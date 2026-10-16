@@ -32,6 +32,10 @@ review compares concepts and maintenance obligations removed and introduced.
 
 ## 1. Contracts, build, and platform substrate
 
+Build and validation commands are in [build.md](build.md); host-specific
+mechanism evidence and outstanding qualification are in
+[platform-evidence.md](platform-evidence.md).
+
 Prerequisite: the specifications and principles define the target contracts.
 
 Deliver in small increments:
@@ -132,6 +136,9 @@ writer rejects mutation after sealing and releases all source roots on failure.
 
 Prerequisite: I/O, bounded metadata storage, codecs, and public reader contracts.
 
+Use the author's libarchive msdosfs reader as sample code, with provenance and
+adaptation rules in [references.md](references.md).
+
 Implement explicit FAT codecs and geometry checks, starting with the simplest
 independent FAT16 read fixture, then FAT12 packed entries and FAT32 variants.
 Keep decoding helpers shared where the on-disk rules actually coincide.
@@ -170,6 +177,9 @@ defects without storing the entire FAT or ownership map in RAM.
 ## 5. FAT planning and writing
 
 Prerequisite: validated catalog, FAT codecs/readers, and publication substrate.
+
+Use the author's libarchive msdosfs writer as sample code, with provenance and
+adaptation rules in [references.md](references.md).
 
 Implement format planning and emission independently of reader structures.
 Complete a FAT16 vertical slice, then FAT12/FAT32 geometry and directory variants.

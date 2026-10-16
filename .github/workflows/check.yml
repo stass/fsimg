@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+name: check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Development tools
+        run: |
+          if [ "$(uname -s)" = Darwin ]; then
+            brew install autoconf automake libtool
+          else
+            sudo apt-get update
+            sudo apt-get install -y autoconf automake libtool clang
+          fi
+      - name: Build and check
+        run: |
+          autoreconf -fi
+          mkdir build
+          cd build
+          ../configure CC=clang CXX=clang++
+          make -j2
+          make check
+          if [ "$(uname -s)" = Linux ]; then ./test-sandbox; fi
+          make check-asan
+          make check-ubsan
+          make check-lsan
+          make check-msan
+          make distcheck
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-${{ matrix.os }}
+          path: build/**/*.log
+  freebsd:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y autoconf automake libtool
+            pw useradd fsimgtest -m
+          run: |
+            chown -R fsimgtest .
+            su -m fsimgtest -c '
+              set -eu
+              autoreconf -fi
+              mkdir build
+              cd build
+              ../configure CC=clang CXX=clang++
+              make -j2
+              make check
+              ./test-sandbox
+              make check-asan
+            '

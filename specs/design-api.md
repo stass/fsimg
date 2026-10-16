@@ -416,3 +416,45 @@ Destruction releases memory, scratch, and owned descriptors on every path.
 Success-sensitive flush/close operations occur before successful operation
 return, not solely in void destructors. Destruction cannot convert a failed
 operation into success or remove a successfully published output.
+
+## Resource and byte-adapter records
+
+The public header defines fixed-size error and statistics records. Errors carry
+operation/resource/output-state enums and bounded 256-byte path/message arrays.
+Cumulative I/O statistics saturate at `UINT64_MAX`; live-resource counters are
+checked before reservation and retain their exact value on failure. Allocation
+accounting includes the context and alignment-preserving allocation headers.
+The statistics query is `fsimg_ctx_get_stats(ctx, out, error)`; status labels are
+available through `fsimg_status_string(status)` without allocation.
+
+`fsimg_options_t` uses `uint64_t` byte/count limits, `uint32_t` depth/path/FD
+limits, separate callback arguments, and zeroed reserved words. Its `flags`
+field accepts zero. Progress snapshots borrow a phase string for the duration
+of the synchronous callback. Destructors called from a callback do nothing;
+fallible reentry returns `FSIMG_ESTATE`. This protects the active context without
+introducing deferred destruction or callback-driven lifecycle transitions.
+
+`fsimg_io_ops_init()` initializes the callback table. Its `max_transfer` limits
+each callback request; zero selects the host transfer maximum. Read/write
+capabilities follow callback presence. `FSIMG_IO_DURABLE` requires a flush
+callback and is the only table flag. Built-in regular-file FDs advertise durable
+flush. Sparse-range discovery is optional and has no bearing on byte correctness.
+
+Byte helpers use the same status/error convention:
+
+* `fsimg_io_get_size(io, out, error)` reports the declared logical length.
+* `fsimg_io_read_at()` and `fsimg_io_write_at()` take an offset, buffer,
+  `size_t` length, and confirmed-transfer output. A non-exact transfer may be
+  limited by the adapter's maximum transfer.
+* `fsimg_io_read_exact()` and `fsimg_io_write_exact()` take the same arguments
+  and loop until completion or error. Exact EOF is an I/O error; zero-length
+  requests at the object's end succeed without calling the adapter.
+* `fsimg_io_resize(io, length, error)` requires a writable whole-object adapter
+  with resize support. A slice never gains that capability. Shrinking a backing
+  object makes any no-longer-contained slice unusable until it fits again.
+* `fsimg_io_zero_range(io, offset, length, error)` establishes zeros with a
+  callback or a charged bounded zero buffer. A failure after possible mutation
+  reports incomplete output, including cancellation between successful batches.
+* `fsimg_io_flush(io, durable, error)` performs available flush semantics.
+  Required durable mode rejects a sink without durable capability before
+  invoking a callback; logical completion without a flush callback succeeds.

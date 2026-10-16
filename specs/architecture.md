@@ -147,6 +147,14 @@ translation to the backing object; nested slice construction checks its own
 range. Drivers never receive an unrestricted backing descriptor. Disk values
 are decoded explicitly, without casting bytes to native C structs.
 
+Slices translate directly to a backing object and a checked base offset, so
+slice nesting does not introduce recursive I/O or an unbounded traversal stack.
+Public FD adapters duplicate borrowed descriptors. Private constructors consume
+already reserved, library-owned descriptors without duplication, so confined
+workers can wrap newly created output and scratch files without gaining a
+descriptor-duplication syscall capability. Both paths share flag, type, and
+range validation and the context's descriptor accounting.
+
 Offsets, logical sizes, counts, and persistent record references use
 `uint64_t`. Buffer lengths use `size_t` only after a checked conversion.
 Adapters reject values outside their host range before invoking OS calls.

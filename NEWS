@@ -1,0 +1,6 @@
+fsimg 0.1.0 (unreleased)
+
+Resource contexts account for memory and owned descriptors, enforce session
+quotas, and report cancellation and structured errors. Bounded positional I/O
+supports regular files, callbacks, fixed sinks, and nested slices. Private
+platform tests exercise confinement and no-replace regular-file publication.

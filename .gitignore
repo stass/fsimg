@@ -1,0 +1,12 @@
+/autom4te.cache/
+/build*/
+!/build-aux/
+/aclocal.m4
+/configure
+/config.h.in
+/Makefile.in
+/build-aux/*
+!/build-aux/check-ascii.sh
+!/build-aux/sanitize.sh
+*~
+.DS_Store

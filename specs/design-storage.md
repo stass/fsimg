@@ -41,6 +41,10 @@ Requests are split to fit `size_t`, `ssize_t`, the adapter's maximum transfer,
 and the configured buffer allowance. Every conversion to `off_t` is checked.
 Nonblocking callbacks return a terminal unsupported/I/O result; the core does
 not busy-wait for readiness.
+After 1024 consecutive interruptions without progress, the next interruption
+is returned as an I/O error retaining EINTR. Cancellation is polled between
+retries, including flush retries, so interruption cannot create an endless
+uncancellable loop.
 
 Capabilities distinguish positional access, resize, flush, known-zero ranges,
 and optional host sparse-range discovery. Only an adapter that owns a fresh,
