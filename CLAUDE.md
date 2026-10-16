@@ -183,6 +183,14 @@ missing tool.
     a line-count delta alone does not establish simplification.
   - Address every CRITICAL and HIGH finding before committing. Note MEDIUM
     findings in `TODO.md` or the commit message if not fixed.
+* Each implementation stage also receives an external, read-only review through
+  OpenCode using the Z.ai coding-plan subscription, model
+  `zai-coding-plan/glm-5.3`, and `--variant max`. This supplements the required
+  code-review subagent and covers the same correctness, design,
+  security/information-leak, and readability criteria. Re-review substantive
+  fixes before committing the stage. Report an unavailable or failed external
+  review explicitly; do not silently substitute another provider, model, or
+  reasoning level.
 
 ## Documents
 
