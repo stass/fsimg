@@ -1,0 +1,319 @@
+# fsimg architecture and product specification
+
+## Product and scope
+
+**fsimg** is the project name and command name. Its C library is also part of
+fsimg; the installed linker artifact is conventionally `libfsimg` and the
+public header is `fsimg.h`. New project-owned code is BSD-2-Clause. Public
+functions and constants use `fsimg_` and `FSIMG_`; all project-defined C types
+have `_t` typedefs, including opaque handles. The creation object is a
+**writer**.
+
+fsimg creates, inspects, lists, verifies, and extracts filesystem volumes
+without mounting them. It accepts regular image files, explicitly bounded
+regions of those files, memory supplied by an embedding application, and
+positional I/O callbacks. The default CLI handles regular files, not devices.
+It requires no privileges, kernel filesystem driver, or external formatter.
+
+The format contract covers FAT12, FAT16, FAT32, and exFAT with independent read
+and write support. The CLI provides `create`, `info`, `ls`, `cat`, `extract`,
+`verify`, and `formats`. Each format declares supported features; no command
+claims support based only on recognizing a boot record.
+
+The supported host baseline is a 64-bit FreeBSD, Linux, or macOS environment
+with C11, 64-bit file offsets, and positional file I/O. A format's legal limits,
+the adapter's representable range, and configured resource limits all apply.
+Using `uint64_t` does not promise that a host can create a file of every
+representable size. Windows and 32-bit hosts require separate portability work.
+
+The product does not modify existing volumes, emulate a POSIX filesystem,
+repair corruption, replay journals, or mount images. Partition-table parsing,
+whole-disk composition, additional filesystems, archive integration, and
+one-shot input streams have separate designs and acceptance gates. A bounded
+volume slice is supported independently of partition discovery. These scope
+boundaries do not justify shortcuts in the common API.
+
+## Priorities and design choices
+
+The [principles](principles.md) govern tradeoffs. In particular:
+
+* Large payload support alone is insufficient: catalogs, FATs, bitmaps,
+  directories, and fragmentation indexes also have bounded resident storage.
+* Metadata scratch files are an explicit resource. They contain records,
+  indexes, and sort runs, never a second image or copied file payloads.
+* CLI image parsing runs in an isolated worker. The default uses OS confinement
+  when available and warns when it is unavailable. A required mode refuses
+  unconfined execution. In-process library calls provide the same validation
+  but do not sandbox their host application.
+* Extraction creates a fresh private destination. Merging into an existing
+  tree, overwriting files, and restoring privileged metadata are outside the
+  extraction contract.
+* A writer consumes known-length, repeatable sources. It freezes its catalog
+  before planning and emits one image. Removing mutation and retry states
+  makes failure and source ownership easier to reason about.
+* External sorting and paged arrays serve metadata workloads. There is no
+  embedded database, persistent transaction log, or general-purpose storage
+  engine for disposable planning data.
+
+## Components and data flow
+
+```mermaid
+flowchart TD
+    CLI[CLI coordinator] --> Worker[Restricted worker]
+    App[Embedding application] --> Core[fsimg API]
+    Worker --> Core
+    Core --> Reader[Reader and verifier]
+    Core --> Writer[Writer]
+    Reader --> Extract[Host extractor]
+    Writer --> Catalog[Source catalog and layout plan]
+    Reader --> IO[Bounded positional I/O]
+    Writer --> IO
+    Catalog --> Resource[Resource context and metadata scratch]
+    Reader --> Resource
+    Extract --> Output[Private output root]
+    CLI --> Publish[Output publication]
+    IO --> Image[Raw volume or bounded slice]
+```
+
+| Owner | Owns | Does not own |
+| --- | --- | --- |
+| Resource context | All fsimg allocations, scratch files, limits, counters, cancellation | Application allocations and global process policy |
+| I/O adapter | Byte ranges, exact I/O, host offset conversion, zero-range capability | Filesystem geometry or image paths |
+| Source catalog | Target entries, stable source identities, external ordering | File payload storage |
+| Writer | Collection, immutable planning, emission, format-specific geometry | Editing an existing image |
+| Reader | Detection, lazy traversal, current entry, logical content reads | Host path creation |
+| Format driver | On-disk codecs, feature checks, chain/extent interpretation | Ambient host filesystem access, independent caches, publication |
+| Extractor | Destination path validation, safe file creation, safe metadata policy | Parsing raw filesystem structures |
+| Output coordinator | Staging, finalization, no-replace publication, outcome reporting; shared by library helpers and CLI | Format parsing |
+| CLI coordinator | Trusted operands, descriptor preparation, worker lifecycle | Parsing image bytes or acting on worker-supplied host paths |
+| Sandbox adapter | Platform confinement and verified capability reporting | Format-specific exceptions |
+
+## Contracts
+
+### Bounded resources
+
+Every dynamically sized library allocation goes through one resource context.
+All caches, live objects, directory state, sort buffers, diagnostics, and I/O
+buffers share its budget. A driver cannot allocate a second budget privately.
+Allocation is charged before use; failure preserves accounting and produces
+`FSIMG_ELIMIT` or `FSIMG_ENOMEM`, as appropriate.
+
+Let `V` be logical volume bytes, `N` entries, `C` allocation units, `F` fragments,
+`D` directory depth, `P` actual payload bytes transferred, and `M` the memory
+budget. Library-controlled resident allocations are at most `M`, independent
+of `V`, `N`, `C`, and `F`. Depth and individual record length are separately
+bounded. Scratch storage can grow with metadata and is limited separately.
+The detailed algorithms and complexity bounds are in
+[storage and algorithms](design-storage.md).
+
+Defaults are product policy, not a measurement claim:
+
+| Limit | Default | Meaning |
+| --- | --- | --- |
+| Memory | 256 MiB | All live fsimg allocations in a context; minimum supported budget 16 MiB |
+| Scratch | 64 GiB | Sum of logical lengths of live scratch files, including simultaneous merge inputs and outputs |
+| Entries | 10,000,000 | Entries admitted or visited in one operation |
+| Directory depth | 256 | Components below the volume root |
+| Image path | 64 KiB | Encoded UTF-8 bytes, including separators and terminating NUL |
+| Open descriptors | 128 | Aggregate descriptors owned by a context, further limited by host availability |
+| Extracted logical bytes | Selected volume length | Sum of file lengths, including holes and repeated references; caller may explicitly change it |
+| Diagnostic frame | 64 KiB | Maximum single worker control message |
+
+Limits are configurable and failures identify the exhausted resource. Lower
+host limits can cause earlier failure; an advertised path/depth maximum is not
+a promise to exceed another budget. Zero in an initialized options structure
+means the documented default, not unlimited. No input field raises a budget.
+Counters use checked arithmetic and never wrap.
+
+An operation spans a writer's complete lifetime or a reader's complete session,
+including every incremental add, iteration, content, and verification call.
+Per-call quota resets are forbidden. Context memory, scratch, and descriptor
+limits aggregate across its live handles. An embedding application that creates
+separate contexts owns the aggregate deployment policy across those contexts.
+
+Memory accounting excludes application-owned callback state and buffers,
+executable/shared-library mappings, allocator bookkeeping, thread stacks, and
+the kernel page cache. These exclusions are reported honestly. RSS is measured
+as a separate acceptance criterion. The CLI uses a bounded control process
+and one single-threaded worker; it does not multiply caches by CPU count.
+Resource exhaustion cannot trigger an unbounded fallback. With scratch
+disabled, an operation either fits in memory or fails with `FSIMG_ELIMIT`.
+
+### Byte and object boundaries
+
+All volume access uses checked, slice-relative positional I/O. The common
+layer validates `offset <= length` and `count <= length - offset` before
+translation to the backing object; nested slice construction checks its own
+range. Drivers never receive an unrestricted backing descriptor. Disk values
+are decoded explicitly, without casting bytes to native C structs.
+
+Offsets, logical sizes, counts, and persistent record references use
+`uint64_t`. Buffer lengths use `size_t` only after a checked conversion.
+Adapters reject values outside their host range before invoking OS calls.
+Partial I/O advances only by confirmed bytes; zero progress before the expected
+end is an error. Interruption, cancellation, and final flush failures propagate.
+
+### Writer and reader independence
+
+A format descriptor has independently optional reader and writer operations.
+The reader is a lazy iterator with content access to its current entry. The
+writer consumes a complete logical catalog, not necessarily an in-memory tree.
+Shared code supplies I/O, resources, codecs, source access, and diagnostics;
+format-specific geometry and allocation models remain with the driver.
+
+Collection records source references, validation orders and checks entries,
+planning fixes geometry and extents, and emission copies content directly to
+final offsets. Plan data may be disk-backed. Nothing requires an allocation
+table or an extent vector for the entire volume in RAM.
+
+### Source consistency
+
+Sources have declared lengths and repeatable positional reads. Host scanning
+does not follow symlinks. Reopened files are checked against recorded identity,
+type, size, and change metadata before and after copying. Changed sources fail
+the operation; partial output is not published.
+
+These checks detect ordinary changes; they are not an atomic snapshot of a
+hostile concurrently modified tree. Callers requiring snapshot consistency
+provide immutable files, a filesystem snapshot, or an equivalently stable
+source provider. Hashing alone does not create a snapshot. No security promise
+depends on mtime being impossible to restore.
+
+### Names and metadata
+
+Image paths are absolute UTF-8 paths rooted at `/`. Format drivers validate
+components, encoding, case comparison, and name collisions. A host pathname is
+a different value with a different trust boundary. Normalization never turns
+an invalid or escaping host name into an accepted one silently.
+
+Metadata has explicit validity bits. Entry kinds, supported attributes,
+timestamp resolution, and naming limits are capabilities, not assumed POSIX
+semantics. A required attribute that cannot be represented is an error.
+Optional omission requires an explicit policy and a bounded, structured loss
+report. The ordinary host-tree import selects content, hierarchy, and
+representable timestamps; it does not promise to preserve every `stat` field.
+
+### Extraction and sandboxing
+
+All parsers treat input as hostile, including probes and listing commands.
+The CLI worker receives only prepared capabilities and establishes available
+confinement before reading image bytes. A confined image-reading worker has no
+network, shell, external formatter, device access, or arbitrary host path
+service. Creation has a distinct source-root profile: it restricts filesystem
+authority but cannot universally prevent opening special nodes already beneath
+an authorized source root. Its additional checks and deployment limits are
+explicit in the security specification.
+Unavailable confinement produces an explicit warning in automatic mode and an
+error in required mode. Partial or unexpected setup failure is an error in
+either mode. The parent does not execute requests to open names supplied by
+the worker.
+
+Extraction accepts only regular files and directories in its safe profile,
+creates a fresh private destination, and never follows image-derived symlinks.
+Image paths are validated component by component, and files are created
+exclusively relative to directory descriptors. Details and platform guarantees
+are defined by the [security specification](design-security.md).
+
+### Output and determinism
+
+Writer output covers every logical byte with either defined data or a proven
+zero range. A hole is safe only when the adapter guarantees its zero contents;
+skipping a write into a reused file is not zeroing. The default CLI publishes a
+completed image without replacing an existing pathname. A caller-supplied raw
+I/O sink can contain partial output after failure and must be discarded.
+
+Before any output resize, zeroing, or write, built-in adapters compare output
+backing identity with all collected host sources and reject an inode alias.
+Slices retain backing identity and translated ranges. Opaque callback sources
+and sinks require the caller to guarantee disjoint storage; that trusted-code
+obligation is explicit and cannot be inferred from distinct object pointers.
+
+Extraction's fresh output directory can remain partially populated on failure.
+This is stated explicitly; directory-wide atomic publication is not promised.
+The CLI preserves private access permissions on a failed destination and reports
+its location. Existing trees are never modified to simulate rollback.
+
+Reproducible mode fixes ordering, timestamp policy, identifiers, and all padding.
+The same logical inputs and options yield identical image bytes regardless of
+host directory order, locale, memory budget, merge fan-in, or scratch location.
+Reproducibility does not imply source immutability or output durability.
+
+### Errors, ownership, and compatibility
+
+The [C API](design-api.md) defines structured, per-call errors and explicit
+lifetimes. The library has no global error buffer, implicit output, process
+termination, environment-dependent behavior, or automatic sandbox transition.
+Each handle is used serially; independent contexts can run concurrently.
+Callbacks cannot re-enter their active context.
+
+Public options have size/version initialization rules. Unknown flags and
+unsupported required capabilities fail explicitly. Private driver interfaces
+are not a plugin ABI. There is no dynamic driver loading in the product
+contract. A format feature is advertised only after its acceptance tests pass.
+
+## Dependencies and implementation organization
+
+The core library and ordinary CLI depend only on libc and host OS interfaces.
+OS sandbox calls are native adapters, not dependencies on libseccomp or a
+container runtime. Optional archive integration cannot become necessary for
+raw-image operations. Imported code and generated tables receive file-level
+provenance and license review; test tools do not imply permission to copy them.
+
+The build uses Autoconf, Automake, and Libtool as development tools. Release
+archives contain generated build machinery; users need a C compiler, make,
+and standard host utilities. Public headers are C11 and C++ includable, do not
+include `config.h`, and expose no platform sandbox headers.
+
+```text
+include/fsimg.h       public API
+lib/core/            context, errors, accounting, progress
+lib/io/              bounded adapters and exact I/O
+lib/meta/            records, paged arrays, external sorting
+lib/source/          descriptor-relative scanning and source reopening
+lib/write/           writer lifecycle and common emission
+lib/read/            reader lifecycle and verification
+lib/extract/         safe host extraction
+lib/output/          shared staging, finalization, publication
+lib/formats/fat/     FAT codecs, reader, writer
+lib/formats/exfat/   exFAT codecs, reader, writer
+compat/             host portability
+cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
+test/               unit, integration, adversarial, resource tests
+fuzz/               bounded parser and protocol targets
+```
+
+## Acceptance contract
+
+A release meets functional, security, and resource requirements together:
+
+* Independent tools accept generated FAT/exFAT images; externally generated
+  fragmented images list and extract correctly. Supported metadata and content
+  survive round trips, and unsupported features produce specific errors.
+* A 128 TiB sparse exFAT volume with a small directory tree can be created,
+  opened, listed, and inspected with a 64 MiB library budget. A multi-terabyte
+  zero source and initialized/zero content boundary exercise 64-bit lengths.
+  Hosts unable to represent those sparse files run the logical adapter tests
+  and explicitly skip, rather than pass, the physical-file case.
+* A generated catalog of ten million entries spread across legal directories
+  plans within 256 MiB, using bounded scratch. A single very wide directory and
+  a highly fragmented file exercise metadata behavior separately from payload
+  size. Scale tests are scheduled separately from fast developer checks.
+* Increasing logical volume size by 1,000 times with fixed live metadata does
+  not increase resident allocation limits or cause reads of unused payload
+  space. Increasing entries or fragments spills metadata instead of RAM.
+* For non-sanitized scale runs, peak combined CLI/worker RSS is no more than
+  the configured library budget plus a measured 64 MiB process allowance on
+  the supported CI hosts. Allocator accounting must stay within the exact
+  budget; RSS failures are investigated, not waived by that distinction.
+* Sequential content extraction advances chains once, batches adjacent ranges,
+  and has no quadratic restart behavior. Benchmarks record bytes, I/O calls,
+  metadata passes, peak memory, scratch peak, and wall time on named fixtures.
+  No universal throughput number substitutes for these measurements.
+* Traversal attacks, corruption, allocation/I/O failure, resource exhaustion,
+  sandbox denial, cancellation, and interrupted publication have regression
+  coverage. Sanitizers and independent architectural/security review are
+  required as described in [the implementation plan](../docs/implementation-plan.md).
+
+Detailed requirements are in the [API](design-api.md),
+[storage](design-storage.md), [security](design-security.md),
+[format](design-formats.md), and [CLI](design-cli.md) specifications.
