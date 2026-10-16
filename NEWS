@@ -4,3 +4,8 @@ Resource contexts account for memory and owned descriptors, enforce session
 quotas, and report cancellation and structured errors. Bounded positional I/O
 supports regular files, callbacks, fixed sinks, and nested slices. Private
 platform tests exercise confinement and no-replace regular-file publication.
+
+Metadata streams, fixed-record arrays, and bitsets share a bounded page cache
+and spill to private scratch files. Stable external sorting uses bounded merge
+heaps and an on-disk run registry. Logical and sampled physical scratch use are
+reported separately; session work quotas and cancellation cover metadata work.

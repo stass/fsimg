@@ -10,11 +10,19 @@
 
 #include "fsimg.h"
 
+typedef struct fsimg_meta_cache fsimg_meta_cache_t;
+
 struct fsimg_ctx {
 	fsimg_options_t	 options;
 	fsimg_stats_t	 stats;
 	uint64_t	 allocation_attempts;
 	uint64_t	 fail_allocation;
+	fsimg_meta_cache_t *meta_cache;
+	uint64_t	 scratch_sequence;
+	uint64_t	 meta_fault_after;
+	uint32_t	 meta_cache_pages;
+	unsigned	 meta_fault_point;
+	int		 meta_fault_errno;
 	bool		 in_callback;
 };
 

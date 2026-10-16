@@ -33,6 +33,7 @@ jobs:
           make check-ubsan
           make check-lsan
           make check-msan
+          make check-scale
           make distcheck
       - uses: actions/upload-artifact@v4
         if: always()
@@ -61,4 +62,5 @@ jobs:
               make check
               ./test-sandbox
               make check-asan
+              make check-scale
             '

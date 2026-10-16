@@ -4,8 +4,9 @@ fsimg is a BSD-2-Clause filesystem image tool and embeddable C11 library for
 64-bit FreeBSD, Linux, and macOS. Its target design covers FAT and exFAT image
 creation, reading, verification, and safe extraction without mounts or root.
 
-The library provides resource contexts and bounded positional I/O. Filesystem
-formats and the `fsimg` command are tracked in the
+The library provides resource contexts, bounded positional I/O, and private
+bounded metadata storage with record streams, paged arrays/bitsets, and stable
+external sorting. Filesystem formats and the `fsimg` command are tracked in the
 [implementation plan](docs/implementation-plan.md) and [open work](TODO.md).
 
 Build with Autoconf, Automake, Libtool, a C11 compiler, and a C++ compiler:

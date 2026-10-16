@@ -103,6 +103,77 @@ system memory despite not appearing as fsimg heap; the CLI documents that a
 disk-backed scratch directory is required for its large-catalog deployment
 profile.
 
+### Shared metadata representation
+
+Metadata objects use one context-owned cache of 4 KiB pages. Cache storage and
+page descriptors are allocated together and charged once; objects do not own
+independent caches. The cache uses bounded least-recently-used replacement.
+Its default capacity is 256 pages, and private validation controls can select
+smaller capacities before any metadata object exists. Releasing the last object
+releases the cache. No page pointer escapes an operation, so eviction needs no
+caller-managed pinning protocol.
+
+A metadata byte store starts resident. Missing pages contain zeros. Evicting a
+modified resident page creates the store's backing file and reserves its entire
+logical length, including the internal version header, before extending it.
+Unmodified zero pages need no backing write. The sum of resident stores' logical
+page counts fits the cache capacity, including untouched zero pages. Growth
+beyond that aggregate capacity acquires backing storage immediately, so many
+untouched sparse arrays cannot bypass either budget. Without scratch authority,
+exceeding resident capacity returns a memory limit error.
+Growth and writes can leave partial private metadata on failure; that object
+must be discarded. Failed eviction retains the dirty page and never reuses it.
+Backing creation is prepared before it is attached to a resident store; failure
+releases its temporary descriptor and scratch reservations without invalidating
+the resident contents.
+
+Each metadata object borrows its containing reader/writer session. That session
+outlives its metadata and owns cumulative work accounting across growth, page
+access, and sort comparisons. Sorting borrows the input's session for every
+temporary and result. Comparison work is reserved before invoking the callback,
+and quota/cancellation errors propagate immediately through heap operations.
+
+Scratch creation uses descriptor-relative exclusive, no-follow opens with mode
+0600 and immediate unlinking. Names contain a version and a checked context
+sequence, never addresses or source names. Bounded collision retries prevent an
+untrusted directory from causing an endless creation loop. The supplied scratch
+directory must exclude untrusted writers; file permissions and unlinking do not
+protect against a hostile owner of that directory. Descriptor reservation
+precedes creation, and adoption does not duplicate the resulting descriptor.
+Logical scratch reservations include cached dirty bytes. Allocated filesystem
+blocks are sampled after scratch writes and extension and reported separately
+from logical lengths; neither value describes secure erasure or device usage.
+
+Record streams encode a version and a 32-bit payload length in an eight-byte
+little-endian frame. A stream declares its maximum record length at creation;
+iteration validates the frame and remaining range before copying into a
+caller-provided bounded buffer. Empty records are valid. Byte offsets are stable
+record references. Sealing prohibits further appends. Fixed-record arrays use
+checked 64-bit multiplication and byte ranges, and bitsets use checked byte
+lengths rather than allocating a resident bit for every possible ID. Callers
+encode fields explicitly; native structs and their padding are not records.
+
+### Sorting and run ownership
+
+Sorting consumes a sealed stream and prepares a separate sealed result. It
+preserves input order among equal keys, including across run sizes and merge
+fan-in. Comparators are synchronous trusted callbacks subject to the context's
+non-reentrancy rule. Run generation holds a charged byte arena and a bounded
+array of record references. In-place heapsort orders references by key and
+original ordinal, leaving payload storage in the arena.
+
+Runs are concatenated in one byte store. Each run has a fixed-width header
+containing its byte length and record count; the next header is found by checked
+range arithmetic. This embedded run registry requires no per-run RAM or open
+descriptor. A merge group holds only a bounded heap of current records and
+positional cursors into the shared input store. Equal keys favor the earlier
+run. Each pass writes a replacement store, and releases the input pass only
+after replacement is complete. There are at most three live data stores during
+sorting, including the original stream, independent of the number of runs.
+The resource owner charges all three, headers, cache pages, buffers, and
+descriptors. Failure discards temporary stores and leaves the original stream
+available; no incomplete replacement is published.
+
 ## Collection and catalog validation
 
 A writer accepts entries in any order and records them without retaining an

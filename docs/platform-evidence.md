@@ -15,13 +15,22 @@ no remote kernel run is recorded here.
 | Regular-file publication | Exclusive hardlink, staged unlink, both directory syncs | Native publication tests; qualify each deployment filesystem separately |
 
 Local checks use Darwin 25.6.0 on x86_64, Apple Clang 21.0.0, and APFS. Native
-`make check`, combined ASan/UBSan, and standalone UBSan each report five passing
+`make check`, combined ASan/UBSan, and standalone UBSan each report seven passing
 executables and one sandbox skip, with no sanitizer findings. `make distcheck`
 passes archive rebuilding, tests, installation, uninstallation, and cleanup.
 The shared library links only to the host's libSystem. Publication tests cover
 APFS; this does not qualify other filesystems. Standalone LSan and MSan report
 unsupported-host skips. Linux/FreeBSD confinement and their sanitizer runs
 remain unverified locally.
+
+The metadata `check-scale` fixture sorts 24 MiB and fills/queries a 24 MiB array
+at a 16 MiB context budget. It reports 329,072 bytes of charged peak memory,
+75,795,888 logical scratch bytes, 75,776,000 sampled allocated scratch bytes,
+134,683 I/O calls, 259,889,616 read bytes, and 178,042,928 written bytes. The
+observed elapsed time is 1.433 seconds and process `ru_maxrss` is 1,228,800 bytes.
+The cache is 16 pages, the run allowance 256 KiB, and merge fan-in eight.
+This single-process metadata measurement does not establish the CLI/worker RSS
+acceptance gate or gigantic-volume/catalog qualification.
 
 Linux requires kernel headers containing Landlock truncation protection; an
 older build environment reports the profile unavailable. Runtime ENOSYS or

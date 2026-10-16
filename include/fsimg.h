@@ -44,7 +44,8 @@ typedef enum fsimg_operation {
 	FSIMG_OP_CONTEXT,
 	FSIMG_OP_ALLOCATE,
 	FSIMG_OP_IO,
-	FSIMG_OP_PUBLISH
+	FSIMG_OP_PUBLISH,
+	FSIMG_OP_METADATA
 } fsimg_operation_t;
 
 typedef enum fsimg_resource {
@@ -120,11 +121,16 @@ typedef struct fsimg_stats {
 	uint64_t	 read_bytes;
 	uint64_t	 written_bytes;
 	uint64_t	 io_calls;
+	/* Sampled allocated scratch blocks, distinct from logical scratch bytes. */
+	uint64_t	 scratch_physical_bytes;
+	uint64_t	 scratch_physical_peak;
 } fsimg_stats_t;
 
 /* Options and callback tables must have exactly this size and version.
  * Zero limits select defaults. Contexts are serial; callbacks cannot re-enter.
  * The context duplicates scratch_directory_fd; -1 disables scratch.
+ * Supply a scratch directory protected from untrusted writers. Scratch holds
+ * private disposable metadata and does not promise secure erasure.
  * Child handles must be freed before their context. Destructors accept NULL.
  */
 void fsimg_options_init(fsimg_options_t *);

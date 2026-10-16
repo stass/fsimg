@@ -20,6 +20,7 @@ make check-asan
 make check-ubsan
 make check-lsan
 make check-msan
+make check-scale
 ```
 
 `check` builds and runs native tests, C11/C++ header examples, and an ASCII
@@ -47,6 +48,35 @@ EOF, partial errors, over-reporting, and flush errors. Publication hooks inject
 file-sync, linking, cleanup, and directory-sync failures, including a lost
 publication reply. The race harness runs competing exclusive destination
 creation and checks which inode and bytes survived.
+
+Metadata tests exercise resident and spilled records, cross-page fixed records,
+bitsets, aggregate logical quotas, one-page dirty eviction, sparse zero ranges,
+exclusive scratch creation, frame corruption, allocation failure, and scratch
+open/resize/read/write failures. External sorting is checked against an
+independent libc `qsort` oracle using explicit key/ordinal pairs, including
+duplicate keys, empty and variable-length records, and varying cache/run/fan-in
+settings. Failure checks verify that the sealed input remains readable and that
+temporary memory, scratch, and descriptors return to baseline. Cancellation and
+work limits are checked during run generation, merging, page I/O, and comparison.
+The metadata interfaces are private; their borrowed session outlives them.
+
+`check-scale` is a separate, non-sanitized metadata qualification: it sorts 24 MiB
+of generated records and fills/queries a 24 MiB fixed-record array with a 16 MiB
+context budget, a 16-page shared cache, a 256 KiB run allowance, and merge fan-in
+eight. It prints charged memory, logical and sampled physical scratch peaks,
+I/O counts/bytes, elapsed time, and the host's raw `getrusage` maximum RSS value
+(bytes on macOS, KiB on Linux/FreeBSD). Generated data and fixed-record lookups
+have deterministic expected results without a resident scale oracle. This
+qualifies metadata spilling separately from future format/catalog scale gates.
+Scratch should use a disk-backed filesystem; a RAM-backed directory consumes
+system memory outside the library heap budget.
+
+Native macOS validation reports seven passing tests and the explicit sandbox
+skip in ordinary, ASan/UBSan, and standalone UBSan runs. The metadata scale
+fixture reports a 329,072-byte allocation peak, 75,795,888-byte logical scratch
+peak, and 134,683 I/O calls on APFS. These are measurements of this fixture,
+not bounds promised for every metadata workload. Linux/FreeBSD checks require
+their own host runs.
 
 Installation and release checks:
 

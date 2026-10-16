@@ -6,6 +6,15 @@ partial implementation. Each work package is split into reviewable commits
 that keep existing checks passing. No calendar estimate substitutes for an
 acceptance gate.
 
+## Implementation status
+
+| Package | Status | Evidence or next gate |
+| --- | --- | --- |
+| 1. Contracts and platform substrate | Implemented; kernel qualification remains open | Native build, I/O, publication, and sanitizer checks; Linux/FreeBSD confinement requires actual-kernel evidence in [platform-evidence.md](platform-evidence.md) |
+| 2. Bounded metadata storage | Implemented and validated on the native host | Shared cache, private scratch, record streams, arrays/bitsets, stable external sort, fault tests, ASan/UBSan, and above-budget scale checks in [build.md](build.md) |
+| 3. Sources and catalog | Next implementation package | Descriptor-relative scanning, source providers, deterministic catalog, and writer lifecycle |
+| 4–9 | Pending | Follow the dependencies and completion gates below; format implementation also requires platform qualification |
+
 ## Dependency order
 
 ```mermaid

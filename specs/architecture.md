@@ -130,6 +130,11 @@ including every incremental add, iteration, content, and verification call.
 Per-call quota resets are forbidden. Context memory, scratch, and descriptor
 limits aggregate across its live handles. An embedding application that creates
 separate contexts owns the aggregate deployment policy across those contexts.
+Metadata objects borrow their reader/writer's session rather than starting new
+work counters; repeated metadata operations cannot reset its quota. The context
+owns their shared page cache and aggregate resident/scratch reservations, so
+neither opening another object nor leaving sparse pages untouched bypasses a
+budget.
 
 Memory accounting excludes application-owned callback state and buffers,
 executable/shared-library mappings, allocator bookkeeping, thread stacks, and
