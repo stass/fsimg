@@ -90,6 +90,13 @@ typedef struct worker_fixture {
 	int		 input;
 } worker_fixture_t;
 
+typedef struct output_source {
+	unsigned	 emitted;
+	unsigned	 records;
+	bool		 fail;
+	unsigned char	 buffer[4097];
+} output_source_t;
+
 static void fixture_open(worker_fixture_t *);
 static void fixture_open_format(worker_fixture_t *, const char *);
 static void fixture_close(worker_fixture_t *);
@@ -107,8 +114,78 @@ static void test_mount_source(const char *);
 static void test_transport(worker_scenario_t);
 static int fake_worker(worker_scenario_t);
 static int fake_output(void);
+static fsimg_status_t produce_output(void *, fsimg_worker_text_t *, fsimg_error_t *);
+static void test_output_ledger(bool);
 static uint64_t fill_pipe(int);
 static void drain_after_delay(int, uint64_t);
+
+static fsimg_status_t
+produce_output(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
+{
+	output_source_t *source = argument;
+
+	if (source->emitted == source->records) {
+		if (source->fail)
+			return (fsimg_error_set(error, FSIMG_EIO, 0,
+			    FSIMG_OP_CONTEXT, "test output producer failed"));
+		return (FSIMG_DONE);
+	}
+	memset(source->buffer, 'A' + source->emitted, sizeof(source->buffer));
+	source->emitted++;
+	*text = (fsimg_worker_text_t){ .data = source->buffer,
+	    .length = sizeof(source->buffer) };
+	return (FSIMG_OK);
+}
+
+static void
+test_output_ledger(bool prefix)
+{
+	worker_fixture_t fixture;
+	output_source_t source = { .records = prefix ? 1 : 2 };
+	fsimg_output_budget_t budget;
+	fsimg_error_t error;
+	struct stat st;
+	uint64_t expected_bytes;
+	int fd;
+
+	fixture_open(&fixture);
+	fd = openat(fixture.parent, "output-only", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+	CHECK(fd != -1);
+	fsimg_output_budget_init(&budget, &fixture.request.limits);
+	CHECK(budget.limit_bytes == UINT64_C(3973121048576));
+	expected_bytes = sizeof(source.buffer);
+	if (prefix) {
+		CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
+		    fd, 0, NULL, &budget, &error) == FSIMG_OK);
+		CHECK(budget.confirmed[0] == sizeof(source.buffer));
+		CHECK(budget.stdout_possible);
+		/* A new reporting phase fails before writing anything itself. The
+		 * already confirmed prefix still makes the complete stream partial.
+		 */
+		source = (output_source_t){ .fail = true };
+		CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
+		    fd, 0, NULL, &budget, &error) == FSIMG_EIO);
+		CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	} else {
+		budget.limit_bytes = FSIMG_OUTPUT_ERROR_RESERVE + sizeof(source.buffer);
+		CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
+		    fd, 0, NULL, &budget, &error) == FSIMG_ELIMIT);
+		CHECK(error.resource == FSIMG_RESOURCE_OUTPUT);
+		CHECK(budget.text_bytes == sizeof(source.buffer));
+		CHECK(budget.confirmed[0] == sizeof(source.buffer));
+		/* A failed operation can still deliver a bounded final diagnostic. */
+		budget.reporting = true;
+		source = (output_source_t){ .records = 1 };
+		CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
+		    fd, 0, NULL, &budget, &error) == FSIMG_OK);
+		expected_bytes += sizeof(source.buffer);
+		CHECK(budget.text_bytes == expected_bytes);
+	}
+	CHECK(fstat(fd, &st) == 0 && st.st_size == (off_t)expected_bytes);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture.parent, "output-only", 0) == 0);
+	fixture_close(&fixture);
+}
 
 
 static void
@@ -951,6 +1028,12 @@ main(int argc, char **argv)
 			return (fake_worker((worker_scenario_t)st.st_size));
 		return (fsimg_worker_main());
 	}
+	if (argc == 2 && (strcmp(argv[1], "--output-prefix") == 0 ||
+	    strcmp(argv[1], "--output-limit") == 0)) {
+		signal(SIGPIPE, SIG_IGN);
+		test_output_ledger(strcmp(argv[1], "--output-prefix") == 0);
+		return (0);
+	}
 	if (argc == 3 && strcmp(argv[1], "--mount-source") == 0) {
 		signal(SIGPIPE, SIG_IGN);
 		test_mount_source(argv[2]);
@@ -976,6 +1059,8 @@ main(int argc, char **argv)
 	test_forged();
 	test_forged_publication();
 	test_incomplete_extraction();
+	test_output_ledger(true);
+	test_output_ledger(false);
 	{
 		test_transport(SCENARIO_STARTUP_NONREADER);
 		test_transport(SCENARIO_PREMATURE_RAW);

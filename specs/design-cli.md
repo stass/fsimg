@@ -18,6 +18,9 @@ fsimg verify [options] -i image
 fsimg formats [-j]
 ```
 
+`-h` displays command help; top-level `-V` displays the version. Options precede
+operands on every host; `--` permits an operand beginning with a dash.
+
 Input images are seekable regular files. `-` is not an implicit request to
 spool stdin into a temporary image, and creation does not promise stdout
 support. The library callback API supplies other explicit positional sources.
@@ -25,6 +28,9 @@ Source operands for `create` name one host directory; programmatic entries use
 the library API.
 
 ## Common processing options
+
+These options apply to processing commands. `formats` accepts only `-j` and
+`-h`, as shown in its synopsis.
 
 | Option | Meaning |
 | --- | --- |
@@ -75,6 +81,8 @@ Offset and length form one bounded slice and are validated against actual file
 length. Raw volumes are the default. fsimg does not auto-select a partition or
 silently guess among multiple filesystem candidates. Format forcing retains
 all safety checks. Unknown format-option keys and unsupported values fail.
+An explicitly supplied slice length is positive. The supported read setting
+is `oem=cp437`; creation settings are `sector` and `cluster` byte quantities.
 
 An image path is an absolute validated UTF-8 path; omitted selection means `/`.
 Matching follows each format's component lookup rules, including FAT case
@@ -154,6 +162,9 @@ files are used where possible. Success means all selected content and required
 finalization completed. On error, a private partial destination can remain;
 the diagnostic identifies it. There is no all-or-nothing directory publication
 or resume promise.
+Final report delivery is part of command completion. If that delivery alone
+fails, extracted content may already be complete, while the command still
+conservatively reports incomplete output.
 
 ## Inspection, verification, and capabilities
 
@@ -209,3 +220,95 @@ fsimg verify -d -m 128M -T /scratch -i data.img
 fsimg info -b 1048576 -z 1073741824 -i disk.img
 fsimg formats -j
 ```
+
+## Coordinator and streaming representation
+
+The coordinator parses trusted command operands, prepares private capabilities,
+and supervises its same-executable worker before publishing an image. It never
+parses image bytes. The existing output relay owns every potentially blocking
+stdout/stderr write, including help, capability records, errors and final
+summaries. An output-only producer reuses the same relay queue, poll loop,
+confirmed-byte accounting, signal handling and absolute monotonic deadline.
+
+Command parsing owns singleton and key-duplicate detection. Numeric parsing
+uses checked decimal accumulation and explicit binary byte suffixes. Only
+known commands/options/settings reach descriptor preparation. Read operations
+share the existing worker selector. Create dry runs supply a source root and
+optional scratch, never output authority. Normal creation prepares a fresh
+private staging directory on the final filesystem; its worker creates the
+image only after planning. Only the coordinator publishes, after a validated
+completion and successful worker exit. Extraction prepares a fresh private
+root and retains it, with an explicit incomplete outcome on failure.
+
+Scratch is a separate fresh private tree beneath -T/TMPDIR or /tmp. It is never
+an output ancestor or descendant. Cleanup never recursively follows worker or
+image names. Worker output authority cannot remove output. Scratch cleanup
+uses descriptor-relative no-follow operations on coordinator-created trees
+after children exit. Cleanup failures preserve the primary error and identify
+retained private output/scratch locations.
+
+Output formatting retains one 128 KiB span, one small UTF-8 carry, the current
+entry metadata, and fixed result/counter records. Name frames stream within
+JSON strings; no pathname or listing tree proportional to entries is retained.
+Valid UTF-8 crosses name-frame boundaries intact. Human names escape controls,
+backslashes and bidi formatting unambiguously. JSON uses valid UTF-8, escapes
+JSON controls/quotes, and encodes untrusted invalid diagnostic bytes visibly.
+Only the successful final summary certifies completion. An error after a
+partial entry first closes that incomplete record, then emits an error record;
+no successful summary follows. Counts and byte quantities use decimal strings
+in schema version 1, and all fields state their units. Header, selected-entry,
+structural and payload-read scopes remain separate.
+
+Capability records distinguish the static format profile and compiled sandbox
+backend from actual per-operation readiness; an unprobed runtime is unknown.
+Source-root limitations and timestamp/source consistency contracts are explicit.
+
+
+The command implementation separates parsing (options.c), bounded text
+formatting (display.c), capability preparation/publication (main.c and paths.c),
+and existing worker/protocol/sandbox owners. The command links the same core
+objects statically so fresh worker execution needs no loader environment.
+The public shared/static library remains independently installed and tested.
+
+Schema version 1 records use numeric schema=1 and string type. Byte quantities,
+counts, Unix seconds and nanosecond precision are decimal strings; bounded
+kind/flag fields, nanoseconds, offset minutes, geometry sizes, enumerated size
+arrays and the UTF-16 name-unit limit are JSON integers. Unknown
+values are null. A timestamp explicitly includes basis and resolution. Record
+types are info, plan, entry, verify, format, capabilities, loss, progress,
+error and summary. Progress and sampled loss details use stderr; data and
+summary/error records use stdout under -j. Raw cat rejects -j and directs any
+final diagnostic summary to stderr. Entry records carry complete=true only
+after all name frames and ENTRY_END validate; error closure marks them false.
+No final successful summary is emitted before worker exit and publication.
+
+CLI help uses -h, and top-level version uses -V. Typed writer settings are
+sector and cluster in bytes; FAT oem=cp437 is explicit on read commands.
+Explicit slice length and exact image size are positive. Offset can be zero.
+Resource zero selects its documented default. Singleton and key duplicate
+flags are syntax errors even if values agree. -e requires -R. -r only applies
+to ls; -d only applies to verify; -j is rejected by cat. Parsing requires all
+options before operands (or an explicit --), consistently on all target hosts.
+
+The signed Unix epoch syntax permits an optional leading minus followed by
+decimal digits. It rejects a plus sign and byte suffixes. Representability in
+the chosen filesystem remains a planning check.
+
+The operation deadline includes successful output. Once processing fails,
+diagnostic delivery has a separate two-second grace; one further two-second
+stderr-only attempt applies if stdout cannot carry the report. Neither attempt
+can resume processing or publish output. Scratch cleanup removes at most 4,096
+flat entries and never descends into a worker-created directory. A retained
+scratch directory or staging object is reported explicitly.
+
+`-l output` limits logical file bytes, including holes, rather than escaped
+listing text. Formatted stdout and stderr share the separate derived ceiling
+in the architecture. Summaries report its ceiling, queued text and confirmed
+stream bytes. Every reported ledger counter is a snapshot before its own record
+is queued, so it excludes that reporting record. Error reporting can use the
+reserved final 128 KiB. Progress emits only
+when an entries/bytes/work counter reaches a new power-of-two milestone, in
+addition to its frequency limit; it therefore needs at most 193 records per
+operation even for gigantic payloads. Suppressing redundant progress never
+stops processing. The common relay charges each text span before forwarding it,
+and preserves the aggregate ledger across worker and final-reporting phases.

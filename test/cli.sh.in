@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+set -eu
+if test -z '@PYTHON3@'; then
+    echo 'SKIP: CLI integration requires the Python 3 development tool'
+    exit 77
+fi
+exec '@PYTHON3@' '@abs_top_srcdir@/test/cli.py' ./fsimg

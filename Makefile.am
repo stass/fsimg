@@ -12,8 +12,14 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
 include_HEADERS = include/fsimg.h
-dist_doc_DATA = LICENSE docs/references.md third-party/Unicode-LICENSE.txt \
+pkgconfigdir = $(libdir)/pkgconfig
+pkgconfig_DATA = libfsimg.pc
+dist_man_MANS = docs/fsimg.1 docs/libfsimg.3
+dist_doc_DATA = LICENSE README.md docs/examples.md docs/references.md third-party/Unicode-LICENSE.txt \
 	third-party/libarchive-msdosfs-LICENSE.txt
+examplesdir = $(datadir)/fsimg/examples
+dist_examples_DATA = examples/example.h examples/create-tree.c examples/provider.c \
+	examples/read-slice.c examples/extract.c
 lib_LTLIBRARIES = libfsimg.la
 noinst_LTLIBRARIES = libfsimg-core.la
 libfsimg_la_SOURCES =
@@ -44,14 +50,34 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/exfat/write-emit.c \
 	compat/host.c compat/host.h
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
+bin_PROGRAMS = fsimg
+fsimg_SOURCES = cmd/fsimg/main.c cmd/fsimg/cli.h cmd/fsimg/options.c \
+	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
+	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/worker-parent.c \
+	cmd/fsimg/worker-child.c cmd/fsimg/worker-output.c \
+	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/spawn.c
+fsimg_LDADD = libfsimg-core.la
+noinst_PROGRAMS = example-create-tree example-provider example-read-slice example-extract
+example_create_tree_SOURCES = examples/create-tree.c examples/example.h
+example_create_tree_LDADD = libfsimg.la
+example_provider_SOURCES = examples/provider.c examples/example.h
+example_provider_LDADD = libfsimg.la
+example_read_slice_SOURCES = examples/read-slice.c examples/example.h
+example_read_slice_LDADD = libfsimg.la
+example_extract_SOURCES = examples/extract.c examples/example.h
+example_extract_LDADD = libfsimg.la
 check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale header-c header-cxx
-TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh
-nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh
+	test-exfat-scale test-cli header-c header-cxx
+TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh test/cli.sh
+nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh test/cli.sh
 test_core_SOURCES = test/core.c test/test.h
 test_core_LDADD = libfsimg.la
+test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
+	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
+	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h
+test_cli_LDADD = libfsimg-core.la
 test_io_SOURCES = test/io.c test/test.h
 test_io_LDADD = libfsimg.la
 test_meta_SOURCES = test/meta.c test/test.h
@@ -97,7 +123,9 @@ header_c_LDADD = libfsimg.la
 header_cxx_SOURCES = test/header_cpp.cc
 header_cxx_LDADD = libfsimg.la
 EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
+	libfsimg.pc.in docs/examples.md \
 	build-aux/check-ascii.sh build-aux/sanitize.sh \
+	build-aux/check-install.sh build-aux/check-installed.py \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
@@ -108,11 +136,27 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-extraction-worker.md specs/design-exfat.md \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in fuzz/fat.c fuzz/protocol.c \
+	test/cli.sh.in test/cli.py \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md
 check-local: check-ascii
 .PHONY: check-ascii check-asan check-ubsan check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz
 .PHONY: check-integration
+.PHONY: check-install
+check-install: all
+	+$(SHELL) $(top_srcdir)/build-aux/check-install.sh "$(abs_top_builddir)" \
+	    "$(MAKE)" "$(CC)" "$(CXX)" "$(CPPFLAGS)" "$(CFLAGS)" "$(CXXFLAGS)" \
+	    "$(LDFLAGS)" "$(PKG_CONFIG)" "$(PYTHON3)"
+.PHONY: check-installed-consumers
+CLEANFILES = provider-static provider-shared header-installed-cxx
+check-installed-consumers:
+	$(CC) "-I$(includedir)" $(CPPFLAGS) $(CFLAGS) -std=c11 $(LDFLAGS) \
+	    "$(examplesdir)/provider.c" "$(libdir)/libfsimg.a" -o provider-static
+	$(CC) "-I$(includedir)" "-L$(libdir)" $(CPPFLAGS) $(CFLAGS) -std=c11 $(LDFLAGS) \
+	    "$(examplesdir)/provider.c" -lfsimg -o provider-shared
+	$(CXX) "-I$(includedir)" $(CPPFLAGS) $(CXXFLAGS) -std=c++11 $(LDFLAGS) \
+	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" -o header-installed-cxx
+	./header-installed-cxx
 check-integration: test-fat test-fat-write test-exfat test/fat-integration.sh test/exfat-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh

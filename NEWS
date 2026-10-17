@@ -55,3 +55,10 @@ streams allocation ownership through bounded metadata storage. Compressed
 Unicode tables and deterministic plans interoperate with exfatprogs and the
 Linux kernel. Sparse-volume checks exercise actual 128 TiB files on APFS and
 ZFS at a 64 MiB library budget, independently of initialized payload size.
+
+The fsimg command provides creation, inspection, listing, raw content, safe
+extraction, verification and capability enumeration. Strict short-option parsing,
+streaming NDJSON, bounded progress and command-wide output accounting share
+the supervised worker/relay path. Manuals, public-API examples, pkg-config
+metadata and private-prefix installation checks accompany the command and
+static/shared library.

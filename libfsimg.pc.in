@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: libfsimg
+Description: Bounded filesystem image readers, writers and extraction
+Version: @PACKAGE_VERSION@
+Libs: -L"${libdir}" -lfsimg
+Cflags: -I"${includedir}"

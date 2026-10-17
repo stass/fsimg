@@ -26,6 +26,14 @@ the adapter's representable range, and configured resource limits all apply.
 Using `uint64_t` does not promise that a host can create a file of every
 representable size. Windows and 32-bit hosts require separate portability work.
 
+The CLI build requires complete descriptor closure during process startup,
+provided by `POSIX_SPAWN_CLOEXEC_DEFAULT` or
+`posix_spawn_file_actions_addclosefrom_np`. Configure checks this capability
+before accepting the host: a successful build must not install a command that
+cannot safely start its required worker and output relay. Descriptor-limit
+loops do not establish closure because open descriptors can outlive a lowered
+limit. This requirement uses native OS/libc interfaces, without a helper library.
+
 The product does not modify existing volumes, emulate a POSIX filesystem,
 repair corruption, replay journals, or mount images. Partition-table parsing,
 whole-disk composition, additional filesystems, archive integration, and
@@ -145,6 +153,31 @@ stdout/stderr sinks cannot block supervision. The relay owns no library cache.
 The process RSS allowance includes this relay. Caches do not multiply by CPU count.
 Resource exhaustion cannot trigger an unbounded fallback. With scratch
 disabled, an operation either fits in memory or fails with `FSIMG_ELIMIT`.
+
+All CLI text uses the output relay, including commands without a parser worker
+and post-publication summaries. A bounded producer feeds the same queue and
+supervision loop as worker events. One absolute monotonic deadline spans command
+preparation, worker processing, publication and successful output; phase changes
+cannot restart its time allowance. After failure, diagnostic delivery receives
+at most two seconds, with one further two-second stderr-only attempt if stdout
+cannot carry the report. These attempts perform no parsing or publication.
+Child termination retains its bounded shutdown grace. The [CLI design](design-cli.md) owns parsing and
+streaming representation. Cleanup of private scratch is descriptor-relative,
+does not follow links or recurse into worker-created directories, and has a
+finite entry bound; incomplete cleanup reports the retained location.
+
+The coordinator owns one output ledger for the complete command, borrowed by
+every relay phase. It records queued formatted bytes and confirmed stdout/stderr
+bytes; raw cat bytes retain their independent logical-output ceiling. The text
+ceiling derives only from trusted entry/path limits: at most
+`entries * (6 * path_bytes + 4096) + 1 MiB`, capped at `UINT64_MAX` with checked
+arithmetic. The factor six bounds JSON escaping and the per-entry allowance
+covers fixed metadata. Fixed records, logarithmically sampled progress, loss
+examples and final diagnostics fit the fixed allowance; its last 128 KiB is
+reserved for failure reports. This bounds text without changing logical-file
+quota semantics or introducing an arbitrary short timeout on gigantic jobs.
+Publication outcomes take precedence over a partial stdout prefix; otherwise
+any confirmed prefix remains incomplete after a later phase fails.
 
 ### Byte and object boundaries
 

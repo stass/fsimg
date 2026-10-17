@@ -176,6 +176,19 @@ fsimg_sandbox_install(int input_fd, int work_fd, int source_fd,
 	return (fsimg_sandbox_install_caps(&caps, error));
 }
 
+const char *
+fsimg_sandbox_backend(void)
+{
+#if defined(__linux__) && defined(FSIMG_AUDIT_ARCH) && \
+    defined(LANDLOCK_ACCESS_FS_TRUNCATE)
+	return ("landlock+seccomp");
+#elif defined(__FreeBSD__)
+	return ("capsicum");
+#else
+	return ("none");
+#endif
+}
+
 fsimg_status_t
 fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
     fsimg_error_t *error)

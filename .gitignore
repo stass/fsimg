@@ -11,5 +11,7 @@
 !/build-aux/fuzz.sh
 !/build-aux/build-fatcat.sh
 !/build-aux/fatcat-freebsd.patch
+!/build-aux/check-install.sh
+!/build-aux/check-installed.py
 *~
 .DS_Store

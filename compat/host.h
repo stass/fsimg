@@ -33,6 +33,15 @@ typedef struct fsimg_host_file {
 #define FSIMG_UNUSED
 #endif
 
+#if defined(__linux__)
+#define FSIMG_HOST_GETOPT_PREFIX "+"
+#else
+#define FSIMG_HOST_GETOPT_PREFIX ""
+#endif
+
+void fsimg_host_getopt_reset(void);
+int fsimg_host_random(void *, size_t);
+
 bool fsimg_host_offset(uint64_t, off_t *);
 int fsimg_host_dup(int);
 int fsimg_host_spawn_worker(const char *, const int *, unsigned, pid_t *);

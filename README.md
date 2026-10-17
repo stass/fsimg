@@ -21,12 +21,12 @@ plan deterministic layouts, stream payloads directly from stable sources, and
 emit to bounded sinks or publish a new image without replacing an existing
 name. Plans expose geometry, space use, and metadata-loss counts. Safe extraction
 creates a fresh private tree with logical quotas, case/alias selection, and
-optional timestamp restoration. Private executable modules supervise confined
-workers and bounded stdout/stderr output; Linux/FreeBSD profiles have actual
-kernel tests. The `fsimg`
-command and remaining work are tracked in the
-[implementation plan](docs/implementation-plan.md) and
-[open work](TODO.md).
+optional timestamp restoration. The `fsimg` command provides `create`, `info`,
+`ls`, `cat`, `extract`, `verify`, and `formats`, with streaming NDJSON output
+and bounded progress. It supervises confined workers and bounded stdout/stderr
+output; Linux/FreeBSD profiles have actual kernel tests. The
+[implementation plan](docs/implementation-plan.md) and [open work](TODO.md)
+record qualification gates and remaining work.
 
 Full FAT verification rejects dirty/error flags and inconsistent known FSInfo
 free-count hints, as well as structural corruption; it performs no repair.
@@ -63,6 +63,20 @@ cd build
 ../configure
 make
 make check
+make check-install
+```
+
+For a release archive, start with `./configure`; generated build support is
+included. `make install` installs the command, static/shared library, public
+header, pkg-config metadata, manuals and checked [C examples](docs/examples.md).
+See `fsimg -h`, `fsimg create -h`, and `man fsimg` for the command contract.
+
+```sh
+fsimg formats
+fsimg create -R -t exfat -o new.img source-directory
+fsimg verify -d -i new.img
+fsimg ls -j -r -i new.img
+fsimg extract -i new.img -C new-directory
 ```
 
 See [build and validation](docs/build.md),

@@ -85,7 +85,7 @@ spawn_entry(const char *executable, const char *entry, const int *descriptors,
 			goto done;
 	}
 	flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
-#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+#if HAVE_DECL_POSIX_SPAWN_CLOEXEC_DEFAULT
 	flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
 #elif HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP
 	code = posix_spawn_file_actions_addclosefrom_np(&actions, (int)count);

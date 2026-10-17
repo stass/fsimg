@@ -68,6 +68,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
     fsimg_error_t *error)
 {
 	uint64_t capabilities;
+	uint32_t path_limit;
 	size_t selection_length, label_length;
 	const char *label;
 
@@ -77,8 +78,12 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	label_length = strnlen(label, 48);
 	if (label_length == 48)
 		return (invalid_job(error));
-	selection_length = strnlen(request->selection,
-	    request->limits.max_path_bytes == 0 ? 65536 : request->limits.max_path_bytes);
+	path_limit = request->limits.max_path_bytes == 0 ?
+	    65536 : request->limits.max_path_bytes;
+	selection_length = strnlen(request->selection, path_limit);
+	if (selection_length >= path_limit)
+		return (fsimg_limit_error(error, FSIMG_RESOURCE_PATH,
+		    path_limit, (uint64_t)selection_length + 1));
 	bzero(raw, FSIMG_JOB_BYTES);
 	put_field(raw, JOB_KIND, request->kind);
 	put_field(raw, JOB_SANDBOX, request->sandbox);

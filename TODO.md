@@ -4,13 +4,21 @@
 
 * [High] **fsimg tool and library** (`lib/`, `cmd/fsimg/`, `test/`): implement the
   [target specification](specs/README.md) through the ordered
-  [implementation plan](docs/implementation-plan.md). Continue with the CLI
-  and release qualification. The acceptance gates cover
+  [implementation plan](docs/implementation-plan.md). Complete system and
+  release qualification. The acceptance gates cover
   bounded metadata and payload processing, FAT/exFAT interoperability, secure
   extraction, actual-kernel sandbox validation, failure handling, and measured
   operation on gigantic volumes and catalogs.
 
 ## Bugs by subsystem
+
+* [Low] **Monotonic-clock failures** (`cmd/fsimg/paths.c`,
+  `cmd/fsimg/worker-parent.c`, `cmd/fsimg/main.c`): make later supervision,
+  publication and reporting clock queries distinguish failure from zero.
+  Initial deadline setup already returns `FSIMG_EIO`; later helpers can derive
+  a reporting deadline or defer timeout detection after a failed query.
+  Centralize the clock result and exercise failures without weakening bounded
+  shutdown or adding a blocking diagnostic path.
 
 * [Medium] **UFS publication handoff** (`lib/output/publish.c`,
   `test/publish.c --identity`, `test/extract.c`): investigate deferred ctime

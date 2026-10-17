@@ -24,6 +24,8 @@ typedef struct fsimg_sandbox_caps {
  */
 fsimg_status_t fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *,
     fsimg_error_t *);
+/* Compile-time backend identity; this does not probe or install confinement. */
+const char *fsimg_sandbox_backend(void);
 
 /* Prototype for a disposable, single-threaded child only. Caller closes all
  * other descriptors first, including stdio, sockets and executable handles.

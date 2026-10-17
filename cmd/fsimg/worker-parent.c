@@ -98,11 +98,14 @@ typedef struct worker_supervisor {
 	const fsimg_worker_request_t *request;
 	fsimg_worker_result_t *result;
 	fsimg_worker_event_fn_t event;
+	fsimg_output_producer_fn_t produce;
 	void		*argument;
 	const volatile sig_atomic_t *interrupted;
 	fsimg_frame_decoder_t decoder;
 	worker_request_cursor_t outbound;
 	worker_relay_t	 relay;
+	fsimg_output_budget_t local_budget;
+	fsimg_output_budget_t *budget;
 	worker_process_t processes[PROCESS_COUNT];
 	int		 channels[CHANNEL_COUNT][2];
 	worker_phase_t	 phase;
@@ -116,12 +119,13 @@ typedef struct worker_supervisor {
 	uint64_t	 volume_limit;
 	bool		 raw_eof;
 	bool		 stdout_available;
+	bool		 producer_done;
 } worker_supervisor_t;
 
 static uint64_t monotonic_milliseconds(void);
 static fsimg_status_t worker_error(fsimg_error_t *, const char *);
 static fsimg_status_t queue_text(worker_supervisor_t *, const fsimg_worker_text_t *,
-    fsimg_error_t *);
+    bool, fsimg_error_t *);
 static fsimg_status_t deliver_event(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t handle_frame(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t read_control(worker_supervisor_t *, fsimg_error_t *);
@@ -136,6 +140,10 @@ static fsimg_status_t read_relay(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t advance_ready(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t observe_process(worker_process_t *, fsimg_error_t *);
 static fsimg_status_t supervise_operation(worker_supervisor_t *, fsimg_error_t *);
+static void supervisor_init(worker_supervisor_t *, const fsimg_worker_request_t *,
+    fsimg_worker_result_t *, void *, int, const volatile sig_atomic_t *);
+static fsimg_status_t finish_operation(worker_supervisor_t *, fsimg_status_t,
+    fsimg_error_t *);
 static void stop_process(worker_process_t *);
 static void close_channel(int *);
 static void cleanup_operation(worker_supervisor_t *);
@@ -166,15 +174,38 @@ close_channel(int *fd)
 
 static fsimg_status_t
 queue_text(worker_supervisor_t *state, const fsimg_worker_text_t *text,
-    fsimg_error_t *error)
+    bool raw, fsimg_error_t *error)
 {
 	worker_relay_t *relay = &state->relay;
+	uint64_t total, ceiling;
+	bool fits;
 
 	if (text->length == 0)
 		return (FSIMG_OK);
 	if (text->data == NULL || text->length > FSIMG_WORKER_TEXT_BYTES ||
 	    relay->phase != RELAY_IDLE)
 		return (worker_error(error, "invalid or overlapping worker text output"));
+	if (!raw) {
+		ceiling = state->budget->limit_bytes;
+		if (ceiling < FSIMG_OUTPUT_ERROR_RESERVE)
+			return (worker_error(error, "formatted output budget lacks its error reserve"));
+		if (!state->budget->reporting)
+			ceiling -= FSIMG_OUTPUT_ERROR_RESERVE;
+		fits = fsimg_add_u64(state->budget->text_bytes, text->length, &total);
+		if (!fits)
+			total = UINT64_MAX;
+		if (!fits || total > ceiling) {
+			fsimg_error_set(error, FSIMG_ELIMIT, 0, FSIMG_OP_CONTEXT,
+			    "formatted output exceeds its derived text ceiling");
+			if (error != NULL) {
+				error->resource = FSIMG_RESOURCE_OUTPUT;
+				error->limit = ceiling;
+				error->observed = total;
+			}
+			return (FSIMG_ELIMIT);
+		}
+		state->budget->text_bytes = total;
+	}
 	relay->text = *text;
 	fsimg_wire_put64(relay->header + FSIMG_RELAY_STREAM, text->diagnostic ? 2 : 1);
 	fsimg_wire_put64(relay->header + FSIMG_RELAY_LENGTH, text->length);
@@ -204,7 +235,7 @@ deliver_event(worker_supervisor_t *state, fsimg_error_t *error)
 		    "worker text requires a standard-output descriptor"));
 	if (state->request->kind == FSIMG_JOB_CAT && text.length != 0 && !text.diagnostic)
 		return (worker_error(error, "CAT event text must use diagnostic output"));
-	return (queue_text(state, &text, error));
+	return (queue_text(state, &text, false, error));
 }
 
 
@@ -260,7 +291,7 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		if (warning.data != NULL)
 			warning.length = strlen(warning.data);
 		state->phase = WORKER_WARNING;
-		return (queue_text(state, &warning, error));
+		return (queue_text(state, &warning, false, error));
 	}
 
 	if (state->output_state == WORKER_IN_ENTRY && frame->type != FSIMG_FRAME_NAME &&
@@ -404,10 +435,13 @@ prepare_request(worker_supervisor_t *state, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	started = monotonic_milliseconds();
-	if (request->seconds > (UINT64_MAX - started) / 1000)
+	if (request->deadline_milliseconds == 0 &&
+	    request->seconds > (UINT64_MAX - started) / 1000)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
 		    "worker deadline exceeds clock range"));
-	if (request->seconds != 0)
+	if (request->deadline_milliseconds != 0)
+		state->deadline = request->deadline_milliseconds;
+	else if (request->seconds != 0)
 		state->deadline = started + request->seconds * 1000;
 	state->output_limit = request->limits.max_output_bytes;
 	if (request->input_fd != -1) {
@@ -541,6 +575,19 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
 		return (fsimg_error_set(error, FSIMG_EIO, saved,
 		    FSIMG_OP_CONTEXT, "output relay execution failed"));
 	}
+	if (state->produce != NULL) {
+		/* Output-only commands share the same relay and supervision states.
+		 * The absent parser has already completed both of its streams.
+		 */
+		state->processes[PROCESS_PARSER].exited = true;
+		state->processes[PROCESS_PARSER].channel_eof = true;
+		state->raw_eof = true;
+		state->phase = WORKER_COMPLETE;
+		close(null_fd);
+		close_channel(&state->channels[CHANNEL_OUTPUT][0]);
+		close_channel(&state->channels[CHANNEL_STATUS][1]);
+		return (FSIMG_OK);
+	}
 	for (unsigned i = 0; i <= FSIMG_CHILD_LAST; i++)
 		parser[i] = null_fd;
 	parser[FSIMG_CHILD_JOB] = state->channels[CHANNEL_JOB][0];
@@ -600,7 +647,7 @@ read_raw(worker_supervisor_t *state, fsimg_error_t *error)
 		return (worker_error(error, "worker raw output exceeds its selected file"));
 	relay->received = observed;
 	text = (fsimg_worker_text_t){ .data = relay->buffer, .length = (size_t)count };
-	return (queue_text(state, &text, error));
+	return (queue_text(state, &text, true, error));
 }
 
 static fsimg_status_t
@@ -638,7 +685,7 @@ static fsimg_status_t
 read_relay(worker_supervisor_t *state, fsimg_error_t *error)
 {
 	worker_relay_t *relay = &state->relay;
-	uint64_t confirmed[2], failure, marker;
+	uint64_t confirmed[2], totals[2], failure, marker;
 	ssize_t count;
 
 	count = read(state->channels[CHANNEL_STATUS][0], relay->report + relay->report_bytes,
@@ -668,6 +715,12 @@ read_relay(worker_supervisor_t *state, fsimg_error_t *error)
 		if (confirmed[stream] < relay->confirmed[stream] ||
 		    confirmed[stream] > relay->forwarded[stream])
 			return (worker_error(error, "invalid output relay byte count"));
+		if (!fsimg_add_u64(state->budget->confirmed[stream],
+		    confirmed[stream] - relay->confirmed[stream], &totals[stream]))
+			return (worker_error(error, "aggregate output byte count overflow"));
+	}
+	for (unsigned stream = 0; stream < 2; stream++) {
+		state->budget->confirmed[stream] = totals[stream];
 		relay->confirmed[stream] = confirmed[stream];
 	}
 	if (state->request->kind == FSIMG_JOB_CAT)
@@ -742,6 +795,7 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 {
 	struct pollfd channels[CHANNEL_COUNT];
 	worker_relay_t *relay = &state->relay;
+	fsimg_worker_text_t text;
 	fsimg_status_t status;
 	bool finished, control_allowed;
 	uint64_t now;
@@ -752,6 +806,22 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 		    (state->deadline != 0 && now >= state->deadline))
 			return (fsimg_error_set(error, FSIMG_ECANCELLED, 0,
 			    FSIMG_OP_CONTEXT, "worker cancelled or deadline exceeded"));
+		if (!state->producer_done && relay->phase == RELAY_IDLE) {
+			bzero(&text, sizeof(text));
+			status = state->produce(state->argument, &text, error);
+			if (status == FSIMG_DONE)
+				state->producer_done = true;
+			else {
+				if (status != FSIMG_OK)
+					return (status);
+				if (text.length == 0 ||
+				    (!text.diagnostic && !state->stdout_available))
+					return (worker_error(error, "invalid output producer span"));
+				status = queue_text(state, &text, false, error);
+				if (status != FSIMG_OK)
+					return (status);
+			}
+		}
 		status = advance_ready(state, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -770,7 +840,7 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 		if (finished)
 			break;
 		if (state->processes[PROCESS_PARSER].channel_eof && state->raw_eof &&
-		    relay->phase == RELAY_IDLE)
+		    relay->phase == RELAY_IDLE && state->producer_done)
 			close_channel(&state->channels[CHANNEL_OUTPUT][1]);
 
 		for (unsigned role = 0; role < CHANNEL_COUNT; role++)
@@ -889,6 +959,56 @@ cleanup_operation(worker_supervisor_t *state)
 	}
 }
 
+static void
+supervisor_init(worker_supervisor_t *state, const fsimg_worker_request_t *request,
+    fsimg_worker_result_t *result, void *argument, int standard_output,
+    const volatile sig_atomic_t *interrupted)
+{
+	bzero(state, sizeof(*state));
+	state->request = request;
+	state->result = result;
+	state->argument = argument;
+	state->interrupted = interrupted;
+	state->stdout_available = standard_output != -1;
+	state->producer_done = true;
+	if (request->output_budget == NULL) {
+		fsimg_output_budget_init(&state->local_budget, &request->limits);
+		state->budget = &state->local_budget;
+	} else
+		state->budget = request->output_budget;
+	for (unsigned role = 0; role < CHANNEL_COUNT; role++)
+		state->channels[role][0] = state->channels[role][1] = -1;
+	for (unsigned role = 0; role < PROCESS_COUNT; role++)
+		state->processes[role].pid = -1;
+}
+
+static fsimg_status_t
+finish_operation(worker_supervisor_t *state, fsimg_status_t status,
+    fsimg_error_t *error)
+{
+	cleanup_operation(state);
+	if (state->relay.forwarded[0] != 0)
+		state->budget->stdout_possible = true;
+	/* Runtime failures are never an expected malformed-input result, even if
+	 * channel EOF or a structured error was observed before process reaping.
+	 */
+	for (unsigned role = 0; role < PROCESS_COUNT; role++) {
+		if (state->processes[role].exited && WIFEXITED(state->processes[role].status) &&
+		    WEXITSTATUS(state->processes[role].status) == FSIMG_WORKER_RUNTIME_EXIT)
+			status = fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_CONTEXT,
+			    "worker sanitizer runtime reported failure");
+	}
+	/* Prepared output roots remain private on every failed operation, even
+	 * when a dead or compromised worker sends no trustworthy outcome frame.
+	 */
+	if (status != FSIMG_OK && error != NULL &&
+	    (state->budget->stdout_possible || state->request->output_fd != -1))
+		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
+	if (status == FSIMG_OK)
+		fsimg_error_clear(error);
+	return (status);
+}
+
 fsimg_status_t
 fsimg_worker_run(const char *executable, const fsimg_worker_request_t *request,
     fsimg_worker_event_fn_t event, void *argument, int standard_output,
@@ -909,40 +1029,60 @@ fsimg_worker_run(const char *executable, const fsimg_worker_request_t *request,
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "missing worker request, callback, output, or result"));
 	selected = *request;
-	bzero(&state, sizeof(state));
-	state.request = &selected;
-	state.result = result;
+	supervisor_init(&state, &selected, result, argument, standard_output, interrupted);
 	state.event = event;
-	state.argument = argument;
-	state.interrupted = interrupted;
-	state.stdout_available = standard_output != -1;
-	for (unsigned role = 0; role < CHANNEL_COUNT; role++)
-		state.channels[role][0] = state.channels[role][1] = -1;
-	for (unsigned role = 0; role < PROCESS_COUNT; role++)
-		state.processes[role].pid = -1;
-
 	status = prepare_request(&state, error);
 	if (status == FSIMG_OK)
 		status = start_processes(&state, executable, standard_output, error);
 	if (status == FSIMG_OK)
 		status = supervise_operation(&state, error);
-	cleanup_operation(&state);
-	/* Runtime failures are never an expected malformed-input result, even if
-	 * channel EOF or a structured error was observed before process reaping.
-	 */
-	for (unsigned role = 0; role < PROCESS_COUNT; role++) {
-		if (state.processes[role].exited && WIFEXITED(state.processes[role].status) &&
-		    WEXITSTATUS(state.processes[role].status) == FSIMG_WORKER_RUNTIME_EXIT)
-			status = fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_CONTEXT,
-			    "worker sanitizer runtime reported failure");
-	}
-	/* Prepared output roots remain private on every failed operation, even
-	 * when a dead or compromised worker sends no trustworthy outcome frame.
-	 */
-	if (status != FSIMG_OK && error != NULL &&
-	    (state.relay.forwarded[0] != 0 || request->output_fd != -1))
-		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
+	return (finish_operation(&state, status, error));
+}
+
+fsimg_status_t
+fsimg_output_run(const char *executable, fsimg_output_producer_fn_t produce,
+    void *argument, int standard_output, uint64_t deadline,
+    const volatile sig_atomic_t *interrupted, fsimg_output_budget_t *budget,
+    fsimg_error_t *error)
+{
+	worker_supervisor_t state;
+	fsimg_worker_request_t request;
+	fsimg_worker_result_t result = { 0 };
+	fsimg_status_t status;
+
+	fsimg_error_clear(error);
+	if (executable == NULL || produce == NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CONTEXT, "missing output executable or producer"));
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_INFO;
+	request.output_budget = budget;
+	supervisor_init(&state, &request, &result, argument, standard_output, interrupted);
+	state.produce = produce;
+	state.producer_done = false;
+	state.deadline = deadline;
+	status = start_processes(&state, executable, standard_output, error);
 	if (status == FSIMG_OK)
-		fsimg_error_clear(error);
-	return (status);
+		status = supervise_operation(&state, error);
+	return (finish_operation(&state, status, error));
+}
+
+void
+fsimg_output_budget_init(fsimg_output_budget_t *budget, const fsimg_options_t *options)
+{
+	fsimg_options_t defaults;
+	uint64_t entries, path, per_entry, variable;
+
+	bzero(budget, sizeof(*budget));
+	fsimg_options_init(&defaults);
+	entries = options->max_entries == 0 ? defaults.max_entries : options->max_entries;
+	path = options->max_path_bytes == 0 ? defaults.max_path_bytes : options->max_path_bytes;
+	/* path is a uint32 field, so this per-entry calculation fits uint64. */
+	per_entry = path * 6 + 4096;
+	if (!fsimg_mul_u64(entries, per_entry, &variable)) {
+		budget->limit_bytes = UINT64_MAX;
+		return;
+	}
+	if (!fsimg_add_u64(variable, 1048576, &budget->limit_bytes))
+		budget->limit_bytes = UINT64_MAX;
 }

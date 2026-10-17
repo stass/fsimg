@@ -15,10 +15,10 @@ jobs:
       - name: Development tools
         run: |
           if [ "$(uname -s)" = Darwin ]; then
-            brew install autoconf automake libtool cmake mtools dosfstools
+            brew install autoconf automake libtool cmake mtools dosfstools pkgconf python
           else
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs
+            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config python3
           fi
       - name: Build and check
         run: |
@@ -32,6 +32,7 @@ jobs:
           ../configure CC=clang CXX=clang++
           make -j2
           make check
+          make check-install
           if [ "$(uname -s)" = Linux ]; then ./test-sandbox; fi
           make check-asan
           make check-ubsan
@@ -68,6 +69,8 @@ jobs:
             install_port devel/cmake cmake
             install_port devel/git git
             install_port filesystems/mtools mcopy
+            install_port devel/pkgconf pkg-config
+            install_port lang/python3 python3
             pw useradd fsimgtest -m -s /bin/sh
           run: |
             chown -R fsimgtest .
@@ -82,6 +85,7 @@ jobs:
               ../configure CC=clang CXX=clang++
               make -j2
               make check
+              make check-install
               ./test-sandbox
               make check-asan
               make check-scale

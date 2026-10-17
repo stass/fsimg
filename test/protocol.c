@@ -15,6 +15,7 @@ static void test_frame_splits(uint32_t);
 static void test_malformed_frames(void);
 static void test_error_codec(void);
 static void test_job_label(void);
+static void test_selection_budget(void);
 static void test_error_padding(void);
 static void write_seed(const char *);
 
@@ -152,6 +153,22 @@ test_error_padding(void)
 }
 
 static void
+test_selection_budget(void)
+{
+	fsimg_worker_request_t request;
+	fsimg_error_t error;
+	unsigned char raw[FSIMG_JOB_BYTES];
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.selection = "/abc";
+	request.limits.max_path_bytes = 4;
+	CHECK(fsimg_job_encode(&request, raw, &error) == FSIMG_ELIMIT);
+	CHECK(error.resource == FSIMG_RESOURCE_PATH);
+	CHECK(error.limit == 4 && error.observed >= 5);
+}
+
+static void
 test_job_label(void)
 {
 	fsimg_worker_request_t request, decoded;
@@ -195,6 +212,7 @@ main(int argc, char **argv)
 	test_malformed_frames();
 	test_error_codec();
 	test_job_label();
+	test_selection_budget();
 	test_error_padding();
 	return (0);
 }

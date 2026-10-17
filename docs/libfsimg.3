@@ -1,0 +1,138 @@
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\" Copyright (c) 2026, fsimg contributors
+.Dd October 17, 2026
+.Dt LIBFSIMG 3
+.Os
+.Sh NAME
+.Nm libfsimg
+.Nd bounded filesystem image readers, writers and safe extraction
+.Sh LIBRARY
+Filesystem image library
+.Pq Fl l Ns fsimg
+.Sh SYNOPSIS
+.In fsimg.h
+.Ft void
+.Fn fsimg_options_init "fsimg_options_t *options"
+.Ft fsimg_status_t
+.Fn fsimg_ctx_new "const fsimg_options_t *options" "fsimg_ctx_t **context" "fsimg_error_t *error"
+.Ft fsimg_status_t
+.Fn fsimg_io_from_fd "fsimg_ctx_t *context" "int fd" "unsigned flags" "fsimg_io_t **io" "fsimg_error_t *error"
+.Ft fsimg_status_t
+.Fn fsimg_io_slice "fsimg_io_t *parent" "uint64_t offset" "uint64_t length" "fsimg_io_t **slice" "fsimg_error_t *error"
+.Ft fsimg_status_t
+.Fn fsimg_reader_open "fsimg_ctx_t *context" "fsimg_io_t *io" "const fsimg_read_options_t *options" "fsimg_reader_t **reader" "fsimg_error_t *error"
+.Ft fsimg_status_t
+.Fn fsimg_writer_new "fsimg_ctx_t *context" "const char *format" "const fsimg_write_options_t *options" "fsimg_writer_t **writer" "fsimg_error_t *error"
+.Sh DESCRIPTION
+The public C11 API supports FAT12, FAT16, FAT32 and ordinary one-FAT exFAT.
+It requires only libc and host OS APIs and is includable from C++.
+It neither prints diagnostics, exits, changes process-global policy nor
+sandboxes its embedding application.
+.Pp
+Initialize option and callback structures with their matching init function.
+Their size and version must match the header.
+Zero resource values choose documented defaults.
+All dynamic library allocations and owned descriptors share one resource
+context.
+Payload copying, metadata, allocation indexes and sorting obey separate memory,
+scratch, work and traversal limits.
+A handle is used serially; independent contexts may be used concurrently.
+Callbacks cannot re-enter an active context.
+.Sh OWNERSHIP
+FD adapters duplicate borrowed regular-file descriptors, preserving position
+and shared flags.
+Read authority requires an O_RDONLY descriptor.
+Slices borrow their parent, have checked fixed bounds and cannot resize it.
+Callback tables are copied; callback state, buffers and backing storage remain
+caller-owned and stable for the documented lifetime.
+No library handle owns an embedding application's memory implicitly.
+.Pp
+Free readers and writers before their context.
+Free a slice before its parent and keep reader inputs alive until reader
+destruction.
+Destructors accept NULL.
+A writer owns its immutable plan; plan and entry snapshots are borrowed.
+Iteration invalidates the previous current-entry snapshot.
+.Sh READERS
+.Fn fsimg_reader_next
+enumerates depth-first in on-disk order and returns FSIMG_DONE at complete EOF.
+Directory prepasses validate case/alias ambiguity before exposing children.
+.Fn fsimg_reader_read_at
+reads only the current regular file, clips to EOF and returns confirmed bytes
+separately from status.
+Confirmed bytes can accompany failure and do not imply complete content.
+Uninitialized logical tails read as zero without exposing underlying
+cluster bytes.
+.Pp
+.Fn fsimg_reader_get_info
+reports header scope, not complete filesystem verification.
+.Fn fsimg_verify
+requires an untouched reader and consumes traversal.
+FSIMG_VERIFY_PAYLOAD also reads initialized payload bytes.
+Its report is complete only after the entire requested scope succeeds.
+No reader modifies or repairs an input image.
+.Sh WRITERS
+Collect host trees, explicit zero sources or one callback provider before
+planning.
+Paths are absolute UTF-8 image paths.
+Host scanning rejects symlinks, special files, descendant mounts and
+encountered
+scratch/output objects.
+Host identity checks detect ordinary metadata-visible changes;
+hostile concurrent mutation requires immutable inputs or a snapshot.
+Provider content and state remain borrowed until writer destruction.
+Opaque callback sources and sinks must use disjoint storage.
+.Pp
+.Fn fsimg_writer_plan
+seals collection, validates names and metadata, and fixes deterministic
+geometry.
+Plans report logical, initialized, allocated, metadata and free byte quantities
+separately, plus metadata-loss counts and observed scratch use.
+Reproducible mode fixes timestamps, identifiers, ordering and padding.
+Optional losses follow the explicit allow-loss policy; required losses fail.
+Time bases distinguish UTC instants, known offsets and unknown-zone calendar
+values.
+.Pp
+.Fn fsimg_writer_emit
+attempts emission once to a bounded sink.
+A raw sink may retain partial bytes after failure and must be discarded.
+.Fn fsimg_writer_write_at
+takes a trusted parent directory descriptor and a single new basename.
+It plans before image creation and publishes without replacement after durable
+finalization.
+Known source aliases are rejected before output mutation.
+Inspect output_state and cleanup_error before any recovery decision.
+Retained staging paths are relative to the supplied parent.
+.Sh EXTRACTION
+.Fn fsimg_extract_at
+requires an untouched reader and a fresh destination basename beneath a trusted
+parent.
+It creates private directories/files with descriptor-relative no-follow
+operations,
+never merges, overwrites, restores privileged metadata or follows links.
+Logical lengths including holes count against output limits.
+Failure after creation can leave private incomplete output.
+The default restores no host timestamps.
+Explicit timestamp restoration requires a time-basis policy and does not
+change the embedding process's sandbox.
+.Sh EXAMPLES
+Checked source examples are installed beneath
+.Pa share/fsimg/examples :
+create-tree.c, provider.c, read-slice.c and extract.c.
+They demonstrate initialization, borrowing, bounded slices, partial-read
+handling,
+safe publication, extraction and cleanup.
+Build with the installed libfsimg pkg-config metadata or direct compiler
+include/library paths.
+.Sh ERRORS
+Functions return structured status values and optionally fill fsimg_error_t.
+Errors distinguish argument/state failures, corruption, unsupported features,
+host I/O, resource exhaustion, source changes, cancellation, existing targets
+and uncertain durability.
+Per-call error storage is caller-owned; there is no global error buffer.
+Publication outcomes are absent, incomplete, published or uncertain.
+Cancellation after linking but before required directory sync completion
+retains a published output with uncertain durability.
+Never retry a published or uncertain outcome blindly.
+.Sh SEE ALSO
+.Xr fsimg 1

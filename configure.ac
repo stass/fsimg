@@ -18,6 +18,10 @@ AC_CHECK_SIZEOF([void *])
 AS_IF([test "$ac_cv_sizeof_void_p" -lt 8], [AC_MSG_ERROR([64-bit host required])])
 AC_CHECK_FUNCS([pread pwrite ftruncate fsync linkat])
 AC_CHECK_FUNCS([posix_spawn_file_actions_addclosefrom_np])
+AC_CHECK_DECLS([POSIX_SPAWN_CLOEXEC_DEFAULT], [], [], [[#include <spawn.h>]])
+AS_IF([test "$ac_cv_func_posix_spawn_file_actions_addclosefrom_np" != yes &&
+    test "$ac_cv_have_decl_POSIX_SPAWN_CLOEXEC_DEFAULT" != yes],
+    [AC_MSG_ERROR([fsimg CLI requires complete spawn-time descriptor closure: POSIX_SPAWN_CLOEXEC_DEFAULT or posix_spawn_file_actions_addclosefrom_np])])
 AC_PATH_PROG([MKFS_FAT], [mkfs.fat], [], [$PATH:/usr/sbin:/sbin:/usr/local/sbin:/opt/homebrew/sbin])
 AC_PATH_PROG([FSCK_FAT], [fsck.fat], [], [$PATH:/usr/sbin:/sbin:/usr/local/sbin:/opt/homebrew/sbin])
 AC_PATH_PROG([NEWFS_MSDOS], [newfs_msdos], [], [$PATH:/sbin])
@@ -26,10 +30,13 @@ AC_PATH_PROG([MCOPY], [mcopy])
 AC_PATH_PROG([MMD], [mmd])
 AC_PATH_PROG([MDEL], [mdel])
 AC_PATH_PROG([FATCAT], [fatcat])
+AC_PATH_PROG([PYTHON3], [python3])
+AC_PATH_PROG([PKG_CONFIG], [pkg-config])
 AC_PATH_PROG([MKFS_EXFAT], [mkfs.exfat], [], [$PATH:/usr/sbin:/sbin:/usr/local/sbin:/opt/homebrew/sbin])
 AC_PATH_PROG([FSCK_EXFAT], [fsck.exfat], [], [$PATH:/usr/sbin:/sbin:/usr/local/sbin:/opt/homebrew/sbin])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
-AC_CONFIG_FILES([Makefile test/fat-integration.sh test/exfat-integration.sh],
+AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integration.sh test/cli.sh],
     [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
-     test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh])
+     test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh
+     test ! -f test/cli.sh || chmod +x test/cli.sh])
 AC_OUTPUT

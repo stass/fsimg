@@ -22,6 +22,7 @@
 #endif
 #if defined(__APPLE__)
 #include <sys/attr.h>
+#include <sys/random.h>
 
 /* Bulk records contain a u32 length, five returned attribute words, and a
  * name reference. The name offset is relative to that reference, not the record.
@@ -38,6 +39,24 @@
 #include "host.h"
 
 _Static_assert(sizeof(off_t) == sizeof(int64_t), "64-bit off_t required");
+
+void
+fsimg_host_getopt_reset(void)
+{
+	opterr = 0;
+#if defined(__linux__)
+	optind = 0;
+#else
+	optind = 1;
+	optreset = 1;
+#endif
+}
+
+int
+fsimg_host_random(void *buffer, size_t length)
+{
+	return (getentropy(buffer, length));
+}
 
 static fsimg_timestamp_t host_time(int64_t, long);
 
@@ -209,6 +228,10 @@ fsimg_host_directory_read(int fd, void *buffer, size_t capacity, size_t *used)
 	ssize_t count;
 
 	*used = 0;
+	/* Native records may contain padding, and raw kernel writes have no
+	 * sanitizer interceptor. Give every caller an initialized batch buffer.
+	 */
+	bzero(buffer, capacity);
 #if defined(__linux__)
 	count = syscall(__NR_getdents64, fd, buffer, capacity);
 #elif defined(__FreeBSD__)

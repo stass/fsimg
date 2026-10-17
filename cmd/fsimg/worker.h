@@ -37,6 +37,21 @@ typedef enum fsimg_confinement {
 /* Fixed sanitizer options reserve this status for runtime failures. */
 #define FSIMG_WORKER_RUNTIME_EXIT 86
 
+#define FSIMG_OUTPUT_ERROR_RESERVE 131072u
+/* One coordinator-owned ledger spans processing and final reporting. Counts
+ * describe queued text and confirmed stream bytes, not a sink's durability.
+ * stdout_possible also covers the write-to-ack window on failed relays.
+ */
+typedef struct fsimg_output_budget {
+	uint64_t	 limit_bytes;
+	uint64_t	 text_bytes;
+	uint64_t	 confirmed[2];
+	bool		 stdout_possible;
+	bool		 reporting;
+} fsimg_output_budget_t;
+
+void fsimg_output_budget_init(fsimg_output_budget_t *, const fsimg_options_t *);
+
 /* Parent descriptors and selection are borrowed for run. No native struct or
  * pointer is transmitted: job.c owns the complete wire representation.
  * The trusted coordinator supplies fresh, disjoint private output and scratch
@@ -51,6 +66,10 @@ typedef struct fsimg_worker_request {
 	uint64_t	 offset;
 	uint64_t	 length;
 	uint64_t	 seconds;
+	/* Coordinator-only absolute CLOCK_MONOTONIC deadline; never sent in JOB. */
+	uint64_t	 deadline_milliseconds;
+	/* Borrowed coordinator-only ledger; NULL uses a single-run local ledger. */
+	fsimg_output_budget_t *output_budget;
 	const char	*selection;
 	unsigned	 flags;
 	uint32_t	 codepage;
@@ -87,6 +106,12 @@ typedef struct fsimg_worker_text {
 typedef fsimg_status_t (*fsimg_worker_event_fn_t)(void *, const fsimg_frame_t *,
     fsimg_worker_text_t *, fsimg_error_t *);
 
+/* A producer returns one nonempty bounded span, DONE, or an error. The next
+ * call follows acknowledgement, so its storage may be reused on that call.
+ */
+typedef fsimg_status_t (*fsimg_output_producer_fn_t)(void *,
+    fsimg_worker_text_t *, fsimg_error_t *);
+
 /* The command entry point ignores SIGPIPE before starting a worker. A nonzero
  * interrupted flag requests termination. A zero seconds limit has no wall-clock
  * deadline; a live silent child then requires an explicit interrupt. The output descriptor is borrowed
@@ -105,6 +130,8 @@ fsimg_status_t fsimg_worker_run(const char *, const fsimg_worker_request_t *,
     fsimg_worker_result_t *, fsimg_error_t *);
 int fsimg_worker_main(void);
 int fsimg_output_main(void);
+fsimg_status_t fsimg_output_run(const char *, fsimg_output_producer_fn_t, void *,
+    int, uint64_t, const volatile sig_atomic_t *, fsimg_output_budget_t *, fsimg_error_t *);
 fsimg_status_t fsimg_job_encode(const fsimg_worker_request_t *, unsigned char *,
     fsimg_error_t *);
 fsimg_status_t fsimg_job_decode(const unsigned char *, uint32_t,

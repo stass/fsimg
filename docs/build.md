@@ -2,13 +2,23 @@
 
 Development requires Autoconf, Automake, Libtool, make, a C11 compiler, and a
 C++ compiler. On macOS install missing tools with `brew install autoconf
-automake libtool`. Independent FAT tests additionally use `brew install mtools
+automake libtool pkgconf python`. CLI integration and installation qualification
+use Python 3 and pkg-config as development tools. On FreeBSD these are
+`lang/python3` and `devel/pkgconf` ports.
+Independent FAT tests additionally use `brew install mtools
 dosfstools cmake`. Linux exFAT interoperability uses `exfatprogs`.
 FreeBSD uses native `newfs_msdos`/`fsck_msdosfs`; install
 missing development tools through ports, including `filesystems/mtools`.
 The additional fatcat oracle is built from a pinned upstream checkout.
 Release archives include generated Autotools support and build without those
 generators. The installed library has no third-party runtime dependencies.
+
+The CLI requires native spawn-time closure of all unspecified descriptors:
+`POSIX_SPAWN_CLOEXEC_DEFAULT` or `posix_spawn_file_actions_addclosefrom_np`.
+Configure reports an error if neither interface is available. Host OS and libc
+versions must supply one of these mechanisms; a resource-limit-bounded close
+loop cannot prove descriptor isolation. `check-install` also tests configure's
+refusal with both capability probes forced unavailable.
 
 From a checkout:
 
@@ -19,6 +29,7 @@ cd build
 ../configure
 make
 make check
+make check-install
 make check-security
 make check-integration
 make check-asan
@@ -29,7 +40,8 @@ make check-scale
 make check-fuzz
 ```
 
-`check` builds and runs native tests, C11/C++ header examples, and an ASCII
+`check` builds and runs native tests, C11/C++ header examples, checked library
+examples, CLI integration with an independent JSON decoder, and an ASCII
 source/build check. Test logs are in `test-suite.log` and individual `.log`
 files. Fixtures are relative to the disposable build directory and cleaned on
 success. `check-security` runs the publication and sandbox harnesses directly;
@@ -220,11 +232,11 @@ explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 ./test-catalog --scale 10000000
 ```
 
-The ordinary suite has twenty-two tests. macOS reports nineteen passes and
+The ordinary suite has twenty-four tests. macOS reports twenty-one passes and
 three skips (backend unavailable, Linux-only setup mocks, and unavailable
-exfatprogs). Linux reports twenty-two passes; FAT fatcat subchecks explicitly
+exfatprogs). Linux reports twenty-four passes; FAT fatcat subchecks explicitly
 skip by host policy while dosfstools/mtools coverage runs. The user-provided
-FreeBSD 16/ZFS host reports twenty passes and two skips (Linux-only setup
+FreeBSD 16/ZFS host reports twenty-two passes and two skips (Linux-only setup
 mocks and unavailable exfatprogs), including native FAT/mtools/fatcat
 interoperability. See [platform evidence](platform-evidence.md)
 for guest kernels and filesystems. The metadata scale fixture reports a
@@ -278,10 +290,28 @@ addition to validation around payload copying.
 Installation and release checks:
 
 ```sh
+make check-install
 make install DESTDIR="$PWD/install-root"
 make uninstall DESTDIR="$PWD/install-root"
 make distcheck
 ```
+
+`check-install` makes a clean distribution snapshot, configures a separate
+private prefix with static and shared libraries, and checks install/uninstall,
+pkg-config metadata, C/C++ consumers, relocated CLI operation and native runtime
+dependencies. It uses its own layout even if the caller's build is in-tree or
+uses custom installation directories. Compiler choices and flags are preserved;
+package lookup and build configuration overrides cannot redirect the fixtures.
+Failure logs and fixtures are retained at the printed location. The metadata
+self-test rejects foreign, relative and extra dependency flags and accepts
+absolute prefixes containing spaces. The command embeds its library core;
+moving the executable does not require a private library or helper search path.
+
+Release-archive qualification runs `./configure` and the complete ordinary suite
+with installed Autotools generator names, including versioned automake/aclocal,
+shadowed by commands that fail if invoked. The generated `.tar.xz` archive
+passes this check and `make distcheck`; source checkouts still require
+`autoreconf -fi`.
 
 `include/fsimg.h` documents implemented entry points and ownership. An options
 or callback table must be initialized and have exactly the supported size and
@@ -293,14 +323,16 @@ private session counters persist across incremental calls. An output ceiling
 of zero is derived by the containing reader/writer from its volume length; optional
 work ceilings are disabled at zero.
 
-The installed header/library expose FAT readers, volume information, current-file
+The installed header/library expose FAT/exFAT readers, volume information, current-file
 content/range reads, full verification, and independent reader/writer capability
-enumeration. No command-line executable is installed. Public FAT writers expose
+enumeration. The installed `fsimg` executable provides all seven commands in
+[fsimg(1)](fsimg.1). Public writers expose
 collection, immutable planning, raw emission, and durable no-replace publication.
 Source access and common catalog/storage remain private. Public extraction exposes safe private-tree creation and optional times.
-Image staging and publication share a library coordinator. Private executable
-modules implement worker supervision and output relay; `test-worker` provides
-the same-executable frontend for their checks.
+Image staging and publication share a library coordinator. Executable modules
+implement worker supervision and output relay; `test-worker` provides a
+same-executable frontend for fault checks. [libfsimg(3)](libfsimg.3) and the
+[checked examples](examples.md) explain embedding and failure handling.
 
 Extraction and worker qualification:
 
@@ -354,13 +386,13 @@ Sanitizer execution evidence:
 
 | Host | Command | Result |
 | --- | --- | --- |
-| macOS | `make check-asan` | 19 pass, 3 tool/platform skips |
-| macOS | `make check-ubsan` | 19 pass, 3 tool/platform skips |
+| macOS | `make check-asan` | 21 pass, 3 tool/platform skips |
+| macOS | `make check-ubsan` | 21 pass, 3 tool/platform skips |
 | macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
-| Linux | `make check-asan` | 22 pass |
-| Linux | `make check-lsan` | 22 pass |
-| Linux | `make check-msan` | 22 pass |
-| FreeBSD 16/ZFS | `make check-asan` | 20 pass, 2 tool/platform skips |
+| Linux | `make check-asan` | 24 pass |
+| Linux | `make check-lsan` | 24 pass |
+| Linux | `make check-msan` | 24 pass |
+| FreeBSD 16/ZFS | `make check-asan` | 22 pass, 2 tool/platform skips |
 
 Configure searches the standard system sbin directories for formatter/checker
 tools. Linux runs dosfstools/mtools and exfatprogs interoperability in its
@@ -368,6 +400,11 @@ ordinary and sanitizer suites. macOS and the provided FreeBSD host include
 passing independent FAT interoperability. FreeBSD uses its native
 formatter/checker plus mtools and fatcat. The real
 child ASan fault is intentional; no unintended sanitizer report remains.
+
+Native directory batches are initialized by the compatibility adapter, including
+padding written through raw kernel interfaces without sanitizer interception.
+The focused `./test-cli --private-cleanup` regression exercises this boundary
+under MSan, symlink-safe scratch deletion, and retained-directory reporting.
 
 Build the fatcat development oracle outside the source tree and export its path
 before configuring ordinary or sanitizer builds:

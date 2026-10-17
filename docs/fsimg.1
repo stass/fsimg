@@ -1,0 +1,228 @@
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\" Copyright (c) 2026, fsimg contributors
+.Dd October 17, 2026
+.Dt FSIMG 1
+.Os
+.Sh NAME
+.Nm fsimg
+.Nd create, inspect, verify and safely extract filesystem images
+.Sh SYNOPSIS
+.Nm
+.Cm create
+.Op options
+.Fl t Ar format
+.Fl o Ar image
+.Ar source_directory
+.Nm
+.Cm info | verify
+.Op options
+.Fl i Ar image
+.Nm
+.Cm ls
+.Op options
+.Fl i Ar image
+.Op Ar image_path
+.Nm
+.Cm cat
+.Op options
+.Fl i Ar image
+.Ar image_path
+.Nm
+.Cm extract
+.Op options
+.Fl i Ar image
+.Fl C Ar new_directory
+.Op Ar image_path
+.Nm
+.Cm formats
+.Op Fl j
+.Nm
+.Fl h | V
+.Sh DESCRIPTION
+.Nm
+reads and creates FAT12, FAT16, FAT32 and ordinary one-FAT exFAT volumes.
+It requires no root privileges, mounts, kernel filesystem driver or external
+filesystem utility.
+It never modifies an existing image in place.
+Input is a seekable regular file; a dash does not request stdin spooling.
+Image paths are absolute UTF-8 paths below
+.Pa / .
+Selection follows filesystem case rules and FAT short aliases.
+Displayed paths retain their image spelling.
+.Pp
+All image parsing occurs in a fresh worker.
+The coordinator prepares capabilities, supervises output and publishes
+completed
+images without replacement.
+The default sandbox policy uses available OS confinement and warns if
+unavailable.
+Unexpected confinement failures never trigger an unrestricted retry.
+The library API does not sandbox its embedding application.
+.Sh COMMON OPTIONS
+Options precede operands; use
+.Fl Fl
+to terminate option parsing.
+Unknown options, repeated singleton options and repeated setting keys fail.
+.Bl -tag -width Ds
+.It Fl h
+Display help.
+.It Fl S Ar auto|required|off
+Select sandbox policy.
+Required mode refuses an unavailable backend; off explicitly disables
+confinement.
+.It Fl T Ar directory|-
+Scratch parent, defaulting to TMPDIR when set, otherwise
+.Pa /tmp .
+A dash disables scratch.
+Fresh private scratch contains metadata, never a payload copy.
+Use disk-backed storage for massive catalogs.
+.It Fl j
+Write streaming newline-delimited JSON, schema version 1.
+The cat command rejects this flag.
+.It Fl m Ar bytes
+Aggregate library memory budget; default 256 MiB, minimum 16 MiB.
+.It Fl l Ar key=value
+Set a resource limit.
+Keys are scratch, entries, depth, path, fds, output, work and seconds.
+Scratch, path and output use bytes; other values use unsigned decimal counts.
+Zero selects the documented default.
+Seconds sets an operation deadline; zero adds no deadline.
+.It Fl v
+Report bounded progress and capabilities on stderr.
+.El
+.Pp
+Byte quantities use unsigned decimal with optional uppercase K, M, G, T or P
+binary suffixes.
+Signs, whitespace, fractions and overflow fail.
+Defaults are 64 GiB scratch, 10,000,000 entries, depth 256, 64 KiB image paths
+including separators and NUL, and 128 owned descriptors.
+Logical extraction output defaults to the selected volume slice length,
+including holes.
+Work and time have no hidden short default limit.
+.Sh READ OPTIONS
+.Bl -tag -width Ds
+.It Fl i Ar image
+Required input file.
+.It Fl b Ar bytes
+Volume offset; default zero.
+.It Fl z Ar bytes
+Positive slice length; default remaining file length.
+.It Fl t Ar format
+Force a supported decoder while retaining validation.
+The default requires unambiguous detection.
+.It Fl O Ar oem=cp437
+Select the supported FAT short-name codepage explicitly.
+.El
+.Pp
+Partition selection is explicit through a byte slice; no partition is guessed.
+.Cm info
+reports header validation, geometry, label, time basis and known capabilities.
+Unknown counts remain unknown.
+.Cm ls
+lists immediate children or a selected file;
+.Fl r
+recursively lists its subtree.
+.Cm cat
+requires one regular file and writes raw logical bytes, including zero tails.
+.Cm verify
+checks the complete supported structure;
+.Fl d
+also reads initialized payload bytes.
+It performs no repair.
+.Sh CREATION
+.Cm create
+accepts one source directory and requires
+.Fl t
+with fat12, fat16, fat32 or exfat.
+.Bl -tag -width Ds
+.It Fl o Ar image
+New output pathname, required except with
+.Fl n .
+.It Fl n
+Collect, validate and report a plan without creating an output image or reading
+file payloads.
+Scratch use is allowed.
+.It Fl L Ar label
+Volume label, default FSIMG.
+.It Fl O Ar sector=bytes
+Sector size within the selected profile.
+.It Fl O Ar cluster=bytes
+Allocation-unit size within the selected profile.
+.It Fl s Ar bytes
+Positive exact logical volume size; omission chooses automatic sizing.
+.It Fl f Ar bytes
+Minimum free-space reserve after metadata and allocation rounding.
+.It Fl R
+Reproducible bytes with stable ordering, identifiers and padding.
+.It Fl e Ar epoch
+Signed decimal Unix seconds for reproducible timestamps; requires
+.Fl R .
+Default is 315532800 (1980-01-01 UTC).
+No implicit timezone or SOURCE_DATE_EPOCH policy applies.
+.El
+.Pp
+Import accepts regular files and directories, hierarchy, content and
+representable timestamps.
+It rejects symlinks, special files, descendant mount crossings and encounters
+with its own scratch or staging trees.
+Keep source trees stable; hostile mutation requires immutable storage or a
+snapshot.
+FAT/exFAT do not preserve POSIX ownership or mode bits.
+The source-root sandbox cannot universally prevent opening device nodes already
+within its authority; use isolated source storage when that exclusion is
+required.
+.Pp
+The image file is created only after planning.
+Payloads are copied once to private staging on the destination filesystem.
+Publication never replaces an existing target.
+Failures distinguish retained staging, published output and uncertain
+durability.
+Do not retry a published or uncertain outcome blindly.
+.Sh EXTRACTION
+.Fl C
+names a fresh directory; even an existing empty directory fails.
+Selected paths and necessary ancestors are preserved below the image root.
+Output uses private directories and regular files, no links, no merge,
+no privileged metadata and no host timestamp restoration.
+Logical holes count against the output quota.
+Failure can leave a private incomplete destination, identified by diagnostics.
+There is no directory-wide atomic publication or resume promise.
+If only final reporting fails, the destination may already contain complete
+content; the command still reports failure and conservatively marks its output
+incomplete.
+.Sh OUTPUT
+Human names and controls are escaped.
+Diagnostics and bounded progress use stderr; payloads and records use stdout.
+JSON entries stream individually and are followed by a successful summary only
+after worker completion and required finalization.
+An error record or missing successful summary means incomplete output.
+Large integers are decimal strings; bounded geometry, flags, nanoseconds and
+offset minutes are JSON integers.
+Unknown values are null.
+Timestamp records state basis and precision.
+.Pp
+The operation deadline spans processing and successful output.
+Failure reporting has a two-second grace and one further two-second stderr-only
+attempt if stdout is unusable.
+Neither attempt resumes processing or publication.
+Scratch cleanup removes at most 4096 flat entries, never follows links or
+recurses into worker-created directories, and reports retained objects.
+.Sh EXIT STATUS
+.Ex -std
+Status 1 means operational failure, including corruption, unsupported required
+features, cancellation, partial output or uncertain durability.
+Status 2 means invalid command syntax.
+A sandbox-unavailable warning under automatic mode alone is not failure.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+fsimg create -R -t exfat -o data.img ./files
+fsimg create -n -R -t exfat -m 64M -T /scratch ./files
+fsimg ls -j -r -i data.img /
+fsimg cat -i data.img /documents/readme.txt > readme.txt
+fsimg extract -S required -i data.img -C ./new-output /documents
+fsimg verify -d -i data.img
+fsimg info -b 1M -z 1G -i disk.img
+fsimg formats -j
+.Ed
+.Sh SEE ALSO
+.Xr libfsimg 3
