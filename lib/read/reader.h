@@ -32,5 +32,10 @@ struct fsimg_reader {
 fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 fsimg_status_t fsimg_reader_stable(fsimg_reader_t *, fsimg_error_t *);
+fsimg_status_t fsimg_reader_abort(fsimg_reader_t *, fsimg_status_t);
+fsimg_status_t fsimg_reader_end_scope(fsimg_reader_t *);
+fsimg_status_t fsimg_reader_match_name(fsimg_reader_t *, const char *, bool *,
+    fsimg_error_t *);
+fsimg_status_t fsimg_reader_skip_directory(fsimg_reader_t *, fsimg_error_t *);
 
 #endif

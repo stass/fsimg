@@ -183,7 +183,10 @@ decode_slot(directory_prepass_t *pass, const unsigned char *raw,
 	if (raw[11] == 0x0f)
 		return (fsimg_fat_lfn_slot(&pass->lfn, raw, error));
 	if ((raw[11] & 0x08) != 0) {
-		if (pass->level != 0 || raw[11] != 0x08 || pass->lfn.active ||
+		/* Native formatters can retain the archive bit on a volume label.
+		 * It still has no data allocation and never becomes a child entry.
+		 */
+		if (pass->level != 0 || (raw[11] & ~0x20u) != 0x08 || pass->lfn.active ||
 		    fat->root_label_seen || fsimg_fat_u16(raw + 20) != 0 ||
 		    fsimg_fat_u16(raw + 26) != 0 || fsimg_fat_u32(raw + 28) != 0)
 			return (fsimg_fat_corrupt(error, "invalid or duplicate FAT volume-label entry"));
@@ -450,4 +453,52 @@ fsimg_fat_next(fsimg_reader_t *reader, fsimg_error_t *error)
 		fat->pending_directory = reader->entry.kind == FSIMG_ENTRY_DIRECTORY;
 		return (FSIMG_OK);
 	}
+}
+
+fsimg_status_t
+fsimg_fat_match_name(fsimg_reader_t *reader, const char *component, bool *matches,
+    fsimg_error_t *error)
+{
+	fsimg_fat_reader_t *fat = reader->fat;
+	unsigned char requested[FAT_KEY_BYTES], candidate[FAT_KEY_BYTES];
+	char alias[FAT_NAME_BYTES];
+	size_t requested_length, candidate_length;
+	fsimg_status_t status;
+
+	*matches = false;
+	status = fsimg_fat_name_key(component, requested, &requested_length, error);
+	if (status != FSIMG_OK)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_READER, "selection component is not representable in FAT"));
+	status = fsimg_fat_name_key((const char *)fat->record + 32,
+	    candidate, &candidate_length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (requested_length == candidate_length &&
+	    bcmp(requested, candidate, requested_length) == 0) {
+		*matches = true;
+		return (FSIMG_OK);
+	}
+	/* The directory prepass validated both spellings against every sibling.
+	 * Only this current entry's alias needs decoding during lookup.
+	 */
+	status = fsimg_fat_short_name(fat->record, alias, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_fat_name_key(alias, candidate, &candidate_length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	*matches = requested_length == candidate_length &&
+	    bcmp(requested, candidate, requested_length) == 0;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_fat_skip_directory(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	if (!reader->fat->pending_directory)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+		    FSIMG_OP_READER, "FAT directory descent is not pending"));
+	reader->fat->pending_directory = false;
+	return (FSIMG_OK);
 }

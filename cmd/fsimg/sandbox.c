@@ -24,6 +24,7 @@
 #include <linux/filter.h>
 #include <linux/landlock.h>
 #include <linux/seccomp.h>
+#include <linux/stat.h>
 
 /* Unknown architectures are unavailable, never a partially checked ABI. */
 #if defined(__x86_64__)
@@ -100,7 +101,30 @@ install_filter(void)
 		BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, O_PATH, 1, 0),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM)
+		/* The final gate permits only statx(fd, NULL, AT_EMPTY_PATH, ...).
+		 * Pointer halves are checked separately; AT_FDCWD would grant cwd
+		 * metadata instead of metadata for a prepared descriptor.
+		 */
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_statx, 1, 0),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+		    offsetof(struct seccomp_data, args[1]) + sizeof(uint32_t)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2])),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AT_EMPTY_PATH, 1, 0),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+		    offsetof(struct seccomp_data, args[2]) + sizeof(uint32_t)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)AT_FDCWD, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
 	};
 	struct sock_fprog program;
 
@@ -124,13 +148,40 @@ allow_directory(int ruleset, int fd, uint64_t rights)
 #endif
 #elif defined(__FreeBSD__)
 #include <sys/capsicum.h>
+
+static int restrict_descriptor(int, cap_rights_t *, unsigned);
+
+static int
+restrict_descriptor(int fd, cap_rights_t *rights, unsigned fcntls)
+{
+	if (cap_rights_limit(fd, rights) == -1)
+		return (-1);
+	if (cap_ioctls_limit(fd, NULL, 0) == -1)
+		return (-1);
+	if (cap_fcntls_limit(fd, fcntls) == -1)
+		return (-1);
+	return (0);
+}
 #endif
 
 fsimg_status_t
 fsimg_sandbox_install(int input_fd, int work_fd, int source_fd,
     fsimg_error_t *error)
 {
+	const fsimg_sandbox_caps_t caps = {
+		.input = input_fd, .output = work_fd, .scratch = -1,
+		.source = source_fd, .job = -1, .control = -1, .data = -1, .cancel = -1
+	};
+
+	return (fsimg_sandbox_install_caps(&caps, error));
+}
+
+fsimg_status_t
+fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
+    fsimg_error_t *error)
+{
 	struct stat st;
+	const int work_fds[] = { caps->output, caps->scratch };
 	int flags;
 #if defined(__linux__) && defined(FSIMG_AUDIT_ARCH) && \
     defined(LANDLOCK_ACCESS_FS_TRUNCATE)
@@ -138,6 +189,7 @@ fsimg_sandbox_install(int input_fd, int work_fd, int source_fd,
 		.handled_access_fs = (LANDLOCK_ACCESS_FS_TRUNCATE << 1) - 1
 	};
 	uint64_t work_rights, source_rights;
+	struct statx mount_query = { 0 };
 	int abi, ruleset, saved;
 #elif defined(__FreeBSD__)
 	cap_rights_t rights;
@@ -145,20 +197,25 @@ fsimg_sandbox_install(int input_fd, int work_fd, int source_fd,
 #endif
 
 	fsimg_error_clear(error);
-	flags = fcntl(input_fd, F_GETFL);
-	if (flags == -1 || fstat(input_fd, &st) == -1)
-		return (fsimg_error_set(error, FSIMG_EIO, errno,
-		    FSIMG_OP_CONTEXT, "sandbox input validation failed"));
-	if ((flags & O_ACCMODE) != O_RDONLY || !S_ISREG(st.st_mode))
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_CONTEXT, "sandbox input requires read-only regular file"));
-	if (fstat(work_fd, &st) == -1 || !S_ISDIR(st.st_mode))
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_CONTEXT, "sandbox work root requires directory"));
-	if (source_fd != -1) {
-		flags = fcntl(source_fd, F_GETFL);
+	if (caps->input != -1) {
+		flags = fcntl(caps->input, F_GETFL);
+		if (flags == -1 || fstat(caps->input, &st) == -1)
+			return (fsimg_error_set(error, FSIMG_EIO, errno,
+			    FSIMG_OP_CONTEXT, "sandbox input validation failed"));
+		if ((flags & O_ACCMODE) != O_RDONLY || !S_ISREG(st.st_mode))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "sandbox input requires read-only regular file"));
+	}
+	for (unsigned i = 0; i < 2; i++) {
+		if (work_fds[i] != -1 &&
+		    (fstat(work_fds[i], &st) == -1 || !S_ISDIR(st.st_mode)))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "sandbox work root requires directory"));
+	}
+	if (caps->source != -1) {
+		flags = fcntl(caps->source, F_GETFL);
 		if (flags == -1 || (flags & O_ACCMODE) != O_RDONLY ||
-		    fstat(source_fd, &st) == -1 || !S_ISDIR(st.st_mode))
+		    fstat(caps->source, &st) == -1 || !S_ISDIR(st.st_mode))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox source requires read-only directory"));
 	}
@@ -174,6 +231,18 @@ fsimg_sandbox_install(int input_fd, int work_fd, int source_fd,
 	if (abi < 3)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_CONTEXT, "Landlock ABI 3 required"));
+	if (caps->source != -1) {
+		if (syscall(__NR_statx, caps->source, NULL, AT_EMPTY_PATH,
+		    STATX_MNT_ID, &mount_query) == -1) {
+			if (errno == EFAULT || errno == ENOSYS || errno == EINVAL)
+				return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, errno,
+				    FSIMG_OP_CONTEXT, "descriptor-only mount queries unavailable"));
+			goto linux_fail;
+		}
+		if ((mount_query.stx_mask & STATX_MNT_ID) == 0)
+			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			    FSIMG_OP_CONTEXT, "descriptor mount identity unavailable"));
+	}
 	ruleset = (int)syscall(__NR_landlock_create_ruleset, &rules,
 	    sizeof(rules), 0);
 	if (ruleset == -1)
@@ -181,12 +250,19 @@ fsimg_sandbox_install(int input_fd, int work_fd, int source_fd,
 	source_rights = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
 	work_rights = source_rights | LANDLOCK_ACCESS_FS_WRITE_FILE |
 	    LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_MAKE_REG |
-	    LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
-	    LANDLOCK_ACCESS_FS_REMOVE_DIR;
-	if (allow_directory(ruleset, work_fd, work_rights) == -1)
-		goto ruleset_fail;
-	if (source_fd != -1 &&
-	    allow_directory(ruleset, source_fd, source_rights) == -1)
+	    LANDLOCK_ACCESS_FS_MAKE_DIR;
+	for (unsigned i = 0; i < 2; i++) {
+		/* Scratch is disposable; output remains for the coordinator to own. */
+		uint64_t rights = work_rights;
+
+		if (i == 1)
+			rights |= LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR;
+		if (work_fds[i] != -1 &&
+		    allow_directory(ruleset, work_fds[i], rights) == -1)
+			goto ruleset_fail;
+	}
+	if (caps->source != -1 &&
+	    allow_directory(ruleset, caps->source, source_rights) == -1)
 		goto ruleset_fail;
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1)
 		goto ruleset_fail;
@@ -210,31 +286,37 @@ linux_fail:
 			    FSIMG_OP_CONTEXT, "Capsicum unavailable"));
 		goto freebsd_fail;
 	}
-	cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT, CAP_FCNTL);
-	if (cap_rights_limit(input_fd, &rights) == -1)
-		goto freebsd_fail;
-	if (cap_ioctls_limit(input_fd, NULL, 0) == -1)
-		goto freebsd_fail;
-	if (cap_fcntls_limit(input_fd, CAP_FCNTL_GETFL) == -1)
-		goto freebsd_fail;
-	cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_LOOKUP, CAP_CREATE,
-	    CAP_FSTAT, CAP_SEEK, CAP_FSYNC, CAP_FTRUNCATE, CAP_MKDIRAT,
-	    CAP_UNLINKAT, CAP_FCNTL);
-	if (cap_rights_limit(work_fd, &rights) == -1)
-		goto freebsd_fail;
-	if (cap_ioctls_limit(work_fd, NULL, 0) == -1)
-		goto freebsd_fail;
-	if (cap_fcntls_limit(work_fd, CAP_FCNTL_GETFL) == -1)
-		goto freebsd_fail;
-	if (source_fd != -1) {
-		cap_rights_init(&rights, CAP_READ, CAP_LOOKUP, CAP_FSTAT,
+	if (caps->input != -1) {
+		cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT, CAP_FCNTL);
+		if (restrict_descriptor(caps->input, &rights, CAP_FCNTL_GETFL) == -1)
+			goto freebsd_fail;
+	}
+	for (unsigned i = 0; i < 2; i++) {
+		if (work_fds[i] == -1)
+			continue;
+		cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_LOOKUP, CAP_CREATE,
+		    CAP_FSTAT, CAP_SEEK, CAP_FSYNC, CAP_FTRUNCATE, CAP_MKDIRAT, CAP_FCNTL);
+		if (i == 1)
+			cap_rights_set(&rights, CAP_UNLINKAT);
+		if (restrict_descriptor(work_fds[i], &rights, CAP_FCNTL_GETFL) == -1)
+			goto freebsd_fail;
+	}
+	if (caps->source != -1) {
+		cap_rights_init(&rights, CAP_READ, CAP_LOOKUP, CAP_FSTAT, CAP_FSTATFS,
 		    CAP_SEEK, CAP_FCNTL);
-		if (cap_rights_limit(source_fd, &rights) == -1)
+		if (restrict_descriptor(caps->source, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
-		if (cap_ioctls_limit(source_fd, NULL, 0) == -1)
-			goto freebsd_fail;
-		if (cap_fcntls_limit(source_fd, CAP_FCNTL_GETFL) == -1)
-			goto freebsd_fail;
+	}
+	{
+		const int channels[] = { caps->job, caps->control, caps->data, caps->cancel };
+
+		for (unsigned i = 0; i < 4; i++) {
+			if (channels[i] == -1)
+				continue;
+			cap_rights_init(&rights, i == 0 || i == 3 ? CAP_READ : CAP_WRITE);
+			if (restrict_descriptor(channels[i], &rights, 0) == -1)
+				goto freebsd_fail;
+		}
 	}
 	if (cap_enter() == -1)
 		goto freebsd_fail;

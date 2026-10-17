@@ -9,6 +9,7 @@
 #define FAT_LAYOUT_BYTES 64u
 #define FAT_WRITE_BUFFER 65536u
 #define FAT_WRITE_DIRECTORY_MAX (2u * 1024u * 1024u)
+#define FAT_AUTO_TYPE_MARGIN 16u
 
 /* Layout wire record: length, slots, parent slot (u64), first/count (u32),
  * then the encoded 32-byte short entry. The root has no parent slot.

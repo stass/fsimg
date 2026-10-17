@@ -13,6 +13,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Storage and algorithms](design-storage.md) | Bounded I/O, metadata scratch storage, reading, planning, and emission |
 | [Sources and catalogs](design-sources.md) | Source identity, scanning/reopening, metadata encoding, deterministic catalog preparation |
 | [Security](design-security.md) | Threat model, extraction, sandboxing, publication, and adversarial tests |
+| [Extraction and workers](design-extraction-worker.md) | Safe host output, bounded descriptor traversal, and worker protocol/lifecycle |
 | [Filesystem formats](design-formats.md) | FAT and exFAT profiles and interoperability requirements |
 | [FAT reader](design-fat-reader.md) | FAT geometry, name profile, traversal, content indexing, and structural verification |
 | [FAT writer](design-fat-writer.md) | Deterministic aliases, bounded layout planning, geometry, metadata encoding, and emission |

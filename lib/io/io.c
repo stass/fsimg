@@ -356,7 +356,25 @@ fsimg_io_close_output(fsimg_io_t *io, fsimg_error_t *error)
 	fsimg_dealloc(io);
 	if (result == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, saved,
-		    FSIMG_OP_PUBLISH, "staged image close failed"));
+		    FSIMG_OP_IO, "output file close failed"));
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_io_set_times(fsimg_io_t *io, const struct timespec *times,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = io_range(io, 0, 0, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (io->root != io || io->fd == -1 || (io->access & FSIMG_IO_WRITE) == 0)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_EXTRACT, "timestamp restoration requires an owned output file"));
+	if (futimens(io->fd, times) == -1)
+		return (fsimg_error_set(error, FSIMG_EIO, errno,
+		    FSIMG_OP_EXTRACT, "output file timestamp restoration failed"));
 	return (FSIMG_OK);
 }
 

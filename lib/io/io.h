@@ -4,6 +4,8 @@
 #ifndef FSIMG_IO_PRIVATE_H
 #define FSIMG_IO_PRIVATE_H
 
+#include <time.h>
+
 #include "host.h"
 #include "internal.h"
 
@@ -28,6 +30,8 @@ fsimg_status_t fsimg_io_zero_session(fsimg_io_t *, fsimg_session_t *,
  * descriptor with another writer or an existing pathname outside private staging.
  */
 fsimg_status_t fsimg_io_adopt_empty_output(fsimg_ctx_t *, int, fsimg_io_t **,
+    fsimg_error_t *);
+fsimg_status_t fsimg_io_set_times(fsimg_io_t *, const struct timespec *,
     fsimg_error_t *);
 
 #endif

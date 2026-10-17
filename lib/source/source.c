@@ -56,13 +56,10 @@ fsimg_status_t
 fsimg_writer_add_tree(fsimg_writer_t *writer, int fd, const char *image_directory,
     fsimg_error_t *error)
 {
-	fsimg_source_root_t *root;
-	fsimg_host_file_t identity;
-	fsimg_error_t detail;
+	fsimg_status_t status;
 	size_t length;
 	uint32_t depth;
-	fsimg_status_t status;
-	int duplicate, flags, saved;
+	int duplicate, saved;
 
 	status = fsimg_writer_collect_ready(writer, error);
 	if (status != FSIMG_OK)
@@ -71,51 +68,74 @@ fsimg_writer_add_tree(fsimg_writer_t *writer, int fd, const char *image_director
 	    &length, &depth, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
+	status = fsimg_fd_reserve(writer->ctx, error);
+	if (status != FSIMG_OK)
+		return (fsimg_writer_fail(writer, status));
+	duplicate = fsimg_host_dup(fd);
+	if (duplicate == -1) {
+		saved = errno;
+		fsimg_fd_release(writer->ctx, -1);
+		status = fsimg_error_set(error, FSIMG_EIO, saved,
+		    FSIMG_OP_SOURCE, "source root duplication failed");
+		return (fsimg_writer_fail(writer, status));
+	}
+	return (fsimg_writer_adopt_tree(writer, duplicate, image_directory, error));
+}
+
+/* Consume the root descriptor and its reservation on every outcome. Worker
+ * startup uses this boundary after acknowledgement, so confinement never needs
+ * descriptor duplication or an extra untracked root capability.
+ */
+fsimg_status_t
+fsimg_writer_adopt_tree(fsimg_writer_t *writer, int fd,
+    const char *image_directory, fsimg_error_t *error)
+{
+	fsimg_source_root_t *root;
+	fsimg_host_file_t identity;
+	fsimg_error_t detail;
+	size_t length;
+	uint32_t depth;
+	fsimg_status_t status;
+	int flags, saved;
+
+	root = NULL;
+	status = fsimg_writer_collect_ready(writer, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	status = fsimg_path_validate(writer->ctx, image_directory, true,
+	    &length, &depth, error);
+	if (status != FSIMG_OK)
+		goto fail;
 	flags = fcntl(fd, F_GETFL);
 	if (flags == -1 || fsimg_host_file(fd, &identity) == -1) {
 		status = fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_SOURCE, "source root inspection failed");
-		return (fsimg_writer_fail(writer, status));
+		goto fail;
 	}
 	if (identity.kind != FSIMG_HOST_DIRECTORY ||
 	    (flags & O_ACCMODE) != O_RDONLY || fsimg_host_unsupported_io(flags)) {
 		status = fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_SOURCE, "source root must be a readable directory");
-		return (fsimg_writer_fail(writer, status));
+		goto fail;
 	}
 	status = fsimg_source_check_object(writer, fd, &identity, NULL, error);
 	if (status != FSIMG_OK)
-		return (fsimg_writer_fail(writer, status));
+		goto fail;
 	root = fsimg_alloc(writer->ctx, sizeof(*root), &detail);
 	if (root == NULL) {
+		status = detail.status;
 		if (error != NULL)
 			*error = detail;
-		return (fsimg_writer_fail(writer, detail.status));
+		goto fail;
 	}
-	status = fsimg_fd_reserve(writer->ctx, error);
-	if (status != FSIMG_OK) {
-		fsimg_dealloc(root);
-		return (fsimg_writer_fail(writer, status));
-	}
-	duplicate = fsimg_host_dup(fd);
-	if (duplicate == -1) {
-		saved = errno;
-		fsimg_fd_release(writer->ctx, -1);
-		fsimg_dealloc(root);
-		status = fsimg_error_set(error, FSIMG_EIO, saved,
-		    FSIMG_OP_SOURCE, "source root duplication failed");
-		return (fsimg_writer_fail(writer, status));
-	}
-	root->fd = duplicate;
+	root->fd = fd;
 	root->identity = identity;
 	if (fsimg_host_mount_id(fd, &root->mount_id) == -1) {
 		saved = errno;
-		fsimg_fd_release(writer->ctx, duplicate);
-		fsimg_dealloc(root);
 		status = fsimg_error_set(error, saved == ENOTSUP ?
 		    FSIMG_EUNSUPPORTED : FSIMG_EIO, saved, FSIMG_OP_SOURCE,
 		    "source mount identity is unavailable");
-		return (fsimg_writer_fail(writer, status));
+		goto fail;
 	}
 	root->id = writer->root_count;
 	writer->root_count++;
@@ -125,6 +145,10 @@ fsimg_writer_add_tree(fsimg_writer_t *writer, int fd, const char *image_director
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
 	return (FSIMG_OK);
+fail:
+	fsimg_dealloc(root);
+	fsimg_fd_release(writer->ctx, fd);
+	return (fsimg_writer_fail(writer, status));
 }
 
 fsimg_status_t
@@ -136,6 +160,11 @@ fsimg_source_check_object(fsimg_writer_t *writer, int fd,
 	uint64_t mount_id;
 	int saved;
 
+	if (writer->output_root_known &&
+	    identity->device == writer->output_root.device &&
+	    identity->inode == writer->output_root.inode)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_SOURCE, "source tree encounters its output directory"));
 	if (writer->ctx->options.scratch_directory_fd != -1) {
 		if (fsimg_host_file(writer->ctx->options.scratch_directory_fd,
 		    &scratch) == -1)
@@ -247,7 +276,7 @@ open_host_source(fsimg_writer_t *writer, uint64_t reference,
 	uint64_t root_id;
 	size_t length;
 	fsimg_status_t status;
-	int parent, fd, flags, saved;
+	int parent, fd, saved;
 	bool parent_owned;
 
 	status = fsimg_stream_next(writer->host_sources, &reference, writer->source_record,
@@ -306,10 +335,7 @@ open_host_source(fsimg_writer_t *writer, uint64_t reference,
 		status = fsimg_fd_reserve(writer->ctx, error);
 		if (status != FSIMG_OK)
 			break;
-		flags = O_RDONLY | O_NOFOLLOW | O_NOCTTY | O_NONBLOCK | O_CLOEXEC;
-		if (separator != NULL)
-			flags |= O_DIRECTORY;
-		fd = openat(parent, component, flags);
+		fd = fsimg_host_source_open(parent, component, separator != NULL);
 		saved = errno;
 		if (parent_owned)
 			fsimg_fd_release(writer->ctx, parent);

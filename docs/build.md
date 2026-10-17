@@ -3,7 +3,9 @@
 Development requires Autoconf, Automake, Libtool, make, a C11 compiler, and a
 C++ compiler. On macOS install missing tools with `brew install autoconf
 automake libtool`. Independent FAT tests additionally use `brew install mtools
-dosfstools`. Linux and FreeBSD use their native development packages.
+dosfstools cmake`. FreeBSD uses native `newfs_msdos`/`fsck_msdosfs`; install
+missing development tools through ports, including `filesystems/mtools`.
+The additional fatcat oracle is built from a pinned upstream checkout.
 Release archives include generated Autotools support and build without those
 generators. The installed library has no third-party runtime dependencies.
 
@@ -33,7 +35,13 @@ success. `check-security` runs the publication and sandbox harnesses directly;
 a sandbox skip is printed explicitly. Automake records exit 77 as SKIP.
 The sandbox harness forks disposable single-threaded children, closes inherited
 handles, disables core dumps, installs the profile, and attempts real forbidden
-operations. It must run on the kernel being qualified.
+operations. It must run on the kernel being qualified. The Linux-only
+`test-sandbox-setup` target renames its own setup syscalls to deterministic mocks;
+it checks unavailable initial probes, old ABIs, and every later setup failure.
+The kernel harness also denies file/directory deletion in output and confirms
+scratch deletion remains available. Unexpected or partially applied setup
+errors remain `FSIMG_EIO` and never
+permit an automatic retry without restriction.
 
 Sanitizer targets configure separate build directories beneath the current build
 and run the full suite. `check-asan` combines ASan and UBSan, enables stack
@@ -44,6 +52,17 @@ LSan/MSan targets print SKIP on non-Linux hosts; this is not a passing check.
 Linux MSan requires Clang and an appropriate runtime; an unsupported compiler
 or runtime fails configuration rather than being reported as a pass. TSan is
 not applicable to the serial library and process-only test harnesses.
+
+Fresh worker and output-relay processes use fixed sanitizer settings, including
+`abort_on_error=0`, `exitcode=86`, and `symbolize=0`. The supervisor classifies
+that reserved status as a runtime failure after reaping both children, so a
+negative protocol test cannot hide a sanitizer report as an expected I/O error.
+A deliberate test-only ASan use-after-free in a fake child checks this actual
+runtime path. Its expected report is suppressed with child stderr; no production
+code contains that fault. Tracer-based leak scanning cannot run under these
+profiles, so fresh children disable it and print an explicit instrumentation
+subcheck skip. Parent and library leak scanning remains enabled where supported.
+A successful worker test does not claim child leak-scan coverage.
 
 Allocation failure injection is private to each context. Tests fail object,
 slice, and transfer-buffer allocation without changing production allocators
@@ -113,9 +132,12 @@ one logical byte; its sparse test transfers only boundary markers and verifies
 allocation without reading through four gigabytes. Logical FAT32 geometry
 ceiling checks do not claim a physical large-image traversal.
 
-`check-integration` creates images with dosfstools and populates them with mtools.
-The ordinary suite includes this script and explicitly skips it if these
-development tools are absent. The dedicated target returns that skip rather
+`check-integration` creates images with the host's formatter: dosfstools on
+macOS/Linux or native `newfs_msdos` on FreeBSD. Native `fsck_msdosfs` or
+`fsck.fat` checks them; mtools supplies population and Unicode extraction, and
+fatcat supplies additional ASCII, nested long-name and fragmented reads.
+The ordinary suite includes this script and explicitly skips it if a required
+development tool is absent. The dedicated target returns that skip rather
 than claiming success. The manifest is `test/fat-integration.sh.log`: formatter
 and validator versions, geometry, population commands, a forced fragmentation
 recipe, and outcomes. Fixtures include all FAT variants and a 4096-byte-sector,
@@ -133,6 +155,10 @@ storage. The latter reaches FAT32's minimum geometry without a large resident
 seed; it does not allocate or transfer the logical volume. The target fuzzes
 probe, directory/name parsing, chain traversal, content/range reads, index
 construction, and full verification; it also checks cleanup accounting.
+The same target builds `fuzz/protocol.c` and runs 1000 mutations with a 64 KiB
+input ceiling and five-second timeout. It exercises production framing, job
+codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker lifecycle ordering
+is covered by `test-worker`, not inferred from pure wire fuzzing.
 Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults to its
 sibling `clang++`. Use a fresh build directory when changing compilers. Apple
 Clang lacks the libFuzzer runtime; macOS fuzz validation uses Homebrew LLVM:
@@ -145,7 +171,7 @@ FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 The exact standalone commands from a configured build are:
 
 ```sh
-make test-fat
+make test-fat test-protocol
 sh ../build-aux/fuzz.sh "$(cd .. && pwd)"
 ```
 
@@ -189,17 +215,21 @@ explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 ./test-catalog --scale 10000000
 ```
 
-Native macOS validation reports thirteen passing tests and the explicit sandbox
-skip in ordinary, ASan/UBSan, and standalone UBSan runs. The metadata scale
-fixture reports a 329,088-byte allocation peak, 75,795,888-byte logical scratch
-peak, and 134,683 I/O calls on APFS. These are measurements of this fixture,
-not bounds promised for every metadata workload. Linux/FreeBSD checks require
-their own host runs.
+The ordinary suite has eighteen tests. macOS reports sixteen passes and two
+skips (backend unavailable and Linux-only setup mocks). Linux reports seventeen
+passes and one explicit integration skip because fatcat is unavailable there.
+The user-provided FreeBSD 16/ZFS host reports seventeen passes and one
+Linux-only harness skip, including
+native FAT/mtools/fatcat interoperability. See [platform evidence](platform-evidence.md)
+for guest kernels and filesystems. The metadata scale fixture reports a
+329,088-byte allocation peak, 75,795,888-byte logical scratch peak, and 134,683
+I/O calls on APFS. These are fixture measurements rather than general bounds.
 
-The instrumented fuzz smoke run uses Homebrew LLVM 23.1.2 and completes 1000
-mutations with FAT12/16/32 seeds, reporting `cov: 2072` and `ft: 5734`
-without sanitizer or cleanup-accounting findings. These counters describe one
-finite run and vary with the generated mutation sequence.
+The instrumented fuzz smoke run uses Homebrew LLVM 23.1.2. FAT completes
+1000 mutations with FAT12/16/32 seeds (`cov: 2076`, `ft: 5758`); protocol
+completes 1000 mutations (`cov: 345`, `ft: 654`). Neither reports an unintended
+sanitizer or accounting finding. These counters describe finite runs and vary
+with the generated mutation sequence.
 
 The 100,000-file wide catalog reports a 3,157,912-byte allocation peak,
 58,500,368 scratch bytes, seven descriptors, and 86,607 I/O calls. The grouped
@@ -260,6 +290,109 @@ The installed header/library expose FAT readers, volume information, current-fil
 content/range reads, full verification, and independent reader/writer capability
 enumeration. No command-line executable is installed. Public FAT writers expose
 collection, immutable planning, raw emission, and durable no-replace publication.
-Source access and common catalog/storage remain private. The sandbox remains a
-private mechanism prototype without worker supervision; image staging and
-publication have a shared library coordinator.
+Source access and common catalog/storage remain private. Public extraction exposes safe private-tree creation and optional times.
+Image staging and publication share a library coordinator. Private executable
+modules implement worker supervision and output relay; `test-worker` provides
+the same-executable frontend for their checks.
+
+Extraction and worker qualification:
+
+```sh
+make test-extract test-worker test-protocol test-sandbox test-sandbox-setup
+./test-extract
+./test-worker
+./test-protocol
+./test-publish --identity
+```
+
+`--identity` is a separate qualification probe, outside the passing ordinary
+suite. It can fail on FreeBSD/UFS when ctime changes after publication; retain
+the conservative source-change error and consult the open investigation.
+
+Extraction tests cover complete and selected trees, case/alias resolution with
+canonical displayed paths, pruning unrelated corrupt directories, quota and
+allocation failures, existing destinations and symlink pivots, metadata loss,
+and postorder timestamp restoration. Protocol/worker tests cover split and
+malformed frames, bounded chunked paths, forged field values and publication
+claims, READY/warning/ACK ordering, context/FD startup failures, inherited FD
+closure above lowered limits, raw data before entry validation, interrupted
+request writes, deadlines, worker death, broken/blocked consumers, relay
+confirmation, and incomplete extraction. The extractor counts logical length
+before creating holes; format-specific initialized-data tails receive their
+own driver regressions.
+
+The separate actual-kernel mount fixture needs root only to mount a disposable
+alias. Run the test itself as an ordinary user, and always unmount before
+removing the fixture:
+
+```sh
+fixture=$(mktemp -d)
+mkdir "$fixture/source" "$fixture/lower" "$fixture/source/alias"
+printf sentinel > "$fixture/lower/payload"
+# Linux; FreeBSD uses: mount -t nullfs "$fixture/lower" "$fixture/source/alias"
+sudo mount --bind "$fixture/lower" "$fixture/source/alias"
+./test-worker --mount-source "$fixture/source"
+test "$(cat "$fixture/lower/payload")" = sentinel
+sudo umount "$fixture/source/alias"
+rm -rf "$fixture"
+```
+
+Ordinary image use and the normal test suite require no mounts or privileges.
+Source-change regressions force an observable timestamp difference so coarse
+host timestamp granularity cannot accidentally leave the mutation invisible.
+The library detects metadata-visible changes; hostile mutation requires a
+stable snapshot as specified by the source contract.
+
+Sanitizer execution evidence for the extraction/worker gate:
+
+| Host | Command | Result |
+| --- | --- | --- |
+| macOS | `make check-asan` | Full ASan/UBSan suite passes; platform skips explicit |
+| macOS | `make check-ubsan` | 16 pass, 2 platform skips |
+| macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
+| Linux | `make check-asan` | 17 pass, 1 fatcat-unavailable integration skip |
+| Linux | `make check-lsan` | 17 pass, 1 fatcat-unavailable integration skip |
+| Linux | `make check-msan` | 17 pass, 1 fatcat-unavailable integration skip |
+| FreeBSD 16/ZFS | `make check-asan` | 17 pass, 1 Linux-only harness skip |
+
+Configure searches the standard system sbin directories for formatter/checker
+tools. Linux's final ordinary and sanitizer runs explicitly skip integration
+because fatcat is unavailable there; sanitized library FAT tests still run.
+macOS and the provided FreeBSD host include passing independent interoperability.
+FreeBSD uses its native formatter/checker plus mtools and fatcat. The real
+child ASan fault is intentional; no unintended sanitizer report remains.
+
+Build the fatcat development oracle outside the source tree and export its path
+before configuring ordinary or sanitizer builds:
+
+```sh
+sh build-aux/build-fatcat.sh /tmp/fsimg-fatcat-oracle
+export FATCAT=/tmp/fsimg-fatcat-oracle/build/fatcat
+```
+
+The destination must be new. The helper needs Git, CMake, a C++ compiler and
+patch; it preserves the upstream checkout/license and verifies revision
+`76000303082e9e86f1aca8edb030c5fb8a63ae55`. FreeBSD selects upstream's existing
+native getopt/64-bit-offset interfaces with a two-condition patch. No format
+logic is changed. C++14 supports the pinned source's deprecated APIs.
+CI builds this oracle before every host's configuration. On FreeBSD, missing
+tools are installed through ports; ordinary builds/tests remain unprivileged.
+Fatcat's non-512-sector subcheck is explicitly skipped, and its Unicode name
+decoding is not an oracle; native checks and mtools cover those features.
+
+`./test-fat --volume-labels` covers native formatter labels with the archive
+bit and malformed label placement/allocation/attributes. Automatic FAT sizing
+keeps sixteen clusters away from the type cutovers as Microsoft recommends;
+`./test-fat-write --type-margins` verifies both sides and retains exact legal
+minimum counts. Native formatter fixtures specify both total sector count and
+adequate FAT capacity explicitly rather than relying on host file-geometry
+inference. The FSInfo next-free value remains an advisory search hint; the
+native checker's warning does not trigger fixture repair.
+
+Extraction/worker code and substantive follow-ups have completed read-only
+OpenCode reviews with `zai-coding-plan/glm-5.3 --variant max` on the Z.ai
+coding-plan subscription. The corrected packaging manifest, native-oracle
+adapter, volume-label compatibility and automatic sizing margins have no
+remaining Critical/High/Medium or readability findings. The local reviewer
+also reviewed those paths before the final test runs. Missing-tool diagnostics
+in the development helper address the final Low observation.

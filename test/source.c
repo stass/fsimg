@@ -106,10 +106,15 @@ static void
 progress(void *argument, const fsimg_progress_t *state)
 {
 	source_fixture_t *fixture = argument;
+	const struct timespec changed[2] = {
+		{ .tv_nsec = UTIME_OMIT }, { .tv_sec = 1 }
+	};
 
 	if (fixture->mutate_directory && state->entries != 0) {
 		fixture->mutate_directory = false;
 		write_file(fixture->root, "changed", "new namespace entry");
+		/* Some filesystems stamp multiple operations in one clock tick. */
+		CHECK(futimens(fixture->root, changed) == 0);
 	}
 }
 
@@ -727,6 +732,7 @@ test_directory_records(void)
 #else
 	bzero(&entry, sizeof(entry));
 	length = offsetof(struct dirent, d_name) + 2;
+	entry.d_fileno = 1;
 	entry.d_reclen = (uint16_t)length;
 	entry.d_namlen = 1;
 	bcopy(&entry, bytes, offsetof(struct dirent, d_name));
@@ -736,6 +742,29 @@ test_directory_records(void)
 	CHECK(fsimg_host_directory_name(bytes, length, &cursor, &name, &name_length) == 1);
 	CHECK(name_length == 1 && name[0] == 'a' && cursor == length);
 	CHECK(fsimg_host_directory_name(bytes, length, &cursor, &name, &name_length) == 0);
+#if defined(__linux__) || defined(__FreeBSD__)
+	/* A native unused slot has valid framing but no live name. It must be
+	 * skipped before applying live-entry name validation.
+	 */
+	bcopy(bytes, bytes + length, length);
+#if defined(__linux__)
+	inode = 0;
+	bcopy(&inode, bytes, sizeof(inode));
+	bytes[19] = '\0';
+#else
+	entry.d_fileno = 0;
+	entry.d_namlen = 0;
+	bcopy(&entry, bytes, offsetof(struct dirent, d_name));
+	bytes[offsetof(struct dirent, d_name)] = '\0';
+#endif
+	cursor = 0;
+	CHECK(fsimg_host_directory_name(bytes, length * 2, &cursor, &name, &name_length) == 1);
+	CHECK(name_length == 1 && name[0] == 'a' && cursor == length * 2);
+	cursor = 0;
+	CHECK(fsimg_host_directory_name(bytes, length, &cursor, &name, &name_length) == 0);
+	CHECK(cursor == length);
+	bcopy(bytes + length, bytes, length);
+#endif
 	cursor = 0;
 	CHECK(fsimg_host_directory_name(bytes, length - 1, &cursor, &name, &name_length) == -1);
 	CHECK(cursor == 0);
@@ -840,6 +869,8 @@ main(int argc, char **argv)
 			test_directory_interruption();
 		else if (strcmp(argv[1], "--unregistered-provider") == 0)
 			test_unregistered_provider();
+		else if (strcmp(argv[1], "--directory-records") == 0)
+			test_directory_records();
 		else
 			CHECK(false);
 		return (0);

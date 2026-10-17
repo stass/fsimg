@@ -69,6 +69,7 @@ static void memory_io(writer_fixture_t *, memory_sink_t *, bool, fsimg_io_t **);
 static void check_contents(writer_fixture_t *, memory_sink_t *);
 static void test_roundtrip(const char *);
 static void test_geometry(void);
+static void test_type_margins(void);
 static void test_invalid_names(void);
 static void test_metadata(void);
 static void test_faults(void);
@@ -380,6 +381,56 @@ test_roundtrip(const char *format)
 	CHECK(bcmp(sinks[0].bytes, sinks[1].bytes, (size_t)sinks[0].length) == 0);
 	free(sinks[0].bytes);
 	free(sinks[1].bytes);
+}
+
+static void
+test_type_margins(void)
+{
+	static const char *const formats[] = { "fat16", "fat32", "fat12", "fat16" };
+	/* Exact boundary geometries include reserved sectors, two adequate FATs,
+	 * and the fixed root where present. These counts come from the disk rules.
+	 */
+	static const uint64_t exact_sectors[] = { 4150, 66581 };
+	static const uint64_t exact_clusters[] = { 4085, 65525 };
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_entry_t entry = { .path = "/ZERO", .kind = FSIMG_ENTRY_FILE };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	uint64_t clusters;
+
+	for (unsigned scenario = 0; scenario < 4; scenario++) {
+		fixture_open(&fixture, formats[scenario], NULL, 1);
+		if (scenario >= 2) {
+			entry.size = (scenario == 2 ? UINT64_C(4075) : UINT64_C(65515)) * 512;
+			CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
+		}
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		clusters = (info.allocated_bytes + info.free_bytes) / info.allocation_unit_bytes;
+		if (!((clusters + 16 <= 4085 || clusters >= 4101) &&
+		    (clusters + 16 <= 65525 || clusters >= 65541)))
+			fprintf(stderr, "%s automatic geometry too close to type cutoff: %llu clusters\n",
+			    formats[scenario], (unsigned long long)clusters);
+		CHECK(clusters + 16 <= 4085 || clusters >= 4101);
+		CHECK(clusters + 16 <= 65525 || clusters >= 65541);
+		if (scenario >= 2)
+			CHECK(info.allocation_unit_bytes == 1024);
+		fixture_close(&fixture);
+	}
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		fsimg_write_options_init(&options);
+		options.volume_bytes = exact_sectors[variant] * 512;
+		options.allocation_unit_bytes = 512;
+		fixture_open(&fixture, formats[variant], &options, 1);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		clusters = (info.allocated_bytes + info.free_bytes) / info.allocation_unit_bytes;
+		CHECK(clusters == exact_clusters[variant]);
+		fixture_close(&fixture);
+	}
 }
 
 static void
@@ -1021,6 +1072,10 @@ main(int argc, char **argv)
 		create_external(argv[2], argv[3], strcmp(argv[1], "--create-empty") == 0);
 		return (0);
 	}
+	if (argc == 2 && strcmp(argv[1], "--type-margins") == 0) {
+		test_type_margins();
+		return (0);
+	}
 	if (argc == 2 && strcmp(argv[1], "--scale") == 0) {
 		test_scale();
 		return (0);
@@ -1030,6 +1085,7 @@ main(int argc, char **argv)
 	test_roundtrip("fat16");
 	test_roundtrip("fat32");
 	test_geometry();
+	test_type_margins();
 	test_invalid_names();
 	test_metadata();
 	test_faults();

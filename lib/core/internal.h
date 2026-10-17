@@ -44,6 +44,8 @@ fsimg_status_t fsimg_error_set(fsimg_error_t *, fsimg_status_t, int,
 fsimg_status_t fsimg_limit_error(fsimg_error_t *, fsimg_resource_t,
     uint64_t, uint64_t);
 fsimg_status_t fsimg_ctx_ready(fsimg_ctx_t *, fsimg_error_t *);
+/* Consumes an already-reserved private scratch directory FD, without dup. */
+fsimg_status_t fsimg_ctx_adopt_scratch(fsimg_ctx_t *, int, fsimg_error_t *);
 fsimg_status_t fsimg_poll(fsimg_ctx_t *, const fsimg_progress_t *,
     fsimg_error_t *);
 void *fsimg_alloc(fsimg_ctx_t *, size_t, fsimg_error_t *);
@@ -62,6 +64,8 @@ void fsimg_session_init(fsimg_session_t *, fsimg_ctx_t *, const char *,
 fsimg_status_t fsimg_session_charge(fsimg_session_t *, uint64_t, uint64_t,
     uint64_t, fsimg_error_t *);
 void fsimg_stat_add(uint64_t *, uint64_t);
+/* fields is a validated FSIMG_META_* mask; path is borrowed for the callback. */
+void fsimg_report_loss(fsimg_ctx_t *, const char *, uint32_t);
 /* Private fault injection: zero disables; n fails the nth subsequent attempt. */
 void fsimg_test_fail_alloc_after(fsimg_ctx_t *, uint64_t);
 

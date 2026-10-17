@@ -99,6 +99,17 @@ try_geometry(fsimg_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
 	minimum = plan->variant == 12 ? 1 : plan->variant == 16 ? 4085 : 65525;
 	maximum = plan->variant == 12 ? 4084 :
 	    plan->variant == 16 ? 65524 : 0x0ffffff5;
+	/* Microsoft's formatting recommendation keeps automatic volumes away
+	 * from type cutovers that other implementations can misclassify. Exact
+	 * requests retain every legal count; upper margins can advance the
+	 * automatic search to its next permitted cluster size.
+	 */
+	if (options->volume_bytes == 0) {
+		if (plan->variant != 12)
+			minimum += FAT_AUTO_TYPE_MARGIN;
+		if (plan->variant != 32)
+			maximum -= FAT_AUTO_TYPE_MARGIN - 1;
+	}
 	needed = divide_up(options->min_free_bytes, cluster_bytes);
 	if (!fsimg_add_u64(allocated, needed, &needed))
 		return (false);
@@ -189,7 +200,7 @@ choose_geometry(fsimg_plan_t *plan, fsimg_error_t *error)
 			return (FSIMG_OK);
 	}
 	return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
-	    "no legal FAT geometry meets the size and free-space constraints"));
+	    "no FAT geometry meets the sizing profile and free-space constraints"));
 }
 
 static fsimg_status_t

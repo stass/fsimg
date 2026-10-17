@@ -6,6 +6,25 @@
 
 #include "fsimg.h"
 
+typedef struct fsimg_sandbox_caps {
+	int	input;
+	int	output;
+	int	scratch;
+	int	source;
+	int	job;
+	int	control;
+	int	data;
+	int	cancel;
+} fsimg_sandbox_caps_t;
+
+/* All fields are borrowed; -1 means absent. Pipe directions and filesystem
+ * authority are declared once here so worker setup cannot omit a live role.
+ * The trusted coordinator supplies disjoint private output/scratch trees.
+ * Only scratch grants deletion; output cleanup belongs to the coordinator.
+ */
+fsimg_status_t fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *,
+    fsimg_error_t *);
+
 /* Prototype for a disposable, single-threaded child only. Caller closes all
  * other descriptors first, including stdio, sockets and executable handles.
  * Input is an O_RDONLY regular file, work is a private writable directory,

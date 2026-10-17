@@ -77,7 +77,8 @@ silently guess among multiple filesystem candidates. Format forcing retains
 all safety checks. Unknown format-option keys and unsupported values fail.
 
 An image path is an absolute validated UTF-8 path; omitted selection means `/`.
-Matching is component-aware. `ls` lists immediate children of a selected
+Matching follows each format's component lookup rules, including FAT case
+equivalence and short aliases. Results retain displayed image paths. `ls` lists immediate children of a selected
 directory, or the selected file; `-r` recursively lists its subtree. The reader
 may scan preceding metadata to find a path, but does not read unselected payloads
 or build a whole-volume pathname hash table. A missing selection is an error.

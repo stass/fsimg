@@ -10,7 +10,6 @@
 #include "reader.h"
 
 static fsimg_status_t reader_ready(const fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t reader_fail(fsimg_reader_t *, fsimg_status_t);
 static fsimg_status_t current_file(fsimg_reader_t *, uint64_t, fsimg_error_t *);
 
 void
@@ -36,13 +35,51 @@ reader_ready(const fsimg_reader_t *reader, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-static fsimg_status_t
-reader_fail(fsimg_reader_t *reader, fsimg_status_t status)
+fsimg_status_t
+fsimg_reader_abort(fsimg_reader_t *reader, fsimg_status_t status)
 {
 	reader->state = FSIMG_READER_FAILED;
 	bzero(&reader->entry, sizeof(reader->entry));
 	fsimg_fat_close(reader);
 	return (status);
+}
+
+fsimg_status_t
+fsimg_reader_end_scope(fsimg_reader_t *reader)
+{
+	reader->state = FSIMG_READER_DONE;
+	bzero(&reader->entry, sizeof(reader->entry));
+	return (FSIMG_DONE);
+}
+
+fsimg_status_t
+fsimg_reader_match_name(fsimg_reader_t *reader, const char *component, bool *matches,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = reader_ready(reader, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (reader->state != FSIMG_READER_ITERATING || reader->entry.path == NULL)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+		    FSIMG_OP_READER, "name matching requires a current entry"));
+	return (fsimg_fat_match_name(reader, component, matches, error));
+}
+
+fsimg_status_t
+fsimg_reader_skip_directory(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = reader_ready(reader, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (reader->state != FSIMG_READER_ITERATING ||
+	    reader->entry.kind != FSIMG_ENTRY_DIRECTORY)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+		    FSIMG_OP_READER, "subtree pruning requires a current directory"));
+	return (fsimg_fat_skip_directory(reader, error));
 }
 
 fsimg_status_t
@@ -206,11 +243,10 @@ fsimg_reader_next(fsimg_reader_t *reader, const fsimg_entry_t **out,
 	if (status == FSIMG_OK)
 		status = fsimg_fat_next(reader, error);
 	if (status == FSIMG_DONE) {
-		reader->state = FSIMG_READER_DONE;
-		return (FSIMG_DONE);
+		return (fsimg_reader_end_scope(reader));
 	}
 	if (status != FSIMG_OK)
-		return (reader_fail(reader, status));
+		return (fsimg_reader_abort(reader, status));
 	*out = &reader->entry;
 	return (FSIMG_OK);
 }
@@ -250,7 +286,7 @@ fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
 		length = (size_t)(reader->entry.size - offset);
 	status = fsimg_fat_read(reader, offset, buffer, length, transferred, error);
 	if (status != FSIMG_OK)
-		return (reader_fail(reader, status));
+		return (fsimg_reader_abort(reader, status));
 	return (FSIMG_OK);
 }
 
@@ -271,7 +307,7 @@ fsimg_reader_next_range(fsimg_reader_t *reader, uint64_t offset,
 		return (FSIMG_DONE);
 	status = fsimg_fat_range(reader, offset, out, error);
 	if (status != FSIMG_OK)
-		return (reader_fail(reader, status));
+		return (fsimg_reader_abort(reader, status));
 	return (FSIMG_OK);
 }
 
@@ -298,7 +334,7 @@ fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
 	status = fsimg_fat_verify(reader, flags, out, error);
 	bzero(&reader->entry, sizeof(reader->entry));
 	if (status != FSIMG_OK)
-		return (reader_fail(reader, status));
+		return (fsimg_reader_abort(reader, status));
 	reader->state = FSIMG_READER_DONE;
 	out->complete = true;
 	return (FSIMG_OK);

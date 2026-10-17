@@ -59,7 +59,23 @@ No locale or host Unicode library supplies comparison behavior at runtime.
 `test/fat.c` owns BSD-2-Clause synthetic fixture generation. The fixed layouts,
 geometry matrix, corruption mutations, and content patterns are encoded
 independently of production decoders. `test/fat-integration.sh.in` creates
-external fixtures using dosfstools and mtools without copying their code or
+external fixtures using dosfstools or native FreeBSD FAT tools, plus mtools,
+without copying their code or
 shipping their generated images. Its test log is the fixture manifest: tool
 versions, creation/population commands, geometry, fragmentation recipe, and
 independent validator/fsimg outcomes. These are development tools only.
+
+The normative FAT reference is the [Microsoft FAT specification](https://www.scs.stanford.edu/~zyedidia/docs/_other/fat.pdf),
+including page 15's cluster-count classification and formatting margin.
+FreeBSD's `newfs_msdos`/`fsck_msdosfs`, dosfstools and mtools are independent
+development oracles, not runtime dependencies or imported implementation code.
+
+The additional [fatcat](https://github.com/gregwar/fatcat) oracle is built from
+revision `76000303082e9e86f1aca8edb030c5fb8a63ae55` by
+`build-aux/build-fatcat.sh`. The external checkout retains its MIT license.
+`build-aux/fatcat-freebsd.patch` selects the existing native getopt/64-bit-offset
+interfaces on FreeBSD and changes no on-disk interpretation. No fatcat source
+is incorporated in fsimg. Its pinned reader requires 512-byte sectors and has
+limited non-ASCII name decoding; comparisons use ASCII names and ASCII long
+names, while mtools validates Unicode. Its information output is recorded as
+tool output, not used as the oracle for free-space or cluster counts.

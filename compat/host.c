@@ -57,6 +57,23 @@ fsimg_host_dup(int fd)
 }
 
 int
+fsimg_host_source_open(int parent, const char *name, bool directory)
+{
+	int fd, flags;
+
+	flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC;
+	if (directory)
+		flags |= O_DIRECTORY;
+	fd = openat(parent, name, flags);
+#if defined(__FreeBSD__)
+	/* FreeBSD names the O_NOFOLLOW symlink failure EMLINK. */
+	if (fd == -1 && errno == EMLINK)
+		errno = ELOOP;
+#endif
+	return (fd);
+}
+
+int
 fsimg_host_closefrom(int first FSIMG_UNUSED)
 {
 #if defined(__linux__) && defined(__NR_close_range)
@@ -147,9 +164,16 @@ fsimg_host_mount_id(int fd FSIMG_UNUSED, uint64_t *out)
 {
 #if defined(__linux__) && defined(__NR_statx) && defined(STATX_MNT_ID)
 	struct statx st;
+	int code;
 
 	bzero(&st, sizeof(st));
-	if (syscall(__NR_statx, fd, "", AT_EMPTY_PATH, STATX_MNT_ID, &st) == -1) {
+	/* A NULL path permits a sandbox to prove descriptor-only authority from
+	 * scalar syscall arguments. Older unconfined kernels need the empty name.
+	 */
+	code = (int)syscall(__NR_statx, fd, NULL, AT_EMPTY_PATH, STATX_MNT_ID, &st);
+	if (code == -1 && errno == EFAULT)
+		code = (int)syscall(__NR_statx, fd, "", AT_EMPTY_PATH, STATX_MNT_ID, &st);
+	if (code == -1) {
 		if (errno == ENOSYS || errno == EINVAL)
 			errno = ENOTSUP;
 		return (-1);
@@ -236,7 +260,7 @@ fsimg_host_directory_name(void *buffer, size_t length, size_t *cursor,
 	unsigned char *bytes = buffer;
 	size_t start, record_length, name_offset, available;
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 next_record:
 #endif
 	if (*cursor > length) {
@@ -286,6 +310,18 @@ next_record:
 #endif
 	if (record_length > length - start || name_offset >= record_length)
 		goto invalid;
+#if defined(__linux__) || defined(__FreeBSD__)
+	/* Unused native records carry no live name. Framing still bounds the
+	 * next cursor before their name bytes are ignored.
+	 */
+	*cursor = start + record_length;
+#if defined(__linux__)
+	if (inode == 0)
+#else
+	if (entry.d_fileno == 0)
+#endif
+		goto next_record;
+#endif
 	available = record_length - name_offset;
 #if defined(__APPLE__)
 	if (reference.attr_length > available)
@@ -298,10 +334,6 @@ next_record:
 	    memchr(*name, '/', *name_length) != NULL)
 		goto invalid;
 	*cursor = start + record_length;
-#if defined(__linux__)
-	if (inode == 0)
-		goto next_record;
-#endif
 	return (1);
 invalid:
 	errno = EIO;

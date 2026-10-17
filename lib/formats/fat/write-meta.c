@@ -117,12 +117,7 @@ encode_field(fsimg_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "FAT cannot preserve the requested timestamp"));
 	plan->info.metadata_losses++;
-	if (writer->ctx->options.loss != NULL) {
-		writer->ctx->in_callback = true;
-		writer->ctx->options.loss(writer->ctx->options.loss_argument,
-		    entry->path, field);
-		writer->ctx->in_callback = false;
-	}
+	fsimg_report_loss(writer->ctx, entry->path, field);
 	return (FSIMG_OK);
 }
 
@@ -138,10 +133,10 @@ fsimg_fat_write_metadata(fsimg_plan_t *plan, const fsimg_entry_t *entry,
 	bzero(raw, 32);
 	attributes = (entry->metadata.valid & FSIMG_META_ATTRIBUTES) != 0 ?
 	    entry->metadata.attributes : 0;
-	raw[11] = (unsigned char)((attributes & FSIMG_ATTR_READONLY ? 1 : 0) |
-	    (attributes & FSIMG_ATTR_HIDDEN ? 2 : 0) |
-	    (attributes & FSIMG_ATTR_SYSTEM ? 4 : 0) |
-	    (attributes & FSIMG_ATTR_ARCHIVE ? 32 : 0));
+	raw[11] = (unsigned char)(((attributes & FSIMG_ATTR_READONLY) != 0 ? 1 : 0) |
+	    ((attributes & FSIMG_ATTR_HIDDEN) != 0 ? 2 : 0) |
+	    ((attributes & FSIMG_ATTR_SYSTEM) != 0 ? 4 : 0) |
+	    ((attributes & FSIMG_ATTR_ARCHIVE) != 0 ? 32 : 0));
 	if (entry->kind == FSIMG_ENTRY_DIRECTORY)
 		raw[11] |= 16;
 	else

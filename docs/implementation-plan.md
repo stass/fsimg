@@ -10,17 +10,19 @@ acceptance gate.
 
 | Package | Status | Evidence or next gate |
 | --- | --- | --- |
-| 1. Contracts and platform substrate | Implemented; kernel qualification remains open | Native build, I/O, publication, and sanitizer checks; Linux/FreeBSD confinement requires actual-kernel evidence in [platform-evidence.md](platform-evidence.md) |
+| 1. Contracts and platform substrate | Implemented with actual-kernel confinement checks | macOS, Linux and FreeBSD suites; confined image/source scans, live mount-alias fixtures and publication evidence in [platform-evidence.md](platform-evidence.md); UFS immediate-reader handoff remains a Medium investigation |
 | 2. Bounded metadata storage | Implemented and validated on the native host | Shared cache, private scratch, record streams, arrays/bitsets, stable external sort, fault tests, ASan/UBSan, and above-budget scale checks in [build.md](build.md) |
-| 3. Sources and catalog | Implemented and validated on the native host | Descriptor-relative scanning, source providers, deterministic catalog, common writer lifecycle, fault regressions, and scale/sanitizer checks in [build.md](build.md); source-profile integration remains part of platform qualification |
+| 3. Sources and catalog | Implemented and validated on the native host | Descriptor-relative scanning, source providers, deterministic catalog, common writer lifecycle, fault regressions, and scale/sanitizer checks in [build.md](build.md); confined source-profile and mount checks also run on Linux/FreeBSD |
 | 4. FAT readers and verification | Implemented and validated on macOS | FAT12/16/32 external fixtures, bounded traversal/indexing and full verification, corruption/fault tests, ASan/UBSan, instrumented fuzzing, and above-budget directory checks in [build.md](build.md) |
 | 5. FAT planning and writing | Implemented and validated on macOS | FAT12/16/32 emission, independent fsck/mtools validation, fault regressions, sanitizer and above-budget planning checks; local and OpenCode GLM 5.3 max reviews and follow-ups found no remaining Critical/High or readability findings |
-| 6–9 | Pending | Follow the dependencies and completion gates below |
+| 6. Safe extraction and worker integration | Implemented and reviewed | Safe extraction, shared selection, bounded protocol/output supervision, actual Linux/FreeBSD confinement and mount tests, native FreeBSD/mtools/fatcat interoperability, sanitizers and protocol fuzzing; local and GLM 5.3 max follow-ups have no remaining Critical/High or readability finding; explicit tool/platform skips in [build.md](build.md) |
+| 7–9 | Pending | Follow the dependencies and completion gates below |
 
-Development and qualification currently target macOS. Linux/FreeBSD kernel
-qualification and confined source-scanner integration remain open in `TODO.md`;
-they do not block native library format work. The portable target contracts
-remain in force, and this sequencing does not qualify either sandbox backend.
+Development and qualification use macOS, a Linux guest, and both guest and
+user-provided FreeBSD kernels. Evidence identifies the filesystem, toolchain, checks, and explicit
+skips; it does not promise enforcement on untested architectures or kernels.
+UFS publication identity and other actionable residual work remain in
+`TODO.md`.
 
 ## Dependency order
 

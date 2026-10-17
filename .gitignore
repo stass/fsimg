@@ -9,5 +9,7 @@
 !/build-aux/check-ascii.sh
 !/build-aux/sanitize.sh
 !/build-aux/fuzz.sh
+!/build-aux/build-fatcat.sh
+!/build-aux/fatcat-freebsd.patch
 *~
 .DS_Store

@@ -41,7 +41,7 @@ open_object(fsimg_writer_t *writer, int parent, const char *name, bool directory
     int *out, fsimg_host_file_t *identity, fsimg_error_t *error)
 {
 	fsimg_status_t status;
-	int fd, flags, saved;
+	int fd, saved;
 
 	*out = -1;
 	status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
@@ -50,10 +50,7 @@ open_object(fsimg_writer_t *writer, int parent, const char *name, bool directory
 	status = fsimg_fd_reserve(writer->ctx, error);
 	if (status != FSIMG_OK)
 		return (status);
-	flags = O_RDONLY | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW | O_CLOEXEC;
-	if (directory)
-		flags |= O_DIRECTORY;
-	fd = openat(parent, name, flags);
+	fd = fsimg_host_source_open(parent, name, directory);
 	if (fd == -1) {
 		saved = errno;
 		fsimg_fd_release(writer->ctx, -1);

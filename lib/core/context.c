@@ -65,6 +65,22 @@ fsimg_stat_add(uint64_t *value, uint64_t amount)
 }
 
 void
+fsimg_report_loss(fsimg_ctx_t *ctx, const char *path, uint32_t fields)
+{
+	if (fields == 0)
+		return;
+	for (uint32_t bit = 1; bit <= FSIMG_META_ATTRIBUTES; bit <<= 1) {
+		if ((fields & bit) != 0)
+			fsimg_stat_add(&ctx->stats.metadata_losses, 1);
+	}
+	if (ctx->options.loss != NULL) {
+		ctx->in_callback = true;
+		ctx->options.loss(ctx->options.loss_argument, path, fields);
+		ctx->in_callback = false;
+	}
+}
+
+void
 fsimg_error_clear(fsimg_error_t *error)
 {
 	if (error != NULL)
@@ -237,6 +253,32 @@ fsimg_ctx_free(fsimg_ctx_t *ctx)
 	if (ctx->options.scratch_directory_fd != -1)
 		fsimg_fd_release(ctx, ctx->options.scratch_directory_fd);
 	free(ctx);
+}
+
+fsimg_status_t
+fsimg_ctx_adopt_scratch(fsimg_ctx_t *ctx, int fd, fsimg_error_t *error)
+{
+	fsimg_host_file_t identity;
+	fsimg_status_t status;
+
+	status = fsimg_ctx_ready(ctx, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	if (ctx->options.scratch_directory_fd != -1 || ctx->meta_cache != NULL) {
+		status = fsimg_error_set(error, FSIMG_ESTATE, 0,
+		    FSIMG_OP_CONTEXT, "scratch adoption requires a fresh context");
+		goto fail;
+	}
+	if (fsimg_host_file(fd, &identity) == -1 || identity.kind != FSIMG_HOST_DIRECTORY) {
+		status = fsimg_error_set(error, FSIMG_EINVAL, errno,
+		    FSIMG_OP_CONTEXT, "scratch adoption requires a directory");
+		goto fail;
+	}
+	ctx->options.scratch_directory_fd = fd;
+	return (FSIMG_OK);
+fail:
+	fsimg_fd_release(ctx, fd);
+	return (status);
 }
 
 fsimg_status_t

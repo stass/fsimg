@@ -40,8 +40,12 @@ reserves 32, uses FSInfo sector 1 and backup boot/FSInfo sectors 6/7.
 
 Candidate cluster sizes are tried in increasing order. Each candidate makes
 one catalog-array pass to count directory/file clusters. Automatic sizing uses
-the greater of the variant minimum and allocated clusters plus the requested
-free reserve, then computes exact FAT and volume lengths. Exact sizing uses a
+the greater of its interoperability minimum and allocated clusters plus the
+requested free reserve, then computes exact FAT and volume lengths. Automatic
+counts stay at least 16 clusters away from the 4085/65525 type cutovers,
+following Microsoft's formatting recommendation. A candidate too close to the
+upper cutover gives way to the next permitted cluster size. Exact sizing retains
+the complete legal variant range, including those boundary counts, and uses a
 bounded binary search for the smallest FAT sector count whose capacity covers
 the resulting data area. Cluster-count classification, legal cluster IDs,
 32-bit sector/file fields, root capacity, and free reserve must all hold.

@@ -29,3 +29,13 @@ if test "$(uname -s)" = Linux; then
 fi
 export ASAN_OPTIONS UBSAN_OPTIONS
 ./fuzz-fat -runs=1000 -max_len=3145728 -timeout=10 fuzz-corpus
+
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -Isanitizer-fuzz -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/cmd/fsimg" \
+    "$source_dir/fuzz/protocol.c" "$source_dir/cmd/fsimg/protocol.c" \
+    "$source_dir/cmd/fsimg/job.c" sanitizer-fuzz/.libs/libfsimg.a -o fuzz-protocol
+protocol_corpus=$(mktemp -d protocol-fuzz-corpus-XXXXXX)
+./test-protocol --seed "$protocol_corpus/frames.seed"
+./fuzz-protocol -runs=1000 -max_len=65536 -timeout=5 "$protocol_corpus"

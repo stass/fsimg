@@ -112,6 +112,9 @@ fsimg_status_t fsimg_fat_entry_decode(const fat_geometry_t *, const unsigned cha
 fsimg_status_t fsimg_fat_open(fsimg_reader_t *, const char *, fsimg_error_t *);
 void fsimg_fat_close(fsimg_reader_t *);
 fsimg_status_t fsimg_fat_next(fsimg_reader_t *, fsimg_error_t *);
+fsimg_status_t fsimg_fat_match_name(fsimg_reader_t *, const char *, bool *,
+    fsimg_error_t *);
+fsimg_status_t fsimg_fat_skip_directory(fsimg_reader_t *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_read(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_range(fsimg_reader_t *, uint64_t, fsimg_range_t *,

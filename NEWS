@@ -33,3 +33,17 @@ Known source aliases are rejected before output mutation, including hardlinks
 and slices. Private fresh output preserves sparse zero space; reused sinks are
 explicitly initialized. Durable file publication never replaces an existing
 destination and reports retained staging and cleanup failures.
+
+Safe extraction creates exclusive private trees with descriptor-relative
+no-follow operations, logical output quotas, filesystem-aware selections,
+optional timestamp restoration, and explicit incomplete-output reporting.
+Same-executable workers use bounded framed control, pre-parser confinement
+handshakes, fixed descriptor roles, and a supervised stdout/stderr relay.
+Linux and FreeBSD image/source profiles have actual-kernel attack and mount
+boundary tests; macOS reports its unavailable backend explicitly.
+
+Automatic FAT geometry stays away from type cutovers following Microsoft's
+interoperability recommendation; explicit sizes retain legal boundary counts.
+FAT directory labels accept the archive bit used by native FreeBSD formatters.
+Independent validation includes native FreeBSD FAT tools, mtools and a pinned
+fatcat development oracle, with its sector/Unicode limits reported explicitly.

@@ -35,10 +35,17 @@ typedef struct fsimg_host_file {
 
 bool fsimg_host_offset(uint64_t, off_t *);
 int fsimg_host_dup(int);
+int fsimg_host_spawn_worker(const char *, const int *, unsigned, pid_t *);
+int fsimg_host_spawn_output(const char *, const int *, unsigned, pid_t *);
+int fsimg_host_executable(char *, size_t);
 /* Failure is fatal to worker startup; no resource-limit-bounded fallback. */
 int fsimg_host_closefrom(int);
 bool fsimg_host_unsupported_io(int);
 int fsimg_host_file(int, fsimg_host_file_t *);
+/* Source opens never follow links or acquire a controlling terminal/block on
+ * a FIFO. ELOOP identifies a no-follow symlink refusal on every host.
+ */
+int fsimg_host_source_open(int, const char *, bool);
 /* Descriptor-based mount identity; ENOTSUP means no enforceable identity. */
 int fsimg_host_mount_id(int, uint64_t *);
 /* Directory readers use only the supplied buffer, never a libc DIR buffer.

@@ -9,11 +9,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 #include <unistd.h>
 
 #include "../lib/output/publish.h"
+#include "host.h"
 #include "internal.h"
 #include "test.h"
 
@@ -34,6 +37,68 @@ static void create_staged(int);
 static void test_failures(fsimg_ctx_t *, int, int);
 static void test_races(fsimg_ctx_t *, int, int);
 static void test_existing_targets(fsimg_ctx_t *, int, int);
+static void test_stable_identity(fsimg_ctx_t *, int, int);
+static void test_image_identity(fsimg_ctx_t *, int);
+
+static void
+test_image_identity(fsimg_ctx_t *ctx, int parent)
+{
+	fsimg_entry_t entry = { .path = "/content", .kind = FSIMG_ENTRY_FILE,
+	    .size = 70001 };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fsimg_writer_t *writer;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	fsimg_verify_report_t report;
+	int fd;
+
+	for (unsigned iteration = 0; iteration < 16; iteration++) {
+		CHECK(fsimg_writer_new(ctx, "fat16", NULL, &writer, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_add(writer, &entry, &zero, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_write_at(writer, parent, "volume", NULL) == FSIMG_OK);
+		fsimg_writer_free(writer);
+		fd = openat(parent, "volume", O_RDONLY | O_NOFOLLOW);
+		CHECK(fd != -1);
+		CHECK(fsimg_io_from_fd(ctx, fd, FSIMG_IO_READ, &input, NULL) == FSIMG_OK);
+		CHECK(close(fd) == 0);
+		CHECK(fsimg_reader_open(ctx, input, NULL, &reader, NULL) == FSIMG_OK);
+		CHECK(fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) == FSIMG_OK);
+		fsimg_reader_free(reader);
+		fsimg_io_free(input);
+		CHECK(unlinkat(parent, "volume", 0) == 0);
+	}
+}
+
+static void
+test_stable_identity(fsimg_ctx_t *ctx, int staging, int parent)
+{
+	fsimg_host_file_t before, after;
+	char byte;
+	int fd;
+
+	/* A published image's identity must already be stable when readers begin.
+	 * Repeated reads allow queued filesystem metadata work to run as well.
+	 */
+	for (unsigned iteration = 0; iteration < 16; iteration++) {
+		create_staged(staging);
+		CHECK(fsimg_publish(ctx, staging, "image", 4, parent, "final", NULL, NULL) == FSIMG_OK);
+		fd = openat(parent, "final", O_RDONLY | O_NOFOLLOW);
+		CHECK(fd != -1);
+		CHECK(fsimg_host_file(fd, &before) == 0);
+		for (unsigned sample = 0; sample < 50; sample++) {
+			CHECK(pread(fd, &byte, 1, 0) == 1 && byte == 'd');
+			poll(NULL, 0, 1);
+			CHECK(fsimg_host_file(fd, &after) == 0);
+			CHECK(before.inode == after.inode && before.length == after.length);
+			CHECK(before.modified.seconds == after.modified.seconds &&
+			    before.modified.nanoseconds == after.modified.nanoseconds);
+			CHECK(before.changed.seconds == after.changed.seconds &&
+			    before.changed.nanoseconds == after.changed.nanoseconds);
+		}
+		CHECK(close(fd) == 0);
+		CHECK(unlinkat(parent, "final", 0) == 0);
+	}
+}
 
 static int
 fault_sync(void *argument, int fd)
@@ -269,7 +334,7 @@ test_existing_targets(fsimg_ctx_t *ctx, int staging, int parent)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	char path[] = "publish-fixture-XXXXXX";
 	fsimg_ctx_t *ctx;
@@ -284,9 +349,15 @@ main(void)
 	CHECK(staging != -1);
 	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(ctx, &before, NULL) == FSIMG_OK);
-	test_failures(ctx, staging, parent);
-	test_existing_targets(ctx, staging, parent);
-	test_races(ctx, staging, parent);
+	if (argc == 2 && strcmp(argv[1], "--identity") == 0) {
+		test_stable_identity(ctx, staging, parent);
+		test_image_identity(ctx, parent);
+	} else {
+		CHECK(argc == 1);
+		test_failures(ctx, staging, parent);
+		test_existing_targets(ctx, staging, parent);
+		test_races(ctx, staging, parent);
+	}
 	CHECK(fsimg_ctx_get_stats(ctx, &after, NULL) == FSIMG_OK);
 	CHECK(after.memory_bytes == before.memory_bytes && after.descriptors == 0);
 	fsimg_ctx_free(ctx);

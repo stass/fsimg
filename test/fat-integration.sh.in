@@ -4,15 +4,52 @@
 set -eu
 MKFS_FAT='@MKFS_FAT@'
 FSCK_FAT='@FSCK_FAT@'
+NEWFS_MSDOS='@NEWFS_MSDOS@'
+FSCK_MSDOSFS='@FSCK_MSDOSFS@'
 MCOPY='@MCOPY@'
 MMD='@MMD@'
 MDEL='@MDEL@'
-for tool in "$MKFS_FAT" "$FSCK_FAT" "$MCOPY" "$MMD" "$MDEL"; do
+FATCAT='@FATCAT@'
+for tool in "$MCOPY" "$MMD" "$MDEL" "$FATCAT"; do
     if test -z "$tool"; then
-        echo 'SKIP: independent FAT tests require dosfstools and mtools'
+        echo 'SKIP: independent FAT tests require mtools and fatcat'
         exit 77
     fi
 done
+
+# Each host uses its own independent formatter/checker pair. Population and
+# content comparison use mtools for both, with identical fixture geometry.
+if test "$(uname -s)" = FreeBSD; then
+    formatter=$NEWFS_MSDOS
+    checker=$FSCK_MSDOSFS
+else
+    formatter=$MKFS_FAT
+    checker=$FSCK_FAT
+fi
+if test -z "$formatter" || test -z "$checker"; then
+    echo 'SKIP: independent FAT tests require the host formatter/checker pair'
+    exit 77
+fi
+
+format_image()
+{
+    if test "$(uname -s)" = FreeBSD; then
+        # File geometry otherwise counts 512-byte sectors even with -S 4096.
+        sectors=$((kib * 1024 / sector))
+        # Ignore metadata overhead for a conservative cluster-count bound.
+        # Include both reserved entries so the formatter's table always has
+        # capacity for the geometry it advertises, including FAT32 boundaries.
+        fat_sectors=$((( (sectors / spc + 2) * variant + 8 * sector - 1) / (8 * sector)))
+        echo "create: newfs_msdos -C ${kib}K -F $variant -S $sector -s $sectors -a $fat_sectors -c $spc -L FSIMGTEST -T 315532800 image"
+        "$formatter" -C "${kib}K" -F "$variant" -S "$sector" \
+            -s "$sectors" -a "$fat_sectors" -c "$spc" \
+            -L FSIMGTEST -T 315532800 "$image"
+    else
+        echo "create: mkfs.fat --invariant -F $variant -S $sector -s $spc -n FSIMGTEST -C image $kib"
+        "$formatter" --invariant -F "$variant" -S "$sector" \
+            -s "$spc" -n FSIMGTEST -C "$image" "$kib"
+    fi
+}
 
 fixture_dir=$(mktemp -d fat-interop-XXXXXX)
 trap 'rm -rf "$fixture_dir"' 0
@@ -23,8 +60,12 @@ unicode_name=$(printf 'R\303\251sum\303\251 collection.txt')
 # Each log is the fixture manifest: formatter/validator versions, geometry,
 # population commands and the independent validator's outcome. No imported
 # binary fixtures or third-party implementation code are distributed.
-"$MKFS_FAT" --help 2>&1 | sed -n '1p'
+echo "formatter: $formatter; checker: $checker; host: $(uname -sr)"
+if test "$(uname -s)" != FreeBSD; then
+    "$formatter" --help 2>&1 | sed -n '1p'
+fi
 "$MCOPY" -V
+"$FATCAT" -h 2>&1 | sed -n '1p'
 for profile in fat12 fat16 fat32 fat16-wide; do
     sector=512
     spc=1
@@ -36,8 +77,7 @@ for profile in fat12 fat16 fat32 fat16-wide; do
     esac
     image="$fixture_dir/$profile.img"
     echo "fixture: FAT$variant; $kib KiB; $sector-byte sectors; $spc sectors/cluster"
-    echo "create: mkfs.fat --invariant -F $variant -S $sector -s $spc -n FSIMGTEST -C image $kib"
-    "$MKFS_FAT" --invariant -F "$variant" -S "$sector" -s "$spc" -n FSIMGTEST -C "$image" "$kib"
+    format_image
     echo 'populate: mcopy Hello.txt, Unicode long name; mmd Nested; mcopy Nested/Deep.txt'
     "$MCOPY" -i "$image" "$fixture_dir/payload" ::Hello.txt
     "$MCOPY" -i "$image" "$fixture_dir/payload" "::$unicode_name"
@@ -56,9 +96,26 @@ for profile in fat12 fat16 fat32 fat16-wide; do
         "$MDEL" -i "$image" ::A.BIN ::C.BIN
         echo 'fragment: three 400 KiB fillers, delete middle, copy 600 KiB, delete remaining fillers'
     fi
-    "$FSCK_FAT" -n "$image"
+    "$checker" -n "$image"
+    # fatcat's pinned reader accepts 512-byte sectors and ASCII long names.
+    # The native checker, mtools and fsimg cover the wide-sector/Unicode cases.
+    if test "$sector" = 512; then
+        "$FATCAT" -i "$image"
+        "$FATCAT" -l /Nested "$image"
+        "$FATCAT" -r /Hello.txt "$image" > "$fixture_dir/fatcat-payload"
+        cmp "$fixture_dir/payload" "$fixture_dir/fatcat-payload"
+        "$FATCAT" -r /Nested/Deep.txt "$image" > "$fixture_dir/fatcat-payload"
+        cmp "$fixture_dir/payload" "$fixture_dir/fatcat-payload"
+        if test "$profile" = fat12; then
+            "$FATCAT" -r /FRAG.BIN "$image" > "$fixture_dir/fatcat-payload"
+            cmp "$fixture_dir/fragment" "$fixture_dir/fatcat-payload"
+        fi
+        echo 'result: fatcat selected ASCII content comparisons passed'
+    else
+        echo 'SKIP: fatcat does not support non-512-byte sectors'
+    fi
     ./test-fat --external "$image" "fat$variant"
-    echo 'result: fsck.fat -n and fsimg enumeration/content/full verification passed'
+    echo 'result: independent checker and fsimg enumeration/content/full verification passed'
 done
 
 # fsimg-created volumes are checked and extracted by independent tools. These
@@ -69,7 +126,13 @@ for profile in fat12 fat16 fat32; do
     ./test-fat-write --create "$fixture_dir/write-$profile" "$profile"
     image="$fixture_dir/write-$profile/writer.img"
     echo "writer fixture: $profile; automatic geometry; serial zero; NO NAME label"
-    "$FSCK_FAT" -n "$image"
+    "$checker" -n "$image"
+    "$FATCAT" -i "$image"
+    "$FATCAT" -l /Nested "$image"
+    "$FATCAT" -r /HELLO.TXT "$image" > "$fixture_dir/fatcat-payload"
+    cmp "$fixture_dir/writer-payload" "$fixture_dir/fatcat-payload"
+    "$FATCAT" -r '/Nested/long name.txt' "$image" > "$fixture_dir/fatcat-payload"
+    cmp "$fixture_dir/writer-payload" "$fixture_dir/fatcat-payload"
     "$MCOPY" -i "$image" ::HELLO.TXT "$fixture_dir/extracted"
     cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
     rm "$fixture_dir/extracted"
@@ -79,9 +142,10 @@ for profile in fat12 fat16 fat32; do
     "$MCOPY" -i "$image" "::$unicode_name" "$fixture_dir/extracted"
     cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
     rm "$fixture_dir/extracted"
-    echo 'result: fsck.fat and mtools content/Unicode extraction passed'
+    echo 'result: checker, fatcat ASCII/long-name content, and mtools Unicode extraction passed'
     rm "$image"
     ./test-fat-write --create-empty "$fixture_dir/write-$profile" "$profile"
-    "$FSCK_FAT" -n "$image"
+    "$checker" -n "$image"
+    "$FATCAT" -i "$image"
     echo 'result: independently checked empty writer volume'
 done

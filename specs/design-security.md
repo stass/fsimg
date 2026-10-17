@@ -84,13 +84,24 @@ messages use a versioned framing protocol with a fixed maximum length,
 known message types, bounded strings, checked counters, and a closed state
 machine. No worker-supplied descriptor or pathname is accepted as new authority.
 
+The coordinator validates the selected entry before forwarding raw cat bytes to
+a same-executable output relay. That relay receives only its bounded input and
+status channels and the caller's stdout/stderr sinks. It owns potentially blocking sink
+writes; the coordinator supervises and terminates both children on cancellation.
+Neither child changes borrowed sink flags. Formatted command output and warnings
+use the same relay; warnings are confirmed before parsing is acknowledged.
+Success requires exact confirmed transfer and successful exit of both children.
+
 The coordinator validates protocol lengths before allocation, escapes names
 and control characters before terminal output, and never treats worker text
 as a format string. A worker cannot forge a successful publication by sending
 an early success frame: the coordinator also requires the correct state,
 successful worker exit, and successful final output checks. Truncated messages,
 unknown types, duplicate completion, child signals, and EOF before completion
-are errors. Cancellation and parent death terminate the worker and stop writes.
+are errors. Cancellation and parent death stop new work when observed at host
+I/O boundaries. An in-flight kernel operation can complete or remain blocked
+according to host behavior. The output relay holds only one bounded record;
+after coordinator death its next status write fails, preventing another record.
 
 Large listing names use bounded entry-start/name-chunk/entry-end records.
 The coordinator enforces the total path limit and legal message order while
@@ -166,6 +177,14 @@ uses safe creation modes, opened-object metadata queries, and no arbitrary
 on each supported architecture. `io_uring`, descriptor acquisition through
 other processes, hardlink creation, and unnecessary fd duplication paths are
 not part of the worker profile. New syscall needs require a security review.
+
+The source profile requires the descriptor-only Linux statx form: a NULL path,
+AT_EMPTY_PATH, and an explicit descriptor other than AT_FDCWD. Setup proves
+that form is supported before restricting the process; an older kernel reports
+the source profile unavailable. Seccomp checks both halves of the path pointer
+and flags and denies every pathname form. Unconfined library callers retain an
+empty-string fallback for older kernels. FreeBSD source capabilities include
+descriptor mount queries, so mount identity checks require no ambient lookup.
 
 ### macOS
 

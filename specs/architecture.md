@@ -140,7 +140,9 @@ Memory accounting excludes application-owned callback state and buffers,
 executable/shared-library mappings, allocator bookkeeping, thread stacks, and
 the kernel page cache. These exclusions are reported honestly. RSS is measured
 as a separate acceptance criterion. The CLI uses a bounded control process
-and one single-threaded worker; it does not multiply caches by CPU count.
+and one single-threaded parser worker, plus one bounded output relay so blocked
+stdout/stderr sinks cannot block supervision. The relay owns no library cache.
+The process RSS allowance includes this relay. Caches do not multiply by CPU count.
 Resource exhaustion cannot trigger an unbounded fallback. With scratch
 disabled, an operation either fits in memory or fails with `FSIMG_ELIMIT`.
 
@@ -201,8 +203,9 @@ descriptor or pair an entry snapshot with a different writer. The writer owns
 one current source, its I/O handle, and its failure cleanup; source operations
 preserve the current catalog-inspection snapshot.
 
-These checks detect ordinary changes; they are not an atomic snapshot of a
-hostile concurrently modified tree. Callers requiring snapshot consistency
+These checks detect changes visible in the recorded host metadata. Writes can
+share coarse timestamps, and metadata-preserving changes can be invisible.
+The checks are not an atomic snapshot of a concurrently modified tree. Callers requiring snapshot consistency
 provide immutable files, a filesystem snapshot, or an equivalently stable
 source provider. Hashing alone does not create a snapshot. No security promise
 depends on mtime being impossible to restore.
@@ -213,6 +216,14 @@ Image paths are absolute UTF-8 paths rooted at `/`. Format drivers validate
 components, encoding, case comparison, and name collisions. A host pathname is
 a different value with a different trust boundary. Normalization never turns
 an invalid or escaping host name into an accepted one silently.
+
+Selection resolves components through the format's validated lookup namespace,
+including its case rules and aliases. A common bounded selector owns resolution
+and subtree traversal; drivers compare only the current component. Resolved
+paths retain displayed image names, so extraction never copies an alias or
+case-normalized query spelling onto the host. Off-branch directories are skipped
+after their parent's namespace is validated, without reading their payloads or
+constructing a whole-volume path index.
 
 Metadata has explicit validity bits. Entry kinds, supported attributes,
 timestamp resolution, and naming limits are capabilities, not assumed POSIX
@@ -246,6 +257,8 @@ creates a fresh private destination, and never follows image-derived symlinks.
 Image paths are validated component by component, and files are created
 exclusively relative to directory descriptors. Details and platform guarantees
 are defined by the [security specification](design-security.md).
+The [extraction and worker design](design-extraction-worker.md) defines
+descriptor ownership, postorder finalization, and the readiness/protocol boundary.
 
 ### Output and determinism
 

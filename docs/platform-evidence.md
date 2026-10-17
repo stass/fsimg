@@ -1,31 +1,52 @@
 # Platform mechanism evidence
 
-The native harnesses are `test-sandbox` and `test-publish`. Their logs, host
-kernel, compiler, and filesystem identify evidence; compiled platform branches
-alone do not establish enforcement. CI runs ordinary and security tests on
-Linux, FreeBSD, and macOS. Jobs that require confinement reject a SKIP.
-Linux and FreeBSD CI jobs require execution before their profiles are qualified;
-no remote kernel run is recorded here.
+The mechanism harnesses are `test-sandbox`, `test-sandbox-setup`,
+`test-publish`, and `test-worker`. Kernel, compiler, and filesystem identify
+execution evidence; compiled platform branches alone do not establish
+enforcement. CI requires confinement on Linux and FreeBSD rather than accepting
+a sandbox SKIP.
 
 | Mechanism | Scope exercised | Host evidence |
 | --- | --- | --- |
-| macOS confinement | Explicit unavailable result before restriction | Native test returns SKIP; no standalone backend claimed |
-| Linux confinement | Landlock ABI >= 3; x86_64 and aarch64 seccomp architecture checks | Requires Linux kernel execution |
-| FreeBSD confinement | Capsicum descriptor, ioctl and fcntl rights | Requires FreeBSD kernel execution |
-| Regular-file publication | Exclusive hardlink, staged unlink, both directory syncs | Native publication tests; qualify each deployment filesystem separately |
-| Bounded host scanning | Native directory batches, no-follow component opens, mount identity, source-change checks | Ordinary native macOS source tests; actual descendant-mount fixtures and Linux/FreeBSD runs remain open |
+| macOS confinement | Explicit unavailable result, automatic warning before ACK, required refusal, explicit off | Darwin 25.6.0 x86_64, Apple Clang 21.0.0, APFS |
+| Linux confinement | Landlock ABI >= 3, seccomp, image and source workers, forbidden operations | Debian 13, Linux 6.12.113+deb13-amd64 x86_64, Clang 19.1.7, ext4 |
+| FreeBSD confinement | Capsicum descriptor/ioctl/fcntl rights, image and source workers, forbidden operations | FreeBSD 15.1-RELEASE-p5/UFS and user-provided FreeBSD 16.0-CURRENT/ZFS, amd64, Clang 19.1.7 |
+| Source mount boundaries | Required-confined scans reject live descendant mount aliases before PLAN | Linux bind mount with equal device IDs; FreeBSD nullfs mount with distinct FSIDs |
+| Regular-file publication | Exclusive hardlink, staged unlink, directory syncs, failure/race reporting | APFS, ext4, UFS, ZFS; UFS immediate-reader identity qualification remains open |
 
-Local checks use Darwin 25.6.0 on x86_64, Apple Clang 21.0.0, and APFS. Native
-`make check`, combined ASan/UBSan, and standalone UBSan each report twelve passing
-tests and one sandbox skip, with no sanitizer findings. `make distcheck`
-passes archive rebuilding, tests, installation, uninstallation, and cleanup.
-The shared library links only to the host's libSystem. Publication tests cover
-APFS; this does not qualify other filesystems. Standalone LSan and MSan report
-unsupported-host skips. Linux/FreeBSD confinement and their sanitizer runs
-remain unverified locally.
+Linux and FreeBSD 15.1 run in local QEMU guests booted from checksum-verified
+upstream images. The user-provided FreeBSD host is 16.0-CURRENT, kernel
+`main-n285245-975e3605ebb1`, on ZFS; it runs the primary native FreeBSD checks.
+The library and ordinary suites run unprivileged. Only the
+separate mount qualification prepares bind/nullfs fixtures with guest root;
+its scanner remains unprivileged. Both fixtures preserve outside sentinel
+bytes. Linux reports devices 65025/65025 and mount IDs 29/68; FreeBSD reports
+devices 61/687931137 and FSID-derived mount IDs
+7650454420974902357/2954641735315095593. These IDs identify those live fixtures,
+not stable identifiers across boots.
 
-FAT qualification uses mtools 4.0.49 and dosfstools 4.2 to create, populate, and
-independently check FAT12, FAT16, FAT32, and a FAT16 image with 4096-byte sectors
+The ordinary suite contains eighteen tests. macOS reports sixteen passes and
+two explicit skips (unavailable backend and Linux-only setup-fault harness).
+Linux reports seventeen passes and one integration skip because fatcat is
+unavailable there. FreeBSD 16/ZFS reports
+seventeen passes and one skip (Linux-only setup-fault harness), including
+native FAT interoperability. Native
+ASan/UBSan and additional platform sanitizer outcomes are recorded with their
+commands in [build.md](build.md). Standalone LSan/MSan are unsupported on macOS
+and FreeBSD; a skip is not a pass. Fresh confined children disable tracer-based
+leak scanning, while parent/library leak checks remain enabled where supported.
+
+Publication tests cover the named filesystems, not remote filesystems or crash
+recovery. FreeBSD/UFS can change ctime after publication without an observed
+payload change. Readers conservatively reject that identity change. Inode
+fsync and a no-replace rename experiment do not establish a stable handoff;
+`test-publish --identity` is a separate qualification probe and passes on the
+provided ZFS host. The unresolved UFS investigation is tracked in `TODO.md`.
+
+FAT qualification uses mtools 4.0.49, dosfstools 4.2 on macOS/Linux, native
+FreeBSD `newfs_msdos`/`fsck_msdosfs`, and the pinned fatcat oracle to create,
+populate, and independently check FAT12, FAT16, FAT32, and a FAT16 image with
+4096-byte sectors
 and 8192-byte clusters. fsimg enumerates their Unicode names, compares file
 bytes, and completes structural plus payload verification. The FAT12 image
 contains forced fragmentation; the FAT32 image confirms cluster zero in a
@@ -34,10 +55,27 @@ geometry combinations, boundary cluster counts, corruption and failure paths,
 and a sparse 4 GiB-minus-one-byte file whose boundary bytes and allocation are
 checked without reading the complete payload.
 
+Fatcat comparisons cover ordinary ASCII names, ASCII long names, nested paths
+and the forced fragmented file. Its pinned reader rejects non-512-byte sectors;
+that subcheck explicitly skips while the formatter/checker, mtools and fsimg
+still validate the wide-sector fixture. Unicode content is checked through
+mtools. Fatcat information output is logged but does not determine geometry or
+free-space correctness. The FreeBSD build uses only the minimal native-interface
+patch described in [references](references.md).
+
+Native formatter fixtures specify sector count and conservative FAT capacity
+explicitly. Automatic fsimg geometry follows Microsoft's 16-cluster cutover
+margin; exact boundary counts remain legal and tested. This avoids FreeBSD's
+4086/65526 checker classification at the Microsoft 4085/65525 boundaries.
+The native checker can warn that an FSInfo next-free hint points at an allocated
+cluster after mtools population; the hint is a search starting point, and images
+are not repaired or rewritten to silence that advisory warning.
+
 The fully instrumented libFuzzer smoke run uses Homebrew LLVM 23.1.2 with
 ASan/UBSan and library coverage. It completes 1000 mutations with all three FAT
-seed variants and finite reader budgets, reporting `cov: 2072` and `ft: 5734`
-with no sanitizer or accounting findings. This is finite parser
+seed variants and finite reader budgets (`cov: 2076`, `ft: 5758`) and 1000
+protocol mutations (`cov: 345`, `ft: 654`), with no unintended sanitizer or
+accounting findings. This is finite parser
 exercise, not sustained fuzzing or an exhaustive compatibility claim. See
 [build commands](build.md) for instrumentation and logical zero-tail details.
 
@@ -90,8 +128,10 @@ The library's source scanner uses bounded native directory batches (`getdents64`
 `getdirentries`, or `getattrlistbulk`) and descriptor mount queries. Linux
 `statx` with `STATX_MNT_ID` distinguishes same-filesystem bind mounts; FreeBSD
 and macOS use each live mount's `fstatfs` FSID. Unsupported identity queries are
-explicit errors. The ordinary macOS source tests exercise native enumeration and
-reopening; they do not create mounts or qualify hostile mount races.
+explicit errors. Actual source tests on all three hosts exercise native enumeration and
+reopening. Linux and FreeBSD also execute the source scan inside required
+confinement, including the descendant-mount rejection fixtures above. This
+does not qualify hostile concurrent mount races.
 
 The native macOS compiler reports a 20-byte `attribute_set_t` and an 8-byte
 `attrreference_t`. A real `getattrlistbulk` batch decodes its name reference at
@@ -101,25 +141,30 @@ these offsets from the SDK types; see Apple's
 FreeBSD's [nullfs mount implementation](https://raw.githubusercontent.com/freebsd/freebsd-src/main/sys/fs/nullfs/null_vfsops.c)
 allocates a fresh FSID and retains it during `statfs`; the
 [VFS allocator](https://raw.githubusercontent.com/freebsd/freebsd-src/main/sys/kern/vfs_subr.c)
-checks live mount IDs for collisions. This source inspection supports the
-mechanism choice and does not replace actual-kernel mount qualification.
+checks live mount IDs for collisions. Source inspection supports the mechanism
+choice; the live nullfs fixture provides separate kernel execution evidence.
 
-Confined scanner integration remains open. The Linux prototype denies `statx`;
-its source profile needs a tested descriptor-only query without granting
-general pathname metadata access. FreeBSD needs the corresponding mount-query
-descriptor right. Both profiles need private source-root descriptor adoption
-instead of the ordinary library's borrowed-FD duplication. Test these paths
-with actual kernels and mount fixtures before claiming a confined source scan.
+Confined source scans adopt prepared source and scratch descriptors without
+requiring duplication after restriction. Linux preflights the descriptor-only
+`statx(fd, NULL, AT_EMPTY_PATH, STATX_MNT_ID, ...)` form before installing the
+profile. The filter accepts only a null pointer (both halves), exact
+`AT_EMPTY_PATH`, and a descriptor other than `AT_FDCWD`. Older kernels lacking
+that form report the source profile unavailable before restriction. Pathname,
+empty-string, high-pointer-half, and high-flags-half bypass attempts are denied
+in the kernel tests. FreeBSD grants `CAP_FSTATFS` only for the source role.
 
-Worker descriptor cleanup requires Linux `close_range` or FreeBSD `closefrom`.
-Failure to establish complete closure prevents worker startup; resource limits
+Worker descriptor cleanup uses macOS close-on-exec-default spawn policy or
+`posix_spawn_file_actions_addclosefrom_np` on Linux and FreeBSD. Failure to
+establish complete closure prevents worker startup; resource limits
 cannot bound a fallback loop because descriptors survive a lowered limit. A
 regression retains a high descriptor, lowers the limit, and checks that cleanup
 either closes that descriptor or refuses to claim success.
 
 FreeBSD limits input to reading/seek/stat and flag inspection, output roots to
-creation/read/write/seek/stat/sync/truncation/removal, and optional source roots
-to lookup/read/seek/stat. No ioctl or metadata-mutation right is granted.
+creation/read/write/seek/stat/sync/truncation, scratch roots additionally to
+removal, and optional source roots
+to lookup/read/seek/stat/mount identity. No ioctl or metadata-mutation right is
+granted; input timestamp mutation is explicitly tested and denied.
 The prototype requires no inherited sockets or executable descriptors. Capsicum
 blocks ambient namespace access, as specified by
 [cap_enter(2)](https://man.freebsd.org/cgi/man.cgi?manpath=FreeBSD+14.3-RELEASE+and+Ports&query=cap_enter&sektion=2).

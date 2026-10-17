@@ -31,6 +31,9 @@ struct fsimg_source_root {
  * copying an exact range must check the returned length. Past-EOF offsets fail.
  */
 void fsimg_sources_release(fsimg_writer_t *);
+/* Internal startup consumes an already-reserved root FD; scanning occurs here. */
+fsimg_status_t fsimg_writer_adopt_tree(fsimg_writer_t *, int, const char *,
+    fsimg_error_t *);
 fsimg_status_t fsimg_source_open(fsimg_writer_t *, uint64_t, fsimg_error_t *);
 fsimg_status_t fsimg_source_read(fsimg_writer_t *, uint64_t, void *,
     size_t, size_t *, fsimg_error_t *);

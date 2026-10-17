@@ -82,6 +82,7 @@ static void test_index_failures(void);
 static void test_cancellation(void);
 static void test_slices(void);
 static void test_long_names(void);
+static void test_volume_labels(void);
 static void test_cached_name(void);
 static void test_cached_index(void);
 static bool cancelled(void *);
@@ -956,6 +957,14 @@ test_host_change(void)
 		}
 
 		CHECK(pwrite(output, "X", 1, (off_t)cluster_offset(&f, 3)) == 1);
+		/* Make the metadata change visible even on coarse timestamp clocks. */
+		{
+			const struct timespec changed[2] = {
+				{ .tv_nsec = UTIME_OMIT }, { .tv_sec = 1 }
+			};
+
+			CHECK(futimens(output, changed) == 0);
+		}
 		if (scenario == 0)
 			CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ESOURCE_CHANGED);
 		else
@@ -1452,6 +1461,65 @@ long_records(unsigned char *records, const uint16_t *name, size_t length,
 }
 
 static void
+test_volume_labels(void)
+{
+	const unsigned variants[] = { 12, 16, 32 };
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	unsigned char root[512];
+	fsimg_status_t status;
+
+	for (unsigned variant = 0; variant < 3; variant++) {
+		for (unsigned scenario = 0; scenario < 9; scenario++) {
+			fixture_init(&f, variants[variant]);
+			CHECK(pread(f.fd, root, sizeof(root), (off_t)f.root_offset) == sizeof(root));
+			bcopy(root, root + 32, 64);
+			bzero(root, 32);
+			bcopy("FSIMG TEST ", root, 11);
+			root[11] = scenario == 1 ? 0x28 : 0x08;
+			if (scenario == 2)
+				root[11] |= 0x10;
+			else if (scenario == 3)
+				bcopy(root, root + 32, 32);
+			else if (scenario == 4)
+				put16(root + 26, 2);
+			else if (scenario == 5)
+				put32(root + 28, 1);
+			else if (scenario == 6)
+				put16(root + 20, 1);
+			else if (scenario == 7)
+				root[11] |= 0x40;
+			else if (scenario == 8) {
+				/* A label in a subdirectory is invalid even without a root label. */
+				write_bytes(&f, cluster_offset(&f, 7) + 64, root, 32);
+				bcopy(root + 32, root, 64);
+				bzero(root + 64, sizeof(root) - 64);
+			}
+			write_bytes(&f, f.root_offset, root, sizeof(root));
+			fixture_open(&f);
+			CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+			status = fsimg_reader_next(f.reader, &entry, NULL);
+			if (scenario < 2) {
+				if (status != FSIMG_OK)
+					fprintf(stderr, "FAT%u label attributes 0x%02x: expected entry, got %d\n",
+					    variants[variant], root[11], status);
+				CHECK(status == FSIMG_OK && strcmp(entry->path, "/HELLO.TXT") == 0);
+				CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+				CHECK(strcmp(entry->path, "/SUB") == 0);
+				CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+				CHECK(strcmp(entry->path, "/SUB/EMPTY") == 0);
+				CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_DONE);
+			} else {
+				while (status == FSIMG_OK)
+					status = fsimg_reader_next(f.reader, &entry, NULL);
+				CHECK(status == FSIMG_ECORRUPT && entry == NULL);
+			}
+			fixture_close(&f);
+		}
+	}
+}
+
+static void
 test_long_names(void)
 {
 	fixture_t f;
@@ -1739,6 +1807,10 @@ main(int argc, char **argv)
 		test_cached_name();
 		return (0);
 	}
+	if (argc == 2 && strcmp(argv[1], "--volume-labels") == 0) {
+		test_volume_labels();
+		return (0);
+	}
 	if (argc == 2 && strcmp(argv[1], "--long-names") == 0) {
 		test_long_names();
 		return (0);
@@ -1814,6 +1886,7 @@ main(int argc, char **argv)
 	test_cancellation();
 	test_slices();
 	test_long_names();
+	test_volume_labels();
 	test_cached_name();
 	test_cached_index();
 	test_report_outputs();

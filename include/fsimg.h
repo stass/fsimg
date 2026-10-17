@@ -53,7 +53,8 @@ typedef enum fsimg_operation {
 	FSIMG_OP_CATALOG,
 	FSIMG_OP_WRITER,
 	FSIMG_OP_READER,
-	FSIMG_OP_VERIFY
+	FSIMG_OP_VERIFY,
+	FSIMG_OP_EXTRACT
 } fsimg_operation_t;
 
 typedef enum fsimg_resource {
@@ -140,6 +141,7 @@ typedef struct fsimg_stats {
 	/* Sampled allocated scratch blocks, distinct from logical scratch bytes. */
 	uint64_t	 scratch_physical_bytes;
 	uint64_t	 scratch_physical_peak;
+	uint64_t	 metadata_losses;
 } fsimg_stats_t;
 
 /* Options and callback tables must have exactly this size and version.
@@ -494,6 +496,34 @@ fsimg_status_t fsimg_verify(fsimg_reader_t *, unsigned,
 void fsimg_reader_free(fsimg_reader_t *);
 fsimg_status_t fsimg_format_next(size_t *, fsimg_format_info_t *,
     fsimg_error_t *);
+
+#define FSIMG_EXTRACT_ALLOW_LOSS 0x01u
+#define FSIMG_EXTRACT_TIMES 0x02u
+#define FSIMG_EXTRACT_WALL_OFFSET 0x04u
+
+typedef struct fsimg_extract_options {
+	size_t		 size;
+	uint32_t	 version;
+	uint32_t	 flags;
+	/* Absolute UTF-8 lookup path; format case/alias rules apply. NULL means /. */
+	const char	*selection;
+	uint64_t	 max_output_bytes; /* Zero uses the reader's ceiling. */
+	/* Explicit minutes east of UTC for unknown-zone calendar timestamps. */
+	int32_t		 wall_offset_minutes;
+	uint64_t	 reserved[4];
+} fsimg_extract_options_t;
+
+/* Requires an untouched reader. Creates one exclusive private directory and
+ * consumes traversal, preserving hierarchy and selected ancestors. It never
+ * merges, overwrites, restores privileged metadata, or sandboxes its host.
+ * Failures after directory creation leave private incomplete output at name.
+ * TIMES restores access/modification through opened descriptors; wall times
+ * require WALL_OFFSET. Optional losses require ALLOW_LOSS (initialized default)
+ * and are reported through the context callback/statistics. Required losses fail.
+ */
+void fsimg_extract_options_init(fsimg_extract_options_t *);
+fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,
+    const fsimg_extract_options_t *, fsimg_error_t *);
 
 #ifdef __cplusplus
 }

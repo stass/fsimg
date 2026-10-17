@@ -13,4 +13,5 @@ find "$1/include" "$1/lib" "$1/compat" "$1/cmd" "$1/test" "$1/.github" \
     -exec awk '/[^\001-\177]/ { print FILENAME ":" FNR ": non-ASCII byte"; bad=1 } END { if (bad) exit 1 }' {} +
 awk '/[^\001-\177]/ { print FILENAME ":" FNR ": non-ASCII byte"; bad=1 } END { if (bad) exit 1 }' \
     "$1/configure.ac" "$1/Makefile.am" "$1/build-aux/check-ascii.sh" \
-    "$1/build-aux/sanitize.sh" "$1/build-aux/fuzz.sh"
+    "$1/build-aux/sanitize.sh" "$1/build-aux/fuzz.sh" \
+    "$1/build-aux/build-fatcat.sh" "$1/build-aux/fatcat-freebsd.patch"

@@ -71,6 +71,8 @@ struct fsimg_writer {
 	fsimg_ctx_t	*ctx;
 	fsimg_plan_t	*plan;
 	fsimg_write_options_t options;
+	/* Prepared worker output authority cannot be imported as source content. */
+	fsimg_host_file_t output_root;
 	fsimg_session_t	 session;
 	fsimg_writer_state_t state;
 	fsimg_stream_t	*entries;
@@ -93,6 +95,7 @@ struct fsimg_writer {
 	uint32_t	 record_capacity;
 	bool		 provider_set;
 	bool		 catalog_ready;
+	bool		 output_root_known;
 	unsigned	 variant;
 	char		 label[12];
 };
