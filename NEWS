@@ -16,3 +16,11 @@ metadata validity contracts. External catalog ordering assigns stable IDs and
 parent links, validates sibling collisions, and retains paged result records.
 Source reopening validates identity and mount boundaries; one writer-owned
 current source is released on completion, failure, or destruction.
+
+FAT12, FAT16, and FAT32 readers provide header information, depth-first
+enumeration, current-file content and range reads, and complete structural
+verification with optional payload read-through. Directory prepasses reject
+long-name/short-alias ambiguity. Allocation chains, directory ownership, random
+access indexes, and global allocation verification use bounded resources.
+Names use pinned CP437 and Unicode simple-uppercase tables; timestamps retain
+wall-clock semantics. Reader and writer capabilities are reported independently.

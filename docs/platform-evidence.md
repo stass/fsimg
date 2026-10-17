@@ -16,13 +16,38 @@ no remote kernel run is recorded here.
 | Bounded host scanning | Native directory batches, no-follow component opens, mount identity, source-change checks | Ordinary native macOS source tests; actual descendant-mount fixtures and Linux/FreeBSD runs remain open |
 
 Local checks use Darwin 25.6.0 on x86_64, Apple Clang 21.0.0, and APFS. Native
-`make check`, combined ASan/UBSan, and standalone UBSan each report ten passing
-executables and one sandbox skip, with no sanitizer findings. `make distcheck`
+`make check`, combined ASan/UBSan, and standalone UBSan each report twelve passing
+tests and one sandbox skip, with no sanitizer findings. `make distcheck`
 passes archive rebuilding, tests, installation, uninstallation, and cleanup.
 The shared library links only to the host's libSystem. Publication tests cover
 APFS; this does not qualify other filesystems. Standalone LSan and MSan report
 unsupported-host skips. Linux/FreeBSD confinement and their sanitizer runs
 remain unverified locally.
+
+FAT qualification uses mtools 4.0.49 and dosfstools 4.2 to create, populate, and
+independently check FAT12, FAT16, FAT32, and a FAT16 image with 4096-byte sectors
+and 8192-byte clusters. fsimg enumerates their Unicode names, compares file
+bytes, and completes structural plus payload verification. The FAT12 image
+contains forced fragmentation; the FAT32 image confirms cluster zero in a
+subdirectory's root-parent `..` record. Synthetic fixtures cover 96 legal
+geometry combinations, boundary cluster counts, corruption and failure paths,
+and a sparse 4 GiB-minus-one-byte file whose boundary bytes and allocation are
+checked without reading the complete payload.
+
+The fully instrumented libFuzzer smoke run uses Homebrew LLVM 23.1.2 with
+ASan/UBSan and library coverage. It completes 1000 mutations with all three FAT
+seed variants and finite reader budgets, reporting `cov: 2072` and `ft: 5734`
+with no sanitizer or accounting findings. This is finite parser
+exercise, not sustained fuzzing or an exhaustive compatibility claim. See
+[build commands](build.md) for instrumentation and logical zero-tail details.
+
+The FAT directory scale fixture enumerates and structurally verifies 65,520
+empty files with a 16 MiB context budget and one shared cache page. It reports
+2,190,928 peak charged memory bytes, 28,632,432 logical scratch bytes,
+28,639,232 sampled physical scratch bytes, five descriptors, and 2,134,938 I/O
+calls in 104.821 seconds. Process `ru_maxrss` is 5,382,144 bytes. This exercises
+metadata spilling above the memory budget; it does not measure payload
+throughput or qualify CLI/worker RSS.
 
 The metadata `check-scale` fixture sorts 24 MiB and fills/queries a 24 MiB array
 at a 16 MiB context budget. It reports 329,088 bytes of charged peak memory,

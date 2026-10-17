@@ -13,7 +13,13 @@ acceptance gate.
 | 1. Contracts and platform substrate | Implemented; kernel qualification remains open | Native build, I/O, publication, and sanitizer checks; Linux/FreeBSD confinement requires actual-kernel evidence in [platform-evidence.md](platform-evidence.md) |
 | 2. Bounded metadata storage | Implemented and validated on the native host | Shared cache, private scratch, record streams, arrays/bitsets, stable external sort, fault tests, ASan/UBSan, and above-budget scale checks in [build.md](build.md) |
 | 3. Sources and catalog | Implemented and validated on the native host | Descriptor-relative scanning, source providers, deterministic catalog, common writer lifecycle, fault regressions, and scale/sanitizer checks in [build.md](build.md); source-profile integration remains part of platform qualification |
-| 4–9 | Pending | Follow the dependencies and completion gates below; format implementation also requires platform qualification |
+| 4. FAT readers and verification | Implemented and validated on macOS | FAT12/16/32 external fixtures, bounded traversal/indexing and full verification, corruption/fault tests, ASan/UBSan, instrumented fuzzing, and above-budget directory checks in [build.md](build.md) |
+| 5–9 | Pending | Follow the dependencies and completion gates below |
+
+Development and qualification currently target macOS. Linux/FreeBSD kernel
+qualification and confined source-scanner integration remain open in `TODO.md`;
+they do not block native library format work. The portable target contracts
+remain in force, and this sequencing does not qualify either sandbox backend.
 
 ## Dependency order
 

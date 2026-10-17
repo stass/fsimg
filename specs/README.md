@@ -14,6 +14,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Sources and catalogs](design-sources.md) | Source identity, scanning/reopening, metadata encoding, deterministic catalog preparation |
 | [Security](design-security.md) | Threat model, extraction, sandboxing, publication, and adversarial tests |
 | [Filesystem formats](design-formats.md) | FAT and exFAT profiles and interoperability requirements |
+| [FAT reader](design-fat-reader.md) | FAT geometry, name profile, traversal, content indexing, and structural verification |
 | [Command line](design-cli.md) | Commands, flags, defaults, output, and failure behavior |
 | [Style](style.md) | C conventions and readability review |
 | [Implementation plan](../docs/implementation-plan.md) | Ordered work packages, dependencies, validation, and completion gates |

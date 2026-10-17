@@ -1,0 +1,61 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+set -eu
+MKFS_FAT='@MKFS_FAT@'
+FSCK_FAT='@FSCK_FAT@'
+MCOPY='@MCOPY@'
+MMD='@MMD@'
+MDEL='@MDEL@'
+for tool in "$MKFS_FAT" "$FSCK_FAT" "$MCOPY" "$MMD" "$MDEL"; do
+    if test -z "$tool"; then
+        echo 'SKIP: independent FAT tests require dosfstools and mtools'
+        exit 77
+    fi
+done
+fixture_dir=$(mktemp -d fat-interop-XXXXXX)
+trap 'rm -rf "$fixture_dir"' 0
+trap 'exit 1' 1 2 15
+printf 'Independent FAT fixture.\n' > "$fixture_dir/payload"
+unicode_name=$(printf 'R\303\251sum\303\251 collection.txt')
+
+# Each log is the fixture manifest: formatter/validator versions, geometry,
+# population commands and the independent validator's outcome. No imported
+# binary fixtures or third-party implementation code are distributed.
+"$MKFS_FAT" --help 2>&1 | sed -n '1p'
+"$MCOPY" -V
+for profile in fat12 fat16 fat32 fat16-wide; do
+    sector=512
+    spc=1
+    case "$profile" in
+    fat12) variant=12; kib=1440 ;;
+    fat16) variant=16; kib=16384 ;;
+    fat32) variant=32; kib=65536 ;;
+    fat16-wide) variant=16; kib=65536; sector=4096; spc=2 ;;
+    esac
+    image="$fixture_dir/$profile.img"
+    echo "fixture: FAT$variant; $kib KiB; $sector-byte sectors; $spc sectors/cluster"
+    echo "create: mkfs.fat --invariant -F $variant -S $sector -s $spc -n FSIMGTEST -C image $kib"
+    "$MKFS_FAT" --invariant -F "$variant" -S "$sector" -s "$spc" -n FSIMGTEST -C "$image" "$kib"
+    echo 'populate: mcopy Hello.txt, Unicode long name; mmd Nested; mcopy Nested/Deep.txt'
+    "$MCOPY" -i "$image" "$fixture_dir/payload" ::Hello.txt
+    "$MCOPY" -i "$image" "$fixture_dir/payload" "::$unicode_name"
+    "$MMD" -i "$image" ::Nested
+    "$MCOPY" -i "$image" "$fixture_dir/payload" ::Nested/Deep.txt
+    if test "$profile" = fat12; then
+        # Leave a 400 KiB hole and a tail shorter than 600 KiB. The new file
+        # must span both, independently forcing a fragmented allocation chain.
+        ./test-fat --make-payload "$fixture_dir/filler" 409600
+        ./test-fat --make-payload "$fixture_dir/fragment" 614400
+        for name in A B C; do
+            "$MCOPY" -i "$image" "$fixture_dir/filler" "::$name.BIN"
+        done
+        "$MDEL" -i "$image" ::B.BIN
+        "$MCOPY" -i "$image" "$fixture_dir/fragment" ::FRAG.BIN
+        "$MDEL" -i "$image" ::A.BIN ::C.BIN
+        echo 'fragment: three 400 KiB fillers, delete middle, copy 600 KiB, delete remaining fillers'
+    fi
+    "$FSCK_FAT" -n "$image"
+    ./test-fat --external "$image" "fat$variant"
+    echo 'result: fsck.fat -n and fsimg enumeration/content/full verification passed'
+done

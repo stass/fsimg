@@ -15,10 +15,10 @@ jobs:
       - name: Development tools
         run: |
           if [ "$(uname -s)" = Darwin ]; then
-            brew install autoconf automake libtool
+            brew install autoconf automake libtool mtools dosfstools
           else
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool clang
+            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools
           fi
       - name: Build and check
         run: |
@@ -48,7 +48,7 @@ jobs:
         with:
           usesh: true
           prepare: |
-            pkg install -y autoconf automake libtool
+            pkg install -y autoconf automake libtool mtools dosfstools
             pw useradd fsimgtest -m
           run: |
             chown -R fsimgtest .

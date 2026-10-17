@@ -140,7 +140,7 @@ read_directory_batch(fsimg_writer_t *writer, scan_directory_t *directory)
 
 fsimg_status_t
 fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
-    const char *destination, fsimg_error_t *error)
+    const char *image_directory, fsimg_error_t *error)
 {
 	scan_directory_t *directories, *current;
 	fsimg_host_file_t identity;
@@ -182,8 +182,8 @@ fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
 			*error = detail;
 		return (detail.status);
 	}
-	prefix_length = strlen(destination);
-	bcopy(destination, image_path, prefix_length + 1);
+	prefix_length = strlen(image_directory);
+	bcopy(image_directory, image_path, prefix_length + 1);
 	depth = 0;
 	status = open_object(writer, root->fd, ".", true, &fd, &identity, error);
 	if (status != FSIMG_OK)

@@ -9,8 +9,8 @@
 #include <sys/mount.h>
 #endif
 
-#include <fcntl.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stddef.h>
 #include <string.h>

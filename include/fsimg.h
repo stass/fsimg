@@ -21,6 +21,7 @@ extern "C" {
 typedef struct fsimg_ctx fsimg_ctx_t;
 typedef struct fsimg_io fsimg_io_t;
 typedef struct fsimg_writer fsimg_writer_t;
+typedef struct fsimg_reader fsimg_reader_t;
 
 typedef enum fsimg_status {
 	FSIMG_OK = 0,
@@ -49,7 +50,9 @@ typedef enum fsimg_operation {
 	FSIMG_OP_METADATA,
 	FSIMG_OP_SOURCE,
 	FSIMG_OP_CATALOG,
-	FSIMG_OP_WRITER
+	FSIMG_OP_WRITER,
+	FSIMG_OP_READER,
+	FSIMG_OP_VERIFY
 } fsimg_operation_t;
 
 typedef enum fsimg_resource {
@@ -313,6 +316,108 @@ typedef struct fsimg_source_ops {
  * select an accepted format driver.
  */
 void fsimg_source_ops_init(fsimg_source_ops_t *);
+
+#define FSIMG_CAP_READ 0x01u
+#define FSIMG_CAP_WRITE 0x02u
+#define FSIMG_CAP_VERIFY 0x04u
+#define FSIMG_VOLUME_GEOMETRY 0x01u
+#define FSIMG_VOLUME_LABEL 0x02u
+#define FSIMG_VOLUME_FREE 0x04u
+#define FSIMG_VERIFY_PAYLOAD 0x01u
+
+typedef enum fsimg_validation_scope {
+	FSIMG_VALIDATION_HEADER = 1,
+	FSIMG_VALIDATION_STRUCTURAL,
+	FSIMG_VALIDATION_PAYLOAD
+} fsimg_validation_scope_t;
+
+typedef struct fsimg_read_options {
+	size_t		 size;
+	uint32_t	 version;
+	uint32_t	 flags;
+	const char	*format;
+	/* Zero or 437 selects CP437; other codepages are unsupported. */
+	uint32_t	 fat_codepage;
+	uint64_t	 reserved[4];
+} fsimg_read_options_t;
+
+typedef struct fsimg_volume_info {
+	uint32_t	 valid;
+	unsigned	 capabilities;
+	char		 format[16];
+	char		 profile[40];
+	char		 label[48];
+	uint64_t	 volume_bytes;
+	uint64_t	 allocation_units;
+	uint64_t	 free_bytes;
+	uint32_t	 sector_bytes;
+	uint32_t	 allocation_unit_bytes;
+	fsimg_time_basis_t time_basis;
+	fsimg_validation_scope_t scope;
+	/* Recorded clean/error flags; they do not certify structural consistency.
+	 * FAT12 has no such flags and reports clean=true, io_error=false.
+	 */
+	bool		 clean;
+	bool		 io_error;
+} fsimg_volume_info_t;
+
+typedef struct fsimg_format_info {
+	char		 name[16];
+	char		 profile[40];
+	unsigned	 capabilities;
+	/* Bit FSIMG_ENTRY_FILE or FSIMG_ENTRY_DIRECTORY denotes support. */
+	uint32_t	 entry_kinds;
+	uint32_t	 metadata_fields;
+	/* Bit n denotes a legal size of 2^n bytes. */
+	uint32_t	 sector_size_mask;
+	uint32_t	 allocation_unit_size_mask;
+	/* Independent upper bounds; not every combination fits a legal volume. */
+	uint64_t	 max_file_bytes;
+	uint64_t	 max_volume_bytes;
+	uint32_t	 max_name_utf16_units;
+} fsimg_format_info_t;
+
+typedef struct fsimg_verify_report {
+	fsimg_validation_scope_t scope;
+	bool		 complete;
+	uint64_t	 files;
+	uint64_t	 directories; /* Includes the implicit root. */
+	uint64_t	 logical_bytes;
+	uint64_t	 payload_bytes_read;
+	uint64_t	 allocated_clusters;
+	uint64_t	 free_clusters;
+	uint64_t	 bad_clusters;
+} fsimg_verify_report_t;
+
+/* Input and its storage remain borrowed and stable until reader destruction.
+ * Opening checks headers only. next validates each directory's lookup namespace
+ * before exposing its children, then visits depth first in on-disk order.
+ * The snapshot is borrowed until the next next call begins, fatal failure,
+ * or destruction. Content functions address only the current regular file.
+ * read_at clips to EOF; offsets past EOF are invalid. Confirmed bytes can
+ * accompany an error. EOF iteration is stable and returns DONE with NULL.
+ * Fatal errors invalidate the snapshot and fail the reader; argument/state
+ * errors detected before work preserve it. No operation enters a sandbox.
+ * verify requires an untouched reader, consumes traversal, and reports complete
+ * only after the entire named scope succeeds. A failed report is incomplete.
+ * Initialize a format cursor to zero; enumeration allocates no catalog.
+ */
+void fsimg_read_options_init(fsimg_read_options_t *);
+fsimg_status_t fsimg_reader_open(fsimg_ctx_t *, fsimg_io_t *,
+    const fsimg_read_options_t *, fsimg_reader_t **, fsimg_error_t *);
+fsimg_status_t fsimg_reader_next(fsimg_reader_t *, const fsimg_entry_t **,
+    fsimg_error_t *);
+fsimg_status_t fsimg_reader_get_info(const fsimg_reader_t *,
+    fsimg_volume_info_t *, fsimg_error_t *);
+fsimg_status_t fsimg_reader_read_at(fsimg_reader_t *, uint64_t, void *,
+    size_t, size_t *, fsimg_error_t *);
+fsimg_status_t fsimg_reader_next_range(fsimg_reader_t *, uint64_t,
+    fsimg_range_t *, fsimg_error_t *);
+fsimg_status_t fsimg_verify(fsimg_reader_t *, unsigned,
+    fsimg_verify_report_t *, fsimg_error_t *);
+void fsimg_reader_free(fsimg_reader_t *);
+fsimg_status_t fsimg_format_next(size_t *, fsimg_format_info_t *,
+    fsimg_error_t *);
 
 #ifdef __cplusplus
 }

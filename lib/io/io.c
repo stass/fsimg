@@ -14,6 +14,7 @@
 
 #include "host.h"
 #include "internal.h"
+#include "io.h"
 
 struct fsimg_io {
 	fsimg_ctx_t	*ctx;
@@ -30,7 +31,7 @@ struct fsimg_io {
 static fsimg_status_t io_range(fsimg_io_t *, uint64_t, uint64_t,
     fsimg_error_t *);
 static fsimg_status_t io_transfer(fsimg_io_t *, uint64_t, void *, size_t,
-    size_t *, bool, bool, fsimg_error_t *);
+    size_t *, bool, bool, fsimg_session_t *, fsimg_error_t *);
 static fsimg_status_t adapter_transfer(fsimg_io_t *, uint64_t, void *,
     size_t, size_t *, bool, fsimg_error_t *);
 static fsimg_status_t callback_result(fsimg_status_t, fsimg_error_t *);
@@ -41,6 +42,32 @@ void
 fsimg_io_bind_session(fsimg_io_t *io, fsimg_session_t *session)
 {
 	io->root->session = session;
+}
+
+fsimg_ctx_t *
+fsimg_io_context(const fsimg_io_t *io)
+{
+	return (io == NULL ? NULL : io->ctx);
+}
+
+fsimg_status_t
+fsimg_io_identity(fsimg_io_t *io, fsimg_host_file_t *identity, bool *known,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	*known = false;
+	bzero(identity, sizeof(*identity));
+	status = io_range(io, 0, 0, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (io->root->fd == -1)
+		return (FSIMG_OK);
+	if (fsimg_host_file(io->root->fd, identity) == -1)
+		return (fsimg_error_set(error, FSIMG_EIO, errno,
+		    FSIMG_OP_IO, "image identity query failed"));
+	*known = true;
+	return (FSIMG_OK);
 }
 
 void
@@ -343,7 +370,8 @@ adapter_transfer(fsimg_io_t *root, uint64_t offset, void *buffer,
 
 static fsimg_status_t
 io_transfer(fsimg_io_t *io, uint64_t offset, void *buffer, size_t length,
-    size_t *transferred, bool writing, bool exact, fsimg_error_t *error)
+    size_t *transferred, bool writing, bool exact, fsimg_session_t *session,
+    fsimg_error_t *error)
 {
 	fsimg_error_t detail;
 	fsimg_progress_t progress;
@@ -367,6 +395,8 @@ io_transfer(fsimg_io_t *io, uint64_t offset, void *buffer, size_t length,
 		return (FSIMG_OK);
 
 	root = io->root;
+	if (session == NULL)
+		session = root->session;
 	done = 0;
 	interruptions = 0;
 	bzero(&progress, sizeof(progress));
@@ -379,8 +409,8 @@ io_transfer(fsimg_io_t *io, uint64_t offset, void *buffer, size_t length,
 		batch = length - done;
 		if (batch > root->ops.max_transfer)
 			batch = root->ops.max_transfer;
-		if (root->session != NULL) {
-			status = fsimg_session_charge(root->session, 0, 0, 1, &detail);
+		if (session != NULL) {
+			status = fsimg_session_charge(session, 0, 0, 1, &detail);
 			if (status != FSIMG_OK)
 				break;
 		}
@@ -435,7 +465,7 @@ fsimg_io_read_at(fsimg_io_t *io, uint64_t offset, void *buffer, size_t length,
     size_t *transferred, fsimg_error_t *error)
 {
 	return (io_transfer(io, offset, buffer, length, transferred, false,
-	    false, error));
+	    false, NULL, error));
 }
 
 fsimg_status_t
@@ -443,7 +473,7 @@ fsimg_io_write_at(fsimg_io_t *io, uint64_t offset, const void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
 	return (io_transfer(io, offset, (void *)buffer, length, transferred,
-	    true, false, error));
+	    true, false, NULL, error));
 }
 
 fsimg_status_t
@@ -451,7 +481,7 @@ fsimg_io_read_exact(fsimg_io_t *io, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
 	return (io_transfer(io, offset, buffer, length, transferred, false,
-	    true, error));
+	    true, NULL, error));
 }
 
 fsimg_status_t
@@ -459,7 +489,16 @@ fsimg_io_write_exact(fsimg_io_t *io, uint64_t offset, const void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
 	return (io_transfer(io, offset, (void *)buffer, length, transferred,
-	    true, true, error));
+	    true, true, NULL, error));
+}
+
+fsimg_status_t
+fsimg_io_read_session(fsimg_io_t *io, fsimg_session_t *session,
+    uint64_t offset, void *buffer, size_t length, size_t *transferred,
+    fsimg_error_t *error)
+{
+	return (io_transfer(io, offset, buffer, length, transferred, false,
+	    true, session, error));
 }
 
 fsimg_status_t

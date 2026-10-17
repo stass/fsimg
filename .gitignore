@@ -8,5 +8,6 @@
 /build-aux/*
 !/build-aux/check-ascii.sh
 !/build-aux/sanitize.sh
+!/build-aux/fuzz.sh
 *~
 .DS_Store

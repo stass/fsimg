@@ -177,6 +177,8 @@ The [sources and catalogs design](design-sources.md) defines common collection,
 source identity and reopening, and immutable catalog preparation independently
 of format planning. Common collection uses private interfaces; public writer
 construction selects an accepted format driver.
+The [FAT reader design](design-fat-reader.md) defines bounded directory
+prepasses, current-file indexing, and full allocation verification for FAT.
 
 Collection records source references, validation orders and checks entries,
 planning fixes geometry and extents, and emission copies content directly to

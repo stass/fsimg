@@ -2,7 +2,8 @@
 
 Development requires Autoconf, Automake, Libtool, make, a C11 compiler, and a
 C++ compiler. On macOS install missing tools with `brew install autoconf
-automake libtool`. Linux and FreeBSD use their native development packages.
+automake libtool`. Independent FAT tests additionally use `brew install mtools
+dosfstools`. Linux and FreeBSD use their native development packages.
 Release archives include generated Autotools support and build without those
 generators. The installed library has no third-party runtime dependencies.
 
@@ -16,11 +17,13 @@ cd build
 make
 make check
 make check-security
+make check-integration
 make check-asan
 make check-ubsan
 make check-lsan
 make check-msan
 make check-scale
+make check-fuzz
 ```
 
 `check` builds and runs native tests, C11/C++ header examples, and an ASCII
@@ -35,7 +38,8 @@ operations. It must run on the kernel being qualified.
 Sanitizer targets configure separate build directories beneath the current build
 and run the full suite. `check-asan` combines ASan and UBSan, enables stack
 use-after-return and scope checks, and enables leak and initialization-order
-checks on Linux. macOS ASan does not support those latter checks. Standalone
+checks on Linux. macOS ASan does not support leak or initialization-order
+checks. ASan/fuzz runs halt on UBSan findings and print a stack trace. Standalone
 LSan/MSan targets print SKIP on non-Linux hosts; this is not a passing check.
 Linux MSan requires Clang and an appropriate runtime; an unsupported compiler
 or runtime fails configuration rather than being reported as a pass. TSan is
@@ -72,6 +76,56 @@ errors, interruption, and cumulative work limits. Corrupt catalog, index, child,
 and host-source records are rejected before values reach a provider or a copy
 operation.
 
+FAT tests use an independently encoded sparse fixture family across all 96
+combinations of three variants, four sector sizes, and eight cluster sizes.
+They exercise type thresholds, legal maximum cluster identifiers, FAT12 window
+boundaries, fragmented sequential/random reads, long-name sequences and alias
+collisions, directory sharing/cycles, global ownership, mirrored/active FATs,
+FSInfo/backup headers, bounded slices, corruption, source changes, allocation
+failures, cancellation, and scratch faults. A maximum FAT file has 4 GiB minus
+one logical byte; its sparse test transfers only boundary markers and verifies
+allocation without reading through four gigabytes. Logical FAT32 geometry
+ceiling checks do not claim a physical large-image traversal.
+
+`check-integration` creates images with dosfstools and populates them with mtools.
+The ordinary suite includes this script and explicitly skips it if these
+development tools are absent. The dedicated target returns that skip rather
+than claiming success. The manifest is `test/fat-integration.sh.log`: formatter
+and validator versions, geometry, population commands, a forced fragmentation
+recipe, and outcomes. Fixtures include all FAT variants and a 4096-byte-sector,
+8192-byte-cluster FAT16 case. Bytes and Unicode names are checked, then complete
+payload verification runs. No test mounts an image or needs root.
+
+`check-fuzz` builds and checks a separate `sanitizer-fuzz` static library with
+ASan/UBSan and `-fsanitize=fuzzer-no-link` coverage on every object, then compiles
+`fuzz/fat.c` with Clang's libFuzzer runtime, and creates seeds for all FAT variants
+using the independent fixture builder. It runs 1000 mutations with a 3 MiB input ceiling
+and a ten-second per-input timeout. Each reader has a 16 MiB budget, 1000-entry,
+eight-level and 250,000-work limits, and no scratch authority. Each input is
+read both as an exact-length byte array and as a prefix of zero-filled logical
+storage. The latter reaches FAT32's minimum geometry without a large resident
+seed; it does not allocate or transfer the logical volume. The target fuzzes
+probe, directory/name parsing, chain traversal, content/range reads, index
+construction, and full verification; it also checks cleanup accounting.
+Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults to its
+sibling `clang++`. Use a fresh build directory when changing compilers. Apple
+Clang lacks the libFuzzer runtime; macOS fuzz validation uses Homebrew LLVM:
+
+```sh
+brew install llvm
+FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
+```
+
+The exact standalone commands from a configured build are:
+
+```sh
+make test-fat
+sh ../build-aux/fuzz.sh "$(cd .. && pwd)"
+```
+
+The target's `fuzz-corpus/` and libFuzzer crash artifacts are disposable build
+outputs. A finite smoke run is not a sustained fuzzing campaign.
+
 `check-scale` is a separate, non-sanitized qualification. It sorts 24 MiB
 of generated records and fills/queries a 24 MiB fixed-record array with a 16 MiB
 context budget, a 16-page shared cache, a 256 KiB run allowance, and merge fan-in
@@ -87,6 +141,21 @@ memory, scratch, and descriptors, cumulative I/O calls, and elapsed time.
 Scratch should use a disk-backed filesystem; a RAM-backed directory consumes
 system memory outside the library heap budget.
 
+The FAT scale case lists and structurally verifies 65,520 empty files in one
+directory at a 16 MiB context budget and one shared cache page. It requires
+scratch use above that budget, checks on-disk order and ownership, and reports
+charged memory, scratch, descriptors, I/O, wall time, and process RSS:
+
+```sh
+./test-fat --scale
+```
+
+On APFS this case reports 2,190,928 peak charged memory bytes, 28,632,432
+logical scratch bytes, 28,639,232 sampled physical scratch bytes, five owned
+descriptors, and 2,134,938 I/O calls in 104.821 seconds. Process `ru_maxrss` is
+5,382,144 bytes. These measurements cover enumeration and structural verification
+of empty files, not payload throughput or the CLI/worker RSS gate.
+
 The extended ten-million-file catalog uses the same generated provider, 10,000
 explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 
@@ -94,12 +163,17 @@ explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 ./test-catalog --scale 10000000
 ```
 
-Native macOS validation reports ten passing tests and the explicit sandbox
+Native macOS validation reports twelve passing tests and the explicit sandbox
 skip in ordinary, ASan/UBSan, and standalone UBSan runs. The metadata scale
 fixture reports a 329,088-byte allocation peak, 75,795,888-byte logical scratch
 peak, and 134,683 I/O calls on APFS. These are measurements of this fixture,
 not bounds promised for every metadata workload. Linux/FreeBSD checks require
 their own host runs.
+
+The instrumented fuzz smoke run uses Homebrew LLVM 23.1.2 and completes 1000
+mutations with FAT12/16/32 seeds, reporting `cov: 2072` and `ft: 5734`
+without sanitizer or cleanup-accounting findings. These counters describe one
+finite run and vary with the generated mutation sequence.
 
 The 100,000-file wide catalog reports a 3,157,912-byte allocation peak,
 58,500,368 scratch bytes, seven descriptors, and 86,607 I/O calls. The grouped
@@ -147,7 +221,9 @@ private session counters persist across incremental calls. An output ceiling
 of zero is derived by the containing reader/writer from its volume length; optional
 work ceilings are disabled at zero.
 
-No command-line executable or format capability is installed. Common writer
+The installed header/library expose FAT readers, volume information, current-file
+content/range reads, full verification, and independent reader/writer capability
+enumeration. No command-line executable is installed. Common writer
 collection/preparation and source access are private; public writer construction
 selects an accepted format driver. The sandbox and publication functions are
 private mechanism prototypes; they do not provide worker supervision, staging

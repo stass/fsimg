@@ -4,14 +4,19 @@
 
 * [High] **fsimg tool and library** (`lib/`, `cmd/fsimg/`, `test/`): implement the
   [target specification](specs/README.md) through the ordered
-  [implementation plan](docs/implementation-plan.md), continuing with FAT readers
-  and structural verification. Format implementation requires platform
-  qualification. The acceptance gates cover
+  [implementation plan](docs/implementation-plan.md), continuing with FAT planning
+  and writing on macOS. Linux/FreeBSD platform qualification
+  is deferred. The acceptance gates cover
   bounded metadata and payload processing, FAT/exFAT interoperability, secure
   extraction, actual-kernel sandbox validation, failure handling, and measured
   operation on gigantic volumes and catalogs.
 
 ## Bugs by subsystem
+
+* [Low] **Source-scanner diagnostics** (`lib/source/scan.c`, `compat/host.c`,
+  `test/source.c`): a socket that fails during open is reported as host I/O
+  failure instead of unsupported source kind. Add a socket regression and
+  classify the failure without guessing object type from `ENXIO` alone.
 
 * [Medium] **FreeBSD directory decoding** (`compat/host.c`, `test/source.c`):
   skip unused native directory records with `d_fileno == 0` after validating
@@ -29,8 +34,8 @@
   inherited descriptors, alternate ABIs, and publication on deployment
   filesystems. Integrate bounded directory reads and descriptor-only mount
   queries with the source profile: Linux seccomp denies the scanner's `statx`,
-  FreeBSD needs mount-query rights, and confined source roots need private
-  descriptor adoption. Do not permit general pathname metadata queries or
+  FreeBSD needs mount-query rights, and source roots and scratch-context
+  construction need private descriptor adoption. Do not permit pathname metadata queries or
   descriptor duplication to make these paths work. Qualify rejection of
   same-filesystem mount aliases with real mount fixtures. The macOS host cannot
   establish those kernel guarantees; see
