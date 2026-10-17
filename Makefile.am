@@ -11,6 +11,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
+DEVELOPMENT_TOOLS_ENV = FATCAT="$(FATCAT)"
 include_HEADERS = include/fsimg.h
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libfsimg.pc
@@ -58,6 +59,14 @@ fsimg_SOURCES = cmd/fsimg/main.c cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/spawn.c
 fsimg_LDADD = libfsimg-core.la
 noinst_PROGRAMS = example-create-tree example-provider example-read-slice example-extract
+noinst_PROGRAMS += fsimg-rss fsimg-rss-guard
+fsimg_rss_SOURCES = $(fsimg_SOURCES) test/qualify-rss.c
+# Qualification collects each existing child reap without a second supervisor.
+fsimg_rss_CPPFLAGS = $(AM_CPPFLAGS) -Dmain=fsimg_measured_main \
+	-Dwaitpid=fsimg_rss_waitpid
+fsimg_rss_LDADD = libfsimg-core.la
+fsimg_rss_guard_SOURCES = test/qualify-rss.c test/qualify-rss-guard.c test/test.h
+fsimg_rss_guard_CPPFLAGS = $(AM_CPPFLAGS) -DFSIMG_RSS_GUARD
 example_create_tree_SOURCES = examples/create-tree.c examples/example.h
 example_create_tree_LDADD = libfsimg.la
 example_provider_SOURCES = examples/provider.c examples/example.h
@@ -69,7 +78,7 @@ example_extract_LDADD = libfsimg.la
 check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale test-cli header-c header-cxx
+	test-exfat-scale test-cli test-qualify test-fragment header-c header-cxx
 TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh test/cli.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh test/cli.sh
 test_core_SOURCES = test/core.c test/test.h
@@ -78,6 +87,10 @@ test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
 	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h
 test_cli_LDADD = libfsimg-core.la
+test_qualify_SOURCES = test/qualify.c test/test.h
+test_qualify_LDADD = libfsimg.la
+test_fragment_SOURCES = test/fragment.c test/test.h
+test_fragment_LDADD = libfsimg.la
 test_io_SOURCES = test/io.c test/test.h
 test_io_LDADD = libfsimg.la
 test_meta_SOURCES = test/meta.c test/test.h
@@ -129,18 +142,18 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
-	docs/references.md .github/workflows/check.yml \
+	docs/references.md docs/qualification.md .github/workflows/check.yml \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
 	specs/design-extraction-worker.md specs/design-exfat.md \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in fuzz/fat.c fuzz/protocol.c \
-	test/cli.sh.in test/cli.py \
+	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md
 check-local: check-ascii
 .PHONY: check-ascii check-asan check-ubsan check-lsan check-msan check-security
-.PHONY: check-scale check-fuzz
+.PHONY: check-scale check-fuzz check-fuzz-extended check-cli-rss check-extended
 .PHONY: check-integration
 .PHONY: check-install
 check-install: all
@@ -166,19 +179,30 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-catalog --scale 100000
 	./test-fat --scale
 	./test-fat-write --scale
-	./test-exfat-scale --huge
+	./test-exfat-scale --huge; result=$$?; test $$result = 0 -o $$result = 77
 check-fuzz: test-fat test-exfat test-protocol
-	$(SHELL) $(top_srcdir)/build-aux/fuzz.sh $(abs_top_srcdir)
+	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh $(abs_top_srcdir)
+check-fuzz-extended: test-fat test-exfat test-protocol
+	$(DEVELOPMENT_TOOLS_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh $(abs_top_srcdir)
+check-cli-rss: fsimg-rss fsimg-rss-guard
+	./fsimg-rss-guard; result=$$?; test $$result = 0 -o $$result = 77
+	$(PYTHON3) $(top_srcdir)/test/qualify-cli.py ./fsimg-rss 100000
+check-extended: test-qualify test-fragment test-exfat-scale check-cli-rss
+	./test-qualify --catalog 10000000
+	./test-qualify --wide 100000
+	./test-fragment --fragments 1048576
+	./test-exfat-scale --volume 33554432; result=$$?; test $$result = 0 -o $$result = 77
+	./test-exfat-scale --volume 33554432000; result=$$?; test $$result = 0 -o $$result = 77
 check-ascii:
 	$(SHELL) $(top_srcdir)/build-aux/check-ascii.sh $(top_srcdir)
 check-asan:
-	$(SHELL) $(top_srcdir)/build-aux/sanitize.sh asan $(abs_top_srcdir)
+	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh asan $(abs_top_srcdir)
 check-ubsan:
-	$(SHELL) $(top_srcdir)/build-aux/sanitize.sh ubsan $(abs_top_srcdir)
+	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh ubsan $(abs_top_srcdir)
 check-lsan:
-	$(SHELL) $(top_srcdir)/build-aux/sanitize.sh lsan $(abs_top_srcdir)
+	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh lsan $(abs_top_srcdir)
 check-msan:
-	$(SHELL) $(top_srcdir)/build-aux/sanitize.sh msan $(abs_top_srcdir)
+	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh msan $(abs_top_srcdir)
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77

@@ -3,6 +3,30 @@
 # Copyright (c) 2026, fsimg contributors
 set -eu
 source_dir=$1
+fuzz_seconds=${FUZZ_SECONDS:-0}
+case "$fuzz_seconds" in
+''|*[!0-9]*) echo 'FUZZ_SECONDS must be decimal seconds (0..999999)' >&2; exit 2 ;;
+esac
+if test "${#fuzz_seconds}" -gt 6; then
+    echo 'FUZZ_SECONDS exceeds 999999 seconds' >&2
+    exit 2
+fi
+fuzz_runs=1000
+if test "$fuzz_seconds" -gt 0; then
+    fuzz_runs=-1
+fi
+
+# A positive wall-clock allowance selects a sustained campaign. Otherwise the
+# finite mutation count provides the smoke budget; neither mode is unlimited.
+run_fuzzer() {
+    fuzz_program=$1
+    fuzz_corpus=$2
+    fuzz_max_length=$3
+    fuzz_timeout=$4
+    "$fuzz_program" -runs="$fuzz_runs" -max_total_time="$fuzz_seconds" \
+        -max_len="$fuzz_max_length" -timeout="$fuzz_timeout" "$fuzz_corpus"
+}
+
 fuzz_cc=$(command -v "${FUZZ_CC:-clang}")
 fuzz_cxx=${FUZZ_CXX:-"$(dirname "$fuzz_cc")/clang++"}
 # Instrument every library object as well as the harness. A separate build
@@ -28,14 +52,19 @@ if test "$(uname -s)" = Linux; then
     ASAN_OPTIONS=$ASAN_OPTIONS:detect_leaks=1:check_initialization_order=1
 fi
 export ASAN_OPTIONS UBSAN_OPTIONS
-./fuzz-fat -runs=1000 -max_len=3145728 -timeout=10 fuzz-corpus
+run_fuzzer ./fuzz-fat fuzz-corpus 3145728 10
 
 # The same bounded dispatch/content harness reaches exFAT from both an
 # independently encoded fragmented fixture and a compact writer fixture.
-exfat_corpus=$(mktemp -d exfat-fuzz-corpus-XXXXXX)
-./test-exfat --seed "$exfat_corpus/fragmented.seed"
-./test-exfat --emit "$exfat_corpus/compact.seed"
-./fuzz-fat -runs=1000 -max_len=3145728 -timeout=10 "$exfat_corpus"
+exfat_corpus=exfat-fuzz-corpus
+mkdir -p "$exfat_corpus"
+if test ! -f "$exfat_corpus/fragmented.seed"; then
+    ./test-exfat --seed "$exfat_corpus/fragmented.seed"
+fi
+if test ! -f "$exfat_corpus/compact.seed"; then
+    ./test-exfat --emit "$exfat_corpus/compact.seed"
+fi
+run_fuzzer ./fuzz-fat "$exfat_corpus" 3145728 10
 
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
@@ -43,6 +72,9 @@ exfat_corpus=$(mktemp -d exfat-fuzz-corpus-XXXXXX)
     -I"$source_dir/lib/core" -I"$source_dir/cmd/fsimg" \
     "$source_dir/fuzz/protocol.c" "$source_dir/cmd/fsimg/protocol.c" \
     "$source_dir/cmd/fsimg/job.c" sanitizer-fuzz/.libs/libfsimg.a -o fuzz-protocol
-protocol_corpus=$(mktemp -d protocol-fuzz-corpus-XXXXXX)
-./test-protocol --seed "$protocol_corpus/frames.seed"
-./fuzz-protocol -runs=1000 -max_len=65536 -timeout=5 "$protocol_corpus"
+protocol_corpus=protocol-fuzz-corpus
+mkdir -p "$protocol_corpus"
+if test ! -f "$protocol_corpus/frames.seed"; then
+    ./test-protocol --seed "$protocol_corpus/frames.seed"
+fi
+run_fuzzer ./fuzz-protocol "$protocol_corpus" 65536 5

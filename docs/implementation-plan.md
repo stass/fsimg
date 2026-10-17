@@ -18,12 +18,19 @@ acceptance gate.
 | 6. Safe extraction and worker integration | Implemented and reviewed | Safe extraction, shared selection, bounded protocol/output supervision, actual Linux/FreeBSD confinement and mount tests, native FreeBSD/mtools/fatcat interoperability, sanitizers and protocol fuzzing; local and GLM 5.3 max follow-ups have no remaining Critical/High or readability finding; explicit tool/platform skips in [build.md](build.md) |
 | 7. exFAT and gigantic volumes | Implemented and reviewed | Independent driver, poisoned-tail extraction and worker tests, exfatprogs/Linux-kernel interoperability, actual 128 TiB APFS/ZFS sparse volumes at 64 MiB, cross-platform sanitizers and fuzz smoke tests; local and GLM 5.3 max reviews have no remaining Critical/High/Medium finding; evidence and explicit skips in [build.md](build.md) |
 | 8. CLI, examples and installation | Implemented and reviewed | All seven commands, streaming NDJSON and bounded output, public-API examples/manuals, static/shared C/C++ install consumers, configure refusal/relocation/dependency checks, release archive without generators, three-host ordinary/sanitizer suites; local and GLM 5.3 max follow-ups resolve Critical/High/Medium and readability findings; the Low later-clock-query residual is tracked in TODO.md |
-| 9. System qualification | In progress | Actual ten-million-file format planning, combined CLI RSS and sustained fuzz campaigns; remaining scale and final release/review gates below |
+| 9. System qualification | Implemented and reviewed | Actual ten-million-file exFAT planning, wide-directory and million-fragment checks, 1000-fold capacity comparison, combined CLI memory on three hosts, sustained instrumented fuzzing, full ordinary/sanitizer and install/archive gates; local and exact-model GLM 5.3 max follow-ups have no remaining Critical/High/Medium or readability finding; measured evidence and explicit skips in [qualification.md](qualification.md) |
 
 Development and qualification use macOS, a Linux guest, and both guest and
 user-provided FreeBSD kernels. Evidence identifies the filesystem, toolchain, checks, and explicit
 skips; it does not promise enforcement on untested architectures or kernels.
 UFS publication identity and other actionable residual work remain in
+`TODO.md`.
+
+All nine functional packages meet their completion gates. The
+[system qualification record](qualification.md) distinguishes measured RSS from
+the enforced FreeBSD VM bound, sparse capacity from payload transfer, and
+supported checks from explicit skips. The extension sequence below is separate
+future work; actionable defects retain their severity and component pointers in
 `TODO.md`.
 
 ## Dependency order
@@ -348,9 +355,10 @@ requires.
 | Resource scale | Forced spills and small-budget synthetic tests | 128 TiB sparse volume, ten-million-entry catalog, extreme fragmentation and wide directories |
 | Portability | Supported host compilation and ordinary tests | Host/filesystem capability and install matrix |
 
-The build exposes documented targets such as `check`, `check-asan`,
-`check-ubsan`, `check-security`, `check-integration`, and `check-scale` when those
-suites are implemented. Missing tools are installed through the development
+The build exposes `check`, `check-asan`, `check-ubsan`, `check-lsan`,
+`check-msan`, `check-security`, `check-integration`, `check-scale`,
+`check-cli-rss`, `check-extended`, `check-fuzz`, and `check-fuzz-extended`.
+Missing tools are installed through the development
 environment or explicitly requested, not bypassed. Unsupported sanitizer or
 host capabilities are reported as skipped with a reason, never passed. Resource
 benchmarks distinguish accounting from RSS, sparse logical bytes from physically

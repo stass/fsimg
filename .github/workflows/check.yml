@@ -39,6 +39,7 @@ jobs:
           make check-lsan
           make check-msan
           make check-scale
+          make check-cli-rss
           make distcheck
       - uses: actions/upload-artifact@v4
         if: always()
@@ -89,4 +90,5 @@ jobs:
               ./test-sandbox
               make check-asan
               make check-scale
+              make check-cli-rss
             '

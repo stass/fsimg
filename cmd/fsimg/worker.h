@@ -34,6 +34,8 @@ typedef enum fsimg_confinement {
 #define FSIMG_JOB_RECURSIVE 0x01u
 #define FSIMG_JOB_PAYLOAD 0x02u
 #define FSIMG_JOB_VERBOSE 0x04u
+/* Coordinator, at most one parser, and at most one output relay. */
+#define FSIMG_CLI_PROCESS_BOUND 3u
 /* Fixed sanitizer options reserve this status for runtime failures. */
 #define FSIMG_WORKER_RUNTIME_EXIT 86
 

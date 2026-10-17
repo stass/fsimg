@@ -62,3 +62,9 @@ streaming NDJSON, bounded progress and command-wide output accounting share
 the supervised worker/relay path. Manuals, public-API examples, pkg-config
 metadata and private-prefix installation checks accompany the command and
 static/shared library.
+
+Extended qualification covers ten-million-file exFAT planning, wide directories,
+a million-fragment payload round trip, fixed-content volumes differing by 1000
+times, sustained instrumented fuzzing, and combined CLI memory on macOS, Linux
+and FreeBSD. Dedicated targets separate these disk-backed resource checks from
+the ordinary suite and report unavailable platform measurements explicitly.

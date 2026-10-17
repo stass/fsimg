@@ -28,6 +28,10 @@ output; Linux/FreeBSD profiles have actual kernel tests. The
 [implementation plan](docs/implementation-plan.md) and [open work](TODO.md)
 record qualification gates and remaining work.
 
+[System qualification](docs/qualification.md) includes ten-million-file format
+planning, a million-fragment content round trip, sustained fuzzing and combined
+CLI memory checks. The extended targets run separately from ordinary tests.
+
 Full FAT verification rejects dirty/error flags and inconsistent known FSInfo
 free-count hints, as well as structural corruption; it performs no repair.
 Supply a private scratch directory for large directory, ownership, and fragment

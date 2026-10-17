@@ -37,7 +37,10 @@ make check-ubsan
 make check-lsan
 make check-msan
 make check-scale
+make check-cli-rss
+make check-extended
 make check-fuzz
+make check-fuzz-extended
 ```
 
 `check` builds and runs native tests, C11/C++ header examples, checked library
@@ -192,8 +195,13 @@ make test-fat test-exfat test-protocol
 sh ../build-aux/fuzz.sh "$(cd .. && pwd)"
 ```
 
-The target's `fuzz-corpus/` and libFuzzer crash artifacts are disposable build
-outputs. A finite smoke run is not a sustained fuzzing campaign.
+The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `protocol-fuzz-corpus/` and
+libFuzzer crash artifacts are disposable build outputs. Existing corpus seeds
+and mutations are reused. `FUZZ_SECONDS=60 make check-fuzz` selects a finite
+wall-clock allowance per corpus instead of the 1000-mutation smoke budget. The value is decimal
+seconds from zero through 999999. `check-fuzz-extended` uses 600 seconds per
+corpus. The configured `FATCAT` development-oracle path is forwarded into
+sanitizer and fuzz builds. A smoke run is not a sustained campaign.
 
 `check-scale` is a separate, non-sanitized qualification. It sorts 24 MiB
 of generated records and fills/queries a 24 MiB fixed-record array with a 16 MiB
@@ -232,11 +240,11 @@ explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 ./test-catalog --scale 10000000
 ```
 
-The ordinary suite has twenty-four tests. macOS reports twenty-one passes and
+The ordinary suite has twenty-six tests. macOS reports twenty-three passes and
 three skips (backend unavailable, Linux-only setup mocks, and unavailable
-exfatprogs). Linux reports twenty-four passes; FAT fatcat subchecks explicitly
+exfatprogs). Linux reports twenty-six passes; FAT fatcat subchecks explicitly
 skip by host policy while dosfstools/mtools coverage runs. The user-provided
-FreeBSD 16/ZFS host reports twenty-two passes and two skips (Linux-only setup
+FreeBSD 16/ZFS host reports twenty-four passes and two skips (Linux-only setup
 mocks and unavailable exfatprogs), including native FAT/mtools/fatcat
 interoperability. See [platform evidence](platform-evidence.md)
 for guest kernels and filesystems. The metadata scale fixture reports a
@@ -261,6 +269,18 @@ The extended run validates 10,000,000 files beneath 10,000 directories in
 logical scratch bytes, seven descriptors, and 10,976,692 I/O calls at a
 256 MiB budget. This is catalog/source qualification; it does not measure a
 filesystem image, payload transfer, or the CLI/worker RSS acceptance gate.
+
+`check-extended` performs actual exFAT planning for ten million generated files
+and for a separate 100,000-entry wide directory, reads/verifies/extracts a
+million-fragment file, compares fixed-content volumes differing by 1000 times,
+and runs `check-cli-rss`. These are disk-backed, non-sanitized qualifications;
+the ten-million-file plan needs about 6.2 GB of scratch. `check-cli-rss` runs all
+six image commands on 100,001 real source files at a 16 MiB library budget and
+checks their combined memory allowance. Its FreeBSD negative guard rejects
+pre-existing mappings above the inherited virtual-memory cap; that
+platform-specific subcheck explicitly skips elsewhere. See the
+[system qualification evidence](qualification.md) for commands, exact
+measurements, memory methods and limitations.
 
 Stage reviews include the required independent code-review agent and an external
 read-only OpenCode review through the Z.ai coding-plan subscription. Copy only
@@ -386,13 +406,13 @@ Sanitizer execution evidence:
 
 | Host | Command | Result |
 | --- | --- | --- |
-| macOS | `make check-asan` | 21 pass, 3 tool/platform skips |
-| macOS | `make check-ubsan` | 21 pass, 3 tool/platform skips |
+| macOS | `make check-asan` | 23 pass, 3 tool/platform skips |
+| macOS | `make check-ubsan` | 23 pass, 3 tool/platform skips |
 | macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
-| Linux | `make check-asan` | 24 pass |
-| Linux | `make check-lsan` | 24 pass |
-| Linux | `make check-msan` | 24 pass |
-| FreeBSD 16/ZFS | `make check-asan` | 22 pass, 2 tool/platform skips |
+| Linux | `make check-asan` | 26 pass |
+| Linux | `make check-lsan` | 26 pass |
+| Linux | `make check-msan` | 26 pass |
+| FreeBSD 16/ZFS | `make check-asan` | 24 pass, 2 tool/platform skips |
 
 Configure searches the standard system sbin directories for formatter/checker
 tools. Linux runs dosfstools/mtools and exfatprogs interoperability in its

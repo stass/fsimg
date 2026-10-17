@@ -2,14 +2,6 @@
 
 ## Major initiatives
 
-* [High] **fsimg tool and library** (`lib/`, `cmd/fsimg/`, `test/`): implement the
-  [target specification](specs/README.md) through the ordered
-  [implementation plan](docs/implementation-plan.md). Complete system and
-  release qualification. The acceptance gates cover
-  bounded metadata and payload processing, FAT/exFAT interoperability, secure
-  extraction, actual-kernel sandbox validation, failure handling, and measured
-  operation on gigantic volumes and catalogs.
-
 ## Bugs by subsystem
 
 * [Low] **Monotonic-clock failures** (`cmd/fsimg/paths.c`,

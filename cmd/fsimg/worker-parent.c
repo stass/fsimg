@@ -55,6 +55,9 @@ typedef enum worker_process_role {
 	PROCESS_COUNT
 } worker_process_role_t;
 
+_Static_assert(FSIMG_CLI_PROCESS_BOUND == PROCESS_COUNT + 1,
+    "CLI process bound includes coordinator and every supervised role");
+
 typedef struct worker_process {
 	pid_t		 pid;
 	int		 status;

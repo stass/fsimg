@@ -25,16 +25,24 @@ devices 61/687931137 and FSID-derived mount IDs
 7650454420974902357/2954641735315095593. These IDs identify those live fixtures,
 not stable identifiers across boots.
 
-The ordinary suite contains twenty-four tests. macOS reports twenty-one passes
+The ordinary suite contains twenty-six tests. macOS reports twenty-three passes
 and three explicit skips (unavailable backend, Linux-only setup-fault harness,
-and unavailable exfatprogs). Linux reports twenty-four passes, with only FAT
-fatcat subchecks skipped by host policy. FreeBSD 16/ZFS reports twenty-two passes
+and unavailable exfatprogs). Linux reports twenty-six passes, with only FAT
+fatcat subchecks skipped by host policy. FreeBSD 16/ZFS reports twenty-four passes
 and two skips (Linux-only setup-fault harness and unavailable exfatprogs),
 including native FAT interoperability. Native
 ASan/UBSan and additional platform sanitizer outcomes are recorded with their
 commands in [build.md](build.md). Standalone LSan/MSan are unsupported on macOS
 and FreeBSD; a skip is not a pass. Fresh confined children disable tracer-based
 leak scanning, while parent/library leak checks remain enabled where supported.
+
+[System qualification](qualification.md) records the actual ten-million-file
+format plan, 100,000-entry wide plan, million-fragment content test, 1000-fold
+volume comparison, sustained fuzz campaigns and combined CLI memory checks on
+these hosts. FreeBSD uses an enforced virtual-memory upper bound because its
+sampled RSS statistic can miss short processes; macOS and Linux sum observed
+individual process peaks conservatively. Those methods and their limitations
+are recorded separately from library allocation accounting.
 
 CLI integration runs every command for all four formats, independently decodes
 NDJSON, compares reproducible images and extracted bytes, exercises filesystem

@@ -121,14 +121,23 @@ main(int argc, char **argv)
 	struct stat storage;
 	struct rusage usage;
 	struct timespec before, after;
-	uint64_t zero_length, validations, rss;
-	char directory[] = "/tmp/fsimg-exfat-scale-XXXXXX";
+	uint64_t zero_length, validations, rss, volume_bytes;
+	char directory[] = "exfat-scale-XXXXXX";
+	char *number_end;
 	int parent, scratch, fd, result;
 	bool huge;
 	fsimg_status_t status;
 
-	CHECK(argc == 1 || (argc == 2 && strcmp(argv[1], "--huge") == 0));
-	huge = argc == 2;
+	huge = argc == 2 && strcmp(argv[1], "--huge") == 0;
+	CHECK(argc == 1 || huge || (argc == 3 && strcmp(argv[1], "--volume") == 0));
+	volume_bytes = huge ? UINT64_C(128) << 40 : UINT64_C(32) << 20;
+	if (argc == 3) {
+		errno = 0;
+		volume_bytes = strtoull(argv[2], &number_end, 10);
+		CHECK(errno == 0 && *number_end == '\0');
+		CHECK(volume_bytes >= (UINT64_C(32) << 20) && volume_bytes <= (UINT64_C(128) << 40));
+		CHECK(volume_bytes % 512 == 0);
+	}
 	zero_length = huge ? (UINT64_C(8) << 40) + 17 : 4 * 1024 * 1024 + 17;
 	CHECK(mkdtemp(directory) != NULL);
 	parent = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -141,7 +150,7 @@ main(int argc, char **argv)
 	limits.scratch_directory_fd = scratch;
 	CHECK(fsimg_ctx_new(&limits, &ctx, NULL) == FSIMG_OK);
 	fsimg_write_options_init(&options);
-	options.volume_bytes = huge ? UINT64_C(128) << 40 : UINT64_C(32) << 20;
+	options.volume_bytes = volume_bytes;
 	options.flags |= FSIMG_WRITE_REPRODUCIBLE;
 	CHECK(fsimg_writer_new(ctx, "exfat", &options, &writer, NULL) == FSIMG_OK);
 	fsimg_source_ops_init(&provider);
@@ -166,8 +175,9 @@ main(int argc, char **argv)
 	CHECK(info.payload_bytes == zero_length + 131074 && info.initialized_bytes == 131074);
 	status = fsimg_writer_write_at(writer, parent, "volume.img", &error);
 	result = 0;
-	if (huge && status == FSIMG_EIO && error.os_error == EFBIG) {
-		printf("SKIP: host rejects a 128 TiB sparse regular file: %s\n", error.message);
+	if (status == FSIMG_EIO && error.os_error == EFBIG) {
+		CHECK(printf("SKIP: host rejects a %" PRIu64 "-byte sparse regular file: %s\n",
+		    options.volume_bytes, error.message) >= 0);
 		result = 77;
 	}
 	if (status != FSIMG_OK && result != 77)
@@ -197,26 +207,34 @@ main(int argc, char **argv)
 		CHECK(clock_gettime(CLOCK_MONOTONIC, &after) == 0);
 		CHECK(fsimg_ctx_get_stats(ctx, &stats, NULL) == FSIMG_OK);
 		CHECK(stats.memory_peak <= limits.memory_bytes);
-		CHECK(getrusage(RUSAGE_SELF, &usage) == 0);
+		/* These three-file profiles need only bounded metadata and initialized
+		 * marker reads. A capacity increase must not scan unreferenced payload.
+		 */
+		CHECK(stats.read_bytes <= (UINT64_C(64) << 20));
+		/* A zero peak means the host has not recorded a usable RSS sample. */
+		CHECK(getrusage(RUSAGE_SELF, &usage) == 0 && usage.ru_maxrss >= 0);
 #if defined(__APPLE__)
 		rss = (uint64_t)usage.ru_maxrss;
 #else
+		CHECK((uint64_t)usage.ru_maxrss <= UINT64_MAX / 1024);
 		rss = (uint64_t)usage.ru_maxrss * 1024;
 #endif
 		/* st_blocks is a filesystem allocation sample, not settled device
 		 * writes: compression and delayed allocation can affect this value.
 		 */
-		printf("exfat sparse volume=%" PRIu64 " logical_payload=%" PRIu64
+		CHECK(printf("exfat sparse volume=%" PRIu64 " logical_payload=%" PRIu64
 		    " initialized_payload=%" PRIu64 " cluster=%u allocated_blocks_sample_bytes=%" PRIu64
 		    " written=%" PRIu64 " read=%" PRIu64 " memory_peak=%" PRIu64
 		    " scratch_peak=%" PRIu64 " fds_peak=%" PRIu64 " rss=%" PRIu64
-		    " elapsed=%.3f\n", info.volume_bytes, info.payload_bytes,
+		    " rss_available=%s elapsed=%.3f\n", info.volume_bytes, info.payload_bytes,
 		    info.initialized_bytes, info.allocation_unit_bytes,
 		    (uint64_t)storage.st_blocks * 512, stats.written_bytes, stats.read_bytes,
 		    stats.memory_peak, stats.scratch_peak, stats.descriptors_peak, rss,
+		    rss != 0 ? "true" : "false",
 		    (double)(after.tv_sec - before.tv_sec) +
-		    (double)(after.tv_nsec - before.tv_nsec) / 1000000000.0);
+		    (double)(after.tv_nsec - before.tv_nsec) / 1000000000.0) >= 0);
 	}
+	CHECK(fflush(stdout) == 0);
 	fsimg_ctx_free(ctx);
 	CHECK(close(scratch) == 0 && unlinkat(parent, "scratch", AT_REMOVEDIR) == 0);
 	CHECK(close(parent) == 0 && rmdir(directory) == 0);
