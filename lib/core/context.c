@@ -94,6 +94,7 @@ fsimg_status_t
 fsimg_limit_error(fsimg_error_t *error, fsimg_resource_t resource,
     uint64_t limit, uint64_t observed)
 {
+	/* The context owns every resource ceiling; resource identifies which one. */
 	fsimg_error_set(error, FSIMG_ELIMIT, 0, FSIMG_OP_CONTEXT,
 	    "configured resource limit exceeded");
 	if (error != NULL) {

@@ -9,3 +9,10 @@ Metadata streams, fixed-record arrays, and bitsets share a bounded page cache
 and spill to private scratch files. Stable external sorting uses bounded merge
 heaps and an on-disk run registry. Logical and sampled physical scratch use are
 reported separately; session work quotas and cancellation cover metadata work.
+
+Private writer collection supports descriptor-relative source-tree scanning,
+zero and provider sources, strict Unicode codecs, and explicit timestamp and
+metadata validity contracts. External catalog ordering assigns stable IDs and
+parent links, validates sibling collisions, and retains paged result records.
+Source reopening validates identity and mount boundaries; one writer-owned
+current source is released on completion, failure, or destruction.

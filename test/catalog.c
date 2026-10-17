@@ -1,0 +1,594 @@
+/* SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (c) 2026, fsimg contributors
+ */
+#include "config.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "source.h"
+#include "test.h"
+
+typedef struct catalog_fixture {
+	fsimg_ctx_t	*ctx;
+	fsimg_writer_t	*writer;
+	fsimg_stats_t	 baseline;
+	char		 directory[64];
+} catalog_fixture_t;
+
+static void fixture_open(catalog_fixture_t *, uint32_t);
+static void fixture_open_budget(catalog_fixture_t *, uint32_t, uint64_t,
+    uint64_t);
+static void fixture_close(catalog_fixture_t *);
+static void add_entry(fsimg_writer_t *, const char *, fsimg_entry_kind_t);
+static void test_order(uint32_t, uint32_t);
+static void test_long_directory(void);
+static void test_invalid_catalogs(void);
+static void test_metadata(void);
+static void test_failures(void);
+static void test_corrupt_metadata(void);
+static void test_inspection_failure(void);
+static void test_scale(uint64_t, bool);
+static void test_deep_catalog(void);
+static void test_short_child_record(void);
+static void test_child_order(void);
+static void test_index_reference(void);
+static fsimg_status_t generated_validate(void *, uint64_t, fsimg_error_t *);
+static fsimg_status_t generated_read(void *, uint64_t, uint64_t, void *,
+    size_t, size_t *, fsimg_error_t *);
+
+static void
+fixture_open(catalog_fixture_t *fixture, uint32_t pages)
+{
+	fixture_open_budget(fixture, pages, UINT64_C(16) * 1024 * 1024, 0);
+}
+
+static void
+fixture_open_budget(catalog_fixture_t *fixture, uint32_t pages, uint64_t budget,
+    uint64_t entries)
+{
+	fsimg_options_t options;
+	int fd;
+
+	bzero(fixture, sizeof(*fixture));
+	snprintf(fixture->directory, sizeof(fixture->directory), "catalog-fixture-XXXXXX");
+	CHECK(mkdtemp(fixture->directory) != NULL);
+	fd = open(fixture->directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(fd != -1);
+	fsimg_options_init(&options);
+	options.memory_bytes = budget;
+	options.max_path_bytes = 512;
+	options.max_open_files = 16;
+	if (entries != 0)
+		options.max_entries = entries;
+	options.scratch_directory_fd = fd;
+	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
+	CHECK(close(fd) == 0);
+	CHECK(fsimg_test_meta_cache(fixture->ctx, pages, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_collect_new(fixture->ctx, &fixture->writer, NULL) == FSIMG_OK);
+}
+
+static void
+fixture_close(catalog_fixture_t *fixture)
+{
+	fsimg_stats_t stats;
+
+	fsimg_writer_free(fixture->writer);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.memory_bytes == fixture->baseline.memory_bytes);
+	CHECK(stats.descriptors == fixture->baseline.descriptors);
+	CHECK(stats.scratch_bytes == 0 && stats.scratch_physical_bytes == 0);
+	CHECK(stats.memory_peak <= fixture->ctx->options.memory_bytes);
+	fsimg_ctx_free(fixture->ctx);
+	CHECK(rmdir(fixture->directory) == 0);
+}
+
+static void
+add_entry(fsimg_writer_t *writer, const char *path, fsimg_entry_kind_t kind)
+{
+	fsimg_entry_t entry = { .path = path, .kind = kind };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+
+	CHECK(fsimg_writer_add(writer, &entry,
+	    kind == FSIMG_ENTRY_FILE ? &zero : NULL, NULL) == FSIMG_OK);
+}
+
+static void
+test_order(uint32_t pages, uint32_t fan_in)
+{
+	const char *paths[] = { "/a/b/d", "/a-", "/z", "/a/b", "/a", "/a/c" };
+	const fsimg_entry_kind_t kinds[] = { FSIMG_ENTRY_FILE, FSIMG_ENTRY_FILE,
+	    FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_DIRECTORY,
+	    FSIMG_ENTRY_FILE };
+	const char *ordered[] = { "/", "/a", "/a/b", "/a/b/d", "/a/c", "/a-", "/z" };
+	const uint64_t parents[] = { 0, 0, 1, 2, 1, 0, 0 };
+	const uint64_t children[] = { 3, 2, 1, 0, 0, 0, 0 };
+	catalog_fixture_t fixture;
+	fsimg_sort_options_t options = { .run_bytes = 2048, .fan_in = fan_in };
+	const fsimg_catalog_entry_t *entry;
+	char borrowed[64];
+
+	fixture_open(&fixture, pages);
+	for (size_t i = 0; i < 6; i++) {
+		size_t source = fan_in == 2 ? (i + pages) % 6 : (5 - i + pages) % 6;
+
+		snprintf(borrowed, sizeof(borrowed), "%s", paths[source]);
+		add_entry(fixture.writer, borrowed, kinds[source]);
+		memset(borrowed, 'x', strlen(borrowed));
+	}
+	CHECK(fsimg_writer_prepare(fixture.writer, &options, NULL) == FSIMG_OK);
+	CHECK(fixture.writer->count == 6 && fixture.writer->catalog_ready);
+	for (uint64_t id = 0; id <= 6; id++) {
+		CHECK(fsimg_catalog_get(fixture.writer, id, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->entry.path, ordered[id]) == 0);
+		CHECK(entry->id == id && entry->parent_id == parents[id]);
+		CHECK(entry->children == children[id]);
+	}
+	CHECK(fsimg_writer_add(fixture.writer, NULL, NULL, NULL) == FSIMG_ESTATE);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_ESTATE);
+	CHECK(fsimg_catalog_get(fixture.writer, 7, &entry, NULL) == FSIMG_ERANGE);
+	CHECK(entry == NULL);
+	fixture_close(&fixture);
+}
+
+static void
+test_deep_catalog(void)
+{
+	catalog_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	char path[256];
+
+	fixture_open(&fixture, 2);
+	for (unsigned i = 40; i != 0; i--) {
+		for (unsigned j = 0; j < i; j++) {
+			path[2 * j] = '/';
+			path[2 * j + 1] = 'd';
+		}
+		path[2 * i] = '\0';
+		add_entry(fixture.writer, path, FSIMG_ENTRY_DIRECTORY);
+	}
+	add_entry(fixture.writer, "/d-/f", FSIMG_ENTRY_FILE);
+	add_entry(fixture.writer, "/d-", FSIMG_ENTRY_DIRECTORY);
+	add_entry(fixture.writer, "/z", FSIMG_ENTRY_FILE);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	for (uint64_t id = 1; id <= 40; id++) {
+		CHECK(fsimg_catalog_get(fixture.writer, id, &entry, NULL) == FSIMG_OK);
+		CHECK(entry->parent_id == id - 1);
+		CHECK(entry->children == (id == 40 ? 0u : 1u));
+	}
+	CHECK(fsimg_catalog_get(fixture.writer, 41, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->entry.path, "/d-") == 0 && entry->parent_id == 0);
+	CHECK(fsimg_catalog_get(fixture.writer, 42, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->entry.path, "/d-/f") == 0 && entry->parent_id == 41);
+	CHECK(fsimg_catalog_get(fixture.writer, 43, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->entry.path, "/z") == 0 && entry->parent_id == 0);
+	fixture_close(&fixture);
+}
+
+static void
+test_long_directory(void)
+{
+	catalog_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	char directory[202], child[208];
+
+	fixture_open(&fixture, 2);
+	directory[0] = '/';
+	memset(directory + 1, 'd', 200);
+	directory[201] = '\0';
+	snprintf(child, sizeof(child), "%s/file", directory);
+	add_entry(fixture.writer, child, FSIMG_ENTRY_FILE);
+	add_entry(fixture.writer, directory, FSIMG_ENTRY_DIRECTORY);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->entry.path, directory) == 0);
+	CHECK(fsimg_catalog_get(fixture.writer, 2, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->entry.path, child) == 0 && entry->parent_id == 1);
+	fixture_close(&fixture);
+}
+
+static void
+test_invalid_catalogs(void)
+{
+	catalog_fixture_t fixture;
+	fsimg_entry_t entry = { .kind = FSIMG_ENTRY_FILE };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fsimg_error_t error;
+
+	for (unsigned scenario = 0; scenario < 4; scenario++) {
+		fixture_open(&fixture, 2);
+		if (scenario == 0) {
+			add_entry(fixture.writer, "/missing/file", FSIMG_ENTRY_FILE);
+		} else if (scenario == 1) {
+			add_entry(fixture.writer, "/a", FSIMG_ENTRY_FILE);
+			add_entry(fixture.writer, "/a/b", FSIMG_ENTRY_FILE);
+		} else {
+			add_entry(fixture.writer, "/a", FSIMG_ENTRY_DIRECTORY);
+			add_entry(fixture.writer, "/a", scenario == 2 ?
+			    FSIMG_ENTRY_DIRECTORY : FSIMG_ENTRY_FILE);
+		}
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) == FSIMG_EINVAL);
+		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+		CHECK(!fixture.writer->catalog_ready && fixture.writer->index == NULL);
+		CHECK(fsimg_writer_add(fixture.writer, NULL, NULL, NULL) == FSIMG_ESTATE);
+		fixture_close(&fixture);
+	}
+	fixture_open(&fixture, 2);
+	fixture.ctx->options.max_entries = 1;
+	add_entry(fixture.writer, "/a", FSIMG_ENTRY_FILE);
+	entry.path = "/b";
+	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, &error) == FSIMG_ELIMIT);
+	CHECK(error.resource == FSIMG_RESOURCE_ENTRIES);
+	CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+	fixture_close(&fixture);
+}
+
+static void
+test_metadata(void)
+{
+	catalog_fixture_t fixture;
+	const fsimg_catalog_entry_t *current;
+	fsimg_entry_t entry = { .path = "/file", .kind = FSIMG_ENTRY_FILE,
+	    .size = UINT64_C(1) << 45 };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	unsigned char buffer[17];
+	size_t transferred;
+
+	fixture_open(&fixture, 2);
+	/* Garbage in absent fields must neither influence order nor be emitted. */
+	memset(&entry.metadata, 0x97, sizeof(entry.metadata));
+	entry.metadata.valid = FSIMG_META_MODIFIED;
+	entry.metadata.required = FSIMG_META_MODIFIED;
+	entry.metadata.modified = (fsimg_timestamp_t){ .seconds = INT64_MIN,
+	    .precision_ns = 100, .nanoseconds = 123400, .basis = FSIMG_TIME_OFFSET,
+	    .offset_minutes = -60 };
+	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_OK);
+	CHECK(current->entry.metadata.modified.seconds == INT64_MIN);
+	CHECK(current->entry.metadata.modified.offset_minutes == -60);
+	CHECK(current->entry.metadata.attributes == 0);
+	CHECK(current->entry.metadata.created.precision_ns == 0);
+	CHECK(fsimg_source_open(fixture.writer, current->id, NULL) == FSIMG_OK);
+	memset(buffer, 0x42, sizeof(buffer));
+	CHECK(fsimg_source_read(fixture.writer, entry.size - sizeof(buffer), buffer,
+	    sizeof(buffer), &transferred, NULL) == FSIMG_OK);
+	CHECK(transferred == sizeof(buffer));
+	for (size_t i = 0; i < sizeof(buffer); i++)
+		CHECK(buffer[i] == 0);
+	CHECK(fsimg_source_finish(fixture.writer, NULL) == FSIMG_OK);
+	fixture_close(&fixture);
+}
+
+static void
+test_failures(void)
+{
+	catalog_fixture_t fixture;
+	fsimg_writer_t *writer;
+	fsimg_sort_options_t options = { .run_bytes = 2048, .fan_in = 2 };
+	fsimg_status_t status;
+	char path[64];
+	bool passed;
+
+	for (uint64_t attempt = 1; attempt < 12; attempt++) {
+		fixture_open(&fixture, 2);
+		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
+		status = fsimg_writer_collect_new(fixture.ctx, &writer, NULL);
+		fsimg_test_fail_alloc_after(fixture.ctx, 0);
+		if (status == FSIMG_OK)
+			fsimg_writer_free(writer);
+		else
+			CHECK(status == FSIMG_ENOMEM && writer == NULL);
+		fixture_close(&fixture);
+		if (status == FSIMG_OK)
+			break;
+	}
+	passed = false;
+	for (uint64_t attempt = 1; attempt <= 128; attempt++) {
+		fixture_open(&fixture, 2);
+		for (unsigned i = 0; i < 100; i++) {
+			snprintf(path, sizeof(path), "/f%03u", 99 - i);
+			add_entry(fixture.writer, path, FSIMG_ENTRY_FILE);
+		}
+		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
+		status = fsimg_writer_prepare(fixture.writer, &options, NULL);
+		fsimg_test_fail_alloc_after(fixture.ctx, 0);
+		if (status == FSIMG_OK)
+			passed = true;
+		else {
+			CHECK(status == FSIMG_ENOMEM);
+			CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+			CHECK(fixture.writer->index == NULL && fixture.writer->ordered == NULL);
+		}
+		fixture_close(&fixture);
+		if (passed)
+			break;
+	}
+	CHECK(passed);
+}
+
+static void
+test_corrupt_metadata(void)
+{
+	catalog_fixture_t fixture;
+	fsimg_entry_t entry = { .path = "/file", .kind = FSIMG_ENTRY_FILE };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	const fsimg_catalog_entry_t *current;
+	unsigned char bytes[8];
+
+	fixture_open(&fixture, 2);
+	entry.metadata.valid = FSIMG_META_MODIFIED;
+	entry.metadata.modified = (fsimg_timestamp_t){ .seconds = 123,
+	    .precision_ns = 1, .nanoseconds = 5, .basis = FSIMG_TIME_UTC };
+	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	/* A wide encoded nanosecond value must be rejected before narrowing. */
+	fsimg_meta_put_u64(bytes, (UINT64_C(1) << 32) | 5);
+	CHECK(fsimg_store_write(fixture.writer->ordered->store, 8 + 96 + 16,
+	    bytes, sizeof(bytes), NULL) == FSIMG_OK);
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_ECORRUPT);
+	CHECK(current == NULL);
+	fixture_close(&fixture);
+}
+
+static void
+test_inspection_failure(void)
+{
+	catalog_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+
+	fixture_open(&fixture, 2);
+	add_entry(fixture.writer, "/file", FSIMG_ENTRY_FILE);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	fixture.ctx->options.max_work = fixture.writer->session.progress.work;
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_ELIMIT);
+	CHECK(entry == NULL && fixture.writer->state == FSIMG_WRITER_FAILED);
+	CHECK(fixture.writer->catalog_ready);
+	fixture.ctx->options.max_work = 0;
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->entry.path, "/file") == 0);
+	fixture_close(&fixture);
+}
+
+static void
+test_short_child_record(void)
+{
+	catalog_fixture_t fixture;
+	unsigned char payload[12] = { 0 };
+
+	fixture_open(&fixture, 2);
+	fixture.writer->count = 1;
+	fixture.writer->state = FSIMG_WRITER_PREPARING;
+	CHECK(fsimg_array_new(&fixture.writer->session, FSIMG_CATALOG_INDEX_SIZE,
+	    2, &fixture.writer->index, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_new(&fixture.writer->session, 512,
+	    &fixture.writer->children, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_append(fixture.writer->children, payload,
+	    sizeof(payload), NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_seal(fixture.writer->children, NULL) == FSIMG_OK);
+	CHECK(fsimg_catalog_count_children(fixture.writer, NULL) == FSIMG_ECORRUPT);
+	fixture_close(&fixture);
+}
+
+static void
+test_child_order(void)
+{
+	catalog_fixture_t fixture;
+	unsigned char payload[18] = { 0 };
+
+	for (unsigned scenario = 0; scenario < 2; scenario++) {
+		fixture_open(&fixture, 2);
+		fixture.writer->count = 4;
+		fixture.writer->state = FSIMG_WRITER_PREPARING;
+		CHECK(fsimg_array_new(&fixture.writer->session, FSIMG_CATALOG_INDEX_SIZE,
+		    5, &fixture.writer->index, NULL) == FSIMG_OK);
+		CHECK(fsimg_stream_new(&fixture.writer->session, 512,
+		    &fixture.writer->children, NULL) == FSIMG_OK);
+		fsimg_meta_put_u64(payload, scenario == 0 ? 0 : 2);
+		fsimg_meta_put_u64(payload + 8, scenario == 0 ? 2 : 3);
+		payload[16] = scenario == 0 ? 'b' : 'a';
+		CHECK(fsimg_stream_append(fixture.writer->children, payload,
+		    sizeof(payload), NULL, NULL) == FSIMG_OK);
+		fsimg_meta_put_u64(payload, 0);
+		fsimg_meta_put_u64(payload + 8, 1);
+		payload[16] = 'a';
+		CHECK(fsimg_stream_append(fixture.writer->children, payload,
+		    sizeof(payload), NULL, NULL) == FSIMG_OK);
+		for (uint64_t i = 0; i < 2; i++) {
+			fsimg_meta_put_u64(payload, scenario == 0 ? 0 : (i == 0 ? 0 : 2));
+			fsimg_meta_put_u64(payload + 8, scenario == 0 ? 3 + i : (i == 0 ? 2 : 4));
+			payload[16] = scenario == 0 ? (unsigned char)('c' + i) : 'b';
+			CHECK(fsimg_stream_append(fixture.writer->children, payload,
+			    sizeof(payload), NULL, NULL) == FSIMG_OK);
+		}
+		CHECK(fsimg_stream_seal(fixture.writer->children, NULL) == FSIMG_OK);
+		CHECK(fsimg_catalog_count_children(fixture.writer, NULL) == FSIMG_ECORRUPT);
+		fixture_close(&fixture);
+	}
+}
+
+static void
+test_index_reference(void)
+{
+	catalog_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	unsigned char index[FSIMG_CATALOG_INDEX_SIZE];
+
+	fixture_open(&fixture, 2);
+	add_entry(fixture.writer, "/file", FSIMG_ENTRY_FILE);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_array_get(fixture.writer->index, 1, index, NULL) == FSIMG_OK);
+	fsimg_meta_put_u64(index + 8, 1);
+	CHECK(fsimg_array_set(fixture.writer->index, 1, index, NULL) == FSIMG_OK);
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_ECORRUPT);
+	CHECK(entry == NULL);
+	fixture_close(&fixture);
+}
+
+static fsimg_status_t
+generated_validate(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
+    fsimg_error_t *error)
+{
+	fsimg_error_clear(error);
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+generated_read(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
+    void *buffer, size_t length, size_t *transferred, fsimg_error_t *error)
+{
+	unsigned char *bytes = buffer;
+
+	for (size_t i = 0; i < length; i++)
+		bytes[i] = (unsigned char)(id + offset + i);
+	*transferred = length;
+	fsimg_error_clear(error);
+	return (FSIMG_OK);
+}
+
+static void
+test_scale(uint64_t files, bool wide)
+{
+	catalog_fixture_t fixture;
+	fsimg_source_ops_t provider;
+	fsimg_entry_t entry = { .kind = FSIMG_ENTRY_FILE, .size = 7 };
+	fsimg_source_t reference = { .kind = FSIMG_SOURCE_PROVIDER };
+	const fsimg_catalog_entry_t *current;
+	fsimg_stats_t stats;
+	struct timespec start, end;
+	char path[80];
+	unsigned char data[7];
+	uint64_t groups, id, file, parent;
+	size_t transferred;
+	double seconds;
+
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	groups = wide ? 0 : files / 1000 + (files % 1000 != 0);
+	fixture_open_budget(&fixture, 256,
+	    (wide ? UINT64_C(16) : UINT64_C(256)) * 1024 * 1024, files + groups);
+	fsimg_source_ops_init(&provider);
+	provider.validate = generated_validate;
+	provider.read_at = generated_read;
+	CHECK(fsimg_writer_set_sources(fixture.writer, &provider, NULL, NULL) == FSIMG_OK);
+	for (uint64_t i = files; i != 0; i--) {
+		file = i - 1;
+		if (wide)
+			snprintf(path, sizeof(path), "/f%08" PRIu64, file);
+		else
+			snprintf(path, sizeof(path), "/d%08" PRIu64 "/f%08" PRIu64,
+			    file / 1000, file);
+		entry.path = path;
+		reference.id = file;
+		CHECK(fsimg_writer_add(fixture.writer, &entry, &reference, NULL) == FSIMG_OK);
+	}
+	for (uint64_t i = groups; i != 0; i--) {
+		snprintf(path, sizeof(path), "/d%08" PRIu64, i - 1);
+		add_entry(fixture.writer, path, FSIMG_ENTRY_DIRECTORY);
+	}
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	id = 1;
+	if (wide) {
+		for (file = 0; file < files; file++) {
+			CHECK(fsimg_catalog_get(fixture.writer, id++, &current, NULL) == FSIMG_OK);
+			snprintf(path, sizeof(path), "/f%08" PRIu64, file);
+			CHECK(strcmp(current->entry.path, path) == 0 && current->parent_id == 0);
+			CHECK(current->source_id == file && current->entry.size == 7);
+		}
+		CHECK(fsimg_catalog_get(fixture.writer, 0, &current, NULL) == FSIMG_OK);
+		CHECK(current->children == files);
+	}
+	for (uint64_t group = 0; group < groups; group++) {
+		CHECK(fsimg_catalog_get(fixture.writer, id, &current, NULL) == FSIMG_OK);
+		snprintf(path, sizeof(path), "/d%08" PRIu64, group);
+		CHECK(strcmp(current->entry.path, path) == 0 && current->parent_id == 0);
+		parent = id++;
+		for (file = group * 1000; file < files && file < (group + 1) * 1000; file++) {
+			CHECK(fsimg_catalog_get(fixture.writer, id++, &current, NULL) == FSIMG_OK);
+			snprintf(path, sizeof(path), "/d%08" PRIu64 "/f%08" PRIu64, group, file);
+			CHECK(strcmp(current->entry.path, path) == 0 && current->parent_id == parent);
+			CHECK(current->source_id == file && current->entry.size == 7);
+			if (file % 1000 != 0)
+				continue;
+			CHECK(fsimg_source_open(fixture.writer, current->id, NULL) == FSIMG_OK);
+			CHECK(fsimg_source_read(fixture.writer, 0, data, sizeof(data), &transferred, NULL) == FSIMG_OK);
+			CHECK(transferred == sizeof(data));
+			for (size_t j = 0; j < sizeof(data); j++)
+				CHECK(data[j] == (unsigned char)(file + j));
+			CHECK(fsimg_source_finish(fixture.writer, NULL) == FSIMG_OK);
+		}
+	}
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.memory_peak <= fixture.ctx->options.memory_bytes);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+	seconds = end.tv_sec - start.tv_sec + (end.tv_nsec - start.tv_nsec) / 1e9;
+	printf("catalog scale: files=%" PRIu64 ", directories=%" PRIu64
+	    ", memory peak=%" PRIu64 ", scratch peak=%" PRIu64
+	    ", descriptors peak=%" PRIu64 ", IO calls=%" PRIu64 ", seconds=%.3f\n",
+	    files, groups, stats.memory_peak, stats.scratch_peak,
+	    stats.descriptors_peak, stats.io_calls, seconds);
+	fixture_close(&fixture);
+}
+
+int
+main(int argc, char **argv)
+{
+	if (argc == 2 && strcmp(argv[1], "--long-directory") == 0) {
+		test_long_directory();
+		return (0);
+	}
+	if (argc == 2 && strcmp(argv[1], "--corrupt-metadata") == 0) {
+		test_corrupt_metadata();
+		return (0);
+	}
+	if (argc == 2 && strcmp(argv[1], "--inspection-failure") == 0) {
+		test_inspection_failure();
+		return (0);
+	}
+	if (argc == 2 && strcmp(argv[1], "--short-child") == 0) {
+		test_short_child_record();
+		return (0);
+	}
+	if (argc == 2 && strcmp(argv[1], "--child-order") == 0) {
+		test_child_order();
+		return (0);
+	}
+	if (argc == 2 && strcmp(argv[1], "--index-reference") == 0) {
+		test_index_reference();
+		return (0);
+	}
+	if (argc == 3 && (strcmp(argv[1], "--scale") == 0 ||
+	    strcmp(argv[1], "--wide") == 0)) {
+		char *end;
+		uint64_t files;
+
+		errno = 0;
+		files = strtoull(argv[2], &end, 10);
+		CHECK(errno == 0 && *end == '\0' && files > 0 && files <= 10000000);
+		test_scale(files, strcmp(argv[1], "--wide") == 0);
+		return (0);
+	}
+	CHECK(argc == 1);
+	for (uint32_t pages = 1; pages <= 16; pages *= 4) {
+		test_order(pages, 2);
+		test_order(pages, 8);
+	}
+	test_long_directory();
+	test_deep_catalog();
+	test_invalid_catalogs();
+	test_metadata();
+	test_failures();
+	test_corrupt_metadata();
+	test_inspection_failure();
+	test_short_child_record();
+	test_child_order();
+	test_index_reference();
+	return (0);
+}

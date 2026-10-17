@@ -6,8 +6,14 @@ creation, reading, verification, and safe extraction without mounts or root.
 
 The library provides resource contexts, bounded positional I/O, and private
 bounded metadata storage with record streams, paged arrays/bitsets, and stable
-external sorting. Filesystem formats and the `fsimg` command are tracked in the
-[implementation plan](docs/implementation-plan.md) and [open work](TODO.md).
+external sorting. Private writer infrastructure scans host trees, reads zero
+and provider-backed sources, and prepares deterministic catalogs without a
+resident object or descriptor per entry. Source scanning rejects symlinks,
+special files, descendant mounts, and scratch-directory overlap; identity checks
+detect ordinary changes, while hostile concurrent mutation requires immutable
+sources or a snapshot. Public format construction and the `fsimg` command are
+tracked in the [implementation plan](docs/implementation-plan.md) and
+[open work](TODO.md).
 
 Build with Autoconf, Automake, Libtool, a C11 compiler, and a C++ compiler:
 

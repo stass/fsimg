@@ -17,6 +17,7 @@
 
 struct fsimg_io {
 	fsimg_ctx_t	*ctx;
+	fsimg_session_t	*session;
 	fsimg_io_t	*root;
 	uint64_t	 base;
 	uint64_t	 length;
@@ -35,6 +36,12 @@ static fsimg_status_t adapter_transfer(fsimg_io_t *, uint64_t, void *,
 static fsimg_status_t callback_result(fsimg_status_t, fsimg_error_t *);
 static fsimg_status_t io_from_fd(fsimg_ctx_t *, int, unsigned, bool,
     fsimg_io_t **, fsimg_error_t *);
+
+void
+fsimg_io_bind_session(fsimg_io_t *io, fsimg_session_t *session)
+{
+	io->root->session = session;
+}
 
 void
 fsimg_io_ops_init(fsimg_io_ops_t *ops)
@@ -372,6 +379,11 @@ io_transfer(fsimg_io_t *io, uint64_t offset, void *buffer, size_t length,
 		batch = length - done;
 		if (batch > root->ops.max_transfer)
 			batch = root->ops.max_transfer;
+		if (root->session != NULL) {
+			status = fsimg_session_charge(root->session, 0, 0, 1, &detail);
+			if (status != FSIMG_OK)
+				break;
+		}
 		status = adapter_transfer(root, io->base + offset + done,
 		    (unsigned char *)buffer + done, batch, &count, writing,
 		    &detail);

@@ -116,10 +116,13 @@ type-restricted opening mechanism. The profile still denies networking,
 execution, ioctl access, metadata mutation, and writes outside output/scratch.
 It is named and reported separately from the image-reading profile.
 
-Scanning does not cross descendant mount points; where the host cannot enforce
-that at resolution time, the security claim excludes adversarial mount changes
-and checks opened filesystem identity. For adversarial source trees requiring
-device-open exclusion, use an isolated source filesystem mounted with device
+Scanning rejects descendant mounts by comparing each opened object's device and
+native mount identity with its authorized root. An unavailable mount-identity
+query returns unsupported; matching device numbers alone are insufficient for
+same-filesystem mount aliases. Post-open checks do not prevent adversarial mount
+changes during resolution, and the security claim excludes those changes. For
+adversarial source trees requiring device-open exclusion, use an isolated
+source filesystem mounted with device
 nodes disabled, or a tested stronger host mechanism. A supported sandbox in
 `required` mode guarantees the advertised profile, not stronger authority
 restriction than its source roots allow. Capability output and user docs state

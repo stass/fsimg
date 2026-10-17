@@ -55,6 +55,8 @@ void fsimg_fd_release(fsimg_ctx_t *, int);
  */
 fsimg_status_t fsimg_io_adopt_fd(fsimg_ctx_t *, int, unsigned,
     fsimg_io_t **, fsimg_error_t *);
+/* Bind a freshly constructed internal adapter to its operation's work quota. */
+void fsimg_io_bind_session(fsimg_io_t *, fsimg_session_t *);
 void fsimg_session_init(fsimg_session_t *, fsimg_ctx_t *, const char *,
     uint64_t);
 fsimg_status_t fsimg_session_charge(fsimg_session_t *, uint64_t, uint64_t,

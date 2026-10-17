@@ -20,6 +20,7 @@ extern "C" {
 
 typedef struct fsimg_ctx fsimg_ctx_t;
 typedef struct fsimg_io fsimg_io_t;
+typedef struct fsimg_writer fsimg_writer_t;
 
 typedef enum fsimg_status {
 	FSIMG_OK = 0,
@@ -45,7 +46,10 @@ typedef enum fsimg_operation {
 	FSIMG_OP_ALLOCATE,
 	FSIMG_OP_IO,
 	FSIMG_OP_PUBLISH,
-	FSIMG_OP_METADATA
+	FSIMG_OP_METADATA,
+	FSIMG_OP_SOURCE,
+	FSIMG_OP_CATALOG,
+	FSIMG_OP_WRITER
 } fsimg_operation_t;
 
 typedef enum fsimg_resource {
@@ -55,7 +59,9 @@ typedef enum fsimg_resource {
 	FSIMG_RESOURCE_DESCRIPTORS,
 	FSIMG_RESOURCE_ENTRIES,
 	FSIMG_RESOURCE_OUTPUT,
-	FSIMG_RESOURCE_WORK
+	FSIMG_RESOURCE_WORK,
+	FSIMG_RESOURCE_DEPTH,
+	FSIMG_RESOURCE_PATH
 } fsimg_resource_t;
 
 typedef enum fsimg_output_state {
@@ -199,6 +205,114 @@ fsimg_status_t fsimg_io_resize(fsimg_io_t *, uint64_t, fsimg_error_t *);
 fsimg_status_t fsimg_io_zero_range(fsimg_io_t *, uint64_t, uint64_t,
     fsimg_error_t *);
 fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
+
+#define FSIMG_META_CREATED 0x01u
+#define FSIMG_META_MODIFIED 0x02u
+#define FSIMG_META_ACCESSED 0x04u
+#define FSIMG_META_ATTRIBUTES 0x08u
+#define FSIMG_ATTR_READONLY 0x01u
+#define FSIMG_ATTR_HIDDEN 0x02u
+#define FSIMG_ATTR_SYSTEM 0x04u
+#define FSIMG_ATTR_ARCHIVE 0x08u
+
+typedef enum fsimg_entry_kind {
+	FSIMG_ENTRY_FILE = 1,
+	FSIMG_ENTRY_DIRECTORY = 2
+} fsimg_entry_kind_t;
+
+typedef enum fsimg_time_basis {
+	FSIMG_TIME_UTC = 1,
+	FSIMG_TIME_OFFSET = 2,
+	FSIMG_TIME_WALL = 3
+} fsimg_time_basis_t;
+
+/* UTC and OFFSET seconds denote Unix-epoch UTC instants. OFFSET also retains
+ * the original minutes east of UTC, strictly within a day. WALL encodes
+ * calendar fields as if UTC without asserting a timezone. UTC/WALL require
+ * offset zero.
+ * Nanoseconds are below 1e9. Positive precision_ns states representation
+ * precision, not clock accuracy. An absent timestamp has no meaning.
+ */
+typedef struct fsimg_timestamp {
+	int64_t		 seconds;
+	uint64_t	 precision_ns;
+	uint32_t	 nanoseconds;
+	fsimg_time_basis_t basis;
+	int32_t		 offset_minutes;
+} fsimg_timestamp_t;
+
+/* Required is a subset of valid. Unknown bits are rejected. The common
+ * catalog preserves every valid field; format planning checks fidelity.
+ */
+typedef struct fsimg_metadata {
+	uint32_t	 valid;
+	uint32_t	 required;
+	uint32_t	 attributes;
+	fsimg_timestamp_t created;
+	fsimg_timestamp_t modified;
+	fsimg_timestamp_t accessed;
+} fsimg_metadata_t;
+
+typedef struct fsimg_entry {
+	const char	*path;
+	fsimg_entry_kind_t kind;
+	uint64_t	 size;
+	fsimg_metadata_t metadata;
+} fsimg_entry_t;
+
+typedef enum fsimg_source_kind {
+	FSIMG_SOURCE_ZERO = 1,
+	FSIMG_SOURCE_PROVIDER = 2
+} fsimg_source_kind_t;
+
+typedef struct fsimg_source {
+	fsimg_source_kind_t kind;
+	uint64_t	 id;
+} fsimg_source_t;
+
+typedef enum fsimg_range_kind {
+	FSIMG_RANGE_DATA = 1,
+	FSIMG_RANGE_ZERO = 2
+} fsimg_range_kind_t;
+
+typedef struct fsimg_range {
+	uint64_t	 offset;
+	uint64_t	 length;
+	fsimg_range_kind_t kind;
+} fsimg_range_t;
+
+typedef fsimg_status_t (*fsimg_source_validate_fn_t)(void *, uint64_t,
+    fsimg_error_t *);
+typedef fsimg_status_t (*fsimg_source_read_fn_t)(void *, uint64_t, uint64_t,
+    void *, size_t, size_t *, fsimg_error_t *);
+typedef fsimg_status_t (*fsimg_source_range_fn_t)(void *, uint64_t, uint64_t,
+    fsimg_range_t *, fsimg_error_t *);
+
+typedef struct fsimg_source_ops {
+	size_t		 size;
+	uint32_t	 version;
+	uint32_t	 flags;
+	size_t		 max_transfer;
+	fsimg_source_validate_fn_t validate;
+	fsimg_source_read_fn_t read_at;
+	fsimg_source_range_fn_t next_range;
+	uint64_t	 reserved[4];
+} fsimg_source_ops_t;
+
+/* One provider is registered once, before its entries. Its table is copied;
+ * its argument/content remain borrowed until writer destruction. No callback
+ * retains buffers or re-enters the active context. Reads follow the byte-I/O
+ * partial-progress/EINTR rules. Opaque source/sink storage must be disjoint.
+ * add copies path/metadata. Directories require size zero and a NULL source;
+ * files require an explicit zero or provider source. Host trees reject links
+ * and special files, and check identity/size/change metadata on reopening.
+ * These checks detect ordinary mutation; hostile writers require a snapshot.
+ * Provider ranges start at the requested offset, have positive in-bounds
+ * length, and use DATA or ZERO. EOF is handled without invoking the callback.
+ * Common collection is private; public writer construction and planning
+ * select an accepted format driver.
+ */
+void fsimg_source_ops_init(fsimg_source_ops_t *);
 
 #ifdef __cplusplus
 }

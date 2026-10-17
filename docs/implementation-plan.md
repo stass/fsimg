@@ -12,7 +12,7 @@ acceptance gate.
 | --- | --- | --- |
 | 1. Contracts and platform substrate | Implemented; kernel qualification remains open | Native build, I/O, publication, and sanitizer checks; Linux/FreeBSD confinement requires actual-kernel evidence in [platform-evidence.md](platform-evidence.md) |
 | 2. Bounded metadata storage | Implemented and validated on the native host | Shared cache, private scratch, record streams, arrays/bitsets, stable external sort, fault tests, ASan/UBSan, and above-budget scale checks in [build.md](build.md) |
-| 3. Sources and catalog | Next implementation package | Descriptor-relative scanning, source providers, deterministic catalog, and writer lifecycle |
+| 3. Sources and catalog | Implemented and validated on the native host | Descriptor-relative scanning, source providers, deterministic catalog, common writer lifecycle, fault regressions, and scale/sanitizer checks in [build.md](build.md); source-profile integration remains part of platform qualification |
 | 4–9 | Pending | Follow the dependencies and completion gates below; format implementation also requires platform qualification |
 
 ## Dependency order
@@ -38,6 +38,9 @@ particular, launch the required reviewer before the pre-commit test run and
 ask explicitly about correctness, architecture, security/information leaks,
 and the style guide's readability criteria. For an architectural change, the
 review compares concepts and maintenance obligations removed and introduced.
+Each stage also receives a read-only OpenCode review with the Z.ai coding-plan
+subscription, `zai-coding-plan/glm-5.3`, and `--variant max`. Substantive fixes
+receive another external review before committing.
 
 ## 1. Contracts, build, and platform substrate
 

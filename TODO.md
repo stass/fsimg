@@ -4,8 +4,8 @@
 
 * [High] **fsimg tool and library** (`lib/`, `cmd/fsimg/`, `test/`): implement the
   [target specification](specs/README.md) through the ordered
-  [implementation plan](docs/implementation-plan.md), continuing with source
-  scanning and the deterministic catalog. Format implementation requires platform
+  [implementation plan](docs/implementation-plan.md), continuing with FAT readers
+  and structural verification. Format implementation requires platform
   qualification. The acceptance gates cover
   bounded metadata and payload processing, FAT/exFAT interoperability, secure
   extraction, actual-kernel sandbox validation, failure handling, and measured
@@ -18,7 +18,13 @@
   and FreeBSD kernels and resolve runtime/libc mismatches before format code
   depends on them. Validate both source and image profiles, failure classification,
   inherited descriptors, alternate ABIs, and publication on deployment
-  filesystems. The macOS host cannot establish those kernel guarantees; see
+  filesystems. Integrate bounded directory reads and descriptor-only mount
+  queries with the source profile: Linux seccomp denies the scanner's `statx`,
+  FreeBSD needs mount-query rights, and confined source roots need private
+  descriptor adoption. Do not permit general pathname metadata queries or
+  descriptor duplication to make these paths work. Qualify rejection of
+  same-filesystem mount aliases with real mount fixtures. The macOS host cannot
+  establish those kernel guarantees; see
   [platform evidence](docs/platform-evidence.md).
 
 ## Planned features

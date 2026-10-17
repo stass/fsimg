@@ -173,6 +173,10 @@ The reader is a lazy iterator with content access to its current entry. The
 writer consumes a complete logical catalog, not necessarily an in-memory tree.
 Shared code supplies I/O, resources, codecs, source access, and diagnostics;
 format-specific geometry and allocation models remain with the driver.
+The [sources and catalogs design](design-sources.md) defines common collection,
+source identity and reopening, and immutable catalog preparation independently
+of format planning. Common collection uses private interfaces; public writer
+construction selects an accepted format driver.
 
 Collection records source references, validation orders and checks entries,
 planning fixes geometry and extents, and emission copies content directly to
@@ -185,6 +189,13 @@ Sources have declared lengths and repeatable positional reads. Host scanning
 does not follow symlinks. Reopened files are checked against recorded identity,
 type, size, and change metadata before and after copying. Changed sources fail
 the operation; partial output is not published.
+
+The immutable catalog owns each source's kind, reference, and declared length.
+Source access accepts a stable catalog ID and obtains those values through the
+catalog's validated indexed-read boundary. A caller cannot substitute a source
+descriptor or pair an entry snapshot with a different writer. The writer owns
+one current source, its I/O handle, and its failure cleanup; source operations
+preserve the current catalog-inspection snapshot.
 
 These checks detect ordinary changes; they are not an atomic snapshot of a
 hostile concurrently modified tree. Callers requiring snapshot consistency
@@ -205,6 +216,11 @@ semantics. A required attribute that cannot be represented is an error.
 Optional omission requires an explicit policy and a bounded, structured loss
 report. The ordinary host-tree import selects content, hierarchy, and
 representable timestamps; it does not promise to preserve every `stat` field.
+UTC and known-offset timestamp seconds denote UTC instants relative to the Unix
+epoch; the latter retains its original offset separately. Unknown-offset wall
+times encode calendar fields as if UTC without asserting a zone. This keeps
+generic metadata independent of the host timezone while preserving the basis
+needed by format codecs and extraction policy.
 
 ### Extraction and sandboxing
 

@@ -60,23 +60,74 @@ temporary memory, scratch, and descriptors return to baseline. Cancellation and
 work limits are checked during run generation, merging, page I/O, and comparison.
 The metadata interfaces are private; their borrowed session outlives them.
 
-`check-scale` is a separate, non-sanitized metadata qualification: it sorts 24 MiB
+Source/catalog tests cover unordered entries, tuple-prefix ordering, deep and
+wide paths, explicit parents, collisions, metadata framing, snapshot lifetimes,
+and injected allocation failures during collection/preparation. Unicode tests
+round-trip every scalar value and reject malformed UTF-8/UTF-16. Disposable source
+trees exercise descriptor-relative reopening, changed files and directories,
+symlink pivots, special files, hardlinks, scratch overlap, interrupted directory reads,
+and descriptor/depth/cancellation limits. Provider scripts cover copied tables,
+reentry, empty files, range progress and EOF handling, short reads, partial
+errors, interruption, and cumulative work limits. Corrupt catalog, index, child,
+and host-source records are rejected before values reach a provider or a copy
+operation.
+
+`check-scale` is a separate, non-sanitized qualification. It sorts 24 MiB
 of generated records and fills/queries a 24 MiB fixed-record array with a 16 MiB
 context budget, a 16-page shared cache, a 256 KiB run allowance, and merge fan-in
 eight. It prints charged memory, logical and sampled physical scratch peaks,
 I/O counts/bytes, elapsed time, and the host's raw `getrusage` maximum RSS value
 (bytes on macOS, KiB on Linux/FreeBSD). Generated data and fixed-record lookups
-have deterministic expected results without a resident scale oracle. This
-qualifies metadata spilling separately from future format/catalog scale gates.
+have deterministic expected results without a resident scale oracle. It also
+prepares a 100,000-file root directory at a 16 MiB budget and a grouped
+100,000-file catalog at a 256 MiB budget. The generated provider supplies
+deterministic content without host payload fixtures. Catalog tests check every
+path, source reference, and parent, sample provider bytes, and report peak charged
+memory, scratch, and descriptors, cumulative I/O calls, and elapsed time.
 Scratch should use a disk-backed filesystem; a RAM-backed directory consumes
 system memory outside the library heap budget.
 
-Native macOS validation reports seven passing tests and the explicit sandbox
+The extended ten-million-file catalog uses the same generated provider, 10,000
+explicit directories, a 256 MiB budget, and no retained per-file object or FD:
+
+```sh
+./test-catalog --scale 10000000
+```
+
+Native macOS validation reports ten passing tests and the explicit sandbox
 skip in ordinary, ASan/UBSan, and standalone UBSan runs. The metadata scale
-fixture reports a 329,072-byte allocation peak, 75,795,888-byte logical scratch
+fixture reports a 329,088-byte allocation peak, 75,795,888-byte logical scratch
 peak, and 134,683 I/O calls on APFS. These are measurements of this fixture,
 not bounds promised for every metadata workload. Linux/FreeBSD checks require
 their own host runs.
+
+The 100,000-file wide catalog reports a 3,157,912-byte allocation peak,
+58,500,368 scratch bytes, seven descriptors, and 86,607 I/O calls. The grouped
+case reports 5,255,064 allocation bytes, 61,558,724 scratch bytes, seven
+descriptors, and 75,894 I/O calls. These charged allocation figures exclude
+kernel filesystem caches and scratch storage.
+
+The extended run validates 10,000,000 files beneath 10,000 directories in
+754.155 seconds. It reports 5,255,064 peak charged memory bytes, 6,155,866,048
+logical scratch bytes, seven descriptors, and 10,976,692 I/O calls at a
+256 MiB budget. This is catalog/source qualification; it does not measure a
+filesystem image, payload transfer, or the CLI/worker RSS acceptance gate.
+
+Stage reviews include the required independent code-review agent and an external
+read-only OpenCode review through the Z.ai coding-plan subscription. Copy only
+project sources, tests, and contracts into a review directory, excluding Git
+metadata, configuration, and credentials, and provide a `REVIEW.md` prompt
+covering correctness, design, security/information leaks, and the style guide's
+readability review. Run from that directory:
+
+```sh
+OPENCODE_CONFIG_CONTENT='{"share":"disabled","permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow"}}' \
+  opencode run --pure --agent plan --model zai-coding-plan/glm-5.3 \
+  --variant max --format json 'Read REVIEW.md and perform the requested review.'
+```
+
+Review substantive fixes again. Report failed or unavailable reviews explicitly.
+OpenCode is a development tool and introduces no library runtime dependency.
 
 Installation and release checks:
 
@@ -96,6 +147,8 @@ private session counters persist across incremental calls. An output ceiling
 of zero is derived by the containing reader/writer from its volume length; optional
 work ceilings are disabled at zero.
 
-No command-line executable or format capability is installed by this substrate
-build. The sandbox and publication functions are private mechanism prototypes;
-they do not provide worker supervision, staging creation, or filesystem parsing.
+No command-line executable or format capability is installed. Common writer
+collection/preparation and source access are private; public writer construction
+selects an accepted format driver. The sandbox and publication functions are
+private mechanism prototypes; they do not provide worker supervision, staging
+creation, or filesystem parsing.

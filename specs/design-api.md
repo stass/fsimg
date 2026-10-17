@@ -173,7 +173,9 @@ components and explicit parent directory entries.
 Metadata has separate `valid` and `required` masks, timestamp values, and format
 attributes with documented meaning. Each timestamp carries signed seconds,
 nanoseconds, precision, and a time basis: UTC, known offset, or wall-clock with
-unknown offset. For wall-clock values, the seconds field encodes the calendar
+unknown offset. UTC and known-offset seconds denote a UTC instant relative to
+the Unix epoch; a known offset additionally retains the original minutes east
+of UTC. For wall-clock values, the seconds field encodes the calendar
 fields as if UTC without claiming that UTC is their actual zone. No implicit
 host timezone conversion is allowed. An unset field is absent, not zero.
 Host uid/gid/mode values, when
