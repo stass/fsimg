@@ -27,6 +27,8 @@ struct fsimg_source_root {
  * Finish validates after the final read and closes it on every outcome.
  * Writer failure/destruction also closes it. Source records have a separate
  * buffer, so source operations preserve the catalog's current snapshot.
+ * Reads clip their requested length to EOF and report confirmed bytes; callers
+ * copying an exact range must check the returned length. Past-EOF offsets fail.
  */
 void fsimg_sources_release(fsimg_writer_t *);
 fsimg_status_t fsimg_source_open(fsimg_writer_t *, uint64_t, fsimg_error_t *);

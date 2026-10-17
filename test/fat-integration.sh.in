@@ -13,6 +13,7 @@ for tool in "$MKFS_FAT" "$FSCK_FAT" "$MCOPY" "$MMD" "$MDEL"; do
         exit 77
     fi
 done
+
 fixture_dir=$(mktemp -d fat-interop-XXXXXX)
 trap 'rm -rf "$fixture_dir"' 0
 trap 'exit 1' 1 2 15
@@ -58,4 +59,29 @@ for profile in fat12 fat16 fat32 fat16-wide; do
     "$FSCK_FAT" -n "$image"
     ./test-fat --external "$image" "fat$variant"
     echo 'result: fsck.fat -n and fsimg enumeration/content/full verification passed'
+done
+
+# fsimg-created volumes are checked and extracted by independent tools. These
+# checks do not rely on fsimg's decoder to judge its own directory/FAT output.
+printf 'Independent FAT writer fixture.\n' > "$fixture_dir/writer-payload"
+for profile in fat12 fat16 fat32; do
+    mkdir "$fixture_dir/write-$profile"
+    ./test-fat-write --create "$fixture_dir/write-$profile" "$profile"
+    image="$fixture_dir/write-$profile/writer.img"
+    echo "writer fixture: $profile; automatic geometry; serial zero; NO NAME label"
+    "$FSCK_FAT" -n "$image"
+    "$MCOPY" -i "$image" ::HELLO.TXT "$fixture_dir/extracted"
+    cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
+    rm "$fixture_dir/extracted"
+    "$MCOPY" -i "$image" '::Nested/long name.txt' "$fixture_dir/extracted"
+    cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
+    rm "$fixture_dir/extracted"
+    "$MCOPY" -i "$image" "::$unicode_name" "$fixture_dir/extracted"
+    cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
+    rm "$fixture_dir/extracted"
+    echo 'result: fsck.fat and mtools content/Unicode extraction passed'
+    rm "$image"
+    ./test-fat-write --create-empty "$fixture_dir/write-$profile" "$profile"
+    "$FSCK_FAT" -n "$image"
+    echo 'result: independently checked empty writer volume'
 done

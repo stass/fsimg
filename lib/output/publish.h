@@ -20,5 +20,7 @@ typedef struct fsimg_publish_ops {
 
 fsimg_status_t fsimg_publish(fsimg_ctx_t *, int, const char *, uint64_t,
     int, const char *, const fsimg_publish_ops_t *, fsimg_error_t *);
+fsimg_status_t fsimg_output_write(fsimg_writer_t *, int, const char *,
+    uint64_t, const fsimg_publish_ops_t *, fsimg_error_t *);
 
 #endif

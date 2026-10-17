@@ -26,10 +26,13 @@ struct fsimg_io {
 	int		 fd;
 	fsimg_io_ops_t	 ops;
 	void		*argument;
+	bool		 known_zero;
 };
 
 static fsimg_status_t io_range(fsimg_io_t *, uint64_t, uint64_t,
     fsimg_error_t *);
+static fsimg_status_t io_zero(fsimg_io_t *, fsimg_session_t *, uint64_t,
+    uint64_t, fsimg_error_t *);
 static fsimg_status_t io_transfer(fsimg_io_t *, uint64_t, void *, size_t,
     size_t *, bool, bool, fsimg_session_t *, fsimg_error_t *);
 static fsimg_status_t adapter_transfer(fsimg_io_t *, uint64_t, void *,
@@ -51,6 +54,28 @@ fsimg_io_context(const fsimg_io_t *io)
 }
 
 fsimg_status_t
+fsimg_io_check_output(fsimg_io_t *io, uint64_t length, bool durable,
+    bool *resize, fsimg_error_t *error)
+{
+	uint64_t current;
+	fsimg_status_t status;
+
+	*resize = false;
+	status = fsimg_io_get_size(io, &current, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if ((io->access & FSIMG_IO_WRITE) == 0 ||
+	    (durable && (io->root->ops.flags & FSIMG_IO_DURABLE) == 0))
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_IO, "sink lacks required write or durability capability"));
+	*resize = io->root == io && (io->fd != -1 || io->ops.resize != NULL);
+	if (!*resize && current != length)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_IO, "fixed sink length differs from planned volume"));
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
 fsimg_io_identity(fsimg_io_t *io, fsimg_host_file_t *identity, bool *known,
     fsimg_error_t *error)
 {
@@ -67,6 +92,25 @@ fsimg_io_identity(fsimg_io_t *io, fsimg_host_file_t *identity, bool *known,
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_IO, "image identity query failed"));
 	*known = true;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_io_adopt_empty_output(fsimg_ctx_t *ctx, int fd, fsimg_io_t **out,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fsimg_io_adopt_fd(ctx, fd, FSIMG_IO_WRITE, out, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if ((*out)->length != 0) {
+		fsimg_io_free(*out);
+		*out = NULL;
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_IO, "fresh output requires an empty private file"));
+	}
+	(*out)->known_zero = true;
 	return (FSIMG_OK);
 }
 
@@ -301,6 +345,21 @@ fsimg_io_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
 	return (FSIMG_OK);
 }
 
+fsimg_status_t
+fsimg_io_close_output(fsimg_io_t *io, fsimg_error_t *error)
+{
+	int result, saved;
+
+	result = close(io->fd);
+	saved = errno;
+	fsimg_fd_release(io->ctx, -1);
+	fsimg_dealloc(io);
+	if (result == -1)
+		return (fsimg_error_set(error, FSIMG_EIO, saved,
+		    FSIMG_OP_PUBLISH, "staged image close failed"));
+	return (FSIMG_OK);
+}
+
 void
 fsimg_io_free(fsimg_io_t *io)
 {
@@ -338,6 +397,11 @@ adapter_transfer(fsimg_io_t *root, uint64_t offset, void *buffer,
 
 	*transferred = 0;
 	fsimg_error_clear(error);
+	/* Once any write is attempted, even a failing one, unwritten ranges no
+	 * longer describe the whole object. Reused sinks always take real zeroing.
+	 */
+	if (writing)
+		root->known_zero = false;
 	if (root->fd != -1) {
 		if (!fsimg_host_offset(offset, &host_offset))
 			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
@@ -502,6 +566,15 @@ fsimg_io_read_session(fsimg_io_t *io, fsimg_session_t *session,
 }
 
 fsimg_status_t
+fsimg_io_write_session(fsimg_io_t *io, fsimg_session_t *session,
+    uint64_t offset, const void *buffer, size_t length, size_t *transferred,
+    fsimg_error_t *error)
+{
+	return (io_transfer(io, offset, (void *)buffer, length, transferred, true,
+	    true, session, error));
+}
+
+fsimg_status_t
 fsimg_io_resize(fsimg_io_t *io, uint64_t length, fsimg_error_t *error)
 {
 	off_t host_length;
@@ -536,9 +609,9 @@ fsimg_io_resize(fsimg_io_t *io, uint64_t length, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-fsimg_status_t
-fsimg_io_zero_range(fsimg_io_t *io, uint64_t offset, uint64_t length,
-    fsimg_error_t *error)
+static fsimg_status_t
+io_zero(fsimg_io_t *io, fsimg_session_t *session, uint64_t offset,
+    uint64_t length, fsimg_error_t *error)
 {
 	fsimg_error_t detail;
 	fsimg_io_t *root;
@@ -557,6 +630,13 @@ fsimg_io_zero_range(fsimg_io_t *io, uint64_t offset, uint64_t length,
 	if (length == 0)
 		return (FSIMG_OK);
 	root = io->root;
+	if (session == NULL)
+		session = root->session;
+	if (root->known_zero) {
+		if (session != NULL)
+			return (fsimg_session_charge(session, 0, 0, 1, error));
+		return (fsimg_poll(io->ctx, NULL, error));
+	}
 	zeros = NULL;
 	if (root->ops.zero_range == NULL) {
 		zeros = fsimg_alloc(io->ctx, 64 * 1024, &detail);
@@ -576,9 +656,14 @@ fsimg_io_zero_range(fsimg_io_t *io, uint64_t offset, uint64_t length,
 			break;
 		mutation_attempted = true;
 		if (zeros != NULL) {
-			status = fsimg_io_write_exact(io, offset + done, zeros,
-			    batch, &transferred, error);
+			status = io_transfer(io, offset + done, zeros, batch,
+			    &transferred, true, true, session, error);
 		} else {
+			if (session != NULL) {
+				status = fsimg_session_charge(session, 0, 0, 1, error);
+				if (status != FSIMG_OK)
+					break;
+			}
 			io->ctx->in_callback = true;
 			status = root->ops.zero_range(root->argument,
 			    io->base + offset + done, batch, error);
@@ -596,6 +681,20 @@ fsimg_io_zero_range(fsimg_io_t *io, uint64_t offset, uint64_t length,
 	if (status != FSIMG_OK && mutation_attempted && error != NULL)
 		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
 	return (status);
+}
+
+fsimg_status_t
+fsimg_io_zero_range(fsimg_io_t *io, uint64_t offset, uint64_t length,
+    fsimg_error_t *error)
+{
+	return (io_zero(io, NULL, offset, length, error));
+}
+
+fsimg_status_t
+fsimg_io_zero_session(fsimg_io_t *io, fsimg_session_t *session,
+    uint64_t offset, uint64_t length, fsimg_error_t *error)
+{
+	return (io_zero(io, session, offset, length, error));
 }
 
 fsimg_status_t

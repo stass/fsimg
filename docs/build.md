@@ -76,6 +76,32 @@ errors, interruption, and cumulative work limits. Corrupt catalog, index, child,
 and host-source records are rejected before values reach a provider or a copy
 operation.
 
+`test-fat-write` covers public construction/planning/emission, all FAT variants,
+every supported sector/allocation-unit pair, exact and automatic sizing, full
+volumes, variant thresholds, fixed-root exhaustion, maximum file-size planning,
+case/alias conflicts, timestamp range and precision, reproducible epochs,
+source-order/cache-size byte equality, successful slices, poisoned reused
+sinks, FD/hardlink/slice aliases, source changes, allocation failures, short
+zero-write work accounting, sparse publication, and retained-staging errors.
+The integration script also validates fsimg-created images with `fsck.fat` and
+extracts ordinary, nested, and Unicode content with mtools for byte comparison.
+
+Targeted initialization and staging regressions are:
+
+```sh
+./test-fat-write --zero-work
+./test-fat-write --short-zero-work
+./test-fat-write --sparse-publication
+./test-fat-write --retained-staging
+./test-fat-write --corrupt-plan
+./test-fat-write --scale
+```
+
+The 30,000-name writer planning case uses one shared cache page and a 16 MiB
+memory budget. On APFS it reports 2,236,096 peak charged memory bytes,
+17,730,160 peak logical scratch bytes, eight descriptors and 1,017,736 I/O calls.
+This measures planning independently of payload transfer and logical capacity.
+
 FAT tests use an independently encoded sparse fixture family across all 96
 combinations of three variants, four sector sizes, and eight cluster sizes.
 They exercise type thresholds, legal maximum cluster identifiers, FAT12 window
@@ -163,7 +189,7 @@ explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 ./test-catalog --scale 10000000
 ```
 
-Native macOS validation reports twelve passing tests and the explicit sandbox
+Native macOS validation reports thirteen passing tests and the explicit sandbox
 skip in ordinary, ASan/UBSan, and standalone UBSan runs. The metadata scale
 fixture reports a 329,088-byte allocation peak, 75,795,888-byte logical scratch
 peak, and 134,683 I/O calls on APFS. These are measurements of this fixture,
@@ -203,6 +229,15 @@ OPENCODE_CONFIG_CONTENT='{"share":"disabled","permission":{"*":"deny","read":"al
 Review substantive fixes again. Report failed or unavailable reviews explicitly.
 OpenCode is a development tool and introduces no library runtime dependency.
 
+The FAT writer has a completed `zai-coding-plan/glm-5.3 --variant max` review
+and focused follow-ups of alias-cursor structure, cleanup ownership, and
+plan/source length guards. No Critical/High or readability findings remain.
+The suspected FAT32 ceiling issue was checked against the Microsoft reference:
+MAX is CountOfClusters + 1, and allocatable identifiers are below the bad-cluster
+marker; the implemented boundary follows that rule. Preflight host-source
+reopening deliberately validates identities before any output mutation, in
+addition to validation around payload copying.
+
 Installation and release checks:
 
 ```sh
@@ -223,8 +258,8 @@ work ceilings are disabled at zero.
 
 The installed header/library expose FAT readers, volume information, current-file
 content/range reads, full verification, and independent reader/writer capability
-enumeration. No command-line executable is installed. Common writer
-collection/preparation and source access are private; public writer construction
-selects an accepted format driver. The sandbox and publication functions are
-private mechanism prototypes; they do not provide worker supervision, staging
-creation, or filesystem parsing.
+enumeration. No command-line executable is installed. Public FAT writers expose
+collection, immutable planning, raw emission, and durable no-replace publication.
+Source access and common catalog/storage remain private. The sandbox remains a
+private mechanism prototype without worker supervision; image staging and
+publication have a shared library coordinator.

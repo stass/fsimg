@@ -21,6 +21,7 @@ extern "C" {
 typedef struct fsimg_ctx fsimg_ctx_t;
 typedef struct fsimg_io fsimg_io_t;
 typedef struct fsimg_writer fsimg_writer_t;
+typedef struct fsimg_plan fsimg_plan_t;
 typedef struct fsimg_reader fsimg_reader_t;
 
 typedef enum fsimg_status {
@@ -77,6 +78,8 @@ typedef enum fsimg_output_state {
 typedef struct fsimg_error {
 	fsimg_status_t	 status;
 	int		 os_error;
+	/* Nonzero when disposable output could not be removed; path identifies it. */
+	int		 cleanup_error;
 	fsimg_operation_t operation;
 	fsimg_resource_t resource;
 	fsimg_output_state_t output_state;
@@ -99,6 +102,8 @@ typedef struct fsimg_progress {
 
 typedef void (*fsimg_progress_fn_t)(void *, const fsimg_progress_t *);
 typedef bool (*fsimg_cancel_fn_t)(void *);
+/* path is borrowed for this callback; fields is a FSIMG_META_* mask. */
+typedef void (*fsimg_loss_fn_t)(void *, const char *, uint32_t);
 
 typedef struct fsimg_options {
 	size_t		 size;
@@ -117,6 +122,8 @@ typedef struct fsimg_options {
 	void		*progress_argument;
 	fsimg_cancel_fn_t cancelled;
 	void		*cancel_argument;
+	fsimg_loss_fn_t	 loss;
+	void		*loss_argument;
 	uint64_t	 reserved[4];
 } fsimg_options_t;
 
@@ -317,6 +324,73 @@ typedef struct fsimg_source_ops {
  */
 void fsimg_source_ops_init(fsimg_source_ops_t *);
 
+#define FSIMG_WRITE_ALLOW_LOSS 0x01u
+#define FSIMG_WRITE_REPRODUCIBLE 0x02u
+#define FSIMG_WRITE_DURABLE 0x04u
+
+typedef struct fsimg_write_options {
+	size_t		 size;
+	uint32_t	 version;
+	uint32_t	 flags;
+	uint64_t	 volume_bytes; /* Zero selects automatic sizing. */
+	uint64_t	 min_free_bytes;
+	int64_t		 epoch; /* Unix seconds; default 1980-01-01 UTC. */
+	const char	*label; /* Copied; NULL selects NO NAME. */
+	uint32_t	 sector_bytes; /* Zero selects 512. */
+	uint32_t	 allocation_unit_bytes; /* Zero selects automatically. */
+	uint32_t	 fat_root_entries; /* Zero selects an adequate fixed root. */
+	uint32_t	 volume_serial;
+	uint64_t	 reserved[4];
+} fsimg_write_options_t;
+
+typedef struct fsimg_plan_info {
+	char		 format[16];
+	uint64_t	 volume_bytes;
+	uint64_t	 payload_bytes;
+	uint64_t	 initialized_bytes; /* Logical initialized payload; excludes metadata. */
+	uint64_t	 allocated_bytes;
+	uint64_t	 metadata_bytes;
+	uint64_t	 free_bytes;
+	uint64_t	 entries;
+	uint64_t	 metadata_losses; /* Number of affected fields. */
+	uint64_t	 scratch_bytes; /* Observed context use at plan completion. */
+	uint32_t	 sector_bytes;
+	uint32_t	 allocation_unit_bytes;
+	unsigned	 required_io_flags;
+} fsimg_plan_info_t;
+
+/* Writers copy options/labels and own their borrowed plan until destruction.
+ * plan seals collection; subsequent plan queries return the same object.
+ * emit/write_at plan automatically and attempt emission only once. A failed
+ * writer retains an already completed plan for inspection. Raw sinks may be
+ * incomplete on failure; known source aliases are rejected before mutation.
+ * Callback source/sink storage must be disjoint. Fixed sinks must match the
+ * planned size; whole resizable sinks are resized. Every byte is defined.
+ * ALLOW_LOSS permits optional timestamp rounding/omission and time-basis loss;
+ * required losses always fail. Counts remain available in plan information.
+ * write_at requires a single basename beneath a trusted directory descriptor,
+ * publishes without replacement, and always performs durable publication.
+ * On unsupported publication error.path names the retained image relative to
+ * parent_fd; when cleanup_error is nonzero it names the retained directory.
+ */
+void fsimg_write_options_init(fsimg_write_options_t *);
+fsimg_status_t fsimg_writer_new(fsimg_ctx_t *, const char *,
+    const fsimg_write_options_t *, fsimg_writer_t **, fsimg_error_t *);
+fsimg_status_t fsimg_writer_set_sources(fsimg_writer_t *,
+    const fsimg_source_ops_t *, void *, fsimg_error_t *);
+fsimg_status_t fsimg_writer_add(fsimg_writer_t *, const fsimg_entry_t *,
+    const fsimg_source_t *, fsimg_error_t *);
+fsimg_status_t fsimg_writer_add_tree(fsimg_writer_t *, int, const char *,
+    fsimg_error_t *);
+fsimg_status_t fsimg_writer_plan(fsimg_writer_t *, const fsimg_plan_t **,
+    fsimg_error_t *);
+fsimg_status_t fsimg_plan_get_info(const fsimg_plan_t *, fsimg_plan_info_t *,
+    fsimg_error_t *);
+fsimg_status_t fsimg_writer_emit(fsimg_writer_t *, fsimg_io_t *, fsimg_error_t *);
+fsimg_status_t fsimg_writer_write_at(fsimg_writer_t *, int, const char *,
+    fsimg_error_t *);
+void fsimg_writer_free(fsimg_writer_t *);
+
 #define FSIMG_CAP_READ 0x01u
 #define FSIMG_CAP_WRITE 0x02u
 #define FSIMG_CAP_VERIFY 0x04u
@@ -371,6 +445,8 @@ typedef struct fsimg_format_info {
 	/* Bit n denotes a legal size of 2^n bytes. */
 	uint32_t	 sector_size_mask;
 	uint32_t	 allocation_unit_size_mask;
+	/* Writer profile can be narrower than the reader's legal geometry. */
+	uint32_t	 write_allocation_unit_size_mask;
 	/* Independent upper bounds; not every combination fits a legal volume. */
 	uint64_t	 max_file_bytes;
 	uint64_t	 max_volume_bytes;

@@ -320,11 +320,12 @@ fsimg_format_next(size_t *cursor, fsimg_format_info_t *out, fsimg_error_t *error
 		return (FSIMG_DONE);
 	strcpy(out->name, names[*cursor]);
 	strcpy(out->profile, "unicode-17-simple-upper/cp437");
-	out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
+	out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY;
 	out->entry_kinds = (1u << FSIMG_ENTRY_FILE) | (1u << FSIMG_ENTRY_DIRECTORY);
 	out->metadata_fields = 0x0f;
 	out->sector_size_mask = (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12);
 	out->allocation_unit_size_mask = ((1u << 20) - 1) & ~((1u << 9) - 1);
+	out->write_allocation_unit_size_mask = ((1u << 16) - 1) & ~((1u << 9) - 1);
 	/* File size is bounded by both its field and usable cluster identifiers.
 	 * Volume size additionally includes reserved/FAT/root regions and a tail
 	 * shorter than one cluster. These are independent supported upper bounds.

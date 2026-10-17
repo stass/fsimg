@@ -31,6 +31,11 @@ above. Its BSD-2-Clause notice is retained in both files and in
 binary distributions. Resource storage, traversal, collision handling, calendar
 conversion, indexing, and verification are project-owned implementations.
 
+`lib/formats/fat/write-emit.c` adapts boot/FSInfo fields and long-name slot
+encoding from the writer above and retains its complete BSD-2-Clause notice.
+Geometry search, alias reservation, paged plans, calendar conversion, and
+direct source emission are project-owned implementations.
+
 The generated `lib/formats/fat/name-tables.h` uses Unicode-3.0 data, with the
 full permission notice in `third-party/Unicode-LICENSE.txt`. Both notices are
 installed with the library documentation. Its inputs are:

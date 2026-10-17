@@ -4,8 +4,8 @@
 
 * [High] **fsimg tool and library** (`lib/`, `cmd/fsimg/`, `test/`): implement the
   [target specification](specs/README.md) through the ordered
-  [implementation plan](docs/implementation-plan.md), continuing with FAT planning
-  and writing on macOS. Linux/FreeBSD platform qualification
+  [implementation plan](docs/implementation-plan.md). Continue with safe extraction and worker
+  integration on macOS. Linux/FreeBSD platform qualification
   is deferred. The acceptance gates cover
   bounded metadata and payload processing, FAT/exFAT interoperability, secure
   extraction, actual-kernel sandbox validation, failure handling, and measured

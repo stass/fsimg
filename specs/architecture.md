@@ -179,6 +179,8 @@ of format planning. Common collection uses private interfaces; public writer
 construction selects an accepted format driver.
 The [FAT reader design](design-fat-reader.md) defines bounded directory
 prepasses, current-file indexing, and full allocation verification for FAT.
+The [FAT writer design](design-fat-writer.md) defines independent paged layout
+records, deterministic alias reservations, geometry selection, and emission.
 
 Collection records source references, validation orders and checks entries,
 planning fixes geometry and extents, and emission copies content directly to

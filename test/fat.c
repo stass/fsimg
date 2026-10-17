@@ -366,7 +366,7 @@ test_variants(void)
 	for (unsigned i = 0; i < 3; i++) {
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK((format.capabilities & FSIMG_CAP_READ) != 0);
-		CHECK((format.capabilities & FSIMG_CAP_WRITE) == 0);
+		CHECK((format.capabilities & FSIMG_CAP_WRITE) != 0);
 	}
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);

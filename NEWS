@@ -24,3 +24,12 @@ long-name/short-alias ambiguity. Allocation chains, directory ownership, random
 access indexes, and global allocation verification use bounded resources.
 Names use pinned CP437 and Unicode simple-uppercase tables; timestamps retain
 wall-clock semantics. Reader and writer capabilities are reported independently.
+
+FAT12, FAT16, and FAT32 writers provide immutable paged layout plans, automatic
+and exact geometry, free-space reserves, deterministic short aliases and
+long names, explicit timestamp-loss reporting, and reproducible emission.
+Sources copy directly into the destination image with validation around reads.
+Known source aliases are rejected before output mutation, including hardlinks
+and slices. Private fresh output preserves sparse zero space; reused sinks are
+explicitly initialized. Durable file publication never replaces an existing
+destination and reports retained staging and cleanup failures.
