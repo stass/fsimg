@@ -546,7 +546,7 @@ test_metadata(void)
 			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
 			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
 			CHECK(info.metadata_losses == 1 && fixture.losses == 1);
-			CHECK(fsimg_fat_layout_get(fixture.writer->plan, 1, &row, NULL) == FSIMG_OK);
+			CHECK(fsimg_fat_layout_get((fat_plan_t *)fixture.writer->plan, 1, &row, NULL) == FSIMG_OK);
 			CHECK(fsimg_fat_u16(row.entry + 24) == 0x576e); /* 2023-11-14 */
 		}
 		fixture_close(&fixture);
@@ -722,9 +722,9 @@ test_corrupt_payload_plan(void)
 			break;
 	}
 	CHECK(id <= fixture.writer->count);
-	CHECK(fsimg_fat_layout_get(fixture.writer->plan, id, &row, NULL) == FSIMG_OK);
+	CHECK(fsimg_fat_layout_get((fat_plan_t *)fixture.writer->plan, id, &row, NULL) == FSIMG_OK);
 	row.length++;
-	CHECK(fsimg_fat_layout_set(fixture.writer->plan, id, &row, NULL) == FSIMG_OK);
+	CHECK(fsimg_fat_layout_set((fat_plan_t *)fixture.writer->plan, id, &row, NULL) == FSIMG_OK);
 	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
 	sink.length = info.volume_bytes;
 	sink.bytes = calloc(1, (size_t)sink.length);
@@ -913,7 +913,7 @@ test_timestamp_boundaries(void)
 		CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
 		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
 		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
-		CHECK(fsimg_fat_layout_get(fixture.writer->plan, 1, &row, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_layout_get((fat_plan_t *)fixture.writer->plan, 1, &row, NULL) == FSIMG_OK);
 		if (scenario == 1) {
 			CHECK(fsimg_fat_u16(row.entry + 16) == 0xff9f);
 			CHECK(row.entry[13] == 199);

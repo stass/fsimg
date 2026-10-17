@@ -7,7 +7,8 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/write -I$(top_srcdir)/lib/io \
 	-I$(top_srcdir)/lib/output \
 	-I$(top_srcdir)/lib/extract \
-	-I$(top_srcdir)/lib/read -I$(top_srcdir)/lib/formats/fat
+	-I$(top_srcdir)/lib/read -I$(top_srcdir)/lib/formats \
+	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
 include_HEADERS = include/fsimg.h
@@ -18,7 +19,9 @@ noinst_LTLIBRARIES = libfsimg-core.la
 libfsimg_la_SOURCES =
 libfsimg_la_LIBADD = libfsimg-core.la
 libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
-	lib/core/unicode.c lib/core/unicode.h \
+	lib/core/unicode.c lib/core/unicode.h lib/core/case-tables.h \
+	lib/core/calendar.c \
+	lib/formats/format.c lib/formats/format.h \
 	lib/io/io.c lib/output/publish.c lib/output/publish.h \
 	lib/output/write.c \
 	lib/extract/extract.c lib/extract/extract.h \
@@ -33,13 +36,20 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/fat/write.h lib/formats/fat/write-plan.c \
 	lib/formats/fat/write-names.c lib/formats/fat/write-meta.c \
 	lib/formats/fat/write-emit.c \
+	lib/formats/exfat/exfat.h lib/formats/exfat/codec.c \
+	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
+	lib/formats/exfat/read.c lib/formats/exfat/directory.c \
+	lib/formats/exfat/names.c lib/formats/exfat/verify.c \
+	lib/formats/exfat/write-exfat.h lib/formats/exfat/write-plan.c \
+	lib/formats/exfat/write-emit.c \
 	compat/host.c compat/host.h
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
-check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode \
+check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write \
-	test-sandbox test-sandbox-setup test-extract test-protocol test-worker header-c header-cxx
-TESTS = $(check_PROGRAMS) test/fat-integration.sh
-nodist_check_SCRIPTS = test/fat-integration.sh
+	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
+	test-exfat-scale header-c header-cxx
+TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh
+nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh
 test_core_SOURCES = test/core.c test/test.h
 test_core_LDADD = libfsimg.la
 test_io_SOURCES = test/io.c test/test.h
@@ -50,6 +60,12 @@ test_meta_sort_SOURCES = test/meta-sort.c test/test.h
 test_meta_sort_LDADD = libfsimg.la
 test_unicode_SOURCES = test/unicode.c test/test.h
 test_unicode_LDADD = libfsimg.la
+test_format_SOURCES = test/format.c test/test.h
+test_format_LDADD = libfsimg.la
+test_exfat_SOURCES = test/exfat.c test/test.h
+test_exfat_LDADD = libfsimg.la
+test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
+test_exfat_scale_LDADD = libfsimg.la
 test_catalog_SOURCES = test/catalog.c test/test.h
 test_catalog_LDADD = libfsimg.la
 test_source_SOURCES = test/source.c test/test.h
@@ -89,23 +105,25 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
-	specs/design-extraction-worker.md \
+	specs/design-extraction-worker.md specs/design-exfat.md \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
-	test/fat-integration.sh.in fuzz/fat.c fuzz/protocol.c \
+	test/fat-integration.sh.in test/exfat-integration.sh.in fuzz/fat.c fuzz/protocol.c \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md
 check-local: check-ascii
 .PHONY: check-ascii check-asan check-ubsan check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz
 .PHONY: check-integration
-check-integration: test-fat test-fat-write test/fat-integration.sh
+check-integration: test-fat test-fat-write test-exfat test/fat-integration.sh test/exfat-integration.sh
 	./test/fat-integration.sh
-check-scale: test-meta-sort test-catalog test-fat test-fat-write
+	./test/exfat-integration.sh
+check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale
 	./test-meta-sort --scale
 	./test-catalog --wide 100000
 	./test-catalog --scale 100000
 	./test-fat --scale
 	./test-fat-write --scale
-check-fuzz: test-fat test-protocol
+	./test-exfat-scale --huge
+check-fuzz: test-fat test-exfat test-protocol
 	$(SHELL) $(top_srcdir)/build-aux/fuzz.sh $(abs_top_srcdir)
 check-ascii:
 	$(SHELL) $(top_srcdir)/build-aux/check-ascii.sh $(top_srcdir)

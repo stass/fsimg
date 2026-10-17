@@ -6,7 +6,7 @@ import hashlib
 import pathlib
 import sys
 
-unicode_path, cp_path, output_path = map(pathlib.Path, sys.argv[1:])
+unicode_path, cp_path, output_path, case_path = map(pathlib.Path, sys.argv[1:])
 expected_unicode = '2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c'
 expected_cp437 = '6bad4dabcdf5940227c7d81fab130dcb18a77850b5d79de28b5dc4e047b0aaac'
 for path, expected in [(unicode_path, expected_unicode), (cp_path, expected_cp437)]:
@@ -42,8 +42,10 @@ for name, values in [('fat_cp437', [cp[i] for i in range(256)]),
     for i in range(0, 256, 8):
         lines.append('\t' + ', '.join('0x%04x' % v for v in values[i:i+8]) + ',')
     lines.extend(['};', ''])
-lines.append('static const fat_case_pair_t fat_upper[] = {')
+output_path.write_text('\n'.join(lines).rstrip() + '\n', encoding='ascii')
+lines = lines[:8]
+lines.append('static const fsimg_case_pair_t fsimg_upper[] = {')
 for scalar, mapped in sorted(upper.items()):
     lines.append('\t{ 0x%06x, 0x%06x },' % (scalar, mapped))
 lines.extend(['};', ''])
-output_path.write_text('\n'.join(lines), encoding='ascii')
+case_path.write_text('\n'.join(lines), encoding='ascii')

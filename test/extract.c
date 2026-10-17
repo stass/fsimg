@@ -61,8 +61,8 @@ test_selection_scope(void)
 	fixture_open(&fixture);
 	CHECK(fsimg_reader_next(fixture.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(strcmp(entry->path, "/A") == 0);
-	directory_offset = fsimg_fat_cluster_offset(&fixture.reader->fat->geometry,
-	    fixture.reader->fat->current_cluster);
+	directory_offset = fsimg_fat_cluster_offset(&fixture.reader->format.fat->geometry,
+	    fixture.reader->format.fat->current_cluster);
 	fsimg_reader_free(fixture.reader);
 	fixture.reader = NULL;
 	/* Corrupt an unrelated directory before capturing the new reader identity.

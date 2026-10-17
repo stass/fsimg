@@ -36,7 +36,8 @@ encoding from the writer above and retains its complete BSD-2-Clause notice.
 Geometry search, alias reservation, paged plans, calendar conversion, and
 direct source emission are project-owned implementations.
 
-The generated `lib/formats/fat/name-tables.h` uses Unicode-3.0 data, with the
+The generated `lib/formats/fat/name-tables.h` and `lib/core/case-tables.h`
+use Unicode-3.0 data, with the
 full permission notice in `third-party/Unicode-LICENSE.txt`. Both notices are
 installed with the library documentation. Its inputs are:
 
@@ -48,7 +49,8 @@ installed with the library documentation. Its inputs are:
 Regenerate from the unmodified downloaded inputs with:
 
 ```sh
-python3 tools/gen-fat-tables.py UnicodeData.txt CP437.TXT lib/formats/fat/name-tables.h
+python3 tools/gen-fat-tables.py UnicodeData.txt CP437.TXT \
+    lib/formats/fat/name-tables.h lib/core/case-tables.h
 ```
 
 The generator rejects source hashes outside the pinned inputs, preserves ASCII
@@ -79,3 +81,11 @@ is incorporated in fsimg. Its pinned reader requires 512-byte sectors and has
 limited non-ASCII name decoding; comparisons use ASCII names and ASCII long
 names, while mtools validates Unicode. Its information output is recorded as
 tool output, not used as the oracle for free-space or cluster counts.
+
+## exFAT reference
+
+The [Microsoft exFAT specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification)
+is the normative on-disk reference. exfatprogs is an independent development
+oracle; its GPL implementation is not imported into fsimg. The writer uses
+the pinned Unicode simple-uppercase mapping for its complete BMP upcase table.
+Readers use the checksum-validated table embedded in each volume.

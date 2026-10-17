@@ -25,12 +25,12 @@ devices 61/687931137 and FSID-derived mount IDs
 7650454420974902357/2954641735315095593. These IDs identify those live fixtures,
 not stable identifiers across boots.
 
-The ordinary suite contains eighteen tests. macOS reports sixteen passes and
-two explicit skips (unavailable backend and Linux-only setup-fault harness).
-Linux reports seventeen passes and one integration skip because fatcat is
-unavailable there. FreeBSD 16/ZFS reports
-seventeen passes and one skip (Linux-only setup-fault harness), including
-native FAT interoperability. Native
+The ordinary suite contains twenty-two tests. macOS reports nineteen passes
+and three explicit skips (unavailable backend, Linux-only setup-fault harness,
+and unavailable exfatprogs). Linux reports twenty-two passes, with only FAT
+fatcat subchecks skipped by host policy. FreeBSD 16/ZFS reports twenty passes
+and two skips (Linux-only setup-fault harness and unavailable exfatprogs),
+including native FAT interoperability. Native
 ASan/UBSan and additional platform sanitizer outcomes are recorded with their
 commands in [build.md](build.md). Standalone LSan/MSan are unsupported on macOS
 and FreeBSD; a skip is not a pass. Fresh confined children disable tracer-based
@@ -55,7 +55,8 @@ geometry combinations, boundary cluster counts, corruption and failure paths,
 and a sparse 4 GiB-minus-one-byte file whose boundary bytes and allocation are
 checked without reading the complete payload.
 
-Fatcat comparisons cover ordinary ASCII names, ASCII long names, nested paths
+Fatcat comparisons on macOS and FreeBSD cover ordinary ASCII names, ASCII long
+names, nested paths
 and the forced fragmented file. Its pinned reader rejects non-512-byte sectors;
 that subcheck explicitly skips while the formatter/checker, mtools and fsimg
 still validate the wide-sector fixture. Unicode content is checked through
@@ -71,10 +72,31 @@ The native checker can warn that an FSInfo next-free hint points at an allocated
 cluster after mtools population; the hint is a search starting point, and images
 are not repaired or rewritten to silence that advisory warning.
 
+exFAT interoperability uses exfatprogs 1.2.9 on the Linux guest. Its checker
+accepts fsimg's emitted image, and fsimg verifies its independently formatted
+image. A separate Linux-kernel mount check reads the emitted file's complete
+70,003-byte logical zero tail. An exfatprogs/kernel-populated 64 MiB fixture
+contains Unicode, nested directories and fragmented content; fsimg completes
+structural and initialized-payload verification (six files, two directories,
+196,707 initialized bytes). Kernel mounting is isolated fixture setup, separate
+from ordinary unprivileged operation.
+
+The actual 128 TiB sparse exFAT file test passes on APFS and user-provided ZFS
+with a 64 MiB library budget, an 8 TiB-plus-17-byte zero source, two initialized
+boundary markers, and 8 MiB clusters. It transfers 278,721 written and 36,226,983
+read adapter bytes, peaks near 5.54 MiB charged memory, and uses 2,097,168
+scratch bytes and three owned descriptors. APFS process RSS is 21,024,768 bytes
+and elapsed time 0.374 seconds; ZFS RSS is 11,882,496 bytes and elapsed time
+0.600 seconds. Immediate allocated-block samples (25,321,472 and 512 bytes)
+reflect sparse storage, compression and delayed allocation; they are not
+settled device-write measurements. This test demonstrates logical capacity
+and bounded access, not multi-terabyte payload throughput or combined CLI RSS.
+
 The fully instrumented libFuzzer smoke run uses Homebrew LLVM 23.1.2 with
 ASan/UBSan and library coverage. It completes 1000 mutations with all three FAT
-seed variants and finite reader budgets (`cov: 2076`, `ft: 5758`) and 1000
-protocol mutations (`cov: 345`, `ft: 654`), with no unintended sanitizer or
+seed variants and finite reader budgets (`cov: 2160`, `ft: 5838`), 1000 exFAT
+mutations with raw/compressed upcase seeds (`cov: 2105`, `ft: 5366`), and 1000
+protocol mutations (`cov: 348`, `ft: 699`), with no unintended sanitizer or
 accounting findings. This is finite parser
 exercise, not sustained fuzzing or an exhaustive compatibility claim. See
 [build commands](build.md) for instrumentation and logical zero-tail details.

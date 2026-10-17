@@ -1,7 +1,7 @@
 # fsimg
 
 fsimg is a BSD-2-Clause filesystem image tool and embeddable C11 library for
-64-bit FreeBSD, Linux, and macOS. Its target design covers FAT and exFAT image
+64-bit FreeBSD, Linux, and macOS. It supports FAT and exFAT image
 creation, reading, verification, and safe extraction without mounts or root.
 
 The library provides resource contexts, bounded positional I/O, and private
@@ -12,11 +12,11 @@ resident object or descriptor per entry. Source scanning rejects symlinks,
 special files, descendant mounts, and scratch-directory overlap; identity checks
 detect changes visible in host metadata; coarse timestamps and metadata-preserving
 mutation require immutable sources or a snapshot for consistency. Public
-FAT12/FAT16/FAT32 readers enumerate entries,
+FAT12/FAT16/FAT32/exFAT readers enumerate entries,
 read current-file content, report volume information, and verify complete
 allocation ownership with optional payload read-through. Native and sanitizer
 suites run on macOS, Linux, and FreeBSD, with platform/tool skips documented
-in the evidence. Public FAT12/FAT16/FAT32 writers
+in the evidence. Public FAT12/FAT16/FAT32/exFAT writers
 plan deterministic layouts, stream payloads directly from stable sources, and
 emit to bounded sinks or publish a new image without replacing an existing
 name. Plans expose geometry, space use, and metadata-loss counts. Safe extraction
@@ -34,8 +34,13 @@ Supply a private scratch directory for large directory, ownership, and fragment
 indexes. Without scratch, operations that exceed resident metadata storage
 return a resource-limit error.
 
-Writers support 512 through 4096-byte sectors and allocation units through
-32 KiB. Automatic FAT sizing follows Microsoft's 16-cluster margin around
+Writers support 512 through 4096-byte sectors. FAT allocation units reach
+32 KiB and exFAT units reach 32 MiB, while transfer buffers remain bounded
+independently. Actual sparse 128 TiB exFAT volumes are qualified at a 64 MiB
+library budget on APFS and ZFS. exFAT validates bitmap allocation, embedded
+case mappings, and directory entry sets; initialized-data tails always read
+as zero. Its timestamps retain per-field UTC, known-offset or wall-clock bases.
+Automatic FAT sizing follows Microsoft's 16-cluster margin around
 variant cutovers; exact sizing retains the legal boundary counts. Required
 metadata loss fails; optional timestamp rounding, range and
 timezone-basis losses follow the initialized options' explicit allow-loss

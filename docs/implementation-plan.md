@@ -16,7 +16,8 @@ acceptance gate.
 | 4. FAT readers and verification | Implemented and validated on macOS | FAT12/16/32 external fixtures, bounded traversal/indexing and full verification, corruption/fault tests, ASan/UBSan, instrumented fuzzing, and above-budget directory checks in [build.md](build.md) |
 | 5. FAT planning and writing | Implemented and validated on macOS | FAT12/16/32 emission, independent fsck/mtools validation, fault regressions, sanitizer and above-budget planning checks; local and OpenCode GLM 5.3 max reviews and follow-ups found no remaining Critical/High or readability findings |
 | 6. Safe extraction and worker integration | Implemented and reviewed | Safe extraction, shared selection, bounded protocol/output supervision, actual Linux/FreeBSD confinement and mount tests, native FreeBSD/mtools/fatcat interoperability, sanitizers and protocol fuzzing; local and GLM 5.3 max follow-ups have no remaining Critical/High or readability finding; explicit tool/platform skips in [build.md](build.md) |
-| 7–9 | Pending | Follow the dependencies and completion gates below |
+| 7. exFAT and gigantic volumes | Implemented and reviewed | Independent driver, poisoned-tail extraction and worker tests, exfatprogs/Linux-kernel interoperability, actual 128 TiB APFS/ZFS sparse volumes at 64 MiB, cross-platform sanitizers and fuzz smoke tests; local and GLM 5.3 max reviews have no remaining Critical/High/Medium finding; evidence and explicit skips in [build.md](build.md) |
+| 8–9 | Pending | Follow the dependencies and completion gates below |
 
 Development and qualification use macOS, a Linux guest, and both guest and
 user-provided FreeBSD kernels. Evidence identifies the filesystem, toolchain, checks, and explicit

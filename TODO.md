@@ -4,7 +4,7 @@
 
 * [High] **fsimg tool and library** (`lib/`, `cmd/fsimg/`, `test/`): implement the
   [target specification](specs/README.md) through the ordered
-  [implementation plan](docs/implementation-plan.md). Continue with exFAT, the CLI,
+  [implementation plan](docs/implementation-plan.md). Continue with the CLI
   and release qualification. The acceptance gates cover
   bounded metadata and payload processing, FAT/exFAT interoperability, secure
   extraction, actual-kernel sandbox validation, failure handling, and measured

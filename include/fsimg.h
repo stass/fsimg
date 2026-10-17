@@ -235,7 +235,9 @@ typedef enum fsimg_entry_kind {
 typedef enum fsimg_time_basis {
 	FSIMG_TIME_UTC = 1,
 	FSIMG_TIME_OFFSET = 2,
-	FSIMG_TIME_WALL = 3
+	FSIMG_TIME_WALL = 3,
+	/* Volume information only; inspect each individual timestamp. */
+	FSIMG_TIME_PER_TIMESTAMP = 4
 } fsimg_time_basis_t;
 
 /* UTC and OFFSET seconds denote Unix-epoch UTC instants. OFFSET also retains
@@ -340,8 +342,8 @@ typedef struct fsimg_write_options {
 	const char	*label; /* Copied; NULL selects NO NAME. */
 	uint32_t	 sector_bytes; /* Zero selects 512. */
 	uint32_t	 allocation_unit_bytes; /* Zero selects automatically. */
-	uint32_t	 fat_root_entries; /* Zero selects an adequate fixed root. */
-	uint32_t	 volume_serial;
+	uint32_t	 fat_root_entries; /* FAT12/16 only; zero selects an adequate root. */
+	uint32_t	 volume_serial; /* Default zero; used verbatim in all modes. */
 	uint64_t	 reserved[4];
 } fsimg_write_options_t;
 
@@ -349,7 +351,7 @@ typedef struct fsimg_plan_info {
 	char		 format[16];
 	uint64_t	 volume_bytes;
 	uint64_t	 payload_bytes;
-	uint64_t	 initialized_bytes; /* Logical initialized payload; excludes metadata. */
+	uint64_t	 initialized_bytes; /* Format-initialized payload extent; excludes metadata. */
 	uint64_t	 allocated_bytes;
 	uint64_t	 metadata_bytes;
 	uint64_t	 free_bytes;

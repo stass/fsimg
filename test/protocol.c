@@ -168,6 +168,17 @@ test_job_label(void)
 	CHECK(decoded.write.label != NULL);
 	CHECK(strcmp(decoded.write.label, "MYLABEL") == 0);
 	CHECK(selection == 1 && capabilities == 0);
+
+	/* An explicit empty exFAT label differs from the default selected by NULL. */
+	request.write.label = "";
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.write.label != NULL && decoded.write.label[0] == '\0');
+	request.write.label = NULL;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK && decoded.write.label == NULL);
 }
 
 int

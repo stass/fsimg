@@ -26,7 +26,10 @@ AC_PATH_PROG([MCOPY], [mcopy])
 AC_PATH_PROG([MMD], [mmd])
 AC_PATH_PROG([MDEL], [mdel])
 AC_PATH_PROG([FATCAT], [fatcat])
+AC_PATH_PROG([MKFS_EXFAT], [mkfs.exfat], [], [$PATH:/usr/sbin:/sbin:/usr/local/sbin:/opt/homebrew/sbin])
+AC_PATH_PROG([FSCK_EXFAT], [fsck.exfat], [], [$PATH:/usr/sbin:/sbin:/usr/local/sbin:/opt/homebrew/sbin])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
-AC_CONFIG_FILES([Makefile test/fat-integration.sh],
-    [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh])
+AC_CONFIG_FILES([Makefile test/fat-integration.sh test/exfat-integration.sh],
+    [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
+     test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh])
 AC_OUTPUT

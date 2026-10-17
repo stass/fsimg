@@ -18,12 +18,14 @@ jobs:
             brew install autoconf automake libtool cmake mtools dosfstools
           else
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool cmake clang mtools dosfstools
+            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs
           fi
       - name: Build and check
         run: |
-          sh build-aux/build-fatcat.sh "$RUNNER_TEMP/fsimg-fatcat"
-          export FATCAT="$RUNNER_TEMP/fsimg-fatcat/build/fatcat"
+          if [ "$(uname -s)" = Darwin ]; then
+            sh build-aux/build-fatcat.sh "$RUNNER_TEMP/fsimg-fatcat"
+            export FATCAT="$RUNNER_TEMP/fsimg-fatcat/build/fatcat"
+          fi
           autoreconf -fi
           mkdir build
           cd build

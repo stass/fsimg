@@ -183,6 +183,17 @@ The [FAT reader design](design-fat-reader.md) defines bounded directory
 prepasses, current-file indexing, and full allocation verification for FAT.
 The [FAT writer design](design-fat-writer.md) defines independent paged layout
 records, deterministic alias reservations, geometry selection, and emission.
+The [exFAT design](design-exfat.md) defines independent bitmap allocation,
+embedded name mappings, entry sets, and initialized-data semantics. Static
+format operations own their private reader state and writer plan extension.
+The common plan holds only its writer and public summary; the selected driver
+destroys the complete plan once. This keeps lifecycle and source/publication
+contracts common without making FAT geometry a requirement of other formats.
+
+Plan initialized payload counts describe format-initialized file extents,
+excluding metadata. They are distinct from logical length, allocated capacity,
+and actual transferred bytes. Uninitialized logical tails read as zero through
+every content interface, even when their backing storage contains other bytes.
 
 Collection records source references, validation orders and checks entries,
 planning fixes geometry and extents, and emission copies content directly to
@@ -211,6 +222,13 @@ source provider. Hashing alone does not create a snapshot. No security promise
 depends on mtime being impossible to restore.
 
 ### Names and metadata
+
+Volume time-basis reporting describes a format-level interpretation. A volume
+whose fields carry independent time bases reports PER_TIMESTAMP; callers inspect
+each timestamp's UTC, known-offset, or wall-clock basis. The volume summary does
+not claim that observed fields differ, and PER_TIMESTAMP is not a valid basis
+for an individual timestamp. This avoids inventing a common zone for exFAT
+fields whose offset-valid flags can differ within one entry.
 
 Image paths are absolute UTF-8 paths rooted at `/`. Format drivers validate
 components, encoding, case comparison, and name collisions. A host pathname is
@@ -283,6 +301,11 @@ Reproducible mode fixes ordering, timestamp policy, identifiers, and all padding
 The same logical inputs and options yield identical image bytes regardless of
 host directory order, locale, memory budget, merge fan-in, or scratch location.
 Reproducibility does not imply source immutability or output durability.
+
+Cancellation is checked at the shared publication boundary after flushing and
+closing the staged file. Once linking succeeds, cancellation before directory
+sync completion reports published output with uncertain durability; it cannot
+restore an absent-output outcome or justify retrying publication.
 
 ### Errors, ownership, and compatibility
 

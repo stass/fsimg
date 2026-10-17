@@ -9,7 +9,7 @@
 
 static bool encode_timestamp(const fsimg_timestamp_t *, uint32_t,
     unsigned char *);
-static fsimg_status_t encode_field(fsimg_plan_t *, const fsimg_entry_t *,
+static fsimg_status_t encode_field(fat_plan_t *, const fsimg_entry_t *,
     uint32_t, const fsimg_timestamp_t *, unsigned char *, fsimg_error_t *);
 
 void
@@ -86,14 +86,14 @@ encode_timestamp(const fsimg_timestamp_t *time, uint32_t field,
 }
 
 static fsimg_status_t
-encode_field(fsimg_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
+encode_field(fat_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
     const fsimg_timestamp_t *original, unsigned char *raw, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer;
 	fsimg_timestamp_t selected;
 	bool exact;
 
-	writer = plan->writer;
+	writer = plan->common.writer;
 	selected = (fsimg_timestamp_t){ .seconds = 315532800,
 	    .basis = FSIMG_TIME_WALL };
 	if ((entry->metadata.valid & field) != 0)
@@ -116,13 +116,13 @@ encode_field(fsimg_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
 	    (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "FAT cannot preserve the requested timestamp"));
-	plan->info.metadata_losses++;
+	plan->common.info.metadata_losses++;
 	fsimg_report_loss(writer->ctx, entry->path, field);
 	return (FSIMG_OK);
 }
 
 fsimg_status_t
-fsimg_fat_write_metadata(fsimg_plan_t *plan, const fsimg_entry_t *entry,
+fsimg_fat_write_metadata(fat_plan_t *plan, const fsimg_entry_t *entry,
     unsigned char *raw, fsimg_error_t *error)
 {
 	fsimg_timestamp_t fallback = { .seconds = 315532800,

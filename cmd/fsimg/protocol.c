@@ -333,7 +333,8 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	capabilities = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES);
 	basis = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS);
 	scope = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SCOPE);
-	if (valid > 7 || capabilities > 7 || basis < FSIMG_TIME_UTC || basis > FSIMG_TIME_WALL)
+	if (valid > 7 || capabilities > 7 || basis < FSIMG_TIME_UTC ||
+	    basis > FSIMG_TIME_PER_TIMESTAMP)
 		return (false);
 	if (scope < FSIMG_VALIDATION_HEADER || scope > FSIMG_VALIDATION_PAYLOAD)
 		return (false);

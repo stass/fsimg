@@ -6,7 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
-#include "fat.h"
+#include "format.h"
 #include "reader.h"
 
 static fsimg_status_t reader_ready(const fsimg_reader_t *, fsimg_error_t *);
@@ -40,7 +40,7 @@ fsimg_reader_abort(fsimg_reader_t *reader, fsimg_status_t status)
 {
 	reader->state = FSIMG_READER_FAILED;
 	bzero(&reader->entry, sizeof(reader->entry));
-	fsimg_fat_close(reader);
+	reader->ops->close(reader);
 	return (status);
 }
 
@@ -64,7 +64,7 @@ fsimg_reader_match_name(fsimg_reader_t *reader, const char *component, bool *mat
 	if (reader->state != FSIMG_READER_ITERATING || reader->entry.path == NULL)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_READER, "name matching requires a current entry"));
-	return (fsimg_fat_match_name(reader, component, matches, error));
+	return (reader->ops->match_name(reader, component, matches, error));
 }
 
 fsimg_status_t
@@ -79,7 +79,7 @@ fsimg_reader_skip_directory(fsimg_reader_t *reader, fsimg_error_t *error)
 	    reader->entry.kind != FSIMG_ENTRY_DIRECTORY)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_READER, "subtree pruning requires a current directory"));
-	return (fsimg_fat_skip_directory(reader, error));
+	return (reader->ops->skip_directory(reader, error));
 }
 
 fsimg_status_t
@@ -158,11 +158,6 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	if (options->fat_codepage != 0 && options->fat_codepage != 437)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_READER, "FAT short names require CP437"));
-	if (options->format != NULL && strcmp(options->format, "fat12") != 0 &&
-	    strcmp(options->format, "fat16") != 0 &&
-	    strcmp(options->format, "fat32") != 0)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_READER, "unsupported reader format"));
 	reader = fsimg_alloc(ctx, sizeof(*reader), &detail);
 	if (reader == NULL) {
 		if (error != NULL)
@@ -171,12 +166,12 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	}
 	reader->ctx = ctx;
 	reader->input = input;
-	fsimg_session_init(&reader->session, ctx, "FAT reading", 0);
+	fsimg_session_init(&reader->session, ctx, "image reading", 0);
 	status = fsimg_io_identity(input, &reader->identity,
 	    &reader->host_identity, error);
 	if (status != FSIMG_OK)
 		goto fail;
-	status = fsimg_fat_open(reader, options->format, error);
+	status = fsimg_format_open(reader, options->format, error);
 	if (status != FSIMG_OK)
 		goto fail;
 	reader->session.output_limit = ctx->options.max_output_bytes == 0 ?
@@ -200,7 +195,8 @@ fsimg_reader_free(fsimg_reader_t *reader)
 {
 	if (reader == NULL || reader->ctx->in_callback)
 		return;
-	fsimg_fat_close(reader);
+	if (reader->ops != NULL)
+		reader->ops->close(reader);
 	fsimg_dealloc(reader->path);
 	fsimg_dealloc(reader);
 }
@@ -241,7 +237,7 @@ fsimg_reader_next(fsimg_reader_t *reader, const fsimg_entry_t **out,
 	reader->state = FSIMG_READER_ITERATING;
 	status = fsimg_reader_stable(reader, error);
 	if (status == FSIMG_OK)
-		status = fsimg_fat_next(reader, error);
+		status = reader->ops->next(reader, error);
 	if (status == FSIMG_DONE) {
 		return (fsimg_reader_end_scope(reader));
 	}
@@ -272,6 +268,7 @@ fsimg_status_t
 fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
+	size_t batch, count;
 	fsimg_status_t status;
 
 	if (transferred != NULL)
@@ -284,7 +281,35 @@ fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
 		    FSIMG_OP_READER, "missing content buffer or count output"));
 	if (length > reader->entry.size - offset)
 		length = (size_t)(reader->entry.size - offset);
-	status = fsimg_fat_read(reader, offset, buffer, length, transferred, error);
+	/* Even synthesized zero bytes depend on stable input. Common content
+	 * dispatch owns these checks so cached and zero-producing drivers cannot
+	 * bypass source consistency, cancellation or the session work budget.
+	 */
+	status = fsimg_reader_stable(reader, error);
+	if (status != FSIMG_OK)
+		return (fsimg_reader_abort(reader, status));
+	do {
+		batch = length - *transferred;
+		if (batch > 65536)
+			batch = 65536;
+		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
+		if (status != FSIMG_OK)
+			return (fsimg_reader_abort(reader, status));
+		count = 0;
+		status = reader->ops->read(reader, offset,
+		    buffer == NULL ? NULL : (unsigned char *)buffer + *transferred,
+		    batch, &count, error);
+		*transferred += count;
+		offset += count;
+		if (status != FSIMG_OK)
+			return (fsimg_reader_abort(reader, status));
+		if (count != batch) {
+			status = fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_READER, "driver returned incomplete successful content");
+			return (fsimg_reader_abort(reader, status));
+		}
+	} while (*transferred < length);
+	status = fsimg_reader_stable(reader, error);
 	if (status != FSIMG_OK)
 		return (fsimg_reader_abort(reader, status));
 	return (FSIMG_OK);
@@ -303,9 +328,16 @@ fsimg_reader_next_range(fsimg_reader_t *reader, uint64_t offset,
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_READER, "missing content range output"));
 	bzero(out, sizeof(*out));
+	status = fsimg_reader_stable(reader, error);
+	if (status == FSIMG_OK)
+		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
+	if (status != FSIMG_OK)
+		return (fsimg_reader_abort(reader, status));
 	if (offset == reader->entry.size)
 		return (FSIMG_DONE);
-	status = fsimg_fat_range(reader, offset, out, error);
+	status = reader->ops->range(reader, offset, out, error);
+	if (status == FSIMG_OK)
+		status = fsimg_reader_stable(reader, error);
 	if (status != FSIMG_OK)
 		return (fsimg_reader_abort(reader, status));
 	return (FSIMG_OK);
@@ -331,50 +363,11 @@ fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
 	out->scope = (flags & FSIMG_VERIFY_PAYLOAD) != 0 ?
 	    FSIMG_VALIDATION_PAYLOAD : FSIMG_VALIDATION_STRUCTURAL;
 	reader->state = FSIMG_READER_ITERATING;
-	status = fsimg_fat_verify(reader, flags, out, error);
+	status = reader->ops->verify(reader, flags, out, error);
 	bzero(&reader->entry, sizeof(reader->entry));
 	if (status != FSIMG_OK)
 		return (fsimg_reader_abort(reader, status));
 	reader->state = FSIMG_READER_DONE;
 	out->complete = true;
-	return (FSIMG_OK);
-}
-
-fsimg_status_t
-fsimg_format_next(size_t *cursor, fsimg_format_info_t *out, fsimg_error_t *error)
-{
-	static const char *const names[] = { "fat12", "fat16", "fat32" };
-	static const uint64_t max_clusters[] = { 4084, 65524, 0x0ffffff5 };
-	uint64_t sectors;
-
-	fsimg_error_clear(error);
-	if (cursor == NULL || out == NULL)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_READER, "missing format cursor or output"));
-	bzero(out, sizeof(*out));
-	if (*cursor >= sizeof(names) / sizeof(names[0]))
-		return (FSIMG_DONE);
-	strcpy(out->name, names[*cursor]);
-	strcpy(out->profile, "unicode-17-simple-upper/cp437");
-	out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY;
-	out->entry_kinds = (1u << FSIMG_ENTRY_FILE) | (1u << FSIMG_ENTRY_DIRECTORY);
-	out->metadata_fields = 0x0f;
-	out->sector_size_mask = (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12);
-	out->allocation_unit_size_mask = ((1u << 20) - 1) & ~((1u << 9) - 1);
-	out->write_allocation_unit_size_mask = ((1u << 16) - 1) & ~((1u << 9) - 1);
-	/* File size is bounded by both its field and usable cluster identifiers.
-	 * Volume size additionally includes reserved/FAT/root regions and a tail
-	 * shorter than one cluster. These are independent supported upper bounds.
-	 */
-	out->max_file_bytes = *cursor == 0 ? UINT64_C(4084) * 512 * 1024 : UINT32_MAX;
-	if (*cursor < 2) {
-		sectors = UINT64_C(65535) * 3 + 512 +
-		    (max_clusters[*cursor] + 1) * 128 - 1;
-		out->max_volume_bytes = sectors * 4096;
-	} else {
-		out->max_volume_bytes = (uint64_t)UINT32_MAX * 4096;
-	}
-	out->max_name_utf16_units = 255;
-	(*cursor)++;
 	return (FSIMG_OK);
 }

@@ -47,3 +47,11 @@ interoperability recommendation; explicit sizes retain legal boundary counts.
 FAT directory labels accept the archive bit used by native FreeBSD formatters.
 Independent validation includes native FreeBSD FAT tools, mtools and a pinned
 fatcat development oracle, with its sector/Unicode limits reported explicitly.
+
+exFAT readers and writers support independent bitmap allocation, chained and
+contiguous streams, validated boot regions and entry sets, embedded case
+mappings, timestamp bases, and initialized-data zero tails. Full verification
+streams allocation ownership through bounded metadata storage. Compressed
+Unicode tables and deterministic plans interoperate with exfatprogs and the
+Linux kernel. Sparse-volume checks exercise actual 128 TiB files on APFS and
+ZFS at a 64 MiB library budget, independently of initialized payload size.

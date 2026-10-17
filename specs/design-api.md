@@ -178,6 +178,9 @@ the Unix epoch; a known offset additionally retains the original minutes east
 of UTC. For wall-clock values, the seconds field encodes the calendar
 fields as if UTC without claiming that UTC is their actual zone. No implicit
 host timezone conversion is allowed. An unset field is absent, not zero.
+Volume information can instead report PER_TIMESTAMP, indicating that each
+timestamp carries its own basis. This value describes format semantics and is
+not a valid basis for an individual timestamp.
 Host uid/gid/mode values, when
 recorded for inspection, are not a promise that FAT/exFAT can store them or that
 extraction will restore them. Required unsupported metadata fails. Optional

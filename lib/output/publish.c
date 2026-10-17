@@ -141,11 +141,19 @@ fsimg_publish(fsimg_ctx_t *ctx, int staging_fd, const char *staged_name,
 		goto close_file;
 	/* Close errors must be observed before a final pathname is created. */
 	result = close(fd);
+	saved = errno;
 	fd = -1;
 	fsimg_fd_release(ctx, -1);
 	if (result == -1)
-		return (publication_error(error, FSIMG_EIO, errno,
+		return (publication_error(error, FSIMG_EIO, saved,
 		    FSIMG_OUTPUT_ABSENT, "staged result close failed"));
+
+	/* Flush and close can take time. Observe cancellation once more at the
+	 * publication boundary; after linking, failures describe published output.
+	 */
+	status = fsimg_poll(ctx, NULL, error);
+	if (status != FSIMG_OK)
+		return (status);
 
 	ctx->in_callback = true;
 	result = hooks->link_at(hooks->argument, staging_fd, staged_name,
@@ -175,12 +183,12 @@ fsimg_publish(fsimg_ctx_t *ctx, int staging_fd, const char *staged_name,
 	if (status != FSIMG_OK)
 		return (publication_error(error, FSIMG_EDURABILITY,
 		    error == NULL ? 0 : error->os_error,
-		    FSIMG_OUTPUT_PUBLISHED, "staging directory sync failed"));
+		    FSIMG_OUTPUT_PUBLISHED, "staging directory sync incomplete"));
 	status = sync_output(ctx, hooks, parent_fd, error);
 	if (status != FSIMG_OK)
 		return (publication_error(error, FSIMG_EDURABILITY,
 		    error == NULL ? 0 : error->os_error,
-		    FSIMG_OUTPUT_PUBLISHED, "destination directory sync failed"));
+		    FSIMG_OUTPUT_PUBLISHED, "destination directory sync incomplete"));
 	return (FSIMG_OK);
 close_file:
 	fsimg_fd_release(ctx, fd);

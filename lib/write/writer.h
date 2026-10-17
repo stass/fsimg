@@ -19,6 +19,23 @@
 
 typedef struct fsimg_source_root fsimg_source_root_t;
 typedef struct fsimg_source_cursor fsimg_source_cursor_t;
+typedef struct fsimg_format fsimg_format_t;
+
+/* Each driver embeds this base first in one owned plan allocation. Common
+ * code sees only the summary; the selected driver frees its entire extension.
+ */
+struct fsimg_plan {
+	fsimg_writer_t	*writer;
+	fsimg_plan_info_t info;
+};
+
+typedef struct fsimg_writer_ops {
+	fsimg_status_t (*validate)(fsimg_write_options_t *, unsigned,
+	    fsimg_error_t *);
+	fsimg_status_t (*plan)(fsimg_writer_t *, fsimg_error_t *);
+	fsimg_status_t (*emit)(fsimg_writer_t *, fsimg_io_t *, fsimg_error_t *);
+	void (*free)(fsimg_plan_t *);
+} fsimg_writer_ops_t;
 
 typedef enum fsimg_writer_state {
 	FSIMG_WRITER_COLLECTING,
@@ -70,6 +87,7 @@ typedef struct fsimg_catalog_child {
 struct fsimg_writer {
 	fsimg_ctx_t	*ctx;
 	fsimg_plan_t	*plan;
+	const fsimg_format_t *format;
 	fsimg_write_options_t options;
 	/* Prepared worker output authority cannot be imported as source content. */
 	fsimg_host_file_t output_root;
@@ -97,7 +115,7 @@ struct fsimg_writer {
 	bool		 catalog_ready;
 	bool		 output_root_known;
 	unsigned	 variant;
-	char		 label[12];
+	char		 label[48];
 };
 
 /* Common collection is private; public construction selects a format driver.

@@ -30,10 +30,10 @@ static int key_compare(const void *, size_t, const void *, size_t, void *);
 static int reservation_compare(const void *, size_t, const void *, size_t,
     void *);
 static bool alias_reservation(const unsigned char *, size_t, uint64_t *);
-static fsimg_status_t collect_names(fsimg_plan_t *, fsimg_stream_t *,
+static fsimg_status_t collect_names(fat_plan_t *, fsimg_stream_t *,
     fsimg_stream_t *, fsimg_error_t *);
 static fsimg_status_t check_names(fsimg_stream_t *, fsimg_error_t *);
-static fsimg_status_t assign_aliases(fsimg_plan_t *, fsimg_stream_t *,
+static fsimg_status_t assign_aliases(fat_plan_t *, fsimg_stream_t *,
     fsimg_error_t *);
 
 bool
@@ -129,7 +129,7 @@ alias_reservation(const unsigned char *key, size_t length, uint64_t *number)
 }
 
 static fsimg_status_t
-collect_names(fsimg_plan_t *plan, fsimg_stream_t *names,
+collect_names(fat_plan_t *plan, fsimg_stream_t *names,
     fsimg_stream_t *reservations, fsimg_error_t *error)
 {
 	const fsimg_catalog_entry_t *catalog;
@@ -145,8 +145,8 @@ collect_names(fsimg_plan_t *plan, fsimg_stream_t *names,
 	status = fsimg_fat_layout_set(plan, 0, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
-	for (uint64_t id = 1; id <= plan->writer->count; id++) {
-		status = fsimg_catalog_get(plan->writer, id, &catalog, error);
+	for (uint64_t id = 1; id <= plan->common.writer->count; id++) {
+		status = fsimg_catalog_get(plan->common.writer, id, &catalog, error);
 		if (status != FSIMG_OK)
 			return (status);
 		name = strrchr(catalog->entry.path, '/') + 1;
@@ -258,7 +258,7 @@ skip_reserved_aliases(fat_alias_cursor_t *cursor, uint64_t parent_id,
 }
 
 static fsimg_status_t
-assign_aliases(fsimg_plan_t *plan, fsimg_stream_t *reservations,
+assign_aliases(fat_plan_t *plan, fsimg_stream_t *reservations,
     fsimg_error_t *error)
 {
 	fsimg_writer_t *writer;
@@ -271,7 +271,7 @@ assign_aliases(fsimg_plan_t *plan, fsimg_stream_t *reservations,
 	size_t length, units;
 	fsimg_status_t status;
 
-	writer = plan->writer;
+	writer = plan->common.writer;
 	cursor = candidate = 0;
 	parent_id = UINT64_MAX;
 	status = next_reservation(&reservation, error);
@@ -333,17 +333,17 @@ assign_aliases(fsimg_plan_t *plan, fsimg_stream_t *reservations,
 }
 
 fsimg_status_t
-fsimg_fat_write_names(fsimg_plan_t *plan, fsimg_error_t *error)
+fsimg_fat_write_names(fat_plan_t *plan, fsimg_error_t *error)
 {
 	fsimg_stream_t *names, *reservations, *sorted;
 	fsimg_status_t status;
 
 	names = reservations = sorted = NULL;
-	status = fsimg_stream_new(&plan->writer->session, 8 + FAT_KEY_BYTES,
+	status = fsimg_stream_new(&plan->common.writer->session, 8 + FAT_KEY_BYTES,
 	    &names, error);
 	if (status != FSIMG_OK)
 		goto done;
-	status = fsimg_stream_new(&plan->writer->session, 16, &reservations, error);
+	status = fsimg_stream_new(&plan->common.writer->session, 16, &reservations, error);
 	if (status != FSIMG_OK)
 		goto done;
 	status = collect_names(plan, names, reservations, error);

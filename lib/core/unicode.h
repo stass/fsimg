@@ -6,6 +6,11 @@
 
 #include "internal.h"
 
+uint32_t fsimg_unicode_upper(uint32_t);
+bool fsimg_dos_time_decode(uint16_t, uint16_t, unsigned, uint64_t,
+    fsimg_timestamp_t *);
+bool fsimg_dos_time_encode(int64_t, uint32_t *, unsigned char *);
+
 /* NULL output with capacity zero validates and counts without allocating. */
 fsimg_status_t fsimg_utf8_to_utf16(const char *, size_t, uint16_t *, size_t,
     size_t *, fsimg_error_t *);

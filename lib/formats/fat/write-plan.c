@@ -10,11 +10,11 @@
 #include "write.h"
 
 static uint64_t divide_up(uint64_t, uint64_t);
-static fsimg_status_t count_clusters(fsimg_plan_t *, uint32_t, uint64_t *,
+static fsimg_status_t count_clusters(fat_plan_t *, uint32_t, uint64_t *,
     fsimg_error_t *);
-static fsimg_status_t choose_geometry(fsimg_plan_t *, fsimg_error_t *);
-static bool try_geometry(fsimg_plan_t *, uint32_t, uint64_t);
-static fsimg_status_t allocate_layout(fsimg_plan_t *, fsimg_error_t *);
+static fsimg_status_t choose_geometry(fat_plan_t *, fsimg_error_t *);
+static bool try_geometry(fat_plan_t *, uint32_t, uint64_t);
+static fsimg_status_t allocate_layout(fat_plan_t *, fsimg_error_t *);
 
 static uint64_t
 divide_up(uint64_t value, uint64_t unit)
@@ -23,7 +23,7 @@ divide_up(uint64_t value, uint64_t unit)
 }
 
 fsimg_status_t
-fsimg_fat_layout_get(fsimg_plan_t *plan, uint64_t id, fat_layout_t *row,
+fsimg_fat_layout_get(fat_plan_t *plan, uint64_t id, fat_layout_t *row,
     fsimg_error_t *error)
 {
 	unsigned char raw[FAT_LAYOUT_BYTES];
@@ -43,7 +43,7 @@ fsimg_fat_layout_get(fsimg_plan_t *plan, uint64_t id, fat_layout_t *row,
 }
 
 fsimg_status_t
-fsimg_fat_layout_set(fsimg_plan_t *plan, uint64_t id, const fat_layout_t *row,
+fsimg_fat_layout_set(fat_plan_t *plan, uint64_t id, const fat_layout_t *row,
     fsimg_error_t *error)
 {
 	unsigned char raw[FAT_LAYOUT_BYTES];
@@ -57,7 +57,7 @@ fsimg_fat_layout_set(fsimg_plan_t *plan, uint64_t id, const fat_layout_t *row,
 }
 
 static fsimg_status_t
-count_clusters(fsimg_plan_t *plan, uint32_t cluster_bytes, uint64_t *out,
+count_clusters(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t *out,
     fsimg_error_t *error)
 {
 	fat_layout_t row;
@@ -65,7 +65,7 @@ count_clusters(fsimg_plan_t *plan, uint32_t cluster_bytes, uint64_t *out,
 	fsimg_status_t status;
 
 	total = 0;
-	for (uint64_t id = 0; id <= plan->writer->count; id++) {
+	for (uint64_t id = 0; id <= plan->common.writer->count; id++) {
 		status = fsimg_fat_layout_get(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -86,14 +86,14 @@ count_clusters(fsimg_plan_t *plan, uint32_t cluster_bytes, uint64_t *out,
  * in at most 32 steps. Oversized metadata cannot be a valid candidate.
  */
 static bool
-try_geometry(fsimg_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
+try_geometry(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
 {
 	const fsimg_write_options_t *options;
 	uint64_t minimum, maximum, needed, clusters, sectors, fat_sectors;
 	uint64_t root_sectors, overhead, low, high, middle, capacity, data_sectors;
 	uint32_t sector, spc;
 
-	options = &plan->writer->options;
+	options = &plan->common.writer->options;
 	sector = options->sector_bytes;
 	spc = cluster_bytes / sector;
 	minimum = plan->variant == 12 ? 1 : plan->variant == 16 ? 4085 : 65525;
@@ -153,15 +153,15 @@ try_geometry(fsimg_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
 	plan->fat_bytes = fat_sectors * sector;
 	plan->root_offset = plan->fat_offset + 2 * plan->fat_bytes;
 	plan->data_offset = plan->root_offset + root_sectors * sector;
-	plan->info.volume_bytes = sectors * sector;
-	plan->info.allocation_unit_bytes = cluster_bytes;
-	plan->info.free_bytes = (clusters - allocated) * cluster_bytes;
-	plan->info.allocated_bytes = allocated * cluster_bytes;
+	plan->common.info.volume_bytes = sectors * sector;
+	plan->common.info.allocation_unit_bytes = cluster_bytes;
+	plan->common.info.free_bytes = (clusters - allocated) * cluster_bytes;
+	plan->common.info.allocated_bytes = allocated * cluster_bytes;
 	return (true);
 }
 
 static fsimg_status_t
-choose_geometry(fsimg_plan_t *plan, fsimg_error_t *error)
+choose_geometry(fat_plan_t *plan, fsimg_error_t *error)
 {
 	const fsimg_write_options_t *options;
 	fat_layout_t root;
@@ -169,7 +169,7 @@ choose_geometry(fsimg_plan_t *plan, fsimg_error_t *error)
 	uint32_t cluster_bytes, maximum, sector;
 	fsimg_status_t status;
 
-	options = &plan->writer->options;
+	options = &plan->common.writer->options;
 	sector = options->sector_bytes;
 	plan->reserved_sectors = plan->variant == 32 ? 32 : 1;
 	status = fsimg_fat_layout_get(plan, 0, &root, error);
@@ -204,7 +204,7 @@ choose_geometry(fsimg_plan_t *plan, fsimg_error_t *error)
 }
 
 static fsimg_status_t
-allocate_layout(fsimg_plan_t *plan, fsimg_error_t *error)
+allocate_layout(fat_plan_t *plan, fsimg_error_t *error)
 {
 	fat_layout_t row;
 	uint64_t directory_bytes;
@@ -213,8 +213,8 @@ allocate_layout(fsimg_plan_t *plan, fsimg_error_t *error)
 
 	next = 2;
 	directory_bytes = 0;
-	cluster_bytes = plan->info.allocation_unit_bytes;
-	for (uint64_t id = 0; id <= plan->writer->count; id++) {
+	cluster_bytes = plan->common.info.allocation_unit_bytes;
+	for (uint64_t id = 0; id <= plan->common.writer->count; id++) {
 		status = fsimg_fat_layout_get(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -236,14 +236,14 @@ allocate_layout(fsimg_plan_t *plan, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	plan->info.metadata_bytes = plan->data_offset + directory_bytes;
+	plan->common.info.metadata_bytes = plan->data_offset + directory_bytes;
 	return (FSIMG_OK);
 }
 
 fsimg_status_t
 fsimg_fat_write_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 {
-	fsimg_plan_t *plan;
+	fat_plan_t *plan;
 	fsimg_error_t detail;
 	fsimg_status_t status;
 
@@ -253,16 +253,16 @@ fsimg_fat_write_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 			*error = detail;
 		return (detail.status);
 	}
-	plan->writer = writer;
+	plan->common.writer = writer;
 	plan->variant = writer->variant;
-	snprintf(plan->info.format, sizeof(plan->info.format), "fat%u", plan->variant);
-	plan->info.payload_bytes = writer->payload_bytes;
-	plan->info.initialized_bytes = writer->payload_bytes;
-	plan->info.entries = writer->count;
-	plan->info.sector_bytes = writer->options.sector_bytes;
-	plan->info.required_io_flags = FSIMG_IO_WRITE;
+	snprintf(plan->common.info.format, sizeof(plan->common.info.format), "fat%u", plan->variant);
+	plan->common.info.payload_bytes = writer->payload_bytes;
+	plan->common.info.initialized_bytes = writer->payload_bytes;
+	plan->common.info.entries = writer->count;
+	plan->common.info.sector_bytes = writer->options.sector_bytes;
+	plan->common.info.required_io_flags = FSIMG_IO_WRITE;
 	if ((writer->options.flags & FSIMG_WRITE_DURABLE) != 0)
-		plan->info.required_io_flags |= FSIMG_IO_DURABLE;
+		plan->common.info.required_io_flags |= FSIMG_IO_DURABLE;
 	status = fsimg_array_new(&writer->session, FAT_LAYOUT_BYTES,
 	    writer->count + 1, &plan->layout, error);
 	if (status != FSIMG_OK)
@@ -276,19 +276,59 @@ fsimg_fat_write_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 	status = allocate_layout(plan, error);
 	if (status != FSIMG_OK)
 		goto fail;
-	plan->info.scratch_bytes = writer->ctx->stats.scratch_bytes;
-	writer->plan = plan;
+	plan->common.info.scratch_bytes = writer->ctx->stats.scratch_bytes;
+	writer->plan = &plan->common;
 	return (FSIMG_OK);
 fail:
-	fsimg_fat_write_free(plan);
+	fsimg_fat_write_free(&plan->common);
 	return (status);
 }
 
 void
-fsimg_fat_write_free(fsimg_plan_t *plan)
+fsimg_fat_write_free(fsimg_plan_t *base)
 {
+	fat_plan_t *plan = (fat_plan_t *)base;
+
 	if (plan == NULL)
 		return;
 	fsimg_array_free(plan->layout);
 	fsimg_dealloc(plan);
+}
+
+fsimg_status_t
+fsimg_fat_write_validate(fsimg_write_options_t *selected, unsigned variant,
+    fsimg_error_t *error)
+{
+	uint32_t sector, cluster;
+	size_t length;
+
+	sector = selected->sector_bytes == 0 ? 512 : selected->sector_bytes;
+	cluster = selected->allocation_unit_bytes;
+	if ((sector != 512 && sector != 1024 && sector != 2048 && sector != 4096) ||
+	    (cluster != 0 && (cluster < sector || cluster > 32768 ||
+	    (cluster & (cluster - 1)) != 0)) ||
+	    selected->volume_bytes % sector != 0 ||
+	    selected->volume_bytes / sector > UINT32_MAX ||
+	    selected->fat_root_entries > UINT16_MAX ||
+	    (variant == 32 && selected->fat_root_entries != 0) ||
+	    ((selected->flags & FSIMG_WRITE_REPRODUCIBLE) != 0 &&
+	    (selected->epoch < 315532800 || selected->epoch > 4354819199LL)))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_WRITER, "invalid FAT geometry or reproducible epoch"));
+	selected->sector_bytes = sector;
+	if (selected->label == NULL)
+		selected->label = "NO NAME";
+	length = strnlen(selected->label, 12);
+	if (length == 0 || length > 11 || selected->label[0] == ' ' ||
+	    selected->label[length - 1] == ' ')
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_WRITER, "invalid FAT volume label length or spacing"));
+	for (size_t i = 0; i < length; i++) {
+		if (!((selected->label[i] >= 'A' && selected->label[i] <= 'Z') ||
+		    (selected->label[i] >= '0' && selected->label[i] <= '9') ||
+		    strchr(" $%'-_@~`!(){}^#&", selected->label[i]) != NULL))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_WRITER, "FAT label requires uppercase ASCII label characters"));
+	}
+	return (FSIMG_OK);
 }

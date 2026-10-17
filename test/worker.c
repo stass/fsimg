@@ -91,11 +91,12 @@ typedef struct worker_fixture {
 } worker_fixture_t;
 
 static void fixture_open(worker_fixture_t *);
+static void fixture_open_format(worker_fixture_t *, const char *);
 static void fixture_close(worker_fixture_t *);
 static fsimg_status_t event(void *, const fsimg_frame_t *, fsimg_worker_text_t *,
     fsimg_error_t *);
 static fsimg_status_t run(worker_fixture_t *, fsimg_error_t *);
-static void test_operations(void);
+static void test_operations(const char *);
 static void test_startup(void);
 static void test_inheritance(void);
 static void test_forged(void);
@@ -196,6 +197,12 @@ drain_after_delay(int fd, uint64_t padding)
 static void
 fixture_open(worker_fixture_t *fixture)
 {
+	fixture_open_format(fixture, "fat16");
+}
+
+static void
+fixture_open_format(worker_fixture_t *fixture, const char *format)
+{
 	fsimg_options_t options;
 	fsimg_writer_t *writer;
 	fsimg_io_t *output;
@@ -225,7 +232,7 @@ fixture_open(worker_fixture_t *fixture)
 	fsimg_options_init(&options);
 	options.scratch_directory_fd = fixture->scratch;
 	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
-	CHECK(fsimg_writer_new(fixture->ctx, "fat16", NULL, &writer, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_new(fixture->ctx, format, NULL, &writer, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_add_tree(writer, fixture->source, "/", NULL) == FSIMG_OK);
 	fd = openat(fixture->parent, "image", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
 	CHECK(fd != -1);
@@ -334,7 +341,7 @@ run(worker_fixture_t *fixture, fsimg_error_t *error)
 }
 
 static void
-test_operations(void)
+test_operations(const char *format)
 {
 	worker_fixture_t fixture;
 	fsimg_error_t error;
@@ -342,7 +349,7 @@ test_operations(void)
 	char bytes[8];
 	int fd;
 
-	fixture_open(&fixture);
+	fixture_open_format(&fixture, format);
 	status = run(&fixture, &error);
 	if (status != FSIMG_OK)
 		fprintf(stderr, "worker info: %d: %s\n", status, error.message);
@@ -369,7 +376,7 @@ test_operations(void)
 
 	fixture.request.kind = FSIMG_JOB_CAT;
 	fixture.request.output_fd = -1;
-	fixture.request.selection = "/HELLO.TXT";
+	fixture.request.selection = "/hello.txt";
 	fd = openat(fixture.parent, "raw", O_CREAT | O_EXCL | O_RDWR, 0600);
 	CHECK(fd != -1);
 	fixture.ready = false;
@@ -386,10 +393,27 @@ test_operations(void)
 	fixture.request.input_fd = -1;
 	fixture.request.source_fd = fixture.source;
 	fixture.request.output_fd = fixture.output;
-	strcpy(fixture.request.format, "fat12");
+	strcpy(fixture.request.format, strcmp(format, "exfat") == 0 ? "exfat" : "fat12");
+	if (strcmp(format, "exfat") == 0)
+		fixture.request.write.label = "";
 	CHECK(run(&fixture, &error) == FSIMG_OK);
 	CHECK(fixture.plans == 1 && fixture.result.image_bytes != 0);
 	CHECK(fixture.plan_losses != 0 && fixture.result.metadata_losses == fixture.plan_losses);
+	if (strcmp(format, "exfat") == 0) {
+		fsimg_io_t *image;
+		fsimg_reader_t *reader;
+		fsimg_volume_info_t info;
+
+		fd = openat(fixture.output, "image", O_RDONLY | O_NOFOLLOW);
+		CHECK(fd != -1);
+		CHECK(fsimg_io_from_fd(fixture.ctx, fd, FSIMG_IO_READ, &image, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_open(fixture.ctx, image, NULL, &reader, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_get_info(reader, &info, NULL) == FSIMG_OK);
+		CHECK(info.label[0] == '\0' && info.time_basis == FSIMG_TIME_PER_TIMESTAMP);
+		fsimg_reader_free(reader);
+		fsimg_io_free(image);
+		CHECK(close(fd) == 0);
+	}
 	CHECK(unlinkat(fixture.output, "image", 0) == 0);
 	fixture.request.kind = FSIMG_JOB_PLAN;
 	fixture.request.output_fd = -1;
@@ -944,7 +968,8 @@ main(int argc, char **argv)
 		test_transport((worker_scenario_t)atoi(getenv("FSIMG_TEST_TRANSPORT")));
 		return (0);
 	}
-	test_operations();
+	test_operations("fat16");
+	test_operations("exfat");
 	test_text_output();
 	test_startup();
 	test_inheritance();

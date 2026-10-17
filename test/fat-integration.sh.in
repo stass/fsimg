@@ -10,12 +10,46 @@ MCOPY='@MCOPY@'
 MMD='@MMD@'
 MDEL='@MDEL@'
 FATCAT='@FATCAT@'
-for tool in "$MCOPY" "$MMD" "$MDEL" "$FATCAT"; do
+host=$(uname -s)
+for tool in "$MCOPY" "$MMD" "$MDEL"; do
     if test -z "$tool"; then
-        echo 'SKIP: independent FAT tests require mtools and fatcat'
+        echo 'SKIP: independent FAT tests require mtools'
         exit 77
     fi
 done
+
+if test "$host" != Linux && test -z "$FATCAT"; then
+    echo 'SKIP: macOS and FreeBSD FAT tests require the pinned fatcat oracle'
+    exit 77
+fi
+
+# fatcat checks are scoped to macOS/FreeBSD. The other independent tools still
+# validate Linux fixtures. Every pair below names an image path and expected
+# host content; an empty list requests volume information only.
+check_fatcat()
+{
+    checked_image=$1
+    checked_sector=$2
+    shift 2
+    if test "$host" = Linux; then
+        echo 'SKIP: fatcat checks are scoped to macOS and FreeBSD'
+        return
+    fi
+    if test "$checked_sector" != 512; then
+        echo 'SKIP: fatcat does not support non-512-byte sectors'
+        return
+    fi
+    "$FATCAT" -i "$checked_image"
+    if test "$#" != 0; then
+        "$FATCAT" -l /Nested "$checked_image"
+    fi
+    while test "$#" != 0; do
+        "$FATCAT" -r "$1" "$checked_image" > "$fixture_dir/fatcat-payload"
+        cmp "$2" "$fixture_dir/fatcat-payload"
+        shift 2
+    done
+    echo 'result: fatcat selected content comparisons passed'
+}
 
 # Each host uses its own independent formatter/checker pair. Population and
 # content comparison use mtools for both, with identical fixture geometry.
@@ -65,7 +99,9 @@ if test "$(uname -s)" != FreeBSD; then
     "$formatter" --help 2>&1 | sed -n '1p'
 fi
 "$MCOPY" -V
-"$FATCAT" -h 2>&1 | sed -n '1p'
+if test "$host" != Linux; then
+    "$FATCAT" -h 2>&1 | sed -n '1p'
+fi
 for profile in fat12 fat16 fat32 fat16-wide; do
     sector=512
     spc=1
@@ -97,22 +133,12 @@ for profile in fat12 fat16 fat32 fat16-wide; do
         echo 'fragment: three 400 KiB fillers, delete middle, copy 600 KiB, delete remaining fillers'
     fi
     "$checker" -n "$image"
-    # fatcat's pinned reader accepts 512-byte sectors and ASCII long names.
-    # The native checker, mtools and fsimg cover the wide-sector/Unicode cases.
-    if test "$sector" = 512; then
-        "$FATCAT" -i "$image"
-        "$FATCAT" -l /Nested "$image"
-        "$FATCAT" -r /Hello.txt "$image" > "$fixture_dir/fatcat-payload"
-        cmp "$fixture_dir/payload" "$fixture_dir/fatcat-payload"
-        "$FATCAT" -r /Nested/Deep.txt "$image" > "$fixture_dir/fatcat-payload"
-        cmp "$fixture_dir/payload" "$fixture_dir/fatcat-payload"
-        if test "$profile" = fat12; then
-            "$FATCAT" -r /FRAG.BIN "$image" > "$fixture_dir/fatcat-payload"
-            cmp "$fixture_dir/fragment" "$fixture_dir/fatcat-payload"
-        fi
-        echo 'result: fatcat selected ASCII content comparisons passed'
+    if test "$profile" = fat12; then
+        check_fatcat "$image" "$sector" /Hello.txt "$fixture_dir/payload" \
+            /Nested/Deep.txt "$fixture_dir/payload" /FRAG.BIN "$fixture_dir/fragment"
     else
-        echo 'SKIP: fatcat does not support non-512-byte sectors'
+        check_fatcat "$image" "$sector" /Hello.txt "$fixture_dir/payload" \
+            /Nested/Deep.txt "$fixture_dir/payload"
     fi
     ./test-fat --external "$image" "fat$variant"
     echo 'result: independent checker and fsimg enumeration/content/full verification passed'
@@ -127,12 +153,8 @@ for profile in fat12 fat16 fat32; do
     image="$fixture_dir/write-$profile/writer.img"
     echo "writer fixture: $profile; automatic geometry; serial zero; NO NAME label"
     "$checker" -n "$image"
-    "$FATCAT" -i "$image"
-    "$FATCAT" -l /Nested "$image"
-    "$FATCAT" -r /HELLO.TXT "$image" > "$fixture_dir/fatcat-payload"
-    cmp "$fixture_dir/writer-payload" "$fixture_dir/fatcat-payload"
-    "$FATCAT" -r '/Nested/long name.txt' "$image" > "$fixture_dir/fatcat-payload"
-    cmp "$fixture_dir/writer-payload" "$fixture_dir/fatcat-payload"
+    check_fatcat "$image" 512 /HELLO.TXT "$fixture_dir/writer-payload" \
+        '/Nested/long name.txt' "$fixture_dir/writer-payload"
     "$MCOPY" -i "$image" ::HELLO.TXT "$fixture_dir/extracted"
     cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
     rm "$fixture_dir/extracted"
@@ -142,10 +164,10 @@ for profile in fat12 fat16 fat32; do
     "$MCOPY" -i "$image" "::$unicode_name" "$fixture_dir/extracted"
     cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
     rm "$fixture_dir/extracted"
-    echo 'result: checker, fatcat ASCII/long-name content, and mtools Unicode extraction passed'
+    echo 'result: checker and mtools Unicode/long-name extraction passed'
     rm "$image"
     ./test-fat-write --create-empty "$fixture_dir/write-$profile" "$profile"
     "$checker" -n "$image"
-    "$FATCAT" -i "$image"
+    check_fatcat "$image" 512
     echo 'result: independently checked empty writer volume'
 done

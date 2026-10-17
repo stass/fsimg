@@ -364,7 +364,7 @@ test_variants(void)
 	fsimg_range_t range;
 
 	cursor = 0;
-	for (unsigned i = 0; i < 3; i++) {
+	for (unsigned i = 0; i < 4; i++) {
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK((format.capabilities & FSIMG_CAP_READ) != 0);
 		CHECK((format.capabilities & FSIMG_CAP_WRITE) != 0);
@@ -378,7 +378,7 @@ test_variants(void)
 		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
 		CHECK(info.allocation_units == f.clusters && info.volume_bytes == f.bytes);
 		CHECK(info.scope == FSIMG_VALIDATION_HEADER && f.payload_calls == 0);
-		CHECK(f.calls <= 3);
+		CHECK(f.calls <= 4);
 		CHECK(fsimg_reader_read_at(f.reader, 0, data, 1, &count, NULL) == FSIMG_ESTATE);
 
 		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
@@ -395,11 +395,12 @@ test_variants(void)
 			CHECK(count == 1 && data[j] == (unsigned char)(j * 37));
 		}
 		CHECK(f.calls - calls <= 1110);
-		CHECK(f.reader->session.progress.work - work == 1103);
+		/* One dispatch and one physical read per byte, plus three chain hops. */
+		CHECK(f.reader->session.progress.work - work == 2203);
 		CHECK(fsimg_reader_read_at(f.reader, 1100, data, 8, &count, NULL) == FSIMG_OK);
 		CHECK(count == 0);
 		CHECK(fsimg_reader_read_at(f.reader, 1020, data, 80, &count, NULL) == FSIMG_OK);
-		CHECK(count == 80 && f.reader->fat->index_count == 3);
+		CHECK(count == 80 && f.reader->format.fat->index_count == 3);
 		for (unsigned j = 0; j < 80; j++)
 			CHECK(data[j] == (unsigned char)((1020 + j) * 37));
 		CHECK(fsimg_reader_next_range(f.reader, 512, &range, NULL) == FSIMG_OK);
@@ -407,7 +408,7 @@ test_variants(void)
 		CHECK(fsimg_reader_next_range(f.reader, 1100, &range, NULL) == FSIMG_DONE);
 		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->path, "/SUB") == 0);
-		CHECK(f.reader->fat->index == NULL);
+		CHECK(f.reader->format.fat->index == NULL);
 		CHECK(fsimg_reader_read_at(f.reader, 0, data, 1, &count, NULL) == FSIMG_ESTATE);
 		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->path, "/SUB/EMPTY") == 0 && entry->size == 0);
@@ -717,7 +718,7 @@ test_detection(void)
 	boot[511] = 0xaa;
 	write_bytes(&f, 0, boot, sizeof(boot));
 	fixture_open(&f);
-	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_EUNSUPPORTED);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_ECORRUPT);
 	fixture_close(&f);
 }
 
@@ -857,7 +858,7 @@ test_limits(void)
 	fixture_open(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
-	f.ctx->options.max_work = f.reader->session.progress.work + 2;
+	f.ctx->options.max_work = f.reader->session.progress.work + 3;
 	CHECK(fsimg_reader_read_at(f.reader, 0, data, 1, &count, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1, data, 1, &count, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_WORK);
@@ -1097,7 +1098,7 @@ test_file_limit(void)
 	CHECK(fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, NULL) == FSIMG_OK);
 	CHECK(count == 1 && byte == 'A');
 	CHECK(fsimg_reader_read_at(f.reader, (uint64_t)UINT32_MAX - 1, &byte, 1, &count, NULL) == FSIMG_OK);
-	CHECK(count == 1 && byte == 'B' && f.reader->fat->index_count == 1);
+	CHECK(count == 1 && byte == 'B' && f.reader->format.fat->index_count == 1);
 	CHECK(fsimg_reader_read_at(f.reader, UINT32_MAX, &byte, 1, &count, NULL) == FSIMG_OK);
 	CHECK(count == 0);
 	CHECK(fsimg_reader_read_at(f.reader, (uint64_t)UINT32_MAX + 1, &byte, 1, &count, NULL) == FSIMG_EINVAL);
@@ -1274,7 +1275,7 @@ test_mirror_selector(void)
 		 */
 		fixture_open(&f);
 		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-		CHECK(f.reader->fat->geometry.mirrored && f.reader->fat->geometry.active_table == 0);
+		CHECK(f.reader->format.fat->geometry.mirrored && f.reader->format.fat->geometry.active_table == 0);
 		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 		fsimg_reader_free(f.reader);
 		f.reader = NULL;
@@ -1333,7 +1334,7 @@ test_index_failures(void)
 		if (fault == 0) {
 			uint64_t work = f.reader->session.progress.work;
 
-			CHECK(status == FSIMG_OK && f.reader->fat->index_count == 1000);
+			CHECK(status == FSIMG_OK && f.reader->format.fat->index_count == 1000);
 			for (unsigned i = 0; i < 100; i++) {
 				CHECK(fsimg_reader_read_at(f.reader, (i * 619u % 1000) * 512,
 				    &byte, 1, &count, NULL) == FSIMG_OK);
@@ -1584,8 +1585,8 @@ test_cached_name(void)
 	fixture_open(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
-	stream = f.reader->fat->directories[0].entries;
-	cursor = f.reader->fat->directories[0].cursor;
+	stream = f.reader->format.fat->directories[0].entries;
+	cursor = f.reader->format.fat->directories[0].cursor;
 	CHECK(fsimg_store_write(stream->store, cursor + 8 + 32,
 	    invalid, sizeof(invalid), NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ECORRUPT);
@@ -1606,9 +1607,9 @@ test_cached_index(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1024, &byte, 1, &count, NULL) == FSIMG_OK);
-	CHECK(f.reader->fat->index_count == 3);
+	CHECK(f.reader->format.fat->index_count == 3);
 	fsimg_meta_put_u64(record, 1);
-	CHECK(fsimg_store_write(f.reader->fat->index, 0, record, sizeof(record), NULL) == FSIMG_OK);
+	CHECK(fsimg_store_write(f.reader->format.fat->index, 0, record, sizeof(record), NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1, &byte, 1, &count, NULL) == FSIMG_ECORRUPT);
 	CHECK(count == 0);
 	fixture_close(&f);
@@ -1732,8 +1733,8 @@ test_external(const char *path, const char *format)
 				uint32_t parent_cluster;
 				uint64_t address;
 
-				address = fsimg_fat_cluster_offset(&reader->fat->geometry,
-				    reader->fat->current_cluster) + 32;
+				address = fsimg_fat_cluster_offset(&reader->format.fat->geometry,
+				    reader->format.fat->current_cluster) + 32;
 				CHECK(fsimg_io_read_exact(io, address, dotdot, sizeof(dotdot), &count, NULL) == FSIMG_OK);
 				CHECK(bcmp(dotdot, "..         ", 11) == 0);
 				parent_cluster = fsimg_fat_u16(dotdot + 26) |
@@ -1763,7 +1764,7 @@ test_external(const char *path, const char *format)
 		}
 		if (fragment) {
 			CHECK(fsimg_reader_read_at(reader, 0, buffer, 1, &count, NULL) == FSIMG_OK);
-			CHECK(reader->fat->index_count > 1);
+			CHECK(reader->format.fat->index_count > 1);
 		}
 	}
 	if (status != FSIMG_DONE)

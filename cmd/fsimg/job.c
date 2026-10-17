@@ -21,6 +21,13 @@ typedef enum job_field {
 	JOB_SELECTION
 } job_field_t;
 
+typedef enum job_string_field {
+	JOB_FORMAT_OFFSET = 200,
+	JOB_LABEL_OFFSET = 216,
+	JOB_LABEL_PRESENT = 264,
+	JOB_RESERVED_OFFSET = 265
+} job_string_field_t;
+
 static void put_field(unsigned char *, job_field_t, uint64_t);
 static uint64_t get_field(const unsigned char *, job_field_t);
 static fsimg_status_t invalid_job(fsimg_error_t *);
@@ -67,8 +74,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	if (request->selection == NULL || memchr(request->format, '\0', 16) == NULL)
 		return (invalid_job(error));
 	label = request->write.label == NULL ? "" : request->write.label;
-	label_length = strnlen(label, 12);
-	if (label_length == 12)
+	label_length = strnlen(label, 48);
+	if (label_length == 48)
 		return (invalid_job(error));
 	selection_length = strnlen(request->selection,
 	    request->limits.max_path_bytes == 0 ? 65536 : request->limits.max_path_bytes);
@@ -101,8 +108,9 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	    (request->scratch_fd != -1 ? 4u : 0u) | (request->source_fd != -1 ? 8u : 0u);
 	put_field(raw, JOB_CAPABILITIES, capabilities);
 	put_field(raw, JOB_SELECTION, selection_length);
-	bcopy(request->format, raw + 200, strlen(request->format));
-	bcopy(label, raw + 216, label_length);
+	bcopy(request->format, raw + JOB_FORMAT_OFFSET, strlen(request->format));
+	bcopy(label, raw + JOB_LABEL_OFFSET, label_length);
+	raw[JOB_LABEL_PRESENT] = request->write.label != NULL ? 1 : 0;
 	return (FSIMG_OK);
 }
 
@@ -122,9 +130,12 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
 	    FSIMG_JOB_VERBOSE)) != 0 || get_field(raw, JOB_CAPABILITIES) > 15 ||
-	    memchr(raw + 200, '\0', 16) == NULL || memchr(raw + 216, '\0', 12) == NULL)
+	    memchr(raw + JOB_FORMAT_OFFSET, '\0', 16) == NULL ||
+	    memchr(raw + JOB_LABEL_OFFSET, '\0', 48) == NULL ||
+	    raw[JOB_LABEL_PRESENT] > 1 ||
+	    (raw[JOB_LABEL_PRESENT] == 0 && raw[JOB_LABEL_OFFSET] != 0))
 		return (invalid_job(error));
-	for (unsigned i = 228; i < FSIMG_JOB_BYTES; i++) {
+	for (unsigned i = JOB_RESERVED_OFFSET; i < FSIMG_JOB_BYTES; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
@@ -163,9 +174,9 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	request->write.fat_root_entries = (uint32_t)get_field(raw, JOB_ROOT);
 	request->write.volume_serial = (uint32_t)get_field(raw, JOB_SERIAL);
 	request->codepage = (uint32_t)get_field(raw, JOB_CODEPAGE);
-	bcopy(raw + 200, request->format, 16);
-	bcopy(raw + 216, request->label_storage, 12);
-	request->write.label = request->label_storage[0] == '\0' ? NULL :
+	bcopy(raw + JOB_FORMAT_OFFSET, request->format, 16);
+	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, 48);
+	request->write.label = raw[JOB_LABEL_PRESENT] == 0 ? NULL :
 	    request->label_storage;
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);

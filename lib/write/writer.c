@@ -10,7 +10,7 @@
 #include "io.h"
 #include "publish.h"
 #include "source.h"
-#include "write.h"
+#include "format.h"
 #include "writer.h"
 
 static fsimg_status_t reject_aliases(fsimg_writer_t *, fsimg_io_t *,
@@ -34,8 +34,7 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 {
 	fsimg_write_options_t selected;
 	fsimg_writer_t *writer;
-	uint32_t sector, cluster;
-	unsigned variant;
+	const fsimg_format_t *driver;
 	size_t length;
 	fsimg_status_t status;
 
@@ -47,9 +46,8 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 	if (out == NULL || format == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "missing writer format or output"));
-	variant = strcmp(format, "fat12") == 0 ? 12 :
-	    strcmp(format, "fat16") == 0 ? 16 : strcmp(format, "fat32") == 0 ? 32 : 0;
-	if (variant == 0)
+	driver = fsimg_format_find(format);
+	if (driver == NULL || driver->writer == NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "unsupported writer format"));
 	fsimg_write_options_init(&selected);
@@ -69,38 +67,21 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_WRITER, "nonzero reserved write option"));
 	}
-	sector = selected.sector_bytes == 0 ? 512 : selected.sector_bytes;
-	cluster = selected.allocation_unit_bytes;
-	if ((sector != 512 && sector != 1024 && sector != 2048 && sector != 4096) ||
-	    (cluster != 0 && (cluster < sector || cluster > 32768 ||
-	    (cluster & (cluster - 1)) != 0)) ||
-	    selected.volume_bytes % sector != 0 ||
-	    selected.volume_bytes / sector > UINT32_MAX ||
-	    selected.fat_root_entries > UINT16_MAX ||
-	    (variant == 32 && selected.fat_root_entries != 0) ||
-	    ((selected.flags & FSIMG_WRITE_REPRODUCIBLE) != 0 &&
-	    (selected.epoch < 315532800 || selected.epoch > 4354819199LL)))
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_WRITER, "invalid FAT geometry or reproducible epoch"));
-	selected.sector_bytes = sector;
+	status = driver->writer->validate(&selected, driver->variant, error);
+	if (status != FSIMG_OK)
+		return (status);
 	if (selected.label == NULL)
-		selected.label = "NO NAME";
-	length = strnlen(selected.label, 12);
-	if (length == 0 || length > 11 || selected.label[0] == ' ' ||
-	    selected.label[length - 1] == ' ')
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+		    FSIMG_OP_WRITER, "format validation did not select a label"));
+	length = strnlen(selected.label, sizeof(writer->label));
+	if (length == sizeof(writer->label))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_WRITER, "invalid FAT volume label length or spacing"));
-	for (size_t i = 0; i < length; i++) {
-		if (!((selected.label[i] >= 'A' && selected.label[i] <= 'Z') ||
-		    (selected.label[i] >= '0' && selected.label[i] <= '9') ||
-		    strchr(" $%'-_@~`!(){}^#&", selected.label[i]) != NULL))
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_WRITER, "FAT label requires uppercase ASCII label characters"));
-	}
+		    FSIMG_OP_WRITER, "volume label exceeds common backing capacity"));
 	status = fsimg_writer_collect_new(ctx, &writer, error);
 	if (status != FSIMG_OK)
 		return (status);
-	writer->variant = variant;
+	writer->format = driver;
+	writer->variant = driver->variant;
 	writer->options = selected;
 	bcopy(selected.label, writer->label, length + 1);
 	writer->options.label = writer->label;
@@ -204,7 +185,8 @@ fsimg_writer_free(fsimg_writer_t *writer)
 	if (writer == NULL || writer->ctx->in_callback)
 		return;
 	fsimg_sources_release(writer);
-	fsimg_fat_write_free(writer->plan);
+	if (writer->format != NULL)
+		writer->format->writer->free(writer->plan);
 	fsimg_catalog_discard(writer);
 	fsimg_stream_free(writer->host_sources);
 	fsimg_stream_free(writer->entries);
@@ -343,11 +325,14 @@ fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
 	if (writer->state != FSIMG_WRITER_COLLECTING)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_WRITER, "writer cannot plan in this state"));
+	if (writer->format == NULL)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+		    FSIMG_OP_WRITER, "catalog-only writer has no image format"));
 	status = fsimg_writer_prepare(writer, NULL, error);
 	if (status != FSIMG_OK)
 		return (status);
-	writer->session.progress.phase = "FAT planning";
-	status = fsimg_fat_write_plan(writer, error);
+	writer->session.progress.phase = "image planning";
+	status = writer->format->writer->plan(writer, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
 	*out = writer->plan;
@@ -428,7 +413,7 @@ fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
 	if (status != FSIMG_OK)
 		goto fail;
 	writer->state = FSIMG_WRITER_EMITTING;
-	writer->session.progress.phase = "FAT emission";
+	writer->session.progress.phase = "image emission";
 	status = reject_aliases(writer, output, error);
 	if (status != FSIMG_OK)
 		goto fail;
@@ -448,7 +433,7 @@ fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
 		if (status != FSIMG_OK)
 			goto fail;
 	}
-	status = fsimg_fat_write_emit(writer, output, error);
+	status = writer->format->writer->emit(writer, output, error);
 	if (status != FSIMG_OK)
 		goto fail;
 	status = fsimg_io_flush(output,

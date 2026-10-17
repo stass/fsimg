@@ -33,16 +33,8 @@
  * author's libarchive msdosfs reader. Geometry, resources, traversal and time
  * conversion use fsimg's independent contracts rather than libarchive state.
  */
-typedef struct fat_case_pair {
-	uint32_t	 scalar;
-	uint32_t	 upper;
-} fat_case_pair_t;
-
 #include "name-tables.h"
 
-static uint32_t name_upper(uint32_t);
-static bool timestamp_decode(uint16_t, uint16_t, unsigned,
-    uint64_t, fsimg_timestamp_t *);
 static fsimg_status_t entry_timestamp(fsimg_metadata_t *, uint32_t,
     uint16_t, uint16_t, unsigned, fsimg_error_t *);
 
@@ -96,8 +88,8 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	 */
 	if (bcmp(boot + 3, "EXFAT   ", 8) == 0 &&
 	    bcmp(boot + 11, exfat_reserved, sizeof(exfat_reserved)) == 0)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_READER, "exFAT reader is unavailable"));
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "exFAT boot record is not a FAT12/16/32 volume"));
 	g->sector_bytes = fsimg_fat_u16(boot + 11);
 	sectors_per_cluster = boot[13];
 	g->reserved_sectors = fsimg_fat_u16(boot + 14);
@@ -186,26 +178,6 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 			    FSIMG_OP_READER, "unsupported FAT32 reserved fields"));
 	}
 	return (FSIMG_OK);
-}
-
-static uint32_t
-name_upper(uint32_t scalar)
-{
-	size_t low, high, middle;
-
-	low = 0;
-	high = sizeof(fat_upper) / sizeof(fat_upper[0]);
-	while (low < high) {
-		middle = low + (high - low) / 2;
-		if (fat_upper[middle].scalar < scalar)
-			low = middle + 1;
-		else
-			high = middle;
-	}
-	if (low < sizeof(fat_upper) / sizeof(fat_upper[0]) &&
-	    fat_upper[low].scalar == scalar)
-		return (fat_upper[low].upper);
-	return (scalar);
 }
 
 fsimg_status_t
@@ -366,53 +338,13 @@ fsimg_fat_name_key(const char *name, unsigned char *key, size_t *length,
 			    (units[i + 1] - 0xdc00);
 			i++;
 		}
-		scalar = name_upper(scalar);
+		scalar = fsimg_unicode_upper(scalar);
 		/* Fixed-width big-endian scalars give an unambiguous byte key. */
 		for (unsigned j = 0; j < 4; j++)
 			key[written++] = (unsigned char)(scalar >> (24 - j * 8));
 	}
 	*length = written;
 	return (FSIMG_OK);
-}
-
-static bool
-timestamp_decode(uint16_t date, uint16_t time, unsigned tenths,
-    uint64_t precision, fsimg_timestamp_t *out)
-{
-	static const unsigned month_days[] = { 31, 28, 31, 30, 31, 30,
-	    31, 31, 30, 31, 30, 31 };
-	unsigned year, month, day, days_in_month, hour, minute, second;
-	int64_t days;
-
-	year = 1980 + (date >> 9);
-	month = (date >> 5) & 15;
-	day = date & 31;
-	hour = time >> 11;
-	minute = (time >> 5) & 63;
-	second = (time & 31) * 2;
-	if (month == 0 || month > 12 || hour > 23 || minute > 59 ||
-	    second > 58 || tenths > 199)
-		return (false);
-	days_in_month = month_days[month - 1];
-	if (month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))
-		days_in_month++;
-	if (day == 0 || day > days_in_month)
-		return (false);
-	days = 0;
-	for (unsigned y = 1970; y < year; y++)
-		days += 365 + (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
-	for (unsigned m = 1; m < month; m++) {
-		days += month_days[m - 1];
-		if (m == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))
-			days++;
-	}
-	out->seconds = (days + day - 1) * 86400 + hour * 3600 + minute * 60 +
-	    second + tenths / 100;
-	out->nanoseconds = (tenths % 100) * 10000000u;
-	out->precision_ns = precision;
-	out->basis = FSIMG_TIME_WALL;
-	out->offset_minutes = 0;
-	return (true);
 }
 
 fsimg_status_t
@@ -488,7 +420,7 @@ entry_timestamp(fsimg_metadata_t *metadata, uint32_t field, uint16_t date,
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_READER, "invalid FAT timestamp field"));
 	}
-	if (!timestamp_decode(date, time, subseconds, precision, timestamp))
+	if (!fsimg_dos_time_decode(date, time, subseconds, precision, timestamp))
 		return (fsimg_fat_corrupt(error, "invalid FAT calendar timestamp"));
 	metadata->valid |= field;
 	return (FSIMG_OK);

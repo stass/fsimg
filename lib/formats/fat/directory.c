@@ -119,7 +119,7 @@ static fsimg_status_t
 validate_dot(directory_prepass_t *pass, const unsigned char *raw,
     fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &pass->reader->fat->geometry;
+	const fat_geometry_t *g = &pass->reader->format.fat->geometry;
 	fsimg_entry_t entry;
 	unsigned char copy[32];
 	uint32_t cluster, expected;
@@ -152,7 +152,7 @@ decode_slot(directory_prepass_t *pass, const unsigned char *raw,
     fsimg_error_t *error)
 {
 	fsimg_reader_t *reader = pass->reader;
-	fsimg_fat_reader_t *fat = reader->fat;
+	fsimg_fat_reader_t *fat = reader->format.fat;
 	fsimg_entry_t entry;
 	char name[FAT_NAME_BYTES], alias[FAT_NAME_BYTES];
 	size_t length;
@@ -239,7 +239,7 @@ read_directory_run(directory_prepass_t *pass, const fat_extent_t *run,
     fsimg_error_t *error)
 {
 	fsimg_reader_t *reader = pass->reader;
-	fsimg_fat_reader_t *fat = reader->fat;
+	fsimg_fat_reader_t *fat = reader->format.fat;
 	uint64_t offset;
 	size_t batch, transferred;
 	fsimg_status_t status;
@@ -268,7 +268,7 @@ prepare_directory(fsimg_reader_t *reader, uint32_t cluster, uint32_t parent,
     size_t path_length, uint32_t level, fat_directory_t *out,
     fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->fat;
+	fsimg_fat_reader_t *fat = reader->format.fat;
 	const fat_geometry_t *g = &fat->geometry;
 	directory_prepass_t pass;
 	fat_chain_t chain;
@@ -352,7 +352,7 @@ done:
 static fsimg_status_t
 traversal_start(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->fat;
+	fsimg_fat_reader_t *fat = reader->format.fat;
 	fsimg_error_t detail;
 	uint64_t bytes;
 	size_t allocation;
@@ -384,7 +384,7 @@ traversal_start(fsimg_reader_t *reader, fsimg_error_t *error)
 fsimg_status_t
 fsimg_fat_next(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->fat;
+	fsimg_fat_reader_t *fat = reader->format.fat;
 	fat_directory_t *directory;
 	uint32_t parent;
 	size_t length, name_length;
@@ -459,7 +459,7 @@ fsimg_status_t
 fsimg_fat_match_name(fsimg_reader_t *reader, const char *component, bool *matches,
     fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->fat;
+	fsimg_fat_reader_t *fat = reader->format.fat;
 	unsigned char requested[FAT_KEY_BYTES], candidate[FAT_KEY_BYTES];
 	char alias[FAT_NAME_BYTES];
 	size_t requested_length, candidate_length;
@@ -496,9 +496,9 @@ fsimg_fat_match_name(fsimg_reader_t *reader, const char *component, bool *matche
 fsimg_status_t
 fsimg_fat_skip_directory(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	if (!reader->fat->pending_directory)
+	if (!reader->format.fat->pending_directory)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_READER, "FAT directory descent is not pending"));
-	reader->fat->pending_directory = false;
+	reader->format.fat->pending_directory = false;
 	return (FSIMG_OK);
 }

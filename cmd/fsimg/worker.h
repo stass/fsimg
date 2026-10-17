@@ -60,7 +60,7 @@ typedef struct fsimg_worker_request {
 	int		 source_fd;
 	char		 format[16];
 	/* Decoder-owned backing only; write.label is the authoritative value. */
-	char		 label_storage[12];
+	char		 label_storage[48];
 } fsimg_worker_request_t;
 
 typedef struct fsimg_worker_result {

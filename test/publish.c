@@ -27,6 +27,9 @@ typedef struct publication_fault {
 	bool		 link_before_error;
 	bool		 fail_unlink;
 	bool		 interrupt_sync;
+	bool		 cancel_after_sync;
+	bool		 cancelled;
+	unsigned	 link_calls;
 	fsimg_ctx_t	*ctx;
 } publication_fault_t;
 
@@ -39,6 +42,56 @@ static void test_races(fsimg_ctx_t *, int, int);
 static void test_existing_targets(fsimg_ctx_t *, int, int);
 static void test_stable_identity(fsimg_ctx_t *, int, int);
 static void test_image_identity(fsimg_ctx_t *, int);
+static bool publication_cancelled(void *);
+static void test_cancel_after_flush(int, int);
+
+static bool
+publication_cancelled(void *argument)
+{
+	publication_fault_t *fault = argument;
+
+	return (fault->cancelled);
+}
+
+static void
+test_cancel_after_flush(int staging, int parent)
+{
+	publication_fault_t fault = { .cancel_after_sync = true };
+	fsimg_publish_ops_t hooks = {
+		.sync_fd = fault_sync,
+		.link_at = fault_link,
+		.unlink_at = fault_unlink,
+		.argument = &fault
+	};
+	fsimg_options_t options;
+	fsimg_ctx_t *ctx;
+	fsimg_error_t error;
+	fsimg_stats_t stats;
+	struct stat st;
+
+	fsimg_options_init(&options);
+	options.cancelled = publication_cancelled;
+	options.cancel_argument = &fault;
+	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
+	create_staged(staging);
+
+	/* A successful but slow file flush can overlap cancellation. Publication
+	 * must observe that cancellation before creating a final pathname.
+	 */
+	CHECK(fsimg_publish(ctx, staging, "image", 4, parent, "final", &hooks,
+	    &error) == FSIMG_ECANCELLED);
+	CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+	CHECK(fault.sync_calls == 1 && fault.link_calls == 0);
+	CHECK(fstatat(parent, "final", &st, AT_SYMLINK_NOFOLLOW) == -1);
+	CHECK(errno == ENOENT);
+	CHECK(fstatat(staging, "image", &st, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(S_ISREG(st.st_mode) && st.st_size == 4);
+	CHECK(fsimg_ctx_get_stats(ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.descriptors == 0);
+
+	CHECK(unlinkat(staging, "image", 0) == 0);
+	fsimg_ctx_free(ctx);
+}
 
 static void
 test_image_identity(fsimg_ctx_t *ctx, int parent)
@@ -118,6 +171,8 @@ fault_sync(void *argument, int fd)
 		errno = EIO;
 		return (-1);
 	}
+	if (fault->cancel_after_sync)
+		fault->cancelled = true;
 	return (fsync(fd));
 }
 
@@ -128,6 +183,7 @@ fault_link(void *argument, int source_dir, const char *source,
 	publication_fault_t *fault = argument;
 	int result;
 
+	fault->link_calls++;
 	if (fault->link_error == 0 || fault->link_before_error) {
 		result = linkat(source_dir, source, target_dir, target, 0);
 		if (result == -1)
@@ -357,6 +413,7 @@ main(int argc, char **argv)
 		test_failures(ctx, staging, parent);
 		test_existing_targets(ctx, staging, parent);
 		test_races(ctx, staging, parent);
+		test_cancel_after_flush(staging, parent);
 	}
 	CHECK(fsimg_ctx_get_stats(ctx, &after, NULL) == FSIMG_OK);
 	CHECK(after.memory_bytes == before.memory_bytes && after.descriptors == 0);

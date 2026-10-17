@@ -17,6 +17,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Filesystem formats](design-formats.md) | FAT and exFAT profiles and interoperability requirements |
 | [FAT reader](design-fat-reader.md) | FAT geometry, name profile, traversal, content indexing, and structural verification |
 | [FAT writer](design-fat-writer.md) | Deterministic aliases, bounded layout planning, geometry, metadata encoding, and emission |
+| [exFAT reader and writer](design-exfat.md) | Boot integrity, bitmap allocation, embedded upcase mapping, initialized data, bounded traversal, and emission |
 | [Command line](design-cli.md) | Commands, flags, defaults, output, and failure behavior |
 | [Style](style.md) | C conventions and readability review |
 | [Implementation plan](../docs/implementation-plan.md) | Ordered work packages, dependencies, validation, and completion gates |

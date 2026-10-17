@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+set -eu
+mkfs_exfat=${MKFS_EXFAT:-'@MKFS_EXFAT@'}
+fsck_exfat=${FSCK_EXFAT:-'@FSCK_EXFAT@'}
+if test -z "$mkfs_exfat" || test -z "$fsck_exfat"; then
+    echo 'SKIP: exfatprogs mkfs.exfat and fsck.exfat are required'
+    exit 77
+fi
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-exfat-oracle-XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+
+./test-exfat --emit "$fixture/written.img"
+"$fsck_exfat" -n "$fixture/written.img"
+./test-exfat --read-external "$fixture/written.img"
+
+# A formatter-produced empty image exercises independently encoded geometry,
+# compressed upcase mappings, metadata chains, bitmap and directory framing.
+dd if=/dev/zero of="$fixture/external.img" bs=1 count=0 seek=67108864 2>/dev/null
+"$mkfs_exfat" -L EXTERNAL "$fixture/external.img"
+"$fsck_exfat" -n "$fixture/external.img"
+./test-exfat --read-external "$fixture/external.img"

@@ -30,6 +30,13 @@ fi
 export ASAN_OPTIONS UBSAN_OPTIONS
 ./fuzz-fat -runs=1000 -max_len=3145728 -timeout=10 fuzz-corpus
 
+# The same bounded dispatch/content harness reaches exFAT from both an
+# independently encoded fragmented fixture and a compact writer fixture.
+exfat_corpus=$(mktemp -d exfat-fuzz-corpus-XXXXXX)
+./test-exfat --seed "$exfat_corpus/fragmented.seed"
+./test-exfat --emit "$exfat_corpus/compact.seed"
+./fuzz-fat -runs=1000 -max_len=3145728 -timeout=10 "$exfat_corpus"
+
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -Isanitizer-fuzz -I"$source_dir/include" -I"$source_dir/compat" \

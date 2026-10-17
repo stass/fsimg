@@ -3,7 +3,8 @@
 Development requires Autoconf, Automake, Libtool, make, a C11 compiler, and a
 C++ compiler. On macOS install missing tools with `brew install autoconf
 automake libtool`. Independent FAT tests additionally use `brew install mtools
-dosfstools cmake`. FreeBSD uses native `newfs_msdos`/`fsck_msdosfs`; install
+dosfstools cmake`. Linux exFAT interoperability uses `exfatprogs`.
+FreeBSD uses native `newfs_msdos`/`fsck_msdosfs`; install
 missing development tools through ports, including `filesystems/mtools`.
 The additional fatcat oracle is built from a pinned upstream checkout.
 Release archives include generated Autotools support and build without those
@@ -135,10 +136,12 @@ ceiling checks do not claim a physical large-image traversal.
 `check-integration` creates images with the host's formatter: dosfstools on
 macOS/Linux or native `newfs_msdos` on FreeBSD. Native `fsck_msdosfs` or
 `fsck.fat` checks them; mtools supplies population and Unicode extraction, and
-fatcat supplies additional ASCII, nested long-name and fragmented reads.
-The ordinary suite includes this script and explicitly skips it if a required
-development tool is absent. The dedicated target returns that skip rather
-than claiming success. The manifest is `test/fat-integration.sh.log`: formatter
+fatcat supplies additional ASCII, nested long-name and fragmented reads on
+macOS and FreeBSD. Linux runs the formatter/checker and mtools checks, with
+only fatcat subchecks explicitly skipped. The ordinary suite includes this
+script and skips it if a required development tool is absent. The dedicated
+target returns that skip rather than claiming success. The manifest is
+`test/fat-integration.sh.log`: formatter
 and validator versions, geometry, population commands, a forced fragmentation
 recipe, and outcomes. Fixtures include all FAT variants and a 4096-byte-sector,
 8192-byte-cluster FAT16 case. Bytes and Unicode names are checked, then complete
@@ -147,7 +150,9 @@ payload verification runs. No test mounts an image or needs root.
 `check-fuzz` builds and checks a separate `sanitizer-fuzz` static library with
 ASan/UBSan and `-fsanitize=fuzzer-no-link` coverage on every object, then compiles
 `fuzz/fat.c` with Clang's libFuzzer runtime, and creates seeds for all FAT variants
-using the independent fixture builder. It runs 1000 mutations with a 3 MiB input ceiling
+using the independent fixture builder. A separate exFAT corpus combines an
+independent raw-table fixture with a writer-generated compressed-table image.
+It runs 1000 mutations per format corpus with a 3 MiB input ceiling
 and a ten-second per-input timeout. Each reader has a 16 MiB budget, 1000-entry,
 eight-level and 250,000-work limits, and no scratch authority. Each input is
 read both as an exact-length byte array and as a prefix of zero-filled logical
@@ -171,7 +176,7 @@ FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 The exact standalone commands from a configured build are:
 
 ```sh
-make test-fat test-protocol
+make test-fat test-exfat test-protocol
 sh ../build-aux/fuzz.sh "$(cd .. && pwd)"
 ```
 
@@ -215,19 +220,21 @@ explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 ./test-catalog --scale 10000000
 ```
 
-The ordinary suite has eighteen tests. macOS reports sixteen passes and two
-skips (backend unavailable and Linux-only setup mocks). Linux reports seventeen
-passes and one explicit integration skip because fatcat is unavailable there.
-The user-provided FreeBSD 16/ZFS host reports seventeen passes and one
-Linux-only harness skip, including
-native FAT/mtools/fatcat interoperability. See [platform evidence](platform-evidence.md)
+The ordinary suite has twenty-two tests. macOS reports nineteen passes and
+three skips (backend unavailable, Linux-only setup mocks, and unavailable
+exfatprogs). Linux reports twenty-two passes; FAT fatcat subchecks explicitly
+skip by host policy while dosfstools/mtools coverage runs. The user-provided
+FreeBSD 16/ZFS host reports twenty passes and two skips (Linux-only setup
+mocks and unavailable exfatprogs), including native FAT/mtools/fatcat
+interoperability. See [platform evidence](platform-evidence.md)
 for guest kernels and filesystems. The metadata scale fixture reports a
 329,088-byte allocation peak, 75,795,888-byte logical scratch peak, and 134,683
 I/O calls on APFS. These are fixture measurements rather than general bounds.
 
 The instrumented fuzz smoke run uses Homebrew LLVM 23.1.2. FAT completes
-1000 mutations with FAT12/16/32 seeds (`cov: 2076`, `ft: 5758`); protocol
-completes 1000 mutations (`cov: 345`, `ft: 654`). Neither reports an unintended
+1000 mutations with FAT12/16/32 seeds (`cov: 2160`, `ft: 5838`), exFAT
+completes 1000 mutations (`cov: 2105`, `ft: 5366`), and protocol completes
+1000 mutations (`cov: 348`, `ft: 699`). None reports an unintended
 sanitizer or accounting finding. These counters describe finite runs and vary
 with the generated mutation sequence.
 
@@ -343,23 +350,23 @@ host timestamp granularity cannot accidentally leave the mutation invisible.
 The library detects metadata-visible changes; hostile mutation requires a
 stable snapshot as specified by the source contract.
 
-Sanitizer execution evidence for the extraction/worker gate:
+Sanitizer execution evidence:
 
 | Host | Command | Result |
 | --- | --- | --- |
-| macOS | `make check-asan` | Full ASan/UBSan suite passes; platform skips explicit |
-| macOS | `make check-ubsan` | 16 pass, 2 platform skips |
+| macOS | `make check-asan` | 19 pass, 3 tool/platform skips |
+| macOS | `make check-ubsan` | 19 pass, 3 tool/platform skips |
 | macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
-| Linux | `make check-asan` | 17 pass, 1 fatcat-unavailable integration skip |
-| Linux | `make check-lsan` | 17 pass, 1 fatcat-unavailable integration skip |
-| Linux | `make check-msan` | 17 pass, 1 fatcat-unavailable integration skip |
-| FreeBSD 16/ZFS | `make check-asan` | 17 pass, 1 Linux-only harness skip |
+| Linux | `make check-asan` | 22 pass |
+| Linux | `make check-lsan` | 22 pass |
+| Linux | `make check-msan` | 22 pass |
+| FreeBSD 16/ZFS | `make check-asan` | 20 pass, 2 tool/platform skips |
 
 Configure searches the standard system sbin directories for formatter/checker
-tools. Linux's final ordinary and sanitizer runs explicitly skip integration
-because fatcat is unavailable there; sanitized library FAT tests still run.
-macOS and the provided FreeBSD host include passing independent interoperability.
-FreeBSD uses its native formatter/checker plus mtools and fatcat. The real
+tools. Linux runs dosfstools/mtools and exfatprogs interoperability in its
+ordinary and sanitizer suites. macOS and the provided FreeBSD host include
+passing independent FAT interoperability. FreeBSD uses its native
+formatter/checker plus mtools and fatcat. The real
 child ASan fault is intentional; no unintended sanitizer report remains.
 
 Build the fatcat development oracle outside the source tree and export its path
@@ -375,7 +382,7 @@ patch; it preserves the upstream checkout/license and verifies revision
 `76000303082e9e86f1aca8edb030c5fb8a63ae55`. FreeBSD selects upstream's existing
 native getopt/64-bit-offset interfaces with a two-condition patch. No format
 logic is changed. C++14 supports the pinned source's deprecated APIs.
-CI builds this oracle before every host's configuration. On FreeBSD, missing
+CI builds this oracle on macOS and FreeBSD. On FreeBSD, missing
 tools are installed through ports; ordinary builds/tests remain unprivileged.
 Fatcat's non-512-sector subcheck is explicitly skipped, and its Unicode name
 decoding is not an oracle; native checks and mtools cover those features.
@@ -389,10 +396,48 @@ adequate FAT capacity explicitly rather than relying on host file-geometry
 inference. The FSInfo next-free value remains an advisory search hint; the
 native checker's warning does not trigger fixture repair.
 
-Extraction/worker code and substantive follow-ups have completed read-only
-OpenCode reviews with `zai-coding-plan/glm-5.3 --variant max` on the Z.ai
-coding-plan subscription. The corrected packaging manifest, native-oracle
-adapter, volume-label compatibility and automatic sizing margins have no
-remaining Critical/High/Medium or readability findings. The local reviewer
-also reviewed those paths before the final test runs. Missing-tool diagnostics
-in the development helper address the final Low observation.
+Extraction/worker code, packaging, native-oracle integration, volume labels,
+and automatic sizing margins receive read-only OpenCode reviews with
+`zai-coding-plan/glm-5.3 --variant max` on the Z.ai coding-plan subscription.
+No Critical/High/Medium or readability finding remains in those paths. The
+local reviewer checks the same criteria before pre-commit test runs.
+
+The exFAT tests cover boot and entry-set checksums, malformed upcase encodings,
+volume-specific case mappings, timestamp bases and losses, bitmap/FAT ownership,
+fragmented metadata and content, preallocation, and initialized-data boundaries.
+Poisoned backing bytes beyond ValidDataLength must become logical zeroes through
+content reads, raw worker output, and host extraction. A 512-fragment fixture
+checks unique bytes in sequential and random reads and bounds metadata work.
+Allocation failure injection exercises construction and cleanup. Reproducibility
+compares complete images across insertion orders, cache sizes and poisoned sinks.
+Publication tests inject cancellation during a successful staged-file flush
+and require cancellation to be observed before the no-replace link; post-link
+failures retain their published/durability outcome.
+
+`test/exfat-integration.sh` checks emitted images with exfatprogs and verifies
+an independently formatted image. Linux uses exfatprogs 1.2.9; macOS and FreeBSD
+explicitly skip this tool-specific test. An isolated Linux kernel also mounts
+an emitted image read-only and compares all 70,003 zero-tail bytes. A separate
+64 MiB image formatted by exfatprogs and populated through the kernel contains
+Unicode names, nested directories and fragmented content; fsimg verifies six
+files, two directories and 196,707 initialized payload bytes. These separate
+mount checks require fixture setup privileges; ordinary tests do not mount.
+
+The sparse exFAT qualification uses a 64 MiB library budget:
+
+```sh
+./test-exfat-scale --huge
+```
+
+It creates an actual 128 TiB sparse file, plans an 8 TiB-plus-17-byte zero
+source and two 65,537-byte initialized markers, opens and enumerates the volume,
+and checks boundary content. Its 8 MiB clusters do not determine transfer-buffer
+size. Both APFS and the provided ZFS host pass. The APFS run reports 5,539,528
+peak charged memory bytes, 2,097,168 scratch bytes, three owned descriptors,
+278,721 written adapter bytes and 36,226,983 read adapter bytes in 0.374 seconds;
+process RSS is 21,024,768 bytes. ZFS reports 5,540,296 charged bytes, the same
+scratch and adapter counts, 11,882,496 RSS bytes and 0.600 seconds.
+Immediate allocated-block samples are 25,321,472 bytes on APFS and 512 bytes
+on ZFS; compression and delayed allocation make these samples distinct from
+settled device writes. This measures sparse logical capacity and bounded
+metadata/content access, not full multi-terabyte payload transfer.

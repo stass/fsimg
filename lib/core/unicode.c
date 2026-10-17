@@ -7,6 +7,13 @@
 
 #include "unicode.h"
 
+typedef struct fsimg_case_pair {
+	uint32_t	 scalar;
+	uint32_t	 upper;
+} fsimg_case_pair_t;
+
+#include "case-tables.h"
+
 static bool utf8_scalar(const unsigned char *, size_t, size_t *, uint32_t *);
 static bool timestamp_valid(const fsimg_timestamp_t *);
 
@@ -231,4 +238,24 @@ fsimg_metadata_validate(const fsimg_metadata_t *metadata, fsimg_error_t *error)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_CATALOG, "unsupported metadata attribute"));
 	return (FSIMG_OK);
+}
+
+uint32_t
+fsimg_unicode_upper(uint32_t scalar)
+{
+	size_t low, high, middle;
+
+	low = 0;
+	high = sizeof(fsimg_upper) / sizeof(fsimg_upper[0]);
+	while (low < high) {
+		middle = low + (high - low) / 2;
+		if (fsimg_upper[middle].scalar < scalar)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	if (low < sizeof(fsimg_upper) / sizeof(fsimg_upper[0]) &&
+	    fsimg_upper[low].scalar == scalar)
+		return (fsimg_upper[low].upper);
+	return (scalar);
 }
