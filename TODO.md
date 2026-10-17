@@ -11,6 +11,15 @@
   extraction, actual-kernel sandbox validation, failure handling, and measured
   operation on gigantic volumes and catalogs.
 
+## Bugs by subsystem
+
+* [Medium] **FreeBSD directory decoding** (`compat/host.c`, `test/source.c`):
+  skip unused native directory records with `d_fileno == 0` after validating
+  their framing and before validating live names. The decoder treats them as
+  entries, and its synthetic live-record fixture leaves the inode zero. On
+  FreeBSD, first demonstrate the failure with unused-before-live and unused-only
+  batches, then repair the decoder and give live fixtures nonzero inodes.
+
 ## Security residuals
 
 * [High] **Platform qualification** (`cmd/fsimg/sandbox.c`, `test/sandbox.c`,
