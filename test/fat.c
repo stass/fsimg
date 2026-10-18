@@ -85,6 +85,7 @@ static void test_long_names(void);
 static void test_volume_labels(void);
 static void test_cached_name(void);
 static void test_cached_index(void);
+static void test_range_reads(void);
 static bool cancelled(void *);
 static size_t long_records(unsigned char *, const uint16_t *, size_t,
     const unsigned char *);
@@ -1095,10 +1096,13 @@ test_file_limit(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(entry->size == UINT32_MAX);
-	CHECK(fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, NULL) == FSIMG_OK);
-	CHECK(count == 1 && byte == 'A');
+	/* A first read at the far end is a seek, so it indexes the maximum-size
+	 * chain; the start is then found through that index.
+	 */
 	CHECK(fsimg_reader_read_at(f.reader, (uint64_t)UINT32_MAX - 1, &byte, 1, &count, NULL) == FSIMG_OK);
 	CHECK(count == 1 && byte == 'B' && f.reader->format.fat->index_count == 1);
+	CHECK(fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, NULL) == FSIMG_OK);
+	CHECK(count == 1 && byte == 'A');
 	CHECK(fsimg_reader_read_at(f.reader, UINT32_MAX, &byte, 1, &count, NULL) == FSIMG_OK);
 	CHECK(count == 0);
 	CHECK(fsimg_reader_read_at(f.reader, (uint64_t)UINT32_MAX + 1, &byte, 1, &count, NULL) == FSIMG_EINVAL);
@@ -1782,6 +1786,44 @@ test_external(const char *path, const char *format)
 	CHECK(close(fd) == 0 && close(scratch) == 0);
 }
 
+/* Extraction asks for a range and then reads it. A range query must not move
+ * the sequential cursor past the bytes it describes, or the following read
+ * looks like a seek and rebuilds the whole chain into a scratch index.
+ */
+static void
+test_range_reads(void)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_range_t range;
+	unsigned char data[1100];
+	uint64_t offset;
+	size_t count;
+
+	/* HELLO.TXT spans three nonadjacent cluster runs. */
+	fixture_init(&f, 16);
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/HELLO.TXT") == 0 && entry->size == sizeof(data));
+	offset = 0;
+	while (fsimg_reader_next_range(f.reader, offset, &range, NULL) == FSIMG_OK) {
+		CHECK(range.offset == offset && range.kind == FSIMG_RANGE_DATA);
+		CHECK(range.length <= sizeof(data) - offset);
+		CHECK(fsimg_reader_read_at(f.reader, offset, data + offset,
+		    (size_t)range.length, &count, NULL) == FSIMG_OK);
+		CHECK(count == range.length);
+		offset += count;
+	}
+	CHECK(offset == sizeof(data));
+	for (unsigned j = 0; j < sizeof(data); j++)
+		CHECK(data[j] == (unsigned char)(j * 37));
+	CHECK(f.reader->format.fat->index == NULL);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	fixture_close(&f);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1890,6 +1932,7 @@ main(int argc, char **argv)
 	test_volume_labels();
 	test_cached_name();
 	test_cached_index();
+	test_range_reads();
 	test_report_outputs();
 	test_capability_bounds();
 	return (0);

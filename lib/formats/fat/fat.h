@@ -77,7 +77,6 @@ struct fsimg_fat_reader {
 	uint64_t	 directory_capacity;
 	fat_chain_t	 file_chain;
 	fat_extent_t	 extent;
-	uint64_t	 next_offset;
 	uint64_t	 table_window_offset;
 	size_t		 table_window_length;
 	uint32_t	 depth;

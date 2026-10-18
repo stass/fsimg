@@ -410,31 +410,39 @@ file_extent(fsimg_reader_t *reader, uint64_t offset, fat_extent_t *run,
 {
 	fsimg_fat_reader_t *fat = reader->format.fat;
 	const fat_geometry_t *g = &fat->geometry;
+	uint64_t end;
 	fsimg_status_t status;
 
 	if (fat->index != NULL)
 		return (index_extent(reader, offset, run, error));
-	if (offset != fat->next_offset) {
-		/* A seek gets one complete forward index pass. Repeated random reads
-		 * then search paged records instead of restarting the allocation chain.
-		 */
+	/* Inside the cached extent: no chain work. Range queries and reads share
+	 * this cursor, so a range followed by reads of it walks the chain once.
+	 */
+	end = fat->extent.logical_offset + fat->extent.length;
+	if (offset >= fat->extent.logical_offset && offset < end) {
+		*run = fat->extent;
+		return (FSIMG_OK);
+	}
+	/* Anywhere but the cached extent's end is a seek: one complete forward
+	 * pass builds the index, and later lookups search it instead of
+	 * restarting the allocation chain.
+	 */
+	if (offset != end) {
 		status = build_index(reader, error);
 		if (status != FSIMG_OK)
 			return (status);
 		return (index_extent(reader, offset, run, error));
 	}
+	/* At the cached extent's end: advance the chain by one run. */
 	if (!fat->file_started) {
 		fsimg_fat_chain_init(&fat->file_chain, fat->current_cluster,
 		    (reader->entry.size + g->cluster_bytes - 1) / g->cluster_bytes);
 		fat->file_started = true;
 	}
-	if (fat->extent.length == 0 ||
-	    offset - fat->extent.logical_offset >= fat->extent.length) {
-		status = fsimg_fat_chain_run(reader, &fat->file_chain, &fat->extent, error);
-		if (status != FSIMG_OK)
-			return (status == FSIMG_DONE ?
-			    fsimg_fat_corrupt(error, "FAT chain ended before content") : status);
-	}
+	status = fsimg_fat_chain_run(reader, &fat->file_chain, &fat->extent, error);
+	if (status != FSIMG_OK)
+		return (status == FSIMG_DONE ?
+		    fsimg_fat_corrupt(error, "FAT chain ended before content") : status);
 	*run = fat->extent;
 	return (FSIMG_OK);
 }
@@ -460,7 +468,6 @@ fsimg_fat_range(fsimg_reader_t *reader, uint64_t offset, fsimg_range_t *out,
 	if (out->length > reader->entry.size - offset)
 		out->length = reader->entry.size - offset;
 	out->kind = FSIMG_RANGE_DATA;
-	reader->format.fat->next_offset = offset + out->length;
 	return (FSIMG_OK);
 }
 
@@ -491,7 +498,6 @@ fsimg_fat_read(fsimg_reader_t *reader, uint64_t offset, void *buffer,
 		    (unsigned char *)buffer + *transferred, batch, &count, error);
 		*transferred += count;
 		offset += count;
-		reader->format.fat->next_offset = offset;
 		if (status != FSIMG_OK)
 			return (status);
 	}

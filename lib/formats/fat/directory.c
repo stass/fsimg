@@ -393,7 +393,6 @@ fsimg_fat_next(fsimg_reader_t *reader, fsimg_error_t *error)
 	fsimg_store_free(fat->index);
 	fat->index = NULL;
 	fat->index_count = 0;
-	fat->next_offset = 0;
 	fat->file_started = false;
 	bzero(&fat->extent, sizeof(fat->extent));
 	if (!fat->started) {
