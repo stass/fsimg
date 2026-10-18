@@ -282,7 +282,8 @@ resident. A counter fails when it exceeds `ceil(baseline * 1.10)`. Decreases and
 that tolerance are printed but do not fail. A missing or extra fixture or key
 fails. The script classifies keys in one place. To cross-check image digests
 with `shasum -a 256`, set `FSIMG_BASELINE_DUMP` to an existing directory.
-Each created image is then also written there as `<fixture>.img`.
+Each created image is then also written there as `<fixture>.img`. Images are
+created exclusively, so use an empty directory for each run.
 
 `make baseline-record` regenerates `test/baseline.txt`; the test itself never
 writes it. Re-record only for an intended change, and explain every changed

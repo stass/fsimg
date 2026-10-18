@@ -26,6 +26,7 @@ static const uint32_t round_constants[64] = {
 static uint32_t rotate_right(uint32_t, unsigned);
 static void sha256_block(sha256_t *, const unsigned char *);
 
+/* bits is a SHA-256 rotation constant, always in 1..31. */
 static uint32_t
 rotate_right(uint32_t value, unsigned bits)
 {

@@ -29,7 +29,8 @@ void baseline_tree(const char *fixture, const char *format);
 void baseline_digest_read(fsimg_reader_t *, uint64_t, uint64_t, sha256_t *);
 
 /* Run the fixed fragmented-file access script on the reader's current file
- * of the given size, absorbing every returned byte and range into digest.
+ * of the given size, absorbing every returned byte into digest. Range answers
+ * are checked for validity but not recorded.
  */
 void baseline_read_script(fsimg_reader_t *, uint64_t, sha256_t *);
 

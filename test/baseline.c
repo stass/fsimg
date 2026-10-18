@@ -162,6 +162,7 @@ provider_range(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
 	 * end within the file: a pattern file is one data range to its length
 	 * (its id); the mixed file is data, zero, data split at the bounds.
 	 */
+	CHECK(offset < (id == MIXED_SOURCE_ID ? TREE_MIXED_BYTES : id));
 	range->offset = offset;
 	if (id != MIXED_SOURCE_ID) {
 		range->length = id - offset;
