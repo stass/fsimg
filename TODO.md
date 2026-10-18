@@ -2,6 +2,15 @@
 
 ## Major initiatives
 
+* [High] **QNX6 read/write and automotive qualification**
+  (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): implement the
+  [Power-Safe design](specs/design-qnx6.md), close the explicit format-evidence
+  gates, and qualify native read/write interoperability across classic,
+  automotive, and extended variants. Porsche PCM 3.1 HDD reproduction also requires
+  metadata fidelity and exact disk composition, including QNX4 where present.
+  The [work breakdown](docs/todo-qnx6.md) owns experiments and implementation;
+  [research evidence](docs/qnx6-research.md) owns source provenance.
+
 ## Bugs by subsystem
 
 * [Low] **Monotonic-clock failures** (`cmd/fsimg/paths.c`,
@@ -36,7 +45,7 @@
 ## Planned features
 
 * [Medium] **Additional inputs and formats** (`lib/source/`, `lib/formats/`):
-  design manifest import, bounded partition selection, and independent NTFS,
-  QNX4, and QNX6 reader profiles as concrete needs arise. Follow the
+  design manifest import, bounded partition selection, and independent NTFS and
+  QNX4 reader profiles as concrete needs arise. Follow the
   [extension sequence](docs/implementation-plan.md#extension-sequence); each
   format needs a bounded-resource design and an independent compatibility corpus.

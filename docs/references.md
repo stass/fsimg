@@ -89,3 +89,11 @@ is the normative on-disk reference. exfatprogs is an independent development
 oracle; its GPL implementation is not imported into fsimg. The writer uses
 the pinned Unicode simple-uppercase mapping for its complete BMP upcase table.
 Readers use the checksum-validated table embedded in each volume.
+
+## QNX6 references
+
+The [QNX6 evidence record](qnx6-research.md) identifies pinned Linux, NFI,
+ReFirmLabs, and Porsche PCM-Explorer references, vendor documentation, license
+boundaries, and independently checked fixture observations. These sources
+inform the [QNX6 design](../specs/design-qnx6.md); no third-party code or
+binary fixture is imported. Read-only parsers are not formatter oracles.

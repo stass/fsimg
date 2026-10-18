@@ -14,10 +14,11 @@ Implementation status and sequencing belong in the implementation plan and
 | [Sources and catalogs](design-sources.md) | Source identity, scanning/reopening, metadata encoding, deterministic catalog preparation |
 | [Security](design-security.md) | Threat model, extraction, sandboxing, publication, and adversarial tests |
 | [Extraction and workers](design-extraction-worker.md) | Safe host output, bounded descriptor traversal, and worker protocol/lifecycle |
-| [Filesystem formats](design-formats.md) | FAT and exFAT profiles and interoperability requirements |
+| [Filesystem formats](design-formats.md) | Format profiles and interoperability requirements |
 | [FAT reader](design-fat-reader.md) | FAT geometry, name profile, traversal, content indexing, and structural verification |
 | [FAT writer](design-fat-writer.md) | Deterministic aliases, bounded layout planning, geometry, metadata encoding, and emission |
 | [exFAT reader and writer](design-exfat.md) | Boot integrity, bitmap allocation, embedded upcase mapping, initialized data, bounded traversal, and emission |
+| [QNX6 reader and writer](design-qnx6.md) | Power-Safe layouts, snapshots, tree addressing, bounded creation/verification, automotive variants, and evidence gates |
 | [Command line](design-cli.md) | Commands, flags, defaults, output, and failure behavior |
 | [Style](style.md) | C conventions and readability review |
 | [Implementation plan](../docs/implementation-plan.md) | Ordered work packages, dependencies, validation, and completion gates |

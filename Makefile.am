@@ -143,10 +143,11 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
 	docs/references.md docs/qualification.md .github/workflows/check.yml \
+	docs/qnx6-research.md docs/todo-qnx6.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
-	specs/design-extraction-worker.md specs/design-exfat.md \
+	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in fuzz/fat.c fuzz/protocol.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \

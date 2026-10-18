@@ -15,9 +15,10 @@ regions of those files, memory supplied by an embedding application, and
 positional I/O callbacks. The default CLI handles regular files, not devices.
 It requires no privileges, kernel filesystem driver, or external formatter.
 
-The format contract covers FAT12, FAT16, FAT32, and exFAT with independent read
-and write support. The CLI provides `create`, `info`, `ls`, `cat`, `extract`,
-`verify`, and `formats`. Each format declares supported features; no command
+The format contract covers FAT12, FAT16, FAT32, exFAT, and the qualified QNX6
+Power-Safe profiles with independent read and write support. The CLI provides
+`create`, `info`, `ls`, `cat`, `extract`, `verify`, and `formats`.
+Each format declares supported features; no command
 claims support based only on recognizing a boot record.
 
 The supported host baseline is a 64-bit FreeBSD, Linux, or macOS environment
@@ -226,11 +227,26 @@ prepasses, current-file indexing, and full allocation verification for FAT.
 The [FAT writer design](design-fat-writer.md) defines independent paged layout
 records, deterministic alias reservations, geometry selection, and emission.
 The [exFAT design](design-exfat.md) defines independent bitmap allocation,
-embedded name mappings, entry sets, and initialized-data semantics. Static
-format operations own their private reader state and writer plan extension.
+embedded name mappings, entry sets, and initialized-data semantics.
+The [QNX6 design](design-qnx6.md) defines snapshot selection, uniform block
+trees, snapshot-aware allocation verification, and independent new-image
+construction. Its on-disk snapshots do not introduce a mutable filesystem or
+change the output coordinator's publication ownership. Native write-after-create
+qualification gates writer support because read-only compatibility cannot
+establish safe free-space and system-metadata state.
+Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
 contracts common without making FAT geometry a requirement of other formats.
+
+Automotive HDD compatibility is a composition-level claim. Individual format
+drivers consume bounded volumes; they neither infer a filesystem from an OEM
+name nor own partition discovery, boot code, or other volumes. A replacement
+Porsche HDD requires a qualified disk layout and every constituent filesystem,
+including QNX4 where present. Required POSIX metadata and link fidelity must
+have explicit common representations before being advertised; they do not
+weaken the safe extractor's file/directory-only contract. This keeps device
+compatibility evidence separate from a successful filesystem parse.
 
 Plan initialized payload counts describe format-initialized file extents,
 excluding metadata. They are distinct from logical length, allocated capacity,
@@ -387,6 +403,7 @@ lib/extract/         safe host extraction
 lib/output/          shared staging, finalization, publication
 lib/formats/fat/     FAT codecs, reader, writer
 lib/formats/exfat/   exFAT codecs, reader, writer
+lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests

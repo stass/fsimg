@@ -371,8 +371,26 @@ and operates without third-party runtime libraries.
 
 ## Extension sequence
 
-Extensions receive their own designs before code: manifest import and bounded
-partition selection; reader-only NTFS, QNX4, and QNX6 profiles with independent
+QNX6 follows the [reader/writer design](../specs/design-qnx6.md) and
+[qualification work](todo-qnx6.md), with Porsche PCM 3.1 HDD use driving the corpus:
+
+1. Identify target PCM and per-volume variants; acquire authorized images and
+   native formatter/checker access. Resolve marker, inode-state, checksum,
+   identity, and system-reservation encodings through controlled experiments.
+2. Implement shared disk codecs and bounded trees, then independent reader,
+   namespace validation, and snapshot-aware full verification. Qualify classic
+   and automotive variants separately; no unvalidated sparse zero-fill.
+3. Implement deterministic new-image planning and emission after the exact
+   writer recipe is established. Validate with QNX checks plus native
+   create/modify/sync/remount tests and Linux reads. Run ASan/UBSan and the
+   required internal and OpenCode reviews at each implementation stage.
+4. Add the metadata/link representation and disk-composition support required
+   for full automotive reproduction, including a separate QNX4 design where
+   the target HDD needs it. Extend MMI and modern Power-Safe features under
+   independent evidence and acceptance gates.
+
+Other extensions receive their own designs before code: manifest import and
+bounded partition selection; reader-only NTFS and QNX4 profiles with independent
 corpora; additional offline-writable formats; optional archive integration; and
 capability-gated sequential output. Their order follows concrete user needs.
 They cannot weaken the core budgets or introduce implicit image spooling.

@@ -8,8 +8,8 @@ verification scope. Registration is static. Shared helpers handle bounded I/O,
 endian conversion, UTF validation, resources, and source copying; a driver does
 not acquire host descriptors or allocate outside its context.
 
-The public names are `fat12`, `fat16`, `fat32`, and `exfat`. Detection identifies
-the actual format from validated structures. A forced name selects a decoder,
+The public names are `fat12`, `fat16`, `fat32`, `exfat`, and `qnx6`.
+Detection identifies the actual format from validated structures. A forced name selects a decoder,
 not permission to skip consistency checks. Report a recognized unsupported
 variant separately from an unrecognized image or a corrupt supported variant.
 
@@ -110,6 +110,21 @@ behavior, large allocation units, and wide directories within the format limit.
 The [scale acceptance cases](architecture.md#acceptance-contract) test gigantic
 logical volumes independently from large entry and fragment counts.
 
+## QNX6 Power-Safe
+
+The [QNX6 design](design-qnx6.md) defines classic, bootless, MMI, and extended
+profiles with independent reader and writer qualification. It supplies concrete
+disk layouts, snapshot and block-tree rules, bounded planning/verification,
+and explicit evidence gates for unknown encodings. Unknown compatibility
+markers are unsupported; a valid magic or Linux mount is insufficient.
+
+The writer constructs a new volume with complete snapshot and allocation
+metadata suitable for native QNX use. Native write-after-create testing gates
+the claim, independently of read-only interoperability. Source-informed
+research imports no GPL code. Porsche HDD compatibility also requires exact
+disk composition and any other filesystem present, particularly QNX4; it is
+not implied by a `qnx6` format capability.
+
 ## Verification and compatibility claims
 
 `info` describes recognized geometry and implemented capabilities. `verify`
@@ -122,6 +137,6 @@ be validated.
 A driver's read-only implementation does not need writer stubs. Adding a
 filesystem requires a design that accounts for geometry, feature negotiation,
 ownership, names, traversal termination, memory/scratch complexity, hostile
-inputs, and independent validation. NTFS and the distinct QNX4/QNX6 formats
-are reader-first extensions; no broad compatibility claim is made merely from
-parsing a boot record. Their concrete profiles belong in separate designs.
+inputs, and independent validation. NTFS and QNX4 require separate reader-first
+designs and qualification gates. QNX6 reading and writing follow their own
+design; no broad compatibility claim is made merely from parsing a boot record.
