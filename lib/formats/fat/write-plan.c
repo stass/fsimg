@@ -186,35 +186,47 @@ geometry_error(const fat_plan_t *plan, fat_geometry_result_t reason,
     fsimg_error_t *error)
 {
 	const fsimg_write_options_t *options = &plan->common.writer->options;
-	const char *explanation;
-	char message[256];
+	char cluster_context[48], message[256];
+
+	/* An explicit cluster size narrows the search. Its capacity failure does
+	 * not establish that the source exceeds every supported cluster size.
+	 */
+	cluster_context[0] = '\0';
+	if (options->allocation_unit_bytes != 0)
+		snprintf(cluster_context, sizeof(cluster_context), " with %u-byte clusters",
+		    options->allocation_unit_bytes);
 
 	switch (reason) {
-	case FAT_GEOMETRY_TOO_SMALL: explanation = "image is too small"; break;
-	case FAT_GEOMETRY_TOO_LARGE: explanation = "image is too large"; break;
-	case FAT_GEOMETRY_CAPACITY:
-		explanation = "file data, directories and free-space reserve exceed cluster capacity";
-		break;
-	case FAT_GEOMETRY_SPACE:
-		explanation = "image cannot fit file data, directories and free-space reserve";
-		break;
-	case FAT_GEOMETRY_FIELD_LIMIT: explanation = "layout exceeds on-disk size limits"; break;
-	default: explanation = "requested size and allocation settings conflict"; break;
-	}
-	/* Include only the requested settings, never a guessed minimum size or
-	 * a remedy that might fail a different candidate's constraint.
-	 */
-	if (reason == FAT_GEOMETRY_TOO_SMALL || reason == FAT_GEOMETRY_TOO_LARGE)
-		snprintf(message, sizeof(message), "image size %llu bytes is too %s for FAT%u with %u-byte sectors%s",
+	case FAT_GEOMETRY_TOO_SMALL:
+	case FAT_GEOMETRY_TOO_LARGE:
+		/* Automatic sizing derives a legal cluster count or rejects capacity
+		 * or field limits; only explicit sizes reach these range failures.
+		 */
+		snprintf(message, sizeof(message), "image size %llu bytes is too %s for FAT%u%s (%u-byte sectors)",
 		    (unsigned long long)options->volume_bytes,
 		    reason == FAT_GEOMETRY_TOO_SMALL ? "small" : "large", plan->variant,
-		    options->sector_bytes, options->allocation_unit_bytes == 0 ?
-		    " and supported cluster sizes" : " and the requested cluster size");
-	else
-		snprintf(message, sizeof(message), "cannot create FAT%u: %s (image size %llu bytes%s, free-space reserve %llu bytes)",
-		    plan->variant, explanation, (unsigned long long)options->volume_bytes,
-		    options->volume_bytes == 0 ? ", automatic" : "",
-		    (unsigned long long)options->min_free_bytes);
+		    cluster_context, options->sector_bytes);
+		break;
+	case FAT_GEOMETRY_CAPACITY:
+		snprintf(message, sizeof(message), "%s too large for FAT%u%s",
+		    options->min_free_bytes == 0 ? "source tree is" :
+		    "source tree and requested free space are", plan->variant, cluster_context);
+		break;
+	case FAT_GEOMETRY_SPACE:
+		snprintf(message, sizeof(message), "image size %llu bytes cannot fit the source tree%s as FAT%u%s",
+		    (unsigned long long)options->volume_bytes,
+		    options->min_free_bytes == 0 ? "" : " and requested free space",
+		    plan->variant, cluster_context);
+		break;
+	case FAT_GEOMETRY_FIELD_LIMIT:
+		snprintf(message, sizeof(message), "required image exceeds FAT%u size limits with %u-byte sectors",
+		    plan->variant, options->sector_bytes);
+		break;
+	default:
+		snprintf(message, sizeof(message), "cannot create FAT%u: requested size and allocation settings conflict",
+		    plan->variant);
+		break;
+	}
 	return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER, message));
 }
 

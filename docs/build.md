@@ -52,7 +52,11 @@ success. CLI presentation regressions can also be run with `make test-cli fsimg`
 (use `test/cli.py` for an in-tree build). They cover contextual help, exact stream
 destinations, quiet success, bounded loss examples, layout rejection reasons,
 terminal controls and final verification timing, alongside JSON and output
-failure checks. `check-security` runs the publication and sandbox harnesses directly;
+failure checks. Failed-creation regressions use a sparse 256 MiB source to
+exercise FAT12 capacity rejection without copying payloads or creating an image;
+they check plain errors, absence of trailing metadata notices, explicit cluster
+qualifications and preserved JSON error fields.
+`check-security` runs the publication and sandbox harnesses directly;
 a sandbox skip is printed explicitly. Automake records exit 77 as SKIP.
 The sandbox harness forks disposable single-threaded children, closes inherited
 handles, disables core dumps, installs the profile, and attempts real forbidden

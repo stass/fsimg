@@ -216,11 +216,14 @@ FAT layout failures identify the rejected constraint when all candidates fail
 for the same reason; otherwise they describe the conflicting requested settings
 without guessing a remedy or an uncomputed minimum image size.
 
-Optional metadata loss produces one final notice counting affected fields,
+Optional metadata loss on success produces one final notice counting affected fields,
 not files. Verbose examples name fields and are explicitly sampled; truncated
-path excerpts are labeled. Samples never establish exact totals. If an operation
-fails before a final total is available, observed samples permit only an
-unnumbered notice. Sandbox-unavailable/disabled warnings remain visible before
+path excerpts are labeled. Samples never establish exact totals. Failed commands
+report the primary error and required output/cleanup consequences without an
+additional metadata-loss notice. Verbose or JSON samples can precede failure.
+FAT sizing errors explain the limiting constraint; automatic-size sentinels and
+unrequested free-space reserves do not appear as zero-byte quantities.
+Sandbox-unavailable/disabled warnings remain visible before
 processing regardless of verbosity or JSON mode. Source profile limitations
 remain documented and appear in verbose creation/capability details.
 

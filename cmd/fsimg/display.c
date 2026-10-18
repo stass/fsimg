@@ -380,8 +380,6 @@ loss_notice(fsimg_cli_display_t *display)
 		append(display, "fsimg: warning: %llu metadata field%s could not be preserved exactly%s\n",
 		    (unsigned long long)losses, losses == 1 ? "" : "s",
 		    (display->options->request.flags & FSIMG_JOB_VERBOSE) == 0 ? "; use -v for examples" : "");
-	else if (display->failure != NULL && display->loss_examples != 0)
-		append(display, "fsimg: warning: some metadata could not be preserved exactly; final count unavailable\n");
 }
 
 static const char *
@@ -815,7 +813,6 @@ failure(fsimg_cli_display_t *display)
 		string_value(display, display->paths->retained_scratch);
 		append(display, "\n");
 	}
-	loss_notice(display);
 	if (display->syntax)
 		usage(display, false);
 }
@@ -917,7 +914,6 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		    (unsigned long long)fsimg_wire_get64(raw + 16));
 		break;
 	case FSIMG_FRAME_LOSS:
-		display->loss_examples++;
 		if (!options->json && (options->request.flags & FSIMG_JOB_VERBOSE) == 0)
 			break;
 		diagnostic = true;

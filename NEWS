@@ -7,6 +7,9 @@ examples. Diagnostics explain relevant paths, OS failures, layout constraints
 and retained/uncertain output without internal error tuples. Verification
 announces human success only after worker completion and finalization; JSON
 completion records and sandbox warning guarantees remain explicit.
+Failed commands omit trailing metadata-loss notices. FAT sizing errors identify
+oversized source trees without displaying automatic-size or unused-reserve
+sentinels as zero-byte requests.
 
 Resource contexts account for memory and owned descriptors, enforce session
 quotas, and report cancellation and structured errors. Bounded positional I/O

@@ -305,7 +305,7 @@ test_final_diagnostics(void)
 {
 	fsimg_cli_options_t options = { 0 };
 	fsimg_cli_paths_t paths = { 0 };
-	fsimg_worker_result_t result = { 0 };
+	fsimg_worker_result_t result = { .metadata_losses = 7 };
 	fsimg_cli_display_t display;
 	fsimg_worker_text_t text;
 	fsimg_error_t error;
@@ -352,6 +352,7 @@ test_final_diagnostics(void)
 
 	options.input = oversized;
 	options.request.kind = FSIMG_JOB_VERIFY;
+	result.metadata_losses = 0;
 	fsimg_cli_display_init(&display, &options, &result, &paths);
 	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
 	CHECK(strstr(display.buffer, "[path truncated]") != NULL);

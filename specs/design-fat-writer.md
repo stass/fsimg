@@ -56,7 +56,11 @@ Candidate rejection distinguishes a volume below or above the variant's cluster
 range, catalog/reserve capacity, insufficient data space and on-disk field
 limits. A failed search reports a specific cause only when every candidate
 agrees. Mixed rejection causes report conflicting requested settings. Diagnostics
-include requested image size and free-space reserve where relevant and never
+reference an explicit image size or a nonzero requested free-space reserve only
+where relevant. Automatic sizing is never presented as a zero-byte image.
+Without a reserve, a catalog exceeding cluster capacity is described as a
+source tree too large for the selected variant; an explicit cluster size
+qualifies that limit. Diagnostics never
 claim an uncomputed minimum size or a remedy not established by planning.
 
 ## Metadata and determinism

@@ -210,8 +210,10 @@ or on stderr during verbose creation.
 Verify reports the checked scope only after successful worker exit and
 finalization.
 .Pp
-Optional metadata loss produces one notice counting affected fields, not files.
+On success, optional metadata loss produces one notice counting affected fields,
+not files.
 Verbose examples are sampled and truncated path excerpts are labeled.
+Failed commands do not append metadata-loss notices to their error reports.
 Sandbox warnings remain visible before processing.
 Errors explain the failure and any relevant OS error without numeric errno
 fields.

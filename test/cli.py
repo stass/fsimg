@@ -142,13 +142,52 @@ def test_human_commands(executable, root):
     assert b"errno" not in geometry.stderr and not (root / "small.img").exists()
     for settings, explanation in [
         (["-t", "fat12", "-s", "1G"], b"too large for FAT12"),
-        (["-t", "fat12", "-s", "1M", "-f", "1M"], b"cannot fit file data, directories and free-space reserve"),
-        (["-t", "fat12", "-f", "1G"], b"exceed cluster capacity"),
-        (["-t", "fat32", "-O", "cluster=32K", "-f", "4T"], b"layout exceeds on-disk size limits"),
+        (["-t", "fat12", "-s", "1M", "-f", "1M"], b"cannot fit the source tree and requested free space"),
+        (["-t", "fat12", "-f", "1G"], b"source tree and requested free space are too large for FAT12"),
+        (["-t", "fat32", "-O", "cluster=32K", "-f", "4T"], b"required image exceeds FAT32 size limits"),
         (["-t", "fat32", "-f", "4T"], b"requested size and allocation settings conflict"),
     ]:
         rejected = invoke(executable, root, ["create", "-n", "-R", *settings, "source"], expected=1)
         assert explanation in rejected.stderr, (settings, rejected.stderr)
+        assert b"image size 0" not in rejected.stderr
+        assert b"free-space reserve 0" not in rejected.stderr
+
+
+def test_failed_creation_output(executable, root):
+    source = root / "oversized-source"
+    source.mkdir()
+    # The sparse payload exceeds the FAT12 writer's capacity. Planning must
+    # reject it before any image creation or payload copying. Reproducible
+    # timestamp conversion emits loss examples before geometry rejection.
+    with (source / "large.bin").open("wb") as payload:
+        payload.truncate(256 * 1024 * 1024)
+    message = b"fsimg: source tree is too large for FAT12\n"
+    arguments = ["create", "-R", "-t", "fat12", "-o", "oversized.img"]
+    rejected = invoke(executable, root, [*arguments, "oversized-source"], expected=1)
+    assert rejected.stdout == b"" and rejected.stderr.endswith(message)
+    lines = rejected.stderr.splitlines(keepends=True)
+    assert lines[-1] == message
+    assert all(line.startswith(b"fsimg: warning: OS sandbox") for line in lines[:-1])
+    assert b"metadata" not in rejected.stderr and b"0 bytes" not in rejected.stderr
+    assert not (root / "oversized.img").exists()
+    assert not list(root.glob(".fsimg-*"))
+
+    verbose = invoke(executable, root, [*arguments, "-v", "oversized-source"], expected=1)
+    assert b"metadata example:" in verbose.stderr and verbose.stderr.endswith(message)
+    assert b"final count unavailable" not in verbose.stderr
+
+    decoded = failed(invoke(executable, root, [*arguments, "-j", "oversized-source"], expected=1))
+    assert decoded["code"] == -7 and decoded["output_state"] == "absent"
+    assert decoded["message"] == "source tree is too large for FAT12"
+    assert decoded["resource"] == "none" and decoded["limit"] == "0"
+    constrained = invoke(executable, root, [
+        *arguments, "-O", "cluster=512", "oversized-source",
+    ], expected=1)
+    assert b"source tree is too large for FAT12 with 512-byte clusters" in constrained.stderr
+    small = invoke(executable, root, [
+        "create", "-n", "-R", "-t", "fat32", "-s", "8M", "-O", "cluster=512", "oversized-source",
+    ], expected=1)
+    assert b"too small for FAT32 with 512-byte clusters" in small.stderr
 
 
 def test_human_loss_bounds(executable, root):
@@ -362,6 +401,7 @@ def main():
         (root / "source/nested/caf\u00e9.txt").write_bytes(payload)
         test_human_help(executable, root)
         test_human_commands(executable, root)
+        test_failed_creation_output(executable, root)
         test_human_loss_bounds(executable, root)
         test_formats(executable, root)
         for profile in ["fat12", "fat16", "fat32", "exfat"]:
