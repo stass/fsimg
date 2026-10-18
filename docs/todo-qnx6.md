@@ -7,7 +7,10 @@ classic, MMI, and extended Power-Safe remain separate profiles.
 
 * [High] **Porsche corpus and disk composition** (`lib/formats/`, volume
   selection): identify the target PCM 3.1 hardware/software and inspect authorized
-  HDD samples. Record exact partition bounds, sector size, actual filesystem
+  HDD samples. Reconcile the measured partition table and mount mapping with
+  the three-partition PCM-Explorer sample and PCM-Forge's script-derived list
+  of five possible devices; do not assume either count. Record exact partition
+  bounds, sector size, actual filesystem
   signatures, boot/locator bytes, identity, metadata, and links. Confirm whether
   live files contain unused references within their logical lengths; distinguish
   native sparse extents from a reader's missing-block zero-fill. Add synthetic
@@ -63,3 +66,10 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   read-only oracle, licensed redistributable fixtures or local generation,
   and a recorded target PCM compatibility run. Keep ordinary tests
   unprivileged and all third-party utilities outside runtime dependencies.
+  Investigate the [PCM-Forge tool inventory](qnx6-research.md#pcm-forge-native-evidence-and-conflicting-assumptions):
+  confirm `mkqnx6fs` and `chkqnx6fs` under `/mnt/data/tools/` on the matching
+  target, record their identities/options and the filesystem module identity,
+  and generate controlled regular-file fixtures in isolated disposable storage.
+  A filesystem-only evidence collector must query these tools explicitly;
+  PCM-Forge's general diagnostic tool list omits them. Acquire no unrelated
+  personal persistence data and perform no formatting on production partitions.

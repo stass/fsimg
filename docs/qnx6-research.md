@@ -49,6 +49,10 @@ v6.12 release; the other implementations are pinned to the revisions below.
 | P1 | [PCM-Explorer format notes](https://github.com/dspl1236/PCM-Explorer/blob/a38709a0db90b9a3e70f4542b82553e93ace0f42/docs/QNX6-NOTES.md) | Author-reported PCM 3.1 observations, mixed QNX6/QNX4 HDD, classic block origin and inode census |
 | P2 | [PCM-Explorer reader](https://github.com/dspl1236/PCM-Explorer/blob/a38709a0db90b9a3e70f4542b82553e93ace0f42/pcmexplorer/core.py) | Automotive comparison; permissive missing-block handling is not a sparse-format specification |
 | C1 | [CRC RevEng catalogue](https://reveng.sourceforge.io/crc-catalogue/17plus.htm#crc.cat.crc-32-mpeg-2) | MPEG-2 uses an all-ones initial register, distinguishing its check value from QNX6's zero-initialized CRC |
+| G1 | [PCM-Forge firmware inventory](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/research/firmware/PCM31_ISO_ANALYSIS.md) | Reported native formatter/checker availability, firmware build identity, and a script's partition-device names |
+| G2 | [PCM-Forge system observations](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/research/PCM31_SYSTEM_INFO.md) | Author-reported checker on a PCM 3.1 HDD; not a measurement of the target 911 |
+| G3 | [PCM-Forge system collector](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/modules/sysinfo/scripts/sysinfo_dump.sh) | Concrete locations for firmware, kernel, process, mount, and tool inventory; script inspection only |
+| G4 | [PCM-Forge HDD reader](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/tools/hdd_tool.py) | Heuristic salvage implementation; incorrect ordinary block origin and incomplete integrity checks exclude it as a format oracle |
 
 NFI's repository declares [Apache-2.0](https://github.com/NetherlandsForensicInstitute/qnxmount/blob/11c8a7f9ee9b945d584263743f6ea8524e8776d2/LICENSE).
 ReFirmLabs declares [MIT](https://github.com/ReFirmLabs/qnx6-extractor/blob/075434f8c07a3bc85f09394970373fe5e04f17a0/LICENSE),
@@ -57,6 +61,12 @@ with a Mathew Evans author attribution in the parser. PCM-Explorer declares
 Their declarations are recorded as provenance, not as a claim that their
 format observations are independent of Linux or that their implementations
 satisfy fsimg's safety requirements.
+
+PCM-Forge declares [MIT](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/LICENSE).
+The inspected material is documentation and source code kept in temporary
+research storage. No PCM tool is executed, no vehicle is contacted, and no
+vendor executable is imported. The project license is not a redistribution
+license for the proprietary utilities its documentation inventories.
 
 ## Reference disagreements and consequences
 
@@ -168,3 +178,75 @@ write-after-create evidence. Porsche reproduction therefore requires a
 device-specific compatibility manifest and both filesystem and disk-level
 qualification. The QNX6 specification alone cannot promise a bootable,
 complete replacement HDD.
+
+## PCM-Forge: native evidence and conflicting assumptions
+
+The pinned PCM-Forge material adds a concrete route to native experiments,
+but supplies neither a QNX6 formatter implementation nor the unknown writer
+field encodings in its inspected filesystem sources.
+
+### Native tools and firmware identity
+
+G1 reports `mkqnx6fs`, `chkqnx6fs`, `fdisk`, `dinit`, `df`, and `du` in the
+PCM's `/mnt/data/tools/` inventory. G2 separately reports a 44 KB
+`chkqnx6fs` there on a Cayenne PCM 3.1. This makes target-native formatting
+and checking a specific lead instead of assuming that an unrelated QNX SDK
+must supply the oracle. Availability and command semantics still require
+confirmation on the actual 911 or a matching isolated target.
+
+G1 identifies a QNX 6.3.2 PSP3 firmware build. That operating-system label does
+not specify the separate filesystem module's on-disk profile. Capture the
+formatter, checker, and filesystem-module identities together with hardware
+and firmware identity; generic QNX 6.5 compatibility is not a substitute.
+
+G3 identifies useful evidence locations: firmware version files beneath
+`/mnt/ifs1/HBproject` or `/HBproject`, `pidin` kernel/process information,
+`mount` output, `df`, and device/tool listings. Its tool-name loop includes
+`dinit` but omits `mkqnx6fs` and `chkqnx6fs`. The full script also lists
+`/mnt/data/tools/`, which can establish their file presence when that listing
+succeeds. Confirm executable identity and options explicitly in a
+filesystem-focused collector.
+
+The script also exports unrelated personal persistence data. fsimg
+qualification collects version, geometry, metadata, and synthetic-fixture
+evidence without that broader export.
+
+After matching-tool availability is established, controlled experiments on
+disposable regular-file images can vary geometry, inode capacity, groups,
+names, links, and source data one factor at a time. Native check results and
+post-sync, unmounted bytes then address the marker, state, reservation, and
+checksum gates. Creation/mutation experiments use an isolated target and
+disposable storage, never the working HDD's partitions. No native formatting
+or checker result is supplied by this source inspection itself.
+
+### Partition inventory needs direct measurement
+
+G1 derives five device names, `hd0t77` through `hd0t81`, from `parkHDD.sh`.
+P1 describes three partitions on its measured drive. A script can enumerate
+possible devices without proving that all exist. Neither observation fixes
+the target disk's partition count, sizes, or filesystem kinds. Record its
+actual partition table and mounted-device mapping; do not turn either count
+into the Porsche image-layout recipe.
+
+### The HDD reader does not establish a proprietary layout
+
+G4's `resolve_inode` searches candidate inode regions instead of traversing
+the inode-table tree. Its comments attribute the difficulty to scrambled
+inode numbers and a divergent Harman format. P1 explicitly rejects that
+interpretation and explains the ordinary tree-based mapping. The code itself
+provides a concrete reason for disagreement: `read_file` translates block
+references from the partition origin, omitting the classic 12288-byte data
+origin, and excludes valid block zero.
+
+G4 also reads only 256 header bytes without validating the 512-byte CRC
+domain, supports direct file blocks only, and reconstructs directory contents
+by scanning rather than selecting one validated snapshot. These behaviors
+make it a salvage aid, not evidence for changing fsimg's established layout
+or a validator for emitted images. The spec retains uniform tree traversal,
+correct slice-relative block translation, and snapshot-bound enumeration.
+
+The unresolved writer gates remain: exact compatibility flags and modes,
+unused/deleted inode state, link/extension fields, system reservation and
+group rules, identity encoding, and non-ASCII long-name checksums. Native
+tools could resolve them through measured output; inventory names and a
+heuristic reader do not resolve them directly.

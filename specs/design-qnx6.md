@@ -58,6 +58,15 @@ This is evidence about that drive, not every Porsche 911 or PCM generation.
 Use validated filesystem structures to identify each bounded volume. Do not
 select Linux's MMI layout from a Porsche/Harman product name. [P1]
 
+Qualification records the actual partition table, mounted-device mapping,
+firmware build, and formatter/checker/filesystem-module identities. Script
+device lists do not define geometry. PCM-Forge's inventory of native
+`mkqnx6fs` and `chkqnx6fs` utilities supplies a lead for obtaining matching
+tools; presence and compatibility are checked on the target. A QNX 6.3.2
+operating-system label alone does not establish the filesystem profile.
+The [PCM-Forge evidence assessment](../docs/qnx6-research.md#pcm-forge-native-evidence-and-conflicting-assumptions)
+distinguishes these leads from verified native results. [G1]
+
 A complete replacement HDD requires more than creating one valid QNX6 volume:
 the disk composition layer preserves or reconstructs validated partition
 bounds, sector geometry, required boot/locator data, and any other filesystem
@@ -742,6 +751,15 @@ native mounts and hostile-kernel tests run only in disposable isolated test
 infrastructure. External tools are development dependencies, never runtime
 requirements. [Q7]
 
+For PCM 3.1, use matching target-native formatter/checker versions when
+available and confirm their options before generating fixtures. Reported
+utility names are not proof of executable availability on the target. Native
+experiments vary one format property at a time on disposable regular-file
+images in isolated infrastructure, record complete commands and tool identity,
+and capture image bytes after sync and unmount. The production HDD is an
+input reference, not experiment storage. This evidence supplements ordinary
+unprivileged synthetic tests. [G1]
+
 Fuzz bounded probes, snapshot choice, tree mapping, inode decoding, directory
 slots, long names, and ownership verification. Scale tests separately grow
 logical volume size, inode capacity, entries in one directory, fragmentation,
@@ -774,6 +792,7 @@ Links and provenance details for these keys are in the
 | R1 | Pinned ReFirmLabs QNX6 extractor |
 | F1 | Pinned NFI synthetic test-image observations |
 | P1 | Pinned PCM-Explorer Porsche PCM 3.1 format investigation |
+| G1 | Pinned PCM-Forge native tool and firmware inventory |
 
 [Q1]: https://www.qnx.com/developers/docs/6.5.0SP1.update/com.qnx.doc.neutrino_utilities/m/mkqnx6fs.html
 [Q2]: https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/m/mkqnx6fsimg.html
@@ -794,3 +813,4 @@ Links and provenance details for these keys are in the
 [R1]: https://github.com/ReFirmLabs/qnx6-extractor/blob/075434f8c07a3bc85f09394970373fe5e04f17a0/qnx6_extractor/main.py
 [F1]: ../docs/qnx6-research.md#fixture-observations
 [P1]: https://github.com/dspl1236/PCM-Explorer/blob/a38709a0db90b9a3e70f4542b82553e93ace0f42/docs/QNX6-NOTES.md
+[G1]: https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/research/firmware/PCM31_ISO_ANALYSIS.md
