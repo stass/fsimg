@@ -11,6 +11,13 @@
   The [work breakdown](docs/todo-qnx6.md) owns experiments and implementation;
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
+* [Medium] **Architecture consolidation** (`lib/read/`, `lib/write/`,
+  `lib/formats/`): move traversal, namespace validation, content delivery,
+  emission, and format identity to the single owners in the
+  [consolidation plan](docs/implementation-plan.md#architecture-consolidation).
+  The drivers still implement their own traversal engines, content loops, and
+  payload copy loops, and the common registry branches on the exFAT variant.
+
 ## Bugs by subsystem
 
 * [Low] **Monotonic-clock failures** (`cmd/fsimg/paths.c`,
@@ -39,6 +46,22 @@
   first-byte `0x05` escape for a CP437 label beginning with `0xe5`, separately
   from the BPB label field. Add a failing root/BPB label fixture before
   changing the decoder's interpretation of either field.
+
+* [Medium] **Scratch descriptors grow with directory depth** (`lib/meta/store.c`,
+  `lib/formats/fat/directory.c`, `lib/formats/exfat/directory.c`): each spilled
+  ancestor directory stream holds its own scratch descriptor. A 24-level tree
+  with one cache page peaks at 30 FAT reader descriptors and fails at
+  `max_open_files=16`. Extrapolating, depth near 120 can exhaust the default
+  128 descriptors although `max_depth` is 256. The
+  [prepared-directory design](specs/design-directories.md#traversal) requires
+  shared scratch for retained ancestors; resolve it with the common walker.
+
+* [Low] **exFAT extent ownership by convention** (`lib/formats/exfat/allocation.c`,
+  `lib/formats/exfat/directory.c`, `lib/formats/exfat/verify.c`): every
+  `exfat_map_build` call site must remember a matching `exfat_map_own`, and
+  the record store is visible outside `allocation.c`. Fold both into the
+  shared [extent index](specs/design-content.md#extent-index): private
+  records, with ownership claimed when the index is built.
 
 ## Security residuals
 

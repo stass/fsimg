@@ -84,22 +84,26 @@ logical length is zero. Its entire chain is validated and owned; extra clusters
 never become readable payload. A directory stream describes its entire
 allocation, so its length equals that allocation. The root has no stream length;
 its chain is bounded by heap geometry and session quotas rather than imposing
-the non-root stream field's 256 MiB limit. Transfer buffers remain at most 64 KiB regardless of cluster
-size. Sequential access advances a cursor; nonsequential access uses a charged,
-paged current-file extent index rather than restarting at the first cluster
-for each read. The index is released on entry advancement.
+the non-root stream field's 256 MiB limit. Cluster size never dictates a
+transfer-buffer size.
 
-Valid-data length never exceeds logical length. Reads and range iteration split
-at that boundary. The entire logical tail is ZERO and never reads backing
-cluster bytes. Allocated clusters beyond valid data remain owned and are
-structurally checked. Payload verification visits only logical file bytes and
-never treats uninitialized physical storage as user data.
+Common [logical content](design-content.md) delivery owns reads and ranges.
+The exFAT initialized length is the valid-data length, which never exceeds the
+logical length. The logical tail is ZERO and its backing clusters are never read.
+The driver validates each regular file's allocation when the entry is exposed,
+so listing reports corrupt file allocation. That pass builds the shared extent
+index used to resolve offsets. Allocated clusters beyond valid
+data remain owned and are structurally checked. Payload verification visits
+only logical file bytes and never treats uninitialized physical storage as user
+data.
 
-Each directory has a bounded prepass. It validates complete entry-set checksums
+Directories follow the [prepared-directory contract](design-directories.md).
+Each entry's namespace key is its name mapped through the validated upcase
+table; record payloads carry the decoded stream fields as the private locator.
+Preparation validates complete entry-set checksums
 before interpreting secondary fields, stream/name entry order, name-unit counts,
 hash, strict UTF-16, legal components, attributes, timestamps, and allocation
-length. Entries retain on-disk order in scratch; uppercase name keys sort
-externally to reject sibling ambiguity before exposing children. Unknown benign
+length. Unknown benign
 entries are skipped only according to their template, with associated allocation
 validated and retained for ownership checks. Unknown critical sets are unsupported.
 Deleted entries and the end marker cannot interrupt a live entry set. Directory
@@ -150,8 +154,9 @@ explicit initialization rules. Plan initialized_bytes counts the format-initiali
 uses logical file lengths, while an exFAT zero source has valid-data length zero
 and contributes zero initialized bytes. Other source kinds can have initialized
 logical zero ranges. This count is separate from actual I/O transfer.
-Source preflight, single-use emission, stable
-copying, and final publication remain common writer contracts.
+Pre-mutation checks, initialization, and payload copying follow the common
+[emission contract](design-emission.md); the output coordinator owns
+publication.
 
 ## Validation and scale
 

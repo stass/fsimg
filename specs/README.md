@@ -10,8 +10,11 @@ Implementation status and sequencing belong in the implementation plan and
 | [Principles](principles.md) | Concise rules for choosing between designs |
 | [Architecture](architecture.md) | Product scope, subsystem boundaries, shared contracts, resource budgets, and acceptance criteria |
 | [C API](design-api.md) | Types, operations, ownership, state transitions, and errors |
-| [Storage and algorithms](design-storage.md) | Bounded I/O, metadata scratch storage, reading, planning, and emission |
+| [Storage and algorithms](design-storage.md) | Bounded I/O, metadata scratch storage, planning, and complexity bounds for reading, verification, and emission |
 | [Sources and catalogs](design-sources.md) | Source identity, scanning/reopening, metadata encoding, deterministic catalog preparation |
+| [Prepared directories](design-directories.md) | Directory preparation, namespace keys, common traversal and selection |
+| [Logical content](design-content.md) | Logical, initialized and mapped content; common delivery; optional extent index |
+| [Emission](design-emission.md) | Emission order, sink initialization, emission object, complete source copies |
 | [Security](design-security.md) | Threat model, extraction, sandboxing, publication, and adversarial tests |
 | [Extraction and workers](design-extraction-worker.md) | Safe host output, bounded descriptor traversal, and worker protocol/lifecycle |
 | [Filesystem formats](design-formats.md) | Format profiles and interoperability requirements |

@@ -86,7 +86,10 @@ catalog-owned source fields, and copies the scalar reference before reusing the
 source-record buffer for host reopening. A second open while active fails without
 disturbing that source. The file is validated before and after bounded reads,
 and at completion, including empty files. Failure, completion, and destruction
-release it. No descriptor or heap object is retained per file.
+release it. No descriptor or heap object is retained per file. During emission
+the alias preflight and the [source copy operation](design-emission.md#source-copy)
+are the only callers of source access; format drivers never open, read, or
+finish a source.
 Ordinary replacements, size changes, and observed change-metadata differences
 return `FSIMG_ESOURCE_CHANGED`. These checks are not an atomic snapshot against
 a hostile concurrent writer; callers requiring one provide immutable sources

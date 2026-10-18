@@ -322,7 +322,7 @@ for unknown totals. Querying it does not traverse directories or certify the
 whole volume; full verification has its own report.
 
 `next()` validates a directory's effective lookup namespace through the bounded
-prepass specified in [storage](design-storage.md#reading-and-traversal) before
+preparation specified in [prepared directories](design-directories.md) before
 exposing its children. Duplicate/case-equivalent names and FAT alias collisions
 fail rather than selecting an arbitrary entry. It visits entries depth-first
 in on-disk directory order and returns a borrowed snapshot

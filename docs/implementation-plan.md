@@ -369,6 +369,37 @@ has reproducible evidence, no unresolved Critical/High defect, complete user/API
 documentation, a reviewed license manifest, and a release archive that builds
 and operates without third-party runtime libraries.
 
+## Architecture consolidation
+
+The [architecture analysis](architecture-analysis.md) motivates moving shared
+reader and writer mechanisms to single owners. The target contracts are in
+[prepared directories](../specs/design-directories.md),
+[logical content](../specs/design-content.md),
+[emission](../specs/design-emission.md), and the
+[descriptor and probe contract](../specs/design-formats.md#format-descriptors-and-profiles).
+The public API stays unchanged. Each stage removes driver obligations instead of
+wrapping them, and it is accepted only if the comparison baseline shows
+identical image bytes and traversal results and resource counters within
+tolerance (see [build.md](build.md)).
+
+| Stage | Work | Depends on |
+| --- | --- | --- |
+| 1 | Contracts in the specifications; comparison baseline in `make check` | - |
+| 2 | Common emission: initialization after pre-mutation checks, emission object, one source copy; delete both driver copy loops | 1 |
+| 3 | Self-contained descriptors: capability records, private driver state, bounded probe contract; no format branches in common code | 1 |
+| 4 | Shared optional extent index; convert FAT and exFAT, keeping their discovery and validation | 1 |
+| 5 | Prepared directories, common namespace validation, one walker and selector; delete both driver traversal engines | 1 |
+| 6 | Common logical content delivery over driver resolution | 4, 5 |
+| - | Scoped ownership-interval utility for the FAT/exFAT verifiers | 1 |
+
+Stage 5 is prototyped first against both drivers. It is rejected if it only
+adds a layer around the retained walkers. Code that a stage rewrites or moves
+leaves it readable: any complicated passage without comments gains comments
+stating its purpose, invariants, and failure paths, and the stage review checks
+for this. Every stage follows the review and
+validation gates above, including the external OpenCode review, and ends with
+one coherent commit.
+
 ## Extension sequence
 
 QNX6 follows the [reader/writer design](../specs/design-qnx6.md) and

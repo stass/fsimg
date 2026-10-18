@@ -81,21 +81,11 @@ explicit labels are uppercase ASCII FAT labels of at most eleven bytes.
 ## Emission and publication
 
 Planning is single-use and repeatable plan queries return the same borrowed
-object. Emission is single-use even after failure. Before any sink mutation,
-the common writer checks context, write/resize/durability capabilities, exact
-fixed-sink size, and known backing identity against every host-source record.
-The identity comparison includes slices and alternate hardlinks. Opaque
-providers and callback sinks require caller-guaranteed disjoint storage.
-
-The emitter defines all image bytes, streams FAT entries from the contiguous
-allocation records, and encodes directory records directly at planned offsets.
-The I/O adapter for the coordinator's exclusively created empty file knows its
-initial contents are zero, including subsequent extension. That fact is cleared
-before its first write; raw/reused sinks never acquire it. Initial zeroing can
-therefore preserve sparse free space without guessing from filenames or sizes.
-Payloads are copied in bounded buffers to their final allocations, with source
-validation before and after every file, including empty and zero files. Scratch
-never contains payload bytes. Failures leave raw sinks explicitly incomplete.
+object. The common [emission contract](design-emission.md) owns pre-mutation
+checks, sink initialization, payload copying, and failure marking. The FAT
+emitter writes the boot sectors, streams FAT entries from the contiguous
+allocation records, encodes directory records directly at planned offsets, and
+requests one payload copy per file into its planned cluster range.
 
 `write_at` uses the common output coordinator to create a private staging
 directory and one destination image beneath the trusted parent. The coordinator

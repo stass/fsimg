@@ -2,16 +2,46 @@
 
 ## Format descriptors and profiles
 
-A format descriptor names its on-disk family, probe, independent reader/writer
-operations, geometry constraints, supported entry/metadata features, and
-verification scope. Registration is static. Shared helpers handle bounded I/O,
-endian conversion, UTF validation, resources, and source copying; a driver does
-not acquire host descriptors or allocate outside its context.
+A format descriptor is the only place that holds a format's identity:
 
-The public names are `fat12`, `fat16`, `fat32`, `exfat`, and `qnx6`.
-Detection identifies the actual format from validated structures. A forced name selects a decoder,
-not permission to skip consistency checks. Report a recognized unsupported
-variant separately from an unrecognized image or a corrupt supported variant.
+* It names its public format or formats, its probe, independently optional
+  reader and writer operations, and one capability record per public name:
+  profile, entry kinds, metadata fields, geometry masks, and format and
+  supported limits.
+* Capability reporting copies those records. Common lifecycle and reporting
+  code never branches on a format name or variant.
+* A reader's driver state is one private pointer that the descriptor's
+  operations construct and destroy. Common structures name no concrete driver
+  type.
+* Registration is a static list. Adding a driver adds a descriptor and nothing
+  in common code. This is not a plugin ABI.
+
+Shared helpers handle bounded I/O, endian conversion, UTF validation,
+resources, and [emission](design-emission.md); a driver does not acquire host
+descriptors or allocate outside its context.
+
+The public names are `fat12`, `fat16`, `fat32`, `exfat`, and `qnx6`. FAT12,
+FAT16, and FAT32 share one descriptor and driver; opening selects the variant
+from the validated cluster count. Detection follows one bounded probe contract:
+
+* A probe reads at most a descriptor-declared prefix through the reader's
+  session. It never opens the volume or allocates driver state.
+* A probe first tests its identity signature: fixed bytes that no other
+  registered format can legitimately carry at those offsets. exFAT's is its
+  jump and `EXFAT` name with a zero legacy BPB. FAT's is the boot signature, a
+  legal BPB, and not the exFAT signature. Only after that signature matches
+  can the probe claim the image, as a match, recognized but unsupported, or
+  corrupt. Without the signature it returns no claim.
+* Automatic detection runs every probe. An I/O error or cancellation propagates
+  immediately. Exactly one claim decides: a match opens that driver, while an
+  unsupported or corrupt claim is reported as such. Several claims are
+  ambiguous and require a forced format. No claim is an unrecognized image,
+  `FSIMG_EFORMAT`.
+* A forced format runs only that descriptor's open, with full validation.
+  Forcing selects a decoder; it never skips checks or falls back to another
+  decoder after a failure.
+* Recognition establishes neither supported reading, nor writing, nor complete
+  validation. Those depend on the opened driver's checks and capabilities.
 
 The default writer profile emphasizes interoperability: a 512-byte sector
 default, documented legal alternative sector sizes, conservative FAT allocation

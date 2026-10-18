@@ -18,8 +18,9 @@ below the variant's bad-cluster marker are reserved. Geometry excludes the
 bad marker and higher values from allocatable cluster identifiers. The
 supported profile accepts 512/1024/2048/4096-byte sectors, one or two FATs,
 and allocation units through 512 KiB. FAT32 revision zero is supported.
-An explicit format must match the validated variant. exFAT is recognized as
-unsupported. Opening does not enumerate directories or read file payloads.
+An explicit format must match the validated variant. The FAT probe does not
+match an exFAT boot record, and a forced FAT name on one fails BPB
+validation. Opening does not enumerate directories or read file payloads.
 
 One bounded table window serves FAT entry decoding, including FAT12 entries
 crossing a window boundary. Mirrored tables must agree for every decoded entry;
@@ -56,15 +57,16 @@ timezone. Zero dates denote absent metadata. Nonzero dates/times must be valid,
 including leap days. Creation has 10 ms representation, modification 2 seconds,
 and access one day. All are wall-clock values with unknown UTC offset.
 
-## Directory prepass and traversal
+## Directory preparation
 
-A directory is decoded once into an ordered spillable stream. A second stream
-contains comparison keys and entry ordinals, including aliases. External sorting
-rejects any key owned by distinct entries before children become visible.
-Entry records store the original 32-byte short record and validated UTF-8 name;
-they never serialize native structs or pointers. Entries are charged when the
-prepass admits them. Iteration replays this stream in on-disk order, using a
-bounded explicit ancestor stack and one charged path buffer.
+FAT directories follow the [prepared-directory contract](design-directories.md);
+the common walker owns traversal, paths, limits, and selection. The driver
+decodes long-name sequences and short entries. Each entry record's payload is
+the original 32-byte short entry, and its displayed name is the validated long
+name or decoded alias. Every entry contributes two namespace keys, its long-name
+key and its alias key, under the case-equivalence rules above. Equal keys from
+different entries, such as a long name equal to another entry's alias, make the
+directory ambiguous.
 
 Directory chains are fully walked even after an end marker so allocated tails
 cannot hide cycles or shared directory clusters. A paged exact bitset claims
@@ -77,18 +79,19 @@ Directory byte length is limited to 2 MiB; depth and path limits are independent
 
 ## Current-file content
 
-Content access belongs to the current iterator entry. A forward cursor retains
-the allocation-chain position across calls, bounds steps by geometry and the
-required file allocation, and uses a constant-space cycle detector. Adjacent
-clusters form one extent and are read in bounded batches. The final required
-cluster must end its chain; neither missing nor excess allocation is accepted.
-Empty files require cluster zero.
+Common [logical content](design-content.md) delivery owns reads and ranges;
+the FAT driver resolves offsets. Its initialized length equals the logical
+length, so FAT content ranges are DATA. A forward cursor retains the chain
+position across resolutions, bounds steps by geometry and the required file
+allocation, and uses a constant-space cycle detector. Adjacent clusters form one
+extent. The final required cluster must end its chain; neither missing nor
+excess allocation is accepted. Empty files require cluster zero. Allocation is
+validated as content resolution walks the chain, and completely during
+verification.
 
-A backward/nonsequential request builds a current-file extent index in one
-forward pass. Fixed-size records in a paged byte store contain logical start,
-physical start, and length. Binary search retrieves fragments without a chain
-restart per request. Advancing iteration discards the index. FAT content ranges
-are DATA; FAT has no initialized-data tail semantics authorizing ZERO ranges.
+A backward or nonsequential request builds the shared extent index in one
+forward chain pass, after which binary search resolves offsets without a
+chain restart.
 
 ## Structural verification and lifecycle
 

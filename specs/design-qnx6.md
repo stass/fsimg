@@ -443,12 +443,10 @@ normalization. Reject embedded NUL, slash, control bytes `0x01` through `0x1f`,
 counts encoded bytes, not Unicode characters. Host normalization and case
 collisions remain the extractor's separate responsibility. [L4], [Q5]
 
-Before exposing a directory, spool validated entries in disk order to bounded
-scratch and externally sort sibling name keys to detect duplicates. Preserve
-one canonical interpretation for listing, selection, content reads, and
-extraction. Validate the namespace even when only one child is selected, but
-do not traverse unselected subtrees. Directory owner tracking is paged and
-separate from the configured depth limit.
+Directories follow the [prepared-directory contract](design-directories.md).
+Each entry's namespace key is its exact UTF-8 name bytes, which gives one
+canonical interpretation for listing, selection, content reads, and extraction.
+Directory owner tracking is paged and separate from the configured depth limit.
 
 ## Allocation bitmap and snapshots
 
@@ -614,23 +612,20 @@ rather than producing plausibly readable images with unsafe free-space data.
 
 ### Emit only a validated immutable plan
 
-1. Run common source/output-alias preflight and establish the final extent.
-2. Initialize every output range through defined records, payload copying,
-   or the adapter's proven zero-range capability.
-3. Stream user payloads directly from their repeatable sources; validate each
-   source before and after copying. Emit directory and long-name blocks,
-   then indirect/system blocks and allocation metadata from the plan.
-4. Emit both 512-byte superblocks with their complete CRCs after the structures
+The common [emission contract](design-emission.md) owns preflight,
+initialization, payload copying, flush, and failure marking. The driver emits
+in this order:
+
+1. Request one payload copy per regular file over its planned block ranges.
+   Then emit directory and long-name blocks, then indirect/system blocks and
+   allocation metadata from the plan.
+2. Emit both 512-byte superblocks with their complete CRCs after the structures
    they describe. Initialize the remaining header-area and boot-area bytes
    according to the qualified nonbootable profile; do not import a QNX loader.
-5. Finish common flush, close, cancellation, and no-replace publication.
 
 Every final partial data block, unused inode byte, directory slot, free block,
-reserved tail, and volume padding byte has a defined value. A fresh sparse
-host sink may omit writes only for known-zero ranges. A reused callback or FD
-sink cannot skip initialization. Metadata scratch contains no copied source
-payload or staging image. A raw sink can contain partial output on failure;
-the CLI never publishes it as a successful image.
+reserved tail, and volume padding byte has a defined value, either written by
+the driver or zero from common initialization.
 
 This ordering helps inspection but is not a live-filesystem atomic update
 protocol. fsimg's guarantee comes from private construction and common

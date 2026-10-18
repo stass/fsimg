@@ -89,9 +89,9 @@ flowchart TD
 | Resource context | All fsimg allocations, scratch files, limits, counters, cancellation | Application allocations and global process policy |
 | I/O adapter | Byte ranges, exact I/O, host offset conversion, zero-range capability | Filesystem geometry or image paths |
 | Source catalog | Target entries, stable source identities, external ordering | File payload storage |
-| Writer | Collection, immutable planning, emission, format-specific geometry | Editing an existing image |
-| Reader | Detection, lazy traversal, current entry, logical content reads | Host path creation |
-| Format driver | On-disk codecs, feature checks, chain/extent interpretation | Ambient host filesystem access, independent caches, publication |
+| Writer | Collection, immutable planning, emission order, sink initialization, payload copying and its source lifecycle | Format placement or metadata encoding; editing an existing image |
+| Reader | Probe dispatch, directory preparation and namespace validation, traversal and selection, current entry, logical content delivery | Format fields or name folding; host path creation |
+| Format driver | Descriptor and capabilities, probe, on-disk codecs, feature checks, directory decoding and comparison keys, content resolution, geometry, layout and encoding | Traversal, paths, limits, source access, raw sinks, ambient host access, independent caches, publication |
 | Extractor | Destination path validation, safe file creation, safe metadata policy | Parsing raw filesystem structures |
 | Output coordinator | Staging, finalization, no-replace publication, outcome reporting; shared by library helpers and CLI | Format parsing |
 | CLI coordinator | Trusted operands, descriptor preparation, worker lifecycle | Parsing image bytes or acting on worker-supplied host paths |
@@ -213,17 +213,39 @@ end is an error. Interruption, cancellation, and final flush failures propagate.
 
 ### Writer and reader independence
 
-A format descriptor has independently optional reader and writer operations.
-The reader is a lazy iterator with content access to its current entry. The
-writer consumes a complete logical catalog, not necessarily an in-memory tree.
-Shared code supplies I/O, resources, codecs, source access, and diagnostics;
-format-specific geometry and allocation models remain with the driver.
+A format descriptor has independently optional reader and writer operations
+and is the only holder of its format's identity and capabilities. Common
+lifecycle and reporting code never branches on a format. Detection uses one
+bounded probe contract. The [format contracts](design-formats.md#format-descriptors-and-profiles)
+define descriptors and probing. The reader is a lazy iterator with content
+access to its current entry. The writer consumes a complete logical catalog,
+not necessarily an in-memory tree. Shared code supplies I/O, resources, codecs,
+source access, and diagnostics; format-specific geometry and allocation models
+remain with the driver.
+
+Each common reader and writer mechanism has one owner, so drivers carry no
+traversal, delivery, or copy lifecycle:
+
+* The [prepared-directory design](design-directories.md) lets a driver
+  prepare a directory: framing, metadata, and comparison keys. Common code
+  validates the namespace before any child is exposed, and one walker owns
+  traversal, paths, limits, and selection.
+* The [logical content design](design-content.md) has drivers resolve offsets
+  to validated extents. One common operation delivers bytes and zeros and
+  preserves confirmed progress. A shared extent index is optional.
+* The [emission design](design-emission.md) has the common writer perform
+  pre-mutation checks, sink initialization, and complete source copies. Drivers
+  write encoded metadata and request copies into planned regions.
+
+These boundaries share infrastructure without a common reader/writer object
+graph or mutable filesystem model.
+
 The [sources and catalogs design](design-sources.md) defines common collection,
 source identity and reopening, and immutable catalog preparation independently
 of format planning. Common collection uses private interfaces; public writer
 construction selects an accepted format driver.
-The [FAT reader design](design-fat-reader.md) defines bounded directory
-prepasses, current-file indexing, and full allocation verification for FAT.
+The [FAT reader design](design-fat-reader.md) defines FAT directory decoding,
+alias keys, chain resolution, and full allocation verification.
 The [FAT writer design](design-fat-writer.md) defines independent paged layout
 records, deterministic alias reservations, geometry selection, and emission.
 The [exFAT design](design-exfat.md) defines independent bitmap allocation,
@@ -295,7 +317,8 @@ an invalid or escaping host name into an accepted one silently.
 
 Selection resolves components through the format's validated lookup namespace,
 including its case rules and aliases. A common bounded selector owns resolution
-and subtree traversal; drivers compare only the current component. Resolved
+and subtree traversal. It compares the driver's key for a query component with
+the same keys that namespace validation proved unambiguous. Resolved
 paths retain displayed image names, so extraction never copies an alias or
 case-normalized query spelling onto the host. Off-branch directories are skipped
 after their parent's namespace is validated, without reading their payloads or
