@@ -22,6 +22,8 @@ for program in test-fat test-fat-write test-exfat; do
         exit 1
     fi
 done
+# One line per fixture, sorted by name (LC_ALL=C), so the order is stable
+# across hosts and independent of which program prints which fixture.
 sort "$work"/*.records >"$work/current"
 if test "${1:-}" = --record; then
     cat "$work/current"
@@ -35,7 +37,8 @@ awk '
 function is_semantic(key) {
     return key ~ /_sha256$/ || key == "image_bytes"
 }
-# ceil(old * 1.10) in integer arithmetic: old + ceil(old / 10).
+# ceil(old * 1.10) in integer arithmetic: old + ceil(old / 10). Floating
+# point would round 10 * 1.1 to 11.000000000000002 and allow 12.
 function resource_limit(old,    tenth) {
     tenth = (old - old % 10) / 10
     if (old % 10 != 0)
@@ -47,6 +50,11 @@ function complain(message) {
     failed = 1
 }
 
+# Parse both files into tables indexed by source (1 = baseline,
+# 2 = current): present[source, fixture], fixtures[source, n] in file
+# order, values[source, fixture, key], and keys[source, fixture], the
+# fixture keys in record order. Malformed input is a failure, never skipped
+# silently.
 {
     source = FILENAME == ARGV[1] ? 1 : 2
     origin = source == 1 ? "baseline" : "current"
@@ -79,6 +87,8 @@ function complain(message) {
     }
 }
 
+# Every fixture must appear in both files; common fixtures are compared key
+# by key. Mismatches are all reported before the exit status is set.
 END {
     if (count[1] == 0 || count[2] == 0)
         complain("expected both baseline and current records")
@@ -103,6 +113,8 @@ END {
     print "PASS: " count[2] " fixtures match the baseline"
 }
 
+# Compare one fixture: a key in only one file fails; semantic values must
+# be identical strings; counters compare numerically against the limit.
 function compare(name,    old_keys, new_keys, old_count, new_count, k, key,
     old, new) {
     old_count = split(keys[1, name], old_keys, " ")

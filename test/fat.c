@@ -1608,6 +1608,10 @@ make_fragmented_file(fixture_t *f, uint32_t fragments)
 {
 	unsigned char raw[32];
 
+	/* Each entry links to the cluster two ahead, leaving the odd clusters
+	 * between them free, so no two clusters of the chain are adjacent. The
+	 * caller's variant must have more than 20 + 2 * fragments clusters.
+	 */
 	for (uint32_t i = 0; i < fragments; i++)
 		set_cluster(f, 20 + i * 2, i + 1 == fragments ? f->eoc : 22 + i * 2);
 	short_entry(raw, "INDEX   BIN", false, 20, fragments * 512);
@@ -1632,6 +1636,9 @@ baseline_fragmented(void)
 
 	fixture_init(&f, 16);
 	make_fragmented_file(&f, fragments);
+	/* The builder leaves payload zero; write the position pattern into the
+	 * chain's clusters in logical order.
+	 */
 	for (uint32_t i = 0; i < fragments; i++) {
 		for (unsigned j = 0; j < sizeof(data); j++)
 			data[j] = (unsigned char)((i * 512 + j) * 37);
@@ -1646,10 +1653,15 @@ baseline_fragmented(void)
 	sha256_init(&digest);
 	baseline_read_script(f.reader, entry->size, &digest);
 	sha256_final_hex(&digest, hex);
+	/* Sampled while INDEX.BIN is still current, before teardown, so
+	 * memory_bytes is what the reader keeps for the file.
+	 */
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 	printf("fixture=fat-fragmented content_sha256=%s read_io_calls=%" PRIu64
-	    " read_work=%" PRIu64 " read_scratch_peak=%" PRIu64 "\n", hex,
-	    stats.io_calls, f.reader->session.progress.work, stats.scratch_peak);
+	    " read_work=%" PRIu64 " read_scratch_peak=%" PRIu64
+	    " read_memory_retained=%" PRIu64 " read_descriptors_peak=%" PRIu64
+	    "\n", hex, stats.io_calls, f.reader->session.progress.work,
+	    stats.scratch_peak, stats.memory_bytes, stats.descriptors_peak);
 	fixture_close(&f);
 }
 
@@ -1882,6 +1894,7 @@ test_range_reads(void)
 int
 main(int argc, char **argv)
 {
+	/* Measurement records only on stdout; test/baseline.sh parses them. */
 	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
 		baseline_fragmented();
 		return (0);

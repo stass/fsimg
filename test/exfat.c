@@ -1072,9 +1072,16 @@ make_fragmented_file(exfat_fixture_t *f, unsigned clusters)
 	fat = f->image + 24 * 512;
 	bitmap = f->image + cluster_offset(2);
 	set = file_set(f);
+	/* Valid data length and data length are equal: no zero tail. The set
+	 * checksum covers both fields, so it is recomputed.
+	 */
 	put64(set + 40, length);
 	put64(set + 56, length);
 	fix_set(f);
+	/* For each logical cluster: link the FAT entry of its physical cluster
+	 * to the next logical one (end of chain for the last), mark it in the
+	 * allocation bitmap, and fill it with the position pattern.
+	 */
 	for (unsigned i = 0; i < clusters; i++) {
 		cluster = fragment_cluster(i, clusters);
 		next = i + 1 == clusters ? UINT32_MAX : fragment_cluster(i + 1, clusters);
@@ -1199,9 +1206,14 @@ baseline_zero_tail(void)
 	sha256_init(&digest);
 	baseline_digest_read(f.reader, 0, entry->size, &digest);
 	sha256_final_hex(&digest, hex);
+	/* Sampled while Data.bin is still current, before teardown, so
+	 * memory_bytes is what the reader keeps for the file.
+	 */
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 	printf("fixture=exfat-zero-tail content_sha256=%s read_bytes=%" PRIu64
-	    " read_io_calls=%" PRIu64 "\n", hex, stats.read_bytes, stats.io_calls);
+	    " read_io_calls=%" PRIu64 " read_memory_retained=%" PRIu64
+	    " read_descriptors_peak=%" PRIu64 "\n", hex, stats.read_bytes,
+	    stats.io_calls, stats.memory_bytes, stats.descriptors_peak);
 	fixture_free(&f);
 }
 
@@ -1224,10 +1236,15 @@ baseline_fragmented(void)
 	sha256_init(&digest);
 	baseline_read_script(f.reader, entry->size, &digest);
 	sha256_final_hex(&digest, hex);
+	/* Sampled while Data.bin is still current, before teardown, so
+	 * memory_bytes is what the reader keeps for the file.
+	 */
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 	printf("fixture=exfat-fragmented content_sha256=%s read_io_calls=%" PRIu64
-	    " read_work=%" PRIu64 " read_scratch_peak=%" PRIu64 "\n", hex,
-	    stats.io_calls, f.reader->session.progress.work, stats.scratch_peak);
+	    " read_work=%" PRIu64 " read_scratch_peak=%" PRIu64
+	    " read_memory_retained=%" PRIu64 " read_descriptors_peak=%" PRIu64
+	    "\n", hex, stats.io_calls, f.reader->session.progress.work,
+	    stats.scratch_peak, stats.memory_bytes, stats.descriptors_peak);
 	fixture_free(&f);
 }
 
@@ -1303,6 +1320,7 @@ emit_external(const char *path)
 int
 main(int argc, char **argv)
 {
+	/* Measurement records only on stdout; test/baseline.sh parses them. */
 	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
 		baseline_tree("exfat-tree", "exfat");
 		baseline_zero_tail();

@@ -1048,6 +1048,7 @@ test_scale(void)
 int
 main(int argc, char **argv)
 {
+	/* Measurement records only on stdout; test/baseline.sh parses them. */
 	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
 		baseline_tree("fat12-tree", "fat12");
 		baseline_tree("fat16-tree", "fat16");

@@ -25,16 +25,20 @@
  * entry stream, and so a scratch descriptor, for each ancestor of the deep
  * path.
  */
-#define TREE_MEMORY_BYTES	(UINT64_C(16) * 1024 * 1024)
+#define TREE_MEMORY_BYTES	(UINT64_C(16) * 1024 * 1024) /* library minimum */
 #define TREE_CACHE_PAGES	1
-#define TREE_WIDE_ENTRIES	300
-#define TREE_DEEP_LEVELS	24
+#define TREE_WIDE_ENTRIES	300	/* enough names to spill one page */
+#define TREE_DEEP_LEVELS	24	/* /deep plus 23 nested levels */
 #define TREE_MIXED_BYTES	20000
+/* The mixed file's zero range spans whole pages, so it covers complete
+ * allocation units in every format and the writer can skip them.
+ */
 #define MIXED_ZERO_START	4096
 #define MIXED_ZERO_END		(3 * 4096)
+/* Nonzero sink fill: an emitted image must overwrite every byte. */
 #define SINK_POISON		0xa5
-#define READ_CHUNK_BYTES	4096
-#define SCRIPT_READ_BYTES	16
+#define READ_CHUNK_BYTES	4096	/* one read_at request while hashing */
+#define SCRIPT_READ_BYTES	16	/* each short read in the access script */
 
 /* Set to a directory to also write each created image there as
  * <fixture>.img, for an independent `shasum -a 256` cross-check.
@@ -53,7 +57,11 @@ typedef struct image_sink {
 	uint64_t	 length;
 } image_sink_t;
 
-/* One tree fixture's record, in printed key order. */
+/* One tree fixture's measurements. The write stats are taken after emit,
+ * before teardown, so their memory_bytes is the writer's retained memory.
+ * The read stats are taken after traversal; the reader's retained memory is
+ * sampled separately while the last file is current.
+ */
 typedef struct tree_record {
 	char		 image_sha256[SHA256_HEX_BYTES];
 	uint64_t	 image_bytes;
@@ -62,6 +70,7 @@ typedef struct tree_record {
 	char		 traversal_sha256[SHA256_HEX_BYTES];
 	char		 content_sha256[SHA256_HEX_BYTES];
 	fsimg_stats_t	 read_stats;
+	uint64_t	 read_memory_retained;
 	uint64_t	 read_work;
 } tree_record_t;
 
@@ -107,6 +116,9 @@ tree_context(int scratch)
 	return (ctx);
 }
 
+/* Provider callbacks. They receive no argument: content is a pure function
+ * of (id, offset), so every run supplies identical bytes and ranges.
+ */
 static bool
 mixed_is_zero(uint64_t offset)
 {
@@ -128,6 +140,9 @@ provider_read(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
 	unsigned char *bytes = buffer;
 	uint64_t position;
 
+	/* The pattern depends on the byte position and the file's id, so a
+	 * misplaced cluster or a swap between files changes the content digest.
+	 */
 	for (size_t i = 0; i < length; i++) {
 		position = offset + i;
 		if (id == MIXED_SOURCE_ID && mixed_is_zero(position))
@@ -143,6 +158,10 @@ static fsimg_status_t
 provider_range(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
     fsimg_range_t *range, fsimg_error_t *error FSIMG_UNUSED)
 {
+	/* The writer only asks for offset < file length, and each range must
+	 * end within the file: a pattern file is one data range to its length
+	 * (its id); the mixed file is data, zero, data split at the bounds.
+	 */
 	range->offset = offset;
 	if (id != MIXED_SOURCE_ID) {
 		range->length = id - offset;
@@ -160,6 +179,10 @@ provider_range(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
 	return (FSIMG_OK);
 }
 
+/* Memory sink callbacks. The sink's length is fixed before emission from
+ * the plan's volume size; an out-of-range request is a library bug and
+ * stops the test.
+ */
 static fsimg_status_t
 sink_size(void *argument, uint64_t *length, fsimg_error_t *error FSIMG_UNUSED)
 {
@@ -210,6 +233,9 @@ sink_flush(void *argument FSIMG_UNUSED, fsimg_error_t *error FSIMG_UNUSED)
 	return (FSIMG_OK);
 }
 
+/* The read phase gets a view without write operations, so the reader
+ * cannot alter the image it measures.
+ */
 static fsimg_io_t *
 sink_io(fsimg_ctx_t *ctx, image_sink_t *sink, bool writable)
 {
@@ -371,12 +397,17 @@ dump_image(const char *fixture, const image_sink_t *sink)
 	CHECK(fclose(file) == 0);
 }
 
-/* List the image and read every file sequentially in iteration order. */
+/* List the image and read every file sequentially in iteration order.
+ * Charged memory is sampled after each file's content is read, while that
+ * file is current, so the last sample is what the reader retains for the
+ * final file before the closing next and teardown.
+ */
 static void
 read_tree(int scratch, image_sink_t *sink, tree_record_t *record)
 {
 	sha256_t traversal, content;
 	const fsimg_entry_t *entry;
+	fsimg_stats_t current;
 	fsimg_reader_t *reader;
 	fsimg_status_t status;
 	fsimg_ctx_t *ctx;
@@ -389,8 +420,11 @@ read_tree(int scratch, image_sink_t *sink, tree_record_t *record)
 	sha256_init(&content);
 	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
 		digest_entry(&traversal, entry);
-		if (entry->kind == FSIMG_ENTRY_FILE)
-			baseline_digest_read(reader, 0, entry->size, &content);
+		if (entry->kind != FSIMG_ENTRY_FILE)
+			continue;
+		baseline_digest_read(reader, 0, entry->size, &content);
+		CHECK(fsimg_ctx_get_stats(ctx, &current, NULL) == FSIMG_OK);
+		record->read_memory_retained = current.memory_bytes;
 	}
 	CHECK(status == FSIMG_DONE);
 
@@ -454,6 +488,9 @@ baseline_digest_read(fsimg_reader_t *reader, uint64_t offset, uint64_t length,
 	unsigned char buffer[READ_CHUNK_BYTES];
 	size_t request, count;
 
+	/* read_at may transfer less than requested; continue from where it
+	 * stopped. A zero count before the requested end is a premature EOF.
+	 */
 	while (length > 0) {
 		request = length < sizeof(buffer) ? (size_t)length : sizeof(buffer);
 		CHECK(fsimg_reader_read_at(reader, offset, buffer, request, &count,
@@ -499,6 +536,10 @@ baseline_tree(const char *fixture, const char *format)
 	char directory[] = "baseline-XXXXXX";
 	int scratch;
 
+	/* One private scratch directory serves both phases. Each phase has its
+	 * own fresh context, so its counters cover that phase alone. The final
+	 * rmdir fails if a phase left a scratch file behind.
+	 */
 	CHECK(mkdtemp(directory) != NULL);
 	scratch = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	CHECK(scratch != -1);
@@ -510,19 +551,26 @@ baseline_tree(const char *fixture, const char *format)
 	CHECK(close(scratch) == 0);
 	CHECK(rmdir(directory) == 0);
 
-	printf("fixture=%s image_sha256=%s image_bytes=%" PRIu64
-	    " write_io_calls=%" PRIu64 " write_memory_peak=%" PRIu64
-	    " write_scratch_peak=%" PRIu64 " write_work=%" PRIu64
-	    " traversal_sha256=%s content_sha256=%s read_io_calls=%" PRIu64
-	    " read_bytes=%" PRIu64 " read_memory_peak=%" PRIu64
-	    " read_scratch_peak=%" PRIu64 " read_work=%" PRIu64 "\n", fixture,
-	    record.image_sha256, record.image_bytes,
+	/* Fixed key order: image identity, write counters, read results, read
+	 * counters. Key names decide the comparison class (see baseline.h).
+	 */
+	printf("fixture=%s image_sha256=%s image_bytes=%" PRIu64, fixture,
+	    record.image_sha256, record.image_bytes);
+	printf(" write_io_calls=%" PRIu64 " write_memory_peak=%" PRIu64
+	    " write_memory_retained=%" PRIu64 " write_scratch_peak=%" PRIu64
+	    " write_descriptors_peak=%" PRIu64 " write_work=%" PRIu64,
 	    record.write_stats.io_calls, record.write_stats.memory_peak,
-	    record.write_stats.scratch_peak, record.write_work,
-	    record.traversal_sha256, record.content_sha256,
-	    record.read_stats.io_calls, record.read_stats.read_bytes,
-	    record.read_stats.memory_peak, record.read_stats.scratch_peak,
-	    record.read_work);
+	    record.write_stats.memory_bytes, record.write_stats.scratch_peak,
+	    record.write_stats.descriptors_peak, record.write_work);
+	printf(" traversal_sha256=%s content_sha256=%s", record.traversal_sha256,
+	    record.content_sha256);
+	printf(" read_io_calls=%" PRIu64 " read_bytes=%" PRIu64
+	    " read_memory_peak=%" PRIu64 " read_memory_retained=%" PRIu64
+	    " read_scratch_peak=%" PRIu64 " read_descriptors_peak=%" PRIu64
+	    " read_work=%" PRIu64 "\n", record.read_stats.io_calls,
+	    record.read_stats.read_bytes, record.read_stats.memory_peak,
+	    record.read_memory_retained, record.read_stats.scratch_peak,
+	    record.read_stats.descriptors_peak, record.read_work);
 }
 
 /* The fragmented-file access script, identical for every format:
@@ -543,6 +591,10 @@ baseline_read_script(fsimg_reader_t *reader, uint64_t size, sha256_t *digest)
 	const size_t seeks = sizeof(seek_permille) / sizeof(seek_permille[0]);
 	uint64_t offset;
 
+	/* Offsets are fixed per-mille fractions of the size, visited out of
+	 * order (end, start, middle). The size bound keeps every short read
+	 * inside the file.
+	 */
 	CHECK(size >= 1000 * SCRIPT_READ_BYTES);
 	baseline_digest_read(reader, 0, size, digest);
 

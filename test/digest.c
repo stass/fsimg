@@ -39,6 +39,11 @@ sha256_block(sha256_t *digest, const unsigned char *block)
 	uint32_t schedule[64], v[8];
 	uint32_t s0, s1, choose, majority, t1, t2;
 
+	/* Message schedule W[0..63]: the first 16 words are the block read
+	 * big-endian; each later word mixes four earlier ones through the
+	 * sigma0 (s0) and sigma1 (s1) functions. All arithmetic is mod 2^32,
+	 * which unsigned 32-bit wraparound provides.
+	 */
 	for (unsigned t = 0; t < 16; t++)
 		schedule[t] = (uint32_t)block[t * 4] << 24 |
 		    (uint32_t)block[t * 4 + 1] << 16 |
@@ -51,7 +56,10 @@ sha256_block(sha256_t *digest, const unsigned char *block)
 		schedule[t] = schedule[t - 16] + s0 + schedule[t - 7] + s1;
 	}
 
-	/* v[0..7] are the working variables a..h. */
+	/* Sixty-four rounds over the working variables; v[0..7] are a..h.
+	 * Each round computes T1 from e, f, g, h, the round constant and the
+	 * schedule word (Sigma1 and Ch), and T2 from a, b, c (Sigma0 and Maj).
+	 */
 	for (unsigned i = 0; i < 8; i++)
 		v[i] = digest->state[i];
 	for (unsigned t = 0; t < 64; t++) {
@@ -72,6 +80,7 @@ sha256_block(sha256_t *digest, const unsigned char *block)
 		v[4] += t1;
 		v[0] = t1 + t2;
 	}
+	/* The block's result is added into the running hash value. */
 	for (unsigned i = 0; i < 8; i++)
 		digest->state[i] += v[i];
 }
@@ -95,6 +104,9 @@ sha256_update(sha256_t *digest, const void *data, size_t length)
 	const unsigned char *bytes = data;
 	size_t take;
 
+	/* Fill the pending block; compress it each time it becomes full. The
+	 * total length is kept for the padding's bit-length field.
+	 */
 	digest->message_bytes += length;
 	while (length > 0) {
 		take = sizeof(digest->block) - digest->block_used;
@@ -121,9 +133,15 @@ sha256_final_hex(sha256_t *digest, char *hex)
 	uint64_t message_bits;
 	unsigned char pad;
 
+	/* Capture the length before padding, because padding goes through
+	 * sha256_update and would otherwise be counted as message.
+	 */
 	message_bits = digest->message_bytes * 8;
 	for (unsigned i = 0; i < 8; i++)
 		length_field[i] = (unsigned char)(message_bits >> (56 - i * 8));
+	/* Zeros run until 8 bytes remain in a block; when fewer than 8 remain
+	 * after the 0x80 byte, this wraps into one more block.
+	 */
 	pad = 0x80;
 	sha256_update(digest, &pad, 1);
 	pad = 0;

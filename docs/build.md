@@ -274,9 +274,11 @@ one `fixture=<name> key=value ...` line per fixture. The script sorts them and
 compares them with the checked-in `test/baseline.txt`.
 
 Keys ending in `_sha256` (image bytes, traversal lines, content read) and
-`image_bytes` must match exactly. Every other key is a resource counter
-(I/O calls, bytes read, memory and scratch peaks, metadata work). A counter
-fails when it exceeds `ceil(baseline * 1.10)`. Decreases and growth within
+`image_bytes` must match exactly. Every other key is a resource counter:
+I/O calls, bytes read, memory, scratch and descriptor peaks, metadata work,
+and `*_memory_retained`. That last key is the charged memory at the end of
+a phase, before teardown, so it shows any index, plan or cache kept
+resident. A counter fails when it exceeds `ceil(baseline * 1.10)`. Decreases and growth within
 that tolerance are printed but do not fail. A missing or extra fixture or key
 fails. The script classifies keys in one place. To cross-check image digests
 with `shasum -a 256`, set `FSIMG_BASELINE_DUMP` to an existing directory.
@@ -289,10 +291,11 @@ FreeBSD must pass within the same tolerance. A deviation on another host is
 investigated, not re-recorded away. Sanitizer builds compare the same
 counters, which do not depend on instrumentation.
 
-The ordinary suite has twenty-seven tests. macOS reports twenty-four passes and
-three skips (backend unavailable, Linux-only setup mocks, and unavailable
-exfatprogs). Linux reports twenty-six passes; FAT fatcat subchecks explicitly
-skip by host policy while dosfstools/mtools coverage runs. The user-provided
+Apart from the comparison baseline, the ordinary suite has twenty-six tests.
+macOS reports twenty-three passes and three skips (backend unavailable,
+Linux-only setup mocks, and unavailable exfatprogs). Linux reports
+twenty-six passes; FAT fatcat subchecks explicitly skip by host policy
+while dosfstools/mtools coverage runs. The user-provided
 FreeBSD 16/ZFS host reports twenty-four passes and two skips (Linux-only setup
 mocks and unavailable exfatprogs), including native FAT/mtools/fatcat
 interoperability. See [platform evidence](platform-evidence.md)

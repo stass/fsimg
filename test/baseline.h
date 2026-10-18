@@ -13,6 +13,9 @@
  * checked-in test/baseline.txt. It classifies keys by name: keys ending in
  * _sha256, and image_bytes, must match exactly; every other key is a
  * resource counter compared with a tolerance. Name a new key accordingly.
+ * A "*_memory_retained" key is the charged memory at the end of its phase,
+ * sampled before any teardown, so it shows indexes, plans and caches that
+ * stay resident.
  */
 
 /* Create the shared tree as a reproducible image of format, read it back,
