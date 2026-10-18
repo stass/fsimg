@@ -79,9 +79,11 @@ check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-fo
 	test-catalog test-source test-publish test-fat test-fat-write \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-cli test-qualify test-fragment header-c header-cxx
-TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh test/cli.sh
-nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh test/cli.sh
-test_core_SOURCES = test/core.c test/test.h
+TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh test/cli.sh \
+	test/baseline.sh
+nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh test/cli.sh \
+	test/baseline.sh
+test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
@@ -101,7 +103,8 @@ test_unicode_SOURCES = test/unicode.c test/test.h
 test_unicode_LDADD = libfsimg.la
 test_format_SOURCES = test/format.c test/test.h
 test_format_LDADD = libfsimg.la
-test_exfat_SOURCES = test/exfat.c test/test.h
+test_exfat_SOURCES = test/exfat.c test/test.h \
+	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_exfat_LDADD = libfsimg.la
 test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
 test_exfat_scale_LDADD = libfsimg.la
@@ -109,9 +112,11 @@ test_catalog_SOURCES = test/catalog.c test/test.h
 test_catalog_LDADD = libfsimg.la
 test_source_SOURCES = test/source.c test/test.h
 test_source_LDADD = libfsimg.la
-test_fat_SOURCES = test/fat.c test/test.h
+test_fat_SOURCES = test/fat.c test/test.h \
+	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_LDADD = libfsimg.la
-test_fat_write_SOURCES = test/fat-write.c test/test.h
+test_fat_write_SOURCES = test/fat-write.c test/test.h \
+	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_write_LDADD = libfsimg.la
 test_extract_SOURCES = test/extract.c test/test.h
 test_extract_LDADD = libfsimg.la
@@ -151,11 +156,12 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in fuzz/fat.c fuzz/protocol.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
+	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md
 check-local: check-ascii
 .PHONY: check-ascii check-asan check-ubsan check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz check-fuzz-extended check-cli-rss check-extended
-.PHONY: check-integration
+.PHONY: check-integration baseline-record
 .PHONY: check-install
 check-install: all
 	+$(SHELL) $(top_srcdir)/build-aux/check-install.sh "$(abs_top_builddir)" \
@@ -174,6 +180,11 @@ check-installed-consumers:
 check-integration: test-fat test-fat-write test-exfat test/fat-integration.sh test/exfat-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
+# Regenerate the checked-in comparison baseline; test/baseline.sh only reads it.
+baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
+	./test/baseline.sh --record > $(srcdir)/test/baseline.txt.new || \
+	    { rm -f $(srcdir)/test/baseline.txt.new; exit 1; }
+	mv $(srcdir)/test/baseline.txt.new $(srcdir)/test/baseline.txt
 check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale
 	./test-meta-sort --scale
 	./test-catalog --wide 100000

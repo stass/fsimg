@@ -15,4 +15,5 @@ awk '/[^\001-\177]/ { print FILENAME ":" FNR ": non-ASCII byte"; bad=1 } END { i
     "$1/configure.ac" "$1/Makefile.am" "$1/libfsimg.pc.in" "$1/build-aux/check-ascii.sh" \
     "$1/build-aux/sanitize.sh" "$1/build-aux/fuzz.sh" \
     "$1/build-aux/build-fatcat.sh" "$1/build-aux/fatcat-freebsd.patch" \
-    "$1/build-aux/check-install.sh" "$1/build-aux/check-installed.py"
+    "$1/build-aux/check-install.sh" "$1/build-aux/check-installed.py" \
+    "$1/test/baseline.txt"

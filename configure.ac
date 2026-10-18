@@ -35,8 +35,9 @@ AC_PATH_PROG([PKG_CONFIG], [pkg-config])
 AC_PATH_PROG([MKFS_EXFAT], [mkfs.exfat], [], [$PATH:/usr/sbin:/sbin:/usr/local/sbin:/opt/homebrew/sbin])
 AC_PATH_PROG([FSCK_EXFAT], [fsck.exfat], [], [$PATH:/usr/sbin:/sbin:/usr/local/sbin:/opt/homebrew/sbin])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
-AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integration.sh test/cli.sh],
+AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integration.sh test/cli.sh test/baseline.sh],
     [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
      test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh
-     test ! -f test/cli.sh || chmod +x test/cli.sh])
+     test ! -f test/cli.sh || chmod +x test/cli.sh
+     test ! -f test/baseline.sh || chmod +x test/baseline.sh])
 AC_OUTPUT

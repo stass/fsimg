@@ -10,12 +10,19 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 #include <strings.h>
 #include <unistd.h>
 
+#include "digest.h"
 #include "host.h"
 #include "internal.h"
 #include "test.h"
+
+typedef struct sha256_vector {
+	const char	*message;
+	const char	*expected;
+} sha256_vector_t;
 
 typedef struct callback_state {
 	fsimg_ctx_t	*ctx;
@@ -26,6 +33,7 @@ typedef struct callback_state {
 static void test_arithmetic(void);
 static void test_context(void);
 static void test_descriptor_cleanup(void);
+static void test_sha256(void);
 static bool cancel_callback(void *);
 static void progress_callback(void *, const fsimg_progress_t *);
 
@@ -231,11 +239,48 @@ test_context(void)
 	fsimg_ctx_free(ctx);
 }
 
+/* FIPS 180-4 example vectors: one block, a 448-bit message whose padding
+ * needs a second block, and a million bytes absorbed in uneven pieces that
+ * straddle block boundaries.
+ */
+static void
+test_sha256(void)
+{
+	static const sha256_vector_t vectors[] = {
+		{ "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+		{ "abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
+		{ "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+		    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" }
+	};
+	char hex[SHA256_HEX_BYTES], chunk[7];
+	sha256_t digest;
+	unsigned take;
+
+	for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+		sha256_init(&digest);
+		sha256_update(&digest, vectors[i].message, strlen(vectors[i].message));
+		sha256_final_hex(&digest, hex);
+		if (strcmp(hex, vectors[i].expected) != 0)
+			fprintf(stderr, "sha256(\"%s\") = %s\n", vectors[i].message, hex);
+		CHECK(strcmp(hex, vectors[i].expected) == 0);
+	}
+
+	memset(chunk, 'a', sizeof(chunk));
+	sha256_init(&digest);
+	for (unsigned remaining = 1000000; remaining > 0; remaining -= take) {
+		take = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+		sha256_update(&digest, chunk, take);
+	}
+	sha256_final_hex(&digest, hex);
+	CHECK(strcmp(hex, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0") == 0);
+}
+
 int
 main(void)
 {
 	test_arithmetic();
 	test_context();
 	test_descriptor_cleanup();
+	test_sha256();
 	return (0);
 }

@@ -12,6 +12,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "baseline.h"
 #include "exfat.h"
 #include "selection.h"
 #include "test.h"
@@ -55,7 +56,7 @@ static fsimg_status_t image_write(void *, uint64_t, const void *, size_t,
 static fsimg_status_t image_zero(void *, uint64_t, uint64_t, fsimg_error_t *);
 static void fixture_new(exfat_fixture_t *);
 static void fixture_free(exfat_fixture_t *);
-static void open_file(exfat_fixture_t *);
+static const fsimg_entry_t *open_file(exfat_fixture_t *);
 static void test_independent(void);
 static void test_corruptions(void);
 static void test_allocation_profiles(void);
@@ -75,6 +76,9 @@ static void test_stream_limits(void);
 static void test_sequential_fragments(void);
 static void test_extract_zero_tail(void);
 static uint32_t fragment_cluster(unsigned, unsigned);
+static void make_fragmented_file(exfat_fixture_t *, unsigned);
+static void baseline_zero_tail(void);
+static void baseline_fragmented(void);
 static void emit_external(const char *);
 static void read_external(const char *);
 static void emit_seed(const char *);
@@ -351,7 +355,8 @@ fixture_free(exfat_fixture_t *f)
 	free(f->image);
 }
 
-static void
+/* Open the reader and return its first entry, which must be Data.bin. */
+static const fsimg_entry_t *
 open_file(exfat_fixture_t *f)
 {
 	const fsimg_entry_t *entry;
@@ -367,6 +372,7 @@ open_file(exfat_fixture_t *f)
 		fprintf(stderr, "exFAT next: %d %s\n", status, error.message);
 	CHECK(status == FSIMG_OK);
 	CHECK(strcmp(entry->path, "/Data.bin") == 0);
+	return (entry);
 }
 
 static void
@@ -1050,14 +1056,43 @@ fragment_cluster(unsigned ordinal, unsigned count)
 	return (FILE_CLUSTER + (ordinal - count / 2) * 2 + 1);
 }
 
+/* Make Data.bin a fully initialized file of the given number of 512-byte
+ * clusters. Visit even clusters, then odd clusters, within one allocated
+ * interval. This creates one physical extent per logical cluster without
+ * holes or extra payload storage. Data follows logical position, not image
+ * order: each cluster starts with its logical ordinal.
+ */
+static void
+make_fragmented_file(exfat_fixture_t *f, unsigned clusters)
+{
+	unsigned char *fat, *bitmap, *set;
+	uint32_t cluster, next;
+	const uint64_t length = (uint64_t)clusters * 512;
+
+	fat = f->image + 24 * 512;
+	bitmap = f->image + cluster_offset(2);
+	set = file_set(f);
+	put64(set + 40, length);
+	put64(set + 56, length);
+	fix_set(f);
+	for (unsigned i = 0; i < clusters; i++) {
+		cluster = fragment_cluster(i, clusters);
+		next = i + 1 == clusters ? UINT32_MAX : fragment_cluster(i + 1, clusters);
+		put32(fat + cluster * 4, next);
+		bitmap[(cluster - 2) / 8] |= (unsigned char)(1u << ((cluster - 2) % 8));
+		for (unsigned j = 0; j < 512; j++)
+			f->image[cluster_offset(cluster) + j] = (unsigned char)((i * 512 + j) * 37);
+		put32(f->image + cluster_offset(cluster), i);
+	}
+}
+
 static void
 test_sequential_fragments(void)
 {
 	static const unsigned seeks[] = { 511, 0, 257, 7, 300 };
 	exfat_fixture_t f;
-	unsigned char *fat, *bitmap, *set, *bytes;
+	unsigned char *bytes;
 	unsigned char marker[4], marker8[8], saved8[8];
-	uint32_t cluster, next;
 	uint64_t before, work;
 	size_t count;
 	const unsigned clusters = 512;
@@ -1065,25 +1100,7 @@ test_sequential_fragments(void)
 
 	fixture_new(&f);
 	CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
-	fat = f.image + 24 * 512;
-	bitmap = f.image + cluster_offset(2);
-	set = file_set(&f);
-	put64(set + 40, length);
-	put64(set + 56, length);
-	fix_set(&f);
-	/* Visit even clusters, then odd clusters, within one allocated interval.
-	 * This creates one physical extent per logical cluster without holes or
-	 * extra payload storage. Data follows logical position, not image order.
-	 */
-	for (unsigned i = 0; i < clusters; i++) {
-		cluster = fragment_cluster(i, clusters);
-		next = i + 1 == clusters ? UINT32_MAX : fragment_cluster(i + 1, clusters);
-		put32(fat + cluster * 4, next);
-		bitmap[(cluster - 2) / 8] |= (unsigned char)(1u << ((cluster - 2) % 8));
-		for (unsigned j = 0; j < 512; j++)
-			f.image[cluster_offset(cluster) + j] = (unsigned char)((i * 512 + j) * 37);
-		put32(f.image + cluster_offset(cluster), i);
-	}
+	make_fragmented_file(&f, clusters);
 	open_file(&f);
 	bytes = malloc(length);
 	CHECK(bytes != NULL);
@@ -1164,6 +1181,56 @@ test_extract_zero_tail(void)
 	fixture_free(&f);
 }
 
+/* Comparison-baseline record (see baseline.h) for the default image, whose
+ * Data.bin has 513 initialized bytes of 1024 and a poisoned tail cluster.
+ * The content digest shows that the tail reads as zeros.
+ */
+static void
+baseline_zero_tail(void)
+{
+	exfat_fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_stats_t stats;
+	sha256_t digest;
+	char hex[SHA256_HEX_BYTES];
+
+	fixture_new(&f);
+	entry = open_file(&f);
+	sha256_init(&digest);
+	baseline_digest_read(f.reader, 0, entry->size, &digest);
+	sha256_final_hex(&digest, hex);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	printf("fixture=exfat-zero-tail content_sha256=%s read_bytes=%" PRIu64
+	    " read_io_calls=%" PRIu64 "\n", hex, stats.read_bytes, stats.io_calls);
+	fixture_free(&f);
+}
+
+/* Comparison-baseline record (see baseline.h): the 512-fragment file under
+ * the common access script with a one-page metadata cache.
+ */
+static void
+baseline_fragmented(void)
+{
+	exfat_fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_stats_t stats;
+	sha256_t digest;
+	char hex[SHA256_HEX_BYTES];
+
+	fixture_new(&f);
+	CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
+	make_fragmented_file(&f, 512);
+	entry = open_file(&f);
+	sha256_init(&digest);
+	baseline_read_script(f.reader, entry->size, &digest);
+	sha256_final_hex(&digest, hex);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	printf("fixture=exfat-fragmented content_sha256=%s read_io_calls=%" PRIu64
+	    " read_work=%" PRIu64 " read_scratch_peak=%" PRIu64 "\n", hex,
+	    stats.io_calls, f.reader->session.progress.work, stats.scratch_peak);
+	fixture_free(&f);
+}
+
 static void
 read_external(const char *path)
 {
@@ -1236,6 +1303,12 @@ emit_external(const char *path)
 int
 main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
+		baseline_tree("exfat-tree", "exfat");
+		baseline_zero_tail();
+		baseline_fragmented();
+		return (0);
+	}
 	if (argc == 3 && strcmp(argv[1], "--guard") == 0) {
 		test_content_guard(argv[2]);
 		return (0);

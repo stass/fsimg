@@ -9,12 +9,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "baseline.h"
 #include "fat.h"
 #include "test.h"
 
@@ -86,6 +88,8 @@ static void test_volume_labels(void);
 static void test_cached_name(void);
 static void test_cached_index(void);
 static void test_range_reads(void);
+static void make_fragmented_file(fixture_t *, uint32_t);
+static void baseline_fragmented(void);
 static bool cancelled(void *);
 static size_t long_records(unsigned char *, const uint16_t *, size_t,
     const unsigned char *);
@@ -1297,7 +1301,7 @@ test_index_failures(void)
 {
 	fixture_t f;
 	const fsimg_entry_t *entry;
-	unsigned char raw[32], byte;
+	unsigned char byte;
 	fsimg_status_t status;
 	size_t count;
 	bool complete;
@@ -1324,10 +1328,7 @@ test_index_failures(void)
 	 */
 	for (unsigned fault = 0; fault <= FSIMG_META_WRITE; fault++) {
 		fixture_init(&f, 16);
-		for (uint32_t i = 0; i < 1000; i++)
-			set_cluster(&f, 20 + i * 2, i == 999 ? f.eoc : 22 + i * 2);
-		short_entry(raw, "INDEX   BIN", false, 20, 1000 * 512);
-		write_bytes(&f, f.root_offset, raw, sizeof(raw));
+		make_fragmented_file(&f, 1000);
 		fixture_open(&f);
 		CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
 		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
@@ -1598,6 +1599,60 @@ test_cached_name(void)
 	fixture_close(&f);
 }
 
+/* Replace the first root entry with INDEX.BIN, a file of the given number
+ * of one-cluster fragments on every other cluster from 20. The payload
+ * stays zero; callers that need content write it themselves.
+ */
+static void
+make_fragmented_file(fixture_t *f, uint32_t fragments)
+{
+	unsigned char raw[32];
+
+	for (uint32_t i = 0; i < fragments; i++)
+		set_cluster(f, 20 + i * 2, i + 1 == fragments ? f->eoc : 22 + i * 2);
+	short_entry(raw, "INDEX   BIN", false, 20, fragments * 512);
+	write_bytes(f, f->root_offset, raw, sizeof(raw));
+}
+
+/* Comparison-baseline record (see baseline.h): the thousand-fragment file
+ * under the common access script with a one-page metadata cache. Each
+ * cluster carries a position pattern led by its logical ordinal, so the
+ * content digest detects misordered or misplaced reads.
+ */
+static void
+baseline_fragmented(void)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_stats_t stats;
+	sha256_t digest;
+	unsigned char data[512];
+	char hex[SHA256_HEX_BYTES];
+	const uint32_t fragments = 1000;
+
+	fixture_init(&f, 16);
+	make_fragmented_file(&f, fragments);
+	for (uint32_t i = 0; i < fragments; i++) {
+		for (unsigned j = 0; j < sizeof(data); j++)
+			data[j] = (unsigned char)((i * 512 + j) * 37);
+		put32(data, i);
+		write_bytes(&f, cluster_offset(&f, 20 + i * 2), data, sizeof(data));
+	}
+	fixture_open(&f);
+	CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/INDEX.BIN") == 0);
+	sha256_init(&digest);
+	baseline_read_script(f.reader, entry->size, &digest);
+	sha256_final_hex(&digest, hex);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	printf("fixture=fat-fragmented content_sha256=%s read_io_calls=%" PRIu64
+	    " read_work=%" PRIu64 " read_scratch_peak=%" PRIu64 "\n", hex,
+	    stats.io_calls, f.reader->session.progress.work, stats.scratch_peak);
+	fixture_close(&f);
+}
+
 static void
 test_cached_index(void)
 {
@@ -1827,6 +1882,10 @@ test_range_reads(void)
 int
 main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
+		baseline_fragmented();
+		return (0);
+	}
 	if (argc == 4 && strcmp(argv[1], "--seed-variant") == 0) {
 		unsigned variant = (unsigned)strtoul(argv[3], NULL, 10);
 

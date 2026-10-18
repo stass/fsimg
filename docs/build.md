@@ -256,7 +256,40 @@ explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 ./test-catalog --scale 10000000
 ```
 
-The ordinary suite has twenty-six tests. macOS reports twenty-three passes and
+`check` also runs the comparison baseline, `test/baseline.sh`. It detects
+semantic and resource changes in library internals on seven named fixtures and
+finishes in under two seconds. `fat12-tree`, `fat16-tree`, `fat32-tree` and
+`exfat-tree` write one shared tree reproducibly from provider sources into a
+memory sink, then list the image and read all content back. The tree has
+names that need generated FAT aliases, a 300-entry directory, a 24-level path,
+an empty file, a zero-only file and a mixed data/zero file. Each context has
+a 16 MiB budget and one metadata cache page, so the writer's catalog spills to
+scratch. `exfat-zero-tail` reads a hand-built file whose initialized length is
+shorter than its logical length and whose tail cluster is poisoned.
+`fat-fragmented` and `exfat-fragmented` run one fixed access script on
+hand-built fragmented files: a sequential pass, short reads at fixed offsets,
+then range queries interleaved with reads. `./test-fat-write --baseline`,
+`./test-exfat --baseline` and `./test-fat --baseline` print the records:
+one `fixture=<name> key=value ...` line per fixture. The script sorts them and
+compares them with the checked-in `test/baseline.txt`.
+
+Keys ending in `_sha256` (image bytes, traversal lines, content read) and
+`image_bytes` must match exactly. Every other key is a resource counter
+(I/O calls, bytes read, memory and scratch peaks, metadata work). A counter
+fails when it exceeds `ceil(baseline * 1.10)`. Decreases and growth within
+that tolerance are printed but do not fail. A missing or extra fixture or key
+fails. The script classifies keys in one place. To cross-check image digests
+with `shasum -a 256`, set `FSIMG_BASELINE_DUMP` to an existing directory.
+Each created image is then also written there as `<fixture>.img`.
+
+`make baseline-record` regenerates `test/baseline.txt`; the test itself never
+writes it. Re-record only for an intended change, and explain every changed
+value in the commit message. The baseline is recorded on macOS. Linux and
+FreeBSD must pass within the same tolerance. A deviation on another host is
+investigated, not re-recorded away. Sanitizer builds compare the same
+counters, which do not depend on instrumentation.
+
+The ordinary suite has twenty-seven tests. macOS reports twenty-four passes and
 three skips (backend unavailable, Linux-only setup mocks, and unavailable
 exfatprogs). Linux reports twenty-six passes; FAT fatcat subchecks explicitly
 skip by host policy while dosfstools/mtools coverage runs. The user-provided

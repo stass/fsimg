@@ -16,6 +16,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "baseline.h"
 #include "fat.h"
 #include "io.h"
 #include "publish.h"
@@ -1047,6 +1048,12 @@ test_scale(void)
 int
 main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
+		baseline_tree("fat12-tree", "fat12");
+		baseline_tree("fat16-tree", "fat16");
+		baseline_tree("fat32-tree", "fat32");
+		return (0);
+	}
 	if (argc == 2 && strcmp(argv[1], "--corrupt-plan") == 0) {
 		test_corrupt_payload_plan();
 		return (0);
