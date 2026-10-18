@@ -20,6 +20,7 @@
 #include "publish.h"
 
 static fsimg_status_t host_error(fsimg_error_t *, const char *);
+static fsimg_status_t path_error(fsimg_error_t *, const char *, const char *);
 static fsimg_status_t split_output(const char *, char *, char *, fsimg_error_t *);
 static fsimg_status_t private_directory(int, const char *, char *, int *, bool *,
     fsimg_error_t *);
@@ -47,6 +48,20 @@ host_error(fsimg_error_t *error, const char *message)
 {
 	return (fsimg_error_set(error, errno == EEXIST ? FSIMG_EEXISTS : FSIMG_EIO,
 	    errno, FSIMG_OP_IO, message));
+}
+
+static fsimg_status_t
+path_error(fsimg_error_t *error, const char *message, const char *path)
+{
+	fsimg_status_t status;
+	int count;
+
+	status = host_error(error, message);
+	if (error != NULL) {
+		count = snprintf(error->path, sizeof(error->path), "%s", path);
+		error->path_truncated = count < 0 || (size_t)count >= sizeof(error->path);
+	}
+	return (status);
 }
 
 static fsimg_status_t
@@ -177,7 +192,7 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 			    FSIMG_OP_IO, "scratch parent leaves no room for a private pathname"));
 		paths->scratch_parent = open(options->scratch, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 		if (paths->scratch_parent == -1)
-			return (host_error(error, "scratch parent open failed"));
+			return (path_error(error, "cannot open scratch directory", options->scratch));
 		status = private_directory(paths->scratch_parent, "scratch", paths->scratch_name,
 		    &request->scratch_fd, &paths->scratch_created, error);
 		if (paths->scratch_created)
@@ -195,12 +210,13 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 			    FSIMG_OP_IO, "output parent leaves no room for a private pathname"));
 		paths->parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 		if (paths->parent == -1)
-			return (host_error(error, "output parent open failed"));
-		if (fstatat(paths->parent, paths->basename, &st, AT_SYMLINK_NOFOLLOW) == 0)
-			return (fsimg_error_set(error, FSIMG_EEXISTS, EEXIST,
-			    FSIMG_OP_IO, "output destination already exists"));
+			return (path_error(error, "cannot open output directory", parent_path));
+		if (fstatat(paths->parent, paths->basename, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+			errno = EEXIST;
+			return (path_error(error, "cannot create output", options->output));
+		}
 		if (errno != ENOENT)
-			return (host_error(error, "output destination query failed"));
+			return (path_error(error, "cannot inspect output", options->output));
 		if (request->kind == FSIMG_JOB_CREATE) {
 			status = private_directory(paths->parent, "output", paths->staging_name,
 			    &request->output_fd, &paths->staging_created, error);
@@ -213,14 +229,14 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 				return (status);
 		} else {
 			if (mkdirat(paths->parent, paths->basename, 0700) == -1)
-				return (host_error(error, "new extraction directory creation failed"));
+				return (path_error(error, "cannot create extraction directory", options->output));
 			paths->extraction_created = true;
 			count = snprintf(paths->retained_output, sizeof(paths->retained_output),
 			    "%s", options->output);
 			request->output_fd = openat(paths->parent, paths->basename,
 			    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 			if (request->output_fd == -1)
-				return (host_error(error, "new extraction directory open failed"));
+				return (path_error(error, "cannot open extraction directory", options->output));
 		}
 		if (count < 0 || (size_t)count >= sizeof(paths->retained_output))
 			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
@@ -237,7 +253,7 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	if (request->kind >= FSIMG_JOB_CREATE) {
 		request->source_fd = fsimg_host_source_open(AT_FDCWD, options->source, true);
 		if (request->source_fd == -1)
-			return (host_error(error, "source directory open failed"));
+			return (path_error(error, "cannot open source directory", options->source));
 		if ((request->write.flags & FSIMG_WRITE_REPRODUCIBLE) == 0 &&
 		    fsimg_host_random(&request->write.volume_serial,
 		    sizeof(request->write.volume_serial)) == -1)
@@ -245,7 +261,7 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	} else {
 		request->input_fd = fsimg_host_source_open(AT_FDCWD, options->input, false);
 		if (request->input_fd == -1)
-			return (host_error(error, "image open failed"));
+			return (path_error(error, "cannot open image", options->input));
 		if (fsimg_host_file(request->input_fd, &identity) == -1)
 			return (host_error(error, "image identity query failed"));
 		if (identity.kind != FSIMG_HOST_FILE)

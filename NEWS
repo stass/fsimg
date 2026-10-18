@@ -1,5 +1,13 @@
 fsimg 0.1.0 (unreleased)
 
+Human CLI output uses contextual usage and help, quiet creation/extraction,
+readable volume information and plans, compact format tables and pathname-only
+listings. Metadata-loss notices count affected fields with bounded verbose
+examples. Diagnostics explain relevant paths, OS failures, layout constraints
+and retained/uncertain output without internal error tuples. Verification
+announces human success only after worker completion and finalization; JSON
+completion records and sandbox warning guarantees remain explicit.
+
 Resource contexts account for memory and owned descriptors, enforce session
 quotas, and report cancellation and structured errors. Bounded positional I/O
 supports regular files, callbacks, fixed sinks, and nested slices. Private

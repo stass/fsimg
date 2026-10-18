@@ -249,6 +249,7 @@ validate_options(fsimg_cli_options_t *options, const bool *seen,
 {
 	fsimg_worker_request_t *request = &options->request;
 	bool creating;
+	char message[96];
 
 	if (options->command == FSIMG_CLI_HELP)
 		return (operands == 0 ? FSIMG_OK : syntax(error, "unexpected help operands"));
@@ -277,8 +278,12 @@ validate_options(fsimg_cli_options_t *options, const bool *seen,
 		if (seen['L'] || seen['R'] || seen['e'] || seen['f'] ||
 		    seen['n'] || seen['o'] || seen['s'])
 			return (syntax(error, "creation options do not apply to read commands"));
-		if (options->input == NULL || strcmp(options->input, "-") == 0)
-			return (syntax(error, "read commands require a seekable regular image with -i"));
+		if (options->input == NULL) {
+			snprintf(message, sizeof(message), "%s requires -i image", options->name);
+			return (syntax(error, message));
+		}
+		if (strcmp(options->input, "-") == 0)
+			return (syntax(error, "-i requires a seekable regular image; stdin is not supported"));
 		if ((request->kind == FSIMG_JOB_EXTRACT) != seen['C'])
 			return (syntax(error, "extract requires -C; other read commands reject it"));
 		if (request->kind == FSIMG_JOB_CAT) {
@@ -313,6 +318,7 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 	uint64_t number;
 	int flag;
 	const char *flags;
+	char message[96];
 
 	bzero(options, sizeof(*options));
 	fsimg_worker_request_init(&options->request);
@@ -326,8 +332,10 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 		options->command = argv[1][1] == 'h' ? FSIMG_CLI_HELP : FSIMG_CLI_VERSION;
 		return (FSIMG_OK);
 	}
-	if (argc < 2)
-		return (syntax(error, "a command is required; use fsimg -h"));
+	if (argc < 2) {
+		options->command = FSIMG_CLI_USAGE;
+		return (syntax(error, "a command is required"));
+	}
 	if (strcmp(argv[1], "formats") == 0)
 		options->command = FSIMG_CLI_FORMATS;
 	else {
@@ -335,21 +343,32 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 			if (strcmp(argv[1], names[i]) == 0)
 				request->kind = (fsimg_job_kind_t)(i + 1);
 		}
-		if (request->kind == 0)
-			return (syntax(error, "unknown command; use fsimg -h"));
+		if (request->kind == 0) {
+			status = syntax(error, "unknown command");
+			if (error != NULL) {
+				flag = snprintf(error->path, sizeof(error->path), "%s", argv[1]);
+				error->path_truncated = flag < 0 || (size_t)flag >= sizeof(error->path);
+			}
+			return (status);
+		}
 	}
 	/* BSD getopt stops at the first operand. GNU's leading '+' selects the
 	 * same behavior without changing the process environment.
 	 */
-	flags = options->command == FSIMG_CLI_FORMATS ? FSIMG_HOST_GETOPT_PREFIX "hj" :
-	    FSIMG_HOST_GETOPT_PREFIX "C:L:O:RS:T:b:de:f:hi:jl:m:no:rs:t:vz:";
+	flags = options->command == FSIMG_CLI_FORMATS ? FSIMG_HOST_GETOPT_PREFIX ":hjv" :
+	    FSIMG_HOST_GETOPT_PREFIX ":C:L:O:RS:T:b:de:f:hi:jl:m:no:rs:t:vz:";
 	limit_keys = setting_keys = 0;
 	fsimg_host_getopt_reset();
 	while ((flag = getopt(argc - 1, argv + 1, flags)) != -1) {
-		if (flag == '?' || flag == ':')
-			return (syntax(error, "unknown option or missing option argument"));
-		if (flag != 'l' && flag != 'O' && seen[(unsigned char)flag])
-			return (syntax(error, "singleton option specified more than once"));
+		if (flag == '?' || flag == ':') {
+			snprintf(message, sizeof(message), flag == '?' ?
+			    "unknown option -%c" : "option -%c requires an argument", optopt);
+			return (syntax(error, message));
+		}
+		if (flag != 'l' && flag != 'O' && seen[(unsigned char)flag]) {
+			snprintf(message, sizeof(message), "option -%c specified more than once", flag);
+			return (syntax(error, message));
+		}
 		seen[(unsigned char)flag] = true;
 		status = FSIMG_OK;
 		switch (flag) {

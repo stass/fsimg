@@ -18,7 +18,15 @@ static void escape_scalar(fsimg_cli_display_t *, uint32_t, const unsigned char *
     unsigned, bool);
 static fsimg_status_t escape_span(fsimg_cli_display_t *, const void *, size_t,
     bool, bool, bool, fsimg_error_t *);
+static void prose(fsimg_cli_display_t *, const char *);
+static void byte_size(fsimg_cli_display_t *, uint64_t);
+static void usage(fsimg_cli_display_t *, bool);
+static void help(fsimg_cli_display_t *);
+static void loss_notice(fsimg_cli_display_t *);
+static void metadata_fields(fsimg_cli_display_t *, uint64_t);
+static void format_details(fsimg_cli_display_t *, const fsimg_format_info_t *);
 static void string_value(fsimg_cli_display_t *, const char *);
+static void path_excerpt(fsimg_cli_display_t *, const char *);
 static void uint_value(fsimg_cli_display_t *, uint64_t);
 static const char *confinement_name(fsimg_confinement_t);
 static const char *basis_name(uint64_t);
@@ -184,6 +192,198 @@ string_value(fsimg_cli_display_t *display, const char *value)
 	append(display, "\"");
 }
 
+static void
+path_excerpt(fsimg_cli_display_t *display, const char *path)
+{
+	size_t length;
+	bool truncated;
+
+	/* Bound the escaped operand here so later outcome and cleanup lines
+	 * always fit, independently of upstream host-path validation.
+	 */
+	length = strnlen(path, 257);
+	truncated = length > 256;
+	if (truncated)
+		length = 256;
+	append(display, "\"");
+	escape_span(display, path, length, false, false, true, NULL);
+	append(display, "\"%s", truncated ? " [path truncated]" : "");
+}
+
+/* Prose remains terminal-safe without the delimiters used for names/JSON. */
+static void
+prose(fsimg_cli_display_t *display, const char *value)
+{
+	escape_span(display, value, strlen(value), false, false, true, NULL);
+}
+
+static void
+byte_size(fsimg_cli_display_t *display, uint64_t value)
+{
+	static const char *const units[] = { "bytes", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB" };
+	uint64_t unit, remainder;
+	unsigned index;
+
+	unit = 1;
+	index = 0;
+	while (index < sizeof(units) / sizeof(units[0]) - 1 && value / unit >= 1024) {
+		unit *= 1024;
+		index++;
+	}
+	remainder = value % unit;
+	append(display, "%llu", (unsigned long long)(value / unit));
+	if (remainder != 0)
+		append(display, ".%llu", (unsigned long long)(remainder * 10 / unit));
+	append(display, " %s", units[index]);
+	if (remainder != 0)
+		append(display, " (%llu bytes)", (unsigned long long)value);
+}
+
+static void
+usage(fsimg_cli_display_t *display, bool overview)
+{
+	const fsimg_cli_options_t *options = display->options;
+
+	if (options->request.kind == FSIMG_JOB_CREATE || options->request.kind == FSIMG_JOB_PLAN)
+		append(display, "usage: fsimg create [options] -t format [-o image] source_directory\n");
+	else if (options->request.kind == FSIMG_JOB_INFO)
+		append(display, "usage: fsimg info [options] -i image\n");
+	else if (options->request.kind == FSIMG_JOB_VERIFY)
+		append(display, "usage: fsimg verify [options] -i image\n");
+	else if (options->request.kind == FSIMG_JOB_LIST)
+		append(display, "usage: fsimg ls [options] -i image [image_path]\n");
+	else if (options->request.kind == FSIMG_JOB_CAT)
+		append(display, "usage: fsimg cat [options] -i image image_path\n");
+	else if (options->request.kind == FSIMG_JOB_EXTRACT)
+		append(display, "usage: fsimg extract [options] -i image -C new_directory [image_path]\n");
+	else if (strcmp(options->name, "formats") == 0)
+		append(display, "usage: fsimg formats [-hjv]\n");
+	else {
+		append(display, "usage: fsimg command [options] [operands]\n");
+		if (overview)
+			append(display, "\ncommands:\n"
+			    "    create     Create an image from a directory\n"
+			    "    info       Show image information\n"
+			    "    ls         List image contents\n"
+			    "    cat        Write a file to standard output\n"
+			    "    extract    Extract into a new directory\n"
+			    "    verify     Check filesystem integrity\n"
+			    "    formats    List supported formats\n\n"
+			    "Use fsimg command -h for command help.\n"
+			    "Use fsimg -V for the version; see fsimg(1) for full documentation.\n");
+	}
+}
+
+static void
+help(fsimg_cli_display_t *display)
+{
+	const fsimg_cli_options_t *options = display->options;
+	fsimg_job_kind_t kind = options->request.kind;
+
+	usage(display, true);
+	if (kind == 0 && strcmp(options->name, "formats") != 0)
+		return;
+	append(display, "\noptions:\n");
+	if (strcmp(options->name, "formats") == 0) {
+		append(display, "    -h              Show command help\n"
+		    "    -j              Write newline-delimited JSON\n"
+		    "    -v              Show profiles, geometry and sandbox capabilities on stderr\n\n"
+		    "example:\n    fsimg formats -v\n");
+		return;
+	}
+	if (kind == FSIMG_JOB_EXTRACT)
+		append(display, "    -C directory    Extract into a new private directory\n");
+	if (kind >= FSIMG_JOB_CREATE)
+		append(display, "    -L label        Volume label (default FSIMG)\n"
+		    "    -O key=value    Set sector or cluster size in bytes\n"
+		    "    -R              Create reproducible image bytes\n");
+	else
+		append(display, "    -O oem=cp437    Set FAT short-name encoding\n");
+	append(display, "    -S policy       Sandbox: auto (default), required, or off\n"
+	    "    -T directory    Scratch parent; - disables scratch\n");
+	if (kind < FSIMG_JOB_CREATE)
+		append(display, "    -b bytes        Volume offset (default 0)\n");
+	if (kind == FSIMG_JOB_VERIFY)
+		append(display, "    -d              Also read initialized file data\n");
+	if (kind >= FSIMG_JOB_CREATE)
+		append(display, "    -e epoch        Reproducible Unix timestamp; requires -R\n"
+		    "    -f bytes        Minimum free space in the image\n");
+	append(display, "    -h              Show command help\n");
+	if (kind < FSIMG_JOB_CREATE)
+		append(display, "    -i image        Read a seekable regular image file\n");
+	if (kind != FSIMG_JOB_CAT)
+		append(display, "    -j              Write newline-delimited JSON\n");
+	append(display, "    -l key=value    Set scratch, entries, depth, path, fds, output, work, or seconds\n"
+	    "    -m bytes        Memory budget (default 256M, minimum 16M)\n");
+	if (kind >= FSIMG_JOB_CREATE)
+		append(display, "    -n              Report a plan without creating an image\n"
+		    "    -o image        New output pathname; required unless -n\n");
+	if (kind == FSIMG_JOB_LIST)
+		append(display, "    -r              List recursively\n");
+	if (kind >= FSIMG_JOB_CREATE)
+		append(display, "    -s bytes        Exact image size (default automatic)\n"
+		    "    -t format       Required: fat12, fat16, fat32, or exfat\n");
+	else
+		append(display, "    -t format       Force a decoder while retaining validation\n");
+	append(display, "    -v              Show progress, details and sampled metadata losses on stderr\n");
+	if (kind < FSIMG_JOB_CREATE)
+		append(display, "    -z bytes        Volume slice length (default remaining file length)\n");
+	append(display, "\nOptions precede operands. K, M, G, T and P are powers of 1024.\n");
+	switch (kind) {
+	case FSIMG_JOB_CREATE: case FSIMG_JOB_PLAN:
+		append(display, "Output must be new. Keep the source directory stable during creation.\n\n"
+		    "examples:\n    fsimg create -R -t exfat -o data.img ./files\n"
+		    "    fsimg create -n -t fat32 -s 1G ./files\n");
+		break;
+	case FSIMG_JOB_INFO:
+		append(display, "\nexample:\n    fsimg info -i data.img\n");
+		break;
+	case FSIMG_JOB_LIST:
+		append(display, "\nexample:\n    fsimg ls -r -i data.img /documents\n");
+		break;
+	case FSIMG_JOB_CAT:
+		append(display, "\nexample:\n    fsimg cat -i data.img /readme.txt > readme.txt\n");
+		break;
+	case FSIMG_JOB_EXTRACT:
+		append(display, "Extracts content with private modes; does not restore host timestamps.\n\n"
+		    "example:\n    fsimg extract -i data.img -C ./new-output\n");
+		break;
+	case FSIMG_JOB_VERIFY:
+		append(display, "Checks the filesystem without repairing it.\n\n"
+		    "example:\n    fsimg verify -d -i data.img\n");
+		break;
+	}
+}
+
+static void
+metadata_fields(fsimg_cli_display_t *display, uint64_t fields)
+{
+	static const char *const names[] = {
+		"creation time", "modification time", "access time", "attributes"
+	};
+	bool first = true;
+
+	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if ((fields & (UINT64_C(1) << i)) == 0)
+			continue;
+		append(display, "%s%s", first ? "" : ", ", names[i]);
+		first = false;
+	}
+}
+
+static void
+loss_notice(fsimg_cli_display_t *display)
+{
+	uint64_t losses = display->result->metadata_losses;
+
+	if (losses != 0)
+		append(display, "fsimg: warning: %llu metadata field%s could not be preserved exactly%s\n",
+		    (unsigned long long)losses, losses == 1 ? "" : "s",
+		    (display->options->request.flags & FSIMG_JOB_VERBOSE) == 0 ? "; use -v for examples" : "");
+	else if (display->failure != NULL && display->loss_examples != 0)
+		append(display, "fsimg: warning: some metadata could not be preserved exactly; final count unavailable\n");
+}
+
 static const char *
 confinement_name(fsimg_confinement_t confinement)
 {
@@ -247,6 +447,7 @@ static void
 volume(fsimg_cli_display_t *display, const unsigned char *raw)
 {
 	uint64_t valid = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VALID);
+	char format_name[16];
 	bool json = display->options->json;
 
 	if (json) {
@@ -279,25 +480,36 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 		    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_IO_ERROR) ? "true" : "false");
 		return;
 	}
-	string_value(display, (const char *)raw + FSIMG_WIRE_INFO_FORMAT);
-	append(display, " profile=");
-	string_value(display, (const char *)raw + FSIMG_WIRE_INFO_PROFILE);
-	append(display, " label=");
+	append(display, "Format:       ");
+	bcopy(raw + FSIMG_WIRE_INFO_FORMAT, format_name, sizeof(format_name));
+	format_name[sizeof(format_name) - 1] = '\0';
+	for (size_t i = 0; format_name[i] != '\0'; i++) {
+		if (format_name[i] >= 'a' && format_name[i] <= 'z')
+			format_name[i] = (char)(format_name[i] - 'a' + 'A');
+	}
+	prose(display, format_name);
+	append(display, "\nLabel:        ");
 	if ((valid & FSIMG_VOLUME_LABEL) != 0)
 		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_LABEL);
 	else
 		append(display, "unknown");
-	append(display, "\nvolume=%llu bytes sector=%llu bytes cluster=%llu bytes units=%llu\n"
-	    "validation=header time-basis=%s entry-count=unknown free-bytes=",
-	    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME),
-	    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SECTOR),
-	    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLUSTER),
-	    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_UNITS),
-	    basis_name(fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS)));
+	append(display, "\nVolume size:  ");
+	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME));
+	append(display, "\nSector size:  ");
+	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SECTOR));
+	append(display, "\nCluster size: ");
+	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLUSTER));
+	append(display, "\nFree space:   ");
 	if ((valid & FSIMG_VOLUME_FREE) != 0)
-		append(display, "%llu\n", (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_FREE));
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_FREE));
 	else
-		append(display, "unknown\n");
+		append(display, "unknown (not scanned)");
+	append(display, "\nValidation:   header only\nTime basis:   %s\nProfile:      ",
+	    basis_name(fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS)));
+	prose(display, (const char *)raw + FSIMG_WIRE_INFO_PROFILE);
+	append(display, "\nCapabilities: read%s%s\n",
+	    (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_WRITE) != 0 ? ", write" : "",
+	    (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_VERIFY) != 0 ? ", verify" : "");
 }
 
 static void
@@ -323,18 +535,24 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SECTOR),
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_CLUSTER));
 	} else {
-		string_value(display, (const char *)raw + FSIMG_WIRE_PLAN_FORMAT);
-		append(display, " plan: volume=%llu payload=%llu metadata=%llu free=%llu bytes\n"
-		    "sector=%llu cluster=%llu bytes entries=%llu metadata-losses=%llu\n"
-		    "source profile: special-node opens require isolated source storage\n",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_PAYLOAD),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_METADATA),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_FREE),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SECTOR),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_CLUSTER),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_ENTRIES),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_LOSSES));
+		append(display, "Format:       ");
+		prose(display, (const char *)raw + FSIMG_WIRE_PLAN_FORMAT);
+		append(display, "\nVolume size:  ");
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME));
+		append(display, "\nFile data:    ");
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_PAYLOAD));
+		append(display, "\nMetadata:     ");
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_METADATA));
+		append(display, "\nFree space:   ");
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_FREE));
+		append(display, "\nSector size:  ");
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SECTOR));
+		append(display, "\nCluster size: ");
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_CLUSTER));
+		append(display, "\nEntries:      %llu\nScratch used: ",
+		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_ENTRIES));
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SCRATCH));
+		append(display, "\n");
 	}
 }
 
@@ -358,8 +576,7 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 		timestamp(display, raw + FSIMG_WIRE_ENTRY_ACCESSED, (valid & FSIMG_META_ACCESSED) != 0);
 		append(display, ",\"path\":\"");
 	} else
-		append(display, "%c %llu \"", directory ? 'd' : 'f',
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH));
+		append(display, "\"");
 	display->entry_open = true;
 }
 
@@ -369,7 +586,6 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 	static const char *const keys[] = { "files", "directories", "logical_bytes",
 	    "initialized_bytes_read", "allocated_clusters", "free_clusters", "bad_clusters" };
 
-	display->scope = (fsimg_validation_scope_t)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_SCOPE);
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"verify\",\"complete\":true,\"validation_scope\":\"%s\"",
 		    scope_name(display));
@@ -378,12 +594,13 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 			uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES + i * 8));
 		}
 		append(display, "}\n");
-	} else
-		append(display, "verified %s: files=%llu directories=%llu initialized-read=%llu bytes\n",
-		    scope_name(display),
+	} else {
+		path_excerpt(display, display->options->input);
+		append(display, ": filesystem structure%s verified (%llu files, %llu directories)\n",
+		    display->scope == FSIMG_VALIDATION_PAYLOAD ? " and initialized file data" : "",
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_DIRECTORIES),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_PAYLOAD));
+		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_DIRECTORIES));
+	}
 }
 
 static void
@@ -422,21 +639,31 @@ format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 		sizes(display, info->write_allocation_unit_size_mask);
 		append(display, "}\n");
 	} else {
-		append(display, "%s read=%s write=%s verify=%s profile=", info->name,
-		    (info->capabilities & FSIMG_CAP_READ) ? "yes" : "no",
-		    (info->capabilities & FSIMG_CAP_WRITE) ? "yes" : "no",
-		    (info->capabilities & FSIMG_CAP_VERIFY) ? "yes" : "no");
-		string_value(display, info->profile);
-		append(display, "\n  max-file=%llu max-volume=%llu bytes name=%u UTF-16 units\n  sectors=",
-		    (unsigned long long)info->max_file_bytes,
-		    (unsigned long long)info->max_volume_bytes, info->max_name_utf16_units);
-		sizes(display, info->sector_size_mask);
-		append(display, " read-clusters=");
-		sizes(display, info->allocation_unit_size_mask);
-		append(display, " write-clusters=");
-		sizes(display, info->write_allocation_unit_size_mask);
-		append(display, " bytes metadata-fields=0x%x\n", info->metadata_fields);
+		append(display, "%-6s  %-4s  %-5s  %s\n", info->name,
+		    (info->capabilities & FSIMG_CAP_READ) != 0 ? "yes" : "no",
+		    (info->capabilities & FSIMG_CAP_WRITE) != 0 ? "yes" : "no",
+		    (info->capabilities & FSIMG_CAP_VERIFY) != 0 ? "yes" : "no");
 	}
+}
+
+static void
+format_details(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
+{
+	append(display, "%s:\n  Profile: ", info->name);
+	prose(display, info->profile);
+	append(display, "\n  Maximum file size: ");
+	byte_size(display, info->max_file_bytes);
+	append(display, "\n  Maximum volume size: ");
+	byte_size(display, info->max_volume_bytes);
+	append(display, "\n  Maximum name: %u UTF-16 units\n  Sector sizes (bytes): ", info->max_name_utf16_units);
+	sizes(display, info->sector_size_mask);
+	append(display, "\n  Read cluster sizes (bytes): ");
+	sizes(display, info->allocation_unit_size_mask);
+	append(display, "\n  Write cluster sizes (bytes): ");
+	sizes(display, info->write_allocation_unit_size_mask);
+	append(display, "\n  Metadata: ");
+	metadata_fields(display, info->metadata_fields);
+	append(display, "\n");
 }
 
 static void
@@ -488,11 +715,12 @@ summary(fsimg_cli_display_t *display)
 		append(display, ",\"progress_records\":\"%llu\",", (unsigned long long)display->progress_records);
 		output_counts(display);
 		append(display, "}\n");
-	} else
-		append(display, "complete: %s entries=%llu logical-bytes=%llu metadata-losses=%llu sandbox=%s%s\n",
-		    scope_name(display), (unsigned long long)r->entries,
-		    (unsigned long long)r->logical_bytes, (unsigned long long)r->metadata_losses,
-		    confinement_name(r->confinement), display->paths->published ? " published" : "");
+	} else {
+		append(display, "fsimg: %s: %llu entries, ", scope_name(display),
+		    (unsigned long long)r->entries);
+		byte_size(display, r->logical_bytes);
+		append(display, "%s\n", display->paths->published ? "; image published" : "");
+	}
 }
 
 static void
@@ -535,26 +763,61 @@ failure(fsimg_cli_display_t *display)
 		append(display, "}\n");
 		return;
 	}
-	append(display, "fsimg: %s: ", fsimg_status_string(error->status));
-	string_value(display, error->message);
-	append(display, " (resource=%s output=%s errno=%d cleanup-errno=%d)", resource,
-	    state, error->os_error, error->cleanup_error);
-	if (error->path[0] != '\0') {
-		append(display, " path=");
+	if (display->syntax && display->options->command == FSIMG_CLI_USAGE) {
+		usage(display, true);
+		return;
+	}
+	append(display, "fsimg: ");
+	prose(display, error->message[0] != '\0' ? error->message : fsimg_status_string(error->status));
+	if (error->message_truncated)
+		append(display, " [message truncated]");
+	if (error->path[0] != '\0' || (display->syntax &&
+	    display->options->command == FSIMG_CLI_PROCESS &&
+	    display->options->request.kind == 0)) {
+		append(display, " ");
 		string_value(display, error->path);
+		if (error->path_truncated)
+			append(display, " [path truncated]");
+	}
+	if (error->os_error != 0) {
+		append(display, ": ");
+		prose(display, strerror(error->os_error));
 	}
 	if (error->resource != FSIMG_RESOURCE_NONE)
-		append(display, " limit=%llu observed=%llu", (unsigned long long)error->limit,
-		    (unsigned long long)error->observed);
+		append(display, " (%s limit %llu, observed %llu)", resource,
+		    (unsigned long long)error->limit, (unsigned long long)error->observed);
+	if (error->offset_valid)
+		append(display, " at byte %llu", (unsigned long long)error->offset);
+	append(display, "\n");
+	if (error->output_state == FSIMG_OUTPUT_INCOMPLETE)
+		append(display, "fsimg: output is incomplete\n");
+	else if (error->output_state == FSIMG_OUTPUT_PUBLISHED) {
+		append(display, "fsimg: output was published");
+		if (display->options->output != NULL) {
+			append(display, " as ");
+			path_excerpt(display, display->options->output);
+		}
+		append(display, "; finalization failed; do not retry blindly\n");
+	} else if (error->output_state == FSIMG_OUTPUT_UNCERTAIN)
+		append(display, "fsimg: output publication or durability is uncertain; inspect the destination before retrying\n");
+	if (error->cleanup_error != 0) {
+		append(display, "fsimg: cleanup failed: ");
+		prose(display, strerror(error->cleanup_error));
+		append(display, "\n");
+	}
 	if (display->paths->retained_output[0] != '\0') {
-		append(display, " retained-output=");
+		append(display, "fsimg: retained output: ");
 		string_value(display, display->paths->retained_output);
+		append(display, "\n");
 	}
 	if (display->paths->retained_scratch[0] != '\0') {
-		append(display, " retained-scratch=");
+		append(display, "fsimg: retained scratch: ");
 		string_value(display, display->paths->retained_scratch);
+		append(display, "\n");
 	}
-	append(display, "\n");
+	loss_notice(display);
+	if (display->syntax)
+		usage(display, false);
 }
 
 void
@@ -600,14 +863,24 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 			if (options->json)
 				append(display, "{\"schema\":1,\"type\":\"capabilities\",\"sandbox\":\"%s\"}\n",
 				    confinement_name(display->result->confinement));
-			else append(display, "fsimg: sandbox %s\n", confinement_name(display->result->confinement));
+			else {
+				append(display, "fsimg: sandbox %s\n", confinement_name(display->result->confinement));
+				if (options->request.kind >= FSIMG_JOB_CREATE)
+					append(display, "fsimg: source profile requires isolated storage to exclude special-node opens\n");
+			}
 		}
 		break;
 	case FSIMG_FRAME_INFO:
 		if (options->json || options->request.kind == FSIMG_JOB_INFO)
 			volume(display, raw);
 		break;
-	case FSIMG_FRAME_PLAN: plan(display, raw); break;
+	case FSIMG_FRAME_PLAN:
+		if (options->json || options->request.kind == FSIMG_JOB_PLAN ||
+		    (options->request.flags & FSIMG_JOB_VERBOSE) != 0) {
+			plan(display, raw);
+			diagnostic = !options->json && options->request.kind == FSIMG_JOB_CREATE;
+		}
+		break;
 	case FSIMG_FRAME_ENTRY:
 		if (listing) entry_start(display, raw);
 		break;
@@ -625,29 +898,45 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 			display->entry_open = false;
 		}
 		break;
-	case FSIMG_FRAME_VERIFY: verification(display, raw); break;
+	case FSIMG_FRAME_VERIFY:
+		display->scope = (fsimg_validation_scope_t)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_SCOPE);
+		if (options->json)
+			verification(display, raw);
+		else
+			bcopy(raw, display->verification, sizeof(display->verification));
+		break;
 	case FSIMG_FRAME_PROGRESS:
 		if (!progress_milestone(display, raw))
 			break;
 		diagnostic = true;
 		append(display, options->json ?
 		    "{\"schema\":1,\"type\":\"progress\",\"entries\":\"%llu\",\"bytes\":\"%llu\",\"work\":\"%llu\"}\n" :
-		    "fsimg: entries=%llu bytes=%llu work=%llu\n",
+		    "fsimg: processed %llu entries, %llu bytes (%llu work units)\n",
 		    (unsigned long long)fsimg_wire_get64(raw),
 		    (unsigned long long)fsimg_wire_get64(raw + 8),
 		    (unsigned long long)fsimg_wire_get64(raw + 16));
 		break;
 	case FSIMG_FRAME_LOSS:
+		display->loss_examples++;
+		if (!options->json && (options->request.flags & FSIMG_JOB_VERBOSE) == 0)
+			break;
 		diagnostic = true;
 		if (options->json)
 			append(display, "{\"schema\":1,\"type\":\"loss\",\"fields\":%llu,\"path_truncated\":%s,\"path_excerpt\":\"",
 			    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS),
 			    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_TRUNCATED) ? "true" : "false");
-		else append(display, "fsimg: optional metadata loss fields=0x%llx path=\"",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS));
+		else {
+			append(display, "fsimg: metadata example: ");
+			metadata_fields(display, fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS));
+			append(display, " could not be preserved exactly for \"");
+		}
 		escape_span(display, raw + FSIMG_WIRE_LOSS_PATH,
 		    (size_t)fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_LENGTH), options->json, false, true, NULL);
-		append(display, options->json ? "\"}\n" : "\"\n");
+		if (options->json)
+			append(display, "\"}\n");
+		else
+			append(display, "\"%s\n", fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_TRUNCATED) != 0 ?
+			    " [path truncated]" : "");
 		break;
 	default: break;
 	}
@@ -691,7 +980,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 	const fsimg_cli_options_t *options = display->options;
 	fsimg_format_info_t info;
 	fsimg_status_t status;
-	bool diagnostic;
+	bool diagnostic, first;
 
 	display->used = 0;
 	display->overflow = false;
@@ -709,23 +998,39 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 			return (FSIMG_DONE);
 	} else if (options->command == FSIMG_CLI_FORMATS) {
 		if (display->phase == FSIMG_CLI_OUTPUT_RECORDS) {
+			first = display->format_cursor == 0;
 			status = fsimg_format_next(&display->format_cursor, &info, error);
 			if (status == FSIMG_OK) {
+				if (first && !options->json)
+					append(display, "Format  Read  Write  Verify\n");
 				format(display, &info);
 				return (finish_span(display, false, text, error));
 			}
 			if (status != FSIMG_DONE)
 				return (status);
+			display->format_cursor = 0;
 			display->phase = FSIMG_CLI_OUTPUT_CAPABILITIES;
 		}
 		if (display->phase == FSIMG_CLI_OUTPUT_CAPABILITIES) {
+			if (!options->json) {
+				if ((options->request.flags & FSIMG_JOB_VERBOSE) == 0)
+					return (FSIMG_DONE);
+				status = fsimg_format_next(&display->format_cursor, &info, error);
+				if (status == FSIMG_OK) {
+					format_details(display, &info);
+					return (finish_span(display, true, text, error));
+				}
+				if (status != FSIMG_DONE)
+					return (status);
+				diagnostic = true;
+			}
 			if (options->json)
 				append(display, "{\"schema\":1,\"type\":\"capabilities\",\"sandbox_backend\":\"%s\","
 				    "\"sandbox_runtime\":\"%s\",\"source_device_open_exclusion\":false,"
 				    "\"posix_modes\":false,\"ownership\":false,\"links\":false,\"boot_loader\":false}\n",
 				    fsimg_sandbox_backend(), strcmp(fsimg_sandbox_backend(), "none") == 0 ?
 				    "unavailable" : "not-probed");
-			else append(display, "sandbox backend=%s runtime=%s\n"
+			else append(display, "Sandbox backend: %s (runtime %s)\n"
 			    "content profile: regular files/directories and representable timestamps; no modes, ownership, links or boot loader\n"
 			    "source profile requires isolated storage to exclude special-node opens\n",
 			    fsimg_sandbox_backend(), strcmp(fsimg_sandbox_backend(), "none") == 0 ?
@@ -739,30 +1044,27 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 	} else {
 		if (display->phase == FSIMG_CLI_OUTPUT_DONE)
 			return (FSIMG_DONE);
+		if (options->command == FSIMG_CLI_PROCESS && !options->json &&
+		    display->phase == FSIMG_CLI_OUTPUT_RECORDS) {
+			display->phase = FSIMG_CLI_OUTPUT_SUMMARY;
+			loss_notice(display);
+			if (display->used != 0)
+				return (finish_span(display, true, text, error));
+		}
 		display->phase = FSIMG_CLI_OUTPUT_DONE;
 		if (options->command == FSIMG_CLI_HELP)
-			append(display, "Usage: fsimg create [options] -t format -o image source_directory\n"
-			    "       fsimg info|verify [options] -i image\n"
-			    "       fsimg ls [options] -i image [image_path]\n"
-			    "       fsimg cat [options] -i image image_path\n"
-			    "       fsimg extract [options] -i image -C new_directory [image_path]\n"
-			    "       fsimg formats [-j] | -h | -V\n\n"
-			    "Common: -S auto|required|off -T scratch_directory|- -j -m bytes -l key=value -v\n"
-			    "Limits: scratch,entries,depth,path,fds,output,work,seconds (zero selects defaults)\n"
-			    "Read:   -b offset_bytes -z length_bytes -t format -O oem=cp437\n"
-			    "Create: -L label -R [-e signed_epoch] -f free_bytes -s exact_bytes -n\n"
-			    "        -O sector=bytes -O cluster=bytes\n"
-			    "ls: -r recursive; verify: -d initialized payload read-through; cat rejects -j\n"
-			    "Byte suffixes: K M G T P (powers of 1024). Options precede operands.\n"
-			    "Outputs must be new. Inputs are seekable regular files; no stdin spooling.\n");
+			help(display);
 		else if (options->command == FSIMG_CLI_VERSION)
 			append(display, "fsimg %s\n", PACKAGE_VERSION);
-		else {
-			diagnostic = options->request.kind == FSIMG_JOB_CAT;
-			if (diagnostic && (options->request.flags & FSIMG_JOB_VERBOSE) == 0)
-				return (FSIMG_DONE);
+		else if (options->json)
 			summary(display);
-		}
+		else if (options->request.kind == FSIMG_JOB_VERIFY)
+			verification(display, display->verification);
+		else if ((options->request.flags & FSIMG_JOB_VERBOSE) != 0) {
+			summary(display);
+			diagnostic = true;
+		} else
+			return (FSIMG_DONE);
 	}
 	return (finish_span(display, diagnostic, text, error));
 }

@@ -47,7 +47,12 @@ make check-fuzz-extended
 examples, CLI integration with an independent JSON decoder, and an ASCII
 source/build check. Test logs are in `test-suite.log` and individual `.log`
 files. Fixtures are relative to the disposable build directory and cleaned on
-success. `check-security` runs the publication and sandbox harnesses directly;
+success. CLI presentation regressions can also be run with `make test-cli fsimg`,
+`./test-cli`, and `python3 ../test/cli.py ./fsimg` from a separate build directory
+(use `test/cli.py` for an in-tree build). They cover contextual help, exact stream
+destinations, quiet success, bounded loss examples, layout rejection reasons,
+terminal controls and final verification timing, alongside JSON and output
+failure checks. `check-security` runs the publication and sandbox harnesses directly;
 a sandbox skip is printed explicitly. Automake records exit 77 as SKIP.
 The sandbox harness forks disposable single-threaded children, closes inherited
 handles, disables core dumps, installs the profile, and attempts real forbidden
@@ -68,6 +73,13 @@ LSan/MSan targets print SKIP on non-Linux hosts; this is not a passing check.
 Linux MSan requires Clang and an appropriate runtime; an unsupported compiler
 or runtime fails configuration rather than being reported as a pass. TSan is
 not applicable to the serial library and process-only test harnesses.
+
+Autotools rejects out-of-tree configuration when the source directory is already
+configured in place. To preserve such a build, copy the tracked sources including
+local edits into a disposable unconfigured source tree, run `autoreconf -fi`
+there, then run `sh build-aux/sanitize.sh asan /absolute/source/copy` and
+`sh build-aux/sanitize.sh ubsan /absolute/source/copy` from that copy. The source
+argument must be absolute because the script enters its sanitizer build directory.
 
 Fresh worker and output-relay processes use fixed sanitizer settings, including
 `abort_on_error=0`, `exitcode=86`, and `symbolize=0`. The supervisor classifies

@@ -288,9 +288,9 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		bzero(&warning, sizeof(warning));
 		warning.diagnostic = true;
 		if (state->result->confinement == FSIMG_CONFINEMENT_UNAVAILABLE)
-			warning.data = "fsimg: OS sandbox unavailable; processing without OS confinement\n";
+			warning.data = "fsimg: warning: OS sandbox unavailable; continuing without confinement\n";
 		else if (state->result->confinement == FSIMG_CONFINEMENT_DISABLED)
-			warning.data = "fsimg: OS sandbox explicitly disabled\n";
+			warning.data = "fsimg: warning: OS sandbox explicitly disabled\n";
 		if (warning.data != NULL)
 			warning.length = strlen(warning.data);
 		state->phase = WORKER_WARNING;

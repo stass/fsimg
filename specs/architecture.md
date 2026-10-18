@@ -166,6 +166,15 @@ streaming representation. Cleanup of private scratch is descriptor-relative,
 does not follow links or recurse into worker-created directories, and has a
 finite entry bound; incomplete cleanup reports the retained location.
 
+Human presentation and structured records share the bounded formatter and relay.
+Human commands use their exit status for completion; JSON retains its explicit
+final completion record. The formatter retains one fixed verification result so
+human success is emitted only after worker exit and required finalization.
+Optional metadata-loss samples are bounded examples, while the worker's final
+aggregate counts affected fields. Quiet presentation never suppresses required
+sandbox warnings or uncertain/retained-output diagnostics. The CLI design owns
+the command-specific presentation rules.
+
 The coordinator owns one output ledger for the complete command, borrowed by
 every relay phase. It records queued formatted bytes and confirmed stdout/stderr
 bytes; raw cat bytes retain their independent logical-output ceiling. The text

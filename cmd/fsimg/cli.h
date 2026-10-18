@@ -12,6 +12,7 @@ typedef enum fsimg_cli_command {
 	FSIMG_CLI_PROCESS,
 	FSIMG_CLI_FORMATS,
 	FSIMG_CLI_HELP,
+	FSIMG_CLI_USAGE,
 	FSIMG_CLI_VERSION
 } fsimg_cli_command_t;
 
@@ -64,7 +65,11 @@ typedef struct fsimg_cli_display {
 	unsigned	 utf8_needed;
 	unsigned	 progress_levels[3];
 	uint64_t	 progress_records;
+	uint64_t	 loss_examples;
+	/* The result is announced only after worker exit and finalization. */
+	unsigned char	 verification[FSIMG_WIRE_VERIFY_BYTES];
 	fsimg_validation_scope_t scope;
+	bool		 syntax;
 	bool		 entry_open;
 	bool		 overflow;
 	bool		 progress_started;

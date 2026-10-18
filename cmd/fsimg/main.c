@@ -93,6 +93,7 @@ main(int argc, char **argv)
 			options.request.deadline_milliseconds = now + options.request.seconds * 1000;
 	}
 	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.syntax = invalid_syntax;
 	if (status == FSIMG_OK && options.command == FSIMG_CLI_PROCESS) {
 		status = fsimg_cli_prepare(&options, &paths, &error);
 		if (status == FSIMG_OK)

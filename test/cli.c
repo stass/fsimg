@@ -22,6 +22,9 @@ static void test_names(bool);
 static void test_private_cleanup(void);
 static void test_staging_cleanup(void);
 static void test_progress(void);
+static void test_final_diagnostics(void);
+static void test_verification_completion(void);
+static void test_volume_controls(void);
 
 static void
 test_numbers(void)
@@ -153,7 +156,10 @@ test_names(bool json)
 	bcopy(text.data, output + used, text.length);
 	used += text.length;
 	output[used] = '\0';
-	CHECK(strstr(output, "9007199254740993") != NULL);
+	if (json)
+		CHECK(strstr(output, "9007199254740993") != NULL);
+	else
+		CHECK(output[0] == '"');
 	CHECK(strstr(output, "/x\342\202\254\\\"\\u001b") != NULL);
 	CHECK(memchr(output, '\033', used) == NULL);
 	CHECK(!display.entry_open && display.utf8_used == 0);
@@ -240,6 +246,125 @@ test_private_cleanup(void)
 	CHECK(unlinkat(parent, "sentinel", 0) == 0);
 	CHECK(unlinkat(parent, "image", 0) == 0);
 	CHECK(close(parent) == 0 && rmdir(root) == 0);
+}
+
+static void
+test_volume_controls(void)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_INFO, .length = FSIMG_WIRE_INFO_BYTES };
+	fsimg_worker_text_t text;
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_INFO;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	bcopy("fat\033\n", frame.payload + FSIMG_WIRE_INFO_FORMAT, 6);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	CHECK(memchr(text.data, '\033', text.length) == NULL);
+	CHECK(strstr(display.buffer, "FAT\\u001b\\u000a") != NULL);
+}
+
+static void
+test_verification_completion(void)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_VERIFY, .length = FSIMG_WIRE_VERIFY_BYTES };
+	fsimg_worker_text_t text;
+	fsimg_error_t error;
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_VERIFY;
+	options.input = "image";
+	options.scratch = "-";
+	fsimg_wire_put64(frame.payload + FSIMG_WIRE_VERIFY_SCOPE, FSIMG_VALIDATION_STRUCTURAL);
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	CHECK(text.length == 0);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "filesystem structure verified") != NULL);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_DONE);
+
+	/* A result frame alone does not certify successful worker exit. */
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	CHECK(text.length == 0);
+	fsimg_error_set(&error, FSIMG_EIO, 0, FSIMG_OP_IO, "worker failed");
+	display.failure = &error;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(text.diagnostic && strstr(display.buffer, "verified") == NULL);
+}
+
+static void
+test_final_diagnostics(void)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_worker_text_t text;
+	fsimg_error_t error;
+	char oversized[24001];
+
+	fsimg_worker_request_init(&options.request);
+	options.scratch = "-";
+	fsimg_error_set(&error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER, "cannot plan image");
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.failure = &error;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strcmp(display.buffer, "fsimg: cannot plan image\n") == 0);
+	for (unsigned state = FSIMG_OUTPUT_INCOMPLETE; state <= FSIMG_OUTPUT_UNCERTAIN; state++) {
+		error.output_state = (fsimg_output_state_t)state;
+		error.cleanup_error = EACCES;
+		strcpy(paths.retained_output, "private\033output");
+		strcpy(paths.retained_scratch, "private\nscratch");
+		fsimg_cli_display_init(&display, &options, &result, &paths);
+		display.failure = &error;
+		CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+		CHECK(text.diagnostic && strstr(display.buffer, "cleanup failed: Permission denied") != NULL);
+		CHECK(strstr(display.buffer, "retained output:") != NULL);
+		CHECK(strstr(display.buffer, "retained scratch:") != NULL);
+		CHECK(strstr(display.buffer, "\\u001b") != NULL);
+		CHECK(memchr(text.data, '\033', text.length) == NULL);
+		if (state == FSIMG_OUTPUT_INCOMPLETE)
+			CHECK(strstr(display.buffer, "output is incomplete") != NULL);
+		if (state == FSIMG_OUTPUT_PUBLISHED)
+			CHECK(strstr(display.buffer, "output was published") != NULL);
+		if (state == FSIMG_OUTPUT_UNCERTAIN)
+			CHECK(strstr(display.buffer, "publication or durability is uncertain") != NULL);
+	}
+	/* Mandatory outcome reporting has its own bound, independent of argv. */
+	memset(oversized, '\033', sizeof(oversized) - 1);
+	oversized[sizeof(oversized) - 1] = '\0';
+	options.output = oversized;
+	error.output_state = FSIMG_OUTPUT_PUBLISHED;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.failure = &error;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "output was published") != NULL);
+	CHECK(strstr(display.buffer, "[path truncated]") != NULL);
+	CHECK(strstr(display.buffer, "retained scratch:") != NULL);
+
+	options.input = oversized;
+	options.request.kind = FSIMG_JOB_VERIFY;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "[path truncated]") != NULL);
+	CHECK(strstr(display.buffer, "verified") != NULL);
+	oversized[256] = '\0';
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "[path truncated]") == NULL);
+	oversized[256] = '\033';
+	oversized[257] = '\0';
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "[path truncated]") != NULL);
 }
 
 static void
@@ -337,6 +462,9 @@ main(int argc, char **argv)
 	CHECK(argc == 1);
 	test_numbers();
 	test_options();
+	test_volume_controls();
+	test_final_diagnostics();
+	test_verification_completion();
 	test_names(false);
 	test_names(true);
 	test_private_cleanup();

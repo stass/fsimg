@@ -35,7 +35,7 @@
 .Op Ar image_path
 .Nm
 .Cm formats
-.Op Fl j
+.Op Fl hjv
 .Nm
 .Fl h | V
 .Sh DESCRIPTION
@@ -65,7 +65,9 @@ to terminate option parsing.
 Unknown options, repeated singleton options and repeated setting keys fail.
 .Bl -tag -width Ds
 .It Fl h
-Display help.
+Display help for the selected command.
+At top level, display the command overview.
+Without arguments, the overview goes to stderr and the command exits 2.
 .It Fl S Ar auto|required|off
 Select sandbox policy.
 Required mode refuses an unavailable backend; off explicitly disables
@@ -88,7 +90,9 @@ Scratch, path and output use bytes; other values use unsigned decimal counts.
 Zero selects the documented default.
 Seconds sets an operation deadline; zero adds no deadline.
 .It Fl v
-Report bounded progress and capabilities on stderr.
+Report bounded progress, capability details and sampled metadata-loss examples
+on stderr.
+With formats, show geometry, profiles and sandbox capabilities on stderr.
 .El
 .Pp
 Byte quantities use unsigned decimal with optional uppercase K, M, G, T or P
@@ -193,6 +197,27 @@ incomplete.
 .Sh OUTPUT
 Human names and controls are escaped.
 Diagnostics and bounded progress use stderr; payloads and records use stdout.
+Successful create and extract commands are silent by default.
+Listings contain one quoted pathname per line, without a completion trailer.
+Info and dry-run creation plans use aligned labels and binary byte units.
+Unknown free space is labeled without scanning the filesystem.
+Formats displays a compact read/write/verify table; use
+.Fl v
+for detailed restrictions.
+Creation plans appear on stdout with
+.Fl n
+or on stderr during verbose creation.
+Verify reports the checked scope only after successful worker exit and
+finalization.
+.Pp
+Optional metadata loss produces one notice counting affected fields, not files.
+Verbose examples are sampled and truncated path excerpts are labeled.
+Sandbox warnings remain visible before processing.
+Errors explain the failure and any relevant OS error without numeric errno
+fields.
+Actual cleanup failures, retained paths, incomplete output and uncertain
+publication or durability are always reported.
+.Pp
 JSON entries stream individually and are followed by a successful summary only
 after worker completion and required finalization.
 An error record or missing successful summary means incomplete output.

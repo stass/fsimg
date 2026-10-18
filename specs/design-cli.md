@@ -15,10 +15,13 @@ fsimg ls [options] -i image [image_path]
 fsimg cat [options] -i image image_path
 fsimg extract [options] -i image -C new_directory [image_path]
 fsimg verify [options] -i image
-fsimg formats [-j]
+fsimg formats [-jv]
 ```
 
-`-h` displays command help; top-level `-V` displays the version. Options precede
+Without arguments, fsimg prints the command overview to stderr and exits 2.
+`-h` displays the overview; a command's `-h` displays only that command's
+synopsis, options, and examples on stdout. Syntax errors name the problem and
+include the applicable synopsis on stderr. Top-level `-V` displays the version. Options precede
 operands on every host; `--` permits an operand beginning with a dash.
 
 Input images are seekable regular files. `-` is not an implicit request to
@@ -29,7 +32,7 @@ the library API.
 
 ## Common processing options
 
-These options apply to processing commands. `formats` accepts only `-j` and
+These options apply to processing commands. `formats` accepts `-j`, `-v` and
 `-h`, as shown in its synopsis.
 
 | Option | Meaning |
@@ -39,7 +42,7 @@ These options apply to processing commands. `formats` accepts only `-j` and
 | `-j` | Streaming machine-readable records, where supported |
 | `-l key=value` | Repeatable resource limit, with each key specified at most once |
 | `-m bytes` | Aggregate fsimg memory budget; default 256 MiB |
-| `-v` | Progress/capability diagnostics on stderr |
+| `-v` | Bounded progress, capability details and sampled metadata-loss examples on stderr |
 
 `-l` keys are `scratch`, `entries`, `depth`, `path`, `fds`, `output`, `work`,
 and `seconds`. Scratch/path/output values are byte quantities; entries/depth/fds/
@@ -191,6 +194,36 @@ escaped unambiguously. Diagnostics and progress go to stderr. Payload output
 and data records go to stdout. Progress has bounded frequency and can be disabled;
 it never accumulates one record per processed file in memory.
 
+Successful creation and extraction are silent by default. Human listings have
+one quoted, escaped pathname per line and no completion trailer. `info` uses
+aligned labels and binary byte units, identifies unknown counts without an
+implicit scan, and states header-only validation. `formats` shows a compact
+read/write/verify table; `-v` adds geometry, metadata and sandbox capability
+details on stderr. Creation plans appear with `-n` on stdout or with verbose
+creation on stderr. Verification emits one human result only after successful
+worker exit and finalization, stating structural or initialized-payload scope.
+Verbose completion details use stderr. Human success is determined by exit
+status; the mandatory machine completion record belongs to `-j`.
+
+Human errors use `fsimg: explanation`, optionally with a quoted pathname and
+an OS error description. Prose has no enclosing quotes. Empty internal fields,
+numeric errno values and generic status prefixes do not appear. Resource
+failures identify the resource, limit and observed demand. Actual cleanup
+failures, retained output/scratch paths, incomplete output, published output
+and uncertain durability remain visible in plain language. Truncated paths
+and messages are labeled; terminal escaping applies to prose as well as names.
+FAT layout failures identify the rejected constraint when all candidates fail
+for the same reason; otherwise they describe the conflicting requested settings
+without guessing a remedy or an uncomputed minimum image size.
+
+Optional metadata loss produces one final notice counting affected fields,
+not files. Verbose examples name fields and are explicitly sampled; truncated
+path excerpts are labeled. Samples never establish exact totals. If an operation
+fails before a final total is available, observed samples permit only an
+unnumbered notice. Sandbox-unavailable/disabled warnings remain visible before
+processing regardless of verbosity or JSON mode. Source profile limitations
+remain documented and appear in verbose creation/capability details.
+
 `-j` writes newline-delimited JSON records with a schema version and `type`.
 Entry records stream individually, followed by a completion summary. There is
 no JSON array proportional to entry count. Final records include validation
@@ -253,7 +286,7 @@ JSON strings; no pathname or listing tree proportional to entries is retained.
 Valid UTF-8 crosses name-frame boundaries intact. Human names escape controls,
 backslashes and bidi formatting unambiguously. JSON uses valid UTF-8, escapes
 JSON controls/quotes, and encodes untrusted invalid diagnostic bytes visibly.
-Only the successful final summary certifies completion. An error after a
+Under `-j`, only the successful final summary certifies completion. An error after a
 partial entry first closes that incomplete record, then emits an error record;
 no successful summary follows. Counts and byte quantities use decimal strings
 in schema version 1, and all fields state their units. Header, selected-entry,

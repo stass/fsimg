@@ -52,6 +52,13 @@ the resulting data area. Cluster-count classification, legal cluster IDs,
 There is no convergence loop or image-wide search per entry. Allocation follows
 catalog ID order, starting with the FAT32 root; empty files have no cluster.
 
+Candidate rejection distinguishes a volume below or above the variant's cluster
+range, catalog/reserve capacity, insufficient data space and on-disk field
+limits. A failed search reports a specific cause only when every candidate
+agrees. Mixed rejection causes report conflicting requested settings. Diagnostics
+include requested image size and free-space reserve where relevant and never
+claim an uncomputed minimum size or a remedy not established by planning.
+
 ## Metadata and determinism
 
 Missing timestamps use 1980-01-01. Timestamp conversion uses integer Gregorian

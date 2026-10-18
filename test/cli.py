@@ -60,8 +60,113 @@ def test_formats(executable, root):
     capabilities = next(record for record in decoded if record["type"] == "capabilities")
     assert capabilities["sandbox_runtime"] in {"unavailable", "not-probed"}
     assert capabilities["source_device_open_exclusion"] is False
-    assert b"Usage: fsimg" in invoke(executable, root, ["-h"]).stdout
+    assert b"usage: fsimg" in invoke(executable, root, ["-h"]).stdout
     assert invoke(executable, root, ["-V"]).stdout.startswith(b"fsimg ")
+
+
+def test_human_help(executable, root):
+    empty = invoke(executable, root, [], expected=2)
+    assert empty.stdout == b"" and empty.stderr.startswith(b"usage: fsimg")
+    assert b"commands:" in empty.stderr and b"errno" not in empty.stderr
+    help_output = invoke(executable, root, ["-h"])
+    assert help_output.stdout == empty.stderr and help_output.stderr == b""
+    for command in ["create", "info", "ls", "cat", "extract", "verify", "formats"]:
+        help_output = invoke(executable, root, [command, "-h"])
+        assert help_output.stdout.startswith(f"usage: fsimg {command} ".encode())
+        assert b"options:" in help_output.stdout and b"example" in help_output.stdout
+        assert b"commands:" not in help_output.stdout and help_output.stderr == b""
+    missing = invoke(executable, root, ["info"], expected=2)
+    assert missing.stderr == b"fsimg: info requires -i image\nusage: fsimg info [options] -i image\n"
+    for arguments, detail in [
+        (["info", "-Q"], b"unknown option -Q"),
+        (["info", "-i"], b"option -i requires an argument"),
+        (["no-such-command"], b'unknown command "no-such-command"'),
+        ([""], b'unknown command ""'),
+    ]:
+        result = invoke(executable, root, arguments, expected=2)
+        assert detail in result.stderr and b"usage:" in result.stderr
+        assert b"errno" not in result.stderr and result.stdout == b""
+    formats = invoke(executable, root, ["formats"])
+    assert formats.stdout == (b"Format  Read  Write  Verify\n"
+                              b"fat12   yes   yes    yes\n"
+                              b"fat16   yes   yes    yes\n"
+                              b"fat32   yes   yes    yes\n"
+                              b"exfat   yes   yes    yes\n")
+    assert formats.stderr == b""
+    verbose = invoke(executable, root, ["formats", "-v"])
+    assert verbose.stdout == formats.stdout and b"Sandbox backend:" in verbose.stderr
+    hostile_command = invoke(executable, root, ["\x1b\n" * 12000], expected=2)
+    assert b"unknown command" in hostile_command.stderr and b"truncated" in hostile_command.stderr
+    assert b"usage:" in hostile_command.stderr and b"\x1b" not in hostile_command.stderr
+    assert len(hostile_command.stderr) < 4096
+
+
+def test_human_commands(executable, root):
+    image = "human.img"
+    created = invoke(executable, root, ["create", "-t", "fat12", "-o", image, "source"])
+    assert created.stdout == b""
+    assert created.stderr.count(b"metadata fields") == 1
+    assert b"fields=0x" not in created.stderr and b"use -v" in created.stderr
+    if b"sandbox unavailable" in created.stderr:
+        assert created.stderr.count(b"sandbox unavailable") == 1
+    listed = invoke(executable, root, ["ls", "-r", "-i", image])
+    assert listed.stdout.decode().splitlines() == ['"/HELLO.TXT"', '"/nested"', '"/nested/caf\u00e9.txt"']
+    info = invoke(executable, root, ["info", "-i", image])
+    assert b"Format:       FAT12\n" in info.stdout
+    assert b"Validation:   header only\n" in info.stdout
+    assert b"Free space:   unknown (not scanned)\n" in info.stdout
+    assert b"complete:" not in info.stdout and b"profile=" not in info.stdout
+    plan = invoke(executable, root, ["create", "-n", "-R", "-t", "fat12", "source"])
+    assert b"Volume size:" in plan.stdout and b"Metadata:" in plan.stdout
+    assert b"source profile" not in plan.stdout and b"complete:" not in plan.stdout
+    verbose = invoke(executable, root, ["create", "-v", "-t", "fat12", "-o", "human-verbose.img", "source"])
+    assert verbose.stdout == b"" and b"Volume size:" in verbose.stderr
+    assert verbose.stderr.count(b"source profile requires") == 1
+    assert b"metadata example:" in verbose.stderr and b"modification time" in verbose.stderr
+    assert b"fields=0x" not in verbose.stderr
+    verified = invoke(executable, root, ["verify", "-i", image])
+    assert verified.stdout == b'"human.img": filesystem structure verified (2 files, 2 directories)\n'
+    payload = invoke(executable, root, ["verify", "-d", "-i", image])
+    assert b"filesystem structure and initialized file data verified" in payload.stdout
+    extracted = invoke(executable, root, ["extract", "-i", image, "-C", "human-output"])
+    assert extracted.stdout == b"" and extracted.stderr.count(b"metadata fields") == 1
+    same_bytes(root / "source/nested/caf\u00e9.txt", root / "human-output/nested/caf\u00e9.txt")
+    raw = invoke(executable, root, ["cat", "-i", image, "/HELLO.TXT"])
+    assert raw.stdout == b"hello\n"
+    missing = invoke(executable, root, ["info", "-i", "missing\n\x1b.img"], expected=1)
+    assert missing.stdout == b"" and b'cannot open image "missing\\u000a\\u001b.img"' in missing.stderr
+    assert b"No such file or directory" in missing.stderr and b"errno=" not in missing.stderr
+    assert b"\x1b" not in missing.stderr and len(missing.stderr.splitlines()) == 1
+    geometry = invoke(executable, root, ["create", "-R", "-t", "fat32", "-s", "8M", "-o", "small.img", "source"], expected=1)
+    assert b"too small for FAT32" in geometry.stderr and b"8388608 bytes" in geometry.stderr
+    assert b"errno" not in geometry.stderr and not (root / "small.img").exists()
+    for settings, explanation in [
+        (["-t", "fat12", "-s", "1G"], b"too large for FAT12"),
+        (["-t", "fat12", "-s", "1M", "-f", "1M"], b"cannot fit file data, directories and free-space reserve"),
+        (["-t", "fat12", "-f", "1G"], b"exceed cluster capacity"),
+        (["-t", "fat32", "-O", "cluster=32K", "-f", "4T"], b"layout exceeds on-disk size limits"),
+        (["-t", "fat32", "-f", "4T"], b"requested size and allocation settings conflict"),
+    ]:
+        rejected = invoke(executable, root, ["create", "-n", "-R", *settings, "source"], expected=1)
+        assert explanation in rejected.stderr, (settings, rejected.stderr)
+
+
+def test_human_loss_bounds(executable, root):
+    source = root / "loss-source"
+    source.mkdir()
+    for index in range(40):
+        (source / f"f{index:02}").write_bytes(b"")
+    # Host import exposes access/modification times everywhere and birth time
+    # on macOS/FreeBSD. Reproducible FAT creation substitutes every such field.
+    expected_losses = 80 if sys.platform.startswith("linux") else 120
+    notice = f"{expected_losses} metadata fields".encode()
+    ordinary = invoke(executable, root, ["create", "-n", "-R", "-t", "fat12", "loss-source"])
+    assert notice in ordinary.stderr
+    assert b"metadata example:" not in ordinary.stderr
+    verbose = invoke(executable, root, ["create", "-n", "-v", "-R", "-t", "fat12", "loss-source"])
+    assert notice in verbose.stderr
+    assert verbose.stderr.count(b"metadata example:") == 32
+    assert b"fields=0x" not in verbose.stderr
 
 
 def test_format(executable, root, profile, payload):
@@ -180,7 +285,7 @@ def test_output_failures(executable, root):
         result = subprocess.run([
             str(executable), "cat", "-i", "exfat.img", "/nested/caf\u00e9.txt",
         ], cwd=root, stdout=write_fd, stderr=subprocess.PIPE, timeout=15)
-        assert result.returncode == 1 and b"I/O failure" in result.stderr
+        assert result.returncode == 1 and b"output write failed: Broken pipe" in result.stderr
     finally:
         os.close(write_fd)
 
@@ -255,6 +360,9 @@ def main():
         (root / "source/HELLO.TXT").write_bytes(b"hello\n")
         payload = bytes(index % 251 for index in range(131101))
         (root / "source/nested/caf\u00e9.txt").write_bytes(payload)
+        test_human_help(executable, root)
+        test_human_commands(executable, root)
+        test_human_loss_bounds(executable, root)
         test_formats(executable, root)
         for profile in ["fat12", "fat16", "fat32", "exfat"]:
             test_format(executable, root, profile, payload)

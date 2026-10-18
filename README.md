@@ -74,6 +74,12 @@ For a release archive, start with `./configure`; generated build support is
 included. `make install` installs the command, static/shared library, public
 header, pkg-config metadata, manuals and checked [C examples](docs/examples.md).
 See `fsimg -h`, `fsimg create -h`, and `man fsimg` for the command contract.
+Creation and extraction are quiet on success. Use `-n` to inspect a creation
+plan, `-v` for progress and sampled metadata-loss details, or `-j` for structured
+records with explicit completion. Human errors report relevant paths and OS
+messages; metadata-loss notices count affected fields rather than files.
+Sandbox-unavailable warnings remain visible. Standalone macOS has no built-in
+OS confinement backend; `-S required` refuses operation there.
 
 ```sh
 fsimg formats

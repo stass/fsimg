@@ -9,11 +9,27 @@
 
 #include "write.h"
 
+/* A candidate explains its own rejection. Only agreement across every
+ * candidate establishes one cause for a failed automatic cluster search.
+ */
+typedef enum fat_geometry_result {
+	FAT_GEOMETRY_NONE,
+	FAT_GEOMETRY_FITS,
+	FAT_GEOMETRY_TOO_SMALL,
+	FAT_GEOMETRY_TOO_LARGE,
+	FAT_GEOMETRY_CAPACITY,
+	FAT_GEOMETRY_SPACE,
+	FAT_GEOMETRY_FIELD_LIMIT,
+	FAT_GEOMETRY_CONFLICT
+} fat_geometry_result_t;
+
 static uint64_t divide_up(uint64_t, uint64_t);
 static fsimg_status_t count_clusters(fat_plan_t *, uint32_t, uint64_t *,
     fsimg_error_t *);
 static fsimg_status_t choose_geometry(fat_plan_t *, fsimg_error_t *);
-static bool try_geometry(fat_plan_t *, uint32_t, uint64_t);
+static fat_geometry_result_t try_geometry(fat_plan_t *, uint32_t, uint64_t);
+static fsimg_status_t geometry_error(const fat_plan_t *, fat_geometry_result_t,
+    fsimg_error_t *);
 static fsimg_status_t allocate_layout(fat_plan_t *, fsimg_error_t *);
 
 static uint64_t
@@ -85,7 +101,7 @@ count_clusters(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t *out,
  * and increases table capacity. Binary search finds the first sufficient FAT
  * in at most 32 steps. Oversized metadata cannot be a valid candidate.
  */
-static bool
+static fat_geometry_result_t
 try_geometry(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
 {
 	const fsimg_write_options_t *options;
@@ -112,11 +128,11 @@ try_geometry(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
 	}
 	needed = divide_up(options->min_free_bytes, cluster_bytes);
 	if (!fsimg_add_u64(allocated, needed, &needed))
-		return (false);
+		return (FAT_GEOMETRY_CAPACITY);
 	if (needed < minimum)
 		needed = minimum;
 	if (needed > maximum)
-		return (false);
+		return (FAT_GEOMETRY_CAPACITY);
 	root_sectors = (uint64_t)plan->root_entries * 32 / sector;
 	overhead = plan->reserved_sectors + root_sectors;
 	if (options->volume_bytes == 0) {
@@ -127,7 +143,7 @@ try_geometry(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
 	} else {
 		sectors = options->volume_bytes / sector;
 		if (sectors <= overhead + 2)
-			return (false);
+			return (FAT_GEOMETRY_TOO_SMALL);
 		low = 1;
 		high = (sectors - overhead) / 2;
 		while (low < high) {
@@ -143,10 +159,15 @@ try_geometry(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
 		fat_sectors = low;
 		clusters = (sectors - overhead - 2 * fat_sectors) / spc;
 	}
-	if (clusters < needed || clusters < minimum || clusters > maximum ||
-	    sectors > UINT32_MAX || fat_sectors == 0 ||
+	if (clusters < minimum)
+		return (FAT_GEOMETRY_TOO_SMALL);
+	if (clusters > maximum)
+		return (FAT_GEOMETRY_TOO_LARGE);
+	if (clusters < needed)
+		return (FAT_GEOMETRY_SPACE);
+	if (sectors > UINT32_MAX || fat_sectors == 0 ||
 	    (plan->variant != 32 && fat_sectors > UINT16_MAX))
-		return (false);
+		return (FAT_GEOMETRY_FIELD_LIMIT);
 	plan->clusters = (uint32_t)clusters;
 	plan->allocated = (uint32_t)allocated;
 	plan->fat_offset = (uint64_t)plan->reserved_sectors * sector;
@@ -157,7 +178,44 @@ try_geometry(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t allocated)
 	plan->common.info.allocation_unit_bytes = cluster_bytes;
 	plan->common.info.free_bytes = (clusters - allocated) * cluster_bytes;
 	plan->common.info.allocated_bytes = allocated * cluster_bytes;
-	return (true);
+	return (FAT_GEOMETRY_FITS);
+}
+
+static fsimg_status_t
+geometry_error(const fat_plan_t *plan, fat_geometry_result_t reason,
+    fsimg_error_t *error)
+{
+	const fsimg_write_options_t *options = &plan->common.writer->options;
+	const char *explanation;
+	char message[256];
+
+	switch (reason) {
+	case FAT_GEOMETRY_TOO_SMALL: explanation = "image is too small"; break;
+	case FAT_GEOMETRY_TOO_LARGE: explanation = "image is too large"; break;
+	case FAT_GEOMETRY_CAPACITY:
+		explanation = "file data, directories and free-space reserve exceed cluster capacity";
+		break;
+	case FAT_GEOMETRY_SPACE:
+		explanation = "image cannot fit file data, directories and free-space reserve";
+		break;
+	case FAT_GEOMETRY_FIELD_LIMIT: explanation = "layout exceeds on-disk size limits"; break;
+	default: explanation = "requested size and allocation settings conflict"; break;
+	}
+	/* Include only the requested settings, never a guessed minimum size or
+	 * a remedy that might fail a different candidate's constraint.
+	 */
+	if (reason == FAT_GEOMETRY_TOO_SMALL || reason == FAT_GEOMETRY_TOO_LARGE)
+		snprintf(message, sizeof(message), "image size %llu bytes is too %s for FAT%u with %u-byte sectors%s",
+		    (unsigned long long)options->volume_bytes,
+		    reason == FAT_GEOMETRY_TOO_SMALL ? "small" : "large", plan->variant,
+		    options->sector_bytes, options->allocation_unit_bytes == 0 ?
+		    " and supported cluster sizes" : " and the requested cluster size");
+	else
+		snprintf(message, sizeof(message), "cannot create FAT%u: %s (image size %llu bytes%s, free-space reserve %llu bytes)",
+		    plan->variant, explanation, (unsigned long long)options->volume_bytes,
+		    options->volume_bytes == 0 ? ", automatic" : "",
+		    (unsigned long long)options->min_free_bytes);
+	return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER, message));
 }
 
 static fsimg_status_t
@@ -168,6 +226,7 @@ choose_geometry(fat_plan_t *plan, fsimg_error_t *error)
 	uint64_t root_entries, allocated;
 	uint32_t cluster_bytes, maximum, sector;
 	fsimg_status_t status;
+	fat_geometry_result_t reason, rejected;
 
 	options = &plan->common.writer->options;
 	sector = options->sector_bytes;
@@ -192,15 +251,20 @@ choose_geometry(fat_plan_t *plan, fsimg_error_t *error)
 	maximum = cluster_bytes == 0 ? 32768 : cluster_bytes;
 	if (cluster_bytes == 0)
 		cluster_bytes = sector;
+	rejected = FAT_GEOMETRY_NONE;
 	for (; cluster_bytes <= maximum; cluster_bytes *= 2) {
 		status = count_clusters(plan, cluster_bytes, &allocated, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (try_geometry(plan, cluster_bytes, allocated))
+		reason = try_geometry(plan, cluster_bytes, allocated);
+		if (reason == FAT_GEOMETRY_FITS)
 			return (FSIMG_OK);
+		if (rejected == FAT_GEOMETRY_NONE)
+			rejected = reason;
+		else if (rejected != reason)
+			rejected = FAT_GEOMETRY_CONFLICT;
 	}
-	return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
-	    "no FAT geometry meets the sizing profile and free-space constraints"));
+	return (geometry_error(plan, rejected, error));
 }
 
 static fsimg_status_t
