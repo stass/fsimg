@@ -29,6 +29,8 @@ static fsimg_status_t prepare_directory(fsimg_reader_t *, exfat_map_t *, size_t,
     uint32_t, exfat_directory_t *, fsimg_error_t *);
 static fsimg_status_t mark_directory(fsimg_reader_t *, exfat_map_t *,
     fsimg_error_t *);
+static fsimg_status_t mark_run(fsimg_reader_t *, uint32_t, uint32_t,
+    fsimg_error_t *);
 static fsimg_status_t start_traversal(fsimg_reader_t *, fsimg_error_t *);
 
 static fsimg_status_t
@@ -231,31 +233,33 @@ decode_set(exfat_prepass_t *pass, size_t set_length, fsimg_error_t *error)
 }
 
 static fsimg_status_t
-mark_directory(fsimg_reader_t *reader, exfat_map_t *map, fsimg_error_t *error)
+mark_run(fsimg_reader_t *reader, uint32_t first, uint32_t count,
+    fsimg_error_t *error)
 {
-	const exfat_geometry_t *g = &reader->format.exfat->geometry;
-	unsigned char record[24];
-	uint64_t first, count;
 	bool claimed;
 	fsimg_status_t status;
 
-	for (uint64_t i = 0; i < map->count; i++) {
-		status = fsimg_store_read(map->index, i * sizeof(record), record,
-		    sizeof(record), error);
+	for (uint32_t i = 0; i < count; i++) {
+		status = fsimg_bitset_test_and_set(reader->format.exfat->directory_clusters,
+		    (uint64_t)first + i, &claimed, error);
 		if (status != FSIMG_OK)
 			return (status);
-		first = (fsimg_meta_get_u64(record + 8) - g->heap_offset) / g->cluster_bytes + 2;
-		count = fsimg_meta_get_u64(record + 16) / g->cluster_bytes;
-		for (uint64_t j = 0; j < count; j++) {
-			status = fsimg_bitset_test_and_set(reader->format.exfat->directory_clusters,
-			    first + j, &claimed, error);
-			if (status != FSIMG_OK)
-				return (status);
-			if (claimed)
-				return (exfat_corrupt(error, "shared or cyclic exFAT directory allocation"));
-		}
+		if (claimed)
+			return (exfat_corrupt(error, "shared or cyclic exFAT directory allocation"));
 	}
 	return (FSIMG_OK);
+}
+
+/* Claim every cluster of a directory's chain before decoding it, so
+ * re-entering claimed storage through a cycle or a shared chain is
+ * corruption. The claim is as good as the chain the map was built from; a
+ * damaged scratch record that names other heap clusters is caught only by
+ * ownership verification.
+ */
+static fsimg_status_t
+mark_directory(fsimg_reader_t *reader, exfat_map_t *map, fsimg_error_t *error)
+{
+	return (exfat_map_runs(reader, map, mark_run, error));
 }
 
 static fsimg_status_t

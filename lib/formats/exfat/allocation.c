@@ -11,7 +11,12 @@ static fsimg_status_t map_append(fsimg_reader_t *, exfat_map_t *, uint64_t,
     uint32_t, uint32_t, fsimg_error_t *);
 static fsimg_status_t bitmap_range(fsimg_reader_t *, uint32_t, uint32_t,
     fsimg_error_t *);
-static fsimg_status_t map_select_extent(exfat_map_t *, uint64_t, fsimg_error_t *);
+static fsimg_status_t map_decode(const exfat_geometry_t *, const exfat_map_t *,
+    uint64_t, uint64_t *, uint64_t *, uint64_t *, fsimg_error_t *);
+static fsimg_status_t map_select_extent(const exfat_geometry_t *, exfat_map_t *,
+    uint64_t, fsimg_error_t *);
+static fsimg_status_t own_run(fsimg_reader_t *, uint32_t, uint32_t,
+    fsimg_error_t *);
 
 fsimg_status_t
 exfat_table_get(fsimg_reader_t *reader, uint32_t cluster, uint32_t *value,
@@ -161,7 +166,8 @@ exfat_map_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
 		cluster = next;
 	}
 	map->allocated_bytes = logical;
-	if (logical < stream->length || (policy == EXFAT_LENGTH_EXACT_ALLOCATION && logical != stream->length)) {
+	if (logical < stream->length ||
+	    (policy == EXFAT_LENGTH_EXACT_ALLOCATION && logical != stream->length)) {
 		status = exfat_corrupt(error, "exFAT chain does not cover its declared allocation");
 		goto fail;
 	}
@@ -171,11 +177,18 @@ fail:
 	return (status);
 }
 
+/* Every read of an index record decodes it here. Scratch records are
+ * untrusted, so a record is accepted only as whole clusters inside the
+ * stream's logical allocation, stored as whole clusters inside the heap. A
+ * damaged record therefore cannot redirect content or ownership to the boot
+ * region, the FAT, or past the volume. It can still name another object's
+ * clusters inside the heap; only ownership verification detects that.
+ */
 static fsimg_status_t
-map_select_extent(exfat_map_t *map, uint64_t index, fsimg_error_t *error)
+map_decode(const exfat_geometry_t *g, const exfat_map_t *map, uint64_t index,
+    uint64_t *logical, uint64_t *image, uint64_t *length, fsimg_error_t *error)
 {
 	unsigned char record[24];
-	uint64_t logical, length;
 	fsimg_status_t status;
 
 	if (index >= map->count)
@@ -184,24 +197,45 @@ map_select_extent(exfat_map_t *map, uint64_t index, fsimg_error_t *error)
 	    sizeof(record), error);
 	if (status != FSIMG_OK)
 		return (status);
-	logical = fsimg_meta_get_u64(record);
-	length = fsimg_meta_get_u64(record + 16);
-	if (logical >= map->allocated_bytes || length == 0 ||
-	    length > map->allocated_bytes - logical)
-		return (exfat_corrupt(error, "invalid cached exFAT allocation extent"));
+	*logical = fsimg_meta_get_u64(record);
+	*image = fsimg_meta_get_u64(record + 8);
+	*length = fsimg_meta_get_u64(record + 16);
+	if (*logical >= map->allocated_bytes || *length == 0 ||
+	    *length > map->allocated_bytes - *logical ||
+	    *logical % g->cluster_bytes != 0 || *length % g->cluster_bytes != 0)
+		return (exfat_corrupt(error,
+		    "cached exFAT extent is outside its stream allocation"));
+	if (*image < g->heap_offset ||
+	    (*image - g->heap_offset) % g->cluster_bytes != 0 ||
+	    !fsimg_range_fits(*image - g->heap_offset, *length,
+	    (uint64_t)g->clusters * g->cluster_bytes))
+		return (exfat_corrupt(error,
+		    "cached exFAT extent is outside the cluster heap"));
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+map_select_extent(const exfat_geometry_t *g, exfat_map_t *map, uint64_t index,
+    fsimg_error_t *error)
+{
+	uint64_t logical, image, length;
+	fsimg_status_t status;
+
+	status = map_decode(g, map, index, &logical, &image, &length, error);
+	if (status != FSIMG_OK)
+		return (status);
 	map->cached = index;
 	map->logical_offset = logical;
-	map->image_offset = fsimg_meta_get_u64(record + 8);
+	map->image_offset = image;
 	map->length = length;
 	return (FSIMG_OK);
 }
 
 fsimg_status_t
-exfat_map_extent(exfat_map_t *map, uint64_t offset, uint64_t *image_offset,
-    uint64_t *length, fsimg_error_t *error)
+exfat_map_extent(const exfat_geometry_t *g, exfat_map_t *map, uint64_t offset,
+    uint64_t *image_offset, uint64_t *length, fsimg_error_t *error)
 {
-	unsigned char record[24];
-	uint64_t low, high, middle, logical;
+	uint64_t low, high, middle, logical, image, extent;
 	fsimg_status_t status;
 
 	if (offset >= map->allocated_bytes)
@@ -215,22 +249,24 @@ exfat_map_extent(exfat_map_t *map, uint64_t offset, uint64_t *image_offset,
 	if (map->length != 0 && offset >= map->logical_offset &&
 	    offset - map->logical_offset == map->length &&
 	    map->cached + 1 < map->count) {
-		status = map_select_extent(map, map->cached + 1, error);
+		status = map_select_extent(g, map, map->cached + 1, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (offset != map->logical_offset)
 			return (exfat_corrupt(error, "discontinuous exFAT extent index"));
 		goto found;
 	}
+	/* Find the last record starting at or before offset. Every probe is
+	 * decoded, and the chosen record must cover offset, but a lookup does not
+	 * prove that records tile the allocation; only exfat_map_runs does.
+	 */
 	low = 0;
 	high = map->count;
 	while (low < high) {
 		middle = low + (high - low) / 2;
-		status = fsimg_store_read(map->index, middle * sizeof(record),
-		    record, sizeof(record), error);
+		status = map_decode(g, map, middle, &logical, &image, &extent, error);
 		if (status != FSIMG_OK)
 			return (status);
-		logical = fsimg_meta_get_u64(record);
 		if (logical <= offset)
 			low = middle + 1;
 		else
@@ -238,7 +274,7 @@ exfat_map_extent(exfat_map_t *map, uint64_t offset, uint64_t *image_offset,
 	}
 	if (low == 0)
 		return (exfat_corrupt(error, "exFAT extent index has no covering run"));
-	status = map_select_extent(map, low - 1, error);
+	status = map_select_extent(g, map, low - 1, error);
 	if (status != FSIMG_OK)
 		return (status);
 found:
@@ -259,8 +295,8 @@ exfat_map_read(fsimg_reader_t *reader, exfat_map_t *map, uint64_t offset,
 
 	done = 0;
 	while (done < length) {
-		status = exfat_map_extent(map, offset + done, &image_offset,
-		    &extent_length, error);
+		status = exfat_map_extent(&reader->format.exfat->geometry, map,
+		    offset + done, &image_offset, &extent_length, error);
 		if (status != FSIMG_OK)
 			return (status);
 		batch = length - done;
@@ -327,52 +363,71 @@ bitmap_range(fsimg_reader_t *reader, uint32_t first, uint32_t count,
 	return (FSIMG_OK);
 }
 
+/* Visit a map's records in order as cluster runs. Each record is decoded,
+ * and together the records must tile [0, allocated_bytes) without gaps,
+ * overlap, or reordering, so each logical cluster is visited exactly once.
+ * The walk does not touch the lookup cache, so a visitor may read through
+ * the same map.
+ */
 fsimg_status_t
-exfat_map_check(fsimg_reader_t *reader, exfat_map_t *map, fsimg_error_t *error)
+exfat_map_runs(fsimg_reader_t *reader, const exfat_map_t *map,
+    exfat_run_fn_t visit, fsimg_error_t *error)
 {
 	const exfat_geometry_t *g = &reader->format.exfat->geometry;
-	unsigned char record[24];
+	uint64_t logical, image, length, expected;
 	uint32_t first, count;
 	fsimg_status_t status;
 
+	expected = 0;
 	for (uint64_t i = 0; i < map->count; i++) {
-		status = fsimg_store_read(map->index, i * sizeof(record), record,
-		    sizeof(record), error);
+		status = map_decode(g, map, i, &logical, &image, &length, error);
 		if (status != FSIMG_OK)
 			return (status);
-		first = (uint32_t)((fsimg_meta_get_u64(record + 8) -
-		    g->heap_offset) / g->cluster_bytes + 2);
-		count = (uint32_t)(fsimg_meta_get_u64(record + 16) / g->cluster_bytes);
-		status = bitmap_range(reader, first, count, error);
+		if (logical != expected)
+			return (exfat_corrupt(error, "discontinuous exFAT extent index"));
+		/* map_decode bounds logical + length by allocated_bytes. */
+		expected = logical + length;
+		/* The run lies inside the heap, whose cluster count fits uint32_t
+		 * with room for the two reserved identifiers below it.
+		 */
+		first = (uint32_t)((image - g->heap_offset) / g->cluster_bytes + 2);
+		count = (uint32_t)(length / g->cluster_bytes);
+		status = visit(reader, first, count, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
+	if (expected != map->allocated_bytes)
+		return (exfat_corrupt(error, "exFAT extent index does not cover its allocation"));
 	return (FSIMG_OK);
 }
 
+/* Require every cluster of a built map to be marked allocated in the bitmap. */
 fsimg_status_t
-exfat_map_own(fsimg_reader_t *reader, exfat_map_t *map,
+exfat_map_check(fsimg_reader_t *reader, exfat_map_t *map, fsimg_error_t *error)
+{
+	return (exfat_map_runs(reader, map, bitmap_range, error));
+}
+
+static fsimg_status_t
+own_run(fsimg_reader_t *reader, uint32_t first, uint32_t count,
     fsimg_error_t *error)
 {
-	const exfat_geometry_t *g = &reader->format.exfat->geometry;
-	unsigned char extent[24], owner[16];
-	fsimg_status_t status;
+	unsigned char owner[16];
 
+	fsimg_meta_put_u64(owner, first);
+	fsimg_meta_put_u64(owner + 8, count);
+	return (fsimg_stream_append(reader->format.exfat->owners, owner,
+	    sizeof(owner), NULL, error));
+}
+
+/* During full verification, append one ownership record (first cluster,
+ * cluster count) per extent for the later overlap sort. Outside verification
+ * there is no owner stream and this does nothing.
+ */
+fsimg_status_t
+exfat_map_own(fsimg_reader_t *reader, exfat_map_t *map, fsimg_error_t *error)
+{
 	if (reader->format.exfat->owners == NULL)
 		return (FSIMG_OK);
-	for (uint64_t i = 0; i < map->count; i++) {
-		status = fsimg_store_read(map->index, i * sizeof(extent), extent,
-		    sizeof(extent), error);
-		if (status != FSIMG_OK)
-			return (status);
-		fsimg_meta_put_u64(owner,
-		    (fsimg_meta_get_u64(extent + 8) - g->heap_offset) / g->cluster_bytes + 2);
-		fsimg_meta_put_u64(owner + 8,
-		    fsimg_meta_get_u64(extent + 16) / g->cluster_bytes);
-		status = fsimg_stream_append(reader->format.exfat->owners, owner,
-		    sizeof(owner), NULL, error);
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	return (FSIMG_OK);
+	return (exfat_map_runs(reader, map, own_run, error));
 }

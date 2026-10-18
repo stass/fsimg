@@ -1056,7 +1056,7 @@ test_sequential_fragments(void)
 	static const unsigned seeks[] = { 511, 0, 257, 7, 300 };
 	exfat_fixture_t f;
 	unsigned char *fat, *bitmap, *set, *bytes;
-	unsigned char marker[4];
+	unsigned char marker[4], marker8[8], saved8[8];
 	uint32_t cluster, next;
 	uint64_t before, work;
 	size_t count;
@@ -1107,6 +1107,30 @@ test_sequential_fragments(void)
 		for (unsigned j = 0; j < 4; j++)
 			CHECK(marker[j] == (unsigned char)(seeks[i] >> (j * 8)));
 	}
+	/* Records must tile the allocation in order. A record repeating an
+	 * earlier logical offset passes per-record checks but not the map walk.
+	 */
+	CHECK(fsimg_store_read(f.reader->format.exfat->file.index, 1 * 24,
+	    marker8, sizeof(marker8), NULL) == FSIMG_OK);
+	CHECK(fsimg_store_read(f.reader->format.exfat->file.index, 2 * 24,
+	    saved8, sizeof(saved8), NULL) == FSIMG_OK);
+	CHECK(fsimg_store_write(f.reader->format.exfat->file.index, 2 * 24,
+	    marker8, sizeof(marker8), NULL) == FSIMG_OK);
+	CHECK(exfat_map_check(f.reader, &f.reader->format.exfat->file, NULL) ==
+	    FSIMG_ECORRUPT);
+	CHECK(fsimg_store_write(f.reader->format.exfat->file.index, 2 * 24,
+	    saved8, sizeof(saved8), NULL) == FSIMG_OK);
+	CHECK(exfat_map_check(f.reader, &f.reader->format.exfat->file, NULL) ==
+	    FSIMG_OK);
+	/* Scratch is not trusted. A record redirected to other in-volume metadata,
+	 * here the FAT, must fail rather than disclose that object's bytes.
+	 */
+	put64(marker8, 24 * 512);
+	CHECK(fsimg_store_write(f.reader->format.exfat->file.index, 3 * 24 + 8,
+	    marker8, sizeof(marker8), NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_read_at(f.reader, 3 * 512, marker, sizeof(marker), &count,
+	    NULL) == FSIMG_ECORRUPT);
+	CHECK(count == 0);
 	free(bytes);
 	fixture_free(&f);
 }

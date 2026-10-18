@@ -53,6 +53,10 @@ typedef struct exfat_map {
 	uint64_t	 length;
 } exfat_map_t;
 
+/* Receives one validated cluster run (first cluster, cluster count). */
+typedef fsimg_status_t (*exfat_run_fn_t)(fsimg_reader_t *, uint32_t, uint32_t,
+    fsimg_error_t *);
+
 typedef enum exfat_length_policy {
 	EXFAT_LENGTH_COVER_DATA,
 	EXFAT_LENGTH_EXACT_ALLOCATION
@@ -138,10 +142,12 @@ fsimg_status_t exfat_table_get(fsimg_reader_t *, uint32_t, uint32_t *,
 void exfat_map_free(exfat_map_t *);
 fsimg_status_t exfat_map_build(fsimg_reader_t *, const exfat_stream_t *,
     exfat_length_policy_t, exfat_map_t *, fsimg_error_t *);
-fsimg_status_t exfat_map_extent(exfat_map_t *, uint64_t, uint64_t *, uint64_t *,
-    fsimg_error_t *);
+fsimg_status_t exfat_map_extent(const exfat_geometry_t *, exfat_map_t *,
+    uint64_t, uint64_t *, uint64_t *, fsimg_error_t *);
 fsimg_status_t exfat_map_read(fsimg_reader_t *, exfat_map_t *, uint64_t,
     void *, size_t, fsimg_error_t *);
+fsimg_status_t exfat_map_runs(fsimg_reader_t *, const exfat_map_t *,
+    exfat_run_fn_t, fsimg_error_t *);
 fsimg_status_t exfat_map_own(fsimg_reader_t *, exfat_map_t *,
     fsimg_error_t *);
 fsimg_status_t exfat_map_check(fsimg_reader_t *, exfat_map_t *, fsimg_error_t *);

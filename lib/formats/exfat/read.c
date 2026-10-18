@@ -347,8 +347,8 @@ exfat_read(fsimg_reader_t *reader, uint64_t offset, void *buffer, size_t length,
 	 * each confirmed byte count when a later extent or physical read fails.
 	 */
 	while (*transferred < initialized) {
-		status = exfat_map_extent(&exfat->file, offset + *transferred,
-		    &image_offset, &extent_length, error);
+		status = exfat_map_extent(&exfat->geometry, &exfat->file,
+		    offset + *transferred, &image_offset, &extent_length, error);
 		if (status != FSIMG_OK)
 			return (status);
 		batch = initialized - *transferred;
