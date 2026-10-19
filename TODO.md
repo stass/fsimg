@@ -22,6 +22,15 @@
 
 ## Bugs by subsystem
 
+* [Medium] **Provider symbolic-link targets are not checked for NUL bytes**
+  (`lib/source/source.c`, `specs/design-metadata.md`): the metadata design
+  says a link target never contains a NUL byte. Host targets cannot, and the
+  catalog rejects the zero source for links, but a provider target reaches a
+  driver unchecked. Before the first writer that stores links, read a
+  provider link's target into the cursor's bounded `link_target` buffer when
+  `fsimg_source_open()` opens it, reject a NUL byte there, and serve the
+  buffer, so every link target is checked once in the common layer.
+
 * [Low] **Source failures fail the writer from inside the source layer**
   (`lib/source/source.c`, `specs/design-sources.md`): an operational source
   failure calls `fsimg_writer_fail()` and releases collection storage while a
@@ -58,6 +67,21 @@
   changing the decoder's interpretation of either field.
 
 ## Security residuals
+
+* [High] **Symbolic-link import under the Linux sandbox** (`cmd/fsimg/sandbox.c`,
+  `lib/source/source.c`, `specs/design-security.md`): the source scan reads a
+  link with `fstatat(AT_SYMLINK_NOFOLLOW)` and `readlinkat()`, which the
+  seccomp allowlist denies because Landlock does not mediate path-based
+  metadata queries. A confined Linux worker therefore fails a tree containing
+  a link with `FSIMG_EUNSUPPORTED` ("symbolic link inspection is not
+  permitted", naming the link) instead of importing it. Decide how a confined
+  scan reads links: allowing both calls lets a compromised worker probe
+  metadata and link targets outside the source tree; an `O_PATH | O_NOFOLLOW`
+  open plus `readlinkat(fd, "")` needs `O_PATH`, which the profile refuses for
+  the same reason; reading links in the coordinator moves source parsing out
+  of confinement. Record the decision in the security design, then test it on
+  Linux with the sandbox active. FreeBSD Capsicum is expected to permit both
+  calls through the source directory's rights but is unverified.
 
 ## Planned features
 

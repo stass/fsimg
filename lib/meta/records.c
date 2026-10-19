@@ -30,6 +30,24 @@ fsimg_meta_put_u64(unsigned char *bytes, uint64_t value)
 		bytes[i] = (unsigned char)(value >> (8 * i));
 }
 
+void
+fsimg_meta_put_u32(unsigned char *bytes, uint32_t value)
+{
+	for (unsigned i = 0; i < 4; i++)
+		bytes[i] = (unsigned char)(value >> (8 * i));
+}
+
+uint32_t
+fsimg_meta_get_u32(const unsigned char *bytes)
+{
+	uint32_t value;
+
+	value = 0;
+	for (unsigned i = 0; i < 4; i++)
+		value |= (uint32_t)bytes[i] << (8 * i);
+	return (value);
+}
+
 uint64_t
 fsimg_meta_get_u64(const unsigned char *bytes)
 {

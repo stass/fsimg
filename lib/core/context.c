@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 #include <unistd.h>
 
@@ -64,20 +65,38 @@ fsimg_stat_add(uint64_t *value, uint64_t amount)
 		*value = UINT64_MAX;
 }
 
-void
+uint64_t
 fsimg_report_loss(fsimg_ctx_t *ctx, const char *path, uint32_t fields)
 {
+	uint64_t count;
+
 	if (fields == 0)
-		return;
-	for (uint32_t bit = 1; bit <= FSIMG_META_ATTRIBUTES; bit <<= 1) {
-		if ((fields & bit) != 0)
-			fsimg_stat_add(&ctx->stats.metadata_losses, 1);
-	}
+		return (0);
+	count = 0;
+	for (uint32_t rest = fields & FSIMG_META_KNOWN; rest != 0; rest &= rest - 1)
+		count++;
+	fsimg_stat_add(&ctx->stats.metadata_losses, count);
 	if (ctx->options.loss != NULL) {
 		ctx->in_callback = true;
 		ctx->options.loss(ctx->options.loss_argument, path, fields);
 		ctx->in_callback = false;
 	}
+	return (count);
+}
+
+void
+fsimg_error_path(fsimg_error_t *error, const char *path)
+{
+	size_t length;
+
+	if (error == NULL)
+		return;
+	length = strlen(path);
+	error->path_truncated = length >= sizeof(error->path);
+	if (error->path_truncated)
+		length = sizeof(error->path) - 1;
+	bcopy(path, error->path, length);
+	error->path[length] = '\0';
 }
 
 void

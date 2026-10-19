@@ -8,7 +8,11 @@
 #include "write.h"
 
 #define FAT_SECTOR_MASK		((1u << 9) | (1u << 10) | (1u << 11) | (1u << 12))
-#define FAT_ENTRY_KINDS		((1u << FSIMG_ENTRY_FILE) | (1u << FSIMG_ENTRY_DIRECTORY))
+#define FAT_ENTRY_KINDS		(FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY)
+#define FAT_METADATA_FIELDS	(FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
+	FSIMG_META_ACCESSED | FSIMG_META_ATTRIBUTES)
+/* The volume-label directory entry and boot-sector field hold 11 bytes. */
+#define FAT_LABEL_BYTES		11
 
 /* Largest FAT12/FAT16 volume: maximal reserved and two maximal FAT regions,
  * a 512-sector root directory, the largest cluster count of the variant with
@@ -50,13 +54,14 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.name = "fat12",
 			.profile = "unicode-17-simple-upper/cp437",
 			.entry_kinds = FAT_ENTRY_KINDS,
-			.metadata_fields = 0x0f,
+			.metadata_fields = FAT_METADATA_FIELDS,
 			.sector_size_mask = FAT_SECTOR_MASK,
 			.allocation_unit_size_mask = ((1u << 20) - 1) & ~((1u << 9) - 1),
 			.write_allocation_unit_size_mask = ((1u << 16) - 1) & ~((1u << 9) - 1),
 			.max_file_bytes = UINT64_C(4084) * 512 * 1024,
 			.max_volume_bytes = FAT_SMALL_VOLUME_BYTES(4085),
-			.max_name_utf16_units = 255
+			.max_name_utf16_units = 255,
+			.max_label_bytes = FAT_LABEL_BYTES
 		},
 		.id = 12
 	},
@@ -65,13 +70,14 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.name = "fat16",
 			.profile = "unicode-17-simple-upper/cp437",
 			.entry_kinds = FAT_ENTRY_KINDS,
-			.metadata_fields = 0x0f,
+			.metadata_fields = FAT_METADATA_FIELDS,
 			.sector_size_mask = FAT_SECTOR_MASK,
 			.allocation_unit_size_mask = ((1u << 20) - 1) & ~((1u << 9) - 1),
 			.write_allocation_unit_size_mask = ((1u << 16) - 1) & ~((1u << 9) - 1),
 			.max_file_bytes = UINT32_MAX,
 			.max_volume_bytes = FAT_SMALL_VOLUME_BYTES(65525),
-			.max_name_utf16_units = 255
+			.max_name_utf16_units = 255,
+			.max_label_bytes = FAT_LABEL_BYTES
 		},
 		.id = 16
 	},
@@ -80,13 +86,14 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.name = "fat32",
 			.profile = "unicode-17-simple-upper/cp437",
 			.entry_kinds = FAT_ENTRY_KINDS,
-			.metadata_fields = 0x0f,
+			.metadata_fields = FAT_METADATA_FIELDS,
 			.sector_size_mask = FAT_SECTOR_MASK,
 			.allocation_unit_size_mask = ((1u << 20) - 1) & ~((1u << 9) - 1),
 			.write_allocation_unit_size_mask = ((1u << 16) - 1) & ~((1u << 9) - 1),
 			.max_file_bytes = UINT32_MAX,
 			.max_volume_bytes = (uint64_t)UINT32_MAX * 4096,
-			.max_name_utf16_units = 255
+			.max_name_utf16_units = 255,
+			.max_label_bytes = FAT_LABEL_BYTES
 		},
 		.id = 32
 	}

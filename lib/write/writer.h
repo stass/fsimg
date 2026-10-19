@@ -9,13 +9,37 @@
 
 #define FSIMG_CATALOG_HEADER 176u
 #define FSIMG_CATALOG_INDEX_SIZE 24u
+#define FSIMG_CATALOG_TIME_BYTES 32u
 
-/* Catalog payload: seven little-endian u64 fields (size, storage, source ID,
- * kind, valid, required, attributes), then three 40-byte timestamps (seconds,
- * precision, nanoseconds, basis, offset), then the NUL-terminated UTF-8 path.
+/* A catalog entry record is a fixed little-endian header followed by the
+ * NUL-terminated UTF-8 path at FSIMG_CATALOG_HEADER. Size and source ID are
+ * u64; storage, kind, the metadata masks, uid, gid and mode are u32. Each
+ * timestamp occupies FSIMG_CATALOG_TIME_BYTES: seconds and precision as u64,
+ * then nanoseconds, basis and offset minutes as u32, then four zero bytes.
+ * Absent fields and the padding are zero, so equal entries encode equally.
  * Child records contain parent ID, child ID, and NUL-terminated component.
  * Index records contain stream frame offset, parent ID, and child count.
  */
+typedef enum fsimg_catalog_field {
+	FSIMG_CATALOG_SIZE = 0,
+	FSIMG_CATALOG_SOURCE_ID = 8,
+	FSIMG_CATALOG_STORAGE = 16,
+	FSIMG_CATALOG_KIND = 20,
+	FSIMG_CATALOG_VALID = 24,
+	FSIMG_CATALOG_REQUIRED = 28,
+	FSIMG_CATALOG_ATTRIBUTES = 32,
+	FSIMG_CATALOG_UID = 36,
+	FSIMG_CATALOG_GID = 40,
+	FSIMG_CATALOG_MODE = 44,
+	FSIMG_CATALOG_CREATED = 48,
+	FSIMG_CATALOG_MODIFIED = 80,
+	FSIMG_CATALOG_ACCESSED = 112,
+	FSIMG_CATALOG_CHANGED = 144
+} fsimg_catalog_field_t;
+_Static_assert(FSIMG_CATALOG_CHANGED + FSIMG_CATALOG_TIME_BYTES ==
+    FSIMG_CATALOG_HEADER, "the catalog header ends with its last timestamp");
+_Static_assert(FSIMG_CATALOG_GID == FSIMG_CATALOG_UID + 4,
+    "uid and gid form one eight-byte owner slot");
 
 typedef struct fsimg_source_root fsimg_source_root_t;
 typedef struct fsimg_source_cursor fsimg_source_cursor_t;
@@ -60,6 +84,8 @@ typedef enum fsimg_source_storage {
 
 /* The writer's single current source owns io. fd is only a borrowed alias
  * used for identity checks; freeing io closes and releases the descriptor.
+ * A host symbolic link has no descriptor: opening it reads its target into
+ * link_target, and io delivers those bytes.
  */
 struct fsimg_source_cursor {
 	fsimg_writer_t	*writer;
@@ -70,6 +96,7 @@ struct fsimg_source_cursor {
 	uint64_t	 length;
 	int		 fd;
 	bool		 active;
+	unsigned char	 link_target[FSIMG_SYMLINK_TARGET_MAX + 1];
 };
 
 typedef struct fsimg_catalog_entry {
@@ -93,6 +120,8 @@ struct fsimg_writer {
 	fsimg_ctx_t	*ctx;
 	fsimg_plan_t	*plan;
 	const fsimg_format_t *format;
+	/* The selected variant's capability record; NULL for catalog-only use. */
+	const fsimg_format_info_t *capabilities;
 	fsimg_write_options_t options;
 	/* Prepared worker output authority cannot be imported as source content. */
 	fsimg_host_file_t output_root;
@@ -113,9 +142,17 @@ struct fsimg_writer {
 	uint64_t	 root_count;
 	uint64_t	 count;
 	uint64_t	 payload_bytes;
+	/* Fields omitted because the format does not store them, counted
+	 * before the driver plans and added to its plan's loss total.
+	 */
+	uint64_t	 omitted_fields;
 	/* Private fault injection: interrupt the nth subsequent directory read. */
 	uint64_t	 interrupt_directory_read_after;
 	uint32_t	 record_capacity;
+	/* Unions of every collected entry's kind, valid and required fields. */
+	uint32_t	 catalog_kinds;
+	uint32_t	 catalog_fields;
+	uint32_t	 catalog_required;
 	bool		 provider_set;
 	bool		 catalog_ready;
 	bool		 output_root_known;

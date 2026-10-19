@@ -18,9 +18,9 @@ static const fsimg_format_variant_t exfat_variants[] = {
 		.info = {
 			.name = "exfat",
 			.profile = "embedded-upcase/unicode-17-writer",
-			.entry_kinds = (1u << FSIMG_ENTRY_FILE) |
-			    (1u << FSIMG_ENTRY_DIRECTORY),
-			.metadata_fields = 0x0f,
+			.entry_kinds = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY,
+			.metadata_fields = FSIMG_META_CREATED | FSIMG_META_MODIFIED |
+			    FSIMG_META_ACCESSED | FSIMG_META_ATTRIBUTES,
 			.sector_size_mask = (1u << 9) | (1u << 10) | (1u << 11) |
 			    (1u << 12),
 			.allocation_unit_size_mask = ((1u << 26) - 1) & ~((1u << 9) - 1),
@@ -28,7 +28,9 @@ static const fsimg_format_variant_t exfat_variants[] = {
 			    ~((1u << 9) - 1),
 			.max_file_bytes = (uint64_t)EXFAT_CLUSTER_MAX * 33554432,
 			.max_volume_bytes = INT64_MAX,
-			.max_name_utf16_units = 255
+			.max_name_utf16_units = 255,
+			/* Eleven UTF-16 units in the volume-label entry. */
+			.max_label_bytes = 22
 		},
 		.id = 0		/* exFAT has a single variant. */
 	}

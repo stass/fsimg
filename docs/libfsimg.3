@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\" Copyright (c) 2026, fsimg contributors
-.Dd October 17, 2026
+.Dd October 19, 2026
 .Dt LIBFSIMG 3
 .Os
 .Sh NAME
@@ -58,8 +58,9 @@ Iteration invalidates the previous current-entry snapshot.
 enumerates depth-first in on-disk order and returns FSIMG_DONE at complete EOF.
 Directory preparation validates case/alias ambiguity before exposing children.
 .Fn fsimg_reader_read_at
-reads only the current regular file, clips to EOF and returns confirmed bytes
-separately from status.
+reads only the current regular file or symbolic link, clips to EOF and returns
+confirmed bytes separately from status.
+A symbolic link's content is its target, which is never resolved.
 Confirmed bytes can accompany failure and do not imply complete content.
 Uninitialized logical tails read as zero without exposing underlying
 cluster bytes.
@@ -75,9 +76,14 @@ No reader modifies or repairs an input image.
 Collect host trees, explicit zero sources or one callback provider before
 planning.
 Paths are absolute UTF-8 image paths.
-Host scanning rejects symlinks, special files, descendant mounts and
-encountered
-scratch/output objects.
+Entries are regular files, directories, symbolic links, whose size is the
+target length of 1 through 1023 bytes and whose provider or host source
+supplies the target, and FIFOs, which have neither size nor source.
+Metadata validity bits cover creation, modification, access and change times,
+attributes, owner (uid and gid) and the permission bits 07777.
+Host scanning records symbolic links without following them and rejects
+special files, descendant mounts and encountered scratch/output objects.
+FSIMG_WRITE_IMPORT_POSIX also records each object's owner and permission bits.
 Host identity checks detect ordinary metadata-visible changes;
 hostile concurrent mutation requires immutable inputs or a snapshot.
 Provider content and state remain borrowed until writer destruction.
@@ -90,6 +96,11 @@ Plans report logical, initialized, allocated, metadata and free byte quantities
 separately, plus metadata-loss counts and observed scratch use.
 Reproducible mode fixes timestamps, identifiers, ordering and padding.
 Optional losses follow the explicit allow-loss policy; required losses fail.
+A field the selected format does not store, as its capability record states,
+is an omission under the same policy, counted once per field.
+An entry kind the format does not store always fails planning.
+A format record whose max_label_bytes is zero has no volume label and accepts
+only a NULL label.
 Time bases distinguish UTC instants, known offsets and unknown-zone calendar
 values.
 .Pp
@@ -113,6 +124,10 @@ never merges, overwrites, restores privileged metadata or follows links.
 Logical lengths including holes count against output limits.
 Failure after creation can leave private incomplete output.
 The default restores no host timestamps.
+Owners, permission bits and change times are never restored.
+A symbolic link, FIFO or other kind fails extraction unless
+FSIMG_EXTRACT_SKIP_UNSUPPORTED omits it and counts it in the context
+statistics' skipped_entries.
 Explicit timestamp restoration requires a time-basis policy and does not
 change the embedding process's sandbox.
 .Sh EXAMPLES

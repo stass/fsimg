@@ -16,6 +16,9 @@
 
 static fsimg_status_t reject_aliases(fsimg_writer_t *, fsimg_io_t *,
     fsimg_error_t *);
+static fsimg_status_t check_capabilities(fsimg_writer_t *, fsimg_error_t *);
+static fsimg_status_t check_entry_capabilities(fsimg_writer_t *,
+    const fsimg_entry_t *, bool, fsimg_error_t *);
 
 void
 fsimg_write_options_init(fsimg_write_options_t *options)
@@ -61,7 +64,7 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 	}
 	if (selected.version != FSIMG_OPTIONS_VERSION ||
 	    (selected.flags & ~(FSIMG_WRITE_ALLOW_LOSS | FSIMG_WRITE_REPRODUCIBLE |
-	    FSIMG_WRITE_DURABLE)) != 0)
+	    FSIMG_WRITE_DURABLE | FSIMG_WRITE_IMPORT_POSIX)) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "unsupported write options version or flags"));
 	for (size_t i = 0; i < 4; i++) {
@@ -69,24 +72,36 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_WRITER, "nonzero reserved write option"));
 	}
+	/* A format without a volume label accepts none; a format with one
+	 * selects its default when the caller passes NULL.
+	 */
+	if (variant->info.max_label_bytes == 0 && selected.label != NULL)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_WRITER, "the image format has no volume label"));
 	status = driver->writer->validate(&selected, variant->id, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (selected.label == NULL)
-		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-		    FSIMG_OP_WRITER, "format validation did not select a label"));
-	length = strnlen(selected.label, sizeof(writer->label));
-	if (length == sizeof(writer->label))
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_WRITER, "volume label exceeds common backing capacity"));
+	length = 0;
+	if (variant->info.max_label_bytes != 0) {
+		if (selected.label == NULL)
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_WRITER, "format validation did not select a label"));
+		length = strnlen(selected.label, sizeof(writer->label));
+		if (length == sizeof(writer->label))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_WRITER, "volume label exceeds common backing capacity"));
+	}
 	status = fsimg_writer_collect_new(ctx, &writer, error);
 	if (status != FSIMG_OK)
 		return (status);
 	writer->format = driver;
+	writer->capabilities = &variant->info;
 	writer->variant = variant->id;
 	writer->options = selected;
-	bcopy(selected.label, writer->label, length + 1);
-	writer->options.label = writer->label;
+	if (selected.label != NULL) {
+		bcopy(selected.label, writer->label, length + 1);
+		writer->options.label = writer->label;
+	}
 	*out = writer;
 	return (FSIMG_OK);
 }
@@ -258,10 +273,9 @@ fsimg_writer_add(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 		return (status);
 	storage = FSIMG_STORAGE_NONE;
 	id = 0;
-	if (entry == NULL || (entry->kind == FSIMG_ENTRY_DIRECTORY &&
-	    source != NULL) || (entry->kind == FSIMG_ENTRY_FILE && source == NULL)) {
+	if (entry == NULL) {
 		status = fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_WRITER, "entry kind and source disagree");
+		    FSIMG_OP_WRITER, "missing writer entry");
 		return (fsimg_writer_fail(writer, status));
 	}
 	if (source != NULL) {
@@ -334,10 +348,89 @@ fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
 	if (status != FSIMG_OK)
 		return (status);
 	writer->session.progress.phase = "image planning";
+	status = check_capabilities(writer, error);
+	if (status != FSIMG_OK)
+		return (fsimg_writer_fail(writer, status));
 	status = writer->format->writer->plan(writer, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
+	fsimg_stat_add(&writer->plan->info.metadata_losses, writer->omitted_fields);
 	*out = writer->plan;
+	return (FSIMG_OK);
+}
+
+/* Planning's first step compares the catalog with the selected format's
+ * capability record, so no driver ever receives an entry kind it lacks and
+ * the policy for a field a format does not store is the same for every
+ * format. A kind is never optional. An omitted field follows the optional
+ * loss policy: a required one fails, an optional one is counted once and
+ * reported under ALLOW_LOSS and fails without it.
+ *
+ * The catalog's unions of kinds, valid fields and required fields decide
+ * the outcome before any entry is read again, because each failure
+ * condition holds for the catalog exactly when it holds for some entry.
+ * The pass over the catalog then either names the first failing entry or,
+ * when nothing fails, reports each omission; a failed plan reports no loss.
+ * When nothing is omitted the catalog is not read at all.
+ */
+static fsimg_status_t
+check_capabilities(fsimg_writer_t *writer, fsimg_error_t *error)
+{
+	const fsimg_format_info_t *capabilities = writer->capabilities;
+	const fsimg_catalog_entry_t *catalog;
+	fsimg_status_t status;
+	uint32_t omitted;
+	bool fails;
+
+	writer->omitted_fields = 0;
+	omitted = writer->catalog_fields & ~capabilities->metadata_fields;
+	fails = (writer->catalog_kinds & ~capabilities->entry_kinds) != 0 ||
+	    (writer->catalog_required & omitted) != 0 ||
+	    (omitted != 0 && (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0);
+	if (!fails && omitted == 0)
+		return (FSIMG_OK);
+	for (uint64_t id = 1; id <= writer->count; id++) {
+		status = fsimg_catalog_get(writer, id, &catalog, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = check_entry_capabilities(writer, &catalog->entry, !fails,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (fails)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "catalog capability summary disagrees with its entries"));
+	return (FSIMG_OK);
+}
+
+/* Fail for an entry the format cannot store; otherwise, when report is set,
+ * count and report the fields the format omits.
+ */
+static fsimg_status_t
+check_entry_capabilities(fsimg_writer_t *writer, const fsimg_entry_t *entry,
+    bool report, fsimg_error_t *error)
+{
+	const fsimg_format_info_t *capabilities = writer->capabilities;
+	fsimg_status_t status;
+	uint32_t omitted;
+
+	status = FSIMG_OK;
+	omitted = entry->metadata.valid & ~capabilities->metadata_fields;
+	if ((entry->kind & ~capabilities->entry_kinds) != 0)
+		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_WRITER, "the image format cannot store this entry kind");
+	else if ((entry->metadata.required & omitted) != 0 ||
+	    (omitted != 0 && (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0))
+		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_WRITER, "the image format cannot store requested metadata");
+	if (status != FSIMG_OK) {
+		fsimg_error_path(error, entry->path);
+		return (status);
+	}
+	if (report)
+		fsimg_stat_add(&writer->omitted_fields,
+		    fsimg_report_loss(writer->ctx, entry->path, omitted));
 	return (FSIMG_OK);
 }
 

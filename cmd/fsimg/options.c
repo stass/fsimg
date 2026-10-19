@@ -31,7 +31,9 @@ static fsimg_status_t parse_setting(fsimg_cli_options_t *, const char *,
     unsigned *, fsimg_error_t *);
 static fsimg_status_t validate_options(fsimg_cli_options_t *, const bool *,
     int, char **, fsimg_error_t *);
-static fsimg_status_t validate_geometry(const fsimg_cli_options_t *,
+static fsimg_status_t find_format(const char *, fsimg_format_info_t *,
+    fsimg_error_t *);
+static fsimg_status_t validate_creation(fsimg_cli_options_t *, const bool *,
     fsimg_error_t *);
 
 static fsimg_status_t
@@ -200,29 +202,47 @@ parse_setting(fsimg_cli_options_t *options, const char *text, unsigned *seen,
 }
 
 static fsimg_status_t
-validate_geometry(const fsimg_cli_options_t *options, fsimg_error_t *error)
+find_format(const char *name, fsimg_format_info_t *info, fsimg_error_t *error)
 {
-	const fsimg_worker_request_t *request = &options->request;
-	fsimg_format_info_t info;
-	uint32_t sizes[2], masks[2];
 	size_t cursor;
-	unsigned shift;
 	fsimg_status_t status;
 
-	if (request->format[0] == '\0')
-		return (FSIMG_OK);
 	cursor = 0;
 	for (;;) {
-		status = fsimg_format_next(&cursor, &info, error);
+		status = fsimg_format_next(&cursor, info, error);
 		if (status == FSIMG_DONE)
 			return (syntax(error, "unknown format name"));
 		if (status != FSIMG_OK)
 			return (status);
-		if (strcmp(info.name, request->format) == 0)
-			break;
+		if (strcmp(info->name, name) == 0)
+			return (FSIMG_OK);
 	}
-	if (request->kind < FSIMG_JOB_CREATE)
-		return (FSIMG_OK);
+}
+
+/* Creation settings that depend on the writer's capability record: the
+ * default label applies only to a format with label capacity, so a format
+ * without labels receives none unless -L asks for one (and then fails), and
+ * explicit geometry must be legal for the writer profile.
+ */
+static fsimg_status_t
+validate_creation(fsimg_cli_options_t *options, const bool *seen,
+    fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
+	fsimg_format_info_t info;
+	uint32_t sizes[2], masks[2];
+	unsigned shift;
+	fsimg_status_t status;
+
+	status = find_format(request->format, &info, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!seen['L'])
+		request->write.label = info.max_label_bytes != 0 ? "FSIMG" : NULL;
+	if (request->write.label != NULL &&
+	    strnlen(request->write.label, sizeof(request->label_storage)) ==
+	    sizeof(request->label_storage))
+		return (syntax(error, "volume label exceeds the command's label representation"));
 	sizes[0] = request->write.sector_bytes;
 	sizes[1] = request->write.allocation_unit_bytes;
 	masks[0] = info.sector_size_mask;
@@ -248,6 +268,7 @@ validate_options(fsimg_cli_options_t *options, const bool *seen,
     int operands, char **values, fsimg_error_t *error)
 {
 	fsimg_worker_request_t *request = &options->request;
+	fsimg_format_info_t info;
 	bool creating;
 	char message[96];
 
@@ -262,12 +283,11 @@ validate_options(fsimg_cli_options_t *options, const bool *seen,
 		return (syntax(error, "-r applies only to ls"));
 	if (seen['d'] && request->kind != FSIMG_JOB_VERIFY)
 		return (syntax(error, "-d applies only to verify"));
+	if (seen['k'] && request->kind != FSIMG_JOB_EXTRACT)
+		return (syntax(error, "-k applies only to extract"));
 	if (options->json && request->kind == FSIMG_JOB_CAT)
 		return (syntax(error, "cat rejects -j because its output is raw content"));
 	if (creating) {
-		if (strnlen(request->write.label, sizeof(request->label_storage)) ==
-		    sizeof(request->label_storage))
-			return (syntax(error, "volume label exceeds the command's label representation"));
 		if (options->input != NULL || seen['b'] || seen['z'] || seen['C'])
 			return (syntax(error, "read/extraction options do not apply to create"));
 		if (request->format[0] == '\0' || operands != 1 ||
@@ -276,7 +296,7 @@ validate_options(fsimg_cli_options_t *options, const bool *seen,
 		options->source = values[0];
 	} else {
 		if (seen['L'] || seen['R'] || seen['e'] || seen['f'] ||
-		    seen['n'] || seen['o'] || seen['s'])
+		    seen['n'] || seen['o'] || seen['p'] || seen['s'])
 			return (syntax(error, "creation options do not apply to read commands"));
 		if (options->input == NULL) {
 			snprintf(message, sizeof(message), "%s requires -i image", options->name);
@@ -301,7 +321,11 @@ validate_options(fsimg_cli_options_t *options, const bool *seen,
 		return (syntax(error, "output requires a new pathname, not stdout"));
 	if (request->limits.memory_bytes < UINT64_C(16) * 1024 * 1024)
 		return (syntax(error, "memory budget must be at least 16M"));
-	return (validate_geometry(options, error));
+	if (creating)
+		return (validate_creation(options, seen, error));
+	if (request->format[0] == '\0')
+		return (FSIMG_OK);
+	return (find_format(request->format, &info, error));
 }
 
 fsimg_status_t
@@ -323,7 +347,6 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 	bzero(options, sizeof(*options));
 	fsimg_worker_request_init(&options->request);
 	request = &options->request;
-	request->write.label = "FSIMG";
 	options->scratch = getenv("TMPDIR");
 	if (options->scratch == NULL)
 		options->scratch = "/tmp";
@@ -356,7 +379,7 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 	 * same behavior without changing the process environment.
 	 */
 	flags = options->command == FSIMG_CLI_FORMATS ? FSIMG_HOST_GETOPT_PREFIX ":hjv" :
-	    FSIMG_HOST_GETOPT_PREFIX ":C:L:O:RS:T:b:de:f:hi:jl:m:no:rs:t:vz:";
+	    FSIMG_HOST_GETOPT_PREFIX ":C:L:O:RS:T:b:de:f:hi:jkl:m:no:prs:t:vz:";
 	limit_keys = setting_keys = 0;
 	fsimg_host_getopt_reset();
 	while ((flag = getopt(argc - 1, argv + 1, flags)) != -1) {
@@ -374,6 +397,8 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 		switch (flag) {
 		case 'h': options->command = FSIMG_CLI_HELP; break;
 		case 'j': options->json = true; break;
+		case 'k': request->flags |= FSIMG_JOB_SKIP_UNSUPPORTED; break;
+		case 'p': request->write.flags |= FSIMG_WRITE_IMPORT_POSIX; break;
 		case 'v': request->flags |= FSIMG_JOB_VERBOSE; break;
 		case 'r': request->flags |= FSIMG_JOB_RECURSIVE; break;
 		case 'd': request->flags |= FSIMG_JOB_PAYLOAD; break;

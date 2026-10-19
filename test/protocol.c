@@ -17,6 +17,11 @@ static void test_error_codec(void);
 static void test_job_label(void);
 static void test_selection_budget(void);
 static void test_error_padding(void);
+static void test_entry_records(void);
+static void test_invalid_entry_records(void);
+static void test_info_uuid(void);
+static void test_job_posix_flags(void);
+static bool entry_frame_valid(const fsimg_entry_t *, bool);
 static void write_seed(const char *);
 
 static void
@@ -198,6 +203,180 @@ test_job_label(void)
 	    &capabilities, NULL) == FSIMG_OK && decoded.write.label == NULL);
 }
 
+static bool
+entry_frame_valid(const fsimg_entry_t *entry, bool content_only)
+{
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_ENTRY,
+	    .length = FSIMG_WIRE_ENTRY_BYTES };
+
+	fsimg_wire_entry_encode(frame.payload, entry, strlen(entry->path));
+	return (fsimg_wire_entry_frame_valid(&frame, content_only, 4096));
+}
+
+/* Entry records carry every kind and the POSIX fields; absent fields are
+ * encoded as zero whatever the caller's struct holds.
+ */
+static void
+test_entry_records(void)
+{
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_ENTRY,
+	    .length = FSIMG_WIRE_ENTRY_BYTES };
+	fsimg_entry_t entry = { .path = "/link", .kind = FSIMG_ENTRY_SYMLINK,
+	    .size = 9 };
+	const unsigned char *raw = frame.payload;
+
+	entry.metadata.valid = FSIMG_META_CHANGED | FSIMG_META_OWNER | FSIMG_META_MODE;
+	entry.metadata.required = FSIMG_META_MODE;
+	entry.metadata.uid = 1000;
+	entry.metadata.gid = 20;
+	entry.metadata.mode = 07777;
+	entry.metadata.changed = (fsimg_timestamp_t){ .seconds = -2,
+	    .precision_ns = 1, .nanoseconds = 7, .basis = FSIMG_TIME_OFFSET,
+	    .offset_minutes = -90 };
+	fsimg_wire_entry_encode(frame.payload, &entry, 5);
+	CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	CHECK(fsimg_wire_entry_frame_valid(&frame, true, 4096));
+	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND) == FSIMG_ENTRY_SYMLINK);
+	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH) == 9);
+	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH) == 5);
+	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_UID) == 1000);
+	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_GID) == 20);
+	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE) == 07777);
+	CHECK(fsimg_wire_get_signed64(raw + FSIMG_WIRE_ENTRY_CHANGED +
+	    FSIMG_WIRE_TIME_SECONDS) == -2);
+	CHECK(fsimg_wire_get_signed64(raw + FSIMG_WIRE_ENTRY_CHANGED +
+	    FSIMG_WIRE_TIME_OFFSET) == -90);
+
+	entry = (fsimg_entry_t){ .path = "/pipe", .kind = FSIMG_ENTRY_FIFO };
+	entry.metadata.uid = 77;
+	entry.metadata.mode = 0177777;
+	fsimg_wire_entry_encode(frame.payload, &entry, 5);
+	CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	CHECK(!fsimg_wire_entry_frame_valid(&frame, true, 4096));
+	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_UID) == 0);
+	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE) == 0);
+
+	entry = (fsimg_entry_t){ .path = "/dir", .kind = FSIMG_ENTRY_DIRECTORY };
+	CHECK(entry_frame_valid(&entry, false) && !entry_frame_valid(&entry, true));
+	entry = (fsimg_entry_t){ .path = "/file", .kind = FSIMG_ENTRY_FILE, .size = 3 };
+	CHECK(entry_frame_valid(&entry, false) && entry_frame_valid(&entry, true));
+}
+
+/* The supervisor rejects every record the worker could not legitimately
+ * produce, so a compromised worker cannot smuggle an unknown kind or mode.
+ */
+static void
+test_invalid_entry_records(void)
+{
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_ENTRY,
+	    .length = FSIMG_WIRE_ENTRY_BYTES };
+	fsimg_entry_t entry;
+	unsigned char *raw = frame.payload;
+
+	entry = (fsimg_entry_t){ .path = "/x", .kind = FSIMG_ENTRY_SYMLINK };
+	CHECK(!entry_frame_valid(&entry, false));
+	entry.size = 1024;
+	CHECK(!entry_frame_valid(&entry, false));
+	entry.size = 1023;
+	CHECK(entry_frame_valid(&entry, false));
+	entry = (fsimg_entry_t){ .path = "/x", .kind = FSIMG_ENTRY_FIFO, .size = 1 };
+	CHECK(!entry_frame_valid(&entry, false));
+	entry = (fsimg_entry_t){ .path = "/x", .kind = FSIMG_ENTRY_FILE };
+	entry.metadata.valid = FSIMG_META_CHANGED;
+	entry.metadata.changed = (fsimg_timestamp_t){ .nanoseconds = 1000000000,
+	    .precision_ns = 1, .basis = FSIMG_TIME_UTC };
+	CHECK(!entry_frame_valid(&entry, false));
+
+	entry = (fsimg_entry_t){ .path = "/x", .kind = FSIMG_ENTRY_FILE };
+	entry.metadata.valid = FSIMG_META_MODE;
+	fsimg_wire_entry_encode(raw, &entry, 2);
+	CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_MODE, 010000);
+	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	fsimg_wire_entry_encode(raw, &entry, 2);
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_UID, UINT64_C(1) << 32);
+	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	fsimg_wire_entry_encode(raw, &entry, 2);
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_VALID, 0x80);
+	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	for (uint64_t kind = 0; kind <= 16; kind++) {
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_KIND, kind);
+		CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096) ==
+		    (kind == FSIMG_ENTRY_FILE || kind == FSIMG_ENTRY_DIRECTORY ||
+		    kind == FSIMG_ENTRY_FIFO));
+	}
+	/* Absent attributes and timestamps must arrive as zero bytes. */
+	fsimg_wire_entry_encode(raw, &entry, 2);
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES, 1);
+	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	fsimg_wire_entry_encode(raw, &entry, 2);
+	raw[FSIMG_WIRE_ENTRY_CHANGED + FSIMG_WIRE_TIME_BYTES - 1] = 1;
+	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	frame.length = FSIMG_WIRE_ENTRY_BYTES - 1;
+	fsimg_wire_entry_encode(raw, &entry, 2);
+	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+}
+
+static void
+test_info_uuid(void)
+{
+	static const unsigned char uuid[16] = { 0x01, 0x23, 0x45, 0x67, 0x89,
+	    0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10 };
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_INFO,
+	    .length = FSIMG_WIRE_INFO_BYTES };
+	fsimg_volume_info_t info;
+
+	bzero(&info, sizeof(info));
+	info.valid = FSIMG_VOLUME_UUID | FSIMG_VOLUME_LABEL;
+	bcopy(uuid, info.uuid, sizeof(uuid));
+	info.volume_bytes = 4096;
+	info.time_basis = FSIMG_TIME_UTC;
+	info.scope = FSIMG_VALIDATION_HEADER;
+	strcpy(info.format, "qnx6");
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_get64(frame.payload + FSIMG_WIRE_INFO_VALID) ==
+	    (FSIMG_VOLUME_UUID | FSIMG_VOLUME_LABEL));
+	CHECK(bcmp(frame.payload + FSIMG_WIRE_INFO_UUID, uuid, sizeof(uuid)) == 0);
+	fsimg_wire_put64(frame.payload + FSIMG_WIRE_INFO_VALID, 0x10);
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+
+	/* An absent UUID travels as zero bytes. */
+	info.valid = 0;
+	fsimg_wire_info_encode(frame.payload, &info);
+	for (unsigned i = 0; i < 16; i++)
+		CHECK(frame.payload[FSIMG_WIRE_INFO_UUID + i] == 0);
+	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	frame.payload[FSIMG_WIRE_INFO_UUID + 15] = 1;
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+}
+
+static void
+test_job_posix_flags(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_EXTRACT;
+	request.flags = FSIMG_JOB_SKIP_UNSUPPORTED;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.flags == FSIMG_JOB_SKIP_UNSUPPORTED);
+
+	request.kind = FSIMG_JOB_CREATE;
+	request.flags = 0;
+	request.write.flags |= FSIMG_WRITE_IMPORT_POSIX;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK((decoded.write.flags & FSIMG_WRITE_IMPORT_POSIX) != 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -214,5 +393,9 @@ main(int argc, char **argv)
 	test_job_label();
 	test_selection_budget();
 	test_error_padding();
+	test_entry_records();
+	test_invalid_entry_records();
+	test_info_uuid();
+	test_job_posix_flags();
 	return (0);
 }

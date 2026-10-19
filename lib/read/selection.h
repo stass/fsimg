@@ -26,7 +26,8 @@ typedef enum fsimg_selection_relation {
  * validated namespace, prunes unrelated directories, and returns displayed
  * paths. TREE and CHILDREN return ancestors, the target, and descendants;
  * CHILDREN prunes below immediate children. The implicit root is never an
- * entry. FILE hides ancestors and returns only the selected regular file.
+ * entry. FILE hides ancestors and returns only the selected entry with
+ * content: a regular file or a symbolic link, whose content is its target.
  * OUTSIDE is an empty/error result, never a successful entry. DONE consumes the
  * selected scope and clears the reader's current entry, without claiming full
  * structural verification. Free before destroying its borrowed reader.

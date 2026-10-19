@@ -364,7 +364,9 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 	case FSIMG_FRAME_LOSS:
 		if (frame->length < FSIMG_WIRE_LOSS_BYTES || frame->length > FSIMG_WIRE_LOSS_BYTES + FSIMG_WIRE_LOSS_PATH_BYTES ||
 		    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_LENGTH) != frame->length - FSIMG_WIRE_LOSS_BYTES ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_TRUNCATED) > 1 || fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS) > 15)
+		    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_TRUNCATED) > 1 ||
+		    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS) == 0 ||
+		    (fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS) & ~(uint64_t)FSIMG_META_KNOWN) != 0)
 			return (worker_error(error, "invalid worker metadata loss frame"));
 		break;
 	case FSIMG_FRAME_DONE:
@@ -379,6 +381,11 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		state->result->entries = count;
 		state->result->logical_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_LOGICAL);
 		state->result->metadata_losses = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_LOSSES);
+		state->result->skipped_entries = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_SKIPPED);
+		if ((kind != FSIMG_JOB_EXTRACT ||
+		    (state->request->flags & FSIMG_JOB_SKIP_UNSUPPORTED) == 0) &&
+		    state->result->skipped_entries != 0)
+			return (worker_error(error, "worker skipped entries it was not asked to skip"));
 		if (fsimg_wire_get64(raw + FSIMG_WIRE_DONE_IMAGE) != state->result->image_bytes ||
 		    fsimg_wire_get64(raw + FSIMG_WIRE_DONE_RAW) != (kind == FSIMG_JOB_CAT ?
 		    state->entry_size : 0))

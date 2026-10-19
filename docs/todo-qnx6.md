@@ -55,11 +55,10 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   failing regressions before nontrivial fixes; run sanitizers and required
   internal/external reviews for implementation stages.
 
-* [High] **POSIX metadata** (`include/fsimg.h`, `lib/source/`, `lib/read/`,
-  `lib/write/`, `lib/extract/`, `cmd/fsimg/`): implement the
-  [metadata design](../specs/design-metadata.md) before the QNX6 reader,
-  since the reader's entry mapping depends on its kinds and fields. Hardlink
-  topology remains unrepresented; add a design before advertising it.
+* [Medium] **Hardlink topology** (`include/fsimg.h`, `specs/design-metadata.md`):
+  the [metadata design](../specs/design-metadata.md) has no hardlink
+  representation, and the host scanner imports each link to a file as an
+  independent copy. Add a design before any format advertises shared inodes.
 
 * [High] **Classic-profile strictness evidence** (`lib/formats/qnx6/`): the
   driver design refuses, as unsupported, a valid block reference beyond an

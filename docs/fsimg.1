@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\" Copyright (c) 2026, fsimg contributors
-.Dd October 17, 2026
+.Dd October 19, 2026
 .Dt FSIMG 1
 .Os
 .Sh NAME
@@ -120,14 +120,16 @@ Select the supported FAT short-name codepage explicitly.
 .Pp
 Partition selection is explicit through a byte slice; no partition is guessed.
 .Cm info
-reports header validation, geometry, label, time basis and known capabilities.
+reports header validation, geometry, label, volume UUID when the format has
+one, time basis and known capabilities.
 Unknown counts remain unknown.
 .Cm ls
 lists immediate children or a selected file;
 .Fl r
 recursively lists its subtree.
 .Cm cat
-requires one regular file and writes raw logical bytes, including zero tails.
+requires one regular file or symbolic link and writes raw logical bytes,
+including zero tails; a symbolic link's bytes are its target.
 .Cm verify
 checks the complete supported structure;
 .Fl d
@@ -147,7 +149,13 @@ Collect, validate and report a plan without creating an output image or reading
 file payloads.
 Scratch use is allowed.
 .It Fl L Ar label
-Volume label, default FSIMG.
+Volume label.
+The default FSIMG applies only to a format with a volume label; a format
+without one is created without a label and rejects
+.Fl L .
+.It Fl p
+Import each source object's owner, group and permission bits as optional
+metadata.
 .It Fl O Ar sector=bytes
 Sector size within the selected profile.
 .It Fl O Ar cluster=bytes
@@ -165,13 +173,25 @@ Default is 315532800 (1980-01-01 UTC).
 No implicit timezone or SOURCE_DATE_EPOCH policy applies.
 .El
 .Pp
-Import accepts regular files and directories, hierarchy, content and
-representable timestamps.
-It rejects symlinks, special files, descendant mount crossings and encounters
-with its own scratch or staging trees.
+Import accepts regular files, directories and symbolic links, hierarchy,
+content and representable timestamps.
+A symbolic link is recorded with its target, which is never followed; a target
+longer than 1023 bytes fails.
+The Linux sandbox denies the worker the path-based queries that read a link,
+so a confined Linux import of a tree containing one fails as unsupported.
+Import rejects special files, including FIFOs, descendant mount crossings and
+encounters with its own scratch or staging trees.
 Keep source trees stable; hostile mutation requires immutable storage or a
 snapshot.
-FAT/exFAT do not preserve POSIX ownership or mode bits.
+A changed or replaced source file or link fails creation.
+.Pp
+A format that cannot store an entry kind fails planning, so FAT and exFAT
+reject trees containing symbolic links.
+A metadata field a format does not store, such as an owner or mode imported
+with
+.Fl p
+on FAT and exFAT, is an optional loss counted in the usual notice and does not
+change the image bytes.
 The source-root sandbox cannot universally prevent opening device nodes already
 within its authority; use isolated source storage when that exclusion is
 required.
@@ -188,6 +208,14 @@ names a fresh directory; even an existing empty directory fails.
 Selected paths and necessary ancestors are preserved below the image root.
 Output uses private directories and regular files, no links, no merge,
 no privileged metadata and no host timestamp restoration.
+An image entry of another kind, such as a symbolic link or FIFO, fails the
+extraction and is named in the error.
+.Bl -tag -width Ds
+.It Fl k
+Skip entries of unsupported kinds instead; the number skipped is reported in a
+warning and in the JSON summary.
+.El
+.Pp
 Logical holes count against the output quota.
 Failure can leave a private incomplete destination, identified by diagnostics.
 There is no directory-wide atomic publication or resume promise.
@@ -198,7 +226,12 @@ incomplete.
 Human names and controls are escaped.
 Diagnostics and bounded progress use stderr; payloads and records use stdout.
 Successful create and extract commands are silent by default.
-Listings contain one quoted pathname per line, without a completion trailer.
+Listings contain one quoted pathname per line, without a completion trailer;
+a symbolic link is marked with
+.Ql @
+and a FIFO with
+.Ql |
+after the quoted name.
 Info and dry-run creation plans use aligned labels and binary byte units.
 Unknown free space is labeled without scanning the filesystem.
 Formats displays a compact read/write/verify table; use
@@ -227,6 +260,10 @@ Large integers are decimal strings; bounded geometry, flags, nanoseconds and
 offset minutes are JSON integers.
 Unknown values are null.
 Timestamp records state basis and precision.
+Entry records name their kind as file, directory, symlink or fifo and carry
+change time, uid, gid and mode, each null when absent.
+Format records give entry_kinds and metadata_fields as bit masks and
+max_label_bytes, zero for a format without a label.
 .Pp
 The operation deadline spans processing and successful output.
 Failure reporting has a two-second grace and one further two-second stderr-only

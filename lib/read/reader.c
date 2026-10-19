@@ -263,9 +263,11 @@ current_file(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
 	status = reader_ready(reader, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (reader->entry.path == NULL || reader->entry.kind != FSIMG_ENTRY_FILE)
+	/* A symbolic link's content is its target, delivered like file bytes. */
+	if (reader->entry.path == NULL || (reader->entry.kind != FSIMG_ENTRY_FILE &&
+	    reader->entry.kind != FSIMG_ENTRY_SYMLINK))
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-		    FSIMG_OP_READER, "content requires a current regular file"));
+		    FSIMG_OP_READER, "content requires a current file or symbolic link"));
 	if (offset > reader->entry.size)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_READER, "content offset exceeds file length"));

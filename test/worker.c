@@ -59,6 +59,7 @@ typedef enum worker_scenario {
 	SCENARIO_RUNTIME_FAILURE,
 	SCENARIO_PARTIAL_EXTRACTION,
 	SCENARIO_ASAN_FAILURE,
+	SCENARIO_SKIPPED_EXTRACTION,
 } worker_scenario_t;
 
 #ifdef FSIMG_TEST_ASAN
@@ -110,6 +111,7 @@ static void test_forged(void);
 static void test_forged_publication(void);
 static void test_text_output(void);
 static void test_incomplete_extraction(void);
+static void test_skipped_extraction(void);
 static void test_mount_source(const char *);
 static void test_transport(worker_scenario_t);
 static int fake_worker(worker_scenario_t);
@@ -611,7 +613,7 @@ fake_worker(worker_scenario_t mode)
 		nanosleep(&delay, NULL);
 	}
 	if (mode == SCENARIO_DONE_BEFORE_READY) {
-		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, 40, NULL);
+		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
 		return (0);
 	}
 	if (mode == SCENARIO_TRUNCATED_HEADER) {
@@ -633,18 +635,18 @@ fake_worker(worker_scenario_t mode)
 	}
 	CHECK(fsimg_frame_read(FSIMG_CHILD_JOB, &frame, NULL) == FSIMG_OK);
 	if (mode == SCENARIO_DONE_BEFORE_INFO) {
-		bzero(raw, 40);
-		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, 40, NULL);
+		bzero(raw, FSIMG_WIRE_DONE_BYTES);
+		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
 		return (0);
 	}
 	if (mode == SCENARIO_NAME_WITHOUT_ENTRY) {
 		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_NAME, "X", 1, NULL);
 		return (0);
 	}
-	bzero(raw, 192);
+	bzero(raw, FSIMG_WIRE_INFO_BYTES);
 	fsimg_wire_put64(raw + 56, mode == SCENARIO_INVALID_TIME_BASIS ? UINT64_MAX : FSIMG_TIME_WALL);
 	fsimg_wire_put64(raw + 64, FSIMG_VALIDATION_HEADER);
-	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO, raw, 192, NULL) == FSIMG_OK);
+	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO, raw, FSIMG_WIRE_INFO_BYTES, NULL) == FSIMG_OK);
 	if (mode == SCENARIO_PARTIAL_EXTRACTION) {
 		output = openat(FSIMG_CHILD_OUTPUT, "partial", O_WRONLY | O_CREAT | O_EXCL, 0600);
 		CHECK(output != -1);
@@ -669,10 +671,10 @@ fake_worker(worker_scenario_t mode)
 			pause();
 	}
 	if (mode == SCENARIO_LONG_LIST_NAME) {
-		bzero(raw, 168);
+		bzero(raw, FSIMG_WIRE_ENTRY_BYTES);
 		fsimg_wire_put64(raw, FSIMG_ENTRY_FILE);
 		fsimg_wire_put64(raw + 16, 65535);
-		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY, raw, 168, NULL) == FSIMG_OK);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY, raw, FSIMG_WIRE_ENTRY_BYTES, NULL) == FSIMG_OK);
 		memset(raw, 'N', sizeof(raw));
 		raw[0] = '/';
 		remaining = 65535;
@@ -684,11 +686,13 @@ fake_worker(worker_scenario_t mode)
 		}
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY_END, NULL, 0, NULL) == FSIMG_OK);
 	}
-	bzero(raw, 40);
+	bzero(raw, FSIMG_WIRE_DONE_BYTES);
 	fsimg_wire_put64(raw, mode == SCENARIO_LONG_LIST_NAME ? 1 : 0);
-	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, 40, NULL) == FSIMG_OK);
+	if (mode == SCENARIO_SKIPPED_EXTRACTION)
+		fsimg_wire_put64(raw + FSIMG_WIRE_DONE_SKIPPED, 1);
+	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL) == FSIMG_OK);
 	if (mode == SCENARIO_DUPLICATE_DONE)
-		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, 40, NULL);
+		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
 	if (mode == SCENARIO_RUNTIME_FAILURE)
 		return (FSIMG_WORKER_RUNTIME_EXIT);
 	return (mode == SCENARIO_BAD_EXIT ? 1 : 0);
@@ -713,6 +717,37 @@ test_incomplete_extraction(void)
 	CHECK(run(&fixture, &error) == FSIMG_EIO);
 	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
 	CHECK(unlinkat(fixture.output, "partial", 0) == 0);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
+	fixture_close(&fixture);
+}
+
+/* A worker may report skipped entries only for an extraction that asked
+ * for skipping; otherwise the count could only be a forged warning.
+ */
+static void
+test_skipped_extraction(void)
+{
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	int fd;
+
+	fixture_open(&fixture);
+	fd = openat(fixture.parent, "fake", O_CREAT | O_EXCL | O_RDWR, 0700);
+	CHECK(fd != -1);
+	CHECK(ftruncate(fd, SCENARIO_SKIPPED_EXTRACTION) == 0);
+	CHECK(fchmod(fd, 0700) == 0);
+	fixture.request.input_fd = fd;
+	fixture.request.output_fd = fixture.output;
+	fixture.request.kind = FSIMG_JOB_EXTRACT;
+	fixture.request.sandbox = FSIMG_SANDBOX_OFF;
+	CHECK(run(&fixture, &error) == FSIMG_EIO);
+	fixture.request.flags = FSIMG_JOB_SKIP_UNSUPPORTED;
+	status = run(&fixture, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "skipped extraction: %d: %s\n", status, error.message);
+	CHECK(status == FSIMG_OK && fixture.result.skipped_entries == 1);
 	CHECK(close(fd) == 0);
 	CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
 	fixture_close(&fixture);
@@ -1059,6 +1094,7 @@ main(int argc, char **argv)
 	test_forged();
 	test_forged_publication();
 	test_incomplete_extraction();
+	test_skipped_extraction();
 	test_output_ledger(true);
 	test_output_ledger(false);
 	{

@@ -221,7 +221,7 @@ fsimg_status_t
 fsimg_metadata_validate(const fsimg_metadata_t *metadata, fsimg_error_t *error)
 {
 	fsimg_error_clear(error);
-	if ((metadata->valid & ~0x0fu) != 0 ||
+	if ((metadata->valid & ~FSIMG_META_KNOWN) != 0 ||
 	    (metadata->required & ~metadata->valid) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CATALOG, "invalid metadata validity or requirements"));
@@ -230,9 +230,15 @@ fsimg_metadata_validate(const fsimg_metadata_t *metadata, fsimg_error_t *error)
 	    ((metadata->valid & FSIMG_META_MODIFIED) != 0 &&
 	    !timestamp_valid(&metadata->modified)) ||
 	    ((metadata->valid & FSIMG_META_ACCESSED) != 0 &&
-	    !timestamp_valid(&metadata->accessed)))
+	    !timestamp_valid(&metadata->accessed)) ||
+	    ((metadata->valid & FSIMG_META_CHANGED) != 0 &&
+	    !timestamp_valid(&metadata->changed)))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CATALOG, "invalid timestamp basis or precision"));
+	if ((metadata->valid & FSIMG_META_MODE) != 0 &&
+	    (metadata->mode & ~FSIMG_MODE_BITS) != 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CATALOG, "mode carries bits beyond the permission bits"));
 	if ((metadata->valid & FSIMG_META_ATTRIBUTES) != 0 &&
 	    (metadata->attributes & ~0x0fu) != 0)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,

@@ -142,6 +142,8 @@ typedef struct fsimg_stats {
 	uint64_t	 scratch_physical_bytes;
 	uint64_t	 scratch_physical_peak;
 	uint64_t	 metadata_losses;
+	/* Entries safe extraction omitted under FSIMG_EXTRACT_SKIP_UNSUPPORTED. */
+	uint64_t	 skipped_entries;
 } fsimg_stats_t;
 
 /* Options and callback tables must have exactly this size and version.
@@ -222,14 +224,24 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
 #define FSIMG_META_MODIFIED 0x02u
 #define FSIMG_META_ACCESSED 0x04u
 #define FSIMG_META_ATTRIBUTES 0x08u
+#define FSIMG_META_CHANGED 0x10u
+#define FSIMG_META_OWNER 0x20u
+#define FSIMG_META_MODE 0x40u
 #define FSIMG_ATTR_READONLY 0x01u
 #define FSIMG_ATTR_HIDDEN 0x02u
 #define FSIMG_ATTR_SYSTEM 0x04u
 #define FSIMG_ATTR_ARCHIVE 0x08u
 
+/* Kinds are distinct bits so a capability record lists a set as a mask.
+ * A symbolic link's size is its target length, 1 through 1023 bytes, and its
+ * content is the target without a terminator; fsimg never resolves it.
+ * Directory and FIFO sizes are zero and they have no content.
+ */
 typedef enum fsimg_entry_kind {
 	FSIMG_ENTRY_FILE = 1,
-	FSIMG_ENTRY_DIRECTORY = 2
+	FSIMG_ENTRY_DIRECTORY = 2,
+	FSIMG_ENTRY_SYMLINK = 4,
+	FSIMG_ENTRY_FIFO = 8
 } fsimg_entry_kind_t;
 
 typedef enum fsimg_time_basis {
@@ -257,14 +269,20 @@ typedef struct fsimg_timestamp {
 
 /* Required is a subset of valid. Unknown bits are rejected. The common
  * catalog preserves every valid field; format planning checks fidelity.
+ * OWNER governs uid and gid; MODE governs the permission bits 07777, never
+ * file-type bits; CHANGED is the inode change time.
  */
 typedef struct fsimg_metadata {
 	uint32_t	 valid;
 	uint32_t	 required;
 	uint32_t	 attributes;
+	uint32_t	 uid;
+	uint32_t	 gid;
+	uint32_t	 mode;
 	fsimg_timestamp_t created;
 	fsimg_timestamp_t modified;
 	fsimg_timestamp_t accessed;
+	fsimg_timestamp_t changed;
 } fsimg_metadata_t;
 
 typedef struct fsimg_entry {
@@ -317,9 +335,11 @@ typedef struct fsimg_source_ops {
  * its argument/content remain borrowed until writer destruction. No callback
  * retains buffers or re-enters the active context. Reads follow the byte-I/O
  * partial-progress/EINTR rules. Opaque source/sink storage must be disjoint.
- * add copies path/metadata. Directories require size zero and a NULL source;
- * files require an explicit zero or provider source. Host trees reject links
- * and special files, and check identity/size/change metadata on reopening.
+ * add copies path/metadata. Directories and FIFOs require size zero and a
+ * NULL source; files require an explicit zero or provider source, and a
+ * symbolic link requires a provider source whose bytes are its target. Host
+ * trees record symbolic links without following them, reject
+ * special files, and check identity/size/change metadata on reopening.
  * These checks detect ordinary mutation; hostile writers require a snapshot.
  * Provider ranges start at the requested offset, have positive in-bounds
  * length, and use DATA or ZERO. EOF is handled without invoking the callback.
@@ -331,6 +351,8 @@ void fsimg_source_ops_init(fsimg_source_ops_t *);
 #define FSIMG_WRITE_ALLOW_LOSS 0x01u
 #define FSIMG_WRITE_REPRODUCIBLE 0x02u
 #define FSIMG_WRITE_DURABLE 0x04u
+/* Host trees also record uid, gid and permission bits as optional fields. */
+#define FSIMG_WRITE_IMPORT_POSIX 0x08u
 
 typedef struct fsimg_write_options {
 	size_t		 size;
@@ -339,7 +361,10 @@ typedef struct fsimg_write_options {
 	uint64_t	 volume_bytes; /* Zero selects automatic sizing. */
 	uint64_t	 min_free_bytes;
 	int64_t		 epoch; /* Unix seconds; default 1980-01-01 UTC. */
-	const char	*label; /* Copied; NULL selects NO NAME. */
+	/* Copied; NULL selects the format default, such as NO NAME. A format
+	 * whose capability record has no label capacity requires NULL.
+	 */
+	const char	*label;
 	uint32_t	 sector_bytes; /* Zero selects 512. */
 	uint32_t	 allocation_unit_bytes; /* Zero selects automatically. */
 	uint32_t	 fat_root_entries; /* FAT12/16 only; zero selects an adequate root. */
@@ -370,8 +395,10 @@ typedef struct fsimg_plan_info {
  * incomplete on failure; known source aliases are rejected before mutation.
  * Callback source/sink storage must be disjoint. Fixed sinks must match the
  * planned size; whole resizable sinks are resized. Every byte is defined.
- * ALLOW_LOSS permits optional timestamp rounding/omission and time-basis loss;
- * required losses always fail. Counts remain available in plan information.
+ * ALLOW_LOSS permits optional timestamp rounding/omission, time-basis loss and
+ * omission of a field the format does not store, counted once per field;
+ * required losses and entry kinds the format lacks always fail planning.
+ * Counts remain available in plan information.
  * write_at requires a single basename beneath a trusted directory descriptor,
  * publishes without replacement, and always performs durable publication.
  * On unsupported publication error.path names the retained image relative to
@@ -401,6 +428,7 @@ void fsimg_writer_free(fsimg_writer_t *);
 #define FSIMG_VOLUME_GEOMETRY 0x01u
 #define FSIMG_VOLUME_LABEL 0x02u
 #define FSIMG_VOLUME_FREE 0x04u
+#define FSIMG_VOLUME_UUID 0x08u
 #define FSIMG_VERIFY_PAYLOAD 0x01u
 
 typedef enum fsimg_validation_scope {
@@ -425,6 +453,8 @@ typedef struct fsimg_volume_info {
 	char		 format[16];
 	char		 profile[40];
 	char		 label[48];
+	/* A 16-byte volume identity in textual (RFC 4122) byte order. */
+	unsigned char	 uuid[16];
 	uint64_t	 volume_bytes;
 	uint64_t	 allocation_units;
 	uint64_t	 free_bytes;
@@ -443,7 +473,7 @@ typedef struct fsimg_format_info {
 	char		 name[16];
 	char		 profile[40];
 	unsigned	 capabilities;
-	/* Bit FSIMG_ENTRY_FILE or FSIMG_ENTRY_DIRECTORY denotes support. */
+	/* Masks of the FSIMG_ENTRY_* kinds and FSIMG_META_* fields stored. */
 	uint32_t	 entry_kinds;
 	uint32_t	 metadata_fields;
 	/* Bit n denotes a legal size of 2^n bytes. */
@@ -455,6 +485,8 @@ typedef struct fsimg_format_info {
 	uint64_t	 max_file_bytes;
 	uint64_t	 max_volume_bytes;
 	uint32_t	 max_name_utf16_units;
+	/* Encoded on-disk label capacity; zero when the format has no label. */
+	uint32_t	 max_label_bytes;
 } fsimg_format_info_t;
 
 typedef struct fsimg_verify_report {
@@ -502,6 +534,7 @@ fsimg_status_t fsimg_format_next(size_t *, fsimg_format_info_t *,
 #define FSIMG_EXTRACT_ALLOW_LOSS 0x01u
 #define FSIMG_EXTRACT_TIMES 0x02u
 #define FSIMG_EXTRACT_WALL_OFFSET 0x04u
+#define FSIMG_EXTRACT_SKIP_UNSUPPORTED 0x08u
 
 typedef struct fsimg_extract_options {
 	size_t		 size;
@@ -522,6 +555,9 @@ typedef struct fsimg_extract_options {
  * TIMES restores access/modification through opened descriptors; wall times
  * require WALL_OFFSET. Optional losses require ALLOW_LOSS (initialized default)
  * and are reported through the context callback/statistics. Required losses fail.
+ * Owners, modes and change times are never restored. A symbolic link, FIFO
+ * or other kind fails with EUNSUPPORTED unless SKIP_UNSUPPORTED omits it and
+ * counts it in the statistics' skipped_entries.
  */
 void fsimg_extract_options_init(fsimg_extract_options_t *);
 fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,

@@ -34,6 +34,8 @@ typedef enum fsimg_confinement {
 #define FSIMG_JOB_RECURSIVE 0x01u
 #define FSIMG_JOB_PAYLOAD 0x02u
 #define FSIMG_JOB_VERBOSE 0x04u
+/* Extraction omits entries of kinds the safe profile does not create. */
+#define FSIMG_JOB_SKIP_UNSUPPORTED 0x08u
 /* Coordinator, at most one parser, and at most one output relay. */
 #define FSIMG_CLI_PROCESS_BOUND 3u
 /* Fixed sanitizer options reserve this status for runtime failures. */
@@ -90,6 +92,7 @@ typedef struct fsimg_worker_result {
 	uint64_t	 raw_bytes;
 	uint64_t	 metadata_losses;
 	uint64_t	 image_bytes;
+	uint64_t	 skipped_entries;
 	fsimg_confinement_t confinement; /* UNKNOWN until a valid READY arrives. */
 } fsimg_worker_result_t;
 

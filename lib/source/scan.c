@@ -36,11 +36,17 @@ static fsimg_status_t scan_entry(fsimg_writer_t *, fsimg_source_root_t *,
 static fsimg_status_t directory_unchanged(scan_directory_t *, fsimg_error_t *);
 static int read_directory_batch(fsimg_writer_t *, scan_directory_t *);
 
+/* Open one object without following a link. A child that the no-follow
+ * open refuses as a symbolic link is inspected instead: identity describes
+ * the link, whose target is read once to learn its length (reopening reads
+ * it again), and *out stays -1 because a link has no descriptor.
+ */
 static fsimg_status_t
 open_object(fsimg_writer_t *writer, int parent, const char *name, bool directory,
     int *out, fsimg_host_file_t *identity, fsimg_error_t *error)
 {
 	fsimg_status_t status;
+	unsigned char target[FSIMG_SYMLINK_TARGET_MAX + 1];
 	int fd, saved;
 
 	*out = -1;
@@ -54,6 +60,9 @@ open_object(fsimg_writer_t *writer, int parent, const char *name, bool directory
 	if (fd == -1) {
 		saved = errno;
 		fsimg_fd_release(writer->ctx, -1);
+		if (saved == ELOOP && !directory)
+			return (fsimg_source_read_link(writer, parent, name,
+			    identity, target, error));
 		return (fsimg_error_set(error,
 		    saved == ELOOP ? FSIMG_EUNSUPPORTED :
 		    saved == ENOENT ? FSIMG_ESOURCE_CHANGED : FSIMG_EIO,
@@ -69,6 +78,11 @@ open_object(fsimg_writer_t *writer, int parent, const char *name, bool directory
 	return (FSIMG_OK);
 }
 
+/* Files and links are host sources: their records hold the identity that
+ * reopening must find again and the relative path that leads to it.
+ * Directories have no source. Owner and mode are optional fields that the
+ * scan records only on request.
+ */
 static fsimg_status_t
 scan_entry(fsimg_writer_t *writer, fsimg_source_root_t *root,
     const fsimg_host_file_t *identity, const char *image_path,
@@ -83,8 +97,11 @@ scan_entry(fsimg_writer_t *writer, fsimg_source_root_t *root,
 	storage = FSIMG_STORAGE_NONE;
 	reference = 0;
 	entry.kind = FSIMG_ENTRY_DIRECTORY;
-	if (identity->kind == FSIMG_HOST_FILE) {
-		entry.kind = FSIMG_ENTRY_FILE;
+	if ((writer->options.flags & FSIMG_WRITE_IMPORT_POSIX) != 0)
+		entry.metadata.valid |= FSIMG_META_OWNER | FSIMG_META_MODE;
+	if (identity->kind == FSIMG_HOST_FILE || identity->kind == FSIMG_HOST_LINK) {
+		entry.kind = identity->kind == FSIMG_HOST_FILE ? FSIMG_ENTRY_FILE :
+		    FSIMG_ENTRY_SYMLINK;
 		entry.size = identity->length;
 		storage = FSIMG_STORAGE_HOST;
 		path_length = strlen(relative_path) + 1;
@@ -97,7 +114,7 @@ scan_entry(fsimg_writer_t *writer, fsimg_source_root_t *root,
 		fsimg_meta_put_u64(writer->source_record + 40, identity->modified.nanoseconds);
 		fsimg_meta_put_u64(writer->source_record + 48, (uint64_t)identity->changed.seconds);
 		fsimg_meta_put_u64(writer->source_record + 56, identity->changed.nanoseconds);
-		fsimg_meta_put_u64(writer->source_record + 64, FSIMG_HOST_FILE);
+		fsimg_meta_put_u64(writer->source_record + 64, identity->kind);
 		fsimg_meta_put_u64(writer->source_record + 72, 1);
 		bcopy(relative_path, writer->source_record + FSIMG_SOURCE_HEADER, path_length);
 		status = fsimg_stream_append(writer->host_sources, writer->source_record,
@@ -258,14 +275,19 @@ fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
 		    &image_length, &image_depth, error);
 		if (status != FSIMG_OK)
 			break;
+		/* A link has no descriptor (fd -1); everything else is open.
+		 * Any failure names the object by its image path.
+		 */
 		status = open_object(writer, current->fd, name, false, &fd, &identity, error);
-		if (status != FSIMG_OK)
-			break;
-		status = fsimg_source_check_object(writer, fd, &identity, root, error);
+		if (status == FSIMG_OK)
+			status = fsimg_source_check_object(writer, fd, &identity, root, error);
 		if (status == FSIMG_OK)
 			status = scan_entry(writer, root, &identity, image_path, relative_path, error);
 		if (status != FSIMG_OK) {
-			fsimg_fd_release(writer->ctx, fd);
+			/* identity may be partial here; fd alone says what is open. */
+			if (fd != -1)
+				fsimg_fd_release(writer->ctx, fd);
+			fsimg_error_path(error, image_path);
 			break;
 		}
 		if (identity.kind == FSIMG_HOST_DIRECTORY) {
@@ -274,7 +296,7 @@ fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
 			directories[depth].identity = identity;
 			directories[depth].fd = fd;
 			directories[depth].path_length = relative_length;
-		} else {
+		} else if (identity.kind != FSIMG_HOST_LINK) {
 			fsimg_fd_release(writer->ctx, fd);
 		}
 	}

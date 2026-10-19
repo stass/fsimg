@@ -11,7 +11,9 @@
 #include "internal.h"
 #include "protocol.h"
 
+static void encode_time(unsigned char *, const fsimg_timestamp_t *, bool);
 static bool time_field_valid(const unsigned char *);
+static bool bytes_zero(const unsigned char *, size_t);
 static bool entry_metadata_valid(const unsigned char *);
 static fsimg_status_t protocol_error(fsimg_error_t *, const char *);
 static fsimg_status_t transfer_frame_bytes(int, void *, size_t, bool,
@@ -281,6 +283,79 @@ fsimg_wire_error_decode(const unsigned char *raw, uint32_t length,
 	return (decoded.status);
 }
 
+static void
+encode_time(unsigned char *raw, const fsimg_timestamp_t *time, bool valid)
+{
+	bzero(raw, FSIMG_WIRE_TIME_BYTES);
+	if (!valid)
+		return;
+	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_SECONDS, (uint64_t)time->seconds);
+	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_PRECISION, time->precision_ns);
+	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_NANOSECONDS, time->nanoseconds);
+	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_BASIS, time->basis);
+	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_OFFSET,
+	    (uint64_t)(int64_t)time->offset_minutes);
+}
+
+void
+fsimg_wire_entry_encode(unsigned char *raw, const fsimg_entry_t *entry,
+    size_t path_length)
+{
+	const fsimg_metadata_t *metadata = &entry->metadata;
+
+	bzero(raw, FSIMG_WIRE_ENTRY_BYTES);
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_KIND, entry->kind);
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_LENGTH, entry->size);
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, path_length);
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_VALID, metadata->valid);
+	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_REQUIRED, metadata->required);
+	if ((metadata->valid & FSIMG_META_ATTRIBUTES) != 0)
+		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES,
+		    metadata->attributes);
+	encode_time(raw + FSIMG_WIRE_ENTRY_CREATED, &metadata->created,
+	    (metadata->valid & FSIMG_META_CREATED) != 0);
+	encode_time(raw + FSIMG_WIRE_ENTRY_MODIFIED, &metadata->modified,
+	    (metadata->valid & FSIMG_META_MODIFIED) != 0);
+	encode_time(raw + FSIMG_WIRE_ENTRY_ACCESSED, &metadata->accessed,
+	    (metadata->valid & FSIMG_META_ACCESSED) != 0);
+	encode_time(raw + FSIMG_WIRE_ENTRY_CHANGED, &metadata->changed,
+	    (metadata->valid & FSIMG_META_CHANGED) != 0);
+	if ((metadata->valid & FSIMG_META_OWNER) != 0) {
+		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_UID, metadata->uid);
+		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_GID, metadata->gid);
+	}
+	if ((metadata->valid & FSIMG_META_MODE) != 0)
+		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_MODE, metadata->mode);
+}
+
+/* Strings are copied up to their terminators, which the reader guarantees
+ * inside each fixed array; the zeroed record supplies the wire terminator.
+ */
+void
+fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
+{
+	bzero(raw, FSIMG_WIRE_INFO_BYTES);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VALID, info->valid);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CAPABILITIES, info->capabilities);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VOLUME, info->volume_bytes);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_UNITS, info->allocation_units);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_FREE, info->free_bytes);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_SECTOR, info->sector_bytes);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CLUSTER, info->allocation_unit_bytes);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_TIME_BASIS, info->time_basis);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_SCOPE, info->scope);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CLEAN, info->clean ? 1 : 0);
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_IO_ERROR, info->io_error ? 1 : 0);
+	bcopy(info->format, raw + FSIMG_WIRE_INFO_FORMAT,
+	    strnlen(info->format, sizeof(info->format) - 1));
+	bcopy(info->profile, raw + FSIMG_WIRE_INFO_PROFILE,
+	    strnlen(info->profile, sizeof(info->profile) - 1));
+	bcopy(info->label, raw + FSIMG_WIRE_INFO_LABEL,
+	    strnlen(info->label, sizeof(info->label) - 1));
+	if ((info->valid & FSIMG_VOLUME_UUID) != 0)
+		bcopy(info->uuid, raw + FSIMG_WIRE_INFO_UUID, sizeof(info->uuid));
+}
+
 static bool
 time_field_valid(const unsigned char *raw)
 {
@@ -301,21 +376,52 @@ time_field_valid(const unsigned char *raw)
 }
 
 static bool
+bytes_zero(const unsigned char *raw, size_t length)
+{
+	for (size_t i = 0; i < length; i++) {
+		if (raw[i] != 0)
+			return (false);
+	}
+	return (true);
+}
+
+/* Every field has the range its public type and documented bits allow;
+ * an absent field must be zero, as the encoder writes it.
+ */
+static bool
 entry_metadata_valid(const unsigned char *raw)
 {
-	uint64_t valid, required, attributes;
-	const unsigned char *time;
+	static const struct {
+		uint32_t	 field;
+		unsigned	 offset;
+	} times[] = {
+		{ FSIMG_META_CREATED, FSIMG_WIRE_ENTRY_CREATED },
+		{ FSIMG_META_MODIFIED, FSIMG_WIRE_ENTRY_MODIFIED },
+		{ FSIMG_META_ACCESSED, FSIMG_WIRE_ENTRY_ACCESSED },
+		{ FSIMG_META_CHANGED, FSIMG_WIRE_ENTRY_CHANGED }
+	};
+	uint64_t valid, required, attributes, uid, gid, mode;
 
 	valid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_VALID);
 	required = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_REQUIRED);
 	attributes = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES);
-	if (valid > 15 || (required & ~valid) != 0 || attributes > 15)
+	uid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_UID);
+	gid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_GID);
+	mode = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE);
+	if ((valid & ~(uint64_t)FSIMG_META_KNOWN) != 0 || (required & ~valid) != 0 ||
+	    attributes > 15 || uid > UINT32_MAX || gid > UINT32_MAX ||
+	    mode > FSIMG_MODE_BITS)
 		return (false);
-	for (unsigned i = 0; i < 3; i++) {
-		if ((valid & (1u << i)) == 0)
-			continue;
-		time = raw + FSIMG_WIRE_ENTRY_CREATED + i * FSIMG_WIRE_TIME_BYTES;
-		if (!time_field_valid(time))
+	if ((valid & FSIMG_META_OWNER) == 0 && (uid != 0 || gid != 0))
+		return (false);
+	if ((valid & FSIMG_META_MODE) == 0 && mode != 0)
+		return (false);
+	if ((valid & FSIMG_META_ATTRIBUTES) == 0 && attributes != 0)
+		return (false);
+	for (size_t i = 0; i < sizeof(times) / sizeof(times[0]); i++) {
+		if ((valid & times[i].field) == 0 ?
+		    !bytes_zero(raw + times[i].offset, FSIMG_WIRE_TIME_BYTES) :
+		    !time_field_valid(raw + times[i].offset))
 			return (false);
 	}
 	return (true);
@@ -333,10 +439,15 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	capabilities = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES);
 	basis = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS);
 	scope = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SCOPE);
-	if (valid > 7 || capabilities > 7 || basis < FSIMG_TIME_UTC ||
+	if (valid > (FSIMG_VOLUME_GEOMETRY | FSIMG_VOLUME_LABEL | FSIMG_VOLUME_FREE |
+	    FSIMG_VOLUME_UUID) || capabilities > 7 || basis < FSIMG_TIME_UTC ||
 	    basis > FSIMG_TIME_PER_TIMESTAMP)
 		return (false);
 	if (scope < FSIMG_VALIDATION_HEADER || scope > FSIMG_VALIDATION_PAYLOAD)
+		return (false);
+	if ((valid & FSIMG_VOLUME_UUID) == 0 &&
+	    !bytes_zero(raw + FSIMG_WIRE_INFO_UUID, FSIMG_WIRE_INFO_BYTES -
+	    FSIMG_WIRE_INFO_UUID))
 		return (false);
 
 	if (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME) > volume_limit)
@@ -381,24 +492,44 @@ fsimg_wire_verify_frame_valid(const fsimg_frame_t *frame, bool payload)
 	    fsimg_wire_get64(frame->payload + FSIMG_WIRE_VERIFY_COMPLETE) == 1);
 }
 
+/* The kind is one of the closed set, with the size that kind allows:
+ * any file length, a link target of 1 through 1023 bytes, and zero for
+ * directories and FIFOs.
+ */
 bool
-fsimg_wire_entry_frame_valid(const fsimg_frame_t *frame, bool file_only, uint64_t path_limit)
+fsimg_wire_entry_frame_valid(const fsimg_frame_t *frame, bool content_only,
+    uint64_t path_limit)
 {
 	const unsigned char *raw = frame->payload;
-	uint64_t entry_kind, name_length;
+	uint64_t entry_kind, name_length, length;
+	bool has_content;
 
 	if (frame->length != FSIMG_WIRE_ENTRY_BYTES)
 		return (false);
 	entry_kind = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND);
 	name_length = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH);
-	if (entry_kind < FSIMG_ENTRY_FILE || entry_kind > FSIMG_ENTRY_DIRECTORY)
-		return (false);
+	length = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH);
 	if (name_length == 0 || name_length >= path_limit)
 		return (false);
-	if (entry_kind == FSIMG_ENTRY_DIRECTORY &&
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH) != 0)
+	switch (entry_kind) {
+	case FSIMG_ENTRY_FILE:
+		has_content = true;
+		break;
+	case FSIMG_ENTRY_SYMLINK:
+		if (length == 0 || length > FSIMG_SYMLINK_TARGET_MAX)
+			return (false);
+		has_content = true;
+		break;
+	case FSIMG_ENTRY_DIRECTORY:
+	case FSIMG_ENTRY_FIFO:
+		if (length != 0)
+			return (false);
+		has_content = false;
+		break;
+	default:
 		return (false);
-	if (file_only && entry_kind != FSIMG_ENTRY_FILE)
+	}
+	if (content_only && !has_content)
 		return (false);
 	return (entry_metadata_valid(raw));
 }

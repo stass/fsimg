@@ -8,6 +8,7 @@
 
 typedef struct fsimg_extract_result {
 	uint64_t	 entries; /* Completed entries, excluding the implicit root. */
+	uint64_t	 skipped_entries; /* Unsupported kinds omitted on request. */
 	uint64_t	 logical_bytes; /* File lengths charged, including partial files. */
 } fsimg_extract_result_t;
 

@@ -8,8 +8,9 @@ The library provides resource contexts, bounded positional I/O, and private
 bounded metadata storage with record streams, paged arrays/bitsets, and stable
 external sorting. Private writer infrastructure scans host trees, reads zero
 and provider-backed sources, and prepares deterministic catalogs without a
-resident object or descriptor per entry. Source scanning rejects symlinks,
-special files, descendant mounts, and scratch-directory overlap; identity checks
+resident object or descriptor per entry. Source scanning records symbolic
+links by target without following them and rejects special files, descendant
+mounts, and scratch-directory overlap; identity checks
 detect changes visible in host metadata; coarse timestamps and metadata-preserving
 mutation require immutable sources or a snapshot for consistency. Public
 FAT12/FAT16/FAT32/exFAT readers enumerate entries,
@@ -49,6 +50,11 @@ variant cutovers; exact sizing retains the legal boundary counts. Required
 metadata loss fails; optional timestamp rounding, range and
 timezone-basis losses follow the initialized options' explicit allow-loss
 policy and optional callback. Reproducible mode selects a fixed UTC epoch.
+The entry model also carries symbolic links, FIFOs, owner, mode and change
+time. FAT and exFAT store none of them: a symbolic link or FIFO fails
+planning, and owner and mode imported with `create -p` are counted optional
+losses that leave the image bytes unchanged. Extraction never creates links
+or FIFOs; `extract -k` skips and counts such entries instead of failing.
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,

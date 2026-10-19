@@ -134,7 +134,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_KIND) > FSIMG_JOB_PLAN ||
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
-	    FSIMG_JOB_VERBOSE)) != 0 || get_field(raw, JOB_CAPABILITIES) > 15 ||
+	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED)) != 0 ||
+	    get_field(raw, JOB_CAPABILITIES) > 15 ||
 	    memchr(raw + JOB_FORMAT_OFFSET, '\0', 16) == NULL ||
 	    memchr(raw + JOB_LABEL_OFFSET, '\0', 48) == NULL ||
 	    raw[JOB_LABEL_PRESENT] > 1 ||

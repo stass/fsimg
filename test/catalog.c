@@ -32,6 +32,9 @@ static void test_order(uint32_t, uint32_t);
 static void test_long_directory(void);
 static void test_invalid_catalogs(void);
 static void test_metadata(void);
+static void test_posix_metadata(void);
+static void test_entry_kinds(void);
+static void test_invalid_kinds(void);
 static void test_failures(void);
 static void test_corrupt_metadata(void);
 static void test_inspection_failure(void);
@@ -40,6 +43,7 @@ static void test_deep_catalog(void);
 static void test_short_child_record(void);
 static void test_child_order(void);
 static void test_index_reference(void);
+static void use_provider(catalog_fixture_t *);
 static fsimg_status_t generated_validate(void *, uint64_t, fsimg_error_t *);
 static fsimg_status_t generated_read(void *, uint64_t, uint64_t, void *,
     size_t, size_t *, fsimg_error_t *);
@@ -268,6 +272,131 @@ test_metadata(void)
 	fixture_close(&fixture);
 }
 
+/* The four POSIX additions survive the catalog exactly, garbage in absent
+ * fields is not carried, and each new kind keeps its declared size and source.
+ */
+static void
+test_posix_metadata(void)
+{
+	catalog_fixture_t fixture;
+	const fsimg_catalog_entry_t *current;
+	fsimg_entry_t directory = { .path = "/dir", .kind = FSIMG_ENTRY_DIRECTORY };
+	fsimg_entry_t link = { .path = "/dir/link", .kind = FSIMG_ENTRY_SYMLINK,
+	    .size = 1023 };
+	fsimg_entry_t fifo = { .path = "/dir/pipe", .kind = FSIMG_ENTRY_FIFO };
+	fsimg_source_t target = { .kind = FSIMG_SOURCE_PROVIDER, .id = 9 };
+
+	fixture_open(&fixture, 2);
+	use_provider(&fixture);
+	directory.metadata.valid = FSIMG_META_OWNER | FSIMG_META_MODE |
+	    FSIMG_META_CHANGED;
+	directory.metadata.required = FSIMG_META_MODE;
+	directory.metadata.uid = UINT32_MAX;
+	directory.metadata.gid = 7;
+	directory.metadata.mode = 07777;
+	directory.metadata.changed = (fsimg_timestamp_t){ .seconds = -5,
+	    .precision_ns = 1, .nanoseconds = 999999999, .basis = FSIMG_TIME_OFFSET,
+	    .offset_minutes = 1439 };
+	memset(&link.metadata, 0x97, sizeof(link.metadata));
+	link.metadata.valid = FSIMG_META_MODE;
+	link.metadata.required = 0;
+	link.metadata.mode = 0777;
+	CHECK(fsimg_writer_add(fixture.writer, &directory, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add(fixture.writer, &link, &target, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add(fixture.writer, &fifo, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_OK);
+	CHECK(current->entry.kind == FSIMG_ENTRY_DIRECTORY && current->children == 2);
+	CHECK(current->entry.metadata.valid == directory.metadata.valid);
+	CHECK(current->entry.metadata.required == FSIMG_META_MODE);
+	CHECK(current->entry.metadata.uid == UINT32_MAX);
+	CHECK(current->entry.metadata.gid == 7);
+	CHECK(current->entry.metadata.mode == 07777);
+	CHECK(current->entry.metadata.changed.seconds == -5);
+	CHECK(current->entry.metadata.changed.nanoseconds == 999999999);
+	CHECK(current->entry.metadata.changed.offset_minutes == 1439);
+
+	CHECK(fsimg_catalog_get(fixture.writer, 2, &current, NULL) == FSIMG_OK);
+	CHECK(strcmp(current->entry.path, "/dir/link") == 0);
+	CHECK(current->entry.kind == FSIMG_ENTRY_SYMLINK);
+	CHECK(current->entry.size == 1023 &&
+	    current->storage == FSIMG_STORAGE_PROVIDER && current->source_id == 9);
+	CHECK(current->entry.metadata.mode == 0777);
+	CHECK(current->entry.metadata.uid == 0 && current->entry.metadata.gid == 0);
+	CHECK(current->entry.metadata.changed.precision_ns == 0);
+	CHECK(current->entry.metadata.attributes == 0);
+
+	CHECK(fsimg_catalog_get(fixture.writer, 3, &current, NULL) == FSIMG_OK);
+	CHECK(current->entry.kind == FSIMG_ENTRY_FIFO);
+	CHECK(current->entry.size == 0 && current->storage == FSIMG_STORAGE_NONE);
+	CHECK(current->children == 0);
+	fixture_close(&fixture);
+}
+
+/* A symbolic link is content: like a file it needs a source and cannot be a
+ * parent. A FIFO is like a directory without children: no size, no source.
+ */
+static void
+test_entry_kinds(void)
+{
+	catalog_fixture_t fixture;
+	fsimg_entry_t link = { .path = "/link", .kind = FSIMG_ENTRY_SYMLINK,
+	    .size = 6 };
+	fsimg_entry_t child = { .path = "/link/child", .kind = FSIMG_ENTRY_FILE };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fsimg_source_t target = { .kind = FSIMG_SOURCE_PROVIDER };
+
+	fixture_open(&fixture, 2);
+	use_provider(&fixture);
+	CHECK(fsimg_writer_add(fixture.writer, &link, &target, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add(fixture.writer, &child, &zero, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_EINVAL);
+	fixture_close(&fixture);
+}
+
+static void
+test_invalid_kinds(void)
+{
+	static const struct {
+		fsimg_entry_kind_t kind;
+		uint64_t size;
+		fsimg_source_kind_t source;
+		uint32_t valid;
+		uint32_t mode;
+	} cases[] = {
+		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 6 },
+		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 6, .source = FSIMG_SOURCE_ZERO },
+		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 0, .source = FSIMG_SOURCE_PROVIDER },
+		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 1024, .source = FSIMG_SOURCE_PROVIDER },
+		{ .kind = FSIMG_ENTRY_FIFO, .source = FSIMG_SOURCE_ZERO },
+		{ .kind = FSIMG_ENTRY_FIFO, .size = 1 },
+		{ .kind = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY },
+		{ .kind = (fsimg_entry_kind_t)16 },
+		{ .kind = (fsimg_entry_kind_t)0 },
+		{ .kind = FSIMG_ENTRY_FIFO, .valid = FSIMG_META_MODE, .mode = 010000 },
+		{ .kind = FSIMG_ENTRY_FIFO, .valid = 0x80 }
+	};
+	catalog_fixture_t fixture;
+	fsimg_entry_t entry;
+	fsimg_source_t source;
+	fsimg_error_t error;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_open(&fixture, 2);
+		use_provider(&fixture);
+		entry = (fsimg_entry_t){ .path = "/entry", .kind = cases[i].kind,
+		    .size = cases[i].size };
+		entry.metadata.valid = cases[i].valid;
+		entry.metadata.mode = cases[i].mode;
+		source = (fsimg_source_t){ .kind = cases[i].source };
+		CHECK(fsimg_writer_add(fixture.writer, &entry,
+		    cases[i].source != 0 ? &source : NULL, &error) == FSIMG_EINVAL);
+		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+		fixture_close(&fixture);
+	}
+}
+
 static void
 test_failures(void)
 {
@@ -330,13 +459,57 @@ test_corrupt_metadata(void)
 	    .precision_ns = 1, .nanoseconds = 5, .basis = FSIMG_TIME_UTC };
 	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
-	/* A wide encoded nanosecond value must be rejected before narrowing. */
-	fsimg_meta_put_u64(bytes, (UINT64_C(1) << 32) | 5);
-	CHECK(fsimg_store_write(fixture.writer->ordered->store, 8 + 96 + 16,
-	    bytes, sizeof(bytes), NULL) == FSIMG_OK);
+	/* An out-of-range encoded nanosecond value is rejected, not narrowed. */
+	fsimg_meta_put_u64(bytes, 1000000005);
+	CHECK(fsimg_store_write(fixture.writer->ordered->store,
+	    8 + FSIMG_CATALOG_MODIFIED + 16, bytes, 4, NULL) == FSIMG_OK);
 	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_ECORRUPT);
 	CHECK(current == NULL);
 	fixture_close(&fixture);
+
+	/* An encoded kind outside the closed set is corruption, not a new kind. */
+	fixture_open(&fixture, 2);
+	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	fsimg_meta_put_u64(bytes, FSIMG_ENTRY_FILE | FSIMG_ENTRY_SYMLINK);
+	CHECK(fsimg_store_write(fixture.writer->ordered->store,
+	    8 + FSIMG_CATALOG_KIND, bytes, 4, NULL) == FSIMG_OK);
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_ECORRUPT);
+	fixture_close(&fixture);
+
+	/* An encoded mode with file-type bits is corruption. */
+	fixture_open(&fixture, 2);
+	entry.metadata.valid |= FSIMG_META_MODE;
+	entry.metadata.mode = 0644;
+	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	fsimg_meta_put_u64(bytes, 0100644);
+	CHECK(fsimg_store_write(fixture.writer->ordered->store,
+	    8 + FSIMG_CATALOG_MODE, bytes, 4, NULL) == FSIMG_OK);
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_ECORRUPT);
+	fixture_close(&fixture);
+
+	/* An absent field is written as zero bytes; anything else there is
+	 * corruption, for scalar fields and timestamps alike.
+	 */
+	static const unsigned absent[] = { FSIMG_CATALOG_ATTRIBUTES,
+	    FSIMG_CATALOG_UID, FSIMG_CATALOG_GID, FSIMG_CATALOG_MODE,
+	    FSIMG_CATALOG_CREATED,
+	    FSIMG_CATALOG_ACCESSED + FSIMG_CATALOG_TIME_BYTES - 1,
+	    FSIMG_CATALOG_CHANGED };
+	entry.metadata.valid = FSIMG_META_MODIFIED;
+	for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+		fixture_open(&fixture, 2);
+		CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+		CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_OK);
+		bytes[0] = 1;
+		CHECK(fsimg_store_write(fixture.writer->ordered->store,
+		    8 + absent[i], bytes, 1, NULL) == FSIMG_OK);
+		CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) ==
+		    FSIMG_ECORRUPT);
+		fixture_close(&fixture);
+	}
 }
 
 static void
@@ -452,6 +625,19 @@ generated_read(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
 	*transferred = length;
 	fsimg_error_clear(error);
 	return (FSIMG_OK);
+}
+
+/* Register the generated-content provider as the writer's only source. */
+static void
+use_provider(catalog_fixture_t *fixture)
+{
+	fsimg_source_ops_t provider;
+
+	fsimg_source_ops_init(&provider);
+	provider.validate = generated_validate;
+	provider.read_at = generated_read;
+	CHECK(fsimg_writer_set_sources(fixture->writer, &provider, NULL, NULL) ==
+	    FSIMG_OK);
 }
 
 static void
@@ -584,6 +770,9 @@ main(int argc, char **argv)
 	test_deep_catalog();
 	test_invalid_catalogs();
 	test_metadata();
+	test_posix_metadata();
+	test_entry_kinds();
+	test_invalid_kinds();
 	test_failures();
 	test_corrupt_metadata();
 	test_inspection_failure();

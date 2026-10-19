@@ -10,6 +10,17 @@
 
 #include "fsimg.h"
 
+/* The closed sets of public metadata fields and entry kinds, and the
+ * longest symbolic-link target the entry model represents.
+ */
+#define FSIMG_META_KNOWN	(FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
+	FSIMG_META_ACCESSED | FSIMG_META_ATTRIBUTES | FSIMG_META_CHANGED |	\
+	FSIMG_META_OWNER | FSIMG_META_MODE)
+#define FSIMG_ENTRY_KNOWN	(FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
+	FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO)
+#define FSIMG_SYMLINK_TARGET_MAX 1023u
+#define FSIMG_MODE_BITS		07777u
+
 typedef struct fsimg_meta_cache fsimg_meta_cache_t;
 
 struct fsimg_ctx {
@@ -64,8 +75,12 @@ void fsimg_session_init(fsimg_session_t *, fsimg_ctx_t *, const char *,
 fsimg_status_t fsimg_session_charge(fsimg_session_t *, uint64_t, uint64_t,
     uint64_t, fsimg_error_t *);
 void fsimg_stat_add(uint64_t *, uint64_t);
-/* fields is a validated FSIMG_META_* mask; path is borrowed for the callback. */
-void fsimg_report_loss(fsimg_ctx_t *, const char *, uint32_t);
+/* fields is a validated FSIMG_META_* mask; path is borrowed for the callback.
+ * The context counts one loss per field; the result is that count.
+ */
+uint64_t fsimg_report_loss(fsimg_ctx_t *, const char *, uint32_t);
+/* Name the object an error concerns, truncating to the error's path field. */
+void fsimg_error_path(fsimg_error_t *, const char *);
 /* Private fault injection: zero disables; n fails the nth subsequent attempt. */
 void fsimg_test_fail_alloc_after(fsimg_ctx_t *, uint64_t);
 

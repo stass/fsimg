@@ -69,7 +69,6 @@ static fsimg_status_t list_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t cat_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t verify_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t extract_job(worker_child_t *, fsimg_error_t *);
-static void encode_time(unsigned char *, const fsimg_timestamp_t *);
 static void child_cleanup(worker_child_t *);
 
 static bool
@@ -317,16 +316,6 @@ child_ready(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 	return (FSIMG_OK);
 }
 
-static void
-encode_time(unsigned char *raw, const fsimg_timestamp_t *time)
-{
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_SECONDS, (uint64_t)time->seconds);
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_PRECISION, time->precision_ns);
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_NANOSECONDS, time->nanoseconds);
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_BASIS, time->basis);
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_OFFSET, (uint64_t)(int64_t)time->offset_minutes);
-}
-
 static fsimg_status_t
 send_info(worker_child_t *child, fsimg_error_t *error)
 {
@@ -337,21 +326,7 @@ send_info(worker_child_t *child, fsimg_error_t *error)
 	status = fsimg_reader_get_info(child->reader, &info, error);
 	if (status != FSIMG_OK)
 		return (status);
-	bzero(raw, sizeof(raw));
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VALID, info.valid);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CAPABILITIES, info.capabilities);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VOLUME, info.volume_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_UNITS, info.allocation_units);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_FREE, info.free_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_SECTOR, info.sector_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CLUSTER, info.allocation_unit_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_TIME_BASIS, info.time_basis);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_SCOPE, info.scope);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CLEAN, info.clean ? 1 : 0);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_IO_ERROR, info.io_error ? 1 : 0);
-	bcopy(info.format, raw + FSIMG_WIRE_INFO_FORMAT, strlen(info.format));
-	bcopy(info.profile, raw + FSIMG_WIRE_INFO_PROFILE, strlen(info.profile));
-	bcopy(info.label, raw + FSIMG_WIRE_INFO_LABEL, strlen(info.label));
+	fsimg_wire_info_encode(raw, &info);
 	return (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO, raw,
 	    sizeof(raw), error));
 }
@@ -388,16 +363,7 @@ send_entry(const fsimg_entry_t *entry, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	length = strlen(entry->path);
-	bzero(raw, sizeof(raw));
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_KIND, entry->kind);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_LENGTH, entry->size);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, length);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_VALID, entry->metadata.valid);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_REQUIRED, entry->metadata.required);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES, entry->metadata.attributes);
-	encode_time(raw + FSIMG_WIRE_ENTRY_CREATED, &entry->metadata.created);
-	encode_time(raw + FSIMG_WIRE_ENTRY_MODIFIED, &entry->metadata.modified);
-	encode_time(raw + FSIMG_WIRE_ENTRY_ACCESSED, &entry->metadata.accessed);
+	fsimg_wire_entry_encode(raw, entry, length);
 	status = fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY,
 	    raw, sizeof(raw), error);
 	if (status != FSIMG_OK)
@@ -557,9 +523,12 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 
 	fsimg_extract_options_init(&options);
 	options.selection = child->selection;
+	if ((child->request.flags & FSIMG_JOB_SKIP_UNSUPPORTED) != 0)
+		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
 	fd = child->output_root;
 	status = fsimg_extract_into(child->reader, fd, &options, &result, error);
 	child->result.entries = result.entries;
+	child->result.skipped_entries = result.skipped_entries;
 	child->result.logical_bytes = result.logical_bytes;
 	if (status == FSIMG_OK && fsync(fd) == -1)
 		status = fsimg_error_set(error, FSIMG_EIO, errno,
@@ -744,6 +713,7 @@ fsimg_worker_main(void)
 	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_LOSSES, child.result.metadata_losses);
 	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_RAW, child.result.raw_bytes);
 	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_IMAGE, child.result.image_bytes);
+	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_SKIPPED, child.result.skipped_entries);
 	status = fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
 	return (status == FSIMG_OK ? 0 : 1);
 }

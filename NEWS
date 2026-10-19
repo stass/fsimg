@@ -73,6 +73,15 @@ Unicode tables and deterministic plans interoperate with exfatprogs and the
 Linux kernel. Sparse-volume checks exercise actual 128 TiB files on APFS and
 ZFS at a 64 MiB library budget, independently of initialized payload size.
 
+POSIX metadata extends entries with symbolic links and FIFOs and metadata
+with change time, owner and permission bits, and volumes with a UUID. Host
+scans import links without following them and, with -p, owners and modes.
+Planning checks every entry against the format's capability record: a kind the
+format cannot store fails, and an omitted field is a counted loss or a failure
+when losses are forbidden. Capability records carry entry-kind and field masks
+whose bits are the public values, and the encoded label capacity. Safe
+extraction fails on kinds it does not create unless -k skips and counts them.
+
 The fsimg command provides creation, inspection, listing, raw content, safe
 extraction, verification and capability enumeration. Strict short-option parsing,
 streaming NDJSON, bounded progress and command-wide output accounting share

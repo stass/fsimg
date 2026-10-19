@@ -14,7 +14,8 @@
 typedef enum fsimg_host_kind {
 	FSIMG_HOST_OTHER,
 	FSIMG_HOST_FILE,
-	FSIMG_HOST_DIRECTORY
+	FSIMG_HOST_DIRECTORY,
+	FSIMG_HOST_LINK
 } fsimg_host_kind_t;
 
 typedef struct fsimg_host_file {
@@ -51,6 +52,8 @@ int fsimg_host_executable(char *, size_t);
 int fsimg_host_closefrom(int);
 bool fsimg_host_unsupported_io(int);
 int fsimg_host_file(int, fsimg_host_file_t *);
+/* Inspect parent/name without following a final symbolic link. */
+int fsimg_host_link(int, const char *, fsimg_host_file_t *);
 /* Source opens never follow links or acquire a controlling terminal/block on
  * a FIFO. ELOOP identifies a no-follow symlink refusal on every host.
  */

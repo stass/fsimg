@@ -164,7 +164,7 @@ private directories and files, regular content only, no links, no privileged
 metadata, no existing-tree merge, and no host timestamp restoration. Inspection
 still exposes image metadata. An entry of another kind, such as a symbolic
 link, fails the extraction unless `-k` is given, which skips such entries and
-reports their count. No force flag, lossy name rewriting, or sandbox
+reports their count in a warning and in the JSON summary. No force flag, lossy name rewriting, or sandbox
 opt-out weakens the path and file-type checks.
 
 Logical output bytes, including holes, count against the output quota. Sparse
@@ -179,7 +179,8 @@ conservatively reports incomplete output.
 ## Inspection, verification, and capabilities
 
 `info` reports detected format/profile, volume and allocation geometry, label,
-implemented capabilities, and validation scope. It does not claim to verify
+volume UUID when the format has one, implemented capabilities, and validation
+scope. It does not claim to verify
 the full filesystem or scan free data space. Counts requiring traversal are
 marked unknown rather than triggering an undisclosed full scan.
 
@@ -237,7 +238,8 @@ remain documented and appear in verbose creation/capability details.
 `-j` writes newline-delimited JSON records with a schema version and `type`.
 Entry records stream individually, followed by a completion summary. There is
 no JSON array proportional to entry count. Final records include validation
-scope, counters, selected limits, metadata-loss counts, and sandbox status.
+scope, counters, selected limits, metadata-loss and skipped-entry counts, and
+sandbox status.
 An error emits a bounded error record when the stream is usable; absence of
 a successful completion summary means incomplete output. JSON numeric values
 that can exceed exact binary64 integer range are decimal strings with documented

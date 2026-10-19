@@ -38,6 +38,8 @@
 
 #include "host.h"
 
+static int host_identity(const struct stat *, fsimg_host_file_t *);
+
 _Static_assert(sizeof(off_t) == sizeof(int64_t), "64-bit off_t required");
 
 void
@@ -148,26 +150,50 @@ fsimg_host_file(int fd, fsimg_host_file_t *out)
 	bzero(out, sizeof(*out));
 	if (fstat(fd, &st) == -1)
 		return (-1);
-	if (st.st_size < 0) {
+	return (host_identity(&st, out));
+}
+
+int
+fsimg_host_link(int parent, const char *name, fsimg_host_file_t *out)
+{
+	struct stat st;
+
+	bzero(out, sizeof(*out));
+	if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) == -1)
+		return (-1);
+	return (host_identity(&st, out));
+}
+
+/* Translate one stat result. Owner and permission bits are recorded without
+ * validity bits; the scanner marks them valid only when asked to import them.
+ */
+static int
+host_identity(const struct stat *st, fsimg_host_file_t *out)
+{
+	if (st->st_size < 0) {
 		errno = EOVERFLOW;
 		return (-1);
 	}
-	out->device = (uint64_t)st.st_dev;
-	out->inode = (uint64_t)st.st_ino;
-	out->length = (uint64_t)st.st_size;
-	out->kind = S_ISREG(st.st_mode) ? FSIMG_HOST_FILE :
-	    S_ISDIR(st.st_mode) ? FSIMG_HOST_DIRECTORY : FSIMG_HOST_OTHER;
+	out->device = (uint64_t)st->st_dev;
+	out->inode = (uint64_t)st->st_ino;
+	out->length = (uint64_t)st->st_size;
+	out->kind = S_ISREG(st->st_mode) ? FSIMG_HOST_FILE :
+	    S_ISDIR(st->st_mode) ? FSIMG_HOST_DIRECTORY :
+	    S_ISLNK(st->st_mode) ? FSIMG_HOST_LINK : FSIMG_HOST_OTHER;
+	out->metadata.uid = (uint32_t)st->st_uid;
+	out->metadata.gid = (uint32_t)st->st_gid;
+	out->metadata.mode = (uint32_t)st->st_mode & 07777u;
 #if defined(__APPLE__)
-	out->modified = host_time(st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec);
-	out->changed = host_time(st.st_ctimespec.tv_sec, st.st_ctimespec.tv_nsec);
-	out->metadata.accessed = host_time(st.st_atimespec.tv_sec, st.st_atimespec.tv_nsec);
-	out->metadata.created = host_time(st.st_birthtimespec.tv_sec, st.st_birthtimespec.tv_nsec);
+	out->modified = host_time(st->st_mtimespec.tv_sec, st->st_mtimespec.tv_nsec);
+	out->changed = host_time(st->st_ctimespec.tv_sec, st->st_ctimespec.tv_nsec);
+	out->metadata.accessed = host_time(st->st_atimespec.tv_sec, st->st_atimespec.tv_nsec);
+	out->metadata.created = host_time(st->st_birthtimespec.tv_sec, st->st_birthtimespec.tv_nsec);
 #else
-	out->modified = host_time(st.st_mtim.tv_sec, st.st_mtim.tv_nsec);
-	out->changed = host_time(st.st_ctim.tv_sec, st.st_ctim.tv_nsec);
-	out->metadata.accessed = host_time(st.st_atim.tv_sec, st.st_atim.tv_nsec);
+	out->modified = host_time(st->st_mtim.tv_sec, st->st_mtim.tv_nsec);
+	out->changed = host_time(st->st_ctim.tv_sec, st->st_ctim.tv_nsec);
+	out->metadata.accessed = host_time(st->st_atim.tv_sec, st->st_atim.tv_nsec);
 #if defined(__FreeBSD__)
-	out->metadata.created = host_time(st.st_birthtim.tv_sec, st.st_birthtim.tv_nsec);
+	out->metadata.created = host_time(st->st_birthtim.tv_sec, st->st_birthtim.tv_nsec);
 #endif
 #endif
 	out->metadata.modified = out->modified;

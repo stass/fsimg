@@ -15,11 +15,16 @@
 static fsimg_status_t source_validate(fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t source_abort(fsimg_source_cursor_t *, fsimg_status_t);
 static fsimg_status_t callback_status(fsimg_status_t, fsimg_error_t *);
+static fsimg_status_t link_failure(int, bool, fsimg_error_t *);
 static fsimg_status_t provider_size(void *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t provider_read(void *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
+static fsimg_status_t link_read(void *, uint64_t, void *, size_t,
+    size_t *, fsimg_error_t *);
+static fsimg_status_t open_host_link(fsimg_writer_t *, fsimg_source_root_t *,
+    int, const char *, fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t open_host_source(fsimg_writer_t *, uint64_t,
-    fsimg_source_cursor_t *, fsimg_error_t *);
+    fsimg_host_kind_t, fsimg_source_cursor_t *, fsimg_error_t *);
 static int64_t source_signed(uint64_t);
 
 bool
@@ -181,11 +186,22 @@ fsimg_source_check_object(fsimg_writer_t *writer, int fd,
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_SOURCE, "source tree encounters its scratch directory"));
 	}
-	if (identity->kind != FSIMG_HOST_FILE && identity->kind != FSIMG_HOST_DIRECTORY)
+	if (identity->kind != FSIMG_HOST_FILE && identity->kind != FSIMG_HOST_DIRECTORY &&
+	    identity->kind != FSIMG_HOST_LINK)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_SOURCE, "source object is neither a regular file nor a directory"));
+		    FSIMG_OP_SOURCE, "source object is not a regular file, directory or symbolic link"));
 	if (root == NULL)
 		return (FSIMG_OK);
+	/* A link cannot be a mount point and has no descriptor: it lives on
+	 * its parent directory's file system, whose mount was checked, so its
+	 * device is enough.
+	 */
+	if (identity->kind == FSIMG_HOST_LINK) {
+		if (identity->device != root->identity.device)
+			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			    FSIMG_OP_SOURCE, "source traversal crosses a descendant mount"));
+		return (FSIMG_OK);
+	}
 	if (fsimg_host_mount_id(fd, &mount_id) == -1) {
 		saved = errno;
 		return (fsimg_error_set(error, saved == ENOTSUP ?
@@ -196,6 +212,61 @@ fsimg_source_check_object(fsimg_writer_t *writer, int fd,
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_SOURCE, "source traversal crosses a descendant mount"));
 	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_source_read_link(fsimg_writer_t *writer, int parent, const char *name,
+    fsimg_host_file_t *identity, unsigned char *target, fsimg_error_t *error)
+{
+	fsimg_host_file_t after;
+	ssize_t length;
+	fsimg_status_t status;
+	int saved;
+
+	status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (fsimg_host_link(parent, name, identity) == -1) {
+		saved = errno;
+		return (link_failure(saved, saved == ENOENT, error));
+	}
+	if (identity->kind != FSIMG_HOST_LINK)
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+		    FSIMG_OP_SOURCE, "source object is no longer a symbolic link"));
+	length = readlinkat(parent, name, (char *)target,
+	    FSIMG_SYMLINK_TARGET_MAX + 1);
+	if (length == -1) {
+		saved = errno;
+		return (link_failure(saved, saved == ENOENT || saved == EINVAL,
+		    error));
+	}
+	/* Inspecting the link again proves the target belongs to identity. */
+	if (fsimg_host_link(parent, name, &after) == -1 ||
+	    !fsimg_source_identity_equal(identity, &after))
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+		    FSIMG_OP_SOURCE, "source link changed while its target was read"));
+	if (length == 0 || (size_t)length > FSIMG_SYMLINK_TARGET_MAX)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_SOURCE, "symbolic link target is empty or longer than 1023 bytes"));
+	identity->length = (uint64_t)length;
+	return (FSIMG_OK);
+}
+
+/* A link that vanished or stopped being a link changed; a process whose
+ * confinement denies link inspection cannot import links at all, which is
+ * a missing capability rather than an I/O failure.
+ */
+static fsimg_status_t
+link_failure(int saved, bool changed, fsimg_error_t *error)
+{
+	if (changed)
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, saved,
+		    FSIMG_OP_SOURCE, "source link changed while it was inspected"));
+	if (saved == EPERM || saved == EACCES)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, saved,
+		    FSIMG_OP_SOURCE, "symbolic link inspection is not permitted"));
+	return (fsimg_error_set(error, FSIMG_EIO, saved, FSIMG_OP_SOURCE,
+	    "source link inspection failed"));
 }
 
 static fsimg_status_t
@@ -232,7 +303,12 @@ source_validate(fsimg_source_cursor_t *source, fsimg_error_t *error)
 		writer->ctx->in_callback = false;
 		return (callback_status(status, error));
 	}
-	if (source->storage == FSIMG_STORAGE_HOST) {
+	/* A link's target was read into memory under a stable identity when
+	 * it was opened; the bytes copied are those bytes, so only a file's
+	 * descriptor can change underneath the copy.
+	 */
+	if (source->storage == FSIMG_STORAGE_HOST &&
+	    source->identity.kind == FSIMG_HOST_FILE) {
 		if (fsimg_host_file(source->fd, &identity) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_SOURCE, "source file inspection failed"));
@@ -265,6 +341,47 @@ provider_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	    offset, buffer, length, transferred, error));
 }
 
+static fsimg_status_t
+link_read(void *argument, uint64_t offset, void *buffer, size_t length,
+    size_t *transferred, fsimg_error_t *error)
+{
+	fsimg_source_cursor_t *source = argument;
+
+	fsimg_error_clear(error);
+	bcopy(source->link_target + offset, buffer, length);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+/* Reopen a link: read its target again and require the recorded identity,
+ * including the target length. The I/O object then serves link_target, so
+ * a later change to the link cannot alter the bytes being copied.
+ */
+static fsimg_status_t
+open_host_link(fsimg_writer_t *writer, fsimg_source_root_t *root, int parent,
+    const char *name, fsimg_source_cursor_t *source, fsimg_error_t *error)
+{
+	fsimg_host_file_t opened;
+	fsimg_io_ops_t ops;
+	fsimg_status_t status;
+
+	status = fsimg_source_read_link(writer, parent, name, &opened,
+	    source->link_target, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_source_check_object(writer, -1, &opened, root, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!fsimg_source_identity_equal(&opened, &source->identity))
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+		    FSIMG_OP_SOURCE, "reopened source link differs from its recorded identity"));
+	fsimg_io_ops_init(&ops);
+	ops.get_size = provider_size;
+	ops.read_at = link_read;
+	return (fsimg_io_from_callbacks(writer->ctx, &ops, source, &source->io,
+	    error));
+}
+
 static int64_t
 source_signed(uint64_t value)
 {
@@ -272,9 +389,13 @@ source_signed(uint64_t value)
 	    -1 - (int64_t)(UINT64_MAX - value));
 }
 
+/* Walk the recorded relative path from its root one component at a time,
+ * never following a link, and open the final object if it still has the
+ * recorded identity. kind is the host kind the catalog entry requires.
+ */
 static fsimg_status_t
 open_host_source(fsimg_writer_t *writer, uint64_t reference,
-    fsimg_source_cursor_t *source, fsimg_error_t *error)
+    fsimg_host_kind_t kind, fsimg_source_cursor_t *source, fsimg_error_t *error)
 {
 	fsimg_source_root_t *root;
 	fsimg_host_file_t opened;
@@ -300,7 +421,7 @@ open_host_source(fsimg_writer_t *writer, uint64_t reference,
 	    length - FSIMG_SOURCE_HEADER) != length - FSIMG_SOURCE_HEADER - 1 ||
 	    fsimg_meta_get_u64(record + 40) >= 1000000000 ||
 	    fsimg_meta_get_u64(record + 56) >= 1000000000 ||
-	    fsimg_meta_get_u64(record + 64) != FSIMG_HOST_FILE ||
+	    fsimg_meta_get_u64(record + 64) != kind ||
 	    fsimg_meta_get_u64(record + 72) != 1)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_SOURCE, "invalid source record fields or path framing"));
@@ -319,7 +440,7 @@ open_host_source(fsimg_writer_t *writer, uint64_t reference,
 	source->identity.modified.nanoseconds = (uint32_t)fsimg_meta_get_u64(record + 40);
 	source->identity.changed.seconds = source_signed(fsimg_meta_get_u64(record + 48));
 	source->identity.changed.nanoseconds = (uint32_t)fsimg_meta_get_u64(record + 56);
-	source->identity.kind = FSIMG_HOST_FILE;
+	source->identity.kind = kind;
 	if (source->identity.length != source->length)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_SOURCE, "source and catalog lengths disagree"));
@@ -334,6 +455,11 @@ open_host_source(fsimg_writer_t *writer, uint64_t reference,
 		    strcmp(component, "..") == 0) {
 			status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_SOURCE, "invalid relative source component");
+			break;
+		}
+		if (separator == NULL && kind == FSIMG_HOST_LINK) {
+			status = open_host_link(writer, root, parent, component,
+			    source, error);
 			break;
 		}
 		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
@@ -408,9 +534,10 @@ fsimg_source_open(fsimg_writer_t *writer, uint64_t entry_id,
 	status = fsimg_catalog_read_source(writer, entry_id, &entry, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (entry.entry.kind != FSIMG_ENTRY_FILE)
+	if (entry.entry.kind != FSIMG_ENTRY_FILE &&
+	    entry.entry.kind != FSIMG_ENTRY_SYMLINK)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-		    FSIMG_OP_SOURCE, "directories have no content source"));
+		    FSIMG_OP_SOURCE, "only files and symbolic links have a content source"));
 	source = &writer->source;
 	bzero(source, sizeof(*source));
 	source->fd = -1;
@@ -420,7 +547,9 @@ fsimg_source_open(fsimg_writer_t *writer, uint64_t entry_id,
 	source->length = entry.entry.size;
 	source->active = true;
 	if (source->storage == FSIMG_STORAGE_HOST) {
-		status = open_host_source(writer, source->id, source, error);
+		status = open_host_source(writer, source->id,
+		    entry.entry.kind == FSIMG_ENTRY_FILE ? FSIMG_HOST_FILE :
+		    FSIMG_HOST_LINK, source, error);
 		if (status != FSIMG_OK)
 			return (source_abort(source, status));
 	} else if (source->storage == FSIMG_STORAGE_PROVIDER) {

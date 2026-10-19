@@ -13,6 +13,8 @@
  * length, mtime seconds/nanoseconds, ctime seconds/nanoseconds, kind, version;
  * a NUL-terminated relative path follows. Signed seconds use modulo-2^64
  * encoding. These offsets are unrelated to the entry's stable catalog ID.
+ * The kind is FSIMG_HOST_FILE for a regular file and FSIMG_HOST_LINK for a
+ * symbolic link, whose length is its target length.
  */
 
 struct fsimg_source_root {
@@ -47,7 +49,18 @@ fsimg_status_t fsimg_source_scan(fsimg_writer_t *, fsimg_source_root_t *,
     const char *, fsimg_error_t *);
 bool fsimg_source_identity_equal(const fsimg_host_file_t *,
     const fsimg_host_file_t *);
+/* fd is ignored (pass -1) when identity is a symbolic link, which has no
+ * descriptor and is checked by identity alone.
+ */
 fsimg_status_t fsimg_source_check_object(fsimg_writer_t *, int,
     const fsimg_host_file_t *, const fsimg_source_root_t *, fsimg_error_t *);
+/* Read the link parent/name into target, which holds
+ * FSIMG_SYMLINK_TARGET_MAX + 1 bytes, without following it. identity
+ * describes the link, with length replaced by the bytes read. A target that
+ * is empty or longer than FSIMG_SYMLINK_TARGET_MAX fails as unsupported; a
+ * link that changes while it is read fails as a changed source.
+ */
+fsimg_status_t fsimg_source_read_link(fsimg_writer_t *, int, const char *,
+    fsimg_host_file_t *, unsigned char *, fsimg_error_t *);
 
 #endif

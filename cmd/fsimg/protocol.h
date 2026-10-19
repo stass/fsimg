@@ -29,7 +29,7 @@ typedef enum fsimg_wire_error_field {
 	FSIMG_WIRE_ERROR_MESSAGE = 336
 } fsimg_wire_error_field_t;
 
-#define FSIMG_WIRE_INFO_BYTES 192u
+#define FSIMG_WIRE_INFO_BYTES 208u
 typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_VALID = 0,
 	FSIMG_WIRE_INFO_CAPABILITIES = 8,
@@ -44,8 +44,11 @@ typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_IO_ERROR = 80,
 	FSIMG_WIRE_INFO_FORMAT = 88,
 	FSIMG_WIRE_INFO_PROFILE = 104,
-	FSIMG_WIRE_INFO_LABEL = 144
+	FSIMG_WIRE_INFO_LABEL = 144,
+	FSIMG_WIRE_INFO_UUID = 192
 } fsimg_wire_info_field_t;
+_Static_assert(FSIMG_WIRE_INFO_UUID + 16 == FSIMG_WIRE_INFO_BYTES,
+    "the info record ends with the volume UUID");
 
 #define FSIMG_WIRE_PLAN_BYTES 112u
 typedef enum fsimg_wire_plan_field {
@@ -64,7 +67,7 @@ typedef enum fsimg_wire_plan_field {
 	FSIMG_WIRE_PLAN_FORMAT = 96
 } fsimg_wire_plan_field_t;
 
-#define FSIMG_WIRE_ENTRY_BYTES 168u
+#define FSIMG_WIRE_ENTRY_BYTES 232u
 typedef enum fsimg_wire_entry_field {
 	FSIMG_WIRE_ENTRY_KIND = 0,
 	FSIMG_WIRE_ENTRY_LENGTH = 8,
@@ -74,8 +77,14 @@ typedef enum fsimg_wire_entry_field {
 	FSIMG_WIRE_ENTRY_ATTRIBUTES = 40,
 	FSIMG_WIRE_ENTRY_CREATED = 48,
 	FSIMG_WIRE_ENTRY_MODIFIED = 88,
-	FSIMG_WIRE_ENTRY_ACCESSED = 128
+	FSIMG_WIRE_ENTRY_ACCESSED = 128,
+	FSIMG_WIRE_ENTRY_CHANGED = 168,
+	FSIMG_WIRE_ENTRY_UID = 208,
+	FSIMG_WIRE_ENTRY_GID = 216,
+	FSIMG_WIRE_ENTRY_MODE = 224
 } fsimg_wire_entry_field_t;
+_Static_assert(FSIMG_WIRE_ENTRY_MODE + 8 == FSIMG_WIRE_ENTRY_BYTES,
+    "the entry record ends with the mode");
 
 #define FSIMG_WIRE_TIME_BYTES 40u
 typedef enum fsimg_wire_time_field {
@@ -85,15 +94,20 @@ typedef enum fsimg_wire_time_field {
 	FSIMG_WIRE_TIME_BASIS = 24,
 	FSIMG_WIRE_TIME_OFFSET = 32
 } fsimg_wire_time_field_t;
+_Static_assert(FSIMG_WIRE_ENTRY_CHANGED + FSIMG_WIRE_TIME_BYTES ==
+    FSIMG_WIRE_ENTRY_UID, "owner fields follow the last timestamp");
 
-#define FSIMG_WIRE_DONE_BYTES 40u
+#define FSIMG_WIRE_DONE_BYTES 48u
 typedef enum fsimg_wire_done_field {
 	FSIMG_WIRE_DONE_ENTRIES = 0,
 	FSIMG_WIRE_DONE_LOGICAL = 8,
 	FSIMG_WIRE_DONE_LOSSES = 16,
 	FSIMG_WIRE_DONE_RAW = 24,
-	FSIMG_WIRE_DONE_IMAGE = 32
+	FSIMG_WIRE_DONE_IMAGE = 32,
+	FSIMG_WIRE_DONE_SKIPPED = 40
 } fsimg_wire_done_field_t;
+_Static_assert(FSIMG_WIRE_DONE_SKIPPED + 8 == FSIMG_WIRE_DONE_BYTES,
+    "the completion record ends with the skipped count");
 
 #define FSIMG_WIRE_VERIFY_BYTES 72u
 typedef enum fsimg_wire_verify_field {
@@ -177,10 +191,19 @@ fsimg_status_t fsimg_frame_write(int, fsimg_frame_type_t, const void *,
     uint32_t, fsimg_error_t *);
 fsimg_status_t fsimg_frame_read(int, fsimg_frame_t *, fsimg_error_t *);
 void fsimg_wire_error_encode(unsigned char *, const fsimg_error_t *);
+/* Fixed entry and volume records. Absent optional fields encode as zero, so
+ * no stale caller bytes cross the boundary. The entry's path follows in NAME
+ * frames; its length is the third argument.
+ */
+void fsimg_wire_entry_encode(unsigned char *, const fsimg_entry_t *, size_t);
+void fsimg_wire_info_encode(unsigned char *, const fsimg_volume_info_t *);
 fsimg_status_t fsimg_wire_error_decode(const unsigned char *, uint32_t,
     fsimg_error_t *);
 
-/* Typed field validation is independent of operation-specific message order. */
+/* Typed field validation is independent of operation-specific message order.
+ * An entry frame with content_only set must describe an entry with content:
+ * a regular file or a symbolic link.
+ */
 bool fsimg_wire_info_frame_valid(const fsimg_frame_t *, uint64_t);
 bool fsimg_wire_plan_frame_valid(const fsimg_frame_t *);
 bool fsimg_wire_entry_frame_valid(const fsimg_frame_t *, bool, uint64_t);

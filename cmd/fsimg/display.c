@@ -24,6 +24,10 @@ static void usage(fsimg_cli_display_t *, bool);
 static void help(fsimg_cli_display_t *);
 static void loss_notice(fsimg_cli_display_t *);
 static void metadata_fields(fsimg_cli_display_t *, uint64_t);
+static void entry_kinds(fsimg_cli_display_t *, uint64_t);
+static const char *kind_name(uint64_t);
+static void uuid_value(fsimg_cli_display_t *, const unsigned char *);
+static void owner_fields(fsimg_cli_display_t *, const unsigned char *, uint64_t);
 static void format_details(fsimg_cli_display_t *, const fsimg_format_info_t *);
 static void string_value(fsimg_cli_display_t *, const char *);
 static void path_excerpt(fsimg_cli_display_t *, const char *);
@@ -294,7 +298,7 @@ help(fsimg_cli_display_t *display)
 	if (kind == FSIMG_JOB_EXTRACT)
 		append(display, "    -C directory    Extract into a new private directory\n");
 	if (kind >= FSIMG_JOB_CREATE)
-		append(display, "    -L label        Volume label (default FSIMG)\n"
+		append(display, "    -L label        Volume label (default FSIMG where the format has one)\n"
 		    "    -O key=value    Set sector or cluster size in bytes\n"
 		    "    -R              Create reproducible image bytes\n");
 	else
@@ -313,11 +317,14 @@ help(fsimg_cli_display_t *display)
 		append(display, "    -i image        Read a seekable regular image file\n");
 	if (kind != FSIMG_JOB_CAT)
 		append(display, "    -j              Write newline-delimited JSON\n");
+	if (kind == FSIMG_JOB_EXTRACT)
+		append(display, "    -k              Skip and count symbolic links and other unsupported kinds\n");
 	append(display, "    -l key=value    Set scratch, entries, depth, path, fds, output, work, or seconds\n"
 	    "    -m bytes        Memory budget (default 256M, minimum 16M)\n");
 	if (kind >= FSIMG_JOB_CREATE)
 		append(display, "    -n              Report a plan without creating an image\n"
-		    "    -o image        New output pathname; required unless -n\n");
+		    "    -o image        New output pathname; required unless -n\n"
+		    "    -p              Import owner, group and permission bits\n");
 	if (kind == FSIMG_JOB_LIST)
 		append(display, "    -r              List recursively\n");
 	if (kind >= FSIMG_JOB_CREATE)
@@ -345,7 +352,8 @@ help(fsimg_cli_display_t *display)
 		append(display, "\nexample:\n    fsimg cat -i data.img /readme.txt > readme.txt\n");
 		break;
 	case FSIMG_JOB_EXTRACT:
-		append(display, "Extracts content with private modes; does not restore host timestamps.\n\n"
+		append(display, "Extracts content with private modes; does not restore host timestamps.\n"
+		    "Symbolic links and other unsupported kinds fail unless -k skips them.\n\n"
 		    "example:\n    fsimg extract -i data.img -C ./new-output\n");
 		break;
 	case FSIMG_JOB_VERIFY:
@@ -359,7 +367,8 @@ static void
 metadata_fields(fsimg_cli_display_t *display, uint64_t fields)
 {
 	static const char *const names[] = {
-		"creation time", "modification time", "access time", "attributes"
+		"creation time", "modification time", "access time", "attributes",
+		"change time", "owner", "mode"
 	};
 	bool first = true;
 
@@ -371,15 +380,74 @@ metadata_fields(fsimg_cli_display_t *display, uint64_t fields)
 	}
 }
 
+static const char *
+kind_name(uint64_t kind)
+{
+	switch (kind) {
+	case FSIMG_ENTRY_FILE: return ("file");
+	case FSIMG_ENTRY_DIRECTORY: return ("directory");
+	case FSIMG_ENTRY_SYMLINK: return ("symlink");
+	case FSIMG_ENTRY_FIFO: return ("fifo");
+	}
+	return ("unknown");
+}
+
+/* Name each known kind bit in ascending order, the FSIMG_ENTRY_* order. */
+static void
+entry_kinds(fsimg_cli_display_t *display, uint64_t kinds)
+{
+	uint64_t rest, kind;
+	bool first = true;
+
+	for (rest = kinds & FSIMG_ENTRY_KNOWN; rest != 0; rest &= rest - 1) {
+		kind = rest & (~rest + 1);	/* the lowest remaining bit */
+		append(display, "%s%s", first ? "" : ", ", kind_name(kind));
+		first = false;
+	}
+}
+
 static void
 loss_notice(fsimg_cli_display_t *display)
 {
 	uint64_t losses = display->result->metadata_losses;
+	uint64_t skipped = display->result->skipped_entries;
 
 	if (losses != 0)
 		append(display, "fsimg: warning: %llu metadata field%s could not be preserved exactly%s\n",
 		    (unsigned long long)losses, losses == 1 ? "" : "s",
 		    (display->options->request.flags & FSIMG_JOB_VERBOSE) == 0 ? "; use -v for examples" : "");
+	if (skipped != 0)
+		append(display, "fsimg: warning: %llu %s skipped\n",
+		    (unsigned long long)skipped, skipped == 1 ?
+		    "entry of an unsupported kind was" :
+		    "entries of unsupported kinds were");
+}
+
+/* A UUID's sixteen bytes in textual order, as RFC 4122 groups them. */
+static void
+uuid_value(fsimg_cli_display_t *display, const unsigned char *uuid)
+{
+	for (unsigned i = 0; i < 16; i++)
+		append(display, "%s%02x", i == 4 || i == 6 || i == 8 || i == 10 ?
+		    "-" : "", uuid[i]);
+}
+
+/* JSON owner and mode, each null when its field is absent. */
+static void
+owner_fields(fsimg_cli_display_t *display, const unsigned char *raw,
+    uint64_t valid)
+{
+	if ((valid & FSIMG_META_OWNER) != 0)
+		append(display, ",\"uid\":%llu,\"gid\":%llu",
+		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_UID),
+		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_GID));
+	else
+		append(display, ",\"uid\":null,\"gid\":null");
+	if ((valid & FSIMG_META_MODE) != 0)
+		append(display, ",\"mode\":%llu",
+		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE));
+	else
+		append(display, ",\"mode\":null");
 }
 
 static const char *
@@ -458,6 +526,13 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 			string_value(display, (const char *)raw + FSIMG_WIRE_INFO_LABEL);
 		else
 			append(display, "null");
+		append(display, ",\"uuid\":");
+		if ((valid & FSIMG_VOLUME_UUID) != 0) {
+			append(display, "\"");
+			uuid_value(display, raw + FSIMG_WIRE_INFO_UUID);
+			append(display, "\"");
+		} else
+			append(display, "null");
 		append(display, ",\"volume_bytes\":");
 		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME));
 		append(display, ",\"allocation_units\":");
@@ -491,6 +566,10 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_LABEL);
 	else
 		append(display, "unknown");
+	if ((valid & FSIMG_VOLUME_UUID) != 0) {
+		append(display, "\nUUID:         ");
+		uuid_value(display, raw + FSIMG_WIRE_INFO_UUID);
+	}
 	append(display, "\nVolume size:  ");
 	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME));
 	append(display, "\nSector size:  ");
@@ -558,11 +637,14 @@ static void
 entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 {
 	uint64_t valid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_VALID);
-	bool directory = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND) == FSIMG_ENTRY_DIRECTORY;
+	uint64_t kind = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND);
 
+	/* Human listings mark a link with @ and a FIFO with |, as ls -F does. */
+	display->entry_marker = kind == FSIMG_ENTRY_SYMLINK ? "@" :
+	    kind == FSIMG_ENTRY_FIFO ? "|" : "";
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"entry\",\"kind\":\"%s\",\"size_bytes\":",
-		    directory ? "directory" : "file");
+		    kind_name(kind));
 		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH));
 		append(display, ",\"metadata_valid\":%llu,\"attributes\":%llu,\"created\":",
 		    (unsigned long long)valid,
@@ -572,6 +654,9 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 		timestamp(display, raw + FSIMG_WIRE_ENTRY_MODIFIED, (valid & FSIMG_META_MODIFIED) != 0);
 		append(display, ",\"accessed\":");
 		timestamp(display, raw + FSIMG_WIRE_ENTRY_ACCESSED, (valid & FSIMG_META_ACCESSED) != 0);
+		append(display, ",\"changed\":");
+		timestamp(display, raw + FSIMG_WIRE_ENTRY_CHANGED, (valid & FSIMG_META_CHANGED) != 0);
+		owner_fields(display, raw, valid);
 		append(display, ",\"path\":\"");
 	} else
 		append(display, "\"");
@@ -625,7 +710,8 @@ format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 		append(display, ",\"profile\":");
 		string_value(display, info->profile);
 		append(display, ",\"capabilities\":%u,\"entry_kinds\":%u,\"metadata_fields\":%u,"
-		    "\"max_file_bytes\":", info->capabilities, info->entry_kinds, info->metadata_fields);
+		    "\"max_label_bytes\":%u,\"max_file_bytes\":", info->capabilities,
+		    info->entry_kinds, info->metadata_fields, info->max_label_bytes);
 		uint_value(display, info->max_file_bytes);
 		append(display, ",\"max_volume_bytes\":");
 		uint_value(display, info->max_volume_bytes);
@@ -659,9 +745,14 @@ format_details(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 	sizes(display, info->allocation_unit_size_mask);
 	append(display, "\n  Write cluster sizes (bytes): ");
 	sizes(display, info->write_allocation_unit_size_mask);
+	append(display, "\n  Entry kinds: ");
+	entry_kinds(display, info->entry_kinds);
 	append(display, "\n  Metadata: ");
 	metadata_fields(display, info->metadata_fields);
-	append(display, "\n");
+	if (info->max_label_bytes != 0)
+		append(display, "\n  Maximum label: %u bytes\n", info->max_label_bytes);
+	else
+		append(display, "\n  Maximum label: none\n");
 }
 
 static void
@@ -705,9 +796,10 @@ summary(fsimg_cli_display_t *display)
 		string_value(display, display->options->name);
 		append(display, ",\"validation_scope\":\"%s\",\"entries_processed\":\"%llu\","
 		    "\"logical_bytes\":\"%llu\",\"raw_bytes\":\"%llu\",\"metadata_losses\":\"%llu\","
-		    "\"sandbox\":\"%s\",\"published\":%s,", scope_name(display),
+		    "\"skipped_entries\":\"%llu\",\"sandbox\":\"%s\",\"published\":%s,", scope_name(display),
 		    (unsigned long long)r->entries, (unsigned long long)r->logical_bytes,
 		    (unsigned long long)r->raw_bytes, (unsigned long long)r->metadata_losses,
+		    (unsigned long long)r->skipped_entries,
 		    confinement_name(r->confinement), display->paths->published ? "true" : "false");
 		limits(display);
 		append(display, ",\"progress_records\":\"%llu\",", (unsigned long long)display->progress_records);
@@ -826,6 +918,7 @@ fsimg_cli_display_init(fsimg_cli_display_t *display, const fsimg_cli_options_t *
 	display->result = result;
 	display->paths = paths;
 	display->scope = FSIMG_VALIDATION_HEADER;
+	display->entry_marker = "";
 }
 
 static fsimg_status_t
@@ -891,7 +984,10 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		if (listing) {
 			status = escape_span(display, NULL, 0, options->json, true, true, error);
 			if (status != FSIMG_OK) return (status);
-			append(display, options->json ? "\",\"complete\":true}\n" : "\"\n");
+			if (options->json)
+				append(display, "\",\"complete\":true}\n");
+			else
+				append(display, "\"%s\n", display->entry_marker);
 			display->entry_open = false;
 		}
 		break;

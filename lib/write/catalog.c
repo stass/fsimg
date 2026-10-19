@@ -16,8 +16,12 @@ typedef struct catalog_ancestor {
 } catalog_ancestor_t;
 
 static int64_t decode_signed(uint64_t);
+static int32_t decode_signed32(uint32_t);
 static void encode_time(unsigned char *, const fsimg_timestamp_t *);
 static bool decode_time(const unsigned char *, fsimg_timestamp_t *);
+static bool entry_shape_valid(uint32_t, uint64_t, uint32_t, uint64_t);
+static void encode_metadata(unsigned char *, const fsimg_metadata_t *);
+static bool decode_metadata(const unsigned char *, fsimg_metadata_t *);
 static fsimg_status_t decode_entry(fsimg_writer_t *, const unsigned char *,
     size_t, fsimg_catalog_entry_t *, fsimg_error_t *);
 static fsimg_status_t read_entry(fsimg_writer_t *, uint64_t, unsigned char *,
@@ -37,33 +41,152 @@ decode_signed(uint64_t value)
 	return (-1 - (int64_t)(UINT64_MAX - value));
 }
 
+static int32_t
+decode_signed32(uint32_t value)
+{
+	if (value <= INT32_MAX)
+		return ((int32_t)value);
+	return (-1 - (int32_t)(UINT32_MAX - value));
+}
+
 static void
 encode_time(unsigned char *bytes, const fsimg_timestamp_t *time)
 {
 	fsimg_meta_put_u64(bytes, (uint64_t)time->seconds);
 	fsimg_meta_put_u64(bytes + 8, time->precision_ns);
-	fsimg_meta_put_u64(bytes + 16, time->nanoseconds);
-	fsimg_meta_put_u64(bytes + 24, time->basis);
-	fsimg_meta_put_u64(bytes + 32, (uint64_t)(int64_t)time->offset_minutes);
+	fsimg_meta_put_u32(bytes + 16, time->nanoseconds);
+	fsimg_meta_put_u32(bytes + 20, (uint32_t)time->basis);
+	fsimg_meta_put_u32(bytes + 24, (uint32_t)time->offset_minutes);
 }
 
+/* Range checks precede every narrowing; the trailing padding must be zero. */
 static bool
 decode_time(const unsigned char *bytes, fsimg_timestamp_t *time)
 {
-	uint64_t nanoseconds, basis;
-	int64_t offset;
+	uint32_t nanoseconds, basis;
+	int32_t offset;
 
-	nanoseconds = fsimg_meta_get_u64(bytes + 16);
-	basis = fsimg_meta_get_u64(bytes + 24);
-	offset = decode_signed(fsimg_meta_get_u64(bytes + 32));
+	nanoseconds = fsimg_meta_get_u32(bytes + 16);
+	basis = fsimg_meta_get_u32(bytes + 20);
+	offset = decode_signed32(fsimg_meta_get_u32(bytes + 24));
 	if (nanoseconds >= 1000000000 || basis < FSIMG_TIME_UTC ||
-	    basis > FSIMG_TIME_WALL || offset <= -1440 || offset >= 1440)
+	    basis > FSIMG_TIME_WALL || offset <= -1440 || offset >= 1440 ||
+	    fsimg_meta_get_u32(bytes + 28) != 0)
 		return (false);
 	time->seconds = decode_signed(fsimg_meta_get_u64(bytes));
 	time->precision_ns = fsimg_meta_get_u64(bytes + 8);
-	time->nanoseconds = (uint32_t)nanoseconds;
+	time->nanoseconds = nanoseconds;
 	time->basis = (fsimg_time_basis_t)basis;
-	time->offset_minutes = (int32_t)offset;
+	time->offset_minutes = offset;
+	return (true);
+}
+
+/* The closed relation between an entry's kind, size and source. Files and
+ * symbolic links have content and need a source; a link's size is its
+ * target length, and its target cannot be the zero source's NUL bytes.
+ * Directories and FIFOs have neither size nor source. A zero source carries
+ * no identifier.
+ */
+static bool
+entry_shape_valid(uint32_t kind, uint64_t size, uint32_t storage,
+    uint64_t source_id)
+{
+	if (storage > FSIMG_STORAGE_HOST ||
+	    (storage == FSIMG_STORAGE_ZERO && source_id != 0))
+		return (false);
+	switch (kind) {
+	case FSIMG_ENTRY_FILE:
+		return (storage != FSIMG_STORAGE_NONE);
+	case FSIMG_ENTRY_SYMLINK:
+		return (storage != FSIMG_STORAGE_NONE &&
+		    storage != FSIMG_STORAGE_ZERO && size != 0 &&
+		    size <= FSIMG_SYMLINK_TARGET_MAX);
+	case FSIMG_ENTRY_DIRECTORY:
+	case FSIMG_ENTRY_FIFO:
+		return (storage == FSIMG_STORAGE_NONE && size == 0 &&
+		    source_id == 0);
+	default:
+		return (false);
+	}
+}
+
+/* Only valid fields are written; the caller zeroed the header, so absent
+ * fields and padding are defined and never carry caller bytes.
+ */
+static void
+encode_metadata(unsigned char *record, const fsimg_metadata_t *metadata)
+{
+	fsimg_meta_put_u32(record + FSIMG_CATALOG_VALID, metadata->valid);
+	fsimg_meta_put_u32(record + FSIMG_CATALOG_REQUIRED, metadata->required);
+	if ((metadata->valid & FSIMG_META_ATTRIBUTES) != 0)
+		fsimg_meta_put_u32(record + FSIMG_CATALOG_ATTRIBUTES,
+		    metadata->attributes);
+	if ((metadata->valid & FSIMG_META_OWNER) != 0) {
+		fsimg_meta_put_u32(record + FSIMG_CATALOG_UID, metadata->uid);
+		fsimg_meta_put_u32(record + FSIMG_CATALOG_GID, metadata->gid);
+	}
+	if ((metadata->valid & FSIMG_META_MODE) != 0)
+		fsimg_meta_put_u32(record + FSIMG_CATALOG_MODE, metadata->mode);
+	if ((metadata->valid & FSIMG_META_CREATED) != 0)
+		encode_time(record + FSIMG_CATALOG_CREATED, &metadata->created);
+	if ((metadata->valid & FSIMG_META_MODIFIED) != 0)
+		encode_time(record + FSIMG_CATALOG_MODIFIED, &metadata->modified);
+	if ((metadata->valid & FSIMG_META_ACCESSED) != 0)
+		encode_time(record + FSIMG_CATALOG_ACCESSED, &metadata->accessed);
+	if ((metadata->valid & FSIMG_META_CHANGED) != 0)
+		encode_time(record + FSIMG_CATALOG_CHANGED, &metadata->changed);
+}
+
+/* The inverse of encode_metadata. encode_metadata writes an absent field as
+ * zero bytes, so any other bytes in an absent slot are corruption; absent
+ * fields stay zero in out. The caller validates the masks and values with
+ * fsimg_metadata_validate.
+ */
+static bool
+decode_metadata(const unsigned char *record, fsimg_metadata_t *out)
+{
+	static const unsigned char zero[FSIMG_CATALOG_TIME_BYTES];
+	static const struct {
+		uint32_t	 field;
+		unsigned	 offset;
+		size_t		 length;
+	} slots[] = {
+		{ FSIMG_META_ATTRIBUTES, FSIMG_CATALOG_ATTRIBUTES, 4 },
+		{ FSIMG_META_OWNER, FSIMG_CATALOG_UID, 8 },
+		{ FSIMG_META_MODE, FSIMG_CATALOG_MODE, 4 },
+		{ FSIMG_META_CREATED, FSIMG_CATALOG_CREATED, FSIMG_CATALOG_TIME_BYTES },
+		{ FSIMG_META_MODIFIED, FSIMG_CATALOG_MODIFIED, FSIMG_CATALOG_TIME_BYTES },
+		{ FSIMG_META_ACCESSED, FSIMG_CATALOG_ACCESSED, FSIMG_CATALOG_TIME_BYTES },
+		{ FSIMG_META_CHANGED, FSIMG_CATALOG_CHANGED, FSIMG_CATALOG_TIME_BYTES }
+	};
+
+	out->valid = fsimg_meta_get_u32(record + FSIMG_CATALOG_VALID);
+	out->required = fsimg_meta_get_u32(record + FSIMG_CATALOG_REQUIRED);
+	for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
+		if ((out->valid & slots[i].field) == 0 &&
+		    bcmp(record + slots[i].offset, zero, slots[i].length) != 0)
+			return (false);
+	}
+	if ((out->valid & FSIMG_META_ATTRIBUTES) != 0)
+		out->attributes = fsimg_meta_get_u32(record + FSIMG_CATALOG_ATTRIBUTES);
+	if ((out->valid & FSIMG_META_OWNER) != 0) {
+		out->uid = fsimg_meta_get_u32(record + FSIMG_CATALOG_UID);
+		out->gid = fsimg_meta_get_u32(record + FSIMG_CATALOG_GID);
+	}
+	if ((out->valid & FSIMG_META_MODE) != 0)
+		out->mode = fsimg_meta_get_u32(record + FSIMG_CATALOG_MODE);
+	if ((out->valid & FSIMG_META_CREATED) != 0 &&
+	    !decode_time(record + FSIMG_CATALOG_CREATED, &out->created))
+		return (false);
+	if ((out->valid & FSIMG_META_MODIFIED) != 0 &&
+	    !decode_time(record + FSIMG_CATALOG_MODIFIED, &out->modified))
+		return (false);
+	if ((out->valid & FSIMG_META_ACCESSED) != 0 &&
+	    !decode_time(record + FSIMG_CATALOG_ACCESSED, &out->accessed))
+		return (false);
+	if ((out->valid & FSIMG_META_CHANGED) != 0 &&
+	    !decode_time(record + FSIMG_CATALOG_CHANGED, &out->changed))
+		return (false);
 	return (true);
 }
 
@@ -71,7 +194,6 @@ fsimg_status_t
 fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
     fsimg_source_storage_t storage, uint64_t source_id, fsimg_error_t *error)
 {
-	const fsimg_metadata_t *metadata;
 	uint64_t payload_bytes;
 	size_t path_length;
 	uint32_t depth;
@@ -81,12 +203,10 @@ fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 	    &path_length, &depth, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if ((entry->kind != FSIMG_ENTRY_FILE && entry->kind != FSIMG_ENTRY_DIRECTORY) ||
-	    (entry->kind == FSIMG_ENTRY_DIRECTORY && entry->size != 0))
+	if (!entry_shape_valid(entry->kind, entry->size, storage, source_id))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_CATALOG, "invalid catalog entry kind or directory size"));
-	metadata = &entry->metadata;
-	status = fsimg_metadata_validate(metadata, error);
+		    FSIMG_OP_CATALOG, "entry kind, size and source disagree"));
+	status = fsimg_metadata_validate(&entry->metadata, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!fsimg_add_u64(writer->payload_bytes, entry->size, &payload_bytes))
@@ -98,20 +218,11 @@ fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 
 	/* Every absent field and all representation bytes have defined contents. */
 	bzero(writer->record, FSIMG_CATALOG_HEADER);
-	fsimg_meta_put_u64(writer->record, entry->size);
-	fsimg_meta_put_u64(writer->record + 8, storage);
-	fsimg_meta_put_u64(writer->record + 16, source_id);
-	fsimg_meta_put_u64(writer->record + 24, entry->kind);
-	fsimg_meta_put_u64(writer->record + 32, metadata->valid);
-	fsimg_meta_put_u64(writer->record + 40, metadata->required);
-	if ((metadata->valid & FSIMG_META_ATTRIBUTES) != 0)
-		fsimg_meta_put_u64(writer->record + 48, metadata->attributes);
-	if ((metadata->valid & FSIMG_META_CREATED) != 0)
-		encode_time(writer->record + 56, &metadata->created);
-	if ((metadata->valid & FSIMG_META_MODIFIED) != 0)
-		encode_time(writer->record + 96, &metadata->modified);
-	if ((metadata->valid & FSIMG_META_ACCESSED) != 0)
-		encode_time(writer->record + 136, &metadata->accessed);
+	fsimg_meta_put_u64(writer->record + FSIMG_CATALOG_SIZE, entry->size);
+	fsimg_meta_put_u64(writer->record + FSIMG_CATALOG_SOURCE_ID, source_id);
+	fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_STORAGE, storage);
+	fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_KIND, entry->kind);
+	encode_metadata(writer->record, &entry->metadata);
 	bcopy(entry->path, writer->record + FSIMG_CATALOG_HEADER, path_length + 1);
 	status = fsimg_stream_append(writer->entries, writer->record,
 	    FSIMG_CATALOG_HEADER + path_length + 1, NULL, error);
@@ -119,6 +230,10 @@ fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 		return (status);
 	writer->count++;
 	writer->payload_bytes = payload_bytes;
+	/* Planning compares these unions with the format's capability record. */
+	writer->catalog_kinds |= (uint32_t)entry->kind;
+	writer->catalog_fields |= entry->metadata.valid;
+	writer->catalog_required |= entry->metadata.required;
 	return (FSIMG_OK);
 }
 
@@ -126,7 +241,7 @@ static fsimg_status_t
 decode_entry(fsimg_writer_t *writer, const unsigned char *bytes, size_t length,
     fsimg_catalog_entry_t *out, fsimg_error_t *error)
 {
-	uint64_t kind, storage, valid, required, attributes;
+	uint32_t kind, storage;
 	size_t path_length;
 	uint32_t depth;
 	fsimg_status_t status;
@@ -137,38 +252,17 @@ decode_entry(fsimg_writer_t *writer, const unsigned char *bytes, size_t length,
 	    length - FSIMG_CATALOG_HEADER) != length - FSIMG_CATALOG_HEADER - 1)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_CATALOG, "invalid catalog record path framing"));
-	kind = fsimg_meta_get_u64(bytes + 24);
-	storage = fsimg_meta_get_u64(bytes + 8);
-	valid = fsimg_meta_get_u64(bytes + 32);
-	required = fsimg_meta_get_u64(bytes + 40);
-	attributes = fsimg_meta_get_u64(bytes + 48);
-	if ((kind != FSIMG_ENTRY_FILE && kind != FSIMG_ENTRY_DIRECTORY) ||
-	    storage > FSIMG_STORAGE_HOST || (valid & ~UINT64_C(15)) != 0 ||
-	    (required & ~valid) != 0 || (attributes & ~UINT64_C(15)) != 0)
-		goto invalid;
+	kind = fsimg_meta_get_u32(bytes + FSIMG_CATALOG_KIND);
+	storage = fsimg_meta_get_u32(bytes + FSIMG_CATALOG_STORAGE);
 	out->entry.path = (const char *)bytes + FSIMG_CATALOG_HEADER;
-	out->entry.size = fsimg_meta_get_u64(bytes);
-	out->storage = (fsimg_source_storage_t)storage;
-	out->source_id = fsimg_meta_get_u64(bytes + 16);
-	out->entry.kind = (fsimg_entry_kind_t)kind;
-	out->entry.metadata.valid = (uint32_t)valid;
-	out->entry.metadata.required = (uint32_t)required;
-	if ((valid & FSIMG_META_ATTRIBUTES) != 0)
-		out->entry.metadata.attributes = (uint32_t)attributes;
-	if ((valid & FSIMG_META_CREATED) != 0 &&
-	    !decode_time(bytes + 56, &out->entry.metadata.created))
-		goto invalid;
-	if ((valid & FSIMG_META_MODIFIED) != 0 &&
-	    !decode_time(bytes + 96, &out->entry.metadata.modified))
-		goto invalid;
-	if ((valid & FSIMG_META_ACCESSED) != 0 &&
-	    !decode_time(bytes + 136, &out->entry.metadata.accessed))
-		goto invalid;
-	if ((kind == FSIMG_ENTRY_DIRECTORY && (storage != FSIMG_STORAGE_NONE ||
-	    out->entry.size != 0 || out->source_id != 0)) ||
-	    (kind == FSIMG_ENTRY_FILE && storage == FSIMG_STORAGE_NONE) ||
-	    (storage == FSIMG_STORAGE_ZERO && out->source_id != 0) ||
+	out->entry.size = fsimg_meta_get_u64(bytes + FSIMG_CATALOG_SIZE);
+	out->source_id = fsimg_meta_get_u64(bytes + FSIMG_CATALOG_SOURCE_ID);
+	if (!entry_shape_valid(kind, out->entry.size, storage, out->source_id) ||
 	    (storage == FSIMG_STORAGE_PROVIDER && !writer->provider_set))
+		goto invalid;
+	out->entry.kind = (fsimg_entry_kind_t)kind;
+	out->storage = (fsimg_source_storage_t)storage;
+	if (!decode_metadata(bytes, &out->entry.metadata))
 		goto invalid;
 	status = fsimg_path_validate(writer->ctx, out->entry.path, false,
 	    &path_length, &depth, error);
@@ -543,7 +637,7 @@ read_entry(fsimg_writer_t *writer, uint64_t id, unsigned char *record,
 	    fsimg_meta_get_u64(index) != UINT64_MAX)) ||
 	    (id != 0 && out->parent_id >= id) ||
 	    out->children > writer->count ||
-	    (out->entry.kind == FSIMG_ENTRY_FILE && out->children != 0)) {
+	    (out->entry.kind != FSIMG_ENTRY_DIRECTORY && out->children != 0)) {
 		status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_CATALOG, "invalid catalog index links or child count");
 		return (fsimg_writer_fail(writer, status));

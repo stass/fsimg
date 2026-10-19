@@ -45,6 +45,157 @@ static void test_pivot(void);
 static void test_alias(void);
 static void test_selection_failure(void);
 static void test_selection_scope(void);
+static fsimg_status_t posix_replay(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_error_t *);
+static void present_posix_kinds(extract_fixture_t *);
+static void test_unsupported_kinds(void);
+static void test_link_content(void);
+
+/* The FAT driver's operations, and a copy whose replay reports two of the
+ * fixture's files as kinds FAT cannot store, so the extractor's handling of
+ * links and FIFOs is exercised without a format that writes them.
+ */
+static const fsimg_reader_ops_t *fat_reader_ops;
+static fsimg_reader_ops_t posix_reader_ops;
+
+/* The four-byte "short" becomes a symbolic link whose target is its content;
+ * the empty root file becomes a FIFO.
+ */
+static fsimg_status_t
+posix_replay(fsimg_reader_t *reader, const char *name,
+    const unsigned char *payload, size_t length, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fat_reader_ops->replay(reader, name, payload, length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (strcmp(name, "short") == 0)
+		reader->entry.kind = FSIMG_ENTRY_SYMLINK;
+	else if (strcmp(name, "Long root name.txt") == 0)
+		reader->entry.kind = FSIMG_ENTRY_FIFO;
+	return (FSIMG_OK);
+}
+
+static void
+present_posix_kinds(extract_fixture_t *fixture)
+{
+	fat_reader_ops = fixture->reader->ops;
+	posix_reader_ops = *fat_reader_ops;
+	posix_reader_ops.replay = posix_replay;
+	fixture->reader->ops = &posix_reader_ops;
+}
+
+/* By default a link or FIFO fails extraction and names the entry; with
+ * SKIP_UNSUPPORTED it is omitted, counted, and everything else is extracted.
+ */
+static void
+test_unsupported_kinds(void)
+{
+	extract_fixture_t fixture;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	fsimg_stats_t stats;
+	struct stat st;
+	int root;
+
+	fixture_open(&fixture);
+	present_posix_kinds(&fixture);
+	CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
+	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
+	CHECK(root != -1);
+	CHECK(fsimg_extract_into(fixture.reader, root, NULL, NULL, &error) ==
+	    FSIMG_EUNSUPPORTED);
+	CHECK(error.operation == FSIMG_OP_EXTRACT);
+	CHECK(strcmp(error.path, "/A/short") == 0 ||
+	    strcmp(error.path, "/Long root name.txt") == 0);
+	CHECK(fstatat(root, "Long root name.txt", &st, AT_SYMLINK_NOFOLLOW) == -1);
+	CHECK(close(root) == 0);
+	remove_tree(fixture.parent, "output");
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.skipped_entries == 0);
+	fixture_close(&fixture);
+
+	fixture_open(&fixture);
+	present_posix_kinds(&fixture);
+	fsimg_extract_options_init(&options);
+	options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	CHECK(fsimg_extract_at(fixture.reader, fixture.parent, "output", &options,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.skipped_entries == 2);
+	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
+	CHECK(root != -1);
+	CHECK(fstatat(root, "Long root name.txt", &st, AT_SYMLINK_NOFOLLOW) == -1);
+	CHECK(fstatat(root, "A/short", &st, AT_SYMLINK_NOFOLLOW) == -1);
+	CHECK(fstatat(root, "A/nested/file", &st, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(S_ISREG(st.st_mode) && st.st_size == FILE_BYTES);
+	CHECK(fstatat(root, "A-", &st, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(close(root) == 0);
+	remove_tree(fixture.parent, "output");
+	fixture_close(&fixture);
+
+	/* Selecting a link directly is the same decision for that one entry. */
+	fixture_open(&fixture);
+	present_posix_kinds(&fixture);
+	fsimg_extract_options_init(&options);
+	options.selection = "/A/short";
+	CHECK(fsimg_extract_at(fixture.reader, fixture.parent, "output", &options,
+	    &error) == FSIMG_EUNSUPPORTED);
+	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	remove_tree(fixture.parent, "output");
+	fixture_close(&fixture);
+	fixture_open(&fixture);
+	present_posix_kinds(&fixture);
+	options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	CHECK(fsimg_extract_at(fixture.reader, fixture.parent, "output", &options,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.skipped_entries == 1);
+	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
+	CHECK(root != -1);
+	CHECK(fstatat(root, "A/short", &st, AT_SYMLINK_NOFOLLOW) == -1);
+	CHECK(close(root) == 0);
+	remove_tree(fixture.parent, "output");
+	fixture_close(&fixture);
+}
+
+/* A symbolic link's content is its target, read like a file's payload; a
+ * FIFO has no content.
+ */
+static void
+test_link_content(void)
+{
+	extract_fixture_t fixture;
+	const fsimg_entry_t *entry;
+	fsimg_range_t range;
+	unsigned char bytes[8];
+	size_t count;
+	bool link_seen, fifo_seen;
+
+	fixture_open(&fixture);
+	present_posix_kinds(&fixture);
+	link_seen = fifo_seen = false;
+	while (fsimg_reader_next(fixture.reader, &entry, NULL) == FSIMG_OK) {
+		if (entry->kind == FSIMG_ENTRY_SYMLINK) {
+			CHECK(strcmp(entry->path, "/A/short") == 0 && entry->size == 4);
+			memset(bytes, 0xa5, sizeof(bytes));
+			CHECK(fsimg_reader_read_at(fixture.reader, 0, bytes,
+			    sizeof(bytes), &count, NULL) == FSIMG_OK);
+			CHECK(count == 4 && bcmp(bytes, "\0\0\0\0", 4) == 0);
+			CHECK(fsimg_reader_next_range(fixture.reader, 0, &range,
+			    NULL) == FSIMG_OK);
+			CHECK(range.offset == 0 && range.length == 4);
+			link_seen = true;
+		} else if (entry->kind == FSIMG_ENTRY_FIFO) {
+			CHECK(fsimg_reader_read_at(fixture.reader, 0, bytes,
+			    sizeof(bytes), &count, NULL) == FSIMG_ESTATE);
+			fifo_seen = true;
+		}
+	}
+	CHECK(link_seen && fifo_seen);
+	fixture_close(&fixture);
+}
 
 static void
 test_selection_scope(void)
@@ -455,5 +606,7 @@ main(int argc, char **argv)
 	test_times();
 	test_allocations();
 	test_pivot();
+	test_unsupported_kinds();
+	test_link_content();
 	return (0);
 }

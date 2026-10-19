@@ -70,6 +70,9 @@ static void test_provider(void);
 static void test_host_tree(void);
 static void test_mutation(void);
 static void test_rejection(void);
+static void test_symlink_import(void);
+static void test_symlink_changes(void);
+static void test_posix_import(void);
 static void test_limits_and_failures(void);
 static void test_corrupt_source(void);
 static void test_ancestor_pivot(void);
@@ -511,15 +514,12 @@ test_rejection(void)
 	fsimg_error_t error;
 
 	fixture_open(&fixture);
-	CHECK(symlinkat("../outside", fixture.root, "symlink") == 0);
-	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_EUNSUPPORTED);
-	CHECK(fixture.writer->roots == NULL);
-	fixture_close(&fixture);
-	fixture_open(&fixture);
 	CHECK(mkfifoat(fixture.root, "fifo", 0600) == 0);
 	alarm(5);
-	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_EUNSUPPORTED);
+	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", &error) == FSIMG_EUNSUPPORTED);
 	alarm(0);
+	/* A rejected object is named by its image path. */
+	CHECK(strcmp(error.path, "/fifo") == 0);
 	fixture_close(&fixture);
 	fixture_open(&fixture);
 	CHECK(fsimg_writer_add_tree(fixture.writer,
@@ -529,6 +529,139 @@ test_rejection(void)
 	fixture_open(&fixture);
 	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.parent, "/", &error) == FSIMG_EINVAL);
 	CHECK(fixture.writer->roots == NULL);
+	fixture_close(&fixture);
+}
+
+/* A host link becomes a SYMLINK entry whose content is its target. The
+ * scanner neither follows the link nor requires the target to exist.
+ */
+static void
+test_symlink_import(void)
+{
+	source_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	fsimg_error_t error;
+	char target[1025];
+	char bytes[64];
+	size_t count;
+
+	fixture_open(&fixture);
+	CHECK(symlinkat("../outside/target", fixture.root, "link") == 0);
+	CHECK(mkdirat(fixture.root, "dir", 0700) == 0);
+	CHECK(symlinkat("dir", fixture.root, "directory-link") == 0);
+	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	CHECK(fixture.writer->count == 3);
+
+	entry = find_entry(fixture.writer, "/link");
+	CHECK(entry->entry.kind == FSIMG_ENTRY_SYMLINK);
+	CHECK(entry->entry.size == strlen("../outside/target"));
+	CHECK(entry->storage == FSIMG_STORAGE_HOST);
+	CHECK((entry->entry.metadata.valid & (FSIMG_META_OWNER | FSIMG_META_MODE)) == 0);
+	CHECK(fsimg_source_open(fixture.writer, entry->id, NULL) == FSIMG_OK);
+	CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes), &count,
+	    NULL) == FSIMG_OK);
+	CHECK(count == 17 && bcmp(bytes, "../outside/target", count) == 0);
+	CHECK(fsimg_source_finish(fixture.writer, NULL) == FSIMG_OK);
+
+	/* A link to a directory is still a link; the scan does not descend. */
+	entry = find_entry(fixture.writer, "/directory-link");
+	CHECK(entry->entry.kind == FSIMG_ENTRY_SYMLINK && entry->entry.size == 3);
+	fixture_close(&fixture);
+
+	/* A target the entry model cannot represent fails the scan explicitly. */
+	fixture_open(&fixture);
+	memset(target, 'a', sizeof(target) - 1);
+	target[sizeof(target) - 1] = '\0';
+	for (size_t i = 64; i < sizeof(target) - 1; i += 64)
+		target[i] = '/';
+	if (symlinkat(target, fixture.root, "long") == 0) {
+		CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/",
+		    &error) == FSIMG_EUNSUPPORTED);
+		CHECK(strcmp(error.path, "/long") == 0);
+	} else
+		CHECK(errno == ENAMETOOLONG);
+	fixture_close(&fixture);
+}
+
+/* Reopening reads the link again and compares it with the scan: a different
+ * length, a replaced link, a link replaced by a file, and a missing link all
+ * fail as changed sources. A replacement is created before the rename, so it
+ * cannot reuse the original inode.
+ */
+static void
+test_symlink_changes(void)
+{
+	source_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+
+	for (unsigned scenario = 0; scenario < 4; scenario++) {
+		fixture_open(&fixture);
+		CHECK(symlinkat("first-target", fixture.root, "link") == 0);
+		CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+		entry = find_entry(fixture.writer, "/link");
+		switch (scenario) {
+		case 0:
+			CHECK(symlinkat("longer-target", fixture.root, "replacement") == 0);
+			break;
+		case 1:
+			CHECK(symlinkat("other-target", fixture.root, "replacement") == 0);
+			break;
+		case 2:
+			write_file(fixture.root, "replacement", "first-target");
+			break;
+		case 3:
+			break;
+		}
+		if (scenario == 3)
+			CHECK(unlinkat(fixture.root, "link", 0) == 0);
+		else
+			CHECK(renameat(fixture.root, "replacement", fixture.root, "link") == 0);
+		CHECK(fsimg_source_open(fixture.writer, entry->id, NULL) ==
+		    FSIMG_ESOURCE_CHANGED);
+		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+		fixture_close(&fixture);
+	}
+}
+
+/* Owner and permission bits enter the catalog only on request, as valid
+ * optional fields taken from the object the scanner opened.
+ */
+static void
+test_posix_import(void)
+{
+	source_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	struct stat st;
+	int fd;
+
+	fixture_open(&fixture);
+	write_file(fixture.root, "file", "mode");
+	fd = openat(fixture.root, "file", O_RDONLY | O_NOFOLLOW);
+	CHECK(fd != -1);
+	CHECK(fchmod(fd, 0640) == 0);
+	CHECK(fstat(fd, &st) == 0);
+	CHECK(close(fd) == 0);
+	CHECK(symlinkat("file", fixture.root, "link") == 0);
+	fixture.writer->options.flags |= FSIMG_WRITE_IMPORT_POSIX;
+	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+
+	entry = find_entry(fixture.writer, "/file");
+	CHECK((entry->entry.metadata.valid & FSIMG_META_OWNER) != 0);
+	CHECK((entry->entry.metadata.valid & FSIMG_META_MODE) != 0);
+	CHECK(entry->entry.metadata.required == 0);
+	CHECK(entry->entry.metadata.mode == 0640);
+	CHECK(entry->entry.metadata.uid == (uint32_t)st.st_uid);
+	CHECK(entry->entry.metadata.gid == (uint32_t)st.st_gid);
+	CHECK((entry->entry.metadata.valid & FSIMG_META_CHANGED) == 0);
+
+	entry = find_entry(fixture.writer, "/link");
+	CHECK(entry->entry.kind == FSIMG_ENTRY_SYMLINK);
+	CHECK((entry->entry.metadata.valid & FSIMG_META_MODE) != 0);
+	CHECK((entry->entry.metadata.mode & ~07777u) == 0);
+	CHECK(entry->entry.metadata.uid == (uint32_t)st.st_uid);
 	fixture_close(&fixture);
 }
 
@@ -884,6 +1017,9 @@ main(int argc, char **argv)
 	test_host_tree();
 	test_mutation();
 	test_rejection();
+	test_symlink_import();
+	test_symlink_changes();
+	test_posix_import();
 	test_limits_and_failures();
 	test_corrupt_source();
 	test_ancestor_pivot();

@@ -36,6 +36,7 @@ typedef struct extract_state {
 	char		*directory_path;
 	char		*entry_path;
 	uint64_t	 completed_entries;
+	uint64_t	 skipped_entries;
 	uint32_t	 depth;
 } extract_state_t;
 
@@ -54,6 +55,8 @@ static fsimg_status_t extract_file(extract_state_t *, const fsimg_entry_t *,
     const char *, fsimg_error_t *);
 static fsimg_status_t copy_content(extract_state_t *, fsimg_io_t *,
     const fsimg_entry_t *, fsimg_error_t *);
+static fsimg_status_t skip_unsupported(extract_state_t *, const fsimg_entry_t *,
+    fsimg_error_t *);
 static fsimg_status_t extract_entries(extract_state_t *, fsimg_error_t *);
 
 void
@@ -88,7 +91,7 @@ extract_options(fsimg_reader_t *reader, const fsimg_extract_options_t *input,
 	}
 	if (options->version != FSIMG_OPTIONS_VERSION ||
 	    (options->flags & ~(FSIMG_EXTRACT_ALLOW_LOSS | FSIMG_EXTRACT_TIMES |
-	    FSIMG_EXTRACT_WALL_OFFSET)) != 0 ||
+	    FSIMG_EXTRACT_WALL_OFFSET | FSIMG_EXTRACT_SKIP_UNSUPPORTED)) != 0 ||
 	    options->wall_offset_minutes <= -1440 || options->wall_offset_minutes >= 1440 ||
 	    ((options->flags & FSIMG_EXTRACT_WALL_OFFSET) == 0 &&
 	    options->wall_offset_minutes != 0))
@@ -361,6 +364,27 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	return (fsimg_io_close_output(output, error));
 }
 
+/* The safe profile creates only regular files and directories. Any other
+ * kind, such as a symbolic link or FIFO, fails the extraction naming the
+ * entry, unless the caller asked to skip such entries; a skip is counted in
+ * the context statistics, so the omission is never silent. Such kinds have
+ * no children, so skipping one never skips a subtree.
+ */
+static fsimg_status_t
+skip_unsupported(extract_state_t *state, const fsimg_entry_t *entry,
+    fsimg_error_t *error)
+{
+	if ((state->options.flags & FSIMG_EXTRACT_SKIP_UNSUPPORTED) == 0) {
+		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_EXTRACT,
+		    "safe extraction creates only regular files and directories");
+		fsimg_error_path(error, entry->path);
+		return (FSIMG_EUNSUPPORTED);
+	}
+	state->skipped_entries++;
+	fsimg_stat_add(&state->reader->ctx->stats.skipped_entries, 1);
+	return (FSIMG_OK);
+}
+
 static fsimg_status_t
 extract_entries(extract_state_t *state, fsimg_error_t *error)
 {
@@ -375,9 +399,12 @@ extract_entries(extract_state_t *state, fsimg_error_t *error)
 			break;
 		if (status != FSIMG_OK)
 			return (status);
-		if (entry->kind != FSIMG_ENTRY_FILE && entry->kind != FSIMG_ENTRY_DIRECTORY)
-			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-			    FSIMG_OP_EXTRACT, "safe extraction requires regular files or directories"));
+		if (entry->kind != FSIMG_ENTRY_FILE && entry->kind != FSIMG_ENTRY_DIRECTORY) {
+			status = skip_unsupported(state, entry, error);
+			if (status != FSIMG_OK)
+				return (status);
+			continue;
+		}
 		status = select_parent(state, entry, &name, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -466,6 +493,7 @@ fsimg_extract_into(fsimg_reader_t *reader, int root,
 done:
 	if (result != NULL) {
 		result->entries = state.completed_entries;
+		result->skipped_entries = state.skipped_entries;
 		result->logical_bytes = reader->session.output_bytes;
 	}
 	while (state.depth != 0) {

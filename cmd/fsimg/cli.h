@@ -67,6 +67,8 @@ typedef struct fsimg_cli_display {
 	uint64_t	 progress_records;
 	/* The result is announced only after worker exit and finalization. */
 	unsigned char	 verification[FSIMG_WIRE_VERIFY_BYTES];
+	/* Human listing suffix for the open entry's kind. */
+	const char	*entry_marker;
 	fsimg_validation_scope_t scope;
 	bool		 syntax;
 	bool		 entry_open;

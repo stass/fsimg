@@ -64,6 +64,69 @@ def test_formats(executable, root):
     assert invoke(executable, root, ["-V"]).stdout.startswith(b"fsimg ")
 
 
+def test_posix_metadata(executable, root):
+    """FAT and exFAT store no POSIX fields or links: -p imports become counted
+    losses that leave image bytes unchanged, and a link fails planning."""
+    decoded = completed(invoke(executable, root, ["formats", "-j"]))
+    formats = {record["name"]: record for record in decoded if record["type"] == "format"}
+    assert all(record["entry_kinds"] == 3 for record in formats.values())
+    assert all(record["metadata_fields"] == 15 for record in formats.values())
+    assert formats["fat16"]["max_label_bytes"] == 11
+    assert formats["exfat"]["max_label_bytes"] == 22
+
+    plans = []
+    for flags in [[], ["-p"]]:
+        decoded = completed(invoke(executable, root, [
+            "create", "-n", "-j", "-R", *flags, "-t", "fat16", "source",
+        ]))
+        plans.append(next(record for record in decoded if record["type"] == "plan"))
+    # Three entries each lose an owner and a mode.
+    assert int(plans[1]["metadata_losses"]) == int(plans[0]["metadata_losses"]) + 6
+    completed(invoke(executable, root, [
+        "create", "-j", "-R", "-p", "-t", "fat16", "-o", "posix.img", "source",
+    ]))
+    same_bytes(root / "fat16.img", root / "posix.img")
+
+    listed = completed(invoke(executable, root, ["ls", "-j", "-r", "-i", "posix.img"]))
+    entries = {record["path"]: record for record in listed if record["type"] == "entry"}
+    assert entries["/nested"]["kind"] == "directory"
+    assert entries["/HELLO.TXT"]["kind"] == "file"
+    assert all(record["uid"] is None and record["mode"] is None and
+               record["changed"] is None for record in entries.values())
+    info = completed(invoke(executable, root, ["info", "-j", "-i", "posix.img"]))[0]
+    assert info["uuid"] is None
+    assert b"UUID" not in invoke(executable, root, ["info", "-i", "posix.img"]).stdout
+
+    linked = root / "linked-source"
+    linked.mkdir()
+    (linked / "target").write_bytes(b"data")
+    os.symlink("target", linked / "link")
+    # Unconfined, the scan imports the link and planning rejects its kind.
+    error = failed(invoke(executable, root, [
+        "create", "-n", "-j", "-S", "off", "-t", "fat16", "linked-source",
+    ], expected=1))
+    assert error["code"] == -6 and error["path"] == "/link"
+    assert "entry kind" in error["message"]
+    human = invoke(executable, root, [
+        "create", "-n", "-S", "off", "-t", "fat16", "linked-source",
+    ], expected=1)
+    assert b"cannot store this entry kind" in human.stderr
+    # A confined worker may be denied link inspection; either way the
+    # failure is unsupported and names the link.
+    error = failed(invoke(executable, root, [
+        "create", "-n", "-j", "-t", "fat16", "linked-source",
+    ], expected=1))
+    assert error["code"] == -6 and error["path"] == "/link"
+    assert ("entry kind" in error["message"] or
+            "link inspection is not permitted" in error["message"])
+
+    skipped = completed(invoke(executable, root, [
+        "extract", "-j", "-k", "-i", "posix.img", "-C", "posix-extracted",
+    ]))
+    assert skipped[-1]["skipped_entries"] == "0"
+    invoke(executable, root, ["ls", "-k", "-i", "posix.img"], expected=2)
+
+
 def test_human_help(executable, root):
     empty = invoke(executable, root, [], expected=2)
     assert empty.stdout == b"" and empty.stderr.startswith(b"usage: fsimg")
@@ -406,6 +469,7 @@ def main():
         test_formats(executable, root)
         for profile in ["fat12", "fat16", "fat32", "exfat"]:
             test_format(executable, root, profile, payload)
+        test_posix_metadata(executable, root)
         test_failures(executable, root)
         test_output_failures(executable, root)
         test_examples(executable, root)

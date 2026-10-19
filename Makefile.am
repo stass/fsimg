@@ -82,7 +82,7 @@ example_extract_LDADD = libfsimg.la
 check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale test-cli test-qualify test-fragment header-c header-cxx
+	test-exfat-scale test-cli test-qualify test-fragment test-posix header-c header-cxx
 TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh test/cli.sh \
 	test/baseline.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh test/cli.sh \
@@ -107,6 +107,8 @@ test_unicode_SOURCES = test/unicode.c test/test.h
 test_unicode_LDADD = libfsimg.la
 test_format_SOURCES = test/format.c test/test.h
 test_format_LDADD = libfsimg.la
+test_posix_SOURCES = test/posix.c test/test.h
+test_posix_LDADD = libfsimg.la
 test_exfat_SOURCES = test/exfat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_exfat_LDADD = libfsimg.la

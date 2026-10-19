@@ -133,7 +133,7 @@ relate_entry(fsimg_selection_t *selection, fsimg_selection_relation_t *relation,
 		return (status);
 	if ((separator != NULL && entry->kind != FSIMG_ENTRY_DIRECTORY) ||
 	    (separator == NULL && selection->policy == FSIMG_SELECTION_FILE &&
-	    entry->kind != FSIMG_ENTRY_FILE))
+	    entry->kind != FSIMG_ENTRY_FILE && entry->kind != FSIMG_ENTRY_SYMLINK))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_READER, "selected image path has the wrong entry kind"));
 
@@ -159,7 +159,9 @@ advance_selection(fsimg_selection_t *selection, const fsimg_entry_t **out,
 
 	*out = NULL;
 	*relation = FSIMG_SELECTION_OUTSIDE;
-	if (selection_found(selection) && reader->entry.kind == FSIMG_ENTRY_FILE &&
+	/* A selected entry other than a directory has no subtree to visit. */
+	if (selection_found(selection) && reader->entry.path != NULL &&
+	    reader->entry.kind != FSIMG_ENTRY_DIRECTORY &&
 	    strcmp(reader->entry.path, selection->resolved) == 0)
 		return (fsimg_reader_end_scope(reader));
 	for (;;) {
