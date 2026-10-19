@@ -43,6 +43,11 @@ make check-fuzz
 make check-fuzz-extended
 ```
 
+The tree builds warning-free under `-Werror` with Clang and with GCC. CI builds
+and checks with Clang on Linux and macOS, and with GCC 13 and GCC 16 on Linux.
+On macOS the Homebrew `gcc` formula installs versioned drivers; configure a
+separate build directory with `../configure CC=gcc-<major> CXX=g++-<major>`.
+
 `check` builds and runs native tests, C11/C++ header examples, checked library
 examples, CLI integration with an independent JSON decoder, and an ASCII
 source/build check. Test logs are in `test-suite.log` and individual `.log`

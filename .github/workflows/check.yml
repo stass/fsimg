@@ -46,6 +46,38 @@ jobs:
         with:
           name: logs-${{ matrix.os }}
           path: build/**/*.log
+  gcc:
+    # The native jobs build with Clang; GCC's -Wmaybe-uninitialized and
+    # -Wformat-truncation analyses differ, and -Werror makes them build breaks.
+    # An older and the newest GCC major run in the official gcc images.
+    strategy:
+      matrix:
+        gcc: ['13', '16']
+    runs-on: ubuntu-24.04
+    container: gcc:${{ matrix.gcc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Development tools
+        run: |
+          apt-get update
+          apt-get install -y autoconf automake libtool make mtools dosfstools exfatprogs pkg-config python3
+          useradd -m builder
+          chown -R builder .
+      - name: Build and check
+        # Container steps run as root; the suite expects an unprivileged user.
+        run: |
+          su builder -c 'set -e
+          autoreconf -fi
+          mkdir build
+          cd build
+          ../configure CC=gcc CXX=g++
+          make -j2
+          make check'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-gcc-${{ matrix.gcc }}
+          path: build/**/*.log
   freebsd:
     runs-on: ubuntu-24.04
     steps:

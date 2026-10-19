@@ -1016,7 +1016,7 @@ test_wide(unsigned entries)
 	const fsimg_entry_t *entry;
 	fsimg_stats_t stats;
 	unsigned char record[32];
-	char name[12];
+	char name[16];
 	unsigned count;
 	fsimg_verify_report_t report;
 	struct rusage usage;
@@ -1041,7 +1041,8 @@ test_wide(unsigned entries)
 		set_cluster(&f, 9, 0);
 	}
 	for (unsigned i = 0; i < entries; i++) {
-		snprintf(name, sizeof(name), "%08uTXT", i);
+		/* entries is at most 65520, so the 8.3 name has 11 characters. */
+		CHECK(snprintf(name, sizeof(name), "%08uTXT", i) == 11);
 		short_entry(record, name, false, 0, 0);
 		write_bytes(&f, f.root_offset + i * 32, record, sizeof(record));
 	}

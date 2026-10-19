@@ -80,6 +80,7 @@ count_clusters(fat_plan_t *plan, uint32_t cluster_bytes, uint64_t *out,
 	uint64_t total, length, count;
 	fsimg_status_t status;
 
+	*out = 0;
 	total = 0;
 	for (uint64_t id = 0; id <= plan->common.writer->count; id++) {
 		status = fsimg_fat_layout_get(plan, id, &row, error);

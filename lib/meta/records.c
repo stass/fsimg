@@ -271,6 +271,7 @@ static fsimg_status_t
 array_offset(fsimg_array_t *array, uint64_t index, uint64_t *offset,
     fsimg_error_t *error)
 {
+	*offset = 0;
 	if (array == NULL || index >= array->count)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 		    FSIMG_OP_METADATA, "array index outside object"));

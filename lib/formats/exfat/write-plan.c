@@ -241,6 +241,7 @@ count_allocation(exfat_plan_t *plan, uint32_t cluster_bytes, uint64_t *out,
 	uint64_t total, count;
 	fsimg_status_t status;
 
+	*out = 0;
 	total = (plan->upcase_length + (uint64_t)cluster_bytes - 1) / cluster_bytes;
 	for (uint64_t id = 0; id <= plan->common.writer->count; id++) {
 		status = exfat_layout_get(plan, id, &row, error);

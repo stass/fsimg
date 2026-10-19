@@ -308,6 +308,7 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		/* Preserve directory traversal state before reusing the record buffer.
 		 * A long component's collision key can overlap the borrowed pathname.
 		 */
+		directory_length = 0;
 		if (entry.entry.kind == FSIMG_ENTRY_DIRECTORY) {
 			directory_length = strlen(entry.entry.path);
 			bcopy(entry.entry.path, directory_path, directory_length + 1);
