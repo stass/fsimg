@@ -68,9 +68,14 @@ table and bitmap are rewritten through fixed twins instead: the system area
 has `R` blocks and an equal twin area after them, and a changed system block
 `k` is written to `k + R`, or back to `k`, whichever the committed snapshot
 does not use. Both twin areas are permanently allocated, so this never
-consumes free space. The design depends on one property inferred from this
-model rather than measured: a block the committed snapshot references is not
-overwritten before a newer snapshot commits. Once one does, blocks only the
+consumes free space. The property the design depends on is that a block the
+committed snapshot references is not overwritten before a newer snapshot
+commits, even if the file owning it has since been deleted. One
+deferred-snapshot power-cut test measures it on a freshly zeroed disk:
+deleting a committed 300000000-byte file
+and writing a 600000000-byte file left 144 MB of uncommitted data on disk at
+a power cut, all in blocks free in the committed bitmap, and every block of
+the deleted file intact. Once a newer snapshot commits, blocks only the
 older snapshot used are free in the new bitmap; the measured old root block
 was.
 
@@ -94,16 +99,15 @@ header committed while the volume was mounted.
 
 ### Power loss
 
-After a crash the volume is the last committed snapshot, given the
-no-overwrite property above. There is no journal to replay and no repair
-pass: mounting reads both headers,
+After a crash the volume is the last committed snapshot. There is no
+journal to replay and no repair pass: mounting reads both headers,
 verifies each one's magic and CRC and selects the larger serial. Work done
 since the last commit is lost; nothing done before it is. In the measured
 test, a file committed with `sync` survived a hard power cut, while a
 200000-byte file and a directory created afterwards were absent; the
-volume mounted and checked clean with no recovery step. The uncommitted
-work had not reached the disk, so the test did not exercise partially
-written uncommitted blocks.
+volume mounted and checked clean with no recovery step. In the deferred
+snapshot test above, the volume likewise recovered to the committed state,
+showing the deleted file whole and none of the partially written one.
 
 QNX 6.5.0 refuses the volume if either header fails its magic or CRC
 check; only an unreadable header (an I/O error) is skipped in favor of the
@@ -141,18 +145,24 @@ still complete snapshots when the volume appears full.
 | Profile | Reader contract | Writer contract |
 | --- | --- | --- |
 | Classic, QNX 6.5-compatible | Plain unencrypted volumes; both byte orders; 512, 1024, 2048, or 4096-byte blocks; validated feature markers | New ordinary volumes in the same profile; regular files and directories; deterministic allocation and two identical serial-1 headers describing one view |
-| Classic without boot area | Same plain layout with first header at byte zero, after unambiguous validation | Not emitted by the default writer |
+| Classic without boot area | First header at byte zero, after unambiguous validation; geometry defined by its own profile | Not emitted by the default writer |
 | Audi MMI 3G | Separate superblock decoder and checksum policy; explicit variant selection if detection is ambiguous | Separate qualification; never emitted by selecting the classic profile |
 | Extended Power-Safe | Identify recognized extensions and reject unsupported semantics explicitly | Separate qualification of each extension and target release |
 
 ### Porsche PCM 3.1 HDD compatibility
 
-An independently published PCM 3.1 investigation reports two ordinary-layout
-QNX6 volumes with 1024-byte blocks and a QNX4 navigation volume on one HDD.
-It also reports QNX6 under partition-type bytes commonly associated with QNX4.
-This is evidence about that drive, not every Porsche 911 or PCM generation.
-Use validated filesystem structures to identify each bounded volume. Do not
-select Linux's MMI layout from a Porsche/Harman product name. [P1]
+One owner's PCM 3.1 HDD (100030242816 bytes, 512-byte sectors) has an MBR
+with 63-sector alignment and five data partitions: primaries of type
+`0x4d`, `0x4e` and `0x4f` and, in an extended partition, logicals of type
+`0x50` and `0x51`. Four hold classic little-endian QNX6 with the 8192-byte
+boot area and 1024-byte blocks; the `0x4f` primary (52.6 GB) holds QNX4.
+The types are the `0x4d` through `0x51` run that QNX names `hd0t77`
+through `hd0t81`, and they do not identify the filesystem, so identify
+each volume from validated structures. The head unit's QNX6 volumes match
+the QNX 6.5.0 superblock, system-area, inode and directory structure; their
+boot loader is a different build of the QNX v1.2b loader. See the
+[PCM measurements](../docs/qnx6-research.md#measured-pcm-31-hdd). Do not
+select Linux's MMI layout from a Porsche/Harman product name. [H1], [P1]
 
 Qualification records the actual partition table, mounted-device mapping,
 firmware build, and formatter/checker/filesystem-module identities. Script
@@ -212,10 +222,14 @@ Native `mkqnx6fs` defaults, which automatic sizing may match but which are not
 validity rules, are: one inode per 8, 32, 64 or 128 blocks for `N` up to
 `0xfffff`, `0x7fffff`, below `0x8000000` and above, rounded up to fill the
 last inode-table block; a 3 percent reserve; long-name checksums enabled; and
-a group count chosen from 1, 4, 8, 16 or 32 and capped at 4, 8, 16 or 32 by
-the same `N` thresholds. The native allocator spreads new directories across
-groups and places indirect blocks downward from the end of a group; fsimg uses
-its own deterministic contiguous plan. [X1], [X2]
+a group count of `min(ladder(m), cap)`. Here `m` is the smaller of the bitmap
+and inode-table leaf-block counts, `ladder(m)` is 1, 4, 8, 16 or 32 for `m` at
+most 3, 7, 15, 31 or above, and `cap` is 4, 8, 16 or 32 by the same `N`
+thresholds unless `-T` names a usage profile. `mkqnx6fs` refuses a volume
+whose bitmap or inode tree would need depth 3 ("filesystem too large"). The
+native allocator spreads new directories across groups and places indirect
+blocks downward from the end of a group; fsimg uses its own deterministic
+contiguous plan. [X1], [X2]
 
 The driver maintains a closed table of accepted compatibility-marker tuples,
 flag meanings, root modes, inode extension encodings, and optional metadata
@@ -260,40 +274,60 @@ The established classic layout has a 512-byte superblock record inside each
 
 | Symbol | Unit and meaning |
 | --- | --- |
-| `H` | Bytes before the first superblock: 8192 normally, zero for the bootless layout |
+| `H` | Bytes before the first superblock: 8192 in the plain layout |
 | `B` | Filesystem block bytes, one of 512, 1024, 2048, 4096 |
+| `V` | Length of the volume's slice (its partition) in bytes |
 | `N` | Number of addressable filesystem blocks from the header |
 | `D` | Data-block origin in volume bytes: `H + 4096` |
-| `S2` | Second superblock position: `D + N * B` |
-| `E` | End of reserved filesystem storage: `S2 + 4096` |
+| `E` | End of reserved filesystem storage: `floor(V / 4096) * 4096` |
+| `S2` | Second superblock position: `E - 4096` |
+
+QNX 6.5.0 places the second header in the last whole 4096-byte unit of the
+partition, independent of `N`, and requires `D + N * B <= S2` and
+`S2 > 12288`. When `mkqnx6fs -n` makes the filesystem smaller than its
+partition, the bytes between `D + N * B` and `S2` are left unwritten and
+hold whatever the device held. A volume that fills its partition has
+`S2 = D + N * B`, the only case the Linux reader handles, since it computes
+the second header from `N`. The boot loaders of measured volumes record the
+same slice-end sector. [X1], [X2], [H1], [L2]
+
+The strict reader takes `V` from its slice: the partition, or a bare image
+file's length. It requires `S2 > 12288` and `D + N * B <= S2`, and reads the
+second header only at `S2`. It never treats bytes between `D + N * B` and
+`S2` as filesystem data. A filesystem image padded past its slice end, or one
+whose second header sits at `D + N * B` short of the slice end, fails
+validation as it does on QNX. The bootless layout's second-header rule is
+not established by this evidence and is qualified with that profile.
 
 Block reference `p` names the range starting at `D + p * B`. Block zero is a
 valid metadata block. Neither the boot area nor either superblock area is
-included in `N`. The entire interval `[0, E)` must fit the input slice, and
-every block access must fit both `[D, S2)` and the slice. [L1], [L2], [R1]
+included in `N`. Every block access must fit `[D, D + N * B)`. [L1], [L2],
+[R1]
 
 ```text
-0                 H             D                         S2          E
-| optional boot   | header area | N filesystem blocks      | header area |
-                  | 512 bytes  | system + ordinary data   | 512 bytes   |
-                  | + padding  |                         | + padding   |
+0          H           D               D+N*B     S2          E      V
+| boot     | header    | N blocks:     | unused  | header    | tail |
+| area     | area      | system + data | (if -n) | area      |      |
 ```
 
 For a writer's exact classic partition/slice length `V`, require 512-byte
 sector alignment. Set the internal end `E = floor(V / 4096) * 4096` and
-`N = (E - 16384) / B`, requiring `E >= 16384`. Metadata and user content
+`N = (E - 16384) / B`, requiring `E > 16384`. Metadata and user content
 must fit after this calculation. The output still has exactly `V` bytes;
 initialize `[E, V)` to zero. These are framing constraints, not a promise
 that a 16384-byte filesystem can hold even an empty root. Automatic sizing
 accounts for metadata and reserve before rounding its output to 4096 bytes.
 For example, QNX's 1028099-sector partition has `V = 526386688`,
-`E = 526385152`, and `N = 514032` at `B = 1024`. A reader does not mistake
-trailing container bytes for a larger filesystem. Deployment onto a QNX
-partition requires matching its exact length, including alignment tail.
+`E = 526385152`, and `N = 514032` at `B = 1024`. The writer always fills
+its slice, so its two header positions agree under both rules. Bytes past
+`E` are not part of the filesystem. Deployment onto a QNX partition requires
+matching its exact length, including alignment tail, since the length fixes
+where QNX looks for the second header.
 Other device-sector profiles require separate qualification. [Q1], [Q2]
 
 There is no arbitrary image-wide magic scan. Classic candidates are the plain
-header at byte 8192, the bootless plain header at byte zero, and the MMI header
+header at byte 8192, the bootless header at byte zero (whose data origin and
+second-header rule belong to that profile), and the MMI header
 at byte zero. Verify each in-range candidate and reject competing interpretations.
 The plain layout at byte zero is not automatically MMI. The boot sector is
 not executed and a partition-type byte is not proof of format validity.
@@ -718,17 +752,19 @@ content blocks even when each name is much shorter than `B`. Inode-table
 content is `ceil(128 * inode_capacity / B)` blocks. Bitmap content is
 `ceil(ceil(N / 8) / B)` blocks for the classic nonexpandable candidate.
 
-The system run occupies blocks 0 through `2R - 1`. Its first `R` blocks are,
-in order: the bitmap tree's indirect blocks (if any) then its leaves; the
-inode tree's indirect blocks from the level nearest the leaves up to the
-level nearest the header; then the inode-table leaves. Within each level,
-blocks ascend in logical order. The next `R` blocks are the zeroed twins.
-For example, at `B = 512` on a 64 MiB volume the bitmap indirect block is
-0, its leaves 1 through 32, the inode tree's 32 lower indirect blocks 33
-through 64, its top indirect block 65 and its leaves 66 through 4160, so
-`R = 4161`. This order is measured for bitmap depths 0 and 1 and inode
-depths 1 and 2; deeper trees follow the same pattern by inference and
-require a native capture before the writer emits them. [X1]
+The system run occupies blocks 0 through `2R - 1`. Its first `R` blocks
+hold the bitmap tree and then the inode tree. Each tree contributes its
+indirect blocks in post-order (an indirect block follows all of its child
+indirect blocks, and siblings follow logical order), then all its leaves in
+logical order. The next `R` blocks are the zeroed twins. For example, at
+`B = 512` on a 64 MiB volume the bitmap indirect block is 0, its leaves 1
+through 32, the inode tree's 32 lower indirect blocks 33 through 64, its top
+indirect block 65 and its leaves 66 through 4160, so `R = 4161`. With
+several top-level indirect blocks, each one directly follows its own
+children. System trees have depth at most 2; the native formatter refuses
+deeper ones. The order is measured for bitmap depths 0, 1 and 2 and inode
+depths 1 and 2; several top-level indirect blocks occur in the inode tree
+only. [X1], [X2]
 
 Automatic sizing solves the dependency between `N`, bitmap storage, total
 metadata, and free reserve with checked monotone sizing and a finite ceiling.
@@ -867,12 +903,13 @@ The minimum format matrix includes:
 | Area | Required cases |
 | --- | --- |
 | Geometry/probe | Both endians; all classic blocks; sector-aligned length with a nonempty 4096-alignment tail; bootless and MMI distinctions; forced-format checks; bounded slices; truncated headers; overflow; competing valid interpretations; modern large-block rejection |
+| Second header | Filesystem filling its slice; short filesystem with the second header at the slice end; valid header only at `D + N * B` short of the slice end (rejected); padded image file (rejected); `S2 <= 12288` (rejected); stale bytes between `D + N * B` and `S2` never read as data |
 | Snapshots | Either header newer; different namespaces in the two views; shared unchanged system block; active/inactive allocation differences; equal conflicting serials; bad CRC in either header; poisoned padding through byte 511 |
 | Trees | Zero-length object; valid block zero; 16/17 leaves; each indirect transition; fragmented leaves; maximum depth; overflowed capacity; unused required pointer; out-of-range pointer; ancestor cycle; same-block branches; metadata/data overlap |
 | Inodes | First/last ID; zero/out-of-range ID; truncated table; each accepted state; directory with status 3; nonzero link/extension word; unsupported special type and extension; timestamp boundaries |
 | Names | 1/27/28/510/511 bytes; multi-byte UTF-8 boundaries; long-name index zero; index vs inode confusion; checksum disabled/enabled; non-ASCII checksum vectors; embedded NUL/slash; invalid UTF-8; duplicate siblings; host collisions |
 | Directories | Empty directory; unused slots before live ones; missing/duplicate/wrong dot entries; self/ancestor links; multiple parents; wide directory forced to scratch; unsupported entry without silent omission |
-| Allocation | Bitmap self-validation; both system reservations; bit 7/8 boundary; final padding bits; live unallocated block; cat/extract rejection of free payload and indirect blocks without prior verify; allocated preallocation beyond EOF; orphan allocation; free counters; full/near-full images; unused inode initialization |
+| Allocation | Bitmap self-validation; system run order for system-tree depths 0, 1 and 2, including several top-level indirect blocks; both system reservations; bit 7/8 boundary; final padding bits; live unallocated block; cat/extract rejection of free payload and indirect blocks without prior verify; allocated preallocation beyond EOF; orphan allocation; free counters; full/near-full images; unused inode initialization |
 | Writer | Exact and automatic sizing; inode exhaustion; existing compatible `.boot` tree; synthesized `.boot`; wrong-kind/metadata conflict; both endian profiles; deterministic serials/identity; free reserve; root metadata; zero sources; complete byte initialization |
 | Failure | Allocation/scratch failures; short reads/writes; premature EOF; zero progress; source mutation; output/source alias; cancellation; flush/close/publication failure; no successful partial output |
 
@@ -948,6 +985,7 @@ Links and provenance details for these keys are in the
 | F1 | Pinned NFI synthetic test-image observations |
 | X1 | Native QNX 6.5.0 formatter, filesystem and checker experiments |
 | X2 | Disassembly of the QNX 6.5.0 filesystem, formatter and checker |
+| H1 | Owner-supplied PCM 3.1 HDD image, structure-only measurements |
 | P1 | Pinned PCM-Explorer Porsche PCM 3.1 format investigation |
 | G1 | Pinned PCM-Forge native tool and firmware inventory |
 
@@ -971,5 +1009,6 @@ Links and provenance details for these keys are in the
 [F1]: ../docs/qnx6-research.md#fixture-observations
 [X1]: ../docs/qnx6-research.md#native-qnx-650-evidence
 [X2]: ../docs/qnx6-research.md#native-qnx-650-evidence
+[H1]: ../docs/qnx6-research.md#measured-pcm-31-hdd
 [P1]: https://github.com/dspl1236/PCM-Explorer/blob/a38709a0db90b9a3e70f4542b82553e93ace0f42/docs/QNX6-NOTES.md
 [G1]: https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/research/firmware/PCM31_ISO_ANALYSIS.md

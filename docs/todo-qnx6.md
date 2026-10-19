@@ -6,33 +6,34 @@ sources and observations. Porsche 911 PCM 3.1 HDD compatibility drives qualifica
 classic, MMI, and extended Power-Safe remain separate profiles.
 
 * [High] **Porsche corpus and disk composition** (`lib/formats/`, volume
-  selection): identify the target PCM 3.1 hardware/software and inspect authorized
-  HDD samples. Reconcile the measured partition table and mount mapping with
-  the three-partition PCM-Explorer sample and PCM-Forge's script-derived list
-  of five possible devices; do not assume either count. Record exact partition
-  bounds, sector size, actual filesystem
-  signatures, boot/locator bytes, identity, metadata, and links. Confirm whether
-  live files contain unused references within their logical lengths; distinguish
-  native sparse extents from a reader's missing-block zero-fill. Add synthetic
-  mixed-filesystem disk fixtures. Define partition composition and a separate
-  QNX4 writer if the target contains QNX4; do not label a single QNX6 volume
-  as a complete compatible HDD.
+  selection): one owner HDD is
+  [measured](qnx6-research.md#measured-pcm-31-hdd): five MBR/EBR
+  partitions, four QNX6 and one 52.6 GB QNX4. Identify the target PCM 3.1
+  hardware and software build and record the head unit's mounted-device
+  mapping. Obtain an unmodified drive or a record of the original contents
+  of partitions 2 and 6, which the owner reformatted, and establish whether
+  partition 5 is original. Record identity, metadata and links of populated
+  volumes, and confirm whether live files contain unused references within
+  their logical lengths. Define partition composition (MBR plus EBR chain,
+  63-sector alignment, boot loader policy including the loader's sector
+  fields at offsets 4, 8 and 12) and a separate QNX4 reader/writer design;
+  do not label a single QNX6 volume as a complete compatible HDD. Add
+  synthetic mixed-filesystem disk fixtures.
 
 * [High] **Compatibility and inode semantics** (`lib/formats/qnx6/`): the
   [native QNX 6.5.0 evidence](qnx6-research.md#native-qnx-650-evidence)
   establishes the classic header words, flag classes, root and `.boot`
-  inodes, status bits, link count and `ftime`. Confirm the same values on
-  the PCM 3.1 target's own formatter before treating QNX 6.5.0 as its
-  profile, and qualify extension trees on later QNX releases.
+  inodes, status bits, link count and `ftime`. The PCM HDD's head-unit
+  volumes match that structure but carry a different boot loader build.
+  Confirm on the target's own formatter, including nondefault options (byte
+  order, block size, checksum), and qualify extension trees on later QNX
+  releases.
 
 * [High] **Writable allocation recipe** (`lib/formats/qnx6/`): qualify fsimg
   output, including the identical serial-1 header pair over a populated
   tree that no native session produces, by native
   create/grow/delete/sync/remount cycles and `chkqnx6fs`; passing a
-  read-only parser cannot close this gate. Capture system-run order for
-  bitmap depth 2 and inode depth 3 or more, and identify the
-  `default_groups` selection inputs on volumes large enough to cross the
-  group-cap and indirect-depth boundaries.
+  read-only parser cannot close this gate.
 
 * [High] **Identity encodings** (`lib/formats/qnx6/`): qualify UUID versus
   text-label selection on the PCM target.

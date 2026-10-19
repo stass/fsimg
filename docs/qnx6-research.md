@@ -64,6 +64,7 @@ v6.12 release; the other implementations are pinned to the revisions below.
 | G4 | [PCM-Forge HDD reader](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/tools/hdd_tool.py) | Heuristic salvage implementation; incorrect ordinary block origin and incomplete integrity checks exclude it as a format oracle |
 | X1 | QNX 6.5.0 x86 live ISO `qnx-6.5.0-x86-201007091524.iso` (SHA-256 `81a4f541...7dbe2`) under QEMU 11.1.2 | Controlled `mkqnx6fs`/`fs-qnx6.so`/`chkqnx6fs` experiments on a 64 MiB raw disk pre-filled with `0xaa`; see [native QNX 6.5.0 evidence](#native-qnx-650-evidence) |
 | X2 | Disassembly of the X1 `fs-qnx6.so` (SHA-256 `87079603...fc58c8`), `mkqnx6fs` (`39a4cfb8...9d642`) and `chkqnx6fs` (`b991f6f2...7e`); unstripped i386 ELF | Decision logic behind X1 observations: header acceptance, feature classes, checksum, name validation, protected inodes |
+| H1 | Owner-supplied image of one Porsche PCM 3.1 HDD, partly reformatted during a recovery attempt | Partition table, filesystem kinds and QNX6 structure only; see [measured PCM 3.1 HDD](#measured-pcm-31-hdd) |
 
 NFI's repository declares [Apache-2.0](https://github.com/NetherlandsForensicInstitute/qnxmount/blob/11c8a7f9ee9b945d584263743f6ea8524e8776d2/LICENSE).
 ReFirmLabs declares [MIT](https://github.com/ReFirmLabs/qnx6-extractor/blob/075434f8c07a3bc85f09394970373fe5e04f17a0/LICENSE),
@@ -181,11 +182,11 @@ They also report partition identifiers `0x4d`, `0x4e`, and `0x4f`, despite
 their mixed filesystem contents. This supports structural probing and exact
 slice boundaries instead of a partition-type-to-filesystem shortcut.
 
-These are the author's reported measurements; no Porsche drive image is
-available in this research corpus. The notes do not establish every 911 model
-year, PCM firmware variant, HDD geometry, or compatibility with the Linux
-MMI-specific layout. The referenced reader supplies no formatter or native
-write-after-create evidence. Porsche reproduction therefore requires a
+These are the author's reported measurements; the drive measured here is
+described under [H1](#measured-pcm-31-hdd). The notes do not establish every
+911 model year, PCM firmware variant, HDD geometry, or compatibility with the
+Linux MMI-specific layout. The referenced reader supplies no formatter or
+native write-after-create evidence. Porsche reproduction therefore requires a
 device-specific compatibility manifest and both filesystem and disk-level
 qualification. The QNX6 specification alone cannot promise a bootable,
 complete replacement HDD.
@@ -239,6 +240,11 @@ the target disk's partition count, sizes, or filesystem kinds. Record its
 actual partition table and mounted-device mapping; do not turn either count
 into the Porsche image-layout recipe.
 
+QNX names a partition device after its partition type in decimal, so
+`hd0t77` through `hd0t81` denote types `0x4d` through `0x51`. These are
+exactly the five partition types measured on H1; see the
+[PCM measurements](#measured-pcm-31-hdd).
+
 ### The HDD reader does not establish a proprietary layout
 
 G4's `resolve_inode` searches candidate inode regions instead of traversing
@@ -263,15 +269,16 @@ target-version differences remain open.
 
 ## Native QNX 6.5.0 evidence
 
-The X1 experiments formatted the whole 67108864-byte disk (`V`), so every
-capture has `N = (V - 16384) / B`, superblocks at 8192 and `D + N * B`, and
-no tail. Each capture records the guest commands and native tool output
-and keeps the raw image; the torn-header record names the exact host-side
-byte change. All captures,
-including those after native create, write, delete and remount cycles,
-check clean. The matrix covered B = 512, 1024, 2048 and 4096, both byte
-orders and long-name checksums enabled and disabled; populated volumes used
-B = 1024 in both byte orders and B = 512 and 4096 in little endian.
+Most X1 experiments formatted the whole 67108864-byte disk (`V`), giving `N =
+(V - 16384) / B` and superblocks at 8192 and `D + N * B`; the `-n` experiment
+and a 5033164800-byte second disk for deep trees and a mid-write power cut are
+noted where used. Each capture records the guest commands and native tool
+output and keeps the raw image; the torn-header record names the exact
+host-side byte change. All captures, including those after native create,
+write, delete and remount cycles, check clean. The matrix covered B = 512,
+1024, 2048 and 4096, both byte orders and long-name checksums enabled and
+disabled; populated volumes used B = 1024 in both byte orders and B = 512 and
+4096 in little endian.
 
 ### Superblock
 
@@ -301,11 +308,22 @@ refused.
 `mkqnx6fs` computes `N = floor((V - 16384) / 4096) * 4096 / B`. Its default
 inode count is one inode per 8 blocks for `N <= 0xfffff`, per 32 up to
 `0x7fffff`, per 64 below `0x8000000` and per 128 above, rounded up to fill
-the last inode-table block (8192 at B = 1024 on this disk). Its default
-group count is chosen from a 1/4/8/16/32 ladder from two values whose
-meaning was not identified, then capped at 4, 8, 16 or 32 by the same `N`
-thresholds; 4 groups at B = 512 and 1024 and 1 group at B = 2048 and 4096 on
-this disk. Only the first rung of each ladder was exercised.
+the last inode-table block (8192 at B = 1024 on this disk, 153600 at
+`N = 9830368`, B = 512). Its default group count is
+`min(ladder(m), cap)`: `m` is the smaller of the bitmap and inode-table
+leaf-block counts, `ladder(m)` is 1, 4, 8, 16 or 32 for `m` at most 3, 7,
+15, 31 or above, and `cap` is 4, 8, 16 or 32 by the same `N` thresholds
+unless `-T` selects a usage table. This reproduces every measured volume:
+4, 4, 1 and 1 groups at B = 512, 1024, 2048 and 4096 on the 64 MiB disk, 16
+at `N = 9830368` and 8 on each H1 QNX6 volume. `main` requires twice the
+bitmap tree, twice the inode tree and two directory blocks to fit in `N`.
+
+`nindirect` sizes each system tree from its leaf count `L` with
+`P = B / 4`: no indirect blocks for `L <= 16`, `ceil(L / P)` for
+`L <= 16 * P`, and `ceil(L / P) + ceil(L / (P * P))` for `L <= 16 * P * P`;
+anything larger fails with "filesystem too large", so system trees never
+exceed depth 2. At B = 512, `-i 1048576` (exactly a full depth-2 inode
+tree) succeeds and `-i 1048577` fails.
 
 ### System area and snapshots
 
@@ -333,6 +351,30 @@ allocated normally. Populate/delete/remount sessions at B = 512, 1024 and
 4096 confirm the twin rule at every tree level: in both resulting headers
 (serials 2 and 3) every bitmap and inode-tree block, indirect or leaf, is at
 its fresh-format position `k` or at exactly `k + R`, and nowhere else.
+A B = 512 volume with `N = 9830368` and 1048576 inodes, giving a depth-2
+bitmap tree with 19 lower indirect blocks and a depth-2 inode tree with 16
+top-level indirect blocks, confirms the rule at every level after a 150 MB
+file (file depth 3) was written, files deleted and the volume remounted.
+
+The run order is a post-order of each tree's indirect blocks followed by its
+leaves, bitmap tree first: every indirect block follows all of its child
+indirect blocks, siblings in logical order. With 16 top-level inode
+indirect blocks, each directly follows its 128 children. The order matches
+every fresh capture, covering bitmap depths 0, 1 and 2 and inode depths 1
+and 2.
+
+### Header placement on the slice
+
+`qnx6fs_vfs_relearn` sets the header offsets before reading either header:
+8192 for the first and `(V & ~0xfff) - 4096` for the second, where `V` is
+the device or partition length, with the data origin at 12288; the mount
+fails unless that second offset exceeds 12288. `sblksanity` then requires only
+`12288 + N * B` to fit below the second header. Formatting the 64 MiB disk
+with `mkqnx6fs -n 16384 -b 1024` put the second header at the last 4096
+bytes of the disk, not at `12288 + N * B`; the volume checked clean, mounted,
+accepted a write and committed serial 2 to that end-of-disk header. The
+bytes between `12288 + N * B` and the second header kept the pre-fill
+pattern: the formatter does not write them.
 
 ### Power loss and header validation
 
@@ -357,6 +399,18 @@ writes the slot not holding the committed snapshot and toggles the
 current-slot bit; the two io-blk calls around that write are unnamed indirect
 calls, interpreted as cache flushes because the driver refuses devices that
 lack cache synchronization.
+
+A second power-cut test deferred automatic snapshots (`snapshot=3600`) on a
+freshly created, all-zero 5033164800-byte disk at B = 1024. A 300000000-byte
+file was written and committed with `sync`; it was then deleted and a
+600000000-byte file was written in the background for 25 seconds before the
+emulator was killed. 140703 blocks (144 MB) of the new file had reached the
+disk, every one free in the committed snapshot's bitmap, and all 292969 blocks
+of the deleted file still held their committed contents; they were the only
+blocks on the disk holding the old file's pattern. An earlier run on a reused
+disk gave the same counts. The committed header (serial 2) was the newest
+valid one; after rebooting, `chkqnx6fs` passed before and after mounting, the
+deleted file was present and complete, and the new file was absent.
 
 The bitmap's set bits are exactly the allocated blocks. Bits past `N` in its
 last block are set (`0xff` bytes). The formatter does not write any block
@@ -415,3 +469,86 @@ signed interpretation would give `0x55555ea3`), and ten copies of
 `e4 b8 ad` give `0xfffffbaf`. Both byte orders store the same numeric value
 in filesystem byte order. With checksums disabled the stored value is 0. A
 computed value of zero, or an empty name, is stored as `0xffffffff`.
+
+## Measured PCM 3.1 HDD
+
+H1 is an image of one owner's Porsche PCM 3.1 HDD, supplied for analysis
+after the owner's recovery attempt reformatted some partitions with QNX
+6.5.0 `mkqnx6fs`. Only structure is recorded here: no file contents,
+names, identities or personal timestamps. The image stays outside the
+repository.
+
+The disk is 100030242816 bytes of 512-byte sectors with an MBR (`55aa`)
+and 63-sector alignment:
+
+| Partition | Type | First sector | Sectors | Content |
+| --- | --- | --- | --- | --- |
+| 1, active | `0x4d` | 63 | 4208967 | QNX6, original |
+| 2 | `0x4e` | 4209030 | 2104515 | QNX6, owner reformat, empty |
+| 3 | `0x4f` | 6313545 | 102767805 | QNX4, original |
+| 5, logical | `0x50` | 109081413 | 2104452 | QNX6, head-unit format, empty |
+| 6, logical | `0x51` | 111185928 | 84180537 | QNX6, owner reformat, empty |
+
+The extended partition (`0x05`) starts at sector 109081350 and chains two
+EBRs. Five data partitions confirm a G1-style device list rather than P1's
+three volumes, for this drive.
+
+Provenance follows from two independent marks. The head unit writes format
+times from an unset clock: 7 seconds at header offset 16 for partition 1,
+24 for partition 5 and 11 for the QNX4 root entry of partition 3.
+Partitions 2 and 6 instead carry wall-clock format times, share one volume
+identity and contain the QNX 6.5.0 build of the boot loader, which marks
+them as the owner's QNX 6.5.0 reformat. Partition 5 carries the head
+unit's loader build; whether the head unit formatted it originally or
+during the recovery cannot be told, since it was never synced.
+
+Every QNX6 volume is little endian with B = 1024, flags `0x100`, version
+word 4, reserve 3, an 8192-byte boot area holding a QNX v1.2b loader, empty
+tree 312 and zero bytes 392-4095 in both headers; the partition tails past
+`E` read as zero. Each loader stores three 32-bit sector numbers at boot
+offsets 4, 8 and 12: the partition's first LBA, the first header's sector
+within the partition (16) and the second header's sector (`S2 / 512`, the
+slice-end position). The head unit's loader is a different build from QNX
+6.5.0's: about 2010 bytes differ and its code is 2598 bytes long against
+2585. Apart from the loader, the volumes match the QNX 6.5.0
+recipe:
+
+* **Head-unit format (partition 5).** Both headers are byte-identical with
+  serial 1; the system run starts at block 0 with `R = 4259`, followed by a
+  zeroed twin region, all allocated; the bitmap's padding is `0xff`; root
+  is `040775` with link count 3 and `.boot` is inode 2, `040700`, both
+  status 1. Its inode count, 32888 for `N = 1052208`, follows the 6.5.0
+  one-per-32-blocks default, and its 8 groups equal the 6.5.0 group rule.
+  The owner's QNX 6.5.0 reformat of partition 2 (`N = 1052240`) has the same
+  structure.
+* **Original populated volume (partition 1).** Serial 8293 and 8294, so
+  the two headers are adjacent snapshots. `N = 2104464`, filling its
+  partition, with 65768 inodes (one per 32 blocks) and 8 groups (the 6.5.0
+  group rule) and
+  `R = 8514`; the newer header's bitmap root is block `0x2142 = R`, the twin
+  of block 0. 69 live inodes (4 directories, 65 regular files) are all
+  uid/gid 0, with status 1 for root and `.boot` and 3 otherwise; link counts
+  are POSIX values; offsets 102-127 are zero. All 38 long names carry
+  checksums that match the unsigned recurrence, every name is valid UTF-8
+  without control bytes, and unused directory slots are all zero.
+* **Owner reformat with a short filesystem (partition 6).** The 43.1 GB
+  partition holds a filesystem of `N = 1052240`. Its first header is at
+  8192 and its second at the partition's last 4096 bytes, not at
+  `12288 + N * B`; both are valid and identical, and its loader records
+  the slice-end sector. This matches the native `mkqnx6fs -n` placement
+  described above; that `-n` was used is an inference, since its `N`
+  equals partition 2's. The partition beyond the filesystem reads as
+  zero, which in a sparse image may only mean those sectors were never
+  written.
+
+The QNX4 volume's root entry is a directory `040775` owned by uid 0 with
+link count 4. Its structure is outside the QNX6 design and awaits a QNX4
+design.
+
+The head unit's formatter therefore produces the QNX 6.5.0 superblock,
+system-area, inode and directory structure for empty volumes of this size,
+with its own loader build, and the original populated volume obeys every
+QNX 6.5.0 structural rule measured. What H1 cannot show: the original
+contents of partitions 2 and 6, whether partition 5 is original, the
+target's own formatter options, the head unit's mounted-device mapping, and
+behavior on other PCM 3.1 drives or software builds.
