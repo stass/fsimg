@@ -151,6 +151,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/check-install.sh build-aux/check-installed.py \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
+	build-aux/opencode-review.sh \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
 	docs/references.md docs/qualification.md .github/workflows/check.yml \
 	docs/qnx6-research.md docs/todo-qnx6.md \
