@@ -60,6 +60,16 @@
   failure instead of unsupported source kind. Add a socket regression and
   classify the failure without guessing object type from `ENXIO` alone.
 
+* [Low] **POSIX metadata simplifications** (`lib/write/catalog.c`,
+  `cmd/fsimg/protocol.c`, `test/extract.c`, `test/posix.c`): give the
+  kind/size rule ("link 1..1023, directory and FIFO 0, file any") one
+  internal owner shared by the catalog and the wire validator, so QNX6
+  reuses it; share one all-zero-bytes check between them; make
+  `test_unsupported_kinds` in `test/extract.c` a table over selection and
+  skip flag; run the format-independent capability tests in `test/posix.c`
+  once rather than per format; replace `images_equal` with a whole-file or
+  digest comparison. About 70 lines, no behaviour change.
+
 * [Low] **FAT volume-label escape** (`lib/formats/fat/codec.c`,
   `lib/formats/fat/directory.c`, `test/fat.c`): verify the directory-name
   first-byte `0x05` escape for a CP437 label beginning with `0xe5`, separately
@@ -79,9 +89,19 @@
   metadata and link targets outside the source tree; an `O_PATH | O_NOFOLLOW`
   open plus `readlinkat(fd, "")` needs `O_PATH`, which the profile refuses for
   the same reason; reading links in the coordinator moves source parsing out
-  of confinement. Record the decision in the security design, then test it on
-  Linux with the sandbox active. FreeBSD Capsicum is expected to permit both
-  calls through the source directory's rights but is unverified.
+  of confinement. Decision: the coordinator reads link targets. The worker
+  sends the link's parent directory descriptor and a single name component
+  over a request/reply channel; the coordinator checks the descriptor is a
+  directory on the source device and the name is one component other than
+  `.` and `..`, then inspects the link, reads the target (at most 1023
+  bytes), inspects it again and returns target and identity. The library
+  scanner reads links through an internal host hook that defaults to
+  `readlinkat()` and that the Linux worker replaces. A walk of the image path
+  from the source root is the alternative if descriptor passing proves
+  awkward. Record the design in the security, CLI and metadata specs, then
+  test it on Linux with the sandbox active, including forged worker requests.
+  FreeBSD Capsicum permits both calls: a confined `create -S required` reads
+  ordinary and dangling links (verified on FreeBSD 16.0-CURRENT).
 
 ## Planned features
 
@@ -91,6 +111,18 @@
   one layout pass accumulating every candidate unit's total, selection of the
   smallest volume, and the pinned test catalogs where it differs from the
   default. QNX6 follows in its writer stage.
+
+* [Medium] **Metadata round-trip through extraction** (`lib/extract/`,
+  `cmd/fsimg/`): the safe extractor never restores owner, mode or change
+  time and creates no links or FIFOs, so an extracted QNX6 tree cannot be
+  rebuilt with its metadata. Design a manifest written beside the extracted
+  tree (owner, mode, times, link targets, FIFOs) that manifest import reads
+  back, which needs no privileges. Separately consider an opt-in that applies
+  permission bits without setuid, setgid or sticky through opened
+  descriptors, directories last, and an explicit trusted-restore profile
+  (owners and full modes, as `tar -p` does as root) outside the safe
+  profile; either needs a security review of the worker's metadata
+  syscalls. Change time cannot be set on any host.
 
 * [Medium] **Additional inputs and formats** (`lib/source/`, `lib/formats/`):
   design manifest import, bounded partition selection, and independent NTFS and
