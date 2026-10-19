@@ -9,17 +9,20 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   selection): one owner HDD is
   [measured](qnx6-research.md#measured-pcm-31-hdd): five MBR/EBR partitions,
   four QNX6 and one 52.6 GB QNX4. Identify the target PCM 3.1 hardware and
-  software build and record the head unit's mounted-device mapping. Obtain an
-  unmodified drive or a record of the original contents of partitions 2 and 6,
-  which the owner reformatted, and establish whether the head unit formatted
-  partition 5 at the factory or during the recovery. Obtain the head unit's
-  `fs-qnx6.so`, which is not on the HDD. Record identity, metadata and links
-  of populated volumes, and confirm whether live files contain unused
-  references within their logical lengths. Define partition composition (MBR
-  plus EBR chain, 63-sector alignment, boot loader policy including the
-  loader's sector fields at offsets 4, 8 and 12) and a separate QNX4
-  reader/writer design; do not label a single QNX6 volume as a complete
-  compatible HDD. Add synthetic mixed-filesystem disk fixtures.
+  software build. Obtain an unmodified drive or a record of the original
+  contents of partitions 2 and 6, which the owner reformatted. Explain why the
+  head unit's `fs-qnx6.so` runs its version-3 test only when the first header
+  is unreadable, and confirm on the target that one corrupt header at 8192
+  sends it to the byte-0 layout ([update
+  disc](qnx6-research.md#pcm-31-update-disc)). Find where the disk signature
+  at MBR offsets 440 through 443 comes from. Record identity, metadata and
+  links of populated volumes, and confirm whether live files contain unused
+  references within their logical lengths. Define partition composition from
+  the head unit's stock partition sectors (MBR plus EBR chain, 63-sector
+  alignment, boot loader policy including the loader's sector fields at
+  offsets 4, 8 and 12) and a separate QNX4 reader/writer design; do not label
+  a single QNX6 volume as a complete compatible HDD. Add synthetic
+  mixed-filesystem disk fixtures.
 
 * [High] **Compatibility and inode semantics** (`lib/formats/qnx6/`): the
   [native QNX 6.5.0 evidence](qnx6-research.md#native-qnx-650-evidence)
@@ -36,8 +39,11 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   create/grow/delete/sync/remount cycles and `chkqnx6fs`; passing a
   read-only parser cannot close this gate.
 
-* [High] **Identity encodings** (`lib/formats/qnx6/`): qualify UUID versus
-  text-label selection on the PCM target.
+* [High] **Identity encodings** (`lib/formats/qnx6/`, writer settings): the
+  UUID encoding at header offset 32 is measured; the head unit formats its
+  media partition with the fixed UUID `11111111-2222-3333-4444-555555555555`.
+  Expose the UUID as a writer setting and confirm on the target whether its
+  software checks it.
 
 * [High] **Reader, verifier, and writer** (`lib/formats/qnx6/`, `test/`,
   `fuzz/`): implement the bounded common tree codec, strict profile checks,
@@ -57,12 +63,13 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   plain and MMI layouts in both reader and writer paths, including whether
   bootless and MMI volumes are the [version-3
   format](qnx6-research.md#head-unit-formatter-and-checker) and what MMI
-  images hold at offsets 16 through 27; then
-  8192–32768-byte blocks, sector locators/copies, expandable capacity, inode
-  integrity, sparse files, ACL/encryption metadata, and special inodes as
-  evidence and test environments permit. Include explicit unsupported-feature
-  fixtures from QNX 6.6/7/8. Separate sparse evidence from parser zero-fill
-  fallbacks.
+  images hold at offsets 16 through 27, using the PCM head unit's filesystem
+  module, which converts version 3 in both directions, as an oracle for
+  version-3 writes; then 8192–32768-byte blocks, sector locators/copies,
+  expandable capacity, inode integrity, sparse files, ACL/encryption metadata,
+  and special inodes as evidence and test environments permit. Include
+  explicit unsupported-feature fixtures from QNX 6.6/7/8. Separate sparse
+  evidence from parser zero-fill fallbacks.
 
 * [Medium] **Independent infrastructure** (`test/`, `docs/build.md`): script
   the local QNX 6.5.0 QEMU harness (unattended boot, serial shell, capture

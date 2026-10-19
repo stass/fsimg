@@ -166,6 +166,16 @@ the QNX 6.5.0 defaults, usage tables and header version. [H2] See the
 [PCM measurements](../docs/qnx6-research.md#measured-pcm-31-hdd). Do not
 select Linux's MMI layout from a Porsche/Harman product name. [H1], [P1]
 
+The head unit mounts `hd0t77` through `hd0t81` as `/mnt/data`,
+`/mnt/share`, `/mnt/nav` (QNX4), `/mnt/pv-cache` and `/mnt/media`. Its
+recovery software writes stock partition sectors, which the measured HDD's
+MBR and EBRs match apart from the MBR disk signature, and formats every QNX6
+partition with `mkqnx6fs -q`, giving the media partition the fixed UUID
+`11111111-2222-3333-4444-555555555555`. Reproducing the recovery
+procedure's media partition therefore requires that UUID as a writer
+setting. See the
+[update disc](../docs/qnx6-research.md#pcm-31-update-disc). [H3]
+
 Qualification records the actual partition table, mounted-device mapping,
 firmware build, and formatter/checker/filesystem-module identities. Script
 device lists do not define geometry. Both native utilities in PCM-Forge's
@@ -377,7 +387,7 @@ integer. [L1], [N1], [R1]
 | 24 | 4 | Flags: `0x100` long-name checksums; feature classes above |
 | 28 | 2 | On-disk format version, 4 |
 | 30 | 2 | Reserved-block percentage, 0 through 100 (`mkqnx6fs -r`, default 3) |
-| 32 | 16 | Volume identity / label storage |
+| 32 | 16 | Volume UUID in version 4, its bytes in textual order for either byte order (`mkqnx6fs` defaults to a random version-4 UUID) |
 | 48 | 4 | Block size |
 | 52 | 4 | Inode capacity |
 | 56 | 4 | Free inode count |
@@ -728,10 +738,12 @@ capacity, identity, and requested free reserve before output mutation.
 Format settings have typed validation. The settings distinguish filesystem
 block size from host or device sector size, inode capacity from live entries,
 and a 16-byte volume identity from the common 32-bit serial option. The
-snapshot sequence is not the volume identity. A UUID and a textual label are
-mutually exclusive where the QNX profile uses the same storage; an absent
-label is not silently replaced by FAT's `NO NAME`. Identity byte encoding,
-text padding, and any selector flag are qualified as a unit. [Q1]
+snapshot sequence is not the volume identity. The classic profile's identity
+is a UUID, written to offset 32 in textual byte order; native formatters
+offer no text label, so a label setting is refused for this profile rather
+than stored in those bytes or replaced by FAT's `NO NAME`. Reproducible
+output takes the UUID from the settings, never from a random source.
+[Q1], [X1]
 
 The deterministic catalog order assigns root inode 1 and `.boot` directory
 inode 2. If the catalog contains
@@ -873,7 +885,14 @@ ambiguous tie. MMI byte orders, unknown header fields, system allocation, and
 writer recipes require their own fixture matrix. Shared magic does not merge
 these profiles. The table matches the version-3 header that the PCM's QNX
 6.3.2 checker converts, and by inference that conversion defines this
-profile's fields. [H2]
+profile's fields. The PCM's filesystem module mounts a volume whose first
+header is at byte 0, with data at 4096, only as version 3, converting it in
+both directions; it misreads a version-4 header there. By inference the
+head unit therefore reads and writes MMI-layout volumes, but only when the
+second header is in the slice's last whole 4096-byte unit, where the driver
+looks for it; an MMI volume whose second header is at `4096 + N * B` short
+of that position is refused. A bootless classic volume is not deployable to
+it. [H2], [H3]
 
 Extended profiles define, rather than infer, large-block geometry, sector
 locators, redundant-header selection, extension trees, inode checksums and
@@ -1008,6 +1027,7 @@ Links and provenance details for these keys are in the
 | X2 | Disassembly of the QNX 6.5.0 filesystem, formatter and checker |
 | H1 | Owner-supplied PCM 3.1 HDD image, structure-only measurements |
 | H2 | Disassembly of the PCM 3.1 head unit's formatter and checker |
+| H3 | PCM 3.1 update disc: boot images, filesystem module, partition and format procedure |
 | P1 | Pinned PCM-Explorer Porsche PCM 3.1 format investigation |
 | G1 | Pinned PCM-Forge native tool and firmware inventory |
 
@@ -1033,5 +1053,6 @@ Links and provenance details for these keys are in the
 [X2]: ../docs/qnx6-research.md#native-qnx-650-evidence
 [H1]: ../docs/qnx6-research.md#measured-pcm-31-hdd
 [H2]: ../docs/qnx6-research.md#head-unit-formatter-and-checker
+[H3]: ../docs/qnx6-research.md#pcm-31-update-disc
 [P1]: https://github.com/dspl1236/PCM-Explorer/blob/a38709a0db90b9a3e70f4542b82553e93ace0f42/docs/QNX6-NOTES.md
 [G1]: https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/research/firmware/PCM31_ISO_ANALYSIS.md

@@ -66,6 +66,7 @@ v6.12 release; the other implementations are pinned to the revisions below.
 | X2 | Disassembly of the X1 `fs-qnx6.so` (SHA-256 `87079603...fc58c8`), `mkqnx6fs` (`39a4cfb8...9d642`) and `chkqnx6fs` (`b991f6f2...7e`); unstripped i386 ELF | Decision logic behind X1 observations: header acceptance, feature classes, checksum, name validation, protected inodes |
 | H1 | Owner-supplied image of one Porsche PCM 3.1 HDD, partly reformatted during a recovery attempt | Partition table, filesystem kinds and QNX6 structure only; see [measured PCM 3.1 HDD](#measured-pcm-31-hdd) |
 | H2 | Disassembly of the head unit's `mkqnx6fs` (SHA-256 `09f998f6...22d05`) and `chkqnx6fs` (`e225fb41...1c5fd`) from H1's partition 1, build `632-1395` of 2009; unstripped SH-4 little-endian ELF | Head-unit formatter defaults and boot loader, the format-version-3 header; see [head-unit formatter and checker](#head-unit-formatter-and-checker) |
+| H3 | Porsche PCM 3.1 update disc image, volume `PCM_20150721` (SHA-256 `d19c34fb...c2b021`), variant `PCM31RDW400`: `PCM3_IFS1.ifs` (`d4dfda29...aa539`) and `PCM3_Emergency.ifs` (`784e553d...12fa1`), LZO-compressed SH-4 boot images | Head-unit `fs-qnx6.so` (`f952c318...fc6ed`, build `632-1395`), device mapping, stock partition sectors and recovery format commands; see [PCM 3.1 update disc](#pcm-31-update-disc) |
 
 NFI's repository declares [Apache-2.0](https://github.com/NetherlandsForensicInstitute/qnxmount/blob/11c8a7f9ee9b945d584263743f6ea8524e8776d2/LICENSE).
 ReFirmLabs declares [MIT](https://github.com/ReFirmLabs/qnx6-extractor/blob/075434f8c07a3bc85f09394970373fe5e04f17a0/LICENSE),
@@ -239,9 +240,10 @@ or checker result is supplied by this source inspection itself.
 G1 derives five device names, `hd0t77` through `hd0t81`, from `parkHDD.sh`.
 P1 describes three partitions on its measured drive. A script can enumerate
 possible devices without proving that all exist. Neither observation fixes
-the target disk's partition count, sizes, or filesystem kinds. Record its
-actual partition table and mounted-device mapping; do not turn either count
-into the Porsche image-layout recipe.
+the target disk's partition count, sizes, or filesystem kinds. H1 records one
+drive's partition table and the [update disc](#pcm-31-update-disc) the
+mounted-device mapping; do not turn either script count into the Porsche
+image-layout recipe.
 
 QNX names a partition device after its partition type in decimal, so
 `hd0t77` through `hd0t81` denote types `0x4d` through `0x51`. These are
@@ -267,8 +269,8 @@ correct slice-relative block translation, and snapshot-bound enumeration.
 
 The native QNX 6.5.0 evidence below resolves the classic profile's header,
 inode, name and system-area questions that the earlier sources left open.
-Identity selection for the PCM target, Porsche partition composition and
-target-version differences remain open.
+The [PCM 3.1 update disc](#pcm-31-update-disc) supplies the head unit's
+device mapping, partition sectors, format commands and filesystem module.
 
 ## Native QNX 6.5.0 evidence
 
@@ -489,7 +491,7 @@ and 63-sector alignment:
 | 1, active | `0x4d` | 63 | 4208967 | QNX6, original |
 | 2 | `0x4e` | 4209030 | 2104515 | QNX6, owner reformat, empty |
 | 3 | `0x4f` | 6313545 | 102767805 | QNX4, original |
-| 5, logical | `0x50` | 109081413 | 2104452 | QNX6, head-unit formatter, empty |
+| 5, logical | `0x50` | 109081413 | 2104452 | QNX6, original, empty |
 | 6, logical | `0x51` | 111185928 | 84180537 | QNX6, owner reformat, empty |
 
 The extended partition (`0x05`) starts at sector 109081350 and chains two
@@ -504,8 +506,8 @@ identity and contain the QNX 6.5.0 build of the boot loader, which marks
 them as the owner's QNX 6.5.0 reformat. Partition 5 carries the loader
 embedded in the head unit's own formatter (see below), and its unset-clock
 time ties it to the head unit, so by inference the head unit's formatter
-made it; whether originally or during the recovery cannot be told, since it
-was never synced.
+made it. The owner reports that partition 5 was not reformatted during the
+owner's recovery attempt, so it is the head unit's original format.
 
 Every QNX6 volume is little endian with B = 1024, flags `0x100`, version
 word 4, reserve 3, an 8192-byte boot area holding a QNX v1.2b loader, empty
@@ -554,10 +556,9 @@ The head unit's formatter therefore produces the QNX 6.5.0 superblock,
 system-area, inode and directory structure for empty volumes of this size,
 with its own loader build, and the original populated volume obeys every
 QNX 6.5.0 structural rule measured. What H1 cannot show: the original
-contents of partitions 2 and 6, whether partition 5 was formatted at the
-factory or during the recovery, the head unit's filesystem module and
-mounted-device mapping, and behavior on other PCM 3.1 drives or software
-builds.
+contents of partitions 2 and 6 and behavior on other PCM 3.1 drives or
+software builds. The [update disc](#pcm-31-update-disc) supplies the
+mounted-device mapping and the head unit's format commands.
 
 ### Head-unit formatter and checker
 
@@ -626,3 +627,113 @@ its native-byte-order branch:
 The foreign-byte-order branch was not traced end to end. Whether the
 identity bytes at 32 through 47 keep their meaning after conversion was not
 established.
+
+## PCM 3.1 update disc
+
+H3 is a Porsche field-update disc: a plain ISO 9660 image carrying 14
+release variants. The `PCM31RDW400` variant was examined. Its flash
+payloads include `PCM3_IFS1.ifs`, the main QNX boot image, and
+`PCM3_Emergency.ifs`, the recovery image. Both are QNX image filesystems
+(startup magic `eb 7e ff 00`, machine SH) whose image filesystem follows the
+startup code as LZO1X chunks, each prefixed by a 16-bit big-endian length.
+The variant's hard-disk module installs files below `mnt/data/tools/`;
+its `mkqnx6fs` and `chkqnx6fs` are byte-identical to H1's. The `_MOPF` and
+`_MOPF_9x1` boot images carry byte-identical `fs-qnx6.so` and `hddmounter`.
+
+### Device mapping
+
+The main boot image's `hddmounter` mounts the HDD partitions in the order
+79, 78, 80, 81, 77:
+
+| Device | H1 partition | Mount point | Filesystems tried |
+| --- | --- | --- | --- |
+| `/dev/hd0t77` | 1 | `/mnt/data` | QNX6, then QNX4 |
+| `/dev/hd0t78` | 2 | `/mnt/share` | QNX6, then QNX4 |
+| `/dev/hd0t79` | 3 | `/mnt/nav` | QNX4, then QNX6 |
+| `/dev/hd0t80` | 5 | `/mnt/pv-cache` | QNX6 |
+| `/dev/hd0t81` | 6 | `/mnt/media` | QNX6 |
+
+The recovery image carries a different `hddmounter` build.
+
+### Recovery partitioning and formatting
+
+The recovery image's `pcm3EmergencyApp` partitions and formats the HDD. It
+writes stock 512-byte partition sectors with `partition_write`, for 40 GB
+and 100 GB drives. H1's MBR equals the stock 100 GB `.mopf` sector except
+for the 4-byte disk signature at offsets 440 through 443, which is zero in
+the stock sector, and both of H1's EBRs, at sectors 109081350 and
+111185865, equal the stock ones. The stock MBR has no boot code. The image
+also carries a `partition_write_disk_signature` tool; no caller was found.
+
+The app then formats each partition, in order:
+
+| Device | Command |
+| --- | --- |
+| `/dev/hd0t77` | `/proc/boot/mkqnx6fs -q /dev/hd0t77` |
+| `/dev/hd0t78` | `/proc/boot/mkqnx6fs -q /dev/hd0t78` |
+| `/dev/hd0t79` | `dinit -hq /dev/hd0t79` (QNX4) |
+| `/dev/hd0t80` | `/proc/boot/mkqnx6fs -q /dev/hd0t80` |
+| `/dev/hd0t81` | `/proc/boot/mkqnx6fs -q /dev/hd0t81 -u11111111-2222-3333-4444-555555555555` |
+
+Every QNX6 partition takes the formatter's defaults, and the media
+partition a fixed UUID; the app's banner names a "Jukebox partition UUID".
+When `hd0t78` or `hd0t77` fails to mount, the app reformats it with the same
+command; for `hd0t80` and `hd0t81` it only reports the failure. H1's
+partition 6 carries a different identity, consistent with the owner's
+reformat. Whether the factory used this procedure is not shown by the disc.
+
+The `mkqnx6fs` these commands run is the recovery image's own: a stripped
+84230-byte binary (`91376d2c...a84de`) of the same `632-1395` build and
+date as H2's, with a byte-identical boot area. H2's findings carry over to
+it by inference. QNX 6.5.0's `mkqnx6fs -u` stores the sixteen UUID bytes in
+textual order at header offset 32, for both byte orders, and without `-u`
+writes a random version-4 UUID (X1); the head unit's formatters use the same
+UUID library, so they are expected, not measured, to match.
+
+### Head-unit filesystem module
+
+The main boot image's `fs-qnx6.so` (`f952c318...fc6ed`) is build `632-1395`
+of 2009, the same build as H2's tools. It is stripped but keeps its dynamic
+symbols. It chooses the header layout by position, not by a boot-sector
+test or the version word:
+
+* `qnx6fs_vfs_relearn` places the first header at 8192, the data origin at
+  12288 and the second header at the partition's last whole 4096-byte unit,
+  and calls `q6_superblock_load`. When that returns 302, the driver's
+  corrupt-volume result, it retries with the first header at byte 0 and the
+  data origin at 4096, the Linux MMI geometry, keeping the second header at
+  the slice end, so a byte-0 volume mounts only if its second header is
+  there.
+* `q6_superblock_load` reads both headers. A header whose read fails is
+  skipped; one that reads but fails its magic or CRC makes the load return
+  302, which therefore also triggers the byte-0 retry. Of two valid headers
+  the larger serial wins.
+* With the first header at 8192, the selected header is copied into memory
+  and the word at offset 28 must be 4, or the mount fails with error 275;
+  anything but 4 is refused there, including version 3. Only when the first
+  header could not be read does the load also test the selected header for
+  3 in the 16-bit word at offset 24 and return 302, sending the driver to
+  the byte-0 layout; why the test depends on that status was not
+  established.
+* With the first header at byte 0, every header is converted from version 3
+  to version 4 in memory, with the checker's moves, before any version test,
+  and converted back to version 3 before it is written; its CRC is computed
+  over bytes 8 through 511 of the version-3 form. A version-4 header at
+  byte 0 is therefore misread rather than refused.
+* The single-header checks equal QNX 6.5.0's: `D + N * B` must not exceed
+  the second header's position, free inodes must be below the inode count
+  and free blocks below `N`, at most 64 groups and a reserve of at most 100.
+  The flag classes are the same: a bit in `0xff0000` refuses mounting and a
+  bit in `0xfe00` a read-write mount.
+* Two valid headers must agree on magic and format time. With the first
+  header at 8192 they must also agree on block size, block count, inode
+  count and group count, as in QNX 6.5.0; at byte 0 those are not compared.
+
+QNX 6.5.0's driver tries only the header at 8192 and requires version 4,
+so the head unit reads and writes bootless version-3 volumes, the MMI
+layout by inference, and QNX 6.5.0 refuses them. The foreign-byte-order
+branch of the conversion stores the 16-bit flags at offset 26 as a 32-bit
+word in the wrong byte order in both directions; by inference a
+big-endian version-3 volume with flag `0x100` reads as `0x10000`, in the
+unmountable class. The head unit is little endian, so this does not affect
+its own volumes.
