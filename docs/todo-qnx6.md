@@ -1,8 +1,10 @@
 # QNX6 implementation and qualification
 
-The [design](../specs/design-qnx6.md) covers independent read/write support
-and variant-specific gates. The [research record](qnx6-research.md) records
-sources and observations. Porsche 911 PCM 3.1 HDD compatibility drives qualification;
+The [format design](../specs/design-qnx6.md) covers independent read/write
+support and variant-specific gates, and the
+[driver design](../specs/design-qnx6-driver.md) the code that implements
+them. The [research record](qnx6-research.md) records sources and
+observations. Porsche 911 PCM 3.1 HDD compatibility drives qualification;
 classic, MMI, and extended Power-Safe remain separate profiles.
 
 * [High] **Porsche corpus and disk composition** (`lib/formats/`, volume
@@ -46,18 +48,29 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   software checks it.
 
 * [High] **Reader, verifier, and writer** (`lib/formats/qnx6/`, `test/`,
-  `fuzz/`): implement the bounded common tree codec, strict profile checks,
-  snapshot selection, directory prepasses, content access, snapshot-aware
-  ownership accounting, immutable planning, and complete initialization.
-  Register each capability only after its native and synthetic acceptance
-  matrix. Add failing regressions before nontrivial fixes; run sanitizers and
-  required internal/external reviews for implementation stages.
+  `fuzz/`): implement the [driver design](../specs/design-qnx6-driver.md) in
+  the stages of the
+  [extension sequence](implementation-plan.md#extension-sequence). Register
+  each capability only after its native and synthetic acceptance matrix. Add
+  failing regressions before nontrivial fixes; run sanitizers and required
+  internal/external reviews for implementation stages.
 
-* [High] **Automotive metadata fidelity** (`include/fsimg.h`, `lib/source/`,
-  `lib/read/`, `lib/write/`, `cmd/fsimg/`): design explicit owner/group/mode,
-  link, and additional timestamp representation needed to recreate the target
-  namespace. Round-trip required fields without overloading FAT attributes
-  or allowing privileged/symlink restoration through safe host extraction.
+* [High] **POSIX metadata** (`include/fsimg.h`, `lib/source/`, `lib/read/`,
+  `lib/write/`, `lib/extract/`, `cmd/fsimg/`): implement the
+  [metadata design](../specs/design-metadata.md) before the QNX6 reader,
+  since the reader's entry mapping depends on its kinds and fields. Hardlink
+  topology remains unrepresented; add a design before advertising it.
+
+* [High] **Classic-profile strictness evidence** (`lib/formats/qnx6/`): the
+  driver design refuses, as unsupported, a valid block reference beyond an
+  object's logical end, a bitmap longer than `ceil(N / 8)`, a nonminimal or
+  depth-3 system tree, and inode types other than regular file, directory,
+  symbolic link and FIFO. Confirm on QNX 6.5.0 that shrinking a file with
+  `truncate` leaves no references past its new end, that the formatter never
+  pads the bitmap, and whether sockets or device nodes occur on the PCM data
+  volumes; also confirm that `chkqnx6fs` and the filesystem accept an
+  all-zero UUID, the writer's default, and record the mode the native
+  filesystem gives a symbolic link.
 
 * [Medium] **Variant expansion** (`lib/formats/qnx6/`): qualify the bootless
   plain and MMI layouts in both reader and writer paths, including whether

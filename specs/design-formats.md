@@ -150,7 +150,9 @@ logical volumes independently from large entry and fragment counts.
 The [QNX6 design](design-qnx6.md) defines classic, bootless, MMI, and extended
 profiles with independent reader and writer qualification. It supplies concrete
 disk layouts, snapshot and block-tree rules, bounded planning/verification,
-and explicit evidence gates for unknown encodings. Unknown compatibility
+and explicit evidence gates for unknown encodings; the [driver
+design](design-qnx6-driver.md) defines the code that implements the classic
+profile. Unknown compatibility
 markers are unsupported; a valid magic or Linux mount is insufficient.
 
 The writer constructs a new volume with complete snapshot and allocation

@@ -60,7 +60,10 @@ than serializing native structs or padding.
 
 Scanning is synchronous and descriptor-relative. Each opened object uses
 nonblocking, no-controlling-terminal, no-follow flags; its opened type is checked
-before any payload read. Symlinks and special files fail. Directory iteration
+before any payload read. A symbolic link becomes a link entry whose source is
+its target, read relative to the directory and never followed; special files
+fail. Owner and mode are recorded only under the writer's import flag, as the
+[POSIX metadata design](design-metadata.md#host-import) states. Directory iteration
 retains bounded depth state and accounts for its descriptors and buffers. Native
 directory batches have a fixed charged capacity, so libc cannot accumulate a
 wide directory outside the memory owner. Host directory order does not determine

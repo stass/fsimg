@@ -402,23 +402,46 @@ one coherent commit.
 
 ## Extension sequence
 
-QNX6 follows the [reader/writer design](../specs/design-qnx6.md) and
-[qualification work](todo-qnx6.md), with Porsche PCM 3.1 HDD use driving the corpus:
+QNX6 follows the [format design](../specs/design-qnx6.md), the
+[driver design](../specs/design-qnx6-driver.md) and the
+[qualification work](todo-qnx6.md), with Porsche PCM 3.1 HDD use driving the
+corpus. Each stage ends with one coherent commit after the review and
+validation gates above:
 
-1. Identify target PCM and per-volume variants; acquire authorized images and
-   native formatter/checker access. Resolve marker, inode-state, checksum,
-   identity, and system-reservation encodings through controlled experiments.
-2. Implement shared disk codecs and bounded trees, then independent reader,
-   namespace validation, and snapshot-aware full verification. Qualify classic
-   and automotive variants separately; no unvalidated sparse zero-fill.
-3. Implement deterministic new-image planning and emission after the exact
-   writer recipe is established. Validate with QNX checks plus native
-   create/modify/sync/remount tests and Linux reads. Run ASan/UBSan and the
-   required internal and OpenCode reviews at each implementation stage.
-4. Add the metadata/link representation and disk-composition support required
-   for full automotive reproduction, including a separate QNX4 design where
-   the target HDD needs it. Extend MMI and modern Power-Safe features under
-   independent evidence and acceptance gates.
+1. **POSIX metadata.** Implement the [metadata design](../specs/design-metadata.md):
+   the entry kinds and fields in the public header, catalog encoding and
+   validation, symbolic-link sources and `-p` import in the scanner, the
+   common loss policy for fields a format does not store, the extractor's
+   fail-or-skip rule with `-k`, capability records with `max_label_bytes`,
+   and the CLI and worker-protocol records. FAT and exFAT tests show that
+   trees without the new fields plan exactly as before and that the new
+   fields are counted losses by default and failures when a caller forbids
+   losses. Complete: every
+   format test passes, the baseline fixtures are unchanged, and `formats`
+   reports the new masks.
+2. **QNX6 reader and verifier.** Implement codecs, header validation and
+   selection, the tree walker, the bitmap self-check, inodes, directories,
+   names, content and snapshot-aware verification as the driver design
+   specifies, with the synthetic generator covering the format design's
+   acceptance matrix for both byte orders and every classic block size, the
+   Linux reader comparison where a Linux host exists, the research fixture
+   from an environment path, and the fuzz target. Complete: `ls`, `cat`,
+   `extract`, `info` and `verify` on synthetic and native fixtures under
+   ASan/UBSan, with no unvalidated zero-fill anywhere.
+3. **QNX6 writer.** Implement settings, the planning passes, the system-run
+   and tree-shape arithmetic, and emission; add round-trip, determinism,
+   poison-scan, fault-injection and scale tests. Register the writer
+   capability in the same stage only once the QNX 6.5.0 harness has run the
+   native `chkqnx6fs`, mount, create, grow, delete, sync, unmount and remount
+   cycle on fsimg output in both byte orders and recorded the result in the
+   qualification documentation; without that record the stage lands the
+   code and tests with the capability unregistered and the gap listed in
+   `TODO.md`.
+4. **Automotive composition.** Add disk-composition support and a separate
+   QNX4 design where the target HDD needs them, and extend MMI, bootless and
+   modern Power-Safe features under independent evidence and acceptance
+   gates, each with its own header decoder and reservation model in the
+   driver's module structure.
 
 Other extensions receive their own designs before code: manifest import and
 bounded partition selection; reader-only NTFS and QNX4 profiles with independent

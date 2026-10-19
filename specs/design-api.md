@@ -165,8 +165,10 @@ library cannot sandbox it or account for allocations it makes independently.
 ## Entries and sources
 
 `fsimg_entry_t` is a public value descriptor with a `const char *path`, entry
-kind, `uint64_t size`, and `fsimg_metadata_t metadata`. Its supported kinds are
-regular file and directory. Directory size is not a file payload length.
+kind, `uint64_t size`, and `fsimg_metadata_t metadata`. Its kinds are regular
+file, directory, symbolic link and FIFO, as the [POSIX metadata
+design](design-metadata.md) defines them; a symbolic link's size and content
+are its target. Directory and FIFO sizes are zero.
 Root is implicit; all other paths are absolute image paths with validated UTF-8
 components and explicit parent directory entries.
 
@@ -181,9 +183,10 @@ host timezone conversion is allowed. An unset field is absent, not zero.
 Volume information can instead report PER_TIMESTAMP, indicating that each
 timestamp carries its own basis. This value describes format semantics and is
 not a valid basis for an individual timestamp.
-Host uid/gid/mode values, when
-recorded for inspection, are not a promise that FAT/exFAT can store them or that
-extraction will restore them. Required unsupported metadata fails. Optional
+Owner, mode and change time are
+fields with their own validity bits; a format stores them only when its
+capability record says so, FAT and exFAT never do, and extraction never
+restores them. Required unsupported metadata fails. Optional
 omission follows the explicit writer/extraction policy and loss reporting.
 
 A source reference is either `FSIMG_SOURCE_PROVIDER` with a `uint64_t` ID or

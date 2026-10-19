@@ -22,6 +22,8 @@ Implementation status and sequencing belong in the implementation plan and
 | [FAT writer](design-fat-writer.md) | Deterministic aliases, bounded layout planning, geometry, metadata encoding, and emission |
 | [exFAT reader and writer](design-exfat.md) | Boot integrity, bitmap allocation, embedded upcase mapping, initialized data, bounded traversal, and emission |
 | [QNX6 reader and writer](design-qnx6.md) | Power-Safe layouts, snapshots, tree addressing, bounded creation/verification, automotive variants, and evidence gates |
+| [QNX6 driver](design-qnx6-driver.md) | Module layout, driver state, tree walker, bitmap self-check, reservation domains, planning passes, emission order, and tests |
+| [POSIX metadata](design-metadata.md) | Entry kinds beyond files and directories; owner, mode and change time across API, catalog, scanner, extractor and CLI |
 | [Command line](design-cli.md) | Commands, flags, defaults, output, and failure behavior |
 | [Style](style.md) | C conventions and readability review |
 | [Implementation plan](../docs/implementation-plan.md) | Ordered work packages, dependencies, validation, and completion gates |

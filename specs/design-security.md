@@ -228,7 +228,10 @@ walks one component at a time beneath the fresh private root.
 
 The safe profile creates only regular files and directories. It rejects
 symlinks, hardlinks, devices, sockets, FIFOs, reparse-like objects, and unknown
-critical entry kinds. It does not restore owners, setuid/setgid bits, executable
+critical entry kinds: an image entry of such a kind fails the extraction, or
+is skipped and counted when the caller selects the explicit skip option of
+the [POSIX metadata design](design-metadata.md#reading-extraction-and-display).
+It does not restore owners, setuid/setgid bits, executable
 permissions, ACLs, xattrs, or host-specific privileged flags. Host case-folding
 or normalization collisions fail through exclusive creation; they are never
 resolved by overwrite or automatic renaming.

@@ -252,7 +252,10 @@ The [exFAT design](design-exfat.md) defines independent bitmap allocation,
 embedded name mappings, entry sets, and initialized-data semantics.
 The [QNX6 design](design-qnx6.md) defines snapshot selection, uniform block
 trees, snapshot-aware allocation verification, and independent new-image
-construction. Its on-disk snapshots do not introduce a mutable filesystem or
+construction, and the [QNX6 driver design](design-qnx6-driver.md) maps them
+onto the driver's modules, the shared extent index, two extent domains that
+separate the system reservation from content, and fixed planning passes. Its
+on-disk snapshots do not introduce a mutable filesystem or
 change the output coordinator's publication ownership. Native write-after-create
 qualification gates writer support because read-only compatibility cannot
 establish safe free-space and system-metadata state.
@@ -265,8 +268,11 @@ Automotive HDD compatibility is a composition-level claim. Individual format
 drivers consume bounded volumes; they neither infer a filesystem from an OEM
 name nor own partition discovery, boot code, or other volumes. A replacement
 Porsche HDD requires a qualified disk layout and every constituent filesystem,
-including QNX4 where present. Required POSIX metadata and link fidelity must
-have explicit common representations before being advertised; they do not
+including QNX4 where present. The [POSIX metadata design](design-metadata.md)
+is the one common representation of owner, mode, change time, symbolic links
+and FIFOs: a format advertises a field or kind only through its capability
+record, planning applies one loss policy to every field, and hardlink
+topology has no representation until a design adds one. Fidelity claims do not
 weaken the safe extractor's file/directory-only contract. This keeps device
 compatibility evidence separate from a successful filesystem parse.
 

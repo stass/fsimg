@@ -4,7 +4,10 @@
 
 * [High] **QNX6 read/write and automotive qualification**
   (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): implement the
-  [Power-Safe design](specs/design-qnx6.md), close the explicit format-evidence
+  [Power-Safe design](specs/design-qnx6.md) through its
+  [driver design](specs/design-qnx6-driver.md) and the
+  [POSIX metadata design](specs/design-metadata.md), close the explicit
+  format-evidence
   gates, and qualify native read/write interoperability across classic,
   automotive, and extended variants. Porsche PCM 3.1 HDD reproduction also requires
   metadata fidelity and exact disk composition, including QNX4 where present.

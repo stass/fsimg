@@ -38,7 +38,9 @@ copy a template image, or infer semantics from a field's name. The
 [qualification work](../docs/todo-qnx6.md) tracks the evidence needed to close
 these gates. Feature advertisement requires that evidence and the acceptance
 tests below. The design covers both reading and writing even where writer
-qualification requires facts a read-only driver cannot establish.
+qualification requires facts a read-only driver cannot establish. The
+[driver design](design-qnx6-driver.md) maps these rules onto the modules,
+state and algorithms of `lib/formats/qnx6/`.
 
 ## How Power-Safe works
 
@@ -543,13 +545,15 @@ that is supported. Inode change time is not file creation time. Required
 unrepresentable timestamps fail planning; optional loss follows the common
 metadata policy. [L2], [X1]
 
-The baseline public entry model carries files, directories, and supported
-timestamps. It does not thereby gain owner, group, mode, link-count, birth-time,
-ACL, or device fidelity. A metadata/API extension must represent each field
-and its validity before the driver advertises that fidelity. Unsupported
-attributes cannot be mapped to unrelated FAT attribute bits. With no selected
-POSIX metadata, writer policy is uid/gid zero, directory permissions 0755,
-and regular-file permissions 0644, independent of process umask.
+The public entry model carries files, directories, symbolic links and FIFOs,
+the shared timestamps, and the owner, mode and change-time fields of the
+[POSIX metadata design](design-metadata.md). The driver advertises exactly
+those kinds and fields; link-count, ACL and device fidelity have no
+representation and are not advertised. Unsupported attributes cannot be
+mapped to unrelated FAT attribute bits. With no selected POSIX metadata,
+writer policy is uid/gid zero, directory permissions 0755, regular-file
+permissions 0644 and symbolic-link and FIFO permissions 0777, independent of
+process umask.
 
 The common source model treats host hardlinks as separate source entries
 unless an explicit topology-preserving contract exists. The baseline writer
@@ -559,12 +563,12 @@ ownership belongs to that inode once, while output quotas count every emitted
 path. Directory sharing and cycles remain errors. Do not infer a special
 hardlink inode format from the Linux prose description alone.
 
-Symbolic links have a distinct mode and Linux reads their target bytes from
-the inode content tree. They are never followed during fsimg path selection
-or extraction. Until the public entry model represents a special kind, an
-operation requiring that entry returns unsupported, not a fabricated regular
-file or silent omission. Full verification cannot report complete support
-after skipping such objects. [L2]
+Symbolic links have a distinct mode and their target bytes are the inode's
+content, exposed as the entry's content and never followed during fsimg path
+selection or extraction. An inode of a kind the entry model does not
+represent makes its directory unsupported, not a fabricated regular file or a
+silent omission. Full verification cannot report complete support after
+encountering such an object. [L2]
 
 The classic profile's inode recipe comes from native QNX 6.5.0. Offset 34 is
 the POSIX link count: one per name of a regular file, `2 + subdirectories` for
@@ -686,22 +690,20 @@ in every bitmap. A fresh format zero-fills the run, points both headers at
 the primary members and gives both headers serial 1. Bits past `N` in the
 final bitmap block are set. [X1]
 
-Bootstrap bitmap pages on demand through the geometry-checked, cycle-bounded
-tree decoder. Record every bitmap leaf and indirect block read in a paged
-pending ledger before consulting it. To validate an encountered block's bit,
-resolve just the required bitmap page; add newly encountered bitmap blocks
-to the same ledger. Drain this work until all encountered blocks' bits have
-been checked. A block is enqueued once, so allocation-bit dependencies can
-refer back to an already recorded bitmap block without recursive validation.
-Pointer-tree cycles still fail independently. Any clear required bit fails
-the operation before exposure.
+Bootstrap the bitmap through the geometry-checked, cycle-bounded tree decoder
+before consulting any allocation bit: index the bitmap tree once, recording
+every indirect and leaf block it visits, then resolve each recorded block's
+bit through that index. The blocks whose bits the check needs are exactly
+the blocks the index covers, so the closure is complete after one pass and
+needs no recursive validation. Pointer-tree cycles still fail independently.
+Any clear required bit fails the operation before exposure.
 
-This work is the dependency closure of accessed pages, not an unconditional
-bitmap scan at open. The ledger, pages, pending work, and I/O obey memory,
-scratch, work, and cancellation limits; an adversarially large closure fails
-at those limits. Cached validated pages remain valid only within the immutable
-reader snapshot. Self-reference does not authorize unchecked pointers or
-unlimited bootstrap work.
+This work reads the bitmap tree's indirect blocks and the pages holding its
+own blocks' bits, not the bitmap's contents. The record, pages and I/O obey
+memory, scratch, work, and cancellation limits; a scattered bitmap tree that
+needs a page per block fails at those limits. Cached validated pages remain
+valid only within the immutable reader snapshot. Self-reference does not
+authorize unchecked pointers or unlimited bootstrap work.
 
 Ordinary selected reads also check the allocation bit of every followed
 indirect, inode, directory, long-name, and payload block against the selected

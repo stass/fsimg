@@ -112,6 +112,7 @@ Creation accepts common options and:
 | `-f bytes` | Minimum free-space reserve after metadata and allocation rounding |
 | `-n` | Collect, validate, and plan; report the plan without creating an output image |
 | `-o image` | Required output pathname except with `-n` |
+| `-p` | Import host owner, group and permission bits as optional metadata |
 | `-s bytes` | Positive exact logical volume size; omission selects automatic sizing |
 | `-t format` | Required writer format |
 
@@ -121,11 +122,14 @@ the host timezone, locale, or `SOURCE_DATE_EPOCH` implicitly. Without `-R`, the
 declared source timestamp policy and a generated volume identifier apply.
 Geometry candidates and format defaults are reported in the plan.
 
-Host import includes regular files and directories, content, hierarchy, and
-representable timestamp fields. It rejects symlinks and special files. It does
-not advertise POSIX ownership/mode fidelity on FAT/exFAT. Hardlinked regular
-host files are copied as independent files; source inode identity is not an
-image hardlink capability.
+Host import includes regular files, directories and symbolic links, content,
+hierarchy, and representable timestamp fields; `-p` adds owner, group and
+permission bits. It rejects special files. A format that cannot store a kind
+fails planning; a field it cannot store is an optional loss, counted in the
+usual notice, so FAT and exFAT advertise no POSIX fidelity and `-p` never
+changes their image bytes. The default label applies only to formats
+with a label. Hardlinked regular host files are copied as independent files;
+source inode identity is not an image hardlink capability.
 
 Scanning rejects descendant mount crossings. The creation sandbox has broader
 source-root authority than the image-reading sandbox; read-only access alone
@@ -157,7 +161,9 @@ necessary parent directories. The default extracts the entire volume.
 The CLI uses the [safe content profile](design-security.md#safe-extraction):
 private directories and files, regular content only, no links, no privileged
 metadata, no existing-tree merge, and no host timestamp restoration. Inspection
-still exposes image metadata. No force flag, lossy name rewriting, or sandbox
+still exposes image metadata. An entry of another kind, such as a symbolic
+link, fails the extraction unless `-k` is given, which skips such entries and
+reports their count. No force flag, lossy name rewriting, or sandbox
 opt-out weakens the path and file-type checks.
 
 Logical output bytes, including holes, count against the output quota. Sparse
