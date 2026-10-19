@@ -216,11 +216,6 @@ fsimg_fat_close(fsimg_reader_t *reader)
 
 	if (fat == NULL)
 		return;
-	if (fat->directories != NULL) {
-		for (uint64_t i = 0; i < fat->directory_capacity; i++)
-			fsimg_stream_free(fat->directories[i].entries);
-	}
-	fsimg_dealloc(fat->directories);
 	fsimg_bitset_free(fat->directory_clusters);
 	fsimg_stream_free(fat->owners);
 	fsimg_extent_index_free(fat->index);

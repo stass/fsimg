@@ -15,9 +15,6 @@ static fsimg_status_t exfat_open(fsimg_reader_t *,
 static void exfat_close(fsimg_reader_t *);
 static fsimg_status_t discover_metadata(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t load_upcase(fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t exfat_match_name(fsimg_reader_t *, const char *, bool *,
-    fsimg_error_t *);
-static fsimg_status_t exfat_skip_directory(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t exfat_read(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 static fsimg_status_t exfat_range(fsimg_reader_t *, uint64_t, fsimg_range_t *,
@@ -26,9 +23,11 @@ static fsimg_status_t exfat_range(fsimg_reader_t *, uint64_t, fsimg_range_t *,
 const fsimg_reader_ops_t fsimg_exfat_reader_ops = {
 	.open = exfat_open,
 	.close = exfat_close,
-	.next = exfat_next,
-	.match_name = exfat_match_name,
-	.skip_directory = exfat_skip_directory,
+	.prepare = exfat_prepare,
+	.replay = exfat_replay,
+	.keys = exfat_keys,
+	.key = exfat_key,
+	.ambiguous = "ambiguous exFAT case-insensitive namespace",
 	.read = exfat_read,
 	.range = exfat_range,
 	.verify = exfat_verify
@@ -288,55 +287,15 @@ exfat_close(fsimg_reader_t *reader)
 
 	if (exfat == NULL)
 		return;
-	if (exfat->directories != NULL) {
-		for (uint32_t i = 0; i <= exfat->depth; i++)
-			fsimg_stream_free(exfat->directories[i].entries);
-	}
 	fsimg_extent_index_free(exfat->root);
 	fsimg_extent_index_free(exfat->bitmap);
 	fsimg_extent_index_free(exfat->upcase_index);
 	fsimg_extent_index_free(exfat->file);
 	fsimg_bitset_free(exfat->directory_clusters);
 	fsimg_stream_free(exfat->owners);
-	fsimg_dealloc(exfat->directories);
 	fsimg_dealloc(exfat->upcase);
 	fsimg_dealloc(exfat);
 	reader->driver = NULL;
-}
-
-static fsimg_status_t
-exfat_match_name(fsimg_reader_t *reader, const char *component, bool *matches,
-    fsimg_error_t *error)
-{
-	const uint16_t *upcase = exfat_state(reader)->upcase;
-	uint16_t query[255], current[255];
-	size_t query_count, current_count;
-	const char *name;
-	fsimg_status_t status;
-
-	*matches = false;
-	status = exfat_name_units(component, query, &query_count, error);
-	if (status != FSIMG_OK)
-		return (status);
-	name = strrchr(reader->entry.path, '/') + 1;
-	status = exfat_name_units(name, current, &current_count, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (query_count != current_count)
-		return (FSIMG_OK);
-	for (size_t i = 0; i < query_count; i++) {
-		if (upcase[query[i]] != upcase[current[i]])
-			return (FSIMG_OK);
-	}
-	*matches = true;
-	return (FSIMG_OK);
-}
-
-static fsimg_status_t
-exfat_skip_directory(fsimg_reader_t *reader, fsimg_error_t *error FSIMG_UNUSED)
-{
-	exfat_state(reader)->pending_directory = false;
-	return (FSIMG_OK);
 }
 
 static fsimg_status_t

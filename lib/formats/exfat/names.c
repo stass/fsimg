@@ -14,7 +14,7 @@ static int key_compare(const void *, size_t, const void *, size_t, void *);
 
 fsimg_status_t
 exfat_key_append(fsimg_stream_t *keys, uint64_t parent, const uint16_t *units,
-    size_t count, const uint16_t *upcase, fsimg_error_t *error)
+    size_t count, fsimg_error_t *error)
 {
 	unsigned char key[518];
 	uint16_t mapped;
@@ -25,8 +25,7 @@ exfat_key_append(fsimg_stream_t *keys, uint64_t parent, const uint16_t *units,
 	for (unsigned i = 0; i < 8; i++)
 		key[i] = (unsigned char)(parent >> (56 - i * 8));
 	for (size_t i = 0; i < count; i++) {
-		mapped = upcase == NULL ? (uint16_t)fsimg_unicode_upper(units[i]) :
-		    upcase[units[i]];
+		mapped = (uint16_t)fsimg_unicode_upper(units[i]);
 		key[8 + i * 2] = (unsigned char)(mapped >> 8);
 		key[9 + i * 2] = (unsigned char)mapped;
 	}
@@ -44,7 +43,7 @@ key_compare(const void *a, size_t alen, const void *b, size_t blen,
 }
 
 fsimg_status_t
-exfat_keys_unique(fsimg_stream_t *keys, bool image, fsimg_error_t *error)
+exfat_keys_unique(fsimg_stream_t *keys, fsimg_error_t *error)
 {
 	fsimg_stream_t *sorted;
 	unsigned char previous[518], current[518];
@@ -71,9 +70,8 @@ exfat_keys_unique(fsimg_stream_t *keys, bool image, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			break;
 		if (length == previous_length && bcmp(previous, current, length) == 0) {
-			status = fsimg_error_set(error, image ? FSIMG_ECORRUPT : FSIMG_EINVAL,
-			    0, image ? FSIMG_OP_READER : FSIMG_OP_WRITER,
-			    "ambiguous exFAT case-insensitive namespace");
+			status = fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_WRITER, "ambiguous exFAT case-insensitive namespace");
 			break;
 		}
 		bcopy(current, previous, length);

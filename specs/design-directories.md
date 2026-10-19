@@ -19,7 +19,7 @@ rules and do not use this walker.
 | Owner | Owns | Does not own |
 | --- | --- | --- |
 | Driver | Decoding directory storage, entry framing and metadata, child allocation and parent references, directory-cycle claims, comparison keys, private locators | Traversal order, ancestor state, paths, depth/path/entry limits, selection |
-| Preparation | Admitting entries: charging them, enforcing depth and path limits, spooling records, validating the namespace, sealing the prepared directory | Interpreting record payloads |
+| Preparation | Admitting entries: charging them, enforcing depth and path limits, spooling records, validating the namespace, publishing the prepared directory | Interpreting record payloads |
 | Walker | Depth-first order, deferred descent, pruning, path assembly, ancestor cursors, directory-stream lifetime, the current-entry snapshot | Name comparison or any format field |
 | Selector | Resolving an image path one component at a time and choosing the traversal scope | Directory decoding or private namespace indexes |
 
@@ -35,15 +35,16 @@ A prepared directory satisfies one invariant:
 > Its children have valid framing and metadata, its lookup namespace is
 > unambiguous, and its entries can be replayed in original order.
 
-It consists of a sealed, spillable stream of entry records in on-disk order.
-Each record holds the displayed component as validated UTF-8 and a bounded,
-explicitly encoded driver payload. The payload carries what the driver needs to
-rebuild the entry snapshot and its private locator: for example, the FAT
-32-byte short entry, or exFAT stream fields. Records never contain native
-structures, pointers, or padding.
+It consists of a run of entry records, in on-disk order, on the walker's
+spillable directory stack. Each record holds the displayed component as
+validated, NUL-terminated UTF-8 followed by a bounded, explicitly encoded driver
+payload. The payload carries what the driver needs to rebuild the entry snapshot
+and its private locator: for example, the FAT 32-byte short entry and the
+cluster its `..` record must name, or the exFAT file and stream extension
+entries. Records never contain native structures, pointers, or padding.
 
 An incomplete directory is private to its preparation. The walker receives a
-directory only after namespace validation and sealing succeed, and owns its
+directory only after namespace validation succeeds, and owns its
 lifetime from then on. No caller can observe a child whose siblings have not
 been validated, so namespace validation is a property of every exposed
 directory, not a step each traversal path must remember.
@@ -63,15 +64,15 @@ While decoding, the driver emits one or more comparison keys for each admitted
 entry. FAT emits its long-name key and alias key; exFAT emits the name mapped
 through the volume's validated upcase table; QNX6 emits the case-sensitive UTF-8
 bytes. Keys are opaque, bounded byte strings to common code. Preparation stores
-key records `(key, entry ordinal)` in a second stream, sorts them externally,
-and rejects equal keys with different ordinals. Duplicate keys for the same
-ordinal are permitted. The key stream is released when validation completes.
+key records `(entry position, key)` in a second stream, sorts them externally,
+and rejects equal keys with different entry positions. Duplicate keys for the
+same entry are permitted. The key stream is released when validation completes.
 The driver derives an entry's keys with one function from its entry record,
 the displayed name and payload. Preparation and selection both call it,
 selection on the replayed and re-validated record.
 
-Entry identity is the entry's ordinal within the prepared directory, a
-directory-entry occurrence. It is never inode or allocation identity: separate
+Entry identity is the position of the entry's record within the prepared
+directory, a directory-entry occurrence. It is never inode or allocation identity: separate
 directory entries can legitimately reference one object, and that never permits
 two names to share a key within a directory. Allocation-owner identity belongs
 to [ownership verification](design-storage.md#verification-scope).
@@ -96,14 +97,19 @@ requires the parent's complete namespace validation.
 ## Traversal
 
 The walker performs iterative depth-first traversal. Its ancestor stack is
-bounded by the configured depth limit, and each level retains only its
-prepared-directory stream, replay cursor, and path length. One charged path
-buffer holds every ancestor prefix. A directory entry is returned before its
-children. Descent is deferred to the next advance, so the caller can prune the
-subtree first. A directory's scratch is released as soon as its stream is
-exhausted. Retained ancestor streams share scratch descriptors, so descriptor
-use does not grow with depth. A legal tree within the depth limit cannot
-exhaust the descriptor limit.
+bounded by the configured depth limit, and each level retains only the start of
+its record run, its replay cursor, and its path length. One charged path buffer
+holds every ancestor prefix. A directory entry is returned before its children.
+Descent is deferred to the next advance, so the caller can prune the subtree
+first.
+
+Every retained directory lives in one stack stream. A child is prepared above
+its parent's unread records, so only the deepest directory is replayed and its
+run always ends the stream. An exhausted directory is released by rewinding the
+stream to the start of its run, and later preparation reuses that storage.
+Traversal therefore holds one scratch store, and at most one scratch descriptor,
+however deep it goes: a legal tree within the depth limit cannot exhaust the
+descriptor limit. The stack is released when the root is exhausted.
 
 The driver opens a child directory from the current entry's locator, and claims
 its storage there. For FAT and exFAT that claim uses a paged exact bitset, so

@@ -12,10 +12,9 @@
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
 * [Medium] **Architecture consolidation** (`lib/read/`, `lib/write/`,
-  `lib/formats/`): move traversal, namespace validation, and content
-  delivery to the single owners in the
+  `lib/formats/`): move content delivery to the single owner in the
   [consolidation plan](docs/implementation-plan.md#architecture-consolidation).
-  The drivers still implement their own traversal engines and content loops.
+  The drivers still implement their own content loops.
 
 ## Bugs by subsystem
 
@@ -53,15 +52,6 @@
   first-byte `0x05` escape for a CP437 label beginning with `0xe5`, separately
   from the BPB label field. Add a failing root/BPB label fixture before
   changing the decoder's interpretation of either field.
-
-* [Medium] **Scratch descriptors grow with directory depth** (`lib/meta/store.c`,
-  `lib/formats/fat/directory.c`, `lib/formats/exfat/directory.c`): each spilled
-  ancestor directory stream holds its own scratch descriptor. A 24-level tree
-  with one cache page peaks at 30 FAT reader descriptors and fails at
-  `max_open_files=16`. Extrapolating, depth near 120 can exhaust the default
-  128 descriptors although `max_depth` is 256. The
-  [prepared-directory design](specs/design-directories.md#traversal) requires
-  shared scratch for retained ancestors; resolve it with the common walker.
 
 ## Security residuals
 

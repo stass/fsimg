@@ -7,8 +7,8 @@
 #include "reader.h"
 
 #define FAT_NAME_BYTES 1021u
-#define FAT_RECORD_BYTES (32u + FAT_NAME_BYTES)
-#define FAT_KEY_BYTES 1028u
+/* A name key: four bytes per scalar of at most 255 UTF-16 units. */
+#define FAT_KEY_BYTES FSIMG_DIRECTORY_KEY_BYTES
 #define FAT_DIRECTORY_LIMIT (2u * 1024u * 1024u)
 
 typedef struct fat_geometry {
@@ -46,13 +46,6 @@ typedef struct fat_chain {
 	uint32_t	 checkpoint;
 } fat_chain_t;
 
-typedef struct fat_directory {
-	fsimg_stream_t	*entries;
-	uint64_t	 cursor;
-	size_t		 path_length;
-	uint32_t	 cluster;
-} fat_directory_t;
-
 typedef struct fat_lfn {
 	uint16_t	 units[260];
 	unsigned	 slots;
@@ -64,31 +57,31 @@ typedef struct fat_lfn {
 /* Driver state behind the reader's private pointer, from open to close. */
 typedef struct fsimg_fat_reader fsimg_fat_reader_t;
 
+/* The current locator is the entry's first cluster and the cluster its
+ * ".." record names, set by replay; content state belongs to it.
+ */
 struct fsimg_fat_reader {
 	fat_geometry_t	 geometry;
-	fat_directory_t	*directories;
 	fsimg_bitset_t	*directory_clusters;
 	fsimg_stream_t	*owners;
 	fsimg_extent_index_t *index;
-	uint64_t	 directory_capacity;
 	fat_chain_t	 file_chain;
 	fsimg_extent_t	 extent;
 	uint64_t	 table_window_offset;
 	size_t		 table_window_length;
-	uint32_t	 depth;
 	uint32_t	 current_cluster;
-	bool		 started;
-	bool		 pending_directory;
+	uint32_t	 current_parent;
 	bool		 file_started;
 	unsigned char	 table_window[2][4096];
 	unsigned char	 directory_window[4096];
-	unsigned char	 record[FAT_RECORD_BYTES];
 	char		 root_label[48];
 	bool		 root_label_seen;
 };
 
 uint16_t fsimg_fat_u16(const unsigned char *);
 uint32_t fsimg_fat_u32(const unsigned char *);
+void fsimg_fat_put16(unsigned char *, uint16_t);
+void fsimg_fat_put32(unsigned char *, uint32_t);
 fsimg_status_t fsimg_fat_corrupt(fsimg_error_t *, const char *);
 bool fsimg_fat_cluster_valid(const fat_geometry_t *, uint32_t);
 uint64_t fsimg_fat_cluster_offset(const fat_geometry_t *, uint32_t);
@@ -109,10 +102,14 @@ const fsimg_format_variant_t *fsimg_fat_variant(unsigned);
 fsimg_status_t fsimg_fat_open(fsimg_reader_t *, const fsimg_format_variant_t *,
     fsimg_error_t *);
 void fsimg_fat_close(fsimg_reader_t *);
-fsimg_status_t fsimg_fat_next(fsimg_reader_t *, fsimg_error_t *);
-fsimg_status_t fsimg_fat_match_name(fsimg_reader_t *, const char *, bool *,
+fsimg_status_t fsimg_fat_prepare(fsimg_reader_t *, fsimg_directory_build_t *,
     fsimg_error_t *);
-fsimg_status_t fsimg_fat_skip_directory(fsimg_reader_t *, fsimg_error_t *);
+fsimg_status_t fsimg_fat_replay(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_error_t *);
+fsimg_status_t fsimg_fat_keys(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
+fsimg_status_t fsimg_fat_key(fsimg_reader_t *, const char *, unsigned char *,
+    size_t *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_read(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_range(fsimg_reader_t *, uint64_t, fsimg_range_t *,

@@ -206,7 +206,7 @@ exfat_verify(fsimg_reader_t *reader, unsigned flags,
 	}
 	report->directories = 1;
 	for (;;) {
-		status = exfat_next(reader, error);
+		status = fsimg_walk_next(reader, error);
 		if (status == FSIMG_DONE)
 			break;
 		if (status != FSIMG_OK)

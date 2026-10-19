@@ -33,13 +33,26 @@ fsimg_status_t fsimg_store_flush(fsimg_store_t *, fsimg_error_t *);
 
 /* Streams borrow their context. Iteration advances only after a complete
  * record, including when the payload is empty. Offsets name frame starts.
+ * end is the stream's length; the store beneath can be longer after a
+ * rewind, and bytes past end are never read.
  */
 struct fsimg_stream {
 	fsimg_store_t	*store;
 	uint64_t	 count;
+	uint64_t	 end;
 	uint32_t	 max_record;
 	bool		 sealed;
 };
+
+/* An unsealed stream can serve as a stack: a mark records its current end,
+ * and rewinding to the mark discards every record appended after it. Later
+ * appends reuse the storage, so a stack of nested record runs holds one
+ * scratch store however deep it grows.
+ */
+typedef struct fsimg_stream_mark {
+	uint64_t	 offset;
+	uint64_t	 count;
+} fsimg_stream_mark_t;
 
 fsimg_status_t fsimg_stream_new(fsimg_session_t *, uint32_t, fsimg_stream_t **,
     fsimg_error_t *);
@@ -49,6 +62,9 @@ fsimg_status_t fsimg_stream_append(fsimg_stream_t *, const void *, size_t,
 fsimg_status_t fsimg_stream_seal(fsimg_stream_t *, fsimg_error_t *);
 fsimg_status_t fsimg_stream_next(fsimg_stream_t *, uint64_t *, void *, size_t,
     size_t *, fsimg_error_t *);
+fsimg_stream_mark_t fsimg_stream_mark(const fsimg_stream_t *);
+fsimg_status_t fsimg_stream_rewind(fsimg_stream_t *, fsimg_stream_mark_t,
+    fsimg_error_t *);
 
 /* Records are explicitly encoded bytes, never native structs with padding. */
 fsimg_status_t fsimg_array_new(fsimg_session_t *, uint32_t, uint64_t,

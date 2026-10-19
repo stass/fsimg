@@ -9,7 +9,6 @@
 
 #define EXFAT_BUFFER_BYTES 65536u
 #define EXFAT_NAME_BYTES 1021u
-#define EXFAT_RECORD_BYTES (64u + EXFAT_NAME_BYTES)
 #define EXFAT_SET_BYTES 8192u
 #define EXFAT_DIRECTORY_BYTES (UINT64_C(256) * 1024 * 1024)
 #define EXFAT_CLUSTER_MAX UINT32_C(0xfffffff5)
@@ -68,15 +67,10 @@ typedef struct exfat_directory_cursor {
 	unsigned char	 set[EXFAT_SET_BYTES];
 } exfat_directory_cursor_t;
 
-typedef struct exfat_directory {
-	fsimg_stream_t	*entries;
-	uint64_t	 cursor;
-	size_t		 path_length;
-} exfat_directory_t;
-
 /* Driver state behind the reader's private pointer, from open to close.
  * Each allocation is a shared extent index over the cluster heap, never a
- * resident chain. The file index belongs to the current entry.
+ * resident chain. current is the current entry's stream, set by replay, and
+ * the file index belongs to it.
  */
 typedef struct fsimg_exfat_reader fsimg_exfat_reader_t;
 
@@ -87,7 +81,6 @@ struct fsimg_exfat_reader {
 	fsimg_extent_index_t *upcase_index;
 	fsimg_extent_index_t *file;
 	exfat_stream_t	 current;
-	exfat_directory_t *directories;
 	fsimg_bitset_t	*directory_clusters;
 	fsimg_stream_t	*owners;
 	uint16_t	*upcase;
@@ -96,12 +89,8 @@ struct fsimg_exfat_reader {
 	uint64_t	 table_window_offset;
 	size_t		 table_window_length;
 	uint32_t	 upcase_checksum;
-	uint32_t	 depth;
-	bool		 started;
-	bool		 pending_directory;
 	bool		 bitmap_ready;
 	unsigned char	 table_window[4096];
-	unsigned char	 record[EXFAT_RECORD_BYTES];
 };
 
 extern const fsimg_reader_ops_t fsimg_exfat_reader_ops;
@@ -123,9 +112,10 @@ uint64_t exfat_cluster_offset(const exfat_geometry_t *, uint32_t);
 bool exfat_character_valid(uint16_t);
 fsimg_status_t exfat_name_units(const char *, uint16_t *, size_t *,
     fsimg_error_t *);
+/* Writer namespace keys: a parent id and the default-upcased name. */
 fsimg_status_t exfat_key_append(fsimg_stream_t *, uint64_t, const uint16_t *,
-    size_t, const uint16_t *, fsimg_error_t *);
-fsimg_status_t exfat_keys_unique(fsimg_stream_t *, bool, fsimg_error_t *);
+    size_t, fsimg_error_t *);
+fsimg_status_t exfat_keys_unique(fsimg_stream_t *, fsimg_error_t *);
 fsimg_status_t exfat_entry_decode(const unsigned char *, fsimg_entry_t *,
     exfat_stream_t *, fsimg_error_t *);
 fsimg_status_t exfat_stream_validate(const exfat_geometry_t *,
@@ -147,7 +137,14 @@ fsimg_status_t exfat_index_claim(fsimg_reader_t *, fsimg_extent_index_t *,
     fsimg_error_t *);
 fsimg_status_t exfat_bitmap_bit(fsimg_reader_t *, uint32_t, bool *,
     fsimg_error_t *);
-fsimg_status_t exfat_next(fsimg_reader_t *, fsimg_error_t *);
+fsimg_status_t exfat_prepare(fsimg_reader_t *, fsimg_directory_build_t *,
+    fsimg_error_t *);
+fsimg_status_t exfat_replay(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_error_t *);
+fsimg_status_t exfat_keys(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
+fsimg_status_t exfat_key(fsimg_reader_t *, const char *, unsigned char *,
+    size_t *, fsimg_error_t *);
 fsimg_status_t exfat_directory_set_next(exfat_directory_cursor_t *,
     fsimg_error_t *);
 fsimg_status_t exfat_verify(fsimg_reader_t *, unsigned,

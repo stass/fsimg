@@ -37,7 +37,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/write/writer.h lib/write/writer.c lib/write/catalog.c \
 	lib/write/emit.h lib/write/emit.c \
 	lib/source/source.h lib/source/source.c lib/source/scan.c \
-	lib/io/io.h lib/read/reader.h lib/read/reader.c \
+	lib/io/io.h lib/read/directory.c lib/read/directory.h \
+	lib/read/reader.h lib/read/reader.c \
 	lib/read/selection.c lib/read/selection.h \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \

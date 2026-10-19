@@ -369,7 +369,7 @@ the configured depth, and benchmarks report it separately.
 Sequential content reading is `O(P + referenced allocation metadata)` in bytes
 processed, with fragmentation reflected in I/O calls. Directory traversal adds
 decoding and the external-sort cost of each visited directory's lookup-key
-stream. The prepass runs once per directory in a session, not once per child
+stream. Preparation runs once per directory in a session, not once per child
 or selection comparison. Full verification additionally scans allocation
 metadata and sorts ownership records. Emission is
 `O(P + emitted metadata + explicitly written zero bytes)`.

@@ -247,12 +247,12 @@ fsimg_fat_verify(fsimg_reader_t *reader, unsigned flags,
 		}
 	}
 
-	/* Traversal prepasses record directory allocations; each returned file
+	/* Directory preparation records directory allocations; each returned file
 	 * contributes its own complete chain. No resident ownership map is needed.
 	 */
 	report->directories = 1;
 	for (;;) {
-		status = fsimg_fat_next(reader, error);
+		status = fsimg_walk_next(reader, error);
 		if (status == FSIMG_DONE)
 			break;
 		if (status != FSIMG_OK)

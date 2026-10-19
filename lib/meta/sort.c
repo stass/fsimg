@@ -238,7 +238,7 @@ generate_runs(sort_state_t *sort, fsimg_stream_t *input, size_t run_bytes,
 		goto done;
 	cursor = 0;
 	seen = 0;
-	end = fsimg_store_size(input->store);
+	end = input->end;
 	while (cursor < end) {
 		count = 0;
 		used = 0;

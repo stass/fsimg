@@ -18,6 +18,8 @@ struct fsimg_bitset {
 	uint64_t	 bits;
 };
 
+static fsimg_status_t record_write(fsimg_store_t *, uint64_t, const void *,
+    uint32_t, fsimg_error_t *);
 static fsimg_status_t array_offset(fsimg_array_t *, uint64_t, uint64_t *,
     fsimg_error_t *);
 
@@ -64,27 +66,37 @@ fsimg_record_length(fsimg_store_t *store, uint64_t offset, uint64_t end,
 	return (FSIMG_OK);
 }
 
-fsimg_status_t
-fsimg_record_append(fsimg_store_t *store, const void *data, uint32_t length,
-    fsimg_error_t *error)
+/* Write one frame at offset, growing the store when the frame ends past it. */
+static fsimg_status_t
+record_write(fsimg_store_t *store, uint64_t offset, const void *data,
+    uint32_t length, fsimg_error_t *error)
 {
 	unsigned char header[8];
-	uint64_t offset, end;
+	uint64_t end;
 	fsimg_status_t status;
 
-	offset = fsimg_store_size(store);
 	if (!fsimg_add_u64(offset, sizeof(header) + (uint64_t)length, &end))
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 		    FSIMG_OP_METADATA, "metadata stream length overflow"));
 	fsimg_meta_put_u64(header, ((uint64_t)length << 32) | 1);
-	status = fsimg_store_grow(store, end, error);
-	if (status != FSIMG_OK)
-		return (status);
+	if (end > fsimg_store_size(store)) {
+		status = fsimg_store_grow(store, end, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	status = fsimg_store_write(store, offset, header, sizeof(header), error);
 	if (status != FSIMG_OK)
 		return (status);
 	return (fsimg_store_write(store, offset + sizeof(header), data,
 	    length, error));
+}
+
+fsimg_status_t
+fsimg_record_append(fsimg_store_t *store, const void *data, uint32_t length,
+    fsimg_error_t *error)
+{
+	return (record_write(store, fsimg_store_size(store), data, length,
+	    error));
 }
 
 fsimg_status_t
@@ -154,10 +166,12 @@ fsimg_stream_append(fsimg_stream_t *stream, const void *data, size_t length,
 	if (stream->count == UINT64_MAX)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 		    FSIMG_OP_METADATA, "metadata record count overflow"));
-	offset = fsimg_store_size(stream->store);
-	status = fsimg_record_append(stream->store, data, (uint32_t)length, error);
+	offset = stream->end;
+	status = record_write(stream->store, offset, data, (uint32_t)length,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
+	stream->end = offset + 8 + (uint64_t)length;
 	stream->count++;
 	if (reference != NULL)
 		*reference = offset;
@@ -195,7 +209,7 @@ fsimg_stream_next(fsimg_stream_t *stream, uint64_t *cursor, void *buffer,
 	status = fsimg_store_read(stream->store, 0, NULL, 0, error);
 	if (status != FSIMG_OK)
 		return (status);
-	end = fsimg_store_size(stream->store);
+	end = stream->end;
 	if (*cursor == end)
 		return (FSIMG_DONE);
 	status = fsimg_record_length(stream->store, *cursor, end,
@@ -211,6 +225,31 @@ fsimg_stream_next(fsimg_stream_t *stream, uint64_t *cursor, void *buffer,
 		return (status);
 	*cursor += 8 + (uint64_t)record_length;
 	*length = record_length;
+	return (FSIMG_OK);
+}
+
+fsimg_stream_mark_t
+fsimg_stream_mark(const fsimg_stream_t *stream)
+{
+	return ((fsimg_stream_mark_t){ .offset = stream->end,
+	    .count = stream->count });
+}
+
+fsimg_status_t
+fsimg_stream_rewind(fsimg_stream_t *stream, fsimg_stream_mark_t mark,
+    fsimg_error_t *error)
+{
+	if (stream == NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_METADATA, "missing stream"));
+	if (stream->sealed)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+		    FSIMG_OP_METADATA, "sealed stream cannot rewind"));
+	if (mark.offset > stream->end || mark.count > stream->count)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_METADATA, "stream mark is past the stream end"));
+	stream->end = mark.offset;
+	stream->count = mark.count;
 	return (FSIMG_OK);
 }
 

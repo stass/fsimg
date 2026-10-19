@@ -51,6 +51,20 @@ fsimg_fat_u32(const unsigned char *p)
 	    (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
 }
 
+void
+fsimg_fat_put16(unsigned char *p, uint16_t value)
+{
+	p[0] = (unsigned char)value;
+	p[1] = (unsigned char)(value >> 8);
+}
+
+void
+fsimg_fat_put32(unsigned char *p, uint32_t value)
+{
+	fsimg_fat_put16(p, (uint16_t)value);
+	fsimg_fat_put16(p + 2, (uint16_t)(value >> 16));
+}
+
 fsimg_status_t
 fsimg_fat_corrupt(fsimg_error_t *error, const char *message)
 {

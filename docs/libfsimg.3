@@ -56,7 +56,7 @@ Iteration invalidates the previous current-entry snapshot.
 .Sh READERS
 .Fn fsimg_reader_next
 enumerates depth-first in on-disk order and returns FSIMG_DONE at complete EOF.
-Directory prepasses validate case/alias ambiguity before exposing children.
+Directory preparation validates case/alias ambiguity before exposing children.
 .Fn fsimg_reader_read_at
 reads only the current regular file, clips to EOF and returns confirmed bytes
 separately from status.

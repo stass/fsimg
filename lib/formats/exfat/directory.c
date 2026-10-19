@@ -9,30 +9,28 @@
 #include "exfat.h"
 #include "unicode.h"
 
-/* One prepass validates a complete directory, keeps original-order records,
- * and sorts only namespace keys. No children are visible before ambiguity and
- * entry-set checks succeed. The parent retains only its spillable entry stream.
+/* exFAT's part of directory preparation (specs/design-directories.md):
+ * frame one directory's entry sets, validate each file set and admit it.
+ * The private payload is the file's primary entry and stream extension.
  */
-typedef struct exfat_prepass {
+#define EXFAT_PAYLOAD_BYTES 64u
+
+typedef struct exfat_pass {
 	exfat_directory_cursor_t input;
-	fsimg_stream_t	*entries;
-	fsimg_stream_t	*keys;
-	size_t		 path_length;
-	uint32_t	 level;
-} exfat_prepass_t;
+	fsimg_directory_build_t *build;
+} exfat_pass_t;
 
 static fsimg_status_t next_slot(exfat_directory_cursor_t *, unsigned char *, fsimg_error_t *);
 static fsimg_status_t benign_allocation(fsimg_reader_t *, const unsigned char *,
     bool, fsimg_error_t *);
-static fsimg_status_t decode_set(exfat_prepass_t *, size_t, fsimg_error_t *);
-static fsimg_status_t prepare_directory(fsimg_reader_t *,
-    fsimg_extent_index_t *, size_t, uint32_t, exfat_directory_t *,
-    fsimg_error_t *);
+static fsimg_status_t decode_set(exfat_pass_t *, size_t, fsimg_error_t *);
+static fsimg_status_t decode_directory(exfat_pass_t *, fsimg_error_t *);
 static fsimg_status_t mark_directory(fsimg_reader_t *, fsimg_extent_index_t *,
     fsimg_error_t *);
 static fsimg_status_t mark_run(fsimg_reader_t *, uint32_t, uint32_t,
     fsimg_error_t *);
-static fsimg_status_t start_traversal(fsimg_reader_t *, fsimg_error_t *);
+static fsimg_status_t name_key(const fsimg_reader_t *, const char *,
+    unsigned char *, size_t *, fsimg_error_t *);
 
 static fsimg_status_t
 next_slot(exfat_directory_cursor_t *pass, unsigned char *out, fsimg_error_t *error)
@@ -149,11 +147,11 @@ benign_allocation(fsimg_reader_t *reader, const unsigned char *raw,
 }
 
 static fsimg_status_t
-decode_set(exfat_prepass_t *pass, size_t set_length, fsimg_error_t *error)
+decode_set(exfat_pass_t *pass, size_t set_length, fsimg_error_t *error)
 {
 	fsimg_reader_t *reader = pass->input.reader;
 	unsigned char *raw = pass->input.set;
-	unsigned char record[EXFAT_RECORD_BYTES];
+	char name[EXFAT_NAME_BYTES];
 	uint16_t units[255], validated[255];
 	fsimg_entry_t entry;
 	exfat_stream_t stream;
@@ -197,15 +195,14 @@ decode_set(exfat_prepass_t *pass, size_t set_length, fsimg_error_t *error)
 	if (exfat_name_hash(units, count, exfat_state(reader)->upcase) !=
 	    exfat_u16(raw + 36))
 		return (exfat_corrupt(error, "invalid exFAT filename hash"));
-	status = fsimg_utf16_to_utf8(units, count, (char *)record + 64,
-	    EXFAT_NAME_BYTES - 1, &written, error);
+	status = fsimg_utf16_to_utf8(units, count, name, EXFAT_NAME_BYTES - 1,
+	    &written, error);
 	if (status != FSIMG_OK)
 		return (exfat_corrupt(error, "invalid exFAT filename UTF-16"));
-	record[64 + written] = 0;
-	if (memchr(record + 64, 0, written) != NULL)
+	name[written] = '\0';
+	if (memchr(name, 0, written) != NULL)
 		return (exfat_corrupt(error, "embedded zero in exFAT filename"));
-	status = exfat_name_units((const char *)record + 64, validated,
-	    &validated_count, error);
+	status = exfat_name_units(name, validated, &validated_count, error);
 	if (status != FSIMG_OK)
 		return (exfat_corrupt(error, "invalid exFAT filename component"));
 	status = exfat_entry_decode(raw, &entry, &stream, error);
@@ -215,21 +212,8 @@ decode_set(exfat_prepass_t *pass, size_t set_length, fsimg_error_t *error)
 	    entry.kind == FSIMG_ENTRY_DIRECTORY, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (pass->path_length + written + 2 > reader->ctx->options.max_path_bytes)
-		return (fsimg_limit_error(error, FSIMG_RESOURCE_PATH,
-		    reader->ctx->options.max_path_bytes, pass->path_length + written + 2));
-	if (pass->level >= reader->ctx->options.max_depth)
-		return (fsimg_limit_error(error, FSIMG_RESOURCE_DEPTH,
-		    reader->ctx->options.max_depth, (uint64_t)pass->level + 1));
-	status = fsimg_session_charge(&reader->session, 1, 0, 1, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = exfat_key_append(pass->keys, 0, units, count,
-	    exfat_state(reader)->upcase, error);
-	if (status != FSIMG_OK)
-		return (status);
-	bcopy(raw, record, 64);
-	return (fsimg_stream_append(pass->entries, record, 65 + written, NULL, error));
+	return (fsimg_directory_admit(pass->build, name, raw, EXFAT_PAYLOAD_BYTES,
+	    error));
 }
 
 static fsimg_status_t
@@ -263,156 +247,159 @@ mark_directory(fsimg_reader_t *reader, fsimg_extent_index_t *index,
 	return (exfat_index_runs(reader, index, mark_run, error));
 }
 
+/* Decode every entry set of the directory pass->input reads. Volume
+ * metadata sets in the root are not children.
+ */
 static fsimg_status_t
-prepare_directory(fsimg_reader_t *reader, fsimg_extent_index_t *index,
-    size_t path_length, uint32_t level, exfat_directory_t *out,
-    fsimg_error_t *error)
+decode_directory(exfat_pass_t *pass, fsimg_error_t *error)
 {
-	exfat_prepass_t *pass;
-	fsimg_error_t detail;
 	fsimg_status_t status;
 
-	pass = fsimg_alloc(reader->ctx, sizeof(*pass), &detail);
-	if (pass == NULL) {
-		if (error != NULL)
-			*error = detail;
-		return (detail.status);
-	}
-	pass->input.reader = reader;
-	pass->input.index = index;
-	pass->input.root = level == 0;
-	pass->path_length = path_length;
-	pass->level = level;
-	status = mark_directory(reader, index, error);
-	if (status != FSIMG_OK)
-		goto done;
-	status = fsimg_stream_new(&reader->session, EXFAT_RECORD_BYTES, &pass->entries, error);
-	if (status != FSIMG_OK)
-		goto done;
-	status = fsimg_stream_new(&reader->session, 518, &pass->keys, error);
-	if (status != FSIMG_OK)
-		goto done;
 	for (;;) {
 		status = exfat_directory_set_next(&pass->input, error);
 		if (status == FSIMG_DONE)
-			break;
+			return (FSIMG_OK);
 		if (status != FSIMG_OK)
-			goto done;
+			return (status);
 		if (pass->input.set[0] >= 0x81 && pass->input.set[0] <= 0x83)
 			continue;
 		status = decode_set(pass, pass->input.set_length, error);
 		if (status != FSIMG_OK)
-			goto done;
-	}
-	status = exfat_keys_unique(pass->keys, true, error);
-	if (status != FSIMG_OK)
-		goto done;
-	status = fsimg_stream_seal(pass->entries, error);
-	if (status != FSIMG_OK)
-		goto done;
-	out->entries = pass->entries;
-	out->cursor = 0;
-	out->path_length = path_length;
-	pass->entries = NULL;
-done:
-	fsimg_stream_free(pass->keys);
-	fsimg_stream_free(pass->entries);
-	fsimg_dealloc(pass);
-	return (status);
-}
-
-static fsimg_status_t
-start_traversal(fsimg_reader_t *reader, fsimg_error_t *error)
-{
-	fsimg_exfat_reader_t *exfat = exfat_state(reader);
-	uint64_t bytes;
-	size_t allocation;
-	fsimg_error_t detail;
-	fsimg_status_t status;
-
-	if (!fsimg_mul_u64((uint64_t)reader->ctx->options.max_depth + 1,
-	    sizeof(*exfat->directories), &bytes) || !fsimg_to_size(bytes, &allocation))
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-		    FSIMG_OP_READER, "exFAT directory stack size overflow"));
-	exfat->directories = fsimg_alloc(reader->ctx, allocation, &detail);
-	if (exfat->directories == NULL) {
-		if (error != NULL)
-			*error = detail;
-		return (detail.status);
-	}
-	status = fsimg_bitset_new(&reader->session, (uint64_t)exfat->geometry.clusters + 2,
-	    &exfat->directory_clusters, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = prepare_directory(reader, exfat->root, 0, 0,
-	    &exfat->directories[0], error);
-	if (status == FSIMG_OK)
-		exfat->started = true;
-	return (status);
-}
-
-fsimg_status_t
-exfat_next(fsimg_reader_t *reader, fsimg_error_t *error)
-{
-	fsimg_exfat_reader_t *exfat = exfat_state(reader);
-	exfat_directory_t *directory;
-	fsimg_extent_index_t *index;
-	size_t length, name_length;
-	fsimg_status_t status;
-
-	fsimg_extent_index_free(exfat->file);
-	exfat->file = NULL;
-	if (!exfat->started) {
-		status = start_traversal(reader, error);
-		if (status != FSIMG_OK)
 			return (status);
 	}
-	if (exfat->pending_directory) {
+}
+
+/* Prepare the root at level 0, using the index opened with the volume;
+ * otherwise the directory of the current entry, whose allocation is indexed
+ * here and released afterwards. A directory without allocation has the
+ * empty (NULL) index and no entries. The pass is heap-allocated for its
+ * window and entry-set buffers.
+ */
+fsimg_status_t
+exfat_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
+    fsimg_error_t *error)
+{
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
+	exfat_pass_t *pass;
+	fsimg_extent_index_t *index;
+	fsimg_error_t detail;
+	bool root;
+	fsimg_status_t status;
+
+	root = fsimg_directory_level(build) == 0;
+	index = NULL;
+	if (root) {
+		status = fsimg_bitset_new(&reader->session,
+		    (uint64_t)exfat->geometry.clusters + 2,
+		    &exfat->directory_clusters, error);
+		if (status != FSIMG_OK)
+			return (status);
+	} else {
 		status = exfat_index_build(reader, &exfat->current,
 		    EXFAT_LENGTH_EXACT_ALLOCATION, &index, error);
 		if (status != FSIMG_OK)
 			return (status);
-		status = prepare_directory(reader, index, strlen(reader->path),
-		    exfat->depth + 1, &exfat->directories[exfat->depth + 1], error);
+	}
+	pass = fsimg_alloc(reader->ctx, sizeof(*pass), &detail);
+	if (pass == NULL) {
 		fsimg_extent_index_free(index);
-		if (status != FSIMG_OK)
-			return (status);
-		exfat->depth++;
-		exfat->pending_directory = false;
+		if (error != NULL)
+			*error = detail;
+		return (detail.status);
 	}
-	for (;;) {
-		directory = &exfat->directories[exfat->depth];
-		status = fsimg_stream_next(directory->entries, &directory->cursor,
-		    exfat->record, sizeof(exfat->record), &length, error);
-		if (status == FSIMG_DONE) {
-			fsimg_stream_free(directory->entries);
-			directory->entries = NULL;
-			if (exfat->depth == 0)
-				return (FSIMG_DONE);
-			exfat->depth--;
-			continue;
-		}
-		if (status != FSIMG_OK)
-			return (status);
-		if (length < 66 || exfat->record[length - 1] != 0 ||
-		    memchr(exfat->record + 64, 0, length - 65) != NULL)
-			return (exfat_corrupt(error, "invalid cached exFAT entry record"));
-		name_length = length - 65;
-		status = exfat_entry_decode(exfat->record, &reader->entry,
-		    &exfat->current, error);
-		if (status != FSIMG_OK)
-			return (status);
-		reader->path[directory->path_length] = '/';
-		bcopy(exfat->record + 64, reader->path + directory->path_length + 1,
-		    name_length + 1);
-		reader->entry.path = reader->path;
-		exfat->pending_directory = reader->entry.kind == FSIMG_ENTRY_DIRECTORY;
-		if (!exfat->pending_directory) {
-			status = exfat_index_build(reader, &exfat->current,
-			    EXFAT_LENGTH_COVER_DATA, &exfat->file, error);
-			if (status != FSIMG_OK)
-				return (status);
-		}
-		return (FSIMG_OK);
+	pass->build = build;
+	pass->input.reader = reader;
+	pass->input.index = root ? exfat->root : index;
+	pass->input.root = root;
+	status = mark_directory(reader, pass->input.index, error);
+	if (status == FSIMG_OK)
+		status = decode_directory(pass, error);
+	fsimg_dealloc(pass);
+	fsimg_extent_index_free(index);
+	return (status);
+}
+
+/* Make a replayed file set current. Its payload came from scratch storage,
+ * so the entry and its stream are decoded and validated again; a file's
+ * allocation is indexed for content now, a directory's on descent.
+ */
+fsimg_status_t
+exfat_replay(fsimg_reader_t *reader, const char *name,
+    const unsigned char *payload, size_t length, fsimg_error_t *error)
+{
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
+	uint16_t units[255];
+	size_t count;
+	bool directory;
+	fsimg_status_t status;
+
+	fsimg_extent_index_free(exfat->file);
+	exfat->file = NULL;
+	if (length != EXFAT_PAYLOAD_BYTES)
+		return (exfat_corrupt(error, "invalid prepared exFAT entry payload"));
+	if (exfat_name_units(name, units, &count, error) != FSIMG_OK)
+		return (exfat_corrupt(error, "invalid prepared exFAT filename"));
+	status = exfat_entry_decode(payload, &reader->entry, &exfat->current,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	directory = reader->entry.kind == FSIMG_ENTRY_DIRECTORY;
+	status = exfat_stream_validate(&exfat->geometry, &exfat->current,
+	    directory, error);
+	if (status != FSIMG_OK || directory)
+		return (status);
+	return (exfat_index_build(reader, &exfat->current,
+	    EXFAT_LENGTH_COVER_DATA, &exfat->file, error));
+}
+
+_Static_assert(255 * 2 <= FSIMG_DIRECTORY_KEY_BYTES,
+    "an exFAT name key fits a directory key buffer");
+
+/* The key is the name mapped through the volume's validated upcase table,
+ * as fixed-width big-endian UTF-16 units.
+ */
+static fsimg_status_t
+name_key(const fsimg_reader_t *reader, const char *name, unsigned char *key,
+    size_t *length, fsimg_error_t *error)
+{
+	const uint16_t *upcase = exfat_state(reader)->upcase;
+	uint16_t units[255];
+	size_t count;
+	fsimg_status_t status;
+
+	*length = 0;
+	status = exfat_name_units(name, units, &count, error);
+	if (status != FSIMG_OK)
+		return (status);
+	for (size_t i = 0; i < count; i++) {
+		key[i * 2] = (unsigned char)(upcase[units[i]] >> 8);
+		key[i * 2 + 1] = (unsigned char)upcase[units[i]];
 	}
+	*length = count * 2;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+exfat_keys(fsimg_reader_t *reader, const char *name,
+    const unsigned char *payload FSIMG_UNUSED, size_t length FSIMG_UNUSED,
+    fsimg_directory_keys_t *keys, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	keys->count = 0;
+	status = name_key(reader, name, keys->key[0], &keys->length[0], error);
+	if (status != FSIMG_OK)
+		return (exfat_corrupt(error, "invalid exFAT filename component"));
+	keys->count = 1;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+exfat_key(fsimg_reader_t *reader, const char *component, unsigned char *key,
+    size_t *length, fsimg_error_t *error)
+{
+	if (name_key(reader, component, key, length, error) != FSIMG_OK)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_READER, "selection component is not representable in exFAT"));
+	return (FSIMG_OK);
 }

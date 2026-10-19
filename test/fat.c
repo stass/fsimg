@@ -643,36 +643,114 @@ test_thresholds(void)
 	}
 }
 
+/* Replace the root's contents with a chain of depth nested directories
+ * /D00/D01/..., one cluster each from 20, the deepest holding an empty file
+ * EMPTY. depth is at most 100.
+ */
+static void
+make_deep_tree(fixture_t *f, unsigned depth)
+{
+	unsigned char root[512], directory[512];
+	char name[16];
+
+	set_cluster(f, 3, 0);
+	set_cluster(f, 5, 0);
+	set_cluster(f, 7, 0);
+	set_cluster(f, 9, 0);
+	bzero(root, sizeof(root));
+	short_entry(root, "D00        ", true, 20, 0);
+	write_bytes(f, f->root_offset, root, sizeof(root));
+	for (unsigned i = 0; i < depth; i++) {
+		set_cluster(f, 20 + i, f->eoc);
+		bzero(directory, sizeof(directory));
+		short_entry(directory, ".          ", true, 20 + i, 0);
+		short_entry(directory + 32, "..         ", true, i == 0 ? 0 : 19 + i, 0);
+		if (i + 1 == depth) {
+			short_entry(directory + 64, "EMPTY      ", false, 0, 0);
+		} else {
+			CHECK(snprintf(name, sizeof(name), "D%02u        ", i + 1) == 11);
+			short_entry(directory + 64, name, true, 21 + i, 0);
+		}
+		write_bytes(f, cluster_offset(f, 20 + i), directory, sizeof(directory));
+	}
+}
+
+/* Traverse a deep tree with a one-page metadata cache, so every scratch
+ * object spills, and return the peak descriptor count. The tree must be
+ * traversed completely within max_open_files.
+ */
+static uint64_t
+deep_tree_descriptors(unsigned depth, uint64_t max_open_files)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_stats_t stats;
+	unsigned entries;
+	fsimg_status_t status;
+
+	fixture_init(&f, 16);
+	make_deep_tree(&f, depth);
+	fixture_open(&f);
+	CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
+	f.ctx->options.max_open_files = max_open_files;
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	entries = 0;
+	while ((status = fsimg_reader_next(f.reader, &entry, NULL)) == FSIMG_OK)
+		entries++;
+	CHECK(status == FSIMG_DONE && entries == depth + 1);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	fixture_close(&f);
+	return (stats.descriptors_peak);
+}
+
+/* Retained ancestors share one scratch store, so descriptor use does not
+ * grow with depth and a deep legal tree fits a small descriptor limit.
+ */
+static void
+test_deep_descriptors(void)
+{
+	uint64_t shallow, deep;
+
+	shallow = deep_tree_descriptors(4, 16);
+	deep = deep_tree_descriptors(60, 16);
+	CHECK(deep == shallow);
+}
+
+/* A failed advance is terminal for the walker itself, so even a caller that
+ * ignores the error cannot replay the partial directory or its parent.
+ */
+static void
+test_walker_poisoned(void)
+{
+	fixture_t f;
+	unsigned char dot[32];
+
+	fixture_init(&f, 16);
+	make_deep_tree(&f, 4);
+	/* /D00/D01 names the wrong parent, so preparing it fails. */
+	short_entry(dot, "..         ", true, 7, 0);
+	write_bytes(&f, cluster_offset(&f, 21) + 32, dot, sizeof(dot));
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	f.reader->state = FSIMG_READER_ITERATING;
+	CHECK(fsimg_walk_next(f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_walk_next(f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_walk_next(f.reader, NULL) == FSIMG_ECORRUPT);
+	CHECK(fsimg_walk_next(f.reader, NULL) == FSIMG_ESTATE);
+	CHECK(fsimg_walk_skip(f.reader, NULL) == FSIMG_ESTATE);
+	fixture_close(&f);
+}
+
 static void
 test_deep_tree(void)
 {
 	fixture_t f;
 	const fsimg_entry_t *entry;
 	fsimg_verify_report_t report;
-	unsigned char root[512], directory[512];
 	char name[12], expected[256];
 
 	fixture_init(&f, 16);
-	set_cluster(&f, 3, 0);
-	set_cluster(&f, 5, 0);
-	set_cluster(&f, 7, 0);
-	set_cluster(&f, 9, 0);
-	bzero(root, sizeof(root));
-	short_entry(root, "D00        ", true, 20, 0);
-	write_bytes(&f, f.root_offset, root, sizeof(root));
-	for (unsigned i = 0; i < 20; i++) {
-		set_cluster(&f, 20 + i, f.eoc);
-		bzero(directory, sizeof(directory));
-		short_entry(directory, ".          ", true, 20 + i, 0);
-		short_entry(directory + 32, "..         ", true, i == 0 ? 0 : 19 + i, 0);
-		if (i == 19) {
-			short_entry(directory + 64, "EMPTY      ", false, 0, 0);
-		} else {
-			snprintf(name, sizeof(name), "D%02u        ", i + 1);
-			short_entry(directory + 64, name, true, 21 + i, 0);
-		}
-		write_bytes(&f, cluster_offset(&f, 20 + i), directory, sizeof(directory));
-	}
+	make_deep_tree(&f, 20);
 
 	/* Every descent retains its parent's path prefix and cursor. Each
 	 * non-root parent has a real cluster; only the first '..' names zero.
@@ -1556,12 +1634,13 @@ test_long_names(void)
 {
 	fixture_t f;
 	const fsimg_entry_t *entry;
+	fsimg_error_t error;
 	unsigned char records[1024], raw[32];
 	uint16_t name[255];
 	size_t length;
 	fsimg_status_t status;
 
-	for (unsigned scenario = 0; scenario < 8; scenario++) {
+	for (unsigned scenario = 0; scenario < 9; scenario++) {
 		fixture_init(&f, 16);
 		bzero(records, sizeof(records));
 		short_entry(raw, "LONGNA~1TXT", false, 0, 0);
@@ -1588,14 +1667,30 @@ test_long_names(void)
 		} else if (scenario == 6) {
 			/* Live slots without their associated short record are corrupt. */
 			bzero(records + length - 32, 32);
+		} else if (scenario == 8) {
+			/* Two equal 120-character long names overflow the message. */
+			length = long_records(records, name, 120, raw);
+			short_entry(raw, "LONGNA~2TXT", false, 0, 0);
+			long_records(records + length, name, 120, raw);
 		}
 		write_bytes(&f, f.root_offset, records, sizeof(records));
 		fixture_open(&f);
 		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-		status = fsimg_reader_next(f.reader, &entry, NULL);
+		status = fsimg_reader_next(f.reader, &entry, &error);
 		if (scenario == 0) {
 			CHECK(status == FSIMG_OK && strlen(entry->path) == 256);
 			CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_DONE);
+		} else if (scenario == 1) {
+			/* A collision names both entries by their displayed names. */
+			CHECK(status == FSIMG_ECORRUPT && entry == NULL);
+			CHECK(strcmp(error.message, "ambiguous FAT long-name or alias "
+			    "namespace: \"HELLO.TXT\" and \"HELLO.TXT\"") == 0);
+			CHECK(!error.message_truncated);
+		} else if (scenario == 8) {
+			CHECK(status == FSIMG_ECORRUPT && entry == NULL);
+			CHECK(strncmp(error.message, "ambiguous FAT long-name or alias "
+			    "namespace: \"aaa", 47) == 0);
+			CHECK(error.message_truncated);
 		} else {
 			CHECK(status == FSIMG_ECORRUPT && entry == NULL);
 		}
@@ -1608,7 +1703,7 @@ test_cached_name(void)
 {
 	fixture_t f;
 	const fsimg_entry_t *entry;
-	fsimg_stream_t *stream;
+	fsimg_store_t *store;
 	unsigned char invalid[2] = { 0xc0, 0x80 };
 	uint64_t cursor;
 
@@ -1616,10 +1711,11 @@ test_cached_name(void)
 	fixture_open(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
-	stream = fsimg_fat_state(f.reader)->directories[0].entries;
-	cursor = fsimg_fat_state(f.reader)->directories[0].cursor;
-	CHECK(fsimg_store_write(stream->store, cursor + 8 + 32,
-	    invalid, sizeof(invalid), NULL) == FSIMG_OK);
+	/* A record starts with its displayed name, after the 8-byte frame. */
+	fsimg_test_walk_cursor(f.reader, &store, &cursor);
+	CHECK(store != NULL);
+	CHECK(fsimg_store_write(store, cursor + 8, invalid, sizeof(invalid),
+	    NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ECORRUPT);
 	CHECK(entry == NULL);
 	fixture_close(&f);
@@ -2013,6 +2109,8 @@ main(int argc, char **argv)
 	test_geometry();
 	test_thresholds();
 	test_deep_tree();
+	test_deep_descriptors();
+	test_walker_poisoned();
 	test_detection();
 	test_corruption();
 	test_limits();

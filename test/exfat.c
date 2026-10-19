@@ -375,6 +375,36 @@ open_file(exfat_fixture_t *f)
 	return (entry);
 }
 
+/* A directory with no allocation is valid and empty. It must not be
+ * mistaken for the root, whose index is the one preparation already holds.
+ */
+static void
+test_empty_directory(void)
+{
+	exfat_fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+	unsigned char *set;
+	fsimg_status_t status;
+
+	fixture_new(&f);
+	set = file_set(&f);
+	put16(set + 4, 0x10);
+	set[33] = 1;
+	put64(set + 40, 0);
+	put32(set + 52, 0);
+	put64(set + 56, 0);
+	fix_set(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(entry->kind == FSIMG_ENTRY_DIRECTORY && strcmp(entry->path, "/Data.bin") == 0);
+	status = fsimg_reader_next(f.reader, &entry, &error);
+	if (status != FSIMG_DONE)
+		fprintf(stderr, "empty directory: %d %s\n", status, error.message);
+	CHECK(status == FSIMG_DONE);
+	fixture_free(&f);
+}
+
 static void
 test_independent(void)
 {
@@ -1384,6 +1414,7 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_empty_directory();
 	test_independent();
 	test_corruptions();
 	test_allocation_profiles();

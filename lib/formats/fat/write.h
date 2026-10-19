@@ -4,6 +4,7 @@
 #ifndef FSIMG_FAT_WRITE_H
 #define FSIMG_FAT_WRITE_H
 
+#include "fat.h"
 #include "writer.h"
 
 #define FAT_LAYOUT_BYTES 64u
@@ -39,8 +40,6 @@ typedef struct fat_plan {
 	unsigned	 variant;
 } fat_plan_t;
 
-void fsimg_fat_put16(unsigned char *, uint16_t);
-void fsimg_fat_put32(unsigned char *, uint32_t);
 bool fsimg_fat_write_short_name(const char *, unsigned char *);
 fsimg_status_t fsimg_fat_layout_get(fat_plan_t *, uint64_t, fat_layout_t *,
     fsimg_error_t *);

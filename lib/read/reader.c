@@ -40,6 +40,7 @@ fsimg_reader_abort(fsimg_reader_t *reader, fsimg_status_t status)
 {
 	reader->state = FSIMG_READER_FAILED;
 	bzero(&reader->entry, sizeof(reader->entry));
+	fsimg_walk_free(reader);
 	reader->ops->close(reader);
 	return (status);
 }
@@ -64,7 +65,13 @@ fsimg_reader_match_name(fsimg_reader_t *reader, const char *component, bool *mat
 	if (reader->state != FSIMG_READER_ITERATING || reader->entry.path == NULL)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_READER, "name matching requires a current entry"));
-	return (reader->ops->match_name(reader, component, matches, error));
+	/* Only an unrepresentable query leaves the reader usable; a failure to
+	 * derive the current entry's keys is a driver failure, and terminal.
+	 */
+	status = fsimg_walk_match(reader, component, matches, error);
+	if (status != FSIMG_OK && status != FSIMG_EINVAL)
+		return (fsimg_reader_abort(reader, status));
+	return (status);
 }
 
 fsimg_status_t
@@ -79,7 +86,7 @@ fsimg_reader_skip_directory(fsimg_reader_t *reader, fsimg_error_t *error)
 	    reader->entry.kind != FSIMG_ENTRY_DIRECTORY)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_READER, "subtree pruning requires a current directory"));
-	return (reader->ops->skip_directory(reader, error));
+	return (fsimg_walk_skip(reader, error));
 }
 
 fsimg_status_t
@@ -195,6 +202,7 @@ fsimg_reader_free(fsimg_reader_t *reader)
 {
 	if (reader == NULL || reader->ctx->in_callback)
 		return;
+	fsimg_walk_free(reader);
 	if (reader->ops != NULL)
 		reader->ops->close(reader);
 	fsimg_dealloc(reader->path);
@@ -237,7 +245,7 @@ fsimg_reader_next(fsimg_reader_t *reader, const fsimg_entry_t **out,
 	reader->state = FSIMG_READER_ITERATING;
 	status = fsimg_reader_stable(reader, error);
 	if (status == FSIMG_OK)
-		status = reader->ops->next(reader, error);
+		status = fsimg_walk_next(reader, error);
 	if (status == FSIMG_DONE) {
 		return (fsimg_reader_end_scope(reader));
 	}

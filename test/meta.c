@@ -234,6 +234,61 @@ test_streams(void)
 	fixture_close(&fixture);
 }
 
+/* A stream used as a stack: rewinding to a mark hides later records, later
+ * appends reuse their storage, and iteration and sorting stop at the
+ * stream's end rather than the store's.
+ */
+static void
+test_stream_stack(void)
+{
+	fixture_t fixture;
+	fsimg_stream_t *stream, *sorted;
+	fsimg_stream_mark_t base, empty;
+	unsigned char buffer[16];
+	uint64_t cursor, reference, size;
+	size_t length;
+
+	fixture_open(&fixture, 1, 1024 * 1024, 4);
+	CHECK(fsimg_stream_new(&fixture.session, sizeof(buffer), &stream, NULL) == FSIMG_OK);
+	empty = fsimg_stream_mark(stream);
+	CHECK(empty.offset == 0 && empty.count == 0);
+	CHECK(fsimg_stream_append(stream, "parent", 6, NULL, NULL) == FSIMG_OK);
+	base = fsimg_stream_mark(stream);
+	CHECK(base.offset == 14 && base.count == 1);
+	CHECK(fsimg_stream_append(stream, "child-one", 9, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_append(stream, "child-two", 9, NULL, NULL) == FSIMG_OK);
+	size = fsimg_store_size(stream->store);
+	CHECK(fsimg_stream_rewind(stream, base, NULL) == FSIMG_OK);
+	CHECK(stream->count == 1 && stream->end == base.offset);
+	cursor = base.offset;
+	CHECK(fsimg_stream_next(stream, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_DONE);
+	/* The next run overwrites the released records in place. */
+	CHECK(fsimg_stream_append(stream, "new", 3, &reference, NULL) == FSIMG_OK);
+	CHECK(reference == base.offset && fsimg_store_size(stream->store) == size);
+	cursor = base.offset;
+	CHECK(fsimg_stream_next(stream, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_OK);
+	CHECK(length == 3 && bcmp(buffer, "new", 3) == 0);
+	CHECK(fsimg_stream_next(stream, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_DONE);
+	/* A mark past the end is rejected and changes nothing. */
+	CHECK(fsimg_stream_rewind(stream, (fsimg_stream_mark_t){ .offset = size,
+	    .count = 1 }, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_stream_rewind(stream, (fsimg_stream_mark_t){ .offset = 0,
+	    .count = 3 }, NULL) == FSIMG_EINVAL);
+	CHECK(stream->count == 2);
+	CHECK(fsimg_stream_seal(stream, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_rewind(stream, empty, NULL) == FSIMG_ESTATE);
+	CHECK(fsimg_stream_sort(stream, compare_bytes, NULL, NULL, &sorted, NULL) == FSIMG_OK);
+	cursor = 0;
+	CHECK(fsimg_stream_next(sorted, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_OK);
+	CHECK(length == 3 && bcmp(buffer, "new", 3) == 0);
+	CHECK(fsimg_stream_next(sorted, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_OK);
+	CHECK(length == 6 && bcmp(buffer, "parent", 6) == 0);
+	CHECK(fsimg_stream_next(sorted, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_DONE);
+	fsimg_stream_free(sorted);
+	fsimg_stream_free(stream);
+	fixture_close(&fixture);
+}
+
 static void
 test_sparse_and_quotas(void)
 {
@@ -787,6 +842,7 @@ main(int argc, char **argv)
 	test_arrays();
 	test_resident();
 	test_streams();
+	test_stream_stack();
 	test_sparse_and_quotas();
 	test_failures();
 	test_retained_dirty_page();

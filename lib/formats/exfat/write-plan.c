@@ -142,7 +142,7 @@ prepare_names(exfat_plan_t *plan, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			goto done;
 		parent_id = catalog->parent_id;
-		status = exfat_key_append(keys, parent_id, units, count, NULL, error);
+		status = exfat_key_append(keys, parent_id, units, count, error);
 		if (status != FSIMG_OK)
 			goto done;
 		status = exfat_layout_get(plan, parent_id, &parent, error);
@@ -173,7 +173,7 @@ prepare_names(exfat_plan_t *plan, fsimg_error_t *error)
 		    catalog->storage != FSIMG_STORAGE_ZERO)
 			plan->common.info.initialized_bytes += catalog->entry.size;
 	}
-	status = exfat_keys_unique(keys, false, error);
+	status = exfat_keys_unique(keys, error);
 done:
 	fsimg_stream_free(keys);
 	return (status);

@@ -12,20 +12,6 @@ static bool encode_timestamp(const fsimg_timestamp_t *, uint32_t,
 static fsimg_status_t encode_field(fat_plan_t *, const fsimg_entry_t *,
     uint32_t, const fsimg_timestamp_t *, unsigned char *, fsimg_error_t *);
 
-void
-fsimg_fat_put16(unsigned char *p, uint16_t value)
-{
-	p[0] = (unsigned char)value;
-	p[1] = (unsigned char)(value >> 8);
-}
-
-void
-fsimg_fat_put32(unsigned char *p, uint32_t value)
-{
-	fsimg_fat_put16(p, (uint16_t)value);
-	fsimg_fat_put16(p + 2, (uint16_t)(value >> 16));
-}
-
 /* Count complete Gregorian years/months from the Unix epoch. The supported
  * interval has only 128 years, so this bounded calendar walk is transparent
  * and avoids host timezones, time_t ranges, and signed division conventions.
