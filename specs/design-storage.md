@@ -236,10 +236,12 @@ The planner performs separate operations:
   required regions fit, do not overlap illegally, and cover the logical output
   with data or known zeros.
 
-Automatic sizing chooses the smallest valid volume among the documented
-geometry candidates satisfying the requested free reserve. It does not claim
-to optimize over unsupported geometries. An entry that cannot fit or be named
-is identified in the error.
+Automatic sizing chooses the smallest valid volume for the first legal
+geometry candidate satisfying the requested free reserve, or under the
+minimization option the smallest volume over every open candidate, as the
+[sizing design](design-sizing.md) states. It does not claim to optimize over
+unsupported geometries. An entry that cannot fit or be named is identified in
+the error.
 
 FAT aliases require special care for huge directories. Reserve legal native
 short names in a sorted stream. Assign long-name aliases from a deterministic

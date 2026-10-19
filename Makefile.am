@@ -160,7 +160,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
 	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
-	specs/design-qnx6-driver.md specs/design-metadata.md \
+	specs/design-qnx6-driver.md specs/design-metadata.md specs/design-sizing.md \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in fuzz/fat.c fuzz/protocol.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \

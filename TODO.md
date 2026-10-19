@@ -61,6 +61,13 @@
 
 ## Planned features
 
+* [Medium] **Image minimization** (`lib/formats/fat/write-plan.c`,
+  `lib/formats/exfat/write-plan.c`, `cmd/fsimg/options.c`): implement the
+  [sizing design](specs/design-sizing.md): `FSIMG_WRITE_MINIMIZE` and `-M`,
+  one layout pass accumulating every candidate unit's total, selection of the
+  smallest volume, and the pinned test catalogs where it differs from the
+  default. QNX6 follows in its writer stage.
+
 * [Medium] **Additional inputs and formats** (`lib/source/`, `lib/formats/`):
   design manifest import, bounded partition selection, and independent NTFS and
   QNX4 reader profiles as concrete needs arise. Follow the

@@ -354,7 +354,10 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    blocks adds 64 free blocks and at most ten metadata and reserve blocks at
    any block size, so the predicate is monotone over that step and the search
    is bounded by the 32-bit reference space. The inode and bitmap trees must
-   have depth at most 2, which the native formatter also requires.
+   have depth at most 2, which the native formatter also requires. Under the
+   [minimization option](design-sizing.md) the search also covers the open
+   block sizes and the exact inode capacity, and refines `N` to the
+   alignment step within the last 64-block window.
 3. **Layout.** Assign block ranges in a fixed order: the system run `[0, 2R)`
    as the format design's post-order recipe; the root directory and `.boot`
    from `2R`; every entry in catalog ID order; then the long-name stream. Each

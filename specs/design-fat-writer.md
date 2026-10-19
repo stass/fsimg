@@ -38,8 +38,9 @@ profile limits clusters to powers of two between the sector size and 32 KiB.
 Two identical FAT copies are emitted. FAT12/16 reserve one sector; FAT32
 reserves 32, uses FSInfo sector 1 and backup boot/FSInfo sectors 6/7.
 
-Candidate cluster sizes are tried in increasing order. Each candidate makes
-one catalog-array pass to count directory/file clusters. Automatic sizing uses
+Candidate cluster sizes are tried in increasing order, or all evaluated under
+the [minimization option](design-sizing.md). One catalog-array pass counts
+directory/file clusters for every candidate. Automatic sizing uses
 the greater of its interoperability minimum and allocated clusters plus the
 requested free reserve, then computes exact FAT and volume lengths. Automatic
 counts stay at least 16 clusters away from the 4085/65525 type cutovers,

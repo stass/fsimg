@@ -106,6 +106,7 @@ Creation accepts common options and:
 | Option | Meaning |
 | --- | --- |
 | `-L label` | Explicit volume label; default `FSIMG`, subject to format rules |
+| `-M` | Minimize the image: choose the open geometry settings that give the smallest volume; conflicts with `-s` |
 | `-O key=value` | Typed format settings; shared keys include `sector` and `cluster`, specified in bytes |
 | `-R` | Reproducible image bytes |
 | `-e epoch` | Timestamp epoch for `-R`; default Unix second 315532800 (1980-01-01 UTC) |

@@ -239,7 +239,9 @@ reproducibility policy and epoch, logical-completion versus required-durability
 mode, and typed format options. Raw emission defaults to logical completion;
 the file-publication helper always performs its durable publication protocol.
 Automatic sizing
-uses `volume_bytes == 0`. A zero label pointer selects the documented format
+uses `volume_bytes == 0`; `FSIMG_WRITE_MINIMIZE` selects the
+[minimization policy](design-sizing.md) over the settings left open and is
+invalid with an exact size. A zero label pointer selects the documented format
 default. Invalid geometry is not silently substituted.
 
 `add()` copies the entry strings and metadata before returning. Source IDs are
