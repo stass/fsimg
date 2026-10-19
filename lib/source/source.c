@@ -34,9 +34,8 @@ fsimg_source_identity_equal(const fsimg_host_file_t *a, const fsimg_host_file_t 
 }
 
 void
-fsimg_sources_release(fsimg_writer_t *writer)
+fsimg_source_close(fsimg_writer_t *writer)
 {
-	fsimg_source_root_t *root;
 	fsimg_source_cursor_t *source;
 
 	source = &writer->source;
@@ -44,6 +43,14 @@ fsimg_sources_release(fsimg_writer_t *writer)
 	source->io = NULL;
 	source->fd = -1;
 	source->active = false;
+}
+
+void
+fsimg_sources_release(fsimg_writer_t *writer)
+{
+	fsimg_source_root_t *root;
+
+	fsimg_source_close(writer);
 	while (writer->roots != NULL) {
 		root = writer->roots;
 		writer->roots = root->next;
@@ -441,10 +448,7 @@ fsimg_source_open(fsimg_writer_t *writer, uint64_t entry_id,
 static fsimg_status_t
 source_abort(fsimg_source_cursor_t *source, fsimg_status_t status)
 {
-	fsimg_io_free(source->io);
-	source->io = NULL;
-	source->fd = -1;
-	source->active = false;
+	fsimg_source_close(source->writer);
 	return (fsimg_writer_fail(source->writer, status));
 }
 
@@ -552,10 +556,7 @@ fsimg_source_finish(fsimg_writer_t *writer, fsimg_error_t *error)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_SOURCE, "source cursor is not active"));
 	status = source_validate(source, error);
-	fsimg_io_free(source->io);
-	source->io = NULL;
-	source->active = false;
-	source->fd = -1;
+	fsimg_source_close(writer);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(source->writer, status));
 	return (FSIMG_OK);

@@ -20,6 +20,7 @@
 typedef struct fsimg_source_root fsimg_source_root_t;
 typedef struct fsimg_source_cursor fsimg_source_cursor_t;
 typedef struct fsimg_format fsimg_format_t;
+typedef struct fsimg_emit fsimg_emit_t;
 
 /* Each driver embeds this base first in one owned plan allocation. Common
  * code sees only the summary; the selected driver frees its entire extension.
@@ -29,11 +30,15 @@ struct fsimg_plan {
 	fsimg_plan_info_t info;
 };
 
+/* emit places the plan's bytes through the emission object (emit.h). The
+ * driver runs only after the writer has checked and resized the sink and
+ * fsimg_emit_image() has zeroed it.
+ */
 typedef struct fsimg_writer_ops {
 	fsimg_status_t (*validate)(fsimg_write_options_t *, unsigned,
 	    fsimg_error_t *);
 	fsimg_status_t (*plan)(fsimg_writer_t *, fsimg_error_t *);
-	fsimg_status_t (*emit)(fsimg_writer_t *, fsimg_io_t *, fsimg_error_t *);
+	fsimg_status_t (*emit)(fsimg_writer_t *, fsimg_emit_t *, fsimg_error_t *);
 	void (*free)(fsimg_plan_t *);
 } fsimg_writer_ops_t;
 

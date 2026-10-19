@@ -7,7 +7,6 @@
 #include "writer.h"
 
 #define FAT_LAYOUT_BYTES 64u
-#define FAT_WRITE_BUFFER 65536u
 #define FAT_WRITE_DIRECTORY_MAX (2u * 1024u * 1024u)
 #define FAT_AUTO_TYPE_MARGIN 16u
 
@@ -51,7 +50,7 @@ fsimg_status_t fsimg_fat_write_names(fat_plan_t *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_write_metadata(fat_plan_t *, const fsimg_entry_t *,
     unsigned char *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_write_plan(fsimg_writer_t *, fsimg_error_t *);
-fsimg_status_t fsimg_fat_write_emit(fsimg_writer_t *, fsimg_io_t *,
+fsimg_status_t fsimg_fat_write_emit(fsimg_writer_t *, fsimg_emit_t *,
     fsimg_error_t *);
 void fsimg_fat_write_free(fsimg_plan_t *);
 fsimg_status_t fsimg_fat_write_validate(fsimg_write_options_t *, unsigned,

@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "emit.h"
 #include "io.h"
 #include "publish.h"
 #include "source.h"
@@ -378,9 +379,11 @@ reject_aliases(fsimg_writer_t *writer, fsimg_io_t *output, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			return (status);
 		if (writer->source.identity.device == identity.device &&
-		    writer->source.identity.inode == identity.inode)
+		    writer->source.identity.inode == identity.inode) {
+			fsimg_source_close(writer);
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_WRITER, "output aliases a collected host source"));
+		}
 		status = fsimg_source_finish(writer, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -388,6 +391,12 @@ reject_aliases(fsimg_writer_t *writer, fsimg_io_t *output, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/* Emission order (specs/design-emission.md): plan, reject source aliases,
+ * check sink capabilities and the output limit, resize, then zero the sink and
+ * run the driver (fsimg_emit_image), then flush. Nothing before the resize
+ * mutates the sink, so a rejected alias or capability leaves it untouched;
+ * every failure after that point marks the output incomplete.
+ */
 fsimg_status_t
 fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
     fsimg_error_t *error)
@@ -433,7 +442,7 @@ fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
 		if (status != FSIMG_OK)
 			goto fail;
 	}
-	status = writer->format->writer->emit(writer, output, error);
+	status = fsimg_emit_image(writer, output, error);
 	if (status != FSIMG_OK)
 		goto fail;
 	status = fsimg_io_flush(output,

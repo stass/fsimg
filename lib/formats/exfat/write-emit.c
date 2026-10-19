@@ -6,35 +6,22 @@
 #include <string.h>
 #include <strings.h>
 
-#include "source.h"
+#include "emit.h"
 #include "unicode.h"
 #include "write-exfat.h"
 
-static fsimg_status_t write_bytes(exfat_plan_t *, fsimg_io_t *, uint64_t,
-    const void *, size_t, fsimg_error_t *);
 static unsigned size_shift(uint32_t);
-static fsimg_status_t emit_boot(exfat_plan_t *, fsimg_io_t *, unsigned char *,
+static fsimg_status_t emit_boot(exfat_plan_t *, fsimg_emit_t *, fsimg_error_t *);
+static fsimg_status_t emit_chain(exfat_plan_t *, fsimg_emit_t *, uint32_t,
+    uint32_t, fsimg_error_t *);
+static fsimg_status_t emit_metadata(exfat_plan_t *, fsimg_emit_t *,
     fsimg_error_t *);
-static fsimg_status_t emit_chain(exfat_plan_t *, fsimg_io_t *, uint32_t,
-    uint32_t, unsigned char *, fsimg_error_t *);
-static fsimg_status_t emit_metadata(exfat_plan_t *, fsimg_io_t *, unsigned char *,
-    fsimg_error_t *);
-static fsimg_status_t emit_payload(exfat_plan_t *, fsimg_io_t *, uint64_t,
-    const exfat_layout_t *, unsigned char *, fsimg_error_t *);
-static fsimg_status_t emit_child(exfat_plan_t *, fsimg_io_t *, const char *,
+static fsimg_status_t emit_payload(exfat_plan_t *, fsimg_emit_t *, uint64_t,
+    const exfat_layout_t *, fsimg_error_t *);
+static fsimg_status_t emit_child(exfat_plan_t *, fsimg_emit_t *, const char *,
     const exfat_layout_t *, const exfat_layout_t *, fsimg_error_t *);
-static fsimg_status_t emit_catalog(exfat_plan_t *, fsimg_io_t *, unsigned char *,
+static fsimg_status_t emit_catalog(exfat_plan_t *, fsimg_emit_t *,
     fsimg_error_t *);
-
-static fsimg_status_t
-write_bytes(exfat_plan_t *plan, fsimg_io_t *output, uint64_t offset,
-    const void *bytes, size_t length, fsimg_error_t *error)
-{
-	size_t transferred;
-
-	return (fsimg_io_write_session(output, &plan->common.writer->session,
-	    offset, bytes, length, &transferred, error));
-}
 
 static unsigned
 size_shift(uint32_t bytes)
@@ -48,10 +35,16 @@ size_shift(uint32_t bytes)
 	return (shift);
 }
 
+/* The boot region is twelve sectors: the boot sector, eight extended boot
+ * sectors, OEM parameters, a reserved sector, and a sector repeating the
+ * region checksum. The checksum skips VolumeFlags (bytes 106-107) and
+ * PercentInUse (112). The backup region follows immediately. Twelve sectors
+ * of at most 4096 bytes fit the emission buffer.
+ */
 static fsimg_status_t
-emit_boot(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
-    fsimg_error_t *error)
+emit_boot(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 {
+	unsigned char *buffer = fsimg_emit_buffer(emit);
 	const exfat_geometry_t *g = &plan->geometry;
 	uint32_t checksum;
 	size_t length;
@@ -86,31 +79,35 @@ emit_boot(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 	}
 	for (size_t i = (size_t)11 * g->sector_bytes; i < length; i += 4)
 		exfat_put32(buffer + i, checksum);
-	status = write_bytes(plan, output, 0, buffer, length, error);
+	status = fsimg_emit_write(emit, 0, buffer, length, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (write_bytes(plan, output, length, buffer, length, error));
+	return (fsimg_emit_write(emit, length, buffer, length, error));
 }
 
+/* Write the FAT entries of a contiguous run of count clusters starting at
+ * first: each entry links to the next cluster and the last ends the chain.
+ */
 static fsimg_status_t
-emit_chain(exfat_plan_t *plan, fsimg_io_t *output, uint32_t first,
-    uint32_t count, unsigned char *buffer, fsimg_error_t *error)
+emit_chain(exfat_plan_t *plan, fsimg_emit_t *emit, uint32_t first,
+    uint32_t count, fsimg_error_t *error)
 {
+	unsigned char *buffer = fsimg_emit_buffer(emit);
 	uint32_t emitted, batch, cluster;
 	fsimg_status_t status;
 
 	emitted = 0;
 	while (emitted < count) {
 		batch = count - emitted;
-		if (batch > EXFAT_BUFFER_BYTES / 4)
-			batch = EXFAT_BUFFER_BYTES / 4;
+		if (batch > FSIMG_EMIT_BUFFER_BYTES / 4)
+			batch = FSIMG_EMIT_BUFFER_BYTES / 4;
 		for (uint32_t i = 0; i < batch; i++) {
 			cluster = first + emitted + i;
 			exfat_put32(buffer + i * 4, emitted + i + 1 == count ?
 			    UINT32_MAX : cluster + 1);
 		}
-		status = write_bytes(plan, output,
-		    plan->geometry.fat_offset + (uint64_t)(first + emitted) * 4,
+		status = fsimg_emit_write(emit,
+		    plan->geometry.fat_offset + ((uint64_t)first + emitted) * 4,
 		    buffer, (size_t)batch * 4, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -120,9 +117,9 @@ emit_chain(exfat_plan_t *plan, fsimg_io_t *output, uint32_t first,
 }
 
 static fsimg_status_t
-emit_metadata(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
-    fsimg_error_t *error)
+emit_metadata(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 {
+	unsigned char *buffer = fsimg_emit_buffer(emit);
 	const exfat_geometry_t *g = &plan->geometry;
 	exfat_layout_t root;
 	unsigned char header[96];
@@ -138,16 +135,16 @@ emit_metadata(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 	upcase_first = 2 + plan->bitmap_clusters;
 	exfat_put32(buffer, UINT32_C(0xfffffff8));
 	exfat_put32(buffer + 4, UINT32_MAX);
-	status = write_bytes(plan, output, g->fat_offset, buffer, 8, error);
+	status = fsimg_emit_write(emit, g->fat_offset, buffer, 8, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = emit_chain(plan, output, 2, plan->bitmap_clusters, buffer, error);
+	status = emit_chain(plan, emit, 2, plan->bitmap_clusters, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = emit_chain(plan, output, upcase_first, plan->upcase_clusters, buffer, error);
+	status = emit_chain(plan, emit, upcase_first, plan->upcase_clusters, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = emit_chain(plan, output, root.first, root.clusters, buffer, error);
+	status = emit_chain(plan, emit, root.first, root.clusters, error);
 	if (status != FSIMG_OK)
 		return (status);
 
@@ -157,11 +154,11 @@ emit_metadata(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 	remaining = ((uint64_t)plan->allocated + 7) / 8;
 	offset = 0;
 	while (remaining != 0) {
-		batch = remaining > EXFAT_BUFFER_BYTES ? EXFAT_BUFFER_BYTES : (size_t)remaining;
+		batch = remaining > FSIMG_EMIT_BUFFER_BYTES ? FSIMG_EMIT_BUFFER_BYTES : (size_t)remaining;
 		memset(buffer, 0xff, batch);
 		if (remaining == batch && plan->allocated % 8 != 0)
 			buffer[batch - 1] = (unsigned char)((1u << (plan->allocated % 8)) - 1);
-		status = write_bytes(plan, output, exfat_cluster_offset(g, 2) + offset,
+		status = fsimg_emit_write(emit, exfat_cluster_offset(g, 2) + offset,
 		    buffer, batch, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -169,9 +166,9 @@ emit_metadata(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 		remaining -= batch;
 	}
 	for (offset = 0; offset < plan->upcase_length; offset += batch) {
-		batch = plan->upcase_length - offset > EXFAT_BUFFER_BYTES ?
-		    EXFAT_BUFFER_BYTES : (size_t)(plan->upcase_length - offset);
-		status = write_bytes(plan, output,
+		batch = plan->upcase_length - offset > FSIMG_EMIT_BUFFER_BYTES ?
+		    FSIMG_EMIT_BUFFER_BYTES : (size_t)(plan->upcase_length - offset);
+		status = fsimg_emit_write(emit,
 		    exfat_cluster_offset(g, upcase_first) + offset,
 		    plan->upcase + offset, batch, error);
 		if (status != FSIMG_OK)
@@ -193,57 +190,36 @@ emit_metadata(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 	header[65] = (unsigned char)label_count;
 	for (size_t i = 0; i < label_count; i++)
 		exfat_put16(header + 66 + i * 2, label[i]);
-	return (write_bytes(plan, output, exfat_cluster_offset(g, root.first),
+	return (fsimg_emit_write(emit, exfat_cluster_offset(g, root.first),
 	    header, sizeof(header), error));
 }
 
+/* An exFAT file occupies one contiguous cluster run; an empty file has none.
+ * Bytes from the valid data length to the end of the allocation stay zero.
+ */
 static fsimg_status_t
-emit_payload(exfat_plan_t *plan, fsimg_io_t *output, uint64_t id,
-    const exfat_layout_t *row, unsigned char *buffer, fsimg_error_t *error)
+emit_payload(exfat_plan_t *plan, fsimg_emit_t *emit, uint64_t id,
+    const exfat_layout_t *row, fsimg_error_t *error)
 {
-	fsimg_writer_t *writer = plan->common.writer;
-	fsimg_range_t range;
-	uint64_t offset, end;
-	size_t batch, transferred;
-	fsimg_status_t status;
+	fsimg_emit_region_t region;
+	fsimg_emit_payload_t payload = {
+		.length = row->length,
+		.initialized = row->valid_length
+	};
 
-	status = fsimg_source_open(writer, id, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (writer->source.length != row->length)
-		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
-		    FSIMG_OP_SOURCE, "source length differs from exFAT plan"));
-	offset = 0;
-	while (offset < row->valid_length) {
-		status = fsimg_source_range(writer, offset, &range, error);
-		if (status != FSIMG_OK)
-			return (status);
-		end = offset + range.length;
-		if (end > row->valid_length)
-			end = row->valid_length;
-		if (range.kind == FSIMG_RANGE_ZERO) {
-			offset = end;
-			continue;
-		}
-		while (offset < end) {
-			batch = end - offset > EXFAT_BUFFER_BYTES ?
-			    EXFAT_BUFFER_BYTES : (size_t)(end - offset);
-			status = fsimg_source_read(writer, offset, buffer, batch, &transferred, error);
-			if (status != FSIMG_OK)
-				return (status);
-			status = write_bytes(plan, output,
-			    exfat_cluster_offset(&plan->geometry, row->first) + offset,
-			    buffer, batch, error);
-			if (status != FSIMG_OK)
-				return (status);
-			offset += batch;
-		}
+	if (row->clusters != 0) {
+		region.image_offset = exfat_cluster_offset(&plan->geometry,
+		    row->first);
+		region.capacity = (uint64_t)row->clusters *
+		    plan->geometry.cluster_bytes;
+		payload.regions = &region;
+		payload.region_count = 1;
 	}
-	return (fsimg_source_finish(writer, error));
+	return (fsimg_emit_copy(emit, id, &payload, error));
 }
 
 static fsimg_status_t
-emit_child(exfat_plan_t *plan, fsimg_io_t *output, const char *name,
+emit_child(exfat_plan_t *plan, fsimg_emit_t *emit, const char *name,
     const exfat_layout_t *row, const exfat_layout_t *parent, fsimg_error_t *error)
 {
 	unsigned char set[608];
@@ -276,14 +252,13 @@ emit_child(exfat_plan_t *plan, fsimg_io_t *output, const char *name,
 			exfat_put16(set + 66 + i * 32 + j * 2, units[i * 15 + j]);
 	}
 	exfat_put16(set + 2, exfat_set_checksum(set, length));
-	return (write_bytes(plan, output,
+	return (fsimg_emit_write(emit,
 	    exfat_cluster_offset(&plan->geometry, parent->first) + row->parent_slot * 32,
 	    set, length, error));
 }
 
 static fsimg_status_t
-emit_catalog(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
-    fsimg_error_t *error)
+emit_catalog(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
 	const fsimg_catalog_entry_t *catalog;
@@ -300,12 +275,12 @@ emit_catalog(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 		status = exfat_layout_get(plan, catalog->parent_id, &parent, error);
 		if (status != FSIMG_OK)
 			return (status);
-		status = emit_child(plan, output, strrchr(catalog->entry.path, '/') + 1,
+		status = emit_child(plan, emit, strrchr(catalog->entry.path, '/') + 1,
 		    &row, &parent, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (catalog->entry.kind == FSIMG_ENTRY_FILE) {
-			status = emit_payload(plan, output, id, &row, buffer, error);
+			status = emit_payload(plan, emit, id, &row, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}
@@ -313,32 +288,20 @@ emit_catalog(exfat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 	return (FSIMG_OK);
 }
 
+/* The sink is already zero: emit the main and backup boot regions, the FAT
+ * chains and system files, then each entry set with its file's payload.
+ */
 fsimg_status_t
-exfat_write_emit(fsimg_writer_t *writer, fsimg_io_t *output, fsimg_error_t *error)
+exfat_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit, fsimg_error_t *error)
 {
 	exfat_plan_t *plan = (exfat_plan_t *)writer->plan;
-	unsigned char *buffer;
-	fsimg_error_t detail;
 	fsimg_status_t status;
 
-	buffer = fsimg_alloc(writer->ctx, EXFAT_BUFFER_BYTES, &detail);
-	if (buffer == NULL) {
-		if (error != NULL)
-			*error = detail;
-		return (detail.status);
-	}
-	status = fsimg_io_zero_session(output, &writer->session, 0,
-	    plan->geometry.volume_bytes, error);
+	status = emit_boot(plan, emit, error);
 	if (status != FSIMG_OK)
-		goto done;
-	status = emit_boot(plan, output, buffer, error);
+		return (status);
+	status = emit_metadata(plan, emit, error);
 	if (status != FSIMG_OK)
-		goto done;
-	status = emit_metadata(plan, output, buffer, error);
-	if (status != FSIMG_OK)
-		goto done;
-	status = emit_catalog(plan, output, buffer, error);
-done:
-	fsimg_dealloc(buffer);
-	return (status);
+		return (status);
+	return (emit_catalog(plan, emit, error));
 }

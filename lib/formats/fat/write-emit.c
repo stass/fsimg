@@ -28,39 +28,26 @@
 #include <string.h>
 #include <strings.h>
 
-#include "io.h"
-#include "source.h"
+#include "emit.h"
 #include "unicode.h"
 #include "write.h"
 
 /* Boot fields, FSInfo and long-name slot encoding follow the author's
- * libarchive writer. Planning, allocation streaming and direct source copying
- * are independent implementations; no payload staging or whole FAT is used.
+ * libarchive writer. Planning and allocation streaming are independent
+ * implementations; no payload staging or whole FAT is used. Payloads are
+ * copied by the common emission object.
  */
-static fsimg_status_t write_bytes(fat_plan_t *, fsimg_io_t *, uint64_t,
-    const void *, size_t, fsimg_error_t *);
 static uint64_t layout_offset(const fat_plan_t *, const fat_layout_t *);
-static fsimg_status_t emit_boot(fat_plan_t *, fsimg_io_t *, fsimg_error_t *);
-static fsimg_status_t emit_fat(fat_plan_t *, fsimg_io_t *, unsigned char *,
-    fsimg_error_t *);
-static fsimg_status_t emit_directory_header(fat_plan_t *, fsimg_io_t *,
+static fsimg_status_t emit_boot(fat_plan_t *, fsimg_emit_t *, fsimg_error_t *);
+static fsimg_status_t emit_fat(fat_plan_t *, fsimg_emit_t *, fsimg_error_t *);
+static fsimg_status_t emit_directory_header(fat_plan_t *, fsimg_emit_t *,
     uint64_t, const fat_layout_t *, const fat_layout_t *, fsimg_error_t *);
-static fsimg_status_t emit_child(fat_plan_t *, fsimg_io_t *, const char *,
+static fsimg_status_t emit_child(fat_plan_t *, fsimg_emit_t *, const char *,
     const fat_layout_t *, const fat_layout_t *, fsimg_error_t *);
-static fsimg_status_t emit_entries(fat_plan_t *, fsimg_io_t *,
-    unsigned char *, fsimg_error_t *);
-static fsimg_status_t emit_payload(fat_plan_t *, fsimg_io_t *, uint64_t,
-    const fat_layout_t *, unsigned char *, fsimg_error_t *);
-
-static fsimg_status_t
-write_bytes(fat_plan_t *plan, fsimg_io_t *output, uint64_t offset,
-    const void *buffer, size_t length, fsimg_error_t *error)
-{
-	size_t transferred;
-
-	return (fsimg_io_write_session(output, &plan->common.writer->session,
-	    offset, buffer, length, &transferred, error));
-}
+static fsimg_status_t emit_entries(fat_plan_t *, fsimg_emit_t *,
+    fsimg_error_t *);
+static fsimg_status_t emit_payload(fat_plan_t *, fsimg_emit_t *, uint64_t,
+    const fat_layout_t *, fsimg_error_t *);
 
 static uint64_t
 layout_offset(const fat_plan_t *plan, const fat_layout_t *row)
@@ -76,7 +63,7 @@ layout_offset(const fat_plan_t *plan, const fat_layout_t *row)
 }
 
 static fsimg_status_t
-emit_boot(fat_plan_t *plan, fsimg_io_t *output, fsimg_error_t *error)
+emit_boot(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 {
 	unsigned char boot[512], info[512];
 	uint32_t sector, total, fat_sectors;
@@ -125,10 +112,10 @@ emit_boot(fat_plan_t *plan, fsimg_io_t *output, fsimg_error_t *error)
 	boot[extension + 27] = 0xfe;
 	boot[510] = 0x55;
 	boot[511] = 0xaa;
-	status = write_bytes(plan, output, 0, boot, sizeof(boot), error);
+	status = fsimg_emit_write(emit, 0, boot, sizeof(boot), error);
 	if (status != FSIMG_OK || plan->variant != 32)
 		return (status);
-	status = write_bytes(plan, output, (uint64_t)sector * 6, boot,
+	status = fsimg_emit_write(emit, (uint64_t)sector * 6, boot,
 	    sizeof(boot), error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -140,10 +127,10 @@ emit_boot(fat_plan_t *plan, fsimg_io_t *output, fsimg_error_t *error)
 	fsimg_fat_put32(info + 492, plan->allocated < plan->clusters ?
 	    plan->allocated + 2 : UINT32_MAX);
 	fsimg_fat_put32(info + 508, 0xaa550000);
-	status = write_bytes(plan, output, sector, info, sizeof(info), error);
+	status = fsimg_emit_write(emit, sector, info, sizeof(info), error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (write_bytes(plan, output, (uint64_t)sector * 7, info,
+	return (fsimg_emit_write(emit, (uint64_t)sector * 7, info,
 	    sizeof(info), error));
 }
 
@@ -153,9 +140,9 @@ emit_boot(fat_plan_t *plan, fsimg_io_t *output, fsimg_error_t *error)
  * Free entries and table padding remain zero from output initialization.
  */
 static fsimg_status_t
-emit_fat(fat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
-    fsimg_error_t *error)
+emit_fat(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 {
+	unsigned char *buffer = fsimg_emit_buffer(emit);
 	fat_layout_t row;
 	uint64_t row_id, written, accumulator;
 	uint32_t value, eoc;
@@ -186,13 +173,13 @@ emit_fat(fat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 			buffer[used++] = (unsigned char)accumulator;
 			accumulator >>= 8;
 			bits -= 8;
-			if (used != FAT_WRITE_BUFFER)
+			if (used != FSIMG_EMIT_BUFFER_BYTES)
 				continue;
-			status = write_bytes(plan, output, plan->fat_offset + written,
+			status = fsimg_emit_write(emit, plan->fat_offset + written,
 			    buffer, used, error);
 			if (status != FSIMG_OK)
 				return (status);
-			status = write_bytes(plan, output,
+			status = fsimg_emit_write(emit,
 			    plan->fat_offset + plan->fat_bytes + written, buffer, used, error);
 			if (status != FSIMG_OK)
 				return (status);
@@ -202,16 +189,16 @@ emit_fat(fat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 	}
 	if (bits != 0)
 		buffer[used++] = (unsigned char)accumulator;
-	status = write_bytes(plan, output, plan->fat_offset + written, buffer,
+	status = fsimg_emit_write(emit, plan->fat_offset + written, buffer,
 	    used, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (write_bytes(plan, output, plan->fat_offset + plan->fat_bytes + written,
+	return (fsimg_emit_write(emit, plan->fat_offset + plan->fat_bytes + written,
 	    buffer, used, error));
 }
 
 static fsimg_status_t
-emit_directory_header(fat_plan_t *plan, fsimg_io_t *output, uint64_t id,
+emit_directory_header(fat_plan_t *plan, fsimg_emit_t *emit, uint64_t id,
     const fat_layout_t *row, const fat_layout_t *parent, fsimg_error_t *error)
 {
 	unsigned char raw[64];
@@ -222,7 +209,7 @@ emit_directory_header(fat_plan_t *plan, fsimg_io_t *output, uint64_t id,
 		memset(raw, ' ', 11);
 		bcopy(plan->common.writer->label, raw, strlen(plan->common.writer->label));
 		raw[11] = 8;
-		return (write_bytes(plan, output, layout_offset(plan, row), raw, 32, error));
+		return (fsimg_emit_write(emit, layout_offset(plan, row), raw, 32, error));
 	}
 	bcopy(row->entry, raw, 32);
 	bcopy(row->entry, raw + 32, 32);
@@ -239,12 +226,12 @@ emit_directory_header(fat_plan_t *plan, fsimg_io_t *output, uint64_t id,
 		parent_cluster = 0;
 	fsimg_fat_put16(raw + 32 + 26, (uint16_t)parent_cluster);
 	fsimg_fat_put16(raw + 32 + 20, (uint16_t)(parent_cluster >> 16));
-	return (write_bytes(plan, output, layout_offset(plan, row), raw,
+	return (fsimg_emit_write(emit, layout_offset(plan, row), raw,
 	    sizeof(raw), error));
 }
 
 static fsimg_status_t
-emit_child(fat_plan_t *plan, fsimg_io_t *output, const char *name,
+emit_child(fat_plan_t *plan, fsimg_emit_t *emit, const char *name,
     const fat_layout_t *row, const fat_layout_t *parent, fsimg_error_t *error)
 {
 	static const unsigned positions[] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22,
@@ -279,60 +266,35 @@ emit_child(fat_plan_t *plan, fsimg_io_t *output, const char *name,
 		}
 	}
 	bcopy(row->entry, raw + long_slots * 32, 32);
-	return (write_bytes(plan, output, layout_offset(plan, parent) +
+	return (fsimg_emit_write(emit, layout_offset(plan, parent) +
 	    row->parent_slot * 32, raw, (long_slots + 1) * 32, error));
 }
 
+/* A FAT file occupies one contiguous run of clusters; an empty file has none.
+ * FAT records no separate initialized length, so the whole file is copied.
+ */
 static fsimg_status_t
-emit_payload(fat_plan_t *plan, fsimg_io_t *output, uint64_t id,
-    const fat_layout_t *row, unsigned char *buffer, fsimg_error_t *error)
+emit_payload(fat_plan_t *plan, fsimg_emit_t *emit, uint64_t id,
+    const fat_layout_t *row, fsimg_error_t *error)
 {
-	fsimg_range_t range;
-	uint64_t offset, remaining;
-	size_t batch, transferred;
-	fsimg_status_t status;
+	fsimg_emit_region_t region;
+	fsimg_emit_payload_t payload = {
+		.length = row->length,
+		.initialized = row->length
+	};
 
-	status = fsimg_source_open(plan->common.writer, id, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (plan->common.writer->source.length != row->length)
-		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
-		    FSIMG_OP_WRITER, "planned payload length differs from its source"));
-	offset = 0;
-	while (offset < row->length) {
-		status = fsimg_source_range(plan->common.writer, offset, &range, error);
-		if (status != FSIMG_OK)
-			return (status);
-		if (range.kind == FSIMG_RANGE_ZERO) {
-			/* The complete destination was initialized before data emission. */
-			offset += range.length;
-			continue;
-		}
-		remaining = range.length;
-		while (remaining != 0) {
-			batch = remaining > FAT_WRITE_BUFFER ? FAT_WRITE_BUFFER :
-			    (size_t)remaining;
-			status = fsimg_source_read(plan->common.writer, offset, buffer, batch,
-			    &transferred, error);
-			if (status != FSIMG_OK)
-				return (status);
-			if (transferred != batch)
-				return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
-				    FSIMG_OP_WRITER, "source ended before its planned range"));
-			status = write_bytes(plan, output, layout_offset(plan, row) + offset,
-			    buffer, batch, error);
-			if (status != FSIMG_OK)
-				return (status);
-			offset += batch;
-			remaining -= batch;
-		}
+	if (row->clusters != 0) {
+		region.image_offset = layout_offset(plan, row);
+		region.capacity = (uint64_t)row->clusters *
+		    plan->common.info.allocation_unit_bytes;
+		payload.regions = &region;
+		payload.region_count = 1;
 	}
-	return (fsimg_source_finish(plan->common.writer, error));
+	return (fsimg_emit_copy(emit, id, &payload, error));
 }
 
 static fsimg_status_t
-emit_entries(fat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
-    fsimg_error_t *error)
+emit_entries(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 {
 	const fsimg_catalog_entry_t *catalog;
 	fat_layout_t row, parent;
@@ -342,7 +304,7 @@ emit_entries(fat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 	status = fsimg_fat_layout_get(plan, 0, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = emit_directory_header(plan, output, 0, &row, &row, error);
+	status = emit_directory_header(plan, emit, 0, &row, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
 	for (uint64_t id = 1; id <= plan->common.writer->count; id++) {
@@ -356,45 +318,35 @@ emit_entries(fat_plan_t *plan, fsimg_io_t *output, unsigned char *buffer,
 		if (status != FSIMG_OK)
 			return (status);
 		name = strrchr(catalog->entry.path, '/') + 1;
-		status = emit_child(plan, output, name, &row, &parent, error);
+		status = emit_child(plan, emit, name, &row, &parent, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (row.slots != 0)
-			status = emit_directory_header(plan, output, id, &row, &parent, error);
+			status = emit_directory_header(plan, emit, id, &row, &parent, error);
 		else
-			status = emit_payload(plan, output, id, &row, buffer, error);
+			status = emit_payload(plan, emit, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
 	return (FSIMG_OK);
 }
 
+/* The sink is already zero: emit only the boot region, both FAT copies,
+ * and directory contents with their files' payloads. Free clusters, unused
+ * FAT entries and slack are never written.
+ */
 fsimg_status_t
-fsimg_fat_write_emit(fsimg_writer_t *writer, fsimg_io_t *output,
+fsimg_fat_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
     fsimg_error_t *error)
 {
-	unsigned char *buffer;
-	fsimg_error_t detail;
+	fat_plan_t *plan = (fat_plan_t *)writer->plan;
 	fsimg_status_t status;
 
-	buffer = fsimg_alloc(writer->ctx, FAT_WRITE_BUFFER, &detail);
-	if (buffer == NULL) {
-		if (error != NULL)
-			*error = detail;
-		return (detail.status);
-	}
-	status = fsimg_io_zero_session(output, &writer->session, 0,
-	    writer->plan->info.volume_bytes, error);
+	status = emit_boot(plan, emit, error);
 	if (status != FSIMG_OK)
-		goto done;
-	status = emit_boot((fat_plan_t *)writer->plan, output, error);
+		return (status);
+	status = emit_fat(plan, emit, error);
 	if (status != FSIMG_OK)
-		goto done;
-	status = emit_fat((fat_plan_t *)writer->plan, output, buffer, error);
-	if (status != FSIMG_OK)
-		goto done;
-	status = emit_entries((fat_plan_t *)writer->plan, output, buffer, error);
-done:
-	fsimg_dealloc(buffer);
-	return (status);
+		return (status);
+	return (emit_entries(plan, emit, error));
 }

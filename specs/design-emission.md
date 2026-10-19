@@ -50,7 +50,9 @@ destination holds zeros, and the emission object exists only after it succeeds.
 The emission object binds the writer, the bounded destination, the writer's
 session, and one transfer buffer. It borrows the writer's lifetime and session.
 It is not another resource context, source owner, or handle.
-Drivers receive it only for the duration of their emit operation.
+Drivers receive it only for the duration of their emit operation. A driver may
+encode metadata in the transfer buffer between operations; a payload copy
+overwrites it.
 
 It offers two operations:
 
@@ -61,22 +63,26 @@ It offers two operations:
   thereby correct.
 * **Copy payload:** copy catalog entry `id` into its planned regions: an
   ordered list of `(image offset, capacity)` ranges that the driver supplies
-  in logical order, together with the planned initialized length. FAT and
-  exFAT files have one region; a fragmented QNX6 file has several.
+  in logical order, together with the file length the plan records and the
+  planned initialized length. FAT and exFAT files have one region; an empty
+  file has none; a fragmented QNX6 file has several.
 
 ## Source copy
 
 The copy operation owns the complete source lifecycle for one entry: open by
-stable catalog ID, check the declared length against the catalog and the planned
+stable catalog ID, check the planned length against the catalog and the planned
 regions' total capacity, copy across the regions in order, validate at finish,
-and close. A driver cannot pair a region with
+and close. Every region must lie within the planned volume. A planned length
+that differs from the catalog, or a payload exceeding its regions, is a corrupt
+plan. A driver cannot pair a region with
 a different entry's source or leave a source open.
 
 * The planned initialized length cannot exceed the declared length or the
   total capacity. Bytes from the initialized length to the end of the last
   region stay zero.
-* DATA ranges are copied in bounded batches. A short read before the declared
-  length is a source change, not success.
+* DATA ranges are copied in bounded batches. A source that ends before its
+  declared length fails the copy; it is never a short success. A change that
+  validation detects is reported as a source change.
 * ZERO ranges, zero sources, and empty files write nothing. Skipping is valid
   only because step 5 established that the destination is zero. Empty and
   zero-only sources are still opened and validated, so a changed source fails

@@ -34,6 +34,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/extract/extract.c lib/extract/extract.h \
 	lib/meta/meta.h lib/meta/store.c lib/meta/records.c lib/meta/sort.c \
 	lib/write/writer.h lib/write/writer.c lib/write/catalog.c \
+	lib/write/emit.h lib/write/emit.c \
 	lib/source/source.h lib/source/source.c lib/source/scan.c \
 	lib/io/io.h lib/read/reader.h lib/read/reader.c \
 	lib/read/selection.c lib/read/selection.h \
@@ -76,7 +77,7 @@ example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
 check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
-	test-catalog test-source test-publish test-fat test-fat-write \
+	test-catalog test-source test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-cli test-qualify test-fragment header-c header-cxx
 TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh test/cli.sh \
@@ -118,6 +119,8 @@ test_fat_LDADD = libfsimg.la
 test_fat_write_SOURCES = test/fat-write.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_write_LDADD = libfsimg.la
+test_emit_SOURCES = test/emit.c test/test.h
+test_emit_LDADD = libfsimg.la
 test_extract_SOURCES = test/extract.c test/test.h
 test_extract_LDADD = libfsimg.la
 test_protocol_SOURCES = test/protocol.c test/test.h \

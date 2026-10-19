@@ -137,6 +137,23 @@ zero-write work accounting, sparse publication, and retained-staging errors.
 The integration script also validates fsimg-created images with `fsck.fat` and
 extracts ordinary, nested, and Unicode content with mtools for byte comparison.
 
+`test-emit` exercises the common emission lifecycle through both the FAT12 and
+exFAT drivers. Empty, zero-only, and mixed data/zero provider sources must give
+identical images on clean sinks, stale sinks with and without a zero-range
+capability, and sinks that accept short writes, and zero ranges are never read.
+It injects source changes on empty, zero-only, and partly copied files, early
+EOF, write failures at the first, middle, and last write with confirmed
+progress, cancellation at the first, middle, and last poll, flush failure, each
+allocation failure, and plan records whose payload exceeds its allocation or
+the volume. Every failure must leave the output incomplete, no source open,
+no memory, scratch, or descriptors charged, and the writer refusing a second
+emission. A test emit callback also drives the copy operation directly with
+placements no driver produces: several regions in non-ascending image order,
+zero-capacity regions, region boundaries inside a batch and inside ZERO and
+DATA ranges, an initialized length ending inside DATA, a planned length below
+the catalog's, a region outside the volume, and sink and source failures in
+mid-copy, checked against an independently mapped expected image.
+
 Targeted initialization and staging regressions are:
 
 ```sh

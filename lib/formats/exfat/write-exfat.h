@@ -37,6 +37,6 @@ fsimg_status_t exfat_layout_get(exfat_plan_t *, uint64_t, exfat_layout_t *,
     fsimg_error_t *);
 fsimg_status_t exfat_layout_set(exfat_plan_t *, uint64_t, const exfat_layout_t *,
     fsimg_error_t *);
-fsimg_status_t exfat_write_emit(fsimg_writer_t *, fsimg_io_t *, fsimg_error_t *);
+fsimg_status_t exfat_write_emit(fsimg_writer_t *, fsimg_emit_t *, fsimg_error_t *);
 
 #endif

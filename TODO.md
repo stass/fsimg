@@ -15,11 +15,19 @@
   `lib/formats/`): move traversal, namespace validation, content delivery,
   emission, and format identity to the single owners in the
   [consolidation plan](docs/implementation-plan.md#architecture-consolidation).
-  The drivers still implement their own traversal engines, content loops, and
-  payload copy loops, and the common registry branches on the exFAT variant.
+  The drivers still implement their own traversal engines and content loops,
+  and the common registry branches on the exFAT variant.
 
 ## Bugs by subsystem
 
+* [Low] **Source failures fail the writer from inside the source layer**
+  (`lib/source/source.c`, `specs/design-sources.md`): an operational source
+  failure calls `fsimg_writer_fail()` and releases collection storage while a
+  driver's emit call is still on the stack, whereas a sink failure during the
+  same copy fails the writer only when `fsimg_writer_emit()` returns. Make the
+  source cursor report status only and leave failing the writer to the writer
+  lifecycle, so writer state after a failed copy no longer depends on which
+  layer failed.
 * [Low] **Monotonic-clock failures** (`cmd/fsimg/paths.c`,
   `cmd/fsimg/worker-parent.c`, `cmd/fsimg/main.c`): make later supervision,
   publication and reporting clock queries distinguish failure from zero.
