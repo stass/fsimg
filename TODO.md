@@ -12,11 +12,10 @@
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
 * [Medium] **Architecture consolidation** (`lib/read/`, `lib/write/`,
-  `lib/formats/`): move traversal, namespace validation, content delivery,
-  emission, and format identity to the single owners in the
+  `lib/formats/`): move traversal, namespace validation, extent indexing,
+  and content delivery to the single owners in the
   [consolidation plan](docs/implementation-plan.md#architecture-consolidation).
-  The drivers still implement their own traversal engines and content loops,
-  and the common registry branches on the exFAT variant.
+  The drivers still implement their own traversal engines and content loops.
 
 ## Bugs by subsystem
 

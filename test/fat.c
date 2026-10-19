@@ -405,7 +405,7 @@ test_variants(void)
 		CHECK(fsimg_reader_read_at(f.reader, 1100, data, 8, &count, NULL) == FSIMG_OK);
 		CHECK(count == 0);
 		CHECK(fsimg_reader_read_at(f.reader, 1020, data, 80, &count, NULL) == FSIMG_OK);
-		CHECK(count == 80 && f.reader->format.fat->index_count == 3);
+		CHECK(count == 80 && fsimg_fat_state(f.reader)->index_count == 3);
 		for (unsigned j = 0; j < 80; j++)
 			CHECK(data[j] == (unsigned char)((1020 + j) * 37));
 		CHECK(fsimg_reader_next_range(f.reader, 512, &range, NULL) == FSIMG_OK);
@@ -413,7 +413,7 @@ test_variants(void)
 		CHECK(fsimg_reader_next_range(f.reader, 1100, &range, NULL) == FSIMG_DONE);
 		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->path, "/SUB") == 0);
-		CHECK(f.reader->format.fat->index == NULL);
+		CHECK(fsimg_fat_state(f.reader)->index == NULL);
 		CHECK(fsimg_reader_read_at(f.reader, 0, data, 1, &count, NULL) == FSIMG_ESTATE);
 		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->path, "/SUB/EMPTY") == 0 && entry->size == 0);
@@ -438,6 +438,13 @@ test_variants(void)
 		{
 			fsimg_reader_t *other;
 			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EFORMAT);
+			CHECK(other == NULL);
+			/* A forced decoder never falls back to the detected one. */
+			options.format = "exfat";
+			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EFORMAT);
+			CHECK(other == NULL);
+			options.format = "qnx6";
+			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EUNSUPPORTED);
 			CHECK(other == NULL);
 		}
 		fixture_close(&f);
@@ -746,8 +753,9 @@ test_geometry(void)
 		CHECK(fsimg_fat_geometry_decode(boot, (uint64_t)sectors * 512, &geometry, NULL) == FSIMG_OK);
 		CHECK(geometry.variant == (clusters == 4084 ? 12 : 16));
 	}
+	/* An illegal fixed BPB field means the record is not FAT at all. */
 	boot[13] = 3;
-	CHECK(fsimg_fat_geometry_decode(boot, UINT64_MAX, &geometry, NULL) == FSIMG_ECORRUPT);
+	CHECK(fsimg_fat_geometry_decode(boot, UINT64_MAX, &geometry, NULL) == FSIMG_EFORMAT);
 	fixture_close(&f);
 
 	/* Cluster 2730 starts at byte 4095 of a packed FAT12 table. Its second
@@ -1104,7 +1112,7 @@ test_file_limit(void)
 	 * chain; the start is then found through that index.
 	 */
 	CHECK(fsimg_reader_read_at(f.reader, (uint64_t)UINT32_MAX - 1, &byte, 1, &count, NULL) == FSIMG_OK);
-	CHECK(count == 1 && byte == 'B' && f.reader->format.fat->index_count == 1);
+	CHECK(count == 1 && byte == 'B' && fsimg_fat_state(f.reader)->index_count == 1);
 	CHECK(fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, NULL) == FSIMG_OK);
 	CHECK(count == 1 && byte == 'A');
 	CHECK(fsimg_reader_read_at(f.reader, UINT32_MAX, &byte, 1, &count, NULL) == FSIMG_OK);
@@ -1283,7 +1291,7 @@ test_mirror_selector(void)
 		 */
 		fixture_open(&f);
 		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-		CHECK(f.reader->format.fat->geometry.mirrored && f.reader->format.fat->geometry.active_table == 0);
+		CHECK(fsimg_fat_state(f.reader)->geometry.mirrored && fsimg_fat_state(f.reader)->geometry.active_table == 0);
 		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 		fsimg_reader_free(f.reader);
 		f.reader = NULL;
@@ -1339,7 +1347,7 @@ test_index_failures(void)
 		if (fault == 0) {
 			uint64_t work = f.reader->session.progress.work;
 
-			CHECK(status == FSIMG_OK && f.reader->format.fat->index_count == 1000);
+			CHECK(status == FSIMG_OK && fsimg_fat_state(f.reader)->index_count == 1000);
 			for (unsigned i = 0; i < 100; i++) {
 				CHECK(fsimg_reader_read_at(f.reader, (i * 619u % 1000) * 512,
 				    &byte, 1, &count, NULL) == FSIMG_OK);
@@ -1590,8 +1598,8 @@ test_cached_name(void)
 	fixture_open(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
-	stream = f.reader->format.fat->directories[0].entries;
-	cursor = f.reader->format.fat->directories[0].cursor;
+	stream = fsimg_fat_state(f.reader)->directories[0].entries;
+	cursor = fsimg_fat_state(f.reader)->directories[0].cursor;
 	CHECK(fsimg_store_write(stream->store, cursor + 8 + 32,
 	    invalid, sizeof(invalid), NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ECORRUPT);
@@ -1678,9 +1686,9 @@ test_cached_index(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1024, &byte, 1, &count, NULL) == FSIMG_OK);
-	CHECK(f.reader->format.fat->index_count == 3);
+	CHECK(fsimg_fat_state(f.reader)->index_count == 3);
 	fsimg_meta_put_u64(record, 1);
-	CHECK(fsimg_store_write(f.reader->format.fat->index, 0, record, sizeof(record), NULL) == FSIMG_OK);
+	CHECK(fsimg_store_write(fsimg_fat_state(f.reader)->index, 0, record, sizeof(record), NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1, &byte, 1, &count, NULL) == FSIMG_ECORRUPT);
 	CHECK(count == 0);
 	fixture_close(&f);
@@ -1804,8 +1812,8 @@ test_external(const char *path, const char *format)
 				uint32_t parent_cluster;
 				uint64_t address;
 
-				address = fsimg_fat_cluster_offset(&reader->format.fat->geometry,
-				    reader->format.fat->current_cluster) + 32;
+				address = fsimg_fat_cluster_offset(&fsimg_fat_state(reader)->geometry,
+				    fsimg_fat_state(reader)->current_cluster) + 32;
 				CHECK(fsimg_io_read_exact(io, address, dotdot, sizeof(dotdot), &count, NULL) == FSIMG_OK);
 				CHECK(bcmp(dotdot, "..         ", 11) == 0);
 				parent_cluster = fsimg_fat_u16(dotdot + 26) |
@@ -1835,7 +1843,7 @@ test_external(const char *path, const char *format)
 		}
 		if (fragment) {
 			CHECK(fsimg_reader_read_at(reader, 0, buffer, 1, &count, NULL) == FSIMG_OK);
-			CHECK(reader->format.fat->index_count > 1);
+			CHECK(fsimg_fat_state(reader)->index_count > 1);
 		}
 	}
 	if (status != FSIMG_DONE)
@@ -1885,7 +1893,7 @@ test_range_reads(void)
 	CHECK(offset == sizeof(data));
 	for (unsigned j = 0; j < sizeof(data); j++)
 		CHECK(data[j] == (unsigned char)(j * 37));
-	CHECK(f.reader->format.fat->index == NULL);
+	CHECK(fsimg_fat_state(f.reader)->index == NULL);
 	fsimg_reader_free(f.reader);
 	f.reader = NULL;
 	fixture_close(&f);

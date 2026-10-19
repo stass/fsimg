@@ -60,8 +60,8 @@ owner_next(fsimg_reader_t *reader, owner_cursor_t *owners, fsimg_error_t *error)
 	first = fsimg_meta_get_u64(record);
 	count = fsimg_meta_get_u64(record + 8);
 	if (first < 2 || count == 0 ||
-	    first >= (uint64_t)reader->format.fat->geometry.clusters + 2 ||
-	    count > (uint64_t)reader->format.fat->geometry.clusters + 2 - first)
+	    first >= (uint64_t)fsimg_fat_state(reader)->geometry.clusters + 2 ||
+	    count > (uint64_t)fsimg_fat_state(reader)->geometry.clusters + 2 - first)
 		return (fsimg_fat_corrupt(error, "invalid FAT ownership run"));
 	if (first < owners->end)
 		return (fsimg_fat_corrupt(error, "cross-linked FAT allocation ownership"));
@@ -74,14 +74,14 @@ static fsimg_status_t
 verify_file(fsimg_reader_t *reader, unsigned char *buffer,
     fsimg_verify_report_t *report, fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &reader->format.fat->geometry;
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	fat_chain_t chain;
 	fat_extent_t run;
 	uint64_t position, length;
 	size_t batch, transferred;
 	fsimg_status_t status;
 
-	fsimg_fat_chain_init(&chain, reader->format.fat->current_cluster,
+	fsimg_fat_chain_init(&chain, fsimg_fat_state(reader)->current_cluster,
 	    (reader->entry.size + g->cluster_bytes - 1) / g->cluster_bytes);
 	for (;;) {
 		status = fsimg_fat_chain_run(reader, &chain, &run, error);
@@ -119,7 +119,7 @@ static fsimg_status_t
 verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
     fsimg_verify_report_t *report, fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &reader->format.fat->geometry;
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	owner_cursor_t owners;
 	uint32_t value;
 	fsimg_status_t status;
@@ -175,7 +175,7 @@ static fsimg_status_t
 verify_reserved(fsimg_reader_t *reader, const fsimg_verify_report_t *report,
     fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &reader->format.fat->geometry;
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	unsigned char primary[512], backup[512], info[512];
 	uint32_t free_count, next_free;
 	size_t transferred;
@@ -183,9 +183,9 @@ verify_reserved(fsimg_reader_t *reader, const fsimg_verify_report_t *report,
 
 	if (!reader->info.clean || reader->info.io_error)
 		return (fsimg_fat_corrupt(error, "FAT volume is dirty or records an I/O error"));
-	if (reader->format.fat->root_label_seen &&
+	if (fsimg_fat_state(reader)->root_label_seen &&
 	    (reader->info.valid & FSIMG_VOLUME_LABEL) != 0 &&
-	    strcmp(reader->format.fat->root_label, reader->info.label) != 0)
+	    strcmp(fsimg_fat_state(reader)->root_label, reader->info.label) != 0)
 		return (fsimg_fat_corrupt(error, "FAT boot and root volume labels disagree"));
 	if (g->variant != 32)
 		return (FSIMG_OK);
@@ -225,7 +225,7 @@ fsimg_status_t
 fsimg_fat_verify(fsimg_reader_t *reader, unsigned flags,
     fsimg_verify_report_t *report, fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->format.fat;
+	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
 	fsimg_stream_t *sorted;
 	fsimg_error_t detail;
 	unsigned char *buffer;

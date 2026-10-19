@@ -67,6 +67,9 @@ typedef struct fat_lfn {
 	bool		 active;
 } fat_lfn_t;
 
+/* Driver state behind the reader's private pointer, from open to close. */
+typedef struct fsimg_fat_reader fsimg_fat_reader_t;
+
 struct fsimg_fat_reader {
 	fat_geometry_t	 geometry;
 	fat_directory_t	*directories;
@@ -108,7 +111,10 @@ fsimg_status_t fsimg_fat_name_key(const char *, unsigned char *, size_t *,
     fsimg_error_t *);
 fsimg_status_t fsimg_fat_entry_decode(const fat_geometry_t *, const unsigned char *,
     fsimg_entry_t *, uint32_t *, fsimg_error_t *);
-fsimg_status_t fsimg_fat_open(fsimg_reader_t *, const char *, fsimg_error_t *);
+fsimg_fat_reader_t *fsimg_fat_state(const fsimg_reader_t *);
+const fsimg_format_variant_t *fsimg_fat_variant(unsigned);
+fsimg_status_t fsimg_fat_open(fsimg_reader_t *, const fsimg_format_variant_t *,
+    fsimg_error_t *);
 void fsimg_fat_close(fsimg_reader_t *);
 fsimg_status_t fsimg_fat_next(fsimg_reader_t *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_match_name(fsimg_reader_t *, const char *, bool *,

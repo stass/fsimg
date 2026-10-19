@@ -27,6 +27,7 @@
 #include <strings.h>
 
 #include "fat.h"
+#include "format.h"
 
 static fsimg_status_t table_byte(fsimg_reader_t *, unsigned, uint64_t,
     unsigned char *, fsimg_error_t *);
@@ -44,7 +45,7 @@ static fsimg_status_t
 table_byte(fsimg_reader_t *reader, unsigned table, uint64_t offset,
     unsigned char *out, fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->format.fat;
+	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
 	const fat_geometry_t *g = &fat->geometry;
 	uint64_t window;
 	size_t length, transferred;
@@ -83,7 +84,7 @@ static fsimg_status_t
 table_value(fsimg_reader_t *reader, unsigned table, uint32_t cluster,
     uint32_t *out, fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &reader->format.fat->geometry;
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	unsigned char bytes[4];
 	uint64_t offset;
 	unsigned count;
@@ -110,7 +111,7 @@ fsimg_status_t
 fsimg_fat_table_get(fsimg_reader_t *reader, uint32_t cluster, uint32_t *out,
     fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &reader->format.fat->geometry;
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	uint32_t copy;
 	fsimg_status_t status;
 
@@ -130,17 +131,25 @@ fsimg_fat_table_get(fsimg_reader_t *reader, uint32_t cluster, uint32_t *out,
 	return (FSIMG_OK);
 }
 
+fsimg_fat_reader_t *
+fsimg_fat_state(const fsimg_reader_t *reader)
+{
+	return (reader->driver);
+}
+
 fsimg_status_t
-fsimg_fat_open(fsimg_reader_t *reader, const char *format, fsimg_error_t *error)
+fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
+    fsimg_error_t *error)
 {
 	unsigned char boot[512];
 	fat_geometry_t geometry;
+	const fsimg_format_variant_t *variant;
+	fsimg_fat_reader_t *fat;
 	fsimg_error_t detail;
 	uint64_t length;
 	uint32_t first, second, mask;
 	size_t transferred;
 	fsimg_status_t status;
-	const char *name;
 
 	status = fsimg_io_get_size(reader->input, &length, error);
 	if (status != FSIMG_OK)
@@ -154,18 +163,18 @@ fsimg_fat_open(fsimg_reader_t *reader, const char *format, fsimg_error_t *error)
 	status = fsimg_fat_geometry_decode(boot, length, &geometry, error);
 	if (status != FSIMG_OK)
 		return (status);
-	name = geometry.variant == 12 ? "fat12" : geometry.variant == 16 ?
-	    "fat16" : "fat32";
-	if (format != NULL && strcmp(format, name) != 0)
+	variant = fsimg_fat_variant(geometry.variant);
+	if (forced != NULL && forced != variant)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "forced format differs from FAT cluster-count type"));
-	reader->format.fat = fsimg_alloc(reader->ctx, sizeof(*reader->format.fat), &detail);
-	if (reader->format.fat == NULL) {
+	fat = fsimg_alloc(reader->ctx, sizeof(*fat), &detail);
+	if (fat == NULL) {
 		if (error != NULL)
 			*error = detail;
 		return (detail.status);
 	}
-	reader->format.fat->geometry = geometry;
+	reader->driver = fat;
+	fat->geometry = geometry;
 	status = fsimg_fat_table_get(reader, 0, &first, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -179,10 +188,9 @@ fsimg_fat_open(fsimg_reader_t *reader, const char *format, fsimg_error_t *error)
 	    (geometry.variant == 16 && (second & 0x3fff) != 0x3fff) ||
 	    (geometry.variant == 32 && (second & 0x03ffffff) != 0x03ffffff))
 		return (fsimg_fat_corrupt(error, "invalid FAT reserved entries"));
-	strcpy(reader->info.format, name);
-	strcpy(reader->info.profile, "unicode-17-simple-upper/cp437");
+	strcpy(reader->info.format, variant->info.name);
+	strcpy(reader->info.profile, variant->info.profile);
 	reader->info.valid = FSIMG_VOLUME_GEOMETRY;
-	reader->info.capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
 	reader->info.volume_bytes = geometry.volume_bytes;
 	reader->info.allocation_units = geometry.clusters;
 	reader->info.sector_bytes = geometry.sector_bytes;
@@ -206,7 +214,7 @@ fsimg_fat_open(fsimg_reader_t *reader, const char *format, fsimg_error_t *error)
 void
 fsimg_fat_close(fsimg_reader_t *reader)
 {
-	fsimg_fat_reader_t *fat = reader->format.fat;
+	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
 
 	if (fat == NULL)
 		return;
@@ -219,7 +227,7 @@ fsimg_fat_close(fsimg_reader_t *reader)
 	fsimg_stream_free(fat->owners);
 	fsimg_store_free(fat->index);
 	fsimg_dealloc(fat);
-	reader->format.fat = NULL;
+	reader->driver = NULL;
 }
 
 void
@@ -236,7 +244,7 @@ static fsimg_status_t
 chain_take(fsimg_reader_t *reader, fat_chain_t *chain, uint32_t *cluster,
     fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &reader->format.fat->geometry;
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	uint32_t next;
 	fsimg_status_t status;
 
@@ -281,7 +289,7 @@ fsimg_status_t
 fsimg_fat_chain_run(fsimg_reader_t *reader, fat_chain_t *chain, fat_extent_t *run,
     fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &reader->format.fat->geometry;
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	uint32_t cluster;
 	fsimg_status_t status;
 
@@ -308,22 +316,22 @@ fsimg_status_t
 fsimg_fat_owner_append(fsimg_reader_t *reader, const fat_extent_t *run,
     fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &reader->format.fat->geometry;
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	unsigned char record[16];
 
-	if (reader->format.fat->owners == NULL)
+	if (fsimg_fat_state(reader)->owners == NULL)
 		return (FSIMG_OK);
 	fsimg_meta_put_u64(record, (run->image_offset - g->data_offset) /
 	    g->cluster_bytes + 2);
 	fsimg_meta_put_u64(record + 8, run->length / g->cluster_bytes);
-	return (fsimg_stream_append(reader->format.fat->owners, record, sizeof(record),
+	return (fsimg_stream_append(fsimg_fat_state(reader)->owners, record, sizeof(record),
 	    NULL, error));
 }
 
 static fsimg_status_t
 build_index(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->format.fat;
+	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
 	const fat_geometry_t *g = &fat->geometry;
 	fat_chain_t chain;
 	fat_extent_t run;
@@ -365,7 +373,7 @@ static fsimg_status_t
 index_extent(fsimg_reader_t *reader, uint64_t offset, fat_extent_t *run,
     fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->format.fat;
+	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
 	const fat_geometry_t *g = &fat->geometry;
 	unsigned char record[24];
 	uint64_t low, high, middle;
@@ -408,7 +416,7 @@ static fsimg_status_t
 file_extent(fsimg_reader_t *reader, uint64_t offset, fat_extent_t *run,
     fsimg_error_t *error)
 {
-	fsimg_fat_reader_t *fat = reader->format.fat;
+	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
 	const fat_geometry_t *g = &fat->geometry;
 	uint64_t end;
 	fsimg_status_t status;

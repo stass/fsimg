@@ -79,6 +79,12 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	uint16_t flags;
 
 	bzero(g, sizeof(*g));
+	/* The identity signature is the jump, the boot signature and a legal
+	 * fixed BPB. Without it this is not a FAT volume (FSIMG_EFORMAT), which
+	 * keeps other boot records that carry a BPB, such as an MBR or NTFS,
+	 * from being reported as corrupt FAT. Every later check is corruption
+	 * of a recognized FAT volume.
+	 */
 	if (!((boot[0] == 0xeb && boot[2] == 0x90) || boot[0] == 0xe9) ||
 	    boot[510] != 0x55 || boot[511] != 0xaa)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
@@ -102,7 +108,8 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	    (sectors_per_cluster & (sectors_per_cluster - 1)) != 0 ||
 	    g->reserved_sectors == 0 || g->tables == 0 || g->tables > 2 ||
 	    (g->media != 0xf0 && g->media < 0xf8))
-		return (fsimg_fat_corrupt(error, "invalid FAT boot geometry"));
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "boot record has no legal FAT BPB"));
 	if (fsimg_fat_u16(boot + 19) != 0 && fsimg_fat_u32(boot + 32) != 0)
 		return (fsimg_fat_corrupt(error, "conflicting FAT sector counts"));
 	total_sectors = fsimg_fat_u16(boot + 19);

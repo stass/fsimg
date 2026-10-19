@@ -10,7 +10,8 @@
 #include "host.h"
 #include "unicode.h"
 
-static fsimg_status_t exfat_open(fsimg_reader_t *, const char *, fsimg_error_t *);
+static fsimg_status_t exfat_open(fsimg_reader_t *,
+    const fsimg_format_variant_t *, fsimg_error_t *);
 static void exfat_close(fsimg_reader_t *);
 static fsimg_status_t discover_metadata(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t load_upcase(fsimg_reader_t *, fsimg_error_t *);
@@ -33,10 +34,16 @@ const fsimg_reader_ops_t fsimg_exfat_reader_ops = {
 	.verify = exfat_verify
 };
 
+fsimg_exfat_reader_t *
+exfat_state(const fsimg_reader_t *reader)
+{
+	return (reader->driver);
+}
+
 static fsimg_status_t
 discover_metadata(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	fsimg_exfat_reader_t *exfat = reader->format.exfat;
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 	exfat_directory_cursor_t *cursor;
 	exfat_stream_t bitmap = { 0 }, upcase = { 0 };
 	const unsigned char *raw;
@@ -140,7 +147,7 @@ done:
 static fsimg_status_t
 load_upcase(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	fsimg_exfat_reader_t *exfat = reader->format.exfat;
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 	unsigned char *buffer;
 	uint64_t offset;
 	uint32_t decoded, checksum;
@@ -222,8 +229,8 @@ done:
 }
 
 static fsimg_status_t
-exfat_open(fsimg_reader_t *reader, const char *forced FSIMG_UNUSED,
-    fsimg_error_t *error)
+exfat_open(fsimg_reader_t *reader,
+    const fsimg_format_variant_t *forced FSIMG_UNUSED, fsimg_error_t *error)
 {
 	fsimg_exfat_reader_t *exfat;
 	exfat_stream_t root;
@@ -237,7 +244,7 @@ exfat_open(fsimg_reader_t *reader, const char *forced FSIMG_UNUSED,
 			*error = detail;
 		return (detail.status);
 	}
-	reader->format.exfat = exfat;
+	reader->driver = exfat;
 	status = exfat_boot_read(reader, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -259,7 +266,6 @@ exfat_open(fsimg_reader_t *reader, const char *forced FSIMG_UNUSED,
 	strcpy(reader->info.format, "exfat");
 	strcpy(reader->info.profile, "embedded-upcase");
 	reader->info.valid |= FSIMG_VOLUME_GEOMETRY;
-	reader->info.capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
 	reader->info.volume_bytes = exfat->geometry.volume_bytes;
 	reader->info.sector_bytes = exfat->geometry.sector_bytes;
 	reader->info.allocation_unit_bytes = exfat->geometry.cluster_bytes;
@@ -274,7 +280,7 @@ exfat_open(fsimg_reader_t *reader, const char *forced FSIMG_UNUSED,
 static void
 exfat_close(fsimg_reader_t *reader)
 {
-	fsimg_exfat_reader_t *exfat = reader->format.exfat;
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 
 	if (exfat == NULL)
 		return;
@@ -291,13 +297,14 @@ exfat_close(fsimg_reader_t *reader)
 	fsimg_dealloc(exfat->directories);
 	fsimg_dealloc(exfat->upcase);
 	fsimg_dealloc(exfat);
-	reader->format.exfat = NULL;
+	reader->driver = NULL;
 }
 
 static fsimg_status_t
 exfat_match_name(fsimg_reader_t *reader, const char *component, bool *matches,
     fsimg_error_t *error)
 {
+	const uint16_t *upcase = exfat_state(reader)->upcase;
 	uint16_t query[255], current[255];
 	size_t query_count, current_count;
 	const char *name;
@@ -314,8 +321,7 @@ exfat_match_name(fsimg_reader_t *reader, const char *component, bool *matches,
 	if (query_count != current_count)
 		return (FSIMG_OK);
 	for (size_t i = 0; i < query_count; i++) {
-		if (reader->format.exfat->upcase[query[i]] !=
-		    reader->format.exfat->upcase[current[i]])
+		if (upcase[query[i]] != upcase[current[i]])
 			return (FSIMG_OK);
 	}
 	*matches = true;
@@ -325,7 +331,7 @@ exfat_match_name(fsimg_reader_t *reader, const char *component, bool *matches,
 static fsimg_status_t
 exfat_skip_directory(fsimg_reader_t *reader, fsimg_error_t *error FSIMG_UNUSED)
 {
-	reader->format.exfat->pending_directory = false;
+	exfat_state(reader)->pending_directory = false;
 	return (FSIMG_OK);
 }
 
@@ -333,7 +339,7 @@ static fsimg_status_t
 exfat_read(fsimg_reader_t *reader, uint64_t offset, void *buffer, size_t length,
     size_t *transferred, fsimg_error_t *error)
 {
-	fsimg_exfat_reader_t *exfat = reader->format.exfat;
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 	uint64_t image_offset, extent_length;
 	size_t initialized, batch, count;
 	fsimg_status_t status;
@@ -370,7 +376,7 @@ static fsimg_status_t
 exfat_range(fsimg_reader_t *reader, uint64_t offset, fsimg_range_t *out,
     fsimg_error_t *error FSIMG_UNUSED)
 {
-	const exfat_stream_t *stream = &reader->format.exfat->current;
+	const exfat_stream_t *stream = &exfat_state(reader)->current;
 
 	out->offset = offset;
 	out->kind = offset < stream->valid_length ? FSIMG_RANGE_DATA : FSIMG_RANGE_ZERO;

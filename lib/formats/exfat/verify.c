@@ -59,7 +59,7 @@ owner_next(fsimg_reader_t *reader, exfat_owner_cursor_t *owners,
 		return (exfat_corrupt(error, "invalid exFAT ownership record length"));
 	first = fsimg_meta_get_u64(record);
 	count = fsimg_meta_get_u64(record + 8);
-	capacity = (uint64_t)reader->format.exfat->geometry.clusters + 2;
+	capacity = (uint64_t)exfat_state(reader)->geometry.clusters + 2;
 	if (first < 2 || first >= capacity || count == 0 ||
 	    count > capacity - first)
 		return (exfat_corrupt(error, "invalid exFAT ownership interval"));
@@ -74,7 +74,7 @@ static fsimg_status_t
 verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
     fsimg_verify_report_t *report, fsimg_error_t *error)
 {
-	const exfat_geometry_t *g = &reader->format.exfat->geometry;
+	const exfat_geometry_t *g = &exfat_state(reader)->geometry;
 	exfat_owner_cursor_t owners;
 	unsigned char bitmap[4096];
 	uint64_t bitmap_offset, window;
@@ -101,7 +101,7 @@ verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 			batch = (size_t)(((uint64_t)g->clusters + 7) / 8 - window);
 			if (batch > sizeof(bitmap))
 				batch = sizeof(bitmap);
-			status = exfat_map_read(reader, &reader->format.exfat->bitmap,
+			status = exfat_map_read(reader, &exfat_state(reader)->bitmap,
 			    window, bitmap, batch, error);
 			if (status != FSIMG_OK)
 				return (status);
@@ -154,11 +154,11 @@ read_payload(fsimg_reader_t *reader, unsigned char *buffer,
 	/* Uninitialized tail storage is not payload. Its zero semantics are covered
 	 * by the content API; read-through never reads those physical bytes.
 	 */
-	initialized = reader->format.exfat->current.valid_length;
+	initialized = exfat_state(reader)->current.valid_length;
 	for (offset = 0; offset < initialized; offset += batch) {
 		batch = initialized - offset > EXFAT_BUFFER_BYTES ?
 		    EXFAT_BUFFER_BYTES : (size_t)(initialized - offset);
-		status = exfat_map_read(reader, &reader->format.exfat->file,
+		status = exfat_map_read(reader, &exfat_state(reader)->file,
 		    offset, buffer, batch, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -171,7 +171,7 @@ fsimg_status_t
 exfat_verify(fsimg_reader_t *reader, unsigned flags,
     fsimg_verify_report_t *report, fsimg_error_t *error)
 {
-	fsimg_exfat_reader_t *exfat = reader->format.exfat;
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 	fsimg_stream_t *sorted;
 	unsigned char *buffer;
 	fsimg_error_t detail;

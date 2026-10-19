@@ -13,6 +13,8 @@
 #define EXFAT_SET_BYTES 8192u
 #define EXFAT_DIRECTORY_BYTES (UINT64_C(256) * 1024 * 1024)
 #define EXFAT_CLUSTER_MAX UINT32_C(0xfffffff5)
+/* Smallest supported volume; it holds both boot regions at any sector size. */
+#define EXFAT_VOLUME_MIN UINT64_C(1048576)
 #define EXFAT_CLUSTER_RECOMMENDED UINT32_C(0x00fffffe)
 #define EXFAT_UPCASE_BYTES 131072u
 
@@ -86,6 +88,9 @@ typedef struct exfat_directory {
 	size_t		 path_length;
 } exfat_directory_t;
 
+/* Driver state behind the reader's private pointer, from open to close. */
+typedef struct fsimg_exfat_reader fsimg_exfat_reader_t;
+
 struct fsimg_exfat_reader {
 	exfat_geometry_t geometry;
 	exfat_map_t	 root;
@@ -112,6 +117,8 @@ struct fsimg_exfat_reader {
 
 extern const fsimg_reader_ops_t fsimg_exfat_reader_ops;
 extern const fsimg_writer_ops_t fsimg_exfat_writer_ops;
+
+fsimg_exfat_reader_t *exfat_state(const fsimg_reader_t *);
 
 uint16_t exfat_u16(const unsigned char *);
 uint32_t exfat_u32(const unsigned char *);

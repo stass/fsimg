@@ -194,7 +194,7 @@ decode_set(exfat_prepass_t *pass, size_t set_length, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	if (exfat_name_hash(units, count, reader->format.exfat->upcase) !=
+	if (exfat_name_hash(units, count, exfat_state(reader)->upcase) !=
 	    exfat_u16(raw + 36))
 		return (exfat_corrupt(error, "invalid exFAT filename hash"));
 	status = fsimg_utf16_to_utf8(units, count, (char *)record + 64,
@@ -211,7 +211,7 @@ decode_set(exfat_prepass_t *pass, size_t set_length, fsimg_error_t *error)
 	status = exfat_entry_decode(raw, &entry, &stream, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = exfat_stream_validate(&reader->format.exfat->geometry, &stream,
+	status = exfat_stream_validate(&exfat_state(reader)->geometry, &stream,
 	    entry.kind == FSIMG_ENTRY_DIRECTORY, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -225,7 +225,7 @@ decode_set(exfat_prepass_t *pass, size_t set_length, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	status = exfat_key_append(pass->keys, 0, units, count,
-	    reader->format.exfat->upcase, error);
+	    exfat_state(reader)->upcase, error);
 	if (status != FSIMG_OK)
 		return (status);
 	bcopy(raw, record, 64);
@@ -240,7 +240,7 @@ mark_run(fsimg_reader_t *reader, uint32_t first, uint32_t count,
 	fsimg_status_t status;
 
 	for (uint32_t i = 0; i < count; i++) {
-		status = fsimg_bitset_test_and_set(reader->format.exfat->directory_clusters,
+		status = fsimg_bitset_test_and_set(exfat_state(reader)->directory_clusters,
 		    (uint64_t)first + i, &claimed, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -322,7 +322,7 @@ done:
 static fsimg_status_t
 start_traversal(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	fsimg_exfat_reader_t *exfat = reader->format.exfat;
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 	uint64_t bytes;
 	size_t allocation;
 	fsimg_error_t detail;
@@ -355,7 +355,7 @@ start_traversal(fsimg_reader_t *reader, fsimg_error_t *error)
 fsimg_status_t
 exfat_next(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	fsimg_exfat_reader_t *exfat = reader->format.exfat;
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 	exfat_directory_t *directory;
 	exfat_map_t map;
 	size_t length, name_length;

@@ -21,6 +21,11 @@ boot_region(fsimg_reader_t *reader, uint64_t base, exfat_geometry_t *g,
 	size_t transferred;
 	fsimg_status_t status;
 
+	status = fsimg_io_get_size(reader->input, &input_length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (input_length < EXFAT_VOLUME_MIN)
+		return (exfat_corrupt(error, "input is smaller than an exFAT volume"));
 	status = fsimg_reader_bytes(reader, base, boot, sizeof(boot), &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -80,12 +85,9 @@ boot_region(fsimg_reader_t *reader, uint64_t base, exfat_geometry_t *g,
 	g->clusters = exfat_u32(boot + 92);
 	g->root_cluster = exfat_u32(boot + 96);
 	g->flags = exfat_u16(boot + 106);
-	status = fsimg_io_get_size(reader->input, &input_length, error);
-	if (status != FSIMG_OK)
-		return (status);
 	if (!fsimg_mul_u64(volume_sectors, g->sector_bytes, &g->volume_bytes) ||
 	    g->volume_bytes > input_length || g->volume_bytes > INT64_MAX ||
-	    g->volume_bytes < 1048576 || fat_sector < 24 || fat_sectors == 0 ||
+	    g->volume_bytes < EXFAT_VOLUME_MIN || fat_sector < 24 || fat_sectors == 0 ||
 	    fat_sector + fat_sectors > heap_sector || heap_sector >= volume_sectors ||
 	    g->clusters < 3 || g->clusters > EXFAT_CLUSTER_MAX ||
 	    !exfat_cluster_valid(g, g->root_cluster))
@@ -121,6 +123,6 @@ exfat_boot_read(fsimg_reader_t *reader, fsimg_error_t *error)
 	    main.cluster_bytes != backup.cluster_bytes ||
 	    main.root_cluster != backup.root_cluster)
 		return (exfat_corrupt(error, "exFAT backup geometry disagrees"));
-	reader->format.exfat->geometry = main;
+	exfat_state(reader)->geometry = main;
 	return (FSIMG_OK);
 }

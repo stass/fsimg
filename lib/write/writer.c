@@ -36,6 +36,7 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 	fsimg_write_options_t selected;
 	fsimg_writer_t *writer;
 	const fsimg_format_t *driver;
+	const fsimg_format_variant_t *variant;
 	size_t length;
 	fsimg_status_t status;
 
@@ -47,7 +48,7 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 	if (out == NULL || format == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "missing writer format or output"));
-	driver = fsimg_format_find(format);
+	driver = fsimg_format_find(format, &variant);
 	if (driver == NULL || driver->writer == NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "unsupported writer format"));
@@ -68,7 +69,7 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_WRITER, "nonzero reserved write option"));
 	}
-	status = driver->writer->validate(&selected, driver->variant, error);
+	status = driver->writer->validate(&selected, variant->id, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (selected.label == NULL)
@@ -82,7 +83,7 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 	if (status != FSIMG_OK)
 		return (status);
 	writer->format = driver;
-	writer->variant = driver->variant;
+	writer->variant = variant->id;
 	writer->options = selected;
 	bcopy(selected.label, writer->label, length + 1);
 	writer->options.label = writer->label;

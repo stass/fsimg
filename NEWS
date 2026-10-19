@@ -36,6 +36,12 @@ access indexes, and global allocation verification use bounded resources.
 Names use pinned CP437 and Unicode simple-uppercase tables; timestamps retain
 wall-clock semantics. Reader and writer capabilities are reported independently.
 
+Format detection runs every format's bounded probe over the image prefix and
+opens only an unambiguous claim; several claims require an explicit format. A
+forced format checks its own identity signature and never falls back to another
+decoder. A boot record without a legal FAT BPB, such as an NTFS or MBR sector,
+is an unrecognized format rather than a corrupt FAT volume.
+
 FAT12, FAT16, and FAT32 writers provide immutable paged layout plans, automatic
 and exact geometry, free-space reserves, deterministic short aliases and
 long names, explicit timestamp-loss reporting, and reproducible emission.

@@ -38,13 +38,14 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/source/source.h lib/source/source.c lib/source/scan.c \
 	lib/io/io.h lib/read/reader.h lib/read/reader.c \
 	lib/read/selection.c lib/read/selection.h \
-	lib/formats/fat/fat.h lib/formats/fat/codec.c \
+	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
 	lib/formats/fat/write.h lib/formats/fat/write-plan.c \
 	lib/formats/fat/write-names.c lib/formats/fat/write-meta.c \
 	lib/formats/fat/write-emit.c \
-	lib/formats/exfat/exfat.h lib/formats/exfat/codec.c \
+	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
+	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
 	lib/formats/exfat/read.c lib/formats/exfat/directory.c \
 	lib/formats/exfat/names.c lib/formats/exfat/verify.c \

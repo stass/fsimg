@@ -22,7 +22,7 @@ fsimg_status_t
 exfat_table_get(fsimg_reader_t *reader, uint32_t cluster, uint32_t *value,
     fsimg_error_t *error)
 {
-	fsimg_exfat_reader_t *exfat = reader->format.exfat;
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 	const exfat_geometry_t *g = &exfat->geometry;
 	uint64_t offset, window;
 	size_t transferred, length;
@@ -60,7 +60,7 @@ static fsimg_status_t
 map_append(fsimg_reader_t *reader, exfat_map_t *map, uint64_t logical,
     uint32_t first, uint32_t count, fsimg_error_t *error)
 {
-	const exfat_geometry_t *g = &reader->format.exfat->geometry;
+	const exfat_geometry_t *g = &exfat_state(reader)->geometry;
 	unsigned char record[24];
 	uint64_t needed, capacity;
 	fsimg_status_t status;
@@ -88,7 +88,7 @@ fsimg_status_t
 exfat_map_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
     exfat_length_policy_t policy, exfat_map_t *map, fsimg_error_t *error)
 {
-	const exfat_geometry_t *g = &reader->format.exfat->geometry;
+	const exfat_geometry_t *g = &exfat_state(reader)->geometry;
 	uint64_t steps, power, distance, logical;
 	uint32_t cluster, next, checkpoint, first, count;
 	fsimg_status_t status;
@@ -109,7 +109,7 @@ exfat_map_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
 		if (status != FSIMG_OK)
 			goto fail;
 		map->allocated_bytes = (uint64_t)count * g->cluster_bytes;
-		if (reader->format.exfat->bitmap_ready) {
+		if (exfat_state(reader)->bitmap_ready) {
 			status = bitmap_range(reader, stream->first, count, error);
 			if (status != FSIMG_OK)
 				goto fail;
@@ -142,7 +142,7 @@ exfat_map_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
 			status = map_append(reader, map, logical, first, count, error);
 			if (status != FSIMG_OK)
 				goto fail;
-			if (reader->format.exfat->bitmap_ready) {
+			if (exfat_state(reader)->bitmap_ready) {
 				status = bitmap_range(reader, first, count, error);
 				if (status != FSIMG_OK)
 					goto fail;
@@ -295,7 +295,7 @@ exfat_map_read(fsimg_reader_t *reader, exfat_map_t *map, uint64_t offset,
 
 	done = 0;
 	while (done < length) {
-		status = exfat_map_extent(&reader->format.exfat->geometry, map,
+		status = exfat_map_extent(&exfat_state(reader)->geometry, map,
 		    offset + done, &image_offset, &extent_length, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -320,7 +320,7 @@ exfat_bitmap_bit(fsimg_reader_t *reader, uint32_t cluster, bool *allocated,
 	unsigned char byte;
 	fsimg_status_t status;
 
-	status = exfat_map_read(reader, &reader->format.exfat->bitmap,
+	status = exfat_map_read(reader, &exfat_state(reader)->bitmap,
 	    (cluster - 2) / 8, &byte, 1, error);
 	if (status == FSIMG_OK)
 		*allocated = (byte & (1u << ((cluster - 2) % 8))) != 0;
@@ -344,7 +344,7 @@ bitmap_range(fsimg_reader_t *reader, uint32_t first, uint32_t count,
 		batch = (size_t)((end + 7) / 8 - byte_offset);
 		if (batch > sizeof(bytes))
 			batch = sizeof(bytes);
-		status = exfat_map_read(reader, &reader->format.exfat->bitmap,
+		status = exfat_map_read(reader, &exfat_state(reader)->bitmap,
 		    byte_offset, bytes, batch, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -373,7 +373,7 @@ fsimg_status_t
 exfat_map_runs(fsimg_reader_t *reader, const exfat_map_t *map,
     exfat_run_fn_t visit, fsimg_error_t *error)
 {
-	const exfat_geometry_t *g = &reader->format.exfat->geometry;
+	const exfat_geometry_t *g = &exfat_state(reader)->geometry;
 	uint64_t logical, image, length, expected;
 	uint32_t first, count;
 	fsimg_status_t status;
@@ -416,7 +416,7 @@ own_run(fsimg_reader_t *reader, uint32_t first, uint32_t count,
 
 	fsimg_meta_put_u64(owner, first);
 	fsimg_meta_put_u64(owner + 8, count);
-	return (fsimg_stream_append(reader->format.exfat->owners, owner,
+	return (fsimg_stream_append(exfat_state(reader)->owners, owner,
 	    sizeof(owner), NULL, error));
 }
 
@@ -427,7 +427,7 @@ own_run(fsimg_reader_t *reader, uint32_t first, uint32_t count,
 fsimg_status_t
 exfat_map_own(fsimg_reader_t *reader, exfat_map_t *map, fsimg_error_t *error)
 {
-	if (reader->format.exfat->owners == NULL)
+	if (exfat_state(reader)->owners == NULL)
 		return (FSIMG_OK);
 	return (exfat_map_runs(reader, map, own_run, error));
 }

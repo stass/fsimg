@@ -24,22 +24,27 @@ The public names are `fat12`, `fat16`, `fat32`, `exfat`, and `qnx6`. FAT12,
 FAT16, and FAT32 share one descriptor and driver; opening selects the variant
 from the validated cluster count. Detection follows one bounded probe contract:
 
-* A probe reads at most a descriptor-declared prefix through the reader's
-  session. It never opens the volume or allocates driver state.
+* A probe inspects at most a descriptor-declared prefix, which common code
+  reads once through the reader's session and cuts to the volume length. The
+  probe is a pure function of those bytes and the volume length: it performs
+  no I/O, never opens the volume, and allocates no driver state.
 * A probe first tests its identity signature: fixed bytes that no other
   registered format can legitimately carry at those offsets. exFAT's is its
-  jump and `EXFAT` name with a zero legacy BPB. FAT's is the boot signature, a
-  legal BPB, and not the exFAT signature. Only after that signature matches
-  can the probe claim the image, as a match, recognized but unsupported, or
-  corrupt. Without the signature it returns no claim.
+  jump and `EXFAT` name with a zero legacy BPB. FAT's is the jump and boot
+  signature, a legal fixed BPB, and not the exFAT signature, so other boot
+  records that carry a BPB, such as NTFS, are not FAT claims. Only after that
+  signature matches can the probe claim the image, as a match, recognized but
+  unsupported, or corrupt. Without the signature it returns no claim
+  (`FSIMG_EFORMAT`).
 * Automatic detection runs every probe. An I/O error or cancellation propagates
   immediately. Exactly one claim decides: a match opens that driver, while an
   unsupported or corrupt claim is reported as such. Several claims are
   ambiguous and require a forced format. No claim is an unrecognized image,
   `FSIMG_EFORMAT`.
-* A forced format runs only that descriptor's open, with full validation.
-  Forcing selects a decoder; it never skips checks or falls back to another
-  decoder after a failure.
+* A forced format runs only that descriptor's probe and open, with full
+  validation; an absent signature is `FSIMG_EFORMAT`. Forcing selects a
+  decoder; it never skips checks or falls back to another decoder after a
+  failure. A recognized format without a reader is `FSIMG_EUNSUPPORTED`.
 * Recognition establishes neither supported reading, nor writing, nor complete
   validation. Those depend on the opened driver's checks and capabilities.
 
