@@ -65,6 +65,7 @@ v6.12 release; the other implementations are pinned to the revisions below.
 | X1 | QNX 6.5.0 x86 live ISO `qnx-6.5.0-x86-201007091524.iso` (SHA-256 `81a4f541...7dbe2`) under QEMU 11.1.2 | Controlled `mkqnx6fs`/`fs-qnx6.so`/`chkqnx6fs` experiments on a 64 MiB raw disk pre-filled with `0xaa`; see [native QNX 6.5.0 evidence](#native-qnx-650-evidence) |
 | X2 | Disassembly of the X1 `fs-qnx6.so` (SHA-256 `87079603...fc58c8`), `mkqnx6fs` (`39a4cfb8...9d642`) and `chkqnx6fs` (`b991f6f2...7e`); unstripped i386 ELF | Decision logic behind X1 observations: header acceptance, feature classes, checksum, name validation, protected inodes |
 | H1 | Owner-supplied image of one Porsche PCM 3.1 HDD, partly reformatted during a recovery attempt | Partition table, filesystem kinds and QNX6 structure only; see [measured PCM 3.1 HDD](#measured-pcm-31-hdd) |
+| H2 | Disassembly of the head unit's `mkqnx6fs` (SHA-256 `09f998f6...22d05`) and `chkqnx6fs` (`e225fb41...1c5fd`) from H1's partition 1, build `632-1395` of 2009; unstripped SH-4 little-endian ELF | Head-unit formatter defaults and boot loader, the format-version-3 header; see [head-unit formatter and checker](#head-unit-formatter-and-checker) |
 
 NFI's repository declares [Apache-2.0](https://github.com/NetherlandsForensicInstitute/qnxmount/blob/11c8a7f9ee9b945d584263743f6ea8524e8776d2/LICENSE).
 ReFirmLabs declares [MIT](https://github.com/ReFirmLabs/qnx6-extractor/blob/075434f8c07a3bc85f09394970373fe5e04f17a0/LICENSE),
@@ -201,10 +202,12 @@ field encodings in its inspected filesystem sources.
 
 G1 reports `mkqnx6fs`, `chkqnx6fs`, `fdisk`, `dinit`, `df`, and `du` in the
 PCM's `/mnt/data/tools/` inventory. G2 separately reports a 44 KB
-`chkqnx6fs` there on a Cayenne PCM 3.1. This makes target-native formatting
-and checking a specific lead instead of assuming that an unrelated QNX SDK
-must supply the oracle. Availability and command semantics still require
-confirmation on the actual 911 or a matching isolated target.
+`chkqnx6fs` there on a Cayenne PCM 3.1. H1's partition 1 holds `mkqnx6fs`,
+`chkqnx6fs`, `fdisk` and `dinit` in `/tools`, and its 44433-byte
+`chkqnx6fs` agrees with G2's size; see
+[head-unit formatter and checker](#head-unit-formatter-and-checker).
+Running them, and their mounted path on the head unit, require an SH-4
+QNX target.
 
 G1 identifies a QNX 6.3.2 PSP3 firmware build. That operating-system label does
 not specify the separate filesystem module's on-disk profile. Capture the
@@ -223,7 +226,7 @@ The script also exports unrelated personal persistence data. fsimg
 qualification collects version, geometry, metadata, and synthetic-fixture
 evidence without that broader export.
 
-After matching-tool availability is established, controlled experiments on
+On an SH-4 QNX target with these tools, controlled experiments on
 disposable regular-file images can vary geometry, inode capacity, groups,
 names, links, and source data one factor at a time. Native check results and
 post-sync, unmounted bytes then address the marker, state, reservation, and
@@ -486,7 +489,7 @@ and 63-sector alignment:
 | 1, active | `0x4d` | 63 | 4208967 | QNX6, original |
 | 2 | `0x4e` | 4209030 | 2104515 | QNX6, owner reformat, empty |
 | 3 | `0x4f` | 6313545 | 102767805 | QNX4, original |
-| 5, logical | `0x50` | 109081413 | 2104452 | QNX6, head-unit format, empty |
+| 5, logical | `0x50` | 109081413 | 2104452 | QNX6, head-unit formatter, empty |
 | 6, logical | `0x51` | 111185928 | 84180537 | QNX6, owner reformat, empty |
 
 The extended partition (`0x05`) starts at sector 109081350 and chains two
@@ -498,9 +501,11 @@ times from an unset clock: 7 seconds at header offset 16 for partition 1,
 24 for partition 5 and 11 for the QNX4 root entry of partition 3.
 Partitions 2 and 6 instead carry wall-clock format times, share one volume
 identity and contain the QNX 6.5.0 build of the boot loader, which marks
-them as the owner's QNX 6.5.0 reformat. Partition 5 carries the head
-unit's loader build; whether the head unit formatted it originally or
-during the recovery cannot be told, since it was never synced.
+them as the owner's QNX 6.5.0 reformat. Partition 5 carries the loader
+embedded in the head unit's own formatter (see below), and its unset-clock
+time ties it to the head unit, so by inference the head unit's formatter
+made it; whether originally or during the recovery cannot be told, since it
+was never synced.
 
 Every QNX6 volume is little endian with B = 1024, flags `0x100`, version
 word 4, reserve 3, an 8192-byte boot area holding a QNX v1.2b loader, empty
@@ -549,6 +554,75 @@ The head unit's formatter therefore produces the QNX 6.5.0 superblock,
 system-area, inode and directory structure for empty volumes of this size,
 with its own loader build, and the original populated volume obeys every
 QNX 6.5.0 structural rule measured. What H1 cannot show: the original
-contents of partitions 2 and 6, whether partition 5 is original, the
-target's own formatter options, the head unit's mounted-device mapping, and
-behavior on other PCM 3.1 drives or software builds.
+contents of partitions 2 and 6, whether partition 5 was formatted at the
+factory or during the recovery, the head unit's filesystem module and
+mounted-device mapping, and behavior on other PCM 3.1 drives or software
+builds.
+
+### Head-unit formatter and checker
+
+Partition 1 holds the head unit's own `mkqnx6fs` and `chkqnx6fs` in
+`/tools`, unstripped SH-4 builds marked `VERSION=632-1395` and dated
+2009-03-19 (H2). They were disassembled, not run; no SH-4 QNX target was
+available. A raw scan of the whole image finds no copy of the head unit's
+filesystem module `fs-qnx6.so`.
+
+The formatter has the same filesystem-construction functions as QNX 6.5.0's,
+which adds device trim; the remaining differences are statically linked C
+library, UUID and compiler helpers. Its sizing and header logic matches
+6.5.0 in every inspected respect:
+
+* `default_inodes` uses one inode per 8, 32, 64 or 128 blocks at the
+  thresholds `0xfffff`, `0x7fffff` and `0x7ffffff`. `default_groups`
+  applies the 6.5.0 group rule described under
+  [superblock](#superblock): the ladder 1, 4, 8, 16 or 32 at 3, 7, 15 and
+  31 leaf blocks, capped at 4, 8, 16 or 32 by the same thresholds.
+  `default_blocks` subtracts 16384 bytes and rounds down to 4096, and
+  `nindirect` refuses system trees deeper than 2.
+* The `-T` usage table holds the same values as 6.5.0's:
+
+  | Usage | Block size | Blocks per inode | Groups | Reserve |
+  | --- | --- | --- | --- | --- |
+  | `desktop` | 1024 | 8 | 32 | 5 % |
+  | `media` | 2048 | 512 | 8 | 1 % |
+  | `runtime` | 1024 | 32 | 16 | 3 % |
+
+* `main` writes the magic, serial 1, format version 4 at offset 28 and a
+  reserve of 3 percent unless `-r` or a usage table sets it. The usage text
+  is identical to 6.5.0's, including `-e` for byte order and
+  `-o lfncksum`.
+
+The formatter embeds an 8192-byte boot area. Partitions 1 and 5 equal it
+except for the three sector fields at offsets 4, 8 and 12; partitions 2 and
+6 differ in about 2010 bytes, as the QNX 6.5.0 loader does. Partition 5's
+unset-clock format time ties it to the head unit, and its loader is
+consistent with the head unit's formatter; both together are the basis for
+attributing partition 5 to that formatter, an inference.
+
+The checker also recognizes format version 3, which QNX 6.5.0's tools do
+not handle, and ties it to the layout without a boot area. Before reading
+headers, `nobootloader` reads sector 0 and sets a global flag unless the
+sector starts with `0xeb`, has `0x90` at byte 2 and ends with `55 aa`. The
+flag selects the first header's position, byte 0 when set and 8192 when
+clear, and the accepted version: with a boot sector the header must have
+4 in the word at offset 28; without one it must have 3 in the 16-bit word
+at offset 24, where version 4 has its flags. A header that is neither is
+not refused by this step when the flag is clear. By inference, version 3 is
+this checker's bootless layout, and it accepts no bootless version-4
+volume. The Linux MMI layout (L1, L5) has the version-3 field offsets, a
+header at byte 0 and data at 4096, so, also by inference, MMI volumes are
+version-3 QNX6; Linux treats bytes 16 through 27, which hold the version-3
+times, version and flags, as spare.
+
+`sbv3v4conversion` turns a version-3 header into version 4 in memory. In
+its native-byte-order branch:
+
+* bytes 40 through 387 move to 48 through 395, so block size and every
+  later field sit 8 bytes earlier in version 3;
+* bytes 28 through 39 move to 36 through 47, and bytes 32 through 35 stay;
+* the version word at 28 becomes 4 and the reserve word at 30 becomes 3;
+* the 16-bit word at offset 26 becomes the 32-bit flags word at 24.
+
+The foreign-byte-order branch was not traced end to end. Whether the
+identity bytes at 32 through 47 keep their meaning after conversion was not
+established.

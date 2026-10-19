@@ -145,7 +145,7 @@ still complete snapshots when the volume appears full.
 | Profile | Reader contract | Writer contract |
 | --- | --- | --- |
 | Classic, QNX 6.5-compatible | Plain unencrypted volumes; both byte orders; 512, 1024, 2048, or 4096-byte blocks; validated feature markers | New ordinary volumes in the same profile; regular files and directories; deterministic allocation and two identical serial-1 headers describing one view |
-| Classic without boot area | First header at byte zero, after unambiguous validation; geometry defined by its own profile | Not emitted by the default writer |
+| Classic without boot area | First header at byte zero, after unambiguous validation; geometry defined by its own profile; evidence is Linux-only, and the PCM's QNX 6.3.2 checker refuses version 4 at byte zero | Not emitted by the default writer |
 | Audi MMI 3G | Separate superblock decoder and checksum policy; explicit variant selection if detection is ambiguous | Separate qualification; never emitted by selecting the classic profile |
 | Extended Power-Safe | Identify recognized extensions and reject unsupported semantics explicitly | Separate qualification of each extension and target release |
 
@@ -160,18 +160,21 @@ The types are the `0x4d` through `0x51` run that QNX names `hd0t77`
 through `hd0t81`, and they do not identify the filesystem, so identify
 each volume from validated structures. The head unit's QNX6 volumes match
 the QNX 6.5.0 superblock, system-area, inode and directory structure; their
-boot loader is a different build of the QNX v1.2b loader. See the
+boot loader is a different build of the QNX v1.2b loader, the one embedded
+in the head unit's own `mkqnx6fs`. That formatter, a QNX 6.3.2 build, uses
+the QNX 6.5.0 defaults, usage tables and header version. [H2] See the
 [PCM measurements](../docs/qnx6-research.md#measured-pcm-31-hdd). Do not
 select Linux's MMI layout from a Porsche/Harman product name. [H1], [P1]
 
 Qualification records the actual partition table, mounted-device mapping,
 firmware build, and formatter/checker/filesystem-module identities. Script
-device lists do not define geometry. PCM-Forge's inventory of native
-`mkqnx6fs` and `chkqnx6fs` utilities supplies a lead for obtaining matching
-tools; presence and compatibility are checked on the target. A QNX 6.3.2
-operating-system label alone does not establish the filesystem profile.
-The [PCM-Forge evidence assessment](../docs/qnx6-research.md#pcm-forge-native-evidence-and-conflicting-assumptions)
-distinguishes these leads from verified native results. [G1]
+device lists do not define geometry. Both native utilities in PCM-Forge's
+inventory, `mkqnx6fs` and `chkqnx6fs`, are present in the measured HDD's
+partition 1 [H2]; their mounted path and execution need an SH-4 QNX target.
+A QNX 6.3.2 operating-system label alone does not establish the filesystem
+profile. The
+[PCM-Forge evidence assessment](../docs/qnx6-research.md#pcm-forge-native-evidence-and-conflicting-assumptions)
+separates its reports from verified native results. [G1]
 
 A complete replacement HDD requires more than creating one valid QNX6 volume:
 the disk composition layer preserves or reconstructs validated partition
@@ -298,6 +301,22 @@ second header only at `S2`. It never treats bytes between `D + N * B` and
 whose second header sits at `D + N * B` short of the slice end, fails
 validation as it does on QNX. The bootless layout's second-header rule is
 not established by this evidence and is qualified with that profile.
+
+A header at byte zero may be an older format. The PCM's QNX 6.3.2 checker
+reads its first header at byte zero only when sector 0 lacks an x86 boot
+signature (`0xeb` at byte 0, `0x90` at byte 2, `55 aa` at bytes 510 and
+511), and there it accepts only version 3: a 16-bit 3 at offset 24, with
+every field from block size on 8 bytes earlier than in version 4. That is
+the field layout of the [MMI profile](#audi-mmi-and-extended-layouts), so,
+by inference, MMI volumes are version 3. The reader therefore chooses the
+decoder from the candidate position and the word at offset 24, never from
+the word at offset 28 alone. A byte-zero header with 3 at offset 24 belongs
+to the MMI profile and the classic decoder never interprets it, since its
+bytes at offset 28 are moved by the conversion into the version-4 identity
+field and can equal 4. Without that marker the MMI decoder still validates
+the header, and a byte-zero header receives a classic version-4 reading
+only when the MMI decoder rejects it; two successful readings are refused
+as ambiguous. [H2]
 
 Block reference `p` names the range starting at `D + p * B`. Block zero is a
 valid metadata block. Neither the boot area nor either superblock area is
@@ -836,7 +855,7 @@ with the plain header, the principal differing offsets are: [L1], [L5]
 
 | Offset | Bytes | MMI interpretation |
 | --- | --- | --- |
-| 16 | 12 | Variant-specific bytes |
+| 16 | 12 | Variant-specific bytes; in version 3, times, version word (24) and flags (26) |
 | 28 | 12 | Variant identity |
 | 40 | 4 | Block size |
 | 44 / 48 | 4 each | Inode capacity / free inodes |
@@ -852,7 +871,9 @@ long-name checksum enforcement for this variant. Its ordinary and MMI paths
 also choose different winners on equal serials; fsimg instead rejects an
 ambiguous tie. MMI byte orders, unknown header fields, system allocation, and
 writer recipes require their own fixture matrix. Shared magic does not merge
-these profiles.
+these profiles. The table matches the version-3 header that the PCM's QNX
+6.3.2 checker converts, and by inference that conversion defines this
+profile's fields. [H2]
 
 Extended profiles define, rather than infer, large-block geometry, sector
 locators, redundant-header selection, extension trees, inode checksums and
@@ -986,6 +1007,7 @@ Links and provenance details for these keys are in the
 | X1 | Native QNX 6.5.0 formatter, filesystem and checker experiments |
 | X2 | Disassembly of the QNX 6.5.0 filesystem, formatter and checker |
 | H1 | Owner-supplied PCM 3.1 HDD image, structure-only measurements |
+| H2 | Disassembly of the PCM 3.1 head unit's formatter and checker |
 | P1 | Pinned PCM-Explorer Porsche PCM 3.1 format investigation |
 | G1 | Pinned PCM-Forge native tool and firmware inventory |
 
@@ -1010,5 +1032,6 @@ Links and provenance details for these keys are in the
 [X1]: ../docs/qnx6-research.md#native-qnx-650-evidence
 [X2]: ../docs/qnx6-research.md#native-qnx-650-evidence
 [H1]: ../docs/qnx6-research.md#measured-pcm-31-hdd
+[H2]: ../docs/qnx6-research.md#head-unit-formatter-and-checker
 [P1]: https://github.com/dspl1236/PCM-Explorer/blob/a38709a0db90b9a3e70f4542b82553e93ace0f42/docs/QNX6-NOTES.md
 [G1]: https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/research/firmware/PCM31_ISO_ANALYSIS.md
