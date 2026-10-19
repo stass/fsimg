@@ -405,7 +405,7 @@ test_variants(void)
 		CHECK(fsimg_reader_read_at(f.reader, 1100, data, 8, &count, NULL) == FSIMG_OK);
 		CHECK(count == 0);
 		CHECK(fsimg_reader_read_at(f.reader, 1020, data, 80, &count, NULL) == FSIMG_OK);
-		CHECK(count == 80 && fsimg_fat_state(f.reader)->index_count == 3);
+		CHECK(count == 80 && fsimg_test_extent_count(fsimg_fat_state(f.reader)->index) == 3);
 		for (unsigned j = 0; j < 80; j++)
 			CHECK(data[j] == (unsigned char)((1020 + j) * 37));
 		CHECK(fsimg_reader_next_range(f.reader, 512, &range, NULL) == FSIMG_OK);
@@ -934,6 +934,23 @@ test_partial_content(void)
 		CHECK(data[i] == (unsigned char)(i * 37));
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ESTATE);
 	fixture_close(&f);
+
+	/* After a seek builds the extent index, a read crossing from one indexed
+	 * extent into the next still reports the bytes confirmed before failing.
+	 */
+	fixture_init(&f, 16);
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_read_at(f.reader, 600, data, 1, &count, NULL) == FSIMG_OK);
+	CHECK(fsimg_test_extent_count(fsimg_fat_state(f.reader)->index) == 3);
+	f.fail_call = f.calls + 2;
+	CHECK(fsimg_reader_read_at(f.reader, 1020, data, sizeof(data), &count, NULL) ==
+	    FSIMG_EIO);
+	CHECK(count == 4 + 7);
+	for (unsigned i = 0; i < count; i++)
+		CHECK(data[i] == (unsigned char)((1020 + i) * 37));
+	fixture_close(&f);
 }
 
 static void
@@ -1112,7 +1129,7 @@ test_file_limit(void)
 	 * chain; the start is then found through that index.
 	 */
 	CHECK(fsimg_reader_read_at(f.reader, (uint64_t)UINT32_MAX - 1, &byte, 1, &count, NULL) == FSIMG_OK);
-	CHECK(count == 1 && byte == 'B' && fsimg_fat_state(f.reader)->index_count == 1);
+	CHECK(count == 1 && byte == 'B' && fsimg_test_extent_count(fsimg_fat_state(f.reader)->index) == 1);
 	CHECK(fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, NULL) == FSIMG_OK);
 	CHECK(count == 1 && byte == 'A');
 	CHECK(fsimg_reader_read_at(f.reader, UINT32_MAX, &byte, 1, &count, NULL) == FSIMG_OK);
@@ -1347,7 +1364,7 @@ test_index_failures(void)
 		if (fault == 0) {
 			uint64_t work = f.reader->session.progress.work;
 
-			CHECK(status == FSIMG_OK && fsimg_fat_state(f.reader)->index_count == 1000);
+			CHECK(status == FSIMG_OK && fsimg_test_extent_count(fsimg_fat_state(f.reader)->index) == 1000);
 			for (unsigned i = 0; i < 100; i++) {
 				CHECK(fsimg_reader_read_at(f.reader, (i * 619u % 1000) * 512,
 				    &byte, 1, &count, NULL) == FSIMG_OK);
@@ -1686,9 +1703,10 @@ test_cached_index(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1024, &byte, 1, &count, NULL) == FSIMG_OK);
-	CHECK(fsimg_fat_state(f.reader)->index_count == 3);
+	CHECK(fsimg_test_extent_count(fsimg_fat_state(f.reader)->index) == 3);
 	fsimg_meta_put_u64(record, 1);
-	CHECK(fsimg_store_write(fsimg_fat_state(f.reader)->index, 0, record, sizeof(record), NULL) == FSIMG_OK);
+	CHECK(fsimg_store_write(fsimg_test_extent_records(fsimg_fat_state(f.reader)->index),
+	    0, record, sizeof(record), NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1, &byte, 1, &count, NULL) == FSIMG_ECORRUPT);
 	CHECK(count == 0);
 	fixture_close(&f);
@@ -1843,7 +1861,7 @@ test_external(const char *path, const char *format)
 		}
 		if (fragment) {
 			CHECK(fsimg_reader_read_at(reader, 0, buffer, 1, &count, NULL) == FSIMG_OK);
-			CHECK(fsimg_fat_state(reader)->index_count > 1);
+			CHECK(fsimg_test_extent_count(fsimg_fat_state(reader)->index) > 1);
 		}
 	}
 	if (status != FSIMG_DONE)

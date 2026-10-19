@@ -33,6 +33,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/output/write.c \
 	lib/extract/extract.c lib/extract/extract.h \
 	lib/meta/meta.h lib/meta/store.c lib/meta/records.c lib/meta/sort.c \
+	lib/meta/extent.c \
 	lib/write/writer.h lib/write/writer.c lib/write/catalog.c \
 	lib/write/emit.h lib/write/emit.c \
 	lib/source/source.h lib/source/source.c lib/source/scan.c \

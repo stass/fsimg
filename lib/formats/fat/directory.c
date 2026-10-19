@@ -36,7 +36,7 @@ static fsimg_status_t validate_dot(directory_prepass_t *, const unsigned char *,
 static fsimg_status_t decode_slot(directory_prepass_t *, const unsigned char *,
     fsimg_error_t *);
 static fsimg_status_t read_directory_run(directory_prepass_t *,
-    const fat_extent_t *, fsimg_error_t *);
+    const fsimg_extent_t *, fsimg_error_t *);
 static fsimg_status_t prepare_directory(fsimg_reader_t *, uint32_t, uint32_t,
     size_t, uint32_t, fat_directory_t *, fsimg_error_t *);
 static fsimg_status_t traversal_start(fsimg_reader_t *, fsimg_error_t *);
@@ -235,7 +235,7 @@ decode_slot(directory_prepass_t *pass, const unsigned char *raw,
 }
 
 static fsimg_status_t
-read_directory_run(directory_prepass_t *pass, const fat_extent_t *run,
+read_directory_run(directory_prepass_t *pass, const fsimg_extent_t *run,
     fsimg_error_t *error)
 {
 	fsimg_reader_t *reader = pass->reader;
@@ -272,7 +272,7 @@ prepare_directory(fsimg_reader_t *reader, uint32_t cluster, uint32_t parent,
 	const fat_geometry_t *g = &fat->geometry;
 	directory_prepass_t pass;
 	fat_chain_t chain;
-	fat_extent_t run;
+	fsimg_extent_t run;
 	uint64_t first, count;
 	fsimg_status_t status;
 	bool claimed;
@@ -390,9 +390,8 @@ fsimg_fat_next(fsimg_reader_t *reader, fsimg_error_t *error)
 	size_t length, name_length;
 	fsimg_status_t status;
 
-	fsimg_store_free(fat->index);
+	fsimg_extent_index_free(fat->index);
 	fat->index = NULL;
-	fat->index_count = 0;
 	fat->file_started = false;
 	bzero(&fat->extent, sizeof(fat->extent));
 	if (!fat->started) {

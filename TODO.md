@@ -12,8 +12,8 @@
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
 * [Medium] **Architecture consolidation** (`lib/read/`, `lib/write/`,
-  `lib/formats/`): move traversal, namespace validation, extent indexing,
-  and content delivery to the single owners in the
+  `lib/formats/`): move traversal, namespace validation, and content
+  delivery to the single owners in the
   [consolidation plan](docs/implementation-plan.md#architecture-consolidation).
   The drivers still implement their own traversal engines and content loops.
 
@@ -62,13 +62,6 @@
   128 descriptors although `max_depth` is 256. The
   [prepared-directory design](specs/design-directories.md#traversal) requires
   shared scratch for retained ancestors; resolve it with the common walker.
-
-* [Low] **exFAT extent ownership by convention** (`lib/formats/exfat/allocation.c`,
-  `lib/formats/exfat/directory.c`, `lib/formats/exfat/verify.c`): every
-  `exfat_map_build` call site must remember a matching `exfat_map_own`, and
-  the record store is visible outside `allocation.c`. Fold both into the
-  shared [extent index](specs/design-content.md#extent-index): private
-  records, with ownership claimed when the index is built.
 
 ## Security residuals
 

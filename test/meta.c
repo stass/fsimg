@@ -42,6 +42,10 @@ static int compare_bytes(const void *, size_t, const void *, size_t, void *);
 static void test_scratch_overflow(void);
 static void test_sort_work_limit(void);
 static void test_transactional_eviction(void);
+static void test_extent_index(void);
+static void test_extent_scratch(void);
+static fsimg_status_t count_extent(void *, const fsimg_extent_t *,
+    fsimg_error_t *);
 
 static void
 fixture_open(fixture_t *fixture, uint32_t pages, uint64_t scratch,
@@ -513,6 +517,257 @@ test_sort_work_limit(void)
 	fixture_close(&fixture);
 }
 
+/* The domain is 2 MiB of 512-byte units starting at 4 KiB. */
+static const fsimg_extent_domain_t extent_domain = {
+	.offset = 4096,
+	.length = 4096 * 512,
+	.unit_bytes = 512
+};
+
+static fsimg_status_t
+count_extent(void *arg, const fsimg_extent_t *extent, fsimg_error_t *error)
+{
+	uint64_t *bytes = arg;
+
+	(void)error;
+	*bytes += extent->length;
+	return (FSIMG_OK);
+}
+
+static void
+test_extent_index(void)
+{
+	static const fsimg_extent_t invalid[] = {
+		{ .logical_offset = 512, .image_offset = 4096, .length = 512 },
+		{ .logical_offset = 0, .image_offset = 4096, .length = 0 },
+		{ .logical_offset = 0, .image_offset = 4096, .length = 100 },
+		{ .logical_offset = 0, .image_offset = 4096 + 7, .length = 512 },
+		{ .logical_offset = 0, .image_offset = 0, .length = 512 },
+		{ .logical_offset = 0, .image_offset = 4096 + 4095 * 512,
+		    .length = 1024 },
+		{ .logical_offset = 0, .image_offset = 4096,
+		    .length = UINT64_MAX - 511 }
+	};
+	static const fsimg_extent_domain_t bad_domains[] = {
+		{ .offset = 0, .length = 4096, .unit_bytes = 0 },
+		{ .offset = 0, .length = 4000, .unit_bytes = 512 },
+		{ .offset = UINT64_MAX - 511, .length = 1024, .unit_bytes = 512 }
+	};
+	fixture_t fixture;
+	fsimg_extent_index_t *index;
+	fsimg_extent_t extent;
+	uint64_t bytes;
+
+	fixture_open(&fixture, 4, 1024 * 1024, 4);
+	for (size_t i = 0; i < sizeof(bad_domains) / sizeof(bad_domains[0]); i++) {
+		CHECK(fsimg_extent_index_new(&fixture.session, &bad_domains[i],
+		    &index, NULL) == FSIMG_EINVAL);
+		CHECK(index == NULL);
+	}
+	/* Each invalid extent is rejected before it changes the index. */
+	for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		CHECK(fsimg_extent_index_new(&fixture.session, &extent_domain,
+		    &index, NULL) == FSIMG_OK);
+		CHECK(fsimg_extent_index_append(index, &invalid[i], NULL) ==
+		    FSIMG_ECORRUPT);
+		CHECK(fsimg_extent_index_length(index) == 0);
+		fsimg_extent_index_free(index);
+	}
+
+	/* Physically adjacent extents coalesce; a gap starts a new record. A
+	 * logical gap, overlap or out-of-order extent is rejected.
+	 */
+	CHECK(fsimg_extent_index_new(&fixture.session, &extent_domain, &index,
+	    NULL) == FSIMG_OK);
+	extent = (fsimg_extent_t){ 0, 4096, 1024 };
+	CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_OK);
+	extent = (fsimg_extent_t){ 1024, 4096 + 1024, 512 };
+	CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_OK);
+	CHECK(fsimg_test_extent_count(index) == 1);
+	extent = (fsimg_extent_t){ 1536, 4096 + 8192, 512 };
+	CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_OK);
+	CHECK(fsimg_test_extent_count(index) == 2);
+	CHECK(fsimg_extent_index_length(index) == 2048);
+	extent = (fsimg_extent_t){ 1536, 4096 + 16384, 512 };
+	CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_ECORRUPT);
+	extent = (fsimg_extent_t){ 2560, 4096 + 16384, 512 };
+	CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_ECORRUPT);
+	CHECK(fsimg_extent_index_length(index) == 2048);
+
+	/* A lookup returns the whole containing extent, wherever it starts. */
+	CHECK(fsimg_extent_index_lookup(index, 1535, &extent, NULL) == FSIMG_OK);
+	CHECK(extent.logical_offset == 0 && extent.image_offset == 4096 &&
+	    extent.length == 1536);
+	CHECK(fsimg_extent_index_lookup(index, 1536, &extent, NULL) == FSIMG_OK);
+	CHECK(extent.logical_offset == 1536 && extent.image_offset == 4096 + 8192);
+	CHECK(fsimg_extent_index_lookup(index, 0, &extent, NULL) == FSIMG_OK);
+	CHECK(extent.logical_offset == 0);
+	CHECK(fsimg_extent_index_lookup(index, 2048, &extent, NULL) ==
+	    FSIMG_ECORRUPT);
+	bytes = 0;
+	CHECK(fsimg_extent_index_walk(index, count_extent, &bytes, NULL) == FSIMG_OK);
+	CHECK(bytes == 2048);
+	fsimg_extent_index_free(index);
+
+	/* NULL is the empty index. */
+	bytes = 0;
+	CHECK(fsimg_extent_index_length(NULL) == 0);
+	CHECK(fsimg_extent_index_lookup(NULL, 0, &extent, NULL) == FSIMG_ECORRUPT);
+	CHECK(fsimg_extent_index_walk(NULL, count_extent, &bytes, NULL) == FSIMG_OK);
+	CHECK(bytes == 0);
+	fsimg_extent_index_free(NULL);
+	fixture_close(&fixture);
+}
+
+/* Fragments spill beyond one cache page. Records read back from scratch are
+ * untrusted, and scratch failures surface without leaking the index.
+ */
+static void
+test_extent_scratch(void)
+{
+	static const fsimg_meta_fault_t append_faults[] = {
+		FSIMG_META_RESIZE, FSIMG_META_WRITE
+	};
+	const uint64_t fragments = 1000;
+	fixture_t fixture;
+	fsimg_extent_index_t *index;
+	fsimg_extent_t extent;
+	unsigned char saved[24], damaged[24];
+	uint64_t before, offset, bytes;
+	fsimg_status_t status;
+
+	fixture_open(&fixture, 1, 1024 * 1024, 4);
+	CHECK(fsimg_extent_index_new(&fixture.session, &extent_domain, &index,
+	    NULL) == FSIMG_OK);
+	/* Fragment i holds logical unit i in physical unit 2i. */
+	for (uint64_t i = 0; i < fragments; i++) {
+		extent = (fsimg_extent_t){ i * 512, 4096 + i * 1024, 512 };
+		CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_OK);
+	}
+	CHECK(fsimg_test_extent_count(index) == fragments);
+
+	/* A sequential pass reads each record once: at most two page accesses. */
+	before = fixture.session.progress.work;
+	for (offset = 0; offset < fragments * 512; offset += 128) {
+		CHECK(fsimg_extent_index_lookup(index, offset, &extent, NULL) ==
+		    FSIMG_OK);
+		CHECK(extent.image_offset == 4096 + offset / 512 * 1024);
+	}
+	CHECK(fixture.session.progress.work - before <= 2 * fragments + 4);
+	for (uint64_t i = 0; i < fragments; i++) {
+		offset = (i * 7919) % fragments * 512 + 3;
+		CHECK(fsimg_extent_index_lookup(index, offset, &extent, NULL) ==
+		    FSIMG_OK);
+		CHECK(extent.logical_offset == offset - 3 &&
+		    extent.image_offset == 4096 + (offset - 3) * 2);
+	}
+
+	/* A record redirected below the domain fails every reader of it. */
+	CHECK(fsimg_store_read(fsimg_test_extent_records(index), 500 * 24, saved,
+	    sizeof(saved), NULL) == FSIMG_OK);
+	bcopy(saved, damaged, sizeof(damaged));
+	fsimg_meta_put_u64(damaged + 8, 0);
+	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 500 * 24,
+	    damaged, sizeof(damaged), NULL) == FSIMG_OK);
+	CHECK(fsimg_extent_index_lookup(index, 500 * 512, &extent, NULL) ==
+	    FSIMG_ECORRUPT);
+	bytes = 0;
+	CHECK(fsimg_extent_index_walk(index, count_extent, &bytes, NULL) ==
+	    FSIMG_ECORRUPT);
+	/* A valid-looking record at the wrong logical offset breaks tiling. */
+	bcopy(saved, damaged, sizeof(damaged));
+	fsimg_meta_put_u64(damaged, 499 * 512);
+	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 500 * 24,
+	    damaged, sizeof(damaged), NULL) == FSIMG_OK);
+	CHECK(fsimg_extent_index_walk(index, count_extent, &bytes, NULL) ==
+	    FSIMG_ECORRUPT);
+	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 500 * 24,
+	    saved, sizeof(saved), NULL) == FSIMG_OK);
+	bytes = 0;
+	CHECK(fsimg_extent_index_walk(index, count_extent, &bytes, NULL) == FSIMG_OK);
+	CHECK(bytes == fragments * 512);
+
+	/* In-domain damage that per-record checks accept still fails a lookup:
+	 * the successor of the cached record must start where it ends, and the
+	 * record binary search selects must contain the offset.
+	 */
+	CHECK(fsimg_extent_index_lookup(index, 10 * 512, &extent, NULL) == FSIMG_OK);
+	CHECK(fsimg_store_read(fsimg_test_extent_records(index), 11 * 24, saved,
+	    sizeof(saved), NULL) == FSIMG_OK);
+	bcopy(saved, damaged, sizeof(damaged));
+	fsimg_meta_put_u64(damaged, 20 * 512);
+	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 11 * 24,
+	    damaged, sizeof(damaged), NULL) == FSIMG_OK);
+	CHECK(fsimg_extent_index_lookup(index, 11 * 512, &extent, NULL) ==
+	    FSIMG_ECORRUPT);
+	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 11 * 24,
+	    saved, sizeof(saved), NULL) == FSIMG_OK);
+	CHECK(fsimg_store_read(fsimg_test_extent_records(index), 700 * 24, saved,
+	    sizeof(saved), NULL) == FSIMG_OK);
+	bcopy(saved, damaged, sizeof(damaged));
+	fsimg_meta_put_u64(damaged, 699 * 512);
+	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 700 * 24,
+	    damaged, sizeof(damaged), NULL) == FSIMG_OK);
+	CHECK(fsimg_extent_index_lookup(index, 700 * 512 + 3, &extent, NULL) ==
+	    FSIMG_ECORRUPT);
+	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 700 * 24,
+	    saved, sizeof(saved), NULL) == FSIMG_OK);
+	CHECK(fsimg_extent_index_lookup(index, 700 * 512 + 3, &extent, NULL) ==
+	    FSIMG_OK);
+
+	/* Spilled reads fail through lookup. */
+	fsimg_test_meta_fail_after(fixture.ctx, FSIMG_META_READ, 1, EIO);
+	CHECK(fsimg_extent_index_lookup(index, 3, &extent, NULL) == FSIMG_EIO);
+	fsimg_extent_index_free(index);
+	fixture_close(&fixture);
+
+	/* Growth and record writes fail through append. */
+	for (size_t i = 0; i < sizeof(append_faults) / sizeof(append_faults[0]); i++) {
+		fixture_open(&fixture, 1, 1024 * 1024, 4);
+		CHECK(fsimg_extent_index_new(&fixture.session, &extent_domain,
+		    &index, NULL) == FSIMG_OK);
+		fsimg_test_meta_fail_after(fixture.ctx, append_faults[i], 1, ENOSPC);
+		status = FSIMG_OK;
+		for (uint64_t j = 0; j < fragments && status == FSIMG_OK; j++) {
+			extent = (fsimg_extent_t){ j * 512, 4096 + j * 1024, 512 };
+			status = fsimg_extent_index_append(index, &extent, NULL);
+		}
+		CHECK(status == FSIMG_EIO);
+		fsimg_extent_index_free(index);
+		fixture_close(&fixture);
+	}
+	/* Two record pages spill past the one cache page. Looking up record 0
+	 * evicts the last record's page, so merging into that record must read
+	 * it back, and the injected read failure fails the append itself.
+	 */
+	fixture_open(&fixture, 1, 1024 * 1024, 4);
+	CHECK(fsimg_extent_index_new(&fixture.session, &extent_domain, &index,
+	    NULL) == FSIMG_OK);
+	for (uint64_t j = 0; j < 200; j++) {
+		extent = (fsimg_extent_t){ j * 512, 4096 + j * 1024, 512 };
+		CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_OK);
+	}
+	CHECK(fsimg_extent_index_lookup(index, 0, &extent, NULL) == FSIMG_OK);
+	fsimg_test_meta_fail_after(fixture.ctx, FSIMG_META_READ, 1, EIO);
+	extent = (fsimg_extent_t){ 200 * 512, 4096 + 199 * 1024 + 512, 512 };
+	CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_EIO);
+	CHECK(fsimg_test_extent_count(index) == 200);
+	CHECK(fsimg_extent_index_length(index) == 200 * 512);
+	fsimg_extent_index_free(index);
+	fixture_close(&fixture);
+	for (uint64_t attempt = 1; attempt < 10; attempt++) {
+		fixture_open(&fixture, 1, 1024 * 1024, 4);
+		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
+		status = fsimg_extent_index_new(&fixture.session, &extent_domain,
+		    &index, NULL);
+		CHECK(status == FSIMG_OK || (status == FSIMG_ENOMEM && index == NULL));
+		fsimg_extent_index_free(index);
+		fixture_close(&fixture);
+		if (status == FSIMG_OK)
+			break;
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -541,5 +796,7 @@ main(int argc, char **argv)
 	test_transactional_eviction();
 	test_scratch_overflow();
 	test_sort_work_limit();
+	test_extent_index();
+	test_extent_scratch();
 	return (0);
 }

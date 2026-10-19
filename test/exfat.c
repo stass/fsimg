@@ -807,7 +807,7 @@ test_allocation_failures(void)
 	fsimg_status_t status;
 	unsigned failures = 0, successes = 0;
 
-	/* Injection spans opening, directory streams, extent maps and verification
+	/* Injection spans opening, directory streams, extent indexes and verification
 	 * sorting. Every failure must release format state before the next session.
 	 */
 	for (unsigned attempt = 1; attempt < 100; attempt++) {
@@ -1110,6 +1110,7 @@ test_sequential_fragments(void)
 	exfat_fixture_t f;
 	unsigned char *bytes;
 	unsigned char marker[4], marker8[8], saved8[8];
+	fsimg_store_t *records;
 	uint64_t before, work;
 	size_t count;
 	const unsigned clusters = 512;
@@ -1142,25 +1143,26 @@ test_sequential_fragments(void)
 			CHECK(marker[j] == (unsigned char)(seeks[i] >> (j * 8)));
 	}
 	/* Records must tile the allocation in order. A record repeating an
-	 * earlier logical offset passes per-record checks but not the map walk.
+	 * earlier logical offset passes per-record checks but not the index walk.
 	 */
-	CHECK(fsimg_store_read(exfat_state(f.reader)->file.index, 1 * 24,
+	records = fsimg_test_extent_records(exfat_state(f.reader)->file);
+	CHECK(fsimg_store_read(records, 1 * 24,
 	    marker8, sizeof(marker8), NULL) == FSIMG_OK);
-	CHECK(fsimg_store_read(exfat_state(f.reader)->file.index, 2 * 24,
+	CHECK(fsimg_store_read(records, 2 * 24,
 	    saved8, sizeof(saved8), NULL) == FSIMG_OK);
-	CHECK(fsimg_store_write(exfat_state(f.reader)->file.index, 2 * 24,
+	CHECK(fsimg_store_write(records, 2 * 24,
 	    marker8, sizeof(marker8), NULL) == FSIMG_OK);
-	CHECK(exfat_map_check(f.reader, &exfat_state(f.reader)->file, NULL) ==
+	CHECK(exfat_index_check(f.reader, exfat_state(f.reader)->file, NULL) ==
 	    FSIMG_ECORRUPT);
-	CHECK(fsimg_store_write(exfat_state(f.reader)->file.index, 2 * 24,
+	CHECK(fsimg_store_write(records, 2 * 24,
 	    saved8, sizeof(saved8), NULL) == FSIMG_OK);
-	CHECK(exfat_map_check(f.reader, &exfat_state(f.reader)->file, NULL) ==
+	CHECK(exfat_index_check(f.reader, exfat_state(f.reader)->file, NULL) ==
 	    FSIMG_OK);
 	/* Scratch is not trusted. A record redirected to other in-volume metadata,
 	 * here the FAT, must fail rather than disclose that object's bytes.
 	 */
 	put64(marker8, 24 * 512);
-	CHECK(fsimg_store_write(exfat_state(f.reader)->file.index, 3 * 24 + 8,
+	CHECK(fsimg_store_write(records, 3 * 24 + 8,
 	    marker8, sizeof(marker8), NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 3 * 512, marker, sizeof(marker), &count,
 	    NULL) == FSIMG_ECORRUPT);

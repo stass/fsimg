@@ -36,9 +36,7 @@ static fsimg_status_t table_value(fsimg_reader_t *, unsigned, uint32_t,
 static fsimg_status_t chain_take(fsimg_reader_t *, fat_chain_t *, uint32_t *,
     fsimg_error_t *);
 static fsimg_status_t build_index(fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t index_extent(fsimg_reader_t *, uint64_t, fat_extent_t *,
-    fsimg_error_t *);
-static fsimg_status_t file_extent(fsimg_reader_t *, uint64_t, fat_extent_t *,
+static fsimg_status_t file_extent(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
     fsimg_error_t *);
 
 static fsimg_status_t
@@ -225,7 +223,7 @@ fsimg_fat_close(fsimg_reader_t *reader)
 	fsimg_dealloc(fat->directories);
 	fsimg_bitset_free(fat->directory_clusters);
 	fsimg_stream_free(fat->owners);
-	fsimg_store_free(fat->index);
+	fsimg_extent_index_free(fat->index);
 	fsimg_dealloc(fat);
 	reader->driver = NULL;
 }
@@ -248,6 +246,8 @@ chain_take(fsimg_reader_t *reader, fat_chain_t *chain, uint32_t *cluster,
 	uint32_t next;
 	fsimg_status_t status;
 
+	/* Define the output on every path; it is meaningful only on success. */
+	*cluster = 0;
 	if (!fsimg_fat_cluster_valid(g, chain->cluster) || chain->steps >= g->clusters)
 		return (fsimg_fat_corrupt(error, "invalid or excessive FAT chain"));
 	if (chain->expected == 0 &&
@@ -286,8 +286,8 @@ chain_take(fsimg_reader_t *reader, fat_chain_t *chain, uint32_t *cluster,
 }
 
 fsimg_status_t
-fsimg_fat_chain_run(fsimg_reader_t *reader, fat_chain_t *chain, fat_extent_t *run,
-    fsimg_error_t *error)
+fsimg_fat_chain_run(fsimg_reader_t *reader, fat_chain_t *chain,
+    fsimg_extent_t *run, fsimg_error_t *error)
 {
 	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	uint32_t cluster;
@@ -313,7 +313,7 @@ fsimg_fat_chain_run(fsimg_reader_t *reader, fat_chain_t *chain, fat_extent_t *ru
 }
 
 fsimg_status_t
-fsimg_fat_owner_append(fsimg_reader_t *reader, const fat_extent_t *run,
+fsimg_fat_owner_append(fsimg_reader_t *reader, const fsimg_extent_t *run,
     fsimg_error_t *error)
 {
 	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
@@ -328,18 +328,28 @@ fsimg_fat_owner_append(fsimg_reader_t *reader, const fat_extent_t *run,
 	    NULL, error));
 }
 
+/* One forward pass over the current file's chain records every run in the
+ * shared index. The chain walk validates the allocation length; the index
+ * confines every record to the data region. Only a complete index becomes
+ * the current file's.
+ */
 static fsimg_status_t
 build_index(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
 	const fat_geometry_t *g = &fat->geometry;
+	const fsimg_extent_domain_t domain = {
+		.offset = g->data_offset,
+		.length = (uint64_t)g->clusters * g->cluster_bytes,
+		.unit_bytes = g->cluster_bytes
+	};
+	fsimg_extent_index_t *index;
 	fat_chain_t chain;
-	fat_extent_t run;
-	unsigned char record[24];
-	uint64_t offset;
+	fsimg_extent_t run;
 	fsimg_status_t status;
 
-	status = fsimg_store_new(&reader->session, &fat->index, error);
+	status = fsimg_extent_index_new(&reader->session, &domain, &index,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_fat_chain_init(&chain, fat->current_cluster,
@@ -349,71 +359,20 @@ build_index(fsimg_reader_t *reader, fsimg_error_t *error)
 		if (status == FSIMG_DONE)
 			break;
 		if (status != FSIMG_OK)
-			return (status);
-		offset = fsimg_store_size(fat->index);
-		fsimg_meta_put_u64(record, run.logical_offset);
-		/* Index records are three little-endian u64s: logical start, image
-		 * start and allocated byte length. They are ordered by logical start
-		 * and contain no payload bytes or native structure padding.
-		 */
-		fsimg_meta_put_u64(record + 8, run.image_offset);
-		fsimg_meta_put_u64(record + 16, run.length);
-		status = fsimg_store_grow(fat->index, offset + sizeof(record), error);
+			goto fail;
+		status = fsimg_extent_index_append(index, &run, error);
 		if (status != FSIMG_OK)
-			return (status);
-		status = fsimg_store_write(fat->index, offset, record, sizeof(record), error);
-		if (status != FSIMG_OK)
-			return (status);
-		fat->index_count++;
+			goto fail;
 	}
+	fat->index = index;
 	return (FSIMG_OK);
+fail:
+	fsimg_extent_index_free(index);
+	return (status);
 }
 
 static fsimg_status_t
-index_extent(fsimg_reader_t *reader, uint64_t offset, fat_extent_t *run,
-    fsimg_error_t *error)
-{
-	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
-	const fat_geometry_t *g = &fat->geometry;
-	unsigned char record[24];
-	uint64_t low, high, middle;
-	fsimg_status_t status;
-
-	low = 0;
-	high = fat->index_count;
-	/* Find the one extent containing the requested byte. Validate the record
-	 * before subtraction or physical translation, even for private scratch.
-	 */
-	while (low < high) {
-		middle = low + (high - low) / 2;
-		status = fsimg_store_read(fat->index, middle * sizeof(record), record,
-		    sizeof(record), error);
-		if (status != FSIMG_OK)
-			return (status);
-		run->logical_offset = fsimg_meta_get_u64(record);
-		run->image_offset = fsimg_meta_get_u64(record + 8);
-		run->length = fsimg_meta_get_u64(record + 16);
-		if (run->length == 0 || run->logical_offset >= reader->entry.size ||
-		    run->logical_offset % g->cluster_bytes != 0 ||
-		    run->length % g->cluster_bytes != 0 ||
-		    run->image_offset < g->data_offset ||
-		    (run->image_offset - g->data_offset) % g->cluster_bytes != 0 ||
-		    !fsimg_range_fits(run->image_offset, run->length, g->volume_bytes) ||
-		    run->length > ((reader->entry.size + g->cluster_bytes - 1) /
-		    g->cluster_bytes) * g->cluster_bytes - run->logical_offset)
-			return (fsimg_fat_corrupt(error, "invalid current-file extent record"));
-		if (offset < run->logical_offset)
-			high = middle;
-		else if (offset - run->logical_offset >= run->length)
-			low = middle + 1;
-		else
-			return (FSIMG_OK);
-	}
-	return (fsimg_fat_corrupt(error, "current-file index does not cover offset"));
-}
-
-static fsimg_status_t
-file_extent(fsimg_reader_t *reader, uint64_t offset, fat_extent_t *run,
+file_extent(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *run,
     fsimg_error_t *error)
 {
 	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
@@ -422,7 +381,8 @@ file_extent(fsimg_reader_t *reader, uint64_t offset, fat_extent_t *run,
 	fsimg_status_t status;
 
 	if (fat->index != NULL)
-		return (index_extent(reader, offset, run, error));
+		return (fsimg_extent_index_lookup(fat->index, offset, run,
+		    error));
 	/* Inside the cached extent: no chain work. Range queries and reads share
 	 * this cursor, so a range followed by reads of it walks the chain once.
 	 */
@@ -439,7 +399,8 @@ file_extent(fsimg_reader_t *reader, uint64_t offset, fat_extent_t *run,
 		status = build_index(reader, error);
 		if (status != FSIMG_OK)
 			return (status);
-		return (index_extent(reader, offset, run, error));
+		return (fsimg_extent_index_lookup(fat->index, offset, run,
+		    error));
 	}
 	/* At the cached extent's end: advance the chain by one run. */
 	if (!fat->file_started) {
@@ -459,7 +420,7 @@ fsimg_status_t
 fsimg_fat_range(fsimg_reader_t *reader, uint64_t offset, fsimg_range_t *out,
     fsimg_error_t *error)
 {
-	fat_extent_t run;
+	fsimg_extent_t run;
 	fsimg_status_t status;
 
 	/* Cached extents still depend on stable host storage, even when no image
@@ -483,7 +444,7 @@ fsimg_status_t
 fsimg_fat_read(fsimg_reader_t *reader, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
-	fat_extent_t run;
+	fsimg_extent_t run;
 	uint64_t within;
 	size_t batch, count;
 	fsimg_status_t status;

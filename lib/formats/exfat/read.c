@@ -60,7 +60,7 @@ discover_metadata(fsimg_reader_t *reader, fsimg_error_t *error)
 		return (detail.status);
 	}
 	cursor->reader = reader;
-	cursor->map = &exfat->root;
+	cursor->index = exfat->root;
 	cursor->root = true;
 	bitmap_count = upcase_count = label_count = 0;
 	for (;;) {
@@ -123,21 +123,23 @@ done:
 		return (exfat_corrupt(error, "missing or undersized exFAT metadata"));
 	bitmap.valid_length = bitmap.length;
 	upcase.valid_length = upcase.length;
-	status = exfat_map_build(reader, &bitmap, EXFAT_LENGTH_COVER_DATA, &exfat->bitmap, error);
+	status = exfat_index_build(reader, &bitmap, EXFAT_LENGTH_COVER_DATA,
+	    &exfat->bitmap, error);
 	if (status != FSIMG_OK)
 		return (status);
 	exfat->bitmap_length = bitmap.length;
 	exfat->bitmap_ready = true;
-	/* Root and bitmap maps predate the allocation bitmap. Every later map
-	 * validates its allocation inside map_build; these bootstrap maps cannot.
+	/* Root and bitmap indexes predate the allocation bitmap. Every later
+	 * index validates its allocation as it is built; these cannot.
 	 */
-	status = exfat_map_check(reader, &exfat->bitmap, error);
+	status = exfat_index_check(reader, exfat->bitmap, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = exfat_map_check(reader, &exfat->root, error);
+	status = exfat_index_check(reader, exfat->root, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = exfat_map_build(reader, &upcase, EXFAT_LENGTH_COVER_DATA, &exfat->upcase_map, error);
+	status = exfat_index_build(reader, &upcase, EXFAT_LENGTH_COVER_DATA,
+	    &exfat->upcase_index, error);
 	if (status != FSIMG_OK)
 		return (status);
 	exfat->upcase_length = upcase.length;
@@ -174,7 +176,8 @@ load_upcase(fsimg_reader_t *reader, fsimg_error_t *error)
 	for (offset = 0; offset < exfat->upcase_length; offset += batch) {
 		batch = exfat->upcase_length - offset > EXFAT_BUFFER_BYTES ?
 		    EXFAT_BUFFER_BYTES : (size_t)(exfat->upcase_length - offset);
-		status = exfat_map_read(reader, &exfat->upcase_map, offset, buffer, batch, error);
+		status = exfat_index_read(reader, exfat->upcase_index, offset,
+		    buffer, batch, error);
 		if (status != FSIMG_OK)
 			goto done;
 		/* Empty identity runs still consume encoded words. Charge input
@@ -254,7 +257,8 @@ exfat_open(fsimg_reader_t *reader,
 	if ((value & UINT32_C(0xffffff00)) != UINT32_C(0xffffff00))
 		return (exfat_corrupt(error, "invalid exFAT media descriptor"));
 	root = (exfat_stream_t){ .first = exfat->geometry.root_cluster };
-	status = exfat_map_build(reader, &root, EXFAT_LENGTH_COVER_DATA, &exfat->root, error);
+	status = exfat_index_build(reader, &root, EXFAT_LENGTH_COVER_DATA,
+	    &exfat->root, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = discover_metadata(reader, error);
@@ -288,10 +292,10 @@ exfat_close(fsimg_reader_t *reader)
 		for (uint32_t i = 0; i <= exfat->depth; i++)
 			fsimg_stream_free(exfat->directories[i].entries);
 	}
-	exfat_map_free(&exfat->root);
-	exfat_map_free(&exfat->bitmap);
-	exfat_map_free(&exfat->upcase_map);
-	exfat_map_free(&exfat->file);
+	fsimg_extent_index_free(exfat->root);
+	fsimg_extent_index_free(exfat->bitmap);
+	fsimg_extent_index_free(exfat->upcase_index);
+	fsimg_extent_index_free(exfat->file);
 	fsimg_bitset_free(exfat->directory_clusters);
 	fsimg_stream_free(exfat->owners);
 	fsimg_dealloc(exfat->directories);
@@ -340,7 +344,8 @@ exfat_read(fsimg_reader_t *reader, uint64_t offset, void *buffer, size_t length,
     size_t *transferred, fsimg_error_t *error)
 {
 	fsimg_exfat_reader_t *exfat = exfat_state(reader);
-	uint64_t image_offset, extent_length;
+	fsimg_extent_t extent;
+	uint64_t within;
 	size_t initialized, batch, count;
 	fsimg_status_t status;
 
@@ -349,18 +354,20 @@ exfat_read(fsimg_reader_t *reader, uint64_t offset, void *buffer, size_t length,
 		initialized = 0;
 	else if (initialized > exfat->current.valid_length - offset)
 		initialized = (size_t)(exfat->current.valid_length - offset);
-	/* Metadata map reads require complete records. Content instead preserves
-	 * each confirmed byte count when a later extent or physical read fails.
+	/* exfat_index_read serves metadata and requires complete records.
+	 * Content instead preserves each confirmed byte count when a later extent
+	 * or physical read fails.
 	 */
 	while (*transferred < initialized) {
-		status = exfat_map_extent(&exfat->geometry, &exfat->file,
-		    offset + *transferred, &image_offset, &extent_length, error);
+		status = fsimg_extent_index_lookup(exfat->file,
+		    offset + *transferred, &extent, error);
 		if (status != FSIMG_OK)
 			return (status);
+		within = offset + *transferred - extent.logical_offset;
 		batch = initialized - *transferred;
-		if (batch > extent_length)
-			batch = (size_t)extent_length;
-		status = fsimg_reader_bytes(reader, image_offset,
+		if (batch > extent.length - within)
+			batch = (size_t)(extent.length - within);
+		status = fsimg_reader_bytes(reader, extent.image_offset + within,
 		    (unsigned char *)buffer + *transferred, batch, &count, error);
 		*transferred += count;
 		if (status != FSIMG_OK)

@@ -45,7 +45,7 @@ content interface. Extent lookup alone never authorizes exposing them.
 | --- | --- |
 | Common delivery (`lib/read/`) | Bounds against the logical length, the initialized/zero split, transfer batching, source-stability checks, cancellation, work charging, confirmed byte counts, terminal failure |
 | Driver | Initialized length, and resolution of a logical offset below it to one validated physical extent containing that offset |
-| Extent index (optional) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
+| Extent index (optional, `lib/meta/`) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
 
 Delivery calls one driver operation: resolve offset `o < initialized` to an
 extent `(logical_offset, image_offset, length)` with

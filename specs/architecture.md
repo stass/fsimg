@@ -418,7 +418,7 @@ include `config.h`, and expose no platform sandbox headers.
 include/fsimg.h       public API
 lib/core/            context, errors, accounting, progress
 lib/io/              bounded adapters and exact I/O
-lib/meta/            records, paged arrays, external sorting
+lib/meta/            records, paged arrays, external sorting, extent index
 lib/source/          descriptor-relative scanning and source reopening
 lib/write/           writer lifecycle and common emission
 lib/read/            reader lifecycle and verification

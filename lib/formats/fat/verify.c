@@ -76,7 +76,7 @@ verify_file(fsimg_reader_t *reader, unsigned char *buffer,
 {
 	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
 	fat_chain_t chain;
-	fat_extent_t run;
+	fsimg_extent_t run;
 	uint64_t position, length;
 	size_t batch, transferred;
 	fsimg_status_t status;

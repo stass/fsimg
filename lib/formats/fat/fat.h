@@ -46,12 +46,6 @@ typedef struct fat_chain {
 	uint32_t	 checkpoint;
 } fat_chain_t;
 
-typedef struct fat_extent {
-	uint64_t	 logical_offset;
-	uint64_t	 image_offset;
-	uint64_t	 length;
-} fat_extent_t;
-
 typedef struct fat_directory {
 	fsimg_stream_t	*entries;
 	uint64_t	 cursor;
@@ -75,11 +69,10 @@ struct fsimg_fat_reader {
 	fat_directory_t	*directories;
 	fsimg_bitset_t	*directory_clusters;
 	fsimg_stream_t	*owners;
-	fsimg_store_t	*index;
-	uint64_t	 index_count;
+	fsimg_extent_index_t *index;
 	uint64_t	 directory_capacity;
 	fat_chain_t	 file_chain;
-	fat_extent_t	 extent;
+	fsimg_extent_t	 extent;
 	uint64_t	 table_window_offset;
 	size_t		 table_window_length;
 	uint32_t	 depth;
@@ -130,9 +123,9 @@ fsimg_status_t fsimg_fat_verify(fsimg_reader_t *, unsigned,
 fsimg_status_t fsimg_fat_table_get(fsimg_reader_t *, uint32_t, uint32_t *,
     fsimg_error_t *);
 void fsimg_fat_chain_init(fat_chain_t *, uint32_t, uint64_t);
-fsimg_status_t fsimg_fat_chain_run(fsimg_reader_t *, fat_chain_t *, fat_extent_t *,
-    fsimg_error_t *);
-fsimg_status_t fsimg_fat_owner_append(fsimg_reader_t *, const fat_extent_t *,
+fsimg_status_t fsimg_fat_chain_run(fsimg_reader_t *, fat_chain_t *,
+    fsimg_extent_t *, fsimg_error_t *);
+fsimg_status_t fsimg_fat_owner_append(fsimg_reader_t *, const fsimg_extent_t *,
     fsimg_error_t *);
 
 #endif

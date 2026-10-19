@@ -25,9 +25,10 @@ static fsimg_status_t next_slot(exfat_directory_cursor_t *, unsigned char *, fsi
 static fsimg_status_t benign_allocation(fsimg_reader_t *, const unsigned char *,
     bool, fsimg_error_t *);
 static fsimg_status_t decode_set(exfat_prepass_t *, size_t, fsimg_error_t *);
-static fsimg_status_t prepare_directory(fsimg_reader_t *, exfat_map_t *, size_t,
-    uint32_t, exfat_directory_t *, fsimg_error_t *);
-static fsimg_status_t mark_directory(fsimg_reader_t *, exfat_map_t *,
+static fsimg_status_t prepare_directory(fsimg_reader_t *,
+    fsimg_extent_index_t *, size_t, uint32_t, exfat_directory_t *,
+    fsimg_error_t *);
+static fsimg_status_t mark_directory(fsimg_reader_t *, fsimg_extent_index_t *,
     fsimg_error_t *);
 static fsimg_status_t mark_run(fsimg_reader_t *, uint32_t, uint32_t,
     fsimg_error_t *);
@@ -40,12 +41,12 @@ next_slot(exfat_directory_cursor_t *pass, unsigned char *out, fsimg_error_t *err
 	fsimg_status_t status;
 
 	if (pass->window_position == pass->window_length) {
-		remaining = pass->map->allocated_bytes - pass->offset;
+		remaining = fsimg_extent_index_length(pass->index) - pass->offset;
 		if (remaining == 0)
 			return (FSIMG_DONE);
 		pass->window_length = remaining > sizeof(pass->window) ?
 		    sizeof(pass->window) : (size_t)remaining;
-		status = exfat_map_read(pass->reader, pass->map, pass->offset,
+		status = exfat_index_read(pass->reader, pass->index, pass->offset,
 		    pass->window, pass->window_length, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -124,7 +125,7 @@ benign_allocation(fsimg_reader_t *reader, const unsigned char *raw,
     bool primary, fsimg_error_t *error)
 {
 	exfat_stream_t stream;
-	exfat_map_t map;
+	fsimg_extent_index_t *index;
 	unsigned flags;
 	fsimg_status_t status;
 
@@ -140,11 +141,10 @@ benign_allocation(fsimg_reader_t *reader, const unsigned char *raw,
 	stream = (exfat_stream_t){ .first = exfat_u32(raw + 20),
 	    .length = fsimg_meta_get_u64(raw + 24), .contiguous = (flags & 2) != 0 };
 	stream.valid_length = stream.length;
-	status = exfat_map_build(reader, &stream, EXFAT_LENGTH_COVER_DATA, &map, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = exfat_map_own(reader, &map, error);
-	exfat_map_free(&map);
+	/* Building the index validates and claims the allocation. */
+	status = exfat_index_build(reader, &stream, EXFAT_LENGTH_COVER_DATA,
+	    &index, error);
+	fsimg_extent_index_free(index);
 	return (status);
 }
 
@@ -252,19 +252,21 @@ mark_run(fsimg_reader_t *reader, uint32_t first, uint32_t count,
 
 /* Claim every cluster of a directory's chain before decoding it, so
  * re-entering claimed storage through a cycle or a shared chain is
- * corruption. The claim is as good as the chain the map was built from; a
+ * corruption. The claim is as good as the chain the index was built from; a
  * damaged scratch record that names other heap clusters is caught only by
  * ownership verification.
  */
 static fsimg_status_t
-mark_directory(fsimg_reader_t *reader, exfat_map_t *map, fsimg_error_t *error)
+mark_directory(fsimg_reader_t *reader, fsimg_extent_index_t *index,
+    fsimg_error_t *error)
 {
-	return (exfat_map_runs(reader, map, mark_run, error));
+	return (exfat_index_runs(reader, index, mark_run, error));
 }
 
 static fsimg_status_t
-prepare_directory(fsimg_reader_t *reader, exfat_map_t *map, size_t path_length,
-    uint32_t level, exfat_directory_t *out, fsimg_error_t *error)
+prepare_directory(fsimg_reader_t *reader, fsimg_extent_index_t *index,
+    size_t path_length, uint32_t level, exfat_directory_t *out,
+    fsimg_error_t *error)
 {
 	exfat_prepass_t *pass;
 	fsimg_error_t detail;
@@ -277,11 +279,11 @@ prepare_directory(fsimg_reader_t *reader, exfat_map_t *map, size_t path_length,
 		return (detail.status);
 	}
 	pass->input.reader = reader;
-	pass->input.map = map;
+	pass->input.index = index;
 	pass->input.root = level == 0;
 	pass->path_length = path_length;
 	pass->level = level;
-	status = mark_directory(reader, map, error);
+	status = mark_directory(reader, index, error);
 	if (status != FSIMG_OK)
 		goto done;
 	status = fsimg_stream_new(&reader->session, EXFAT_RECORD_BYTES, &pass->entries, error);
@@ -342,10 +344,7 @@ start_traversal(fsimg_reader_t *reader, fsimg_error_t *error)
 	    &exfat->directory_clusters, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = exfat_map_own(reader, &exfat->root, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = prepare_directory(reader, &exfat->root, 0, 0,
+	status = prepare_directory(reader, exfat->root, 0, 0,
 	    &exfat->directories[0], error);
 	if (status == FSIMG_OK)
 		exfat->started = true;
@@ -357,25 +356,25 @@ exfat_next(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_exfat_reader_t *exfat = exfat_state(reader);
 	exfat_directory_t *directory;
-	exfat_map_t map;
+	fsimg_extent_index_t *index;
 	size_t length, name_length;
 	fsimg_status_t status;
 
-	exfat_map_free(&exfat->file);
+	fsimg_extent_index_free(exfat->file);
+	exfat->file = NULL;
 	if (!exfat->started) {
 		status = start_traversal(reader, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
 	if (exfat->pending_directory) {
-		status = exfat_map_build(reader, &exfat->current, EXFAT_LENGTH_EXACT_ALLOCATION, &map, error);
+		status = exfat_index_build(reader, &exfat->current,
+		    EXFAT_LENGTH_EXACT_ALLOCATION, &index, error);
 		if (status != FSIMG_OK)
 			return (status);
-		status = exfat_map_own(reader, &map, error);
-		if (status == FSIMG_OK)
-			status = prepare_directory(reader, &map, strlen(reader->path),
-			    exfat->depth + 1, &exfat->directories[exfat->depth + 1], error);
-		exfat_map_free(&map);
+		status = prepare_directory(reader, index, strlen(reader->path),
+		    exfat->depth + 1, &exfat->directories[exfat->depth + 1], error);
+		fsimg_extent_index_free(index);
 		if (status != FSIMG_OK)
 			return (status);
 		exfat->depth++;
@@ -409,11 +408,8 @@ exfat_next(fsimg_reader_t *reader, fsimg_error_t *error)
 		reader->entry.path = reader->path;
 		exfat->pending_directory = reader->entry.kind == FSIMG_ENTRY_DIRECTORY;
 		if (!exfat->pending_directory) {
-			status = exfat_map_build(reader, &exfat->current, EXFAT_LENGTH_COVER_DATA,
-			    &exfat->file, error);
-			if (status != FSIMG_OK)
-				return (status);
-			status = exfat_map_own(reader, &exfat->file, error);
+			status = exfat_index_build(reader, &exfat->current,
+			    EXFAT_LENGTH_COVER_DATA, &exfat->file, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}

@@ -41,20 +41,6 @@ typedef struct exfat_stream {
 	bool		 contiguous;
 } exfat_stream_t;
 
-/* A map owns a spillable, coalesced extent index, never a resident chain.
- * Records contain logical offset, image offset and length, all little-endian
- * u64. cached is the last successful lookup, making sequential access cheap.
- */
-typedef struct exfat_map {
-	fsimg_store_t	*index;
-	uint64_t	 count;
-	uint64_t	 allocated_bytes;
-	uint64_t	 cached;
-	uint64_t	 logical_offset;
-	uint64_t	 image_offset;
-	uint64_t	 length;
-} exfat_map_t;
-
 /* Receives one validated cluster run (first cluster, cluster count). */
 typedef fsimg_status_t (*exfat_run_fn_t)(fsimg_reader_t *, uint32_t, uint32_t,
     fsimg_error_t *);
@@ -71,7 +57,7 @@ typedef enum exfat_length_policy {
  */
 typedef struct exfat_directory_cursor {
 	fsimg_reader_t	*reader;
-	exfat_map_t	*map;
+	fsimg_extent_index_t *index;
 	uint64_t	 offset;
 	size_t		 window_position;
 	size_t		 window_length;
@@ -88,15 +74,18 @@ typedef struct exfat_directory {
 	size_t		 path_length;
 } exfat_directory_t;
 
-/* Driver state behind the reader's private pointer, from open to close. */
+/* Driver state behind the reader's private pointer, from open to close.
+ * Each allocation is a shared extent index over the cluster heap, never a
+ * resident chain. The file index belongs to the current entry.
+ */
 typedef struct fsimg_exfat_reader fsimg_exfat_reader_t;
 
 struct fsimg_exfat_reader {
 	exfat_geometry_t geometry;
-	exfat_map_t	 root;
-	exfat_map_t	 bitmap;
-	exfat_map_t	 upcase_map;
-	exfat_map_t	 file;
+	fsimg_extent_index_t *root;
+	fsimg_extent_index_t *bitmap;
+	fsimg_extent_index_t *upcase_index;
+	fsimg_extent_index_t *file;
 	exfat_stream_t	 current;
 	exfat_directory_t *directories;
 	fsimg_bitset_t	*directory_clusters;
@@ -146,18 +135,16 @@ fsimg_status_t exfat_metadata_encode(fsimg_plan_t *, const fsimg_entry_t *,
 fsimg_status_t exfat_boot_read(fsimg_reader_t *, fsimg_error_t *);
 fsimg_status_t exfat_table_get(fsimg_reader_t *, uint32_t, uint32_t *,
     fsimg_error_t *);
-void exfat_map_free(exfat_map_t *);
-fsimg_status_t exfat_map_build(fsimg_reader_t *, const exfat_stream_t *,
-    exfat_length_policy_t, exfat_map_t *, fsimg_error_t *);
-fsimg_status_t exfat_map_extent(const exfat_geometry_t *, exfat_map_t *,
-    uint64_t, uint64_t *, uint64_t *, fsimg_error_t *);
-fsimg_status_t exfat_map_read(fsimg_reader_t *, exfat_map_t *, uint64_t,
-    void *, size_t, fsimg_error_t *);
-fsimg_status_t exfat_map_runs(fsimg_reader_t *, const exfat_map_t *,
+fsimg_status_t exfat_index_build(fsimg_reader_t *, const exfat_stream_t *,
+    exfat_length_policy_t, fsimg_extent_index_t **, fsimg_error_t *);
+fsimg_status_t exfat_index_read(fsimg_reader_t *, fsimg_extent_index_t *,
+    uint64_t, void *, size_t, fsimg_error_t *);
+fsimg_status_t exfat_index_runs(fsimg_reader_t *, fsimg_extent_index_t *,
     exfat_run_fn_t, fsimg_error_t *);
-fsimg_status_t exfat_map_own(fsimg_reader_t *, exfat_map_t *,
+fsimg_status_t exfat_index_check(fsimg_reader_t *, fsimg_extent_index_t *,
     fsimg_error_t *);
-fsimg_status_t exfat_map_check(fsimg_reader_t *, exfat_map_t *, fsimg_error_t *);
+fsimg_status_t exfat_index_claim(fsimg_reader_t *, fsimg_extent_index_t *,
+    fsimg_error_t *);
 fsimg_status_t exfat_bitmap_bit(fsimg_reader_t *, uint32_t, bool *,
     fsimg_error_t *);
 fsimg_status_t exfat_next(fsimg_reader_t *, fsimg_error_t *);

@@ -101,7 +101,7 @@ verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 			batch = (size_t)(((uint64_t)g->clusters + 7) / 8 - window);
 			if (batch > sizeof(bitmap))
 				batch = sizeof(bitmap);
-			status = exfat_map_read(reader, &exfat_state(reader)->bitmap,
+			status = exfat_index_read(reader, exfat_state(reader)->bitmap,
 			    window, bitmap, batch, error);
 			if (status != FSIMG_OK)
 				return (status);
@@ -158,7 +158,7 @@ read_payload(fsimg_reader_t *reader, unsigned char *buffer,
 	for (offset = 0; offset < initialized; offset += batch) {
 		batch = initialized - offset > EXFAT_BUFFER_BYTES ?
 		    EXFAT_BUFFER_BYTES : (size_t)(initialized - offset);
-		status = exfat_map_read(reader, &exfat_state(reader)->file,
+		status = exfat_index_read(reader, exfat_state(reader)->file,
 		    offset, buffer, batch, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -183,10 +183,16 @@ exfat_verify(fsimg_reader_t *reader, unsigned flags,
 	status = fsimg_stream_new(&reader->session, 16, &exfat->owners, error);
 	if (status != FSIMG_OK)
 		goto done;
-	status = exfat_map_own(reader, &exfat->bitmap, error);
+	/* Indexes built while opening predate the owner stream; every index
+	 * built during the traversal below claims its own runs.
+	 */
+	status = exfat_index_claim(reader, exfat->bitmap, error);
 	if (status != FSIMG_OK)
 		goto done;
-	status = exfat_map_own(reader, &exfat->upcase_map, error);
+	status = exfat_index_claim(reader, exfat->upcase_index, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = exfat_index_claim(reader, exfat->root, error);
 	if (status != FSIMG_OK)
 		goto done;
 	if ((flags & FSIMG_VERIFY_PAYLOAD) != 0) {

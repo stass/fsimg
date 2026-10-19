@@ -64,6 +64,53 @@ void fsimg_bitset_free(fsimg_bitset_t *);
 fsimg_status_t fsimg_bitset_test_and_set(fsimg_bitset_t *, uint64_t, bool *,
     fsimg_error_t *);
 
+/* One physical run of an object's storage: length bytes at image_offset hold
+ * the object's bytes [logical_offset, logical_offset + length).
+ */
+typedef struct fsimg_extent {
+	uint64_t	 logical_offset;
+	uint64_t	 image_offset;
+	uint64_t	 length;
+} fsimg_extent_t;
+
+/* The image range [offset, offset + length) that an object's storage may
+ * occupy, in whole units counted from offset, such as a cluster heap.
+ */
+typedef struct fsimg_extent_domain {
+	uint64_t	 offset;
+	uint64_t	 length;
+	uint32_t	 unit_bytes;
+} fsimg_extent_domain_t;
+
+/* An optional extent index for resolving logical offsets. A driver appends
+ * extents in logical order from zero; the covered length is their sum.
+ * Physically adjacent extents merge, so callers may append unmerged runs. Its
+ * records are private scratch, decoded and checked against the covered length
+ * and the domain on every read. NULL is the empty index of an object without
+ * storage: its length is zero, a walk visits nothing, and every lookup fails
+ * with FSIMG_ECORRUPT, as does any lookup at or beyond the covered length. On
+ * a failed append discard the index. Creation fails with FSIMG_EINVAL
+ * unless the domain has a nonzero unit, a length in whole units, and an end
+ * that fits in uint64_t.
+ */
+typedef struct fsimg_extent_index fsimg_extent_index_t;
+typedef fsimg_status_t (*fsimg_extent_visit_fn_t)(void *,
+    const fsimg_extent_t *, fsimg_error_t *);
+
+fsimg_status_t fsimg_extent_index_new(fsimg_session_t *,
+    const fsimg_extent_domain_t *, fsimg_extent_index_t **, fsimg_error_t *);
+void fsimg_extent_index_free(fsimg_extent_index_t *);
+uint64_t fsimg_extent_index_length(const fsimg_extent_index_t *);
+fsimg_status_t fsimg_extent_index_append(fsimg_extent_index_t *,
+    const fsimg_extent_t *, fsimg_error_t *);
+fsimg_status_t fsimg_extent_index_lookup(fsimg_extent_index_t *, uint64_t,
+    fsimg_extent_t *, fsimg_error_t *);
+fsimg_status_t fsimg_extent_index_walk(fsimg_extent_index_t *,
+    fsimg_extent_visit_fn_t, void *, fsimg_error_t *);
+/* Validation controls: the record count and the private record store. */
+uint64_t fsimg_test_extent_count(const fsimg_extent_index_t *);
+fsimg_store_t *fsimg_test_extent_records(const fsimg_extent_index_t *);
+
 typedef int (*fsimg_compare_fn_t)(const void *, size_t, const void *, size_t,
     void *);
 
