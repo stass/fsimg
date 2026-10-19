@@ -63,3 +63,11 @@
   QNX4 reader profiles as concrete needs arise. Follow the
   [extension sequence](docs/implementation-plan.md#extension-sequence); each
   format needs a bounded-resource design and an independent compatibility corpus.
+
+* [Medium] **QNX IFS image support** (`lib/formats/`): read, and later write,
+  QNX boot images (`mkifs` output: startup header, image header, flat
+  directory, packed and optionally LZO/UCL-compressed file data), such as the
+  PCM 3.1 `PCM3_IFS1*.ifs` flash images. Write
+  `specs/design-ifs.md` first: header variants and byte orders, compression,
+  executable-in-place entries, checksums, and an independent corpus (QNX
+  `dumpifs`/`mkifs` output and real images).
