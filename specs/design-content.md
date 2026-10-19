@@ -43,27 +43,36 @@ content interface. Extent lookup alone never authorizes exposing them.
 
 | Owner | Owns |
 | --- | --- |
-| Common delivery (`lib/read/`) | Bounds against the logical length, the initialized/zero split, transfer batching, source-stability checks, cancellation, work charging, confirmed byte counts, terminal failure |
-| Driver | Initialized length, and resolution of a logical offset below it to one validated physical extent containing that offset |
+| Common delivery (`lib/read/`) | Bounds against the logical length, the initialized/zero split, transfer batching, source-stability checks, cancellation, work charging, confirmed byte counts, content-domain enforcement, terminal failure |
+| Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated physical extent containing that offset |
 | Extent index (optional, `lib/meta/`) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
 
 Delivery calls one driver operation: resolve offset `o < initialized` to an
 extent `(logical_offset, image_offset, length)` with
-`logical_offset <= o < logical_offset + length`. The extent's image range must
-lie within the input. The driver chooses how to answer: a sequential chain
-cursor, a direct block-tree lookup, or the extent index. Delivery clips the
-extent to the request and to the initialized length, and then reads through
-bounded I/O.
+`logical_offset <= o < logical_offset + length`. The driver chooses how to
+answer: a sequential chain cursor, a direct block-tree lookup, or the extent
+index. Delivery checks containment, clips the extent to the request and to the
+initialized length, and reads through bounded I/O only inside the reader's
+content domain: the image range file storage can occupy, which the driver
+declares when it opens the volume and which also bounds its extent indexes. A
+driver defect therefore cannot deliver bytes outside that domain, such as
+allocation tables or the boot area, as content. Metadata stored inside the
+domain is not excluded; as with index records, ownership verification detects
+a file extent that names another object's units.
+
+Payload verification reads through the same delivery. A driver whose
+ownership walk already yields each physical run, such as FAT, can instead read
+those runs clipped to the logical length, so verification walks the
+allocation once.
 
 ## Operations
 
 `read_at()` and `next_range()` follow the same rules:
 
-* A range query reports DATA from the initialized region or ZERO from the
-  uninitialized tail. ZERO can also describe a hole that the input adapter
-  reliably reports beneath initialized data; ordinary FAT allocation never
-  implies a hole. A range query consumes nothing: a range query followed by
-  reads of that range costs no additional allocation walk.
+* A range query reports DATA for the whole initialized region and ZERO for
+  the uninitialized tail. It answers from these lengths alone: it consumes
+  nothing and resolves no storage, so a range query followed by reads of that
+  range costs no additional allocation walk.
 * `next_range()` can return a DATA range spanning several physical extents.
   Callers cannot infer fragmentation from range boundaries; range shapes are
   a delivery decision, not a driver one.

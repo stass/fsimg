@@ -28,8 +28,7 @@ static const fsimg_reader_ops_t fat_reader = {
 	.keys = fsimg_fat_keys,
 	.key = fsimg_fat_key,
 	.ambiguous = "ambiguous FAT long-name or alias namespace",
-	.read = fsimg_fat_read,
-	.range = fsimg_fat_range,
+	.resolve = fsimg_fat_resolve,
 	.verify = fsimg_fat_verify
 };
 

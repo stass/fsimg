@@ -11,10 +11,11 @@
   The [work breakdown](docs/todo-qnx6.md) owns experiments and implementation;
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
-* [Medium] **Architecture consolidation** (`lib/read/`, `lib/write/`,
-  `lib/formats/`): move content delivery to the single owner in the
+* [Low] **Scoped ownership intervals** (`lib/formats/fat/verify.c`,
+  `lib/formats/exfat/verify.c`): extract the duplicate ownership-interval
+  sorting and cursor checks into one bounded utility, the last item of the
   [consolidation plan](docs/implementation-plan.md#architecture-consolidation).
-  The drivers still implement their own content loops.
+  Both verifiers keep their format-specific reconciliation.
 
 ## Bugs by subsystem
 

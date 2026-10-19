@@ -408,8 +408,13 @@ test_variants(void)
 		CHECK(count == 80 && fsimg_test_extent_count(fsimg_fat_state(f.reader)->index) == 3);
 		for (unsigned j = 0; j < 80; j++)
 			CHECK(data[j] == (unsigned char)((1020 + j) * 37));
+		/* One DATA range covers the remaining fragments; a range query
+		 * resolves no storage and reads nothing.
+		 */
+		calls = f.calls;
 		CHECK(fsimg_reader_next_range(f.reader, 512, &range, NULL) == FSIMG_OK);
-		CHECK(range.offset == 512 && range.length == 512 && range.kind == FSIMG_RANGE_DATA);
+		CHECK(range.offset == 512 && range.length == 588 && range.kind == FSIMG_RANGE_DATA);
+		CHECK(f.calls == calls);
 		CHECK(fsimg_reader_next_range(f.reader, 1100, &range, NULL) == FSIMG_DONE);
 		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->path, "/SUB") == 0);
@@ -1976,9 +1981,8 @@ test_external(const char *path, const char *format)
 	CHECK(close(fd) == 0 && close(scratch) == 0);
 }
 
-/* Extraction asks for a range and then reads it. A range query must not move
- * the sequential cursor past the bytes it describes, or the following read
- * looks like a seek and rebuilds the whole chain into a scratch index.
+/* Extraction asks for a range and then reads it. Interleaved range queries
+ * and sequential reads walk the chain once, with no scratch index.
  */
 static void
 test_range_reads(void)

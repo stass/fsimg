@@ -15,10 +15,8 @@ static fsimg_status_t exfat_open(fsimg_reader_t *,
 static void exfat_close(fsimg_reader_t *);
 static fsimg_status_t discover_metadata(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t load_upcase(fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t exfat_read(fsimg_reader_t *, uint64_t, void *, size_t,
-    size_t *, fsimg_error_t *);
-static fsimg_status_t exfat_range(fsimg_reader_t *, uint64_t, fsimg_range_t *,
-    fsimg_error_t *);
+static fsimg_status_t exfat_resolve(fsimg_reader_t *, uint64_t,
+    fsimg_extent_t *, fsimg_error_t *);
 
 const fsimg_reader_ops_t fsimg_exfat_reader_ops = {
 	.open = exfat_open,
@@ -28,8 +26,7 @@ const fsimg_reader_ops_t fsimg_exfat_reader_ops = {
 	.keys = exfat_keys,
 	.key = exfat_key,
 	.ambiguous = "ambiguous exFAT case-insensitive namespace",
-	.read = exfat_read,
-	.range = exfat_range,
+	.resolve = exfat_resolve,
 	.verify = exfat_verify
 };
 
@@ -298,55 +295,14 @@ exfat_close(fsimg_reader_t *reader)
 	reader->driver = NULL;
 }
 
+/* Replay indexed the current file's whole allocation when it exposed the
+ * entry, so resolution is a lookup; common delivery stops at the valid-data
+ * length and never reads the clusters after it.
+ */
 static fsimg_status_t
-exfat_read(fsimg_reader_t *reader, uint64_t offset, void *buffer, size_t length,
-    size_t *transferred, fsimg_error_t *error)
+exfat_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *extent,
+    fsimg_error_t *error)
 {
-	fsimg_exfat_reader_t *exfat = exfat_state(reader);
-	fsimg_extent_t extent;
-	uint64_t within;
-	size_t initialized, batch, count;
-	fsimg_status_t status;
-
-	initialized = length;
-	if (offset >= exfat->current.valid_length)
-		initialized = 0;
-	else if (initialized > exfat->current.valid_length - offset)
-		initialized = (size_t)(exfat->current.valid_length - offset);
-	/* exfat_index_read serves metadata and requires complete records.
-	 * Content instead preserves each confirmed byte count when a later extent
-	 * or physical read fails.
-	 */
-	while (*transferred < initialized) {
-		status = fsimg_extent_index_lookup(exfat->file,
-		    offset + *transferred, &extent, error);
-		if (status != FSIMG_OK)
-			return (status);
-		within = offset + *transferred - extent.logical_offset;
-		batch = initialized - *transferred;
-		if (batch > extent.length - within)
-			batch = (size_t)(extent.length - within);
-		status = fsimg_reader_bytes(reader, extent.image_offset + within,
-		    (unsigned char *)buffer + *transferred, batch, &count, error);
-		*transferred += count;
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	if (length > initialized)
-		bzero((unsigned char *)buffer + initialized, length - initialized);
-	*transferred = length;
-	return (FSIMG_OK);
-}
-
-static fsimg_status_t
-exfat_range(fsimg_reader_t *reader, uint64_t offset, fsimg_range_t *out,
-    fsimg_error_t *error FSIMG_UNUSED)
-{
-	const exfat_stream_t *stream = &exfat_state(reader)->current;
-
-	out->offset = offset;
-	out->kind = offset < stream->valid_length ? FSIMG_RANGE_DATA : FSIMG_RANGE_ZERO;
-	out->length = (offset < stream->valid_length ? stream->valid_length :
-	    stream->length) - offset;
-	return (FSIMG_OK);
+	return (fsimg_extent_index_lookup(exfat_state(reader)->file, offset,
+	    extent, error));
 }

@@ -124,5 +124,9 @@ exfat_boot_read(fsimg_reader_t *reader, fsimg_error_t *error)
 	    main.root_cluster != backup.root_cluster)
 		return (exfat_corrupt(error, "exFAT backup geometry disagrees"));
 	exfat_state(reader)->geometry = main;
+	reader->content_domain.offset = main.heap_offset;
+	reader->content_domain.length = (uint64_t)main.clusters *
+	    main.cluster_bytes;
+	reader->content_domain.unit_bytes = main.cluster_bytes;
 	return (FSIMG_OK);
 }

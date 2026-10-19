@@ -36,8 +36,6 @@ static fsimg_status_t table_value(fsimg_reader_t *, unsigned, uint32_t,
 static fsimg_status_t chain_take(fsimg_reader_t *, fat_chain_t *, uint32_t *,
     fsimg_error_t *);
 static fsimg_status_t build_index(fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t file_extent(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
-    fsimg_error_t *);
 
 static fsimg_status_t
 table_byte(fsimg_reader_t *reader, unsigned table, uint64_t offset,
@@ -173,6 +171,10 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	}
 	reader->driver = fat;
 	fat->geometry = geometry;
+	reader->content_domain.offset = geometry.data_offset;
+	reader->content_domain.length = (uint64_t)geometry.clusters *
+	    geometry.cluster_bytes;
+	reader->content_domain.unit_bytes = geometry.cluster_bytes;
 	status = fsimg_fat_table_get(reader, 0, &first, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -333,18 +335,13 @@ build_index(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
 	const fat_geometry_t *g = &fat->geometry;
-	const fsimg_extent_domain_t domain = {
-		.offset = g->data_offset,
-		.length = (uint64_t)g->clusters * g->cluster_bytes,
-		.unit_bytes = g->cluster_bytes
-	};
 	fsimg_extent_index_t *index;
 	fat_chain_t chain;
 	fsimg_extent_t run;
 	fsimg_status_t status;
 
-	status = fsimg_extent_index_new(&reader->session, &domain, &index,
-	    error);
+	status = fsimg_extent_index_new(&reader->session,
+	    &reader->content_domain, &index, error);
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_fat_chain_init(&chain, fat->current_cluster,
@@ -366,8 +363,11 @@ fail:
 	return (status);
 }
 
-static fsimg_status_t
-file_extent(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *run,
+/* Resolve offset within the current file. Common delivery owns the read,
+ * its bounds and its stability checks; this only finds the containing run.
+ */
+fsimg_status_t
+fsimg_fat_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *run,
     fsimg_error_t *error)
 {
 	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
@@ -378,9 +378,7 @@ file_extent(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *run,
 	if (fat->index != NULL)
 		return (fsimg_extent_index_lookup(fat->index, offset, run,
 		    error));
-	/* Inside the cached extent: no chain work. Range queries and reads share
-	 * this cursor, so a range followed by reads of it walks the chain once.
-	 */
+	/* Inside the cached extent: no chain work. */
 	end = fat->extent.logical_offset + fat->extent.length;
 	if (offset >= fat->extent.logical_offset && offset < end) {
 		*run = fat->extent;
@@ -408,62 +406,5 @@ file_extent(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *run,
 		return (status == FSIMG_DONE ?
 		    fsimg_fat_corrupt(error, "FAT chain ended before content") : status);
 	*run = fat->extent;
-	return (FSIMG_OK);
-}
-
-fsimg_status_t
-fsimg_fat_range(fsimg_reader_t *reader, uint64_t offset, fsimg_range_t *out,
-    fsimg_error_t *error)
-{
-	fsimg_extent_t run;
-	fsimg_status_t status;
-
-	/* Cached extents still depend on stable host storage, even when no image
-	 * read is needed to answer this request.
-	 */
-	status = fsimg_reader_stable(reader, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = file_extent(reader, offset, &run, error);
-	if (status != FSIMG_OK)
-		return (status);
-	out->offset = offset;
-	out->length = run.length - (offset - run.logical_offset);
-	if (out->length > reader->entry.size - offset)
-		out->length = reader->entry.size - offset;
-	out->kind = FSIMG_RANGE_DATA;
-	return (FSIMG_OK);
-}
-
-fsimg_status_t
-fsimg_fat_read(fsimg_reader_t *reader, uint64_t offset, void *buffer,
-    size_t length, size_t *transferred, fsimg_error_t *error)
-{
-	fsimg_extent_t run;
-	uint64_t within;
-	size_t batch, count;
-	fsimg_status_t status;
-
-	*transferred = 0;
-	status = fsimg_reader_stable(reader, error);
-	if (status != FSIMG_OK)
-		return (status);
-	while (*transferred < length) {
-		status = file_extent(reader, offset, &run, error);
-		if (status != FSIMG_OK)
-			return (status);
-		within = offset - run.logical_offset;
-		batch = length - *transferred;
-		if (batch > run.length - within)
-			batch = (size_t)(run.length - within);
-		if (batch > 1024 * 1024)
-			batch = 1024 * 1024;
-		status = fsimg_reader_bytes(reader, run.image_offset + within,
-		    (unsigned char *)buffer + *transferred, batch, &count, error);
-		*transferred += count;
-		offset += count;
-		if (status != FSIMG_OK)
-			return (status);
-	}
 	return (FSIMG_OK);
 }

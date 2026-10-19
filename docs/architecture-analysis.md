@@ -134,15 +134,14 @@ initialized, the distinction is:
 
 The common reader in
 [`lib/read/reader.c`](../lib/read/reader.c) already owns content bounds,
-source-stability checks, cancellation, and terminal failure. FAT and exFAT
-implement separate delivery loops beneath that boundary. A common content
-operation could perform bounded reads and zero synthesis while drivers resolve
-initialized bytes to validated physical ranges.
+source-stability checks, cancellation, and terminal failure. One common
+content operation performs bounded reads and zero synthesis while drivers
+resolve initialized bytes to validated physical ranges.
 
-Both `read_at()` and `next_range()` would use the same logical-content rules.
-A range query describes data or zeros; it must not consume content or force an
-otherwise unnecessary complete mapping. Physical fragmentation need not divide
-an exFAT logical data range into smaller public ranges.
+Both `read_at()` and `next_range()` use the same logical-content rules.
+A range query describes data or zeros; it does not consume content or force an
+otherwise unnecessary complete mapping. Physical fragmentation does not divide
+a logical data range into smaller public ranges.
 
 The common operation must preserve confirmed byte counts on partial failure,
 including a request crossing a physical extent or initialized-data boundary.
@@ -162,12 +161,8 @@ typedef struct fsimg_extent {
 } fsimg_extent_t;
 ```
 
-FAT implements index construction and binary search in
-[`lib/formats/fat/read.c`](../lib/formats/fat/read.c), while exFAT implements
-another spillable index and lookup cache in
-[`lib/formats/exfat/allocation.c`](../lib/formats/exfat/allocation.c).
-
-One shared extent-index implementation could own encoded records, bounded
+One shared extent-index implementation in
+[`lib/meta/extent.c`](../lib/meta/extent.c) owns encoded records, bounded
 growth, ordering and coverage checks, checked offset arithmetic, sequential
 lookup, binary search, and cleanup under the existing session. Drivers retain
 allocation discovery, geometry-specific checks, and chain/bitmap validation.

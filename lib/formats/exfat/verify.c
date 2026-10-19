@@ -147,22 +147,22 @@ static fsimg_status_t
 read_payload(fsimg_reader_t *reader, unsigned char *buffer,
     fsimg_verify_report_t *report, fsimg_error_t *error)
 {
-	uint64_t offset, initialized;
-	size_t batch;
+	uint64_t offset;
+	size_t batch, count;
 	fsimg_status_t status;
 
-	/* Uninitialized tail storage is not payload. Its zero semantics are covered
-	 * by the content API; read-through never reads those physical bytes.
+	/* Read-through uses common content delivery and visits only the
+	 * initialized bytes: the zero tail is not payload, and delivery never
+	 * reads its physical storage.
 	 */
-	initialized = exfat_state(reader)->current.valid_length;
-	for (offset = 0; offset < initialized; offset += batch) {
-		batch = initialized - offset > EXFAT_BUFFER_BYTES ?
-		    EXFAT_BUFFER_BYTES : (size_t)(initialized - offset);
-		status = exfat_index_read(reader, exfat_state(reader)->file,
-		    offset, buffer, batch, error);
+	for (offset = 0; offset < reader->initialized; offset += batch) {
+		batch = reader->initialized - offset > EXFAT_BUFFER_BYTES ?
+		    EXFAT_BUFFER_BYTES : (size_t)(reader->initialized - offset);
+		status = fsimg_reader_content(reader, offset, buffer, batch,
+		    &count, error);
+		report->payload_bytes_read += count;
 		if (status != FSIMG_OK)
 			return (status);
-		report->payload_bytes_read += batch;
 	}
 	return (FSIMG_OK);
 }

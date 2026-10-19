@@ -110,9 +110,7 @@ fsimg_status_t fsimg_fat_keys(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_key(fsimg_reader_t *, const char *, unsigned char *,
     size_t *, fsimg_error_t *);
-fsimg_status_t fsimg_fat_read(fsimg_reader_t *, uint64_t, void *, size_t,
-    size_t *, fsimg_error_t *);
-fsimg_status_t fsimg_fat_range(fsimg_reader_t *, uint64_t, fsimg_range_t *,
+fsimg_status_t fsimg_fat_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
     fsimg_error_t *);
 fsimg_status_t fsimg_fat_verify(fsimg_reader_t *, unsigned,
     fsimg_verify_report_t *, fsimg_error_t *);

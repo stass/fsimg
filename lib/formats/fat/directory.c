@@ -275,6 +275,7 @@ fsimg_fat_replay(fsimg_reader_t *reader, const char *name,
 	if (status != FSIMG_OK)
 		return (status);
 	fat->current_parent = fsimg_fat_u32(payload + 32);
+	reader->initialized = reader->entry.size;
 	return (FSIMG_OK);
 }
 

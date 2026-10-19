@@ -428,10 +428,14 @@ make_current(fsimg_reader_t *reader, walk_level_t *level, size_t length,
 		return (status);
 	if (level->path_length + name_length + 2 > reader->ctx->options.max_path_bytes)
 		return (corrupt(error, "prepared directory record exceeds path limit"));
+	reader->initialized = 0;
 	status = reader->ops->replay(reader, (const char *)walk->record,
 	    walk->record + name_length + 1, length - name_length - 1, error);
 	if (status != FSIMG_OK)
 		return (status);
+	/* No content exists past the logical length, whatever the driver set. */
+	if (reader->initialized > reader->entry.size)
+		reader->initialized = reader->entry.size;
 	reader->path[level->path_length] = '/';
 	bcopy(walk->record, reader->path + level->path_length + 1, name_length + 1);
 	reader->entry.path = reader->path;

@@ -22,13 +22,21 @@ typedef struct fsimg_format_variant fsimg_format_variant_t;
  *		the current entry locates; claim its storage and admit every
  *		child with fsimg_directory_admit().
  * replay	re-validate a replayed record's name and payload and make it
- *		the current entry: fill reader->entry except its path and set
- *		the driver's current locator and content state.
+ *		the current entry: fill reader->entry except its path, set
+ *		the driver's current locator and content state, and for a
+ *		regular file set reader->initialized.
  * keys		derive the namespace keys of a record's name and payload.
  * key		derive the key of one spelling, used for selection queries;
  *		FSIMG_EINVAL when the format cannot represent it.
  *		Key buffers hold FSIMG_DIRECTORY_KEY_BYTES bytes.
  * ambiguous	the corruption message for two entries sharing a key.
+ *
+ * Content callback (specs/design-content.md). Common delivery owns reads and
+ * range queries of the current file; the driver only resolves storage:
+ * resolve	return one validated extent of the current file containing
+ *		logical offset o, where o < reader->initialized. Delivery
+ *		checks that it contains o and reads only the part of it
+ *		inside reader->content_domain.
  */
 typedef struct fsimg_reader_ops {
 	fsimg_status_t (*open)(fsimg_reader_t *, const fsimg_format_variant_t *,
@@ -44,9 +52,7 @@ typedef struct fsimg_reader_ops {
 	fsimg_status_t (*key)(fsimg_reader_t *, const char *, unsigned char *,
 	    size_t *, fsimg_error_t *);
 	const char	*ambiguous;
-	fsimg_status_t (*read)(fsimg_reader_t *, uint64_t, void *, size_t,
-	    size_t *, fsimg_error_t *);
-	fsimg_status_t (*range)(fsimg_reader_t *, uint64_t, fsimg_range_t *,
+	fsimg_status_t (*resolve)(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
 	    fsimg_error_t *);
 	fsimg_status_t (*verify)(fsimg_reader_t *, unsigned,
 	    fsimg_verify_report_t *, fsimg_error_t *);
@@ -68,6 +74,18 @@ struct fsimg_reader {
 	fsimg_host_file_t identity;
 	fsimg_volume_info_t info;
 	fsimg_entry_t	 entry;
+	/* The current file's initialized length: bytes below it come from
+	 * storage, the rest of entry.size reads as zeros. The walker clears it
+	 * before each replay, so a driver that does not set it exposes zeros,
+	 * never backing storage, and bounds it by entry.size after.
+	 */
+	uint64_t	 initialized;
+	/* The image range file storage can occupy, such as the FAT data
+	 * region or the exFAT cluster heap, set by the driver's open. Content
+	 * is never read outside it; until a driver sets it, it is empty. It
+	 * also bounds every extent index the driver builds.
+	 */
+	fsimg_extent_domain_t content_domain;
 	fsimg_reader_state_t state;
 	fsimg_walk_t	*walk;
 	char		*path;
@@ -77,6 +95,11 @@ struct fsimg_reader {
 fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 fsimg_status_t fsimg_reader_stable(fsimg_reader_t *, fsimg_error_t *);
+/* Common content delivery for the current file, without the public entry
+ * checks or terminal failure: payload verification reads through it.
+ */
+fsimg_status_t fsimg_reader_content(fsimg_reader_t *, uint64_t, void *, size_t,
+    size_t *, fsimg_error_t *);
 fsimg_status_t fsimg_reader_abort(fsimg_reader_t *, fsimg_status_t);
 fsimg_status_t fsimg_reader_end_scope(fsimg_reader_t *);
 fsimg_status_t fsimg_reader_match_name(fsimg_reader_t *, const char *, bool *,

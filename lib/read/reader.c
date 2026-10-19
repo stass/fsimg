@@ -272,6 +272,72 @@ current_file(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/* Deliver up to length bytes of the current file at offset, clipped to the
+ * file length; an offset at or past it delivers nothing. Bytes below the
+ * initialized length are read from the extents the driver resolves, one
+ * exact physical read per piece; the rest are synthesized zeros and never
+ * touch storage. transferred counts only confirmed bytes, so a failure in a
+ * later extent still reports the pieces before it.
+ */
+fsimg_status_t
+fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
+    size_t length, size_t *transferred, fsimg_error_t *error)
+{
+	const fsimg_extent_domain_t *domain = &reader->content_domain;
+	unsigned char *buffer = out;
+	fsimg_extent_t extent;
+	uint64_t initialized, within, image;
+	size_t piece, count;
+	fsimg_status_t status;
+
+	initialized = reader->initialized;
+	*transferred = 0;
+	if (offset >= reader->entry.size)
+		return (FSIMG_OK);
+	if (length > reader->entry.size - offset)
+		length = (size_t)(reader->entry.size - offset);
+	while (*transferred < length) {
+		piece = length - *transferred;
+		if (offset >= initialized) {
+			bzero(buffer + *transferred, piece);
+			*transferred = length;
+			break;
+		}
+		bzero(&extent, sizeof(extent));
+		status = reader->ops->resolve(reader, offset, &extent, error);
+		if (status != FSIMG_OK)
+			return (status);
+		/* The extent must contain offset; clip it to the request and to
+		 * the initialized length, so slack after either is never read.
+		 * The piece must lie in the content domain whatever the driver
+		 * resolved, so no driver can deliver metadata as content.
+		 */
+		if (offset < extent.logical_offset ||
+		    offset - extent.logical_offset >= extent.length)
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_READER, "resolved extent does not contain the offset"));
+		within = offset - extent.logical_offset;
+		if (piece > extent.length - within)
+			piece = (size_t)(extent.length - within);
+		if (piece > initialized - offset)
+			piece = (size_t)(initialized - offset);
+		if (extent.image_offset > UINT64_MAX - within ||
+		    extent.image_offset + within < domain->offset ||
+		    !fsimg_range_fits(extent.image_offset + within - domain->offset,
+		    piece, domain->length))
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_READER, "content extent outside the file storage domain"));
+		image = extent.image_offset + within;
+		status = fsimg_reader_bytes(reader, image,
+		    buffer + *transferred, piece, &count, error);
+		*transferred += count;
+		offset += count;
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (FSIMG_OK);
+}
+
 fsimg_status_t
 fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
@@ -289,9 +355,9 @@ fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
 		    FSIMG_OP_READER, "missing content buffer or count output"));
 	if (length > reader->entry.size - offset)
 		length = (size_t)(reader->entry.size - offset);
-	/* Even synthesized zero bytes depend on stable input. Common content
-	 * dispatch owns these checks so cached and zero-producing drivers cannot
-	 * bypass source consistency, cancellation or the session work budget.
+	/* Even synthesized zero bytes depend on stable input, and every batch,
+	 * whether resolved from a cached extent or synthesized, is charged and
+	 * polled for cancellation by the session.
 	 */
 	status = fsimg_reader_stable(reader, error);
 	if (status != FSIMG_OK)
@@ -304,18 +370,12 @@ fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
 		if (status != FSIMG_OK)
 			return (fsimg_reader_abort(reader, status));
 		count = 0;
-		status = reader->ops->read(reader, offset,
-		    buffer == NULL ? NULL : (unsigned char *)buffer + *transferred,
-		    batch, &count, error);
+		status = fsimg_reader_content(reader, offset, buffer == NULL ? NULL :
+		    (unsigned char *)buffer + *transferred, batch, &count, error);
 		*transferred += count;
 		offset += count;
 		if (status != FSIMG_OK)
 			return (fsimg_reader_abort(reader, status));
-		if (count != batch) {
-			status = fsimg_error_set(error, FSIMG_ESTATE, 0,
-			    FSIMG_OP_READER, "driver returned incomplete successful content");
-			return (fsimg_reader_abort(reader, status));
-		}
 	} while (*transferred < length);
 	status = fsimg_reader_stable(reader, error);
 	if (status != FSIMG_OK)
@@ -323,10 +383,16 @@ fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
 	return (FSIMG_OK);
 }
 
+/* A range answers from lengths alone: DATA up to the initialized length,
+ * ZERO after it. Physical fragmentation never divides a range, and a query
+ * resolves no storage, so a range followed by reads of it walks the
+ * allocation once, during the reads.
+ */
 fsimg_status_t
 fsimg_reader_next_range(fsimg_reader_t *reader, uint64_t offset,
     fsimg_range_t *out, fsimg_error_t *error)
 {
+	uint64_t initialized;
 	fsimg_status_t status;
 
 	status = current_file(reader, offset, error);
@@ -343,11 +409,15 @@ fsimg_reader_next_range(fsimg_reader_t *reader, uint64_t offset,
 		return (fsimg_reader_abort(reader, status));
 	if (offset == reader->entry.size)
 		return (FSIMG_DONE);
-	status = reader->ops->range(reader, offset, out, error);
-	if (status == FSIMG_OK)
-		status = fsimg_reader_stable(reader, error);
-	if (status != FSIMG_OK)
-		return (fsimg_reader_abort(reader, status));
+	initialized = reader->initialized;
+	out->offset = offset;
+	if (offset < initialized) {
+		out->kind = FSIMG_RANGE_DATA;
+		out->length = initialized - offset;
+	} else {
+		out->kind = FSIMG_RANGE_ZERO;
+		out->length = reader->entry.size - offset;
+	}
 	return (FSIMG_OK);
 }
 

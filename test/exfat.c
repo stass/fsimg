@@ -32,7 +32,8 @@ typedef struct exfat_fixture {
 	uint64_t	 length;
 	uint64_t	 calls;
 	bool		 cancelled;
-	bool		 fail_payload;
+	uint64_t	 fail_from;	/* image offset failing reads start at; 0 disables */
+	uint64_t	 forbid_from;	/* image offset no read may reach; 0 disables */
 	int		 scratch;
 	char		 directory[64];
 } exfat_fixture_t;
@@ -268,7 +269,8 @@ image_read(void *argument, uint64_t offset, void *buffer, size_t length,
 
 	f->calls++;
 	CHECK(fsimg_range_fits(offset, length, f->length));
-	if (f->fail_payload && offset >= cluster_offset(FILE_CLUSTER)) {
+	CHECK(f->forbid_from == 0 || offset + length <= f->forbid_from);
+	if (f->fail_from != 0 && offset >= f->fail_from) {
 		length = length > 7 ? 7 : length;
 		bcopy(f->image + offset, buffer, length);
 		*transferred = length;
@@ -463,9 +465,11 @@ static void
 test_content_guard(const char *mode)
 {
 	exfat_fixture_t f;
+	const fsimg_entry_t *entry;
 	unsigned char bytes[1024], byte;
 	fsimg_range_t range;
 	fsimg_status_t status;
+	uint64_t calls;
 	size_t count;
 	int fd, read_fd;
 
@@ -490,9 +494,49 @@ test_content_guard(const char *mode)
 	} else {
 		open_file(&f);
 		if (strcmp(mode, "partial") == 0) {
-			f.fail_payload = true;
+			f.fail_from = cluster_offset(FILE_CLUSTER);
 			status = fsimg_reader_read_at(f.reader, 0, bytes, sizeof(bytes), &count, NULL);
 			CHECK(status == FSIMG_EIO && count == 7);
+		} else if (strcmp(mode, "partial-fragment") == 0) {
+			/* The first fragment completes; the second fails after its
+			 * one initialized byte, so the zero tail is never confirmed.
+			 */
+			f.fail_from = cluster_offset(FILE_CLUSTER + 2);
+			status = fsimg_reader_read_at(f.reader, 0, bytes, sizeof(bytes), &count, NULL);
+			CHECK(status == FSIMG_EIO && count == 513);
+			for (unsigned i = 0; i < 512; i++)
+				CHECK(bytes[i] == (unsigned char)(i * 37));
+			CHECK(bytes[512] == 0x7b);
+		} else if (strcmp(mode, "zero-tail") == 0) {
+			/* One read crosses the fragment and initialized boundaries;
+			 * no physical read reaches past the one initialized byte of
+			 * the second fragment, whose poisoned tail reads as zeros.
+			 */
+			f.forbid_from = cluster_offset(FILE_CLUSTER + 2) + 1;
+			status = fsimg_reader_read_at(f.reader, 0, bytes, sizeof(bytes), &count, NULL);
+			CHECK(status == FSIMG_OK && count == sizeof(bytes));
+			CHECK(bytes[511] == (unsigned char)(511 * 37) && bytes[512] == 0x7b);
+			for (unsigned i = 513; i < sizeof(bytes); i++)
+				CHECK(bytes[i] == 0);
+		} else if (strcmp(mode, "eof") == 0) {
+			CHECK(fsimg_reader_read_at(f.reader, 0, NULL, 0, &count, NULL) == FSIMG_OK);
+			CHECK(count == 0);
+			CHECK(fsimg_reader_read_at(f.reader, 1024, bytes, 8, &count, NULL) == FSIMG_OK);
+			CHECK(count == 0);
+			CHECK(fsimg_reader_next_range(f.reader, 1024, &range, NULL) == FSIMG_DONE);
+			CHECK(fsimg_reader_read_at(f.reader, 1025, bytes, 1, &count, NULL) == FSIMG_EINVAL);
+			CHECK(fsimg_reader_read_at(f.reader, 1000, bytes, 100, &count, NULL) == FSIMG_OK);
+			CHECK(count == 24);
+		} else if (strcmp(mode, "domain") == 0) {
+			/* Delivery reads nothing outside the content domain, even
+			 * when the driver resolves an extent there.
+			 */
+			f.reader->content_domain.length = cluster_offset(FILE_CLUSTER) -
+			    f.reader->content_domain.offset;
+			calls = f.calls;
+			status = fsimg_reader_read_at(f.reader, 0, bytes, 1, &count, NULL);
+			CHECK(status == FSIMG_ESTATE && count == 0 && f.calls == calls);
+			CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ESTATE);
 		} else if (strcmp(mode, "work") == 0) {
 			f.ctx->options.max_work = f.reader->session.progress.work;
 			status = fsimg_reader_read_at(f.reader, 900, &byte, 1, &count, NULL);
@@ -1141,7 +1185,8 @@ test_sequential_fragments(void)
 	unsigned char *bytes;
 	unsigned char marker[4], marker8[8], saved8[8];
 	fsimg_store_t *records;
-	uint64_t before, work;
+	fsimg_range_t range;
+	uint64_t before, work, calls;
 	size_t count;
 	const unsigned clusters = 512;
 	const size_t length = 512u * 512;
@@ -1152,6 +1197,12 @@ test_sequential_fragments(void)
 	open_file(&f);
 	bytes = malloc(length);
 	CHECK(bytes != NULL);
+	/* One DATA range covers all 512 fragments without reading storage. */
+	calls = f.calls;
+	CHECK(fsimg_reader_next_range(f.reader, 0, &range, NULL) == FSIMG_OK);
+	CHECK(range.kind == FSIMG_RANGE_DATA && range.length == length);
+	CHECK(fsimg_reader_next_range(f.reader, length, &range, NULL) == FSIMG_DONE);
+	CHECK(f.calls == calls);
 	before = f.reader->session.progress.work;
 	CHECK(fsimg_reader_read_at(f.reader, 0, bytes, length, &count, NULL) == FSIMG_OK);
 	CHECK(count == length);
@@ -1434,6 +1485,10 @@ main(int argc, char **argv)
 	test_content_guard("cancel-range");
 	test_content_guard("work");
 	test_content_guard("partial");
+	test_content_guard("partial-fragment");
+	test_content_guard("zero-tail");
+	test_content_guard("eof");
+	test_content_guard("domain");
 	test_metadata_boundary("after-end");
 	test_metadata_boundary("inside-set");
 	test_metadata_boundary("unknown-offset");

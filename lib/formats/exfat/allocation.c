@@ -141,11 +141,6 @@ exfat_index_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
     fsimg_error_t *error)
 {
 	const exfat_geometry_t *g = &exfat_state(reader)->geometry;
-	const fsimg_extent_domain_t heap = {
-		.offset = g->heap_offset,
-		.length = (uint64_t)g->clusters * g->cluster_bytes,
-		.unit_bytes = g->cluster_bytes
-	};
 	fsimg_extent_index_t *index;
 	uint64_t allocated;
 	uint32_t count;
@@ -157,7 +152,8 @@ exfat_index_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
 		return (status);
 	if (stream->first == 0)
 		return (FSIMG_OK);
-	status = fsimg_extent_index_new(&reader->session, &heap, &index, error);
+	status = fsimg_extent_index_new(&reader->session,
+	    &reader->content_domain, &index, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (stream->contiguous) {
