@@ -40,11 +40,107 @@ these gates. Feature advertisement requires that evidence and the acceptance
 tests below. The design covers both reading and writing even where writer
 qualification requires facts a read-only driver cannot establish.
 
+## How Power-Safe works
+
+This section explains the native filesystem's operating model, which the
+on-disk rules in the rest of this document serve. Statements are measured
+on QNX 6.5.0 [X1] or read from its driver [X2] unless marked as inference.
+
+### A snapshot is a tree hanging from a header
+
+Everything on the volume is reachable from a 512-byte header (superblock):
+the inode table, the allocation bitmap and the long-name table are each
+stored as a tree of blocks whose root pointers sit in the header, and every
+file and directory is a tree of blocks whose root pointers sit in its inode.
+One header therefore describes one complete, self-consistent filesystem:
+a snapshot. The volume holds two header slots, one before the data area and
+one after it, each with a 64-bit serial number and a CRC over its contents.
+When both headers are valid, the one with the larger serial is the live
+filesystem.
+
+### Changes never overwrite the committed snapshot
+
+While mounted read-write, the driver builds the next snapshot in memory and on
+blocks free in the committed snapshot's bitmap. Changed file data, directories
+and indirect blocks are written to newly allocated blocks: in one measured
+session the root directory moved from block `0x818` to `0x1fff`. The inode
+table and bitmap are rewritten through fixed twins instead: the system area
+has `R` blocks and an equal twin area after them, and a changed system block
+`k` is written to `k + R`, or back to `k`, whichever the committed snapshot
+does not use. Both twin areas are permanently allocated, so this never
+consumes free space. The design depends on one property inferred from this
+model rather than measured: a block the committed snapshot references is not
+overwritten before a newer snapshot commits. Once one does, blocks only the
+older snapshot used are free in the new bitmap; the measured old root block
+was.
+
+### Commit is one header write
+
+A snapshot is committed periodically (the `snapshot=` mount option,
+default every 10 seconds), on `sync` and at unmount. The driver increments
+the serial, recomputes the CRC over bytes 8 through 511, writes the header
+into the slot that does not hold the committed snapshot and then switches
+its notion of the current slot; successive snapshots alternate between
+the two slots. Around the header write it makes two io-blk calls that can
+fail the commit; they are, by inference, cache flushes ordering the new
+blocks before the header and the header before later writes. The driver
+refuses to mount a device that cannot synchronize its cache ("hardware
+lack of SYNC") unless told `sync=optional` or `sync=none`, which supports
+that inference.
+
+The bit `0x1` in the header flags is set in the driver's in-memory copy
+during a read-write mount; it was never present on disk, including in a
+header committed while the volume was mounted.
+
+### Power loss
+
+After a crash the volume is the last committed snapshot, given the
+no-overwrite property above. There is no journal to replay and no repair
+pass: mounting reads both headers,
+verifies each one's magic and CRC and selects the larger serial. Work done
+since the last commit is lost; nothing done before it is. In the measured
+test, a file committed with `sync` survived a hard power cut, while a
+200000-byte file and a directory created afterwards were absent; the
+volume mounted and checked clean with no recovery step. The uncommitted
+work had not reached the disk, so the test did not exercise partially
+written uncommitted blocks.
+
+QNX 6.5.0 refuses the volume if either header fails its magic or CRC
+check; only an unreadable header (an I/O error) is skipped in favor of the
+other. With the older header corrupted, the mount, including a read-only
+mount, failed with "Corrupted file system detected", and `chkqnx6fs`, with
+or without `-f`, refused the volume ("bad sblk chksum"). A commit overwrites
+the older header's slot, so a torn header write leaves a volume QNX 6.5.0
+cannot use; by inference, the design relies on the device writing each
+512-byte header completely or not at all.
+
+### Free space and the reserve
+
+Copy-on-write needs room: until a commit, a changed file occupies both its
+old and new blocks. The header's reserve percentage (default 3) withholds
+part of the volume from ordinary users; by inference, it lets the driver
+still complete snapshots when the volume appears full.
+
+### Consequences for fsimg
+
+* A reader consumes exactly one snapshot, selected by the larger serial as
+  QNX selects it but with the stricter agreement checks under
+  [superblock fields](#superblock-fields-and-integrity), and treats a header
+  that fails validation as an error, as QNX does. Blocks reachable only from
+  the other snapshot are not content of the selected one and may be free in
+  its bitmap.
+* A reader never needs recovery logic: a volume is either a valid snapshot
+  or invalid.
+* The writer emits a committed state with no pending work: both headers
+  valid and identical, twin areas zeroed and allocated, all reachable
+  blocks written before the headers. A partially written image is not a
+  QNX volume in any recoverable sense and is never reported as success.
+
 ## Compatibility profiles
 
 | Profile | Reader contract | Writer contract |
 | --- | --- | --- |
-| Classic, QNX 6.5-compatible | Plain unencrypted volumes; both byte orders; 512, 1024, 2048, or 4096-byte blocks; validated feature markers | New ordinary volumes in the same profile; regular files and directories; deterministic allocation and two consistent snapshots |
+| Classic, QNX 6.5-compatible | Plain unencrypted volumes; both byte orders; 512, 1024, 2048, or 4096-byte blocks; validated feature markers | New ordinary volumes in the same profile; regular files and directories; deterministic allocation and two identical serial-1 headers describing one view |
 | Classic without boot area | Same plain layout with first header at byte zero, after unambiguous validation | Not emitted by the default writer |
 | Audi MMI 3G | Separate superblock decoder and checksum policy; explicit variant selection if detection is ambiguous | Separate qualification; never emitted by selecting the classic profile |
 | Extended Power-Safe | Identify recognized extensions and reject unsupported semantics explicitly | Separate qualification of each extension and target release |
@@ -102,20 +198,39 @@ distinct features. Their disk markers and payload representations must be
 understood before acceptance. OS version strings alone do not identify an
 on-disk feature set. [Q2], [Q3], [Q4], [Q5]
 
-The default writer uses little endian, 1024-byte blocks, a boot-area layout,
-and one allocation group. Explicit big endian and other classic block sizes
-are independently qualified. A group is an allocation-policy subdivision,
-not permission to relocate the data origin. Readers do not infer group-local
-pointer bases. [Q1]
+The default writer uses little endian, 1024-byte blocks, a zeroed boot area,
+and one allocation group. Big endian and the other classic block sizes, 512,
+2048 and 4096, are encoded identically apart from byte order and geometry,
+including the tree depths that geometry implies (see the system run below);
+QNX 6.5.0 refuses block sizes outside 512 through 4096 or below the device
+sector size. A group is an allocation-policy subdivision, not permission to
+relocate the data origin. Readers do not infer group-local pointer bases.
+QNX accepts 1 through 64 groups, and pointers remain volume-relative in
+every group. [Q1], [X1], [X2]
+
+Native `mkqnx6fs` defaults, which automatic sizing may match but which are not
+validity rules, are: one inode per 8, 32, 64 or 128 blocks for `N` up to
+`0xfffff`, `0x7fffff`, below `0x8000000` and above, rounded up to fill the
+last inode-table block; a 3 percent reserve; long-name checksums enabled; and
+a group count chosen from 1, 4, 8, 16 or 32 and capped at 4, 8, 16 or 32 by
+the same `N` thresholds. The native allocator spreads new directories across
+groups and places indirect blocks downward from the end of a group; fsimg uses
+its own deterministic contiguous plan. [X1], [X2]
 
 The driver maintains a closed table of accepted compatibility-marker tuples,
 flag meanings, root modes, inode extension encodings, and optional metadata
 layouts. Each row names its evidence and fixture profile. Unknown
 read-incompatible features fail opening; unknown write-incompatible features
 cannot be emitted. An unknown marker is not ignored because Linux ignores it.
-The raw words at superblock offsets 28 and 30 are not parsed as decimal QNX
-release numbers. Determining their marker semantics is a prerequisite for
-populating this table, not a task for heuristic detection.
+The classic table follows QNX 6.5.0's own acceptance rules. The word at
+offset 28 is the on-disk format version and must be 4. The word at offset 30
+is the reserved-block percentage, at most 100. In the flag word, `0x100`
+enables long-name checksums; the driver sets `0x1` only in memory during a
+read-write mount, and it has not been observed on disk. Any bit in `0xfe00`
+makes the volume read-only to QNX, and any bit in `0xff0000` makes it
+unmountable. The reader's classic table holds the flag words `0` and
+`0x100`; any other value is an unsupported feature. The writer emits one of
+those two. [X1], [X2]
 
 ## Shared owners and representation
 
@@ -204,23 +319,23 @@ integer. [L1], [N1], [R1]
 | 0 | 4 | Magic |
 | 4 | 4 | Superblock CRC |
 | 8 | 8 | Snapshot serial |
-| 16 | 4 | Volume creation time |
-| 20 | 4 | Volume access/update time; precise writer meaning is profile-qualified |
-| 24 | 4 | Flags |
-| 28 | 2 | First compatibility/version word |
-| 30 | 2 | Second compatibility/version word |
+| 16 | 4 | Format time, Unix seconds |
+| 20 | 4 | Last snapshot sync time; equal to the format time in a fresh volume |
+| 24 | 4 | Flags: `0x100` long-name checksums; feature classes above |
+| 28 | 2 | On-disk format version, 4 |
+| 30 | 2 | Reserved-block percentage, 0 through 100 (`mkqnx6fs -r`, default 3) |
 | 32 | 16 | Volume identity / label storage |
 | 48 | 4 | Block size |
 | 52 | 4 | Inode capacity |
 | 56 | 4 | Free inode count |
 | 60 | 4 | Block count `N` |
 | 64 | 4 | Free block count |
-| 68 | 4 | Allocation-group parameter |
+| 68 | 4 | Allocation-group count, 1 through 64 |
 | 72 | 80 | Inode-table tree descriptor |
 | 152 | 80 | Allocation-bitmap tree descriptor |
 | 232 | 80 | Long-name tree descriptor |
-| 312 | 80 | Additional system tree; semantics require profile evidence |
-| 392 | 120 | Extension/reserved region; covered by CRC |
+| 312 | 80 | Additional system tree; empty in the classic profile (length 0, unused references, depth 0, mode 1) |
+| 392 | 120 | Extension/reserved region, all zero in the classic profile; covered by CRC |
 
 The 392-byte structure described by the Linux header is not the complete
 512-byte integrity record. The NFI schema describes a further tree at 392,
@@ -248,16 +363,18 @@ complete 504-byte test inputs with stored values. Tests must cover both disk
 byte orders and a changed byte near offset 511; checking only decoded fields
 misses part of the integrity domain.
 
-fsimg's strict snapshot policy validates both headers before selection:
-magic, CRC, byte order,
-profile, geometry, counts, tree capacities, and ranges. Stable identity,
-block size, block count, inode capacity, layout, and compatible feature
-interpretation must agree; serials, free counts, timestamps, flags with
-documented snapshot meaning, and tree roots may differ. Reject a profile
-transition whose compatibility cannot be established.
+fsimg's strict snapshot policy validates both headers before selection: magic,
+CRC, byte order, profile, geometry, counts, tree capacities, and ranges.
+Stable identity, creation time, block size, block count, inode capacity, group
+count, layout, and compatible feature interpretation must agree; serials, free
+counts, timestamps, flags with documented snapshot meaning, and tree roots may
+differ. Reject a profile transition whose compatibility cannot be established.
 
 Select the larger unsigned 64-bit serial. Equal serials are accepted only for
 equivalent snapshot descriptions; conflicting roots or state are ambiguous.
+A freshly formatted native volume has two identical serial-1 headers, so
+equal serials are the normal state of an unmodified volume. QNX itself
+takes the first header on a tie. [X1], [X2]
 There is no guessed wraparound ordering. The default strict reader requires
 both headers to validate and does not silently fall back to an older snapshot
 after a checksum or tree failure. Every subsequent metadata read uses the
@@ -272,8 +389,8 @@ Every classic tree descriptor has the following 80-byte representation:
 | 0 | 8 | Logical stream length |
 | 8 | 64 | Sixteen 32-bit filesystem block references |
 | 72 | 1 | Indirection depth `L` |
-| 73 | 1 | Tree mode, interpreted by the accepted profile |
-| 74 | 6 | Profile-defined extension/reserved bytes |
+| 73 | 1 | Tree mode; 1 for every classic system tree |
+| 74 | 6 | Extension/reserved bytes; zero in the classic profile |
 
 An inode embeds the same pointer/depth model at different offsets. Each
 indirect block consists of `P = B / 4` references. All branches have the same
@@ -302,7 +419,10 @@ blocks also remain errors. Modern sparse encodings require their own feature
 decoder; they are not inferred from this unused sentinel. [L1], [L3], [Q4]
 
 The writer uses the smallest sufficient depth and fills every unused pointer
-slot with the sentinel. It pads a partially occupied data block with zero.
+slot with the sentinel, as native QNX does. It pads a partially occupied
+data block with zero; native QNX leaves stale bytes there, which readers
+never expose. A symbolic link's target is ordinary content without a
+terminator. [X1]
 Unused pointer slots therefore contain defined nonzero bytes; zeroing an
 entire indirect block is not a valid empty-pointer encoding.
 
@@ -332,17 +452,17 @@ fixed physical disk offset. Validate `1 <= i <= inode_capacity` and complete
 | 0 | 8 | Logical content length |
 | 8 | 4 | Owner ID |
 | 12 | 4 | Group ID |
-| 16 | 4 | Additional time field, called `ftime` by the references |
+| 16 | 4 | Creation time (`ftime`) |
 | 20 | 4 | Modification time |
 | 24 | 4 | Access time |
 | 28 | 4 | Inode change time |
 | 32 | 2 | POSIX file type and permission bits |
-| 34 | 2 | Extension/link metadata; do not assume it is unused |
+| 34 | 2 | Link count |
 | 36 | 64 | Sixteen 32-bit block references |
 | 100 | 1 | Indirection depth |
-| 101 | 1 | Inode state/status |
-| 102 | 2 | Profile-defined metadata |
-| 104 | 24 | Profile-defined extension/reserved bytes |
+| 101 | 1 | Status bits: `0x1` allocated, `0x2` created through the filesystem |
+| 102 | 2 | Zero in the classic profile |
+| 104 | 24 | Zero in the classic profile |
 
 Type comes from the disk mode masked with octal `0170000`: `0100000` is a
 regular file, `0040000` a directory, `0120000` a symbolic link, and `0010000`
@@ -354,10 +474,11 @@ these numbers do not establish an exhaustive state machine. [L1], [L2], [F1]
 Modification, access, and change times are unsigned 32-bit Unix-epoch seconds
 in the classic reader interpretation, with one-second precision. They do not
 use the host timezone and are not signed 2038-limited fields. The representable
-range is 0 through 4294967295 seconds. `ftime` is not exposed as creation
-time without independent confirmation of its meaning. Inode change time is
-not file creation time. Required unrepresentable timestamps fail planning;
-optional loss follows the common metadata policy. [L2]
+range is 0 through 4294967295 seconds. `ftime` uses the same encoding and
+is the file's creation time and maps to the entry model's birth time where
+that is supported. Inode change time is not file creation time. Required
+unrepresentable timestamps fail planning; optional loss follows the common
+metadata policy. [L2], [X1]
 
 The baseline public entry model carries files, directories, and supported
 timestamps. It does not thereby gain owner, group, mode, link-count, birth-time,
@@ -382,12 +503,19 @@ operation requiring that entry returns unsupported, not a fabricated regular
 file or silent omission. Full verification cannot report complete support
 after skipping such objects. [L2]
 
-Free inode, deleted inode, root, `.boot`, extension/link fields, and any
-integrity-check encoding have explicit profile recipes. Filling fields at 34
-or 101 with guessed zeros is prohibited. The fixture's extension word often
-matches POSIX link counts, but that observation does not prove its complete
-bit layout. Similarly, unknown trailing inode bytes are not necessarily
-padding in an extended profile.
+The classic profile's inode recipe comes from native QNX 6.5.0. Offset 34 is
+the POSIX link count: one per name of a regular file, `2 + subdirectories` for
+a directory. Offset 16 is the creation time. The status byte is a bit set: bit
+0 means allocated, and bit 1 is set when the filesystem creates an inode and
+when it writes regular-file data. Formatter-created inodes have 1, inodes
+created afterwards 3 and deleted ones 2; rewriting a formatter-created
+directory leaves it at 1. A never-used inode is 128 zero bytes, and offsets
+102 through 127 are zero. Root is inode 1 with mode `040775`; inode 2 is
+`.boot`, mode `040700`, listed in root. QNX refuses to remove inode 2 whatever
+its name, so the writer always reserves it for `.boot` and emits both with
+status 1. Every other inode the writer emits has status 3, the state of an
+inode created through the filesystem. Unknown trailing inode bytes are not
+necessarily padding in an extended profile. [X1], [X2]
 
 ## Directories and names
 
@@ -401,15 +529,18 @@ first; root's two references both identify inode 1. [L3], [L4]
 | --- | --- | --- |
 | 0, four bytes | Target inode | Target inode |
 | 4, one byte | Name byte length, 1 through 27 | Marker `0xff` |
-| 5 | Up to 27 name bytes through offset 31 | Three profile-defined bytes |
+| 5 | Up to 27 name bytes through offset 31, zero padded | Three zero bytes |
 | 8, four bytes | Part of inline name | Zero-based long-name stream block index |
 | 12, four bytes | Part of inline name | Long-name checksum when enabled |
-| 16, sixteen bytes | Part of inline name | Profile-defined tail |
+| 16, sixteen bytes | Part of inline name | Zero |
 
 Slots with inode zero or length zero are unused in the reference readers;
-fsimg does not dereference their other fields. For a live slot, lengths 28
-through 254 are invalid. Inline names are length-delimited, not dependent on
-a trailing NUL. A 27-byte inline name consumes the entire name area. [L4], [N1]
+fsimg does not dereference their other fields. QNX deletes an entry by zeroing
+only its inode number, so an unused slot can retain a stale name. The writer
+emits unused slots as 32 zero bytes, and a directory occupies whole blocks: a
+new directory is one block of slots. [X1] For a live slot, lengths 28 through
+254 are invalid. Inline names are length-delimited, not dependent on a
+trailing NUL. A 27-byte inline name consumes the entire name area. [L4], [N1]
 
 A long-name index `j` identifies logical byte `j * B` of the long-name tree.
 It is neither a filesystem block reference nor an ordinary inode number.
@@ -427,21 +558,27 @@ It is not the superblock CRC. For ASCII byte values, check examples are
 `a -> 0x00000061`, `ab -> 0x80000092`, and
 `abc -> 0x400000ac`. [L4]
 
-The reference uses plain C `char` for character values. Its behavior for
-UTF-8 bytes above 127 therefore does not establish a portable signedness rule.
-The checksum's enabled marker, byte interpretation for non-ASCII names, and
-disabled-field value must be qualified against QNX-generated long names in
-both byte orders. Do not accept either checksum indiscriminately or let the
-host compiler choose. A qualified checksum mismatch is corruption; Linux's
-diagnostic-only handling is not fsimg policy. MMI does not use this checksum
-under its Linux profile. [L4], [Q1], [Q8]
+Character values are unsigned bytes, whatever the host's `char`. A name whose
+recurrence yields zero stores `0xffffffff`. The value is stored in filesystem
+byte order. With flag `0x100` clear, the field is zero. Native vectors:
+fourteen copies of `c3 a9` give `0x55554083`, and ten copies of `e4 b8 ad`
+give `0xfffffbaf`. Do not accept either signedness indiscriminately. [X1],
+[X2] A qualified checksum mismatch is corruption; Linux's diagnostic-only
+handling is not fsimg policy. MMI does not use this checksum under its Linux
+profile. [L4], [Q1], [Q8]
 
 The fsimg name profile uses strict UTF-8 components, compared byte-for-byte with case preserved
 and case significant. There is no locale-dependent folding or silent Unicode
 normalization. Reject embedded NUL, slash, control bytes `0x01` through `0x1f`,
 `0x7f`, invalid UTF-8, and ordinary children named `.` or `..`. The 510 limit
 counts encoded bytes, not Unicode characters. Host normalization and case
-collisions remain the extractor's separate responsibility. [L4], [Q5]
+collisions remain the extractor's separate responsibility. QNX 6.5.0
+itself accepts 1 through 510 bytes, rejects NUL and slash, and rejects any
+component that its C library's multibyte decoder does not accept, which is
+UTF-8 under the 6.5.0 native locale. The fsimg profile is stricter. The
+writer never emits a name outside it; a reader reports a natively valid
+name outside it, such as one with control bytes, as unsupported rather than
+corrupt. [L4], [Q5], [X2]
 
 Directories follow the [prepared-directory contract](design-directories.md).
 Each entry's namespace key is its exact UTF-8 name bytes, which gives one
@@ -462,9 +599,10 @@ in its final storage are not counted as free; the classic convention marks
 them allocated. [Q6], [L3], [F1]
 
 Inode-table and bitmap storage, including their indirect blocks, occupies a
-reserved system region associated with the two snapshots. Ordinary data and
-long-name storage also consume allocatable blocks. A writer accounts for all
-metadata and both system reservations before offering free space. The reserve
+reserved system region and its twin region, described below. Ordinary data
+and long-name storage also consume allocatable blocks. A writer accounts for
+all metadata and both halves of the system region before offering free
+space. The reserve
 for future copy-on-write operations is distinct from system metadata and
 distinct from a source file's logical zeros.
 
@@ -475,6 +613,15 @@ retains an unchanged inode-table block used by the older snapshot. A snapshot
 can also stop owning ordinary data still referenced by its predecessor.
 Each bitmap describes its own snapshot; applying the active bitmap to every
 old-snapshot block reports false corruption. [L3], [F1]
+
+Native QNX 6.5.0 lays the system region out as one run from block 0: the
+bitmap, the inode-tree indirect blocks and the inode-table leaves (`R`
+blocks), then a twin region of another `R` blocks. System block `k` and
+`k + R` are a pair; a snapshot rewrites a changed system block in whichever
+member the previous snapshot does not use, and both members stay allocated
+in every bitmap. A fresh format zero-fills the run, points both headers at
+the primary members and gives both headers serial 1. Bits past `N` in the
+final bitmap block are set. [X1]
 
 Bootstrap bitmap pages on demand through the geometry-checked, cycle-bounded
 tree decoder. Record every bitmap leaf and indirect block read in a paged
@@ -533,8 +680,8 @@ mutually exclusive where the QNX profile uses the same storage; an absent
 label is not silently replaced by FAT's `NO NAME`. Identity byte encoding,
 text padding, and any selector flag are qualified as a unit. [Q1]
 
-The deterministic catalog order assigns root inode 1 and, when required by
-the qualified profile, `.boot` directory inode 2. If the catalog contains
+The deterministic catalog order assigns root inode 1 and `.boot` directory
+inode 2. If the catalog contains
 `/.boot` as a directory, assign that directory inode 2, retain its children
 with their ordinary independent inode numbers, and validate the directory's
 selected metadata against the profile. If absent,
@@ -571,12 +718,17 @@ content blocks even when each name is much shorter than `B`. Inode-table
 content is `ceil(128 * inode_capacity / B)` blocks. Bitmap content is
 `ceil(ceil(N / 8) / B)` blocks for the classic nonexpandable candidate.
 
-Two complete system-tree copies provide a simple new-image layout. Their
-reservation includes both copies' indirect blocks and the format's required
-alignment and allocation-policy overhead. This dense-tree arithmetic is
-established by the addressing model; the exact system-region reservation and
-placement rules are a separate writer qualification gate. The formula alone
-does not prove that QNX can subsequently update the image.
+The system run occupies blocks 0 through `2R - 1`. Its first `R` blocks are,
+in order: the bitmap tree's indirect blocks (if any) then its leaves; the
+inode tree's indirect blocks from the level nearest the leaves up to the
+level nearest the header; then the inode-table leaves. Within each level,
+blocks ascend in logical order. The next `R` blocks are the zeroed twins.
+For example, at `B = 512` on a 64 MiB volume the bitmap indirect block is
+0, its leaves 1 through 32, the inode tree's 32 lower indirect blocks 33
+through 64, its top indirect block 65 and its leaves 66 through 4160, so
+`R = 4161`. This order is measured for bitmap depths 0 and 1 and inode
+depths 1 and 2; deeper trees follow the same pattern by inference and
+require a native capture before the writer emits them. [X1]
 
 Automatic sizing solves the dependency between `N`, bitmap storage, total
 metadata, and free reserve with checked monotone sizing and a finite ceiling.
@@ -592,23 +744,31 @@ contiguous range still uses QNX6 tree pointers. Fill indirect blocks from the
 plan in logical order. Do not allocate a resident vector proportional to
 volume blocks, inode capacity, long names, or catalog size.
 
-### Prepare two independently valid snapshots
+### Emit the native snapshot pair
 
-Both headers describe complete, internally consistent filesystem views.
-Use different deterministic serials, 1 and 2, so snapshot choice is
-unambiguous. Both views contain the same user namespace and content; ordinary
-immutable payloads can be shared. Each view's system descriptors reference
-its planned system metadata, and its own bitmap/free counts conform to the
-qualified reservation rules. Do not create the second view by copying a
-header whose system pointers refer to the wrong reservation.
+The writer emits a committed state with the native format's header convention:
+both headers are byte-identical, carry serial 1 and describe one view. No
+native session produces exactly this state, since native population commits
+new serials, so each emitted profile is qualified by native mount, write,
+remount and `chkqnx6fs` runs before registration. QNX takes the first header
+on the tie. The system run starts at block 0: bitmap blocks, inode-tree
+indirect blocks and inode-table leaves covering the full inode capacity (`R`
+blocks), then the `R`-block twin region. The writer zero-fills the twin region
+and unused inode records, and marks both halves allocated. QNX's first
+snapshot then writes changed system blocks into their twins and the alternate
+header with serial 2. Ordinary directory, long-name, indirect and payload
+blocks follow the system run. Emitting two different views, or system pointers
+into the twin region, departs from the native recipe and is not part of the
+classic writer profile. [X1]
 
 The precise flags, compatibility words, root modes, inode state/link fields,
 unused-inode recipe, mandatory directory metadata, bitmap reservation, and
-boot-area locator bytes are part of a versioned writer profile. These values
-are derived from controlled QNX formatter experiments and native validation.
-One readable fixture or a Linux mount does not supply a complete recipe.
-Until the profile has this evidence, writer registration remains disabled
-rather than producing plausibly readable images with unsafe free-space data.
+boot-area bytes are part of a versioned writer profile. The classic profile
+takes them from the native QNX 6.5.0 evidence recorded above, and the boot
+area is all zero: QNX mounts, checks and writes such a volume. Every emitted
+image is qualified by native validation; one readable fixture or a Linux
+mount does not supply a complete recipe. Writer registration requires that
+native qualification; a profile without it is not registered.
 
 ### Emit only a validated immutable plan
 
@@ -786,6 +946,8 @@ Links and provenance details for these keys are in the
 | N1 / N2 | Pinned NFI QNX6 schema / reader |
 | R1 | Pinned ReFirmLabs QNX6 extractor |
 | F1 | Pinned NFI synthetic test-image observations |
+| X1 | Native QNX 6.5.0 formatter, filesystem and checker experiments |
+| X2 | Disassembly of the QNX 6.5.0 filesystem, formatter and checker |
 | P1 | Pinned PCM-Explorer Porsche PCM 3.1 format investigation |
 | G1 | Pinned PCM-Forge native tool and firmware inventory |
 
@@ -807,5 +969,7 @@ Links and provenance details for these keys are in the
 [N2]: https://github.com/NetherlandsForensicInstitute/qnxmount/blob/11c8a7f9ee9b945d584263743f6ea8524e8776d2/qnxmount/qnx6/interface.py
 [R1]: https://github.com/ReFirmLabs/qnx6-extractor/blob/075434f8c07a3bc85f09394970373fe5e04f17a0/qnx6_extractor/main.py
 [F1]: ../docs/qnx6-research.md#fixture-observations
+[X1]: ../docs/qnx6-research.md#native-qnx-650-evidence
+[X2]: ../docs/qnx6-research.md#native-qnx-650-evidence
 [P1]: https://github.com/dspl1236/PCM-Explorer/blob/a38709a0db90b9a3e70f4542b82553e93ace0f42/docs/QNX6-NOTES.md
 [G1]: https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/research/firmware/PCM31_ISO_ANALYSIS.md

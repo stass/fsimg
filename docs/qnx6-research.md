@@ -22,6 +22,15 @@ firmware or user data embedded in its sample images. No mirrored proprietary
 SDK header is used as an authority, including the SDK mirror linked from the
 NFI schema. No OEM map, firmware, or personal HDD image is imported.
 
+QNX 6.5.0 native binaries are run as external test tools and inspected by
+disassembly only to establish on-disk interoperability facts: field
+meanings, accepted values and the decisions a native implementation makes.
+No QNX code, loader bytes or translated routines enter fsimg, and no symbol
+tables are imported; individual function names are cited only to locate
+evidence. The ISO, extracted binaries and generated images stay outside the
+repository; native images include the proprietary QNX boot loader in their
+first 8192 bytes and are not redistributable fixtures as captured.
+
 ## Sources
 
 Vendor references describe user-visible behavior and compatibility, rather
@@ -53,6 +62,8 @@ v6.12 release; the other implementations are pinned to the revisions below.
 | G2 | [PCM-Forge system observations](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/research/PCM31_SYSTEM_INFO.md) | Author-reported checker on a PCM 3.1 HDD; not a measurement of the target 911 |
 | G3 | [PCM-Forge system collector](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/modules/sysinfo/scripts/sysinfo_dump.sh) | Concrete locations for firmware, kernel, process, mount, and tool inventory; script inspection only |
 | G4 | [PCM-Forge HDD reader](https://github.com/dspl1236/PCM-Forge/blob/78cc9e76b2a5b7b205022e78912cee043a00603e/tools/hdd_tool.py) | Heuristic salvage implementation; incorrect ordinary block origin and incomplete integrity checks exclude it as a format oracle |
+| X1 | QNX 6.5.0 x86 live ISO `qnx-6.5.0-x86-201007091524.iso` (SHA-256 `81a4f541...7dbe2`) under QEMU 11.1.2 | Controlled `mkqnx6fs`/`fs-qnx6.so`/`chkqnx6fs` experiments on a 64 MiB raw disk pre-filled with `0xaa`; see [native QNX 6.5.0 evidence](#native-qnx-650-evidence) |
+| X2 | Disassembly of the X1 `fs-qnx6.so` (SHA-256 `87079603...fc58c8`), `mkqnx6fs` (`39a4cfb8...9d642`) and `chkqnx6fs` (`b991f6f2...7e`); unstripped i386 ELF | Decision logic behind X1 observations: header acceptance, feature classes, checksum, name validation, protected inodes |
 
 NFI's repository declares [Apache-2.0](https://github.com/NetherlandsForensicInstitute/qnxmount/blob/11c8a7f9ee9b945d584263743f6ea8524e8776d2/LICENSE).
 ReFirmLabs declares [MIT](https://github.com/ReFirmLabs/qnx6-extractor/blob/075434f8c07a3bc85f09394970373fe5e04f17a0/LICENSE),
@@ -245,8 +256,162 @@ make it a salvage aid, not evidence for changing fsimg's established layout
 or a validator for emitted images. The spec retains uniform tree traversal,
 correct slice-relative block translation, and snapshot-bound enumeration.
 
-The unresolved writer gates remain: exact compatibility flags and modes,
-unused/deleted inode state, link/extension fields, system reservation and
-group rules, identity encoding, and non-ASCII long-name checksums. Native
-tools could resolve them through measured output; inventory names and a
-heuristic reader do not resolve them directly.
+The native QNX 6.5.0 evidence below resolves the classic profile's header,
+inode, name and system-area questions that the earlier sources left open.
+Identity selection for the PCM target, Porsche partition composition and
+target-version differences remain open.
+
+## Native QNX 6.5.0 evidence
+
+The X1 experiments formatted the whole 67108864-byte disk (`V`), so every
+capture has `N = (V - 16384) / B`, superblocks at 8192 and `D + N * B`, and
+no tail. Each capture records the guest commands and native tool output
+and keeps the raw image; the torn-header record names the exact host-side
+byte change. All captures,
+including those after native create, write, delete and remount cycles,
+check clean. The matrix covered B = 512, 1024, 2048 and 4096, both byte
+orders and long-name checksums enabled and disabled; populated volumes used
+B = 1024 in both byte orders and B = 512 and 4096 in little endian.
+
+### Superblock
+
+| Field | Native value and meaning | Evidence |
+| --- | --- | --- |
+| 8, serial | A fresh format writes serial 1 to both headers; they are byte-identical | X1 |
+| 16, 20 | Both equal the format time on a fresh volume | X1 |
+| 24, flags | `0x100` = long-name checksums enabled (the `mkqnx6fs` default); `0` disabled. `0x1` is set in the driver's in-memory copy during a read-write mount and never reached disk, including in a header committed while mounted (power-cut capture). Any bit in `0xfe00` refuses a read-write mount ("unsupported r/w features"); any bit in `0xff0000` refuses mounting ("incompatable features") | X1, X2 |
+| 28 | On-disk format version, always 4 (`chkqnx6fs`: "Ondisk format: v4"). Any other value refuses mounting | X1, X2 |
+| 30 | Reserved-block percentage (`-r`, default 3); the driver rejects values above 100 and reserves `N * w30 / 100` blocks (`floor(N / 100) * w30` when `N > 0x28f5c27`) | X1, X2 |
+| 32 | The `-u` UUID's sixteen bytes in textual order, independent of byte order | X1 |
+| 68 | Allocation-group count; `sblksanity` rejects values above 64 | X1, X2 |
+| 312 | Empty descriptor: length 0, sixteen `0xffffffff` references, depth 0, mode 1 | X1 |
+| 392..511 | All zero; the descriptor-shaped bytes at 392 hold zero references, not the unused sentinel | X1 |
+| 512..4095 | Zero in both header areas | X1 |
+
+Every tree descriptor written by the formatter has mode byte 1 and six zero
+extension bytes. The driver selects the header with the strictly greater
+64-bit serial and the first header on a tie. When both are loaded it
+requires equal magic, creation time, inode count, block count, block size
+and group count; the UUID is not compared. Single-header sanity requires
+the volume to fit the device, free inodes below the inode count, free
+blocks below `N`, groups at most 64 and the reserve at most 100 percent.
+Block sizes outside 512 through 4096, or below the device sector size, are
+refused.
+
+`mkqnx6fs` computes `N = floor((V - 16384) / 4096) * 4096 / B`. Its default
+inode count is one inode per 8 blocks for `N <= 0xfffff`, per 32 up to
+`0x7fffff`, per 64 below `0x8000000` and per 128 above, rounded up to fill
+the last inode-table block (8192 at B = 1024 on this disk). Its default
+group count is chosen from a 1/4/8/16/32 ladder from two values whose
+meaning was not identified, then capped at 4, 8, 16 or 32 by the same `N`
+thresholds; 4 groups at B = 512 and 1024 and 1 group at B = 2048 and 4096 on
+this disk. Only the first rung of each ladder was exercised.
+
+### System area and snapshots
+
+A fresh format allocates one contiguous run from block 0: the bitmap
+blocks, the inode-tree indirect blocks, the inode-table leaves, then an
+equal-size twin region, then the root and `.boot` directory blocks. With
+`R` system blocks, every system block `k` has a fixed twin `k + R`. The
+formatter zero-fills the whole run, points both headers at the primary
+half and marks both halves allocated. For example, at B = 1024, `R = 1036`
+(8 bitmap, 4 indirect, 1024 leaves) and the used count is
+`2 * 1036 + 2 = 2074`; the same relation holds at every block size.
+Within the run, the bitmap tree comes first (indirect block, then leaves),
+then the inode tree's indirect blocks from the level nearest the leaves
+upward, then the inode-table leaves, each level in ascending logical order.
+At B = 512 that is bitmap indirect 0, bitmap leaves 1-32, inode lower
+indirects 33-64, inode top indirect 65 and leaves 66-4160 (`R = 4161`).
+
+A native snapshot rewrites a changed system block in its other twin
+location and writes only the alternate header with the next serial. After
+one session, header 0 still describes the empty serial-1 volume and header 1
+describes serial 2, for instance bitmap block 0 moved to `0x40c`
+and inode indirect block 8 to `0x414`. The next session wrote serial 3 to
+header 0. Ordinary data and directory blocks outside the system run are
+allocated normally. Populate/delete/remount sessions at B = 512, 1024 and
+4096 confirm the twin rule at every tree level: in both resulting headers
+(serials 2 and 3) every bitmap and inode-tree block, indirect or leaf, is at
+its fresh-format position `k` or at exactly `k + R`, and nowhere else.
+
+### Power loss and header validation
+
+A file written and committed with `sync`, followed by a 200000-byte file
+and a directory written without a commit and a hard kill of the emulator,
+left header 1 at serial 2 describing only the committed file and header 0
+at serial 1 describing the empty volume. After rebooting, native
+`chkqnx6fs` passed and the mount showed the committed file with its
+content and nothing else. The uncommitted data never reached the disk, so
+the test shows loss of uncommitted work and survival of committed work, not
+that pre-commit writes avoid committed blocks. In the live serial-2
+bitmap, the serial-1 root directory block `0x818` is free.
+
+The loader marks each header unreadable (I/O error), invalid (bad magic or
+CRC) or valid, and fails the mount if either header is invalid; only an
+unreadable header is skipped. Natively, flipping bit 0 of byte `0x2100`
+(inside the older, serial-1 header's CRC domain) made both read-write and
+read-only mounts fail with "Corrupted file system detected", and `chkqnx6fs`,
+with or without `-f`, refused the volume with "bad sblk chksum". The commit
+path increments the 64-bit serial, computes the CRC over bytes 8 through 511,
+writes the slot not holding the committed snapshot and toggles the
+current-slot bit; the two io-blk calls around that write are unnamed indirect
+calls, interpreted as cache flushes because the driver refuses devices that
+lack cache synchronization.
+
+The bitmap's set bits are exactly the allocated blocks. Bits past `N` in its
+last block are set (`0xff` bytes). The formatter does not write any block
+outside the system run, so unused data blocks keep stale device contents.
+
+### Inodes
+
+| Inode | Mode | Offset 34 | Status 101 | Content |
+| --- | --- | --- | --- | --- |
+| 1, root | `040775` | 3 when empty (link count) | 1 | One block: `.`, `..`, `.boot`, rest zero slots |
+| 2, `.boot` | `040700` | 2 | 1 | One block: `.`, `..` |
+| Never used | | | | 128 zero bytes |
+
+The inode table is allocated and zeroed in full at format time. Offset 34 is
+the POSIX link count: a second hard link increments it, directories count
+`2 + subdirectories`, and a hard link is simply a second directory slot
+naming the same inode. Offsets 102 through 127 were zero in every inode.
+Times are Unix seconds; offset 16 (`ftime`) is the creation time. Writing a
+file at `t`, appending at `t + 3` and changing mode at `t + 6` produced
+ftime `t`, mtime `t + 3` and ctime `t + 6`; a later read did not update
+atime.
+
+The status byte is a bit set. Bit 0 means allocated: inode walks test it and
+freeing clears it. Bit 1 is set when the driver creates an inode and when it
+writes regular-file data; rewriting a formatter-created directory leaves it
+clear. Formatter-created inodes have status 1, inodes created
+through the filesystem 3, and deleted inodes 2. A deleted inode keeps its
+other fields; its directory slot keeps the name and has inode number 0.
+
+The driver refuses to remove inode number 2 (EACCES) regardless of its name,
+so a compatible writer reserves inode 2 for `.boot`. A volume whose boot
+area is all zero mounts, checks clean and accepts native writes.
+
+Files with no content have depth 0 and sixteen unused references. The
+driver uses the smallest sufficient depth: a 17-block file at B = 1024 has
+depth 1. Native QNX does not zero the bytes after a file's logical end in
+its last data block; symbolic-link targets are stored as file content with
+the remainder of the block zeroed. New directories are spread over
+allocation groups (their inodes and blocks start new groups), and indirect
+blocks are allocated downward from the end of a group.
+
+### Names
+
+`q6_validfilename` accepts 1 to 510 bytes, rejects NUL and `/` (EINVAL) and
+validates each character with the C library's `mblen`, returning EILSEQ for an
+invalid sequence. Under the native locale this is UTF-8: native creation of a
+name containing `ff` failed with "Illegal byte sequence", and a name beginning
+with byte `80` was not created. Control bytes are not rejected. Names up to 27
+bytes are inline with zero padding; longer names use the long-name marker, one
+long-name block per name with the record's remainder zeroed, and zero in slot
+bytes 5 through 7 and 16 through 31.
+
+The long-name checksum is the documented recurrence over *unsigned* bytes
+(`movzbl`). Native vectors: 14 copies of `c3 a9` give `0x55554083` (the
+signed interpretation would give `0x55555ea3`), and ten copies of
+`e4 b8 ad` give `0xfffffbaf`. Both byte orders store the same numeric value
+in filesystem byte order. With checksums disabled the stored value is 0. A
+computed value of zero, or an empty name, is stored as `0xffffffff`.

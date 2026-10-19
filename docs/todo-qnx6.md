@@ -18,27 +18,24 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   QNX4 writer if the target contains QNX4; do not label a single QNX6 volume
   as a complete compatible HDD.
 
-* [High] **Compatibility and inode semantics** (`lib/formats/qnx6/`): obtain
-  controlled native formatter output for every accepted marker/flag tuple.
-  Determine clean/snapshot flags, the two version words, root modes, unused
-  inode representation, status transitions, the word at inode offset 34,
-  `ftime`, link encodings, mandatory `.boot` metadata, and extension trees.
-  Vary one feature at a time; retain native inspection output and provenance.
-  Empty and populated F1 snapshots are clues, not a writer template.
+* [High] **Compatibility and inode semantics** (`lib/formats/qnx6/`): the
+  [native QNX 6.5.0 evidence](qnx6-research.md#native-qnx-650-evidence)
+  establishes the classic header words, flag classes, root and `.boot`
+  inodes, status bits, link count and `ftime`. Confirm the same values on
+  the PCM 3.1 target's own formatter before treating QNX 6.5.0 as its
+  profile, and qualify extension trees on later QNX releases.
 
-* [High] **Writable allocation recipe** (`lib/formats/qnx6/`): derive exact
-  dual-system reservation, alignment, indirect-block placement, group
-  parameter semantics, bitmap padding and free counts from images spanning
-  direct/indirect and group boundaries. Qualify two complete fresh snapshots,
-  then create/grow/delete/sync/remount under QNX. Passing a read-only parser
-  cannot close this gate.
+* [High] **Writable allocation recipe** (`lib/formats/qnx6/`): qualify fsimg
+  output, including the identical serial-1 header pair over a populated
+  tree that no native session produces, by native
+  create/grow/delete/sync/remount cycles and `chkqnx6fs`; passing a
+  read-only parser cannot close this gate. Capture system-run order for
+  bitmap depth 2 and inode depth 3 or more, and identify the
+  `default_groups` selection inputs on volumes large enough to cross the
+  group-cap and indirect-depth boundaries.
 
-* [High] **Name and identity encodings** (`lib/formats/qnx6/`): confirm the
-  long-name-checksum enable marker and disabled value; obtain non-ASCII vectors
-  resolving signed-byte behavior on each target. Test 27/28/510-byte names,
-  both byte orders, long-name block zero, and nonempty indirect name trees.
-  Qualify UUID/text-label selection and byte order plus nonbootable boot-area
-  locators without importing loader code.
+* [High] **Identity encodings** (`lib/formats/qnx6/`): qualify UUID versus
+  text-label selection on the PCM target.
 
 * [High] **Reader, verifier, and writer** (`lib/formats/qnx6/`, `test/`,
   `fuzz/`): implement the bounded common tree codec, strict profile checks,
@@ -61,8 +58,11 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   test environments permit. Include explicit unsupported-feature fixtures
   from QNX 6.6/7/8. Separate sparse evidence from parser zero-fill fallbacks.
 
-* [Medium] **Independent infrastructure** (`test/`, `docs/build.md`): arrange
-  QNX formatter/checker and isolated native write-after-create tests, a Linux
+* [Medium] **Independent infrastructure** (`test/`, `docs/build.md`): script
+  the local QNX 6.5.0 QEMU harness (unattended boot, serial shell, capture
+  provenance) and give it a way to load host-built images without a reboot,
+  since the guest block cache does not see host writes to the attached disk.
+  Arrange isolated native write-after-create tests, a Linux
   read-only oracle, licensed redistributable fixtures or local generation,
   and a recorded target PCM compatibility run. Keep ordinary tests
   unprivileged and all third-party utilities outside runtime dependencies.
