@@ -383,10 +383,11 @@ creation command; validator results; and the image hash per tool version.
 
 Bases come from two kinds of builder. **Formatters** are `mkfs.fat --invariant`
 with a fixed volume ID on macOS and Linux, or `newfs_msdos` on FreeBSD,
-populated with `mmd` and `mcopy -m` from source files with fixed times, which
-the [name funnel](#host-names) writes into `test/spec-cache/<key>.src/` like a
-creation case's source tree and which is removed once the base is built; their
-output is a **formatter base**. A typical command is
+populated with `mmd` and `mcopy -m` from source files with fixed times. The
+[name funnel](#host-names) writes those files, like a creation case's source
+tree, into a directory of the build's own,
+`test/spec-cache/<key>.<hex>.tmp.src/`, which is removed once the base is
+built. Their output is a **formatter base**. A typical command is
 `mkfs.fat -C --invariant -i 12345678 -F 32 -s 1 base.img 65536`, with the size
 in 1024-byte blocks. The manifest records the read-only checker
 (`fsck.fat -n` or `fsck_msdosfs -n`) and an `mdir` listing. Formatter bases
@@ -484,11 +485,20 @@ ends it with status 87. Without these keys, Apple platforms default
 automake. fsimg's workers receive fixed sanitizer options of their own from
 `compat/spawn.c`.
 
-Oracles see the same `PATH` and `TZ`, a UTF-8 locale (`C.UTF-8`, or
-`en_US.UTF-8` where the host lacks it) so that mtools keeps Unicode long names,
-`HOME` set to `oracle-home/`, which they cannot write, and `MTOOLSRC` naming
-the empty file in it. Nothing fsimg writes into a case directory can therefore
-configure an oracle. mtools still reads a system `/etc/mtools.conf`; the
+Oracles see the same `PATH` and `TZ`, and:
+
+* a UTF-8 locale, `C.UTF-8` or else `en_US.UTF-8`, under the name the host
+  lists (glibc spells it `C.utf8`), so that mtools keeps Unicode long names; a
+  host with neither cannot run the oracles;
+* `SOURCE_DATE_EPOCH` at 2000-01-01, the time the base trees carry, so mtools
+  stamps the entries it creates alike on every run and a formatter base is
+  reproducible;
+* `HOME` set to `oracle-home/`, and `MTOOLSRC` naming the mtoolsrc in it,
+  which the harness creates without following a link and requires to be an
+  empty regular file before every run of the oracles.
+
+Nothing fsimg writes into a case directory can therefore configure an oracle.
+mtools still reads a system `/etc/mtools.conf`; the
 harness accepts it as part of the host's mtools, and names images only with
 `-i`, so the file cannot redirect a drive to a device. Every argument built
 from a name starts with a fixed prefix, such as `source/` or `::/`, so a
@@ -520,9 +530,9 @@ The preflight also checks:
 
 * that the longest tree root the runner walks by path, a case's `dest/` or
   `source/` with a 128-byte id or a population tree
-  `test/spec-cache/<key>.src/`, plus the profile's `path` ceiling, stays below
-  the host's `PATH_MAX`, because the runner walks by path while fsimg works
-  descriptor-relative;
+  `test/spec-cache/<key>.<hex>.tmp.src/`, plus the profile's `path` ceiling,
+  stays below the host's `PATH_MAX`, because the runner walks by path while
+  fsimg works descriptor-relative;
 * that the soft `RLIMIT_NOFILE` fsimg inherits is at least the `fds` limit;
 * that `trials/` and `cases/` report the same `st_dev`;
 * when oracle confinement is configured, that a fixed command run through it

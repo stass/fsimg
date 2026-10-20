@@ -10,6 +10,9 @@ dosfstools cmake`. Linux exFAT interoperability uses `exfatprogs`.
 FreeBSD uses native `newfs_msdos`/`fsck_msdosfs`; install
 missing development tools through ports, including `filesystems/mtools`.
 The additional fatcat oracle is built from a pinned upstream checkout.
+`configure` finds each tool on `PATH`; a tool given to it in a variable such
+as `MKFS_FAT` or `FATCAT` must be an absolute path, as the specification tests
+treat any other value as an unavailable tool.
 Release archives include generated Autotools support and build without those
 generators. The installed library has no third-party runtime dependencies.
 
@@ -109,6 +112,18 @@ writes `coverage.json` and `summary.txt` there; `make clean` removes it. A run
 passes only when Minitest reports no failure, error or interruption and at
 least one test ran. CI installs the gems on macOS, Ubuntu and FreeBSD and fails
 when the suite skips there. The GCC container jobs install no Ruby and skip it.
+
+The tests' base images are cached in `test/spec-cache/` under the build
+directory, keyed by the base recipe and the versions of the tools that build
+it; `make clean` removes the cache. Measured on macOS (Intel, APFS) with
+mkfs.fat 4.2 and mtools, a first run builds the 1440 KiB FAT12 formatter base
+in 0.04 s, the 16 MiB FAT16 base in 0.08 s and the populated 64 MiB FAT32 base
+in 0.26 s, each including the read-only checker and `mdir`. A cached base is
+checked again in 0.02 to 0.20 s, and copying one into a case directory takes
+1 to 9 ms. mkfs.fat writes the FAT16 base's zeros, so that base occupies
+16 MiB on disk, while the sparse FAT32 base occupies about 1 MiB. The
+independent builder writes a 130000-cluster FAT32 base holding the standard
+tree in 0.2 s.
 
 Sanitizer targets run the full suite in `sanitizer-<mode>/` beneath the current
 build directory, which may be the source tree configured in place or a separate

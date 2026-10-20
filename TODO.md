@@ -27,6 +27,12 @@
   `deep` profile, and stdout is parsed whole. Stream captures to their
   case-directory files and parse the NDJSON records line by line.
 
+* [Medium] **Spec harness formatter oracles beyond mkfs.fat**
+  (`test/spec/lib/fsimg_spec/fat/bases.rb`): formatter bases are built only
+  with mkfs.fat and mtools, so a FreeBSD host without them runs on builder
+  bases alone. Add the `newfs_msdos` formatter adapter, and read every base
+  with fatcat as a secondary reader where `configure` found it.
+
 * [Low] **Scoped ownership intervals** (`lib/formats/fat/verify.c`,
   `lib/formats/exfat/verify.c`): extract the duplicate ownership-interval
   sorting and cursor checks into one bounded utility, the last item of the

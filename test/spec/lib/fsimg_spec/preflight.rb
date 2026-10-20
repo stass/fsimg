@@ -13,28 +13,37 @@ module FsimgSpec
   # in the results directory's preflight/, which it removes when it
   # finishes. It checks the host's path and descriptor limits, the trials
   # and cases filesystems and any oracle confinement, then runs one valid
-  # creation and every reading stage on the created image through fsimg
-  # with the run's options. It answers the Runner every case uses: one
-  # bound to the sandbox status the preflight saw, the coordinator's text
-  # ceiling and whether RLIMIT_AS applies.
+  # creation, and every reading stage on a sample image no fsimg writer
+  # produced, through fsimg with the run's options. It answers the Runner
+  # every case uses: one bound to the sandbox status the preflight saw,
+  # the coordinator's text ceiling and whether RLIMIT_AS applies.
   class Preflight
     # The case directory roots the runner walks by path, beyond the results
     # directory, with the longest id a recipe may carry.
     LONGEST_CASE_ROOT = "/cases/#{"x" * 128}/source".length
-    # A population tree, test/spec-cache/<key>.src/, beyond the build
-    # directory; a key is a SHA-256 in hex.
-    LONGEST_CACHE_ROOT = "/test/spec-cache/#{"0" * 64}.src".length
+    # A population tree in test/spec-cache/, beyond the build directory.
+    LONGEST_CACHE_ROOT = "/test/spec-cache/".length + FixtureCache::LONGEST_NAME
     # Before the first summary reports the coordinator's text ceiling, a
     # capture may hold this much.
     INITIAL_TEXT_BYTES = 64 << 20
     SENTINEL = "fsimg-spec-sentinel"
+    # The creation the preflight runs: one file on FAT16.
+    CREATION = Recipe.new(
+      id: "preflight", format: "fat16", kind: "valid", stages: ["create"],
+      source: Source.new(tree: [TreeEntry.new(path: "file.txt", type: "file", size: 4096, seed: 1)],
+                         settings: { size: 16 << 20 }),
+      expected: { "create" => Expectation.parse("accept") }
+    )
 
-    def initialize(results:, build_directory:, profile:, fsimg:, environment:)
+    # sample renders the reading sample into a directory and answers its
+    # valid reading recipe and image (Fat::Bases.preflight_sample).
+    def initialize(results:, build_directory:, profile:, fsimg:, environment:, sample:)
       @results = results
       @build_directory = build_directory
       @profile = profile
       @fsimg = fsimg
       @environment = environment
+      @sample = sample
     end
 
     # Runs every check and answers the run's Runner and the sandbox status
@@ -47,7 +56,7 @@ module FsimgSpec
       Dir.mkdir(directory, 0o700)
       begin
         check_confinement(directory)
-        run_valid_case(File.join(directory, "case"), address_space: address_space?)
+        run_valid_cases(directory, address_space: address_space?)
       ensure
         FileUtils.rm_r(directory, secure: true)
       end
@@ -137,34 +146,36 @@ module FsimgSpec
     def probe_limits = Invocation::Limits.new(wall_seconds: 30, cpu_seconds: 30, file_bytes: 1 << 20,
                                               address_space_bytes: nil, capture_bytes: 1 << 20)
 
-    # A one-file FAT16 creation, then every reading stage on its image.
-    # Every stage must accept, and every record must repeat the sandbox
-    # status the first one reported.
-    def run_valid_case(directory, address_space:)
-      recipe = Recipe.new(
-        id: "preflight", format: "fat16", kind: "valid", stages: RUN_ORDER,
-        source: Source.new(tree: [TreeEntry.new(path: "file.txt", type: "file", size: 4096, seed: 1)],
-                           settings: { size: 16 << 20 }),
-        expected: RUN_ORDER.to_h { [_1, Expectation.parse("accept")] }
-      )
+    # A one-file FAT16 creation, whose summary reports the coordinator's
+    # text ceiling and the sandbox status, then every reading stage on the
+    # sample, so the reading stages do not depend on the writer under
+    # test. Every stage must accept, and every record must repeat the
+    # sandbox status create reported. Answers the run's Runner and that
+    # status.
+    def run_valid_cases(directory, address_space:)
       runner = runner_for(text_bytes: INITIAL_TEXT_BYTES, address_space:)
-      sandbox = nil
-      refusal = CaseDirectory.prepare(directory, recipe:, image: nil)
-      begin
-        raise PreflightError, "the host cannot hold the preflight's source tree: #{refusal}" if refusal
-
-        recipe.stages.each do |stage|
-          result = runner.run(stage, recipe:, case_directory: directory, sandbox:)
-          raise PreflightError, "preflight #{stage}: #{result.outcome} #{result.outcome.detail} #{result.problems.join("; ")}".strip unless
-            result.outcome.kind == "accepted" && result.safe?
-
-          sandbox ||= reported_sandbox(result)
-          runner = runner_for(text_bytes: text_limit(result), address_space:) if stage == "create"
-        end
-      ensure
-        FileUtils.rm_r(directory, secure: true)
-      end
+      create, = run_case(File.join(directory, "create"), CREATION, image: nil, runner:, sandbox: nil)
+      sandbox = reported_sandbox(create)
+      runner = runner_for(text_bytes: text_limit(create), address_space:)
+      recipe, image = @sample.(directory)
+      run_case(File.join(directory, "read"), recipe, image:, runner:, sandbox:)
       [runner, sandbox]
+    end
+
+    # Runs every stage of recipe in a new case directory and answers the
+    # results; a stage that does not accept safely fails the preflight.
+    def run_case(directory, recipe, image:, runner:, sandbox:)
+      refusal = CaseDirectory.prepare(directory, recipe:, image:)
+      raise PreflightError, "the host cannot hold the preflight's source tree: #{refusal}" if refusal
+
+      recipe.stages.map do |stage|
+        result = runner.run(stage, recipe:, case_directory: directory, sandbox:)
+        unless result.outcome.kind == "accepted" && result.safe?
+          detail = [result.outcome, result.outcome.detail, *result.problems].compact.join(" ")
+          raise PreflightError, "preflight #{recipe.id} #{stage}: #{detail}"
+        end
+        result
+      end
     end
 
     # The sandbox status an accepted stage's summary reports; every later

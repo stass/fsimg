@@ -6,10 +6,12 @@ require "minitest"
 require "fileutils"
 require "tmpdir"
 require "fsimg_spec"
+require "fsimg_spec/fat"
 
-# The runner drives the real fsimg: the preflight runs a creation and every
-# reading stage, and the fault side of the outcome classes holds for real
-# invocations (specs/design-spec-testing.md#outcome-classes).
+# The runner drives the real fsimg: the preflight runs a creation, and every
+# reading stage on the builder's sample, and the fault side of the outcome
+# classes holds for real invocations
+# (specs/design-spec-testing.md#outcome-classes).
 class TestRunnerFsimg < Minitest::Test
   PROFILE = FsimgSpec.fetch_profile("quick")
 
@@ -57,6 +59,20 @@ class TestRunnerFsimg < Minitest::Test
     end
   end
 
+  # The preflight's reading stages run on the builder's sample, never on
+  # an image the writer under test created.
+  def test_preflight_reads_the_builder_sample
+    with_results do |results|
+      read = []
+      sample = lambda do |directory|
+        FsimgSpec::Fat::Bases.preflight_sample(directory).tap { read << _1.first.id }
+      end
+      preflight(results, sample:)
+
+      assert_equal ["preflight-sample"], read
+    end
+  end
+
   # A worker the harness kills is a fault of fsimg's plumbing, never a
   # verdict on the image.
   def test_killed_worker_is_a_fault
@@ -89,9 +105,9 @@ class TestRunnerFsimg < Minitest::Test
     end
   end
 
-  def preflight(results, environment: ENV.to_h) =
+  def preflight(results, environment: ENV.to_h, sample: FsimgSpec::Fat::Bases.method(:preflight_sample)) =
     FsimgSpec::Preflight.new(results:, build_directory: results, profile: PROFILE, fsimg: @fsimg,
-                             environment:).call
+                             environment:, sample:).call
 
   def runner_for(observer:) =
     FsimgSpec::Runner.new(fsimg: @fsimg, profile: PROFILE, environment: ENV.to_h, observer:,

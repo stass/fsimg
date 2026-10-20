@@ -12,6 +12,9 @@ require "fsimg_spec"
 # checks need no fsimg binary.
 class TestPreflight < Minitest::Test
   PROFILE = FsimgSpec.fetch_profile("quick")
+  # Every check here fails before the preflight runs fsimg or reads its
+  # sample.
+  NO_SAMPLE = ->(_directory) { raise "the preflight read its sample" }
 
   # A results directory so deep that a case tree at the path ceiling would
   # pass the host's PATH_MAX.
@@ -81,5 +84,5 @@ class TestPreflight < Minitest::Test
 
   def preflight(results, environment: { "PATH" => ENV.fetch("PATH") }) =
     FsimgSpec::Preflight.new(results:, build_directory: results, profile: PROFILE, fsimg: "/nonexistent/fsimg",
-                             environment:).call
+                             environment:, sample: NO_SAMPLE).call
 end

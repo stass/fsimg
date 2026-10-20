@@ -269,8 +269,8 @@ review and commit gates.
   Each must be classified correctly, and no process of the group may
   survive. Two cases with one id in a run must give `harness_error`.
 * The preflight fails the run when the longest walked root (`dest/` or
-  `source/` with a 128-byte id, or `test/spec-cache/<key>.src/`) plus the
-  profile's `path` ceiling exceeds the host's `PATH_MAX`, when the soft
+  `source/` with a 128-byte id, or `test/spec-cache/<key>.<hex>.tmp.src/`)
+  plus the profile's `path` ceiling exceeds the host's `PATH_MAX`, when the soft
   `RLIMIT_NOFILE` is below the `fds` limit, when `trials/` and `cases/`
   differ in `st_dev`, and when the oracle confinement command lets a write
   outside the case directory or a read of the sentinel succeed (for example,
@@ -310,8 +310,8 @@ review and commit gates.
 * An absent oracle is reported as unavailable for that oracle only. Core
   tests still run on bases from the builder.
 * Add the cache and the manifests. A formatter base's population tree is
-  written by the name funnel into `test/spec-cache/<key>.src/` and removed
-  once the base is built.
+  written by the name funnel into a directory of its build's own,
+  `test/spec-cache/<key>.<hex>.tmp.src/`, and removed once the base is built.
 * Add the independent empty-volume builder.
 * Give the preflight its sample image from a builder base instead of its
   own `create` output, so the preflight does not depend on the writer it
