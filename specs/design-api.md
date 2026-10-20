@@ -528,6 +528,9 @@ against a memory-corruption exploit in its host application.
 Verification returns bounded counters and a named scope: structural or
 structural-plus-payload-read. It reports corruption and unsupported features,
 performs no repair, and never claims success for an incomplete traversal.
+A format without full verification advertises no verify capability, and
+`fsimg_verify` on it fails with `FSIMG_EUNSUPPORTED` before any work, leaving
+the reader untouched.
 Detailed findings stream through the bounded reporting interface; they do not
 accumulate in the report struct.
 

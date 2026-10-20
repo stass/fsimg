@@ -81,6 +81,11 @@ fsimg_status_t fsimg_bitset_test(fsimg_bitset_t *, uint64_t, bool *,
     fsimg_error_t *);
 fsimg_status_t fsimg_bitset_test_and_set(fsimg_bitset_t *, uint64_t, bool *,
     fsimg_error_t *);
+/* Set bits [first, first + count). *was_set reports whether any of them was
+ * already set; on success every bit of the range is set afterwards.
+ */
+fsimg_status_t fsimg_bitset_test_and_set_range(fsimg_bitset_t *, uint64_t,
+    uint64_t, bool *, fsimg_error_t *);
 
 /* One physical run of an object's storage: length bytes at image_offset hold
  * the object's bytes [logical_offset, logical_offset + length).

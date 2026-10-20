@@ -9,7 +9,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/extract \
 	-I$(top_srcdir)/lib/read -I$(top_srcdir)/lib/formats \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
-	-I$(top_srcdir)/lib/formats/qnx6
+	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
 # The sanitizer and fuzz scripts run `make distdir` and `make check` as
@@ -66,6 +66,11 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx6/directory.c lib/formats/qnx6/read.c \
 	lib/formats/qnx6/verify.c lib/formats/qnx6/write-qnx6.h \
 	lib/formats/qnx6/write-plan.c lib/formats/qnx6/write-emit.c \
+	lib/formats/qnx4/qnx4.h lib/formats/qnx4/descriptor.c \
+	lib/formats/qnx4/codec.c lib/formats/qnx4/volume.c \
+	lib/formats/qnx4/extent.c lib/formats/qnx4/bitmap.c \
+	lib/formats/qnx4/inode.c lib/formats/qnx4/names.c \
+	lib/formats/qnx4/directory.c lib/formats/qnx4/read.c \
 	compat/host.c compat/host.h
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
 bin_PROGRAMS = fsimg
@@ -95,13 +100,13 @@ example_extract_LDADD = libfsimg.la
 check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale test-qnx6 test-qnx6-write test-cli test-qualify test-fragment \
-	test-posix header-c header-cxx
+	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-cli test-qualify \
+	test-fragment test-posix header-c header-cxx
 TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh \
-	test/qnx6-integration.sh test/cli.sh \
+	test/qnx6-integration.sh test/qnx4-integration.sh test/cli.sh \
 	test/baseline.sh test/spec.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
-	test/qnx6-integration.sh test/cli.sh \
+	test/qnx6-integration.sh test/qnx4-integration.sh test/cli.sh \
 	test/baseline.sh test/spec.sh
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
@@ -132,6 +137,8 @@ test_qnx6_SOURCES = test/qnx6.c test/test.h
 test_qnx6_LDADD = libfsimg.la
 test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h
 test_qnx6_write_LDADD = libfsimg.la
+test_qnx4_SOURCES = test/qnx4.c test/test.h
+test_qnx4_LDADD = libfsimg.la
 test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
 test_exfat_scale_LDADD = libfsimg.la
 test_catalog_SOURCES = test/catalog.c test/test.h
@@ -197,7 +204,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/vm/qsh.py tools/qnx/vm/shot.sh tools/qnx/vm/type.py \
 	tools/qnx/vm/vmstart.sh \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
-	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/protocol.c \
+	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
+	test/qnx4-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/protocol.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
@@ -226,10 +234,12 @@ check-installed-consumers:
 	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" -o header-installed-cxx
 	./header-installed-cxx
 check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write \
-	    fsimg test/fat-integration.sh test/exfat-integration.sh test/qnx6-integration.sh
+	    test-qnx4 fsimg test/fat-integration.sh test/exfat-integration.sh \
+	    test/qnx6-integration.sh test/qnx4-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
 	./test/qnx6-integration.sh
+	./test/qnx4-integration.sh
 # Regenerate the checked-in comparison baseline; test/baseline.sh only reads it.
 baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	./test/baseline.sh --record > $(srcdir)/test/baseline.txt.new || \
@@ -245,10 +255,11 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx6-write --scale
 	./test-exfat-scale --huge; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx6 --scale; result=$$?; test $$result = 0 -o $$result = 77
-check-fuzz: test-fat test-exfat test-qnx6 test-protocol test/spec.sh
+check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-protocol test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
-check-fuzz-extended: test-fat test-exfat test-qnx6 test-protocol test/spec.sh
+check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-protocol \
+	    test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard
@@ -287,7 +298,8 @@ clean-local:
 	    sanitizer-fuzz test/spec-results test/spec-cache
 # Fuzz corpora persist across clean so later runs reuse their mutations.
 distclean-local:
-	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus protocol-fuzz-corpus
+	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
+	    protocol-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77

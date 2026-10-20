@@ -20,6 +20,7 @@ static void test_error_padding(void);
 static void test_entry_records(void);
 static void test_invalid_entry_records(void);
 static void test_info_uuid(void);
+static void test_info_label(void);
 static void test_job_posix_flags(void);
 static bool entry_frame_valid(const fsimg_entry_t *, bool);
 static void write_seed(const char *);
@@ -352,6 +353,40 @@ test_info_uuid(void)
 	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
 }
 
+/* The widest label a format stores, 48 bytes without a terminator on disk,
+ * travels whole; a label field without its terminator is refused.
+ */
+static void
+test_info_label(void)
+{
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_INFO,
+	    .length = FSIMG_WIRE_INFO_BYTES };
+	fsimg_volume_info_t info;
+
+	bzero(&info, sizeof(info));
+	info.valid = FSIMG_VOLUME_LABEL;
+	memset(info.label, 'L', 48);
+	info.label[48] = '\0';
+	info.volume_bytes = 4096;
+	info.time_basis = FSIMG_TIME_UTC;
+	info.scope = FSIMG_VALIDATION_HEADER;
+	strcpy(info.format, "qnx4");
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(strlen((const char *)frame.payload + FSIMG_WIRE_INFO_LABEL) == 48);
+	CHECK(bcmp(frame.payload + FSIMG_WIRE_INFO_LABEL, info.label, 48) == 0);
+	frame.payload[FSIMG_WIRE_INFO_LABEL + 48] = 'L';
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	frame.payload[FSIMG_WIRE_INFO_LABEL + 48] = '\0';
+	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	/* The seven bytes between the label and the UUID are zero. */
+	frame.payload[FSIMG_WIRE_INFO_LABEL + 49] = 1;
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	frame.payload[FSIMG_WIRE_INFO_LABEL + 49] = 0;
+	frame.payload[FSIMG_WIRE_INFO_UUID - 1] = 1;
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+}
+
 static void
 test_job_posix_flags(void)
 {
@@ -432,6 +467,7 @@ main(int argc, char **argv)
 	test_entry_records();
 	test_invalid_entry_records();
 	test_info_uuid();
+	test_info_label();
 	test_job_posix_flags();
 	return (0);
 }

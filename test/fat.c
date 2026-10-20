@@ -379,7 +379,9 @@ test_variants(void)
 	size_t count, cursor;
 	fsimg_range_t range;
 
-	/* Four FAT and exFAT variants, then QNX6; every one is writable. */
+	/* Four FAT and exFAT variants, then QNX6; every one is writable.
+	 * QNX4 follows, readable only.
+	 */
 	cursor = 0;
 	for (unsigned i = 0; i < 5; i++) {
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
@@ -387,6 +389,9 @@ test_variants(void)
 		CHECK((format.capabilities & FSIMG_CAP_WRITE) != 0);
 	}
 	CHECK(strcmp(format.name, "qnx6") == 0);
+	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
+	CHECK(strcmp(format.name, "qnx4") == 0);
+	CHECK(format.capabilities == FSIMG_CAP_READ);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	for (unsigned i = 0; i < 3; i++) {
@@ -464,8 +469,11 @@ test_variants(void)
 			options.format = "qnx6";
 			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EFORMAT);
 			CHECK(other == NULL);
-			/* An unknown format name is unsupported. */
 			options.format = "qnx4";
+			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EFORMAT);
+			CHECK(other == NULL);
+			/* An unknown format name is unsupported. */
+			options.format = "qnx2";
 			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EUNSUPPORTED);
 			CHECK(other == NULL);
 		}

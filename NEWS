@@ -106,6 +106,20 @@ remounts fsimg volumes cleanly at every block size and in both byte orders. A
 provider's symbolic-link target is read once when its source opens, and a
 NUL byte in it fails creation.
 
+A QNX4 driver reads the volumes QNX 6.5.0 `dinit` makes, with and without
+`.longfilenames`. It derives the geometry from the slice length, checks the
+root block, the bitmap's own blocks and padding, `.inodes`, `.longfilenames`
+and `lost+found` at open, and checks every extent and extent block a record
+names for range, allocation and sharing before exposing it. Entries carry
+symbolic links, FIFOs, owner, mode and all four timestamps; names of up to
+505 bytes compare byte for byte, and the label of up to 48 bytes is
+reported, so the volume information and its wire record hold 48-byte labels.
+Every native QNX 6.5.0 capture reads with names, modes, link counts, owners,
+sizes, targets and checksums equal to the guest's manifests, and the QNX4
+partition of a Porsche PCM 3.1 hard disk lists and reads completely. QNX4
+has no full verification, and verifying a format without one fails as
+unsupported before any work.
+
 The fsimg command provides creation, inspection, listing, raw content, safe
 extraction, verification and capability enumeration. Strict short-option parsing,
 streaming NDJSON, bounded progress and command-wide output accounting share

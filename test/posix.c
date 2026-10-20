@@ -225,7 +225,8 @@ test_capability_records(void)
 	count = 0;
 	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
 		count++;
-		if (strcmp(info.name, "qnx6") == 0) {
+		if (strcmp(info.name, "qnx6") == 0 ||
+		    strcmp(info.name, "qnx4") == 0) {
 			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
 			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
 			    FSIMG_ENTRY_FIFO));
@@ -233,7 +234,8 @@ test_capability_records(void)
 			    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
 			    FSIMG_META_CHANGED | FSIMG_META_OWNER |
 			    FSIMG_META_MODE));
-			CHECK(info.max_label_bytes == 0);
+			CHECK(info.max_label_bytes ==
+			    (strcmp(info.name, "qnx4") == 0 ? 48 : 0));
 			continue;
 		}
 		CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY));
@@ -244,7 +246,7 @@ test_capability_records(void)
 		else
 			CHECK(info.max_label_bytes == 11);
 	}
-	CHECK(count == 5);
+	CHECK(count == 6);
 }
 
 /* Optional owner, mode and change time are counted once per field and

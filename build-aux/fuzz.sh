@@ -5,8 +5,8 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-protocol and test/spec.sh, which write the
-# seeds, with MAKE naming the make program that drives that build
+# test-exfat, test-qnx6, test-qnx4, test-protocol and test/spec.sh, which
+# write the seeds, with MAKE naming the make program that drives that build
 # (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX select the compiler.
 # The harnesses build against the instrumented sanitizer-fuzz/ tree (see
 # sanitize.sh) and keep their corpora here between runs.
@@ -105,6 +105,23 @@ if test ! -f "$qnx6_corpus/sample.seed"; then
     ./test-qnx6 --seed "$qnx6_corpus/sample.seed"
 fi
 run_fuzzer "$work_dir/fuzz-qnx6" "$qnx6_corpus" 1048576 10
+
+# QNX4 derives its block count from the slice length, so its harness also
+# reads exactly the input and forces the decoder. The seeds are generated
+# volumes of the reader's acceptance fixtures.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    "$source_dir/fuzz/qnx4.c" "$fuzz_library" -o "$work_dir/fuzz-qnx4"
+qnx4_corpus=qnx4-fuzz-corpus
+mkdir -p "$qnx4_corpus"
+if test ! -f "$qnx4_corpus/sample.seed"; then
+    ./test-qnx4 --seed "$qnx4_corpus/sample.seed"
+fi
+if test ! -f "$qnx4_corpus/chain.seed"; then
+    ./test-qnx4 --seed-chain "$qnx4_corpus/chain.seed"
+fi
+run_fuzzer "$work_dir/fuzz-qnx4" "$qnx4_corpus" 1048576 10
 
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \

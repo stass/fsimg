@@ -45,10 +45,12 @@ FSIMG_DEV_TOOL([MKFS_EXFAT], [mkfs.exfat], [exfatprogs exFAT formatter], [$fsimg
 FSIMG_DEV_TOOL([FSCK_EXFAT], [fsck.exfat], [exfatprogs exFAT checker], [$fsimg_sbin_path])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
 AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integration.sh
-    test/qnx6-integration.sh test/cli.sh test/baseline.sh test/spec.sh],
+    test/qnx6-integration.sh test/qnx4-integration.sh test/cli.sh test/baseline.sh
+    test/spec.sh],
     [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
      test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh
      test ! -f test/qnx6-integration.sh || chmod +x test/qnx6-integration.sh
+     test ! -f test/qnx4-integration.sh || chmod +x test/qnx4-integration.sh
      test ! -f test/cli.sh || chmod +x test/cli.sh
      test ! -f test/baseline.sh || chmod +x test/baseline.sh
      test ! -f test/spec.sh || chmod +x test/spec.sh])

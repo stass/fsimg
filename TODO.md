@@ -35,10 +35,11 @@
   input relay runs confined is also unstated in
   [architecture.md](specs/architecture.md).
 
-* [High] **QNX4 reader, verifier and writer** (`lib/formats/qnx4/`): the
+* [High] **QNX4 verifier and writer** (`lib/formats/qnx4/`): the
   [format design](specs/design-qnx4.md) and [driver design](specs/design-qnx4-driver.md)
   describe the reader, verifier and writer for native QNX4 volumes and the
-  PCM 3.1 navigation partition; the [plan](docs/qnx4-plan.md) orders the
+  PCM 3.1 navigation partition. The reader is registered; the
+  [plan](docs/qnx4-plan.md) orders the remaining
   stages and the [work breakdown](docs/todo-qnx4.md) holds the open items,
   including the native qualification that gates writer registration.
   [Research evidence](docs/qnx4-research.md) owns the native observations.

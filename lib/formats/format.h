@@ -43,6 +43,7 @@ struct fsimg_format {
 extern const fsimg_format_t fsimg_fat_format;
 extern const fsimg_format_t fsimg_exfat_format;
 extern const fsimg_format_t fsimg_qnx6_format;
+extern const fsimg_format_t fsimg_qnx4_format;
 
 const fsimg_format_t *fsimg_format_find(const char *,
     const fsimg_format_variant_t **);

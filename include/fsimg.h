@@ -466,7 +466,8 @@ typedef struct fsimg_volume_info {
 	unsigned	 capabilities;
 	char		 format[16];
 	char		 profile[40];
-	char		 label[48];
+	/* A label of at most 48 bytes and its terminator. */
+	char		 label[49];
 	/* A 16-byte volume identity in textual (RFC 4122) byte order. */
 	unsigned char	 uuid[16];
 	uint64_t	 volume_bytes;

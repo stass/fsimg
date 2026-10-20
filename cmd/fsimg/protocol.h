@@ -29,7 +29,7 @@ typedef enum fsimg_wire_error_field {
 	FSIMG_WIRE_ERROR_MESSAGE = 336
 } fsimg_wire_error_field_t;
 
-#define FSIMG_WIRE_INFO_BYTES 208u
+#define FSIMG_WIRE_INFO_BYTES 216u
 typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_VALID = 0,
 	FSIMG_WIRE_INFO_CAPABILITIES = 8,
@@ -44,9 +44,10 @@ typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_IO_ERROR = 80,
 	FSIMG_WIRE_INFO_FORMAT = 88,
 	FSIMG_WIRE_INFO_PROFILE = 104,
-	FSIMG_WIRE_INFO_LABEL = 144,
-	FSIMG_WIRE_INFO_UUID = 192
+	FSIMG_WIRE_INFO_LABEL = 144,	/* 48 bytes and a NUL, then zeros */
+	FSIMG_WIRE_INFO_UUID = 200
 } fsimg_wire_info_field_t;
+#define FSIMG_WIRE_INFO_LABEL_BYTES 49u
 _Static_assert(FSIMG_WIRE_INFO_UUID + 16 == FSIMG_WIRE_INFO_BYTES,
     "the info record ends with the volume UUID");
 

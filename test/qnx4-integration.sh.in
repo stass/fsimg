@@ -1,0 +1,157 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+#
+# Independent QNX4 evidence. The fixtures are external inputs that are never
+# redistributed:
+#   FSIMG_QNX4_NATIVE     a directory of QNX 6.5.0 captures, q4-*.img.gz,
+#                         with the guest's manifests q4-manifest-*.txt
+#   FSIMG_QNX4_H1         a disk image holding a QNX4 partition, read only
+#   FSIMG_QNX4_H1_OFFSET  that partition's byte offset
+#   FSIMG_QNX4_H1_LENGTH  and its byte length
+# The H1 survey reports counts only, never names. Each unavailable check is
+# reported as a skip.
+set -eu
+ran=0
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-qnx4-oracle-XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# A capture named *-N-file holds a volume of N blocks formatted on a file at
+# the start of the disk; every other capture is formatted on the whole disk.
+slice_bytes() {
+    case $1 in
+    *-file)
+        blocks=${1%-file}
+        blocks=${blocks##*-}
+        echo $((blocks * 512))
+        ;;
+    *)
+        wc -c < "$2" | tr -d ' '
+        ;;
+    esac
+}
+
+# The native manifest $1 as the tab-separated lines fsimg_lines writes:
+# "E path mode links uid gid size [target]" for each ls -l line and "C path
+# crc size" for each cksum line. ls shows the format-owned .bitmap, .inodes
+# and .longfilenames, which fsimg does not list; root is owner 0. The
+# captures' names hold no blanks, so ls lines split on blanks.
+native_lines() {
+    awk -v OFS='\t' '
+    function name(p) { return p == "." ? "/" : substr(p, 2) }
+    function hidden(p) {
+        return p == "./.bitmap" || p == "./.inodes" ||
+            p == "./.longfilenames"
+    }
+    function owner(o) { return o == "root" ? 0 : o }
+    /^---- output ----$/ { body = 1; next }
+    !body || $0 == "exit: 0" { next }
+    length($1) == 10 && $1 ~ /^[-dlp]/ {
+        if (hidden($9))
+            next
+        if ($10 == "->")
+            print "E", name($9), $1, $2, owner($3), owner($4), $5, $11
+        else
+            print "E", name($9), $1, $2, owner($3), owner($4), $5
+        next
+    }
+    NF == 3 && $1 ~ /^[0-9]+$/ && $3 ~ /^\.\// {
+        if (!hidden($3))
+            print "C", name($3), $1, $2
+        next
+    }
+    { print "unparsed native line: " $0 > "/dev/stderr"; exit 1 }
+    ' "$1"
+}
+
+# fsimg's view of the volume at byte $3 of image $1, $2 bytes long, written
+# to the file $4: the manifest lines, then each regular file's POSIX
+# checksum through fsimg cat. Any failure fails the script.
+fsimg_lines() {
+    ./test-qnx4 --manifest "$1" "$3" "$2" > "$4"
+    awk -F '\t' '$1 == "E" && $3 ~ /^-/ { print $2 }' "$4" > "$fixture/files"
+    while IFS= read -r path; do
+        ./fsimg cat -b "$3" -z "$2" -i "$1" "$path" > "$fixture/content" \
+            2>/dev/null || fail "fsimg cat failed on a file of $1"
+        cksum < "$fixture/content" > "$fixture/sum"
+        read -r crc size < "$fixture/sum"
+        printf 'C\t%s\t%s\t%s\n' "$path" "$crc" "$size" >> "$4"
+    done < "$fixture/files"
+    rm -f "$fixture/files" "$fixture/content" "$fixture/sum"
+}
+
+native=${FSIMG_QNX4_NATIVE:-}
+if test -n "$native"; then
+    compared=0
+    for capture in "$native"/q4-*.img.gz; do
+        test -f "$capture" || continue
+        name=$(basename "$capture" .img.gz)
+        gzip -d -c "$capture" > "$fixture/image"
+        length=$(slice_bytes "$name" "$fixture/image")
+        ./fsimg info -j -z "$length" -i "$fixture/image" > "$fixture/info" \
+            2>/dev/null || fail "fsimg info failed on $name"
+        grep -q '"format":"qnx4"' "$fixture/info" ||
+            fail "$name is not read as QNX4"
+        ./fsimg ls -r -z "$length" -i "$fixture/image" > "$fixture/ls" \
+            2>/dev/null || fail "fsimg ls failed on $name"
+        listed=$(wc -l < "$fixture/ls" | tr -d ' ')
+        fsimg_lines "$fixture/image" "$length" 0 "$fixture/lines"
+        LC_ALL=C sort "$fixture/lines" > "$fixture/fsimg"
+        entries=$(awk -F '\t' '$1 == "E" { n++ } END { print n + 0 }' \
+            "$fixture/fsimg")
+        test "$entries" -eq $((listed + 1)) ||
+            fail "$name: fsimg ls lists $listed of $((entries - 1)) entries"
+        case $name in
+        q4-manifest-*)
+            manifest=$native/$name.txt
+            test -f "$manifest" || fail "$name has no manifest"
+            native_lines "$manifest" > "$fixture/lines"
+            LC_ALL=C sort "$fixture/lines" > "$fixture/native"
+            if ! cmp -s "$fixture/native" "$fixture/fsimg"; then
+                diff "$fixture/native" "$fixture/fsimg" | cut -c 1-160 >&2 ||
+                    true
+                fail "$name differs from its native manifest"
+            fi
+            echo "$name: $listed entries match the native manifest"
+            compared=$((compared + 1))
+            ;;
+        *)
+            echo "$name: $listed entries read"
+            ;;
+        esac
+        rm -f "$fixture/image"
+    done
+    test "$compared" != 0 || fail "$native holds no manifest captures"
+    ran=1
+else
+    echo 'SKIP: FSIMG_QNX4_NATIVE is not set (QNX 6.5.0 captures)'
+fi
+
+# The PCM partition, opened in place and read only: every file is read
+# through the CLI, and only counts are printed.
+h1=${FSIMG_QNX4_H1:-}
+if test -n "$h1"; then
+    offset=${FSIMG_QNX4_H1_OFFSET:?FSIMG_QNX4_H1_OFFSET is required}
+    length=${FSIMG_QNX4_H1_LENGTH:?FSIMG_QNX4_H1_LENGTH is required}
+    fsimg_lines "$h1" "$length" "$offset" "$fixture/h1"
+    # The root has an E line too, so the directories include it.
+    count() {
+        awk -F '\t' "$1"' { n++ } END { print n + 0 }' "$fixture/h1"
+    }
+    echo "H1: $(count '$1 == "E" && $3 ~ /^d/') directories with the root," \
+        "$(count '$1 == "E" && $3 ~ /^-/') files read," \
+        "$(count '$1 == "E" && $3 !~ /^[-d]/') others"
+    rm -f "$fixture/h1"
+    ran=1
+else
+    echo 'SKIP: FSIMG_QNX4_H1 is not set (PCM partition, counts only)'
+fi
+
+if test "$ran" = 0; then
+    exit 77
+fi

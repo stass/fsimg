@@ -294,24 +294,31 @@ not force a format with `-t`, rewritten on every run; seeds of cases that no
 longer exist are removed. A separate exFAT corpus combines an independent
 raw-table fixture with a writer-generated compressed-table image. It runs 1000
 mutations per format corpus with a 3 MiB input ceiling and a ten-second
-per-input timeout.
-Each reader has a 16 MiB budget, 1000-entry, eight-level and 250,000-work
-limits, and no scratch authority. Each input is read both as an exact-length
-byte array and as a prefix of zero-filled logical storage. The latter reaches
-FAT32's minimum geometry without a large resident seed; it does not allocate or
-transfer the logical volume. The target fuzzes probe, directory/name parsing,
-chain traversal, content/range reads, index construction, and full verification;
-it also checks cleanup accounting. `fuzz/qnx6.c` forces the QNX6 decoder and
-reads each input as the exact slice, since QNX6 finds its second header from the
-slice length; its seed is a 64 KiB B = 512 volume from the independent generator
-holding every entry kind, inline and long names and a depth-1 tree, with a 1 MiB
-input ceiling and the same budgets. The same target builds `fuzz/protocol.c` and
-runs 1000 mutations with a 64 KiB input ceiling and five-second timeout. It
-exercises production framing, job codecs, and typed INFO/PLAN/ENTRY/VERIFY
-validators. Worker lifecycle ordering is covered by `test-worker`, not inferred
-from pure wire fuzzing. Set `FUZZ_CC` to a Clang with the required runtime;
-`FUZZ_CXX` defaults to its sibling `clang++`. Apple Clang lacks the libFuzzer
-runtime; macOS fuzz validation uses Homebrew LLVM:
+per-input timeout. Each reader has a 16 MiB budget, 1000-entry, eight-level and
+250,000-work limits, and no scratch authority. Each input is read both as an
+exact-length byte array and as a prefix of zero-filled logical storage. The
+latter reaches FAT32's minimum geometry without a large resident seed; it does
+not allocate or transfer the logical volume. The target fuzzes probe,
+directory/name parsing, chain traversal, content/range reads, index
+construction, and full verification; it also checks cleanup accounting.
+`fuzz/qnx6.c` forces the QNX6 decoder and reads each input as the exact slice,
+since QNX6 finds its second header from the slice length; its seed is a 64 KiB B
+= 512 volume from the independent generator holding every entry kind, inline and
+long names and a depth-1 tree, with a 1 MiB input ceiling and the same budgets.
+`fuzz/qnx4.c` forces the QNX4 decoder and reads each input as the exact slice,
+since QNX4 derives its block count from the slice length, and again cut to whole
+blocks, which a length-changing mutation otherwise never reaches. It requires
+the verify request to fail as unsupported without work. Its seeds are the reader
+tests' sample volume, 2000 blocks holding every entry kind, 16-, 48- and
+505-byte names, a hard link and a 61-extent file, and a 400-block volume whose
+file has 122 extents in a three-block chain, with a 1 MiB input ceiling and the
+same budgets. The same target builds `fuzz/protocol.c` and runs 1000 mutations
+with a 64 KiB input ceiling and five-second timeout. It exercises production
+framing, job codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker
+lifecycle ordering is covered by `test-worker`, not inferred from pure wire
+fuzzing. Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults
+to its sibling `clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
+validation uses Homebrew LLVM:
 
 ```sh
 brew install llvm
@@ -321,7 +328,7 @@ FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 The exact standalone commands from the top of a separate build directory are:
 
 ```sh
-make test-fat test-exfat test-qnx6 test-protocol
+make test-fat test-exfat test-qnx6 test-qnx4 test-protocol
 MAKE=make sh ../build-aux/fuzz.sh
 ```
 
@@ -331,7 +338,7 @@ instrumented library through `build-aux/sanitize.sh fuzz` and compiles the
 harnesses into `sanitizer-fuzz/` from the same read-only source copy.
 
 The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `qnx6-fuzz-corpus/`,
-`protocol-fuzz-corpus/` and libFuzzer crash artifacts are disposable build
+`qnx4-fuzz-corpus/`, `protocol-fuzz-corpus/` and libFuzzer crash artifacts are disposable build
 outputs. Existing corpus seeds and mutations are reused; `make clean` keeps the
 corpora, `make distclean` removes them, and neither removes crash artifacts.
 `FUZZ_SECONDS=60 make check-fuzz` selects a finite wall-clock allowance per
@@ -798,6 +805,56 @@ host as root the script mounts the generated sample with the kernel's qnx6
 driver and compares every regular file with `fsimg cat`; elsewhere that
 comparison is an explicit skip, and no Linux result is recorded
 ([TODO](todo-qnx6.md)).
+
+`test-qnx4` builds QNX4 volumes with its own generator, written from the
+format design with separate offset tables; it shares no code with
+`lib/formats/qnx4/`; it includes the driver header to compare the
+production decoders with its encoders and to read two facts no public
+interface reports, `lost+found` occupancy and, in `--manifest`, stored link
+counts. The generator lays volumes out as `dinit` does and fills free
+blocks and unused file tails with `0xa5`. The sample volume holds every
+entry kind, 16-, 48- and 505-byte names, a nested tree, a hard link in
+`.inodes`, a 61-extent file and boundary owners, modes and times; it is read
+at 1000, 4095, 4096, 4097, 5001, 8192, 8193 and 40000 blocks, so the bitmap
+ends inside a byte, at a byte and at a block in one, two and three blocks,
+and spans ten blocks, more than one 4 KiB bitmap window. Further
+cases cover names of 1 to 505 bytes at each record's boundary, files of 0, 1,
+2, 60, 61, 62, 121 and 122 extents, two- and sixteen-block directories, a
+2000-entry directory spilled to scratch, the minimum 43-block volume, probe
+exclusivity against fsimg's FAT, exFAT and QNX6 volumes and a native-like
+QNX6 boot area, and about 200 single-field mutations of the geometry, root
+block, bitmap, names, long-name records, statuses, records, link targets,
+extent blocks, dot entries, `.inodes` and `lost+found`, each checked for its
+status class, with every status byte value of each record kind. Fault cases
+inject allocation failures at every step, scratch open, resize, read and
+write failures with a one-page cache, cancellation at every poll, a work
+limit, failing reads of the bitmap, an extent block and file content, and
+seven-byte short reads; each checks that nothing charged outlives the
+reader. Extraction, verification as unsupported and a hard link's chain
+walked once per name are checked too. `--seed` and `--seed-chain` write the
+fuzz seeds, and `--manifest IMAGE [OFFSET LENGTH]` prints one line per
+object for the integration script.
+
+`test/qnx4-integration.sh` reads external evidence that is never
+redistributed, and skips what is absent; [the QNX4 research
+record](qnx4-research.md) describes the captures and the partition:
+
+```sh
+FSIMG_QNX4_NATIVE=/path/to/captures-qnx4 ./test/qnx4-integration.sh
+FSIMG_QNX4_H1=/path/to/disk.img FSIMG_QNX4_H1_OFFSET=BYTES \
+    FSIMG_QNX4_H1_LENGTH=BYTES ./test/qnx4-integration.sh
+```
+
+`FSIMG_QNX4_NATIVE` names a directory of QNX 6.5.0 captures (`q4-*.img.gz`).
+Each must open as QNX4 through `fsimg info` and list through `fsimg ls`; for
+each `q4-manifest-*` capture the guest's `ls -l` and `cksum` manifest must
+equal fsimg's names, kinds, modes, link counts, owners, sizes, symbolic-link
+targets and the checksums of every file read through `fsimg cat`. On macOS
+all 40 captures open and the 16 manifests match. `FSIMG_QNX4_H1` names a
+disk image read in place at the partition's byte range; every file is read
+through `fsimg cat`, and the script prints only counts. The PCM 3.1 HDD's
+QNX4 partition lists 21 directories below the root and 52 files, every one
+readable.
 
 The sparse exFAT qualification uses a 64 MiB library budget:
 

@@ -149,6 +149,44 @@ test_arrays(void)
 	CHECK(fsimg_bitset_test_and_set(bitset, 200003, &was_set, NULL) == FSIMG_ERANGE);
 	CHECK(!was_set);
 	fsimg_bitset_free(bitset);
+
+	/* Ranges: a run inside one byte, runs across byte and chunk ends,
+	 * and the last bit. A range reports whether any of its bits was set
+	 * and leaves all of them set; bits outside it never change.
+	 */
+	CHECK(fsimg_bitset_new(&fixture.session, 200003, &bitset, NULL) == FSIMG_OK);
+	CHECK(fsimg_bitset_test_and_set_range(bitset, 3, 4, &was_set, NULL) ==
+	    FSIMG_OK);
+	CHECK(!was_set);
+	CHECK(fsimg_bitset_test_and_set_range(bitset, 13, 100000, &was_set,
+	    NULL) == FSIMG_OK);
+	CHECK(!was_set);
+	CHECK(fsimg_bitset_test_and_set_range(bitset, 200002, 1, &was_set,
+	    NULL) == FSIMG_OK);
+	CHECK(!was_set);
+	for (uint64_t i = 0; i < 200003; i++) {
+		CHECK(fsimg_bitset_test(bitset, i, &was_set, NULL) == FSIMG_OK);
+		CHECK(was_set == ((i >= 3 && i < 7) || (i >= 13 && i < 100013) ||
+		    i == 200002));
+	}
+	CHECK(fsimg_bitset_test_and_set_range(bitset, 7, 6, &was_set, NULL) ==
+	    FSIMG_OK);
+	CHECK(!was_set);
+	CHECK(fsimg_bitset_test_and_set_range(bitset, 100012, 2, &was_set,
+	    NULL) == FSIMG_OK);
+	CHECK(was_set);
+	CHECK(fsimg_bitset_test(bitset, 100013, &was_set, NULL) == FSIMG_OK &&
+	    was_set);
+	CHECK(fsimg_bitset_test_and_set_range(bitset, 0, 0, &was_set, NULL) ==
+	    FSIMG_OK);
+	CHECK(!was_set);
+	CHECK(fsimg_bitset_test_and_set_range(bitset, 200000, 4, &was_set,
+	    NULL) == FSIMG_ERANGE);
+	CHECK(fsimg_bitset_test_and_set_range(bitset, UINT64_MAX, 2, &was_set,
+	    NULL) == FSIMG_ERANGE);
+	CHECK(fsimg_bitset_test(bitset, 200001, &was_set, NULL) == FSIMG_OK &&
+	    !was_set);
+	fsimg_bitset_free(bitset);
 	CHECK(fsimg_array_new(&fixture.session, 2, UINT64_MAX, &bad, NULL) == FSIMG_ERANGE);
 	CHECK(bad == NULL);
 	CHECK(fsimg_array_new(&fixture.session, 1, UINT64_MAX, &bad, NULL) == FSIMG_ERANGE);

@@ -91,8 +91,9 @@ next reads:
 3. **Bitmap pager.** Create the pager over blocks `3` to `2 + B` from the
    geometry alone and run its bounded self-check (below). No object can be
    walked before this step, because every walk checks allocation bits.
-4. **Claims.** Create the claimed-block bitset of `N` bits in scratch and
-   claim blocks `1` through `2 + B`.
+4. **Claims.** Create the claimed-block bitset in scratch, indexed by block
+   number, so `N + 1` bits with bit 0 unused, and claim blocks `1` through
+   `2 + B` with one range claim.
 5. **Root slots.** Walk record 0's extents under the allocated policy, a
    non-claiming read, and validate slots 0 to 5 against the root-slot
    table: the dots' targets, slot 2 a direct `.bitmap` record with extent
@@ -172,10 +173,11 @@ way, and the content domain rejects them at index construction as well.
 ## The bitmap pager
 
 The bitmap's position is fixed by the geometry, so the pager exists before
-any record is trusted. `qnx4_block_allocated()` answers whether block `b`
-in `[1, N]` is allocated by reading the 4 KiB window containing byte
+any record is trusted. `qnx4_blocks_allocated()` answers whether every
+block of a run in `[1, N]` is allocated; for each block `b` it reads the
+4 KiB window containing byte
 `floor((b - 1) / 8)` of the bitmap bytes at volume offset
-`1024 + floor((b - 1) / 8)`, retained between calls, and testing bit
+`1024 + floor((b - 1) / 8)`, retained between calls, and tests bit
 `(b - 1) mod 8`, least significant first. The self-check at open is bounded
 to two windows: in the first window, the bits of blocks `1` through
 `min(2 + B, 32768)` are set; in the window holding the last bitmap block,
@@ -411,7 +413,7 @@ Format-owned records carry the format time in all four fields.
 
 | Operation | Work and residency |
 | --- | --- |
-| Probe and open | Two 512-byte reads, the bitmap self-check's two windows, the chains of the root directory, `.inodes`, `.longfilenames` and `lost+found`; scratch for the indexes and locators, the claimed bitset of `N` bits, which every open creates, `info` included, and the exposure bitset of the `.inodes` slot count |
+| Probe and open | Two 512-byte reads, the bitmap self-check's two windows, the chains of the root directory, `.inodes`, `.longfilenames` and `lost+found`; scratch for the indexes and locators, the claimed bitset of `N + 1` bits, which every open creates, `info` included, and the exposure bitset of the `.inodes` slot count |
 | Listing | Per directory: its chain, one slot pass and the common key sort; per object's first name: its chain. No payload is read |
 | Content | One extent lookup per request after the walk at exposure |
 | Verification | One traversal, two external sorts of streams proportional to extents and names, one bitmap pass of `ceil(N / 8)` bytes, one pass over `.inodes` and one over `.longfilenames` |

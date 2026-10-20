@@ -25,7 +25,13 @@ Filesystem image library
 .Fn fsimg_writer_new "fsimg_ctx_t *context" "const char *format" "const fsimg_write_options_t *options" "fsimg_writer_t **writer" "fsimg_error_t *error"
 .Sh DESCRIPTION
 The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT and
-classic QNX6 Power-Safe volumes in either byte order.
+classic QNX6 Power-Safe volumes in either byte order, and reads QNX4 volumes.
+A format without full verification, such as QNX4, has no verify capability,
+and
+.Fn fsimg_verify
+fails on it with
+.Dv FSIMG_EUNSUPPORTED
+before doing any work.
 It requires only libc and host OS APIs and is includable from C++.
 It neither prints diagnostics, exits, changes process-global policy nor
 sandboxes its embedding application.

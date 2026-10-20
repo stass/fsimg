@@ -66,11 +66,22 @@ Hard links appear as separate entries with the same content, and names are
 compared byte for byte. QNX6 names reach 510 bytes; extracting one longer
 than the host filesystem allows, 255 bytes on most, fails as unsupported.
 Bootless and Audi MMI layouts and later Power-Safe extensions are recognized
-and refused as unsupported; QNX4 is not recognized. The QNX6 writer creates
+and refused as unsupported. The QNX6 writer creates
 the same layout with `-O endian=`, `uuid=`, `inodes=` and `reserve=`
 settings and stores every entry kind and the POSIX fields; QNX 6.5.0 checks,
 mounts, modifies and remounts its volumes cleanly at every block size and in
 both byte orders.
+
+The QNX4 reader accepts the volumes QNX 6.5.0 `dinit` makes, with or without
+`.longfilenames`, and reports files, directories, symbolic links and FIFOs
+with owner, mode and all four timestamps, and the label of up to 48 bytes.
+It derives the block count from the slice length, so a partition is read
+with `-b` and `-z` set to its exact offset and length. Names reach 505 bytes
+on a volume with `.longfilenames` and 48 bytes without; they compare byte for
+byte, and hard links appear as separate entries with the same content. The
+format's own `.bitmap`, `.inodes`, `.longfilenames` and `lost+found` are not
+listed; `.boot` and `.altboot` are. fsimg does not write QNX4 volumes, and
+`verify` reports a QNX4 volume as unsupported.
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,

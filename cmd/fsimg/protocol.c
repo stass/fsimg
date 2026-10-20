@@ -328,6 +328,9 @@ fsimg_wire_entry_encode(unsigned char *raw, const fsimg_entry_t *entry,
 		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_MODE, metadata->mode);
 }
 
+_Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->label) ==
+    FSIMG_WIRE_INFO_LABEL_BYTES, "the wire label holds the public label");
+
 /* Strings are copied up to their terminators, which the reader guarantees
  * inside each fixed array; the zeroed record supplies the wire terminator.
  */
@@ -458,9 +461,14 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	if (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLEAN) > 1 ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_IO_ERROR) > 1)
 		return (false);
+	if (!bytes_zero(raw + FSIMG_WIRE_INFO_LABEL + FSIMG_WIRE_INFO_LABEL_BYTES,
+	    FSIMG_WIRE_INFO_UUID - FSIMG_WIRE_INFO_LABEL -
+	    FSIMG_WIRE_INFO_LABEL_BYTES))
+		return (false);
 	return (memchr(raw + FSIMG_WIRE_INFO_FORMAT, '\0', 16) != NULL &&
 	    memchr(raw + FSIMG_WIRE_INFO_PROFILE, '\0', 40) != NULL &&
-	    memchr(raw + FSIMG_WIRE_INFO_LABEL, '\0', 48) != NULL);
+	    memchr(raw + FSIMG_WIRE_INFO_LABEL, '\0',
+	    FSIMG_WIRE_INFO_LABEL_BYTES) != NULL);
 }
 
 bool

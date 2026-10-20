@@ -692,7 +692,7 @@ the passes and the emission order.
 
 Keep only the geometry, the root block, a bounded number of 4 KiB windows,
 the current record and the current extent chain position resident. Scratch
-holds the extent indexes, the claimed-block bitset of `N` bits, the
+holds the extent indexes, the claimed-block bitset of `N + 1` bits, the
 `.inodes` exposure bitset, directory records, plan rows and ownership
 records, never copied payload. A random content lookup costs one index
 search after the object's chain is walked once; sequential reads batch

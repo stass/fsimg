@@ -113,7 +113,9 @@ Only three primitives are needed:
    iterate sequentially; a record larger than the per-record/path allowance
    fails before allocation.
 2. **Paged arrays and bitsets.** Dense numeric IDs address fixed-size records
-   through the shared cache. Sparse bitsets mark visited directory clusters.
+   through the shared cache. Sparse bitsets mark visited directory clusters
+   and claimed blocks; one call tests and sets a range of bits and reports
+   whether any was already set, so an extent is claimed in one pass.
    Their logical length is derived from validated geometry and charged to the
    scratch budget even if the host stores few physical blocks.
 3. **External sort and merge.** A bounded run buffer produces sorted runs;

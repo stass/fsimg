@@ -451,3 +451,51 @@ fsimg_bitset_test_and_set(fsimg_bitset_t *bitset, uint64_t bit, bool *was_set,
 	byte |= mask;
 	return (fsimg_store_write(bitset->store, bit / 8, &byte, 1, error));
 }
+
+/* A run of bits is updated a chunk of bytes at a time: each byte's mask
+ * covers the bits of the range inside it, so a run of n bits costs about
+ * n / 4096 store accesses instead of one per bit.
+ */
+fsimg_status_t
+fsimg_bitset_test_and_set_range(fsimg_bitset_t *bitset, uint64_t first,
+    uint64_t count, bool *was_set, fsimg_error_t *error)
+{
+	unsigned char chunk[512];
+	uint64_t end, byte, last_byte, low, high;
+	size_t length;
+	unsigned mask;
+	fsimg_status_t status;
+
+	if (was_set != NULL)
+		*was_set = false;
+	if (bitset == NULL || was_set == NULL || first > bitset->bits ||
+	    count > bitset->bits - first)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_METADATA, "invalid bitset range or output"));
+	if (count == 0)
+		return (FSIMG_OK);
+	end = first + count;
+	last_byte = (end - 1) / 8;
+	for (byte = first / 8; byte <= last_byte; byte += length) {
+		length = last_byte - byte + 1 < sizeof(chunk) ?
+		    (size_t)(last_byte - byte + 1) : sizeof(chunk);
+		status = fsimg_store_read(bitset->store, byte, chunk, length,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+		for (size_t i = 0; i < length; i++) {
+			/* The range's bits within byte + i: [low, high). */
+			low = (byte + i) * 8 < first ? first % 8 : 0;
+			high = (byte + i) * 8 + 8 > end ? end % 8 : 8;
+			mask = (0xffu >> (8 - (high - low))) << low;
+			if ((chunk[i] & mask) != 0)
+				*was_set = true;
+			chunk[i] |= (unsigned char)mask;
+		}
+		status = fsimg_store_write(bitset->store, byte, chunk, length,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (FSIMG_OK);
+}
