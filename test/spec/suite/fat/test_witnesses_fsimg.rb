@@ -12,7 +12,8 @@ require "fsimg_spec/fat"
 # stage, and any other targeted one through the first stage that checks
 # its intended rule. A rule whose status is mis-set fails its witness with
 # both statuses named; a scope mis-set to one the model leaves
-# unclassified asserts nothing about fsimg (docs/spec-testing-plan.md, S6).
+# unclassified asserts nothing about fsimg
+# (specs/design-spec-testing.md#data-flow).
 class TestFatWitnessesFsimg < Minitest::Test
   Fat = FsimgSpec::Fat
   PROFILE = FsimgSpec.fetch_profile("quick")

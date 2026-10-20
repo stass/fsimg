@@ -242,10 +242,10 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx6-write --scale
 	./test-exfat-scale --huge; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx6 --scale; result=$$?; test $$result = 0 -o $$result = 77
-check-fuzz: test-fat test-exfat test-qnx6 test-protocol
+check-fuzz: test-fat test-exfat test-qnx6 test-protocol test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
-check-fuzz-extended: test-fat test-exfat test-qnx6 test-protocol
+check-fuzz-extended: test-fat test-exfat test-qnx6 test-protocol test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard

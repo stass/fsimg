@@ -33,7 +33,9 @@ class TestInvocation < Minitest::Test
     "exits 0 without a summary" => ["exit 0", "harness_error"],
     "reports another sandbox status" => ["echo '#{SUMMARY.sub("unavailable", "active")}'", "harness_error"],
     "completes with sandbox unknown" => ["echo '#{SUMMARY.sub("unavailable", "unknown")}'", "harness_error"],
-    "reports unknown at a reading stage" => ["echo '#{EIO.sub("unavailable", "unknown")}'; exit 1", "harness_error"],
+    "faults with sandbox unknown" => ["echo '#{EIO.sub("unavailable", "unknown")}'; exit 1", "faulted:FSIMG_EIO"],
+    "rejects with sandbox unknown" => ["echo '#{LIMIT.sub("unavailable", "unknown")}'; exit 1", "harness_error"],
+    "faults with another sandbox" => ["echo '#{EIO.sub("unavailable", "active")}'; exit 1", "harness_error"],
     "completes" => ["echo '#{SUMMARY}'", "accepted"]
   }.freeze
 
@@ -58,12 +60,15 @@ class TestInvocation < Minitest::Test
   end
 
   # create refuses a setting before any worker runs, so its error record
-  # reports the sandbox as unknown; that is still a rejection.
+  # reports the sandbox as unknown; that is still a rejection. A create
+  # that completes ran a worker, which reported its confinement.
   def test_create_refused_before_a_worker_ran_is_a_rejection
     einval = '{"schema":1,"type":"error","code":-1,"resource":"none","sandbox":"unknown"}'
-    execution, = run_stub("echo '#{einval}'; exit 2")
+    refused, = run_stub("echo '#{einval}'; exit 2")
+    completed, = run_stub("echo '#{SUMMARY.sub("unavailable", "unknown")}'")
 
-    assert_equal "rejected:FSIMG_EINVAL", FsimgSpec::Outcome.classify(execution, stage: "create", sandbox: "unavailable").to_s
+    assert_equal "rejected:FSIMG_EINVAL", FsimgSpec::Outcome.classify(refused, stage: "create", sandbox: "unavailable").to_s
+    assert_equal "harness_error", FsimgSpec::Outcome.classify(completed, stage: "create", sandbox: "unavailable").to_s
   end
 
   # A child that outlives the stub is found by the probe after the reap,

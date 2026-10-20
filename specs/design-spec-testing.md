@@ -536,10 +536,13 @@ Before any case, a **preflight** establishes the host in `preflight/`, which it
 removes when it finishes. A valid builder base runs through every reading
 stage, and one valid creation runs, with the run's options; any failure stops
 the run with `harness_error`. Every later invocation must report the
-preflight's sandbox status. The one exception is a failed `create` that
-reports `unknown`: the coordinator reports `unknown` until a worker reports
-its confinement, and `create` refuses a setting before any worker runs. A
-reading stage's verdict, and any acceptance, always comes from a worker.
+preflight's sandbox status, except where the stage may have ended before a
+worker reported its confinement: the coordinator reports `unknown` until then.
+Two kinds of outcome may report `unknown`: a `create` rejection, since
+`create` may refuse a setting before any worker runs, and any outcome but an
+acceptance or a rejection, such as a fault after a worker died. Every
+acceptance, and every rejection at a reading stage, comes from a worker and must
+repeat the preflight's status.
 The preflight also checks:
 
 * that the longest tree root the runner walks by path, a case's `dest/` or
@@ -724,7 +727,7 @@ that check it.
 | `timed_out` | The runner's wall-clock limit expired, or fsimg reported its own deadline as `FSIMG_ECANCELLED` |
 | `output_exceeded` | A capture reached its cap |
 | `sanitizer_failure` | The coordinator exited with status 87, or stderr contains `ERROR: AddressSanitizer`, `ERROR: LeakSanitizer`, `WARNING: MemorySanitizer` or `runtime error:` |
-| `harness_error` | Anything else: a launch failure, any other exit 2, exit 0 without a completion summary, exit 1 without exactly one error record, malformed NDJSON, a sandbox status that differs from the preflight's (apart from `unknown` on a failed `create`), or any other exit status |
+| `harness_error` | Anything else: a launch failure, any other exit 2, exit 0 without a completion summary, exit 1 without exactly one error record, malformed NDJSON, a sandbox status that differs from the preflight's (apart from `unknown` on a `create` rejection or an outcome other than an acceptance or a rejection), or any other exit status |
 
 When several conditions hold, the first match decides, in this order: a launch
 failure, a sanitizer report, the runner's wall-clock limit or a capture cap, a
@@ -828,8 +831,15 @@ per-case run time; `profile.rb` holds their values. The runner passes them to
 fsimg as `-m` and `-l` values, and the generators and the recipe loader keep
 within them. The `path` ceiling leaves room under the 1024-byte `PATH_MAX` of
 macOS for the case directory's own path. Fuzzing stays in
-`check-fuzz`, which `bin/export-seeds` supplies with the deterministic invalid
-witnesses and the promoted cases as seeds; the native fuzzers never call Ruby.
+`check-fuzz`. `bin/export-seeds`, run as `test/spec.sh
+--export-seeds=DIRECTORY`, gives it a seed per deterministic invalid witness
+and per promoted case, except a case that forces its format with `-t`: the
+fuzzer detects the format itself and cannot force one. A seed is the case's
+image when it fits the fuzzer's 3 MiB input, since some cases test the image's
+length itself; a larger image is cut after its last byte that is not zero,
+which the fuzzer's zero-filled reading restores, and one with data past the
+input fails the export rather than seed a different image. Seeds of cases that no longer exist are removed. The native
+fuzzers never call Ruby.
 
 ## Reports and regressions
 

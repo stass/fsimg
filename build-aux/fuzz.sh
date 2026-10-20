@@ -5,11 +5,11 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6 and test-protocol, which write the seeds, with MAKE
-# naming the make program that drives that build (sanitize.sh inherits it).
-# FUZZ_CC and FUZZ_CXX select the compiler. The harnesses build against the
-# instrumented sanitizer-fuzz/ tree (see sanitize.sh) and keep their corpora
-# here between runs.
+# test-exfat, test-qnx6, test-protocol and test/spec.sh, which write the
+# seeds, with MAKE naming the make program that drives that build
+# (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX select the compiler.
+# The harnesses build against the instrumented sanitizer-fuzz/ tree (see
+# sanitize.sh) and keep their corpora here between runs.
 set -eu
 fuzz_seconds=${FUZZ_SECONDS:-0}
 case "$fuzz_seconds" in
@@ -60,6 +60,15 @@ for variant in 12 16 32; do
         ./test-fat --seed-variant "fuzz-corpus/fat$variant.seed" "$variant"
     fi
 done
+# The specification harness adds a seed per targeted or promoted FAT case
+# when Ruby 3.2 and its locked gems are available; test/spec.sh exits 77
+# otherwise.
+spec_status=0
+sh test/spec.sh --export-seeds="$PWD/fuzz-corpus" || spec_status=$?
+if test "$spec_status" -ne 0 && test "$spec_status" -ne 77; then
+    echo "FAIL: test/spec.sh --export-seeds exited $spec_status" >&2
+    exit 1
+fi
 ASAN_OPTIONS=detect_stack_use_after_return=1:strict_string_checks=1
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
 if test "$(uname -s)" = Linux; then

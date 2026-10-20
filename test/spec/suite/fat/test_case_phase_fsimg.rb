@@ -10,8 +10,9 @@ require "tmpdir"
 require "fsimg_spec"
 require "fsimg_spec/fat"
 
-# The case phase through the real fsimg (docs/spec-testing-plan.md, S7): an
-# injected fault, here a rule whose status is mis-set, fails its case,
+# The case phase through the real fsimg
+# (specs/design-spec-testing.md#reports-and-regressions): an injected
+# fault, here a rule whose status is mis-set, fails its case,
 # writes a failure record that names no host path, and replaying the
 # record's recipe under the same rules reproduces the failure. A fault in
 # one case is that case's harness error, and the phase goes on.

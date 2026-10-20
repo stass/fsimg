@@ -397,12 +397,12 @@ review and commit gates.
 ### S8. Fuzz seeds and sanitizer pass
 
 * `bin/export-seeds DIR` writes the deterministic invalid witnesses and the
-  promoted cases as fuzz seeds. FAT32 seeds are cut the way
-  `test-fat --seed-variant` cuts them (data offset plus 16 clusters) to fit
-  the 3 MiB maximum length.
-* `build-aux/fuzz.sh` adds these seeds to `fuzz-corpus/` when Ruby is
-  available, and is otherwise unchanged. The native harness never
-  calls Ruby inside a fuzzing iteration.
+  promoted cases as fuzz seeds, as the
+  [design](../specs/design-spec-testing.md#profiles) states: an image within
+  the 3 MiB maximum length whole, a larger one without its zero tail.
+* `build-aux/fuzz.sh` adds these seeds to `fuzz-corpus/` when Ruby 3.2
+  and the locked gems are available, and is otherwise unchanged. The
+  native harness never calls Ruby inside a fuzzing iteration.
 * Run `check-asan`, `check-ubsan`, `check-lsan` and `check-msan` on the
   final milestone tree with the spec suite inside. Record per host in
   build.md which sanitizer checks ran and which were skipped.

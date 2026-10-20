@@ -26,11 +26,15 @@ module FsimgSpec
     end
 
     # The outcome of execution at stage. sandbox is the sandbox status the
-    # preflight established, or nil while the preflight itself runs. Every
-    # record repeats it, except that a failed create may report unknown:
-    # the coordinator reports unknown until a worker reports its
-    # confinement, and create refuses a setting before any worker runs. A
-    # reading stage's verdict always comes from a worker.
+    # preflight established, or nil while the preflight itself runs.
+    #
+    # Every record repeats sandbox, except where the stage may have ended
+    # before a worker reported its confinement: the coordinator reports
+    # unknown until then. Two kinds of outcome may report unknown: a
+    # create's rejection, since create may refuse a setting before any
+    # worker runs, and any outcome but an acceptance or a rejection, such
+    # as a fault after a worker died. Every acceptance, and every rejection at a
+    # reading stage, comes from a worker and must repeat sandbox.
     #
     # When several conditions hold, the first decides, in this order: a
     # launch failure, a sanitizer report, the runner's wall clock or a
@@ -56,23 +60,25 @@ module FsimgSpec
       records = parse(execution.stdout)
       return new(kind: "harness_error", detail: "malformed NDJSON on stdout") unless records
 
-      unexpected = unexpected_sandbox(records, sandbox:, failed_create: stage == "create" && execution.exit_status != 0)
-      if unexpected.any?
-        return new(kind: "harness_error", records:, detail: "sandbox #{unexpected} differs from the preflight's #{sandbox}")
-      end
+      outcome = case execution.exit_status
+                in 0 then completion(records)
+                in 1 | 2 => exit_status then rejection(records, stage:, exit_status:)
+                in exit_status then new(kind: "harness_error", records:, detail: "exit status #{exit_status}")
+                end
+      may_be_unknown = !outcome.passed? || (stage == "create" && outcome.kind == "rejected")
+      unexpected = unexpected_sandbox(records, sandbox:, may_be_unknown:)
+      return outcome if unexpected.empty?
 
-      case execution.exit_status
-      in 0 then completion(records)
-      in 1 | 2 => exit_status then rejection(records, stage:, exit_status:)
-      in exit_status then new(kind: "harness_error", records:, detail: "exit status #{exit_status}")
-      end
+      new(kind: "harness_error", records:, detail: "sandbox #{unexpected} differs from the preflight's #{sandbox}")
     end
 
     # The sandbox statuses records report that the stage may not report.
-    private_class_method def self.unexpected_sandbox(records, sandbox:, failed_create:)
+    # may_be_unknown says the stage may have ended before a worker reported
+    # its confinement.
+    private_class_method def self.unexpected_sandbox(records, sandbox:, may_be_unknown:)
       return [] unless sandbox
 
-      allowed = failed_create ? [sandbox, "unknown"] : [sandbox]
+      allowed = may_be_unknown ? [sandbox, "unknown"] : [sandbox]
       records.filter_map { _1["sandbox"] }.uniq - allowed
     end
 

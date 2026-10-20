@@ -285,30 +285,33 @@ recipe, and outcomes. Fixtures include all FAT variants and a 4096-byte-sector,
 payload verification runs. No test mounts an image or needs root.
 
 `check-fuzz` builds and checks a separate `sanitizer-fuzz` static library with
-ASan/UBSan and `-fsanitize=fuzzer-no-link` coverage on every object, then compiles
-`fuzz/fat.c` with Clang's libFuzzer runtime, and creates seeds for all FAT variants
-using the independent fixture builder. A separate exFAT corpus combines an
-independent raw-table fixture with a writer-generated compressed-table image.
-It runs 1000 mutations per format corpus with a 3 MiB input ceiling
-and a ten-second per-input timeout. Each reader has a 16 MiB budget, 1000-entry,
-eight-level and 250,000-work limits, and no scratch authority. Each input is
-read both as an exact-length byte array and as a prefix of zero-filled logical
-storage. The latter reaches FAT32's minimum geometry without a large resident
-seed; it does not allocate or transfer the logical volume. The target fuzzes
-probe, directory/name parsing, chain traversal, content/range reads, index
-construction, and full verification; it also checks cleanup accounting.
-`fuzz/qnx6.c` forces the QNX6 decoder and reads each input as the exact slice,
-since QNX6 finds its second header from the slice length; its seed is a 64 KiB
-B = 512 volume from the independent generator holding every entry kind,
-inline and long names and a depth-1 tree, with a 1 MiB input ceiling and the
-same budgets.
-The same target builds `fuzz/protocol.c` and runs 1000 mutations with a 64 KiB
-input ceiling and five-second timeout. It exercises production framing, job
-codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker lifecycle ordering
-is covered by `test-worker`, not inferred from pure wire fuzzing.
-Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults to its
-sibling `clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
-validation uses Homebrew LLVM:
+ASan/UBSan and `-fsanitize=fuzzer-no-link` coverage on every object, then
+compiles `fuzz/fat.c` with Clang's libFuzzer runtime, and creates seeds for all
+FAT variants using the independent fixture builder. When Ruby 3.2 and the
+harness's gems are installed, `test/spec.sh --export-seeds` adds the
+specification harness's seeds, one per targeted or promoted FAT case that does
+not force a format with `-t`, rewritten on every run; seeds of cases that no
+longer exist are removed. A separate exFAT corpus combines an independent
+raw-table fixture with a writer-generated compressed-table image. It runs 1000
+mutations per format corpus with a 3 MiB input ceiling and a ten-second
+per-input timeout.
+Each reader has a 16 MiB budget, 1000-entry, eight-level and 250,000-work
+limits, and no scratch authority. Each input is read both as an exact-length
+byte array and as a prefix of zero-filled logical storage. The latter reaches
+FAT32's minimum geometry without a large resident seed; it does not allocate or
+transfer the logical volume. The target fuzzes probe, directory/name parsing,
+chain traversal, content/range reads, index construction, and full verification;
+it also checks cleanup accounting. `fuzz/qnx6.c` forces the QNX6 decoder and
+reads each input as the exact slice, since QNX6 finds its second header from the
+slice length; its seed is a 64 KiB B = 512 volume from the independent generator
+holding every entry kind, inline and long names and a depth-1 tree, with a 1 MiB
+input ceiling and the same budgets. The same target builds `fuzz/protocol.c` and
+runs 1000 mutations with a 64 KiB input ceiling and five-second timeout. It
+exercises production framing, job codecs, and typed INFO/PLAN/ENTRY/VERIFY
+validators. Worker lifecycle ordering is covered by `test-worker`, not inferred
+from pure wire fuzzing. Set `FUZZ_CC` to a Clang with the required runtime;
+`FUZZ_CXX` defaults to its sibling `clang++`. Apple Clang lacks the libFuzzer
+runtime; macOS fuzz validation uses Homebrew LLVM:
 
 ```sh
 brew install llvm

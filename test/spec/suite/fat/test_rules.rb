@@ -12,7 +12,7 @@ require "fsimg_spec/fat"
 # The FAT rules and their deterministic witnesses, without fsimg: every
 # witness classifies as its generator meant, every rule has a witness that
 # violates it, the witnesses follow the domains, and a recorded recipe
-# replays to the same bytes (docs/spec-testing-plan.md, S6).
+# replays to the same bytes (specs/design-spec-testing.md#data-flow).
 class TestFatRules < Minitest::Test
   Fat = FsimgSpec::Fat
   REGISTRY = Fat::Rules.registry

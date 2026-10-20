@@ -1,0 +1,42 @@
+#!/usr/bin/env ruby
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+# frozen_string_literal: true
+
+# Writes the FAT cases' fuzz seeds into a corpus directory:
+#
+#   test/spec.sh --export-seeds=DIRECTORY
+#
+# build-aux/fuzz.sh runs this before the FAT fuzzer. It exits 0 after
+# writing the seeds, 1 when a case cannot be seeded, 2 for a usage error,
+# and 77 without the locked gems.
+
+require_relative "../bundle"
+require "fsimg_spec"
+require "fsimg_spec/fat"
+
+def export
+  raise FsimgSpec::UsageError, "usage: test/spec.sh --export-seeds=DIRECTORY" unless ARGV.size == 1
+  corpus = ARGV.first
+  raise FsimgSpec::UsageError, "no such corpus directory: #{FsimgSpec.shown(corpus)}" unless File.directory?(corpus)
+
+  build_directory = ENV.fetch("FSIMG_BUILDDIR") do
+    raise FsimgSpec::UsageError, "FSIMG_BUILDDIR is not set; run through test/spec.sh"
+  end
+  # Every profile runs the same cases, and quick's ceilings are the
+  # tightest, so every case loads under them; a seed needs a fixture, not
+  # a run.
+  cache = FsimgSpec::FixtureCache.new(File.join(build_directory, "test", "spec-cache"))
+  seeds = FsimgSpec::Fat::Seeds
+  names = seeds.export(corpus, seeds.seeded(cache:, ceilings: FsimgSpec.fetch_profile("quick").ceilings))
+  puts "export-seeds: #{names.size} FAT seeds"
+  0
+rescue FsimgSpec::UsageError => e
+  warn FsimgSpec::Terminal.escaped("export-seeds: #{e.message}")
+  2
+rescue FsimgSpec::Error, SystemCallError => e
+  warn FsimgSpec::Terminal.escaped("export-seeds: #{FsimgSpec.error_label(e)}")
+  1
+end
+
+exit export

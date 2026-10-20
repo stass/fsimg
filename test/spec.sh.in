@@ -6,18 +6,21 @@
 #
 #   test/spec.sh [PROFILE]
 #   test/spec.sh --replay=CASE.json [PROFILE]
+#   test/spec.sh --export-seeds=DIRECTORY
 #
 # The profile is quick when none is given, as under make check. --replay
 # rebuilds and reruns one case from its recipe, such as a failure record's
-# case.json, under the profile's ceilings, with bin/replay. The script
-# exits 77 when Ruby 3.2 is absent, and run.rb does when a locked gem is.
+# case.json, under the profile's ceilings, with bin/replay; --export-seeds
+# writes the FAT cases' fuzz seeds into a corpus directory with
+# bin/export-seeds. The script exits 77 when Ruby 3.2 is absent, and each
+# program it runs does when a locked gem is.
 # A replay's status is for git bisect run: 0 good, 3 bad, 125 untestable,
 # which a missing Ruby or gem is too, and 128, which stops the bisection,
 # for anything else, such as a usage error or a crash of the harness.
 set -eu
 # Exits 2, or 128 when the first argument asks for a replay.
 usage() {
-    echo 'usage: test/spec.sh [PROFILE | --replay=CASE.json [PROFILE]]' >&2
+    echo 'usage: test/spec.sh [PROFILE | --replay=CASE.json [PROFILE] | --export-seeds=DIRECTORY]' >&2
     case ${1:-} in --replay=*) exit 128 ;; esac
     exit 2
 }
@@ -55,6 +58,7 @@ FATCAT='@FATCAT@'
 export BUNDLE_GEMFILE FSIMG_BUILDDIR FSIMG_BIN MKFS_FAT FSCK_FAT NEWFS_MSDOS \
     FSCK_MSDOSFS MCOPY MMD MDEL MDIR FATCAT
 case $profile in
+--export-seeds=*) exec "$ruby" "$spec/bin/export-seeds" "${profile#--export-seeds=}" ;;
 --replay=*)
     status=0
     "$ruby" "$spec/bin/replay" "${profile#--replay=}" ${2+"$2"} || status=$?
