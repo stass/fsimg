@@ -215,6 +215,8 @@ class TestRecipe < Minitest::Test
       [/a base or a source, not both/, ->(r) { r.merge("source" => JSON.parse(CREATION)["source"]) }],
     "reading case running create" =>
       [/a reading case cannot run create/, ->(r) { r.merge("stages" => %w[info create], "expected" => { "info" => "accept", "create" => "accept" }) }],
+    "stages out of run order" =>
+      [/stages are not in the order/, ->(r) { r.merge("stages" => %w[verify info], "expected" => { "verify" => "accept", "info" => "accept" }) }],
     "creation case not running create" =>
       [/a creation case needs create/, ->(_) { JSON.parse(CREATION).merge("stages" => ["verify"], "expected" => { "verify" => "accept" }) }],
     "unknown kind" => [/unknown kind "fuzzed"/, ->(r) { r.merge("kind" => "fuzzed") }],

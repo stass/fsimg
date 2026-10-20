@@ -20,7 +20,7 @@ module FsimgSpec
     # malformed case asserts only safety, because the model may not see
     # everything a random edit breaks.
     def self.expectations(recipe, classification)
-      return recipe.stages.to_h { [_1, Expectation.new(outcomes: [Expectation::UNCLASSIFIED])] } if recipe.kind == "malformed"
+      return recipe.stages.to_h { [_1, Expectation.new(unclassified: true)] } if recipe.kind == "malformed"
 
       recipe.stages.to_h { [_1, Expectation.derive(classification, _1)] }
     end

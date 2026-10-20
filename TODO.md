@@ -21,6 +21,12 @@
   [design](specs/design-spec-testing.md) owns the decisions and the
   [plan](docs/spec-testing-plan.md) the stages.
 
+* [Medium] **Spec harness captures in memory** (`test/spec/lib/fsimg_spec/process.rb`,
+  `outcome.rb`): each stage's stdout and stderr are held in Ruby strings up
+  to the coordinator's text ceiling, which reaches several GiB under the
+  `deep` profile, and stdout is parsed whole. Stream captures to their
+  case-directory files and parse the NDJSON records line by line.
+
 * [Low] **Scoped ownership intervals** (`lib/formats/fat/verify.c`,
   `lib/formats/exfat/verify.c`): extract the duplicate ownership-interval
   sorting and cursor checks into one bounded utility, the last item of the

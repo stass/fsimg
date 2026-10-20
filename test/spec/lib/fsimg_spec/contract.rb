@@ -35,6 +35,9 @@ module FsimgSpec
 
   READING_STAGES = %w[info ls extract verify verify-deep].freeze
   STAGES = (READING_STAGES + %w[create]).freeze
+  # The order a case runs its stages in: create writes the image the
+  # reading stages then read.
+  RUN_ORDER = (%w[create] + READING_STAGES).freeze
 
   # The check a violation's scope names, and the stages that run it.
   SCOPE_STAGES = {

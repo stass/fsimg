@@ -292,6 +292,10 @@ review and commit gates.
   in which the harness kills the parser worker is classified `faulted`,
   never `rejected`, and a `-S required` run on a host without confinement
   fails the preflight as `harness_error`.
+* Items that wait for later stages:
+  - the `.mtoolsrc` stub needs the oracle runner of milestone B;
+  - the promoted NFC/NFD replay needs promoted creation cases with name
+    trials;
 * **Gate:** every stub is classified as above, with no leftover processes
   (checked by process group), and the runner drives the real `fsimg` through
   every stage on a trivially valid image.
@@ -309,6 +313,9 @@ review and commit gates.
   written by the name funnel into `test/spec-cache/<key>.src/` and removed
   once the base is built.
 * Add the independent empty-volume builder.
+* Give the preflight its sample image from a builder base instead of its
+  own `create` output, so the preflight does not depend on the writer it
+  is about to test.
 * Classify a creation case per stage: `create` follows the source tree's
   classification, and the reading stages that run on the created image
   follow the image's. A rejecting `create` leaves those stages nothing to

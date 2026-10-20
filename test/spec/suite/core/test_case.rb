@@ -87,7 +87,7 @@ class TestCase < Minitest::Test
 
     assert_nil malformed.harness_defect
     assert_nil malformed.isolation
-    assert malformed.expected.values.all?(&:unclassified?)
+    assert malformed.expected.values.all?(&:unclassified)
     assert_equal 2, malformed.recorded.actual_violations.size
   end
 

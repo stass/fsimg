@@ -447,9 +447,10 @@ share a defect.
 `runner.rb` is the only code that knows fsimg's command syntax. fsimg runs as a
 [coordinator](design-cli.md#coordinator-and-streaming-representation) process
 that supervises its workers. Every command runs with the case directory as its
-working directory and relative operands, so fsimg is given no host path to
-report. Sanitizer reports and Ruby backtraces can still carry build, gem and
-home paths.
+working directory and relative operands, so no operand names a host path for
+fsimg to report; only `HOME` and `TMPDIR`, which point into the case directory,
+are absolute. Sanitizer reports and Ruby backtraces can still carry build, gem
+and home paths.
 
 | Stage | Command |
 | --- | --- |
@@ -460,8 +461,9 @@ home paths.
 | `create` | `fsimg create -j -R -t FORMAT [-s BYTES] [-O sector=N] [-O cluster=N] -o out/created.img source` |
 
 A reading stage adds `-t FORMAT` when the recipe forces a format. Every
-invocation passes the profile's ceilings: `-m 64M`, `-l` values for `seconds`,
-`entries`, `depth`, `path`, `output`, `scratch` and `fds`, and `-T scratch`.
+invocation passes the profile's ceilings: `-m` with the memory ceiling, `-l`
+values for `seconds`, `entries`, `depth`, `path`, `output`, `scratch` and
+`fds`, and `-T scratch`.
 Extraction holds one descriptor per directory level, so `fds` is the larger of
 fsimg's default and the depth ceiling plus a fixed margin. No `work` limit is
 passed, because fsimg's own algorithmic bounds are under test and the deadline
@@ -510,7 +512,11 @@ Before any case, a **preflight** establishes the host in `preflight/`, which it
 removes when it finishes. A valid builder base runs through every reading
 stage, and one valid creation runs, with the run's options; any failure stops
 the run with `harness_error`. Every later invocation must report the
-preflight's sandbox status. The preflight also checks:
+preflight's sandbox status. The one exception is a failed `create` that
+reports `unknown`: the coordinator reports `unknown` until a worker reports
+its confinement, and `create` refuses a setting before any worker runs. A
+reading stage's verdict, and any acceptance, always comes from a worker.
+The preflight also checks:
 
 * that the longest tree root the runner walks by path, a case's `dest/` or
   `source/` with a 128-byte id or a population tree
@@ -520,27 +526,43 @@ preflight's sandbox status. The preflight also checks:
 * that the soft `RLIMIT_NOFILE` fsimg inherits is at least the `fds` limit;
 * that `trials/` and `cases/` report the same `st_dev`;
 * when oracle confinement is configured, that a fixed command run through it
-  can neither write a file outside the case directory nor read a sentinel file
-  the harness placed outside it.
+  writes a file inside its directory and exits 0, which shows that the
+  command runs programs at all, and can neither write a file outside the
+  case directory nor read a sentinel file the harness placed outside it.
 
 Each invocation follows one lifetime:
 
 1. The runner spawns fsimg in a new process group under the limits below.
 2. It reads stdout and stderr through pipes, each up to its cap, while it waits
-   for the coordinator by pid with `Process.wait(pid)`. It never uses
+   for the coordinator, polling for it by pid. It never uses
    `wait(-1)`, `Open3` or `Process.detach`, which reap in helper threads.
-3. If the wall-clock limit or a cap is reached first, it kills the group and
-   then reaps the coordinator.
+3. If the wall-clock limit or a cap is reached first, it kills the coordinator
+   and its group, then reaps the coordinator. A coordinator still unreaped a
+   few seconds after `SIGKILL` is a harness error.
 4. Once the coordinator is reaped, it probes the group with
    `Process.kill(0, -pgid)`. Success means a process outlived the
    coordinator: the runner records it as a leftover and kills the group. A
    group with members keeps its ID allocated, so the kill cannot reach a
-   reused ID. The one residual race is that the last member exits, and a new
-   group leader takes the ID, between the probe and the kill.
+   reused ID while a member lives. The residual race spans the reap to the
+   kill: if the group empties in that window, a new group leader can take
+   the ID and receive the kill. After killing a leftover, the runner waits
+   until the group is gone, so nothing of it runs during the checks.
 5. It reads both pipes to their end and keeps what it read in `STAGE.stdout`
-   and `STAGE.stderr`.
+   and `STAGE.stderr`, each created exclusively without following a link.
 
-`SIGINT` or `SIGTERM` to the harness kills every live case group. A process
+The checks after a stage inspect the case directory with `lstat` and never
+follow a link: every name it may hold must have its own type (the image and
+the captures regular files, the subdirectories directories), the destination
+is walked only when `dest` is a real directory, a file is hashed through a
+descriptor opened without following a link or blocking, and an accepted
+`create` must leave `out/created.img` a regular file before anything opens
+it.
+
+`SIGINT` or `SIGTERM` to the harness stops the stage it is running. The
+harness installs no signal handler: Ruby raises each signal as an exception,
+held while a child starts and delivered during supervision, which it unwinds,
+killing the child and its group and waiting a few seconds for both to go.
+Ruby delivers signals to the main thread, so stages run on it. A process
 that leaves its group with `setsid` escapes these steps; fsimg never does so.
 Oracles follow the same lifetime and limits, each with its own deadline. The
 limits are:
@@ -558,8 +580,9 @@ limits are:
 * a capture cap of the coordinator's [text
   ceiling](architecture.md#bounded-resources) for the limits passed, plus a
   fixed allowance for text the coordinator does not count, such as a sanitizer
-  report. The profile's `entries` and `path` limits keep it within tens of MiB,
-  and reaching it means fsimg exceeded its own output bound.
+  report. Reaching it means fsimg exceeded its own output bound. The ceiling
+  grows with the profile's `entries` limit, to about 70 MiB under `quick` and
+  several GiB under `deep`, and the harness holds each capture in memory.
 
 Each case runs in a fresh directory:
 
@@ -570,20 +593,25 @@ cases/<id>/      working directory and fsimg's HOME; the only place tools write
   dest/          the extract destination; absent before extract
   source/        the creation input tree
   out/           created.img and its staging
-  oracle/        files that independent tools write
+  oracle/        files that independent tools write; fsimg adds nothing
   STAGE.stdout   bounded captures, one pair per stage
   STAGE.stderr
 ```
 
 After every stage the runner checks the following:
 
-* the image's size and modification time are unchanged;
-* the case directory holds only the names above;
+* the image is the same regular file with one link: its inode, size,
+  modification time and change time are unchanged;
+* the case directory holds only the names above that the case and the stages
+  run so far allow: `image.img` or `source/`, `dest/` only once extract has
+  run, and the captures of the stages run so far, each of its type;
 * `dest/`, walked with `lstat` without following links, holds only directories
-  and regular files, whose total logical size stays within the `output` limit.
-  Each entry records its path, type, size and SHA-256;
-* `scratch/` is empty and `out/` holds nothing beyond `created.img`, except a
-  path the error record names in `retained_scratch` or `retained_output`;
+  and regular files with one link, whose total logical size stays within the
+  `output` limit. Each entry records its path, type and size, and each file
+  its SHA-256 when the total is within the limit;
+* `scratch/` is empty and `out/` holds nothing beyond a creation case's
+  `created.img`, except a path the error record names in `retained_scratch` or
+  `retained_output`, and `oracle/` gained nothing;
 * no leftover was recorded in step 4.
 
 A failed check fails the case under every policy and ends it: no further stage
@@ -667,7 +695,7 @@ that check it.
 | `timed_out` | The runner's wall-clock limit expired, or fsimg reported its own deadline as `FSIMG_ECANCELLED` |
 | `output_exceeded` | A capture reached its cap |
 | `sanitizer_failure` | The coordinator exited with status 87, or stderr contains `ERROR: AddressSanitizer`, `ERROR: LeakSanitizer`, `WARNING: MemorySanitizer` or `runtime error:` |
-| `harness_error` | Anything else: a launch failure, any other exit 2, exit 0 without a completion summary, exit 1 without exactly one error record, malformed NDJSON, a sandbox status that differs from the preflight's, or any other exit status |
+| `harness_error` | Anything else: a launch failure, any other exit 2, exit 0 without a completion summary, exit 1 without exactly one error record, malformed NDJSON, a sandbox status that differs from the preflight's (apart from `unknown` on a failed `create`), or any other exit status |
 
 When several conditions hold, the first match decides, in this order: a launch
 failure, a sanitizer report, the runner's wall-clock limit or a capture cap, a
@@ -859,6 +887,7 @@ test/spec/
     contract.rb             fsimg's stages, scopes, statuses and resources
     profile.rb              profiles, their ceilings and results directories
     results_directory.rb    the results lock and emptying
+    undefined.rb            Undefined values and their propagation
     rule.rb                 Rule, Domain, the registry and its checks
     expectation.rb          expectation derivation
     recipe.rb               recipes and the checks on their values
@@ -867,7 +896,11 @@ test/spec/
     mutation.rb             mutations
     case.rb                 a recipe's classification and recorded fields
     image.rb                in-memory views and sparse materialization
+    process.rb              process groups, deadlines and capped output
+    outcome.rb              a stage's outcome from its exit and records
     runner.rb               the only code that knows fsimg's syntax
+    case_run.rb             one case through its stages
+    preflight.rb            the host and fsimg checks before any case
     tree.rb                 tree model, lstat walk, digests, name funnel
     fixtures.rb             base recipes, cache, manifests, tool adapters
     report.rb               coverage and failure records

@@ -166,6 +166,7 @@ module FsimgSpec
       return "stages are empty or repeat" if stages.empty? || stages.uniq.size != stages.size
       return "a reading case cannot run create" if base && stages.include?("create")
       return "a creation case needs create" if source && !stages.include?("create")
+      return "stages are not in the order #{RUN_ORDER.join(", ")}" unless stages == stages.sort_by { RUN_ORDER.index(_1) }
 
       base ? reading_problem(fields) : creation_problem(fields)
     end
