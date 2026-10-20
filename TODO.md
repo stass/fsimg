@@ -38,8 +38,9 @@
 * [High] **QNX4 writer** (`lib/formats/qnx4/`): the
   [format design](specs/design-qnx4.md) and [driver design](specs/design-qnx4-driver.md)
   describe the reader, verifier and writer for native QNX4 volumes and the
-  PCM 3.1 navigation partition. The reader and verifier are registered; the
-  [plan](docs/qnx4-plan.md) orders the remaining
+  PCM 3.1 navigation partition. The reader and verifier are registered, and
+  the writer is implemented but unregistered until QNX 6.5.0 qualifies its
+  output; the [plan](docs/qnx4-plan.md) orders the remaining
   stages and the [work breakdown](docs/todo-qnx4.md) holds the open items,
   including the native qualification that gates writer registration.
   [Research evidence](docs/qnx4-research.md) owns the native observations.
@@ -256,6 +257,13 @@
   test it on Linux with the sandbox active, including forged worker requests.
   FreeBSD Capsicum permits both calls: a confined `create -S required` reads
   ordinary and dangling links (verified on FreeBSD 16.0-CURRENT).
+* [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
+  exports every external symbol, internal ones included, so a consumer that
+  declares `fsimg_writer_new_variant()` and `fsimg_qnx4_candidate_format`
+  itself can build the unqualified QNX4 writer that the registry and the
+  public header keep out of reach. Export only the public header's symbols
+  (a libtool `-export-symbols-regex` or a symbol file, with test programs
+  linking the convenience library for internals).
 
 ## Planned features
 

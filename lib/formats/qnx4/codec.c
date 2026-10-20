@@ -8,14 +8,21 @@
 
 #include "qnx4.h"
 
-/* Pure decoders of the four QNX4 records. Every disk integer is
- * little-endian. A decoder copies every field it names and reduces each
- * reserved range to a flag, so a decoded record holds nothing unexamined.
- * Slot classification (free, link) and the root scan's search for
- * format-owned names read the status byte and name field directly.
+/* Pure decoders of the four QNX4 records and encoders of the three the
+ * writer emits. Every disk integer is little-endian. A decoder copies every
+ * field it names and reduces each reserved range to a flag, so a decoded
+ * record holds nothing unexamined. Slot classification (free, link) and the
+ * root scan's search for format-owned names read the status byte and name
+ * field directly. An encoder is the inverse: it writes the first
+ * name_length bytes of the name, never past the field's width, and every
+ * named field, and zero in every other byte of the record, so an encoded
+ * record carries no byte the caller did not supply. The flags that
+ * describe reserved ranges are ignored, since those ranges are always
+ * encoded as zero.
  */
 
 static uint8_t name_length(const unsigned char *, size_t, bool *);
+static size_t bounded(size_t, size_t);
 
 uint16_t
 qnx4_u16(const unsigned char *p)
@@ -28,6 +35,22 @@ qnx4_u32(const unsigned char *p)
 {
 	return ((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
 	    (uint32_t)p[3] << 24);
+}
+
+void
+qnx4_put16(unsigned char *p, uint16_t value)
+{
+	p[0] = (unsigned char)(value & 0xff);
+	p[1] = (unsigned char)(value >> 8);
+}
+
+void
+qnx4_put32(unsigned char *p, uint32_t value)
+{
+	p[0] = (unsigned char)(value & 0xff);
+	p[1] = (unsigned char)(value >> 8 & 0xff);
+	p[2] = (unsigned char)(value >> 16 & 0xff);
+	p[3] = (unsigned char)(value >> 24);
 }
 
 bool
@@ -53,6 +76,13 @@ name_length(const unsigned char *field, size_t width, bool *padding_zero)
 	length = nul == NULL ? width : (size_t)(nul - field);
 	*padding_zero = qnx4_bytes_zero(field + length, width - length);
 	return ((uint8_t)length);
+}
+
+/* An encoder's name length, never past its field. */
+static size_t
+bounded(size_t length, size_t width)
+{
+	return (length < width ? length : width);
 }
 
 /* A directory slot is free when its status has neither the used nor the
@@ -147,4 +177,49 @@ qnx4_longname_decode(const unsigned char *raw, qnx4_longname_t *record)
 	record->name_padding_zero = qnx4_bytes_zero(raw + 6 +
 	    record->name_length, QNX4_NAME_MAX - record->name_length);
 	record->tail_zero = raw[0x1ff] == 0;
+}
+
+void
+qnx4_inode_encode(const qnx4_inode_t *inode, unsigned char *raw)
+{
+	bzero(raw, QNX4_RECORD_BYTES);
+	bcopy(inode->name, raw, bounded(inode->name_length,
+	    QNX4_DIRECT_NAME_MAX));
+	qnx4_put32(raw + 0x10, inode->size);
+	qnx4_put32(raw + 0x14, inode->first_extent.first);
+	qnx4_put32(raw + 0x18, inode->first_extent.blocks);
+	qnx4_put32(raw + 0x1c, inode->chain);
+	qnx4_put32(raw + 0x20, inode->created);
+	qnx4_put32(raw + 0x24, inode->modified);
+	qnx4_put32(raw + 0x28, inode->accessed);
+	qnx4_put32(raw + 0x2c, inode->changed);
+	qnx4_put16(raw + 0x30, inode->extents);
+	qnx4_put16(raw + 0x32, inode->mode);
+	qnx4_put16(raw + 0x34, inode->uid);
+	qnx4_put16(raw + 0x36, inode->gid);
+	qnx4_put16(raw + 0x38, inode->links);
+	raw[0x3e] = inode->type;
+	raw[0x3f] = inode->status;
+}
+
+void
+qnx4_link_encode(const qnx4_link_t *link, unsigned char *raw)
+{
+	bzero(raw, QNX4_RECORD_BYTES);
+	bcopy(link->name, raw, bounded(link->name_length, QNX4_LINK_NAME_MAX));
+	qnx4_put32(raw + 0x30, link->target_block);
+	raw[0x34] = link->target_slot;
+	qnx4_put32(raw + 0x35, link->long_block);
+	raw[0x3f] = link->status;
+}
+
+void
+qnx4_longname_encode(const qnx4_longname_t *record, unsigned char *raw)
+{
+	bzero(raw, QNX4_BLOCK_BYTES);
+	qnx4_put32(raw, record->block);
+	raw[4] = record->slot;
+	raw[5] = record->state;
+	bcopy(record->name, raw + 6, bounded(record->name_length,
+	    QNX4_NAME_MAX));
 }

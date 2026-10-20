@@ -44,6 +44,7 @@ _Static_assert(FSIMG_CATALOG_GID == FSIMG_CATALOG_UID + 4,
 typedef struct fsimg_source_root fsimg_source_root_t;
 typedef struct fsimg_source_cursor fsimg_source_cursor_t;
 typedef struct fsimg_format fsimg_format_t;
+typedef struct fsimg_format_variant fsimg_format_variant_t;
 typedef struct fsimg_emit fsimg_emit_t;
 
 /* Each driver embeds this base first in one owned plan allocation. Common
@@ -159,7 +160,8 @@ struct fsimg_writer {
 	bool		 catalog_ready;
 	bool		 output_root_known;
 	unsigned	 variant;
-	char		 label[48];
+	/* A label of at most 48 bytes and its terminator. */
+	char		 label[49];
 };
 
 /* Common collection is private; public construction selects a format driver.
@@ -171,6 +173,14 @@ struct fsimg_writer {
  */
 fsimg_status_t fsimg_writer_collect_new(fsimg_ctx_t *, fsimg_writer_t **,
     fsimg_error_t *);
+/* fsimg_writer_new() for one variant of a given descriptor, registered or
+ * not. A descriptor outside the registry is reachable only by code that
+ * names it, which is how tests and native qualification exercise a writer
+ * before its capability is registered.
+ */
+fsimg_status_t fsimg_writer_new_variant(fsimg_ctx_t *, const fsimg_format_t *,
+    const fsimg_format_variant_t *, const fsimg_write_options_t *,
+    fsimg_writer_t **, fsimg_error_t *);
 fsimg_status_t fsimg_writer_set_sources(fsimg_writer_t *,
     const fsimg_source_ops_t *, void *, fsimg_error_t *);
 fsimg_status_t fsimg_writer_add(fsimg_writer_t *, const fsimg_entry_t *,

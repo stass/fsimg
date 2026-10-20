@@ -325,9 +325,11 @@ after skipping an object.
 or at most 48 bytes under the profile's byte rules, where NULL and the empty
 string both select the zero field; `epoch` within `[0, 2147483647]` in
 reproducible mode; `volume_bytes` zero or a multiple of 512 in
-`[43 * 512, 2^31 * 512]`. `volume_serial` is ignored, as the profile stores
-none. The capability record's `write_settings` names `inode_capacity`
-alone:
+`[43 * 512, 2^31 * 512]`; `inode_capacity` at most 33554424, the slots of
+the largest whole-block `.inodes` within the `2^31 - 1` byte object
+maximum that readers enforce on every record.
+`volume_serial` is ignored, as the profile stores none. The capability
+record's `write_settings` names `inode_capacity` alone:
 
 | Field | CLI setting | Meaning |
 | --- | --- | --- |
@@ -335,20 +337,22 @@ alone:
 
 ## Planning
 
-The plan object embeds `fsimg_plan_t`, the geometry, the first blocks of
-the root directory, `.inodes`, `lost+found`, `.longfilenames` and the first
-catalog object, the `.inodes` capacity and used count, the long-name count,
-the catalog IDs of `/.boot` and `/.altboot` or sentinels, the allocated
+The plan object embeds `fsimg_plan_t`, the geometry, the first blocks and
+lengths of the root directory, `.inodes`, `lost+found` and
+`.longfilenames`, the `.inodes` capacity and used count, the long-name
+count, the catalog IDs of `/.boot` and `/.altboot`, or 0 (the root's ID)
+for one the catalog lacks, the allocated
 block count `A`, the format time, and one paged array of 64-byte rows keyed
 by catalog ID with row 0 for the root. A row holds the size, the first block
 of the object's one extent, its slot index in the parent and, for a
 directory, the slots assigned so far, its `.inodes` slot or a sentinel, its
-long-name record index or a sentinel, and the record fields already encoded
-under the metadata policy: owner, the four times, mode, link count and
-status. The parent's first block, the `.inodes` block of a slot and the
-block of a long-name record all derive from these and the layout, so a row
-stores no pointer. Rows are the only per-entry state; no vector grows with
-`N`.
+long-name record index or a sentinel, its record position, and the record
+fields already encoded under the metadata policy: owner, the four times,
+mode, link count and status. The record position, which dot entries and
+links name, is fixed by the layout pass from the parent's first block or the
+`.inodes` slot; the `.inodes` block of a slot and the block of a long-name
+record derive from the layout, so a row stores no pointer to another row.
+Rows are the only per-entry state; no vector grows with `N`.
 
 Planning runs a fixed sequence of passes over the frozen catalog:
 
@@ -368,11 +372,13 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    `FSIMG_EUNSUPPORTED`; accumulate the blocks of every object and
    `initialized_bytes`. A time is stored as unsigned UTC seconds; an absent
    one takes the format time, and in reproducible mode every time is the
-   epoch. Sibling collisions are exact byte collisions, which catalog
+   epoch, a present time that differs from it being a counted loss. Sibling collisions are exact byte collisions, which catalog
    preparation has already rejected.
 2. **Geometry.** Directory sizes follow the writer profile's rounding; the
    `.inodes` capacity is the setting rule above; `.longfilenames` is
-   `16 * ceil(long names / 16)` blocks. The plan's block demand is
+   `16 * ceil(long names / 16)` blocks. Every directory and both tables
+   stay within the `2^31 - 1` byte object maximum that readers enforce on
+   every record, or planning fails. The plan's block demand is
    `D = R + I + 16 + L + objects + ceil(min_free_bytes / 512)`, the
    loader, root block and bitmap excluded. A volume fits when
    `2 + B(N) + D <= N`. With exact `volume_bytes`, `N` is given and must
@@ -450,7 +456,7 @@ Writer:
 | --- | --- |
 | Setting outside its type, name outside the profile, reserved root name | `FSIMG_EINVAL` |
 | Catalog `/.boot` or `/.altboot` of another kind; a size above `2^31 - 1`; a kind the profile lacks; an owner or time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
-| Content does not fit the exact size or `2^31` blocks | `FSIMG_ERANGE` |
+| Content does not fit the exact size or `2^31` blocks; a directory, `.inodes` or `.longfilenames` above `2^31 - 1` bytes; a non-reproducible format time outside `[0, 2147483647]` | `FSIMG_ERANGE` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
 
 Diagnostics quote at most one bounded, escaped name and never slot bytes,
@@ -475,9 +481,11 @@ back through its own independent checker, written from the format design
 like the generator, as well as through the reader and verifier. It compares
 bytes across source order, metadata cache size, scratch placement and time
 zone, and scans every unused byte for poison. Its `--native` mode compares an
-empty volume with the native `dinit` capture of the same geometry: every
-block but the loader matches byte for byte apart from times. Its `--create`
-mode builds the native qualification tree. Fault tests inject allocation,
+empty volume with the native `dinit` capture of the same geometry, label
+and format time: every block but the loader matches byte for byte, and the
+free blocks the formatter never wrote are counted, not compared. Its
+`--create` mode builds the native qualification images and their
+manifests. Fault tests inject allocation,
 scratch, short-read, short-write, EOF, source-change and cancellation
 failures at every stage and check cleanup. Scale tests grow `N` to near
 `2^31` on a sparse fixture with the bitmap in scratch, one directory's width

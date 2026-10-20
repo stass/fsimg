@@ -843,6 +843,69 @@ link's chain walked once per name are checked too. `--seed` and `--seed-chain` w
 fuzz seeds, and `--manifest IMAGE [OFFSET LENGTH]` prints one line per
 object for the integration script.
 
+`test-qnx4-write` creates QNX4 volumes with the writer. The registry lists
+only writers that native QNX has qualified, so the test builds writers from
+the driver's candidate descriptor through `fsimg_writer_new_variant()`,
+while `fsimg_writer_new("qnx4")` must fail as unsupported. Every image is checked twice: with fsimg's
+reader and payload verification, and with its own checker, written from
+the format design with separate offsets and sharing no code with
+`lib/formats/qnx4/`. The checker decodes the root block, the bitmap, every
+directory slot, `.inodes`, `.longfilenames` and `lost+found`; requires the
+writer profile's layout (the formatter's fixed slots and records, every
+object one extent, allocation one prefix of blocks, siblings in byte order,
+`.inodes` slots and long-name records assigned in a row) and the native
+statuses, modes and link counts; and requires every byte the layout gives
+no meaning, the loader block, free slots, slack and free blocks included,
+to be zero over a sink poisoned with `0xa5`. A mutation pass shows it
+reporting one changed byte in the loader, a free block, a free slot, an
+unused `.inodes` slot, a file's slack, a dot entry, a bitmap padding bit
+and root slot 6, and an empty root's slot 7 losing its `0x02` status. The
+fixture tree holds every entry kind, names of 1, 16, 17, 48, 49 and 505
+bytes, with 15, 47 and 504 in a separate case, two long names sharing their first 48 bytes, a
+UTF-8 name, directories with direct, link and long names, `/.boot` with
+content and nondefault owners, modes and times; forward and reverse catalog
+order, a one-page and a 1024-page metadata cache, scratch in fresh
+directories and none, and two time zones give identical bytes. Further
+cases cover the 43-block empty volume, exact and automatic sizes at the
+bitmap-block boundaries 4096/4097 and 8192/8193, requested free space, a
+full volume, the 2^31-block and 2^31 - 1-byte limits, roots of 0 to 60
+entries, `inodes=` below, at and above the need, the `/.boot` and
+`/.altboot` rules, reserved root names, names outside the profile, the
+owner and time loss policy, labels of 0, 1, 47 and 48 bytes, every invalid
+setting, sink-size, durability, write, flush, short-write, changed-source
+and early-EOF faults, allocation and metadata-storage failures at every
+step and cancellation at polls about 6% apart, each followed by a resource
+check.
+
+`--native DIR` compares fsimg's empty volume with each empty `dinit -hq`
+capture in DIR, the integration script's `FSIMG_QNX4_NATIVE`, at its block count,
+label and format time; block 1, the proprietary loader, is not compared,
+and free blocks the formatter never wrote, the capture disk's `0xaa` fill,
+are counted rather than compared. On macOS all twelve captures match byte
+for byte: the whole-disk 131072-block volume with and without `chkfsys`,
+with the 9-byte label `LabelAAAA` and the 48-byte label of `labelC`, and
+the 1000, 4095, 4096, 4097, 5001, 8192, 8193 and 131071-block volumes,
+root slot 7's status `0x02` and slot 6's `lost+found` link included.
+`--create DIR NAME BLOCKS [LABEL]` writes `DIR/writer.img` and its manifest
+`DIR/writer.manifest`, in the integration script's line format, for the
+native qualification in `tools/qnx/guest/qualify4.sh`: NAME `empty`,
+`tree` or `full` (the tree and a zero-filled file leaving 256 blocks free),
+BLOCKS 0 for the smallest volume. The images are not reproducible, so the
+entries keep their own times:
+
+```sh
+./test-qnx4-write --create /tmp/q4/tree tree 131072 fsimg-qualification
+./test-qnx4-write --create /tmp/q4/empty empty 0
+./test-qnx4-write --create /tmp/q4/small tree 0
+./test-qnx4-write --create /tmp/q4/b1 tree 4096
+./test-qnx4-write --create /tmp/q4/b2 tree 8192
+./test-qnx4-write --create /tmp/q4/b3 tree 12288
+./test-qnx4-write --create /tmp/q4/full full 131072
+```
+
+Compressed with `gzip -9` they take 66,688, 326, 1,552, 3,472, 5,524,
+7,558 and 66,749 bytes, far below the serial loader's 3 MiB limit.
+
 `test/qnx4-integration.sh` reads external evidence that is never
 redistributed, and skips what is absent; [the QNX4 research
 record](qnx4-research.md) describes the captures and the partition:
@@ -858,8 +921,14 @@ Each must open as QNX4 through `fsimg info`, list through `fsimg ls` and
 verify completely through `fsimg verify -d`; for
 each `q4-manifest-*` capture the guest's `ls -l` and `cksum` manifest must
 equal fsimg's names, kinds, modes, link counts, owners, sizes, symbolic-link
-targets and the checksums of every file read through `fsimg cat`. On macOS
-all 40 captures open and verify, and the 16 manifests match.
+targets and the checksums of every file read through `fsimg cat`, and
+`test-qnx4-write --native` must find no difference. On macOS all 40
+captures open and verify, the 16 manifests match and the twelve empty
+captures equal fsimg's empty volumes. On a Linux host as root the script
+mounts a writer tree with the kernel's qnx4 driver and compares the POSIX
+`cksum` of every file the writer was given with its manifest, counting the
+files below a name over 48 bytes, which Linux shows as the 48-byte prefix; elsewhere that comparison is an explicit skip, and no Linux
+result is recorded.
 `FSIMG_QNX4_H1` names a disk image read in place at the partition's byte
 range; it must verify completely, every file is read through `fsimg cat`,
 and the script prints only counts. The PCM 3.1 HDD's QNX4 partition lists

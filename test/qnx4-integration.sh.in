@@ -9,13 +9,16 @@
 #   FSIMG_QNX4_H1         a disk image holding a QNX4 partition, read only
 #   FSIMG_QNX4_H1_OFFSET  that partition's byte offset
 #   FSIMG_QNX4_H1_LENGTH  and its byte length
-# Every capture and the partition must verify completely. The H1 survey
-# reports counts only, never names. Each unavailable check is reported as a
-# skip.
+# Every capture and the partition must verify completely, and fsimg's
+# empty volumes must equal the empty captures of their geometry. The H1
+# survey reports counts only, never names. The Linux kernel reader of
+# writer output runs on a Linux host as root. Each unavailable check is
+# reported as a skip.
 set -eu
 ran=0
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-qnx4-oracle-XXXXXX")
-trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+trap 'umount "$fixture/mnt" 2>/dev/null || true; rm -rf "$fixture"' \
+    EXIT HUP INT TERM
 
 fail() {
     echo "FAIL: $*" >&2
@@ -154,6 +157,15 @@ if test -n "$native"; then
         rm -f "$fixture/image"
     done
     test "$compared" != 0 || fail "$native holds no manifest captures"
+    # The writer's empty volume of each empty capture's geometry, label and
+    # format time: every byte but the loader block's must match.
+    rc=0
+    ./test-qnx4-write --native "$native" || rc=$?
+    case $rc in
+    0) ;;
+    77) echo "SKIP: $native holds no empty capture for the writer" ;;
+    *) fail "fsimg's empty volumes differ from the native captures" ;;
+    esac
     ran=1
 else
     echo 'SKIP: FSIMG_QNX4_NATIVE is not set (QNX 6.5.0 captures)'
@@ -183,6 +195,49 @@ if test -n "$h1"; then
     ran=1
 else
     echo 'SKIP: FSIMG_QNX4_H1 is not set (PCM partition, counts only)'
+fi
+
+# The Linux kernel's read-only qnx4 driver as an independent reader of
+# writer output: every file the writer was given must read back through the
+# mount with the POSIX cksum and size of its manifest line. Linux shows a
+# name over 48 bytes as its 48-byte link field, the mangled prefix, so a
+# file below such a name is counted, not compared.
+if test "$(uname -s)" = Linux && test "$(id -u)" = 0 &&
+    { grep -qw qnx4 /proc/filesystems || modprobe qnx4 2>/dev/null; }; then
+    mkdir "$fixture/writer" "$fixture/mnt"
+    ./test-qnx4-write --create "$fixture/writer" tree 0 > /dev/null
+    mount -t qnx4 -o ro,loop "$fixture/writer/writer.img" "$fixture/mnt" ||
+        fail 'the Linux qnx4 driver refuses to mount writer output'
+    LC_ALL=C awk -F '\t' '$1 == "C" {
+        long = 0
+        n = split($2, part, "/")
+        for (i = 1; i <= n; i++)
+            if (length(part[i]) > 48)
+                long = 1
+        print long "\t" $2 "\t" $3 " " $4
+    }' "$fixture/writer/writer.manifest" > "$fixture/contents"
+    tab=$(printf '\t')
+    compared=0
+    long=0
+    while IFS=$tab read -r prefixed path expected; do
+        if test "$prefixed" = 1; then
+            long=$((long + 1))
+            continue
+        fi
+        actual=$(cksum < "$fixture/mnt$path") ||
+            fail "Linux cannot read $path"
+        test "$actual" = "$expected" ||
+            fail "Linux reads $path as $actual, the writer wrote $expected"
+        compared=$((compared + 1))
+    done < "$fixture/contents"
+    test "$compared" != 0 || fail 'the writer manifest names no file to compare'
+    umount "$fixture/mnt"
+    echo "Linux qnx4: $compared writer files match their manifest;" \
+        "$long below a name over 48 bytes"
+    ran=1
+else
+    echo 'SKIP: the Linux qnx4 kernel reader of writer output needs a' \
+        'Linux host and root'
 fi
 
 if test "$ran" = 0; then

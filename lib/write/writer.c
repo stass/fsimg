@@ -19,6 +19,7 @@ static fsimg_status_t reject_aliases(fsimg_writer_t *, fsimg_io_t *,
 static fsimg_status_t check_capabilities(fsimg_writer_t *, fsimg_error_t *);
 static fsimg_status_t check_entry_capabilities(fsimg_writer_t *,
     const fsimg_entry_t *, bool, fsimg_error_t *);
+static bool variant_of(const fsimg_format_t *, const fsimg_format_variant_t *);
 
 void
 fsimg_write_options_init(fsimg_write_options_t *options)
@@ -50,16 +51,27 @@ settings_supported(const fsimg_write_options_t *options, uint32_t settings)
 	    options->reserve_percent == 3));
 }
 
+/* Whether variant is one of the descriptor's own capability records. */
+static bool
+variant_of(const fsimg_format_t *driver, const fsimg_format_variant_t *variant)
+{
+	for (size_t i = 0; i < driver->variant_count; i++)
+		if (&driver->variants[i] == variant)
+			return (true);
+	return (false);
+}
+
+/* Public construction selects the writer by name among the registered
+ * descriptors; a descriptor the registry does not list cannot be reached
+ * through it.
+ */
 fsimg_status_t
 fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
     const fsimg_write_options_t *options, fsimg_writer_t **out,
     fsimg_error_t *error)
 {
-	fsimg_write_options_t selected;
-	fsimg_writer_t *writer;
 	const fsimg_format_t *driver;
 	const fsimg_format_variant_t *variant;
-	size_t length;
 	fsimg_status_t status;
 
 	if (out != NULL)
@@ -71,9 +83,35 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "missing writer format or output"));
 	driver = fsimg_format_find(format, &variant);
-	if (driver == NULL || driver->writer == NULL)
+	return (fsimg_writer_new_variant(ctx, driver, variant, options, out,
+	    error));
+}
+
+fsimg_status_t
+fsimg_writer_new_variant(fsimg_ctx_t *ctx, const fsimg_format_t *driver,
+    const fsimg_format_variant_t *variant,
+    const fsimg_write_options_t *options, fsimg_writer_t **out,
+    fsimg_error_t *error)
+{
+	fsimg_write_options_t selected;
+	fsimg_writer_t *writer;
+	size_t length;
+	fsimg_status_t status;
+
+	if (out != NULL)
+		*out = NULL;
+	status = fsimg_ctx_ready(ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (out == NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_WRITER, "missing writer output"));
+	if (driver == NULL || variant == NULL || driver->writer == NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "unsupported writer format"));
+	if (!variant_of(driver, variant))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_WRITER, "variant does not belong to the format"));
 	fsimg_write_options_init(&selected);
 	if (options != NULL) {
 		if (options->size != sizeof(*options))

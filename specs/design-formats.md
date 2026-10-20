@@ -15,6 +15,14 @@ A format descriptor is the only place that holds a format's identity:
   type.
 * Registration is a static list. Adding a driver adds a descriptor and nothing
   in common code. This is not a plugin ABI.
+* The CLI and the public header reach a capability only through a registered
+  descriptor. A writer awaiting native qualification lives in a second
+  descriptor that the registry does not list: the format list, detection and
+  writer construction by name never see it, and tests and qualification
+  tools construct writers from it through the internal
+  `fsimg_writer_new_variant()`. Registering the writer
+  moves its operations and write masks into the registered descriptor and
+  removes the second one.
 
 Shared helpers handle bounded I/O, endian conversion, UTF validation,
 resources, and [emission](design-emission.md); a driver does not acquire host

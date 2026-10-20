@@ -98,6 +98,22 @@ qnx4_direct_name(const qnx4_inode_t *inode, char *out, fsimg_error_t *error)
 	    inode->name_padding_zero, out, error));
 }
 
+/* The 48-byte link name of a long name whose record is at block: its
+ * first 38 bytes, '~', the block as eight lowercase hexadecimal digits and
+ * a zero byte at 47. name holds at least 38 bytes.
+ */
+void
+qnx4_long_prefix(const unsigned char *name, uint32_t block,
+    unsigned char *mangled)
+{
+	char digits[10];
+
+	bzero(mangled, QNX4_LINK_NAME_MAX);
+	bcopy(name, mangled, QNX4_LONG_PREFIX);
+	snprintf(digits, sizeof(digits), "~%08" PRIx32, block);
+	bcopy(digits, mangled + QNX4_LONG_PREFIX, 9);
+}
+
 /* Read the .longfilenames record a link names and check it against the
  * link at position: state used, the back-reference to the link's own
  * block and slot, a name of 49 to 505 bytes with zeros after it and a zero
@@ -130,7 +146,7 @@ long_name(fsimg_reader_t *reader, const qnx4_link_t *link, uint64_t position,
 	if (status != FSIMG_OK)
 		return (status);
 	qnx4_longname_decode(raw, &record);
-	if (record.state != 0x01 ||
+	if (record.state != QNX4_LONG_NAME_USED ||
 	    record.block != QNX4_POSITION_BLOCK(position) ||
 	    record.slot != QNX4_POSITION_SLOT(position))
 		return (qnx4_corrupt(error,
@@ -139,11 +155,7 @@ long_name(fsimg_reader_t *reader, const qnx4_link_t *link, uint64_t position,
 	    !record.tail_zero)
 		return (qnx4_corrupt(error, "QNX4 long-name record is malformed"));
 
-	/* The prefix is 38 + 1 + 8 bytes, then the zero byte at 47. */
-	bzero(mangled, sizeof(mangled));
-	bcopy(record.name, mangled, QNX4_LONG_PREFIX);
-	snprintf((char *)mangled + QNX4_LONG_PREFIX, 10, "~%08" PRIx32,
-	    link->long_block);
+	qnx4_long_prefix(record.name, link->long_block, mangled);
 	if (bcmp(mangled, link->name, sizeof(mangled)) != 0)
 		return (qnx4_corrupt(error,
 		    "QNX4 long name disagrees with its link's prefix"));

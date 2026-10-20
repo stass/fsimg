@@ -43,6 +43,9 @@
 #define QNX4_STATUS_TABLE	0x10u
 #define QNX4_STATUS_CLEAN	0x20u
 
+/* The state byte of a used .longfilenames record. */
+#define QNX4_LONG_NAME_USED	0x01u
+
 #define QNX4_MODE_TYPE		0170000u
 #define QNX4_MODE_FIFO		0010000u
 #define QNX4_MODE_DIRECTORY	0040000u
@@ -234,15 +237,20 @@ fsimg_status_t qnx4_corrupt(fsimg_error_t *, const char *);
 fsimg_status_t qnx4_unsupported(fsimg_error_t *, const char *);
 uint64_t qnx4_block_offset(uint32_t);
 
-/* codec.c: pure decoders over byte buffers. */
+/* codec.c: pure decoders and encoders over byte buffers. */
 uint16_t qnx4_u16(const unsigned char *);
 uint32_t qnx4_u32(const unsigned char *);
+void qnx4_put16(unsigned char *, uint16_t);
+void qnx4_put32(unsigned char *, uint32_t);
 bool qnx4_slot_free(const unsigned char *);
 bool qnx4_slot_link(const unsigned char *);
 void qnx4_inode_decode(const unsigned char *, qnx4_inode_t *);
 void qnx4_link_decode(const unsigned char *, qnx4_link_t *);
 void qnx4_xblock_decode(const unsigned char *, qnx4_xblock_t *);
 void qnx4_longname_decode(const unsigned char *, qnx4_longname_t *);
+void qnx4_inode_encode(const qnx4_inode_t *, unsigned char *);
+void qnx4_link_encode(const qnx4_link_t *, unsigned char *);
+void qnx4_longname_encode(const qnx4_longname_t *, unsigned char *);
 bool qnx4_bytes_zero(const unsigned char *, size_t);
 
 /* volume.c: geometry, the root block and the format-owned objects. */
@@ -286,6 +294,7 @@ fsimg_status_t qnx4_inode_entry(const qnx4_inode_t *, fsimg_entry_t *,
 fsimg_status_t qnx4_name_profile(const unsigned char *, size_t,
     fsimg_error_t *);
 bool qnx4_label_valid(const unsigned char *, size_t);
+void qnx4_long_prefix(const unsigned char *, uint32_t, unsigned char *);
 fsimg_status_t qnx4_direct_name(const qnx4_inode_t *, char *, fsimg_error_t *);
 fsimg_status_t qnx4_link_name(fsimg_reader_t *, const qnx4_link_t *, uint64_t,
     char *, fsimg_error_t *);

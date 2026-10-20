@@ -6,35 +6,41 @@
 #include <strings.h>
 
 #include "format.h"
-#include "qnx4.h"
+#include "write-qnx4.h"
 
 static fsimg_status_t qnx4_probe(const unsigned char *, size_t, uint64_t,
     fsimg_error_t *);
 
-/* The reader profile of native QNX4 volumes: 512-byte blocks, names of up to
- * 505 bytes and a 48-byte label. The writer is not registered.
+/* The native profile: 512-byte blocks, names of up to 505 bytes and a
+ * 48-byte label. write_units and settings are what the writer stores, zero
+ * in the registered descriptor, which has no writer.
+ */
+#define QNX4_PROFILE(write_units, settings) {				\
+	.name = "qnx4",							\
+	.profile = "long names",					\
+	.entry_kinds = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
+	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO,			\
+	.metadata_fields = FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
+	    FSIMG_META_ACCESSED | FSIMG_META_CHANGED |			\
+	    FSIMG_META_OWNER | FSIMG_META_MODE,				\
+	.sector_size_mask = 1u << 9,					\
+	.allocation_unit_size_mask = 1u << 9,				\
+	.write_allocation_unit_size_mask = (write_units),		\
+	.max_file_bytes = QNX4_FILE_MAX,				\
+	.max_volume_bytes = QNX4_BLOCKS_MAX * QNX4_BLOCK_BYTES,		\
+	/* A UTF-8 name has no more UTF-16 units than bytes. */		\
+	.max_name_utf16_units = QNX4_NAME_MAX,				\
+	.max_label_bytes = QNX4_LABEL_BYTES,				\
+	.write_settings = (settings)					\
+}
+
+/* The registered descriptor reads and verifies. The registry lists a
+ * writer only after native QNX has checked, mounted and modified its
+ * output, so the writer has its own candidate descriptor below.
  */
 static const fsimg_format_variant_t qnx4_variants[] = {
 	{
-		.info = {
-			.name = "qnx4",
-			.profile = "long names",
-			.entry_kinds = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |
-			    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO,
-			.metadata_fields = FSIMG_META_CREATED |
-			    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
-			    FSIMG_META_CHANGED | FSIMG_META_OWNER |
-			    FSIMG_META_MODE,
-			.sector_size_mask = 1u << 9,
-			.allocation_unit_size_mask = 1u << 9,
-			.write_allocation_unit_size_mask = 0,
-			.max_file_bytes = QNX4_FILE_MAX,
-			.max_volume_bytes = QNX4_BLOCKS_MAX * QNX4_BLOCK_BYTES,
-			/* A UTF-8 name has no more UTF-16 units than bytes. */
-			.max_name_utf16_units = QNX4_NAME_MAX,
-			.max_label_bytes = QNX4_LABEL_BYTES,
-			.write_settings = 0
-		},
+		.info = QNX4_PROFILE(0, 0),
 		.id = 0		/* The native profile is the only variant. */
 	}
 };
@@ -46,6 +52,24 @@ const fsimg_format_t fsimg_qnx4_format = {
 	.probe = qnx4_probe,
 	.reader = &fsimg_qnx4_reader_ops,
 	.writer = NULL
+};
+
+/* The same profile with the writer, outside the registry (write-qnx4.h). */
+static const fsimg_format_variant_t qnx4_candidate_variants[] = {
+	{
+		.info = QNX4_PROFILE(1u << 9, FSIMG_SETTING_INODE_CAPACITY),
+		.id = 0
+	}
+};
+
+const fsimg_format_t fsimg_qnx4_candidate_format = {
+	.variants = qnx4_candidate_variants,
+	.variant_count = sizeof(qnx4_candidate_variants) /
+	    sizeof(qnx4_candidate_variants[0]),
+	.probe_bytes = QNX4_PROBE_BYTES,
+	.probe = qnx4_probe,
+	.reader = &fsimg_qnx4_reader_ops,
+	.writer = &fsimg_qnx4_writer_ops
 };
 
 /* QNX4 has no magic number. The identity signature is root-block record 0,

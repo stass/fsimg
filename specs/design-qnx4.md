@@ -378,7 +378,7 @@ The root directory's first slots are fixed: [X1]
 | 3 | `.inodes`, link | `(2, 1)` |
 | 4 | `.boot`, link | `(2, 2)` |
 | 5 | `.altboot`, link | `(2, 3)` |
-| 6 | the slot that natively names `lost+found`, status `0x04` | free to the reader |
+| 6 | the slot that natively names `lost+found`, status `0x04`, with `0x08` at byte `0x36` | free to the reader |
 | 7 | free | reused by the filesystem for the next entry |
 | 8 | `.longfilenames`, direct record, or free with `-N` | size 0 and no extent on a new volume |
 
@@ -571,11 +571,11 @@ holds. [X1]
 | Blocks | Object | Size | Mode | Status |
 | --- | --- | --- | --- | --- |
 | 1 | Loader | | | zero: a zero loader mounts and checks clean |
-| 2 | Root block | | root `040775` or the catalog root's mode | `0x21` |
+| 2 | Root block | | root `040775` | `0x21` |
 | 3 to `2 + B` | `.bitmap` | `ceil(N / 8)` | `0100444` | `0x01` |
 | `3 + B`, `R` blocks | Root directory | `R * 512` | | |
 | next, `I` blocks | `.inodes` | `I * 512` | `0100444` | `0x11` |
-| next, 16 blocks | `lost+found` | 8192 | `040755`, links 2 | `0x11`; its root slot 6 `0x04` with target `(2, 4)` |
+| next, 16 blocks | `lost+found` | 8192 | `040755`, links 2 | `0x11`; its root slot 6 `0x04` with target `(2, 4)` and byte `0x36` `0x08` |
 | next, `L` blocks | `.longfilenames` | `L * 512` | `0100444` | `0x01` |
 | next | Catalog objects in catalog ID order | | | |
 
@@ -587,12 +587,15 @@ volume's convention; the native requirement is only whole blocks. `I` is
 the `.inodes` capacity below and `L = 16 * ceil(long names / 16)`, zero
 without long names. An empty catalog gives exactly the formatter's 43-block
 minimum at the smallest size, and at any size the layout is byte for byte
-the formatter's apart from times and the loader block. [X1]
+the formatter's apart from the loader block, times included when the format
+time is the formatter's; the blocks the formatter leaves unwritten are zero.
+[X1]
 
 ### Root slots and records
 
 Slots 0 to 6 are the fixed table above with the `lost+found` slot named,
-targeted at `(2, 4)` and given status `0x04`; slot 7 is the first of the
+targeted at `(2, 4)`, given status `0x04` and `0x08` at byte `0x36`, inside
+the long-name pointer, as the formatter writes it; slot 7 is the first of the
 `E` root entries or, without one, a zero slot with status `0x02` as the
 formatter writes; slot 8 is `.longfilenames`; the remaining root entries
 follow in catalog ID order. `/.boot` and `/.altboot` take no root slot of
@@ -603,9 +606,10 @@ a regular file is `FSIMG_EUNSUPPORTED`; one that is supplies record 2's or
 3's size, extent, mode, owner and times, with mode `0600`, owner 0 and the
 format time for absent fields, and status `0x13` when its size is nonzero;
 without one the record has size 0, no extent, the native defaults and
-status `0x11`. The catalog root's owner, mode and times, when given, become
-the root record's. `lost+found` is 16 blocks with `.` targeting `(2, 4)`
-and `..` targeting `(3 + B, 0)`.
+status `0x11`. The catalog's root carries no metadata, so the root record
+has the formatter's mode `040775`, owner 0 and the format time.
+`lost+found` is 16 blocks with `.` targeting `(2, 4)` and `..` targeting
+`(3 + B, 0)`.
 
 ### `.inodes` capacity
 

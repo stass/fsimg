@@ -67,7 +67,7 @@ path. The writer checks every entry against the capability record before the
 driver plans, so no driver receives a kind it does not store and one rule
 governs omission for every format. The catalog keeps the unions of collected
 kinds, valid fields and required fields, which decide whether the check fails
-before any entry is read again: a failed plan reports no loss, and a tree with
+before any entry is read again: a plan this check fails reports no loss, and a tree with
 nothing the format lacks is not read again.
 
 When a format stores a field the entry does not carry, the driver applies its

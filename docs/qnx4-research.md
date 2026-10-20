@@ -160,7 +160,7 @@ populated capture, including `q4-inodes`, whose `.inodes` grew, and on H1.
 | 3 | `.inodes`: link record to `(2, 1)` |
 | 4 | `.boot`: link record to `(2, 2)` |
 | 5 | `.altboot`: link record to `(2, 3)` |
-| 6 | `lost+found`: link record to `(2, 4)`, status `0x04` |
+| 6 | `lost+found`: link record to `(2, 4)`, status `0x04`, and `0x08` at byte `0x36`, inside the long-name pointer, in every empty capture |
 | 7 | zero, status `0x02` |
 | 8 | `.longfilenames`: direct record, `0100444`, status `0x01`, size 0, no extent |
 | 9 to 63 | zero |

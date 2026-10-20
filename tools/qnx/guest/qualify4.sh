@@ -10,6 +10,7 @@
 # is first copied into a file on the /w scratch volume, because chkfsys -m
 # derives the expected geometry from the size of what it checks. Upload and
 # capture with, for example:
+#   test-qnx4-write --create DIR tree 4096
 #   put.sh tools/qnx/guest/qualify4.sh /tmp/qualify4.sh
 #   capture.sh -i DIR/writer.img q4-writer-4096-qualify "sh /tmp/qualify4.sh 4096"
 set -e

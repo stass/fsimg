@@ -71,7 +71,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx4/extent.c lib/formats/qnx4/bitmap.c \
 	lib/formats/qnx4/inode.c lib/formats/qnx4/names.c \
 	lib/formats/qnx4/directory.c lib/formats/qnx4/read.c \
-	lib/formats/qnx4/verify.c \
+	lib/formats/qnx4/verify.c lib/formats/qnx4/write-qnx4.h \
+	lib/formats/qnx4/write-plan.c lib/formats/qnx4/write-emit.c \
 	compat/host.c compat/host.h
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
 bin_PROGRAMS = fsimg
@@ -101,8 +102,8 @@ example_extract_LDADD = libfsimg.la
 check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-cli test-qualify \
-	test-fragment test-posix header-c header-cxx
+	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
+	test-qualify test-fragment test-posix header-c header-cxx
 TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh test/cli.sh \
 	test/baseline.sh test/spec.sh
@@ -140,6 +141,8 @@ test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h
 test_qnx6_write_LDADD = libfsimg.la
 test_qnx4_SOURCES = test/qnx4.c test/test.h
 test_qnx4_LDADD = libfsimg.la
+test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h
+test_qnx4_write_LDADD = libfsimg.la
 test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
 test_exfat_scale_LDADD = libfsimg.la
 test_catalog_SOURCES = test/catalog.c test/test.h
@@ -236,8 +239,9 @@ check-installed-consumers:
 	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" -o header-installed-cxx
 	./header-installed-cxx
 check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write \
-	    test-qnx4 fsimg test/fat-integration.sh test/exfat-integration.sh \
-	    test/qnx6-integration.sh test/qnx4-integration.sh
+	    test-qnx4 test-qnx4-write fsimg test/fat-integration.sh \
+	    test/exfat-integration.sh test/qnx6-integration.sh \
+	    test/qnx4-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
 	./test/qnx6-integration.sh

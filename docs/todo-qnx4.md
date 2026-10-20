@@ -3,21 +3,35 @@
 Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
 [research record](qnx4-research.md) owns the evidence and provenance.
 
-* [High] **Interoperability, scale and writer** (`lib/formats/qnx4/`):
-  stages 5 to 7 of the plan: interoperability, scale and fault coverage,
-  and a writer registered only after QNX 6.5.0 checks, mounts, modifies and
-  remounts its output. The native cycle also confirms a label written by
-  fsimg, which has no native example yet.
-* [Medium] **Writing long names, 49 to 505 bytes**
-  (`lib/formats/qnx4/names.c`): stage 8. The reader decodes
-  `.longfilenames` records and checks them against the `q4-long` capture;
-  writing them remains, and the native rename of a long name is still
-  uncaptured (`mv` fails in the live shell).
+* [High] **Writer registration after native qualification**
+  (`lib/formats/qnx4/descriptor.c`, `tools/qnx/guest/qualify4.sh`): stage 7.
+  The writer is implemented and tested but unregistered: it lives in
+  `fsimg_qnx4_candidate_format`, outside the registry, so `formats` and
+  `create -t qnx4` do not offer it. Run `qualify4.sh` in the QNX 6.5.0 guest
+  on the `test-qnx4-write --create` images ([build](build.md) lists them):
+  the 64 MiB tree with a label, the smallest volume, 1, 2 and 3 bitmap
+  blocks and a nearly full volume. Record the cycle in the research record,
+  then register: move the writer and its write masks into
+  `fsimg_qnx4_format`, delete the candidate, switch `test/qnx4-write.c` to
+  `fsimg_writer_new()`, and update `README.md`, `docs/fsimg.1`,
+  `docs/libfsimg.3` and `NEWS`. The cycle also confirms a label written by
+  fsimg natively, beyond the byte comparison with the `-l` captures.
+* [High] **Interoperability and scale** (`lib/formats/qnx4/`): stage 5 of
+  the plan, the reader's interoperability, scale and fault coverage, and the
+  writer's scale cases (`N` near `2^31` on a sparse sink, a spilling
+  directory, and the 2 GiB object limit at 524288 directory steps and
+  4194289 long names, which `object_fits()` refuses and no test reaches).
+* [Medium] **Long names, 49 to 505 bytes, natively** (`lib/formats/qnx4/`):
+  stage 8. The reader decodes `.longfilenames` records and checks them
+  against the `q4-long` capture, and the writer emits them with the mangled
+  prefix and back-references; native QNX has not yet checked, read, renamed
+  or deleted a long name fsimg wrote, and the native rename of a long name
+  is uncaptured (`mv` fails in the live shell).
 * [Medium] **48-byte labels through the CLI** (`cmd/fsimg/job.c`,
-  `cmd/fsimg/worker.h`, `lib/write/writer.h`): the job record and the
-  writer options carry a label of at most 47 bytes, so `create -L` with a
-  48-byte QNX4 label would be refused as an invalid job. Widen both with
-  the writer stage.
+  `cmd/fsimg/worker.h`): the job record carries a label of at most 47 bytes,
+  so `create -L` with a 48-byte QNX4 label would be refused as an invalid
+  job. The library's writer holds 48 bytes; widen the job record before the
+  writer is registered.
 * [Low] **Claims as a checked fact** (`lib/formats/qnx4/extent.c`): a walk
   under the allocated policy trusts that an earlier exclusive walk claimed
   the storage (the root at open, a later name of an `.inodes` object).
