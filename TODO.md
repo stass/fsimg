@@ -509,10 +509,13 @@
   [extension sequence](docs/implementation-plan.md#extension-sequence); each
   format needs a bounded-resource design and an independent compatibility corpus.
 
-* [Medium] **QNX IFS image support** (`lib/formats/`): read, and later write,
-  QNX boot images (`mkifs` output: startup header, image header, flat
-  directory, packed and optionally LZO/UCL-compressed file data), such as the
-  PCM 3.1 `PCM3_IFS1*.ifs` flash images. Write
-  `specs/design-ifs.md` first: header variants and byte orders, compression,
-  executable-in-place entries, checksums, and an independent corpus (QNX
-  `dumpifs`/`mkifs` output and real images).
+* [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/layers/`):
+  read ImageFS bodies, bare or inside QNX boot images (`qnxboot`) and the
+  PCM 3.1 `hbcifs` wrapper, with project-owned LZO1X and UCL decoders; write
+  standalone ImageFS volumes; then wrap a new ImageFS in an existing boot
+  image's startup section. The [plan](docs/ifs-plan.md) orders the work from native QNX
+  6.5.0 `mkifs` and `dumpifs` evidence and the PCM 3.1 update-disc images,
+  through the designs, to writer registration and boot-gated wraps; its
+  open owner decisions (codec provenance, boot attributes in a wrap, the
+  writer registration bar, the `hbcifs` checksum and layer kind) close before the stages
+  that need them.

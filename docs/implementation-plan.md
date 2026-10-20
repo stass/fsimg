@@ -518,6 +518,14 @@ each stage one reviewed commit:
 The harness's creation stages (B1f and B1g of the
 [specification-testing plan](spec-testing-plan.md)) follow stage 4.
 
+QNX IFS follows its own [plan](ifs-plan.md): native evidence from QNX
+6.5.0's `mkifs` and `dumpifs` and the PCM 3.1 update-disc images, format,
+driver, layer-profile and codec designs, a reader and verifier for bare
+ImageFS, project-owned codecs, the `qnxboot` container and `hbcifs`
+compression layers after the layer stages they need, a standalone writer
+registered after native qualification, and boot-gated wraps of a new
+ImageFS in an existing boot image's startup section.
+
 Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order
