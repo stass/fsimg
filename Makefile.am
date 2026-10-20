@@ -175,6 +175,15 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
 	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
 	specs/design-qnx6-driver.md specs/design-metadata.md specs/design-sizing.md \
+	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
+	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
+	tools/qnx/guest/pop2.sh tools/qnx/pcm/pcmq6.py tools/qnx/pcm/shdis.py \
+	tools/qnx/pcm/shrange.py tools/qnx/vm/boot.sh \
+	tools/qnx/vm/capture.sh tools/qnx/vm/click.py tools/qnx/vm/env.sh \
+	tools/qnx/vm/guest.sh tools/qnx/vm/mon.py tools/qnx/vm/monitor.sh \
+	tools/qnx/vm/ppm2png.py tools/qnx/vm/put.sh \
+	tools/qnx/vm/qsh.py tools/qnx/vm/shot.sh tools/qnx/vm/type.py \
+	tools/qnx/vm/vmstart.sh \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/protocol.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
