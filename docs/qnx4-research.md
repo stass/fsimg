@@ -99,6 +99,7 @@ commands and full output. Population recipes are `tools/qnx/guest/pop4.sh`.
 | `q4-long-131072-default` | E7, names over 48 bytes |
 | `q4-mounted-131072-default` | E8, captured while mounted after `sync` |
 | `q4-zeroloader-131072-default` | E9, zeroed block 1 |
+| `q4-free-131072-default` | A freed `.inodes` slot left unreused; content written to `.boot` and `.altboot` |
 | `q4-over-131072-default` | E10, appends and truncation |
 
 ## Observations
@@ -138,8 +139,11 @@ Block 2 holds five 64-byte inode records, a label and zeros:
 
 All four times of every record equal the format time; uid and gid are 0;
 bytes `0x3a` to `0x3e` are zero. `-l LABEL` writes the label at `0x1c0`;
-`-L` rewrites only the label; a 67-byte label is truncated to 48 bytes and
-followed by 16 zero bytes. Without `-l` the field is zero.
+`dinit -hq -L LABEL` rewrites the label (`-L` without `-h` refuses the hard
+disk, as `labelB` records); a 67-byte label is truncated to 48 bytes and
+followed by 16 zero bytes (`labelC`). Without `-l` the field is zero.
+Writing `.boot` and `.altboot` through the mounted filesystem sets their
+records' status to `0x13` (`q4-free`).
 
 ### Root directory slots (E1, E3)
 
@@ -168,8 +172,9 @@ A `.` record is the name `.`, a NUL, the bytes `I`, `0x03`, `Q`, `N`, `X`
 at offsets 2 to 6, a zero at 7, a 32-bit little-endian value at 8, and zeros
 to offset 47; its target is the directory's own record position; status
 `0x08`. The value at 8 is the directory's first-extent length in blocks: 8
-for every `mkdir` and for the root, 16 for `lost+found`; it stays 8 when a
-directory grows. A `..` record is the name `..` with a zero name tail and
+for the root and for `mkdir` on the 131072-block disk, 2 for `mkdir` on a
+4096-block volume, 16 for `lost+found`; it is unchanged
+when a directory grows. A `..` record is the name `..` with a zero name tail and
 targets the parent's record position: `(2, 0)` for a child of the root,
 otherwise the position of the parent's own record in its parent (a direct
 slot, or an `.inodes` slot when the parent has a link name). `lost+found`'s
@@ -186,7 +191,7 @@ spare bytes and long-name pointer.
   `0x13` or `0x11`. Directories with such names live in `.inodes` too (H1).
 * **Names of 49 to 505 bytes** are link records whose 48-byte name is the
   first 38 name bytes, `~` and eight lowercase hex digits of the long-name
-  block; the pointer at link offset `0x35` is that physical block. The block
+  block, then a zero byte; the pointer at link offset `0x35` is that physical block. The block
   in `.longfilenames` holds the directory block (32 bits), the slot (8
   bits), state `0x01`, the full name NUL-padded in 505 bytes and a zero last
   byte. The first long name grows `.longfilenames` from 0 to 16 blocks; a
@@ -200,11 +205,16 @@ spare bytes and long-name pointer.
   (`hk2` keeps its name and target with status `0x00`). Free slots carry no
   information.
 * **`.inodes` slot 0** is the name `IamTHE.inodeFILE` and the 32-bit value
-  `0x00100000` at offset 16, the rest zero, also on H1. Unused slots are zero.
-  `.inodes` grows by a 32-block extent (E6).
+  `0x00100000` at offset 16, the rest zero, also on H1. A used slot's name field is 16 zero bytes.
+  Never-used slots are zero; a slot freed by `rm` keeps its bytes with
+  status `0x00` (`q4-free`), so unused slots carry no information. H1 has
+  no nonzero unused slot. `.inodes` grows by a 32-block extent (E6).
 * **Kinds:** symbolic links are `0120777` with the target as content
   (`ln -s` relative, absolute, dangling and to a directory); FIFOs are
-  `010664` with size 5120 and 10 allocated blocks the guest never writes;
+  `010664` with size 5120 and 10 allocated blocks the guest never writes.
+  A FIFO edited on the host to size 0 with no extent and its blocks freed
+  checks clean, lists as a FIFO and checks clean again after a write to the
+  volume (`~/qnx65-vm/writer-captures/q4-probe-fifo0-4096`);
   `mknod` is absent from the live CD. The type byte at `0x3e` and the bytes
   `0x3a` to `0x3d` were zero in every record.
 * **Metadata:** `chown 65535` fails with `EINVAL`; 65534 is stored. `touch
@@ -215,7 +225,10 @@ spare bytes and long-name pointer.
 
 ### Extents (E4, E5, E6)
 
-A directory grows by 8-block extents, `.inodes` by 32. An extent block holds
+On the 131072-block disk a directory is created with, and grows by, 8-block
+extents; on a 4096-block volume `mkdir` allocates 2 blocks (size 1024, `.`
+value 2), so the step depends on the volume size. The root directory is 8
+blocks at every measured size. `.inodes` grows by 32. An extent block holds
 the next block (0 at the end), the previous block (0 in the first),
 `entries_used` (8 bits), three zero bytes, the sum of its extent lengths, up
 to 60 extents, `IamXblk` and a NUL at `0x1f0`, and at `0x1f8` a copy of the
@@ -282,7 +295,7 @@ was not cleanly unmounted. The loader block is nonzero and differs from
 | `.inodes` default, slot 0, used and free slots | 16 blocks; slot 0 signature and `0x00100000`; used `0x11` or `0x13`; free zero (E1, E3, E6) |
 | `.longfilenames` default, `-N` | Created empty by default, `0100444` root-owned (E1, H1); `-N` omits it and leaves slots 7 and 8 zero (`q4-empty-131072-N`); `-R` puts an empty `0100444` `.diskroot` in slot 8 and `.longfilenames` in slot 9 (`q4-empty-131072-R`) |
 | Extent block header | Extents section above (E5, E6) |
-| Directory size and growth | 4096 at creation (8 blocks), grows by 8 blocks; `lost+found` 8192 (E4, H1) |
+| Directory size and growth | A multiple of 512 equal to the allocation; 8 blocks per step on the 64 MiB disk, 2 on a 4096-block volume; root always 8 blocks; `lost+found` 16 (E1, E4, H1) |
 | Link counts | Directories 2 plus subdirectories; hard links in the `.inodes` slot (E3, H1) |
 | Busy, modified and clean flags | Clean is root status `0x20`; modified `0x02` marks written data; busy not observed (E8, H1) |
 | Zero loader | Accepted by `chkfsys` and the mount (E9) |

@@ -147,7 +147,7 @@ owns the grammar: three slots in fixed order, filesystem, scheme, container;
 a name fills the slot of its kind and `-` marks the next slot empty, so
 `fat32/-/dmg` spells `fat32/dmg` out and `fat32/-/-` is a bare volume. A
 repeated kind or misordered name is a syntax error, not a guess. Filesystem
-names are `fat12`, `fat16`, `fat32`, `exfat` and `qnx6`.
+names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6` and `qnx4`.
 
 `-F` is required for `c`, and its stack must begin with a filesystem name:
 `-F gpt` creates nothing and is a syntax error. On reading, a named slot is
@@ -179,7 +179,7 @@ unqualified key always targets the filesystem: `oem=cp437` on read; on
 create `sector` and `cluster` in bytes, and the QNX6 settings
 `endian=little|big`, `uuid=` RFC 4122 text, `inodes=` a positive inode count
 and `reserve=` a percentage up to 100, which every other format rejects
-unless at their defaults. A qualified key targets one layer: `-o gpt:type=esp`,
+unless at their defaults; QNX4 shares `inodes=` as its `.inodes` slot count. A qualified key targets one layer: `-o gpt:type=esp`,
 `-o gpt:name=EFI`, `-o dmg:compress=none`, `-o gzip:level=9`. A qualifier
 naming a layer absent from the stack, or a compression not selected, fails;
 fsimg never guesses the target of a bare key. On read the layer must be

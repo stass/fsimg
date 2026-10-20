@@ -15,8 +15,8 @@ regions of those files, memory supplied by an embedding application, and
 positional I/O callbacks. The default CLI handles regular files, not devices.
 It requires no privileges, kernel filesystem driver, or external formatter.
 
-The format contract covers FAT12, FAT16, FAT32, exFAT, and the qualified QNX6
-Power-Safe profiles with independent read and write support. The CLI is
+The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
+Power-Safe profiles and QNX4 with independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
 `--formats` for capabilities, with `-f` naming the image. Each format
@@ -289,6 +289,15 @@ on-disk snapshots do not introduce a mutable filesystem or
 change the output coordinator's publication ownership. Native write-after-create
 qualification gates writer support because read-only compatibility cannot
 establish safe free-space and system-metadata state.
+The [QNX4 design](design-qnx4.md) defines geometry derived from the slice
+length, closed acceptance tables fixed by native observation, physical record
+identity with links resolved only into the `.inodes` table, hidden
+format-owned files, and a writer that reproduces the native formatter's
+default layout with one extent per object; the
+[QNX4 driver design](design-qnx4-driver.md) maps them onto one extent walker
+feeding the shared extent index, a bitmap pager fixed by geometry, and the
+same planning and emission passes. The same native write-after-create
+qualification gates its writer.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
@@ -509,6 +518,7 @@ lib/layers/          partition schemes, containers, compression, spooling
 lib/formats/fat/     FAT codecs, reader, writer
 lib/formats/exfat/   exFAT codecs, reader, writer
 lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
+lib/formats/qnx4/    QNX4 codecs, reader, writer, verification
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests

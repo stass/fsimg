@@ -20,7 +20,7 @@ Shared helpers handle bounded I/O, endian conversion, UTF validation,
 resources, and [emission](design-emission.md); a driver does not acquire host
 descriptors or allocate outside its context.
 
-The public names are `fat12`, `fat16`, `fat32`, `exfat`, and `qnx6`. FAT12,
+The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6` and `qnx4`. FAT12,
 FAT16, and FAT32 share one descriptor and driver; opening selects the variant
 from the validated cluster count. Detection follows one bounded probe contract:
 
@@ -162,6 +162,24 @@ research imports no GPL code. Porsche HDD compatibility also requires exact
 disk composition and any other filesystem present, particularly QNX4; it is
 not implied by a `qnx6` format capability.
 
+## QNX4
+
+The [QNX4 design](design-qnx4.md) defines the 512-byte-block, extent-based
+filesystem that `fs-qnx4.so` mounts: geometry derived from the slice length,
+the root block, the 64-byte inode and link records, extent-block chains, the
+bitmap, `.inodes`, `.longfilenames` and the hidden format-owned files. Its
+acceptance tables are closed by native QNX 6.5.0 observation and the PCM 3.1
+navigation partition; an unobserved value is unsupported, a contradiction is
+corrupt. The [driver design](design-qnx4-driver.md) defines the code. QNX4
+has no magic number: the probe's identity signature is the root record of
+block 2, and `open` completes recognition.
+
+The writer reproduces the native formatter's default layout with one
+contiguous extent per object. Native check, mount, modify and remount
+testing gates the writer capability, as for QNX6. Long names, device nodes
+and the head unit's own filesystem module have their own evidence gates in
+the [qualification work](../docs/todo-qnx4.md).
+
 ## Verification and compatibility claims
 
 Info (`i`) describes recognized geometry and implemented capabilities.
@@ -174,6 +192,7 @@ their lengths can be validated.
 A driver's read-only implementation does not need writer stubs. Adding a
 filesystem requires a design that accounts for geometry, feature negotiation,
 ownership, names, traversal termination, memory/scratch complexity, hostile
-inputs, and independent validation. NTFS and QNX4 require separate reader-first
-designs and qualification gates. QNX6 reading and writing follow their own
-design; no broad compatibility claim is made merely from parsing a boot record.
+inputs, and independent validation. NTFS requires a separate reader-first
+design and qualification gates. QNX6 and QNX4 reading and writing follow their
+own designs; no broad compatibility claim is made merely from parsing a boot
+record.

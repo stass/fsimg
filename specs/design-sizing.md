@@ -39,6 +39,7 @@ still contains them.
 | FAT12/16/32 | Allocation-unit size over the variant's legal units; root capacity on FAT12/16, the smallest sector multiple holding the root's slots | The variant, its cluster-count minimum and the 16-cluster type margin, the reserved-sector count, two FAT copies |
 | exFAT | Allocation-unit size over the legal units | The 1 MiB minimum, one FAT, the recommended cluster-count rule as a tie-break only |
 | QNX6 | Block size over the classic sizes; inode capacity, the catalog's inodes rounded to a whole table block; the block count at the alignment step instead of the 64-block search step | Byte order, the reserve percentage, the system-run recipe |
+| QNX4 | Nothing: the block is 512 bytes and the block count is already the smallest that fits | The native default layout, the 128-slot `.inodes` minimum, the 4096-byte directory rounding |
 
 The FAT type minimum is what makes the image the requested variant and is
 not a dimension. The exFAT recommended cluster count is a guidance value, so
@@ -63,6 +64,11 @@ then tests each smaller block count at the volume's alignment step within
 that 64-block window and keeps the smallest that fits. The window holds at
 most 64 candidates, each a constant-time check against the accumulated
 totals, so the exact minimum costs no further pass.
+
+For QNX4 the default block count is the smallest one that holds the fixed
+layout, the objects and the bitmap, found by the short iteration the
+[driver design](design-qnx4-driver.md#planning) states, so minimization
+returns the default volume.
 
 Planning work grows by the number of candidates evaluated, never by a
 second traversal of the catalog. The plan's reported scratch and work
