@@ -11,7 +11,8 @@
 
 /* Host records contain ten little-endian u64 fields: root ID, device, inode,
  * length, mtime seconds/nanoseconds, ctime seconds/nanoseconds, kind, version;
- * a NUL-terminated relative path follows. Signed seconds use modulo-2^64
+ * a NUL-terminated relative path follows, empty exactly when the root is the
+ * regular file itself. Signed seconds use modulo-2^64
  * encoding. These offsets are unrelated to the entry's stable catalog ID.
  * The kind is FSIMG_HOST_FILE for a regular file and FSIMG_HOST_LINK for a
  * symbolic link, whose length is its target length.
@@ -36,7 +37,9 @@ struct fsimg_source_root {
  */
 void fsimg_source_close(fsimg_writer_t *);
 void fsimg_sources_release(fsimg_writer_t *);
-/* Internal startup consumes an already-reserved root FD; scanning occurs here. */
+/* Internal startup consumes an already-reserved root FD, a directory or a
+ * regular file; scanning occurs here.
+ */
 fsimg_status_t fsimg_writer_adopt_tree(fsimg_writer_t *, int, const char *,
     fsimg_error_t *);
 fsimg_status_t fsimg_source_open(fsimg_writer_t *, uint64_t, fsimg_error_t *);

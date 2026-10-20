@@ -28,6 +28,7 @@ static void fixture_open_budget(catalog_fixture_t *, uint32_t, uint64_t,
     uint64_t);
 static void fixture_close(catalog_fixture_t *);
 static void add_entry(fsimg_writer_t *, const char *, fsimg_entry_kind_t);
+static void add_dated_directory(fsimg_writer_t *, const char *, int64_t);
 static void test_order(uint32_t, uint32_t);
 static void test_long_directory(void);
 static void test_invalid_catalogs(void);
@@ -43,6 +44,10 @@ static void test_deep_catalog(void);
 static void test_short_child_record(void);
 static void test_child_order(void);
 static void test_index_reference(void);
+static void test_merged_directories(void);
+static void test_path_collisions(void);
+static void test_merged_metadata(void);
+static void test_corrupt_rank(void);
 static void use_provider(catalog_fixture_t *);
 static fsimg_status_t generated_validate(void *, uint64_t, fsimg_error_t *);
 static fsimg_status_t generated_read(void *, uint64_t, uint64_t, void *,
@@ -95,14 +100,38 @@ fixture_close(catalog_fixture_t *fixture)
 	CHECK(rmdir(fixture->directory) == 0);
 }
 
+/* Files read as zeros; a symbolic link takes its six-byte target from the
+ * generated provider, which the caller registers first with use_provider.
+ * Directories and FIFOs have no source.
+ */
 static void
 add_entry(fsimg_writer_t *writer, const char *path, fsimg_entry_kind_t kind)
 {
 	fsimg_entry_t entry = { .path = path, .kind = kind };
 	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fsimg_source_t target = { .kind = FSIMG_SOURCE_PROVIDER };
+	const fsimg_source_t *source;
 
-	CHECK(fsimg_writer_add(writer, &entry,
-	    kind == FSIMG_ENTRY_FILE ? &zero : NULL, NULL) == FSIMG_OK);
+	source = NULL;
+	if (kind == FSIMG_ENTRY_FILE)
+		source = &zero;
+	if (kind == FSIMG_ENTRY_SYMLINK) {
+		entry.size = 6;
+		source = &target;
+	}
+	CHECK(fsimg_writer_add(writer, &entry, source, NULL) == FSIMG_OK);
+}
+
+/* A programmatic directory whose only metadata is its modification time. */
+static void
+add_dated_directory(fsimg_writer_t *writer, const char *path, int64_t seconds)
+{
+	fsimg_entry_t entry = { .path = path, .kind = FSIMG_ENTRY_DIRECTORY };
+
+	entry.metadata.valid = FSIMG_META_MODIFIED;
+	entry.metadata.modified = (fsimg_timestamp_t){ .seconds = seconds,
+	    .precision_ns = 1, .basis = FSIMG_TIME_UTC };
+	CHECK(fsimg_writer_add(writer, &entry, NULL, NULL) == FSIMG_OK);
 }
 
 static void
@@ -215,11 +244,13 @@ test_invalid_catalogs(void)
 			add_entry(fixture.writer, "/a", FSIMG_ENTRY_FILE);
 			add_entry(fixture.writer, "/a/b", FSIMG_ENTRY_FILE);
 		} else {
-			add_entry(fixture.writer, "/a", FSIMG_ENTRY_DIRECTORY);
 			add_entry(fixture.writer, "/a", scenario == 2 ?
-			    FSIMG_ENTRY_DIRECTORY : FSIMG_ENTRY_FILE);
+			    FSIMG_ENTRY_FILE : FSIMG_ENTRY_DIRECTORY);
+			add_entry(fixture.writer, "/a", FSIMG_ENTRY_FILE);
 		}
 		CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) == FSIMG_EINVAL);
+		if (scenario >= 2)
+			CHECK(strcmp(error.path, "/a") == 0 && !error.path_truncated);
 		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
 		CHECK(!fixture.writer->catalog_ready && fixture.writer->index == NULL);
 		CHECK(fsimg_writer_add(fixture.writer, NULL, NULL, NULL) == FSIMG_ESTATE);
@@ -606,6 +637,174 @@ test_index_reference(void)
 	fixture_close(&fixture);
 }
 
+/* Programmatic records of one directory merge into one entry whose
+ * children are the union of the records' children. Every programmatic
+ * record has the same rank, so the encoded record decides which one is
+ * kept: the merged catalog, metadata included, is the same for either
+ * insertion order and with sort runs small enough to need merging.
+ */
+static void
+test_merged_directories(void)
+{
+	static const char *const ordered[] = { "/", "/d", "/d/x", "/d/y", "/e" };
+	static const uint64_t parents[] = { 0, 0, 1, 1, 0 };
+	static const uint64_t children[] = { 2, 2, 0, 0, 0 };
+	catalog_fixture_t fixture;
+	fsimg_sort_options_t options = { .run_bytes = 2048, .fan_in = 2 };
+	const fsimg_catalog_entry_t *entry;
+	int64_t kept_seconds[2];
+
+	for (unsigned order = 0; order < 2; order++) {
+		fixture_open(&fixture, 1);
+		add_dated_directory(fixture.writer, "/d", order == 0 ? 100 : 200);
+		add_entry(fixture.writer, "/d/x", FSIMG_ENTRY_FILE);
+		add_entry(fixture.writer, "/e", FSIMG_ENTRY_DIRECTORY);
+		add_entry(fixture.writer, "/e", FSIMG_ENTRY_DIRECTORY);
+		add_dated_directory(fixture.writer, "/d", order == 0 ? 200 : 100);
+		add_entry(fixture.writer, "/d/y", FSIMG_ENTRY_FILE);
+		CHECK(fsimg_writer_prepare(fixture.writer, &options, NULL) == FSIMG_OK);
+
+		/* Six records collapse to four entries with dense IDs. */
+		CHECK(fixture.writer->count == 4);
+		for (uint64_t id = 0; id <= 4; id++) {
+			CHECK(fsimg_catalog_get(fixture.writer, id, &entry, NULL) == FSIMG_OK);
+			CHECK(strcmp(entry->entry.path, ordered[id]) == 0);
+			CHECK(entry->parent_id == parents[id]);
+			CHECK(entry->children == children[id]);
+		}
+		CHECK(fsimg_catalog_get(fixture.writer, 5, &entry, NULL) == FSIMG_ERANGE);
+		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
+		CHECK(entry->entry.metadata.valid == FSIMG_META_MODIFIED);
+		kept_seconds[order] = entry->entry.metadata.modified.seconds;
+		fixture_close(&fixture);
+	}
+	CHECK(kept_seconds[0] == kept_seconds[1]);
+}
+
+/* Equal paths merge only when every record is a directory. Any other run
+ * fails preparation naming the path, also beneath a merged directory.
+ */
+static void
+test_path_collisions(void)
+{
+	static const struct {
+		size_t			 records;
+		fsimg_entry_kind_t	 kinds[3];
+	} cases[] = {
+		{ 2, { FSIMG_ENTRY_FILE, FSIMG_ENTRY_FILE } },
+		{ 2, { FSIMG_ENTRY_FILE, FSIMG_ENTRY_DIRECTORY } },
+		{ 2, { FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_FILE } },
+		{ 2, { FSIMG_ENTRY_SYMLINK, FSIMG_ENTRY_DIRECTORY } },
+		{ 2, { FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_SYMLINK } },
+		{ 2, { FSIMG_ENTRY_SYMLINK, FSIMG_ENTRY_SYMLINK } },
+		{ 2, { FSIMG_ENTRY_SYMLINK, FSIMG_ENTRY_FILE } },
+		{ 2, { FSIMG_ENTRY_FIFO, FSIMG_ENTRY_DIRECTORY } },
+		{ 3, { FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_FILE } },
+		{ 3, { FSIMG_ENTRY_FILE, FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_DIRECTORY } }
+	};
+	catalog_fixture_t fixture;
+	fsimg_error_t error;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_open(&fixture, 2);
+		use_provider(&fixture);
+		add_entry(fixture.writer, "/d", FSIMG_ENTRY_DIRECTORY);
+		add_entry(fixture.writer, "/d", FSIMG_ENTRY_DIRECTORY);
+		for (size_t record = 0; record < cases[i].records; record++)
+			add_entry(fixture.writer, "/d/a", cases[i].kinds[record]);
+		add_entry(fixture.writer, "/d/b", FSIMG_ENTRY_FILE);
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) == FSIMG_EINVAL);
+		if (strcmp(error.path, "/d/a") != 0)
+			fprintf(stderr, "collision case %zu named '%s': %s\n", i,
+			    error.path, error.message);
+		CHECK(strcmp(error.path, "/d/a") == 0 && !error.path_truncated);
+		CHECK(strstr(error.message, "more than one source") != NULL);
+		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+		CHECK(!fixture.writer->catalog_ready && fixture.writer->index == NULL);
+		fixture_close(&fixture);
+	}
+}
+
+/* A merge keeps one directory record and discards the others' metadata.
+ * Optional metadata of a dropped record simply does not reach the catalog,
+ * including the field unions planning checks against the format; metadata
+ * a dropped record requires cannot be discarded, so that run collides.
+ * A record without metadata encodes zero validity and so is the one kept
+ * among programmatic records.
+ */
+static void
+test_merged_metadata(void)
+{
+	fsimg_entry_t bare = { .path = "/d", .kind = FSIMG_ENTRY_DIRECTORY };
+	fsimg_entry_t owned = { .path = "/d", .kind = FSIMG_ENTRY_DIRECTORY };
+	catalog_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	fsimg_error_t error;
+
+	owned.metadata.valid = FSIMG_META_OWNER;
+	owned.metadata.uid = 1000;
+	owned.metadata.gid = 1000;
+
+	fixture_open(&fixture, 2);
+	CHECK(fsimg_writer_add(fixture.writer, &owned, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add(fixture.writer, &bare, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	CHECK(fixture.writer->count == 1);
+	CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
+	CHECK(entry->entry.metadata.valid == 0);
+	CHECK((fixture.writer->catalog_fields & FSIMG_META_OWNER) == 0);
+	fixture_close(&fixture);
+
+	owned.metadata.required = FSIMG_META_OWNER;
+	fixture_open(&fixture, 2);
+	CHECK(fsimg_writer_add(fixture.writer, &owned, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add(fixture.writer, &bare, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "/d") == 0);
+	fixture_close(&fixture);
+}
+
+/* The rank fields are closed: an unknown origin, nonzero padding, an order
+ * on a programmatic record, a scanned order naming no registered root, or a
+ * scanned record with zero-source storage is corruption. Each case breaks
+ * one rule: a pretended registered root keeps the order rule satisfied
+ * where another rule is under test.
+ */
+static void
+test_corrupt_rank(void)
+{
+	static const struct {
+		unsigned		 offset;
+		uint32_t		 value;
+		fsimg_entry_kind_t	 kind;
+		uint64_t		 roots;
+	} corruptions[] = {
+		{ FSIMG_CATALOG_ORIGIN, 2, FSIMG_ENTRY_DIRECTORY, 0 },
+		{ FSIMG_CATALOG_ORIGIN + 4, 1, FSIMG_ENTRY_DIRECTORY, 0 },
+		{ FSIMG_CATALOG_ORDER, 1, FSIMG_ENTRY_DIRECTORY, 0 },
+		{ FSIMG_CATALOG_ORIGIN, FSIMG_ORIGIN_SCANNED, FSIMG_ENTRY_DIRECTORY, 0 },
+		{ FSIMG_CATALOG_ORIGIN, FSIMG_ORIGIN_SCANNED, FSIMG_ENTRY_FILE, 1 }
+	};
+	catalog_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	unsigned char bytes[4];
+
+	for (size_t i = 0; i < sizeof(corruptions) / sizeof(corruptions[0]); i++) {
+		fixture_open(&fixture, 2);
+		add_entry(fixture.writer, "/entry", corruptions[i].kind);
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+		fixture.writer->root_count = corruptions[i].roots;
+		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
+		/* The first record's header starts eight bytes into its stream. */
+		fsimg_meta_put_u32(bytes, corruptions[i].value);
+		CHECK(fsimg_store_write(fixture.writer->ordered->store,
+		    8 + corruptions[i].offset, bytes, sizeof(bytes), NULL) == FSIMG_OK);
+		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) ==
+		    FSIMG_ECORRUPT);
+		fixture_close(&fixture);
+	}
+}
+
 static fsimg_status_t
 generated_validate(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
     fsimg_error_t *error)
@@ -779,5 +978,9 @@ main(int argc, char **argv)
 	test_short_child_record();
 	test_child_order();
 	test_index_reference();
+	test_merged_directories();
+	test_path_collisions();
+	test_merged_metadata();
+	test_corrupt_rank();
 	return (0);
 }

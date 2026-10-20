@@ -122,7 +122,8 @@ scan_entry(fsimg_writer_t *writer, fsimg_source_root_t *root,
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	return (fsimg_writer_collect(writer, &entry, storage, reference, error));
+	return (fsimg_writer_collect(writer, &entry, storage, reference, root,
+	    error));
 }
 
 static fsimg_status_t
@@ -154,7 +155,7 @@ read_directory_batch(fsimg_writer_t *writer, scan_directory_t *directory)
 
 fsimg_status_t
 fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
-    const char *image_directory, fsimg_error_t *error)
+    const char *root_image_path, fsimg_error_t *error)
 {
 	scan_directory_t *directories, *current;
 	fsimg_host_file_t identity;
@@ -167,6 +168,19 @@ fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
 	uint32_t image_depth;
 	fsimg_status_t status;
 	int fd, result, saved;
+
+	/* A regular-file root is one file entry at root_image_path. Its source
+	 * record's empty relative path names the root descriptor itself, the
+	 * identity recorded here is the one adoption inspected, and there is
+	 * nothing to traverse.
+	 */
+	if (root->identity.kind == FSIMG_HOST_FILE) {
+		status = scan_entry(writer, root, &root->identity,
+		    root_image_path, "", error);
+		if (status != FSIMG_OK)
+			fsimg_error_path(error, root_image_path);
+		return (status);
+	}
 
 	if (!fsimg_mul_u64((uint64_t)writer->ctx->options.max_depth + 1,
 	    sizeof(*directories), &stack_bytes) ||
@@ -196,8 +210,8 @@ fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
 			*error = detail;
 		return (detail.status);
 	}
-	prefix_length = strlen(image_directory);
-	bcopy(image_directory, image_path, prefix_length + 1);
+	prefix_length = strlen(root_image_path);
+	bcopy(root_image_path, image_path, prefix_length + 1);
 	depth = 0;
 	status = open_object(writer, root->fd, ".", true, &fd, &identity, error);
 	if (status != FSIMG_OK)

@@ -262,10 +262,14 @@ Programmatic content uses one registered provider and opaque numeric source
 IDs, not one callback closure or retained descriptor per file.
 
 The image root is implicit. Every other entry has an explicit parent directory
-entry; missing parents, duplicate paths, file/directory conflicts, or alternate
-spellings of the same format-equivalent parent are errors. The host scanner
-emits directories as well as files. There is no order-dependent merging of
-metadata and no silent synthesis of arbitrary parent attributes.
+entry; missing parents, file/directory conflicts, any repeated path other than
+a directory, or alternate spellings of the same format-equivalent parent are
+errors. A directory that several sources supply becomes one directory by the
+[merging rule](design-sources.md#merging-roots), whose fixed rank, not
+insertion order, chooses the metadata kept; a repeated directory whose
+discarded record requires metadata is an error too. The host scanner emits
+directories as well as files. There is no silent synthesis of arbitrary
+parent attributes.
 
 Catalog preparation uses these passes:
 

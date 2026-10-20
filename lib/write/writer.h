@@ -7,7 +7,7 @@
 #include "host.h"
 #include "meta.h"
 
-#define FSIMG_CATALOG_HEADER 176u
+#define FSIMG_CATALOG_HEADER 192u
 #define FSIMG_CATALOG_INDEX_SIZE 24u
 #define FSIMG_CATALOG_TIME_BYTES 32u
 
@@ -16,6 +16,8 @@
  * u64; storage, kind, the metadata masks, uid, gid and mode are u32. Each
  * timestamp occupies FSIMG_CATALOG_TIME_BYTES: seconds and precision as u64,
  * then nanoseconds, basis and offset minutes as u32, then four zero bytes.
+ * The record's rank follows: its origin as u32, four zero bytes, then its
+ * order as u64.
  * Absent fields and the padding are zero, so equal entries encode equally.
  * Child records contain parent ID, child ID, and NUL-terminated component.
  * Index records contain stream frame offset, parent ID, and child count.
@@ -34,12 +36,29 @@ typedef enum fsimg_catalog_field {
 	FSIMG_CATALOG_CREATED = 48,
 	FSIMG_CATALOG_MODIFIED = 80,
 	FSIMG_CATALOG_ACCESSED = 112,
-	FSIMG_CATALOG_CHANGED = 144
+	FSIMG_CATALOG_CHANGED = 144,
+	FSIMG_CATALOG_ORIGIN = 176,
+	FSIMG_CATALOG_ORDER = 184
 } fsimg_catalog_field_t;
 _Static_assert(FSIMG_CATALOG_CHANGED + FSIMG_CATALOG_TIME_BYTES ==
-    FSIMG_CATALOG_HEADER, "the catalog header ends with its last timestamp");
+    FSIMG_CATALOG_ORIGIN, "the rank follows the last timestamp");
+_Static_assert(FSIMG_CATALOG_ORDER + 8 == FSIMG_CATALOG_HEADER,
+    "the catalog header ends with the rank's order");
 _Static_assert(FSIMG_CATALOG_GID == FSIMG_CATALOG_UID + 4,
     "uid and gid form one eight-byte owner slot");
+
+/* Every collected record carries a rank, the pair (origin, order), that
+ * decides among records of one image path; the lowest rank wins. A record
+ * scanned beneath a source root has origin SCANNED and that root's
+ * registration order, so the first-registered root wins among scanned
+ * records. A programmatic record, such as a parent directory the CLI
+ * synthesizes, has origin PROGRAMMATIC and order zero, so any scanned record
+ * outranks it whenever either was added.
+ */
+typedef enum fsimg_catalog_origin {
+	FSIMG_ORIGIN_SCANNED = 0,
+	FSIMG_ORIGIN_PROGRAMMATIC = 1
+} fsimg_catalog_origin_t;
 
 typedef struct fsimg_source_root fsimg_source_root_t;
 typedef struct fsimg_source_cursor fsimg_source_cursor_t;
@@ -84,7 +103,9 @@ typedef enum fsimg_source_storage {
 } fsimg_source_storage_t;
 
 /* The writer's single current source owns io. fd is only a borrowed alias
- * used for identity checks; freeing io closes and releases the descriptor.
+ * used for identity checks: the reopened descriptor io owns, which freeing
+ * io closes and releases, or a regular-file root's descriptor, which the
+ * root registry owns while io reads a duplicate of it.
  * A symbolic link, host or provider, has no descriptor: opening it reads
  * and checks its whole target into link_target, link is set, and io
  * delivers those bytes as one data range.
@@ -143,6 +164,11 @@ struct fsimg_writer {
 	unsigned char	*source_record;
 	fsimg_catalog_entry_t current;
 	uint64_t	 root_count;
+	/* Records appended to the entry stream during collection. */
+	uint64_t	 collected;
+	/* Catalog entries, IDs 1..count: zero until preparation indexes the
+	 * catalog, then the collected records less the merged duplicates.
+	 */
 	uint64_t	 count;
 	uint64_t	 payload_bytes;
 	/* Fields omitted because the format does not store them, counted
@@ -152,7 +178,10 @@ struct fsimg_writer {
 	/* Private fault injection: interrupt the nth subsequent directory read. */
 	uint64_t	 interrupt_directory_read_after;
 	uint32_t	 record_capacity;
-	/* Unions of every collected entry's kind, valid and required fields. */
+	/* Unions of every catalog entry's kind, valid and required fields,
+	 * taken over the kept records when preparation indexes the catalog: a
+	 * dropped directory record's metadata never reaches the image.
+	 */
 	uint32_t	 catalog_kinds;
 	uint32_t	 catalog_fields;
 	uint32_t	 catalog_required;
@@ -194,8 +223,12 @@ fsimg_status_t fsimg_writer_prepare(fsimg_writer_t *,
     const fsimg_sort_options_t *, fsimg_error_t *);
 fsimg_status_t fsimg_catalog_get(fsimg_writer_t *, uint64_t,
     const fsimg_catalog_entry_t **, fsimg_error_t *);
+/* Append one record. root is the source root whose scan produced it, which
+ * gives the record its rank, or NULL for a programmatic record.
+ */
 fsimg_status_t fsimg_writer_collect(fsimg_writer_t *, const fsimg_entry_t *,
-    fsimg_source_storage_t, uint64_t, fsimg_error_t *);
+    fsimg_source_storage_t, uint64_t, const fsimg_source_root_t *,
+    fsimg_error_t *);
 void fsimg_catalog_discard(fsimg_writer_t *);
 fsimg_status_t fsimg_catalog_prepare(fsimg_writer_t *,
     const fsimg_sort_options_t *, fsimg_error_t *);

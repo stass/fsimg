@@ -70,6 +70,17 @@ static void test_provider(void);
 static void test_host_tree(void);
 static void test_mutation(void);
 static void test_rejection(void);
+static int make_directory(int, const char *);
+static void set_modified(int, const char *, time_t);
+static void populate_root(int, const char *, time_t);
+static void read_source(fsimg_writer_t *, uint64_t, const char *);
+static void test_merged_roots(void);
+static void test_scanned_rank(void);
+static void test_repeated_tree(void);
+static void test_root_collisions(void);
+static void test_file_root(void);
+static void test_file_root_changes(void);
+static void test_file_root_rejection(void);
 static void test_symlink_import(void);
 static void test_symlink_changes(void);
 static void test_posix_import(void);
@@ -530,6 +541,385 @@ test_rejection(void)
 	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.parent, "/", &error) == FSIMG_EINVAL);
 	CHECK(fixture.writer->roots == NULL);
 	fixture_close(&fixture);
+}
+
+/* Make parent/name a directory and return a read-only descriptor for it. */
+static int
+make_directory(int parent, const char *name)
+{
+	int fd;
+
+	CHECK(mkdirat(parent, name, 0700) == 0);
+	fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(fd != -1);
+	return (fd);
+}
+
+/* Scanning records a host object's modification time as its metadata, so
+ * distinct times tell which root's directory a merge kept.
+ */
+static void
+set_modified(int parent, const char *name, time_t seconds)
+{
+	const struct timespec times[2] = {
+		{ .tv_nsec = UTIME_OMIT }, { .tv_sec = seconds }
+	};
+
+	CHECK(utimensat(parent, name, times, AT_SYMLINK_NOFOLLOW) == 0);
+}
+
+/* One operand's tree: dir/<label> and only-<label>, each containing the
+ * label, with dir/ modified at dir_seconds.
+ */
+static void
+populate_root(int root, const char *label, time_t dir_seconds)
+{
+	char only[32];
+	int directory;
+
+	snprintf(only, sizeof(only), "only-%s", label);
+	directory = make_directory(root, "dir");
+	write_file(directory, label, label);
+	CHECK(close(directory) == 0);
+	write_file(root, only, label);
+	set_modified(root, "dir", dir_seconds);
+}
+
+/* Open, read and finish one file entry, expecting exactly contents. */
+static void
+read_source(fsimg_writer_t *writer, uint64_t id, const char *contents)
+{
+	char bytes[64];
+	size_t count;
+
+	CHECK(fsimg_source_open(writer, id, NULL) == FSIMG_OK);
+	CHECK(fsimg_source_read(writer, 0, bytes, sizeof(bytes), &count,
+	    NULL) == FSIMG_OK);
+	CHECK(count == strlen(contents) && bcmp(bytes, contents, count) == 0);
+	CHECK(fsimg_source_finish(writer, NULL) == FSIMG_OK);
+}
+
+/* Two directory roots at "/" whose trees both contain dir/ produce one /dir
+ * holding the children of both. IDs, parent links and file contents are
+ * the same for either registration order; only the merged directory's
+ * metadata follows the order, coming from the root registered first.
+ */
+static void
+test_merged_roots(void)
+{
+	static const char *const ordered[] = { "/", "/dir", "/dir/first",
+	    "/dir/second", "/only-first", "/only-second" };
+	static const char *const contents[] = { NULL, NULL, "first", "second",
+	    "first", "second" };
+	static const uint64_t parents[] = { 0, 0, 1, 1, 0, 0 };
+	static const uint64_t children[] = { 3, 2, 0, 0, 0, 0 };
+	source_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	int second;
+
+	for (unsigned order = 0; order < 2; order++) {
+		fixture_open(&fixture);
+		second = make_directory(fixture.parent, "second");
+		populate_root(fixture.root, "first", 1000);
+		populate_root(second, "second", 2000);
+		if (order == 0) {
+			CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
+			CHECK(fsimg_writer_add_tree(fixture.writer, second, "/", NULL) == FSIMG_OK);
+		} else {
+			CHECK(fsimg_writer_add_tree(fixture.writer, second, "/", NULL) == FSIMG_OK);
+			CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
+		}
+		CHECK(close(second) == 0);
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+
+		CHECK(fixture.writer->count == 5);
+		for (uint64_t id = 0; id <= 5; id++) {
+			CHECK(fsimg_catalog_get(fixture.writer, id, &entry, NULL) == FSIMG_OK);
+			CHECK(strcmp(entry->entry.path, ordered[id]) == 0);
+			CHECK(entry->parent_id == parents[id]);
+			CHECK(entry->children == children[id]);
+			if (contents[id] != NULL)
+				read_source(fixture.writer, id, contents[id]);
+		}
+		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
+		CHECK(entry->entry.metadata.modified.seconds == (order == 0 ? 1000 : 2000));
+		fixture_close(&fixture);
+	}
+}
+
+/* Among records of one directory a scanned record outranks a synthesized
+ * parent (a programmatic directory without metadata) whenever either was
+ * added, and the first-registered root outranks later ones. Both roots
+ * populate /a, so /a is each root's own directory entry and /a/x is a
+ * directory both trees contain.
+ */
+static void
+test_scanned_rank(void)
+{
+	fsimg_entry_t synthesized = { .path = "/a", .kind = FSIMG_ENTRY_DIRECTORY };
+	source_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	int second, first_root, later_root, directory;
+	bool reversed, synthesized_first;
+
+	for (unsigned scenario = 0; scenario < 4; scenario++) {
+		reversed = (scenario & 1) != 0;
+		synthesized_first = (scenario & 2) != 0;
+		fixture_open(&fixture);
+		second = make_directory(fixture.parent, "second");
+		directory = make_directory(fixture.root, "x");
+		CHECK(close(directory) == 0);
+		directory = make_directory(second, "x");
+		CHECK(close(directory) == 0);
+		set_modified(fixture.root, "x", 1000);
+		set_modified(second, "x", 2000);
+		set_modified(fixture.parent, "source", 3000);
+		set_modified(fixture.parent, "second", 4000);
+		first_root = reversed ? second : fixture.root;
+		later_root = reversed ? fixture.root : second;
+
+		if (synthesized_first)
+			CHECK(fsimg_writer_add(fixture.writer, &synthesized, NULL, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_add_tree(fixture.writer, first_root, "/a", NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_add_tree(fixture.writer, later_root, "/a", NULL) == FSIMG_OK);
+		if (!synthesized_first)
+			CHECK(fsimg_writer_add(fixture.writer, &synthesized, NULL, NULL) == FSIMG_OK);
+		CHECK(close(second) == 0);
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+
+		CHECK(fixture.writer->count == 2);
+		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->entry.path, "/a") == 0 && entry->children == 1);
+		CHECK((entry->entry.metadata.valid & FSIMG_META_MODIFIED) != 0);
+		CHECK(entry->entry.metadata.modified.seconds == (reversed ? 4000 : 3000));
+		CHECK(fsimg_catalog_get(fixture.writer, 2, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->entry.path, "/a/x") == 0 && entry->parent_id == 1);
+		CHECK(entry->entry.metadata.modified.seconds == (reversed ? 2000 : 1000));
+		fixture_close(&fixture);
+	}
+}
+
+/* The same tree named twice merges its directories and then fails on its
+ * first file in catalog order, whatever the host's directory order.
+ */
+static void
+test_repeated_tree(void)
+{
+	source_fixture_t fixture;
+	fsimg_error_t error;
+	int directory;
+
+	fixture_open(&fixture);
+	write_file(fixture.root, "b", "later file");
+	directory = make_directory(fixture.root, "a");
+	write_file(directory, "z", "first file");
+	CHECK(close(directory) == 0);
+	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "/a/z") == 0);
+	CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+	CHECK(fixture.writer->roots == NULL);
+	fixture_close(&fixture);
+}
+
+/* Host roots collide like programmatic entries. The root at "/" holds f as
+ * a file, directory or link; a rival then supplies /f as a regular-file
+ * root, as a directory in a second root at "/", or as a programmatic
+ * directory that requires an owner, which merging cannot keep.
+ */
+static void
+test_root_collisions(void)
+{
+	typedef enum { HOLDS_FILE, HOLDS_DIRECTORY, HOLDS_LINK } holding_t;
+	typedef enum {
+		RIVAL_FILE_ROOT, RIVAL_SECOND_ROOT, RIVAL_REQUIRED_DIRECTORY
+	} rival_t;
+	static const struct {
+		holding_t	 holding;
+		rival_t		 rival;
+	} cases[] = {
+		{ HOLDS_FILE, RIVAL_FILE_ROOT },
+		{ HOLDS_DIRECTORY, RIVAL_FILE_ROOT },
+		{ HOLDS_LINK, RIVAL_SECOND_ROOT },
+		{ HOLDS_DIRECTORY, RIVAL_REQUIRED_DIRECTORY }
+	};
+	fsimg_entry_t required = { .path = "/f", .kind = FSIMG_ENTRY_DIRECTORY };
+	source_fixture_t fixture;
+	fsimg_error_t error;
+	int second, file, directory;
+
+	required.metadata.valid = FSIMG_META_OWNER;
+	required.metadata.required = FSIMG_META_OWNER;
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_open(&fixture);
+		if (cases[i].holding == HOLDS_FILE) {
+			write_file(fixture.root, "f", "scanned file");
+		} else if (cases[i].holding == HOLDS_DIRECTORY) {
+			directory = make_directory(fixture.root, "f");
+			CHECK(close(directory) == 0);
+		} else {
+			CHECK(symlinkat("target", fixture.root, "f") == 0);
+		}
+		CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
+
+		if (cases[i].rival == RIVAL_FILE_ROOT) {
+			write_file(fixture.parent, "single", "file root");
+			file = openat(fixture.parent, "single", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+			CHECK(file != -1);
+			CHECK(fsimg_writer_add_tree(fixture.writer, file, "/f", NULL) == FSIMG_OK);
+			CHECK(close(file) == 0);
+		} else if (cases[i].rival == RIVAL_SECOND_ROOT) {
+			second = make_directory(fixture.parent, "second");
+			directory = make_directory(second, "f");
+			CHECK(close(directory) == 0);
+			CHECK(fsimg_writer_add_tree(fixture.writer, second, "/", NULL) == FSIMG_OK);
+			CHECK(close(second) == 0);
+		} else {
+			CHECK(fsimg_writer_add(fixture.writer, &required, NULL, NULL) == FSIMG_OK);
+		}
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) == FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "/f") == 0);
+		fixture_close(&fixture);
+	}
+}
+
+/* A regular-file root contributes one file entry at its image path. Its
+ * source borrows the root descriptor, which the registry keeps open, so
+ * the file opens again after its source closes. Reads are positioned: the
+ * descriptor's shared offset does not affect them.
+ */
+static void
+test_file_root(void)
+{
+	fsimg_entry_t parent = { .path = "/d", .kind = FSIMG_ENTRY_DIRECTORY };
+	source_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	int file;
+
+	fixture_open(&fixture);
+	write_file(fixture.parent, "single", "file root bytes");
+	file = openat(fixture.parent, "single",
+	    O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+	CHECK(file != -1);
+	CHECK(lseek(file, 5, SEEK_SET) == 5);
+	CHECK(fsimg_writer_add_tree(fixture.writer, file, "/d/f", NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add(fixture.writer, &parent, NULL, NULL) == FSIMG_OK);
+	CHECK(close(file) == 0);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+
+	CHECK(fixture.writer->count == 2);
+	entry = find_entry(fixture.writer, "/d/f");
+	CHECK(entry->entry.kind == FSIMG_ENTRY_FILE && entry->entry.size == 15);
+	CHECK(entry->storage == FSIMG_STORAGE_HOST && entry->parent_id == 1);
+	CHECK((entry->entry.metadata.valid & FSIMG_META_MODIFIED) != 0);
+	read_source(fixture.writer, entry->id, "file root bytes");
+	CHECK(fixture.writer->roots != NULL && fixture.writer->roots->fd != -1);
+	read_source(fixture.writer, entry->id, "file root bytes");
+	fixture_close(&fixture);
+}
+
+/* A regular-file root is held to the recorded identity like any host
+ * source: growth or a new modification time after adoption is a change,
+ * whether it happens before the source opens or while it is open.
+ */
+static void
+test_file_root_changes(void)
+{
+	static const struct {
+		bool		 grows;		/* Otherwise only its mtime changes. */
+		bool		 while_open;
+	} cases[] = {
+		{ .grows = true, .while_open = false },
+		{ .grows = false, .while_open = false },
+		{ .grows = true, .while_open = true },
+		{ .grows = false, .while_open = true }
+	};
+	source_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	char bytes[32];
+	size_t count;
+	int file, writable;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_open(&fixture);
+		write_file(fixture.parent, "single", "original");
+		set_modified(fixture.parent, "single", 1000);
+		file = openat(fixture.parent, "single", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+		CHECK(file != -1);
+		CHECK(fsimg_writer_add_tree(fixture.writer, file, "/f", NULL) == FSIMG_OK);
+		CHECK(close(file) == 0);
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+		entry = find_entry(fixture.writer, "/f");
+		if (cases[i].while_open)
+			CHECK(fsimg_source_open(fixture.writer, entry->id, NULL) == FSIMG_OK);
+
+		if (cases[i].grows) {
+			writable = openat(fixture.parent, "single",
+			    O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC);
+			CHECK(writable != -1);
+			CHECK(write(writable, "+", 1) == 1);
+			CHECK(close(writable) == 0);
+		} else {
+			set_modified(fixture.parent, "single", 2000);
+		}
+
+		if (cases[i].while_open)
+			CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes),
+			    &count, NULL) == FSIMG_ESOURCE_CHANGED);
+		else
+			CHECK(fsimg_source_open(fixture.writer, entry->id, NULL) ==
+			    FSIMG_ESOURCE_CHANGED);
+		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+		CHECK(fixture.writer->roots == NULL);
+		fixture_close(&fixture);
+	}
+}
+
+/* A regular file cannot populate the image root, and a root that is neither
+ * a directory nor a regular file fails before anything is collected.
+ */
+static void
+test_file_root_rejection(void)
+{
+	source_fixture_t fixture;
+	fsimg_error_t error;
+	int fd;
+
+	fixture_open(&fixture);
+	write_file(fixture.parent, "single", "file root");
+	fd = openat(fixture.parent, "single", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	CHECK(fd != -1);
+	CHECK(fsimg_writer_add_tree(fixture.writer, fd, "/", &error) == FSIMG_EINVAL);
+	CHECK(fixture.writer->roots == NULL && fixture.writer->collected == 0);
+	CHECK(close(fd) == 0);
+	fixture_close(&fixture);
+
+	fixture_open(&fixture);
+	CHECK(mkfifoat(fixture.parent, "fifo", 0600) == 0);
+	fd = openat(fixture.parent, "fifo", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	CHECK(fd != -1);
+	CHECK(fsimg_writer_add_tree(fixture.writer, fd, "/fifo", &error) == FSIMG_EINVAL);
+	CHECK(fixture.writer->roots == NULL && fixture.writer->collected == 0);
+	CHECK(close(fd) == 0);
+	fixture_close(&fixture);
+
+	/* A descriptor for the link itself needs a host-specific open flag. */
+#if defined(O_SYMLINK) || defined(O_PATH)
+	fixture_open(&fixture);
+	write_file(fixture.parent, "single", "file root");
+	CHECK(symlinkat("single", fixture.parent, "link") == 0);
+#if defined(O_SYMLINK)
+	fd = openat(fixture.parent, "link", O_RDONLY | O_SYMLINK | O_CLOEXEC);
+#else
+	fd = openat(fixture.parent, "link", O_PATH | O_NOFOLLOW | O_CLOEXEC);
+#endif
+	CHECK(fd != -1);
+	CHECK(fsimg_writer_add_tree(fixture.writer, fd, "/link", &error) == FSIMG_EINVAL);
+	CHECK(fixture.writer->roots == NULL && fixture.writer->collected == 0);
+	CHECK(close(fd) == 0);
+	fixture_close(&fixture);
+#endif
 }
 
 /* A host link becomes a SYMLINK entry whose content is its target. The
@@ -1017,6 +1407,13 @@ main(int argc, char **argv)
 	test_host_tree();
 	test_mutation();
 	test_rejection();
+	test_merged_roots();
+	test_scanned_rank();
+	test_repeated_tree();
+	test_root_collisions();
+	test_file_root();
+	test_file_root_changes();
+	test_file_root_rejection();
 	test_symlink_import();
 	test_symlink_changes();
 	test_posix_import();

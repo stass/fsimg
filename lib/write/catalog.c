@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "host.h"
+#include "source.h"
 #include "unicode.h"
 #include "writer.h"
 
@@ -22,12 +23,20 @@ static bool decode_time(const unsigned char *, fsimg_timestamp_t *);
 static bool entry_shape_valid(uint32_t, uint64_t, uint32_t, uint64_t);
 static void encode_metadata(unsigned char *, const fsimg_metadata_t *);
 static bool decode_metadata(const unsigned char *, fsimg_metadata_t *);
+static bool rank_valid(const fsimg_writer_t *, const unsigned char *,
+    uint32_t);
 static fsimg_status_t decode_entry(fsimg_writer_t *, const unsigned char *,
     size_t, fsimg_catalog_entry_t *, fsimg_error_t *);
 static fsimg_status_t read_entry(fsimg_writer_t *, uint64_t, unsigned char *,
     fsimg_catalog_entry_t *, fsimg_error_t *);
 static int path_compare(const void *, size_t, const void *, size_t, void *);
+static int rank_compare(const unsigned char *, const unsigned char *);
+static int entry_compare(const void *, size_t, const void *, size_t, void *);
 static int child_compare(const void *, size_t, const void *, size_t, void *);
+static fsimg_status_t resolve_repeated_path(fsimg_entry_kind_t,
+    const fsimg_entry_t *, fsimg_error_t *);
+static bool find_parent(const catalog_ancestor_t *, size_t *, const char *,
+    const char *, size_t);
 static fsimg_status_t index_entries(fsimg_writer_t *, fsimg_stream_t *,
     fsimg_error_t *);
 static fsimg_status_t set_child_count(fsimg_writer_t *, uint64_t, uint64_t,
@@ -192,7 +201,8 @@ decode_metadata(const unsigned char *record, fsimg_metadata_t *out)
 
 fsimg_status_t
 fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
-    fsimg_source_storage_t storage, uint64_t source_id, fsimg_error_t *error)
+    fsimg_source_storage_t storage, uint64_t source_id,
+    const fsimg_source_root_t *root, fsimg_error_t *error)
 {
 	uint64_t payload_bytes;
 	size_t path_length;
@@ -223,18 +233,47 @@ fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 	fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_STORAGE, storage);
 	fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_KIND, entry->kind);
 	encode_metadata(writer->record, &entry->metadata);
+	if (root != NULL) {
+		fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_ORIGIN,
+		    FSIMG_ORIGIN_SCANNED);
+		fsimg_meta_put_u64(writer->record + FSIMG_CATALOG_ORDER, root->id);
+	} else {
+		fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_ORIGIN,
+		    FSIMG_ORIGIN_PROGRAMMATIC);
+	}
 	bcopy(entry->path, writer->record + FSIMG_CATALOG_HEADER, path_length + 1);
 	status = fsimg_stream_append(writer->entries, writer->record,
 	    FSIMG_CATALOG_HEADER + path_length + 1, NULL, error);
 	if (status != FSIMG_OK)
 		return (status);
-	writer->count++;
+	writer->collected++;
 	writer->payload_bytes = payload_bytes;
-	/* Planning compares these unions with the format's capability record. */
-	writer->catalog_kinds |= (uint32_t)entry->kind;
-	writer->catalog_fields |= entry->metadata.valid;
-	writer->catalog_required |= entry->metadata.required;
 	return (FSIMG_OK);
+}
+
+/* The rank fields are closed, mirroring fsimg_writer_collect: zero padding;
+ * a scanned record names a registered root and is a directory (no storage)
+ * or a host source; a programmatic record has order zero and never host
+ * storage.
+ */
+static bool
+rank_valid(const fsimg_writer_t *writer, const unsigned char *record,
+    uint32_t storage)
+{
+	uint64_t order;
+
+	if (fsimg_meta_get_u32(record + FSIMG_CATALOG_ORIGIN + 4) != 0)
+		return (false);
+	order = fsimg_meta_get_u64(record + FSIMG_CATALOG_ORDER);
+	switch (fsimg_meta_get_u32(record + FSIMG_CATALOG_ORIGIN)) {
+	case FSIMG_ORIGIN_SCANNED:
+		return (order < writer->root_count &&
+		    (storage == FSIMG_STORAGE_NONE || storage == FSIMG_STORAGE_HOST));
+	case FSIMG_ORIGIN_PROGRAMMATIC:
+		return (order == 0 && storage != FSIMG_STORAGE_HOST);
+	default:
+		return (false);
+	}
 }
 
 static fsimg_status_t
@@ -258,6 +297,7 @@ decode_entry(fsimg_writer_t *writer, const unsigned char *bytes, size_t length,
 	out->entry.size = fsimg_meta_get_u64(bytes + FSIMG_CATALOG_SIZE);
 	out->source_id = fsimg_meta_get_u64(bytes + FSIMG_CATALOG_SOURCE_ID);
 	if (!entry_shape_valid(kind, out->entry.size, storage, out->source_id) ||
+	    !rank_valid(writer, bytes, storage) ||
 	    (storage == FSIMG_STORAGE_PROVIDER && !writer->provider_set))
 		goto invalid;
 	out->entry.kind = (fsimg_entry_kind_t)kind;
@@ -304,6 +344,44 @@ path_compare(const void *a, size_t a_length, const void *b, size_t b_length,
 }
 
 static int
+rank_compare(const unsigned char *a, const unsigned char *b)
+{
+	uint64_t a_order, b_order;
+	uint32_t a_origin, b_origin;
+
+	a_origin = fsimg_meta_get_u32(a + FSIMG_CATALOG_ORIGIN);
+	b_origin = fsimg_meta_get_u32(b + FSIMG_CATALOG_ORIGIN);
+	if (a_origin != b_origin)
+		return ((a_origin > b_origin) - (a_origin < b_origin));
+	a_order = fsimg_meta_get_u64(a + FSIMG_CATALOG_ORDER);
+	b_order = fsimg_meta_get_u64(b + FSIMG_CATALOG_ORDER);
+	return ((a_order > b_order) - (a_order < b_order));
+}
+
+/* The catalog sort key: the path's component tuple, then the rank, lowest
+ * first, so records of one path are adjacent with the winning record
+ * first. Equal paths have equal lengths, so records of equal path and rank
+ * compare by their header bytes and differ only when the records differ:
+ * the order never depends on insertion order or the sort's stability, run
+ * size or merge fan-in.
+ */
+static int
+entry_compare(const void *a, size_t a_length, const void *b, size_t b_length,
+    void *argument)
+{
+	int order;
+
+	order = path_compare(a, a_length, b, b_length, argument);
+	if (order != 0 || a_length <= FSIMG_CATALOG_HEADER ||
+	    b_length <= FSIMG_CATALOG_HEADER)
+		return (order);
+	order = rank_compare(a, b);
+	if (order != 0)
+		return (order);
+	return (memcmp(a, b, FSIMG_CATALOG_HEADER));
+}
+
+static int
 child_compare(const void *a, size_t a_length, const void *b, size_t b_length,
     void *argument FSIMG_UNUSED)
 {
@@ -325,22 +403,77 @@ child_compare(const void *a, size_t a_length, const void *b, size_t b_length,
 	return ((a_length > b_length) - (a_length < b_length));
 }
 
+/* Decide a record whose path equals the last kept record's path. Two
+ * directories merge: the later record is dropped, and its children, which
+ * keep their own paths, attach to the kept directory, so the merged
+ * directory holds the union of the children. A dropped record's metadata
+ * never reaches the image, so a record that requires metadata cannot be
+ * dropped. Anything else is a collision named by its path.
+ */
+static fsimg_status_t
+resolve_repeated_path(fsimg_entry_kind_t kept_kind, const fsimg_entry_t *entry,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	if (kept_kind == FSIMG_ENTRY_DIRECTORY &&
+	    entry->kind == FSIMG_ENTRY_DIRECTORY &&
+	    entry->metadata.required == 0)
+		return (FSIMG_OK);
+	status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CATALOG,
+	    "image path is supplied by more than one source");
+	fsimg_error_path(error, entry->path);
+	return (status);
+}
+
+/* Pop the ancestor stack down to the directory that is path's parent and
+ * report whether it was found. Every stack entry's path is a prefix of
+ * kept_path, the last kept record's path, so an entry is path's parent
+ * when its length is parent_length and those bytes of kept_path and path
+ * agree.
+ */
+static bool
+find_parent(const catalog_ancestor_t *ancestors, size_t *top,
+    const char *kept_path, const char *path, size_t parent_length)
+{
+	while (*top != 0 && (ancestors[*top].path_length != parent_length ||
+	    bcmp(kept_path, path, parent_length) != 0))
+		(*top)--;
+	return (ancestors[*top].path_length == parent_length &&
+	    bcmp(kept_path, path, parent_length) == 0);
+}
+
+/* Assign stable IDs in sorted order and append one child record per entry.
+ *
+ * The sort places the records of one path next to each other, lowest rank
+ * first. The first record of such a run is kept and resolve_repeated_path
+ * decides each later one, so a run needs only the last kept record's path
+ * and kind. A dropped record gets no ID: IDs stay dense and writer->count,
+ * the number of catalog entries, counts kept records only.
+ *
+ * Parents come from an ancestor stack holding each open directory's ID and
+ * path length. The open directories are the last kept record (when it is a
+ * directory) and its ancestors, so their paths are prefixes of kept_path.
+ *
+ * Planning's capability unions are taken here, over kept records only.
+ */
 static fsimg_status_t
 index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
     fsimg_error_t *error)
 {
 	catalog_ancestor_t *ancestors;
 	fsimg_catalog_entry_t entry;
+	fsimg_entry_kind_t kept_kind;
 	fsimg_error_t detail;
-	char *directory_path;
+	char *kept_path;
 	unsigned char index[FSIMG_CATALOG_INDEX_SIZE];
-	uint64_t cursor, reference, capacity, stack_bytes;
-	size_t length, directory_length, parent_length, top, name_length, allocation_size;
+	uint64_t cursor, reference, capacity, stack_bytes, id, records;
+	size_t length, path_length, parent_length, top, name_length, allocation_size;
 	fsimg_status_t status;
 	const char *name;
 
-	capacity = writer->count < writer->ctx->options.max_depth ?
-	    writer->count + 1 : (uint64_t)writer->ctx->options.max_depth + 1;
+	capacity = writer->collected < writer->ctx->options.max_depth ?
+	    writer->collected + 1 : (uint64_t)writer->ctx->options.max_depth + 1;
 	/* One slot per possible ancestor plus the implicit root, never per child. */
 	if (!fsimg_mul_u64(capacity, sizeof(*ancestors), &stack_bytes) ||
 	    !fsimg_to_size(stack_bytes, &allocation_size))
@@ -352,15 +485,18 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 			*error = detail;
 		return (detail.status);
 	}
-	directory_path = fsimg_alloc(writer->ctx, writer->ctx->options.max_path_bytes,
+	kept_path = fsimg_alloc(writer->ctx, writer->ctx->options.max_path_bytes,
 	    &detail);
-	if (directory_path == NULL) {
+	if (kept_path == NULL) {
 		fsimg_dealloc(ancestors);
 		if (error != NULL)
 			*error = detail;
 		return (detail.status);
 	}
-	directory_path[0] = '/';
+	/* The implicit root is the first open directory. */
+	kept_path[0] = '/';
+	kept_path[1] = '\0';
+	ancestors[0].id = 0;
 	ancestors[0].path_length = 1;
 	fsimg_meta_put_u64(index, UINT64_MAX);
 	fsimg_meta_put_u64(index + 8, 0);
@@ -368,27 +504,44 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 	status = fsimg_array_set(writer->index, 0, index, error);
 	if (status != FSIMG_OK)
 		goto done;
+
 	cursor = 0;
 	top = 0;
-	for (uint64_t id = 1; id <= writer->count; id++) {
+	id = 0;
+	records = 0;
+	kept_kind = FSIMG_ENTRY_DIRECTORY;
+	for (;;) {
 		reference = cursor;
 		status = fsimg_stream_next(writer->ordered, &cursor, writer->record,
 		    writer->record_capacity, &length, error);
+		if (status == FSIMG_DONE)
+			break;
 		if (status != FSIMG_OK)
 			goto done;
+		records++;
+		if (records > writer->collected)
+			break;
 		status = decode_entry(writer, writer->record, length, &entry, error);
 		if (status != FSIMG_OK)
 			goto done;
+		/* Before the first kept record kept_path holds the implicit root,
+		 * which no record repeats.
+		 */
+		if (id != 0 && strcmp(kept_path, entry.entry.path) == 0) {
+			status = resolve_repeated_path(kept_kind, &entry.entry, error);
+			if (status != FSIMG_OK)
+				goto done;
+			continue;
+		}
+
+		id++;
 		name = strrchr(entry.entry.path, '/') + 1;
 		parent_length = name - entry.entry.path - 1;
 		/* A root child's last slash is at index zero; its parent is '/'. */
 		if (parent_length == 0)
 			parent_length = 1;
-		while (top != 0 && (ancestors[top].path_length != parent_length ||
-		    bcmp(directory_path, entry.entry.path, parent_length) != 0))
-			top--;
-		if (ancestors[top].path_length != parent_length ||
-		    bcmp(directory_path, entry.entry.path, parent_length) != 0) {
+		if (!find_parent(ancestors, &top, kept_path, entry.entry.path,
+		    parent_length)) {
 			status = fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CATALOG, "catalog entry has no explicit directory parent");
 			goto done;
@@ -399,14 +552,17 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		status = fsimg_array_set(writer->index, id, index, error);
 		if (status != FSIMG_OK)
 			goto done;
-		/* Preserve directory traversal state before reusing the record buffer.
-		 * A long component's collision key can overlap the borrowed pathname.
+		writer->catalog_kinds |= (uint32_t)entry.entry.kind;
+		writer->catalog_fields |= entry.entry.metadata.valid;
+		writer->catalog_required |= entry.entry.metadata.required;
+
+		/* Preserve the merge and traversal state before reusing the record
+		 * buffer. A long component's collision key can overlap the
+		 * borrowed pathname.
 		 */
-		directory_length = 0;
-		if (entry.entry.kind == FSIMG_ENTRY_DIRECTORY) {
-			directory_length = strlen(entry.entry.path);
-			bcopy(entry.entry.path, directory_path, directory_length + 1);
-		}
+		path_length = strlen(entry.entry.path);
+		bcopy(entry.entry.path, kept_path, path_length + 1);
+		kept_kind = entry.entry.kind;
 		name_length = strlen(name) + 1;
 		/* Copy the name before reusing the record buffer for its key. */
 		bcopy(name, writer->record + 16, name_length);
@@ -419,18 +575,19 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		if (entry.entry.kind == FSIMG_ENTRY_DIRECTORY) {
 			top++;
 			ancestors[top].id = id;
-			ancestors[top].path_length = directory_length;
+			ancestors[top].path_length = path_length;
 		}
 	}
-	status = fsimg_stream_next(writer->ordered, &cursor, writer->record,
-	    writer->record_capacity, &length, error);
-	if (status == FSIMG_DONE)
-		status = FSIMG_OK;
-	else if (status == FSIMG_OK)
+	/* The sorted stream holds exactly the collected records. */
+	if (records != writer->collected) {
 		status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_CATALOG, "catalog entry count mismatch");
+		goto done;
+	}
+	writer->count = id;
+	status = FSIMG_OK;
 done:
-	fsimg_dealloc(directory_path);
+	fsimg_dealloc(kept_path);
 	fsimg_dealloc(ancestors);
 	return (status);
 }
@@ -488,7 +645,6 @@ fsimg_catalog_count_children(fsimg_writer_t *writer, fsimg_error_t *error)
 	uint64_t cursor, current_parent, count, seen;
 	size_t length;
 	fsimg_status_t status;
-	int order;
 
 	if (writer->state != FSIMG_WRITER_PREPARING || writer->catalog_ready)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
@@ -526,16 +682,14 @@ fsimg_catalog_count_children(fsimg_writer_t *writer, fsimg_error_t *error)
 			current_parent = child.parent_id;
 			count = 0;
 		}
-		if (count != 0) {
-			order = strcmp(previous, child.name);
-			if (order >= 0) {
-				status = fsimg_error_set(error,
-				    order == 0 ? FSIMG_EINVAL : FSIMG_ECORRUPT, 0,
-				    FSIMG_OP_CATALOG, order == 0 ?
-				    "duplicate catalog path or conflicting entry kind" :
-				    "catalog child names are not ordered");
-				goto done;
-			}
+		/* Indexing kept one record per path, so a parent's children have
+		 * distinct names; an equal name is corruption like a misordered one.
+		 */
+		if (count != 0 && strcmp(previous, child.name) >= 0) {
+			status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+			    FSIMG_OP_CATALOG,
+			    "catalog child names are not strictly ordered");
+			goto done;
 		}
 		bcopy(child.name, previous, child.name_length + 1);
 		count++;
@@ -559,12 +713,13 @@ fsimg_catalog_prepare(fsimg_writer_t *writer, const fsimg_sort_options_t *option
 	fsimg_stream_t *children;
 	fsimg_status_t status;
 
-	status = fsimg_stream_sort(writer->entries, path_compare, NULL, options,
+	status = fsimg_stream_sort(writer->entries, entry_compare, NULL, options,
 	    &writer->ordered, error);
 	if (status != FSIMG_OK)
 		return (status);
+	/* Merging can only shrink the catalog, so every kept ID fits. */
 	status = fsimg_array_new(&writer->session, FSIMG_CATALOG_INDEX_SIZE,
-	    writer->count + 1, &writer->index, error);
+	    writer->collected + 1, &writer->index, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_stream_new(&writer->session, writer->record_capacity,

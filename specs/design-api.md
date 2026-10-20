@@ -269,9 +269,10 @@ values, not handles to caller entry structs. `set_sources()` is called once,
 before provider-backed entries are added. `add_tree()` accepts a directory or
 regular-file root descriptor, as the [sources design](design-sources.md)
 defines: a directory root contributes its tree beneath `image_path`, a
-regular-file root one file at `image_path`. It scans synchronously,
-duplicates the root descriptor for subsequent reopening, and records metadata
-rather than payload bytes. It rejects symlinks and unsupported host file
+regular-file root one file at a non-root `image_path`. It scans
+synchronously, duplicates the root descriptor for subsequent source access
+(reopening beneath a directory, reading a regular file in place), and
+records metadata rather than payload bytes. It rejects symlinks and unsupported host file
 kinds. A non-root image destination directory must be explicitly represented
 in the catalog by planning time; insertion order is unrestricted.
 

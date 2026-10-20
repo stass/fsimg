@@ -11,7 +11,8 @@ reservation and a charged registry record; neither scales with the number of
 files beneath that root. A directory root contributes its tree beneath its
 image path and, when that path is not the root, its own directory entry from
 the directory's metadata. A regular-file root contributes exactly one file
-entry at its image path, with the file as its source. Programmatic sources
+entry at its image path, which therefore cannot be the root, with the file
+as its source. Programmatic sources
 use one copied provider table and borrowed argument, with numeric source IDs.
 The caller keeps provider state alive until writer destruction. Zero sources
 have no backing storage. Directories have no source or payload length.
@@ -135,16 +136,24 @@ paths adjacent, and one rule decides each run of equal paths:
 * If every record in the run is a directory, the run becomes one directory
   whose children are the union of the children the roots supplied. The
   retained record, and so the directory's metadata, is the one with the
-  lowest rank; the others are dropped.
+  lowest rank; the others are dropped. A dropped record's metadata never
+  reaches the image, so a record that requires a metadata field cannot be
+  dropped: such a run is a collision rather than a silent loss, even when
+  the kept record carries the same values.
 * Otherwise the run is a collision and preparation fails naming the path: a
   file against a file, a file against a directory, a link against anything.
   The same tree named twice therefore fails on its first file.
 
 The sort key is the component tuple, then the rank, and the lowest rank
-wins: the rank is the pair (0 for a scanned record, 1 for a synthesized one;
-then the root's registration order, the operand's position on the command
-line), so a scanned directory always outranks a synthesized parent whatever
-the operand order, and among scanned directories the first operand wins.
+wins: the rank is the pair (0 for a scanned record, 1 for a programmatic one
+such as a synthesized parent; then the root's registration order, the
+operand's position on the command line), so a scanned directory always
+outranks a synthesized parent whatever the operand order, and among scanned
+directories the first operand wins. Programmatic records share order 0, and
+the full encoded record breaks any remaining tie, so two programmatic
+records of one path order the same way for any insertion order and sort
+structure; a programmatic directory without metadata, such as a synthesized
+parent, encodes zero validity and is kept before one that carries metadata.
 Within one root equal paths cannot occur, because a host
 directory enumerates each name once, so this is the only duplicate rule in
 preparation and it adds no state: the rank is a fixed-width field of the

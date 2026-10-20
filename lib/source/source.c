@@ -27,6 +27,8 @@ static fsimg_status_t open_provider_link(fsimg_writer_t *,
     fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t open_host_link(fsimg_writer_t *, fsimg_source_root_t *,
     int, const char *, fsimg_source_cursor_t *, fsimg_error_t *);
+static fsimg_status_t open_root_file(fsimg_writer_t *,
+    const fsimg_source_root_t *, fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t open_host_source(fsimg_writer_t *, uint64_t,
     fsimg_host_kind_t, fsimg_source_cursor_t *, fsimg_error_t *);
 static int64_t source_signed(uint64_t);
@@ -69,7 +71,7 @@ fsimg_sources_release(fsimg_writer_t *writer)
 }
 
 fsimg_status_t
-fsimg_writer_add_tree(fsimg_writer_t *writer, int fd, const char *image_directory,
+fsimg_writer_add_tree(fsimg_writer_t *writer, int fd, const char *image_path,
     fsimg_error_t *error)
 {
 	fsimg_status_t status;
@@ -80,7 +82,7 @@ fsimg_writer_add_tree(fsimg_writer_t *writer, int fd, const char *image_director
 	status = fsimg_writer_collect_ready(writer, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_path_validate(writer->ctx, image_directory, true,
+	status = fsimg_path_validate(writer->ctx, image_path, true,
 	    &length, &depth, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
@@ -95,16 +97,20 @@ fsimg_writer_add_tree(fsimg_writer_t *writer, int fd, const char *image_director
 		    FSIMG_OP_SOURCE, "source root duplication failed");
 		return (fsimg_writer_fail(writer, status));
 	}
-	return (fsimg_writer_adopt_tree(writer, duplicate, image_directory, error));
+	return (fsimg_writer_adopt_tree(writer, duplicate, image_path, error));
 }
 
 /* Consume the root descriptor and its reservation on every outcome. Worker
  * startup uses this boundary after acknowledgement, so confinement never needs
  * descriptor duplication or an extra untracked root capability.
+ *
+ * A directory root populates image_path with its tree; a regular-file root
+ * is the one file at image_path, so it cannot be the image root. Either way
+ * the registry owns the descriptor until the writer releases its sources.
  */
 fsimg_status_t
 fsimg_writer_adopt_tree(fsimg_writer_t *writer, int fd,
-    const char *image_directory, fsimg_error_t *error)
+    const char *image_path, fsimg_error_t *error)
 {
 	fsimg_source_root_t *root;
 	fsimg_host_file_t identity;
@@ -118,7 +124,7 @@ fsimg_writer_adopt_tree(fsimg_writer_t *writer, int fd,
 	status = fsimg_writer_collect_ready(writer, error);
 	if (status != FSIMG_OK)
 		goto fail;
-	status = fsimg_path_validate(writer->ctx, image_directory, true,
+	status = fsimg_path_validate(writer->ctx, image_path, true,
 	    &length, &depth, error);
 	if (status != FSIMG_OK)
 		goto fail;
@@ -128,10 +134,16 @@ fsimg_writer_adopt_tree(fsimg_writer_t *writer, int fd,
 		    FSIMG_OP_SOURCE, "source root inspection failed");
 		goto fail;
 	}
-	if (identity.kind != FSIMG_HOST_DIRECTORY ||
+	if ((identity.kind != FSIMG_HOST_DIRECTORY &&
+	    identity.kind != FSIMG_HOST_FILE) ||
 	    (flags & O_ACCMODE) != O_RDONLY || fsimg_host_unsupported_io(flags)) {
-		status = fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_SOURCE, "source root must be a readable directory");
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_SOURCE,
+		    "source root must be a readable directory or regular file");
+		goto fail;
+	}
+	if (identity.kind == FSIMG_HOST_FILE && strcmp(image_path, "/") == 0) {
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_SOURCE,
+		    "a regular-file source root cannot populate the image root");
 		goto fail;
 	}
 	status = fsimg_source_check_object(writer, fd, &identity, NULL, error);
@@ -157,7 +169,7 @@ fsimg_writer_adopt_tree(fsimg_writer_t *writer, int fd,
 	writer->root_count++;
 	root->next = writer->roots;
 	writer->roots = root;
-	status = fsimg_source_scan(writer, root, image_directory, error);
+	status = fsimg_source_scan(writer, root, image_path, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
 	return (FSIMG_OK);
@@ -433,6 +445,41 @@ open_host_link(fsimg_writer_t *writer, fsimg_source_root_t *root, int parent,
 	return (serve_link(writer, source, error));
 }
 
+/* Open a regular-file root's source without reopening a name: the root
+ * descriptor, which the registry keeps open, must still describe the
+ * recorded identity, checked as for a reopened file. Its bytes are read
+ * through an I/O object over a duplicate of that descriptor. The object
+ * reads at explicit offsets, so the offset the duplicate shares with the
+ * root never matters, and freeing it closes only the duplicate.
+ */
+static fsimg_status_t
+open_root_file(fsimg_writer_t *writer, const fsimg_source_root_t *root,
+    fsimg_source_cursor_t *source, fsimg_error_t *error)
+{
+	fsimg_host_file_t opened;
+	fsimg_status_t status;
+
+	status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (fsimg_host_file(root->fd, &opened) == -1)
+		return (fsimg_error_set(error, FSIMG_EIO, errno,
+		    FSIMG_OP_SOURCE, "source root file inspection failed"));
+	status = fsimg_source_check_object(writer, root->fd, &opened, root,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!fsimg_source_identity_equal(&opened, &source->identity))
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+		    FSIMG_OP_SOURCE, "source root file differs from its recorded identity"));
+	status = fsimg_io_from_fd(writer->ctx, root->fd, FSIMG_IO_READ,
+	    &source->io, error);
+	if (status != FSIMG_OK)
+		return (status);
+	source->fd = root->fd;
+	return (FSIMG_OK);
+}
+
 static int64_t
 source_signed(uint64_t value)
 {
@@ -496,6 +543,15 @@ open_host_source(fsimg_writer_t *writer, uint64_t reference,
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_SOURCE, "source and catalog lengths disagree"));
 	component = (char *)record + FSIMG_SOURCE_HEADER;
+	/* Only a regular-file root's record has an empty relative path; a
+	 * directory root's empty first component fails below.
+	 */
+	if (root->identity.kind == FSIMG_HOST_FILE) {
+		if (component[0] != '\0' || kind != FSIMG_HOST_FILE)
+			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+			    FSIMG_OP_SOURCE, "invalid regular-file root source record"));
+		return (open_root_file(writer, root, source, error));
+	}
 	parent = root->fd;
 	parent_owned = false;
 	for (;;) {

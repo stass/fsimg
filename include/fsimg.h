@@ -413,6 +413,15 @@ typedef struct fsimg_plan_info {
  * omission of a field the format does not store, counted once per field;
  * required losses and entry kinds the format lacks always fail planning.
  * Counts remain available in plan information.
+ * add_tree takes a readable directory root, whose tree populates image_path,
+ * or a regular-file root, the one file at a non-root image_path. Planning
+ * merges a directory that several sources supply into one directory holding
+ * all their children, with the metadata of a scanned record over a
+ * programmatic one, of the first-added root among scanned records, and of a
+ * directory without metadata among programmatic ones (otherwise of a fixed
+ * one, independent of insertion order). Any other repeated path, or a
+ * dropped directory that requires metadata, fails with FSIMG_EINVAL naming
+ * the path in error.path.
  * write_at requires a single basename beneath a trusted directory descriptor,
  * publishes without replacement, and always performs durable publication.
  * On unsupported publication error.path names the retained image relative to

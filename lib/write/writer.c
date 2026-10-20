@@ -350,7 +350,7 @@ fsimg_writer_add(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 		}
 		id = source->id;
 	}
-	status = fsimg_writer_collect(writer, entry, storage, id, error);
+	status = fsimg_writer_collect(writer, entry, storage, id, NULL, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
 	return (FSIMG_OK);

@@ -75,6 +75,9 @@ static void test_invalid_names(void);
 static void test_metadata(void);
 static void test_faults(void);
 static void test_aliases(void);
+static int host_directory(int, const char *);
+static void host_file(int, const char *, const char *);
+static void test_multiple_roots(void);
 static void test_publication(void);
 static void test_allocation_failures(void);
 static void test_zero_work(void);
@@ -649,6 +652,131 @@ test_aliases(void)
 	}
 }
 
+/* Make parent/name a directory and return a read-only descriptor for it. */
+static int
+host_directory(int parent, const char *name)
+{
+	int fd;
+
+	CHECK(mkdirat(parent, name, 0700) == 0);
+	fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(fd != -1);
+	return (fd);
+}
+
+static void
+host_file(int parent, const char *name, const char *contents)
+{
+	size_t length;
+	int fd;
+
+	fd = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+	CHECK(fd != -1);
+	length = strlen(contents);
+	CHECK(write(fd, contents, length) == (ssize_t)length);
+	CHECK(close(fd) == 0);
+}
+
+/* One image composed from several roots, as the CLI composes operands: two
+ * directory roots that both supply EFI/, a directory root at /BOOT, a
+ * regular-file root beneath it, and a programmatic /BOOT carrying an owner,
+ * which FAT cannot store. The scanned /BOOT outranks the programmatic one,
+ * so the owner leaves the catalog with the dropped record: planning reports
+ * no owner loss (loss_report accepts only timestamps). Reading the image
+ * back finds the union of the roots.
+ */
+static void
+test_multiple_roots(void)
+{
+	static const struct {
+		const char	*path;
+		const char	*contents;
+	} expected[] = {
+		{ "/BOOT", NULL }, { "/BOOT/C.TXT", "gamma" }, { "/EFI", NULL },
+		{ "/EFI/A.TXT", "alpha" }, { "/EFI/B.TXT", "beta" }
+	};
+	fsimg_entry_t programmatic = { .path = "/BOOT", .kind = FSIMG_ENTRY_DIRECTORY };
+	writer_fixture_t fixture;
+	memory_sink_t sink = { 0 };
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_reader_t *reader;
+	fsimg_io_t *output, *input;
+	const fsimg_entry_t *entry;
+	char bytes[16];
+	size_t length, found;
+	fsimg_status_t status;
+	int one, two, boot, efi, file;
+
+	fixture_open(&fixture, "fat12", NULL, 1);
+	one = host_directory(fixture.parent, "one");
+	two = host_directory(fixture.parent, "two");
+	boot = host_directory(fixture.parent, "boot");
+	efi = host_directory(one, "EFI");
+	host_file(efi, "A.TXT", "alpha");
+	CHECK(close(efi) == 0);
+	efi = host_directory(two, "EFI");
+	host_file(efi, "B.TXT", "beta");
+	CHECK(close(efi) == 0);
+	host_file(fixture.parent, "single", "gamma");
+	file = openat(fixture.parent, "single", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	CHECK(file != -1);
+
+	programmatic.metadata.valid = FSIMG_META_OWNER;
+	CHECK(fsimg_writer_add(fixture.writer, &programmatic, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add_tree(fixture.writer, one, "/", NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add_tree(fixture.writer, two, "/", NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add_tree(fixture.writer, boot, "/BOOT", NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add_tree(fixture.writer, file, "/BOOT/C.TXT", NULL) == FSIMG_OK);
+	CHECK(close(file) == 0);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	CHECK(info.entries == 5);
+	sink.length = info.volume_bytes;
+	sink.bytes = malloc((size_t)info.volume_bytes);
+	CHECK(sink.bytes != NULL);
+	memory_io(&fixture, &sink, true, &output);
+	CHECK(fsimg_writer_emit(fixture.writer, output, NULL) == FSIMG_OK);
+	fsimg_io_free(output);
+
+	memory_io(&fixture, &sink, false, &input);
+	CHECK(fsimg_reader_open(fixture.ctx, input, NULL, &reader, NULL) == FSIMG_OK);
+	found = 0;
+	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
+		for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+			if (strcmp(entry->path, expected[i].path) != 0)
+				continue;
+			found++;
+			if (expected[i].contents == NULL) {
+				CHECK(entry->kind == FSIMG_ENTRY_DIRECTORY);
+				continue;
+			}
+			CHECK(fsimg_reader_read_at(reader, 0, bytes, sizeof(bytes),
+			    &length, NULL) == FSIMG_OK);
+			CHECK(length == strlen(expected[i].contents));
+			CHECK(bcmp(bytes, expected[i].contents, length) == 0);
+		}
+	}
+	CHECK(status == FSIMG_DONE);
+	CHECK(found == sizeof(expected) / sizeof(expected[0]));
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+	free(sink.bytes);
+
+	CHECK(unlinkat(fixture.parent, "single", 0) == 0);
+	CHECK(unlinkat(one, "EFI/A.TXT", 0) == 0);
+	CHECK(unlinkat(one, "EFI", AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(two, "EFI/B.TXT", 0) == 0);
+	CHECK(unlinkat(two, "EFI", AT_REMOVEDIR) == 0);
+	CHECK(close(one) == 0);
+	CHECK(close(two) == 0);
+	CHECK(close(boot) == 0);
+	CHECK(unlinkat(fixture.parent, "one", AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(fixture.parent, "two", AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(fixture.parent, "boot", AT_REMOVEDIR) == 0);
+	fixture_close(&fixture);
+}
+
 static void
 test_publication(void)
 {
@@ -1098,6 +1226,7 @@ main(int argc, char **argv)
 	test_metadata();
 	test_faults();
 	test_aliases();
+	test_multiple_roots();
 	test_publication();
 	test_allocation_failures();
 	test_zero_work();
