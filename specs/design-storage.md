@@ -144,22 +144,35 @@ profile.
 
 ### Shared metadata representation
 
-Metadata objects use one context-owned cache of 4 KiB pages. Cache storage and
-page descriptors are allocated together and charged once; objects do not own
-independent caches. The cache uses bounded least-recently-used replacement.
-Its default capacity is 256 pages, and private validation controls can select
-smaller capacities before any metadata object exists. Releasing the last object
-releases the cache. No page pointer escapes an operation, so eviction needs no
-caller-managed pinning protocol.
+Metadata objects use one context-owned cache of 4 KiB pages; objects do not own
+independent caches. The cache starts with one chunk of 256 page slots and grows
+by charged chunks, each holding its pages and their descriptors, up to a
+quarter of the memory budget and at most 16 GiB of pages. A budget large enough
+for an input's metadata therefore keeps it resident and creates no scratch
+file, while a small input charges only the slots it has needed. Growth past the
+first chunk is opportunistic: it stops while the context's charge would leave
+less than a quarter of the budget for sort runs and callers, and when the host
+refuses a chunk the cache replaces a page instead. The cache never shrinks while
+objects exist. Private validation controls can select a smaller fixed capacity
+before any metadata object exists. Releasing the last object releases the
+cache.
+
+The cache uses least-recently-used replacement. A hash index on object and page
+number finds a cached page; its bucket array grows with the slots, not with the
+budget. Released slots move to the replacement end, so lookup and slot selection
+do not scan the cache. Reading a resident page that is not cached returns zeros
+without taking a slot; every cached resident page is therefore dirty, and every
+clean cached page can be dropped without a write. No page pointer escapes an
+operation, so eviction needs no caller-managed pinning protocol.
 
 A metadata byte store starts resident. Missing pages contain zeros. Evicting a
 modified resident page creates the store's backing file and reserves its entire
-logical length, including the internal version header, before extending it.
-Unmodified zero pages need no backing write. The sum of resident stores' logical
-page counts fits the cache capacity, including untouched zero pages. Growth
-beyond that aggregate capacity acquires backing storage immediately, so many
-untouched sparse arrays cannot bypass either budget. Without scratch authority,
-exceeding resident capacity returns a memory limit error.
+logical length, including the internal version header. Unmodified zero pages
+need no backing write. The sum of resident stores' logical page counts fits the
+cache capacity, including untouched zero pages. Growth beyond that aggregate
+capacity acquires backing storage immediately, so many untouched sparse arrays
+cannot bypass either budget. Without scratch authority, exceeding resident
+capacity returns a memory limit error.
 Growth and writes can leave partial private metadata on failure; that object
 must be discarded. Failed eviction retains the dirty page and never reuses it.
 Backing creation is prepared before it is attached to a resident store; failure
@@ -179,9 +192,14 @@ untrusted directory from causing an endless creation loop. The supplied scratch
 directory must exclude untrusted writers; file permissions and unlinking do not
 protect against a hostile owner of that directory. Descriptor reservation
 precedes creation, and adoption does not duplicate the resulting descriptor.
-Logical scratch reservations include cached dirty bytes. Allocated filesystem
-blocks are sampled after scratch writes and extension and reported separately
-from logical lengths; neither value describes secure erasure or device usage.
+Logical scratch reservations include cached dirty bytes. Growth charges the
+reservation without a host call: the scratch file is an unsized internal I/O
+object that grows only as page writes reach it, and bytes beyond its written
+extent read as zero. Host file-size limits therefore surface when a page is
+written back, as an error of the operation whose access caused the eviction.
+Allocated filesystem blocks are sampled after scratch writes and reported
+separately from logical lengths; neither value describes secure erasure or
+device usage.
 
 Record streams encode a version and a 32-bit payload length in an eight-byte
 little-endian frame. A stream declares its maximum record length at creation;

@@ -68,7 +68,9 @@ fixture_open(fixture_t *fixture, uint32_t pages, uint64_t scratch,
 	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
 	CHECK(close(fd) == 0);
 	fsimg_session_init(&fixture->session, fixture->ctx, "metadata test", 0);
-	CHECK(fsimg_test_meta_cache(fixture->ctx, pages, NULL) == FSIMG_OK);
+	/* Zero pages keeps the cache the budget selects. */
+	if (pages != 0)
+		CHECK(fsimg_test_meta_cache(fixture->ctx, pages, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline, NULL) == FSIMG_OK);
 }
 
@@ -398,6 +400,152 @@ test_sparse_and_quotas(void)
 	fixture_close(&fixture);
 }
 
+/* Growing a spilled store only books its reservation: the host file grows
+ * as pages are written, so appending many small records costs host calls
+ * per page flushed, not per record, and unwritten pages still read as zero.
+ */
+static void
+test_spilled_growth_host_calls(void)
+{
+	fixture_t fixture;
+	fsimg_stream_t *stream;
+	fsimg_stats_t before, after;
+	unsigned char record[8], buffer[8];
+	uint64_t cursor, reference;
+	size_t length;
+
+	fixture_open(&fixture, 1, 1024 * 1024, 3);
+	CHECK(fsimg_stream_new(&fixture.session, sizeof(record), &stream, NULL) == FSIMG_OK);
+	for (uint32_t i = 0; i < 1024; i++) {
+		fsimg_meta_put_u64(record, i);
+		CHECK(fsimg_stream_append(stream, record, sizeof(record), NULL, NULL) == FSIMG_OK);
+	}
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &before, NULL) == FSIMG_OK);
+	CHECK(before.scratch_bytes != 0);
+	for (uint32_t i = 1024; i < 10240; i++) {
+		fsimg_meta_put_u64(record, i);
+		CHECK(fsimg_stream_append(stream, record, sizeof(record), &reference, NULL) == FSIMG_OK);
+	}
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &after, NULL) == FSIMG_OK);
+	/* 9216 records of 16 bytes fill 36 pages; each flush is one write. */
+	CHECK(after.io_calls - before.io_calls <= 64);
+	CHECK(after.scratch_bytes == fsimg_store_size(stream->store) + 16);
+	CHECK(fsimg_stream_seal(stream, NULL) == FSIMG_OK);
+	cursor = 0;
+	for (uint32_t i = 0; i < 10240; i++) {
+		CHECK(fsimg_stream_next(stream, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_OK);
+		CHECK(length == sizeof(buffer) && fsimg_meta_get_u64(buffer) == i);
+	}
+	CHECK(fsimg_stream_next(stream, &cursor, NULL, 0, &length, NULL) == FSIMG_DONE);
+	fsimg_stream_free(stream);
+	fixture_close(&fixture);
+}
+
+/* The cache takes a quarter of the memory budget: 3 MiB of metadata under a
+ * 16 MiB budget stays resident and creates no scratch file.
+ */
+static void
+test_budget_sized_cache(void)
+{
+	fixture_t fixture;
+	fsimg_store_t *store;
+	fsimg_stats_t stats;
+	unsigned char page[FSIMG_META_PAGE_SIZE];
+	uint64_t length;
+
+	length = UINT64_C(3) << 20;
+	fixture_open(&fixture, 0, 1024 * 1024, 3);
+	CHECK(fsimg_store_new(&fixture.session, &store, NULL) == FSIMG_OK);
+	CHECK(fsimg_store_grow(store, length, NULL) == FSIMG_OK);
+	for (uint64_t offset = 0; offset < length; offset += sizeof(page)) {
+		memset(page, (int)(offset / sizeof(page)), sizeof(page));
+		CHECK(fsimg_store_write(store, offset, page, sizeof(page), NULL) == FSIMG_OK);
+	}
+	for (uint64_t offset = 0; offset < length; offset += sizeof(page)) {
+		CHECK(fsimg_store_read(store, offset, page, sizeof(page), NULL) == FSIMG_OK);
+		CHECK(page[0] == (unsigned char)(offset / sizeof(page)) &&
+		    page[sizeof(page) - 1] == page[0]);
+	}
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.scratch_peak == 0 && stats.io_calls == 0);
+	CHECK(stats.memory_peak <= fixture.ctx->options.memory_bytes / 4 + 65536);
+	fsimg_store_free(store);
+	fixture_close(&fixture);
+}
+
+/* Fill a store's pages with a pattern derived from a seed and its page
+ * number, or check that pattern.
+ */
+static void
+pattern_pages(fsimg_store_t *store, uint64_t pages, unsigned seed, bool check)
+{
+	unsigned char page[FSIMG_META_PAGE_SIZE];
+
+	for (uint64_t i = 0; i < pages; i++) {
+		if (check) {
+			CHECK(fsimg_store_read(store, i * sizeof(page), page,
+			    sizeof(page), NULL) == FSIMG_OK);
+			CHECK(page[0] == (unsigned char)(seed + i) &&
+			    page[sizeof(page) - 1] == page[0]);
+		} else {
+			memset(page, (int)(unsigned char)(seed + i), sizeof(page));
+			CHECK(fsimg_store_write(store, i * sizeof(page), page,
+			    sizeof(page), NULL) == FSIMG_OK);
+		}
+	}
+}
+
+/* Stores interleave as the cache grows past chunk boundaries and then
+ * spills; freeing and flushing walk a small store page by page and a large
+ * one slot by slot, and the survivors keep their contents. A refused chunk
+ * makes the cache replace pages instead of failing.
+ */
+static void
+test_cache_growth(void)
+{
+	fixture_t fixture;
+	fsimg_store_t *small, *middle, *large;
+	fsimg_stats_t stats;
+
+	fixture_open(&fixture, 0, 64 * 1024 * 1024, 4);
+	CHECK(fsimg_store_new(&fixture.session, &small, NULL) == FSIMG_OK);
+	CHECK(fsimg_store_new(&fixture.session, &middle, NULL) == FSIMG_OK);
+	CHECK(fsimg_store_new(&fixture.session, &large, NULL) == FSIMG_OK);
+	CHECK(fsimg_store_grow(small, 10 * FSIMG_META_PAGE_SIZE, NULL) == FSIMG_OK);
+	CHECK(fsimg_store_grow(middle, 600 * FSIMG_META_PAGE_SIZE, NULL) == FSIMG_OK);
+	pattern_pages(small, 10, 1, false);
+	pattern_pages(middle, 600, 2, false);
+	/* Larger than the cache's 768-slot limit under a 16 MiB budget: this
+	 * store spills.
+	 */
+	CHECK(fsimg_store_grow(large, 6000 * FSIMG_META_PAGE_SIZE, NULL) == FSIMG_OK);
+	pattern_pages(large, 6000, 3, false);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.scratch_bytes >= 6000 * FSIMG_META_PAGE_SIZE + 16);
+	CHECK(stats.memory_peak <= fixture.ctx->options.memory_bytes / 4 * 3);
+	CHECK(fsimg_store_flush(large, NULL) == FSIMG_OK);
+	fsimg_store_free(small);
+	pattern_pages(middle, 600, 2, true);
+	pattern_pages(large, 6000, 3, true);
+	fsimg_store_free(large);
+	pattern_pages(middle, 600, 2, true);
+	fsimg_store_free(middle);
+	fixture_close(&fixture);
+
+	/* The second chunk's allocation fails: the store spills instead. */
+	fixture_open(&fixture, 0, 64 * 1024 * 1024, 4);
+	CHECK(fsimg_store_new(&fixture.session, &middle, NULL) == FSIMG_OK);
+	fsimg_test_fail_alloc_after(fixture.ctx, 1);
+	CHECK(fsimg_store_grow(middle, 600 * FSIMG_META_PAGE_SIZE, NULL) == FSIMG_OK);
+	fsimg_test_fail_alloc_after(fixture.ctx, 0);
+	pattern_pages(middle, 600, 4, false);
+	pattern_pages(middle, 600, 4, true);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.scratch_bytes != 0);
+	fsimg_store_free(middle);
+	fixture_close(&fixture);
+}
+
 static void
 test_failures(void)
 {
@@ -435,7 +583,7 @@ static void
 test_retained_dirty_page(void)
 {
 	fixture_t fixture;
-	fsimg_store_t *a, *b;
+	fsimg_store_t *a, *b, *c;
 	fsimg_error_t error;
 	unsigned char value;
 
@@ -446,19 +594,29 @@ test_retained_dirty_page(void)
 	CHECK(fsimg_store_write(a, 0, &value, 1, NULL) == FSIMG_OK);
 	CHECK(fsimg_store_new(&fixture.session, &b, NULL) == FSIMG_OK);
 	CHECK(fsimg_store_grow(b, 1, NULL) == FSIMG_OK);
+	/* An uncached resident page reads as zero without evicting anything. */
+	CHECK(fsimg_store_read(b, 0, &value, 1, NULL) == FSIMG_OK);
+	CHECK(value == 0);
 	fsimg_test_meta_fail_after(fixture.ctx, FSIMG_META_WRITE, 1, ENOSPC);
-	CHECK(fsimg_store_read(b, 0, &value, 1, &error) == FSIMG_EIO);
+	value = 0x11;
+	CHECK(fsimg_store_write(b, 0, &value, 1, &error) == FSIMG_EIO);
 	CHECK(error.os_error == ENOSPC);
 	CHECK(fsimg_store_read(a, 0, &value, 1, NULL) == FSIMG_OK);
 	CHECK(value == 0x6e);
+	/* Evicting the page writes it, so reading it back reaches the host. */
+	CHECK(fsimg_store_new(&fixture.session, &c, NULL) == FSIMG_OK);
+	CHECK(fsimg_store_grow(c, 1, NULL) == FSIMG_OK);
+	value = 0x22;
+	CHECK(fsimg_store_write(c, 0, &value, 1, NULL) == FSIMG_OK);
 	fsimg_test_meta_fail_after(fixture.ctx, FSIMG_META_READ, 1, EIO);
-	CHECK(fsimg_store_read(a, 4096, &value, 1, &error) == FSIMG_EIO);
+	CHECK(fsimg_store_read(a, 0, &value, 1, &error) == FSIMG_EIO);
+	CHECK(fsimg_store_read(c, 0, &value, 1, NULL) == FSIMG_OK);
+	CHECK(value == 0x22);
 	CHECK(fsimg_store_read(a, 0, &value, 1, NULL) == FSIMG_OK);
 	CHECK(value == 0x6e);
-	CHECK(fsimg_store_read(b, 0, &value, 1, NULL) == FSIMG_OK);
-	CHECK(value == 0);
 	fsimg_store_free(a);
 	fsimg_store_free(b);
+	fsimg_store_free(c);
 	fixture_close(&fixture);
 }
 
@@ -908,6 +1066,9 @@ main(int argc, char **argv)
 	test_streams();
 	test_stream_stack();
 	test_sparse_and_quotas();
+	test_spilled_growth_host_calls();
+	test_budget_sized_cache();
+	test_cache_growth();
 	test_failures();
 	test_retained_dirty_page();
 	test_exclusive_scratch();

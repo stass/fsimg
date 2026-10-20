@@ -27,6 +27,7 @@ struct fsimg_io {
 	fsimg_io_ops_t	 ops;
 	void		*argument;
 	bool		 known_zero;
+	bool		 unsized;	/* scratch: length is only the host range */
 };
 
 static fsimg_status_t io_range(fsimg_io_t *, uint64_t, uint64_t,
@@ -296,6 +297,21 @@ fsimg_io_adopt_fd(fsimg_ctx_t *ctx, int fd, unsigned access, fsimg_io_t **out,
 	return (status);
 }
 
+fsimg_status_t
+fsimg_io_adopt_scratch(fsimg_ctx_t *ctx, int fd, fsimg_io_t **out,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fsimg_io_adopt_fd(ctx, fd, FSIMG_IO_READ | FSIMG_IO_WRITE, out,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	(*out)->length = INT64_MAX;
+	(*out)->unsized = true;
+	return (FSIMG_OK);
+}
+
 static fsimg_status_t
 io_range(fsimg_io_t *io, uint64_t offset, uint64_t length,
     fsimg_error_t *error)
@@ -328,6 +344,9 @@ fsimg_io_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
 	if (out == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_IO, "missing slice output"));
+	if (parent->root->unsized)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_IO, "scratch object cannot be sliced"));
 	slice = fsimg_alloc(parent->ctx, sizeof(*slice), &detail);
 	if (slice == NULL) {
 		if (error != NULL)
@@ -401,6 +420,9 @@ fsimg_io_get_size(fsimg_io_t *io, uint64_t *out, fsimg_error_t *error)
 	if (out == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_IO, "missing size output"));
+	if (io->root->unsized)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_IO, "scratch object has no size"));
 	*out = io->length;
 	return (FSIMG_OK);
 }
@@ -602,7 +624,7 @@ fsimg_io_resize(fsimg_io_t *io, uint64_t length, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	if (io->root != io || (io->access & FSIMG_IO_WRITE) == 0 ||
-	    (io->fd == -1 && io->ops.resize == NULL))
+	    io->root->unsized || (io->fd == -1 && io->ops.resize == NULL))
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_IO, "I/O object cannot resize"));
 	status = fsimg_poll(io->ctx, NULL, error);
@@ -612,6 +634,7 @@ fsimg_io_resize(fsimg_io_t *io, uint64_t length, fsimg_error_t *error)
 		if (!fsimg_host_offset(length, &host_length))
 			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 			    FSIMG_OP_IO, "length exceeds host range"));
+		fsimg_stat_add(&io->ctx->stats.io_calls, 1);
 		if (ftruncate(io->fd, host_length) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_IO, "resize failed"));
@@ -620,6 +643,7 @@ fsimg_io_resize(fsimg_io_t *io, uint64_t length, fsimg_error_t *error)
 		status = io->ops.resize(io->argument, length, error);
 		io->ctx->in_callback = false;
 		status = callback_result(status, error);
+		fsimg_stat_add(&io->ctx->stats.io_calls, 1);
 		if (status != FSIMG_OK)
 			return (status);
 	}
