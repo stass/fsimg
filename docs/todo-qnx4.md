@@ -30,3 +30,8 @@ Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
   the 6.5.0 layout, but only a target run or disassembly can close this.
 * [Low] **Device nodes** (`lib/formats/qnx4/`): the live CD has no `mknod`,
   so the device encoding is unobserved and devices are unsupported.
+* [Low] **Partition types for layers** (`specs/design-layers.md`): the
+  layer design's GPT and MBR type tables have no `qnx4` row, so a scheme
+  around a QNX4 volume has no derived type. Record the MBR types QNX 6.5.0
+  assigns to QNX4 partitions from native evidence, and whether any GPT type
+  exists, before the stacks stage.

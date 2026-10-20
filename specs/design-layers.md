@@ -53,7 +53,7 @@ An image is a stack with three slots in fixed order, each at most once:
 
 | Slot | Kind | Names |
 | --- | --- | --- |
-| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`; reserved: `apfs`, `hfs` |
+| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`; reserved: `apfs`, `hfs` |
 | 2 | Scheme | `gpt`, `mbr` |
 | 3 | Container | `dmg`, `vhd`, `simg` |
 
@@ -93,7 +93,8 @@ inside it.
 ### Layer settings
 
 A setting without a layer qualifier targets the filesystem: `oem`,
-`sector`, `cluster`, and the QNX6 `endian`, `uuid`, `inodes`, `reserve`.
+`sector`, `cluster`, the QNX6 `endian`, `uuid`, `inodes`, `reserve`, and the
+QNX4 `inodes`.
 A layer setting is qualified by its layer name: `gpt:type=esp`,
 `dmg:compress=none`, `gzip:level=9`. A qualified key for a layer absent from
 the stack fails; fsimg never guesses the target of a bare key. On read the

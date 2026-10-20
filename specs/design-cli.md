@@ -179,7 +179,8 @@ unqualified key always targets the filesystem: `oem=cp437` on read; on
 create `sector` and `cluster` in bytes, and the QNX6 settings
 `endian=little|big`, `uuid=` RFC 4122 text, `inodes=` a positive inode count
 and `reserve=` a percentage up to 100, which every other format rejects
-unless at their defaults; QNX4 shares `inodes=` as its `.inodes` slot count. A qualified key targets one layer: `-o gpt:type=esp`,
+unless at their defaults; QNX4 shares `inodes=` as its `.inodes` slot count.
+A qualified key targets one layer: `-o gpt:type=esp`,
 `-o gpt:name=EFI`, `-o dmg:compress=none`, `-o gzip:level=9`. A qualifier
 naming a layer absent from the stack, or a compression not selected, fails;
 fsimg never guesses the target of a bare key. On read the layer must be
