@@ -50,8 +50,8 @@ publication. The common contracts cover QNX4 without exceptions:
 [emission](design-emission.md), [sizing](design-sizing.md) and
 [POSIX metadata](design-metadata.md). The entry model carries owner,
 mode, the four timestamps, symbolic links and FIFOs, so common code gains
-only the descriptor registration and a volume-information label field of 49
-bytes, room for a 48-byte label and its terminator.
+only the descriptor registration and room for a 48-byte label and its
+terminator in the volume information and the CLI's worker job record.
 
 Every disk integer is little-endian and decoded from bytes; native structure
 layout, host alignment and host `stat` constants are not disk codecs. Block
@@ -430,8 +430,11 @@ equal the mangled form of that name; a disagreement is `FSIMG_ECORRUPT`. A
 link whose pointer is nonzero but whose record names at most 48 bytes is
 `FSIMG_ECORRUPT`. Because the mangled prefix carries the record's block, two
 names sharing their first 48 bytes never collide. The native filesystem
-refuses 506 bytes, grows `.longfilenames` from 0 to 16 blocks at the first
-long name and reuses freed records; renaming a long name is unobserved. [X1]
+refuses 506 bytes, grows `.longfilenames` from 0 blocks at the first long
+name by a step that depends on the volume size (16 blocks at 131072
+blocks, 2 at 4096) and reuses freed records; it renames a long name to
+another and deletes one cleanly, and renaming a 505-byte name is
+unobserved, since the shell cuts its path. [X1]
 
 ### Profile
 

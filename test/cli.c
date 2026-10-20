@@ -122,7 +122,7 @@ test_options(void)
 		0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67
 	};
 	fsimg_cli_options_t options;
-	char label[49];
+	char label[50];
 	char *large_label[] = { "fsimg", "create", "-n", "-t", "exfat", "-L", label, ".", NULL };
 
 	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
@@ -141,6 +141,7 @@ test_options(void)
 	CHECK(bcmp(options.request.write.volume_uuid, uuid, 16) == 0);
 	CHECK(options.request.write.inode_capacity == 1000);
 	CHECK(options.request.write.reserve_percent == 0);
+	/* One byte more than the longest label any format stores. */
 	memset(label, 'A', sizeof(label) - 1);
 	label[sizeof(label) - 1] = '\0';
 	CHECK(parse(large_label, &options) == FSIMG_EINVAL);

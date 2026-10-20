@@ -130,6 +130,16 @@ which no native volume has, does not open: it is unsupported. Every native
 QNX 6.5.0 capture and the PCM 3.1
 QNX4 partition verify.
 
+QNX4 volumes are written in the layout QNX 6.5.0 `dinit` makes, with
+`.longfilenames`, names of up to 505 bytes, every entry kind, owner, mode,
+all four timestamps, a label of up to 48 bytes and an `inodes=` setting.
+Every object is one extent and the loader block is zero. QNX 6.5.0 checks,
+mounts and remounts fsimg's volumes cleanly from the 43-block minimum
+through one, two and three bitmap blocks, a full volume and the 102767805
+blocks of the PCM 3.1 navigation partition, modifies every one with free
+space cleanly, and fsimg verifies what QNX wrote to them. `create -L`
+accepts QNX4's 48-byte label.
+
 The fsimg command provides creation, inspection, listing, raw content, safe
 extraction, verification and capability enumeration. Strict short-option parsing,
 streaming NDJSON, bounded progress and command-wide output accounting share

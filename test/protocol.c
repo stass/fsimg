@@ -174,6 +174,21 @@ test_selection_budget(void)
 	CHECK(error.limit == 4 && error.observed >= 5);
 }
 
+/* Whether a job record still decodes with one byte replaced. */
+static bool
+job_decodes(const unsigned char *raw, unsigned offset, unsigned char value)
+{
+	fsimg_worker_request_t decoded;
+	unsigned char copy[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	bcopy(raw, copy, sizeof(copy));
+	copy[offset] = value;
+	return (fsimg_job_decode(copy, sizeof(copy), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+}
+
 static void
 test_job_label(void)
 {
@@ -191,6 +206,38 @@ test_job_label(void)
 	CHECK(decoded.write.label != NULL);
 	CHECK(strcmp(decoded.write.label, "MYLABEL") == 0);
 	CHECK(selection == 1 && capabilities == 0);
+
+	/* The longest label any format stores, QNX4's 48 bytes, round-trips;
+	 * one byte more does not encode.
+	 */
+	request.write.label = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV";
+	CHECK(strlen(request.write.label) == 48);
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(strcmp(decoded.write.label, request.write.label) == 0);
+	request.write.label = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVW";
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+
+	/* The worker refuses every other encoding of the strings: a label with
+	 * no terminator in its 49 bytes (216 to 264) or a byte after its
+	 * terminator, a presence byte (265) other than 0 or 1 or marking a
+	 * label absent, nonzero padding before the UUID, and a byte after the
+	 * format name's terminator.
+	 */
+	request.write.label = "MYLABEL";
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	memset(raw + 216 + 7, 'X', 41);
+	CHECK(job_decodes(raw, 216 + 48, 0));
+	CHECK(!job_decodes(raw, 216 + 48, 'X'));
+	request.write.label = "MYLABEL";
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(job_decodes(raw, 216 + 8, 0));
+	CHECK(!job_decodes(raw, 216 + 8, 'X'));
+	CHECK(!job_decodes(raw, 265, 2));
+	CHECK(!job_decodes(raw, 265, 0));
+	CHECK(!job_decodes(raw, 271, 1));
+	CHECK(!job_decodes(raw, 200 + 15, 'X'));
 
 	/* An explicit empty exFAT label differs from the default selected by NULL. */
 	request.write.label = "";

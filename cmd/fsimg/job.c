@@ -9,12 +9,14 @@
 #include "internal.h"
 #include "worker.h"
 
-/* Each numeric field occupies eight little-endian bytes. Fixed strings follow
- * at byte 200, then the QNX6 settings: the 16-byte UUID, the byte order as
- * one byte, and the inode capacity and reserve percentage as eight
- * little-endian bytes each. The remainder is zero reserved space. These
- * enums name wire positions only and are independent of native struct
- * layout or padding.
+/* Each numeric field occupies eight little-endian bytes. Fixed strings
+ * follow at byte 200: the format name in 16 bytes and the label in 49, each
+ * NUL-terminated and zero after the terminator, then one byte saying
+ * whether a label is present. Then come the write settings: the 16-byte
+ * UUID, the byte order as one byte, and the inode capacity and reserve
+ * percentage as eight little-endian bytes each. The remainder is zero
+ * reserved space. These enums name wire positions and sizes only and are
+ * independent of native struct layout or padding.
  */
 typedef enum job_field {
 	JOB_KIND, JOB_SANDBOX, JOB_FLAGS, JOB_MEMORY, JOB_SCRATCH, JOB_ENTRIES,
@@ -26,18 +28,26 @@ typedef enum job_field {
 
 typedef enum job_string_field {
 	JOB_FORMAT_OFFSET = 200,
+	JOB_FORMAT_BYTES = 16,
 	JOB_LABEL_OFFSET = 216,
-	JOB_LABEL_PRESENT = 264,
+	JOB_LABEL_BYTES = 49,
+	JOB_LABEL_PRESENT = JOB_LABEL_OFFSET + JOB_LABEL_BYTES,
 	JOB_UUID_OFFSET = 272,
 	JOB_BYTE_ORDER = 288,
 	JOB_INODES_OFFSET = 296,
 	JOB_RESERVE_OFFSET = 304,
 	JOB_RESERVED_OFFSET = 312
 } job_string_field_t;
+_Static_assert(JOB_FORMAT_OFFSET + JOB_FORMAT_BYTES == JOB_LABEL_OFFSET &&
+    JOB_LABEL_PRESENT < JOB_UUID_OFFSET, "the string fields do not overlap");
+_Static_assert(sizeof(((fsimg_worker_request_t *)0)->format) ==
+    JOB_FORMAT_BYTES && sizeof(((fsimg_worker_request_t *)0)->label_storage) ==
+    JOB_LABEL_BYTES, "the request holds each string field");
 
 static void put_field(unsigned char *, job_field_t, uint64_t);
 static uint64_t get_field(const unsigned char *, job_field_t);
 static fsimg_status_t invalid_job(fsimg_error_t *);
+static bool string_field_valid(const unsigned char *, size_t);
 
 static void
 put_field(unsigned char *raw, job_field_t field, uint64_t value)
@@ -49,6 +59,24 @@ static uint64_t
 get_field(const unsigned char *raw, job_field_t field)
 {
 	return (fsimg_wire_get64(raw + (unsigned)field * 8));
+}
+
+/* A string field holds a terminator, and only zero bytes follow it, so a
+ * record has one encoding.
+ */
+static bool
+string_field_valid(const unsigned char *field, size_t bytes)
+{
+	const unsigned char *end;
+
+	end = memchr(field, '\0', bytes);
+	if (end == NULL)
+		return (false);
+	for (; end < field + bytes; end++) {
+		if (*end != 0)
+			return (false);
+	}
+	return (true);
 }
 
 static fsimg_status_t
@@ -79,11 +107,12 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	size_t selection_length, label_length;
 	const char *label;
 
-	if (request->selection == NULL || memchr(request->format, '\0', 16) == NULL)
+	if (request->selection == NULL ||
+	    memchr(request->format, '\0', JOB_FORMAT_BYTES) == NULL)
 		return (invalid_job(error));
 	label = request->write.label == NULL ? "" : request->write.label;
-	label_length = strnlen(label, 48);
-	if (label_length == 48)
+	label_length = strnlen(label, JOB_LABEL_BYTES);
+	if (label_length == JOB_LABEL_BYTES)
 		return (invalid_job(error));
 	path_limit = request->limits.max_path_bytes == 0 ?
 	    65536 : request->limits.max_path_bytes;
@@ -148,8 +177,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
 	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED)) != 0 ||
 	    get_field(raw, JOB_CAPABILITIES) > 15 ||
-	    memchr(raw + JOB_FORMAT_OFFSET, '\0', 16) == NULL ||
-	    memchr(raw + JOB_LABEL_OFFSET, '\0', 48) == NULL ||
+	    !string_field_valid(raw + JOB_FORMAT_OFFSET, JOB_FORMAT_BYTES) ||
+	    !string_field_valid(raw + JOB_LABEL_OFFSET, JOB_LABEL_BYTES) ||
 	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||
 	    (raw[JOB_LABEL_PRESENT] == 0 && raw[JOB_LABEL_OFFSET] != 0))
 		return (invalid_job(error));
@@ -202,8 +231,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	request->write.fat_root_entries = (uint32_t)get_field(raw, JOB_ROOT);
 	request->write.volume_serial = (uint32_t)get_field(raw, JOB_SERIAL);
 	request->codepage = (uint32_t)get_field(raw, JOB_CODEPAGE);
-	bcopy(raw + JOB_FORMAT_OFFSET, request->format, 16);
-	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, 48);
+	bcopy(raw + JOB_FORMAT_OFFSET, request->format, JOB_FORMAT_BYTES);
+	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, JOB_LABEL_BYTES);
 	request->write.label = raw[JOB_LABEL_PRESENT] == 0 ? NULL :
 	    request->label_storage;
 	bcopy(raw + JOB_UUID_OFFSET, request->write.volume_uuid,

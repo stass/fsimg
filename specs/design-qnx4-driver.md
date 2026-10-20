@@ -21,7 +21,7 @@ share no code, since they decode different records.
 | File | Owns |
 | --- | --- |
 | `qnx4.h` | Private types, constants and prototypes shared by the files below |
-| `descriptor.c` | `fsimg_qnx4_format`: the `qnx4` name, its capability record and the probe |
+| `descriptor.c` | `fsimg_qnx4_format`: the `qnx4` name, its capability record, the probe and the reader and writer operations |
 | `codec.c` | Little-endian integer codecs and decode/encode of the 64-byte inode record, 64-byte link record, 512-byte extent block and 512-byte long-name record; pure functions without I/O |
 | `volume.c` | Geometry from the slice length, the root block, the root directory's fixed slots, discovery of `.bitmap`, `.inodes`, `.longfilenames` and `lost+found` |
 | `extent.c` | The extent walker: first extent and chain validation, index construction, ownership claims |

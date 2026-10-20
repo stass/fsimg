@@ -368,6 +368,9 @@ static void
 test_variants(void)
 {
 	static const unsigned variants[] = { 16, 12, 32 };
+	static const char *const names[] = {
+		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4"
+	};
 	fixture_t f;
 	fsimg_read_options_t options;
 	fsimg_volume_info_t info;
@@ -379,19 +382,16 @@ test_variants(void)
 	size_t count, cursor;
 	fsimg_range_t range;
 
-	/* Four FAT and exFAT variants, then QNX6; every one is writable.
-	 * QNX4 follows, readable and verifiable but not writable.
+	/* The registry lists every format in this order, and every one reads,
+	 * writes and verifies.
 	 */
 	cursor = 0;
-	for (unsigned i = 0; i < 5; i++) {
+	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
-		CHECK((format.capabilities & FSIMG_CAP_READ) != 0);
-		CHECK((format.capabilities & FSIMG_CAP_WRITE) != 0);
+		CHECK(strcmp(format.name, names[i]) == 0);
+		CHECK(format.capabilities ==
+		    (FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
 	}
-	CHECK(strcmp(format.name, "qnx6") == 0);
-	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
-	CHECK(strcmp(format.name, "qnx4") == 0);
-	CHECK(format.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	for (unsigned i = 0; i < 3; i++) {

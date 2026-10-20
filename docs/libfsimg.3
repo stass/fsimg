@@ -24,9 +24,8 @@ Filesystem image library
 .Ft fsimg_status_t
 .Fn fsimg_writer_new "fsimg_ctx_t *context" "const char *format" "const fsimg_write_options_t *options" "fsimg_writer_t **writer" "fsimg_error_t *error"
 .Sh DESCRIPTION
-The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT and
-classic QNX6 Power-Safe volumes in either byte order, and reads and verifies
-QNX4 volumes.
+The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
+classic QNX6 Power-Safe volumes in either byte order, and QNX4 volumes.
 A format without full verification has no verify capability, and
 .Fn fsimg_verify
 fails on it with
@@ -110,11 +109,16 @@ A format record whose max_label_bytes is zero has no volume label and accepts
 only a NULL label.
 The settings byte_order, volume_uuid, inode_capacity and reserve_percent
 select the byte order, the UUID in textual byte order, the inode capacity
-(zero selects the native ratio raised to the number of entries) and the
-reserved-block percentage (default 3) of a format whose record's
-write_settings mask names them, which QNX6 does; writer construction
-rejects a non-default value for any other format with FSIMG_EINVAL.
-QNX6 stores no volume_serial and ignores it.
+and the reserved-block percentage (default 3) of a format whose record's
+write_settings mask names them; writer construction rejects a non-default
+value for any other format with FSIMG_EINVAL.
+QNX6 names all four, and zero inode_capacity selects its native ratio
+raised to the number of entries.
+QNX4 names inode_capacity alone, the
+.Pa .inodes
+slot count, where zero selects 128 slots raised to the slots the names
+need.
+QNX6 and QNX4 store no volume_serial and ignore it.
 Time bases distinguish UTC instants, known offsets and unknown-zone calendar
 values.
 .Pp

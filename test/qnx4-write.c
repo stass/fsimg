@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include <sys/types.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -24,23 +25,16 @@
 #include "test.h"
 
 /*
- * QNX4 writer tests. The writer is not registered, so the fixture builds
- * its writers from the driver's candidate descriptor through
- * fsimg_writer_new_variant(); the driver's write-qnx4.h declares it, and
- * the declaration is repeated here so that this file includes nothing from
- * lib/formats/qnx4/.
- *
- * Images are checked twice: by fsimg's own reader and verifier, and by the
- * independent checker below, written from the format design with its own
- * offsets. The checker decodes the root block, the bitmap, every directory
- * slot, .inodes, .longfilenames and lost+found, requires the writer
- * profile's layout -- every object one extent, allocation one prefix of
- * blocks, the native statuses and modes -- and marks every byte the layout
- * gives a meaning. Every other byte of the image must be zero over a sink
- * poisoned with 0xa5, so a stray or stale byte anywhere fails the test.
+ * QNX4 writer tests. Images are checked twice: by fsimg's own reader and
+ * verifier, and by the independent checker below, written from the format
+ * design with its own offsets. The checker decodes the root block, the
+ * bitmap, every directory slot, .inodes, .longfilenames and lost+found,
+ * requires the writer profile's layout -- every object one extent,
+ * allocation one prefix of blocks, the native statuses and modes -- and
+ * marks every byte the layout gives a meaning. Every other byte of the image
+ * must be zero over a sink poisoned with 0xa5, so a stray or stale byte
+ * anywhere fails the test.
  */
-extern const fsimg_format_t fsimg_qnx4_candidate_format;
-
 #define BLOCK		512u
 #define SLOT		64u
 #define T_TYPE		0170000u
@@ -1082,15 +1076,6 @@ cancel_poll(void *argument)
 	    ++fixture->polls >= fixture->cancel_after);
 }
 
-/* A writer from the unregistered candidate descriptor. */
-static fsimg_status_t
-candidate_writer(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
-    fsimg_writer_t **writer, fsimg_error_t *error)
-{
-	return (fsimg_writer_new_variant(ctx, &fsimg_qnx4_candidate_format,
-	    &fsimg_qnx4_candidate_format.variants[0], options, writer, error));
-}
-
 /* Open a fixture. pages sizes the metadata cache; scratch false keeps all
  * metadata in memory.
  */
@@ -1123,8 +1108,8 @@ fixture_open_with(fixture_t *fixture, const fsimg_write_options_t *write_options
 	CHECK(fsimg_test_meta_cache(fixture->ctx, pages, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline, NULL) ==
 	    FSIMG_OK);
-	CHECK(candidate_writer(fixture->ctx, write_options, &fixture->writer,
-	    NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_new(fixture->ctx, "qnx4", write_options,
+	    &fixture->writer, NULL) == FSIMG_OK);
 	fsimg_source_ops_init(&source_ops);
 	source_ops.validate = provider_validate;
 	source_ops.read_at = provider_read;
@@ -1586,7 +1571,8 @@ test_empty(void)
 
 	options.volume_bytes = 42 * 512;
 	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
-	CHECK(candidate_writer(ctx, &options, &writer, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_writer_new(ctx, "qnx4", &options, &writer, NULL) ==
+	    FSIMG_EINVAL);
 	fsimg_ctx_free(ctx);
 }
 
@@ -1768,9 +1754,11 @@ test_inodes(void)
 	reproducible_options(&options);
 	options.inode_capacity = UINT32_C(33554424) + 1;
 	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
-	CHECK(candidate_writer(ctx, &options, &writer, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_writer_new(ctx, "qnx4", &options, &writer, NULL) ==
+	    FSIMG_EINVAL);
 	options.inode_capacity = UINT32_C(33554424);
-	CHECK(candidate_writer(ctx, &options, &writer, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_new(ctx, "qnx4", &options, &writer, NULL) ==
+	    FSIMG_OK);
 	fsimg_writer_free(writer);
 	fsimg_ctx_free(ctx);
 }
@@ -2074,7 +2062,7 @@ test_labels(void)
 	for (size_t i = 0; i < 4; i++) {
 		reproducible_options(&options);
 		options.label = invalid[i];
-		CHECK(candidate_writer(fixture.ctx, &options, &writer, NULL) ==
+		CHECK(fsimg_writer_new(fixture.ctx, "qnx4", &options, &writer, NULL) ==
 		    FSIMG_EINVAL);
 	}
 	fixture_close(&fixture);
@@ -2086,13 +2074,13 @@ check_refused(fsimg_ctx_t *ctx, const fsimg_write_options_t *options)
 {
 	fsimg_writer_t *writer;
 
-	CHECK(candidate_writer(ctx, options, &writer, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_writer_new(ctx, "qnx4", options, &writer, NULL) ==
+	    FSIMG_EINVAL);
 }
 
 /* Settings: 512-byte sectors and blocks only, no FAT root, sizes of whole
  * blocks from 43 to 2^31, a 31-bit reproducible epoch, and no byte order,
- * UUID or reserve. The registered qnx4 descriptor has no writer, and a
- * capability record of another descriptor is refused.
+ * UUID or reserve. A capability record of another descriptor is refused.
  */
 static void
 test_validation(void)
@@ -2103,13 +2091,8 @@ test_validation(void)
 
 	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
 	fsimg_write_options_init(&options);
-	CHECK(fsimg_writer_new(ctx, "qnx4", &options, &writer, NULL) ==
-	    FSIMG_EUNSUPPORTED);
 	CHECK(fsimg_writer_new_variant(ctx, &fsimg_qnx4_format,
-	    &fsimg_qnx4_format.variants[0], &options, &writer, NULL) ==
-	    FSIMG_EUNSUPPORTED);
-	CHECK(fsimg_writer_new_variant(ctx, &fsimg_qnx4_candidate_format,
-	    &fsimg_qnx4_format.variants[0], &options, &writer, NULL) ==
+	    &fsimg_qnx6_format.variants[0], &options, &writer, NULL) ==
 	    FSIMG_EINVAL);
 	o = options;
 	o.sector_bytes = 1024;
@@ -2153,7 +2136,8 @@ test_validation(void)
 	options.volume_bytes = 43 * 512;
 	options.flags |= FSIMG_WRITE_REPRODUCIBLE;
 	options.epoch = 2147483647;
-	CHECK(candidate_writer(ctx, &options, &writer, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_new(ctx, "qnx4", &options, &writer, NULL) ==
+	    FSIMG_OK);
 	fsimg_writer_free(writer);
 	fsimg_ctx_free(ctx);
 }
@@ -2633,7 +2617,7 @@ create_external(const char *directory, const char *name, const char *blocks,
 	struct stat st;
 	chk_t c;
 	char path[1024];
-	unsigned char *image;
+	const unsigned char *image;
 	size_t count;
 	FILE *manifest;
 	int parent, fd;
@@ -2666,9 +2650,14 @@ create_external(const char *directory, const char *name, const char *blocks,
 
 	fd = openat(parent, "writer.img", O_RDONLY);
 	CHECK(fd != -1 && fstat(fd, &st) == 0);
-	image = malloc((size_t)st.st_size);
-	CHECK(image != NULL);
-	CHECK(pread(fd, image, (size_t)st.st_size, 0) == st.st_size);
+	/* Mapped, not read: a volume the size of the PCM navigation partition
+	 * qualify4.sh checks is 52 GB, almost all of it holes. The checker
+	 * still keeps one byte of state per image byte, so such a run needs
+	 * that much address space and touches every page of it.
+	 */
+	CHECK(st.st_size >= 2 * BLOCK && (uint64_t)st.st_size <= SIZE_MAX);
+	image = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	CHECK(image != MAP_FAILED);
 	CHECK(close(fd) == 0);
 	bzero(&expect, sizeof(expect));
 	expect.time = le32(image + BLOCK + 0x20);
@@ -2683,7 +2672,7 @@ create_external(const char *directory, const char *name, const char *blocks,
 	printf("%s/writer.img: %" PRIu32 " blocks, %" PRIu32 " allocated, %zu "
 	    "objects\n", directory, c.blocks, c.allocated, c.count);
 	chk_free(&c);
-	free(image);
+	CHECK(munmap((void *)image, (size_t)st.st_size) == 0);
 	CHECK(close(parent) == 0);
 	return (0);
 }

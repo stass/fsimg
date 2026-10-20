@@ -112,14 +112,6 @@ typedef struct qnx4_plan {
 
 extern const fsimg_writer_ops_t fsimg_qnx4_writer_ops;
 
-/* The QNX4 descriptor with its writer. The registry lists only writers
- * native QNX has qualified, and not this one, so neither the format list
- * nor writer construction by name can reach it; tests and the
- * qualification tool construct writers from it through
- * fsimg_writer_new_variant().
- */
-extern const fsimg_format_t fsimg_qnx4_candidate_format;
-
 /* The root directory's first block, fixed at 3 + B. */
 static inline uint32_t
 qnx4_plan_root_first(const qnx4_plan_t *plan)

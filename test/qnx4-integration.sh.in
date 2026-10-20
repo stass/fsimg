@@ -11,11 +11,12 @@
 #   FSIMG_QNX4_H1_LENGTH  and its byte length
 #   QNXPROBE              a qnxprobe command at a pinned revision, run as
 #                         $QNXPROBE IMAGE on each volume's exact slice
+#   FSIMG_QNX4_LINUX      1 to mount volumes with the Linux qnx4 driver
 # Every capture and the partition must verify completely, and fsimg's
 # empty volumes must equal the empty captures of their geometry. The H1
-# survey runs only info and verify and reports counts, never names. The
-# Linux kernel's qnx4 driver, mounted read only from a loop device on a
-# Linux host as root, compares its view of the generated sample volume and
+# survey runs only info and verify and reports counts, never names. When
+# asked for, the Linux kernel's qnx4 driver, mounted read only from a loop
+# device on a Linux host as root, compares its view of the generated sample volume and
 # of every capture with fsimg's, and reads writer output; qnxprobe, when
 # its command is given, must accept the same volumes. Mounting hands each
 # image to the host kernel's driver, so give FSIMG_QNX4_NATIVE only
@@ -32,9 +33,11 @@ fail() {
     exit 1
 }
 
-# Whether the Linux kernel's qnx4 driver can be mounted here.
+# Whether the Linux kernel's qnx4 driver is asked for and can be mounted
+# here. Mounting hands images to the host kernel, so it is never implicit.
 linux=0
-if test "$(uname -s)" = Linux && test "$(id -u)" = 0 &&
+if test "${FSIMG_QNX4_LINUX:-0}" = 1 && test "$(uname -s)" = Linux &&
+    test "$(id -u)" = 0 &&
     { grep -qw qnx4 /proc/filesystems || modprobe qnx4 2>/dev/null; }; then
     linux=1
     mkdir "$fixture/mnt"
@@ -381,8 +384,9 @@ if test "$linux" = 1; then
     echo "Linux $(uname -r) qnx4: $compared writer files match their" \
         "manifest; $long below a name over 48 bytes"
 else
-    echo "SKIP: the Linux qnx4 kernel reader needs a Linux host, root and" \
-        "the qnx4 driver; this is $(uname -s) as uid $(id -u)"
+    echo "SKIP: the Linux qnx4 kernel reader needs FSIMG_QNX4_LINUX=1," \
+        "a Linux host, root and the qnx4 driver; this is $(uname -s) as" \
+        "uid $(id -u)"
 fi
 if test -z "$probe"; then
     echo 'SKIP: QNXPROBE is not set (qnxprobe comparison)'

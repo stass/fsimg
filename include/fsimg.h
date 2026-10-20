@@ -379,7 +379,7 @@ typedef struct fsimg_write_options {
 	 * FSIMG_SETTING_* bit requires the default.
 	 */
 	fsimg_byte_order_t byte_order; /* Default little. */
-	uint32_t	 inode_capacity; /* Zero selects the native ladder. */
+	uint32_t	 inode_capacity; /* Zero selects the format's default. */
 	uint32_t	 reserve_percent; /* Default 3; at most 100. */
 	/* Default zero; used verbatim in all modes, in textual byte order. */
 	unsigned char	 volume_uuid[16];

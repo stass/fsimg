@@ -10,6 +10,8 @@ T=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd)
 VM=$(CDPATH= cd -P -- "${FSIMG_QNX_VM:-$HOME/qnx65-vm}" && pwd)
 ISO=${FSIMG_QNX_ISO:-$HOME/qnx-6.5.0-x86-201007091524.iso}
 CAPTURES=${FSIMG_QNX_CAPTURES:-$VM/new-captures}
+# The second disk, /dev/hd1, relative to $VM unless absolute.
+HD1=${FSIMG_QNX_HD1:-big.img}
 MON=$VM/mon.sock
 SER=$VM/ser.sock
 

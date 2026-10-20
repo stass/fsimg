@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026, fsimg contributors
 # Boot the QNX 6.5.0 live CD headless with $VM/test0.img as /dev/hd0 and
-# $VM/big.img as /dev/hd1, log in through the graphical console and start a
+# $VM/big.img (or FSIMG_QNX_HD1) as /dev/hd1, log in through the graphical console and start a
 # shell on the serial port ($VM/ser.sock). Refuses to start while qemu.pid
 # names a live process. Stop the VM with: kill "$(cat "$VM/qemu.pid")".
 # If a boot step fails, QEMU keeps running; inspect it with shot.sh.
@@ -21,7 +21,7 @@ rm -f mon.sock ser.sock
 qemu-system-x86_64 -accel hvf -accel kvm -accel tcg -m 1024 \
     -cdrom "$ISO" -boot d \
     -drive file=test0.img,format=raw,if=ide,index=0 \
-    -drive file=big.img,format=raw,if=ide,index=1 \
+    -drive file="$HD1",format=raw,if=ide,index=1 \
     -monitor unix:mon.sock,server,nowait -serial unix:ser.sock,server,nowait \
     -display none -vga std -daemonize -pidfile qemu.pid
 "$T/boot.sh"

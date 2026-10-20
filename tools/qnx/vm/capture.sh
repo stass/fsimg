@@ -14,8 +14,9 @@
 #                  one fsimg created) is then written over the start of the
 #                  disk by the guest itself through load.py, and the record
 #                  names its SHA-256. Saved as NAME.img.gz.
-#   hd1            $VM/big.img, 5 GB sparse; not reset, so it still holds
-#                  what earlier experiments wrote, and the record says so.
+#   hd1            $FSIMG_QNX_HD1, default $VM/big.img, 5 GB sparse; not
+#                  reset, so it holds what earlier experiments or a host
+#                  writer put there, and the record names the file.
 #                  Saved as NAME.img.zst.
 #
 # The commands run as one line in the guest shell (a line break is refused;
@@ -64,7 +65,7 @@ case $cmds in
 esac
 case $disk in
 hd0) image=$VM/test0.img; suffix=img.gz; timeout=600 ;;
-hd1) image=$VM/big.img; suffix=img.zst; timeout=1800 ;;
+hd1) case $HD1 in /*) image=$HD1 ;; *) image=$VM/$HD1 ;; esac; suffix=img.zst; timeout=1800 ;;
 *) echo "capture.sh: unknown disk $disk" >&2; exit 2 ;;
 esac
 record=$CAPTURES/$name.txt
@@ -101,7 +102,7 @@ if test $disk = hd0; then
 else
     size=$(wc -c < "$image" | tr -d ' ')
     media="QEMU IDE raw $size bytes, /dev/hd1 whole disk, sparse host file"
-    media="$media not reset since earlier captures"
+    media="$media $(basename -- "$image"), not reset by the capture"
 fi
 # printf, not echo: some sh echo builtins interpret backslashes.
 {

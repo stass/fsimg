@@ -422,11 +422,11 @@ verified; charged memory at most 4 MiB and scratch within a budget the
 context enforces (the claimed bitset of `N` bits, 128 bytes per name and 32
 per extent), which together keep the 256 MiB claimed bitset out of memory;
 the operation's growth of the child's peak RSS at most 32 MiB; every
-extent block read exactly once by each operation; each directory's slots
-read once, the root's twice, and each name's record once more; the bitmap
-read in full only by verification, once, beside one window load per
-4 KiB window holding owned blocks and two per extent block; and the
-`.inodes` table read in full only by verification. On APFS:
+extent block read exactly once by each operation; directory reads at most
+each directory's slots once, the root's twice, and each name's record once
+more; the bitmap read in full only by verification, once, beside one
+window load per 4 KiB window holding owned blocks and two per extent block;
+and the `.inodes` table read in full only by verification. On APFS:
 
 | Case | Operation | Image calls | Image bytes | Bitmap bytes | Directory bytes | Extent-block bytes | Peak scratch | RSS | Seconds |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -439,9 +439,9 @@ read in full only by verification, once, beside one window load per
 | 16,383 levels | list | 32,777 | 9,465,412 | 3,072 | 9,453,056 | 0 | 0 | 15,069,184 | 1.317 |
 | 16,383 levels | verify | 32,780 | 9,476,164 | 5,632 | 9,453,056 | 0 | 0 | 11,816,960 | 1.314 |
 
-The byte counts exclude the format registry's probe of the image's first
-8,704 bytes, and give the metadata passes. At `N` = 2^31 the listing
-loads the bitmap windows of the self-check and of the walks, and
+The per-kind byte counts exclude the format registry's probe of the image's
+first 8,704 bytes, which the image bytes include, and give the metadata
+passes. At `N` = 2^31 the listing loads the bitmap windows of the self-check and of the walks, and
 verification adds one pass over all 268,435,456 bitmap bytes, compared a
 window at a time with the claimed bitset, which lives in scratch: the
 verification's 65,553 image calls and 131,115 I/O calls in all are one
@@ -916,11 +916,8 @@ link's chain walked once per name are checked too. `--seed` and `--seed-chain` w
 fuzz seeds, and `--manifest IMAGE [OFFSET LENGTH]` prints one line per
 object for the integration script.
 
-`test-qnx4-write` creates QNX4 volumes with the writer. The registry lists
-only writers that native QNX has qualified, so the test builds writers from
-the driver's candidate descriptor through `fsimg_writer_new_variant()`,
-while `fsimg_writer_new("qnx4")` must fail as unsupported. Every image is checked twice: with fsimg's
-reader and payload verification, and with its own checker, written from
+`test-qnx4-write` creates QNX4 volumes with the writer. Every image is
+checked twice: with fsimg's reader and payload verification, and with its own checker, written from
 the format design with separate offsets and sharing no code with
 `lib/formats/qnx4/`. The checker decodes the root block, the bitmap, every
 directory slot, `.inodes`, `.longfilenames` and `lost+found`; requires the
@@ -967,7 +964,7 @@ BLOCKS 0 for the smallest volume. The images are not reproducible, so the
 entries keep their own times:
 
 ```sh
-./test-qnx4-write --create /tmp/q4/tree tree 131072 fsimg-qualification
+./test-qnx4-write --create /tmp/q4/tree tree 131072 PCMnav
 ./test-qnx4-write --create /tmp/q4/empty empty 0
 ./test-qnx4-write --create /tmp/q4/small tree 0
 ./test-qnx4-write --create /tmp/q4/b1 tree 4096
@@ -977,7 +974,14 @@ entries keep their own times:
 ```
 
 Compressed with `gzip -9` they take 66,688, 326, 1,552, 3,472, 5,524,
-7,558 and 66,749 bytes, far below the serial loader's 3 MiB limit.
+7,558 and 66,749 bytes, far below the serial loader's 3 MiB limit. Each runs
+through `capture.sh -i DIR/writer.img NAME "sh /tmp/qualify4.sh BLOCKS"`,
+with `ro` as a second argument for the volumes with no free block (empty
+and small). A volume at the PCM navigation partition's 102767805 blocks,
+52.6 GB sparse, is too large for the loader: it is written while the VM is
+stopped to the file `FSIMG_QNX_HD1` names, which the VM then attaches as
+its second disk, and `qualify4.sh hd1` checks and modifies that disk in
+place, so it must be a disposable copy.
 
 `test/qnx4-integration.sh` reads external evidence that is never
 redistributed, and skips what is absent; [the QNX4 research
@@ -1002,7 +1006,8 @@ captures open and verify, the 16 manifests match and the twelve empty
 captures equal fsimg's empty volumes; with the H1 partition below the whole
 run takes 252 seconds, most of it one `fsimg cat` per file.
 
-On a Linux host as root, with the kernel's qnx4 driver, the script mounts
+With `FSIMG_QNX4_LINUX=1` on a Linux host as root, with the kernel's qnx4
+driver, the script mounts
 the sample and every capture read only from a loop device limited to the
 volume's slice, and requires the kernel's view to agree with fsimg's
 manifest and `fsimg cat`: every entry below names of at most 48 bytes with
@@ -1015,8 +1020,9 @@ given with its manifest, counting the files below a name over 48 bytes.
 so it may carry an interpreter, run as `$QNXPROBE IMAGE` on the exact slice
 of the sample and of every capture; it must accept each volume fsimg
 verifies. Both comparisons are skips on this macOS host, which reports
-"the Linux qnx4 kernel reader needs a Linux host, root and the qnx4 driver;
-this is Darwin as uid 501" and "QNXPROBE is not set", so no Linux or
+"the Linux qnx4 kernel reader needs FSIMG_QNX4_LINUX=1, a Linux host, root
+and the qnx4 driver; this is Darwin as uid 501" and "QNXPROBE is not set",
+so no Linux or
 qnxprobe result is recorded ([TODO](todo-qnx4.md)).
 
 `FSIMG_QNX4_H1` names a disk image read in place at the partition's byte

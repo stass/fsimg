@@ -329,7 +329,7 @@ help(fsimg_cli_display_t *display)
 		append(display, "    -r              List recursively\n");
 	if (kind >= FSIMG_JOB_CREATE)
 		append(display, "    -s bytes        Exact image size (default automatic)\n"
-		    "    -t format       Required: fat12, fat16, fat32, or exfat\n");
+		    "    -t format       Required: fat12, fat16, fat32, exfat, qnx6, or qnx4\n");
 	else
 		append(display, "    -t format       Force a decoder while retaining validation\n");
 	append(display, "    -v              Show progress, details and sampled metadata losses on stderr\n");

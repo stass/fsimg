@@ -201,8 +201,12 @@ spare bytes and long-name pointer.
   bits), state `0x01`, the full name NUL-padded in 505 bytes and a zero last
   byte. The first long name grows `.longfilenames` from 0 to 16 blocks; a
   freed record is reused. Two names sharing their first 48 bytes therefore
-  never collide. A 506-byte name is refused; `mv` to a long name failed in
-  the guest (`stat() failed ... Filename too long`), so rename is untested.
+  never collide. A 506-byte name is refused. `mv` to a long name failed in
+  the live shell (`stat() failed ... Filename too long`); in the
+  qualification runs a native `mv` of a 49-byte name to a 70-byte one
+  succeeds and checks clean (fsimg writer output below), while the shell
+  cuts a 505-byte path to 255 bytes, so renaming the longest names is
+  unobserved.
 * **Hard links** turn every name into a link record to one `.inodes` slot
   holding the link count. Unlinking back to one name leaves the link record
   and the `.inodes` slot.
@@ -242,7 +246,9 @@ to 60 extents, `IamXblk` and a NUL at `0x1f0`, and at `0x1f8` a copy of the
 record's first extent in the first block only (zero in later blocks). A
 record's extent count includes its own extent: 61 extents need one extent
 block, 62 and 121 two, 122 three. Interleaved one-block appends fragment a
-file into one extent per append; sequential writes stay contiguous.
+file into one extent per append; sequential writes stay contiguous. The
+extent count at record offset `0x30` is 16 bits, so one object has at most
+65535 extents in at most 1093 extent blocks.
 
 ### Bitmap (E1, H1)
 
@@ -251,6 +257,7 @@ starting at block 3. Bit `k` (LSB first) is block `k + 1`. Bits from `N` to
 the end of the last used byte are set (`0x80` at 4095 blocks, `0xfe` at 4097
 and 5001), and the bytes from the size to the end of block `2 + B` are
 `0xff`. So `N` is the slice length, and `ceil(N / 8)` equals the size.
+At the largest `N`, 2^31 blocks, the bitmap is 524288 blocks (256 MiB).
 
 ### State flags (E8)
 
@@ -292,6 +299,88 @@ was not cleanly unmounted. The loader block is nonzero and differs from
 | Full verification | `fsimg verify` complete: 43744183 blocks allocated, each with one owner, and 59023622 free; no orphan, no link-count or occupancy mismatch, so allocation past EOF needs no wider reader policy |
 | Owners | all uid and gid at most 65534; reserved bytes zero |
 
+## fsimg writer output
+
+`test-qnx4-write --native` compares fsimg's empty volumes with the `dinit`
+captures of the same geometry (the whole 131072-block disk with and without
+labels, and 1000, 4095, 4096, 4097, 5001, 8192, 8193 and 131071 blocks):
+every byte from block 2 to the end matches. Block 1 differs only because
+fsimg writes no loader (E9).
+
+`tools/qnx/guest/qualify4.sh` ran the native cycle on volumes made with
+`test-qnx4-write --create`, loaded onto `hd0` by `capture.sh -i`; captures
+are `~/qnx65-vm/writer-captures/q4-writer-NAME-qualify`, whose records name
+each image's SHA-256. The cycle is `chkfsys -m -f -u -s -x`, a read-write
+mount, a manifest (`ls -ld` and `cksum` of every path), native writes, a
+second check, a remount, a third manifest and a third check. Native writes
+append 70 interleaved blocks to one file (70 extents through two extent
+blocks), create a directory holding files named with 33 and 65 bytes,
+`mkdir` and `rmdir` a directory, rename a file to a 31-byte name and delete
+the interleaving spacer.
+
+| Image | Blocks | Content | Result |
+| --- | --- | --- | --- |
+| `empty0` | 43 | Empty catalog, no free block | Three clean checks; mount and read (no native writes possible) |
+| `tree0` | 262 | Fixture tree at its smallest volume, no free block | Three clean checks; mount and read |
+| `tree4096` | 4096 | Fixture tree, 1 bitmap block | Full cycle clean |
+| `tree8192` | 8192 | 2 bitmap blocks | Full cycle clean |
+| `tree12288` | 12288 | 3 bitmap blocks | Full cycle clean |
+| `tree131072` | 131072 | The default geometry, label `PCMnav` | Full cycle clean |
+| `full131072` | 131072 | Nearly full: 256 free blocks | Full cycle clean |
+
+The fixture tree holds names of 16, 17, 48, 49 (two sharing their first 48
+bytes) and 505 bytes, a directory and a FIFO and a symbolic link with link
+names, nested directories, a setuid directory owned by 1000:65534, mode
+`0000`, a non-ASCII name, `.boot` with 700 bytes of content, an empty
+`.altboot` and `.diskroot`. In every capture the native manifest equals
+fsimg's writer manifest in name, kind, mode, link count, owner, size,
+symbolic-link target and `cksum` (27 paths for the tree, `.bitmap`,
+`.inodes` and `.longfilenames` excepted because fsimg hides them). fsimg's
+`verify -d` and `ls` then read every captured image back after the native
+writes, including the native 70-extent file and native long names: all
+verify clean.
+
+`q4-writer-tree4096-longnames` exercises fsimg-written long names: native
+`rm` of a 49-byte name and `mv` of the other 49-byte name to a 70-byte name
+pass `chkfsys`; QNX frees the two old records (state `0x00`) and writes a
+new one, and fsimg verifies the result. `mv` of the 505-byte name fails in
+the guest shell because the path it passes is cut to 255 bytes ("Source
+file not found"); this is the utility's path limit, not the volume's.
+
+Native `ls` without `-l` omits some names over 48 bytes from a directory
+listing, including a 505-byte name QNX itself created
+(`q4-long505-4096-file`), while `find`, shell globbing, `stat` and `cat`
+see them. The native comparisons therefore use `find` and `ls -ld` of each
+path. On a 4096-block volume the first long name grows `.longfilenames` by
+2 blocks rather than 16, as directories grow by smaller steps there.
+
+### PCM navigation geometry
+
+On a sparse 52617116160-byte `hd1` (`FSIMG_QNX_HD1`), QNX 6.5.0's `dinit
+-hq` at H1 partition 3's 102767805 blocks writes the same root block,
+`.inodes`, `lost+found` and fixed root slots as H1, apart from times. H1
+differs only where use changed it: the root's link count and status
+(`0x01`, not clean), the user entries from root slot 7 on, and the loader
+block, which is a different QNX loader build. So the head unit formatted the
+partition with the 6.5.0 defaults.
+
+`test-qnx4-write --create DIR tree 102767805` writes the fixture tree at
+that geometry as a sparse file (25351 allocated blocks, 12 MB on disk) in
+96 seconds, most of it the test's own full-image check. Attached as `hd1`
+with the VM stopped while it was written, it passes the native cycle
+(`q4-writer-pcmnav-102767805-qualify`): three clean checks, the native
+manifest equal to fsimg's, and fsimg's `verify -d` of the result clean.
+
+The partition's compatibility manifest, the fields an image for it must
+reproduce; the namespace counts are those of the H1 table above:
+
+| Field | Value |
+| --- | --- |
+| Geometry | `N` 102767805 blocks of 512 bytes, `B` 25090, root directory at 25093 for 8 blocks, `.inodes` at 25101 for 16, `lost+found` at 25117 for 16 |
+| Profile | long names, `.longfilenames` present, label zero; the head unit's loader is nonzero, fsimg's zero |
+| Namespace | 22 directories with the root, depth at most 2, 50 regular files, no symbolic link, FIFO or second name; names 5 to 31 bytes, none over 48; owners at most 65534 |
+| Not captured | Disk composition: the partition table and the other partitions |
+
 ## Evidence questions
 
 | Question | Answer |
@@ -307,14 +396,13 @@ was not cleanly unmounted. The loader block is nonzero and differs from
 | Link counts | Directories 2 plus subdirectories; hard links in the `.inodes` slot (E3, H1) |
 | Busy, modified and clean flags | Clean is root status `0x20`; modified `0x02` marks written data; busy not observed (E8, H1) |
 | Zero loader | Accepted by `chkfsys` and the mount (E9) |
-| Long-name pointer and record | Physical block; record layout and mangled prefix above (E7); rename open |
+| Long-name pointer and record | Physical block; record layout and mangled prefix above (E7); native rename to 70 bytes and delete check clean, 505-byte rename unobserved (shell limit) |
 | Allocation beyond EOF | Not retained for regular files; FIFOs own unwritten blocks (E10, E3) |
 | `.inodes` growth | 32-block extents through an extent block (E6) |
 | FIFO and device encodings | FIFO above; devices open (no `mknod`) |
 | uid, gid and time limits | uid and gid up to 65534; times 0 to 2147483647 via `touch` (E3) |
-| Head-unit `dinit` defaults | Same option set and same layout on H1; not disassembled |
+| Head-unit `dinit` defaults | Same option set, and H1 has exactly 6.5.0's layout at its geometry (PCM navigation geometry); not disassembled |
 | Name encodings on H1 | All ASCII; none outside the profile, so owner decision 6 needs no byte-name policy |
 
-Open: device nodes, long-name rename, and the
-head-unit modules' acceptance of fsimg output. They block no reader feature;
+Open: device nodes and the head-unit modules' acceptance of fsimg output. They block no reader feature;
 their consumers are listed in [the TODO](todo-qnx4.md).

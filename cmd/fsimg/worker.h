@@ -82,8 +82,11 @@ typedef struct fsimg_worker_request {
 	int		 scratch_fd;
 	int		 source_fd;
 	char		 format[16];
-	/* Decoder-owned backing only; write.label is the authoritative value. */
-	char		 label_storage[48];
+	/* Decoder-owned backing only; write.label is the authoritative value.
+	 * It holds the longest label any format stores, the volume
+	 * information's, and its NUL.
+	 */
+	char		 label_storage[sizeof(((fsimg_volume_info_t *)0)->label)];
 } fsimg_worker_request_t;
 
 typedef struct fsimg_worker_result {
