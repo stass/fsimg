@@ -638,10 +638,10 @@ test_index_reference(void)
 }
 
 /* Programmatic records of one directory merge into one entry whose
- * children are the union of the records' children. Every programmatic
- * record has the same rank, so the encoded record decides which one is
- * kept: the merged catalog, metadata included, is the same for either
- * insertion order and with sort runs small enough to need merging.
+ * children are the union of the records' children when they encode equally,
+ * as the parents the CLI synthesizes for several operands do. The merged
+ * catalog is the same wherever the repeated records sit among the other
+ * entries and with sort runs small enough to need merging.
  */
 static void
 test_merged_directories(void)
@@ -652,15 +652,17 @@ test_merged_directories(void)
 	catalog_fixture_t fixture;
 	fsimg_sort_options_t options = { .run_bytes = 2048, .fan_in = 2 };
 	const fsimg_catalog_entry_t *entry;
-	int64_t kept_seconds[2];
 
 	for (unsigned order = 0; order < 2; order++) {
 		fixture_open(&fixture, 1);
-		add_dated_directory(fixture.writer, "/d", order == 0 ? 100 : 200);
+		if (order == 0)
+			add_dated_directory(fixture.writer, "/d", 100);
 		add_entry(fixture.writer, "/d/x", FSIMG_ENTRY_FILE);
 		add_entry(fixture.writer, "/e", FSIMG_ENTRY_DIRECTORY);
 		add_entry(fixture.writer, "/e", FSIMG_ENTRY_DIRECTORY);
-		add_dated_directory(fixture.writer, "/d", order == 0 ? 200 : 100);
+		add_dated_directory(fixture.writer, "/d", 100);
+		if (order == 1)
+			add_dated_directory(fixture.writer, "/d", 100);
 		add_entry(fixture.writer, "/d/y", FSIMG_ENTRY_FILE);
 		CHECK(fsimg_writer_prepare(fixture.writer, &options, NULL) == FSIMG_OK);
 
@@ -675,10 +677,9 @@ test_merged_directories(void)
 		CHECK(fsimg_catalog_get(fixture.writer, 5, &entry, NULL) == FSIMG_ERANGE);
 		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
 		CHECK(entry->entry.metadata.valid == FSIMG_META_MODIFIED);
-		kept_seconds[order] = entry->entry.metadata.modified.seconds;
+		CHECK(entry->entry.metadata.modified.seconds == 100);
 		fixture_close(&fixture);
 	}
-	CHECK(kept_seconds[0] == kept_seconds[1]);
 }
 
 /* Equal paths merge only when every record is a directory. Any other run
@@ -725,12 +726,10 @@ test_path_collisions(void)
 	}
 }
 
-/* A merge keeps one directory record and discards the others' metadata.
- * Optional metadata of a dropped record simply does not reach the catalog,
- * including the field unions planning checks against the format; metadata
- * a dropped record requires cannot be discarded, so that run collides.
- * A record without metadata encodes zero validity and so is the one kept
- * among programmatic records.
+/* Programmatic records of one directory that encode differently collide:
+ * nothing ranks one above the other, so keeping either would discard the
+ * other's metadata on an arbitrary basis. The collision names the path in
+ * either insertion order, for optional and required metadata alike.
  */
 static void
 test_merged_metadata(void)
@@ -738,30 +737,41 @@ test_merged_metadata(void)
 	fsimg_entry_t bare = { .path = "/d", .kind = FSIMG_ENTRY_DIRECTORY };
 	fsimg_entry_t owned = { .path = "/d", .kind = FSIMG_ENTRY_DIRECTORY };
 	catalog_fixture_t fixture;
-	const fsimg_catalog_entry_t *entry;
 	fsimg_error_t error;
 
 	owned.metadata.valid = FSIMG_META_OWNER;
 	owned.metadata.uid = 1000;
 	owned.metadata.gid = 1000;
+	for (unsigned with_required = 0; with_required < 2; with_required++) {
+		owned.metadata.required = with_required == 0 ? 0 : FSIMG_META_OWNER;
+		for (unsigned order = 0; order < 2; order++) {
+			fixture_open(&fixture, 2);
+			CHECK(fsimg_writer_add(fixture.writer,
+			    order == 0 ? &owned : &bare, NULL, NULL) == FSIMG_OK);
+			CHECK(fsimg_writer_add(fixture.writer,
+			    order == 0 ? &bare : &owned, NULL, NULL) == FSIMG_OK);
+			CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) ==
+			    FSIMG_EINVAL);
+			CHECK(strcmp(error.path, "/d") == 0);
+			CHECK(strstr(error.message, "more than one source") != NULL);
+			fixture_close(&fixture);
+		}
+	}
 
-	fixture_open(&fixture, 2);
-	CHECK(fsimg_writer_add(fixture.writer, &owned, NULL, NULL) == FSIMG_OK);
-	CHECK(fsimg_writer_add(fixture.writer, &bare, NULL, NULL) == FSIMG_OK);
-	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
-	CHECK(fixture.writer->count == 1);
-	CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
-	CHECK(entry->entry.metadata.valid == 0);
-	CHECK((fixture.writer->catalog_fields & FSIMG_META_OWNER) == 0);
-	fixture_close(&fixture);
-
-	owned.metadata.required = FSIMG_META_OWNER;
-	fixture_open(&fixture, 2);
-	CHECK(fsimg_writer_add(fixture.writer, &owned, NULL, NULL) == FSIMG_OK);
-	CHECK(fsimg_writer_add(fixture.writer, &bare, NULL, NULL) == FSIMG_OK);
-	CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) == FSIMG_EINVAL);
-	CHECK(strcmp(error.path, "/d") == 0);
-	fixture_close(&fixture);
+	/* Two dated records differing only in their time collide as well, and
+	 * so does a differing record after two identical ones: each record is
+	 * compared with the kept one, not with its predecessor.
+	 */
+	for (unsigned identical = 1; identical <= 2; identical++) {
+		fixture_open(&fixture, 2);
+		for (unsigned i = 0; i < identical; i++)
+			add_dated_directory(fixture.writer, "/d", 100);
+		add_dated_directory(fixture.writer, "/d", 200);
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "/d") == 0);
+		fixture_close(&fixture);
+	}
 }
 
 /* The rank fields are closed: an unknown origin, nonzero padding, an order

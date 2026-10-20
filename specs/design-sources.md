@@ -139,7 +139,10 @@ paths adjacent, and one rule decides each run of equal paths:
   lowest rank; the others are dropped. A dropped record's metadata never
   reaches the image, so a record that requires a metadata field cannot be
   dropped: such a run is a collision rather than a silent loss, even when
-  the kept record carries the same values.
+  the kept record carries the same values. Nor can a record of the kept
+  record's rank that encodes differently: nothing ranks one above the
+  other, so keeping either would discard the other's metadata on an
+  arbitrary basis, and the run is a collision.
 * Otherwise the run is a collision and preparation fails naming the path: a
   file against a file, a file against a directory, a link against anything.
   The same tree named twice therefore fails on its first file.
@@ -149,11 +152,13 @@ wins: the rank is the pair (0 for a scanned record, 1 for a programmatic one
 such as a synthesized parent; then the root's registration order, the
 operand's position on the command line), so a scanned directory always
 outranks a synthesized parent whatever the operand order, and among scanned
-directories the first operand wins. Programmatic records share order 0, and
-the full encoded record breaks any remaining tie, so two programmatic
-records of one path order the same way for any insertion order and sort
-structure; a programmatic directory without metadata, such as a synthesized
-parent, encodes zero validity and is kept before one that carries metadata.
+directories the first operand wins. Programmatic records share order 0, so
+when no scanned record of the path outranks them, programmatic directories
+of one path merge only when they encode equally, as the synthesized parents
+of several operands do, and otherwise collide. Under a scanned record they
+are all dropped whatever optional metadata they carry, so no choice between
+them arises. The full encoded record ends the sort key so that the stream
+order and the IDs are the same for any insertion order and sort structure.
 Within one root equal paths cannot occur, because a host
 directory enumerates each name once, so this is the only duplicate rule in
 preparation and it adds no state: the rank is a fixed-width field of the

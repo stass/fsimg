@@ -34,7 +34,8 @@ static int rank_compare(const unsigned char *, const unsigned char *);
 static int entry_compare(const void *, size_t, const void *, size_t, void *);
 static int child_compare(const void *, size_t, const void *, size_t, void *);
 static fsimg_status_t resolve_repeated_path(fsimg_entry_kind_t,
-    const fsimg_entry_t *, fsimg_error_t *);
+    const unsigned char *, const unsigned char *, const fsimg_entry_t *,
+    fsimg_error_t *);
 static bool find_parent(const catalog_ancestor_t *, size_t *, const char *,
     const char *, size_t);
 static fsimg_status_t index_entries(fsimg_writer_t *, fsimg_stream_t *,
@@ -403,22 +404,31 @@ child_compare(const void *a, size_t a_length, const void *b, size_t b_length,
 	return ((a_length > b_length) - (a_length < b_length));
 }
 
-/* Decide a record whose path equals the last kept record's path. Two
- * directories merge: the later record is dropped, and its children, which
- * keep their own paths, attach to the kept directory, so the merged
- * directory holds the union of the children. A dropped record's metadata
- * never reaches the image, so a record that requires metadata cannot be
- * dropped. Anything else is a collision named by its path.
+/* Decide a record whose path equals the last kept record's path, given
+ * both records' encoded headers. Two directories merge: the later record is
+ * dropped, and its children, which keep their own paths, attach to the kept
+ * directory, so the merged directory holds the union of the children. A
+ * dropped record's metadata never reaches the image, so a record that
+ * requires metadata cannot be dropped, and a record of equal rank must
+ * encode exactly as the kept one: nothing would justify keeping either's
+ * metadata. Anything else is a collision named by its path.
  */
 static fsimg_status_t
-resolve_repeated_path(fsimg_entry_kind_t kept_kind, const fsimg_entry_t *entry,
-    fsimg_error_t *error)
+resolve_repeated_path(fsimg_entry_kind_t kept_kind,
+    const unsigned char *kept_header, const unsigned char *record_header,
+    const fsimg_entry_t *entry, fsimg_error_t *error)
 {
 	fsimg_status_t status;
+	bool outranked, identical;
 
+	/* The sort places the kept record first, so a different rank is a
+	 * higher one.
+	 */
+	outranked = rank_compare(kept_header, record_header) != 0;
+	identical = bcmp(kept_header, record_header, FSIMG_CATALOG_HEADER) == 0;
 	if (kept_kind == FSIMG_ENTRY_DIRECTORY &&
 	    entry->kind == FSIMG_ENTRY_DIRECTORY &&
-	    entry->metadata.required == 0)
+	    entry->metadata.required == 0 && (outranked || identical))
 		return (FSIMG_OK);
 	status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CATALOG,
 	    "image path is supplied by more than one source");
@@ -447,9 +457,9 @@ find_parent(const catalog_ancestor_t *ancestors, size_t *top,
  *
  * The sort places the records of one path next to each other, lowest rank
  * first. The first record of such a run is kept and resolve_repeated_path
- * decides each later one, so a run needs only the last kept record's path
- * and kind. A dropped record gets no ID: IDs stay dense and writer->count,
- * the number of catalog entries, counts kept records only.
+ * decides each later one, so a run needs only the last kept record's path,
+ * kind and encoded header. A dropped record gets no ID: IDs stay dense and
+ * writer->count, the number of catalog entries, counts kept records only.
  *
  * Parents come from an ancestor stack holding each open directory's ID and
  * path length. The open directories are the last kept record (when it is a
@@ -466,6 +476,7 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 	fsimg_entry_kind_t kept_kind;
 	fsimg_error_t detail;
 	char *kept_path;
+	unsigned char kept_header[FSIMG_CATALOG_HEADER];
 	unsigned char index[FSIMG_CATALOG_INDEX_SIZE];
 	uint64_t cursor, reference, capacity, stack_bytes, id, records;
 	size_t length, path_length, parent_length, top, name_length, allocation_size;
@@ -528,7 +539,8 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		 * which no record repeats.
 		 */
 		if (id != 0 && strcmp(kept_path, entry.entry.path) == 0) {
-			status = resolve_repeated_path(kept_kind, &entry.entry, error);
+			status = resolve_repeated_path(kept_kind, kept_header,
+			    writer->record, &entry.entry, error);
 			if (status != FSIMG_OK)
 				goto done;
 			continue;
@@ -562,6 +574,7 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		 */
 		path_length = strlen(entry.entry.path);
 		bcopy(entry.entry.path, kept_path, path_length + 1);
+		bcopy(writer->record, kept_header, sizeof(kept_header));
 		kept_kind = entry.entry.kind;
 		name_length = strlen(name) + 1;
 		/* Copy the name before reusing the record buffer for its key. */

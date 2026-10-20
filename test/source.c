@@ -647,16 +647,22 @@ test_merged_roots(void)
 	}
 }
 
-/* Among records of one directory a scanned record outranks a synthesized
- * parent (a programmatic directory without metadata) whenever either was
- * added, and the first-registered root outranks later ones. Both roots
+/* Among records of one directory a scanned record outranks a programmatic
+ * one whenever either was added, and the first-registered root outranks
+ * later ones. Two programmatic records carry different attributes, which the
+ * scanner never records: under a scanned record both are dropped without a
+ * collision, and the capability unions planning checks show that their
+ * metadata is dropped rather than merged. Both roots
  * populate /a, so /a is each root's own directory entry and /a/x is a
  * directory both trees contain.
  */
 static void
 test_scanned_rank(void)
 {
-	fsimg_entry_t synthesized = { .path = "/a", .kind = FSIMG_ENTRY_DIRECTORY };
+	fsimg_entry_t synthesized = { .path = "/a", .kind = FSIMG_ENTRY_DIRECTORY,
+	    .metadata = { .valid = FSIMG_META_ATTRIBUTES, .attributes = 0x01 } };
+	fsimg_entry_t other = { .path = "/a", .kind = FSIMG_ENTRY_DIRECTORY,
+	    .metadata = { .valid = FSIMG_META_ATTRIBUTES, .attributes = 0x02 } };
 	source_fixture_t fixture;
 	const fsimg_catalog_entry_t *entry;
 	int second, first_root, later_root, directory;
@@ -680,17 +686,23 @@ test_scanned_rank(void)
 
 		if (synthesized_first)
 			CHECK(fsimg_writer_add(fixture.writer, &synthesized, NULL, NULL) == FSIMG_OK);
+		else
+			CHECK(fsimg_writer_add(fixture.writer, &other, NULL, NULL) == FSIMG_OK);
 		CHECK(fsimg_writer_add_tree(fixture.writer, first_root, "/a", NULL) == FSIMG_OK);
 		CHECK(fsimg_writer_add_tree(fixture.writer, later_root, "/a", NULL) == FSIMG_OK);
 		if (!synthesized_first)
 			CHECK(fsimg_writer_add(fixture.writer, &synthesized, NULL, NULL) == FSIMG_OK);
+		else
+			CHECK(fsimg_writer_add(fixture.writer, &other, NULL, NULL) == FSIMG_OK);
 		CHECK(close(second) == 0);
 		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
 
 		CHECK(fixture.writer->count == 2);
+		CHECK((fixture.writer->catalog_fields & FSIMG_META_ATTRIBUTES) == 0);
 		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->entry.path, "/a") == 0 && entry->children == 1);
 		CHECK((entry->entry.metadata.valid & FSIMG_META_MODIFIED) != 0);
+		CHECK((entry->entry.metadata.valid & FSIMG_META_ATTRIBUTES) == 0);
 		CHECK(entry->entry.metadata.modified.seconds == (reversed ? 4000 : 3000));
 		CHECK(fsimg_catalog_get(fixture.writer, 2, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->entry.path, "/a/x") == 0 && entry->parent_id == 1);

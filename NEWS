@@ -29,8 +29,10 @@ Source reopening validates identity and mount boundaries; one writer-owned
 current source is released on completion, failure, or destruction.
 Several directory or regular-file roots compose one catalog: a directory that
 more than one source supplies merges into one, keeping scanned metadata over a
-programmatic directory's and the first root's over later ones, and any other
-repeated path, or discarding metadata a directory requires, fails naming it.
+programmatic directory's and the first root's over later ones; programmatic
+directories with no scanned record of their path merge only when their
+metadata are identical, and any other repeated path, or discarding metadata a
+directory requires, fails naming it.
 
 FAT12, FAT16, and FAT32 readers provide header information, depth-first
 enumeration, current-file content and range reads, and complete structural

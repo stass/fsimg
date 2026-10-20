@@ -94,11 +94,13 @@ A host root is a directory, whose tree populates its image path, or a
 regular file, which is the one file at a non-root image path.
 A directory that several roots or entries supply becomes one directory
 holding all their children; its metadata comes from a scanned record before
-a programmatic one, from the first-added root among scanned records, and
-from a directory without metadata among programmatic ones, otherwise from a
-fixed one independent of insertion order.
-Any other repeated path, or a discarded directory that requires metadata,
-fails planning with FSIMG_EINVAL naming the path.
+a programmatic one, and from the first-added root among scanned records.
+Programmatic directories of one path with no scanned record of that path
+merge with each other only when they carry identical metadata.
+Any other repeated path, a discarded directory that requires metadata, or
+programmatic directories of one path whose metadata differ, with no scanned
+record of that path to outrank them, fail planning with
+FSIMG_EINVAL naming the path.
 Host identity checks detect ordinary metadata-visible changes;
 hostile concurrent mutation requires immutable inputs or a snapshot.
 Provider content and state remain borrowed until writer destruction.

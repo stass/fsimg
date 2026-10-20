@@ -265,9 +265,10 @@ The image root is implicit. Every other entry has an explicit parent directory
 entry; missing parents, file/directory conflicts, any repeated path other than
 a directory, or alternate spellings of the same format-equivalent parent are
 errors. A directory that several sources supply becomes one directory by the
-[merging rule](design-sources.md#merging-roots), whose fixed rank, not
-insertion order, chooses the metadata kept; a repeated directory whose
-discarded record requires metadata is an error too. The host scanner emits
+[merging rule](design-sources.md#merging-roots): the record of lowest
+rank supplies the metadata, independent of insertion order, and a repeated
+directory whose discarded record requires metadata, or that repeats the kept
+record's rank with different metadata, is an error too. The host scanner emits
 directories as well as files. There is no silent synthesis of arbitrary
 parent attributes.
 
