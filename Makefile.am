@@ -234,6 +234,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/qnx6-research.md docs/qnx6-infrastructure.md docs/todo-qnx6.md \
 	docs/spec-testing-plan.md docs/qnx4-plan.md docs/qnx4-research.md \
 	docs/todo-qnx4.md docs/architecture-analysis.md docs/ifs-plan.md \
+	docs/ifs-research.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
@@ -245,7 +246,10 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
 	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh tools/qnx/guest/manifest4.sh \
-	tools/qnx/guest/qualify4.sh \
+	tools/qnx/guest/qualify.sh tools/qnx/guest/qualify4.sh \
+	tools/qnx/guest/popifs.sh tools/qnx/decode/ifsdump.py \
+	tools/qnx/decode/ifschunks.py tools/qnx/decode/ifsflip.py \
+	tools/qnx/oracle/oracle.c tools/qnx/oracle/build.sh tools/qnx/vm/load.py \
 	tools/qnx/decode/q4dump.py tools/qnx/pcm/pcmq4.py tools/qnx/pcm/pcmq6.py tools/qnx/pcm/shdis.py \
 	tools/qnx/pcm/shrange.py tools/qnx/vm/boot.sh \
 	tools/qnx/vm/capture.sh tools/qnx/vm/click.py tools/qnx/vm/env.sh \

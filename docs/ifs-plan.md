@@ -257,17 +257,18 @@ remove a class of special cases rather than handling each case.
    list of full relative paths. Open makes one pass over it and puts each
    record's path and byte offset into the metadata store. The common
    external sort orders them by path components, and the sorted run feeds
-   the common walker's `prepare` and `replay` per directory. Two errors are
-   corrupt: a duplicate path, which appears as adjacent equal keys, and a
-   path below a non-directory. Missing parents are synthesized, with the
-   metadata that stage 1 shows native readers give them. Nothing holds the
-   record table in RAM.
+   the common walker's `prepare` and `replay` per directory. A duplicate
+   path appears as adjacent equal keys; the stable sort keeps table order
+   among them, so the last is the entry and the others are shadowed (owner
+   decision 10). A path below a non-directory is unsupported (owner
+   decision 11). Missing parents are synthesized with the values `mkifs`
+   gives an explicit directory record: mode `040755`, uid 0, gid 0, time 0.
+   Nothing holds the record table in RAM.
 3. **One table rule and one range rule.**
    * **Table.** The records tile `[dir_offset, hdr_dir_size - 4)` and four
-     zero bytes end the table, if stage 1 confirms it. A record that
-     crosses the end, a zero length before the end, or a missing terminator
-     is corrupt. A record with a zero inode word is unsupported unless
-     stage 1 observes one.
+     zero bytes end the table. A record that crosses the end, a zero length
+     before the end, or a missing terminator is corrupt. A record with a
+     zero inode word is unsupported. Padding bytes are not interpreted.
    * **Ranges.** Every regular file's data lies in
      `[hdr_dir_size, image_size - 4)`. Ranges may overlap each other
      (deduplication), and each record stays its own entry. Content goes
@@ -280,7 +281,6 @@ remove a class of special cases rather than handling each case.
    * record kinds and their payload lengths;
    * the symbolic-link layout (decision 5);
    * a zero extended-attribute offset;
-   * padding contents;
    * for `qnxboot`: `flags1`, machine values and boot prefixes.
 
    An unobserved value is `FSIMG_EUNSUPPORTED`, and a contradiction is
@@ -293,8 +293,9 @@ remove a class of special cases rather than handling each case.
    dangling, absolute and long targets.
 6. **Names use one profile.** Path components are compared byte for byte
    under the QNX fsimg name profile: strict UTF-8, no NUL, slash, control
-   byte or `0x7f`, and neither `.` nor `..`. A stored path that is absolute
-   or has an empty component is corrupt. A component outside the profile is
+   byte or `0x7f`, and neither `.` nor `..`. A stored path that is absolute,
+   has an empty component or has a `.` or `..` component is unsupported
+   (owner decision 11). A component outside the profile is
    `FSIMG_EUNSUPPORTED`. The root is the empty path.
 7. **Boot-specific state stays visible but inert.** Info reports:
    * the mountpoint and mount flags;
@@ -320,7 +321,7 @@ remove a class of special cases rather than handling each case.
      the smallest non-final size stage 1 observes. A smaller chunk is
      unobserved, so it is `FSIMG_EUNSUPPORTED` under decision 4, not
      corrupt;
-   * the padding up to the stored trailer is zero, if stage 1 confirms it;
+   * the padding up to the stored trailer is zero;
    * the decoded total equals `imagefs_size`.
 
    Output beyond `imagefs_size` stops decoding. These bounds also limit the
@@ -674,14 +675,16 @@ repository records only pass and fail counts.
 * `verify.c` runs the common walker once and checks:
   * the ImageFS checksum, in one sequential pass;
   * the table rule and the range rule (decision 3);
-  * the boot and script references, under the stage 1 matching rule;
-  * the padding contents, if stage 1 makes them a closed rule.
+  * the boot and script references, each matching one record's full inode
+    word;
+  * shadowed duplicate paths, reported by name class and count.
 * Tests cover:
   * a flipped byte in each region;
   * a trailer of the wrong byte order;
   * dangling and duplicate boot references;
   * a reference to a directory;
-  * nonzero padding;
+  * nonzero padding, which verifies;
+  * a shadowed duplicate path;
   * verification incomplete after an unsupported record.
 * **Gate:**
   * every well-formed native capture and every S1 and S2 copy verifies;
@@ -959,7 +962,7 @@ when stage 6 completes, stages 9 and 10 go first.
 
 ## Owner decisions
 
-The owner has settled all nine.
+The owner has settled all eleven.
 
 1. **Writer scope.** A standalone, nonbootable ImageFS writer first, then a
    gated wrap of a new ImageFS in an existing boot image (stages 9 to 11).
@@ -992,6 +995,16 @@ The owner has settled all nine.
    loader with metadata of its own, as `qnxboot` does, and only one file on
    the examined disc variant carries its header. If stage 1 finds the
    header on non-IFS payloads, this returns to the owner.
+10. **Duplicate paths.** Native images store some paths twice (every H3
+    boot image has a link record and a file record for one to three paths).
+    The last record with a path is the entry, as `dumpifs -x` leaves it;
+    earlier records with that path are shadowed: counted by info, reported
+    by verification, never delivered. A boot test showing that `procnto`
+    resolves differently reopens this.
+11. **Paths `mkifs` writes but fsimg does not represent.** A stored path
+    with a `.` or `..` component, an empty component, a leading slash, or a
+    parent that is not a directory makes the image `FSIMG_EUNSUPPORTED`,
+    not corrupt: `mkifs` writes such paths verbatim.
 
 ## Risks
 
