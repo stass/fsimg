@@ -16,11 +16,18 @@ Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
   `fsimg_writer_new()`, and update `README.md`, `docs/fsimg.1`,
   `docs/libfsimg.3` and `NEWS`. The cycle also confirms a label written by
   fsimg natively, beyond the byte comparison with the `-l` captures.
-* [High] **Interoperability and scale** (`lib/formats/qnx4/`): stage 5 of
-  the plan, the reader's interoperability, scale and fault coverage, and the
-  writer's scale cases (`N` near `2^31` on a sparse sink, a spilling
-  directory, and the 2 GiB object limit at 524288 directory steps and
-  4194289 long names, which `object_fits()` refuses and no test reaches).
+* [High] **Writer scale** (`lib/formats/qnx4/write-plan.c`,
+  `test/qnx4-write.c`): the writer's scale cases, `N` near `2^31` on a
+  sparse sink, a spilling directory, and the 2 GiB object limit at 524288
+  directory steps and 4194289 long names, which `object_fits()` refuses and
+  no test reaches.
+* [Medium] **Linux and qnxprobe comparisons not yet run**
+  (`test/qnx4-integration.sh`): the script compares the Linux qnx4 driver's
+  view of the generated sample, every native capture and writer output with
+  fsimg's, and qnxprobe's acceptance of the same volumes, but it has run
+  only on macOS, where both are skips. Run it as root on a Linux host and
+  record the kernel revision in [build](build.md); pin a qnxprobe revision,
+  confirm that `$QNXPROBE IMAGE` is its invocation, and record the run.
 * [Medium] **Long names, 49 to 505 bytes, natively** (`lib/formats/qnx4/`):
   stage 8. The reader decodes `.longfilenames` records and checks them
   against the `q4-long` capture, and the writer emits them with the mangled
@@ -42,14 +49,9 @@ Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
   `extent.c`): "allocated block has no owner" and "block is already in use"
   name neither the block nor its owners. `fsimg_error_t`'s offset could
   carry the block's volume offset without quoting image bytes.
-* [Low] **"Owned block is marked free" untested**
-  (`lib/formats/qnx4/verify.c`): the branch is reachable only when
-  `2 + B` exceeds the 32768 blocks open's first bitmap window checks, so
-  `N` above about 134 million blocks; the stage 5 sparse scale fixture can
-  reach it.
 * [Low] **Integration run time** (`test/qnx4-integration.sh.in`): the
   native comparison starts one `fsimg cat` per regular file, about four
-  minutes for the 40 captures on macOS; a single command that checksums
+  minutes for the 41 captures on macOS; a single command that checksums
   every file would make it seconds.
 * [Medium] **PCM navigation-partition profile** (`docs/qnx4-research.md`):
   stage 9. A native cycle on an fsimg volume at H1 partition 3's exact
@@ -59,6 +61,3 @@ Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
   the 6.5.0 layout, but only a target run or disassembly can close this.
 * [Low] **Device nodes** (`lib/formats/qnx4/`): the live CD has no `mknod`,
   so the device encoding is unobserved and devices are unsupported.
-* [Low] **Synthetic `.inodes` growth** (`test/qnx4.c`): no generated volume
-  holds more than 128 table records, so `.inodes` growing through its own
-  extent block is exercised only by the `q4-inodes` capture and fuzzing.

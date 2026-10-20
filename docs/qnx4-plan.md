@@ -432,10 +432,10 @@ research boundary of the QNX6 record.
     environment, and the script runs only `info` and `verify` and prints
     counts.
 * Scale cases:
-  - `N` near `2^31` blocks on a sparse fixture, with a 256 MiB bitmap that
+  - `N` at `2^31` blocks on a sparse fixture, whose 256 MiB claimed bitset
     stays in scratch;
   - a directory wide enough to spill to scratch;
-  - a file of about `10^5` extents;
+  - a file of 65535 extents, the most the record's 16-bit count holds;
   - a deep tree.
 
   Each records I/O calls, metadata passes, peak scratch and RSS.

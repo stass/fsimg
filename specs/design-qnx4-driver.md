@@ -427,16 +427,17 @@ Format-owned records carry the format time in all four fields.
 | Operation | Work and residency |
 | --- | --- |
 | Probe and open | Two 512-byte reads, the bitmap self-check's two windows, the chains of the root directory, `.inodes`, `.longfilenames` and `lost+found`; scratch for the indexes and locators, the claimed bitset of `N` bits, which every open creates, `info` included, and the exposure bitset of the `.inodes` slot count |
-| Listing | Per directory: its chain, one slot pass and the common key sort; per object's first name: its chain. No payload is read |
+| Listing | Per directory: its chain, one slot pass and the common key sort; per name: its 64-byte record read again at replay; per object's first name: its chain. No payload is read |
 | Content | One extent lookup per request after the walk at exposure |
 | Verification | One traversal, one external sort of the link records' targets, one bitmap pass comparing `ceil(N / 8)` bytes with the claimed set, one pass over `.inodes` and one over `.longfilenames`; scratch for the sorted targets and one bit per long-name record |
 | Planning | One pass over the catalog, the raise-until-fit size search of a few steps, one layout pass; rows in one paged array |
 | Emission | Payload bytes plus metadata proportional to entries, names and the bitmap |
 
 Only the geometry, the root block, the bitmap window, one record window, the
-current record and the chain cursor are resident per reader; everything else
-is charged scratch. Every loop charges the session and observes
-cancellation.
+current record and the chain cursor are resident per reader, beside the
+common walk's charged stack of `max_depth + 1` levels and its path buffer;
+everything else is charged scratch. Every loop charges the session and
+observes cancellation.
 
 ## Failure classification
 
@@ -487,10 +488,11 @@ free blocks the formatter never wrote are counted, not compared. Its
 `--create` mode builds the native qualification images and their
 manifests. Fault tests inject allocation,
 scratch, short-read, short-write, EOF, source-change and cancellation
-failures at every stage and check cleanup. Scale tests grow `N` to near
-`2^31` on a sparse fixture with the bitmap in scratch, one directory's width
-to spilling, one file to about `10^5` extents and a tree's depth, recording
-I/O calls, metadata passes, peak scratch and RSS.
+failures at every stage and check cleanup. Scale tests grow `N` to `2^31`
+on a sparse fixture whose claimed bitset stays in scratch, one directory's
+width to spilling, one file to 65535 extents, the most the record's 16-bit
+count holds, and a tree's depth, recording I/O calls, metadata passes, peak
+scratch and RSS.
 
 `test/qnx4-integration.sh` runs the independent oracles the build finds and
 skips the others explicitly: the Linux `qnx4` reader on a Linux host, as a
