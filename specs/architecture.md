@@ -407,6 +407,43 @@ unsupported required capabilities fail explicitly. Private driver interfaces
 are not a plugin ABI. There is no dynamic driver loading in the product
 contract. A format feature is advertised only after its acceptance tests pass.
 
+### Specification-driven testing
+
+The [specification-driven test harness](design-spec-testing.md) classifies
+each failed CLI invocation by the integer `code` of its `-j` error record,
+mapped to the `fsimg_status_t` names in `include/fsimg.h`. The CLI emits one
+bounded error record per failed command, and that code is the contract between
+fsimg and the harness. The exit status separates only success, failure and invalid
+syntax, and the prose `status` string is not an interface. The harness relies
+on these codes, which image content can cause:
+
+* `FSIMG_EFORMAT`: no single decoder was selected, because none claims the
+  image, several do, or a forced format contradicts the variant the image
+  declares;
+* `FSIMG_ECORRUPT`: at a reading command, a claimed image is corrupt. At
+  `create` it reports inconsistent scratch data, a fault;
+* `FSIMG_EUNSUPPORTED`: fsimg or the host lacks a feature or capability. The
+  image can cause it with a feature outside the supported profile; the host
+  can cause it with unavailable required confinement, no publication without
+  replacement, or a name the destination cannot represent.
+
+It also relies on these fault codes:
+
+* `FSIMG_EIO`: an I/O, process-spawn or worker-protocol failure, such as a
+  failed read or write on the image, scratch, destination or output, an
+  unexpected end of file, or a worker that died or broke the protocol before
+  its final frame;
+* `FSIMG_ESTATE`: an internal-state or contract failure, including a worker
+  that exited with the sanitizer runtime's reserved status.
+
+On a working host, image content never causes `FSIMG_EIO` or `FSIMG_ESTATE`,
+so neither is a verdict. Because `FSIMG_EUNSUPPORTED` also has host causes,
+the harness establishes the host's capabilities before it reads that code as
+a verdict on an image. At reading commands, `FSIMG_ECORRUPT` and
+`FSIMG_ERANGE` can also report inconsistent scratch metadata, such as
+verification's external sort reading back a bad run, so a scratch defect can
+satisfy an image expectation.
+
 ## Dependencies and implementation organization
 
 The core library and ordinary CLI depend only on libc and host OS interfaces.

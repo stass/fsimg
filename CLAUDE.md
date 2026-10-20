@@ -124,6 +124,85 @@ missing tool.
 * Source and build files, including C headers and shell scripts, must be
   ASCII-only. Markdown prose is exempt. Enforce this in build checks and CI.
 
+## Ruby
+
+Ruby is a development tool, confined to the specification-driven test harness
+under `test/spec/` ([design](specs/design-spec-testing.md)). Write Ruby that
+reads like the problem: functional, idiomatic and small. The syntax floor is
+Ruby 3.2, so use `_1` rather than `it`; CI runs the floor version so the
+floor is enforced, not assumed. Every file starts with the SPDX
+BSD-2-Clause header and `# frozen_string_literal: true`, uses two-space
+indentation, and is ASCII-only like other source files.
+
+Prefer:
+
+* Immutable values: `Data.define`, frozen constants and configuration.
+* Pure functions and pipelines: `then`, `Enumerable` and `Enumerator::Lazy`,
+  `filter_map`, `each_with_object`, `sum`, `tally`, `group_by`, `zip`. No index
+  loops.
+* Small objects with one job, and `call`-style callables for steps so they
+  compose.
+* Keyword arguments for anything with more than two parameters, including
+  case construction. No positional boolean flags.
+* Pattern matching (`case ... in`) for shape-dependent logic, such as decoded
+  records and NDJSON payloads.
+* Explicit errors under an `FsimgSpec::Error` hierarchy. Raise; do not return
+  `nil` to mean failure. Return `nil` only for "absent", and say so in the
+  name (`find_` versus `fetch_`). A total decoder is the exception: it marks
+  absent or undefined fields explicitly instead of raising.
+* Endless methods for one-liners.
+* `private` by default; expose the smallest surface.
+* Binary strings via `String#b`, and explicit-endian `pack`/`unpack`
+  directives (`v`, `V`, `S<`, `L<`).
+
+Avoid:
+
+* Mutating arguments or shared state, and `!` methods on anything you did not
+  just create.
+* `unless ... else`, nested ternaries and `and`/`or` as control flow.
+* Broad `rescue`. Rescue the specific exceptions an operation expects, such
+  as an `Errno` value mapped to an answer. A catch-all rescue appears only at
+  a declared boundary that records the error as a result, such as the
+  harness's per-case boundary.
+* Monkey patching core classes or gems; extend through wrapper objects.
+* Classes that hold no state and only carry class methods. Write stateless
+  operations as module functions.
+* `eval`, `instance_eval` DSLs and `method_missing` on public interfaces. The
+  harness has no rule DSL: rules are plain values and procs. BinData record
+  declarations are the one sanctioned declarative DSL, confined to layout
+  files.
+* `Kernel#open`, `IO.read`, `IO.write`, `IO.readlines` and `IO.foreach` with
+  a path built from data: a leading `|` runs a command. Use `File.open`,
+  `File.read` and `File.binread`.
+
+```ruby
+# Bad
+def legal_sizes(values)
+  out = []
+  for v in values
+    out << v if v >= 512 && v <= 4096 && (v & (v - 1)).zero?
+  end
+  out
+end
+
+# Good
+def legal_sizes(values) =
+  values.select { power_of_two?(_1) && (512..4096).cover?(_1) }
+
+private def power_of_two?(n) = n.positive? && (n & (n - 1)).zero?
+```
+
+Metaprogramming is allowed only to remove repetition that mirrors data, such
+as accessors generated from a layout's field table, never to be clever.
+Generated methods satisfy `respond_to?` and appear in `methods`; each
+generated surface has a comment saying what it generates and a test that
+calls a generated member. If plain code is within about 20% of the length,
+write plain code.
+
+Tests use Minitest and follow [readable tests](specs/style.md#readable-tests).
+Test names describe behaviour, such as
+`test_cluster_count_4085_selects_fat16`. Tests never reach the network.
+
 ## Tests and sanitizers
 
 * Write a detailed test suite as you add features. It must be re-executed at

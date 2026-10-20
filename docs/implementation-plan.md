@@ -449,9 +449,10 @@ validation gates above:
    driver's module structure.
 
 Specification-driven testing follows its own
-[plan](spec-testing-plan.md): a design document, then a Ruby harness that
-derives FAT cases from cited rules and checks fsimg's per-stage results
-against independent oracles, and later a second format.
+[plan](spec-testing-plan.md) and [design](../specs/design-spec-testing.md):
+a Ruby harness that derives FAT cases from cited rules, checks fsimg's
+per-stage results against the outcome the rules derive, records independent
+tools' observations, and later serves a second format.
 
 Other extensions receive their own designs before code: manifest import and
 bounded partition selection; reader-only NTFS and QNX4 profiles with independent

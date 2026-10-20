@@ -197,7 +197,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/protocol.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
-	specs/design-security.md specs/design-formats.md specs/design-cli.md
+	specs/design-security.md specs/design-formats.md specs/design-cli.md \
+	specs/design-spec-testing.md
 check-local: check-ascii
 .PHONY: check-ascii check-asan check-ubsan check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz check-fuzz-extended check-cli-rss check-extended

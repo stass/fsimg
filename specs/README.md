@@ -26,6 +26,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [QNX6 driver](design-qnx6-driver.md) | Module layout, driver state, tree walker, bitmap self-check, reservation domains, planning passes, emission order, and tests |
 | [POSIX metadata](design-metadata.md) | Entry kinds beyond files and directories; owner, mode and change time across API, catalog, scanner, extractor and CLI |
 | [Command line](design-cli.md) | Commands, flags, defaults, output, and failure behavior |
+| [Specification-driven testing](design-spec-testing.md) | Rule-derived valid and invalid images, per-stage expectations, the CLI runner contract, fixtures and coverage reports |
 | [Style](style.md) | C conventions and readability review |
 | [Implementation plan](../docs/implementation-plan.md) | Ordered work packages, dependencies, validation, and completion gates |
 

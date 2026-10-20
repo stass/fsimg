@@ -14,11 +14,12 @@
 
 * [Medium] **Specification-driven testing** (`test/spec/`, `test/spec.sh.in`,
   `Makefile.am`, `.github/workflows/check.yml`): build the Ruby rule, case and
-  runner harness. It derives valid and single-rule-invalid FAT images from
-  cited specification rules, checks fsimg's per-stage status against
-  independent oracles, and reports specification coverage. The
-  [plan](docs/spec-testing-plan.md) owns the design decisions and the stages.
-  The design document `specs/design-spec-testing.md` comes first.
+  runner harness. It derives valid and targetedly invalid FAT images from
+  cited specification rules, checks fsimg's per-stage status against the
+  outcome the rules derive, records independent tools' observations, and
+  reports specification coverage. The
+  [design](specs/design-spec-testing.md) owns the decisions and the
+  [plan](docs/spec-testing-plan.md) the stages.
 
 * [Low] **Scoped ownership intervals** (`lib/formats/fat/verify.c`,
   `lib/formats/exfat/verify.c`): extract the duplicate ownership-interval
@@ -27,6 +28,16 @@
   Both verifiers keep their format-specific reconciliation.
 
 ## Bugs by subsystem
+
+* [Medium] **Worker sanitizer exit after an error frame is lost**
+  (`cmd/fsimg/worker-parent.c`): after the parser worker sends its final
+  `FSIMG_FRAME_ERROR`, `finish_operation()` calls `cleanup_operation()`, which
+  sends SIGTERM before the sanitizer exit status is examined. A sanitizer
+  report or crash at worker exit is then killed or races with the signal, and
+  the frame's verdict is reported instead of `FSIMG_ESTATE`. Wait a bounded time
+  for the worker's own exit after a final frame before signalling it. Write a
+  failing test first: a worker that sends an error frame and then exits with
+  the reserved sanitizer status must yield `FSIMG_ESTATE`.
 
 * [Medium] **Spilled metadata stores resize scratch on every growth**
   (`lib/meta/store.c`): once a store spills, each `fsimg_store_grow()`, one
@@ -83,14 +94,15 @@
   from the BPB label field. Add a failing root/BPB label fixture before
   changing the decoder's interpretation of either field.
 
-* [Low] **Reserved FAT entry checked at open** (`lib/formats/fat/read.c`,
+* [Low] **Reserved FAT entries checked at open** (`lib/formats/fat/read.c`,
   `lib/formats/fat/verify.c`, `specs/design-fat-reader.md`): header-only
-  open rejects a `FAT[0]` whose low byte differs from the BPB media byte.
-  That divergence is recoverable and does not affect content. Move the check
-  into `verify`'s reserved-entry scope, so `info`, `ls` and `extract` accept
-  it while full verification stays strict. This follows the
-  [spec-testing policy](docs/spec-testing-plan.md#decisions). Write the
-  failing open/verify test first.
+  open rejects a `FAT[0]` whose low byte differs from the BPB media byte and
+  a `FAT[1]` without its end-of-chain bits. Neither divergence affects
+  content. Move both checks into `verify`'s reserved-entry scope, so `info`,
+  `ls` and `extract` accept them while full verification stays strict. This
+  follows the
+  [spec-testing stage policy](specs/design-spec-testing.md#stage-policy).
+  Write the failing open/verify tests first.
 
 ## Security residuals
 
