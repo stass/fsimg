@@ -171,6 +171,18 @@
 
 ## Bugs by subsystem
 
+* [Medium] **FreeBSD fsck_msdosfs rejects the FAT16 builder base at 4085
+  clusters** (`test/spec/suite/fat/test_bases.rb`,
+  `test/spec/lib/fsimg_spec/fat/builder.rb`): on FreeBSD 16.0-CURRENT,
+  `test_builder_bases_pass_the_checkers` fails at "fat16 at the threshold"
+  with `fsck_msdosfs -n` exit 8: crossed chains near cluster 4080 and chains
+  ending in free clusters, the pattern of 12-bit FAT decoding. macOS
+  `fsck_msdos`, mtools and fatcat accept the image, and the 140 FAT cases pass
+  on that host, so `test/spec.sh` fails there only on this base. Establish
+  from the FreeBSD source whether its FAT12/FAT16 cutover differs from the
+  specification's 4085; then either fix the builder or record the checker's
+  deviation as a cited host-specific skip for that one base.
+
 * [Medium] **Worker sanitizer exit after an error frame is lost**
   (`cmd/fsimg/worker-parent.c`): after the parser worker sends its final
   `FSIMG_FRAME_ERROR`, `finish_operation()` calls `cleanup_operation()`, which
