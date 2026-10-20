@@ -71,6 +71,10 @@ Captures are in `~/qnx65-vm/captures-qnx4/` (`FSIMG_QNX4_NATIVE`), made with
 `tools/qnx/vm/capture.sh` on the 64 MiB `hd0` pre-filled with `0xAA`, and
 decoded with `tools/qnx/decode/q4dump.py`. Each `NAME.txt` holds the guest
 commands and full output. Population recipes are `tools/qnx/guest/pop4.sh`.
+`q4-manifest-NAME` records the native manifest of capture `NAME`: the image
+loaded back onto `hd0`, mounted read-only and listed by
+`tools/qnx/guest/manifest4.sh` (`ls -ld` of every path in sorted order and
+`cksum` of every regular file).
 
 * **Whole-disk volumes** use `dinit -hq /dev/hd0` (131072 blocks).
 * **Exact block counts** use a regular file: `dinit -hq -S BYTES FILE` on a
