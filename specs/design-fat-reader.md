@@ -12,14 +12,23 @@ examples, with provenance in [references](../docs/references.md).
 Opening reads the 512-byte boot prefix and validates the jump, signature,
 sector size, power-of-two sectors per cluster, reserved area, table count,
 table capacity, root layout, and declared length against its input slice.
+The reserved area, the tables and the root region must end within the
+declared volume, and a data region of at least one cluster must follow them.
 Cluster count determines the variant at the 4,085 and 65,525 boundaries.
 The last valid cluster is `MAX = CountOfClusters + 1`; links above MAX and
-below the variant's bad-cluster marker are reserved. Geometry excludes the
-bad marker and higher values from allocatable cluster identifiers. The
+below the variant's bad-cluster marker are reserved. A cluster count whose
+MAX would reach the bad marker is corrupt, so no allocatable cluster
+identifier is the bad marker or a higher value. The
 supported profile accepts 512/1024/2048/4096-byte sectors, one or two FATs,
 and allocation units through 512 KiB. Any nonzero FAT count is legal; once
 the region geometry is valid, a count above two is a recognized volume
 reported as unsupported. FAT32 revision zero is supported.
+On FAT32, opening range-checks the structure pointers: `BPB_FSInfo` names a
+reserved-area sector after the boot sector, and a nonzero `BPB_BkBootSec` a
+sector of the reserved area. `0xFFFF` in either means the structure is
+absent. The structures they locate are not read at open. Opening refuses as
+corrupt a FAT32 `BPB_ExtFlags` with a reserved bit (4-6 or 8-15) set, or one
+that disables mirroring and selects an active table beyond the table count.
 An explicit format must match the validated variant. The FAT probe does not
 match an exFAT boot record, and a forced FAT name on one fails BPB
 validation. Opening does not enumerate directories or read file payloads.
@@ -27,8 +36,9 @@ validation. Opening does not enumerate directories or read file payloads.
 One bounded table window serves FAT entry decoding, including FAT12 entries
 crossing a window boundary. Mirrored tables must agree for every decoded entry;
 full verification compares all meaningful entries. FAT32 nonmirrored mode uses
-only its declared active table. Reserved entries, dirty/error flags, FSInfo,
-and backup boot geometry are checked within their named verification scope.
+only its declared active table. Reserved entries, dirty/error flags, FSInfo
+contents, and the backup boot record are checked within their named
+verification scope.
 Mirrored mode ignores the inactive selector nibble. Full verification also
 requires the declared backup BPB bytes to match the primary copy, including
 ignored fields: readability of the active volume and consistency of its recovery

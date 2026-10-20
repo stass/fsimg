@@ -33,6 +33,42 @@
   bases alone. Add the `newfs_msdos` formatter adapter, and read every base
   with fatcat as a secondary reader where `configure` found it.
 
+* [Medium] **Spec harness random draws never reach fsimg**
+  (`test/spec/suite/fat/test_rules.rb`, `test/spec/lib/fsimg_spec/fat/witnesses.rb`):
+  PropCheck's field draws are classified in memory only. The `quick` profile
+  also runs about 30 drawn cases per variant through fsimg; run that sample.
+
+* [Medium] **Spec harness FAT acceptance asserted only at `info`**
+  (`test/spec/lib/fsimg_spec/fat/model.rb`, `test/spec/lib/fsimg_spec/fat/cases.rb`):
+  valid and `must_accept` FAT witnesses run every reading stage, but assert
+  acceptance only at `info`, because the model leaves the directory, file
+  and verification scopes unclassified; `ls`, `extract` and `verify` assert
+  only that they run without a fault. Milestone B2's table and directory
+  decoder, or classifying an unmutated builder base's known tree, makes
+  them assert acceptance.
+
+* [Low] **Spec harness FAT witness gaps**
+  (`test/spec/lib/fsimg_spec/fat/witnesses.rb`):
+  - `fat.geometry.max_cluster` has only a multi-rule witness, which also
+    exceeds its image and FAT. Isolating it needs a sparse image of about
+    128 GiB, above the `deep` profile's 64 GiB image ceiling.
+  - Common-BPB field witnesses and draws vary the FAT12 base only; vary the
+    FAT16 and FAT32 bases as well.
+  - No witness puts the backup BPB sector past 29, where the builder can no
+    longer render the three-sector record, so the accepted `BPB_BkBootSec`
+    of 30 or 31 with 32 reserved sectors has no standing witness; add a
+    mutation witness that places a backup BPB there.
+
+* [Low] **Spec harness FAT rule wiring** (`test/spec/lib/fsimg_spec/fat/rules.rb`,
+  `witnesses.rb`, `cases.rb`):
+  - `Rules` names `Witnesses` domain constants and `Witnesses` reads
+    `Rules::FIELDS`, keyed by rule id, to tell field rules from relational
+    ones. Break the cycle, for example by making a rule's field part of the
+    rule.
+  - A case's recipe records the base's variant as its format, not the variant
+    the mutated image decodes to (documented in `Cases#recipe`). Decide which
+    one picks the format suite on replay.
+
 * [Low] **Scoped ownership intervals** (`lib/formats/fat/verify.c`,
   `lib/formats/exfat/verify.c`): extract the duplicate ownership-interval
   sorting and cursor checks into one bounded utility, the last item of the

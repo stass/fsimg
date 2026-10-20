@@ -19,6 +19,18 @@ format-independent; each format adds its own layouts, model, rules, builder and
 tool adapters. The [plan](../docs/spec-testing-plan.md) orders the
 construction.
 
+The harness's rules cover what the `test/fat.c` cases check about images:
+the BPB, geometry, table count and variant thresholds, FAT chains,
+directory entries, names and long names, FSInfo contents, the backup boot
+record and mirrored tables. The remaining `test/fat.c` cases stay in C as
+intentionally white-box, because they test the library's interfaces,
+internals and injected failures rather than a specification rule: corrupt
+metadata scratch name and extent records, allocation-failure and short-read
+injection, premature EOF under the reader, cancellation, `FSIMG_ELIMIT`
+resource limits, `FSIMG_ESTATE` call ordering, a source changed under the
+reader, a corrupt writer plan, and the detection of a boot record that
+claims exFAT.
+
 ## Data flow
 
 One classification decides every expectation. The harness decodes each image
@@ -748,6 +760,18 @@ sector size, cluster size, reserved count, table count, root entries and
 cluster count. A targeted witness replaces one parameter with an out-of-domain
 value and recomputes the rest from it.
 
+A FAT32 boot record and its backup are one logical record. When the base has
+a backup boot sector, the generators repeat every byte or integer mutation
+that lies within the boot sector at the same offset in the backup, right
+after the original, so a witness changes one field, not the agreement
+between the copies. Mutations beyond the boot sector and truncations are not
+repeated, and a truncation must be a witness's last mutation, so no change
+or copy applies to a cut image. A mutation that straddles the end of the
+boot sector would change half a record, and a mutation of another kind has
+no defined copy; a generator that makes either, or that truncates before
+another mutation, fails with a harness error. Divergence between the copies
+is generated only on purpose, as a witness of the backup's own rule.
+
 PropCheck explores beyond the enumerated points. It generates recipes, not raw
 images, so shrinking yields meaningful minimal cases. Random invalid draws need
 no filter, because classification derives their expectation. Random draws
@@ -787,7 +811,7 @@ rule families, and would then stay optional and outside CI.
 
 | Profile | Entry point | Contents | Target |
 | --- | --- | --- | --- |
-| `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness through fsimg at the first stage that checks its violation, and valid witnesses through every stage; 100-300 PropCheck examples, of which about 30 per variant run fsimg; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
+| `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness through fsimg: a valid one or one of a `must_accept` rule through every reading stage, and one of any other policy through the first stage that checks its rule; 100-300 PropCheck examples, of which about 30 per variant run fsimg; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
 | `nightly` | `make check-spec-extended` | Thousands of random examples, deterministic witnesses through every stage, 50-150 oracle cross-checks, class C cases | 10-30 min |
 | `deep` | `make check-spec-deep` | Large volumes, broad mutation matrices, every oracle on every case | Explicit opt-in |
 

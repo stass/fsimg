@@ -58,8 +58,9 @@ module FsimgSpec
 
     # A defect of the generator or builder that made this case, or nil
     # (specs/design-spec-testing.md#cases). A valid case must violate no
-    # rule and leave no scope unclassified, since the model's bounds exceed
-    # the run's limits. A targeted case must name a rule with violations,
+    # rule. It may leave scopes unclassified while the model does not decode
+    # the allocation tables and directories (docs/spec-testing-plan.md, B2).
+    # A targeted case must name a rule with violations,
     # run a stage that checks it, and violate it. A violation the image
     # alone cannot show is exempt from that last check: one of a
     # destination rule depends on the host's name trials, and one in a
@@ -70,8 +71,6 @@ module FsimgSpec
       case recipe.kind
       in "valid" if violated.any?
         "#{recipe.id} is meant valid but violates #{violated.join(", ")}"
-      in "valid" if classification.unclassified.any?
-        "#{recipe.id} is meant valid but leaves #{classification.unclassified.join(", ")} unclassified"
       in "targeted" if intended_rule.policy == "equivalent_contents"
         "#{recipe.id} targets #{intended_rule.id}, a freedom of the format with no violations"
       in "targeted" if (intended_rule.stages & recipe.stages).empty?

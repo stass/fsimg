@@ -93,6 +93,10 @@ module FsimgSpec
     def stages = scopes.flat_map { SCOPE_STAGES.fetch(_1) }.uniq
   end
 
+  # What rules read about a run beyond the decoded model: the format a
+  # case forces with -t, or nil.
+  Environment = Data.define(:forced_format)
+
   # The decoded model's violations and the scopes it could not decode
   # completely; together they decide every expectation of a case.
   Classification = Data.define(:violations, :unclassified) do

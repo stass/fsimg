@@ -96,12 +96,6 @@ class TestCase < Minitest::Test
     assert_raises(FsimgSpec::RecipeError) { recipe(kind: "targeted") }
   end
 
-  def test_valid_case_with_an_unclassified_scope_is_a_harness_defect
-    classification = classify(REGISTRY, unclassified: ["files"])
-
-    assert_match(/leaves files unclassified/, FsimgSpec::Case.derive(recipe, classification, registry: REGISTRY).harness_defect)
-  end
-
   def test_targeted_case_its_stages_cannot_check_is_a_harness_defect
     assert_match(/runs no stage that checks/, derive(recipe(intended: "t.crosslink", stages: %w[info ls]), "t.crosslink" => true).harness_defect)
   end

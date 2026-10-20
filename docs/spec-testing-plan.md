@@ -358,9 +358,9 @@ review and commit gates.
   - PropCheck draws over the field's full width.
 * Mark each case `single_rule` or `multi_rule`, and report collateral
   violations.
-* Run cases end to end within the quick budget: each deterministic witness
-  through the first stage that checks its violation, and valid witnesses
-  through every stage.
+* Run cases end to end within the quick budget: valid witnesses and those of
+  `must_accept` rules through every reading stage, and the witnesses of any
+  other policy through the first stage that checks their rule.
 * Inventory the existing `test/fat.c` corruption and detection cases against
   the rules. Every gap either becomes a Ruby case or is noted in the design
   as intentionally white-box.
@@ -437,11 +437,22 @@ review and commit gates.
 * **B2, semantic mutations.**
   - `model.rb` gains a bounded FAT-table and directory decoder for small
     images.
+  - With the decoder, `Case#harness_defect` again refuses a valid case that
+    leaves a scope unclassified, as the cases design requires.
   - The mutations are the semantic
     [mutations](../specs/design-spec-testing.md#mutations) (`set_fat_entry`,
     `set_directory_entry`, `splice_chain` and `relocate_chain`), plus LFN
     order, checksum and UTF-16 faults, FSInfo signatures and hints, backup
     boot divergence, and mirror divergence.
+  - The rules include the `test/fat.c` cases that S6 left without one:
+    FAT chains (a cycle, a link to a free, bad or out-of-range cluster, a
+    short or long chain, a directory cycle, crosslinks, an orphan, a dirty
+    `FAT[1]`); directory entries (a duplicate short name, timestamps,
+    attribute `0x80`, a shared or ancestor directory, `.` and `..`, labels);
+    names and long names (a lowercase short name, `/`, a leading space, LFN
+    ordinal, checksum, padding, type, orphan and collision faults); FSInfo
+    contents; backup boot contents; and mirror agreement. With them come
+    `fat.fat.media_entry` and `fat.fat.eoc_entry`.
   - Expected stages follow the
     [stage policy](../specs/design-spec-testing.md#stage-policy), including
     its file-chain crosslink example.
@@ -504,48 +515,106 @@ review and commit gates.
 ## Initial FAT rule set
 
 The rules are cited by structure and field name from the Microsoft FAT
-specification. The column "fsimg (hypothesis)" comes from reading
-`lib/formats/fat/codec.c` and `read.c`. It is a hypothesis that S6 confirms
-or corrects; it is not an assertion.
+specification; `test/spec/lib/fsimg_spec/fat/rules.rb` registers them. Every
+rule reads the boot sector, which the reader checks when it opens the volume,
+so every scope is `open`. The category column names the policy when it is not
+`must_reject`. The column "fsimg (observed)" records what the S6 witnesses
+observed. A witness of a rule whose policy is not `must_accept` runs `info`,
+the first stage that checks its rule. A valid witness, or one of a `must_accept` rule, runs every
+reading stage, but only `info` asserts acceptance: the model leaves the
+directory, file and verification scopes unclassified, so `ls`, `extract` and
+`verify` assert only that they run without a fault. All 139 deterministic
+witnesses agree with the expectations their rules derive.
 
-| Rule ID | Requirement | Category | fsimg (hypothesis) |
+| Rule ID | Requirement | Category | fsimg (observed) |
 | --- | --- | --- | --- |
+| `fat.boot.present` | The image holds the 512-byte boot sector | normative | `info`: `EFORMAT` for FAT12 images cut to 0, 36, 62 and 511 bytes and a FAT32 image cut to 90 |
 | `fat.boot.jump` | `BS_jmpBoot` is `EB ?? 90` or `E9 ?? ??` | normative | `info`: `EFORMAT` (no claim) |
 | `fat.boot.signature` | `0x55 0xAA` at offsets 510 and 511 | normative | `info`: `EFORMAT` |
 | `fat.bpb.bytes_per_sector` | 512, 1024, 2048 or 4096 | normative | `info`: `EFORMAT` |
 | `fat.bpb.sectors_per_cluster` | Power of two, 1-128 | normative | `info`: `EFORMAT` |
-| `fat.bpb.cluster_bytes` | Bytes per cluster above 32 KiB is legal but discouraged | advisory | Accepted up to 512 KiB |
 | `fat.bpb.reserved_sectors` | Nonzero | normative | `info`: `EFORMAT` |
 | `fat.bpb.num_fats` | Nonzero | normative | `info`: `EFORMAT` for zero |
-| `fat.bpb.num_fats.supported` | fsimg reads one or two FATs | profile (`optional_feature`) | `info`: `EUNSUPPORTED` above two |
+| `fat.bpb.num_fats.supported` | fsimg reads one or two FATs | profile (`optional_feature`) | `info`: `EUNSUPPORTED` for 3, 254 and 255 |
 | `fat.bpb.media` | `0xF0` or `0xF8`-`0xFF` | normative | `info`: `EFORMAT` |
-| `fat.bpb.total_sectors` | `BPB_TotSec16` or `BPB_TotSec32` selection; not both nonzero | normative | `info`: `ECORRUPT` |
+| `fat.bpb.total_sectors` | Exactly one of `BPB_TotSec16` and `BPB_TotSec32` is nonzero; FAT32 uses `BPB_TotSec32` | normative | `info`: `ECORRUPT`; a FAT12 volume that counts only in `BPB_TotSec32` is accepted |
 | `fat.bpb.fat_size` | `BPB_FATSz16` nonzero for FAT12/16 and zero for FAT32 | normative | `info`: `ECORRUPT` |
-| `fat.bpb.root_entries` | Zero for FAT32; nonzero for FAT12/16; aligned to sector size | normative | `info`: `ECORRUPT` for a zero or nonzero count in the wrong variant; alignment is rounded up, not checked |
-| `fat.geometry.data_region` | Data region is positive | normative | `info`: `ECORRUPT` |
-| `fat.geometry.within_image` | Declared volume fits within the image or slice (truncation) | normative | `info`: `ECORRUPT` |
-| `fat.geometry.fat_capacity` | FAT holds `clusters + 2` entries | normative | `info`: `ECORRUPT` |
-| `fat.geometry.variant` | Variant follows the cluster-count thresholds; a forced `-t` must match | normative | Accepts all four threshold neighbours; mismatched `-t` gives `EFORMAT` |
-| `fat.geometry.max_cluster` | Maximum cluster stays below the bad-cluster marker | normative | `info`: `ECORRUPT` |
-| `fat.fat.media_entry` | `FAT[0]` low byte equals `BPB_Media`; scope `verification` | normative | `info`: `ECORRUPT` until the check moves to `verify` (`TODO.md`) |
-| `fat.fat.eoc_entry` | `FAT[1]` holds an end-of-chain value; the FAT16/32 flag bits are separate; scope `verification` | normative | `info`: `ECORRUPT` on the value until the check moves to `verify` (`TODO.md`); flags only at `verify` |
-| `fat32.bpb.ext_flags` | Bits 4-6 and 8-15 are zero; when mirroring is disabled, the active FAT is less than the FAT count | normative | `info`: `ECORRUPT`; mirrored mode ignores the active nibble |
-| `fat32.bpb.fs_version` | `BPB_FSVer` is `0:0` | normative (`must_reject`, `EUNSUPPORTED`) | `info`: `EUNSUPPORTED` |
-| `fat32.bpb.reserved` | `BPB_Reserved` (bytes 52-63) is zero | normative (`must_reject`, `EUNSUPPORTED`) | `info`: `EUNSUPPORTED` |
+| `fat.bpb.root_entries` | `BPB_RootEntCnt` zero for FAT32 and nonzero for FAT12/16 | normative | `info`: `ECORRUPT` |
+| `fat.bpb.root_entries.aligned` | On FAT12/16, the root region fills whole sectors | advisory (`must_accept`) | Accepted by `info`; the root region is rounded up |
+| `fat.geometry.regions` | The total sector count includes the reserved area, the FATs and the root region | normative | `info`: `ECORRUPT` |
+| `fat.geometry.data_region` | Where the regions fit, at least one data cluster follows them | profile | `info`: `ECORRUPT` |
+| `fat.geometry.within_image` | The declared volume fits within the image or slice | normative | `info`: `ECORRUPT` |
+| `fat.geometry.fat_capacity` | Each FAT holds `CountOfClusters + 2` entries | normative | `info`: `ECORRUPT` |
+| `fat.geometry.max_cluster` | The largest cluster number stays below the bad-cluster marker | normative (`safety_only`) | `info`: `ECORRUPT` on its one witness, which also exceeds the image and its FAT |
+| `fat.geometry.forced_variant` | A format forced with `-t` matches the variant the cluster count selects | profile | `info`: `EFORMAT` on a mismatch; a matching `-t` is accepted |
+| `fat32.bpb.ext_flags` | When mirroring is disabled, the active FAT (bits 0-3) is less than the FAT count | normative | `info`: `ECORRUPT`; mirrored mode ignores the active nibble |
+| `fat32.bpb.ext_flags.reserved` | `BPB_ExtFlags` bits 4-6 and 8-15 are zero | profile | `info`: `ECORRUPT` |
+| `fat32.bpb.fs_version` | `BPB_FSVer` is `0:0` | normative (status `EUNSUPPORTED`) | `info`: `EUNSUPPORTED` |
+| `fat32.bpb.reserved` | `BPB_Reserved` (bytes 52-63) is zero | normative (status `EUNSUPPORTED`) | `info`: `EUNSUPPORTED` |
 | `fat32.bpb.root_cluster` | 2 to the maximum cluster | normative | `info`: `ECORRUPT` |
-| `fat32.bpb.fsinfo_sector` | `BPB_FSInfo` lies within the reserved area and is not sector 0 | normative | `info`: `ECORRUPT`; `0xFFFF` is accepted as no FSInfo |
-| `fat32.bpb.backup_boot_sector` | A nonzero `BPB_BkBootSec` lies within the reserved area | normative | `info`: `ECORRUPT`; `0xFFFF` is accepted as no backup |
-| `fat32.bpb.backup_boot_sector.recommended` | 6 is the recommended backup boot sector | advisory (`must_accept`) | Accepted |
+| `fat32.bpb.fsinfo_sector` | `BPB_FSInfo` is `0xFFFF` or a reserved-area sector after the boot sector | normative | `info`: `ECORRUPT` for 0, 32 of 32 reserved sectors, and `0xFFFE` |
+| `fat32.bpb.fsinfo_sector.recommended` | `BPB_FSInfo` is 1 | advisory (`must_accept`) | Accepted by `info` at 2 and 31 |
+| `fat32.bpb.fsinfo_sector.absent` | `BPB_FSInfo` is not `0xFFFF` | advisory (`must_accept`) | Accepted by `info` as no FSInfo |
+| `fat32.bpb.backup_boot_sector` | `BPB_BkBootSec` is 0, `0xFFFF` or a reserved-area sector after the boot sector | normative | `info`: `ECORRUPT` for 32 of 32 reserved sectors and `0xFFFE` |
+| `fat32.bpb.backup_boot_sector.recommended` | `BPB_BkBootSec` is 0 or 6 | advisory (`must_accept`) | Accepted by `info` at 29 |
+| `fat32.bpb.backup_boot_sector.absent` | `BPB_BkBootSec` is not `0xFFFF` | advisory (`must_accept`) | Accepted by `info` as no backup |
 
 Twelve well-isolated rules are worth more than thirty unverified ones.
 
+The rule set reads the specification as follows where it is not decisive:
+
+* **Cluster size.** The specification states no limit on bytes per cluster,
+  so no rule bounds it. The valid witness `fat.valid.cluster_bytes_524288`,
+  4096-byte sectors in 128-sector clusters, is accepted by `info`, and every
+  reading stage runs without a fault.
+* **Variant thresholds.** The cluster count alone selects the variant. Valid
+  witnesses at 4084, 4085, 65524 and 65525 clusters are accepted by `info`,
+  and every reading stage runs without a fault; `fat.geometry.forced_variant`
+  covers only a forced `-t`.
+* **Maximum cluster.** The specification says no FAT32 volume *should* hold
+  allocatable cluster numbers at or above `0x0FFFFFF7`, so a reader may refuse
+  such a volume or exclude those clusters from allocation, and the rule is
+  `safety_only`. fsimg refuses it with `ECORRUPT`. The rule has no isolating
+  witness: one that fits its image and its FAT needs a sparse image of about
+  128 GiB.
+* **Structure pointers.** Section 3.3 calls `BPB_FSInfo` "usually 1" and
+  `BPB_BkBootSec` "0 or 6". Section 5 says FSInfo "must be located at sector
+  #1", and section 3.6 that sector 6 "must contain a copy of the BPB". The rule
+  set reads both as requirements of formatting: a reader follows the pointer,
+  so another reserved-area sector is advisory and fsimg must accept it. The
+  recommended values are those of section 3.3: FSInfo at 1, and the backup
+  boot record at 6 or, with 0, none.
+* **Reserved `BPB_ExtFlags` bits.** Section 3.3 calls bits 4-6 and 8-15
+  reserved without saying what they hold, unlike `BPB_Reserved`, which "must
+  be set to 0x0". The rule that they are zero is therefore the reader's
+  profile, `fat32.bpb.ext_flags.reserved`, and the normative
+  `fat32.bpb.ext_flags` covers only the active FAT.
+* **Absent structures.** The specification gives `0xFFFF` in either pointer
+  no meaning. Compatible readers, and fsimg, take it to mean the structure is
+  absent, so the `.absent` rules are advisory and must accept.
+* **Backup boot record.** Section 3.6 places a copy of the whole three-sector
+  boot record at `BPB_BkBootSec`, but a reader uses only its first, the BPB
+  copy. The rule requires only that sector inside the reserved area; the rest
+  of the record is formatting. fsimg therefore accepts `BPB_BkBootSec` 30 with
+  32 reserved sectors.
+* **FAT32 backup copies.** A FAT32 witness's boot-sector mutations are
+  mirrored into its backup boot sector, so each witness changes one field of
+  the one logical boot record, never the agreement between the copies.
+* **Reserved FAT entries.** `fat.fat.media_entry` (`FAT[0]` low byte equals
+  `BPB_Media`) and `fat.fat.eoc_entry` (`FAT[1]` holds an end-of-chain value,
+  with the FAT16/32 flag bits separate) have scope `verification`. Until the
+  model decodes the FAT, every case leaves that scope unclassified, so both
+  rules belong to milestone B2. FSInfo contents and the backup boot record's
+  agreement with the primary are B2 rules for the same reason.
+
 ## Expected early findings
 
-* **Strict verification fields.** The first witnesses of the fields the
+* **Strict verification fields.** The B2 witnesses of the fields the
   [stage policy](../specs/design-spec-testing.md#stage-policy) places in
   scope `verification` confirm that `info`, `ls` and `extract` accept them.
   The `FAT[0]` and `FAT[1]` checks at open are expected to fail this until
-  the `TODO.md` item lands.
+  the `TODO.md` item lands. The S6 boot-sector and geometry witnesses found no
+  disagreement with fsimg.
 * **Writer boundary interoperability.** The writer stays 16 clusters away from
   the variant cutovers unless `-s` is given. B1 checks the exact-threshold
   images that `-s` permits against fsck and mtools, which may themselves
