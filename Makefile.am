@@ -178,7 +178,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
 	docs/references.md docs/qualification.md .github/workflows/check.yml \
 	docs/qnx6-research.md docs/qnx6-infrastructure.md docs/todo-qnx6.md \
-	docs/spec-testing-plan.md \
+	docs/spec-testing-plan.md docs/qnx4-plan.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \

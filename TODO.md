@@ -289,8 +289,8 @@
   security review of the worker's metadata syscalls.
 
 * [Medium] **Additional inputs and formats** (`lib/source/`, `lib/formats/`):
-  design independent NTFS and QNX4 reader profiles as concrete needs arise.
-  Follow the
+  design an independent NTFS reader profile as concrete needs arise; QNX4
+  follows its [plan](docs/qnx4-plan.md). Follow the
   [extension sequence](docs/implementation-plan.md#extension-sequence); each
   format needs a bounded-resource design and an independent compatibility corpus.
 

@@ -489,8 +489,12 @@ stage again one reviewed commit:
 Later container and compression profiles each need their own profile in the
 layer design first.
 
-Other extensions receive their own designs before code: manifest import;
-reader-only NTFS and QNX4 profiles with independent corpora; additional
+QNX4 follows its own [plan](qnx4-plan.md): native evidence from QNX 6.5.0 and
+the PCM 3.1 navigation partition, a format and a driver design, a reader and
+verifier, and a writer registered only after native qualification.
+
+Other extensions receive their own designs before code: manifest import; a
+reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order
 follows concrete user needs. They cannot weaken the core budgets; the only
 image spool is the explicit, budgeted one of the layer design. One-shot
