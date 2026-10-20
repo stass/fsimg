@@ -438,14 +438,17 @@ review and commit gates.
       `create` and the created image's for the reading stages, so
       `Case#recorded` and `Case#drift` accept it; creation recipes record and
       replay; the case phase supplies the `created` hook. A created image
-      must classify with no violation, or the case is a harness defect.
+      must classify with no violation, or `create` fails, as rule 3 of the
+      [expectation derivation](../specs/design-spec-testing.md#expectation-derivation)
+      states: the image is fsimg's output, not a generator's.
     - Seeded failures: a stub `ls` that drops one entry, an `extract` whose
       file differs by one byte, and a `verify` that reports one file too few
       each fail their case; a creation recipe with an edited recorded
       expectation fails the drift check.
-    - **Gate:** every valid and `must_accept` witness asserts acceptance at
-      `ls`, `extract` and `verify` with records that match the known tree; a
-      creation recipe round-trips through a failure record and `bin/replay`.
+    - **Gate:** every valid and `must_accept` witness on an unmutated base
+      asserts acceptance at `ls`, `extract` and `verify` with records that
+      match the known tree; a creation recipe round-trips through a failure
+      record and `bin/replay`.
   - **B1b, name trials and destination rules**, as the design's
     [host names](../specs/design-spec-testing.md#host-names) section states.
     - Each extract case's sibling sets go through `trials/`; `EEXIST` gives a
@@ -606,10 +609,12 @@ so every scope is `open`. The category column names the policy when it is not
 `must_reject`. The column "fsimg (observed)" records what the S6 witnesses
 observed. A witness of a rule whose policy is not `must_accept` runs `info`,
 the first stage that checks its rule. A valid witness, or one of a `must_accept` rule, runs every
-reading stage, but only `info` asserts acceptance: the model leaves the
-directory, file and verification scopes unclassified, so `ls`, `extract` and
-`verify` assert only that they run without a fault. All 139 deterministic
-witnesses agree with the expectations their rules derive.
+reading stage. On an unmutated base, each stage asserts acceptance, and `ls`,
+`extract` and `verify` compare their records with the base's known tree; a
+mutated base leaves the directory, file and verification scopes unclassified,
+so there `ls`, `extract` and `verify` assert only that they run without a
+fault. All 139 deterministic witnesses agree with the expectations their rules
+derive.
 
 | Rule ID | Requirement | Category | fsimg (observed) |
 | --- | --- | --- | --- |

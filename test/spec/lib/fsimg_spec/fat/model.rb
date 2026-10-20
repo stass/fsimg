@@ -16,23 +16,37 @@ module FsimgSpec
     # FAT32 extension; a FAT32 extension is never read over a FAT12/16 BPB.
     # fat32_extension says which was read, and is Undefined with the BPB.
     #
-    # fat and root_directory stand for the structures this model does not
-    # decode; they are Undefined, and every scope that reads them is
-    # unclassified, derived from them rather than listed.
-    class Model < Data.define(:image_length, :common, :fat32_extension, :extension, :signature, :geometry,
-                              :fat, :root_directory)
+    # The model does not decode the allocation tables or directories. tree
+    # is the known tree the case says its image holds, an Array of
+    # WalkedEntry that KnownTree builds: an unmutated base its recipe's
+    # tree, an image fsimg created the source tree the harness wrote
+    # (specs/design-spec-testing.md#cases). A mutated image's tree is
+    # Undefined, and every scope that reads it is unclassified, derived from
+    # it rather than listed.
+    class Model < Data.define(:image_length, :common, :fat32_extension, :extension, :signature, :geometry, :tree)
       # The boot sector records lie in the volume's first 512 bytes,
       # whatever BPB_BytsPerSec says.
       BOOT_SECTOR_BYTES = 512
-      # The structures each scope of the contract (SCOPE_STAGES) reads
-      # beyond the boot sector. Every scope is listed, so a scope missing
-      # here can never pass for decoded.
+      # What each scope of an image (SCOPE_STAGES but input, which a
+      # SourceModel answers) reads beyond the boot sector. Every scope is
+      # listed, so a scope missing here can never pass for decoded. The
+      # destination scope reads the tree's names, whose name trials decide
+      # its violations (specs/design-spec-testing.md#host-names).
       SCOPE_INPUTS = {
-        "open" => [], "directories" => %i[fat root_directory], "files" => %i[fat root_directory],
-        "verification" => %i[fat root_directory], "destination" => %i[root_directory], "input" => []
+        "open" => [], "directories" => %i[tree], "files" => %i[tree], "verification" => %i[tree], "destination" => %i[tree]
       }.freeze
+      UNKNOWN_TREE = Undefined.new(reason: "the tree of an image no case vouches for, such as a mutated one, is unknown")
+      # The differences of each kind a tree comparison names before it
+      # counts the rest, so a tree that differs everywhere stays a short
+      # message.
+      SHOWN_DIFFERENCES = 3
+      # The entry kinds a known tree holds.
+      ENTRY_KINDS = %w[file directory].freeze
+      # The validation scope each verification stage must report
+      # (specs/design-cli.md#verification-information-and-formats).
+      VALIDATION_SCOPES = { "verify" => "structural", "verify-deep" => "initialized-payload" }.freeze
 
-      def self.decode(image)
+      def self.decode(image, tree: UNKNOWN_TREE)
         sector = image.read(0, BOOT_SECTOR_BYTES)
         common = record(Layout::CommonBpb, sector)
         fat32_extension = FsimgSpec.derive(common) { _1.bpb_fat_sz16.zero? }
@@ -42,8 +56,7 @@ module FsimgSpec
           common:, fat32_extension:, extension:,
           signature: record(Layout::Signature, sector),
           geometry: geometry(common, fat32_extension, extension),
-          fat: Undefined.new(reason: "the model does not decode the allocation tables"),
-          root_directory: Undefined.new(reason: "the model does not decode directories")
+          tree:
         )
       end
 
@@ -62,20 +75,104 @@ module FsimgSpec
       def unclassified_scopes =
         SCOPE_INPUTS.select { |_, inputs| inputs.any? { FsimgSpec.undefined?(public_send(_1)) } }.keys
 
-      # How fsimg's records for an accepting stage disagree with the model.
-      # fsimg writes large integers as JSON strings, so values compare as
-      # text.
-      def record_problems(stage, records)
-        return [] unless stage == "info"
+      # How fsimg's records for an accepting stage, a StageResult, disagree
+      # with the model (specs/design-spec-testing.md#expectation-derivation):
+      # info with the boot sector, ls with the known tree's paths, types and
+      # file sizes, extract's walked destination with the whole known tree,
+      # SHA-256 digests included, and verify with its file, directory and
+      # logical-byte counts. fsimg writes large integers as JSON strings,
+      # so values compare as text. The records are fsimg's, the output under
+      # test, so every value a message quotes is shown, and a stage must
+      # write exactly one info or verify record. The stages after info are
+      # judged only where the tree is known, since otherwise their scopes
+      # are unclassified and no expectation asks for records.
+      def record_problems(result)
+        records = result.outcome.records
+        case result.stage
+        in "create" then raise Error, "an image model does not judge create; its SourceModel does"
+        in "info" then info_problems(records)
+        in _ if FsimgSpec.undefined?(tree) then []
+        in "ls" then tree_differences("ls", actual: actual_listing(records), expected: expected_listing(tree))
+        in "extract" then tree_differences("extract", actual: KnownTree.from_walk(result.tree), expected: tree)
+        in "verify" | "verify-deep" then count_problems(result.stage, records)
+        end
+      end
 
-        info = records.find { _1["type"] == "info" }
-        return ["info wrote no info record"] unless info
+      private
+
+      def info_problems(records)
+        info, problem = sole_record(records, "info", stage: "info")
+        return [problem] if problem
 
         INFO_FIELDS.filter_map do |field, derive|
           expected = derive.call(self)
           next if FsimgSpec.undefined?(expected) || info[field].to_s == expected.to_s
 
           "info reports #{field} #{FsimgSpec.shown(info[field])}, the model derives #{expected}"
+        end
+      end
+
+      # The one record of type that stage wrote and nil, or nil and why
+      # there is not exactly one.
+      def sole_record(records, type, stage:)
+        found = records.select { _1["type"] == type }
+        found.one? ? [found.first, nil] : [nil, "#{stage} wrote #{found.size} #{type} records, not one"]
+      end
+
+      # The known tree as ls lists it: each path from the root, and a
+      # file's size without its digest.
+      def expected_listing(tree) = tree.map { _1.with(path: "/".b + _1.path, sha256: nil) }
+
+      # ls's entry records in the form of expected_listing. A kind or size
+      # that is not one a known tree holds is kept shown, so it differs: a
+      # size must be the decimal JSON string fsimg writes for a large
+      # integer, since a size is compared as an Integer, not as text.
+      def actual_listing(records)
+        records.select { _1["type"] == "entry" }.map do |entry|
+          kind = entry["kind"]
+          WalkedEntry.new(path: entry["path"].to_s.b, type: ENTRY_KINDS.include?(kind) ? kind : FsimgSpec.shown(kind),
+                          size: kind == "file" ? decimal(entry["size_bytes"]) : nil, sha256: nil)
+        end
+      end
+
+      # A JSON string of decimal digits as its Integer, or the value shown.
+      def decimal(value) = value.is_a?(String) && value.match?(/\A(0|[1-9][0-9]{0,19})\z/) ? Integer(value, 10) : FsimgSpec.shown(value)
+
+      # The entries of expected that actual lacks and those it adds beyond
+      # them; an entry that differs in type, size or digest is both, and
+      # one listed twice is unexpected the second time.
+      def tree_differences(stage, actual:, expected:)
+        { "lacks" => surplus(expected, actual), "has unexpected" => surplus(actual, expected) }.flat_map do |verb, entries|
+          shown = entries.first(SHOWN_DIFFERENCES).map { "#{stage} #{verb} #{described(_1)}" }
+          rest = entries.size - shown.size
+          rest.positive? ? [*shown, "#{stage} #{verb} #{rest} more"] : shown
+        end
+      end
+
+      # entries beyond other, counting repeats, as multisets differ.
+      def surplus(entries, other)
+        others = other.tally
+        entries.tally.flat_map { |entry, count| [entry] * [count - others.fetch(entry, 0), 0].max }
+      end
+
+      def described(entry) =
+        ["#{entry.type} #{FsimgSpec.shown(entry.path)}", ("of #{entry.size} bytes" if entry.size),
+         ("SHA-256 #{entry.sha256}" if entry.sha256)].compact.join(" ")
+
+      # The verify record's counts, completeness and validation scope.
+      # fsimg counts the root among the directories (include/fsimg.h,
+      # fsimg_verify_report_t), which the tree does not list.
+      def count_problems(stage, records)
+        verify, problem = sole_record(records, "verify", stage:)
+        return [problem] if problem
+
+        files = tree.select { _1.type == "file" }
+        expected = {
+          "complete" => true, "validation_scope" => VALIDATION_SCOPES.fetch(stage),
+          "files" => files.size, "directories" => tree.size - files.size + 1, "logical_bytes" => files.sum(&:size)
+        }
+        expected.filter_map do |field, value|
+          "#{stage} reports #{field} #{FsimgSpec.shown(verify[field])}, not #{value}" unless verify[field].to_s == value.to_s
         end
       end
 

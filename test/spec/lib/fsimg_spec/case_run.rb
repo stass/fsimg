@@ -47,8 +47,15 @@ module FsimgSpec
   #
   # A creation case needs created, which decodes the image create wrote
   # and answers its model and Classification: create is judged by the
-  # source tree, and the reading stages after it by the image it created.
+  # source model, and the reading stages after it by the image it created.
+  # An accepting create must also write an image that violates no rule
+  # (Case#created_image_problem); one that does fails create and ends the
+  # case.
   module CaseRun
+    # One stage's result with the case and model that judge it, and for an
+    # accepting create, why the image it wrote fails it, or nil.
+    Judged = Data.define(:result, :kase, :model, :image_problem)
+
     def self.call(kase, model:, image:, runner:, cases_directory:, sandbox:, created: nil, stages: kase.recipe.stages)
       raise HarnessError, "#{kase.recipe.id}: a creation case needs the created hook" if !kase.recipe.reading? && created.nil?
 
@@ -60,24 +67,28 @@ module FsimgSpec
       end
 
       judged = run_stages(kase, model:, runner:, directory:, sandbox:, stages:, created:)
-      failure = judged.lazy.filter_map { |result, judging_case, judging_model| failure(judging_case, judging_model, result) }.first
+      failure = judged.lazy.filter_map { failure(_1) }.first
       FileUtils.rm_r(directory, secure: true) unless failure
-      CaseResult.new(id: kase.recipe.id, verdict: failure ? "failed" : "passed", stages: judged.map(&:first), detail: failure)
+      CaseResult.new(id: kase.recipe.id, verdict: failure ? "failed" : "passed", stages: judged.map(&:result), detail: failure)
     end
 
-    # Each stage's result with the case and model that judge it, up to the
-    # stage that ends the case.
+    # Each stage's Judged, up to the stage that ends the case. Once create
+    # has accepted, the case and model that judge the later stages are the
+    # created image's.
     private_class_method def self.run_stages(kase, model:, runner:, directory:, sandbox:, stages:, created:)
       judged = []
       stages.each do |stage|
         result = runner.run(stage, recipe: kase.recipe, case_directory: directory, sandbox:)
-        judged << [result, kase, model]
-        break if ends_case?(result)
-
-        if result.stage == "create"
-          model, classification = created.call(File.join(directory, Runner::CREATED))
-          kase = kase.created(classification)
+        if result.stage == "create" && !ends_case?(result)
+          image_model, classification = created.call(File.join(directory, Runner::CREATED))
+          image_case = kase.created(classification)
+          judged << Judged.new(result:, kase:, model:, image_problem: image_case.created_image_problem)
+          kase = image_case
+          model = image_model
+        else
+          judged << Judged.new(result:, kase:, model:, image_problem: nil)
         end
+        break if ends_case?(result) || judged.last.image_problem
       end
       judged
     end
@@ -87,15 +98,18 @@ module FsimgSpec
     private_class_method def self.ends_case?(result) =
       !result.safe? || (result.stage == "create" && result.outcome.kind != "accepted")
 
-    # Why result fails the case, or nil.
-    private_class_method def self.failure(kase, model, result)
-      expected = kase.expected.fetch(result.stage)
+    # Why the judged stage fails the case, or nil.
+    private_class_method def self.failure(judged)
+      result = judged.result
+      expected = judged.kase.expected.fetch(result.stage)
       if !result.safe?
         "#{result.stage}: #{result.problems.join("; ")}"
       elsif !expected.satisfied_by?(result.outcome)
         "#{result.stage}: expected #{expected}, got #{result.outcome}#{" (#{result.outcome.detail})" if result.outcome.detail}"
+      elsif judged.image_problem
+        "#{result.stage}: #{judged.image_problem}"
       elsif result.outcome.kind == "accepted" && !expected.unclassified
-        model.record_problems(result.stage, result.outcome.records).then { _1.empty? ? nil : "#{result.stage}: #{_1.join("; ")}" }
+        judged.model.record_problems(result).then { _1.empty? ? nil : "#{result.stage}: #{_1.join("; ")}" }
       end
     end
   end

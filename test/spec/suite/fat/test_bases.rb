@@ -180,11 +180,11 @@ class TestFatBases < Minitest::Test
       bases.each do |name, base|
         fixture = Fat::Bases.materialize(base, cache:, shell:, tools: @tools, ceilings: CEILINGS)
         image = FsimgSpec::ImageView.open(fixture.image)
-        result = FsimgSpec::CaseRun.call(reading_case(name, base), model: Fat::Model.decode(image), image:,
-                                                                   runner:, cases_directory: File.join(results, "cases"), sandbox:)
+        model = Fat::Model.decode(image, tree: FsimgSpec::KnownTree.of(base.tree))
+        result = FsimgSpec::CaseRun.call(reading_case(name, base), model:, image:, runner:,
+                                                                   cases_directory: File.join(results, "cases"), sandbox:)
 
         assert_equal "passed", result.verdict, "#{name}: #{result.detail}"
-        assert_equal expected_tree(base.tree), walked_tree(result.stages.find { _1.stage == "extract" }.tree), name
       end
     end
   end
@@ -226,18 +226,6 @@ class TestFatBases < Minitest::Test
   end
 
   def decode_format(base) = base.builder == Fat::Builder::NAME ? Fat.variant_of(base.parameters.fetch(:clusters)) : "fat#{base.parameters.fetch(:fat_bits)}"
-
-  # A tree as rows to compare: path and type, and for a file its size and
-  # SHA-256.
-  def expected_tree(tree) =
-    tree.map do |entry|
-      next [entry.path, "directory"] if entry.type == "directory"
-
-      [entry.path, "file", entry.size, Digest::SHA256.hexdigest(FsimgSpec::FileContent.bytes(seed: entry.seed, offset: 0, length: entry.size))]
-    end.sort
-
-  def walked_tree(entries) =
-    entries.map { [_1.path.dup.force_encoding(Encoding::UTF_8), _1.type, *(_1.type == "file" ? [_1.size, _1.sha256] : [])] }.sort
 
   def decode(image) = Fat::Model.decode(FsimgSpec::ImageView.open(image))
 

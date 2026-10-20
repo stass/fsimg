@@ -137,6 +137,21 @@ class TestFatRules < Minitest::Test
     end
   end
 
+  # The known tree's gate: every valid and must_accept witness on an
+  # unmutated base asserts acceptance at ls, extract and verify, whose
+  # records the case phase compares with the tree; a mutated base's tree
+  # is unknown, which leaves those stages unclassified.
+  def test_unmutated_accepting_witnesses_assert_acceptance_beyond_info
+    accepting = WITNESSES.select { _1.intended.nil? || REGISTRY.fetch(_1.intended).policy == "must_accept" }
+    with_cases do |cases|
+      outcomes = accepting.group_by { _1.mutations.empty? ? "unmutated" : "mutated" }.transform_values do |witnesses|
+        witnesses.flat_map { cases.call(_1).kase.expected.values_at("ls", "extract", "verify").map(&:to_s) }.uniq
+      end
+
+      assert_equal({ "unmutated" => ["accept"], "mutated" => ["unclassified"] }, outcomes)
+    end
+  end
+
   # Section 3.3 calls ExtFlags bits 4-6 and 8-15 reserved without saying
   # what they must hold, so a set reserved bit breaks the reader's profile
   # rule, and an active FAT that does not exist the specification's rule.

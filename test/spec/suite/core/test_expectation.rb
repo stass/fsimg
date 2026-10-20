@@ -140,9 +140,12 @@ class TestExpectation < Minitest::Test
     FsimgSpec::STAGES.to_h { [_1, FsimgSpec::Expectation.derive(classification, _1).to_s] }
   end
 
+  # An input rule classifies a source model, any other rule an image.
   def derive_with_scope(scope, stage)
     registry = FsimgSpec::Registry.new([rule("t.moved", policy: "must_reject", scopes: [scope], status: "FSIMG_ERANGE")])
-    FsimgSpec::Expectation.derive(classify(registry, { "t.moved" => true }), stage)
+    model = Synthetic::Model.new(facts: { "t.moved" => true })
+    classification = scope == "input" ? registry.classify_source(model, nil) : registry.classify(model, nil)
+    FsimgSpec::Expectation.derive(classification, stage)
   end
 
   # The info expectation of a case whose sector size is each value, under

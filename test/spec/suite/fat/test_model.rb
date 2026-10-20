@@ -110,15 +110,16 @@ class TestFatModel < Minitest::Test
     assert FsimgSpec.undefined?(model.geometry.variant)
   end
 
-  # The scopes beyond the boot sector follow from the structures the model
-  # leaves undefined.
-  def test_undecoded_structures_leave_their_scopes_unclassified
+  # The scopes beyond the boot sector follow from the tree: unknown, it
+  # leaves them unclassified.
+  def test_unknown_tree_leaves_its_scopes_unclassified
     assert_equal %w[directories files verification destination], decode(FAT16_SECTOR).unclassified_scopes
-    assert_empty decode(FAT16_SECTOR).with(fat: [], root_directory: []).unclassified_scopes
+    assert_empty decode(FAT16_SECTOR).with(tree: []).unclassified_scopes
   end
 
-  def test_every_contract_scope_names_its_inputs
-    assert_equal FsimgSpec::SCOPE_STAGES.keys.sort, FsimgSpec::Fat::Model::SCOPE_INPUTS.keys.sort
+  # Every scope of an image names its inputs; input is the source model's.
+  def test_every_image_scope_names_its_inputs
+    assert_equal (FsimgSpec::SCOPE_STAGES.keys - ["input"]).sort, FsimgSpec::Fat::Model::SCOPE_INPUTS.keys.sort
   end
 
   # fsimg's info record must agree with every field the model derives,
@@ -128,10 +129,41 @@ class TestFatModel < Minitest::Test
     info = { "type" => "info", "format" => "fat16", "sector_bytes" => 512, "cluster_bytes" => 2048,
              "volume_bytes" => "33554432", "allocation_units" => "16343", "clean_flag" => false }
 
-    assert_empty model.record_problems("info", [info])
-    assert_equal ["info reports cluster_bytes 512, the model derives 2048"], model.record_problems("info", [info.merge("cluster_bytes" => 512)])
-    assert_empty model.record_problems("ls", [])
-    assert_empty decode(FAT16_SECTOR.byteslice(0, 10)).record_problems("info", [info.merge("format" => "fat32")])
+    assert_empty model.record_problems(accepted("info", [info]))
+    assert_equal ["info reports cluster_bytes 512, the model derives 2048"],
+                 model.record_problems(accepted("info", [info.merge("cluster_bytes" => 512)]))
+    assert_empty model.record_problems(accepted("ls", []))
+    assert_empty decode(FAT16_SECTOR.byteslice(0, 10)).record_problems(accepted("info", [info.merge("format" => "fat32")]))
+  end
+
+  # ls, extract and verify are compared with the known tree, and a tree
+  # that differs everywhere is named in a few differences and a count.
+  def test_records_are_compared_with_the_known_tree
+    tree = FsimgSpec::KnownTree.of([FsimgSpec::TreeEntry.new(path: "d", type: "directory", size: 0, seed: 0),
+                                    *(1..5).map { FsimgSpec::TreeEntry.new(path: "d/f#{_1}", type: "file", size: _1, seed: _1) }])
+    model = decode(FAT16_SECTOR).with(tree:)
+    listed = tree.map { { "type" => "entry", "kind" => _1.type, "path" => "/#{_1.path}", "size_bytes" => _1.size.to_s } }
+    counts = { "type" => "verify", "complete" => true, "validation_scope" => "initialized-payload", "files" => "5",
+               "directories" => "2", "logical_bytes" => "15" }
+    as_file = tree.first.with(type: "file", size: 0, sha256: FsimgSpec::FileContent.sha256(seed: 0, size: 0))
+
+    assert_empty model.record_problems(accepted("ls", listed))
+    assert_empty model.record_problems(accepted("extract", [], tree:))
+    assert_empty model.record_problems(accepted("verify-deep", [counts]))
+    assert_equal ['ls lacks file "/d/f1" of 1 bytes', 'ls lacks file "/d/f2" of 2 bytes', 'ls lacks file "/d/f3" of 3 bytes',
+                  "ls lacks 2 more"],
+                 model.record_problems(accepted("ls", listed.first(1)))
+    assert_equal ['ls has unexpected file "/d/f1" of 1 bytes'], model.record_problems(accepted("ls", listed + listed.values_at(1)))
+    malformed = [listed[0].merge("kind" => "link"), listed[1].merge("size_bytes" => "01")]
+    assert_equal ['ls lacks directory "/d"', 'ls lacks file "/d/f1" of 1 bytes', 'ls has unexpected "link" "/d"',
+                  'ls has unexpected file "/d/f1" of "01" bytes'],
+                 model.record_problems(accepted("ls", malformed + listed.drop(2)))
+    assert_equal ['extract lacks directory "d"', "extract has unexpected file \"d\" of 0 bytes SHA-256 #{as_file.sha256}"],
+                 model.record_problems(accepted("extract", [], tree: [as_file, *tree.drop(1)]))
+    assert_equal ['verify reports validation_scope "initialized-payload", not structural', 'verify reports directories "1", not 2',
+                  'verify reports logical_bytes "14", not 15'],
+                 model.record_problems(accepted("verify", [counts.merge("directories" => "1", "logical_bytes" => "14")]))
+    assert_equal ["verify wrote 2 verify records, not one"], model.record_problems(accepted("verify", [counts, counts]))
   end
 
   # BPB field tuples, with BPB_FATSz16 often zero so the FAT32 branch is
@@ -153,11 +185,15 @@ class TestFatModel < Minitest::Test
       model = decode(sector.byteslice(0, length))
       %i[variant fat_fits first_data_sector max_cluster].each { model.geometry.public_send(_1) }
       model.unclassified_scopes
-      model.record_problems("info", [{ "type" => "info" }])
+      model.record_problems(accepted("info", [{ "type" => "info" }]))
     end
   end
 
   private
+
+  def accepted(stage, records, tree: []) =
+    FsimgSpec::StageResult.new(stage:, outcome: FsimgSpec::Outcome.new(kind: "accepted", records:), execution: nil,
+                               problems: [], tree:)
 
   def decode(bytes)
     Dir.mktmpdir do |directory|

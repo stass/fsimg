@@ -105,22 +105,33 @@ class TestCase < Minitest::Test
   end
 
   # A creation case's reading stages follow the image create wrote, while
-  # create keeps the source tree's expectation.
+  # create keeps the source model's expectation; an image that violates a
+  # rule is create's problem, never the recipe's.
   def test_created_image_decides_the_reading_stages
-    created = derive(creation_recipe).created(classify(REGISTRY, { "t.crosslink" => true }))
+    source = derive_creation(creation_recipe)
+    created = source.created(classify(REGISTRY, { "t.crosslink" => true }))
 
     assert_equal({ "create" => "accept", "verify" => "reject:FSIMG_ECORRUPT" }, created.expected.transform_values(&:to_s))
+    assert_equal "the image it wrote violates t.crosslink", created.created_image_problem
+    assert_equal source.recorded, created.recorded
   end
 
-  # recorded derives expectations from the classification the case was
-  # derived with, which for a creation case is the source tree's rather
-  # than the created image's, so it refuses a creation case, and so does
-  # drift, which compares with it.
-  def test_a_creation_case_is_not_recorded
-    created = derive(creation_recipe).created(classify(REGISTRY, { "t.crosslink" => true }))
+  # A creation case records the classification every created image must
+  # have, so its recipe replays without drift.
+  def test_a_creation_case_records_and_replays_without_drift
+    recorded = derive_creation(creation_recipe).recorded
 
-    assert_raises(FsimgSpec::Error) { created.recorded }
-    assert_raises(FsimgSpec::Error) { created.drift }
+    assert_equal({ "create" => "accept", "verify" => "accept" }, recorded.expected.transform_values(&:to_s))
+    assert_empty derive_creation(recorded).drift
+  end
+
+  def test_only_a_creation_case_has_a_source_classification
+    assert_raises(FsimgSpec::Error) do
+      FsimgSpec::Case.new(recipe: creation_recipe, classification: classify(REGISTRY), intended_rule: nil, expected: creation_recipe.expected)
+    end
+    assert_raises(FsimgSpec::Error) do
+      FsimgSpec::Case.derive(recipe, classify(REGISTRY), registry: REGISTRY, source_classification: classify(REGISTRY))
+    end
   end
 
   private
@@ -139,4 +150,8 @@ class TestCase < Minitest::Test
   )
 
   def derive(recipe, facts = {}) = FsimgSpec::Case.derive(recipe, classify(REGISTRY, facts), registry: REGISTRY)
+
+  def derive_creation(recipe) =
+    FsimgSpec::Case.derive(recipe, FsimgSpec::Case::CREATED_IMAGE, registry: REGISTRY,
+                                   source_classification: classify(REGISTRY))
 end

@@ -86,17 +86,22 @@ class TestFatPromoted < Minitest::Test
     end
   end
 
-  # No suite replays a creation recipe, so asking for one is the caller's
-  # error, refused before the replay directory is touched.
-  def test_replay_refuses_a_creation_recipe
+  # A promoted creation recipe needs no base and replays without drift;
+  # one whose recorded expectation was edited by hand fails as drifted.
+  def test_edited_creation_expectation_fails_the_drift_check
     Dir.mktmpdir do |directory|
-      path = File.join(directory, "creation.json")
-      File.write(path, FsimgSpec::Preflight::CREATION.dump)
-
-      assert_raises(FsimgSpec::UsageError) do
-        FsimgSpec::Replay.call(path, profile: FsimgSpec.fetch_profile("quick"), build_directory: directory, environment: {})
+      { "accept" => "recorded", "reject:FSIMG_ECORRUPT" => "edited" }.each do |ls, name|
+        File.write(File.join(directory, "regression.fat.create.#{name}.json"), promoted_creation(name, ls:).dump)
       end
-      refute File.exist?(File.join(directory, "test"))
+      with_cache do |cache|
+        edited, recorded = Fat::Suite.promoted(directory, ceilings: CEILINGS).map do
+          Fat::Suite.replay(_1, cache:, ceilings: CEILINGS).classify.call
+        end
+
+        assert_nil recorded.defect
+        assert_match(/drifted: expected: recorded create=accept ls=reject:FSIMG_ECORRUPT, derived create=accept ls=accept/,
+                     edited.defect)
+      end
     end
   end
 
@@ -110,6 +115,13 @@ class TestFatPromoted < Minitest::Test
   end
 
   private
+
+  def promoted_creation(name, ls:) = FsimgSpec::Recipe.new(
+    id: "regression.fat.create.#{name}", format: "fat16", kind: "valid", stages: %w[create ls],
+    source: FsimgSpec::Source.new(tree: [FsimgSpec::TreeEntry.new(path: "a.txt", type: "file", size: 5, seed: 1)], settings: {}),
+    expected: { "create" => "accept", "ls" => ls }.transform_values { FsimgSpec::Expectation.parse(_1) },
+    reason: "A creation recipe written for this test."
+  )
 
   def with_cache
     Dir.mktmpdir { yield FsimgSpec::FixtureCache.new(_1) }

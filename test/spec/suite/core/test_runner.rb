@@ -238,20 +238,26 @@ class TestRunner < Minitest::Test
     end
   end
 
-  # After create accepts, the reading stages are judged by the image it
-  # wrote: here that image violates a verification rule, so a verify that
-  # accepts fails the case, though the source tree was valid.
-  def test_reading_stages_after_create_follow_the_created_image
+  # An accepting create must write an image that violates no rule: here
+  # the image violates a verification rule, which fails create and ends
+  # the case before verify runs. A create that already fails its own
+  # expectation is reported by that.
+  def test_created_image_that_violates_a_rule_fails_create
     Dir.mktmpdir do |cases|
       stub = write_stub(cases, "test -e out/created.img || : > out/created.img; #{ACCEPT}")
       registry = FsimgSpec::Registry.new([Synthetic.rule("t.crosslink", policy: "must_reject", scopes: ["verification"],
                                                                          status: "FSIMG_ECORRUPT")])
-      recipe = creation_recipe(settings: {}).with(stages: %w[create verify], expected: %w[create verify].to_h { [_1, FsimgSpec::Expectation.parse("accept")] })
+      accepting = creation_recipe(settings: {}).with(stages: %w[create verify], expected: %w[create verify].to_h { [_1, FsimgSpec::Expectation.parse("accept")] })
+      rejecting = accepting.with(id: "t.rejecting", expected: accepting.expected.merge("create" => FsimgSpec::Expectation.parse("reject:FSIMG_EINVAL")))
       created = ->(_image) { [NoRecords.new, Synthetic.classify(registry, { "t.crosslink" => true })] }
-      result = FsimgSpec::CaseRun.call(plain_case(recipe), model: NoRecords.new, image: nil, runner: runner_for(stub),
-                                                           cases_directory: cases, sandbox: "unavailable", created:)
+      results = [accepting, rejecting].map do
+        FsimgSpec::CaseRun.call(plain_case(_1), model: NoRecords.new, image: nil, runner: runner_for(stub),
+                                                cases_directory: cases, sandbox: "unavailable", created:)
+      end
 
-      assert_equal ["failed", "verify: expected reject:FSIMG_ECORRUPT, got accepted"], [result.verdict, result.detail]
+      assert_equal [["failed", "create: the image it wrote violates t.crosslink", ["create"]],
+                    ["failed", "create: expected reject:FSIMG_EINVAL, got accepted", ["create"]]],
+                   results.map { [_1.verdict, _1.detail, _1.stages.map(&:stage)] }
     end
   end
 
@@ -287,9 +293,12 @@ class TestRunner < Minitest::Test
   # The created hook for an image that violates nothing.
   CREATED_VALID = ->(_image) { [NoRecords.new, FsimgSpec::Classification.new(violations: [], unclassified: [])] }
 
+  # A classification with no violation and nothing unclassified.
+  CLEAN = FsimgSpec::Classification.new(violations: [], unclassified: [])
+
   def plain_case(recipe) =
-    FsimgSpec::Case.new(recipe:, classification: FsimgSpec::Classification.new(violations: [], unclassified: []),
-                        intended_rule: nil, expected: recipe.expected)
+    FsimgSpec::Case.new(recipe:, classification: CLEAN, intended_rule: nil, expected: recipe.expected,
+                        source_classification: recipe.reading? ? nil : CLEAN)
 
   def folds_case?(directory)
     probe = File.join(directory, "Probe")
@@ -299,7 +308,7 @@ class TestRunner < Minitest::Test
 
   # A model that contradicts every record.
   class Contradicting
-    def record_problems(_stage, _records) = ["the model disagrees"]
+    def record_problems(_result) = ["the model disagrees"]
   end
 
   def runner_for(fsimg, environment: { "PATH" => "/bin:/usr/bin" }) =
@@ -352,6 +361,6 @@ class TestRunner < Minitest::Test
 
   # A model whose stages report no records to compare.
   class NoRecords
-    def record_problems(_stage, _records) = []
+    def record_problems(_result) = []
   end
 end

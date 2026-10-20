@@ -22,9 +22,6 @@ module FsimgSpec
     # harness fault.
     def self.call(path, profile:, build_directory:, environment:, suite: nil)
       recipe = Recipe.read(path, ceilings: profile.ceilings)
-      # Replaying a creation recipe needs the created hook, which no suite
-      # offers: no revision can judge it, so it is the caller's error.
-      raise UsageError, "#{recipe.id} is a creation recipe, which does not replay" unless recipe.reading?
       suite ||= CasePhase.suite_for(recipe.format)
       results = File.join(build_directory, "test", "spec-results", DIRECTORY)
       ResultsDirectory.hold(results) do

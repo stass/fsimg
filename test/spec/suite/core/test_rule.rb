@@ -36,7 +36,8 @@ class TestRule < Minitest::Test
       "safety_only with status" => [rule("t.r", policy: "safety_only", scopes: ["open"], status: "FSIMG_ECORRUPT")],
       "EEXISTS where info checks" => [rule("t.r", **VALID, status: "FSIMG_EEXISTS")],
       "EINVAL at a reading stage" => [rule("t.r", **VALID, status: "FSIMG_EINVAL")],
-      "unknown related rule" => [rule("t.r", **VALID, related: ["t.missing"])]
+      "unknown related rule" => [rule("t.r", **VALID, related: ["t.missing"])],
+      "input rule with an image scope" => [rule("t.r", **VALID, scopes: %w[input open], status: "FSIMG_ERANGE")]
     }
 
     refusals.each do |reason, rules|
@@ -49,6 +50,16 @@ class TestRule < Minitest::Test
     %w[FSIMG_ELIMIT FSIMG_ELIMIT:bogus FSIMG_EFORMAT:entries FSIMG_EBOGUS].each do |text|
       assert_raises(FsimgSpec::Error, text) { FsimgSpec::Status.parse(text) }
     end
+  end
+
+  # An input rule reads a creation case's source model and every other
+  # rule an image's model, so each is classified by its own rules alone.
+  def test_input_rules_classify_the_source_and_the_others_the_image
+    registry = FsimgSpec::Registry.new([rule("t.name", policy: "must_reject", scopes: ["input"], status: "FSIMG_EINVAL"),
+                                        rule("t.format", **VALID)])
+    model = Model.new(facts: { "t.name" => true, "t.format" => true })
+
+    assert_equal [["t.format"], ["t.name"]], [registry.classify(model, nil).rule_ids, registry.classify_source(model, nil).rule_ids]
   end
 
   def test_registry_accepts_a_collision_status_only_at_the_destination

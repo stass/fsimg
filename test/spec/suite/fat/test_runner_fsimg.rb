@@ -123,13 +123,13 @@ class TestRunnerFsimg < Minitest::Test
       source: FsimgSpec::Source.new(tree:, settings: {}),
       expected: stages.to_h { [_1, FsimgSpec::Expectation.parse("accept")] }
     )
-    FsimgSpec::Case.new(recipe:, classification: FsimgSpec::Classification.new(violations: [], unclassified: []),
-                        intended_rule: nil, expected: recipe.expected)
+    clean = FsimgSpec::Classification.new(violations: [], unclassified: [])
+    FsimgSpec::Case.new(recipe:, classification: clean, source_classification: clean, intended_rule: nil, expected: recipe.expected)
   end
 
   # A model whose stages report no records to compare.
   class NoRecords
-    def record_problems(_stage, _records) = []
+    def record_problems(_result) = []
   end
 
   # The created hook for an image these cases do not classify.

@@ -33,21 +33,21 @@ module FsimgSpec
     # Writes the record of the case id, which ended as result under
     # profile. kase is its Case, or nil when it could not be classified,
     # which leaves only result.json to record; image is its ImageView, or
-    # nil for a creation case, which does not replay and gets no replay.sh.
-    # result.json is written last, so a record that could not be completed
-    # holds no verdict that the run's report contradicts.
+    # nil for a creation case, whose image create writes in the case
+    # directory. result.json is written last, so a record that could not
+    # be completed holds no verdict that the run's report contradicts.
     def self.write(failures, id:, kase:, result:, image:, profile:)
       directory = File.join(failures, id)
       Dir.mkdir(directory, 0o700)
       if kase
         write_file(directory, "case.json", kase.recipe.dump)
-        write_file(directory, "fixture.json", "#{CanonicalJson.generate(fixture(kase.recipe))}\n") if kase.recipe.reading?
+        write_file(directory, "fixture.json", "#{CanonicalJson.generate(fixture(kase.recipe))}\n")
         result.stages.each do |stage|
           write_file(directory, "#{stage.stage}.stdout", stage.execution.stdout)
           write_file(directory, "#{stage.stage}.stderr", stage.execution.stderr)
         end
         image.write(File.join(directory, "image.img")) if image && image.length <= IMAGE_BYTES
-        write_file(directory, "replay.sh", replay_script(profile)) if kase.recipe.reading?
+        write_file(directory, "replay.sh", replay_script(profile))
       end
       write_file(directory, "result.json", "#{JSON.pretty_generate(result_fields(result, profile))}\n")
       directory
@@ -58,9 +58,15 @@ module FsimgSpec
       raise HarnessError, "#{name} exists in the new failure record #{File.basename(directory)}" unless answer == :created
     end
 
-    private_class_method def self.fixture(recipe) =
+    # A reading case's base, its digest and the versions of the tools that
+    # built it. A creation case has no base and builds with no tool, so its
+    # record names no tool version.
+    private_class_method def self.fixture(recipe)
+      return { tool_versions: {} } unless recipe.reading?
+
       { base: { builder: recipe.base.builder, parameters: recipe.base.parameters, tree: recipe.base.tree.map(&:to_h) },
         base_sha256: recipe.base_sha256, tool_versions: recipe.tool_versions }
+    end
 
     # The profile, the verdict, and each stage's outcome, timings and
     # safety problems.

@@ -47,8 +47,9 @@ module FsimgSpec
   end
 
   # A named, cited statement about images or creation input. applies_to and
-  # predicate are called with the decoded model and the run environment; the
-  # predicate runs only when applies_to holds. A rule with one scope has a
+  # predicate are called with a model and the run environment: the decoded
+  # image's, or for a rule of the input scope a creation case's SourceModel.
+  # The predicate runs only when applies_to holds. A rule with one scope has a
   # predicate that answers whether the rule holds; a rule with several
   # reports the scope of each violation, and an empty list when it holds.
   # Either may answer Undefined, as FsimgSpec.derive does when an input is
@@ -91,11 +92,27 @@ module FsimgSpec
     end
 
     def stages = scopes.flat_map { SCOPE_STAGES.fetch(_1) }.uniq
+
+    # Whether the rule states the domain of creation input, which it reads
+    # from a SourceModel rather than from an image.
+    def input? = scopes.include?("input")
   end
 
   # What rules read about a run beyond the decoded model: the format a
   # case forces with -t, or nil.
   Environment = Data.define(:forced_format)
+
+  # What the input rules read about a creation case: its settings and the
+  # tree the harness wrote into source/ and walked back
+  # (specs/design-spec-testing.md#cases). Every input is known, so it
+  # leaves no scope unclassified. It judges create, whose records describe
+  # a plan no rule models; the image create wrote is judged by the image
+  # model the created hook decodes, so no record is compared here.
+  SourceModel = Data.define(:settings, :tree) do
+    def unclassified_scopes = []
+
+    def record_problems(_result) = []
+  end
 
   # The decoded model's violations and the scopes it could not decode
   # completely; together they decide every expectation of a case.
@@ -109,9 +126,12 @@ module FsimgSpec
 
   # The checked set of rules a run evaluates. Construction refuses a rule
   # set that would make an expectation ambiguous: a duplicate or malformed
-  # id, a category and policy that do not pair, an unknown scope, a status
-  # the policy does not call for or no stage of its scopes can report, or a
-  # related rule that does not exist.
+  # id, a category and policy that do not pair, an unknown scope, an input
+  # rule with another scope, a status the policy does not call for or no
+  # stage of its scopes can report, or a related rule that does not exist.
+  #
+  # The input rules read a SourceModel and every other rule an image
+  # model, so each kind of model is classified by its own rules alone.
   class Registry
     def initialize(rules)
       @rules = rules.to_h { [_1.id, _1] }.freeze
@@ -124,7 +144,17 @@ module FsimgSpec
 
     def fetch(id) = @rules.fetch(id) { raise RuleError, "unknown rule #{id}" }
 
-    def classify(model, environment)
+    # The classification of a decoded image by every rule but the input
+    # rules.
+    def classify(model, environment) = classification(model, environment, rules.reject(&:input?))
+
+    # The classification of a creation case's SourceModel by the input
+    # rules.
+    def classify_source(model, environment) = classification(model, environment, rules.select(&:input?))
+
+    private
+
+    def classification(model, environment, rules)
       unknown = model.unclassified_scopes - SCOPE_STAGES.keys
       raise RuleError, "the model names unknown unclassified scopes #{unknown}" unless unknown.empty?
 
@@ -133,8 +163,6 @@ module FsimgSpec
         unclassified: model.unclassified_scopes.sort.freeze
       )
     end
-
-    private
 
     def check(rule)
       found = problem(rule)
@@ -157,6 +185,7 @@ module FsimgSpec
     def scope_problem(rule)
       return "unknown scope among #{rule.scopes}" unless rule.scopes.all? { SCOPE_STAGES.key?(_1) }
       return "a scope repeats in #{rule.scopes}" if rule.scopes.uniq.size != rule.scopes.size
+      return "an input rule reads the source model and has no other scope" if rule.input? && rule.scopes.size > 1
 
       "no scope" if rule.scopes.empty? && rule.policy != "equivalent_contents"
     end

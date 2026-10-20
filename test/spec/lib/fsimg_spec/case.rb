@@ -3,47 +3,74 @@
 # frozen_string_literal: true
 
 module FsimgSpec
-  # A recipe with the classification of its image and what each of its
-  # stages must do, derived from the rules (specs/design-spec-testing.md#data-flow).
-  # No case carries a hand-written expectation.
+  # A recipe with the classifications of what its stages read and what
+  # each of its stages must do, derived from the rules
+  # (specs/design-spec-testing.md#data-flow). No case carries a
+  # hand-written expectation.
+  #
+  # classification is the image's: a reading case's image, or the image a
+  # creation case's create writes. Until create has written it, that is
+  # CREATED_IMAGE, the classification every created image must have, and
+  # #created replaces it with the classification of the image itself.
+  # source_classification is a creation case's SourceModel classified by
+  # the input rules, which create follows, or nil for a reading case.
   #
   # intended_rule is the Rule the recipe names as its intended violation,
   # or nil for a case meant valid.
-  class Case < Data.define(:recipe, :classification, :intended_rule, :expected)
-    def self.derive(recipe, classification, registry:) = new(
-      recipe:, classification:,
-      intended_rule: recipe.intended_violation && registry.fetch(recipe.intended_violation),
-      expected: expectations(recipe, classification)
-    )
+  class Case < Data.define(:recipe, :classification, :source_classification, :intended_rule, :expected)
+    include Checked
 
-    # What each of recipe's stages must do under classification. A general
-    # malformed case asserts only safety, because the model may not see
-    # everything a random edit breaks.
-    def self.expectations(recipe, classification)
-      return recipe.stages.to_h { [_1, Expectation.new(unclassified: true)] } if recipe.kind == "malformed"
+    # What an image fsimg created must classify to: no violation, and no
+    # scope left unclassified, since the harness knows the tree it holds
+    # (specs/design-spec-testing.md#cases).
+    CREATED_IMAGE = Classification.new(violations: [].freeze, unclassified: [].freeze)
 
-      recipe.stages.to_h { [_1, Expectation.derive(classification, _1)] }
+    def initialize(recipe:, classification:, intended_rule:, expected:, source_classification: nil)
+      raise Error, "#{recipe.id}: only a creation case has, and must have, a source classification" if
+        recipe.reading? != source_classification.nil?
+
+      super
     end
 
-    # The case once create has accepted: create keeps the expectation the
-    # source tree's classification derived, and the reading stages follow
-    # image_classification, the classification of the image create wrote.
+    def self.derive(recipe, classification, registry:, source_classification: nil) = new(
+      recipe:, classification:, source_classification:,
+      intended_rule: recipe.intended_violation && registry.fetch(recipe.intended_violation),
+      expected: expectations(recipe, image: classification, source: source_classification)
+    )
+
+    # What each of recipe's stages must do: create under source, the
+    # source model's classification, and every reading stage under image.
+    # A general malformed case asserts only safety, because the model may
+    # not see everything a random edit breaks.
+    def self.expectations(recipe, image:, source: nil)
+      return recipe.stages.to_h { [_1, Expectation.new(unclassified: true)] } if recipe.kind == "malformed"
+
+      recipe.stages.to_h { [_1, Expectation.derive(_1 == "create" ? source : image, _1)] }
+    end
+
+    # The case once create has accepted, with image_classification, the
+    # classification of the image create wrote: create keeps the source
+    # model's expectation, and the reading stages follow the image.
     def created(image_classification) =
-      with(expected: expected.merge(Case.expectations(recipe, image_classification).except("create")))
+      with(classification: image_classification,
+           expected: Case.expectations(recipe, image: image_classification, source: source_classification))
+
+    # Why the image create wrote fails create, or nil: an accepting create
+    # must write an image that violates no rule
+    # (specs/design-spec-testing.md#expectation-derivation). Destination
+    # violations depend on the host, not on the image.
+    def created_image_problem
+      violated = classification.without_destination.rule_ids
+      "the image it wrote violates #{violated.join(", ")}" if violated.any?
+    end
 
     # The recipe as written for this case: the derived violations,
     # isolation and expectations replace whatever the recipe recorded.
     # Destination violations depend on the host's name trials, so the
     # recorded fields leave them out (specs/design-spec-testing.md#host-names).
-    # A creation case's reading stages follow the image create wrote,
-    # which this case's classification does not describe, so a creation
-    # case is refused.
-    def recorded
-      raise Error, "#{recipe.id}: a creation case is not recorded from its source classification" if recipe.source
-
+    def recorded =
       recipe.with(actual_violations: recorded_violations, isolation:,
-                  expected: Case.expectations(recipe, classification.without_destination))
-    end
+                  expected: Case.expectations(recipe, image: recorded_image, source: source_classification))
 
     # How the recipe's recorded classification differs from the one the
     # current rules derive, as messages; a promoted case must have none.
@@ -58,49 +85,61 @@ module FsimgSpec
 
     # A defect of the generator or builder that made this case, or nil
     # (specs/design-spec-testing.md#cases). A valid case must violate no
-    # rule. It may leave scopes unclassified while the model does not decode
-    # the allocation tables and directories (docs/spec-testing-plan.md, B2).
-    # A targeted case must name a rule with violations,
-    # run a stage that checks it, and violate it. A violation the image
-    # alone cannot show is exempt from that last check: one of a
-    # destination rule depends on the host's name trials, and one in a
-    # scope the model could not decode is never found. A malformed case
-    # may violate anything.
+    # rule. It may leave scopes unclassified while the model does not
+    # decode the allocation tables and directories
+    # (docs/spec-testing-plan.md, B2). A targeted case must name a rule
+    # with violations, run a stage that checks it, and violate it. A
+    # violation the case alone cannot show is exempt from that last check:
+    # one of a destination rule depends on the host's name trials, and one
+    # in a scope the model could not decode is never found. A malformed
+    # case may violate anything. The image a creation case's create writes
+    # is fsimg's output, which create's own judgement covers
+    # (#created_image_problem).
     def harness_defect
-      violated = classification.without_destination.rule_ids
       case recipe.kind
-      in "valid" if violated.any?
-        "#{recipe.id} is meant valid but violates #{violated.join(", ")}"
+      in "valid" if rule_ids.any?
+        "#{recipe.id} is meant valid but violates #{rule_ids.join(", ")}"
       in "targeted" if intended_rule.policy == "equivalent_contents"
         "#{recipe.id} targets #{intended_rule.id}, a freedom of the format with no violations"
       in "targeted" if (intended_rule.stages & recipe.stages).empty?
         "#{recipe.id} runs no stage that checks its intended rule #{intended_rule.id}"
-      in "targeted" if image_checks_intended_rule? && !violated.include?(intended_rule.id)
+      in "targeted" if decides_intended_rule? && !rule_ids.include?(intended_rule.id)
         "#{recipe.id} does not violate its intended rule #{intended_rule.id}"
       else nil
       end
     end
 
-    # For a targeted case, single_rule when the image violates no rule but
+    # For a targeted case, single_rule when the case violates no rule but
     # the intended one and multi_rule when it violates others too; nil for
     # any other case. Destination violations never count, so the answer is
     # the same on every host.
     def isolation
       return nil unless recipe.kind == "targeted"
 
-      (classification.without_destination.rule_ids - [intended_rule.id]).empty? ? "single_rule" : "multi_rule"
+      (rule_ids - [intended_rule.id]).empty? ? "single_rule" : "multi_rule"
     end
 
     private
 
-    def image_checks_intended_rule? =
-      (intended_rule.scopes - ["destination"] - classification.unclassified).any?
+    # The image classification the recipe stands for: a reading case's
+    # image without its destination violations, and for a creation case
+    # CREATED_IMAGE, whatever image a run wrote, since create judges that
+    # image and the recipe never records it.
+    def recorded_image = recipe.reading? ? classification.without_destination : CREATED_IMAGE
 
-    def recorded_violations
-      classification.without_destination.violations
-                    .map { ViolationRecord.new(rule: _1.rule.id, scope: _1.scope) }
-                    .uniq.sort_by { [_1.rule, _1.scope] }
+    def violations = [*source_classification&.violations, *recorded_image.violations]
+
+    def rule_ids = violations.map { _1.rule.id }.uniq.sort
+
+    # Whether the case alone decides a scope of the intended rule: one that
+    # is neither the host's destination nor left unclassified.
+    def decides_intended_rule?
+      undecided = ["destination", *recorded_image.unclassified, *source_classification&.unclassified]
+      (intended_rule.scopes - undecided).any?
     end
+
+    def recorded_violations =
+      violations.map { ViolationRecord.new(rule: _1.rule.id, scope: _1.scope) }.uniq.sort_by { [_1.rule, _1.scope] }
 
     def describe(value)
       case value

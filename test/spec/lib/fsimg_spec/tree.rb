@@ -128,8 +128,17 @@ module FsimgSpec
     BLOCK_BYTES = 32
     CHUNK_BYTES = 1 << 16
 
-    def self.write(io, seed:, size:)
-      (0...size).step(CHUNK_BYTES) { io.write(bytes(seed:, offset: _1, length: [CHUNK_BYTES, size - _1].min)) }
+    def self.write(io, seed:, size:) = each_chunk(seed:, size:) { io.write(_1) }
+
+    # The SHA-256 of the bytes, computed without holding them whole.
+    def self.sha256(seed:, size:)
+      digest = Digest::SHA256.new
+      each_chunk(seed:, size:) { digest << _1 }
+      digest.hexdigest
+    end
+
+    def self.each_chunk(seed:, size:)
+      (0...size).step(CHUNK_BYTES) { yield bytes(seed:, offset: _1, length: [CHUNK_BYTES, size - _1].min) }
     end
 
     def self.bytes(seed:, offset:, length:)
@@ -137,6 +146,29 @@ module FsimgSpec
       last = (offset + length - 1) / BLOCK_BYTES
       stream = (first..last).map { Digest::SHA256.digest([seed, _1].pack("Q<Q<")) }.join
       stream.byteslice(offset - (first * BLOCK_BYTES), length)
+    end
+  end
+
+  # The tree a model knows an image to hold, until it decodes directories
+  # itself (specs/design-spec-testing.md#cases): the recipe tree of an
+  # unmutated base, or the source tree of an image fsimg created. Its
+  # entries are the WalkedEntry values a walk of the extracted tree gives,
+  # so the two compare as values: binary paths in byte order, and each file
+  # with its size and SHA-256. A directory has no size and no digest, since
+  # the size a host reports for a directory says nothing about the image.
+  # A known tree is an Array of WalkedEntry in path order, so differences
+  # are reported in that order.
+  module KnownTree
+    # The known tree of entries, a recipe tree.
+    def self.of(entries) = from_walk(entries.map { walked_entry(_1) })
+
+    # walked, a TreeWalk listing, in the known tree's form.
+    def self.from_walk(walked) = walked.map { _1.type == "directory" ? _1.with(size: nil) : _1 }.sort_by(&:path).freeze
+
+    private_class_method def self.walked_entry(entry)
+      return WalkedEntry.new(path: entry.path.b, type: "directory", size: nil, sha256: nil) if entry.type == "directory"
+
+      WalkedEntry.new(path: entry.path.b, type: "file", size: entry.size, sha256: FileContent.sha256(seed: entry.seed, size: entry.size))
     end
   end
 

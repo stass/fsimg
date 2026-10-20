@@ -178,7 +178,7 @@ module FsimgSpec
       return CaseResult.new(id:, verdict: "harness_error", stages: [], detail: classified.defect) if classified.defect
 
       CaseRun.call(classified.kase, model: classified.model, image: classified.image, runner: setup.runner,
-                                    sandbox: setup.sandbox, cases_directory:)
+                                    sandbox: setup.sandbox, cases_directory:, created: classified.created)
     end
 
     private_class_method def self.harness_error(id, error, context: nil) =
