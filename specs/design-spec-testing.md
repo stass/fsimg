@@ -248,17 +248,22 @@ both.
 A **creation case** is a file tree and a set of creation settings, and `create`
 always runs with `-R`. The harness writes the tree into `source/` through the
 [name funnel](#host-names) and classifies the tree it walks back, not the
-recipe. Rules with scope `input` state the domain of settings
-and source trees and the writer's layout policy. For example, automatic sizing
-keeps at least 16 clusters away from the FAT variant thresholds while `-s`
-permits the exact boundary counts, and the writer refuses a source name that is
-not a valid FAT name or that is case-equivalent to a sibling. The image an
-accepted creation produces is classified like any other and must violate no
-rule, including a writer `profile` rule that every byte outside allocated
-metadata and file content is zero. Independent readers must reproduce the tree,
-and a second creation from the same tree, written to disk in a different order,
-must produce identical bytes. fsimg's reading stages then run on the created
-image as secondary evidence.
+recipe. Rules with scope `input` state the domain of settings and source trees
+and the writer's layout policy, evaluated over a **source model** of the
+settings and the walked tree: the setting domains, name validity,
+case-equivalent siblings and file size. For example, automatic sizing keeps at
+least 16 clusters away from the FAT variant thresholds while `-s` permits the
+exact boundary counts, and the writer refuses a source name that is not a valid
+FAT name or that is case-equivalent to a sibling. A creation case carries two
+classifications: `create` follows the source model's, and the reading stages
+follow the created image's, which the harness decodes once `create` accepts.
+The created image is classified like any other and must violate no rule,
+including a writer `profile` rule that every byte outside allocated metadata
+and file content is zero. The [oracles](#independence-and-oracles) then read
+the image, `mcopy -s` with a verdict, and a second `create` in the same case
+reads the same tree written into `source-reversed/` in reverse order and
+writes `out/reversed.img`, whose bytes must equal `out/created.img`. fsimg's
+reading stages then run on the created image as secondary evidence.
 
 ### Recipes
 
@@ -393,17 +398,20 @@ is reported and serves no case. Every base has a manifest in the
 format, geometry and feature profile; builder, recipe and tree digest; the
 creation command; validator results; and the image hash per tool version.
 
-Bases come from two kinds of builder. **Formatters** are `mkfs.fat --invariant`
-with a fixed volume ID on macOS and Linux, or `newfs_msdos` on FreeBSD,
-populated with `mmd` and `mcopy -m` from source files with fixed times. The
-[name funnel](#host-names) writes those files, like a creation case's source
-tree, into a directory of the build's own,
-`test/spec-cache/<key>.<hex>.tmp.src/`, which is removed once the base is
-built. Their output is a **formatter base**. A typical command is
+Bases come from two kinds of builder, and population is separate from
+formatting. **Formatters** are `mkfs.fat --invariant` with a fixed volume ID on
+macOS and Linux, or `newfs_msdos` on FreeBSD; their output is a **formatter
+base**. A typical command is
 `mkfs.fat -C --invariant -i 12345678 -F 32 -s 1 base.img 65536`, with the size
-in 1024-byte blocks. The manifest records the read-only checker
-(`fsck.fat -n` or `fsck_msdosfs -n`) and an `mdir` listing. Formatter bases
-test both the model and fsimg against images neither produced.
+in 1024-byte blocks. A tree is populated into an empty base of either builder
+with `mmd` and `mcopy -m` from source files with fixed times. The [name
+funnel](#host-names) writes those files, like a creation case's source tree,
+into a directory of the build's own, `test/spec-cache/<key>.<hex>.tmp.src/`,
+which is removed once the base is built. The manifest records the read-only
+checker (`fsck.fat -n` or `fsck_msdosfs -n`) and an `mdir` listing. Formatter
+bases test both the model and fsimg against images neither produced, and an
+mtools-populated builder base tests them against a directory tree neither
+wrote.
 
 **The independent builder**, one per format, renders an image from explicit
 parameters: for FAT, the boot sector and BPB, any number of tables with their
@@ -442,18 +450,27 @@ copied from them.
 The model and the builder are checked against each other through independent
 tools: the model decodes formatter output, and checkers read builder output. A
 builder base and a formatter base of the same geometry must decode to equal
-models. Beside each case's derived expectation, oracles are secondary evidence:
-mtools reads the tree of a valid image; for an image fsimg created, `mcopy -s`
-must reproduce the tree, with `fsck -n` and fatcat as further evidence; for an
-invalid image, checker diagnostics are only recorded.
+models.
 
-An oracle is evidence, not a verdict. A checker can flag conservative
-incompatibilities or tolerate errors, so its result never overrides a published
-rule; where the specification is clear, it decides. Disagreements are recorded
-per tool, never resolved by majority, and expected at the exact variant
-thresholds, which some implementations avoid. `fsimg c` followed by
-fsimg's own reading stages is never evidence on its own, because both paths can
-share a defect.
+Every oracle run on a case yields one **observation** per tool: `agrees`,
+`disagrees` with a short detail, `not_applicable` when the tool does not
+support the image's geometry or names (the checkers read one or two FATs;
+fatcat reads 512-byte sectors and ASCII names), or `unavailable` when the host
+lacks the tool. The observation is recorded in the case result, the failure
+record and the coverage report.
+
+No oracle overrides a published rule. A checker can flag conservative
+incompatibilities or tolerate errors, so where the specification is clear, it
+decides, and `fsck -n`, `mdir` and fatcat are always recorded only, as are
+checker diagnostics on an invalid image. Disagreements are recorded per tool,
+never resolved by majority. The one oracle with a verdict is `mcopy -s` on an
+image fsimg created: it must reproduce the source tree in path, type, size and
+SHA-256, because that is fsimg's own creation contract rather than an
+interpretation of the format. A mismatch fails the case, except when the
+image's cluster count lies within 16 clusters of a variant threshold (4085 or
+65525), where some implementations disagree on the variant; there it is
+recorded only. `fsimg c` followed by fsimg's own reading stages is never
+evidence on its own, because both paths can share a defect.
 
 ## Runner
 
@@ -626,7 +643,8 @@ cases/<id>/      working directory and fsimg's HOME; the only place tools write
   scratch/       -T and TMPDIR
   dest/          the extract destination; absent before extract
   source/        the creation input tree
-  out/           created.img and its staging
+  source-reversed/  the same tree in reverse order, for the second create
+  out/           created.img, reversed.img and their staging
   oracle/        files that independent tools write; fsimg adds nothing
   STAGE.stdout   bounded captures, one pair per stage
   STAGE.stderr
@@ -644,8 +662,8 @@ After every stage the runner checks the following:
   `output` limit. Each entry records its path, type and size, and each file
   its SHA-256 when the total is within the limit;
 * `scratch/` is empty and `out/` holds nothing beyond a creation case's
-  `created.img`, except a path the error record names in `retained_scratch` or
-  `retained_output`, and `oracle/` gained nothing;
+  `created.img` and `reversed.img`, except a path the error record names in
+  `retained_scratch` or `retained_output`, and `oracle/` gained nothing;
 * no leftover was recorded in step 4.
 
 A failed check fails the case under every policy and ends it: no further stage
@@ -680,8 +698,8 @@ violates a `destination` rule with status `FSIMG_EEXISTS`; one answered
 `FSIMG_EUNSUPPORTED`. No trial path nests, so path traversal and path length
 cannot arise. Answers are cached for the run by the sibling set's bytes, so a
 repeated set costs no trial. For a creation case, and for the files that
-populate a formatter base, the funnel writes the source tree and the harness
-walks it back; the case is classified against the walked tree.
+populate a base, the funnel writes the source tree and the harness walks it
+back; the case is classified against the walked tree.
 
 If a listing or walk differs from the names the funnel created, because the
 host refused a name or stored another one (HFS+ normalization, msdosfs trailing
@@ -789,7 +807,26 @@ images, so shrinking yields meaningful minimal cases. Random invalid draws need
 no filter, because classification derives their expectation. Random draws
 mutate shared bases and never invoke a formatter per draw; they are classified
 in memory, apart from name trials for sibling sets not yet tried in the run, and
-only a sample sized by the profile runs fsimg.
+only a sample sized by the profile runs fsimg. The profile sets the number of
+draws and the size of that sample; the case phase draws the sample from a
+generator seeded per run, and each sampled recipe records the seed as
+`random_seed`.
+
+Tree generators draw small trees: names that are 8.3, long, Unicode BMP and
+non-BMP, or reserved; nesting depth; files that are empty, one byte, one
+cluster minus one byte, one cluster and several clusters long; and a bounded
+directory width. A **reserved** name is a DOS device name (`CON`, `NUL`,
+`AUX`, `PRN`, `COM1` to `COM9`, `LPT1` to `LPT9`), with or without an
+extension, or a long name whose generated short alias could collide with a
+sibling's literal 8.3 name, such as `NAMEFI~1.TXT` beside a long
+`name file.txt`. A
+drawn tree reaches fsimg in both directions: as a creation case's source, and
+populated by mtools into a copy of one cached empty base, so no draw costs a
+formatter run. A witness of case-equivalent siblings draws only characters
+whose simple and full uppercase mappings agree, so Ruby's `String#upcase` and
+fsimg's simple-uppercase table decide alike; on a case-insensitive host
+filesystem the funnel answers `EEXIST` for the second sibling and the case is a
+host skip.
 
 Shrinking starts with PropCheck's shrinker on recipes. Recipe shrinkers then
 remove unrelated files and directories, shrink files and chains, reduce a cycle
@@ -829,7 +866,8 @@ rule families, and would then stay optional and outside CI.
 
 The budgets are targets, which measurement adjusts. Every profile sets ceilings
 on image capacity, file count, path depth, memory, scratch, extracted bytes and
-per-case run time; `profile.rb` holds their values. The runner passes them to
+per-case run time, and the number of random draws and the sample of them that
+runs fsimg; `profile.rb` holds their values. The runner passes the ceilings to
 fsimg as `-m` and `-l` values, and the generators and the recipe loader keep
 within them. The `path` ceiling leaves room under the 1024-byte `PATH_MAX` of
 macOS for the case directory's own path. Fuzzing stays in
@@ -852,8 +890,9 @@ outcomes. A run holds an
 exclusive lock on that directory, so concurrent runs of one profile take turns,
 and empties it when it starts, so no case, trial or failure directory outlives
 the next run. For each rule the report records the attempted, passed, failed
-and skipped counts, the boundaries exercised, the stages asserted, the oracle
-results, the promoted regression cases and the isolation: `single_rule` when
+and skipped counts, the boundaries exercised, the stages asserted, the
+[oracle observations](#independence-and-oracles) per tool, the promoted
+regression cases and the isolation: `single_rule` when
 every targeted witness isolates the rule, `partial` when some do, and
 `multi_rule_only` when none do.
 
@@ -886,17 +925,18 @@ error, has only its predicate tested.
 Every final mismatch writes a failure record in `failures/<id>/` of the results
 directory, created exclusively like a case directory: the recipe with its
 classification and expectation (`case.json`), the base recipe, image hash and
-tool versions (`fixture.json`), the bounded captures, the oracle observations,
+tool versions (`fixture.json`; a creation case has no base and records the
+tool versions alone), the bounded captures, the oracle observations per tool,
 the outcome, timings and safety checks of each stage (`result.json`), the image
-when it is sparse and at most 64 MiB logical, and, for a reading case, which
-alone has a base to record and can be replayed, a `replay.sh`, run as `sh
+when it is sparse and at most 64 MiB logical, and a `replay.sh`, run as `sh
 PATH/replay.sh` from the build directory, that passes the `case.json` beside it
 and the recording profile to `test/spec.sh --replay`. `result.json`, written
 last, names the profile too. A case that could not be classified has no recipe
 to replay, and its record holds `result.json` alone. `bin/replay` rebuilds and
 reruns one case under the profile's ceilings, re-deriving its classification
-and expectation from the current rules. Its exit status answers `git bisect
-run`: 0 when fsimg passes the case and 3 when it fails it, a status Ruby never
+and expectation from the current rules: a reading case rebuilds its base, and a
+creation case writes its source tree and needs fsimg alone. Its exit status
+answers `git bisect run`: 0 when fsimg passes the case and 3 when it fails it, a status Ruby never
 exits with by itself; 125, untestable, when this revision cannot judge it (a
 host skip, a harness error such as a drifted promoted case or a base that
 renders to other bytes, a recipe these rules cannot classify, a preflight
@@ -914,9 +954,10 @@ A confirmed defect is promoted by copying its recipe into
 to its id, so a promoted case and the witness it came from never share a case
 or failure directory; no generated id starts with `regression.`. The promoted
 recipe is the defect's regression test: it fails before the fix and passes
-after it. It uses an independent-builder base wherever the defect reproduces on
-one, so that it runs on every host; the quick profile replays every promoted
-case whose builder the host has, and reports the others as skipped. A promoted
+after it. A reading case uses an independent-builder base wherever the defect
+reproduces on one, so that it runs on every host; a creation case needs no
+builder. The quick profile replays every promoted case whose builder the host
+has, and reports the others as skipped. A promoted
 case's recorded violations and expectation must equal the re-derived ones, so a
 rule change that alters a regression case's meaning fails until the same commit
 updates the recipe.

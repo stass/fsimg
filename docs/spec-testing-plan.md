@@ -421,22 +421,107 @@ review and commit gates.
 
 ### Milestone B: semantics and writer/reader oracles
 
-* **B1, tree model and cross-oracles.**
-  - Generate small trees with PropCheck: names that are 8.3, long, Unicode
-    BMP and non-BMP, or reserved; nesting depth; empty, 1-byte,
-    cluster-minus-one, exact-cluster and multi-cluster files; bounded
-    directory width.
-  - External create, fsimg read: mtools populates, then fsimg `x`
-    output must equal the model in path, type, size and SHA-256.
-  - fsimg create, external read: `fsimg c -R`, then `mcopy -s` must
-    reproduce the tree, with `fsck -n` and fatcat as further evidence.
-  - Exercise writer geometry rules with `-s`, `-o sector=` and `-o cluster=`,
-    including exact-threshold sizes, which the writer permits only with `-s`.
-  - Then decide whether the fixed cases in `fat-integration.sh` move into the
-    harness. Moving them is worthwhile only if it removes a mechanism.
+* **B1, tree model and cross-oracles**, as the reviewed commits B1a to B1g.
+  Each leaves `make check` passing and follows the review and commit gates.
+  Until B2's decoder, the model classifies the `directories`, `files` and
+  `verification` scopes with a **known tree**: an unmutated base carries its
+  recipe's tree as its decoded tree, whether the independent builder rendered
+  it or mtools populated it, and an image fsimg created carries the source
+  tree the harness walked back. A mutated image leaves those scopes
+  unclassified. Shrinking of drawn trees stays in B4.
+  - **B1a, core record checks.**
+    - `Model#record_problems` compares per stage: `ls` paths, types and
+      sizes; `extract` the walked `dest/` tree with SHA-256 digests; `verify`
+      the file, directory and logical-byte counts, each against the known
+      tree.
+    - A creation `Case` carries both classifications, the source model's for
+      `create` and the created image's for the reading stages, so
+      `Case#recorded` and `Case#drift` accept it; creation recipes record and
+      replay; the case phase supplies the `created` hook. A created image
+      must classify with no violation, or the case is a harness defect.
+    - Seeded failures: a stub `ls` that drops one entry, an `extract` whose
+      file differs by one byte, and a `verify` that reports one file too few
+      each fail their case; a creation recipe with an edited recorded
+      expectation fails the drift check.
+    - **Gate:** every valid and `must_accept` witness asserts acceptance at
+      `ls`, `extract` and `verify` with records that match the known tree; a
+      creation recipe round-trips through a failure record and `bin/replay`.
+  - **B1b, name trials and destination rules**, as the design's
+    [host names](../specs/design-spec-testing.md#host-names) section states.
+    - Each extract case's sibling sets go through `trials/`; `EEXIST` gives a
+      `destination` violation with `FSIMG_EEXISTS`, `ENAMETOOLONG` and
+      `EILSEQ` one with `FSIMG_EUNSUPPORTED`; answers are cached per run by
+      the set's bytes; recipes never record destination violations.
+    - Seeded failure: a funnel that treats `EEXIST` as success makes a
+      case-pair witness fail at `extract` on APFS.
+    - **Gate:** `extract` is classified; the promoted NFC/NFD replay that
+      S4 left waiting passes on APFS and ext4.
+  - **B1c, tree generator.**
+    - PropCheck generators draw the small trees the
+      [design](../specs/design-spec-testing.md#generation-and-shrinking)
+      lists, with its definition of a reserved name and its character
+      restriction for case-equivalent siblings.
+    - The profile gains the number of drawn trees and the sample that runs
+      fsimg; the case phase draws the sample from a generator seeded per run
+      and records `random_seed` in each sampled recipe; builder tree cases
+      join the run.
+    - Seeded failure: a generator that emits a trailing-space name classifies
+      its tree invalid and is reported as a generator defect.
+    - **Gate:** a quick run reports drawn tree cases run through fsimg, each
+      replayable from its recipe without the seed.
+  - **B1d, oracle layer.**
+    - Population is separated from formatting, so mtools populates any empty
+      base, builder or formatter.
+    - The case phase gets the tool set, the oracle shell and `oracle-home/`;
+      the observation type (`agrees`, `disagrees` with detail,
+      `not_applicable`, `unavailable`) is recorded per tool in the case
+      result, the failure record and the coverage report.
+    - Seeded failure: a planted `.mtoolsrc` in a case directory does not
+      reach the next oracle, which closes the S4 stub that waited for this
+      layer.
+    - **Gate:** an mtools-populated builder base decodes to its recipe's
+      tree and passes the checkers, or the report says per host why not.
+  - **B1e, external create, fsimg read.**
+    - mtools-populated cases run in the case phase; each drawn tree is
+      populated into a copy of one cached empty base, never a formatter run
+      per draw.
+    - **Gate:** fsimg `x` of every populated case equals the known
+      tree in path, type, size and SHA-256, and the quick budget holds.
+  - **B1f, creation cases.**
+    - A source model evaluates the `input` rules: setting domains, name
+      validity, case-equivalent siblings and file size.
+    - After an accepting `create`, `mcopy -s` reads `out/created.img` with the
+      verdict the design gives it, `fsck -n` and fatcat are recorded, and a
+      second `create` from the tree written in reverse order into
+      `source-reversed/` writes `out/reversed.img`, which must equal
+      `created.img` byte for byte.
+    - Seeded failures: a source tree with a trailing-dot name must classify
+      as an `input` violation and `create` must reject it; a stub `create`
+      that writes different bytes for the reversed source fails the case.
+    - **Gate:** creation cases of drawn trees pass through every stage;
+      disagreements are recorded per tool.
+  - **B1g, writer geometry witnesses.**
+    - Automatic sizing margins: cluster counts 16 from each threshold
+      (FAT12 at most 4069, FAT16 4101 to 65509, FAT32 at least 65541).
+    - Exact `-s` sizes giving 4084, 4085, 65524 and 65525 clusters, and
+      `-o sector=` with `-o cluster=` combinations, including 4096-byte
+      sectors.
+    - Then the decision whether `test/fat-integration.sh` moves into the
+      harness. It is worthwhile only if it removes a mechanism, which needs
+      the `newfs_msdos` adapter, FAT12 fragmentation through `mdel`, and
+      CLI-level writer checks first; the script, `test-fat --external` and
+      `--make-payload`, and `test-fat-write --create` and `--create-empty` go
+      with it.
+    - **Gate:** each threshold witness classifies as intended, fsimg creates
+      and reads it, and the oracles' observations at the thresholds are in
+      the report.
 * **B2, semantic mutations.**
   - `model.rb` gains a bounded FAT-table and directory decoder for small
-    images.
+    images. It replaces the known tree: an unmutated base and a created image
+    must decode to the tree B1 assigns them, and a mutated image classifies
+    its directory scopes.
+  - The writer `profile` rule that every byte outside allocated metadata and
+    file content is zero, which needs the decoder's allocation map.
   - With the decoder, `Case#harness_defect` again refuses a valid case that
     leaves a scope unclassified, as the cases design requires.
   - The mutations are the semantic

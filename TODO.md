@@ -140,19 +140,22 @@
   bases alone. Add the `newfs_msdos` formatter adapter, and read every base
   with fatcat as a secondary reader where `configure` found it.
 
-* [Medium] **Spec harness random draws never reach fsimg**
+* [Medium] **Spec harness field draws never reach fsimg**
   (`test/spec/suite/fat/test_rules.rb`, `test/spec/lib/fsimg_spec/fat/witnesses.rb`):
-  PropCheck's field draws are classified in memory only. The `quick` profile
-  also runs about 30 drawn cases per variant through fsimg; run that sample.
+  PropCheck's BPB and geometry field draws are classified in memory only,
+  while drawn trees run through fsimg in the profile's sample. Run the field
+  draws through the same seeded sample, so about 30 drawn cases per variant
+  reach fsimg under `quick`.
 
-* [Medium] **Spec harness FAT acceptance asserted only at `info`**
+* [Medium] **Spec harness mutated images unclassified beyond `info`**
   (`test/spec/lib/fsimg_spec/fat/model.rb`, `test/spec/lib/fsimg_spec/fat/cases.rb`):
-  valid and `must_accept` FAT witnesses run every reading stage, but assert
-  acceptance only at `info`, because the model leaves the directory, file
-  and verification scopes unclassified; `ls`, `extract` and `verify` assert
-  only that they run without a fault. Milestone B2's table and directory
-  decoder, or classifying an unmutated builder base's known tree, makes
-  them assert acceptance.
+  the model classifies the directory, file and verification scopes only
+  through a known tree, which an unmutated base and a created image carry;
+  a mutated image leaves them unclassified, so its `ls`, `extract` and
+  `verify` assert only safety. Milestone B2's table and directory decoder
+  replaces the known tree and must decode those images to the same tree.
+  The writer `profile` rule that every byte outside allocated metadata and
+  file content is zero needs the decoder's allocation map and lands with it.
 
 * [Low] **Spec harness FAT witness gaps**
   (`test/spec/lib/fsimg_spec/fat/witnesses.rb`):
@@ -180,8 +183,8 @@
   `fat/cases.rb`, `fat/bases.rb`): the design replays every promoted case
   whose builder the host has and skips the others, but only independent-builder
   bases replay: `Suite.promoted` refuses a promoted recipe on a formatter
-  base, and `bin/replay` skips one. Replaying needs the case phase to
-  materialize formatter bases with the configured tools and their versions.
+  base, and `bin/replay` skips one. Replay them where the case phase's tool
+  set has the formatter, with its recorded version.
 
 * [Medium] **Killed worker once gave malformed NDJSON** (`cmd/fsimg/worker-parent.c`,
   `test/spec/suite/fat/test_runner_fsimg.rb`): in one full quick run on macOS,
@@ -204,10 +207,9 @@
 * [Low] **Spec harness reports and records** (`test/spec/lib/fsimg_spec/coverage.rb`,
   `failure_record.rb`):
   - Coverage reports `targeted_witnesses` as only `available` or
-    `not_generated`, and has no fields for the boundaries exercised or the
-    oracle results; the design also names "impossible within the enumerated
-    space" and per-rule oracle states. A promoted `valid` recipe counts
-    toward no rule.
+    `not_generated`, and has no field for the boundaries exercised; the
+    design also names "impossible within the enumerated space". A promoted
+    `valid` recipe counts toward no rule.
   - A promoted case that drifted is a `harness_error`, the verdict a
     generator defect or a base digest mismatch also gets; a distinct verdict
     or detail class would let the report tell a stale regression recipe
@@ -215,8 +217,6 @@
   - A rule whose only cases could not be classified reports
     `predicate_only`, though no predicate ran for them; `witnesses` also
     lists promoted ids.
-  - Failure records hold no oracle observations; the case phase runs no
-    oracle yet.
   - Failure records are bounded one by one (64 MiB logical image, capped
     captures) but not per run: a broken fsimg that fails every case writes
     one image per case, and the design's "when it is sparse" condition is
