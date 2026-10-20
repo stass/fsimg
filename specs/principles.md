@@ -7,8 +7,10 @@
 
 2. **Bound resources independently of image size.** Payloads, allocation tables,
    entry catalogs, sorting, traversal, and diagnostics all obey budgets. Spill
-   metadata to bounded scratch storage; never silently grow RAM or stage an
-   entire payload image. Measure adversarial cases as well as ordinary ones.
+   metadata to bounded scratch storage; never silently grow RAM or stage a
+   payload image, except through the two explicit, separately budgeted
+   files the layer design names. Measure adversarial cases as well as
+   ordinary ones.
 
 3. **Plan new images; read existing ones.** A writer turns stable sources into
    a validated layout and then emits it. A reader decodes an existing volume.
@@ -41,6 +43,7 @@
    injection, fuzzing, sanitizers, and measured resource bounds.
 
 10. **Keep fsimg small and embeddable.** Use portable C11, BSD-style `_t`
-    typedefs, BSD-2-Clause project code, and libc/OS interfaces. Keep optional
-    integrations outside the dependency-free core. The library neither exits
-    the process nor silently changes its sandbox or global state.
+    typedefs, BSD-2-Clause project code, libc/OS interfaces and the system
+    zlib, the one third-party library the architecture permits. Keep
+    optional integrations outside the core. The library neither exits the
+    process nor silently changes its sandbox or global state.

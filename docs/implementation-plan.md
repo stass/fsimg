@@ -417,7 +417,7 @@ validation gates above:
    trees without the new fields plan exactly as before and that the new
    fields are counted losses by default and failures when a caller forbids
    losses. Complete: every
-   format test passes, the baseline fixtures are unchanged, and `formats`
+   format test passes, the baseline fixtures are unchanged, and `--formats`
    reports the new masks.
 2. **QNX6 reader and verifier.** Implement codecs, header validation and
    selection, the tree walker, the bitmap self-check, inodes, directories,
@@ -425,8 +425,8 @@ validation gates above:
    specifies, with the synthetic generator covering the format design's
    acceptance matrix for both byte orders and every classic block size, the
    Linux reader comparison where a Linux host exists, the research fixture
-   from an environment path, and the fuzz target. Complete: `ls`, `cat`,
-   `extract`, `info` and `verify` on synthetic and native fixtures under
+   from an environment path, and the fuzz target. Complete: listing, `x -O`,
+   extraction, info and verification on synthetic and native fixtures under
    ASan/UBSan, with no unvalidated zero-fill anywhere. Implemented, with the
    evidence in [build.md](build.md); the Linux reader comparison is scripted,
    and recording its result is open in [the QNX6 TODO](todo-qnx6.md).
@@ -442,11 +442,11 @@ validation gates above:
    classic block size and in both byte orders, as the
    [research record](qnx6-research.md#fsimg-writer-output) documents, with
    the test evidence in [build.md](build.md).
-4. **Automotive composition.** Add disk-composition support and a separate
-   QNX4 design where the target HDD needs them, and extend MMI, bootless and
-   modern Power-Safe features under independent evidence and acceptance
-   gates, each with its own header decoder and reservation model in the
-   driver's module structure.
+4. **Automotive composition.** Use the layer design's disk composition, add
+   a separate QNX4 design where the target HDD needs it, and extend MMI,
+   bootless and modern Power-Safe features under independent evidence and
+   acceptance gates, each with its own header decoder and reservation model
+   in the driver's module structure.
 
 Specification-driven testing follows its own
 [plan](spec-testing-plan.md) and [design](../specs/design-spec-testing.md):
@@ -454,11 +454,45 @@ a Ruby harness that derives FAT cases from cited rules, checks fsimg's
 per-stage results against the outcome the rules derive, records independent
 tools' observations, and later serves a second format.
 
-Other extensions receive their own designs before code: manifest import and
-bounded partition selection; reader-only NTFS and QNX4 profiles with independent
-corpora; additional offline-writable formats; optional archive integration; and
-capability-gated sequential output. Their order follows concrete user needs.
-They cannot weaken the core budgets or introduce implicit image spooling.
-One-shot input construction and richer extraction policies are separate
-contracts, not flags that bypass invariants in the planned writer or safe
-extractor.
+The [command-line contract](../specs/design-cli.md) and the
+[layer design](../specs/design-layers.md) follow their own sequence, each
+stage again one reviewed commit:
+
+1. **Tar-like CLI.** Replace the subcommands with the mode letters, the
+   first-argument bundle parser and the option map; multi-root create
+   operands with the merge rule; extraction into a fresh stem directory or,
+   with `-E`, an existing empty private directory, including the ACL checks;
+   `x -O`; the human and JSON outputs; and the sandbox grants split to the
+   [authority mapping](../specs/design-security.md#coordinator-and-worker),
+   with staging separate from the extraction destination. The specification
+   harness invocation, the manual page, README and NEWS move with it. Complete:
+   every suite passes through the new spelling, and the destination fixtures
+   of the [security evidence](../specs/design-security.md#required-security-evidence)
+   pass on each platform.
+2. **Stacks and schemes.** Stack parsing, the layered reader with GPT and MBR
+   detection, partition selection and the stack in info; creation into a
+   staged raw disk with a scheme; unwrap and compose as library operations
+   only, since their command-line spelling needs an owner decision and its
+   own design first. Complete: sgdisk/gdisk and fdisk read fsimg disks, and
+   fsimg reads theirs.
+3. **Containers.** Fixed VHD, simg, and DMG with the bounded plist parser,
+   chunk index and zlib chunks; the transcode pass, the raw intermediate,
+   stream output and wrap. Complete: the hdiutil and qemu-img gates of the
+   layer design, both directions.
+4. **Compression.** gzip output, the budgeted spool with the coordinator's
+   stdin pipe for gzip and stream input, and the zlib version in capability
+   output; the sandbox admits pipe input and rights-limits the handed-over
+   spool and raw-intermediate descriptors. Complete: `gzip -t` and `zcat`
+   oracles, bomb and spool-limit tests, byte-identical output under one zlib
+   version.
+
+Later container and compression profiles each need their own profile in the
+layer design first.
+
+Other extensions receive their own designs before code: manifest import;
+reader-only NTFS and QNX4 profiles with independent corpora; additional
+offline-writable formats; and optional archive integration. Their order
+follows concrete user needs. They cannot weaken the core budgets; the only
+image spool is the explicit, budgeted one of the layer design. One-shot
+input construction and richer extraction policies are separate contracts,
+not flags that bypass invariants in the planned writer or safe extractor.

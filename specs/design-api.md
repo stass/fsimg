@@ -34,6 +34,17 @@ typedef struct fsimg_format_info fsimg_format_info_t;
 typedef struct fsimg_io_ops fsimg_io_ops_t;
 typedef struct fsimg_source_ops fsimg_source_ops_t;
 typedef struct fsimg_source fsimg_source_t;
+typedef struct fsimg_stack fsimg_stack_t;
+typedef struct fsimg_layer_options fsimg_layer_options_t;
+typedef struct fsimg_image fsimg_image_t;
+typedef struct fsimg_image_options fsimg_image_options_t;
+typedef struct fsimg_image_info fsimg_image_info_t;
+typedef struct fsimg_partition_info fsimg_partition_info_t;
+typedef struct fsimg_selector fsimg_selector_t;
+typedef struct fsimg_sink fsimg_sink_t;
+typedef struct fsimg_part fsimg_part_t;
+typedef struct fsimg_layer_report fsimg_layer_report_t;
+typedef struct fsimg_layer_info fsimg_layer_info_t;
 
 typedef enum fsimg_status {
 	FSIMG_OK = 0,
@@ -85,7 +96,7 @@ strict rule can be extended deliberately when ABI compatibility requires it.
 
 | `fsimg_options_t` field group | Contract |
 | --- | --- |
-| Limits | Memory, scratch, entries, depth, path bytes, open files, optional work/deadline ceilings; defaults in the architecture |
+| Limits | Memory, scratch, spool, entries, depth, path bytes, open files, optional work/deadline ceilings; defaults in the architecture |
 | Scratch directory descriptor | Authorized parent for private metadata scratch; `-1` disables spill |
 | Progress callback and argument | Receives bounded counters and phase, never an accumulated event list |
 | Cancellation callback and argument | Polled at each batch and external-sort pass; true requests cancellation |
@@ -221,7 +232,7 @@ fsimg_status_t fsimg_writer_add(fsimg_writer_t *writer,
     const fsimg_entry_t *entry, const fsimg_source_t *source,
     fsimg_error_t *error);
 fsimg_status_t fsimg_writer_add_tree(fsimg_writer_t *writer, int root_fd,
-    const char *image_directory, fsimg_error_t *error);
+    const char *image_path, fsimg_error_t *error);
 fsimg_status_t fsimg_writer_plan(fsimg_writer_t *writer,
     const fsimg_plan_t **out, fsimg_error_t *error);
 fsimg_status_t fsimg_plan_get_info(const fsimg_plan_t *plan,
@@ -233,11 +244,20 @@ fsimg_status_t fsimg_writer_write_at(fsimg_writer_t *writer, int parent_fd,
 void fsimg_writer_free(fsimg_writer_t *writer);
 ```
 
-Write options specify exact or automatic volume size, minimum free bytes,
-sector/allocation-unit constraints, label, required/optional metadata policy,
-reproducibility policy and epoch, logical-completion versus required-durability
-mode, and typed format options. Raw emission defaults to logical completion;
-the file-publication helper always performs its durable publication protocol.
+The `format` argument is a [stack](design-layers.md#the-stack) whose
+filesystem slot is present: `fat32` writes a bare volume and `fat32/gpt/dmg`
+a partitioned disk in a container. Write options specify exact or automatic
+volume size, minimum free bytes, sector/allocation-unit constraints, label,
+required/optional metadata policy, reproducibility policy and epoch,
+logical-completion versus required-durability mode, typed format options, and
+a borrowed `layers` pointer to an `fsimg_layer_options_t` with the typed
+settings of every layer (NULL selects every default). The writer copies both
+structures. A layer setting whose layer is absent from the stack must hold its
+default, exactly as a format setting a format does not store; an
+[identifier](design-layers.md#identifiers) of a layer in the stack must be
+set unless the reproducible flag is given. Raw emission
+defaults to logical completion; the file-publication helper always performs
+its durable publication protocol.
 Automatic sizing
 uses `volume_bytes == 0`; `FSIMG_WRITE_MINIMIZE` selects the
 [minimization policy](design-sizing.md) over the settings left open and is
@@ -246,10 +266,13 @@ default. Invalid geometry is not silently substituted.
 
 `add()` copies the entry strings and metadata before returning. Source IDs are
 values, not handles to caller entry structs. `set_sources()` is called once,
-before provider-backed entries are added. `add_tree()` scans synchronously,
-duplicates a source-root descriptor for subsequent reopening, and records
-metadata rather than payload bytes. It rejects symlinks and unsupported host
-file kinds. A non-root image destination directory must be explicitly represented
+before provider-backed entries are added. `add_tree()` accepts a directory or
+regular-file root descriptor, as the [sources design](design-sources.md)
+defines: a directory root contributes its tree beneath `image_path`, a
+regular-file root one file at `image_path`. It scans synchronously,
+duplicates the root descriptor for subsequent reopening, and records metadata
+rather than payload bytes. It rejects symlinks and unsupported host file
+kinds. A non-root image destination directory must be explicitly represented
 in the catalog by planning time; insertion order is unrestricted.
 
 | State | Allowed operations | Transition |
@@ -294,6 +317,28 @@ without replacing an existing name. It owns and closes its output descriptors.
 The caller's descriptor is borrowed for the call. Publication and durability
 outcomes follow the [security/output contract](design-security.md#image-publication).
 The helper does not enter an OS sandbox on behalf of an embedding application.
+
+```c
+fsimg_status_t fsimg_writer_output(fsimg_writer_t *writer,
+    const fsimg_sink_t *sink, fsimg_error_t *error);
+```
+
+`output()` generalises both: `fsimg_sink_t` is a caller-owned value naming a
+file (parent descriptor and basename, as `write_at()`), a positional I/O
+object (as `emit()`), or a stream descriptor written sequentially, plus
+`raw_fd`, the [raw intermediate](design-layers.md#handed-over-files): an
+exclusively created, empty, read/write regular file the caller has unlinked,
+adopted on every outcome, required whenever the stack has a container or
+compression or the sink is a stream, and `-1` otherwise. The library never
+creates that file by name, and checks the one it adopts: a sink that needs
+one and has none, or whose descriptor is not a regular file of size zero
+with link count zero open for reading and writing, is `FSIMG_EINVAL` before
+any mutation. `emit()` and `write_at()` are the
+positional and file cases for stacks that need no raw intermediate. With one
+the writer stages the raw disk there and transcodes it as the
+[layer design](design-layers.md#writing) states. A stream sink has no
+publication; a failure after the first byte reports
+`FSIMG_OUTPUT_INCOMPLETE`, and the caller must discard what it received.
 
 ## Reader
 
@@ -356,6 +401,102 @@ and invalidate the current snapshot. Argument/state errors detected before
 work do not advance it. Rewinding means opening a new reader, not retaining a
 second tree or index in the same handle.
 
+## Images and layers
+
+```c
+fsimg_status_t fsimg_stack_parse(const char *text, fsimg_stack_t *out,
+    fsimg_error_t *error);
+size_t fsimg_stack_format(const fsimg_stack_t *stack, char *buffer,
+    size_t capacity);
+void fsimg_layer_options_init(fsimg_layer_options_t *opts);
+void fsimg_image_options_init(fsimg_image_options_t *opts);
+fsimg_status_t fsimg_image_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
+    const fsimg_image_options_t *opts, fsimg_image_t **out,
+    fsimg_error_t *error);
+fsimg_status_t fsimg_image_open_stream(fsimg_ctx_t *ctx, int stream_fd,
+    const fsimg_image_options_t *opts, fsimg_image_t **out,
+    fsimg_error_t *error);
+fsimg_status_t fsimg_image_get_info(const fsimg_image_t *image,
+    fsimg_image_info_t *out, fsimg_error_t *error);
+fsimg_status_t fsimg_image_next_partition(fsimg_image_t *image,
+    fsimg_partition_info_t *out, fsimg_error_t *error);
+fsimg_status_t fsimg_image_select(fsimg_image_t *image,
+    const fsimg_selector_t *selector, fsimg_io_t **volume,
+    fsimg_error_t *error);
+fsimg_status_t fsimg_image_verify(fsimg_image_t *image, unsigned flags,
+    fsimg_layer_report_t *out, fsimg_error_t *error);
+void fsimg_image_free(fsimg_image_t *image);
+```
+
+An image is the opened [stack](design-layers.md) around a volume: the
+container peeled to a disk, the scheme's partitions enumerated, nothing of the
+filesystem. `fsimg_stack_t` is a public value of three slots, each a name,
+an explicit empty or unspecified; `parse()` applies the
+[one grammar rule](design-layers.md#the-stack) and fails on any other text,
+and `format()` writes the canonical text, omitting empty and unspecified
+slots, and returns the length it needs. Image options carry a forced stack
+(a named slot is forced, an explicit empty slot is forced empty, an
+unspecified slot is detected), the read-side settings such as `gpt:sector`,
+accepted only for a layer the forced stack names, and `spool_fd`: the
+[spool](design-layers.md#handed-over-files), an exclusively created, empty,
+read/write regular file the caller has unlinked, adopted on every outcome
+after the same check as `raw_fd` (regular, size zero, link count zero,
+read/write, else `FSIMG_EINVAL`), or `-1`. `open()` uses it only when the
+input turns out to be gzip and
+otherwise closes it; `open_stream()` requires it and reads `stream_fd`, a
+pipe or other non-seekable descriptor borrowed for the call, to EOF into it,
+deciding compression from the first block. Without a spool, stream and gzip
+input fail as a spool limit error with limit zero.
+
+The image information record exposes the canonical detected stack text, the
+compression name, disk length, the container's chunk count and codecs, the
+scheme's sector size, disk identifier and partition count, and the layer
+validation scope. `next_partition()` iterates the scheme's slots in order
+from 1, returning DONE at the end: slot number, used flag, disk offset and
+length, type as table name and raw value, name as UTF-8 (GPT), unique
+identifier, active flag (MBR), and the bounded probe's claim for the
+partition's prefix (format name, unsupported, corrupt or none). A disk
+without a scheme has no partitions: the information record reports no
+scheme and a partition count of zero, `next_partition()` returns DONE at
+once, and `select()` accepts only the automatic, range and disk selectors
+for it, the automatic one yielding the whole disk as the volume.
+
+`select()` applies one selector (automatic, index, name, type, range or
+disk) under the [selection rules](design-layers.md#partition-selection) and
+returns a checked read-only slice of the disk. The slice borrows the image,
+which must outlive it, and is released with `fsimg_io_free()`; it is the
+input to `fsimg_reader_open()`, which stays unaware of layers. `verify()`
+checks every layer with the [layer verification scope](design-layers.md#verification-scope);
+`FSIMG_VERIFY_PAYLOAD` adds the read-through checks. It does not require an
+untouched image and does not consume anything.
+
+```c
+fsimg_status_t fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input,
+    const char *stack, const fsimg_write_options_t *opts,
+    const fsimg_sink_t *sink, fsimg_error_t *error);
+fsimg_status_t fsimg_image_unwrap(fsimg_image_t *image,
+    const fsimg_selector_t *selector, const fsimg_write_options_t *opts,
+    const fsimg_sink_t *sink, fsimg_error_t *error);
+fsimg_status_t fsimg_image_compose(fsimg_ctx_t *ctx, const char *stack,
+    const fsimg_part_t *parts, size_t count,
+    const fsimg_write_options_t *opts, const fsimg_sink_t *sink,
+    fsimg_error_t *error);
+```
+
+`wrap()` puts a raw volume or disk into a stack; `unwrap()` writes the bytes
+a selector names, raw; `compose()` builds a partitioned disk from `count`
+parts, each a borrowed volume I/O object with a partition name and type
+(NULL selects the derived default) and the partition's unique GUID, which
+follows the [identifier rule](design-layers.md#identifiers): required
+outside reproducible mode, `FSIMG_EINVAL` naming the partition when unset,
+derived from the partition index under it. Each follows the
+[wrap, unwrap and compose rules](design-layers.md#wrap-unwrap-and-compose).
+They take write options for the mode flags, epoch and `layers`; filesystem
+settings must hold their defaults. Inputs are borrowed for the call and
+checked against the sink for backing-identity aliases before any mutation.
+Outputs follow the same publication, stream and failure contracts as
+`fsimg_writer_output()`.
+
 ## Extraction and verification
 
 ```c
@@ -406,6 +547,16 @@ registry and allocates no per-format catalog. It does not promise that a host
 can represent every theoretical format size. Runtime OS sandbox reporting is
 owned by the CLI and is separate from filesystem capabilities.
 
+```c
+fsimg_status_t fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out,
+    fsimg_error_t *error);
+```
+
+`fsimg_layer_next()` enumerates schemes, containers and compressions the same
+way: name, kind, reader/writer flags, the settings the layer stores, the file
+suffixes that name it, its codecs and a bounded codec version string, so a
+reproducibility claim for compressed bytes can name the zlib it depends on.
+
 ## Ownership summary
 
 | Value | Owner | Valid through |
@@ -420,6 +571,11 @@ owned by the CLI and is separate from filesystem capabilities.
 | Entry passed to writer | Caller; values copied | Caller can release after add returns |
 | Entry returned by reader | Reader | Next iteration call, fatal error, or reader destruction |
 | Plan | Writer | Writer destruction after successful planning |
+| Input I/O passed to image open, wrap or compose | Caller, borrowed by the image or for the call | Image destruction or end of the call |
+| Spool descriptor in image options | Adopted by the open on every outcome | Image destruction |
+| Raw intermediate descriptor in a sink | Adopted by the output call on every outcome | End of the call |
+| Volume slice returned by select | Caller, borrows the image | Slice destruction; image outlives it |
+| Sink value and its descriptor or I/O object | Caller, borrowed for the call | End of the output call; a staged file is library-owned until published or removed |
 | Error/report value | Caller | Independent of the failed object |
 
 Destruction releases memory, scratch, and owned descriptors on every path.
@@ -437,9 +593,11 @@ accounting includes the context and alignment-preserving allocation headers.
 The statistics query is `fsimg_ctx_get_stats(ctx, out, error)`; status labels are
 available through `fsimg_status_string(status)` without allocation.
 
-`fsimg_options_t` uses `uint64_t` byte/count limits, `uint32_t` depth/path/FD
-limits, separate callback arguments, and zeroed reserved words. Its `flags`
-field accepts zero. Progress snapshots borrow a phase string for the duration
+`fsimg_options_t` uses `uint64_t` byte/count limits, including `spool_bytes`,
+`uint32_t` depth/path/FD limits, separate callback arguments, and zeroed
+reserved words. Its `flags` field accepts zero. `FSIMG_RESOURCE_SPOOL`
+identifies the spool limit in errors, and `FSIMG_OP_LAYER` identifies a
+failure in a scheme, container or compression layer. Progress snapshots borrow a phase string for the duration
 of the synchronous callback. Destructors called from a callback do nothing;
 fallible reentry returns `FSIMG_ESTATE`. This protects the active context without
 introducing deferred destruction or callback-driven lifecycle transitions.

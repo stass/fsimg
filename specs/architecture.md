@@ -16,10 +16,12 @@ positional I/O callbacks. The default CLI handles regular files, not devices.
 It requires no privileges, kernel filesystem driver, or external formatter.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, and the qualified QNX6
-Power-Safe profiles with independent read and write support. The CLI provides
-`create`, `info`, `ls`, `cat`, `extract`, `verify`, and `formats`.
-Each format declares supported features; no command
-claims support based only on recognizing a boot record.
+Power-Safe profiles with independent read and write support. The CLI is
+tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
+`-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
+`--formats` for capabilities, with `-f` naming the image. Each format
+declares supported features; no mode claims support based only on
+recognizing a boot record.
 
 The supported host baseline is a 64-bit FreeBSD, Linux, or macOS environment
 with C11, 64-bit file offsets, and positional file I/O. A format's legal limits,
@@ -36,11 +38,17 @@ loops do not establish closure because open descriptors can outlive a lowered
 limit. This requirement uses native OS/libc interfaces, without a helper library.
 
 The product does not modify existing volumes, emulate a POSIX filesystem,
-repair corruption, replay journals, or mount images. Partition-table parsing,
-whole-disk composition, additional filesystems, archive integration, and
-one-shot input streams have separate designs and acceptance gates. A bounded
-volume slice is supported independently of partition discovery. These scope
-boundaries do not justify shortcuts in the common API.
+repair corruption, replay journals, or mount images. Partition tables,
+disk-image containers, compression, stream input and whole-disk composition
+are covered by the [layer design](design-layers.md): an image is a stack of
+slots, filesystem inside partition scheme inside container, with compression
+applied separately to the whole; emission is random-access into a staged
+result followed by one sequential transcode, and reading peels each layer
+down to a bounded I/O slice, so filesystem drivers never see a layer. A
+bounded volume slice is supported independently of partition discovery.
+Additional filesystems and archive integration have separate designs and
+acceptance gates. These scope boundaries do not justify shortcuts in the
+common API.
 
 ## Priorities and design choices
 
@@ -49,14 +57,20 @@ The [principles](principles.md) govern tradeoffs. In particular:
 * Large payload support alone is insufficient: catalogs, FATs, bitmaps,
   directories, and fragmentation indexes also have bounded resident storage.
 * Metadata scratch files are an explicit resource. They contain records,
-  indexes, and sort runs, never a second image or copied file payloads.
+  indexes, and sort runs, never a second image or copied file payloads. The
+  only payload-sized temporary files are the spool and the raw intermediate,
+  two separately named and budgeted resources whose placement the
+  [storage design](design-storage.md#resource-model) states.
 * CLI image parsing runs in an isolated worker. The default uses OS confinement
   when available and warns when it is unavailable. A required mode refuses
   unconfined execution. In-process library calls provide the same validation
   but do not sandbox their host application.
-* Extraction creates a fresh private destination. Merging into an existing
-  tree, overwriting files, and restoring privileged metadata are outside the
-  extraction contract.
+* Extraction writes beneath one private destination that the coordinator has
+  proven empty: a fresh directory it creates inside the user's `-C`
+  directory, or with `-E` the user's own directory after the checks in the
+  [security specification](design-security.md#safe-extraction). Merging
+  into a populated tree, overwriting files, and restoring privileged metadata
+  are outside the extraction contract.
 * A writer consumes known-length, repeatable sources. It freezes its catalog
   before planning and emits one image. Removing mutation and retry states
   makes failure and source ownership easier to reason about.
@@ -121,11 +135,13 @@ Defaults are product policy, not a measurement claim:
 | --- | --- | --- |
 | Memory | 256 MiB | All live fsimg allocations in a context; minimum supported budget 16 MiB |
 | Scratch | 64 GiB | Sum of logical lengths of live scratch files, including simultaneous merge inputs and outputs |
+| Spool | 64 GiB | Logical bytes of the spool file holding a stream or compressed input, defined in the [layer design](design-layers.md) |
 | Entries | 10,000,000 | Entries admitted or visited in one operation |
 | Directory depth | 256 | Components below the volume root |
 | Image path | 64 KiB | Encoded UTF-8 bytes, including separators and terminating NUL |
 | Open descriptors | 128 | Aggregate descriptors owned by a context, further limited by host availability |
 | Extracted logical bytes | Selected volume length | Sum of file lengths, including holes and repeated references; caller may explicitly change it |
+| Created output bytes | Planned length | Logical bytes of the staged output plus, while a transcode holds both, the raw intermediate: the plan sums the disk length and the layers' worst-case encoded length, and an explicit lower limit fails at planning naming both parts |
 | Diagnostic frame | 64 KiB | Maximum single worker control message |
 
 Limits are configurable and failures identify the exhausted resource. Lower
@@ -157,7 +173,12 @@ disabled, an operation either fits in memory or fails with `FSIMG_ELIMIT`.
 
 All CLI text uses the output relay, including commands without a parser worker
 and post-publication summaries. A bounded producer feeds the same queue and
-supervision loop as worker events. One absolute monotonic deadline spans command
+supervision loop as worker events. An image read from standard input goes
+the other way through an input relay: a child from the same executable
+holding only the standard input descriptor and one pipe to the worker, under
+the same supervision and deadline, carrying bytes it never interprets; those
+bytes are image payload, not text, and are charged to the spool limit by the
+worker, not to the ledger. One absolute monotonic deadline spans command
 preparation, worker processing, publication and successful output; phase changes
 cannot restart its time allowance. After failure, diagnostic delivery receives
 at most two seconds, with one further two-second stderr-only attempt if stdout
@@ -178,7 +199,7 @@ the command-specific presentation rules.
 
 The coordinator owns one output ledger for the complete command, borrowed by
 every relay phase. It records queued formatted bytes and confirmed stdout/stderr
-bytes; raw cat bytes retain their independent logical-output ceiling. The text
+bytes; raw member bytes and a streamed image retain their independent logical-output ceiling. The text
 ceiling derives only from trusted entry/path limits: at most
 `entries * (6 * path_bytes + 4096) + 1 MiB`, capped at `UINT64_MAX` with checked
 arithmetic. The factor six bounds JSON escaping and the per-entry allowance
@@ -239,6 +260,15 @@ traversal, delivery, or copy lifecycle:
 
 These boundaries share infrastructure without a common reader/writer object
 graph or mutable filesystem model.
+
+The [layer design](design-layers.md) wraps a finished volume in a partition
+scheme, a container and compression, and unwraps them on reading. Layers are
+applied around the common writer and reader, never inside a driver: the
+writer emits into a staged random-access result and one sequential transcode
+produces the final file or stream; the reader decodes a stream or
+compressed input into a spool file first, then peels each layer down to a
+bounded I/O slice, which the filesystem driver opens as it opens a raw
+image. The design also owns `--partition` selection and the spool budget.
 
 The [sources and catalogs design](design-sources.md) defines common collection,
 source identity and reopening, and immutable catalog preparation independently
@@ -358,7 +388,8 @@ either mode. The parent does not execute requests to open names supplied by
 the worker.
 
 Extraction accepts only regular files and directories in its safe profile,
-creates a fresh private destination, and never follows image-derived symlinks.
+writes only beneath a destination proven empty and private before the worker
+starts, and never follows image-derived symlinks.
 Image paths are validated component by component, and files are created
 exclusively relative to directory descriptors. Details and platform guarantees
 are defined by the [security specification](design-security.md).
@@ -410,7 +441,7 @@ contract. A format feature is advertised only after its acceptance tests pass.
 ### Specification-driven testing
 
 The [specification-driven test harness](design-spec-testing.md) classifies
-each failed CLI invocation by the integer `code` of its `-j` error record,
+each failed CLI invocation by the integer `code` of its `--json` error record,
 mapped to the `fsimg_status_t` names in `include/fsimg.h`. The CLI emits one
 bounded error record per failed command, and that code is the contract between
 fsimg and the harness. The exit status separates only success, failure and invalid
@@ -421,7 +452,7 @@ on these codes, which image content can cause:
   image, several do, or a forced format contradicts the variant the image
   declares;
 * `FSIMG_ECORRUPT`: at a reading command, a claimed image is corrupt. At
-  `create` it reports inconsistent scratch data, a fault;
+  `c` it reports inconsistent scratch data, a fault;
 * `FSIMG_EUNSUPPORTED`: fsimg or the host lacks a feature or capability. The
   image can cause it with a feature outside the supported profile; the host
   can cause it with unavailable required confinement, no publication without
@@ -446,11 +477,18 @@ satisfy an image expectation.
 
 ## Dependencies and implementation organization
 
-The core library and ordinary CLI depend only on libc and host OS interfaces.
-OS sandbox calls are native adapters, not dependencies on libseccomp or a
-container runtime. Optional archive integration cannot become necessary for
-raw-image operations. Imported code and generated tables receive file-level
-provenance and license review; test tools do not imply permission to copy them.
+The core library and ordinary CLI depend on libc, host OS interfaces and
+one third-party library, the system zlib. zlib is required, never vendored:
+compressed DMG chunks and gzip are basic layer features, not optional
+extras; zlib's permissive license matches the project's; it is the system
+library on macOS and FreeBSD and standard on every Linux distribution; and
+linking the system copy means its security fixes arrive with the host,
+which matters because inflate parses untrusted images. Configure fails
+clearly without it. OS sandbox calls are native adapters, not dependencies
+on libseccomp or a container runtime. Optional archive integration cannot
+become necessary for raw-image operations. Imported code and generated
+tables receive file-level provenance and license review; test tools do not
+imply permission to copy them.
 
 The build uses Autoconf, Automake, and Libtool as development tools. Release
 archives contain generated build machinery; users need a C compiler, make,
@@ -467,6 +505,7 @@ lib/write/           writer lifecycle and common emission
 lib/read/            reader lifecycle and verification
 lib/extract/         safe host extraction
 lib/output/          shared staging, finalization, publication
+lib/layers/          partition schemes, containers, compression, spooling
 lib/formats/fat/     FAT codecs, reader, writer
 lib/formats/exfat/   exFAT codecs, reader, writer
 lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
@@ -510,4 +549,5 @@ A release meets functional, security, and resource requirements together:
 
 Detailed requirements are in the [API](design-api.md),
 [storage](design-storage.md), [security](design-security.md),
-[format](design-formats.md), and [CLI](design-cli.md) specifications.
+[format](design-formats.md), [layer](design-layers.md), and
+[CLI](design-cli.md) specifications.

@@ -164,12 +164,12 @@ not implied by a `qnx6` format capability.
 
 ## Verification and compatibility claims
 
-`info` describes recognized geometry and implemented capabilities. `verify`
-performs complete structural checks for the supported profile and optionally
-reads payloads. Neither performs filesystem repair or claims that arbitrary
-unknown extensions are safe to ignore. Unknown benign records are skipped
-only where the format expressly defines that behavior and their lengths can
-be validated.
+Info (`i`) describes recognized geometry and implemented capabilities.
+Verification (`W`) performs complete structural checks for the supported
+profile and optionally reads payloads. Neither performs filesystem repair or
+claims that arbitrary unknown extensions are safe to ignore. Unknown benign
+records are skipped only where the format expressly defines that behavior and
+their lengths can be validated.
 
 A driver's read-only implementation does not need writer stubs. Adding a
 filesystem requires a design that accounts for geometry, feature negotiation,

@@ -47,10 +47,10 @@ are failures. A policy is reported as active only after every required layer
 is installed, not because one syscall succeeded. Machine-readable results
 include policy, backend, and active/unavailable/disabled status.
 
-The policy applies to all image-consuming commands, including `info`, `ls`,
-`cat`, and `verify`; probes are parsers too. Creation uses a separate profile
-with read access to the selected source roots. `formats` and usage output do
-not require an image-processing worker.
+The policy applies to all image-consuming modes, including `i`, `t`, `x -O`
+and `W`; probes are parsers too. Creation uses a separate profile with read
+access to its source roots, one per create operand. `--formats` and usage
+output do not require an image-processing worker.
 
 ## Coordinator and worker
 
@@ -61,12 +61,24 @@ fresh execution with a minimal environment removes inherited application
 memory and unneeded environment variables from the worker. No shell or PATH
 lookup selects an executable.
 
-Only designated descriptors survive worker startup: read-only input or source
-roots, scratch authority, fresh output authority where needed, and bounded
-control/data channels. Other descriptors, sockets, terminal handles, and
+Only designated descriptors survive worker startup: the image input, which
+is a read-only regular file or the pipe through which the coordinator pumps
+standard input unread (the [CLI design](design-cli.md#coordinator-and-streaming-representation)
+states that rule and refuses a terminal), source roots, scratch authority,
+fresh output authority where needed, the unlinked
+[handed-over files](design-layers.md#handed-over-files), and bounded
+control/data channels. The sandbox's input check admits a regular file or a
+pipe and nothing else. Other descriptors, sockets, terminal handles, and
 executable handles are closed. Core dumps are disabled. Runtime initialization
 needed by libc occurs before confinement; no locale, timezone, or plugin
 loading may cause ambient file opens while processing an image.
+
+The worker's authority over names is this mapping and nothing more. In the
+staging directory it may create the staged output and remove nothing. In
+the scratch tree it may create and unlink its own scratch files. A
+handed-over file (spool, raw intermediate) is a descriptor only, with no
+name to create or remove. Source roots and the image input are read-only.
+The platform profiles below install exactly these rights.
 
 The worker establishes its profile and reports readiness and confinement status.
 It waits for the coordinator's acknowledgement before reading image data or
@@ -78,13 +90,13 @@ file itself is created only after successful planning. Source scanning rejects
 encounters with scratch/output objects rather than importing them.
 
 The worker writes payload bytes directly through authorized descriptors.
-Gigantic image payloads do not pass through a per-file request broker. `cat`
+Gigantic image payloads do not pass through a per-file request broker. `x -O`
 uses a separate bounded data pipe for explicitly requested raw bytes. Control
 messages use a versioned framing protocol with a fixed maximum length,
 known message types, bounded strings, checked counters, and a closed state
 machine. No worker-supplied descriptor or pathname is accepted as new authority.
 
-The coordinator validates the selected entry before forwarding raw cat bytes to
+The coordinator validates the selected entry before forwarding raw `x -O` bytes to
 a same-executable output relay. That relay receives only its bounded input and
 status channels and the caller's stdout/stderr sinks. It owns potentially blocking sink
 writes; the coordinator supervises and terminates both children on cancellation.
@@ -113,7 +125,16 @@ host path access.
 ## Source-root profile
 
 The creation worker can open objects beneath explicitly authorized source roots.
-This is more authority than a pre-opened regular image descriptor. Normal
+The coordinator opens one root per create operand, with the same no-follow,
+nonblocking, no-controlling-terminal open that scanning uses, and passes the
+descriptors as the worker's complete source authority: the worker never
+receives the `-C` directory, an operand's parent, or a pathname to resolve,
+and every check below applies to each root on its own. Roots may nest or
+overlap on the host; what that does to the image is the
+[merging rule's](design-sources.md#merging-roots) business, which fails two
+roots that supply the same file, and it grants nothing beyond the union of
+the roots. This is more authority than a pre-opened regular image
+descriptor. Normal
 scanning uses nonblocking, no-controlling-terminal, no-follow opens and checks
 the opened object's type before reading; FIFOs cannot make an ordinary open
 wait for a writer, and special files are rejected. A prior directory type check
@@ -204,11 +225,65 @@ application's sandbox is not automatically advertised as the fsimg profile.
 
 ## Safe extraction
 
-The destination operand names a new directory, not a tree to merge into.
-The coordinator creates it exclusively with mode 0700 and passes only its
-opened directory capability to the extractor. Any existing object, including
-an empty directory or symlink, fails. The selected parent comes from the user;
-image names never influence how that initial authority is obtained.
+The destination is one directory that the coordinator has proven private
+before the worker starts, and the worker receives only its opened descriptor,
+never the parent. There are two ways to obtain it, and the
+[CLI contract](design-cli.md#extraction) defines their syntax:
+
+* By default the coordinator creates a fresh directory, named after the
+  image stem, inside the existing `-C` directory: one `mkdirat` with mode
+  0700 beneath the opened parent, then a no-follow reopen of the result. An
+  existing object of that name, including an empty directory or a symbolic
+  link, fails. A name fsimg cannot derive is not invented; the user then
+  chooses the second way.
+* With `-E` the user designates the destination itself. The coordinator opens
+  it with `O_DIRECTORY | O_NOFOLLOW`, so a symbolic link fails, and uses only
+  that descriptor afterwards: `fstat` must show a directory owned by the
+  effective user without group or other write permission; a read of the
+  directory through the descriptor must find it empty; and the access
+  control list must be trivial, as defined next. This accepts exactly the
+  state a fresh directory is in, so the worker's behaviour is the same for
+  both: every entry is created exclusively and no-follow beneath a verified
+  parent, and an object another process adds concurrently is a collision
+  failure, never an escape.
+
+Both destinations satisfy one privacy rule, checked on the opened descriptor
+by a compat-layer function. The mode bits are fully inspectable, so they are
+judged: the owner is the effective user, and group and others have no write
+bit. Read and search bits for others are allowed, deliberately: they expose
+only the names at the top level, because every extracted directory is
+created with mode 0700 and every file with 0600, so nothing beneath is
+readable through them; a write bit, by contrast, would let another
+principal plant an object the extraction then collides with or
+races. An access control list is not interpreted; any non-trivial ACL of any
+type the platform can report on the descriptor is refused: on FreeBSD
+`acl_is_trivial_np` for each ACL type the filesystem supports (POSIX.1e
+access and default, NFSv4); on Linux the presence of a
+`system.posix_acl_access` or `system.posix_acl_default` attribute in
+`flistxattr`, which the kernel keeps only for a non-trivial ACL; on macOS
+any extended ACL entry. On Linux a listed `system.nfs4_acl` attribute is
+refused as well, trivial or not: the NFS client lists it for every inode of
+a server with ACL support, and fsimg cannot prove it trivial without
+decoding NFSv4 ACLs, which is out of scope. A Linux NFSv4 destination on
+such a server therefore cannot be used, a limitation the user-facing
+documentation states; FreeBSD's NFSv4 case is unaffected, since
+`acl_is_trivial_np` answers there. Refusing rather than reading ACLs is the
+rule by construction: the three platforms' ACL semantics differ, an
+allowlist of harmless entries is a list that grows with each platform, and a
+user who wants an ACL on the destination can extract elsewhere. The rule
+covers the fresh directory because a parent's inheritable entries attach to
+it at creation; the check runs after `mkdirat`, and a failure removes the
+directory while it is still the empty object just created and names the
+parent. fsimg never strips or edits an ACL: that would add host-metadata
+mutation to the extraction path for the sake of a parent the user can
+replace. The checks run as the invoking user and hold against another
+process with the same credentials only as far as the threat model states;
+they are a safeguard against mistakes and the ordinary shared-directory
+attacks, not an isolation boundary.
+
+The selected parent comes from the user; image names never influence how
+that initial authority is obtained. Merging into a populated tree is not
+possible by any option.
 
 Image paths are split into validated components. Reject embedded NULs, `.` and
 `..`, empty internal components, embedded separators in a component, invalid
@@ -290,7 +365,14 @@ contract. Outcomes are distinguished:
 
 A remote filesystem can have weaker or ambiguous failure semantics. fsimg does
 not claim stronger guarantees than its adapter can establish. Publication
-status is independent of worker success. Power loss may leave private staging;
+status is independent of worker success. With `cW` the staged image is first
+verified by a reading worker; a failed verification discards the staged
+result and publishes nothing, as the
+[layer design](design-layers.md#create-then-verify) states. An image
+streamed to stdout has no publication step: the staged result is transcoded
+to the stream as the [layer design](design-layers.md#streams) specifies, and
+a failure after the first forwarded byte is incomplete output, reported
+through the exit status. Power loss may leave private staging;
 stale staging cleanup must never follow symlinks or delete files by a broad
 filename pattern.
 
@@ -303,7 +385,11 @@ timestamp-based detection; the source stability contract requires a snapshot
 when an adversarial concurrent writer is relevant.
 
 Decoders validate lengths, offsets, integer products, chain termination,
-directory references, encoding, and required checksums before use. In exFAT,
+directory references, encoding, and required checksums before use. Partition
+tables, container block tables, the DMG plist and compressed streams are
+untrusted input under the same rules, decoded inside the worker; the
+[layer design](design-layers.md#security) states their bounds and the spool
+authority. In exFAT,
 uninitialized logical file tails are returned as zero; they are not read from
 old cluster contents. Emitters initialize all reserved bytes and padding.
 Diagnostics never dump uninitialized buffers, file payloads, pointers, or
@@ -326,6 +412,25 @@ allowlist alone does not guarantee a disk-space quota.
   host normalization collisions, source/output aliasing, symlink pivots, hardlink
   attacks, special files, and privileged metadata. Outside sentinels must retain
   both contents and metadata.
+* Destination fixtures exercise both ways of obtaining the root, each passing
+  case paired with a seeded failure that proves the check ran: a stem name
+  already present as a file, an empty directory and a symbolic link to an
+  outside directory (fails, the target untouched); `-E` on a symbolic link to
+  an empty directory (fails on the no-follow open); `-E` on a directory with
+  one entry, a dotfile, or an entry added between the emptiness check and
+  the first creation (fails as a collision, the entry untouched); `-E` on a
+  group-writable, other-writable or differently owned directory (fails) and
+  an other-readable one (succeeds); a parent carrying a non-trivial
+  inheritable ACL, or an `-E` directory carrying a non-trivial ACL, of each type the platform reports (FreeBSD POSIX.1e
+  access, POSIX.1e default and NFSv4; Linux access, default and NFSv4
+  attributes; macOS extended entries), including an entry that grants
+  nothing, where the fresh case must remove its empty directory and name the
+  parent; a trivial ACL that passes on FreeBSD and macOS, and on Linux a
+  trivial POSIX ACL that leaves no attribute behind, while a listed
+  `system.nfs4_acl` is refused; `-f -` and an underivable
+  stem without `-E`; and a parent replaced by a symbolic link between the
+  user's inspection and the open, which succeeds only into the link's target
+  as a fresh directory and never into a populated one.
 * A dedicated adversarial worker harness attempts forbidden syscalls after
   confinement, including metadata mutation through input descriptors, alternate
   syscall ABIs, network/exec, `/proc` descriptor reopening, and inherited-fd leaks.

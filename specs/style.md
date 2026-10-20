@@ -323,9 +323,17 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
 * Use the project's error interfaces in library code. CLI diagnostics should
   use `err(3)` / `warn(3)` and their variants where appropriate. Prefer
   `printf(3)`-family calls for formatted output.
-* Parse CLI options with `getopt(3)` and single-letter flags. Keep option
-  meanings consistent across subcommands. Validate numeric operands, including
-  units, range, overflow, and trailing characters.
+* Parse CLI options with `getopt_long(3)`, available in the libc of every
+  supported host. Short letters serve the tar-like and frequent options;
+  rare settings are long-only, and short options carry no long alias unless
+  the [CLI contract](design-cli.md#long-options-and-ordering) names one.
+  Options precede operands: begin the option string with `+` on every host,
+  since glibc, musl, FreeBSD and macOS all permute arguments by default,
+  and never read `POSIXLY_CORRECT`. The only option recognized among
+  operands is `-C dir` in create mode, and the CLI contract defines that
+  rule. Keep one meaning
+  per letter across modes. Validate numeric operands, including units,
+  range, overflow, and trailing characters.
 * Sort option strings, switch cases, and option descriptions alphabetically
   unless intentional fallthrough requires another order.
 * Format usage like a manual-page synopsis: grouped flags without operands,

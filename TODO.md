@@ -12,6 +12,29 @@
   The [work breakdown](docs/todo-qnx6.md) owns experiments and implementation;
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
+* [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
+  `compat/`): implement the [command-line contract](specs/design-cli.md) and
+  the [layer design](specs/design-layers.md) in the four stages of the
+  [plan](docs/implementation-plan.md#extension-sequence). The specification
+  harness invokes the old CLI (`specs/design-spec-testing.md` invocation
+  table, `test/spec/` runner) and the manual page documents it; both move
+  with the first stage. Configure gains the required system zlib. The layer
+  design's evidence gates (hdiutil, qemu-img) settle its uncovered-DMG-sector
+  and DMG-table-split questions; its degraded-GPT and reproducible-identifier
+  questions, and the command-line spelling of wrap, unwrap and compose, are
+  owner decisions to take before the stages that need them.
+  The sandbox does not yet install the authority mapping of
+  [design-security.md](specs/design-security.md#coordinator-and-worker)
+  (`cmd/fsimg/sandbox.c`): staging shares the extraction grant and so gains
+  directory creation, scratch also gets directory rights, the input check
+  accepts only a regular file (pipes are specified), handed-over spool and
+  raw-intermediate descriptors are not rights-limited under Capsicum, and
+  the extraction destination is absent from the mapping. Split the grants,
+  admit FIFO input and limit handed-over descriptors in stages 1 and 4, and
+  state which naming constraints only worker behaviour enforces. Whether the
+  input relay runs confined is also unstated in
+  [architecture.md](specs/architecture.md).
+
 * [Medium] **Specification-driven testing** (`test/spec/`, `test/spec.sh.in`,
   `Makefile.am`, `.github/workflows/check.yml`): build the Ruby rule, case and
   runner harness. It derives valid and targetedly invalid FAT images from
@@ -249,7 +272,8 @@
   `lib/source/`, `cmd/fsimg/`): the safe extractor never restores owner, mode
   or change time and creates no links or FIFOs, so an extracted QNX6 tree
   cannot be rebuilt with its metadata. Write an mtree(5) spec beside the
-  extracted tree (`extract -F spec`) and import one (`create -F spec`), on
+  extracted tree on `x` and import one on `c`, through an option whose
+  spelling the design decides (`-F` is the stack), on
   the model of FreeBSD `makefs -F` with a release `METALOG`: the host tree
   supplies bytes, the spec supplies `type`, `uid`, `gid`, `mode`, `time`,
   `link` and `sha256digest`, with no privileges. Plain mtree has only
@@ -265,8 +289,8 @@
   security review of the worker's metadata syscalls.
 
 * [Medium] **Additional inputs and formats** (`lib/source/`, `lib/formats/`):
-  design bounded partition selection, and independent NTFS and
-  QNX4 reader profiles as concrete needs arise. Follow the
+  design independent NTFS and QNX4 reader profiles as concrete needs arise.
+  Follow the
   [extension sequence](docs/implementation-plan.md#extension-sequence); each
   format needs a bounded-resource design and an independent compatibility corpus.
 

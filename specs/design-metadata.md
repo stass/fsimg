@@ -112,13 +112,13 @@ reports their count in the context statistics' `skipped_entries`, which the
 CLI prints as a warning and as a JSON summary field; an omission is never
 silent. Owner, mode and change time, like other fields the extractor does not
 restore, are optional losses under the extraction loss policy. Selecting a
-symbolic link directly with `cat` writes its target bytes, which is the
+symbolic link directly with `x -O` writes its target bytes, which is the
 content the entry declares.
 
-`ls -j` records carry `kind` as a name (`file`, `directory`, `symlink`,
+`t --json` records carry `kind` as a name (`file`, `directory`, `symlink`,
 `fifo`) and the new fields when valid and null otherwise; human listings mark
 a symbolic link with `@` and a FIFO with `|` after the quoted name, in the
-style of `ls -F`. `info` prints the volume UUID when valid, and `formats`
+style of `ls -F`. Info (`i`) prints the volume UUID when valid, and `--formats`
 lists the additional kinds and fields a format advertises.
 
 ## Capability records

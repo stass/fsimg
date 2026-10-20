@@ -8,10 +8,27 @@ Payload size, entry count, directory width, allocation-unit count, and fragment
 count are separate scaling dimensions. Tests vary each independently.
 
 The resource context supplies charged allocation, a shared bounded page cache,
-scratch creation, descriptor accounting, and cancellation. A caller cannot
-evade the total by opening several readers or writers in one context. Dirty
-page eviction checks writes before reusing memory. A failed allocation does
-not lose the old object or alter a published count.
+scratch creation, spool accounting, descriptor accounting, and cancellation.
+A caller cannot evade the total by opening several readers or writers in one
+context. Dirty page eviction checks writes before reusing memory. A failed
+allocation does not lose the old object or alter a published count.
+
+Metadata scratch never holds payload: it holds records, indexes and sort
+runs, including the chunk records of a container's block tables, and never a
+second image or copied file bytes. fsimg has exactly two payload-sized
+temporary files, each a separately named and separately budgeted resource of
+the [layer design](design-layers.md#handed-over-files): the **spool**, which
+holds a decoded stream or gzip input and is charged to the spool limit, and
+the **raw intermediate**, which holds a staged raw disk awaiting a transcode
+or a sequential copy and is charged to the output limit. Neither is metadata
+scratch, whatever directory holds it. The spool always lives in the
+context's private scratch tree, since every reading operation may need one;
+the raw intermediate lives beside the staged output for a file destination,
+so that the destination filesystem bounds a file job and a small scratch
+filesystem does not, and in the private scratch tree for a stream, which
+has no destination directory. A payload-sized file on a
+memory-backed filesystem consumes RAM outside the memory budget, which the
+CLI warns about where the host can report the filesystem kind (tmpfs).
 
 The implementation does not map entire images, allocation tables, catalogs, or
 scratch files. A huge mapping is not an acceptable replacement for a huge
@@ -59,6 +76,26 @@ the absence of hole support causes ordinary bounded copying. A host-file hole
 does not mean that a filesystem allocation unit is free. Reflinks and
 `copy_file_range` are not required and cannot bypass source validation or slice
 bounds. Metadata and content copies remain correct without them.
+
+### Container adapter
+
+A container is read through one more read-only adapter kind, which exposes
+the disk length its tables declare and resolves each read through the
+[chunk index and cache](design-layers.md#chunk-index-and-cache) the layer
+design owns: raw chunks read the backing file at a translated offset, zero
+and fill chunks synthesise bytes, compressed chunks are decoded once into
+the bounded chunk cache and served from it, and cache capacity changes no
+result. A read crossing chunk boundaries continues across them in one call
+and reports confirmed bytes on failure. A slice above the adapter translates
+to one checked disk offset, as above a file. The adapter retains the backing
+file's identity for alias checks.
+
+An assembled disk, used by wrap and compose, is a read-only adapter over
+ordered regions: bounded table buffers in charged memory, borrowed input
+slices, and zero gaps. It has the same translation and identity rules.
+Adapters stack at most two deep, an assembled disk above a container
+adapter, so there is still no recursive I/O and no unbounded traversal
+stack.
 
 ## Metadata scratch primitives
 
@@ -153,6 +190,13 @@ checked 64-bit multiplication and byte ranges, and bitsets use checked byte
 lengths rather than allocating a resident bit for every possible ID. Callers
 encode fields explicitly; native structs and their padding are not records.
 
+The [chunk index](design-layers.md#chunk-index-and-cache) of a container's
+block tables is built from these primitives: a record stream, one external
+sort and one sequential tiling pass on read, and a record stream replayed
+in order when a written DMG emits its table after the data fork. No block
+table is resident, and the layer design states the record layout and why
+the record count is bounded by the file length.
+
 ### Sorting and run ownership
 
 Sorting consumes a sealed stream and prepares a separate sealed result. It
@@ -173,6 +217,20 @@ sorting, including the original stream, independent of the number of runs.
 The resource owner charges all three, headers, cache pages, buffers, and
 descriptors. Failure discards temporary stores and leaves the original stream
 available; no incomplete replacement is published.
+
+## Spool
+
+The spool holds the decoded bytes of an input that cannot be read in place:
+a non-seekable stream, or a gzip-encoded file. It is a resource of its own,
+`spool`, with its own limit (default 64 GiB, in the architecture's table) and
+its own error resource, because scratch never holds a second image and the
+two must be budgeted and reported apart. The
+[layer design](design-layers.md#stream-input-and-the-spool) owns how it is
+handed over, filled and bounded; the resource facts are that logical length
+is reserved against the limit before each bounded extension, which is what
+bounds a decompression bomb, that physical blocks are sampled and reported
+separately as for scratch, and that there is one spool per opened image and
+a context may hold several, all within the one limit.
 
 ## Collection and catalog validation
 
@@ -283,6 +341,29 @@ persistent durability. A required durable mode needs an explicit durable-flush
 capability and fails before writing if absent. An optional internal read-back
 check has a named scope and does not replace independent validation.
 
+### Transcode and sequential sinks
+
+With a scheme in the stack the sink the driver emits into is a checked slice
+of a staged raw disk, and the scheme writes its tables into the same disk
+through the bounded metadata write. With a container or compression present
+the staged disk is an intermediate: one transcode pass reads it sequentially
+and writes the final output through a chain of **sequential sinks**, each an
+append-only object offering write and finish. The container encoder and the
+gzip encoder are sequential sinks wrapping the next; the innermost writes a
+positional object at increasing offsets or a stream descriptor. Nothing in
+the chain seeks.
+
+Its bounds: one chunk-sized transfer buffer (the container's chunk size, or
+1 MiB without one), one compression state, chunk records in a scratch stream,
+and the sink's own fixed trailer or footer buffer. Zero decisions inspect the
+buffer; sparse-range discovery may skip reading a known hole and nothing
+more. simg, whose header needs the chunk count, runs the inspection pass
+twice, the first over data ranges only. The raw intermediate is the
+handed-over file of the [resource model](#resource-model), charged to the
+output limit together with the staged output. Cancellation is polled per
+chunk. Work is `O(disk data bytes + chunk records + table bytes)`; a sparse
+disk costs its data plus a few merged zero records.
+
 ## Reading and traversal
 
 Opening a volume reads bounded probe/header regions and validates geometry
@@ -290,7 +371,11 @@ against the actual slice length. It does not scan all entries, read free
 payload space, or materialize allocation metadata. Detection follows the
 [bounded probe contract](design-formats.md#format-descriptors-and-profiles):
 ambiguous recognition requires an explicit format choice, and forcing a format
-never disables checks.
+never disables checks. Layers around the volume are peeled first by the
+[image open](design-layers.md#reading) under the same rule; opening an image
+reads the container's prefix and tail, parses its tables into the chunk
+index, reads the scheme's tables (at most two 128 KiB entry arrays), and
+probes each partition's prefix for auto-selection. It reads no volume payload.
 
 The [prepared-directory design](design-directories.md) owns preparation,
 namespace validation, and traversal. Its bounds: each directory is prepared once
@@ -328,7 +413,7 @@ hidden quadratic fallback.
 
 Normal reads validate everything needed for the metadata and content they
 expose. They do not certify unreachable allocations or all other files.
-`info` reports that limited scope rather than claiming a clean filesystem.
+Info (`i`) reports that limited scope rather than claiming a clean filesystem.
 
 Full verification walks the directory graph and file allocations, emits
 ownership records for allocation runs, externally sorts those records by
@@ -380,7 +465,12 @@ an allocation table entry for each unit. That cost is streamed, not resident.
 
 Tests assert operation counts as well as elapsed time: no chain restart per
 buffer, no quadratic alias generation, bounded merge fan-in, bounded run
-registry, and no I/O through free payload space during `info` or `ls`. Resource
-tests force spills with small budgets and compare results against large-budget
-runs. They cover wide directories, deep trees, sparse capacity, many fragments,
+registry, and no I/O through free payload space during info (`i`) or
+listing (`t`). Resource tests force spills with small budgets and compare
+results against large-budget runs. They cover wide directories, deep trees,
+sparse capacity, many fragments,
 scratch ENOSPC, descriptor exhaustion, and arithmetic near supported limits.
+Layer tests add: one decode per compressed chunk under sequential reads, a
+chunk index that spills with a small scratch budget and answers identically,
+spool holes for all-zero input, and a transcode whose output bytes do not
+change with the chunk cache size or sparse-range discovery.

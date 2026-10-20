@@ -32,9 +32,14 @@ the work. Implementation follows the [style guide](specs/style.md).
   attribution, and license notices. A reference implementation or test oracle
   is not automatically suitable for inclusion in the project.
 * Keep the core library and default CLI free of third-party runtime
-  dependencies beyond libc and host OS APIs. Optional integrations, such as
-  libarchive import/export, belong outside the core and must not become
-  requirements for ordinary image creation or extraction.
+  dependencies beyond libc, host OS APIs and the system zlib. zlib is the one
+  permitted library, required and never vendored: compressed DMG and gzip
+  are basic layer features, its license is permissive, it is the system
+  library on macOS and FreeBSD and standard on Linux, and inflate parses
+  untrusted images, so the host's security fixes must apply. Optional
+  integrations, such as libarchive import/export, belong outside the core
+  and must not become requirements for ordinary image creation or
+  extraction.
 * Normal raw-image use requires no root privileges, mounts, kernel filesystem
   support, or external filesystem utilities. The CLI can isolate work in a
   restricted process running its own executable.
@@ -100,9 +105,11 @@ missing tool.
 * Follow the [security specification](specs/design-security.md). Treat images
   and source trees as untrusted; validate arithmetic, encoding, geometry, and
   termination before using them. Initialize all emitted bytes and zero ranges.
-* Extract beneath a fresh private directory with descriptor-relative operations
-  and no-follow protections. Never merge, overwrite, or restore privileged
-  metadata under the safe profile.
+* Extract beneath a private root with descriptor-relative operations and
+  no-follow protections: a directory fsimg creates exclusively, or an existing
+  empty directory the user owns, others cannot write, and no non-trivial ACL
+  applies to, verified on its opened descriptor. Never merge into a populated
+  tree, overwrite, or restore privileged metadata under the safe profile.
 * The CLI uses an OS sandbox when available and warns otherwise. Required mode
   refuses unconfined operation. An unexpected setup failure is never a reason
   to silently retry without confinement. Sandboxing does not replace validation.

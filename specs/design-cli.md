@@ -2,364 +2,613 @@
 
 ## Command structure
 
-The command is `fsimg`. Options use `getopt(3)` and short flags. Common flags
-retain their meaning across subcommands. Invalid options, repeated singleton
-options, unknown format settings, and unexpected operands fail before image
-processing. `--` terminates option parsing. No command modifies an existing
-image in place.
+The command is `fsimg`, shaped like `tar(1)`: one mode letter chooses the
+operation, `-f` names the image, and the remaining words are operands. The
+goal is tar-like ergonomics, not tar parity: letters tar users type by habit
+keep their tar meaning, fsimg's own settings keep their letters where they do
+not collide, and rare settings are long options.
 
 ```text
-fsimg create [options] -t format -o image source_directory
-fsimg info [options] -i image
-fsimg ls [options] -i image [image_path]
-fsimg cat [options] -i image image_path
-fsimg extract [options] -i image -C new_directory [image_path]
-fsimg verify [options] -i image
-fsimg formats [-jv]
+fsimg c[W] -f image -F stack [options] [-C dir] operand ...
+fsimg x -f image [options] [-C dir] [member ...]
+fsimg x -O -f image [options] member
+fsimg t -f image [options] [member ...]
+fsimg W -f image [options]
+fsimg i -f image [options]
+fsimg --formats [--json] [-v]
+fsimg -h | -V
 ```
 
-Without arguments, fsimg prints the command overview to stderr and exits 2.
-`-h` displays the overview; a command's `-h` displays only that command's
-synopsis, options, and examples on stdout. Syntax errors name the problem and
-include the applicable synopsis on stderr. Top-level `-V` displays the version. Options precede
-operands on every host; `--` permits an operand beginning with a dash.
+| Mode | Operation |
+| --- | --- |
+| `c` | Create an image from host operands |
+| `x` | Extract members into a fresh destination, or one member to stdout with `-O` |
+| `t` | List members, recursively by default |
+| `W` | Verify an image; as `cW`, verify the staged result before publication |
+| `i`, `--info` | Report the stack, partition table and volume information |
+| `--formats` | Report compiled and usable capabilities; takes no image |
 
-Input images are seekable regular files. `-` is not an implicit request to
-spool stdin into a temporary image, and creation does not promise stdout
-support. The library callback API supplies other explicit positional sources.
-Source operands for `create` name one host directory; programmatic entries use
-the library API.
+Exactly one mode is given, except that `c` and `W` combine. No mode, two
+modes, an option a mode does not accept, a repeated singleton option, a
+repeated setting or limit key, an unknown stack or setting name and an
+unexpected operand are syntax errors: they fail before any image or source
+is opened, name the problem, print the applicable synopsis on stderr and exit
+2. Without arguments fsimg prints the overview on stderr and exits 2. `-h`
+with a mode prints that mode's synopsis, options and examples on stdout, `-h`
+alone the overview; `-V` prints the version. No mode modifies an existing
+image in place.
 
-## Common processing options
+### Bundled mode letters
 
-These options apply to processing commands. `formats` accepts `-j`, `-v` and
-`-h`, as shown in its synopsis.
+`argv[1]`, and only `argv[1]`, may be a tar-style bundle: letters without a
+leading dash, such as `xvf`. The parser decides in this order:
+
+1. A first argument beginning with `-` is an ordinary option word;
+   `fsimg -xvf boot.img` works through ordinary `getopt` bundling.
+2. Otherwise every character must be a short option letter. Any other
+   character is a syntax error naming it, so a mistyped word such as
+   `extract` fails with the overview instead of being half-interpreted.
+3. The bundle must contain a mode letter or `h`; none, or two modes other
+   than `cW`, is a syntax error.
+4. The bundle is rewritten into one `-X` word per letter, in order. A letter
+   that takes an argument consumes the next unconsumed word after the bundle,
+   in letter order: `fsimg cfF boot.img fat32` is
+   `fsimg -c -f boot.img -F fat32`. A missing argument is a syntax error.
+
+The rules below then apply unchanged, so a bundle expresses nothing that
+dashed options cannot.
+
+### Long options and ordering
+
+Options are parsed with `getopt_long(3)`. Short letters serve the tar-like
+and frequent options; rare and new settings are long-only. Short options
+have no long aliases, except that `--info` names mode `i` for symmetry with
+`--formats`. `--` ends option parsing.
+
+Options precede operands on every host: the option string begins with `+`,
+which stops parsing at the first word that is not an option, so a later `-x`
+is an operand. The `+` is needed everywhere, because glibc, musl, FreeBSD and
+macOS `getopt_long` all permute arguments by default; `POSIXLY_CORRECT` is
+not consulted. One exception is deliberate: in mode `c` the operand list may
+contain further `-C dir` words (also spelled `-Cdir`), applying to the
+operands after them.
+After `--` every word is an operand, including one spelled `-C`.
+
+## Common options
 
 | Option | Meaning |
 | --- | --- |
-| `-S auto|required|off` | Sandbox policy; default `auto`, with a visible warning if unavailable |
-| `-T directory` | Scratch parent; CLI default is `TMPDIR` when set, otherwise `/tmp`; `-T -` disables scratch |
-| `-j` | Streaming machine-readable records, where supported |
-| `-l key=value` | Repeatable resource limit, with each key specified at most once |
+| `-f image` | The image: input for `x`, `t`, `W`, `i`; output for `c`; `-` is stdin or stdout. Required except with `c -n` |
+| `-C dir` | An existing directory: the parent of the extraction destination; the base of create operands |
+| `-S auto|required|off` | Sandbox policy; default `auto`, with a visible warning when confinement is unavailable |
+| `-T directory|-` | Scratch parent; default `TMPDIR` when set, otherwise `/tmp`. `-T -` disables scratch: no spool is created, so gzip input then fails with a diagnostic naming `-T -` rather than a limit figure; with `-f -`, whose stream needs the scratch tree for its spool or raw intermediate, `-T -` is a syntax error |
+| `-l key=value` | Repeatable resource limit; each key at most once |
 | `-m bytes` | Aggregate fsimg memory budget; default 256 MiB |
-| `-v` | Bounded progress, capability details and sampled metadata-loss examples on stderr |
+| `-v` | Repeatable verbosity, defined per mode below |
+| `--json` | Streaming machine-readable records on stdout, where supported |
+| `-h`, `-V` | Help and version |
 
-`-l` keys are `scratch`, `entries`, `depth`, `path`, `fds`, `output`, `work`,
-and `seconds`. Scratch/path/output values are byte quantities; entries/depth/fds/
-work are unsigned counts; seconds is an integer wall-clock deadline, with zero
-selecting the default of no additional deadline.
-Work counts primitive metadata steps and adapter calls, not just payload bytes.
-The deadline is also supervised by the coordinator. Unset work/time limits
-retain algorithmic traversal bounds and cancellation, not a hidden short
-timeout that makes gigantic legitimate jobs impossible.
+`-l` keys are `scratch`, `spool`, `entries`, `depth`, `path`, `fds`,
+`output`, `work` and `seconds`. Scratch, spool, path and output values are
+byte quantities; entries, depth, fds and work are unsigned counts; seconds is
+an integer deadline measured on the monotonic clock, where zero selects the
+default of no additional deadline. `spool` bounds the temporary file that
+holds a stream or compressed input, defined in the
+[layer design](design-layers.md#budget). `fds` (default 128) also caps the
+number of create operands, since the coordinator holds one open root per
+operand; a command line exceeding it fails before the worker starts, naming
+the descriptor limit. Work counts primitive metadata steps, adapter calls
+and every byte decompressed from a container chunk or a gzip member, not
+just payload bytes, so `work` and `seconds` bound decompression time.
+The deadline is also supervised by the coordinator. Unset work and time
+limits retain algorithmic traversal bounds and cancellation, not a hidden
+short timeout that makes gigantic legitimate jobs impossible.
 
-Zero resource values select their documented defaults; disabling scratch uses
-`-T -`. There is no magic negative or `unlimited` operand. Explicit large limits
-remain bounded by checked `uint64_t` counters and host capabilities. The
-[architecture](architecture.md#bounded-resources) defines default limits.
+Zero resource values select their documented defaults; disabling scratch
+uses `-T -`. There is no magic negative or `unlimited` operand. Explicit
+large limits remain bounded by checked `uint64_t` counters and host
+capabilities. The [architecture](architecture.md#bounded-resources) defines
+the defaults.
 
-Byte quantities are unsigned decimal with an optional `K`, `M`, `G`, `T`, or
-`P` binary multiplier (powers of 1024). Bare values are bytes. Signs, whitespace
-inside a number, fractions, percentages, overflow, and trailing junk fail.
-Counts and Unix epochs have their separately documented integer syntax.
+Byte quantities are unsigned decimal with an optional `K`, `M`, `G`, `T` or
+`P` binary multiplier (powers of 1024). Bare values are bytes. Signs,
+whitespace inside a number, fractions, percentages, overflow and trailing
+junk fail. Counts are unsigned decimal without suffix. The signed Unix epoch
+permits an optional leading minus and decimal digits, rejecting a plus sign
+and suffixes; representability in the chosen filesystem is a planning check.
+Singleton and key duplicates are syntax errors even when the values agree.
 
-For massive catalogs, `-T` should identify disk-backed storage. A tmpfs/RAM disk
-can consume system memory outside fsimg's heap budget. Diagnostics report
-memory and scratch budgets independently and identify unavailable scratch or
-host capacity errors. Scratch is for metadata, not payload staging.
+`-T` should identify disk-backed storage: a tmpfs or RAM disk consumes
+system memory outside fsimg's heap budget, and the coordinator warns when it
+places scratch or a payload-sized temporary file on a filesystem the host
+reports as memory-backed. Diagnostics report memory, scratch and spool
+budgets independently and identify unavailable scratch or host capacity
+errors. What scratch and the two payload-sized temporary files hold, and
+where each lives, is the [storage design's](design-storage.md#resource-model)
+rule.
 
-## Read-side options and selection
+### Verbosity
 
-`info`, `ls`, `cat`, `extract`, and `verify` accept:
+| Mode | `-v` | `-vv` |
+| --- | --- | --- |
+| `c`, `x` | One escaped entry name per line on stderr as each entry is processed | Adds bounded progress, capability details and sampled metadata-loss examples on stderr |
+| `t` | The long listing on stdout, defined under [listing](#listing) | The same stderr details |
+| `W`, `i`, `--formats` | Capability, geometry and sandbox details on stderr | Nothing further |
+
+Verbose names are streamed, never accumulated, and count against the
+formatted-text ceiling like every diagnostic line.
+
+## Stack, settings and selection
+
+`-F stack` names the layers of an image inner to outer, separated by `/`,
+like file suffixes read left to right: `fat32`, `fat32/gpt`, `fat32/gpt/dmg`,
+`exfat/mbr/vhd`, `fat32/dmg`. The [layer design](design-layers.md#the-stack)
+owns the grammar: three slots in fixed order, filesystem, scheme, container;
+a name fills the slot of its kind and `-` marks the next slot empty, so
+`fat32/-/dmg` spells `fat32/dmg` out and `fat32/-/-` is a bare volume. A
+repeated kind or misordered name is a syntax error, not a guess. Filesystem
+names are `fat12`, `fat16`, `fat32`, `exfat` and `qnx6`.
+
+`-F` is required for `c`, and its stack must begin with a filesystem name:
+`-F gpt` creates nothing and is a syntax error. On reading, a named slot is
+forced, a `-` forces its slot empty, and an unfilled slot is detected, so
+`-F fat32` forces the FAT decoder on whatever volume the container and
+partition table around it yield, while `-F fat32/-/-` forces every slot and
+leaves only compression to the layer design's step-1 rule. Without `-F`,
+every slot is detected unambiguously or the command fails. Forcing retains
+every safety check.
+
+Compression is not a slot: it wraps the whole image on its way to or from
+the file. On create, `-z` selects gzip and `-a` chooses the compression from
+the output suffix as tar does, using the suffixes the layer registry
+declares: `.gz` selects gzip, a reserved name such as `.zst` or `.xz` fails,
+and a container suffix (`.dmg`, `.vhd`, `.simg`) selects nothing but must
+match the stack's container, so `-a -f disk.dmg -F fat32/gpt` is a syntax
+error. A double suffix is matched outermost first: `disk.dmg.gz` selects
+gzip and requires a `dmg` container. Without either flag the output is
+uncompressed, whatever its name says. `-z` and `-a` together are accepted only when the suffix is `.gz`;
+`-a` with `-f -` is a syntax error, since a stream has no name. On reading,
+compression is decided by the layer design's
+[step-1 rule](design-layers.md#peeling-order): `-z` forces it, and when a
+file passes for both compressed and raw, `-z` resolves it as compressed and
+an explicit `-F` as raw. Compressed and stream inputs are decoded into the
+budgeted spool inside the worker.
+
+`-o key=value` is the repeatable typed setting, each key at most once. An
+unqualified key always targets the filesystem: `oem=cp437` on read; on
+create `sector` and `cluster` in bytes, and the QNX6 settings
+`endian=little|big`, `uuid=` RFC 4122 text, `inodes=` a positive inode count
+and `reserve=` a percentage up to 100, which every other format rejects
+unless at their defaults. A qualified key targets one layer: `-o gpt:type=esp`,
+`-o gpt:name=EFI`, `-o dmg:compress=none`, `-o gzip:level=9`. A qualifier
+naming a layer absent from the stack, or a compression not selected, fails;
+fsimg never guesses the target of a bare key. On read the layer must be
+named in `-F`, because detection runs later inside the worker and every key
+is validated first: `-F fat32/gpt -o gpt:sector=4096` is the remedy for a
+disk carrying GPT headers at both sector sizes, and `-o gpt:sector=4096`
+alone fails. The layer key set is defined in the
+[layer design](design-layers.md#layer-settings). Unknown keys and unsupported
+values fail before any worker starts. Without `-R`, a QNX6 volume receives a
+random version 4 UUID, every volume a random serial, and every scheme and
+container a random [identifier](design-layers.md#identifiers), unless the
+setting is given.
+
+Read-side selection:
 
 | Option | Meaning |
 | --- | --- |
-| `-b bytes` | Volume start offset within the image; default zero |
-| `-i image` | Required image pathname |
-| `-t format` | Explicit decoder; default is unambiguous detection |
-| `-z bytes` | Volume slice length; default is the remaining image length |
-| `-O key=value` | Repeatable typed format option, such as `oem=cp437` for FAT |
+| `--partition=N|name=TEXT|type=NAME` | The partition holding the volume; the automatic choice and the selectors are the [layer design's](design-layers.md#partition-selection); an error on a disk without a partition scheme |
+| `--offset=bytes`, `--length=bytes` | A manual volume slice within the unwrapped image, validated against its length; the length is positive; conflicts with `--partition` |
 
-Offset and length form one bounded slice and are validated against actual file
-length. Raw volumes are the default. fsimg does not auto-select a partition or
-silently guess among multiple filesystem candidates. Format forcing retains
-all safety checks. Unknown format-option keys and unsupported values fail.
-An explicitly supplied slice length is positive. The supported read setting
-is `oem=cp437`; creation settings are `sector` and `cluster` byte quantities
-and the QNX6 settings `endian=little|big`, `uuid=` RFC 4122 text, `inodes=`
-a positive inode count and `reserve=` a percentage up to 100, which every
-other format rejects unless they hold their defaults. Without `-R` and
-`uuid=`, a QNX6 volume receives a random version 4 UUID, as every volume
-receives a random serial.
-
-An image path is an absolute validated UTF-8 path; omitted selection means `/`.
-Matching follows each format's component lookup rules, including FAT case
-equivalence and short aliases. Results retain displayed image paths. `ls` lists immediate children of a selected
-directory, or the selected file; `-r` recursively lists its subtree. The reader
-may scan preceding metadata to find a path, but does not read unselected payloads
-or build a whole-volume pathname hash table. A missing selection is an error.
-
-`cat` requires one regular file and writes its logical bytes to stdout,
-including explicit zero bytes for logical zero ranges. Its content is raw;
-terminal escaping would corrupt it. It rejects `-j`. Broken output pipes and
-content errors produce failure rather than a truncated success result.
+Members are image paths, relative to the image root (`EFI/BOOT`) or absolute
+(`/EFI/BOOT`), both naming the same entry. A member is validated UTF-8,
+matched by each format's component lookup rules including FAT case
+equivalence and short aliases, and displayed with its image spelling.
+Several members select the union of their subtrees; an entry selected twice
+is processed once. No member means `/`; a member matching nothing fails. The
+reader may scan preceding metadata to find a member but reads no unselected
+payload and builds no whole-volume pathname table.
 
 ## Creation
 
-Creation accepts common options and:
+Operands are host paths, as for tar: each is opened relative to the current
+`-C` directory (the working directory until a `-C` is given; absolute
+operands as given) and stored under its own name, so
+`fsimg cf x.img -F fat32 rootfs` produces `/rootfs/...` and `-C rootfs .`
+places rootfs's contents at the image root. `-C` must name an existing
+directory, applies to the operands after it, and may repeat:
+`-C esp . -C extra EFI`. An operand may be a regular file.
+
+The image name of an operand is its path with empty and `.` components
+removed; a `..` component is a syntax error, not stripped. An operand with
+no remaining components contributes the directory's contents at the image
+root and no entry of its own. A multi-component operand `a/b/c` stores `c`
+as `/a/b/c` beneath synthesized parents `/a` and `/a/b`: directory entries
+with no valid metadata field, added like any programmatic directory, so each
+format's documented defaults for absent fields apply (QNX6: mode `0755`,
+uid and gid zero, its timestamp fallback; `-R`: the epoch) and host
+directories the user did not name never influence the image.
+
+Operands merge by the [merging rule](design-sources.md#merging-roots):
+directories supplied by several operands become one directory with the union
+of their children; any other collision fails planning; a directory's
+metadata comes from the first operand in command-line order that scanned it,
+and a synthesized parent never outranks a scanned directory. Naming the same
+tree twice fails on its first file.
+
+The coordinator opens every operand before the worker starts, with the same
+no-follow, nonblocking, no-controlling-terminal open as any scanned object,
+so a symbolic link operand fails, and passes the opened roots to the worker
+as its only source authority. Scanning rules apply per root: no mount
+crossing beneath it, type checked before reading, special files rejected.
+The creation sandbox has broader source-root authority than the
+image-reading sandbox; read-only access alone does not prevent opening
+device nodes already beneath an authorized root, so adversarial sources
+needing device exclusion use an isolated filesystem with device nodes
+disabled. This [profile limitation](design-security.md#source-root-profile)
+is reported with creation capabilities.
 
 | Option | Meaning |
 | --- | --- |
-| `-L label` | Explicit volume label; default `FSIMG`, subject to format rules |
-| `-M` | Minimize the image: choose the open geometry settings that give the smallest volume; conflicts with `-s` |
-| `-O key=value` | Typed format settings; shared keys include `sector` and `cluster`, specified in bytes |
+| `-F stack` | Required stack |
+| `-L label` | Volume label; default `FSIMG`, subject to format rules |
+| `-M` | Minimize: choose the open geometry settings giving the smallest volume; conflicts with `-s` |
 | `-R` | Reproducible image bytes |
-| `-e epoch` | Timestamp epoch for `-R`; default Unix second 315532800 (1980-01-01 UTC) |
-| `-f bytes` | Minimum free-space reserve after metadata and allocation rounding |
-| `-n` | Collect, validate, and plan; report the plan without creating an output image |
-| `-o image` | Required output pathname except with `-n` |
+| `-e epoch` | Timestamp epoch for `-R`; default Unix second 315532800 (1980-01-01 UTC); requires `-R` |
+| `-n` | Collect, validate and plan; report the plan and create nothing; `-f` is then optional |
 | `-p` | Import host owner, group and permission bits as optional metadata |
 | `-s bytes` | Positive exact logical volume size; omission selects automatic sizing |
-| `-t format` | Required writer format |
+| `--free-space=bytes` | Minimum free space after metadata and allocation rounding, in bytes; distinct from the QNX6 `-o reserve=` percentage, which is why the option is not called reserve |
+| `-z`, `-a`, `-o key=value` | Compression and typed settings, as above |
+| `-W` | Verify the staged result before publication; `-d` adds payload reads; a syntax error with `-f -` |
 
-`-e` requires `-R`. Reproducible mode normalizes timestamps to the selected epoch,
-uses defined stable identifiers, and fixes ordering/padding. It does not read
-the host timezone, locale, or `SOURCE_DATE_EPOCH` implicitly. Without `-R`, the
-declared source timestamp policy and a generated volume identifier apply.
-Geometry candidates and format defaults are reported in the plan.
+Reproducible mode normalizes timestamps to the selected epoch, uses defined
+stable identifiers and fixes ordering and padding. It does not read the host
+timezone, locale or `SOURCE_DATE_EPOCH` implicitly. Without `-R`, the
+declared source timestamp policy and generated identifiers apply. Geometry
+candidates and format defaults appear in the plan.
 
 Host import includes regular files, directories and symbolic links, content,
-hierarchy, and representable timestamp fields; `-p` adds owner, group and
-permission bits. It rejects special files. A format that cannot store a kind
-fails planning; a field it cannot store is an optional loss, counted in the
-usual notice, so FAT and exFAT advertise no POSIX fidelity and `-p` never
-changes their image bytes. The default label applies only to formats
-with a label. Hardlinked regular host files are copied as independent files;
-source inode identity is not an image hardlink capability.
+hierarchy and representable timestamps; `-p` adds owner, group and
+permission bits. Special files are rejected. A format that cannot store a
+kind fails planning; a field it cannot store is an optional loss counted in
+the usual notice, so FAT and exFAT advertise no POSIX fidelity and `-p` never
+changes their image bytes. The default label applies only to formats with a
+label. Hardlinked host files are copied as independent files.
 
-Scanning rejects descendant mount crossings. The creation sandbox has broader
-source-root authority than the image-reading sandbox; read-only access alone
-does not prevent opening device nodes already beneath an authorized root.
-For adversarial sources requiring device-open exclusion, use an isolated
-filesystem with device nodes disabled. This
-[profile limitation](design-security.md#source-root-profile) is reported with
-creation capabilities; ordinary scanning uses nonblocking/no-follow opens and
-checks type before reading.
+The output name must not already exist. Planning completes before the image
+file is created; payloads are written once to a staged image on the
+destination filesystem, and publication is atomic and without replacement
+where the supported primitive establishes that guarantee. There is no
+force-overwrite flag. A failed operation reports whether a staged or
+published output exists and whether durability is uncertain.
 
-The output must not already exist. Planning completes before image-file
-creation; payloads are written once to a staged image on the destination
-filesystem. Final publication is atomic and without replacement where the
-supported publication primitive can establish that guarantee. There is no
-force-overwrite flag. A failed operation reports whether a staged or published
-output exists and whether durability is uncertain.
+`cW` runs the ordinary read-side verification on the staged image, in a
+second worker under the image-reading profile, after the creation worker
+exits and before publication. A failed verification discards the staged
+result and publishes nothing; the error names the failing layer and says so.
+`cW` with `-f -` is a syntax error: a stream leaves no complete artefact for
+the second worker to open.
 
-`-n` may use metadata scratch but does not create the output image or read file
-payloads. It reports logical size, allocation geometry, payload/metadata/free
-bytes, entry count, and known resource estimates with estimates labeled. It
-cannot certify future source stability or the availability of future disk space.
+`-f -` streams the final bytes to stdout, and is refused when stdout is a
+terminal, as `gzip(1)` refuses to write compressed data to one. The layer
+design specifies how the staged result becomes a sequential stream with its
+container and compression. A stream has no publication step and no atomic
+outcome: a
+failure after bytes were written reports incomplete output through the exit
+status and stderr. `--json` is rejected with `cf -`, because stdout carries
+the image.
+
+`-n` may use metadata scratch but creates no output and reads no payloads.
+It reports logical size, allocation geometry, payload, metadata and free
+bytes, entry count and known resource estimates with estimates labeled. It
+cannot certify future source stability or disk space.
 
 ## Extraction
 
-`-C` names a new destination directory; even an existing empty directory fails.
-The selected entry/subtree retains its path below the image root, including
-necessary parent directories. The default extracts the entire volume.
+`-C dir` is always an existing directory. Extraction creates exactly one
+fresh directory inside it, named after the image stem, and extracts beneath
+that: `fsimg xf boot.img` extracts into `./boot/`, `fsimg xf boot.img -C /tmp`
+into `/tmp/boot/`. This is GNU tar's `--one-top-level`, made the default
+because a directory fsimg created itself is the one it can prove private.
+The coordinator creates it with one `mkdirat` with mode 0700 beneath the
+opened `-C` descriptor and reopens it no-follow; an existing name of any kind
+fails, and there is no merge. The worker receives the fresh directory's
+descriptor, never the parent's.
 
-The CLI uses the [safe content profile](design-security.md#safe-extraction):
-private directories and files, regular content only, no links, no privileged
-metadata, no existing-tree merge, and no host timestamp restoration. Inspection
-still exposes image metadata. An entry of another kind, such as a symbolic
-link, fails the extraction unless `-k` is given, which skips such entries and
-reports their count in a warning and in the JSON summary. No force flag, lossy name rewriting, or sandbox
-opt-out weakens the path and file-type checks.
+The stem is the basename of the `-f` path with suffixes stripped from the
+outside in, each at most once, matched ASCII case-insensitively: one
+compression suffix, then one container suffix, each as the
+[layer registry](design-layers.md#layer-contract) declares it (`.gz`; `.dmg`,
+`.vhd`, `.simg`), then one generic image suffix (`.img`, `.raw`, `.bin`,
+`.dd`), the only suffix list the CLI keeps itself. `disk.img.gz` yields
+`disk`, `system.dmg` yields `system`, `rootfs.vhd.img` yields `rootfs.vhd`.
+If nothing was stripped, the input is `-f -`, or the stem is empty, `.`,
+`..` or otherwise not one valid host name, fsimg invents no name: extraction
+then requires `-E`, and the error says so.
 
-Logical output bytes, including holes, count against the output quota. Sparse
-files are used where possible. Success means all selected content and required
-finalization completed. On error, a private partial destination can remain;
-the diagnostic identifies it. There is no all-or-nothing directory publication
-or resume promise.
-Final report delivery is part of command completion. If that delivery alone
-fails, extracted content may already be complete, while the command still
-conservatively reports incomplete output.
+`-E` extracts directly into the `-C` directory, which must be empty and
+private. The coordinator opens it no-follow and establishes on that
+descriptor alone that it is a directory owned by the effective user, not
+group or other writable, empty, and carrying no non-trivial access control
+list of any type the platform can report; the
+[security specification](design-security.md#safe-extraction) defines the
+checks, states why read and search bits for others are allowed where write
+bits are not, applies the same ACL rule to the fresh directory, and states
+why fsimg never edits an ACL. The worker then receives this descriptor
+exactly as it would a fresh one, and extraction proceeds unchanged: every
+entry is
+created exclusively and no-follow beneath a verified parent, so an object
+another process adds concurrently is a collision failure, never an escape.
+A non-empty `-C` with `-E` fails; merging into a populated tree is not
+possible by any option.
 
-## Inspection, verification, and capabilities
+| Option | Meaning |
+| --- | --- |
+| `-C dir` | Parent of the fresh destination; default the working directory |
+| `-E` | Extract directly into the empty private `-C` directory |
+| `-k` | Skip entries of unsupported kinds and report their count |
+| `-O` | Write one member's logical bytes to stdout instead of extracting |
 
-`info` reports detected format/profile, volume and allocation geometry, label,
-volume UUID when the format has one, implemented capabilities, and validation
-scope. It does not claim to verify
-the full filesystem or scan free data space. Counts requiring traversal are
-marked unknown rather than triggering an undisclosed full scan.
+Each member keeps its path below the image root, including necessary parent
+directories. The CLI uses the
+[safe content profile](design-security.md#safe-extraction): private
+directories and files, regular content only, no links, no privileged
+metadata, no existing-tree merge and no host timestamp restoration.
+Inspection still exposes image metadata. An entry of another kind, such as a
+symbolic link, fails the extraction unless `-k` skips it; skipped entries are
+counted in a warning and in the JSON summary. No force flag, lossy name
+rewriting or sandbox opt-out weakens the path and file-type checks.
 
-`verify` checks the supported profile's complete structure. `-d` additionally
-reads initialized payload bytes; logical zero tails need no backing read.
+Logical output bytes, including holes, count against the output quota.
+Sparse files are used where possible. Success means all selected content and
+required finalization completed. On error a private partial destination can
+remain; the diagnostic identifies it. There is no all-or-nothing directory
+publication or resume promise. Final report delivery is part of command
+completion: if that delivery alone fails, extracted content may already be
+complete, while the command still conservatively reports incomplete output.
+
+`x -O` takes exactly one member, a regular file or a symbolic link (whose
+bytes are its target), and writes its logical bytes to stdout, including
+explicit zeros for logical zero ranges. The content is raw; terminal
+escaping would corrupt it. `-O` rejects `--json`, `-C`, `-E` and `-k`. A
+broken output pipe or a content error produces failure rather than a
+truncated success result.
+
+## Listing
+
+`t` lists the selected members and, by default, their whole subtrees in the
+reader's order; `--no-recursion`, GNU tar's spelling, lists one level, the
+immediate children of each selected directory or the selected file itself
+(`-n` keeps its one meaning, the create plan). The default listing has one
+quoted, escaped image path per line, a symbolic link marked with `@` and a
+FIFO with `|` after the name, and no completion trailer.
+
+`-v` gives the long listing, one line per entry:
+
+| Column | Content |
+| --- | --- |
+| mode | Kind character `-`, `d`, `l` or `p`, then nine permission characters when the entry has a valid mode and nine `?` when the format stores none |
+| size | Logical content length in bytes for regular files and symbolic links; `-` for directories and FIFOs |
+| mtime | `YYYY-MM-DD HH:MM:SS` from the modification timestamp: UTC for UTC and known-offset instants, the recorded calendar fields for an unknown-offset time; `-` when absent |
+| name | As in the default listing |
+
+The long listing consults no locale or host timezone, so it is the same on
+every host. `--json` entry records carry the exact fields, basis and
+precision; `-v` with `--json` affects only stderr.
+
+## Verification, information and formats
+
+`W` checks the supported profile's complete structure; `-d` additionally
+reads initialized payload bytes, and logical zero tails need no backing read.
 Verification reports unsupported critical features, corruption, incomplete
-work, and resource limits distinctly and never repairs an image.
+work and resource limits distinctly, and never repairs an image. One human
+result is emitted only after successful worker exit and finalization,
+stating structural or initialized-payload scope.
 
-`formats` reports compiled-in reader/writer capabilities, format profiles,
-geometry restrictions, metadata fidelity, and available sandbox backends.
-Availability distinguishes a compiled backend from a usable runtime facility.
-Formatting a volume and booting a machine from it are separate capabilities;
-fsimg does not promise to install boot loaders.
+`i` reports, in order, the detected or forced stack in `-F` syntax with the
+detected compression; when the stack has a scheme, a partition-table summary
+with each partition's index, type, name, offset, length and whether it holds
+a supported filesystem, marking the selected one; then the volume: format and
+profile, volume and allocation geometry, label, volume UUID when the format
+has one, time basis, implemented capabilities and validation scope. When no
+partition is selected and none is unambiguous, `i` still succeeds with the
+stack and table and reports the volume section as unselected, so the user
+can choose; every other mode fails. `i` claims no verification and no
+free-space scan; counts requiring traversal are marked unknown rather than
+triggering an undisclosed scan.
 
-## Output, diagnostics, and exit status
+`--formats` reports compiled capabilities: filesystem formats with their
+read, write and verify support, profiles, geometry restrictions and metadata
+fidelity; partition schemes; containers; compressions with the zlib version
+string, since compressed bytes are reproducible only for one zlib; and
+sandbox backends. Availability distinguishes a compiled backend from a usable
+runtime facility, so a sandbox backend appears as compiled and probed. `-v`
+adds detailed restrictions on stderr; `--json` emits one `format` record per
+entry with a `kind` of
+`filesystem`, `scheme`, `container` or `compression`, and a `capabilities`
+record. Formatting a volume and booting a machine from it are separate
+capabilities; fsimg does not promise to install boot loaders.
+
+## Output, diagnostics and exit status
 
 Human output is concise and terminal-safe; names and control characters are
 escaped unambiguously. Diagnostics and progress go to stderr. Payload output
-and data records go to stdout. Progress has bounded frequency and can be disabled;
-it never accumulates one record per processed file in memory.
+and data records go to stdout, which carries exactly one thing per
+invocation: an image stream, a member's bytes, a listing, a plan, a report
+or JSON records. Progress has bounded frequency and can be disabled; it
+never accumulates one record per processed file in memory.
 
-Successful creation and extraction are silent by default. Human listings have
-one quoted, escaped pathname per line and no completion trailer. `info` uses
-aligned labels and binary byte units, identifies unknown counts without an
-implicit scan, and states header-only validation. `formats` shows a compact
-read/write/verify table; `-v` adds geometry, metadata and sandbox capability
-details on stderr. Creation plans appear with `-n` on stdout or with verbose
-creation on stderr. Verification emits one human result only after successful
-worker exit and finalization, stating structural or initialized-payload scope.
-Verbose completion details use stderr. Human success is determined by exit
-status; the mandatory machine completion record belongs to `-j`.
+Successful creation and extraction are silent by default. `i` uses aligned
+labels and binary byte units, identifies unknown counts without an implicit
+scan, and states header-only validation. Creation plans appear with `-n` on
+stdout or with `-vv` on stderr. Verbose completion details use stderr. Human
+success is determined by exit status; the mandatory machine completion
+record belongs to `--json`.
 
 Human errors use `fsimg: explanation`, optionally with a quoted pathname and
-an OS error description. Prose has no enclosing quotes. Empty internal fields,
-numeric errno values and generic status prefixes do not appear. Resource
-failures identify the resource, limit and observed demand. Actual cleanup
-failures, retained output/scratch paths, incomplete output, published output
-and uncertain durability remain visible in plain language. Truncated paths
-and messages are labeled; terminal escaping applies to prose as well as names.
-FAT layout failures identify the rejected constraint when all candidates fail
-for the same reason; otherwise they describe the conflicting requested settings
-without guessing a remedy or an uncomputed minimum image size.
+an OS error description. Prose has no enclosing quotes. Empty internal
+fields, numeric errno values and generic status prefixes do not appear.
+Resource failures identify the resource, limit and observed demand. Actual
+cleanup failures, retained output and scratch paths, incomplete output,
+published output and uncertain durability remain visible in plain language.
+Truncated paths and messages are labeled; terminal escaping applies to prose
+as well as names. FAT layout failures identify the rejected constraint when
+all candidates fail for the same reason; otherwise they describe the
+conflicting requested settings without guessing a remedy or an uncomputed
+minimum image size.
 
-Optional metadata loss on success produces one final notice counting affected fields,
-not files. Verbose examples name fields and are explicitly sampled; truncated
-path excerpts are labeled. Samples never establish exact totals. Failed commands
-report the primary error and required output/cleanup consequences without an
-additional metadata-loss notice. Verbose or JSON samples can precede failure.
-FAT sizing errors explain the limiting constraint; automatic-size sentinels and
-unrequested free-space reserves do not appear as zero-byte quantities.
-Sandbox-unavailable/disabled warnings remain visible before
-processing regardless of verbosity or JSON mode. Source profile limitations
-remain documented and appear in verbose creation/capability details.
+Optional metadata loss on success produces one final notice counting
+affected fields, not files. Verbose examples name fields and are explicitly
+sampled; truncated path excerpts are labeled. Samples never establish exact
+totals. Failed commands report the primary error and required output and
+cleanup consequences without an additional metadata-loss notice. Verbose or
+JSON samples can precede failure. FAT sizing errors explain the limiting
+constraint; automatic-size sentinels and unrequested free-space reserves do
+not appear as zero-byte quantities. Sandbox-unavailable and disabled
+warnings remain visible before processing regardless of verbosity or JSON
+mode. Source profile limitations remain documented and appear in verbose
+creation and capability details.
 
-`-j` writes newline-delimited JSON records with a schema version and `type`.
-Entry records stream individually, followed by a completion summary. There is
-no JSON array proportional to entry count. Final records include validation
-scope, counters, selected limits, metadata-loss and skipped-entry counts, and
-sandbox status.
-An error emits a bounded error record when the stream is usable; absence of
-a successful completion summary means incomplete output. JSON numeric values
-that can exceed exact binary64 integer range are decimal strings with documented
-units. Human-readable sandbox warnings remain visible on stderr.
+`--json` writes newline-delimited JSON records with a schema version and
+`type`. Entry records stream individually, followed by a completion summary.
+There is no JSON array proportional to entry count. Final records include
+validation scope, counters, selected limits, metadata-loss and skipped-entry
+counts and sandbox status. An error emits a bounded error record when the
+stream is usable; absence of a successful completion summary means
+incomplete output.
 
-Exit status is 0 for complete success, 1 for operational failure, and 2 for
-invalid command syntax. Corruption, unsupported required features, partial output,
-and uncertain durability are failures. A sandbox-unavailable warning under
-`auto` alone does not make otherwise successful work fail. Signals/cancellation
-stop the worker, suppress publication, and report incomplete output when possible.
+Exit status is 0 for complete success, 1 for operational failure and 2 for
+invalid command syntax. Corruption, unsupported required features, partial
+output and uncertain durability are failures. A sandbox-unavailable warning
+under `auto` alone does not make otherwise successful work fail. Signals and
+cancellation stop the worker, suppress publication and report incomplete
+output when possible.
 
 ## Examples
 
 ```sh
-fsimg create -R -t fat32 -s 1G -L BOOT -o boot.img ./rootfs
-fsimg create -R -t exfat -f 100G -m 128M -T /scratch -o data.img ./files
-fsimg create -n -R -t exfat -m 64M -T /scratch ./files
-fsimg info -i data.img
-fsimg ls -j -r -i data.img /
-fsimg cat -i boot.img /EFI/BOOT/BOOTX64.EFI > BOOTX64.EFI
-fsimg extract -S required -i data.img -C ./new-output /documents
-fsimg verify -d -m 128M -T /scratch -i data.img
-fsimg info -b 1048576 -z 1073741824 -i disk.img
-fsimg formats -j
+fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .
+fsimg cRf data.img -F exfat --free-space=100G -m 128M -T /scratch rootfs extra
+fsimg cWf disk.vhd -F exfat/gpt/vhd -o gpt:type=esp -C esp . -C extra EFI
+fsimg cf disk.img.gz -F fat32/mbr -a -C esp .
+fsimg cf system.dmg -F fat32/dmg -o dmg:compress=none -C esp .
+fsimg cn -F exfat -R -m 64M -T /scratch rootfs
+fsimg cf - -F fat32 rootfs | ssh host 'cat > boot.img'
+fsimg if disk.img
+fsimg tvf disk.img
+fsimg tf disk.img --no-recursion /EFI
+fsimg tf disk.img --json --partition=2 /EFI
+fsimg tf odd.bin -F fat32/-/-
+fsimg xf boot.img                      # into ./boot/
+fsimg xf boot.img -C /tmp EFI/BOOT     # into /tmp/boot/EFI/BOOT
+fsimg xEf boot.img -C ./empty-dir
+fsimg xOf boot.img /EFI/BOOT/BOOTX64.EFI > BOOTX64.EFI
+fsimg Wdf disk.img -S required
+fsimg if disk.img --offset=1M --length=1G
+fsimg --formats --json
+curl -s https://example.org/disk.img.gz | fsimg tf -
 ```
 
 ## Coordinator and streaming representation
 
-The coordinator parses trusted command operands, prepares private capabilities,
-and supervises its same-executable worker before publishing an image. It never
-parses image bytes. The existing output relay owns every potentially blocking
-stdout/stderr write, including help, capability records, errors and final
-summaries. An output-only producer reuses the same relay queue, poll loop,
+The coordinator parses trusted command operands, prepares private
+capabilities and supervises its same-executable workers before publishing an
+image. It never parses image bytes. The existing output relay owns every
+potentially blocking stdout and stderr write, including help, capability
+records, errors, final summaries, a streamed image and a member's raw bytes;
+an output-only producer reuses the same relay queue, poll loop,
 confirmed-byte accounting, signal handling and absolute monotonic deadline.
+The [architecture](architecture.md#bounded-resources) owns the relay and its
+ledger.
 
-Command parsing owns singleton and key-duplicate detection. Numeric parsing
-uses checked decimal accumulation and explicit binary byte suffixes. Only
-known commands/options/settings reach descriptor preparation. Read operations
-share the existing worker selector. Create dry runs supply a source root and
-optional scratch, never output authority. Normal creation prepares a fresh
-private staging directory on the final filesystem; its worker creates the
-image only after planning. Only the coordinator publishes, after a validated
-completion and successful worker exit. Extraction prepares a fresh private
-root and retains it, with an explicit incomplete outcome on failure.
+Command parsing owns the bundle rewrite, singleton and key-duplicate
+detection, stack and setting validation and operand normalization. Numeric
+parsing uses checked decimal accumulation and explicit binary byte suffixes.
+Only known modes, options, stacks and settings reach descriptor preparation.
 
-Scratch is a separate fresh private tree beneath -T/TMPDIR or /tmp. It is never
-an output ancestor or descendant. Cleanup never recursively follows worker or
-image names. Worker output authority cannot remove output. Scratch cleanup
-uses descriptor-relative no-follow operations on coordinator-created trees
-after children exit. Cleanup failures preserve the primary error and identify
-retained private output/scratch locations.
+Read operations share the existing worker selector. The worker's image input
+is one of exactly two things: the read-only regular file `-f` names, or a
+pipe from the coordinator. For `-f -` the coordinator refuses a standard
+input that is a terminal and otherwise pumps standard input into that pipe
+byte for byte, through the input relay the
+[architecture](architecture.md#bounded-resources) defines beside the output
+relay, which interprets nothing it carries; the worker decodes the stream
+and fills the spool as the [layer design](design-layers.md#filling) states.
+The worker therefore never sees a socket, a terminal or an unknown
+descriptor kind, and the sandbox's input check admits exactly those two
+kinds.
 
-Output formatting retains one 128 KiB span, one small UTF-8 carry, the current
-entry metadata, and fixed result/counter records. Name frames stream within
-JSON strings; no pathname or listing tree proportional to entries is retained.
-Valid UTF-8 crosses name-frame boundaries intact. Human names escape controls,
-backslashes and bidi formatting unambiguously. JSON uses valid UTF-8, escapes
-JSON controls/quotes, and encodes untrusted invalid diagnostic bytes visibly.
-Under `-j`, only the successful final summary certifies completion. An error after a
-partial entry first closes that incomplete record, then emits an error record;
-no successful summary follows. Counts and byte quantities use decimal strings
-in schema version 1, and all fields state their units. Header, selected-entry,
-structural and payload-read scopes remain separate.
+Create dry runs supply the source roots and optional scratch, never output
+authority. Normal creation prepares a fresh private staging directory on the
+final filesystem; its worker creates the image there only after planning.
+Only the coordinator publishes, after a validated completion, successful
+worker exit and, for `cW`, successful exit of the verification worker.
+Extraction prepares the fresh stem directory, or checks the `-E` directory,
+and retains it with an explicit incomplete outcome on failure.
 
-Capability records distinguish the static format profile and compiled sandbox
-backend from actual per-operation readiness; an unprobed runtime is unknown.
-Source-root limitations and timestamp/source consistency contracts are explicit.
+The coordinator is the sole creator of the two
+[handed-over files](design-layers.md#handed-over-files), each made
+exclusively and unlinked before the worker starts, and places them where the
+[storage design](design-storage.md#resource-model) says: the spool in the
+private scratch tree, for every read-side worker, since the coordinator
+cannot know whether the input will need it; the raw intermediate beside the
+staged output in the staging directory when the output is a file, and in the
+private scratch tree when it is a stream. With `-T -` there is no scratch
+tree and no spool, and the coordinator reports a worker that needed one as
+gzip input refused under `-T -`. The worker receives descriptors, never
+names; its authority over names is the
+[mapping](design-security.md#coordinator-and-worker) in the security
+design.
 
+Scratch is a separate fresh private tree beneath `-T`, `TMPDIR` or `/tmp`.
+It is never an output ancestor or descendant. Cleanup never recursively
+follows worker or image names. Scratch cleanup uses descriptor-relative
+no-follow operations on coordinator-created trees after children exit.
+Cleanup failures preserve the primary error and identify retained private
+output and scratch locations.
+
+Output formatting retains one 128 KiB span, one small UTF-8 carry, the
+current entry metadata and fixed result and counter records. Name frames
+stream within JSON strings; no pathname or listing tree proportional to
+entries is retained, and valid UTF-8 crosses name-frame boundaries intact.
+Human names escape controls, backslashes and bidi formatting unambiguously.
+JSON uses valid UTF-8, escapes JSON controls and quotes, and encodes
+untrusted invalid diagnostic bytes visibly.
+
+Schema version 1 records use numeric schema=1 and string type, of which
+there are info, plan, entry, verify, format, capabilities, loss, progress,
+error and summary. Byte quantities, counts, Unix seconds and nanosecond
+precision are decimal strings with stated units; bounded kind and flag
+fields, nanoseconds, offset minutes, geometry sizes, enumerated size arrays
+and the UTF-16 name-unit limit are JSON integers; unknown values are null; a
+timestamp includes basis and resolution. Progress and sampled loss details
+use stderr; data, summary and error records use stdout. Entry records carry
+complete=true only after all name frames and ENTRY_END validate; an error
+after a partial entry first closes that record as incomplete, then emits an
+error record, and no successful summary follows. Header, selected-entry,
+structural and payload-read scopes remain separate. Capability records
+distinguish the static format profile and compiled sandbox backend from
+per-operation readiness; an unprobed runtime is unknown.
 
 The command implementation separates parsing (options.c), bounded text
-formatting (display.c), capability preparation/publication (main.c and paths.c),
-and existing worker/protocol/sandbox owners. The command links the same core
-objects statically so fresh worker execution needs no loader environment.
-The public shared/static library remains independently installed and tested.
+formatting (display.c), capability preparation and publication (main.c and
+paths.c), and the existing worker, protocol and sandbox owners. The command
+links the same core objects statically so fresh worker execution needs no
+loader environment. The public shared and static library remains
+independently installed and tested.
 
-Schema version 1 records use numeric schema=1 and string type. Byte quantities,
-counts, Unix seconds and nanosecond precision are decimal strings; bounded
-kind/flag fields, nanoseconds, offset minutes, geometry sizes, enumerated size
-arrays and the UTF-16 name-unit limit are JSON integers. Unknown
-values are null. A timestamp explicitly includes basis and resolution. Record
-types are info, plan, entry, verify, format, capabilities, loss, progress,
-error and summary. Progress and sampled loss details use stderr; data and
-summary/error records use stdout under -j. Raw cat rejects -j and directs any
-final diagnostic summary to stderr. Entry records carry complete=true only
-after all name frames and ENTRY_END validate; error closure marks them false.
-No final successful summary is emitted before worker exit and publication.
-
-CLI help uses -h, and top-level version uses -V. Typed writer settings are
-sector and cluster in bytes and the QNX6 endian, uuid, inodes and reserve;
-FAT oem=cp437 is explicit on read commands.
-Explicit slice length and exact image size are positive. Offset can be zero.
-Resource zero selects its documented default. Singleton and key duplicate
-flags are syntax errors even if values agree. -e requires -R. -r only applies
-to ls; -d only applies to verify; -j is rejected by cat. Parsing requires all
-options before operands (or an explicit --), consistently on all target hosts.
-
-The signed Unix epoch syntax permits an optional leading minus followed by
-decimal digits. It rejects a plus sign and byte suffixes. Representability in
-the chosen filesystem remains a planning check.
-
-The operation deadline includes successful output. Once processing fails,
-diagnostic delivery has a separate two-second grace; one further two-second
-stderr-only attempt applies if stdout cannot carry the report. Neither attempt
-can resume processing or publish output. Scratch cleanup removes at most 4,096
-flat entries and never descends into a worker-created directory. A retained
-scratch directory or staging object is reported explicitly.
+The operation deadline, the post-failure diagnostic grace and the formatted
+text ceiling are the [architecture's](architecture.md#bounded-resources).
+Scratch cleanup removes at most 4,096 flat entries and never descends into a
+worker-created directory. A retained scratch directory or staging object is
+reported explicitly.
 
 `-l output` limits logical file bytes, including holes, rather than escaped
-listing text. Formatted stdout and stderr share the separate derived ceiling
-in the architecture. Summaries report its ceiling, queued text and confirmed
-stream bytes. Every reported ledger counter is a snapshot before its own record
-is queued, so it excludes that reporting record. Error reporting can use the
-reserved final 128 KiB. Progress emits only
-when an entries/bytes/work counter reaches a new power-of-two milestone, in
+listing text. Summaries report the text ceiling, queued text and confirmed
+stream bytes; every reported ledger counter is a snapshot taken before its
+own record is queued, so it excludes that record. Progress emits only when
+an entries, bytes or work counter reaches a new power-of-two milestone, in
 addition to its frequency limit; it therefore needs at most 193 records per
 operation even for gigantic payloads. Suppressing redundant progress never
-stops processing. The common relay charges each text span before forwarding it,
-and preserves the aggregate ledger across worker and final-reporting phases.
+stops processing.

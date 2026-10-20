@@ -5,15 +5,24 @@
 The extractor consumes a reader before its first iteration and creates one
 fresh private destination beneath a trusted parent descriptor. It accepts a
 single destination basename. Existing files, directories and symlinks fail.
-The internal worker entry point instead borrows a root that its coordinator
-has just created exclusively; it never receives the final parent authority.
+The internal worker entry point instead borrows a root descriptor from its
+coordinator; it never receives the final parent authority. The coordinator
+obtains that root in one of two ways defined by the
+[security specification](design-security.md#safe-extraction): it creates
+the directory exclusively inside the `-C` parent, named after the image
+stem, or with `-E` it proves the user's own `-C` directory empty and private
+on its opened descriptor. The worker cannot tell the two apart, and does not
+need to: a verified empty private directory is the state exclusive creation
+produces, and everything beneath it is created exclusively and no-follow.
 
 The common reader selector resolves requested components through each format's
 validated name/alias namespace and prunes unrelated directory branches. Its
 bounded requested/resolved path buffers belong to the resource context. It
 returns ancestors, the selected entry, and selected descendants as distinct
-relations. Listing can limit descendants to immediate children; cat requires
-the selected entry to be a regular file. All host paths use displayed names.
+relations. Listing can limit descendants to immediate children; `x -O` requires
+the selected entry to be a regular file or a symbolic link, whose bytes are
+its target, as the [CLI design](design-cli.md#extraction) defines the mode.
+All host paths use displayed names.
 
 Every image path is independently validated at the extraction boundary. A
 component-aware selection includes the selected entry/subtree and its ancestor
@@ -62,7 +71,10 @@ A bounded versioned protocol carries readiness, acknowledgement, operation
 records, errors and completion. Its header states magic, version, type and
 payload length in explicit byte order. Lengths and message order are checked
 before payload allocation or interpretation. Entry names use start/chunk/end
-frames with a checked total path limit. Raw cat bytes use a separate data pipe.
+frames with a checked total path limit. Raw `x -O` bytes use a separate data pipe,
+and a streamed image input arrives through its mirror, the input pipe the
+coordinator fills from standard input without reading it, as the
+[CLI design](design-cli.md#coordinator-and-streaming-representation) states.
 No protocol message grants a pathname or descriptor-opening service.
 
 The protocol header owns named field offsets shared by encoders, validators,
@@ -83,13 +95,13 @@ publication additionally requires the staged regular-file type and planned size
 and runs only after all writable worker descriptors are closed.
 
 The protocol and supervisor are independent of command formatting. The worker
-can perform source planning/emission or reader info/list/cat/verify/extract;
+can perform source planning/emission or a reader job: info, list, raw member output, verify or extract;
 all detection and parsing occur after acknowledgement. The coordinator handles
 terminal escaping and streaming machine records. Worker process separation on a
 platform without a supported sandbox is reported as unconfined.
 
 An output relay runs from the same executable with only its input/status pipes
-and borrowed stdout/stderr sinks. The coordinator forwards raw cat bytes only
+and borrowed stdout/stderr sinks. The coordinator forwards raw `x -O` bytes only
 after the complete selected-entry record is validated, and enforces the declared
 file length and output limit before forwarding each bounded batch. Formatting
 callbacks return bounded text spans to this same owner; they never write sinks.

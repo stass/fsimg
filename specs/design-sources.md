@@ -4,8 +4,14 @@
 
 The writer owns one collection session, an append-only entry stream, a host
 source-record stream, and a bounded registry of source-root descriptors. A
-source root consumes a descriptor reservation and a charged registry record;
-neither scales with the number of files beneath that root. Programmatic sources
+source root is an opened host directory or regular file paired with the image
+path it populates; the CLI opens one root per create operand, so a command
+line composes an image from several trees. A root consumes a descriptor
+reservation and a charged registry record; neither scales with the number of
+files beneath that root. A directory root contributes its tree beneath its
+image path and, when that path is not the root, its own directory entry from
+the directory's metadata. A regular-file root contributes exactly one file
+entry at its image path, with the file as its source. Programmatic sources
 use one copied provider table and borrowed argument, with numeric source IDs.
 The caller keeps provider state alive until writer destruction. Zero sources
 have no backing storage. Directories have no source or payload length.
@@ -69,7 +75,11 @@ directory batches have a fixed charged capacity, so libc cannot accumulate a
 wide directory outside the memory owner. Host directory order does not determine
 catalog order. Regular hardlinks become independent image files. A non-root
 image prefix contributes its own explicit directory entry; its ancestors must
-be supplied in the same collection.
+be supplied in the same collection. The CLI supplies them as synthesized
+directories: entries with a path and no valid metadata field, added through
+the same programmatic path as any caller's directory, so the driver's
+documented defaults for absent fields apply and host directories the user
+did not name never influence the image.
 
 Every opened descendant must have the root's device and mount identity. Linux
 uses descriptor-based `statx` mount IDs; FreeBSD and macOS use the mount's unique
@@ -83,8 +93,10 @@ Source records contain the root ID, bounded relative host path, device/inode,
 size, modification time, and change time. Directory records retain their
 identity for validation while scanning. Reopening walks one validated component
 at a time, checks opened directories and filesystem identity, and opens only the
-current file. The writer embeds one current source; its I/O handle owns the file
-descriptor. Opening accepts a stable catalog ID, reads and validates the
+current file. A regular-file root has an empty relative path; its source
+borrows the root descriptor under the same identity checks instead of
+reopening, and the registry keeps ownership. The writer embeds one current
+source; its I/O handle owns a reopened file's descriptor. Opening accepts a stable catalog ID, reads and validates the
 catalog-owned source fields, and copies the scalar reference before reusing the
 source-record buffer for host reopening. A second open while active fails without
 disturbing that source. The file is validated before and after bounded reads,
@@ -107,11 +119,43 @@ host identity records before any sink mutation.
 
 ## Catalog preparation
 
-Preparation seals the input and external-sorts entries by component tuples. One
+Preparation seals the input and external-sorts entries by component tuples,
+with the collection record's rank as the tie-breaker among equal paths. One
 bounded path buffer and an ancestor stack assign stable IDs starting at one;
 ID zero denotes the implicit root. Every non-root parent must already occur in
-tuple order as an explicit directory. Duplicate paths, missing parents, and
-file/directory conflicts fail.
+tuple order as an explicit directory. Missing parents and file/directory
+conflicts fail; equal paths resolve by the merging rule below.
+
+### Merging roots
+
+Several roots can supply the same directory: two operands that both contain
+`EFI/`, or a synthesized parent and a scanned directory. The sort makes equal
+paths adjacent, and one rule decides each run of equal paths:
+
+* If every record in the run is a directory, the run becomes one directory
+  whose children are the union of the children the roots supplied. The
+  retained record, and so the directory's metadata, is the one with the
+  lowest rank; the others are dropped.
+* Otherwise the run is a collision and preparation fails naming the path: a
+  file against a file, a file against a directory, a link against anything.
+  The same tree named twice therefore fails on its first file.
+
+The sort key is the component tuple, then the rank, and the lowest rank
+wins: the rank is the pair (0 for a scanned record, 1 for a synthesized one;
+then the root's registration order, the operand's position on the command
+line), so a scanned directory always outranks a synthesized parent whatever
+the operand order, and among scanned directories the first operand wins.
+Within one root equal paths cannot occur, because a host
+directory enumerates each name once, so this is the only duplicate rule in
+preparation and it adds no state: the rank is a fixed-width field of the
+sort key, and the union of children falls out of the sort because every
+child record keeps its own path.
+
+The catalog is independent of operand order except through this rank: IDs,
+parent links, generic ordering and every entry's content are the same for any
+permutation of operands; only the metadata of a directory that two operands
+both scanned follows the command line, and that dependence is documented in
+the [CLI contract](design-cli.md#creation).
 
 Sorted records remain in an immutable stream. A paged fixed-record array maps
 each stable ID to its stream offset and parent ID. A second stream contains
