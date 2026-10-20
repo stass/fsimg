@@ -26,7 +26,7 @@ module FsimgSpec
       results = File.join(build_directory, "test", "spec-results", DIRECTORY)
       ResultsDirectory.hold(results) do
         setup = CasePhase.prepare(results:, profile:, build_directory:, environment:)
-        pending = suite.replay(recipe, cache: setup.cache, ceilings: profile.ceilings)
+        pending = suite.replay(recipe, cache: setup.cache, ceilings: profile.ceilings, name_trials: setup.name_trials)
         next [CasePhase.skipped(pending), []] if pending.skip
 
         classified = CasePhase.classify(pending)

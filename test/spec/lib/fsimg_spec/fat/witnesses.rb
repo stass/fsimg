@@ -31,20 +31,20 @@ module FsimgSpec
       BASES = { "fat12" => { clusters: 100 }, "fat16" => { clusters: 4085 }, "fat32" => { clusters: 65_525 } }.freeze
 
       # One witness of a relational rule: the base it varies, builder
-      # parameters that replace the base's, mutations of the rendered
-      # image, the format forced with -t, and whether the witness is meant
-      # to violate the rule.
-      class Variation < Data.define(:label, :base, :parameters, :mutations, :forced_format, :violates)
+      # parameters that replace the base's, the tree the builder writes
+      # into it, mutations of the rendered image, the format forced with
+      # -t, and whether the witness is meant to violate the rule.
+      class Variation < Data.define(:label, :base, :parameters, :tree, :mutations, :forced_format, :violates)
         include Checked
 
-        def initialize(label:, base:, violates:, parameters: {}, mutations: [], forced_format: nil) = super
+        def initialize(label:, base:, violates:, parameters: {}, tree: [], mutations: [], forced_format: nil) = super
       end
 
-      # A case before classification: its id, its builder parameters and
-      # mutations, the forced format, the rule it targets, or nil for a case
-      # meant valid, and the rule whose domain generated it, or nil for a
-      # valid volume of no one rule.
-      Witness = Data.define(:id, :parameters, :mutations, :forced_format, :intended, :rule)
+      # A case before classification: its id, its builder parameters, tree
+      # and mutations, the forced format, the rule it targets, or nil for a
+      # case meant valid, and the rule whose domain generated it, or nil
+      # for a valid volume of no one rule.
+      Witness = Data.define(:id, :parameters, :tree, :mutations, :forced_format, :intended, :rule)
 
       # Valid volumes beyond the bases: both sides of each variant threshold
       # (section 3.5), and the largest allocation unit fsimg reads, 4096-byte
@@ -59,7 +59,7 @@ module FsimgSpec
       # Every deterministic witness of registry's rules.
       def self.deterministic(registry)
         layouts = BASES.transform_values { Builder::Layout.new(_1) }
-        valid = VALID.map { |id, parameters| Witness.new(id:, parameters:, mutations: [], forced_format: nil, intended: nil, rule: nil) }
+        valid = VALID.map { |id, parameters| Witness.new(id:, parameters:, tree: [], mutations: [], forced_format: nil, intended: nil, rule: nil) }
         relational = registry.rules.reject { Rules::FIELDS.key?(_1.id) || _1.domain.nil? }
         valid + field_rules(registry).flat_map { |field, rules| field_witnesses(field, rules) } +
           relational.flat_map { |rule| rule.domain.call(layouts).map { witness(rule, _1) } }
@@ -88,7 +88,7 @@ module FsimgSpec
         rebuilt = rebuild && field.parameter && renders?(base.merge(field.parameter => value))
         parameters = rebuilt ? base.merge(field.parameter => value) : base
         rule = (intended || rules.first).id
-        Witness.new(id: "#{rule}.#{field.label(value)}", parameters:,
+        Witness.new(id: "#{rule}.#{field.label(value)}", parameters:, tree: [],
                     mutations: with_backup_copies(parameters, rebuilt ? [] : [field.mutation(value)]),
                     forced_format: nil, intended: intended&.id, rule:)
       end
@@ -107,8 +107,9 @@ module FsimgSpec
 
       private_class_method def self.witness(rule, variation)
         parameters = BASES.fetch(variation.base).merge(variation.parameters)
-        Witness.new(id: "#{rule.id}.#{variation.label}", parameters:, mutations: with_backup_copies(parameters, variation.mutations),
-                    forced_format: variation.forced_format, intended: variation.violates ? rule.id : nil, rule: rule.id)
+        Witness.new(id: "#{rule.id}.#{variation.label}", parameters:, tree: variation.tree,
+                    mutations: with_backup_copies(parameters, variation.mutations), forced_format: variation.forced_format,
+                    intended: variation.violates ? rule.id : nil, rule: rule.id)
       end
 
       # mutations, with each change to the boot sector followed by the same
@@ -372,6 +373,29 @@ module FsimgSpec
       # The one witness of an absent-sector rule: field set to 0xFFFF.
       def self.absent(field) = lambda { |_layouts|
         [mutated(field, Rules::ABSENT_SECTOR, base: "fat32", violates: true)]
+      }
+
+      # A destination witness is a valid FAT volume whose names some hosts
+      # cannot hold (specs/design-spec-testing.md#host-names). Each is meant
+      # to violate its rule, but only the host's name trials decide whether
+      # it does; on a host that holds its names it runs as an ordinary case.
+      private_class_method def self.files(*names) =
+        names.each_with_index.map { TreeEntry.new(path: _1, type: "file", size: 1, seed: _2 + 1) }
+
+      # U+00E9 and e with U+0301: distinct FAT names, since FAT compares
+      # names by simple uppercase and not by normalization, which a
+      # normalization-insensitive host such as APFS takes for one. A case
+      # pair is no witness: FAT takes it for one name, an ambiguous
+      # directory that fsimg rejects before it creates anything.
+      HOST_COLLISION = lambda { |_layouts|
+        [Variation.new(label: "nfc_nfd", base: "fat12", violates: true, tree: files("\u00e9", "e\u0301"))]
+      }
+
+      # 128 U+00E9: 128 UTF-16 units in FAT, well within its 255, but 256
+      # bytes of UTF-8, beyond the 255-byte component limit of hosts such
+      # as ext4 and UFS. APFS counts characters and holds it.
+      HOST_UNREPRESENTABLE = lambda { |_layouts|
+        [Variation.new(label: "utf8_256", base: "fat12", violates: true, tree: files("\u00e9" * 128))]
       }
     end
   end

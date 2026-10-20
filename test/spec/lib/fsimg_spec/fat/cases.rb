@@ -17,23 +17,30 @@ module FsimgSpec
     # is rendered into the fixture cache, its mutations applied, the image
     # decoded and classified by the whole registry, and the recipe recorded
     # with the classification and the expectations derived from it. A
-    # creation case is classified from its source, and the image create
-    # writes is decoded and classified by the created hook.
+    # case that extracts a known tree is classified with the host's answers
+    # to its name trials. A creation case is classified from its source,
+    # and the image create writes is decoded and classified by the created
+    # hook.
     class Cases
-      def initialize(registry:, cache:, ceilings:)
+      # name_trials is the run's NameTrials, or NameTrials::NONE where
+      # nothing extracts, as when fuzz seeds are exported.
+      def initialize(registry:, cache:, ceilings:, name_trials:)
         @registry = registry
         @cache = cache
         @ceilings = ceilings
+        @name_trials = name_trials
         @base_digests = {}
       end
 
       # The witness's case, image and model, with the generator defect the
       # case shows, or nil.
       def call(witness)
-        base = Base.new(builder: Builder::NAME, parameters: witness.parameters, tree: [])
+        base = Base.new(builder: Builder::NAME, parameters: witness.parameters, tree: witness.tree)
         path = Bases.render(base, cache: @cache, ceilings: @ceilings)
-        image, model, classification = decode(path, base.tree, witness.mutations, witness.forced_format)
-        kase = Case.derive(recipe(witness, base:, path:, classification:), classification, registry: @registry)
+        stages = stages_for(witness)
+        image, model, classification = decode(path, tree: base.tree, mutations: witness.mutations,
+                                              forced_format: witness.forced_format, stages:)
+        kase = Case.derive(recipe(witness, base:, path:, stages:, classification:), classification, registry: @registry)
         kase = kase.with(recipe: kase.recorded)
         Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect)
       end
@@ -60,7 +67,8 @@ module FsimgSpec
         return creation(recipe) unless recipe.reading?
 
         path = Bases.render(recipe.base, cache: @cache, ceilings: @ceilings)
-        image, model, classification = decode(path, recipe.base.tree, recipe.mutations, recipe.forced_format)
+        image, model, classification = decode(path, tree: recipe.base.tree, mutations: recipe.mutations,
+                                              forced_format: recipe.forced_format, stages: recipe.stages)
         kase = Case.derive(recipe, classification, registry: @registry)
         digest = base_digest(path)
         defect = digest == recipe.base_sha256 ? replay_defect(kase) : "#{recipe.id}: its base renders to #{digest}"
@@ -73,15 +81,17 @@ module FsimgSpec
       # the reading stages the image it writes, which the created hook
       # decodes once create has accepted. The source tree the case
       # directory holds is the recipe's, since CaseDirectory makes a tree
-      # the host stores under other names a host skip.
+      # the host stores under other names a host skip. That source tree,
+      # written through the funnel and walked back, stands for the name
+      # trials of the created image's tree.
       def creation(recipe)
         source = SourceModel.new(settings: recipe.source.settings, tree: recipe.source.tree)
-        source_classification = @registry.classify_source(source, Environment.new(forced_format: nil))
+        source_classification = @registry.classify_source(source, Environment.new(forced_format: nil, trial_answers: NO_TRIAL))
         kase = Case.derive(recipe, Case::CREATED_IMAGE, registry: @registry, source_classification:)
         known_tree = KnownTree.of(recipe.source.tree)
         created = lambda do |path|
           model = Model.decode(ImageView.open(path), tree: known_tree)
-          [model, @registry.classify(model, Environment.new(forced_format: nil))]
+          [model, @registry.classify(model, Environment.new(forced_format: nil, trial_answers: TrialAnswers::HELD))]
         end
         Classified.new(kase:, image: nil, model: source, created:, defect: replay_defect(kase))
       end
@@ -90,17 +100,18 @@ module FsimgSpec
       # classification with format forced. An unmutated image holds tree,
       # the tree its base was populated with; a mutation may have changed
       # anything, so a mutated image's tree is unknown.
-      def decode(path, tree, mutations, forced_format)
+      def decode(path, tree:, mutations:, forced_format:, stages:)
         image = mutations.reduce(ImageView.open(path)) { |view, mutation| mutation.apply(view) }
-        model = Model.decode(image, tree: mutations.empty? ? KnownTree.of(tree) : Model::UNKNOWN_TREE)
-        [image, model, @registry.classify(model, Environment.new(forced_format:))]
+        known_tree = mutations.empty? ? KnownTree.of(tree) : Model::UNKNOWN_TREE
+        model = Model.decode(image, tree: known_tree)
+        trial_answers = @name_trials.answers_for(known_tree, stages:)
+        [image, model, @registry.classify(model, Environment.new(forced_format:, trial_answers:))]
       end
 
       # The witness's recipe. Its format is the base's variant, which picks
       # the format suite on replay; a mutation may change the variant the
       # image decodes to, which the classification records.
-      def recipe(witness, base:, path:, classification:)
-        stages = stages_for(witness)
+      def recipe(witness, base:, path:, stages:, classification:)
         Recipe.new(
           id: witness.id, format: Fat.variant_of(witness.parameters.fetch(:clusters)),
           kind: witness.intended ? "targeted" : "valid", intended_violation: witness.intended,

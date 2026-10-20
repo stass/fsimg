@@ -98,9 +98,35 @@ module FsimgSpec
     def input? = scopes.include?("input")
   end
 
+  # A name the host refused in a name trial: its path in the tree, as a
+  # binary string, and the funnel's answer, :exists, :too_long or :illegal.
+  Refusal = Data.define(:path, :answer)
+
+  # The host's answers to the name trials of one tree
+  # (specs/design-spec-testing.md#host-names): every name it refused, in
+  # path order, and unheld, nil or why the host cannot hold the tree, which
+  # makes the case a host skip. HELD is the answer of a tree the host held
+  # whole, such as a creation case's source tree, which the funnel wrote
+  # and the harness walked back.
+  class TrialAnswers < Data.define(:refused, :unheld)
+    HELD = new(refused: [].freeze, unheld: nil)
+
+    # Whether the host refused any name with one of answers.
+    def refused?(answers) = refused.any? { answers.include?(_1.answer) }
+  end
+
+  # The trials of a case that ran none.
+  NO_TRIAL = Undefined.new(reason: "no name trial ran for this case")
+
   # What rules read about a run beyond the decoded model: the format a
-  # case forces with -t, or nil.
-  Environment = Data.define(:forced_format)
+  # case forces with -t, or nil, and the TrialAnswers of the case's tree,
+  # or Undefined when no name trial ran, as for a case that does not
+  # extract or an image whose tree is unknown. Without trial answers the
+  # destination scope is unclassified, so no destination expectation
+  # stands without a trial behind it.
+  Environment = Data.define(:forced_format, :trial_answers) do
+    def unclassified_scopes = FsimgSpec.undefined?(trial_answers) ? ["destination"] : []
+  end
 
   # What the input rules read about a creation case: its settings and the
   # tree the harness wrote into source/ and walked back
@@ -116,12 +142,17 @@ module FsimgSpec
 
   # The decoded model's violations and the scopes it could not decode
   # completely; together they decide every expectation of a case.
-  Classification = Data.define(:violations, :unclassified) do
+  # trial_answers are the environment's name-trial answers, which its
+  # destination violations come from: they also say whether the case is a
+  # host skip (Case#host_skip), and a failure record shows them.
+  Classification = Data.define(:violations, :unclassified, :trial_answers) do
     def rule_ids = violations.map { _1.rule.id }.uniq.sort
 
-    # The classification without destination violations, which depend on
-    # the host's name trials rather than on the image.
-    def without_destination = with(violations: violations.reject { _1.scope == "destination" })
+    # The classification as the image alone decides it, the same on every
+    # host: no destination violation and no unclassified destination
+    # scope, since both depend on the host's name trials.
+    def without_destination =
+      with(violations: violations.reject { _1.scope == "destination" }, unclassified: unclassified - ["destination"])
   end
 
   # The checked set of rules a run evaluates. Construction refuses a rule
@@ -145,22 +176,28 @@ module FsimgSpec
     def fetch(id) = @rules.fetch(id) { raise RuleError, "unknown rule #{id}" }
 
     # The classification of a decoded image by every rule but the input
-    # rules.
-    def classify(model, environment) = classification(model, environment, rules.reject(&:input?))
+    # rules. A scope is unclassified when the model could not decode its
+    # inputs or the environment lacks them, as the destination scope lacks
+    # name-trial answers.
+    def classify(model, environment) =
+      classification(model, environment, rules.reject(&:input?),
+                     unclassified: model.unclassified_scopes | environment.unclassified_scopes)
 
     # The classification of a creation case's SourceModel by the input
-    # rules.
-    def classify_source(model, environment) = classification(model, environment, rules.select(&:input?))
+    # rules, which read no name trial.
+    def classify_source(model, environment) =
+      classification(model, environment, rules.select(&:input?), unclassified: model.unclassified_scopes)
 
     private
 
-    def classification(model, environment, rules)
-      unknown = model.unclassified_scopes - SCOPE_STAGES.keys
+    def classification(model, environment, rules, unclassified:)
+      unknown = unclassified - SCOPE_STAGES.keys
       raise RuleError, "the model names unknown unclassified scopes #{unknown}" unless unknown.empty?
 
       Classification.new(
         violations: rules.flat_map { _1.violations(model, environment) },
-        unclassified: model.unclassified_scopes.sort.freeze
+        unclassified: unclassified.sort.freeze,
+        trial_answers: environment.trial_answers
       )
     end
 

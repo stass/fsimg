@@ -123,7 +123,7 @@ class TestRunnerFsimg < Minitest::Test
       source: FsimgSpec::Source.new(tree:, settings: {}),
       expected: stages.to_h { [_1, FsimgSpec::Expectation.parse("accept")] }
     )
-    clean = FsimgSpec::Classification.new(violations: [], unclassified: [])
+    clean = FsimgSpec::Classification.new(violations: [], unclassified: [], trial_answers: FsimgSpec::TrialAnswers::HELD)
     FsimgSpec::Case.new(recipe:, classification: clean, source_classification: clean, intended_rule: nil, expected: recipe.expected)
   end
 
@@ -133,7 +133,7 @@ class TestRunnerFsimg < Minitest::Test
   end
 
   # The created hook for an image these cases do not classify.
-  CREATED_VALID = ->(_image) { [NoRecords.new, FsimgSpec::Classification.new(violations: [], unclassified: [])] }
+  CREATED_VALID = ->(_image) { [NoRecords.new, FsimgSpec::Case::CREATED_IMAGE] }
 
   # An observer that, for the second invocation (ls after create), kills
   # every member of its group but the coordinator once one appears, and

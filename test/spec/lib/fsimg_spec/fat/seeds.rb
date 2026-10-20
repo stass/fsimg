@@ -47,9 +47,11 @@ module FsimgSpec
       # case the host skips has no image to seed from; one that cannot be
       # classified fails the export, as it fails a run. A case whose
       # generator was wrong or whose promoted recipe drifted still has an
-      # image, which seeds the fuzzer as well as any.
+      # image, which seeds the fuzzer as well as any. A seed needs the
+      # image, not the host's answers for its names, so no name trial runs.
       def self.seeded(cache:, ceilings:) =
-        Suite.cases(cache:, ceilings:).reject(&:skip).map { CasePhase.classify(_1) }.select { seeds?(_1.kase.recipe) }
+        Suite.cases(cache:, ceilings:, name_trials: NameTrials::NONE).reject(&:skip)
+             .map { CasePhase.classify(_1) }.select { seeds?(_1.kase.recipe) }
 
       # Whether recipe's case seeds the fuzzer: a targeted or promoted case
       # whose format the fuzzer detects itself.

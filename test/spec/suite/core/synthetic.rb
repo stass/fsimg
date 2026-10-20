@@ -8,6 +8,11 @@ require "fsimg_spec"
 # is a set of named facts; a rule with the same name as a fact is violated
 # when the fact is present, at the scope the fact names.
 module Synthetic
+  # The run environment of the synthetic tests: a host whose name trials
+  # held every name, so the destination scope is classified and a
+  # destination fact decides it like any other.
+  ENVIRONMENT = FsimgSpec::Environment.new(forced_format: nil, trial_answers: FsimgSpec::TrialAnswers::HELD)
+
   Model = Data.define(:facts, :unclassified_scopes) do
     def initialize(facts: {}, unclassified_scopes: []) = super
   end
@@ -33,5 +38,5 @@ module Synthetic
   # facts maps a rule id to true, or for a rule with several scopes to the
   # scope of its violation.
   def classify(registry, facts = {}, unclassified: []) =
-    registry.classify(Model.new(facts:, unclassified_scopes: unclassified), nil)
+    registry.classify(Model.new(facts:, unclassified_scopes: unclassified), ENVIRONMENT)
 end

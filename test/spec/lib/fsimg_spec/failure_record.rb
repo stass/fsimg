@@ -13,6 +13,8 @@ module FsimgSpec
   module FailureRecord
     # The largest image the record keeps.
     IMAGE_BYTES = 64 << 20
+    # The most refused names a record lists; it counts the rest.
+    SHOWN_REFUSALS = 32
 
     # replay.sh, created mode 0600 like every file of the record, so it runs
     # as sh PATH/replay.sh from the build directory. It holds nothing from
@@ -49,7 +51,8 @@ module FsimgSpec
         image.write(File.join(directory, "image.img")) if image && image.length <= IMAGE_BYTES
         write_file(directory, "replay.sh", replay_script(profile))
       end
-      write_file(directory, "result.json", "#{JSON.pretty_generate(result_fields(result, profile))}\n")
+      trial_answers = kase&.classification&.trial_answers
+      write_file(directory, "result.json", "#{JSON.pretty_generate(result_fields(result, profile, trial_answers:))}\n")
       directory
     end
 
@@ -69,15 +72,32 @@ module FsimgSpec
     end
 
     # The profile, the verdict, and each stage's outcome, timings and
-    # safety problems.
-    private_class_method def self.result_fields(result, profile) = {
+    # safety problems; extract's also the name-trial answers that judged
+    # it, which the recipe never records because they depend on the host
+    # (specs/design-spec-testing.md#host-names).
+    private_class_method def self.result_fields(result, profile, trial_answers:) = {
       profile: profile.name, verdict: result.verdict, detail: result.detail,
       stages: result.stages.map do |stage|
         execution = stage.execution
         { stage: stage.stage, outcome: stage.outcome.to_s, detail: stage.outcome.detail, problems: stage.problems,
           exit_status: execution.exit_status, signal: execution.signal, ended_by: execution.ended_by,
-          wall_seconds: execution.wall_seconds.round(3), cpu_seconds: execution.cpu_seconds.round(3) }
+          wall_seconds: execution.wall_seconds.round(3), cpu_seconds: execution.cpu_seconds.round(3),
+          **(stage.stage == "extract" ? { name_trials: trial_fields(trial_answers) } : {}) }
       end
     }
+
+    # The names the host refused, the first SHOWN_REFUSALS with their
+    # answers and the count of all, and why the host could not hold the
+    # tree; nil when no trial ran. A path is shown as UTF-8 text, as recipe
+    # trees spell it, so a byte that is not escapes rather than breaking
+    # the JSON.
+    private_class_method def self.trial_fields(answers)
+      return nil if answers.nil? || FsimgSpec.undefined?(answers)
+
+      shown = answers.refused.first(SHOWN_REFUSALS).map do
+        { path: FsimgSpec.shown(_1.path.dup.force_encoding(Encoding::UTF_8), limit: 400), answer: _1.answer.to_s }
+      end
+      { refused: shown, refused_count: answers.refused.size, unheld: answers.unheld }
+    end
   end
 end

@@ -229,7 +229,7 @@ class TestRunner < Minitest::Test
   def test_accepting_stage_records_must_match_the_model
     Dir.mktmpdir do |cases|
       either = FsimgSpec::Expectation.parse("accept|reject:*")
-      kase = FsimgSpec::Case.new(recipe:, classification: FsimgSpec::Classification.new(violations: [], unclassified: []),
+      kase = FsimgSpec::Case.new(recipe:, classification: CLEAN,
                                  intended_rule: nil, expected: STAGES.to_h { [_1, either] })
       result = FsimgSpec::CaseRun.call(kase, model: Contradicting.new, image: image(cases), runner: runner_for(write_stub(cases, ACCEPT)),
                                              cases_directory: cases, sandbox: "unavailable")
@@ -291,10 +291,11 @@ class TestRunner < Minitest::Test
   private
 
   # The created hook for an image that violates nothing.
-  CREATED_VALID = ->(_image) { [NoRecords.new, FsimgSpec::Classification.new(violations: [], unclassified: [])] }
+  CREATED_VALID = ->(_image) { [NoRecords.new, FsimgSpec::Case::CREATED_IMAGE] }
 
-  # A classification with no violation and nothing unclassified.
-  CLEAN = FsimgSpec::Classification.new(violations: [], unclassified: [])
+  # A classification with no violation and nothing unclassified, on a
+  # host that held every name.
+  CLEAN = FsimgSpec::Classification.new(violations: [], unclassified: [], trial_answers: FsimgSpec::TrialAnswers::HELD)
 
   def plain_case(recipe) =
     FsimgSpec::Case.new(recipe:, classification: CLEAN, intended_rule: nil, expected: recipe.expected,
@@ -347,7 +348,7 @@ class TestRunner < Minitest::Test
   end
 
   def run_case(stub, cases)
-    kase = FsimgSpec::Case.new(recipe:, classification: FsimgSpec::Classification.new(violations: [], unclassified: []),
+    kase = FsimgSpec::Case.new(recipe:, classification: CLEAN,
                                intended_rule: nil, expected: recipe.expected)
     FsimgSpec::CaseRun.call(kase, model: NoRecords.new, image: image(cases), runner: runner_for(stub),
                                   cases_directory: cases, sandbox: "unavailable")

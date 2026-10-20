@@ -32,13 +32,14 @@ module FsimgSpec
   module CasePhase
     SUBDIRECTORIES = %w[cases trials failures].freeze
 
-    # The profile, runner, sandbox status and fixture cache every case of a
-    # phase uses.
-    Setup = Data.define(:profile, :runner, :sandbox, :cache)
+    # The profile, runner, sandbox status, fixture cache and name trials
+    # every case of a phase uses.
+    Setup = Data.define(:profile, :runner, :sandbox, :cache, :name_trials)
 
-    # The format suites, each answering registry, cases(cache:, ceilings:)
-    # and replay(recipe, cache:, ceilings:) with PendingCases, and
-    # preflight_sample(directory). A run uses these; a test may pass its own.
+    # The format suites, each answering registry, cases(cache:, ceilings:,
+    # name_trials:) and replay(recipe, cache:, ceilings:, name_trials:) with
+    # PendingCases, and preflight_sample(directory). A run uses these; a
+    # test may pass its own.
     def self.suites = { "fat" => Fat::Suite }
 
     # The suite of a recipe's format: fat12, fat16 and fat32 are FAT's.
@@ -54,7 +55,8 @@ module FsimgSpec
       sample = suite_for(Preflight::CREATION.format, suites:).method(:preflight_sample)
       runner, sandbox = Preflight.new(results:, build_directory:, profile:, fsimg: environment.fetch("FSIMG_BIN"),
                                       environment:, sample:).call
-      Setup.new(profile:, runner:, sandbox:, cache: FixtureCache.new(File.join(build_directory, "test", "spec-cache")))
+      Setup.new(profile:, runner:, sandbox:, cache: FixtureCache.new(File.join(build_directory, "test", "spec-cache")),
+                name_trials: NameTrials.new(File.join(results, "trials")))
     end
 
     # How the phase ended, as a run takes it.
@@ -84,7 +86,7 @@ module FsimgSpec
 
     def self.call(profile:, results:, build_directory:, environment:, suites: CasePhase.suites)
       setup = prepare(results:, profile:, build_directory:, environment:, suites:)
-      pending = suites.transform_values { _1.cases(cache: setup.cache, ceilings: profile.ceilings) }
+      pending = suites.transform_values { _1.cases(cache: setup.cache, ceilings: profile.ceilings, name_trials: setup.name_trials) }
       check_ids(pending.values.flatten.map(&:id))
       formats = pending.to_h do |format, cases|
         [format, run_suite(suites.fetch(format).registry, cases, setup:, results:)]
@@ -170,12 +172,14 @@ module FsimgSpec
     end
 
     # The CaseResult of a classified case: a harness error when its
-    # generator was wrong or its recipe drifted, which runs nothing, and
-    # otherwise its run in cases_directory. Exceptions propagate to the
+    # generator was wrong or its recipe drifted, and a host skip when the
+    # host cannot hold the names it extracts, both of which run nothing,
+    # and otherwise its run in cases_directory. Exceptions propagate to the
     # caller's funnel.
     def self.result_of(classified, setup:, cases_directory:)
       id = classified.kase.recipe.id
       return CaseResult.new(id:, verdict: "harness_error", stages: [], detail: classified.defect) if classified.defect
+      return CaseResult.new(id:, verdict: "host_skip", stages: [], detail: classified.kase.host_skip) if classified.kase.host_skip
 
       CaseRun.call(classified.kase, model: classified.model, image: classified.image, runner: setup.runner,
                                     sandbox: setup.sandbox, cases_directory:, created: classified.created)

@@ -30,8 +30,9 @@ module FsimgSpec
       # What each scope of an image (SCOPE_STAGES but input, which a
       # SourceModel answers) reads beyond the boot sector. Every scope is
       # listed, so a scope missing here can never pass for decoded. The
-      # destination scope reads the tree's names, whose name trials decide
-      # its violations (specs/design-spec-testing.md#host-names).
+      # destination scope reads the tree's names; the host's answers to
+      # their name trials, which decide its violations, are the run
+      # environment's (specs/design-spec-testing.md#host-names).
       SCOPE_INPUTS = {
         "open" => [], "directories" => %i[tree], "files" => %i[tree], "verification" => %i[tree], "destination" => %i[tree]
       }.freeze

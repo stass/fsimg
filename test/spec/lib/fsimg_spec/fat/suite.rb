@@ -17,10 +17,11 @@ module FsimgSpec
 
       # The pending cases of a run under registry: every deterministic
       # witness, then every promoted recipe in directory, loaded within
-      # ceilings. A promoted file that does not load is no case, so it fails
-      # the whole phase, before any case runs.
-      def self.cases(cache:, ceilings:, registry: Suite.registry, directory: PROMOTED)
-        cases = Cases.new(registry:, cache:, ceilings:)
+      # ceilings, each classified with the run's name trials (Cases.new). A
+      # promoted file that does not load is no case, so it fails the whole
+      # phase, before any case runs.
+      def self.cases(cache:, ceilings:, name_trials:, registry: Suite.registry, directory: PROMOTED)
+        cases = Cases.new(registry:, cache:, ceilings:, name_trials:)
         witnesses = Witnesses.deterministic(registry).map do |witness|
           PendingCase.new(id: witness.id, rules: [witness.rule, witness.intended].compact.uniq, skip: nil,
                           classify: -> { cases.call(witness) })
@@ -29,8 +30,8 @@ module FsimgSpec
       end
 
       # recipe as a pending case under registry.
-      def self.replay(recipe, cache:, ceilings:, registry: Suite.registry) =
-        pending(recipe, Cases.new(registry:, cache:, ceilings:))
+      def self.replay(recipe, cache:, ceilings:, name_trials:, registry: Suite.registry) =
+        pending(recipe, Cases.new(registry:, cache:, ceilings:, name_trials:))
 
       # The promoted recipes in directory, in file name order. Every entry
       # is one: a recipe file named after its id, which replays on every

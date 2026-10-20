@@ -73,7 +73,11 @@ module FsimgSpec
       # The registry's rules. Rules of one field are listed normative
       # first: a value that several of them exclude targets the first
       # (Witnesses.deterministic).
-      def self.all = [*boot_rules, *bpb_rules, *geometry_rules, *fat32_rules]
+      def self.all = [*boot_rules, *bpb_rules, *geometry_rules, *fat32_rules, *destination_rules]
+
+      # The rules of the host's names, with FAT's witnesses.
+      def self.destination_rules =
+        DestinationRules.with_domains(collision: Witnesses::HOST_COLLISION, unrepresentable: Witnesses::HOST_UNREPRESENTABLE)
 
       def self.registry = Registry.new(all)
 

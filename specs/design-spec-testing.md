@@ -695,11 +695,15 @@ through the funnel, as empty files in a fresh flat directory of its own, and
 lists it back. A sibling answered `EEXIST` collides with an earlier one and
 violates a `destination` rule with status `FSIMG_EEXISTS`; one answered
 `ENAMETOOLONG` or `EILSEQ` violates a `destination` rule with status
-`FSIMG_EUNSUPPORTED`. No trial path nests, so path traversal and path length
-cannot arise. Answers are cached for the run by the sibling set's bytes, so a
-repeated set costs no trial. For a creation case, and for the files that
-populate a base, the funnel writes the source tree and the harness walks it
-back; the case is classified against the walked tree.
+`FSIMG_EUNSUPPORTED`. Both rules are `profile` rules with policy
+`must_reject`, since they state a limit of the run's host. No trial path
+nests, so path traversal and path length cannot arise. Answers are cached for
+the run by the sibling set's bytes, so a repeated set costs no trial. A case
+with no trial answers, one that does not extract or whose tree is unknown,
+leaves the `destination` scope unclassified. For a creation case, and for the
+files that populate a base, the funnel writes the source tree and the harness
+walks it back; the case is classified against the walked tree, which stands
+for the created image's name trials.
 
 If a listing or walk differs from the names the funnel created, because the
 host refused a name or stored another one (HFS+ normalization, msdosfs trailing

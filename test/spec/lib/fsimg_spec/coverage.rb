@@ -17,7 +17,10 @@ module FsimgSpec
 
     # Every rule of registry with its counts, in rule id order.
     def self.rules(registry, entries)
-      registry.rules.sort_by(&:id).map { |rule| rule_entry(rule, entries.select { belongs?(_1, rule) }) }
+      registry.rules.sort_by(&:id).map do |rule|
+        generated = entries.select { _1.rules.include?(rule.id) }
+        rule_entry(rule, generated:, exercising: generated.select { exercises?(_1, rule) })
+      end
     end
 
     # The counts over every case of the run.
@@ -26,36 +29,45 @@ module FsimgSpec
       **VERDICTS.to_h { |verdict| [verdict.to_sym, entries.count { _1.result.verdict == verdict }] }
     }
 
-    # The counts of one rule. valid_witnesses, attempted and the verdicts
-    # count cases; targeted_witnesses and isolation are states. A case
-    # never classified has no kind, so it counts toward neither witness
-    # field.
-    private_class_method def self.rule_entry(rule, entries)
-      recipes = entries.filter_map { _1.kase&.recipe }
+    # The counts of one rule over the cases generated for it, and those of
+    # them that exercise it. valid_witnesses, attempted and the verdicts
+    # count cases; targeted_witnesses and isolation are states. The witness
+    # fields describe what was generated; the state, attempts, verdicts and
+    # asserted stages what exercised the rule. A case never classified has
+    # no kind, so it counts toward neither witness field.
+    private_class_method def self.rule_entry(rule, generated:, exercising:)
+      recipes = generated.filter_map { _1.kase&.recipe }
       targeted = recipes.select { _1.kind == "targeted" }
-      ran = entries.select { ran?(_1) }
+      ran = exercising.select { ran?(_1) }
       {
         id: rule.id, category: rule.category, policy: rule.policy, scopes: rule.scopes, status: rule.status&.to_s,
-        state: state(entries, ran),
+        state: state(exercising, ran),
         valid_witnesses: recipes.count { _1.kind == "valid" },
         targeted_witnesses: targeted.empty? ? "not_generated" : "available",
         isolation: isolation(targeted),
-        attempted: entries.size,
-        **VERDICTS.to_h { |verdict| [verdict.to_sym, entries.count { _1.result.verdict == verdict }] },
+        attempted: exercising.size,
+        **VERDICTS.to_h { |verdict| [verdict.to_sym, exercising.count { _1.result.verdict == verdict }] },
         stages_asserted: asserted_stages(ran),
-        witnesses: entries.map(&:id).sort,
-        promoted: entries.map(&:id).select { _1.start_with?(Recipe::PROMOTED_PREFIX) }.sort
+        witnesses: generated.map(&:id).sort,
+        promoted: generated.map(&:id).select { _1.start_with?(Recipe::PROMOTED_PREFIX) }.sort
       }
     end
 
-    private_class_method def self.belongs?(entry, rule) = entry.rules.include?(rule.id)
+    # Whether a case generated for rule exercises it. A destination rule's
+    # violations depend on the host's name trials, so its witness
+    # exercises it only on a host whose trials violate it; on any other
+    # host it runs as an ordinary case, and the rule is not exercised there
+    # (specs/design-spec-testing.md#host-names). A case never classified
+    # still counts, so that its harness error shows under the rule.
+    private_class_method def self.exercises?(entry, rule) =
+      !rule.scopes.include?("destination") || entry.kase.nil? || entry.kase.classification.rule_ids.include?(rule.id)
 
     # Whether fsimg ran the case: a host skip, and a harness error, which
     # runs nothing or stops in the harness, did not.
     private_class_method def self.ran?(entry) =
       %w[passed failed].include?(entry.result.verdict) && !entry.result.stages.empty?
 
-    # not_exercised: no case; predicate_only: cases, but fsimg ran none of
+    # not_exercised: no case exercises the rule; predicate_only: cases, but fsimg ran none of
     # them; unclassified: fsimg ran some, but no stage had a derived
     # expectation; asserted otherwise.
     private_class_method def self.state(entries, ran)

@@ -59,7 +59,8 @@ class TestRule < Minitest::Test
                                         rule("t.format", **VALID)])
     model = Model.new(facts: { "t.name" => true, "t.format" => true })
 
-    assert_equal [["t.format"], ["t.name"]], [registry.classify(model, nil).rule_ids, registry.classify_source(model, nil).rule_ids]
+    assert_equal [["t.format"], ["t.name"]],
+                 [registry.classify(model, Synthetic::ENVIRONMENT).rule_ids, registry.classify_source(model, Synthetic::ENVIRONMENT).rule_ids]
   end
 
   def test_registry_accepts_a_collision_status_only_at_the_destination

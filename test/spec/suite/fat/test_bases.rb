@@ -221,7 +221,8 @@ class TestFatBases < Minitest::Test
       expected: READING_STAGES.to_h { [_1, FsimgSpec::Expectation.parse("accept")] },
       base:, base_sha256: "0" * 64, tool_versions: {}, mutations: []
     )
-    FsimgSpec::Case.new(recipe:, classification: FsimgSpec::Classification.new(violations: [], unclassified: []),
+    clean = FsimgSpec::Classification.new(violations: [], unclassified: [], trial_answers: FsimgSpec::TrialAnswers::HELD)
+    FsimgSpec::Case.new(recipe:, classification: clean,
                         intended_rule: nil, expected: recipe.expected)
   end
 

@@ -144,7 +144,7 @@ class TestExpectation < Minitest::Test
   def derive_with_scope(scope, stage)
     registry = FsimgSpec::Registry.new([rule("t.moved", policy: "must_reject", scopes: [scope], status: "FSIMG_ERANGE")])
     model = Synthetic::Model.new(facts: { "t.moved" => true })
-    classification = scope == "input" ? registry.classify_source(model, nil) : registry.classify(model, nil)
+    classification = scope == "input" ? registry.classify_source(model, Synthetic::ENVIRONMENT) : registry.classify(model, Synthetic::ENVIRONMENT)
     FsimgSpec::Expectation.derive(classification, stage)
   end
 

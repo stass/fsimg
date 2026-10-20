@@ -34,8 +34,8 @@ class TestKnownTreeFsimg < Minitest::Test
 
     def self.preflight_sample(directory) = Fat::Suite.preflight_sample(directory)
 
-    def self.cases(cache:, ceilings:) =
-      [Fat::Suite.replay(TestKnownTreeFsimg.creation("fat.create.listed", %w[create ls]), cache:, ceilings:)]
+    def self.cases(cache:, ceilings:, name_trials:) =
+      [Fat::Suite.replay(TestKnownTreeFsimg.creation("fat.create.listed", %w[create ls]), cache:, ceilings:, name_trials:)]
   end
 
   def self.creation(id, stages) = FsimgSpec::Recipe.new(
@@ -54,7 +54,7 @@ class TestKnownTreeFsimg < Minitest::Test
       setup = FsimgSpec::CasePhase.prepare(results: root, profile: PROFILE, build_directory: root, environment:)
       details = %w[ls extract verify].to_h do |stage|
         classified = Fat::Suite.replay(TestKnownTreeFsimg.creation("fat.create.#{stage}", ["create", stage]),
-                                       cache: setup.cache, ceilings: PROFILE.ceilings).classify.call
+                                       cache: setup.cache, ceilings: PROFILE.ceilings, name_trials: setup.name_trials).classify.call
         result = FsimgSpec::CasePhase.result_of(classified, setup:, cases_directory: File.join(root, "cases"))
         [stage, "#{result.verdict}: #{result.detail}"]
       end

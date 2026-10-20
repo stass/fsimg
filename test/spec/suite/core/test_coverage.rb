@@ -13,7 +13,8 @@ class TestCoverage < Minitest::Test
   REGISTRY = FsimgSpec::Registry.new([
     Synthetic.rule("t.format", policy: "must_reject", scopes: ["open"], status: "FSIMG_EFORMAT"),
     Synthetic.rule("t.crosslink", policy: "must_reject", scopes: ["verification"], status: "FSIMG_ECORRUPT"),
-    Synthetic.rule("t.unused", policy: "must_reject", scopes: ["open"], status: "FSIMG_ECORRUPT")
+    Synthetic.rule("t.unused", policy: "must_reject", scopes: ["open"], status: "FSIMG_ECORRUPT"),
+    Synthetic.rule("t.collision", policy: "must_reject", scopes: ["destination"], status: "FSIMG_EEXISTS")
   ])
 
   def test_each_rule_reports_its_state
@@ -23,7 +24,8 @@ class TestCoverage < Minitest::Test
                              unclassified: ["verification"])
     ]
 
-    assert_equal({ "t.crosslink" => "predicate_only", "t.format" => "asserted", "t.unused" => "not_exercised" },
+    assert_equal({ "t.collision" => "not_exercised", "t.crosslink" => "predicate_only", "t.format" => "asserted",
+                   "t.unused" => "not_exercised" },
                  rules(entries).to_h { [_1[:id], _1[:state]] })
   end
 
@@ -95,6 +97,29 @@ class TestCoverage < Minitest::Test
     assert_equal({ attempted: 3, passed: 1, failed: 1, host_skip: 1 }, format.slice(:attempted, :passed, :failed, :host_skip))
     assert_equal({ total: 3, passed: 1, failed: 1, host_skip: 1, harness_error: 0 },
                  FsimgSpec::Coverage.cases(entries))
+  end
+
+  # A destination witness exercises its rule only on a host whose name
+  # trials violate it; on a host that holds its names it runs as an
+  # ordinary case, and the rule is not exercised there, though its
+  # witness is still listed (specs/design-spec-testing.md#host-names).
+  def test_destination_witness_exercises_its_rule_only_where_the_host_violates_it
+    states = [{ "t.collision" => true }, {}].map do |facts|
+      witness = entry("t.collision.0", intended: "t.collision", facts:, verdict: "passed", stages: ["extract"])
+      rules([witness]).find { _1[:id] == "t.collision" }.values_at(:state, :attempted, :witnesses)
+    end
+
+    assert_equal [["asserted", 1, ["t.collision.0"]], ["not_exercised", 0, ["t.collision.0"]]], states
+  end
+
+  # A destination witness that could not be classified, such as one whose
+  # trial failed, still counts under its rule, so its harness error shows.
+  def test_unclassified_destination_witness_still_counts_under_its_rule
+    failed = FsimgSpec::CaseEntry.new(id: "t.collision.0", rules: ["t.collision"], kase: nil,
+                                      result: result("t.collision.0", "harness_error", []))
+
+    assert_equal({ state: "predicate_only", attempted: 1, harness_error: 1 },
+                 rules([failed]).find { _1[:id] == "t.collision" }.slice(:state, :attempted, :harness_error))
   end
 
   private

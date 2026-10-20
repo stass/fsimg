@@ -280,8 +280,8 @@ review and commit gates.
   Ruby string is tagged ISO-8859-1 or CP437. On default APFS a case pair and
   an NFC/NFD pair answer `EEXIST`, and a component of 255 U+00E9 succeeds; on
   ext4 the pairs succeed and that component answers `ENAMETOOLONG`. Seeded
-  failures: a funnel that treats `EEXIST` as success makes a case-pair
-  witness fail at `extract` on APFS, and one that builds paths with
+  failures: a name trial that takes `EEXIST` for success makes an NFC/NFD
+  pair witness fail at `extract` on APFS, and a funnel that builds paths with
   `File.join` creates `C3 A9` for an ISO-8859-1 `E9`. A creation recipe with
   a case pair is a host skip on APFS and runs no fsimg. A promoted case
   whose tree holds an NFC/NFD pair replays on both APFS and ext4.
@@ -294,8 +294,6 @@ review and commit gates.
   fails the preflight as `harness_error`.
 * Items that wait for later stages:
   - the `.mtoolsrc` stub needs the oracle runner of milestone B;
-  - the promoted NFC/NFD replay needs promoted creation cases with name
-    trials;
 * **Gate:** every stub is classified as above, with no leftover processes
   (checked by process group), and the runner drives the real `fsimg` through
   every stage on a trivially valid image.
@@ -455,8 +453,12 @@ review and commit gates.
       `destination` violation with `FSIMG_EEXISTS`, `ENAMETOOLONG` and
       `EILSEQ` one with `FSIMG_EUNSUPPORTED`; answers are cached per run by
       the set's bytes; recipes never record destination violations.
-    - Seeded failure: a funnel that treats `EEXIST` as success makes a
-      case-pair witness fail at `extract` on APFS.
+    - Seeded failure: a name trial that takes `EEXIST` for success makes the
+      NFC/NFD pair witness fail at `extract` on APFS. A FAT case pair is no
+      destination witness: FAT takes it for one name, an ambiguous directory
+      that fsimg rejects before it creates anything. A funnel that answers
+      success for `EEXIST` is caught by the trial's listing instead, which
+      makes the case a host skip.
     - **Gate:** `extract` is classified; the promoted NFC/NFD replay that
       S4 left waiting passes on APFS and ext4.
   - **B1c, tree generator.**

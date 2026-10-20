@@ -173,7 +173,7 @@ class TestFatRules < Minitest::Test
   # FSInfo recommendation.
   def test_fat32_without_a_backup_boot_record_violates_no_rule
     no_backup = Fat::Witnesses::Witness.new(id: "fat.test.no_backup", parameters: { clusters: 65_525, backup_boot: 0 },
-                                            mutations: [], forced_format: nil, intended: nil, rule: nil)
+                                            tree: [], mutations: [], forced_format: nil, intended: nil, rule: nil)
     with_cases do |cases|
       violated = cases.call(no_backup).kase.recipe.actual_violations
       fsinfo_31 = cases.call(witness("fat32.bpb.fsinfo_sector.recommended.001f")).kase.recipe
@@ -243,10 +243,13 @@ class TestFatRules < Minitest::Test
     FsimgSpec::Registry.new([REGISTRY.fetch("fat.boot.present").with(id: "fat.test.probe", domain: ->(_layouts) { [variation] })])
   end
 
+  # Yields the cases of the FAT rules, with a fixture cache and name
+  # trials of their own.
   def with_cases
     Dir.mktmpdir do |directory|
-      cache = FsimgSpec::FixtureCache.new(directory)
-      yield Fat::Cases.new(registry: REGISTRY, cache:, ceilings: CEILINGS)
+      cache = FsimgSpec::FixtureCache.new(File.join(directory, "cache"))
+      Dir.mkdir(File.join(directory, "trials"))
+      yield Fat::Cases.new(registry: REGISTRY, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials.new(File.join(directory, "trials")))
     end
   end
 

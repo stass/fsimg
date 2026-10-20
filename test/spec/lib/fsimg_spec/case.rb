@@ -22,8 +22,10 @@ module FsimgSpec
 
     # What an image fsimg created must classify to: no violation, and no
     # scope left unclassified, since the harness knows the tree it holds
-    # (specs/design-spec-testing.md#cases).
-    CREATED_IMAGE = Classification.new(violations: [].freeze, unclassified: [].freeze)
+    # (specs/design-spec-testing.md#cases). The host held that tree as the
+    # case's source/, so it holds its names at the destination too
+    # (specs/design-spec-testing.md#host-names).
+    CREATED_IMAGE = Classification.new(violations: [].freeze, unclassified: [].freeze, trial_answers: TrialAnswers::HELD)
 
     def initialize(recipe:, classification:, intended_rule:, expected:, source_classification: nil)
       raise Error, "#{recipe.id}: only a creation case has, and must have, a source classification" if
@@ -63,6 +65,12 @@ module FsimgSpec
       violated = classification.without_destination.rule_ids
       "the image it wrote violates #{violated.join(", ")}" if violated.any?
     end
+
+    # Why the host cannot hold the names the case extracts, or nil: its
+    # name trials found the host storing other names than it created
+    # (specs/design-spec-testing.md#host-names). Such a case is a host
+    # skip, and fsimg does not run.
+    def host_skip = FsimgSpec.undefined?(classification.trial_answers) ? nil : classification.trial_answers.unheld
 
     # The recipe as written for this case: the derived violations,
     # isolation and expectations replace whatever the recipe recorded.
