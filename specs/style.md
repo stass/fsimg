@@ -338,7 +338,8 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
 Keep changes focused and consistent. Follow these conventions when creating
 or editing code; make broad style sweeps deliberate, reviewable work. Compile
 with the project's warnings enabled and use its required reviews, tests, and
-sanitizers for the behavior affected.
+sanitizers for the behavior affected. The QEMU/QNX evidence harness and
+research scripts under `tools/qnx/` are exempt from this guide.
 
 ### Readability review
 

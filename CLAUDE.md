@@ -164,6 +164,9 @@ missing tool.
   introducing or changing concurrency or state shared between workers.
 * Run standalone LeakSanitizer and MemorySanitizer on supported platforms.
   A skipped or unsupported sanitizer is not a passing check.
+* Implementation subagents do not run sanitizer or fuzz suites. The
+  coordinating session runs them once, on the integrated tree, before the
+  work lands; subagents run the plain suite with `make -j32 check`.
 
 ## Committing
 
@@ -183,6 +186,9 @@ missing tool.
     a line-count delta alone does not establish simplification.
   - Address every CRITICAL and HIGH finding before committing. Note MEDIUM
     findings in `TODO.md` or the commit message if not fixed.
+* The QEMU/QNX evidence harness and research scripts under `tools/qnx/` are
+  exempt from the style guide and from the code-review and OpenCode review
+  gates.
 * Each implementation stage also receives an external, read-only review through
   OpenCode using the Z.ai coding-plan subscription, model
   `zai-coding-plan/glm-5.3`, and `--variant max`. This supplements the required
