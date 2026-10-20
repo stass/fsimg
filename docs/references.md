@@ -82,6 +82,13 @@ limited non-ASCII name decoding; comparisons use ASCII names and ASCII long
 names, while mtools validates Unicode. Its information output is recorded as
 tool output, not used as the oracle for free-space or cluster counts.
 
+The specification-driven harness under `test/spec/` writes its rules, layouts
+and builder from the Microsoft specification, independently of
+`lib/formats/fat/` and `test/fat.c`, and uses the oracles above on the same
+terms. Its development gems, pinned in `test/spec/Gemfile.lock`, are Minitest
+(MIT) with its dependencies drb (BSD-2-Clause) and prism (MIT), PropCheck (MIT)
+and BinData (BSD-2-Clause); none is vendored or becomes a runtime dependency.
+
 ## exFAT reference
 
 The [Microsoft exFAT specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification)

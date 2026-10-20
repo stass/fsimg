@@ -333,6 +333,18 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
   bracketed optional arguments. Use `|` for alternatives. Exit with zero on
   success and one on ordinary failure.
 
+## Ruby test harness
+
+The [specification-driven test harness](design-spec-testing.md) under
+`test/spec/` is the project's only Ruby. The C layout, naming, header and macro
+rules above do not apply to it; the readability standard, readable tests and the
+readability review do. Its idiom (the Ruby 3.2 syntax floor, immutable values,
+pure functions, explicit errors and the forms to avoid) is set by the
+[Ruby section of CLAUDE.md](../CLAUDE.md#ruby). Every Ruby file, the `Gemfile`
+included, starts with the SPDX line and `# frozen_string_literal: true` in its
+leading comment block, uses two-space indentation and is ASCII-only. The ASCII
+gate scans these files, and a harness self-test checks the header.
+
 ## Applying the guide
 
 Keep changes focused and consistent. Follow these conventions when creating

@@ -84,41 +84,57 @@ demonstrate.
 
 ## Build, dependencies and CI
 
-* **configure.ac:** `AC_PATH_PROG([RUBY], [ruby])`,
-  `AC_PATH_PROG([BUNDLE], [bundle])` and `AC_PATH_PROG([MDIR], [mdir])`, all
-  optional, and `test/spec.sh` in `AC_CONFIG_FILES`.
+* **configure.ac:** `RUBY` and `MDIR` as optional development tools, and
+  `test/spec.sh` in `AC_CONFIG_FILES`.
 * **`test/spec.sh.in`:**
   - It exits 77 with a `SKIP:` message when Ruby is missing or older than
-    3.2, or when `bundle check` fails. The message names
-    `bundle install --gemfile=test/spec/Gemfile`.
-  - It sets `BUNDLE_GEMFILE` and `BUNDLE_FROZEN=true`, so a test run never
-    rewrites the lock or reaches the network.
-  - It exports `FSIMG_BIN`, the source and build directories, and the tool
-    paths that `configure` found: `MKFS_FAT`, `FSCK_FAT`, `NEWFS_MSDOS`,
+    3.2, and sets `BUNDLE_GEMFILE`.
+  - `run.rb` loads the bundle through Bundler with the frozen and
+    no-auto-install settings, which outrank any Bundler configuration, so a
+    test run never rewrites the lock, installs a gem or reaches the network.
+    It exits 77 with a `SKIP:` message naming
+    `bundle install --gemfile=test/spec/Gemfile` when Bundler or a locked gem
+    is absent, and fails on any other load error. Loading through the
+    interpreter that runs the tests, rather than a separately found `bundle`,
+    checks that interpreter's gems.
+  - It exports `FSIMG_BIN`, the build directory as `FSIMG_BUILDDIR`, and the
+    tool paths that `configure` found: `MKFS_FAT`, `FSCK_FAT`, `NEWFS_MSDOS`,
     `FSCK_MSDOSFS`, `MCOPY`, `MMD`, `MDEL`, `MDIR` and `FATCAT`.
-  - It runs `run.rb --profile=${FSIMG_SPEC_PROFILE:-quick}`.
+  - It takes the profile as its argument, quick when none is given, and runs
+    `run.rb --profile=PROFILE`. `make check` runs it without one, so no
+    exported variable changes the profile of `make check`.
 * **Makefile.am:**
   - `test/spec.sh` joins `TESTS`.
   - New targets: `check-spec` (quick), `check-spec-extended` (nightly) and
     `check-spec-deep` (opt-in).
   - `check-extended` gains `check-spec-extended`.
-  - `test/spec/` goes into `EXTRA_DIST`.
+  - `EXTRA_DIST` names the tracked roots of `test/spec/` (`Gemfile`,
+    `Gemfile.lock`, `run.rb`, `lib`, `suite`), not the directory, so a local
+    `.bundle` or `vendor` never ships. The stages that add `bin` and `cases`
+    add them here and to the header self-test's glob.
 * **ASCII gate:** `build-aux/check-ascii.sh` also scans `*.rb`, `*.json`,
   `Gemfile` and `Gemfile.lock`. Every Ruby file starts with the SPDX
   BSD-2-Clause header and `# frozen_string_literal: true`.
-* **Licences:** minitest (MIT), prop_check (MIT, no dependencies) and bindata
-  (BSD-2-Clause), used as the
+* **Licences:** minitest (MIT, with its dependencies drb, BSD-2-Clause, and
+  prism, MIT), prop_check (MIT, no dependencies) and bindata (BSD-2-Clause),
+  used as the
   [placement section](../specs/design-spec-testing.md#placement-and-toolchain)
   states; the GPL oracles are used as
   [independence](../specs/design-spec-testing.md#independence-and-oracles)
   requires. `docs/references.md` records the oracles.
 * **CI** (`.github/workflows/check.yml`):
   - macOS: `brew install ruby`.
-  - Ubuntu: `apt-get install ruby ruby-bundler`, giving Ruby 3.2.
-  - FreeBSD: `lang/ruby3x` with bundler.
-  - Every job runs `bundle install` with a cached path outside the checkout.
-  - The jobs upload only each profile's `coverage.json`, text summary and
-    `failures/` with the logs.
+  - Ubuntu: `apt-get install ruby ruby-dev ruby-bundler`, giving Ruby 3.2;
+    `ruby-dev` lets the install compile Minitest's prism dependency.
+  - FreeBSD: the `devel/rubygem-bundler` port, which brings the default Ruby
+    port; configure is given the interpreter `bundle` runs on, which may be
+    named `ruby3x`.
+  - Every job runs `bundle install` into a path outside the checkout. The
+    GitHub-hosted jobs cache it by host, Ruby version and lock; the FreeBSD
+    VM installs afresh.
+  - The GitHub-hosted jobs upload only each profile's `coverage.json`, text
+    summary and `failures/` with the logs. The GCC container jobs install no
+    Ruby and skip the suite.
 * **docs/build.md** gains the setup, the profiles, the environment variables,
   the replay command and the report location. It also states the explicit
   skips per host, as it already does for the other oracles.

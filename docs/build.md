@@ -32,6 +32,7 @@ make check
 make check-install
 make check-security
 make check-integration
+make check-spec
 make check-asan
 make check-ubsan
 make check-lsan
@@ -72,6 +73,42 @@ The kernel harness also denies file/directory deletion in output and confirms
 scratch deletion remains available. Unexpected or partially applied setup
 errors remain `FSIMG_EIO` and never
 permit an automatic retry without restriction.
+
+The [specification-driven tests](../specs/design-spec-testing.md) are Ruby
+under `test/spec/`. They need Ruby 3.2 or later and the gems pinned in
+`test/spec/Gemfile.lock` (Minitest, PropCheck and BinData), installed once with
+`bundle install --gemfile=test/spec/Gemfile` from the source tree. The install
+compiles Minitest's prism dependency where the Ruby does not ship the locked
+version, as Ruby 3.2 never does. A `BUNDLE_PATH` set for the install, to keep
+the gems outside the system gem directory, must also be set when the tests run.
+On macOS use `brew install ruby` and put `$(brew --prefix ruby)/bin` first in
+`PATH`, because the system Ruby is older; Ubuntu 24.04 installs `ruby ruby-dev
+ruby-bundler`, and FreeBSD the `devel/rubygem-bundler` port. Configure records
+the interpreter as `RUBY`; pass `RUBY=` to configure when the interpreter has
+another name, such as FreeBSD's versioned `ruby33`.
+
+The lock records Bundler 2.4.20, the 2.4 series that Ruby 3.2 and Ubuntu 24.04
+ship, so every supported Bundler reads it. RubyGems loads Bundler 2.4.20 where it
+is installed in the default gem path, and the interpreter's own Bundler
+otherwise. `Bundler.setup` in `run.rb` sets `RUBYOPT`, `RUBYLIB` and
+`BUNDLER_VERSION` in its environment, so every Ruby process the harness starts
+loads the same bundle. `test/spec.sh` exits 77 (SKIP) when Ruby 3.2 is
+absent, and `run.rb` when Bundler or a locked gem is; a bundle that fails to
+load for another reason, such as a `Gemfile` changed without relocking, fails
+the run. `run.rb` loads the bundle with Bundler's frozen and no-auto-install
+settings, which outrank any Bundler configuration, so a test run never rewrites
+the lock, installs a gem or reaches the network.
+
+`make check` runs the quick profile and `make check-spec` runs it alone; `make
+check-spec-extended`, part of `check-extended`, runs the nightly profile, and
+`make check-spec-deep` the deep one. `./test/spec.sh PROFILE` runs a profile
+directly, and Minitest's `SEED` environment variable fixes the test order a
+summary reports. PropCheck draws are not seeded. Each run locks
+`test/spec-results/<profile>/` under the build directory, empties it, and
+writes `coverage.json` and `summary.txt` there; `make clean` removes it. A run
+passes only when Minitest reports no failure, error or interruption and at
+least one test ran. CI installs the gems on macOS, Ubuntu and FreeBSD and fails
+when the suite skips there. The GCC container jobs install no Ruby and skip it.
 
 Sanitizer targets run the full suite in `sanitizer-<mode>/` beneath the current
 build directory, which may be the source tree configured in place or a separate

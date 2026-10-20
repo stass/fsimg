@@ -15,11 +15,23 @@ jobs:
       - name: Development tools
         run: |
           if [ "$(uname -s)" = Darwin ]; then
-            brew install autoconf automake libtool cmake mtools dosfstools pkgconf python
+            brew install autoconf automake libtool cmake mtools dosfstools pkgconf python ruby
+            # Homebrew's Ruby is keg-only; the system Ruby is older than 3.2.
+            echo "$(brew --prefix ruby)/bin" >> "$GITHUB_PATH"
           else
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config python3
+            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config python3 ruby ruby-dev ruby-bundler
           fi
+          echo "BUNDLE_PATH=$RUNNER_TEMP/spec-gems" >> "$GITHUB_ENV"
+      - name: Ruby version
+        id: ruby
+        run: echo "version=$(ruby -e 'print RUBY_VERSION')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/spec-gems
+          key: spec-gems-${{ matrix.os }}-ruby-${{ steps.ruby.outputs.version }}-${{ hashFiles('test/spec/Gemfile.lock') }}
+      - name: Specification test gems
+        run: BUNDLE_FROZEN=true bundle install --gemfile=test/spec/Gemfile
       - name: Build and check
         run: |
           if [ "$(uname -s)" = Darwin ]; then
@@ -32,6 +44,8 @@ jobs:
           ../configure CC=clang CXX=clang++
           make -j2
           make check
+          # The specification tests must run here, not skip.
+          grep -q '^:test-result: PASS' test/spec.sh.trs
           make check-install
           if [ "$(uname -s)" = Linux ]; then ./test-sandbox; fi
           make check-asan
@@ -45,7 +59,11 @@ jobs:
         if: always()
         with:
           name: logs-${{ matrix.os }}
-          path: build/**/*.log
+          path: |
+            build/**/*.log
+            build/test/spec-results/*/coverage.json
+            build/test/spec-results/*/summary.txt
+            build/test/spec-results/*/failures/
   gcc:
     # The native jobs build with Clang; GCC's -Wmaybe-uninitialized and
     # -Wformat-truncation analyses differ, and -Werror makes them build breaks.
@@ -104,6 +122,7 @@ jobs:
             install_port filesystems/mtools mcopy
             install_port devel/pkgconf pkg-config
             install_port lang/python3 python3
+            install_port devel/rubygem-bundler bundle
             pw useradd fsimgtest -m -s /bin/sh
           run: |
             chown -R fsimgtest .
@@ -112,12 +131,19 @@ jobs:
               oracle_parent=$(mktemp -d)
               sh build-aux/build-fatcat.sh "$oracle_parent/fatcat"
               export FATCAT="$oracle_parent/fatcat/build/fatcat"
+              # The interpreter bundle runs on, from its shebang: the Ruby
+              # port may install only a versioned one, such as ruby33.
+              ruby=$(sed -n '1s/^#! *//p' "$(command -v bundle)")
+              test -x "$ruby"
+              export BUNDLE_PATH="$oracle_parent/spec-gems"
+              BUNDLE_FROZEN=true bundle install --gemfile=test/spec/Gemfile
               autoreconf -fi
               mkdir build
               cd build
-              ../configure CC=clang CXX=clang++
+              ../configure CC=clang CXX=clang++ RUBY="$ruby"
               make -j2
               make check
+              grep -q "^:test-result: PASS" test/spec.sh.trs
               make check-install
               ./test-sandbox
               make check-asan

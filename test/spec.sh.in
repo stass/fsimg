@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+#
+# Runs the specification-driven test harness (specs/design-spec-testing.md):
+#
+#   test/spec.sh [PROFILE]
+#
+# The profile is quick when none is given, as under make check. The script
+# exits 77 when Ruby 3.2 is absent, and run.rb does when a locked gem is.
+set -eu
+if test $# -gt 1; then
+    echo 'usage: test/spec.sh [PROFILE]' >&2
+    exit 2
+fi
+# run.rb loads the locked bundle itself. An inherited Ruby or bundle
+# environment, such as another project's bundle exec, would change what the
+# interpreter loads first.
+unset RUBYOPT RUBYLIB BUNDLER_VERSION
+ruby='@RUBY@'
+spec='@abs_top_srcdir@/test/spec'
+profile=${1:-quick}
+if test -z "$ruby" ||
+    ! "$ruby" -e 'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.2"))'; then
+    echo "SKIP: specification tests require Ruby 3.2 or later (configured: ${ruby:-none})"
+    exit 77
+fi
+BUNDLE_GEMFILE="$spec/Gemfile"
+FSIMG_BUILDDIR='@abs_top_builddir@'
+FSIMG_BIN="$FSIMG_BUILDDIR/fsimg"
+MKFS_FAT='@MKFS_FAT@'
+FSCK_FAT='@FSCK_FAT@'
+NEWFS_MSDOS='@NEWFS_MSDOS@'
+FSCK_MSDOSFS='@FSCK_MSDOSFS@'
+MCOPY='@MCOPY@'
+MMD='@MMD@'
+MDEL='@MDEL@'
+MDIR='@MDIR@'
+FATCAT='@FATCAT@'
+export BUNDLE_GEMFILE FSIMG_BUILDDIR FSIMG_BIN MKFS_FAT FSCK_FAT NEWFS_MSDOS \
+    FSCK_MSDOSFS MCOPY MMD MDEL MDIR FATCAT
+exec "$ruby" "$spec/run.rb" --profile="$profile"

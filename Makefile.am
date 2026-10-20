@@ -99,10 +99,10 @@ check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-fo
 	test-posix header-c header-cxx
 TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/cli.sh \
-	test/baseline.sh
+	test/baseline.sh test/spec.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/cli.sh \
-	test/baseline.sh
+	test/baseline.sh test/spec.sh
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
@@ -198,11 +198,14 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
-	specs/design-spec-testing.md
+	specs/design-spec-testing.md test/spec.sh.in \
+	test/spec/Gemfile test/spec/Gemfile.lock test/spec/run.rb \
+	test/spec/lib test/spec/suite
 check-local: check-ascii
 .PHONY: check-ascii check-asan check-ubsan check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz check-fuzz-extended check-cli-rss check-extended
 .PHONY: check-integration baseline-record
+.PHONY: check-spec check-spec-extended check-spec-deep
 .PHONY: check-install
 check-install: all
 	+$(SHELL) $(top_srcdir)/build-aux/check-install.sh "$(abs_top_builddir)" \
@@ -247,12 +250,20 @@ check-fuzz-extended: test-fat test-exfat test-qnx6 test-protocol
 check-cli-rss: fsimg-rss fsimg-rss-guard
 	./fsimg-rss-guard; result=$$?; test $$result = 0 -o $$result = 77
 	$(PYTHON3) $(top_srcdir)/test/qualify-cli.py ./fsimg-rss 100000
-check-extended: test-qualify test-fragment test-exfat-scale check-cli-rss
+check-extended: test-qualify test-fragment test-exfat-scale check-cli-rss \
+	    check-spec-extended
 	./test-qualify --catalog 10000000
 	./test-qualify --wide 100000
 	./test-fragment --fragments 1048576
 	./test-exfat-scale --volume 33554432; result=$$?; test $$result = 0 -o $$result = 77
 	./test-exfat-scale --volume 33554432000; result=$$?; test $$result = 0 -o $$result = 77
+# The specification-driven tests by profile; quick also runs in check.
+check-spec: fsimg test/spec.sh
+	./test/spec.sh quick; result=$$?; test $$result = 0 -o $$result = 77
+check-spec-extended: fsimg test/spec.sh
+	./test/spec.sh nightly; result=$$?; test $$result = 0 -o $$result = 77
+check-spec-deep: fsimg test/spec.sh
+	./test/spec.sh deep; result=$$?; test $$result = 0 -o $$result = 77
 check-ascii:
 	$(SHELL) $(top_srcdir)/build-aux/check-ascii.sh $(top_srcdir)
 check-asan:
@@ -269,7 +280,7 @@ check-msan:
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh msan
 clean-local:
 	-rm -rf sanitizer-asan sanitizer-ubsan sanitizer-lsan sanitizer-msan \
-	    sanitizer-fuzz
+	    sanitizer-fuzz test/spec-results test/spec-cache
 # Fuzz corpora persist across clean so later runs reuse their mutations.
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus protocol-fuzz-corpus

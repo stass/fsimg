@@ -36,17 +36,20 @@ FSIMG_DEV_TOOL([FSCK_MSDOSFS], [fsck_msdosfs], [BSD FAT checker], [$PATH:/sbin])
 FSIMG_DEV_TOOL([MCOPY], [mcopy], [mtools file copy])
 FSIMG_DEV_TOOL([MMD], [mmd], [mtools directory creation])
 FSIMG_DEV_TOOL([MDEL], [mdel], [mtools file deletion])
+FSIMG_DEV_TOOL([MDIR], [mdir], [mtools directory listing])
 FSIMG_DEV_TOOL([FATCAT], [fatcat], [pinned fatcat FAT oracle])
 FSIMG_DEV_TOOL([PYTHON3], [python3], [Python 3 interpreter for tests])
+FSIMG_DEV_TOOL([RUBY], [ruby], [Ruby interpreter for specification tests])
 FSIMG_DEV_TOOL([PKG_CONFIG], [pkg-config], [pkg-config for installation checks])
 FSIMG_DEV_TOOL([MKFS_EXFAT], [mkfs.exfat], [exfatprogs exFAT formatter], [$fsimg_sbin_path])
 FSIMG_DEV_TOOL([FSCK_EXFAT], [fsck.exfat], [exfatprogs exFAT checker], [$fsimg_sbin_path])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
 AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integration.sh
-    test/qnx6-integration.sh test/cli.sh test/baseline.sh],
+    test/qnx6-integration.sh test/cli.sh test/baseline.sh test/spec.sh],
     [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
      test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh
      test ! -f test/qnx6-integration.sh || chmod +x test/qnx6-integration.sh
      test ! -f test/cli.sh || chmod +x test/cli.sh
-     test ! -f test/baseline.sh || chmod +x test/baseline.sh])
+     test ! -f test/baseline.sh || chmod +x test/baseline.sh
+     test ! -f test/spec.sh || chmod +x test/spec.sh])
 AC_OUTPUT
