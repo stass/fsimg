@@ -73,22 +73,25 @@ scratch deletion remains available. Unexpected or partially applied setup
 errors remain `FSIMG_EIO` and never
 permit an automatic retry without restriction.
 
-Sanitizer targets configure separate build directories beneath the current build
-and run the full suite. `check-asan` combines ASan and UBSan, enables stack
-use-after-return and scope checks, and enables leak and initialization-order
-checks on Linux. macOS ASan does not support leak or initialization-order
+Sanitizer targets run the full suite in `sanitizer-<mode>/` beneath the current
+build directory, which may be the source tree configured in place or a separate
+build. Each run starts from scratch: `make distdir` copies the distribution into
+a read-only `sanitizer-<mode>/src`, and `sanitizer-<mode>/build` configures that
+copy with the current build's configure arguments (`config.status --config`),
+followed by the sanitizer compiler, flags and `--disable-shared`. Nothing outside
+`sanitizer-<mode>/` is written, development oracles given to configure such as
+`FATCAT` carry over, and a file missing from the distribution fails the run as it
+would fail `make distcheck`. Compiler and sanitizer diagnostics name files in the
+copy; edit the originals. `CC` and `CXX` in the environment select the sanitizer
+compiler (default `clang`); `make -n` does not run the targets. `make clean`
+removes the sanitizer builds and the fuzz harnesses. `check-asan` combines ASan
+and UBSan, enables stack use-after-return and scope checks, and enables leak and
+initialization-order checks on Linux. macOS ASan does not support leak or initialization-order
 checks. ASan/fuzz runs halt on UBSan findings and print a stack trace. Standalone
 LSan/MSan targets print SKIP on non-Linux hosts; this is not a passing check.
 Linux MSan requires Clang and an appropriate runtime; an unsupported compiler
 or runtime fails configuration rather than being reported as a pass. TSan is
 not applicable to the serial library and process-only test harnesses.
-
-Autotools rejects out-of-tree configuration when the source directory is already
-configured in place. To preserve such a build, copy the tracked sources including
-local edits into a disposable unconfigured source tree, run `autoreconf -fi`
-there, then run `sh build-aux/sanitize.sh asan /absolute/source/copy` and
-`sh build-aux/sanitize.sh ubsan /absolute/source/copy` from that copy. The source
-argument must be absolute because the script enters its sanitizer build directory.
 
 Fresh worker and output-relay processes use fixed sanitizer settings, including
 `abort_on_error=0`, `exitcode=86`, and `symbolize=0`. The supervisor classifies
@@ -223,29 +226,34 @@ input ceiling and five-second timeout. It exercises production framing, job
 codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker lifecycle ordering
 is covered by `test-worker`, not inferred from pure wire fuzzing.
 Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults to its
-sibling `clang++`. Use a fresh build directory when changing compilers. Apple
-Clang lacks the libFuzzer runtime; macOS fuzz validation uses Homebrew LLVM:
+sibling `clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
+validation uses Homebrew LLVM:
 
 ```sh
 brew install llvm
 FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 ```
 
-The exact standalone commands from a configured build are:
+The exact standalone commands from the top of a separate build directory are:
 
 ```sh
 make test-fat test-exfat test-qnx6 test-protocol
-sh ../build-aux/fuzz.sh "$(cd .. && pwd)"
+MAKE=make sh ../build-aux/fuzz.sh
 ```
 
+Set `MAKE` to the make program that drives the build (`gmake` on FreeBSD); in a
+tree configured in place the script is `build-aux/fuzz.sh`. It builds the
+instrumented library through `build-aux/sanitize.sh fuzz` and compiles the
+harnesses into `sanitizer-fuzz/` from the same read-only source copy.
+
 The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `qnx6-fuzz-corpus/`,
-`protocol-fuzz-corpus/` and
-libFuzzer crash artifacts are disposable build outputs. Existing corpus seeds
-and mutations are reused. `FUZZ_SECONDS=60 make check-fuzz` selects a finite
-wall-clock allowance per corpus instead of the 1000-mutation smoke budget. The value is decimal
+`protocol-fuzz-corpus/` and libFuzzer crash artifacts are disposable build
+outputs. Existing corpus seeds and mutations are reused; `make clean` keeps the
+corpora, `make distclean` removes them, and neither removes crash artifacts.
+`FUZZ_SECONDS=60 make check-fuzz` selects a finite wall-clock allowance per
+corpus instead of the 1000-mutation smoke budget. The value is decimal
 seconds from zero through 999999. `check-fuzz-extended` uses 600 seconds per
-corpus. The configured `FATCAT` development-oracle path is forwarded into
-sanitizer and fuzz builds. A smoke run is not a sustained campaign.
+corpus. A smoke run is not a sustained campaign.
 
 `check-scale` is a separate, non-sanitized qualification. It sorts 24 MiB
 of generated records and fills/queries a 24 MiB fixed-record array with a 16 MiB
@@ -535,8 +543,10 @@ padding written through raw kernel interfaces without sanitizer interception.
 The focused `./test-cli --private-cleanup` regression exercises this boundary
 under MSan, symlink-safe scratch deletion, and retained-directory reporting.
 
-Build the fatcat development oracle outside the source tree and export its path
-before configuring ordinary or sanitizer builds:
+Build the fatcat development oracle outside the source tree and give its path
+to configure, exported or as a `FATCAT=` argument. Configure records development
+tool paths given to it (see `configure --help`), so sanitizer and fuzz builds use
+the same oracles; a tool found on `PATH` is searched for again there:
 
 ```sh
 sh build-aux/build-fatcat.sh /tmp/fsimg-fatcat-oracle

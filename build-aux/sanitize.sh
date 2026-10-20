@@ -1,9 +1,31 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026, fsimg contributors
+#
+# usage: MAKE=make sh sanitize.sh asan|ubsan|lsan|msan|fuzz
+#
+# Run the complete test suite under one sanitizer. Run it from the top of a
+# configured build directory, with MAKE naming the make program that drives
+# that build; CC and CXX select the sanitizer compiler (default clang). The
+# result lives in sanitizer-MODE/ there:
+#
+#   src/    a pristine, read-only source copy made by this build's
+#           `make distdir`, so it works whether the source tree is configured
+#           in place or not, and a file missing from the distribution fails
+#           the suite. Diagnostics name files here; edit the originals.
+#   build/  the instrumented build, configured with this build's own
+#           configure arguments so it finds the same development oracles
+#
+# Each run starts from scratch and writes nothing outside sanitizer-MODE/.
 set -eu
-mode=$1
-source_dir=$2
+mode=${1:-}
+make=${MAKE:-make}
+if test ! -f config.status; then
+    echo 'sanitize.sh: run from the top of a configured build directory' >&2
+    exit 2
+fi
+
+# Select the instrumentation and the runtime options for the mode.
 case "$mode" in
 asan|fuzz)
     sanitizers=address,undefined
@@ -23,18 +45,37 @@ lsan|msan)
     fi
     case "$mode" in
     lsan) flags='-fsanitize=leak' ;;
-msan) flags='-fsanitize=memory -fsanitize-memory-track-origins=2 -fPIE' ;;
+    msan) flags='-fsanitize=memory -fsanitize-memory-track-origins=2 -fPIE' ;;
     esac ;;
-*) exit 1 ;;
+*)
+    echo 'usage: MAKE=make sh sanitize.sh asan|ubsan|lsan|msan|fuzz' >&2
+    exit 2 ;;
 esac
-mkdir -p "sanitizer-$mode"
-cd "sanitizer-$mode"
 link_flags=$flags
 if test "$mode" = msan; then link_flags="$link_flags -pie"; fi
 sanitizer_cc=${CC:-clang}
 sanitizer_cxx=${CXX:-clang++}
-CC="$sanitizer_cc" CXX="$sanitizer_cxx" CFLAGS="-O1 -g $flags" \
-    CXXFLAGS="-O1 -g $flags" LDFLAGS="$link_flags" \
-    "$source_dir/configure" --disable-shared
-make check CC="$sanitizer_cc" CXX="$sanitizer_cxx" \
-    CFLAGS="-O1 -g $flags" CXXFLAGS="-O1 -g $flags" LDFLAGS="$link_flags"
+sanitizer_cflags="-O1 -g $flags"
+work_dir="$(pwd)/sanitizer-$mode"
+
+# Copy the distribution afresh, so no stale source or object survives.
+rm -rf "$work_dir"
+mkdir "$work_dir" "$work_dir/build"
+"$make" distdir distdir="$work_dir/src"
+find "$work_dir/src" -type f -exec chmod a-w {} +
+
+# Replay this build's configure arguments (oracle paths such as FATCAT and
+# feature options); config.status --config prints them quoted for the shell.
+# Arguments given after them take precedence, so the copy is the source and
+# no cache file is shared whatever the outer build was configured with.
+eval "set -- $(./config.status --config)"
+cd "$work_dir/build"
+../src/configure "$@" --srcdir=../src --cache-file=/dev/null \
+    CC="$sanitizer_cc" CXX="$sanitizer_cxx" CFLAGS="$sanitizer_cflags" \
+    CXXFLAGS="$sanitizer_cflags" LDFLAGS="$link_flags" --disable-shared
+
+# Repeat the compiler and flags: assignments on the outer make command line
+# (make check-asan CFLAGS=-O0) reach this make through MAKEFLAGS and would
+# override the configured ones, silently building without instrumentation.
+"$make" check CC="$sanitizer_cc" CXX="$sanitizer_cxx" \
+    CFLAGS="$sanitizer_cflags" CXXFLAGS="$sanitizer_cflags" LDFLAGS="$link_flags"

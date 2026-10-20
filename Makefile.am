@@ -12,7 +12,12 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/formats/qnx6
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
-DEVELOPMENT_TOOLS_ENV = FATCAT="$(FATCAT)"
+# The sanitizer and fuzz scripts run `make distdir` and `make check` as
+# sub-makes. MAKE names this make program (gmake rather than BSD make, say),
+# and their rules start with + to pass the jobserver. A + line runs even
+# under make -n, so automake's am__make_dryrun keeps a dry run from
+# replacing the previous sanitizer build.
+SANITIZE_ENV = MAKE="$(MAKE)"
 include_HEADERS = include/fsimg.h
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libfsimg.pc
@@ -226,9 +231,11 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-fat-write --scale
 	./test-exfat-scale --huge; result=$$?; test $$result = 0 -o $$result = 77
 check-fuzz: test-fat test-exfat test-qnx6 test-protocol
-	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh $(abs_top_srcdir)
+	+@$(am__make_dryrun) || \
+	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-fuzz-extended: test-fat test-exfat test-qnx6 test-protocol
-	$(DEVELOPMENT_TOOLS_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh $(abs_top_srcdir)
+	+@$(am__make_dryrun) || \
+	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard
 	./fsimg-rss-guard; result=$$?; test $$result = 0 -o $$result = 77
 	$(PYTHON3) $(top_srcdir)/test/qualify-cli.py ./fsimg-rss 100000
@@ -241,13 +248,23 @@ check-extended: test-qualify test-fragment test-exfat-scale check-cli-rss
 check-ascii:
 	$(SHELL) $(top_srcdir)/build-aux/check-ascii.sh $(top_srcdir)
 check-asan:
-	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh asan $(abs_top_srcdir)
+	+@$(am__make_dryrun) || \
+	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh asan
 check-ubsan:
-	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh ubsan $(abs_top_srcdir)
+	+@$(am__make_dryrun) || \
+	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh ubsan
 check-lsan:
-	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh lsan $(abs_top_srcdir)
+	+@$(am__make_dryrun) || \
+	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh lsan
 check-msan:
-	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh msan $(abs_top_srcdir)
+	+@$(am__make_dryrun) || \
+	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh msan
+clean-local:
+	-rm -rf sanitizer-asan sanitizer-ubsan sanitizer-lsan sanitizer-msan \
+	    sanitizer-fuzz
+# Fuzz corpora persist across clean so later runs reuse their mutations.
+distclean-local:
+	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus protocol-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77
