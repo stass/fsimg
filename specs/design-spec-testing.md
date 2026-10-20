@@ -93,7 +93,7 @@ plain Ruby value with these fields:
 | --- | --- |
 | `id` | Stable identifier such as `fat.bpb.bytes_per_sector`. It is the regression key and never changes meaning. |
 | `applies_to` | Predicate over the model and the run environment: variant, feature flags and preconditions |
-| `predicate` | Pure function over the same inputs, plus the settings and tree for a creation rule. It returns the rule's violations and never runs fsimg. |
+| `predicate` | Pure function over the same inputs, plus the settings and tree for a creation rule. It returns the rule's violations and never runs fsimg: a rule with one scope answers whether it holds, and a rule whose scope varies per violation returns the scope of each violation. |
 | `domain` | For a field, its legal values, explicit invalid examples and boundaries. For a relational rule, a generator of parameter overrides and mutations. |
 | `category` | `normative`, `profile` or `advisory` |
 | `policy` | What the stages that check a violation must do |
@@ -221,8 +221,9 @@ A case is one image and the stages run on it. Each case belongs to one class:
   Targeted cases explain their own failures, unlike byte fuzzing.
 * **C. General malformed.** Combined mutations, truncations and arbitrary byte
   edits. Classification is recorded, but the model may not see everything a
-  random edit breaks, so only safety is asserted. Acceptance or rejection is
-  never counted as evidence of compliance.
+  random edit breaks, so only safety is asserted: every stage is
+  `unclassified`. Acceptance or rejection is never counted as evidence of
+  compliance.
 
 A rule with policy `equivalent_contents` is `normative` and states a freedom of
 the format rather than a requirement, so it has no violations. Its domain
@@ -268,6 +269,7 @@ coherently; the same field patched into a formatter base would also violate
   "tool_versions": {"independent": "<digest of the builder source>"},
   "mutations": [],
   "stages": ["info", "ls", "extract", "verify", "verify-deep"],
+  "kind": "targeted",
   "intended_violation": "fat.bpb.bytes_per_sector",
   "actual_violations": [{"rule": "fat.bpb.bytes_per_sector", "scope": "open"}],
   "isolation": "single_rule",
@@ -287,32 +289,54 @@ case](#reports-and-regressions) runs all of them. A reading case carries
 of entries, each with a relative `path`, a `type` of `file` or `directory`, a
 `size` and a `seed`. The harness generates each file's bytes from its seed and
 offset with its own function, never with PropCheck's random source, so a tree
-stays stable across upgrades. `expected` maps each stage to its allowed
-outcomes separated by `|`: `accept`, `reject:STATUS` for each allowed status,
-or `reject:*` for any verdict status. An `FSIMG_ELIMIT` status carries its
+stays stable across upgrades. `kind` names the case class: `valid`, `targeted`
+or `malformed`. `expected` maps each stage to its allowed outcomes separated by
+`|`: `accept`, `reject:STATUS` for each allowed status, or `reject:*` for any
+verdict status; `unclassified` alone marks a stage that checks a scope the
+model could not decode completely. An `FSIMG_ELIMIT` status carries its
 resource, as in `reject:FSIMG_ELIMIT:entries`. The optional fields are
 `random_seed`, `source_revision` and `resource_limits`; a promoted case also
 carries a `reason`.
 
-`intended_violation` (null for a valid case), `actual_violations`, `isolation`
-and `expected` record the classification and derivation made when the recipe
-was written. They are never inputs: replay re-derives them from the current
-rules and compares.
+`intended_violation` (named by a targeted case and null otherwise),
+`actual_violations`, `isolation` and `expected` record the classification and
+derivation made when the recipe was written. They are never inputs: replay
+re-derives them from the current rules and compares.
 
 Recipes are untrusted input, arriving in promoted cases, replay requests and CI
 artifacts, including those of pull requests. The loader parses them with
-`JSON.parse`, never `JSON.load`, and refuses an unknown schema version or
-mutation and a missing required field. It also refuses an `id` longer than 128
-bytes, outside `[a-z0-9._-]` or starting with `.` or `-`; a `format` or
-`forced_format` the harness does not model; a `base_sha256` that is not 64
-hexadecimal digits; a setting that is not an integer; an unknown tree entry
-type; a tree path that is not valid UTF-8, is absolute, or contains `..`, `.`,
-an empty component or NUL; and any size, parameter, mutation or
-`resource_limits` value beyond the profile's ceilings. Source names that are
-not UTF-8 are therefore outside what a recipe can express. A loaded recipe
-round-trips to identical JSON. A random seed alone does not reproduce a case
-across PropCheck or formatter upgrades, so recipes carry explicit parameters,
-mutations and trees.
+`JSON.parse`, never `JSON.load`. Before reading any field it refuses a recipe
+text larger than 64 MiB, any string or object key that is not valid UTF-8 or is
+longer than 1 MiB, and any number that is not an integer of at most 64 bits, so
+every later check reads well-formed text and bounded numbers. It refuses an
+unknown schema version or mutation, a missing required field and an unknown
+one. It also refuses an `id` longer than 128 bytes, outside `[a-z0-9._-]` or
+starting with `.` or `-`; a `format` or `forced_format` the harness does not
+model; a `base_sha256` that is not 64 hexadecimal digits; a parameter or
+setting that is not an integer; a parameter or setting name that is not
+`[a-z][a-z0-9_]*` of at most 64 bytes, or a builder or tool name that is not
+`[a-z][a-z0-9._-]*` of at most 64 bytes; more than 256 parameters, settings or
+tools; an unknown tree entry type; a tree path that is empty, is absolute, or
+contains `..`, `.`, an empty component or NUL, that repeats, or whose parent is
+not a directory entry of the same tree; a directory entry with a size or seed;
+an unknown `kind`, or an `intended_violation` named by a case that is not
+targeted or missing from one that is; an `expected` that does not name exactly
+the `stages`; a reading case that runs `create` or a creation case that does
+not; more than 4096 mutations; a promoted case without a `reason`; and any
+size, parameter, mutation or `resource_limits` value beyond the profile's
+ceilings. Refusal messages cut the values they quote short. Recipe values check
+the format when they are built, so a recipe a generator builds in code obeys it
+too; only the ceilings are the loader's. Because every string is UTF-8, source
+names that are not UTF-8 are outside what a recipe can express. The canonical
+form has a fixed field order, sorted map keys apart from `expected`, which
+follows the order of `stages`, and two-space indentation; the
+harness writes it with its own serializer, because the json gem's pretty
+printer varies across versions and recipe bytes key the fixture cache. The
+loader accepts only text in canonical form, which also refuses duplicate keys
+that `JSON.parse` would resolve silently, so a loaded recipe round-trips to
+identical bytes. A random seed alone does not reproduce a case across PropCheck
+or formatter upgrades, so recipes carry explicit parameters, mutations and
+trees.
 
 ### Mutations
 
@@ -731,8 +755,10 @@ rule families, and would then stay optional and outside CI.
 
 The budgets are targets, which measurement adjusts. Every profile sets ceilings
 on image capacity, file count, path depth, memory, scratch, extracted bytes and
-per-case run time. The runner passes them to fsimg as `-m` and `-l` values, and
-the generators and the recipe loader keep within them. Fuzzing stays in
+per-case run time; `profile.rb` holds their values. The runner passes them to
+fsimg as `-m` and `-l` values, and the generators and the recipe loader keep
+within them. The `path` ceiling leaves room under the 1024-byte `PATH_MAX` of
+macOS for the case directory's own path. Fuzzing stays in
 `check-fuzz`, which `bin/export-seeds` supplies with the deterministic invalid
 witnesses and the promoted cases as seeds; the native fuzzers never call Ruby.
 
@@ -830,10 +856,16 @@ test/spec/
   Gemfile, Gemfile.lock     locked gems
   run.rb                    runs one profile and writes its report
   lib/fsimg_spec/           format-independent core
-    profile.rb              profiles and their results directories
+    contract.rb             fsimg's stages, scopes, statuses and resources
+    profile.rb              profiles, their ceilings and results directories
     results_directory.rb    the results lock and emptying
     rule.rb                 Rule, Domain, the registry and its checks
-    case.rb                 recipes, mutations, expectation derivation
+    expectation.rb          expectation derivation
+    recipe.rb               recipes and the checks on their values
+    recipe_loader.rb        the recipe loader
+    canonical_json.rb       the canonical JSON form of recipes
+    mutation.rb             mutations
+    case.rb                 a recipe's classification and recorded fields
     image.rb                in-memory views and sparse materialization
     runner.rb               the only code that knows fsimg's syntax
     tree.rb                 tree model, lstat walk, digests, name funnel

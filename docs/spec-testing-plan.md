@@ -237,6 +237,12 @@ review and commit gates.
 
 * Implement the [runner contract](../specs/design-spec-testing.md#runner),
   the preflight, and `tree.rb` with the name funnel.
+* Give `Expectation` a structured form, the allowed statuses plus
+  any-verdict and unclassified markers, with one method that decides whether
+  an observed outcome satisfies it, so the runner never re-parses outcome
+  strings.
+* Cover the accepting stages under `safety_only`, whose records must still
+  match the model.
 * Self-tests use stub executables written into the test's temporary
   directory. Each stub demonstrates one failure:
   - it never exits;
@@ -303,6 +309,12 @@ review and commit gates.
   written by the name funnel into `test/spec-cache/<key>.src/` and removed
   once the base is built.
 * Add the independent empty-volume builder.
+* Classify a creation case per stage: `create` follows the source tree's
+  classification, and the reading stages that run on the created image
+  follow the image's. A rejecting `create` leaves those stages nothing to
+  run. `Case#recorded` and `Case#drift` refuse a creation case until the
+  case carries both classifications and derives each stage's recorded
+  expectation from the right one.
 * Base set:
 
   | Base | Size | Sector bytes | Sectors per cluster | Tree |
