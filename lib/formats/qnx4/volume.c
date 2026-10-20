@@ -443,7 +443,7 @@ qnx4_volume_open(fsimg_reader_t *reader, fsimg_error_t *error)
 		return (status);
 
 	/* Bit b - 1 of the claimed set is block b, as in the bitmap itself;
-	 * the loader, the root block and the bitmap are claimed now.
+	 * the loader, the root block and the bitmap are claimed at open.
 	 */
 	status = fsimg_bitset_new(&reader->session, qnx4->geometry.blocks,
 	    &qnx4->claimed, error);

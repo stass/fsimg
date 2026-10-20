@@ -147,7 +147,8 @@ bytes `0x3a` to `0x3e` are zero. `-l LABEL` writes the label at `0x1c0`;
 disk, as `labelB` records); a 67-byte label is truncated to 48 bytes and
 followed by 16 zero bytes (`labelC`). Without `-l` the field is zero.
 Writing `.boot` and `.altboot` through the mounted filesystem sets their
-records' status to `0x13` (`q4-free`).
+records' status to `0x13` (`q4-free`). Record 1 stays `0x11` on every
+populated capture, including `q4-inodes`, whose `.inodes` grew, and on H1.
 
 ### Root directory slots (E1, E3)
 
@@ -215,7 +216,9 @@ spare bytes and long-name pointer.
   no nonzero unused slot. `.inodes` grows by a 32-block extent (E6).
 * **Kinds:** symbolic links are `0120777` with the target as content
   (`ln -s` relative, absolute, dangling and to a directory); FIFOs are
-  `010664` with size 5120 and 10 allocated blocks the guest never writes.
+  `010664` with size 5120 and 10 allocated blocks the guest never writes;
+  native `ls -ld` reports its size as 0 (`q4-manifest-pop`), while a
+  directory's listed size is its stored size.
   A FIFO edited on the host to size 0 with no extent and its blocks freed
   checks clean, lists as a FIFO and checks clean again after a write to the
   volume (`~/qnx65-vm/writer-captures/q4-probe-fifo0-4096`);

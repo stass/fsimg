@@ -45,3 +45,6 @@ Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
   the 6.5.0 layout, but only a target run or disassembly can close this.
 * [Low] **Device nodes** (`lib/formats/qnx4/`): the live CD has no `mknod`,
   so the device encoding is unobserved and devices are unsupported.
+* [Low] **Synthetic `.inodes` growth** (`test/qnx4.c`): no generated volume
+  holds more than 128 table records, so `.inodes` growing through its own
+  extent block is exercised only by the `q4-inodes` capture and fuzzing.

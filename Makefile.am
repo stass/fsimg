@@ -197,6 +197,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
 	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh tools/qnx/guest/manifest4.sh \
+	tools/qnx/guest/qualify4.sh \
 	tools/qnx/decode/q4dump.py tools/qnx/pcm/pcmq4.py tools/qnx/pcm/pcmq6.py tools/qnx/pcm/shdis.py \
 	tools/qnx/pcm/shrange.py tools/qnx/vm/boot.sh \
 	tools/qnx/vm/capture.sh tools/qnx/vm/click.py tools/qnx/vm/env.sh \

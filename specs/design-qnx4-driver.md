@@ -323,7 +323,7 @@ after skipping an object.
 `validate` accepts the common options with these rules: `sector_bytes` and
 `allocation_unit_bytes` zero or 512; `fat_root_entries` zero; `label` NULL
 or at most 48 bytes under the profile's byte rules, where NULL and the empty
-string both select the zero field; `epoch` within `[0, 4294967295]` in
+string both select the zero field; `epoch` within `[0, 2147483647]` in
 reproducible mode; `volume_bytes` zero or a multiple of 512 in
 `[43 * 512, 2^31 * 512]`. `volume_serial` is ignored, as the profile stores
 none. The capability record's `write_settings` names `inode_capacity`
@@ -406,7 +406,7 @@ The common emission object has already zeroed the sink. The driver emits:
    with their profile values, records 2 and 3 from the `/.boot` and
    `/.altboot` rows or their empty defaults, every one with a 16-NUL name
    field, the label, zeros elsewhere.
-3. The root's fixed slots 0 to 6, slot 7 when no entry took it, slot 8, and
+3. The root's fixed slots 2 to 6 (row 0's dot slots come from step 1), slot 7 when no entry took it, slot 8, and
    `.inodes` slot 0; `lost+found`'s two dot slots, `..` targeting
    `(3 + B, 0)`.
 4. The bitmap: ones for bits `0` to `A - 1`, zeros to bit `N - 1`, ones to

@@ -10,7 +10,7 @@ about directory encodings, allocation, or name folding.
 The [architecture](architecture.md#writer-and-reader-independence) assigns the
 owners. [Storage](design-storage.md#reading-and-traversal) states the bounds.
 Driver designs ([FAT](design-fat-reader.md), [exFAT](design-exfat.md),
-[QNX6](design-qnx6.md)) define only their decoding, keys, and locators.
+[QNX6](design-qnx6.md), [QNX4](design-qnx4.md)) define only their decoding, keys, and locators.
 Host source scanning and safe extraction have separate authority and lifetime
 rules and do not use this walker.
 

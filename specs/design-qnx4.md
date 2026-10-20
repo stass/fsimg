@@ -48,7 +48,7 @@ publication. The common contracts cover QNX4 without exceptions:
 [prepared directories](design-directories.md),
 [logical content and the extent index](design-content.md),
 [emission](design-emission.md), [sizing](design-sizing.md) and
-[POSIX metadata](design-metadata.md). The entry model already carries owner,
+[POSIX metadata](design-metadata.md). The entry model carries owner,
 mode, the four timestamps, symbolic links and FIFOs, so common code gains
 only the descriptor registration and a volume-information label field of 49
 bytes, room for a 48-byte label and its terminator.
@@ -384,7 +384,7 @@ The root directory's first slots are fixed: [X1]
 
 Root slots 3 to 5 are the only links that target block 2, each with exactly
 this target, and they are validated by position when the volume is opened.
-Every other link record anywhere resolves inside `.inodes`. `.longfilenames`
+Every other link record except the dot entries resolves inside `.inodes`. `.longfilenames`
 is found by name among the root's direct records; with `-R` it sits in slot
 9 behind `.diskroot`. A used root slot beyond the fixed ones that carries the
 name `.bitmap`, `.inodes` or a second `.longfilenames` is `FSIMG_ECORRUPT`.
@@ -512,7 +512,8 @@ by construction. [X1]
 ### Link resolution
 
 Root slots 3 to 5 are validated by position at open against their fixed
-targets in block 2. Every other link record's target `(block, slot)` must
+targets in block 2. Dot entries name directory positions (below). Every
+other link record's target `(block, slot)` must
 have a slot index of at most 7, lie inside an `.inodes` extent, not be slot
 0, and hold a used record with status `0x11` or `0x13`; a target outside
 those bounds, in the loader, root block, bitmap or any other object, or at a
@@ -611,8 +612,8 @@ and `..` targeting `(3 + B, 0)`.
 The capacity is `max(128, 1 + indirect)` slots rounded up to a whole block
 of 8, where `indirect` is the number of catalog entries that need an
 `.inodes` slot: every entry whose name exceeds 16 bytes. The
-`inode_capacity` setting (`inodes=`) replaces 128 by its value, slot 0
-counted, so the capacity is `max(128, setting, 1 + indirect)` rounded up to
+`inode_capacity` setting (`inodes=`) counts slot 0 and raises the floor, so
+the capacity is `max(128, setting, 1 + indirect)` rounded up to
 whole blocks. Slots are assigned in catalog ID order from slot 1, and every
 `.inodes` record's name field is 16 NUL bytes.
 
@@ -650,7 +651,7 @@ the end of the last used byte and `0xff` to the end of block `2 + B`.
 
 `sector_bytes` and `allocation_unit_bytes` are zero or 512; `volume_bytes`
 is zero or a multiple of 512 from `43 * 512` to `2^31 * 512`; the epoch is
-within 32 bits; the label is at most 48 bytes; `inode_capacity` is as above.
+within 0 to 2147483647, the range the writer stores; the label is at most 48 bytes; `inode_capacity` is as above.
 A volume of `N` blocks holds the plan when
 `2 + B(N) + R + I + 16 + L + objects + ceil(min_free_bytes / 512) <= N`,
 where `objects` is the catalog objects' blocks. Automatic sizing takes the
@@ -674,7 +675,8 @@ option set as 6.5.0's and no `.inodes` size option. [H1], [H3]
 
 Reading the partition is a slice of `102767805 * 512` bytes at its
 partition offset. Reproducing it is the writer at that `volume_bytes` with
-an empty label; the loader block and disk composition are outside this
+an empty label, which the CLI selects with `-L ""` because its default
+label `FSIMG` applies to every format that stores one; the loader block and disk composition are outside this
 design.
 
 ## Deterministic planning and emission

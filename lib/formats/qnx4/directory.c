@@ -170,7 +170,7 @@ admit(qnx4_prepare_t *prepare, const char *name, const qnx4_inode_t *object,
 	    sizeof(payload), error));
 }
 
-/* A direct record is its own object. It is validated now, so an
+/* A direct record is its own object. It is validated at admission, so an
  * unsupported kind fails the whole directory instead of disappearing from
  * it.
  */
@@ -193,7 +193,7 @@ admit_direct(qnx4_prepare_t *prepare, uint64_t position,
 }
 
 /* A link record names an .inodes record; its target is resolved and
- * validated now, and the entry carries the target's position.
+ * validated at admission, and the entry carries the target's position.
  */
 static fsimg_status_t
 admit_link(qnx4_prepare_t *prepare, uint64_t position,
@@ -364,8 +364,9 @@ qnx4_index_current(fsimg_reader_t *reader, qnx4_walk_policy_t policy,
 
 /* Make a replayed child current. Its record came from scratch storage, so
  * the payload and name are validated and the record is read again. The
- * first name of a file, symbolic link or FIFO claims its storage now, so
- * storage it shares with any other object fails while listing. A later
+ * first name of a file, symbolic link or FIFO claims its storage at
+ * admission, so storage it shares with any other object fails while
+ * listing. A later
  * name of the same .inodes object (a hard link) is indexed when first
  * read, so listing many names of a large file walks it once. The exposed
  * bit is set only after the claiming walk succeeds. A direct or root-block

@@ -195,7 +195,7 @@ experiments (E1 to E10) and the H1 survey are defined in stage 1.
 
 | Question | Evidence | Consumer |
 | --- | --- | --- |
-| Block 2 bytes `0x100` to `0x1ff`; label position and terminator | E1, E2 | Writer bytes; label stays unsupported until answered |
+| Block 2 bytes `0x100` to `0x1ff`; label position and terminator | E1, E2 | Writer bytes and label support |
 | Special records in block 2: names, modes, link counts, status, times, type byte | E1, H1 | Probe signature, open, writer |
 | Root directory slot order; `.` and `..` encoding; offset of the `I`, `0x03`, `QNX` signature; root versus subdirectory cases | E1, E3 | Dot-entry validation; writer subdirectories |
 | `.bitmap` size for `N` not divisible by 8 or 4096; padding bits | E1 (4095, 4096, 4097, 8193 blocks), H1 | Geometry rule |
@@ -450,7 +450,7 @@ research boundary of the QNX6 record.
 * `write-qnx4.h`, `write-plan.c` and `write-emit.c`.
 * Settings:
   - `sector_bytes` and `allocation_unit_bytes`: zero or 512;
-  - `label`: NULL, because `max_label_bytes` is 0 until E2 is answered;
+  - `label`: at most 48 bytes at root-block offset `0x1c0`, as E2 shows;
   - epoch: within 32 bits;
   - `volume_bytes`: a multiple of 512, between the fixed-metadata minimum and
     the native maximum;
