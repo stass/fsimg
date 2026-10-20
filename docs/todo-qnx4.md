@@ -3,11 +3,6 @@
 Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
 [research record](qnx4-research.md) owns the evidence and provenance.
 
-* [High] **Writer scale** (`lib/formats/qnx4/write-plan.c`,
-  `test/qnx4-write.c`): the writer's scale cases, `N` near `2^31` on a
-  sparse sink, a spilling directory, and the 2 GiB object limit at 524288
-  directory steps and 4194289 long names, which `object_fits()` refuses and
-  no test reaches.
 * [Medium] **Linux and qnxprobe comparisons not yet run**
   (`test/qnx4-integration.sh`): the script compares the Linux qnx4 driver's
   view of the generated sample, every native capture and writer output with

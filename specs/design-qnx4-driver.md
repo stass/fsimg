@@ -486,13 +486,18 @@ empty volume with the native `dinit` capture of the same geometry, label
 and format time: every block but the loader matches byte for byte, and the
 free blocks the formatter never wrote are counted, not compared. Its
 `--create` mode builds the native qualification images and their
-manifests. Fault tests inject allocation,
-scratch, short-read, short-write, EOF, source-change and cancellation
-failures at every stage and check cleanup. Scale tests grow `N` to `2^31`
-on a sparse fixture whose claimed bitset stays in scratch, one directory's
-width to spilling, one file to 65535 extents, the most the record's 16-bit
-count holds, and a tree's depth, recording I/O calls, metadata passes, peak
-scratch and RSS.
+manifests. Fault tests inject allocation, scratch, short-read, short-write,
+EOF, source-change and cancellation failures at every stage and check
+cleanup.
+
+Scale tests record I/O calls, peak scratch and RSS. The reader's grow `N`
+to `2^31` on a sparse fixture whose claimed bitset stays in scratch, one
+directory's width to spilling, one file to 65535 extents, the most the
+record's 16-bit count holds, and a tree's depth, and count metadata passes.
+The writer's emit, into a sink that holds only nonzero pages so that no
+image reaches the disk, a full `2^31`-block volume and a directory whose
+catalog spills to scratch, and plan two object maximums of `2^31 - 1`
+bytes, `.longfilenames` and one directory, on both sides of the limit.
 
 `test/qnx4-integration.sh` runs the independent oracles the build finds and
 skips the others explicitly: the Linux `qnx4` reader on a Linux host, as a

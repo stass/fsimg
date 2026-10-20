@@ -5,7 +5,9 @@
 
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 
 #include <errno.h>
@@ -1123,9 +1125,11 @@ fixture_open(fixture_t *fixture, const fsimg_write_options_t *write_options)
 	fixture_open_with(fixture, write_options, 1, true);
 }
 
-/* Close a fixture and require that it released every resource. */
+/* Free a fixture's writer and context and require that they released
+ * every resource; its directory stays.
+ */
 static void
-fixture_close(fixture_t *fixture)
+fixture_release(fixture_t *fixture)
 {
 	fsimg_stats_t stats;
 
@@ -1136,6 +1140,13 @@ fixture_close(fixture_t *fixture)
 	CHECK(stats.descriptors == fixture->baseline.descriptors);
 	fsimg_ctx_free(fixture->ctx);
 	CHECK(close(fixture->parent) == 0);
+}
+
+/* Close a fixture: release it and remove its directory. */
+static void
+fixture_close(fixture_t *fixture)
+{
+	fixture_release(fixture);
 	CHECK(rmdir(fixture->directory) == 0);
 }
 
@@ -2677,6 +2688,945 @@ create_external(const char *directory, const char *name, const char *blocks,
 	return (0);
 }
 
+/*
+ * Writer scale (--scale and --scale-limits). Each case runs in a child
+ * process of its own and prints what it took. --scale emits and reads back:
+ *
+ * - the largest volume, 2^31 blocks (1 TiB), filled to its last block by
+ *   the tree, 511 files of 2^31 - 1 zero bytes and a filler, so the
+ *   bitmap is ones from end to end and the last extent ends in block N;
+ * - one directory of 200,000 files, one in sixteen with a long name, whose
+ *   catalog and rows spill far beyond the 16 MiB budget into scratch.
+ *
+ * --scale-limits plans, without emitting, the object maximum of 2^31 - 1
+ * bytes that every directory and table must respect: 4,194,288 long names
+ * fit .longfilenames and one more fails, and a directory of 33,554,366
+ * children fits and one more fails, each failure for that reason. They
+ * run under a 1 GiB budget and need tens of GiB of transient scratch.
+ *
+ * No case writes an image file. Emission goes to a page sink, which keeps
+ * only the nonzero 4 KiB pages of the volume in memory and shares
+ * identical ones: the common emitter zeroes the sink through zero_range
+ * first and skips zero sources, so free blocks and zero payload are never
+ * written, and the ones of a full bitmap are one shared page. The sink
+ * refuses to hold more pages than the plan's metadata and content need,
+ * so a writer that wrote free space would fail the case before it could
+ * fill memory. The fsimg reader opens and verifies the volume through the
+ * same sink. Every context has an explicit scratch budget, and a case runs
+ * only when the scratch filesystem has that free and 1 GiB more, so
+ * scratch, the only data that reaches a disk, is bounded too.
+ * QNX4_SCALE_SCRATCH names the scratch parent, such as a RAM disk.
+ *
+ * The checks restate the driver design's bounds: charged memory stays
+ * below SCALE_MEMORY, scratch within the case's budget, the growth of the
+ * child's peak resident set, less the sink's pages, below
+ * SCALE_RSS_GROWTH, and the bytes written at most the plan's metadata and
+ * the tree's content.
+ */
+
+/* The charged-memory ceiling, below the context's 16 MiB budget. */
+#define SCALE_MEMORY		(UINT64_C(8) << 20)
+#define SCALE_BUDGET		(UINT64_C(16) << 20)
+
+/* The limit cases' budget: they show where planning refuses, not what it
+ * keeps resident, and a large budget spills less of their tens of
+ * millions of entries.
+ */
+#define SCALE_LIMIT_BUDGET	(UINT64_C(1) << 30)
+
+/* The most a case may raise its process's peak resident set beyond the
+ * pages its sink holds.
+ */
+#define SCALE_RSS_GROWTH	(UINT64_C(64) << 20)
+
+/* The QNX4 object maximum, the largest file. */
+#define FILE_MAX		UINT64_C(0x7fffffff)
+
+#define PAGE_BYTES		4096u
+#define PAGE_SLOT_BUCKETS	(1u << 20)
+#define PAGE_CONTENT_BUCKETS	(1u << 16)
+
+/* One distinct page content, shared by every volume page that holds it. */
+typedef struct page {
+	struct page	*next;		/* in its content bucket */
+	uint64_t	 hash;
+	uint64_t	 refs;
+	unsigned char	 bytes[PAGE_BYTES];
+} page_t;
+
+/* A volume page that is not all zero. */
+typedef struct page_slot {
+	struct page_slot *next;		/* in its index bucket */
+	uint64_t	 index;
+	page_t		*page;
+} page_slot_t;
+
+typedef struct page_sink {
+	uint64_t	 length;
+	uint64_t	 slot_limit;	/* the most nonzero pages allowed */
+	page_slot_t	**slots;	/* by page index */
+	page_t		**contents;	/* by content hash */
+	uint64_t	 slot_count;
+	uint64_t	 page_count;	/* distinct contents held */
+	uint64_t	 page_peak;
+	uint64_t	 written_bytes;	/* through write_at, zeros included */
+	uint64_t	 write_limit;	/* the most write_at may take */
+	uint64_t	 zeroed_bytes;	/* through zero_range */
+	uint64_t	 zero_calls;
+} page_sink_t;
+
+static uint64_t
+page_hash(const unsigned char *bytes)
+{
+	uint64_t hash = UINT64_C(0xcbf29ce484222325);
+
+	for (size_t i = 0; i < PAGE_BYTES; i++)
+		hash = (hash ^ bytes[i]) * UINT64_C(0x100000001b3);
+	return (hash);
+}
+
+/* The link to page index's slot in its bucket, or to the bucket's end. */
+static page_slot_t **
+page_slot_link(page_sink_t *sink, uint64_t index)
+{
+	page_slot_t **link;
+
+	/* Fibonacci hashing: the product's top 20 bits pick one of the
+	 * PAGE_SLOT_BUCKETS buckets.
+	 */
+	link = &sink->slots[(index * UINT64_C(0x9e3779b97f4a7c15)) >> 44];
+	while (*link != NULL && (*link)->index != index)
+		link = &(*link)->next;
+	return (link);
+}
+
+/* A shared page holding bytes, with one more reference. */
+static page_t *
+page_intern(page_sink_t *sink, const unsigned char *bytes)
+{
+	page_t *page;
+	uint64_t hash;
+
+	hash = page_hash(bytes);
+	for (page = sink->contents[hash % PAGE_CONTENT_BUCKETS]; page != NULL;
+	    page = page->next) {
+		if (page->hash == hash && bcmp(page->bytes, bytes,
+		    PAGE_BYTES) == 0) {
+			page->refs++;
+			return (page);
+		}
+	}
+	page = malloc(sizeof(*page));
+	CHECK(page != NULL);
+	page->hash = hash;
+	page->refs = 1;
+	bcopy(bytes, page->bytes, PAGE_BYTES);
+	page->next = sink->contents[hash % PAGE_CONTENT_BUCKETS];
+	sink->contents[hash % PAGE_CONTENT_BUCKETS] = page;
+	if (++sink->page_count > sink->page_peak)
+		sink->page_peak = sink->page_count;
+	return (page);
+}
+
+static void
+page_release(page_sink_t *sink, page_t *page)
+{
+	page_t **link;
+
+	if (--page->refs != 0)
+		return;
+	link = &sink->contents[page->hash % PAGE_CONTENT_BUCKETS];
+	while (*link != page)
+		link = &(*link)->next;
+	*link = page->next;
+	free(page);
+	sink->page_count--;
+}
+
+/* Unlink and free the slot at link. */
+static void
+page_drop(page_sink_t *sink, page_slot_t **link)
+{
+	page_slot_t *slot = *link;
+
+	*link = slot->next;
+	page_release(sink, slot->page);
+	free(slot);
+	sink->slot_count--;
+}
+
+/* Store one whole page; an all-zero page is dropped. */
+static void
+page_store(page_sink_t *sink, uint64_t index, const unsigned char *bytes)
+{
+	page_slot_t **link, *slot;
+	page_t *old;
+
+	link = page_slot_link(sink, index);
+	slot = *link;
+	if (all_zero(bytes, PAGE_BYTES)) {
+		if (slot != NULL)
+			page_drop(sink, link);
+		return;
+	}
+	if (slot != NULL) {
+		/* Intern first: the new content may be the old one. */
+		old = slot->page;
+		slot->page = page_intern(sink, bytes);
+		page_release(sink, old);
+		return;
+	}
+	CHECK(sink->slot_count < sink->slot_limit);
+	slot = malloc(sizeof(*slot));
+	CHECK(slot != NULL);
+	slot->index = index;
+	slot->page = page_intern(sink, bytes);
+	slot->next = NULL;
+	*link = slot;
+	sink->slot_count++;
+}
+
+/* Copy page index's bytes, zeros when absent. */
+static void
+page_load(page_sink_t *sink, uint64_t index, unsigned char *bytes)
+{
+	page_slot_t *slot;
+
+	slot = *page_slot_link(sink, index);
+	if (slot != NULL)
+		bcopy(slot->page->bytes, bytes, PAGE_BYTES);
+	else
+		bzero(bytes, PAGE_BYTES);
+}
+
+/* Apply bytes, or zeros when bytes is NULL, to [offset, offset + length). */
+static void
+page_apply(page_sink_t *sink, uint64_t offset, const unsigned char *bytes,
+    uint64_t length)
+{
+	unsigned char page[PAGE_BYTES];
+	uint64_t index;
+	size_t within, n;
+
+	while (length > 0) {
+		index = offset / PAGE_BYTES;
+		within = (size_t)(offset % PAGE_BYTES);
+		n = PAGE_BYTES - within;
+		if (n > length)
+			n = (size_t)length;
+		if (n != PAGE_BYTES)
+			page_load(sink, index, page);
+		if (bytes != NULL)
+			bcopy(bytes, page + within, n);
+		else
+			bzero(page + within, n);
+		page_store(sink, index, page);
+		if (bytes != NULL)
+			bytes += n;
+		offset += n;
+		length -= n;
+	}
+}
+
+/* Zero [offset, offset + length): the partial pages at either end through
+ * page_apply, the whole pages between by dropping their slots, walking
+ * whichever is smaller, the range or the slots held.
+ */
+static void
+page_clear(page_sink_t *sink, uint64_t offset, uint64_t length)
+{
+	page_slot_t **link;
+	uint64_t first, last, head, tail;
+
+	head = (PAGE_BYTES - offset % PAGE_BYTES) % PAGE_BYTES;
+	if (head >= length) {
+		page_apply(sink, offset, NULL, length);
+		return;
+	}
+	tail = (offset + length) % PAGE_BYTES;
+	page_apply(sink, offset, NULL, head);
+	page_apply(sink, offset + length - tail, NULL, tail);
+	first = (offset + head) / PAGE_BYTES;
+	last = (offset + length - tail) / PAGE_BYTES;	/* exclusive */
+	if (last - first <= sink->slot_count) {
+		for (uint64_t index = first; index < last; index++) {
+			link = page_slot_link(sink, index);
+			if (*link != NULL)
+				page_drop(sink, link);
+		}
+		return;
+	}
+	for (size_t b = 0; b < PAGE_SLOT_BUCKETS; b++) {
+		link = &sink->slots[b];
+		while (*link != NULL) {
+			if ((*link)->index >= first && (*link)->index < last)
+				page_drop(sink, link);
+			else
+				link = &(*link)->next;
+		}
+	}
+}
+
+static fsimg_status_t
+page_size(void *argument, uint64_t *length, fsimg_error_t *error FSIMG_UNUSED)
+{
+	page_sink_t *sink = argument;
+
+	*length = sink->length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+page_read(void *argument, uint64_t offset, void *buffer, size_t length,
+    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	page_sink_t *sink = argument;
+	unsigned char page[PAGE_BYTES], *out = buffer;
+	size_t within, n;
+
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	*transferred = length;
+	while (length > 0) {
+		within = (size_t)(offset % PAGE_BYTES);
+		n = PAGE_BYTES - within;
+		if (n > length)
+			n = length;
+		page_load(sink, offset / PAGE_BYTES, page);
+		bcopy(page + within, out, n);
+		out += n;
+		offset += n;
+		length -= n;
+	}
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+page_write(void *argument, uint64_t offset, const void *buffer, size_t length,
+    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	page_sink_t *sink = argument;
+
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	CHECK(length <= sink->write_limit - sink->written_bytes);
+	page_apply(sink, offset, buffer, length);
+	sink->written_bytes += length;
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+/* Zeroing an empty sink, as the emitter does first, touches nothing. */
+static fsimg_status_t
+page_zero(void *argument, uint64_t offset, uint64_t length,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	page_sink_t *sink = argument;
+
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	if (sink->slot_count != 0)
+		page_clear(sink, offset, length);
+	sink->zeroed_bytes += length;
+	sink->zero_calls++;
+	return (FSIMG_OK);
+}
+
+/* Allocate the sink's tables and touch them, so that the resident set
+ * measured after this includes them.
+ */
+static void
+page_sink_open(page_sink_t *sink)
+{
+	bzero(sink, sizeof(*sink));
+	sink->slots = malloc(PAGE_SLOT_BUCKETS * sizeof(*sink->slots));
+	sink->contents = malloc(PAGE_CONTENT_BUCKETS * sizeof(*sink->contents));
+	CHECK(sink->slots != NULL && sink->contents != NULL);
+	memset(sink->slots, 0, PAGE_SLOT_BUCKETS * sizeof(*sink->slots));
+	memset(sink->contents, 0,
+	    PAGE_CONTENT_BUCKETS * sizeof(*sink->contents));
+}
+
+/* The memory the sink's slots and its peak of pages took. */
+static uint64_t
+page_sink_bytes(const page_sink_t *sink)
+{
+	return (sink->slot_count * sizeof(page_slot_t) +
+	    sink->page_peak * sizeof(page_t));
+}
+
+static void
+page_sink_close(page_sink_t *sink)
+{
+	for (size_t b = 0; b < PAGE_SLOT_BUCKETS; b++) {
+		while (sink->slots[b] != NULL)
+			page_drop(sink, &sink->slots[b]);
+	}
+	CHECK(sink->page_count == 0 && sink->slot_count == 0);
+	free(sink->slots);
+	free(sink->contents);
+}
+
+static fsimg_status_t
+page_io(fsimg_ctx_t *ctx, page_sink_t *sink, bool writable, fsimg_io_t **out)
+{
+	fsimg_io_ops_t ops;
+
+	fsimg_io_ops_init(&ops);
+	ops.get_size = page_size;
+	ops.read_at = page_read;
+	if (writable) {
+		ops.write_at = page_write;
+		ops.zero_range = page_zero;
+	}
+	*out = NULL;
+	return (fsimg_io_from_callbacks(ctx, &ops, sink, out, NULL));
+}
+
+/* The page sink itself, which the scale cases rely on: unaligned writes
+ * and reads, sharing of identical pages, and zeroing of ranges shorter and
+ * longer than the pages held, through both of page_clear's walks.
+ */
+static void
+test_page_sink(void)
+{
+	static const uint64_t offsets[] = { 100, 4096 * 7 + 3, 4096 * 20 };
+	unsigned char data[3 * PAGE_BYTES], back[3 * PAGE_BYTES];
+	page_sink_t sink;
+	size_t n;
+
+	page_sink_open(&sink);
+	sink.length = UINT64_C(1) << 40;
+	sink.slot_limit = 16;
+	sink.write_limit = UINT64_MAX;
+	memset(data, 0x5a, sizeof(data));
+	for (size_t i = 0; i < 3; i++)
+		CHECK(page_write(&sink, offsets[i], data, sizeof(data), &n,
+		    NULL) == FSIMG_OK && n == sizeof(data));
+	/* Three runs of 12 KiB touch 11 pages, sharing the all-0x5a one. */
+	CHECK(sink.slot_count == 11 && sink.page_count < sink.slot_count);
+	CHECK(page_read(&sink, offsets[1], back, sizeof(back), &n, NULL) ==
+	    FSIMG_OK && bcmp(back, data, sizeof(back)) == 0);
+	/* A short range walks its pages: the middle run loses bytes 10 to
+	 * 8191, its ends survive.
+	 */
+	CHECK(page_zero(&sink, offsets[1] + 10, 8182, NULL) == FSIMG_OK);
+	CHECK(page_read(&sink, offsets[1], back, sizeof(back), &n, NULL) ==
+	    FSIMG_OK);
+	CHECK(all_zero(back + 10, 8182) && back[9] == 0x5a &&
+	    back[8192] == 0x5a);
+	/* A range longer than the pages held walks the slot table. */
+	CHECK(page_zero(&sink, 1, sink.length - 1, NULL) == FSIMG_OK);
+	CHECK(sink.slot_count == 0 && sink.page_count == 0);
+	CHECK(page_read(&sink, offsets[0], back, sizeof(back), &n, NULL) ==
+	    FSIMG_OK && all_zero(back, sizeof(back)));
+	page_sink_close(&sink);
+}
+
+/* What one case measured in its child. */
+typedef struct scale_result {
+	fsimg_status_t	 plan_status;
+	uint64_t	 volume_bytes;
+	uint64_t	 memory_peak;
+	uint64_t	 plan_scratch;	/* the scratch peak after planning */
+	uint64_t	 scratch_peak;	/* and after reading back */
+	uint64_t	 io_calls;	/* emission's, the zeroing excluded */
+	uint64_t	 zero_calls;	/* the zeroing's, 64 KiB each */
+	uint64_t	 written_bytes;	/* through write_at */
+	uint64_t	 sink_pages;	/* peak distinct nonzero contents */
+	uint64_t	 sink_slots;	/* nonzero volume pages at the end */
+	uint64_t	 rss_growth;	/* beyond the sink's pages */
+	uint64_t	 files;
+	uint64_t	 directories;
+	uint64_t	 allocated;	/* blocks, as verification counts them */
+	uint64_t	 free;
+	double		 plan_seconds;
+	double		 emit_seconds;
+	double		 verify_seconds;
+} scale_result_t;
+
+typedef enum scale_kind {
+	SCALE_EMIT,	/* plan, emit and read back; --scale */
+	SCALE_LIMIT	/* plan only, at an object maximum; --scale-limits */
+} scale_kind_t;
+
+/* A case: its entries, generated without a catalog of their own, and its
+ * expectations.
+ */
+typedef struct scale_case {
+	const char	*name;
+	scale_kind_t	 kind;
+	uint64_t	 volume_bytes;	/* zero sizes automatically */
+	uint64_t	 memory_bytes;	/* zero is SCALE_BUDGET */
+	uint64_t	 scratch_bytes;
+	uint64_t	 max_entries;	/* zero keeps the default */
+	bool		 tree;		/* the volume holds the tree */
+	bool		 spills;	/* planning needs scratch beyond memory */
+	void		(*add)(fixture_t *, const struct scale_case *);
+	uint64_t	 count;		/* the generator's size */
+	fsimg_status_t	 expect;
+	const char	*refusal;	/* in the failing plan's message */
+	const char	*refusal_path;	/* the failing plan's path, if any */
+} scale_case_t;
+
+static double
+seconds_since(const struct timespec *start)
+{
+	struct timespec now;
+
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+	return ((double)(now.tv_sec - start->tv_sec) +
+	    (double)(now.tv_nsec - start->tv_nsec) / 1e9);
+}
+
+/* The process's peak resident set so far, in bytes. */
+static uint64_t
+peak_rss(void)
+{
+	struct rusage usage;
+
+	CHECK(getrusage(RUSAGE_SELF, &usage) == 0 && usage.ru_maxrss >= 0);
+#if defined(__APPLE__)
+	return ((uint64_t)usage.ru_maxrss);
+#else
+	return ((uint64_t)usage.ru_maxrss * 1024);
+#endif
+}
+
+/* A writer for a scale case: a 16 MiB budget, the default metadata cache,
+ * and scratch under the case's budget in directory, which the parent
+ * process made and removes.
+ */
+static void
+scale_fixture_open(fixture_t *fixture, const scale_case_t *sc,
+    const char *directory)
+{
+	fsimg_write_options_t write_options;
+	fsimg_options_t options;
+	fsimg_source_ops_t source_ops;
+
+	bzero(fixture, sizeof(*fixture));
+	CHECK(snprintf(fixture->directory, sizeof(fixture->directory), "%s",
+	    directory) < (int)sizeof(fixture->directory));
+	fixture->parent = open(fixture->directory,
+	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(fixture->parent != -1);
+	fsimg_options_init(&options);
+	options.memory_bytes = sc->memory_bytes != 0 ? sc->memory_bytes :
+	    SCALE_BUDGET;
+	options.scratch_bytes = sc->scratch_bytes;
+	if (sc->max_entries != 0)
+		options.max_entries = sc->max_entries;
+	options.scratch_directory_fd = fixture->parent;
+	options.max_open_files = 64;
+	options.loss = loss_report;
+	options.loss_argument = fixture;
+	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline, NULL) ==
+	    FSIMG_OK);
+	reproducible_options(&write_options);
+	write_options.volume_bytes = sc->volume_bytes;
+	CHECK(fsimg_writer_new(fixture->ctx, "qnx4", &write_options,
+	    &fixture->writer, NULL) == FSIMG_OK);
+	fsimg_source_ops_init(&source_ops);
+	source_ops.validate = provider_validate;
+	source_ops.read_at = provider_read;
+	CHECK(fsimg_writer_set_sources(fixture->writer, &source_ops, fixture,
+	    NULL) == FSIMG_OK);
+}
+
+/* Add one generated entry; the path is copied by the writer. */
+static void
+scale_add(fixture_t *fixture, const char *path, fsimg_entry_kind_t kind,
+    uint64_t size)
+{
+	spec_t spec = { path, kind, size, 0, NULL };
+
+	CHECK(add_one(fixture, &spec) == FSIMG_OK);
+}
+
+/* The tree, then 511 files of the 2^31 - 1 byte maximum and a filler that
+ * takes every block still free, all of zero content.
+ */
+static void
+scale_add_full(fixture_t *fixture, const scale_case_t *sc)
+{
+	static spec_t specs[TREE_COUNT + 511];
+	static char paths[511][16];
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fixture_t sizing;
+
+	bcopy(tree, specs, sizeof(tree));
+	for (size_t i = 0; i < 511; i++) {
+		snprintf(paths[i], sizeof(paths[i]), "/max%03zu", i);
+		specs[TREE_COUNT + i] = (spec_t){ paths[i], FSIMG_ENTRY_FILE,
+		    FILE_MAX, 0, NULL };
+	}
+	/* The filler takes what a plan of everything else leaves free. */
+	scale_fixture_open(&sizing, sc, fixture->directory);
+	add_specs(&sizing, specs, TREE_COUNT + 511, false);
+	CHECK(fsimg_writer_plan(sizing.writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	fixture_release(&sizing);
+	CHECK(info.free_bytes % 512 == 0 && info.free_bytes <= FILE_MAX);
+	add_specs(fixture, specs, TREE_COUNT + 511, false);
+	scale_add(fixture, "/zfiller", FSIMG_ENTRY_FILE, info.free_bytes);
+}
+
+/* count files in /wide, every sixteenth with a 49-byte name, each 1000
+ * bytes of zero content.
+ */
+static void
+scale_add_wide(fixture_t *fixture, const scale_case_t *sc)
+{
+	char path[64];
+
+	scale_add(fixture, "/wide", FSIMG_ENTRY_DIRECTORY, 0);
+	for (uint64_t i = 0; i < sc->count; i++) {
+		if (i % 16 == 0)
+			snprintf(path, sizeof(path), "/wide/%049" PRIu64, i);
+		else
+			snprintf(path, sizeof(path), "/wide/w%015" PRIu64, i);
+		scale_add(fixture, path, FSIMG_ENTRY_FILE, 1000);
+	}
+}
+
+/* count empty files with 49-byte names in /n. */
+static void
+scale_add_long(fixture_t *fixture, const scale_case_t *sc)
+{
+	char path[64];
+
+	scale_add(fixture, "/n", FSIMG_ENTRY_DIRECTORY, 0);
+	for (uint64_t i = 0; i < sc->count; i++) {
+		snprintf(path, sizeof(path), "/n/%049" PRIu64, i);
+		scale_add(fixture, path, FSIMG_ENTRY_FILE, 0);
+	}
+}
+
+/* count empty files with 16-byte names, direct records, in /d. */
+static void
+scale_add_children(fixture_t *fixture, const scale_case_t *sc)
+{
+	char path[32];
+
+	scale_add(fixture, "/d", FSIMG_ENTRY_DIRECTORY, 0);
+	for (uint64_t i = 0; i < sc->count; i++) {
+		snprintf(path, sizeof(path), "/d/%016" PRIu64, i);
+		scale_add(fixture, path, FSIMG_ENTRY_FILE, 0);
+	}
+}
+
+/* The tree's nonzero content, in whole blocks. */
+static uint64_t
+tree_content_bytes(void)
+{
+	uint64_t bytes = 0;
+
+	for (size_t i = 0; i < TREE_COUNT; i++) {
+		if (tree[i].source != 0)
+			bytes += (tree[i].size + 511) / 512 * 512;
+	}
+	return (bytes);
+}
+
+/* Read the volume back: open, list every entry, check the tree's content
+ * when the case holds it, and verify the structure.
+ */
+static void
+scale_read_back(fixture_t *fixture, page_sink_t *sink, scale_result_t *result,
+    bool tree_content)
+{
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	const fsimg_entry_t *entry;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	unsigned char buffer[4096];
+	uint64_t offset, listed;
+	uint32_t crc;
+	size_t length;
+	fsimg_status_t status;
+
+	CHECK(page_io(fixture->ctx, sink, false, &input) == FSIMG_OK);
+	CHECK(fsimg_reader_open(fixture->ctx, input, NULL, &reader, NULL) ==
+	    FSIMG_OK);
+	listed = 0;
+	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
+		listed++;
+		if (!tree_content)
+			continue;
+		for (size_t i = 0; i < TREE_COUNT; i++) {
+			if (strcmp(entry->path, tree[i].path) != 0 ||
+			    tree[i].kind != FSIMG_ENTRY_FILE)
+				continue;
+			crc = 0;
+			for (offset = 0; offset < entry->size; offset += length) {
+				CHECK(fsimg_reader_read_at(reader, offset,
+				    buffer, sizeof(buffer), &length, NULL) ==
+				    FSIMG_OK);
+				CHECK(length > 0);
+				crc = crc_update(crc, buffer, length);
+			}
+			CHECK(crc_finish(crc, entry->size) ==
+			    expected_crc(tree[i].source, tree[i].size));
+		}
+	}
+	CHECK(status == FSIMG_DONE);
+	fsimg_reader_free(reader);
+	CHECK(fsimg_reader_open(fixture->ctx, input, NULL, &reader, NULL) ==
+	    FSIMG_OK);
+	status = fsimg_verify(reader, 0, &report, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "scale verify: %d %s\n", status, error.message);
+	CHECK(status == FSIMG_OK && report.complete);
+	/* Verification counts the root, which the listing does not show. */
+	CHECK(report.files + report.directories == listed + 1);
+	result->files = report.files;
+	result->directories = report.directories;
+	result->allocated = report.allocated_clusters;
+	result->free = report.free_clusters;
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+}
+
+/* Emit the plan into the sink and read it back. The sink takes no more
+ * bytes than the metadata and the tree's content, and holds no more pages
+ * than they fill, plus one for each edge an object or a 64-byte record
+ * leaves within a page; either limit fails the write that crosses it.
+ */
+static void
+scale_emit(fixture_t *fixture, const scale_case_t *sc,
+    const fsimg_plan_info_t *info, page_sink_t *sink, scale_result_t *result)
+{
+	fsimg_stats_t before, after;
+	fsimg_io_t *output;
+	struct timespec start;
+	uint64_t content;
+
+	content = sc->tree ? tree_content_bytes() : 0;
+	sink->length = info->volume_bytes;
+	sink->write_limit = info->metadata_bytes + content;
+	sink->slot_limit = (info->metadata_bytes + content) / PAGE_BYTES +
+	    2 * (sc->tree ? TREE_COUNT : 0) + 1024;
+	CHECK(page_io(fixture->ctx, sink, true, &output) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &before, NULL) == FSIMG_OK);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	CHECK(fsimg_writer_emit(fixture->writer, output, NULL) == FSIMG_OK);
+	result->emit_seconds = seconds_since(&start);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &after, NULL) == FSIMG_OK);
+	fsimg_io_free(output);
+	result->zero_calls = sink->zero_calls;
+	result->io_calls = after.io_calls - before.io_calls - sink->zero_calls;
+	result->written_bytes = sink->written_bytes;
+	CHECK(sink->zeroed_bytes == info->volume_bytes);
+
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	scale_read_back(fixture, sink, result, sc->tree);
+	result->verify_seconds = seconds_since(&start);
+	/* Verification finds free exactly the blocks the plan left free; the
+	 * tree's volume has none.
+	 */
+	CHECK(result->free * 512 == info->free_bytes);
+	CHECK(!sc->tree || result->free == 0);
+	result->sink_pages = sink->page_peak;
+	result->sink_slots = sink->slot_count;
+}
+
+/* One case, in the calling process, with scratch in directory. */
+static void
+scale_run(const scale_case_t *sc, const char *directory,
+    scale_result_t *result)
+{
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_stats_t stats;
+	fsimg_error_t error;
+	page_sink_t sink;
+	fixture_t fixture;
+	struct timespec start;
+	uint64_t baseline, sink_bytes;
+
+	bzero(result, sizeof(*result));
+	page_sink_open(&sink);
+	baseline = peak_rss();
+	scale_fixture_open(&fixture, sc, directory);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	sc->add(&fixture, sc);
+	bzero(&error, sizeof(error));
+	result->plan_status = fsimg_writer_plan(fixture.writer, &plan, &error);
+	result->plan_seconds = seconds_since(&start);
+	if (result->plan_status != sc->expect)
+		fprintf(stderr, "scale %s: plan %d %s\n", sc->name,
+		    result->plan_status, error.message);
+	CHECK(result->plan_status == sc->expect);
+	CHECK(sc->refusal == NULL || strstr(error.message, sc->refusal) !=
+	    NULL);
+	CHECK(sc->refusal_path == NULL || strcmp(error.path,
+	    sc->refusal_path) == 0);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	result->plan_scratch = stats.scratch_peak;
+	CHECK(!sc->spills || result->plan_scratch > SCALE_BUDGET);
+	if (result->plan_status == FSIMG_OK) {
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		result->volume_bytes = info.volume_bytes;
+		if (sc->kind == SCALE_EMIT)
+			scale_emit(&fixture, sc, &info, &sink, result);
+	}
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	result->memory_peak = stats.memory_peak;
+	result->scratch_peak = stats.scratch_peak;
+	fixture_release(&fixture);
+	sink_bytes = page_sink_bytes(&sink);
+	page_sink_close(&sink);
+	result->rss_growth = peak_rss() - baseline;
+	result->rss_growth = result->rss_growth > sink_bytes ?
+	    result->rss_growth - sink_bytes : 0;
+}
+
+/* Where scratch directories go: QNX4_SCALE_SCRATCH, such as a RAM disk,
+ * or the current directory.
+ */
+static const char *
+scale_scratch_parent(void)
+{
+	const char *parent = getenv("QNX4_SCALE_SCRATCH");
+
+	return (parent != NULL && parent[0] != '\0' ? parent : ".");
+}
+
+/* Run one case in a child process and collect its measurements. The
+ * parent makes the scratch directory and removes it, so a child that fails
+ * a check leaves nothing behind: its scratch files are unlinked as they
+ * are created.
+ */
+static void
+scale_measure(const scale_case_t *sc, scale_result_t *result)
+{
+	char directory[sizeof(((fixture_t *)0)->directory)];
+	int channel[2], status;
+	pid_t child;
+
+	CHECK(snprintf(directory, sizeof(directory), "%s/qnx4-scale-XXXXXX",
+	    scale_scratch_parent()) < (int)sizeof(directory));
+	CHECK(mkdtemp(directory) != NULL);
+	CHECK(pipe(channel) == 0);
+	CHECK(fflush(stdout) == 0 && fflush(stderr) == 0);
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		CHECK(close(channel[0]) == 0);
+		scale_run(sc, directory, result);
+		CHECK(write(channel[1], result, sizeof(*result)) ==
+		    (ssize_t)sizeof(*result));
+		_exit(0);
+	}
+	CHECK(close(channel[1]) == 0);
+	CHECK(waitpid(child, &status, 0) == child);
+	if (WIFSIGNALED(status))
+		fprintf(stderr, "scale: the child died of signal %d\n",
+		    WTERMSIG(status));
+	CHECK(rmdir(directory) == 0 || errno == ENOENT);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(read(channel[0], result, sizeof(*result)) ==
+	    (ssize_t)sizeof(*result));
+	CHECK(close(channel[0]) == 0);
+}
+
+/* Whether the scratch filesystem has room for a case's scratch budget,
+ * which the context enforces, and 1 GiB more; a case that does not fit is
+ * skipped, not run.
+ */
+static bool
+scale_room(const scale_case_t *sc)
+{
+	struct statvfs fs;
+	uint64_t need;
+
+	need = sc->scratch_bytes + (UINT64_C(1) << 30);
+	CHECK(statvfs(scale_scratch_parent(), &fs) == 0);
+	if ((uint64_t)fs.f_bavail * fs.f_frsize >= need)
+		return (true);
+	printf("SKIP: %s needs %" PRIu64 " bytes of free scratch space\n",
+	    sc->name, need);
+	return (false);
+}
+
+/* Run the cases of one kind, or those QNX4_SCALE_CASE names a part of.
+ * Returns 77 when a case was skipped or none ran.
+ */
+static int
+test_scale(scale_kind_t kind)
+{
+	static const scale_case_t cases[] = {
+		{ .name = "2^31 blocks, full", .kind = SCALE_EMIT,
+		    .volume_bytes = (UINT64_C(1) << 31) * 512,
+		    .scratch_bytes = UINT64_C(1) << 30, .tree = true,
+		    .add = scale_add_full, .expect = FSIMG_OK },
+		{ .name = "200,000 files in one directory", .kind = SCALE_EMIT,
+		    .scratch_bytes = UINT64_C(1) << 30, .spills = true,
+		    .add = scale_add_wide, .count = 200000,
+		    .expect = FSIMG_OK },
+		{ .name = "4,194,288 long names", .kind = SCALE_LIMIT,
+		    .memory_bytes = SCALE_LIMIT_BUDGET,
+		    .scratch_bytes = UINT64_C(4) << 30, .add = scale_add_long,
+		    .count = 4194288, .expect = FSIMG_OK },
+		{ .name = "4,194,289 long names", .kind = SCALE_LIMIT,
+		    .memory_bytes = SCALE_LIMIT_BUDGET,
+		    .scratch_bytes = UINT64_C(4) << 30, .add = scale_add_long,
+		    .count = 4194289, .expect = FSIMG_ERANGE,
+		    .refusal = ".longfilenames exceeds 2 GiB" },
+		{ .name = "33,554,366 children", .kind = SCALE_LIMIT,
+		    .memory_bytes = SCALE_LIMIT_BUDGET,
+		    .scratch_bytes = UINT64_C(24) << 30,
+		    .max_entries = 33554368, .add = scale_add_children,
+		    .count = 33554366, .expect = FSIMG_OK },
+		{ .name = "33,554,367 children", .kind = SCALE_LIMIT,
+		    .memory_bytes = SCALE_LIMIT_BUDGET,
+		    .scratch_bytes = UINT64_C(24) << 30,
+		    .max_entries = 33554368, .add = scale_add_children,
+		    .count = 33554367, .expect = FSIMG_ERANGE,
+		    .refusal = "directory exceeds 2 GiB", .refusal_path = "/d" }
+	};
+	scale_result_t r;
+	const char *only;
+	unsigned ran, skipped;
+
+	only = getenv("QNX4_SCALE_CASE");
+	ran = skipped = 0;
+	printf("%-31s %4s %14s %8s %11s %11s %8s %8s %10s %6s %6s %9s %7s "
+	    "%6s %6s\n", "case", "plan", "volume", "memory", "plan scr",
+	    "scratch", "io", "zeroing", "written", "pages", "slots", "rss",
+	    "plan s", "emit s", "read s");
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		if (cases[i].kind != kind || (only != NULL &&
+		    strstr(cases[i].name, only) == NULL))
+			continue;
+		if (!scale_room(&cases[i])) {
+			skipped++;
+			continue;
+		}
+		scale_measure(&cases[i], &r);
+		ran++;
+		printf("%-31s %4d %14" PRIu64 " %8" PRIu64 " %11" PRIu64
+		    " %11" PRIu64 " %8" PRIu64 " %8" PRIu64 " %10" PRIu64
+		    " %6" PRIu64 " %6" PRIu64 " %9" PRIu64 " %7.2f %6.2f"
+		    " %6.2f\n", cases[i].name, (int)r.plan_status,
+		    r.volume_bytes, r.memory_peak, r.plan_scratch,
+		    r.scratch_peak, r.io_calls, r.zero_calls,
+		    r.written_bytes, r.sink_pages, r.sink_slots,
+		    r.rss_growth, r.plan_seconds, r.emit_seconds,
+		    r.verify_seconds);
+		/* The resident bounds are the emitting cases'; the limit
+		 * cases run under a budget large enough to plan quickly.
+		 */
+		CHECK(r.scratch_peak <= cases[i].scratch_bytes);
+		if (kind == SCALE_EMIT) {
+			CHECK(r.memory_peak <= SCALE_MEMORY);
+			CHECK(r.rss_growth <= SCALE_RSS_GROWTH);
+		}
+	}
+	return (skipped != 0 || ran == 0 ? 77 : 0);
+}
+
 /* Run one test; QNX4_WRITE_DEBUG names each as it starts. */
 #define RUN(test) do { \
 	if (getenv("QNX4_WRITE_DEBUG") != NULL) \
@@ -2692,6 +3642,10 @@ main(int argc, char **argv)
 	if ((argc == 5 || argc == 6) && strcmp(argv[1], "--create") == 0)
 		return (create_external(argv[2], argv[3], argv[4],
 		    argc == 6 ? argv[5] : NULL));
+	if (argc == 2 && strcmp(argv[1], "--scale") == 0)
+		return (test_scale(SCALE_EMIT));
+	if (argc == 2 && strcmp(argv[1], "--scale-limits") == 0)
+		return (test_scale(SCALE_LIMIT));
 	CHECK(argc == 1);
 	RUN(test_checker);
 	RUN(test_validation);
@@ -2708,5 +3662,6 @@ main(int argc, char **argv)
 	RUN(test_labels);
 	RUN(test_faults);
 	RUN(test_injected);
+	RUN(test_page_sink);
 	return (0);
 }

@@ -589,9 +589,12 @@ size_tables(qnx4_plan_t *plan, fsimg_error_t *error)
 	    QNX4_SLOTS_PER_BLOCK;
 	names = ((uint64_t)plan->long_names + QNX4_NAMES_STEP - 1) /
 	    QNX4_NAMES_STEP * QNX4_NAMES_STEP;
-	if (!object_fits(slots / QNX4_SLOTS_PER_BLOCK) || !object_fits(names))
+	if (!object_fits(slots / QNX4_SLOTS_PER_BLOCK))
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
-		    "QNX4 .inodes or .longfilenames exceeds 2 GiB"));
+		    "QNX4 .inodes exceeds 2 GiB"));
+	if (!object_fits(names))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
+		    "QNX4 .longfilenames exceeds 2 GiB"));
 	plan->inode_slots = (uint32_t)slots;
 	plan->inodes_blocks = plan->inode_slots / QNX4_SLOTS_PER_BLOCK;
 	plan->names_blocks = (uint32_t)names;

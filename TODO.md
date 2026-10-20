@@ -35,12 +35,12 @@
   input relay runs confined is also unstated in
   [architecture.md](specs/architecture.md).
 
-* [High] **QNX4 scale and interoperability** (`lib/formats/qnx4/`): the
+* [Medium] **QNX4 interoperability** (`lib/formats/qnx4/`): the
   [format design](specs/design-qnx4.md) and [driver design](specs/design-qnx4-driver.md)
   describe the reader, verifier and writer for native QNX4 volumes and the
   PCM 3.1 navigation partition, and all three are registered. The
-  [work breakdown](docs/todo-qnx4.md) holds the open items: the writer's
-  scale cases, the Linux and qnxprobe comparisons and head-unit acceptance.
+  [work breakdown](docs/todo-qnx4.md) holds the open items: the Linux and
+  qnxprobe comparisons and head-unit acceptance.
   [Research evidence](docs/qnx4-research.md) owns the native observations.
 
 * [Medium] **Specification-driven testing** (`test/spec/`, `test/spec.sh.in`,

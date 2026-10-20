@@ -441,8 +441,8 @@ and the `.inodes` table read in full only by verification. On APFS:
 
 The per-kind byte counts exclude the format registry's probe of the image's
 first 8,704 bytes, which the image bytes include, and give the metadata
-passes. At `N` = 2^31 the listing loads the bitmap windows of the self-check and of the walks, and
-verification adds one pass over all 268,435,456 bitmap bytes, compared a
+passes. At `N` = 2^31 the listing loads the bitmap windows of the
+self-check and of the walks, and verification adds one pass over all 268,435,456 bitmap bytes, compared a
 window at a time with the claimed bitset, which lives in scratch: the
 verification's 65,553 image calls and 131,115 I/O calls in all are one
 4 KiB window of each at a time, while the process stays at 5 MB. The wide
@@ -461,6 +461,68 @@ child's peak, almost all of it the operation's growth. Ordinary
 2,000 extents and 255 levels, the file at the default 256-component depth
 limit; it exits 77 when the host cannot hold the 64 GiB sparse volume of
 the bitmap-window case.
+
+The QNX4 writer's scale cases write no image file. Each emits into a
+callback sink that keeps only the volume's nonzero 4 KiB pages in memory,
+sharing identical ones, and reads the volume back through the same sink:
+the common emitter zeroes the sink through `zero_range` first and skips
+zero sources, so free blocks and zero payload are never written. The sink
+refuses more pages than the plan's metadata and the tree's content need,
+so a writer that wrote free space fails the case instead of filling
+memory. Every case runs in a child process with an explicit scratch budget
+and a scratch directory the parent creates and removes, under
+`QNX4_SCALE_SCRATCH` (such as a RAM disk) or the current directory, and
+only when that filesystem has the scratch budget and 1 GiB more free; a
+skipped case makes the run exit 77:
+
+```sh
+./test-qnx4-write --scale
+QNX4_SCALE_SCRATCH=/Volumes/scratch ./test-qnx4-write --scale-limits
+```
+
+`--scale`, part of `check-scale`, runs under a 16 MiB context budget. It
+emits a full 2^31-block volume, 1 TiB: the tree, 511 files of 2^31 - 1
+zero bytes and a filler that takes every remaining block, so the bitmap is
+ones throughout and the last extent ends in block `N`. It reads the tree's
+files back with their checksums, verifies the structure, and requires
+verification to find no free block. It also emits one directory of
+200,000 files, one in sixteen with a 49-byte name, whose catalog and rows
+spill past the budget into scratch. Both check charged memory at most
+8 MiB, the child's RSS growth beyond the sink's pages at most 64 MiB, and
+the bytes written at most the plan's metadata and the tree's content. On
+APFS:
+
+| Case | Memory peak | Plan scratch | Scratch peak | Emission I/O calls | Zeroing calls | Bytes written | Distinct pages | Nonzero pages | RSS growth | Plan s | Emit s | Read s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2^31 blocks, full | 5,491,216 | 0 | 268,630,479 | 4,698 | 16,777,216 | 268,480,766 | 25 | 65,558 | 19,250,072 | 0.01 | 1.39 | 11.55 |
+| 200,000 files | 5,491,816 | 125,438,790 | 125,438,790 | 239,686 | 3,432 | 20,056,704 | 4,890 | 4,900 | 21,539,376 | 5.03 | 1.84 | 3.80 |
+
+The full volume's scratch peak is the reader's claimed bitset of 2^31 bits;
+the writer plans its 538 entries in memory. Emission writes the 256 MiB
+bitmap, ones that share one page, and its metadata in 4,698 calls; zeroing
+the 1 TiB sink first takes 16,777,216 calls of 64 KiB that touch nothing.
+The wide directory's scratch is its catalog and rows, about 630 bytes per
+entry. The whole run takes about 24 seconds with the free disk space
+unchanged.
+
+`--scale-limits` plans only, at the format's 2 GiB object limit, under a
+1 GiB context budget: 4,194,288 long names fill `.longfilenames` and one
+more is refused with ".longfilenames exceeds 2 GiB", and a directory of
+33,554,366 children fills its 2 GiB of directory blocks and one more child
+is refused with "directory exceeds 2 GiB" at `/d`. Each case's metadata
+cache holds 272 MB, a quarter of the budget; the rest of the catalog and
+its sort runs spill. With scratch on a RAM disk:
+
+| Case | Status | Volume bytes | Memory peak | Scratch peak |
+| --- | ---: | ---: | ---: | ---: |
+| 4,194,288 long names | OK | 2,685,015,040 | 271,960,632 | 3,019,890,212 |
+| 4,194,289 long names | ERANGE | | 271,960,632 | 3,019,890,932 |
+| 33,554,366 children | OK | 2,148,025,856 | 271,960,632 | 20,535,325,945 |
+| 33,554,367 children | ERANGE | | 271,960,632 | 20,535,326,557 |
+
+The long-name cases plan in about a minute each and the directory cases in
+five to nine minutes each, so the run needs about 21 GiB of free scratch
+space and a quarter of an hour.
 
 The extended ten-million-file catalog uses the same generated provider, 10,000
 explicit directories, a 256 MiB budget, and no retained per-file object or FD:
