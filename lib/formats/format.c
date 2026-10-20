@@ -13,7 +13,8 @@
  */
 static const fsimg_format_t *const formats[] = {
 	&fsimg_fat_format,
-	&fsimg_exfat_format
+	&fsimg_exfat_format,
+	&fsimg_qnx6_format
 };
 
 #define FORMAT_COUNT	(sizeof(formats) / sizeof(formats[0]))

@@ -53,8 +53,10 @@ def same_bytes(first, second):
 def test_formats(executable, root):
     decoded = completed(invoke(executable, root, ["formats", "-j"]))
     formats = {record["name"]: record for record in decoded if record["type"] == "format"}
-    assert set(formats) == {"fat12", "fat16", "fat32", "exfat"}
-    assert all(record["capabilities"] == 7 for record in formats.values())
+    assert set(formats) == {"fat12", "fat16", "fat32", "exfat", "qnx6"}
+    assert all(record["capabilities"] == 7 for name, record in formats.items()
+               if name != "qnx6")
+    assert formats["qnx6"]["capabilities"] == 5
     assert formats["exfat"]["write_cluster_bytes"][-1] == 32 * 1024 * 1024
     assert isinstance(formats["exfat"]["max_file_bytes"], str)
     capabilities = next(record for record in decoded if record["type"] == "capabilities")
@@ -66,9 +68,13 @@ def test_formats(executable, root):
 
 def test_posix_metadata(executable, root):
     """FAT and exFAT store no POSIX fields or links: -p imports become counted
-    losses that leave image bytes unchanged, and a link fails planning."""
+    losses that leave image bytes unchanged, and a link fails planning. The
+    read-only QNX6 format stores every kind and the POSIX fields."""
     decoded = completed(invoke(executable, root, ["formats", "-j"]))
     formats = {record["name"]: record for record in decoded if record["type"] == "format"}
+    qnx6 = formats.pop("qnx6")
+    assert qnx6["entry_kinds"] == 15 and qnx6["metadata_fields"] == 0x77
+    assert qnx6["max_label_bytes"] == 0
     assert all(record["entry_kinds"] == 3 for record in formats.values())
     assert all(record["metadata_fields"] == 15 for record in formats.values())
     assert formats["fat16"]["max_label_bytes"] == 11
@@ -154,7 +160,8 @@ def test_human_help(executable, root):
                               b"fat12   yes   yes    yes\n"
                               b"fat16   yes   yes    yes\n"
                               b"fat32   yes   yes    yes\n"
-                              b"exfat   yes   yes    yes\n")
+                              b"exfat   yes   yes    yes\n"
+                              b"qnx6    yes   no     yes\n")
     assert formats.stderr == b""
     verbose = invoke(executable, root, ["formats", "-v"])
     assert verbose.stdout == formats.stdout and b"Sandbox backend:" in verbose.stderr

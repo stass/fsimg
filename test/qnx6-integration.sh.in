@@ -1,0 +1,116 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+#
+# Independent QNX6 evidence. The fixtures are external inputs that are never
+# redistributed:
+#   FSIMG_QNX6_F1      the NFI research image test_image.bin (SHA-256 checked)
+#   FSIMG_QNX6_NATIVE  a directory of QNX 6.5.0 captures, *.img.gz, and
+#                      *.img.zst when zstd is installed and
+#                      FSIMG_QNX6_LARGE=1 (they expand to 5 GB each)
+# The Linux kernel reader runs on a Linux host as root. Each unavailable
+# check is reported as a skip.
+set -eu
+f1_sha256=7dc3b4f771d9c74af6df0643124c18450357cdb9b01c892d48613b11dc3a3554
+ran=0
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-qnx6-oracle-XXXXXX")
+trap 'umount "$fixture/mnt" 2>/dev/null || true; rm -rf "$fixture"' EXIT HUP INT TERM
+
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    else
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    fi
+}
+
+# The research fixture: two snapshots, the selected one committed with the
+# mounted bit, hard links, symbolic links and a FIFO.
+f1=${FSIMG_QNX6_F1:-}
+if test -n "$f1"; then
+    if test "$(sha256 "$f1")" != "$f1_sha256"; then
+        echo "FAIL: $f1 is not the pinned research fixture" >&2
+        exit 1
+    fi
+    ./test-qnx6 --read-external "$f1"
+    ran=1
+else
+    echo 'SKIP: FSIMG_QNX6_F1 is not set (research fixture F1)'
+fi
+
+# Native captures: every one verifies except the torn header and the failed
+# oversized format, which QNX itself refuses.
+native=${FSIMG_QNX6_NATIVE:-}
+if test -n "$native"; then
+    for capture in "$native"/*.img.gz "$native"/*.img.zst; do
+        test -f "$capture" || continue
+        name=$(basename "$capture")
+        case $name in
+        *.zst)
+            if test "${FSIMG_QNX6_LARGE:-0}" != 1; then
+                echo "SKIP: $name (set FSIMG_QNX6_LARGE=1)"
+                continue
+            fi
+            if ! command -v zstd >/dev/null 2>&1; then
+                echo "SKIP: $name (zstd is required)"
+                continue
+            fi
+            zstd -q -d -c "$capture" > "$fixture/image"
+            ;;
+        *)
+            gzip -d -c "$capture" > "$fixture/image"
+            ;;
+        esac
+        printf '%s: ' "$name"
+        case $name in
+        tornheader-* | deep-b512-i1100000.*)
+            # A refusal at open with the expected status: the torn header
+            # is corrupt (-5), and the failed format is not QNX6 (-4). A
+            # crash or any other failure is not this rejection.
+            case $name in
+            tornheader-*) expected='open -5 ' ;;
+            *) expected='open -4 ' ;;
+            esac
+            status=0
+            ./test-qnx6 --read-external "$fixture/image" > "$fixture/out" ||
+                status=$?
+            cat "$fixture/out"
+            if test "$status" != 1 ||
+                ! grep -q "^$expected" "$fixture/out"; then
+                echo "FAIL: $name was not refused with '$expected'" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            ./test-qnx6 --read-external "$fixture/image"
+            ;;
+        esac
+        rm -f "$fixture/image"
+    done
+    ran=1
+else
+    echo 'SKIP: FSIMG_QNX6_NATIVE is not set (QNX 6.5.0 captures)'
+fi
+
+# The Linux kernel's read-only qnx6 driver as an independent reader of the
+# generated sample: every regular file it shows must match fsimg's bytes.
+if test "$(uname -s)" = Linux && test "$(id -u)" = 0 &&
+    { grep -qw qnx6 /proc/filesystems || modprobe qnx6 2>/dev/null; }; then
+    ./test-qnx6 --seed "$fixture/sample.img"
+    mkdir "$fixture/mnt"
+    mount -t qnx6 -o ro,loop "$fixture/sample.img" "$fixture/mnt"
+    (cd "$fixture/mnt" && find . -type f) | while IFS= read -r path; do
+        ./fsimg cat -i "$fixture/sample.img" "${path#.}" > "$fixture/cat"
+        cmp "$fixture/mnt/$path" "$fixture/cat"
+    done
+    test "$(cd "$fixture/mnt" && find . -mindepth 1 | wc -l)" -eq \
+        "$(./fsimg ls -r -i "$fixture/sample.img" | wc -l)"
+    umount "$fixture/mnt"
+    ran=1
+else
+    echo 'SKIP: the Linux qnx6 kernel reader needs a Linux host and root'
+fi
+
+if test "$ran" = 0; then
+    exit 77
+fi

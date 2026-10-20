@@ -85,7 +85,8 @@ corrupt(fsimg_error_t *error, const char *message)
 }
 
 /* A displayed component is nonempty valid UTF-8 without a separator, and is
- * neither "." nor "..". Format rules beyond that belong to the driver.
+ * neither "." nor "..". Its length is bounded by the record's name buffer;
+ * format rules beyond that, such as a name length limit, belong to the driver.
  */
 static bool
 component_valid(const char *name, size_t length)
@@ -97,7 +98,7 @@ component_valid(const char *name, size_t length)
 	    (length == 2 && name[0] == '.' && name[1] == '.'))
 		return (false);
 	return (fsimg_utf8_to_utf16(name, length, NULL, 0, &units, NULL) ==
-	    FSIMG_OK && units <= 255);
+	    FSIMG_OK);
 }
 
 /* Split the record in walk->record: the name is NUL-terminated within the

@@ -213,6 +213,11 @@ storage. The latter reaches FAT32's minimum geometry without a large resident
 seed; it does not allocate or transfer the logical volume. The target fuzzes
 probe, directory/name parsing, chain traversal, content/range reads, index
 construction, and full verification; it also checks cleanup accounting.
+`fuzz/qnx6.c` forces the QNX6 decoder and reads each input as the exact slice,
+since QNX6 finds its second header from the slice length; its seed is a 64 KiB
+B = 512 volume from the independent generator holding every entry kind,
+inline and long names and a depth-1 tree, with a 1 MiB input ceiling and the
+same budgets.
 The same target builds `fuzz/protocol.c` and runs 1000 mutations with a 64 KiB
 input ceiling and five-second timeout. It exercises production framing, job
 codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker lifecycle ordering
@@ -229,11 +234,12 @@ FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 The exact standalone commands from a configured build are:
 
 ```sh
-make test-fat test-exfat test-protocol
+make test-fat test-exfat test-qnx6 test-protocol
 sh ../build-aux/fuzz.sh "$(cd .. && pwd)"
 ```
 
-The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `protocol-fuzz-corpus/` and
+The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `qnx6-fuzz-corpus/`,
+`protocol-fuzz-corpus/` and
 libFuzzer crash artifacts are disposable build outputs. Existing corpus seeds
 and mutations are reused. `FUZZ_SECONDS=60 make check-fuzz` selects a finite
 wall-clock allowance per corpus instead of the 1000-mutation smoke budget. The value is decimal
@@ -509,8 +515,8 @@ Sanitizer execution evidence:
 
 | Host | Command | Result |
 | --- | --- | --- |
-| macOS | `make check-asan` | 23 pass, 3 tool/platform skips |
-| macOS | `make check-ubsan` | 23 pass, 3 tool/platform skips |
+| macOS | `make check-asan` | 27 pass, 4 tool/platform skips |
+| macOS | `make check-ubsan` | 27 pass, 4 tool/platform skips |
 | macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
 | Linux | `make check-asan` | 26 pass |
 | Linux | `make check-lsan` | 26 pass |
@@ -582,6 +588,44 @@ an emitted image read-only and compares all 70,003 zero-tail bytes. A separate
 Unicode names, nested directories and fragmented content; fsimg verifies six
 files, two directories and 196,707 initialized payload bytes. These separate
 mount checks require fixture setup privileges; ordinary tests do not mount.
+
+`test-qnx6` builds classic QNX6 volumes with its own generator, written from
+the format design with separate offset tables, a long-division CRC and its
+own name checksum; it shares no code with `lib/formats/qnx6/`. It reads every
+entry kind, inline, 28-byte and 510-byte names, UTF-8 names and full metadata
+in both byte orders at all four block sizes with checksums on and off, then
+verifies payload and free counts. Further cases cover depth-2 fragmented
+files, inode trees of depth 0, 1 and 2, a depth-1 bitmap tree, an object in
+block N - 1, short and padded slices, two snapshots in either order, the
+mounted bit, and over eighty single-field mutations of headers, trees, inodes,
+names, directories and the bitmap, each checked for its expected status.
+Allocation-failure injection at every step, a failing read range,
+cancellation and a work limit check cleanup. `--seed` writes the fuzz seed and
+`--read-external` lists and verifies an image file.
+
+`test/qnx6-integration.sh` reads external evidence that is never
+redistributed, and skips what is absent:
+
+```sh
+FSIMG_QNX6_F1=/path/to/test_image.bin \
+FSIMG_QNX6_NATIVE=/path/to/captures FSIMG_QNX6_LARGE=1 \
+    ./test/qnx6-integration.sh
+```
+
+`FSIMG_QNX6_F1` names the NFI research fixture, checked against its pinned
+SHA-256. `FSIMG_QNX6_NATIVE` names a directory of QNX 6.5.0 captures
+(`*.img.gz`, and with `FSIMG_QNX6_LARGE=1` and zstd the 5 GB `*.img.zst`
+ones); each must verify except the torn-header capture and the oversized
+format that QNX itself refused. On macOS all 31 native captures and F1 behave
+so: free block counts equal native `chkqnx6fs` output, and the 9,830,368-block
+volume with 1,048,576 inodes and a depth-3 file verifies with payload in under
+a second at 16 MiB RSS. The four QNX6 partitions of the measured PCM 3.1 HDD,
+read with `fsimg verify -b -z` at their partition offsets and lengths, also
+verify, including the head unit's original populated partition. On a Linux
+host as root the script mounts the generated sample with the kernel's qnx6
+driver and compares every regular file with `fsimg cat`; elsewhere that
+comparison is an explicit skip, and no Linux result is recorded
+([TODO](todo-qnx6.md)).
 
 The sparse exFAT qualification uses a 64 MiB library budget:
 

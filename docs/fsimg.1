@@ -40,7 +40,8 @@
 .Fl h | V
 .Sh DESCRIPTION
 .Nm
-reads and creates FAT12, FAT16, FAT32 and ordinary one-FAT exFAT volumes.
+reads and creates FAT12, FAT16, FAT32 and ordinary one-FAT exFAT volumes,
+and reads classic QNX6 Power-Safe volumes.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.
 It never modifies an existing image in place.
@@ -119,6 +120,11 @@ Select the supported FAT short-name codepage explicitly.
 .El
 .Pp
 Partition selection is explicit through a byte slice; no partition is guessed.
+QNX6 locates its second superblock in the last whole 4096-byte unit of the
+slice, so
+.Fl z
+must be the exact partition length.
+QNX6 names compare byte for byte, and hard links list as separate entries.
 .Cm info
 reports header validation, geometry, label, volume UUID when the format has
 one, time basis and known capabilities.

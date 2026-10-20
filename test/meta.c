@@ -130,6 +130,18 @@ test_arrays(void)
 		CHECK(fsimg_bitset_test_and_set(bitset, i, &was_set, NULL) == FSIMG_OK);
 		CHECK(!was_set);
 	}
+	/* Testing reads without setting: neighbours stay clear. */
+	for (uint64_t i = 0; i < 200003; i += 47) {
+		CHECK(fsimg_bitset_test(bitset, i, &was_set, NULL) == FSIMG_OK);
+		CHECK(was_set);
+		if (i + 1 < 200003) {
+			CHECK(fsimg_bitset_test(bitset, i + 1, &was_set, NULL) ==
+			    FSIMG_OK);
+			CHECK(!was_set);
+		}
+	}
+	CHECK(fsimg_bitset_test(bitset, 200003, &was_set, NULL) == FSIMG_ERANGE);
+	CHECK(!was_set);
 	for (uint64_t i = 0; i < 200003; i += 47) {
 		CHECK(fsimg_bitset_test_and_set(bitset, i, &was_set, NULL) == FSIMG_OK);
 		CHECK(was_set);

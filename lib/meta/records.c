@@ -414,6 +414,24 @@ fsimg_bitset_free(fsimg_bitset_t *bitset)
 }
 
 fsimg_status_t
+fsimg_bitset_test(fsimg_bitset_t *bitset, uint64_t bit, bool *set,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+	unsigned char byte;
+
+	if (set != NULL)
+		*set = false;
+	if (bitset == NULL || bit >= bitset->bits || set == NULL)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_METADATA, "invalid bitset index or output"));
+	status = fsimg_store_read(bitset->store, bit / 8, &byte, 1, error);
+	if (status == FSIMG_OK)
+		*set = (byte & (1u << (bit % 8))) != 0;
+	return (status);
+}
+
+fsimg_status_t
 fsimg_bitset_test_and_set(fsimg_bitset_t *bitset, uint64_t bit, bool *was_set,
     fsimg_error_t *error)
 {

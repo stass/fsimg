@@ -8,7 +8,8 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/output \
 	-I$(top_srcdir)/lib/extract \
 	-I$(top_srcdir)/lib/read -I$(top_srcdir)/lib/formats \
-	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat
+	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
+	-I$(top_srcdir)/lib/formats/qnx6
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
 DEVELOPMENT_TOOLS_ENV = FATCAT="$(FATCAT)"
@@ -53,6 +54,12 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/exfat/names.c lib/formats/exfat/verify.c \
 	lib/formats/exfat/write-exfat.h lib/formats/exfat/write-plan.c \
 	lib/formats/exfat/write-emit.c \
+	lib/formats/qnx6/qnx6.h lib/formats/qnx6/descriptor.c \
+	lib/formats/qnx6/codec.c lib/formats/qnx6/header.c \
+	lib/formats/qnx6/tree.c lib/formats/qnx6/bitmap.c \
+	lib/formats/qnx6/inode.c lib/formats/qnx6/names.c \
+	lib/formats/qnx6/directory.c lib/formats/qnx6/read.c \
+	lib/formats/qnx6/verify.c \
 	compat/host.c compat/host.h
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
 bin_PROGRAMS = fsimg
@@ -82,10 +89,13 @@ example_extract_LDADD = libfsimg.la
 check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale test-cli test-qualify test-fragment test-posix header-c header-cxx
-TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh test/cli.sh \
+	test-exfat-scale test-qnx6 test-cli test-qualify test-fragment test-posix header-c \
+	header-cxx
+TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh \
+	test/qnx6-integration.sh test/cli.sh \
 	test/baseline.sh
-nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh test/cli.sh \
+nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
+	test/qnx6-integration.sh test/cli.sh \
 	test/baseline.sh
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
@@ -112,6 +122,8 @@ test_posix_LDADD = libfsimg.la
 test_exfat_SOURCES = test/exfat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_exfat_LDADD = libfsimg.la
+test_qnx6_SOURCES = test/qnx6.c test/test.h
+test_qnx6_LDADD = libfsimg.la
 test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
 test_exfat_scale_LDADD = libfsimg.la
 test_catalog_SOURCES = test/catalog.c test/test.h
@@ -164,7 +176,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
 	specs/design-qnx6-driver.md specs/design-metadata.md specs/design-sizing.md \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
-	test/fat-integration.sh.in test/exfat-integration.sh.in fuzz/fat.c fuzz/protocol.c \
+	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/protocol.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md
@@ -187,9 +199,11 @@ check-installed-consumers:
 	$(CXX) "-I$(includedir)" $(CPPFLAGS) $(CXXFLAGS) -std=c++11 $(LDFLAGS) \
 	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" -o header-installed-cxx
 	./header-installed-cxx
-check-integration: test-fat test-fat-write test-exfat test/fat-integration.sh test/exfat-integration.sh
+check-integration: test-fat test-fat-write test-exfat test-qnx6 fsimg \
+	    test/fat-integration.sh test/exfat-integration.sh test/qnx6-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
+	./test/qnx6-integration.sh
 # Regenerate the checked-in comparison baseline; test/baseline.sh only reads it.
 baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	./test/baseline.sh --record > $(srcdir)/test/baseline.txt.new || \
@@ -202,9 +216,9 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-fat --scale
 	./test-fat-write --scale
 	./test-exfat-scale --huge; result=$$?; test $$result = 0 -o $$result = 77
-check-fuzz: test-fat test-exfat test-protocol
+check-fuzz: test-fat test-exfat test-qnx6 test-protocol
 	$(DEVELOPMENT_TOOLS_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh $(abs_top_srcdir)
-check-fuzz-extended: test-fat test-exfat test-protocol
+check-fuzz-extended: test-fat test-exfat test-qnx6 test-protocol
 	$(DEVELOPMENT_TOOLS_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh $(abs_top_srcdir)
 check-cli-rss: fsimg-rss fsimg-rss-guard
 	./fsimg-rss-guard; result=$$?; test $$result = 0 -o $$result = 77

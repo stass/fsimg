@@ -211,7 +211,8 @@ images_equal(posix_fixture_t *fixture, const char *left_name,
 }
 
 /* FAT and exFAT advertise exactly the original kinds and fields, and a label
- * capacity in encoded bytes: eleven OEM bytes, or eleven UTF-16 units.
+ * capacity in encoded bytes: eleven OEM bytes, or eleven UTF-16 units. QNX6
+ * stores every kind and the POSIX fields, and has no label.
  */
 static void
 test_capability_records(void)
@@ -224,6 +225,17 @@ test_capability_records(void)
 	count = 0;
 	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
 		count++;
+		if (strcmp(info.name, "qnx6") == 0) {
+			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
+			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
+			    FSIMG_ENTRY_FIFO));
+			CHECK(info.metadata_fields == (FSIMG_META_CREATED |
+			    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
+			    FSIMG_META_CHANGED | FSIMG_META_OWNER |
+			    FSIMG_META_MODE));
+			CHECK(info.max_label_bytes == 0);
+			continue;
+		}
 		CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY));
 		CHECK(info.metadata_fields == (FSIMG_META_CREATED |
 		    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED | FSIMG_META_ATTRIBUTES));
@@ -232,7 +244,7 @@ test_capability_records(void)
 		else
 			CHECK(info.max_label_bytes == 11);
 	}
-	CHECK(count == 4);
+	CHECK(count == 5);
 }
 
 /* Optional owner, mode and change time are counted once per field and

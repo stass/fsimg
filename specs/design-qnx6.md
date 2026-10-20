@@ -96,8 +96,11 @@ lack of SYNC") unless told `sync=optional` or `sync=none`, which supports
 that inference.
 
 The bit `0x1` in the header flags is set in the driver's in-memory copy
-during a read-write mount; it was never present on disk, including in a
-header committed while the volume was mounted.
+during a read-write mount; QNX 6.5.0 never wrote it to disk, including in a
+header committed while the volume was mounted. The research fixture's newer
+header, written by an unrecorded release, carries it (flags `0x101`) while
+its older header does not, so some release commits it as snapshot state.
+[X1], [F1]
 
 ### Power loss
 
@@ -254,12 +257,15 @@ cannot be emitted. An unknown marker is not ignored because Linux ignores it.
 The classic table follows QNX 6.5.0's own acceptance rules. The word at
 offset 28 is the on-disk format version and must be 4. The word at offset 30
 is the reserved-block percentage, at most 100. In the flag word, `0x100`
-enables long-name checksums; the driver sets `0x1` only in memory during a
-read-write mount, and it has not been observed on disk. Any bit in `0xfe00`
+enables long-name checksums, a feature of the volume. `0x1` records that a
+read-write mount was active when the snapshot was committed: QNX 6.5.0 sets
+it only in memory, and the research fixture's newer header has it on disk.
+It is snapshot state, not a feature, so either header may carry it and the
+reader reports a selected header with it as not clean. Any bit in `0xfe00`
 makes the volume read-only to QNX, and any bit in `0xff0000` makes it
-unmountable. The reader's classic table holds the flag words `0` and
-`0x100`; any other value is an unsupported feature. The writer emits one of
-those two. [X1], [X2]
+unmountable. The reader's classic table holds the feature words `0` and
+`0x100`, with or without `0x1`; any other value is an unsupported feature.
+The writer emits `0` or `0x100`. [X1], [X2], [F1]
 
 ## Shared owners and representation
 
@@ -386,7 +392,7 @@ integer. [L1], [N1], [R1]
 | 8 | 8 | Snapshot serial |
 | 16 | 4 | Format time, Unix seconds |
 | 20 | 4 | Last snapshot sync time; equal to the format time in a fresh volume |
-| 24 | 4 | Flags: `0x100` long-name checksums; feature classes above |
+| 24 | 4 | Flags: `0x100` long-name checksums; `0x1` mounted read-write when committed (snapshot state); feature classes above |
 | 28 | 2 | On-disk format version, 4 |
 | 30 | 2 | Reserved-block percentage, 0 through 100 (`mkqnx6fs -r`, default 3) |
 | 32 | 16 | Volume UUID in version 4, its bytes in textual order for either byte order (`mkqnx6fs` defaults to a random version-4 UUID) |
@@ -432,8 +438,8 @@ fsimg's strict snapshot policy validates both headers before selection: magic,
 CRC, byte order, profile, geometry, counts, tree capacities, and ranges.
 Stable identity, creation time, block size, block count, inode capacity, group
 count, layout, and compatible feature interpretation must agree; serials, free
-counts, timestamps, flags with documented snapshot meaning, and tree roots may
-differ. Reject a profile transition whose compatibility cannot be established.
+counts, timestamps, flags with documented snapshot meaning (the mounted bit
+`0x1`), and tree roots may differ. Reject a profile transition whose compatibility cannot be established.
 
 Select the larger unsigned 64-bit serial. Equal serials are accepted only for
 equivalent snapshot descriptions; conflicting roots or state are ambiguous.

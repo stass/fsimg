@@ -47,13 +47,27 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   Expose the UUID as a writer setting and confirm on the target whether its
   software checks it.
 
-* [High] **Reader, verifier, and writer** (`lib/formats/qnx6/`, `test/`,
-  `fuzz/`): implement the [driver design](../specs/design-qnx6-driver.md) in
-  the stages of the
-  [extension sequence](implementation-plan.md#extension-sequence). Register
-  each capability only after its native and synthetic acceptance matrix. Add
+* [High] **Writer** (`lib/formats/qnx6/`, `test/`): implement the writer
+  half of the [driver design](../specs/design-qnx6-driver.md) as stage 3 of
+  the [extension sequence](implementation-plan.md#extension-sequence), and
+  register it only after its native and synthetic acceptance matrix. Add
   failing regressions before nontrivial fixes; run sanitizers and required
-  internal/external reviews for implementation stages.
+  internal/external reviews.
+
+* [Medium] **Linux reader comparison** (`test/qnx6-integration.sh`): the
+  script mounts the generated sample with the Linux qnx6 driver as root and
+  compares every regular file with `fsimg cat`. No Linux result is recorded;
+  run it and record the kernel revision, byte order and checksum behavior in
+  the build evidence.
+
+* [Medium] **Reader scale and fault coverage** (`test/qnx6.c`): the
+  [driver design](../specs/design-qnx6-driver.md) asks for a synthetic scale
+  test that grows `N`, the inode capacity, one directory's width, a file's
+  depth and a file beyond 4 GiB separately, recording I/O calls, metadata
+  passes and peak scratch; the native 5 GB captures cover part of this. Also
+  add a bitmap tree of depth 2, an inode table spanning several top-level
+  indirect blocks, a full volume with no free block, short reads and
+  premature EOF, and cancellation in the middle of a traversal.
 
 * [Medium] **Hardlink topology** (`include/fsimg.h`, `specs/design-metadata.md`):
   the [metadata design](../specs/design-metadata.md) has no hardlink
@@ -69,7 +83,9 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   pads the bitmap, and whether sockets or device nodes occur on the PCM data
   volumes; also confirm that `chkqnx6fs` and the filesystem accept an
   all-zero UUID, the writer's default, and record the mode the native
-  filesystem gives a symbolic link.
+  filesystem gives a symbolic link. Identify the release that commits the
+  mounted flag `0x1`, as the research fixture's newer header does, and
+  whether its checker accepts such a volume.
 
 * [Medium] **Variant expansion** (`lib/formats/qnx6/`): qualify the bootless
   plain and MMI layouts in both reader and writer paths, including whether

@@ -27,11 +27,11 @@ QNX6-specific branch.
 | `descriptor.c` | `fsimg_qnx6_format`: the `qnx6` variant, its capability record and the probe |
 | `codec.c` | Byte-order aware integer codecs, the superblock CRC, the long-name checksum, and decode/encode of the 512-byte header, 80-byte tree descriptor, 128-byte inode and 32-byte directory slot; pure functions without I/O |
 | `header.c` | Header candidates, field validation, pair agreement, snapshot selection, geometry and the system reservation |
-| `tree.c` | The bounded block-tree walker: shape arithmetic, index construction, cycle and range checks, allocation and claim checks |
+| `tree.c` | The bounded block-tree walker: shape arithmetic, index construction, cycle and range checks, allocation and sharing checks |
 | `bitmap.c` | The allocation-bitmap pager: self-validation at open and the allocated-bit query |
 | `inode.c` | Inode-table access, inode state validation and the inode-to-entry mapping |
 | `names.c` | The name profile, inline and long-name decoding, and checksum policy |
-| `directory.c` | `prepare`, `replay`, `keys` and `key`; dot entries; directory claims |
+| `directory.c` | `prepare`, `replay`, `keys` and `key`; dot entries; exposure tracking |
 | `read.c` | `fsimg_qnx6_reader_ops`: open, close, resolve and volume information |
 | `verify.c` | Snapshot-aware full verification |
 | `write-qnx6.h` | Plan rows and the plan object |
@@ -40,7 +40,7 @@ QNX6-specific branch.
 
 `tree.c` is the only place that interprets a block reference. Readers of
 system trees, directories, long names and payload all call it, so range,
-sentinel, cycle, allocation-bit and claim checks exist once. The writer uses
+sentinel, cycle, allocation-bit and sharing checks exist once. The writer uses
 the same shape arithmetic in `tree.c` to count and place indirect blocks, so
 plan and emission cannot disagree about where a tree's blocks are.
 
@@ -90,7 +90,8 @@ allocates nothing.
 `open` reads both header areas with exact 512-byte reads and validates each
 header completely:
 
-* magic, CRC and byte order; version 4; flags in `{0, 0x100}`; reserve at
+* magic, CRC and byte order; version 4; flags other than the mounted bit
+  `0x1` in `{0, 0x100}`; reserve at
   most 100; groups 1 through 64; block size in `{512, 1024, 2048, 4096}`;
 * `S2 > 12288`, `D + N * B <= S2`, and `N >= 1`;
 * inode capacity at least 2 with `128 * capacity` representable, and the
@@ -104,7 +105,8 @@ Any deviation from the native layout that is not a byte-level inconsistency,
 such as an oversized bitmap or a deeper system tree, is `FSIMG_EUNSUPPORTED`:
 the reservation model below assumes the native layout, so the driver refuses
 rather than guesses. The two headers must agree on UUID, format time, block
-size, block count, inode capacity, group count and flags. The larger serial is
+size, block count, inode capacity, group count and flags other than the
+mounted bit, which is snapshot state. The larger serial is
 selected; equal serials require byte-identical headers and are otherwise
 `FSIMG_ECORRUPT` as an ambiguous tie. Only the selected header's descriptors
 are used afterwards.
@@ -158,19 +160,38 @@ The reader's walker, `qnx6_index_build()`, turns a descriptor into a shared
    range, in the root and in the last partially used indirect block of every
    level, is the sentinel. A valid reference beyond the logical end is
    unqualified preallocation and `FSIMG_EUNSUPPORTED`.
-3. For each visited block, apply the policy the caller selects: check the
-   allocation bit, check that the block is not a claimed metadata block, claim
-   it, or record it as an ownership run. Append leaves to the index in logical
-   order; adjacent leaves coalesce, so a contiguous object has one extent.
+3. For each visited block, apply the policy the caller selects (below), and
+   during verification record it as an ownership run. Append leaves to the
+   index in logical order; adjacent leaves coalesce, so a contiguous object
+   has one extent.
 4. Charge one work unit per reference and the I/O of each indirect block.
 
-The walker keeps the current path of at most six block numbers; a block that
-equals one of its ancestors is a cycle and `FSIMG_ECORRUPT`. A repeated block
-across branches is caught by the allocation, claim and ownership policies, not
-by the path. Indirect blocks are read through 4 KiB windows, never buffers
-sized from the descriptor. The depth bound, the required-slot bound and the
-work charge together bound a walk by the object's declared length, so a
-hostile descriptor cannot make the walker visit more than `n + I` blocks.
+The policy is one of three, a closed set:
+
+| Policy | Used for | Rule |
+| --- | --- | --- |
+| Bootstrap | The bitmap tree at open | Record every block; the bitmap does not exist yet |
+| Allocated | The inode table at open, a later name of an inode, verification's second walks of the system trees | Check the allocation bit |
+| Exclusive | The long-name tree at open, every directory as it is entered, the first name of a file, symbolic link or FIFO | Check the allocation bit and claim the block |
+
+Outside the system trees one committed snapshot uses every block once:
+directories, long names, indirect blocks and file data never share storage,
+and no tree names one block twice. A paged bitset of `N` bits, created at
+open, holds the claimed blocks; claiming a block already claimed is
+`FSIMG_ECORRUPT`, whichever object came first. A hard link's later names
+walk a tree its first name already claimed, so they only recheck allocation.
+The system trees are not claimed; their blocks lie in the system domain,
+which no other object can reach, and verification's ownership merge checks
+them against each other.
+
+The walker keeps the current path of at most five indirect block numbers; a
+block that equals one of its ancestors is a cycle and `FSIMG_ECORRUPT`.
+Indirect blocks are read through 4 KiB windows, never buffers sized from the
+descriptor. The depth bound, the required-slot bound and the work charge
+together bound a walk by the object's declared length, so a hostile
+descriptor cannot make the walker visit more than `n + I` blocks. Because
+every block of an exclusive walk is claimed once, the exclusive walks of one
+reader visit at most `N` blocks in total.
 
 ## Allocation bitmap
 
@@ -219,12 +240,11 @@ their fields. Attributes are absent.
 
 ## Directories and names
 
-`prepare` builds the extent index of the directory's content, claims each of
-its blocks, including indirect blocks, in the paged claim bitset, and scans
-the slots in 4 KiB windows. The root is inode 1 at level 0; deeper levels use
-the current entry's inode. The claim bitset has `N` bits, exists from open,
-and already holds the long-name tree's blocks, so a directory whose storage
-overlaps another directory, a long-name block, or itself through a cycle fails
+`prepare` builds the extent index of the directory's content under the
+exclusive policy and scans the slots in 4 KiB windows. The root is inode 1
+at level 0; deeper levels use the current entry's inode. The long-name
+tree's blocks are claimed at open, so a directory whose storage overlaps a
+long-name block, an object walked before it, or itself through a cycle fails
 with `FSIMG_ECORRUPT` when it is entered. Entering the same directory again
 from a second parent fails the same way, which also rejects hardlinked
 directories.
@@ -235,32 +255,42 @@ Every other slot with a zero inode or zero name length is unused and is not
 decoded further. A live slot names an inode that `qnx6_inode_read()` accepts;
 the slot's name is the inline bytes, or the long-name record at logical byte
 `index * B` of the long-name index, whose two-byte length must be 28 through
-510 and fit both its block and the stream. With flag `0x100` the stored
+510 and fit both its block and the stream. A long-name slot's bytes 5 through
+7 and 16 through 31 are zero natively; anything else there is an unqualified
+extension. With flag `0x100` the stored
 checksum must equal the recurrence over the name bytes; without it the field
 must be zero. The name is then checked against the fsimg profile: strict
-UTF-8, no NUL, slash, control byte or `0x7f`, and neither `.` nor `..`; a
+UTF-8, no NUL, slash, control byte or `0x7f`, and neither `.` nor `..`. QNX
+itself forbids NUL, slash and the dot names, so they are corruption; a
 natively legal name outside the profile is `FSIMG_EUNSUPPORTED`.
 
-An admitted record carries the displayed name and a 12-byte payload: the
-inode number, the parent directory's inode number and the slot index, each
-a 32-bit little-endian value. `keys` emits one key, the exact name bytes;
+An admitted record carries the displayed name and an 8-byte payload: the
+inode number and the parent directory's inode number, each a 32-bit
+little-endian value. `keys` emits one key, the exact name bytes;
 `key` validates a query component against the same profile and returns its
 bytes, so selection and namespace validation compare identical keys. The
 `ambiguous` text names a duplicate QNX6 directory name.
 
-`replay` re-validates the payload, reads the inode again, fills the entry,
-and for a file or symbolic link builds the content index over the content
-domain with the "check allocation and not claimed" policy, so a file that
-references a directory, long-name or system block is reported when it is
-exposed. `reader->initialized` is the inode's size. A directory's index is
-built on descent, a FIFO has none.
+`replay` re-validates the payload, reads the inode again and fills the entry.
+A paged bitset of one bit per inode records the inodes whose first name was
+replayed. For the first name of a file, symbolic link or FIFO, `replay`
+builds the content index under the exclusive policy and then sets the bit,
+so the tree is claimed once the name is exposed. A later name of the same
+inode builds its index on its first `resolve`, under the allocated policy,
+so listing many names of one file walks its tree once. Validation is
+therefore order dependent: storage shared by two objects fails when the
+second of them is walked, and an operation that never walks one of them,
+such as a selective read that skips a directory, does not detect it. Full
+verification walks everything. `reader->initialized` is the inode's size. A
+directory's index is built on descent; a FIFO's tree is empty.
 
 ## Content
 
-`resolve` is a lookup in the current file's index. Sequential reads therefore
-advance one extent cursor and batch adjacent blocks; a random offset costs one
-binary search. The index is released when the walker advances. No content
-read re-walks the inode's tree or rereads its parent directory.
+`resolve` is a lookup in the current file's index, which it first builds for
+a later name of an inode. Sequential reads therefore advance one extent
+cursor and batch adjacent blocks; a random offset costs one binary search.
+The index is released when the walker advances. A name's tree is walked at
+most once, and no content read rereads its parent directory.
 
 ## Verification
 
@@ -268,20 +298,27 @@ Full verification runs the common walker once with the ownership policy
 enabled, then reconciles. During the walk the driver appends:
 
 * an ownership run for every block visited by every index it builds, as
-  `(first, count, owner, role)` with owner identity the inode number and the
-  role one of indirect, directory, payload, symlink or long name; system
-  trees use reserved owner identities above the inode space and are recorded
-  once from the indexes built at open;
+  `(first, count, owner)` with owner identity the inode number; blocks
+  visited consecutively extend a run. The system trees and the long-name
+  tree use reserved owner identities above the inode space; the verifier
+  walks them once more as it starts, since the indexes built at open hold
+  only leaves;
 * a reference record for every live slot, including `.` and `..`, naming the
   referenced inode.
 
-Both streams are sealed and externally sorted. The ownership merge requires
-runs of different owners to be disjoint; identical runs from one owner are the
-same inode reached through several names and collapse. It then streams the
-bitmap in 4 KiB pages and, for each block: below `2R`, the bit is set and any
-owner is a system tree; from `2R`, the bit is set exactly when an owner exists;
-at or past `N`, the bit is set. The free count is the number of clear bits and
-must equal the selected header's free block count.
+Both streams are sealed and externally sorted. Exactly one walk records
+each tree: the verifier's walks of the system and long-name trees, each
+directory's as it is entered, and each inode's under its first name. A
+later name's walk never records, and payload read-through reads an inode's
+bytes under its first name only, since a later name has the same bytes.
+Any two overlapping runs are therefore a block with two owners, or one used
+twice by one tree, and fail. The listing walk's claims reject most such images
+first; the merge also covers the system trees, which are not claimed. The
+merge then streams the bitmap in 4 KiB pages and, for each block: below
+`2R`, the bit is set and any owner is a system tree; from `2R`, the bit is
+set exactly when an owner exists; at or past `N`, the bit is set. The free
+count is the number of clear bits and must equal the selected header's free
+block count.
 
 The reference stream, sorted by inode, yields each referenced inode's name
 count; it must equal the inode's link count, which for a directory is
@@ -289,7 +326,7 @@ count; it must equal the inode's link count, which for a directory is
 sequential pass over the inode table then checks that every inode with status
 bit 0 set was referenced, that unreferenced inodes have bit 0 clear, and that
 the header's free inode count equals the capacity minus the referenced count.
-Payload read-through, when requested, reads each file's initialized bytes
+Payload read-through, when requested, reads each inode's initialized bytes
 through common delivery during the walk. The report counts files, directories
 including the root, logical bytes, bytes read, allocated and free blocks;
 bad blocks are always zero, since the format has no bad-block marking. A
@@ -401,8 +438,8 @@ Every emitted byte comes from a row, the geometry or a profile constant.
 
 | Operation | Work and residency |
 | --- | --- |
-| Probe and open | Two 512-byte reads, the indirect blocks of the three system trees, the bitmap self-check pages, and inode 1; scratch for three indexes and the claim bitset of `N` bits |
-| Listing | Per directory: its tree walk, one slot pass and the common key sort; per exposed file: its tree walk. No file payload is read |
+| Probe and open | Two 512-byte reads, the indirect blocks of the three system trees, the bitmap self-check pages, and inode 1; scratch for three indexes, a bitset of `N` bits and one of an inode count's bits |
+| Listing | Per directory: its tree walk, one slot pass and the common key sort; per inode's first name: its tree walk. No file payload is read |
 | Content | One extent lookup per request after the walk at exposure |
 | Verification | One traversal, two external sorts of streams proportional to blocks visited and slots, one bitmap pass of `ceil(N / 8)` bytes and one inode-table pass of `128 * capacity` bytes |
 | Planning | One pass over the catalog, a bounded binary search, one layout pass; rows in one paged array |
@@ -418,7 +455,7 @@ charged scratch. Every loop charges the session and observes cancellation.
 | --- | --- |
 | No classic magic at 8192 | `FSIMG_EFORMAT` |
 | Recognized but unqualified: byte-zero layouts, flags outside the table, nonminimal or deep system trees, oversized bitmap, extension bytes, unknown inode type or status bits, nonzero inode tail, preallocation past the logical end, name outside the profile | `FSIMG_EUNSUPPORTED` |
-| CRC, range, sentinel, free-bit, claim, dot-entry, name-checksum, link-count, tie or counter inconsistency | `FSIMG_ECORRUPT` |
+| CRC, range, sentinel, free-bit, sharing, dot-entry, name-checksum, link-count, tie or counter inconsistency | `FSIMG_ECORRUPT` |
 | Setting outside its type, label for this profile, unrepresentable selection component | `FSIMG_EINVAL` |
 | Content and reserve do not fit the exact or any automatic size; required metadata or kind that the profile cannot store | `FSIMG_ERANGE` or `FSIMG_EUNSUPPORTED` as the common policy states |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |

@@ -24,7 +24,8 @@ Filesystem image library
 .Ft fsimg_status_t
 .Fn fsimg_writer_new "fsimg_ctx_t *context" "const char *format" "const fsimg_write_options_t *options" "fsimg_writer_t **writer" "fsimg_error_t *error"
 .Sh DESCRIPTION
-The public C11 API supports FAT12, FAT16, FAT32 and ordinary one-FAT exFAT.
+The public C11 API supports FAT12, FAT16, FAT32 and ordinary one-FAT exFAT,
+and reads classic QNX6 Power-Safe volumes.
 It requires only libc and host OS APIs and is includable from C++.
 It neither prints diagnostics, exits, changes process-global policy nor
 sandboxes its embedding application.
@@ -128,6 +129,8 @@ Owners, permission bits and change times are never restored.
 A symbolic link, FIFO or other kind fails extraction unless
 FSIMG_EXTRACT_SKIP_UNSUPPORTED omits it and counts it in the context
 statistics' skipped_entries.
+An entry name the host filesystem cannot represent, such as one longer than
+its component limit, fails with FSIMG_EUNSUPPORTED.
 Explicit timestamp restoration requires a time-basis policy and does not
 change the embedding process's sandbox.
 .Sh EXAMPLES

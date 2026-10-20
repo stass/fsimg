@@ -13,8 +13,9 @@
  * deferred descent, paths and name matching.
  */
 
-/* A displayed component and its NUL: room for the UTF-8 form of any
- * component of at most 255 UTF-16 units, which needs at most 765 bytes.
+/* A displayed component and its NUL: room for any UTF-8 component of at
+ * most 1020 bytes, which includes every component of at most 255 UTF-16
+ * units (765 bytes). Each driver bounds its own names.
  */
 #define FSIMG_DIRECTORY_NAME_BYTES 1021u
 #define FSIMG_DIRECTORY_PAYLOAD_BYTES 64u

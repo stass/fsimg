@@ -66,6 +66,23 @@ if test ! -f "$exfat_corpus/compact.seed"; then
 fi
 run_fuzzer ./fuzz-fat "$exfat_corpus" 3145728 10
 
+# QNX6 locates its second header from the slice length, so its harness
+# reads exactly the input and forces the decoder. It reseals header CRCs
+# with the driver's own codec, so it sees the driver's private header.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/meta" -I"$source_dir/lib/io" \
+    -I"$source_dir/lib/read" -I"$source_dir/lib/formats" \
+    -I"$source_dir/lib/formats/qnx6" \
+    "$source_dir/fuzz/qnx6.c" sanitizer-fuzz/.libs/libfsimg.a -o fuzz-qnx6
+qnx6_corpus=qnx6-fuzz-corpus
+mkdir -p "$qnx6_corpus"
+if test ! -f "$qnx6_corpus/sample.seed"; then
+    ./test-qnx6 --seed "$qnx6_corpus/sample.seed"
+fi
+run_fuzzer ./fuzz-qnx6 "$qnx6_corpus" 1048576 10
+
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -Isanitizer-fuzz -I"$source_dir/include" -I"$source_dir/compat" \

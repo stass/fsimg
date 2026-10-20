@@ -49,6 +49,7 @@ static fsimg_status_t prepare_times(extract_state_t *, const fsimg_entry_t *,
 static fsimg_status_t close_directory(extract_state_t *, fsimg_error_t *);
 static fsimg_status_t select_parent(extract_state_t *, const fsimg_entry_t *,
     const char **, fsimg_error_t *);
+static fsimg_status_t creation_failed(int, const char *, fsimg_error_t *);
 static fsimg_status_t extract_directory(extract_state_t *, const fsimg_entry_t *,
     const char *, fsimg_error_t *);
 static fsimg_status_t extract_file(extract_state_t *, const fsimg_entry_t *,
@@ -226,6 +227,30 @@ select_parent(extract_state_t *state, const fsimg_entry_t *entry,
 	return (FSIMG_OK);
 }
 
+/* Classify a failed exclusive creation of an entry. A name the host
+ * filesystem cannot represent, such as one longer than its component
+ * limit, is an unsupported entry rather than an I/O failure.
+ */
+static fsimg_status_t
+creation_failed(int saved, const char *message, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	switch (saved) {
+	case EEXIST:
+		status = FSIMG_EEXISTS;
+		break;
+	case ENAMETOOLONG:
+	case EILSEQ:
+		status = FSIMG_EUNSUPPORTED;
+		break;
+	default:
+		status = FSIMG_EIO;
+		break;
+	}
+	return (fsimg_error_set(error, status, saved, FSIMG_OP_EXTRACT, message));
+}
+
 static fsimg_status_t
 extract_directory(extract_state_t *state, const fsimg_entry_t *entry,
     const char *name, fsimg_error_t *error)
@@ -254,8 +279,8 @@ extract_directory(extract_state_t *state, const fsimg_entry_t *entry,
 	if (mkdirat(parent, name, 0700) == -1) {
 		saved = errno;
 		fsimg_fd_release(ctx, -1);
-		return (fsimg_error_set(error, saved == EEXIST ? FSIMG_EEXISTS : FSIMG_EIO,
-		    saved, FSIMG_OP_EXTRACT, "exclusive output directory creation failed"));
+		return (creation_failed(saved,
+		    "exclusive output directory creation failed", error));
 	}
 	fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 	if (fd == -1) {
@@ -343,8 +368,8 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	if (fd == -1) {
 		saved = errno;
 		fsimg_fd_release(ctx, -1);
-		return (fsimg_error_set(error, saved == EEXIST ? FSIMG_EEXISTS : FSIMG_EIO,
-		    saved, FSIMG_OP_EXTRACT, "exclusive output file creation failed"));
+		return (creation_failed(saved,
+		    "exclusive output file creation failed", error));
 	}
 	status = fsimg_io_adopt_empty_output(ctx, fd, &output, error);
 	if (status != FSIMG_OK)

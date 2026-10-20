@@ -77,6 +77,8 @@ fsimg_status_t fsimg_array_set(fsimg_array_t *, uint64_t, const void *,
 fsimg_status_t fsimg_bitset_new(fsimg_session_t *, uint64_t, fsimg_bitset_t **,
     fsimg_error_t *);
 void fsimg_bitset_free(fsimg_bitset_t *);
+fsimg_status_t fsimg_bitset_test(fsimg_bitset_t *, uint64_t, bool *,
+    fsimg_error_t *);
 fsimg_status_t fsimg_bitset_test_and_set(fsimg_bitset_t *, uint64_t, bool *,
     fsimg_error_t *);
 

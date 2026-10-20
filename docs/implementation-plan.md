@@ -427,7 +427,9 @@ validation gates above:
    Linux reader comparison where a Linux host exists, the research fixture
    from an environment path, and the fuzz target. Complete: `ls`, `cat`,
    `extract`, `info` and `verify` on synthetic and native fixtures under
-   ASan/UBSan, with no unvalidated zero-fill anywhere.
+   ASan/UBSan, with no unvalidated zero-fill anywhere. Implemented, with the
+   evidence in [build.md](build.md); the Linux reader comparison is scripted,
+   and recording its result is open in [the QNX6 TODO](todo-qnx6.md).
 3. **QNX6 writer.** Implement settings, the planning passes, the system-run
    and tree-shape arithmetic, and emission; add round-trip, determinism,
    poison-scan, fault-injection and scale tests. Register the writer
