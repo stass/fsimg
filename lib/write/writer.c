@@ -29,6 +29,25 @@ fsimg_write_options_init(fsimg_write_options_t *options)
 	options->flags = FSIMG_WRITE_ALLOW_LOSS;
 	options->epoch = 315532800;
 	options->sector_bytes = 512;
+	options->reserve_percent = 3;
+}
+
+/* Whether every format-specific setting outside the format's mask holds its
+ * default, so no setting is ever silently ignored.
+ */
+static bool
+settings_supported(const fsimg_write_options_t *options, uint32_t settings)
+{
+	static const unsigned char zero[sizeof(options->volume_uuid)];
+
+	return (((settings & FSIMG_SETTING_BYTE_ORDER) != 0 ||
+	    options->byte_order == FSIMG_BYTE_ORDER_LITTLE) &&
+	    ((settings & FSIMG_SETTING_VOLUME_UUID) != 0 ||
+	    bcmp(options->volume_uuid, zero, sizeof(zero)) == 0) &&
+	    ((settings & FSIMG_SETTING_INODE_CAPACITY) != 0 ||
+	    options->inode_capacity == 0) &&
+	    ((settings & FSIMG_SETTING_RESERVE) != 0 ||
+	    options->reserve_percent == 3));
 }
 
 fsimg_status_t
@@ -78,6 +97,9 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 	if (variant->info.max_label_bytes == 0 && selected.label != NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "the image format has no volume label"));
+	if (!settings_supported(&selected, variant->info.write_settings))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "write setting does not apply to the image format"));
 	status = driver->writer->validate(&selected, variant->id, error);
 	if (status != FSIMG_OK)
 		return (status);

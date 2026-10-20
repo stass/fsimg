@@ -24,8 +24,8 @@ Filesystem image library
 .Ft fsimg_status_t
 .Fn fsimg_writer_new "fsimg_ctx_t *context" "const char *format" "const fsimg_write_options_t *options" "fsimg_writer_t **writer" "fsimg_error_t *error"
 .Sh DESCRIPTION
-The public C11 API supports FAT12, FAT16, FAT32 and ordinary one-FAT exFAT,
-and reads classic QNX6 Power-Safe volumes.
+The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT and
+classic QNX6 Power-Safe volumes in either byte order.
 It requires only libc and host OS APIs and is includable from C++.
 It neither prints diagnostics, exits, changes process-global policy nor
 sandboxes its embedding application.
@@ -102,6 +102,13 @@ is an omission under the same policy, counted once per field.
 An entry kind the format does not store always fails planning.
 A format record whose max_label_bytes is zero has no volume label and accepts
 only a NULL label.
+The settings byte_order, volume_uuid, inode_capacity and reserve_percent
+select the byte order, the UUID in textual byte order, the inode capacity
+(zero selects the native ratio raised to the number of entries) and the
+reserved-block percentage (default 3) of a format whose record's
+write_settings mask names them, which QNX6 does; writer construction
+rejects a non-default value for any other format with FSIMG_EINVAL.
+QNX6 stores no volume_serial and ignores it.
 Time bases distinguish UTC instants, known offsets and unknown-zone calendar
 values.
 .Pp

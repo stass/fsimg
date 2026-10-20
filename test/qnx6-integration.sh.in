@@ -39,7 +39,9 @@ else
 fi
 
 # Native captures: every one verifies except the torn header and the failed
-# oversized format, which QNX itself refuses.
+# oversized format, which QNX itself refuses. fsimg's empty volume of each
+# natively formatted one with long-name checksums matches its headers and
+# allocated blocks byte for byte.
 native=${FSIMG_QNX6_NATIVE:-}
 if test -n "$native"; then
     for capture in "$native"/*.img.gz "$native"/*.img.zst; do
@@ -80,6 +82,10 @@ if test -n "$native"; then
                 echo "FAIL: $name was not refused with '$expected'" >&2
                 exit 1
             fi
+            ;;
+        empty-*-lfnon.img.gz)
+            ./test-qnx6 --read-external "$fixture/image"
+            ./test-qnx6-write --native "$fixture/image"
             ;;
         *)
             ./test-qnx6 --read-external "$fixture/image"

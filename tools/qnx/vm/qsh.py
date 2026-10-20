@@ -5,7 +5,9 @@
 
 Usage: qsh.py [-s STATUS-FILE] SOCKET COMMAND [TIMEOUT-SECONDS]
 
-Prints the command's output byte for byte (CR LF becomes LF). The end of
+Prints the command's output byte for byte (a line end of one or more CR
+and an LF becomes LF; the guest's line editor ends the echoed command line
+with CR CR LF). The end of
 output is found by a random marker the guest shell echoes after the command,
 together with the command's exit status.
 
@@ -28,6 +30,7 @@ scripts in this directory take (see env.sh); guest.sh wraps it for one-off
 commands.
 """
 import os
+import re
 import socket
 import sys
 import time
@@ -54,7 +57,7 @@ if '\n' in command or '\r' in command:
 
 
 def harness_failure(out, why):
-    sys.stdout.buffer.write(bytes(out[-4096:]).replace(b'\r\n', b'\n'))
+    sys.stdout.buffer.write(re.sub(rb'\r+\n', b'\n', bytes(out[-4096:])))
     sys.stdout.buffer.write(f'\nqsh.py: {why}\n'.encode())
     sys.stdout.buffer.flush()
     sys.exit(124 if status_file is None else 1)
@@ -107,7 +110,7 @@ while True:
         harness_failure(out, 'serial connection closed')
     out += chunk
 
-text = bytes(out[:found]).replace(b'\r\n', b'\n')
+text = re.sub(rb'\r+\n', b'\n', bytes(out[:found]))
 echoed = cmdline.encode() + b'\n'
 if text.startswith(echoed):
     text = text[len(echoed):]

@@ -341,16 +341,21 @@ complete after skipping an object.
 `validate` accepts the common options with these rules: `sector_bytes` zero
 or 512; `allocation_unit_bytes` zero, selecting 1024, or a classic block size,
 which is the filesystem block size; `fat_root_entries` zero; `label` NULL,
-since the profile has no label; `epoch` within `[0, 4294967295]` in
-reproducible mode; `volume_bytes` zero or a multiple of 512 of at least
-`16384 + 64 * B`. The QNX6-specific fields of `fsimg_write_options_t` are
-typed:
+which the common capability check already enforces with
+`FSIMG_EUNSUPPORTED`, since the profile has no label; `epoch` within
+`[0, 4294967295]` in reproducible mode; `volume_bytes` zero or a multiple of
+512 of at least `16384 + 64 * B`. `volume_serial` is the identity of the
+formats that have a serial; the profile stores none and ignores it, since the
+CLI generates one for every format. The QNX6-specific fields of
+`fsimg_write_options_t` are typed, and the capability record's
+`write_settings` names all four, so every other format requires their
+defaults:
 
 | Field | CLI setting | Meaning |
 | --- | --- | --- |
 | `byte_order` | `endian=little` or `big` | Default little; selects the on-disk byte order of every field |
-| `volume_uuid[16]` | `uuid=<RFC 4122 text>` | Default all zero, used verbatim in every mode like the FAT serial; written at header offset 32 in textual byte order |
-| `inode_capacity` | `inodes=<count>` | Zero selects the native ladder; otherwise the exact capacity, rounded up to a whole inode-table block |
+| `volume_uuid[16]` | `uuid=<RFC 4122 text>` | Default all zero, used verbatim in every mode like the FAT serial; written at header offset 32 in textual byte order. Without `-R` and `uuid=` the CLI generates a random version 4 UUID |
+| `inode_capacity` | `inodes=<count>` | Zero selects the native ladder raised to the inodes the catalog needs; otherwise the exact capacity, rounded up to a whole inode-table block, which must hold the catalog |
 | `reserve_percent` | `reserve=<percent>` | Default 3; the header's reserved-block percentage, at most 100 |
 
 The emitted flags word is `0x100`: long-name checksums are always written.
@@ -358,14 +363,18 @@ The emitted flags word is `0x100`: long-name checksums are always written.
 ## Planning
 
 The plan object embeds `fsimg_plan_t`, the geometry, the shape of the three
-system trees, the first block of the root, `.boot` and long-name stream, the
-number of long names, the allocated block count `A`, and one paged array of
-64-byte rows keyed by catalog ID, with row 0 for the root and one extra row
-for a synthesized `.boot` directory. A row holds the inode number, the kind,
-the content length, the first block of the object's range, its content and
-indirect block counts and depth, its slot index in the parent, its long-name
-index or a sentinel, and its link count. Rows are the only per-entry state;
-no vector grows with volume size, inode capacity or name count.
+system trees, the catalog ID of `.boot`, the first block of the long-name
+stream, the allocated block count `A`, the used inode count and the format
+time, and one paged array of 64-byte rows keyed by catalog ID, with row 0
+for the root and one extra row for a synthesized `.boot` directory. A row
+holds the content length, the first block of the object's range, the inode
+number, its slot index in the parent and, for a directory, the slots
+assigned so far, its long-name index or a sentinel, and the inode fields
+already encoded under the metadata policy: owner, the four times, mode, link
+count and status. The object's shape (content and indirect block counts and
+depth) is a function of its length, so the row does not store it. Rows are
+the only per-entry state; no vector grows with volume size, inode capacity or
+name count.
 
 Planning runs a fixed sequence of passes over the frozen catalog:
 
@@ -378,19 +387,34 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    positions and link counts; assign the next long-name index when the name
    exceeds 27 bytes; validate kind and metadata representability under the
    [metadata policy](design-metadata.md#writer-policy); accumulate the totals
-   of content and indirect blocks and `initialized_bytes`. A catalog `/.boot`
-   that is not a directory fails. Sibling collisions are exact byte
-   collisions, which catalog preparation has already rejected, so the driver
-   keeps no key stream.
+   of content and indirect blocks and `initialized_bytes`. A name outside the
+   profile fails with `FSIMG_EINVAL`. A catalog `/.boot` that is not a
+   directory fails with `FSIMG_EUNSUPPORTED`; a catalog `/.boot` directory
+   keeps its children and takes the profile mode `0700`, and another
+   requested mode is an optional loss. Without one, `.boot` is synthesized
+   and its slot placed among the root's children in byte order. Owner
+   defaults to zero and the mode to `0755` for directories, `0644` for files
+   and `0777` for links and FIFOs. A time is stored as unsigned UTC seconds;
+   an absent one, or one outside 32 bits, takes the format time, and in
+   reproducible mode every time is the epoch. A present time that is not a
+   whole-second UTC instant in range (or, when reproducible, the epoch) is a
+   loss under the policy. Sibling collisions are exact byte collisions,
+   which catalog preparation has already rejected, so the driver keeps no
+   key stream.
 2. **Geometry.** With exact `volume_bytes`, `E = floor(V / 4096) * 4096` and
    `N = (E - 16384) / B`. With automatic sizing, binary search the smallest
    `N` that is a multiple of 64 blocks and satisfies `fits(N)`:
    `2R(N) + objects + longnames + ceil(N * reserve / 100) +
    ceil(min_free / B) <= N`, where `R(N)` uses the inode capacity selected
-   for `N` and the bitmap size `ceil(ceil(N / 8) / B)`. Raising `N` by 64
-   blocks adds 64 free blocks and at most ten metadata and reserve blocks at
-   any block size, so the predicate is monotone over that step and the search
-   is bounded by the 32-bit reference space. The inode and bitmap trees must
+   for `N` (the native ladder of one inode per 8, 32, 64 or 128 blocks,
+   raised to the catalog's inode count, or the requested capacity) and the
+   bitmap size `ceil(ceil(N / 8) / B)`. Raising `N` by 64 blocks adds 64
+   blocks against at most fourteen system blocks and `ceil(64 * reserve /
+   100)` reserve blocks at any block size, so the predicate is monotone over
+   that step for reserves up to 76 percent, and the search is bounded by the
+   32-bit reference space. With a larger reserve the search still returns a
+   fitting `N`, not necessarily the smallest, and near the depth-2 limit of
+   the system trees it can refuse a request a smaller `N` would hold. The inode and bitmap trees must
    have depth at most 2, which the native formatter also requires. Under the
    [minimization option](design-sizing.md) the search also covers the open
    block sizes and the exact inode capacity, and refines `N` to the
@@ -428,8 +452,11 @@ The common emission object has already zeroed the sink. The driver emits:
    indirect blocks. The twin region stays zero.
 5. Both 512-byte headers, byte-identical with serial 1, format and sync times
    equal to the epoch in reproducible mode and otherwise the host's UTC clock
-   at planning, flags `0x100`, the free counts, the three descriptors and the
-   empty fourth tree, and the CRC, at 8192 and `S2`. The boot area and the
+   at planning, flags `0x100`, a group count of one, the free counts, the
+   three descriptors and the empty fourth tree, and the CRC, at 8192 and
+   `S2`. The native formatter's group count grows with the volume; the
+   count describes no on-disk structure of the classic profile, and the
+   native tools accept one. The boot area and the
    rest of both header areas stay zero, as do bytes from `E` to `V`.
 
 Every emitted byte comes from a row, the geometry or a profile constant.
@@ -456,7 +483,8 @@ charged scratch. Every loop charges the session and observes cancellation.
 | No classic magic at 8192 | `FSIMG_EFORMAT` |
 | Recognized but unqualified: byte-zero layouts, flags outside the table, nonminimal or deep system trees, oversized bitmap, extension bytes, unknown inode type or status bits, nonzero inode tail, preallocation past the logical end, name outside the profile | `FSIMG_EUNSUPPORTED` |
 | CRC, range, sentinel, free-bit, sharing, dot-entry, name-checksum, link-count, tie or counter inconsistency | `FSIMG_ECORRUPT` |
-| Setting outside its type, label for this profile, unrepresentable selection component | `FSIMG_EINVAL` |
+| Setting outside its type, name outside the profile, unrepresentable selection component | `FSIMG_EINVAL` |
+| Label for this profile | `FSIMG_EUNSUPPORTED`, from the common capability check |
 | Content and reserve do not fit the exact or any automatic size; required metadata or kind that the profile cannot store | `FSIMG_ERANGE` or `FSIMG_EUNSUPPORTED` as the common policy states |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
 
@@ -471,10 +499,14 @@ code with `lib/formats/qnx6/`. It builds volumes in memory for both byte
 orders and every classic block size, with a chosen snapshot pair, system run,
 inode table, directories, long names and files, and mutates them for the
 format design's [acceptance matrix](design-qnx6.md#acceptance-and-independent-validation).
-Writer tests create images through the public API and read them back through
-the generator's independent decoder as well as the reader, compare bytes
-across source order, budget, fan-in, scratch location, locale and time zone,
-and scan every unused byte and pointer slot. Fault tests inject allocation,
+`test/qnx6-write.c` creates images through the public API and reads them
+back through its own independent checker, written from the format design
+like the generator and sharing no code with the driver, as well as through
+the reader and verifier. It compares bytes across source order, metadata
+cache size, scratch placement and time zone, and scans every unused byte and
+pointer slot. Its `--native` mode compares an empty volume with a native
+`mkqnx6fs` capture of the same geometry: the headers and allocated blocks
+match byte for byte apart from the CRC, sync time and group count. Fault tests inject allocation,
 scratch, short-read, short-write, EOF, source-change and cancellation failures
 at every stage and check cleanup. A scale test grows `N`, the inode capacity,
 one directory's width, a file's depth and a file beyond 4 GiB separately,

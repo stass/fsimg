@@ -82,7 +82,7 @@ when losses are forbidden. Capability records carry entry-kind and field masks
 whose bits are the public values, and the encoded label capacity. Safe
 extraction fails on kinds it does not create unless -k skips and counts them.
 
-A read-only QNX6 driver reads and verifies classic Power-Safe volumes in both
+A QNX6 driver reads, verifies and writes classic Power-Safe volumes in both
 byte orders at every classic block size. It selects the newer of the two
 snapshot headers, validates the allocation bitmap against itself, and checks
 every block a tree references for range, allocation and sharing before
@@ -92,6 +92,19 @@ reconciles block ownership with the bitmap and slot references with link
 counts and the inode table. Native QNX 6.5.0 captures, the NFI research image
 and the QNX6 partitions of a Porsche PCM 3.1 hard disk verify. Extraction
 reports an entry name the host filesystem cannot represent as unsupported.
+
+The QNX6 writer lays the system run and its zero twin out from block 0 and
+every directory, file, link and long name in one contiguous run after it,
+so allocation is a prefix and two identical serial-1 headers describe the
+volume. Tree pointers come from shape arithmetic shared with the reader;
+rows in one paged array are the only per-entry state. `-O endian=`, `uuid=`,
+`inodes=` and `reserve=` select the byte order, UUID, inode capacity and
+reserve; without `-R` a volume receives a random version 4 UUID. Empty
+volumes match native `mkqnx6fs` output byte for byte apart from the CRC,
+sync time and group count, and QNX 6.5.0 checks, mounts, modifies, syncs and
+remounts fsimg volumes cleanly at every block size and in both byte orders. A
+provider's symbolic-link target is read once when its source opens, and a
+NUL byte in it fails creation.
 
 The fsimg command provides creation, inspection, listing, raw content, safe
 extraction, verification and capability enumeration. Strict short-option parsing,

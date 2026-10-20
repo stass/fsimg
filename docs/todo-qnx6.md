@@ -35,24 +35,11 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   an SH-4 QNX target with nondefault options (byte order, block size,
   checksum) to confirm, and qualify extension trees on later QNX releases.
 
-* [High] **Writable allocation recipe** (`lib/formats/qnx6/`): qualify fsimg
-  output, including the identical serial-1 header pair over a populated
-  tree that no native session produces, by native
-  create/grow/delete/sync/remount cycles and `chkqnx6fs`; passing a
-  read-only parser cannot close this gate.
-
 * [High] **Identity encodings** (`lib/formats/qnx6/`, writer settings): the
   UUID encoding at header offset 32 is measured; the head unit formats its
-  media partition with the fixed UUID `11111111-2222-3333-4444-555555555555`.
-  Expose the UUID as a writer setting and confirm on the target whether its
-  software checks it.
-
-* [High] **Writer** (`lib/formats/qnx6/`, `test/`): implement the writer
-  half of the [driver design](../specs/design-qnx6-driver.md) as stage 3 of
-  the [extension sequence](implementation-plan.md#extension-sequence), and
-  register it only after its native and synthetic acceptance matrix. Add
-  failing regressions before nontrivial fixes; run sanitizers and required
-  internal/external reviews.
+  media partition with the fixed UUID `11111111-2222-3333-4444-555555555555`,
+  which the writer's `uuid=` setting reproduces and QNX 6.5.0 accepts.
+  Confirm on the target whether its software checks it.
 
 * [Medium] **Linux reader comparison** (`test/qnx6-integration.sh`): the
   script mounts the generated sample with the Linux qnx6 driver as root and
@@ -93,10 +80,9 @@ classic, MMI, and extended Power-Safe remain separate profiles.
 * [Medium] **Independent infrastructure** (`test/`, `docs/build.md`): script
   the local QNX 6.5.0 QEMU harness (unattended boot, serial shell, capture
   provenance), whose layout and manual procedure the
-  [infrastructure page](qnx6-infrastructure.md) records, and give it a way
-  to load host-built images without a reboot, since the guest block cache
-  does not see host writes to the attached disk.
-  Arrange isolated native write-after-create tests, a Linux
+  [infrastructure page](qnx6-infrastructure.md) records, including the
+  writer's native write-after-create cycle through `capture.sh -i`. Arrange
+  a Linux
   read-only oracle, licensed redistributable fixtures or local generation,
   and a recorded target PCM compatibility run. Keep ordinary tests
   unprivileged and all third-party utilities outside runtime dependencies.

@@ -23,6 +23,7 @@ captures into a new directory, and never format or modify the originals.
 | `~/qnx-6.5.0-x86-201007091524.iso` | QNX 6.5.0 x86 live CD, source X1 in the research record |
 | `~/qnx65-vm/` | The VM's working directory: `test0.img` (64 MiB, guest `/dev/hd0`), `big.img` (5,033,164,800 bytes, guest `/dev/hd1`), `mon.sock` (QEMU monitor), `ser.sock` (guest serial shell), `qemu.pid` |
 | `~/qnx65-vm/captures/` | Native captures: `NAME.img.gz` (64 MiB disk) or `NAME.img.zst` (5 GB disk), with `NAME.txt` (guest commands, tool output, provenance) and for some `NAME.decode.txt`; this is `FSIMG_QNX6_NATIVE` for `test/qnx6-integration.sh` |
+| `~/qnx65-vm/writer-captures/` | Native qualification of fsimg writer output, in the same capture format |
 | `~/qnx65-vm/bin/`, `~/qnx65-vm/boot/`, `~/qnx65-vm/rtkit/` | QNX 6.5.0 binaries copied out of the live CD for disassembly (source X2): `mkqnx6fs`, `chkqnx6fs`, `fs-qnx6.so`, `io-blk.so`, `fsysinfo`, and the other filesystem modules |
 | `~/qnx65-vm/workbench/` | The full working set of the original native and PCM analysis: decoders, disassembly listings (`*.s`, `rv-*`), symbol tables and intermediate images |
 | `~/PCM-3.1-v4.76-disc-image.iso` | The PCM 3.1 update disc |
@@ -90,8 +91,8 @@ Two wrappers take the lock for one-off use of a running VM:
 
 ## Captures
 
-`capture.sh [-d hd0|hd1] NAME 'GUEST-COMMANDS'` runs one native experiment and
-keeps its evidence. On `hd0` (64 MiB `test0.img`, the default) it first fills
+`capture.sh [-d hd0|hd1] [-i IMAGE] NAME 'GUEST-COMMANDS'` runs one native
+experiment and keeps its evidence. On `hd0` (64 MiB `test0.img`, the default) it first fills
 the disk with `0xaa` from inside the guest, so a decoder can tell which bytes
 QNX wrote, and saves `NAME.img.gz`; on `hd1` (the sparse 5 GB `big.img`) the
 disk is not reset, the record says so, and it saves `NAME.img.zst`. The
@@ -118,12 +119,29 @@ tools/qnx/vm/capture.sh pop1-b1024-le \
 Names follow `KIND-bBLOCKSIZE-ORDER-OPTION`, for example
 `empty-b2048-be-lfnoff` or `pop2-b1024-le`.
 
-The guest block cache does not see host writes to an attached disk. An image
-built on the host, such as fsimg writer output, reaches the guest only through
-a fresh guest view of the disk: copy it over `test0.img` and reboot the VM, or
-attach it as a new drive the guest has not cached. Host-side edits between two
-guest steps, such as the torn-header experiment, are recorded byte for byte in
-the capture's `.txt` file.
+The guest block cache does not see host writes to an attached disk, so an
+image built on the host, such as fsimg writer output, is written by the guest
+itself: `capture.sh -i IMAGE` fills `hd0` with `0xaa` as usual and then runs
+`load.py`, which sends the image gzip-compressed and uuencoded over the
+serial line into the guest's `/tmp` (paced below the guest's 10 KB/s input
+limit; the encoded image must stay under 3 MiB, which a mostly empty 64 MiB
+volume does), decodes it onto `/dev/hd0` with `dd`, and compares the guest's
+`cksum` of the written range with the host's. The record names the image and
+its SHA-256. `tools/qnx/guest/qualify.sh` is the native write-after-create
+cycle for the fixture tree that `test-qnx6-write --create` builds; the
+[research record](qnx6-research.md#fsimg-writer-output) lists its captures,
+kept in `~/qnx65-vm/writer-captures/`:
+
+```sh
+./test-qnx6-write --create /tmp/q big 2048 67108864 \
+    11111111222233334444555555555555
+tools/qnx/vm/put.sh tools/qnx/guest/qualify.sh /tmp/qualify.sh
+FSIMG_QNX_CAPTURES=~/qnx65-vm/writer-captures tools/qnx/vm/capture.sh \
+    -i /tmp/q/writer.img writer-b2048-be-uuid-qualify 'sh /tmp/qualify.sh'
+```
+
+Host-side edits between two guest steps, such as the torn-header experiment,
+are recorded byte for byte in the capture's `.txt` file.
 
 ## Decoders and analysis
 

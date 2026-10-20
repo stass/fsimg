@@ -95,12 +95,32 @@ test_options(void)
 		{ "fsimg", "create", "-t", "exfat", "-o", "image", "-e", "315532800", ".", NULL },
 		{ "fsimg", "create", "-n", "-t", "exfat", "-O", "cluster=3K", ".", NULL },
 		{ "fsimg", "create", "-n", "-t", "fat16", "-O", "cluster=64K", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O", "endian=middle", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O", "uuid=1-2-3-4-5", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O",
+		    "uuid=11111111-2222-3333-4444-55555555555g", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O",
+		    "uuid=11111111+2222-3333-4444-555555555555", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O",
+		    "uuid=11111111-2222-3333-4444-5555555555550", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O", "inodes=0", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O", "inodes=4294967296", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O", "reserve=101", ".", NULL },
+		{ "fsimg", "create", "-n", "-t", "qnx6", "-O", "reserve=1K", ".", NULL },
+		{ "fsimg", "info", "-i", "image", "-O", "endian=big", NULL },
 		{ "fsimg", "formats", "-m", "16M", NULL },
 		{ "fsimg", "info", "-i", "image", "operand", "-j", NULL }
 	};
 	char *dry_run[] = { "fsimg", "create", "-n", "-R", "-t", "exfat", ".", NULL };
 	char *defaults[] = { "fsimg", "info", "-i", "image", "-m", "0", "-l", "fds=0", NULL };
 	char *listing[] = { "fsimg", "ls", "-j", "-r", "-i", "image", "--", "/A", NULL };
+	char *qnx6[] = { "fsimg", "create", "-n", "-t", "qnx6", "-O", "endian=big",
+	    "-O", "uuid=89ABCDEF-0123-4567-89ab-cdef01234567", "-O",
+	    "inodes=1000", "-O", "reserve=0", ".", NULL };
+	static const unsigned char uuid[16] = {
+		0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+		0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67
+	};
 	fsimg_cli_options_t options;
 	char label[49];
 	char *large_label[] = { "fsimg", "create", "-n", "-t", "exfat", "-L", label, ".", NULL };
@@ -116,6 +136,11 @@ test_options(void)
 	CHECK(parse(listing, &options) == FSIMG_OK);
 	CHECK(options.json && (options.request.flags & FSIMG_JOB_RECURSIVE) != 0);
 	CHECK(strcmp(options.request.selection, "/A") == 0);
+	CHECK(parse(qnx6, &options) == FSIMG_OK);
+	CHECK(options.request.write.byte_order == FSIMG_BYTE_ORDER_BIG);
+	CHECK(bcmp(options.request.write.volume_uuid, uuid, 16) == 0);
+	CHECK(options.request.write.inode_capacity == 1000);
+	CHECK(options.request.write.reserve_percent == 0);
 	memset(label, 'A', sizeof(label) - 1);
 	label[sizeof(label) - 1] = '\0';
 	CHECK(parse(large_label, &options) == FSIMG_EINVAL);

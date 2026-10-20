@@ -84,8 +84,9 @@ typedef enum fsimg_source_storage {
 
 /* The writer's single current source owns io. fd is only a borrowed alias
  * used for identity checks; freeing io closes and releases the descriptor.
- * A host symbolic link has no descriptor: opening it reads its target into
- * link_target, and io delivers those bytes.
+ * A symbolic link, host or provider, has no descriptor: opening it reads
+ * and checks its whole target into link_target, link is set, and io
+ * delivers those bytes as one data range.
  */
 struct fsimg_source_cursor {
 	fsimg_writer_t	*writer;
@@ -96,6 +97,7 @@ struct fsimg_source_cursor {
 	uint64_t	 length;
 	int		 fd;
 	bool		 active;
+	bool		 link;
 	unsigned char	 link_target[FSIMG_SYMLINK_TARGET_MAX + 1];
 };
 

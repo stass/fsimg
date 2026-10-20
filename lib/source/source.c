@@ -21,6 +21,10 @@ static fsimg_status_t provider_read(void *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 static fsimg_status_t link_read(void *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
+static fsimg_status_t serve_link(fsimg_writer_t *, fsimg_source_cursor_t *,
+    fsimg_error_t *);
+static fsimg_status_t open_provider_link(fsimg_writer_t *,
+    fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t open_host_link(fsimg_writer_t *, fsimg_source_root_t *,
     int, const char *, fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t open_host_source(fsimg_writer_t *, uint64_t,
@@ -353,16 +357,67 @@ link_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	return (FSIMG_OK);
 }
 
+/* Serve a link's content from link_target, which opening filled with the
+ * whole target: later changes to the link or the provider cannot alter the
+ * bytes being copied, and the content has no holes.
+ */
+static fsimg_status_t
+serve_link(fsimg_writer_t *writer, fsimg_source_cursor_t *source,
+    fsimg_error_t *error)
+{
+	fsimg_io_ops_t ops;
+
+	fsimg_io_ops_init(&ops);
+	ops.get_size = provider_size;
+	ops.read_at = link_read;
+	source->link = true;
+	return (fsimg_io_from_callbacks(writer->ctx, &ops, source, &source->io,
+	    error));
+}
+
+/* Read a provider link's whole target through a transient provider I/O
+ * object and reject a NUL byte, so every link target any driver receives,
+ * host or provider, is checked here once. Host targets cannot hold one.
+ */
+static fsimg_status_t
+open_provider_link(fsimg_writer_t *writer, fsimg_source_cursor_t *source,
+    fsimg_error_t *error)
+{
+	fsimg_io_ops_t ops;
+	fsimg_io_t *io;
+	size_t transferred;
+	fsimg_status_t status;
+
+	if (source->length == 0 || source->length > FSIMG_SYMLINK_TARGET_MAX)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_SOURCE, "catalog link target length is out of range"));
+	fsimg_io_ops_init(&ops);
+	ops.max_transfer = writer->provider.max_transfer;
+	ops.get_size = provider_size;
+	ops.read_at = provider_read;
+	status = fsimg_io_from_callbacks(writer->ctx, &ops, source, &io, error);
+	if (status != FSIMG_OK)
+		return (status);
+	fsimg_io_bind_session(io, &writer->session);
+	status = fsimg_io_read_exact(io, 0, source->link_target,
+	    (size_t)source->length, &transferred, error);
+	fsimg_io_free(io);
+	if (status != FSIMG_OK)
+		return (status);
+	if (memchr(source->link_target, '\0', (size_t)source->length) != NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_SOURCE,
+		    "provider symbolic link target contains a NUL byte"));
+	return (serve_link(writer, source, error));
+}
+
 /* Reopen a link: read its target again and require the recorded identity,
- * including the target length. The I/O object then serves link_target, so
- * a later change to the link cannot alter the bytes being copied.
+ * including the target length, then serve the bytes read.
  */
 static fsimg_status_t
 open_host_link(fsimg_writer_t *writer, fsimg_source_root_t *root, int parent,
     const char *name, fsimg_source_cursor_t *source, fsimg_error_t *error)
 {
 	fsimg_host_file_t opened;
-	fsimg_io_ops_t ops;
 	fsimg_status_t status;
 
 	status = fsimg_source_read_link(writer, parent, name, &opened,
@@ -375,11 +430,7 @@ open_host_link(fsimg_writer_t *writer, fsimg_source_root_t *root, int parent,
 	if (!fsimg_source_identity_equal(&opened, &source->identity))
 		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
 		    FSIMG_OP_SOURCE, "reopened source link differs from its recorded identity"));
-	fsimg_io_ops_init(&ops);
-	ops.get_size = provider_size;
-	ops.read_at = link_read;
-	return (fsimg_io_from_callbacks(writer->ctx, &ops, source, &source->io,
-	    error));
+	return (serve_link(writer, source, error));
 }
 
 static int64_t
@@ -552,6 +603,11 @@ fsimg_source_open(fsimg_writer_t *writer, uint64_t entry_id,
 		    FSIMG_HOST_LINK, source, error);
 		if (status != FSIMG_OK)
 			return (source_abort(source, status));
+	} else if (source->storage == FSIMG_STORAGE_PROVIDER &&
+	    entry.entry.kind == FSIMG_ENTRY_SYMLINK) {
+		status = open_provider_link(writer, source, error);
+		if (status != FSIMG_OK)
+			return (source_abort(source, status));
 	} else if (source->storage == FSIMG_STORAGE_PROVIDER) {
 		fsimg_io_ops_init(&ops);
 		ops.max_transfer = writer->provider.max_transfer;
@@ -644,7 +700,8 @@ fsimg_source_range(fsimg_writer_t *writer, uint64_t offset,
 		    FSIMG_OP_SOURCE, "source range starts past declared length"));
 	if (offset == source->length)
 		return (FSIMG_DONE);
-	if (source->storage != FSIMG_STORAGE_PROVIDER || writer->provider.next_range == NULL) {
+	if (source->storage != FSIMG_STORAGE_PROVIDER || source->link ||
+	    writer->provider.next_range == NULL) {
 		range->offset = offset;
 		range->length = source->length - offset;
 		range->kind = source->storage == FSIMG_STORAGE_ZERO ?

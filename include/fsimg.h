@@ -354,6 +354,12 @@ void fsimg_source_ops_init(fsimg_source_ops_t *);
 /* Host trees also record uid, gid and permission bits as optional fields. */
 #define FSIMG_WRITE_IMPORT_POSIX 0x08u
 
+/* The on-disk byte order of a format that offers both, such as QNX6. */
+typedef enum fsimg_byte_order {
+	FSIMG_BYTE_ORDER_LITTLE = 0,
+	FSIMG_BYTE_ORDER_BIG = 1
+} fsimg_byte_order_t;
+
 typedef struct fsimg_write_options {
 	size_t		 size;
 	uint32_t	 version;
@@ -369,6 +375,14 @@ typedef struct fsimg_write_options {
 	uint32_t	 allocation_unit_bytes; /* Zero selects automatically. */
 	uint32_t	 fat_root_entries; /* FAT12/16 only; zero selects an adequate root. */
 	uint32_t	 volume_serial; /* Default zero; used verbatim in all modes. */
+	/* Format-specific settings: a format whose record lacks the matching
+	 * FSIMG_SETTING_* bit requires the default.
+	 */
+	fsimg_byte_order_t byte_order; /* Default little. */
+	uint32_t	 inode_capacity; /* Zero selects the native ladder. */
+	uint32_t	 reserve_percent; /* Default 3; at most 100. */
+	/* Default zero; used verbatim in all modes, in textual byte order. */
+	unsigned char	 volume_uuid[16];
 	uint64_t	 reserved[4];
 } fsimg_write_options_t;
 
@@ -469,6 +483,12 @@ typedef struct fsimg_volume_info {
 	bool		 io_error;
 } fsimg_volume_info_t;
 
+/* Format-specific fields of fsimg_write_options_t. */
+#define FSIMG_SETTING_BYTE_ORDER 0x01u
+#define FSIMG_SETTING_VOLUME_UUID 0x02u
+#define FSIMG_SETTING_INODE_CAPACITY 0x04u
+#define FSIMG_SETTING_RESERVE 0x08u
+
 typedef struct fsimg_format_info {
 	char		 name[16];
 	char		 profile[40];
@@ -487,6 +507,8 @@ typedef struct fsimg_format_info {
 	uint32_t	 max_name_utf16_units;
 	/* Encoded on-disk label capacity; zero when the format has no label. */
 	uint32_t	 max_label_bytes;
+	/* FSIMG_SETTING_* write options the format stores. */
+	uint32_t	 write_settings;
 } fsimg_format_info_t;
 
 typedef struct fsimg_verify_report {

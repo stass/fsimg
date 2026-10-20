@@ -438,7 +438,10 @@ validation gates above:
    cycle on fsimg output in both byte orders and recorded the result in the
    qualification documentation; without that record the stage lands the
    code and tests with the capability unregistered and the gap listed in
-   `TODO.md`.
+   `TODO.md`. Implemented and registered: the native cycle passed at every
+   classic block size and in both byte orders, as the
+   [research record](qnx6-research.md#fsimg-writer-output) documents, with
+   the test evidence in [build.md](build.md).
 4. **Automotive composition.** Add disk-composition support and a separate
    QNX4 design where the target HDD needs them, and extend MMI, bootless and
    modern Power-Safe features under independent evidence and acceptance

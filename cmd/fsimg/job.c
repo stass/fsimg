@@ -10,8 +10,11 @@
 #include "worker.h"
 
 /* Each numeric field occupies eight little-endian bytes. Fixed strings follow
- * at byte 200; the remainder is zero reserved space. This enum names wire
- * positions only and is independent of native struct layout or padding.
+ * at byte 200, then the QNX6 settings: the 16-byte UUID, the byte order as
+ * one byte, and the inode capacity and reserve percentage as eight
+ * little-endian bytes each. The remainder is zero reserved space. These
+ * enums name wire positions only and are independent of native struct
+ * layout or padding.
  */
 typedef enum job_field {
 	JOB_KIND, JOB_SANDBOX, JOB_FLAGS, JOB_MEMORY, JOB_SCRATCH, JOB_ENTRIES,
@@ -25,7 +28,11 @@ typedef enum job_string_field {
 	JOB_FORMAT_OFFSET = 200,
 	JOB_LABEL_OFFSET = 216,
 	JOB_LABEL_PRESENT = 264,
-	JOB_RESERVED_OFFSET = 265
+	JOB_UUID_OFFSET = 272,
+	JOB_BYTE_ORDER = 288,
+	JOB_INODES_OFFSET = 296,
+	JOB_RESERVE_OFFSET = 304,
+	JOB_RESERVED_OFFSET = 312
 } job_string_field_t;
 
 static void put_field(unsigned char *, job_field_t, uint64_t);
@@ -116,6 +123,11 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	bcopy(request->format, raw + JOB_FORMAT_OFFSET, strlen(request->format));
 	bcopy(label, raw + JOB_LABEL_OFFSET, label_length);
 	raw[JOB_LABEL_PRESENT] = request->write.label != NULL ? 1 : 0;
+	bcopy(request->write.volume_uuid, raw + JOB_UUID_OFFSET,
+	    sizeof(request->write.volume_uuid));
+	raw[JOB_BYTE_ORDER] = (unsigned char)request->write.byte_order;
+	fsimg_wire_put64(raw + JOB_INODES_OFFSET, request->write.inode_capacity);
+	fsimg_wire_put64(raw + JOB_RESERVE_OFFSET, request->write.reserve_percent);
 	return (FSIMG_OK);
 }
 
@@ -138,9 +150,17 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_CAPABILITIES) > 15 ||
 	    memchr(raw + JOB_FORMAT_OFFSET, '\0', 16) == NULL ||
 	    memchr(raw + JOB_LABEL_OFFSET, '\0', 48) == NULL ||
-	    raw[JOB_LABEL_PRESENT] > 1 ||
+	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||
 	    (raw[JOB_LABEL_PRESENT] == 0 && raw[JOB_LABEL_OFFSET] != 0))
 		return (invalid_job(error));
+	for (unsigned i = JOB_LABEL_PRESENT + 1; i < JOB_UUID_OFFSET; i++) {
+		if (raw[i] != 0)
+			return (invalid_job(error));
+	}
+	for (unsigned i = JOB_BYTE_ORDER + 1; i < JOB_INODES_OFFSET; i++) {
+		if (raw[i] != 0)
+			return (invalid_job(error));
+	}
 	for (unsigned i = JOB_RESERVED_OFFSET; i < FSIMG_JOB_BYTES; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
@@ -153,7 +173,9 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		if (get_field(raw, field) > UINT32_MAX)
 			return (invalid_job(error));
 	}
-	if (get_field(raw, JOB_WRITE_FLAGS) > UINT32_MAX)
+	if (get_field(raw, JOB_WRITE_FLAGS) > UINT32_MAX ||
+	    fsimg_wire_get64(raw + JOB_INODES_OFFSET) > UINT32_MAX ||
+	    fsimg_wire_get64(raw + JOB_RESERVE_OFFSET) > UINT32_MAX)
 		return (invalid_job(error));
 	request->kind = (fsimg_job_kind_t)get_field(raw, JOB_KIND);
 	request->sandbox = (fsimg_sandbox_policy_t)get_field(raw, JOB_SANDBOX);
@@ -184,6 +206,13 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, 48);
 	request->write.label = raw[JOB_LABEL_PRESENT] == 0 ? NULL :
 	    request->label_storage;
+	bcopy(raw + JOB_UUID_OFFSET, request->write.volume_uuid,
+	    sizeof(request->write.volume_uuid));
+	request->write.byte_order = (fsimg_byte_order_t)raw[JOB_BYTE_ORDER];
+	request->write.inode_capacity =
+	    (uint32_t)fsimg_wire_get64(raw + JOB_INODES_OFFSET);
+	request->write.reserve_percent =
+	    (uint32_t)fsimg_wire_get64(raw + JOB_RESERVE_OFFSET);
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);
 	path_limit = request->limits.max_path_bytes == 0 ? 65536 :

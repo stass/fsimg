@@ -4,14 +4,14 @@
 #include "config.h"
 
 #include "format.h"
-#include "qnx6.h"
+#include "write-qnx6.h"
 
 static fsimg_status_t qnx6_probe(const unsigned char *, size_t, uint64_t,
     fsimg_error_t *);
 
-/* The classic profile is read-only: the writer is registered only after
- * native qualification. Files are bounded by the 32-bit block references,
- * a slice by nothing below the host's file size.
+/* The classic profile, read and written at every classic block size. Files
+ * are bounded by the 32-bit block references, a slice by nothing below the
+ * host's file size.
  */
 static const fsimg_format_variant_t qnx6_variants[] = {
 	{
@@ -27,13 +27,18 @@ static const fsimg_format_variant_t qnx6_variants[] = {
 			.sector_size_mask = 1u << 9,
 			.allocation_unit_size_mask = (1u << 9) | (1u << 10) |
 			    (1u << 11) | (1u << 12),
+			.write_allocation_unit_size_mask = (1u << 9) |
+			    (1u << 10) | (1u << 11) | (1u << 12),
 			.max_file_bytes = (uint64_t)(QNX6_SENTINEL - 1) * 4096,
 			.max_volume_bytes = INT64_MAX,
 			/* Names are bounded in bytes; a UTF-8 name has no more
 			 * UTF-16 units than bytes, so the byte limit bounds it.
 			 */
 			.max_name_utf16_units = QNX6_NAME_MAX,
-			.max_label_bytes = 0
+			.max_label_bytes = 0,
+			.write_settings = FSIMG_SETTING_BYTE_ORDER |
+			    FSIMG_SETTING_VOLUME_UUID |
+			    FSIMG_SETTING_INODE_CAPACITY | FSIMG_SETTING_RESERVE
 		},
 		.id = 0		/* The classic profile is the only variant. */
 	}
@@ -45,7 +50,7 @@ const fsimg_format_t fsimg_qnx6_format = {
 	.probe_bytes = QNX6_PROBE_BYTES,
 	.probe = qnx6_probe,
 	.reader = &fsimg_qnx6_reader_ops,
-	.writer = NULL
+	.writer = &fsimg_qnx6_writer_ops
 };
 
 /* The identity signature is the magic at byte 8192, in either byte order.

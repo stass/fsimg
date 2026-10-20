@@ -64,7 +64,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx6/tree.c lib/formats/qnx6/bitmap.c \
 	lib/formats/qnx6/inode.c lib/formats/qnx6/names.c \
 	lib/formats/qnx6/directory.c lib/formats/qnx6/read.c \
-	lib/formats/qnx6/verify.c \
+	lib/formats/qnx6/verify.c lib/formats/qnx6/write-qnx6.h \
+	lib/formats/qnx6/write-plan.c lib/formats/qnx6/write-emit.c \
 	compat/host.c compat/host.h
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
 bin_PROGRAMS = fsimg
@@ -94,8 +95,8 @@ example_extract_LDADD = libfsimg.la
 check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale test-qnx6 test-cli test-qualify test-fragment test-posix header-c \
-	header-cxx
+	test-exfat-scale test-qnx6 test-qnx6-write test-cli test-qualify test-fragment \
+	test-posix header-c header-cxx
 TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/cli.sh \
 	test/baseline.sh
@@ -129,6 +130,8 @@ test_exfat_SOURCES = test/exfat.c test/test.h \
 test_exfat_LDADD = libfsimg.la
 test_qnx6_SOURCES = test/qnx6.c test/test.h
 test_qnx6_LDADD = libfsimg.la
+test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h
+test_qnx6_write_LDADD = libfsimg.la
 test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
 test_exfat_scale_LDADD = libfsimg.la
 test_catalog_SOURCES = test/catalog.c test/test.h
@@ -213,8 +216,8 @@ check-installed-consumers:
 	$(CXX) "-I$(includedir)" $(CPPFLAGS) $(CXXFLAGS) -std=c++11 $(LDFLAGS) \
 	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" -o header-installed-cxx
 	./header-installed-cxx
-check-integration: test-fat test-fat-write test-exfat test-qnx6 fsimg \
-	    test/fat-integration.sh test/exfat-integration.sh test/qnx6-integration.sh
+check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write \
+	    fsimg test/fat-integration.sh test/exfat-integration.sh test/qnx6-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
 	./test/qnx6-integration.sh
@@ -224,12 +227,13 @@ baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	    { rm -f $(srcdir)/test/baseline.txt.new; exit 1; }
 	mv $(srcdir)/test/baseline.txt.new $(srcdir)/test/baseline.txt
 check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale \
-	    test-qnx6
+	    test-qnx6 test-qnx6-write
 	./test-meta-sort --scale
 	./test-catalog --wide 100000
 	./test-catalog --scale 100000
 	./test-fat --scale
 	./test-fat-write --scale
+	./test-qnx6-write --scale
 	./test-exfat-scale --huge; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx6 --scale; result=$$?; test $$result = 0 -o $$result = 77
 check-fuzz: test-fat test-exfat test-qnx6 test-protocol

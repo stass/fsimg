@@ -21,11 +21,15 @@ typedef enum cli_limit_key {
 } cli_limit_key_t;
 
 typedef enum cli_setting_key {
-	CLI_SETTING_SECTOR, CLI_SETTING_CLUSTER, CLI_SETTING_OEM
+	CLI_SETTING_SECTOR, CLI_SETTING_CLUSTER, CLI_SETTING_OEM,
+	CLI_SETTING_ENDIAN, CLI_SETTING_UUID, CLI_SETTING_INODES,
+	CLI_SETTING_RESERVE, CLI_SETTING_COUNT
 } cli_setting_key_t;
 
 static fsimg_status_t syntax(fsimg_error_t *, const char *);
 static fsimg_status_t parse_limit(fsimg_cli_options_t *, const char *, unsigned *,
+    fsimg_error_t *);
+static fsimg_status_t parse_uuid(const char *, unsigned char *,
     fsimg_error_t *);
 static fsimg_status_t parse_setting(fsimg_cli_options_t *, const char *,
     unsigned *, fsimg_error_t *);
@@ -157,10 +161,53 @@ parse_limit(fsimg_cli_options_t *options, const char *text, unsigned *seen,
 	return (FSIMG_OK);
 }
 
+/* RFC 4122 text: 32 hexadecimal digits in groups of 8, 4, 4, 4 and 12,
+ * stored in textual byte order.
+ */
+static fsimg_status_t
+parse_uuid(const char *text, unsigned char *uuid, fsimg_error_t *error)
+{
+	static const char digits[] = "0123456789abcdef";
+	const char *digit;
+	size_t i, nibble;
+
+	nibble = 0;
+	for (i = 0; text[i] != '\0' && nibble < 32; i++) {
+		if (i == 8 || i == 13 || i == 18 || i == 23) {
+			if (text[i] != '-')
+				break;
+			continue;
+		}
+		digit = strchr(digits, text[i] >= 'A' && text[i] <= 'F' ?
+		    text[i] - 'A' + 'a' : text[i]);
+		if (digit == NULL || text[i] == '\0')
+			break;
+		if (nibble % 2 == 0)
+			uuid[nibble / 2] = (unsigned char)((digit - digits) << 4);
+		else
+			uuid[nibble / 2] |= (unsigned char)(digit - digits);
+		nibble++;
+	}
+	if (nibble != 32 || i != 36 || text[i] != '\0')
+		return (syntax(error, "uuid setting must be RFC 4122 text"));
+	return (FSIMG_OK);
+}
+
+/* Typed format settings: read-side oem, and creation-side byte quantities
+ * (sector, cluster), the byte order, the volume UUID, the inode capacity
+ * and the reserve percentage. The writer validates them for its format.
+ */
 static fsimg_status_t
 parse_setting(fsimg_cli_options_t *options, const char *text, unsigned *seen,
     fsimg_error_t *error)
 {
+	static const char *const keys[CLI_SETTING_COUNT] = {
+		[CLI_SETTING_SECTOR] = "sector", [CLI_SETTING_CLUSTER] = "cluster",
+		[CLI_SETTING_OEM] = "oem", [CLI_SETTING_ENDIAN] = "endian",
+		[CLI_SETTING_UUID] = "uuid", [CLI_SETTING_INODES] = "inodes",
+		[CLI_SETTING_RESERVE] = "reserve"
+	};
+	fsimg_write_options_t *write = &options->request.write;
 	const char *value;
 	uint64_t number;
 	size_t length;
@@ -171,33 +218,62 @@ parse_setting(fsimg_cli_options_t *options, const char *text, unsigned *seen,
 	if (value == NULL)
 		return (syntax(error, "format settings require key=value"));
 	length = (size_t)(value - text);
-	if (length == 6 && strncmp(text, "sector", 6) == 0)
-		key = CLI_SETTING_SECTOR;
-	else if (length == 7 && strncmp(text, "cluster", 7) == 0)
-		key = CLI_SETTING_CLUSTER;
-	else if (length == 3 && strncmp(text, "oem", 3) == 0)
-		key = CLI_SETTING_OEM;
-	else
+	value++;
+	for (key = 0; key < CLI_SETTING_COUNT; key++) {
+		if (strlen(keys[key]) == length && strncmp(text, keys[key], length) == 0)
+			break;
+	}
+	if (key == CLI_SETTING_COUNT)
 		return (syntax(error, "unknown format-setting key"));
 	if ((*seen & (1u << key)) != 0)
 		return (syntax(error, "format-setting key specified more than once"));
 	*seen |= 1u << key;
 	if (key == CLI_SETTING_OEM) {
-		if (options->request.kind >= FSIMG_JOB_CREATE || strcmp(value + 1, "cp437") != 0)
+		if (options->request.kind >= FSIMG_JOB_CREATE || strcmp(value, "cp437") != 0)
 			return (syntax(error, "read-side oem setting supports only cp437"));
 		return (FSIMG_OK);
 	}
 	if (options->request.kind < FSIMG_JOB_CREATE)
 		return (syntax(error, "geometry settings apply only to creation"));
-	status = fsimg_cli_number(value + 1, true, &number, error);
+	switch (key) {
+	case CLI_SETTING_ENDIAN:
+		if (strcmp(value, "little") == 0)
+			write->byte_order = FSIMG_BYTE_ORDER_LITTLE;
+		else if (strcmp(value, "big") == 0)
+			write->byte_order = FSIMG_BYTE_ORDER_BIG;
+		else
+			return (syntax(error, "endian setting must be little or big"));
+		return (FSIMG_OK);
+	case CLI_SETTING_UUID:
+		options->uuid_given = true;
+		return (parse_uuid(value, write->volume_uuid, error));
+	case CLI_SETTING_INODES:
+	case CLI_SETTING_RESERVE:
+		status = fsimg_cli_number(value, false, &number, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (key == CLI_SETTING_RESERVE) {
+			if (number > 100)
+				return (syntax(error, "reserve setting is a percentage up to 100"));
+			write->reserve_percent = (uint32_t)number;
+		} else {
+			if (number == 0 || number > UINT32_MAX)
+				return (syntax(error, "inodes setting must be a positive uint32 count"));
+			write->inode_capacity = (uint32_t)number;
+		}
+		return (FSIMG_OK);
+	default:
+		break;
+	}
+	status = fsimg_cli_number(value, true, &number, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (number == 0 || number > UINT32_MAX)
 		return (syntax(error, "geometry setting must be a positive uint32 byte quantity"));
 	if (key == CLI_SETTING_SECTOR)
-		options->request.write.sector_bytes = (uint32_t)number;
+		write->sector_bytes = (uint32_t)number;
 	else
-		options->request.write.allocation_unit_bytes = (uint32_t)number;
+		write->allocation_unit_bytes = (uint32_t)number;
 	return (FSIMG_OK);
 }
 
@@ -239,6 +315,12 @@ validate_creation(fsimg_cli_options_t *options, const bool *seen,
 		return (status);
 	if (!seen['L'])
 		request->write.label = info.max_label_bytes != 0 ? "FSIMG" : NULL;
+	/* Like the serial, a format's UUID is random unless reproducible or
+	 * given.
+	 */
+	options->random_uuid = (info.write_settings & FSIMG_SETTING_VOLUME_UUID) != 0 &&
+	    (request->write.flags & FSIMG_WRITE_REPRODUCIBLE) == 0 &&
+	    !options->uuid_given;
 	if (request->write.label != NULL &&
 	    strnlen(request->write.label, sizeof(request->label_storage)) ==
 	    sizeof(request->label_storage))

@@ -475,6 +475,40 @@ signed interpretation would give `0x55555ea3`), and ten copies of
 in filesystem byte order. With checksums disabled the stored value is 0. A
 computed value of zero, or an empty name, is stored as `0xffffffff`.
 
+### fsimg writer output
+
+The writer's layout departs from a native volume in three ways: both headers
+carry serial 1 over a populated tree, every object occupies one contiguous
+run after the system run in catalog order, and the group count is always
+one. QNX 6.5.0 (X1) accepts all three. Five 67108864-byte volumes holding
+the `test-qnx6-write --create` fixture tree (inline, 27-, 28- and 510-byte
+names, a UTF-8 name, a symbolic link, a FIFO, a depth-1 file of 300000
+bytes, a 70001-byte zero file, empty files and directories, a synthesized
+`.boot` sorted among the root's names and a file named `.boot` in a
+subdirectory) were written onto `/dev/hd0` by the guest
+itself and run through `tools/qnx/guest/qualify.sh`: `chkqnx6fs -vv`,
+mount, read every file, create files and a directory with a long name, grow
+the 300000-byte file by 3 MB, append, hard-link, symlink, rename an entry to
+a long name, delete files and a directory, sync, unmount, `chkqnx6fs`,
+remount, read again, unmount and `chkqnx6fs` again. Every check passed and
+the script exited 0:
+
+| Capture | B | Order | UUID | Blocks used before, after | Inodes |
+| --- | --- | --- | --- | --- | --- |
+| `writer-b512-le-qualify` | 512 | little | zero | 9076, 14982 of 131040 | 18, 20 of 16380 |
+| `writer-b1024-le-qualify` | 1024 | little | zero | 2456, 5397 of 65520 | 18, 20 of 8192 |
+| `writer-b1024-be-qualify` | 1024 | big | zero | 2456, 5397 of 65520 | 18, 20 of 8192 |
+| `writer-b2048-be-uuid-qualify` | 2048 | big | `11111111-2222-3333-4444-555555555555` | 719, 2188 of 32760 | 18, 20 of 4096 |
+| `writer-b4096-be-qualify` | 4096 | big | zero | 242, 976 of 16380 | 18, 20 of 2048 |
+
+The natively modified images then verify with fsimg, payload included. The
+captures are in `~/qnx65-vm/writer-captures/` with their records, which name
+the SHA-256 of the image loaded. An empty fsimg volume given a native empty
+capture's size, block size, byte order, UUID, reserve and format time as its
+epoch matches that capture's headers and allocated blocks byte for byte,
+apart from the CRC, sync time and group count, at every block size in both
+byte orders (`test-qnx6-write --native`).
+
 ## Measured PCM 3.1 HDD
 
 H1 is an image of one owner's Porsche PCM 3.1 HDD, supplied for analysis

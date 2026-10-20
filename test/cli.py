@@ -54,9 +54,7 @@ def test_formats(executable, root):
     decoded = completed(invoke(executable, root, ["formats", "-j"]))
     formats = {record["name"]: record for record in decoded if record["type"] == "format"}
     assert set(formats) == {"fat12", "fat16", "fat32", "exfat", "qnx6"}
-    assert all(record["capabilities"] == 7 for name, record in formats.items()
-               if name != "qnx6")
-    assert formats["qnx6"]["capabilities"] == 5
+    assert all(record["capabilities"] == 7 for record in formats.values())
     assert formats["exfat"]["write_cluster_bytes"][-1] == 32 * 1024 * 1024
     assert isinstance(formats["exfat"]["max_file_bytes"], str)
     capabilities = next(record for record in decoded if record["type"] == "capabilities")
@@ -69,12 +67,13 @@ def test_formats(executable, root):
 def test_posix_metadata(executable, root):
     """FAT and exFAT store no POSIX fields or links: -p imports become counted
     losses that leave image bytes unchanged, and a link fails planning. The
-    read-only QNX6 format stores every kind and the POSIX fields."""
+    QNX6 format stores every kind and the POSIX fields."""
     decoded = completed(invoke(executable, root, ["formats", "-j"]))
     formats = {record["name"]: record for record in decoded if record["type"] == "format"}
     qnx6 = formats.pop("qnx6")
     assert qnx6["entry_kinds"] == 15 and qnx6["metadata_fields"] == 0x77
-    assert qnx6["max_label_bytes"] == 0
+    assert qnx6["max_label_bytes"] == 0 and qnx6["write_settings"] == 15
+    assert all(record["write_settings"] == 0 for record in formats.values())
     assert all(record["entry_kinds"] == 3 for record in formats.values())
     assert all(record["metadata_fields"] == 15 for record in formats.values())
     assert formats["fat16"]["max_label_bytes"] == 11
@@ -161,7 +160,7 @@ def test_human_help(executable, root):
                               b"fat16   yes   yes    yes\n"
                               b"fat32   yes   yes    yes\n"
                               b"exfat   yes   yes    yes\n"
-                              b"qnx6    yes   no     yes\n")
+                              b"qnx6    yes   yes    yes\n")
     assert formats.stderr == b""
     verbose = invoke(executable, root, ["formats", "-v"])
     assert verbose.stdout == formats.stdout and b"Sandbox backend:" in verbose.stderr
@@ -461,6 +460,57 @@ def test_examples(executable, root):
     assert not list(scratch.iterdir())
 
 
+def test_qnx6(executable, root, payload):
+    """QNX6 creation with its typed settings: a big-endian volume with a
+    chosen UUID, inode capacity and reserve stores the POSIX fields and a
+    symbolic link, reads back and verifies, and is reproducible."""
+    source = root / "qnx6-source"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested/caf\u00e9.txt").write_bytes(payload)
+    (source / "nested/caf\u00e9.txt").chmod(0o640)
+    os.symlink("nested/caf\u00e9.txt", source / "link")
+    uuid = "89abcdef-0123-4567-89ab-cdef01234567"
+    arguments = ["create", "-j", "-R", "-p", "-S", "off", "-t", "qnx6",
+                 "-O", "cluster=2K", "-O", "endian=big", "-O", "uuid=" + uuid.upper(),
+                 "-O", "inodes=100", "-O", "reserve=0"]
+    decoded = completed(invoke(executable, root, [*arguments, "-o", "qnx6.img",
+                                                  "qnx6-source"]))
+    plan = next(record for record in decoded if record["type"] == "plan")
+    assert plan["format"] == "qnx6" and plan["cluster_bytes"] == 2048
+    image = (root / "qnx6.img").read_bytes()
+    assert image[8192:8196] == bytes.fromhex("68191122")
+    assert image[8192 + 32:8192 + 48] == bytes.fromhex(uuid.replace("-", ""))
+    assert int.from_bytes(image[8192 + 52:8192 + 56], "big") == 112
+
+    info = completed(invoke(executable, root, ["info", "-j", "-i", "qnx6.img"]))[0]
+    assert info["format"] == "qnx6" and info["uuid"] == uuid
+    listed = completed(invoke(executable, root, ["ls", "-j", "-r", "-i", "qnx6.img"]))
+    entries = {record["path"]: record for record in listed if record["type"] == "entry"}
+    assert set(entries) == {"/.boot", "/link", "/nested", "/nested/caf\u00e9.txt"}
+    assert entries["/link"]["kind"] == "symlink"
+    assert entries["/nested/caf\u00e9.txt"]["mode"] == 0o640
+    assert invoke(executable, root, ["cat", "-i", "qnx6.img", "/nested/caf\u00e9.txt"]).stdout == payload
+    assert invoke(executable, root, ["cat", "-i", "qnx6.img", "/link"]).stdout == \
+        "nested/caf\u00e9.txt".encode()
+    verification = completed(invoke(executable, root, ["verify", "-j", "-d", "-i", "qnx6.img"]))
+    report = next(record for record in verification if record["type"] == "verify")
+    assert report["validation_scope"] == "initialized-payload"
+
+    completed(invoke(executable, root, [*arguments, "-m", "16M", "-o", "qnx6-second.img",
+                                        "qnx6-source"]))
+    same_bytes(root / "qnx6.img", root / "qnx6-second.img")
+    # Without -R and uuid= the volume gets a random version 4 UUID.
+    completed(invoke(executable, root, ["create", "-j", "-S", "off", "-t", "qnx6",
+                                        "-o", "qnx6-random.img", "qnx6-source"]))
+    random_uuid = completed(invoke(executable, root, [
+        "info", "-j", "-i", "qnx6-random.img"]))[0]["uuid"]
+    assert random_uuid[14] == "4" and random_uuid[19] in "89ab"
+    error = failed(invoke(executable, root, [
+        "create", "-n", "-j", "-t", "qnx6", "-L", "LABEL", "qnx6-source",
+    ], expected=1))
+    assert error["code"] == -6
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -477,6 +527,7 @@ def main():
         for profile in ["fat12", "fat16", "fat32", "exfat"]:
             test_format(executable, root, profile, payload)
         test_posix_metadata(executable, root)
+        test_qnx6(executable, root, payload)
         test_failures(executable, root)
         test_output_failures(executable, root)
         test_examples(executable, root)

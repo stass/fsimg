@@ -85,7 +85,12 @@ length. Raw volumes are the default. fsimg does not auto-select a partition or
 silently guess among multiple filesystem candidates. Format forcing retains
 all safety checks. Unknown format-option keys and unsupported values fail.
 An explicitly supplied slice length is positive. The supported read setting
-is `oem=cp437`; creation settings are `sector` and `cluster` byte quantities.
+is `oem=cp437`; creation settings are `sector` and `cluster` byte quantities
+and the QNX6 settings `endian=little|big`, `uuid=` RFC 4122 text, `inodes=`
+a positive inode count and `reserve=` a percentage up to 100, which every
+other format rejects unless they hold their defaults. Without `-R` and
+`uuid=`, a QNX6 volume receives a random version 4 UUID, as every volume
+receives a random serial.
 
 An image path is an absolute validated UTF-8 path; omitted selection means `/`.
 Matching follows each format's component lookup rules, including FAT case
@@ -328,7 +333,8 @@ after all name frames and ENTRY_END validate; error closure marks them false.
 No final successful summary is emitted before worker exit and publication.
 
 CLI help uses -h, and top-level version uses -V. Typed writer settings are
-sector and cluster in bytes; FAT oem=cp437 is explicit on read commands.
+sector and cluster in bytes and the QNX6 endian, uuid, inodes and reserve;
+FAT oem=cp437 is explicit on read commands.
 Explicit slice length and exact image size are positive. Offset can be zero.
 Resource zero selects its documented default. Singleton and key duplicate
 flags are syntax errors even if values agree. -e requires -R. -r only applies

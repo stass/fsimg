@@ -182,3 +182,121 @@ qnx6_slot_decode(const unsigned char *p, bool big, qnx6_slot_t *slot)
 	if (slot->length <= QNX6_INLINE_NAME_MAX)
 		bcopy(p + 5, slot->name, slot->length);
 }
+
+/* The encoders are the exact inverses of the decoders above. Each fills the
+ * whole record, so an encoded record has no unspecified byte.
+ */
+void
+qnx6_put16(unsigned char *p, uint16_t value, bool big)
+{
+	if (big) {
+		p[0] = (unsigned char)(value >> 8);
+		p[1] = (unsigned char)value;
+	} else {
+		p[0] = (unsigned char)value;
+		p[1] = (unsigned char)(value >> 8);
+	}
+}
+
+void
+qnx6_put32(unsigned char *p, uint32_t value, bool big)
+{
+	for (unsigned i = 0; i < 4; i++)
+		p[big ? 3 - i : i] = (unsigned char)(value >> (8 * i));
+}
+
+void
+qnx6_put64(unsigned char *p, uint64_t value, bool big)
+{
+	qnx6_put32(p + (big ? 4 : 0), (uint32_t)value, big);
+	qnx6_put32(p + (big ? 0 : 4), (uint32_t)(value >> 32), big);
+}
+
+/* An 80-byte header descriptor with the classic mode byte 1. */
+static void
+tree_encode(const qnx6_tree_t *tree, bool big, unsigned char *p)
+{
+	bzero(p, 80);
+	qnx6_put64(p, tree->length, big);
+	for (unsigned i = 0; i < QNX6_ROOT_SLOTS; i++)
+		qnx6_put32(p + 8 + i * 4, tree->ref[i], big);
+	p[72] = tree->depth;
+	p[73] = 1;
+}
+
+/* Encode a classic header: the three descriptors, the empty fourth tree, a
+ * zero extension area and the CRC over bytes [8, 512).
+ */
+void
+qnx6_header_encode(const qnx6_header_t *header, bool big, unsigned char *p)
+{
+	qnx6_tree_t spare;
+
+	bzero(p, QNX6_HEADER_BYTES);
+	qnx6_put32(p, QNX6_MAGIC, big);
+	qnx6_put64(p + 8, header->serial, big);
+	qnx6_put32(p + 16, header->format_time, big);
+	qnx6_put32(p + 20, header->sync_time, big);
+	qnx6_put32(p + 24, header->flags, big);
+	qnx6_put16(p + 28, header->version, big);
+	qnx6_put16(p + 30, header->reserve, big);
+	bcopy(header->uuid, p + 32, sizeof(header->uuid));
+	qnx6_put32(p + 48, header->block_size, big);
+	qnx6_put32(p + 52, header->inode_count, big);
+	qnx6_put32(p + 56, header->free_inodes, big);
+	qnx6_put32(p + 60, header->block_count, big);
+	qnx6_put32(p + 64, header->free_blocks, big);
+	qnx6_put32(p + 68, header->groups, big);
+	tree_encode(&header->inodes, big, p + 72);
+	tree_encode(&header->bitmap, big, p + 152);
+	tree_encode(&header->names, big, p + 232);
+	spare = (qnx6_tree_t){ .length = 0 };
+	for (unsigned i = 0; i < QNX6_ROOT_SLOTS; i++)
+		spare.ref[i] = QNX6_SENTINEL;
+	tree_encode(&spare, big, p + 312);
+	qnx6_put32(p + 4, qnx6_crc32(p + 8, QNX6_HEADER_BYTES - 8), big);
+}
+
+/* Encode a 128-byte inode; its tree length is the inode size. */
+void
+qnx6_inode_encode(const qnx6_inode_t *inode, bool big, unsigned char *p)
+{
+	bzero(p, QNX6_INODE_BYTES);
+	qnx6_put64(p, inode->size, big);
+	qnx6_put32(p + 8, inode->uid, big);
+	qnx6_put32(p + 12, inode->gid, big);
+	qnx6_put32(p + 16, inode->created, big);
+	qnx6_put32(p + 20, inode->modified, big);
+	qnx6_put32(p + 24, inode->accessed, big);
+	qnx6_put32(p + 28, inode->changed, big);
+	qnx6_put16(p + 32, inode->mode, big);
+	qnx6_put16(p + 34, inode->links, big);
+	for (unsigned i = 0; i < QNX6_ROOT_SLOTS; i++)
+		qnx6_put32(p + 36 + i * 4, inode->tree.ref[i], big);
+	p[100] = inode->tree.depth;
+	p[101] = inode->status;
+}
+
+/* Encode a live 32-byte slot: an inline name, zero padded, or a long-name
+ * marker with its index and checksum and zero padding. The caller keeps an
+ * inline length within 27 bytes; a longer one is clamped rather than
+ * copied past the slot.
+ */
+void
+qnx6_slot_encode(const qnx6_slot_t *slot, bool big, unsigned char *p)
+{
+	size_t length;
+
+	bzero(p, QNX6_SLOT_BYTES);
+	qnx6_put32(p, slot->inode, big);
+	if (slot->long_name) {
+		p[4] = QNX6_LONG_NAME_MARKER;
+		qnx6_put32(p + 8, slot->long_index, big);
+		qnx6_put32(p + 12, slot->checksum, big);
+		return;
+	}
+	length = slot->length < QNX6_INLINE_NAME_MAX ? slot->length :
+	    QNX6_INLINE_NAME_MAX;
+	p[4] = (unsigned char)length;
+	bcopy(slot->name, p + 5, length);
+}

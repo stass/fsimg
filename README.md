@@ -1,9 +1,9 @@
 # fsimg
 
 fsimg is a BSD-2-Clause filesystem image tool and embeddable C11 library for
-64-bit FreeBSD, Linux, and macOS. It supports FAT and exFAT image
-creation, reading, verification, and safe extraction without mounts or root,
-and reads and verifies classic QNX6 Power-Safe volumes.
+64-bit FreeBSD, Linux, and macOS. It supports FAT, exFAT and classic QNX6
+Power-Safe image creation, reading, verification, and safe extraction without
+mounts or root.
 
 The library provides resource contexts, bounded positional I/O, and private
 bounded metadata storage with record streams, paged arrays/bitsets, and stable
@@ -66,8 +66,11 @@ Hard links appear as separate entries with the same content, and names are
 compared byte for byte. QNX6 names reach 510 bytes; extracting one longer
 than the host filesystem allows, 255 bytes on most, fails as unsupported.
 Bootless and Audi MMI layouts and later Power-Safe extensions are recognized
-and refused as unsupported; QNX4 is not recognized. Writing QNX6 awaits
-native qualification.
+and refused as unsupported; QNX4 is not recognized. The QNX6 writer creates
+the same layout with `-O endian=`, `uuid=`, `inodes=` and `reserve=`
+settings and stores every entry kind and the POSIX fields; QNX 6.5.0 checks,
+mounts, modifies and remounts its volumes cleanly at every block size and in
+both byte orders.
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,

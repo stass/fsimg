@@ -26,6 +26,8 @@ typedef struct fsimg_cli_options {
 	const char	*source;
 	const char	*scratch;
 	bool		 json;
+	bool		 uuid_given;	/* -O uuid= was given */
+	bool		 random_uuid;	/* paths generates the volume UUID */
 } fsimg_cli_options_t;
 
 typedef struct fsimg_cli_paths {

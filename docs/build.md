@@ -658,6 +658,33 @@ other case passes. `--seed` writes the fuzz seed,
 `--read-external` lists and verifies an image file, and `--scale` runs the
 scale cases at full size.
 
+`test-qnx6-write` creates QNX6 volumes through the public API and checks each
+one twice: with fsimg's reader and payload verification, and with its own
+checker, which decodes the layout from the format design with separate
+offsets, CRC and name checksum, requires every tree in the post-order run
+layout, every block below `A` to have exactly one owner, the bitmap to match,
+and every other byte of the image, from the boot area to the tail past the
+last 4096-byte boundary, to be zero over a sink poisoned with `0xa5`. A
+mutation pass shows the checker reporting one changed byte in a free block,
+the twin region, the header, an unused slot and the bitmap. The fixture tree
+holds every entry kind, inline, 27-, 28- and 510-byte and UTF-8 names and a
+depth-1 file, and is written at all four block sizes in both byte orders;
+forward and reverse catalog order, a one-page and a 1024-page metadata
+cache, scratch on and off and two time zones give identical bytes. Further
+cases cover exact sizes, sizing with inode capacity, reserve and free space,
+every invalid setting, the `.boot` rules, the metadata and time policy, a
+provider link target with a NUL byte, sink-size, durability, write, flush,
+short-write, changed-source and early-EOF faults, and allocation, metadata
+storage and cancellation failures at every step. `--scale` publishes a
+100000-entry directory (100008 inodes, 4.3 MB peak memory, 60 MB peak
+scratch), a 4000000-inode table, a depth-3 file of 130 MiB at B = 512, an
+exact 8 GiB volume of 512-byte blocks and a 4 GiB + 4097-byte file at
+B = 4096, each sparse on disk and passing the checker. `--native IMAGE`
+compares fsimg's empty volume with a native empty capture of the same
+geometry, and `--create DIR ORDER BLOCK BYTES [UUID]` writes the fixture tree
+for the native qualification that the [QNX6 research
+record](qnx6-research.md#fsimg-writer-output) documents.
+
 `test/qnx6-integration.sh` reads external evidence that is never
 redistributed, and skips what is absent; [the QNX6 infrastructure
 page](qnx6-infrastructure.md) records where that evidence and the QNX 6.5.0
@@ -673,9 +700,11 @@ FSIMG_QNX6_NATIVE=/path/to/captures FSIMG_QNX6_LARGE=1 \
 SHA-256. `FSIMG_QNX6_NATIVE` names a directory of QNX 6.5.0 captures
 (`*.img.gz`, and with `FSIMG_QNX6_LARGE=1` and zstd the 5 GB `*.img.zst`
 ones); each must verify except the torn-header capture and the oversized
-format that QNX itself refused. On macOS all 31 native captures and F1 behave
-so: free block counts equal native `chkqnx6fs` output, and the 9,830,368-block
-volume with 1,048,576 inodes and a depth-3 file verifies with payload in under
+format that QNX itself refused, and each empty capture formatted with
+long-name checksums must match fsimg's empty volume of its geometry. On macOS
+all 31 native captures and F1 behave so: free block counts equal native
+`chkqnx6fs` output, the eight empty comparisons find no difference outside
+the CRC, sync time and group count, and the 9,830,368-block volume with 1,048,576 inodes and a depth-3 file verifies with payload in under
 a second at 16 MiB RSS. The four QNX6 partitions of the measured PCM 3.1 HDD,
 read with `fsimg verify -b -z` at their partition offsets and lengths, also
 verify, including the head unit's original populated partition. On a Linux

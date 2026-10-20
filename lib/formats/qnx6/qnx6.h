@@ -124,6 +124,18 @@ typedef struct qnx6_geometry {
 	bool		 big_endian;
 } qnx6_geometry_t;
 
+/* The layout of a tree the writer emits (tree.c): n leaves at minimal
+ * depth L, count[j] indirect blocks at level j (count[0] = 1 for the root
+ * descriptor, count[L + 1] = n) and their indirect total.
+ */
+typedef struct qnx6_shape {
+	uint64_t	 leaves;
+	uint64_t	 count[QNX6_DEPTH_MAX + 2];
+	uint64_t	 indirect;
+	uint32_t	 pointers;
+	unsigned	 depth;
+} qnx6_shape_t;
+
 /* The two block domains a tree may occupy. */
 typedef enum qnx6_domain {
 	QNX6_DOMAIN_SYSTEM = 1,
@@ -223,7 +235,7 @@ fsimg_qnx6_reader_t *qnx6_state(const fsimg_reader_t *);
 fsimg_status_t qnx6_corrupt(fsimg_error_t *, const char *);
 fsimg_status_t qnx6_unsupported(fsimg_error_t *, const char *);
 
-/* codec.c: pure decoders over byte buffers. */
+/* codec.c: pure decoders and encoders over byte buffers. */
 uint16_t qnx6_u16(const unsigned char *, bool);
 uint32_t qnx6_u32(const unsigned char *, bool);
 uint64_t qnx6_u64(const unsigned char *, bool);
@@ -233,6 +245,12 @@ bool qnx6_magic_order(const unsigned char *, bool *);
 void qnx6_header_decode(const unsigned char *, bool, qnx6_header_t *);
 void qnx6_inode_decode(const unsigned char *, bool, qnx6_inode_t *);
 void qnx6_slot_decode(const unsigned char *, bool, qnx6_slot_t *);
+void qnx6_put16(unsigned char *, uint16_t, bool);
+void qnx6_put32(unsigned char *, uint32_t, bool);
+void qnx6_put64(unsigned char *, uint64_t, bool);
+void qnx6_header_encode(const qnx6_header_t *, bool, unsigned char *);
+void qnx6_inode_encode(const qnx6_inode_t *, bool, unsigned char *);
+void qnx6_slot_encode(const qnx6_slot_t *, bool, unsigned char *);
 
 /* header.c */
 fsimg_status_t qnx6_headers_read(fsimg_reader_t *, fsimg_error_t *);
@@ -241,6 +259,10 @@ fsimg_status_t qnx6_headers_read(fsimg_reader_t *, fsimg_error_t *);
 uint64_t qnx6_tree_leaves(uint64_t, uint32_t);
 bool qnx6_tree_min_depth(uint64_t, uint32_t, unsigned *);
 bool qnx6_tree_blocks(uint64_t, uint32_t, unsigned, uint64_t *);
+bool qnx6_shape(uint64_t, uint32_t, qnx6_shape_t *);
+uint64_t qnx6_shape_position(const qnx6_shape_t *, unsigned, uint64_t);
+void qnx6_shape_refs(const qnx6_shape_t *, uint32_t, unsigned, uint64_t,
+    uint32_t *);
 fsimg_status_t qnx6_index_build(fsimg_reader_t *, const qnx6_object_t *,
     fsimg_extent_index_t **, fsimg_error_t *);
 fsimg_status_t qnx6_index_read(fsimg_reader_t *, fsimg_extent_index_t *,

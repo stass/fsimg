@@ -3,13 +3,11 @@
 ## Major initiatives
 
 * [High] **QNX6 read/write and automotive qualification**
-  (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): the classic reader and
-  verifier are implemented; implement the writer of the
-  [Power-Safe design](specs/design-qnx6.md) through its
-  [driver design](specs/design-qnx6-driver.md), close the explicit
-  format-evidence
-  gates, and qualify native read/write interoperability across classic,
-  automotive, and extended variants. Porsche PCM 3.1 HDD reproduction also requires
+  (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): the classic reader,
+  verifier and writer of the [Power-Safe design](specs/design-qnx6.md) are
+  implemented through its [driver design](specs/design-qnx6-driver.md);
+  close the explicit format-evidence gates, and qualify native read/write
+  interoperability across automotive and extended variants. Porsche PCM 3.1 HDD reproduction also requires
   metadata fidelity and exact disk composition, including QNX4 where present.
   The [work breakdown](docs/todo-qnx6.md) owns experiments and implementation;
   [research evidence](docs/qnx6-research.md) owns source provenance.
@@ -21,15 +19,6 @@
   Both verifiers keep their format-specific reconciliation.
 
 ## Bugs by subsystem
-
-* [Medium] **Provider symbolic-link targets are not checked for NUL bytes**
-  (`lib/source/source.c`, `specs/design-metadata.md`): the metadata design
-  says a link target never contains a NUL byte. Host targets cannot, and the
-  catalog rejects the zero source for links, but a provider target reaches a
-  driver unchecked. Before the first writer that stores links, read a
-  provider link's target into the cursor's bounded `link_target` buffer when
-  `fsimg_source_open()` opens it, reject a NUL byte there, and serve the
-  buffer, so every link target is checked once in the common layer.
 
 * [Medium] **Spilled metadata stores resize scratch on every growth**
   (`lib/meta/store.c`): once a store spills, each `fsimg_store_grow()`, one
@@ -120,7 +109,8 @@
   [sizing design](specs/design-sizing.md): `FSIMG_WRITE_MINIMIZE` and `-M`,
   one layout pass accumulating every candidate unit's total, selection of the
   smallest volume, and the pinned test catalogs where it differs from the
-  default. QNX6 follows in its writer stage.
+  default, including the QNX6 search over the open block sizes and the exact
+  inode capacity that its driver design specifies.
 
 * [Medium] **Metadata round-trip through mtree** (`lib/extract/`,
   `lib/source/`, `cmd/fsimg/`): the safe extractor never restores owner, mode

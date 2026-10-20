@@ -377,6 +377,41 @@ test_job_posix_flags(void)
 	CHECK((decoded.write.flags & FSIMG_WRITE_IMPORT_POSIX) != 0);
 }
 
+/* The QNX6 settings cross the job wire unchanged; a byte order, inode
+ * capacity or reserve outside its type, or a nonzero padding byte between
+ * them, is refused.
+ */
+static void
+test_job_qnx6_settings(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES], mutated[FSIMG_JOB_BYTES];
+	static const unsigned bad[] = { 270, 288, 289, 300, 308 };
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.write.byte_order = FSIMG_BYTE_ORDER_BIG;
+	request.write.inode_capacity = 4000000;
+	request.write.reserve_percent = 0;
+	for (unsigned i = 0; i < 16; i++)
+		request.write.volume_uuid[i] = (unsigned char)(0xf0 + i);
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.write.byte_order == FSIMG_BYTE_ORDER_BIG);
+	CHECK(decoded.write.inode_capacity == 4000000);
+	CHECK(decoded.write.reserve_percent == 0);
+	CHECK(bcmp(decoded.write.volume_uuid, request.write.volume_uuid, 16) == 0);
+	for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		bcopy(raw, mutated, sizeof(raw));
+		mutated[bad[i]] = 2;
+		CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded,
+		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -385,6 +420,7 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_job_qnx6_settings();
 	test_frame_splits(0);
 	test_frame_splits(127);
 	test_frame_splits(FSIMG_FRAME_BYTES);

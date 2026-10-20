@@ -258,6 +258,17 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		    fsimg_host_random(&request->write.volume_serial,
 		    sizeof(request->write.volume_serial)) == -1)
 			return (host_error(error, "volume identifier generation failed"));
+		/* A random version 4 UUID, which option validation requests. */
+		if (options->random_uuid) {
+			if (fsimg_host_random(request->write.volume_uuid,
+			    sizeof(request->write.volume_uuid)) == -1)
+				return (host_error(error,
+				    "volume identifier generation failed"));
+			request->write.volume_uuid[6] =
+			    (unsigned char)((request->write.volume_uuid[6] & 0x0f) | 0x40);
+			request->write.volume_uuid[8] =
+			    (unsigned char)((request->write.volume_uuid[8] & 0x3f) | 0x80);
+		}
 	} else {
 		request->input_fd = fsimg_host_source_open(AT_FDCWD, options->input, false);
 		if (request->input_fd == -1)

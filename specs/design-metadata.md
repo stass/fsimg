@@ -130,3 +130,10 @@ format without a volume label. Writer construction rejects a non-NULL label
 for such a format; the CLI applies its default label only when the value is
 nonzero and passes a NULL label otherwise, so a format that refuses labels,
 such as QNX6, is created without `-L` and fails explicitly when `-L` is given.
+The same rule covers format-specific write options: `write_settings` is the
+mask of `FSIMG_SETTING_*` fields of `fsimg_write_options_t` the format stores
+(byte order, volume UUID, inode capacity and reserve percentage, all QNX6's),
+and writer construction rejects a non-default value of any other one with
+`FSIMG_EINVAL` before the driver's `validate` runs, so no driver has to
+remember another format's settings. The CLI generates a random UUID, like
+the serial, without `-R` when the mask names the UUID and none is given.

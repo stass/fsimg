@@ -165,7 +165,22 @@ metadata.
 .It Fl O Ar sector=bytes
 Sector size within the selected profile.
 .It Fl O Ar cluster=bytes
-Allocation-unit size within the selected profile.
+Allocation-unit size within the selected profile; for QNX6 the block size,
+512, 1024 (the default), 2048 or 4096.
+.It Fl O Ar endian=little|big
+QNX6 on-disk byte order; default little.
+.It Fl O Ar uuid=uuid
+QNX6 volume UUID as RFC 4122 text, stored in textual byte order.
+Without it,
+.Fl R
+selects all zero and otherwise a random version 4 UUID is generated.
+.It Fl O Ar inodes=count
+QNX6 inode capacity, rounded up to a whole inode-table block; default the
+native formatter's ratio of one inode per 8 to 128 blocks, raised to the
+number of entries.
+.It Fl O Ar reserve=percent
+QNX6 reserved-block percentage recorded in the header and kept free; default
+3.
 .It Fl s Ar bytes
 Positive exact logical volume size; omission chooses automatic sizing.
 .It Fl f Ar bytes
@@ -268,8 +283,8 @@ Unknown values are null.
 Timestamp records state basis and precision.
 Entry records name their kind as file, directory, symlink or fifo and carry
 change time, uid, gid and mode, each null when absent.
-Format records give entry_kinds and metadata_fields as bit masks and
-max_label_bytes, zero for a format without a label.
+Format records give entry_kinds, metadata_fields and write_settings as bit
+masks and max_label_bytes, zero for a format without a label.
 .Pp
 The operation deadline spans processing and successful output.
 Failure reporting has a two-second grace and one further two-second stderr-only

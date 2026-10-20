@@ -3,6 +3,8 @@
  */
 #include "config.h"
 
+#include <strings.h>
+
 #include "qnx6.h"
 
 /* A tree has sixteen root slots and depth L. At depth zero they reference
@@ -422,4 +424,84 @@ qnx6_index_read(fsimg_reader_t *reader, fsimg_extent_index_t *index,
 		done += batch;
 	}
 	return (FSIMG_OK);
+}
+
+/* The shape of a tree the writer emits: n leaves at the minimal depth L,
+ * with count[j] = ceil(n / P^(L + 1 - j)) indirect blocks at level j, from
+ * 1 at the root's children to L at the leaves' parents. count[0] is the
+ * root descriptor and count[L + 1] the leaves, so node (j, i) has children
+ * at level j + 1 for every j. False when no depth up to 5 holds n.
+ */
+bool
+qnx6_shape(uint64_t leaves, uint32_t pointers, qnx6_shape_t *shape)
+{
+	uint64_t span;
+
+	bzero(shape, sizeof(*shape));
+	if (!qnx6_tree_min_depth(leaves, pointers, &shape->depth))
+		return (false);
+	shape->leaves = leaves;
+	shape->pointers = pointers;
+	shape->count[0] = 1;
+	for (unsigned j = 1; j <= shape->depth; j++) {
+		span = span_of(pointers, shape->depth + 1 - j);
+		shape->count[j] = leaves / span + (leaves % span != 0);
+		shape->indirect += shape->count[j];
+	}
+	shape->count[shape->depth + 1] = leaves;
+	return (true);
+}
+
+/* The post-order position of indirect node (level, index) within the
+ * tree's run of indirect blocks: every node of its own and earlier subtrees
+ * at its level and below, plus the completed nodes above it.
+ *
+ *   pos(j, i) = sum(m = j..L: min((i + 1) * P^(m - j), count_m)) - 1
+ *             + sum(m = 1..j-1: floor(i / P^(j - m)))
+ *
+ * With index < count_j = ceil(n / P^(L + 1 - j)) and m <= L, each product
+ * (i + 1) * P^(m - j) is at most n / P + P^5, far below 2^64 for any n the
+ * writer lays out.
+ */
+uint64_t
+qnx6_shape_position(const qnx6_shape_t *shape, unsigned level, uint64_t index)
+{
+	uint64_t position, covered;
+
+	position = 0;
+	for (unsigned m = level; m <= shape->depth; m++) {
+		covered = (index + 1) * span_of(shape->pointers, m - level);
+		position += covered < shape->count[m] ? covered : shape->count[m];
+	}
+	position--;
+	for (unsigned m = 1; m < level; m++)
+		position += index / span_of(shape->pointers, level - m);
+	return (position);
+}
+
+/* Fill the references of node (level, index) of a tree laid out from block
+ * first: its indirect blocks in post-order, then its leaves in logical order.
+ * Level 0 is the root descriptor's sixteen slots, any other level an
+ * indirect block's P slots. Slots past the last child hold the sentinel.
+ * The caller has checked that first plus the tree's blocks fits the volume.
+ */
+void
+qnx6_shape_refs(const qnx6_shape_t *shape, uint32_t first, unsigned level,
+    uint64_t index, uint32_t *refs)
+{
+	uint64_t child, slots, position;
+	bool leaf;
+
+	slots = level == 0 ? QNX6_ROOT_SLOTS : shape->pointers;
+	leaf = level == shape->depth;
+	for (uint64_t c = 0; c < slots; c++) {
+		child = level == 0 ? c : index * shape->pointers + c;
+		if (child >= shape->count[level + 1]) {
+			refs[c] = QNX6_SENTINEL;
+			continue;
+		}
+		position = leaf ? shape->indirect + child :
+		    qnx6_shape_position(shape, level + 1, child);
+		refs[c] = (uint32_t)(first + position);
+	}
 }

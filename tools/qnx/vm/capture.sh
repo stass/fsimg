@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026, fsimg contributors
-# capture.sh [-d hd0|hd1] NAME 'GUEST-COMMANDS'
+# capture.sh [-d hd0|hd1] [-i IMAGE] NAME 'GUEST-COMMANDS'
 #
 # Run one native experiment and keep its evidence: run the guest commands
 # (which format and populate the disk), sync, and save the raw disk with a
@@ -10,7 +10,10 @@
 #
 #   hd0 (default)  $VM/test0.img, 64 MiB; filled with 0xAA from inside the
 #                  guest first, so a decoder can tell which bytes QNX wrote.
-#                  Saved as NAME.img.gz.
+#                  With -i, IMAGE (a host file of at most 64 MiB, such as
+#                  one fsimg created) is then written over the start of the
+#                  disk by the guest itself through load.py, and the record
+#                  names its SHA-256. Saved as NAME.img.gz.
 #   hd1            $VM/big.img, 5 GB sparse; not reset, so it still holds
 #                  what earlier experiments wrote, and the record says so.
 #                  Saved as NAME.img.zst.
@@ -26,16 +29,30 @@
 set -eu
 . "$(dirname -- "$0")/env.sh"
 disk=hd0
-while getopts d: opt; do
+load=
+while getopts d:i: opt; do
     case $opt in
     d) disk=$OPTARG ;;
+    i) load=$OPTARG ;;
     *) exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
 if test $# -ne 2; then
-    echo "usage: capture.sh [-d hd0|hd1] NAME 'GUEST-COMMANDS'" >&2
+    echo "usage: capture.sh [-d hd0|hd1] [-i IMAGE] NAME 'GUEST-COMMANDS'" >&2
     exit 2
+fi
+if test -n "$load"; then
+    if test "$disk" != hd0 || ! test -f "$load" || ! test -r "$load"; then
+        echo "capture.sh: -i needs a readable image and disk hd0" >&2
+        exit 2
+    fi
+    load_bytes=$(wc -c < "$load" | tr -d ' ')
+    if test "$load_bytes" -gt 67108864; then
+        echo "capture.sh: $load is larger than hd0" >&2
+        exit 2
+    fi
+    load_sha=$(shasum -a 256 "$load" | cut -d ' ' -f 1)
 fi
 name=$1; cmds=$2
 check_capture_name "$name"
@@ -76,6 +93,11 @@ if test $disk = hd0; then
     fi
     media='QEMU IDE raw 64 MiB (67108864 bytes), /dev/hd0 whole disk,'
     media="$media pre-filled with 0xAA"
+    if test -n "$load"; then
+        python3 -I "$T/load.py" "$SER" "$load" /dev/hd0 >&2
+        media="$media, then bytes 0 to $load_bytes written by the guest"
+        media="$media from host image $(basename -- "$load") (SHA-256 $load_sha)"
+    fi
 else
     size=$(wc -c < "$image" | tr -d ' ')
     media="QEMU IDE raw $size bytes, /dev/hd1 whole disk, sparse host file"
