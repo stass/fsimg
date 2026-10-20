@@ -759,8 +759,9 @@ signal, then the records. Only `accepted` and `rejected` can satisfy an
 expectation; every other outcome fails the case under every policy. Each stage
 result records its outcome, exit status and any signal, its wall and CPU time,
 the bounded captures and parsed records, whether the address-space limit was
-applied, the extracted tree digest, the name-trial answers and the oracle
-observations.
+applied, the extracted tree digest and the oracle observations. A failure
+record's extract entry also carries the name-trial answers that classified it,
+the refused names capped at 32 with their total count.
 
 ### Process boundary and host safety
 
