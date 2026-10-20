@@ -23,6 +23,8 @@ captures into a new directory, and never format or modify the originals.
 | `~/qnx-6.5.0-x86-201007091524.iso` | QNX 6.5.0 x86 live CD, source X1 in the research record |
 | `~/qnx65-vm/` | The VM's working directory: `test0.img` (64 MiB, guest `/dev/hd0`), `big.img` (5,033,164,800 bytes, guest `/dev/hd1`), `mon.sock` (QEMU monitor), `ser.sock` (guest serial shell), `qemu.pid` |
 | `~/qnx65-vm/captures/` | Native captures: `NAME.img.gz` (64 MiB disk) or `NAME.img.zst` (5 GB disk), with `NAME.txt` (guest commands, tool output, provenance) and for some `NAME.decode.txt`; this is `FSIMG_QNX6_NATIVE` for `test/qnx6-integration.sh` |
+| `~/qnx65-vm/captures-qnx4/` | QNX4 native captures in the same format, named `q4-KIND-BLOCKS-OPTION`; `FSIMG_QNX4_NATIVE`. The [QNX4 research record](qnx4-research.md) lists them and their method |
+| `~/qnx65-vm/bin4/` | QNX 6.5.0 `dinit`, `chkfsys` and `fs-qnx4.so`, copied out of the guest |
 | `~/qnx65-vm/writer-captures/` | Native qualification of fsimg writer output, in the same capture format |
 | `~/qnx65-vm/bin/`, `~/qnx65-vm/boot/`, `~/qnx65-vm/rtkit/` | QNX 6.5.0 binaries copied out of the live CD for disassembly (source X2): `mkqnx6fs`, `chkqnx6fs`, `fs-qnx6.so`, `io-blk.so`, `fsysinfo`, and the other filesystem modules |
 | `~/qnx65-vm/workbench/` | The full working set of the original native and PCM analysis: decoders, disassembly listings (`*.s`, `rv-*`), symbol tables and intermediate images |
@@ -153,7 +155,9 @@ partition of the HDD image. They are research aids, not test oracles;
 `q6ls.py` prints names raw and writes extracted contents to the path it is
 given, which belongs outside the source tree.
 
-All four decoders trust their input: they do not bound tree depth, fan-out or
+`q4dump.py` and `tools/qnx/pcm/pcmq4.py` are the QNX4 counterparts: a
+capture dump with the written-range map, and a structure-only survey of one
+QNX4 partition. All of these decoders trust their input: they do not bound tree depth, fan-out or
 block references, so they are for the owner's own images and never part of
 the test suite.
 

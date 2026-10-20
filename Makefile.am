@@ -178,7 +178,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
 	docs/references.md docs/qualification.md .github/workflows/check.yml \
 	docs/qnx6-research.md docs/qnx6-infrastructure.md docs/todo-qnx6.md \
-	docs/spec-testing-plan.md docs/qnx4-plan.md \
+	docs/spec-testing-plan.md docs/qnx4-plan.md docs/qnx4-research.md \
+	docs/todo-qnx4.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
@@ -186,7 +187,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-qnx6-driver.md specs/design-metadata.md specs/design-sizing.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
-	tools/qnx/guest/pop2.sh tools/qnx/pcm/pcmq6.py tools/qnx/pcm/shdis.py \
+	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh \
+	tools/qnx/decode/q4dump.py tools/qnx/pcm/pcmq4.py tools/qnx/pcm/pcmq6.py tools/qnx/pcm/shdis.py \
 	tools/qnx/pcm/shrange.py tools/qnx/vm/boot.sh \
 	tools/qnx/vm/capture.sh tools/qnx/vm/click.py tools/qnx/vm/env.sh \
 	tools/qnx/vm/guest.sh tools/qnx/vm/mon.py tools/qnx/vm/monitor.sh \
