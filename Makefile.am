@@ -71,6 +71,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx4/extent.c lib/formats/qnx4/bitmap.c \
 	lib/formats/qnx4/inode.c lib/formats/qnx4/names.c \
 	lib/formats/qnx4/directory.c lib/formats/qnx4/read.c \
+	lib/formats/qnx4/verify.c \
 	compat/host.c compat/host.h
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
 bin_PROGRAMS = fsimg

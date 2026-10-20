@@ -72,8 +72,8 @@ check_run(qnx4_walk_t *walk, uint32_t first, uint32_t blocks,
 	status = qnx4_blocks_allocated(walk->reader, first, blocks, error);
 	if (status != FSIMG_OK || walk->policy != QNX4_WALK_EXCLUSIVE)
 		return (status);
-	status = fsimg_bitset_test_and_set_range(qnx4->claimed, first, blocks,
-	    &claimed, error);
+	status = fsimg_bitset_test_and_set_range(qnx4->claimed,
+	    (uint64_t)first - 1, blocks, &claimed, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (claimed)

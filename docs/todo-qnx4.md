@@ -3,12 +3,11 @@
 Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
 [research record](qnx4-research.md) owns the evidence and provenance.
 
-* [High] **Verifier and writer** (`lib/formats/qnx4/`): stages 4 to 7 of
-  the plan: the verifier, interoperability, scale and fault coverage, and a
-  writer registered only after QNX 6.5.0 checks, mounts, modifies and
+* [High] **Interoperability, scale and writer** (`lib/formats/qnx4/`):
+  stages 5 to 7 of the plan: interoperability, scale and fault coverage,
+  and a writer registered only after QNX 6.5.0 checks, mounts, modifies and
   remounts its output. The native cycle also confirms a label written by
-  fsimg, which has no native example yet. Until the verifier exists,
-  `verify` reports QNX4 as unsupported.
+  fsimg, which has no native example yet.
 * [Medium] **Writing long names, 49 to 505 bytes**
   (`lib/formats/qnx4/names.c`): stage 8. The reader decodes
   `.longfilenames` records and checks them against the `q4-long` capture;
@@ -25,6 +24,15 @@ Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
   Testing that every block is already claimed would make that a checked
   fact, but needs the root claimed at open instead of by `prepare`, which
   changes the driver design's open sequence.
+* [Low] **Verifier diagnostics carry no location** (`lib/formats/qnx4/verify.c`,
+  `extent.c`): "allocated block has no owner" and "block is already in use"
+  name neither the block nor its owners. `fsimg_error_t`'s offset could
+  carry the block's volume offset without quoting image bytes.
+* [Low] **"Owned block is marked free" untested**
+  (`lib/formats/qnx4/verify.c`): the branch is reachable only when
+  `2 + B` exceeds the 32768 blocks open's first bitmap window checks, so
+  `N` above about 134 million blocks; the stage 5 sparse scale fixture can
+  reach it.
 * [Low] **Integration run time** (`test/qnx4-integration.sh.in`): the
   native comparison starts one `fsimg cat` per regular file, about four
   minutes for the 40 captures on macOS; a single command that checksums

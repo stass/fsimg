@@ -80,8 +80,12 @@ with `-b` and `-z` set to its exact offset and length. Names reach 505 bytes
 on a volume with `.longfilenames` and 48 bytes without; they compare byte for
 byte, and hard links appear as separate entries with the same content. The
 format's own `.bitmap`, `.inodes`, `.longfilenames` and `lost+found` are not
-listed; `.boot` and `.altboot` are. fsimg does not write QNX4 volumes, and
-`verify` reports a QNX4 volume as unsupported.
+listed; `.boot` and `.altboot` are. `verify` checks that every allocated
+block has exactly one owner, that every link count matches the names, and
+that every used `.inodes` slot and long-name record is named; it reports a
+volume whose label is invalid or
+whose `lost+found` holds an entry as unsupported, since neither has an
+observed form. fsimg does not write QNX4 volumes.
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,

@@ -9,8 +9,9 @@
 #   FSIMG_QNX4_H1         a disk image holding a QNX4 partition, read only
 #   FSIMG_QNX4_H1_OFFSET  that partition's byte offset
 #   FSIMG_QNX4_H1_LENGTH  and its byte length
-# The H1 survey reports counts only, never names. Each unavailable check is
-# reported as a skip.
+# Every capture and the partition must verify completely. The H1 survey
+# reports counts only, never names. Each unavailable check is reported as a
+# skip.
 set -eu
 ran=0
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-qnx4-oracle-XXXXXX")
@@ -85,6 +86,28 @@ fsimg_lines() {
     rm -f "$fixture/files" "$fixture/content" "$fixture/sum"
 }
 
+# Full verification of the volume at byte $3 of image $1, $2 bytes long,
+# with payload read-through when $4 is -d; the JSON verify record goes to
+# the file $5. It fails unless the report is complete. fsimg's diagnostic
+# can quote a name, so it is shown only when $6 is "show", for the public
+# captures; the private partition's stays hidden.
+fsimg_verify() {
+    if ./fsimg verify -j $4 -b "$3" -z "$2" -i "$1" > "$5" \
+        2> "$fixture/verify-error" &&
+        grep -q '"type":"verify","complete":true' "$5"; then
+        return 0
+    fi
+    if test "$6" = show; then
+        grep -v 'sandbox unavailable' "$fixture/verify-error" >&2 || true
+    fi
+    return 1
+}
+
+# The value of counter $1 in the verify record file $2.
+verify_count() {
+    sed -n 's/.*"type":"verify".*"'"$1"'":"\([0-9]*\)".*/\1/p' "$2"
+}
+
 native=${FSIMG_QNX4_NATIVE:-}
 if test -n "$native"; then
     compared=0
@@ -100,6 +123,9 @@ if test -n "$native"; then
         ./fsimg ls -r -z "$length" -i "$fixture/image" > "$fixture/ls" \
             2>/dev/null || fail "fsimg ls failed on $name"
         listed=$(wc -l < "$fixture/ls" | tr -d ' ')
+        fsimg_verify "$fixture/image" "$length" 0 -d "$fixture/verify" show ||
+            fail "$name does not verify"
+        free=$(verify_count free_clusters "$fixture/verify")
         fsimg_lines "$fixture/image" "$length" 0 "$fixture/lines"
         LC_ALL=C sort "$fixture/lines" > "$fixture/fsimg"
         entries=$(awk -F '\t' '$1 == "E" { n++ } END { print n + 0 }' \
@@ -117,11 +143,12 @@ if test -n "$native"; then
                     true
                 fail "$name differs from its native manifest"
             fi
-            echo "$name: $listed entries match the native manifest"
+            echo "$name: $listed entries match the native manifest;" \
+                "verified, $free blocks free"
             compared=$((compared + 1))
             ;;
         *)
-            echo "$name: $listed entries read"
+            echo "$name: $listed entries read; verified, $free blocks free"
             ;;
         esac
         rm -f "$fixture/image"
@@ -132,12 +159,18 @@ else
     echo 'SKIP: FSIMG_QNX4_NATIVE is not set (QNX 6.5.0 captures)'
 fi
 
-# The PCM partition, opened in place and read only: every file is read
-# through the CLI, and only counts are printed.
+# The PCM partition, opened in place and read only: it verifies, every
+# file is read through the CLI, and only counts are printed. fsimg cat
+# reads the payload, so verification checks the structure alone.
 h1=${FSIMG_QNX4_H1:-}
 if test -n "$h1"; then
     offset=${FSIMG_QNX4_H1_OFFSET:?FSIMG_QNX4_H1_OFFSET is required}
     length=${FSIMG_QNX4_H1_LENGTH:?FSIMG_QNX4_H1_LENGTH is required}
+    fsimg_verify "$h1" "$length" "$offset" "" "$fixture/verify" hide ||
+        fail "the H1 partition does not verify"
+    echo "H1: verified, $(verify_count allocated_clusters "$fixture/verify")" \
+        "blocks allocated, $(verify_count free_clusters "$fixture/verify")" \
+        "free"
     fsimg_lines "$h1" "$length" "$offset" "$fixture/h1"
     # The root has an E line too, so the directories include it.
     count() {

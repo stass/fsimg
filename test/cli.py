@@ -54,7 +54,7 @@ def test_formats(executable, root):
     decoded = completed(invoke(executable, root, ["formats", "-j"]))
     formats = {record["name"]: record for record in decoded if record["type"] == "format"}
     assert set(formats) == {"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4"}
-    assert formats.pop("qnx4")["capabilities"] == 1
+    assert formats.pop("qnx4")["capabilities"] == 5
     assert all(record["capabilities"] == 7 for record in formats.values())
     assert formats["exfat"]["write_cluster_bytes"][-1] == 32 * 1024 * 1024
     assert isinstance(formats["exfat"]["max_file_bytes"], str)
@@ -165,7 +165,7 @@ def test_human_help(executable, root):
                               b"fat32   yes   yes    yes\n"
                               b"exfat   yes   yes    yes\n"
                               b"qnx6    yes   yes    yes\n"
-                              b"qnx4    yes   no     no\n")
+                              b"qnx4    yes   no     yes\n")
     assert formats.stderr == b""
     verbose = invoke(executable, root, ["formats", "-v"])
     assert verbose.stdout == formats.stdout and b"Sandbox backend:" in verbose.stderr

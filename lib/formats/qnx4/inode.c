@@ -132,10 +132,12 @@ table_record(fsimg_reader_t *reader, uint64_t position, qnx4_inode_t *inode,
  * an .inodes extent, not the signature in slot 0, holding a used record.
  * Every other target -- the loader, the root block, the bitmap, a
  * directory or payload block -- lies outside .inodes and is corruption.
+ * *table_slot is the target's logical .inodes slot.
  */
 fsimg_status_t
 qnx4_link_resolve(fsimg_reader_t *reader, const qnx4_link_t *link,
-    uint64_t *position, qnx4_inode_t *inode, fsimg_error_t *error)
+    uint64_t *position, uint64_t *table_slot, qnx4_inode_t *inode,
+    fsimg_error_t *error)
 {
 	fsimg_qnx4_reader_t *qnx4 = qnx4_state(reader);
 	uint64_t logical;
@@ -143,6 +145,7 @@ qnx4_link_resolve(fsimg_reader_t *reader, const qnx4_link_t *link,
 	fsimg_status_t status;
 
 	*position = 0;
+	*table_slot = 0;
 	if (link->target_slot >= QNX4_SLOTS_PER_BLOCK)
 		return (qnx4_corrupt(error, "QNX4 link target slot is out of range"));
 	status = qnx4_locator_find(&qnx4->inodes_locator, link->target_block,
@@ -154,6 +157,7 @@ qnx4_link_resolve(fsimg_reader_t *reader, const qnx4_link_t *link,
 	if (logical == 0 && link->target_slot == 0)
 		return (qnx4_corrupt(error, "QNX4 link names the .inodes signature"));
 	*position = QNX4_POSITION(link->target_block, link->target_slot);
+	*table_slot = logical * QNX4_SLOTS_PER_BLOCK + link->target_slot;
 	return (table_record(reader, *position, inode, error));
 }
 

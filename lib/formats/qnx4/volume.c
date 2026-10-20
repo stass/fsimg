@@ -442,13 +442,13 @@ qnx4_volume_open(fsimg_reader_t *reader, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 
-	/* Blocks are numbered from 1, so the claimed set has N + 1 bits and
-	 * bit 0 is never used.
+	/* Bit b - 1 of the claimed set is block b, as in the bitmap itself;
+	 * the loader, the root block and the bitmap are claimed now.
 	 */
-	status = fsimg_bitset_new(&reader->session,
-	    (uint64_t)qnx4->geometry.blocks + 1, &qnx4->claimed, error);
+	status = fsimg_bitset_new(&reader->session, qnx4->geometry.blocks,
+	    &qnx4->claimed, error);
 	if (status == FSIMG_OK)
-		status = fsimg_bitset_test_and_set_range(qnx4->claimed, 1,
+		status = fsimg_bitset_test_and_set_range(qnx4->claimed, 0,
 		    2 + (uint64_t)qnx4->geometry.bitmap_blocks, &claimed, error);
 	if (status != FSIMG_OK)
 		return (status);

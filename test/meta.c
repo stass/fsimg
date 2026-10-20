@@ -94,6 +94,7 @@ test_arrays(void)
 	fsimg_array_t *array, *wide, *bad;
 	fsimg_bitset_t *bitset;
 	unsigned char value[31], expected[31], large[7001], readback[7001];
+	unsigned char bytes[3];
 	uint64_t index;
 	bool was_set;
 
@@ -186,6 +187,19 @@ test_arrays(void)
 	    NULL) == FSIMG_ERANGE);
 	CHECK(fsimg_bitset_test(bitset, 200001, &was_set, NULL) == FSIMG_OK &&
 	    !was_set);
+
+	/* Reading bytes: bit i is bit i % 8 of byte i / 8, least significant
+	 * first, through the last byte; a range past it fails.
+	 */
+	CHECK(fsimg_bitset_read(bitset, 0, bytes, 3, NULL) == FSIMG_OK);
+	CHECK(bytes[0] == 0xf8 && bytes[1] == 0xff && bytes[2] == 0xff);
+	CHECK(fsimg_bitset_read(bitset, 12501, bytes, 2, NULL) == FSIMG_OK);
+	CHECK(bytes[0] == 0x3f && bytes[1] == 0x00);
+	CHECK(fsimg_bitset_read(bitset, 25000, bytes, 1, NULL) == FSIMG_OK);
+	CHECK(bytes[0] == 0x04);
+	CHECK(fsimg_bitset_read(bitset, 25000, bytes, 2, NULL) == FSIMG_ERANGE);
+	CHECK(fsimg_bitset_read(bitset, UINT64_MAX, bytes, 2, NULL) ==
+	    FSIMG_ERANGE);
 	fsimg_bitset_free(bitset);
 	CHECK(fsimg_array_new(&fixture.session, 2, UINT64_MAX, &bad, NULL) == FSIMG_ERANGE);
 	CHECK(bad == NULL);

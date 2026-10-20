@@ -286,6 +286,7 @@ was not cleanly unmounted. The loader block is nonzero and differs from
 | Statuses | regular `0x01`, `0x03`, `0x11`, `0x13`; directories `0x01`, `0x11`; type byte 0 |
 | Free slots | 21 with stale bytes (status `0x00`, and the `lost+found` slot `0x04`) |
 | Allocation | every object exact, nothing past EOF; reachable allocation equals the bitmap exactly |
+| Full verification | `fsimg verify` complete: 43744183 blocks allocated, each with one owner, and 59023622 free; no orphan, no link-count or occupancy mismatch, so allocation past EOF needs no wider reader policy |
 | Owners | all uid and gid at most 65534; reserved bytes zero |
 
 ## Evidence questions

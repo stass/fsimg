@@ -86,6 +86,12 @@ fsimg_status_t fsimg_bitset_test_and_set(fsimg_bitset_t *, uint64_t, bool *,
  */
 fsimg_status_t fsimg_bitset_test_and_set_range(fsimg_bitset_t *, uint64_t,
     uint64_t, bool *, fsimg_error_t *);
+/* Copy length bytes of the set from byte first_byte: bit i is bit i % 8,
+ * least significant first, of byte i / 8, and bits past the set's size
+ * read as zero. A range past the last byte fails with FSIMG_ERANGE.
+ */
+fsimg_status_t fsimg_bitset_read(fsimg_bitset_t *, uint64_t, void *, size_t,
+    fsimg_error_t *);
 
 /* One physical run of an object's storage: length bytes at image_offset hold
  * the object's bytes [logical_offset, logical_offset + length).

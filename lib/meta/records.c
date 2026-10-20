@@ -499,3 +499,22 @@ fsimg_bitset_test_and_set_range(fsimg_bitset_t *bitset, uint64_t first,
 	}
 	return (FSIMG_OK);
 }
+
+fsimg_status_t
+fsimg_bitset_read(fsimg_bitset_t *bitset, uint64_t first_byte, void *buffer,
+    size_t length, fsimg_error_t *error)
+{
+	uint64_t bytes;
+
+	if (bitset == NULL || (buffer == NULL && length != 0))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_METADATA, "invalid bitset range or output"));
+	bytes = bitset->bits / 8 + (bitset->bits % 8 != 0);
+	if (first_byte > bytes || length > bytes - first_byte)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_METADATA, "invalid bitset range or output"));
+	if (length == 0)
+		return (FSIMG_OK);
+	return (fsimg_store_read(bitset->store, first_byte, buffer, length,
+	    error));
+}

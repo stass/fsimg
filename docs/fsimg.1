@@ -135,10 +135,11 @@ QNX4 hides its own
 .Pa .inodes ,
 .Pa .longfilenames
 and
-.Pa lost+found ,
-and has no full verification:
+.Pa lost+found .
 .Cm verify
-reports it as unsupported.
+reports a QNX4 volume whose label is invalid or whose
+.Pa lost+found
+holds an entry as unsupported, since neither has an observed form to check.
 .Cm info
 reports header validation, geometry, label, volume UUID when the format has
 one, time basis and known capabilities.

@@ -116,9 +116,19 @@ symbolic links, FIFOs, owner, mode and all four timestamps; names of up to
 reported, so the volume information and its wire record hold 48-byte labels.
 Every native QNX 6.5.0 capture reads with names, modes, link counts, owners,
 sizes, targets and checksums equal to the guest's manifests, and the QNX4
-partition of a Porsche PCM 3.1 hard disk lists and reads completely. QNX4
-has no full verification, and verifying a format without one fails as
-unsupported before any work.
+partition of a Porsche PCM 3.1 hard disk lists and reads completely.
+Verifying a format without full verification fails as unsupported before
+any work.
+
+QNX4 volumes verify fully: every allocated block has exactly one owner,
+directories count 2 plus their subdirectories and other objects their
+names, every used `.inodes` slot and long-name record is named, and the
+free count is reported. A volume whose label is invalid or whose
+`lost+found` holds an entry verifies as unsupported. A volume whose
+`lost+found` `..` names the root record rather than the root's `.` slot,
+which no native volume has, does not open: it is unsupported. Every native
+QNX 6.5.0 capture and the PCM 3.1
+QNX4 partition verify.
 
 The fsimg command provides creation, inspection, listing, raw content, safe
 extraction, verification and capability enumeration. Strict short-option parsing,

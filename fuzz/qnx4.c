@@ -71,6 +71,7 @@ exercise(const uint8_t *data, size_t size)
 	const fsimg_entry_t *entry;
 	unsigned char bytes[256];
 	size_t count;
+	fsimg_status_t status;
 
 	fsimg_options_init(&options);
 	options.memory_bytes = 16 * 1024 * 1024;
@@ -105,10 +106,13 @@ exercise(const uint8_t *data, size_t size)
 		}
 		fsimg_reader_free(reader);
 	}
-	/* QNX4 has no verifier: the request fails before any work. */
+	/* Full verification: a passing report accounts for every block of
+	 * the slice, which is the whole input, as allocated or free.
+	 */
 	if (fsimg_reader_open(ctx, io, &read_options, &reader, NULL) == FSIMG_OK) {
-		if (fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) !=
-		    FSIMG_EUNSUPPORTED || report.complete)
+		status = fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, NULL);
+		if (status == FSIMG_OK && report.allocated_clusters +
+		    report.free_clusters != size / 512)
 			abort();
 		fsimg_reader_free(reader);
 	}

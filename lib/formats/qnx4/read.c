@@ -14,9 +14,6 @@ static void qnx4_close(fsimg_reader_t *);
 static fsimg_status_t qnx4_resolve(fsimg_reader_t *, uint64_t,
     fsimg_extent_t *, fsimg_error_t *);
 
-/* Full verification is not provided, so the descriptor advertises no
- * verify capability and a verification request is unsupported.
- */
 const fsimg_reader_ops_t fsimg_qnx4_reader_ops = {
 	.open = qnx4_open,
 	.close = qnx4_close,
@@ -26,7 +23,7 @@ const fsimg_reader_ops_t fsimg_qnx4_reader_ops = {
 	.key = qnx4_key,
 	.ambiguous = "duplicate QNX4 directory name",
 	.resolve = qnx4_resolve,
-	.verify = NULL
+	.verify = qnx4_verify
 };
 
 fsimg_qnx4_reader_t *
@@ -113,6 +110,8 @@ qnx4_close(fsimg_reader_t *reader)
 	fsimg_extent_index_free(qnx4->file);
 	fsimg_bitset_free(qnx4->claimed);
 	fsimg_bitset_free(qnx4->exposed);
+	fsimg_stream_free(qnx4->references);
+	fsimg_bitset_free(qnx4->long_named);
 	fsimg_dealloc(qnx4);
 	reader->driver = NULL;
 }

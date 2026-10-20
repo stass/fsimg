@@ -111,7 +111,7 @@ long_name(fsimg_reader_t *reader, const qnx4_link_t *link, uint64_t position,
 	unsigned char raw[QNX4_BLOCK_BYTES], mangled[QNX4_LINK_NAME_MAX];
 	qnx4_longname_t record;
 	uint64_t logical;
-	bool found;
+	bool found, named;
 	fsimg_status_t status;
 
 	*length = 0;
@@ -147,6 +147,19 @@ long_name(fsimg_reader_t *reader, const qnx4_link_t *link, uint64_t position,
 	if (bcmp(mangled, link->name, sizeof(mangled)) != 0)
 		return (qnx4_corrupt(error,
 		    "QNX4 long name disagrees with its link's prefix"));
+
+	/* Verification marks the record named. Its back-reference admits one
+	 * link position, so a second mark means that link was decoded twice.
+	 */
+	if (qnx4->long_named != NULL) {
+		status = fsimg_bitset_test_and_set(qnx4->long_named, logical,
+		    &named, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (named)
+			return (qnx4_corrupt(error,
+			    "QNX4 long-name record is named twice"));
+	}
 	bcopy(record.name, name, record.name_length);
 	*length = record.name_length;
 	return (FSIMG_OK);

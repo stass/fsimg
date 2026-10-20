@@ -91,9 +91,9 @@ next reads:
 3. **Bitmap pager.** Create the pager over blocks `3` to `2 + B` from the
    geometry alone and run its bounded self-check (below). No object can be
    walked before this step, because every walk checks allocation bits.
-4. **Claims.** Create the claimed-block bitset in scratch, indexed by block
-   number, so `N + 1` bits with bit 0 unused, and claim blocks `1` through
-   `2 + B` with one range claim.
+4. **Claims.** Create the claimed-block bitset in scratch, `N` bits with
+   bit `b - 1` for block `b`, the bitmap's own layout, and claim blocks `1`
+   through `2 + B` with one range claim.
 5. **Root slots.** Walk record 0's extents under the allocated policy, a
    non-claiming read, and validate slots 0 to 5 against the root-slot
    table: the dots' targets, slot 2 a direct `.bitmap` record with extent
@@ -144,10 +144,8 @@ over the bitmap domain `[1024, (2 + B) * 512)` for `.bitmap` alone:
    and zero in later ones. The chain ends when the descriptors appended
    reach `count - 1`; a next pointer there must be zero, and a zero next
    pointer earlier is a short chain. Either is `FSIMG_ECORRUPT`.
-3. For each extent, apply the walk policy below, and during verification
-   record an ownership run for it and for each extent block when the walk
-   is the object's recording walk. Adjacent extents coalesce, so a
-   contiguous object has one index record.
+3. For each extent, apply the walk policy below. Adjacent extents
+   coalesce, so a contiguous object has one index record.
 4. After the chain, check the allocation against the size by the kind
    table: exact for regular files, directories and symbolic links, any for
    a FIFO.
@@ -161,7 +159,7 @@ The policy is one of two:
 
 | Policy | Used for | Rule |
 | --- | --- | --- |
-| Allocated | The root's slots at open; a later name of an `.inodes` object; verification's second walks of the system objects | Each block's bit is set |
+| Allocated | The root's slots at open; a later name of an `.inodes` object | Each block's bit is set |
 | Exclusive | `.inodes`, `.longfilenames` and `lost+found` at open, every directory as it is entered, the first name of a file, symbolic link or FIFO | Each block's bit is set and the block is claimed |
 
 A volume uses every block once, so the first walk of each object claims its
@@ -184,14 +182,15 @@ to two windows: in the first window, the bits of blocks `1` through
 bits `N` through `8 * ceil(N / 8) - 1` are set and the bytes from
 `ceil(N / 8)` to the end of block `2 + B` are `0xff`. Any clear bit or
 other byte there is `FSIMG_ECORRUPT`. That the whole bitmap range through
-`2 + B` is allocated is checked by verification's merge, where the bitmap's
-own run is an owner. Padding bits never count as free.
+`2 + B` is allocated is checked by verification's comparison with the
+claimed set, in which open claimed those blocks. Padding bits never count
+as free.
 
 ## Identity and link resolution
 
 A record position is `(block, slot)` packed as `block * 8 + slot` in a
-`uint64_t`, the owner identity in verification and the key of every
-reference. `qnx4_record_read()` reads a position's 64 bytes through a
+`uint64_t`, an object's identity and the target of every link and dot
+entry. `qnx4_record_read()` reads a position's 64 bytes through a
 window and decodes them; root-block positions `(2, 0)` to `(2, 4)` come from
 the decoded root block.
 
@@ -232,9 +231,11 @@ own position and its parent's position; the root's both name `(2, 0)`, and
 there, unobserved, is `FSIMG_EUNSUPPORTED`. They are never admitted. Every
 later slot whose status has neither the used nor the link bit is free and
 is not decoded further. A used slot is validated as a direct record, or as
-a link record whose target resolves; at the root, slots 2 and 3 and the
-`.longfilenames` record are skipped after their validation at open, and
-slots 4 and 5 are admitted with their fixed targets. The name is then
+a link record whose target resolves. At the root, slots 2 to 5 are checked
+again against their fixed form and the `.longfilenames` record is found by
+its offset; the `.bitmap`, `.inodes` and `.longfilenames` slots are counted
+as names but never admitted, and slots 4 and 5 are admitted with their
+fixed targets. The name is then
 decoded: the direct field's 1 to 16 bytes, the link field's 1 to 48 bytes,
 or, with a nonzero long-name pointer, the long-name record found through the
 long-name locator, whose back-reference, state, length and mangled prefix
@@ -267,50 +268,55 @@ or `.inodes`.
 
 ## Verification
 
-Full verification runs the common walker once with the ownership policy
-enabled, then reconciles. During the walk the driver appends:
+Full verification runs the common walker once and then reconciles what the
+walk established with the bitmap, `.inodes` and `.longfilenames`. It needs
+no ownership stream of its own, because the claims already are one:
 
-* an ownership run `(first, count, owner)` for every extent and extent block
-  of each object's recording walk, under the object's position, with
-  reserved owners above the position space for the loader, the root block
-  and the bitmap. As in QNX6, exactly one walk records each object: the
-  verifier's walks of `.inodes`, `.longfilenames` and `lost+found` as it
-  starts (open recorded nothing), each directory's as it is entered, and
-  each other object's under its first name; a later name's walk never
-  records;
-* a reference record for every used slot, whether or not the entry is
-  exposed, so the hidden root records' link counts are checked like every
-  other: a name slot under the object's position; for every directory one
-  under its own position for `.` and one under its parent's for `..`,
-  where the root's `..` counts under the root and `lost+found`'s under the
-  root as well; and root-block record 4 as `lost+found`'s one name;
-* a long-name reference for every link with a long-name pointer, under the
-  record's block.
+* **Ownership.** Every object's extents and extent blocks are walked under
+  the exclusive policy exactly once -- `.inodes`, `.longfilenames` and
+  `lost+found` at open, each directory as it is entered, every other object
+  under its first name -- and the loader, root block and bitmap are claimed
+  at open. A block claimed twice has already failed, whichever objects own
+  it, an extent block and data included, and every claim checks the
+  bitmap first. After the walk the claimed set is therefore exactly the
+  owned blocks, and allocation is one sequential comparison of the claimed
+  set with the bitmap's first `N` bits in 4 KiB windows, which share a
+  layout: an allocated block outside the set is an orphan, `FSIMG_ECORRUPT`.
+  The padding bits and bytes were checked at open. The clear bits are the
+  free count, which sets `FSIMG_VOLUME_FREE`.
+* **Link counts.** Every used slot, exposed or hidden, gives one name to the
+  object whose record it holds or links. A directory's count is `2` plus
+  the directories among its used slots, plus `lost+found` for the root,
+  which no used slot names, so it is checked when the directory's slot scan
+  ends; dot entries are validated by position and count as the `2`. A
+  direct record and root-block records 1 to 3 have exactly the name in the
+  slot that holds or links them, so a non-directory there must count `1`;
+  `lost+found`, root-block record 4, has no subdirectory and must count `2`.
+  Only an `.inodes` object can have several names: each link record's
+  target appends its logical `.inodes` slot to a stream, which is sorted
+  externally and merged with one sequential pass over `.inodes`.
+* **`.inodes` occupancy.** That pass requires every used slot but 0 to be
+  named, and a non-directory's names to equal its link count; a directory's
+  single name is guaranteed by the claim made when it is entered. A link to
+  a free slot already failed at resolution, and a free slot's bytes are not
+  examined.
+* **Long names.** Decoding a link's long name checks the record's state and
+  back-reference and marks the record in a bitset of one bit per
+  `.longfilenames` record; a second mark fails. A sequential pass over
+  `.longfilenames` then requires every record with state `0x01` to be
+  marked, so each used record is named exactly once.
 
-Each object's extents are recorded by exactly one walk, so any two
-overlapping runs are a block with two owners and fail. The runs are sorted
-externally and merged with the bitmap in 4 KiB pages: every block in
-`[1, N]` has its bit set exactly when it has an owner, and the bits past `N`
-are set. The free count is the number of clear bits and sets
-`FSIMG_VOLUME_FREE`.
+Payload read-through, when requested, reads each object's initialized bytes
+through common delivery under its first name. The report counts files,
+directories including the root, logical bytes, bytes read, allocated and
+free blocks; bad blocks are zero, since `.bad_blks` is an ordinary file.
 
-The reference stream, sorted by position, gives every object's reference
-count, which must equal its link count: `2 + subdirectories` for a
-directory, by construction of the dot references, and the name count for
-every other object. A sequential pass over `.inodes` then checks that every
-used slot but 0 was referenced; a referenced free slot already failed at
-resolution, and a free slot's bytes are not examined. A sequential pass
-over `.longfilenames` checks that
-every record with state `0x01` was referenced exactly once. Payload
-read-through, when requested, reads each object's initialized bytes through
-common delivery under its first name. The report counts files, directories
-including the root, logical bytes, bytes read, allocated and free blocks;
-bad blocks are zero, since `.bad_blks` is an ordinary file.
-
-An unsupported kind, name or status anywhere, a used slot in `lost+found`
-or an invalid label makes the verification incomplete with
-`FSIMG_EUNSUPPORTED`; the report is never marked complete after skipping an
-object.
+An invalid label, or a used slot in `lost+found`, whose objects would never
+be walked and so never owned, makes verification incomplete with
+`FSIMG_EUNSUPPORTED` before any work. An unsupported kind, name or status
+anywhere fails the walk the same way, since a directory's slots are
+validated before any is admitted; the report is never marked complete
+after skipping an object.
 
 ## Writer settings
 
@@ -414,10 +420,10 @@ Format-owned records carry the format time in all four fields.
 
 | Operation | Work and residency |
 | --- | --- |
-| Probe and open | Two 512-byte reads, the bitmap self-check's two windows, the chains of the root directory, `.inodes`, `.longfilenames` and `lost+found`; scratch for the indexes and locators, the claimed bitset of `N + 1` bits, which every open creates, `info` included, and the exposure bitset of the `.inodes` slot count |
+| Probe and open | Two 512-byte reads, the bitmap self-check's two windows, the chains of the root directory, `.inodes`, `.longfilenames` and `lost+found`; scratch for the indexes and locators, the claimed bitset of `N` bits, which every open creates, `info` included, and the exposure bitset of the `.inodes` slot count |
 | Listing | Per directory: its chain, one slot pass and the common key sort; per object's first name: its chain. No payload is read |
 | Content | One extent lookup per request after the walk at exposure |
-| Verification | One traversal, two external sorts of streams proportional to extents and names, one bitmap pass of `ceil(N / 8)` bytes, one pass over `.inodes` and one over `.longfilenames` |
+| Verification | One traversal, one external sort of the link records' targets, one bitmap pass comparing `ceil(N / 8)` bytes with the claimed set, one pass over `.inodes` and one over `.longfilenames`; scratch for the sorted targets and one bit per long-name record |
 | Planning | One pass over the catalog, the raise-until-fit size search of a few steps, one layout pass; rows in one paged array |
 | Emission | Payload bytes plus metadata proportional to entries, names and the bitmap |
 

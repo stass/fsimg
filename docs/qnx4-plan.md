@@ -100,7 +100,7 @@ QNX6 variant and decodes different records. The draft's proposed components
 | `InodeTable`, `LongNames` | Driver inode and name modules |
 | `DirectoryWalk` | The common walker; the driver supplies `prepare`, `replay`, `keys` and `key` |
 | `ImagePlanner` | The writer lifecycle (`validate`, `plan`, `emit`), the emission object and the sizing policies |
-| `QNX4Verifier` | A driver verifier over the common ownership-run and external-sort machinery |
+| `QNX4Verifier` | A driver verifier over the walk's claimed-block set and the common external sort |
 | `CompatibilityHarness` | The `tools/qnx/vm` capture harness, `test/qnx4-integration.sh` and capture records |
 
 ## Design decisions
@@ -394,16 +394,17 @@ research boundary of the QNX6 record.
 
 ### 4. Verifier
 
-* `verify.c` runs the common walker once with ownership enabled. It records:
-  - ownership runs for every walked extent and extent block, under the
-    object's identity, with reserved identities for the loader, root block,
-    bitmap, `.inodes` and `.longfilenames`;
-  - reference records for every live slot, including dot entries.
-
-  It then sorts both externally, merges the bitmap in pages, checks link
-  counts and `.inodes` occupancy against the stage 1 conventions, checks
-  long-name back-references, and reports the free count. Payload
-  read-through uses common delivery.
+* `verify.c` runs the common walker once. Every object's storage is
+  claimed exactly once by the walk or at open, so the claimed-block set is
+  the ownership record, and the verifier:
+  - compares the claimed set with the bitmap in pages;
+  - checks each directory's link count against its own slots and each
+    single-name record's count where its slot is scanned;
+  - sorts the link records' `.inodes` targets externally and checks link
+    counts and `.inodes` occupancy in one pass, against the stage 1
+    conventions;
+  - checks that every used long-name record was named, and reports the
+    free count. Payload read-through uses common delivery.
 * Tests cover each failure the draft lists in section 13.2:
   - missing and orphan allocation, double ownership, and an overlap between
     an extent block and data;

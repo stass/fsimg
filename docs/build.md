@@ -830,8 +830,16 @@ inject allocation failures at every step, scratch open, resize, read and
 write failures with a one-page cache, cancellation at every poll, a work
 limit, failing reads of the bitmap, an extent block and file content, and
 seven-byte short reads; each checks that nothing charged outlives the
-reader. Extraction, verification as unsupported and a hard link's chain
-walked once per name are checked too. `--seed` and `--seed-chain` write the
+reader. Every case runs full verification with payload too, which must
+agree with the listing's class or, for the faults only verification sees,
+fail with its own: allocated orphans, a file's data in an extent block or
+in a metadata block, link counts of every record kind, an unnamed used
+`.inodes` slot or long-name record, and the incomplete reports of an
+invalid label, a used `lost+found` slot and an unsupported nested object.
+The fault cases run under verification as well, with read failures of the
+blocks only it reads: free `.inodes` slots, unused long-name records and a
+bitmap block between the two windows open reads. Extraction and a hard
+link's chain walked once per name are checked too. `--seed` and `--seed-chain` write the
 fuzz seeds, and `--manifest IMAGE [OFFSET LENGTH]` prints one line per
 object for the integration script.
 
@@ -846,15 +854,22 @@ FSIMG_QNX4_H1=/path/to/disk.img FSIMG_QNX4_H1_OFFSET=BYTES \
 ```
 
 `FSIMG_QNX4_NATIVE` names a directory of QNX 6.5.0 captures (`q4-*.img.gz`).
-Each must open as QNX4 through `fsimg info` and list through `fsimg ls`; for
+Each must open as QNX4 through `fsimg info`, list through `fsimg ls` and
+verify completely through `fsimg verify -d`; for
 each `q4-manifest-*` capture the guest's `ls -l` and `cksum` manifest must
 equal fsimg's names, kinds, modes, link counts, owners, sizes, symbolic-link
 targets and the checksums of every file read through `fsimg cat`. On macOS
-all 40 captures open and the 16 manifests match. `FSIMG_QNX4_H1` names a
-disk image read in place at the partition's byte range; every file is read
-through `fsimg cat`, and the script prints only counts. The PCM 3.1 HDD's
-QNX4 partition lists 21 directories below the root and 52 files, every one
-readable.
+all 40 captures open and verify, and the 16 manifests match.
+`FSIMG_QNX4_H1` names a disk image read in place at the partition's byte
+range; it must verify completely, every file is read through `fsimg cat`,
+and the script prints only counts. The PCM 3.1 HDD's QNX4 partition lists
+21 directories below the root and 52 files, every one readable, and
+verifies with 43,744,183 blocks allocated and 59,023,622 free: every
+allocated block has one owner. On macOS with the image in the page cache,
+`fsimg verify -b 3232535040 -z 52617116160` takes 4.2 seconds of wall time
+and 0.22 seconds of CPU at a peak RSS of 41 MB as `/usr/bin/time -l`
+reports it, and `verify -d`, which reads the 22,384,057,279 initialized
+bytes, 7.9 seconds at 37 MB.
 
 The sparse exFAT qualification uses a 64 MiB library budget:
 

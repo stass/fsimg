@@ -23,15 +23,20 @@ typedef struct qnx4_prepare {
 	fsimg_directory_build_t *build;
 	uint64_t	 self;		/* the directory's own record position */
 	uint64_t	 parent;	/* its parent's record position */
+	uint64_t	 subdirectories; /* lost+found and child directories */
 	bool		 root;
 	char		 name[QNX4_NAME_MAX + 1];
 } qnx4_prepare_t;
 
-static fsimg_status_t admit(qnx4_prepare_t *, const char *, uint64_t,
-    fsimg_error_t *);
+static fsimg_status_t count_name(qnx4_prepare_t *, const qnx4_inode_t *,
+    qnx4_place_t, uint64_t, fsimg_error_t *);
+static fsimg_status_t admit(qnx4_prepare_t *, const char *,
+    const qnx4_inode_t *, qnx4_place_t, uint64_t, uint64_t, fsimg_error_t *);
 static fsimg_status_t admit_direct(qnx4_prepare_t *, uint64_t,
     const unsigned char *, fsimg_error_t *);
 static fsimg_status_t admit_link(qnx4_prepare_t *, uint64_t,
+    const unsigned char *, fsimg_error_t *);
+static fsimg_status_t prepare_format_slot(qnx4_prepare_t *, uint64_t,
     const unsigned char *, fsimg_error_t *);
 static fsimg_status_t prepare_slot(void *, uint64_t, uint64_t,
     const unsigned char *, fsimg_error_t *);
@@ -128,12 +133,37 @@ qnx4_dot_target(const unsigned char *raw, bool self, uint64_t *target,
 	return (FSIMG_OK);
 }
 
+/* Account the name a used slot gives the object whose record it holds or
+ * links, found at place: a child directory adds one to this directory's
+ * link count, and verification checks the object's own count (see
+ * verify.c). table_slot is the logical .inodes slot of a record in
+ * QNX4_PLACE_TABLE. Every used slot past the dot entries is counted here,
+ * admitted or not.
+ */
 static fsimg_status_t
-admit(qnx4_prepare_t *prepare, const char *name, uint64_t position,
+count_name(qnx4_prepare_t *prepare, const qnx4_inode_t *object,
+    qnx4_place_t place, uint64_t table_slot, fsimg_error_t *error)
+{
+	if ((object->mode & QNX4_MODE_TYPE) == QNX4_MODE_DIRECTORY)
+		prepare->subdirectories++;
+	return (qnx4_verify_name(prepare->reader, object, place, table_slot,
+	    error));
+}
+
+/* Admit the object whose record is at position under name, after counting
+ * the name: every admitted entry passes here, so none escapes the count.
+ */
+static fsimg_status_t
+admit(qnx4_prepare_t *prepare, const char *name, const qnx4_inode_t *object,
+    qnx4_place_t place, uint64_t position, uint64_t table_slot,
     fsimg_error_t *error)
 {
 	unsigned char payload[QNX4_PAYLOAD_BYTES];
+	fsimg_status_t status;
 
+	status = count_name(prepare, object, place, table_slot, error);
+	if (status != FSIMG_OK)
+		return (status);
 	fsimg_meta_put_u64(payload, position);
 	fsimg_meta_put_u64(payload + 8, prepare->self);
 	return (fsimg_directory_admit(prepare->build, name, payload,
@@ -158,7 +188,8 @@ admit_direct(qnx4_prepare_t *prepare, uint64_t position,
 	status = qnx4_direct_name(&inode, prepare->name, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (admit(prepare, prepare->name, position, error));
+	return (admit(prepare, prepare->name, &inode, QNX4_PLACE_DIRECT,
+	    position, 0, error));
 }
 
 /* A link record names an .inodes record; its target is resolved and
@@ -170,7 +201,7 @@ admit_link(qnx4_prepare_t *prepare, uint64_t position,
 {
 	qnx4_link_t link;
 	qnx4_inode_t target;
-	uint64_t target_position;
+	uint64_t target_position, table_slot;
 	fsimg_status_t status;
 
 	qnx4_link_decode(raw, &link);
@@ -178,21 +209,64 @@ admit_link(qnx4_prepare_t *prepare, uint64_t position,
 		return (qnx4_unsupported(error,
 		    "QNX4 link record has unexpected status or spare bytes"));
 	status = qnx4_link_resolve(prepare->reader, &link, &target_position,
-	    &target, error);
+	    &table_slot, &target, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = qnx4_link_name(prepare->reader, &link, position,
 	    prepare->name, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (admit(prepare, prepare->name, target_position, error));
+	return (admit(prepare, prepare->name, &target, QNX4_PLACE_TABLE,
+	    target_position, table_slot, error));
 }
 
-/* One slot of the directory being prepared. In the root, slots 0 to 5 and
- * .longfilenames were validated at open and are checked again here: the
- * .bitmap and .inodes slots and .longfilenames are format-owned and never
- * admitted, while .boot and .altboot are admitted as the root-block records
- * their links name.
+/* A root slot naming a format-owned object, which open validated: fixed
+ * slots 2 to 5, checked again here, and the .longfilenames record found
+ * beyond them. Each gives its object one name. .bitmap, .inodes and
+ * .longfilenames are never admitted, so their names are counted here;
+ * .boot and .altboot are admitted as the root-block records their links
+ * name.
+ */
+static fsimg_status_t
+prepare_format_slot(qnx4_prepare_t *prepare, uint64_t slot,
+    const unsigned char *raw, fsimg_error_t *error)
+{
+	fsimg_qnx4_reader_t *qnx4 = qnx4_state(prepare->reader);
+	const qnx4_inode_t *root = qnx4->root;
+	qnx4_inode_t direct;
+	fsimg_status_t status;
+
+	if (slot < QNX4_ROOT_FIXED_SLOTS) {
+		status = qnx4_root_fixed_slot(prepare->reader, (unsigned)slot,
+		    raw, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	switch (slot) {
+	case 2:		/* .bitmap, a direct record */
+		qnx4_inode_decode(raw, &direct);
+		return (count_name(prepare, &direct, QNX4_PLACE_DIRECT, 0,
+		    error));
+	case 3:		/* .inodes, a link to root-block record 1 */
+		return (count_name(prepare, &root[QNX4_RECORD_INODES],
+		    QNX4_PLACE_ROOT, 0, error));
+	case 4:		/* .boot, a link to root-block record 2 */
+		return (admit(prepare, ".boot", &root[QNX4_RECORD_BOOT],
+		    QNX4_PLACE_ROOT, QNX4_POSITION(QNX4_ROOT_BLOCK,
+		    QNX4_RECORD_BOOT), 0, error));
+	case 5:		/* .altboot, a link to root-block record 3 */
+		return (admit(prepare, ".altboot", &root[QNX4_RECORD_ALTBOOT],
+		    QNX4_PLACE_ROOT, QNX4_POSITION(QNX4_ROOT_BLOCK,
+		    QNX4_RECORD_ALTBOOT), 0, error));
+	default:	/* .longfilenames, a direct record */
+		qnx4_inode_decode(raw, &direct);
+		return (count_name(prepare, &direct, QNX4_PLACE_DIRECT, 0,
+		    error));
+	}
+}
+
+/* One slot of the directory being prepared: the dot entries, the root's
+ * format-owned slots, then free slots, links and direct records anywhere.
  */
 static fsimg_status_t
 prepare_slot(void *argument, uint64_t slot, uint64_t position,
@@ -212,21 +286,10 @@ prepare_slot(void *argument, uint64_t slot, uint64_t position,
 			    "QNX4 directory has a missing or wrong dot entry"));
 		return (FSIMG_OK);
 	}
-	if (prepare->root && slot < QNX4_ROOT_FIXED_SLOTS) {
-		status = qnx4_root_fixed_slot(prepare->reader, (unsigned)slot,
-		    raw, error);
-		if (status != FSIMG_OK)
-			return (status);
-		/* .bitmap and .inodes are format-owned and never admitted. */
-		if (slot < 4)
-			return (FSIMG_OK);
-		return (admit(prepare, slot == 4 ? ".boot" : ".altboot",
-		    QNX4_POSITION(QNX4_ROOT_BLOCK, slot == 4 ?
-		    QNX4_RECORD_BOOT : QNX4_RECORD_ALTBOOT), error));
-	}
-	if (prepare->root && qnx4->has_names &&
-	    slot * QNX4_RECORD_BYTES == qnx4->names_slot_offset)
-		return (FSIMG_OK);
+	if (prepare->root && (slot < QNX4_ROOT_FIXED_SLOTS ||
+	    (qnx4->has_names &&
+	    slot * QNX4_RECORD_BYTES == qnx4->names_slot_offset)))
+		return (prepare_format_slot(prepare, slot, raw, error));
 	if (qnx4_slot_free(raw))
 		return (FSIMG_OK);
 	if (qnx4_slot_link(raw))
@@ -238,6 +301,8 @@ prepare_slot(void *argument, uint64_t slot, uint64_t position,
  * replay made current. Its walk claims its storage, so storage shared with
  * any object walked before, and a directory reached from a second parent,
  * through two link names or through a cycle, are corruption at entry.
+ * The scan counts the directory's subdirectories for its link count; the
+ * root's include lost+found, which no used slot names.
  */
 fsimg_status_t
 qnx4_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
@@ -259,6 +324,7 @@ qnx4_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	prepare->reader = reader;
 	prepare->build = build;
 	prepare->root = fsimg_directory_level(build) == 0;
+	prepare->subdirectories = prepare->root ? 1 : 0;
 	if (prepare->root) {
 		directory = &qnx4->root[QNX4_RECORD_ROOT];
 		prepare->self = QNX4_POSITION(QNX4_ROOT_BLOCK, QNX4_RECORD_ROOT);
@@ -274,6 +340,9 @@ qnx4_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	if (status == FSIMG_OK)
 		status = qnx4_slots_scan(reader, index, directory->size,
 		    prepare_slot, prepare, error);
+	if (status == FSIMG_OK)
+		status = qnx4_verify_directory(reader, directory,
+		    prepare->subdirectories, error);
 	fsimg_extent_index_free(index);
 	fsimg_dealloc(prepare);
 	return (status);

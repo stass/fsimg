@@ -421,8 +421,13 @@ Full verification walks the directory graph and file allocations, emits
 ownership records for allocation runs, externally sorts those records by
 physical range, and detects forbidden overlap. It streams allocation tables or
 bitmaps to compare claimed and allocated storage and report orphaned allocations
-and inconsistent copies. It need not read free data clusters or every payload byte
-to verify structural consistency. Payload read-through is a distinct option.
+and inconsistent copies. A driver whose traversal already claims every owned
+unit exactly once in a scratch bitset indexed by unit, failing on a second
+claim, has its overlap check and its ownership record in that set; it
+compares the set with the bitmap instead of sorting runs. QNX4 does this,
+since its reader claims every block it walks. Full verification need not
+read free data clusters or every payload byte to verify structural
+consistency. Payload read-through is a distinct option.
 An unsupported critical feature prevents a complete verification claim.
 
 Exclusivity has a narrow, driver-defined scope:

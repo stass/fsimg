@@ -169,6 +169,7 @@ typedef struct gen {
 
 static void put16(unsigned char *, uint16_t);
 static void put32(unsigned char *, uint32_t);
+static uint16_t get16(const unsigned char *);
 static uint32_t get32(const unsigned char *);
 static unsigned char *block_at(gen_t *, uint32_t);
 static uint32_t gen_alloc(gen_t *, uint32_t, unsigned char);
@@ -211,6 +212,12 @@ put32(unsigned char *p, uint32_t v)
 {
 	for (unsigned i = 0; i < 4; i++)
 		p[i] = (unsigned char)(v >> (8 * i));
+}
+
+static uint16_t
+get16(const unsigned char *p)
+{
+	return ((uint16_t)(p[0] | p[1] << 8));
 }
 
 static uint32_t
@@ -830,6 +837,14 @@ static void fixture_free(fixture_t *);
 static fsimg_status_t walk_all(fixture_t *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t run_image(const unsigned char *, uint64_t, uint64_t *,
     fsimg_error_t *);
+static fsimg_status_t verify_image(const unsigned char *, uint64_t,
+    fsimg_verify_report_t *, fsimg_error_t *);
+static void expect_outcome(const char *, const char *, fsimg_status_t,
+    fsimg_status_t, const fsimg_error_t *);
+static void expect_verify_length(gen_t *, uint64_t, fsimg_status_t,
+    fsimg_status_t, const char *);
+static void expect_verify(gen_t *, fsimg_status_t, fsimg_status_t,
+    const char *);
 static void expect_length(gen_t *, uint64_t, fsimg_status_t, const char *);
 static void expect(gen_t *, fsimg_status_t, const char *);
 
@@ -1000,24 +1015,78 @@ run_image(const unsigned char *image, uint64_t length, uint64_t *entries,
 	return (status);
 }
 
-/* QNX4_TRACE=1 shows each case's diagnostic, to confirm that a mutation
- * fails for its intended reason.
+/* Open a volume and verify it with payload read-through. The report is
+ * complete exactly when verification succeeds.
+ */
+static fsimg_status_t
+verify_image(const unsigned char *image, uint64_t length,
+    fsimg_verify_report_t *report, fsimg_error_t *error)
+{
+	fixture_t f;
+	fsimg_verify_report_t local;
+	fsimg_status_t status;
+
+	if (report == NULL)
+		report = &local;
+	bzero(report, sizeof(*report));
+	fixture_new(&f, image, length);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, error);
+	if (status == FSIMG_OK)
+		status = fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, report,
+		    error);
+	CHECK(report->complete == (status == FSIMG_OK));
+	fixture_free(&f);
+	return (status);
+}
+
+/* One case's outcome: what listing and verification return. QNX4_TRACE=1
+ * shows each diagnostic, to confirm that a mutation fails for its
+ * intended reason.
  */
 static void
-expect_length(gen_t *g, uint64_t length, fsimg_status_t expected,
-    const char *label)
+expect_outcome(const char *label, const char *operation,
+    fsimg_status_t expected, fsimg_status_t status, const fsimg_error_t *error)
+{
+	if (getenv("QNX4_TRACE") != NULL)
+		fprintf(stderr, "TRACE %s (%s): %d %s\n", label, operation, status,
+		    error->message);
+	if (status != expected)
+		fprintf(stderr, "%s (%s): expected %d, got %d (%s)\n", label,
+		    operation, expected, status, error->message);
+	CHECK(status == expected);
+}
+
+/* A case that listing and verification classify differently: a fault only
+ * full verification can see, or one that makes it incomplete.
+ */
+static void
+expect_verify_length(gen_t *g, uint64_t length, fsimg_status_t listed,
+    fsimg_status_t verified, const char *label)
 {
 	fsimg_error_t error;
 	fsimg_status_t status;
 
 	bzero(&error, sizeof(error));
 	status = run_image(g->image, length, NULL, &error);
-	if (getenv("QNX4_TRACE") != NULL)
-		fprintf(stderr, "TRACE %s: %d %s\n", label, status, error.message);
-	if (status != expected)
-		fprintf(stderr, "%s: expected %d, got %d (%s)\n", label,
-		    expected, status, error.message);
-	CHECK(status == expected);
+	expect_outcome(label, "list", listed, status, &error);
+	bzero(&error, sizeof(error));
+	status = verify_image(g->image, length, NULL, &error);
+	expect_outcome(label, "verify", verified, status, &error);
+}
+
+static void
+expect_verify(gen_t *g, fsimg_status_t listed, fsimg_status_t verified,
+    const char *label)
+{
+	expect_verify_length(g, g->length, listed, verified, label);
+}
+
+/* Most cases fail, or pass, listing and verification alike. */
+static void
+expect_length(gen_t *g, uint64_t length, fsimg_status_t expected,
+    const char *label)
+{
+	expect_verify_length(g, length, expected, expected, label);
 }
 
 static void
@@ -1307,7 +1376,7 @@ check_sample(uint32_t blocks)
 	unsigned char *bytes;
 	bool seen[sizeof(expected) / sizeof(expected[0])];
 	bool long_seen;
-	uint64_t count;
+	uint64_t count, free_blocks;
 	size_t i;
 	fsimg_status_t status;
 
@@ -1322,7 +1391,7 @@ check_sample(uint32_t blocks)
 	CHECK(strcmp(info.format, "qnx4") == 0);
 	CHECK(strcmp(info.profile, "long names") == 0);
 	CHECK(info.valid == FSIMG_VOLUME_GEOMETRY);
-	CHECK(info.capabilities == FSIMG_CAP_READ);
+	CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 	CHECK(info.volume_bytes == (uint64_t)blocks * 512);
 	CHECK(info.allocation_units == blocks);
 	CHECK(info.sector_bytes == 512 && info.allocation_unit_bytes == 512);
@@ -1392,16 +1461,28 @@ check_sample(uint32_t blocks)
 	CHECK(count == sizeof(expected) / sizeof(expected[0]) + 1);
 	fixture_free(&f);
 
-	/* Without a verifier, verification is unsupported, fails before any
-	 * work and leaves the reader untouched.
+	/* Full verification with payload: 13 files and links with 35363
+	 * logical bytes, the hard link's 1500 read once; the root and two
+	 * directories; every block the generator left unused is free.
 	 */
+	free_blocks = 0;
+	for (uint32_t b = 1; b <= blocks; b++)
+		if (!g.used[b])
+			free_blocks++;
 	fixture_new(&f, g.image, g.length);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-	bzero(&report, sizeof(report));
-	CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) ==
-	    FSIMG_EUNSUPPORTED);
-	CHECK(!report.complete);
-	CHECK(walk_all(&f, &count, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report, &error) ==
+	    FSIMG_OK);
+	CHECK(report.complete && report.scope == FSIMG_VALIDATION_PAYLOAD);
+	CHECK(report.files == 13 && report.directories == 3);
+	CHECK(report.logical_bytes == 35363);
+	CHECK(report.payload_bytes_read == 35363 - 1500);
+	CHECK(report.free_clusters == free_blocks);
+	CHECK(report.allocated_clusters == blocks - free_blocks);
+	CHECK(report.bad_clusters == 0);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK((info.valid & FSIMG_VOLUME_FREE) != 0);
+	CHECK(info.free_bytes == free_blocks * 512);
 	fixture_free(&f);
 	free(bytes);
 	gen_free(&g);
@@ -1480,6 +1561,7 @@ test_geometry(void)
 {
 	gen_t g;
 	sample_t s;
+	fsimg_verify_report_t report;
 	unsigned char *longer;
 	uint64_t entries;
 
@@ -1489,6 +1571,8 @@ test_geometry(void)
 	gen_finish(&g);
 	CHECK(run_image(g.image, g.length, &entries, NULL) == FSIMG_OK);
 	CHECK(entries == 2);
+	CHECK(verify_image(g.image, g.length, &report, NULL) == FSIMG_OK);
+	CHECK(report.free_clusters == 0 && report.allocated_clusters == 43);
 	expect_length(&g, 42 * 512, FSIMG_ECORRUPT, "42 blocks");
 	gen_free(&g);
 
@@ -1567,7 +1651,12 @@ test_bitmap(void)
 	expect(&g, FSIMG_ECORRUPT, "referenced free block");
 	gen_set_bit(&g, g.objects[s.one].extents[0].first, true);
 	gen_set_bit(&g, 4000, true);
-	expect(&g, FSIMG_OK, "allocated orphan");
+	expect_verify(&g, FSIMG_OK, FSIMG_ECORRUPT, "allocated orphan");
+	gen_set_bit(&g, 4000, false);
+	gen_set_bit(&g, 4097, true);
+	expect_verify(&g, FSIMG_OK, FSIMG_ECORRUPT, "orphan at block N");
+	gen_set_bit(&g, 4097, false);
+	expect(&g, FSIMG_OK, "orphans freed");
 	put32(record_of(&g, s.one) + INODE_FIRST,
 	    g.objects[s.chained].extents[1].first);
 	expect(&g, FSIMG_ECORRUPT, "a block with two owners");
@@ -1614,6 +1703,7 @@ test_root_block(void)
 			CHECK(strcmp(info.label, label) == 0);
 		}
 		fixture_free(&f);
+		CHECK(verify_image(g.image, g.length, NULL, NULL) == FSIMG_OK);
 		free(label);
 		gen_free(&g);
 	}
@@ -1640,7 +1730,8 @@ test_root_block(void)
 	CHECK((info.valid & FSIMG_VOLUME_LABEL) == 0);
 	fixture_free(&f);
 	memcpy(root + 0x1c0, "\xff", 1);
-	expect(&g, FSIMG_OK, "non-UTF-8 label lists");
+	expect_verify(&g, FSIMG_OK, FSIMG_EUNSUPPORTED,
+	    "a non-UTF-8 label lists and verifies incomplete");
 	gen_free(&g);
 
 	/* Statuses: 0x13 only on .boot and .altboot. */
@@ -2025,6 +2116,7 @@ test_names(void)
 	gen_finish(&g);
 	CHECK(run_image(g.image, g.length, &entries, NULL) == FSIMG_OK);
 	CHECK(entries == 5);
+	CHECK(verify_image(g.image, g.length, NULL, NULL) == FSIMG_OK);
 	/* Swap the two 49-byte links' pointers: each record then names the
 	 * other link.
 	 */
@@ -2050,6 +2142,7 @@ test_names(void)
 	file = gen_file(&g, OBJ_ROOT, "x", (const unsigned char *)"x", 1);
 	gen_finish(&g);
 	CHECK(run_image(g.image, g.length, &entries, NULL) == FSIMG_OK);
+	CHECK(verify_image(g.image, g.length, NULL, NULL) == FSIMG_OK);
 	slot = slot_of(&g, OBJ_ROOT, link_slot(&g, OBJ_ROOT,
 	    g.objects[file].record));
 	put32(slot + LINK_LONG, 100);
@@ -2132,6 +2225,9 @@ test_statuses(void)
 		CHECK(status == expected);
 		if ((v & 0x09) == 0)
 			CHECK(entries == SAMPLE_ENTRIES - 1);
+		/* A freed slot leaves its object's blocks without an owner. */
+		CHECK(verify_image(g.image, g.length, NULL, NULL) ==
+		    ((v & 0x09) == 0 ? FSIMG_ECORRUPT : expected));
 		record[INODE_STATUS] = saved;
 
 		/* A direct directory: no modified bit. */
@@ -2151,6 +2247,8 @@ test_statuses(void)
 			fprintf(stderr, "directory status %#x: %d (%s)\n", v,
 			    status, error.message);
 		CHECK(status == expected);
+		CHECK(verify_image(g.image, g.length, NULL, NULL) ==
+		    ((v & 0x09) == 0 ? FSIMG_ECORRUPT : expected));
 		record[INODE_STATUS] = saved;
 
 		/* An .inodes regular file. */
@@ -2167,6 +2265,7 @@ test_statuses(void)
 			fprintf(stderr, "table status %#x: %d (%s)\n", v, status,
 			    error.message);
 		CHECK(status == expected);
+		CHECK(verify_image(g.image, g.length, NULL, NULL) == expected);
 		record[INODE_STATUS] = saved;
 
 		/* A link record. */
@@ -2191,6 +2290,9 @@ test_statuses(void)
 				fprintf(stderr, "link status %#x: %d (%s)\n", v,
 				    status, error.message);
 			CHECK(status == expected);
+			/* A freed link leaves the file one name short. */
+			CHECK(verify_image(g.image, g.length, NULL, NULL) ==
+			    ((v & 0x09) == 0 ? FSIMG_ECORRUPT : expected));
 		}
 		record[LINK_STATUS] = saved;
 	}
@@ -2272,12 +2374,20 @@ test_records(void)
 	record[INODE_STATUS] = 0;
 	CHECK(run_image(g.image, g.length, &entries, NULL) == FSIMG_OK);
 	CHECK(entries == SAMPLE_ENTRIES);
-	/* A deleted directory slot keeps its bytes too. */
+	CHECK(verify_image(g.image, g.length, NULL, NULL) == FSIMG_OK);
+	/* A deleted directory slot keeps its bytes too. Deleting one of a
+	 * hard link's two names without lowering its link count is the
+	 * verifier's to report.
+	 */
 	link = slot_of(&g, OBJ_ROOT, link_slot(&g, OBJ_ROOT,
 	    g.objects[s.linked].record));
 	link[LINK_STATUS] = 0;
 	CHECK(run_image(g.image, g.length, &entries, NULL) == FSIMG_OK);
 	CHECK(entries == SAMPLE_ENTRIES - 1);
+	expect_verify(&g, FSIMG_OK, FSIMG_ECORRUPT,
+	    "a file's link count above its names");
+	put16(record_of(&g, s.linked) + INODE_LINKS, 1);
+	expect(&g, FSIMG_OK, "a file's link count lowered with its name");
 	gen_free(&g);
 
 	/* The root's links into the root block are fixed by position. */
@@ -2450,6 +2560,10 @@ test_extents(void)
 	put32(record + INODE_BLOCKS, 0);
 	expect(&g, FSIMG_ECORRUPT, "empty file with an extent count");
 	put16(record + INODE_EXTENTS, 0);
+	expect_verify(&g, FSIMG_OK, FSIMG_ECORRUPT,
+	    "empty file leaving its blocks allocated");
+	gen_set_bit(&g, first, false);
+	gen_set_bit(&g, first + 1, false);
 	expect(&g, FSIMG_OK, "empty file");
 	gen_free(&g);
 
@@ -2564,6 +2678,7 @@ test_directories(void)
 	    g.objects[dir].chain_count == 1);
 	CHECK(run_image(g.image, g.length, &entries, NULL) == FSIMG_OK);
 	CHECK(entries == 2 + 2 + 200 + 1);
+	CHECK(verify_image(g.image, g.length, NULL, NULL) == FSIMG_OK);
 	gen_free(&g);
 
 	/* A directory in .inodes reached a second time: from itself, from a
@@ -2652,11 +2767,18 @@ test_tables(void)
 	put32(record + INODE_SIZE, 8000);
 	expect(&g, FSIMG_ECORRUPT, ".inodes size not whole blocks");
 	put32(record + INODE_SIZE, 8192);
-	/* A used .inodes slot no link names is the verifier's to report. */
+	/* A used .inodes slot no link names is the verifier's to report;
+	 * a freed slot keeps its stale bytes, which nothing examines.
+	 */
 	slot = slot_of(&g, OBJ_INODES, 9);
 	bcopy(record_of(&g, s.linked), slot, 64);
 	CHECK(run_image(g.image, g.length, &entries, NULL) == FSIMG_OK);
 	CHECK(entries == SAMPLE_ENTRIES);
+	expect_verify(&g, FSIMG_OK, FSIMG_ECORRUPT, "unnamed used .inodes slot");
+	slot[INODE_STATUS] = 0x00;
+	expect(&g, FSIMG_OK, "freed .inodes slot with stale bytes");
+	slot[INODE_STATUS] = 0x10;
+	expect(&g, FSIMG_OK, "free .inodes slot with the table bit");
 	gen_free(&g);
 
 	/* lost+found: ".." at the root's "." slot, as the formatter writes it;
@@ -2687,10 +2809,139 @@ test_tables(void)
 	CHECK(walk_all(&f, &entries, NULL) == FSIMG_OK);
 	CHECK(entries == SAMPLE_ENTRIES);
 	fixture_free(&f);
-	/* The lost+found slot in the root stays hidden whatever it names. */
+	expect_verify(&g, FSIMG_OK, FSIMG_EUNSUPPORTED,
+	    "a used lost+found slot verifies incomplete");
+	/* Freed, the slot's stale link is ignored. The lost+found slot in
+	 * the root stays hidden whatever it names.
+	 */
+	slot_of(&g, OBJ_LOST, 5)[LINK_STATUS] = 0x00;
+	expect(&g, FSIMG_OK, "freed lost+found slot");
 	slot = slot_of(&g, OBJ_ROOT, 6);
 	slot[0] = 'L';
 	expect(&g, FSIMG_OK, "renamed lost+found slot");
+	gen_free(&g);
+}
+
+/* Raise the link count of the inode record at `record` by one: listing
+ * never reads link counts, and verification must find the mismatch.
+ */
+static void
+expect_link_count_checked(gen_t *g, unsigned char *record, const char *label)
+{
+	uint16_t links;
+
+	links = get16(record + INODE_LINKS);
+	put16(record + INODE_LINKS, (uint16_t)(links + 1));
+	expect_verify(g, FSIMG_OK, FSIMG_ECORRUPT, label);
+	put16(record + INODE_LINKS, links);
+}
+
+/* Full verification's own checks: ownership of every block, link counts
+ * of every kind of record, .longfilenames occupancy, and an incomplete
+ * report after an unsupported object.
+ */
+static void
+test_verification(void)
+{
+	gen_t g;
+	sample_t s;
+	unsigned char *record, *root_block, *names;
+	uint32_t first, metadata[4];
+
+	sample(&g, &s);
+	expect(&g, FSIMG_OK, "the sample verifies");
+
+	/* Blocks owned twice: a file's data in another file's extent block,
+	 * or in a block of .inodes, .longfilenames, lost+found or a
+	 * directory.
+	 */
+	record = record_of(&g, s.one);
+	first = get32(record + INODE_FIRST);
+	put32(record + INODE_FIRST, g.objects[s.chained].chain[0]);
+	expect(&g, FSIMG_ECORRUPT, "data in an extent block");
+	metadata[0] = g.objects[OBJ_INODES].extents[0].first + 9;
+	metadata[1] = g.objects[OBJ_NAMES].extents[0].first + 3;
+	metadata[2] = g.objects[OBJ_LOST].extents[0].first + 4;
+	metadata[3] = g.objects[s.d1].extents[0].first + 7;
+	for (size_t i = 0; i < sizeof(metadata) / sizeof(metadata[0]); i++) {
+		put32(record + INODE_FIRST, metadata[i]);
+		expect(&g, FSIMG_ECORRUPT, "a metadata block used as payload");
+	}
+	put32(record + INODE_FIRST, first);
+	expect(&g, FSIMG_OK, "ownership restored");
+
+	/* Link counts: directories 2 plus subdirectories, the root counting
+	 * lost+found; every other object its names, hidden ones included.
+	 */
+	root_block = block_at(&g, 2);
+	expect_link_count_checked(&g, root_block, "root link count");
+	expect_link_count_checked(&g, root_block + 64, ".inodes link count");
+	expect_link_count_checked(&g, root_block + 128, ".boot link count");
+	expect_link_count_checked(&g, root_block + 192, ".altboot link count");
+	expect_link_count_checked(&g, root_block + 256,
+	    "lost+found link count");
+	expect_link_count_checked(&g, record_of(&g, OBJ_BITMAP),
+	    ".bitmap link count");
+	expect_link_count_checked(&g, record_of(&g, OBJ_NAMES),
+	    ".longfilenames link count");
+	expect_link_count_checked(&g, record_of(&g, s.d1),
+	    "direct directory link count");
+	expect_link_count_checked(&g, record_of(&g, s.d2),
+	    ".inodes directory link count");
+	expect_link_count_checked(&g, record_of(&g, s.one),
+	    "direct file link count");
+	expect_link_count_checked(&g, record_of(&g, s.linked),
+	    "hard-linked file link count");
+	expect_link_count_checked(&g, record_of(&g, s.long505),
+	    "long-named file link count");
+	expect_link_count_checked(&g, record_of(&g, s.symlink),
+	    "symbolic link link count");
+	expect_link_count_checked(&g, record_of(&g, s.fifo),
+	    "FIFO link count");
+	expect(&g, FSIMG_OK, "link counts restored");
+
+	/* A used long-name record no link names; an unused one is ignored
+	 * whatever its bytes.
+	 */
+	names = block_at(&g, g.objects[OBJ_NAMES].extents[0].first + 1);
+	bcopy(block_at(&g, g.objects[OBJ_NAMES].extents[0].first), names, 512);
+	expect_verify(&g, FSIMG_OK, FSIMG_ECORRUPT,
+	    "an unnamed used long-name record");
+	names[LONG_STATE] = 0x02;
+	expect(&g, FSIMG_OK, "an unused long-name record with stale bytes");
+
+	/* An unsupported kind deep in the tree leaves verification
+	 * incomplete, never skipped.
+	 */
+	record = record_of(&g, s.nested);
+	put16(record + INODE_MODE, 0020644);
+	expect(&g, FSIMG_EUNSUPPORTED, "an unsupported nested object");
+	put16(record + INODE_MODE, 0100644);
+	expect(&g, FSIMG_OK, "the nested object restored");
+
+	/* A driver without a verifier: the request fails before any work
+	 * and leaves the reader untouched. The QNX4 operations stand in,
+	 * with their verifier removed.
+	 */
+	{
+		fsimg_reader_ops_t unverified = fsimg_qnx4_reader_ops;
+		fsimg_verify_report_t report;
+		fixture_t f;
+		uint64_t entries;
+
+		unverified.verify = NULL;
+		fixture_new(&f, g.image, g.length);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+		    FSIMG_OK);
+		f.reader->ops = &unverified;
+		CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report,
+		    NULL) == FSIMG_EUNSUPPORTED);
+		CHECK(!report.complete);
+		CHECK(walk_all(&f, &entries, NULL) == FSIMG_OK);
+		CHECK(entries == SAMPLE_ENTRIES);
+		f.reader->ops = &fsimg_qnx4_reader_ops;
+		fixture_free(&f);
+	}
 	gen_free(&g);
 }
 
@@ -2733,26 +2984,47 @@ test_metadata(void)
 	gen_free(&g);
 }
 
-/* Allocation, scratch, read and cancellation failures and the work limit
- * end the operation cleanly; fixture_free checks that nothing leaked.
+/* What a fault case runs after opening: a listing that reads every file,
+ * or full verification with payload.
+ */
+typedef enum operation {
+	OPERATION_LIST = 1,
+	OPERATION_VERIFY
+} operation_t;
+
+static fsimg_status_t
+run_operation(fixture_t *f, operation_t operation, fsimg_error_t *error)
+{
+	fsimg_verify_report_t report;
+	uint64_t entries;
+	fsimg_status_t status;
+
+	status = fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (operation == OPERATION_LIST)
+		return (walk_all(f, &entries, error));
+	status = fsimg_verify(f->reader, FSIMG_VERIFY_PAYLOAD, &report, error);
+	CHECK(report.complete == (status == FSIMG_OK));
+	return (status);
+}
+
+/* Allocation, scratch and cancellation failures at every occurrence, and
+ * the work limit, end the operation cleanly; fixture_free checks that
+ * nothing leaked.
  */
 static void
-test_failures(void)
+check_faults(const gen_t *g, operation_t operation)
 {
-	gen_t g;
-	sample_t s;
 	fixture_t f;
 	fsimg_error_t error;
 	fsimg_status_t status;
-	uint64_t entries, n, failures;
+	uint64_t n, failures;
 
-	sample(&g, &s);
 	for (n = 1;; n++) {
-		fixture_new(&f, g.image, g.length);
+		fixture_new(&f, g->image, g->length);
 		fsimg_test_fail_alloc_after(f.ctx, n);
-		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
-		if (status == FSIMG_OK)
-			status = walk_all(&f, &entries, NULL);
+		status = run_operation(&f, operation, NULL);
 		fsimg_test_fail_alloc_after(f.ctx, 0);
 		fixture_free(&f);
 		if (status == FSIMG_OK)
@@ -2769,13 +3041,10 @@ test_failures(void)
 	    point++) {
 		failures = 0;
 		for (n = 1;; n += n < 64 ? 1 : n / 8) {
-			fixture_limited(&f, g.image, g.length, 0, 1);
+			fixture_limited(&f, g->image, g->length, 0, 1);
 			fsimg_test_meta_fail_after(f.ctx, (fsimg_meta_fault_t)point,
 			    n, ENOSPC);
-			status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader,
-			    &error);
-			if (status == FSIMG_OK)
-				status = walk_all(&f, &entries, &error);
+			status = run_operation(&f, operation, &error);
 			fsimg_test_meta_fail_after(f.ctx, (fsimg_meta_fault_t)point,
 			    0, 0);
 			fixture_free(&f);
@@ -2788,14 +3057,12 @@ test_failures(void)
 		CHECK(failures > 0);
 	}
 
-	/* Cancellation at every poll until the listing completes. */
+	/* Cancellation at every poll until the operation completes. */
 	failures = 0;
 	for (n = 1;; n++) {
-		fixture_new(&f, g.image, g.length);
+		fixture_new(&f, g->image, g->length);
 		f.cancel_after = n;
-		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
-		if (status == FSIMG_OK)
-			status = walk_all(&f, &entries, NULL);
+		status = run_operation(&f, operation, NULL);
 		fixture_free(&f);
 		if (status == FSIMG_OK)
 			break;
@@ -2806,12 +3073,57 @@ test_failures(void)
 	CHECK(failures > 0);
 
 	/* The work limit. */
-	fixture_limited(&f, g.image, g.length, 40, 0);
-	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
-	if (status == FSIMG_OK)
-		status = walk_all(&f, &entries, NULL);
-	CHECK(status == FSIMG_ELIMIT);
+	fixture_limited(&f, g->image, g->length, 40, 0);
+	CHECK(run_operation(&f, operation, NULL) == FSIMG_ELIMIT);
 	fixture_free(&f);
+
+	/* Short reads of seven bytes at most change nothing. */
+	fixture_new(&f, g->image, g->length);
+	f.short_max = 7;
+	CHECK(run_operation(&f, operation, NULL) == FSIMG_OK);
+	fixture_free(&f);
+}
+
+/* A read failure of block `block`, which only verification reads: a
+ * listing that reads every file succeeds, and verification fails with
+ * FSIMG_EIO.
+ */
+static void
+check_verify_read_failure(const gen_t *g, uint32_t block)
+{
+	fixture_t f;
+	fsimg_error_t error;
+	fsimg_status_t status, expected;
+
+	for (operation_t operation = OPERATION_LIST;
+	    operation <= OPERATION_VERIFY; operation++) {
+		fixture_new(&f, g->image, g->length);
+		f.fail_first = (uint64_t)(block - 1) * 512;
+		f.fail_end = f.fail_first + 512;
+		bzero(&error, sizeof(error));
+		status = run_operation(&f, operation, &error);
+		expected = operation == OPERATION_LIST ? FSIMG_OK : FSIMG_EIO;
+		if (status != expected)
+			fprintf(stderr, "read failure of block %" PRIu32
+			    " (operation %d): %d (%s)\n", block, (int)operation,
+			    status, error.message);
+		CHECK(status == expected);
+		fixture_free(&f);
+	}
+}
+
+static void
+test_failures(void)
+{
+	gen_t g;
+	sample_t s;
+	fixture_t f;
+	fsimg_status_t status;
+	uint64_t entries;
+
+	sample(&g, &s);
+	check_faults(&g, OPERATION_LIST);
+	check_faults(&g, OPERATION_VERIFY);
 
 	/* A failed read of the bitmap fails the open, of an extent block the
 	 * listing, and of file content the read, never the listing before it.
@@ -2849,13 +3161,29 @@ test_failures(void)
 	}
 	fixture_free(&f);
 
-	/* Short reads of seven bytes at most change nothing. */
+	/* Payload read-through fails with the content read. */
 	fixture_new(&f, g.image, g.length);
-	f.short_max = 7;
-	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-	CHECK(walk_all(&f, &entries, NULL) == FSIMG_OK);
-	CHECK(entries == SAMPLE_ENTRIES);
+	f.fail_first = (uint64_t)(g.objects[s.one].extents[0].first - 1) * 512;
+	f.fail_end = f.fail_first + 512;
+	CHECK(run_operation(&f, OPERATION_VERIFY, NULL) == FSIMG_EIO);
 	fixture_free(&f);
+
+	/* Verification also reads what a listing never does: the free
+	 * .inodes slots past the used ones and the unused long-name records.
+	 */
+	check_verify_read_failure(&g,
+	    g.objects[OBJ_INODES].extents[0].first + 15);
+	check_verify_read_failure(&g,
+	    g.objects[OBJ_NAMES].extents[0].first + 15);
+	gen_free(&g);
+
+	/* With 25 bitmap blocks, open reads a window of the bitmap's start
+	 * and one of its end; block 20, in the middle, is read only by the
+	 * verifier's comparison with the claimed blocks.
+	 */
+	sample_build(&g, &s, 100000);
+	CHECK(g.bitmap_blocks == 25);
+	check_verify_read_failure(&g, 20);
 	gen_free(&g);
 }
 
@@ -3163,6 +3491,7 @@ main(int argc, char **argv)
 	test_extents();
 	test_directories();
 	test_tables();
+	test_verification();
 	test_metadata();
 	test_failures();
 	test_extract();

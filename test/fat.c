@@ -380,7 +380,7 @@ test_variants(void)
 	fsimg_range_t range;
 
 	/* Four FAT and exFAT variants, then QNX6; every one is writable.
-	 * QNX4 follows, readable only.
+	 * QNX4 follows, readable and verifiable but not writable.
 	 */
 	cursor = 0;
 	for (unsigned i = 0; i < 5; i++) {
@@ -391,7 +391,7 @@ test_variants(void)
 	CHECK(strcmp(format.name, "qnx6") == 0);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 	CHECK(strcmp(format.name, "qnx4") == 0);
-	CHECK(format.capabilities == FSIMG_CAP_READ);
+	CHECK(format.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	for (unsigned i = 0; i < 3; i++) {

@@ -186,9 +186,16 @@ typedef struct qnx4_locator {
  * current_position, with its parent directory's position. file indexes
  * the current object's content: replay builds it for an object's first
  * name, and the first read builds it for a later one (later_name).
- * claimed has one bit per block number, set by exclusive walks. exposed
- * has one bit per logical .inodes slot, set when replay reached the slot's
- * first name.
+ * claimed holds the blocks exclusive walks claimed, bit b - 1 for block b
+ * as in the bitmap's own bits, so verification compares the two byte for
+ * byte. exposed has one bit per logical .inodes slot, set when replay
+ * reached the slot's first name.
+ *
+ * references and long_named exist only during full verification, and
+ * references being set is what makes directory preparation account names
+ * (see verify.c): references receives the logical .inodes slot of every
+ * link record's target, and long_named has one bit per .longfilenames
+ * record, set when a link's long name is decoded from it.
  */
 typedef struct fsimg_qnx4_reader fsimg_qnx4_reader_t;
 
@@ -203,6 +210,8 @@ struct fsimg_qnx4_reader {
 	fsimg_extent_index_t *file;
 	fsimg_bitset_t	*claimed;
 	fsimg_bitset_t	*exposed;
+	fsimg_stream_t	*references;
+	fsimg_bitset_t	*long_named;
 	uint64_t	 current_position;
 	uint64_t	 current_parent;
 	uint64_t	 inode_slots;		/* .inodes size / 64 */
@@ -267,7 +276,7 @@ fsimg_status_t qnx4_record_read(fsimg_reader_t *, uint64_t, unsigned char *,
 fsimg_status_t qnx4_inode_validate(const qnx4_inode_t *, qnx4_place_t,
     fsimg_error_t *);
 fsimg_status_t qnx4_link_resolve(fsimg_reader_t *, const qnx4_link_t *,
-    uint64_t *, qnx4_inode_t *, fsimg_error_t *);
+    uint64_t *, uint64_t *, qnx4_inode_t *, fsimg_error_t *);
 fsimg_status_t qnx4_object_read(fsimg_reader_t *, uint64_t, qnx4_inode_t *,
     qnx4_place_t *, uint64_t *, fsimg_error_t *);
 fsimg_status_t qnx4_inode_entry(const qnx4_inode_t *, fsimg_entry_t *,
@@ -301,5 +310,13 @@ fsimg_status_t qnx4_keys(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
 fsimg_status_t qnx4_key(fsimg_reader_t *, const char *, unsigned char *,
     size_t *, fsimg_error_t *);
+
+/* verify.c. The two accounting calls do nothing outside verification. */
+fsimg_status_t qnx4_verify(fsimg_reader_t *, unsigned,
+    fsimg_verify_report_t *, fsimg_error_t *);
+fsimg_status_t qnx4_verify_name(fsimg_reader_t *, const qnx4_inode_t *,
+    qnx4_place_t, uint64_t, fsimg_error_t *);
+fsimg_status_t qnx4_verify_directory(fsimg_reader_t *, const qnx4_inode_t *,
+    uint64_t, fsimg_error_t *);
 
 #endif
