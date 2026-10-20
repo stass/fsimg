@@ -140,6 +140,10 @@ and
 reports a QNX4 volume whose label is invalid or whose
 .Pa lost+found
 holds an entry as unsupported, since neither has an observed form to check.
+A QNX4 volume whose
+.Pa lost+found
+.Pa ..
+entry names the root record does not open, for the same reason.
 .Cm info
 reports header validation, geometry, label, volume UUID when the format has
 one, time basis and known capabilities.

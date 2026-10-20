@@ -366,11 +366,11 @@ qnx4_index_current(fsimg_reader_t *reader, qnx4_walk_policy_t policy,
  * the payload and name are validated and the record is read again. The
  * first name of a file, symbolic link or FIFO claims its storage at
  * admission, so storage it shares with any other object fails while
- * listing. A later
- * name of the same .inodes object (a hard link) is indexed when first
- * read, so listing many names of a large file walks it once. The exposed
- * bit is set only after the claiming walk succeeds. A direct or root-block
- * record has exactly one name. A directory is indexed on descent.
+ * listing. A later name of the same .inodes object (a hard link) is
+ * indexed when first read, so listing many names of a large file walks it
+ * once. The exposed bit is set only after the claiming walk succeeds. A
+ * direct or root-block record has exactly one name. A directory is indexed
+ * on descent.
  */
 fsimg_status_t
 qnx4_replay(fsimg_reader_t *reader, const char *name,

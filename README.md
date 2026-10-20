@@ -85,7 +85,8 @@ block has exactly one owner, that every link count matches the names, and
 that every used `.inodes` slot and long-name record is named; it reports a
 volume whose label is invalid or
 whose `lost+found` holds an entry as unsupported, since neither has an
-observed form. fsimg does not write QNX4 volumes.
+observed form. A volume whose `lost+found` `..` names the root record does
+not open, for the same reason. fsimg does not write QNX4 volumes.
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,
