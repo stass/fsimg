@@ -227,7 +227,8 @@ understood before acceptance. OS version strings alone do not identify an
 on-disk feature set. [Q2], [Q3], [Q4], [Q5]
 
 The default writer uses little endian, 1024-byte blocks, a zeroed boot area,
-and one allocation group. Big endian and the other classic block sizes, 512,
+and the native formatter's default allocation-group count for its geometry
+(see the native defaults below). Big endian and the other classic block sizes, 512,
 2048 and 4096, are encoded identically apart from byte order and geometry,
 including the tree depths that geometry implies (see the system run below);
 QNX 6.5.0 refuses block sizes outside 512 through 4096 or below the device

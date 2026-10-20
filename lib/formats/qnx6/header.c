@@ -207,6 +207,7 @@ qnx6_headers_read(fsimg_reader_t *reader, fsimg_error_t *error)
 	g->blocks = selected->header.block_count;
 	g->inode_count = selected->header.inode_count;
 	g->reservation = selected->reservation;
+	g->groups = selected->header.groups;
 	g->big_endian = selected->big_endian;
 	system_bytes = (uint64_t)g->reservation * 2 * g->block_size;
 	qnx6->system_domain = (fsimg_extent_domain_t){

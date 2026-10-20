@@ -704,7 +704,7 @@ format that QNX itself refused, and each empty capture formatted with
 long-name checksums must match fsimg's empty volume of its geometry. On macOS
 all 31 native captures and F1 behave so: free block counts equal native
 `chkqnx6fs` output, the eight empty comparisons find no difference outside
-the CRC, sync time and group count, and the 9,830,368-block volume with 1,048,576 inodes and a depth-3 file verifies with payload in under
+the CRC and sync time, and the 9,830,368-block volume with 1,048,576 inodes and a depth-3 file verifies with payload in under
 a second at 16 MiB RSS. The four QNX6 partitions of the measured PCM 3.1 HDD,
 read with `fsimg verify -b -z` at their partition offsets and lengths, also
 verify, including the head unit's original populated partition. On a Linux

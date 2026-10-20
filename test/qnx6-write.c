@@ -483,6 +483,25 @@ chk_directory(chk_t *c, const uint32_t *table, uint32_t number, uint32_t parent,
 	free(leaves);
 }
 
+/* The native formatter's allocation-group count, written from the research
+ * record: a ladder over the smaller of the bitmap and inode-table leaf-block
+ * counts, capped at 4, 8, 16 or 32 by the size of N.
+ */
+static uint32_t
+native_groups(uint64_t blocks, uint32_t block, uint64_t capacity)
+{
+	uint64_t bitmap_leaves, inode_leaves, m;
+	uint32_t ladder, cap;
+
+	bitmap_leaves = ((blocks + 7) / 8 + block - 1) / block;
+	inode_leaves = (capacity * 128 + block - 1) / block;
+	m = bitmap_leaves < inode_leaves ? bitmap_leaves : inode_leaves;
+	ladder = m <= 3 ? 1 : m <= 7 ? 4 : m <= 15 ? 8 : m <= 31 ? 16 : 32;
+	cap = blocks <= 0xfffff ? 4 : blocks <= 0x7fffff ? 8 :
+	    blocks < 0x8000000 ? 16 : 32;
+	return (ladder < cap ? ladder : cap);
+}
+
 /* Check a whole image. The checker owns the entries it collects. */
 static void
 chk_image(chk_t *c, const unsigned char *img, uint64_t length,
@@ -537,7 +556,8 @@ chk_image(chk_t *c, const unsigned char *img, uint64_t length,
 	free_blocks = get32(c, h + 64);
 	used_inodes = c->capacity - get32(c, h + 56);
 	c->used_inodes = used_inodes;
-	CHK(c, get32(c, h + 68) == 1, "group count");
+	CHK(c, get32(c, h + 68) == native_groups(c->blocks, c->block,
+	    c->capacity), "group count");
 	CHECK(D_ORIGIN + (uint64_t)c->blocks * c->block <= c->second);
 	CHK(c, D_ORIGIN + (uint64_t)c->blocks * c->block + c->block > c->second,
 	    "the volume does not fill its slice");
@@ -1957,6 +1977,104 @@ scale_case(const char *label, const fsimg_write_options_t *options,
 	fixture_close(&fixture);
 }
 
+/* One empty volume's stored allocation-group count. The volume is a sparse
+ * file; only its first header is read, after checking that N and the inode
+ * capacity are the geometry the case names.
+ */
+typedef struct groups_case {
+	uint32_t	 block;
+	uint64_t	 blocks;
+	uint64_t	 volume;	/* 0: exactly D + N * B plus one header area */
+	uint32_t	 inodes;	/* 0: the native default ladder */
+	uint32_t	 groups;
+} groups_case_t;
+
+static void
+groups_case(const groups_case_t *gc)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	unsigned char header[512];
+	chk_t probe;
+	int fd;
+
+	fsimg_write_options_init(&options);
+	options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+	options.allocation_unit_bytes = gc->block;
+	options.volume_bytes = gc->volume != 0 ? gc->volume :
+	    D_ORIGIN + gc->blocks * gc->block + 4096;
+	options.inode_capacity = gc->inodes;
+	fixture_open(&fixture, &options);
+	CHECK(fsimg_writer_write_at(fixture.writer, fixture.parent, "groups.img",
+	    NULL) == FSIMG_OK);
+	fd = openat(fixture.parent, "groups.img", O_RDONLY);
+	CHECK(fd != -1);
+	CHECK(pread(fd, header, sizeof(header), 8192) == (ssize_t)sizeof(header));
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture.parent, "groups.img", 0) == 0);
+	fixture_close(&fixture);
+	bzero(&probe, sizeof(probe));
+	CHECK(get32(&probe, header + 60) == gc->blocks);
+	CHECK(gc->inodes == 0 || get32(&probe, header + 52) == gc->inodes);
+	if (get32(&probe, header + 68) != gc->groups) {
+		printf("B=%" PRIu32 " N=%" PRIu64 " inodes=%" PRIu32 ": %" PRIu32
+		    " groups, expected %" PRIu32 "\n", gc->block, gc->blocks,
+		    get32(&probe, header + 52), get32(&probe, header + 68),
+		    gc->groups);
+		CHECK(0);
+	}
+}
+
+/* The stored allocation-group count, as literal values. The first cases
+ * are geometries whose count native mkqnx6fs wrote in the research record:
+ * the 64 MiB disks at every block size, the -n 16384 volume, the 9830368-
+ * block volume with 1048576 inodes and the head unit's 2154991104-byte
+ * partition. The rest sit on each side of every ladder threshold (the
+ * inode capacity sets m at B = 4096 with a large bitmap, and small volumes
+ * make the bitmap the smaller tree) and every cap threshold (m = 32 through
+ * a 1024-inode table). The two cases at the last cap threshold, the only
+ * ones where the ladder's top rung (m = 31/32) is not capped, need 512 GiB
+ * sparse volumes and run only with --scale.
+ */
+static void
+test_groups(bool scale)
+{
+	static const groups_case_t cases[] = {
+		{ 512, 131040, 67108864, 0, 4 },
+		{ 1024, 65520, 67108864, 0, 4 },
+		{ 2048, 32760, 67108864, 0, 1 },
+		{ 4096, 16380, 67108864, 0, 1 },
+		{ 1024, 16384, 0, 0, 1 },
+		{ 512, 9830368, 0, 1048576, 16 },
+		{ 1024, 2104464, UINT64_C(2154991104), 0, 8 },
+		/* ladder over the inode table at cap 16: m = 3/4, 7/8, 15/16 */
+		{ 4096, 0x800000, 0, 96, 1 },
+		{ 4096, 0x800000, 0, 128, 4 },
+		{ 4096, 0x800000, 0, 224, 4 },
+		{ 4096, 0x800000, 0, 256, 8 },
+		{ 4096, 0x800000, 0, 480, 8 },
+		{ 4096, 0x800000, 0, 512, 16 },
+		/* ladder over the bitmap: 3 and 4 leaves at B = 512 */
+		{ 512, 12288, 0, 0, 1 },
+		{ 512, 16384, 0, 0, 4 },
+		/* caps: N on each side of 0x100000 and 0x800000 */
+		{ 4096, 0xfffff, 0, 1024, 4 },
+		{ 4096, 0x100000, 0, 1024, 8 },
+		{ 4096, 0x7fffff, 0, 1024, 8 },
+	};
+	static const groups_case_t large[] = {
+		{ 4096, 0x7ffffff, 0, 1024, 16 },
+		{ 4096, 0x8000000, 0, 992, 16 },
+		{ 4096, 0x8000000, 0, 1024, 32 },
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+		groups_case(&cases[i]);
+	if (scale)
+		for (size_t i = 0; i < sizeof(large) / sizeof(large[0]); i++)
+			groups_case(&large[i]);
+}
+
 /* Grow N, the inode capacity, one directory's width, a file's depth and a
  * file past 4 GiB separately. Zero content stays sparse in the published
  * image.
@@ -1989,8 +2107,8 @@ test_scale(void)
 /* Compare an empty volume formatted natively (mkqnx6fs with long-name
  * checksums) with fsimg's empty volume of the same size, block size, byte
  * order, UUID, reserve and format time. Every byte must match except the
- * header CRC and group count, since fsimg always writes one group, and the
- * sync time, which the native formatter may set after the format time.
+ * header CRC and the sync time, which the native formatter may set after
+ * the format time.
  */
 static int
 compare_native(const char *path)
@@ -2046,16 +2164,15 @@ compare_native(const char *path)
 		offset = i >= second ? i - second : i - 8192;
 		if (i < D_ORIGIN || i >= second) {
 			if ((offset >= 4 && offset < 8) ||
-			    (offset >= 20 && offset < 24) ||
-			    (offset >= 68 && offset < 72))
+			    (offset >= 20 && offset < 24))
 				continue;
 		}
 		if (differences++ < 10)
 			printf("%s: byte %" PRIu64 " is %02x, native %02x\n",
 			    path, i, sink.bytes[i], native[i]);
 	}
-	printf("%s: %" PRIu64 " differing bytes outside the CRC, sync time "
-	    "and group count\n", path, differences);
+	printf("%s: %" PRIu64 " differing bytes outside the CRC and sync "
+	    "time\n", path, differences);
 	free(sink.bytes);
 	free(native);
 	return (differences == 0 ? 0 : 1);
@@ -2068,6 +2185,7 @@ main(int argc, char **argv)
 		return (compare_native(argv[2]));
 	if (argc == 2 && strcmp(argv[1], "--scale") == 0) {
 		test_scale();
+		test_groups(true);
 		return (0);
 	}
 	if ((argc == 6 || argc == 7) && strcmp(argv[1], "--create") == 0) {
@@ -2088,6 +2206,7 @@ main(int argc, char **argv)
 	test_boot();
 	test_metadata();
 	test_sizing();
+	test_groups(false);
 	test_faults();
 	test_injected();
 	return (0);

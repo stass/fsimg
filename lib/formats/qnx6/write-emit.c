@@ -18,8 +18,6 @@
  * geometry or a profile constant.
  */
 
-#define QNX6_HEADER_GROUPS	1u
-
 /* A post-order walk over one tree's indirect blocks, which produces them in
  * position order, so consecutive blocks batch in the emission buffer.
  */
@@ -479,7 +477,7 @@ emit_headers(qnx6_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	header.free_inodes = g->inode_count - plan->used_inodes;
 	header.block_count = g->blocks;
 	header.free_blocks = g->blocks - plan->allocated;
-	header.groups = QNX6_HEADER_GROUPS;
+	header.groups = g->groups;
 	tree_of(&plan->bitmap, 0, (uint64_t)g->blocks / 8 + (g->blocks % 8 != 0),
 	    &header.bitmap);
 	tree_of(&plan->inodes, (uint32_t)(plan->bitmap.indirect +

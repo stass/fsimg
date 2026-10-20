@@ -319,8 +319,9 @@ the last inode-table block (8192 at B = 1024 on this disk, 153600 at
 leaf-block counts, `ladder(m)` is 1, 4, 8, 16 or 32 for `m` at most 3, 7,
 15, 31 or above, and `cap` is 4, 8, 16 or 32 by the same `N` thresholds
 unless `-T` selects a usage table. This reproduces every measured volume:
-4, 4, 1 and 1 groups at B = 512, 1024, 2048 and 4096 on the 64 MiB disk, 16
-at `N = 9830368` and 8 on each H1 QNX6 volume. `main` requires twice the
+4, 4, 1 and 1 groups at B = 512, 1024, 2048 and 4096 on the 64 MiB disk, 1
+for `-n 16384` at B = 1024, 16 at `N = 9830368` and 8 on each H1 QNX6
+volume. `main` requires twice the
 bitmap tree, twice the inode tree and two directory blocks to fit in `N`.
 
 `nindirect` sizes each system tree from its leaf count `L` with
@@ -477,37 +478,42 @@ computed value of zero, or an empty name, is stored as `0xffffffff`.
 
 ### fsimg writer output
 
-The writer's layout departs from a native volume in three ways: both headers
-carry serial 1 over a populated tree, every object occupies one contiguous
-run after the system run in catalog order, and the group count is always
-one. QNX 6.5.0 (X1) accepts all three. Five 67108864-byte volumes holding
-the `test-qnx6-write --create` fixture tree (inline, 27-, 28- and 510-byte
-names, a UTF-8 name, a symbolic link, a FIFO, a depth-1 file of 300000
-bytes, a 70001-byte zero file, empty files and directories, a synthesized
-`.boot` sorted among the root's names and a file named `.boot` in a
-subdirectory) were written onto `/dev/hd0` by the guest
+The writer's layout departs from a native volume in two ways: both headers
+carry serial 1 over a populated tree, and every object occupies one
+contiguous run after the system run in catalog order. QNX 6.5.0 (X1) accepts
+both. The header's allocation-group count is the native formatter's default
+for the geometry. Eight 67108864-byte volumes, one at every block size in
+each byte order, holding the `test-qnx6-write --create` fixture tree
+(inline, 27-, 28- and 510-byte names, a UTF-8 name, a symbolic link, a FIFO,
+a depth-1 file of 300000 bytes, a 70001-byte zero file, empty files and
+directories, a synthesized `.boot` sorted among the root's names and a file
+named `.boot` in a subdirectory) were written onto `/dev/hd0` by the guest
 itself and run through `tools/qnx/guest/qualify.sh`: `chkqnx6fs -vv`,
 mount, read every file, create files and a directory with a long name, grow
 the 300000-byte file by 3 MB, append, hard-link, symlink, rename an entry to
 a long name, delete files and a directory, sync, unmount, `chkqnx6fs`,
 remount, read again, unmount and `chkqnx6fs` again. Every check passed and
-the script exited 0:
+the script exited 0; both byte orders give the same counts:
 
-| Capture | B | Order | UUID | Blocks used before, after | Inodes |
-| --- | --- | --- | --- | --- | --- |
-| `writer-b512-le-qualify` | 512 | little | zero | 9076, 14982 of 131040 | 18, 20 of 16380 |
-| `writer-b1024-le-qualify` | 1024 | little | zero | 2456, 5397 of 65520 | 18, 20 of 8192 |
-| `writer-b1024-be-qualify` | 1024 | big | zero | 2456, 5397 of 65520 | 18, 20 of 8192 |
-| `writer-b2048-be-uuid-qualify` | 2048 | big | `11111111-2222-3333-4444-555555555555` | 719, 2188 of 32760 | 18, 20 of 4096 |
-| `writer-b4096-be-qualify` | 4096 | big | zero | 242, 976 of 16380 | 18, 20 of 2048 |
+| Captures | B | Groups | Blocks used before, after | Inodes |
+| --- | --- | --- | --- | --- |
+| `writer-b512-{le,be}-groups-qualify` | 512 | 4 | 9076, 14982 of 131040 | 18, 20 of 16380 |
+| `writer-b1024-{le,be}-groups-qualify` | 1024 | 4 | 2456, 5397 of 65520 | 18, 20 of 8192 |
+| `writer-b2048-{le,be}-groups-qualify` | 2048 | 1 | 719, 2188 of 32760 | 18, 20 of 4096 |
+| `writer-b4096-{le,be}-groups-qualify` | 4096 | 1 | 242, 976 of 16380 | 18, 20 of 2048 |
 
-The natively modified images then verify with fsimg, payload included. The
-captures are in `~/qnx65-vm/writer-captures/` with their records, which name
-the SHA-256 of the image loaded. An empty fsimg volume given a native empty
-capture's size, block size, byte order, UUID, reserve and format time as its
-epoch matches that capture's headers and allocated blocks byte for byte,
-apart from the CRC, sync time and group count, at every block size in both
-byte orders (`test-qnx6-write --native`).
+Five further volumes with a group count of one at every block size
+(`writer-b512-le-qualify`, `writer-b1024-le-qualify`,
+`writer-b1024-be-qualify`, `writer-b4096-be-qualify`, and
+`writer-b2048-be-uuid-qualify` with the UUID
+`11111111-2222-3333-4444-555555555555`) pass the same cycle, so QNX does not
+depend on the count. The natively modified images verify with fsimg,
+payload included. The captures are in `~/qnx65-vm/writer-captures/` with
+their records, which name the SHA-256 of the image loaded. An empty fsimg
+volume given a native empty capture's size, block size, byte order, UUID,
+reserve and format time as its epoch matches that capture's headers and
+allocated blocks byte for byte, apart from the CRC and sync time, at every
+block size in both byte orders (`test-qnx6-write --native`).
 
 ## Measured PCM 3.1 HDD
 

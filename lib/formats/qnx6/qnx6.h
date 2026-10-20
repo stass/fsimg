@@ -121,6 +121,7 @@ typedef struct qnx6_geometry {
 	uint32_t	 blocks;
 	uint32_t	 inode_count;
 	uint32_t	 reservation;
+	uint32_t	 groups;		/* allocation-group count */
 	bool		 big_endian;
 } qnx6_geometry_t;
 

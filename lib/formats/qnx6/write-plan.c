@@ -57,7 +57,9 @@ static fsimg_status_t plan_entry(qnx6_plan_t *, const fsimg_catalog_entry_t *,
     qnx6_totals_t *, fsimg_error_t *);
 static fsimg_status_t plan_entries(qnx6_plan_t *, qnx6_totals_t *,
     fsimg_error_t *);
+static unsigned size_class(uint64_t);
 static uint64_t ladder_capacity(uint64_t);
+static uint32_t native_groups(const qnx6_system_t *, uint64_t);
 static bool system_for(const qnx6_plan_t *, uint64_t, uint64_t, qnx6_system_t *);
 static bool fits(const qnx6_plan_t *, uint64_t, uint64_t, uint64_t,
     qnx6_system_t *);
@@ -502,19 +504,63 @@ plan_entries(qnx6_plan_t *plan, qnx6_totals_t *totals, fsimg_error_t *error)
 	return (qnx6_row_set(plan, 0, &root, error));
 }
 
+/* The native formatter's size class of N blocks, 0 through 3 for N up to
+ * 0xfffff, up to 0x7fffff, below 0x8000000 and above. Its default inode
+ * count and its group cap both step at these bounds.
+ */
+static unsigned
+size_class(uint64_t blocks)
+{
+	if (blocks <= 0xfffff)
+		return (0);
+	if (blocks <= 0x7fffff)
+		return (1);
+	if (blocks < 0x8000000)
+		return (2);
+	return (3);
+}
+
 /* The native formatter's default inode count for N blocks: one per 8, 32,
- * 64 or 128 blocks by the size of N.
+ * 64 or 128 blocks by the size class of N.
  */
 static uint64_t
 ladder_capacity(uint64_t blocks)
 {
-	if (blocks <= 0xfffff)
-		return (blocks / 8);
-	if (blocks <= 0x7fffff)
-		return (blocks / 32);
-	if (blocks < 0x8000000)
-		return (blocks / 64);
-	return (blocks / 128);
+	static const unsigned blocks_per_inode[] = { 8, 32, 64, 128 };
+
+	return (blocks / blocks_per_inode[size_class(blocks)]);
+}
+
+/* The allocation-group count the native formatter writes for N blocks and
+ * the given system trees: a ladder over m, the smaller of the bitmap and
+ * inode-table leaf counts (1, 4, 8, 16 or 32 for m up to 3, 7, 15, 31 and
+ * above), capped at 4, 8, 16 or 32 by the size class of N. No on-disk
+ * structure depends on it; the running filesystem uses it to spread new
+ * directories and indirect blocks, so storing the native value gives the
+ * native allocator the group count it would use on a natively formatted
+ * volume of this geometry.
+ */
+static uint32_t
+native_groups(const qnx6_system_t *system, uint64_t blocks)
+{
+	static const uint32_t caps[] = { 4, 8, 16, 32 };
+	uint64_t m;
+	uint32_t ladder, cap;
+
+	m = system->bitmap.leaves < system->inodes.leaves ?
+	    system->bitmap.leaves : system->inodes.leaves;
+	if (m <= 3)
+		ladder = 1;
+	else if (m <= 7)
+		ladder = 4;
+	else if (m <= 15)
+		ladder = 8;
+	else if (m <= 31)
+		ladder = 16;
+	else
+		ladder = 32;
+	cap = caps[size_class(blocks)];
+	return (ladder < cap ? ladder : cap);
 }
 
 /* The system run for N blocks: the inode capacity (the requested one, or
@@ -648,6 +694,7 @@ choose_geometry(qnx6_plan_t *plan, const qnx6_totals_t *totals,
 	g->blocks = (uint32_t)blocks;
 	g->inode_count = (uint32_t)system.capacity;
 	g->reservation = (uint32_t)system.reservation;
+	g->groups = native_groups(&system, blocks);
 	plan->bitmap = system.bitmap;
 	plan->inodes = system.inodes;
 	plan->used_inodes = (uint32_t)needed;

@@ -100,8 +100,8 @@ volume. Tree pointers come from shape arithmetic shared with the reader;
 rows in one paged array are the only per-entry state. `-O endian=`, `uuid=`,
 `inodes=` and `reserve=` select the byte order, UUID, inode capacity and
 reserve; without `-R` a volume receives a random version 4 UUID. Empty
-volumes match native `mkqnx6fs` output byte for byte apart from the CRC,
-sync time and group count, and QNX 6.5.0 checks, mounts, modifies, syncs and
+volumes match native `mkqnx6fs` output byte for byte apart from the CRC
+and sync time, and QNX 6.5.0 checks, mounts, modifies, syncs and
 remounts fsimg volumes cleanly at every block size and in both byte orders. A
 provider's symbolic-link target is read once when its source opens, and a
 NUL byte in it fails creation.

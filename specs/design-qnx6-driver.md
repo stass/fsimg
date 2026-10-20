@@ -452,11 +452,14 @@ The common emission object has already zeroed the sink. The driver emits:
    indirect blocks. The twin region stays zero.
 5. Both 512-byte headers, byte-identical with serial 1, format and sync times
    equal to the epoch in reproducible mode and otherwise the host's UTC clock
-   at planning, flags `0x100`, a group count of one, the free counts, the
+   at planning, flags `0x100`, the native formatter's default group count
+   for the planned bitmap and inode-table leaf counts and `N` (the
+   [format design](design-qnx6.md) gives the rule), the free counts, the
    three descriptors and the empty fourth tree, and the CRC, at 8192 and
-   `S2`. The native formatter's group count grows with the volume; the
-   count describes no on-disk structure of the classic profile, and the
-   native tools accept one. The boot area and the
+   `S2`. The count describes no on-disk structure of the classic profile;
+   the running filesystem uses it to spread later allocations, so storing
+   the native value gives the native allocator the group count it would use
+   on a natively formatted volume of the same geometry. The boot area and the
    rest of both header areas stay zero, as do bytes from `E` to `V`.
 
 Every emitted byte comes from a row, the geometry or a profile constant.
@@ -506,7 +509,7 @@ the reader and verifier. It compares bytes across source order, metadata
 cache size, scratch placement and time zone, and scans every unused byte and
 pointer slot. Its `--native` mode compares an empty volume with a native
 `mkqnx6fs` capture of the same geometry: the headers and allocated blocks
-match byte for byte apart from the CRC, sync time and group count. Fault tests inject allocation,
+match byte for byte apart from the CRC and sync time. Fault tests inject allocation,
 scratch, short-read, short-write, EOF, source-change and cancellation failures
 at every stage and check cleanup. A scale test grows `N`, the inode capacity,
 one directory's width, a file's depth and a file beyond 4 GiB separately,
