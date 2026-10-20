@@ -451,12 +451,13 @@ for guest kernels and filesystems. The metadata scale fixture reports a
 329,088-byte allocation peak, 75,795,888-byte logical scratch peak, and 134,683
 I/O calls on APFS. These are fixture measurements rather than general bounds.
 
-The instrumented fuzz smoke run uses Homebrew LLVM 23.1.2. FAT completes
-1000 mutations with FAT12/16/32 seeds (`cov: 2160`, `ft: 5838`), exFAT
-completes 1000 mutations (`cov: 2105`, `ft: 5366`), and protocol completes
-1000 mutations (`cov: 348`, `ft: 699`). None reports an unintended
-sanitizer or accounting finding. These counters describe finite runs and vary
-with the generated mutation sequence.
+The instrumented fuzz smoke run uses Homebrew LLVM 23.1.2 on macOS. FAT
+completes 1000 mutations from its FAT12/16/32 seeds and the 80 specification
+harness seeds (`cov: 2406`, `ft: 6844`), exFAT completes 1000 mutations
+(`cov: 2291`, `ft: 6359`), QNX6 completes 1000 mutations (`cov: 2524`,
+`ft: 7590`), and protocol completes 1000 mutations (`cov: 409`, `ft: 770`).
+None reports an unintended sanitizer or accounting finding. These counters
+describe finite runs and vary with the generated mutation sequence.
 
 The 100,000-file wide catalog reports a 3,157,912-byte allocation peak,
 58,500,368 scratch bytes, seven descriptors, and 86,607 I/O calls. The grouped
@@ -634,8 +635,9 @@ Sanitizer execution evidence:
 
 | Host | Command | Result |
 | --- | --- | --- |
-| macOS | `make check-asan` | 27 pass, 4 tool/platform skips |
-| macOS | `make check-ubsan` | 27 pass, 4 tool/platform skips |
+| macOS | `make check-asan` | 29 pass, 4 tool/platform skips; the specification suite passes all 140 FAT cases |
+| macOS | `make check-ubsan` | 29 pass, 4 tool/platform skips; the specification suite passes all 140 FAT cases |
+| macOS | `make check-fuzz` | 29 pass, 4 tool/platform skips; FAT, exFAT, QNX6 and protocol fuzzers complete 1000 mutations each |
 | macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
 | Linux | `make check-asan` | 26 pass |
 | Linux | `make check-lsan` | 26 pass |
