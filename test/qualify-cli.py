@@ -21,7 +21,8 @@ def main():
     scratch = root / "scratch"
     scratch.mkdir(mode=0o700)
     image = root / "image.img"
-    destination = root / "extracted"
+    # Extraction creates a directory named after the image beside it.
+    destination = root / "image"
 
     # Grouping bounds host directory width independently of total entries.
     for first in range(0, files, 1000):
@@ -35,16 +36,16 @@ def main():
     sandbox = "auto" if sys.platform == "darwin" else "required"
     common = ["-S", sandbox, "-T", str(scratch), "-l", "seconds=600"]
     commands = [
-        ["create", "-j", "-R", "-t", "exfat", "-o", str(image), *common, str(source)],
-        ["info", "-j", "-i", str(image), *common],
-        ["ls", "-j", "-r", "-i", str(image), *common],
-        ["cat", "-i", str(image), *common, "/MARKER.BIN"],
-        ["verify", "-j", "-d", "-i", str(image), *common],
-        ["extract", "-j", "-i", str(image), "-C", str(destination), *common],
+        ["c", "--json", "-R", "-F", "exfat", "-f", str(image), *common, "-C", str(source), "."],
+        ["i", "--json", "-f", str(image), *common],
+        ["t", "--json", "-f", str(image), *common],
+        ["x", "-O", "-f", str(image), *common, "/MARKER.BIN"],
+        ["W", "--json", "-d", "-f", str(image), *common],
+        ["x", "--json", "-f", str(image), *common, "-C", str(root)],
     ]
     try:
-        for command in commands:
-            diagnostic_path = root / f"{command[0]}.log"
+        for index, command in enumerate(commands):
+            diagnostic_path = root / f"{index}-{command[0]}.log"
             with diagnostic_path.open("wb") as diagnostics:
                 result = subprocess.run(
                     [str(program), "16777216", *command],

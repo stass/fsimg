@@ -36,6 +36,14 @@ typedef enum fsimg_confinement {
 #define FSIMG_JOB_VERBOSE 0x04u
 /* Extraction omits entries of kinds the safe profile does not create. */
 #define FSIMG_JOB_SKIP_UNSUPPORTED 0x08u
+
+/* The job record's capability bits: which prepared descriptors the worker
+ * receives. Scratch is optional for every kind; the others follow the kind.
+ */
+#define FSIMG_JOB_CAP_INPUT 0x01u
+#define FSIMG_JOB_CAP_OUTPUT 0x02u
+#define FSIMG_JOB_CAP_SCRATCH 0x04u
+#define FSIMG_JOB_CAP_ROOTS 0x08u
 /* Coordinator, at most one parser, and at most one output relay. */
 #define FSIMG_CLI_PROCESS_BOUND 3u
 /* Fixed sanitizer options reserve this status for runtime failures. */
@@ -74,13 +82,20 @@ typedef struct fsimg_worker_request {
 	uint64_t	 deadline_milliseconds;
 	/* Borrowed coordinator-only ledger; NULL uses a single-run local ledger. */
 	fsimg_output_budget_t *output_budget;
+	/* The selected member of a read job; create jobs use the roots. */
 	const char	*selection;
+	/* Create jobs: root_count opened roots, a directory or a regular file
+	 * each, and the image path each populates, in command-line order.
+	 */
+	const int	*root_fds;
+	const char *const *root_paths;
+	uint32_t	 root_count;
 	unsigned	 flags;
 	uint32_t	 codepage;
 	int		 input_fd;
+	/* The staging directory of CREATE, or the destination of EXTRACT. */
 	int		 output_fd;
 	int		 scratch_fd;
-	int		 source_fd;
 	char		 format[16];
 	/* Decoder-owned backing only; write.label is the authoritative value.
 	 * It holds the longest label any format stores, the volume
@@ -140,20 +155,31 @@ int fsimg_worker_main(void);
 int fsimg_output_main(void);
 fsimg_status_t fsimg_output_run(const char *, fsimg_output_producer_fn_t, void *,
     int, uint64_t, const volatile sig_atomic_t *, fsimg_output_budget_t *, fsimg_error_t *);
+/* A create or plan job reads source roots and carries one image path per
+ * root; every other kind reads an image and carries its one selection.
+ * These are the job's paths in wire order.
+ */
+bool fsimg_job_has_roots(fsimg_job_kind_t);
+uint32_t fsimg_job_path_count(const fsimg_worker_request_t *);
+const char *fsimg_job_path(const fsimg_worker_request_t *, uint32_t);
+fsimg_status_t fsimg_job_paths_length(const fsimg_worker_request_t *,
+    uint64_t *, fsimg_error_t *);
 fsimg_status_t fsimg_job_encode(const fsimg_worker_request_t *, unsigned char *,
     fsimg_error_t *);
 fsimg_status_t fsimg_job_decode(const unsigned char *, uint32_t,
     fsimg_worker_request_t *, uint64_t *, unsigned *, fsimg_error_t *);
 
-/* Child FD numbers are a closed startup layout, not descriptor-opening requests. */
+/* Child FD numbers are a closed startup layout, not descriptor-opening
+ * requests. A create job's roots follow the fixed descriptors in order:
+ * root i is FSIMG_CHILD_ROOTS + i, and the job record states their count.
+ */
 #define FSIMG_CHILD_JOB 3
 #define FSIMG_CHILD_CONTROL 4
 #define FSIMG_CHILD_DATA 5
 #define FSIMG_CHILD_INPUT 6
 #define FSIMG_CHILD_OUTPUT 7
 #define FSIMG_CHILD_SCRATCH 8
-#define FSIMG_CHILD_SOURCE 9
-#define FSIMG_CHILD_CANCEL 10
-#define FSIMG_CHILD_LAST FSIMG_CHILD_CANCEL
+#define FSIMG_CHILD_CANCEL 9
+#define FSIMG_CHILD_ROOTS 10
 
 #endif

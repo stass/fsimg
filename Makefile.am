@@ -80,7 +80,8 @@ fsimg_SOURCES = cmd/fsimg/main.c cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
 	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/worker-parent.c \
 	cmd/fsimg/worker-child.c cmd/fsimg/worker-output.c \
-	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/spawn.c
+	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/private.c \
+	compat/private.h compat/spawn.c
 fsimg_LDADD = libfsimg-core.la
 noinst_PROGRAMS = example-create-tree example-provider example-read-slice example-extract
 noinst_PROGRAMS += fsimg-rss fsimg-rss-guard
@@ -114,7 +115,8 @@ test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
-	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h
+	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h \
+	compat/private.c compat/private.h
 test_cli_LDADD = libfsimg-core.la
 test_qualify_SOURCES = test/qualify.c test/test.h
 test_qualify_LDADD = libfsimg.la

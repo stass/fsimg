@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include <getopt.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,10 +15,181 @@
 #include "host.h"
 #include "internal.h"
 
+/*
+ * Command parsing turns argv into a validated fsimg_cli_options_t in five
+ * steps, each finishing before the next starts:
+ *
+ * 1. A dashless first argument (tar's "xvf") is rewritten into one "-X" word
+ *    per letter, argument letters taking the following words in order.
+ * 2. getopt_long records every option word. Options precede operands on
+ *    every host: the option string begins with "+", which stops parsing at
+ *    the first operand instead of permuting argv.
+ * 3. The mode words select exactly one mode, or c and W together.
+ * 4. Every recorded option is checked against the modes that accept it and
+ *    against repetition, then interpreted; operands follow.
+ * 5. Recognized features that are not implemented fail last, so a command
+ *    line is reported as invalid syntax (exit 2) before it is reported as
+ *    unsupported (exit 1).
+ *
+ * Nothing here opens a file: preparation opens images, sources and
+ * directories only after the whole command line is known to be valid.
+ */
+
+/* Mode bits. An option's table entry names the modes that accept it. */
+#define MODE_CREATE		0x01u
+#define MODE_CREATE_VERIFY	0x02u
+#define MODE_EXTRACT		0x04u
+#define MODE_LIST		0x08u
+#define MODE_VERIFY		0x10u
+#define MODE_INFO		0x20u
+#define MODE_FORMATS		0x40u
+#define MODES_CREATE		(MODE_CREATE | MODE_CREATE_VERIFY)
+#define MODES_READ		(MODE_EXTRACT | MODE_LIST | MODE_VERIFY | MODE_INFO)
+#define MODES_IMAGE		(MODES_CREATE | MODES_READ)
+#define MODES_ALL		(MODES_IMAGE | MODE_FORMATS)
+
+/* getopt_long values of the long-only options, above every short letter. */
+enum {
+	OPT_FORMATS = 256,
+	OPT_FREE_SPACE,
+	OPT_INFO,
+	OPT_JSON,
+	OPT_LENGTH,
+	OPT_NO_RECURSION,
+	OPT_OFFSET,
+	OPT_PARTITION
+};
+
+typedef struct cli_option {
+	int		 key;		/* getopt_long return value */
+	const char	*spelling;	/* As the user writes it, for diagnostics */
+	unsigned	 modes;		/* Modes accepting the option */
+	unsigned	 repeat_modes;	/* Modes in which it may repeat */
+} cli_option_t;
+
+/* Every option fsimg recognizes. Mode words (c, x, t, W, i, --info,
+ * --formats) and -h and -V are listed so they are counted like any option;
+ * mode selection, not this table, decides where they are legal.
+ */
+static const cli_option_t option_table[] = {
+	{ 'a', "-a", MODES_CREATE, 0 },
+	{ 'C', "-C", MODES_CREATE | MODE_EXTRACT, MODES_CREATE },
+	{ 'c', "-c", MODES_ALL, 0 },
+	{ 'd', "-d", MODE_VERIFY | MODE_CREATE_VERIFY, 0 },
+	{ 'E', "-E", MODE_EXTRACT, 0 },
+	{ 'e', "-e", MODES_CREATE, 0 },
+	{ 'F', "-F", MODES_IMAGE, 0 },
+	{ 'f', "-f", MODES_IMAGE, 0 },
+	{ 'h', "-h", MODES_ALL, 0 },
+	{ 'i', "-i", MODES_ALL, 0 },
+	{ 'k', "-k", MODE_EXTRACT, 0 },
+	{ 'L', "-L", MODES_CREATE, 0 },
+	{ 'l', "-l", MODES_IMAGE, MODES_IMAGE },
+	{ 'M', "-M", MODES_CREATE, 0 },
+	{ 'm', "-m", MODES_IMAGE, 0 },
+	{ 'n', "-n", MODE_CREATE, 0 },
+	{ 'O', "-O", MODE_EXTRACT, 0 },
+	{ 'o', "-o", MODES_IMAGE, MODES_IMAGE },
+	{ 'p', "-p", MODES_CREATE, 0 },
+	{ 'R', "-R", MODES_CREATE, 0 },
+	{ 'S', "-S", MODES_IMAGE, 0 },
+	{ 's', "-s", MODES_CREATE, 0 },
+	{ 'T', "-T", MODES_IMAGE, 0 },
+	{ 't', "-t", MODES_ALL, 0 },
+	{ 'V', "-V", MODES_ALL, 0 },
+	{ 'v', "-v", MODES_ALL, MODES_ALL },
+	{ 'W', "-W", MODES_ALL, 0 },
+	{ 'x', "-x", MODES_ALL, 0 },
+	{ 'z', "-z", MODES_IMAGE, 0 },
+	{ OPT_FORMATS, "--formats", MODES_ALL, 0 },
+	{ OPT_FREE_SPACE, "--free-space", MODES_CREATE, 0 },
+	{ OPT_INFO, "--info", MODES_ALL, 0 },
+	{ OPT_JSON, "--json", MODES_ALL, 0 },
+	{ OPT_LENGTH, "--length", MODES_READ, 0 },
+	{ OPT_NO_RECURSION, "--no-recursion", MODE_LIST, 0 },
+	{ OPT_OFFSET, "--offset", MODES_READ, 0 },
+	{ OPT_PARTITION, "--partition", MODES_READ, 0 }
+};
+#define OPTION_COUNT (sizeof(option_table) / sizeof(option_table[0]))
+
+static const struct option long_options[] = {
+	{ "formats", no_argument, NULL, OPT_FORMATS },
+	{ "free-space", required_argument, NULL, OPT_FREE_SPACE },
+	{ "info", no_argument, NULL, OPT_INFO },
+	{ "json", no_argument, NULL, OPT_JSON },
+	{ "length", required_argument, NULL, OPT_LENGTH },
+	{ "no-recursion", no_argument, NULL, OPT_NO_RECURSION },
+	{ "offset", required_argument, NULL, OPT_OFFSET },
+	{ "partition", required_argument, NULL, OPT_PARTITION },
+	{ NULL, 0, NULL, 0 }
+};
+
+/* The short letters, and those of them taking an argument. A dashless
+ * bundle may contain exactly these letters.
+ */
+static const char short_options[] = "+:aC:cdEe:F:f:hikL:l:Mm:nOo:pRS:s:T:tVvWxz";
+
+/* The mode words, each naming one mode bit. */
+static const struct {
+	int		 key;
+	unsigned	 mode;
+} mode_words[] = {
+	{ 'c', MODE_CREATE }, { 'i', MODE_INFO }, { 't', MODE_LIST },
+	{ 'W', MODE_VERIFY }, { 'x', MODE_EXTRACT }, { OPT_INFO, MODE_INFO },
+	{ OPT_FORMATS, MODE_FORMATS }
+};
+
+/* Layer names the stack grammar knows besides filesystems, with the file
+ * suffix that names each container and compression. These are the layer
+ * registry's names: a scheme or container in a stack is recognized and
+ * refused as unsupported, and the suffixes shorten extraction stems.
+ */
+typedef enum cli_slot {
+	CLI_SLOT_FILESYSTEM,
+	CLI_SLOT_SCHEME,
+	CLI_SLOT_CONTAINER,
+	CLI_SLOT_COMPRESSION	/* Not a stack slot; named only by settings */
+} cli_slot_t;
+
+typedef struct cli_layer {
+	const char	*name;
+	cli_slot_t	 slot;
+	const char	*suffix;
+} cli_layer_t;
+
+static const cli_layer_t layer_names[] = {
+	{ "dmg", CLI_SLOT_CONTAINER, ".dmg" },
+	{ "gpt", CLI_SLOT_SCHEME, NULL },
+	{ "gzip", CLI_SLOT_COMPRESSION, ".gz" },
+	{ "mbr", CLI_SLOT_SCHEME, NULL },
+	{ "simg", CLI_SLOT_CONTAINER, ".simg" },
+	{ "vhd", CLI_SLOT_CONTAINER, ".vhd" }
+};
+
+/* Filesystem names reserved by the stack grammar without a driver. */
+static const char *const reserved_filesystems[] = { "apfs", "hfs" };
+
+/* The only image suffixes the command keeps itself. */
+static const char *const generic_suffixes[] = { ".bin", ".dd", ".img", ".raw" };
+
+typedef enum cli_slot_state {
+	CLI_SLOT_UNFILLED,
+	CLI_SLOT_EMPTY,
+	CLI_SLOT_NAMED
+} cli_slot_state_t;
+
+/* A parsed -F stack: each slot unfilled, explicitly empty or named. */
+typedef struct cli_stack {
+	cli_slot_state_t state[3];
+	const char	*layer[3];	/* Borrowed name of a NAMED slot */
+	size_t		 length[3];
+	bool		 reserved;	/* The filesystem name has no driver */
+} cli_stack_t;
+
 typedef enum cli_limit_key {
-	CLI_LIMIT_SCRATCH, CLI_LIMIT_ENTRIES, CLI_LIMIT_DEPTH, CLI_LIMIT_PATH,
-	CLI_LIMIT_FDS, CLI_LIMIT_OUTPUT, CLI_LIMIT_WORK, CLI_LIMIT_SECONDS,
-	CLI_LIMIT_COUNT
+	CLI_LIMIT_SCRATCH, CLI_LIMIT_SPOOL, CLI_LIMIT_ENTRIES, CLI_LIMIT_DEPTH,
+	CLI_LIMIT_PATH, CLI_LIMIT_FDS, CLI_LIMIT_OUTPUT, CLI_LIMIT_WORK,
+	CLI_LIMIT_SECONDS, CLI_LIMIT_COUNT
 } cli_limit_key_t;
 
 typedef enum cli_setting_key {
@@ -26,24 +198,335 @@ typedef enum cli_setting_key {
 	CLI_SETTING_RESERVE, CLI_SETTING_COUNT
 } cli_setting_key_t;
 
-static fsimg_status_t syntax(fsimg_error_t *, const char *);
-static fsimg_status_t parse_limit(fsimg_cli_options_t *, const char *, unsigned *,
-    fsimg_error_t *);
-static fsimg_status_t parse_uuid(const char *, unsigned char *,
-    fsimg_error_t *);
-static fsimg_status_t parse_setting(fsimg_cli_options_t *, const char *,
-    unsigned *, fsimg_error_t *);
-static fsimg_status_t validate_options(fsimg_cli_options_t *, const bool *,
-    int, char **, fsimg_error_t *);
-static fsimg_status_t find_format(const char *, fsimg_format_info_t *,
-    fsimg_error_t *);
-static fsimg_status_t validate_creation(fsimg_cli_options_t *, const bool *,
-    fsimg_error_t *);
+/* Parsing state. Option arguments are borrowed from the command words;
+ * the repeatable -l and -o arguments are kept in order until the mode,
+ * which decides their meaning, is known.
+ */
+typedef struct cli_parse {
+	fsimg_cli_options_t *options;
+	fsimg_error_t	*error;
+	char		**argv;
+	int		 argc;
+	int		 first_operand;
+	unsigned	 counts[OPTION_COUNT];
+	const char	*values[OPTION_COUNT];
+	const char	**limits;
+	unsigned	 limit_count;
+	const char	**settings;
+	unsigned	 setting_count;
+	unsigned	 mode;		/* One MODE_* bit after selection */
+	cli_stack_t	 stack;
+	const char	*unsupported;	/* First recognized, unimplemented feature */
+	bool		 options_ended;	/* "--" ended option parsing */
+} cli_parse_t;
+
+static fsimg_status_t syntax(cli_parse_t *, const char *);
+static fsimg_status_t syntax_naming(cli_parse_t *, const char *, const char *);
+static size_t option_index(int);
+static unsigned option_count(const cli_parse_t *, int);
+static const char *option_value(const cli_parse_t *, int);
+static const char *mode_name(unsigned);
+static bool is_option_letter(char);
+static bool takes_argument(char);
+static fsimg_status_t expand_bundle(cli_parse_t *);
+static fsimg_status_t read_option_words(cli_parse_t *);
+static fsimg_status_t select_mode(cli_parse_t *);
+static fsimg_status_t check_option_modes(cli_parse_t *);
+static fsimg_status_t parse_limit(cli_parse_t *, const char *, unsigned *);
+static fsimg_status_t parse_uuid(cli_parse_t *, const char *, unsigned char *);
+static bool layer_selected(const cli_parse_t *, const cli_layer_t *);
+static fsimg_status_t parse_setting(cli_parse_t *, const char *, unsigned *);
+static fsimg_status_t classify_stack_name(cli_parse_t *, const char *,
+    cli_slot_t *);
+static fsimg_status_t parse_stack(cli_parse_t *, const char *);
+static fsimg_status_t parse_byte_option(cli_parse_t *, int, bool, uint64_t *);
+static fsimg_status_t interpret_common(cli_parse_t *);
+static fsimg_status_t interpret_create(cli_parse_t *);
+static fsimg_status_t interpret_read(cli_parse_t *);
+static fsimg_status_t read_create_operands(cli_parse_t *);
+static fsimg_status_t read_members(cli_parse_t *);
+static fsimg_status_t normalize_path(cli_parse_t *, const char *, bool, char **);
+static fsimg_status_t find_format(cli_parse_t *, const char *,
+    fsimg_format_info_t *);
+static fsimg_status_t validate_creation(cli_parse_t *);
+static fsimg_status_t check_image_name(cli_parse_t *);
+static void note_unsupported(cli_parse_t *, const char *);
+static bool strip_suffix(char *, const char *);
+static bool strip_layer_suffix(char *, cli_slot_t);
 
 static fsimg_status_t
-syntax(fsimg_error_t *error, const char *message)
+syntax(cli_parse_t *parse, const char *message)
 {
-	return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT, message));
+	parse->options->syntax_error = true;
+	return (fsimg_error_set(parse->error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
+	    message));
+}
+
+/* A syntax error quoting the offending word, which the display escapes. */
+static fsimg_status_t
+syntax_naming(cli_parse_t *parse, const char *message, const char *word)
+{
+	fsimg_status_t status;
+	int count;
+
+	status = syntax(parse, message);
+	if (parse->error != NULL) {
+		count = snprintf(parse->error->path, sizeof(parse->error->path),
+		    "%s", word);
+		parse->error->path_truncated = count < 0 ||
+		    (size_t)count >= sizeof(parse->error->path);
+	}
+	return (status);
+}
+
+static size_t
+option_index(int key)
+{
+	size_t i;
+
+	for (i = 0; i < OPTION_COUNT; i++) {
+		if (option_table[i].key == key)
+			break;
+	}
+	return (i);
+}
+
+static unsigned
+option_count(const cli_parse_t *parse, int key)
+{
+	return (parse->counts[option_index(key)]);
+}
+
+static const char *
+option_value(const cli_parse_t *parse, int key)
+{
+	return (parse->values[option_index(key)]);
+}
+
+static const char *
+mode_name(unsigned mode)
+{
+	switch (mode) {
+	case MODE_CREATE: return ("c");
+	case MODE_CREATE_VERIFY: return ("cW");
+	case MODE_EXTRACT: return ("x");
+	case MODE_LIST: return ("t");
+	case MODE_VERIFY: return ("W");
+	case MODE_INFO: return ("i");
+	case MODE_FORMATS: return ("formats");
+	default: return ("");
+	}
+}
+
+static bool
+is_option_letter(char letter)
+{
+	return (letter != '\0' && letter != ':' && letter != '+' &&
+	    strchr(short_options, letter) != NULL);
+}
+
+static bool
+takes_argument(char letter)
+{
+	const char *found;
+
+	found = strchr(short_options, letter);
+	return (found != NULL && found[1] == ':');
+}
+
+/*
+ * A first argument without a leading dash is a tar-style bundle such as
+ * "xvf". Every character must be an option letter and one of them must be
+ * a mode or h; the bundle becomes one "-X" word per letter, and each letter
+ * taking an argument consumes the next unconsumed word after the bundle, in
+ * letter order: "cfF boot.img fat32" is "-c -f boot.img -F fat32". The
+ * rewritten words borrow the original arguments; the "-X" words are built
+ * in the same allocation, after the word pointers.
+ */
+static fsimg_status_t
+expand_bundle(cli_parse_t *parse)
+{
+	const char *bundle;
+	char **words, *letter_word;
+	size_t letter_count, word_count, used;
+	int next;
+	bool has_mode;
+	char name[2];
+
+	bundle = parse->argv[1];
+	if (bundle[0] == '-')
+		return (FSIMG_OK);
+	parse->options->overview = true;
+	has_mode = false;
+	for (const char *p = bundle; *p != '\0'; p++) {
+		if (!is_option_letter(*p)) {
+			name[0] = *p;
+			name[1] = '\0';
+			return (syntax_naming(parse,
+			    "unknown mode or option letter in the first argument", name));
+		}
+		if (strchr("chiWtx", *p) != NULL)
+			has_mode = true;
+	}
+	if (!has_mode)
+		return (syntax_naming(parse,
+		    "the first argument names no mode", bundle));
+	letter_count = strlen(bundle);
+	word_count = (size_t)parse->argc + letter_count + 1;
+	words = calloc(word_count * sizeof(*words) + letter_count * 3, 1);
+	if (words == NULL)
+		return (fsimg_error_set(parse->error, FSIMG_ENOMEM, 0,
+		    FSIMG_OP_CONTEXT, "command word allocation failed"));
+	parse->options->words = words;
+	used = 0;
+	words[used++] = parse->argv[0];
+	letter_word = (char *)(words + word_count);
+	next = 2;
+	for (const char *p = bundle; *p != '\0'; p++) {
+		letter_word[0] = '-';
+		letter_word[1] = *p;
+		words[used++] = letter_word;
+		letter_word += 3;
+		if (!takes_argument(*p))
+			continue;
+		if (next >= parse->argc) {
+			name[0] = *p;
+			name[1] = '\0';
+			return (syntax_naming(parse,
+			    "bundled option letter lacks its argument", name));
+		}
+		words[used++] = parse->argv[next++];
+	}
+	while (next < parse->argc)
+		words[used++] = parse->argv[next++];
+	words[used] = NULL;
+	parse->argv = words;
+	parse->argc = (int)used;
+	parse->options->overview = false;
+	return (FSIMG_OK);
+}
+
+/*
+ * Record every option word. Values of singleton options are kept for
+ * interpretation after mode selection; -l and -o keep every value in
+ * order. getopt_long stops at the first operand; it consumes a "--" word,
+ * which is detected because only that advances optind while returning -1.
+ */
+static fsimg_status_t
+read_option_words(cli_parse_t *parse)
+{
+	size_t index;
+	int key, before;
+	char name[3];
+
+	parse->limits = calloc((size_t)parse->argc, sizeof(*parse->limits));
+	parse->settings = calloc((size_t)parse->argc, sizeof(*parse->settings));
+	if (parse->limits == NULL || parse->settings == NULL)
+		return (fsimg_error_set(parse->error, FSIMG_ENOMEM, 0,
+		    FSIMG_OP_CONTEXT, "command word allocation failed"));
+	fsimg_host_getopt_reset();
+	for (;;) {
+		before = optind;
+		key = getopt_long(parse->argc, parse->argv, short_options,
+		    long_options, NULL);
+		if (key == -1)
+			break;
+		if (key == '?' || key == ':') {
+			/* A short option names its letter; a long one its word. */
+			if (optopt > 0 && optopt < 256) {
+				name[0] = '-';
+				name[1] = (char)optopt;
+				name[2] = '\0';
+				return (syntax_naming(parse, key == '?' ?
+				    "unknown option" : "option requires an argument", name));
+			}
+			return (syntax_naming(parse, key == '?' ?
+			    "unknown option" : "option requires an argument",
+			    parse->argv[optind - 1]));
+		}
+		index = option_index(key);
+		if (index == OPTION_COUNT)
+			return (syntax(parse, "unrecognized option value"));
+		parse->counts[index]++;
+		parse->values[index] = optarg;
+		if (key == 'l')
+			parse->limits[parse->limit_count++] = optarg;
+		else if (key == 'o')
+			parse->settings[parse->setting_count++] = optarg;
+	}
+	parse->options_ended = optind == before + 1 &&
+	    strcmp(parse->argv[before], "--") == 0;
+	parse->first_operand = optind;
+	return (FSIMG_OK);
+}
+
+/* Exactly one mode, except that c and W combine. -h and -V are commands of
+ * their own: help for the named mode, and the version alone.
+ */
+static fsimg_status_t
+select_mode(cli_parse_t *parse)
+{
+	fsimg_cli_options_t *options = parse->options;
+	unsigned named, count;
+
+	named = 0;
+	for (size_t i = 0; i < sizeof(mode_words) / sizeof(mode_words[0]); i++) {
+		count = option_count(parse, mode_words[i].key);
+		if (count > 1 || (count == 1 && (named & mode_words[i].mode) != 0))
+			return (syntax(parse, "a mode is given more than once"));
+		if (count == 1)
+			named |= mode_words[i].mode;
+	}
+	if (option_count(parse, 'V') != 0) {
+		if (parse->argc != 2)
+			return (syntax(parse, "-V takes no other option or operand"));
+		options->command = FSIMG_CLI_VERSION;
+		return (FSIMG_OK);
+	}
+	if (named == (MODE_CREATE | MODE_VERIFY))
+		named = MODE_CREATE_VERIFY;
+	if ((named & (named - 1)) != 0)
+		return (syntax(parse, "two modes are given; only c and W combine"));
+	parse->mode = named;
+	options->mode = mode_name(named);
+	if (option_count(parse, 'h') != 0) {
+		if (parse->first_operand != parse->argc)
+			return (syntax_naming(parse, "unexpected operand",
+			    parse->argv[parse->first_operand]));
+		options->command = FSIMG_CLI_HELP;
+		return (FSIMG_OK);
+	}
+	if (named == 0) {
+		options->overview = true;
+		return (syntax(parse, "a mode is required"));
+	}
+	if (named == MODE_FORMATS)
+		options->command = FSIMG_CLI_FORMATS;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+check_option_modes(cli_parse_t *parse)
+{
+	const cli_option_t *option;
+	char message[96];
+
+	for (size_t i = 0; i < OPTION_COUNT; i++) {
+		option = &option_table[i];
+		if (parse->counts[i] == 0)
+			continue;
+		if ((option->modes & parse->mode) == 0) {
+			snprintf(message, sizeof(message),
+			    "option does not apply to mode %s", mode_name(parse->mode));
+			return (syntax_naming(parse, message, option->spelling));
+		}
+		if (parse->counts[i] > 1 && (option->repeat_modes & parse->mode) == 0)
+			return (syntax_naming(parse, "option is given more than once",
+			    option->spelling));
+	}
+	if (option_count(parse, 'v') > 2)
+		return (syntax(parse, "verbosity has two levels, -v and -vv"));
+	return (FSIMG_OK);
 }
 
 /* Decimal accumulation rejects overflow before multiplication. A suffix is
@@ -58,22 +541,26 @@ fsimg_cli_number(const char *text, bool bytes, uint64_t *out, fsimg_error_t *err
 	unsigned power, digit;
 
 	if (text == NULL || text[0] < '0' || text[0] > '9')
-		return (syntax(error, "expected an unsigned decimal quantity"));
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
+		    "expected an unsigned decimal quantity"));
 	value = 0;
 	for (p = text; *p >= '0' && *p <= '9'; p++) {
 		digit = (unsigned)(*p - '0');
 		if (value > (UINT64_MAX - digit) / 10)
-			return (syntax(error, "decimal quantity overflows uint64"));
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "decimal quantity overflows uint64"));
 		value = value * 10 + digit;
 	}
 	if (*p != '\0') {
 		unit = strchr(units, *p);
 		if (!bytes || unit == NULL || p[1] != '\0')
-			return (syntax(error, "invalid quantity suffix or trailing characters"));
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "invalid quantity suffix or trailing characters"));
 		power = (unsigned)(unit - units) + 1;
 		for (unsigned i = 0; i < power; i++) {
 			if (value > UINT64_MAX / 1024)
-				return (syntax(error, "byte quantity overflows uint64"));
+				return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+				    FSIMG_OP_CONTEXT, "byte quantity overflows uint64"));
 			value *= 1024;
 		}
 	}
@@ -89,14 +576,16 @@ fsimg_cli_epoch(const char *text, int64_t *out, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	if (text == NULL)
-		return (syntax(error, "expected a signed decimal Unix epoch"));
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
+		    "expected a signed decimal Unix epoch"));
 	negative = text[0] == '-';
 	status = fsimg_cli_number(text + (negative ? 1 : 0), false, &magnitude, error);
 	if (status != FSIMG_OK)
 		return (status);
 	ceiling = negative ? UINT64_C(1) << 63 : INT64_MAX;
 	if (magnitude > ceiling)
-		return (syntax(error, "Unix epoch overflows int64"));
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
+		    "Unix epoch overflows int64"));
 	if (negative)
 		*out = magnitude == (UINT64_C(1) << 63) ? INT64_MIN : -(int64_t)magnitude;
 	else
@@ -105,50 +594,54 @@ fsimg_cli_epoch(const char *text, int64_t *out, fsimg_error_t *error)
 }
 
 static fsimg_status_t
-parse_limit(fsimg_cli_options_t *options, const char *text, unsigned *seen,
-    fsimg_error_t *error)
+parse_limit(cli_parse_t *parse, const char *text, unsigned *seen)
 {
 	static const char *const keys[CLI_LIMIT_COUNT] = {
-		[CLI_LIMIT_SCRATCH] = "scratch", [CLI_LIMIT_ENTRIES] = "entries",
-		[CLI_LIMIT_DEPTH] = "depth", [CLI_LIMIT_PATH] = "path",
-		[CLI_LIMIT_FDS] = "fds", [CLI_LIMIT_OUTPUT] = "output",
-		[CLI_LIMIT_WORK] = "work", [CLI_LIMIT_SECONDS] = "seconds"
+		[CLI_LIMIT_SCRATCH] = "scratch", [CLI_LIMIT_SPOOL] = "spool",
+		[CLI_LIMIT_ENTRIES] = "entries", [CLI_LIMIT_DEPTH] = "depth",
+		[CLI_LIMIT_PATH] = "path", [CLI_LIMIT_FDS] = "fds",
+		[CLI_LIMIT_OUTPUT] = "output", [CLI_LIMIT_WORK] = "work",
+		[CLI_LIMIT_SECONDS] = "seconds"
 	};
-	fsimg_worker_request_t *request = &options->request;
+	fsimg_worker_request_t *request = &parse->options->request;
 	const char *value;
 	uint64_t number;
 	size_t length;
 	cli_limit_key_t key;
-	fsimg_status_t status;
+	bool bytes;
 
 	value = strchr(text, '=');
 	if (value == NULL)
-		return (syntax(error, "resource limits require key=value"));
+		return (syntax_naming(parse, "resource limits require key=value", text));
 	length = (size_t)(value - text);
 	for (key = 0; key < CLI_LIMIT_COUNT; key++) {
 		if (strlen(keys[key]) == length && strncmp(text, keys[key], length) == 0)
 			break;
 	}
 	if (key == CLI_LIMIT_COUNT)
-		return (syntax(error, "unknown resource-limit key"));
+		return (syntax_naming(parse, "unknown resource-limit key", text));
 	if ((*seen & (1u << key)) != 0)
-		return (syntax(error, "resource-limit key specified more than once"));
+		return (syntax_naming(parse, "resource-limit key is given more than once",
+		    text));
 	*seen |= 1u << key;
-	status = fsimg_cli_number(value + 1, key == CLI_LIMIT_SCRATCH ||
-	    key == CLI_LIMIT_PATH || key == CLI_LIMIT_OUTPUT,
-	    &number, error);
-	if (status != FSIMG_OK)
-		return (status);
+	bytes = key == CLI_LIMIT_SCRATCH || key == CLI_LIMIT_SPOOL ||
+	    key == CLI_LIMIT_PATH || key == CLI_LIMIT_OUTPUT;
+	if (fsimg_cli_number(value + 1, bytes, &number, parse->error) != FSIMG_OK)
+		return (syntax_naming(parse, bytes ?
+		    "resource limit requires an unsigned byte quantity" :
+		    "resource limit requires an unsigned decimal count", text));
 	if ((key == CLI_LIMIT_DEPTH || key == CLI_LIMIT_PATH || key == CLI_LIMIT_FDS) &&
 	    number > UINT32_MAX)
-		return (syntax(error, "resource limit exceeds its uint32 range"));
-	/* The initialized request already owns the defaults. A zero singleton
+		return (syntax_naming(parse, "resource limit exceeds its uint32 range",
+		    text));
+	/* The initialized request already owns the defaults. A zero value
 	 * leaves that value intact rather than maintaining another default list.
 	 */
 	if (number == 0)
 		return (FSIMG_OK);
 	switch (key) {
 	case CLI_LIMIT_SCRATCH: request->limits.scratch_bytes = number; break;
+	case CLI_LIMIT_SPOOL: parse->options->spool_bytes = number; break;
 	case CLI_LIMIT_ENTRIES: request->limits.max_entries = number; break;
 	case CLI_LIMIT_DEPTH: request->limits.max_depth = (uint32_t)number; break;
 	case CLI_LIMIT_PATH: request->limits.max_path_bytes = (uint32_t)number; break;
@@ -156,7 +649,7 @@ parse_limit(fsimg_cli_options_t *options, const char *text, unsigned *seen,
 	case CLI_LIMIT_OUTPUT: request->limits.max_output_bytes = number; break;
 	case CLI_LIMIT_WORK: request->limits.max_work = number; break;
 	case CLI_LIMIT_SECONDS: request->seconds = number; break;
-	case CLI_LIMIT_COUNT: return (syntax(error, "invalid resource-limit key"));
+	case CLI_LIMIT_COUNT: return (syntax(parse, "invalid resource-limit key"));
 	}
 	return (FSIMG_OK);
 }
@@ -165,7 +658,7 @@ parse_limit(fsimg_cli_options_t *options, const char *text, unsigned *seen,
  * stored in textual byte order.
  */
 static fsimg_status_t
-parse_uuid(const char *text, unsigned char *uuid, fsimg_error_t *error)
+parse_uuid(cli_parse_t *parse, const char *text, unsigned char *uuid)
 {
 	static const char digits[] = "0123456789abcdef";
 	const char *digit;
@@ -189,17 +682,37 @@ parse_uuid(const char *text, unsigned char *uuid, fsimg_error_t *error)
 		nibble++;
 	}
 	if (nibble != 32 || i != 36 || text[i] != '\0')
-		return (syntax(error, "uuid setting must be RFC 4122 text"));
+		return (syntax(parse, "uuid setting must be RFC 4122 text"));
 	return (FSIMG_OK);
 }
 
-/* Typed format settings: read-side oem, and creation-side byte quantities
- * (sector, cluster), the byte order, the volume UUID, the inode capacity
- * and the reserve percentage. The writer validates them for its format.
+/*
+ * Typed settings. An unqualified key targets the filesystem: read-side
+ * oem, and the creation-side byte quantities (sector, cluster), the byte
+ * order, the volume UUID, the inode capacity and the reserve percentage,
+ * which the writer validates for its format. A qualified key "layer:key"
+ * targets one layer, which the stack must name; a stack naming a layer is
+ * itself refused as unsupported, so such a key is accepted here unread.
  */
+/* Whether the command selects a layer: a scheme or container named in its
+ * -F slot, whose token is not terminated within the -F word, or gzip when
+ * -z or -a asks for compression.
+ */
+static bool
+layer_selected(const cli_parse_t *parse, const cli_layer_t *layer)
+{
+	const cli_stack_t *stack = &parse->stack;
+
+	if (layer->slot == CLI_SLOT_COMPRESSION)
+		return (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0);
+	return (stack->state[layer->slot] == CLI_SLOT_NAMED &&
+	    stack->length[layer->slot] == strlen(layer->name) &&
+	    strncmp(stack->layer[layer->slot], layer->name,
+	    stack->length[layer->slot]) == 0);
+}
+
 static fsimg_status_t
-parse_setting(fsimg_cli_options_t *options, const char *text, unsigned *seen,
-    fsimg_error_t *error)
+parse_setting(cli_parse_t *parse, const char *text, unsigned *seen)
 {
 	static const char *const keys[CLI_SETTING_COUNT] = {
 		[CLI_SETTING_SECTOR] = "sector", [CLI_SETTING_CLUSTER] = "cluster",
@@ -207,34 +720,51 @@ parse_setting(fsimg_cli_options_t *options, const char *text, unsigned *seen,
 		[CLI_SETTING_UUID] = "uuid", [CLI_SETTING_INODES] = "inodes",
 		[CLI_SETTING_RESERVE] = "reserve"
 	};
-	fsimg_write_options_t *write = &options->request.write;
-	const char *value;
+	fsimg_write_options_t *write = &parse->options->request.write;
+	const char *value, *qualifier;
 	uint64_t number;
 	size_t length;
 	cli_setting_key_t key;
-	fsimg_status_t status;
+	bool creating;
 
+	creating = (parse->mode & MODES_CREATE) != 0;
 	value = strchr(text, '=');
 	if (value == NULL)
-		return (syntax(error, "format settings require key=value"));
+		return (syntax_naming(parse, "settings require key=value", text));
 	length = (size_t)(value - text);
 	value++;
+	qualifier = memchr(text, ':', length);
+	if (qualifier != NULL) {
+		for (size_t i = 0; i < sizeof(layer_names) / sizeof(layer_names[0]); i++) {
+			if (strlen(layer_names[i].name) != (size_t)(qualifier - text) ||
+			    strncmp(text, layer_names[i].name, (size_t)(qualifier - text)) != 0)
+				continue;
+			if (!layer_selected(parse, &layer_names[i]))
+				return (syntax_naming(parse,
+				    "setting names a layer the stack does not contain", text));
+			return (FSIMG_OK);
+		}
+		return (syntax_naming(parse, "unknown setting layer", text));
+	}
 	for (key = 0; key < CLI_SETTING_COUNT; key++) {
 		if (strlen(keys[key]) == length && strncmp(text, keys[key], length) == 0)
 			break;
 	}
 	if (key == CLI_SETTING_COUNT)
-		return (syntax(error, "unknown format-setting key"));
+		return (syntax_naming(parse, "unknown setting key", text));
 	if ((*seen & (1u << key)) != 0)
-		return (syntax(error, "format-setting key specified more than once"));
+		return (syntax_naming(parse, "setting key is given more than once", text));
 	*seen |= 1u << key;
 	if (key == CLI_SETTING_OEM) {
-		if (options->request.kind >= FSIMG_JOB_CREATE || strcmp(value, "cp437") != 0)
-			return (syntax(error, "read-side oem setting supports only cp437"));
+		if (creating)
+			return (syntax_naming(parse, "the oem setting applies only to reading",
+			    text));
+		if (strcmp(value, "cp437") != 0)
+			return (syntax(parse, "read-side oem setting supports only cp437"));
 		return (FSIMG_OK);
 	}
-	if (options->request.kind < FSIMG_JOB_CREATE)
-		return (syntax(error, "geometry settings apply only to creation"));
+	if (!creating)
+		return (syntax_naming(parse, "setting applies only to creation", text));
 	switch (key) {
 	case CLI_SETTING_ENDIAN:
 		if (strcmp(value, "little") == 0)
@@ -242,34 +772,33 @@ parse_setting(fsimg_cli_options_t *options, const char *text, unsigned *seen,
 		else if (strcmp(value, "big") == 0)
 			write->byte_order = FSIMG_BYTE_ORDER_BIG;
 		else
-			return (syntax(error, "endian setting must be little or big"));
+			return (syntax(parse, "endian setting must be little or big"));
 		return (FSIMG_OK);
 	case CLI_SETTING_UUID:
-		options->uuid_given = true;
-		return (parse_uuid(value, write->volume_uuid, error));
+		parse->options->uuid_given = true;
+		return (parse_uuid(parse, value, write->volume_uuid));
 	case CLI_SETTING_INODES:
 	case CLI_SETTING_RESERVE:
-		status = fsimg_cli_number(value, false, &number, error);
-		if (status != FSIMG_OK)
-			return (status);
+		if (fsimg_cli_number(value, false, &number, parse->error) != FSIMG_OK)
+			return (syntax_naming(parse,
+			    "setting requires an unsigned decimal count", text));
 		if (key == CLI_SETTING_RESERVE) {
 			if (number > 100)
-				return (syntax(error, "reserve setting is a percentage up to 100"));
+				return (syntax(parse, "reserve setting is a percentage up to 100"));
 			write->reserve_percent = (uint32_t)number;
 		} else {
 			if (number == 0 || number > UINT32_MAX)
-				return (syntax(error, "inodes setting must be a positive uint32 count"));
+				return (syntax(parse, "inodes setting must be a positive uint32 count"));
 			write->inode_capacity = (uint32_t)number;
 		}
 		return (FSIMG_OK);
 	default:
 		break;
 	}
-	status = fsimg_cli_number(value, true, &number, error);
-	if (status != FSIMG_OK)
-		return (status);
+	if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK)
+		return (syntax_naming(parse, "setting requires a byte quantity", text));
 	if (number == 0 || number > UINT32_MAX)
-		return (syntax(error, "geometry setting must be a positive uint32 byte quantity"));
+		return (syntax(parse, "geometry setting must be a positive uint32 byte quantity"));
 	if (key == CLI_SETTING_SECTOR)
 		write->sector_bytes = (uint32_t)number;
 	else
@@ -277,17 +806,482 @@ parse_setting(fsimg_cli_options_t *options, const char *text, unsigned *seen,
 	return (FSIMG_OK);
 }
 
+/* The slot a stack name fills: a registered filesystem, a reserved
+ * filesystem name without a driver, or a scheme or container. A
+ * compression is not a slot, so its name is unknown here.
+ */
 static fsimg_status_t
-find_format(const char *name, fsimg_format_info_t *info, fsimg_error_t *error)
+classify_stack_name(cli_parse_t *parse, const char *name, cli_slot_t *slot)
+{
+	fsimg_format_info_t info;
+	size_t cursor;
+	fsimg_status_t status;
+
+	*slot = CLI_SLOT_FILESYSTEM;
+	cursor = 0;
+	while ((status = fsimg_format_next(&cursor, &info, parse->error)) == FSIMG_OK) {
+		if (strcmp(info.name, name) == 0)
+			return (FSIMG_OK);
+	}
+	if (status != FSIMG_DONE)
+		return (status);
+	for (size_t i = 0; i < sizeof(reserved_filesystems) / sizeof(reserved_filesystems[0]); i++) {
+		if (strcmp(name, reserved_filesystems[i]) == 0) {
+			parse->stack.reserved = true;
+			return (FSIMG_OK);
+		}
+	}
+	for (size_t i = 0; i < sizeof(layer_names) / sizeof(layer_names[0]); i++) {
+		if (strcmp(name, layer_names[i].name) == 0 &&
+		    layer_names[i].slot != CLI_SLOT_COMPRESSION) {
+			*slot = layer_names[i].slot;
+			return (FSIMG_OK);
+		}
+	}
+	return (syntax_naming(parse, "unknown stack name", name));
+}
+
+/*
+ * The stack grammar: tokens separated by "/", each a layer name or "-".
+ * A name fills the slot of its kind; "-" fills the next slot and marks it
+ * empty. Every token must fill a slot later than every slot filled before
+ * it, so a repeated kind or a misordered name is rejected as it is read.
+ */
+static fsimg_status_t
+parse_stack(cli_parse_t *parse, const char *text)
+{
+	cli_stack_t *stack = &parse->stack;
+	const char *token, *end;
+	char name[16];
+	size_t length;
+	unsigned next;
+	cli_slot_t slot;
+	fsimg_status_t status;
+
+	if (text[0] == '\0')
+		return (syntax(parse, "the stack is empty"));
+	next = CLI_SLOT_FILESYSTEM;
+	for (token = text;; token = end + 1) {
+		end = strchr(token, '/');
+		length = end == NULL ? strlen(token) : (size_t)(end - token);
+		if (length == 0)
+			return (syntax_naming(parse, "the stack has an empty token", text));
+		if (length >= sizeof(name))
+			return (syntax_naming(parse, "unknown stack name", text));
+		bcopy(token, name, length);
+		name[length] = '\0';
+		if (strcmp(name, "-") == 0) {
+			if (next == CLI_SLOT_FILESYSTEM)
+				return (syntax_naming(parse,
+				    "- cannot fill the filesystem slot", text));
+			if (next > CLI_SLOT_CONTAINER)
+				return (syntax_naming(parse, "the stack has too many tokens", text));
+			stack->state[next++] = CLI_SLOT_EMPTY;
+		} else {
+			status = classify_stack_name(parse, name, &slot);
+			if (status != FSIMG_OK)
+				return (status);
+			if (slot < next)
+				return (syntax_naming(parse,
+				    "stack name repeats or misorders a slot", name));
+			stack->state[slot] = CLI_SLOT_NAMED;
+			stack->layer[slot] = token;
+			stack->length[slot] = length;
+			next = slot + 1;
+		}
+		if (end == NULL)
+			break;
+	}
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+parse_byte_option(cli_parse_t *parse, int key, bool positive, uint64_t *out)
+{
+	const char *value;
+
+	value = option_value(parse, key);
+	if (fsimg_cli_number(value, true, out, parse->error) != FSIMG_OK)
+		return (syntax_naming(parse, "option requires an unsigned byte quantity",
+		    option_table[option_index(key)].spelling));
+	if (positive && *out == 0)
+		return (syntax_naming(parse, "option requires a positive byte quantity",
+		    option_table[option_index(key)].spelling));
+	return (FSIMG_OK);
+}
+
+/* Remember the first recognized feature this build does not implement. It
+ * is reported only after every syntax check passes.
+ */
+static void
+note_unsupported(cli_parse_t *parse, const char *message)
+{
+	if (parse->unsupported == NULL)
+		parse->unsupported = message;
+}
+
+/* Options every image mode shares: image, sandbox, scratch, budgets, stack
+ * and settings. The stack precedes settings, which may name its layers.
+ */
+static fsimg_status_t
+interpret_common(cli_parse_t *parse)
+{
+	fsimg_cli_options_t *options = parse->options;
+	fsimg_worker_request_t *request = &options->request;
+	const char *value;
+	uint64_t number;
+	unsigned limit_keys, setting_keys;
+	fsimg_status_t status;
+
+	options->image = option_value(parse, 'f');
+	options->json = option_count(parse, OPT_JSON) != 0;
+	options->verbosity = option_count(parse, 'v');
+	value = option_value(parse, 'S');
+	if (value != NULL) {
+		if (strcmp(value, "auto") == 0)
+			request->sandbox = FSIMG_SANDBOX_AUTO;
+		else if (strcmp(value, "required") == 0)
+			request->sandbox = FSIMG_SANDBOX_REQUIRED;
+		else if (strcmp(value, "off") == 0)
+			request->sandbox = FSIMG_SANDBOX_OFF;
+		else
+			return (syntax(parse, "sandbox policy must be auto, required or off"));
+	}
+	if (option_value(parse, 'T') != NULL)
+		options->scratch = option_value(parse, 'T');
+	if (option_count(parse, 'm') != 0) {
+		status = parse_byte_option(parse, 'm', false, &number);
+		if (status != FSIMG_OK)
+			return (status);
+		if (number != 0)
+			request->limits.memory_bytes = number;
+		if (request->limits.memory_bytes < UINT64_C(16) * 1024 * 1024)
+			return (syntax(parse, "memory budget must be at least 16M"));
+	}
+	limit_keys = 0;
+	for (unsigned i = 0; i < parse->limit_count; i++) {
+		status = parse_limit(parse, parse->limits[i], &limit_keys);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (option_value(parse, 'F') != NULL) {
+		status = parse_stack(parse, option_value(parse, 'F'));
+		if (status != FSIMG_OK)
+			return (status);
+		if (parse->stack.state[CLI_SLOT_FILESYSTEM] == CLI_SLOT_NAMED &&
+		    !parse->stack.reserved) {
+			bcopy(parse->stack.layer[CLI_SLOT_FILESYSTEM], request->format,
+			    parse->stack.length[CLI_SLOT_FILESYSTEM]);
+			request->format[parse->stack.length[CLI_SLOT_FILESYSTEM]] = '\0';
+		}
+	}
+	setting_keys = 0;
+	for (unsigned i = 0; i < parse->setting_count; i++) {
+		status = parse_setting(parse, parse->settings[i], &setting_keys);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+
+	if (parse->stack.reserved)
+		note_unsupported(parse, "the named filesystem is reserved and not supported");
+	if (parse->stack.state[CLI_SLOT_SCHEME] == CLI_SLOT_NAMED)
+		note_unsupported(parse, "partition schemes are not supported");
+	if (parse->stack.state[CLI_SLOT_CONTAINER] == CLI_SLOT_NAMED)
+		note_unsupported(parse, "image containers are not supported");
+	if (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0)
+		note_unsupported(parse, "compressed images are not supported");
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+interpret_create(cli_parse_t *parse)
+{
+	fsimg_cli_options_t *options = parse->options;
+	fsimg_worker_request_t *request = &options->request;
+	uint64_t number;
+	fsimg_status_t status;
+
+	request->kind = option_count(parse, 'n') != 0 ? FSIMG_JOB_PLAN : FSIMG_JOB_CREATE;
+	options->verify_staged = parse->mode == MODE_CREATE_VERIFY;
+	if (option_count(parse, 'd') != 0)
+		request->flags |= FSIMG_JOB_PAYLOAD;
+	if (parse->stack.state[CLI_SLOT_FILESYSTEM] != CLI_SLOT_NAMED)
+		return (syntax(parse, "c requires -F with a filesystem"));
+	if (option_count(parse, 'e') != 0 && option_count(parse, 'R') == 0)
+		return (syntax(parse, "-e requires -R"));
+	if (option_count(parse, 'M') != 0 && option_count(parse, 's') != 0)
+		return (syntax(parse, "-M conflicts with -s"));
+	if (option_count(parse, 'R') != 0)
+		request->write.flags |= FSIMG_WRITE_REPRODUCIBLE;
+	if (option_count(parse, 'p') != 0)
+		request->write.flags |= FSIMG_WRITE_IMPORT_POSIX;
+	if (option_count(parse, 'L') != 0)
+		request->write.label = option_value(parse, 'L');
+	if (option_count(parse, 'e') != 0) {
+		status = fsimg_cli_epoch(option_value(parse, 'e'), &request->write.epoch,
+		    parse->error);
+		if (status != FSIMG_OK)
+			return (syntax_naming(parse, "-e requires a signed decimal Unix epoch",
+			    option_value(parse, 'e')));
+	}
+	if (option_count(parse, 's') != 0) {
+		status = parse_byte_option(parse, 's', true, &request->write.volume_bytes);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (option_count(parse, OPT_FREE_SPACE) != 0) {
+		status = parse_byte_option(parse, OPT_FREE_SPACE, false, &number);
+		if (status != FSIMG_OK)
+			return (status);
+		request->write.min_free_bytes = number;
+	}
+	if (options->image == NULL && request->kind == FSIMG_JOB_CREATE)
+		return (syntax(parse, "c requires -f image unless -n is given"));
+	if (options->image != NULL && strcmp(options->image, "-") == 0) {
+		if (options->verify_staged)
+			return (syntax(parse, "cW cannot verify an image written to standard output"));
+		if (options->json)
+			return (syntax(parse, "--json conflicts with an image on standard output"));
+		if (option_count(parse, 'a') != 0)
+			return (syntax(parse, "-a needs an image name, not standard output"));
+		if (strcmp(options->scratch, "-") == 0)
+			return (syntax(parse, "-T - conflicts with an image on standard output"));
+		if (request->kind == FSIMG_JOB_CREATE)
+			note_unsupported(parse, "writing an image to standard output is not supported");
+	}
+	if (option_count(parse, 'z') != 0 && option_count(parse, 'a') != 0 &&
+	    options->image != NULL) {
+		number = strlen(options->image);
+		if (number < 3 || strcasecmp(options->image + number - 3, ".gz") != 0)
+			return (syntax(parse, "-z with -a requires a .gz image name"));
+	}
+	if (option_count(parse, 'M') != 0)
+		note_unsupported(parse, "-M minimization is not supported");
+	status = read_create_operands(parse);
+	if (status != FSIMG_OK)
+		return (status);
+	return (validate_creation(parse));
+}
+
+static fsimg_status_t
+interpret_read(cli_parse_t *parse)
+{
+	fsimg_cli_options_t *options = parse->options;
+	fsimg_worker_request_t *request = &options->request;
+	fsimg_format_info_t info;
+	fsimg_status_t status;
+
+	switch (parse->mode) {
+	case MODE_EXTRACT:
+		request->kind = option_count(parse, 'O') != 0 ? FSIMG_JOB_CAT :
+		    FSIMG_JOB_EXTRACT;
+		if (option_count(parse, 'k') != 0)
+			request->flags |= FSIMG_JOB_SKIP_UNSUPPORTED;
+		options->extract_here = option_count(parse, 'E') != 0;
+		options->directory = option_value(parse, 'C');
+		break;
+	case MODE_LIST:
+		request->kind = FSIMG_JOB_LIST;
+		if (option_count(parse, OPT_NO_RECURSION) == 0)
+			request->flags |= FSIMG_JOB_RECURSIVE;
+		break;
+	case MODE_VERIFY:
+		request->kind = FSIMG_JOB_VERIFY;
+		if (option_count(parse, 'd') != 0)
+			request->flags |= FSIMG_JOB_PAYLOAD;
+		break;
+	default:
+		request->kind = FSIMG_JOB_INFO;
+		break;
+	}
+	if (request->kind == FSIMG_JOB_CAT && (options->json ||
+	    option_count(parse, 'C') != 0 || option_count(parse, 'E') != 0 ||
+	    option_count(parse, 'k') != 0))
+		return (syntax(parse, "-O rejects --json, -C, -E and -k"));
+	if (option_count(parse, OPT_PARTITION) != 0 &&
+	    (option_count(parse, OPT_OFFSET) != 0 || option_count(parse, OPT_LENGTH) != 0))
+		return (syntax(parse, "--partition conflicts with --offset and --length"));
+	if (option_count(parse, OPT_OFFSET) != 0) {
+		status = parse_byte_option(parse, OPT_OFFSET, false, &request->offset);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (option_count(parse, OPT_LENGTH) != 0) {
+		status = parse_byte_option(parse, OPT_LENGTH, true, &request->length);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (options->image == NULL)
+		return (syntax(parse, "-f image is required"));
+	status = read_members(parse);
+	if (status != FSIMG_OK)
+		return (status);
+	if (request->kind == FSIMG_JOB_EXTRACT && !options->extract_here &&
+	    !fsimg_cli_stem(options->image, options->stem, sizeof(options->stem)))
+		return (syntax_naming(parse,
+		    "cannot name the extraction directory after the image; use -E",
+		    options->image));
+	if (strcmp(options->image, "-") == 0) {
+		if (strcmp(options->scratch, "-") == 0)
+			return (syntax(parse, "-T - conflicts with an image on standard input"));
+		note_unsupported(parse, "reading an image from standard input is not supported");
+	}
+	if (option_count(parse, OPT_PARTITION) != 0)
+		note_unsupported(parse, "partition selection is not supported");
+	if (request->format[0] == '\0')
+		return (FSIMG_OK);
+	return (find_format(parse, request->format, &info));
+}
+
+/*
+ * Create operands are host paths. getopt has stopped at the first one, and
+ * from there "-C dir" or "-Cdir" changes the directory for the operands
+ * after it, until a "--" makes every later word an operand. Every -C must
+ * apply to at least one operand, so a misplaced one is not silently lost.
+ */
+static fsimg_status_t
+read_create_operands(cli_parse_t *parse)
+{
+	fsimg_cli_options_t *options = parse->options;
+	fsimg_cli_operand_t *operand;
+	const char *directory, *word;
+	fsimg_status_t status;
+	bool literal, pending;
+
+	if (option_count(parse, 'C') > 1)
+		return (syntax(parse, "-C applies to no operand"));
+	options->operands = calloc((size_t)(parse->argc - parse->first_operand) + 1,
+	    sizeof(*options->operands));
+	if (options->operands == NULL)
+		return (fsimg_error_set(parse->error, FSIMG_ENOMEM, 0,
+		    FSIMG_OP_CONTEXT, "operand allocation failed"));
+	directory = option_value(parse, 'C');
+	pending = directory != NULL;
+	literal = parse->options_ended;
+	for (int i = parse->first_operand; i < parse->argc; i++) {
+		word = parse->argv[i];
+		if (!literal && strcmp(word, "--") == 0) {
+			literal = true;
+			continue;
+		}
+		if (!literal && strncmp(word, "-C", 2) == 0) {
+			if (pending)
+				return (syntax(parse, "-C applies to no operand"));
+			if (word[2] != '\0')
+				directory = word + 2;
+			else if (i + 1 < parse->argc)
+				directory = parse->argv[++i];
+			else
+				return (syntax_naming(parse, "option requires an argument", "-C"));
+			if (directory[0] == '\0')
+				return (syntax(parse, "-C requires a nonempty directory name"));
+			pending = true;
+			continue;
+		}
+		operand = &options->operands[options->operand_count];
+		operand->directory = directory;
+		operand->host_path = word;
+		status = normalize_path(parse, word, false, &operand->image_path);
+		if (status != FSIMG_OK)
+			return (status);
+		options->operand_count++;
+		pending = false;
+	}
+	if (pending)
+		return (syntax(parse, "-C applies to no operand"));
+	if (options->operand_count == 0)
+		return (syntax(parse, "c requires at least one operand"));
+	return (FSIMG_OK);
+}
+
+/* The image path a create operand or a member names: its components
+ * without empty and "." ones, under the image root. ".." is refused rather
+ * than resolved, since stripping it would silently change which host object
+ * populates the name, or which entry a member selects.
+ */
+static fsimg_status_t
+normalize_path(cli_parse_t *parse, const char *word, bool member, char **out)
+{
+	const char *component, *end;
+	char *path;
+	size_t length, used;
+
+	*out = NULL;
+	length = strlen(word);
+	if (length == 0)
+		return (syntax(parse, member ? "a member is empty" :
+		    "an operand is empty"));
+	path = malloc(length + 2);
+	if (path == NULL)
+		return (fsimg_error_set(parse->error, FSIMG_ENOMEM, 0,
+		    FSIMG_OP_CONTEXT, "operand allocation failed"));
+	*out = path;
+	path[0] = '/';
+	used = 1;
+	for (component = word; *component != '\0'; component = end) {
+		end = strchr(component, '/');
+		if (end == NULL)
+			end = component + strlen(component);
+		length = (size_t)(end - component);
+		if (*end == '/')
+			end++;
+		if (length == 0 || (length == 1 && component[0] == '.'))
+			continue;
+		if (length == 2 && component[0] == '.' && component[1] == '.')
+			return (syntax_naming(parse, member ?
+			    "a member contains a .. component" :
+			    "an operand contains a .. component", word));
+		if (used > 1)
+			path[used++] = '/';
+		bcopy(component, path + used, length);
+		used += length;
+	}
+	path[used] = '\0';
+	return (FSIMG_OK);
+}
+
+/* Members are image paths, relative or absolute; both name the same entry.
+ * The worker validates encoding and resolves components with the format's
+ * rules.
+ */
+static fsimg_status_t
+read_members(cli_parse_t *parse)
+{
+	fsimg_cli_options_t *options = parse->options;
+	fsimg_status_t status;
+	int count;
+
+	count = parse->argc - parse->first_operand;
+	if (parse->mode == MODE_VERIFY || parse->mode == MODE_INFO) {
+		if (count != 0)
+			return (syntax_naming(parse, "unexpected operand",
+			    parse->argv[parse->first_operand]));
+		return (FSIMG_OK);
+	}
+	if (options->request.kind == FSIMG_JOB_CAT && count != 1)
+		return (syntax(parse, "-O requires exactly one member"));
+	if (count == 0)
+		return (FSIMG_OK);
+	if (count > 1)
+		note_unsupported(parse, "selecting several members is not supported");
+	status = normalize_path(parse, parse->argv[parse->first_operand], true,
+	    &options->member);
+	if (status == FSIMG_OK)
+		options->request.selection = options->member;
+	return (status);
+}
+
+static fsimg_status_t
+find_format(cli_parse_t *parse, const char *name, fsimg_format_info_t *info)
 {
 	size_t cursor;
 	fsimg_status_t status;
 
 	cursor = 0;
 	for (;;) {
-		status = fsimg_format_next(&cursor, info, error);
+		status = fsimg_format_next(&cursor, info, parse->error);
 		if (status == FSIMG_DONE)
-			return (syntax(error, "unknown format name"));
+			return (syntax_naming(parse, "unknown filesystem name", name));
 		if (status != FSIMG_OK)
 			return (status);
 		if (strcmp(info->name, name) == 0)
@@ -301,19 +1295,21 @@ find_format(const char *name, fsimg_format_info_t *info, fsimg_error_t *error)
  * explicit geometry must be legal for the writer profile.
  */
 static fsimg_status_t
-validate_creation(fsimg_cli_options_t *options, const bool *seen,
-    fsimg_error_t *error)
+validate_creation(cli_parse_t *parse)
 {
+	fsimg_cli_options_t *options = parse->options;
 	fsimg_worker_request_t *request = &options->request;
 	fsimg_format_info_t info;
 	uint32_t sizes[2], masks[2];
 	unsigned shift;
 	fsimg_status_t status;
 
-	status = find_format(request->format, &info, error);
+	if (parse->stack.reserved)
+		return (FSIMG_OK);
+	status = find_format(parse, request->format, &info);
 	if (status != FSIMG_OK)
 		return (status);
-	if (!seen['L'])
+	if (option_count(parse, 'L') == 0)
 		request->write.label = info.max_label_bytes != 0 ? "FSIMG" : NULL;
 	/* Like the serial, a format's UUID is random unless reproducible or
 	 * given.
@@ -324,7 +1320,7 @@ validate_creation(fsimg_cli_options_t *options, const bool *seen,
 	if (request->write.label != NULL &&
 	    strnlen(request->write.label, sizeof(request->label_storage)) ==
 	    sizeof(request->label_storage))
-		return (syntax(error, "volume label exceeds the command's label representation"));
+		return (syntax(parse, "volume label exceeds the command's label representation"));
 	sizes[0] = request->write.sector_bytes;
 	sizes[1] = request->write.allocation_unit_bytes;
 	masks[0] = info.sector_size_mask;
@@ -333,197 +1329,169 @@ validate_creation(fsimg_cli_options_t *options, const bool *seen,
 		if (sizes[i] == 0)
 			continue;
 		if ((sizes[i] & (sizes[i] - 1)) != 0)
-			return (syntax(error, "geometry byte quantities must be powers of two"));
+			return (syntax(parse, "geometry byte quantities must be powers of two"));
 		shift = 0;
 		while ((UINT32_C(1) << shift) != sizes[i])
 			shift++;
 		if ((masks[i] & (UINT32_C(1) << shift)) == 0)
-			return (syntax(error, "geometry is outside the selected writer profile"));
+			return (syntax(parse, "geometry is outside the selected writer profile"));
 	}
 	if (sizes[1] != 0 && sizes[1] < (sizes[0] == 0 ? 512 : sizes[0]))
-		return (syntax(error, "cluster size is smaller than sector size"));
+		return (syntax(parse, "cluster size is smaller than sector size"));
 	return (FSIMG_OK);
 }
 
-static fsimg_status_t
-validate_options(fsimg_cli_options_t *options, const bool *seen,
-    int operands, char **values, fsimg_error_t *error)
+/* Remove suffix from the end of name, ASCII case-insensitively, when what
+ * remains is nonempty.
+ */
+static bool
+strip_suffix(char *name, const char *suffix)
 {
-	fsimg_worker_request_t *request = &options->request;
-	fsimg_format_info_t info;
-	bool creating;
-	char message[96];
+	size_t length, suffix_length;
 
-	if (options->command == FSIMG_CLI_HELP)
-		return (operands == 0 ? FSIMG_OK : syntax(error, "unexpected help operands"));
-	if (options->command == FSIMG_CLI_FORMATS)
-		return (operands == 0 ? FSIMG_OK : syntax(error, "formats takes no operands"));
-	creating = request->kind >= FSIMG_JOB_CREATE;
-	if (seen['e'] && !seen['R'])
-		return (syntax(error, "-e requires -R"));
-	if (seen['r'] && request->kind != FSIMG_JOB_LIST)
-		return (syntax(error, "-r applies only to ls"));
-	if (seen['d'] && request->kind != FSIMG_JOB_VERIFY)
-		return (syntax(error, "-d applies only to verify"));
-	if (seen['k'] && request->kind != FSIMG_JOB_EXTRACT)
-		return (syntax(error, "-k applies only to extract"));
-	if (options->json && request->kind == FSIMG_JOB_CAT)
-		return (syntax(error, "cat rejects -j because its output is raw content"));
-	if (creating) {
-		if (options->input != NULL || seen['b'] || seen['z'] || seen['C'])
-			return (syntax(error, "read/extraction options do not apply to create"));
-		if (request->format[0] == '\0' || operands != 1 ||
-		    (request->kind == FSIMG_JOB_CREATE && options->output == NULL))
-			return (syntax(error, "create requires -t, one source directory, and -o unless -n"));
-		options->source = values[0];
-	} else {
-		if (seen['L'] || seen['R'] || seen['e'] || seen['f'] ||
-		    seen['n'] || seen['o'] || seen['p'] || seen['s'])
-			return (syntax(error, "creation options do not apply to read commands"));
-		if (options->input == NULL) {
-			snprintf(message, sizeof(message), "%s requires -i image", options->name);
-			return (syntax(error, message));
-		}
-		if (strcmp(options->input, "-") == 0)
-			return (syntax(error, "-i requires a seekable regular image; stdin is not supported"));
-		if ((request->kind == FSIMG_JOB_EXTRACT) != seen['C'])
-			return (syntax(error, "extract requires -C; other read commands reject it"));
-		if (request->kind == FSIMG_JOB_CAT) {
-			if (operands != 1)
-				return (syntax(error, "cat requires exactly one image path"));
-		} else if (operands > (request->kind == FSIMG_JOB_LIST ||
-		    request->kind == FSIMG_JOB_EXTRACT ? 1 : 0))
-			return (syntax(error, "unexpected command operands"));
-		if (operands == 1)
-			request->selection = values[0];
-		if (request->selection[0] != '/')
-			return (syntax(error, "image selection must be an absolute UTF-8 path"));
+	length = strlen(name);
+	suffix_length = strlen(suffix);
+	if (length <= suffix_length ||
+	    strcasecmp(name + length - suffix_length, suffix) != 0)
+		return (false);
+	name[length - suffix_length] = '\0';
+	return (true);
+}
+
+/* Remove the one suffix of the given layer class that ends name, if any. */
+static bool
+strip_layer_suffix(char *name, cli_slot_t slot)
+{
+	for (size_t i = 0; i < sizeof(layer_names) / sizeof(layer_names[0]); i++) {
+		if (layer_names[i].slot == slot && layer_names[i].suffix != NULL &&
+		    strip_suffix(name, layer_names[i].suffix))
+			return (true);
 	}
-	if (options->output != NULL && strcmp(options->output, "-") == 0)
-		return (syntax(error, "output requires a new pathname, not stdout"));
-	if (request->limits.memory_bytes < UINT64_C(16) * 1024 * 1024)
-		return (syntax(error, "memory budget must be at least 16M"));
-	if (creating)
-		return (validate_creation(options, seen, error));
-	if (request->format[0] == '\0')
-		return (FSIMG_OK);
-	return (find_format(request->format, &info, error));
+	return (false);
+}
+
+/*
+ * The extraction stem: the basename with suffixes removed from the outside
+ * in, each class at most once and in this order: one compression suffix,
+ * one container suffix, one generic image suffix. Each step looks only at
+ * the current outermost suffix, so "disk.img.gz" yields "disk" and
+ * "rootfs.vhd.img" yields "rootfs.vhd". A name with nothing stripped, or
+ * whose remainder is not a single usable host name, yields no stem.
+ */
+bool
+fsimg_cli_stem(const char *image, char *stem, size_t capacity)
+{
+	const char *base;
+	bool stripped;
+
+	if (image == NULL || strcmp(image, "-") == 0)
+		return (false);
+	base = strrchr(image, '/');
+	base = base == NULL ? image : base + 1;
+	if (strlen(base) >= capacity)
+		return (false);
+	strcpy(stem, base);
+	stripped = strip_layer_suffix(stem, CLI_SLOT_COMPRESSION);
+	stripped |= strip_layer_suffix(stem, CLI_SLOT_CONTAINER);
+	for (size_t i = 0; i < sizeof(generic_suffixes) / sizeof(generic_suffixes[0]); i++) {
+		if (strip_suffix(stem, generic_suffixes[i])) {
+			stripped = true;
+			break;
+		}
+	}
+	return (stripped && strcmp(stem, ".") != 0 && strcmp(stem, "..") != 0);
+}
+
+/* Reject an image or -C name that cannot be passed to the host at all;
+ * an empty -C would otherwise read as the working directory.
+ */
+static fsimg_status_t
+check_image_name(cli_parse_t *parse)
+{
+	const char *image = parse->options->image;
+	const char *directory = option_value(parse, 'C');
+
+	if (image != NULL && image[0] == '\0')
+		return (syntax(parse, "-f requires a nonempty image name"));
+	if (directory != NULL && directory[0] == '\0')
+		return (syntax(parse, "-C requires a nonempty directory name"));
+	return (FSIMG_OK);
 }
 
 fsimg_status_t
 fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
     fsimg_error_t *error)
 {
-	static const char *const names[] = {
-		"info", "ls", "cat", "extract", "verify", "create"
-	};
-	bool seen[256] = { false };
-	fsimg_worker_request_t *request;
+	cli_parse_t parse;
 	fsimg_status_t status;
-	unsigned limit_keys, setting_keys;
-	uint64_t number;
-	int flag;
-	const char *flags;
-	char message[96];
 
 	bzero(options, sizeof(*options));
 	fsimg_worker_request_init(&options->request);
-	request = &options->request;
+	options->mode = "";
 	options->scratch = getenv("TMPDIR");
 	if (options->scratch == NULL)
 		options->scratch = "/tmp";
-	options->name = argc > 1 ? argv[1] : "";
-	if (argc == 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "-V") == 0)) {
-		options->command = argv[1][1] == 'h' ? FSIMG_CLI_HELP : FSIMG_CLI_VERSION;
-		return (FSIMG_OK);
-	}
+	bzero(&parse, sizeof(parse));
+	parse.options = options;
+	parse.error = error;
+	parse.argc = argc;
+	parse.argv = argv;
 	if (argc < 2) {
 		options->command = FSIMG_CLI_USAGE;
-		return (syntax(error, "a command is required"));
+		options->overview = true;
+		return (syntax(&parse, "a mode is required"));
 	}
-	if (strcmp(argv[1], "formats") == 0)
-		options->command = FSIMG_CLI_FORMATS;
-	else {
-		for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-			if (strcmp(argv[1], names[i]) == 0)
-				request->kind = (fsimg_job_kind_t)(i + 1);
-		}
-		if (request->kind == 0) {
-			status = syntax(error, "unknown command");
-			if (error != NULL) {
-				flag = snprintf(error->path, sizeof(error->path), "%s", argv[1]);
-				error->path_truncated = flag < 0 || (size_t)flag >= sizeof(error->path);
-			}
-			return (status);
-		}
+
+	status = expand_bundle(&parse);
+	if (status == FSIMG_OK)
+		status = read_option_words(&parse);
+	if (status == FSIMG_OK)
+		status = select_mode(&parse);
+	if (status == FSIMG_OK && (options->command == FSIMG_CLI_PROCESS ||
+	    options->command == FSIMG_CLI_FORMATS))
+		status = check_option_modes(&parse);
+	if (status == FSIMG_OK && options->command == FSIMG_CLI_FORMATS) {
+		options->json = option_count(&parse, OPT_JSON) != 0;
+		options->verbosity = option_count(&parse, 'v');
+		if (parse.first_operand != parse.argc)
+			status = syntax_naming(&parse, "unexpected operand",
+			    parse.argv[parse.first_operand]);
+	} else if (status == FSIMG_OK && options->command == FSIMG_CLI_PROCESS) {
+		status = interpret_common(&parse);
+		if (status == FSIMG_OK)
+			status = check_image_name(&parse);
+		if (status == FSIMG_OK && (parse.mode & MODES_CREATE) != 0)
+			status = interpret_create(&parse);
+		else if (status == FSIMG_OK)
+			status = interpret_read(&parse);
 	}
-	/* BSD getopt stops at the first operand. GNU's leading '+' selects the
-	 * same behavior without changing the process environment.
+	/* Details on stderr: -v for W, i and --formats, whose -v has no other
+	 * meaning; -vv for c, x and t, whose -v is the entry stream or listing.
 	 */
-	flags = options->command == FSIMG_CLI_FORMATS ? FSIMG_HOST_GETOPT_PREFIX ":hjv" :
-	    FSIMG_HOST_GETOPT_PREFIX ":C:L:O:RS:T:b:de:f:hi:jkl:m:no:prs:t:vz:";
-	limit_keys = setting_keys = 0;
-	fsimg_host_getopt_reset();
-	while ((flag = getopt(argc - 1, argv + 1, flags)) != -1) {
-		if (flag == '?' || flag == ':') {
-			snprintf(message, sizeof(message), flag == '?' ?
-			    "unknown option -%c" : "option -%c requires an argument", optopt);
-			return (syntax(error, message));
-		}
-		if (flag != 'l' && flag != 'O' && seen[(unsigned char)flag]) {
-			snprintf(message, sizeof(message), "option -%c specified more than once", flag);
-			return (syntax(error, message));
-		}
-		seen[(unsigned char)flag] = true;
-		status = FSIMG_OK;
-		switch (flag) {
-		case 'h': options->command = FSIMG_CLI_HELP; break;
-		case 'j': options->json = true; break;
-		case 'k': request->flags |= FSIMG_JOB_SKIP_UNSUPPORTED; break;
-		case 'p': request->write.flags |= FSIMG_WRITE_IMPORT_POSIX; break;
-		case 'v': request->flags |= FSIMG_JOB_VERBOSE; break;
-		case 'r': request->flags |= FSIMG_JOB_RECURSIVE; break;
-		case 'd': request->flags |= FSIMG_JOB_PAYLOAD; break;
-		case 'i': options->input = optarg; break;
-		case 'o': case 'C': options->output = optarg; break;
-		case 'T': options->scratch = optarg; break;
-		case 'L': request->write.label = optarg; break;
-		case 'R': request->write.flags |= FSIMG_WRITE_REPRODUCIBLE; break;
-		case 'n':
-			if (request->kind < FSIMG_JOB_CREATE)
-				return (syntax(error, "-n applies only to create"));
-			request->kind = FSIMG_JOB_PLAN;
-			break;
-		case 't':
-			if (optarg[0] == '\0' || strlen(optarg) >= sizeof(request->format))
-				return (syntax(error, "format name is empty or too long"));
-			strcpy(request->format, optarg);
-			break;
-		case 'S':
-			if (strcmp(optarg, "auto") == 0) request->sandbox = FSIMG_SANDBOX_AUTO;
-			else if (strcmp(optarg, "required") == 0) request->sandbox = FSIMG_SANDBOX_REQUIRED;
-			else if (strcmp(optarg, "off") == 0) request->sandbox = FSIMG_SANDBOX_OFF;
-			else return (syntax(error, "sandbox policy must be auto, required or off"));
-			break;
-		case 'l': status = parse_limit(options, optarg, &limit_keys, error); break;
-		case 'O': status = parse_setting(options, optarg, &setting_keys, error); break;
-		case 'e': status = fsimg_cli_epoch(optarg, &request->write.epoch, error); break;
-		case 'm': case 'b': case 'z': case 'f': case 's':
-			status = fsimg_cli_number(optarg, true, &number, error);
-			if (status != FSIMG_OK)
-				break;
-			if ((flag == 's' || flag == 'z') && number == 0)
-				return (syntax(error, "explicit volume size and slice length must be positive"));
-			if (flag == 'm' && number != 0) request->limits.memory_bytes = number;
-			if (flag == 'b') request->offset = number;
-			if (flag == 'z') request->length = number;
-			if (flag == 'f') request->write.min_free_bytes = number;
-			if (flag == 's') request->write.volume_bytes = number;
-			break;
-		}
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	return (validate_options(options, seen, argc - 1 - optind,
-	    argv + 1 + optind, error));
+	if (options->verbosity >= ((parse.mode & (MODES_CREATE | MODE_EXTRACT |
+	    MODE_LIST)) != 0 ? 2u : 1u))
+		options->request.flags |= FSIMG_JOB_VERBOSE;
+	if (status == FSIMG_OK && parse.unsupported != NULL)
+		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_CONTEXT, parse.unsupported);
+	free(parse.limits);
+	free(parse.settings);
+	return (status);
+}
+
+void
+fsimg_cli_release(fsimg_cli_options_t *options)
+{
+	for (unsigned i = 0; i < options->operand_count; i++)
+		free(options->operands[i].image_path);
+	/* A failed normalization leaves its allocation in the next slot. */
+	if (options->operands != NULL)
+		free(options->operands[options->operand_count].image_path);
+	free(options->operands);
+	free(options->member);
+	free(options->words);
+	options->operands = NULL;
+	options->operand_count = 0;
+	options->member = NULL;
+	options->words = NULL;
 }

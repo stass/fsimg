@@ -29,11 +29,24 @@
 #include "internal.h"
 #include "test.h"
 
+/* The worker's three descriptor profiles: a read job writing beneath an
+ * extraction destination, and a create job writing a staged image from one
+ * directory root or one regular-file root. Every profile places the input at
+ * 3, the writable work directory at 4, a root (when present) at 5 and the
+ * scratch directory at 6.
+ */
+typedef enum sandbox_profile {
+	PROFILE_EXTRACT,
+	PROFILE_DIRECTORY_ROOT,
+	PROFILE_FILE_ROOT,
+	PROFILE_COUNT
+} sandbox_profile_t;
+
 typedef enum sandbox_attempt {
 	ATTEMPT_INPUT_READ,
 	ATTEMPT_WORK_WRITE,
+	ATTEMPT_WORK_MKDIR,
 	ATTEMPT_OUTPUT_REMOVE_FILE,
-	ATTEMPT_OUTPUT_REMOVE_DIRECTORY,
 	ATTEMPT_SCRATCH_REMOVE,
 	ATTEMPT_SOURCE_READ,
 	ATTEMPT_SOURCE_MOUNT,
@@ -59,8 +72,8 @@ typedef enum sandbox_attempt {
 } sandbox_attempt_t;
 
 static void close_unlisted(void);
-static bool attempt_operation(sandbox_attempt_t);
-static int run_child(int, int, int, int, sandbox_attempt_t, bool);
+static bool attempt_operation(sandbox_attempt_t, sandbox_profile_t);
+static int run_child(const int *, sandbox_attempt_t, sandbox_profile_t);
 
 static void
 close_unlisted(void)
@@ -73,10 +86,12 @@ close_unlisted(void)
 }
 
 /* Each attempt runs in its own child: an accidental successful exec, mutation,
- * or descriptor acquisition cannot mask any later negative assertion.
+ * or descriptor acquisition cannot mask any later negative assertion. Only an
+ * extraction destination may create directories; no work directory may remove
+ * names, and scratch removes files but never makes directories.
  */
 static bool
-attempt_operation(sandbox_attempt_t attempt)
+attempt_operation(sandbox_attempt_t attempt, sandbox_profile_t profile)
 {
 	struct sockaddr_in address;
 	struct stat st;
@@ -115,7 +130,15 @@ attempt_operation(sandbox_attempt_t attempt)
 		fsimg_io_free(io);
 		fsimg_ctx_free(ctx);
 		return (transferred == 1);
+	case ATTEMPT_WORK_MKDIR:
+		if (profile != PROFILE_EXTRACT)
+			return (mkdirat(4, "work-directory", 0700) == -1);
+		if (mkdirat(4, "work-directory", 0700) == -1)
+			return (false);
+		return (unlinkat(4, "work-directory", AT_REMOVEDIR) == -1);
 	case ATTEMPT_SOURCE_READ:
+		if (profile == PROFILE_FILE_ROOT)
+			return (pread(5, &byte, 1, 0) == 1 && byte == 'S');
 		fd = openat(5, "source", O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
 		if (fd == -1)
 			return (false);
@@ -129,10 +152,6 @@ attempt_operation(sandbox_attempt_t attempt)
 		if (close(fd) == -1)
 			return (false);
 		return (unlinkat(4, "delete-file", 0) == -1);
-	case ATTEMPT_OUTPUT_REMOVE_DIRECTORY:
-		if (mkdirat(4, "delete-directory", 0700) == -1)
-			return (false);
-		return (unlinkat(4, "delete-directory", AT_REMOVEDIR) == -1);
 	case ATTEMPT_SCRATCH_REMOVE:
 		fd = openat(6, "scratch-file", O_WRONLY | O_CREAT | O_EXCL, 0600);
 		if (fd == -1)
@@ -141,9 +160,7 @@ attempt_operation(sandbox_attempt_t attempt)
 			return (false);
 		if (unlinkat(6, "scratch-file", 0) == -1)
 			return (false);
-		if (mkdirat(6, "scratch-directory", 0700) == -1)
-			return (false);
-		return (unlinkat(6, "scratch-directory", AT_REMOVEDIR) == 0);
+		return (mkdirat(6, "scratch-directory", 0700) == -1);
 	case ATTEMPT_SOURCE_MOUNT:
 		return (fsimg_host_mount_id(5, &mount_id) == 0 && mount_id != 0);
 	case ATTEMPT_STATX_PATH:
@@ -194,6 +211,8 @@ attempt_operation(sandbox_attempt_t attempt)
 	case ATTEMPT_INPUT_TRUNCATE:
 		return (ftruncate(3, 0) == -1);
 	case ATTEMPT_SOURCE_WRITE:
+		if (profile == PROFILE_FILE_ROOT)
+			return (pwrite(5, "X", 1, 0) == -1 && ftruncate(5, 0) == -1);
 		return (openat(5, "source", O_WRONLY | O_TRUNC) == -1);
 	case ATTEMPT_NETWORK:
 		fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -237,36 +256,41 @@ attempt_operation(sandbox_attempt_t attempt)
 	return (false);
 }
 
+/* fds holds the input, work directory, directory root, file root and scratch
+ * directory; the child installs them at the profile's numbers and enforces.
+ */
 static int
-run_child(int input, int work, int source, int scratch, sandbox_attempt_t attempt,
-    bool source_profile)
+run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile)
 {
 	struct rlimit no_core = { 0, 0 };
 	fsimg_sandbox_caps_t caps = {
-		.input = 3, .output = 4, .scratch = 6,
-		.source = source_profile ? 5 : -1,
+		.input = 3, .staging = 4, .destination = -1, .scratch = 6,
+		.roots = 5, .root_count = 1,
 		.job = -1, .control = -1, .data = -1, .cancel = -1
 	};
 	fsimg_status_t status;
 	pid_t child;
-	int wait_status;
+	int wait_status, root;
 
+	if (profile == PROFILE_EXTRACT) {
+		caps.staging = -1;
+		caps.destination = 4;
+		caps.roots = -1;
+		caps.root_count = 0;
+	}
+	root = profile == PROFILE_FILE_ROOT ? fds[3] : fds[2];
 	child = fork();
 	CHECK(child != -1);
 	if (child == 0) {
 		if (setrlimit(RLIMIT_CORE, &no_core) == -1)
 			_exit(1);
-		if (dup2(input, 3) == -1)
+		if (dup2(fds[0], 3) == -1 || dup2(fds[1], 4) == -1)
 			_exit(1);
-		if (dup2(work, 4) == -1)
-			_exit(1);
-		if (source_profile) {
-			if (dup2(source, 5) == -1)
-				_exit(1);
-		} else {
+		if (profile == PROFILE_EXTRACT)
 			close(5);
-		}
-		if (dup2(scratch, 6) == -1)
+		else if (dup2(root, 5) == -1)
+			_exit(1);
+		if (dup2(fds[4], 6) == -1)
 			_exit(1);
 		close_unlisted();
 		status = fsimg_sandbox_install_caps(&caps, NULL);
@@ -274,7 +298,7 @@ run_child(int input, int work, int source, int scratch, sandbox_attempt_t attemp
 			_exit(77);
 		if (status != FSIMG_OK)
 			_exit(2);
-		_exit(attempt_operation(attempt) ? 0 : 1);
+		_exit(attempt_operation(attempt, profile) ? 0 : 1);
 	}
 	CHECK(waitpid(child, &wait_status, 0) == child);
 	if (!WIFEXITED(wait_status)) {
@@ -295,7 +319,7 @@ main(void)
 	char path[] = "sandbox-fixture-XXXXXX";
 	struct stat before, after;
 	char sentinel;
-	int parent, work, source, scratch, input, fd, result, skipped;
+	int parent, work, source, source_file, scratch, input, fd, result, skipped;
 	bool enforce;
 
 	CHECK(mkdtemp(path) != NULL);
@@ -333,6 +357,11 @@ main(void)
 	CHECK(fd != -1);
 	CHECK(write(fd, "S", 1) == 1);
 	CHECK(close(fd) == 0);
+	fd = openat(source, "source", O_RDONLY | O_CLOEXEC);
+	CHECK(fd != -1);
+	source_file = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+	CHECK(source_file != -1);
+	CHECK(close(fd) == 0);
 
 	skipped = 0;
 	enforce = false;
@@ -343,12 +372,15 @@ main(void)
 		CHECK(fsimg_sandbox_install(input, work, -1, NULL) == FSIMG_EUNSUPPORTED);
 		skipped = 1;
 	}
-	for (unsigned profile = 0; enforce && profile < 2; profile++) {
+	for (sandbox_profile_t profile = 0; enforce && profile < PROFILE_COUNT;
+	    profile++) {
 		for (sandbox_attempt_t attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
-			if (profile == 0 && (attempt == ATTEMPT_SOURCE_READ || attempt == ATTEMPT_SOURCE_MOUNT ||
-			    attempt == ATTEMPT_SOURCE_WRITE))
+			const int fds[] = { input, work, source, source_file, scratch };
+
+			if (profile == PROFILE_EXTRACT && (attempt == ATTEMPT_SOURCE_READ ||
+			    attempt == ATTEMPT_SOURCE_MOUNT || attempt == ATTEMPT_SOURCE_WRITE))
 				continue;
-			result = run_child(input, work, source, scratch, attempt, profile != 0);
+			result = run_child(fds, attempt, profile);
 			if (result == 77) {
 				skipped++;
 				continue;
@@ -361,13 +393,16 @@ main(void)
 				CHECK(unlinkat(work, "output", 0) == 0);
 			if (attempt == ATTEMPT_OUTPUT_REMOVE_FILE)
 				CHECK(unlinkat(work, "delete-file", 0) == 0);
-			if (attempt == ATTEMPT_OUTPUT_REMOVE_DIRECTORY)
-				CHECK(unlinkat(work, "delete-directory", AT_REMOVEDIR) == 0);
+			if (attempt == ATTEMPT_WORK_MKDIR && profile == PROFILE_EXTRACT)
+				CHECK(unlinkat(work, "work-directory", AT_REMOVEDIR) == 0);
 		}
 	}
 	CHECK(fstat(input, &after) == 0);
 	CHECK(before.st_size == after.st_size && before.st_mode == after.st_mode);
 	CHECK(pread(input, &sentinel, 1, 0) == 1 && sentinel == 'I');
+	CHECK(fstat(source_file, &after) == 0 && after.st_size == 1);
+	CHECK(pread(source_file, &sentinel, 1, 0) == 1 && sentinel == 'S');
+	CHECK(close(source_file) == 0);
 	CHECK(unlinkat(source, "source", 0) == 0);
 	CHECK(close(source) == 0);
 	CHECK(close(scratch) == 0);

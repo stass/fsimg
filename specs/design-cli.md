@@ -95,9 +95,12 @@ an integer deadline measured on the monotonic clock, where zero selects the
 default of no additional deadline. `spool` bounds the temporary file that
 holds a stream or compressed input, defined in the
 [layer design](design-layers.md#budget). `fds` (default 128) also caps the
-number of create operands, since the coordinator holds one open root per
-operand; a command line exceeding it fails before the worker starts, naming
-the descriptor limit. Work counts primitive metadata steps, adapter calls
+number of create operands, since the worker holds one open root per operand
+besides its own staging directory, scratch directory and two scanning
+descriptors (a directory and the entry read from it); a command line
+leaving no room for those fails before the worker starts, naming the
+descriptor limit, and a deep source tree can still reach the limit while
+scanning. Work counts primitive metadata steps, adapter calls
 and every byte decompressed from a container chunk or a gzip member, not
 just payload bytes, so `work` and `seconds` bound decompression time.
 The deadline is also supervised by the coordinator. Unset work and time
@@ -218,7 +221,10 @@ operands as given) and stored under its own name, so
 `fsimg cf x.img -F fat32 rootfs` produces `/rootfs/...` and `-C rootfs .`
 places rootfs's contents at the image root. `-C` must name an existing
 directory, applies to the operands after it, and may repeat:
-`-C esp . -C extra EFI`. An operand may be a regular file.
+`-C esp . -C extra EFI`. Each `-C` is resolved against the working
+directory, not against the previous `-C`, so the operand list reads the same
+in any order. A `-C` that applies to no operand (two in a row, or one at the
+end) is a syntax error. An operand may be a regular file.
 
 The image name of an operand is its path with empty and `.` components
 removed; a `..` component is a syntax error, not stripped. An operand with
@@ -288,6 +294,9 @@ published output exists and whether durability is uncertain.
 second worker under the image-reading profile, after the creation worker
 exits and before publication. A failed verification discards the staged
 result and publishes nothing; the error names the failing layer and says so.
+The capability record and the summary's `sandbox` field describe the
+creation worker; each worker still warns separately when it runs
+unconfined.
 `cW` with `-f -` is a syntax error: a stream leaves no complete artefact for
 the second worker to open.
 

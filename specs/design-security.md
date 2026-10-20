@@ -257,8 +257,8 @@ readable through them; a write bit, by contrast, would let another
 principal plant an object the extraction then collides with or
 races. An access control list is not interpreted; any non-trivial ACL of any
 type the platform can report on the descriptor is refused: on FreeBSD
-`acl_is_trivial_np` for each ACL type the filesystem supports (POSIX.1e
-access and default, NFSv4); on Linux the presence of a
+`acl_is_trivial_np` for the access and NFSv4 types the filesystem supports,
+and any entry at all in a POSIX.1e default ACL, which has no trivial form; on Linux the presence of a
 `system.posix_acl_access` or `system.posix_acl_default` attribute in
 `flistxattr`, which the kernel keeps only for a non-trivial ACL; on macOS
 any extended ACL entry. On Linux a listed `system.nfs4_acl` attribute is
@@ -267,7 +267,11 @@ a server with ACL support, and fsimg cannot prove it trivial without
 decoding NFSv4 ACLs, which is out of scope. A Linux NFSv4 destination on
 such a server therefore cannot be used, a limitation the user-facing
 documentation states; FreeBSD's NFSv4 case is unaffected, since
-`acl_is_trivial_np` answers there. Refusing rather than reading ACLs is the
+`acl_is_trivial_np` answers there. A Linux CIFS mount exposes no ACL
+through `flistxattr`, so its server-side Windows ACLs are not seen; the
+user-facing documentation states this as well. A platform other than these
+three has no known ACL interface, and its privacy check fails rather than
+trusting the mode bits. Refusing rather than reading ACLs is the
 rule by construction: the three platforms' ACL semantics differ, an
 allowlist of harmless entries is a list that grows with each platform, and a
 user who wants an ACL on the destination can extract elsewhere. The rule

@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
@@ -17,6 +18,7 @@
 #include "cli.h"
 #include "host.h"
 #include "internal.h"
+#include "private.h"
 #include "publish.h"
 
 static fsimg_status_t host_error(fsimg_error_t *, const char *);
@@ -25,6 +27,21 @@ static fsimg_status_t split_output(const char *, char *, char *, fsimg_error_t *
 static fsimg_status_t private_directory(int, const char *, char *, int *, bool *,
     fsimg_error_t *);
 static fsimg_status_t reject_ancestor(int, int, fsimg_error_t *);
+static fsimg_status_t prepare_scratch(fsimg_cli_options_t *, fsimg_cli_paths_t *,
+    fsimg_error_t *);
+static fsimg_status_t open_input(fsimg_cli_options_t *, fsimg_error_t *);
+static fsimg_status_t open_operand(int, const fsimg_cli_operand_t *, int,
+    int *, fsimg_error_t *);
+static fsimg_status_t open_roots(fsimg_cli_options_t *, fsimg_cli_paths_t *,
+    fsimg_error_t *);
+static fsimg_status_t generate_identifiers(fsimg_cli_options_t *, fsimg_error_t *);
+static fsimg_status_t prepare_staging(fsimg_cli_options_t *, fsimg_cli_paths_t *,
+    fsimg_error_t *);
+static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t, bool,
+    const char *);
+static bool remove_fresh_directory(int, const char *, int);
+static fsimg_status_t prepare_destination(fsimg_cli_options_t *,
+    fsimg_cli_paths_t *, fsimg_error_t *);
 static int clean_scratch(int);
 static bool publication_cancelled(void *);
 
@@ -170,125 +187,501 @@ reject_ancestor(int descendant, int ancestor, fsimg_error_t *error)
 	return (status);
 }
 
-fsimg_status_t
-fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
+/* Prepare scratch before creating output. A -T path that would exist only
+ * inside the new extraction root cannot acquire cleanup authority there.
+ */
+static fsimg_status_t
+prepare_scratch(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
     fsimg_error_t *error)
 {
 	fsimg_worker_request_t *request = &options->request;
+	fsimg_status_t status;
+
+	if (strcmp(options->scratch, "-") == 0)
+		return (FSIMG_OK);
+	if (strlen(options->scratch) + sizeof(paths->scratch_name) + 1 >= PATH_MAX)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_IO, "scratch parent leaves no room for a private pathname"));
+	paths->scratch_parent = open(options->scratch, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (paths->scratch_parent == -1)
+		return (path_error(error, "cannot open scratch directory", options->scratch));
+	status = private_directory(paths->scratch_parent, "scratch", paths->scratch_name,
+	    &request->scratch_fd, &paths->scratch_created, error);
+	if (paths->scratch_created)
+		snprintf(paths->retained_scratch, sizeof(paths->retained_scratch),
+		    "%s/%s", options->scratch, paths->scratch_name);
+	return (status);
+}
+
+/* The image of a read mode: a regular file, which the requested volume
+ * slice must fit.
+ */
+static fsimg_status_t
+open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
 	fsimg_host_file_t identity;
+
+	request->input_fd = fsimg_host_source_open(AT_FDCWD, options->image, false);
+	if (request->input_fd == -1)
+		return (path_error(error, "cannot open image", options->image));
+	if (fsimg_host_file(request->input_fd, &identity) == -1)
+		return (host_error(error, "image identity query failed"));
+	if (identity.kind != FSIMG_HOST_FILE)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_IO, "input image must be a seekable regular file"));
+	if (request->offset > identity.length)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_IO, "volume slice starts past the input image"));
+	if (request->length == 0)
+		request->length = identity.length - request->offset;
+	if (request->length > identity.length - request->offset)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_IO, "volume slice exceeds the input image"));
+	if (request->limits.max_output_bytes == 0)
+		request->limits.max_output_bytes = request->length;
+	return (FSIMG_OK);
+}
+
+/*
+ * The no-follow scanned-object open of a command-line path. O_NOFOLLOW
+ * covers only the final component, and a path ending in "/" or "/." makes
+ * the kernel resolve a symbolic link before that component, so trailing
+ * slashes and "." components are removed first: "link/." then names the
+ * link itself and fails. A path left with no component means the base
+ * directory itself (".") or the root ("/"). A refused link fails with ELOOP
+ * on every host: a no-follow directory open of one reports ENOTDIR on
+ * macOS, so an lstat of the same name, used only to choose the errno,
+ * tells the two apart.
+ */
+static int
+open_nofollow(int base, const char *path, bool directory)
+{
+	char trimmed[PATH_MAX];
+	struct stat st;
+	size_t length;
+	int fd;
+	bool trimmed_slash;
+
+	length = strlen(path);
+	if (length >= sizeof(trimmed)) {
+		errno = ENAMETOOLONG;
+		return (-1);
+	}
+	bcopy(path, trimmed, length + 1);
+	/* A trailing slash names a directory, so it stays a requirement. */
+	trimmed_slash = false;
+	for (;;) {
+		if (length > 1 && trimmed[length - 1] == '/')
+			length--;
+		else if (length == 1 && trimmed[0] == '.')
+			length = 0;
+		else if (length >= 2 && trimmed[length - 1] == '.' &&
+		    trimmed[length - 2] == '/')
+			length--;
+		else
+			break;
+		trimmed[length] = '\0';
+		trimmed_slash = true;
+	}
+	if (trimmed_slash)
+		directory = true;
+	if (length == 0)
+		return (fsimg_host_source_open(base, ".", directory));
+	fd = fsimg_host_source_open(base, trimmed, directory);
+	if (fd == -1 && errno == ENOTDIR &&
+	    fstatat(base, trimmed, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode))
+		errno = ELOOP;
+	return (fd);
+}
+
+/*
+ * Open one create operand with the no-follow, nonblocking,
+ * no-controlling-terminal open used for every scanned object, so a symbolic
+ * link operand fails and a FIFO cannot block. Only a directory or a regular
+ * file becomes a root. The descriptor is moved above the worker's
+ * descriptor layout, at least first_free, so starting the worker passes it
+ * without another copy.
+ */
+static fsimg_status_t
+open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
+    int *out, fsimg_error_t *error)
+{
+	fsimg_host_file_t identity;
+	int fd, saved;
+
+	fd = open_nofollow(operand->host_path[0] == '/' ? AT_FDCWD : directory,
+	    operand->host_path, false);
+	if (fd == -1)
+		return (path_error(error, errno == ELOOP ? "operand is a symbolic link" :
+		    "cannot open operand", operand->host_path));
+	if (fsimg_host_file(fd, &identity) == -1) {
+		saved = errno;
+		close(fd);
+		errno = saved;
+		return (path_error(error, "operand identity query failed", operand->host_path));
+	}
+	if (identity.kind != FSIMG_HOST_DIRECTORY && identity.kind != FSIMG_HOST_FILE) {
+		close(fd);
+		errno = 0;
+		return (path_error(error, "operand is not a regular file or directory",
+		    operand->host_path));
+	}
+	*out = fcntl(fd, F_DUPFD_CLOEXEC, first_free);
+	saved = errno;
+	close(fd);
+	if (*out == -1) {
+		errno = saved;
+		return (path_error(error, "cannot hold operand", operand->host_path));
+	}
+	return (FSIMG_OK);
+}
+
+/*
+ * Open every create operand before the worker starts; the opened roots are
+ * the worker's whole source authority, so it never receives a -C directory
+ * or a name to resolve. Each operand is opened relative to the -C directory
+ * that precedes it, or the working directory, and an absolute operand as
+ * given. The worker holds one descriptor per root besides its own: the
+ * staging directory of a create job, scratch unless it is disabled, and two
+ * while scanning, a directory and the entry read from it; the staged image
+ * is opened after scanning, in one of those two. The operands must leave
+ * room for those within the fds limit, so an oversized command line fails
+ * here, before the worker starts.
+ */
+static fsimg_status_t
+open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
+    fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
+	const fsimg_cli_operand_t *operand;
+	const char *directory_name;
+	unsigned count;
+	fsimg_status_t status;
+	uint64_t needed;
+	int directory, first_free;
+
+	count = options->operand_count;
+	needed = (uint64_t)count + 2 + (request->kind == FSIMG_JOB_CREATE ? 1 : 0) +
+	    (request->scratch_fd != -1 ? 1 : 0);
+	if (needed > request->limits.max_open_files)
+		return (fsimg_limit_error(error, FSIMG_RESOURCE_DESCRIPTORS,
+		    request->limits.max_open_files, needed));
+	paths->root_fds = calloc(count, sizeof(*paths->root_fds));
+	paths->root_paths = calloc(count, sizeof(*paths->root_paths));
+	if (paths->root_fds == NULL || paths->root_paths == NULL)
+		return (fsimg_error_set(error, FSIMG_ENOMEM, ENOMEM,
+		    FSIMG_OP_IO, "operand descriptor table allocation failed"));
+	for (unsigned i = 0; i < count; i++)
+		paths->root_fds[i] = -1;
+	/* Published before any open, so cleanup closes the roots opened before
+	 * a later operand fails.
+	 */
+	request->root_fds = paths->root_fds;
+	request->root_paths = paths->root_paths;
+	request->root_count = count;
+	first_free = FSIMG_CHILD_ROOTS + (int)count;
+	directory = AT_FDCWD;
+	directory_name = NULL;
+	status = FSIMG_OK;
+	for (unsigned i = 0; i < count && status == FSIMG_OK; i++) {
+		operand = &options->operands[i];
+		/* Operands after one -C borrow the same argv string, so a new
+		 * pointer, not new text, marks the next -C: two -C words naming
+		 * the same path are opened separately, each when it applies.
+		 */
+		if (operand->directory != directory_name) {
+			if (directory != AT_FDCWD)
+				close(directory);
+			directory = open(operand->directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+			directory_name = operand->directory;
+			if (directory == -1) {
+				status = path_error(error, "cannot open -C directory",
+				    operand->directory);
+				break;
+			}
+		}
+		status = open_operand(directory, operand, first_free, &paths->root_fds[i],
+		    error);
+		paths->root_paths[i] = operand->image_path;
+	}
+	if (directory != AT_FDCWD && directory != -1)
+		close(directory);
+	return (status);
+}
+
+/* Without -R every volume receives a random serial, and a format storing a
+ * UUID a random version 4 UUID unless one is given.
+ */
+static fsimg_status_t
+generate_identifiers(fsimg_cli_options_t *options, fsimg_error_t *error)
+{
+	fsimg_write_options_t *write = &options->request.write;
+
+	if ((write->flags & FSIMG_WRITE_REPRODUCIBLE) == 0 &&
+	    fsimg_host_random(&write->volume_serial, sizeof(write->volume_serial)) == -1)
+		return (host_error(error, "volume identifier generation failed"));
+	if (!options->random_uuid)
+		return (FSIMG_OK);
+	if (fsimg_host_random(write->volume_uuid, sizeof(write->volume_uuid)) == -1)
+		return (host_error(error, "volume identifier generation failed"));
+	write->volume_uuid[6] = (unsigned char)((write->volume_uuid[6] & 0x0f) | 0x40);
+	write->volume_uuid[8] = (unsigned char)((write->volume_uuid[8] & 0x3f) | 0x80);
+	return (FSIMG_OK);
+}
+
+/* A fresh private staging directory beside the final name, which must not
+ * exist yet. The worker creates the staged image inside it only after
+ * planning; only the coordinator publishes it.
+ */
+static fsimg_status_t
+prepare_staging(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
+    fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
 	struct stat st;
 	char parent_path[PATH_MAX];
 	fsimg_status_t status;
 	int count;
 
+	status = split_output(options->image, parent_path, paths->basename, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (strlen(parent_path) + sizeof(paths->staging_name) + 7 >= PATH_MAX)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_IO, "output parent leaves no room for a private pathname"));
+	paths->parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (paths->parent == -1)
+		return (path_error(error, "cannot open output directory", parent_path));
+	if (fstatat(paths->parent, paths->basename, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+		errno = EEXIST;
+		return (path_error(error, "cannot create output", options->image));
+	}
+	if (errno != ENOENT)
+		return (path_error(error, "cannot inspect output", options->image));
+	status = private_directory(paths->parent, "output", paths->staging_name,
+	    &request->output_fd, &paths->staging_created, error);
+	if (!paths->staging_created)
+		return (status);
+	/* A post-create open failure still needs a retained staging path. */
+	count = snprintf(paths->retained_output, sizeof(paths->retained_output),
+	    "%s/%s/image", parent_path, paths->staging_name);
+	if (status != FSIMG_OK)
+		return (status);
+	if (count < 0 || (size_t)count >= sizeof(paths->retained_output))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_IO, "private output pathname exceeds host path bound"));
+	return (FSIMG_OK);
+}
+
+/* A destination that fails the privacy rule. A fresh directory carrying an
+ * ACL got it from the -C parent's inheritable entries, so that error names
+ * the parent; every other verdict names the destination itself.
+ */
+static fsimg_status_t
+privacy_error(fsimg_error_t *error, fsimg_host_privacy_t verdict, bool fresh,
+    const char *path)
+{
+	const char *message;
+	fsimg_status_t status;
+
+	status = FSIMG_EINVAL;
+	switch (verdict) {
+	case FSIMG_HOST_NOT_DIRECTORY:
+		message = "extraction destination is not a directory";
+		break;
+	case FSIMG_HOST_FOREIGN_OWNER:
+		message = "extraction destination is not owned by the effective user";
+		break;
+	case FSIMG_HOST_SHARED_WRITE:
+		message = "extraction destination is writable by group or others";
+		break;
+	case FSIMG_HOST_EXTENDED_ACL:
+		message = fresh ?
+		    "-C directory gives new directories a non-trivial access control list" :
+		    "extraction destination carries a non-trivial access control list";
+		break;
+	case FSIMG_HOST_NOT_EMPTY:
+		message = "extraction destination is not empty";
+		status = FSIMG_EEXISTS;
+		break;
+	default:
+		message = "extraction destination is not private";
+		break;
+	}
+	errno = 0;
+	path_error(error, message, path);
+	if (error != NULL) {
+		error->status = status;
+		error->os_error = 0;
+	}
+	return (status);
+}
+
+/* Remove the directory just created under name when it is still that
+ * object, which the opened descriptor identifies, still owned by this user,
+ * so a directory someone else substituted for it is never removed, and
+ * still empty, which rmdir itself requires. Anything else stays and is
+ * reported.
+ */
+static bool
+remove_fresh_directory(int parent, const char *name, int fd)
+{
+	struct stat opened, named;
+
+	if (fstat(fd, &opened) == -1 ||
+	    fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == -1)
+		return (false);
+	if (opened.st_dev != named.st_dev || opened.st_ino != named.st_ino ||
+	    opened.st_uid != geteuid())
+		return (false);
+	return (unlinkat(parent, name, AT_REMOVEDIR) == 0);
+}
+
+/*
+ * The extraction destination, proven private before the worker starts.
+ * By default it is a fresh directory named after the image stem: one
+ * mkdirat with mode 0700 beneath the opened -C directory, so an existing
+ * name of any kind fails, then a no-follow reopen. With -E it is the -C
+ * directory itself, opened no-follow. Either way the opened descriptor
+ * alone must pass the privacy rule, and the worker receives only it.
+ */
+static fsimg_status_t
+prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
+    fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
+	fsimg_host_privacy_t verdict;
+	const char *parent_path;
+	fsimg_status_t status;
+	int count;
+
+	parent_path = options->directory == NULL ? "." : options->directory;
+	if (options->extract_here) {
+		request->output_fd = open_nofollow(AT_FDCWD, parent_path, true);
+		if (request->output_fd == -1)
+			return (path_error(error, errno == ELOOP ?
+			    "-C directory is a symbolic link" : "cannot open -C directory",
+			    parent_path));
+		if (fsimg_host_private_directory(request->output_fd, &verdict) == -1)
+			return (path_error(error, "cannot inspect -C directory", parent_path));
+		if (verdict != FSIMG_HOST_PRIVATE)
+			return (privacy_error(error, verdict, false, parent_path));
+		paths->extraction_prepared = true;
+		snprintf(paths->retained_output, sizeof(paths->retained_output), "%s",
+		    parent_path);
+		return (FSIMG_OK);
+	}
+
+	paths->parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (paths->parent == -1)
+		return (path_error(error, "cannot open -C directory", parent_path));
+	count = snprintf(paths->retained_output, sizeof(paths->retained_output),
+	    "%s/%s", parent_path, options->stem);
+	if (count < 0 || (size_t)count >= sizeof(paths->retained_output))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_IO, "extraction pathname exceeds host path bound"));
+	if (mkdirat(paths->parent, options->stem, 0700) == -1) {
+		status = path_error(error, "cannot create extraction directory",
+		    paths->retained_output);
+		paths->retained_output[0] = '\0';
+		return (status);
+	}
+	paths->extraction_prepared = true;
+	request->output_fd = openat(paths->parent, options->stem,
+	    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	if (request->output_fd == -1)
+		return (path_error(error, "cannot open extraction directory",
+		    paths->retained_output));
+	if (fsimg_host_private_directory(request->output_fd, &verdict) == -1)
+		return (path_error(error, "cannot inspect extraction directory",
+		    paths->retained_output));
+	if (verdict == FSIMG_HOST_PRIVATE)
+		return (FSIMG_OK);
+	status = privacy_error(error, verdict, true,
+	    verdict == FSIMG_HOST_EXTENDED_ACL ? parent_path : paths->retained_output);
+	if (remove_fresh_directory(paths->parent, options->stem, request->output_fd)) {
+		paths->extraction_prepared = false;
+		paths->retained_output[0] = '\0';
+	}
+	return (status);
+}
+
+fsimg_status_t
+fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
+    fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
+	fsimg_status_t status;
+
 	bzero(paths, sizeof(*paths));
 	paths->parent = paths->scratch_parent = -1;
-	/* Prepare scratch before creating output. A -T path that would exist only
-	 * inside the new extraction root cannot acquire cleanup authority there.
+	status = prepare_scratch(options, paths, error);
+	if (status != FSIMG_OK)
+		return (status);
+
+	/* Inputs before outputs: a missing image or operand leaves no
+	 * extraction directory or staging behind.
 	 */
-	if (strcmp(options->scratch, "-") != 0) {
-		if (strlen(options->scratch) + sizeof(paths->scratch_name) + 1 >= PATH_MAX)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_IO, "scratch parent leaves no room for a private pathname"));
-		paths->scratch_parent = open(options->scratch, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-		if (paths->scratch_parent == -1)
-			return (path_error(error, "cannot open scratch directory", options->scratch));
-		status = private_directory(paths->scratch_parent, "scratch", paths->scratch_name,
-		    &request->scratch_fd, &paths->scratch_created, error);
-		if (paths->scratch_created)
-			snprintf(paths->retained_scratch, sizeof(paths->retained_scratch),
-			    "%s/%s", options->scratch, paths->scratch_name);
+	switch (request->kind) {
+	case FSIMG_JOB_CREATE:
+	case FSIMG_JOB_PLAN:
+		status = open_roots(options, paths, error);
+		if (status == FSIMG_OK)
+			status = generate_identifiers(options, error);
+		if (status == FSIMG_OK && request->kind == FSIMG_JOB_CREATE)
+			status = prepare_staging(options, paths, error);
+		break;
+	case FSIMG_JOB_EXTRACT:
+		status = open_input(options, error);
+		if (status == FSIMG_OK)
+			status = prepare_destination(options, paths, error);
+		break;
+	default:
+		status = open_input(options, error);
+		break;
+	}
+	if (status != FSIMG_OK)
+		return (status);
+
+	if (request->output_fd != -1 && request->scratch_fd != -1) {
+		status = reject_ancestor(request->output_fd, request->scratch_fd, error);
 		if (status != FSIMG_OK)
 			return (status);
+		status = reject_ancestor(request->scratch_fd, request->output_fd, error);
 	}
-	if (request->kind == FSIMG_JOB_CREATE || request->kind == FSIMG_JOB_EXTRACT) {
-		status = split_output(options->output, parent_path, paths->basename, error);
-		if (status != FSIMG_OK)
-			return (status);
-		if (strlen(parent_path) + sizeof(paths->staging_name) + 7 >= PATH_MAX)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_IO, "output parent leaves no room for a private pathname"));
-		paths->parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-		if (paths->parent == -1)
-			return (path_error(error, "cannot open output directory", parent_path));
-		if (fstatat(paths->parent, paths->basename, &st, AT_SYMLINK_NOFOLLOW) == 0) {
-			errno = EEXIST;
-			return (path_error(error, "cannot create output", options->output));
-		}
-		if (errno != ENOENT)
-			return (path_error(error, "cannot inspect output", options->output));
-		if (request->kind == FSIMG_JOB_CREATE) {
-			status = private_directory(paths->parent, "output", paths->staging_name,
-			    &request->output_fd, &paths->staging_created, error);
-			if (!paths->staging_created)
-				return (status);
-			/* A post-create open failure still needs a retained staging path. */
-			count = snprintf(paths->retained_output, sizeof(paths->retained_output),
-			    "%s/%s/image", parent_path, paths->staging_name);
-			if (status != FSIMG_OK)
-				return (status);
-		} else {
-			if (mkdirat(paths->parent, paths->basename, 0700) == -1)
-				return (path_error(error, "cannot create extraction directory", options->output));
-			paths->extraction_created = true;
-			count = snprintf(paths->retained_output, sizeof(paths->retained_output),
-			    "%s", options->output);
-			request->output_fd = openat(paths->parent, paths->basename,
-			    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-			if (request->output_fd == -1)
-				return (path_error(error, "cannot open extraction directory", options->output));
-		}
-		if (count < 0 || (size_t)count >= sizeof(paths->retained_output))
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_IO, "private output pathname exceeds host path bound"));
-		if (request->scratch_fd != -1) {
-			status = reject_ancestor(request->output_fd, request->scratch_fd, error);
-			if (status != FSIMG_OK)
-				return (status);
-			status = reject_ancestor(request->scratch_fd, request->output_fd, error);
-			if (status != FSIMG_OK)
-				return (status);
-		}
-	}
-	if (request->kind >= FSIMG_JOB_CREATE) {
-		request->source_fd = fsimg_host_source_open(AT_FDCWD, options->source, true);
-		if (request->source_fd == -1)
-			return (path_error(error, "cannot open source directory", options->source));
-		if ((request->write.flags & FSIMG_WRITE_REPRODUCIBLE) == 0 &&
-		    fsimg_host_random(&request->write.volume_serial,
-		    sizeof(request->write.volume_serial)) == -1)
-			return (host_error(error, "volume identifier generation failed"));
-		/* A random version 4 UUID, which option validation requests. */
-		if (options->random_uuid) {
-			if (fsimg_host_random(request->write.volume_uuid,
-			    sizeof(request->write.volume_uuid)) == -1)
-				return (host_error(error,
-				    "volume identifier generation failed"));
-			request->write.volume_uuid[6] =
-			    (unsigned char)((request->write.volume_uuid[6] & 0x0f) | 0x40);
-			request->write.volume_uuid[8] =
-			    (unsigned char)((request->write.volume_uuid[8] & 0x3f) | 0x80);
-		}
-	} else {
-		request->input_fd = fsimg_host_source_open(AT_FDCWD, options->input, false);
-		if (request->input_fd == -1)
-			return (path_error(error, "cannot open image", options->input));
-		if (fsimg_host_file(request->input_fd, &identity) == -1)
-			return (host_error(error, "image identity query failed"));
-		if (identity.kind != FSIMG_HOST_FILE)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IO, "input image must be a seekable regular file"));
-		if (request->offset > identity.length)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_IO, "volume slice starts past the input image"));
-		if (request->length == 0)
-			request->length = identity.length - request->offset;
-		if (request->length > identity.length - request->offset)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_IO, "volume slice exceeds the input image"));
-		if (request->limits.max_output_bytes == 0)
-			request->limits.max_output_bytes = request->length;
-	}
+	return (status);
+}
+
+/* The request of cW's verification worker: the staged image, opened
+ * read-only and no-follow through the staging descriptor, checked with the
+ * ordinary verification under the image-reading profile, with the
+ * creation's filesystem forced and its limits and scratch.
+ */
+fsimg_status_t
+fsimg_cli_verification_request(const fsimg_cli_options_t *options,
+    fsimg_worker_request_t *verify, fsimg_error_t *error)
+{
+	const fsimg_worker_request_t *create = &options->request;
+	fsimg_host_file_t identity;
+
+	*verify = *create;
+	verify->kind = FSIMG_JOB_VERIFY;
+	verify->flags = create->flags & (FSIMG_JOB_PAYLOAD | FSIMG_JOB_VERBOSE);
+	verify->selection = "/";
+	verify->root_fds = NULL;
+	verify->root_paths = NULL;
+	verify->root_count = 0;
+	verify->output_fd = -1;
+	verify->offset = verify->length = 0;
+	verify->input_fd = fsimg_host_source_open(create->output_fd, "image", false);
+	if (verify->input_fd == -1)
+		return (host_error(error, "cannot open the staged image for verification"));
+	if (fsimg_host_file(verify->input_fd, &identity) == -1)
+		return (host_error(error, "staged image identity query failed"));
+	if (identity.kind != FSIMG_HOST_FILE)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_IO, "staged image is not a regular file"));
 	return (FSIMG_OK);
 }
 
@@ -386,8 +779,8 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	fsimg_worker_request_t *request = &options->request;
 	char *last_component;
 	int cleanup, failure;
-	int *descriptors[] = { &request->input_fd, &request->source_fd,
-	    &request->output_fd, &request->scratch_fd, &paths->parent, &paths->scratch_parent };
+	int *descriptors[] = { &request->input_fd, &request->output_fd,
+	    &request->scratch_fd, &paths->parent, &paths->scratch_parent };
 
 	cleanup = 0;
 	if (paths->staging_created && !paths->retain_staging) {
@@ -424,6 +817,18 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 			cleanup = errno;
 		*descriptors[i] = -1;
 	}
+	for (uint32_t i = 0; paths->root_fds != NULL && i < request->root_count; i++) {
+		if (paths->root_fds[i] != -1 && close(paths->root_fds[i]) == -1 &&
+		    cleanup == 0)
+			cleanup = errno;
+	}
+	free(paths->root_fds);
+	free(paths->root_paths);
+	paths->root_fds = NULL;
+	paths->root_paths = NULL;
+	request->root_fds = NULL;
+	request->root_paths = NULL;
+	request->root_count = 0;
 	if (cleanup != 0) {
 		if (status == FSIMG_OK)
 			status = fsimg_error_set(error, paths->published ? FSIMG_EDURABILITY : FSIMG_EIO,
@@ -434,7 +839,7 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		if (paths->published)
 			error->output_state = FSIMG_OUTPUT_PUBLISHED;
 		else if (error->output_state != FSIMG_OUTPUT_UNCERTAIN) {
-			if (paths->extraction_created)
+			if (paths->extraction_prepared)
 				error->output_state = FSIMG_OUTPUT_INCOMPLETE;
 			else if (request->kind == FSIMG_JOB_CREATE)
 				error->output_state = FSIMG_OUTPUT_ABSENT;

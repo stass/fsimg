@@ -12,7 +12,7 @@ module FsimgSpec
   # A case's directory (specs/design-spec-testing.md#runner): created
   # exclusively, with scratch/, out/ and oracle/, and either the case image
   # or, for a creation case, its source tree written through the name
-  # funnel. dest/ stays absent until extract creates it.
+  # funnel. dest/ stays absent until the runner creates it for extract.
   module CaseDirectory
     SUBDIRECTORIES = %w[scratch out oracle].freeze
 

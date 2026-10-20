@@ -22,7 +22,7 @@ Open QNX4 work, ordered by the [QNX4 plan](qnx4-plan.md). The
   name neither the block nor its owners. `fsimg_error_t`'s offset could
   carry the block's volume offset without quoting image bytes.
 * [Low] **Integration run time** (`test/qnx4-integration.sh.in`): the
-  native comparison starts one `fsimg cat` per regular file, about four
+  native comparison starts one `fsimg x -O` per regular file, about four
   minutes for the 41 captures on macOS; a single command that checksums
   every file would make it seconds.
 * [Low] **Head-unit acceptance** (`docs/qnx4-research.md`): the head unit's

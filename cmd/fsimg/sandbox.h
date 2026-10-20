@@ -6,21 +6,36 @@
 
 #include "fsimg.h"
 
+/*
+ * The worker's complete filesystem authority, one field per role. The
+ * profile grants each role exactly what the worker does with it:
+ *
+ * input	read a read-only regular image file
+ * staging	create the staged image inside it; remove nothing
+ * destination	create directories and files beneath it; remove nothing
+ * scratch	create, use and unlink its own files; no directories
+ * roots	read beneath each directory root, or read a file root
+ *
+ * The coordinator, not the worker, removes staging and destination
+ * objects. -1 marks an absent role. roots is the first of root_count
+ * consecutive descriptors.
+ */
 typedef struct fsimg_sandbox_caps {
-	int	input;
-	int	output;
-	int	scratch;
-	int	source;
-	int	job;
-	int	control;
-	int	data;
-	int	cancel;
+	int		 input;
+	int		 staging;
+	int		 destination;
+	int		 scratch;
+	int		 roots;
+	unsigned	 root_count;
+	int		 job;
+	int		 control;
+	int		 data;
+	int		 cancel;
 } fsimg_sandbox_caps_t;
 
-/* All fields are borrowed; -1 means absent. Pipe directions and filesystem
- * authority are declared once here so worker setup cannot omit a live role.
- * The trusted coordinator supplies disjoint private output/scratch trees.
- * Only scratch grants deletion; output cleanup belongs to the coordinator.
+/* All fields are borrowed. Pipe directions and filesystem authority are
+ * declared once here so worker setup cannot omit a live role. The trusted
+ * coordinator supplies disjoint private output and scratch trees.
  */
 fsimg_status_t fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *,
     fsimg_error_t *);
@@ -29,11 +44,12 @@ const char *fsimg_sandbox_backend(void);
 
 /* Prototype for a disposable, single-threaded child only. Caller closes all
  * other descriptors first, including stdio, sockets and executable handles.
- * Input is an O_RDONLY regular file, work is a private writable directory,
- * source is an optional O_RDONLY source root (-1 selects image-only profile).
- * EUNSUPPORTED means unavailable before confinement; EIO never permits retry
- * without confinement, since some restrictions may already have taken effect.
- * This private entry point is never called by in-process library operations.
+ * Input is an O_RDONLY regular file, destination a private directory that
+ * receives the extraction grant, and source an optional O_RDONLY directory
+ * root (-1 selects the image-only profile). EUNSUPPORTED means unavailable
+ * before confinement; EIO never permits retry without confinement, since
+ * some restrictions may already have taken effect. This private entry point
+ * is never called by in-process library operations.
  */
 fsimg_status_t fsimg_sandbox_install(int, int, int, fsimg_error_t *);
 

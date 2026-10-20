@@ -25,7 +25,6 @@ typedef enum worker_capability_slot {
 	CHILD_INPUT_CAP,
 	CHILD_OUTPUT_CAP,
 	CHILD_SCRATCH_CAP,
-	CHILD_SOURCE_CAP,
 	CHILD_CAP_COUNT
 } worker_capability_slot_t;
 
@@ -38,11 +37,19 @@ typedef struct worker_child {
 	fsimg_reader_t	*reader;
 	fsimg_selection_t *selector;
 	fsimg_writer_t	*writer;
+	/* The job's NUL-terminated paths, back to back: the member of a read
+	 * job, or one image path per root of a create job.
+	 */
+	char		*paths;
+	uint64_t	 paths_length;
 	char		*selection;
 	uint64_t	 last_progress;
 	unsigned	 losses_sent;
-	/* Raw filesystem capabilities remain here until an owner adopts them. */
+	/* Raw filesystem capabilities remain here until an owner adopts them.
+	 * Roots FSIMG_CHILD_ROOTS + roots_adopted onwards are still raw.
+	 */
 	int		 raw_caps[CHILD_CAP_COUNT];
+	uint32_t	 roots_adopted;
 	int		 output_root;
 	bool		 processing;
 	bool		 channel_failed;
@@ -55,7 +62,11 @@ static fsimg_status_t prepare_capabilities(worker_child_t *, unsigned,
     fsimg_sandbox_caps_t *, fsimg_error_t *);
 static fsimg_status_t prepare_context(worker_child_t *, const fsimg_sandbox_caps_t *,
     fsimg_error_t *);
-static fsimg_status_t read_selection(worker_child_t *, uint64_t, fsimg_error_t *);
+static fsimg_status_t read_paths(worker_child_t *, uint64_t, fsimg_error_t *);
+static fsimg_status_t validate_paths(worker_child_t *, fsimg_error_t *);
+static fsimg_status_t add_synthesized_parents(worker_child_t *, const char *,
+    fsimg_error_t *);
+static fsimg_status_t adopt_roots(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t child_setup(worker_child_t *, fsimg_sandbox_caps_t *,
     fsimg_error_t *);
 static fsimg_status_t child_ready(worker_child_t *, const fsimg_sandbox_caps_t *,
@@ -133,34 +144,52 @@ child_loss(void *argument, const char *path, uint32_t fields)
 		child->channel_failed = true;
 }
 
+/* Each job kind has one shape of filesystem authority: reads have an
+ * input, creation has roots, and creation and extraction write into their
+ * output directory, which is staging for one and the destination for the
+ * other. Scratch is optional for every kind.
+ */
 static fsimg_status_t
 prepare_capabilities(worker_child_t *child, unsigned capabilities,
     fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 {
+	fsimg_job_kind_t kind = child->request.kind;
 	unsigned expected;
+	bool output;
 
-	expected = child->request.kind >= FSIMG_JOB_CREATE ? 8 : 1;
-	if (child->request.kind == FSIMG_JOB_CREATE || child->request.kind == FSIMG_JOB_EXTRACT)
-		expected |= 2;
-	if ((capabilities & ~4u) != expected)
+	expected = fsimg_job_has_roots(kind) ? FSIMG_JOB_CAP_ROOTS : FSIMG_JOB_CAP_INPUT;
+	if (kind == FSIMG_JOB_CREATE || kind == FSIMG_JOB_EXTRACT)
+		expected |= FSIMG_JOB_CAP_OUTPUT;
+	if ((capabilities & ~FSIMG_JOB_CAP_SCRATCH) != expected)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "worker job has excess or missing filesystem authority"));
+	output = (capabilities & FSIMG_JOB_CAP_OUTPUT) != 0;
 	*caps = (fsimg_sandbox_caps_t){
-		.input = (capabilities & 1) != 0 ? FSIMG_CHILD_INPUT : -1,
-		.output = (capabilities & 2) != 0 ? FSIMG_CHILD_OUTPUT : -1,
-		.scratch = (capabilities & 4) != 0 ? FSIMG_CHILD_SCRATCH : -1,
-		.source = (capabilities & 8) != 0 ? FSIMG_CHILD_SOURCE : -1,
+		.input = (capabilities & FSIMG_JOB_CAP_INPUT) != 0 ? FSIMG_CHILD_INPUT : -1,
+		.staging = output && kind == FSIMG_JOB_CREATE ? FSIMG_CHILD_OUTPUT : -1,
+		.destination = output && kind == FSIMG_JOB_EXTRACT ? FSIMG_CHILD_OUTPUT : -1,
+		.scratch = (capabilities & FSIMG_JOB_CAP_SCRATCH) != 0 ?
+		    FSIMG_CHILD_SCRATCH : -1,
+		.roots = child->request.root_count != 0 ? FSIMG_CHILD_ROOTS : -1,
+		.root_count = child->request.root_count,
 		.job = FSIMG_CHILD_JOB, .control = FSIMG_CHILD_CONTROL,
-		.data = child->request.kind == FSIMG_JOB_CAT ? FSIMG_CHILD_DATA : -1,
+		.data = kind == FSIMG_JOB_CAT ? FSIMG_CHILD_DATA : -1,
 		.cancel = FSIMG_CHILD_CANCEL
 	};
 	child->raw_caps[CHILD_INPUT_CAP] = caps->input;
-	child->raw_caps[CHILD_OUTPUT_CAP] = caps->output;
+	child->raw_caps[CHILD_OUTPUT_CAP] = output ? FSIMG_CHILD_OUTPUT : -1;
 	child->raw_caps[CHILD_SCRATCH_CAP] = caps->scratch;
-	child->raw_caps[CHILD_SOURCE_CAP] = caps->source;
-	for (unsigned i = 0; i < CHILD_CAP_COUNT; i++) {
-		if (child->raw_caps[i] == -1)
-			close(FSIMG_CHILD_INPUT + (int)i);
+	{
+		static const int numbers[CHILD_CAP_COUNT] = {
+			[CHILD_INPUT_CAP] = FSIMG_CHILD_INPUT,
+			[CHILD_OUTPUT_CAP] = FSIMG_CHILD_OUTPUT,
+			[CHILD_SCRATCH_CAP] = FSIMG_CHILD_SCRATCH
+		};
+
+		for (unsigned i = 0; i < CHILD_CAP_COUNT; i++) {
+			if (child->raw_caps[i] == -1)
+				close(numbers[i]);
+		}
 	}
 	if (caps->data == -1)
 		close(FSIMG_CHILD_DATA);
@@ -205,7 +234,7 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	if (caps->output != -1) {
+	if (child->raw_caps[CHILD_OUTPUT_CAP] != -1) {
 		status = fsimg_fd_reserve(child->ctx, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -215,30 +244,74 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 	return (FSIMG_OK);
 }
 
+/* Receive the job's path sequence. Its length was checked against the path
+ * limit and the path count when the job record was decoded; validate_paths
+ * checks its framing once every byte has arrived.
+ */
 static fsimg_status_t
-read_selection(worker_child_t *child, uint64_t selection_length, fsimg_error_t *error)
+read_paths(worker_child_t *child, uint64_t paths_length, fsimg_error_t *error)
 {
 	fsimg_frame_t frame;
 	uint64_t received;
 	fsimg_status_t status;
+	size_t allocation;
 
-	child->selection = fsimg_alloc(child->ctx, (size_t)selection_length + 1, error);
-	if (child->selection == NULL)
+	if (!fsimg_to_size(paths_length, &allocation))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_CONTEXT, "worker path sequence exceeds host range"));
+	child->paths = fsimg_alloc(child->ctx, allocation, error);
+	if (child->paths == NULL)
 		return (error->status);
 	received = 0;
-	while (received < selection_length) {
+	while (received < paths_length) {
 		status = fsimg_frame_read(FSIMG_CHILD_JOB, &frame, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (frame.type != FSIMG_FRAME_SELECTION || frame.length == 0 ||
-		    frame.length > selection_length - received ||
-		    memchr(frame.payload, '\0', frame.length) != NULL)
+		    frame.length > paths_length - received)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
-		bcopy(frame.payload, child->selection + received, frame.length);
+		bcopy(frame.payload, child->paths + received, frame.length);
 		received += frame.length;
 	}
+	child->paths_length = paths_length;
+	child->selection = child->paths;
 	child->request.selection = child->selection;
+	return (FSIMG_OK);
+}
+
+/* The sequence holds exactly the job's paths, one for a read job and one
+ * per root for a create job, each terminated and each a valid absolute
+ * image path within the context's limits.
+ */
+static fsimg_status_t
+validate_paths(worker_child_t *child, fsimg_error_t *error)
+{
+	const char *path, *end;
+	size_t length, validated;
+	uint32_t depth, count, expected;
+	fsimg_status_t status;
+
+	expected = fsimg_job_path_count(&child->request);
+	end = child->paths + child->paths_length;
+	if (child->paths_length == 0 || end[-1] != '\0')
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
+	count = 0;
+	for (path = child->paths; path < end; path += length + 1) {
+		length = strlen(path);
+		if (count == expected)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
+		status = fsimg_path_validate(child->ctx, path, true, &validated,
+		    &depth, error);
+		if (status != FSIMG_OK)
+			return (status);
+		count++;
+	}
+	if (count != expected)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
 	return (FSIMG_OK);
 }
 
@@ -247,7 +320,7 @@ child_setup(worker_child_t *child, fsimg_sandbox_caps_t *caps, fsimg_error_t *er
 {
 	const struct rlimit core_limit = { .rlim_cur = 0, .rlim_max = 0 };
 	fsimg_frame_t frame;
-	uint64_t selection_length;
+	uint64_t paths_length;
 	unsigned capabilities;
 	fsimg_status_t status;
 
@@ -264,7 +337,7 @@ child_setup(worker_child_t *child, fsimg_sandbox_caps_t *caps, fsimg_error_t *er
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "worker startup requires a job frame"));
 	status = fsimg_job_decode(frame.payload, frame.length, &child->request,
-	    &selection_length, &capabilities, error);
+	    &paths_length, &capabilities, error);
 	if (status != FSIMG_OK)
 		return (status);
 
@@ -274,7 +347,7 @@ child_setup(worker_child_t *child, fsimg_sandbox_caps_t *caps, fsimg_error_t *er
 	status = prepare_context(child, caps, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (read_selection(child, selection_length, error));
+	return (read_paths(child, paths_length, error));
 }
 
 static fsimg_status_t
@@ -591,6 +664,72 @@ read_job(worker_child_t *child, fsimg_error_t *error)
 	}
 }
 
+/*
+ * Give every root to the writer at its image path. A root at "/" adds its
+ * contents only; any other root also adds its own entry, and its ancestors
+ * that no root names are added as synthesized directories with no metadata
+ * field, so the format's defaults apply to them. The writer merges a
+ * directory that several roots or synthesized parents supply and fails on
+ * any other repeated path.
+ */
+static fsimg_status_t
+adopt_roots(worker_child_t *child, fsimg_error_t *error)
+{
+	const char *path;
+	fsimg_status_t status;
+
+	path = child->paths;
+	for (uint32_t i = 0; i < child->request.root_count; i++) {
+		status = fsimg_fd_reserve(child->ctx, error);
+		if (status != FSIMG_OK)
+			return (status);
+		/* Adoption consumes the descriptor on every outcome. */
+		child->roots_adopted++;
+		status = fsimg_writer_adopt_tree(child->writer, FSIMG_CHILD_ROOTS + (int)i,
+		    path, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = add_synthesized_parents(child, path, error);
+		if (status != FSIMG_OK)
+			return (status);
+		path += strlen(path) + 1;
+	}
+	return (FSIMG_OK);
+}
+
+/* Add each proper ancestor of path below the image root, "/a" and "/a/b"
+ * for "/a/b/c", as a directory entry without metadata.
+ */
+static fsimg_status_t
+add_synthesized_parents(worker_child_t *child, const char *path,
+    fsimg_error_t *error)
+{
+	fsimg_entry_t entry;
+	char *ancestor;
+	const char *separator;
+	size_t length;
+	fsimg_status_t status;
+
+	length = strlen(path);
+	ancestor = fsimg_alloc(child->ctx, length + 1, error);
+	if (ancestor == NULL)
+		return (error->status);
+	status = FSIMG_OK;
+	for (separator = strchr(path + 1, '/'); separator != NULL;
+	    separator = strchr(separator + 1, '/')) {
+		bcopy(path, ancestor, (size_t)(separator - path));
+		ancestor[separator - path] = '\0';
+		bzero(&entry, sizeof(entry));
+		entry.path = ancestor;
+		entry.kind = FSIMG_ENTRY_DIRECTORY;
+		status = fsimg_writer_add(child->writer, &entry, NULL, error);
+		if (status != FSIMG_OK)
+			break;
+	}
+	fsimg_dealloc(ancestor);
+	return (status);
+}
+
 static fsimg_status_t
 create_job(worker_child_t *child, fsimg_error_t *error)
 {
@@ -610,12 +749,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 			    FSIMG_OP_SOURCE, "prepared output identity query failed"));
 		child->writer->output_root_known = true;
 	}
-	status = fsimg_fd_reserve(child->ctx, error);
-	if (status != FSIMG_OK)
-		return (status);
-	fd = child->raw_caps[CHILD_SOURCE_CAP];
-	child->raw_caps[CHILD_SOURCE_CAP] = -1;
-	status = fsimg_writer_adopt_tree(child->writer, fd, "/", error);
+	status = adopt_roots(child, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_writer_plan(child->writer, &plan, error);
@@ -660,7 +794,7 @@ child_cleanup(worker_child_t *child)
 	fsimg_io_free(child->volume);
 	fsimg_io_free(child->input);
 	fsimg_writer_free(child->writer);
-	fsimg_dealloc(child->selection);
+	fsimg_dealloc(child->paths);
 	if (child->output_root != -1)
 		fsimg_fd_release(child->ctx, child->output_root);
 	fsimg_ctx_free(child->ctx);
@@ -668,6 +802,8 @@ child_cleanup(worker_child_t *child)
 		if (child->raw_caps[i] != -1)
 			close(child->raw_caps[i]);
 	}
+	for (uint32_t i = child->roots_adopted; i < child->request.root_count; i++)
+		close(FSIMG_CHILD_ROOTS + (int)i);
 }
 
 int
@@ -678,8 +814,6 @@ fsimg_worker_main(void)
 	fsimg_error_t error;
 	fsimg_stats_t stats;
 	unsigned char raw[FSIMG_WIRE_ERROR_BYTES];
-	size_t length;
-	uint32_t depth;
 	fsimg_status_t status;
 
 	bzero(&child, sizeof(child));
@@ -691,10 +825,9 @@ fsimg_worker_main(void)
 	if (status == FSIMG_OK)
 		status = child_ready(&child, &caps, &error);
 	if (status == FSIMG_OK)
-		status = fsimg_path_validate(child.ctx, child.selection, true,
-		    &length, &depth, &error);
+		status = validate_paths(&child, &error);
 	if (status == FSIMG_OK) {
-		if (child.request.kind >= FSIMG_JOB_CREATE)
+		if (fsimg_job_has_roots(child.request.kind))
 			status = create_job(&child, &error);
 		else
 			status = read_job(&child, &error);

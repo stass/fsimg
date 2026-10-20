@@ -18,6 +18,8 @@ static volatile sig_atomic_t interrupted;
 static void catch_signal(int);
 static bool install_signals(void);
 static void output_failure_state(const fsimg_cli_paths_t *, fsimg_error_t *);
+static fsimg_status_t verify_staged(const char *, fsimg_cli_options_t *,
+    fsimg_cli_paths_t *, fsimg_cli_display_t *, fsimg_error_t *);
 
 static void
 catch_signal(int number)
@@ -47,8 +49,39 @@ output_failure_state(const fsimg_cli_paths_t *paths, fsimg_error_t *error)
 {
 	if (paths->published)
 		error->output_state = FSIMG_OUTPUT_PUBLISHED;
-	else if (paths->extraction_created)
+	else if (paths->extraction_prepared)
 		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
+}
+
+/*
+ * cW: after the creation worker exits, a second worker under the
+ * image-reading profile verifies the staged image before publication. Its
+ * events reach the display marked as verification; a failure leaves the
+ * staged image unpublished, and cleanup discards it.
+ */
+static fsimg_status_t
+verify_staged(const char *executable, fsimg_cli_options_t *options,
+    fsimg_cli_paths_t *paths, fsimg_cli_display_t *display, fsimg_error_t *error)
+{
+	fsimg_worker_request_t verify;
+	fsimg_worker_result_t result = { .confinement = FSIMG_CONFINEMENT_UNKNOWN };
+	fsimg_status_t status;
+
+	status = fsimg_cli_verification_request(options, &verify, error);
+	if (status == FSIMG_OK) {
+		display->verifying_staged = true;
+		status = fsimg_worker_run(executable, &verify, fsimg_cli_event, display,
+		    STDOUT_FILENO, &interrupted, &result, error);
+		display->verifying_staged = false;
+	}
+	if (verify.input_fd != -1)
+		close(verify.input_fd);
+	/* Only a verdict on the image is a failed verification; cancellation,
+	 * a deadline, a resource limit or unavailable confinement leaves the
+	 * image unjudged, and the error itself says so.
+	 */
+	paths->verification_failed = status == FSIMG_ECORRUPT;
+	return (status);
 }
 
 int
@@ -79,7 +112,7 @@ main(int argc, char **argv)
 	status = fsimg_cli_parse(argc, argv, &options, &error);
 	fsimg_output_budget_init(&budget, &options.request.limits);
 	options.request.output_budget = &budget;
-	invalid_syntax = status != FSIMG_OK;
+	invalid_syntax = status != FSIMG_OK && options.syntax_error;
 	if (status == FSIMG_OK && options.request.seconds != 0) {
 		now = fsimg_cli_clock();
 		if (now == 0)
@@ -99,6 +132,8 @@ main(int argc, char **argv)
 		if (status == FSIMG_OK)
 			status = fsimg_worker_run(executable, &options.request,
 			    fsimg_cli_event, &display, STDOUT_FILENO, &interrupted, &result, &error);
+		if (status == FSIMG_OK && options.verify_staged)
+			status = verify_staged(executable, &options, &paths, &display, &error);
 		if (status == FSIMG_OK && options.request.kind == FSIMG_JOB_CREATE)
 			status = fsimg_cli_publish(&options, &paths, &result, &interrupted, &error);
 		status = fsimg_cli_cleanup(&options, &paths, status, &error);
@@ -136,5 +171,6 @@ main(int argc, char **argv)
 		fsimg_output_run(executable, fsimg_cli_final, &display, -1,
 		    fsimg_cli_clock() + 2000, &interrupted, &budget, &output_error);
 	}
+	fsimg_cli_release(&options);
 	return (status == FSIMG_OK ? 0 : invalid_syntax ? 2 : 1);
 }

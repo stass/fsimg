@@ -106,11 +106,11 @@ if test "$(uname -s)" = Linux && test "$(id -u)" = 0 &&
     mkdir "$fixture/mnt"
     mount -t qnx6 -o ro,loop "$fixture/sample.img" "$fixture/mnt"
     (cd "$fixture/mnt" && find . -type f) | while IFS= read -r path; do
-        ./fsimg cat -i "$fixture/sample.img" "${path#.}" > "$fixture/cat"
+        ./fsimg x -O -f "$fixture/sample.img" "${path#.}" > "$fixture/cat"
         cmp "$fixture/mnt/$path" "$fixture/cat"
     done
     test "$(cd "$fixture/mnt" && find . -mindepth 1 | wc -l)" -eq \
-        "$(./fsimg ls -r -i "$fixture/sample.img" | wc -l)"
+        "$(./fsimg t -f "$fixture/sample.img" | wc -l)"
     umount "$fixture/mnt"
     ran=1
 else

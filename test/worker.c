@@ -62,6 +62,9 @@ typedef enum worker_scenario {
 	SCENARIO_SKIPPED_EXTRACTION,
 } worker_scenario_t;
 
+/* Create jobs in these tests copy one source directory to the image root. */
+static const char *const image_root[] = { "/" };
+
 #ifdef FSIMG_TEST_ASAN
 /* A volatile release target keeps the deliberate runtime failure observable
  * under optimization. This is used only to test fatal-error classification.
@@ -114,6 +117,7 @@ static void test_text_output(void);
 static void test_incomplete_extraction(void);
 static void test_skipped_extraction(void);
 static void test_mount_source(const char *);
+static void test_multiple_roots(worker_fixture_t *);
 static void test_transport(worker_scenario_t);
 static int fake_worker(worker_scenario_t);
 static int fake_output(void);
@@ -215,7 +219,9 @@ test_mount_source(const char *path)
 #endif
 	CHECK(close(alias) == 0);
 	fixture.request.input_fd = -1;
-	fixture.request.source_fd = source;
+	fixture.request.root_fds = &source;
+	fixture.request.root_paths = image_root;
+	fixture.request.root_count = 1;
 	fixture.request.kind = FSIMG_JOB_PLAN;
 	fixture.request.sandbox = FSIMG_SANDBOX_REQUIRED;
 	strcpy(fixture.request.format, "fat12");
@@ -471,7 +477,9 @@ test_operations(const char *format)
 	fixture.request.kind = FSIMG_JOB_CREATE;
 	fixture.request.selection = "/";
 	fixture.request.input_fd = -1;
-	fixture.request.source_fd = fixture.source;
+	fixture.request.root_fds = &fixture.source;
+	fixture.request.root_paths = image_root;
+	fixture.request.root_count = 1;
 	fixture.request.output_fd = fixture.output;
 	strcpy(fixture.request.format, strcmp(format, "exfat") == 0 ? "exfat" : "fat12");
 	if (strcmp(format, "exfat") == 0)
@@ -500,7 +508,48 @@ test_operations(const char *format)
 	CHECK(run(&fixture, &error) == FSIMG_OK);
 	CHECK(fixture.plans == 2);
 	CHECK(fixture.result.metadata_losses == fixture.plan_losses);
+	test_multiple_roots(&fixture);
 	fixture_close(&fixture);
+}
+
+/* A plan job with several roots: the source directory at the image root and
+ * again at "/a/b" beneath a synthesized "/a", and one of its files as a
+ * regular-file root. The worker validates every root path and refuses an
+ * image path two roots supply.
+ */
+static void
+test_multiple_roots(worker_fixture_t *fixture)
+{
+	static const char *const paths[] = { "/", "/a/b", "/c.txt" };
+	static const char *const invalid[] = { "/", "/a/../b", "/c.txt" };
+	static const char *const colliding[] = { "/", "/HELLO.TXT", "/c.txt" };
+	fsimg_error_t error;
+	uint64_t single;
+	int roots[3];
+
+	single = fixture->result.entries;
+	roots[0] = fixture->source;
+	roots[1] = fixture->source;
+	roots[2] = openat(fixture->source, "HELLO.TXT", O_RDONLY | O_CLOEXEC);
+	CHECK(roots[2] != -1);
+	fixture->request.kind = FSIMG_JOB_PLAN;
+	fixture->request.root_fds = roots;
+	fixture->request.root_paths = paths;
+	fixture->request.root_count = 3;
+	CHECK(run(fixture, &error) == FSIMG_OK);
+	/* "/a", "/a/b", "/a/b/HELLO.TXT" and "/c.txt" beside the single root's. */
+	CHECK(fixture->result.entries == single + 4);
+
+	fixture->request.root_paths = invalid;
+	CHECK(run(fixture, &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "image path component") != NULL);
+	fixture->request.root_paths = colliding;
+	CHECK(run(fixture, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "/HELLO.TXT") == 0);
+	CHECK(close(roots[2]) == 0);
+	fixture->request.root_fds = &fixture->source;
+	fixture->request.root_paths = image_root;
+	fixture->request.root_count = 1;
 }
 
 /* Children close their channels just before they exit, and no descriptor

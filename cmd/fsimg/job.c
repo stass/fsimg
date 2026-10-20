@@ -14,9 +14,13 @@
  * NUL-terminated and zero after the terminator, then one byte saying
  * whether a label is present. Then come the write settings: the 16-byte
  * UUID, the byte order as one byte, and the inode capacity and reserve
- * percentage as eight little-endian bytes each. The remainder is zero
- * reserved space. These enums name wire positions and sizes only and are
- * independent of native struct layout or padding.
+ * percentage as eight little-endian bytes each, and the number of create
+ * roots as eight bytes. These enums name wire positions and sizes only and
+ * are independent of native struct layout or padding.
+ *
+ * The job's image paths follow the record in SELECTION frames, as one
+ * sequence of NUL-terminated paths whose total length the record states:
+ * a read job sends its one member, a create job one path per root.
  */
 typedef enum job_field {
 	JOB_KIND, JOB_SANDBOX, JOB_FLAGS, JOB_MEMORY, JOB_SCRATCH, JOB_ENTRIES,
@@ -36,7 +40,8 @@ typedef enum job_string_field {
 	JOB_BYTE_ORDER = 288,
 	JOB_INODES_OFFSET = 296,
 	JOB_RESERVE_OFFSET = 304,
-	JOB_RESERVED_OFFSET = 312
+	JOB_ROOTS_OFFSET = 312,
+	JOB_RESERVED_OFFSET = 320
 } job_string_field_t;
 _Static_assert(JOB_FORMAT_OFFSET + JOB_FORMAT_BYTES == JOB_LABEL_OFFSET &&
     JOB_LABEL_PRESENT < JOB_UUID_OFFSET, "the string fields do not overlap");
@@ -95,31 +100,76 @@ fsimg_worker_request_init(fsimg_worker_request_t *request)
 	request->selection = "/";
 	request->codepage = 437;
 	request->input_fd = request->output_fd = -1;
-	request->scratch_fd = request->source_fd = -1;
+	request->scratch_fd = -1;
+}
+
+bool
+fsimg_job_has_roots(fsimg_job_kind_t kind)
+{
+	return (kind == FSIMG_JOB_CREATE || kind == FSIMG_JOB_PLAN);
+}
+
+uint32_t
+fsimg_job_path_count(const fsimg_worker_request_t *request)
+{
+	return (fsimg_job_has_roots(request->kind) ? request->root_count : 1);
+}
+
+const char *
+fsimg_job_path(const fsimg_worker_request_t *request, uint32_t index)
+{
+	return (fsimg_job_has_roots(request->kind) ? request->root_paths[index] :
+	    request->selection);
+}
+
+/* The bytes of the job's path sequence, each path with its terminator.
+ * Every path must be shorter than the path limit; since there are at most
+ * UINT32_MAX paths of at most UINT32_MAX bytes, the total fits a uint64_t.
+ */
+fsimg_status_t
+fsimg_job_paths_length(const fsimg_worker_request_t *request, uint64_t *total,
+    fsimg_error_t *error)
+{
+	const char *path;
+	uint32_t path_limit, count;
+	size_t length;
+
+	path_limit = request->limits.max_path_bytes == 0 ?
+	    65536 : request->limits.max_path_bytes;
+	count = fsimg_job_path_count(request);
+	*total = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		path = fsimg_job_path(request, i);
+		if (path == NULL)
+			return (invalid_job(error));
+		length = strnlen(path, path_limit);
+		if (length >= path_limit)
+			return (fsimg_limit_error(error, FSIMG_RESOURCE_PATH,
+			    path_limit, (uint64_t)length + 1));
+		*total += (uint64_t)length + 1;
+	}
+	return (FSIMG_OK);
 }
 
 fsimg_status_t
 fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
     fsimg_error_t *error)
 {
-	uint64_t capabilities;
-	uint32_t path_limit;
-	size_t selection_length, label_length;
+	uint64_t capabilities, paths_length;
+	size_t label_length;
 	const char *label;
+	fsimg_status_t status;
 
-	if (request->selection == NULL ||
-	    memchr(request->format, '\0', JOB_FORMAT_BYTES) == NULL)
+	if (memchr(request->format, '\0', JOB_FORMAT_BYTES) == NULL ||
+	    fsimg_job_has_roots(request->kind) != (request->root_count != 0))
 		return (invalid_job(error));
 	label = request->write.label == NULL ? "" : request->write.label;
 	label_length = strnlen(label, JOB_LABEL_BYTES);
 	if (label_length == JOB_LABEL_BYTES)
 		return (invalid_job(error));
-	path_limit = request->limits.max_path_bytes == 0 ?
-	    65536 : request->limits.max_path_bytes;
-	selection_length = strnlen(request->selection, path_limit);
-	if (selection_length >= path_limit)
-		return (fsimg_limit_error(error, FSIMG_RESOURCE_PATH,
-		    path_limit, (uint64_t)selection_length + 1));
+	status = fsimg_job_paths_length(request, &paths_length, error);
+	if (status != FSIMG_OK)
+		return (status);
 	bzero(raw, FSIMG_JOB_BYTES);
 	put_field(raw, JOB_KIND, request->kind);
 	put_field(raw, JOB_SANDBOX, request->sandbox);
@@ -144,11 +194,12 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	put_field(raw, JOB_SERIAL, request->write.volume_serial);
 	put_field(raw, JOB_CODEPAGE, request->codepage);
 	put_field(raw, JOB_SECONDS, request->seconds);
-	capabilities = (request->input_fd != -1 ? 1u : 0u) |
-	    (request->output_fd != -1 ? 2u : 0u) |
-	    (request->scratch_fd != -1 ? 4u : 0u) | (request->source_fd != -1 ? 8u : 0u);
+	capabilities = (request->input_fd != -1 ? FSIMG_JOB_CAP_INPUT : 0) |
+	    (request->output_fd != -1 ? FSIMG_JOB_CAP_OUTPUT : 0) |
+	    (request->scratch_fd != -1 ? FSIMG_JOB_CAP_SCRATCH : 0) |
+	    (request->root_count != 0 ? FSIMG_JOB_CAP_ROOTS : 0);
 	put_field(raw, JOB_CAPABILITIES, capabilities);
-	put_field(raw, JOB_SELECTION, selection_length);
+	put_field(raw, JOB_SELECTION, paths_length);
 	bcopy(request->format, raw + JOB_FORMAT_OFFSET, strlen(request->format));
 	bcopy(label, raw + JOB_LABEL_OFFSET, label_length);
 	raw[JOB_LABEL_PRESENT] = request->write.label != NULL ? 1 : 0;
@@ -157,6 +208,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	raw[JOB_BYTE_ORDER] = (unsigned char)request->write.byte_order;
 	fsimg_wire_put64(raw + JOB_INODES_OFFSET, request->write.inode_capacity);
 	fsimg_wire_put64(raw + JOB_RESERVE_OFFSET, request->write.reserve_percent);
+	fsimg_wire_put64(raw + JOB_ROOTS_OFFSET, request->root_count);
 	return (FSIMG_OK);
 }
 
@@ -165,7 +217,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
     fsimg_worker_request_t *request, uint64_t *selection_length,
     unsigned *capabilities, fsimg_error_t *error)
 {
-	uint64_t epoch;
+	uint64_t epoch, roots, count;
 	uint32_t path_limit;
 
 	fsimg_worker_request_init(request);
@@ -176,7 +228,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
 	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED)) != 0 ||
-	    get_field(raw, JOB_CAPABILITIES) > 15 ||
+	    get_field(raw, JOB_CAPABILITIES) > (FSIMG_JOB_CAP_INPUT |
+	    FSIMG_JOB_CAP_OUTPUT | FSIMG_JOB_CAP_SCRATCH | FSIMG_JOB_CAP_ROOTS) ||
 	    !string_field_valid(raw + JOB_FORMAT_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_LABEL_OFFSET, JOB_LABEL_BYTES) ||
 	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||
@@ -205,6 +258,15 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	if (get_field(raw, JOB_WRITE_FLAGS) > UINT32_MAX ||
 	    fsimg_wire_get64(raw + JOB_INODES_OFFSET) > UINT32_MAX ||
 	    fsimg_wire_get64(raw + JOB_RESERVE_OFFSET) > UINT32_MAX)
+		return (invalid_job(error));
+	/* Roots exist exactly for create jobs, at most one per permitted
+	 * descriptor, and arrive with the roots capability.
+	 */
+	roots = fsimg_wire_get64(raw + JOB_ROOTS_OFFSET);
+	if (fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND)) !=
+	    (roots != 0) || roots > get_field(raw, JOB_FDS) ||
+	    ((get_field(raw, JOB_CAPABILITIES) & FSIMG_JOB_CAP_ROOTS) != 0) !=
+	    (roots != 0))
 		return (invalid_job(error));
 	request->kind = (fsimg_job_kind_t)get_field(raw, JOB_KIND);
 	request->sandbox = (fsimg_sandbox_policy_t)get_field(raw, JOB_SANDBOX);
@@ -244,9 +306,16 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    (uint32_t)fsimg_wire_get64(raw + JOB_RESERVE_OFFSET);
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);
+	/* Each path is at least "/" and its terminator, and shorter than the
+	 * path limit.
+	 */
 	path_limit = request->limits.max_path_bytes == 0 ? 65536 :
 	    request->limits.max_path_bytes;
-	if (*selection_length == 0 || *selection_length >= path_limit)
+	count = roots == 0 ? 1 : roots;
+	if (*selection_length < 2 * count ||
+	    *selection_length > count * path_limit)
 		return (invalid_job(error));
+	/* Last, so a refused record leaves no roots for cleanup to close. */
+	request->root_count = (uint32_t)roots;
 	return (FSIMG_OK);
 }

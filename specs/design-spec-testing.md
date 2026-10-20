@@ -451,7 +451,7 @@ An oracle is evidence, not a verdict. A checker can flag conservative
 incompatibilities or tolerate errors, so its result never overrides a published
 rule; where the specification is clear, it decides. Disagreements are recorded
 per tool, never resolved by majority, and expected at the exact variant
-thresholds, which some implementations avoid. `fsimg create` followed by
+thresholds, which some implementations avoid. `fsimg c` followed by
 fsimg's own reading stages is never evidence on its own, because both paths can
 share a defect.
 
@@ -467,13 +467,15 @@ and home paths.
 
 | Stage | Command |
 | --- | --- |
-| `info` | `fsimg info -j -i image.img` |
-| `ls` | `fsimg ls -j -r -i image.img` |
-| `extract` | `fsimg extract -j -i image.img -C dest` |
-| `verify`, `verify-deep` | `fsimg verify -j [-d] -i image.img` |
-| `create` | `fsimg create -j -R -t FORMAT [-s BYTES] [-O sector=N] [-O cluster=N] -o out/created.img source` |
+| `info` | `fsimg i --json -f image.img` |
+| `ls` | `fsimg t --json -f image.img` |
+| `extract` | `fsimg x --json -E -f image.img -C dest` |
+| `verify`, `verify-deep` | `fsimg W --json [-d] -f image.img` |
+| `create` | `fsimg c --json -R -F FORMAT [-s BYTES] [-o sector=N] [-o cluster=N] -f out/created.img -C source .` |
 
-A reading stage adds `-t FORMAT` when the recipe forces a format. Every
+A reading stage adds `-F FORMAT` when the recipe forces a format. The
+extraction stage creates `dest` empty with mode 0700 before it runs, since
+`-E` requires an empty private directory. Every
 invocation passes the profile's ceilings: `-m` with the memory ceiling, `-l`
 values for `seconds`, `entries`, `depth`, `path`, `output`, `scratch` and
 `fds`, and `-T scratch`.
@@ -700,7 +702,7 @@ stops, including on `SIGINT` or `SIGTERM`.
 
 ### Outcome classes
 
-A rejection is read from the integer `code` of the CLI's `-j` error record,
+A rejection is read from the integer `code` of the CLI's `--json` error record,
 under the [status contract](architecture.md#specification-driven-testing);
 neither the exit status nor the prose `status` string decides it.
 

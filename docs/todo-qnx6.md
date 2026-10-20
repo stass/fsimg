@@ -43,7 +43,7 @@ classic, MMI, and extended Power-Safe remain separate profiles.
 
 * [Medium] **Linux reader comparison** (`test/qnx6-integration.sh`): the
   script mounts the generated sample with the Linux qnx6 driver as root and
-  compares every regular file with `fsimg cat`. No Linux result is recorded;
+  compares every regular file with `fsimg x -O`. No Linux result is recorded;
   run it and record the kernel revision, byte order and checksum behavior in
   the build evidence.
 

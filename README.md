@@ -23,8 +23,9 @@ plan deterministic layouts, stream payloads directly from stable sources, and
 emit to bounded sinks or publish a new image without replacing an existing
 name. Plans expose geometry, space use, and metadata-loss counts. Safe extraction
 creates a fresh private tree with logical quotas, case/alias selection, and
-optional timestamp restoration. The `fsimg` command provides `create`, `info`,
-`ls`, `cat`, `extract`, `verify`, and `formats`, with streaming NDJSON output
+optional timestamp restoration. The tar-like `fsimg` command creates (`c`), lists (`t`),
+extracts (`x`, or `x -O` to stdout), verifies (`W`) and describes (`i`)
+images and reports `--formats`, with streaming NDJSON output
 and bounded progress. It supervises confined workers and bounded stdout/stderr
 output; Linux/FreeBSD profiles have actual kernel tests. The
 [implementation plan](docs/implementation-plan.md) and [open work](TODO.md)
@@ -53,21 +54,21 @@ timezone-basis losses follow the initialized options' explicit allow-loss
 policy and optional callback. Reproducible mode selects a fixed UTC epoch.
 The entry model also carries symbolic links, FIFOs, owner, mode and change
 time. FAT and exFAT store none of them: a symbolic link or FIFO fails
-planning, and owner and mode imported with `create -p` are counted optional
+planning, and owner and mode imported with `fsimg c -p` are counted optional
 losses that leave the image bytes unchanged. Extraction never creates links
-or FIFOs; `extract -k` skips and counts such entries instead of failing.
+or FIFOs; `fsimg x -k` skips and counts such entries instead of failing.
 
 The QNX6 reader accepts the classic QNX 6.5.0 layout in either byte order at
 512 through 4096-byte blocks, selects the newer of the two snapshot headers,
 and reports files, directories, symbolic links and FIFOs with owner, mode and
 all four timestamps. It finds the second header from the slice length, so a
-partition is read with `-b` and `-z` set to its exact offset and length.
-Hard links appear as separate entries with the same content, and names are
+partition is read with `--offset=` and `--length=` set to its exact offset
+and length. Hard links appear as separate entries with the same content, and names are
 compared byte for byte. QNX6 names reach 510 bytes; extracting one longer
 than the host filesystem allows, 255 bytes on most, fails as unsupported.
 Bootless and Audi MMI layouts and later Power-Safe extensions are recognized
 and refused as unsupported. The QNX6 writer creates
-the same layout with `-O endian=`, `uuid=`, `inodes=` and `reserve=`
+the same layout with `-o endian=`, `uuid=`, `inodes=` and `reserve=`
 settings and stores every entry kind and the POSIX fields; QNX 6.5.0 checks,
 mounts, modifies and remounts its volumes cleanly at every block size and in
 both byte orders.
@@ -76,11 +77,12 @@ The QNX4 reader accepts the volumes QNX 6.5.0 `dinit` makes, with or without
 `.longfilenames`, and reports files, directories, symbolic links and FIFOs
 with owner, mode and all four timestamps, and the label of up to 48 bytes.
 It derives the block count from the slice length, so a partition is read
-with `-b` and `-z` set to its exact offset and length. Names reach 505 bytes
+with `--offset=` and `--length=` set to its exact offset and length. Names
+reach 505 bytes
 on a volume with `.longfilenames` and 48 bytes without; they compare byte for
 byte, and hard links appear as separate entries with the same content. The
 format's own `.bitmap`, `.inodes`, `.longfilenames` and `lost+found` are not
-listed; `.boot` and `.altboot` are. `verify` checks that every allocated
+listed; `.boot` and `.altboot` are. `fsimg W` checks that every allocated
 block has exactly one owner, that every link count matches the names, and
 that every used `.inodes` slot and long-name record is named; it reports a
 volume whose label is invalid or
@@ -88,7 +90,7 @@ whose `lost+found` holds an entry as unsupported, since neither has an
 observed form. A volume whose `lost+found` `..` names the root record does
 not open, for the same reason. The QNX4 writer creates the layout QNX
 6.5.0 `dinit` makes, with `.longfilenames`, names of up to 505 bytes, a
-label of up to 48 bytes and an `-O inodes=` setting for the `.inodes`
+label of up to 48 bytes and an `-o inodes=` setting for the `.inodes`
 capacity. Every object is one extent, and the loader block is zero, so the
 volume is not bootable. It stores every entry kind and the POSIX fields.
 QNX 6.5.0 checks, mounts and remounts its volumes cleanly at every size
@@ -118,20 +120,22 @@ make check-install
 For a release archive, start with `./configure`; generated build support is
 included. `make install` installs the command, static/shared library, public
 header, pkg-config metadata, manuals and checked [C examples](docs/examples.md).
-See `fsimg -h`, `fsimg create -h`, and `man fsimg` for the command contract.
-Creation and extraction are quiet on success. Use `-n` to inspect a creation
-plan, `-v` for progress and sampled metadata-loss details, or `-j` for structured
-records with explicit completion. Human errors report relevant paths and OS
+The command is shaped like tar: a mode letter (`c` create, `x` extract, `t`
+list, `W` verify, `i` information) followed by option letters, with `-f`
+naming the image. See `fsimg -h`, `fsimg c -h`, and `man fsimg` for the
+command contract. Creation and extraction are quiet on success. Use `-n` to
+inspect a creation plan, `-vv` for progress and sampled metadata-loss details,
+or `--json` for structured records with explicit completion. Human errors report relevant paths and OS
 messages; metadata-loss notices count affected fields rather than files.
 Sandbox-unavailable warnings remain visible. Standalone macOS has no built-in
 OS confinement backend; `-S required` refuses operation there.
 
 ```sh
-fsimg formats
-fsimg create -R -t exfat -o new.img source-directory
-fsimg verify -d -i new.img
-fsimg ls -j -r -i new.img
-fsimg extract -i new.img -C new-directory
+fsimg --formats
+fsimg cRf new.img -F exfat -C source-directory .
+fsimg Wdf new.img
+fsimg tf new.img --json
+fsimg xf new.img
 ```
 
 See [build and validation](docs/build.md),

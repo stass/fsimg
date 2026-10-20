@@ -77,15 +77,15 @@ run_clean "$qualification_make" check-installed-consumers \
 LD_LIBRARY_PATH="$qualification_prefix/lib" DYLD_LIBRARY_PATH="$qualification_prefix/lib" \
     "$qualification_build/provider-shared" "$qualification_root/output" shared.img \
     "$qualification_root/scratch"
-"$qualification_prefix/bin/fsimg" verify -j -d \
-    -i "$qualification_root/output/shared.img" > "$qualification_root/verify.log"
+"$qualification_prefix/bin/fsimg" W --json -d \
+    -f "$qualification_root/output/shared.img" > "$qualification_root/verify.log"
 
 # The command carries its core directly; a moved copy still starts its worker
 # with no private-library search environment or installed helper executable.
 mkdir -m 700 "$qualification_root/relocated"
 cp "$qualification_prefix/bin/fsimg" "$qualification_root/relocated/fsimg"
-"$qualification_root/relocated/fsimg" verify -j -d \
-    -i "$qualification_root/output/static.img" > "$qualification_root/relocated.log"
+"$qualification_root/relocated/fsimg" W --json -d \
+    -f "$qualification_root/output/static.img" > "$qualification_root/relocated.log"
 
 case "$(uname -s)" in
     Darwin)

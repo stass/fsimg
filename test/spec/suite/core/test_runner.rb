@@ -23,17 +23,24 @@ class TestRunner < Minitest::Test
     runner = runner_for("/opt/fsimg")
     limits = %w[-l seconds=1 -l entries=100 -l depth=8 -l path=256 -l output=1048576 -l scratch=2097152 -l fds=64]
 
-    assert_equal ["/opt/fsimg", "info", "-j", "-m", "67108864", *limits, "-T", "scratch", "-i", "image.img"],
+    assert_equal ["/opt/fsimg", "i", "--json", "-m", "67108864", *limits, "-T", "scratch", "-f", "image.img"],
                  runner.command("info", recipe)
-    assert_equal %w[-i image.img -C dest], runner.command("extract", recipe).last(4)
-    assert_equal %w[-d -i image.img], runner.command("verify-deep", recipe).last(3)
-    assert_equal %w[-t fat12 -i image.img], runner.command("ls", recipe.with(forced_format: "fat12")).last(5).values_at(0, 1, 3, 4)
+    assert_equal %w[-E -f image.img -C dest], runner.command("extract", recipe).last(5)
+    assert_equal %w[-d -f image.img], runner.command("verify-deep", recipe).last(3)
+    assert_equal %w[-F fat12 -f image.img], runner.command("ls", recipe.with(forced_format: "fat12")).last(4)
+  end
+
+  def test_each_stage_runs_its_mode
+    modes = %w[info ls extract verify verify-deep].to_h { [_1, runner_for("/opt/fsimg").command(_1, recipe)[1]] }
+
+    assert_equal({ "info" => "i", "ls" => "t", "extract" => "x", "verify" => "W", "verify-deep" => "W" }, modes)
   end
 
   def test_create_command_maps_the_settings
     command = runner_for("/opt/fsimg").command("create", creation_recipe(settings: { size: 65_536, cluster: 4096 }))
 
-    assert_equal %w[-R -t fat16 -O cluster=4096 -s 65536 -o out/created.img source], command.last(10)
+    assert_equal "c", command[1]
+    assert_equal %w[-R -F fat16 -o cluster=4096 -s 65536 -f out/created.img -C source .], command.last(12)
   end
 
   def test_required_sandbox_passes_s_required
@@ -67,15 +74,14 @@ class TestRunner < Minitest::Test
   # Each stub misbehaves in one way the checks after the stage must find.
   def test_checks_after_a_stage_find_each_misbehaviour
     misbehaviours = {
-      "a link in the destination" => ["mkdir dest && ln -s /etc dest/link; #{ACCEPT}", /dest holds the link/],
-      "a hard link in the destination" => ["mkdir dest && echo x > dest/a && ln dest/a dest/b; #{ACCEPT}",
-                                           /dest holds the hard link/],
-      "a file outside the destination" => ["mkdir dest && echo x > stray; #{ACCEPT}", /unexpected "stray"/],
+      "a link in the destination" => ["ln -s /etc dest/link; #{ACCEPT}", /dest holds the link/],
+      "a hard link in the destination" => ["echo x > dest/a && ln dest/a dest/b; #{ACCEPT}", /dest holds the hard link/],
+      "a file outside the destination" => ["echo x > stray; #{ACCEPT}", /unexpected "stray"/],
       "a changed image" => ["echo x >> image.img; #{ACCEPT}", /image.img changed/],
       "a scratch file left behind" => ["echo x > scratch/left; #{ACCEPT}", %r{scratch/"left" was left behind}],
       "a child left alive" => ["sleep 30 & #{ACCEPT}", /outlived fsimg/],
       "an oracle configuration" => ["echo x > .mtoolsrc; #{ACCEPT}", /unexpected ".mtoolsrc"/],
-      "dest as a link" => ["ln -s / dest; #{ACCEPT}", /"dest" is a link, not a directory/],
+      "dest as a link" => ["rmdir dest && ln -s / dest; #{ACCEPT}", /"dest" is a link, not a directory/],
       "scratch as a link" => ["rmdir scratch && ln -s / scratch; #{ACCEPT}", /"scratch" is a link, not a directory/]
     }
 
@@ -103,9 +109,43 @@ class TestRunner < Minitest::Test
   # A dest that is a link to / is reported, never walked, so the checks
   # cannot hash the host's files.
   def test_destination_link_is_not_walked
-    with_case(script: "ln -s / dest; #{ACCEPT}", stage: "extract") do |result|
+    with_case(script: "rmdir dest && ln -s / dest; #{ACCEPT}", stage: "extract") do |result|
       assert_empty result.tree
       refute_empty result.problems
+    end
+  end
+
+  # extract -E fills only an empty directory private to its caller, so the
+  # runner creates dest/ with mode 0700 just before extract runs.
+  def test_extract_finds_an_empty_private_destination
+    with_case(script: "ls -A dest >&2; #{ACCEPT}", stage: "extract") do |result, directory|
+      assert_equal ["accepted", "", []], [result.outcome.kind, result.execution.stderr, result.problems]
+      assert_equal 0o700, File.lstat(File.join(directory, "dest")).mode & 0o7777
+    end
+  end
+
+  # A failed extract leaves its dest/, perhaps partly filled; the walk
+  # still checks what it holds.
+  def test_rejected_extract_leaves_a_checked_destination
+    error = '{"schema":1,"type":"error","code":-12,"resource":"none","sandbox":"unavailable"}'
+
+    with_case(script: "echo x > dest/a; ln -s /etc dest/link; echo '#{error}'; exit 1", stage: "extract") do |result|
+      assert_equal "rejected:FSIMG_EEXISTS", result.outcome.to_s
+      assert_equal ["dest holds the link \"link\""], result.problems
+    end
+  end
+
+  # dest/ already in the case directory before extract means the checks
+  # after an earlier stage were bypassed: a harness error, not a verdict.
+  def test_destination_before_extract_is_a_harness_error
+    Dir.mktmpdir do |root|
+      directory = File.join(root, "case")
+      FsimgSpec::CaseDirectory.prepare(directory, recipe:, image: image(root))
+      Dir.mkdir(File.join(directory, "dest"))
+
+      assert_raises(FsimgSpec::Error) do
+        runner_for(write_stub(root, ACCEPT)).run("extract", recipe:, case_directory: directory, sandbox: "unavailable")
+      end
     end
   end
 

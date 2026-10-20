@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdlib.h>
@@ -28,8 +29,12 @@
 #define FSIMG_CHILD_ASAN_PLATFORM_OPTIONS ""
 #endif
 
-/* Duplicate sources above the fixed target range before constructing actions.
- * This prevents one dup2 action from destroying a later action's source FD.
+/* Child descriptor i receives descriptors[i]. A source numbered below count
+ * could be the target of an earlier dup2 action, so it is first duplicated
+ * at or above count; a source already there is never a target and is used
+ * directly. No source then equals its target, so every target receives a
+ * fresh duplicate without close-on-exec, and a parent holding many roots
+ * above the child's layout needs no second copy of each.
  * Apple closes all unspecified FDs by spawn policy. Other hosts require their
  * closefrom file action; an unsupported host fails rather than guessing a loop
  * bound from a resource limit that can be below an already-open descriptor.
@@ -56,31 +61,37 @@ spawn_entry(const char *executable, const char *entry, const int *descriptors,
 		"MSAN_OPTIONS=halt_on_error=1:abort_on_error=0:exitcode=86:symbolize=0",
 		NULL
 	};
-	int copies[16], code;
+	int *copies, code;
 	short flags;
-	unsigned initialized;
 	bool have_actions, have_attributes;
 
-	if (count > 16 || executable == NULL || executable[0] != '/') {
+	if (count == 0 || count > INT_MAX || executable == NULL ||
+	    executable[0] != '/') {
 		errno = EINVAL;
 		return (-1);
 	}
+	copies = calloc(count, sizeof(*copies));
+	if (copies == NULL)
+		return (-1);
 	have_actions = have_attributes = false;
-	initialized = 0;
+	for (unsigned i = 0; i < count; i++)
+		copies[i] = -1;
 	for (unsigned i = 0; i < count; i++) {
-		copies[i] = fcntl(descriptors[i], F_DUPFD_CLOEXEC, 32);
+		if (descriptors[i] >= (int)count)
+			continue;
+		copies[i] = fcntl(descriptors[i], F_DUPFD_CLOEXEC, (int)count);
 		if (copies[i] == -1) {
 			code = errno;
 			goto done;
 		}
-		initialized++;
 	}
 	code = posix_spawn_file_actions_init(&actions);
 	if (code != 0)
 		goto done;
 	have_actions = true;
 	for (unsigned i = 0; i < count; i++) {
-		code = posix_spawn_file_actions_adddup2(&actions, copies[i], (int)i);
+		code = posix_spawn_file_actions_adddup2(&actions,
+		    copies[i] != -1 ? copies[i] : descriptors[i], (int)i);
 		if (code != 0)
 			goto done;
 	}
@@ -122,8 +133,11 @@ done:
 		posix_spawnattr_destroy(&attributes);
 	if (have_actions)
 		posix_spawn_file_actions_destroy(&actions);
-	for (unsigned i = 0; i < initialized; i++)
-		close(copies[i]);
+	for (unsigned i = 0; i < count; i++) {
+		if (copies[i] != -1)
+			close(copies[i]);
+	}
+	free(copies);
 	if (code != 0) {
 		errno = code;
 		return (-1);

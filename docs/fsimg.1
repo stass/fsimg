@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\" Copyright (c) 2026, fsimg contributors
-.Dd October 19, 2026
+.Dd October 20, 2026
 .Dt FSIMG 1
 .Os
 .Sh NAME
@@ -8,34 +8,41 @@
 .Nd create, inspect, verify and safely extract filesystem images
 .Sh SYNOPSIS
 .Nm
-.Cm create
+.Cm c Ns Op Cm W
+.Fl f Ar image
+.Fl F Ar stack
 .Op options
-.Fl t Ar format
-.Fl o Ar image
-.Ar source_directory
+.Op Fl C Ar dir
+.Ar operand ...
 .Nm
-.Cm info | verify
+.Cm x
+.Fl f Ar image
 .Op options
-.Fl i Ar image
+.Op Fl C Ar dir
+.Op Ar member ...
 .Nm
-.Cm ls
+.Cm x
+.Fl O
+.Fl f Ar image
 .Op options
-.Fl i Ar image
-.Op Ar image_path
+.Ar member
 .Nm
-.Cm cat
+.Cm t
+.Fl f Ar image
 .Op options
-.Fl i Ar image
-.Ar image_path
+.Op Ar member ...
 .Nm
-.Cm extract
+.Cm W
+.Fl f Ar image
 .Op options
-.Fl i Ar image
-.Fl C Ar new_directory
-.Op Ar image_path
 .Nm
-.Cm formats
-.Op Fl hjv
+.Cm i
+.Fl f Ar image
+.Op options
+.Nm
+.Fl Fl formats
+.Op Fl Fl json
+.Op Fl v
 .Nm
 .Fl h | V
 .Sh DESCRIPTION
@@ -46,30 +53,128 @@ FAT volumes with more than two FAT copies are reported as unsupported.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.
 It never modifies an existing image in place.
-Input is a seekable regular file; a dash does not request stdin spooling.
-Image paths are absolute UTF-8 paths below
-.Pa / .
+.Pp
+The command is shaped like
+.Xr tar 1 :
+one mode letter chooses the operation,
+.Fl f
+names the image and the remaining words are operands.
+.Bl -tag -width "-F stack"
+.It Cm c
+Create an image from host operands.
+.It Cm x
+Extract members into a fresh directory, or one member to stdout with
+.Fl O .
+.It Cm t
+List members, recursively by default.
+.It Cm W
+Verify an image; as
+.Cm cW ,
+verify the staged image before it is published.
+.It Cm i , Fl Fl info
+Report the stack and the volume information.
+.It Fl Fl formats
+Report compiled and usable capabilities; takes no image.
+.El
+.Pp
+Exactly one mode is given, except that
+.Cm c
+and
+.Cm W
+combine.
+Each mode may also be written as an option, such as
+.Fl x .
+The first argument, and only the first, may bundle mode and option letters
+without a leading dash, as in
+.Ql fsimg xvf boot.img .
+Every character of such a bundle must be an option letter and one of them a
+mode or
+.Fl h .
+The bundle is read as one option per letter, in order, and a letter that
+takes an argument consumes the next unused word after the bundle:
+.Ql fsimg cfF boot.img fat32
+is
+.Ql fsimg -c -f boot.img -F fat32 .
+.Pp
+Image paths, called members, are UTF-8 paths below the image root, relative
+.Pq Pa EFI/BOOT
+or absolute
+.Pq Pa /EFI/BOOT ,
+both naming the same entry.
 Selection follows filesystem case rules and FAT short aliases.
 Displayed paths retain their image spelling.
+No member selects the whole image.
 .Pp
 All image parsing occurs in a fresh worker.
 The coordinator prepares capabilities, supervises output and publishes
-completed
-images without replacement.
+completed images without replacement.
 The default sandbox policy uses available OS confinement and warns if
 unavailable.
 Unexpected confinement failures never trigger an unrestricted retry.
 The library API does not sandbox its embedding application.
 .Sh COMMON OPTIONS
-Options precede operands; use
+Options precede operands on every host: option parsing stops at the first
+operand, so a later word beginning with a dash is an operand.
+The one exception is
+.Fl C Ar dir
+among the operands of
+.Cm c .
 .Fl Fl
-to terminate option parsing.
-Unknown options, repeated singleton options and repeated setting keys fail.
+ends option parsing; every later word is an operand.
+No mode, two modes, an option the mode does not accept, a repeated singleton
+option, a repeated setting or limit key (even with an equal value), an unknown
+stack or setting name and an unexpected operand are syntax errors, reported
+before any image or source is opened.
 .Bl -tag -width Ds
+.It Fl f Ar image
+The image: input for
+.Cm x , t , W
+and
+.Cm i ,
+a seekable regular file; output for
+.Cm c ,
+a pathname that must not exist.
+Required except with
+.Cm c Fl n .
+.It Fl F Ar stack
+The image's layers, inner to outer, separated by
+.Ql / ;
+the filesystem name is fat12, fat16, fat32, exfat, qnx6 or qnx4.
+Required for
+.Cm c .
+On reading it forces the named decoder while retaining every validation; the
+default requires unambiguous detection.
+.Ql -
+marks a slot empty, so
+.Ql fat32/-/-
+names a bare volume.
 .It Fl h
-Display help for the selected command.
-At top level, display the command overview.
+With a mode, display that mode's synopsis, options and examples on stdout;
+alone, display the overview.
 Without arguments, the overview goes to stderr and the command exits 2.
+.It Fl Fl json
+Write streaming newline-delimited JSON, schema version 1.
+.Cm x Fl O
+rejects it.
+.It Fl l Ar key=value
+Set a resource limit; repeatable, each key at most once.
+Keys are scratch, spool, entries, depth, path, fds, output, work and seconds.
+Scratch, spool, path and output use bytes; the others are unsigned decimal
+counts.
+Zero selects the documented default.
+Seconds sets an operation deadline; zero adds no deadline.
+.It Fl m Ar bytes
+Aggregate library memory budget; default 256 MiB, minimum 16 MiB.
+.It Fl o Ar key=value
+A typed filesystem setting; repeatable, each key at most once.
+On reading, only
+.Ar oem=cp437 ,
+the FAT short-name codepage, is accepted.
+Creation settings are described under
+.Sx CREATION .
+A key qualified by a layer name, such as
+.Ar gpt:type=esp ,
+names a layer the stack must contain.
 .It Fl S Ar auto|required|off
 Select sandbox policy.
 Required mode refuses an unavailable backend; off explicitly disables
@@ -80,21 +185,32 @@ Scratch parent, defaulting to TMPDIR when set, otherwise
 A dash disables scratch.
 Fresh private scratch contains metadata, never a payload copy.
 Use disk-backed storage for massive catalogs.
-.It Fl j
-Write streaming newline-delimited JSON, schema version 1.
-The cat command rejects this flag.
-.It Fl m Ar bytes
-Aggregate library memory budget; default 256 MiB, minimum 16 MiB.
-.It Fl l Ar key=value
-Set a resource limit.
-Keys are scratch, entries, depth, path, fds, output, work and seconds.
-Scratch, path and output use bytes; other values use unsigned decimal counts.
-Zero selects the documented default.
-Seconds sets an operation deadline; zero adds no deadline.
 .It Fl v
-Report bounded progress, capability details and sampled metadata-loss examples
-on stderr.
-With formats, show geometry, profiles and sandbox capabilities on stderr.
+Verbosity, repeatable as
+.Fl vv .
+In modes
+.Cm c
+and
+.Cm x ,
+.Fl vv
+reports bounded progress, capability details and sampled metadata-loss
+examples on stderr; a single
+.Fl v
+alone adds no output in these modes.
+In mode
+.Cm t ,
+.Fl v
+selects the long listing on stdout and
+.Fl vv
+adds the same stderr details.
+In modes
+.Cm W , i
+and
+.Fl Fl formats ,
+.Fl v
+shows capability, geometry and sandbox details on stderr.
+.It Fl V
+Display the version.
 .El
 .Pp
 Byte quantities use unsigned decimal with optional uppercase K, M, G, T or P
@@ -102,31 +218,32 @@ binary suffixes.
 Signs, whitespace, fractions and overflow fail.
 Defaults are 64 GiB scratch, 10,000,000 entries, depth 256, 64 KiB image paths
 including separators and NUL, and 128 owned descriptors.
+The fds limit also caps the number of create operands: the worker holds one
+open root per operand besides its staging directory, scratch directory and
+two scanning descriptors.
 Logical extraction output defaults to the selected volume slice length,
 including holes.
 Work and time have no hidden short default limit.
-.Sh READ OPTIONS
+.Sh READING
+Modes
+.Cm x , t , W
+and
+.Cm i
+also accept:
 .Bl -tag -width Ds
-.It Fl i Ar image
-Required input file.
-.It Fl b Ar bytes
-Volume offset; default zero.
-.It Fl z Ar bytes
-Positive slice length; default remaining file length.
-.It Fl t Ar format
-Force a supported decoder while retaining validation.
-The default requires unambiguous detection.
-.It Fl O Ar oem=cp437
-Select the supported FAT short-name codepage explicitly.
+.It Fl Fl offset Ns = Ns Ar bytes
+Volume offset within the image; default zero.
+.It Fl Fl length Ns = Ns Ar bytes
+Positive volume length; default the rest of the image.
 .El
 .Pp
-Partition selection is explicit through a byte slice; no partition is guessed.
+A volume slice is selected explicitly by byte range; no partition is guessed.
 QNX6 locates its second superblock in the last whole 4096-byte unit of the
 slice, so
-.Fl z
+.Fl Fl length
 must be the exact partition length.
 QNX4 derives its block count from the slice length, so
-.Fl z
+.Fl Fl length
 must be its exact partition length too.
 QNX6 and QNX4 names compare byte for byte, and hard links list as separate
 entries.
@@ -136,7 +253,7 @@ QNX4 hides its own
 .Pa .longfilenames
 and
 .Pa lost+found .
-.Cm verify
+.Cm W
 reports a QNX4 volume whose label is invalid or whose
 .Pa lost+found
 holds an entry as unsupported, since neither has an observed form to check.
@@ -144,56 +261,103 @@ A QNX4 volume whose
 .Pa lost+found
 .Pa ..
 entry names the root record does not open, for the same reason.
-.Cm info
-reports header validation, geometry, label, volume UUID when the format has
-one, time basis and known capabilities.
+.Pp
+.Cm i
+reports the stack in
+.Fl F
+syntax and its compression, then header validation, geometry, label, volume
+UUID when the format has one, time basis and known capabilities.
 Unknown counts remain unknown.
-.Cm ls
-lists immediate children or a selected file;
-.Fl r
-recursively lists its subtree.
-.Cm cat
-requires one regular file or symbolic link and writes raw logical bytes,
-including zero tails; a symbolic link's bytes are its target.
-.Cm verify
+.Pp
+.Cm t
+lists the selected members and their whole subtrees;
+.Fl Fl no-recursion
+lists one level, the immediate children of a selected directory or the
+selected file itself.
+.Pp
+.Cm W
 checks the complete supported structure;
 .Fl d
 also reads initialized payload bytes.
 It performs no repair.
 .Sh CREATION
-.Cm create
-accepts one source directory and requires
-.Fl t
-with fat12, fat16, fat32, exfat, qnx6 or qnx4.
+Operands are host paths, as for
+.Xr tar 1 .
+Each is opened relative to the
+.Fl C
+directory in force, the working directory until a
+.Fl C
+is given; an absolute operand is opened as given.
+Among the operands,
+.Fl C Ar dir
+or
+.Fl C Ns Ar dir
+applies to the operands after it.
+Each
+.Fl C
+directory is resolved against the working directory, must exist and must
+apply to at least one operand.
+An operand is a directory or a regular file; it is opened without following
+a final symbolic link, so a symbolic link operand fails.
+.Pp
+An operand is stored under its own path with empty and
+.Pa \&.
+components removed, so
+.Ql fsimg cf x.img -F fat32 rootfs
+produces
+.Pa /rootfs/...
+and
+.Ql -C rootfs \&.
+places the contents of rootfs at the image root.
+A
+.Pa ..
+component is a syntax error.
+An operand
+.Pa a/b/c
+is stored as
+.Pa /a/b/c
+beneath parent directories
+.Pa /a
+and
+.Pa /a/b
+that carry no metadata, so the format's defaults for absent fields apply.
+Directories supplied by several operands become one directory with the union
+of their children; its metadata comes from the first operand that scanned it,
+and a parent created for a longer operand never outranks a scanned directory.
+Any other repeated image path fails planning and names the path, so naming
+the same tree twice fails on its first file.
 .Bl -tag -width Ds
-.It Fl o Ar image
-New output pathname, required except with
-.Fl n .
-.It Fl n
-Collect, validate and report a plan without creating an output image or reading
-file payloads.
-Scratch use is allowed.
+.It Fl e Ar epoch
+Signed decimal Unix seconds for reproducible timestamps; requires
+.Fl R .
+Default is 315532800 (1980-01-01 UTC).
+No implicit timezone or SOURCE_DATE_EPOCH policy applies.
+.It Fl Fl free-space Ns = Ns Ar bytes
+Minimum free space after metadata and allocation rounding.
 .It Fl L Ar label
 Volume label.
 The default FSIMG applies only to a format with a volume label; a format
 without one is created without a label and rejects
 .Fl L .
-.It Fl p
-Import each source object's owner, group and permission bits as optional
-metadata.
-.It Fl O Ar sector=bytes
+.It Fl n
+Collect, validate and report a plan without creating an output image or reading
+file payloads;
+.Fl f
+is then optional.
+Scratch use is allowed.
+.It Fl o Ar sector=bytes
 Sector size within the selected profile.
-.It Fl O Ar cluster=bytes
+.It Fl o Ar cluster=bytes
 Allocation-unit size within the selected profile; for QNX6 the block size,
 512, 1024 (the default), 2048 or 4096.
-.It Fl O Ar endian=little|big
+.It Fl o Ar endian=little|big
 QNX6 on-disk byte order; default little.
-.It Fl O Ar uuid=uuid
+.It Fl o Ar uuid=uuid
 QNX6 volume UUID as RFC 4122 text, stored in textual byte order.
 Without it,
 .Fl R
 selects all zero and otherwise a random version 4 UUID is generated.
-.It Fl O Ar inodes=count
+.It Fl o Ar inodes=count
 QNX6 inode capacity, rounded up to a whole inode-table block; default the
 native formatter's ratio of one inode per 8 to 128 blocks, raised to the
 number of entries.
@@ -201,20 +365,22 @@ For QNX4, the
 .Pa .inodes
 slot count, rounded up to a whole block of 8 slots; default and minimum
 128, raised to the number of names longer than 16 bytes plus one.
-.It Fl O Ar reserve=percent
+.It Fl o Ar reserve=percent
 QNX6 reserved-block percentage recorded in the header and kept free; default
 3.
-.It Fl s Ar bytes
-Positive exact logical volume size; omission chooses automatic sizing.
-.It Fl f Ar bytes
-Minimum free-space reserve after metadata and allocation rounding.
+.It Fl p
+Import each source object's owner, group and permission bits as optional
+metadata.
 .It Fl R
 Reproducible bytes with stable ordering, identifiers and padding.
-.It Fl e Ar epoch
-Signed decimal Unix seconds for reproducible timestamps; requires
-.Fl R .
-Default is 315532800 (1980-01-01 UTC).
-No implicit timezone or SOURCE_DATE_EPOCH policy applies.
+.It Fl s Ar bytes
+Positive exact logical volume size; omission chooses automatic sizing.
+.It Fl W
+Verify the staged image in a second worker under the image-reading profile
+before publication;
+.Fl d
+adds payload reads.
+A failed verification discards the staged image and publishes nothing.
 .El
 .Pp
 Import accepts regular files, directories and symbolic links, hierarchy,
@@ -225,6 +391,7 @@ The Linux sandbox denies the worker the path-based queries that read a link,
 so a confined Linux import of a tree containing one fails as unsupported.
 Import rejects special files, including FIFOs, descendant mount crossings and
 encounters with its own scratch or staging trees.
+Hardlinked host files are copied as independent files.
 Keep source trees stable; hostile mutation requires immutable storage or a
 snapshot.
 A changed or replaced source file or link fails creation.
@@ -247,18 +414,85 @@ Failures distinguish retained staging, published output and uncertain
 durability.
 Do not retry a published or uncertain outcome blindly.
 .Sh EXTRACTION
+.Fl C Ar dir
+names an existing directory, by default the working directory.
+.Cm x
+creates exactly one fresh directory inside it, named after the image, with
+mode 0700, and extracts beneath that:
+.Ql fsimg xf boot.img
+extracts into
+.Pa ./boot/ .
+An existing name of any kind, including an empty directory or a symbolic
+link, fails; there is no merge.
+The name is the basename of the
+.Fl f
+path with suffixes removed from the outside in, each at most once and
+ASCII case-insensitively: one compression suffix
+.Pq Pa .gz ,
+then one container suffix
+.Pq Pa .dmg , .vhd , .simg ,
+then one image suffix
+.Pq Pa .img , .raw , .bin , .dd .
+.Pa disk.img.gz
+yields
+.Pa disk
+and
+.Pa rootfs.vhd.img
+yields
+.Pa rootfs.vhd .
+When nothing was removed, or the rest is empty,
+.Pa \&. ,
+.Pa ..
+or not one valid host name, no name is invented and
+.Fl E
+is required.
+.Bl -tag -width Ds
+.It Fl E
+Extract directly into the
 .Fl C
-names a fresh directory; even an existing empty directory fails.
+directory, which must be empty and private.
+.It Fl k
+Skip entries of unsupported kinds; the number skipped is reported in a
+warning and in the JSON summary.
+.It Fl O
+Write one member's logical bytes to stdout instead of extracting.
+.El
+.Pp
+Both destinations must be private, judged on the opened directory alone: a
+directory owned by the effective user, not writable by group or others, and
+carrying no non-trivial access control list of any type the platform reports.
+Read and search permission for others is allowed.
+With
+.Fl E
+the directory is opened without following a symbolic link and must also be
+empty.
+A fresh directory that inherits a non-trivial ACL from its parent is removed
+again and the error names the parent.
+.Nm
+never edits an ACL.
+On Linux a listed
+.Ql system.nfs4_acl
+attribute counts as non-trivial whatever it holds, so a destination on an NFS
+server with ACL support cannot be used, and the server-side ACLs of a CIFS
+mount are not visible to the check at all.
+.Pp
 Selected paths and necessary ancestors are preserved below the image root.
 Output uses private directories and regular files, no links, no merge,
 no privileged metadata and no host timestamp restoration.
+Every entry is created exclusively, so an object another process adds
+concurrently is a collision failure.
 An image entry of another kind, such as a symbolic link or FIFO, fails the
-extraction and is named in the error.
-.Bl -tag -width Ds
-.It Fl k
-Skip entries of unsupported kinds instead; the number skipped is reported in a
-warning and in the JSON summary.
-.El
+extraction and is named in the error, unless
+.Fl k
+skips it.
+.Pp
+.Fl O
+takes exactly one member, a regular file or a symbolic link, whose bytes are
+its target, and writes its raw logical bytes including zero tails.
+It rejects
+.Fl Fl json , C , E
+and
+.Fl k .
 .Pp
 Logical holes count against the output quota.
 Failure can leave a private incomplete destination, identified by diagnostics.
@@ -269,22 +503,39 @@ incomplete.
 .Sh OUTPUT
 Human names and controls are escaped.
 Diagnostics and bounded progress use stderr; payloads and records use stdout.
-Successful create and extract commands are silent by default.
+Successful creation and extraction are silent by default.
 Listings contain one quoted pathname per line, without a completion trailer;
 a symbolic link is marked with
 .Ql @
 and a FIFO with
 .Ql |
 after the quoted name.
-Info and dry-run creation plans use aligned labels and binary byte units.
+The long listing of
+.Cm t Fl v
+prefixes each name with three columns: the kind
+.Pq Ql - , d , l No or Ql p
+followed by nine permission characters, or nine
+.Ql \&?
+when the format stores no mode; the logical length of a file or link, or
+.Ql - ;
+and the modification time as
+.Ql YYYY-MM-DD HH:MM:SS
+in UTC, the recorded calendar fields for an unknown-offset time, or
+.Ql -
+when absent.
+It consults no locale or host timezone.
+Information and dry-run creation plans use aligned labels and binary byte
+units.
 Unknown free space is labeled without scanning the filesystem.
-Formats displays a compact read/write/verify table; use
+.Fl Fl formats
+displays a compact read/write/verify table; use
 .Fl v
 for detailed restrictions.
 Creation plans appear on stdout with
 .Fl n
-or on stderr during verbose creation.
-Verify reports the checked scope only after successful worker exit and
+or on stderr with
+.Fl vv .
+Verification reports the checked scope only after successful worker exit and
 finalization.
 .Pp
 On success, optional metadata loss produces one notice counting affected fields,
@@ -300,6 +551,19 @@ publication or durability are always reported.
 JSON entries stream individually and are followed by a successful summary only
 after worker completion and required finalization.
 An error record or missing successful summary means incomplete output.
+The summary's command field names the mode:
+.Ql c ,
+.Ql cW ,
+.Ql x ,
+.Ql t ,
+.Ql W ,
+.Ql i
+or
+.Ql formats .
+Information records carry the stack and a null compression for a bare,
+uncompressed volume.
+.Cm cW
+writes a verify record for its staged image.
 Large integers are decimal strings; bounded geometry, flags, nanoseconds and
 offset minutes are JSON integers.
 Unknown values are null.
@@ -321,16 +585,40 @@ Status 1 means operational failure, including corruption, unsupported required
 features, cancellation, partial output or uncertain durability.
 Status 2 means invalid command syntax.
 A sandbox-unavailable warning under automatic mode alone is not failure.
+.Pp
+.Nm
+recognizes the following and reports each as not supported, with status 1,
+after the rest of the command line is checked:
+compression
+.Pq Fl z , No and Fl a No with Cm c ,
+minimization
+.Pq Fl M No with Cm c ,
+partition selection
+.Pq Fl Fl partition No when reading ,
+an image on standard input or output
+.Pq Fl f Fl ,
+a stack naming a partition scheme or a container, such as
+.Ql fat32/gpt ,
+the reserved filesystem names apfs and hfs,
+and more than one member for
+.Cm x
+or
+.Cm t .
 .Sh EXAMPLES
 .Bd -literal -offset indent
-fsimg create -R -t exfat -o data.img ./files
-fsimg create -n -R -t exfat -m 64M -T /scratch ./files
-fsimg ls -j -r -i data.img /
-fsimg cat -i data.img /documents/readme.txt > readme.txt
-fsimg extract -S required -i data.img -C ./new-output /documents
-fsimg verify -d -i data.img
-fsimg info -b 1M -z 1G -i disk.img
-fsimg formats -j
+fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .
+fsimg cRf data.img -F exfat -C files .
+fsimg cWf data.img -F exfat -C esp . -C extra EFI
+fsimg cn -F exfat -R -m 64M -T /scratch -C files .
+fsimg tf data.img --json /
+fsimg tvf data.img
+fsimg xOf data.img /documents/readme.txt > readme.txt
+fsimg xf data.img -S required -C /tmp /documents
+fsimg xEf data.img -C ./empty-dir
+fsimg Wdf data.img
+fsimg if disk.img --offset=1M --length=1G
+fsimg --formats --json
 .Ed
 .Sh SEE ALSO
+.Xr tar 1 ,
 .Xr libfsimg 3

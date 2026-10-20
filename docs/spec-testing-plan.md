@@ -70,7 +70,7 @@ The harness adds to the current suites. It does not replace them.
 | Comparison baseline | `test/baseline.sh.in`, `test/baseline.txt` | Out of scope. The harness never changes the baseline fixtures. |
 | libFuzzer targets | `fuzz/fat.c`, `build-aux/fuzz.sh` | Seeds are generated at run time into `fuzz-corpus/` with a 3 MiB maximum length. No corpus is committed. |
 | Interpreter precedent | `test/cli.sh.in` with `test/cli.py` | Python is an optional development tool. Its wrapper exits 77 when the interpreter is absent. The Ruby wrapper follows this pattern. |
-| CLI stages | `info`, `ls -r`, `cat`, `extract -C`, `verify [-d]`, `create` (`specs/design-cli.md`) | The runner drives these. With `-j`, they emit NDJSON `summary` and `error` records. Each error record carries the integer status `code` (an `fsimg_status_t` value) and a prose `status` string. |
+| CLI stages | `i`, `t`, `x -O`, `x -E`, `W [-d]`, `c` (`specs/design-cli.md`) | The runner drives these. With `--json`, they emit NDJSON `summary` and `error` records. Each error record carries the integer status `code` (an `fsimg_status_t` value) and a prose `status` string. |
 
 ## Design
 
@@ -157,7 +157,7 @@ review and commit gates.
   target design in the present tense.
 * Reference it from `specs/README.md` and from a short testing section in
   `specs/architecture.md`. That section records only the cross-subsystem
-  contract: the integer status `code` of CLI `-j` error records, what
+  contract: the integer status `code` of CLI `--json` error records, what
   `FSIMG_EFORMAT`, `FSIMG_ECORRUPT` and `FSIMG_EUNSUPPORTED` mean, including
   the host causes of `FSIMG_EUNSUPPORTED`, and the `FSIMG_EIO` and
   `FSIMG_ESTATE` fault classes, which image content never causes on a
@@ -426,11 +426,11 @@ review and commit gates.
     BMP and non-BMP, or reserved; nesting depth; empty, 1-byte,
     cluster-minus-one, exact-cluster and multi-cluster files; bounded
     directory width.
-  - External create, fsimg read: mtools populates, then fsimg `extract`
+  - External create, fsimg read: mtools populates, then fsimg `x`
     output must equal the model in path, type, size and SHA-256.
-  - fsimg create, external read: `fsimg create -R`, then `mcopy -s` must
+  - fsimg create, external read: `fsimg c -R`, then `mcopy -s` must
     reproduce the tree, with `fsck -n` and fatcat as further evidence.
-  - Exercise writer geometry rules with `-s`, `-O sector=` and `-O cluster=`,
+  - Exercise writer geometry rules with `-s`, `-o sector=` and `-o cluster=`,
     including exact-threshold sizes, which the writer permits only with `-s`.
   - Then decide whether the fixed cases in `fat-integration.sh` move into the
     harness. Moving them is worthwhile only if it removes a mechanism.

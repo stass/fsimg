@@ -16,6 +16,8 @@
 #include "internal.h"
 #include "sandbox.h"
 
+static fsimg_status_t check_roles(const fsimg_sandbox_caps_t *, fsimg_error_t *);
+
 #if defined(__linux__)
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -165,12 +167,13 @@ restrict_descriptor(int fd, cap_rights_t *rights, unsigned fcntls)
 #endif
 
 fsimg_status_t
-fsimg_sandbox_install(int input_fd, int work_fd, int source_fd,
+fsimg_sandbox_install(int input_fd, int destination_fd, int source_fd,
     fsimg_error_t *error)
 {
 	const fsimg_sandbox_caps_t caps = {
-		.input = input_fd, .output = work_fd, .scratch = -1,
-		.source = source_fd, .job = -1, .control = -1, .data = -1, .cancel = -1
+		.input = input_fd, .staging = -1, .destination = destination_fd,
+		.scratch = -1, .roots = source_fd, .root_count = source_fd == -1 ? 0 : 1,
+		.job = -1, .control = -1, .data = -1, .cancel = -1
 	};
 
 	return (fsimg_sandbox_install_caps(&caps, error));
@@ -189,27 +192,17 @@ fsimg_sandbox_backend(void)
 #endif
 }
 
-fsimg_status_t
-fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
-    fsimg_error_t *error)
+/* Every role must be the object its grant assumes before any backend runs:
+ * the input a read-only regular file, the three writable roles
+ * directories, and each root a read-only directory or regular file.
+ */
+static fsimg_status_t
+check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 {
+	const int directories[] = { caps->staging, caps->destination, caps->scratch };
 	struct stat st;
-	const int work_fds[] = { caps->output, caps->scratch };
-	int flags;
-#if defined(__linux__) && defined(FSIMG_AUDIT_ARCH) && \
-    defined(LANDLOCK_ACCESS_FS_TRUNCATE)
-	struct landlock_ruleset_attr rules = {
-		.handled_access_fs = (LANDLOCK_ACCESS_FS_TRUNCATE << 1) - 1
-	};
-	uint64_t work_rights, source_rights;
-	struct statx mount_query = { 0 };
-	int abi, ruleset, saved;
-#elif defined(__FreeBSD__)
-	cap_rights_t rights;
-	unsigned mode;
-#endif
+	int flags, fd;
 
-	fsimg_error_clear(error);
 	if (caps->input != -1) {
 		flags = fcntl(caps->input, F_GETFL);
 		if (flags == -1 || fstat(caps->input, &st) == -1)
@@ -219,19 +212,63 @@ fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox input requires read-only regular file"));
 	}
-	for (unsigned i = 0; i < 2; i++) {
-		if (work_fds[i] != -1 &&
-		    (fstat(work_fds[i], &st) == -1 || !S_ISDIR(st.st_mode)))
+	for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
+		if (directories[i] != -1 &&
+		    (fstat(directories[i], &st) == -1 || !S_ISDIR(st.st_mode)))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox work root requires directory"));
 	}
-	if (caps->source != -1) {
-		flags = fcntl(caps->source, F_GETFL);
+	if ((caps->roots == -1) != (caps->root_count == 0))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CONTEXT, "sandbox roots are inconsistent"));
+	for (unsigned i = 0; i < caps->root_count; i++) {
+		fd = caps->roots + (int)i;
+		flags = fcntl(fd, F_GETFL);
 		if (flags == -1 || (flags & O_ACCMODE) != O_RDONLY ||
-		    fstat(caps->source, &st) == -1 || !S_ISDIR(st.st_mode))
+		    fstat(fd, &st) == -1 || (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CONTEXT, "sandbox source requires read-only directory"));
+			    FSIMG_OP_CONTEXT, "sandbox source requires read-only directory or file"));
 	}
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+#if defined(__linux__) && defined(FSIMG_AUDIT_ARCH) && \
+    defined(LANDLOCK_ACCESS_FS_TRUNCATE)
+	struct landlock_ruleset_attr rules = {
+		.handled_access_fs = (LANDLOCK_ACCESS_FS_TRUNCATE << 1) - 1
+	};
+	const struct {
+		int		 fd;
+		uint64_t	 rights;
+	} grants[] = {
+		{ caps->staging, LANDLOCK_ACCESS_FS_READ_FILE |
+		    LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_TRUNCATE |
+		    LANDLOCK_ACCESS_FS_MAKE_REG },
+		{ caps->destination, LANDLOCK_ACCESS_FS_READ_FILE |
+		    LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_TRUNCATE |
+		    LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_READ_DIR |
+		    LANDLOCK_ACCESS_FS_MAKE_DIR },
+		{ caps->scratch, LANDLOCK_ACCESS_FS_READ_FILE |
+		    LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_TRUNCATE |
+		    LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_REMOVE_FILE }
+	};
+	struct statx mount_query = { 0 };
+	struct stat st;
+	int abi, ruleset, saved;
+#elif defined(__FreeBSD__)
+	cap_rights_t rights;
+	unsigned mode;
+#endif
+
+	fsimg_error_clear(error);
+	status = check_roles(caps, error);
+	if (status != FSIMG_OK)
+		return (status);
 #if defined(__linux__) && defined(FSIMG_AUDIT_ARCH) && \
     defined(LANDLOCK_ACCESS_FS_TRUNCATE)
 	abi = (int)syscall(__NR_landlock_create_ruleset, NULL, 0,
@@ -244,8 +281,8 @@ fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
 	if (abi < 3)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_CONTEXT, "Landlock ABI 3 required"));
-	if (caps->source != -1) {
-		if (syscall(__NR_statx, caps->source, NULL, AT_EMPTY_PATH,
+	if (caps->root_count != 0) {
+		if (syscall(__NR_statx, caps->roots, NULL, AT_EMPTY_PATH,
 		    STATX_MNT_ID, &mount_query) == -1) {
 			if (errno == EFAULT || errno == ENOSYS || errno == EINVAL)
 				return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, errno,
@@ -260,23 +297,21 @@ fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
 	    sizeof(rules), 0);
 	if (ruleset == -1)
 		goto linux_fail;
-	source_rights = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
-	work_rights = source_rights | LANDLOCK_ACCESS_FS_WRITE_FILE |
-	    LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_MAKE_REG |
-	    LANDLOCK_ACCESS_FS_MAKE_DIR;
-	for (unsigned i = 0; i < 2; i++) {
-		/* Scratch is disposable; output remains for the coordinator to own. */
-		uint64_t rights = work_rights;
-
-		if (i == 1)
-			rights |= LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR;
-		if (work_fds[i] != -1 &&
-		    allow_directory(ruleset, work_fds[i], rights) == -1)
+	for (unsigned i = 0; i < sizeof(grants) / sizeof(grants[0]); i++) {
+		if (grants[i].fd != -1 &&
+		    allow_directory(ruleset, grants[i].fd, grants[i].rights) == -1)
 			goto ruleset_fail;
 	}
-	if (caps->source != -1 &&
-	    allow_directory(ruleset, caps->source, source_rights) == -1)
-		goto ruleset_fail;
+	/* A file root is read through its descriptor alone, which Landlock does
+	 * not mediate, so only directory roots need a rule.
+	 */
+	for (unsigned i = 0; i < caps->root_count; i++) {
+		if (fstat(caps->roots + (int)i, &st) == -1)
+			goto ruleset_fail;
+		if (S_ISDIR(st.st_mode) && allow_directory(ruleset, caps->roots + (int)i,
+		    LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR) == -1)
+			goto ruleset_fail;
+	}
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1)
 		goto ruleset_fail;
 	if (syscall(__NR_landlock_restrict_self, ruleset, 0) == -1)
@@ -304,20 +339,40 @@ linux_fail:
 		if (restrict_descriptor(caps->input, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
 	}
-	for (unsigned i = 0; i < 2; i++) {
-		if (work_fds[i] == -1)
-			continue;
-		cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_LOOKUP, CAP_CREATE,
-		    CAP_FSTAT, CAP_SEEK, CAP_FSYNC, CAP_FTRUNCATE, CAP_MKDIRAT, CAP_FCNTL);
-		if (i == 1)
-			cap_rights_set(&rights, CAP_UNLINKAT);
-		if (restrict_descriptor(work_fds[i], &rights, CAP_FCNTL_GETFL) == -1)
-			goto freebsd_fail;
+	/* The three writable roles share file rights and differ only in what
+	 * they may do to names: destination makes directories, scratch
+	 * removes its files, and staging does neither.
+	 */
+	{
+		const struct {
+			int	 fd;
+			bool	 make_directories;
+			bool	 remove_files;
+		} writable[] = {
+			{ caps->staging, false, false },
+			{ caps->destination, true, false },
+			{ caps->scratch, false, true }
+		};
+
+		for (unsigned i = 0; i < sizeof(writable) / sizeof(writable[0]); i++) {
+			if (writable[i].fd == -1)
+				continue;
+			cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_LOOKUP,
+			    CAP_CREATE, CAP_FSTAT, CAP_SEEK, CAP_FSYNC, CAP_FTRUNCATE,
+			    CAP_FCNTL);
+			if (writable[i].make_directories)
+				cap_rights_set(&rights, CAP_MKDIRAT);
+			if (writable[i].remove_files)
+				cap_rights_set(&rights, CAP_UNLINKAT);
+			if (restrict_descriptor(writable[i].fd, &rights,
+			    CAP_FCNTL_GETFL) == -1)
+				goto freebsd_fail;
+		}
 	}
-	if (caps->source != -1) {
+	for (unsigned i = 0; i < caps->root_count; i++) {
 		cap_rights_init(&rights, CAP_READ, CAP_LOOKUP, CAP_FSTAT, CAP_FSTATFS,
 		    CAP_SEEK, CAP_FCNTL);
-		if (restrict_descriptor(caps->source, &rights, CAP_FCNTL_GETFL) == -1)
+		if (restrict_descriptor(caps->roots + (int)i, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
 	}
 	{

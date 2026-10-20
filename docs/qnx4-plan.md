@@ -30,7 +30,7 @@ estimate substitutes for a gate.
 
 Goals:
 
-1. Read native QNX4 volumes, bare or as a slice given with `-b` and `-z`,
+1. Read native QNX4 volumes, bare or as a slice given with `--offset=` and `--length=`,
    through `info`, `ls`, `cat`, `extract` and `verify`. Resources are bounded
    at any legal geometry, and every failure falls into the closed status
    classification.
@@ -425,7 +425,7 @@ research boundary of the QNX6 record.
 * `test/qnx4-integration.sh.in` runs the oracles the build finds and skips
   the others explicitly:
   - the Linux `qnx4` reader on a Linux host (root, loop device, read-only),
-    compared with `fsimg ls` and `cat`;
+    compared with `fsimg t` and `fsimg x -O`;
   - qnxprobe, as a comparison only, when its path is given;
   - the native captures;
   - H1 partition 3. The image path and slice bounds come from the

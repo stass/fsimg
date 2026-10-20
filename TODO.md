@@ -15,25 +15,42 @@
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
   the [layer design](specs/design-layers.md) in the four stages of the
-  [plan](docs/implementation-plan.md#extension-sequence). The specification
-  harness invokes the old CLI (`specs/design-spec-testing.md` invocation
-  table, `test/spec/` runner) and the manual page documents it; both move
-  with the first stage. Configure gains the required system zlib. The layer
+  [plan](docs/implementation-plan.md#extension-sequence). The command
+  line recognizes and refuses with exit 1 what stages 2 to 4 implement
+  (stacks beyond a bare filesystem, containers, compression, `-f -` and
+  `--partition`) and `-M` minimization, which no stage schedules yet. Configure gains the required system zlib. The layer
   design's evidence gates (hdiutil, qemu-img) settle its uncovered-DMG-sector
   and DMG-table-split questions; its degraded-GPT and reproducible-identifier
   questions, and the command-line spelling of wrap, unwrap and compose, are
   owner decisions to take before the stages that need them.
-  The sandbox does not yet install the authority mapping of
+  The remaining sandbox gaps against the authority mapping of
   [design-security.md](specs/design-security.md#coordinator-and-worker)
-  (`cmd/fsimg/sandbox.c`): staging shares the extraction grant and so gains
-  directory creation, scratch also gets directory rights, the input check
-  accepts only a regular file (pipes are specified), handed-over spool and
-  raw-intermediate descriptors are not rights-limited under Capsicum, and
-  the extraction destination is absent from the mapping. Split the grants,
-  admit FIFO input and limit handed-over descriptors in stages 1 and 4, and
-  state which naming constraints only worker behaviour enforces. Whether the
-  input relay runs confined is also unstated in
+  (`cmd/fsimg/sandbox.c`) belong to stage 4: the input check accepts only a
+  regular file (pipes are specified), and handed-over spool and
+  raw-intermediate descriptors are not rights-limited under Capsicum. State
+  which naming constraints only worker behaviour enforces; whether the input
+  relay runs confined is also unstated in
   [architecture.md](specs/architecture.md).
+  Stage 1 leaves these open:
+  * The split staging, destination, scratch and root grants and the
+    destination fixtures have run only on macOS, which has no sandbox
+    backend; run `test-sandbox`, `test-sandbox-setup` and the CLI
+    destination tests on Linux (Landlock) and FreeBSD (Capsicum).
+  * `c -v` and `x -v` do not yet print one line per entry: the writer and
+    extractor have no per-entry callback for the worker to relay
+    (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
+  * Layer-qualified `-o` keys are accepted unread once their layer is
+    selected, without each layer's key table, and `-a` does not yet apply
+    the container-suffix and reserved-suffix rules of the contract; both
+    arrive with the layers (`cmd/fsimg/options.c`).
+  * Tests do not yet feed the worker a malformed path sequence (a count
+    differing from the record, a missing terminator, an extra or empty
+    SELECTION frame), and no test drives a `cW` whose staged image fails
+    verification to show it is discarded unpublished
+    (`cmd/fsimg/worker-child.c`, `test/worker.c`, `test/cli.py`).
+  * `x` and `t` accept one member; several members, the union of their
+    subtrees resolved by each format's lookup rules, are refused with exit 1
+    (`cmd/fsimg/options.c`, `lib/read/`).
 
 * [Medium] **QNX4 interoperability** (`lib/formats/qnx4/`): the
   [format design](specs/design-qnx4.md) and [driver design](specs/design-qnx4-driver.md)

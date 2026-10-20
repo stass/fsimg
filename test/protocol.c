@@ -22,6 +22,10 @@ static void test_invalid_entry_records(void);
 static void test_info_uuid(void);
 static void test_info_label(void);
 static void test_job_posix_flags(void);
+static void test_job_roots(void);
+
+/* Create jobs in these tests populate the image root from one root. */
+static const char *const image_root[] = { "/" };
 static bool entry_frame_valid(const fsimg_entry_t *, bool);
 static void write_seed(const char *);
 
@@ -199,13 +203,15 @@ test_job_label(void)
 
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
 	request.write.label = "MYLABEL";
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
 	CHECK(decoded.write.label != NULL);
 	CHECK(strcmp(decoded.write.label, "MYLABEL") == 0);
-	CHECK(selection == 1 && capabilities == 0);
+	CHECK(selection == 2 && capabilities == 8);
 
 	/* The longest label any format stores, QNX4's 48 bytes, round-trips;
 	 * one byte more does not encode.
@@ -451,6 +457,8 @@ test_job_posix_flags(void)
 	CHECK(decoded.flags == FSIMG_JOB_SKIP_UNSUPPORTED);
 
 	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
 	request.flags = 0;
 	request.write.flags |= FSIMG_WRITE_IMPORT_POSIX;
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
@@ -474,6 +482,8 @@ test_job_qnx6_settings(void)
 
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
 	request.write.byte_order = FSIMG_BYTE_ORDER_BIG;
 	request.write.inode_capacity = 4000000;
 	request.write.reserve_percent = 0;
@@ -492,6 +502,58 @@ test_job_qnx6_settings(void)
 		CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded,
 		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
 	}
+}
+
+/* Roots travel with create jobs only: their count, the roots capability and
+ * the packed path sequence length must agree, and the count cannot exceed
+ * the descriptor limit.
+ */
+static void
+test_job_roots(void)
+{
+	static const char *const paths[] = { "/", "/EFI", "/a/b" };
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES], mutated[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+	request.kind = FSIMG_JOB_LIST;
+	request.root_paths = paths;
+	request.root_count = 1;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+	request.kind = FSIMG_JOB_PLAN;
+	request.root_count = 3;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.root_count == 3 && selection == 2 + 5 + 5);
+	CHECK((capabilities & 8) != 0);
+
+	/* A count over the descriptor limit, a zero count, a missing roots
+	 * capability, and a sequence too short for the count are refused.
+	 */
+	bcopy(raw, mutated, sizeof(raw));
+	fsimg_wire_put64(mutated + 312, 129);
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	fsimg_wire_put64(mutated + 312, 0);
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	bcopy(raw, mutated, sizeof(raw));
+	fsimg_wire_put64(mutated + 23 * 8, 0);
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	bcopy(raw, mutated, sizeof(raw));
+	fsimg_wire_put64(mutated + 24 * 8, 5);
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+
+	/* The path limit bounds every root path. */
+	request.limits.max_path_bytes = 4;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_ELIMIT);
 }
 
 int
@@ -516,5 +578,6 @@ main(int argc, char **argv)
 	test_info_uuid();
 	test_info_label();
 	test_job_posix_flags();
+	test_job_roots();
 	return (0);
 }

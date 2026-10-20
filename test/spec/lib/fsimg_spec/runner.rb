@@ -27,7 +27,7 @@ module FsimgSpec
     SANITIZER_SUFFIX = "abort_on_error=0:log_path=stderr:exitcode=87"
     SANITIZER_VARIABLES = %w[ASAN_OPTIONS UBSAN_OPTIONS LSAN_OPTIONS MSAN_OPTIONS].freeze
     # The creation settings and the create option each becomes.
-    CREATE_SETTINGS = { size: ["-s"], sector: ["-O", "sector="], cluster: ["-O", "cluster="] }.freeze
+    CREATE_SETTINGS = { size: ["-s"], sector: ["-o", "sector="], cluster: ["-o", "cluster="] }.freeze
 
     # fsimg is the binary's absolute path, and environment the harness's
     # own (ENV), from which PATH, the sanitizer options and the sandbox
@@ -52,6 +52,7 @@ module FsimgSpec
 
       image_before = image_identity(case_directory, stage, recipe)
       oracle_before = oracle_files(case_directory)
+      create_destination(case_directory, recipe) if stage == "extract"
       execution = Invocation.run(command(stage, recipe), chdir: case_directory, env: fsimg_environment(case_directory),
                                                           limits:, observer: @observer)
       capture_problems = capture(case_directory, stage, execution)
@@ -62,15 +63,18 @@ module FsimgSpec
       StageResult.new(stage:, outcome:, execution:, tree:, problems:)
     end
 
-    # fsimg's argv for stage of recipe, with relative operands.
+    # fsimg's argv for stage of recipe, with relative operands. A listing
+    # recurses by default, extract fills the dest/ the runner created (-E),
+    # and create stores the contents of source/ at the image root.
     def command(stage, recipe)
       case stage
-      in "info" then [@fsimg, "info", *reading_options(recipe), "-i", image(recipe)]
-      in "ls" then [@fsimg, "ls", *reading_options(recipe), "-r", "-i", image(recipe)]
-      in "extract" then [@fsimg, "extract", *reading_options(recipe), "-i", image(recipe), "-C", "dest"]
-      in "verify" then [@fsimg, "verify", *reading_options(recipe), "-i", image(recipe)]
-      in "verify-deep" then [@fsimg, "verify", *reading_options(recipe), "-d", "-i", image(recipe)]
-      in "create" then [@fsimg, "create", *common_options, "-R", "-t", recipe.format, *settings(recipe), "-o", CREATED, "source"]
+      in "info" then [@fsimg, "i", *reading_options(recipe), "-f", image(recipe)]
+      in "ls" then [@fsimg, "t", *reading_options(recipe), "-f", image(recipe)]
+      in "extract" then [@fsimg, "x", *reading_options(recipe), "-E", "-f", image(recipe), "-C", "dest"]
+      in "verify" then [@fsimg, "W", *reading_options(recipe), "-f", image(recipe)]
+      in "verify-deep" then [@fsimg, "W", *reading_options(recipe), "-d", "-f", image(recipe)]
+      in "create"
+        [@fsimg, "c", *common_options, "-R", "-F", recipe.format, *settings(recipe), "-f", CREATED, "-C", "source", "."]
       else raise Error, "#{recipe.id}: unknown stage #{FsimgSpec.shown(stage)}"
       end
     end
@@ -98,14 +102,14 @@ module FsimgSpec
 
     def image(recipe) = recipe.reading? ? IMAGE : CREATED
 
-    def reading_options(recipe) = [*common_options, *(recipe.forced_format ? ["-t", recipe.forced_format] : [])]
+    def reading_options(recipe) = [*common_options, *(recipe.forced_format ? ["-F", recipe.forced_format] : [])]
 
     # The profile's ceilings, the scratch directory and the sandbox policy,
     # which stays at fsimg's default unless the run requires a sandbox.
     def common_options
       limits = %i[seconds entries depth path output scratch fds].flat_map { ["-l", "#{_1}=#{@ceilings.limit(_1)}"] }
       sandbox = @environment["FSIMG_SPEC_SANDBOX"] == "required" ? ["-S", "required"] : []
-      ["-j", "-m", @ceilings.memory.to_s, *limits, "-T", "scratch", *sandbox]
+      ["--json", "-m", @ceilings.memory.to_s, *limits, "-T", "scratch", *sandbox]
     end
 
     def settings(recipe)
@@ -124,6 +128,15 @@ module FsimgSpec
         answer = NameFunnel.create_file(case_directory, name) { _1.write(bytes) }
         "#{name} existed before its capture" unless answer == :created
       end
+    end
+
+    # Creates dest/ empty and private for extract to fill: fsimg fills the
+    # directory -E names only when the caller owns it and no one else may
+    # write it. The case directory check forbids dest/ before extract, so a
+    # dest/ already there is a fault of the harness.
+    def create_destination(case_directory, recipe)
+      answer = NameFunnel.create_directory(case_directory, "dest")
+      raise Error, "#{recipe.id}: dest could not be created before extract (#{answer})" unless answer == :created
     end
 
     # The image's identity, or nil before create: its inode, size and

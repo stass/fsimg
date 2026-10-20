@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
@@ -90,11 +91,16 @@ typedef struct worker_relay {
 	bool		 final;
 } worker_relay_t;
 
+/* The outbound job: one JOB frame, then SELECTION frames carrying the job's
+ * NUL-terminated paths. path_index and path_offset locate the next byte of
+ * that sequence; a frame may end inside a path or span several.
+ */
 typedef struct worker_request_cursor {
 	unsigned char	 wire[FSIMG_FRAME_HEADER + FSIMG_FRAME_BYTES];
 	size_t		 length;
 	size_t		 used;
-	size_t		 selection_offset;
+	uint32_t	 path_index;
+	size_t		 path_offset;
 } worker_request_cursor_t;
 
 typedef struct worker_supervisor {
@@ -133,6 +139,8 @@ static fsimg_status_t deliver_event(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t handle_frame(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t read_control(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t prepare_request(worker_supervisor_t *, fsimg_error_t *);
+static size_t fill_paths_frame(const fsimg_worker_request_t *,
+    worker_request_cursor_t *, unsigned char *);
 static void advance_request(worker_supervisor_t *);
 static fsimg_status_t setup_channels(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t start_processes(worker_supervisor_t *, const char *, int,
@@ -481,7 +489,7 @@ static void
 advance_request(worker_supervisor_t *state)
 {
 	worker_request_cursor_t *outbound = &state->outbound;
-	size_t length, batch;
+	size_t batch;
 	ssize_t count;
 
 	count = write(state->channels[CHANNEL_JOB][1], outbound->wire + outbound->used,
@@ -507,21 +515,47 @@ advance_request(worker_supervisor_t *state)
 		fsimg_frame_advance(&state->decoder);
 		return;
 	}
-	length = strlen(state->request->selection);
-	if (outbound->selection_offset == length) {
+	batch = fill_paths_frame(state->request, outbound,
+	    outbound->wire + FSIMG_FRAME_HEADER);
+	if (batch == 0) {
 		state->phase = WORKER_STARTING;
 		return;
 	}
-	batch = length - outbound->selection_offset;
-	if (batch > FSIMG_FRAME_BYTES)
-		batch = FSIMG_FRAME_BYTES;
 	fsimg_frame_header(outbound->wire, FSIMG_FRAME_SELECTION, (uint32_t)batch, NULL);
-	bcopy(state->request->selection + outbound->selection_offset,
-	    outbound->wire + FSIMG_FRAME_HEADER, batch);
-	outbound->selection_offset += batch;
 	outbound->length = FSIMG_FRAME_HEADER + batch;
 	outbound->used = 0;
 	return;
+}
+
+/* Copy the next bytes of the job's path sequence, the member of a read job
+ * or each root's image path of a create job, every path with its NUL.
+ * Encoding has already checked each path against the path limit.
+ */
+static size_t
+fill_paths_frame(const fsimg_worker_request_t *request,
+    worker_request_cursor_t *outbound, unsigned char *payload)
+{
+	const char *path;
+	size_t used, length, batch;
+	uint32_t count;
+
+	count = fsimg_job_path_count(request);
+	used = 0;
+	while (used < FSIMG_FRAME_BYTES && outbound->path_index < count) {
+		path = fsimg_job_path(request, outbound->path_index);
+		length = strlen(path) + 1;
+		batch = length - outbound->path_offset;
+		if (batch > FSIMG_FRAME_BYTES - used)
+			batch = FSIMG_FRAME_BYTES - used;
+		bcopy(path + outbound->path_offset, payload + used, batch);
+		used += batch;
+		outbound->path_offset += batch;
+		if (outbound->path_offset == length) {
+			outbound->path_index++;
+			outbound->path_offset = 0;
+		}
+	}
+	return (used);
 }
 
 static fsimg_status_t
@@ -560,7 +594,8 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
     fsimg_error_t *error)
 {
 	const fsimg_worker_request_t *request = state->request;
-	int parser[FSIMG_CHILD_LAST + 1], output[5];
+	int *parser, output[5];
+	unsigned parser_count;
 	fsimg_status_t status;
 	int null_fd, code, saved;
 
@@ -598,7 +633,20 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
 		close_channel(&state->channels[CHANNEL_STATUS][1]);
 		return (FSIMG_OK);
 	}
-	for (unsigned i = 0; i <= FSIMG_CHILD_LAST; i++)
+	/* The fixed layout, then one descriptor per create root. */
+	if (request->root_count > INT_MAX - FSIMG_CHILD_ROOTS) {
+		close(null_fd);
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_CONTEXT,
+		    "worker descriptor layout exceeds the descriptor range"));
+	}
+	parser_count = FSIMG_CHILD_ROOTS + request->root_count;
+	parser = calloc(parser_count, sizeof(*parser));
+	if (parser == NULL) {
+		close(null_fd);
+		return (fsimg_error_set(error, FSIMG_ENOMEM, ENOMEM,
+		    FSIMG_OP_CONTEXT, "worker descriptor table allocation failed"));
+	}
+	for (unsigned i = 0; i < parser_count; i++)
 		parser[i] = null_fd;
 	parser[FSIMG_CHILD_JOB] = state->channels[CHANNEL_JOB][0];
 	parser[FSIMG_CHILD_CONTROL] = state->channels[CHANNEL_CONTROL][1];
@@ -610,11 +658,12 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
 		parser[FSIMG_CHILD_OUTPUT] = request->output_fd;
 	if (request->scratch_fd != -1)
 		parser[FSIMG_CHILD_SCRATCH] = request->scratch_fd;
-	if (request->source_fd != -1)
-		parser[FSIMG_CHILD_SOURCE] = request->source_fd;
-	code = fsimg_host_spawn_worker(executable, parser, FSIMG_CHILD_LAST + 1,
+	for (uint32_t i = 0; i < request->root_count; i++)
+		parser[FSIMG_CHILD_ROOTS + i] = request->root_fds[i];
+	code = fsimg_host_spawn_worker(executable, parser, parser_count,
 	    &state->processes[PROCESS_PARSER].pid);
 	saved = errno;
+	free(parser);
 	close(null_fd);
 	if (code == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, saved,

@@ -920,10 +920,11 @@ all 31 native captures and F1 behave so: free block counts equal native
 `chkqnx6fs` output, the eight empty comparisons find no difference outside
 the CRC and sync time, and the 9,830,368-block volume with 1,048,576 inodes and a depth-3 file verifies with payload in under
 a second at 16 MiB RSS. The four QNX6 partitions of the measured PCM 3.1 HDD,
-read with `fsimg verify -b -z` at their partition offsets and lengths, also
+read with `fsimg W --offset= --length=` at their partition offsets and
+lengths, also
 verify, including the head unit's original populated partition. On a Linux
 host as root the script mounts the generated sample with the kernel's qnx6
-driver and compares every regular file with `fsimg cat`; elsewhere that
+driver and compares every regular file with `fsimg x -O`; elsewhere that
 comparison is an explicit skip, and no Linux result is recorded
 ([TODO](todo-qnx6.md)).
 
@@ -1058,21 +1059,21 @@ QNXPROBE='/path/to/qnxprobe' ./test/qnx4-integration.sh
 
 The script first writes the generator's sample volume with `test-qnx4
 --seed` and verifies it. `FSIMG_QNX4_NATIVE` names a directory of QNX 6.5.0
-captures (`q4-*.img.gz`). Each must open as QNX4 through `fsimg info`, list
-through `fsimg ls` and verify completely through `fsimg verify -d`; for
+captures (`q4-*.img.gz`). Each must open as QNX4 through `fsimg i`, list
+through `fsimg t` and verify completely through `fsimg W -d`; for
 each `q4-manifest-*` capture the guest's `ls -l` and `cksum` manifest must
 equal fsimg's names, kinds, modes, link counts, owners, sizes, symbolic-link
-targets and the checksums of every file read through `fsimg cat`, and
+targets and the checksums of every file read through `fsimg x -O`, and
 `test-qnx4-write --native` must find no difference. On macOS all 41
 captures open and verify, the 16 manifests match and the twelve empty
 captures equal fsimg's empty volumes; with the H1 partition below the whole
-run takes 252 seconds, most of it one `fsimg cat` per file.
+run takes 252 seconds, most of it one `fsimg x -O` per file.
 
 With `FSIMG_QNX4_LINUX=1` on a Linux host as root, with the kernel's qnx4
 driver, the script mounts
 the sample and every capture read only from a loop device limited to the
 volume's slice, and requires the kernel's view to agree with fsimg's
-manifest and `fsimg cat`: every entry below names of at most 48 bytes with
+manifest and `fsimg x -O`: every entry below names of at most 48 bytes with
 the same kind, size or symbolic-link target and POSIX `cksum`, and the same
 number of entries in all, since Linux shows a name over 48 bytes as its
 48-byte link field; it prints the kernel revision with each result. It also
@@ -1088,15 +1089,16 @@ so no Linux or
 qnxprobe result is recorded ([TODO](todo-qnx4.md)).
 
 `FSIMG_QNX4_H1` names a disk image read in place at the partition's byte
-range. The script runs only `fsimg info`, which must report QNX4, and
-`fsimg verify -d`, whose payload read-through reads every file, and prints
+range. The script runs only `fsimg i`, which must report QNX4, and
+`fsimg W -d`, whose payload read-through reads every file, and prints
 only the verify record's counts. The PCM 3.1 HDD's QNX4 partition verifies
 with 22 directories, the root included, and 52 other entries, 22,384,057,279
 initialized bytes read, 43,744,183 blocks allocated and 59,023,622 free:
 every allocated block has one owner. On macOS with the image in the page
-cache, `fsimg verify -b 3232535040 -z 52617116160` takes 4.2 seconds of
+cache, `fsimg W --offset=3232535040 --length=52617116160` takes 4.2 seconds
+of
 wall time and 0.22 seconds of CPU at a peak RSS of 41 MB as
-`/usr/bin/time -l` reports it, and `verify -d` 7.9 seconds at 37 MB.
+`/usr/bin/time -l` reports it, and `W -d` 7.9 seconds at 37 MB.
 
 The sparse exFAT qualification uses a 64 MiB library budget:
 

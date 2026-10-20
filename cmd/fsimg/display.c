@@ -34,10 +34,13 @@ static void path_excerpt(fsimg_cli_display_t *, const char *);
 static void uint_value(fsimg_cli_display_t *, uint64_t);
 static const char *confinement_name(fsimg_confinement_t);
 static const char *basis_name(uint64_t);
+static const char *verified_scope_name(fsimg_validation_scope_t);
 static const char *scope_name(const fsimg_cli_display_t *);
 static void timestamp(fsimg_cli_display_t *, const unsigned char *, bool);
 static void volume(fsimg_cli_display_t *, const unsigned char *);
 static void plan(fsimg_cli_display_t *, const unsigned char *);
+static void civil_time(int64_t, char *, size_t);
+static void long_listing_columns(fsimg_cli_display_t *, const unsigned char *);
 static void entry_start(fsimg_cli_display_t *, const unsigned char *);
 static void verification(fsimg_cli_display_t *, const unsigned char *);
 static void format(fsimg_cli_display_t *, const fsimg_format_info_t *);
@@ -243,124 +246,173 @@ byte_size(fsimg_cli_display_t *display, uint64_t value)
 		append(display, " (%llu bytes)", (unsigned long long)value);
 }
 
+/* The synopsis lines of each mode, and the overview listing them all. */
+static const char synopsis_create[] =
+    "usage: fsimg c[W] -f image -F stack [options] [-C dir] operand ...\n";
+static const char synopsis_extract[] =
+    "usage: fsimg x -f image [options] [-C dir] [member ...]\n"
+    "       fsimg x -O -f image [options] member\n";
+static const char synopsis_list[] = "usage: fsimg t -f image [options] [member ...]\n";
+static const char synopsis_verify[] = "usage: fsimg W -f image [options]\n";
+static const char synopsis_info[] = "usage: fsimg i -f image [options]\n";
+static const char synopsis_formats[] = "usage: fsimg --formats [--json] [-v]\n";
+
 static void
 usage(fsimg_cli_display_t *display, bool overview)
 {
-	const fsimg_cli_options_t *options = display->options;
+	const char *mode = display->options->mode;
 
-	if (options->request.kind == FSIMG_JOB_CREATE || options->request.kind == FSIMG_JOB_PLAN)
-		append(display, "usage: fsimg create [options] -t format [-o image] source_directory\n");
-	else if (options->request.kind == FSIMG_JOB_INFO)
-		append(display, "usage: fsimg info [options] -i image\n");
-	else if (options->request.kind == FSIMG_JOB_VERIFY)
-		append(display, "usage: fsimg verify [options] -i image\n");
-	else if (options->request.kind == FSIMG_JOB_LIST)
-		append(display, "usage: fsimg ls [options] -i image [image_path]\n");
-	else if (options->request.kind == FSIMG_JOB_CAT)
-		append(display, "usage: fsimg cat [options] -i image image_path\n");
-	else if (options->request.kind == FSIMG_JOB_EXTRACT)
-		append(display, "usage: fsimg extract [options] -i image -C new_directory [image_path]\n");
-	else if (strcmp(options->name, "formats") == 0)
-		append(display, "usage: fsimg formats [-hjv]\n");
-	else {
-		append(display, "usage: fsimg command [options] [operands]\n");
-		if (overview)
-			append(display, "\ncommands:\n"
-			    "    create     Create an image from a directory\n"
-			    "    info       Show image information\n"
-			    "    ls         List image contents\n"
-			    "    cat        Write a file to standard output\n"
-			    "    extract    Extract into a new directory\n"
-			    "    verify     Check filesystem integrity\n"
-			    "    formats    List supported formats\n\n"
-			    "Use fsimg command -h for command help.\n"
-			    "Use fsimg -V for the version; see fsimg(1) for full documentation.\n");
+	if (overview || mode[0] == '\0') {
+		append(display,
+		    "usage: fsimg c[W] -f image -F stack [options] [-C dir] operand ...\n"
+		    "       fsimg x -f image [options] [-C dir] [member ...]\n"
+		    "       fsimg x -O -f image [options] member\n"
+		    "       fsimg t -f image [options] [member ...]\n"
+		    "       fsimg W -f image [options]\n"
+		    "       fsimg i -f image [options]\n"
+		    "       fsimg --formats [--json] [-v]\n"
+		    "       fsimg -h | -V\n");
+		if (!overview && mode[0] == '\0')
+			return;
+		append(display, "\nmodes:\n"
+		    "    c          Create an image from host operands\n"
+		    "    x          Extract into a new directory, or one member to stdout with -O\n"
+		    "    t          List members\n"
+		    "    W          Verify an image; cW verifies a new image before publication\n"
+		    "    i, --info  Show the stack and volume information\n"
+		    "    --formats  List supported formats\n\n"
+		    "The first argument may bundle the mode and option letters: fsimg xvf boot.img.\n"
+		    "Use fsimg MODE -h, such as fsimg x -h, for mode help.\n"
+		    "Use fsimg -V for the version; see fsimg(1) for full documentation.\n");
+		return;
 	}
+	if (mode[0] == 'c')
+		append(display, synopsis_create);
+	else if (strcmp(mode, "x") == 0)
+		append(display, synopsis_extract);
+	else if (strcmp(mode, "t") == 0)
+		append(display, synopsis_list);
+	else if (strcmp(mode, "W") == 0)
+		append(display, synopsis_verify);
+	else if (strcmp(mode, "i") == 0)
+		append(display, synopsis_info);
+	else
+		append(display, synopsis_formats);
 }
+
+/* Option descriptions shared by the image modes, in option order. */
+static const char help_budgets[] =
+    "    -l key=value    Limit scratch, spool, entries, depth, path, fds, output,\n"
+    "                    work or seconds\n";
+static const char help_memory[] =
+    "    -m bytes        Memory budget (default 256M, minimum 16M)\n";
+static const char help_read_common[] =
+    "    -F stack        Force the filesystem decoder, retaining validation\n"
+    "    -f image        Read a seekable regular image file\n"
+    "    -h              Show mode help\n"
+    "    --json          Write newline-delimited JSON\n";
+static const char help_slice[] =
+    "    --length=bytes  Volume slice length (default the rest of the image)\n";
+static const char help_settings_read[] =
+    "    -o oem=cp437    Set FAT short-name encoding\n"
+    "    --offset=bytes  Volume slice offset (default 0)\n";
+static const char help_policies[] =
+    "    -S policy       Sandbox: auto (default), required or off\n"
+    "    -T directory    Scratch parent; - disables scratch\n";
+static const char help_units[] =
+    "\nOptions precede operands. K, M, G, T and P are powers of 1024.\n";
 
 static void
 help(fsimg_cli_display_t *display)
 {
-	const fsimg_cli_options_t *options = display->options;
-	fsimg_job_kind_t kind = options->request.kind;
+	const char *mode = display->options->mode;
 
-	usage(display, true);
-	if (kind == 0 && strcmp(options->name, "formats") != 0)
+	usage(display, mode[0] == '\0');
+	if (mode[0] == '\0')
 		return;
 	append(display, "\noptions:\n");
-	if (strcmp(options->name, "formats") == 0) {
-		append(display, "    -h              Show command help\n"
-		    "    -j              Write newline-delimited JSON\n"
+	if (strcmp(mode, "formats") == 0) {
+		append(display, "    -h              Show mode help\n"
+		    "    --json          Write newline-delimited JSON\n"
 		    "    -v              Show profiles, geometry and sandbox capabilities on stderr\n\n"
-		    "example:\n    fsimg formats -v\n");
+		    "example:\n    fsimg --formats -v\n");
 		return;
 	}
-	if (kind == FSIMG_JOB_EXTRACT)
-		append(display, "    -C directory    Extract into a new private directory\n");
-	if (kind >= FSIMG_JOB_CREATE)
-		append(display, "    -L label        Volume label (default FSIMG where the format has one)\n"
-		    "    -O key=value    Set sector or cluster size in bytes\n"
-		    "    -R              Create reproducible image bytes\n");
-	else
-		append(display, "    -O oem=cp437    Set FAT short-name encoding\n");
-	append(display, "    -S policy       Sandbox: auto (default), required, or off\n"
-	    "    -T directory    Scratch parent; - disables scratch\n");
-	if (kind < FSIMG_JOB_CREATE)
-		append(display, "    -b bytes        Volume offset (default 0)\n");
-	if (kind == FSIMG_JOB_VERIFY)
-		append(display, "    -d              Also read initialized file data\n");
-	if (kind >= FSIMG_JOB_CREATE)
-		append(display, "    -e epoch        Reproducible Unix timestamp; requires -R\n"
-		    "    -f bytes        Minimum free space in the image\n");
-	append(display, "    -h              Show command help\n");
-	if (kind < FSIMG_JOB_CREATE)
-		append(display, "    -i image        Read a seekable regular image file\n");
-	if (kind != FSIMG_JOB_CAT)
-		append(display, "    -j              Write newline-delimited JSON\n");
-	if (kind == FSIMG_JOB_EXTRACT)
-		append(display, "    -k              Skip and count symbolic links and other unsupported kinds\n");
-	append(display, "    -l key=value    Set scratch, entries, depth, path, fds, output, work, or seconds\n"
-	    "    -m bytes        Memory budget (default 256M, minimum 16M)\n");
-	if (kind >= FSIMG_JOB_CREATE)
+	if (mode[0] == 'c') {
+		append(display, "    -C dir          Open the operands after it relative to dir\n"
+		    "    -d              With W, also read initialized file data\n"
+		    "    -e epoch        Reproducible Unix timestamp; requires -R\n"
+		    "    -F stack        Required filesystem: fat12, fat16, fat32, exfat, qnx6\n"
+		    "                    or qnx4\n"
+		    "    -f image        New image pathname; optional with -n\n"
+		    "    --free-space=bytes\n"
+		    "                    Minimum free space after allocation\n"
+		    "    -h              Show mode help\n"
+		    "    --json          Write newline-delimited JSON\n"
+		    "    -L label        Volume label (default FSIMG where the format has one)\n");
+		append(display, "%s%s", help_budgets, help_memory);
 		append(display, "    -n              Report a plan without creating an image\n"
-		    "    -o image        New output pathname; required unless -n\n"
-		    "    -p              Import owner, group and permission bits\n");
-	if (kind == FSIMG_JOB_LIST)
-		append(display, "    -r              List recursively\n");
-	if (kind >= FSIMG_JOB_CREATE)
+		    "    -o key=value    Filesystem setting: sector, cluster, endian, uuid,\n"
+		    "                    inodes or reserve\n"
+		    "    -p              Import owner, group and permission bits\n"
+		    "    -R              Create reproducible image bytes\n");
+		append(display, "%s", help_policies);
 		append(display, "    -s bytes        Exact image size (default automatic)\n"
-		    "    -t format       Required: fat12, fat16, fat32, exfat, qnx6, or qnx4\n");
-	else
-		append(display, "    -t format       Force a decoder while retaining validation\n");
-	append(display, "    -v              Show progress, details and sampled metadata losses on stderr\n");
-	if (kind < FSIMG_JOB_CREATE)
-		append(display, "    -z bytes        Volume slice length (default remaining file length)\n");
-	append(display, "\nOptions precede operands. K, M, G, T and P are powers of 1024.\n");
-	switch (kind) {
-	case FSIMG_JOB_CREATE: case FSIMG_JOB_PLAN:
-		append(display, "Output must be new. Keep the source directory stable during creation.\n\n"
-		    "examples:\n    fsimg create -R -t exfat -o data.img ./files\n"
-		    "    fsimg create -n -t fat32 -s 1G ./files\n");
-		break;
-	case FSIMG_JOB_INFO:
-		append(display, "\nexample:\n    fsimg info -i data.img\n");
-		break;
-	case FSIMG_JOB_LIST:
-		append(display, "\nexample:\n    fsimg ls -r -i data.img /documents\n");
-		break;
-	case FSIMG_JOB_CAT:
-		append(display, "\nexample:\n    fsimg cat -i data.img /readme.txt > readme.txt\n");
-		break;
-	case FSIMG_JOB_EXTRACT:
-		append(display, "Extracts content with private modes; does not restore host timestamps.\n"
-		    "Symbolic links and other unsupported kinds fail unless -k skips them.\n\n"
-		    "example:\n    fsimg extract -i data.img -C ./new-output\n");
-		break;
-	case FSIMG_JOB_VERIFY:
-		append(display, "Checks the filesystem without repairing it.\n\n"
-		    "example:\n    fsimg verify -d -i data.img\n");
-		break;
+		    "    -v              Repeat as -vv for progress, details and sampled\n"
+		    "                    metadata losses on stderr\n"
+		    "    -W              Verify the staged image before publication\n");
+		append(display, "%s", help_units);
+		append(display, "Only -C dir may appear among the operands, for the operands after it.\n"
+		    "Each operand is stored under its own path; -C dir . stores the contents\n"
+		    "of dir at the image root. The output must be new. Keep the sources stable\n"
+		    "during creation.\n\n"
+		    "examples:\n"
+		    "    fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .\n"
+		    "    fsimg cRf data.img -F exfat rootfs extra\n"
+		    "    fsimg cWf data.img -F exfat -C esp . -C extra EFI\n"
+		    "    fsimg cn -F exfat -R rootfs\n");
+		return;
 	}
+	if (strcmp(mode, "x") == 0) {
+		append(display, "    -C dir          Existing parent of the new extraction directory\n"
+		    "                    (default the working directory)\n"
+		    "    -E              Extract into the empty private -C directory itself\n");
+		append(display, "%s", help_read_common);
+		append(display, "    -k              Skip and count symbolic links and other unsupported kinds\n");
+		append(display, "%s%s%s", help_budgets, help_slice, help_memory);
+		append(display, "    -O              Write one member's bytes to stdout\n");
+		append(display, "%s%s", help_settings_read, help_policies);
+		append(display, "    -v              Repeat as -vv for progress and details on stderr\n");
+		append(display, "%s", help_units);
+		append(display, "Extracts into a new directory named after the image, such as ./boot for\n"
+		    "boot.img, with private modes and without host timestamps. Symbolic links\n"
+		    "and other unsupported kinds fail unless -k skips them.\n\n"
+		    "examples:\n"
+		    "    fsimg xf boot.img\n"
+		    "    fsimg xf boot.img -C /tmp EFI/BOOT\n"
+		    "    fsimg xEf boot.img -C ./empty-dir\n"
+		    "    fsimg xOf boot.img /EFI/BOOT/BOOTX64.EFI > BOOTX64.EFI\n");
+		return;
+	}
+	if (strcmp(mode, "W") == 0)
+		append(display, "    -d              Also read initialized file data\n");
+	append(display, "%s%s%s%s", help_read_common, help_budgets, help_slice, help_memory);
+	if (strcmp(mode, "t") == 0)
+		append(display, "    --no-recursion  List one level\n");
+	append(display, "%s%s", help_settings_read, help_policies);
+	if (strcmp(mode, "t") == 0)
+		append(display, "    -v              Long listing; -vv adds details on stderr\n");
+	else
+		append(display, "    -v              Show capability, geometry and sandbox details on stderr\n");
+	append(display, "%s", help_units);
+	if (strcmp(mode, "t") == 0)
+		append(display, "\nexamples:\n    fsimg tvf disk.img\n"
+		    "    fsimg tf disk.img --no-recursion /EFI\n");
+	else if (strcmp(mode, "W") == 0)
+		append(display, "Checks the filesystem without repairing it.\n\n"
+		    "example:\n    fsimg Wdf disk.img\n");
+	else
+		append(display, "\nexample:\n    fsimg if disk.img\n");
 }
 
 static void
@@ -411,11 +463,17 @@ loss_notice(fsimg_cli_display_t *display)
 {
 	uint64_t losses = display->result->metadata_losses;
 	uint64_t skipped = display->result->skipped_entries;
+	const char *mode = display->options->mode;
 
+	/* Examples are a stderr detail: -vv in c and x, whose -v is the entry
+	 * stream.
+	 */
 	if (losses != 0)
 		append(display, "fsimg: warning: %llu metadata field%s could not be preserved exactly%s\n",
 		    (unsigned long long)losses, losses == 1 ? "" : "s",
-		    (display->options->request.flags & FSIMG_JOB_VERBOSE) == 0 ? "; use -v for examples" : "");
+		    (display->options->request.flags & FSIMG_JOB_VERBOSE) != 0 ? "" :
+		    mode != NULL && (mode[0] == 'c' || mode[0] == 'x') ?
+		    "; use -vv for examples" : "; use -v for examples");
 	if (skipped != 0)
 		append(display, "fsimg: warning: %llu %s skipped\n",
 		    (unsigned long long)skipped, skipped == 1 ?
@@ -474,6 +532,19 @@ basis_name(uint64_t basis)
 	return ("unknown");
 }
 
+/* The scope a verification reached, from the VERIFY record itself, so cW's
+ * verification of its staged image reports structural or payload reads.
+ */
+static const char *
+verified_scope_name(fsimg_validation_scope_t scope)
+{
+	if (scope == FSIMG_VALIDATION_PAYLOAD)
+		return ("initialized-payload");
+	if (scope == FSIMG_VALIDATION_STRUCTURAL)
+		return ("structural");
+	return ("header");
+}
+
 static const char *
 scope_name(const fsimg_cli_display_t *display)
 {
@@ -486,11 +557,7 @@ scope_name(const fsimg_cli_display_t *display)
 		return ("selected-entry");
 	default: break;
 	}
-	if (display->scope == FSIMG_VALIDATION_PAYLOAD)
-		return ("initialized-payload");
-	if (display->scope == FSIMG_VALIDATION_STRUCTURAL)
-		return ("structural");
-	return ("header");
+	return (verified_scope_name(display->scope));
 }
 
 static void
@@ -517,7 +584,12 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 	bool json = display->options->json;
 
 	if (json) {
-		append(display, "{\"schema\":1,\"type\":\"info\",\"format\":");
+		/* A bare volume's stack is its filesystem alone, and it is not
+		 * compressed.
+		 */
+		append(display, "{\"schema\":1,\"type\":\"info\",\"stack\":");
+		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_FORMAT);
+		append(display, ",\"compression\":null,\"format\":");
 		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_FORMAT);
 		append(display, ",\"profile\":");
 		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_PROFILE);
@@ -553,7 +625,9 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 		    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_IO_ERROR) ? "true" : "false");
 		return;
 	}
-	append(display, "Format:       ");
+	append(display, "Stack:        ");
+	prose(display, (const char *)raw + FSIMG_WIRE_INFO_FORMAT);
+	append(display, "\nCompression:  none\nFormat:       ");
 	bcopy(raw + FSIMG_WIRE_INFO_FORMAT, format_name, sizeof(format_name));
 	format_name[sizeof(format_name) - 1] = '\0';
 	for (size_t i = 0; format_name[i] != '\0'; i++) {
@@ -633,6 +707,86 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 	}
 }
 
+/*
+ * "YYYY-MM-DD HH:MM:SS" of seconds since 1970-01-01 in the proleptic
+ * Gregorian calendar, with no locale or host timezone. Days are counted from
+ * 0000-03-01 in 400-year eras of 146097 days, so leap days fall at the end
+ * of each counted year and the month lengths follow a fixed pattern.
+ */
+static void
+civil_time(int64_t seconds, char *text, size_t capacity)
+{
+	int64_t days, era, year;
+	int64_t day_of_era, year_of_era, day_of_year, month_index;
+	int64_t second_of_day;
+	unsigned month, day;
+
+	days = seconds / 86400;
+	second_of_day = seconds % 86400;
+	if (second_of_day < 0) {
+		second_of_day += 86400;
+		days--;
+	}
+	days += 719468;
+	era = (days >= 0 ? days : days - 146096) / 146097;
+	day_of_era = days - era * 146097;
+	year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 -
+	    day_of_era / 146096) / 365;
+	day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 -
+	    year_of_era / 100);
+	month_index = (5 * day_of_year + 2) / 153;
+	day = (unsigned)(day_of_year - (153 * month_index + 2) / 5 + 1);
+	month = (unsigned)(month_index < 10 ? month_index + 3 : month_index - 9);
+	year = year_of_era + era * 400 + (month <= 2 ? 1 : 0);
+	snprintf(text, capacity, "%04lld-%02u-%02u %02u:%02u:%02u", (long long)year,
+	    month, day, (unsigned)(second_of_day / 3600),
+	    (unsigned)(second_of_day % 3600 / 60), (unsigned)(second_of_day % 60));
+}
+
+/* The -v listing's columns before the name: the kind and nine permission
+ * characters, or nine '?' when the format stores no mode; the logical
+ * length of a file or link, or '-'; and the modification time, or '-'.
+ * Unknown-offset times encode their calendar fields as UTC seconds, so one
+ * conversion serves every basis.
+ */
+static void
+long_listing_columns(fsimg_cli_display_t *display, const unsigned char *raw)
+{
+	static const char kinds[] = "-dlp";
+	static const char permissions[] = "rwxrwxrwx";
+	uint64_t valid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_VALID);
+	uint64_t kind = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND);
+	uint64_t mode = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE);
+	char column[40];	/* the widest time: a 12-digit signed year */
+
+	switch (kind) {
+	case FSIMG_ENTRY_FILE: column[0] = kinds[0]; break;
+	case FSIMG_ENTRY_DIRECTORY: column[0] = kinds[1]; break;
+	case FSIMG_ENTRY_SYMLINK: column[0] = kinds[2]; break;
+	case FSIMG_ENTRY_FIFO: column[0] = kinds[3]; break;
+	default: column[0] = '?'; break;
+	}
+	for (unsigned i = 0; i < 9; i++) {
+		if ((valid & FSIMG_META_MODE) == 0)
+			column[1 + i] = '?';
+		else
+			column[1 + i] = (mode & (0400u >> i)) != 0 ? permissions[i] : '-';
+	}
+	column[10] = '\0';
+	append(display, "%s ", column);
+	if (kind == FSIMG_ENTRY_FILE || kind == FSIMG_ENTRY_SYMLINK)
+		append(display, "%12llu ",
+		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH));
+	else
+		append(display, "%12s ", "-");
+	if ((valid & FSIMG_META_MODIFIED) != 0) {
+		civil_time(fsimg_wire_get_signed64(raw + FSIMG_WIRE_ENTRY_MODIFIED +
+		    FSIMG_WIRE_TIME_SECONDS), column, sizeof(column));
+		append(display, "%s ", column);
+	} else
+		append(display, "%-19s ", "-");
+}
+
 static void
 entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 {
@@ -658,8 +812,11 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 		timestamp(display, raw + FSIMG_WIRE_ENTRY_CHANGED, (valid & FSIMG_META_CHANGED) != 0);
 		owner_fields(display, raw, valid);
 		append(display, ",\"path\":\"");
-	} else
+	} else {
+		if (display->options->verbosity != 0)
+			long_listing_columns(display, raw);
 		append(display, "\"");
+	}
 	display->entry_open = true;
 }
 
@@ -671,14 +828,14 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"verify\",\"complete\":true,\"validation_scope\":\"%s\"",
-		    scope_name(display));
+		    verified_scope_name(display->scope));
 		for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
 			append(display, ",\"%s\":", keys[i]);
 			uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES + i * 8));
 		}
 		append(display, "}\n");
 	} else {
-		path_excerpt(display, display->options->input);
+		path_excerpt(display, display->options->image);
 		append(display, ": filesystem structure%s verified (%llu files, %llu directories)\n",
 		    display->scope == FSIMG_VALIDATION_PAYLOAD ? " and initialized file data" : "",
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES),
@@ -794,7 +951,7 @@ summary(fsimg_cli_display_t *display)
 
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"summary\",\"complete\":true,\"command\":");
-		string_value(display, display->options->name);
+		string_value(display, display->options->mode);
 		append(display, ",\"validation_scope\":\"%s\",\"entries_processed\":\"%llu\","
 		    "\"logical_bytes\":\"%llu\",\"raw_bytes\":\"%llu\",\"metadata_losses\":\"%llu\","
 		    "\"skipped_entries\":\"%llu\",\"sandbox\":\"%s\",\"published\":%s,", scope_name(display),
@@ -862,9 +1019,7 @@ failure(fsimg_cli_display_t *display)
 	prose(display, error->message[0] != '\0' ? error->message : fsimg_status_string(error->status));
 	if (error->message_truncated)
 		append(display, " [message truncated]");
-	if (error->path[0] != '\0' || (display->syntax &&
-	    display->options->command == FSIMG_CLI_PROCESS &&
-	    display->options->request.kind == 0)) {
+	if (error->path[0] != '\0') {
 		append(display, " ");
 		string_value(display, error->path);
 		if (error->path_truncated)
@@ -884,13 +1039,16 @@ failure(fsimg_cli_display_t *display)
 		append(display, "fsimg: output is incomplete\n");
 	else if (error->output_state == FSIMG_OUTPUT_PUBLISHED) {
 		append(display, "fsimg: output was published");
-		if (display->options->output != NULL) {
+		if (display->options->image != NULL) {
 			append(display, " as ");
-			path_excerpt(display, display->options->output);
+			path_excerpt(display, display->options->image);
 		}
 		append(display, "; finalization failed; do not retry blindly\n");
 	} else if (error->output_state == FSIMG_OUTPUT_UNCERTAIN)
 		append(display, "fsimg: output publication or durability is uncertain; inspect the destination before retrying\n");
+	if (display->paths->verification_failed)
+		append(display, "fsimg: the staged %s volume failed verification; nothing was published\n",
+		    display->options->request.format);
 	if (error->cleanup_error != 0) {
 		append(display, "fsimg: cleanup failed: ");
 		prose(display, strerror(error->cleanup_error));
@@ -907,7 +1065,7 @@ failure(fsimg_cli_display_t *display)
 		append(display, "\n");
 	}
 	if (display->syntax)
-		usage(display, false);
+		usage(display, display->options->overview);
 }
 
 void
@@ -949,20 +1107,27 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 	listing = options->request.kind == FSIMG_JOB_LIST;
 	switch (frame->type) {
 	case FSIMG_FRAME_READY:
-		if ((options->request.flags & FSIMG_JOB_VERBOSE) != 0) {
+		/* cW's verification worker reuses the creation command's result,
+		 * so only the creation worker reports its capabilities.
+		 */
+		if ((options->request.flags & FSIMG_JOB_VERBOSE) != 0 &&
+		    !display->verifying_staged) {
 			diagnostic = true;
 			if (options->json)
 				append(display, "{\"schema\":1,\"type\":\"capabilities\",\"sandbox\":\"%s\"}\n",
 				    confinement_name(display->result->confinement));
 			else {
 				append(display, "fsimg: sandbox %s\n", confinement_name(display->result->confinement));
-				if (options->request.kind >= FSIMG_JOB_CREATE)
+				if (options->request.kind >= FSIMG_JOB_CREATE &&
+				    !display->verifying_staged)
 					append(display, "fsimg: source profile requires isolated storage to exclude special-node opens\n");
 			}
 		}
 		break;
 	case FSIMG_FRAME_INFO:
-		if (options->json || options->request.kind == FSIMG_JOB_INFO)
+		/* cW reports the verification of its staged image, not its header. */
+		if (!display->verifying_staged &&
+		    (options->json || options->request.kind == FSIMG_JOB_INFO))
 			volume(display, raw);
 		break;
 	case FSIMG_FRAME_PLAN:

@@ -101,7 +101,7 @@ The QNX6 writer lays the system run and its zero twin out from block 0 and
 every directory, file, link and long name in one contiguous run after it,
 so allocation is a prefix and two identical serial-1 headers describe the
 volume. Tree pointers come from shape arithmetic shared with the reader;
-rows in one paged array are the only per-entry state. `-O endian=`, `uuid=`,
+rows in one paged array are the only per-entry state. `-o endian=`, `uuid=`,
 `inodes=` and `reserve=` select the byte order, UUID, inode capacity and
 reserve; without `-R` a volume receives a random version 4 UUID. Empty
 volumes match native `mkqnx6fs` output byte for byte apart from the CRC
@@ -141,12 +141,21 @@ Every object is one extent and the loader block is zero. QNX 6.5.0 checks,
 mounts and remounts fsimg's volumes cleanly from the 43-block minimum
 through one, two and three bitmap blocks, a full volume and the 102767805
 blocks of the PCM 3.1 navigation partition, modifies every one with free
-space cleanly, and fsimg verifies what QNX wrote to them. `create -L`
+space cleanly, and fsimg verifies what QNX wrote to them. `fsimg c -L`
 accepts QNX4's 48-byte label.
 
-The fsimg command provides creation, inspection, listing, raw content, safe
-extraction, verification and capability enumeration. Strict short-option parsing,
-streaming NDJSON, bounded progress and command-wide output accounting share
+The fsimg command is shaped like tar: modes c (create, cW to verify before
+publication), x (extract, x -O for one member's bytes), t (list, recursive by
+default), W (verify), i (information) and --formats, with -f naming the image,
+-F naming the stack and a dashless bundle in the first argument. Creation takes
+several directory or file operands with -C changing directory among them;
+each operand keeps its own path in the image and equal directories merge.
+Extraction creates one fresh private directory named after the image, or with
+-E fills an empty private directory; both refuse destinations carrying a
+non-trivial ACL. The long listing shows mode, size and UTC modification time.
+Compression, minimization, partition selection, standard input or output
+images, partition schemes, containers and several members are recognized and
+reported as not supported. Strict option parsing, streaming NDJSON, bounded progress and command-wide output accounting share
 the supervised worker/relay path. Manuals, public-API examples, pkg-config
 metadata and private-prefix installation checks accompany the command and
 static/shared library.
