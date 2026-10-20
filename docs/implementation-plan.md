@@ -448,6 +448,11 @@ validation gates above:
    gates, each with its own header decoder and reservation model in the
    driver's module structure.
 
+Specification-driven testing follows its own
+[plan](spec-testing-plan.md): a design document, then a Ruby harness that
+derives FAT cases from cited rules and checks fsimg's per-stage results
+against independent oracles, and later a second format.
+
 Other extensions receive their own designs before code: manifest import and
 bounded partition selection; reader-only NTFS and QNX4 profiles with independent
 corpora; additional offline-writable formats; optional archive integration; and

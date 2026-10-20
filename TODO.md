@@ -12,6 +12,14 @@
   The [work breakdown](docs/todo-qnx6.md) owns experiments and implementation;
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
+* [Medium] **Specification-driven testing** (`test/spec/`, `test/spec.sh.in`,
+  `Makefile.am`, `.github/workflows/check.yml`): build the Ruby rule, case and
+  runner harness. It derives valid and single-rule-invalid FAT images from
+  cited specification rules, checks fsimg's per-stage status against
+  independent oracles, and reports specification coverage. The
+  [plan](docs/spec-testing-plan.md) owns the design decisions and the stages.
+  The design document `specs/design-spec-testing.md` comes first.
+
 * [Low] **Scoped ownership intervals** (`lib/formats/fat/verify.c`,
   `lib/formats/exfat/verify.c`): extract the duplicate ownership-interval
   sorting and cursor checks into one bounded utility, the last item of the
@@ -75,6 +83,15 @@
   from the BPB label field. Add a failing root/BPB label fixture before
   changing the decoder's interpretation of either field.
 
+* [Low] **Reserved FAT entry checked at open** (`lib/formats/fat/read.c`,
+  `lib/formats/fat/verify.c`, `specs/design-fat-reader.md`): header-only
+  open rejects a `FAT[0]` whose low byte differs from the BPB media byte.
+  That divergence is recoverable and does not affect content. Move the check
+  into `verify`'s reserved-entry scope, so `info`, `ls` and `extract` accept
+  it while full verification stays strict. This follows the
+  [spec-testing policy](docs/spec-testing-plan.md#decisions). Write the
+  failing open/verify test first.
+
 ## Security residuals
 
 * [High] **Symbolic-link import under the Linux sandbox** (`cmd/fsimg/sandbox.c`,
@@ -103,6 +120,16 @@
   ordinary and dangling links (verified on FreeBSD 16.0-CURRENT).
 
 ## Planned features
+
+* [Medium] **More than two FATs** (`lib/formats/fat/`, `cmd/fsimg/options.c`,
+  `specs/design-fat-reader.md`, `specs/design-fat-writer.md`,
+  `specs/design-sizing.md`): the Microsoft specification allows any nonzero
+  `BPB_NumFATs`. The reader supports one or two and reports a larger count as
+  `FSIMG_EUNSUPPORTED` (`FAT_READ_TABLES` also sizes the table window); the
+  writer always emits two. Design per-copy mirror checks within the bounded
+  window, FAT32's four-bit active-table field, a writer setting, sizing and
+  the capability record; then implement both sides and check mtools and
+  `fsck.fat` behaviour with more than two tables.
 
 * [Medium] **Image minimization** (`lib/formats/fat/write-plan.c`,
   `lib/formats/exfat/write-plan.c`, `cmd/fsimg/options.c`): implement the
