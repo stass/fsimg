@@ -101,8 +101,10 @@ classic, MMI, and extended Power-Safe remain separate profiles.
 
 * [Medium] **Independent infrastructure** (`test/`, `docs/build.md`): script
   the local QNX 6.5.0 QEMU harness (unattended boot, serial shell, capture
-  provenance) and give it a way to load host-built images without a reboot,
-  since the guest block cache does not see host writes to the attached disk.
+  provenance), whose layout and manual procedure the
+  [infrastructure page](qnx6-infrastructure.md) records, and give it a way
+  to load host-built images without a reboot, since the guest block cache
+  does not see host writes to the attached disk.
   Arrange isolated native write-after-create tests, a Linux
   read-only oracle, licensed redistributable fixtures or local generation,
   and a recorded target PCM compatibility run. Keep ordinary tests

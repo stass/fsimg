@@ -604,7 +604,9 @@ cancellation and a work limit check cleanup. `--seed` writes the fuzz seed and
 `--read-external` lists and verifies an image file.
 
 `test/qnx6-integration.sh` reads external evidence that is never
-redistributed, and skips what is absent:
+redistributed, and skips what is absent; [the QNX6 infrastructure
+page](qnx6-infrastructure.md) records where that evidence and the QNX 6.5.0
+VM that produced it live:
 
 ```sh
 FSIMG_QNX6_F1=/path/to/test_image.bin \
