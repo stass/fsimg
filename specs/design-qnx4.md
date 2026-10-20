@@ -492,7 +492,8 @@ walks it and the bitmap allocates its blocks. The reader reaches it only
 through root-block record 4: a directory record whose first extent and chain
 are walked and owned when the volume is opened, whose `.` targets `(2, 4)`
 and whose `..` targets `(3 + B, 0)`, the root's own `.` slot, which is what
-the formatter writes. Its content is never exposed. Every slot beyond the
+the formatter writes; a `..` naming the root record `(2, 0)` has never been
+observed there and is `FSIMG_EUNSUPPORTED`. Its content is never exposed. Every slot beyond the
 dots is free on every observed volume; a used slot there does not block
 reading, and full verification reports the volume incomplete with
 `FSIMG_EUNSUPPORTED`, since recovered objects have no observed form. [X1],
@@ -730,7 +731,7 @@ ran. The minimum matrix:
 | Records | Every status value for each record kind, the modified bit on each kind; used with link; nonzero type, reserved or spare bytes; a nonzero `.inodes` name field; a freed `.inodes` slot with stale bytes; links with slot index 8, into the loader, root block, bitmap, a payload block, outside `.inodes`, to slot 0 or to a free slot; root slots 3 to 5 with wrong targets; a link into block 2 from any other slot |
 | Extents | 0, 1, 2, 60, 61, 62, 121 and 122 extents; each extent-block fault: loop, repeated block, wrong previous pointer, 0 or 61 used, nonzero spare, count disagreement, nonzero unused descriptor, bad signature, wrong first-extent copy, partial block followed by another; an extent crossing `N`; zero start with nonzero length; size short of, equal to and beyond allocation for each kind; FIFO with and without blocks |
 | Directories | Size not a multiple of 512, not equal to allocation; each dot-entry fault; a 2-block and a 16-block directory; a cycle; a second parent; a hard link listed twice and walked once; an unsupported kind; a wide directory that spills to scratch |
-| `.inodes` and `lost+found` | Missing or wrong signature; used slot unreferenced; referenced free slot; a directory in `.inodes`; `lost+found` with `..` at `(3 + B, 0)` and at `(2, 0)`, with a used slot (reads, verifies incomplete), and with record 4 zero |
+| `.inodes` and `lost+found` | Missing or wrong signature; used slot unreferenced; referenced free slot; a directory in `.inodes`; `lost+found` with `..` at `(3 + B, 0)`, at `(2, 0)` (unsupported) and elsewhere, with a used slot (reads, verifies incomplete), and with record 4 zero |
 | Metadata | uid and gid 0, 65534 and 65535 read as stored; modes `0000`, `0644`, `0755`, setuid; times 0, 2147483647 and 4294967295 read as stored |
 | Writer | Exact and automatic sizing at every bitmap-block boundary; the empty catalog at 43 blocks; a full volume; `inodes=` below 128, at and above the need; root with 0, 1, 2 and 60 entries; names at every length boundary; `/.boot` as an empty file, a file with content and a directory; reserved root names; FIFOs and symbolic links; owner 65535 and a time of 2147483648 as counted losses and as refusals when losses are forbidden; byte identity across source order, cache size, scratch path and time zone; poison scan of every unused byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |

@@ -2659,18 +2659,22 @@ test_tables(void)
 	CHECK(entries == SAMPLE_ENTRIES);
 	gen_free(&g);
 
-	/* lost+found: ".." at the root's "." slot, at the root record, or
-	 * anywhere else; a used slot is still never listed.
+	/* lost+found: ".." at the root's "." slot, as the formatter writes it;
+	 * at the root record, which every other child of the root names but
+	 * no native lost+found does; or anywhere else. A used slot is still
+	 * never listed.
 	 */
 	sample(&g, &s);
 	slot = slot_of(&g, OBJ_LOST, 1);
 	CHECK(get32(slot + LINK_BLOCK) == 3 + g.bitmap_blocks &&
 	    slot[LINK_SLOT] == 0);
 	put32(slot + LINK_BLOCK, 2);
-	expect(&g, FSIMG_OK, "lost+found dot-dot at the root record");
+	expect(&g, FSIMG_EUNSUPPORTED, "lost+found dot-dot at the root record");
 	slot[LINK_SLOT] = 1;
 	expect(&g, FSIMG_ECORRUPT, "lost+found dot-dot elsewhere");
+	put32(slot + LINK_BLOCK, 3 + g.bitmap_blocks);
 	slot[LINK_SLOT] = 0;
+	expect(&g, FSIMG_OK, "lost+found dot-dot restored");
 	slot = slot_of(&g, OBJ_LOST, 0);
 	slot[LINK_SLOT] = 3;
 	expect(&g, FSIMG_ECORRUPT, "lost+found dot");

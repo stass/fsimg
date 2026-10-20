@@ -383,15 +383,19 @@ lost_slot(void *argument, uint64_t slot, uint64_t position FSIMG_UNUSED,
 	if (status != FSIMG_OK)
 		return (status);
 	/* "." names record 4. The formatter points ".." at the root's own
-	 * "." slot, (3 + B, 0); the root record (2, 0), which every other
-	 * child of the root names, is accepted too.
+	 * "." slot, (3 + B, 0). The root record (2, 0), which every other
+	 * child of the root names, is a plausible parent but no native
+	 * lost+found has it, so it is unsupported rather than corrupt.
 	 */
 	if (slot == 0 && target != QNX4_POSITION(QNX4_ROOT_BLOCK,
 	    QNX4_RECORD_LOST_FOUND))
 		return (qnx4_corrupt(error,
 		    "QNX4 directory has a missing or wrong dot entry"));
-	if (slot == 1 && target != QNX4_POSITION(3 + g->bitmap_blocks, 0) &&
-	    target != QNX4_POSITION(QNX4_ROOT_BLOCK, QNX4_RECORD_ROOT))
+	if (slot == 1 && target == QNX4_POSITION(QNX4_ROOT_BLOCK,
+	    QNX4_RECORD_ROOT))
+		return (qnx4_unsupported(error,
+		    "QNX4 lost+found names the root record as its parent"));
+	if (slot == 1 && target != QNX4_POSITION(3 + g->bitmap_blocks, 0))
 		return (qnx4_corrupt(error,
 		    "QNX4 directory has a missing or wrong dot entry"));
 	return (FSIMG_OK);

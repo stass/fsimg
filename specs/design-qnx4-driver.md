@@ -228,7 +228,8 @@ separate rule for hardlinked directories.
 
 Slots 0 and 1 must be the dot entries, validated against the directory's
 own position and its parent's position; the root's both name `(2, 0)`, and
-`lost+found`'s `..` may name `(3 + B, 0)`. They are never admitted. Every
+`lost+found`'s `..` names `(3 + B, 0)`, the root's `.` slot, while `(2, 0)`
+there, unobserved, is `FSIMG_EUNSUPPORTED`. They are never admitted. Every
 later slot whose status has neither the used nor the link bit is free and
 is not decoded further. A used slot is validated as a direct record, or as
 a link record whose target resolves; at the root, slots 2 and 3 and the
@@ -432,7 +433,7 @@ Reader:
 | Condition | Status |
 | --- | --- |
 | No root signature in block 2; image shorter than 1024 bytes | `FSIMG_EFORMAT` |
-| Recognized but unobserved: a status, type byte, reserved or spare byte, `.inodes` status or name field, zero root-block record 4, extent-block fill, kind, size above `2^31 - 1`, or name outside the profile; a used slot in `lost+found` or an invalid label under `verify` | `FSIMG_EUNSUPPORTED` |
+| Recognized but unobserved: a status, type byte, reserved or spare byte, `.inodes` status or name field, zero root-block record 4, extent-block fill, kind, size above `2^31 - 1`, or name outside the profile, `lost+found`'s `..` naming `(2, 0)`; a used slot in `lost+found` or an invalid label under `verify` | `FSIMG_EUNSUPPORTED` |
 | Slice length not a multiple of 512; `N` outside `[43, 2^31]`; root extent not at `3 + B`; bitmap position, size or padding; used with link; empty name, NUL, slash or dot name; range, chain, count, signature, first-copy, claim, dot-entry, link-target, long-name, link-count, occupancy or free-bit inconsistency | `FSIMG_ECORRUPT` |
 | Unrepresentable selection component | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
