@@ -117,8 +117,11 @@ fsimg_fat_table_get(fsimg_reader_t *reader, uint32_t cluster, uint32_t *out,
 	status = table_value(reader, g->active_table, cluster, out, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (g->mirrored && g->tables == 2) {
-		status = table_value(reader, 1, cluster, &copy, error);
+	/* Mirroring makes table 0 active (geometry decoding), so every other
+	 * copy must agree with the value just read.
+	 */
+	for (unsigned table = 1; g->mirrored && table < g->tables; table++) {
+		status = table_value(reader, table, cluster, &copy, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (copy != *out)

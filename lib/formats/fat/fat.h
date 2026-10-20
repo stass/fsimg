@@ -10,6 +10,10 @@
 /* A name key: four bytes per scalar of at most 255 UTF-16 units. */
 #define FAT_KEY_BYTES FSIMG_DIRECTORY_KEY_BYTES
 #define FAT_DIRECTORY_LIMIT (2u * 1024u * 1024u)
+/* The reader's supported table count. It sizes the mirrored table window,
+ * so geometry decoding must refuse any larger count before a reader exists.
+ */
+#define FAT_READ_TABLES 2u
 
 typedef struct fat_geometry {
 	uint64_t	 volume_bytes;
@@ -72,7 +76,7 @@ struct fsimg_fat_reader {
 	uint32_t	 current_cluster;
 	uint32_t	 current_parent;
 	bool		 file_started;
-	unsigned char	 table_window[2][4096];
+	unsigned char	 table_window[FAT_READ_TABLES][4096];
 	unsigned char	 directory_window[4096];
 	char		 root_label[48];
 	bool		 root_label_seen;

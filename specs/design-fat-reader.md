@@ -17,7 +17,9 @@ The last valid cluster is `MAX = CountOfClusters + 1`; links above MAX and
 below the variant's bad-cluster marker are reserved. Geometry excludes the
 bad marker and higher values from allocatable cluster identifiers. The
 supported profile accepts 512/1024/2048/4096-byte sectors, one or two FATs,
-and allocation units through 512 KiB. FAT32 revision zero is supported.
+and allocation units through 512 KiB. Any nonzero FAT count is legal; once
+the region geometry is valid, a count above two is a recognized volume
+reported as unsupported. FAT32 revision zero is supported.
 An explicit format must match the validated variant. The FAT probe does not
 match an exFAT boot record, and a forced FAT name on one fails BPB
 validation. Opening does not enumerate directories or read file payloads.

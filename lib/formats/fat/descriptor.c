@@ -127,9 +127,9 @@ fsimg_fat_variant(unsigned id)
 }
 
 /* The boot record decides: its signature and legal BPB make the claim, and
- * the remaining geometry checks decide between a match, an unsupported FAT32
- * revision or field, and corruption. The variant follows from the cluster
- * count when the volume is opened.
+ * the remaining geometry checks decide between a match, an unsupported table
+ * count, FAT32 revision or field, and corruption. The variant follows from
+ * the cluster count when the volume is opened.
  */
 static fsimg_status_t
 fat_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,

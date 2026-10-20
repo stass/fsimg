@@ -44,6 +44,7 @@ typedef struct fixture {
 	uint32_t	 cluster_bytes;
 	uint32_t	 eoc;
 	unsigned	 variant;
+	unsigned	 tables;
 	int		 fd;
 	int		 scratch;
 	char		 directory[64];
@@ -57,6 +58,7 @@ static uint64_t cluster_offset(const fixture_t *, uint32_t);
 static void short_entry(unsigned char *, const char *, bool, uint32_t, uint32_t);
 static void fixture_init(fixture_t *, unsigned);
 static void fixture_geometry(fixture_t *, unsigned, unsigned, unsigned);
+static void fixture_layout(fixture_t *, unsigned, unsigned, unsigned, unsigned);
 static void test_geometry_matrix(void);
 static void test_cluster_ceiling(unsigned);
 static void fixture_open(fixture_t *);
@@ -130,7 +132,7 @@ set_cluster(fixture_t *f, uint32_t cluster, uint32_t value)
 	offset = f->variant == 12 ? (uint64_t)cluster * 3 / 2 :
 	    (uint64_t)cluster * (f->variant / 8);
 	length = f->variant == 32 ? 4 : 2;
-	for (unsigned copy = 0; copy < 2; copy++) {
+	for (unsigned copy = 0; copy < f->tables; copy++) {
 		uint64_t address = f->fat_offset + copy * f->table_bytes + offset;
 		if (f->variant == 12) {
 			CHECK(pread(f->fd, bytes, 2, (off_t)address) == 2);
@@ -209,6 +211,14 @@ static void
 fixture_geometry(fixture_t *f, unsigned variant, unsigned sector_bytes,
     unsigned sectors_per_cluster)
 {
+	fixture_layout(f, variant, sector_bytes, sectors_per_cluster, 2);
+}
+
+/* Build the fixture volume with the given number of mirrored FATs. */
+static void
+fixture_layout(fixture_t *f, unsigned variant, unsigned sector_bytes,
+    unsigned sectors_per_cluster, unsigned tables)
+{
 	unsigned char boot[512], root[512], directory[512], data[512], info[512];
 	uint32_t sectors, reserved, table_sectors, root_sectors, file_clusters;
 	char name[] = "fat-image-XXXXXX";
@@ -223,14 +233,15 @@ fixture_geometry(fixture_t *f, unsigned variant, unsigned sector_bytes,
 	table_sectors = ((f->clusters + 2) * variant + 8 * sector_bytes - 1) /
 	    (8 * sector_bytes);
 	root_sectors = variant == 32 ? 0 : (512 * 32 + sector_bytes - 1) / sector_bytes;
-	sectors = reserved + 2 * table_sectors + root_sectors +
+	f->tables = tables;
+	sectors = reserved + tables * table_sectors + root_sectors +
 	    f->clusters * sectors_per_cluster;
 	f->bytes = (uint64_t)sectors * sector_bytes;
 	f->fat_offset = (uint64_t)reserved * sector_bytes;
 	f->table_bytes = (uint64_t)table_sectors * sector_bytes;
-	f->data_offset = (reserved + 2 * (uint64_t)table_sectors + root_sectors) * sector_bytes;
+	f->data_offset = (reserved + tables * (uint64_t)table_sectors + root_sectors) * sector_bytes;
 	f->root_offset = variant == 32 ? f->data_offset :
-	    f->fat_offset + 2 * f->table_bytes;
+	    f->fat_offset + tables * f->table_bytes;
 	f->fd = mkstemp(name);
 	CHECK(f->fd != -1 && unlink(name) == 0);
 	CHECK(ftruncate(f->fd, (off_t)f->bytes) == 0);
@@ -243,7 +254,7 @@ fixture_geometry(fixture_t *f, unsigned variant, unsigned sector_bytes,
 	put16(boot + 11, (uint16_t)sector_bytes);
 	boot[13] = (unsigned char)sectors_per_cluster;
 	put16(boot + 14, (uint16_t)reserved);
-	boot[16] = 2;
+	boot[16] = (unsigned char)tables;
 	put16(boot + 17, variant == 32 ? 0 : 512);
 	if (sectors < 65536 && variant != 32)
 		put16(boot + 19, (uint16_t)sectors);
@@ -791,6 +802,9 @@ test_deep_tree(void)
 static void
 test_detection(void)
 {
+	static const unsigned variants[] = { 12, 16, 32 };
+	static const unsigned char no_tables = 0;
+	fsimg_verify_report_t report;
 	fixture_t f;
 	unsigned char boot[512];
 
@@ -821,6 +835,33 @@ test_detection(void)
 	fixture_open(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_ECORRUPT);
 	fixture_close(&f);
+
+	/* The specification allows any nonzero table count, and the supported
+	 * profile reads one or two. One table reads and verifies without a
+	 * mirror. A coherent third table is a recognized FAT volume this reader
+	 * does not support, while a zero count is not a legal BPB at all.
+	 */
+	for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); i++) {
+		fixture_layout(&f, variants[i], 512, 1, 1);
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+		CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+		CHECK(report.complete && report.files == 2);
+		fixture_close(&f);
+
+		fixture_layout(&f, variants[i], 512, 1, 3);
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+		    FSIMG_EUNSUPPORTED);
+		fixture_close(&f);
+
+		fixture_init(&f, variants[i]);
+		write_bytes(&f, 16, &no_tables, 1);
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+		    FSIMG_EFORMAT);
+		fixture_close(&f);
+	}
 }
 
 static void

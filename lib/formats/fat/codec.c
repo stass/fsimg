@@ -120,7 +120,7 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	    g->sector_bytes != 2048 && g->sector_bytes != 4096) ||
 	    sectors_per_cluster == 0 || sectors_per_cluster > 128 ||
 	    (sectors_per_cluster & (sectors_per_cluster - 1)) != 0 ||
-	    g->reserved_sectors == 0 || g->tables == 0 || g->tables > 2 ||
+	    g->reserved_sectors == 0 || g->tables == 0 ||
 	    (g->media != 0xf0 && g->media < 0xf8))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "boot record has no legal FAT BPB"));
@@ -160,6 +160,14 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	if ((capacity + 7) / 8 > g->fat_bytes ||
 	    g->clusters > g->bad_value - 2)
 		return (fsimg_fat_corrupt(error, "FAT cannot describe its data region"));
+	/* Any nonzero table count is legal FAT, and the regions above already
+	 * account for every table. The supported profile reads one or two, so a
+	 * larger count is a recognized volume this reader does not support. The
+	 * same bound sizes the reader's mirrored table window.
+	 */
+	if (g->tables > FAT_READ_TABLES)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_READER, "FAT table count exceeds the supported profile"));
 	g->fat_offset = (uint64_t)g->reserved_sectors * g->sector_bytes;
 	g->root_offset = (g->reserved_sectors + g->tables * fat_sectors) *
 	    g->sector_bytes;

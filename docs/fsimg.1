@@ -42,6 +42,7 @@
 .Nm
 reads and creates FAT12, FAT16, FAT32 and ordinary one-FAT exFAT volumes,
 and reads classic QNX6 Power-Safe volumes.
+FAT volumes with more than two FAT copies are reported as unsupported.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.
 It never modifies an existing image in place.
