@@ -55,7 +55,7 @@ Goals:
    header, the opaque startup section, a closed set of boot prefixes, and
    uncompressed, LZO and UCL bodies, with the startup and stored-image
    checksums.
-3. Read `PCM3_IFS2.ifs` through an `hbcifs` compression layer.
+3. Read `PCM3_IFS2.ifs` through an `hbcifs` container layer.
 4. Verify completely: header geometry, the record table and its
    terminator, data ranges, the derived hierarchy, the boot and script
    references, and the ImageFS checksum. Each layer adds its own checks.
@@ -166,21 +166,21 @@ requires:
 | --- | --- |
 | ImageFS header, record table, hierarchy, names, content, checksum | The `ifs` filesystem driver (`lib/formats/ifs/`), on an ordinary `fsimg_io_t` |
 | Startup header, boot prefix, startup section, chunk framing, startup and stored checksums, wrap | The `qnxboot` container layer |
-| The 64-byte Harman-Becker header and its unframed stream | The `hbcifs` compression layer |
+| The 64-byte Harman-Becker header and its unframed stream | The `hbcifs` container layer |
 | LZO1X decode and encode, UCL NRV2B decode | Project-owned compression codecs with no knowledge of IFS |
 | Random access to a framed compressed body | The layer chunk index and decoded-chunk cache, filled by a decoding pass at peel |
 | Random access to an unframed stream | The layer spool |
 | Hierarchy from a flat path table | The driver, over the common external sort and the common directory walker |
 
-The stack is `ifs/qnxboot`. `hbcifs` behaves like gzip: a header and one
-sequential stream around the whole file. This plan therefore treats it as a
-compression profile, reported beside the stack as gzip is, and peeled into
-the spool (open owner decision 9). Stage 2 generalises step 1 of the
-[peeling order](../specs/design-layers.md#peeling-order), which names gzip
-alone, to every compression profile.
+The stacks are `ifs/qnxboot` and `ifs/hbcifs`. Both are containers: each
+packages an ImageFS for one loader, QNX's startup code or Harman-Becker's
+flash loader, with metadata and integrity fields of its own, and the
+compression inside each is a property of the container, as zlib chunks are
+of DMG. Compression in the layer design is a payload-agnostic encoding
+around any stack; neither wrapper is that.
 
-The layer contract carries `qnxboot` with five changes, which stage 2 makes
-in the layer design and records in the architecture:
+The layer contract carries the two containers with six changes, which
+stage 2 makes in the layer design and records in the architecture:
 
 * **Prefix probe.** The probe reads at fixed offsets from a closed table of
   boot prefixes, not only the file's prefix and last 512 bytes.
@@ -197,21 +197,25 @@ in the layer design and records in the architecture:
   length, as simg's inspection pass counts chunks, and the second emits.
   Stage 2 chooses between that and compressing once into the staged raw
   intermediate.
+* **Spool-backed peel.** A container whose payload is one sequential stream
+  that cannot be indexed, as `hbcifs`'s is, peels through the spool rather
+  than the chunk index. Its read side is still a positional I/O object over
+  the volume.
 
-`qnxboot` also declares that it carries a volume. A scheme in a create
-stack is then refused, and on read a scheme probe already fails on an
+Both containers also declare that they carry a volume. A scheme in a
+create stack is then refused, and on read a scheme probe already fails on an
 ImageFS body, so no new rule is needed there.
 
-The layer machinery is specified but not implemented. Two stages wait for
-it:
+The layer machinery implements stacks and partition schemes; its container
+stages are specified but not implemented. Two stages wait for them:
 
-* the `qnxboot` read stage, on layer stages 2 and 3 (stacks, peel and the
-  chunk index);
-* the `hbcifs` stage, on layer stages 2 and 4 (peel and the spool).
+* the `qnxboot` read stage, on layer stage 3 (containers and the chunk
+  index);
+* the `hbcifs` stage, on layer stages 3 and 4 (containers and the spool).
 
-The bare ImageFS stages depend on neither. Until the layers land, the reader
-is qualified on uncompressed copies made by native `dumpifs -u`, read as
-byte slices.
+The bare ImageFS stages depend on neither. Until the container layers land,
+the reader is qualified on uncompressed copies made by native `dumpifs -u`,
+read as byte slices.
 
 The draft's proposed model (section 10.3) maps onto these owners:
 
@@ -248,9 +252,7 @@ remove a class of special cases rather than handling each case.
 
      The probe never scans for magic.
    * **`hbcifs`.** The identity is `hbcifs` and two NUL bytes at offset 0.
-     A payload length other than the file length minus 64 is corrupt. On
-     stream input the length is unknown until the spool fill ends, so the
-     check runs there.
+     A payload length other than the file length minus 64 is corrupt.
 2. **The hierarchy comes from sorted paths.** The record table is a flat
    list of full relative paths. Open makes one pass over it and puts each
    record's path and byte offset into the metadata store. The common
@@ -586,9 +588,9 @@ repository records only pass and fail counts.
     `flags1` and machine tables, peel through the learned chunk index and
     its bounds, both checksums, info fields, and the wrap encoder with its
     template input;
-  * an `hbcifs` compression profile: header checks and peel through the
-    spool;
-  * the five contract changes listed under
+  * an `hbcifs` container profile: the probe, header checks, and peel
+    through the spool;
+  * the six contract changes listed under
     [placement](#placement-and-owners);
   * `ifs` added to the filesystem slot.
 * `specs/design-codecs.md`: the LZO1X and NRV2B decoders and the LZO1X
@@ -613,8 +615,7 @@ repository records only pass and fail counts.
 * **Gate:** the review subagent checks the designs against the research
   record, against the common contracts, and for readability. The NRV2B
   description gets a separate provenance review. The owner accepts the
-  designs and closes owner decisions 5, 7 and 9. Decisions 6 and 8 close when
-  the stages that need them begin.
+  designs.
 
 ### 3. Reader: probe, open and traversal
 
@@ -763,14 +764,17 @@ Depends on stages 4 and 6 and on layer stages 2 and 3.
 
 ### 8. `hbcifs` read
 
-Depends on stages 4 and 6 and on layer stages 2 and 4.
+Depends on stages 4 and 6 and on layer stages 2 to 4.
 
-* The compression descriptor: the probe (decision 1), the header checks S1
+* The container descriptor: the probe (decision 1), the header checks S1
   establishes, then peel through the spool, bounded by the header's decoded
   size.
-* Verification of the header's checksum field follows owner decision 8.
-* **Gate:** `PCM3_IFS2.ifs` lists, extracts and verifies against its
-  manifest. A spool-limit test fails at the step that crosses the limit.
+* Until evidence identifies the header's checksum field, verification
+  reports it as unverified, and a full verification is therefore
+  incomplete (owner decision 8). Every other check runs.
+* **Gate:** `PCM3_IFS2.ifs` lists and extracts against its manifest, and
+  verification passes every check it makes and names the unverified field.
+  A spool-limit test fails at the step that crosses the limit.
 
 ### 9. Writer, unregistered
 
@@ -841,8 +845,8 @@ Depends on stages 4 and 6 and on layer stages 2 and 4.
 
 ### 11. Boot-image wrap
 
-Depends on stages 7 and 10, on owner decision 6, and on the layer design's
-command-line spelling of wrap.
+Depends on stages 7 and 10, on E8's answers for owner decision 6, and on
+the layer design's command-line spelling of wrap.
 
 * The LZO1X encoder, with determinism tests and the differential checker.
 * The `qnxboot` wrap encoder (decision 10): the template input, read and
@@ -894,7 +898,7 @@ flowchart LR
     L23[Layer stages 2-3] --> S7
     S4 --> S8[8. hbcifs read]
     S6 --> S8
-    L24[Layer stages 2 and 4] --> S8
+    L24[Layer stages 2-4] --> S8
     S4 --> S9[9. Writer]
     S9 --> S10[10. Native qualification]
     S7 --> S11[11. Wrap]
@@ -944,18 +948,18 @@ when stage 6 completes, stages 9 and 10 go first.
 | Ambiguous symbolic links reported as such (section 5.2) | One layout; others unsupported | The preliminary survey shows it in every PCM link; S1 and E4 confirm |
 | Startup checksum algorithm unknown (section 3.5) | The additive rule over both domains | Observed in every boot image checked; S1 and S2 confirm |
 | Compressed body decoded into a temporary file (section 6) | The learned chunk index for framed bodies; the spool for `hbcifs` | Both owners exist in the layer design |
-| `hbcifs` as an OEM container to keep out of the core (section 9) | A compression profile, read only | The PCM application image needs it, and it has gzip's shape |
+| `hbcifs` as an OEM container to keep out of the core (section 9) | A container profile in the layer registry, read only | The PCM application image needs it |
 | Adapting the BSD-3-Clause `go-compressions/lzo` decoder (section 6) | A decoder written from the stream description | A Go source is a rewrite either way, and a decoder written from the description keeps one provenance story for both codecs |
 | Byte-exact no-change repack (section 14.2) | A wrap with recomputed fields | The output is a new image, not a preserved one |
 | Big-endian reading in stage A2 | Only if a native producer exists | Closed tables accept only observed values |
 | Hard links inferred from aliases, or a sidecar manifest | Never inferred; every record is an entry | No common hardlink representation; draft question 7 |
-| `fsimg -t ifs -l` and similar | The existing commands, and the tar-like CLI when it lands | The flags in the draft are not normative (section 12) |
+| `fsimg -t ifs -l` and similar | The tar-like CLI | The flags in the draft are not normative (section 12) |
 | BSD `lclevy/dumpifs` as a possible code source (section 13.2) | Comparison only | Designs are written from facts; nothing is imported |
-| Stage order A0 to D (section 16) | Reader, verifier and writer on bare ImageFS first; layers after the layer stages | The layer machinery is not yet implemented |
+| Stage order A0 to D (section 16) | Reader, verifier and writer on bare ImageFS first; layers after the layer stages | The container layers are not yet implemented |
 
 ## Owner decisions
 
-The owner has settled the first four. The rest are open.
+The owner has settled all nine.
 
 1. **Writer scope.** A standalone, nonbootable ImageFS writer first, then a
    gated wrap of a new ImageFS in an existing boot image (stages 9 to 11).
@@ -965,37 +969,29 @@ The owner has settled the first four. The rest are open.
    zlib is not scheduled.
 4. **Native producer.** The guest's 6.5.0 `mkifs` and `dumpifs` are the
    oracle. No licensed SDP beyond the live CD is needed.
-5. **Codec provenance.** Confirm project-owned codecs under the clean-room
-   split, with `liblzo2` and `libucl` used only as out-of-tree black-box
-   oracles. The alternative, an optional link-time integration outside the
-   core, makes distributed binaries GPL-bound and leaves the default build
-   unable to read PCM images ([codecs](#codecs-and-dependencies)). Closed
-   at the stage 2 gate.
-6. **Boot attributes in a wrapped image.** The new ImageFS needs
-   `boot_ino[]`, `script_ino` and, if E8 shows `procnto` needs them, inode
-   flags on the matching members. The recommendation is typed writer
-   settings: up to four boot programs and one script, named by path, plus a
-   flag rule that E8 must justify. With these the writer never reads an
-   image, and the template supplies only the startup section. The
-   alternative, inheriting flags by path from the template, makes the writer
-   plan against a reader's catalog. If E8 finds members whose bytes depend on
-   their offset, neither option suffices: a wrap must keep those members at
-   the template's offsets, and the wrap's scope needs a new decision.
-   Closed before stage 11.
-7. **Writer registration bar.** QNX 6.5.0 has no `mount_ifs`. If E11 finds
-   another native mount, the bar is `dumpifs` acceptance plus that mount.
-   Otherwise the choice is between `dumpifs` acceptance alone and waiting
-   for the stage 11 x86 boot, where `procnto` serves the ImageFS as
-   `/proc/boot`. Closed at the stage 2 gate.
-8. **`hbcifs` checksum.** If S1 cannot identify the header's checksum
-   field, the choice is between two options. One reads IFS2 with that field
-   reported as unverified, so verification is incomplete; the other refuses
-   IFS2 as `FSIMG_EUNSUPPORTED`. Closed before stage 8.
-9. **`hbcifs` layer kind.** The recommendation is a compression profile
-   peeled into the spool, because the wrapper is a header and one
-   sequential stream around the whole file, as gzip is. The alternative is
-   a container. That needs a container peel without a chunk index, which
-   the layer contract does not have. Closed at the stage 2 gate.
+5. **Codec provenance.** The codecs are project-owned, written under the
+   clean-room split, with `liblzo2` and `libucl` used only as out-of-tree
+   black-box oracles. No GPL library is linked, even optionally
+   ([codecs](#codecs-and-dependencies)).
+6. **Boot attributes in a wrapped image.** The writer takes typed settings:
+   up to four boot programs and one script, named by path, plus an
+   inode-flag rule that E8 must justify. The writer never reads an image,
+   and the template supplies only the startup section. Inheriting flags by
+   path from the template was rejected because it makes the writer plan
+   against a reader's catalog. If E8 finds members whose bytes depend on
+   their image offset, a wrap must keep them at the template's offsets, and
+   the wrap's scope returns to the owner.
+7. **Writer registration bar.** `dumpifs` acceptance in the stage 10 cycle,
+   plus the E11 mount if one exists. QNX 6.5.0 has no `mount_ifs`, so
+   without an E11 mount the bar is `dumpifs` acceptance alone.
+8. **`hbcifs` checksum.** Until evidence identifies the header's checksum
+   field, IFS2 is read, and verification reports that field as unverified
+   and the verification as incomplete.
+9. **`hbcifs` layer kind.** A container, peeled through the spool
+   ([placement](#placement-and-owners)). It packages an ImageFS for one
+   loader with metadata of its own, as `qnxboot` does, and only one file on
+   the examined disc variant carries its header. If stage 1 finds the
+   header on non-IFS payloads, this returns to the owner.
 
 ## Risks
 

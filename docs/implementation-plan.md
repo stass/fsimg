@@ -521,8 +521,8 @@ The harness's creation stages (B1f and B1g of the
 QNX IFS follows its own [plan](ifs-plan.md): native evidence from QNX
 6.5.0's `mkifs` and `dumpifs` and the PCM 3.1 update-disc images, format,
 driver, layer-profile and codec designs, a reader and verifier for bare
-ImageFS, project-owned codecs, the `qnxboot` container and `hbcifs`
-compression layers after the layer stages they need, a standalone writer
+ImageFS, project-owned codecs, the `qnxboot` and `hbcifs` containers
+after the layer stages they need, a standalone writer
 registered after native qualification, and boot-gated wraps of a new
 ImageFS in an existing boot image's startup section.
 

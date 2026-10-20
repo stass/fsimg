@@ -510,12 +510,12 @@
   format needs a bounded-resource design and an independent compatibility corpus.
 
 * [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/layers/`):
-  read ImageFS bodies, bare or inside QNX boot images (`qnxboot`) and the
-  PCM 3.1 `hbcifs` wrapper, with project-owned LZO1X and UCL decoders; write
-  standalone ImageFS volumes; then wrap a new ImageFS in an existing boot
-  image's startup section. The [plan](docs/ifs-plan.md) orders the work from native QNX
-  6.5.0 `mkifs` and `dumpifs` evidence and the PCM 3.1 update-disc images,
-  through the designs, to writer registration and boot-gated wraps; its
-  open owner decisions (codec provenance, boot attributes in a wrap, the
-  writer registration bar, the `hbcifs` checksum and layer kind) close before the stages
-  that need them.
+  read ImageFS bodies, bare or inside the `qnxboot` and `hbcifs` containers
+  (QNX boot images and the PCM 3.1 Harman-Becker wrapper), with
+  project-owned LZO1X and UCL decoders; write standalone ImageFS volumes;
+  then wrap a new ImageFS in an existing boot image's startup section. The
+  [plan](docs/ifs-plan.md) orders the work from native QNX 6.5.0 `mkifs`
+  and `dumpifs` evidence and the PCM 3.1 update-disc images, through the
+  designs, to writer registration and boot-gated wraps. Its owner decisions
+  are settled; the stage 1 evidence can return two of them (offset-dependent
+  boot members, `hbcifs` on non-IFS payloads) to the owner.
