@@ -800,6 +800,24 @@ observe_process(worker_process_t *process, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/* While a descriptor is polled, its next event wakes the poll, and the
+ * timeout only bounds how late cancellation and the deadline are noticed.
+ * When none is polled, only a child's exit, which no descriptor reports, and
+ * the clocks can end the wait; a short timeout reaps the children promptly
+ * instead of adding the full interval to every command. A child that closes
+ * its channels without exiting keeps the loop waking each millisecond only
+ * until the exit grace observe_process armed at its channel EOF expires.
+ */
+static int
+poll_milliseconds(const struct pollfd *channels)
+{
+	for (unsigned role = 0; role < CHANNEL_COUNT; role++) {
+		if (channels[role].fd != -1)
+			return (100);
+	}
+	return (1);
+}
+
 static fsimg_status_t
 supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 {
@@ -880,7 +898,7 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 		if (!state->processes[PROCESS_OUTPUT].channel_eof)
 			channels[CHANNEL_STATUS] = (struct pollfd){
 			    .fd = state->channels[CHANNEL_STATUS][0], .events = POLLIN };
-		if (poll(channels, CHANNEL_COUNT, 100) == -1) {
+		if (poll(channels, CHANNEL_COUNT, poll_milliseconds(channels)) == -1) {
 			if (errno == EINTR)
 				continue;
 			return (worker_error(error, "worker channel polling failed"));

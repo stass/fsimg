@@ -105,6 +105,7 @@ static fsimg_status_t event(void *, const fsimg_frame_t *, fsimg_worker_text_t *
     fsimg_error_t *);
 static fsimg_status_t run(worker_fixture_t *, fsimg_error_t *);
 static void test_operations(const char *);
+static void test_prompt_completion(void);
 static void test_startup(void);
 static void test_inheritance(void);
 static void test_forged(void);
@@ -499,6 +500,44 @@ test_operations(const char *format)
 	CHECK(run(&fixture, &error) == FSIMG_OK);
 	CHECK(fixture.plans == 2);
 	CHECK(fixture.result.metadata_losses == fixture.plan_losses);
+	fixture_close(&fixture);
+}
+
+/* Children close their channels just before they exit, and no descriptor
+ * reports the exit itself. The supervisor must reap them promptly rather
+ * than sleep out its cancellation-poll interval (100 ms) after the last
+ * frame, which would add that interval to every operation. The fastest of
+ * ten info operations shows it whatever the host's load; a sanitizer
+ * runtime's process startup alone exceeds the bound, so those builds skip.
+ */
+static void
+test_prompt_completion(void)
+{
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	struct timespec start, end;
+	long long elapsed_ms, fastest_ms = -1;
+
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) || \
+    __has_feature(thread_sanitizer)
+	puts("SKIP: worker completion latency is not measurable under a sanitizer runtime");
+	return;
+#endif
+#endif
+	fixture_open_format(&fixture, "fat16");
+	for (int i = 0; i < 10; i++) {
+		CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+		CHECK(run(&fixture, &error) == FSIMG_OK);
+		CHECK(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+		elapsed_ms = (long long)(end.tv_sec - start.tv_sec) * 1000 +
+		    (end.tv_nsec - start.tv_nsec) / 1000000;
+		if (fastest_ms == -1 || elapsed_ms < fastest_ms)
+			fastest_ms = elapsed_ms;
+	}
+	if (fastest_ms >= 50)
+		fprintf(stderr, "fastest worker operation took %lld ms\n", fastest_ms);
+	CHECK(fastest_ms < 50);
 	fixture_close(&fixture);
 }
 
@@ -1088,6 +1127,7 @@ main(int argc, char **argv)
 	}
 	test_operations("fat16");
 	test_operations("exfat");
+	test_prompt_completion();
 	test_text_output();
 	test_startup();
 	test_inheritance();
