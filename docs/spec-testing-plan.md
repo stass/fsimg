@@ -214,7 +214,7 @@ review and commit gates.
   A FAT32 extension is never read over a FAT12/16 BPB.
 * An offset table, transcribed by hand from the specification, is asserted
   against every field. It is independent of the C sources.
-* `model.rb` decodes any byte prefix into a model with explicit `missing`
+* `model.rb` decodes any byte prefix into a model with explicit `Undefined`
   markers.
 * `geometry.rb` derives these quantities without raising on zero divisors,
   overflow or contradictory fields:

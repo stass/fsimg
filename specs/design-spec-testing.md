@@ -66,7 +66,7 @@ allocation graphs) is expressed by rule predicates over the decoded model.
 must find it, is expressed by rule policies and scopes.
 
 The model decoder is total. It decodes any byte prefix, including one shorter
-than a boot sector, into a model whose absent fields are explicit `missing`
+than a boot sector, into a model whose absent fields are explicit `Undefined`
 markers rather than exceptions; records are read only over complete structures.
 Derived quantities never raise on a zero divisor, an overflow or contradictory
 fields; they are undefined instead, and a rule applies only when every input
