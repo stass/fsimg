@@ -31,6 +31,16 @@
   `fsimg_source_open()` opens it, reject a NUL byte there, and serve the
   buffer, so every link target is checked once in the common layer.
 
+* [Medium] **Spilled metadata stores resize scratch on every growth**
+  (`lib/meta/store.c`): once a store spills, each `fsimg_store_grow()`, one
+  per appended record, runs `scratch_resize()`, whose `fsimg_io_resize()`
+  calls `ftruncate(2)`. Sampling `./test-qnx6 --scale` on macOS while it
+  lists a 200,000-file directory puts nearly all of the listing in that
+  call, and the FAT scale case's 105-second listing likely shares the cause.
+  Track a backing capacity and extend the file in larger sparse steps only
+  when a growth exceeds it, while charging the logical length, so the
+  scratch limit and physical-peak accounting stay exact.
+
 * [Low] **Source failures fail the writer from inside the source layer**
   (`lib/source/source.c`, `specs/design-sources.md`): an operational source
   failure calls `fsimg_writer_fail()` and releases collection storage while a

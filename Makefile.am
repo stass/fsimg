@@ -223,13 +223,15 @@ baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	./test/baseline.sh --record > $(srcdir)/test/baseline.txt.new || \
 	    { rm -f $(srcdir)/test/baseline.txt.new; exit 1; }
 	mv $(srcdir)/test/baseline.txt.new $(srcdir)/test/baseline.txt
-check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale
+check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale \
+	    test-qnx6
 	./test-meta-sort --scale
 	./test-catalog --wide 100000
 	./test-catalog --scale 100000
 	./test-fat --scale
 	./test-fat-write --scale
 	./test-exfat-scale --huge; result=$$?; test $$result = 0 -o $$result = 77
+	./test-qnx6 --scale; result=$$?; test $$result = 0 -o $$result = 77
 check-fuzz: test-fat test-exfat test-qnx6 test-protocol
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh

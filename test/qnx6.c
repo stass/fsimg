@@ -3,15 +3,19 @@
  */
 #include "config.h"
 
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdint.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "fsimg.h"
@@ -43,8 +47,10 @@
 typedef struct gen_object {
 	uint32_t	*blocks;	/* every block it owns, leaves and indirect */
 	size_t		 block_count;
+	size_t		 block_capacity;
 	unsigned char	*slots;		/* a directory's slots */
 	size_t		 slot_count;
+	size_t		 slot_capacity;
 	uint64_t	 size;
 	uint32_t	 refs[16];
 	uint32_t	 parent;
@@ -58,9 +64,27 @@ typedef struct gen_object {
 	bool		 live;
 } gen_object_t;
 
+/* The shape of a new volume. objects bounds the inode numbers the
+ * generator can make live, from 1; the rest of the inode table stays free.
+ * A sparse volume lives in an unlinked, ftruncate-extended temporary file
+ * mapped shared, so its untouched blocks cost neither memory nor disk and
+ * read as zeros instead of the poison byte; it lets tests describe volumes
+ * of many gigabytes and files whose content is mostly unwritten.
+ */
+typedef struct gen_shape {
+	uint64_t	 length;
+	uint32_t	 block_size;
+	uint32_t	 inodes;
+	uint32_t	 objects;
+	uint32_t	 flags;
+	bool		 big;
+	bool		 sparse;
+} gen_shape_t;
+
 typedef struct qnx6_gen {
 	unsigned char	*image;
 	uint64_t	 length;
+	int		 image_fd;	/* the sparse volume's file, or -1 */
 	uint64_t	 second;
 	unsigned char	*table;
 	unsigned char	*bitmap;
@@ -82,12 +106,15 @@ typedef struct qnx6_gen {
 	uint32_t	 inode_refs[16];
 	uint32_t	 name_refs[16];
 	uint32_t	 inode_leaf0;	/* first inode-table leaf */
+	uint32_t	 object_count;	/* live inode numbers are 1..object_count */
+	uint32_t	 inode_cursor;	/* gen_inode's search starts here */
 	uint8_t		 bitmap_depth;
 	uint8_t		 inode_depth;
 	uint8_t		 name_depth;
 	bool		 big;
 	bool		 root_last;
-	gen_object_t	 objects[GEN_INODES + 1];
+	bool		 sparse;
+	gen_object_t	*objects;	/* indexed by inode number */
 } qnx6_gen_t;
 
 static void put16(qnx6_gen_t *, unsigned char *, uint16_t);
@@ -103,6 +130,9 @@ static uint32_t gen_alloc(qnx6_gen_t *);
 static void own(gen_object_t *, uint32_t);
 static void gen_tree(qnx6_gen_t *, const uint32_t *, uint64_t, unsigned,
     uint32_t *, gen_object_t *, uint32_t *, uint8_t *);
+static void temp_name(char *, size_t, const char *);
+static bool gen_sparse(qnx6_gen_t *);
+static bool gen_create(qnx6_gen_t *, const gen_shape_t *);
 static void gen_init(qnx6_gen_t *, uint32_t, bool, uint64_t, uint32_t, uint32_t);
 static void gen_free(qnx6_gen_t *);
 static uint32_t gen_inode(qnx6_gen_t *, uint16_t);
@@ -232,12 +262,26 @@ gen_alloc(qnx6_gen_t *g)
 	return (block);
 }
 
+/* Grow an array of count elements to hold one more, doubling its capacity
+ * so that large objects and wide directories build in linear time.
+ */
+static void *
+grow(void *array, size_t count, size_t *capacity, size_t element)
+{
+	if (count < *capacity)
+		return (array);
+	CHECK(*capacity <= SIZE_MAX / 2 / element);
+	*capacity = *capacity == 0 ? 16 : *capacity * 2;
+	array = realloc(array, *capacity * element);
+	CHECK(array != NULL);
+	return (array);
+}
+
 static void
 own(gen_object_t *object, uint32_t block)
 {
-	object->blocks = realloc(object->blocks,
-	    (object->block_count + 1) * sizeof(*object->blocks));
-	CHECK(object->blocks != NULL);
+	object->blocks = grow(object->blocks, object->block_count,
+	    &object->block_capacity, sizeof(*object->blocks));
 	object->blocks[object->block_count++] = block;
 }
 
@@ -284,43 +328,116 @@ gen_tree(qnx6_gen_t *g, const uint32_t *leaves, uint64_t n, unsigned depth,
 	free(level);
 }
 
+/* A mkstemp/mkdtemp template for prefix in $TMPDIR, or /tmp. */
+static void
+temp_name(char *buffer, size_t size, const char *prefix)
+{
+	const char *directory = getenv("TMPDIR");
+
+	if (directory == NULL || directory[0] == '\0')
+		directory = "/tmp";
+	CHECK((size_t)snprintf(buffer, size, "%s/%s-XXXXXX", directory,
+	    prefix) < size);
+}
+
+/* Cases skipped because the host cannot hold a sparse volume; a run with
+ * any exits 77 after everything else passed.
+ */
+static unsigned skipped;
+
+/* Back the volume with an unlinked temporary file extended to its length
+ * and mapped shared. A host without the address space, a file size limit
+ * (SIGXFSZ is ignored so that it shows as EFBIG), or a filesystem without
+ * room, quota or support for a large shared mapping cannot hold it; that
+ * is reported as a skip, not a failure. Any other error fails.
+ */
+static bool
+gen_sparse(qnx6_gen_t *g)
+{
+	char path[1024];
+	int saved;
+
+	if (g->length > SIZE_MAX || g->length > (uint64_t)INT64_MAX) {
+		printf("SKIP: a sparse %" PRIu64 "-byte QNX6 volume exceeds the "
+		    "address space\n", g->length);
+		skipped++;
+		return (false);
+	}
+	CHECK(signal(SIGXFSZ, SIG_IGN) != SIG_ERR);
+	temp_name(path, sizeof(path), "fsimg-qnx6-image");
+	g->image_fd = mkstemp(path);
+	CHECK(g->image_fd != -1 && unlink(path) == 0);
+	g->image = MAP_FAILED;
+	if (ftruncate(g->image_fd, (off_t)g->length) == 0)
+		g->image = mmap(NULL, (size_t)g->length, PROT_READ | PROT_WRITE,
+		    MAP_SHARED, g->image_fd, 0);
+	if (g->image != MAP_FAILED)
+		return (true);
+	saved = errno;
+	CHECK(saved == EFBIG || saved == ENOSPC || saved == EDQUOT ||
+	    saved == ENOMEM || saved == ENODEV || saved == ENOTSUP ||
+	    saved == EOPNOTSUPP);
+	printf("SKIP: a sparse %" PRIu64 "-byte QNX6 volume: %s\n", g->length,
+	    strerror(saved));
+	skipped++;
+	CHECK(close(g->image_fd) == 0);
+	g->image_fd = -1;
+	g->image = NULL;
+	return (false);
+}
+
 /* Lay out an empty volume of `length` bytes: N follows from the 4096-byte
  * end, the second header sits in the last whole 4096-byte unit, and R is
  * the block count of the bitmap and inode-table trees. Root (inode 1) and
- * .boot (inode 2) are created with formatter status 1.
+ * .boot (inode 2) are created with formatter status 1. False, with nothing
+ * to free, when a sparse volume cannot be held.
  */
-static void
-gen_init(qnx6_gen_t *g, uint32_t block_size, bool big, uint64_t length,
-    uint32_t inodes, uint32_t flags)
+static bool
+gen_create(qnx6_gen_t *g, const gen_shape_t *shape)
 {
-	uint64_t end, bitmap_bytes;
-	uint32_t boot;
+	uint64_t end, bitmap_bytes, length = shape->length;
+	uint32_t boot, block_size = shape->block_size;
 
 	bzero(g, sizeof(*g));
 	g->block_size = block_size;
 	g->pointers = block_size / 4;
-	g->big = big;
+	g->big = shape->big;
 	g->length = length;
-	g->flags = flags;
+	g->flags = shape->flags;
 	g->stride = 1;
-	g->inode_count = inodes;
+	g->inode_count = shape->inodes;
+	g->object_count = shape->objects < shape->inodes ? shape->objects :
+	    shape->inodes;
+	g->inode_cursor = 1;
+	g->sparse = shape->sparse;
+	g->image_fd = -1;
 	end = length / 4096 * 4096;
 	g->second = end - 4096;
 	g->blocks = (uint32_t)((end - 16384) / block_size);
 	bitmap_bytes = (g->blocks + 7) / 8;
 	g->reservation = (uint32_t)(gen_tree_blocks((bitmap_bytes +
 	    block_size - 1) / block_size, g->pointers) +
-	    gen_tree_blocks((uint64_t)inodes * 128 / block_size, g->pointers));
-	CHECK((uint64_t)inodes * 128 % block_size == 0);
+	    gen_tree_blocks((uint64_t)g->inode_count * 128 / block_size,
+	    g->pointers));
+	CHECK((uint64_t)g->inode_count * 128 % block_size == 0);
+	CHECK(2 * (uint64_t)g->reservation < g->blocks);
 	g->next_block = 2 * g->reservation;
-	g->image = malloc(length);
-	g->table = calloc(inodes, 128);
+	if (g->sparse) {
+		if (!gen_sparse(g))
+			return (false);
+	} else {
+		CHECK(length <= SIZE_MAX);
+		g->image = malloc(length);
+		CHECK(g->image != NULL);
+		memset(g->image, GEN_POISON, length);
+		bzero(g->image + end, length - end);
+	}
+	g->objects = calloc((size_t)g->object_count + 1, sizeof(*g->objects));
+	g->table = calloc(g->inode_count, 128);
 	g->bitmap = calloc((g->blocks + 7) / 8 + block_size, 1);
 	g->names = calloc(GEN_NAMES, block_size);
-	CHECK(g->image != NULL && g->table != NULL && g->bitmap != NULL &&
+	CHECK(g->objects != NULL && g->table != NULL && g->bitmap != NULL &&
 	    g->names != NULL);
-	memset(g->image, GEN_POISON, length);
-	bzero(g->image + end, length - end);
 	CHECK(gen_inode(g, 040775) == 1);
 	g->objects[1].parent = 1;
 	g->objects[1].status = 1;
@@ -331,16 +448,42 @@ gen_init(qnx6_gen_t *g, uint32_t block_size, bool big, uint64_t length,
 	CHECK(boot == 2);
 	g->objects[2].mode = 040700;
 	g->objects[2].status = 1;
+	return (true);
+}
+
+/* An ordinary in-memory volume with poisoned free blocks and up to
+ * GEN_INODES live inodes.
+ */
+static void
+gen_init(qnx6_gen_t *g, uint32_t block_size, bool big, uint64_t length,
+    uint32_t inodes, uint32_t flags)
+{
+	gen_shape_t shape = {
+		.length = length,
+		.block_size = block_size,
+		.inodes = inodes,
+		.objects = GEN_INODES,
+		.flags = flags,
+		.big = big
+	};
+
+	CHECK(gen_create(g, &shape));
 }
 
 static void
 gen_free(qnx6_gen_t *g)
 {
-	for (unsigned i = 0; i <= GEN_INODES; i++) {
+	for (uint32_t i = 0; i <= g->object_count; i++) {
 		free(g->objects[i].blocks);
 		free(g->objects[i].slots);
 	}
-	free(g->image);
+	free(g->objects);
+	if (g->sparse) {
+		CHECK(munmap(g->image, (size_t)g->length) == 0);
+		CHECK(close(g->image_fd) == 0);
+	} else {
+		free(g->image);
+	}
 	free(g->table);
 	free(g->bitmap);
 	free(g->names);
@@ -348,12 +491,16 @@ gen_free(qnx6_gen_t *g)
 	free(g->system_blocks);
 }
 
+/* The first free inode number at or above the cursor, which then moves
+ * past it; a test moves the cursor to place an inode at a chosen number.
+ */
 static uint32_t
 gen_inode(qnx6_gen_t *g, uint16_t mode)
 {
-	for (uint32_t i = 1; i <= GEN_INODES && i <= g->inode_count; i++) {
+	for (uint32_t i = g->inode_cursor; i <= g->object_count; i++) {
 		if (g->objects[i].live)
 			continue;
+		g->inode_cursor = i + 1;
 		g->objects[i] = (gen_object_t){
 			.live = true,
 			.mode = mode,
@@ -382,8 +529,7 @@ gen_slot(qnx6_gen_t *g, uint32_t dir, uint32_t inode, const char *name,
 	gen_object_t *d = &g->objects[dir];
 	unsigned char *slot, *record;
 
-	d->slots = realloc(d->slots, (d->slot_count + 1) * 32);
-	CHECK(d->slots != NULL);
+	d->slots = grow(d->slots, d->slot_count, &d->slot_capacity, 32);
 	slot = d->slots + d->slot_count++ * 32;
 	bzero(slot, 32);
 	put32(g, slot, inode);
@@ -419,7 +565,9 @@ gen_dir(qnx6_gen_t *g, uint32_t parent, const char *name)
 }
 
 /* A regular file's leaves are allocated and filled now; its last block is
- * zero-padded. Its tree has the minimal depth.
+ * zero-padded. Its tree has the minimal depth. In a sparse volume bytes may
+ * be NULL: the leaves keep the image's zeros, and a test writes what it
+ * checks through block_at.
  */
 static uint32_t
 gen_file(qnx6_gen_t *g, uint32_t parent, const char *name,
@@ -438,6 +586,10 @@ gen_file(qnx6_gen_t *g, uint32_t parent, const char *name,
 	for (uint64_t i = 0; i < n; i++) {
 		leaves[i] = gen_alloc(g);
 		own(f, leaves[i]);
+		if (bytes == NULL) {
+			CHECK(g->sparse);
+			continue;
+		}
 		piece = length - i * g->block_size;
 		if (piece > g->block_size)
 			piece = g->block_size;
@@ -517,7 +669,7 @@ gen_header(qnx6_gen_t *g, unsigned char *h, uint64_t serial)
 	used_blocks = used_inodes = 0;
 	for (uint32_t b = 0; b < g->blocks; b++)
 		used_blocks += (g->bitmap[b / 8] >> (b % 8)) & 1;
-	for (uint32_t i = 1; i <= GEN_INODES; i++)
+	for (uint32_t i = 1; i <= g->object_count; i++)
 		used_inodes += g->objects[i].live;
 	bzero(h, 512);
 	put32(g, h, 0x68191122);
@@ -574,7 +726,7 @@ gen_commit(qnx6_gen_t *g, uint32_t base, uint64_t serial, bool first,
 	/* Directories, each in whole blocks of slots; the root optionally in
 	 * the volume's last block.
 	 */
-	for (uint32_t i = 1; i <= GEN_INODES; i++) {
+	for (uint32_t i = 1; i <= g->object_count; i++) {
 		o = &g->objects[i];
 		if (!o->live || (o->mode & 0170000) != 040000)
 			continue;
@@ -619,7 +771,7 @@ gen_commit(qnx6_gen_t *g, uint32_t base, uint64_t serial, bool first,
 	bzero(g->bitmap, bitmap_bytes + g->block_size);
 	for (uint32_t b = 0; b < 2 * g->reservation; b++)
 		gen_set_bit(g, b, true);
-	for (uint32_t i = 1; i <= GEN_INODES; i++)
+	for (uint32_t i = 1; i <= g->object_count; i++)
 		for (size_t b = 0; g->objects[i].live &&
 		    b < g->objects[i].block_count; b++)
 			gen_set_bit(g, g->objects[i].blocks[b], true);
@@ -632,7 +784,7 @@ gen_commit(qnx6_gen_t *g, uint32_t base, uint64_t serial, bool first,
 
 	/* The inode table. */
 	bzero(g->table, (size_t)g->inode_count * 128);
-	for (uint32_t i = 1; i <= GEN_INODES && i <= g->inode_count; i++) {
+	for (uint32_t i = 1; i <= g->object_count; i++) {
 		o = &g->objects[i];
 		if (!o->live)
 			continue;
@@ -702,20 +854,49 @@ gen_commit(qnx6_gen_t *g, uint32_t base, uint64_t serial, bool first,
  * Reading generated volumes through the public API.
  */
 
+/* Reads of a generated volume by block range, armed by fixture_account:
+ * bytes read from the system run [D, D + 2RB) and from the content blocks
+ * [D + 2RB, D + NB), and reads of a content block already read, which seen
+ * (a bit per content block) detects.
+ */
+typedef struct account {
+	uint64_t	 system_first;
+	uint64_t	 content_first;
+	uint64_t	 content_end;
+	uint32_t	 block_size;
+	unsigned char	*seen;
+	uint64_t	 system_bytes;
+	uint64_t	 content_bytes;
+	uint64_t	 repeats;
+} account_t;
+
+/* A volume behind the callback adapter, with fault injection and read
+ * accounting. Reads come from image_fd when the volume is sparse, so its
+ * holes are read without being mapped, otherwise from image.
+ */
 typedef struct fixture {
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*io;
 	fsimg_reader_t	*reader;
 	unsigned char	*image;
 	uint64_t	 length;
+	int		 image_fd;
+	uint64_t	 memory;	/* charged before any I/O object */
 	uint64_t	 calls;
+	uint64_t	 read_bytes;
 	uint64_t	 forbid_first;	/* reads may not touch [first, end) */
 	uint64_t	 forbid_end;
 	uint64_t	 fail_first;	/* reads touching [first, end) fail */
 	uint64_t	 fail_end;
+	uint64_t	 eof_at;	/* reads make no progress in [at, end) */
+	uint64_t	 eof_end;
+	size_t		 short_max;	/* nonzero: the most one read returns */
+	account_t	 account;	/* off while account.seen is NULL */
+	uint64_t	 polls;		/* cancellation callbacks so far */
+	uint64_t	 cancel_after;	/* nonzero: cancel at this poll */
 	bool		 cancelled;
 	int		 scratch;
-	char		 directory[64];
+	char		 directory[1024];
 } fixture_t;
 
 #define RUN_LIST	0x1u	/* open, walk and read every file */
@@ -724,9 +905,54 @@ typedef struct fixture {
 static bool
 cancelled(void *argument)
 {
-	return (((fixture_t *)argument)->cancelled);
+	fixture_t *f = argument;
+
+	f->polls++;
+	return (f->cancelled ||
+	    (f->cancel_after != 0 && f->polls >= f->cancel_after));
 }
 
+/* The bytes of [first, end) that fall in [low, high). */
+static uint64_t
+overlap(uint64_t first, uint64_t end, uint64_t low, uint64_t high)
+{
+	if (first < low)
+		first = low;
+	if (end > high)
+		end = high;
+	return (end > first ? end - first : 0);
+}
+
+/* Account one delivered read of [offset, offset + length). */
+static void
+account_read(account_t *a, uint64_t offset, size_t length)
+{
+	uint64_t end, first, last;
+
+	end = offset + length;
+	a->system_bytes += overlap(offset, end, a->system_first,
+	    a->content_first);
+	a->content_bytes += overlap(offset, end, a->content_first,
+	    a->content_end);
+	if (overlap(offset, end, a->content_first, a->content_end) == 0)
+		return;
+	first = ((offset > a->content_first ? offset : a->content_first) -
+	    a->content_first) / a->block_size;
+	last = ((end < a->content_end ? end : a->content_end) - 1 -
+	    a->content_first) / a->block_size;
+	for (uint64_t b = first; b <= last; b++) {
+		a->repeats += (a->seen[b / 8] >> (b % 8)) & 1;
+		a->seen[b / 8] |= (unsigned char)(1u << (b % 8));
+	}
+}
+
+/* The read callback applies the fixture's policies in a fixed order:
+ * every read must lie in the slice and outside the forbidden range; a read
+ * touching the failure range fails without progress; a read reaching the
+ * no-progress range is cut at its start, and one starting inside it makes
+ * no progress, which the bounded I/O layer reports as EOF; short_max then
+ * caps what remains. Only the bytes finally delivered are accounted.
+ */
 static fsimg_status_t
 image_read(void *argument, uint64_t offset, void *buffer, size_t length,
     size_t *transferred, fsimg_error_t *error)
@@ -740,7 +966,20 @@ image_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	if (offset < f->fail_end && offset + length > f->fail_first)
 		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
 		    "injected QNX6 read failure"));
-	bcopy(f->image + offset, buffer, length);
+	if (offset >= f->eof_at && offset < f->eof_end)
+		return (FSIMG_OK);
+	if (offset < f->eof_at && length > f->eof_at - offset)
+		length = (size_t)(f->eof_at - offset);
+	if (f->short_max != 0 && length > f->short_max)
+		length = f->short_max;
+	if (f->account.seen != NULL)
+		account_read(&f->account, offset, length);
+	if (f->image_fd != -1)
+		CHECK(pread(f->image_fd, buffer, length, (off_t)offset) ==
+		    (ssize_t)length);
+	else
+		bcopy(f->image + offset, buffer, length);
+	f->read_bytes += length;
 	*transferred = length;
 	return (FSIMG_OK);
 }
@@ -752,17 +991,48 @@ image_size(void *argument, uint64_t *size, fsimg_error_t *error FSIMG_UNUSED)
 	return (FSIMG_OK);
 }
 
+/* Replace the fixture's I/O object with one whose slice is the first
+ * length bytes of the image.
+ */
 static void
-fixture_new(fixture_t *f, unsigned char *image, uint64_t length,
-    uint64_t max_work)
+fixture_resize(fixture_t *f, uint64_t length)
+{
+	fsimg_io_ops_t ops;
+
+	fsimg_io_free(f->io);
+	f->length = length;
+	fsimg_io_ops_init(&ops);
+	ops.read_at = image_read;
+	ops.get_size = image_size;
+	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, f, &f->io, NULL) == FSIMG_OK);
+}
+
+static uint64_t
+charged_memory(fsimg_ctx_t *ctx)
+{
+	fsimg_stats_t stats;
+
+	CHECK(fsimg_ctx_get_stats(ctx, &stats, NULL) == FSIMG_OK);
+	return (stats.memory_bytes);
+}
+
+/* A fixture over image, or over image_fd when it is not -1, whose context
+ * has a 16 MiB memory budget and, when nonzero, the given work and scratch
+ * limits.
+ */
+static void
+fixture_limited(fixture_t *f, unsigned char *image, int image_fd,
+    uint64_t length, uint64_t max_work, uint64_t scratch_bytes)
 {
 	fsimg_options_t options;
-	fsimg_io_ops_t ops;
 
 	bzero(f, sizeof(*f));
 	f->image = image;
 	f->length = length;
-	strcpy(f->directory, "/tmp/fsimg-qnx6-XXXXXX");
+	f->image_fd = image_fd;
+	f->eof_at = UINT64_MAX;
+	f->eof_end = UINT64_MAX;
+	temp_name(f->directory, sizeof(f->directory), "fsimg-qnx6");
 	CHECK(mkdtemp(f->directory) != NULL);
 	f->scratch = open(f->directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	CHECK(f->scratch != -1);
@@ -773,25 +1043,71 @@ fixture_new(fixture_t *f, unsigned char *image, uint64_t length,
 	options.cancel_argument = f;
 	if (max_work != 0)
 		options.max_work = max_work;
+	if (scratch_bytes != 0)
+		options.scratch_bytes = scratch_bytes;
 	CHECK(fsimg_ctx_new(&options, &f->ctx, NULL) == FSIMG_OK);
-	fsimg_io_ops_init(&ops);
-	ops.read_at = image_read;
-	ops.get_size = image_size;
-	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, f, &f->io, NULL) == FSIMG_OK);
+	f->memory = charged_memory(f->ctx);
+	fixture_resize(f, length);
+}
+
+/* A fixture over an in-memory image. */
+static void
+fixture_new(fixture_t *f, unsigned char *image, uint64_t length,
+    uint64_t max_work)
+{
+	fixture_limited(f, image, -1, length, max_work, 0);
+}
+
+/* A fixture over a generated volume, sparse or not. */
+static void
+fixture_gen(fixture_t *f, const qnx6_gen_t *g, uint64_t max_work)
+{
+	fixture_limited(f, g->image, g->image_fd, g->length, max_work, 0);
+}
+
+/* Give the context a metadata cache of `pages` pages, so that small
+ * volumes already spill their metadata to scratch.
+ */
+static void
+fixture_cache(fixture_t *f, uint32_t pages)
+{
+	fsimg_io_free(f->io);
+	f->io = NULL;
+	CHECK(fsimg_test_meta_cache(f->ctx, pages, NULL) == FSIMG_OK);
+	f->memory = charged_memory(f->ctx);
+	fixture_resize(f, f->length);
+}
+
+/* Account reads of g's system run and content blocks. */
+static void
+fixture_account(fixture_t *f, const qnx6_gen_t *g)
+{
+	account_t *a = &f->account;
+
+	bzero(a, sizeof(*a));
+	a->system_first = GEN_DATA;
+	a->content_first = GEN_DATA + 2 * (uint64_t)g->reservation *
+	    g->block_size;
+	a->content_end = GEN_DATA + (uint64_t)g->blocks * g->block_size;
+	a->block_size = g->block_size;
+	a->seen = calloc(g->blocks / 8 + 1, 1);
+	CHECK(a->seen != NULL);
 }
 
 /* Release everything and check that no memory, scratch or descriptor
- * outlived the reader.
+ * outlived the reader and the I/O object.
  */
 static void
 fixture_free(fixture_t *f)
 {
 	fsimg_stats_t stats;
 
+	free(f->account.seen);
 	fsimg_reader_free(f->reader);
 	fsimg_io_free(f->io);
 	CHECK(fsimg_ctx_get_stats(f->ctx, &stats, NULL) == FSIMG_OK);
 	CHECK(stats.scratch_bytes == 0 && stats.descriptors == 1);
+	CHECK(stats.memory_bytes == f->memory);
 	fsimg_ctx_free(f->ctx);
 	CHECK(close(f->scratch) == 0);
 	CHECK(rmdir(f->directory) == 0);
@@ -830,7 +1146,7 @@ walk_all(fixture_t *f, uint64_t *entries, fsimg_error_t *error)
 
 /* Run the selected operations on an image and return the first failure. */
 static fsimg_status_t
-run_image(unsigned char *image, uint64_t length, unsigned what,
+run_image(unsigned char *image, int image_fd, uint64_t length, unsigned what,
     fsimg_error_t *error)
 {
 	fixture_t f;
@@ -840,14 +1156,14 @@ run_image(unsigned char *image, uint64_t length, unsigned what,
 
 	status = FSIMG_OK;
 	if ((what & RUN_LIST) != 0) {
-		fixture_new(&f, image, length, 0);
+		fixture_limited(&f, image, image_fd, length, 0, 0);
 		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, error);
 		if (status == FSIMG_OK)
 			status = walk_all(&f, &entries, error);
 		fixture_free(&f);
 	}
 	if (status == FSIMG_OK && (what & RUN_VERIFY) != 0) {
-		fixture_new(&f, image, length, 0);
+		fixture_limited(&f, image, image_fd, length, 0, 0);
 		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, error);
 		if (status == FSIMG_OK)
 			status = fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD,
@@ -866,7 +1182,7 @@ expect(qnx6_gen_t *g, unsigned what, fsimg_status_t expected,
 	fsimg_status_t status;
 
 	bzero(&error, sizeof(error));
-	status = run_image(g->image, g->length, what, &error);
+	status = run_image(g->image, g->image_fd, g->length, what, &error);
 	/* QNX6_TRACE=1 shows each case's diagnostic, to confirm that a
 	 * mutation fails for its intended reason.
 	 */
@@ -978,12 +1294,19 @@ dir_slot(qnx6_gen_t *g, uint32_t dir, size_t index)
 	    index * 32 % g->block_size);
 }
 
-/* The bitmap byte holding block's bit; sample bitmaps have one leaf. */
+/* The bitmap byte holding block's bit in the committed system run, whose
+ * bitmap leaves follow the bitmap tree's indirect blocks from its base.
+ */
 static unsigned char *
 bitmap_byte(qnx6_gen_t *g, uint32_t block)
 {
-	CHECK(g->bitmap_depth == 0 && block / 8 < g->block_size);
-	return (block_at(g, g->bitmap_refs[0]) + block / 8);
+	uint64_t leaves, indirect;
+
+	leaves = (((uint64_t)g->blocks + 7) / 8 + g->block_size - 1) /
+	    g->block_size;
+	indirect = gen_tree_blocks(leaves, g->pointers) - leaves;
+	return (block_at(g, g->base + (uint32_t)indirect + block / 8 /
+	    g->block_size) + block / 8 % g->block_size);
 }
 
 /* Change a field of both headers and recompute their CRCs. */
@@ -1113,7 +1436,7 @@ check_sample(uint32_t block_size, bool big, uint32_t flags)
 
 	sample_build(&g, &s, block_size, big, flags, block_size == 512 ?
 	    1048576 + 512 : 2097152 + 3584);
-	fixture_new(&f, g.image, g.length, 0);
+	fixture_gen(&f, &g, 0);
 	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
 	if (status != FSIMG_OK)
 		fprintf(stderr, "B=%u big=%d: %s\n", block_size, big, error.message);
@@ -1299,7 +1622,7 @@ test_hard_links(void)
 		gen_link(&g, 1, name, file);
 	}
 	gen_commit(&g, 0, 1, true, true);
-	fixture_new(&f, g.image, g.length, 1000000);
+	fixture_gen(&f, &g, 1000000);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	entries = reads = 0;
 	while ((status = fsimg_reader_next(f.reader, &entry, NULL)) ==
@@ -1344,24 +1667,24 @@ test_geometry(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(walk_all(&f, &entries, NULL) == FSIMG_OK && entries == 17);
 	fixture_free(&f);
-	CHECK(run_image(bigger, length, RUN_VERIFY, NULL) == FSIMG_OK);
+	CHECK(run_image(bigger, -1, length, RUN_VERIFY, NULL) == FSIMG_OK);
 
 	/* The same bytes with the second header left at D + N * B: QNX looks
 	 * for it at the slice end, so the volume is corrupt.
 	 */
 	memset(bigger + (length / 4096 * 4096 - 4096), GEN_POISON, 4096);
 	bcopy(g.image + g.second, bigger + g.second, 4096);
-	CHECK(run_image(bigger, length, RUN_LIST, NULL) == FSIMG_ECORRUPT);
+	CHECK(run_image(bigger, -1, length, RUN_LIST, NULL) == FSIMG_ECORRUPT);
 
 	/* A volume image padded past its slice end. */
 	bcopy(g.image, bigger, g.length);
 	bzero(bigger + g.length, 4096);
-	CHECK(run_image(bigger, g.length + 4096, RUN_LIST, NULL) ==
+	CHECK(run_image(bigger, -1, g.length + 4096, RUN_LIST, NULL) ==
 	    FSIMG_ECORRUPT);
 
 	/* S2 <= 12288 and truncated headers. */
-	CHECK(run_image(g.image, 20479, RUN_LIST, NULL) == FSIMG_ECORRUPT);
-	CHECK(run_image(g.image, 8703, RUN_LIST, NULL) == FSIMG_EFORMAT);
+	CHECK(run_image(g.image, -1, 20479, RUN_LIST, NULL) == FSIMG_ECORRUPT);
+	CHECK(run_image(g.image, -1, 8703, RUN_LIST, NULL) == FSIMG_EFORMAT);
 	free(bigger);
 	gen_free(&g);
 
@@ -1389,7 +1712,7 @@ test_snapshots(void)
 	gen_file(&g, 1, "second", (const unsigned char *)"2", 1);
 	gen_commit(&g, g.reservation, 2, false, true);
 	expect(&g, RUN_LIST | RUN_VERIFY, FSIMG_OK, "newer second header");
-	fixture_new(&f, g.image, g.length, 0);
+	fixture_gen(&f, &g, 0);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	second_seen = false;
 	while (fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK)
@@ -1403,7 +1726,7 @@ test_snapshots(void)
 	put64(&g, g.image + 8192 + 8, 3);
 	gen_reseal(&g, 8192);
 	expect(&g, RUN_LIST | RUN_VERIFY, FSIMG_OK, "newer first header");
-	fixture_new(&f, g.image, g.length, 0);
+	fixture_gen(&f, &g, 0);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	while (fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK)
 		CHECK(strcmp(entry->path, "/second") != 0);
@@ -1431,7 +1754,7 @@ test_snapshots(void)
 	put64(&g, g.image + g.second + 8, 2);
 	gen_reseal(&g, g.second);
 	expect(&g, RUN_LIST | RUN_VERIFY, FSIMG_OK, "mounted bit");
-	fixture_new(&f, g.image, g.length, 0);
+	fixture_gen(&f, &g, 0);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
 	CHECK(!info.clean);
@@ -1483,7 +1806,7 @@ test_probe(void)
 
 	zero = calloc(1, 65536);
 	CHECK(zero != NULL);
-	CHECK(run_image(zero, 65536, RUN_LIST, NULL) == FSIMG_EFORMAT);
+	CHECK(run_image(zero, -1, 65536, RUN_LIST, NULL) == FSIMG_EFORMAT);
 	fixture_new(&f, zero, 65536, 0);
 	fsimg_read_options_init(&options);
 	options.format = "qnx6";
@@ -1952,7 +2275,7 @@ test_failures(void)
 
 	sample(&g, &s);
 	for (uint64_t n = 1;; n++) {
-		fixture_new(&f, g.image, g.length, 0);
+		fixture_gen(&f, &g, 0);
 		fsimg_test_fail_alloc_after(f.ctx, n);
 		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
 		if (status == FSIMG_OK)
@@ -1969,7 +2292,7 @@ test_failures(void)
 	/* A read failure inside file content fails the read, not the
 	 * listing before it.
 	 */
-	fixture_new(&f, g.image, g.length, 0);
+	fixture_gen(&f, &g, 0);
 	f.fail_first = GEN_DATA + (uint64_t)g.objects[s.indirect].blocks[3] *
 	    g.block_size;
 	f.fail_end = f.fail_first + g.block_size;
@@ -1977,7 +2300,7 @@ test_failures(void)
 	CHECK(walk_all(&f, &entries, NULL) == FSIMG_EIO);
 	fixture_free(&f);
 
-	fixture_new(&f, g.image, g.length, 0);
+	fixture_gen(&f, &g, 0);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	f.cancelled = true;
 	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_ECANCELLED);
@@ -1985,12 +2308,674 @@ test_failures(void)
 	f.cancelled = false;
 	fixture_free(&f);
 
-	fixture_new(&f, g.image, g.length, 200);
+	fixture_gen(&f, &g, 200);
 	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
 	if (status == FSIMG_OK)
 		status = walk_all(&f, &entries, NULL);
 	CHECK(status == FSIMG_ELIMIT);
 	fixture_free(&f);
+	gen_free(&g);
+}
+
+/* The image length of a volume of at least `blocks` blocks: the data
+ * origin, the blocks rounded up to whole 4096-byte units, and the second
+ * header's unit after them.
+ */
+static uint64_t
+gen_length(uint32_t block_size, uint64_t blocks)
+{
+	return (16384 + (blocks * block_size + 4095) / 4096 * 4096);
+}
+
+/* The image length of the smallest volume with this inode table and
+ * `content` free blocks after the reservation and its twin. R depends on N
+ * through the bitmap, so N grows until it holds 2R + content.
+ */
+static uint64_t
+gen_fit(uint32_t block_size, uint32_t inodes, uint64_t content)
+{
+	uint64_t table, blocks, bitmap, needed;
+
+	table = gen_tree_blocks((uint64_t)inodes * 128 / block_size,
+	    block_size / 4);
+	blocks = 2 * table + content;
+	for (;;) {
+		/* The N that gen_create derives from this length. */
+		blocks = (gen_length(block_size, blocks) - 16384) / block_size;
+		bitmap = gen_tree_blocks(((blocks + 7) / 8 + block_size - 1) /
+		    block_size, block_size / 4);
+		needed = 2 * (table + bitmap) + content;
+		if (needed <= blocks)
+			return (gen_length(block_size, blocks));
+		blocks = needed;
+	}
+}
+
+static gen_shape_t
+sparse_shape(uint32_t block_size, bool big, uint64_t length, uint32_t inodes,
+    uint32_t objects)
+{
+	return ((gen_shape_t){
+		.length = length,
+		.block_size = block_size,
+		.inodes = inodes,
+		.objects = objects,
+		.flags = 0x100,
+		.big = big,
+		.sparse = true
+	});
+}
+
+/* Open the volume, find path and read length bytes at offset from it. */
+static void
+read_file_at(qnx6_gen_t *g, const char *path, uint64_t offset,
+    unsigned char *bytes, size_t length)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	size_t count;
+	fsimg_status_t status;
+
+	fixture_gen(&f, g, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	while ((status = fsimg_reader_next(f.reader, &entry, NULL)) == FSIMG_OK)
+		if (strcmp(entry->path, path) == 0)
+			break;
+	CHECK(status == FSIMG_OK);
+	CHECK(fsimg_reader_read_at(f.reader, offset, bytes, length, &count,
+	    NULL) == FSIMG_OK && count == length);
+	fixture_free(&f);
+}
+
+/* System trees at their deeper shapes. A bitmap of more than 16 * P leaves
+ * has depth 2, which at B = 512 takes N > 16 * 128 * 4096 blocks: a sparse
+ * 4 GiB volume whose block N - 1 holds a file, so that its bit lies in the
+ * last bitmap leaf, below the seventeenth indirect block. Inode tables of
+ * depth 1 and 2 span several top-level indirect blocks, with a file at the
+ * first inode of each later subtree and at the table's last inode.
+ */
+static void
+test_system_trees(void)
+{
+	static const struct {
+		uint32_t	 block_size;
+		uint32_t	 inodes;
+		uint8_t		 depth;
+		unsigned	 roots;		/* top-level blocks used */
+	} tables[] = {
+		{ 512, 2048, 1, 4 },
+		{ 4096, 32768 + 32, 1, 2 },
+		{ 512, 2 * 65536 + 4096, 2, 3 }
+	};
+	qnx6_gen_t g;
+	gen_shape_t shape;
+	unsigned char byte[1];
+	uint64_t span;
+	uint32_t next, first, block_size;
+	char name[16];
+
+	for (unsigned big = 0; big < 2; big++) {
+		shape = sparse_shape(512, big != 0, gen_length(512,
+		    16 * 128 * 4096 + 1), GEN_INODES, GEN_INODES);
+		if (!gen_create(&g, &shape))
+			continue;
+		next = g.next_block;
+		g.next_block = g.blocks - 1;
+		gen_file(&g, 1, "last", (const unsigned char *)"N-1", 3);
+		g.next_block = next;
+		gen_commit(&g, 0, 1, true, true);
+		CHECK(g.bitmap_depth == 2 && g.objects[3].blocks[0] == g.blocks - 1);
+		expect(&g, RUN_LIST | RUN_VERIFY, FSIMG_OK, "bitmap tree depth 2");
+		read_file_at(&g, "/last", 0, byte, 1);
+		CHECK(byte[0] == 'N');
+		*bitmap_byte(&g, g.blocks - 1) &= (unsigned char)~(1u <<
+		    ((g.blocks - 1) % 8));
+		header_put32(&g, 64, get32(&g, g.image + 8192 + 64) + 1);
+		expect(&g, RUN_LIST, FSIMG_ECORRUPT, "free bit in the last bitmap leaf");
+		gen_free(&g);
+	}
+
+	for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {
+		for (unsigned big = 0; big < 2; big++) {
+			/* One root slot covers B / 128 inodes per leaf times
+			 * P^L leaves. The content is the root and .boot
+			 * directories and one block per file.
+			 */
+			block_size = tables[t].block_size;
+			span = block_size / 128;
+			for (unsigned l = 0; l < tables[t].depth; l++)
+				span *= block_size / 4;
+			shape = sparse_shape(block_size, big != 0, gen_fit(block_size,
+			    tables[t].inodes, 2 + tables[t].roots), tables[t].inodes,
+			    tables[t].inodes);
+			if (!gen_create(&g, &shape))
+				continue;
+			for (unsigned k = 1; k < tables[t].roots; k++) {
+				first = (uint32_t)(k * span + 1);
+				g.inode_cursor = first;
+				snprintf(name, sizeof(name), "s%u", k);
+				CHECK(gen_file(&g, 1, name, (const unsigned char *)name,
+				    strlen(name)) == first);
+			}
+			g.inode_cursor = tables[t].inodes;
+			gen_file(&g, 1, "last", (const unsigned char *)"z", 1);
+			gen_commit(&g, 0, 1, true, true);
+			CHECK(g.next_block <= g.blocks);
+			CHECK(g.inode_depth == tables[t].depth);
+			CHECK(g.inode_refs[tables[t].roots - 1] != GEN_SENTINEL &&
+			    g.inode_refs[tables[t].roots] == GEN_SENTINEL);
+			expect(&g, RUN_LIST | RUN_VERIFY, FSIMG_OK,
+			    "inode table across top-level blocks");
+			read_file_at(&g, "/last", 0, byte, 1);
+			CHECK(byte[0] == 'z');
+			/* Without its last top-level block the table is short. */
+			header_put32(&g, 80 + (tables[t].roots - 1) * 4, GEN_SENTINEL);
+			expect(&g, RUN_LIST, FSIMG_ECORRUPT,
+			    "inode table missing a top-level block");
+			gen_free(&g);
+		}
+	}
+}
+
+/* A volume with no free block and no free inode at every block size and in
+ * both byte orders: files fill every content block, FIFOs every inode.
+ */
+static void
+check_full(uint32_t block_size, bool big)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_volume_info_t info;
+	fsimg_verify_report_t report;
+	unsigned char *bytes;
+	uint64_t remaining, leaves;
+	uint32_t live;
+	char name[16];
+
+	gen_init(&g, block_size, big, 1048576, GEN_INODES, 0x100);
+	/* Every inode but the root is named in the root, after its two dot
+	 * slots; .boot has one block.
+	 */
+	remaining = g.blocks - g.next_block - 1 -
+	    ((2 + GEN_INODES - 1) * 32 + block_size - 1) / block_size;
+	live = 2;
+	while (remaining != 0) {
+		leaves = remaining;
+		while (gen_tree_blocks(leaves, g.pointers) > remaining)
+			leaves--;
+		bytes = pattern(leaves * block_size, live);
+		snprintf(name, sizeof(name), "f%u", live);
+		gen_file(&g, 1, name, bytes, leaves * block_size);
+		free(bytes);
+		remaining -= gen_tree_blocks(leaves, g.pointers);
+		live++;
+	}
+	for (; live < GEN_INODES; live++) {
+		snprintf(name, sizeof(name), "p%u", live);
+		gen_fifo(&g, 1, name);
+	}
+	gen_commit(&g, 0, 1, true, true);
+	CHECK(g.next_block == g.blocks);
+	CHECK(get32(&g, g.image + 8192 + 64) == 0 &&
+	    get32(&g, g.image + 8192 + 56) == 0);
+	expect(&g, RUN_LIST, FSIMG_OK, "full volume listed");
+	fixture_gen(&f, &g, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) ==
+	    FSIMG_OK && report.complete);
+	CHECK(report.free_clusters == 0 && report.allocated_clusters == g.blocks);
+	CHECK(report.files == GEN_INODES - 2);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK((info.valid & FSIMG_VOLUME_FREE) != 0 && info.free_bytes == 0);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_full(void)
+{
+	for (uint32_t block_size = 512; block_size <= 4096; block_size *= 2) {
+		check_full(block_size, false);
+		check_full(block_size, true);
+	}
+}
+
+/* A chain of directories as deep as the context's depth limit lists and
+ * verifies; one level more is refused as a limit by both. (Extraction
+ * holds a descriptor per open directory level, so its own bound is the
+ * context's open-file limit.)
+ */
+static void
+test_deep_paths(void)
+{
+	qnx6_gen_t g;
+	gen_shape_t shape = {
+		.length = 1048576,
+		.block_size = 512,
+		.inodes = 512,
+		.objects = 512,
+		.flags = 0x100
+	};
+	fsimg_options_t defaults;
+	uint32_t dir;
+	unsigned levels;
+
+	fsimg_options_init(&defaults);
+	levels = defaults.max_depth;
+	for (unsigned extra = 0; extra < 2; extra++) {
+		CHECK(gen_create(&g, &shape));
+		dir = 1;
+		for (unsigned i = 0; i < levels + extra; i++)
+			dir = gen_dir(&g, dir, "d");
+		gen_commit(&g, 0, 1, true, true);
+		if (extra == 0) {
+			expect(&g, RUN_LIST | RUN_VERIFY, FSIMG_OK,
+			    "chain at the depth limit");
+		} else {
+			expect(&g, RUN_LIST, FSIMG_ELIMIT,
+			    "chain past the depth limit listed");
+			expect(&g, RUN_VERIFY, FSIMG_ELIMIT,
+			    "chain past the depth limit verified");
+		}
+		gen_free(&g);
+	}
+}
+
+/*
+ * Short and failing I/O through the bounded I/O layer.
+ */
+
+/* Short reads: the callback returns at most a few bytes per call, and the
+ * bounded I/O layer completes every exact read from the pieces.
+ */
+static void
+test_short_reads(void)
+{
+	static const size_t caps[] = { 1, 3, 512, 4095 };
+	qnx6_gen_t g;
+	sample_t s;
+	fixture_t f;
+	fsimg_verify_report_t report;
+	uint64_t entries;
+
+	for (unsigned big = 0; big < 2; big++) {
+		sample_build(&g, &s, big ? 4096 : 1024, big != 0, 0x100,
+		    2097152 + 3584);
+		for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
+			fixture_gen(&f, &g, 0);
+			f.short_max = caps[i];
+			CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader,
+			    NULL) == FSIMG_OK);
+			CHECK(walk_all(&f, &entries, NULL) == FSIMG_OK &&
+			    entries == 17);
+			fsimg_reader_free(f.reader);
+			CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader,
+			    NULL) == FSIMG_OK);
+			CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report,
+			    NULL) == FSIMG_OK && report.complete);
+			CHECK(report.files == 14 && report.directories == 4);
+			fixture_free(&f);
+		}
+		gen_free(&g);
+	}
+}
+
+/* When the source ends: at open, or after a successful open, during a
+ * listing that reads every file or a verification with payload.
+ */
+typedef enum eof_stage {
+	EOF_OPEN,
+	EOF_LIST,
+	EOF_VERIFY
+} eof_stage_t;
+
+/* A source that makes no progress from `end`: to its end when span is 0,
+ * otherwise for span bytes, which isolates one structure from the ones
+ * after it. The read that reaches `end` fails with an I/O error at exactly
+ * that offset, and everything is released.
+ *
+ * The offset is exact because image_read cuts a read that straddles `end`
+ * there, and the bounded I/O layer's exact-read loop then asks for the rest
+ * from `end` and reports the zero progress at that offset. So the case must
+ * make the first read reaching [end, end + span) one that starts before
+ * `end`: span covers the rest of the structure's block, and the volume's
+ * layout puts no structure read earlier inside that range (see test_eof).
+ */
+static void
+check_eof(qnx6_gen_t *g, uint64_t end, uint64_t span, eof_stage_t stage,
+    size_t short_max, const char *label)
+{
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	uint64_t entries;
+	fsimg_status_t status;
+
+	fixture_gen(&f, g, 0);
+	f.short_max = short_max;
+	f.eof_end = span == 0 ? UINT64_MAX : end + span;
+	if (stage == EOF_OPEN)
+		f.eof_at = end;
+	bzero(&error, sizeof(error));
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+	if (stage != EOF_OPEN) {
+		CHECK(status == FSIMG_OK);
+		f.eof_at = end;
+		if (stage == EOF_LIST)
+			status = walk_all(&f, &entries, &error);
+		else
+			status = fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD,
+			    &report, &error);
+	}
+	if (status != FSIMG_EIO || error.offset != end)
+		fprintf(stderr, "%s: expected EIO at %" PRIu64 ", got %d at %"
+		    PRIu64 " (%s)\n", label, end, status, error.offset,
+		    error.message);
+	CHECK(status == FSIMG_EIO && error.status == FSIMG_EIO);
+	CHECK(error.offset_valid && error.offset == end);
+	CHECK(strstr(error.message, "EOF") != NULL);
+	fixture_free(&f);
+}
+
+static void
+test_eof(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	fixture_t f;
+	fsimg_status_t status, expected;
+	uint64_t entries, floor, length, bitmap, inode, root, payload, table;
+	char path[1100];
+	int fd, input;
+
+	/* Every slot the listing replays names a higher inode in a higher
+	 * block than the one before, so the first read to reach a structure
+	 * is the one that straddles its start. direct16 has no indirect block,
+	 * and the last inode-table leaf holds only free inodes: listing never
+	 * reads it, verification's table pass does.
+	 */
+	sample(&g, &s);
+	bitmap = GEN_DATA + (uint64_t)g.bitmap_refs[0] * g.block_size;
+	inode = GEN_DATA + (uint64_t)g.inode_leaf0 * g.block_size +
+	    (uint64_t)(s.indirect - 1) * 128;
+	root = GEN_DATA + (uint64_t)g.objects[1].blocks[0] * g.block_size;
+	payload = GEN_DATA + (uint64_t)g.objects[s.direct].blocks[3] *
+	    g.block_size;
+	table = GEN_DATA + (uint64_t)(g.inode_leaf0 + 7) * g.block_size;
+	CHECK(g.bitmap_depth == 0 && g.inode_depth == 0 && s.indirect <= 8 &&
+	    g.inode_count * 128 == 8 * g.block_size &&
+	    g.objects[s.direct].depth == 0);
+	check_eof(&g, 0, 0, EOF_OPEN, 0, "EOF at 0");
+	check_eof(&g, 8192 + 1, 0, EOF_OPEN, 0, "EOF in the first header");
+	check_eof(&g, g.second + 511, 0, EOF_OPEN, 0, "EOF in the second header");
+	check_eof(&g, bitmap + 1, g.block_size, EOF_OPEN, 0, "EOF in the bitmap");
+	check_eof(&g, inode + 64, g.block_size, EOF_LIST, 0, "EOF in an inode");
+	check_eof(&g, root + 100, g.block_size, EOF_LIST, 0,
+	    "EOF in the root directory");
+	check_eof(&g, payload + 1, g.block_size, EOF_LIST, 0,
+	    "EOF in file content");
+	check_eof(&g, payload + 1, g.block_size, EOF_LIST, 3,
+	    "EOF after short reads");
+	check_eof(&g, payload + 1, g.block_size, EOF_VERIFY, 0,
+	    "EOF in verified content");
+	check_eof(&g, table + 1, g.block_size, EOF_VERIFY, 0,
+	    "EOF in the inode-table pass");
+
+	/* A slice cut short has its second header where the cut puts it,
+	 * which holds no header unless the cut leaves the last 4096-byte unit
+	 * whole; with less than the first header there is no classic magic.
+	 * The cuts fall at each 4096-byte boundary and halfway between, and
+	 * reads never pass the slice's end.
+	 */
+	floor = g.length / 4096 * 4096;
+	fixture_gen(&f, &g, 0);
+	for (length = 0; length < g.length; length += 2048) {
+		expected = length >= floor ? FSIMG_OK : length < 8192 + 512 ?
+		    FSIMG_EFORMAT : FSIMG_ECORRUPT;
+		fixture_resize(&f, length);
+		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
+		if (status == FSIMG_OK)
+			status = walk_all(&f, &entries, NULL);
+		fsimg_reader_free(f.reader);
+		f.reader = NULL;
+		if (status != expected)
+			fprintf(stderr, "truncated to %" PRIu64 ": %d\n", length,
+			    status);
+		CHECK(status == expected);
+	}
+	fixture_free(&f);
+
+	/* An image file that shrinks after open is a changed source. */
+	fixture_gen(&f, &g, 0);
+	CHECK((size_t)snprintf(path, sizeof(path), "%s/image", f.directory) <
+	    sizeof(path));
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(fd != -1 && write(fd, g.image, g.length) == (ssize_t)g.length);
+	input = open(path, O_RDONLY | O_CLOEXEC);
+	CHECK(input != -1);
+	fsimg_io_free(f.io);
+	CHECK(fsimg_io_from_fd(f.ctx, input, FSIMG_IO_READ, &f.io, NULL) ==
+	    FSIMG_OK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(ftruncate(fd, (off_t)(g.length / 2)) == 0);
+	CHECK(walk_all(&f, &entries, NULL) == FSIMG_ESOURCE_CHANGED);
+	fsimg_reader_free(f.reader);
+	fsimg_io_free(f.io);
+	f.reader = NULL;
+	f.io = NULL;
+	CHECK(close(input) == 0 && close(fd) == 0 && unlink(path) == 0);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+/* Scratch failures in a listing and in a verification whose context keeps
+ * a single cache page, so that every store spills. Each kind of metadata
+ * operation fails at its first 64 occurrences one by one, then at a spread
+ * of later ones, until the operation has fewer and succeeds; every failure
+ * is an I/O error carrying the injected errno.
+ */
+static void
+test_scratch_faults(void)
+{
+	static const unsigned operations[] = { RUN_LIST, RUN_VERIFY };
+	qnx6_gen_t g;
+	sample_t s;
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t n, entries;
+	unsigned what;
+
+	sample(&g, &s);
+	for (size_t o = 0; o < sizeof(operations) / sizeof(operations[0]);
+	    o++) {
+		what = operations[o];
+		for (unsigned point = FSIMG_META_OPEN; point <= FSIMG_META_WRITE;
+		    point++) {
+			for (n = 1;; n += n < 64 ? 1 : n / 8) {
+				fixture_gen(&f, &g, 0);
+				fixture_cache(&f, 1);
+				fsimg_test_meta_fail_after(f.ctx,
+				    (fsimg_meta_fault_t)point, n, ENOSPC);
+				status = fsimg_reader_open(f.ctx, f.io, NULL,
+				    &f.reader, &error);
+				if (status == FSIMG_OK && what == RUN_LIST)
+					status = walk_all(&f, &entries, &error);
+				else if (status == FSIMG_OK)
+					status = fsimg_verify(f.reader,
+					    FSIMG_VERIFY_PAYLOAD, &report, &error);
+				fsimg_test_meta_fail_after(f.ctx,
+				    (fsimg_meta_fault_t)point, 0, 0);
+				fixture_free(&f);
+				if (status == FSIMG_OK)
+					break;
+				CHECK(status == FSIMG_EIO &&
+				    error.os_error == ENOSPC);
+				CHECK(n < 100000);
+			}
+			CHECK(n > 1);
+		}
+	}
+	gen_free(&g);
+}
+
+/*
+ * Cancellation during a traversal.
+ */
+
+#define CANCEL_LIST	0u
+#define CANCEL_VERIFY	1u
+#define CANCEL_EXTRACT	2u
+
+/* Remove a partial extraction below parent; name may be absent. Each pass
+ * removes the first entry it finds and rewinds, so no entry is skipped
+ * while the directory changes under readdir.
+ */
+static void
+remove_tree(int parent, const char *name)
+{
+	struct dirent *child;
+	struct stat sb;
+	DIR *dir;
+	int fd;
+
+	fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+	    O_CLOEXEC);
+	if (fd == -1) {
+		CHECK(errno == ENOENT || errno == ENOTDIR || errno == ELOOP ||
+		    errno == EMLINK);
+		CHECK(unlinkat(parent, name, 0) == 0 || errno == ENOENT);
+		return;
+	}
+	dir = fdopendir(fd);
+	CHECK(dir != NULL);
+	while ((child = readdir(dir)) != NULL) {
+		if (strcmp(child->d_name, ".") == 0 ||
+		    strcmp(child->d_name, "..") == 0)
+			continue;
+		CHECK(fstatat(fd, child->d_name, &sb, AT_SYMLINK_NOFOLLOW) == 0);
+		if (S_ISDIR(sb.st_mode))
+			remove_tree(fd, child->d_name);
+		else
+			CHECK(unlinkat(fd, child->d_name, 0) == 0);
+		rewinddir(dir);
+	}
+	CHECK(closedir(dir) == 0);
+	CHECK(unlinkat(parent, name, AT_REMOVEDIR) == 0);
+}
+
+/* Run one operation, cancelled at poll `after` (never when 0), with a
+ * metadata cache of `pages` pages when nonzero. *polls receives the polls
+ * it made and *opened whether the open succeeded; fixture_free checks that
+ * nothing leaked.
+ */
+static fsimg_status_t
+cancel_run(qnx6_gen_t *g, unsigned operation, uint32_t pages, uint64_t after,
+    uint64_t *polls, bool *opened, fsimg_error_t *error)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_verify_report_t report;
+	uint64_t entries;
+	fsimg_status_t status;
+
+	fixture_gen(&f, g, 0);
+	if (pages != 0)
+		fixture_cache(&f, pages);
+	f.cancel_after = after;
+	bzero(error, sizeof(*error));
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, error);
+	*opened = status == FSIMG_OK;
+	if (status == FSIMG_OK) {
+		switch (operation) {
+		case CANCEL_LIST:
+			status = walk_all(&f, &entries, error);
+			break;
+		case CANCEL_VERIFY:
+			status = fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD,
+			    &report, error);
+			CHECK(report.complete == (status == FSIMG_OK));
+			break;
+		case CANCEL_EXTRACT:
+			fsimg_extract_options_init(&options);
+			options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+			status = fsimg_extract_at(f.reader, f.scratch, "out",
+			    &options, error);
+			remove_tree(f.scratch, "out");
+			break;
+		}
+	}
+	*polls = f.polls;
+	fixture_free(&f);
+	return (status);
+}
+
+/* Cancellation at a spread of polls through each operation, with the
+ * default cache and with metadata spilled to scratch: every run reports
+ * the cancellation, an interrupted extraction reports its output
+ * incomplete, and nothing outlives the reader.
+ */
+static void
+test_cancellation(void)
+{
+	static const char *names[] = { "list", "verify", "extract" };
+	qnx6_gen_t g;
+	fsimg_error_t error;
+	unsigned char *bytes;
+	uint64_t total, polls;
+	uint32_t file, dir;
+	bool opened;
+	fsimg_status_t status;
+
+	/* The sample's kinds and shapes without its 510-byte name, which no
+	 * host can extract.
+	 */
+	gen_init(&g, 1024, false, 1048576 + 1536, GEN_INODES, 0x100);
+	bytes = pattern(17 * 1024 + 1, 4);
+	file = gen_file(&g, 1, "direct16", bytes, 16 * 1024);
+	gen_file(&g, 1, "indirect17", bytes, 17 * 1024 + 1);
+	free(bytes);
+	gen_file(&g, 1, "aaaaaaaaaaaaaaaaaaaaaaaaaaab", (const unsigned char *)"28",
+	    2);
+	dir = gen_dir(&g, gen_dir(&g, 1, "d1"), "d2");
+	gen_file(&g, dir, "f", (const unsigned char *)"sub", 3);
+	gen_link(&g, 1, "hardlink", file);
+	gen_symlink(&g, 1, "symlink", "direct16");
+	gen_fifo(&g, 1, "fifo");
+	gen_commit(&g, 0, 1, true, true);
+	for (uint32_t pages = 0; pages <= 1; pages++) {
+		for (unsigned op = CANCEL_LIST; op <= CANCEL_EXTRACT; op++) {
+			status = cancel_run(&g, op, pages, 0, &total, &opened,
+			    &error);
+			if (status != FSIMG_OK)
+				fprintf(stderr, "%s: %d (%s)\n", names[op], status,
+				    error.message);
+			CHECK(status == FSIMG_OK);
+			CHECK(total > 1);
+			/* Every poll of the first 64, then a step of a
+			 * sixteenth: dense through open, spread through the
+			 * traversal.
+			 */
+			for (uint64_t after = 1; after <= total;
+			    after += after < 64 ? 1 : after / 16) {
+				status = cancel_run(&g, op, pages, after, &polls,
+				    &opened, &error);
+				if (status != FSIMG_ECANCELLED)
+					fprintf(stderr, "%s cancelled at poll %"
+					    PRIu64 " of %" PRIu64 ": %d (%s)\n",
+					    names[op], after, total, status,
+					    error.message);
+				CHECK(status == FSIMG_ECANCELLED);
+				CHECK(error.status == FSIMG_ECANCELLED &&
+				    polls >= after);
+				if (op == CANCEL_EXTRACT && opened)
+					CHECK(error.output_state ==
+					    FSIMG_OUTPUT_INCOMPLETE &&
+					    strcmp(error.path, "out") == 0);
+			}
+		}
+	}
 	gen_free(&g);
 }
 
@@ -2011,7 +2996,7 @@ test_extract(void)
 	int fd;
 
 	sample(&g, &s);
-	fixture_new(&f, g.image, g.length, 0);
+	fixture_gen(&f, &g, 0);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	fsimg_extract_options_init(&options);
 	options.selection = "/d1";
@@ -2080,6 +3065,368 @@ test_extract(void)
 	gen_free(&g);
 }
 
+/*
+ * Scale: each case grows one dimension of a sparse volume, then lists it
+ * (reading every file) and verifies it with payload, each in a fresh
+ * context. Ordinary runs use each case's small size; --scale the large
+ * one, and prints the measurements. The checks restate the driver design's
+ * resource bounds for these volumes:
+ *
+ * - the listing and verification see every live inode, and verification
+ *   completes;
+ * - charged memory stays below SCALE_MEMORY at every size, and scratch
+ *   within a budget the context enforces (see test_scale);
+ * - no owned block is read twice by one operation;
+ * - the system run is read in bounded passes: only verification reads
+ *   the bitmap and the inode table in full, once each (see scale_system).
+ */
+
+typedef struct scale_run {
+	uint64_t	 entries;	/* listed, or verified with the root */
+	uint64_t	 image_calls;
+	uint64_t	 image_bytes;
+	uint64_t	 system_bytes;	/* image bytes read from blocks [0, 2R) */
+	uint64_t	 content_bytes;	/* and from blocks [2R, N) */
+	uint64_t	 repeats;	/* reads of a content block read before */
+	uint64_t	 io_calls;	/* image and scratch */
+	uint64_t	 memory_peak;
+	uint64_t	 scratch_peak;
+	double		 seconds;
+} scale_run_t;
+
+typedef struct scale_case {
+	const char	*name;
+	bool		(*build)(qnx6_gen_t *, uint64_t);
+	uint64_t	 small;
+	uint64_t	 large;
+	bool		 marked;	/* /f carries scale_mark bytes */
+} scale_case_t;
+
+/* The charged-memory ceiling: a regression bound below the context's
+ * 16 MiB budget that no case approaches by growing.
+ */
+#define SCALE_MEMORY	(UINT64_C(4) << 20)
+
+/* Facts about a committed volume the bounds are stated in. */
+typedef struct scale_volume {
+	uint64_t	 live;		/* live inodes, the root included */
+	uint64_t	 owned;		/* blocks objects own, indirect included */
+	uint64_t	 branches;	/* indirect blocks objects own */
+	uint64_t	 bitmap_leaves;
+	uint64_t	 bitmap_blocks;	/* the bitmap tree, indirect included */
+	uint64_t	 table_leaves;
+	uint64_t	 system_indirect; /* both system trees' indirect blocks */
+} scale_volume_t;
+
+static void
+scale_describe(const qnx6_gen_t *g, scale_volume_t *v)
+{
+	const gen_object_t *o;
+	uint64_t table_blocks;
+
+	bzero(v, sizeof(*v));
+	v->owned = gen_tree_blocks(g->name_count, g->pointers);
+	v->branches = v->owned - g->name_count;
+	for (uint32_t i = 1; i <= g->object_count; i++) {
+		o = &g->objects[i];
+		if (!o->live)
+			continue;
+		v->live++;
+		v->owned += o->block_count;
+		v->branches += o->block_count - (o->size + g->block_size - 1) /
+		    g->block_size;
+	}
+	v->bitmap_leaves = (((uint64_t)g->blocks + 7) / 8 + g->block_size - 1) /
+	    g->block_size;
+	v->bitmap_blocks = gen_tree_blocks(v->bitmap_leaves, g->pointers);
+	v->table_leaves = (uint64_t)g->inode_count * 128 / g->block_size;
+	table_blocks = gen_tree_blocks(v->table_leaves, g->pointers);
+	v->system_indirect = v->bitmap_blocks - v->bitmap_leaves +
+	    table_blocks - v->table_leaves;
+}
+
+/* The most bytes of the system run an operation may read. The indirect
+ * and passes terms restate rows of the driver design's resource table; the
+ * inodes and windows terms restate the reader's access pattern on these
+ * volumes, as regression ceilings. The windows term depends on the
+ * generator's layout: gen_file allocates a file's leaves contiguously and
+ * gen_tree its indirect blocks after them, gen_commit lays out directories
+ * after every file, and scale_blocks places a file in block N - 1. A layout
+ * change that moves blocks apart can exceed it.
+ *
+ * indirect	open indexes the bitmap and inode-table trees, reading
+ *		their indirect blocks once; verification walks them again
+ *		to record ownership.
+ * passes	verification reads the whole bitmap and the whole inode
+ *		table once each.
+ * inodes	the reader reads an inode when its name is admitted to the
+ *		directory sort and again when the entry is replayed: two
+ *		128-byte reads per live inode.
+ * windows	allocation checks read the bitmap through one 4 KiB window
+ *		covering 32768 blocks, loading a window whenever a checked
+ *		block lies outside the current one.
+ */
+static uint64_t
+scale_system(const qnx6_gen_t *g, const scale_volume_t *v, bool verify)
+{
+	uint64_t indirect, passes, inodes, own, tail, walk, between, windows;
+
+	indirect = v->system_indirect * g->block_size * (verify ? 2 : 1);
+	passes = verify ? (v->bitmap_leaves + v->table_leaves) *
+	    g->block_size : 0;
+	inodes = 2 * 128 * v->live;
+	/* Open checks the bits of the bitmap's own blocks, which are
+	 * contiguous, so the windows they span, plus one for a span that
+	 * straddles a window boundary.
+	 */
+	own = v->bitmap_blocks / 32768 + 2;
+	/* Open checks the bits past N in the last bitmap block. */
+	tail = 1;
+	/* A walk visits an object's leaves in block order, laid out
+	 * contiguously, and an indirect block, laid out after its leaves,
+	 * before and after the leaves under it: at most two loads per
+	 * indirect block and one per 32768 blocks.
+	 */
+	walk = 2 * v->branches + v->owned / 32768;
+	/* Between objects: the directories, laid out at commit after the
+	 * files, the files, and a file a case places in block N - 1.
+	 */
+	between = 4;
+	windows = 4096 * (own + tail + walk + between);
+	return (indirect + passes + inodes + windows);
+}
+
+static void
+scale_measure(qnx6_gen_t *g, bool verify, uint64_t scratch_bytes,
+    scale_run_t *run)
+{
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_stats_t stats;
+	fsimg_error_t error;
+	struct timespec start, end;
+	fsimg_status_t status;
+
+	fixture_limited(&f, g->image, g->image_fd, g->length, 0, scratch_bytes);
+	fixture_account(&f, g);
+	bzero(&error, sizeof(error));
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+	if (status == FSIMG_OK && verify)
+		status = fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report,
+		    &error);
+	else if (status == FSIMG_OK)
+		status = walk_all(&f, &run->entries, &error);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "scale: %d %s\n", status, error.message);
+	CHECK(status == FSIMG_OK);
+	if (verify) {
+		CHECK(report.complete);
+		run->entries = report.files + report.directories;
+	}
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	run->image_calls = f.calls;
+	run->image_bytes = f.read_bytes;
+	run->system_bytes = f.account.system_bytes;
+	run->content_bytes = f.account.content_bytes;
+	run->repeats = f.account.repeats;
+	run->io_calls = stats.io_calls;
+	run->memory_peak = stats.memory_peak;
+	run->scratch_peak = stats.scratch_peak;
+	run->seconds = (double)(end.tv_sec - start.tv_sec) +
+	    (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+	fixture_free(&f);
+}
+
+/* N grows: B = 512, two files, one of them in block N - 1. */
+static bool
+scale_blocks(qnx6_gen_t *g, uint64_t blocks)
+{
+	gen_shape_t shape = sparse_shape(512, false, gen_length(512, blocks),
+	    GEN_INODES, GEN_INODES);
+	uint32_t next;
+
+	if (!gen_create(g, &shape))
+		return (false);
+	gen_file(g, 1, "first", (const unsigned char *)"a", 1);
+	next = g->next_block;
+	g->next_block = g->blocks - 1;
+	gen_file(g, 1, "last", (const unsigned char *)"z", 1);
+	g->next_block = next;
+	gen_commit(g, 0, 1, true, true);
+	return (true);
+}
+
+/* The inode capacity grows: B = 4096, big endian, one file. The content
+ * is the root and .boot directories and the file's block.
+ */
+static bool
+scale_inodes(qnx6_gen_t *g, uint64_t inodes)
+{
+	gen_shape_t shape = sparse_shape(4096, true, gen_fit(4096,
+	    (uint32_t)inodes, 3), (uint32_t)inodes, GEN_INODES);
+
+	if (!gen_create(g, &shape))
+		return (false);
+	gen_file(g, 1, "f", (const unsigned char *)"i", 1);
+	gen_commit(g, 0, 1, true, true);
+	return (true);
+}
+
+/* One directory widens: B = 1024, n files in the root, every 64th with one
+ * byte of content. The content is the root's tree over its n + 3 slots,
+ * the .boot directory and the files' blocks.
+ */
+static bool
+scale_width(qnx6_gen_t *g, uint64_t files)
+{
+	gen_shape_t shape;
+	uint64_t root;
+	uint32_t inodes;
+	char name[16];
+
+	inodes = (uint32_t)((files + 2 + 7) / 8 * 8);
+	root = gen_tree_blocks(((files + 3) * 32 + 1023) / 1024, 256);
+	shape = sparse_shape(1024, false, gen_fit(1024, inodes, root + 1 +
+	    (files + 63) / 64), inodes, inodes);
+	if (!gen_create(g, &shape))
+		return (false);
+	for (uint64_t i = 0; i < files; i++) {
+		snprintf(name, sizeof(name), "f%07" PRIu64, i);
+		gen_file(g, 1, name, (const unsigned char *)"w",
+		    i % 64 == 0 ? 1 : 0);
+	}
+	gen_commit(g, 0, 1, true, true);
+	return (true);
+}
+
+/* The offsets of a marked file that hold the bytes 1 to 4: its first,
+ * middle and last byte, and 4 GiB or a third of the way in.
+ */
+static uint64_t
+scale_mark(uint64_t length, unsigned which)
+{
+	switch (which) {
+	case 0:
+		return (0);
+	case 1:
+		return (length / 2);
+	case 2:
+		return (length > (UINT64_C(1) << 32) ? UINT64_C(1) << 32 :
+		    length / 3);
+	default:
+		return (length - 1);
+	}
+}
+
+/* A volume whose one file /f has the given length, sparse but for its
+ * marks. The content is the root and .boot directories and the file's
+ * tree.
+ */
+static bool
+scale_file(qnx6_gen_t *g, uint32_t block_size, bool big, uint64_t length)
+{
+	gen_shape_t shape;
+	uint64_t leaves, offset;
+	uint32_t file;
+
+	leaves = (length + block_size - 1) / block_size;
+	shape = sparse_shape(block_size, big, gen_fit(block_size, GEN_INODES, 2 +
+	    gen_tree_blocks(leaves, block_size / 4)), GEN_INODES, GEN_INODES);
+	if (!gen_create(g, &shape))
+		return (false);
+	file = gen_file(g, 1, "f", NULL, length);
+	for (unsigned m = 0; m < 4; m++) {
+		offset = scale_mark(length, m);
+		*(block_at(g, g->objects[file].blocks[offset / block_size]) +
+		    offset % block_size) = (unsigned char)(m + 1);
+	}
+	gen_commit(g, 0, 1, true, true);
+	return (true);
+}
+
+/* A file's tree deepens: B = 512, big endian, n leaves. */
+static bool
+scale_depth(qnx6_gen_t *g, uint64_t leaves)
+{
+	return (scale_file(g, 512, true, leaves * 512 - 7));
+}
+
+/* A file passes 4 GiB: B = 4096, little endian. */
+static bool
+scale_large(qnx6_gen_t *g, uint64_t length)
+{
+	return (scale_file(g, 4096, false, length));
+}
+
+static void
+scale_print(const char *name, uint64_t size, const char *what,
+    const scale_run_t *run)
+{
+	printf("qnx6 scale %s=%" PRIu64 " %s entries=%" PRIu64
+	    " image_calls=%" PRIu64 " image_read=%" PRIu64 " system_read=%"
+	    PRIu64 " content_read=%" PRIu64 " io_calls=%" PRIu64
+	    " memory_peak=%" PRIu64 " scratch_peak=%" PRIu64 " seconds=%.3f\n",
+	    name, size, what, run->entries, run->image_calls, run->image_bytes,
+	    run->system_bytes, run->content_bytes, run->io_calls,
+	    run->memory_peak, run->scratch_peak, run->seconds);
+}
+
+static void
+test_scale(bool large)
+{
+	static const scale_case_t cases[] = {
+		{ "blocks", scale_blocks, 80000, UINT64_C(64) << 20, false },
+		{ "inodes", scale_inodes, 4096, 1048576, false },
+		{ "width", scale_width, 2000, 200000, false },
+		{ "depth", scale_depth, 2100, 16 * 128 * 128 + 1, true },
+		{ "large", scale_large, (UINT64_C(16) << 20) + 1,
+		    (UINT64_C(4) << 30) + 4097, true }
+	};
+	qnx6_gen_t g;
+	scale_volume_t v;
+	scale_run_t list, verify;
+	unsigned char byte[1];
+	uint64_t size, scratch;
+
+	for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+		size = large ? cases[c].large : cases[c].small;
+		if (!cases[c].build(&g, size))
+			continue;
+		scale_describe(&g, &v);
+		/* The scratch budget: the bitsets of claimed blocks (N bits)
+		 * and exposed inodes (one bit per inode), at most one 16-byte
+		 * ownership run per owned block, and 128 bytes per live inode
+		 * for its directory key record, the record's sorted copy and
+		 * its 4-byte slot reference, measured at about 110 bytes for
+		 * 8-byte names; 1 MiB covers store headers and partly filled
+		 * pages. The context fails any operation that needs more.
+		 */
+		scratch = g.blocks / 8 + g.inode_count / 8 + 16 * v.owned +
+		    128 * v.live + (UINT64_C(1) << 20);
+		scale_measure(&g, false, scratch, &list);
+		scale_measure(&g, true, scratch, &verify);
+		if (large) {
+			scale_print(cases[c].name, size, "list", &list);
+			scale_print(cases[c].name, size, "verify", &verify);
+		}
+		CHECK(list.entries == v.live - 1 && verify.entries == v.live);
+		CHECK(list.memory_peak <= SCALE_MEMORY &&
+		    verify.memory_peak <= SCALE_MEMORY);
+		CHECK(list.repeats == 0 && verify.repeats == 0);
+		CHECK(list.system_bytes <= scale_system(&g, &v, false));
+		CHECK(verify.system_bytes <= scale_system(&g, &v, true));
+		for (unsigned m = 0; cases[c].marked && m < 4; m++) {
+			read_file_at(&g, "/f", scale_mark(g.objects[3].size, m),
+			    byte, 1);
+			CHECK(byte[0] == m + 1);
+		}
+		gen_free(&g);
+	}
+	CHECK(fflush(stdout) == 0);
+}
+
 /* Read and verify an external image: the integration script's entry to
  * native and research fixtures. Prints entry and verification counts.
  */
@@ -2095,10 +3442,10 @@ read_external(const char *image)
 	fsimg_status_t status;
 	uint64_t entries;
 	fixture_t view;
-	char directory[64];
+	char directory[1024];
 	int fd, scratch;
 
-	strcpy(directory, "/tmp/fsimg-qnx6-XXXXXX");
+	temp_name(directory, sizeof(directory), "fsimg-qnx6");
 	CHECK(mkdtemp(directory) != NULL);
 	scratch = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	CHECK(scratch != -1);
@@ -2165,6 +3512,10 @@ main(int argc, char **argv)
 		emit_seed(argv[2]);
 		return (0);
 	}
+	if (argc == 2 && strcmp(argv[1], "--scale") == 0) {
+		test_scale(true);
+		return (skipped == 0 ? 0 : 77);
+	}
 	CHECK(argc == 1);
 	test_codecs();
 	test_matrix();
@@ -2179,6 +3530,17 @@ main(int argc, char **argv)
 	test_directories();
 	test_allocation();
 	test_failures();
+	test_system_trees();
+	test_full();
+	test_deep_paths();
+	test_short_reads();
+	test_eof();
+	test_scratch_faults();
+	test_cancellation();
 	test_extract();
-	return (0);
+	test_scale(false);
+	if (skipped != 0)
+		printf("SKIP: %u sparse-volume cases; every other case passed\n",
+		    skipped);
+	return (skipped == 0 ? 0 : 77);
 }

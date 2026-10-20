@@ -285,6 +285,33 @@ descriptors, and 2,134,938 I/O calls in 104.821 seconds. Process `ru_maxrss` is
 5,382,144 bytes. These measurements cover enumeration and structural verification
 of empty files, not payload throughput or the CLI/worker RSS gate.
 
+The QNX6 scale case grows one dimension of a generated sparse volume at a
+time: `N` to 67,108,864 blocks (a depth-2 bitmap tree), the inode capacity to
+1,048,576, one directory to 200,000 files, a file's tree to depth 3, and a
+file past 4 GiB. Each volume is listed with every file read and verified
+with payload, each at a 16 MiB context budget:
+
+```sh
+./test-qnx6 --scale
+```
+
+It checks the driver design's resource bounds as they apply to these
+volumes: every live inode listed and verified, charged memory at most 4 MiB
+at every size, scratch within a context budget linear in `N`, the inode
+count, the live inodes and the blocks objects own, no owned block read twice
+by one operation, and the system run read in bounded passes, so that only
+verification reads the bitmap and the inode table in full, once each. The
+per-inode reads and bitmap-window loads allowed beside those passes are
+regression ceilings for the reader's access pattern, not design bounds. It
+prints image I/O calls and bytes, the bytes read from the system run and
+from content blocks, all I/O calls including scratch, peak memory and
+scratch, and time. On APFS charged memory peaks between 3,235,840 and
+3,303,104 bytes in every case and operation. The 200,000-file
+directory peaks at 21,821,982 scratch bytes and is listed in 6.1 seconds and
+verified in 10.1; the 67,108,864-block volume verifies in 0.55 seconds with
+8,388,624 scratch bytes, 8,388,608 of them its block bitset, and the 4 GiB
+file in 0.82 seconds. Ordinary `test-qnx6` runs the same cases at small sizes.
+
 The extended ten-million-file catalog uses the same generated provider, 10,000
 explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 
@@ -605,13 +632,31 @@ own name checksum; it shares no code with `lib/formats/qnx6/`. It reads every
 entry kind, inline, 28-byte and 510-byte names, UTF-8 names and full metadata
 in both byte orders at all four block sizes with checksums on and off, then
 verifies payload and free counts. Further cases cover depth-2 fragmented
-files, inode trees of depth 0, 1 and 2, a depth-1 bitmap tree, an object in
-block N - 1, short and padded slices, two snapshots in either order, the
-mounted bit, and over eighty single-field mutations of headers, trees, inodes,
-names, directories and the bitmap, each checked for its expected status.
-Allocation-failure injection at every step, a failing read range,
-cancellation and a work limit check cleanup. `--seed` writes the fuzz seed and
-`--read-external` lists and verifies an image file.
+files, inode trees of depth 0, 1 and 2, inode tables spanning several
+top-level indirect blocks at depths 1 and 2, bitmap trees of depth 1 and 2
+(the latter a sparse 4 GiB volume at B = 512), an object in block N - 1, a
+full volume with no free block or inode at every block size in both byte
+orders, a directory chain at the context's depth limit, short and padded
+slices, two snapshots in either order, the mounted bit, and over eighty
+single-field mutations of headers, trees, inodes, names, directories and the
+bitmap, each checked for its expected status. Fault cases inject allocation
+failures at every step; reads cut down to one byte; a source that stops
+making progress, as at EOF, inside each header, the bitmap, an inode, the
+root directory, file content and verification's inode-table pass, failing
+at exactly that offset; slices truncated at and between every 4096-byte
+boundary; an image file that shrinks after open; a failing read range;
+scratch open, resize, read and write failures with every metadata store
+spilled; cancellation at each of the first 64 polls and then a spread of
+later ones through a listing, a verification and an extraction, with and
+without spilled metadata; and a work limit. Each checks the reported error
+and that no charged memory, scratch or descriptor outlives the reader. The
+ordinary run also runs the scale cases above at small sizes. Sparse volumes
+live in an unlinked temporary file in `$TMPDIR` (or `/tmp`), which needs a
+64-bit address space and room for sparse files; a host without them prints
+a `SKIP:` line for each such case and the program exits 77 after every
+other case passes. `--seed` writes the fuzz seed,
+`--read-external` lists and verifies an image file, and `--scale` runs the
+scale cases at full size.
 
 `test/qnx6-integration.sh` reads external evidence that is never
 redistributed, and skips what is absent; [the QNX6 infrastructure

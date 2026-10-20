@@ -60,15 +60,6 @@ classic, MMI, and extended Power-Safe remain separate profiles.
   run it and record the kernel revision, byte order and checksum behavior in
   the build evidence.
 
-* [Medium] **Reader scale and fault coverage** (`test/qnx6.c`): the
-  [driver design](../specs/design-qnx6-driver.md) asks for a synthetic scale
-  test that grows `N`, the inode capacity, one directory's width, a file's
-  depth and a file beyond 4 GiB separately, recording I/O calls, metadata
-  passes and peak scratch; the native 5 GB captures cover part of this. Also
-  add a bitmap tree of depth 2, an inode table spanning several top-level
-  indirect blocks, a full volume with no free block, short reads and
-  premature EOF, and cancellation in the middle of a traversal.
-
 * [Medium] **Hardlink topology** (`include/fsimg.h`, `specs/design-metadata.md`):
   the [metadata design](../specs/design-metadata.md) has no hardlink
   representation, and the host scanner imports each link to a file as an
