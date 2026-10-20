@@ -88,6 +88,26 @@ class TestRun < Minitest::Test
     end
   end
 
+  # A replay under the same missing gems is untestable for git bisect run,
+  # which reads 77 as bad, so the wrapper turns it into 125.
+  def test_replay_wrapper_skips_as_untestable_when_the_locked_gems_are_absent
+    Dir.mktmpdir do |home|
+      wrapper = File.join(ENV.fetch("FSIMG_BUILDDIR"), "test", "spec.sh")
+      environment = {
+        "PATH" => ENV.fetch("PATH"),
+        "HOME" => home,
+        "BUNDLE_APP_CONFIG" => home,
+        "BUNDLER_FORCE_TTY" => "1",
+        "BUNDLE_PATH" => File.join(home, "gems"),
+        "GEM_HOME" => File.join(home, "gems"),
+        "GEM_PATH" => File.join(home, "gems")
+      }
+      outcome = capture(environment, [wrapper, "--replay=#{File.join(home, "absent.json")}"], unsetenv_others: true)
+
+      assert_equal 125, outcome.status, outcome.output
+    end
+  end
+
   def test_run_writes_the_report_of_the_selected_profile
     Dir.mktmpdir do |build_directory|
       results = File.join(build_directory, "test", "spec-results", "nightly")
@@ -99,7 +119,7 @@ class TestRun < Minitest::Test
       refute File.exist?(File.join(build_directory, "test", "spec-results", "quick"))
 
       coverage = JSON.parse(File.read(File.join(results, "coverage.json")))
-      assert_equal({ "schema_version" => 1, "profile" => "nightly", "seed" => 1234, "passed" => true },
+      assert_equal({ "schema_version" => 2, "profile" => "nightly", "seed" => 1234, "passed" => true },
                    coverage.slice("schema_version", "profile", "seed", "passed"))
       assert_equal({ "runs" => 1, "failures" => 0, "errors" => 0, "skips" => 0 },
                    coverage.fetch("tests").except("assertions"))

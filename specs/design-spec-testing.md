@@ -517,8 +517,10 @@ from a name starts with a fixed prefix, such as `source/` or `::/`, so a
 leading `-` is never read as an option.
 
 Each profile's results directory holds only these names, and every case and
-failure directory in it is created exclusively; a second case with the same id
-in one run is a [`harness_error`](#outcome-classes):
+failure directory in it is created exclusively. The case phase checks every
+case id before any case runs, and a repeated or malformed id fails the phase as
+a whole; a case directory that exists anyway is a
+[`harness_error`](#outcome-classes):
 
 ```text
 test/spec-results/<profile>/
@@ -580,14 +582,19 @@ descriptor opened without following a link or blocking, and an accepted
 `create` must leave `out/created.img` a regular file before anything opens
 it.
 
-`SIGINT` or `SIGTERM` to the harness stops the stage it is running. The
-harness installs no signal handler: Ruby raises each signal as an exception,
-held while a child starts and delivered during supervision, which it unwinds,
-killing the child and its group and waiting a few seconds for both to go.
-Ruby delivers signals to the main thread, so stages run on it. A process
-that leaves its group with `setsid` escapes these steps; fsimg never does so.
-Oracles follow the same lifetime and limits, each with its own deadline. The
-limits are:
+`SIGINT` or `SIGTERM` to the harness stops the stage it is running. The harness
+installs no signal handler: Ruby raises each signal as an exception, held while
+a child starts and delivered during supervision, which it unwinds, killing the
+child and its group and waiting a few seconds for both to go. During the case
+phase, the run then writes its report, naming the signal, and dies by it;
+during the Minitest tests, Minitest's own handling applies. A process that
+outlives `SIGKILL` raises `ContainmentError`, the one harness error outside the
+`FsimgSpec::Error` hierarchy: it derives from `Exception`, so that no per-case
+rescue can take it for one case's fault, and only the run's and a replay's
+boundaries name it. Ruby delivers signals to the main thread, so stages run on
+it. A process that leaves its group with `setsid` escapes these steps; fsimg
+never does so. Oracles follow the same lifetime and limits, each with its own
+deadline. The limits are:
 
 * a wall clock of fsimg's own deadline plus a grace period longer than the
   coordinator's shutdown deadlines, so fsimg's deadline normally fires first
@@ -855,18 +862,40 @@ A declared rule never counts as covered until fsimg has run its cases, and a
 rule whose targeted witnesses are all multi-rule is reported as such; neither
 declarations nor entangled witnesses make a coverage number. The report orders
 entries by rule and case ID, so its content does not depend on execution order.
-A Ruby exception while handling a case makes that case a `harness_error`; the
-run continues and fails at the end.
+Each case is classified, run and recorded through one funnel, so a Ruby
+exception while handling a case, including one that classifying a promoted
+recipe raises, makes that case a `harness_error`; the run continues and fails
+at the end. Any exception outside every case ends the phase instead, as do a
+process that outlives `SIGKILL` and a signal, and the report then says why; a
+run ended by a signal writes its report and then dies by the signal.
+A rule whose cases fsimg never ran, because each was a host skip or a harness
+error, has only its predicate tested.
 
 Every final mismatch writes a failure record in `failures/<id>/` of the results
 directory, created exclusively like a case directory: the recipe with its
 classification and expectation (`case.json`), the base recipe, image hash and
 tool versions (`fixture.json`), the bounded captures, the oracle observations,
 the outcome, timings and safety checks of each stage (`result.json`), the image
-when it is sparse and at most 64 MiB logical, and a `replay.sh` holding the
-fixed line `bin/replay case.json`. `bin/replay` rebuilds and reruns one case,
-re-deriving its classification and expectation from the current rules. CI
-uploads only `coverage.json`, the summary and `failures/`.
+when it is sparse and at most 64 MiB logical, and, for a reading case, which
+alone has a base to record and can be replayed, a `replay.sh`, run as `sh
+PATH/replay.sh` from the build directory, that passes the `case.json` beside it
+and the recording profile to `test/spec.sh --replay`. `result.json`, written
+last, names the profile too. A case that could not be classified has no recipe
+to replay, and its record holds `result.json` alone. `bin/replay` rebuilds and
+reruns one case under the profile's ceilings, re-deriving its classification
+and expectation from the current rules. Its exit status answers `git bisect
+run`: 0 when fsimg passes the case and 3 when it fails it, a status Ruby never
+exits with by itself; 125, untestable, when this revision cannot judge it (a
+host skip, a harness error such as a drifted promoted case or a base that
+renders to other bytes, a recipe these rules cannot classify, a preflight
+refusal, including an fsimg that fails the preflight's own valid sample as a
+broken build would, or a missing Ruby or gem); and 128, which stops the
+bisection, for anything else, such as a usage error or a fault of the harness.
+`test/spec.sh` maps every other status to 128.
+CI uploads only `coverage.json`, the summary and `failures/`. The record's own
+fields name no host path and carry no environment, while stage captures, a
+harness error's detail and the reason a whole phase failed quote fsimg and Ruby
+messages, which can.
 
 A confirmed defect is promoted by copying its recipe into
 `test/spec/cases/<format>/` with its `reason` and with `regression.` prefixed
@@ -895,7 +924,8 @@ uses; the harness calls `Minitest.run` directly. The gems are not vendored and
 never become runtime dependencies of the library or the CLI.
 
 `make` owns every entry point, and there is no Rakefile. `test/spec.sh`,
-generated by `configure`, runs `test/spec/run.rb --profile=NAME`. The quick
+generated by `configure`, runs `test/spec/run.rb --profile=NAME`, or
+`bin/replay` for `--replay=CASE.json [PROFILE]`. The quick
 profile is a member of `TESTS`, so `make check` runs it, and so does every
 sanitizer tree, because `check-asan`, `check-ubsan`, `check-lsan` and
 `check-msan` run `make check` in their own builds; `make check-spec` runs it

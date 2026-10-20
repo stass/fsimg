@@ -200,7 +200,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
 	specs/design-spec-testing.md test/spec.sh.in \
 	test/spec/Gemfile test/spec/Gemfile.lock test/spec/run.rb \
-	test/spec/lib test/spec/suite
+	test/spec/bundle.rb test/spec/bin test/spec/cases test/spec/lib \
+	test/spec/suite
 check-local: check-ascii
 .PHONY: check-ascii check-asan check-ubsan check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz check-fuzz-extended check-cli-rss check-extended

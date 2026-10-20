@@ -10,8 +10,8 @@ module FsimgSpec
     # its mutations applied, the image decoded and classified by the whole
     # registry, and the recipe recorded with the classification and the
     # expectations derived from it (specs/design-spec-testing.md#data-flow).
-    # rule is the rule the case belongs to in the coverage report, or nil.
-    Classified = Data.define(:kase, :image, :model, :defect, :rule)
+    # defect is why the case cannot be trusted to judge fsimg, or nil.
+    Classified = Data.define(:kase, :image, :model, :defect)
 
     class Cases
       def initialize(registry:, cache:, ceilings:)
@@ -26,15 +26,47 @@ module FsimgSpec
       def call(witness)
         base = Base.new(builder: Builder::NAME, parameters: witness.parameters, tree: [])
         path = Bases.render(base, cache: @cache, ceilings: @ceilings)
-        image = witness.mutations.reduce(ImageView.open(path)) { |view, mutation| mutation.apply(view) }
-        model = Model.decode(image)
-        classification = @registry.classify(model, Environment.new(forced_format: witness.forced_format))
+        image, model, classification = decode(path, witness.mutations, witness.forced_format)
         kase = Case.derive(recipe(witness, base:, path:, classification:), classification, registry: @registry)
         kase = kase.with(recipe: kase.recorded)
-        Classified.new(kase:, image:, model:, defect: kase.harness_defect, rule: witness.rule)
+        Classified.new(kase:, image:, model:, defect: kase.harness_defect)
+      end
+
+      # Why recipe cannot be replayed on this host, or nil: only a reading
+      # recipe on a base of the independent builder renders without
+      # development tools.
+      def self.unreplayable(recipe)
+        return "#{recipe.id}: a creation recipe does not replay" unless recipe.reading?
+        return "#{recipe.id}: only #{Builder::NAME} bases replay without tools" unless recipe.base.builder == Builder::NAME
+
+        nil
+      end
+
+      # A recorded recipe that is not unreplayable, such as a promoted case
+      # or a failure record's, classified again under the current rules. Its
+      # base must render to the bytes it recorded. How the recorded
+      # classification differs from the derived one is the case's drift; a
+      # promoted case's drift is a defect, because its recipe must change in
+      # the commit that changes its meaning.
+      def replay(recipe)
+        reason = Cases.unreplayable(recipe)
+        raise HarnessError, reason if reason
+
+        path = Bases.render(recipe.base, cache: @cache, ceilings: @ceilings)
+        image, model, classification = decode(path, recipe.mutations, recipe.forced_format)
+        kase = Case.derive(recipe, classification, registry: @registry)
+        Classified.new(kase:, image:, model:, defect: replay_defect(kase, base_digest(path)))
       end
 
       private
+
+      # The image at path with mutations applied, its model, and its
+      # classification with format forced.
+      def decode(path, mutations, forced_format)
+        image = mutations.reduce(ImageView.open(path)) { |view, mutation| mutation.apply(view) }
+        model = Model.decode(image)
+        [image, model, @registry.classify(model, Environment.new(forced_format:))]
+      end
 
       # The witness's recipe. Its format is the base's variant, which picks
       # the format suite on replay; a mutation may change the variant the
@@ -63,6 +95,14 @@ module FsimgSpec
       end
 
       def base_digest(path) = @base_digests[path] ||= Digest::SHA256.file(path).hexdigest
+
+      def replay_defect(kase, rendered)
+        recipe = kase.recipe
+        if rendered != recipe.base_sha256 then "#{recipe.id}: its base renders to #{rendered}"
+        elsif kase.harness_defect then kase.harness_defect
+        elsif recipe.promoted? && kase.drift.any? then "#{recipe.id} drifted: #{kase.drift.join("; ")}"
+        end
+      end
     end
   end
 end

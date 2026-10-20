@@ -5,14 +5,27 @@
 # Runs the specification-driven test harness (specs/design-spec-testing.md):
 #
 #   test/spec.sh [PROFILE]
+#   test/spec.sh --replay=CASE.json [PROFILE]
 #
-# The profile is quick when none is given, as under make check. The script
+# The profile is quick when none is given, as under make check. --replay
+# rebuilds and reruns one case from its recipe, such as a failure record's
+# case.json, under the profile's ceilings, with bin/replay. The script
 # exits 77 when Ruby 3.2 is absent, and run.rb does when a locked gem is.
+# A replay's status is for git bisect run: 0 good, 3 bad, 125 untestable,
+# which a missing Ruby or gem is too, and 128, which stops the bisection,
+# for anything else, such as a usage error or a crash of the harness.
 set -eu
-if test $# -gt 1; then
-    echo 'usage: test/spec.sh [PROFILE]' >&2
+# Exits 2, or 128 when the first argument asks for a replay.
+usage() {
+    echo 'usage: test/spec.sh [PROFILE | --replay=CASE.json [PROFILE]]' >&2
+    case ${1:-} in --replay=*) exit 128 ;; esac
     exit 2
-fi
+}
+case $# in
+0 | 1) ;;
+2) case $1 in --replay=*) ;; *) usage "$1" ;; esac ;;
+*) usage "$1" ;;
+esac
 # run.rb loads the locked bundle itself. An inherited Ruby or bundle
 # environment, such as another project's bundle exec, would change what the
 # interpreter loads first.
@@ -20,10 +33,12 @@ unset RUBYOPT RUBYLIB BUNDLER_VERSION
 ruby='@RUBY@'
 spec='@abs_top_srcdir@/test/spec'
 profile=${1:-quick}
+skip=77
+case $profile in --replay=*) skip=125 ;; esac
 if test -z "$ruby" ||
     ! "$ruby" -e 'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.2"))'; then
     echo "SKIP: specification tests require Ruby 3.2 or later (configured: ${ruby:-none})"
-    exit 77
+    exit $skip
 fi
 BUNDLE_GEMFILE="$spec/Gemfile"
 FSIMG_BUILDDIR='@abs_top_builddir@'
@@ -39,4 +54,16 @@ MDIR='@MDIR@'
 FATCAT='@FATCAT@'
 export BUNDLE_GEMFILE FSIMG_BUILDDIR FSIMG_BIN MKFS_FAT FSCK_FAT NEWFS_MSDOS \
     FSCK_MSDOSFS MCOPY MMD MDEL MDIR FATCAT
+case $profile in
+--replay=*)
+    status=0
+    "$ruby" "$spec/bin/replay" "${profile#--replay=}" ${2+"$2"} || status=$?
+    case $status in
+    0 | 3 | 125) ;;
+    77) status=125 ;;
+    *) status=128 ;;
+    esac
+    exit "$status"
+    ;;
+esac
 exec "$ruby" "$spec/run.rb" --profile="$profile"

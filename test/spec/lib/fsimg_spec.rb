@@ -20,6 +20,19 @@ module FsimgSpec
     text.length > limit ? "#{text[0, limit]}..." : text
   end
 
+  # An exception as a report or detail quotes it: its class's own name and
+  # its message, shown, so that a path or recipe value in the message can
+  # neither flood the report nor carry bytes JSON cannot encode.
+  def self.error_label(error) = "#{error_class(error)}: #{shown(error.message, limit: 400)}"
+
+  # The last part of the name of error's class, or of its nearest named
+  # superclass when the class is anonymous.
+  def self.error_class(error)
+    named = error.class
+    named = named.superclass while named.name.nil?
+    named.name.split("::").last
+  end
+
   # Data#with does not call initialize on Ruby 3.2, the floor; 3.3 and
   # later do. A Data class whose initialize checks or normalizes its
   # fields includes this, so with runs those checks on the floor too.
@@ -28,6 +41,7 @@ module FsimgSpec
   end
 end
 
+require_relative "fsimg_spec/terminal"
 require_relative "fsimg_spec/undefined"
 require_relative "fsimg_spec/contract"
 require_relative "fsimg_spec/profile"
@@ -46,5 +60,9 @@ require_relative "fsimg_spec/runner"
 require_relative "fsimg_spec/case_run"
 require_relative "fsimg_spec/fixtures"
 require_relative "fsimg_spec/preflight"
+require_relative "fsimg_spec/coverage"
+require_relative "fsimg_spec/failure_record"
+require_relative "fsimg_spec/case_phase"
+require_relative "fsimg_spec/replay"
 require_relative "fsimg_spec/report"
 require_relative "fsimg_spec/results_directory"

@@ -10,7 +10,7 @@ require "prop_check"
 class TestToolchain < Minitest::Test
   SPEC_ROOT = File.expand_path("../..", __dir__)
   # The harness's own Ruby; installed gems, such as a vendor/bundle, are not.
-  RUBY_SOURCES = "{Gemfile,*.rb,lib/**/*.rb,suite/**/*.rb}"
+  RUBY_SOURCES = "{Gemfile,*.rb,bin/*,lib/**/*.rb,suite/**/*.rb}"
   SPDX_LINE = "# SPDX-License-Identifier: BSD-2-Clause\n"
   FROZEN_LINE = "# frozen_string_literal: true\n"
 
@@ -36,8 +36,10 @@ class TestToolchain < Minitest::Test
 
   # The SPDX line comes first; the magic comment belongs to the same leading
   # comment block, the only place Ruby honours it.
+  # A program under bin/ starts with its #! line, and the header follows.
   private def license_header?(path)
     leading_comments = File.open(path) { |file| file.each_line.take_while { _1.start_with?("#") } }
+    leading_comments = leading_comments.drop(1) if leading_comments.first&.start_with?("#!")
     leading_comments.first == SPDX_LINE && leading_comments.include?(FROZEN_LINE)
   end
 end

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "regression.fat.bpb.num_fats.supported.3",
+  "format": "fat12",
+  "base": {
+    "builder": "independent",
+    "tree": [],
+    "parameters": {
+      "clusters": 100,
+      "fat_count": 3
+    }
+  },
+  "base_sha256": "9ee71bc749c69d10dc89be79fad3213b17e909861b87b807a42ab4c0be422931",
+  "tool_versions": {
+    "independent": "ed71680de2f0b269b584f74f4dff87f6e500cf3cf9ff4333be8ff97a98035f2b"
+  },
+  "mutations": [],
+  "stages": [
+    "info"
+  ],
+  "kind": "targeted",
+  "intended_violation": "fat.bpb.num_fats.supported",
+  "actual_violations": [
+    {
+      "rule": "fat.bpb.num_fats.supported",
+      "scope": "open"
+    }
+  ],
+  "isolation": "single_rule",
+  "expected": {
+    "info": "reject:FSIMG_EUNSUPPORTED"
+  },
+  "reason": "A coherent FAT12 volume with three FATs is a recognized volume outside the supported profile, which reads one or two; fsimg reported it as an unrecognized image (FSIMG_EFORMAT) instead of FSIMG_EUNSUPPORTED."
+}

@@ -1,0 +1,63 @@
+#!/usr/bin/env ruby
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+# frozen_string_literal: true
+
+# Rebuilds and reruns one case from its recipe under the current rules:
+#
+#   test/spec.sh --replay=CASE.json [PROFILE]
+#
+# test/spec.sh runs this with the environment of a run. The profile is
+# quick when none is given; a failure record's replay.sh names the profile
+# that recorded it. It prints the verdict and how the recorded
+# classification differs from the derived one.
+#
+# The exit status is meant for git bisect run, which reads 0 as good, 125
+# as untestable, any other status up to 127 as bad and anything higher as
+# a reason to stop. Only fsimg's own verdict is good or bad, and bad is 3,
+# a status Ruby never exits with by itself, so that test/spec.sh, the
+# entry point, can turn every status but 0, 3 and 125 into 128. A case
+# this revision cannot judge is untestable: the host skips it, the harness
+# finds it defective or drifted, its recipe cannot be classified under
+# these rules, or the preflight refuses the host. A revision whose fsimg
+# fails the preflight's own valid sample is untestable too, as a broken
+# build is: it is broken in a way this case does not test. A usage error
+# or a fault of the harness itself stops the bisection. Text from the
+# case is printed with its control characters escaped.
+
+require_relative "../bundle"
+require "fsimg_spec"
+require "fsimg_spec/fat"
+
+GOOD = 0
+BAD = 3
+UNTESTABLE = 125
+STOP = 128
+VERDICT_STATUS = { "passed" => GOOD, "failed" => BAD, "host_skip" => UNTESTABLE, "harness_error" => UNTESTABLE }.freeze
+
+def escaped(text) = FsimgSpec::Terminal.escaped(text)
+
+def replay
+  raise FsimgSpec::UsageError, "usage: test/spec.sh --replay=CASE.json [PROFILE]" unless (1..2).cover?(ARGV.size)
+  raise FsimgSpec::UsageError, "no such recipe file: #{FsimgSpec.shown(ARGV.first)}" unless File.file?(ARGV.first)
+
+  build_directory = ENV.fetch("FSIMG_BUILDDIR") { raise FsimgSpec::UsageError, "FSIMG_BUILDDIR is not set; run through test/spec.sh" }
+  raise FsimgSpec::UsageError, "FSIMG_BIN names no fsimg binary" unless File.executable?(ENV.fetch("FSIMG_BIN", ""))
+
+  profile = FsimgSpec.fetch_profile(ARGV.fetch(1, "quick"))
+  result, drift = FsimgSpec::Replay.call(ARGV.first, profile:, build_directory:, environment: ENV.to_h)
+  puts escaped("#{result.id}: #{result.verdict}#{": #{result.detail}" if result.detail}")
+  drift.each { puts escaped("drift: #{_1}") }
+  VERDICT_STATUS.fetch(result.verdict)
+rescue FsimgSpec::UsageError => e
+  warn escaped("replay: #{e.message}")
+  STOP
+rescue FsimgSpec::RecipeError, FsimgSpec::PreflightError => e
+  warn escaped("replay: #{e.message}")
+  UNTESTABLE
+rescue StandardError, FsimgSpec::ContainmentError => e
+  warn escaped("replay: #{FsimgSpec.error_label(e)}")
+  STOP
+end
+
+exit replay

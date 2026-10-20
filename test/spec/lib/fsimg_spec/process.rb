@@ -3,6 +3,14 @@
 # frozen_string_literal: true
 
 module FsimgSpec
+  # A process the harness started outlived SIGKILL. Nothing the run does
+  # after it can be trusted to be isolated, so it ends the case phase
+  # instead of failing one case. It derives from Exception, not Error, so
+  # that no rescue of StandardError, such as the case phase's per-case
+  # funnel, can take it for one case's fault; only the boundaries of a run
+  # and of a replay name it.
+  class ContainmentError < Exception; end
+
   # Told when an invocation's process group starts and when the
   # invocation is done with it; a test subclasses it to watch or disturb a
   # run. It does nothing by default, and nothing kills through it. Both
@@ -157,7 +165,7 @@ module FsimgSpec
       deadline = now + GROUP_EXIT_SECONDS
       kill_group(pgid)
       sleep(POLL_SECONDS / 10) while group_alive?(pgid) && now < deadline
-      raise Error, "process group #{pgid} survived SIGKILL" if group_alive?(pgid)
+      raise ContainmentError, "process group #{pgid} survived SIGKILL" if group_alive?(pgid)
     end
 
     # Whether any process is left in the group. EPERM means a member
@@ -199,7 +207,7 @@ module FsimgSpec
         read_available(captures, open_readers, cap: limits.capture_bytes)
         _, status = Process.wait2(pid, Process::WNOHANG)
         break if status
-        raise Error, "process #{pid} survived SIGKILL" if killed_at && now - killed_at >= GROUP_EXIT_SECONDS
+        raise ContainmentError, "process #{pid} survived SIGKILL" if killed_at && now - killed_at >= GROUP_EXIT_SECONDS
         next if ended_by
 
         # Checked only while the child runs, so a child that has already

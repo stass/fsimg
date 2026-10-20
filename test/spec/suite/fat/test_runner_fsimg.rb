@@ -92,7 +92,9 @@ class TestRunnerFsimg < Minitest::Test
       ls = result.stages.find { _1.stage == "ls" }
       skip "ls finished before a worker appeared" unless killer.killed?
 
-      assert_equal "faulted", ls.outcome.kind, ls.outcome.detail
+      stdout = ls.execution.stdout
+      assert_equal "faulted", ls.outcome.kind,
+                   "#{ls.outcome.detail}; stdout ends #{FsimgSpec.shown(stdout.byteslice([stdout.bytesize - 400, 0].max, 400), limit: 500)}"
     end
   end
 

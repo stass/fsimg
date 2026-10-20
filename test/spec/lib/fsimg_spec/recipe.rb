@@ -261,6 +261,20 @@ module FsimgSpec
 
     def self.load(text, ceilings:) = RecipeLoader.new(ceilings).load(text)
 
+    # The recipe in the file at path, which is untrusted: it must be a
+    # regular file, and no more than the loader accepts is read from it.
+    # The open does not block, so a FIFO is refused rather than waited on.
+    def self.read(path, ceilings:)
+      text = File.open(path, File::RDONLY | File::NONBLOCK | File::BINARY) do |file|
+        raise RecipeError, "#{FsimgSpec.shown(path)} is no regular file" unless file.stat.file?
+
+        file.read(RecipeLoader::TEXT_BYTES + 1) || ""
+      end
+      load(text, ceilings:)
+    rescue SystemCallError => e
+      raise RecipeError, "cannot read #{FsimgSpec.shown(path)}: #{e.message}"
+    end
+
     private
 
     def to_json_fields

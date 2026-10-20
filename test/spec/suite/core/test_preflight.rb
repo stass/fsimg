@@ -52,6 +52,17 @@ class TestPreflight < Minitest::Test
     end
   end
 
+  # The sandbox status reaches the report, and an accepted stage is a
+  # worker's, which knows its confinement: unknown, a status fsimg names
+  # only before a worker reports, and any word fsimg does not define are
+  # refused.
+  def test_accepted_stage_reports_a_known_sandbox_status
+    assert_equal "active", FsimgSpec::Preflight.accepted_sandbox("active", stage: "create")
+    ["unknown", "active\e[2J", nil].each do |status|
+      assert_raises(FsimgSpec::PreflightError, status.inspect) { FsimgSpec::Preflight.accepted_sandbox(status, stage: "create") }
+    end
+  end
+
   # env confines nothing, and false runs nothing: the probe's positive
   # control refuses a command that cannot run the oracle at all.
   def test_confinement_that_confines_nothing_or_runs_nothing_fails

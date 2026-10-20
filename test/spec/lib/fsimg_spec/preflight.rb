@@ -27,6 +27,11 @@ module FsimgSpec
     # capture may hold this much.
     INITIAL_TEXT_BYTES = 64 << 20
     SENTINEL = "fsimg-spec-sentinel"
+    # The confinement statuses an accepted stage can report: fsimg's
+    # summaries also name unknown (cmd/fsimg/display.c), but only before a
+    # worker has reported its confinement, and a worker makes every
+    # acceptance.
+    SANDBOX_STATUSES = %w[active unavailable disabled].freeze
     # The creation the preflight runs: one file on FAT16.
     CREATION = Recipe.new(
       id: "preflight", format: "fat16", kind: "valid", stages: ["create"],
@@ -54,12 +59,28 @@ module FsimgSpec
       check_devices
       directory = File.join(@results, "preflight")
       Dir.mkdir(directory, 0o700)
-      begin
+      checked = begin
         check_confinement(directory)
         run_valid_cases(directory, address_space: address_space?)
-      ensure
-        FileUtils.rm_r(directory, secure: true)
+      rescue Exception
+        # A cleanup that raised here would replace the exception in flight,
+        # such as a ContainmentError or a signal; rm_rf raises no
+        # StandardError.
+        FileUtils.rm_rf(directory, secure: true)
+        raise
       end
+      # After success, a directory that cannot be removed fails the preflight.
+      FileUtils.rm_r(directory, secure: true)
+      checked
+    end
+
+    # status, which reaches the report, when an accepted stage may report
+    # it; otherwise the preflight fails.
+    def self.accepted_sandbox(status, stage:)
+      return status if SANDBOX_STATUSES.include?(status)
+
+      raise PreflightError, "preflight #{stage}: the summary reports the sandbox status #{FsimgSpec.shown(status)}, " \
+                            "not one of #{SANDBOX_STATUSES.join(", ")}"
     end
 
     private
@@ -179,13 +200,10 @@ module FsimgSpec
     end
 
     # The sandbox status an accepted stage's summary reports; every later
-    # record of the run must repeat it.
-    def reported_sandbox(result)
-      status = result.outcome.records.last["sandbox"]
-      raise PreflightError, "preflight #{result.stage}: the summary reports no sandbox status" unless status.is_a?(String)
+    # record of the run must repeat it. It reaches the report, so only the
+    # statuses fsimg defines are taken.
+    def reported_sandbox(result) = Preflight.accepted_sandbox(result.outcome.records.last["sandbox"], stage: result.stage)
 
-      status
-    end
 
     def runner_for(text_bytes:, address_space:) =
       Runner.new(fsimg: @fsimg, profile: @profile, environment: @environment,

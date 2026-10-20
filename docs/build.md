@@ -109,8 +109,37 @@ directly, and Minitest's `SEED` environment variable fixes the test order a
 summary reports. PropCheck draws are not seeded. Each run locks
 `test/spec-results/<profile>/` under the build directory, empties it, and
 writes `coverage.json` and `summary.txt` there; `make clean` removes it. A run
-passes only when Minitest reports no failure, error or interruption and at
-least one test ran. CI installs the gems on macOS, Ubuntu and FreeBSD and fails
+passes only when Minitest reports no failure, error or interruption, at least
+one test ran, the case phase did not fail as a whole and no case failed or
+ended as a harness error. A failing case leaves a record under
+`test/spec-results/<profile>/failures/<id>/`; `sh PATH/replay.sh`, or
+`./test/spec.sh --replay=PATH/case.json [PROFILE]`, rebuilds and reruns that
+one case under the current rules and reports any drift from its recorded
+classification. Its exit status suits `git bisect run`: 0 when fsimg passes
+the case, 3 when it fails it, 125 when this revision cannot judge it, and 128,
+which stops the bisection, for a usage error or a harness fault.
+`test/spec/bin/report PATH/coverage.json` prints a run's per-rule coverage.
+
+`replay.sh` runs from the build directory. To bisect a recorded failure from
+an in-tree build, copy its `case.json` elsewhere first, since any run of the
+profile empties its results directory, and rebuild fsimg at every step, since
+`test/spec.sh` only runs the binary it finds. A revision without `bin/replay`
+cannot judge a case, so the script skips it:
+
+```sh
+recipe=$(mktemp) && cp test/spec-results/quick/failures/ID/case.json "$recipe"
+git bisect run sh -c 'test -f test/spec/bin/replay || exit 125
+    make -j32 fsimg test/spec.sh || exit 125
+    ./test/spec.sh --replay="$1" quick' sh "$recipe"
+```
+
+A stage that fsimg cannot be launched for on the host counts as a failed case,
+so bisect on an idle host.
+
+The preflight runs inside the results directory, so a build directory deep
+enough that a case's longest path would pass the host's `PATH_MAX` fails the
+case phase, as does any other preflight refusal, and the report names the
+check that refused. CI installs the gems on macOS, Ubuntu and FreeBSD and fails
 when the suite skips there. The GCC container jobs install no Ruby and skip it.
 
 The tests' base images are cached in `test/spec-cache/` under the build

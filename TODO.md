@@ -69,6 +69,52 @@
     the mutated image decodes to (documented in `Cases#recipe`). Decide which
     one picks the format suite on replay.
 
+* [Medium] **Promoted recipes on formatter bases** (`test/spec/lib/fsimg_spec/fat/suite.rb`,
+  `fat/cases.rb`, `fat/bases.rb`): the design replays every promoted case
+  whose builder the host has and skips the others, but only independent-builder
+  bases replay: `Suite.promoted` refuses a promoted recipe on a formatter
+  base, and `bin/replay` skips one. Replaying needs the case phase to
+  materialize formatter bases with the configured tools and their versions.
+
+* [Medium] **Killed worker once gave malformed NDJSON** (`cmd/fsimg/worker-parent.c`,
+  `test/spec/suite/fat/test_runner_fsimg.rb`): in one full quick run on macOS,
+  `test_killed_worker_is_a_fault` saw `ls` end as `harness_error` ("malformed
+  NDJSON on stdout") instead of a fault record after its worker was killed.
+  It did not recur in 40 runs of the test under CPU load or in 450 direct
+  worker kills during `fsimg ls -j`. Either the relay can emit a partial
+  record when a worker dies, which is an fsimg defect, or the test's killer
+  raced; the assertion now quotes the end of stdout to tell them apart.
+
+* [Medium] **Spec harness stage harness errors** (`test/spec/lib/fsimg_spec/outcome.rb`,
+  `case_run.rb`): a stage's `harness_error` outcome covers both host faults
+  (fsimg could not be launched, a sandbox status that differs from the
+  preflight's) and fsimg's own protocol violations (malformed NDJSON, an exit
+  status outside the contract). A case whose expectation such a stage fails is
+  `failed`, so a host fault counts as an fsimg failure in coverage and is a
+  bad revision to `bin/replay`. Split the host faults out so that they make the
+  case a `harness_error`.
+
+* [Low] **Spec harness reports and records** (`test/spec/lib/fsimg_spec/coverage.rb`,
+  `failure_record.rb`):
+  - Coverage reports `targeted_witnesses` as only `available` or
+    `not_generated`, and has no fields for the boundaries exercised or the
+    oracle results; the design also names "impossible within the enumerated
+    space" and per-rule oracle states. A promoted `valid` recipe counts
+    toward no rule.
+  - A promoted case that drifted is a `harness_error`, the verdict a
+    generator defect or a base digest mismatch also gets; a distinct verdict
+    or detail class would let the report tell a stale regression recipe
+    from a harness fault.
+  - A rule whose only cases could not be classified reports
+    `predicate_only`, though no predicate ran for them; `witnesses` also
+    lists promoted ids.
+  - Failure records hold no oracle observations; the case phase runs no
+    oracle yet.
+  - Failure records are bounded one by one (64 MiB logical image, capped
+    captures) but not per run: a broken fsimg that fails every case writes
+    one image per case, and the design's "when it is sparse" condition is
+    not checked. Add a per-run budget for recorded images.
+
 * [Low] **Scoped ownership intervals** (`lib/formats/fat/verify.c`,
   `lib/formats/exfat/verify.c`): extract the duplicate ownership-interval
   sorting and cursor checks into one bounded utility, the last item of the

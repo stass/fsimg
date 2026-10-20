@@ -9,33 +9,21 @@
 #
 # test/spec.sh is the entry point. It checks the Ruby version, names the
 # Gemfile and exports FSIMG_BUILDDIR, FSIMG_BIN and the development tool
-# paths. Without test files, every suite/**/test_*.rb file runs. The exit
-# status is 0 when the run passes, 1 when it does not, 2 for a usage error
-# and 77 when a locked gem is not installed. Minitest's SEED environment
-# variable fixes the test order.
+# paths. Without test files, every suite/**/test_*.rb file runs and then
+# the case phase runs every format's cases through fsimg; naming test files
+# runs only those and skips the case phase. The exit status is 0 when the
+# run passes, 1 when it does not, 2 for a usage error and 77 when a locked
+# gem is not installed. Minitest's SEED environment variable fixes the test
+# order.
 
-# Only the locked gems: a run never rewrites Gemfile.lock, installs a gem or
-# reaches the network. Temporary settings outrank every Bundler
-# configuration, a local test/spec/.bundle/config included. Any other
-# failure to load the bundle, such as a Gemfile changed without relocking,
-# raises and fails the run.
-# Ruby matches a rescue list in order, so Bundler::GemNotFound is not looked
-# up when LoadError reports a missing Bundler.
-begin
-  require "bundler"
-  Bundler.settings.temporary(frozen: true, auto_install: false) { Bundler.setup }
-rescue LoadError, Bundler::GemNotFound => e
-  warn e.message
-  puts "SKIP: specification tests require the locked gems; run bundle install --gemfile=test/spec/Gemfile"
-  exit 77
-end
+require_relative "bundle"
 
 require "minitest"
 require "optparse"
 require "stringio"
 
-$LOAD_PATH.unshift(File.join(__dir__, "lib"))
 require "fsimg_spec"
+require "fsimg_spec/fat"
 
 module FsimgSpec
   # Minitest attaches reporters only through plugins: Minitest.run calls
@@ -65,10 +53,23 @@ module FsimgSpec
     def self.call(argv)
       profile, test_files = parse(argv)
       directory = profile.results_directory(build_directory)
+      fsimg_binary if test_files.nil?
       ResultsDirectory.hold(directory) do
-        report = run_tests(profile, test_files)
-        report.write(directory)
-        puts report.summary
+        report, interrupted = run_tests(profile, test_files || suite_files)
+        ending = case_phase(profile, directory, named: !test_files.nil?, interrupted:)
+        report = report.with(cases: ending.cases)
+        begin
+          report.write(directory)
+          puts report.summary
+        rescue StandardError => e
+          # Dying by a signal prints nothing, so the failed write is said
+          # here before the signal is raised again.
+          warn "run.rb: the report was not written: #{FsimgSpec.error_label(e)}" if ending.fatal
+          raise
+        ensure
+          raise ending.fatal if ending.fatal
+        end
+
         report.passed? ? 0 : 1
       end
     end
@@ -80,7 +81,7 @@ module FsimgSpec
       test_files = parser.parse(argv)
       raise UsageError, "--profile is required" if profile_name.nil?
 
-      [FsimgSpec.fetch_profile(profile_name), test_files.empty? ? suite_files : checked(test_files)]
+      [FsimgSpec.fetch_profile(profile_name), test_files.empty? ? nil : checked(test_files)]
     rescue OptionParser::ParseError => e
       raise UsageError, e.message
     end
@@ -99,12 +100,29 @@ module FsimgSpec
     private_class_method def self.build_directory =
       ENV.fetch("FSIMG_BUILDDIR") { raise UsageError, "FSIMG_BUILDDIR is not set; run through test/spec.sh" }
 
+    # A full run needs the fsimg binary, which is checked before the
+    # results directory is emptied.
+    private_class_method def self.fsimg_binary
+      fsimg = ENV.fetch("FSIMG_BIN", "")
+      raise UsageError, "FSIMG_BIN names no fsimg binary; run through test/spec.sh" unless File.executable?(fsimg)
+    end
+
+    # How the case phase ended (CasePhase.guarded): a run that names its
+    # test files or was interrupted skips it.
+    private_class_method def self.case_phase(profile, directory, named:, interrupted:)
+      return CasePhase::Ending.new(cases: CasesSkipped.new(reason: "test files named"), fatal: nil) if named
+      return CasePhase::Ending.new(cases: CasesSkipped.new(reason: "interrupted"), fatal: nil) if interrupted
+
+      CasePhase.guarded(profile:, results: directory, build_directory:, environment: ENV.to_h)
+    end
+
+    # The report of the Minitest run, and whether it was interrupted.
     private_class_method def self.run_tests(profile, test_files)
       test_files.each { require _1 }
       Minitest.register_plugin(MinitestCounts)
       # Minitest.run answers nil, not false, for an interrupted run.
-      minitest_passed = Minitest.run([]) == true
-      Report.new(profile:, seed: Minitest.seed, minitest_passed:, tests: MinitestCounts.fetch)
+      answer = Minitest.run([])
+      [Report.new(profile:, seed: Minitest.seed, minitest_passed: answer == true, tests: MinitestCounts.fetch), answer.nil?]
     end
   end
 end

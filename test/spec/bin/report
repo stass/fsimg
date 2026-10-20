@@ -1,0 +1,78 @@
+#!/usr/bin/env ruby
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+# frozen_string_literal: true
+
+# Prints the per-rule coverage of a run from its coverage.json:
+#
+#   test/spec/bin/report test/spec-results/PROFILE/coverage.json
+#
+# One line per rule: its state, how many of its cases were attempted,
+# passed and failed, its isolation and the stages fsimg was held to. A
+# coverage.json may come from a downloaded CI artifact, so the file is read
+# within a bound and every string from it is printed with its control
+# characters escaped. It reads only the schema version the harness writes
+# and exits 2 for anything else.
+
+require "json"
+require_relative "../lib/fsimg_spec/terminal"
+
+LIMIT = 64 << 20
+SCHEMA_VERSION = 2 # FsimgSpec::Report::SCHEMA_VERSION; test_report.rb checks both agree.
+
+def escaped(value) = FsimgSpec::Terminal.escaped(value)
+
+def fail_with(message)
+  warn "report: #{escaped(message)}"
+  exit 2
+end
+
+fail_with("usage: bin/report COVERAGE.json") if ARGV.size != 1
+
+begin
+  text = File.open(ARGV.first, File::RDONLY | File::NONBLOCK) do |file|
+    fail_with("#{ARGV.first} is no regular file") unless file.stat.file?
+    file.read(LIMIT + 1) || ""
+  end
+  fail_with("#{ARGV.first} is larger than #{LIMIT} bytes") if text.bytesize > LIMIT
+  coverage = JSON.parse(text)
+rescue SystemCallError, JSON::ParserError, EncodingError => e
+  fail_with(e.message)
+end
+unless coverage.is_a?(Hash) && coverage["schema_version"] == SCHEMA_VERSION
+  fail_with("#{ARGV.first} is no coverage.json of schema version #{SCHEMA_VERSION}")
+end
+
+# Columns: rule id, state, the attempted/passed/failed counts, isolation,
+# then the stages asserted.
+RULE_LINE = "  %-44s %-14s %-36s %-15s %s"
+
+# The report's lines, all built before any is printed, so that a malformed
+# file prints nothing but its refusal.
+def lines(coverage)
+  header = "profile #{coverage.fetch("profile")}, Ruby #{coverage.fetch("ruby")}, seed #{coverage.fetch("seed")}, " \
+           "#{coverage.fetch("passed") ? "passed" : "failed"}"
+  cases = coverage.fetch("cases")
+  return [header, "cases: not run (#{cases.fetch("skipped")})"] if cases.key?("skipped")
+  return [header, "cases: failed (#{cases.fetch("error")})"] if cases.key?("error")
+
+  [header, *cases.fetch("formats").flat_map { |name, result| format_lines(name, result) }]
+end
+
+def format_lines(name, result)
+  counts = result.fetch("cases")
+  verdicts = counts.reject { |verdict, _| verdict == "total" }.map { |verdict, count| "#{count} #{verdict}" }
+  rules = result.fetch("rules").map do |rule|
+    tally = "#{rule.fetch("attempted")} attempted, #{rule.fetch("passed")} passed, #{rule.fetch("failed")} failed"
+    format(RULE_LINE, rule.fetch("id"), rule.fetch("state"), tally, rule.fetch("isolation") || "-",
+           rule.fetch("stages_asserted").join(" "))
+  end
+  ["#{name}: #{counts.fetch("total")} (#{verdicts.join(", ")})", *rules]
+end
+
+begin
+  report = lines(coverage)
+rescue KeyError, TypeError, NoMethodError, ArgumentError, EncodingError => e
+  fail_with("#{ARGV.first} is malformed: #{e.message}")
+end
+report.each { puts escaped(_1) }

@@ -23,19 +23,6 @@ class TestFatWitnessesFsimg < Minitest::Test
     skip "FSIMG_BIN names no fsimg binary" unless File.executable?(@fsimg)
   end
 
-  def test_every_witness_passes
-    witnesses = Fat::Witnesses.deterministic(REGISTRY)
-    refute_empty witnesses
-    with_run do |run|
-      failures = witnesses.filter_map do |witness|
-        result = run.call(witness, REGISTRY)
-        "#{result.id}: #{result.verdict}: #{result.detail}" unless result.verdict == "passed"
-      end
-
-      assert_empty failures
-    end
-  end
-
   # A rule whose status is mis-set fails its witness and names both
   # statuses.
   def test_misset_status_is_reported
@@ -74,15 +61,11 @@ class TestFatWitnessesFsimg < Minitest::Test
     Dir.mktmpdir do |root|
       results = File.join(root, "results")
       Dir.mkdir(results)
-      %w[cases trials].each { Dir.mkdir(File.join(results, _1)) }
-      runner, sandbox = FsimgSpec::Preflight.new(results:, build_directory: root, profile: PROFILE, fsimg: @fsimg,
-                                                 environment: ENV.to_h, sample: FsimgSpec::Fat::Bases.method(:preflight_sample)).call
-      cache = FsimgSpec::FixtureCache.new(File.join(root, "cache"))
+      setup = FsimgSpec::CasePhase.prepare(results:, profile: PROFILE, build_directory: root, environment: ENV.to_h)
       yield lambda { |witness, registry|
-        classified = Fat::Cases.new(registry:, cache:, ceilings: PROFILE.ceilings).call(witness)
+        classified = Fat::Cases.new(registry:, cache: setup.cache, ceilings: PROFILE.ceilings).call(witness)
         flunk classified.defect if classified.defect
-        FsimgSpec::CaseRun.call(classified.kase, model: classified.model, image: classified.image, runner:, sandbox:,
-                                                 cases_directory: File.join(results, "cases"))
+        FsimgSpec::CasePhase.result_of(classified, setup:, cases_directory: File.join(results, "cases"))
       }
     end
   end

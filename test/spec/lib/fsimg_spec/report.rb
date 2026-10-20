@@ -12,16 +12,34 @@ module FsimgSpec
   # coverage.json for tools and summary.txt for people, both in the profile's
   # results directory. minitest_passed is Minitest's own verdict, which is
   # false when a test failed or raised and when the run was interrupted.
-  class Report < Data.define(:profile, :seed, :minitest_passed, :tests)
+  # cases is how the case phase ended: a CasePhaseResult; CasesSkipped when
+  # the run named its test files or was interrupted; or CasesFailed when an
+  # exception outside every case, or a signal, ended the phase. A report
+  # made before the phase holds CasesSkipped.
+  class Report < Data.define(:profile, :seed, :minitest_passed, :tests, :cases)
+    include Checked
+
     # Bumped by any change to the meaning or shape of coverage.json.
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
+
+    def initialize(cases: CasesSkipped.new(reason: "not run"), **fields) = super
 
     # A run that executed no test proves nothing, so it does not pass.
-    def passed? = minitest_passed && tests.runs.positive?
+    def passed? = minitest_passed && tests.runs.positive? && !cases.is_a?(CasesFailed) && failures.empty?
 
+    # The ids of the failed cases, by format.
+    def failures = cases.is_a?(CasePhaseResult) ? cases.formats.transform_values(&:failures).reject { _2.empty? } : {}
+
+    # Both files are written beside their names before either is renamed
+    # into place, so a write that fails leaves no truncated or half-new
+    # report.
     def write(directory)
-      File.write(File.join(directory, "coverage.json"), "#{JSON.pretty_generate(coverage)}\n")
-      File.write(File.join(directory, "summary.txt"), summary)
+      paths = { "coverage.json" => "#{JSON.pretty_generate(coverage)}\n", "summary.txt" => summary }.map do |name, text|
+        path = File.join(directory, name)
+        File.write("#{path}.tmp", text)
+        path
+      end
+      paths.each { File.rename("#{_1}.tmp", _1) }
     end
 
     def coverage = {
@@ -30,13 +48,51 @@ module FsimgSpec
       ruby: RUBY_VERSION,
       seed:,
       passed: passed?,
-      tests: tests.to_h
+      tests: tests.to_h,
+      cases: case_coverage
     }
 
     def summary = <<~TEXT
       fsimg specification tests: profile #{profile.name}, Ruby #{RUBY_VERSION}, seed #{seed}
       tests: #{tests.runs} runs, #{tests.assertions} assertions, #{tests.failures} failures, #{tests.errors} errors, #{tests.skips} skips
+      #{case_lines.join("\n")}
       result: #{passed? ? "PASS" : "FAIL"}
     TEXT
+
+    private
+
+    # A format's case counts in summary.txt: the total, then the count of
+    # each verdict. bin/report, which loads none of the harness, prints
+    # them in the same form.
+    def case_counts(counts) = "#{counts.fetch(:total)} (#{counted(counts.except(:total))})"
+
+    # "COUNT LABEL" for each label and count.
+    def counted(pairs) = pairs.map { |label, count| "#{count} #{label}" }.join(", ")
+
+    def case_coverage
+      case cases
+      in CasesSkipped(reason:) then { skipped: reason }
+      in CasesFailed(reason:) then { error: reason }
+      in CasePhaseResult(sandbox:, formats:)
+        { sandbox:, formats: formats.transform_values { { cases: _1.cases, failures: _1.failures, rules: _1.rules } } }
+      end
+    end
+
+    # Why the phase did not run, or one line per format with its case
+    # counts and how many rules fsimg asserted, then each case that did not
+    # pass, whether fsimg failed it or the harness could not judge it.
+    def case_lines
+      case cases
+      in CasesSkipped(reason:) then ["cases: not run (#{reason})"]
+      in CasesFailed(reason:) then ["cases: failed (#{reason})"]
+      in CasePhaseResult(sandbox:, formats:)
+        formats.flat_map do |format, result|
+          states = result.rules.map { _1[:state] }.tally.sort
+          ["#{format} cases: #{case_counts(result.cases)}; sandbox #{sandbox}",
+           "#{format} rules: #{counted(states)}",
+           *result.failures.map { "not passed: #{format} #{_1}" }]
+        end
+      end
+    end
   end
 end
