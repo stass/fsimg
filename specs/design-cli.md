@@ -105,7 +105,12 @@ of a container, compressed image or stream, and two scanning descriptors
 leaving no room for those fails before the worker starts, naming the
 descriptor limit, and a deep source tree, which holds one more descriptor
 per directory level, can still reach the limit while it is scanned or
-copied. Work counts primitive metadata steps, adapter calls
+copied. The worker charges every descriptor it holds, each root and
+handed-over file included, from the moment it holds it, so that limit
+counts them all. An internal adopter takes the worker's charge over with
+the descriptor; a public library call that adopts a handed-over file
+charges it itself, so the worker returns its charge as it passes the file
+over. Work counts primitive metadata steps, adapter calls
 and every byte decompressed from a container chunk or a gzip member, not
 just payload bytes, so `work` and `seconds` bound decompression time.
 The deadline is also supervised by the coordinator. Unset work and time

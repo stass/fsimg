@@ -52,7 +52,11 @@ typedef struct worker_child {
 	uint64_t	 last_progress;
 	unsigned	 losses_sent;
 	/* Raw filesystem capabilities remain here until an owner adopts them.
-	 * Roots FSIMG_CHILD_ROOTS + roots_adopted onwards are still raw.
+	 * Roots FSIMG_CHILD_ROOTS + roots_adopted onwards are still raw. Each
+	 * is charged to ctx from prepare_context on. An adopter takes the
+	 * charge over with the descriptor, except a library call that charges
+	 * a handed-over file itself (release_to_charging_adopter); child_cleanup
+	 * drops the charges of those left here with the context.
 	 */
 	int		 raw_caps[CHILD_CAP_COUNT];
 	uint32_t	 roots_adopted;
@@ -90,7 +94,8 @@ static fsimg_status_t report_unselected(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t send_plan(const fsimg_plan_info_t *, fsimg_error_t *);
 static fsimg_status_t send_entry(const fsimg_entry_t *, fsimg_error_t *);
 static fsimg_status_t read_job(worker_child_t *, fsimg_error_t *);
-static int take_raw(worker_child_t *);
+static int release_to_charging_adopter(worker_child_t *,
+    worker_capability_slot_t);
 static fsimg_status_t create_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t list_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t cat_job(worker_child_t *, fsimg_error_t *);
@@ -235,6 +240,7 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
     fsimg_error_t *error)
 {
 	fsimg_status_t status;
+	uint64_t held;
 	int fd;
 
 	child->request.limits.scratch_directory_fd = -1;
@@ -247,21 +253,27 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 	status = fsimg_ctx_new(&child->request.limits, &child->ctx, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (caps->scratch != -1) {
+	/* Charge what raw_caps and the roots hold before any work can open
+	 * another descriptor, so every later charge, such as a scanned
+	 * directory's, counts them all.
+	 */
+	held = child->request.root_count;
+	for (unsigned i = 0; i < CHILD_CAP_COUNT; i++)
+		held += child->raw_caps[i] != -1 ? 1 : 0;
+	for (uint64_t i = 0; i < held; i++) {
 		status = fsimg_fd_reserve(child->ctx, error);
 		if (status != FSIMG_OK)
 			return (status);
+	}
+	if (caps->scratch != -1) {
 		fd = child->raw_caps[CHILD_SCRATCH_CAP];
 		child->raw_caps[CHILD_SCRATCH_CAP] = -1;
 		status = fsimg_ctx_adopt_scratch(child->ctx, fd, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	/* A stream stays a bare descriptor until the image reads it. */
+	/* A stream stays a bare descriptor, which the image borrows. */
 	if (caps->input != -1 && !caps->input_pipe) {
-		status = fsimg_fd_reserve(child->ctx, error);
-		if (status != FSIMG_OK)
-			return (status);
 		fd = child->raw_caps[CHILD_INPUT_CAP];
 		child->raw_caps[CHILD_INPUT_CAP] = -1;
 		status = fsimg_io_adopt_fd(child->ctx, fd, FSIMG_IO_READ, &child->input, error);
@@ -269,9 +281,6 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 			return (status);
 	}
 	if (child->raw_caps[CHILD_OUTPUT_CAP] != -1) {
-		status = fsimg_fd_reserve(child->ctx, error);
-		if (status != FSIMG_OK)
-			return (status);
 		child->output_root = child->raw_caps[CHILD_OUTPUT_CAP];
 		child->raw_caps[CHILD_OUTPUT_CAP] = -1;
 	}
@@ -773,8 +782,7 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 		options.layers.gpt_sector_bytes = 0;
 	}
 	/* The image adopts the spool on every outcome. */
-	options.spool_fd = child->raw_caps[CHILD_SPOOL_CAP];
-	child->raw_caps[CHILD_SPOOL_CAP] = -1;
+	options.spool_fd = release_to_charging_adopter(child, CHILD_SPOOL_CAP);
 	if (child->input != NULL)
 		status = fsimg_image_open(child->ctx, child->input, &options,
 		    &child->image, error);
@@ -934,10 +942,9 @@ adopt_roots(worker_child_t *child, fsimg_error_t *error)
 			path = contents ? next + strlen(next) + 1 : next;
 			continue;
 		}
-		status = fsimg_fd_reserve(child->ctx, error);
-		if (status != FSIMG_OK)
-			return (status);
-		/* Adoption consumes the descriptor on every outcome. */
+		/* Adoption consumes the descriptor and its charge on every
+		 * outcome.
+		 */
 		child->roots_adopted++;
 		status = fsimg_writer_adopt_tree(child->writer, fd, path, error);
 		if (status != FSIMG_OK)
@@ -952,8 +959,9 @@ adopt_roots(worker_child_t *child, fsimg_error_t *error)
 
 /* A manifest root is the raw manifest descriptor at fd and, when contents
  * is set, its content directory's at fd + 1: the descriptors the
- * coordinator counted for this root. Each is reserved and given to the
- * writer, which consumes them without duplicating either, so the
+ * coordinator counted for this root. Each, already charged by
+ * prepare_context, is given to the writer, which consumes them with their
+ * charges and without duplicating either, so the
  * sandbox's refusal of descriptor duplication never applies. A manifest
  * without a content directory is given -1, so the writer refuses every
  * entry that needs host bytes.
@@ -962,18 +970,6 @@ static fsimg_status_t
 adopt_manifest(worker_child_t *child, int fd, bool contents,
     fsimg_error_t *error)
 {
-	fsimg_status_t status;
-
-	status = fsimg_fd_reserve(child->ctx, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (contents) {
-		status = fsimg_fd_reserve(child->ctx, error);
-		if (status != FSIMG_OK) {
-			fsimg_fd_release(child->ctx, -1);
-			return (status);
-		}
-	}
 	/* Adoption consumes the descriptors on every outcome. */
 	child->roots_adopted += contents ? 2 : 1;
 	return (fsimg_writer_adopt_manifest(child->writer, fd,
@@ -1013,13 +1009,23 @@ add_synthesized_parents(worker_child_t *child, const char *path,
 	return (status);
 }
 
-/* Hand the raw intermediate, or -1 when the job has none, to its user. */
+/*
+ * Take a handed-over file, the raw intermediate or the spool, out of
+ * raw_caps for the library call that adopts it, or -1 when the job has
+ * none. Unlike the worker's other adopters, which take its charge over,
+ * these public entry points charge the file themselves before opening
+ * anything else, since an embedder has no charge to give them; so the
+ * worker returns its own charge here, and the file stays charged once.
+ */
 static int
-take_raw(worker_child_t *child)
+release_to_charging_adopter(worker_child_t *child,
+    worker_capability_slot_t slot)
 {
-	int fd = child->raw_caps[CHILD_RAW_CAP];
+	int fd = child->raw_caps[slot];
 
-	child->raw_caps[CHILD_RAW_CAP] = -1;
+	child->raw_caps[slot] = -1;
+	if (fd != -1)
+		fsimg_fd_release(child->ctx, -1);
 	return (fd);
 }
 
@@ -1087,16 +1093,13 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	status = send_plan(&info, error);
 	if (status != FSIMG_OK || child->request.kind == FSIMG_JOB_PLAN)
 		return (status);
-	/* The raw intermediate stays in raw_caps, which the worker's
-	 * cleanup closes, until fsimg_writer_output takes it over.
-	 */
 	if ((child->request.flags & FSIMG_JOB_STDOUT) != 0) {
 		/* The coordinator counts what reaches stdout; DONE reports
 		 * no staged image.
 		 */
 		fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
 		sink.stream_fd = FSIMG_CHILD_DATA;
-		sink.raw_fd = take_raw(child);
+		sink.raw_fd = release_to_charging_adopter(child, CHILD_RAW_CAP);
 		return (fsimg_writer_output(child->writer, &sink, error));
 	}
 	status = fsimg_fd_reserve(child->ctx, error);
@@ -1118,7 +1121,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	 */
 	fsimg_sink_init(&sink, FSIMG_SINK_IO);
 	sink.io = output;
-	sink.raw_fd = take_raw(child);
+	sink.raw_fd = release_to_charging_adopter(child, CHILD_RAW_CAP);
 	status = fsimg_writer_output(child->writer, &sink, error);
 	if (status == FSIMG_OK)
 		status = fsimg_io_get_size(output, &child->result.image_bytes,
@@ -1142,6 +1145,9 @@ child_cleanup(worker_child_t *child)
 	fsimg_dealloc(child->paths);
 	if (child->output_root != -1)
 		fsimg_fd_release(child->ctx, child->output_root);
+	/* The descriptors no owner adopted go with the context, which
+	 * holds their charges.
+	 */
 	fsimg_ctx_free(child->ctx);
 	for (unsigned i = 0; i < CHILD_CAP_COUNT; i++) {
 		if (child->raw_caps[i] != -1)

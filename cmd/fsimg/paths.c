@@ -455,7 +455,8 @@ operand_roots(const fsimg_cli_operand_t *operand)
  * read from it; copying, the staged image and a source file. A deeper tree
  * holds one more per directory level while it is scanned, and one more
  * while a file below the top level is copied, which the worker refuses
- * against the same limit.
+ * against the same limit: it charges every descriptor it holds, these
+ * included, from the start.
  */
 static uint64_t
 worker_descriptors(const fsimg_worker_request_t *request, unsigned roots)

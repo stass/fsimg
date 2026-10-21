@@ -1459,10 +1459,11 @@ def test_containers(executable, root):
 
 def test_compressed_and_streams(executable, root):
     """t, x, i and W read standard input through the coordinator's relay,
-    raw, DMG and gzip alike, and gzip files in place; a terminal on stdin
-    is refused; -z on a raw file is an absent signature; a raw stream that
-    also passes for gzip is ambiguous until -z or -F resolves it; -T -
-    leaves no spool for a gzip file; and a spool limit stops the decode."""
+    raw, DMG and gzip alike, and gzip files in place, the relayed stream
+    counting against fds; a terminal on stdin is refused; -z on a raw file
+    is an absent signature; a raw stream that also passes for gzip is
+    ambiguous until -z or -F resolves it; -T - leaves no spool for a gzip
+    file; and a spool limit stops the decode."""
     names = listing(executable, root, "gpt.img")
     disk = (root / "gpt.img").read_bytes()
     (root / "gpt.img.gz").write_bytes(gzip.compress(disk, mtime=0))
@@ -1470,6 +1471,13 @@ def test_compressed_and_streams(executable, root):
         with (root / image).open("rb") as stream:
             listed = invoke(executable, root, ["tf", "-"], stdin=stream)
         assert listed.stdout.decode().splitlines() == names, image
+    # The worker charges the relayed stream like any descriptor it holds.
+    with (root / "gpt.img").open("rb") as stream:
+        error = failed(invoke(executable, root, ["tf", "-", "--json", "-l", "fds=2"],
+                              expected=1, stdin=stream))
+    assert error["resource"] == "fds" and error["limit"] == "2", error
+    with (root / "gpt.img").open("rb") as stream:
+        invoke(executable, root, ["tf", "-", "-l", "fds=3"], stdin=stream)
     assert listing(executable, root, "gpt.img.gz") == names
     info = invoke(executable, root, ["i", "-f", "gpt.img.gz"]).stdout.decode()
     assert info.startswith("Stack:        fat12/gpt\nCompression:  gzip\n"), info
@@ -1753,6 +1761,28 @@ def test_compressed_create(executable, root):
     # Planning writes no raw intermediate and stages nothing.
     invoke(executable, root, ["c", "-n", "-z", "-F", "fat12/gpt/dmg", "-l", "fds=4",
                               "-C", "source", "nested"])
+
+    # The worker charges every descriptor it holds from the moment it holds
+    # it, so scanning nested empty directories counts the raw intermediate
+    # and every root not yet scanned: the compressed image needs one
+    # descriptor more than the plain one, whatever the operand order.
+    (root / "levels/deep/a/b/c").mkdir(parents=True)
+    (root / "levels/file").write_bytes(b"x")
+
+    def fewest(name, *arguments):
+        for count in range(4, 16):
+            result = invoke(executable, root, ["cf", name, "-F", "fat12", "-l",
+                                               f"fds={count}", *arguments], expected=None)
+            if result.returncode == 0:
+                (root / name).unlink()
+                return count
+            assert failed(result)["resource"] == "fds", result
+        raise AssertionError(arguments)
+
+    plain = fewest("levels.img", "--json", "-C", "levels", "deep")
+    assert fewest("levels.img.gz", "--json", "-z", "-C", "levels", "deep") == plain + 1
+    assert fewest("levels.img", "--json", "-C", "levels", "deep", "file") == plain + 1
+    assert fewest("levels.img", "--json", "-C", "levels", "file", "deep") == plain + 1
 
 
 def main():
