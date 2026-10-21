@@ -780,8 +780,8 @@ read-only review. Write a prompt covering correctness, design, security and
 information leaks, and the style guide's readability review, mark new files
 with `git add -N`, and run `aireview "${TMPDIR:-/tmp}/review.md" prompt.txt`
 from the checkout. `aireview`, installed from `~/aireview` and documented in
-its README, reviews a confined, read-only copy of the tracked files and of
-`git diff HEAD` with Codex `gpt-6.1-sol` at reasoning effort `xhigh`. It
+its README, reviews the checkout and `git diff HEAD` read-only, its reads
+confined to the checkout and the system's minimal paths, with Codex `gpt-6.1-sol` at reasoning effort `xhigh`. It
 switches to OpenCode `zai-coding-plan/glm-5.3 --variant max`, with a warning,
 only when Codex is out of quota or rate limited, and the first line of the
 review names the reviewer used. The diff holds every staged and unstaged
