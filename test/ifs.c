@@ -5079,20 +5079,25 @@ manifest_link(fsimg_reader_t *reader, const fsimg_entry_t *entry)
 }
 
 /*
- * Print the content of every file and symbolic link of the bare ImageFS
- * at path, for test/ifs-native.py to compare with a decoder's manifest:
- * "F\tPATH\tCKSUM\tSIZE" for a file, with its POSIX cksum, and
- * "L\tPATH\tTARGET" for a link, the target in hexadecimal, since it may
- * hold any byte. A delivered path is inside the name profile, so it holds
- * no tab or newline. The names travel through the pipe, never through a
- * command line; diagnostics give the status alone.
+ * Print the content of every file and symbolic link of the ImageFS in the
+ * image file at path, bare or in a container, which the image layers peel
+ * with a spool in the scratch directory, for test/ifs-native.py to compare
+ * with a decoder's manifest: "F\tPATH\tCKSUM\tSIZE" for a file, with its
+ * POSIX cksum, and "L\tPATH\tTARGET" for a link, the target in
+ * hexadecimal, since it may hold any byte. A delivered path is inside the
+ * name profile, so it holds no tab or newline. The names travel through
+ * the pipe, never through a command line; diagnostics give the status
+ * alone.
  */
 static int
 manifest(const char *path)
 {
+	fsimg_selector_t automatic = { .kind = FSIMG_SELECT_AUTOMATIC };
+	fsimg_image_options_t image_options;
 	fsimg_options_t options;
 	fsimg_ctx_t *ctx;
-	fsimg_io_t *io;
+	fsimg_image_t *image;
+	fsimg_io_t *io, *volume;
 	fsimg_reader_t *reader;
 	const fsimg_entry_t *entry;
 	fsimg_status_t status;
@@ -5113,8 +5118,19 @@ manifest(const char *path)
 	fd = open(path, O_RDONLY | O_CLOEXEC);
 	CHECK(fd != -1);
 	CHECK(fsimg_io_from_fd(ctx, fd, FSIMG_IO_READ, &io, NULL) == FSIMG_OK);
+	fsimg_image_options_init(&image_options);
+	image_options.spool_fd = openat(scratch, "spool", O_RDWR | O_CREAT |
+	    O_EXCL | O_CLOEXEC, 0600);
+	CHECK(image_options.spool_fd != -1);
+	CHECK(unlinkat(scratch, "spool", 0) == 0);
+	image = NULL;
+	volume = NULL;
 	reader = NULL;
-	status = fsimg_reader_open(ctx, io, NULL, &reader, NULL);
+	status = fsimg_image_open(ctx, io, &image_options, &image, NULL);
+	if (status == FSIMG_OK)
+		status = fsimg_image_select(image, &automatic, &volume, NULL);
+	if (status == FSIMG_OK)
+		status = fsimg_reader_open(ctx, volume, NULL, &reader, NULL);
 	while (status == FSIMG_OK) {
 		status = fsimg_reader_next(reader, &entry, NULL);
 		if (status != FSIMG_OK)
@@ -5129,6 +5145,8 @@ manifest(const char *path)
 	if (status != FSIMG_OK)
 		fprintf(stderr, "manifest: status %d\n", status);
 	fsimg_reader_free(reader);
+	fsimg_io_free(volume);
+	fsimg_image_free(image);
 	fsimg_io_free(io);
 	fsimg_ctx_free(ctx);
 	CHECK(close(scratch) == 0);

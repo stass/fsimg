@@ -15,11 +15,17 @@
 #                     as $DUMPIFS IMAGE
 #   QNXPROBE          a qnxprobe command at a pinned revision, run as
 #                     $QNXPROBE IMAGE
+#   FSIMG_HBCIFS_IMAGE    the hbcifs container PCM3_IFS2.ifs of the PCM 3.1
+#   FSIMG_HBCIFS_DECODED  update disc, and its payload decoded by the
+#                     out-of-tree liblzo2 oracle (docs/ifs-research.md)
 # The captures are compared with test-ifs's model by test-ifs --native and,
 # through the command, with the research decoder ifsdump.py by
 # test/ifs-native.py, which first checks itself on two generated images.
 # dumpifs and qnxprobe, when given, must accept every bare image fsimg
-# verifies. Member names are image data: only counts and image file names
+# verifies. The hbcifs container must decode to the oracle's bytes, list and
+# extract as that decode's manifest says, verify with its two unidentified
+# fields named, and fail at a spool limit below its decoded length. Member
+# names are image data: only counts and image file names
 # are printed, and fsimg's and the oracles' diagnostics, which can quote a
 # name, are discarded. Each unavailable check is reported as a skip.
 set -eu
@@ -112,6 +118,20 @@ for image in "$fixture/omitted.ifs" "$fixture/shadowed.ifs"; do
     fsimg_verify "$image" 0 "$length" "$fixture/verify" ||
         fail "the generated $(basename "$image") does not verify"
 done
+
+# A generated hbcifs container and the ImageFS it decodes to: i reports the
+# stack, the codec and the header fields, and W -d passes, naming the two
+# fields no rule checks and calling the verification incomplete.
+./test-hbcifs --seed-hbcifs "$fixture/seed.hbcifs" "$fixture/seed.imagefs"
+./fsimg i --json -f "$fixture/seed.hbcifs" > "$fixture/info" 2> /dev/null ||
+    fail "fsimg i failed on the generated hbcifs container"
+grep -q '"stack":"ifs/hbcifs".*"container_codecs":"lzo1x".*"container_details":{"decoded_bytes":"[0-9]*","payload_bytes"' \
+    "$fixture/info" || fail "the generated container is not read as ifs/hbcifs"
+./fsimg W --json -d -f "$fixture/seed.hbcifs" > "$fixture/verify" \
+    2> /dev/null || fail "the generated hbcifs container does not verify"
+grep -q '"type":"verify","complete":false,.*"container":"hbcifs","unverified":"0x14,0x1c"' \
+    "$fixture/verify" ||
+    fail "the generated container's verification does not name its unverified fields"
 if test -n "$python"; then
     result=0
     "$python" -I "$native_tool" compare ./fsimg ./test-ifs "$ifsdump" \
@@ -125,6 +145,18 @@ if test -n "$python"; then
     expect_line '^compare: 2 images, 0 refused,'
     expect_line '^omitted.ifs: .* 4 implicit directories, 0 shadowed records, 6 omitted subtrees$'
     expect_line '^shadowed.ifs: .* 2 implicit directories, 5 shadowed records, 0 omitted subtrees$'
+    # The container comparison on the generated hbcifs container and the
+    # ImageFS it decodes to, and, as a seeded failure, against another
+    # image's decode.
+    "$python" -I "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
+        "$fixture/seed.hbcifs" "$fixture/seed.imagefs" > "$fixture/compare" ||
+        fail "fsimg differs from ifsdump.py on the generated container"
+    cat "$fixture/compare"
+    expect_line '^seed.hbcifs: 2 entries, 1 files. bytes, 1 link targets, .*; extracted 1 files and 0 directories$'
+    if "$python" -I "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
+        "$fixture/seed.hbcifs" "$fixture/omitted.ifs" > /dev/null; then
+        fail "the container comparison accepts another image's decode"
+    fi
     ran=1
 else
     echo 'SKIP: the ifsdump.py comparison requires the Python 3 development tool'
@@ -160,6 +192,53 @@ else
 fi
 test -n "$dumpifs" || echo 'SKIP: DUMPIFS is not set (lclevy/dumpifs comparison)'
 test -n "$probe" || echo 'SKIP: QNXPROBE is not set (qnxprobe comparison)'
+
+# The hbcifs container, read through its layers; only counts and the
+# image's file name are printed.
+hbcifs=${FSIMG_HBCIFS_IMAGE:-}
+hbcifs_decoded=${FSIMG_HBCIFS_DECODED:-}
+if test -z "$hbcifs" || test -z "$hbcifs_decoded"; then
+    echo 'SKIP: FSIMG_HBCIFS_IMAGE and FSIMG_HBCIFS_DECODED are not set' \
+        '(PCM3_IFS2.ifs and its oracle decode)'
+elif test -z "$python"; then
+    echo 'SKIP: the hbcifs comparison requires the Python 3 development tool'
+else
+    name=$(basename "$hbcifs")
+    ./fsimg i --json -f "$hbcifs" > "$fixture/info" 2> /dev/null ||
+        fail "fsimg i failed on $name"
+    grep -q '"stack":"ifs/hbcifs".*"container_codecs":"lzo1x"' \
+        "$fixture/info" || fail "$name is not read as ifs/hbcifs"
+    disk=$(./test-hbcifs --cksum "$hbcifs") ||
+        fail "the library cannot decode $name"
+    oracle=$(cksum < "$hbcifs_decoded" | awk '{ print $1, $2 }')
+    test "$disk" = "$oracle" ||
+        fail "the disk decoded from $name differs from the oracle's decode"
+    "$python" -I "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
+        "$hbcifs" "$hbcifs_decoded" ||
+        fail "fsimg differs from ifsdump.py on $name"
+    ./fsimg W --json -d -f "$hbcifs" > "$fixture/verify" 2> /dev/null ||
+        fail "$name does not verify"
+    grep -q '"type":"verify","complete":false,' "$fixture/verify" &&
+        grep -q '"container":"hbcifs","unverified":"0x14,0x1c"' \
+        "$fixture/verify" ||
+        fail "the verification of $name does not name its unverified fields"
+    status=0
+    ./fsimg t --json -l spool=1M -f "$hbcifs" > "$fixture/limit" \
+        2> /dev/null || status=$?
+    test "$status" = 1 &&
+        grep -q '"type":"error".*"resource":"spool"' "$fixture/limit" ||
+        fail "$name is read under a 1 MiB spool limit"
+    # The step that crosses the limit fails, one 64 KiB window past it.
+    observed=$(sed -n 's/.*"type":"error".*"observed":"\([0-9]*\)".*/\1/p' \
+        "$fixture/limit")
+    test -n "$observed" && test "$observed" -gt 1048576 &&
+        test "$observed" -le $((1048576 + 65536)) ||
+        fail "$name does not fail at the step crossing the spool limit"
+    echo "$name: decodes to the oracle's $(echo "$disk" | cut -d ' ' -f 2)" \
+        "bytes; verified with fields 0x14 and 0x1c unverified; refused" \
+        "under a 1 MiB spool limit"
+    ran=1
+fi
 
 # The licensed images, read in place through info and verification with
 # payload read-through alone, which reads every file; only counts and the

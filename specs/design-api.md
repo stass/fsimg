@@ -534,8 +534,8 @@ accepted only for a layer the forced stack names, and `spool_fd`: the
 read/write regular file the caller has unlinked, adopted on every outcome
 after the same check as `raw_fd` (regular, size zero, link count zero,
 read/write, else `FSIMG_EINVAL`), or `-1`. `open()` uses it only when the
-input turns out to be compressed and
-otherwise closes it; `open_stream()` requires it and reads `stream_fd`, a
+input turns out to be compressed or its container decodes into it, as
+`hbcifs` does, and otherwise closes it; `open_stream()` requires it and reads `stream_fd`, a
 pipe or other non-seekable descriptor borrowed for the call, to EOF into it,
 deciding compression from the first block. Without a spool, stream and
 compressed input fail as a spool limit error with limit zero. The options'
@@ -549,9 +549,11 @@ The image information record exposes the canonical detected stack text, the
 compression name, the length of the file the layers were peeled from (the
 input, or the spool holding a stream or a decoded gzip; a plan reports its
 planned disk), disk length, the container's name, chunk count, the
-encodings its chunks use and its identifier (the DMG segment ID or the VHD
-unique ID), the scheme's sector size, disk identifier and partition count,
-and the layer validation scope. `next_partition()` iterates the scheme's slots in order
+encodings its chunks use, its identifier (the DMG segment ID or the VHD
+unique ID) and its header fields as up to sixteen named details in the
+volume details' form (the `hbcifs` lengths and unidentified words), the
+scheme's sector size, disk identifier and partition count, and the layer
+validation scope. `next_partition()` iterates the scheme's slots in order
 from 1, returning DONE at the end: slot number, used flag, disk offset and
 length, type as table name and raw value, name as UTF-8 (GPT), unique
 identifier, active flag (MBR), and the bounded probe's claim for the
@@ -572,7 +574,10 @@ checks every layer with the [layer verification scope](design-layers.md#verifica
 `FSIMG_VERIFY_PAYLOAD` adds the read-through checks. Its report names the
 container and the scheme it checked and the partitions whose bounds it
 checked, with payload scope when read-through decoded the container's
-chunks, and the compression whose member checks passed at open. It does not require an untouched image and does not consume
+chunks, and the compression whose member checks passed at open. A
+container field no evidence gives a rule to check, such as `hbcifs`'s
+`0x14` and `0x1c`, is named in the report's `unverified` list, and the
+report is then not complete although `verify()` succeeds. It does not require an untouched image and does not consume
 anything.
 
 ```c

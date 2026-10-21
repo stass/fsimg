@@ -130,17 +130,30 @@ request_key(const fsimg_disk_plan_t *plan,
 }
 
 /* The stack's container and its resolved settings; none leaves the disk
- * unencoded, with a granularity of one byte, copied in 1 MiB chunks.
+ * unencoded, with a granularity of one byte, copied in 1 MiB chunks. A
+ * container that carries a filesystem holds nothing else, and one without
+ * a writer, such as hbcifs, is refused naming it.
  */
 static fsimg_status_t
 resolve_container(fsimg_disk_plan_t *plan, const fsimg_stack_t *stack,
     const fsimg_layer_options_t *layers, fsimg_error_t *error)
 {
+	fsimg_status_t status;
+
 	plan->container_settings.granularity = 1;
 	plan->container_settings.chunk_bytes = FSIMG_TRANSCODE_CHUNK_BYTES;
 	plan->container = fsimg_stack_layer(stack, FSIMG_LAYER_CONTAINER);
 	if (plan->container == NULL)
 		return (FSIMG_OK);
+	status = fsimg_stack_carried(stack, plan->container, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (plan->container->container->plan == NULL) {
+		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
+		    "the container is read only");
+		fsimg_error_path(error, plan->container->name);
+		return (FSIMG_EUNSUPPORTED);
+	}
 	return (plan->container->container->plan(layers, plan->flags,
 	    plan->epoch, &plan->container_settings, error));
 }

@@ -59,7 +59,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/layers/plan.c lib/layers/output.c \
 	lib/layers/chunks.c lib/layers/plist.c lib/layers/dmg.c \
 	lib/layers/vhd.c lib/layers/simg.c lib/layers/transcode.c \
-	lib/layers/spool.c lib/layers/gzip.c \
+	lib/layers/spool.c lib/layers/gzip.c lib/layers/hbcifs.c \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
@@ -131,7 +131,7 @@ test_programs = test-core test-private test-io test-meta test-meta-sort test-uni
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
 	test-containers test-compression test-gzip-write test-holes header-c \
-	header-cxx test-codec
+	header-cxx test-codec test-hbcifs
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
@@ -176,6 +176,8 @@ test_containers_SOURCES = test/containers.c test/test.h
 test_containers_LDADD = libfsimg-core.la
 test_compression_SOURCES = test/compression.c test/test.h
 test_compression_LDADD = libfsimg-core.la
+test_hbcifs_SOURCES = test/hbcifs.c test/test.h
+test_hbcifs_LDADD = libfsimg-core.la
 test_gzip_write_SOURCES = test/gzip-write.c test/test.h
 test_gzip_write_LDADD = libfsimg-core.la
 test_holes_SOURCES = test/holes.c test/test.h
@@ -354,12 +356,13 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
 	MallocSpaceEfficient=1 ./test-ifs --scale
 check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-ifs test-codec \
-	    test-protocol test-layers test-containers test-compression test-mtree \
-	    test/spec.sh
+	    test-protocol test-layers test-containers test-compression test-hbcifs \
+	    test-mtree test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-ifs \
-	    test-codec test-protocol test-layers test-containers test-compression test-mtree \
+	    test-codec test-protocol test-layers test-containers test-compression \
+	    test-hbcifs test-mtree \
 	    test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh

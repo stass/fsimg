@@ -163,8 +163,17 @@ below a link at boot the same way); `fsimg i` counts both kinds as
 shadowed. A path with `.`, `..` or empty components is unsupported.
 `fsimg W` checks the image's additive checksum, its length against the
 image size, and that each boot and script reference names exactly one
-file. A compressed or boot image's startup code and compression are not
-read, and ImageFS images cannot be created.
+file. A QNX boot image's startup code and compression are not read, and
+ImageFS images cannot be created.
+
+An ImageFS inside a Harman-Becker `hbcifs` container, such as `PCM3_IFS2.ifs`
+on the PCM 3.1 update disc, is read through the container: its header is
+checked and its LZO1X payload decoded into the spool, so it needs scratch
+(not `-T -`) and a spool limit above the decoded length, and it is refused
+gzip-compressed or on standard input. `fsimg i` prints the stack as
+`ifs/hbcifs` with the header's fields; `fsimg W` names the two fields no
+known rule checks, 0x14 and 0x1c, and reports the verification as
+incomplete.
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,

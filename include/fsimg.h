@@ -522,8 +522,9 @@ struct fsimg_layer_options {
  * fsimg_image_options_init() did not set are refused before spool_fd is
  * examined, so zero-filled options never hand over descriptor 0. Once the
  * options' size and version are valid spool_fd is adopted on every
- * outcome; open() keeps it only when the input is compressed and
- * otherwise closes it, and open_stream() requires it.
+ * outcome; open() keeps it only when the input is compressed or its
+ * container decodes into it, as hbcifs does, and otherwise closes it, and
+ * open_stream() requires it.
  */
 typedef struct fsimg_image_options {
 	size_t		 size;
@@ -535,6 +536,17 @@ typedef struct fsimg_image_options {
 	int		 spool_fd;
 	uint64_t	 reserved[4];
 } fsimg_image_options_t;
+
+/* One named value a driver or a container reports, such as a count
+ * collected while opening or a header field: an ASCII name of at most 23
+ * bytes and its terminator.
+ */
+typedef struct fsimg_volume_detail {
+	char		 name[24];
+	uint64_t	 value;
+} fsimg_volume_detail_t;
+
+#define FSIMG_IMAGE_DETAILS_MAX 16u
 
 /* stack is the canonical text of the layers found: the container and the
  * scheme when detected or forced, and the filesystem when forced or once
@@ -550,7 +562,10 @@ typedef struct fsimg_image_options {
  * disk_bytes is the disk the container yields, or file_bytes without one.
  * GUIDs are in textual (RFC 4122) byte order.
  * selected is the slot of the last partition select() returned, zero for
- * none. The scope is the validation the tables received.
+ * none. The scope is the validation the tables received. details holds the
+ * container's header fields in the order its profile documents, such as
+ * hbcifs's decoded and payload lengths and its unidentified words;
+ * detail_count of them are filled and the rest are zero.
  */
 typedef struct fsimg_image_info {
 	char		 stack[64];
@@ -568,6 +583,8 @@ typedef struct fsimg_image_info {
 	uint32_t	 selected;
 	uint32_t	 mbr_disk_id;
 	fsimg_validation_scope_t scope;
+	uint32_t	 detail_count;
+	fsimg_volume_detail_t details[FSIMG_IMAGE_DETAILS_MAX];
 } fsimg_image_info_t;
 
 /* What the filesystem probes say about a partition's first bytes. */
@@ -626,12 +643,16 @@ typedef struct fsimg_selector {
  * were checked. The scope is FSIMG_VALIDATION_PAYLOAD when a container's
  * chunks were decoded and checked under FSIMG_VERIFY_PAYLOAD. The
  * filesystem of a selected partition is verified separately, and no other
- * partition's contents.
+ * partition's contents. unverified names, comma-separated, the container's
+ * fields that no evidence gives a rule to check, such as "0x14,0x1c" for
+ * hbcifs; complete is false exactly when it is not empty, every other
+ * check having run and passed.
  */
 typedef struct fsimg_layer_report {
 	char		 compression[16];	/* Members checked at spool time */
 	char		 container[16];
 	char		 scheme[16];
+	char		 unverified[32];
 	uint32_t	 partitions;
 	fsimg_validation_scope_t scope;
 	bool		 complete;
@@ -870,14 +891,6 @@ typedef struct fsimg_read_options {
 	uint32_t	 fat_codepage;
 	uint64_t	 reserved[4];
 } fsimg_read_options_t;
-
-/* One named value a driver reports, such as a count collected while opening:
- * an ASCII name of at most 23 bytes and its terminator.
- */
-typedef struct fsimg_volume_detail {
-	char		 name[24];
-	uint64_t	 value;
-} fsimg_volume_detail_t;
 
 typedef struct fsimg_volume_info {
 	uint32_t	 valid;

@@ -475,7 +475,11 @@ precision; `-v` with `--json` affects only stderr.
 `W` checks the layers around the volume, then the supported profile's
 complete structure; `-d` additionally reads initialized payload bytes,
 decoding every container chunk for the container's checksums, and logical
-zero tails need no backing read.
+zero tails need no backing read. A container field with no known rule,
+such as `hbcifs`'s `0x14` and `0x1c`, is named beside the container in
+the result, and the `--json` verify record is then `"complete":false` with
+those fields in `unverified`; every other check passed, so the exit status
+is that of a passing verification.
 Verification reports unsupported critical features, corruption, incomplete
 work and resource limits distinctly, and never repairs an image. One human
 result is emitted only after successful worker exit and finalization,
@@ -493,7 +497,9 @@ syntax error reports the combination.
 `i` reports, in order, the detected or forced stack in `-F` syntax with the
 detected compression; when the stack has a container, the container with
 the length of the disk it holds, its chunk count, the encodings its chunks
-use and its identifier; when the stack has a scheme, a partition-table summary
+use, its identifier and its header fields, one `name: value` line each with
+the value in hexadecimal and a `container_details` object in the `--json`
+stack record; when the stack has a scheme, a partition-table summary
 with each partition's index, type, name, offset, length and whether it holds
 a supported filesystem, marking the selected one; then the volume: format and
 profile, volume and allocation geometry, label, mountpoint and volume UUID

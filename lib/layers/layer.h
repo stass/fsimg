@@ -317,20 +317,27 @@ fsimg_layer_put_be64(unsigned char *p, uint64_t value)
 	fsimg_layer_put_be32(p + 4, (uint32_t)value);
 }
 
+typedef struct fsimg_spool fsimg_spool_t;
+
 /* What a container reads: the file, its length, and the session that
- * charges its reads and decoding.
+ * charges its reads and decoding. spool is the image's free spool, given
+ * only to the open of a spooled container and NULL for every other call;
+ * that open decodes into it and seals it for its disk, and the image
+ * keeps the spool until it is freed, after the disk that reads it.
  */
 typedef struct fsimg_container_input {
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*file;
 	fsimg_session_t	*session;
+	fsimg_spool_t	*spool;
 	uint64_t	 file_bytes;
 } fsimg_container_input_t;
 
 /* An opened container: the disk it yields, owned and freed with
  * fsimg_io_free, and what the image reports of it. guid is the VHD unique
  * identifier or the DMG segment ID in textual byte order, all zero for a
- * container without one. kinds is a summary's kind bits.
+ * container without one. kinds is a summary's kind bits. details are the
+ * header fields info reports, in the order the profile documents.
  */
 typedef struct fsimg_container {
 	fsimg_io_t	*disk;
@@ -338,6 +345,8 @@ typedef struct fsimg_container {
 	uint64_t	 disk_bytes;
 	uint64_t	 chunks;
 	unsigned	 kinds;
+	uint32_t	 detail_count;
+	fsimg_volume_detail_t details[FSIMG_IMAGE_DETAILS_MAX];
 } fsimg_container_t;
 
 /*
@@ -429,12 +438,24 @@ typedef struct fsimg_encoder_ops {
  * the chunk encodings it reads, for the capability record; zlib is true
  * when it depends on zlib.
  *
+ * Three profile facts (specs/design-layers.md#layer-contract). spooled
+ * says the payload is one unframed stream that open decodes into the
+ * spool, which the input then carries; such a container's disk is that
+ * one stream in codecs. carries names the filesystem a loader's package
+ * holds, NULL for a disk-image format: a stack that puts a scheme or
+ * another filesystem inside it is FSIMG_EINVAL naming the container, and
+ * the step after it probes for that filesystem alone. unverified names,
+ * comma-separated, the fields no evidence gives a rule to check, NULL for
+ * none; verification reports them and is then incomplete.
+ *
  * The write side. plan validates the container's layer settings and
  * resolves them, its identifier under the identifier rule, given the
  * FSIMG_WRITE_* mode and the epoch; a failure is FSIMG_EINVAL naming the
  * key. bound states the most bytes the encoding of a disk of the given
  * length can take, and refuses with FSIMG_EUNSUPPORTED, naming the field,
- * a disk the format cannot describe. encoder writes the container.
+ * a disk the format cannot describe. encoder writes the container. The
+ * three come together: a read-only container has none, so the disk plan
+ * refuses it and its capability lacks FSIMG_CAP_WRITE.
  */
 #define FSIMG_CONTAINER_TAIL_BYTES	512u
 typedef struct fsimg_container_ops {
@@ -452,8 +473,11 @@ typedef struct fsimg_container_ops {
 			    uint64_t *, fsimg_error_t *);
 	const fsimg_encoder_ops_t *encoder;
 	const char	*codecs;
+	const char	*carries;
+	const char	*unverified;
 	bool		 payload_checks;
 	bool		 zlib;
+	bool		 spooled;
 } fsimg_container_ops_t;
 
 /* The CRC32 of crc's bytes followed by length zero bytes, computed in time
@@ -473,8 +497,6 @@ unsigned long fsimg_crc32_zeros(unsigned long, uint64_t);
  * blocks and yields a read-only view of the bytes appended, which the
  * spool must outlive. free releases the reservation and the file.
  */
-typedef struct fsimg_spool fsimg_spool_t;
-
 fsimg_status_t fsimg_spool_adopt(fsimg_ctx_t *, int, fsimg_spool_t **,
     fsimg_error_t *);
 fsimg_status_t fsimg_spool_append(fsimg_spool_t *, const unsigned char *,
@@ -589,15 +611,25 @@ extern const fsimg_scheme_ops_t fsimg_mbr_scheme;
 extern const fsimg_container_ops_t fsimg_dmg_container;
 extern const fsimg_container_ops_t fsimg_vhd_container;
 extern const fsimg_container_ops_t fsimg_simg_container;
+extern const fsimg_container_ops_t fsimg_hbcifs_container;
 extern const fsimg_compression_ops_t fsimg_gzip_compression;
 
 /* The registry, in reporting order; NULL past the end. */
 const fsimg_layer_t *fsimg_layer_at(size_t);
 const fsimg_layer_t *fsimg_layer_find(const char *);
 /* Check a caller's stack value: states in range, names terminated, each
- * named slot holding a layer of its kind or a filesystem name.
+ * named slot holding a layer of its kind or a filesystem name, and a
+ * container that carries a filesystem holding nothing else.
  */
 fsimg_status_t fsimg_stack_validate(const fsimg_stack_t *, fsimg_error_t *);
+/* A stack against a container that carries a filesystem: FSIMG_EINVAL
+ * naming the container when the stack names a scheme or a filesystem
+ * other than the carried one, and FSIMG_OK for any other container or
+ * none. fsimg_stack_validate() applies it to the container the stack
+ * names; reading applies it again to a container it detects.
+ */
+fsimg_status_t fsimg_stack_carried(const fsimg_stack_t *,
+    const fsimg_layer_t *, fsimg_error_t *);
 /* The layer named in a stack slot, NULL when the slot names none. */
 const fsimg_layer_t *fsimg_stack_layer(const fsimg_stack_t *,
     fsimg_layer_kind_t);

@@ -980,6 +980,45 @@ test_image_records(void)
 	memset(raw + FSIMG_WIRE_IMAGE_STACK, 'x', FSIMG_WIRE_IMAGE_STACK_BYTES);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 
+	/* Only a container has header details, and only a verified one
+	 * unverified fields, each a word of printable ASCII.
+	 */
+	bzero(&frame, sizeof(frame));
+	frame.type = FSIMG_FRAME_IMAGE;
+	frame.length = FSIMG_WIRE_IMAGE_BYTES;
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 8388608);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 4194368);
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "ifs/hbcifs");
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "hbcifs");
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_CODECS, "lzo1x");
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHUNKS, 1);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 1);
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_DETAILS, "field_0x14");
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_UNVERIFIED, "0x14,0x1c");
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_VERIFIED);
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	raw[FSIMG_WIRE_IMAGE_UNVERIFIED + 4] = ' ';
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	raw[FSIMG_WIRE_IMAGE_UNVERIFIED + 4] = ',';
+	raw[FSIMG_WIRE_IMAGE_DETAILS + FSIMG_WIRE_INFO_DETAIL_BYTES] = 'x';
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	raw[FSIMG_WIRE_IMAGE_DETAILS + FSIMG_WIRE_INFO_DETAIL_BYTES] = '\0';
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 17);
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 1);
+	bzero(raw + FSIMG_WIRE_IMAGE_CONTAINER, 16);
+	bzero(raw + FSIMG_WIRE_IMAGE_CODECS, FSIMG_WIRE_IMAGE_CODECS_BYTES);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHUNKS, 0);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	bzero(raw + FSIMG_WIRE_IMAGE_UNVERIFIED, FSIMG_WIRE_IMAGE_UNVERIFIED_BYTES);
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 0);
+	bzero(raw + FSIMG_WIRE_IMAGE_DETAILS, FSIMG_WIRE_INFO_DETAIL_BYTES);
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+
 	bzero(&partition, sizeof(partition));
 	partition.index = 2;
 	partition.offset = 1048576;

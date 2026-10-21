@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026, fsimg contributors
-"""Native ImageFS evidence for test/ifs-integration.sh, in two commands.
+"""Native ImageFS evidence for test/ifs-integration.sh, in three commands.
 
 ifs-native.py compare FSIMG TEST_IFS IFSDUMP IMAGE...
 
@@ -44,6 +44,21 @@ ifs-native.py compare FSIMG TEST_IFS IFSDUMP IMAGE...
   target holding a tab or newline byte makes an image's comparison fail
   as a decoder-manifest mismatch.
 
+ifs-native.py container FSIMG TEST_IFS IFSDUMP IMAGE DECODED
+
+  Compare fsimg's view of the ImageFS inside a container file, such as an
+  hbcifs image, with the decoder's manifest of DECODED, an oracle's decode
+  of the container's payload: the listing and content comparison above,
+  with fsimg and test-ifs reading IMAGE through its layers, and then an
+  extraction. fsimg extracts IMAGE into a private temporary directory
+  with -k, which skips the links safe extraction does not create and
+  would also omit a name outside the extraction profile. Every placed
+  directory and file must be extracted, so an omission is a mismatch,
+  each file with the cksum and size of its last record, and nothing
+  else. cksum(1) reads each extracted file on its standard input, so no
+  name reaches a command line. Exit status 0 means both comparisons
+  agreed.
+
 ifs-native.py body IMAGE
 
   Print where the ImageFS of an image file lies, as "OFFSET LENGTH PATH",
@@ -62,9 +77,12 @@ category and count, and an unexpected failure by its exception type alone.
 import collections
 import json
 import os
+import shutil
+import stat
 import struct
 import subprocess
 import sys
+import tempfile
 
 KINDS = {"file": "file", "directory": "dir", "symlink": "link", "fifo": "fifo"}
 IMPLICIT_DIRECTORY = ("directory", 0o755, 0, 0, 0)
@@ -97,10 +115,10 @@ class ImageFailure(Exception):
     category, never output bytes."""
 
 
-def run(arguments, category):
+def run(arguments, category, stdin=None):
     """The command's stdout; raises ImageFailure(category) when it fails.
     Its stderr is dropped: a diagnostic may quote a member name."""
-    result = subprocess.run(arguments, stdout=subprocess.PIPE,
+    result = subprocess.run(arguments, stdin=stdin, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
     if result.returncode != 0:
         raise ImageFailure(category)
@@ -265,12 +283,14 @@ def compare_entry(entry, expected, content, counts, mismatches):
             mismatches["link target"] += 1
 
 
-def compare(fsimg, test_ifs, ifsdump, image):
-    """Compare one image; returns (counts, mismatches) of category to
-    count. Raises Refused or ImageFailure as fsimg_view does."""
+def compare(fsimg, test_ifs, ifsdump, image, decoded=None):
+    """Compare one image, whose ImageFS the decoder reads from decoded
+    when it is in a container; returns (counts, mismatches) of category to
+    count and the expected Tree. Raises Refused or ImageFailure as
+    fsimg_view does."""
     details, entries = fsimg_view(fsimg, image)
     content = library_content(test_ifs, image)
-    tree = expected_tree(oracle_records(ifsdump, image))
+    tree = expected_tree(oracle_records(ifsdump, decoded or image))
     counts = collections.Counter(implicit=len(tree.parents),
                                  shadowed=tree.shadowed,
                                  omitted=tree.omitted, entries=len(entries))
@@ -289,6 +309,74 @@ def compare(fsimg, test_ifs, ifsdump, image):
     for name, detail in DETAILS.items():
         if counts[name] != details.get(detail):
             mismatches[f"{name} count"] += 1
+    return counts, +mismatches, tree
+
+
+def file_cksum(path):
+    """The POSIX cksum and size of a file, from cksum(1) reading it on its
+    standard input."""
+    category = "extracted content"
+    with open(path, "rb") as stream:
+        parts = run(["cksum"], category, stdin=stream).split()
+    if len(parts) != 2:
+        raise ImageFailure(category)
+    return number(parts[0], category), number(parts[1], category)
+
+
+def extracted_entries(root):
+    """What lies under root by relative path, following no link: ("dir",),
+    ("file", cksum, size) or ("other",)."""
+    found = {}
+    for directory, subdirectories, files in os.walk(os.fsencode(root)):
+        for name in subdirectories + files:
+            path = os.path.join(directory, name)
+            mode = os.lstat(path).st_mode
+            relative = os.path.relpath(path, os.fsencode(root))
+            if stat.S_ISDIR(mode):
+                found[relative] = ("dir",)
+            elif stat.S_ISREG(mode):
+                found[relative] = ("file",) + file_cksum(path)
+            else:
+                found[relative] = ("other",)
+    return found
+
+
+def expected_extraction(tree):
+    """The directories and files a safe extraction of the tree creates."""
+    expected = {}
+    for path in tree.listed:
+        record = tree.last.get(path)
+        if record is None or record.kind == "dir":
+            expected[path] = ("dir",)
+        elif record.kind == "file":
+            crc, _, size = record.value.partition(b" ")
+            expected[path] = ("file", number(crc, "decoder manifest"),
+                              number(size, "decoder manifest"))
+    return expected
+
+
+def compare_extraction(fsimg, image, tree):
+    """Extract image with -k, which skips links and would omit a name
+    outside the profile, and compare what lands with the tree; returns
+    (counts, mismatches)."""
+    root = tempfile.mkdtemp(prefix="fsimg-ifs-extract-")
+    try:
+        run([fsimg, "x", "-k", "-E", "-C", root, "-f", image],
+            "fsimg extraction")
+        found = extracted_entries(root)
+    finally:
+        shutil.rmtree(root)
+    expected = expected_extraction(tree)
+    mismatches = collections.Counter()
+    mismatches["extracted entries the table does not place"] = len(
+        found.keys() - expected.keys())
+    mismatches["placed entries fsimg does not extract"] = len(
+        expected.keys() - found.keys())
+    mismatches["extracted kind, size or bytes"] = sum(
+        found[path] != expected[path] for path in found.keys() & expected.keys())
+    counts = collections.Counter(
+        extracted_files=sum(entry[0] == "file" for entry in found.values()),
+        extracted_directories=sum(entry[0] == "dir" for entry in found.values()))
     return counts, +mismatches
 
 
@@ -303,7 +391,7 @@ def compare_images(fsimg, test_ifs, ifsdump, images):
                 skipped += 1
                 continue
         try:
-            counts, mismatches = compare(fsimg, test_ifs, ifsdump, image)
+            counts, mismatches, _ = compare(fsimg, test_ifs, ifsdump, image)
         except Refused:
             refused += 1
             print(f"{name}: refused by fsimg")
@@ -325,6 +413,33 @@ def compare_images(fsimg, test_ifs, ifsdump, images):
           f"{total['links']} link targets, {failed} mismatches; "
           f"{skipped} files without an ImageFS at offset 0")
     return 1 if failed else 0
+
+
+def compare_container(fsimg, test_ifs, ifsdump, image, decoded):
+    """The container command."""
+    name = os.path.basename(image)
+    try:
+        counts, mismatches, tree = compare(fsimg, test_ifs, ifsdump, image,
+                                           decoded)
+        extracted, extraction_mismatches = compare_extraction(fsimg, image,
+                                                              tree)
+    except Refused:
+        print(f"{name}: refused by fsimg")
+        return 1
+    except ImageFailure as failure:
+        print(f"{name}: MISMATCH {failure} failure: 1")
+        return 1
+    mismatches.update(extraction_mismatches)
+    print(f"{name}: {counts['entries']} entries, {counts['files']} "
+          f"files' bytes, {counts['links']} link targets, "
+          f"{counts['implicit']} implicit directories, "
+          f"{counts['shadowed']} shadowed records, "
+          f"{counts['omitted']} omitted subtrees; extracted "
+          f"{extracted['extracted_files']} files and "
+          f"{extracted['extracted_directories']} directories")
+    for category, count in sorted(mismatches.items()):
+        print(f"{name}: MISMATCH {category}: {count}")
+    return 1 if mismatches else 0
 
 
 def body_report(image):
@@ -355,10 +470,14 @@ def main(arguments):
     if len(arguments) >= 5 and arguments[0] == "compare":
         return compare_images(arguments[1], arguments[2], arguments[3],
                               arguments[4:])
+    if len(arguments) == 6 and arguments[0] == "container":
+        return compare_container(*arguments[1:])
     if len(arguments) == 2 and arguments[0] == "body":
         print(body_report(arguments[1]))
         return 0
     sys.exit("usage: ifs-native.py compare FSIMG TEST_IFS IFSDUMP IMAGE...\n"
+             "       ifs-native.py container FSIMG TEST_IFS IFSDUMP IMAGE "
+             "DECODED\n"
              "       ifs-native.py body IMAGE")
 
 

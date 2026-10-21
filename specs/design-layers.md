@@ -167,7 +167,13 @@ loader packages:
   any byte moves; the [scheme step](#peeling-order) inside it runs that
   filesystem's probe alone, as if the stack named it with an empty scheme
   slot; and a wrap probes its input with that filesystem's bounded probe
-  and requires its claim.
+  and requires its claim. The declaration is a field of the container's
+  descriptor, and one check applies it: stack validation for a stack that
+  names the container, the disk plan for creation, and the container step
+  for a container it detects, at the claim, before the container's open
+  reads its payload. A detected container then reads as if the stack had
+  named the carried filesystem and an empty scheme slot, so `i` prints
+  `ifs/hbcifs` before any volume is selected.
 
 The registry is the single source of layer suffixes. The CLI reads them from
 the descriptors for three uses, and a container added to the registry is
@@ -415,20 +421,35 @@ backing identity for alias checks, as every peel result does.
 
 The step-1 spool and the peel's spool are one handed-over file, and an
 image has one: the open keeps the descriptor through step 2 and closes it
-only when neither step used it. A spool-backed container inside gzip, or
-arriving as a stream, would need a second spool; that combination is
-`FSIMG_EUNSUPPORTED` naming both layers, decided at the container claim
-before any byte is decoded. The [open question](#open-questions) weighs a
-second spool.
+only when neither step used it. A container's descriptor declares that it
+peels through the spool, and the container step gives the spool, in its
+input, to that container's open alone, never to another container or to
+verification; after a successful open the image keeps the spool until it
+is freed, after the disk that reads it, and every other outcome closes it
+unless it holds the file. Without a spool
+descriptor the open fails as a spool limit of zero, as a gzip input does.
+A spool-backed container inside gzip, or arriving as a stream, would need
+a second spool; that combination is `FSIMG_EUNSUPPORTED` naming both
+layers ("the hbcifs container inside gzip needs a second spool"), with the
+container in `error.path`, decided at the container claim before any byte
+is decoded. The [open question](#open-questions) weighs a second spool.
+
+The disk a spool-backed peel yields is a read-only object of the decoded
+length that reads the sealed spool and carries the input's identity. The
+image information reports the profile's codec as the container's
+encodings and one chunk, the one stream, as a fixed VHD reports its one
+raw run.
 
 The declared decoded length is the decoder's output bound, and it is
 reserved against the spool limit in bounded steps exactly as a gzip
 member's output is, so a stream whose declared length crosses the limit
 fails at the step that crosses it with `FSIMG_RESOURCE_SPOOL`. A stream
 that ends before the declared length, would produce more, or does not end
-exactly at the end of its payload is `FSIMG_ECORRUPT`. Decoded bytes are
-charged to the work counter, the decoder's state to memory, and
-cancellation is polled at every step.
+exactly at the end of its payload is `FSIMG_ECORRUPT`, naming the
+container at the file offset of the stream position where it went wrong.
+The bytes each decoder call consumes and produces are charged to the work
+counter, the decoder's buffers to memory, and cancellation is polled at
+every step.
 
 ## Writing
 
@@ -953,7 +974,13 @@ chunk decoded.
 A profile that holds a field it cannot verify, because no evidence
 identifies the field's rule, names that field in the layer report as
 **unverified**, and the layer scope is then **incomplete**: every other
-check ran and passed, and the report never calls the layer verified. A
+check ran and passed, and the report never calls the layer verified. The
+profile's descriptor lists those fields; the layer report carries the
+list (`unverified`, "0x14,0x1c" for `hbcifs`) and is then not complete,
+while verification still succeeds. `W` names the fields beside the
+container ("hbcifs container (incomplete: fields 0x14,0x1c unverified)"),
+its JSON verify record is `"complete":false` with an `unverified` member,
+and its exit status is that of a passing verification. A
 container that carries a volume needs no check that its declared decoded
 length matches the volume's own length field: the disk it yields is
 exactly that length, and the `ifs` driver's verification compares its
@@ -1607,7 +1634,8 @@ runs to the end of the file. Header fields are little-endian:
 | 0x20 | 32 | Zero | Closed table: zero |
 
 Reading: identity is the eight bytes at offset 0. Validation then requires
-the payload length equal to the file length minus 64, else
+the payload length equal to the file length minus 64 and a nonzero
+decoded length, since an ImageFS starts with a header, else
 `FSIMG_ECORRUPT`; and the values the closed table names at 0x10, 0x18 and
 0x20, else `FSIMG_EUNSUPPORTED` naming the field, because a second
 producer variant is unobserved and is reported rather than guessed at. The
@@ -1630,7 +1658,18 @@ identifies the checksum field; the tie between the decoded length and the
 ImageFS's `image_size` is the driver's check, as for `qnxboot`.
 
 Info reports the decoded and payload lengths, the four unidentified fields
-as hexadecimal values, and the codec.
+as hexadecimal values, and the codec: the image information's container
+details `decoded_bytes`, `payload_bytes`, `field_0x10`, `field_0x14`,
+`field_0x18` and `field_0x1c`, each a 32-bit field's value, which `i`
+prints in hexadecimal as it prints every container detail, and `lzo1x` as
+the container's encodings. The descriptor declares no writer, so a
+creation stack naming `hbcifs` is refused naming it, and the capability
+record lists it as read and verified.
+
+Decoding reads the payload in 64 KiB pieces and writes through a 64 KiB
+window behind 64 KiB of history, more than the 49151 bytes an LZO1X match
+reaches back, appending each window to the spool: the buffers are charged
+to memory, and each append is one reservation step.
 
 ### gzip
 

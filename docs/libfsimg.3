@@ -346,9 +346,18 @@ Selections then address the container's disk, served through a cache of
 four decoded chunks of at most 16 MiB each, allocated at open within the
 memory limit; decoded bytes count as work.
 .Fn fsimg_image_get_info
-reports the container's name, chunk count, chunk encodings and identifier;
+reports the container's name, chunk count, chunk encodings, identifier and
+header fields as named details;
 .Fn fsimg_image_verify
-checks its checksums and, under FSIMG_VERIFY_PAYLOAD, decodes every chunk.
+checks its checksums and, under FSIMG_VERIFY_PAYLOAD, decodes every chunk,
+and names in the report's unverified list the container's fields no known
+rule checks, the report then not complete.
+An hbcifs container, read only, holds an ImageFS as one LZO1X stream, which
+the open decodes into the spool under the spool limit; it needs a spool,
+is refused inside gzip or on a stream, which would need a second one, and
+reports its fields 0x14 and 0x1c as unverified.
+A stack naming a scheme or another filesystem with a container that
+carries one filesystem is FSIMG_EINVAL naming the container.
 .Fn fsimg_layer_next
 reports each container's chunk encodings and the zlib version it uses.
 .Pp
@@ -371,7 +380,7 @@ the spool in error.path otherwise.
 .Fn fsimg_image_open_stream
 reads a non-seekable descriptor, such as a pipe, in order, decoding it or
 copying it unchanged into the spool; container probes, which need the last
-512 bytes, do not run on a stream.
+512 bytes, then read the spooled file.
 Each step's logical length is reserved against the spool_bytes limit, 64
 GiB by default, before the spool grows, so a decompression bomb fails with
 FSIMG_ELIMIT and FSIMG_RESOURCE_SPOOL with the file still within the limit;

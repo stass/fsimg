@@ -337,6 +337,33 @@ _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->mountpoint) ==
 _Static_assert(sizeof(((fsimg_volume_detail_t *)NULL)->name) ==
     FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
     "the wire detail name holds the public detail name");
+_Static_assert(FSIMG_IMAGE_DETAILS_MAX == FSIMG_VOLUME_DETAILS_MAX,
+    "the info and image records hold detail tables of one size");
+_Static_assert(sizeof(((fsimg_layer_report_t *)NULL)->unverified) ==
+    FSIMG_WIRE_IMAGE_UNVERIFIED_BYTES,
+    "the wire unverified fields hold the public list");
+
+/* A detail table as the info and image records lay it out: the count at
+ * count_offset of raw, then one entry of FSIMG_WIRE_INFO_DETAIL_BYTES per
+ * detail from table_offset, its name and then its value; raw is zeroed.
+ */
+void
+fsimg_wire_details_encode(unsigned char *raw, size_t count_offset,
+    size_t table_offset, const fsimg_volume_detail_t *details, uint32_t count)
+{
+	if (count > FSIMG_VOLUME_DETAILS_MAX)
+		count = FSIMG_VOLUME_DETAILS_MAX;
+	fsimg_wire_put64(raw + count_offset, count);
+	for (uint32_t i = 0; i < count; i++) {
+		unsigned char *detail = raw + table_offset +
+		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
+
+		bcopy(details[i].name, detail, strnlen(details[i].name,
+		    sizeof(details[i].name) - 1));
+		fsimg_wire_put64(detail + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
+		    details[i].value);
+	}
+}
 
 /* Strings are copied up to their terminators, which the reader guarantees
  * inside each fixed array; the zeroed record supplies the wire terminator.
@@ -344,8 +371,6 @@ _Static_assert(sizeof(((fsimg_volume_detail_t *)NULL)->name) ==
 void
 fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 {
-	uint32_t count;
-
 	bzero(raw, FSIMG_WIRE_INFO_BYTES);
 	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VALID, info->valid);
 	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CAPABILITIES, info->capabilities);
@@ -369,19 +394,8 @@ fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 	if ((info->valid & FSIMG_VOLUME_MOUNTPOINT) != 0)
 		bcopy(info->mountpoint, raw + FSIMG_WIRE_INFO_MOUNTPOINT,
 		    strnlen(info->mountpoint, sizeof(info->mountpoint) - 1));
-	count = info->detail_count < FSIMG_VOLUME_DETAILS_MAX ?
-	    info->detail_count : FSIMG_VOLUME_DETAILS_MAX;
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_DETAIL_COUNT, count);
-	for (uint32_t i = 0; i < count; i++) {
-		unsigned char *detail = raw + FSIMG_WIRE_INFO_DETAILS +
-		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
-
-		bcopy(info->details[i].name, detail,
-		    strnlen(info->details[i].name,
-		    sizeof(info->details[i].name) - 1));
-		fsimg_wire_put64(detail + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
-		    info->details[i].value);
-	}
+	fsimg_wire_details_encode(raw, FSIMG_WIRE_INFO_DETAIL_COUNT,
+	    FSIMG_WIRE_INFO_DETAILS, info->details, info->detail_count);
 }
 
 /* Only a used slot crosses the boundary, so the record has no used flag. */
@@ -489,18 +503,33 @@ string_field_valid(const unsigned char *raw, size_t length)
 	return (nul != NULL && bytes_zero(nul, length - (size_t)(nul - raw)));
 }
 
-/* The detail table: at most sixteen used entries, each a nonempty name of
- * printable ASCII and its value, and zeros after them.
+/* A string field holding printable ASCII without blanks, possibly empty. */
+static bool
+word_field_valid(const unsigned char *raw, size_t length)
+{
+	if (!string_field_valid(raw, length))
+		return (false);
+	for (size_t i = 0; raw[i] != '\0'; i++) {
+		if (raw[i] <= 0x20 || raw[i] >= 0x7f)
+			return (false);
+	}
+	return (true);
+}
+
+/* A detail table laid out as fsimg_wire_details_encode() writes it: at
+ * most sixteen used entries, each a nonempty name of printable ASCII and
+ * its value, and zeros after them.
  */
 static bool
-details_valid(const unsigned char *raw)
+details_valid(const unsigned char *raw, size_t count_offset,
+    size_t table_offset)
 {
-	uint64_t count = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_DETAIL_COUNT);
+	uint64_t count = fsimg_wire_get64(raw + count_offset);
 
 	if (count > FSIMG_VOLUME_DETAILS_MAX)
 		return (false);
 	for (uint64_t i = 0; i < FSIMG_VOLUME_DETAILS_MAX; i++) {
-		const unsigned char *detail = raw + FSIMG_WIRE_INFO_DETAILS +
+		const unsigned char *detail = raw + table_offset +
 		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
 
 		if (i >= count) {
@@ -508,12 +537,9 @@ details_valid(const unsigned char *raw)
 				return (false);
 			continue;
 		}
-		if (detail[0] == '\0' || !string_field_valid(detail,
+		if (detail[0] == '\0' || !word_field_valid(detail,
 		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES))
 			return (false);
-		for (size_t j = 0; detail[j] != '\0'; j++)
-			if (detail[j] <= 0x20 || detail[j] >= 0x7f)
-				return (false);
 	}
 	return (true);
 }
@@ -547,7 +573,8 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	if ((valid & FSIMG_VOLUME_MOUNTPOINT) == 0 &&
 	    raw[FSIMG_WIRE_INFO_MOUNTPOINT] != '\0')
 		return (false);
-	if (!details_valid(raw))
+	if (!details_valid(raw, FSIMG_WIRE_INFO_DETAIL_COUNT,
+	    FSIMG_WIRE_INFO_DETAILS))
 		return (false);
 
 	if (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME) > volume_limit)
@@ -573,7 +600,8 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
  * container the disk is the file the layers were peeled from, so the two
  * lengths match exactly, and every container field is zero; a container
  * is a registered one, and its disk is the length its tables declare,
- * which bounds what follows. Without a scheme every table field is zero;
+ * which bounds what follows. Only a container has details, and only a
+ * verified one unverified fields. Without a scheme every table field is zero;
  * with one, the sector size is GPT's or MBR's and the selection lies in
  * the table. The caller checks the file against the input it knows.
  */
@@ -601,6 +629,11 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	    memchr(raw + FSIMG_WIRE_IMAGE_REASON, '\0',
 	    FSIMG_WIRE_IMAGE_REASON_BYTES) == NULL)
 		return (false);
+	if (!details_valid(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+	    FSIMG_WIRE_IMAGE_DETAILS) ||
+	    !word_field_valid(raw + FSIMG_WIRE_IMAGE_UNVERIFIED,
+	    FSIMG_WIRE_IMAGE_UNVERIFIED_BYTES))
+		return (false);
 	if (raw[FSIMG_WIRE_IMAGE_COMPRESSION] != '\0') {
 		layer = fsimg_layer_find((const char *)raw +
 		    FSIMG_WIRE_IMAGE_COMPRESSION);
@@ -616,11 +649,15 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FILE) ||
 		    raw[FSIMG_WIRE_IMAGE_CODECS] != '\0' ||
 		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHUNKS) != 0 ||
-		    !bytes_zero(raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID, 16))
+		    !bytes_zero(raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID, 16) ||
+		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT) != 0 ||
+		    raw[FSIMG_WIRE_IMAGE_UNVERIFIED] != '\0')
 			return (false);
 	} else {
 		layer = fsimg_layer_find((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER);
-		if (layer == NULL || layer->container == NULL)
+		if (layer == NULL || layer->container == NULL ||
+		    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) == 0 &&
+		    raw[FSIMG_WIRE_IMAGE_UNVERIFIED] != '\0'))
 			return (false);
 	}
 	/* A reason exactly when no volume was selected, and then no slot. */

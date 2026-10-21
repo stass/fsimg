@@ -334,6 +334,11 @@ one sequential stream peels through the spool rather than the chunk index,
 its read side still a positional I/O object over the volume. Beyond those
 six, both containers declare that they carry a volume, a declaration the
 layer design adds alongside them, so a scheme in their create stack is refused.
+A container also declares the fields no evidence gives a rule to check;
+the library's layer report names them and calls the verification
+incomplete, the CLI worker carries them to the coordinator, and `W`
+reports them while still passing, because every check it makes passed
+([verification scope](design-layers.md#verification-scope)).
 
 The [sources and catalogs design](design-sources.md) defines common collection,
 source identity and reopening, and immutable catalog preparation independently

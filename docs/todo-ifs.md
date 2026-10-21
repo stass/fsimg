@@ -69,13 +69,32 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   unidentified; `0x14` is neither CRC-32 nor the additive sum. Until one is
   identified as the checksum, `hbcifs` verification is incomplete (owner
   decision 8).
+* [Low] **Carried-volume rule placement** (`lib/layers/stack.c`,
+  `plan.c`, `image.c`): `fsimg_stack_carried` runs in stack validation,
+  in the disk plan, because the writer's and output's `fsimg_stack_parse`
+  callers do not validate, and at a detected claim, which then rewrites the
+  image's forced slots. One parse-and-validate funnel would delete the plan
+  call, and deriving the carried filesystem from the opened container would
+  keep the forced stack what the caller forced.
+* [Low] **Worker image records against the registry**
+  (`cmd/fsimg/protocol.c`, `worker-parent.c`): the coordinator could
+  require an IMAGE record's unverified list to equal the container's
+  profile list, details only from a container that reports them, and a
+  spool-backed container's disk within the spool limit.
+* [Low] **Forced spool-backed container under forced gzip**
+  (`lib/layers/image.c`): with both forced, the whole gzip member is
+  decoded into the spool before the claim refuses a second spool;
+  `validate_forced_stack` could refuse the pair before any byte is read.
+* [Low] **Detail type naming** (`include/fsimg.h`): `fsimg_volume_detail_t`
+  also carries container details, and `FSIMG_IMAGE_DETAILS_MAX` repeats
+  `FSIMG_VOLUME_DETAILS_MAX`; a neutral type and one constant would say so
+  before the API is released.
 * [Medium] **Container stages and the layer machinery** (`lib/layers/`):
   the `qnxboot` read stage can use the container reading, chunk index and
-  chunk cache of `lib/layers/chunks.c`, adding LZO1X and NRV2B record kinds;
-  the `hbcifs` read stage waits for the layer plan's spool (its stage 4),
-  and the wrap stage for container writing (the write half of its stage 3).
-  Until then compressed boot images are read through uncompressed copies as
-  slices.
+  chunk cache of `lib/layers/chunks.c`, adding LZO1X and NRV2B record kinds,
+  and the wrap stage waits for container writing (the write half of the
+  layer plan's stage 3). Until then compressed boot images are read through
+  uncompressed copies as slices.
 * [Medium] **`qnxboot` design against the implemented layers**
   (`specs/design-layers.md`, `lib/layers/`): the profile was written before
   the stack and container code. Owner decisions, before the `qnxboot` stages:
@@ -90,19 +109,16 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   * A scheme in an `ifs` stack: the profile refuses it, while `plan.c`
     refuses only a missing partition type, as for QNX4; choose one rule.
     The writer registration item below depends on it.
-  * The carried-volume refusal has no field in the layer record;
-    `fsimg_stack_validate()` checks slot kinds only. It can be stated as the
-    forced filesystem plus an empty scheme slot.
   * `qnxboot` has no rows in `layer_settings` and `layer_keys`, and the IFS
     settings rows do not mark `compress` and `template` creation-only.
   * The LZO1X transcode reads its input once per pass, while the layer
     design says wrap and compose read each input once.
   * Smaller gaps: owners of the template read, the second pass and the
-    4-byte sizing; the layer report has no place to name unverified fields;
-    `fsimg_image_info_t` has no place for startup-header fields (the
-    `details[]` pattern fits); the spool wording names gzip only; the `.ifs`
-    suffix rationale against the CLI's generic suffix list;
-    `fsimg_layer_info_t` lacks carries, codec and version fields.
+    4-byte sizing; the `.ifs` suffix rationale against the CLI's generic
+    suffix list; `fsimg_layer_info_t` lacks carries and codec version
+    fields. The container descriptor's `carries`, `spooled` and
+    `unverified` facts, the image information's container details and the
+    layer report's unverified list serve `ifsboot` too.
 * [Low] **Large native bodies** (`tools/qnx/guest/popifs.sh`): the guest's
   4 MiB RAM disk limits native builds to small bodies; build one above
   16 MiB on a scratch volume if a design rule ever depends on body size.

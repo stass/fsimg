@@ -109,19 +109,21 @@ def test_formats(executable, root):
               if record["type"] == "format" and record["kind"] != "filesystem"}
     assert {name: record["kind"] for name, record in layers.items()} == {
         "gpt": "scheme", "mbr": "scheme", "dmg": "container", "vhd": "container",
-        "simg": "container", "gzip": "compression", "zstd": "compression",
-        "xz": "compression"}
+        "simg": "container", "hbcifs": "container", "gzip": "compression",
+        "zstd": "compression", "xz": "compression"}
     assert layers["gpt"]["settings"] == ["sector", "disk", "type", "name", "disk-guid", "guid"]
     assert layers["mbr"]["settings"] == ["disk", "type", "active", "id"]
     assert layers["dmg"]["settings"] == ["compress", "level", "chunk", "uuid"]
     assert layers["simg"]["settings"] == ["block", "crc"]
     assert layers["gzip"]["settings"] == ["level"]
     assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 7
+    assert layers["hbcifs"]["capabilities"] == 5 and layers["hbcifs"]["suffix"] is None
     assert layers["gzip"]["capabilities"] == 7 and layers["zstd"]["suffix"] == ".zst"
     assert layers["gzip"]["codec_version"] == layers["dmg"]["codec_version"]
     assert {name: record["codecs"] for name, record in layers.items()} == {
         "gpt": None, "mbr": None, "dmg": "raw,zero,zlib", "vhd": "raw",
-        "simg": "raw,zero,fill", "gzip": None, "zstd": None, "xz": None}
+        "simg": "raw,zero,fill", "hbcifs": "lzo1x", "gzip": None, "zstd": None,
+        "xz": None}
     assert re.fullmatch(r"zlib [0-9][0-9A-Za-z.-]*", layers["dmg"]["codec_version"])
     assert layers["vhd"]["codec_version"] is None
     assert layers["vhd"]["suffix"] == ".vhd" and layers["gpt"]["suffix"] is None
@@ -274,7 +276,7 @@ def test_human_help(executable, root):
     formats = invoke(executable, root, ["--formats"])
     # The DMG and gzip rows are each followed by the zlib version fsimg runs
     # against.
-    version = re.search(rb"\n {20}(zlib [0-9][0-9A-Za-z.-]*)\n", formats.stdout)
+    version = re.search(rb"\n {21}(zlib [0-9][0-9A-Za-z.-]*)\n", formats.stdout)
     assert version is not None, formats.stdout
     assert formats.stdout.count(version.group(0)) == 2, formats.stdout
     assert formats.stdout.replace(version.group(0), b"\n") == (b"Format  Read  Write  Verify\n"
@@ -286,18 +288,19 @@ def test_human_help(executable, root):
                               b"qnx4    yes   yes    yes\n"
                               b"ifs     yes   no     yes\n"
                               b"\n"
-                              b"Layer  Kind         Read  Write  Verify  Codecs         Settings\n"
-                              b"gpt    scheme       yes   yes    yes     -              "
+                              b"Layer   Kind         Read  Write  Verify  Codecs         Settings\n"
+                              b"gpt     scheme       yes   yes    yes     -              "
                               b"sector,disk,type,name,disk-guid,guid\n"
-                              b"mbr    scheme       yes   yes    yes     -              "
+                              b"mbr     scheme       yes   yes    yes     -              "
                               b"disk,type,active,id\n"
-                              b"dmg    container    yes   yes    yes     raw,zero,zlib  "
+                              b"dmg     container    yes   yes    yes     raw,zero,zlib  "
                               b"compress,level,chunk,uuid\n"
-                              b"vhd    container    yes   yes    yes     raw            align,uuid\n"
-                              b"simg   container    yes   yes    yes     raw,zero,fill  block,crc\n"
-                              b"gzip   compression  yes   yes    yes     -              level\n"
-                              b"zstd   compression  no    no     no      -              -\n"
-                              b"xz     compression  no    no     no      -              -\n")
+                              b"vhd     container    yes   yes    yes     raw            align,uuid\n"
+                              b"simg    container    yes   yes    yes     raw,zero,fill  block,crc\n"
+                              b"hbcifs  container    yes   no     yes     lzo1x          -\n"
+                              b"gzip    compression  yes   yes    yes     -              level\n"
+                              b"zstd    compression  no    no     no      -              -\n"
+                              b"xz      compression  no    no     no      -              -\n")
     assert formats.stderr == b""
     verbose = invoke(executable, root, ["--formats", "-v"])
     assert verbose.stdout == formats.stdout and b"Sandbox backend:" in verbose.stderr

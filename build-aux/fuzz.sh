@@ -6,8 +6,8 @@
 #
 # Run from the top of a configured build directory holding test-fat,
 # test-exfat, test-qnx6, test-qnx4, test-ifs, test-codec, test-protocol,
-# test-layers, test-containers, test-compression, test-mtree and
-# test/spec.sh, which write the seeds, with MAKE naming the make program
+# test-layers, test-containers, test-compression, test-hbcifs, test-mtree
+# and test/spec.sh, which write the seeds, with MAKE naming the make program
 # that drives that build (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX
 # select the compiler. The harnesses build against the instrumented
 # sanitizer-fuzz/ tree (see sanitize.sh) and keep their corpora here
@@ -205,8 +205,8 @@ run_fuzzer "$work_dir/fuzz-image" "$image_corpus" 1048576 10
 # The container harness reads each input as an image file under detection
 # and under each forced container, reaching the koly trailer, the plist,
 # the mish tables, the VHD footer, the sparse header and chunk walk, the
-# chunk index and the chunk cache. The seeds are the container tests'
-# images.
+# chunk index and the chunk cache, and the hbcifs header and its LZO1X
+# stream. The seeds are the container tests' and the hbcifs tests' images.
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
@@ -218,6 +218,9 @@ for kind in dmg vhd simg; do
         ./test-containers "--seed-$kind" "$container_corpus/$kind.seed"
     fi
 done
+if test ! -f "$container_corpus/hbcifs.seed"; then
+    ./test-hbcifs --seed-hbcifs "$container_corpus/hbcifs.seed"
+fi
 run_fuzzer "$work_dir/fuzz-container" "$container_corpus" 1048576 10
 
 # The plist harness drives the bounded XML parser directly with a visitor

@@ -147,7 +147,7 @@ the filesystem name is fat12, fat16, fat32, exfat, qnx6 or qnx4.
 Required for
 .Cm c .
 The slots are the filesystem, the partition scheme (gpt or mbr) and the
-container (dmg, vhd or simg), in that order, so
+container (dmg, vhd, simg, or hbcifs, which is only read), in that order, so
 .Ql fat32/gpt
 is a FAT32 volume in a GPT partition.
 On reading a named slot forces that layer while retaining every validation;
@@ -196,8 +196,8 @@ confinement.
 .It Fl T Ar directory|-
 Scratch parent, defaulting to TMPDIR when set, otherwise
 .Pa /tmp .
-A dash disables scratch, and with it the spool, so a compressed image
-cannot be read; with
+A dash disables scratch, and with it the spool, so neither a compressed
+image nor an hbcifs container can be read; with
 .Fl f Ar - ,
 or with
 .Cm cW
@@ -389,11 +389,27 @@ damaged one fails the command rather than being read as a raw disk.
 Decompressed chunks are cached four at a time, each at most 16 MiB, within
 the memory limit; decoding counts as work.
 .Pp
+A Harman-Becker hbcifs container holds an ImageFS behind a 64-byte header
+whose identity is
+.Ql hbcifs
+and two NUL bytes, as one LZO1X stream that runs to the end of the file.
+Its payload length must be the file length minus 64, and the header fields
+at 0x10 and 0x18 and the reserved bytes must hold the one producer's
+values; the stream is decoded into the spool, reserved against
+.Fl l Ar spool
+in 64 KiB steps, and must produce exactly the decoded length the header
+states.
+It holds only an ImageFS: a stack naming a partition scheme or another
+filesystem with it is refused.
+An hbcifs image that is gzip-compressed or read from standard input would
+need a second spool and is refused.
+.Pp
 .Cm i
 reports the stack in
 .Fl F
 syntax and its compression, gzip or none; with a container, its disk size,
-chunk count, chunk encodings and identifier; with a partition scheme, the disk and each used
+chunk count, chunk encodings and identifier, then its header fields, one
+per line in hexadecimal; with a partition scheme, the disk and each used
 partition's slot, type, size, offset, filesystem and name, marking the
 selected one; then header validation, geometry, label, volume UUID when the
 format has one, the mountpoint and named format details when the format
@@ -420,6 +436,9 @@ structure of the volume, including a DMG's data fork and master checksums;
 .Fl d
 also reads initialized payload bytes and decodes every container chunk to
 check the DMG block-table and sparse-image checksums.
+A container field no known rule checks, hbcifs's 0x14 and 0x1c, is named as
+unverified beside the container and makes the verification incomplete;
+every other check still passes or fails the command.
 It performs no repair.
 .Sh CREATION
 Operands are host paths, as for
@@ -1219,7 +1238,8 @@ or
 .Ql formats .
 A stack record precedes the information record: it carries the stack, the
 compression (gzip or null), the container with its chunk count, chunk
-encodings and identifier, each null without one, the scheme, the disk size and identifier
+encodings, identifier and container_details object of header fields, each
+null without one, the scheme, the disk size and identifier
 and the selected partition, and states whether a volume was selected.
 Partition records, one per used slot, follow it for
 .Cm i .
@@ -1228,6 +1248,8 @@ one partition record when the stack names a scheme.
 Information records carry the stack and the compression.
 .Cm cW
 writes a verify record for its staged image.
+A verify record's complete member is false, and its unverified member
+names the fields, when the container holds fields no known rule checks.
 Large integers are decimal strings; bounded geometry, flags, nanoseconds and
 offset minutes are JSON integers.
 Unknown values are null.

@@ -319,6 +319,20 @@ reference to name exactly one delivered or omitted file, never a shadowed
 record, and walks every directory, omitted ones included; `fsimg W` adds
 the shadowed count, and the references to omitted entries, to its result.
 
+An ImageFS inside a Harman-Becker `hbcifs` container, the PCM 3.1 update
+disc's `PCM3_IFS2.ifs`, is read through a read-only container layer: the
+header's identity, its payload length against the file and the one known
+producer's constant fields are checked, and the LZO1X payload is decoded
+into the spool, reserved against the spool limit in 64 KiB steps, to
+exactly the decoded length the header states. An `hbcifs` image inside
+gzip or on standard input, which would need a second spool, is refused
+naming both layers. A container that carries one filesystem refuses a
+stack naming a scheme or another filesystem with it. `fsimg i` prints the
+stack as `ifs/hbcifs` and the header's fields, which the image information
+carries as container details; `fsimg W` names the two fields no known rule
+checks, which the layer report lists as unverified, and calls the
+verification incomplete.
+
 The fsimg command is shaped like tar: modes c (create, cW to verify before
 publication), x (extract, x -O for one member's bytes), t (list, recursive by
 default), W (verify), i (information) and --formats, with -f naming the image,

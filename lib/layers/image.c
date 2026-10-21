@@ -24,7 +24,12 @@
  * sees how it was filled. The container step runs once, at open: the
  * container probes run on the file's prefix and its last 512 bytes, and a
  * claim's tables are validated and become the disk, a positional object of
- * the length they declare; without a claim the file is the disk. Then one
+ * the length they declare; without a claim the file is the disk. A
+ * container whose payload is one unframed stream, such as hbcifs, decodes
+ * it into the spool instead, which is why the open keeps an unused spool
+ * through the container step; a file the spool already holds leaves no
+ * spool for it. A container that carries a filesystem then reads as if the
+ * stack named that filesystem with an empty scheme slot. Then one
  * step decides between a partition scheme and a bare volume by running the
  * scheme probes and the filesystem probes on the disk prefix together. In both
  * steps exactly one claim decides, so a boot sector that also resembles a
@@ -49,7 +54,7 @@ struct fsimg_image {
 	fsimg_layer_options_t layers;
 	/* The compression the options force, NULL to detect one. */
 	const fsimg_layer_t *forced_compression;
-	/* The adopted spool, NULL once an uncompressed file proves it unused;
+	/* The adopted spool, NULL once the container step proves it unused;
 	 * spooled is its read-only view when it holds the file.
 	 */
 	fsimg_spool_t	*spool;
@@ -125,11 +130,17 @@ static fsimg_status_t read_prefix(fsimg_ctx_t *, fsimg_io_t *,
     fsimg_error_t *);
 static fsimg_status_t claim_volume(fsimg_image_t *, uint64_t, uint64_t,
     fsimg_claim_t *, char [static FORMAT_NAME_BYTES], fsimg_error_t *);
-static void container_input(fsimg_image_t *, fsimg_container_input_t *);
+static void container_input(fsimg_image_t *, fsimg_spool_t *,
+    fsimg_container_input_t *);
 static fsimg_status_t layer_failed(const fsimg_layer_t *, fsimg_status_t,
     fsimg_error_t *);
 static fsimg_status_t identify_container(fsimg_image_t *,
     const fsimg_layer_t *, const fsimg_layer_t **, fsimg_error_t *);
+static fsimg_status_t second_spool(const fsimg_image_t *,
+    const fsimg_layer_t *, fsimg_error_t *);
+static fsimg_status_t claim_container(fsimg_image_t *,
+    const fsimg_layer_t **, fsimg_error_t *);
+static void adopt_carried_stack(fsimg_image_t *, const fsimg_layer_t *);
 static fsimg_status_t peel_container(fsimg_image_t *, fsimg_error_t *);
 static fsimg_status_t identify_disk(fsimg_image_t *, const fsimg_layer_t *,
     const fsimg_layer_t **, fsimg_error_t *);
@@ -292,8 +303,8 @@ check_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
  * Both opens: file is a seekable input, or NULL for the stream on
  * stream_fd. Once the options' size and version are valid, the spool
  * descriptor belongs to the open on every outcome: it is checked before
- * any input byte is read, closed when the open fails, and closed as soon
- * as a seekable input proves uncompressed.
+ * any input byte is read, closed when the open fails, and closed once the
+ * container step leaves it unused.
  */
 static fsimg_status_t
 open_image(fsimg_ctx_t *ctx, fsimg_io_t *file, int stream_fd,
@@ -534,12 +545,10 @@ peel_compression(fsimg_image_t *image, int stream_fd, fsimg_error_t *error)
 	return (status);
 }
 
-/* The file is the input as it is; the spool, unused, is closed. */
+/* The file is the input as it is; the spool waits for the container step. */
 static void
 read_in_place(fsimg_image_t *image)
 {
-	fsimg_spool_free(image->spool);
-	image->spool = NULL;
 	image->disk = image->input;
 	image->disk_bytes = image->file_bytes;
 }
@@ -649,12 +658,15 @@ fsimg_volume_claim(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
 	return (FSIMG_OK);
 }
 
+/* What a container reads; spool is NULL except for a spooled open. */
 static void
-container_input(fsimg_image_t *image, fsimg_container_input_t *input)
+container_input(fsimg_image_t *image, fsimg_spool_t *spool,
+    fsimg_container_input_t *input)
 {
 	input->ctx = image->ctx;
 	input->file = image->input;
 	input->session = &image->session;
+	input->spool = spool;
 	input->file_bytes = image->file_bytes;
 }
 
@@ -768,9 +780,9 @@ survey(unsigned kinds, const probe_input_t *input,
  * of the file: the forced container's alone, or every container's. On
  * success *container is the container that claimed, or NULL when none did
  * and the file is the disk. Several claims are an ambiguity; a claim that
- * is corrupt or unsupported fails with its probe's reason, never falling
- * back to a raw disk. The scheme and filesystem probes do not run here:
- * they read the disk this step yields.
+ * is corrupt or unsupported fails with its probe's reason, naming the
+ * claimant, never falling back to a raw disk. The scheme and filesystem
+ * probes do not run here: they read the disk this step yields.
  */
 static fsimg_status_t
 identify_container(fsimg_image_t *image, const fsimg_layer_t *forced,
@@ -822,7 +834,8 @@ identify_container(fsimg_image_t *image, const fsimg_layer_t *forced,
 		return (FSIMG_OK);
 	default:
 		*error = containers->reason;
-		return (containers->status);
+		return (layer_failed(containers->layer, containers->status,
+		    error));
 	}
 }
 
@@ -842,33 +855,123 @@ layer_failed(const fsimg_layer_t *layer, fsimg_status_t status,
 }
 
 /*
- * Peel the container, once, at open. A container slot forced empty, or no
- * claim, leaves the file as the disk; otherwise the claimant validates its
- * tables and yields the disk every later step reads.
+ * An image has one spool. When it already holds the file, decoded from
+ * gzip or copied from a stream, a container that decodes into the spool
+ * would need a second one: FSIMG_EUNSUPPORTED naming both layers
+ * (specs/design-layers.md#spool-backed-peel).
  */
 static fsimg_status_t
-peel_container(fsimg_image_t *image, fsimg_error_t *error)
+second_spool(const fsimg_image_t *image, const fsimg_layer_t *container,
+    fsimg_error_t *error)
+{
+	char message[sizeof(error->message)];
+
+	if (!container->container->spooled || image->spooled == NULL)
+		return (FSIMG_OK);
+	if (image->compression != NULL)
+		snprintf(message, sizeof(message), "the %s container inside %s "
+		    "needs a second spool; decompress the image first",
+		    container->name, image->compression->name);
+	else
+		snprintf(message, sizeof(message), "the %s container on a stream "
+		    "needs a second spool; read the image from a file",
+		    container->name);
+	return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
+	    message));
+}
+
+/*
+ * The container step's claimant in *container: NULL when the container
+ * slot is forced empty, nothing claims, or the claim fails, the failure
+ * then naming the layer it blames. A claimant that carries a
+ * filesystem must agree with the forced slots, and one that decodes into
+ * the spool must find it free; both are refused before its payload is
+ * read.
+ */
+static fsimg_status_t
+claim_container(fsimg_image_t *image, const fsimg_layer_t **container,
+    fsimg_error_t *error)
 {
 	const fsimg_stack_slot_t *slot;
-	const fsimg_layer_t *forced, *container;
-	fsimg_container_input_t input;
+	const fsimg_layer_t *forced;
 	fsimg_status_t status;
 
+	*container = NULL;
 	slot = &image->forced.slots[FSIMG_LAYER_CONTAINER];
 	if (slot->state == FSIMG_SLOT_EMPTY)
 		return (FSIMG_OK);
 	forced = slot->state == FSIMG_SLOT_NAMED ? fsimg_layer_find(slot->name) :
 	    NULL;
-	status = identify_container(image, forced, &container, error);
-	if (status != FSIMG_OK || container == NULL)
+	status = identify_container(image, forced, container, error);
+	if (status != FSIMG_OK) {
+		*container = NULL;
 		return (layer_failed(forced, status, error));
-	container_input(image, &input);
-	status = container->container->open(&input, &image->opened, error);
-	if (status != FSIMG_OK)
-		return (layer_failed(container, status, error));
+	}
+	if (*container == NULL)
+		return (FSIMG_OK);
+	status = fsimg_stack_carried(&image->forced, *container, error);
+	if (status == FSIMG_OK)
+		status = second_spool(image, *container, error);
+	if (status != FSIMG_OK) {
+		layer_failed(*container, status, error);
+		*container = NULL;
+	}
+	return (status);
+}
+
+/*
+ * After a container that carries a filesystem opens, the forced slots
+ * name that filesystem and an empty scheme, so the next step runs that
+ * filesystem's probe alone. claim_container checked they agree.
+ */
+static void
+adopt_carried_stack(fsimg_image_t *image, const fsimg_layer_t *container)
+{
+	fsimg_stack_slot_t *slots = image->forced.slots;
+
+	slots[FSIMG_LAYER_FILESYSTEM].state = FSIMG_SLOT_NAMED;
+	snprintf(slots[FSIMG_LAYER_FILESYSTEM].name,
+	    sizeof(slots[FSIMG_LAYER_FILESYSTEM].name), "%s",
+	    container->container->carries);
+	bzero(&slots[FSIMG_LAYER_SCHEME], sizeof(slots[FSIMG_LAYER_SCHEME]));
+	slots[FSIMG_LAYER_SCHEME].state = FSIMG_SLOT_EMPTY;
+}
+
+/*
+ * Peel the container, once, at open. With no claimant the file is the
+ * disk; otherwise the claimant validates its tables and yields the disk
+ * every later step reads. Only a spooled claimant's open is given the
+ * spool. Afterwards, whatever the outcome, the spool is closed unless it
+ * holds the file or the opened container's disk.
+ */
+static fsimg_status_t
+peel_container(fsimg_image_t *image, fsimg_error_t *error)
+{
+	const fsimg_layer_t *container;
+	fsimg_container_input_t input;
+	fsimg_status_t status;
+	bool spooled, keep;
+
+	status = claim_container(image, &container, error);
+	spooled = container != NULL && container->container->spooled;
+	if (container != NULL) {
+		container_input(image, spooled ? image->spool : NULL, &input);
+		status = layer_failed(container,
+		    container->container->open(&input, &image->opened, error),
+		    error);
+	}
+	keep = image->spooled != NULL || (status == FSIMG_OK && spooled);
+	if (!keep) {
+		fsimg_spool_free(image->spool);
+		image->spool = NULL;
+	}
+	if (status != FSIMG_OK || container == NULL)
+		return (status);
 	image->container = container;
 	image->disk = image->opened.disk;
 	image->disk_bytes = image->opened.disk_bytes;
+	if (container->container->carries != NULL)
+		adopt_carried_stack(image, container);
 	return (FSIMG_OK);
 }
 
@@ -878,7 +981,8 @@ peel_container(fsimg_image_t *image, fsimg_error_t *error)
  * On success *scheme is the scheme that claimed, or NULL for a bare volume.
  * Unforced, exactly one claim decides; none is an unrecognized disk and
  * several are an ambiguity. A scheme claim that is corrupt or unsupported
- * fails with its probe's reason, never falling back to a bare volume.
+ * fails with its probe's reason, naming the scheme, never falling back
+ * to a bare volume.
  */
 static fsimg_status_t
 identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
@@ -939,7 +1043,7 @@ identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
 		return (FSIMG_OK);
 	default:
 		*error = schemes->reason;
-		return (schemes->status);
+		return (layer_failed(schemes->layer, schemes->status, error));
 	}
 }
 
@@ -1023,11 +1127,19 @@ fsimg_image_get_info(fsimg_image_t *image, fsimg_image_info_t *out,
 		    image->container->name);
 		snprintf(out->container, sizeof(out->container), "%s",
 		    image->container->name);
-		fsimg_chunk_kinds_text(image->opened.kinds, out->codecs,
-		    sizeof(out->codecs));
+		/* A spooled container's disk is one stream in its codec. */
+		if (image->container->container->spooled)
+			snprintf(out->codecs, sizeof(out->codecs), "%s",
+			    image->container->container->codecs);
+		else
+			fsimg_chunk_kinds_text(image->opened.kinds, out->codecs,
+			    sizeof(out->codecs));
 		bcopy(image->opened.guid, out->container_guid,
 		    sizeof(out->container_guid));
 		out->chunk_count = image->opened.chunks;
+		out->detail_count = image->opened.detail_count;
+		bcopy(image->opened.details, out->details,
+		    sizeof(out->details));
 	}
 	if (stack.slots[FSIMG_LAYER_FILESYSTEM].state != FSIMG_SLOT_NAMED &&
 	    image->selected_format[0] != '\0') {
@@ -1352,7 +1464,9 @@ fsimg_image_select(fsimg_image_t *image, const fsimg_selector_t *selector,
 
 /* Opening the container and the table already performed every check
  * reading needs; verify adds the passes that read beyond the tables, the
- * container's first, and reports the scope reached.
+ * container's first, and reports the scope reached. A container's fields
+ * that no evidence gives a rule are named, and the report is then
+ * incomplete although every check passed.
  */
 fsimg_status_t
 fsimg_image_verify(fsimg_image_t *image, unsigned flags,
@@ -1379,13 +1493,16 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		snprintf(out->compression, sizeof(out->compression), "%s",
 		    image->compression->name);
 	if (image->container != NULL) {
-		container_input(image, &container);
+		container_input(image, NULL, &container);
 		status = image->container->container->verify(&container,
 		    &image->opened, payload, error);
 		if (status != FSIMG_OK)
 			return (layer_failed(image->container, status, error));
 		snprintf(out->container, sizeof(out->container), "%s",
 		    image->container->name);
+		if (image->container->container->unverified != NULL)
+			snprintf(out->unverified, sizeof(out->unverified), "%s",
+			    image->container->container->unverified);
 	}
 	status = detect_scheme(image, error);
 	if (status != FSIMG_OK)
@@ -1408,6 +1525,6 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 	if (payload && image->container != NULL &&
 	    image->container->container->payload_checks)
 		out->scope = FSIMG_VALIDATION_PAYLOAD;
-	out->complete = true;
+	out->complete = out->unverified[0] == '\0';
 	return (FSIMG_OK);
 }

@@ -71,11 +71,13 @@ _Static_assert(FSIMG_WIRE_INFO_DETAILS + FSIMG_VOLUME_DETAILS_MAX *
  * canonical text of the forced and detected slots with the selected
  * volume's filesystem, SCHEME the partition scheme or empty, CONTAINER the
  * container the disk was peeled from or empty, with its chunk count, its
- * chunk encodings (CODECS) and its identifier, and REASON why no volume was
- * selected when UNSELECTED is set. DISK is the disk the container yields,
- * or the input file's length without one.
+ * chunk encodings (CODECS), its identifier and its header fields (DETAILS,
+ * laid out as the info record's), and REASON why no volume was selected
+ * when UNSELECTED is set. UNVERIFIED names the container's fields that W
+ * reports unverified, which makes its verification incomplete. DISK is the
+ * disk the container yields, or the input file's length without one.
  */
-#define FSIMG_WIRE_IMAGE_BYTES 376u
+#define FSIMG_WIRE_IMAGE_BYTES 928u
 #define FSIMG_WIRE_IMAGE_UNSELECTED 0x1u	/* i only: no volume follows */
 #define FSIMG_WIRE_IMAGE_VERIFIED 0x2u		/* W only: layers verified */
 typedef enum fsimg_wire_image_field {
@@ -99,11 +101,21 @@ typedef enum fsimg_wire_image_field {
 	 */
 	FSIMG_WIRE_IMAGE_FILE = 224,
 	FSIMG_WIRE_IMAGE_COMPRESSION = 232,
-	FSIMG_WIRE_IMAGE_REASON = 248
+	FSIMG_WIRE_IMAGE_UNVERIFIED = 248,
+	FSIMG_WIRE_IMAGE_DETAIL_COUNT = 280,
+	FSIMG_WIRE_IMAGE_DETAILS = 288,
+	FSIMG_WIRE_IMAGE_REASON = 800
 } fsimg_wire_image_field_t;
 #define FSIMG_WIRE_IMAGE_STACK_BYTES 64u
 #define FSIMG_WIRE_IMAGE_CODECS_BYTES 32u
+#define FSIMG_WIRE_IMAGE_UNVERIFIED_BYTES 32u
 #define FSIMG_WIRE_IMAGE_REASON_BYTES 128u
+_Static_assert(FSIMG_WIRE_IMAGE_UNVERIFIED +
+    FSIMG_WIRE_IMAGE_UNVERIFIED_BYTES == FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+    "the detail count follows the unverified fields");
+_Static_assert(FSIMG_WIRE_IMAGE_DETAILS + FSIMG_IMAGE_DETAILS_MAX *
+    FSIMG_WIRE_INFO_DETAIL_BYTES == FSIMG_WIRE_IMAGE_REASON,
+    "the reason follows the details");
 _Static_assert(FSIMG_WIRE_IMAGE_REASON + FSIMG_WIRE_IMAGE_REASON_BYTES ==
     FSIMG_WIRE_IMAGE_BYTES, "the image record ends with the reason");
 
@@ -289,6 +301,11 @@ void fsimg_wire_error_encode(unsigned char *, const fsimg_error_t *);
  */
 void fsimg_wire_entry_encode(unsigned char *, const fsimg_entry_t *, size_t);
 void fsimg_wire_info_encode(unsigned char *, const fsimg_volume_info_t *);
+/* A detail table into a zeroed record at the given count and table
+ * offsets, at most sixteen details.
+ */
+void fsimg_wire_details_encode(unsigned char *, size_t, size_t,
+    const fsimg_volume_detail_t *, uint32_t);
 void fsimg_wire_partition_encode(unsigned char *, const fsimg_partition_info_t *);
 fsimg_status_t fsimg_wire_error_decode(const unsigned char *, uint32_t,
     fsimg_error_t *);

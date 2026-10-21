@@ -400,9 +400,14 @@ must tile under `next_range()` and
 read back, zero inside every ZERO run, and each import must return all its
 memory and descriptors. Its seeds, written by `test-mtree
 --seed`, are `mtree -c` and bsdtar manifests of one host tree and a
-generated-content manifest, with a 64 KiB input ceiling. Set `FUZZ_CC` to
-a Clang with the required runtime; `FUZZ_CXX` defaults to its sibling
-`clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
+generated-content manifest, with a 64 KiB input ceiling.
+`fuzz/container.c` opens each input under detection and under each forced
+container, `hbcifs` among them with a fresh unlinked spool under a 16 MiB
+limit, so its header checks and LZO1X decode see every mutation; its seeds
+are the images `test-containers --seed-dmg`, `--seed-vhd` and `--seed-simg`
+and `test-hbcifs --seed-hbcifs` write, with a 1 MiB input ceiling. Set
+`FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults to its
+sibling `clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
 validation uses Homebrew LLVM:
 
 ```sh
@@ -1358,6 +1363,9 @@ FSIMG_IFS_NATIVE=/path/to/captures-ifs ./test/ifs-integration.sh
 FSIMG_IFS_IMAGES=/path/to/images ./test/ifs-integration.sh
 DUMPIFS='/path/to/dumpifs' QNXPROBE='/path/to/qnxprobe' \
     ./test/ifs-integration.sh
+FSIMG_HBCIFS_IMAGE=/path/to/PCM3_IFS2.ifs \
+FSIMG_HBCIFS_DECODED=/path/to/captures-ifs/decoded/h3-PCM3_IFS2.imagefs \
+    ./test/ifs-integration.sh
 ```
 
 `test/ifs-native.py compare` derives the tree fsimg must list from the
@@ -1422,6 +1430,33 @@ and "QNXPROBE is not set (qnxprobe comparison)"; the decoded S1 and S2
 bodies in the captures' `decoded/` are compared above
 ([TODO](todo-ifs.md)). The script exits 77 when it runs nothing, without
 Python 3 and every variable.
+
+`test/ifs-native.py container` compares an ImageFS inside a container with
+the decoder's manifest of an oracle's decode of the container's payload:
+the comparison above, with `fsimg t --json` and `test-ifs --manifest`
+reading the container through its layers, and then an extraction, `fsimg x
+-k -E` into a private temporary directory, in which every placed directory
+and file must appear, a file with its last record's size and POSIX
+`cksum`, which `cksum(1)` computes from the file on its standard input, and
+nothing else; safe extraction creates no links, whose targets the
+library comparison checks. The script checks the command on a generated
+`hbcifs` container, `test-hbcifs --seed-hbcifs` with the ImageFS it
+decodes to (2 entries, one file and one link), and requires it to fail
+against another image's decode. `FSIMG_HBCIFS_IMAGE` and
+`FSIMG_HBCIFS_DECODED` name `PCM3_IFS2.ifs` from one of the H3 update
+disc's `HEADUNIT/ADR*/` directories and its out-of-tree `liblzo2` decode
+from the captures' `decoded/`; the script then requires `fsimg i` to report
+`ifs/hbcifs` with the `lzo1x` codec, the disk `test-hbcifs --cksum`
+decodes to have the decode's `cksum` and length, the container comparison
+to agree, `fsimg W -d` to pass with `"complete":false` and `"unverified":
+"0x14,0x1c"`, and `fsimg t -l spool=1M` to fail with a spool limit error
+whose observed length lies within one 64 KiB step past the limit. On
+macOS the image decodes to the decode's 68,849,668 bytes, and lists 364
+entries, 214 files' bytes and 120 link targets, with 29 implicit
+directories, and extracts 214 files and 30 directories in agreement, in
+about 17 seconds. Without both variables the script prints "SKIP:
+FSIMG_HBCIFS_IMAGE and FSIMG_HBCIFS_DECODED are not set (PCM3_IFS2.ifs and
+its oracle decode)".
 
 `test-ifs-write` creates ImageFS images with the writer. The registry lists
 only writers that native QNX has qualified, so the test builds writers from

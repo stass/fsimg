@@ -15,9 +15,9 @@
 
 /*
  * The layer registry is the one list of layer names and file suffixes.
- * Schemes, containers and gzip are read and written; zstd and xz are
- * compression names reserved for later profiles, recognized by name and
- * suffix with no operations.
+ * Schemes, containers and gzip are read and written, except hbcifs, which
+ * is read only; zstd and xz are compression names reserved for later
+ * profiles, recognized by name and suffix with no operations.
  */
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme },
@@ -28,6 +28,8 @@ static const fsimg_layer_t layers[] = {
 	    .container = &fsimg_vhd_container },
 	{ .name = "simg", .suffix = ".simg", .kind = FSIMG_LAYER_CONTAINER,
 	    .container = &fsimg_simg_container },
+	{ .name = "hbcifs", .kind = FSIMG_LAYER_CONTAINER,
+	    .container = &fsimg_hbcifs_container },
 	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION,
 	    .compression = &fsimg_gzip_compression },
 	{ .name = "zstd", .suffix = ".zst", .kind = FSIMG_LAYER_COMPRESSION },
@@ -281,7 +283,33 @@ fsimg_stack_validate(const fsimg_stack_t *stack, fsimg_error_t *error)
 			return (FSIMG_EINVAL);
 		}
 	}
-	return (FSIMG_OK);
+	return (fsimg_stack_carried(stack,
+	    fsimg_stack_layer(stack, FSIMG_LAYER_CONTAINER), error));
+}
+
+fsimg_status_t
+fsimg_stack_carried(const fsimg_stack_t *stack, const fsimg_layer_t *container,
+    fsimg_error_t *error)
+{
+	const fsimg_stack_slot_t *filesystem, *scheme;
+	const char *carries;
+
+	if (container == NULL || container->container == NULL ||
+	    container->container->carries == NULL)
+		return (FSIMG_OK);
+	carries = container->container->carries;
+	filesystem = &stack->slots[FSIMG_LAYER_FILESYSTEM];
+	scheme = &stack->slots[FSIMG_LAYER_SCHEME];
+	if (scheme->state != FSIMG_SLOT_NAMED &&
+	    (filesystem->state != FSIMG_SLOT_NAMED ||
+	    strcmp(filesystem->name, carries) == 0))
+		return (FSIMG_OK);
+	fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+	    scheme->state == FSIMG_SLOT_NAMED ?
+	    "the container holds a volume, not a partition table" :
+	    "the container holds a different filesystem");
+	fsimg_error_path(error, container->name);
+	return (FSIMG_EINVAL);
 }
 
 const fsimg_layer_t *
@@ -435,8 +463,8 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
 		    FSIMG_CAP_VERIFY;
 	if (layer->container != NULL) {
-		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
-		    FSIMG_CAP_VERIFY;
+		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY |
+		    (layer->container->plan != NULL ? FSIMG_CAP_WRITE : 0);
 		snprintf(out->codecs, sizeof(out->codecs), "%s",
 		    layer->container->codecs);
 		if (layer->container->zlib)

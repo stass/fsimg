@@ -516,7 +516,11 @@ send_image(const fsimg_image_info_t *info, const fsimg_layer_report_t *report,
 	if (report != NULL) {
 		flags |= FSIMG_WIRE_IMAGE_VERIFIED;
 		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHECKED, report->partitions);
+		bcopy(report->unverified, raw + FSIMG_WIRE_IMAGE_UNVERIFIED,
+		    strnlen(report->unverified, sizeof(report->unverified) - 1));
 	}
+	fsimg_wire_details_encode(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+	    FSIMG_WIRE_IMAGE_DETAILS, info->details, info->detail_count);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, flags);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, info->disk_bytes);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, info->sector_bytes);
@@ -830,8 +834,8 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 }
 
 /*
- * The layers around the selected volume, which W also verifies
- * (report->complete): the container, then the partition table unless the
+ * The layers around the selected volume, which W also verifies, into
+ * report: the container, then the partition table unless the
  * selection was a range or the whole disk, whose image forces the scheme
  * empty. W -d adds the container's read-through checks.
  */
@@ -910,7 +914,8 @@ read_job(worker_child_t *child, fsimg_error_t *error)
 	status = fsimg_reader_get_info(child->reader, &volume, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = send_image(&image, report.complete ? &report : NULL, NULL, error);
+	status = send_image(&image, child->request.kind == FSIMG_JOB_VERIFY ?
+	    &report : NULL, NULL, error);
 	if (status == FSIMG_OK && child->request.kind == FSIMG_JOB_INFO &&
 	    image.scheme[0] != '\0')
 		status = send_partitions(child, error);

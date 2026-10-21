@@ -655,8 +655,41 @@ claim_name(uint64_t claim)
 }
 
 /*
+ * A detail table of a record, printed without interpreting a name:
+ * "name":value members of a JSON object, or one "name: value" line each,
+ * the value in hexadecimal when hex is set. The protocol checked the count
+ * and every name.
+ */
+static void
+details_report(fsimg_cli_display_t *display, const unsigned char *raw,
+    size_t count_offset, size_t table_offset, bool hex)
+{
+	uint64_t count = fsimg_wire_get64(raw + count_offset);
+
+	for (uint64_t i = 0; i < count; i++) {
+		const unsigned char *detail = raw + table_offset +
+		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
+		uint64_t value = fsimg_wire_get64(detail +
+		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES);
+
+		if (display->options->json) {
+			if (i != 0)
+				append(display, ",");
+			string_value(display, (const char *)detail);
+			append(display, ":");
+			uint_value(display, value);
+		} else {
+			prose(display, (const char *)detail);
+			append(display, hex ? ": 0x%08llx\n" : ": %llu\n",
+			    (unsigned long long)value);
+		}
+	}
+}
+
+/*
  * The container line of the image report: its name, the disk it yields,
- * its chunk count and encodings, and its identifier when it has one.
+ * its chunk count and encodings, and its identifier when it has one; then
+ * its header fields, words printed in hexadecimal.
  */
 static void
 container_report(fsimg_cli_display_t *display, const unsigned char *raw)
@@ -679,6 +712,10 @@ container_report(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, "\"");
 		} else
 			append(display, "null");
+		append(display, ",\"container_details\":{");
+		details_report(display, raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+		    FSIMG_WIRE_IMAGE_DETAILS, true);
+		append(display, "}");
 		return;
 	}
 	append(display, "Container:    ");
@@ -694,6 +731,8 @@ container_report(fsimg_cli_display_t *display, const unsigned char *raw)
 		uuid_value(display, raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID);
 	}
 	append(display, "\n");
+	details_report(display, raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+	    FSIMG_WIRE_IMAGE_DETAILS, true);
 }
 
 /*
@@ -726,7 +765,8 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 			container_report(display, raw);
 		else
 			append(display, ",\"container\":null,\"container_chunks\":null,"
-			    "\"container_codecs\":null,\"container_guid\":null");
+			    "\"container_codecs\":null,\"container_guid\":null,"
+			    "\"container_details\":null");
 		append(display, ",\"scheme\":");
 		if (scheme[0] != '\0')
 			string_value(display, scheme);
@@ -864,32 +904,12 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "%s%s\n", active ? ", active" : "", selected ? ", selected" : "");
 }
 
-/* The volume's named details in the driver's order, printed without
- * interpreting a name: "name":"value" members of the JSON details object,
- * or one "name: value" line each. The protocol checked every name.
- */
+/* The volume's named details in the driver's order, values in decimal. */
 static void
 volume_details(fsimg_cli_display_t *display, const unsigned char *raw)
 {
-	uint64_t count = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_DETAIL_COUNT);
-
-	for (uint64_t i = 0; i < count; i++) {
-		const unsigned char *detail = raw + FSIMG_WIRE_INFO_DETAILS +
-		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
-		uint64_t value = fsimg_wire_get64(detail +
-		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES);
-
-		if (display->options->json) {
-			if (i != 0)
-				append(display, ",");
-			string_value(display, (const char *)detail);
-			append(display, ":");
-			uint_value(display, value);
-		} else {
-			prose(display, (const char *)detail);
-			append(display, ": %llu\n", (unsigned long long)value);
-		}
-	}
+	details_report(display, raw, FSIMG_WIRE_INFO_DETAIL_COUNT,
+	    FSIMG_WIRE_INFO_DETAILS, false);
 }
 
 static void
@@ -1227,6 +1247,7 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 	const unsigned char *image = display->image;
 	const char *scheme = (const char *)image + FSIMG_WIRE_IMAGE_SCHEME;
 	const char *container_name = (const char *)image + FSIMG_WIRE_IMAGE_CONTAINER;
+	const char *unverified = (const char *)image + FSIMG_WIRE_IMAGE_UNVERIFIED;
 	uint64_t checked = fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_CHECKED);
 	uint64_t selected = fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_SELECTED);
 	bool layers, table, container;
@@ -1237,7 +1258,8 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 	table = layers && scheme[0] != '\0';
 	container = layers && container_name[0] != '\0';
 	if (display->options->json) {
-		append(display, "{\"schema\":1,\"type\":\"verify\",\"complete\":true,\"validation_scope\":\"%s\"",
+		append(display, "{\"schema\":1,\"type\":\"verify\",\"complete\":%s,\"validation_scope\":\"%s\"",
+		    unverified[0] == '\0' ? "true" : "false",
 		    verified_scope_name(display->scope));
 		for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
 			append(display, ",\"%s\":", keys[i]);
@@ -1246,6 +1268,11 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 		append(display, ",\"container\":");
 		if (container)
 			string_value(display, container_name);
+		else
+			append(display, "null");
+		append(display, ",\"unverified\":");
+		if (unverified[0] != '\0')
+			string_value(display, unverified);
 		else
 			append(display, "null");
 		append(display, ",\"scheme\":");
@@ -1267,13 +1294,20 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 	} else {
 		path_excerpt(display, display->options->image);
 		/* "image": [dmg container,] [GPT partition table (2 partitions)
-		 * and partition 1] filesystem structure verified (...)
+		 * and partition 1] filesystem structure verified (...); a
+		 * container with fields no rule checks says so.
 		 */
 		append(display, ":");
 		if (container) {
 			append(display, " ");
 			prose(display, container_name);
-			append(display, " container,");
+			append(display, " container");
+			if (unverified[0] != '\0') {
+				append(display, " (incomplete: fields ");
+				prose(display, unverified);
+				append(display, " unverified)");
+			}
+			append(display, ",");
 		}
 		if (table)
 			append(display, " %s partition table (%llu partition%s) and partition %llu",
@@ -1384,14 +1418,14 @@ layer(fsimg_cli_display_t *display, const fsimg_layer_info_t *info)
 		append(display, "}\n");
 		return;
 	}
-	append(display, "%-5s  %-11s  %-4s  %-5s  %-6s  %-13s  %s\n", info->name,
+	append(display, "%-6s  %-11s  %-4s  %-5s  %-6s  %-13s  %s\n", info->name,
 	    kind, (info->capabilities & FSIMG_CAP_READ) != 0 ? "yes" : "no",
 	    (info->capabilities & FSIMG_CAP_WRITE) != 0 ? "yes" : "no",
 	    (info->capabilities & FSIMG_CAP_VERIFY) != 0 ? "yes" : "no",
 	    info->codecs[0] != '\0' ? info->codecs : "-",
 	    info->settings[0] != '\0' ? info->settings : "-");
 	if (info->codec_version[0] != '\0')
-		append(display, "%-5s  %-11s  %s\n", "", "", info->codec_version);
+		append(display, "%-6s  %-11s  %s\n", "", "", info->codec_version);
 }
 
 static void
@@ -1894,7 +1928,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 			    error);
 			if (status == FSIMG_OK) {
 				if (first && !options->json)
-					append(display, "\nLayer  Kind         Read  Write  "
+					append(display, "\nLayer   Kind         Read  Write  "
 					    "Verify  Codecs         Settings\n");
 				layer(display, &layer_info);
 				return (finish_span(display, false, text, error));
