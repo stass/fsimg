@@ -13,7 +13,8 @@ static fsimg_status_t ifs_open(fsimg_reader_t *,
 static void ifs_close(fsimg_reader_t *);
 static fsimg_status_t ifs_resolve(fsimg_reader_t *, uint64_t,
     fsimg_extent_t *, fsimg_error_t *);
-static void add_detail(fsimg_volume_info_t *, const char *, uint64_t);
+static uint64_t shadowed_references(const fsimg_ifs_reader_t *);
+static void report_details(const fsimg_ifs_reader_t *, fsimg_volume_info_t *);
 static void report_info(fsimg_reader_t *);
 
 const fsimg_reader_ops_t fsimg_ifs_reader_ops = {
@@ -79,35 +80,59 @@ ifs_open(fsimg_reader_t *reader,
 	return (FSIMG_OK);
 }
 
-/* Append one named value; the fifteen ImageFS details fit the table, and
- * a sixteenth would be dropped rather than written past it.
+/* The nonzero references whose inode word a shadowed record carries. */
+static uint64_t
+shadowed_references(const fsimg_ifs_reader_t *ifs)
+{
+	uint64_t count = 0;
+
+	for (unsigned i = 0; i < IFS_REFERENCES; i++)
+		if (ifs->counts.reference_shadowed[i])
+			count++;
+	return (count);
+}
+
+/* The header's boot state and the open passes' counts as named details,
+ * in the documented order. The table is sized by its initializer, so a
+ * detail that would not fit the volume information fails the build.
  */
 static void
-add_detail(fsimg_volume_info_t *info, const char *name, uint64_t value)
+report_details(const fsimg_ifs_reader_t *ifs, fsimg_volume_info_t *info)
 {
-	fsimg_volume_detail_t *detail;
+	const ifs_header_t *header = &ifs->header;
+	const fsimg_volume_detail_t details[] = {
+		{ "mount_flags", header->mount_flags },
+		{ "boot_ino_0", header->boot_ino[0] },
+		{ "boot_ino_1", header->boot_ino[1] },
+		{ "boot_ino_2", header->boot_ino[2] },
+		{ "boot_ino_3", header->boot_ino[3] },
+		{ "script_ino", header->script_ino },
+		{ "chain_paddr", header->chain_paddr },
+		/* Records by inode flag nibble 0x0, 0x8, 0xc and 0xe. */
+		{ "flags_0", ifs->counts.records_by_flag[0] },
+		{ "flags_8", ifs->counts.records_by_flag[1] },
+		{ "flags_c", ifs->counts.records_by_flag[2] },
+		{ "flags_e", ifs->counts.records_by_flag[3] },
+		{ "implicit_directories", ifs->counts.implicit_directories },
+		{ "shadowed", ifs->counts.shadowed },
+		{ "omitted", ifs->counts.omitted },
+		{ "omitted_references", ifs->counts.omitted_references },
+		{ "shadowed_references", shadowed_references(ifs) }
+	};
 
-	if (info->detail_count >= FSIMG_VOLUME_DETAILS_MAX)
-		return;
-	detail = &info->details[info->detail_count];
-	strcpy(detail->name, name);
-	detail->value = value;
-	info->detail_count++;
+	_Static_assert(IFS_FLAG_NIBBLES == 4, "four flag details");
+	_Static_assert(sizeof(details) <= sizeof(info->details),
+	    "the ImageFS details fit the volume information's table");
+	bcopy(details, info->details, sizeof(details));
+	info->detail_count = sizeof(details) / sizeof(details[0]);
 }
 
 /* The volume information: byte geometry over image_size, the mountpoint
- * when its bytes are valid, and the header's boot state and the open
- * passes' counts as named details in this documented order: mount_flags,
- * boot_ino_0 to boot_ino_3, script_ino, chain_paddr, the record counts by
- * inode flag nibble flags_0, flags_8, flags_c and flags_e, then
- * implicit_directories, shadowed, omitted and omitted_references.
+ * when its bytes are valid, and the details.
  */
 static void
 report_info(fsimg_reader_t *reader)
 {
-	static const char *const flag_names[IFS_FLAG_NIBBLES] = {
-		"flags_0", "flags_8", "flags_c", "flags_e"
-	};
 	fsimg_ifs_reader_t *ifs = ifs_state(reader);
 	const ifs_header_t *header = &ifs->header;
 	fsimg_volume_info_t *info = &reader->info;
@@ -135,23 +160,7 @@ report_info(fsimg_reader_t *reader)
 		info->valid |= FSIMG_VOLUME_MOUNTPOINT;
 		bcopy(ifs->mountpoint, info->mountpoint, sizeof(ifs->mountpoint));
 	}
-
-	info->detail_count = 0;
-	add_detail(info, "mount_flags", header->mount_flags);
-	add_detail(info, "boot_ino_0", header->boot_ino[0]);
-	add_detail(info, "boot_ino_1", header->boot_ino[1]);
-	add_detail(info, "boot_ino_2", header->boot_ino[2]);
-	add_detail(info, "boot_ino_3", header->boot_ino[3]);
-	add_detail(info, "script_ino", header->script_ino);
-	add_detail(info, "chain_paddr", header->chain_paddr);
-	for (unsigned i = 0; i < IFS_FLAG_NIBBLES; i++)
-		add_detail(info, flag_names[i],
-		    ifs->counts.records_by_flag[i]);
-	add_detail(info, "implicit_directories",
-	    ifs->counts.implicit_directories);
-	add_detail(info, "shadowed", ifs->counts.shadowed);
-	add_detail(info, "omitted", ifs->counts.omitted);
-	add_detail(info, "omitted_references", ifs->counts.omitted_references);
+	report_details(ifs, info);
 }
 
 static void

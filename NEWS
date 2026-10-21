@@ -317,7 +317,8 @@ ImageFS checks the additive checksum over the whole image, requires the
 volume to end at the image's size, requires each boot and script
 reference to name exactly one delivered or omitted file, never a shadowed
 record, and walks every directory, omitted ones included; `fsimg W` adds
-the shadowed count, and the references to omitted entries, to its result.
+the shadowed count, the references to omitted entries and the references
+whose inode word a shadowed record also carries to its result.
 
 An ImageFS inside a Harman-Becker `hbcifs` container, the PCM 3.1 update
 disc's `PCM3_IFS2.ifs`, is read through a read-only container layer: the
@@ -340,7 +341,10 @@ data on a 4-byte boundary, and the trailer checksum, every other byte zero.
 `-o mountpoint=` sets the mountpoint, default `/`; the size follows from
 the contents, so a size or free-space request is refused, and `boot1=` to
 `boot4=` and `script=` are refused until a boot slot's inode-flag rule is
-observed. QNX 6.5.0 `dumpifs` lists and extracts fsimg's images of one
+observed. A verified ImageFS ends exactly at its image size, so a
+partition scheme or a container that pads the volume (DMG, VHD, simg)
+below `ifs` is refused before anything is written; gzip is not. QNX 6.5.0
+`dumpifs` lists and extracts fsimg's images of one
 file, the name and path limits, every kind, the owner, mode and time
 limits, data sizes around 4 bytes and 64 KiB, shared contents, an empty
 image and empty and 1024-byte mountpoints as it does the `mkifs` images of

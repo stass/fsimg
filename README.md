@@ -169,8 +169,10 @@ with a mountpoint setting (default `/`): the root and a record for every
 directory, then files, symbolic links and FIFOs with owner, mode and
 modification time, each file's data on a 4-byte boundary. The image's size
 follows from its contents, and boot programs and scripts are refused until
-a boot flag rule is observed. QNX 6.5.0 `dumpifs` lists and extracts its
-images as it does the `mkifs` images of the same trees.
+a boot flag rule is observed. A partition scheme or a container that pads
+the volume (DMG, VHD, simg) cannot hold an ImageFS, which must end exactly
+at its image size; gzip can compress it. QNX 6.5.0 `dumpifs` lists and
+extracts its images as it does the `mkifs` images of the same trees.
 
 An ImageFS inside a Harman-Becker `hbcifs` container, such as `PCM3_IFS2.ifs`
 on the PCM 3.1 update disc, is read through the container: its header is

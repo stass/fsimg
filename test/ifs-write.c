@@ -1546,6 +1546,86 @@ test_validation(void)
 	fsimg_ctx_free(ctx);
 }
 
+/* An ImageFS must fill its slot exactly, so a stack that puts a scheme or
+ * a padding container below ifs is refused when the writer is made,
+ * naming both layers, whatever the partition settings; gzip pads nothing
+ * and is accepted. A wrap whose stack names ifs is refused the same way
+ * before it writes a byte.
+ */
+static void
+test_stack_rule(void)
+{
+	static const struct {
+		const char	*stack;
+		const char	*layers;
+	} refused[] = {
+		{ "ifs/gpt", "ifs/gpt" }, { "ifs/mbr", "ifs/mbr" },
+		{ "ifs/vhd", "ifs/vhd" }, { "ifs/dmg", "ifs/dmg" },
+		{ "ifs/simg", "ifs/simg" }, { "ifs/gpt/vhd", "ifs/gpt" },
+		{ "ifs/-/simg", "ifs/simg" }
+	};
+	static const spec_t one[] = {
+		{ "/a.txt", FSIMG_ENTRY_FILE, 5, 1, NULL }
+	};
+	fsimg_layer_options_t gpt, mbr;
+	fsimg_write_options_t options, o;
+	fsimg_writer_t *writer;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_io_t *input, *output;
+	memory_sink_t volume, out;
+	fsimg_ctx_t *ctx;
+	chk_t c;
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	reproducible_options(&options);
+	/* A typed partition, so the refusal is not the missing type's. */
+	fsimg_layer_options_init(&gpt);
+	snprintf(gpt.gpt_type, sizeof(gpt.gpt_type), "linux");
+	fsimg_layer_options_init(&mbr);
+	snprintf(mbr.mbr_type, sizeof(mbr.mbr_type), "0x83");
+	for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+		o = options;
+		if (strstr(refused[i].stack, "gpt") != NULL)
+			o.layers = &gpt;
+		else if (strstr(refused[i].stack, "mbr") != NULL)
+			o.layers = &mbr;
+		writer = NULL;
+		CHECK(fsimg_writer_new(ctx, refused[i].stack, &o, &writer,
+		    &error) == FSIMG_EUNSUPPORTED);
+		CHECK(writer == NULL &&
+		    strcmp(error.path, refused[i].layers) == 0);
+	}
+	/* A scheme is refused before a container's settings are read. */
+	o = options;
+	gpt.vhd_align_bytes = 3;
+	o.layers = &gpt;
+	CHECK(fsimg_writer_new(ctx, "ifs/gpt/vhd", &o, &writer, &error) ==
+	    FSIMG_EUNSUPPORTED && strcmp(error.path, "ifs/gpt") == 0);
+	o = options;
+	snprintf(o.compression, sizeof(o.compression), "%s", "gzip");
+	CHECK(fsimg_writer_new(ctx, "ifs", &o, &writer, NULL) == FSIMG_OK);
+	fsimg_writer_free(writer);
+	CHECK(fsimg_writer_new(ctx, "ifs/-/-", &options, &writer, NULL) ==
+	    FSIMG_OK);
+	fsimg_writer_free(writer);
+
+	build_checked(&options, one, 1, &volume, &c, NULL);
+	chk_free(&c);
+	CHECK(memory_io(ctx, &volume, false, &input) == FSIMG_OK);
+	bzero(&out, sizeof(out));
+	CHECK(memory_io(ctx, &out, true, &output) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+	CHECK(fsimg_image_wrap(ctx, input, "ifs/vhd", &options, &sink,
+	    &error) == FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "ifs/vhd") == 0 && out.writes == 0);
+	fsimg_io_free(output);
+	fsimg_io_free(input);
+	free(volume.bytes);
+	fsimg_ctx_free(ctx);
+}
+
 /* Rewrite a little-endian image's trailer so its words sum to zero again,
  * so that only the checker's layout and zero checks can see a mutation.
  */
@@ -2819,6 +2899,7 @@ main(int argc, char **argv)
 		return (create_external(argv[2]));
 	CHECK(argc == 1);
 	test_validation();
+	test_stack_rule();
 	test_small();
 	test_matrix();
 	test_tree_times();

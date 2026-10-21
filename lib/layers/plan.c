@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "format.h"
 #include "layer.h"
 #include "unicode.h"
 
@@ -19,7 +20,8 @@
  * with the trailing tables at the end of the disk. A container rounds the
  * disk up to its granularity first, so those tables end the disk it
  * declares, and states the bound of the output it will encode; a
- * compression states the bound of its encoding of that.
+ * compression states the bound of its encoding of that. A filesystem that
+ * must fill its slot exactly refuses a scheme or a padding container.
  */
 #define PARTITION_ALIGNMENT	(UINT64_C(1) << 20)
 
@@ -39,6 +41,8 @@ static fsimg_status_t resolve_container(fsimg_disk_plan_t *,
     const fsimg_stack_t *, const fsimg_layer_options_t *, fsimg_error_t *);
 static fsimg_status_t resolve_compression(fsimg_disk_plan_t *,
     const fsimg_layer_options_t *, fsimg_error_t *);
+static fsimg_status_t check_exact_volume(const fsimg_stack_t *,
+    const fsimg_layer_t *, fsimg_error_t *);
 static fsimg_status_t size_disk(fsimg_disk_plan_t *, uint64_t,
     fsimg_error_t *);
 
@@ -169,6 +173,38 @@ resolve_compression(fsimg_disk_plan_t *plan,
 	    plan->epoch, &plan->compression_settings, error));
 }
 
+/*
+ * The exact-volume stack rule (specs/design-layers.md#exact-volumes): no
+ * layer below a filesystem whose descriptor declares an exact volume may
+ * make its slot longer than the volume. The caller passes each layer that
+ * can lengthen the slot: the scheme, since a partition is whole
+ * sectors, and the container only when it rounds the disk up to a
+ * granularity above one byte, the one way a container pads. Compression
+ * encodes the disk byte for byte and is never a candidate. NULL passes.
+ * The refusal names the filesystem and the layer ("ifs/vhd").
+ */
+static fsimg_status_t
+check_exact_volume(const fsimg_stack_t *stack,
+    const fsimg_layer_t *lengthening, fsimg_error_t *error)
+{
+	const fsimg_stack_slot_t *slot = &stack->slots[FSIMG_LAYER_FILESYSTEM];
+	const fsimg_format_variant_t *variant;
+	const fsimg_format_t *format;
+	char layers[2 * sizeof(slot->name)];
+
+	if (lengthening == NULL || slot->state != FSIMG_SLOT_NAMED)
+		return (FSIMG_OK);
+	format = fsimg_format_find(slot->name, &variant);
+	if (format == NULL || !format->exact_volume)
+		return (FSIMG_OK);
+	snprintf(layers, sizeof(layers), "%s/%s", slot->name,
+	    lengthening->name);
+	fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
+	    "the filesystem cannot sit in a scheme or a padding container");
+	fsimg_error_path(error, layers);
+	return (FSIMG_EUNSUPPORTED);
+}
+
 bool
 fsimg_disk_plan_encoded(const fsimg_disk_plan_t *plan)
 {
@@ -179,8 +215,10 @@ fsimg_disk_plan_encoded(const fsimg_disk_plan_t *plan)
  * Resolve the stack's scheme and container and the disk-level settings:
  * the sector size, a fixed disk length, and the disk identifier, which is
  * taken as given, derived from the epoch in reproducible mode, or refused.
- * The disk holds count partitions, each made an empty record in slot
- * order.
+ * A stack that breaks the exact-volume rule is refused with
+ * FSIMG_EUNSUPPORTED: a scheme before any container setting is resolved,
+ * a padding container once its settings give its granularity. The disk
+ * holds count partitions, each made an empty record in slot order.
  */
 fsimg_status_t
 fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
@@ -205,7 +243,12 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 		status = fsimg_layer_options_check(stack, plan->compression,
 		    layers, true, error);
 	if (status == FSIMG_OK)
+		status = check_exact_volume(stack,
+		    fsimg_stack_layer(stack, FSIMG_LAYER_SCHEME), error);
+	if (status == FSIMG_OK)
 		status = resolve_container(plan, stack, layers, error);
+	if (status == FSIMG_OK && plan->container_settings.granularity > 1)
+		status = check_exact_volume(stack, plan->container, error);
 	if (status == FSIMG_OK)
 		status = resolve_compression(plan, layers, error);
 	if (status != FSIMG_OK)

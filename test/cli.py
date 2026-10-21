@@ -2056,13 +2056,14 @@ def test_mtree_reporting(executable, root):
     assert (work / "json.mtree").exists()
 
 
-def ifs_image(payload, shadowed=0, motd=b"motd", script=0):
+def ifs_image(payload, shadowed=0, motd=b"motd", script=0, twin=False):
     """A big-endian ImageFS encoded here from the published layout: the
     mountpoint /proc/boot, a directory etc holding the file motd, and the
     symbolic link bin/sh, whose parent bin has no record; shadowed adds that
     many directory records below the link, and motd renames the file. Boot
     inode 0 names the file, so the image is bootable; script sets the
-    script reference."""
+    script reference, and twin gives the first shadowed record the file's
+    inode."""
     def record(mode, inode, tail, path, extra=b""):
         body = tail + path + b"\0" + extra
         length = (0x18 + len(body) + 3) // 4 * 4
@@ -2077,7 +2078,8 @@ def ifs_image(payload, shadowed=0, motd=b"motd", script=0):
                        len(payload).to_bytes(4, "big"), b"etc/" + motd) +
                 record(0o120777, 3, (7).to_bytes(2, "big") +
                        len(target).to_bytes(2, "big"), b"bin/sh", target + b"\0") +
-                b"".join(record(0o40755, 4 + i, b"", b"bin/sh/x%d" % i)
+                b"".join(record(0o40755, 2 if twin and i == 0 else 4 + i, b"",
+                                b"bin/sh/x%d" % i)
                          for i in range(shadowed)) +
                 bytes(4))
 
@@ -2112,6 +2114,7 @@ def test_ifs(executable, root, payload):
     assert info["details"]["boot_ino_0"] == "2"
     # The root and bin have no record.
     assert info["details"]["implicit_directories"] == "2"
+    assert info["details"]["shadowed_references"] == "0"
     human = invoke(executable, root, ["i", "-f", "boot.ifs"]).stdout
     assert b"Format:       IFS\n" in human and b'Mountpoint:   "/proc/boot"\n' in human
     assert b"implicit_directories: 2\n" in human
@@ -2136,6 +2139,16 @@ def test_ifs(executable, root, payload):
     verified = invoke(executable, root, ["W", "-f", "shadowed.ifs"]).stdout
     assert verified == (b'"shadowed.ifs": filesystem structure verified '
                         b'(2 files, 3 directories, 1 shadowed record)\n'), verified
+    # A shadowed record carrying the boot program's inode word is counted
+    # beside the reference, which still names the delivered file.
+    (root / "twin.ifs").write_bytes(ifs_image(payload, shadowed=1, twin=True))
+    info = completed(invoke(executable, root, ["i", "--json", "-f", "twin.ifs"]))[1]
+    assert info["details"]["shadowed_references"] == "1"
+    assert b"shadowed_references: 1\n" in invoke(executable, root, ["i", "-f", "twin.ifs"]).stdout
+    verified = invoke(executable, root, ["W", "-f", "twin.ifs"]).stdout
+    assert verified == (b'"twin.ifs": filesystem structure verified (2 files, 3 directories, '
+                        b'1 shadowed record, 1 boot or script reference matching a shadowed '
+                        b'record)\n'), verified
     # A boot program whose name is outside the profile is omitted, still
     # verified, and its reference counted.
     (root / "omitted.ifs").write_bytes(ifs_image(payload, shadowed=2, motd=b"mo\xe9td"))
@@ -2197,6 +2210,22 @@ def test_ifs_create(executable, root, payload):
                                            "-f", "refused.ifs", *operands], expected=1)
         assert detail in result.stderr, (extra, result.stderr)
         assert not (root / "refused.ifs").exists()
+    # gzip encodes the image byte for byte, so it verifies; a scheme or a
+    # container that pads the volume is refused before any output, even
+    # with a partition type.
+    completed(invoke(executable, root, [*arguments, "-a", "-f", "made.ifs.gz", *operands]))
+    with gzip.open(root / "made.ifs.gz") as packed:
+        assert packed.read() == image
+    verification = completed(invoke(executable, root, ["W", "--json", "-d", "-f", "made.ifs.gz"]))
+    report = next(record for record in verification if record["type"] == "verify")
+    assert report["validation_scope"] == "initialized-payload"
+    for stack, extra in [("ifs/gpt", ["-o", "gpt:type=linux"]), ("ifs/mbr", ["-o", "mbr:type=0x83"]),
+                         ("ifs/vhd", []), ("ifs/dmg", []), ("ifs/simg", [])]:
+        result = invoke(executable, root, ["c", "-R", "-S", "off", "-F", stack, *extra,
+                                           "-f", "refused.img", *operands], expected=1)
+        assert (b'the filesystem cannot sit in a scheme or a padding container "' +
+                stack.encode() + b'"') in result.stderr, (stack, result.stderr)
+        assert not (root / "refused.img").exists()
 
 
 def main():

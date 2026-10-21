@@ -343,8 +343,12 @@ checks an ImageFS's additive checksum over the whole image, requires the
 volume to end exactly at the image's size, and requires each boot and
 script inode reference to name exactly one file, delivered or omitted for
 its name; a reference naming only a shadowed record names nothing.
-Its result adds, when nonzero, the number of shadowed records and of boot
-and script references naming an entry omitted for its name.
+Its result adds, when nonzero, the number of shadowed records, of boot
+and script references naming an entry omitted for its name, and of boot
+and script references whose inode word, the inode number with its flag
+bits, a shadowed record also carries,
+which a startup finding them by scanning the table rather than by path
+could load instead.
 An ImageFS whose mountpoint is outside the name rules is reported as
 unsupported, since it has no observed form to check.
 .Cm c
@@ -357,6 +361,10 @@ Its size follows from its contents, so
 and
 .Fl Fl free-space
 are refused.
+A verified ImageFS ends exactly at its image size, so a partition scheme or
+a container that pads the volume (DMG, VHD, simg) below
+.Ql ifs
+is refused before anything is written; gzip compression is not.
 QNX 6.5.0
 .Ql dumpifs
 lists and extracts fsimg's images as it does the
@@ -431,8 +439,9 @@ format has one, the mountpoint and named format details when the format
 records them, time basis and known capabilities.
 An ImageFS's details are its header's mount flags, boot and script inode
 references and chain address, its record counts by inode flag nibble, and
-the numbers of implicit directories, shadowed records, omitted subtrees and
-references to omitted entries.
+the numbers of implicit directories, shadowed records, omitted subtrees,
+references to omitted entries and references a shadowed record also
+carries.
 When no single partition holds a filesystem,
 .Cm i
 still reports the table and states that no volume is selected; every other

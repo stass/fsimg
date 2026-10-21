@@ -26,7 +26,7 @@ two share no code, since they decode different records.
 | File | Owns |
 | --- | --- |
 | `ifs.h` | Private types, constants and prototypes shared by the files below |
-| `descriptor.c` | `fsimg_ifs_format`: the `ifs` name, its capability record, the probe and the reader and writer operations |
+| `descriptor.c` | `fsimg_ifs_format`: the `ifs` name, its capability record, the probe, the reader and writer operations and the exact-volume declaration |
 | `records.c` | Byte-order codecs and decode/encode of the header and of every record kind; pure functions without I/O |
 | `volume.c` | Header validation, the mountpoint, and the record-table pass |
 | `tree.c` | The path sort, the derived hierarchy, synthesized parents, shadowed records and the child groups |
@@ -175,8 +175,9 @@ in three bounded steps over the metadata store:
      entry or shadowed. When the first sorted record is not the empty
      path, the root is synthesized first, as any missing parent.
    * **Duplicate.** If the next record has the same path, this record is
-     shadowed: the shadowed counter advances and nothing is emitted or
-     pushed. The last of a run of equal paths is the entry.
+     shadowed: the shadowed counter advances, each reference carrying its
+     inode word is marked for `shadowed_references`, and nothing is
+     emitted or pushed. The last of a run of equal paths is the entry.
    * **Ancestors.** Let `m` be the number of leading components this path
      shares with the last emitted path, which is the stack's path; a
      shadowed record never changes it, so the entry after a shadowed run
@@ -186,7 +187,8 @@ in three bounded steps over the metadata store:
    * **Below a non-directory.** If that node's kind is not directory, this
      path lies below a file, link or FIFO, and the record is
      [shadowed](design-ifs.md#paths-below-a-non-directory): the shadowed
-     counter advances, nothing is synthesized, emitted or pushed, and the
+     counter advances and the references are marked as for a duplicate,
+     nothing is synthesized, emitted or pushed, and the
      stack stays popped to the non-directory, which every later path of
      its subtree meets in turn. The node on the stack is the entry of its
      path, the last record in table order, since an earlier duplicate is
@@ -279,22 +281,37 @@ geometry as `volume_bytes = image_size` with a 1-byte sector and allocation
 unit, since the format addresses bytes; the mountpoint, when valid, in the
 volume information's `mountpoint` field under `FSIMG_VOLUME_MOUNTPOINT`;
 no label; the time basis UTC; and `FSIMG_VOLUME_FREE` only after a
-completed verification, with zero free bytes.
+completed verification, with zero free bytes. The 1-byte allocation unit
+is the design for reading and writing alike: every data offset and length
+the format stores is a byte count, and the writer's 4-byte file alignment
+is a [layout choice](design-ifs.md#writer-profile), not a unit of
+allocation, so the writer accepts only an `allocation_unit_bytes` of zero
+or 1 and its plan reports every byte of the image as allocated.
 
 The boot-specific state and the counters open collects go through the
 volume information's [detail table](design-api.md#reader), in this order:
 `mount_flags`, `boot_ino_0` to `boot_ino_3`, `script_ino`, `chain_paddr`,
 `flags_0`, `flags_8`, `flags_c`, `flags_e`, `implicit_directories`,
-`shadowed`, `omitted` and `omitted_references`, fifteen of the sixteen the
-table holds. The record count is not a detail: every validated record has
+`shadowed`, `omitted`, `omitted_references` and `shadowed_references`,
+all sixteen the table holds, so a new value needs a wider table first.
+The record count is not a detail: every validated record has
 exactly one of the four accepted nibbles, so it is the sum of the four
 `flags_*` values, shadowed and omitted records included. `omitted` counts
 the omitted subtree roots the child pass found, which is what a full walk
 reports in `omitted_entries`;
 `omitted_references` counts the boot and script references that resolve to
-an omitted node. `info` always prints it, and the `W` result adds it
-when it is nonzero, since a boot program fsimg cannot name is worth
-saying. Every value is known when
+an omitted node. `shadowed_references` counts the nonzero boot and script
+references whose inode word at least one shadowed record also carries, an
+earlier duplicate or a record below a non-directory, each reference once
+however many such records there are. Inode words need not be unique and
+reference matching sees only nodes, so such a record is invisible to the
+[reference check](#verification); a startup that finds `boot_ino` records
+by scanning the table rather than by path could load its bytes instead of
+the delivered file's. The child pass marks a reference whenever it counts
+a shadowed record carrying its word, with no pass of its own. `info`
+always prints both reference counts, and the `W` result adds each when it
+is nonzero, since a boot program fsimg cannot name, or one a shadowed
+record may stand in for, is worth saying. Every value is known when
 open returns, so info discloses no scan.
 
 ## Verification
@@ -330,7 +347,9 @@ to reconcile, and the table pass validated every record at open. It runs:
   earlier duplicates and records below a non-directory together. A
   shadowed record is validated at open like any other, so it does not
   make the verification incomplete: every H3 boot image carries three and
-  verifies.
+  verifies. A shadowed record carrying a reference's inode word does not
+  fail it either: the reference still names exactly one node, and the
+  `shadowed_references` detail, which `W` prints when nonzero, reports it.
 
 The report counts delivered files and directories, the root and the
 synthesized ones included and omitted subtrees excluded, logical bytes and
@@ -362,9 +381,11 @@ defaults:
 | `boot_programs[4]`, `script` | `boot1=` to `boot4=`, `script=` | `FSIMG_SETTING_BOOT`; copied image paths; governed by the [boot settings rule](design-ifs.md#boot-settings): a path naming no catalog file, or an entry of another kind, is `FSIMG_EINVAL`, and a slot the closed flag table lacks is `FSIMG_EUNSUPPORTED`, refused by `validate` before any collection; the empty table makes that every slot |
 
 The keys are bare, as the [layer design](design-layers.md#layer-settings)
-spells every filesystem setting; the epoch is the common `-e`. The format
-declares no partition type, so a scheme in an `ifs` create stack is
-`FSIMG_EINVAL`.
+spells every filesystem setting; the epoch is the common `-e`. The
+descriptor declares an [exact volume](design-layers.md#exact-volumes), so
+the disk plan refuses a scheme or a padding container below `ifs` with
+`FSIMG_EUNSUPPORTED` before `validate` runs; the format declares no
+partition type.
 
 ## Planning
 
@@ -481,8 +502,8 @@ Writer:
 
 | Condition | Status |
 | --- | --- |
-| A setting outside its type; a nonzero `volume_bytes` or `min_free_bytes`; a mountpoint over 1024 bytes or outside the byte rules; a boot setting naming no catalog file or an entry of another kind; a component outside the profile; a scheme in the create stack | `FSIMG_EINVAL` |
-| A label, from the common capability check; a boot setting for a slot the flag table lacks; a path over 1024 bytes; a file above `2^32 - 1` bytes; a kind the profile lacks; a time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
+| A setting outside its type; a nonzero `volume_bytes` or `min_free_bytes`; a mountpoint over 1024 bytes or outside the byte rules; a boot setting naming no catalog file or an entry of another kind; a component outside the profile | `FSIMG_EINVAL` |
+| A scheme or a padding container below `ifs`, under the [exact-volume rule](design-layers.md#exact-volumes); a label, from the common capability check; a boot setting for a slot the flag table lacks; a path over 1024 bytes; a file above `2^32 - 1` bytes; a kind the profile lacks; a time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
 | An image above `2^32 - 4` bytes; a non-reproducible fallback time outside `[0, 4294967295]` | `FSIMG_ERANGE` |
 | A plan row read back from metadata storage outside the profile's limits, or disagreeing with its catalog entry | `FSIMG_ECORRUPT` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |

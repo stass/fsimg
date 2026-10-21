@@ -687,9 +687,9 @@ repository records only pass and fail counts.
   * the boot and script references, each matching one node's full inode
     word;
   * shadowed records, the earlier records of duplicate paths and the
-    records below a non-directory, reported by count; a reference that a
-    shadowed record also carries waits on the owner's answer to the
-    [references item](todo-ifs.md).
+    records below a non-directory, reported by count, and the references
+    a shadowed record also carries, reported by the `shadowed_references`
+    count without failing.
 * Tests cover:
   * a flipped byte in each region;
   * a trailer of the wrong byte order;
@@ -855,7 +855,9 @@ Depends on stages 4 and 6 and on layer stages 2 to 4.
   * an empty mountpoint.
 * The record goes into `docs/ifs-research.md` under fsimg writer output,
   with captures in `~/qnx65-vm/writer-captures-ifs/`.
-* Registration covers the capability record and the formats output, plus
+* Registration covers the capability record and the formats output, the
+  [exact-volume stack rule](../specs/design-layers.md#exact-volumes) that
+  keeps a scheme or a padding container from holding the image, plus
   updates to `README.md`, `docs/fsimg.1`, `docs/libfsimg.3` and `NEWS`.
 * **Gate:** every cycle passes, and the registration bar of owner decision
   7 is met.

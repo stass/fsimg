@@ -18,21 +18,9 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   use a native bootable body; and how `procnto` resolves a duplicated path
   (owner decision 10). They answer owner decision 6 and decision 10's growth
   refusal, and gate the wrap stage.
-* [Medium] **References and shadowed records** (`lib/formats/ifs/tree.c`,
-  `lib/formats/ifs/verify.c`, `specs/design-ifs-driver.md#verification`):
-  reference matching counts only the nodes the tree emits, and inode words
-  need not be unique, so a shadowed record (an earlier duplicate, or a
-  whole subtree below a link) can carry the inode word of a delivered boot
-  program unseen; `test/ifs.c` pins that such an image verifies. If the
-  native startup finds `boot_ino` records by scanning the table rather
-  than by path (untested), it could load the shadowed record's bytes while
-  fsimg verifies the delivered one. Verification cannot note it without
-  failing: `fsimg_verify_report_t` has no field for it, and the findings
-  stream `specs/design-api.md` describes has no public interface. The
-  owner chooses one of: refuse it, counting reference matches over every
-  record in the table pass as well, with its status class; count it in a
-  sixteenth `info` detail, `shadowed_references`, which `W` prints; or
-  report it as a non-fatal finding once a findings interface exists.
+  * [Low] Boot a body whose shadowed record carries `boot_ino[0]`'s word,
+    to learn whether the startup finds boot programs by path or by
+    scanning the table, which `shadowed_references` only counts.
 * [Medium] **`dumpifs -u` copies of the H3 boot images**
   (`docs/ifs-research.md`): the eight images exceed `load.py`'s 3 MiB
   budget. Write them into `big.img` while the VM is stopped, run
@@ -106,11 +94,6 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   * The template must outlive writer construction until
     `fsimg_writer_output()` or the wrap returns; no ownership row in
     `specs/design-api.md` covers it.
-  * A scheme in an `ifs` stack: the profile refuses it, while `plan.c`
-    refuses only a missing partition type, as for QNX4; choose one rule.
-    No design states one for a padding container (`vhd`, `dmg`, `simg`)
-    below `ifs`; `create` must not publish a padded ImageFS that `W`
-    reports as longer than its image size.
   * The carried-volume refusal has no field in the layer record;
     `fsimg_stack_validate()` checks slot kinds only. It can be stated as the
     forced filesystem plus an empty scheme slot.
@@ -124,16 +107,19 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
     fields. The container descriptor's `carries`, `spooled` and
     `unverified` facts, the image information's container details and the
     layer report's unverified list serve `ifsboot` too.
+* [Medium] **Exact volumes in unnamed wraps and composes**
+  (`lib/layers/output.c`, `specs/design-layers.md#exact-volumes`): the
+  disk plan applies the exact-volume rule to the filesystem a stack names,
+  so `fsimg_image_wrap()` of an ImageFS volume under `vhd` or `gpt`, with
+  no filesystem in the stack, and `fsimg_image_compose()` with an ImageFS
+  part still write a padded ImageFS that `W` reports as longer than its
+  image size. Both are library-only. The owner chooses whether the rule
+  follows the volume's identified filesystem: wrap already identifies its
+  input and could name it in the stack before planning; compose identifies
+  only untyped parts.
 * [Low] **Large native bodies** (`tools/qnx/guest/popifs.sh`): the guest's
   4 MiB RAM disk limits native builds to small bodies; build one above
   16 MiB on a scratch volume if a design rule ever depends on body size.
-* [Low] **Writer mountpoint default** (`lib/formats/ifs/write-plan.c`,
-  `specs/design-ifs.md#mountpoint`): with no setting the writer stores `/`,
-  the value every bootable `mkifs` image and every H3 and X1 boot image
-  carries, while a nonbootable `mkifs` image without `mount=` stores an
-  empty mountpoint. `dumpifs` accepts both. The owner chooses
-  whether the default stays `/` (one default for the wrap's bodies too) or
-  follows nonbootable `mkifs`.
 * [Medium] **Writer scale** (`test/ifs-write.c`): the 2^32 - 4 byte limit
   is emitted on a sparse sink; a catalog that spills to scratch, with
   measured I/O calls, scratch and RSS as the

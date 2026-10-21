@@ -487,8 +487,10 @@ stating structural or initialized-payload scope. Entries the reader omitted
 for a name outside its profile are reported by the omitted-entry warning
 and summary field next to a complete result, never as corruption; for
 ImageFS the result also prints the `shadowed` detail when records are
-shadowed, and the `omitted_references` detail when a boot or script
-reference resolves to an omitted node.
+shadowed, the `omitted_references` detail when a boot or script
+reference resolves to an omitted node, and the `shadowed_references`
+detail when a shadowed record carries a boot or script reference's inode
+word.
 
 A byte range (`--offset`, `--length`) never reads a partition table, so it
 conflicts with a scheme named in `-F` as it does with `--partition`; a

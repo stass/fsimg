@@ -92,6 +92,7 @@ static fsimg_status_t path_entry_decode(const unsigned char *, size_t,
     path_entry_t *, fsimg_error_t *);
 static void match_references(fsimg_ifs_reader_t *, uint32_t, ifs_kind_t,
     bool);
+static void shadow_record(fsimg_ifs_reader_t *, uint32_t);
 static fsimg_status_t emit_node(tree_pass_t *, const unsigned char *, size_t,
     const path_entry_t *, fsimg_error_t *);
 static bool level_names(const tree_pass_t *, uint32_t, const unsigned char *,
@@ -179,6 +180,25 @@ match_references(fsimg_ifs_reader_t *ifs, uint32_t inode, ifs_kind_t kind,
 		ifs->counts.reference_kind[i] = kind;
 		if (hidden)
 			ifs->counts.omitted_references++;
+	}
+}
+
+/* Count one shadowed record, and mark each nonzero boot or script
+ * reference that carries its inode word: a shadowed record is never
+ * matched, so a startup that found references by scanning the table could
+ * load it instead of the delivered node, and info reports how many
+ * references are exposed. Both kinds of shadowing pass through here.
+ */
+static void
+shadow_record(fsimg_ifs_reader_t *ifs, uint32_t inode)
+{
+	uint32_t reference;
+
+	ifs->counts.shadowed++;
+	for (unsigned i = 0; i < IFS_REFERENCES; i++) {
+		reference = ifs_reference(&ifs->header, i);
+		if (reference != 0 && reference == inode)
+			ifs->counts.reference_shadowed[i] = true;
 	}
 }
 
@@ -301,7 +321,7 @@ place_entry(tree_pass_t *pass, const path_entry_t *entry,
 	pass->depth = shared;
 	pass->path_length = pass->levels[shared].path_end;
 	if (pass->levels[shared].kind != IFS_KIND_DIRECTORY) {
-		ifs->counts.shadowed++;
+		shadow_record(ifs, entry->inode);
 		return (FSIMG_OK);
 	}
 
@@ -357,7 +377,7 @@ child_pass(tree_pass_t *pass, fsimg_stream_t *sorted, fsimg_error_t *error)
 			if (pending.path_length == entry.path_length &&
 			    bcmp(pending.path, entry.path,
 			    entry.path_length) == 0) {
-				ifs->counts.shadowed++;
+				shadow_record(ifs, pending.inode);
 			} else {
 				status = place_entry(pass, &pending, error);
 				if (status != FSIMG_OK)

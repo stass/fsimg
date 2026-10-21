@@ -1218,18 +1218,20 @@ volume_detail(const fsimg_cli_display_t *display, const char *name)
 }
 
 /* An ImageFS result also counts, when nonzero, the records no entry
- * delivers and the boot or script references naming an omitted entry.
+ * delivers, the boot or script references naming an omitted entry, and
+ * those whose inode word a shadowed record also carries.
  */
 static void
 ifs_counts(fsimg_cli_display_t *display)
 {
-	uint64_t shadowed, references;
+	uint64_t shadowed, references, shadowed_references;
 
 	if (strcmp((const char *)display->volume + FSIMG_WIRE_INFO_FORMAT,
 	    "ifs") != 0)
 		return;
 	shadowed = volume_detail(display, "shadowed");
 	references = volume_detail(display, "omitted_references");
+	shadowed_references = volume_detail(display, "shadowed_references");
 	if (shadowed != 0)
 		append(display, ", %llu shadowed record%s",
 		    (unsigned long long)shadowed, shadowed == 1 ? "" : "s");
@@ -1238,6 +1240,12 @@ ifs_counts(fsimg_cli_display_t *display)
 		    (unsigned long long)references, references == 1 ?
 		    "reference to an omitted entry" :
 		    "references to omitted entries");
+	if (shadowed_references != 0)
+		append(display, ", %llu boot or script %s",
+		    (unsigned long long)shadowed_references,
+		    shadowed_references == 1 ?
+		    "reference matching a shadowed record" :
+		    "references matching shadowed records");
 }
 
 static void

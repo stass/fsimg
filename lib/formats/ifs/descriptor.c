@@ -50,7 +50,9 @@ const fsimg_format_t fsimg_ifs_format = {
 	.probe_bytes = IFS_HEADER_BYTES,
 	.probe = ifs_probe,
 	.reader = &fsimg_ifs_reader_ops,
-	.writer = &fsimg_ifs_writer_ops
+	.writer = &fsimg_ifs_writer_ops,
+	/* A verified ImageFS ends exactly at image_size. */
+	.exact_volume = true
 };
 
 /* The identity signature is the seven bytes "imagefs" at offset 0; no FAT

@@ -30,6 +30,11 @@ struct fsimg_format_variant {
  * without opening the volume names a public format.
  *
  * reader and writer are independently optional.
+ *
+ * exact_volume is true for a format whose volume must end where its slot
+ * ends, because full verification fails a longer one (ImageFS's
+ * volume-length rule). The disk plan then refuses any layer that can make
+ * the slot longer than the volume (specs/design-layers.md#exact-volumes).
  */
 struct fsimg_format {
 	const fsimg_format_variant_t *variants;
@@ -39,6 +44,7 @@ struct fsimg_format {
 			    const fsimg_format_variant_t **, fsimg_error_t *);
 	const fsimg_reader_ops_t *reader;
 	const fsimg_writer_ops_t *writer;
+	bool		 exact_volume;
 };
 
 /* The registered descriptors; the registry in format.c lists them. */

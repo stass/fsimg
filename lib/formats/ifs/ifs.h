@@ -153,7 +153,9 @@ typedef struct ifs_record {
  * counts the roots of omitted subtrees, omitted_references the boot and
  * script references naming an omitted node. reference_matches and
  * reference_kind record, per reference slot, how many nodes carry its
- * inode word and the kind of the last one, for verification.
+ * inode word and the kind of the last one, for verification;
+ * reference_shadowed whether a shadowed record carries it too, which info
+ * counts as shadowed_references.
  */
 typedef struct ifs_counts {
 	uint64_t	 records_by_flag[IFS_FLAG_NIBBLES];
@@ -163,6 +165,7 @@ typedef struct ifs_counts {
 	uint64_t	 omitted_references;
 	uint64_t	 reference_matches[IFS_REFERENCES];
 	ifs_kind_t	 reference_kind[IFS_REFERENCES];
+	bool		 reference_shadowed[IFS_REFERENCES];
 } ifs_counts_t;
 
 /* The node replay made current: its index, kind, the table offset of its

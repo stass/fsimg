@@ -544,6 +544,7 @@ typedef struct model_record {
 	size_t		 path_length;
 	const unsigned char *content;
 	size_t		 content_length;
+	bool		 shadowed;	/* no node delivers this record */
 } model_record_t;
 
 /* One entry the reader must deliver, in traversal order. */
@@ -572,6 +573,8 @@ typedef struct model {
 	uint64_t	 below;		/* the shadowed below a non-directory */
 	uint64_t	 omitted;
 	uint64_t	 omitted_references;
+	/* The nonzero references whose word a shadowed record carries. */
+	uint64_t	 shadowed_references;
 	uint32_t	 references[5];
 	/* Per reference, the nodes carrying its inode word, the root and
 	 * omitted ones included, and the kind of the last of them.
@@ -841,16 +844,20 @@ model_deliver(model_t *m, const model_node_t *node, const char *path)
 	e->content_length = rec->content_length;
 }
 
-/* The number of nodes below node that hold a record. */
+/* Mark the record of every node below node shadowed and count them. */
 static uint64_t
-model_records_below(const model_t *m, size_t node)
+model_shadow_below(model_t *m, size_t node)
 {
 	uint64_t count = 0;
 
 	for (size_t c = m->nodes[node].first_child; c != 0;
-	    c = m->nodes[c - 1].next_sibling)
-		count += (m->nodes[c - 1].record >= 0 ? 1 : 0) +
-		    model_records_below(m, c - 1);
+	    c = m->nodes[c - 1].next_sibling) {
+		if (m->nodes[c - 1].record >= 0) {
+			m->records[m->nodes[c - 1].record].shadowed = true;
+			count++;
+		}
+		count += model_shadow_below(m, c - 1);
+	}
 	return (count);
 }
 
@@ -877,7 +884,7 @@ model_match(model_t *m, long record, bool hidden)
  * record is not a directory nothing is listed and every record is
  * shadowed, as procnto hides the records below a link (the format design
  * extends this to files and FIFOs); the parents there are neither listed
- * nor counted. model_records_below() counts nodes, one per path: the
+ * nor counted. model_shadow_below() counts nodes, one per path: the
  * earlier records of a duplicate path were counted by model_build().
  */
 static void
@@ -888,7 +895,7 @@ model_list(model_t *m, size_t node, const char *path, bool hidden)
 
 	if (m->nodes[node].record >= 0 &&
 	    m->records[m->nodes[node].record].kind != GEN_DIR) {
-		below = model_records_below(m, node);
+		below = model_shadow_below(m, node);
 		m->below += below;
 		m->shadowed += below;
 		return;
@@ -1010,8 +1017,10 @@ model_build(model_t *m, const unsigned char *image, size_t length)
 			    j - start);
 			start = j + 1;
 		}
-		if (m->nodes[node].record >= 0)
+		if (m->nodes[node].record >= 0) {
+			m->records[m->nodes[node].record].shadowed = true;
 			m->shadowed++;
+		}
 		m->nodes[node].record = (long)i;
 	}
 	if (m->nodes[0].record < 0)
@@ -1019,6 +1028,18 @@ model_build(model_t *m, const unsigned char *image, size_t length)
 	else
 		model_match(m, m->nodes[0].record, false);
 	model_list(m, 0, "", false);
+
+	/* A reference counts once however many shadowed records carry it. */
+	for (unsigned r = 0; r < 5; r++) {
+		for (size_t i = 0; m->references[r] != 0 &&
+		    i < m->record_count; i++) {
+			if (m->records[i].shadowed &&
+			    m->records[i].inode == m->references[r]) {
+				m->shadowed_references++;
+				break;
+			}
+		}
+	}
 }
 
 /* What full verification of an image that opens must return: an invalid
@@ -1507,6 +1528,8 @@ listing_matches(const listing_t *l, const model_t *m, const char *label)
 	    detail(&l->info, "shadowed") != m->shadowed ||
 	    detail(&l->info, "omitted") != m->omitted ||
 	    detail(&l->info, "omitted_references") != m->omitted_references ||
+	    detail(&l->info, "shadowed_references") !=
+	    m->shadowed_references ||
 	    detail(&l->info, "mount_flags") != m->mount_flags ||
 	    detail(&l->info, "chain_paddr") != m->chain ||
 	    detail(&l->info, "boot_ino_0") != m->references[0] ||
@@ -1733,7 +1756,7 @@ test_sample(void)
 		"mount_flags", "boot_ino_0", "boot_ino_1", "boot_ino_2",
 		"boot_ino_3", "script_ino", "chain_paddr", "flags_0", "flags_8",
 		"flags_c", "flags_e", "implicit_directories", "shadowed",
-		"omitted", "omitted_references"
+		"omitted", "omitted_references", "shadowed_references"
 	};
 	gen_t g;
 	listing_t l;
@@ -1752,7 +1775,7 @@ test_sample(void)
 	CHECK(l.info.time_basis == FSIMG_TIME_UTC);
 	CHECK(l.info.scope == FSIMG_VALIDATION_HEADER);
 	CHECK(l.info.label[0] == '\0');
-	/* Fifteen details in the documented order. */
+	/* Sixteen details, the table full, in the documented order. */
 	CHECK(l.info.detail_count == sizeof(details) / sizeof(details[0]));
 	for (size_t i = 0; i < l.info.detail_count; i++)
 		CHECK(strcmp(l.info.details[i].name, details[i]) == 0);
@@ -3182,6 +3205,7 @@ test_references(void)
 	CHECK(detail(&info, "script_ino") == g.members[script].inode);
 	CHECK(detail(&info, "flags_e") == 1);
 	CHECK(detail(&info, "omitted_references") == 0);
+	CHECK(detail(&info, "shadowed_references") == 0);
 	/* The flag nibble is part of the inode word a reference names. */
 	g.boot[0] = g.members[boot].inode & 0x0fffffffu;
 	gen_finish(&g);
@@ -3231,21 +3255,40 @@ test_references(void)
 	    FSIMG_EUNSUPPORTED, "a reference naming a FIFO");
 
 	/* Matching counts nodes only, so a shadowed record carrying the word
-	 * of the entry a reference names does not disturb it. Whether
-	 * verification should refuse such an image is open
-	 * (docs/todo-ifs.md).
+	 * of the entry a reference names does not disturb verification; info
+	 * counts the reference in shadowed_references, once however many
+	 * shadowed records carry its word, and once per reference slot.
 	 */
 	reference_image(&g, (const char *[]){ "d:", "f:dup", "f:dup", NULL }, 1,
 	    2);
 	g.members[1].inode = g.members[2].inode;
 	gen_finish(&g);
 	expect_verify(&g, FSIMG_OK, "a shadowed duplicate carrying the word");
+	image_info(&g, &info);
+	CHECK(detail(&info, "shadowed_references") == 1);
+	g.boot[2] = g.members[2].inode;
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_OK, "two references to a shadowed word");
+	image_info(&g, &info);
+	CHECK(detail(&info, "shadowed_references") == 2);
+	gen_free(&g);
+	reference_image(&g, (const char *[]){ "d:", "f:dup", "f:dup", "f:dup",
+	    NULL }, 1, 3);
+	g.members[1].inode = g.members[3].inode;
+	g.members[2].inode = g.members[3].inode;
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_OK, "two shadowed duplicates carrying the word");
+	image_info(&g, &info);
+	CHECK(detail(&info, "shadowed") == 2 &&
+	    detail(&info, "shadowed_references") == 1);
 	gen_free(&g);
 	reference_image(&g, (const char *[]){ "d:", "f:x", "l:L", "f:L/y", NULL },
 	    1, 1);
 	g.members[3].inode = g.members[1].inode;
 	gen_finish(&g);
 	expect_verify(&g, FSIMG_OK, "a record below a link carrying the word");
+	image_info(&g, &info);
+	CHECK(detail(&info, "shadowed_references") == 1);
 	gen_free(&g);
 }
 

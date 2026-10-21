@@ -173,6 +173,13 @@ invalid mountpoint never blocks reading: info omits it, and full
 verification reports the volume incomplete with `FSIMG_EUNSUPPORTED`. This
 is the one statement of the mountpoint rule; the driver cites it. [X1]
 
+Without a mountpoint setting the writer stores `/`, not the empty
+mountpoint a nonbootable `mkifs` image gets without `mount=`. `/` is the
+value of every bootable `mkifs` image and of every H3 and X1 boot image,
+so one default serves a standalone image and the body an `ifsboot` wrap
+packages, and `dumpifs` accepts both values; `mountpoint=` with an empty
+value writes the empty mountpoint. [X1], [S1], [S2]
+
 ## The record table
 
 ### Table rule
@@ -277,7 +284,11 @@ a [shadowed record](#duplicates) has no entry and the loader could not open
 it by name: a reference that names no entry, or more than one, is
 `FSIMG_ECORRUPT`, and a reference whose only match is a shadowed record
 names no entry; one that names an entry of another kind is
-`FSIMG_EUNSUPPORTED`. The referenced members, `.script`
+`FSIMG_EUNSUPPORTED`. A shadowed record that carries the word of a
+reference naming exactly one entry does not fail it: info counts the
+reference in its `shadowed_references` detail, because a startup that
+found references by scanning the table could load that record instead.
+The referenced members, `.script`
 and the boot programs, are ordinary file entries delivered as bytes.
 Nonbootable images carry zeros, which are never checked. [S1], [S2], [X1]
 
@@ -578,9 +589,13 @@ range the time field stores. The mountpoint, byte order and boot settings
 are filesystem settings, so their keys are bare: `mountpoint=`, `endian=`,
 the latter shared with QNX6, `boot1=` to `boot4=` and `script=`; the epoch
 is the common `-e`. An ImageFS is
-placed in no partition scheme in any observed product and declares no
-partition type, so a scheme in an `ifs` create stack is refused with
-`FSIMG_EINVAL`; a `qnxboot` or `hbcifs` container around it is the
+placed in no partition scheme in any observed product, and the
+[volume-length rule](#volume-layout) fails one in a slot longer than
+`image_size`, so the format declares an
+[exact volume](design-layers.md#exact-volumes): the layer design refuses
+a scheme, or a container that pads the volume, below `ifs` before any
+output, while gzip around it is written. An `ifsboot` or `hbcifs`
+container around it is the
 [layer design's](design-layers.md#layer-profiles). [X1], [S1], [S2]
 
 ## The PCM and live-CD images
@@ -663,7 +678,7 @@ code ran. The minimum matrix:
 | Ranges | a range ending exactly at the trailer; one including the trailer; one inside the table; one inside the header; start plus length overflowing 32 bits; shared ranges, including extraction of a heavily shared image under the default output ceiling; zero-length files with offsets 0, inside the table and past the image; sizes 0, 1, 3, 4, 65535, 65536, 65537 and above 16 MiB |
 | Symbolic links | `sym_offset` of `L`, `L + 1` and `L + 2`; `sym_size` 0, 1, 1023, 1024 and 1025; a target crossing the record; a missing NUL after the target; relative, absolute, dangling and `..` targets delivered as bytes |
 | Metadata | uid and gid 0, 65535 and 4294967295 read as stored; modes `0000`, `0644`, `0755`, `4755` and `7777`; times 0 and 4294967295; FIFO words nonzero |
-| References | `boot_ino[0]` and `script_ino` naming one file; naming no record; naming two records; naming only a shadowed record, an earlier duplicate or a record below a link; naming a directory and a link; a nonzero `boot_ino[3]`; all zero |
+| References | `boot_ino[0]` and `script_ino` naming one file; naming no record; naming two records; naming only a shadowed record, an earlier duplicate or a record below a link; naming a file whose inode word one or two shadowed records also carry, verified and counted once in `shadowed_references`, and two references to such a word, counted twice; naming a directory and a link; a nonzero `boot_ino[3]`; all zero |
 | Checksum | a correct trailer; one flipped byte in the header, the mountpoint, a record, file data, padding and the trailer; a byte-swapped trailer; a big-endian image summed in its order |
 | Writer | an empty catalog, which is the root record alone; one file; the name limits; each kind; owner 4294967295 and mode `7777`; a time of 4294967296 as a counted loss and as a refusal when losses are forbidden; a 1024-byte target, and a 1025-byte one refused by collection; mountpoints of 0, 1, 1024 and 1025 bytes; both byte orders; `volume_bytes`, `min_free_bytes`, a label and each boot setting refused; a 1025-byte path refused; an image one word below and at `2^32 - 4` bytes on a sparse sink; byte identity across source order, cache size, scratch path and time zone; a poison scan of every padding byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |

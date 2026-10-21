@@ -40,7 +40,7 @@ layers add to it.
 | Layer descriptor, one per layer | Probe with its prefix table, read-side open (peel), write-side plan/encode/transcode with its template input where declared, verification, settings and capability record |
 | Image (`lib/layers/image.c`) | Read-side peeling order, detection and forcing, partition enumeration and selection, the spool and the spool-backed peel, the layer verification report |
 | Container adapter and chunk index (`lib/layers/chunks.c`, `lib/meta/`) | Disk-offset to chunk resolution, the decompressed-chunk cache, chunk validation |
-| Disk plan (`lib/layers/plan.c`) | Disk sizing around a volume, partition placement, partition types and names, identifiers, the plan's disk and partition report |
+| Disk plan (`lib/layers/plan.c`) | The exact-volume stack rule, disk sizing around a volume, partition placement, partition types and names, identifiers, the plan's disk and partition report |
 | Layered output (`lib/layers/output.c`) | The scheme tables written into the staged raw disk, the assembled disk, the transcode pass, the sequential sink, raw-intermediate lifetime |
 | Output coordinator (`lib/output/`) | Staging directory, publication, durability, unchanged |
 | Filesystem drivers | The volume only; they never see a layer |
@@ -48,7 +48,8 @@ layers add to it.
 Each obligation has exactly one owner. A driver cannot reach a container or a
 partition table, and a layer cannot reach a filesystem driver except through
 the bounded probe used for partition auto-selection and default partition
-types.
+types, and the [exact-volume](#exact-volumes) fact the disk plan reads from
+its descriptor.
 
 ## The stack
 
@@ -92,6 +93,33 @@ empty slots and `-`, because every name says which slot it fills, so a
 detected `fat32/-/dmg` prints as `fat32/dmg`. Pasted into `-F` on create it
 produces the same stack. Compression is reported beside it (`gzip`), never
 inside it.
+
+### Exact volumes
+
+A filesystem descriptor may declare an **exact volume**: its volume must
+end where the slot holding it ends, because full verification fails a
+longer one. `ifs` declares it, under the ImageFS
+[volume-length rule](design-ifs.md#volume-layout). Two layers can make a
+slot longer than its volume: every scheme, since a partition is whole
+sectors, and a container that rounds the disk up to a granularity above
+one byte, which is how a container pads (DMG and VHD to a 512-byte
+sector, simg to its block). A create or wrap stack that names such a
+filesystem and puts either below it is `FSIMG_EUNSUPPORTED`, naming the
+filesystem and the first such layer (`ifs/gpt`, `ifs/vhd`), when the disk
+plan resolves the stack, before any byte is written: a scheme before any
+container setting is resolved, a container once its settings give its
+granularity. The property is the container's resolved granularity, not a
+list of names, so a container added to the registry is judged by how it
+sizes the disk. Compression encodes the disk byte for byte and never pads:
+`ifs` with gzip is written. A
+[carried-volume](#prefix-tables-opaque-sections-and-carried-volumes)
+container gives its filesystem a slot of exactly the declared length and
+states its own rules; since this rule refuses any scheme below `ifs`
+first, a scheme inside a carried container around `ifs` is refused here,
+naming the scheme, before the carried-volume rule applies.
+Reading is unaffected: a disk made otherwise, with
+an ImageFS in a partition, still reads, and its full verification reports
+a volume longer than the image as the filesystem's design says.
 
 ### Layer settings
 
@@ -709,9 +737,8 @@ once per transcode pass and writes the output once.
 Values use the CLI's existing byte-quantity, integer, UUID and boolean
 syntax. A key whose layer is absent from the stack fails as an unknown
 setting. Duplicate keys are syntax errors. `ifs` has no derived `gpt:type`
-or `mbr:type`: a scheme in an `ifs` stack is refused, because both
-containers that package an ImageFS [carry the volume](#prefix-tables-opaque-sections-and-carried-volumes)
-and a bare ImageFS is a loader's image, not a partition's content.
+or `mbr:type`; a scheme below it on create is refused under
+[exact volumes](#exact-volumes).
 
 The zlib levels default to 6, zlib's own default and `gzip(1)`'s: the last
 level before compression time grows steeply for little gain. What `hdiutil`
