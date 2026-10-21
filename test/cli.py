@@ -1276,9 +1276,16 @@ def test_compressed_and_streams(executable, root):
     # a closed descriptor, which the coordinator holds with an unreadable
     # placeholder so no descriptor of its own takes its place, and a
     # directory.
-    result = invoke(executable, root, ["tf", "-"], expected=1,
-                    preexec_fn=lambda: os.close(0))
-    assert b"standard input could not be read" in result.stderr, result.stderr
+    # The AddressSanitizer runtime opens a socket before main(), which takes
+    # descriptor 0 when it is closed, so the closed case is unobservable
+    # there: the coordinator correctly relays that socket as the input.
+    if "ASAN_OPTIONS" in os.environ:
+        print("SKIP: closed standard input (the sanitizer runtime takes "
+              "descriptor 0 before main)")
+    else:
+        result = invoke(executable, root, ["tf", "-"], expected=1,
+                        preexec_fn=lambda: os.close(0))
+        assert b"standard input could not be read" in result.stderr, result.stderr
     directory = os.open(root, os.O_RDONLY)
     try:
         result = invoke(executable, root, ["tf", "-"], expected=1, stdin=directory)
