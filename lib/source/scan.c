@@ -91,7 +91,6 @@ scan_entry(fsimg_writer_t *writer, fsimg_source_root_t *root,
 	fsimg_entry_t entry = { .path = image_path, .metadata = identity->metadata };
 	fsimg_source_storage_t storage;
 	uint64_t reference;
-	size_t path_length;
 	fsimg_status_t status;
 
 	storage = FSIMG_STORAGE_NONE;
@@ -104,26 +103,49 @@ scan_entry(fsimg_writer_t *writer, fsimg_source_root_t *root,
 		    FSIMG_ENTRY_SYMLINK;
 		entry.size = identity->length;
 		storage = FSIMG_STORAGE_HOST;
-		path_length = strlen(relative_path) + 1;
-		bzero(writer->source_record, FSIMG_SOURCE_HEADER);
-		fsimg_meta_put_u64(writer->source_record, root->id);
-		fsimg_meta_put_u64(writer->source_record + 8, identity->device);
-		fsimg_meta_put_u64(writer->source_record + 16, identity->inode);
-		fsimg_meta_put_u64(writer->source_record + 24, identity->length);
-		fsimg_meta_put_u64(writer->source_record + 32, (uint64_t)identity->modified.seconds);
-		fsimg_meta_put_u64(writer->source_record + 40, identity->modified.nanoseconds);
-		fsimg_meta_put_u64(writer->source_record + 48, (uint64_t)identity->changed.seconds);
-		fsimg_meta_put_u64(writer->source_record + 56, identity->changed.nanoseconds);
-		fsimg_meta_put_u64(writer->source_record + 64, identity->kind);
-		fsimg_meta_put_u64(writer->source_record + 72, 1);
-		bcopy(relative_path, writer->source_record + FSIMG_SOURCE_HEADER, path_length);
-		status = fsimg_stream_append(writer->host_sources, writer->source_record,
-		    FSIMG_SOURCE_HEADER + path_length, &reference, error);
+		status = fsimg_source_append_host(writer, root, identity, NULL,
+		    relative_path, &reference, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
 	return (fsimg_writer_collect(writer, &entry, storage, reference, root,
 	    error));
+}
+
+/* The path is placed first, with bcopy's overlap-safe copy, because a
+ * caller may have built it in the record already.
+ */
+fsimg_status_t
+fsimg_source_append_host(fsimg_writer_t *writer, const fsimg_source_root_t *root,
+    const fsimg_host_file_t *identity, const unsigned char *digest,
+    const char *relative_path, uint64_t *reference, fsimg_error_t *error)
+{
+	unsigned char *record = writer->source_record;
+	size_t path_length;
+
+	path_length = strlen(relative_path) + 1;
+	if (path_length > writer->ctx->options.max_path_bytes)
+		return (fsimg_limit_error(error, FSIMG_RESOURCE_PATH,
+		    writer->ctx->options.max_path_bytes, path_length));
+	bcopy(relative_path, record + FSIMG_SOURCE_HEADER, path_length);
+	bzero(record, FSIMG_SOURCE_HEADER);
+	fsimg_meta_put_u64(record, root->id);
+	fsimg_meta_put_u64(record + 8, identity->device);
+	fsimg_meta_put_u64(record + 16, identity->inode);
+	fsimg_meta_put_u64(record + 24, identity->length);
+	fsimg_meta_put_u64(record + 32, (uint64_t)identity->modified.seconds);
+	fsimg_meta_put_u64(record + 40, identity->modified.nanoseconds);
+	fsimg_meta_put_u64(record + 48, (uint64_t)identity->changed.seconds);
+	fsimg_meta_put_u64(record + 56, identity->changed.nanoseconds);
+	fsimg_meta_put_u64(record + 64, identity->kind);
+	fsimg_meta_put_u64(record + 72, 1);
+	if (digest != NULL) {
+		fsimg_meta_put_u64(record + 80, 1);
+		bcopy(digest, record + FSIMG_SOURCE_DIGEST,
+		    FSIMG_SHA256_DIGEST_LENGTH);
+	}
+	return (fsimg_stream_append(writer->host_sources, record,
+	    FSIMG_SOURCE_HEADER + path_length, reference, error));
 }
 
 static fsimg_status_t

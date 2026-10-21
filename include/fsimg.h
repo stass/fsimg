@@ -771,6 +771,17 @@ void fsimg_sink_init(fsimg_sink_t *, fsimg_sink_kind_t);
  * repeated path, a dropped directory that requires metadata, or such
  * programmatic directories whose metadata differ fail with FSIMG_EINVAL
  * naming the path in error.path.
+ * add_manifest imports an mtree(5) manifest as one more root, read from
+ * manifest_fd, an O_RDONLY regular file borrowed for the call, from offset
+ * zero to its length when the call begins. contents_fd is an O_RDONLY
+ * directory, duplicated, beneath which host files supply the bytes of
+ * entries that need them, or -1 when none does; the directory is taken as
+ * a root only once an entry needs host bytes, and an entry that needs them
+ * without one fails. Its records rank as that root's scanned records. A
+ * failure while reading the manifest names the line by byte offset in
+ * error.offset and by number in error.message, and the entry's image path
+ * in error.path. A host file that changed, or whose bytes differ from the
+ * manifest's sha256digest, fails emission with FSIMG_ESOURCE_CHANGED.
  * write_at requires a single basename beneath a trusted directory descriptor,
  * publishes without replacement, and always performs durable publication.
  * On unsupported publication error.path names the retained image relative to
@@ -788,6 +799,8 @@ fsimg_status_t fsimg_writer_set_sources(fsimg_writer_t *,
 fsimg_status_t fsimg_writer_add(fsimg_writer_t *, const fsimg_entry_t *,
     const fsimg_source_t *, fsimg_error_t *);
 fsimg_status_t fsimg_writer_add_tree(fsimg_writer_t *, int, const char *,
+    fsimg_error_t *);
+fsimg_status_t fsimg_writer_add_manifest(fsimg_writer_t *, int, int,
     fsimg_error_t *);
 fsimg_status_t fsimg_writer_plan(fsimg_writer_t *, const fsimg_plan_t **,
     fsimg_error_t *);

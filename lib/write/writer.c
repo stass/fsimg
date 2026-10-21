@@ -300,7 +300,7 @@ fsimg_writer_collect_new(fsimg_ctx_t *ctx, fsimg_writer_t **out,
 {
 	fsimg_writer_t *writer;
 	fsimg_error_t detail;
-	uint64_t capacity;
+	uint64_t capacity, source_capacity;
 	fsimg_status_t status;
 
 	if (out != NULL)
@@ -311,7 +311,13 @@ fsimg_writer_collect_new(fsimg_ctx_t *ctx, fsimg_writer_t **out,
 	if (out == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "missing writer output"));
+	/* Catalog records hold a path; source records hold a relative path or
+	 * a generated description, whose size does not depend on the path
+	 * limit, so the source-record buffer and stream may be the larger.
+	 */
 	capacity = (uint64_t)ctx->options.max_path_bytes + FSIMG_CATALOG_HEADER;
+	source_capacity = capacity < FSIMG_GENERATED_RECORD_MAX ?
+	    FSIMG_GENERATED_RECORD_MAX : capacity;
 	if (capacity > UINT32_MAX)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 		    FSIMG_OP_WRITER, "catalog record limit exceeds internal range"));
@@ -323,6 +329,7 @@ fsimg_writer_collect_new(fsimg_ctx_t *ctx, fsimg_writer_t **out,
 	}
 	writer->ctx = ctx;
 	writer->record_capacity = (uint32_t)capacity;
+	writer->source_record_capacity = (uint32_t)source_capacity;
 	fsimg_session_init(&writer->session, ctx, "source collection", 0);
 	writer->record = fsimg_alloc(ctx, (size_t)capacity, &detail);
 	if (writer->record == NULL) {
@@ -331,7 +338,8 @@ fsimg_writer_collect_new(fsimg_ctx_t *ctx, fsimg_writer_t **out,
 			*error = detail;
 		goto fail;
 	}
-	writer->source_record = fsimg_alloc(ctx, (size_t)capacity, &detail);
+	writer->source_record = fsimg_alloc(ctx, (size_t)source_capacity,
+	    &detail);
 	if (writer->source_record == NULL) {
 		status = detail.status;
 		if (error != NULL)
@@ -342,7 +350,7 @@ fsimg_writer_collect_new(fsimg_ctx_t *ctx, fsimg_writer_t **out,
 	    &writer->entries, error);
 	if (status != FSIMG_OK)
 		goto fail;
-	status = fsimg_stream_new(&writer->session, (uint32_t)capacity,
+	status = fsimg_stream_new(&writer->session, (uint32_t)source_capacity,
 	    &writer->host_sources, error);
 	if (status != FSIMG_OK)
 		goto fail;
@@ -686,6 +694,7 @@ reject_aliases(fsimg_writer_t *writer, const fsimg_host_file_t *output,
 {
 	const fsimg_catalog_entry_t *catalog;
 	fsimg_status_t status;
+	bool aliased;
 
 	for (uint64_t id = 1; id <= writer->count; id++) {
 		status = fsimg_catalog_get(writer, id, &catalog, error);
@@ -693,18 +702,23 @@ reject_aliases(fsimg_writer_t *writer, const fsimg_host_file_t *output,
 			return (status);
 		if (catalog->storage != FSIMG_STORAGE_HOST)
 			continue;
+		/* Opening validates the source's identity, which is all this
+		 * probe needs, so it closes rather than finishes: finishing is
+		 * for a cursor that served the bytes, whose digest it checks. A
+		 * source that changed since collection is named by its image
+		 * path; source access leaves the catalog snapshot intact.
+		 */
 		status = fsimg_source_open(writer, id, error);
-		if (status != FSIMG_OK)
+		if (status != FSIMG_OK) {
+			fsimg_error_path(error, catalog->entry.path);
 			return (status);
-		if (writer->source.identity.device == output->device &&
-		    writer->source.identity.inode == output->inode) {
-			fsimg_source_close(writer);
+		}
+		aliased = writer->source.identity.device == output->device &&
+		    writer->source.identity.inode == output->inode;
+		fsimg_source_close(writer);
+		if (aliased)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_WRITER, "output aliases a collected host source"));
-		}
-		status = fsimg_source_finish(writer, error);
-		if (status != FSIMG_OK)
-			return (status);
 	}
 	return (FSIMG_OK);
 }

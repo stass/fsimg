@@ -46,7 +46,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/write/writer.h lib/write/writer.c lib/write/catalog.c \
 	lib/write/emit.h lib/write/emit.c \
 	lib/source/source.h lib/source/source.c lib/source/scan.c \
-	lib/source/mtree.h lib/source/mtree.c \
+	lib/source/mtree.h lib/source/mtree.c lib/source/manifest.c \
+	lib/source/generated.h lib/source/generated.c \
 	lib/io/io.h lib/read/directory.c lib/read/directory.h \
 	lib/read/reader.h lib/read/reader.c \
 	lib/read/selection.c lib/read/selection.h \
@@ -113,7 +114,7 @@ example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
 test_programs = test-core test-io test-meta test-meta-sort test-unicode test-format \
-	test-catalog test-source test-mtree test-publish test-fat test-fat-write test-emit \
+	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
@@ -184,6 +185,9 @@ test_source_SOURCES = test/source.c test/test.h
 test_source_LDADD = libfsimg.la
 test_mtree_SOURCES = test/mtree.c test/test.h
 test_mtree_LDADD = libfsimg.la
+test_manifest_SOURCES = test/manifest.c test/test.h test/digest.c \
+	test/digest.h
+test_manifest_LDADD = libfsimg.la
 test_fat_SOURCES = test/fat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_LDADD = libfsimg.la

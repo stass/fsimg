@@ -4,9 +4,11 @@
 #ifndef FSIMG_WRITER_H
 #define FSIMG_WRITER_H
 
+#include "generated.h"
 #include "host.h"
 #include "layer.h"
 #include "meta.h"
+#include "sha256.h"
 
 #define FSIMG_CATALOG_HEADER 192u
 #define FSIMG_CATALOG_INDEX_SIZE 24u
@@ -102,31 +104,50 @@ typedef enum fsimg_writer_state {
 	FSIMG_WRITER_FAILED
 } fsimg_writer_state_t;
 
+/* Where an entry's bytes come from: nowhere (a directory or FIFO), the zero
+ * source, the caller's provider, a host object, or a generator a manifest
+ * describes. HOST and GENERATED records live in the writer's source-record
+ * stream (host_sources) and belong to scanned records only.
+ */
 typedef enum fsimg_source_storage {
 	FSIMG_STORAGE_NONE,
 	FSIMG_STORAGE_ZERO,
 	FSIMG_STORAGE_PROVIDER,
-	FSIMG_STORAGE_HOST
+	FSIMG_STORAGE_HOST,
+	FSIMG_STORAGE_GENERATED
 } fsimg_source_storage_t;
 
 /* The writer's single current source owns io. fd is only a borrowed alias
  * used for identity checks: the reopened descriptor io owns, which freeing
  * io closes and releases, or a regular-file root's descriptor, which the
  * root registry owns while io reads a duplicate of it.
- * A symbolic link, host or provider, has no descriptor: opening it reads
- * and checks its whole target into link_target, link is set, and io
- * delivers those bytes as one data range.
+ * A symbolic link, host, provider or generated, has no descriptor: opening
+ * it reads and checks its whole target into link_target, link is set, and
+ * io delivers those bytes as one data range. Generated file content has
+ * neither descriptor nor io: generated holds its generator, and reads and
+ * ranges are computed from it.
+ *
+ * A host file whose record carries a digest is checked as it is copied:
+ * digest_state hashes the bytes the cursor serves in order from offset
+ * zero, digest_offset counts them, and finishing requires every byte to
+ * have been served and compares the digest. A caller that opens a source
+ * only to inspect it closes it instead.
  */
 struct fsimg_source_cursor {
 	fsimg_writer_t	*writer;
 	fsimg_io_t	*io;
 	fsimg_host_file_t identity;
+	fsimg_generated_t generated;
+	fsimg_sha256_t	 digest_state;
 	fsimg_source_storage_t storage;
 	uint64_t	 id;
 	uint64_t	 length;
+	uint64_t	 digest_offset;
 	int		 fd;
 	bool		 active;
 	bool		 link;
+	bool		 digest_claimed;
+	unsigned char	 digest[FSIMG_SHA256_DIGEST_LENGTH];
 	unsigned char	 link_target[FSIMG_SYMLINK_TARGET_MAX + 1];
 };
 
@@ -136,7 +157,9 @@ typedef struct fsimg_catalog_entry {
 	uint64_t	 parent_id;
 	uint64_t	 children;
 	fsimg_source_storage_t storage;
-	/* HOST: host_sources frame offset; PROVIDER: caller ID; NONE/ZERO: 0. */
+	/* HOST, GENERATED: host_sources frame offset; PROVIDER: caller ID;
+	 * NONE/ZERO: 0.
+	 */
 	uint64_t	 source_id;
 } fsimg_catalog_entry_t;
 
@@ -191,7 +214,12 @@ struct fsimg_writer {
 	uint64_t	 omitted_fields;
 	/* Private fault injection: interrupt the nth subsequent directory read. */
 	uint64_t	 interrupt_directory_read_after;
+	/* Catalog records (record, the entry streams) and source records
+	 * (source_record, host_sources), which also hold generated records
+	 * and so are never smaller than FSIMG_GENERATED_RECORD_MAX.
+	 */
 	uint32_t	 record_capacity;
+	uint32_t	 source_record_capacity;
 	/* Unions of every catalog entry's kind, valid and required fields,
 	 * taken over the kept records when preparation indexes the catalog: a
 	 * dropped directory record's metadata never reaches the image.
@@ -229,6 +257,8 @@ fsimg_status_t fsimg_writer_set_sources(fsimg_writer_t *,
 fsimg_status_t fsimg_writer_add(fsimg_writer_t *, const fsimg_entry_t *,
     const fsimg_source_t *, fsimg_error_t *);
 fsimg_status_t fsimg_writer_add_tree(fsimg_writer_t *, int, const char *,
+    fsimg_error_t *);
+fsimg_status_t fsimg_writer_add_manifest(fsimg_writer_t *, int, int,
     fsimg_error_t *);
 void fsimg_writer_free(fsimg_writer_t *);
 fsimg_status_t fsimg_writer_collect_ready(fsimg_writer_t *, fsimg_error_t *);

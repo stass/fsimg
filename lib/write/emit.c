@@ -33,6 +33,7 @@ static fsimg_status_t copy_data(fsimg_emit_t *, region_cursor_t *, uint64_t,
     uint64_t, fsimg_error_t *);
 static fsimg_status_t copy_initialized(fsimg_emit_t *,
     const fsimg_emit_payload_t *, fsimg_error_t *);
+static void name_source(fsimg_writer_t *, uint64_t, fsimg_error_t *);
 
 fsimg_status_t
 fsimg_emit_image(fsimg_writer_t *writer, fsimg_io_t *output,
@@ -112,10 +113,32 @@ fsimg_emit_copy(fsimg_emit_t *emit, uint64_t id,
 	status = copy_initialized(emit, payload, error);
 	if (status != FSIMG_OK)
 		goto fail;
-	return (fsimg_source_finish(writer, error));
+	status = fsimg_source_finish(writer, error);
+	if (status != FSIMG_OK)
+		name_source(writer, id, error);
+	return (status);
 fail:
 	fsimg_source_close(writer);
+	name_source(writer, id, error);
 	return (status);
+}
+
+/* Name the entry whose source failed, so that a changed or mismatching
+ * file is reported by its image path. Only source failures are named: an
+ * output write failing during the copy concerns the image, not the file.
+ * The lookup replaces the catalog's current snapshot, which the failing
+ * driver no longer reads, and a lookup failure leaves the error as it is.
+ */
+static void
+name_source(fsimg_writer_t *writer, uint64_t id, fsimg_error_t *error)
+{
+	const fsimg_catalog_entry_t *entry;
+	fsimg_error_t ignored;
+
+	if (error == NULL || error->operation != FSIMG_OP_SOURCE)
+		return;
+	if (fsimg_catalog_get(writer, id, &entry, &ignored) == FSIMG_OK)
+		fsimg_error_path(error, entry->entry.path);
 }
 
 /* Validate a payload placement before any source is touched: each region lies

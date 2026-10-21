@@ -31,6 +31,17 @@ static fsimg_status_t open_root_file(fsimg_writer_t *,
     const fsimg_source_root_t *, fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t open_host_source(fsimg_writer_t *, uint64_t,
     fsimg_host_kind_t, fsimg_source_cursor_t *, fsimg_error_t *);
+static fsimg_status_t read_host_record(fsimg_writer_t *, uint64_t,
+    fsimg_host_kind_t, fsimg_source_cursor_t *, fsimg_source_root_t **,
+    char **, fsimg_error_t *);
+static fsimg_status_t adopt_reopened_file(fsimg_writer_t *, int,
+    const fsimg_host_file_t *, fsimg_source_cursor_t *, fsimg_error_t *);
+static fsimg_status_t open_failure(int, fsimg_source_walk_t, fsimg_error_t *);
+static fsimg_status_t inspect_import_file(int, const char *, fsimg_error_t *);
+static fsimg_status_t open_generated(fsimg_writer_t *, uint64_t,
+    fsimg_entry_kind_t, fsimg_source_cursor_t *, fsimg_error_t *);
+static fsimg_status_t check_digest(fsimg_source_cursor_t *, fsimg_error_t *);
+static bool generated_content(const fsimg_source_cursor_t *);
 static int64_t source_signed(uint64_t);
 
 bool
@@ -65,7 +76,9 @@ fsimg_sources_release(fsimg_writer_t *writer)
 	while (writer->roots != NULL) {
 		root = writer->roots;
 		writer->roots = root->next;
-		fsimg_fd_release(writer->ctx, root->fd);
+		/* A descriptorless root holds no reservation to return. */
+		if (root->fd != -1)
+			fsimg_fd_release(writer->ctx, root->fd);
 		fsimg_dealloc(root);
 	}
 }
@@ -487,26 +500,25 @@ source_signed(uint64_t value)
 	    -1 - (int64_t)(UINT64_MAX - value));
 }
 
-/* Walk the recorded relative path from its root one component at a time,
- * never following a link, and open the final object if it still has the
- * recorded identity. kind is the host kind the catalog entry requires.
+/* Read and validate the host source record at reference: its framing, its
+ * recorded identity, which goes to the cursor, and its digest claim, which
+ * starts the cursor's digest. Return the record's root and its relative
+ * path, which stays in the writer's source record buffer.
  */
 static fsimg_status_t
-open_host_source(fsimg_writer_t *writer, uint64_t reference,
-    fsimg_host_kind_t kind, fsimg_source_cursor_t *source, fsimg_error_t *error)
+read_host_record(fsimg_writer_t *writer, uint64_t reference,
+    fsimg_host_kind_t kind, fsimg_source_cursor_t *source,
+    fsimg_source_root_t **rootp, char **pathp, fsimg_error_t *error)
 {
+	static const unsigned char no_digest[FSIMG_SHA256_DIGEST_LENGTH];
 	fsimg_source_root_t *root;
-	fsimg_host_file_t opened;
 	unsigned char *record;
-	char *component, *separator;
-	uint64_t root_id;
+	uint64_t digest_flag, root_id;
 	size_t length;
 	fsimg_status_t status;
-	int parent, fd, saved;
-	bool parent_owned;
 
-	status = fsimg_stream_next(writer->host_sources, &reference, writer->source_record,
-	    writer->record_capacity, &length, error);
+	status = fsimg_stream_next(writer->host_sources, &reference,
+	    writer->source_record, writer->source_record_capacity, &length, error);
 	if (status == FSIMG_DONE)
 		status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_SOURCE, "source reference points to the end of its stream");
@@ -542,82 +554,233 @@ open_host_source(fsimg_writer_t *writer, uint64_t reference,
 	if (source->identity.length != source->length)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_SOURCE, "source and catalog lengths disagree"));
-	component = (char *)record + FSIMG_SOURCE_HEADER;
+	digest_flag = fsimg_meta_get_u64(record + 80);
+	if (digest_flag > 1 || (digest_flag == 1 && kind != FSIMG_HOST_FILE) ||
+	    (digest_flag == 0 && bcmp(record + FSIMG_SOURCE_DIGEST, no_digest,
+	    sizeof(no_digest)) != 0))
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_SOURCE, "invalid source record digest fields"));
+	if (digest_flag == 1) {
+		source->digest_claimed = true;
+		bcopy(record + FSIMG_SOURCE_DIGEST, source->digest,
+		    sizeof(source->digest));
+		fsimg_sha256_init(&source->digest_state);
+	}
+	*rootp = root;
+	*pathp = (char *)record + FSIMG_SOURCE_HEADER;
+	return (FSIMG_OK);
+}
+
+/* Walk the recorded relative path from its root one component at a time,
+ * never following a link, and open the final object if it still has the
+ * recorded identity. kind is the host kind the catalog entry requires.
+ */
+static fsimg_status_t
+open_host_source(fsimg_writer_t *writer, uint64_t reference,
+    fsimg_host_kind_t kind, fsimg_source_cursor_t *source, fsimg_error_t *error)
+{
+	fsimg_source_root_t *root;
+	fsimg_host_file_t opened;
+	char *name, *path;
+	fsimg_status_t status;
+	int fd, parent;
+
+	status = read_host_record(writer, reference, kind, source, &root, &path,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
 	/* Only a regular-file root's record has an empty relative path; a
-	 * directory root's empty first component fails below.
+	 * directory root's empty first component fails in the walk. A
+	 * descriptorless root has no path to walk at all.
 	 */
 	if (root->identity.kind == FSIMG_HOST_FILE) {
-		if (component[0] != '\0' || kind != FSIMG_HOST_FILE)
+		if (path[0] != '\0' || kind != FSIMG_HOST_FILE)
 			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_SOURCE, "invalid regular-file root source record"));
 		return (open_root_file(writer, root, source, error));
 	}
+	if (root->fd == -1)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_SOURCE, "source record names a descriptorless root"));
+
+	status = fsimg_source_walk(writer, root, path, FSIMG_WALK_REOPEN,
+	    &parent, &name, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (kind == FSIMG_HOST_LINK) {
+		status = open_host_link(writer, root, parent, name, source, error);
+	} else {
+		status = fsimg_source_open_child(writer, root, parent, name, false,
+		    FSIMG_WALK_REOPEN, &fd, &opened, error);
+		if (status == FSIMG_OK)
+			status = adopt_reopened_file(writer, fd, &opened, source,
+			    error);
+	}
+	if (parent != root->fd)
+		fsimg_fd_release(writer->ctx, parent);
+	return (status);
+}
+
+/* Take a reopened file as the current source if it still has the recorded
+ * identity; the descriptor is consumed either way.
+ */
+static fsimg_status_t
+adopt_reopened_file(fsimg_writer_t *writer, int fd,
+    const fsimg_host_file_t *opened, fsimg_source_cursor_t *source,
+    fsimg_error_t *error)
+{
+	if (!fsimg_source_identity_equal(opened, &source->identity)) {
+		fsimg_fd_release(writer->ctx, fd);
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+		    FSIMG_OP_SOURCE, "reopened source differs from its recorded identity"));
+	}
+	source->fd = fd;
+	return (fsimg_io_adopt_fd(writer->ctx, fd, FSIMG_IO_READ, &source->io,
+	    error));
+}
+
+/* A failed open beneath a root, reported for why the path was walked. A
+ * recorded path whose object vanished, became a link or stopped being a
+ * directory names a changed source. A manifest's contents path that has a
+ * link is unsupported, as the scanner cannot record one there, and one
+ * that names nothing, or a name its file system cannot hold, is invalid
+ * input.
+ */
+static fsimg_status_t
+open_failure(int saved, fsimg_source_walk_t walk, fsimg_error_t *error)
+{
+	if (walk == FSIMG_WALK_REOPEN)
+		return (fsimg_error_set(error,
+		    saved == ENOENT || saved == ELOOP || saved == ENOTDIR ?
+		    FSIMG_ESOURCE_CHANGED : FSIMG_EIO, saved,
+		    FSIMG_OP_SOURCE, "source component cannot be reopened"));
+	if (saved == ELOOP)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, saved,
+		    FSIMG_OP_SOURCE, "contents path has a symbolic link"));
+	if (saved == ENOENT || saved == ENOTDIR || saved == ENAMETOOLONG)
+		return (fsimg_error_set(error, FSIMG_EINVAL, saved,
+		    FSIMG_OP_SOURCE, "contents path names no file"));
+	return (fsimg_error_set(error, FSIMG_EIO, saved, FSIMG_OP_SOURCE,
+	    "contents path component cannot be opened"));
+}
+
+/* A manifest, not a directory listing, names the final object of an
+ * import walk, so it is inspected before it is opened and only a regular
+ * file is opened: a device or FIFO a manifest points at is refused
+ * without the side effects an open can have. The name can change after
+ * the inspection, so the opened object is checked again.
+ */
+static fsimg_status_t
+inspect_import_file(int parent, const char *name, fsimg_error_t *error)
+{
+	fsimg_host_file_t named;
+	int saved;
+
+	if (fsimg_host_link(parent, name, &named) == -1) {
+		saved = errno;
+		/* As for a link the scanner meets: confinement that denies
+		 * the inspection is a missing capability, not an I/O error.
+		 */
+		if (saved == EPERM || saved == EACCES)
+			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, saved,
+			    FSIMG_OP_SOURCE, "contents path inspection is not permitted"));
+		return (open_failure(saved, FSIMG_WALK_IMPORT, error));
+	}
+	if (named.kind == FSIMG_HOST_LINK)
+		return (open_failure(ELOOP, FSIMG_WALK_IMPORT, error));
+	if (named.kind != FSIMG_HOST_FILE)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_SOURCE, "contents path does not name a regular file"));
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
+    int parent, const char *name, bool directory, fsimg_source_walk_t walk,
+    int *out, fsimg_host_file_t *identity, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+	int fd, saved;
+
+	*out = -1;
+	status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (walk == FSIMG_WALK_IMPORT && !directory) {
+		status = inspect_import_file(parent, name, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	status = fsimg_fd_reserve(writer->ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	fd = fsimg_host_source_open(parent, name, directory);
+	if (fd == -1) {
+		saved = errno;
+		fsimg_fd_release(writer->ctx, -1);
+		return (open_failure(saved, walk, error));
+	}
+	if (fsimg_host_file(fd, identity) == -1) {
+		saved = errno;
+		fsimg_fd_release(writer->ctx, fd);
+		return (fsimg_error_set(error, FSIMG_EIO, saved,
+		    FSIMG_OP_SOURCE, "opened source object inspection failed"));
+	}
+	status = fsimg_source_check_object(writer, fd, identity, root, error);
+	if (status != FSIMG_OK) {
+		fsimg_fd_release(writer->ctx, fd);
+		return (status);
+	}
+	*out = fd;
+	return (FSIMG_OK);
+}
+
+/* Each directory is opened relative to the one before it, so the walk
+ * holds at most two descriptors: the previous directory is released as
+ * soon as its child is open. A separator is cut only while the component
+ * before it is opened, so path is unchanged on every return.
+ */
+fsimg_status_t
+fsimg_source_walk(fsimg_writer_t *writer, const fsimg_source_root_t *root,
+    char *path, fsimg_source_walk_t walk, int *parent_out, char **name_out,
+    fsimg_error_t *error)
+{
+	fsimg_host_file_t opened;
+	char *component, *separator;
+	fsimg_status_t status;
+	int fd, parent;
+
 	parent = root->fd;
-	parent_owned = false;
+	component = path;
 	for (;;) {
 		separator = strchr(component, '/');
 		if (separator != NULL)
 			*separator = '\0';
 		if (component[0] == '\0' || strcmp(component, ".") == 0 ||
 		    strcmp(component, "..") == 0) {
-			status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
-			    FSIMG_OP_SOURCE, "invalid relative source component");
-			break;
-		}
-		if (separator == NULL && kind == FSIMG_HOST_LINK) {
-			status = open_host_link(writer, root, parent, component,
-			    source, error);
-			break;
-		}
-		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
-		if (status != FSIMG_OK)
-			break;
-		status = fsimg_fd_reserve(writer->ctx, error);
-		if (status != FSIMG_OK)
-			break;
-		fd = fsimg_host_source_open(parent, component, separator != NULL);
-		saved = errno;
-		if (parent_owned)
-			fsimg_fd_release(writer->ctx, parent);
-		parent_owned = false;
-		if (separator != NULL)
-			*separator = '/';
-		if (fd == -1) {
-			fsimg_fd_release(writer->ctx, -1);
 			status = fsimg_error_set(error,
-			    saved == ENOENT || saved == ELOOP || saved == ENOTDIR ?
-			    FSIMG_ESOURCE_CHANGED : FSIMG_EIO, saved,
-			    FSIMG_OP_SOURCE, "source component cannot be reopened");
-			break;
-		}
-		if (fsimg_host_file(fd, &opened) == -1) {
-			saved = errno;
-			fsimg_fd_release(writer->ctx, fd);
-			status = fsimg_error_set(error, FSIMG_EIO, saved,
-			    FSIMG_OP_SOURCE, "reopened source inspection failed");
-			break;
-		}
-		status = fsimg_source_check_object(writer, fd, &opened, root, error);
-		if (status != FSIMG_OK) {
-			fsimg_fd_release(writer->ctx, fd);
+			    walk == FSIMG_WALK_REOPEN ? FSIMG_ECORRUPT : FSIMG_EINVAL,
+			    0, FSIMG_OP_SOURCE, "invalid relative source component");
 			break;
 		}
 		if (separator == NULL) {
-			if (!fsimg_source_identity_equal(&opened, &source->identity)) {
-				fsimg_fd_release(writer->ctx, fd);
-				status = fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
-				    FSIMG_OP_SOURCE, "reopened source differs from its recorded identity");
-				break;
-			}
-			source->fd = fd;
-			return (fsimg_io_adopt_fd(writer->ctx, fd, FSIMG_IO_READ,
-			    &source->io, error));
+			*parent_out = parent;
+			*name_out = component;
+			return (FSIMG_OK);
 		}
+		status = fsimg_source_open_child(writer, root, parent, component,
+		    true, walk, &fd, &opened, error);
+		*separator = '/';
+		if (status != FSIMG_OK)
+			break;
+		if (parent != root->fd)
+			fsimg_fd_release(writer->ctx, parent);
 		parent = fd;
-		parent_owned = true;
 		component = separator + 1;
 	}
-	if (parent_owned)
+	if (separator != NULL)
+		*separator = '/';
+	if (parent != root->fd)
 		fsimg_fd_release(writer->ctx, parent);
 	return (status);
 }
@@ -657,6 +820,11 @@ fsimg_source_open(fsimg_writer_t *writer, uint64_t entry_id,
 		status = open_host_source(writer, source->id,
 		    entry.entry.kind == FSIMG_ENTRY_FILE ? FSIMG_HOST_FILE :
 		    FSIMG_HOST_LINK, source, error);
+		if (status != FSIMG_OK)
+			return (source_abort(source, status));
+	} else if (source->storage == FSIMG_STORAGE_GENERATED) {
+		status = open_generated(writer, source->id, entry.entry.kind,
+		    source, error);
 		if (status != FSIMG_OK)
 			return (source_abort(source, status));
 	} else if (source->storage == FSIMG_STORAGE_PROVIDER &&
@@ -723,6 +891,10 @@ fsimg_source_read(fsimg_writer_t *writer, uint64_t offset, void *buffer,
 	if (source->storage == FSIMG_STORAGE_ZERO) {
 		bzero(buffer, remaining);
 		*transferred = remaining;
+	} else if (generated_content(source)) {
+		fsimg_generated_read(&source->generated, offset, buffer,
+		    remaining);
+		*transferred = remaining;
 	} else {
 		status = fsimg_io_read_exact(source->io, offset, buffer, remaining,
 		    transferred, error);
@@ -732,6 +904,13 @@ fsimg_source_read(fsimg_writer_t *writer, uint64_t offset, void *buffer,
 	status = source_validate(source, error);
 	if (status != FSIMG_OK)
 		return (source_abort(source, status));
+	/* Only a read continuing the hashed prefix extends it; finishing
+	 * tells a prefix that stopped short from one that covers the file.
+	 */
+	if (source->digest_claimed && offset == source->digest_offset) {
+		fsimg_sha256_update(&source->digest_state, buffer, *transferred);
+		source->digest_offset += *transferred;
+	}
 	return (FSIMG_OK);
 }
 
@@ -756,6 +935,10 @@ fsimg_source_range(fsimg_writer_t *writer, uint64_t offset,
 		    FSIMG_OP_SOURCE, "source range starts past declared length"));
 	if (offset == source->length)
 		return (FSIMG_DONE);
+	if (generated_content(source)) {
+		fsimg_generated_range(&source->generated, offset, range);
+		return (FSIMG_OK);
+	}
 	if (source->storage != FSIMG_STORAGE_PROVIDER || source->link ||
 	    writer->provider.next_range == NULL) {
 		range->offset = offset;
@@ -798,8 +981,78 @@ fsimg_source_finish(fsimg_writer_t *writer, fsimg_error_t *error)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_SOURCE, "source cursor is not active"));
 	status = source_validate(source, error);
+	if (status == FSIMG_OK)
+		status = check_digest(source, error);
 	fsimg_source_close(writer);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(source->writer, status));
 	return (FSIMG_OK);
+}
+
+/* Whether the cursor computes its bytes from source->generated: generated
+ * file content has neither descriptor nor I/O object. A generated link is
+ * not, since its target is served from link_target like every link's.
+ */
+static bool
+generated_content(const fsimg_source_cursor_t *source)
+{
+	return (source->storage == FSIMG_STORAGE_GENERATED && !source->link);
+}
+
+/* Compare a host file's claimed digest with the bytes served. Finishing
+ * asserts that the cursor served the file: one that served less than the
+ * whole file in order from offset zero cannot check the claim, which is a
+ * defect of its reader, not of the file. A caller that only opens a source
+ * to inspect it closes it instead of finishing it.
+ */
+static fsimg_status_t
+check_digest(fsimg_source_cursor_t *source, fsimg_error_t *error)
+{
+	unsigned char digest[FSIMG_SHA256_DIGEST_LENGTH];
+
+	if (!source->digest_claimed)
+		return (FSIMG_OK);
+	if (source->digest_offset != source->length)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_SOURCE, "source with a digest was not read in order to its end"));
+	fsimg_sha256_final(digest, &source->digest_state);
+	if (bcmp(digest, source->digest, sizeof(digest)) != 0)
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+		    FSIMG_OP_SOURCE, "source bytes do not match the manifest's sha256digest"));
+	return (FSIMG_OK);
+}
+
+/* Read a generated record. A link's target is copied out of the record
+ * buffer, which later lookups reuse, and served as every link target is;
+ * file content keeps its generator in the cursor.
+ */
+static fsimg_status_t
+open_generated(fsimg_writer_t *writer, uint64_t reference,
+    fsimg_entry_kind_t kind, fsimg_source_cursor_t *source,
+    fsimg_error_t *error)
+{
+	size_t length;
+	fsimg_status_t status;
+
+	status = fsimg_stream_next(writer->host_sources, &reference,
+	    writer->source_record, writer->source_record_capacity, &length,
+	    error);
+	if (status == FSIMG_DONE)
+		status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_SOURCE, "source reference points to the end of its stream");
+	if (status != FSIMG_OK)
+		return (status);
+	if (!fsimg_generated_decode(writer->source_record, length,
+	    &source->generated) ||
+	    source->generated.length != source->length ||
+	    (source->generated.generator == FSIMG_GENERATOR_LINK) !=
+	    (kind == FSIMG_ENTRY_SYMLINK))
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_SOURCE, "invalid generated source record"));
+	if (kind != FSIMG_ENTRY_SYMLINK)
+		return (FSIMG_OK);
+	bcopy(source->generated.target, source->link_target,
+	    (size_t)source->length);
+	source->generated.target = NULL;
+	return (serve_link(writer, source, error));
 }

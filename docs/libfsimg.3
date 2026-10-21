@@ -32,6 +32,8 @@ lists
 .Fn fsimg_image_open "fsimg_ctx_t *context" "fsimg_io_t *io" "const fsimg_image_options_t *options" "fsimg_image_t **image" "fsimg_error_t *error"
 .Ft fsimg_status_t
 .Fn fsimg_image_open_stream "fsimg_ctx_t *context" "int fd" "const fsimg_image_options_t *options" "fsimg_image_t **image" "fsimg_error_t *error"
+.Ft fsimg_status_t
+.Fn fsimg_writer_add_manifest "fsimg_writer_t *writer" "int manifest_fd" "int contents_fd" "fsimg_error_t *error"
 .Sh DESCRIPTION
 The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
 classic QNX6 Power-Safe volumes in either byte order, and QNX4 volumes.
@@ -105,8 +107,8 @@ FSIMG_VERIFY_PAYLOAD also reads initialized payload bytes.
 Its report is complete only after the entire requested scope succeeds.
 No reader modifies or repairs an input image.
 .Sh WRITERS
-Collect host trees, explicit zero sources or one callback provider before
-planning.
+Collect host trees, manifests, explicit zero sources or one callback
+provider before planning.
 Paths are absolute UTF-8 image paths.
 Entries are regular files, directories, symbolic links, whose size is the
 target length of 1 through 1023 bytes and whose provider or host source
@@ -127,6 +129,46 @@ Any other repeated path, a discarded directory that requires metadata, or
 programmatic directories of one path whose metadata differ, with no scanned
 record of that path to outrank them, fail planning with
 FSIMG_EINVAL naming the path.
+.Fn fsimg_writer_add_manifest
+imports an
+.Xr mtree 5
+manifest as one more root whose entries rank as scanned records at its
+position among the roots.
+.Fa manifest_fd
+is an
+.Dv O_RDONLY
+regular file, borrowed and read through a duplicate from offset zero to its
+length when the call begins; it must be unchanged when the parse ends.
+.Fa contents_fd
+is an
+.Dv O_RDONLY
+directory, duplicated, beneath which a file without generated content takes
+its bytes from its
+.Cm contents
+path or its own path, or \-1.
+The directory becomes a root only when an entry first needs host bytes;
+an entry that needs them without one fails.
+Contents paths are walked one component at a time without following links
+and never leave the directory; a link on the path, or a directory or
+special file at its end, fails with
+.Dv FSIMG_EUNSUPPORTED .
+Owner, mode and modification time come from the manifest's keywords, never
+from a content file.
+The
+.Cm fsimg.content
+keyword selects zero, seeded or positional generated content instead, with
+.Cm fsimg.seed
+and
+.Cm fsimg.holes .
+A generated file's
+.Cm sha256digest
+is checked at input; a host file's is checked as emission copies it, and a
+mismatch fails emission with
+.Dv FSIMG_ESOURCE_CHANGED
+naming the path.
+An input failure names the manifest line by byte offset in the error's
+offset and by number at the start of its message, and the entry's image
+path.
 Host identity checks detect ordinary metadata-visible changes;
 hostile concurrent mutation requires immutable inputs or a snapshot.
 Provider content and state remain borrowed until writer destruction.

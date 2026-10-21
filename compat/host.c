@@ -147,7 +147,8 @@ fsimg_host_next_hole(int fd FSIMG_UNUSED, uint64_t offset FSIMG_UNUSED,
 int
 fsimg_host_source_open(int parent, const char *name, bool directory)
 {
-	int fd, flags;
+	struct stat st;
+	int fd, flags, saved;
 
 	flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC;
 	if (directory)
@@ -158,6 +159,17 @@ fsimg_host_source_open(int parent, const char *name, bool directory)
 	if (fd == -1 && errno == EMLINK)
 		errno = ELOOP;
 #endif
+	/* macOS refuses a symlink opened with O_DIRECTORY as ENOTDIR, as it
+	 * refuses a regular file; inspecting the name without following it
+	 * tells the two apart. The inspection only classifies the failure.
+	 */
+	if (fd == -1 && errno == ENOTDIR && directory) {
+		saved = errno;
+		if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+		    S_ISLNK(st.st_mode))
+			saved = ELOOP;
+		errno = saved;
+	}
 	return (fd);
 }
 

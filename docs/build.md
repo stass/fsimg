@@ -373,7 +373,13 @@ twice, whole and in 13-byte reads, under a 256-byte path limit, depth eight
 and a 100,000-line work limit; both parses must reach the same status after
 the same entries, every accepted entry must satisfy the parser's contract
 (valid image path, link, contents path, holes within size, metadata), and
-the parser must return all its memory. Its seeds, written by `test-mtree
+the parser must return all its memory. The same bytes are then written to
+a file and imported through `fsimg_writer_add_manifest()`, without a content
+directory and with a small fixed one, under a 512-unit work limit, since a
+claimed digest hashes the whole generated file at input; an accepted
+manifest's generated and zero sources must tile under `next_range()` and
+read back, zero inside every ZERO run, and each import must return all its
+memory and descriptors. Its seeds, written by `test-mtree
 --seed`, are `mtree -c` and bsdtar manifests of one host tree and a
 generated-content manifest, with a 64 KiB input ceiling. Set `FUZZ_CC` to
 a Clang with the required runtime; `FUZZ_CXX` defaults to its sibling

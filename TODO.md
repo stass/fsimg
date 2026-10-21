@@ -382,7 +382,21 @@
   awkward. Record the design in the security, CLI and metadata specs, then
   test it on Linux with the sandbox active, including forged worker requests.
   FreeBSD Capsicum permits both calls: a confined `create -S required` reads
-  ordinary and dangling links (verified on FreeBSD 16.0-CURRENT).
+  ordinary and dangling links (verified on FreeBSD 16.0-CURRENT). Manifest
+  import has the same dependency: the content-path walk inspects each
+  final name with `fstatat(AT_SYMLINK_NOFOLLOW)` before opening it, so a
+  device or FIFO a manifest names is never opened
+  (`inspect_import_file()` in `lib/source/source.c`); the coordinator hook
+  must serve that inspection too before the `@file` operand runs confined
+  on Linux.
+* [Medium] **Input digest of a huge generated file** (`lib/source/manifest.c`,
+  `specs/design-mtree.md`): a generated file's `sha256digest` is checked
+  at input by hashing the whole content, before planning could reject a
+  size no format stores, so one manifest line such as `size=2^64-1` with a
+  digest costs work proportional to its size, bounded only by `max_work`
+  and cancellation, both unlimited by default. Decide between checking
+  generated digests after planning (which rejects impossible sizes cheaply)
+  and a default work budget for the CLI's create mode.
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself
@@ -421,18 +435,14 @@
 
 * [Medium] **Manifest import and export** (`lib/source/`, `lib/extract/`,
   `lib/core/`, `cmd/fsimg/`, `fuzz/`): implement the
-  [manifest design](specs/design-mtree.md). The parser
-  (`lib/source/mtree.c`, `test/mtree.c`, `fuzz/mtree.c`) exists; what
-  remains is the source root (`fsimg_writer_add_manifest()` wiring the
-  parser's entries to collection, generated zero, seeded and positional
-  content with holes through the source cursor, the generated-digest check
-  at input, host contents beneath the content directory with digests
-  checked through `lib/core/sha256.h` during the copy), the `@file`
-  operand, `x --mtree=FILE` through the output coordinator, extending
-  `fuzz/mtree.c` to the public call and the generated sources' `read_at()`
-  and `next_range()`, and the round-trip tests against `mtree -c` and
-  `bsdtar --format=mtree`. The spec harness's creation cases then emit
-  manifests instead of writing `source/`.
+  [manifest design](specs/design-mtree.md). The parser and the source
+  root (`fsimg_writer_add_manifest()`, `lib/source/manifest.c`,
+  `lib/source/generated.c`, `test/manifest.c`) exist; what remains is the
+  `@file` operand with its CLI tests (two descriptors per operand against
+  `fds`), `x --mtree=FILE` through the output coordinator, the round trips
+  through `x --mtree` for exFAT, QNX6 and QNX4, and a content-path test
+  across a nested mount where the host allows one. The spec harness's
+  creation cases then emit manifests instead of writing `source/`.
 
 * [Low] **Opt-in metadata restore** (`lib/extract/`): consider an opt-in that
   applies permission bits without setuid, setgid or sticky through opened

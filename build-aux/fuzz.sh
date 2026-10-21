@@ -208,13 +208,16 @@ fi
 run_fuzzer "$work_dir/fuzz-gzip" "$gzip_corpus" 262144 10
 
 # The manifest harness parses each input twice, whole and in small reads,
-# and checks every accepted entry against the parser's contract. The seeds
-# are mtree -c and bsdtar manifests of one tree and a generated-content
-# manifest, from the parser's unit test.
+# and checks every accepted entry against the parser's contract, then
+# imports it through fsimg_writer_add_manifest() and serves its generated
+# sources. The seeds are mtree -c and bsdtar manifests of one tree and a
+# generated-content manifest, from the parser's unit test.
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/source" \
+    -I"$source_dir/lib/meta" -I"$source_dir/lib/write" \
+    -I"$source_dir/lib/io" -I"$source_dir/lib/layers" \
     "$source_dir/fuzz/mtree.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-mtree"
 mtree_corpus=mtree-fuzz-corpus
 mkdir -p "$mtree_corpus"

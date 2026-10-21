@@ -776,9 +776,11 @@ test_merged_metadata(void)
 
 /* The rank fields are closed: an unknown origin, nonzero padding, an order
  * on a programmatic record, a scanned order naming no registered root, or a
- * scanned record with zero-source storage is corruption. Each case breaks
+ * scanned record with provider storage, or a programmatic record with
+ * generated or host storage, is corruption. Each case breaks
  * one rule: a pretended registered root keeps the order rule satisfied
- * where another rule is under test.
+ * where another rule is under test. A scanned zero-source file is valid,
+ * as a manifest's zero file is one.
  */
 static void
 test_corrupt_rank(void)
@@ -793,7 +795,9 @@ test_corrupt_rank(void)
 		{ FSIMG_CATALOG_ORIGIN + 4, 1, FSIMG_ENTRY_DIRECTORY, 0 },
 		{ FSIMG_CATALOG_ORDER, 1, FSIMG_ENTRY_DIRECTORY, 0 },
 		{ FSIMG_CATALOG_ORIGIN, FSIMG_ORIGIN_SCANNED, FSIMG_ENTRY_DIRECTORY, 0 },
-		{ FSIMG_CATALOG_ORIGIN, FSIMG_ORIGIN_SCANNED, FSIMG_ENTRY_FILE, 1 }
+		{ FSIMG_CATALOG_ORIGIN, FSIMG_ORIGIN_SCANNED, FSIMG_ENTRY_SYMLINK, 1 },
+		{ FSIMG_CATALOG_STORAGE, FSIMG_STORAGE_GENERATED, FSIMG_ENTRY_FILE, 1 },
+		{ FSIMG_CATALOG_STORAGE, FSIMG_STORAGE_HOST, FSIMG_ENTRY_FILE, 1 }
 	};
 	catalog_fixture_t fixture;
 	const fsimg_catalog_entry_t *entry;
@@ -801,6 +805,8 @@ test_corrupt_rank(void)
 
 	for (size_t i = 0; i < sizeof(corruptions) / sizeof(corruptions[0]); i++) {
 		fixture_open(&fixture, 2);
+		if (corruptions[i].kind == FSIMG_ENTRY_SYMLINK)
+			use_provider(&fixture);
 		add_entry(fixture.writer, "/entry", corruptions[i].kind);
 		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
 		fixture.writer->root_count = corruptions[i].roots;

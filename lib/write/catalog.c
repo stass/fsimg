@@ -23,6 +23,7 @@ static bool decode_time(const unsigned char *, fsimg_timestamp_t *);
 static bool entry_shape_valid(uint32_t, uint64_t, uint32_t, uint64_t);
 static void encode_metadata(unsigned char *, const fsimg_metadata_t *);
 static bool decode_metadata(const unsigned char *, fsimg_metadata_t *);
+static bool storage_matches_origin(uint32_t, fsimg_catalog_origin_t);
 static bool rank_valid(const fsimg_writer_t *, const unsigned char *,
     uint32_t);
 static fsimg_status_t decode_entry(fsimg_writer_t *, const unsigned char *,
@@ -101,7 +102,7 @@ static bool
 entry_shape_valid(uint32_t kind, uint64_t size, uint32_t storage,
     uint64_t source_id)
 {
-	if (storage > FSIMG_STORAGE_HOST ||
+	if (storage > FSIMG_STORAGE_GENERATED ||
 	    (storage == FSIMG_STORAGE_ZERO && source_id != 0))
 		return (false);
 	switch (kind) {
@@ -214,7 +215,9 @@ fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 	    &path_length, &depth, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (!entry_shape_valid(entry->kind, entry->size, storage, source_id))
+	if (!entry_shape_valid(entry->kind, entry->size, storage, source_id) ||
+	    !storage_matches_origin(storage, root != NULL ?
+	    FSIMG_ORIGIN_SCANNED : FSIMG_ORIGIN_PROGRAMMATIC))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CATALOG, "entry kind, size and source disagree"));
 	status = fsimg_metadata_validate(&entry->metadata, error);
@@ -252,10 +255,32 @@ fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 	return (FSIMG_OK);
 }
 
+/* Which storage each origin can carry: a root's scan or manifest yields no
+ * storage, the zero source, a host object or generated content, never the
+ * caller's provider; a programmatic record has no storage, the zero source
+ * or the provider, never a host object or generated content, which only a
+ * root can describe.
+ */
+static bool
+storage_matches_origin(uint32_t storage, fsimg_catalog_origin_t origin)
+{
+	switch (storage) {
+	case FSIMG_STORAGE_NONE:
+	case FSIMG_STORAGE_ZERO:
+		return (true);
+	case FSIMG_STORAGE_PROVIDER:
+		return (origin == FSIMG_ORIGIN_PROGRAMMATIC);
+	case FSIMG_STORAGE_HOST:
+	case FSIMG_STORAGE_GENERATED:
+		return (origin == FSIMG_ORIGIN_SCANNED);
+	default:
+		return (false);
+	}
+}
+
 /* The rank fields are closed, mirroring fsimg_writer_collect: zero padding;
- * a scanned record names a registered root and is a directory (no storage)
- * or a host source; a programmatic record has order zero and never host
- * storage.
+ * a scanned record names a registered root, a programmatic record has
+ * order zero, and the storage is one the origin can carry.
  */
 static bool
 rank_valid(const fsimg_writer_t *writer, const unsigned char *record,
@@ -269,9 +294,10 @@ rank_valid(const fsimg_writer_t *writer, const unsigned char *record,
 	switch (fsimg_meta_get_u32(record + FSIMG_CATALOG_ORIGIN)) {
 	case FSIMG_ORIGIN_SCANNED:
 		return (order < writer->root_count &&
-		    (storage == FSIMG_STORAGE_NONE || storage == FSIMG_STORAGE_HOST));
+		    storage_matches_origin(storage, FSIMG_ORIGIN_SCANNED));
 	case FSIMG_ORIGIN_PROGRAMMATIC:
-		return (order == 0 && storage != FSIMG_STORAGE_HOST);
+		return (order == 0 &&
+		    storage_matches_origin(storage, FSIMG_ORIGIN_PROGRAMMATIC));
 	default:
 		return (false);
 	}
@@ -556,6 +582,7 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		    parent_length)) {
 			status = fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CATALOG, "catalog entry has no explicit directory parent");
+			fsimg_error_path(error, entry.entry.path);
 			goto done;
 		}
 		fsimg_meta_put_u64(index, reference);

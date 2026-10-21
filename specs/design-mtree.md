@@ -51,12 +51,19 @@ implements the [grammar](#grammar) and the parser's bounds: it reads a
 manifest through a read callback, one bounded logical line at a time, and
 hands each entry line to an entry callback as a decoded, validated entry
 (image path, kind, size, owner, mode, time, link target, `contents=` path,
-digest, content kind, seed and holes). It opens nothing, has no catalog or
-writer, and only its tests (`test/mtree.c`) and `fuzz/mtree.c` call it;
-`fsimg_writer_add_manifest()`, generated content, host contents and the
-digest checks do not exist yet. The SHA-256 implementation is the one
-[Digests](#digests) describes, `lib/core/sha256.c`, which only the tests
-call.
+digest, content kind, seed and holes). `fsimg_writer_add_manifest()`
+(`lib/source/manifest.c`) is the [source root](#a-manifest-is-a-source-root)
+built on it: it registers the root, feeds the parser from the manifest
+descriptor, and collects every entry. Generated content
+(`lib/source/generated.c`) is the `GENERATED` storage class, which the
+source cursor serves and the catalog accepts on scanned records only;
+host contents are walked by the same component walk reopening uses
+(`fsimg_source_walk()`), and their digests are checked by the cursor during
+the copy. The CLI does not yet accept a manifest operand and the extractor
+writes no manifest; the [command line](#command-line) and
+[extraction](#extraction-writing-a-manifest) sections describe the target.
+The SHA-256 implementation is the one [Digests](#digests) describes,
+`lib/core/sha256.c`.
 
 ## A manifest is a source root
 
@@ -103,12 +110,14 @@ The requirements follow from this one construction:
 
 Generated content is a private fourth storage class beside none, zero,
 provider and host. Its source record holds the generator and its
-parameters, and the writer's one source cursor serves it as it serves a
-link's target from its record: `read_at()` computes bytes, `next_range()`
-reports the holes, `finish()` checks the digest. Collection and catalog
-validation accept generated storage on a scanned record only; a
-programmatic record still carries neither host nor generated storage. The
-public source kinds do not change.
+parameters, and the writer's one source cursor serves it: `read_at()`
+computes bytes and `next_range()` reports the holes. A manifest link is
+generated storage too, its record holding the target the manifest states,
+which the cursor serves as it serves every link target; a `zero` file is
+the zero source and has no record. Collection and catalog validation
+accept generated storage on a scanned record only; a programmatic record
+still carries neither host nor generated storage, and a scanned one never
+carries the provider. The public source kinds do not change.
 
 ## Command line
 
@@ -155,8 +164,12 @@ fsimg_status_t fsimg_writer_add_manifest(fsimg_writer_t *writer,
     int manifest_fd, int contents_fd, fsimg_error_t *error);
 ```
 
-`manifest_fd` is an opened regular file, borrowed for the call and read from
-offset zero to its end. `contents_fd` is an opened directory, duplicated and
+`manifest_fd` is an opened `O_RDONLY` regular file, borrowed for the call
+and read through a duplicate from offset zero to the length it had when the
+call began; a manifest whose identity, size or change metadata differ when
+the parse ends fails with `FSIMG_ESOURCE_CHANGED`, and one that shrinks
+while it is read fails as a short read. `contents_fd` is an opened
+`O_RDONLY` directory, checked to be one when the call begins, duplicated and
 registered as a root like the descriptor of `add_tree()`, consuming one
 descriptor reservation, or `-1` when the manifest supplies no host bytes.
 Either way the call registers one charged root record. With `-1` it is a
@@ -169,7 +182,7 @@ closed and the root stays descriptorless, so a manifest of generated files
 behaves the same whether or not a directory was offered. The
 manifest's records are scanned records whose order is that root's ID under
 the [merging rule](design-sources.md#merging-roots), whatever their storage:
-none, host or generated. The call is valid in the COLLECTING state and is
+none, zero, host or generated. The call is valid in the COLLECTING state and is
 terminal on failure, like `add_tree()`.
 
 `fsimg_extract_options_t` gains `int manifest_fd`, `-1` from the
@@ -335,11 +348,15 @@ root. The path is decoded bytes split on `/`; an absolute path or an empty,
 `.` or `..` component is refused. The parser walks it exactly as reopening
 walks a scanned path: each directory component opened `O_DIRECTORY |
 O_NOFOLLOW`, each opened object checked for the root's device and mount
-identity, the final component opened no-follow and required to be a regular
-file. A symbolic link anywhere on the path fails as unsupported, as the
-scanner fails one it cannot record; a directory, FIFO or special file at the
-end fails as unsupported; a missing file is `FSIMG_EINVAL` with the OS
-error, since the manifest named something that does not exist. The host
+identity, the final component inspected without following a link, opened
+no-follow only when it is a regular file, so a device or FIFO the manifest
+names is never opened, and required again to be a regular file once open.
+A symbolic link anywhere on the path fails as unsupported, as the scanner
+fails one it cannot record; a directory, FIFO or special file at the
+end fails as unsupported; a missing file, a path that continues through
+a regular file, or a component longer than the content directory's file
+system allows, is `FSIMG_EINVAL` with the OS error, since the manifest
+named something that does not exist. The host
 record stores the file's identity and the relative path, so reopening
 during emission compares identity, size and change metadata as for a
 scanned file and reports `FSIMG_ESOURCE_CHANGED` on a difference.
@@ -387,10 +404,15 @@ parser computes the digest while it validates the entry and refuses the
 manifest on a mismatch: a disagreement between the harness's generator and
 fsimg's fails before any plan exists. For host bytes the digest is checked
 where the bytes are read, during the emission copy: the source cursor
-hashes every byte it serves and `finish()` compares, so a mismatch is
+hashes the bytes it serves in order from offset zero and `finish()`
+compares once every byte was served, so a mismatch is
 `FSIMG_ESOURCE_CHANGED` naming the path, the staged output is discarded and
-nothing is published. Checking host digests at input would read every
-payload twice and make `-n` read payloads, which the [CLI
+nothing is published. Finishing a cursor asserts that it served the file:
+one that served less than all of it in order is an internal fault
+(`FSIMG_ECORRUPT`), never a silently skipped check, and the alias
+preflight, which opens every host source only to compare identities,
+closes its cursor instead of finishing it. Checking host digests at input
+would read every payload twice and make `-n` read payloads, which the [CLI
 contract](design-cli.md#creation) forbids.
 
 The project has one SHA-256 implementation in `lib/core/`, used by the
@@ -498,7 +520,7 @@ drive their parsers; `build-aux/fuzz.sh` runs it with the others.
 
 | Condition | Status | Where |
 | --- | --- | --- |
-| NUL, a byte outside the word range, a bad escape, a word beginning with `/` other than `/set` and `/unset`, keywords on `..`, `..` with no open directory, input ending inside a line, a repeated keyword, an unknown keyword, a bare keyword, a malformed value, `link` or `contents` or a digest on the wrong type, an entry without `type`, a `type=link` without `link`, `uid` without `gid` or the reverse, generated content without `size`, `fsimg.seed` or `fsimg.holes` with the wrong content, a `size` that disagrees with a link target or the host file, a generated digest mismatch, a `contents=` path that is absolute or contains `..` or names a missing file | `FSIMG_EINVAL`, operation `SOURCE`; `offset` is the byte offset of the line, the message begins with its line number, `path` the entry's image path when one exists | Input |
+| NUL, a byte outside the word range, a bad escape, a word beginning with `/` other than `/set` and `/unset`, keywords on `..`, `..` with no open directory, input ending inside a line, a repeated keyword, an unknown keyword, a bare keyword, a malformed value, `link` or `contents` or a digest on the wrong type, an entry without `type`, a `type=link` without `link`, `uid` without `gid` or the reverse, generated content without `size`, `fsimg.seed` or `fsimg.holes` with the wrong content, a `size` that disagrees with a link target or the host file, a generated digest mismatch, a `contents=` path that is absolute or contains `..`, names a missing file or has a component too long for its file system | `FSIMG_EINVAL`, operation `SOURCE`; `offset` is the byte offset of the line, the message begins with its line number, `path` the entry's image path when one exists | Input |
 | A keyword of the unsupported class, a symbolic link on a `contents=` path, a directory or special file at its end | `FSIMG_EUNSUPPORTED` | Input |
 | A value beyond its numeric range | `FSIMG_ERANGE` | Input |
 | A line, entry count, depth or path beyond its limit | `FSIMG_ELIMIT` naming the resource | Input |

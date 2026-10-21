@@ -1,16 +1,24 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2026, fsimg contributors
  */
+#include <sys/types.h>
+#include <sys/stat.h>
+
+#include <fcntl.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "fsimg.h"
 #include "host.h"
 #include "internal.h"
 #include "mtree.h"
+#include "source.h"
 #include "unicode.h"
+#include "writer.h"
 
 /* Arbitrary bytes as an mtree(5) manifest under finite limits. Every entry
  * the parser accepts must keep the parser's promises: a valid image path
@@ -21,6 +29,16 @@
  * must reach the same status after the same entries, so read boundaries
  * cannot change what a manifest means. Silently dropped lines are the unit
  * tests' to find, against real mtree -c and bsdtar output.
+ *
+ * The same bytes then go through the public fsimg_writer_add_manifest(),
+ * from a file, once without a content directory and once with a small
+ * fixed one holding a file, a nested file and a symbolic link. When the
+ * manifest is accepted and its catalog prepares, every generated and zero
+ * source is opened through the writer's source cursor: next_range() must
+ * tile the file, and reads at offsets drawn from the input must succeed
+ * and read zero wherever a range says ZERO. Every call must return all its
+ * memory and descriptors. The work limit is small because a claimed digest
+ * is computed over the whole generated file at input.
  */
 typedef struct fuzz_input {
 	const uint8_t	*data;
@@ -45,7 +63,31 @@ static void fold(uint64_t *, const void *, size_t);
 static void fold_entry(uint64_t *, const fsimg_mtree_entry_t *);
 static bool relative_path_safe(const char *);
 static void exercise(const uint8_t *, size_t, size_t, fuzz_outcome_t *);
+static void prepare_directory(void);
+static void remove_directory(void);
+static void import_manifest(const uint8_t *, size_t, int, uint64_t);
+static void serve_sources(fsimg_writer_t *, uint64_t);
+static void serve_source(fsimg_writer_t *, uint64_t, uint64_t);
 int LLVMFuzzerTestOneInput(const uint8_t *, size_t);
+
+/* The fuzzer's own directory: the manifest file each input is written to,
+ * and the content directory beside it.
+ */
+static char work_directory[1024];
+static int work_fd = -1;
+static int contents_fd = -1;
+
+static void
+remove_directory(void)
+{
+	unlinkat(contents_fd, "d/b", 0);
+	unlinkat(contents_fd, "d", AT_REMOVEDIR);
+	unlinkat(contents_fd, "a", 0);
+	unlinkat(contents_fd, "l", 0);
+	unlinkat(work_fd, "contents", AT_REMOVEDIR);
+	unlinkat(work_fd, "manifest", 0);
+	rmdir(work_directory);
+}
 
 static fsimg_status_t
 fuzz_read(void *argument, unsigned char *buffer, size_t capacity,
@@ -227,6 +269,154 @@ exercise(const uint8_t *data, size_t size, size_t chunk,
 	outcome->ctx = NULL;
 }
 
+/* Created once, beneath the temporary directory, and removed at exit. */
+static void
+prepare_directory(void)
+{
+	const char *temporary;
+	int fd;
+
+	if (work_fd != -1)
+		return;
+	temporary = getenv("TMPDIR");
+	if (temporary == NULL || temporary[0] == '\0')
+		temporary = "/tmp";
+	if (snprintf(work_directory, sizeof(work_directory),
+	    "%s/mtree-fuzz-XXXXXX", temporary) >= (int)sizeof(work_directory) ||
+	    mkdtemp(work_directory) == NULL || atexit(remove_directory) != 0)
+		abort();
+	work_fd = open(work_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (work_fd == -1 || mkdirat(work_fd, "contents", 0700) == -1)
+		abort();
+	contents_fd = openat(work_fd, "contents",
+	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (contents_fd == -1 || mkdirat(contents_fd, "d", 0700) == -1 ||
+	    symlinkat("a", contents_fd, "l") == -1)
+		abort();
+	fd = openat(contents_fd, "a", O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fd == -1 || write(fd, "abc", 3) != 3 || close(fd) == -1)
+		abort();
+	fd = openat(contents_fd, "d/b", O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fd == -1 || write(fd, "xy", 2) != 2 || close(fd) == -1)
+		abort();
+}
+
+/* Import data as a manifest file through the public call, with contents
+ * as its content directory or -1, and serve what it describes.
+ */
+static void
+import_manifest(const uint8_t *data, size_t size, int contents, uint64_t seed)
+{
+	fsimg_options_t options;
+	fsimg_stats_t baseline, stats;
+	fsimg_writer_t *writer;
+	fsimg_error_t error;
+	fsimg_ctx_t *ctx;
+	fsimg_status_t status;
+	int fd;
+
+	fd = openat(work_fd, "manifest", O_WRONLY | O_CREAT | O_TRUNC |
+	    O_CLOEXEC, 0600);
+	if (fd == -1 || (size != 0 && write(fd, data, size) != (ssize_t)size) ||
+	    close(fd) == -1)
+		abort();
+	fd = openat(work_fd, "manifest", O_RDONLY | O_CLOEXEC);
+	if (fd == -1)
+		abort();
+	fsimg_options_init(&options);
+	options.memory_bytes = 16 * 1024 * 1024;
+	options.max_entries = 1000;
+	options.max_depth = 8;
+	options.max_path_bytes = 256;
+	options.max_work = 512;
+	options.max_open_files = 8;
+	if (fsimg_ctx_new(&options, &ctx, &error) != FSIMG_OK ||
+	    fsimg_ctx_get_stats(ctx, &baseline, &error) != FSIMG_OK ||
+	    fsimg_writer_collect_new(ctx, &writer, &error) != FSIMG_OK)
+		abort();
+	status = fsimg_writer_add_manifest(writer, fd, contents, &error);
+	if (status != FSIMG_OK && error.status != status)
+		abort();
+	if (status == FSIMG_OK &&
+	    fsimg_writer_prepare(writer, NULL, &error) == FSIMG_OK)
+		serve_sources(writer, seed);
+	fsimg_writer_free(writer);
+	if (fsimg_ctx_get_stats(ctx, &stats, &error) != FSIMG_OK ||
+	    stats.memory_bytes != baseline.memory_bytes ||
+	    stats.descriptors != baseline.descriptors)
+		abort();
+	fsimg_ctx_free(ctx);
+	if (close(fd) == -1)
+		abort();
+}
+
+static void
+serve_sources(fsimg_writer_t *writer, uint64_t seed)
+{
+	const fsimg_catalog_entry_t *entry;
+	uint64_t count;
+
+	count = writer->count;
+	for (uint64_t id = 1; id <= count; id++) {
+		if (fsimg_catalog_get(writer, id, &entry, NULL) != FSIMG_OK)
+			return;
+		if (entry->storage != FSIMG_STORAGE_GENERATED &&
+		    entry->storage != FSIMG_STORAGE_ZERO)
+			continue;
+		serve_source(writer, id, seed + id);
+	}
+}
+
+/* The ranges of a source must tile it in order with nonempty runs, and a
+ * read at any offset must deliver the bytes it asks for within the file,
+ * zero inside a ZERO run. A failure for lack of work ends the check.
+ */
+static void
+serve_source(fsimg_writer_t *writer, uint64_t id, uint64_t seed)
+{
+	unsigned char buffer[256];
+	fsimg_range_t range;
+	uint64_t length, offset;
+	size_t request, transferred;
+	fsimg_status_t status;
+
+	if (fsimg_source_open(writer, id, NULL) != FSIMG_OK)
+		return;
+	length = writer->source.length;
+	for (offset = 0; offset < length; offset += range.length) {
+		status = fsimg_source_range(writer, offset, &range, NULL);
+		if (status != FSIMG_OK)
+			abort();
+		if (range.offset != offset || range.length == 0 ||
+		    range.length > length - offset)
+			abort();
+	}
+	if (fsimg_source_range(writer, length, &range, NULL) != FSIMG_DONE)
+		abort();
+	for (unsigned trial = 0; trial < 4 && length != 0; trial++) {
+		seed = seed * 6364136223846793005u + 1442695040888963407u;
+		offset = (seed >> 11) % length;
+		request = (size_t)((seed >> 3) % sizeof(buffer)) + 1;
+		status = fsimg_source_read(writer, offset, buffer, request,
+		    &transferred, NULL);
+		if (status == FSIMG_ELIMIT)
+			return;
+		if (status != FSIMG_OK || transferred != (request <
+		    length - offset ? request : (size_t)(length - offset)))
+			abort();
+		if (fsimg_source_range(writer, offset, &range, NULL) != FSIMG_OK)
+			abort();
+		for (size_t i = 0; range.kind == FSIMG_RANGE_ZERO &&
+		    i < transferred && i < range.length; i++) {
+			if (buffer[i] != 0)
+				abort();
+		}
+	}
+	status = fsimg_source_finish(writer, NULL);
+	if (status != FSIMG_OK && status != FSIMG_ELIMIT)
+		abort();
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -237,5 +427,8 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	if (whole.status != pieces.status || whole.entries != pieces.entries ||
 	    whole.fingerprint != pieces.fingerprint)
 		abort();
+	prepare_directory();
+	import_manifest(data, size, -1, whole.fingerprint);
+	import_manifest(data, size, contents_fd, whole.fingerprint);
 	return (0);
 }
