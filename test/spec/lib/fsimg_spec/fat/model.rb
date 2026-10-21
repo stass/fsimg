@@ -16,6 +16,17 @@ module FsimgSpec
     # FAT32 extension; a FAT32 extension is never read over a FAT12/16 BPB.
     # fat32_extension says which was read, and is Undefined with the BPB.
     #
+    # fsinfo is the FSInfo record (section 5) of a volume whose cluster
+    # count makes it FAT32, read at the sector BPB_FSInfo names. It is nil
+    # where there is none to read:
+    #   * the boot sector has no FAT32 extension, so no BPB_FSInfo;
+    #   * the cluster count makes the volume FAT12 or FAT16;
+    #   * BPB_FSInfo names no sector of the reserved area after the boot
+    #     sector, as 0xFFFF, which compatible readers take for none, does
+    #     not; the pointer's own rules judge that value.
+    # It is Undefined with the boot sector, with the variant of a volume
+    # that has a FAT32 extension, or when the image ends before the record.
+    #
     # The model does not decode the allocation tables or directories. tree
     # is the known tree the case says its image holds, an Array of
     # WalkedEntry that KnownTree builds: an unmutated base its recipe's
@@ -23,7 +34,8 @@ module FsimgSpec
     # (specs/design-spec-testing.md#cases). A mutated image's tree is
     # Undefined, and every scope that reads it is unclassified, derived from
     # it rather than listed.
-    class Model < Data.define(:image_length, :common, :fat32_extension, :extension, :signature, :geometry, :tree)
+    class Model < Data.define(:image_length, :common, :fat32_extension, :extension, :signature, :fsinfo, :geometry,
+                             :tree)
       # The boot sector records lie in the volume's first 512 bytes,
       # whatever BPB_BytsPerSec says.
       BOOT_SECTOR_BYTES = 512
@@ -34,7 +46,7 @@ module FsimgSpec
       # their name trials, which decide its violations, are the run
       # environment's (specs/design-spec-testing.md#host-names).
       SCOPE_INPUTS = {
-        "open" => [], "directories" => %i[tree], "files" => %i[tree], "verification" => %i[tree], "destination" => %i[tree]
+        "open" => [], "directories" => %i[tree], "files" => %i[tree], "verification" => %i[tree fsinfo], "destination" => %i[tree]
       }.freeze
       UNKNOWN_TREE = Undefined.new(reason: "the tree of an image no case vouches for, such as a mutated one, is unknown")
       # The entry kinds a known tree holds.
@@ -48,11 +60,13 @@ module FsimgSpec
         common = record(Layout::CommonBpb, sector)
         fat32_extension = FsimgSpec.derive(common) { _1.bpb_fat_sz16.zero? }
         extension = FsimgSpec.derive(fat32_extension) { record(_1 ? Layout::Fat32Extension : Layout::Fat16Extension, sector) }
+        geometry = geometry(common, fat32_extension, extension)
         new(
           image_length: image.length,
           common:, fat32_extension:, extension:,
           signature: record(Layout::Signature, sector),
-          geometry: geometry(common, fat32_extension, extension),
+          fsinfo: fsinfo(image, common, fat32_extension, extension, geometry.variant),
+          geometry:,
           tree:
         )
       end
@@ -152,6 +166,10 @@ module FsimgSpec
         end
       end
 
+      # Whether sector is one of the reserved area after the boot sector,
+      # where a FAT32 volume's FSInfo and backup boot record lie.
+      def self.reserved_sector?(common, sector) = (1...common.bpb_rsvd_sec_cnt).cover?(sector)
+
       # The plain values of layout at its position in sector, or Undefined
       # when sector ends before the record does.
       private_class_method def self.record(layout, sector)
@@ -160,6 +178,20 @@ module FsimgSpec
         return Undefined.new(reason: "#{layout.name} needs bytes #{position}-#{position + size - 1}") if sector.bytesize < position + size
 
         Layout.decode(layout, sector.byteslice(position, size))
+      end
+
+      # The FSInfo record BPB_FSInfo locates (Model's fsinfo).
+      private_class_method def self.fsinfo(image, common, fat32_extension, extension, variant)
+        FsimgSpec.derive(fat32_extension) do |fat32|
+          next nil unless fat32
+
+          FsimgSpec.derive(extension, variant) do |fields, kind|
+            sector = fields.bpb_fs_info
+            next nil unless kind == "fat32" && reserved_sector?(common, sector)
+
+            record(Layout::FsInfo, image.read(sector * common.bpb_byts_per_sec, Layout::FsInfo.new.num_bytes))
+          end
+        end
       end
 
       # The BPB fields geometry derives from; every one is Undefined when

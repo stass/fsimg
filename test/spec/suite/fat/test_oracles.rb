@@ -138,10 +138,9 @@ class TestFatOracles < Minitest::Test
     end
   end
 
-  # A checker's detail quotes every line it wrote, stderr first, so that
-  # a diagnostic after a progress line, as FreeBSD's fsck_msdosfs writes,
-  # is in the detail an exception matches; its label names the program.
-  def test_a_failing_checker_is_quoted_by_program_and_every_line
+  # A checker's detail names the program and quotes the lines it wrote
+  # that are not blank, stderr first.
+  def test_a_failing_checker_is_quoted_by_program_and_its_lines
     Dir.mktmpdir do |stubs|
       checker = File.join(stubs, "fsck_msdosfs")
       File.write(checker, "#!/bin/sh\necho '** image.img'\necho\necho 'Filesystem too small'\necho 'dirty' >&2\nexit 8\n")
@@ -153,21 +152,33 @@ class TestFatOracles < Minitest::Test
     end
   end
 
-  # A disagreement an exception's tool, cluster counts and diagnostic
-  # all match is excused and names the exception; any other observation
-  # stays as it was.
-  def test_a_disagreement_a_documented_exception_matches_is_excused
-    exceptions = [Fat::OracleException.new(id: "t.crossed", tool: "fsck", clusters: [4085, 5005], diagnostic: /crossed/,
-                                           reason: "a test")]
-    crossed = FsimgSpec::Observation.disagrees("fsck_msdosfs -n exited 8: crossed chain")
-    excused = ->(observations, count) { Fat::Oracles.excused(observations, cluster_count: count, exceptions:) }
+  # A disagreement is excused when an exception's tool, cluster count,
+  # program and exit status match, its symptom is among the lines the
+  # tool wrote, and every line is the symptom or one the exception
+  # explains. A wrong count, tool, program or status, an undefined count,
+  # or a disagreement with no failure leaves it as it is; another line, or
+  # no symptom, leaves it unexcused with a detail that says why first.
+  def test_an_exception_excuses_only_complete_output_it_explains
+    exception = Fat::OracleException.new(id: "t.crossed", tool: "fsck", program: "fsck_msdosfs", exit_status: 8,
+                                         clusters: [4085, 5005], symptom: /\ACluster \d+ crossed\z/,
+                                         explains: [/\A\*\* \S+\z/, /\ATruncate\? no\z/], reason: "a test")
+    message = 'fsck_msdosfs -n exited 8: "** image.img"'
+    failure = failure(["** image.img", "Cluster 8 crossed", "Truncate? no"])
+    excused = lambda do |tool: "fsck", count: 4085, with: failure|
+      Fat::Oracles.excuse(Fat::Oracles::Disagreement.new(message, failure: with), tool:, cluster_count: count,
+                                                                                  exceptions: [exception])
+    end
+    disagreement = FsimgSpec::Observation.disagrees(message)
 
-    assert_equal crossed.excused_by("t.crossed"), excused.call({ "fsck" => crossed }, 4085).fetch("fsck")
-    assert_equal "excused", excused.call({ "fsck" => crossed }, 5005).fetch("fsck").state
-    unexcused = [[{ "fsck" => crossed }, 4084], [{ "mtools" => crossed }, 4085],
-                 [{ "fsck" => FsimgSpec::Observation.disagrees("exited 8: lost cluster") }, 4085],
-                 [{ "fsck" => crossed }, FsimgSpec::Undefined.new(reason: "no BPB")], [{ "fsck" => FsimgSpec::Observation.agrees }, 4085]]
-    unexcused.each { |observations, count| assert_equal observations, excused.call(observations, count) }
+    assert_equal [disagreement.excused_by("t.crossed")] * 2, [excused.call, excused.call(count: 5005)]
+    uncovered = [excused.call(count: 4084), excused.call(tool: "mtools"), excused.call(count: FsimgSpec::Undefined.new(reason: "no BPB")),
+                 excused.call(with: failure.with(program: "fsck.fat")), excused.call(with: failure.with(exit_status: 4)),
+                 excused.call(with: nil)]
+    assert_equal [disagreement] * uncovered.size, uncovered
+    assert_equal ["t.crossed does not explain \"/DIR has entries after end of directory\": #{message}",
+                  "t.crossed finds no line of its symptom: #{message}"],
+                 [excused.call(with: failure.with(lines: [*failure.lines, "/DIR has entries after end of directory"])),
+                  excused.call(with: failure.with(lines: ["** image.img", "Truncate? no"]))].map(&:detail)
   end
 
   # An exception names the exact counts a defect was observed at: a range
@@ -175,7 +186,8 @@ class TestFatOracles < Minitest::Test
   def test_an_exception_names_exact_cluster_counts
     [[4070..4100], 4070..4100, [], [4085.0]].each do |clusters|
       assert_raises(FsimgSpec::HarnessError, clusters.inspect) do
-        Fat::OracleException.new(id: "t.range", tool: "mtools", clusters:, diagnostic: //, reason: "a test")
+        Fat::OracleException.new(id: "t.range", tool: "mtools", program: "mdir", exit_status: 1, clusters:, symptom: //,
+                                 explains: [], reason: "a test")
       end
     end
   end
@@ -185,38 +197,55 @@ class TestFatOracles < Minitest::Test
   # the 16 clusters automatic sizing keeps from them, and none excuses
   # fsck.fat's there.
   def test_no_exception_excuses_the_read_back_or_fsck_fat_near_the_cutovers
-    observations = { "mtools" => FsimgSpec::Observation.disagrees("mtools lacks file \"a\""),
-                     "fsck" => FsimgSpec::Observation.disagrees('fsck.fat -n exited 1: "FATs differ"') }
     counts = [4069, 4070, 4084, 4085, 4086, 4100, 4101, 65_509, 65_510, 65_524, 65_525, 65_526, 65_540, 65_541]
-
-    assert_empty counts.reject { Fat::Oracles.excused(observations, cluster_count: _1) == observations }
+    failures = { "mtools" => failure(["init: not a DOS filesystem"], program: "mdir", exit_status: 1),
+                 "fsck" => failure(["fsck.fat 4.2", "FATs differ"], program: "fsck.fat", exit_status: 1) }
+    excused = counts.product(failures.to_a).reject do |count, (tool, failure)|
+      Fat::Oracles.excuse(Fat::Oracles::Disagreement.new("x", failure:), tool:, cluster_count: count) ==
+        FsimgSpec::Observation.disagrees("x")
+    end
+    assert_empty excused
   end
 
   # FreeBSD's fsck_msdosfs takes the variant one cluster off section
   # 3.5's cutovers: it decodes a FAT16 volume of 4085 clusters with a
-  # 12-bit table and refuses a FAT32 volume of 65525. Those disagreements
-  # alone are excused, a misread chain in any phase among them, and the
-  # refusal after its warning about the sector after FSInfo. A boot
-  # sector diagnostic before the FAT is read or before the refusal is not
-  # excused, nor is fsck.fat's at the same counts, nor fsck_msdosfs's at
-  # any other count.
-  def test_fsck_msdosfs_is_excused_only_at_its_off_by_one_cutovers
-    observed = lambda do |detail, count|
-      Fat::Oracles.excused({ "fsck" => FsimgSpec::Observation.disagrees(detail) }, cluster_count: count).fetch("fsck").exception_id
+  # 12-bit table and refuses a FAT32 volume of 65525. Its complete output
+  # there is excused when every line is one the misread table or the
+  # refusal explains, as observed on FreeBSD 16: chains crossed, cut,
+  # lost, or too short or too long for a file's size in any phase, and the
+  # refusal after its warning about the sector after FSInfo. Any other
+  # diagnostic, such as a boot sector problem or a directory's entries
+  # past its end, wherever it
+  # falls among the lines, leaves the disagreement unexcused, as do
+  # fsck.fat's output and another count.
+  def test_fsck_msdosfs_is_excused_only_for_output_its_defect_explains
+    observed = lambda do |lines, count, program: "fsck_msdosfs"|
+      Fat::Oracles.excuse(Fat::Oracles::Disagreement.new("x", failure: failure(lines, program:)), tool: "fsck",
+                                                                                                  cluster_count: count)
+                  .exception_id
     end
-    crossed = 'fsck_msdosfs -n exited 8: "** out/created.img | ** Phase 1 - Read FAT and checking connectivity | ' \
-              'Cluster 8 crossed another chain at 7 | Truncate? no"'
-    lost = 'fsck_msdosfs -n exited 8: "** image.img | ** Phase 1 - Read FAT and checking connectivity | ' \
-           '** Phase 2 - Checking Directories | ** Phase 3 - Checking for Lost Files | Lost cluster chain at cluster 4096"'
-    boot = 'fsck_msdosfs -n exited 8: "** out/created.img | Invalid signature in boot block: 0000"'
-    refused = 'fsck_msdosfs -n exited 8: "** out/created.img | Filesystem too small (65525 clusters) for FAT32 partition"'
-    warned = refused.sub("img | ", "img | Invalid signature in fsinfo block | Fix? no | ")
-    backup = refused.sub("img | ", "img | backup (block 6) mismatch with primary bootblock | ")
+    crossed = ["** out/created.img", "** Phase 1 - Read FAT and checking connectivity",
+               *(["Cluster 8 crossed another chain at 7", "Truncate? no"] * 10),
+               "Cluster 23 continues with out of range cluster number 1", "Truncate? no",
+               "** Phase 2 - Checking Directories", "Cluster chain starting at 8 ends with cluster marked free",
+               "Truncate? no", "Cluster chain starting at 9 ends with cluster out of range (70000)", "Truncate? no",
+               "/DIR/big.bin has too many clusters allocated", "Drop superfluous clusters? no",
+               "size of /DIR/zeros.bin is 70000, should at most be 32768", "/DIR doesn't start a new cluster chain",
+               "Remove? no", "** Phase 3 - Checking for Lost Files", "Lost cluster chain at cluster 4096",
+               "1 Cluster(s) lost", "Reconnect? no", "Clear? no", "8 files, 1.9 MiB free (3932 clusters)"]
+    lost = ["** image.img", "** Phase 1 - Read FAT and checking connectivity", "** Phase 2 - Checking Directories",
+            "** Phase 3 - Checking for Lost Files", "Lost cluster chain at cluster 4096", "1 Cluster(s) lost",
+            "Reconnect? no", "Clear? no", "1 files, 2.0 MiB free (4094 clusters)"]
+    stale = [*crossed, "/DIR has entries after end of directory", "Remove? no"]
+    boot = ["** out/created.img", "Invalid signature in boot block: 0000", *crossed.drop(1)]
+    refused = ["** out/created.img", "Filesystem too small (65525 clusters) for FAT32 partition"]
+    warned = [refused.first, "Invalid signature in fsinfo block", "Fix? no", refused.last]
+    backup = [refused.first, "backup (block 6) mismatch with primary bootblock", refused.last]
 
-    assert_equal ["fsck_msdosfs.fat16_4085", "fsck_msdosfs.fat16_4085", nil, nil, nil],
-                 [observed.call(crossed, 4085), observed.call(lost, 4085), observed.call(boot, 4085), observed.call(crossed, 4086),
-                  observed.call(crossed.sub("fsck_msdosfs", "fsck.fat"), 4085)]
-    assert_equal ["fsck_msdosfs.fat32_65525", "fsck_msdosfs.fat32_65525", nil, nil, nil],
+    assert_equal ["fsck_msdosfs.fat16_4085"] * 2 + [nil] * 5,
+                 [observed.call(crossed, 4085), observed.call(lost, 4085), observed.call(stale, 4085), observed.call(boot, 4085),
+                  observed.call(crossed, 4086), observed.call(crossed, 4085, program: "fsck.fat"), observed.call(refused, 4085)]
+    assert_equal ["fsck_msdosfs.fat32_65525"] * 2 + [nil] * 3,
                  [observed.call(refused, 65_525), observed.call(warned, 65_525), observed.call(backup, 65_525),
                   observed.call(crossed, 65_525), observed.call(warned, 65_524)]
   end
@@ -235,21 +264,27 @@ class TestFatOracles < Minitest::Test
     assert_empty Fat::Oracles.disagreements(observations.except("fsck"))
   end
 
-  # Every exception is documented: a unique id, a verdict tool, cluster
-  # counts and a diagnostic to match, and a reason that cites where the
-  # tool departs from the specification.
+  # Every exception is documented: a unique id, a verdict tool, the
+  # program and exit status it matches, a symptom and the lines it
+  # explains, and a reason that cites where the tool departs from the
+  # specification.
   def test_every_exception_is_documented
     exceptions = Fat::Oracles::EXCEPTIONS
 
     assert_equal exceptions.size, exceptions.map(&:id).uniq.size
     exceptions.each do |exception|
       assert_includes Fat::Oracles::VERDICT_TOOLS, exception.tool, exception.id
-      assert_kind_of Regexp, exception.diagnostic, exception.id
+      assert_kind_of Regexp, exception.symptom, exception.id
+      assert(exception.explains.all?(Regexp), exception.id)
       assert_match(%r{https://|specs/}, exception.reason, exception.id)
     end
   end
 
   private
+
+  # What a tool that failed wrote, as an exception matches it.
+  def failure(lines, program: "fsck_msdosfs", exit_status: 8) =
+    Fat::Oracles::ToolFailure.new(program:, exit_status:, lines: lines.map(&:b))
 
   # Writes a builder image of tree into a case directory, plants the
   # named files beside it, and yields the observations of it as the known

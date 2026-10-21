@@ -31,6 +31,8 @@ module FsimgSpec
       # The FSInfo and backup boot sector values that compatible readers
       # take to mean "none"; the specification gives 0xFFFF no meaning.
       ABSENT_SECTOR = 0xFFFF
+      # FSInfo's three signatures (section 5), by field.
+      FSINFO_SIGNATURES = { fsi_lead_sig: 0x4161_5252, fsi_struc_sig: 0x6141_7272, fsi_trail_sig: 0xAA55_0000 }.freeze
       # The reserved bits of BPB_ExtFlags, 4-6 and 8-15.
       EXT_FLAGS_RESERVED_BITS = 0xFF70
 
@@ -420,7 +422,7 @@ module FsimgSpec
         # other legal value.
         def kind(model, sector)
           if sector == ABSENT_SECTOR then :absent
-          elsif sector != none && !Rules.reserved_sector?(model, sector) then :illegal
+          elsif sector != none && !Model.reserved_sector?(model.common, sector) then :illegal
           elsif recommended.include?(sector) then :recommended
           else :other
           end
@@ -438,9 +440,6 @@ module FsimgSpec
         id: "fat32.bpb.backup_boot_sector", recommended: [0, 6], none: 0,
         field: Field.new(record: Layout::Fat32Extension, name: :bpb_bk_boot_sec, parameter: :backup_boot)
       )
-
-      # A sector of the reserved area after the boot sector.
-      def self.reserved_sector?(model, sector) = (1...model.common.bpb_rsvd_sec_cnt).cover?(sector)
 
       # A pointer's normative rule: its value is legal, or 0xFFFF.
       def self.reserved_area_rule(pointer, source:, domain:)
@@ -520,6 +519,20 @@ module FsimgSpec
                   "formatting, not of reading (docs/spec-testing-plan.md#initial-fat-rule-set)"
         ),
         absent_sector_rule(FSINFO, source: cite("3.3", "BPB_FSInfo")),
+        # The FSInfo record a legal BPB_FSInfo locates carries three
+        # signatures. The reader checks them when it verifies the volume
+        # (specs/design-fat-reader.md), and FreeBSD's fsck_msdosfs, whose
+        # warning names none of them, is excused for it at 65525 clusters,
+        # so this rule is what fails an image of fsimg's with a wrong one.
+        Rule.new(
+          id: "fat32.fsinfo.signatures", category: "normative", policy: "must_reject", status: "FSIMG_ECORRUPT",
+          scopes: ["verification"], applies_to: ->(model, _) { FsimgSpec.derive(model.fsinfo) { !_1.nil? } },
+          domain: Witnesses::FSINFO_SIGNATURES,
+          predicate: lambda { |model, _|
+            FsimgSpec.derive(model.fsinfo) { |info| FSINFO_SIGNATURES.all? { info.public_send(_1) == _2 } }
+          },
+          source: cite("5", "FSI_LeadSig, FSI_StrucSig and FSI_TrailSig")
+        ),
         # Section 3.6 places a copy of the whole three-sector boot record
         # at BPB_BkBootSec, but a reader uses only the BPB copy in its first
         # sector, so the rule set requires only that sector in the reserved

@@ -565,7 +565,7 @@ review and commit gates.
   - The mutations are the semantic
     [mutations](../specs/design-spec-testing.md#mutations) (`set_fat_entry`,
     `set_directory_entry`, `splice_chain` and `relocate_chain`), plus LFN
-    order, checksum and UTF-16 faults, FSInfo signatures and hints, backup
+    order, checksum and UTF-16 faults, FSInfo hints, backup
     boot divergence, and mirror divergence.
   - The rules include the `test/fat.c` cases that S6 left without one:
     FAT chains (a cycle, a link to a free, bad or out-of-range cluster, a
@@ -573,8 +573,8 @@ review and commit gates.
     `FAT[1]`); directory entries (a duplicate short name, timestamps,
     attribute `0x80`, a shared or ancestor directory, `.` and `..`, labels);
     names and long names (a lowercase short name, `/`, a leading space, LFN
-    ordinal, checksum, padding, type, orphan and collision faults); FSInfo
-    contents; backup boot contents; and mirror agreement. With them come
+    ordinal, checksum, padding, type, orphan and collision faults); the
+    FSInfo hints; backup boot contents; and mirror agreement. With them come
     `fat.fat.media_entry` and `fat.fat.eoc_entry`.
   - Expected stages follow the
     [stage policy](../specs/design-spec-testing.md#stage-policy), including
@@ -687,6 +687,7 @@ the expectations their rules derive.
 | `fat32.bpb.fsinfo_sector` | `BPB_FSInfo` is `0xFFFF` or a reserved-area sector after the boot sector | normative | `info`: `ECORRUPT` for 0, 32 of 32 reserved sectors, and `0xFFFE` |
 | `fat32.bpb.fsinfo_sector.recommended` | `BPB_FSInfo` is 1 | advisory (`must_accept`) | Accepted by `info` at 2 and 31 |
 | `fat32.bpb.fsinfo_sector.absent` | `BPB_FSInfo` is not `0xFFFF` | advisory (`must_accept`) | Accepted by `info` as no FSInfo |
+| `fat32.fsinfo.signatures` | The FSInfo record a legal `BPB_FSInfo` locates on a FAT32 volume carries `FSI_LeadSig` `0x41615252`, `FSI_StrucSig` `0x61417272` and `FSI_TrailSig` `0xAA550000` | normative | Not asserted: its witnesses clear each signature by mutation, which leaves `verification` unclassified until B2; a base or a created image that breaks it is refused |
 | `fat32.bpb.backup_boot_sector` | `BPB_BkBootSec` is 0, `0xFFFF` or a reserved-area sector after the boot sector | normative | `info`: `ECORRUPT` for 32 of 32 reserved sectors and `0xFFFE` |
 | `fat32.bpb.backup_boot_sector.recommended` | `BPB_BkBootSec` is 0 or 6 | advisory (`must_accept`) | Accepted by `info` at 29 |
 | `fat32.bpb.backup_boot_sector.absent` | `BPB_BkBootSec` is not `0xFFFF` | advisory (`must_accept`) | Accepted by `info` as no backup |
@@ -747,8 +748,12 @@ The rule set reads the specification as follows where it is not decisive:
   `BPB_Media`) and `fat.fat.eoc_entry` (`FAT[1]` holds an end-of-chain value,
   with the FAT16/32 flag bits separate) have scope `verification`. Until the
   model decodes the FAT, every case leaves that scope unclassified, so both
-  rules belong to milestone B2. FSInfo contents and the backup boot record's
-  agreement with the primary are B2 rules for the same reason.
+  rules belong to milestone B2. The FSInfo hints and the backup boot record's
+  agreement with the primary are B2 rules for the same reason. The FSInfo
+  signatures are not: the model reads them from the FSInfo sector alone, so
+  `fat32.fsinfo.signatures` classifies every unmutated image, and refuses a
+  base or a created image with a wrong one on any host, whatever its
+  checker reports.
 
 ## Expected early findings
 

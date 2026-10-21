@@ -120,10 +120,13 @@ module FsimgSpec
       # generator defect: a tree the builder cannot lay out, or a rule it
       # violates. Nothing of the witness is written. The builder writes a
       # tree only into the tables, the directories, the data region and
-      # FSInfo, none of which the model decodes, so the model is the empty
-      # base's, rendered once into the cache, with the witness's tree as
-      # its known tree. No name trial runs, so only the host's destination
-      # rules, which no witness's validity depends on, stay unclassified.
+      # FSInfo's free-cluster hints. The model decodes none of the first
+      # three, and no rule reads the hints, only FSInfo's signatures, which
+      # no tree changes. So the model is the empty base's, rendered once
+      # into the cache, with the witness's tree as its known tree; a rule
+      # that reads the hints would need the witness's own image instead.
+      # No name trial runs, so only the host's destination rules, which no
+      # witness's validity depends on, stay unclassified.
       # A defective witness's own case reports how, and a sampled one's
       # case checks this answer (Suite.drawn). A fault in rendering the
       # empty base is no defect of the witness, and propagates.

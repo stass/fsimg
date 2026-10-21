@@ -117,6 +117,31 @@ class TestFatModel < Minitest::Test
     assert_empty decode(FAT16_SECTOR).with(tree: []).unclassified_scopes
   end
 
+  # A FAT32 volume's FSInfo record is read at the sector BPB_FSInfo
+  # names, and is Undefined, leaving verification unclassified, when the
+  # image ends before it or the FAT32 boot sector gives no variant. A
+  # FAT16 volume, a FAT32 one whose BPB_FSInfo is 0xFFFF or outside the
+  # reserved area, and a FAT32 extension over a FAT16 cluster count have
+  # none to read.
+  def test_fsinfo_is_read_where_bpb_fsinfo_points
+    fsinfo = [0x4161_5252, "\0" * 480, 0x6141_7272, 0xFFFF_FFFF, 0xFFFF_FFFF, "\0" * 12, 0xAA55_0000].pack("Va480VVVa12V")
+    pointing = lambda do |sector|
+      self.class.boot_sector(FAT32_BPB, Layout::Fat32Extension, FAT32_EXTENSION.merge(bpb_fs_info: sector))
+    end
+    read = decode(FAT32_SECTOR + fsinfo).fsinfo
+
+    assert_equal [0x4161_5252, 0x6141_7272, 0xAA55_0000], [read.fsi_lead_sig, read.fsi_struc_sig, read.fsi_trail_sig]
+    assert_equal [0, 0x4161_5252], [decode(pointing.(2) + fsinfo + ("\0" * 512)).fsinfo.fsi_lead_sig,
+                                    decode(pointing.(2) + ("\0" * 512) + fsinfo).fsinfo.fsi_lead_sig]
+    short = decode(FAT32_SECTOR + fsinfo.byteslice(0, 511)).with(tree: [])
+    assert_equal [true, ["verification"]], [FsimgSpec.undefined?(short.fsinfo), short.unclassified_scopes]
+    assert_equal [nil] * 4, [decode(FAT16_SECTOR + fsinfo), decode(pointing.(0xFFFF) + fsinfo),
+                             decode(pointing.(32) + fsinfo), decode(pointing.(0) + fsinfo)].map(&:fsinfo)
+    small = self.class.boot_sector(FAT32_BPB.merge(bpb_tot_sec32: 65_536), Layout::Fat32Extension, FAT32_EXTENSION)
+    unsized = self.class.boot_sector(FAT32_BPB.merge(bpb_sec_per_clus: 0), Layout::Fat32Extension, FAT32_EXTENSION)
+    assert_equal [nil, true], [decode(small + fsinfo).fsinfo, FsimgSpec.undefined?(decode(unsized + fsinfo).fsinfo)]
+  end
+
   # Every scope of an image names its inputs; input is the source model's.
   def test_every_image_scope_names_its_inputs
     assert_equal (FsimgSpec::SCOPE_STAGES.keys - ["input"]).sort, FsimgSpec::Fat::Model::SCOPE_INPUTS.keys.sort

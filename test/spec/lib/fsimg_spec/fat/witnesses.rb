@@ -418,6 +418,17 @@ module FsimgSpec
         [0, 32, 0xFFFE].map { mutated(Rules::FSINFO.field, _1, base: "fat32", violates: true) }
       }
 
+      # Each of the three FSInfo signatures of the base cleared in turn.
+      FSINFO_SIGNATURES = lambda { |layouts|
+        base = layouts.fetch("fat32")
+        offsets = Layout.field_offsets.fetch(Layout::FsInfo)
+        { "lead" => :fsi_lead_sig, "structure" => :fsi_struc_sig, "trail" => :fsi_trail_sig }.map do |label, field|
+          offset = base.sector_offset(base.fs_info) + offsets.fetch(field)
+          Variation.new(label:, base: "fat32", violates: true,
+                        mutations: [Mutation::ReplaceBytes.new(offset:, bytes: "\0\0\0\0".b)])
+        end
+      }
+
       BACKUP_BOOT_SECTOR = lambda { |_layouts|
         [32, 0xFFFE].map { mutated(Rules::BACKUP_BOOT.field, _1, base: "fat32", violates: true) }
       }

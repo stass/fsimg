@@ -573,22 +573,36 @@ its own, because both paths can share a defect.
 
 An **oracle exception** documents a disagreement that is a defect of the
 tool rather than of the image. The exceptions are one frozen list,
-`Fat::Oracles::EXCEPTIONS`, reviewed like rules, and they cover the checker
-and the read-back alike. Each entry has five parts:
+`Fat::Oracles::EXCEPTIONS`, reviewed like rules. An entry may name the
+checker or the read-back, and excuses only a run of the tool that exited
+nonzero; a read-back that ran and listed or read other contents than the
+tree is never excused. Each entry has these parts:
 
 * an id, which records and reports name it by;
 * the tool it excuses;
+* the program and exit status it matches, since `fsck.fat` and
+  `fsck_msdosfs` have different defects;
 * the exact cluster counts of the volumes it covers, never a range;
-* a pattern the disagreement's detail must match, which for a checker
-  names the program, since `fsck.fat` and `fsck_msdosfs` have different
-  defects, and is anchored on the symptom of the defect;
+* a symptom, a pattern for the line that shows the defect;
+* the patterns of the other lines the defect explains;
 * a reason that cites the tool's source or the specification section it
   departs from.
 
+An entry matches the tool's complete output, not the detail the result
+quotes: every line that is not blank, stderr first, within the tool's
+capture cap. It excuses the disagreement only when the program and exit
+status match, some line is the symptom, and every line is the symptom or
+one the entry explains. Any other line, wherever it falls, is a diagnostic
+the defect does not explain and leaves the disagreement unexcused, as does
+a tool that wrote past its cap, ran past its deadline or died by a signal.
+An entry that matches the tool, count, program and status but does not
+excuse the output names the first line it does not explain, or the
+missing symptom, at the head of the detail, since that line may lie past
+the lines the detail quotes.
 A tool's defect gets an entry only once a disagreement was observed and
-traced to the tool's source; any other disagreement fails its case until
-fsimg is fixed or an entry is reviewed in. The pattern matches only what
-the detail quotes, so a diagnostic past it is never excused. The oracles
+traced to the tool's source, and the entry explains only the lines that
+defect was observed to write; any other disagreement fails its case until
+fsimg is fixed or an entry is reviewed in. The oracles
 apply the list to every observation, not only to the verdicts. An excused
 disagreement appears as `excused` with its exception's id in the case
 result and the failure record, and the coverage report counts each tool's
@@ -597,10 +611,10 @@ still fire. A known tool defect neither fails a case nor keeps a base from
 serving one; only a populated tree needs more, a read-back that agrees, as
 [fixtures](#fixtures) state.
 
-| Exception | Tool | Matches | Reason |
-| --- | --- | --- | --- |
-| `fsck_msdosfs.fat16_4085` | checker | `fsck_msdosfs` exiting 8 on a volume of 4085 clusters once its boot sector checks passed, so that it reached Phase 1 | FreeBSD's `readboot` (`sbin/fsck_msdosfs/boot.c`) takes a 12-bit FAT below `CLUST_RSRVD & CLUST12_MASK`, 4086 clusters, where section 3.5 makes 4085 clusters FAT16, so it misreads every chain |
-| `fsck_msdosfs.fat32_65525` | checker | `fsck_msdosfs` exiting 8 with `Filesystem too small (65525 clusters) for FAT32 partition` right after the image line, or after its warning about the sector after FSInfo, whose boot signature section 5 does not define and neither fsimg nor `mkfs.fat` writes | `readboot` refuses FAT32 below `CLUST_RSRVD & CLUST16_MASK`, 65526 clusters, where section 3.5 makes 65525 clusters FAT32 |
+| Exception | Tool | Symptom | Lines it explains | Reason |
+| --- | --- | --- | --- | --- |
+| `fsck_msdosfs.fat16_4085` | checker | `fsck_msdosfs` exiting 8 on a volume of 4085 clusters with a chain crossed, continued out of range, ended on a free or out-of-range cluster, or lost | The image line, the three phase banners, those chain lines, a file whose chain is shorter or longer than its size, a directory that does not start a chain, the count of lost clusters, the `Truncate`, `Clear`, `Reconnect`, `Remove` and `Drop superfluous clusters` prompts answered no, and the summary | FreeBSD's `readboot` (`sbin/fsck_msdosfs/boot.c`) takes a 12-bit FAT below `CLUST_RSRVD & CLUST12_MASK`, 4086 clusters, where section 3.5 makes 4085 clusters FAT16, so it misreads every chain |
+| `fsck_msdosfs.fat32_65525` | checker | `fsck_msdosfs` exiting 8 with `Filesystem too small (65525 clusters) for FAT32 partition` | The image line, and `Invalid signature in fsinfo block` with `Fix? no`: `readboot` warns of every FAT32 volume fsimg and `mkfs.fat` write, since it wants a boot signature at the end of the sector after FSInfo, which section 5 does not define | `readboot` refuses FAT32 below `CLUST_RSRVD & CLUST16_MASK`, 65526 clusters, where section 3.5 makes 65525 clusters FAT32 |
 
 No exception covers a range of counts near the variant cutovers. A
 volume there is one whose variant is easiest to get wrong, and both
@@ -612,13 +626,15 @@ with them. A tool that departs from section 3.5 is documented at the
 exact counts where it does, as FreeBSD's checker is.
 
 On a host whose only checker is `fsck_msdosfs`, its exceptions leave a
-volume of exactly 4085 or 65525 clusters to the read-back and to the
-checks `readboot` makes of the boot sector before it decides the variant.
-At 65525 not even all of those remain: its one FSInfo warning covers every
-FSInfo signature, so a defect in any of them is excused there. Its other
-diagnostics at 4085, such as a Phase 2 directory problem, are excused with
-the misread table. Such a host judges every other count in full, and a
-host with `fsck.fat` judges those two as well.
+volume of exactly 4085 or 65525 clusters to the read-back, to the rules,
+and to the diagnostics the defect does not explain. At 4085 the misread
+table hides every fault of the chains, the sizes they give files and the
+directories they start, which the read-back's listing and contents check
+instead. At 65525 its one FSInfo warning names none of the three
+signatures, so the rule `fat32.fsinfo.signatures` checks them on the
+harness's side: an image or base with a wrong one breaks the rule and
+fails whatever the checker says. Such a host judges every other count in
+full, and a host with `fsck.fat` judges those two as well.
 
 ## Runner
 

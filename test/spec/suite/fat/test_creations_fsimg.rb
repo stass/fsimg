@@ -83,6 +83,57 @@ class TestFatCreationsFsimg < Minitest::Test
     end
   end
 
+  # An exception excuses the checker's complete output only: at 4085
+  # clusters, a checker that reports FreeBSD's misread chains and then a
+  # directory with entries past its end, a diagnostic the misread table
+  # does not explain, fails the case, although that line falls beyond
+  # the lines the detail quotes, which names it first.
+  def test_a_checker_diagnostic_no_exception_explains_fails_a_created_image
+    Dir.mktmpdir do |stubs|
+      checker = File.join(stubs, "fsck_msdosfs")
+      chains = "echo 'Cluster 8 crossed another chain at 7'\necho 'Truncate? no'\n" * 10
+      File.write(checker, "#!/bin/sh\necho \"** $2\"\necho '** Phase 1 - Read FAT and checking connectivity'\n#{chains}" \
+                          "echo '** Phase 2 - Checking Directories'\necho '/DIR has entries after end of directory'\n" \
+                          "echo 'Remove? no'\nexit 8\n")
+      File.chmod(0o700, checker)
+      with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
+        _, result = run.call("fat.create.cluster_count.fat16_4085")
+        checked = result.observations.fetch("fsck")
+        skip "no oracle runs on this host" if checked.state == "unavailable"
+
+        assert_equal %w[failed disagrees], [result.verdict, checked.state]
+        assert_match(/\Afsck_msdosfs\.fat16_4085 does not explain "\/DIR has entries after end of directory": fsck_msdosfs -n exited 8: /,
+                     checked.detail)
+      end
+    end
+  end
+
+  # A created FAT32 image whose FSInfo lead signature is wrong violates
+  # fat32.fsinfo.signatures, so create fails it on the harness's own
+  # reading, whatever the checker reports: here fsck_msdosfs, whose one
+  # FSInfo warning at 65525 clusters the exception for its refusal
+  # excuses.
+  def test_a_created_image_with_a_bad_fsinfo_signature_fails_whatever_the_checker_reports
+    Dir.mktmpdir do |stubs|
+      checker = File.join(stubs, "fsck_msdosfs")
+      File.write(checker, "#!/bin/sh\necho \"** $2\"\necho 'Invalid signature in fsinfo block'\necho 'Fix? no'\n" \
+                          "echo 'Filesystem too small (65525 clusters) for FAT32 partition'\nexit 8\n")
+      File.chmod(0o700, checker)
+      corrupt = lambda do |path|
+        File.open(path, "r+b") do |image|
+          sector, fsinfo = [11, 48].map { image.pread(2, _1).unpack1("v") }
+          image.pwrite("\0\0\0\0".b, sector * fsinfo)
+        end
+      end
+      with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
+        _, result = run.call("fat.create.cluster_count.fat32_65525", alter: corrupt)
+
+        assert_equal ["failed", ["create"]], [result.verdict, result.stages.map(&:stage)]
+        assert_match(/\Acreate: the image it wrote violates fat32\.fsinfo\.signatures/, result.detail)
+      end
+    end
+  end
+
   # The seeded failure of the read-back's verdict at a cutover: an mdir
   # that lists nothing fails the created FAT16 volume of exactly 4085
   # clusters, which no exception excuses, as at any other count. No
@@ -130,7 +181,8 @@ class TestFatCreationsFsimg < Minitest::Test
   # runs it, answering its Case and CaseResult, after one preflight for
   # the whole test. A witness whose case shows a generator defect fails
   # the test instead. tools replaces those of the host's tools it names in
-  # the oracles' shell.
+  # the oracles' shell. alter, when given, changes the image create wrote
+  # before the harness decodes it, standing in for a defect of fsimg.
   def with_run(tools: {})
     Dir.mktmpdir do |root|
       results = File.join(root, "results")
@@ -143,9 +195,16 @@ class TestFatCreationsFsimg < Minitest::Test
       cases = Fat::Cases.new(registry: REGISTRY, cache: setup.cache, ceilings: PROFILE.ceilings, name_trials: setup.name_trials,
                              shell:)
       witnesses = Fat::Witnesses.creations(REGISTRY, ceilings: PROFILE.ceilings).to_h { [_1.id, _1] }
-      yield lambda { |id|
+      yield lambda { |id, alter: nil|
         classified = cases.creation_witness(witnesses.fetch(id))
         flunk classified.defect if classified.defect
+        if alter
+          decode = classified.created
+          classified = classified.with(created: lambda { |path|
+            alter.call(path)
+            decode.call(path)
+          })
+        end
         [classified.kase, FsimgSpec::CasePhase.result_of(classified, setup:, cases_directory: File.join(results, "cases"))]
       }
     end

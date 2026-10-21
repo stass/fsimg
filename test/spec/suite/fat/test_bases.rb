@@ -117,6 +117,29 @@ class TestFatBases < Minitest::Test
     end
   end
 
+  # The seeded failure of the FSInfo signatures: a valid case of a FAT32
+  # base whose FSInfo lead signature is wrong violates
+  # fat32.fsinfo.signatures, a generator defect, so the case is refused
+  # before any oracle reads the base, whatever a checker such as
+  # fsck_msdosfs, whose FSInfo warning at 65525 clusters an exception
+  # excuses, would report.
+  # The same case of the sound base is no defect.
+  def test_valid_case_of_a_fat32_base_with_a_bad_fsinfo_signature_is_a_generator_defect
+    with_cache do |cache, shell, results|
+      cases = Fat::Cases.new(registry: Fat::Rules.registry, cache:, ceilings: CEILINGS, shell:,
+                             name_trials: FsimgSpec::NameTrials.new(File.join(results, "trials")))
+      parameters = Fat::Witnesses::BASES.fetch("fat32")
+      witness = Fat::Witnesses::Witness.new(id: "fat.test.fat32_base", parameters:, tree: [], mutations: [],
+                                            forced_format: nil, intended: nil, rule: nil)
+      sound = cases.call(witness).defect
+      image = Fat::Bases.render(builder_base(parameters, []), cache:, ceilings: CEILINGS)
+      File.open(image, "r+b") { _1.pwrite("\0\0\0\0".b, 512) }
+
+      assert_equal [nil, "fat.test.fat32_base is meant valid but violates fat32.fsinfo.signatures"],
+                   [sound, cases.call(witness).defect]
+    end
+  end
+
   # The builder renders each formatter base's decoded geometry; the two
   # images decode to equal geometry, BPB, extension and signature. The
   # formatter's geometry is the builder's input, so this compares how the

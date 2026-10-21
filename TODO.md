@@ -165,6 +165,17 @@
   version differs. Rebuild such a base through `Bases.materialize` when the
   host has its tools, and skip it otherwise.
 
+* [Medium] **Spec harness judges a base in two places**
+  (`test/spec/lib/fsimg_spec/fat/bases.rb` `Bases.materialize`,
+  `fat/cases.rb` `Cases#populated`, `fixtures.rb` `Fixture#problems`):
+  `Fixture#problems` and `usable?` are the base verdict the bases tests
+  assert, but `Cases#populated`, the one production caller, re-derives its
+  own from `geometry_problems` and the observations, with a stricter
+  read-back (it must agree, where `Oracles.disagreements` accepts an
+  excused one). Make one funnel: `populated` acts on the fixture's verdict,
+  keeping its read-back rule there, or the tests assert through
+  `Cases#populated` and `problems` goes.
+
 * [Medium] **Spec harness read-back skips drawn creations with supplementary names**
   (`test/spec/lib/fsimg_spec/fat/oracles.rb`, `fat/trees.rb`): mtools
   drops long names beyond the BMP, so the read-back that gives a creation
@@ -180,15 +191,6 @@
   case whose tree holds one. Once the model decodes directories (B2),
   report fatcat as not applicable to a name stored with case bits rather
   than as a disagreement.
-
-* [Low] **Spec harness has no rule for the FSInfo signatures**
-  (`test/spec/lib/fsimg_spec/fat/rules.rb`, `fat/oracles.rb`): only
-  `fat32.bpb.fsinfo_sector` checks FSInfo's position. The oracle exception
-  `fsck_msdosfs.fat32_65525` excuses FreeBSD's "Invalid signature in fsinfo
-  block" warning, which covers all three section 5 signatures, so at
-  exactly 65525 clusters a host whose only checker is `fsck_msdosfs` would
-  miss a bad signature fsimg wrote. A rule for FSI_LeadSig, FSI_StrucSig and
-  FSI_TrailSig would make the model catch it on every host.
 
 * [Medium] **FAT integration script into the spec harness**
   (`test/fat-integration.sh.in`, `test/fat.c` `--external` and

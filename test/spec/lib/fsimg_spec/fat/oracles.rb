@@ -9,27 +9,42 @@ module FsimgSpec
   module Fat
     # A documented exception for an oracle tool
     # (specs/design-spec-testing.md#oracle-exceptions): a disagreement of
-    # tool, on an image whose cluster count is one of clusters, whose
-    # detail matches diagnostic, is the tool's defect rather than the
-    # image's. reason says why, citing the tool's source or the
-    # specification section it departs from. clusters are exact counts,
-    # never a range: a defect is traced to the counts it was observed at.
-    OracleException = Data.define(:id, :tool, :clusters, :diagnostic, :reason) do
+    # tool, on an image whose cluster count is one of clusters, is the
+    # tool's defect rather than the image's when the program tool ran
+    # exited exit_status and its complete output is that defect's: some
+    # line matches symptom, and every line matches symptom or one of the
+    # patterns in explains. Any other line is a diagnostic the defect does
+    # not explain, and leaves the disagreement unexcused. reason says why,
+    # citing the tool's source or the specification section it departs
+    # from. clusters are exact counts, never a range: a defect is traced
+    # to the counts it was observed at.
+    OracleException = Data.define(:id, :tool, :program, :exit_status, :clusters, :symptom, :explains, :reason) do
       include Checked
 
-      def initialize(clusters:, **fields)
+      def initialize(clusters:, explains:, **fields)
         raise HarnessError, "an oracle exception names exact cluster counts" unless
           clusters.is_a?(Array) && !clusters.empty? && clusters.all?(Integer)
 
-        super(clusters: clusters.dup.freeze, **fields)
+        super(clusters: clusters.dup.freeze, explains: explains.dup.freeze, **fields)
       end
 
-      # Whether this excuses observation, the view that the tool named
-      # observed_by took of an image of cluster_count clusters, which is
-      # Undefined where the BPB is.
-      def excuses?(observation, observed_by:, cluster_count:) =
-        observed_by == tool && observation.state == "disagrees" && clusters.include?(cluster_count) &&
-        diagnostic.match?(observation.detail)
+      # Whether this is about failure, what the tool named observed_by
+      # wrote when it failed on an image of cluster_count clusters, which
+      # is Undefined where the BPB is: the tool, the count, the program and
+      # the exit status are this exception's.
+      def covers?(failure, observed_by:, cluster_count:) =
+        observed_by == tool && clusters.include?(cluster_count) && failure.program == program &&
+        failure.exit_status == exit_status
+
+      # Why this does not excuse failure, which it covers, or nil when it
+      # does: no line shows the symptom, or a line is neither the symptom
+      # nor one the defect explains.
+      def unexcused_reason(failure)
+        return "#{id} finds no line of its symptom" unless failure.lines.any?(symptom)
+
+        line = failure.lines.find { |written| !symptom.match?(written) && explains.none? { _1.match?(written) } }
+        line && "#{id} does not explain #{FsimgSpec.shown(line)}"
+      end
     end
 
     # The independent tools that read a FAT image beside fsimg
@@ -47,8 +62,23 @@ module FsimgSpec
     # to stdout, so an observation writes nothing.
     module Oracles
       # A step that found the tool disagreeing with the tree; Oracles.observe
-      # turns it into that tool's Observation.
-      class Disagreement < Error; end
+      # turns it into that tool's Observation. failure is what a tool that
+      # ran to its end and exited nonzero wrote, a ToolFailure, and nil for
+      # any other disagreement, which no exception excuses.
+      class Disagreement < Error
+        attr_reader :failure
+
+        def initialize(message, failure: nil)
+          super(message)
+          @failure = failure
+        end
+      end
+
+      # What a tool that exited nonzero wrote: the program's name, its exit
+      # status, and every line that is not blank, stderr first, as bytes.
+      # The tool's capture cap bounds them, and one that wrote past it
+      # disagrees with no failure.
+      ToolFailure = Data.define(:program, :exit_status, :lines)
 
       # The read-only checkers read one or two FATs.
       CHECKER_FAT_COUNTS = 1..2
@@ -67,10 +97,11 @@ module FsimgSpec
       # backslash before one takes it literally.
       PATTERN_CHARACTERS = /[\\*?\[\]]/
 
-      # What the detail of a tool that failed quotes: this many of the
-      # lines it wrote that are not blank, within Observation::DETAIL_LENGTH.
-      # An exception's diagnostic matches only what the detail quotes, so a
-      # diagnostic past that is never excused and fails its case.
+      # What the detail of a tool that failed quotes, for reports: this
+      # many of the lines it wrote that are not blank, within
+      # Observation::DETAIL_LENGTH. An exception matches the complete
+      # output (ToolFailure), so a diagnostic past what the detail quotes
+      # still leaves the disagreement unexcused.
       QUOTED_LINES = 8
 
       TOOLS = %w[fsck mtools fatcat].freeze
@@ -81,32 +112,49 @@ module FsimgSpec
       VERDICT_TOOLS = %w[fsck mtools].freeze
 
       FREEBSD_BOOT_C = "https://cgit.freebsd.org/src/tree/sbin/fsck_msdosfs/boot.c"
+      # The lines fsck_msdosfs -n writes around its diagnostics: the image
+      # it reads, and the summary of a volume it read to the end.
+      FSCK_MSDOSFS_IMAGE = /\A\*\* \S+\z/
+      FSCK_MSDOSFS_SUMMARY = /\A\d+ files?, \d+(?:\.\d+)? (?:[KMGTPE]i)?B free \(\d+ clusters?\)\z/
 
       # The documented oracle exceptions (specs/design-spec-testing.md#oracle-exceptions),
       # each reviewed like a rule: a disagreement one of them excuses fails
       # nothing and is recorded as excused, naming it. Each is a tool's
       # defect, added only once it was observed and traced to the tool's
-      # source.
+      # source, and explains only the lines that defect was observed to
+      # write.
       EXCEPTIONS = [
-        # readboot found the boot sector sound, since Phase 1 follows the
-        # image line at once, so every diagnostic comes from the table it
-        # misreads: crossed chains in Phase 1, or lost ones in Phase 3 of
-        # an empty volume.
+        # Every chain the misread table gives is wrong: crossed, cut short
+        # or run long in Phase 1 or 2, or lost in Phase 3, as on an empty
+        # volume, with the files whose chains they make shorter or longer
+        # than their sizes, the directories they leave without a chain, and
+        # the prompts -n answers.
         OracleException.new(
-          id: "fsck_msdosfs.fat16_4085", tool: "fsck", clusters: [4085],
-          diagnostic: /\Afsck_msdosfs -n exited 8: "\*\* [^|]* \| \*\* Phase 1 - Read FAT and checking connectivity \|/,
+          id: "fsck_msdosfs.fat16_4085", tool: "fsck", program: "fsck_msdosfs", exit_status: 8, clusters: [4085],
+          symptom: Regexp.union(/\ACluster \d+ crossed another chain at \d+\z/,
+                                /\ACluster \d+ continues with out of range cluster number \d+\z/,
+                                /\ACluster chain starting at \d+ ends with cluster (?:marked free|out of range \(\d+\))\z/,
+                                /\ALost cluster chain at cluster \d+\z/),
+          explains: [
+            FSCK_MSDOSFS_IMAGE, FSCK_MSDOSFS_SUMMARY,
+            /\A\*\* Phase (?:1 - Read FAT and checking connectivity|2 - Checking Directories|3 - Checking for Lost Files)\z/,
+            /\Asize of \/.* is \d+, should at most be \d+\z/, %r{\A/.* has too many clusters allocated\z},
+            %r{\A/.* doesn't start a new cluster chain\z}, /\A\d+ Cluster\(s\) lost\z/,
+            /\A(?:Truncate|Clear|Reconnect|Remove|Drop superfluous clusters)\? no\z/
+          ],
           reason: "FreeBSD's fsck_msdosfs (#{FREEBSD_BOOT_C}, readboot) takes a 12-bit FAT while the cluster count is " \
                   "below CLUST_RSRVD & CLUST12_MASK, 4086, where section 3.5 makes 4085 clusters FAT16; it decodes the " \
                   "16-bit table at 12 bits, so every chain it reports is misread.".freeze
         ),
+        # The refusal may follow readboot's warning on every FAT32 volume
+        # fsimg and mkfs.fat write: it wants a boot signature at the end of
+        # the sector after FSInfo, which section 5 does not define. The
+        # warning names no signature, so the rule fat32.fsinfo.signatures
+        # checks the three section 5 does define on fsimg's side.
         OracleException.new(
-          id: "fsck_msdosfs.fat32_65525", tool: "fsck", clusters: [65_525],
-          # The refusal follows the image line, or readboot's one earlier
-          # warning on every FAT32 volume fsimg and mkfs.fat write: it
-          # wants a boot signature at the end of the sector after FSInfo,
-          # which section 5 does not define.
-          diagnostic: Regexp.new('\Afsck_msdosfs -n exited 8: "\*\* [^|]* \| (Invalid signature in fsinfo block \| Fix\? no \| )?' \
-                                 'Filesystem too small \(65525 clusters\) for FAT32 partition').freeze,
+          id: "fsck_msdosfs.fat32_65525", tool: "fsck", program: "fsck_msdosfs", exit_status: 8, clusters: [65_525],
+          symptom: /\AFilesystem too small \(65525 clusters\) for FAT32 partition\z/,
+          explains: [FSCK_MSDOSFS_IMAGE, /\AInvalid signature in fsinfo block\z/, /\AFix\? no\z/],
           reason: "FreeBSD's fsck_msdosfs (#{FREEBSD_BOOT_C}, readboot) refuses a FAT32 volume whose cluster count is " \
                   "below CLUST_RSRVD & CLUST16_MASK, 65526, where section 3.5 makes 65525 clusters FAT32.".freeze
         )
@@ -114,7 +162,7 @@ module FsimgSpec
 
       # One Observation per tool of the image at image, a path relative to
       # chdir, whose model knows its tree, with each disagreement an
-      # exception excuses marked excused (Oracles.excused). Each tool is
+      # exception excuses marked excused (Oracles.excuse). Each tool is
       # observed on its own: the rescue inside the block turns one tool's
       # Disagreement into its observation and leaves the other tools to
       # run. On a host the shell cannot run oracles on, every tool is
@@ -129,28 +177,34 @@ module FsimgSpec
         # A FAT32 image's root cluster, nil for FAT12 or FAT16, whose root
         # directory is a fixed region, or Undefined with the BPB.
         root_cluster = FsimgSpec.derive(model.fat32_extension, model.extension) { _1 ? _2.bpb_root_clus : nil }
-        observations = {
+        {
           "fsck" => -> { checker(shell, image:, chdir:, fat_count: geometry.fat_count) },
           "mtools" => -> { mtools(shell, image:, chdir:, tree: model.tree) },
           "fatcat" => lambda {
             fatcat(shell, image:, chdir:, tree: model.tree, geometry:, root_cluster:)
           }
-        }.transform_values do |tool|
-          tool.call
+        }.to_h do |tool, run|
+          [tool, run.call]
         rescue Disagreement => e
-          Observation.disagrees(e.message)
+          [tool, excuse(e, tool:, cluster_count: geometry.cluster_count)]
         end
-        excused(observations, cluster_count: geometry.cluster_count)
       end
 
-      # observations, tool => Observation of an image of cluster_count
-      # clusters, with each disagreement that one of exceptions excuses
-      # excused by the first that does.
-      def self.excused(observations, cluster_count:, exceptions: EXCEPTIONS) =
-        observations.to_h do |tool, observation|
-          exception = exceptions.find { _1.excuses?(observation, observed_by: tool, cluster_count:) }
-          [tool, exception ? observation.excused_by(exception.id) : observation]
-        end
+      # The Observation of disagreement, tool's Disagreement with an image
+      # of cluster_count clusters. The first of exceptions that covers what
+      # the tool wrote and excuses it marks it excused. When exceptions
+      # cover it but none excuses it, its detail says first why the first
+      # of them does not, so a report shows the line that kept it
+      # unexcused, which the quoted lines may not reach. A disagreement
+      # without a failure is never excused.
+      def self.excuse(disagreement, tool:, cluster_count:, exceptions: EXCEPTIONS)
+        failure = disagreement.failure
+        covering = failure ? exceptions.select { _1.covers?(failure, observed_by: tool, cluster_count:) } : []
+        excusing = covering.find { _1.unexcused_reason(failure).nil? }
+        return Observation.disagrees(disagreement.message).excused_by(excusing.id) if excusing
+
+        Observation.disagrees([covering.first&.unexcused_reason(failure), disagreement.message].compact.join(": "))
+      end
 
       # Each verdict tool's disagreement in observations, as "tool: detail".
       # An excused one, and one that does not apply or is unavailable,
@@ -161,8 +215,8 @@ module FsimgSpec
         end
 
       # fsck.fat -n or fsck_msdosfs -n agrees when it exits 0. Its label
-      # names the program, which an exception's diagnostic matches, since
-      # the two checkers differ in their defects.
+      # names the program, whose failure an exception names, since the two
+      # checkers differ in their defects.
       private_class_method def self.checker(shell, image:, chdir:, fat_count:)
         tool = shell.tools.values_at(:fsck_fat, :fsck_msdosfs).compact.first
         return Observation.unavailable("no read-only checker is configured") unless tool
@@ -233,7 +287,8 @@ module FsimgSpec
       # Runs argv through shell and answers its stdout once it ran to its
       # end and exited 0. A tool that ran past its deadline, wrote past cap,
       # left a process behind or exited otherwise disagrees, quoting the
-      # lines it wrote; one that could not start is the harness's fault.
+      # first lines it wrote; one that exited nonzero carries every line as
+      # its failure. One that could not start is the harness's fault.
       private_class_method def self.output(shell, argv, chdir:, cap:, label:)
         execution = shell.run(argv, chdir:, capture_bytes: cap)
         raise HarnessError, "#{label} could not start: #{execution.launch_error}" if execution.launch_error
@@ -246,16 +301,20 @@ module FsimgSpec
         raise Disagreement, "#{label} left a process behind" if execution.leftover
         return execution.stdout if execution.exit_status == 0
 
-        ending = execution.signal ? "died by signal #{execution.signal}" : "exited #{execution.exit_status}"
-        raise Disagreement, "#{label} #{ending}: #{FsimgSpec.shown(written(execution), limit: Observation::DETAIL_LENGTH)}"
+        lines = written(execution)
+        quoted = FsimgSpec.shown(lines.first(QUOTED_LINES).join(" | ".b), limit: Observation::DETAIL_LENGTH)
+        raise Disagreement, "#{label} died by signal #{execution.signal}: #{quoted}" if execution.signal
+
+        raise Disagreement.new("#{label} exited #{execution.exit_status}: #{quoted}",
+                               failure: ToolFailure.new(program: File.basename(argv.first), exit_status: execution.exit_status,
+                                                        lines:))
       end
 
-      # The first QUOTED_LINES lines that are not blank of what a tool
-      # wrote, stderr first, joined by " | ": a checker's diagnostic may
-      # follow its progress lines, as fsck_msdosfs's does.
+      # The lines that are not blank of what a tool wrote, stderr first: a
+      # checker's diagnostic may follow its progress lines, as
+      # fsck_msdosfs's does.
       private_class_method def self.written(execution) =
-        [execution.stderr, execution.stdout].lazy.flat_map { _1.each_line(chomp: true).lazy }
-                                            .reject { _1.strip.empty? }.first(QUOTED_LINES).join(" | ".b)
+        [execution.stderr, execution.stdout].flat_map { _1.each_line(chomp: true).reject { |line| line.strip.empty? } }.freeze
 
       # A cap for a listing of tree's entries and a few more.
       private_class_method def self.listing_bytes(tree) = tree.sum { _1.path.bytesize + LINE_BYTES } + SLACK_BYTES
