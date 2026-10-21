@@ -131,6 +131,11 @@ module FsimgSpec
     def source(value)
       case value
       in { root:, tree: Array => tree, settings: Hash => settings, **nil }
+        size = settings[:size]
+        # An exact volume is output fsimg writes, which the profile's
+        # output ceiling bounds as it bounds the tree's content.
+        raise RecipeError, "setting size #{size} exceeds #{@ceilings.output}" if size.is_a?(Integer) && size > @ceilings.output
+
         Source.new(root:, tree: tree(tree), settings: within_image(settings, "setting"))
       else
         raise RecipeError, "source is not an object of root, tree and settings"

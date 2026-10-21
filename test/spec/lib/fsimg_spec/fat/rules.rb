@@ -163,18 +163,27 @@ module FsimgSpec
       DEFAULT_SECTOR_BYTES = 512
       MAX_SECTORS_PER_CLUSTER = 128
       MAX_WRITER_CLUSTER_BYTES = 32 << 10
-      # DIR_FileSize is a 32-bit count of bytes.
+      # DIR_FileSize is a 32-bit count of bytes, and BPB_TotSec32 of sectors.
       MAX_FILE_BYTES = 0xFFFF_FFFF
+      MAX_TOTAL_SECTORS = 0xFFFF_FFFF
 
       # The domain of creation input (specs/design-spec-testing.md#cases):
-      # create's settings, and the names and sizes of the tree it reads.
-      # Each rule reads a SourceModel and has scope input, so create checks
-      # it, and fsimg refuses a violation before it writes an image. A
-      # setting rule applies only when the case gives the setting. The
-      # name rules state for the writer what fat.directory.name and
-      # fat.directory.unique_names state for the reader, since the
-      # writer's name profile is the reader's.
-      def self.creation_rules = [
+      # create's settings, the names and sizes of the tree it reads, and
+      # the volume it can lay out. Each rule reads a SourceModel and has
+      # scope input, so create checks it, and fsimg refuses a violation
+      # before it writes an image. A setting rule applies only when the
+      # case gives the setting. The name rules state for the writer what
+      # fat.directory.name and fat.directory.unique_names state for the
+      # reader, since the writer's name profile is the reader's. The
+      # sizing rules apply only to a source create gets as far as laying
+      # out, one that breaks none of the rules before them.
+      def self.creation_rules
+        refusals = source_refusals
+        laid_out = ->(source, environment) { refusals.all? { _1.violations(source, environment).empty? } }
+        refusals + sizing_rules(laid_out)
+      end
+
+      def self.source_refusals = [
         Rule.new(
           id: "fat.create.sector_bytes", category: "normative", policy: "must_reject", status: "FSIMG_EINVAL",
           scopes: ["input"], applies_to: setting?(:sector), domain: Witnesses::CREATE_SECTOR,
@@ -202,9 +211,13 @@ module FsimgSpec
         Rule.new(
           id: "fat.create.volume_bytes", category: "profile", policy: "must_reject", status: "FSIMG_EINVAL",
           scopes: ["input"], applies_to: sectored_setting?(:size), domain: Witnesses::CREATE_VOLUME,
-          predicate: ->(source, _) { source.settings.fetch(:size).then { _1.positive? && (_1 % sector_bytes(source)).zero? } },
+          predicate: lambda { |source, _|
+            sectors, rest = source.settings.fetch(:size).divmod(sector_bytes(source))
+            rest.zero? && (1..MAX_TOTAL_SECTORS).cover?(sectors)
+          },
           source: "specs/design-cli.md, creation options: -s is a positive exact logical volume size; " \
-                  "#{cite("3.1", "BPB_TotSec16 and BPB_TotSec32")}: the volume is a count of whole sectors"
+                  "#{cite("3.1", "BPB_TotSec16 and BPB_TotSec32")}: the volume is a count of whole sectors that " \
+                  "BPB_TotSec32 holds"
         ),
         Rule.new(
           id: "fat.create.name", category: "profile", policy: "must_reject", status: "FSIMG_EINVAL",
@@ -226,6 +239,37 @@ module FsimgSpec
           source: "#{SPECIFICATION}, section 6, DIR_FileSize: a 32-bit count of the file's bytes"
         )
       ]
+
+      # The volume create lays out (Sizing): some cluster size it may
+      # choose must give a cluster count of the variant that holds the
+      # tree, within what the BPB fields count, and without -s a count
+      # the writer's margin admits. A count beyond the margin that the
+      # variant still admits violates only the margin rule.
+      def self.sizing_rules(laid_out)
+        variant_range = Rule.new(
+          id: "fat.create.cluster_count", category: "normative", policy: "must_reject", status: "FSIMG_ERANGE",
+          scopes: ["input"], applies_to: laid_out, domain: Witnesses::CREATE_CLUSTER_COUNT,
+          predicate: lambda { |source, _|
+            range = Sizing::RANGES.fetch(source.format)
+            Sizing.candidates(source, range:).any? { _1.fits?(range) }
+          },
+          source: "#{cite("3.5", "CountofClusters")}: the cluster count alone selects the variant, so FAT12 holds " \
+                  "fewer than 4085 clusters, FAT16 fewer than 65525 and FAT32 at least 65525; #{WRITER}#geometry-and-" \
+                  "allocation: each permitted cluster size is tried, and an exact size keeps the whole legal range"
+        )
+        margin = Rule.new(
+          id: "fat.create.cluster_count.automatic", category: "profile", policy: "must_reject", status: "FSIMG_ERANGE",
+          scopes: ["input"], domain: Witnesses::CREATE_AUTOMATIC_COUNT,
+          applies_to: lambda { |source, environment|
+            !source.settings.key?(:size) && laid_out.call(source, environment) &&
+              variant_range.violations(source, environment).empty?
+          },
+          predicate: ->(source, _) { !Sizing.plan(source).nil? },
+          source: "#{WRITER}#geometry-and-allocation: automatic counts stay at least 16 clusters away from the " \
+                  "4085/65525 type cutovers, following Microsoft's formatting recommendation"
+        )
+        [variant_range, margin]
+      end
 
       # A rule that applies when the case gives the setting name.
       def self.setting?(name) = ->(source, _) { source.settings.key?(name) }
@@ -501,7 +545,7 @@ module FsimgSpec
       def self.active_fat_exists(flags, fat_count) = flags.nobits?(0x80) || (flags & 0x0F) < fat_count
 
       private_class_method :field_rule, :cite, :boot_rules, :bpb_rules, :geometry_rules, :fat32_rules, :name_rules,
-                           :creation_rules, :setting?, :sectored_setting?, :base_name, :parent_path, :distinct_siblings, :reserved_area_rule,
+                           :creation_rules, :source_refusals, :sizing_rules, :setting?, :sectored_setting?, :base_name, :parent_path, :distinct_siblings, :reserved_area_rule,
                            :recommended_sector_rule, :absent_sector_rule
     end
   end

@@ -258,17 +258,23 @@ never touches the host filesystem: a case with case-equivalent siblings or
 an NFC/NFD pair runs on every host, and no source tree is written. The
 harness classifies the tree it wrote. Rules with scope `input` state the
 domain of settings and source trees and the writer's layout policy,
-evaluated over a **source model** of the settings and the recipe's tree: the
-setting domains, name validity, case-equivalent siblings and file size. For
-example, automatic sizing keeps at least 16 clusters away from the FAT
-variant thresholds while `-s` permits the exact boundary counts, and the
-writer refuses a source name that is not a valid FAT name or that is
-case-equivalent to a sibling. A creation case carries two classifications:
-`create` follows the source model's, and the reading stages follow the
-created image's, which the harness decodes once `create` accepts. The
-created image is classified like any other and must violate no rule,
-including a writer `profile` rule that every byte outside allocated metadata
-and file content is zero. A second `create` in the same case then reads
+evaluated over a **source model** of the format, the settings and the
+recipe's tree: the setting domains, name validity, case-equivalent
+siblings, file size and the volume the writer lays out. For example,
+automatic sizing keeps at least 16 clusters away from the FAT variant
+thresholds while `-s` permits the exact boundary counts, and the writer
+refuses a source name that is not a valid FAT name or that is
+case-equivalent to a sibling. The source model also gives the layout the
+[writer design](design-fat-writer.md#geometry-and-allocation) states for
+an accepted source: its sector, cluster, FAT and root region sizes and
+its cluster count, computed with the specification's region arithmetic.
+A creation case carries two classifications: `create` follows the source
+model's, and the reading stages follow the created image's, which the
+harness decodes once `create` accepts. The created image is classified
+like any other and must violate no rule, including a writer `profile`
+rule that every byte outside allocated metadata and file content is
+zero, and its decoded geometry must be that layout, so a threshold
+witness is the volume it names. A second `create` in the same case then reads
 `source-reversed.mtree`, the same lines in reverse order, and writes
 `out/reversed.img`, whose bytes must equal `out/created.img`; once they
 do, the harness removes it, so the case holds one image from there on.
@@ -520,7 +526,8 @@ Every oracle run on a case yields one **observation** per tool: `agrees`,
 `disagrees` with a short detail, `not_applicable` when the tool does not
 support the image's geometry or names (the checkers read one or two FATs;
 mtools drops the surrogate pairs of a long name beyond the BMP; fatcat reads
-512-byte sectors, ASCII names and a FAT32 root directory at cluster 2 only),
+512-byte sectors, ASCII names, a FAT32 root directory at cluster 2 and a
+FAT12 or FAT16 root region of whole clusters only),
 or `unavailable` when the host lacks the tool. The observation is recorded in
 the case result, the failure record and the coverage report. The oracles run
 once a case's last stage has run, on an image whose tree is known: the read-only checker agrees when it exits 0, and

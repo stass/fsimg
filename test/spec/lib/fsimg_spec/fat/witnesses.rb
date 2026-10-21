@@ -98,15 +98,29 @@ module FsimgSpec
 
       # Every deterministic creation witness of registry's input rules, and
       # a valid creation of each variant from a manifest and of FAT16 from
-      # a host tree, whose tree content stays within ceilings: a witness
-      # beyond the output ceiling, such as a file past FAT's 4 GiB, is one
-      # only a profile with room for it runs.
+      # a host tree, whose footprint stays within the output ceiling: a
+      # witness beyond it, such as a file past FAT's 4 GiB or a volume of
+      # 65525 clusters of 32 KiB, is one only a profile with room for it
+      # runs.
       def self.creations(registry, ceilings:)
         valid = %w[fat12 fat16 fat32].map { Creation.new(label: _1, format: _1, violates: false) } +
                 [Creation.new(label: "host_tree", format: "fat16", root: "directory", violates: false)]
         witnesses = valid.map { creation_witness(nil, _1) } +
                     registry.rules.select(&:input?).flat_map { |rule| rule.domain.call.map { creation_witness(rule, _1) } }
-        witnesses.select { |witness| witness.tree.sum { _1.size || 0 } <= ceilings.output }
+        witnesses.select { footprint(_1) <= ceilings.output }
+      end
+
+      # The bytes a creation witness's case hashes and writes: its tree's
+      # content, which the manifest's digests hash, and for a witness meant
+      # valid the volume create lays out (Sizing.plan), which fsimg's
+      # output limit counts. create refuses a targeted witness before it
+      # writes a volume. A witness meant valid that has no plan is a
+      # generator defect, which its classification reports, so it runs.
+      private_class_method def self.footprint(witness)
+        content = witness.tree.sum { _1.size || 0 }
+        planned = witness.intended ? nil : Sizing.plan(SourceModel.new(format: witness.format, settings: witness.settings,
+                                                                       tree: witness.tree))
+        planned ? [content, planned.geometry.total_sectors * planned.geometry.bytes_per_sector].max : content
       end
 
       private_class_method def self.creation_witness(rule, creation)
@@ -514,6 +528,76 @@ module FsimgSpec
         [Creation.new(label: "4294967296", tree: [TreeEntry.file("big", size: Rules::MAX_FILE_BYTES + 1, content: "zero")],
                       violates: true)]
       }
+
+      # The cluster counts on both sides of each variant threshold
+      # (section 3.5) from an exact -s, and 4100 and 65540, the counts an
+      # exact size admits one short of the least automatic sizing gives
+      # FAT16 and FAT32: in 512-byte clusters and sectors, in 4096-byte
+      # ones, and the counts that hold the tree in 32 KiB clusters, the
+      # smallest and largest allocation units create writes. Each fixes
+      # -o cluster=, so create cannot fall back to a larger cluster, but
+      # for fat16_65525_any_cluster, which shows that fallback: 65525
+      # clusters of 512 bytes are FAT16 in 1024-byte clusters. An exact
+      # size too small for the tree, and a tree too large for FAT12 in
+      # 512-byte clusters, violate the rule too.
+      CREATE_CLUSTER_COUNT = lambda {
+        sides = [["fat12", 4084, false], ["fat12", 4085, true], ["fat16", 4084, true], ["fat16", 4085, false],
+                 ["fat16", 4100, false], ["fat16", 65_524, false], ["fat16", 65_525, true], ["fat32", 65_524, true],
+                 ["fat32", 65_525, false], ["fat32", 65_540, false]]
+        units = [512, 4096].flat_map do |sector|
+          sides.map { |variant, clusters, violates| exact_count(variant, clusters, sector:, cluster: sector, violates:) }
+        end
+        large = [["fat12", 4084], ["fat16", 4085], ["fat16", 65_524], ["fat32", 65_525]].map do |variant, clusters|
+          exact_count(variant, clusters, sector: 512, cluster: 32_768, violates: false)
+        end
+        any_cluster = exact_count("fat16", 65_525, sector: 512, cluster: 512, violates: false)
+        units + large + [
+          any_cluster.with(label: "#{any_cluster.label}_any_cluster", settings: any_cluster.settings.except(:cluster)),
+          exact_count("fat12", 100, sector: 512, cluster: 512, violates: true).with(label: "fat12_100_short"),
+          Creation.new(label: "fat12_automatic_4085", tree: [zeros(4085)], settings: { cluster: 512 }, violates: true)
+        ]
+      }
+
+      # Trees of 512-byte clusters at the automatic sizing margin below
+      # the FAT12 and FAT16 upper thresholds and one cluster past it, which
+      # create refuses in 512-byte clusters and lays out in 1024-byte ones
+      # when it may choose them. The margin above the lower thresholds
+      # needs no tree of its own: every valid automatic FAT16 and FAT32
+      # creation takes the least count the margin admits.
+      CREATE_AUTOMATIC_COUNT = lambda {
+        sides = [["fat12", 4069, false], ["fat12", 4070, true], ["fat16", 65_509, false], ["fat16", 65_510, true]]
+        sides.map do |variant, clusters, violates|
+          Creation.new(label: "#{variant}_#{clusters}", format: variant, tree: [zeros(clusters)], settings: { cluster: 512 },
+                       violates:)
+        end + [Creation.new(label: "fat12_4070_any_cluster", tree: [zeros(4070)], violates: false)]
+      }
+
+      # CREATION_TREE with a long name in ASCII, which fatcat decodes, so
+      # every oracle reads the thresholds' images of 512-byte sectors.
+      THRESHOLD_TREE = [
+        TreeEntry.file("HELLO.TXT", size: 13, seed: 1),
+        TreeEntry.file("Long name file.txt", size: 700, content: "positional", seed: 2),
+        TreeEntry.directory("DIR"),
+        TreeEntry.directory("DIR/Nested"),
+        TreeEntry.file("DIR/Nested/blocks.bin", size: 5000, seed: 3, holes: [[100, 1000], [2048, 512]]),
+        TreeEntry.file("DIR/empty", size: 0, content: "zero"),
+        TreeEntry.file("DIR/zeros.bin", size: 70_000, content: "zero")
+      ].freeze
+
+      # A creation of THRESHOLD_TREE as variant from the exact -s that
+      # gives it clusters of cluster bytes (Sizing.counted), labelled by
+      # variant and count, and by sector and cluster sizes beyond 512 bytes.
+      private_class_method def self.exact_count(variant, clusters, sector:, cluster:, violates:)
+        source = SourceModel.new(format: variant, settings: { sector: }, tree: THRESHOLD_TREE)
+        geometry = Sizing.counted(variant:, sector:, cluster_bytes: cluster, root_entries: Sizing.root_entries(source),
+                                  clusters:)
+        label = ["#{variant}_#{clusters}", ("sector_#{sector}" if sector != 512), ("cluster_#{cluster}" if cluster != sector)]
+        Creation.new(label: label.compact.join("_"), format: variant, tree: THRESHOLD_TREE, violates:,
+                     settings: { size: geometry.total_sectors * sector, cluster:, **(sector == 512 ? {} : { sector: }) })
+      end
+
+      # A file of zeros as long as clusters of 512 bytes.
+      private_class_method def self.zeros(clusters) = TreeEntry.file("ZEROS.BIN", size: clusters * 512, content: "zero")
 
       # A FAT12 creation of CREATION_TREE with settings, labelled by the
       # value of one setting, and by each name and value of several.

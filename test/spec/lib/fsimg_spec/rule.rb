@@ -134,14 +134,15 @@ module FsimgSpec
     def unclassified_scopes = FsimgSpec.undefined?(trial_answers) ? ["destination"] : []
   end
 
-  # What the input rules read about a creation case: its settings and its
-  # recipe's tree, which the harness writes as the case's manifest or, for
-  # a host-tree case, into source/ (specs/design-spec-testing.md#cases).
+  # What the input rules read about a creation case: the format create
+  # writes, its settings and its recipe's tree, which the harness writes as
+  # the case's manifest or, for a host-tree case, into source/
+  # (specs/design-spec-testing.md#cases).
   # Every input is known, so it leaves no scope unclassified. It judges
   # create, whose records describe a plan no rule models; the image create
   # wrote is judged by the image model the created hook decodes, so no
   # record is compared here.
-  SourceModel = Data.define(:settings, :tree) do
+  SourceModel = Data.define(:format, :settings, :tree) do
     def unclassified_scopes = []
 
     def record_problems(_result) = []

@@ -63,7 +63,7 @@ module FsimgSpec
           "fsck" => -> { checker(shell, image:, chdir:, fat_count: geometry.fat_count) },
           "mtools" => -> { mtools(shell, image:, chdir:, tree: model.tree) },
           "fatcat" => lambda {
-            fatcat(shell, image:, chdir:, tree: model.tree, bytes_per_sector: geometry.bytes_per_sector, root_cluster:)
+            fatcat(shell, image:, chdir:, tree: model.tree, geometry:, root_cluster:)
           }
         }.transform_values do |tool|
           tool.call
@@ -127,15 +127,27 @@ module FsimgSpec
       # fatcat lists each directory of the tree as JSON and reads each file
       # the tree expects to stdout. It reads 512-byte sectors only, finds a
       # FAT32 root directory only at cluster 2, the usual one, and decodes
-      # no Unicode, so it applies only where every name is ASCII.
-      # root_cluster is nil for FAT12 or FAT16. Its exit status is 0 even
-      # when a path is missing, so only what it writes counts.
-      private_class_method def self.fatcat(shell, image:, chdir:, tree:, bytes_per_sector:, root_cluster:)
+      # no Unicode, so it applies only where every name is ASCII. It reads
+      # a FAT12 or FAT16 root region in whole clusters, so a region that is
+      # no multiple of the cluster size is read on into the data region,
+      # whose first directory it lists as the root's (FatSystem::getEntries
+      # and rootClusters in the pinned fatcat). root_cluster is nil for
+      # FAT12 or FAT16. Its exit status is 0 even when a path is missing,
+      # so only what it writes counts.
+      private_class_method def self.fatcat(shell, image:, chdir:, tree:, geometry:, root_cluster:)
         tool = shell.tools[:fatcat]
+        sector = geometry.bytes_per_sector
         return Observation.unavailable("fatcat is not configured") unless tool
-        return Observation.not_applicable("fatcat reads 512-byte sectors, not #{bytes_per_sector}") unless bytes_per_sector == 512
+        return Observation.not_applicable("fatcat reads 512-byte sectors, not #{sector}") unless sector == 512
+
+        # Whether the root region ends inside a cluster, or Undefined.
+        root_overread = FsimgSpec.derive(geometry.root_entries, geometry.sectors_per_cluster) do |entries, spc|
+          spc.zero? || !((entries * Geometry::DIRECTORY_ENTRY_BYTES) % (spc * sector)).zero?
+        end
         return Observation.not_applicable("fatcat finds a FAT32 root directory at cluster 2 only") unless
           root_cluster.nil? || root_cluster == 2
+        return Observation.not_applicable("fatcat reads a FAT12 or FAT16 root region in whole clusters") if
+          root_cluster.nil? && root_overread != false # an Undefined region is not known to be whole
         return Observation.not_applicable("fatcat decodes ASCII names only") unless tree.all? { _1.path.ascii_only? }
 
         directories = ["".b, *tree.select { _1.type == "directory" }.map(&:path)]

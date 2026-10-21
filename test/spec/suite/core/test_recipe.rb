@@ -50,7 +50,7 @@ class TestRecipe < Minitest::Test
       "schema_version": 1,
       "id": "regression.fat32.create.case_pair",
       "format": "fat32",
-      "source": {"root": "manifest", "tree": [{"path": "a", "type": "file", "size": 1, "content": "zero"}], "settings": {"size": 65536}},
+      "source": {"root": "manifest", "tree": [{"path": "a", "type": "file", "size": 1, "content": "zero"}], "settings": {"size": 4096}},
       "stages": ["create", "verify"],
       "kind": "valid",
       "intended_violation": null,
@@ -99,7 +99,7 @@ class TestRecipe < Minitest::Test
   def test_dump_is_the_same_bytes_on_every_ruby
     recipe = FsimgSpec::Recipe.new(
       id: "regression.fat32.create.case_pair", format: "fat32", kind: "valid", stages: %w[create verify],
-      source: FsimgSpec::Source.new(tree: [], settings: { zeta: 1, alpha: 2 }),
+      source: FsimgSpec::Source.new(tree: [], settings: { size: 1, cluster: 2 }),
       expected: { "create" => FsimgSpec::Expectation.parse("accept"), "verify" => FsimgSpec::Expectation.parse("accept") },
       reason: "a promoted creation case"
     )
@@ -113,8 +113,8 @@ class TestRecipe < Minitest::Test
           "root": "manifest",
           "tree": [],
           "settings": {
-            "alpha": 2,
-            "zeta": 1
+            "cluster": 2,
+            "size": 1
           }
         },
         "stages": [
@@ -244,6 +244,10 @@ class TestRecipe < Minitest::Test
     "promoted case without a reason" => [/needs a reason/, ->(r) { r.merge("id" => "regression.fat16.x") }],
     "creation setting that is not an integer" =>
       [/a number that is not an integer/, ->(_) { creation("root" => "manifest", "tree" => [], "settings" => { "size" => FRACTION }) }],
+    "exact volume beyond the output ceiling" =>
+      [/setting size 4097 exceeds 4096/, ->(_) { creation("root" => "manifest", "tree" => [], "settings" => { "size" => 4097 }) }],
+    "unknown creation setting" =>
+      [/unknown setting "label"/, ->(_) { creation("root" => "manifest", "tree" => [], "settings" => { "label" => 1 }) }],
     "unknown source root" =>
       [/unknown source root "archive"/, ->(_) { creation("root" => "archive", "tree" => [], "settings" => {}) }],
     "source without a root" => [/source is not an object of root/, ->(_) { creation("tree" => [], "settings" => {}) }]

@@ -190,16 +190,20 @@ module FsimgSpec
       # names a host skip. The oracles read the image create wrote, and
       # their read-back gives a verdict. The known tree, which hashes every
       # file, is built only once create has accepted, never to classify the
-      # case: a file create must refuse may be one past FAT's 4 GiB.
+      # case: a file create must refuse may be one past FAT's 4 GiB. A
+      # source create must accept has a planned volume (Sizing.plan), whose
+      # layout the created image must have.
       def creation(recipe)
         tree = recipe.source.tree
-        source = SourceModel.new(settings: recipe.source.settings, tree:)
+        source = SourceModel.new(format: recipe.format, settings: recipe.source.settings, tree:)
         source_classification = @registry.classify_source(source, Environment.new(forced_format: nil, trial_answers: NO_TRIAL))
         trial_answers = recipe.source.manifest? ? @name_trials.answers_for(tree, stages: recipe.stages) : TrialAnswers::HELD
         kase = Case.derive(recipe, Case::CREATED_IMAGE.with(trial_answers:), registry: @registry, source_classification:)
+        planned = Sizing.plan(source) if source_classification.violations.empty?
         created = lambda do |path|
           model = Model.decode(ImageView.open(path), tree: KnownTree.of(tree))
-          [model, @registry.classify(model, Environment.new(forced_format: nil, trial_answers:))]
+          [model, @registry.classify(model, Environment.new(forced_format: nil, trial_answers:)),
+           planned && Sizing.layout_problem(planned, model.geometry)]
         end
         Classified.new(kase:, image: nil, model: source, created:, defect: replay_defect(kase), oracles: created_oracles)
       end

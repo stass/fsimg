@@ -25,10 +25,12 @@ module FsimgSpec
 
   MIB = 1 << 20
 
+  # quick's output ceiling admits the FAT16 and FAT32 threshold volumes of
+  # 4096-byte clusters, about 257 MiB each, which create writes sparse.
   PROFILES = [
     Profile.new(name: "quick", ceilings: Ceilings.new(
       image: 1024 * MIB, memory: 64 * MIB, scratch: 256 * MIB, entries: 10_000, depth: 32,
-      path: 512, fds: 128, output: 256 * MIB, work: 1 << 40, seconds: 20
+      path: 512, fds: 128, output: 512 * MIB, work: 1 << 40, seconds: 20
     ), tree_draws: 150, tree_sample: 15, populated_trees: 6),
     Profile.new(name: "nightly", ceilings: Ceilings.new(
       image: 4096 * MIB, memory: 64 * MIB, scratch: 1024 * MIB, entries: 100_000, depth: 64,

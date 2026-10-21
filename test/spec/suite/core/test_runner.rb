@@ -320,6 +320,21 @@ class TestRunner < Minitest::Test
     end
   end
 
+  # An accepting create must also write the layout its settings and tree
+  # call for: a created image the hook finds off it fails create and ends
+  # the case, though it violates no rule.
+  def test_created_image_off_its_layout_fails_create
+    Dir.mktmpdir do |cases|
+      stub = write_stub(cases, ": > out/created.img; #{ACCEPT}")
+      created = ->(image) { [*CREATED_VALID.call(image), "the image it wrote has clusters 4100"] }
+      result = FsimgSpec::CaseRun.call(plain_case(creation_recipe(settings: {})), model: NoRecords.new, image: nil,
+                                       runner: runner_for(stub), cases_directory: cases, sandbox: "unavailable", created:)
+
+      assert_equal ["failed", "create: the image it wrote has clusters 4100", ["create"]],
+                   [result.verdict, result.detail, result.stages.map(&:stage)]
+    end
+  end
+
   # A created image that is no regular file fails the case before the
   # created hook could open it.
   def test_created_image_must_be_a_regular_file

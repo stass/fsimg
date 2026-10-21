@@ -66,7 +66,9 @@ class TestFatOracles < Minitest::Test
 
   # Each tool states the geometry or names it cannot read: the checkers
   # three FATs, mtools a long name beyond the BMP, fatcat a 4096-byte
-  # sector and a name that is not ASCII.
+  # sector, a name that is not ASCII, and a one-sector FAT16 root region
+  # beside two-sector clusters, which the pinned fatcat reads on into
+  # cluster 2 and lists that directory's entries as the root's.
   def test_a_tool_that_cannot_read_the_image_does_not_apply
     skip_without(:fsck, :mdir, :mtype, :fatcat)
     observe_image(tree: [self.class.entry("\u{10400} beyond.txt", size: 5)], parameters: { clusters: 5000, fat_count: 3 }) do |observations|
@@ -74,6 +76,9 @@ class TestFatOracles < Minitest::Test
     end
     observe_image(tree: ASCII_TREE, parameters: { clusters: 5000, bytes_per_sector: 4096 }) do |observations|
       assert_equal "fatcat reads 512-byte sectors, not 4096", observations.fetch("fatcat").detail
+    end
+    observe_image(tree: ASCII_TREE, parameters: { clusters: 5000, sectors_per_cluster: 2, root_entries: 16 }) do |observations|
+      assert_equal "fatcat reads a FAT12 or FAT16 root region in whole clusters", observations.fetch("fatcat").detail
     end
   end
 

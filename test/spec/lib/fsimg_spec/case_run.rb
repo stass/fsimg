@@ -79,13 +79,15 @@ module FsimgSpec
   # directory is deleted, as is a host skip's.
   #
   # A creation case needs created, which decodes the image create wrote
-  # and answers its model and Classification: create is judged by the
-  # source model, and the reading stages after it by the image it created.
-  # An accepting create must also write an image that violates no rule
-  # (Case#created_image_problem); one that does fails create and ends the
-  # case. A manifest case then runs the second create, from the manifest's
-  # lines reversed, which must accept and write the same bytes
-  # (specs/design-spec-testing.md#cases), or the case fails and ends.
+  # and answers its model, its Classification, and why its layout is not
+  # the one the creation's settings and tree call for, or nil: create is
+  # judged by the source model, and the reading stages after it by the
+  # image it created. An accepting create must also write an image that
+  # violates no rule (Case#created_image_problem) and has that layout; one
+  # that does not fails create and ends the case. A manifest case then
+  # runs the second create, from the manifest's lines reversed, which must
+  # accept and write the same bytes (specs/design-spec-testing.md#cases),
+  # or the case fails and ends.
   #
   # oracles, when the case's image is one the oracles read, takes the case
   # directory and the image's model, a creation case's created image's,
@@ -168,14 +170,15 @@ module FsimgSpec
     end
 
     # What follows an accepting create: the created hook decodes the image
-    # it wrote, whose rules may fail create; a manifest case then runs its
+    # it wrote, whose rules or layout may fail create; a manifest case then runs its
     # second create, unless create already failed. Answers the Judged of
     # create and of the second create, and the created image's case and
     # model.
     private_class_method def self.after_create(create, kase:, created:, runner:, directory:, sandbox:)
-      image_model, classification = created.call(File.join(directory, Runner::CREATED))
+      image_model, classification, image_problem = created.call(File.join(directory, Runner::CREATED))
       kase = kase.created(classification)
-      create = create.with(problem: kase.created_image_problem)
+      problems = [kase.created_image_problem, image_problem].compact
+      create = create.with(problem: problems.empty? ? nil : problems.join("; "))
       reproduced = reproduction(runner, kase.recipe, directory:, sandbox:, model: create.model) if
         create.problem.nil? && kase.recipe.source.manifest?
       [[create, *reproduced], kase, image_model]

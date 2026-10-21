@@ -38,12 +38,15 @@ class TestFatRules < Minitest::Test
     end
   end
 
-  # A witness whose tree exceeds a profile's output ceiling is left to a
-  # profile with room for it: quick runs no file past FAT's 4 GiB.
+  # A witness whose tree or exact volume exceeds a profile's output
+  # ceiling is left to a profile with room for it: quick runs no file past
+  # FAT's 4 GiB and no 2 GiB threshold volume of 32 KiB clusters.
   def test_creation_witnesses_stay_within_the_profile
     quick = Fat::Witnesses.creations(REGISTRY, ceilings: CEILINGS).map(&:id)
+    beyond = %w[fat.create.file_size.4294967296 fat.create.cluster_count.fat16_65524_cluster_32768
+                fat.create.cluster_count.fat32_65525_cluster_32768]
 
-    assert_equal CREATIONS.map(&:id) - ["fat.create.file_size.4294967296"], quick
+    assert_equal CREATIONS.map(&:id) - beyond, quick
   end
 
   # Every tree path fits the path ceiling as fsimg counts an image path,
@@ -61,7 +64,7 @@ class TestFatRules < Minitest::Test
   def test_illegal_sector_alone_classifies_a_creation
     environment = FsimgSpec::Environment.new(forced_format: nil, trial_answers: FsimgSpec::TrialAnswers::HELD)
     ids = [{ sector: 0, cluster: 512 }, { sector: 0, size: 1000 }].map do |settings|
-      REGISTRY.classify_source(FsimgSpec::SourceModel.new(settings:, tree: []), environment).rule_ids
+      REGISTRY.classify_source(FsimgSpec::SourceModel.new(format: "fat12", settings:, tree: []), environment).rule_ids
     end
 
     assert_equal [["fat.create.sector_bytes"]] * 2, ids

@@ -177,11 +177,19 @@ module FsimgSpec
     include Checked
 
     ROOTS = %w[manifest directory].freeze
+    # The settings create takes, each of which the runner passes as its
+    # option: the exact volume size, the sector size and the cluster size,
+    # in bytes.
+    SETTINGS = %i[cluster sector size].freeze
 
     def initialize(tree:, settings:, root: "manifest")
       raise RecipeError, "unknown source root #{FsimgSpec.shown(root)}" unless ROOTS.include?(root)
 
-      super(tree: TreeEntry.tree(tree), settings: RecipeValues.named_integers(settings, what: "setting"), root:)
+      settings = RecipeValues.named_integers(settings, what: "setting")
+      unknown = settings.keys - SETTINGS
+      raise RecipeError, "unknown setting #{FsimgSpec.shown(unknown.first.to_s)}" if unknown.any?
+
+      super(tree: TreeEntry.tree(tree), settings:, root:)
     end
 
     def manifest? = root == "manifest"

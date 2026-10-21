@@ -536,12 +536,20 @@ review and commit gates.
     - Exact `-s` sizes giving 4084, 4085, 65524 and 65525 clusters, and
       `-o sector=` with `-o cluster=` combinations, including 4096-byte
       sectors.
+    - Every accepted creation's image must have the layout the writer
+      design gives its settings and tree, so each threshold witness is the
+      volume it names.
     - Then the decision whether `test/fat-integration.sh` moves into the
-      harness. It is worthwhile only if it removes a mechanism, which needs
-      the `newfs_msdos` adapter, FAT12 fragmentation through `mdel`, and
-      CLI-level writer checks first; the script, `test-fat --external` and
-      `--make-payload`, and `test-fat-write --create` and `--create-empty` go
-      with it.
+      harness, which is worthwhile only once it removes a mechanism: the
+      script, `test-fat --external` and `--make-payload`, and
+      `test-fat-write --create` and `--create-empty` go together. It stays
+      for now. The creation cases cover the script's writer half through
+      the CLI, but for an empty volume and the checker's verdict, which the
+      script gives a created image and the harness records only; whether
+      the checker judges fsimg's own images is the owner's call. The
+      reader half still needs the `newfs_msdos` adapter, a formatter base
+      of 4096-byte sectors in two-sector clusters, and FAT12 fragmentation
+      through `mdel`. `TODO.md` tracks the move.
     - **Gate:** each threshold witness classifies as intended, fsimg creates
       and reads it, and the oracles' observations at the thresholds are in
       the report.
@@ -647,7 +655,7 @@ acceptance, and `ls`, `extract` and `verify` compare their records with the
 base's known tree; a mutated base leaves the directory, file and
 verification scopes unclassified, so there `ls`, `extract` and `verify`
 assert only that they run without a fault. All 153 deterministic
-witnesses, and the 40 creation witnesses of the `quick` profile, agree with
+witnesses, and the 70 creation witnesses of the `quick` profile, agree with
 the expectations their rules derive.
 
 | Rule ID | Requirement | Category | fsimg (observed) |
@@ -687,10 +695,12 @@ the expectations their rules derive.
 | `fat.create.sector_bytes` | `-o sector=` is 512, 1024, 2048 or 4096 | normative (scope `input`) | `create`: `EINVAL` for 256, 1000 and 8192; each legal size accepted, read back by mtools and by every reading stage |
 | `fat.create.cluster_bytes` | `-o cluster=` is a power-of-two multiple of the sector, 1 to 128 sectors | normative (scope `input`) | `create`: `EINVAL` for 256, 1000, 131072, and 1024 with 2048-byte sectors; 512, 2048, 32768, and 4096 with 4096-byte sectors accepted |
 | `fat.create.cluster_bytes.supported` | The writer's clusters are at most 32 KiB | profile (scope `input`) | `create`: `EINVAL` for 65536, also with 4096-byte sectors; 32768 accepted |
-| `fat.create.volume_bytes` | `-s` is a positive whole number of sectors | profile (scope `input`) | `create`: `EINVAL` for 0, 1000, and 2134528 with 4096-byte sectors; 2134016 bytes for FAT16 accepted |
+| `fat.create.volume_bytes` | `-s` is a positive whole number of sectors that `BPB_TotSec32` counts | profile (scope `input`) | `create`: `EINVAL` for 0, 1000, and 2134528 with 4096-byte sectors; 2134016 bytes for FAT16 accepted |
 | `fat.create.name` | Source names obey `fat.directory.name` | profile (scope `input`) | `create`: `EINVAL` for every invalid name of `fat.directory.name`, from a manifest, and for a trailing period from a host tree; 255 units accepted |
 | `fat.create.unique_names` | No two source names of a directory have one simple-uppercase key where simple and full uppercase agree | profile (scope `input`) | `create`: `EINVAL` for the ASCII and Deseret case pairs; a long name beside a literal 8.3 name, and `F0000000` beside a long name, accepted |
 | `fat.create.file_size` | A source file fits `DIR_FileSize`, at most 0xFFFFFFFF bytes | normative (scope `input`) | `create`: `ERANGE` for a 4 GiB file of zeros, a witness only `deep` has the output ceiling to run |
+| `fat.create.cluster_count` | Some cluster size create may choose gives a cluster count of the variant (FAT12 1 to 4084, FAT16 4085 to 65524, FAT32 65525 to 0x0FFFFFF5) that holds the tree, within `BPB_TotSec32` and, on FAT12 and FAT16, `BPB_FATSz16` and `BPB_RootEntCnt` | normative (scope `input`) | `create`: `ERANGE` for exact sizes of 4085 FAT12, 4084 FAT16, 65525 FAT16 and 65524 FAT32 one-sector clusters in 512- and 4096-byte sectors, an exact size too small for the tree, and a FAT12 tree of 4085 clusters; 4084, 4085, 4100, 65524, 65525 and 65540 accepted in both sector sizes, the thresholds in 32 KiB clusters (65524 and 65525 under `deep` only), and 65525 512-byte clusters as FAT16 in 1024-byte ones |
+| `fat.create.cluster_count.automatic` | Without `-s`, some cluster size holds the tree 16 clusters from each variant threshold: FAT12 at most 4069, FAT16 4101 to 65509, FAT32 at least 65541 | profile (scope `input`) | `create`: `ERANGE` for trees of 4070 FAT12 and 65510 FAT16 clusters of 512 bytes; 4069 and 65509 accepted, and 4070 in 1024-byte clusters when create may choose |
 
 Twelve well-isolated rules are worth more than thirty unverified ones.
 

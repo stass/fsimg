@@ -176,6 +176,18 @@
   report fatcat as not applicable to a name stored with case bits rather
   than as a disagreement.
 
+* [Medium] **FAT integration script into the spec harness**
+  (`test/fat-integration.sh.in`, `test/fat.c` `--external` and
+  `--make-payload`, `test/fat-write.c` `--create` and `--create-empty`):
+  the script is a second interoperability path beside the harness, worth
+  moving only as a whole, so that the C hooks go with it. The harness
+  still lacks the `newfs_msdos` formatter adapter, a formatter base of
+  4096-byte sectors in two-sector clusters, FAT12 fragmentation through
+  `mdel`, and an empty created volume of each variant. The script also
+  fails on `fsck -n` refusing an fsimg-created image, which the harness
+  records only; the owner decides whether the checker judges fsimg's own
+  images before the move (docs/spec-testing-plan.md, B1g).
+
 * [Medium] **Spec harness field draws never reach fsimg**
   (`test/spec/suite/fat/test_rules.rb`, `test/spec/lib/fsimg_spec/fat/witnesses.rb`):
   PropCheck's BPB and geometry field draws are classified in memory only,
@@ -199,6 +211,17 @@
 
 * [Low] **Spec harness FAT witness gaps**
   (`test/spec/lib/fsimg_spec/fat/witnesses.rb`):
+  - No creation rule states the writer's 2 MiB directory limit, 65536
+    slots, which create refuses with `FSIMG_ERANGE`
+    (specs/design-fat-writer.md#names-and-directory-layout); the source
+    model would expect a wider directory to be accepted. No witness or
+    draw comes near it, though a promoted recipe of some 3200 names of 255
+    units in one directory would.
+  - The recipe loader bounds an exact `-s` by the output ceiling, but not
+    the volume automatic sizing gives a loaded creation recipe, such as
+    65541 FAT32 clusters of 32 KiB; fsimg would refuse it with
+    `FSIMG_ELIMIT` where the rules expect it to be accepted. Bound it by
+    `Fat::Sizing.plan` as the witness generator does.
   - `fat.geometry.max_cluster` has only a multi-rule witness, which also
     exceeds its image and FAT. Isolating it needs a sparse image of about
     128 GiB, above the `deep` profile's 64 GiB image ceiling.
