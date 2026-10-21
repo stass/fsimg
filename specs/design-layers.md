@@ -512,7 +512,7 @@ absent layer.
 | `gpt:disk-guid`, `gpt:guid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text |
 | `gpt:disk` | bytes | Derived from the volume | Multiple of the sector size and the container granularity; large enough for the volume and tables |
 | `gpt:sector` | bytes | 512 | 512 or 4096; the LBA size of the tables. On read it resolves a disk carrying a header at both offsets and requires `gpt` in the forced stack |
-| `mbr:type` | type name, or `0x` byte | Derived: `fat12` 0x01, `fat16` 0x06, `fat32` 0x0C, `exfat` 0x07, `qnx6` 0xB1, `qnx4` 0x4D | Nonzero byte; not 0x05, 0x0F or 0x85 (extended containers) and not 0xEE (GPT protective) |
+| `mbr:type` | type name, or `0x` byte | Derived: `fat12` 0x01, `fat16` 0x06, `fat32` 0x0C, `exfat` 0x07, `qnx6` 0xB2, `qnx4` 0x4D | Nonzero byte; not 0x05, 0x0F or 0x85 (extended containers) and not 0xEE (GPT protective) |
 | `mbr:active` | `yes`, `no` | `no` | Sets the 0x80 status |
 | `mbr:id` | `0x` 32-bit | See [identifiers](#identifiers) | Any value |
 | `mbr:disk` | bytes | Derived | As `gpt:disk`; at most 2 TiB, the 2^32 sectors an entry can address |
@@ -551,7 +551,7 @@ One table serves `type=` on write, the Type selector on read, compose and
 | `linux` | `0FC63DAF-8483-4772-8E79-3D69D8477DE4` | 0x83 | `Linux filesystem` | Linux filesystem data |
 | `apfs` | `7C3457EF-0000-11AA-AA11-00306543ECAC` | none | `Apple APFS` | APFS container |
 | `hfs` | `48465300-0000-11AA-AA11-00306543ECAC` | 0xAF | `Apple HFS/HFS+` | Apple HFS+ |
-| `qnx6` | `CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1` | 0xB1 | `QNX6 Power-Safe` | QNX6 Power-Safe; 0xB2 and 0xB3 accepted on read |
+| `qnx6` | `CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1` | 0xB2 | `QNX6 Power-Safe` | QNX6 Power-Safe; 0xB1 and 0xB3 accepted on read |
 | `qnx4` | none | 0x4D | none | QNX4 POSIX volume; 0x4E and 0x4F, the secondary and tertiary volumes, accepted on read |
 
 The default GPT names are the ones `sgdisk` assigns, so a disk fsimg writes
@@ -563,7 +563,8 @@ gptfdisk (`0xb300`, "QNX6 Power-Safe") and util-linux ("QNX6 file system");
 0xB1, 0xB2 and 0xB3 are the Power-Safe types and 0x4D, 0x4E and 0x4F the QNX4
 types of the QNX system architecture guide's partition table and the QNX
 `fdisk` reference. Other operating systems' lists also give 0xB1 and 0xB3 to
-HP volume expansion, which a type selection cannot tell apart. A
+HP volume expansion, which a type selection cannot tell apart; fsimg writes
+0xB2, the type QNX's own `fdisk` assigns, which no other list claims. A
 type with no MBR byte cannot be requested on an MBR disk. A filesystem with no
 GPT type has no `gpt:type` default: QNX4 predates GPT and no published list
 registers a GUID for it, so `qnx4/gpt` without `gpt:type=` is `FSIMG_EINVAL`

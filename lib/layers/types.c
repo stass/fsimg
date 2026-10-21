@@ -37,7 +37,7 @@ static const fsimg_partition_type_t partition_types[] = {
 	{ "hfs", "48465300-0000-11AA-AA11-00306543ECAC", "Apple HFS/HFS+",
 	    { 0xaf } },
 	{ "qnx6", "CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1", "QNX6 Power-Safe",
-	    { 0xb1, 0xb2, 0xb3 } },
+	    { 0xb2, 0xb1, 0xb3 } },
 	{ "qnx4", NULL, NULL, { 0x4d, 0x4e, 0x4f } }
 };
 

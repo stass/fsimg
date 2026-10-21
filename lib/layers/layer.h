@@ -135,7 +135,7 @@ typedef struct fsimg_partition_type {
 	const char	*name;
 	const char	*gpt_guid;	/* RFC 4122 text, or NULL */
 	const char	*gpt_name;	/* sgdisk's default partition name */
-	uint8_t		 mbr_types[3];	/* Zero-terminated when shorter */
+	uint8_t		 mbr_types[3];	/* Written type first; zero-terminated */
 } fsimg_partition_type_t;
 
 /* A parsed type selector: a table entry, a literal GUID or a literal byte. */
