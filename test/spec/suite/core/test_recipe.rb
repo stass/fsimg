@@ -11,7 +11,7 @@ require "fsimg_spec"
 class TestRecipe < Minitest::Test
   # Small ceilings, so that one past each is a short recipe.
   CEILINGS = FsimgSpec::Ceilings.new(image: 1 << 20, memory: 64 << 20, scratch: 1 << 20, entries: 4, depth: 3,
-                                     path: 32, fds: 128, output: 4096, work: 1 << 20, seconds: 10)
+                                     path: 32, fds: 128, output: 4096, content: 4096, work: 1 << 20, seconds: 10)
 
   READING = <<~JSON
     {

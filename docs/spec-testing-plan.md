@@ -518,8 +518,8 @@ review and commit gates.
       host-tree cases keep `source/` and the funnel; `SourceTree.write`
       serves them alone. The preflight's creation runs from a manifest whose
       names need every escape a FAT name can need.
-    - After an accepting `create`, the mtools read-back of `out/created.img`
-      gives the verdict the design gives it, `fsck -n` and fatcat are
+    - After an accepting `create`, the checker and the mtools read-back of
+      `out/created.img` give the verdict the design gives them, fatcat is
       recorded, and the second `create` from `source-reversed.mtree` writes
       `out/reversed.img`, which must equal `created.img` byte for byte.
     - Seeded failures: a manifest with a trailing-dot name must classify as
@@ -533,6 +533,8 @@ review and commit gates.
   - **B1g, writer geometry witnesses.**
     - Automatic sizing margins: cluster counts 16 from each threshold
       (FAT12 at most 4069, FAT16 4101 to 65509, FAT32 at least 65541).
+      The 32 MiB file at the FAT16 margin exceeds `quick`'s content
+      ceiling, so `nightly` runs that witness.
     - Exact `-s` sizes giving 4084, 4085, 65524 and 65525 clusters, and
       `-o sector=` with `-o cluster=` combinations, including 4096-byte
       sectors.
@@ -544,12 +546,10 @@ review and commit gates.
       script, `test-fat --external` and `--make-payload`, and
       `test-fat-write --create` and `--create-empty` go together. It stays
       for now. The creation cases cover the script's writer half through
-      the CLI, but for an empty volume and the checker's verdict, which the
-      script gives a created image and the harness records only; whether
-      the checker judges fsimg's own images is the owner's call. The
-      reader half still needs the `newfs_msdos` adapter, a formatter base
-      of 4096-byte sectors in two-sector clusters, and FAT12 fragmentation
-      through `mdel`. `TODO.md` tracks the move.
+      the CLI, but for an empty volume. The reader half still needs the
+      `newfs_msdos` adapter, a formatter base of 4096-byte sectors in
+      two-sector clusters, and FAT12 fragmentation through `mdel`.
+      `TODO.md` tracks the move.
     - **Gate:** each threshold witness classifies as intended, fsimg creates
       and reads it, and the oracles' observations at the thresholds are in
       the report.
@@ -761,7 +761,10 @@ The rule set reads the specification as follows where it is not decisive:
 * **Writer boundary interoperability.** The writer stays 16 clusters away from
   the variant cutovers unless `-s` is given. B1 checks the exact-threshold
   images that `-s` permits against fsck and mtools, which may themselves
-  disagree. Disagreements are recorded per tool, not resolved by majority.
+  disagree. Disagreements are recorded per tool, not resolved by majority,
+  and one of the checker or the read-back fails the case unless a
+  documented [oracle exception](../specs/design-spec-testing.md#oracle-exceptions)
+  excuses it.
 
 ## Risks
 

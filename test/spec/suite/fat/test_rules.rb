@@ -39,12 +39,21 @@ class TestFatRules < Minitest::Test
   end
 
   # A witness whose tree or exact volume exceeds a profile's output
-  # ceiling is left to a profile with room for it: quick runs no file past
-  # FAT's 4 GiB and no 2 GiB threshold volume of 32 KiB clusters.
+  # ceiling, or a valid one whose file content exceeds its content
+  # ceiling, is left to a profile with room for it: quick runs no file
+  # past FAT's 4 GiB, no 2 GiB threshold volume of 32 KiB clusters, and
+  # not the 32 MiB file of the automatic FAT16 margin, which extraction
+  # writes in full. The witness one cluster past that margin, which
+  # create refuses before writing, still runs.
   def test_creation_witnesses_stay_within_the_profile
     quick = Fat::Witnesses.creations(REGISTRY, ceilings: CEILINGS).map(&:id)
     beyond = %w[fat.create.file_size.4294967296 fat.create.cluster_count.fat16_65524_cluster_32768
-                fat.create.cluster_count.fat32_65525_cluster_32768]
+                fat.create.cluster_count.fat32_65525_cluster_32768 fat.create.cluster_count.automatic.fat16_65509]
+
+    nightly = Fat::Witnesses.creations(REGISTRY, ceilings: FsimgSpec.fetch_profile("nightly").ceilings).map(&:id)
+
+    assert_includes quick, "fat.create.cluster_count.automatic.fat16_65510"
+    assert_includes nightly, "fat.create.cluster_count.automatic.fat16_65509"
 
     assert_equal CREATIONS.map(&:id) - beyond, quick
   end

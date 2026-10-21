@@ -181,6 +181,15 @@
   report fatcat as not applicable to a name stored with case bits rather
   than as a disagreement.
 
+* [Low] **Spec harness has no rule for the FSInfo signatures**
+  (`test/spec/lib/fsimg_spec/fat/rules.rb`, `fat/oracles.rb`): only
+  `fat32.bpb.fsinfo_sector` checks FSInfo's position. The oracle exception
+  `fsck_msdosfs.fat32_65525` excuses FreeBSD's "Invalid signature in fsinfo
+  block" warning, which covers all three section 5 signatures, so at
+  exactly 65525 clusters a host whose only checker is `fsck_msdosfs` would
+  miss a bad signature fsimg wrote. A rule for FSI_LeadSig, FSI_StrucSig and
+  FSI_TrailSig would make the model catch it on every host.
+
 * [Medium] **FAT integration script into the spec harness**
   (`test/fat-integration.sh.in`, `test/fat.c` `--external` and
   `--make-payload`, `test/fat-write.c` `--create` and `--create-empty`):
@@ -188,10 +197,8 @@
   moving only as a whole, so that the C hooks go with it. The harness
   still lacks the `newfs_msdos` formatter adapter, a formatter base of
   4096-byte sectors in two-sector clusters, FAT12 fragmentation through
-  `mdel`, and an empty created volume of each variant. The script also
-  fails on `fsck -n` refusing an fsimg-created image, which the harness
-  records only; the owner decides whether the checker judges fsimg's own
-  images before the move (docs/spec-testing-plan.md, B1g).
+  `mdel`, and an empty created volume of each variant
+  (docs/spec-testing-plan.md, B1g).
 
 * [Medium] **Spec harness field draws never reach fsimg**
   (`test/spec/suite/fat/test_rules.rb`, `test/spec/lib/fsimg_spec/fat/witnesses.rb`):
@@ -297,18 +304,6 @@
   Both verifiers keep their format-specific reconciliation.
 
 ## Bugs by subsystem
-
-* [Medium] **FreeBSD fsck_msdosfs rejects the FAT16 builder base at 4085
-  clusters** (`test/spec/suite/fat/test_bases.rb`,
-  `test/spec/lib/fsimg_spec/fat/builder.rb`): on FreeBSD 16.0-CURRENT,
-  `test_builder_bases_pass_the_checkers` fails at "fat16 at the threshold"
-  with `fsck_msdosfs -n` exit 8: crossed chains near cluster 4080 and chains
-  ending in free clusters, the pattern of 12-bit FAT decoding. macOS
-  `fsck_msdos`, mtools and fatcat accept the image, and the 140 FAT cases pass
-  on that host, so `test/spec.sh` fails there only on this base. Establish
-  from the FreeBSD source whether its FAT12/FAT16 cutover differs from the
-  specification's 4085; then either fix the builder or record the checker's
-  deviation as a cited host-specific skip for that one base.
 
 * [Low] **The mtree -c round trip fails on FreeBSD** (`test/manifest.c`
   rebuild_from_tool): FreeBSD's `mtree -c` writes `flags=uarch` in its

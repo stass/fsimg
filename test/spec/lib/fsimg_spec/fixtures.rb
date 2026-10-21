@@ -45,20 +45,24 @@ module FsimgSpec
   # One oracle's view of one image (specs/design-spec-testing.md#independence-and-oracles):
   # the tool agrees with the tree the harness knows the image to hold,
   # disagrees with it, giving a short detail, does not apply to the
-  # image's geometry or names, or is unavailable on this host. A detail
-  # quotes the image's names and the tool's output only through
-  # FsimgSpec.shown, and is cut to DETAIL_LENGTH, so a hostile image
-  # cannot flood a report.
-  class Observation < Data.define(:state, :detail)
+  # image's geometry or names, or is unavailable on this host. A
+  # disagreement that a documented oracle exception matches is excused:
+  # it keeps its detail and carries the exception's id, so it is recorded
+  # as the tool's defect rather than dropped. A detail quotes the image's names
+  # and the tool's output only through FsimgSpec.shown, and is cut to
+  # DETAIL_LENGTH, so a hostile image cannot flood a report.
+  class Observation < Data.define(:state, :detail, :exception_id)
     include Checked
 
-    STATES = %w[agrees disagrees not_applicable unavailable].freeze
+    STATES = %w[agrees disagrees excused not_applicable unavailable].freeze
     DETAIL_LENGTH = 240
 
-    def initialize(state:, detail: nil)
+    def initialize(state:, detail: nil, exception_id: nil)
       raise HarnessError, "unknown observation #{FsimgSpec.shown(state)}" unless STATES.include?(state)
+      raise HarnessError, "an observation names an exception exactly when it is excused" unless
+        (state == "excused") == !exception_id.nil?
 
-      super(state:, detail: detail && (detail.length > DETAIL_LENGTH ? "#{detail[0, DETAIL_LENGTH]}..." : detail))
+      super(state:, detail: detail && (detail.length > DETAIL_LENGTH ? "#{detail[0, DETAIL_LENGTH]}..." : detail), exception_id:)
     end
 
     def self.agrees = new(state: "agrees")
@@ -69,16 +73,29 @@ module FsimgSpec
 
     def self.unavailable(detail) = new(state: "unavailable", detail:)
 
+    # This disagreement excused by the oracle exception whose id is
+    # exception_id.
+    def excused_by(exception_id)
+      raise HarnessError, "only a disagreement is excused, not #{state}" unless state == "disagrees"
+
+      Observation.new(state: "excused", detail:, exception_id:)
+    end
+
+    # The label the coverage report counts this observation under: its
+    # state, and for an excused one the exception that excused it, so a
+    # report shows which exceptions fired.
+    def tally_label = exception_id ? "excused:#{exception_id}" : state
+
     # The observation as reports and failure records write it.
     def to_h = super.compact
 
-    # How many observations of each tool are in each state, over a list of
-    # observation maps (tool => Observation), as the coverage report
-    # counts them: tools and states in name order, states never seen
-    # left out.
+    # How many observations of each tool have each tally_label, over a
+    # list of observation maps (tool => Observation), as the coverage
+    # report counts them: tools and labels in name order, labels never
+    # seen left out.
     def self.tally(observations) =
       observations.flat_map(&:to_a).group_by(&:first).sort.to_h do |tool, pairs|
-        [tool, pairs.map { |_tool, observation| observation.state }.tally.sort.to_h]
+        [tool, pairs.map { |_tool, observation| observation.tally_label }.tally.sort.to_h]
       end
   end
 

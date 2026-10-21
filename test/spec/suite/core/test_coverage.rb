@@ -29,7 +29,8 @@ class TestCoverage < Minitest::Test
                  rules(entries).to_h { [_1[:id], _1[:state]] })
   end
 
-  # The oracles' observations are counted per tool and state, over a
+  # The oracles' observations are counted per tool and state, an
+  # excused one under the exception that excused it, over a
   # format's cases and over each rule's, and a case no oracle read adds
   # nothing.
   def test_observations_are_counted_per_tool_and_state
@@ -41,9 +42,10 @@ class TestCoverage < Minitest::Test
     entries = [
       observed.call("t.format.0", FsimgSpec::Observation.agrees),
       observed.call("t.format.1", FsimgSpec::Observation.disagrees("mdir lacks file \"A\"")),
+      observed.call("t.format.2", FsimgSpec::Observation.disagrees("mdir lacks file \"B\"").excused_by("t.exception")),
       entry("t.crosslink.0", intended: "t.crosslink", facts: { "t.crosslink" => true }, verdict: "passed")
     ]
-    expected = { "fsck" => { "agrees" => 2 }, "mtools" => { "agrees" => 1, "disagrees" => 1 } }
+    expected = { "fsck" => { "agrees" => 3 }, "mtools" => { "agrees" => 1, "disagrees" => 1, "excused:t.exception" => 1 } }
 
     assert_equal expected, FsimgSpec::Coverage.oracles(entries)
     assert_equal [expected, {}], %w[t.format t.crosslink].map { |id| rules(entries).find { _1[:id] == id }[:oracles] }

@@ -98,17 +98,24 @@ module FsimgSpec
 
       # Every deterministic creation witness of registry's input rules, and
       # a valid creation of each variant from a manifest and of FAT16 from
-      # a host tree, whose footprint stays within the output ceiling: a
-      # witness beyond it, such as a file past FAT's 4 GiB or a volume of
-      # 65525 clusters of 32 KiB, is one only a profile with room for it
-      # runs.
+      # a host tree, whose footprint stays within the output ceiling and,
+      # for a witness meant valid, whose file content stays within the
+      # content ceiling: a witness beyond them, such as a file past FAT's
+      # 4 GiB, a volume of 65525 clusters of 32 KiB or the 32 MiB file of
+      # the automatic FAT16 margin, is one only a profile with room for it
+      # runs. create refuses a targeted witness before it writes, so
+      # nothing extracts or reads back its content.
       def self.creations(registry, ceilings:)
         valid = %w[fat12 fat16 fat32].map { Creation.new(label: _1, format: _1, violates: false) } +
                 [Creation.new(label: "host_tree", format: "fat16", root: "directory", violates: false)]
         witnesses = valid.map { creation_witness(nil, _1) } +
                     registry.rules.select(&:input?).flat_map { |rule| rule.domain.call.map { creation_witness(rule, _1) } }
-        witnesses.select { footprint(_1) <= ceilings.output }
+        witnesses.select do
+          footprint(_1) <= ceilings.output && (_1.intended || content_bytes(_1) <= ceilings.content)
+        end
       end
+
+      private_class_method def self.content_bytes(witness) = witness.tree.sum { _1.size || 0 }
 
       # The bytes a creation witness's case hashes and writes: its tree's
       # content, which the manifest's digests hash, and for a witness meant
@@ -117,7 +124,7 @@ module FsimgSpec
       # writes a volume. A witness meant valid that has no plan is a
       # generator defect, which its classification reports, so it runs.
       private_class_method def self.footprint(witness)
-        content = witness.tree.sum { _1.size || 0 }
+        content = content_bytes(witness)
         planned = witness.intended ? nil : Sizing.plan(SourceModel.new(format: witness.format, settings: witness.settings,
                                                                        tree: witness.tree))
         planned ? [content, planned.geometry.total_sectors * planned.geometry.bytes_per_sector].max : content
@@ -563,7 +570,9 @@ module FsimgSpec
       # create refuses in 512-byte clusters and lays out in 1024-byte ones
       # when it may choose them. The margin above the lower thresholds
       # needs no tree of its own: every valid automatic FAT16 and FAT32
-      # creation takes the least count the margin admits.
+      # creation takes the least count the margin admits. The 32 MiB file
+      # at the FAT16 margin exceeds quick's content ceiling, so only a
+      # profile with room for it, nightly or deep, runs fat16_65509.
       CREATE_AUTOMATIC_COUNT = lambda {
         sides = [["fat12", 4069, false], ["fat12", 4070, true], ["fat16", 65_509, false], ["fat16", 65_510, true]]
         sides.map do |variant, clusters, violates|

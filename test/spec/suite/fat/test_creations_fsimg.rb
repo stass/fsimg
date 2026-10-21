@@ -58,6 +58,30 @@ class TestFatCreationsFsimg < Minitest::Test
     end
   end
 
+  # The seeded failure of the checker's verdict: a checker that reports
+  # what FreeBSD's fsck_msdosfs reports of a 4085-cluster FAT16 volume
+  # fails a created image of any other count, and the documented
+  # exception for that checker's off-by-one cutover excuses it at 4085,
+  # where the case passes and records the exception.
+  def test_a_checker_disagreement_fails_a_created_image_unless_an_exception_excuses_it
+    Dir.mktmpdir do |stubs|
+      checker = File.join(stubs, "fsck_msdosfs")
+      File.write(checker, "#!/bin/sh\necho \"** $2\"\necho '** Phase 1 - Read FAT and checking connectivity'\n" \
+                          "echo 'Cluster 8 crossed another chain at 7'\nexit 8\n")
+      File.chmod(0o700, checker)
+      with_run(checkers: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
+        _, failed = run.call("fat.create.valid.fat16")
+        _, excused = run.call("fat.create.cluster_count.fat16_4085")
+        skip "no oracle runs on this host" if failed.observations.fetch("fsck").state == "unavailable"
+
+        assert_equal "failed", failed.verdict
+        assert_match(/fsck: fsck_msdosfs -n exited 8: "\*\* out\/created.img \| \*\* Phase 1 .* \| Cluster 8 crossed/, failed.detail)
+        assert_equal ["passed", "excused", "fsck_msdosfs.fat16_4085"],
+                     [excused.verdict, *excused.observations.fetch("fsck").to_h.values_at(:state, :exception_id)], excused.detail
+      end
+    end
+  end
+
   # A manifest writer that leaves # unescaped turns the rest of a name
   # into a comment; fsimg refuses the manifest, and the preflight, whose
   # names need that escape, stops the run, so no case reads the refusal
@@ -81,14 +105,17 @@ class TestFatCreationsFsimg < Minitest::Test
   # Yields a callable that classifies the creation witness of an id and
   # runs it, answering its Case and CaseResult, after one preflight for
   # the whole test. A witness whose case shows a generator defect fails
-  # the test instead.
-  def with_run
+  # the test instead. checkers replaces the host's read-only checkers in
+  # the oracles' shell.
+  def with_run(checkers: {})
     Dir.mktmpdir do |root|
       results = File.join(root, "results")
       Dir.mkdir(results)
       setup = FsimgSpec::CasePhase.prepare(results:, profile: PROFILE, build_directory: root, environment: ENV.to_h)
+      shell = FsimgSpec::OracleShell.new(home: File.join(root, "checker-home"), environment: ENV.to_h,
+                                         tools: setup.shell.tools.merge(checkers))
       cases = Fat::Cases.new(registry: REGISTRY, cache: setup.cache, ceilings: PROFILE.ceilings, name_trials: setup.name_trials,
-                             shell: setup.shell)
+                             shell:)
       witnesses = Fat::Witnesses.creations(REGISTRY, ceilings: PROFILE.ceilings).to_h { [_1.id, _1] }
       yield lambda { |id|
         classified = cases.creation_witness(witnesses.fetch(id))

@@ -48,4 +48,16 @@ class TestFixtures < Minitest::Test
       assert_raises(FsimgSpec::FixtureError) { shell.run(["/usr/bin/true"], chdir: directory) }
     end
   end
+
+  # Only a disagreement is excused: it keeps its detail and names the
+  # exception that excuses it, and an excused observation always names
+  # one, so none is excused silently.
+  def test_an_excused_observation_is_a_disagreement_naming_its_exception
+    excused = FsimgSpec::Observation.disagrees("fsck_msdosfs -n exited 8").excused_by("t.exception")
+
+    assert_equal({ state: "excused", detail: "fsck_msdosfs -n exited 8", exception_id: "t.exception" }, excused.to_h)
+    assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.agrees.excused_by("t.exception") }
+    assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.new(state: "excused", detail: "x") }
+    assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.new(state: "disagrees", detail: "x", exception_id: "t.exception") }
+  end
 end

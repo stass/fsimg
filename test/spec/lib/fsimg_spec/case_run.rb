@@ -50,9 +50,9 @@ module FsimgSpec
   # How one case ended: passed, failed, host_skip or harness_error, with
   # each stage's result, for a verdict other than passed why, and the
   # oracles' observations of its image, tool => Observation. Only the
-  # read-back of an image fsimg created gives a verdict (Observed); every
-  # other observation is recorded only, though an oracle that cannot run
-  # is a harness error.
+  # checker and the read-back of an image fsimg created give a verdict
+  # (Observed); every other observation is recorded only, though an
+  # oracle that cannot run is a harness error.
   class CaseResult < Data.define(:id, :verdict, :stages, :detail, :observations)
     include Checked
 
@@ -61,8 +61,9 @@ module FsimgSpec
 
   # What the oracles found in a case's image
   # (specs/design-spec-testing.md#independence-and-oracles): one
-  # Observation per tool, and problem, why the one oracle with a verdict,
-  # the read-back of an image fsimg created, fails the case, or nil.
+  # Observation per tool, and problem, why the oracles with a verdict, the
+  # checker and the read-back of an image fsimg created, fail the case, or
+  # nil.
   class Observed < Data.define(:observations, :problem)
     include Checked
 

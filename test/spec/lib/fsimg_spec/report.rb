@@ -20,7 +20,7 @@ module FsimgSpec
     include Checked
 
     # Bumped by any change to the meaning or shape of coverage.json.
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def initialize(cases: CasesSkipped.new(reason: "not run"), **fields) = super
 

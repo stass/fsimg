@@ -13,7 +13,9 @@ module FsimgSpec
     # population is mtools, piped into the empty volume with mmd and mcopy.
     # A base is then refused if its decoded geometry differs from its
     # parameters, and read by the oracles: the read-only checker and the
-    # mtools read-back must agree with its tree, and fatcat is recorded.
+    # mtools read-back must agree with its tree, unless a documented
+    # exception excuses their disagreement (Oracles.disagreements), and
+    # fatcat is recorded.
     # The manifest records the command, the observations and the image
     # hash.
     module Bases
@@ -35,10 +37,6 @@ module FsimgSpec
       FORMAT_TOOLS = { FORMATTER => %i[mkfs_fat] }.freeze
       POPULATION_TOOLS = %i[mmd mcopy].freeze
       READ_BACK_TOOLS = %i[mdir mtype].freeze
-      # The oracles whose disagreement keeps a base from serving a case:
-      # the read-only checker and the mtools read-back. fatcat is recorded
-      # only.
-      GATING_ORACLES = %w[fsck mtools].freeze
       # The preflight sample's parameters, and a bound on its few MiB.
       SAMPLE_PARAMETERS = { clusters: 5000 }.freeze
       SAMPLE_BYTES = 16 << 20
@@ -96,9 +94,7 @@ module FsimgSpec
         image = cache.fetch(key) { build(base, _1, shell:, ceilings:, content:) }
         model = Model.decode(ImageView.open(image), tree: KnownTree.of(base.tree))
         observations = Oracles.observe(shell, image: File.basename(image), chdir: File.dirname(image), model:)
-        problems = geometry_problems(base, image) + observations.slice(*GATING_ORACLES).filter_map do |tool, observation|
-          "#{tool}: #{observation.detail}" if observation.state == "disagrees"
-        end
+        problems = geometry_problems(base, image) + Oracles.disagreements(observations)
         manifest = manifest(base, image, versions:, command: command(base, shell.tools), observations:)
         cache.publish_manifest(key, manifest)
         Fixture.new(image:, manifest:, observations:, problems:)

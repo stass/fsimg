@@ -281,7 +281,7 @@ do, the harness removes it, so the case holds one image from there on.
 fsimg's reading stages then run on the created image as secondary
 evidence, and
 once the last has run the [oracles](#independence-and-oracles) read the
-image, the mtools read-back with a verdict.
+image, the checker and the mtools read-back with a verdict.
 
 Two deterministic **host-tree creation cases** per run, one valid and one
 `input` witness, keep the host scanner, the sandbox and the worker protocol
@@ -436,7 +436,8 @@ geometry differs from its parameters, so a formatter that silently substitutes
 another geometry never supplies a witness. It then classifies the base like any
 case. A base meant to be valid must classify valid, decode to its recipe's
 tree, and pass the read-only checkers that support its geometry, and the
-mtools read-back, where the host has it, must reproduce its tree; otherwise
+mtools read-back, where the host has it, must reproduce its tree, unless an
+[oracle exception](#oracle-exceptions) excuses the tool; otherwise
 it is reported and serves no case. Every base has a manifest in the
 [fixture-manifest shape](design-formats.md#format-descriptors-and-profiles):
 format, geometry and feature profile; builder, recipe and tree digest; the
@@ -464,7 +465,10 @@ wrote. Every run whose host has the tools reads the formatter base of each
 variant, holding a small standard tree, as a valid case.
 
 A populated tree judges fsimg only once mtools wrote it, the mtools
-read-back reproduced it and the checker did not refuse the image; a host
+read-back reproduced it and the checker did not refuse the image. A checker
+disagreement an [oracle exception](#oracle-exceptions) excuses is no
+refusal, but an excused read-back is no agreement either: it does not show
+that mtools wrote the tree. A host
 without the read-back skips populated cases outright. Otherwise the host's
 mtools did not write the tree the recipe states, and a drawn tree's case is
 a host skip whose detail names why: the refusal of a populating tool that
@@ -528,7 +532,9 @@ support the image's geometry or names (the checkers read one or two FATs;
 mtools drops the surrogate pairs of a long name beyond the BMP; fatcat reads
 512-byte sectors, ASCII names, a FAT32 root directory at cluster 2 and a
 FAT12 or FAT16 root region of whole clusters only),
-or `unavailable` when the host lacks the tool. The observation is recorded in
+or `unavailable` when the host lacks the tool. A disagreement that an
+[oracle exception](#oracle-exceptions) matches is `excused`: it keeps its
+detail and names the exception. The observation is recorded in
 the case result, the failure record and the coverage report. The oracles run
 once a case's last stage has run, on an image whose tree is known: the read-only checker agrees when it exits 0, and
 the mtools read-back and fatcat, which lists each directory as JSON with
@@ -537,25 +543,83 @@ Tool output is untrusted text carrying the image's names: each stream is
 read within a cap the known tree sets, a few entries' listing beyond the
 tree's and a file's size plus a fixed allowance, and a stream past its cap,
 a tool past its deadline and a nonzero exit disagree; a tool that cannot
-start is a harness error.
+start is a harness error. A disagreement's detail names the program and
+quotes the first lines that are not blank of what it wrote, stderr first,
+since a checker's diagnostic can follow its progress lines.
 
 No oracle overrides a published rule. A checker can flag conservative
 incompatibilities or tolerate errors, so where the specification is clear, it
-decides, and `fsck -n`, fatcat and the mtools read-back of any image fsimg
-did not create are always recorded only, as are checker diagnostics on an
-invalid image; a base, though, serves no case unless the checker and the
-read-back agree with it, as [fixtures](#fixtures) state. Disagreements are
-recorded per tool, never resolved by majority. The one oracle with a verdict
-is the **mtools read-back** of an image fsimg created: `mdir -b -/ -a ::/`
-lists every path, a directory with a trailing `/`, and `mtype` streams each
-file's bytes to stdout, where the harness hashes them. It must reproduce the
-source tree in path, type, size and SHA-256, because that is fsimg's own
-creation contract rather than an interpretation of the format. A mismatch
-fails the case, except when the image's cluster count lies closer to a
-variant threshold (4085 or 65525) than the 16 clusters automatic sizing
-keeps from it, where some implementations disagree on the variant; there it
-is recorded only. `fsimg c` followed by fsimg's own reading stages is never
-evidence on its own, because both paths can share a defect.
+decides: the oracles' observations of a reading case's image are recorded
+only, as are checker diagnostics on an invalid image and fatcat's
+observations of any image. Disagreements are recorded per tool, never
+resolved by majority. Two oracles give a **verdict** on an image fsimg
+created, and on a base, which serves no case unless they agree with it, as
+[fixtures](#fixtures) state:
+
+* The **read-only checker**, `fsck.fat -n` or `fsck_msdosfs -n`, must exit
+  0. fsimg's images must be valid, and a conforming checker finds nothing
+  to report in a valid image.
+* The **mtools read-back**: `mdir -b -/ -a ::/` lists every path, a
+  directory with a trailing `/`, and `mtype` streams each file's bytes to
+  stdout, where the harness hashes them. It must reproduce the source tree
+  in path, type, size and SHA-256, because that is fsimg's own creation
+  contract rather than an interpretation of the format.
+
+A disagreement of either fails the case, unless an oracle exception excuses
+it. `fsimg c` followed by fsimg's own reading stages is never evidence on
+its own, because both paths can share a defect.
+
+### Oracle exceptions
+
+An **oracle exception** documents a disagreement that is no fault of the
+image: a defect of the tool, or the variant disagreement the specification
+warns of near the cutovers. The exceptions are one frozen list,
+`Fat::Oracles::EXCEPTIONS`, reviewed like rules, and they cover the checker
+and the read-back alike. Each entry has five parts:
+
+* an id, which records and reports name it by;
+* the tool it excuses;
+* the cluster counts of the volumes it covers;
+* a pattern the disagreement's detail must match, which for a checker
+  names the program, since `fsck.fat` and `fsck_msdosfs` have different
+  defects, and is anchored on the symptom of the defect;
+* a reason that cites the tool's source or the specification section it
+  departs from.
+
+A tool's defect gets an entry only once a disagreement was observed and
+traced to the tool's source; any other disagreement fails its case until
+fsimg is fixed or an entry is reviewed in. The pattern matches only what
+the detail quotes, so a diagnostic past it is never excused. The oracles
+apply the list to every observation, not only to the verdicts. An excused
+disagreement appears as `excused` with its exception's id in the case
+result and the failure record, and the coverage report counts each tool's
+excused observations per exception, so the report shows which exceptions
+still fire. A known tool defect neither fails a case nor keeps a base from
+serving one; only a populated tree needs more, a read-back that agrees, as
+[fixtures](#fixtures) state.
+
+| Exception | Tool | Matches | Reason |
+| --- | --- | --- | --- |
+| `mtools.variant_margin` | read-back | Any disagreement on a volume closer than 16 clusters to 4085 or 65525 | Implementations disagree on the variant near the cutovers, which is why Microsoft's formatting recommendation and fsimg's automatic sizing keep 16 clusters from them |
+| `fsck_msdosfs.fat16_4085` | checker | `fsck_msdosfs` exiting 8 on a volume of 4085 clusters once its boot sector checks passed, so that it reached Phase 1 | FreeBSD's `readboot` (`sbin/fsck_msdosfs/boot.c`) takes a 12-bit FAT below `CLUST_RSRVD & CLUST12_MASK`, 4086 clusters, where section 3.5 makes 4085 clusters FAT16, so it misreads every chain |
+| `fsck_msdosfs.fat32_65525` | checker | `fsck_msdosfs` exiting 8 with `Filesystem too small (65525 clusters) for FAT32 partition` right after the image line, or after its warning about the sector after FSInfo, whose boot signature section 5 does not define and neither fsimg nor `mkfs.fat` writes | `readboot` refuses FAT32 below `CLUST_RSRVD & CLUST16_MASK`, 65526 clusters, where section 3.5 makes 65525 clusters FAT32 |
+
+The variant margin is the read-back's alone. The checker's verdict is the
+evidence that a threshold volume's tables are the ones its variant
+requires; a margin for the checker would excuse every diagnostic on the
+very volumes whose variant is easiest to get wrong. A checker that departs
+from section 3.5 is documented exactly instead, as FreeBSD's is. The
+read-back keeps the margin because the checker, which has none, still
+judges those volumes' tables where it reads them: `fsck.fat` reads every
+threshold volume fsimg creates. On a host whose only checker is
+`fsck_msdosfs`, both its exception and the margin apply to a volume of
+exactly 4085 or 65525 clusters, so there that host judges only the boot
+sector, the checks `readboot` makes before it decides the variant, and at
+65525 not even all of those: its one FSInfo warning covers every FSInfo
+signature, so a defect in any of them is excused there. Its other
+diagnostics at 4085, such as a Phase 2 directory problem, are excused with
+the misread table. Such a host judges every other count in
+full, and a host with `fsck.fat` judges those two as well.
 
 ## Runner
 
@@ -998,14 +1062,20 @@ rule families, and would then stay optional and outside CI.
 
 | Profile | Entry point | Contents | Target |
 | --- | --- | --- | --- |
-| `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness through fsimg: a valid one or one of a `must_accept` rule through every reading stage, and one of any other policy through the first stage that checks its rule; 100-300 PropCheck examples, of which a sample of a few per variant runs fsimg; a few trees mtools populates and the formatter base of each variant, through every reading stage; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
+| `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness within its ceilings through fsimg: a valid one or one of a `must_accept` rule through every reading stage, and one of any other policy through the first stage that checks its rule; 100-300 PropCheck examples, of which a sample of a few per variant runs fsimg; a few trees mtools populates and the formatter base of each variant, through every reading stage; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
 | `nightly` | `make check-spec-extended` | Thousands of random examples, deterministic witnesses through every stage, 50-150 oracle cross-checks, 150 trees mtools populates, class C cases | 10-30 min |
 | `deep` | `make check-spec-deep` | Large volumes, broad mutation matrices, every oracle on every case | Explicit opt-in |
 
 The budgets are targets, which measurement adjusts. Every profile sets ceilings
-on image capacity, file count, path depth, memory, scratch, extracted bytes and
-per-case run time, and the number of random draws and the sample of them that
-runs fsimg; `profile.rb` holds their values. The runner passes the ceilings to
+on image capacity, file count, path depth, memory, scratch, extracted bytes,
+the file content of a valid creation witness, which bounds only the
+witness generator, and per-case run time, and the
+number of random draws and the sample of them that runs fsimg; `profile.rb`
+holds their values. A FAT volume stores no holes, so extraction writes a
+created tree's every byte to the host, and the read-back holds each file
+whole; the content ceiling keeps a witness such as the 32 MiB file at the
+automatic FAT16 margin out of `quick`, whose output ceiling bounds sparse
+volumes instead. The runner passes the ceilings to
 fsimg as `-m` and `-l` values, and the generators and the recipe loader keep
 within them. The `path` ceiling leaves room under the 1024-byte `PATH_MAX` of
 macOS for the case directory's own path. Fuzzing stays in
@@ -1046,7 +1116,8 @@ It keeps these states distinct:
 * base accepted by its formatter, or a geometry the tool does not support;
 * case run, or a host skip because the host cannot hold its tree or its
   tools did not build its image as its recipe states;
-* oracle agrees, disagrees, is not applicable or is unavailable;
+* oracle agrees, disagrees, is excused by a named exception, is not
+  applicable or is unavailable;
 * run confined by a sandbox or not.
 
 A declared rule never counts as covered until fsimg has run its cases, and a

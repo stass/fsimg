@@ -66,9 +66,12 @@ module FsimgSpec
       # harness's fault, a FixtureError. The tree judges fsimg only once
       # mtools wrote it, its read-back reproduced it and the checker did not
       # refuse the image; otherwise mtools did not write the tree the recipe
-      # states, and the case is a HostSkip naming why. The oracles observed
-      # the very bytes the case reads, unmutated, when the base was built,
-      # so those observations are the case's.
+      # states, and the case is a HostSkip naming why. The read-back must
+      # agree, since an excused one does not show that mtools wrote the
+      # tree, while an excused checker refused nothing: its defect is no
+      # fault of the image (specs/design-spec-testing.md#oracle-exceptions).
+      # The oracles observed the very bytes the case reads, unmutated, when
+      # the base was built, so those observations are the case's.
       def populated(base, id:, random_seed: nil)
         fixture = begin
           Bases.materialize(base, cache: @cache, shell: @shell, ceilings: @ceilings)
@@ -188,11 +191,11 @@ module FsimgSpec
       # source tree, written through the funnel and walked back, stands for
       # them, since CaseDirectory makes a tree the host stores under other
       # names a host skip. The oracles read the image create wrote, and
-      # their read-back gives a verdict. The known tree, which hashes every
-      # file, is built only once create has accepted, never to classify the
-      # case: a file create must refuse may be one past FAT's 4 GiB. A
-      # source create must accept has a planned volume (Sizing.plan), whose
-      # layout the created image must have.
+      # their checker and read-back give a verdict. The known tree, which
+      # hashes every file, is built only once create has accepted, never
+      # to classify the case: a file create must refuse may be one past
+      # FAT's 4 GiB. A source create must accept has a planned volume
+      # (Sizing.plan), whose layout the created image must have.
       def creation(recipe)
         tree = recipe.source.tree
         source = SourceModel.new(format: recipe.format, settings: recipe.source.settings, tree:)
@@ -209,13 +212,17 @@ module FsimgSpec
       end
 
       # The oracles' hook for the image fsimg created, whose model the
-      # created hook decoded; nil when no oracle runs.
+      # created hook decoded; nil when no oracle runs. A disagreement of
+      # the checker or the read-back that no exception excuses fails the
+      # case (specs/design-spec-testing.md#independence-and-oracles).
       def created_oracles
         return nil unless @shell
 
         lambda do |directory, model|
           observations = Oracles.observe(@shell, image: Runner::CREATED, chdir: directory, model:)
-          Observed.new(observations:, problem: Oracles.read_back_problem(observations, model))
+          disagreements = Oracles.disagreements(observations)
+          Observed.new(observations:,
+                       problem: disagreements.empty? ? nil : "the oracles disagree with the created image: #{disagreements.join("; ")}")
         end
       end
 
