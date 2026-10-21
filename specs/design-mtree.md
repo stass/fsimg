@@ -463,8 +463,8 @@ The image depends on the manifest's decoded entries, the content bytes and
 the options. The order of lines, the choice of relative or full form, the
 use of `/set`, continuation and comments change nothing, because every form
 yields the same records and the catalog sorts them. Reversing the lines of
-a manifest yields byte-identical output, which the harness uses as it uses
-`source-reversed/`. Generated content is the same on every host. The
+a manifest yields byte-identical output, which is the harness's
+reproducibility check. Generated content is the same on every host. The
 manifest the extractor writes depends on the image, the selection and the
 wall-offset interpretation, not on the host.
 

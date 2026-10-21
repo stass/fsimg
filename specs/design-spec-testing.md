@@ -47,8 +47,9 @@ hand-written expectation.
    applicable rule. The result is the set of violations, each a rule and the
    scope that must find it, and the scopes the model could not decode
    completely. The violations' policies give the allowed outcome at each stage.
-4. **Execution.** The runner writes the image into a fresh case directory,
-   executes the stages under fixed bounds and classifies each outcome.
+4. **Execution.** The runner writes the image, or a creation case's manifest,
+   into a fresh case directory, executes the stages under fixed bounds and
+   classifies each outcome.
 5. **Comparison.** Outcomes are compared with the expectation, the records of
    accepting stages with the model, and the host state with the safety checks.
    Independent tools' observations are recorded.
@@ -246,24 +247,42 @@ or the transformation is wrong. fsimg must then produce the same records for
 both.
 
 A **creation case** is a file tree and a set of creation settings, and `create`
-always runs with `-R`. The harness writes the tree into `source/` through the
-[name funnel](#host-names) and classifies the tree it walks back, not the
-recipe. Rules with scope `input` state the domain of settings and source trees
-and the writer's layout policy, evaluated over a **source model** of the
-settings and the walked tree: the setting domains, name validity,
-case-equivalent siblings and file size. For example, automatic sizing keeps at
-least 16 clusters away from the FAT variant thresholds while `-s` permits the
-exact boundary counts, and the writer refuses a source name that is not a valid
-FAT name or that is case-equivalent to a sibling. A creation case carries two
-classifications: `create` follows the source model's, and the reading stages
-follow the created image's, which the harness decodes once `create` accepts.
-The created image is classified like any other and must violate no rule,
+always runs with `-R`. The harness writes the tree as an mtree(5)
+[manifest](design-mtree.md), `source.mtree`, and passes it to `create` as the
+`@source.mtree` operand. Each entry is one full-form line, `./path` with
+every keyword on the line and no `/set` or `..`, so the manifest holds its
+meaning in any line order. Names are vis(3)-encoded bytes and file bytes are
+generated (`fsimg.content=zero|seeded|positional`, `fsimg.seed`,
+`fsimg.holes`, and the `sha256digest` the harness computes), so the tree
+never touches the host filesystem: a case with case-equivalent siblings or
+an NFC/NFD pair runs on every host, and no source tree is written. The
+harness classifies the tree it wrote. Rules with scope `input` state the
+domain of settings and source trees and the writer's layout policy,
+evaluated over a **source model** of the settings and the recipe's tree: the
+setting domains, name validity, case-equivalent siblings and file size. For
+example, automatic sizing keeps at least 16 clusters away from the FAT
+variant thresholds while `-s` permits the exact boundary counts, and the
+writer refuses a source name that is not a valid FAT name or that is
+case-equivalent to a sibling. A creation case carries two classifications:
+`create` follows the source model's, and the reading stages follow the
+created image's, which the harness decodes once `create` accepts. The
+created image is classified like any other and must violate no rule,
 including a writer `profile` rule that every byte outside allocated metadata
 and file content is zero. The [oracles](#independence-and-oracles) then read
-the image, `mcopy -s` with a verdict, and a second `create` in the same case
-reads the same tree written into `source-reversed/` in reverse order and
-writes `out/reversed.img`, whose bytes must equal `out/created.img`. fsimg's
-reading stages then run on the created image as secondary evidence.
+the image, the mtools read-back with a verdict, and a second `create` in the
+same case reads `source-reversed.mtree`, the same lines in reverse order,
+and writes `out/reversed.img`, whose bytes must equal `out/created.img`.
+fsimg's reading stages then run on the created image as secondary evidence.
+
+Two deterministic **host-tree creation cases** per run, one valid and one
+`input` witness, keep the host scanner, the sandbox and the worker protocol
+covered end to end: the harness writes their trees into `source/` through
+the [name funnel](#host-names) and `create` reads `-C source .`. The valid
+tree holds a nested directory, an empty file, a multi-cluster file, a
+short name and a long Unicode name; the witness holds a trailing-dot name,
+which the scanner must refuse with `FSIMG_EINVAL` from a worker. A host
+that cannot hold one of these trees makes the case a host skip. Every other
+creation case, including every drawn tree, is a manifest case.
 
 ### Recipes
 
@@ -303,10 +322,14 @@ case](#reports-and-regressions) runs all of them. A reading case carries
 `base`, `base_sha256`, `tool_versions` and `mutations`, plus an optional
 `forced_format` passed to every reading stage; a creation case carries a
 `source` object holding the `tree` and the `settings` instead. A tree is a list
-of entries, each with a relative `path`, a `type` of `file` or `directory`, a
-`size` and a `seed`. The harness generates each file's bytes from its seed and
-offset with its own function, never with PropCheck's random source, so a tree
-stays stable across upgrades. `kind` names the case class: `valid`, `targeted`
+of entries, each with a relative `path` and a `type` of `file` or `directory`;
+a file also has a `size` and a `content` of `zero`, `seeded` or `positional`,
+the last two with a `seed` and optional `holes`, the manifest's generated
+[content](design-mtree.md#generated-bytes) in the recipe's own fields. The
+harness generates each file's bytes from its seed and offset with its own
+function, never with PropCheck's random source, so a tree stays stable across
+upgrades, and the same function gives the `sha256digest` of each manifest
+line. `kind` names the case class: `valid`, `targeted`
 or `malformed`. `expected` maps each stage to its allowed outcomes separated by
 `|`: `accept`, `reject:STATUS` for each allowed status, or `reject:*` for any
 verdict status; `unclassified` alone marks a stage that checks a scope the
@@ -335,7 +358,10 @@ setting that is not an integer; a parameter or setting name that is not
 `[a-z][a-z0-9._-]*` of at most 64 bytes; more than 256 parameters, settings or
 tools; an unknown tree entry type; a tree path that is empty, is absolute, or
 contains `..`, `.`, an empty component or NUL, that repeats, or whose parent is
-not a directory entry of the same tree; a directory entry with a size or seed;
+not a directory entry of the same tree; a directory entry with a size,
+content, seed or holes, or a file entry whose seed or holes disagree with
+its content kind as the manifest's [keyword
+table](design-mtree.md#keywords) states;
 an unknown `kind`, or an `intended_violation` named by a case that is not
 targeted or missing from one that is; an `expected` that does not name exactly
 the `stages`; a reading case that runs `create` or a creation case that does
@@ -404,10 +430,10 @@ macOS and Linux, or `newfs_msdos` on FreeBSD; their output is a **formatter
 base**. A typical command is
 `mkfs.fat -C --invariant -i 12345678 -F 32 -s 1 base.img 65536`, with the size
 in 1024-byte blocks. A tree is populated into an empty base of either builder
-with `mmd` and `mcopy -m` from source files with fixed times. The [name
-funnel](#host-names) writes those files, like a creation case's source tree,
-into a directory of the build's own, `test/spec-cache/<key>.<hex>.tmp.src/`,
-which is removed once the base is built. The manifest records the read-only
+with `mmd` and `mcopy - ::/path`, each file's bytes generated from its seed
+and piped to mtools' stdin, so population writes no host file; with
+`SOURCE_DATE_EPOCH` set, mtools stamps every entry with the time the tree
+carries. The manifest records the read-only
 checker (`fsck.fat -n` or `fsck_msdosfs -n`) and an `mdir` listing. Formatter
 bases test both the model and fsimg against images neither produced, and an
 mtools-populated builder base tests them against a directory tree neither
@@ -463,10 +489,13 @@ No oracle overrides a published rule. A checker can flag conservative
 incompatibilities or tolerate errors, so where the specification is clear, it
 decides, and `fsck -n`, `mdir` and fatcat are always recorded only, as are
 checker diagnostics on an invalid image. Disagreements are recorded per tool,
-never resolved by majority. The one oracle with a verdict is `mcopy -s` on an
-image fsimg created: it must reproduce the source tree in path, type, size and
-SHA-256, because that is fsimg's own creation contract rather than an
-interpretation of the format. A mismatch fails the case, except when the
+never resolved by majority. The one oracle with a verdict is the **mtools
+read-back** of an image fsimg created: `mdir -b -/ -a ::/` lists every path,
+a directory with a trailing `/`, and `mtype` streams each file's bytes to
+stdout, where the harness hashes them. It must reproduce the source tree in
+path, type, size and SHA-256, because that is fsimg's own creation contract
+rather than an interpretation of the format. A mismatch fails the case,
+except when the
 image's cluster count lies within 16 clusters of a variant threshold (4085 or
 65525), where some implementations disagree on the variant; there it is
 recorded only. `fsimg c` followed by fsimg's own reading stages is never
@@ -488,11 +517,15 @@ and home paths.
 | `ls` | `fsimg t --json -f image.img` |
 | `extract` | `fsimg x --json -E -f image.img -C dest` |
 | `verify`, `verify-deep` | `fsimg W --json [-d] -f image.img` |
-| `create` | `fsimg c --json -R -F FORMAT [-s BYTES] [-o sector=N] [-o cluster=N] -f out/created.img -C source .` |
+| `create` | `fsimg c --json -R -F FORMAT [-s BYTES] [-o sector=N] [-o cluster=N] -f out/created.img @source.mtree`, or `-C source .` for a host-tree case |
 
-A reading stage adds `-F FORMAT` when the recipe forces a format. The
-extraction stage creates `dest` empty with mode 0700 before it runs, since
-`-E` requires an empty private directory. Every
+The commands are the [command-line contract](design-cli.md)'s. `t` lists
+subtrees by default. The extraction stage creates `dest` empty with mode
+0700 before it runs, since `x -E` extracts only into an empty private
+directory. A creation case names its manifest as an `@` operand, as
+[manifest import](design-mtree.md#command-line) defines; a host-tree case
+stores the contents of `source/` at the image root. A reading stage adds
+`-F FORMAT` when the recipe forces a format. Every
 invocation passes the profile's ceilings: `-m` with the memory ceiling, `-l`
 values for `seconds`, `entries`, `depth`, `path`, `output`, `scratch` and
 `fds`, and `-T scratch`.
@@ -532,8 +565,9 @@ Nothing fsimg writes into a case directory can therefore configure an oracle.
 mtools still reads a system `/etc/mtools.conf`; the
 harness accepts it as part of the host's mtools, and names images only with
 `-i`, so the file cannot redirect a drive to a device. Every argument built
-from a name starts with a fixed prefix, such as `source/` or `::/`, so a
-leading `-` is never read as an option.
+from a name starts with the fixed prefix `::/`, so a leading `-` is never
+read as an option; mtools reads file bytes from stdin and writes them to
+stdout, so no oracle names or creates a host file.
 
 Each profile's results directory holds only these names, and every case and
 failure directory in it is created exclusively. The case phase checks every
@@ -553,8 +587,12 @@ test/spec-results/<profile>/
 
 Before any case, a **preflight** establishes the host in `preflight/`, which it
 removes when it finishes. A valid builder base runs through every reading
-stage, and one valid creation runs, with the run's options; any failure stops
-the run with `harness_error`. Every later invocation must report the
+stage, and one valid creation runs, with the run's options, from a manifest
+whose names hold a space, `#`, `\` and a non-ASCII character; any failure
+stops the run with `harness_error`. A manifest writer that mis-encodes a
+name therefore stops the run, instead of making fsimg's refusal of the
+manifest, `FSIMG_EINVAL` like a refused setting, read as a case failure.
+Every later invocation must report the
 preflight's sandbox status, except where the stage may have ended before a
 worker reported its confinement: the coordinator reports `unknown` until then.
 Two kinds of outcome may report `unknown`: a `create` rejection, since
@@ -565,10 +603,9 @@ repeat the preflight's status.
 The preflight also checks:
 
 * that the longest tree root the runner walks by path, a case's `dest/` or
-  `source/` with a 128-byte id or a population tree
-  `test/spec-cache/<key>.<hex>.tmp.src/`, plus the profile's `path` ceiling,
-  stays below the host's `PATH_MAX`, because the runner walks by path while
-  fsimg works descriptor-relative;
+  `source/` with a 128-byte id, plus the profile's `path` ceiling, stays
+  below the host's `PATH_MAX`, because the runner walks by path while fsimg
+  works descriptor-relative;
 * that the soft `RLIMIT_NOFILE` fsimg inherits is at least the `fds` limit;
 * that `trials/` and `cases/` report the same `st_dev`;
 * when oracle confinement is configured, that a fixed command run through it
@@ -639,32 +676,41 @@ Each case runs in a fresh directory:
 
 ```text
 cases/<id>/      working directory and fsimg's HOME; the only place tools write
-  image.img      the case image; no reading stage writes it
+  image.img      the case image, a sparse copy; no reading stage writes it
   scratch/       -T and TMPDIR
   dest/          the extract destination; absent before extract
-  source/        the creation input tree
-  source-reversed/  the same tree in reverse order, for the second create
+  source.mtree   the creation manifest
+  source-reversed.mtree  the same lines in reverse order, for the second create
+  source/        a host-tree creation case's input tree
   out/           created.img, reversed.img and their staging
-  oracle/        files that independent tools write; fsimg adds nothing
   STAGE.stdout   bounded captures, one pair per stage
   STAGE.stderr
 ```
+
+These, the name trials and the cache are all the harness writes to the host
+filesystem: expected digests come from seeds in memory, and the oracles read
+from and write to pipes.
 
 After every stage the runner checks the following:
 
 * the image is the same regular file with one link: its inode, size,
   modification time and change time are unchanged;
 * the case directory holds only the names above that the case and the stages
-  run so far allow: `image.img` or `source/`, `dest/` only once extract has
-  run, and the captures of the stages run so far, each of its type;
-* `dest/`, walked with `lstat` without following links, holds only directories
-  and regular files with one link, whose total logical size stays within the
-  `output` limit. Each entry records its path, type and size, and each file
-  its SHA-256 when the total is within the limit;
+  run so far allow: `image.img`, or the manifests or `source/`, `dest/`
+  only once extract has run, and the captures of the stages run so far,
+  each of its type; the manifests are the bytes the harness wrote;
+* `dest/`, walked with `lstat` without following links, holds only
+  directories and regular files with one link, whose total logical size
+  stays within the `output` limit. Each entry records its path, type and
+  size, and each file its SHA-256 when the total is within the limit;
 * `scratch/` is empty and `out/` holds nothing beyond a creation case's
   `created.img` and `reversed.img`, except a path the error record names in
-  `retained_scratch` or `retained_output`, and `oracle/` gained nothing;
+  `retained_scratch` or `retained_output`;
 * no leftover was recorded in step 4.
+
+The walk of the case directory these checks make also counts the files it
+holds and sums their logical sizes, which the stage result records as its
+disk footprint beside its timings.
 
 A failed check fails the case under every policy and ends it: no further stage
 or oracle runs on it. The runner gives fsimg and every oracle only paths inside
@@ -700,10 +746,11 @@ violates a `destination` rule with status `FSIMG_EEXISTS`; one answered
 nests, so path traversal and path length cannot arise. Answers are cached for
 the run by the sibling set's bytes, so a repeated set costs no trial. A case
 with no trial answers, one that does not extract or whose tree is unknown,
-leaves the `destination` scope unclassified. For a creation case, and for the
-files that populate a base, the funnel writes the source tree and the harness
-walks it back; the case is classified against the walked tree, which stands
-for the created image's name trials.
+leaves the `destination` scope unclassified. A manifest creation case's tree
+reaches fsimg without touching the host, so the funnel does not apply to it
+and its extract stage is classified by name trials like any other case's.
+The funnel writes only the host-tree creation cases' trees, which the
+harness walks back and compares with the recipe.
 
 If a listing or walk differs from the names the funnel created, because the
 host refused a name or stored another one (HFS+ normalization, msdosfs trailing
@@ -837,9 +884,8 @@ that breaks either is a generator defect. A drawn tree, and a witness of
 case-equivalent siblings, draw only characters whose simple and full uppercase
 mappings agree, so Ruby's `String#upcase` and fsimg's simple-uppercase table
 decide alike. A reading witness of case-equivalent siblings runs `ls` alone and
-never reaches the host; a creation witness writes its source through the
-funnel, which on a case-insensitive host filesystem answers `EEXIST` for the
-second sibling, so the case is a host skip there.
+never reaches the host; a creation witness names both siblings in its
+manifest, so it runs on every host and `create` must refuse them.
 
 Shrinking starts with PropCheck's shrinker on recipes. Recipe shrinkers then
 remove unrelated files and directories, shrink files and chains, reduce a cycle
@@ -886,7 +932,7 @@ within them. The `path` ceiling leaves room under the 1024-byte `PATH_MAX` of
 macOS for the case directory's own path. Fuzzing stays in
 `check-fuzz`. `bin/export-seeds`, run as `test/spec.sh
 --export-seeds=DIRECTORY`, gives it a seed per deterministic invalid witness
-and per promoted case, except a case that forces its format with `-t`: the
+and per promoted case, except a case that forces its format with `-F`: the
 fuzzer detects the format itself and cannot force one. A seed is the case's
 image when it fits the fuzzer's 3 MiB input, since some cases test the image's
 length itself; a larger image is cut after its last byte that is not zero,
@@ -941,7 +987,8 @@ directory, created exclusively like a case directory: the recipe with its
 classification and expectation (`case.json`), the base recipe, image hash and
 tool versions (`fixture.json`; a creation case has no base and records the
 tool versions alone), the bounded captures, the oracle observations per tool,
-the outcome, timings and safety checks of each stage (`result.json`), the image
+the outcome, timings, disk footprint and safety checks of each stage
+(`result.json`), the image
 when it is sparse and at most 64 MiB logical, and a `replay.sh`, run as `sh
 PATH/replay.sh` from the build directory, that passes the `case.json` beside it
 and the recording profile to `test/spec.sh --replay`. `result.json`, written
@@ -949,7 +996,7 @@ last, names the profile too. A case that could not be classified has no recipe
 to replay, and its record holds `result.json` alone. `bin/replay` rebuilds and
 reruns one case under the profile's ceilings, re-deriving its classification
 and expectation from the current rules: a reading case rebuilds its base, and a
-creation case writes its source tree and needs fsimg alone. Its exit status
+creation case writes its manifest and needs fsimg alone. Its exit status
 answers `git bisect run`: 0 when fsimg passes the case and 3 when it fails it, a status Ruby never
 exits with by itself; 125, untestable, when this revision cannot judge it (a
 host skip, a harness error such as a drifted promoted case or a base that
