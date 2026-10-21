@@ -595,9 +595,52 @@ claim_name(uint64_t claim)
 }
 
 /*
+ * The container line of the image report: its name, the disk it yields,
+ * its chunk count and encodings, and its identifier when it has one.
+ */
+static void
+container_report(fsimg_cli_display_t *display, const unsigned char *raw)
+{
+	static const unsigned char nil[16];
+	const char *container = (const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER;
+	uint64_t chunks = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHUNKS);
+
+	if (display->options->json) {
+		append(display, ",\"container\":");
+		string_value(display, container);
+		append(display, ",\"container_chunks\":");
+		uint_value(display, chunks);
+		append(display, ",\"container_codecs\":");
+		string_value(display, (const char *)raw + FSIMG_WIRE_IMAGE_CODECS);
+		append(display, ",\"container_guid\":");
+		if (bcmp(raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID, nil, sizeof(nil)) != 0) {
+			append(display, "\"");
+			uuid_value(display, raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID);
+			append(display, "\"");
+		} else
+			append(display, "null");
+		return;
+	}
+	append(display, "Container:    ");
+	prose(display, container);
+	append(display, ", ");
+	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK));
+	append(display, " disk in %llu chunk%s (", (unsigned long long)chunks,
+	    chunks == 1 ? "" : "s");
+	prose(display, (const char *)raw + FSIMG_WIRE_IMAGE_CODECS);
+	append(display, ")");
+	if (bcmp(raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID, nil, sizeof(nil)) != 0) {
+		append(display, ", ID ");
+		uuid_value(display, raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID);
+	}
+	append(display, "\n");
+}
+
+/*
  * The layers around the volume, from the IMAGE record: the stack, the
- * compression and, with a scheme, the disk and its table. JSON emits one
- * "stack" record; a disk without a selected volume carries the reason.
+ * compression, the container and, with a scheme, the disk and its table.
+ * JSON emits one "stack" record; a disk without a selected volume carries
+ * the reason.
  */
 static void
 image_report(fsimg_cli_display_t *display, const unsigned char *raw)
@@ -607,11 +650,18 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	uint64_t flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
 	uint64_t selected = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
 	bool gpt = strcmp(scheme, "gpt") == 0;
+	bool container = raw[FSIMG_WIRE_IMAGE_CONTAINER] != '\0';
 
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"stack\",\"stack\":");
 		string_value(display, stack);
-		append(display, ",\"compression\":null,\"scheme\":");
+		append(display, ",\"compression\":null");
+		if (container)
+			container_report(display, raw);
+		else
+			append(display, ",\"container\":null,\"container_chunks\":null,"
+			    "\"container_codecs\":null,\"container_guid\":null");
+		append(display, ",\"scheme\":");
 		if (scheme[0] != '\0')
 			string_value(display, scheme);
 		else
@@ -654,6 +704,8 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "Stack:        ");
 	prose(display, stack[0] != '\0' ? stack : "none");
 	append(display, "\nCompression:  none\n");
+	if (container)
+		container_report(display, raw);
 	if (scheme[0] == '\0')
 		return;
 	append(display, "Scheme:       %s, %llu-byte sectors\nDisk size:    ",
@@ -992,13 +1044,16 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 	    "initialized_bytes_read", "allocated_clusters", "free_clusters", "bad_clusters" };
 	const unsigned char *image = display->image;
 	const char *scheme = (const char *)image + FSIMG_WIRE_IMAGE_SCHEME;
+	const char *container_name = (const char *)image + FSIMG_WIRE_IMAGE_CONTAINER;
 	uint64_t checked = fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_CHECKED);
 	uint64_t selected = fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_SELECTED);
-	bool table;
+	bool layers, table, container;
 
 	/* A partition table is verified only when the selection read it. */
-	table = (fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_FLAGS) &
-	    FSIMG_WIRE_IMAGE_VERIFIED) != 0 && scheme[0] != '\0';
+	layers = (fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_FLAGS) &
+	    FSIMG_WIRE_IMAGE_VERIFIED) != 0;
+	table = layers && scheme[0] != '\0';
+	container = layers && container_name[0] != '\0';
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"verify\",\"complete\":true,\"validation_scope\":\"%s\"",
 		    verified_scope_name(display->scope));
@@ -1006,6 +1061,11 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, ",\"%s\":", keys[i]);
 			uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES + i * 8));
 		}
+		append(display, ",\"container\":");
+		if (container)
+			string_value(display, container_name);
+		else
+			append(display, "null");
 		append(display, ",\"scheme\":");
 		if (table)
 			string_value(display, scheme);
@@ -1024,10 +1084,15 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 		append(display, "}\n");
 	} else {
 		path_excerpt(display, display->options->image);
-		/* "image": [GPT partition table (2 partitions) and partition 1]
-		 * filesystem structure verified (...)
+		/* "image": [dmg container,] [GPT partition table (2 partitions)
+		 * and partition 1] filesystem structure verified (...)
 		 */
 		append(display, ":");
+		if (container) {
+			append(display, " ");
+			prose(display, container_name);
+			append(display, " container,");
+		}
 		if (table)
 			append(display, " %s partition table (%llu partition%s) and partition %llu",
 			    strcmp(scheme, "gpt") == 0 ? "GPT" : "MBR",
@@ -1086,8 +1151,10 @@ format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 	}
 }
 
-/* One scheme, container or compression: its kind, support and the keys
- * of its settings, which -o qualifies with its name.
+/* One scheme, container or compression: its kind, support, the codecs its
+ * chunks use and the keys of its settings, which -o qualifies with its name.
+ * A layer that depends on a codec library names that library's version on a
+ * second line, since compressed bytes reproduce only under one version.
  */
 static void
 layer(fsimg_cli_display_t *display, const fsimg_layer_info_t *info)
@@ -1118,14 +1185,27 @@ layer(fsimg_cli_display_t *display, const fsimg_layer_info_t *info)
 			append(display, "%s\"%.*s\"", key == info->settings ? "" : ",",
 			    (int)length, key);
 		}
-		append(display, "]}\n");
+		append(display, "],\"codecs\":");
+		if (info->codecs[0] != '\0')
+			string_value(display, info->codecs);
+		else
+			append(display, "null");
+		append(display, ",\"codec_version\":");
+		if (info->codec_version[0] != '\0')
+			string_value(display, info->codec_version);
+		else
+			append(display, "null");
+		append(display, "}\n");
 		return;
 	}
-	append(display, "%-5s  %-11s  %-4s  %-5s  %-6s  %s\n", info->name, kind,
-	    (info->capabilities & FSIMG_CAP_READ) != 0 ? "yes" : "no",
+	append(display, "%-5s  %-11s  %-4s  %-5s  %-6s  %-13s  %s\n", info->name,
+	    kind, (info->capabilities & FSIMG_CAP_READ) != 0 ? "yes" : "no",
 	    (info->capabilities & FSIMG_CAP_WRITE) != 0 ? "yes" : "no",
 	    (info->capabilities & FSIMG_CAP_VERIFY) != 0 ? "yes" : "no",
+	    info->codecs[0] != '\0' ? info->codecs : "-",
 	    info->settings[0] != '\0' ? info->settings : "-");
+	if (info->codec_version[0] != '\0')
+		append(display, "%-5s  %-11s  %s\n", "", "", info->codec_version);
 }
 
 static void
@@ -1548,7 +1628,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 			if (status == FSIMG_OK) {
 				if (first && !options->json)
 					append(display, "\nLayer  Kind         Read  Write  "
-					    "Verify  Settings\n");
+					    "Verify  Codecs         Settings\n");
 				layer(display, &layer_info);
 				return (finish_span(display, false, text, error));
 			}

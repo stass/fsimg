@@ -42,6 +42,16 @@ selects one; `--offset=`/`--length=` bypass the table. `fsimg i` lists the
 table and marks the selected partition, and `fsimg W` checks the table with
 the volume.
 
+DMG, fixed VHD and Android sparse image containers are read the same way:
+`fsimg xf installer.dmg` unwraps the DMG, the GPT inside it and the volume
+inside that. DMG chunks may be stored, zero or zlib-compressed, as `hdiutil`
+writes UDRO and UDZO images; the koly trailer, the property list and every
+block table are validated before any chunk is used, and decoded chunks are
+cached four at a time within the memory limit, the decoding counted as
+work. `fsimg W` checks the container's checksums, and `W -d` decodes every
+chunk. Other DMG compressions, multi-segment DMGs and dynamic VHDs are
+refused as unsupported.
+
 Creating with a scheme in the stack writes a disk: `fsimg cf disk.img -F
 fat32/gpt -C esp .` puts the volume at 1 MiB as the disk's one partition,
 typed and named after its filesystem unless `-o gpt:type=`, `gpt:name=`,
@@ -49,7 +59,7 @@ typed and named after its filesystem unless `-o gpt:type=`, `gpt:name=`,
 fixed by `gpt:disk=`/`mbr:disk=` and 4096-byte GPT sectors on request.
 Identifiers are random, or under `-R` derived from the epoch. The library
 also wraps a raw volume in a scheme, unwraps a partition back to its raw
-bytes, and composes several volumes into one disk. Containers and
+bytes, and composes several volumes into one disk. Writing containers and
 compression are not implemented.
 
 [System qualification](docs/qualification.md) includes ten-million-file format
@@ -162,8 +172,9 @@ fsimg xf new.img
 
 See [build and validation](docs/build.md),
 [platform evidence](docs/platform-evidence.md), and the
-[specifications](specs/README.md). The ordinary library requires only libc and
-host OS APIs. Development tests run unprivileged in disposable fixtures.
+[specifications](specs/README.md). The ordinary library requires only libc,
+host OS APIs and the system zlib, which DMG chunks need and which is never
+vendored. Development tests run unprivileged in disposable fixtures.
 
 Project-owned files carry SPDX BSD-2-Clause notices and contributor copyright;
 [LICENSE](LICENSE) contains the terms. Autotools generates its own build support

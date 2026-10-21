@@ -54,7 +54,8 @@ def self_test(pkg_config):
         spelled_prefix = str(prefix.parent) + "//" + prefix.name
         replacements = {"@prefix@": spelled_prefix, "@exec_prefix@": "${prefix}",
                         "@libdir@": "${exec_prefix}/lib", "@includedir@": "${prefix}/include",
-                        "@PACKAGE_VERSION@": "1.2.3"}
+                        "@PACKAGE_VERSION@": "1.2.3",
+                        "@ZLIB_LIBS@": "-lz"}
         for placeholder, value in replacements.items():
             good = good.replace(placeholder, value)
         metadata.write_text(good)

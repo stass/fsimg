@@ -496,12 +496,15 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 }
 
 /*
- * The disk is the input file the parent opened, so its size must match
- * exactly. Without a scheme every table field is zero; with one, the
- * sector size is GPT's or MBR's and the selection lies in the table.
+ * Without a container the disk is the input file the parent opened, so
+ * its size must match exactly, and every container field is zero; a
+ * container is a registered one, and its disk is the length its tables
+ * declare, which bounds what follows. Without a scheme every table field
+ * is zero; with one, the sector size is GPT's or MBR's and the selection
+ * lies in the table.
  */
 bool
-fsimg_wire_image_frame_valid(const fsimg_frame_t *frame, uint64_t disk_bytes)
+fsimg_wire_image_frame_valid(const fsimg_frame_t *frame, uint64_t file_bytes)
 {
 	const unsigned char *raw = frame->payload;
 	const fsimg_layer_t *layer;
@@ -517,14 +520,27 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame, uint64_t disk_bytes)
 	checked = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHECKED);
 	if (memchr(raw + FSIMG_WIRE_IMAGE_STACK, '\0', FSIMG_WIRE_IMAGE_STACK_BYTES) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_SCHEME, '\0', 16) == NULL ||
+	    memchr(raw + FSIMG_WIRE_IMAGE_CONTAINER, '\0', 16) == NULL ||
+	    memchr(raw + FSIMG_WIRE_IMAGE_CODECS, '\0',
+	    FSIMG_WIRE_IMAGE_CODECS_BYTES) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_REASON, '\0',
 	    FSIMG_WIRE_IMAGE_REASON_BYTES) == NULL)
 		return (false);
 	if ((flags & ~(uint64_t)(FSIMG_WIRE_IMAGE_UNSELECTED |
 	    FSIMG_WIRE_IMAGE_VERIFIED)) != 0 ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) != disk_bytes ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID) > UINT32_MAX)
 		return (false);
+	if (raw[FSIMG_WIRE_IMAGE_CONTAINER] == '\0') {
+		if (fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) != file_bytes ||
+		    raw[FSIMG_WIRE_IMAGE_CODECS] != '\0' ||
+		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHUNKS) != 0 ||
+		    !bytes_zero(raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID, 16))
+			return (false);
+	} else {
+		layer = fsimg_layer_find((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER);
+		if (layer == NULL || layer->container == NULL)
+			return (false);
+	}
 	/* A reason exactly when no volume was selected, and then no slot. */
 	if ((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 ?
 	    raw[FSIMG_WIRE_IMAGE_REASON] == '\0' || selected != 0 :

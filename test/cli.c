@@ -429,6 +429,7 @@ test_stacks(void)
 		{ "fsimg", "-t", "-f", "image", "--partition", "type=bogus", NULL },
 		{ "fsimg", "-t", "-f", "image", "--partition", "label=EFI", NULL },
 		{ "fsimg", "-t", "-f", "image", "-F", "fat32/-", "--partition", "1", NULL },
+		{ "fsimg", "-t", "-f", "image", "-F", "fat32/gpt", "--offset", "1M", NULL },
 		{ "fsimg", "-t", "-f", "image", "-F", "gpt", "-o", "gpt:sector=512",
 		    "--offset", "0", NULL },
 		{ "fsimg", "-cn", "-F", "fat32/gpt", "-o", "gpt:align=1M", ".", NULL },
@@ -455,7 +456,8 @@ test_stacks(void)
 		{ "fsimg", "-cM", "-F", "fat32", "-f", "out.img", ".", NULL },
 		{ "fsimg", "-c", "-F", "fat32", "-f", "-", ".", NULL },
 		{ "fsimg", "-t", "-f", "-", NULL },
-		{ "fsimg", "-t", "-f", "image", "-F", "fat32/-/dmg", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/gpt/dmg", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/-/simg", ".", NULL },
 		{ "fsimg", "-t", "-f", "image", "/a", "/b", NULL },
 		{ "fsimg", "-tz", "-f", "image", NULL },
 		{ "fsimg", "-cn", "-F", "exfat/gpt/vhd", "-o", "gpt:type=esp", ".", NULL },
@@ -480,6 +482,8 @@ test_stacks(void)
 	char *by_type[] = { "fsimg", "-W", "-f", "image", "--partition", "type=0x0c",
 	    NULL };
 	char *by_range[] = { "fsimg", "-i", "-f", "image", "--offset", "1M", NULL };
+	char *container[] = { "fsimg", "-t", "-f", "image", "-F", "fat32/gpt/dmg",
+	    NULL };
 	fsimg_cli_options_t options;
 
 	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
@@ -532,6 +536,11 @@ test_stacks(void)
 	CHECK(parse(by_range, &options) == FSIMG_OK);
 	CHECK(options.request.selector == FSIMG_SELECT_RANGE &&
 	    options.request.offset == 1048576);
+	fsimg_cli_release(&options);
+	/* A forced container is read; only writing one is refused. */
+	CHECK(parse(container, &options) == FSIMG_OK);
+	CHECK(strcmp(options.request.stack.slots[FSIMG_LAYER_CONTAINER].name,
+	    "dmg") == 0);
 	fsimg_cli_release(&options);
 }
 

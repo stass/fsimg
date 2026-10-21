@@ -409,15 +409,23 @@ precision; `-v` with `--json` affects only stderr.
 
 ## Verification, information and formats
 
-`W` checks the supported profile's complete structure; `-d` additionally
-reads initialized payload bytes, and logical zero tails need no backing read.
+`W` checks the layers around the volume, then the supported profile's
+complete structure; `-d` additionally reads initialized payload bytes,
+decoding every container chunk for the container's checksums, and logical
+zero tails need no backing read.
 Verification reports unsupported critical features, corruption, incomplete
 work and resource limits distinctly, and never repairs an image. One human
 result is emitted only after successful worker exit and finalization,
 stating structural or initialized-payload scope.
 
+A byte range (`--offset`, `--length`) never reads a partition table, so it
+conflicts with a scheme named in `-F` as it does with `--partition`; a
+syntax error reports the combination.
+
 `i` reports, in order, the detected or forced stack in `-F` syntax with the
-detected compression; when the stack has a scheme, a partition-table summary
+detected compression; when the stack has a container, the container with
+the length of the disk it holds, its chunk count, the encodings its chunks
+use and its identifier; when the stack has a scheme, a partition-table summary
 with each partition's index, type, name, offset, length and whether it holds
 a supported filesystem, marking the selected one; then the volume: format and
 profile, volume and allocation geometry, label, volume UUID when the format
@@ -430,8 +438,9 @@ triggering an undisclosed scan.
 
 `--formats` reports compiled capabilities: filesystem formats with their
 read, write and verify support, profiles, geometry restrictions and metadata
-fidelity; partition schemes; containers; compressions with the zlib version
-string, since compressed bytes are reproducible only for one zlib; and
+fidelity; partition schemes; containers with the chunk encodings they read;
+containers and compressions that use zlib with its version string, since
+compressed bytes are reproducible only for one zlib; and
 sandbox backends. Availability distinguishes a compiled backend from a usable
 runtime facility, so a sandbox backend appears as compiled and probed. `-v`
 adds detailed restrictions on stderr; `--json` emits one `format` record per

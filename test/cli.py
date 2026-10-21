@@ -2,8 +2,10 @@
 # Copyright (c) 2026, fsimg contributors
 """Exercise the installed command contract through independent JSON decoding."""
 
+import base64
 import json
 import os
+import random
 from pathlib import Path
 import re
 import shutil
@@ -100,7 +102,13 @@ def test_formats(executable, root):
         "simg": "container", "gzip": "compression"}
     assert layers["gpt"]["settings"] == ["sector", "disk", "type", "name", "disk-guid", "guid"]
     assert layers["mbr"]["settings"] == ["disk", "type", "active", "id"]
-    assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 0
+    assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 5
+    assert layers["gzip"]["capabilities"] == 0
+    assert {name: record["codecs"] for name, record in layers.items()} == {
+        "gpt": None, "mbr": None, "dmg": "raw,zero,zlib", "vhd": "raw",
+        "simg": "raw,zero,fill", "gzip": None}
+    assert re.fullmatch(r"zlib [0-9][0-9A-Za-z.-]*", layers["dmg"]["codec_version"])
+    assert layers["vhd"]["codec_version"] is None
     assert layers["vhd"]["suffix"] == ".vhd" and layers["gpt"]["suffix"] is None
     assert all(record["capabilities"] == 7 for record in formats.values())
     assert formats["exfat"]["write_cluster_bytes"][-1] == 32 * 1024 * 1024
@@ -215,7 +223,10 @@ def test_human_help(executable, root):
         assert detail in result.stderr and b"usage:" in result.stderr, (arguments, result.stderr)
         assert b"errno" not in result.stderr and result.stdout == b""
     formats = invoke(executable, root, ["--formats"])
-    assert formats.stdout == (b"Format  Read  Write  Verify\n"
+    # The DMG row is followed by the zlib version fsimg runs against.
+    version = re.search(rb"\n {20}(zlib [0-9][0-9A-Za-z.-]*)\n", formats.stdout)
+    assert version is not None, formats.stdout
+    assert formats.stdout.replace(version.group(0), b"\n", 1) == (b"Format  Read  Write  Verify\n"
                               b"fat12   yes   yes    yes\n"
                               b"fat16   yes   yes    yes\n"
                               b"fat32   yes   yes    yes\n"
@@ -223,14 +234,15 @@ def test_human_help(executable, root):
                               b"qnx6    yes   yes    yes\n"
                               b"qnx4    yes   yes    yes\n"
                               b"\n"
-                              b"Layer  Kind         Read  Write  Verify  Settings\n"
-                              b"gpt    scheme       yes   yes    yes     "
+                              b"Layer  Kind         Read  Write  Verify  Codecs         Settings\n"
+                              b"gpt    scheme       yes   yes    yes     -              "
                               b"sector,disk,type,name,disk-guid,guid\n"
-                              b"mbr    scheme       yes   yes    yes     disk,type,active,id\n"
-                              b"dmg    container    no    no     no      -\n"
-                              b"vhd    container    no    no     no      -\n"
-                              b"simg   container    no    no     no      -\n"
-                              b"gzip   compression  no    no     no      -\n")
+                              b"mbr    scheme       yes   yes    yes     -              "
+                              b"disk,type,active,id\n"
+                              b"dmg    container    yes   no     yes     raw,zero,zlib  -\n"
+                              b"vhd    container    yes   no     yes     raw            -\n"
+                              b"simg   container    yes   no     yes     raw,zero,fill  -\n"
+                              b"gzip   compression  no    no     no      -              -\n")
     assert formats.stderr == b""
     verbose = invoke(executable, root, ["--formats", "-v"])
     assert verbose.stdout == formats.stdout and b"Sandbox backend:" in verbose.stderr
@@ -379,11 +391,12 @@ def test_option_syntax(executable, root):
         (["t", "-f", "human.img", "/nested", "-v"], b"selecting several members is not supported"),
         (["t", "-z", "-f", "human.img"], b"compressed images are not supported"),
         (["cf", "syntax.img", "-F", "fat32/gpt/vhd", "-C", "source", "."],
-         b"image containers are not supported"),
+         b"writing image containers is not supported"),
         (["t", "-f", "-"], b"reading an image from standard input is not supported"),
-        (["t", "-F", "fat32/-/vhd", "-f", "human.img"], b"image containers are not supported"),
+        # A forced container runs only its own probe, which a bare volume fails.
+        (["t", "-F", "fat32/-/vhd", "-f", "human.img"], b"no VHD footer"),
         (["cf", "syntax.img", "-F", "fat32/dmg", "-C", "source", "."],
-         b"image containers are not supported"),
+         b"writing image containers is not supported"),
         (["cf", "syntax.img", "-a", "-F", "fat32", "-C", "source", "."],
          b"compressed images are not supported"),
         (["cf", "syntax.img", "-M", "-F", "fat32", "-C", "source", "."],
@@ -709,9 +722,13 @@ def test_failures(executable, root):
     assert failed(invoke(executable, root, [
         "t", "--json", "-f", "exfat.img", "-l", "path=4", "/abc",
     ], expected=1))["resource"] == "path"
-    assert failed(invoke(executable, root, [
+    # A range addresses the disk, which only the worker sees once it has
+    # peeled any container, so the library's selection refuses it.
+    past_end = failed(invoke(executable, root, [
         "i", "--json", "-f", "exfat.img", "--offset=1T",
-    ], expected=1))["code"] == -7
+    ], expected=1))
+    assert past_end["code"] == -1
+    assert past_end["message"] == "the range starts past the end of the disk"
 
     (root / "truncated.img").write_bytes(bytes(511))
     failed(invoke(executable, root, ["i", "--json", "-f", "truncated.img"], expected=1))
@@ -1070,6 +1087,153 @@ def test_partitioned(executable, root):
     assert b"several partitions have that type" in info.stderr
 
 
+SEGMENT_ID = "0123abcd-4567-4890-8bcd-ef0123456789"
+
+
+def dmg_image(disk, regions):
+    """A DMG as hdiutil lays it out: the data fork, the XML plist, the koly
+    trailer. Each (first, count) region in sectors gets a block table whose
+    256-sector chunks are zero runs when blank, zlib runs when compression
+    pays and raw runs otherwise; the master checksum covers the tables'."""
+    fork, entries, master = bytearray(), [], 0
+    for index, (first, count) in enumerate(regions):
+        runs, crc = [], 0
+        for sector in range(0, count, 256):
+            sectors = min(256, count - sector)
+            data = disk[(first + sector) * 512:(first + sector + sectors) * 512]
+            crc = zlib.crc32(data, crc)
+            packed = zlib.compress(data, 9)
+            if not any(data):
+                runs.append((0, sector, sectors, len(fork), 0))
+            elif len(packed) < len(data):
+                runs.append((0x80000005, sector, sectors, len(fork), len(packed)))
+                fork += packed
+            else:
+                runs.append((1, sector, sectors, len(fork), len(data)))
+                fork += data
+        runs.append((0xFFFFFFFF, count, 0, len(fork), 0))
+        mish = struct.pack(">4sIQQQII24sII128sI", b"mish", 1, first, count, 0, 0x208,
+                           index, b"", 2, 32, struct.pack(">I", crc), len(runs))
+        mish += b"".join(struct.pack(">IIQQQQ", kind, 0, sector, sectors, offset, length)
+                         for kind, sector, sectors, offset, length in runs)
+        master = zlib.crc32(struct.pack(">I", crc), master)
+        entries.append(
+            "\t\t\t<dict>\n\t\t\t\t<key>Attributes</key>\n\t\t\t\t<string>0x0050</string>\n"
+            f"\t\t\t\t<key>Data</key>\n\t\t\t\t<data>{base64.b64encode(mish).decode()}</data>\n"
+            f"\t\t\t\t<key>ID</key>\n\t\t\t\t<string>{index}</string>\n"
+            "\t\t\t\t<key>Name</key>\n\t\t\t\t<string>region &amp; more</string>\n"
+            "\t\t\t</dict>\n")
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n'
+           "\t<key>resource-fork</key>\n\t<dict>\n\t\t<key>blkx</key>\n\t\t<array>\n" +
+           "".join(entries) + "\t\t</array>\n\t</dict>\n</dict>\n</plist>\n").encode()
+    koly = struct.pack(">4sIIIQQQQQII16sII128sQQ120sII128sIQ12s", b"koly", 4, 512, 1, 0, 0,
+                       len(fork), 0, 0, 1, 1, uuid.UUID(SEGMENT_ID).bytes, 2, 32,
+                       struct.pack(">I", zlib.crc32(fork)), len(fork), len(xml), b"", 2, 32,
+                       struct.pack(">I", master), 1, len(disk) // 512, b"")
+    return bytes(fork) + xml + koly
+
+
+def vhd_image(disk):
+    """A fixed VHD: the disk and a footer whose checksum is the one's
+    complement of its byte sum."""
+    footer = bytearray(struct.pack(">8sIIQI4sI4sQQHBBII16sB427s", b"conectix", 2, 0x10000,
+                                   0xFFFFFFFFFFFFFFFF, 0, b"test", 0x10000, b"Wi2k", len(disk),
+                                   len(disk), 120, 16, 63, 2, 0, uuid.UUID(DISK_GUID).bytes,
+                                   0, b""))
+    footer[64:68] = struct.pack(">I", ~sum(footer) & 0xFFFFFFFF)
+    return bytes(disk) + bytes(footer)
+
+
+def simg_image(disk):
+    """An Android sparse image of 4 KiB blocks: a DONT_CARE chunk for each
+    blank 64 KiB unit, a RAW chunk otherwise, and a closing CRC32 chunk."""
+    chunks = []
+    for offset in range(0, len(disk), 65536):
+        unit = disk[offset:offset + 65536]
+        if any(unit):
+            chunks.append(struct.pack("<HHII", 0xCAC1, 0, len(unit) // 4096, 12 + len(unit)) + unit)
+        else:
+            chunks.append(struct.pack("<HHII", 0xCAC3, 0, len(unit) // 4096, 12))
+    chunks.append(struct.pack("<HHIII", 0xCAC4, 0, 0, 16, zlib.crc32(disk)))
+    header = struct.pack("<IHHHHIIII", 0xED26FF3A, 1, 0, 28, 12, 4096, len(disk) // 4096,
+                         len(chunks), 0)
+    return header + b"".join(chunks)
+
+
+def test_containers(executable, root):
+    """t, x, i and W read through a DMG, a fixed VHD and a sparse image, the
+    partition table inside included; a forced container slot runs only its
+    own probe; a range addresses the container's disk, longer than the
+    file; and a damaged chunk fails the read instead of passing raw bytes."""
+    # Incompressible bytes outside every partition give the DMG raw runs.
+    disk = bytearray((root / "gpt.img").read_bytes())
+    disk[6144 * 512:6400 * 512] = random.Random(7).randbytes(256 * 512)
+    disk = bytes(disk)
+    names = listing(executable, root, "gpt.img")
+    (root / "gpt.dmg").write_bytes(dmg_image(disk, [(0, 2048), (2048, 2048), (4096, 4096)]))
+    (root / "gpt.simg").write_bytes(simg_image(disk))
+    (root / "part.vhd").write_bytes(vhd_image((root / "part.img").read_bytes()))
+    assert (root / "gpt.dmg").stat().st_size < len(disk) // 2
+
+    for image, stack in [("gpt.dmg", "fat12/gpt/dmg"), ("gpt.simg", "fat12/gpt/simg"),
+                         ("part.vhd", "fat12/vhd")]:
+        assert listing(executable, root, image) == names, image
+        info = invoke(executable, root, ["i", "-f", image]).stdout.decode()
+        assert info.startswith(f"Stack:        {stack}\nCompression:  none\nContainer:    "), info
+        verified = invoke(executable, root, ["W", "-d", "-f", image]).stdout
+        assert f'"{image}": {stack.rsplit("/", 1)[1]} container,'.encode() in verified, verified
+        assert b"initialized file data verified" in verified, verified
+        assert invoke(executable, root, ["tf", image, "-F", stack]).stdout.decode() \
+            .splitlines() == names
+    info = invoke(executable, root, ["i", "-f", "gpt.dmg"]).stdout.decode()
+    assert "Container:    dmg, 4 MiB disk in " in info and \
+        f"chunks (raw,zero,zlib), ID {SEGMENT_ID}\n" in info, info
+    assert "Scheme:       GPT, 512-byte sectors\nDisk size:    4 MiB\n" in info, info
+    stack = next(record for record in completed(invoke(
+        executable, root, ["i", "--json", "-f", "gpt.dmg"])) if record["type"] == "stack")
+    assert stack["stack"] == "fat12/gpt/dmg" and stack["container"] == "dmg"
+    assert stack["container_codecs"] == "raw,zero,zlib" and stack["container_guid"] == SEGMENT_ID
+    assert int(stack["container_chunks"]) > 3 and stack["disk_bytes"] == str(len(disk))
+    report = next(record for record in completed(invoke(
+        executable, root, ["W", "-d", "--json", "-f", "gpt.dmg"])) if record["type"] == "verify")
+    assert report["container"] == "dmg" and report["scheme"] == "gpt"
+    plain = next(record for record in completed(invoke(
+        executable, root, ["i", "--json", "-f", "gpt.img"])) if record["type"] == "stack")
+    assert plain["container"] is None and plain["container_chunks"] is None
+
+    (root / "from-dmg").mkdir()
+    invoke(executable, root, ["xf", "gpt.dmg", "-C", "from-dmg"])
+    assert (root / "from-dmg/gpt/HELLO.TXT").read_bytes() == b"hello\n"
+    # The range lies inside the 4 MiB disk though the file is far shorter.
+    assert invoke(executable, root, [
+        "tf", "gpt.dmg", "--offset=1M", "--length=1M",
+    ]).stdout.decode().splitlines() == names
+    result = invoke(executable, root, ["tf", "gpt.dmg", "--offset=5M"], expected=1)
+    assert b"the range starts past the end of the disk" in result.stderr, result.stderr
+    result = invoke(executable, root, ["tf", "gpt.dmg", "-F", "fat12/-/vhd"], expected=1)
+    assert b"no VHD footer" in result.stderr, result.stderr
+
+    # A flipped byte in the first zlib stream fails the read that decodes
+    # it; one in raw bytes no read needs fails W on the data fork checksum.
+    image = (root / "gpt.dmg").read_bytes()
+    damaged = bytearray(image)
+    damaged[damaged.index(b"\x78\xda") + 40] ^= 0xFF
+    (root / "damaged.dmg").write_bytes(damaged)
+    result = invoke(executable, root, ["tf", "damaged.dmg"], expected=1)
+    assert b"compressed chunk is not a valid zlib stream" in result.stderr, result.stderr
+    damaged = bytearray(image)
+    damaged[image.index(disk[6144 * 512:6144 * 512 + 64])] ^= 0xFF
+    (root / "damaged.dmg").write_bytes(damaged)
+    assert listing(executable, root, "damaged.dmg") == names
+    result = invoke(executable, root, ["W", "-f", "damaged.dmg"], expected=1)
+    assert b"DMG data fork checksum does not match" in result.stderr, result.stderr
+    # Writing a container stays refused, publishing nothing.
+    result = invoke(executable, root, ["cf", "made.dmg", "-F", "fat12/gpt/dmg",
+                                       "-C", "source", "."], expected=1)
+    assert b"writing image containers is not supported" in result.stderr
+    assert not (root / "made.dmg").exists()
+
+
 BASIC_TYPE = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
 
 
@@ -1202,6 +1366,7 @@ def main():
         test_examples(executable, root)
         test_merged_operands(executable, root)
         test_partitioned(executable, root)
+        test_containers(executable, root)
         test_partitioned_create(executable, root)
         assert not list(root.glob(".fsimg-*"))
     print("CLI commands, independent JSON decoding, publication and failure checks pass")

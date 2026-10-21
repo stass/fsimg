@@ -5,8 +5,8 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-qnx4, test-protocol, test-layers and
-# test/spec.sh, which write the seeds, with MAKE naming the make program
+# test-exfat, test-qnx6, test-qnx4, test-protocol, test-layers,
+# test-containers and test/spec.sh, which write the seeds, with MAKE naming the make program
 # that drives that build (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX
 # select the compiler. The harnesses build against the instrumented
 # sanitizer-fuzz/ tree (see sanitize.sh) and keep their corpora here
@@ -47,6 +47,9 @@ work_dir=sanitizer-fuzz
 source_dir=$work_dir/src
 build_dir=$work_dir/build
 fuzz_library=$build_dir/.libs/libfsimg.a
+# The library links the system zlib, which the instrumented build's
+# configure found; its Makefile names the link flags.
+zlib_libs=$(sed -n 's/^ZLIB_LIBS = //p' "$build_dir/Makefile")
 if ! nm "$fuzz_library" | grep -q __sanitizer_cov_; then
     echo 'FAIL: fuzz library lacks sanitizer coverage instrumentation' >&2
     exit 1
@@ -54,7 +57,7 @@ fi
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
-    "$source_dir/fuzz/fat.c" "$fuzz_library" -o "$work_dir/fuzz-fat"
+    "$source_dir/fuzz/fat.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-fat"
 mkdir -p fuzz-corpus
 for variant in 12 16 32; do
     if test ! -f "fuzz-corpus/fat$variant.seed"; then
@@ -99,7 +102,7 @@ run_fuzzer "$work_dir/fuzz-fat" "$exfat_corpus" 3145728 10
     -I"$source_dir/lib/core" -I"$source_dir/lib/meta" -I"$source_dir/lib/io" \
     -I"$source_dir/lib/read" -I"$source_dir/lib/formats" \
     -I"$source_dir/lib/formats/qnx6" \
-    "$source_dir/fuzz/qnx6.c" "$fuzz_library" -o "$work_dir/fuzz-qnx6"
+    "$source_dir/fuzz/qnx6.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-qnx6"
 qnx6_corpus=qnx6-fuzz-corpus
 mkdir -p "$qnx6_corpus"
 if test ! -f "$qnx6_corpus/sample.seed"; then
@@ -113,7 +116,7 @@ run_fuzzer "$work_dir/fuzz-qnx6" "$qnx6_corpus" 1048576 10
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
-    "$source_dir/fuzz/qnx4.c" "$fuzz_library" -o "$work_dir/fuzz-qnx4"
+    "$source_dir/fuzz/qnx4.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-qnx4"
 qnx4_corpus=qnx4-fuzz-corpus
 mkdir -p "$qnx4_corpus"
 if test ! -f "$qnx4_corpus/sample.seed"; then
@@ -129,7 +132,7 @@ run_fuzzer "$work_dir/fuzz-qnx4" "$qnx4_corpus" 1048576 10
     -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/layers" -I"$source_dir/cmd/fsimg" \
     "$source_dir/fuzz/protocol.c" "$source_dir/cmd/fsimg/protocol.c" \
-    "$source_dir/cmd/fsimg/job.c" "$fuzz_library" -o "$work_dir/fuzz-protocol"
+    "$source_dir/cmd/fsimg/job.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-protocol"
 protocol_corpus=protocol-fuzz-corpus
 mkdir -p "$protocol_corpus"
 if test ! -f "$protocol_corpus/frames.seed"; then
@@ -144,7 +147,7 @@ run_fuzzer "$work_dir/fuzz-protocol" "$protocol_corpus" 65536 5
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
-    "$source_dir/fuzz/image.c" "$fuzz_library" -o "$work_dir/fuzz-image"
+    "$source_dir/fuzz/image.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-image"
 image_corpus=image-fuzz-corpus
 mkdir -p "$image_corpus"
 if test ! -f "$image_corpus/gpt.seed"; then
@@ -154,3 +157,36 @@ if test ! -f "$image_corpus/mbr.seed"; then
     ./test-layers --seed-mbr "$image_corpus/mbr.seed"
 fi
 run_fuzzer "$work_dir/fuzz-image" "$image_corpus" 1048576 10
+
+# The container harness reads each input as an image file under detection
+# and under each forced container, reaching the koly trailer, the plist,
+# the mish tables, the VHD footer, the sparse header and chunk walk, the
+# chunk index and the chunk cache. The seeds are the container tests'
+# images.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    "$source_dir/fuzz/container.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-container"
+container_corpus=container-fuzz-corpus
+mkdir -p "$container_corpus"
+for kind in dmg vhd simg; do
+    if test ! -f "$container_corpus/$kind.seed"; then
+        ./test-containers "--seed-$kind" "$container_corpus/$kind.seed"
+    fi
+done
+run_fuzzer "$work_dir/fuzz-container" "$container_corpus" 1048576 10
+
+# The plist harness drives the bounded XML parser directly with a visitor
+# that checks element pairing, nesting and text bounds. The seed is the
+# plist of the container tests' DMG.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/layers" \
+    "$source_dir/fuzz/plist.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-plist"
+plist_corpus=plist-fuzz-corpus
+mkdir -p "$plist_corpus"
+if test ! -f "$plist_corpus/udif.seed"; then
+    ./test-containers --seed-plist "$plist_corpus/udif.seed"
+fi
+run_fuzzer "$work_dir/fuzz-plist" "$plist_corpus" 65536 5

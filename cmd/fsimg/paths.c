@@ -214,9 +214,11 @@ prepare_scratch(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	return (status);
 }
 
-/* The image of a read mode: a regular file, which a volume range given by
- * --offset and --length must fit. The selected volume, at most the whole
- * image, bounds what extraction may write unless -l output says otherwise.
+/* The image of a read mode: a regular file. A volume range given by
+ * --offset and --length addresses the disk, which a container inside the
+ * file can make longer than the file, so only the worker, which peels the
+ * container, can check that the range fits; the selected volume then
+ * bounds what extraction may write unless -l output says otherwise.
  */
 static fsimg_status_t
 open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
@@ -232,20 +234,6 @@ open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 	if (identity.kind != FSIMG_HOST_FILE)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_IO, "input image must be a seekable regular file"));
-	if (request->selector == FSIMG_SELECT_RANGE) {
-		if (request->offset > identity.length)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_IO, "volume slice starts past the input image"));
-		if (request->length == 0)
-			request->length = identity.length - request->offset;
-		if (request->length > identity.length - request->offset)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_IO, "volume slice exceeds the input image"));
-	}
-	if (request->limits.max_output_bytes == 0)
-		request->limits.max_output_bytes =
-		    request->selector == FSIMG_SELECT_RANGE ? request->length :
-		    identity.length;
 	return (FSIMG_OK);
 }
 

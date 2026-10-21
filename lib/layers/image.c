@@ -15,14 +15,18 @@
 /*
  * An image is the input peeled down to its disk, with the disk's partition
  * table enumerated and nothing of the filesystem opened. Reading peels
- * from the outside in: compression and containers are not implemented, so
- * the input is the disk; then one step decides between a partition scheme
- * and a bare volume by running the scheme probes and the filesystem probes
- * on the disk prefix together. Exactly one claim decides, so a boot sector
- * that also resembles a partition table is an ambiguity the caller resolves
- * by forcing a slot, never a guess.
+ * from the outside in. Compression is not implemented, so the input is the
+ * file. The container step runs once, at open: the container probes run on
+ * the file's prefix and its last 512 bytes, and a claim's tables are
+ * validated and become the disk, a positional object of the length they
+ * declare; without a claim the file is the disk. Then one step decides
+ * between a partition scheme and a bare volume by running the scheme
+ * probes and the filesystem probes on the disk prefix together. In both
+ * steps exactly one claim decides, so a boot sector that also resembles a
+ * partition table is an ambiguity the caller resolves by forcing a slot,
+ * never a guess.
  *
- * That scheme step runs at most once, on the first operation that needs
+ * The scheme step runs at most once, on the first operation that needs
  * the table. A range or disk selection never needs it, so a damaged table
  * cannot block raw access to the disk's bytes.
  */
@@ -33,11 +37,18 @@ _Static_assert(sizeof(((fsimg_partition_info_t *)NULL)->format) ==
 
 struct fsimg_image {
 	fsimg_ctx_t	*ctx;
-	fsimg_io_t	*disk;		/* Borrowed input */
+	fsimg_io_t	*input;		/* Borrowed file */
+	fsimg_io_t	*disk;		/* The input, or the container's disk */
 	fsimg_session_t	 session;
 	fsimg_stack_t	 forced;
 	fsimg_layer_options_t layers;
+	uint64_t	 file_bytes;
 	uint64_t	 disk_bytes;
+	/* The container the disk was peeled from, NULL for none; opened owns
+	 * its disk object.
+	 */
+	const fsimg_layer_t *container;
+	fsimg_container_t opened;
 	/* The scheme step's result once detected is set; scheme stays NULL
 	 * for a bare volume, and table is then empty.
 	 */
@@ -52,7 +63,35 @@ struct fsimg_image {
 	char		 selected_format[FORMAT_NAME_BYTES];
 };
 
+/* What one step's probes see: a prefix of the step's input, the input's
+ * last bytes for a container probe, and the input's length.
+ */
+typedef struct probe_input {
+	const unsigned char *prefix;
+	size_t		 length;
+	const unsigned char *tail;
+	size_t		 tail_length;
+	uint64_t	 bytes;
+} probe_input_t;
+
+/* One kind's probes counted under the detection rule: how many claimed,
+ * and the first claimant with its probe's verdict and reason.
+ */
+typedef struct layer_survey {
+	const fsimg_layer_t *first;
+	fsimg_error_t	 reason;
+	fsimg_status_t	 verdict;
+	unsigned	 claims;
+} layer_survey_t;
+
 static fsimg_status_t image_ready(fsimg_image_t *, fsimg_error_t *);
+static bool probes(const fsimg_layer_t *, fsimg_layer_kind_t);
+static size_t probe_bytes(const fsimg_layer_t *);
+static size_t survey_bytes(fsimg_layer_kind_t, const fsimg_layer_t *, size_t);
+static fsimg_status_t probe_layer(const fsimg_layer_t *, const probe_input_t *,
+    fsimg_error_t *);
+static void survey_layers(fsimg_layer_kind_t, const probe_input_t *,
+    layer_survey_t *);
 static const char *forced_filesystem(const fsimg_image_t *);
 static fsimg_status_t validate_forced_stack(const fsimg_image_options_t *,
     fsimg_error_t *);
@@ -61,6 +100,10 @@ static fsimg_status_t read_prefix(fsimg_ctx_t *, fsimg_io_t *,
     fsimg_error_t *);
 static fsimg_status_t claim_volume(fsimg_image_t *, uint64_t, uint64_t,
     fsimg_claim_t *, char [static FORMAT_NAME_BYTES], fsimg_error_t *);
+static void container_input(fsimg_image_t *, fsimg_container_input_t *);
+static fsimg_status_t identify_container(fsimg_image_t *,
+    const fsimg_layer_t *, const fsimg_layer_t **, fsimg_error_t *);
+static fsimg_status_t peel_container(fsimg_image_t *, fsimg_error_t *);
 static fsimg_status_t identify_disk(fsimg_image_t *, const fsimg_layer_t *,
     const fsimg_layer_t **, fsimg_error_t *);
 static fsimg_status_t detect_scheme(fsimg_image_t *, fsimg_error_t *);
@@ -101,9 +144,9 @@ forced_filesystem(const fsimg_image_t *image)
 /*
  * A forced stack must be well formed, and each layer it forces must be
  * readable in this build: a filesystem with a reader, an implemented
- * scheme, and no container. Of the layer settings reading uses only
- * gpt:sector, which forces the GPT LBA size and so requires gpt in the
- * scheme slot.
+ * scheme and an implemented container. Of the layer settings reading uses
+ * only gpt:sector, which forces the GPT LBA size and so requires gpt in
+ * the scheme slot.
  */
 static fsimg_status_t
 validate_forced_stack(const fsimg_image_options_t *options,
@@ -112,7 +155,7 @@ validate_forced_stack(const fsimg_image_options_t *options,
 	const fsimg_stack_slot_t *slots = options->stack.slots;
 	const fsimg_format_variant_t *variant;
 	const fsimg_format_t *format;
-	const fsimg_layer_t *scheme;
+	const fsimg_layer_t *scheme, *container;
 	uint32_t sector;
 	fsimg_status_t status;
 
@@ -132,9 +175,12 @@ validate_forced_stack(const fsimg_image_options_t *options,
 			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 			    FSIMG_OP_IMAGE, "the named partition scheme is not supported"));
 	}
-	if (slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_IMAGE, "image containers are not supported"));
+	if (slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED) {
+		container = fsimg_layer_find(slots[FSIMG_LAYER_CONTAINER].name);
+		if (container == NULL || container->container == NULL)
+			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			    FSIMG_OP_IMAGE, "the named container is not supported"));
+	}
 
 	status = fsimg_layer_options_check(&options->stack, &options->layers,
 	    false, error);
@@ -173,7 +219,7 @@ fsimg_image_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	fsimg_image_options_t defaults;
 	fsimg_image_t *image;
 	fsimg_error_t local;
-	uint64_t disk_bytes;
+	uint64_t file_bytes;
 	fsimg_status_t status;
 
 	if (error == NULL)
@@ -202,7 +248,7 @@ fsimg_image_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	status = validate_forced_stack(options, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_io_get_size(input, &disk_bytes, error);
+	status = fsimg_io_get_size(input, &file_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
 
@@ -211,11 +257,18 @@ fsimg_image_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 		return (error->status);
 	bzero(image, sizeof(*image));
 	image->ctx = ctx;
+	image->input = input;
 	image->disk = input;
 	image->forced = options->stack;
 	image->layers = options->layers;
-	image->disk_bytes = disk_bytes;
+	image->file_bytes = file_bytes;
+	image->disk_bytes = file_bytes;
 	fsimg_session_init(&image->session, ctx, "image layers", 0);
+	status = peel_container(image, error);
+	if (status != FSIMG_OK) {
+		fsimg_image_free(image);
+		return (status);
+	}
 	*out = image;
 	return (FSIMG_OK);
 }
@@ -225,6 +278,7 @@ fsimg_image_free(fsimg_image_t *image)
 {
 	if (image == NULL || image->ctx->in_callback)
 		return;
+	fsimg_io_free(image->opened.disk);
 	fsimg_dealloc(image->table.records);
 	fsimg_dealloc(image);
 }
@@ -301,6 +355,200 @@ fsimg_volume_claim(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
 	return (FSIMG_OK);
 }
 
+static void
+container_input(fsimg_image_t *image, fsimg_container_input_t *input)
+{
+	input->ctx = image->ctx;
+	input->file = image->input;
+	input->session = &image->session;
+	input->file_bytes = image->file_bytes;
+}
+
+/* Whether a layer runs a probe at the step of its kind: a scheme or a
+ * container this build implements.
+ */
+static bool
+probes(const fsimg_layer_t *layer, fsimg_layer_kind_t kind)
+{
+	if (layer->kind != kind)
+		return (false);
+	switch (kind) {
+	case FSIMG_LAYER_SCHEME:
+		return (layer->scheme != NULL);
+	case FSIMG_LAYER_CONTAINER:
+		return (layer->container != NULL);
+	default:
+		return (false);
+	}
+}
+
+/* A probing layer's probe length. */
+static size_t
+probe_bytes(const fsimg_layer_t *layer)
+{
+	switch (layer->kind) {
+	case FSIMG_LAYER_SCHEME:
+		return (layer->scheme->probe_bytes);
+	case FSIMG_LAYER_CONTAINER:
+		return (layer->container->probe_bytes);
+	default:
+		return (0);
+	}
+}
+
+/* The prefix one step reads: the forced layer's probe length, or the
+ * longest of the kind's, but at least least bytes.
+ */
+static size_t
+survey_bytes(fsimg_layer_kind_t kind, const fsimg_layer_t *forced,
+    size_t least)
+{
+	const fsimg_layer_t *layer;
+	size_t want = least;
+
+	if (forced != NULL)
+		return (probe_bytes(forced));
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		if (probes(layer, kind) && probe_bytes(layer) > want)
+			want = probe_bytes(layer);
+	}
+	return (want);
+}
+
+/* One layer's probe on its share of the prefix. */
+static fsimg_status_t
+probe_layer(const fsimg_layer_t *layer, const probe_input_t *input,
+    fsimg_error_t *error)
+{
+	size_t length;
+
+	length = input->length < probe_bytes(layer) ? input->length :
+	    probe_bytes(layer);
+	if (layer->kind == FSIMG_LAYER_SCHEME)
+		return (layer->scheme->probe(input->prefix, length, input->bytes,
+		    error));
+	return (layer->container->probe(input->prefix, length, input->tail,
+	    input->tail_length, input->bytes, error));
+}
+
+/*
+ * Run every probe of one kind and count the claims, keeping the first
+ * claimant with its verdict and reason: a corrupt or unsupported claim is
+ * still a claim. Each step applies the detection rule to the count.
+ */
+static void
+survey_layers(fsimg_layer_kind_t kind, const probe_input_t *input,
+    layer_survey_t *out)
+{
+	const fsimg_layer_t *layer;
+	fsimg_error_t detail;
+	fsimg_status_t status;
+
+	out->first = NULL;
+	out->verdict = FSIMG_OK;
+	out->claims = 0;
+	fsimg_error_clear(&out->reason);
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		if (!probes(layer, kind))
+			continue;
+		fsimg_error_clear(&detail);
+		status = probe_layer(layer, input, &detail);
+		if (status == FSIMG_EFORMAT)
+			continue;
+		if (out->claims++ == 0) {
+			out->first = layer;
+			out->verdict = status;
+			out->reason = detail;
+		}
+	}
+}
+
+/*
+ * The container step's probes, run on one prefix and the last 512 bytes
+ * of the file: the forced container's alone, or every container's. On
+ * success *container is the container that claimed, or NULL when none did
+ * and the file is the disk. Several claims are an ambiguity; a claim that
+ * is corrupt or unsupported fails with its probe's reason, never falling
+ * back to a raw disk. The scheme and filesystem probes do not run here:
+ * they read the disk this step yields.
+ */
+static fsimg_status_t
+identify_container(fsimg_image_t *image, const fsimg_layer_t *forced,
+    const fsimg_layer_t **container, fsimg_error_t *error)
+{
+	unsigned char tail[FSIMG_CONTAINER_TAIL_BYTES], *prefix;
+	layer_survey_t survey;
+	probe_input_t input;
+	size_t transferred;
+	fsimg_status_t status;
+
+	*container = NULL;
+	input.tail = tail;
+	input.tail_length = image->file_bytes < sizeof(tail) ?
+	    (size_t)image->file_bytes : sizeof(tail);
+	input.bytes = image->file_bytes;
+	status = fsimg_io_read_session(image->input, &image->session,
+	    image->file_bytes - input.tail_length, tail, input.tail_length,
+	    &transferred, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = read_prefix(image->ctx, image->input, &image->session, 0,
+	    image->file_bytes, survey_bytes(FSIMG_LAYER_CONTAINER, forced, 0),
+	    &prefix, &input.length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	input.prefix = prefix;
+	if (forced != NULL) {
+		status = probe_layer(forced, &input, error);
+		fsimg_dealloc(prefix);
+		if (status == FSIMG_OK)
+			*container = forced;
+		return (status);
+	}
+	survey_layers(FSIMG_LAYER_CONTAINER, &input, &survey);
+	fsimg_dealloc(prefix);
+	if (survey.claims > 1)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
+		    "the file matches several containers; force one"));
+	if (survey.verdict != FSIMG_OK) {
+		*error = survey.reason;
+		return (survey.verdict);
+	}
+	*container = survey.first;
+	return (FSIMG_OK);
+}
+
+/*
+ * Peel the container, once, at open. A container slot forced empty, or no
+ * claim, leaves the file as the disk; otherwise the claimant validates its
+ * tables and yields the disk every later step reads.
+ */
+static fsimg_status_t
+peel_container(fsimg_image_t *image, fsimg_error_t *error)
+{
+	const fsimg_stack_slot_t *slot;
+	const fsimg_layer_t *forced, *container;
+	fsimg_container_input_t input;
+	fsimg_status_t status;
+
+	slot = &image->forced.slots[FSIMG_LAYER_CONTAINER];
+	if (slot->state == FSIMG_SLOT_EMPTY)
+		return (FSIMG_OK);
+	forced = slot->state == FSIMG_SLOT_NAMED ? fsimg_layer_find(slot->name) :
+	    NULL;
+	status = identify_container(image, forced, &container, error);
+	if (status != FSIMG_OK || container == NULL)
+		return (status);
+	container_input(image, &input);
+	status = container->container->open(&input, &image->opened, error);
+	if (status != FSIMG_OK)
+		return (status);
+	image->container = container;
+	image->disk = image->opened.disk;
+	image->disk_bytes = image->opened.disk_bytes;
+	return (FSIMG_OK);
+}
+
 /*
  * The scheme step's probes, run on one prefix of the disk: the forced
  * scheme's alone, or every scheme's together with the filesystem probes.
@@ -313,82 +561,58 @@ static fsimg_status_t
 identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
     const fsimg_layer_t **scheme, fsimg_error_t *error)
 {
-	const fsimg_layer_t *layer;
 	fsimg_format_survey_t filesystems;
-	fsimg_error_t detail, reason;
+	layer_survey_t survey;
+	probe_input_t input;
 	unsigned char *prefix;
-	size_t want, length;
-	unsigned claims;
-	fsimg_status_t status, verdict;
+	fsimg_status_t status;
 
 	*scheme = NULL;
-	fsimg_error_clear(&reason);
-	want = forced != NULL ? forced->scheme->probe_bytes :
-	    fsimg_format_probe_bytes(forced_filesystem(image));
-	for (size_t i = 0; forced == NULL && (layer = fsimg_layer_at(i)) != NULL; i++) {
-		if (layer->scheme != NULL && layer->scheme->probe_bytes > want)
-			want = layer->scheme->probe_bytes;
-	}
+	input.tail = NULL;
+	input.tail_length = 0;
+	input.bytes = image->disk_bytes;
 	status = read_prefix(image->ctx, image->disk, &image->session, 0,
-	    image->disk_bytes, want, &prefix, &length, error);
+	    image->disk_bytes, survey_bytes(FSIMG_LAYER_SCHEME, forced,
+	    fsimg_format_probe_bytes(forced_filesystem(image))), &prefix,
+	    &input.length, error);
 	if (status != FSIMG_OK)
 		return (status);
+	input.prefix = prefix;
 	if (forced != NULL) {
-		status = forced->scheme->probe(prefix, length, image->disk_bytes, error);
+		status = probe_layer(forced, &input, error);
 		fsimg_dealloc(prefix);
 		if (status == FSIMG_OK)
 			*scheme = forced;
 		return (status);
 	}
-
-	/* Count the scheme claims, keeping the first claimant with its verdict
-	 * and reason: a corrupt or unsupported claim is still a claim.
-	 */
-	claims = 0;
-	verdict = FSIMG_OK;
-	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
-		if (layer->scheme == NULL)
-			continue;
-		fsimg_error_clear(&detail);
-		status = layer->scheme->probe(prefix, length < layer->scheme->probe_bytes ?
-		    length : layer->scheme->probe_bytes, image->disk_bytes, &detail);
-		if (status == FSIMG_EFORMAT)
-			continue;
-		if (claims++ == 0) {
-			*scheme = layer;
-			verdict = status;
-			reason = detail;
-		}
-	}
-	status = fsimg_format_identify(forced_filesystem(image), prefix, length,
-	    image->disk_bytes, &filesystems, error);
+	survey_layers(FSIMG_LAYER_SCHEME, &input, &survey);
+	status = fsimg_format_identify(forced_filesystem(image), prefix,
+	    input.length, image->disk_bytes, &filesystems, error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);
 
 	/* Nothing claimed; both kinds claimed; several schemes claimed; one
-	 * scheme claimed but its table is damaged or unsupported.
+	 * scheme claimed but its table is damaged or unsupported. Otherwise
+	 * one scheme claimed, or the filesystems (one, or several left for the
+	 * reader to report) make it a bare volume.
 	 */
-	if (claims + filesystems.claims == 0)
-		status = fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
-		    "no partition table or filesystem recognized");
-	else if (claims != 0 && filesystems.claims != 0)
-		status = fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
+	if (survey.claims + filesystems.claims == 0)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
+		    "no partition table or filesystem recognized"));
+	if (survey.claims != 0 && filesystems.claims != 0)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "the disk matches both a partition table and a filesystem; "
-		    "force the scheme slot");
-	else if (claims > 1)
-		status = fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
-		    "the disk matches several partition schemes; force one");
-	else if (verdict != FSIMG_OK) {
-		*error = reason;
-		status = verdict;
+		    "force the scheme slot"));
+	if (survey.claims > 1)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
+		    "the disk matches several partition schemes; force one"));
+	if (survey.verdict != FSIMG_OK) {
+		*error = survey.reason;
+		return (survey.verdict);
 	}
-	/* Otherwise one scheme claimed, or the filesystems (one, or several
-	 * left for the reader to report) make it a bare volume.
-	 */
-	if (status != FSIMG_OK)
-		*scheme = NULL;
-	return (status);
+	*scheme = survey.first;
+	return (FSIMG_OK);
 }
 
 static void
@@ -460,6 +684,19 @@ fsimg_image_get_info(fsimg_image_t *image, fsimg_image_info_t *out,
 	bzero(&stack, sizeof(stack));
 	stack.slots[FSIMG_LAYER_FILESYSTEM] =
 	    image->forced.slots[FSIMG_LAYER_FILESYSTEM];
+	if (image->container != NULL) {
+		stack.slots[FSIMG_LAYER_CONTAINER].state = FSIMG_SLOT_NAMED;
+		snprintf(stack.slots[FSIMG_LAYER_CONTAINER].name,
+		    sizeof(stack.slots[FSIMG_LAYER_CONTAINER].name), "%s",
+		    image->container->name);
+		snprintf(out->container, sizeof(out->container), "%s",
+		    image->container->name);
+		fsimg_chunk_kinds_text(image->opened.kinds, out->codecs,
+		    sizeof(out->codecs));
+		bcopy(image->opened.guid, out->container_guid,
+		    sizeof(out->container_guid));
+		out->chunk_count = image->opened.chunks;
+	}
 	if (stack.slots[FSIMG_LAYER_FILESYSTEM].state != FSIMG_SLOT_NAMED &&
 	    image->selected_format[0] != '\0') {
 		stack.slots[FSIMG_LAYER_FILESYSTEM].state = FSIMG_SLOT_NAMED;
@@ -781,15 +1018,18 @@ fsimg_image_select(fsimg_image_t *image, const fsimg_selector_t *selector,
 	return (select_record(image, record, volume, error));
 }
 
-/* Opening the table already performed every check reading needs; verify
- * adds the scheme's remaining checks and reports the scope reached.
+/* Opening the container and the table already performed every check
+ * reading needs; verify adds the passes that read beyond the tables, the
+ * container's first, and reports the scope reached.
  */
 fsimg_status_t
 fsimg_image_verify(fsimg_image_t *image, unsigned flags,
     fsimg_layer_report_t *out, fsimg_error_t *error)
 {
+	fsimg_container_input_t container;
 	fsimg_scheme_input_t input;
 	fsimg_error_t local;
+	bool payload;
 	fsimg_status_t status;
 
 	if (error == NULL)
@@ -801,6 +1041,16 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "missing layer report or unknown verification flags"));
 	bzero(out, sizeof(*out));
+	payload = (flags & FSIMG_VERIFY_PAYLOAD) != 0;
+	if (image->container != NULL) {
+		container_input(image, &container);
+		status = image->container->container->verify(&container,
+		    &image->opened, payload, error);
+		if (status != FSIMG_OK)
+			return (status);
+		snprintf(out->container, sizeof(out->container), "%s",
+		    image->container->name);
+	}
 	status = detect_scheme(image, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -815,8 +1065,13 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 				out->partitions++;
 		}
 	}
-	/* No layer of this build has bytes beyond its tables to read through. */
+	/* Only a container whose checksums cover its decoded bytes has a
+	 * payload to read through.
+	 */
 	out->scope = FSIMG_VALIDATION_STRUCTURAL;
+	if (payload && image->container != NULL &&
+	    image->container->container->payload_checks)
+		out->scope = FSIMG_VALIDATION_PAYLOAD;
 	out->complete = true;
 	return (FSIMG_OK);
 }

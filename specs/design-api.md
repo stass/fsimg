@@ -462,9 +462,10 @@ deciding compression from the first block. Without a spool, stream and gzip
 input fail as a spool limit error with limit zero.
 
 The image information record exposes the canonical detected stack text, the
-compression name, disk length, the container's chunk count and codecs, the
-scheme's sector size, disk identifier and partition count, and the layer
-validation scope. `next_partition()` iterates the scheme's slots in order
+compression name, disk length, the container's name, chunk count, the
+encodings its chunks use and its identifier (the DMG segment ID or the VHD
+unique ID), the scheme's sector size, disk identifier and partition count,
+and the layer validation scope. `next_partition()` iterates the scheme's slots in order
 from 1, returning DONE at the end: slot number, used flag, disk offset and
 length, type as table name and raw value, name as UTF-8 (GPT), unique
 identifier, active flag (MBR), and the bounded probe's claim for the
@@ -482,8 +483,11 @@ returns a checked read-only slice of the disk. The slice borrows the image,
 which must outlive it, and is released with `fsimg_io_free()`; it is the
 input to `fsimg_reader_open()`, which stays unaware of layers. `verify()`
 checks every layer with the [layer verification scope](design-layers.md#verification-scope);
-`FSIMG_VERIFY_PAYLOAD` adds the read-through checks. It does not require an
-untouched image and does not consume anything.
+`FSIMG_VERIFY_PAYLOAD` adds the read-through checks. Its report names the
+container and the scheme it checked and the partitions whose bounds it
+checked, with payload scope when read-through decoded the container's
+chunks. It does not require an untouched image and does not consume
+anything.
 
 ```c
 fsimg_status_t fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input,

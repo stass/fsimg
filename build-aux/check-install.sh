@@ -91,7 +91,8 @@ case "$(uname -s)" in
     Darwin)
         otool -L "$qualification_prefix/bin/fsimg" > "$qualification_root/dependencies.log"
         awk '
-            NR > 1 && $1 != "/usr/lib/libSystem.B.dylib" { bad=1 }
+            NR > 1 && $1 != "/usr/lib/libSystem.B.dylib" &&
+                $1 != "/usr/lib/libz.1.dylib" { bad=1 }
             END { exit bad }
         ' "$qualification_root/dependencies.log"
         ;;
@@ -101,6 +102,7 @@ case "$(uname -s)" in
             NR == 1 { next }
             $1 ~ /^libc\.so\.[0-9]+$/ { next }
             $1 ~ /^libsys\.so\.[0-9]+$/ { next }
+            $1 ~ /^libz\.so\.[0-9]+$/ { next }
             $1 == "[vdso]" { next }
             { bad=1 }
             END { exit bad }
@@ -111,6 +113,7 @@ case "$(uname -s)" in
         awk '
             $1 ~ /^linux-vdso\.so\./ { next }
             $1 == "libc.so.6" { next }
+            $1 == "libz.so.1" { next }
             $1 ~ /^\/.*\/ld-linux[^/]*\.so\.[0-9]+$/ { next }
             { bad=1 }
             END { exit bad }

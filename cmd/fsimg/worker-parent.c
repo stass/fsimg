@@ -153,6 +153,7 @@ static fsimg_status_t worker_error(fsimg_error_t *, const char *);
 static fsimg_status_t queue_text(worker_supervisor_t *, const fsimg_worker_text_t *,
     bool, fsimg_error_t *);
 static fsimg_status_t deliver_event(worker_supervisor_t *, fsimg_error_t *);
+static bool bound_volume(worker_supervisor_t *);
 static bool image_frame_expected(const worker_supervisor_t *,
     const fsimg_frame_t *);
 static bool partition_frame_expected(const worker_supervisor_t *,
@@ -271,12 +272,37 @@ deliver_event(worker_supervisor_t *state, fsimg_error_t *error)
 }
 
 /*
- * A read job's IMAGE record describes the input it opened, so its disk is
- * the input file's size. A create job's describes the disk it plans: it
- * names the request's scheme and selects the one partition, and the
- * handler then takes its disk length as the bound of the partition and
- * the image. Only i reports a disk without a volume; only W verifies
- * tables.
+ * A read job's volume lies within the disk its IMAGE record states: the
+ * range --offset and --length name, or else the whole disk. That bounds
+ * the INFO record's volume and, without -l output, what x -O may write.
+ * False when the range does not fit the disk. The library's range
+ * selection applies the same rule (a zero length runs to the disk's end);
+ * the coordinator repeats it so its bound does not depend on the worker
+ * having applied it.
+ */
+static bool
+bound_volume(worker_supervisor_t *state)
+{
+	const fsimg_worker_request_t *request = state->request;
+
+	if (request->offset > state->disk_bytes)
+		return (false);
+	state->volume_limit = request->length != 0 ? request->length :
+	    state->disk_bytes - request->offset;
+	if (state->volume_limit > state->disk_bytes - request->offset)
+		return (false);
+	if (request->limits.max_output_bytes == 0)
+		state->output_limit = state->volume_limit;
+	return (true);
+}
+
+/*
+ * A read job's IMAGE record describes the input it opened: its disk is the
+ * input file's size, or the length a container's tables declare. A create
+ * job's describes the disk it plans: it names the request's scheme and
+ * selects the one partition. Either way the handler then takes the disk
+ * length as the bound of the partitions, the volume and the image. Only i
+ * reports a disk without a volume; only W verifies layers.
  */
 static bool
 image_frame_expected(const worker_supervisor_t *state,
@@ -393,10 +419,10 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
 		state->table_slots = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SLOTS);
 		state->selected_slot = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
-		/* A create job's planned disk bounds what follows it. */
-		if (state->request->kind >= FSIMG_JOB_CREATE)
-			state->disk_bytes = fsimg_wire_get64(raw +
-			    FSIMG_WIRE_IMAGE_DISK);
+		/* The disk, planned or peeled, bounds what follows it. */
+		state->disk_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK);
+		if (kind < FSIMG_JOB_CREATE && !bound_volume(state))
+			return (worker_error(error, "worker image cannot hold the selected range"));
 		state->output_state = (flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 ?
 		    WORKER_UNSELECTED : WORKER_WAIT_HEADER;
 		break;
@@ -568,20 +594,13 @@ prepare_request(worker_supervisor_t *state, fsimg_error_t *error)
 		if (fsimg_host_file(request->input_fd, &identity) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_CONTEXT, "worker input identity query failed"));
-		if (identity.kind != FSIMG_HOST_FILE || request->offset > identity.length)
+		if (identity.kind != FSIMG_HOST_FILE)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "worker input must be a bounded regular file"));
-		/* Only a range selector sets offset and length; any other
-		 * volume lies within the whole file.
+		/* The disk is the file until the IMAGE record says a container
+		 * yields another; the volume's bound follows from it there.
 		 */
 		state->disk_bytes = identity.length;
-		state->volume_limit = request->length == 0 ? identity.length - request->offset :
-		    request->length;
-		if (state->volume_limit > identity.length - request->offset)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CONTEXT, "worker input slice exceeds the regular file"));
-		if (state->output_limit == 0)
-			state->output_limit = state->volume_limit;
 	}
 	status = fsimg_job_encode(request, outbound->wire + FSIMG_FRAME_HEADER, error);
 	if (status != FSIMG_OK)

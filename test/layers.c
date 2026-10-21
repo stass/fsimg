@@ -554,20 +554,25 @@ test_registry(void)
 {
 	static const unsigned scheme = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
 	    FSIMG_CAP_VERIFY;
+	static const unsigned container = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
 	static const struct {
 		const char	*name;
 		const char	*suffix;
 		const char	*settings;
+		const char	*codecs;
 		fsimg_layer_kind_t kind;
 		unsigned	 capabilities;
 	} expected[] = {
-		{ "gpt", "", "sector,disk,type,name,disk-guid,guid",
+		{ "gpt", "", "sector,disk,type,name,disk-guid,guid", "",
 		    FSIMG_LAYER_SCHEME, scheme },
-		{ "mbr", "", "disk,type,active,id", FSIMG_LAYER_SCHEME, scheme },
-		{ "dmg", ".dmg", "", FSIMG_LAYER_CONTAINER, 0 },
-		{ "vhd", ".vhd", "", FSIMG_LAYER_CONTAINER, 0 },
-		{ "simg", ".simg", "", FSIMG_LAYER_CONTAINER, 0 },
-		{ "gzip", ".gz", "", FSIMG_LAYER_COMPRESSION, 0 }
+		{ "mbr", "", "disk,type,active,id", "", FSIMG_LAYER_SCHEME,
+		    scheme },
+		{ "dmg", ".dmg", "", "raw,zero,zlib", FSIMG_LAYER_CONTAINER,
+		    container },
+		{ "vhd", ".vhd", "", "raw", FSIMG_LAYER_CONTAINER, container },
+		{ "simg", ".simg", "", "raw,zero,fill", FSIMG_LAYER_CONTAINER,
+		    container },
+		{ "gzip", ".gz", "", "", FSIMG_LAYER_COMPRESSION, 0 }
 	};
 	fsimg_layer_info_t info;
 	size_t cursor = 0;
@@ -579,6 +584,10 @@ test_registry(void)
 		CHECK(strcmp(info.settings, expected[i].settings) == 0);
 		CHECK(info.kind == expected[i].kind);
 		CHECK(info.capabilities == expected[i].capabilities);
+		CHECK(strcmp(info.codecs, expected[i].codecs) == 0);
+		/* Only a layer whose chunks use zlib names its version. */
+		CHECK((strstr(info.codecs, "zlib") != NULL) ==
+		    (strncmp(info.codec_version, "zlib ", 5) == 0));
 	}
 	CHECK(fsimg_layer_next(&cursor, &info, NULL) == FSIMG_DONE);
 }
@@ -1192,8 +1201,9 @@ test_forcing(void)
 
 	make_fat12(bare.bytes);
 	fixture_init(&f);
-	CHECK(fixture_open(&f, &gpt, "fat32/-/dmg", 0, &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.message, "image containers are not supported") == 0);
+	/* A forced container runs only its own probe, which a raw disk fails. */
+	CHECK(fixture_open(&f, &gpt, "fat32/-/dmg", 0, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "no DMG trailer") == 0);
 	CHECK(fixture_open(&f, &gpt, "hfs", 0, NULL) == FSIMG_EUNSUPPORTED);
 	CHECK(fixture_open(&f, &gpt, "fat12/mbr", 4096, NULL) == FSIMG_EINVAL);
 

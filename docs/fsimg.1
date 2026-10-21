@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\" Copyright (c) 2026, fsimg contributors
-.Dd October 20, 2026
+.Dd October 21, 2026
 .Dt FSIMG 1
 .Os
 .Sh NAME
@@ -254,18 +254,20 @@ each selects any basic-data partition.
 Without it the volume is the one partition holding a recognized filesystem;
 a disk without a partition table is itself the volume.
 .It Fl Fl offset Ns = Ns Ar bytes
-Volume offset within the image; default zero.
+Volume offset within the disk; default zero.
 .It Fl Fl length Ns = Ns Ar bytes
-Positive volume length; default the rest of the image.
+Positive volume length; default the rest of the disk.
 .El
 .Pp
 .Fl Fl offset
 and
 .Fl Fl length
 select a volume slice by byte range and conflict with
-.Fl Fl partition .
-A range never reads the partition table, so a damaged table does not block
-it.
+.Fl Fl partition
+and with a partition scheme named in
+.Fl F .
+A range addresses the disk inside any container and never reads the
+partition table, so a damaged table does not block it.
 Both GPT copies must be intact and agree, MBR entries must lie within the disk
 without overlapping, and a table that fails a check fails the command rather
 than falling back to the disk as a bare volume.
@@ -299,10 +301,22 @@ A QNX4 volume whose
 .Pa ..
 entry names the root record does not open, for the same reason.
 .Pp
+A DMG, a fixed VHD or an Android sparse image is read as the disk it
+holds, detected from the file's first bytes and its last 512 bytes, or
+forced by naming it in the stack's container slot.
+DMG chunks may be stored, zero, free or zlib-compressed; other DMG
+compressions (ADC, bzip2, LZFSE, LZMA), multi-segment DMGs and dynamic or
+differencing VHDs are refused as unsupported.
+A container's tables are checked completely when the image opens, and a
+damaged one fails the command rather than being read as a raw disk.
+Decompressed chunks are cached four at a time, each at most 16 MiB, within
+the memory limit; decoding counts as work.
+.Pp
 .Cm i
 reports the stack in
 .Fl F
-syntax and its compression; with a partition scheme, the disk and each used
+syntax and its compression; with a container, its disk size, chunk count,
+chunk encodings and identifier; with a partition scheme, the disk and each used
 partition's slot, type, size, offset, filesystem and name, marking the
 selected one; then header validation, geometry, label, volume UUID when the
 format has one, time basis and known capabilities.
@@ -319,9 +333,11 @@ lists one level, the immediate children of a selected directory or the
 selected file itself.
 .Pp
 .Cm W
-checks the complete supported structure;
+checks the container, the partition table and the complete supported
+structure of the volume, including a DMG's data fork and master checksums;
 .Fl d
-also reads initialized payload bytes.
+also reads initialized payload bytes and decodes every container chunk to
+check the DMG block-table and sparse-image checksums.
 It performs no repair.
 .Sh CREATION
 Operands are host paths, as for
@@ -664,8 +680,9 @@ The summary's command field names the mode:
 or
 .Ql formats .
 A stack record precedes the information record: it carries the stack, a null
-compression, the scheme, the disk size and identifier and the selected
-partition, and states whether a volume was selected.
+compression, the container with its chunk count, chunk encodings and
+identifier, each null without one, the scheme, the disk size and identifier
+and the selected partition, and states whether a volume was selected.
 Partition records, one per used slot, follow it for
 .Cm i .
 A creation's plan record follows the planned disk's stack record and its
@@ -683,7 +700,9 @@ Format records name their kind: filesystem, scheme, container or
 compression.
 A filesystem's record gives entry_kinds, metadata_fields and write_settings
 as bit masks and max_label_bytes, zero for a format without a label; a
-layer's gives its suffix, its capabilities and the keys of its settings.
+layer's gives its suffix, its capabilities, the keys of its settings, the
+chunk encodings it reads as codecs and, for a layer using zlib, the zlib
+version as codec_version.
 .Pp
 The operation deadline spans processing and successful output.
 Failure reporting has a two-second grace and one further two-second stderr-only
@@ -707,7 +726,7 @@ minimization
 .Pq Fl M No with Cm c ,
 an image on standard input or output
 .Pq Fl f Fl ,
-a stack naming a container, such as
+creating an image in a container, such as
 .Ql fat32/dmg ,
 the reserved filesystem names apfs and hfs,
 and more than one member for
@@ -731,6 +750,8 @@ fsimg Wdf data.img
 fsimg if disk.img --offset=1M --length=1G
 fsimg tf disk.img --partition=2 /EFI
 fsimg xf disk.img --partition=name=EFI
+fsimg tf installer.dmg -F fat32/gpt/dmg
+fsimg Wdf system.simg
 fsimg Wf disk.img -F fat32/gpt -o gpt:sector=4096
 fsimg --formats --json
 .Ed

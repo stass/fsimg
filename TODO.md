@@ -15,12 +15,12 @@
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
   the [layer design](specs/design-layers.md) in the four stages of the
-  [plan](docs/implementation-plan.md#extension-sequence). The command
-  line recognizes and refuses with exit 1 what stages 3 and 4 implement
-  (containers, compression and `-f -`) and `-M` minimization, which no stage
-  schedules yet. Configure gains the required system zlib. The layer
-  design's evidence gates (hdiutil, qemu-img) settle its uncovered-DMG-sector
-  and DMG-table-split questions.
+  [plan](docs/implementation-plan.md#extension-sequence). Containers are
+  read; the command line recognizes and refuses with exit 1 what the rest
+  of stage 3 and stage 4 implement (writing containers, compression and
+  `-f -`) and `-M` minimization, which no stage schedules yet. The
+  `hdiutil attach` gate of the container writer settles the layer design's
+  DMG-table-split question.
   The remaining sandbox gaps against the authority mapping of
   [design-security.md](specs/design-security.md#coordinator-and-worker)
   (`cmd/fsimg/sandbox.c`) belong to stage 4: the input check accepts only a
@@ -51,13 +51,26 @@
   * `x` and `t` accept one member; several members, the union of their
     subtrees resolved by each format's lookup rules, are refused with exit 1
     (`cmd/fsimg/options.c`, `lib/read/`).
-  The layer read side leaves this open [Medium]: the scheme step counts
-  scheme claims with its own loop beside `fsimg_format_survey`, so the two
-  claim rules must be kept in step; and the image's stack text has two
-  composers, `fsimg_image_get_info` (from the last selection's probe) and the
-  worker's `send_image` (from the opened reader). One survey over both
-  registries, and one composer, would remove both obligations
-  (`lib/layers/image.c`, `cmd/fsimg/worker-child.c`).
+  The layer read side leaves these open:
+  * [Medium] The container and scheme steps count claims with
+    `survey_layers` beside the filesystems' `fsimg_format_survey`, so the
+    two claim rules must be kept in step. One survey over both registries
+    would remove the obligation (`lib/layers/image.c`).
+  * [Medium] `W -d` on a container computes its checksums over every
+    declared disk byte, zero runs and DONT_CARE chunks included, by reading
+    them; a small image declaring a vast zero disk costs time in proportion
+    to the declared length, bounded only by the work limit and the
+    deadline. Combining the CRC32 of a zero run arithmetically
+    (`crc32_combine` over a zero CRC built by doubling) would make it cost
+    in proportion to the image (`lib/layers/dmg.c` `verify_run`,
+    `lib/layers/simg.c` `verify_chunk`).
+  * [Medium] The coordinator bounds default output by the disk length the
+    worker reports for a container image, which it cannot check against
+    the file; a compromised worker could raise it. A fixed VHD's disk must
+    be the file less 512 bytes, which the IMAGE frame check could enforce,
+    and a default ceiling for container images derived from the file
+    length would take the rest of the trust out (`cmd/fsimg/protocol.c`,
+    `cmd/fsimg/worker-parent.c` `bound_volume`).
   The layer write side leaves these open:
   * [Medium] A fixed disk without `-s` fits the volume to whole 512-byte
     sectors (or `-o sector=`) before the driver chooses its geometry. Every

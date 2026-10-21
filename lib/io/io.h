@@ -10,6 +10,22 @@
 #include "internal.h"
 
 fsimg_ctx_t *fsimg_io_context(const fsimg_io_t *);
+/*
+ * A read-only object of a fixed length whose bytes an internal owner
+ * computes, such as a container's disk. resolve fills exactly the length
+ * requested at an offset the object's bounds already checked, never more
+ * than the object's maximum transfer; it returns FSIMG_OK only when every
+ * byte is filled and otherwise sets the confirmed count. It runs as
+ * library code, not as a caller's callback. The object carries backing's
+ * identity, so alias and stability checks see the file beneath it; backing
+ * must outlive it. It adopts argument on every outcome and calls release
+ * on it when it is freed.
+ */
+typedef fsimg_status_t (*fsimg_io_resolve_t)(void *, uint64_t, void *, size_t,
+    size_t *, fsimg_error_t *);
+fsimg_status_t fsimg_io_resolver(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
+    fsimg_io_resolve_t, void (*)(void *), void *, fsimg_io_t **,
+    fsimg_error_t *);
 /* A slice that refuses writes whatever the parent's access, for handing
  * one partition of a disk to a reader.
  */

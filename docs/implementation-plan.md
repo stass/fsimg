@@ -474,13 +474,14 @@ stage again one reviewed commit:
    staged raw disk with a scheme; wrap of a raw volume in a scheme, unwrap
    and compose as library operations with no command-line form. Complete:
    sgdisk/gdisk and fdisk read fsimg disks, and fsimg reads theirs.
-3. **Containers.** Fixed VHD, simg, and DMG with the bounded plist parser,
-   chunk index and zlib chunks; the transcode pass, the raw intermediate,
-   stream output and wrap into a container. Complete: the hdiutil and
-   qemu-img gates of the layer design, both directions.
-4. **Compression.** gzip output, the budgeted spool with the coordinator's
-   stdin pipe for gzip and stream input, and the zlib version in capability
-   output; the sandbox admits pipe input and rights-limits the handed-over
+3. **Containers.** Reading first: fixed VHD, simg, and DMG with the
+   bounded plist parser, chunk index, chunk cache and zlib chunks, the
+   system zlib as a required dependency, and its version in capability
+   output. Then writing: the transcode pass, the raw intermediate, stream
+   output and wrap into a container. Complete: the hdiutil, qemu-img and
+   simg2img gates of the layer design, both directions.
+4. **Compression.** gzip output, and the budgeted spool with the
+   coordinator's stdin pipe for gzip and stream input; the sandbox admits pipe input and rights-limits the handed-over
    spool and raw-intermediate descriptors. Complete: `gzip -t` and `zcat`
    oracles, bomb and spool-limit tests, byte-identical output under one zlib
    version.

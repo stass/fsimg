@@ -52,13 +52,16 @@ _Static_assert(FSIMG_WIRE_INFO_UUID + 16 == FSIMG_WIRE_INFO_BYTES,
     "the info record ends with the volume UUID");
 
 /* The image a read job opened: the layers around its volume. STACK is the
- * canonical text of the forced and detected slots with the filesystem the
- * reader opened, SCHEME the partition scheme or empty, and REASON why no
- * volume was selected when UNSELECTED is set.
+ * canonical text of the forced and detected slots with the selected
+ * volume's filesystem, SCHEME the partition scheme or empty, CONTAINER the
+ * container the disk was peeled from or empty, with its chunk count, its
+ * chunk encodings (CODECS) and its identifier, and REASON why no volume was
+ * selected when UNSELECTED is set. DISK is the disk the container yields,
+ * or the input file's length without one.
  */
-#define FSIMG_WIRE_IMAGE_BYTES 280u
+#define FSIMG_WIRE_IMAGE_BYTES 352u
 #define FSIMG_WIRE_IMAGE_UNSELECTED 0x1u	/* i only: no volume follows */
-#define FSIMG_WIRE_IMAGE_VERIFIED 0x2u		/* W only: tables verified */
+#define FSIMG_WIRE_IMAGE_VERIFIED 0x2u		/* W only: layers verified */
 typedef enum fsimg_wire_image_field {
 	FSIMG_WIRE_IMAGE_FLAGS = 0,
 	FSIMG_WIRE_IMAGE_DISK = 8,
@@ -70,9 +73,14 @@ typedef enum fsimg_wire_image_field {
 	FSIMG_WIRE_IMAGE_DISK_GUID = 56,
 	FSIMG_WIRE_IMAGE_STACK = 72,
 	FSIMG_WIRE_IMAGE_SCHEME = 136,
-	FSIMG_WIRE_IMAGE_REASON = 152
+	FSIMG_WIRE_IMAGE_CONTAINER = 152,
+	FSIMG_WIRE_IMAGE_CODECS = 168,
+	FSIMG_WIRE_IMAGE_CONTAINER_GUID = 200,
+	FSIMG_WIRE_IMAGE_CHUNKS = 216,
+	FSIMG_WIRE_IMAGE_REASON = 224
 } fsimg_wire_image_field_t;
 #define FSIMG_WIRE_IMAGE_STACK_BYTES 64u
+#define FSIMG_WIRE_IMAGE_CODECS_BYTES 32u
 #define FSIMG_WIRE_IMAGE_REASON_BYTES 128u
 _Static_assert(FSIMG_WIRE_IMAGE_REASON + FSIMG_WIRE_IMAGE_REASON_BYTES ==
     FSIMG_WIRE_IMAGE_BYTES, "the image record ends with the reason");
@@ -256,8 +264,10 @@ fsimg_status_t fsimg_wire_error_decode(const unsigned char *, uint32_t,
  * a regular file or a symbolic link.
  */
 bool fsimg_wire_info_frame_valid(const fsimg_frame_t *, uint64_t);
-/* An image record for a disk of the given size; a partition record within
- * it, in a table of the given slot count.
+/* An image record of an input of the given size: without a container its
+ * disk is that size, and a container's disk is what its tables declare. A
+ * partition record lies within a disk of the given size, in a table of the
+ * given slot count.
  */
 bool fsimg_wire_image_frame_valid(const fsimg_frame_t *, uint64_t);
 bool fsimg_wire_partition_frame_valid(const fsimg_frame_t *, uint64_t,

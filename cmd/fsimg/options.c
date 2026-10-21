@@ -1082,8 +1082,6 @@ interpret_common(cli_parse_t *parse)
 
 	if (parse->reserved)
 		note_unsupported(parse, "the named filesystem is reserved and not supported");
-	if (request->stack.slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED)
-		note_unsupported(parse, "image containers are not supported");
 	if (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0)
 		note_unsupported(parse, "compressed images are not supported");
 	return (FSIMG_OK);
@@ -1151,6 +1149,8 @@ interpret_create(cli_parse_t *parse)
 		return (syntax(parse, "-z with -a requires a .gz image name"));
 	if (option_count(parse, 'M') != 0)
 		note_unsupported(parse, "-M minimization is not supported");
+	if (request->stack.slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED)
+		note_unsupported(parse, "writing image containers is not supported");
 	status = read_create_operands(parse);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1210,6 +1210,10 @@ interpret_read(cli_parse_t *parse)
 	if (request->selector == FSIMG_SELECT_RANGE &&
 	    request->layers.gpt_sector_bytes != 0)
 		return (syntax(parse, "gpt:sector conflicts with --offset and --length"));
+	if (request->selector == FSIMG_SELECT_RANGE &&
+	    request->stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_NAMED)
+		return (syntax(parse,
+		    "a partition scheme in -F conflicts with --offset and --length"));
 	if (option_count(parse, OPT_OFFSET) != 0) {
 		status = parse_byte_option(parse, OPT_OFFSET, false, &request->offset);
 		if (status != FSIMG_OK)

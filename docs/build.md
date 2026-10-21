@@ -23,8 +23,24 @@ The additional fatcat oracle is built from a pinned upstream checkout.
 `configure` finds each tool on `PATH`; a tool given to it in a variable such
 as `MKFS_FAT` or `FATCAT` must be an absolute path, as the specification tests
 treat any other value as an unavailable tool.
+Container oracles use `hdiutil` on macOS for DMG, `qemu-img` (`brew install
+qemu`) for fixed VHD and as a reader of DMG, which it cannot write, and
+`img2simg` and `simg2img` (`brew install simg2img`) for Android sparse
+images. `test/containers-integration.sh` checks that fsimg reads what each
+writes exactly as the raw disk the tools expand it to, reports each missing
+tool and skips only when none is present. `img2simg` aborts on a disk that
+is not a whole number of 4 KiB blocks, so its fixture sets the GPT disk
+length.
 Release archives include generated Autotools support and build without those
-generators. The installed library has no third-party runtime dependencies.
+generators. The installed library's one third-party runtime dependency is
+the system zlib, which DMG chunks (and gzip) require: `configure` finds it
+through pkg-config, or failing that `zlib.h` and `-lz`, accepts
+`ZLIB_CFLAGS` and `ZLIB_LIBS` to override both, and fails naming zlib when
+none links. zlib is never vendored, so the host's security fixes apply to
+the inflate that parses untrusted images. On macOS and FreeBSD it is part of
+the base system; on Linux install the distribution's zlib development
+package (`zlib1g-dev`, `zlib-devel`). `libfsimg.pc` lists it in
+`Libs.private` for static linking.
 
 The CLI requires native spawn-time closure of all unspecified descriptors:
 `POSIX_SPAWN_CLOEXEC_DEFAULT` or `posix_spawn_file_actions_addclosefrom_np`.

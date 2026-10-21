@@ -608,9 +608,8 @@ the file at the translated offset; zero and fill records synthesise bytes;
 compressed records go through the **chunk cache**, a least-recently-used
 cache of decompressed chunks charged to the memory budget. A decompressed
 chunk is at most 16 MiB, and a declared chunk larger than that is
-unsupported, not corrupt; `hdiutil` writes chunks of about 1 MiB, and the
-limit is to verify against `hdiutil` and third-party images before the
-codec is accepted. The cache holds four chunks of the image's largest
+unsupported, not corrupt; `hdiutil` writes chunks of 1 MiB, far inside the
+limit. The cache holds four chunks of the image's largest
 declared decompressed chunk, so 4 MiB for `hdiutil`'s 1 MiB chunks and
 64 MiB at the limit. Each adapter has its own cache, so composing several
 compressed inputs needs a budget that holds every cache; a budget that
@@ -623,9 +622,12 @@ pad its input with gigabytes of empty stored blocks; a longer run is
 `FSIMG_ECORRUPT`. Compressed bytes read and decoded bytes produced are both
 charged to the work counter, so `-l work=` and the deadline bound
 decompression time. Without a work limit, an adapter still stops at an
-algorithmic bound: its decoded bytes may not exceed 64 times the disk length
-plus 1 GiB, beyond which the read fails as a work limit naming the chunk
-cache. That bound is policy, to calibrate against fragmented real images.
+algorithmic bound: its decoded bytes may not exceed 64 times the summed
+decoded length of its compressed records plus 1 GiB, beyond which the read
+fails as a work limit naming the chunk cache. The bound counts only what
+compressed records declare, which the image pays for in compressed bytes,
+so a disk declared vast through zero runs does not raise it. That bound is
+policy, to calibrate against fragmented real images.
 The amplification an adversarial image can force is therefore bounded: a
 read costs at most one chunk decode when it misses the cache; sequential
 reads and any access pattern confined to four chunks decode each chunk
@@ -648,8 +650,9 @@ UDIF uses, as a streaming parser over bounded windows of the file:
   processing instructions after the prolog, and any other element are
   unsupported.
 * Entities: only the five predefined (`&lt;`, `&gt;`, `&amp;`, `&quot;`,
-  `&apos;`). Numeric character references and declared entities are
-  unsupported.
+  `&apos;`). Numeric character references and a DOCTYPE internal subset
+  are unsupported; with no subset to declare one, a reference to any other
+  entity is undeclared, and malformed.
 * Limits: nesting depth 32; element name 16 bytes; key, string and integer
   text 4 KiB; the plist length is bounded by the koly's XML length, itself
   bounded by the file; a `data` element is decoded from base64 in bounded
@@ -658,6 +661,9 @@ UDIF uses, as a streaming parser over bounded windows of the file:
   and rejecting any other byte outside the alphabet.
 * Unknown keys at any level are skipped as a bounded subtree under the same
   depth limit. The parser charges work per element and polls cancellation.
+* A construct beyond the subset or a limit crossed is
+  `FSIMG_EUNSUPPORTED`, naming the construct; malformed XML is
+  `FSIMG_ECORRUPT`.
 
 ### Tables and output
 
@@ -739,7 +745,7 @@ Layer verification runs before the filesystem's and reports its own scope:
 | Layer | Checks |
 | --- | --- |
 | gzip | Each member's CRC32 and modular length, at spool time; trailing bytes |
-| DMG | koly fields and ranges, the data-fork CRC32 by one sequential pass over the data fork where the koly declares it, each block table's CRC32 over its decompressed bytes under payload read-through, chunk tiling and bounds, every chunk decoded once under read-through |
+| DMG | koly fields and ranges, the data-fork CRC32 by one sequential pass over the data fork where the koly declares it, the master CRC32 over the tables' checksum values where the koly declares it, each block table's CRC32 over its decoded bytes under payload read-through, chunk tiling and bounds, every chunk decoded once under read-through |
 | VHD | Footer checksum and the constant fields (format version, data offset, saved state); the cookie, type 2 and the size tie are identity and already hold at open |
 | simg | Header and chunk-header consistency, block totals, CRC32 chunk where present under read-through |
 | GPT | Protective MBR, primary and backup header CRC32 and entry-array CRC32, primary and backup consistency (disk GUID, usable range, entry arrays byte-identical), partitions within the usable range and non-overlapping |
@@ -750,8 +756,9 @@ Partitions not selected are not verified, and the report says so. Ordinary
 open already performs every table check: header, trailer and entry
 validation, chunk tiling and bounds, partition bounds and overlap, so a
 damaged table never yields a volume. Verification adds the passes that read
-beyond the tables: the DMG data-fork CRC32, and under read-through the
-per-table, simg and member checksums with every chunk decoded.
+beyond the tables: the DMG data-fork and master CRC32s, and under
+read-through the per-table, simg and member checksums with every chunk
+decoded.
 
 ## Dependencies and capabilities
 
@@ -934,8 +941,8 @@ All integers are big-endian. The trailer:
 | 32 | 8 | Data fork length |
 | 40 | 8 | Resource fork offset (0) |
 | 48 | 8 | Resource fork length (0) |
-| 56 | 4 | Segment number (1) |
-| 60 | 4 | Segment count (1) |
+| 56 | 4 | Segment number (1; `hdiutil create` writes 0) |
+| 60 | 4 | Segment count (1; `hdiutil create` writes 0) |
 | 64 | 16 | Segment ID |
 | 80 | 136 | Data fork checksum: type (2 = CRC32, 0 = none), bit size (32), 32 x 32-bit values |
 | 216 | 8 | XML offset |
@@ -950,9 +957,12 @@ The plist is `<plist><dict>` with a `resource-fork` dict holding a `blkx`
 array; each element is a dict with `Attributes` (string `0x0050`), `CFName`
 and `Name` (strings), `ID` (string, decimal) and `Data` (base64 of a `mish`
 table). The `mish` table, big-endian like the trailer, follows the layout
-`libdmg-hfsplus` and `dmg2img` document; the values in the "Written" column
-and the three relations marked "to verify" are confirmed against `hdiutil`
-output and a QEMU read of an fsimg image before the codec is accepted:
+`libdmg-hfsplus` and `dmg2img` document. The relations the reader relies on
+are confirmed against `hdiutil` output: every image it writes has data
+offset 0, tables starting at nonzero sectors with run sectors counted from
+the table's first sector, and table and master checksums as stated below.
+The values in the "Written" column are confirmed against `hdiutil` output
+and a QEMU read of an fsimg image before the writer is accepted:
 
 | Offset | Size | Field | Written |
 | --- | --- | --- | --- |
@@ -960,18 +970,20 @@ output and a QEMU read of an fsimg image before the codec is accepted:
 | 4 | 4 | Version 1 | |
 | 8 | 8 | First sector of the table within the disk | 0 |
 | 16 | 8 | Sector count of the table | The disk's |
-| 24 | 8 | Data offset: the base, relative to the data fork start, that every run's compressed offset adds to (to verify) | 0 |
+| 24 | 8 | Data offset: the base, relative to the data fork start, that every run's compressed offset adds to | 0 |
 | 32 | 4 | Buffers needed | 0x208, as `libdmg-hfsplus` writes |
 | 36 | 4 | Block descriptor: the partition number the table describes, not a count | The plist `ID`, 0 |
 | 40 | 24 | Reserved | Zero |
-| 64 | 136 | Checksum of the table's decompressed bytes: type (2 = CRC32), bit size (32), 32 x 32-bit values, the first used | CRC32 |
+| 64 | 136 | Checksum of the table's decoded bytes, every run but Ignore runs: type (2 = CRC32), bit size (32), 32 x 32-bit values, the first used | CRC32 |
 | 200 | 4 | Run count, terminator included | |
-| 204 | 40 each | Runs: type (32-bit), comment (32-bit), sector number relative to the table's first sector (to verify), sector count, compressed offset, compressed length (each 64-bit) | |
+| 204 | 40 each | Runs: type (32-bit), comment (32-bit), sector number relative to the table's first sector, sector count, compressed offset, compressed length (each 64-bit) | |
 
 Sectors are 512 bytes. The trailer's data-fork checksum is the CRC32 of the
 data fork bytes; the master checksum is the CRC32 over the concatenated
-32-bit per-table checksum values in table order (moderate confidence, to
-verify). Run types:
+big-endian 32-bit per-table checksum values in table order, zero values
+included. A table's checksum covers the decoded bytes of its runs in order,
+zero runs as zeros, and skips Ignore runs, so a table of free space alone
+has the empty CRC, zero. Run types:
 
 | Type | Meaning | Read | Write |
 | --- | --- | --- | --- |
@@ -983,18 +995,20 @@ verify). Run types:
 | 0x80000006 | bzip2 | Unsupported | Never |
 | 0x80000007 | lzfse | Unsupported | Never |
 | 0x80000008 | lzma | Unsupported | Never |
+| Any other | Unknown | Unsupported, naming the type | Never |
 | 0x7FFFFFFE | Comment | Skipped; zero sectors | Never |
 | 0xFFFFFFFF | Terminator | Ends a table; zero sectors | Last entry |
 
 Reading: the probe claims on identity, tied to the file length it receives:
-`koly`, version 4 and header size 512 in the last 512 bytes, the XML range
-ending exactly at the trailer (XML offset plus XML length equal to the file
-length minus 512) and the data fork ending at or before the XML offset (to
-verify against `hdiutil` output; a producer that pads between the plist and
-the trailer relaxes the rule to "both ranges before the trailer", stated
-here, never a looser identity). Validation then requires: segment count 1
-and segment number 1 (multi-segment images are unsupported); sector count
-times 512 as the disk length; checksum types 0 or 2. The plist is parsed as
+`koly`, version 4 and header size 512 in the last 512 bytes, and the XML
+range ending exactly at the trailer (XML offset plus XML length equal to the
+file length minus 512). Every `hdiutil` image ends its data fork exactly at
+the XML offset and its XML exactly at the trailer. Validation then requires:
+the data fork ending at or before the XML offset; a single segment, segment
+number and count both 1 (`hdiutil convert`) or both 0 (`hdiutil create`),
+any other pair being a multi-segment image, which is unsupported; sector
+count times 512 as the disk length; checksum types 0 or 2, a CRC32 of 32
+bits. The plist is parsed as
 the [bounded subset](#plist-parser) states, and every table and run is
 appended to the chunk index: a table's first sector and sector count within
 the disk, each run's sector range within its table, compressed offset plus
@@ -1002,11 +1016,17 @@ length within the data fork, raw runs with compressed length equal to sector
 count times 512, zero and ignore runs with compressed length zero, compressed
 runs with a nonzero compressed length and a decompressed length of at most
 16 MiB, and a nonzero sector count for every run other than a comment or the
-terminator, which carry zero by definition. Run sector counts are summed per
-table and must equal the table's count. The index's tiling pass then proves
-that the tables and runs together cover exactly the declared sector count
-with no overlap; an image with uncovered sectors is corrupt rather than
-silently zero. The `plst` resource and other resource-fork keys are skipped.
+terminator, which carry zero by definition. A table holds exactly its
+declared run count and ends with its one terminator. Run sector counts are
+summed per table and must equal the table's count. The index's tiling pass
+then proves that the tables and runs together cover exactly the declared
+sector count with no overlap; an image with uncovered sectors is corrupt
+rather than silently zero. Every `hdiutil` image examined (UDRO, UDZO, UDRW
+converted to both, zero-filled, with no partition map, GPT and MBR) tiles
+its disk exactly, one table per partition-map region with its free space as
+Ignore runs, so the strict rule costs no real image. `hdiutil` writes UDZO
+chunks of 2048 sectors and stores a chunk raw when compression does not
+shrink it. The `plst` resource and other resource-fork keys are skipped.
 
 Writing: one block table covering the whole disk, `ID` 0, `Name` and
 `CFName` `whole disk (fsimg : 0)`, runs of `dmg:chunk` bytes with a shorter
@@ -1025,7 +1045,11 @@ plan, without changing anything else in this design.
 
 Reference: Microsoft, "Virtual Hard Disk Image Format Specification",
 version 1.0. Oracles: `qemu-img info`/`check`/`convert`, and a hypervisor
-attach where available.
+attach where available. `qemu-img` must be told the format (`-f vpc`):
+probing reads a fixed VHD as a raw file. `qemu-img convert -O vpc -o
+subformat=fixed` pads the disk to its CHS geometry unless `force_size=on`
+is given, so a GPT converted without it no longer ends at the disk's last
+sector and fails the GPT checks, as it should.
 
 Layout: the raw disk followed by a 512-byte big-endian footer: cookie
 `conectix`, features 0x00000002, format version 0x00010000, data offset
@@ -1089,12 +1113,13 @@ at plan time as unsupported by the container, naming the field.
 
 Reading: identity is the magic. Validation then requires major version 1
 (another major version is `FSIMG_EUNSUPPORTED`), minor version 0 and the
-header sizes, every chunk header
-within the file with a total
-size consistent with its type, a nonzero chunk size for every chunk other
-than `CRC32`, the sum of chunk sizes equal to total blocks, the chunk count
-equal to total chunks, and total blocks times block size not overflowing;
-that product is the disk length. The chunks feed the chunk index in file
+header sizes, a block size that is a nonzero multiple of 4, every chunk
+header within the file with a total size consistent with its type, a
+nonzero chunk size for every chunk other than `CRC32`, the sum of chunk
+sizes equal to total blocks, and the chunks filling the file exactly, so
+the file holds exactly the header's total chunks, as `img2simg` writes it;
+total blocks times block size, which two 32-bit fields cannot overflow, is
+the disk length. The chunks feed the chunk index in file
 order, which is also disk order.
 
 ### gzip
@@ -1158,13 +1183,13 @@ format correctness; the oracle rows do.
 | GPT read | Disks from `sgdisk` and `qemu-img` open; auto-selection with one filesystem; index, name and type selectors; names compared as UTF-16 units; `gpt:sector=4096` with `-F fat32/gpt` resolves a disk carrying both headers | Header CRC, entry CRC, alternate LBA, usable range, overlapping entries, backup mismatch, truncated backup, protective MBR with no header: each `FSIMG_ECORRUPT` naming the check and never a bare-volume read; two headers at 512 and 4096 without `gpt:sector`: ambiguity |
 | MBR | `fdisk -l` and `mtools` read fsimg disks; `sfdisk` disks open; types 0x04, 0x0B and 0x0E accepted; a partition ending at sector 2^32; CHS saturation at 1023 | Missing signature, overlapping entries, entry beyond the disk (`FSIMG_ECORRUPT`), 0xEE entry (routes to GPT), FAT boot sector resembling a table (ambiguity), `mbr:type=0x85` refused |
 | DMG write | `hdiutil imageinfo` and `hdiutil verify` accept zlib and `none` images; `hdiutil attach` mounts the FAT volume with and without GPT; `qemu-img convert` yields the raw disk byte for byte; zero runs become zero-fill entries | A flipped data-fork byte fails `hdiutil verify` and fsimg's own verification; `dmg:level=0` and `10` refused |
-| DMG read | `hdiutil create` images in UDRO, UDZO and zero-filled variants open and extract; `qemu-img`-produced DMGs; per-table CRC under read-through | Overlapping tables, uncovered sectors, run beyond the data fork, run with zero sectors, run decompressing short and long, run over 16 MiB, bzip2 run (unsupported), unknown type, segment count 2, koly ranges overlapping, plist depth 33, undeclared entity, 5 KiB key; a bare volume whose last sector is a koly whose ranges do not end at the file's end opens as a bare volume |
+| DMG read | `hdiutil create` images in UDRO, UDZO and zero-filled variants open and extract, and list as the raw disks `hdiutil convert -format UDTO` and `qemu-img convert` expand them to (`qemu-img` reads DMG but cannot write it); both table shapes; per-table CRC under read-through | Overlapping tables, uncovered sectors, run beyond the data fork, run with zero sectors, run decompressing short and long, run over 16 MiB, bzip2 run (unsupported), unknown type, segment count 2, koly ranges overlapping, plist depth 33, undeclared entity, 5 KiB key; a bare volume whose last sector is a koly whose ranges do not end at the file's end opens as a bare volume |
 | VHD | `qemu-img check` and `info` report fixed VHD of the declared size; `vhd:align=1M` lengths; footer checksum; creator fields and original size as written | Flipped checksum (`FSIMG_ECORRUPT`, not a raw read), dynamic type 3 (`FSIMG_EUNSUPPORTED`), size mismatch with file length (no VHD claim: the file is whatever its prefix claims, or unrecognised) |
 | simg | `simg2img` expands to the raw disk byte for byte; `img2simg` output opens; `crc=yes` chunk verified | Chunk total mismatch, block sum mismatch, zero-size RAW chunk, FILL with wrong size, CRC mismatch under read-through, block size not a multiple of 4, 2^32 blocks refused at plan time |
 | gzip | `gzip -t` accepts output; `zcat` yields the raw file; header bytes fixed (OS 3, flags 0, XFL by level); `gzip` and `pigz` input spools; concatenated members; MTIME clamp at an epoch of -1 and 2^32 | Trailing garbage, CRC mismatch, length mismatch, reserved flag bit, truncated member, 65 KiB FNAME; `-z` on a raw file fails as an absent signature |
 | Spool | Stdin of a raw, DMG and gzip image through the coordinator's pipe; all-zero input leaves holes (physical blocks sampled); limit exactly reached; a raw stream whose prefix also passes for gzip is ambiguous and `-z` or `-F` resolves it | A gzip bomb failing at the step that crosses the limit with `FSIMG_RESOURCE_SPOOL`, before the host file grows past it; no spool descriptor; spool descriptor not a fresh empty file; a terminal on stdin refused |
 | Transcode | Output bytes identical with and without sparse-range discovery, across budgets and chunk-cache sizes; raw intermediate absent from every directory after success and failure; output-limit accounting of both files, in the staging directory and in the scratch tree | Short write, flush failure and cancellation at each chunk: staged files removed, nothing published, stream reports incomplete output after the first byte; a sink needing a raw intermediate without one, or with a descriptor that is linked, non-empty, not regular or read-only, fails before any mutation; `cf -` with a terminal on stdout refused |
-| Chunk cache | Sequential reads of a UDZO image decode each chunk once; a pattern confined to four chunks decodes each once; decoded bytes appear in the work counter | A pattern alternating across five maximum chunks pays one decode per read and stops at `-l work=` with `FSIMG_RESOURCE_WORK`; a 16 MiB memory budget fails the open as a memory limit |
+| Chunk cache | Sequential reads of a UDZO image decode each chunk once; a pattern confined to four chunks decodes each once; decoded bytes appear in the work counter | A pattern alternating across five maximum chunks pays one decode per read and stops at `-l work=` with `FSIMG_RESOURCE_WORK`, and without a work limit at the decode bound; a 16 MiB memory budget fails the open as a memory limit |
 | Wrap, unwrap, compose | Wrap then unwrap is the identity; compose of three volumes lists three partitions with the given names and types in `sgdisk`; inputs read once | Aliased input and output; five partitions on MBR; unrecognised volume without `type=` |
 | Create then verify | Verification runs on the staged file before publication | A fault injected into the staged file after transcode discards it, publishes nothing, and names the layer; `cW` with `-f -` is a syntax error |
 | Reproducibility | Byte-identical output across host order, budget, scratch placement, cache size and sparse discovery for every container, under `compress=none` and under zlib with one zlib version; identifiers follow the derivation under `-R` | Different epochs differ only in the derived fields; an unset identifier without `-R` fails in the library with the key named; zlib version reported |
@@ -1176,11 +1201,6 @@ its platform.
 
 ## Open questions
 
-* **Uncovered DMG sectors.** This design treats sectors no block table covers
-  as corrupt. If `hdiutil`-produced images turn out to leave gaps, the
-  alternative is to read them as zeros, as QEMU does. Recommendation: keep
-  the strict rule unless the evidence gate shows real images need the other,
-  then change the rule here rather than special-casing a producer.
 * **Default DMG chunk table shape.** One table for the whole disk is the
   simplest; `hdiutil` writes one per partition-map region. Recommendation:
   decide by the `hdiutil attach` gate; both shapes are supported on read.

@@ -393,12 +393,17 @@ typedef struct fsimg_stack {
  * FSIMG_CAP_* operations this build implements; suffix is the file suffix
  * naming a container or compression, empty for a scheme. settings lists
  * the keys the layer stores, comma-separated and unqualified ("type,name"),
- * empty for none.
+ * empty for none. codecs lists the chunk encodings a container reads
+ * ("raw,zero,zlib"), and codec_version names the library a layer's codecs
+ * depend on with its version ("zlib 1.3.1"), both empty for none:
+ * compressed bytes are reproducible only for one zlib.
  */
 typedef struct fsimg_layer_info {
 	char		 name[16];
 	char		 suffix[8];
 	char		 settings[64];
+	char		 codecs[32];
+	char		 codec_version[32];
 	fsimg_layer_kind_t kind;
 	unsigned	 capabilities;
 } fsimg_layer_info_t;
@@ -444,17 +449,27 @@ typedef struct fsimg_image_options {
 	uint64_t	 reserved[4];
 } fsimg_image_options_t;
 
-/* stack is the canonical text of the layers found: the scheme when one was
- * detected or forced, and the filesystem when forced or once select() has
- * identified the selected volume. GUIDs are in textual (RFC 4122) byte
- * order. selected is the slot of the last partition select() returned,
- * zero for none. The scope is the validation the tables received.
+/* stack is the canonical text of the layers found: the container and the
+ * scheme when detected or forced, and the filesystem when forced or once
+ * select() has identified the selected volume. container names the
+ * container the disk was peeled from, empty for none; codecs lists the
+ * chunk encodings its index holds ("raw,zero,zlib"), chunk_count its
+ * chunks (one for a fixed VHD, whose disk is one raw run), and
+ * container_guid the VHD unique identifier or DMG segment ID, all zero
+ * when it has none. disk_bytes is the disk the container yields, or the
+ * input's length without one. GUIDs are in textual (RFC 4122) byte order.
+ * selected is the slot of the last partition select() returned, zero for
+ * none. The scope is the validation the tables received.
  */
 typedef struct fsimg_image_info {
 	char		 stack[64];
 	char		 compression[16];
+	char		 container[16];
+	char		 codecs[32];
 	char		 scheme[16];
+	unsigned char	 container_guid[16];
 	unsigned char	 disk_guid[16];
+	uint64_t	 chunk_count;
 	uint64_t	 disk_bytes;
 	uint32_t	 sector_bytes;	/* Zero without a scheme */
 	uint32_t	 partition_count; /* Table slots, used or not */
@@ -514,11 +529,15 @@ typedef struct fsimg_selector {
 	uint64_t	 length;
 } fsimg_selector_t;
 
-/* scheme names the verified table, empty without one; partitions counts
- * the used slots whose bounds were checked. The filesystem of a selected
- * partition is verified separately, and no other partition's contents.
+/* container names the verified container and scheme the verified table,
+ * each empty without one; partitions counts the used slots whose bounds
+ * were checked. The scope is FSIMG_VALIDATION_PAYLOAD when a container's
+ * chunks were decoded and checked under FSIMG_VERIFY_PAYLOAD. The
+ * filesystem of a selected partition is verified separately, and no other
+ * partition's contents.
  */
 typedef struct fsimg_layer_report {
+	char		 container[16];
 	char		 scheme[16];
 	uint32_t	 partitions;
 	fsimg_validation_scope_t scope;
@@ -826,15 +845,20 @@ fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,
  * returns the length it needs without the terminator.
  *
  * An image borrows its input until destruction; the input must be
- * seekable. Opening validates the options and the forced stack; a forced
- * container is unsupported in this build. The scheme is detected, and its
+ * seekable. Opening validates the options and the forced stack, then peels
+ * the container: the DMG, fixed VHD and sparse-image probes run on the
+ * input's prefix and last 512 bytes, or only the forced one, and a claim's
+ * tables are validated completely, so the disk has a fixed length before
+ * any other byte is read; a damaged or unsupported container fails the
+ * open and is never read as a raw disk. The scheme is detected, and its
  * tables validated completely, at most once, on the first get_info,
  * next_partition, verify or partition-based select. A range or disk
  * selection never consults the scheme, so a damaged table cannot block it.
  * next_partition yields each slot from 1, then DONE. select returns a
  * read-only slice for fsimg_reader_open; the slice borrows the image and
  * is released with fsimg_io_free before it. verify checks every table and
- * consumes nothing.
+ * the container's checksums, decoding every chunk under
+ * FSIMG_VERIFY_PAYLOAD, and consumes nothing.
  */
 fsimg_status_t fsimg_stack_parse(const char *, fsimg_stack_t *,
     fsimg_error_t *);

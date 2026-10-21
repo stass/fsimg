@@ -43,6 +43,26 @@ input, and `fsimg_writer_output`, which takes a file or I/O sink that
 `--formats` lists the schemes, containers and compressions with their kind,
 support and settings.
 
+Reading accepts containers. DMG (stored, zero and zlib chunks, as hdiutil
+writes UDRO and UDZO images), fixed VHD and Android sparse images are
+detected from the file's prefix and last 512 bytes, or forced in the
+stack's container slot, and read as the disk they hold, with any partition
+table inside. Each container's tables are validated completely at open,
+under checked arithmetic, into a chunk index kept in bounded metadata
+storage that must tile the disk exactly; a damaged or unsupported container
+fails rather than being read as a raw disk. DMG property lists go through
+a bounded streaming XML parser. Decoded chunks live in a four-chunk cache
+allocated at open within the memory limit; decoding is charged as work and
+capped without a work limit, and inflate must produce exactly the declared
+bytes. `W` checks the DMG data fork and master checksums and the VHD
+footer, and `W -d` decodes every chunk for the block-table and sparse-image
+CRC32s. `i` and its JSON stack record report the container, its chunk
+count, encodings and identifier, and `--formats` the encodings each
+container reads and the zlib version. The system zlib becomes a required
+dependency, found by configure and never vendored. A range given with
+`--offset` addresses the container's disk, so the worker, not the
+coordinator, checks it.
+
 Resource contexts account for memory and owned descriptors, enforce session
 quotas, and report cancellation and structured errors. Bounded positional I/O
 supports regular files, callbacks, fixed sinks, and nested slices. Private
@@ -187,8 +207,8 @@ each operand keeps its own path in the image and equal directories merge.
 Extraction creates one fresh private directory named after the image, or with
 -E fills an empty private directory; both refuse destinations carrying a
 non-trivial ACL. The long listing shows mode, size and UTC modification time.
-Compression, minimization, standard input or output images, containers and
-several members are recognized and reported as not supported. Strict option parsing, streaming NDJSON, bounded progress and command-wide output accounting share
+Compression, minimization, standard input or output images, writing
+containers and several members are recognized and reported as not supported. Strict option parsing, streaming NDJSON, bounded progress and command-wide output accounting share
 the supervised worker/relay path. Manuals, public-API examples, pkg-config
 metadata and private-prefix installation checks accompany the command and
 static/shared library.

@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\" Copyright (c) 2026, fsimg contributors
-.Dd October 19, 2026
+.Dd October 21, 2026
 .Dt LIBFSIMG 3
 .Os
 .Sh NAME
@@ -8,7 +8,12 @@
 .Nd bounded filesystem image readers, writers and safe extraction
 .Sh LIBRARY
 Filesystem image library
-.Pq Fl l Ns fsimg
+.Pq Fl l Ns fsimg ;
+a static link also needs the system zlib
+.Pq Fl l Ns z ,
+which
+.Pa libfsimg.pc
+lists
 .Sh SYNOPSIS
 .In fsimg.h
 .Ft void
@@ -176,6 +181,23 @@ writes the bytes an opened image's selection names, raw, and
 builds a disk from several volumes, one partition each.
 They copy the disk once, read each input once, and refuse an output that
 shares storage with an input before writing.
+.Pp
+.Fn fsimg_image_open
+peels a DMG, fixed VHD or Android sparse image container before anything
+else reads the input: the container probes run on the input's first bytes
+and last 512 bytes, or only the one the stack's container slot forces, and
+a claimed container's tables are validated completely, so a damaged or
+unsupported container fails the open with FSIMG_ECORRUPT or
+FSIMG_EUNSUPPORTED and is never read as a raw disk.
+Selections then address the container's disk, served through a cache of
+four decoded chunks of at most 16 MiB each, allocated at open within the
+memory limit; decoded bytes count as work.
+.Fn fsimg_image_get_info
+reports the container's name, chunk count, chunk encodings and identifier;
+.Fn fsimg_image_verify
+checks its checksums and, under FSIMG_VERIFY_PAYLOAD, decodes every chunk.
+.Fn fsimg_layer_next
+reports each container's chunk encodings and the zlib version it uses.
 .Sh EXTRACTION
 .Fn fsimg_extract_at
 requires an untouched reader and a fresh destination basename beneath a trusted

@@ -1,0 +1,128 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+#
+# fsimg reads the containers independent tools write: hdiutil's read-only
+# (UDRO) and zlib (UDZO) DMGs with and without a partition map, populated
+# and zero-filled; qemu-img's fixed VHDs; and img2simg's sparse images.
+# Each container's volume must list and extract exactly as its source
+# tree, verify with read-through, and read as the raw disk the same tools
+# expand it to (hdiutil convert to UDTO, qemu-img convert to raw, simg2img).
+# Each missing tool is reported; the test skips only when no oracle is
+# available.
+set -eu
+hdiutil=${HDIUTIL:-'@HDIUTIL@'}
+qemu_img=${QEMU_IMG:-'@QEMU_IMG@'}
+simg2img=${SIMG2IMG:-'@SIMG2IMG@'}
+img2simg=${IMG2SIMG:-'@IMG2SIMG@'}
+fsimg="$(pwd)/fsimg"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-containers-oracle-XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+cd "$fixture"
+mkdir source
+printf 'hello\n' > source/HELLO.TXT
+# Incompressible bytes give UDZO raw runs beside its zlib runs.
+dd if=/dev/urandom of=source/RANDOM.BIN bs=1024 count=1536 2>/dev/null
+awk 'BEGIN { for (i = 0; i < 40000; i++) printf "line %d of a compressible file\n", i }' \
+    > source/TEXT.TXT
+ran=0
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# The image's stack, a listing and extraction identical to the source, and
+# verification with read-through naming the container.
+check_container() {
+    "$fsimg" if "$1" > info.txt 2>/dev/null || fail "$1: information"
+    grep -q "^Stack:        $2\$" info.txt || fail "$1: stack is not $2"
+    grep -q "^Container:    ${2##*/}, " info.txt || fail "$1: container line"
+    rm -rf extracted
+    mkdir extracted
+    "$fsimg" xf "$1" -C extracted 2>/dev/null || fail "$1: extraction"
+    diff -r source "extracted/$(basename "${1%.*}")" > /dev/null ||
+        fail "$1: extraction differs from the source"
+    "$fsimg" Wdf "$1" 2>/dev/null | grep -q "${2##*/} container," ||
+        fail "$1: verification"
+}
+
+# A container's volume lists as the raw disk an oracle expanded it to.
+same_listing() {
+    "$fsimg" tf "$1" > container.txt 2>/dev/null || fail "$1: listing"
+    "$fsimg" tf "$2" > raw.txt 2>/dev/null || fail "$2: listing"
+    cmp -s container.txt raw.txt || fail "$1 and $2 list differently"
+}
+
+if test -n "$hdiutil"; then
+    for format in UDRO UDZO; do
+        for layout in NONE GPTSPUD; do
+            "$hdiutil" create -quiet -srcfolder source -size 16m -fs 'MS-DOS FAT16' \
+                -volname FSIMG -layout "$layout" -format "$format" -o "$format-$layout"
+        done
+        check_container "$format-NONE.dmg" fat16/dmg
+        check_container "$format-GPTSPUD.dmg" fat16/gpt/dmg
+        "$hdiutil" convert -quiet "$format-GPTSPUD.dmg" -format UDTO -o "$format-raw"
+        same_listing "$format-GPTSPUD.dmg" "$format-raw.cdr"
+    done
+    # Zero-filled volumes: hdiutil writes free-space runs and tables
+    # whose checksum is the empty CRC.
+    "$hdiutil" create -quiet -size 32m -fs 'MS-DOS FAT16' -volname EMPTY \
+        -layout GPTSPUD -o zero-UDRW
+    for format in UDRO UDZO; do
+        "$hdiutil" convert -quiet zero-UDRW.dmg -format "$format" -o "zero-$format"
+        "$fsimg" if "zero-$format.dmg" 2>/dev/null |
+            grep -q '^Stack:        fat16/gpt/dmg$' || fail "zero-$format.dmg: stack"
+        test -z "$("$fsimg" tf "zero-$format.dmg" 2>/dev/null)" ||
+            fail "zero-$format.dmg: listing"
+        "$fsimg" Wdf "zero-$format.dmg" > /dev/null 2>&1 ||
+            fail "zero-$format.dmg: verification"
+    done
+    ran=$((ran + 1))
+else
+    echo 'SKIP: hdiutil is required for the DMG oracle'
+fi
+
+if test -n "$qemu_img"; then
+    # qemu-img reads DMG but cannot write it: report that rather than
+    # assume it.
+    if "$qemu_img" create -f dmg qemu.dmg 1M > /dev/null 2>&1; then
+        echo 'NOTE: qemu-img wrote a DMG; add it to the DMG oracle'
+    else
+        echo 'NOTE: qemu-img cannot write DMG images; hdiutil is the DMG producer'
+    fi
+    if test -n "$hdiutil"; then
+        "$qemu_img" convert -f dmg -O raw UDZO-GPTSPUD.dmg qemu-dmg.raw
+        cmp -s qemu-dmg.raw UDZO-raw.cdr || fail "qemu-img and hdiutil expand UDZO differently"
+    fi
+    # A fixed VHD around a disk fsimg wrote. force_size keeps the disk
+    # length; without it qemu-img pads the disk to its CHS geometry and the
+    # GPT no longer ends at the disk's last sector.
+    "$fsimg" cf disk.img -F fat32/gpt -C source . 2>/dev/null
+    "$qemu_img" convert -f raw -O vpc -o subformat=fixed,force_size=on disk.img disk.vhd
+    check_container disk.vhd fat32/gpt/vhd
+    "$qemu_img" convert -f vpc -O raw disk.vhd qemu-vhd.raw
+    cmp -s qemu-vhd.raw disk.img || fail "qemu-img expands the fixed VHD to another disk"
+    same_listing disk.vhd disk.img
+    ran=$((ran + 1))
+else
+    echo 'SKIP: qemu-img is required for the VHD oracle'
+fi
+
+if test -n "$img2simg" && test -n "$simg2img"; then
+    # img2simg asserts unless the disk is a whole number of 4 KiB blocks.
+    "$fsimg" cf sparse.img -F exfat/gpt -s 32M -o gpt:disk=40M -C source . 2>/dev/null
+    "$img2simg" sparse.img sparse.simg > /dev/null
+    check_container sparse.simg exfat/gpt/simg
+    "$simg2img" sparse.simg expanded.img
+    cmp -s expanded.img sparse.img || fail "simg2img expands to another disk"
+    same_listing sparse.simg sparse.img
+    ran=$((ran + 1))
+else
+    echo 'SKIP: img2simg and simg2img are required for the sparse image oracle'
+fi
+
+if test "$ran" -eq 0; then
+    exit 77
+fi
+echo "PASS: $ran container oracles"

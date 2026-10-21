@@ -26,6 +26,13 @@ struct fsimg_io {
 	int		 fd;
 	fsimg_io_ops_t	 ops;
 	void		*argument;
+	/* An internal resolver: resolve supplies every byte, release frees its
+	 * argument with the object, and backing is the file whose identity it
+	 * carries for alias and stability checks.
+	 */
+	fsimg_io_resolve_t resolve;
+	void		(*release)(void *);
+	fsimg_io_t	*backing;
 	bool		 known_zero;
 	bool		 unsized;	/* scratch: length is only the host range */
 };
@@ -87,6 +94,8 @@ fsimg_io_identity(fsimg_io_t *io, fsimg_host_file_t *identity, bool *known,
 	status = io_range(io, 0, 0, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if (io->root->backing != NULL)
+		return (fsimg_io_identity(io->root->backing, identity, known, error));
 	if (io->root->fd == -1)
 		return (FSIMG_OK);
 	if (fsimg_host_file(io->root->fd, identity) == -1)
@@ -210,6 +219,34 @@ fsimg_io_from_callbacks(fsimg_ctx_t *ctx, const fsimg_io_ops_t *ops,
 		io->access |= FSIMG_IO_READ;
 	if (ops->write_at != NULL)
 		io->access |= FSIMG_IO_WRITE;
+	*out = io;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_io_resolver(fsimg_ctx_t *ctx, fsimg_io_t *backing, uint64_t length,
+    fsimg_io_resolve_t resolve, void (*release)(void *), void *argument,
+    fsimg_io_t **out, fsimg_error_t *error)
+{
+	fsimg_io_t *io;
+
+	*out = NULL;
+	io = fsimg_alloc(ctx, sizeof(*io), error);
+	if (io == NULL) {
+		release(argument);
+		return (error->status);
+	}
+	bzero(io, sizeof(*io));
+	io->ctx = ctx;
+	io->root = io;
+	io->fd = -1;
+	io->length = length;
+	io->access = FSIMG_IO_READ;
+	io->ops.max_transfer = 64 * 1024;
+	io->resolve = resolve;
+	io->release = release;
+	io->argument = argument;
+	io->backing = backing;
 	*out = io;
 	return (FSIMG_OK);
 }
@@ -422,6 +459,8 @@ fsimg_io_free(fsimg_io_t *io)
 		return;
 	if (io->fd != -1)
 		fsimg_fd_release(io->ctx, io->fd);
+	if (io->root == io && io->release != NULL)
+		io->release(io->argument);
 	fsimg_dealloc(io);
 }
 
@@ -460,6 +499,9 @@ adapter_transfer(fsimg_io_t *root, uint64_t offset, void *buffer,
 	 */
 	if (writing)
 		root->known_zero = false;
+	if (root->resolve != NULL)
+		return (root->resolve(root->argument, offset, buffer, length,
+		    transferred, error));
 	if (root->fd != -1) {
 		if (!fsimg_host_offset(offset, &host_offset))
 			return (fsimg_error_set(error, FSIMG_ERANGE, 0,

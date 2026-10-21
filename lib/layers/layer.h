@@ -165,8 +165,198 @@ typedef struct fsimg_scheme_ops {
 			    uint64_t, fsimg_scheme_tables_t *, fsimg_error_t *);
 } fsimg_scheme_ops_t;
 
+/*
+ * A container's disk as a chunk index (lib/layers/chunks.c): records that
+ * tile the disk, each a disk range and how to obtain its bytes. Raw bytes
+ * lie at a file offset, encoded_length equal to length; zero and fill
+ * chunks name no file bytes, a fill chunk repeating argument every four
+ * bytes little-endian; a compressed chunk has encoded_length bytes of the
+ * codec argument names, decoding to length bytes, at most 16 MiB.
+ */
+typedef enum fsimg_chunk_kind {
+	FSIMG_CHUNK_RAW = 1,
+	FSIMG_CHUNK_ZERO = 2,
+	FSIMG_CHUNK_FILL = 3,
+	FSIMG_CHUNK_COMPRESSED = 4
+} fsimg_chunk_kind_t;
+
+typedef enum fsimg_chunk_codec {
+	FSIMG_CODEC_ZLIB = 1
+} fsimg_chunk_codec_t;
+
+#define FSIMG_CHUNK_MAX_DECODED	(UINT64_C(16) * 1024 * 1024)
+
+typedef struct fsimg_chunk {
+	uint64_t	 disk_offset;
+	uint64_t	 length;
+	uint64_t	 file_offset;
+	uint64_t	 encoded_length;
+	fsimg_chunk_kind_t kind;
+	uint32_t	 argument;
+} fsimg_chunk_t;
+
+/* What an index holds: its record count, its largest compressed chunk's
+ * decoded length (zero without one), and a bit (1u << kind) per kind.
+ */
+typedef struct fsimg_chunk_summary {
+	uint64_t	 count;
+	uint64_t	 max_decoded;
+	unsigned	 kinds;
+} fsimg_chunk_summary_t;
+
+typedef struct fsimg_chunk_index fsimg_chunk_index_t;
+
+/*
+ * new makes an empty index for a disk of disk_bytes whose encoded bytes
+ * lie in the file range [data_offset, data_offset + data_bytes); owner
+ * names the container in messages and must outlive the index. Records are
+ * charged to the session's scratch. append accepts records in any order
+ * and fails with FSIMG_ECORRUPT for a record outside the disk or the data
+ * or whose lengths disagree with its kind. seal sorts the records and
+ * keeps them only when they tile the disk exactly, FSIMG_ECORRUPT naming
+ * an overlap or an uncovered range otherwise. lookup returns the sealed
+ * record containing a disk offset. On any failure discard the index.
+ */
+fsimg_status_t fsimg_chunk_index_new(fsimg_session_t *, const char *,
+    uint64_t, uint64_t, uint64_t, fsimg_chunk_index_t **, fsimg_error_t *);
+fsimg_status_t fsimg_chunk_index_append(fsimg_chunk_index_t *,
+    const fsimg_chunk_t *, fsimg_error_t *);
+fsimg_status_t fsimg_chunk_index_seal(fsimg_chunk_index_t *, fsimg_error_t *);
+fsimg_status_t fsimg_chunk_index_lookup(fsimg_chunk_index_t *, uint64_t,
+    fsimg_chunk_t *, fsimg_error_t *);
+void fsimg_chunk_index_summary(const fsimg_chunk_index_t *,
+    fsimg_chunk_summary_t *);
+void fsimg_chunk_index_free(fsimg_chunk_index_t *);
+/* Validation control: the sealed index's private record store. */
+struct fsimg_store *fsimg_test_chunk_records(const fsimg_chunk_index_t *);
+/* The kinds of a summary as text in a fixed order: "raw,zero,fill,zlib". */
+void fsimg_chunk_kinds_text(unsigned, char *, size_t);
+/*
+ * The container adapter: a read-only object over a sealed index's disk,
+ * reading raw and compressed bytes from file through session, which both
+ * outlive it, and carrying file's identity. It adopts the index on every
+ * outcome. Its chunk cache is allocated at open, so a memory budget that
+ * cannot hold four of the largest compressed chunk fails here with
+ * FSIMG_ELIMIT naming the chunk cache. Decoding charges the compressed and
+ * decoded bytes to session's work counter.
+ */
+fsimg_status_t fsimg_chunk_disk_open(fsimg_ctx_t *, fsimg_io_t *,
+    fsimg_session_t *, fsimg_chunk_index_t *, fsimg_io_t **, fsimg_error_t *);
+
+/*
+ * The bounded XML property-list parser (lib/layers/plist.c), as DMG uses
+ * it: it streams the file range [offset, offset + length) and reports each
+ * element to a visitor. open announces an element once its place is
+ * valid: a plist root holding one value, a dict holding keys each followed
+ * by one value, an array holding values. A key, string or integer then
+ * delivers its whole text, entities replaced, at most 4 KiB; a data
+ * element delivers its base64 content decoded in pieces; close follows.
+ * Nesting is at most 32 elements and names at most 16 bytes. Malformed
+ * text is FSIMG_ECORRUPT; a construct beyond the subset or its limits
+ * (CDATA, numeric references, another element, a deeper nesting) is
+ * FSIMG_EUNSUPPORTED. A visitor's failure stops the parse with its status.
+ * Every element charges one unit of work to session.
+ */
+typedef enum fsimg_plist_element {
+	FSIMG_PLIST_PLIST,
+	FSIMG_PLIST_DICT,
+	FSIMG_PLIST_ARRAY,
+	FSIMG_PLIST_KEY,
+	FSIMG_PLIST_STRING,
+	FSIMG_PLIST_DATA,
+	FSIMG_PLIST_INTEGER,
+	FSIMG_PLIST_TRUE,
+	FSIMG_PLIST_FALSE
+} fsimg_plist_element_t;
+
+#define FSIMG_PLIST_MAX_DEPTH	32u
+#define FSIMG_PLIST_MAX_TEXT	4096u
+
+typedef struct fsimg_plist_visitor {
+	fsimg_status_t	(*open)(void *, fsimg_plist_element_t, fsimg_error_t *);
+	fsimg_status_t	(*text)(void *, const char *, size_t, fsimg_error_t *);
+	fsimg_status_t	(*data)(void *, const unsigned char *, size_t,
+			    fsimg_error_t *);
+	fsimg_status_t	(*close)(void *, fsimg_plist_element_t, fsimg_error_t *);
+	void		*argument;
+} fsimg_plist_visitor_t;
+
+fsimg_status_t fsimg_plist_parse(fsimg_ctx_t *, fsimg_io_t *,
+    fsimg_session_t *, uint64_t, uint64_t, const fsimg_plist_visitor_t *,
+    fsimg_error_t *);
+
+/* Container tables are big-endian in DMG and VHD. */
+static inline uint32_t
+fsimg_layer_be32(const unsigned char *p)
+{
+	return ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
+	    (uint32_t)p[2] << 8 | (uint32_t)p[3]);
+}
+
+static inline uint64_t
+fsimg_layer_be64(const unsigned char *p)
+{
+	return ((uint64_t)fsimg_layer_be32(p) << 32 | fsimg_layer_be32(p + 4));
+}
+
+/* What a container reads: the file, its length, and the session that
+ * charges its reads and decoding.
+ */
+typedef struct fsimg_container_input {
+	fsimg_ctx_t	*ctx;
+	fsimg_io_t	*file;
+	fsimg_session_t	*session;
+	uint64_t	 file_bytes;
+} fsimg_container_input_t;
+
+/* An opened container: the disk it yields, owned and freed with
+ * fsimg_io_free, and what the image reports of it. guid is the VHD unique
+ * identifier or the DMG segment ID in textual byte order, all zero for a
+ * container without one. kinds is a summary's kind bits.
+ */
+typedef struct fsimg_container {
+	fsimg_io_t	*disk;
+	unsigned char	 guid[16];
+	uint64_t	 disk_bytes;
+	uint64_t	 chunks;
+	unsigned	 kinds;
+} fsimg_container_t;
+
+/*
+ * A container format.
+ *
+ * probe is a pure function of at most probe_bytes of the file's prefix,
+ * its last FSIMG_CONTAINER_TAIL_BYTES (fewer for a shorter file) and the
+ * file length: FSIMG_EFORMAT without its identity, and otherwise a claim,
+ * FSIMG_OK or FSIMG_ECORRUPT or FSIMG_EUNSUPPORTED with a reason. A
+ * trailer claims only when its ranges end at the file's end.
+ *
+ * open validates every table and yields the disk; any failure is final and
+ * leaves nothing allocated. verify performs the checks that read beyond
+ * the tables, and with payload those that decode every chunk;
+ * payload_checks is true when those check decoded bytes against a
+ * checksum, so read-through verification has payload scope. codecs names
+ * the chunk encodings it reads, for the capability record; zlib is true
+ * when it depends on zlib.
+ */
+#define FSIMG_CONTAINER_TAIL_BYTES	512u
+typedef struct fsimg_container_ops {
+	size_t		 probe_bytes;
+	fsimg_status_t	(*probe)(const unsigned char *, size_t,
+			    const unsigned char *, size_t, uint64_t,
+			    fsimg_error_t *);
+	fsimg_status_t	(*open)(const fsimg_container_input_t *,
+			    fsimg_container_t *, fsimg_error_t *);
+	fsimg_status_t	(*verify)(const fsimg_container_input_t *,
+			    const fsimg_container_t *, bool, fsimg_error_t *);
+	const char	*codecs;
+	bool		 payload_checks;
+	bool		 zlib;
+} fsimg_container_ops_t;
+
 /* A registered layer. Every layer name the stack grammar accepts outside
- * the filesystem slot is one record; scheme is NULL for a layer this build
+ * the filesystem slot is one record; a scheme has scheme operations and a
+ * container container operations, and both are NULL for a layer this build
  * recognizes but does not implement.
  */
 typedef struct fsimg_layer {
@@ -174,10 +364,14 @@ typedef struct fsimg_layer {
 	const char	*suffix;	/* File suffix of a container or compression */
 	fsimg_layer_kind_t kind;
 	const fsimg_scheme_ops_t *scheme;
+	const fsimg_container_ops_t *container;
 } fsimg_layer_t;
 
 extern const fsimg_scheme_ops_t fsimg_gpt_scheme;
 extern const fsimg_scheme_ops_t fsimg_mbr_scheme;
+extern const fsimg_container_ops_t fsimg_dmg_container;
+extern const fsimg_container_ops_t fsimg_vhd_container;
+extern const fsimg_container_ops_t fsimg_simg_container;
 
 /* The registry, in reporting order; NULL past the end. */
 const fsimg_layer_t *fsimg_layer_at(size_t);

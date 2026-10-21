@@ -8,20 +8,25 @@
 #include <string.h>
 #include <strings.h>
 
+#include <zlib.h>
+
 #include "format.h"
 #include "layer.h"
 
 /*
  * The layer registry is the one list of layer names and file suffixes.
- * Containers and compression are recognized by name and suffix; this build
- * has no implementation of them, so their records carry no operations.
+ * Containers are read in this build and not written; compression is
+ * recognized by name and suffix, and its record carries no operations.
  */
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme },
 	{ .name = "mbr", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_mbr_scheme },
-	{ .name = "dmg", .suffix = ".dmg", .kind = FSIMG_LAYER_CONTAINER },
-	{ .name = "vhd", .suffix = ".vhd", .kind = FSIMG_LAYER_CONTAINER },
-	{ .name = "simg", .suffix = ".simg", .kind = FSIMG_LAYER_CONTAINER },
+	{ .name = "dmg", .suffix = ".dmg", .kind = FSIMG_LAYER_CONTAINER,
+	    .container = &fsimg_dmg_container },
+	{ .name = "vhd", .suffix = ".vhd", .kind = FSIMG_LAYER_CONTAINER,
+	    .container = &fsimg_vhd_container },
+	{ .name = "simg", .suffix = ".simg", .kind = FSIMG_LAYER_CONTAINER,
+	    .container = &fsimg_simg_container },
 	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION }
 };
 
@@ -374,6 +379,14 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 	if (layer->scheme != NULL)
 		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
 		    FSIMG_CAP_VERIFY;
+	if (layer->container != NULL) {
+		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
+		snprintf(out->codecs, sizeof(out->codecs), "%s",
+		    layer->container->codecs);
+		if (layer->container->zlib)
+			snprintf(out->codec_version, sizeof(out->codec_version),
+			    "zlib %s", zlibVersion());
+	}
 	/* The layer's keys in table order; the longest list fits. */
 	used = 0;
 	for (size_t i = 0; i < SETTING_COUNT; i++) {

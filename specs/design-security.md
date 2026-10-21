@@ -325,8 +325,12 @@ cannot mutate read-only input or escape through a descriptor alias.
 
 Count logical extracted bytes, including zero ranges, before creating or
 extending files. Default total output is at most the selected volume length
-for the supported uncompressed formats. A caller can select another finite
-ceiling. Sparsity, cross-links, and repeated entry references do not evade it.
+for the supported uncompressed formats. A container's disk can be far longer
+than its file (zero runs cost nothing), so the coordinator takes the disk
+length from the worker's image record and cannot check it against the file:
+for a container image the default bound rests on that worker-reported
+length, and a caller who wants a bound independent of the worker sets
+`-l output`. A caller can select another finite ceiling. Sparsity, cross-links, and repeated entry references do not evade it.
 Disk-full and short-write errors fail the operation. Completion requires
 successful file finalization; sparse logical length alone does not prove that
 initialized content was written.
