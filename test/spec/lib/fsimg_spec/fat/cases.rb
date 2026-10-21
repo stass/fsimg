@@ -10,8 +10,14 @@ module FsimgSpec
     # Case, its image, an ImageView or nil for a creation case, and the
     # model that judges its first stage, with the created hook a creation
     # case needs, or nil. defect is why the case cannot be trusted to judge
-    # fsimg, or nil.
-    Classified = Data.define(:kase, :image, :model, :created, :defect)
+    # fsimg, or nil. oracles is the hook CaseRun calls with the case
+    # directory for the oracles' observations, or nil when no oracle reads
+    # the case's image.
+    class Classified < Data.define(:kase, :image, :model, :created, :defect, :oracles)
+      include Checked
+
+      def initialize(oracles: nil, **fields) = super
+    end
 
     # Witnesses and recorded recipes made into cases. A reading case's base
     # is rendered into the fixture cache, its mutations applied, the image
@@ -20,15 +26,19 @@ module FsimgSpec
     # case that extracts a known tree is classified with the host's answers
     # to its name trials. A creation case is classified from its source,
     # and the image create writes is decoded and classified by the created
-    # hook.
+    # hook. The oracles read a valid case's unmutated image
+    # (specs/design-spec-testing.md#process-boundary-and-host-safety),
+    # whose tree is known.
     class Cases
       # name_trials is the run's NameTrials, or NameTrials::NONE where
-      # nothing extracts, as when fuzz seeds are exported.
-      def initialize(registry:, cache:, ceilings:, name_trials:)
+      # nothing extracts, as when fuzz seeds are exported. shell is the
+      # run's OracleShell, or nil where no oracle runs.
+      def initialize(registry:, cache:, ceilings:, name_trials:, shell:)
         @registry = registry
         @cache = cache
         @ceilings = ceilings
         @name_trials = name_trials
+        @shell = shell
         @base_digests = {}
       end
 
@@ -45,7 +55,7 @@ module FsimgSpec
         kase = Case.derive(recipe(witness, base:, path:, stages:, classification:, random_seed:), classification,
                            registry: @registry)
         kase = kase.with(recipe: kase.recorded)
-        Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect)
+        Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect, oracles: oracles(kase.recipe, model))
       end
 
       # Whether a witness meant valid, classified in memory, shows a
@@ -72,11 +82,13 @@ module FsimgSpec
       end
 
       # Why recipe cannot be replayed on this host, or nil: only a reading
-      # recipe on a base of the independent builder renders without
-      # development tools, and a creation recipe needs fsimg alone.
+      # recipe on a base the independent builder renders, tree and all,
+      # replays without development tools, and a creation recipe needs
+      # fsimg alone.
       def self.unreplayable(recipe)
         return nil unless recipe.reading?
         return "#{recipe.id}: only #{Builder::NAME} bases replay without tools" unless recipe.base.builder == Builder::NAME
+        return "#{recipe.id}: a base mtools populates does not replay without tools" if recipe.base.population
 
         nil
       end
@@ -98,10 +110,20 @@ module FsimgSpec
         kase = Case.derive(recipe, classification, registry: @registry)
         digest = base_digest(path)
         defect = digest == recipe.base_sha256 ? replay_defect(kase) : "#{recipe.id}: its base renders to #{digest}"
-        Classified.new(kase:, image:, model:, created: nil, defect:)
+        Classified.new(kase:, image:, model:, created: nil, defect:, oracles: oracles(recipe, model))
       end
 
       private
+
+      # The oracles' hook for a reading case, when the run has a shell and
+      # the case's image is valid and unmutated, so its tree is known; an
+      # image of another class would reach an oracle only under the
+      # confinement the nightly and deep profiles name.
+      def oracles(recipe, model)
+        return nil unless @shell && recipe.reading? && recipe.kind == "valid" && recipe.mutations.empty?
+
+        ->(directory) { Oracles.observe(@shell, image: Runner::IMAGE, chdir: directory, model:) }
+      end
 
       # A creation recipe as a case: create follows its source model, and
       # the reading stages the image it writes, which the created hook

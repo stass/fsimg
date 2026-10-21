@@ -4,10 +4,38 @@
 
 module FsimgSpec
   # What one stage did to one case: its outcome, the execution behind it,
-  # the safety problems the checks after it found, and for extract the
-  # destination tree as walked.
-  StageResult = Data.define(:stage, :outcome, :execution, :problems, :tree) do
+  # the safety problems the checks after it found, for extract the
+  # destination tree as walked, and the case directory's Footprint after
+  # it.
+  StageResult = Data.define(:stage, :outcome, :execution, :problems, :tree, :footprint) do
     def safe? = problems.empty?
+  end
+
+  # The disk a case directory takes (specs/design-spec-testing.md#runner):
+  # the entries it holds that are not directories and their logical
+  # bytes, as a walk with lstat finds them; a sparse image counts its
+  # logical size. The walk is total: a directory it cannot list, such as
+  # one fsimg left unreadable, adds nothing, so the checks after a stage,
+  # not the footprint, report what the stage left behind.
+  Footprint = Data.define(:files, :bytes) do
+    def self.of(directory)
+      children = begin
+        NameFunnel.children(directory)
+      rescue SystemCallError
+        []
+      end
+      children.map { child(directory.b + "/".b + _1) }.reduce(new(files: 0, bytes: 0), :+)
+    end
+
+    def self.child(path)
+      stat = File.lstat(path)
+      stat.directory? ? of(path) : new(files: 1, bytes: stat.size)
+    rescue SystemCallError
+      new(files: 0, bytes: 0)
+    end
+    private_class_method :child
+
+    def +(other) = with(files: files + other.files, bytes: bytes + other.bytes)
   end
 
   # The only code that knows fsimg's command syntax
@@ -51,16 +79,14 @@ module FsimgSpec
       raise Error, "#{recipe.id} does not run #{FsimgSpec.shown(stage)}" unless recipe.stages.include?(stage)
 
       image_before = image_identity(case_directory, stage, recipe)
-      oracle_before = oracle_files(case_directory)
       create_destination(case_directory, recipe) if stage == "extract"
       execution = Invocation.run(command(stage, recipe), chdir: case_directory, env: fsimg_environment(case_directory),
                                                           limits:, observer: @observer)
       capture_problems = capture(case_directory, stage, execution)
       outcome = Outcome.classify(execution, stage:, sandbox:)
       tree = stage == "extract" ? walk_destination(case_directory) : []
-      problems = capture_problems + problems(case_directory, stage:, recipe:, execution:, outcome:, image_before:,
-                                                            oracle_before:, tree:)
-      StageResult.new(stage:, outcome:, execution:, tree:, problems:)
+      problems = capture_problems + problems(case_directory, stage:, recipe:, execution:, outcome:, image_before:, tree:)
+      StageResult.new(stage:, outcome:, execution:, tree:, problems:, footprint: Footprint.of(case_directory))
     end
 
     # fsimg's argv for stage of recipe, with relative operands. A listing
@@ -170,12 +196,12 @@ module FsimgSpec
 
     # The checks after every stage. Any problem fails the case under every
     # policy and ends it.
-    def problems(case_directory, stage:, recipe:, execution:, outcome:, image_before:, oracle_before:, tree:)
+    def problems(case_directory, stage:, recipe:, execution:, outcome:, image_before:, tree:)
       [
         *image_problems(case_directory, recipe, image_before),
         *directory_problems(case_directory, recipe:, stage:),
         *tree_problems(tree),
-        *residue_problems(case_directory, recipe, outcome, oracle_before),
+        *residue_problems(case_directory, recipe, outcome),
         *created_problems(case_directory, stage, outcome),
         ("a process of the group outlived fsimg" if execution.leftover)
       ].compact
@@ -191,16 +217,16 @@ module FsimgSpec
 
     # The names the case directory may hold once stage has run, each with
     # the type lstat must report: the image, or the source tree of a
-    # creation case, scratch/, out/ and oracle/, dest/ once extract has
-    # run, and the captures of the stages run so far. Recipes list their
-    # stages in run order. A link in place of any could send a capture or
-    # a walk to a host path, and any other name is a write fsimg had no
-    # business making.
+    # creation case, scratch/ and out/, dest/ once extract has run, and
+    # the captures of the stages run so far. Recipes list their stages in
+    # run order. A link in place of any could send a capture or a walk to a
+    # host path, and any other name is a write fsimg had no business
+    # making.
     def case_entries(recipe, stage)
       ran = recipe.stages.take(recipe.stages.index(stage) + 1)
       {
         **(recipe.reading? ? { IMAGE => "file" } : { "source" => "directory" }),
-        "scratch" => "directory", "out" => "directory", "oracle" => "directory",
+        "scratch" => "directory", "out" => "directory",
         **(ran.include?("extract") ? { "dest" => "directory" } : {}),
         **ran.flat_map { ["#{_1}.stdout", "#{_1}.stderr"] }.to_h { [_1, "file"] }
       }.transform_keys(&:b)
@@ -244,14 +270,12 @@ module FsimgSpec
 
     # scratch/ must be empty and out/ hold nothing beyond a creation
     # case's created.img, except what an error record names as retained.
-    # oracle/ belongs to the independent tools: fsimg adds nothing to it.
-    def residue_problems(case_directory, recipe, outcome, oracle_before)
+    def residue_problems(case_directory, recipe, outcome)
       error = outcome.records.find { _1["type"] == "error" } || {}
       created = recipe.reading? ? nil : File.basename(CREATED)
       [
         *leftovers(case_directory, "scratch", allowed: [retained_entry(error["retained_scratch"], "scratch")]),
-        *leftovers(case_directory, "out", allowed: [created, retained_entry(error["retained_output"], "out")]),
-        *leftovers(case_directory, "oracle", allowed: oracle_before)
+        *leftovers(case_directory, "out", allowed: [created, retained_entry(error["retained_output"], "out")])
       ]
     end
 
@@ -263,12 +287,6 @@ module FsimgSpec
       return nil unless path.is_a?(String) && path.start_with?("#{directory}/")
 
       path.delete_prefix("#{directory}/").split("/").first
-    end
-
-    # The names in oracle/ before a stage, as binary strings.
-    def oracle_files(case_directory)
-      path = File.join(case_directory, "oracle")
-      real_directory?(path) ? NameFunnel.children(path) : []
     end
 
     def leftovers(case_directory, directory, allowed:)

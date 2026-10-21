@@ -60,7 +60,7 @@ class TestFatTrees < Minitest::Test
       draws = FsimgSpec::Draws.new(seed: SEED, count: 3, sample: 1, cache:)
       promoted = File.join(directory, "promoted")
       Dir.mkdir(promoted)
-      drawn = Fat::Suite.cases(cache:, ceilings: PROFILE.ceilings, name_trials: FsimgSpec::NameTrials::NONE, draws:,
+      drawn = Fat::Suite.cases(cache:, ceilings: PROFILE.ceilings, name_trials: FsimgSpec::NameTrials::NONE, shell: nil, draws:,
                                directory: promoted, tree_generator: faulty).select { _1.id.start_with?("fat.drawn.") }
       defects = drawn.map { _1.classify.call.defect }
 
@@ -116,7 +116,7 @@ class TestFatTrees < Minitest::Test
     Dir.mktmpdir do |directory|
       cache = FsimgSpec::FixtureCache.new(File.join(directory, "cache"))
       yield Fat::Cases.new(registry: Fat::Rules.registry, cache:, ceilings: PROFILE.ceilings,
-                           name_trials: FsimgSpec::NameTrials::NONE), cache, directory
+                           name_trials: FsimgSpec::NameTrials::NONE, shell: nil), cache, directory
     end
   end
 end

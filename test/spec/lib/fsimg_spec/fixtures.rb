@@ -19,7 +19,7 @@ module FsimgSpec
   module Tools
     VARIABLES = {
       mkfs_fat: "MKFS_FAT", fsck_fat: "FSCK_FAT", newfs_msdos: "NEWFS_MSDOS", fsck_msdosfs: "FSCK_MSDOSFS",
-      mcopy: "MCOPY", mmd: "MMD", mdir: "MDIR", fatcat: "FATCAT"
+      mcopy: "MCOPY", mmd: "MMD", mdir: "MDIR", mtype: "MTYPE", fatcat: "FATCAT"
     }.freeze
 
     def self.find(environment) =
@@ -37,38 +37,95 @@ module FsimgSpec
     def self.source_version(*files) = Digest::SHA256.hexdigest(files.map { File.binread(_1) }.join)
   end
 
+  # One oracle's view of one image (specs/design-spec-testing.md#independence-and-oracles):
+  # the tool agrees with the tree the harness knows the image to hold,
+  # disagrees with it, giving a short detail, does not apply to the
+  # image's geometry or names, or is unavailable on this host. A detail
+  # quotes the image's names and the tool's output only through
+  # FsimgSpec.shown, and is cut to DETAIL_LENGTH, so a hostile image
+  # cannot flood a report.
+  class Observation < Data.define(:state, :detail)
+    include Checked
+
+    STATES = %w[agrees disagrees not_applicable unavailable].freeze
+    DETAIL_LENGTH = 240
+
+    def initialize(state:, detail: nil)
+      raise HarnessError, "unknown observation #{FsimgSpec.shown(state)}" unless STATES.include?(state)
+
+      super(state:, detail: detail && (detail.length > DETAIL_LENGTH ? "#{detail[0, DETAIL_LENGTH]}..." : detail))
+    end
+
+    def self.agrees = new(state: "agrees")
+
+    def self.disagrees(detail) = new(state: "disagrees", detail:)
+
+    def self.not_applicable(detail) = new(state: "not_applicable", detail:)
+
+    def self.unavailable(detail) = new(state: "unavailable", detail:)
+
+    # The observation as reports and failure records write it.
+    def to_h = super.compact
+
+    # How many observations of each tool are in each state, over a list of
+    # observation maps (tool => Observation), as the coverage report
+    # counts them: tools and states in name order, states never seen
+    # left out.
+    def self.tally(observations) =
+      observations.flat_map(&:to_a).group_by(&:first).sort.to_h do |tool, pairs|
+        [tool, pairs.map { |_tool, observation| observation.state }.tally.sort.to_h]
+      end
+  end
+
   # Runs an independent tool under the runner's process lifetime, with the
   # oracles' environment (specs/design-spec-testing.md#runner): the
   # harness's PATH, TZ=UTC, a UTF-8 locale so mtools keeps Unicode long
   # names, SOURCE_DATE_EPOCH so mtools stamps the same times on every run,
-  # and HOME and MTOOLSRC in oracle-home/, which holds only an empty
-  # mtoolsrc, so nothing a case writes can configure a tool.
+  # and HOME in oracle-home/. mtools reads both HOME/.mtoolsrc and the file
+  # MTOOLSRC names, so MTOOLSRC names that one file, and oracle-home/ must
+  # hold it alone, an empty regular file, before every run: nothing a case
+  # writes, in its directory or beside the shell's file, configures a
+  # tool. The shell carries the run's tools, each nil where the host lacks
+  # it.
   class OracleShell
     LIMITS = Invocation::Limits.new(wall_seconds: 120, cpu_seconds: 120, file_bytes: 64 << 30,
                                     address_space_bytes: nil, capture_bytes: 16 << 20)
     # The time the base trees carry, and the one mtools stamps on the
     # entries it creates.
     EPOCH = Time.utc(2000, 1, 1)
+    MTOOLSRC = ".mtoolsrc"
 
-    def initialize(home:, environment:)
+    attr_reader :tools
+
+    def initialize(home:, environment:, tools: Tools.find(environment))
       @home = home
       @environment = environment
-      @locale = OracleShell.utf8_locale
+      @tools = tools
       FileUtils.mkdir_p(home, mode: 0o700)
       create_mtoolsrc
     end
 
-    # Runs argv once the mtoolsrc is still the empty regular file it was
-    # created as, so no earlier oracle run can configure a later one.
-    def run(argv, chdir:)
-      check_mtoolsrc
-      Invocation.run(argv, chdir:, env: environment, limits: LIMITS)
+    # Runs argv once oracle-home/ still holds only the empty mtoolsrc it
+    # was created with, so no earlier run can configure a later one. input
+    # is nil, for an empty stdin, or an Enumerator of the chunks to write to
+    # it; capture_bytes caps each of stdout and stderr.
+    def run(argv, chdir:, input: nil, capture_bytes: LIMITS.capture_bytes)
+      check_home
+      Invocation.run(argv, chdir:, env: environment, limits: LIMITS.with(capture_bytes:), input:)
     end
 
     def environment
-      { "PATH" => @environment.fetch("PATH"), "TZ" => "UTC", "LC_ALL" => @locale,
+      { "PATH" => @environment.fetch("PATH"), "TZ" => "UTC", "LC_ALL" => locale,
         "SOURCE_DATE_EPOCH" => EPOCH.to_i.to_s, "HOME" => @home, "MTOOLSRC" => mtoolsrc }
     end
+
+    # Why this host cannot run the oracles, or nil: it lists no UTF-8
+    # locale for them. The locale is looked up on first use, so such a
+    # host still runs every fsimg case, its observations unavailable.
+    def unavailable_reason = locale_lookup.last
+
+    # The oracles' locale (OracleShell.utf8_locale).
+    def locale = locale_lookup.first || raise(FixtureError, locale_lookup.last)
 
     # C.UTF-8 where the host has it, else en_US.UTF-8, under the name the
     # host lists: glibc spells them C.utf8 and en_US.utf8. A host with
@@ -88,17 +145,33 @@ module FsimgSpec
 
     private
 
-    def mtoolsrc = File.join(@home, "mtoolsrc")
+    def mtoolsrc = File.join(@home, MTOOLSRC)
+
+    # The locale and nil, or nil and why the host has none, looked up once
+    # whichever it answers.
+    def locale_lookup
+      @locale_lookup ||= begin
+        [OracleShell.utf8_locale, nil]
+      rescue FixtureError => e
+        [nil, e.message]
+      end
+    end
 
     # Creates the empty mtoolsrc without following a link, or checks that
-    # an earlier shell left it an empty regular file.
+    # an earlier shell left oracle-home/ as it must be.
     def create_mtoolsrc
       File.open(mtoolsrc, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600, &:close)
     rescue Errno::EEXIST
-      check_mtoolsrc
+      check_home
     end
 
-    def check_mtoolsrc
+    def check_home
+      raise FixtureError, "#{@home} is not a directory" unless File.lstat(@home).directory?
+
+      names = NameFunnel.children(@home)
+      raise FixtureError, "#{@home} holds #{names.map { FsimgSpec.shown(_1) }.join(", ")}, not #{MTOOLSRC} alone" unless
+        names == [MTOOLSRC.b]
+
       stat = File.lstat(mtoolsrc)
       raise FixtureError, "#{mtoolsrc} is not an empty regular file" unless stat.file? && stat.size.zero?
     end
@@ -118,17 +191,6 @@ module FsimgSpec
   # run killed while building leaves its temporary files behind; make
   # clean removes the cache.
   class FixtureCache
-    # A build's temporary image is <key>.<hex>.tmp, and the names that
-    # extend it are that build's alone.
-    TEMPORARY_HEX_BYTES = 8
-    # The longest name a build uses in the cache: its population
-    # directory.
-    LONGEST_NAME = "#{"0" * 64}.#{"0" * (2 * TEMPORARY_HEX_BYTES)}.tmp.src".length
-
-    # The directory a build whose temporary image is temporary populates
-    # its tree in.
-    def self.population_directory(temporary) = "#{temporary}.src"
-
     # Tools run from other directories, so the cache names its entries by
     # absolute paths.
     def initialize(directory)
@@ -138,7 +200,8 @@ module FsimgSpec
 
     def key(base, tool_versions) =
       Digest::SHA256.hexdigest(CanonicalJson.generate(
-        { builder: base.builder, parameters: base.parameters, tree: base.tree.map(&:to_h), tools: tool_versions.sort.to_h }
+        { builder: base.builder, population: base.population, parameters: base.parameters, tree: base.tree.map(&:to_h),
+          tools: tool_versions.sort.to_h }.compact
       ))
 
     def image_path(key) = File.join(@directory, "#{key}.img")
@@ -146,14 +209,14 @@ module FsimgSpec
     def manifest_path(key) = File.join(@directory, "#{key}.json")
 
     # The published image for key, building it with the block into a
-    # temporary path first when no run has published one. The block may
-    # use names that extend the temporary path, which no other build
-    # shares, and must remove them.
+    # temporary path of its own first when no run has published one. The
+    # block writes that one file, so the cache holds nothing but images
+    # and their manifests.
     def fetch(key)
       final = image_path(key)
       return final if published?(final)
 
-      temporary = File.join(@directory, "#{key}.#{SecureRandom.hex(TEMPORARY_HEX_BYTES)}.tmp")
+      temporary = File.join(@directory, "#{key}.#{SecureRandom.hex(8)}.tmp")
       begin
         yield temporary
         link_unless_published(temporary, final)

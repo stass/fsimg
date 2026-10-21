@@ -21,7 +21,7 @@ class TestFatPromoted < Minitest::Test
 
     with_cache do |cache|
       recipes.each do |recipe|
-        classified = Fat::Suite.replay(recipe, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE).classify.call
+        classified = Fat::Suite.replay(recipe, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE, shell: nil).classify.call
 
         assert_nil classified.defect, recipe.id
         assert_empty classified.kase.drift, recipe.id
@@ -37,7 +37,7 @@ class TestFatPromoted < Minitest::Test
     Dir.mktmpdir do |directory|
       File.write(File.join(directory, "#{recipe.id}.json"), edited.dump)
       with_cache do |cache|
-        promoted = Fat::Suite.cases(cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE,
+        promoted = Fat::Suite.cases(cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE, shell: nil,
                                     draws: FsimgSpec::Draws::NONE, directory:).find { _1.id == recipe.id }
 
         assert_match(/drifted: expected: recorded info=accept, derived info=reject:/, promoted.classify.call.defect)
@@ -53,7 +53,7 @@ class TestFatPromoted < Minitest::Test
     recipe = Fat::Suite.promoted(Fat::Suite::PROMOTED, ceilings: CEILINGS).first
     registry = FsimgSpec::Registry.new(Fat::Suite.registry.rules.reject { _1.id == recipe.intended_violation })
     with_cache do |cache|
-      pending = Fat::Suite.replay(recipe, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE, registry:)
+      pending = Fat::Suite.replay(recipe, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE, shell: nil, registry:)
 
       error = assert_raises(FsimgSpec::RecipeError) { FsimgSpec::CasePhase.classify(pending) }
       assert_match(/#{Regexp.escape(recipe.intended_violation)}/, error.message)
@@ -66,8 +66,11 @@ class TestFatPromoted < Minitest::Test
   def test_recipe_on_a_formatter_base_is_skipped_and_never_promoted
     recipe = Fat::Suite.promoted(Fat::Suite::PROMOTED, ceilings: CEILINGS).first
     formatted = recipe.with(base: recipe.base.with(builder: "mkfs.fat"))
+    populated = recipe.with(base: recipe.base.with(population: "mtools"))
     with_cache do |cache|
-      assert_match(/only independent bases replay without tools/, Fat::Suite.replay(formatted, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE).skip)
+      replay = ->(case_recipe) { Fat::Suite.replay(case_recipe, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE, shell: nil) }
+      assert_match(/only independent bases replay without tools/, replay.call(formatted).skip)
+      assert_match(/a base mtools populates does not replay without tools/, replay.call(populated).skip)
     end
     Dir.mktmpdir do |directory|
       File.write(File.join(directory, "#{recipe.id}.json"), formatted.dump)
@@ -96,7 +99,7 @@ class TestFatPromoted < Minitest::Test
       end
       with_cache do |cache|
         edited, recorded = Fat::Suite.promoted(directory, ceilings: CEILINGS).map do
-          Fat::Suite.replay(_1, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE).classify.call
+          Fat::Suite.replay(_1, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE, shell: nil).classify.call
         end
 
         assert_nil recorded.defect

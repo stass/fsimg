@@ -30,10 +30,11 @@ class TestCasePhaseFsimg < Minitest::Test
       rule.id == "fat.bpb.bytes_per_sector" ? rule.with(status: FsimgSpec::Status.new(name: "FSIMG_ECORRUPT")) : rule
     end)
 
-    def self.cases(cache:, ceilings:, name_trials:, draws:) =
-      Fat::Suite.cases(cache:, ceilings:, name_trials:, draws:, registry:).select { [FAULTY, VALID].include?(_1.id) }
+    def self.cases(cache:, ceilings:, name_trials:, shell:, draws:) =
+      Fat::Suite.cases(cache:, ceilings:, name_trials:, shell:, draws:, registry:).select { [FAULTY, VALID].include?(_1.id) }
 
-    def self.replay(recipe, cache:, ceilings:, name_trials:) = Fat::Suite.replay(recipe, cache:, ceilings:, name_trials:, registry:)
+    def self.replay(recipe, cache:, ceilings:, name_trials:, shell:) =
+      Fat::Suite.replay(recipe, cache:, ceilings:, name_trials:, shell:, registry:)
 
     def self.preflight_sample(directory) = Fat::Suite.preflight_sample(directory)
   end
@@ -203,8 +204,8 @@ class TestCasePhaseFsimg < Minitest::Test
     Module.new do
       define_singleton_method(:registry) { Fat::Suite.registry }
       define_singleton_method(:preflight_sample) { |directory| Fat::Suite.preflight_sample(directory) }
-      define_singleton_method(:cases) do |cache:, ceilings:, name_trials:, draws:|
-        [Fat::Suite.cases(cache:, ceilings:, name_trials:, draws:).find { _1.id == VALID }, *extra]
+      define_singleton_method(:cases) do |cache:, ceilings:, name_trials:, shell:, draws:|
+        [Fat::Suite.cases(cache:, ceilings:, name_trials:, shell:, draws:).find { _1.id == VALID }, *extra]
       end
     end
   end

@@ -293,8 +293,6 @@ review and commit gates.
   in which the harness kills the parser worker is classified `faulted`,
   never `rejected`, and a `-S required` run on a host without confinement
   fails the preflight as `harness_error`.
-* Items that wait for later stages:
-  - the `.mtoolsrc` stub needs the oracle runner of milestone B;
 * **Gate:** every stub is classified as above, with no leftover processes
   (checked by process group), and the runner drives the real `fsimg` through
   every stage on a trivially valid image.
@@ -498,7 +496,8 @@ review and commit gates.
     - Seeded failures: a planted `.mtoolsrc` in a case directory does not
       reach the next oracle, which closes the S4 stub that waited for this
       layer; a population that pipes one byte too few makes the base's
-      `mdir` size disagree with its recipe, and the base serves no case.
+      mtools read-back disagree with its recipe's file sizes, and the base
+      serves no case.
     - **Gate:** an mtools-populated builder base decodes to its recipe's
       tree and passes the checkers, or the report says per host why not;
       building it writes nothing under `test/spec-cache/` but the image and

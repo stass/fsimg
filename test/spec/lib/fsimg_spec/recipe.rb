@@ -101,16 +101,26 @@ module FsimgSpec
   end
 
   # How a reading case's base image is built: a builder, its integer
-  # parameters and the tree it populates.
-  class Base < Data.define(:builder, :parameters, :tree)
+  # parameters and its tree, and who writes the tree into it. Population is
+  # separate from formatting (specs/design-spec-testing.md#fixtures):
+  # population nil means the builder renders the tree itself, and
+  # "mtools" that mtools populates the builder's empty volume.
+  class Base < Data.define(:builder, :parameters, :tree, :population)
     include Checked
 
-    def initialize(builder:, parameters:, tree:)
+    POPULATIONS = [nil, "mtools"].freeze
+
+    def initialize(builder:, parameters:, tree:, population: nil)
       raise RecipeError, "malformed builder name #{FsimgSpec.shown(builder)}" unless
         builder.is_a?(String) && TOOL_NAME.match?(builder)
+      raise RecipeError, "unknown population #{FsimgSpec.shown(population)}" unless POPULATIONS.include?(population)
 
-      super(builder:, parameters: RecipeValues.named_integers(parameters, what: "parameter"), tree: TreeEntry.tree(tree))
+      super(builder:, parameters: RecipeValues.named_integers(parameters, what: "parameter"), tree: TreeEntry.tree(tree),
+            population:)
     end
+
+    # The base as a recipe and a manifest write it.
+    def to_h = { builder:, population:, tree: tree.map(&:to_h), parameters: }.compact
   end
 
   # A creation case's input: the tree fsimg create reads and its settings.
@@ -286,7 +296,7 @@ module FsimgSpec
     end
 
     def reading_fields = {
-      base: { builder: base.builder, tree: base.tree.map(&:to_h), parameters: base.parameters },
+      base: base.to_h,
       base_sha256:, tool_versions:, mutations: mutations.map(&:to_h), forced_format:
     }.compact
 

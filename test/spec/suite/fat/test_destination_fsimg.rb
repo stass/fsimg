@@ -96,7 +96,7 @@ class TestDestinationFsimg < Minitest::Test
         File.write(File.join(directory, "#{recipe.id}.json"), recipe.dump)
         promoted = Fat::Suite.promoted(directory, ceilings: PROFILE.ceilings).first
         classified = FsimgSpec::CasePhase.classify(Fat::Suite.replay(promoted, cache: phase.setup.cache, ceilings: PROFILE.ceilings,
-                                                                                 name_trials: phase.setup.name_trials))
+                                                                                 name_trials: phase.setup.name_trials, shell: phase.setup.shell))
         result = FsimgSpec::CasePhase.result_of(classified, setup: phase.setup, cases_directory: File.join(phase.results, "cases"))
 
         assert_equal [nil, []], [classified.defect, classified.kase.drift]
@@ -113,7 +113,8 @@ class TestDestinationFsimg < Minitest::Test
   # Classified case and its CaseResult.
   Phase = Data.define(:setup, :results) do
     def run(witness, name_trials)
-      classified = Fat::Cases.new(registry: Fat::Suite.registry, cache: setup.cache, ceilings: PROFILE.ceilings, name_trials:)
+      classified = Fat::Cases.new(registry: Fat::Suite.registry, cache: setup.cache, ceilings: PROFILE.ceilings, name_trials:,
+                                 shell: setup.shell)
                              .call(witness)
       [classified, FsimgSpec::CasePhase.result_of(classified, setup:, cases_directory: File.join(results, "cases"))]
     end

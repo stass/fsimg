@@ -27,9 +27,9 @@ module FsimgSpec
   #
   # 1. spawn it in a new process group, under resource limits, with a fixed
   #    environment and the case directory as its working directory;
-  # 2. read stdout and stderr, each up to the capture cap, while polling for
-  #    the child by pid; never wait(-1), Open3 or Process.detach, which reap
-  #    in helper threads;
+  # 2. read stdout and stderr, each up to the capture cap, and write any
+  #    input to stdin, while polling for the child by pid; never wait(-1),
+  #    Open3 or Process.detach, which reap in helper threads;
   # 3. kill the child and its group when the wall clock or a cap is
   #    reached, then reap; a child alive GROUP_EXIT_SECONDS after the kill
   #    is a harness error;
@@ -74,30 +74,65 @@ module FsimgSpec
     Execution = Data.define(:exit_status, :signal, :stdout, :stderr, :wall_seconds, :cpu_seconds,
                             :ended_by, :leftover, :launch_error, :address_space_applied)
 
-    def self.run(argv, chdir:, env:, limits:, observer: GroupObserver.new)
+    # input is nil, which gives the child an empty stdin, or an Enumerator
+    # of the binary chunks its stdin reads, written as the pipe takes them.
+    def self.run(argv, chdir:, env:, limits:, observer: GroupObserver.new, input: nil)
       started = now
       cpu_before = children_cpu
       IO.pipe(binmode: true) do |out_reader, out_writer|
         IO.pipe(binmode: true) do |err_reader, err_writer|
-          # Interrupts wait while the child starts and arrive only during
-          # supervise, inside stopped_on_unwind, so no started child
-          # escapes its cleanup.
-          Thread.handle_interrupt(Object => :never) do
-            pid = begin
-              spawn(argv, chdir:, env:, limits:, out: out_writer, err: err_writer)
-            rescue SystemCallError => e
-              return launch_failure(e.message, started:)
-            end
-            stopped_on_unwind(pid, observer:) do
-              out_writer.close
-              err_writer.close
-              Thread.handle_interrupt(Object => :immediate) do
-                supervise(pid, readers: [out_reader, err_reader], limits:, started:, cpu_before:)
+          IO.pipe(binmode: true) do |in_reader, in_writer|
+            # Interrupts wait while the child starts and arrive only during
+            # supervise, inside stopped_on_unwind, so no started child
+            # escapes its cleanup.
+            Thread.handle_interrupt(Object => :never) do
+              pid = begin
+                spawn(argv, chdir:, env:, limits:, stdin: input ? in_reader : File::NULL, out: out_writer, err: err_writer)
+              rescue SystemCallError => e
+                return launch_failure(e.message, started:)
+              end
+              stopped_on_unwind(pid, observer:) do
+                # The child holds its own ends now. Without input, the
+                # stdin pipe is unused, so its writer closes too.
+                [out_writer, err_writer, in_reader, *(input ? [] : [in_writer])].each(&:close)
+                feed = input && Feed.new(in_writer, input)
+                Thread.handle_interrupt(Object => :immediate) do
+                  supervise(pid, readers: [out_reader, err_reader], feed:, limits:, started:, cpu_before:)
+                end
               end
             end
           end
         end
       end
+    end
+
+    # A child's stdin, written from an Enumerator of binary chunks as the
+    # pipe takes them, so that writing never blocks supervision. The pipe
+    # closes once the chunks run out, which the child reads as the end of
+    # its input, or once the child stops reading, as a tool that failed
+    # may; its exit status reports that. The pending chunk and the pipe are
+    # the feed's own state.
+    class Feed
+      def initialize(writer, chunks)
+        @writer = writer
+        @chunks = chunks
+        @pending = "".b
+      end
+
+      # The pipe while input remains to be written, for IO.select, or nil.
+      def io = @writer.closed? ? nil : @writer
+
+      # Writes what the pipe takes of the pending chunk, taking the next
+      # chunk once one is written.
+      def write
+        @pending = @chunks.next.b if @pending.empty?
+        written = @writer.write_nonblock(@pending, exception: false)
+        @pending = @pending.byteslice(written..) if written.is_a?(Integer)
+      rescue StopIteration, Errno::EPIPE
+        close
+      end
+
+      def close = @writer.closed? ? nil : @writer.close
     end
 
     # Tells observer the child pid started, then runs the block, which
@@ -186,10 +221,10 @@ module FsimgSpec
 
     # The argv[0] pair keeps Process.spawn from handing a lone argument to
     # a shell.
-    private_class_method def self.spawn(argv, chdir:, env:, limits:, out:, err:)
+    private_class_method def self.spawn(argv, chdir:, env:, limits:, stdin:, out:, err:)
       Process.spawn(env, [argv.first, argv.first], *argv.drop(1),
                     chdir:, unsetenv_others: true, pgroup: true, close_others: true,
-                    in: File::NULL, out:, err:, **rlimits(limits))
+                    in: stdin, out:, err:, **rlimits(limits))
     end
 
     private_class_method def self.rlimits(limits)
@@ -197,14 +232,15 @@ module FsimgSpec
       limits.address_space_bytes ? fixed.merge(rlimit_as: limits.address_space_bytes) : fixed
     end
 
-    private_class_method def self.supervise(pid, readers:, limits:, started:, cpu_before:)
+    # feed is the child's Feed, or nil when its stdin is empty.
+    private_class_method def self.supervise(pid, readers:, feed:, limits:, started:, cpu_before:)
       captures = readers.to_h { [_1, +"".b] }
       open_readers = readers.dup
       ended_by = nil
       killed_at = nil
       status = nil
       loop do
-        read_available(captures, open_readers, cap: limits.capture_bytes)
+        read_available(captures, open_readers, cap: limits.capture_bytes, feed:)
         _, status = Process.wait2(pid, Process::WNOHANG)
         break if status
         raise ContainmentError, "process #{pid} survived SIGKILL" if killed_at && now - killed_at >= GROUP_EXIT_SECONDS
@@ -218,6 +254,7 @@ module FsimgSpec
         killed_at = now
         kill_child(pid)
       end
+      feed&.close
       leftover = group_alive?(pid)
       kill_and_await_group(pid) if leftover
       drain(captures, open_readers, cap: limits.capture_bytes)
@@ -245,11 +282,14 @@ module FsimgSpec
 
     # Appends what the ready pipes hold to their captures and drops a pipe
     # from open_readers at its end. Both are the supervisor's own buffers,
-    # updated in place as the pipes are read.
-    private_class_method def self.read_available(captures, open_readers, cap:, timeout: POLL_SECONDS)
-      return sleep(timeout) if open_readers.empty?
+    # updated in place as the pipes are read. A feed whose pipe has room is
+    # written to.
+    private_class_method def self.read_available(captures, open_readers, cap:, feed: nil, timeout: POLL_SECONDS)
+      writers = [feed&.io].compact
+      return sleep(timeout) if open_readers.empty? && writers.empty?
 
-      ready, = IO.select(open_readers, nil, nil, timeout)
+      ready, writable = IO.select(open_readers, writers, nil, timeout)
+      feed.write unless Array(writable).empty?
       Array(ready).each do |reader|
         case reader.read_nonblock(READ_BYTES, exception: false)
         in nil then open_readers.delete(reader)

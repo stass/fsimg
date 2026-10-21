@@ -3,16 +3,16 @@
 # frozen_string_literal: true
 
 require "digest"
-require "fileutils"
 require "minitest"
 require "tmpdir"
 require "fsimg_spec"
 require "fsimg_spec/fat"
 
 # FAT bases (specs/design-spec-testing.md#fixtures): every base passes the
-# read-only checker and mdir, a builder base and a formatter base of one
-# geometry decode to equal models, a base off its parameters is refused,
-# and fsimg accepts every base and extracts its tree.
+# read-only checker and the mtools read-back, mtools populates a builder
+# base as well as a formatter base, a builder base and a formatter base of
+# one geometry decode to equal models, a base off its parameters is
+# refused, and fsimg accepts every base and extracts its tree.
 class TestFatBases < Minitest::Test
   Fat = FsimgSpec::Fat
   PROFILE = FsimgSpec.fetch_profile("quick")
@@ -47,7 +47,7 @@ class TestFatBases < Minitest::Test
     skip_without_checkers
     with_cache do |cache, shell|
       BUILDER_BASES.each do |name, parameters|
-        fixture = Fat::Bases.materialize(builder_base(parameters, Fat::Bases.standard.fetch("fat32").tree), cache:, shell:, tools: @tools, ceilings: CEILINGS)
+        fixture = Fat::Bases.materialize(builder_base(parameters, Fat::Bases.standard.fetch("fat32").tree), cache:, shell:, ceilings: CEILINGS)
 
         assert fixture.usable?, "#{name}: #{fixture.problems.join("; ")}"
       end
@@ -59,7 +59,7 @@ class TestFatBases < Minitest::Test
     skip_without_checkers
     with_cache do |cache, shell|
       Fat::Bases.standard.each do |name, base|
-        fixture = Fat::Bases.materialize(base, cache:, shell:, tools: @tools, ceilings: CEILINGS)
+        fixture = Fat::Bases.materialize(base, cache:, shell:, ceilings: CEILINGS)
 
         assert fixture.usable?, "#{name}: #{fixture.problems.join("; ")}"
         assert_equal name, fixture.manifest.fetch(:format)
@@ -76,28 +76,44 @@ class TestFatBases < Minitest::Test
     digests = [0, 2.1].map do |delay|
       sleep delay
       with_cache do |cache, shell|
-        Digest::SHA256.file(Fat::Bases.materialize(base, cache:, shell:, tools: @tools, ceilings: CEILINGS).image).hexdigest
+        Digest::SHA256.file(Fat::Bases.materialize(base, cache:, shell:, ceilings: CEILINGS).image).hexdigest
       end
     end
 
     assert_equal digests.first, digests.last
   end
 
-  # Two runs may build one base at once: a build populates its tree in a
-  # directory of its own, and never touches another build's.
-  def test_a_build_leaves_another_builds_population_alone
-    skip_without(:mkfs_fat, :mmd, :mcopy)
-    base = Fat::Bases.standard.fetch("fat32")
+  # Population is separate from formatting: mtools pipes the standard tree
+  # into the builder's empty volume, the checker and the mtools read-back
+  # agree with the tree, and the build leaves nothing in the cache but the
+  # image and its manifest.
+  def test_mtools_populated_builder_base_holds_its_tree
+    skip_without(:mmd, :mcopy)
+    skip_without_checkers
     with_cache do |cache, shell, _results, directory|
-      Fat::Bases.materialize(base, cache:, shell:, tools: @tools, ceilings: CEILINGS)
-      key = File.basename(Dir.glob(File.join(directory, "cache", "*.json")).first, ".json")
-      other = FsimgSpec::FixtureCache.new(File.join(directory, "other"))
-      planted = File.join(directory, "other", "#{key}.src", "keep")
-      FileUtils.mkdir_p(File.dirname(planted))
-      File.write(planted, "")
-      Fat::Bases.materialize(base, cache: other, shell:, tools: @tools, ceilings: CEILINGS)
+      fixture = Fat::Bases.materialize(populated_builder_base, cache:, shell:, ceilings: CEILINGS)
+      key = File.basename(fixture.image, ".img")
 
-      assert File.exist?(planted), "the build removed another build's population directory"
+      assert fixture.usable?, fixture.problems.join("; ")
+      assert_equal %w[fsck mtools], fixture.manifest.fetch(:validators).select { _2[:state] == "agrees" }.keys.sort
+      assert_equal ["#{key}.img", "#{key}.json"], Dir.children(File.join(directory, "cache")).sort
+    end
+  end
+
+  # The seeded failure: a population that pipes each file one byte short
+  # leaves a base whose mtools read-back disagrees with its recipe, so the
+  # base serves no case.
+  def test_base_populated_one_byte_short_serves_no_case
+    skip_without(:mmd, :mcopy)
+    skip_without_checkers
+    short = Module.new do
+      def self.each_chunk(seed:, size:) = FsimgSpec::FileContent.each_chunk(seed:, size: [size - 1, 0].max)
+    end
+    with_cache do |cache, shell|
+      fixture = Fat::Bases.materialize(populated_builder_base, cache:, shell:, ceilings: CEILINGS, content: short)
+
+      refute fixture.usable?
+      assert_match(/\Amtools: mtools lacks file "DIR\/Nested\/blocks.bin" of 5000 bytes/, fixture.problems.join("; "))
     end
   end
 
@@ -109,8 +125,8 @@ class TestFatBases < Minitest::Test
     skip_without(:mkfs_fat, :mmd, :mcopy)
     with_cache do |cache, shell|
       Fat::Bases.standard.each_value do |base|
-        formatter = decode(Fat::Bases.materialize(base, cache:, shell:, tools: @tools, ceilings: CEILINGS).image)
-        builder = decode(Fat::Bases.materialize(builder_base(parameters_of(formatter), []), cache:, shell:, tools: @tools, ceilings: CEILINGS).image)
+        formatter = decode(Fat::Bases.materialize(base, cache:, shell:, ceilings: CEILINGS).image)
+        builder = decode(Fat::Bases.materialize(builder_base(parameters_of(formatter), []), cache:, shell:, ceilings: CEILINGS).image)
 
         assert_equal formatter.geometry, builder.geometry
         assert_equal formatter.common.to_h.except(*FORMATTER_CHOICES), builder.common.to_h.except(*FORMATTER_CHOICES)
@@ -123,11 +139,15 @@ class TestFatBases < Minitest::Test
   # Bases the harness cannot build are refused as fixture errors before
   # any tool runs, so a malformed recipe base is refused, never a crash.
   REFUSED_BASES = {
-    "a formatter base without its size" => [{ builder: "mkfs.fat", parameters: { fat_bits: 16 }, tree: [] }, "needs blocks"],
+    "a formatter base nothing populates" => [{ builder: "mkfs.fat", parameters: { blocks: 1440, fat_bits: 12 }, tree: [] },
+                                             "mtools must populate it"],
+    "a formatter base without its size" =>
+      [{ builder: "mkfs.fat", parameters: { fat_bits: 16 }, tree: [], population: "mtools" }, "needs blocks"],
     "a formatter base with an unknown parameter" =>
-      [{ builder: "mkfs.fat", parameters: { blocks: 1440, fat_bits: 12, color: 1 }, tree: [] }, "unknown mkfs.fat parameters color"],
+      [{ builder: "mkfs.fat", parameters: { blocks: 1440, fat_bits: 12, color: 1 }, tree: [], population: "mtools" },
+       "unknown mkfs.fat parameters color"],
     "a formatter base whose tree outgrows its image" =>
-      [{ builder: "mkfs.fat", parameters: { blocks: 1440, fat_bits: 12 },
+      [{ builder: "mkfs.fat", parameters: { blocks: 1440, fat_bits: 12 }, population: "mtools",
          tree: [FsimgSpec::TreeEntry.new(path: "BIG", type: "file", size: 2 << 20, seed: 1)] }, "tree exceeds"],
     "an unknown builder" => [{ builder: "mformat", parameters: {}, tree: [] }, "unknown builder mformat"],
     "a builder base its builder refuses" => [{ builder: "independent", parameters: { clusters: 0 }, tree: [] }, "clusters"],
@@ -139,7 +159,7 @@ class TestFatBases < Minitest::Test
     with_cache do |cache, shell|
       REFUSED_BASES.each do |name, (fields, message)|
         error = assert_raises(FsimgSpec::FixtureError, name) do
-          Fat::Bases.materialize(FsimgSpec::Base.new(**fields), cache:, shell:, tools: @tools, ceilings: CEILINGS)
+          Fat::Bases.materialize(FsimgSpec::Base.new(**fields), cache:, shell:, ceilings: CEILINGS)
         end
         assert_includes error.message, message, name
       end
@@ -175,10 +195,10 @@ class TestFatBases < Minitest::Test
     skip "FSIMG_BIN names no fsimg binary" unless File.executable?(fsimg)
 
     with_cache do |cache, shell, results|
-      runner, sandbox = FsimgSpec::Preflight.new(results:, build_directory: results, profile: PROFILE, fsimg:,
+      runner, sandbox = FsimgSpec::Preflight.new(results:, profile: PROFILE, fsimg:,
                                                  environment: ENV.to_h, sample: FsimgSpec::Fat::Bases.method(:preflight_sample)).call
       bases.each do |name, base|
-        fixture = Fat::Bases.materialize(base, cache:, shell:, tools: @tools, ceilings: CEILINGS)
+        fixture = Fat::Bases.materialize(base, cache:, shell:, ceilings: CEILINGS)
         image = FsimgSpec::ImageView.open(fixture.image)
         model = Fat::Model.decode(image, tree: FsimgSpec::KnownTree.of(base.tree))
         result = FsimgSpec::CaseRun.call(reading_case(name, base), model:, image:, runner:,
@@ -196,10 +216,15 @@ class TestFatBases < Minitest::Test
     builders = { "fat12" => 2000, "fat16" => 20_000, "fat32" => 70_000 }.to_h do |name, clusters|
       ["#{name} builder", builder_base({ clusters: }, Fat::Bases.standard.fetch("fat32").tree)]
     end
-    formatters.merge(builders)
+    populated = [@tools[:mmd], @tools[:mcopy]].all? ? { "fat16 mtools-populated builder" => populated_builder_base } : {}
+    formatters.merge(builders, populated)
   end
 
   def builder_base(parameters, tree) = FsimgSpec::Base.new(builder: Fat::Builder::NAME, parameters:, tree:)
+
+  # A FAT16 builder base whose standard tree mtools populates.
+  def populated_builder_base = FsimgSpec::Base.new(builder: Fat::Builder::NAME, parameters: { clusters: 5000 },
+                                                   tree: Fat::Bases.standard.fetch("fat32").tree, population: "mtools")
 
   # The builder parameters that reproduce model's geometry.
   def parameters_of(model)
@@ -236,10 +261,10 @@ class TestFatBases < Minitest::Test
   end
 
   # A base checked by no tool passes vacuously, so the checker tests need
-  # a read-only checker and mdir.
+  # a read-only checker and the mtools read-back.
   def skip_without_checkers
     skip "no read-only checker" unless @tools[:fsck_fat] || @tools[:fsck_msdosfs]
-    skip_without(:mdir)
+    skip_without(:mdir, :mtype)
   end
 
   def with_cache

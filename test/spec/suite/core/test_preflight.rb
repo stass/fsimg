@@ -94,6 +94,6 @@ class TestPreflight < Minitest::Test
   end
 
   def preflight(results, environment: { "PATH" => ENV.fetch("PATH") }) =
-    FsimgSpec::Preflight.new(results:, build_directory: results, profile: PROFILE, fsimg: "/nonexistent/fsimg",
+    FsimgSpec::Preflight.new(results:, profile: PROFILE, fsimg: "/nonexistent/fsimg",
                              environment:, sample: NO_SAMPLE).call
 end

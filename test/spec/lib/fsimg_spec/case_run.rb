@@ -10,11 +10,11 @@ module FsimgSpec
   class HarnessError < Error; end
 
   # A case's directory (specs/design-spec-testing.md#runner): created
-  # exclusively, with scratch/, out/ and oracle/, and either the case image
-  # or, for a creation case, its source tree written through the name
-  # funnel. dest/ stays absent until the runner creates it for extract.
+  # exclusively, with scratch/ and out/, and either the case image or, for
+  # a creation case, its source tree written through the name funnel.
+  # dest/ stays absent until the runner creates it for extract.
   module CaseDirectory
-    SUBDIRECTORIES = %w[scratch out oracle].freeze
+    SUBDIRECTORIES = %w[scratch out].freeze
 
     # Prepares directory for recipe, writing image, an ImageView, for a
     # reading case. Answers nil, or why the host cannot hold the case's
@@ -34,9 +34,16 @@ module FsimgSpec
     end
   end
 
-  # How one case ended: passed, failed or host_skip, with each stage's
-  # result and, for a failure, why.
-  CaseResult = Data.define(:id, :verdict, :stages, :detail)
+  # How one case ended: passed, failed, host_skip or harness_error, with
+  # each stage's result, for a verdict other than passed why, and the
+  # oracles' observations of its image, tool => Observation, which are
+  # recorded only: what a tool observes never decides the verdict, though
+  # an oracle that cannot run is a harness error.
+  class CaseResult < Data.define(:id, :verdict, :stages, :detail, :observations)
+    include Checked
+
+    def initialize(observations: {}, **fields) = super
+  end
 
   # Runs one case through its stages and judges each against its derived
   # expectation. A stage that fails a safety check ends the case, as does a
@@ -51,12 +58,20 @@ module FsimgSpec
   # An accepting create must also write an image that violates no rule
   # (Case#created_image_problem); one that does fails create and ends the
   # case.
+  #
+  # oracles, when the case's image is one the oracles read, takes the case
+  # directory and answers their observations of the image
+  # (specs/design-spec-testing.md#independence-and-oracles). They run
+  # after the last stage, unless a stage failed a safety check, which ends
+  # the case before any oracle runs. An oracle that cannot run makes a
+  # case fsimg passed a harness error, and leaves a failed case failed.
   module CaseRun
     # One stage's result with the case and model that judge it, and for an
     # accepting create, why the image it wrote fails it, or nil.
     Judged = Data.define(:result, :kase, :model, :image_problem)
 
-    def self.call(kase, model:, image:, runner:, cases_directory:, sandbox:, created: nil, stages: kase.recipe.stages)
+    def self.call(kase, model:, image:, runner:, cases_directory:, sandbox:, created: nil, oracles: nil,
+                  stages: kase.recipe.stages)
       raise HarnessError, "#{kase.recipe.id}: a creation case needs the created hook" if !kase.recipe.reading? && created.nil?
 
       directory = File.join(cases_directory, kase.recipe.id)
@@ -68,8 +83,30 @@ module FsimgSpec
 
       judged = run_stages(kase, model:, runner:, directory:, sandbox:, stages:, created:)
       failure = judged.lazy.filter_map { failure(_1) }.first
-      FileUtils.rm_r(directory, secure: true) unless failure
-      CaseResult.new(id: kase.recipe.id, verdict: failure ? "failed" : "passed", stages: judged.map(&:result), detail: failure)
+      observations, oracle_error = observe(oracles, directory) if judged.all? { _1.result.safe? }
+      verdict = if failure then "failed"
+                elsif oracle_error then "harness_error"
+                else "passed"
+                end
+      FileUtils.rm_r(directory, secure: true) if verdict == "passed"
+      CaseResult.new(id: kase.recipe.id, verdict:, stages: judged.map(&:result),
+                     detail: [failure, oracle_error].compact.join("; ").then { _1.empty? ? nil : _1 },
+                     observations: observations || {})
+    end
+
+    # The oracles' observations of the case directory, and nil; or no
+    # observations and the harness error that kept them from running, such
+    # as a tool that could not start. The error never hides fsimg's own
+    # verdict or the stages that ran, so this is the oracles' boundary: it
+    # records any StandardError as the case's harness error, where the case
+    # phase's funnel would discard the stages. A ContainmentError or a
+    # signal still ends the phase.
+    private_class_method def self.observe(oracles, directory)
+      return [{}, nil] unless oracles
+
+      [oracles.call(directory), nil]
+    rescue StandardError => e
+      [{}, "oracles: #{FsimgSpec.error_label(e)}"]
     end
 
     # Each stage's Judged, up to the stage that ends the case. Once create

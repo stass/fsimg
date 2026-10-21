@@ -45,7 +45,7 @@ class TestFatDrawnFsimg < Minitest::Test
   def test_a_drawn_recipe_replays_without_its_seed
     with_results do |root, results|
       setup = FsimgSpec::CasePhase.prepare(results:, profile: PROFILE, build_directory: root, environment: ENV.to_h)
-      arguments = { cache: setup.cache, ceilings: PROFILE.ceilings, name_trials: setup.name_trials }
+      arguments = { cache: setup.cache, ceilings: PROFILE.ceilings, name_trials: setup.name_trials, shell: setup.shell }
       draws = FsimgSpec::Draws.new(seed: SEED, count: 1, sample: 1, cache: FsimgSpec::FixtureCache.new(File.join(results, "drawn")))
       classified = DrawnSuite.cases(**arguments, draws:).first.classify.call
       recipe = classified.kase.recipe

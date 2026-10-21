@@ -80,6 +80,21 @@ class TestInvocation < Minitest::Test
     refute survivors
   end
 
+  # Input reaches the child's stdin in full, larger than a pipe holds, and
+  # a child that stops reading ends the input without stalling the run.
+  def test_input_is_fed_to_stdin_as_the_child_reads_it
+    input = -> { Array.new(4) { |index| (index.to_s * 50_000).b }.each }
+    Dir.mktmpdir do |directory|
+      env = { "PATH" => "/bin:/usr/bin" }
+      limits = LIMITS.with(capture_bytes: 1 << 20)
+      read = FsimgSpec::Invocation.run(["/usr/bin/wc", "-c"], chdir: directory, env:, limits:, input: input.call)
+      ignored = FsimgSpec::Invocation.run(["/usr/bin/true"], chdir: directory, env:, limits:, input: input.call)
+
+      assert_equal [0, "200000", nil], [read.exit_status, read.stdout.strip, read.ended_by]
+      assert_equal [0, nil], [ignored.exit_status, ignored.ended_by]
+    end
+  end
+
   def test_launch_failure_is_a_harness_error
     Dir.mktmpdir do |directory|
       execution = FsimgSpec::Invocation.run([File.join(directory, "missing")], chdir: directory, env: {},

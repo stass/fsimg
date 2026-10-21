@@ -23,18 +23,18 @@ module FsimgSpec
       # The pending cases of a run under registry: every deterministic
       # witness, then the drawn trees that run, then every promoted recipe
       # in directory, loaded within ceilings, each classified with the
-      # run's name trials (Cases.new). A promoted file that does not load is
-      # no case, so it fails the whole phase, before any case runs.
-      # tree_generator draws one tree (Trees.draw); a test may pass a
-      # faulty one.
-      def self.cases(cache:, ceilings:, name_trials:, draws:, registry: Suite.registry, directory: PROMOTED,
+      # run's name trials and oracle shell (Cases.new). A promoted file that
+      # does not load is no case, so it fails the whole phase, before any
+      # case runs. tree_generator draws one tree (Trees.draw); a test may
+      # pass a faulty one.
+      def self.cases(cache:, ceilings:, name_trials:, shell:, draws:, registry: Suite.registry, directory: PROMOTED,
                      tree_generator: Trees.method(:tree))
-        cases = Cases.new(registry:, cache:, ceilings:, name_trials:)
+        cases = Cases.new(registry:, cache:, ceilings:, name_trials:, shell:)
         witnesses = Witnesses.deterministic(registry).map do |witness|
           PendingCase.new(id: witness.id, rules: [witness.rule, witness.intended].compact.uniq, skip: nil,
                           classify: -> { cases.call(witness) })
         end
-        witnesses + drawn(draws, cases:, registry:, ceilings:, name_trials:, tree_generator:) +
+        witnesses + drawn(draws, cases:, registry:, ceilings:, name_trials:, shell:, tree_generator:) +
           promoted(directory, ceilings:).map { pending(_1, cases) }
       end
 
@@ -44,8 +44,8 @@ module FsimgSpec
       # as cases whose recipes record the run's seed. Only those render,
       # into the draws' own cache, so a draw found sound costs neither a
       # file nor an fsimg run.
-      def self.drawn(draws, cases:, registry:, ceilings:, name_trials:, tree_generator:)
-        rendering = Cases.new(registry:, cache: draws.cache, ceilings:, name_trials:)
+      def self.drawn(draws, cases:, registry:, ceilings:, name_trials:, shell:, tree_generator:)
+        rendering = Cases.new(registry:, cache: draws.cache, ceilings:, name_trials:, shell:)
         Trees.draw(seed: draws.seed, count: draws.count, generator: tree_generator).each_with_index.filter_map do |witness, index|
           defective = cases.defective?(witness)
           next unless index < draws.sample || defective
@@ -74,8 +74,8 @@ module FsimgSpec
       end
 
       # recipe as a pending case under registry.
-      def self.replay(recipe, cache:, ceilings:, name_trials:, registry: Suite.registry) =
-        pending(recipe, Cases.new(registry:, cache:, ceilings:, name_trials:))
+      def self.replay(recipe, cache:, ceilings:, name_trials:, shell:, registry: Suite.registry) =
+        pending(recipe, Cases.new(registry:, cache:, ceilings:, name_trials:, shell:))
 
       # The promoted recipes in directory, in file name order. Every entry
       # is one: a recipe file named after its id, which replays on every

@@ -108,7 +108,7 @@ class TestRunnerFsimg < Minitest::Test
   end
 
   def preflight(results, environment: ENV.to_h, sample: FsimgSpec::Fat::Bases.method(:preflight_sample)) =
-    FsimgSpec::Preflight.new(results:, build_directory: results, profile: PROFILE, fsimg: @fsimg,
+    FsimgSpec::Preflight.new(results:, profile: PROFILE, fsimg: @fsimg,
                              environment:, sample:).call
 
   def runner_for(observer:) =

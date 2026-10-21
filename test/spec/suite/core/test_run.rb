@@ -119,7 +119,7 @@ class TestRun < Minitest::Test
       refute File.exist?(File.join(build_directory, "test", "spec-results", "quick"))
 
       coverage = JSON.parse(File.read(File.join(results, "coverage.json")))
-      assert_equal({ "schema_version" => 3, "profile" => "nightly", "seed" => 1234, "passed" => true },
+      assert_equal({ "schema_version" => FsimgSpec::Report::SCHEMA_VERSION, "profile" => "nightly", "seed" => 1234, "passed" => true },
                    coverage.slice("schema_version", "profile", "seed", "passed"))
       assert_equal({ "runs" => 1, "failures" => 0, "errors" => 0, "skips" => 0 },
                    coverage.fetch("tests").except("assertions"))

@@ -188,11 +188,14 @@ when the suite skips there. The GCC container jobs install no Ruby and skip it.
 The tests' base images are cached in `test/spec-cache/` under the build
 directory, keyed by the base recipe and the versions of the tools that build
 it; `make clean` removes the cache. Measured on macOS (Intel, APFS) with
-mkfs.fat 4.2 and mtools, a first run builds the 1440 KiB FAT12 formatter base
-in 0.04 s, the 16 MiB FAT16 base in 0.08 s and the populated 64 MiB FAT32 base
-in 0.26 s, each including the read-only checker and `mdir`. A cached base is
-checked again in 0.02 to 0.20 s, and copying one into a case directory takes
-1 to 9 ms. mkfs.fat writes the FAT16 base's zeros, so that base occupies
+mkfs.fat 4.2, mtools 4.0.49 and fatcat, a first run builds the 1440 KiB FAT12
+formatter base in 0.12 s, the 16 MiB FAT16 base in 0.23 s, the populated
+64 MiB FAT32 base in 0.77 s and a FAT16 builder base mtools populates with
+the same tree in 0.36 s, each including the oracles' read-back: the
+read-only checker, `mdir` and `mtype` of every file, and fatcat. A cached
+base is read back again in 0.05 to 0.24 s, and copying one into a case
+directory takes 1 to 9 ms. Population pipes each file's bytes to `mcopy -`,
+so a build writes nothing to the cache but the image and its manifest. mkfs.fat writes the FAT16 base's zeros, so that base occupies
 16 MiB on disk, while the sparse FAT32 base occupies about 1 MiB. The
 independent builder writes a 130000-cluster FAT32 base holding the standard
 tree in 0.2 s.

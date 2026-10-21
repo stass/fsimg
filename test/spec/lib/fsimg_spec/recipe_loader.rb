@@ -120,10 +120,10 @@ module FsimgSpec
 
     def base(value)
       case value
-      in { builder:, tree: Array => tree, parameters: Hash => parameters, **nil }
-        Base.new(builder:, tree: tree(tree), parameters: within_image(parameters, "parameter"))
+      in { builder:, tree: Array => tree, parameters: Hash => parameters, **rest } if rest.keys - [:population] == []
+        Base.new(builder:, tree: tree(tree), parameters: within_image(parameters, "parameter"), population: rest[:population])
       else
-        raise RecipeError, "base is not an object of builder, tree and parameters"
+        raise RecipeError, "base is not an object of builder, an optional population, tree and parameters"
       end
     end
 

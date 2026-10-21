@@ -54,9 +54,10 @@ MCOPY='@MCOPY@'
 MMD='@MMD@'
 MDEL='@MDEL@'
 MDIR='@MDIR@'
+MTYPE='@MTYPE@'
 FATCAT='@FATCAT@'
 export BUNDLE_GEMFILE FSIMG_BUILDDIR FSIMG_BIN MKFS_FAT FSCK_FAT NEWFS_MSDOS \
-    FSCK_MSDOSFS MCOPY MMD MDEL MDIR FATCAT
+    FSCK_MSDOSFS MCOPY MMD MDEL MDIR MTYPE FATCAT
 case $profile in
 --export-seeds=*) exec "$ruby" "$spec/bin/export-seeds" "${profile#--export-seeds=}" ;;
 --replay=*)

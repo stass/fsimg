@@ -321,7 +321,11 @@ stage the case can run; a profile runs the subset it selects, and a [promoted
 case](#reports-and-regressions) runs all of them. A reading case carries
 `base`, `base_sha256`, `tool_versions` and `mutations`, plus an optional
 `forced_format` passed to every reading stage; a creation case carries a
-`source` object holding the `tree` and the `settings` instead. A tree is a list
+`source` object holding the `tree` and the `settings` instead. A `base` names
+its `builder`, `tree` and `parameters`, and an optional `population` of
+`mtools` when mtools populates the builder's empty volume with the tree
+instead of the builder rendering it; a formatter writes no tree, so a
+formatter base always names it. A tree is a list
 of entries, each with a relative `path` and a `type` of `file` or `directory`;
 a file also has a `size` and a `content` of `zero`, `seeded` or `positional`,
 the last two with a `seed` and optional `holes`, the manifest's generated
@@ -418,8 +422,9 @@ After materialization the harness refuses a base whose decoded variant or
 geometry differs from its parameters, so a formatter that silently substitutes
 another geometry never supplies a witness. It then classifies the base like any
 case. A base meant to be valid must classify valid, decode to its recipe's
-tree, and pass the read-only checkers that support its geometry; otherwise it
-is reported and serves no case. Every base has a manifest in the
+tree, and pass the read-only checkers that support its geometry, and the
+mtools read-back, where the host has it, must reproduce its tree; otherwise
+it is reported and serves no case. Every base has a manifest in the
 [fixture-manifest shape](design-formats.md#format-descriptors-and-profiles):
 format, geometry and feature profile; builder, recipe and tree digest; the
 creation command; validator results; and the image hash per tool version.
@@ -433,8 +438,9 @@ in 1024-byte blocks. A tree is populated into an empty base of either builder
 with `mmd` and `mcopy - ::/path`, each file's bytes generated from its seed
 and piped to mtools' stdin, so population writes no host file; with
 `SOURCE_DATE_EPOCH` set, mtools stamps every entry with the time the tree
-carries. The manifest records the read-only
-checker (`fsck.fat -n` or `fsck_msdosfs -n`) and an `mdir` listing. Formatter
+carries. The manifest records each oracle's observation of the base: the
+read-only checker (`fsck.fat -n` or `fsck_msdosfs -n`), the mtools read-back
+and fatcat. Formatter
 bases test both the model and fsimg against images neither produced, and an
 mtools-populated builder base tests them against a directory tree neither
 wrote.
@@ -481,18 +487,30 @@ models.
 Every oracle run on a case yields one **observation** per tool: `agrees`,
 `disagrees` with a short detail, `not_applicable` when the tool does not
 support the image's geometry or names (the checkers read one or two FATs;
-fatcat reads 512-byte sectors and ASCII names), or `unavailable` when the host
-lacks the tool. The observation is recorded in the case result, the failure
-record and the coverage report.
+mtools drops the surrogate pairs of a long name beyond the BMP; fatcat reads
+512-byte sectors, ASCII names and a FAT32 root directory at cluster 2 only),
+or `unavailable` when the host lacks the tool. The observation is recorded in
+the case result, the failure record and the coverage report. The oracles run
+once a case's last stage has run, on an image whose tree is known: the read-only checker agrees when it exits 0, and
+the mtools read-back and fatcat, which lists each directory as JSON with
+`-l` and streams each file with `-r`, agree when they reproduce the tree.
+Tool output is untrusted text carrying the image's names: each stream is
+read within a cap the known tree sets, a few entries' listing beyond the
+tree's and a file's size plus a fixed allowance, and a stream past its cap,
+a tool past its deadline and a nonzero exit disagree; a tool that cannot
+start is a harness error.
 
 No oracle overrides a published rule. A checker can flag conservative
 incompatibilities or tolerate errors, so where the specification is clear, it
-decides, and `fsck -n`, `mdir` and fatcat are always recorded only, as are
-checker diagnostics on an invalid image. Disagreements are recorded per tool,
-never resolved by majority. The one oracle with a verdict is the **mtools
-read-back** of an image fsimg created: `mdir -b -/ -a ::/` lists every path,
-a directory with a trailing `/`, and `mtype` streams each file's bytes to
-stdout, where the harness hashes them. It must reproduce the source tree in
+decides, and `fsck -n`, fatcat and the mtools read-back of any image fsimg
+did not create are always recorded only, as are checker diagnostics on an
+invalid image; a base, though, serves no case unless the checker and the
+read-back agree with it, as [fixtures](#fixtures) state. Disagreements are
+recorded per tool, never resolved by majority. The one oracle with a verdict
+is the **mtools read-back** of an image fsimg created: `mdir -b -/ -a ::/`
+lists every path, a directory with a trailing `/`, and `mtype` streams each
+file's bytes to stdout, where the harness hashes them. It must reproduce the
+source tree in
 path, type, size and SHA-256, because that is fsimg's own creation contract
 rather than an interpretation of the format. A mismatch fails the case,
 except when the
@@ -557,17 +575,22 @@ Oracles see the same `PATH` and `TZ`, and:
 * `SOURCE_DATE_EPOCH` at 2000-01-01, the time the base trees carry, so mtools
   stamps the entries it creates alike on every run and a formatter base is
   reproducible;
-* `HOME` set to `oracle-home/`, and `MTOOLSRC` naming the mtoolsrc in it,
-  which the harness creates without following a link and requires to be an
-  empty regular file before every run of the oracles.
+* `HOME` set to `oracle-home/`, and `MTOOLSRC` naming `oracle-home/.mtoolsrc`.
+  mtools reads both `$HOME/.mtoolsrc` and the file `MTOOLSRC` names, so the
+  two name one file, which the harness creates without following a link
+  and requires, before every run of the oracles, to be an empty regular
+  file and the only name in `oracle-home/`.
 
 Nothing fsimg writes into a case directory can therefore configure an oracle.
 mtools still reads a system `/etc/mtools.conf`; the
 harness accepts it as part of the host's mtools, and names images only with
 `-i`, so the file cannot redirect a drive to a device. Every argument built
-from a name starts with the fixed prefix `::/`, so a leading `-` is never
-read as an option; mtools reads file bytes from stdin and writes them to
-stdout, so no oracle names or creates a host file.
+from a name starts with the fixed prefix `::/`, or `/` for fatcat, so a
+leading `-` is never read as an option. mtools looks up the directories of a
+path as patterns, so the harness escapes `*`, `?`, `[`, `]` and `\` with a
+backslash wherever mtools looks a name up, and only the new name of an entry
+`mmd` or `mcopy` creates goes unescaped. mtools reads file bytes from stdin
+and writes them to stdout, so no oracle names or creates a host file.
 
 Each profile's results directory holds only these names, and every case and
 failure directory in it is created exclusively. The case phase checks every
@@ -582,7 +605,7 @@ test/spec-results/<profile>/
   failures/<id>/               failure records
   trials/                      name trials
   preflight/                   the preflight's case directory
-  oracle-home/                 the oracles' HOME, with an empty mtoolsrc
+  oracle-home/                 the oracles' HOME, holding an empty .mtoolsrc alone
 ```
 
 Before any case, a **preflight** establishes the host in `preflight/`, which it
@@ -806,7 +829,8 @@ signal, then the records. Only `accepted` and `rejected` can satisfy an
 expectation; every other outcome fails the case under every policy. Each stage
 result records its outcome, exit status and any signal, its wall and CPU time,
 the bounded captures and parsed records, whether the address-space limit was
-applied, the extracted tree digest and the oracle observations. A failure
+applied, the extracted tree digest and its disk footprint, and the case result
+records the oracle observations. A failure
 record's extract entry also carries the name-trial answers that classified it,
 the refused names capped at 32 with their total count.
 
@@ -948,8 +972,8 @@ profile, the Ruby version and the Minitest seed, and count the run's Minitest
 outcomes. A run holds an
 exclusive lock on that directory, so concurrent runs of one profile take turns,
 and empties it when it starts, so no case, trial or failure directory outlives
-the next run. For each format it counts the cases by verdict and the drawn
-cases fsimg ran. For each rule the report records the attempted, passed, failed
+the next run. For each format it counts the cases by verdict, the drawn
+cases fsimg ran and each oracle's observations by state. For each rule the report records the attempted, passed, failed
 and skipped counts, the boundaries exercised, the stages asserted, the
 [oracle observations](#independence-and-oracles) per tool, the promoted
 regression cases and the isolation: `single_rule` when

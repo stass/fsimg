@@ -24,11 +24,26 @@ class TestFixtures < Minitest::Test
     assert_nil found[:fatcat]
   end
 
-  def test_a_shell_refuses_to_run_once_mtoolsrc_is_written
+  # oracle-home/ holds the shell's .mtoolsrc alone, so any other name in
+  # it, such as a configuration under another name, is refused.
+  def test_a_shell_refuses_to_run_once_its_home_holds_another_name
     Dir.mktmpdir do |directory|
       home = File.join(directory, "home")
       shell = FsimgSpec::OracleShell.new(home:, environment: { "PATH" => "/bin:/usr/bin" })
       File.write(File.join(home, "mtoolsrc"), "drive a: file=\"/dev/null\"\n")
+
+      error = assert_raises(FsimgSpec::FixtureError) { shell.run(["/usr/bin/true"], chdir: directory) }
+      assert_match(/holds .*"mtoolsrc".*, not \.mtoolsrc alone\z/, error.message)
+    end
+  end
+
+  # mtools reads HOME/.mtoolsrc as well as the file MTOOLSRC names, so a
+  # configuration written to HOME/.mtoolsrc is refused too.
+  def test_a_shell_refuses_to_run_once_home_mtoolsrc_is_written
+    Dir.mktmpdir do |directory|
+      home = File.join(directory, "home")
+      shell = FsimgSpec::OracleShell.new(home:, environment: { "PATH" => "/bin:/usr/bin" })
+      File.write(File.join(home, ".mtoolsrc"), "drive t: file=\"image.img\"\n")
 
       assert_raises(FsimgSpec::FixtureError) { shell.run(["/usr/bin/true"], chdir: directory) }
     end

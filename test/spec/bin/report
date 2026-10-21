@@ -7,7 +7,8 @@
 #
 #   test/spec/bin/report test/spec-results/PROFILE/coverage.json
 #
-# One line per format with its case counts, then one line per rule: its
+# One line per format with its case counts, one with its oracles'
+# observation counts, then one line per rule: its
 # state, how many of its cases were attempted, passed and failed, its
 # isolation and the stages fsimg was held to. A
 # coverage.json may come from a downloaded CI artifact, so the file is read
@@ -19,7 +20,7 @@ require "json"
 require_relative "../lib/fsimg_spec/terminal"
 
 LIMIT = 64 << 20
-SCHEMA_VERSION = 3 # FsimgSpec::Report::SCHEMA_VERSION; test_report.rb checks both agree.
+SCHEMA_VERSION = 4 # FsimgSpec::Report::SCHEMA_VERSION; test_report.rb checks both agree.
 
 def escaped(value) = FsimgSpec::Terminal.escaped(value)
 
@@ -68,7 +69,15 @@ def format_lines(name, result)
     format(RULE_LINE, rule.fetch("id"), rule.fetch("state"), tally, rule.fetch("isolation") || "-",
            rule.fetch("stages_asserted").join(" "))
   end
-  ["#{name}: #{counts.fetch("total")} (#{verdicts.join(", ")}), #{counts.fetch("drawn")} drawn", *rules]
+  ["#{name}: #{counts.fetch("total")} (#{verdicts.join(", ")}), #{counts.fetch("drawn")} drawn",
+   "#{name} oracles: #{oracle_counts(result.fetch("oracles"))}", *rules]
+end
+
+# Each oracle's observation counts, as summary.txt prints them.
+def oracle_counts(oracles)
+  return "none" if oracles.empty?
+
+  oracles.map { |tool, states| "#{tool} #{states.map { |state, count| "#{count} #{state}" }.join(", ")}" }.join("; ")
 end
 
 begin

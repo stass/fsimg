@@ -249,7 +249,7 @@ class TestFatRules < Minitest::Test
     Dir.mktmpdir do |directory|
       cache = FsimgSpec::FixtureCache.new(File.join(directory, "cache"))
       Dir.mkdir(File.join(directory, "trials"))
-      yield Fat::Cases.new(registry: REGISTRY, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials.new(File.join(directory, "trials")))
+      yield Fat::Cases.new(registry: REGISTRY, cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials.new(File.join(directory, "trials")), shell: nil)
     end
   end
 

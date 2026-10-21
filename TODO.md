@@ -132,13 +132,35 @@
   `outcome.rb`): each stage's stdout and stderr are held in Ruby strings up
   to the coordinator's text ceiling, which reaches several GiB under the
   `deep` profile, and stdout is parsed whole. Stream captures to their
-  case-directory files and parse the NDJSON records line by line.
+  case-directory files and parse the NDJSON records line by line. The
+  oracles' read-back of each file (`fat/oracles.rb`, `mtype` and
+  `fatcat -r`) likewise holds a file's bytes whole before hashing them;
+  give `Invocation` a stdout sink that hashes and counts as it reads, and
+  bound each case's oracle runs by a total budget.
 
 * [Medium] **Spec harness formatter oracles beyond mkfs.fat**
   (`test/spec/lib/fsimg_spec/fat/bases.rb`): formatter bases are built only
   with mkfs.fat and mtools, so a FreeBSD host without them runs on builder
-  bases alone. Add the `newfs_msdos` formatter adapter, and read every base
-  with fatcat as a secondary reader where `configure` found it.
+  bases alone. Add the `newfs_msdos` formatter adapter.
+
+* [Medium] **Spec harness oracles never read targeted or malformed images**
+  (`test/spec/lib/fsimg_spec/fat/cases.rb`, `test/spec/lib/fsimg_spec/fat/oracles.rb`):
+  the oracles read only valid, unmutated case images, as every profile
+  allows unconfined. The nightly and deep profiles should also run them on
+  class B and C images through `FSIMG_SPEC_ORACLE_CONFINE`, which the
+  preflight checks but no oracle runs through yet, and report those
+  observations unavailable without it.
+
+* [Low] **Spec harness names mtools and fatcat do not round-trip**
+  (`test/spec/lib/fsimg_spec/fat/bases.rb`, `fat/oracles.rb`): `mcopy` and
+  `mmd` 4.0.49 refuse to create a bare DOS device name such as `CON` or
+  `NUL`, which drawn trees hold; a lowercase non-ASCII name that fits 8.3,
+  such as `café`, is stored with the case bits and read back with only
+  its ASCII letters lowered; and fatcat ignores the case bits, so a
+  lowercase 8.3 name mtools wrote reads back in upper case. Once drawn
+  trees are mtools-populated, report such a tree as a tool limitation of
+  its case, and fatcat's view of it as not applicable, rather than as a
+  fixture error or a disagreement.
 
 * [Medium] **Spec harness field draws never reach fsimg**
   (`test/spec/suite/fat/test_rules.rb`, `test/spec/lib/fsimg_spec/fat/witnesses.rb`):
@@ -245,6 +267,14 @@
   from the FreeBSD source whether its FAT12/FAT16 cutover differs from the
   specification's 4085; then either fix the builder or record the checker's
   deviation as a cited host-specific skip for that one base.
+
+* [Low] **test-worker's relay scenario fails setpgid intermittently**
+  (`test/worker.c:1103`): under a loaded `make -j32 check` on macOS the
+  forked consumer's `setpgid(0, 0)` failed once, while the parent's
+  `setpgid(child, child)` at line 1144 races it; five standalone reruns
+  passed. Find which errno the child sees and let the child tolerate the
+  same race the parent already tolerates (`EACCES`), or move group
+  creation to one side.
 
 * [Medium] **Worker sanitizer exit after an error frame is lost**
   (`cmd/fsimg/worker-parent.c`): after the parser worker sends its final

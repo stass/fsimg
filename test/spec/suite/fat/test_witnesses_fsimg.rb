@@ -64,7 +64,8 @@ class TestFatWitnessesFsimg < Minitest::Test
       Dir.mkdir(results)
       setup = FsimgSpec::CasePhase.prepare(results:, profile: PROFILE, build_directory: root, environment: ENV.to_h)
       yield lambda { |witness, registry|
-        classified = Fat::Cases.new(registry:, cache: setup.cache, ceilings: PROFILE.ceilings, name_trials: setup.name_trials).call(witness)
+        classified = Fat::Cases.new(registry:, cache: setup.cache, ceilings: PROFILE.ceilings, name_trials: setup.name_trials,
+                                   shell: setup.shell).call(witness)
         flunk classified.defect if classified.defect
         FsimgSpec::CasePhase.result_of(classified, setup:, cases_directory: File.join(results, "cases"))
       }

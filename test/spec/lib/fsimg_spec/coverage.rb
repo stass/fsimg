@@ -32,6 +32,10 @@ module FsimgSpec
       drawn: entries.count { _1.kase&.recipe&.random_seed && ran?(_1) }
     }
 
+    # How many of the cases' observations each oracle made in each state
+    # (Observation.tally).
+    def self.oracles(entries) = Observation.tally(entries.map { _1.result.observations })
+
     # The counts of one rule over the cases generated for it, and those of
     # them that exercise it. valid_witnesses, attempted and the verdicts
     # count cases; targeted_witnesses and isolation are states. The witness
@@ -51,6 +55,7 @@ module FsimgSpec
         attempted: exercising.size,
         **VERDICTS.to_h { |verdict| [verdict.to_sym, exercising.count { _1.result.verdict == verdict }] },
         stages_asserted: asserted_stages(ran),
+        oracles: oracles(exercising),
         witnesses: generated.map(&:id).sort,
         promoted: generated.map(&:id).select { _1.start_with?(Recipe::PROMOTED_PREFIX) }.sort
       }

@@ -29,6 +29,26 @@ class TestCoverage < Minitest::Test
                  rules(entries).to_h { [_1[:id], _1[:state]] })
   end
 
+  # The oracles' observations are counted per tool and state, over a
+  # format's cases and over each rule's, and a case no oracle read adds
+  # nothing.
+  def test_observations_are_counted_per_tool_and_state
+    observed = lambda do |id, mtools|
+      base = entry(id, intended: nil, facts: {}, verdict: "passed", rule: "t.format")
+      observations = { "mtools" => mtools, "fsck" => FsimgSpec::Observation.agrees }
+      base.with(result: base.result.with(observations:))
+    end
+    entries = [
+      observed.call("t.format.0", FsimgSpec::Observation.agrees),
+      observed.call("t.format.1", FsimgSpec::Observation.disagrees("mdir lacks file \"A\"")),
+      entry("t.crosslink.0", intended: "t.crosslink", facts: { "t.crosslink" => true }, verdict: "passed")
+    ]
+    expected = { "fsck" => { "agrees" => 2 }, "mtools" => { "agrees" => 1, "disagrees" => 1 } }
+
+    assert_equal expected, FsimgSpec::Coverage.oracles(entries)
+    assert_equal [expected, {}], %w[t.format t.crosslink].map { |id| rules(entries).find { _1[:id] == id }[:oracles] }
+  end
+
   # A case whose only stage checks a scope the model left undecoded asserts
   # nothing about the rule.
   def test_run_without_a_derived_expectation_is_unclassified
@@ -147,6 +167,7 @@ class TestCoverage < Minitest::Test
 
   def result(id, verdict, stages) =
     FsimgSpec::CaseResult.new(id:, verdict:, detail: nil, stages: stages.map do |stage|
-      FsimgSpec::StageResult.new(stage:, outcome: FsimgSpec::Outcome.new(kind: "accepted"), execution: nil, problems: [], tree: [])
+      FsimgSpec::StageResult.new(stage:, outcome: FsimgSpec::Outcome.new(kind: "accepted"), execution: nil, problems: [], tree: [],
+                                 footprint: FsimgSpec::Footprint.new(files: 0, bytes: 0))
     end)
 end

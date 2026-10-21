@@ -137,7 +137,11 @@ module FsimgSpec
       digest.hexdigest
     end
 
+    # Yields the bytes in chunks of CHUNK_BYTES, or answers an Enumerator
+    # of them without a block, such as a tool's stdin reads.
     def self.each_chunk(seed:, size:)
+      return enum_for(:each_chunk, seed:, size:) unless block_given?
+
       (0...size).step(CHUNK_BYTES) { yield bytes(seed:, offset: _1, length: [CHUNK_BYTES, size - _1].min) }
     end
 
@@ -164,6 +168,34 @@ module FsimgSpec
 
     # walked, a TreeWalk listing, in the known tree's form.
     def self.from_walk(walked) = walked.map { _1.type == "directory" ? _1.with(size: nil) : _1 }.sort_by(&:path).freeze
+
+    # The most differences of each kind a comparison names; it counts the
+    # rest.
+    SHOWN_DIFFERENCES = 3
+
+    # How actual, a listing in the known tree's form, differs from
+    # expected, each difference a sentence that starts with label: the
+    # entries actual lacks, then those it adds beyond them. An entry that
+    # differs in type, size or digest is both, and one listed twice is
+    # unexpected the second time. Paths are quoted shown, since a listing
+    # may come from fsimg or a tool reading an untrusted image.
+    def self.differences(label, actual:, expected:)
+      { "lacks" => surplus(expected, actual), "has unexpected" => surplus(actual, expected) }.flat_map do |verb, entries|
+        shown = entries.first(SHOWN_DIFFERENCES).map { "#{label} #{verb} #{described(_1)}" }
+        rest = entries.size - shown.size
+        rest.positive? ? [*shown, "#{label} #{verb} #{rest} more"] : shown
+      end
+    end
+
+    # entries beyond other, counting repeats, as multisets differ.
+    private_class_method def self.surplus(entries, other)
+      others = other.tally
+      entries.tally.flat_map { |entry, count| [entry] * [count - others.fetch(entry, 0), 0].max }
+    end
+
+    private_class_method def self.described(entry) =
+      ["#{entry.type} #{FsimgSpec.shown(entry.path)}", ("of #{entry.size} bytes" if entry.size),
+       ("SHA-256 #{entry.sha256}" if entry.sha256)].compact.join(" ")
 
     private_class_method def self.walked_entry(entry)
       return WalkedEntry.new(path: entry.path.b, type: "directory", size: nil, sha256: nil) if entry.type == "directory"

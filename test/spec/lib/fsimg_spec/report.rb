@@ -20,7 +20,7 @@ module FsimgSpec
     include Checked
 
     # Bumped by any change to the meaning or shape of coverage.json.
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def initialize(cases: CasesSkipped.new(reason: "not run"), **fields) = super
 
@@ -66,6 +66,11 @@ module FsimgSpec
     # none of the harness, prints them in the same form.
     def case_counts(counts) = "#{counts.fetch(:total)} (#{counted(counts.except(:total, :drawn))}), #{counts.fetch(:drawn)} drawn"
 
+    # Each oracle's observation counts in summary.txt, "none" when no
+    # oracle read a case; bin/report prints them in the same form.
+    def oracle_counts(oracles) =
+      oracles.empty? ? "none" : oracles.map { |tool, states| "#{tool} #{counted(states)}" }.join("; ")
+
     # "COUNT LABEL" for each label and count.
     def counted(pairs) = pairs.map { |label, count| "#{count} #{label}" }.join(", ")
 
@@ -74,13 +79,14 @@ module FsimgSpec
       in CasesSkipped(reason:) then { skipped: reason }
       in CasesFailed(reason:) then { error: reason }
       in CasePhaseResult(sandbox:, formats:)
-        { sandbox:, formats: formats.transform_values { { cases: _1.cases, failures: _1.failures, rules: _1.rules } } }
+        { sandbox:, formats: formats.transform_values { { cases: _1.cases, oracles: _1.oracles, failures: _1.failures, rules: _1.rules } } }
       end
     end
 
     # Why the phase did not run, or one line per format with its case
-    # counts and how many rules fsimg asserted, then each case that did not
-    # pass, whether fsimg failed it or the harness could not judge it.
+    # counts, its oracles' observations and how many rules fsimg asserted,
+    # then each case that did not pass, whether fsimg failed it or the
+    # harness could not judge it.
     def case_lines
       case cases
       in CasesSkipped(reason:) then ["cases: not run (#{reason})"]
@@ -89,6 +95,7 @@ module FsimgSpec
         formats.flat_map do |format, result|
           states = result.rules.map { _1[:state] }.tally.sort
           ["#{format} cases: #{case_counts(result.cases)}; sandbox #{sandbox}",
+           "#{format} oracles: #{oracle_counts(result.oracles)}",
            "#{format} rules: #{counted(states)}",
            *result.failures.map { "not passed: #{format} #{_1}" }]
         end

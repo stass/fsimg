@@ -37,10 +37,6 @@ module FsimgSpec
         "open" => [], "directories" => %i[tree], "files" => %i[tree], "verification" => %i[tree], "destination" => %i[tree]
       }.freeze
       UNKNOWN_TREE = Undefined.new(reason: "the tree of an image no case vouches for, such as a mutated one, is unknown")
-      # The differences of each kind a tree comparison names before it
-      # counts the rest, so a tree that differs everywhere stays a short
-      # message.
-      SHOWN_DIFFERENCES = 3
       # The entry kinds a known tree holds.
       ENTRY_KINDS = %w[file directory].freeze
       # The validation scope each verification stage must report
@@ -93,8 +89,8 @@ module FsimgSpec
         in "create" then raise Error, "an image model does not judge create; its SourceModel does"
         in "info" then info_problems(records)
         in _ if FsimgSpec.undefined?(tree) then []
-        in "ls" then tree_differences("ls", actual: actual_listing(records), expected: expected_listing(tree))
-        in "extract" then tree_differences("extract", actual: KnownTree.from_walk(result.tree), expected: tree)
+        in "ls" then KnownTree.differences("ls", actual: actual_listing(records), expected: expected_listing(tree))
+        in "extract" then KnownTree.differences("extract", actual: KnownTree.from_walk(result.tree), expected: tree)
         in "verify" | "verify-deep" then count_problems(result.stage, records)
         end
       end
@@ -138,27 +134,6 @@ module FsimgSpec
 
       # A JSON string of decimal digits as its Integer, or the value shown.
       def decimal(value) = value.is_a?(String) && value.match?(/\A(0|[1-9][0-9]{0,19})\z/) ? Integer(value, 10) : FsimgSpec.shown(value)
-
-      # The entries of expected that actual lacks and those it adds beyond
-      # them; an entry that differs in type, size or digest is both, and
-      # one listed twice is unexpected the second time.
-      def tree_differences(stage, actual:, expected:)
-        { "lacks" => surplus(expected, actual), "has unexpected" => surplus(actual, expected) }.flat_map do |verb, entries|
-          shown = entries.first(SHOWN_DIFFERENCES).map { "#{stage} #{verb} #{described(_1)}" }
-          rest = entries.size - shown.size
-          rest.positive? ? [*shown, "#{stage} #{verb} #{rest} more"] : shown
-        end
-      end
-
-      # entries beyond other, counting repeats, as multisets differ.
-      def surplus(entries, other)
-        others = other.tally
-        entries.tally.flat_map { |entry, count| [entry] * [count - others.fetch(entry, 0), 0].max }
-      end
-
-      def described(entry) =
-        ["#{entry.type} #{FsimgSpec.shown(entry.path)}", ("of #{entry.size} bytes" if entry.size),
-         ("SHA-256 #{entry.sha256}" if entry.sha256)].compact.join(" ")
 
       # The verify record's counts, completeness and validation scope.
       # fsimg counts the root among the directories (include/fsimg.h,

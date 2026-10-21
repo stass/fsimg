@@ -56,6 +56,9 @@ class TestReport < Minitest::Test
       assert_equal 0, Process.last_status.exitstatus, output
       assert_match(/^fat: 1 \(1 passed, 0 failed\), 1 drawn$/, output)
       assert_match(/^fat cases: 1 \(1 passed, 0 failed\), 1 drawn; /, report.summary)
+      oracles = "fsck 1 agrees; mtools 1 disagrees, 2 not_applicable"
+      assert_match(/^fat oracles: #{oracles}$/, output)
+      assert_match(/^fat oracles: #{oracles}$/, report.summary)
 
       File.write(path, JSON.generate(report.coverage.merge(schema_version: FsimgSpec::Report::SCHEMA_VERSION + 1)))
       output = IO.popen([RbConfig.ruby, BIN_REPORT, path], err: %i[child out], &:read)
@@ -95,7 +98,12 @@ class TestReport < Minitest::Test
 
   def report(cases) = FsimgSpec::Report.new(profile: PROFILE, seed: 1, minitest_passed: true, tests: TESTS, cases:)
 
+  # A phase whose FAT cases the oracles read: the checker agreed once, and
+  # the mtools read-back disagreed once and applied to two images not at
+  # all.
+  ORACLES = { "fsck" => { "agrees" => 1 }, "mtools" => { "disagrees" => 1, "not_applicable" => 2 } }.freeze
+
   def phase(failures:, cases:) =
     FsimgSpec::CasePhaseResult.new(sandbox: "unavailable",
-                                   formats: { "fat" => FsimgSpec::FormatResult.new(rules: [], cases:, failures:) })
+                                   formats: { "fat" => FsimgSpec::FormatResult.new(rules: [], cases:, oracles: ORACLES, failures:) })
 end

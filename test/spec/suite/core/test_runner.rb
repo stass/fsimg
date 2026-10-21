@@ -2,6 +2,7 @@
 # Copyright (c) 2026, fsimg contributors
 # frozen_string_literal: true
 
+require "fileutils"
 require "minitest"
 require "tmpdir"
 require "fsimg_spec"
@@ -13,7 +14,7 @@ require_relative "synthetic"
 # A stub script stands in for fsimg.
 class TestRunner < Minitest::Test
   CEILINGS = FsimgSpec::Ceilings.new(image: 1 << 20, memory: 64 << 20, scratch: 2 << 20, entries: 100, depth: 8,
-                                     path: 256, fds: 64, output: 1 << 20, work: 1 << 20, seconds: 1)
+                                     path: 256, fds: 64, output: 1 << 20, work: 1 << 20, seconds: 10)
   PROFILE = FsimgSpec::Profile.new(name: "test", ceilings: CEILINGS, tree_draws: 0, tree_sample: 0)
   SUMMARY = '{"schema":1,"type":"summary","complete":true,"sandbox":"unavailable"}'
   ACCEPT = "echo '#{SUMMARY}'".freeze
@@ -21,7 +22,7 @@ class TestRunner < Minitest::Test
 
   def test_reading_commands_use_relative_operands_and_the_profiles_limits
     runner = runner_for("/opt/fsimg")
-    limits = %w[-l seconds=1 -l entries=100 -l depth=8 -l path=256 -l output=1048576 -l scratch=2097152 -l fds=64]
+    limits = %w[-l seconds=10 -l entries=100 -l depth=8 -l path=256 -l output=1048576 -l scratch=2097152 -l fds=64]
 
     assert_equal ["/opt/fsimg", "i", "--json", "-m", "67108864", *limits, "-T", "scratch", "-f", "image.img"],
                  runner.command("info", recipe)
@@ -95,14 +96,54 @@ class TestRunner < Minitest::Test
 
   # The names a case may hold follow its progress: no dest/ before
   # extract, no capture of a stage still to run, no created.img in a
-  # reading case, and nothing in oracle/, which the independent tools own.
+  # reading case, and no oracle/, since the oracles read from and write to
+  # pipes.
   def test_entries_a_stage_had_no_business_writing_are_found
-    script = "mkdir dest; echo x > oracle/escaped; echo x > verify.stdout; echo x > out/created.img; #{ACCEPT}"
+    script = "mkdir dest; mkdir oracle; echo x > verify.stdout; echo x > out/created.img; #{ACCEPT}"
     with_case(script:) do |result|
       problems = result.problems.join("; ")
 
-      [/unexpected "dest"/, %r{oracle/"escaped" was left behind}, /unexpected "verify.stdout"/,
+      [/unexpected "dest"/, /unexpected "oracle"/, /unexpected "verify.stdout"/,
        %r{out/"created.img" was left behind}].each { assert_match _1, problems }
+    end
+  end
+
+  # A stage records the files the case directory holds after it and
+  # their logical bytes: here the image and the stage's two captures.
+  def test_stage_records_the_case_directory_footprint
+    with_case(script: ACCEPT) do |result|
+      captured = result.execution.stdout.bytesize + result.execution.stderr.bytesize
+
+      assert_equal FsimgSpec::Footprint.new(files: 3, bytes: 512 + captured), result.footprint
+    end
+  end
+
+  # A directory the stage left unreadable is still a left-behind entry,
+  # never a fault of the footprint's walk. The ensure restores its mode so
+  # the temporary directory can be removed; run as root, the test passes
+  # trivially.
+  def test_unreadable_directory_left_behind_is_a_problem
+    with_case(script: "mkdir scratch/x; chmod 000 scratch/x; #{ACCEPT}") do |result, directory|
+      assert_match %r{scratch/"x" was left behind}, result.problems.join("; ")
+    ensure
+      FileUtils.chmod(0o700, File.join(directory, "scratch", "x")) if directory && File.directory?(File.join(directory, "scratch", "x"))
+    end
+  end
+
+  # An oracle that raises, a harness error or any other StandardError, is
+  # the harness's fault, but it neither hides fsimg's own verdict nor the
+  # stages that ran.
+  def test_an_oracle_that_raises_keeps_the_stages_and_fsimg_verdict
+    Dir.mktmpdir do |cases|
+      passed = run_case(write_stub(cases, ACCEPT), cases, oracles: ->(_directory) { raise "fsck answered nothing" })
+      FileUtils.rm_rf(File.join(cases, "t.case"))
+      raising = ->(_directory) { raise FsimgSpec::HarnessError, "fsck could not start" }
+      failed = run_case(write_stub(cases, "echo x; #{ACCEPT}"), cases, oracles: raising)
+
+      assert_equal ["harness_error", STAGES, 'oracles: RuntimeError: "fsck answered nothing"'],
+                   [passed.verdict, passed.stages.map(&:stage), passed.detail]
+      assert_equal ["failed", STAGES], [failed.verdict, failed.stages.map(&:stage)]
+      assert_match(/\Ainfo: expected accept, got harness_error .*; oracles: HarnessError: "fsck could not start"\z/, failed.detail)
     end
   end
 
@@ -176,24 +217,35 @@ class TestRunner < Minitest::Test
     end
   end
 
-  # A failed safety check ends the case: no later stage runs, and the case
-  # directory stays for the failure record.
-  def test_unsafe_stage_ends_the_case
+  # A failed safety check ends the case: no later stage runs, no oracle
+  # reads the image, so the .mtoolsrc the stage planted reaches none, and
+  # the case directory stays for the failure record.
+  def test_unsafe_stage_ends_the_case_before_any_oracle_runs
     Dir.mktmpdir do |cases|
       stub = write_stub(cases, "echo x > .mtoolsrc; #{ACCEPT}")
-      result = run_case(stub, cases)
+      observed = []
+      result = run_case(stub, cases, oracles: ->(directory) { observed << directory })
 
       assert_equal "failed", result.verdict
       assert_equal ["info"], result.stages.map(&:stage)
+      assert_empty observed
+      assert_empty result.observations
       assert File.directory?(File.join(cases, "t.case"))
     end
   end
 
-  def test_passing_case_runs_every_stage_and_removes_its_directory
+  # The oracles read the case directory after the last stage, before a
+  # passing case's directory is removed, and the case result keeps what
+  # they observed.
+  def test_passing_case_runs_every_stage_then_the_oracles_and_removes_its_directory
     Dir.mktmpdir do |cases|
-      result = run_case(write_stub(cases, ACCEPT), cases)
+      oracles = lambda do |directory|
+        { "t.tool" => FsimgSpec::Observation.new(state: File.file?(File.join(directory, "image.img")) ? "agrees" : "disagrees") }
+      end
+      result = run_case(write_stub(cases, ACCEPT), cases, oracles:)
 
       assert_equal ["passed", STAGES], [result.verdict, result.stages.map(&:stage)]
+      assert_equal({ "t.tool" => FsimgSpec::Observation.agrees }, result.observations)
       refute File.exist?(File.join(cases, "t.case"))
     end
   end
@@ -347,11 +399,11 @@ class TestRunner < Minitest::Test
     end
   end
 
-  def run_case(stub, cases)
+  def run_case(stub, cases, oracles: nil)
     kase = FsimgSpec::Case.new(recipe:, classification: CLEAN,
                                intended_rule: nil, expected: recipe.expected)
     FsimgSpec::CaseRun.call(kase, model: NoRecords.new, image: image(cases), runner: runner_for(stub),
-                                  cases_directory: cases, sandbox: "unavailable")
+                                  cases_directory: cases, sandbox: "unavailable", oracles:)
   end
 
   def image(directory)

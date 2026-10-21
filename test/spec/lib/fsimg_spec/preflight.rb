@@ -21,8 +21,6 @@ module FsimgSpec
     # The case directory roots the runner walks by path, beyond the results
     # directory, with the longest id a recipe may carry.
     LONGEST_CASE_ROOT = "/cases/#{"x" * 128}/source".length
-    # A population tree in test/spec-cache/, beyond the build directory.
-    LONGEST_CACHE_ROOT = "/test/spec-cache/".length + FixtureCache::LONGEST_NAME
     # Before the first summary reports the coordinator's text ceiling, a
     # capture may hold this much.
     INITIAL_TEXT_BYTES = 64 << 20
@@ -42,9 +40,8 @@ module FsimgSpec
 
     # sample renders the reading sample into a directory and answers its
     # valid reading recipe and image (Fat::Bases.preflight_sample).
-    def initialize(results:, build_directory:, profile:, fsimg:, environment:, sample:)
+    def initialize(results:, profile:, fsimg:, environment:, sample:)
       @results = results
-      @build_directory = build_directory
       @profile = profile
       @fsimg = fsimg
       @environment = environment
@@ -111,7 +108,7 @@ module FsimgSpec
       host = Integer(answer, exception: false)
       raise PreflightError, "getconf reports no PATH_MAX for #{@results}" unless host
 
-      longest = [@results.bytesize + LONGEST_CASE_ROOT, @build_directory.bytesize + LONGEST_CACHE_ROOT].max
+      longest = @results.bytesize + LONGEST_CASE_ROOT
       return if longest + 1 + @profile.ceilings.path + 1 <= host
 
       raise PreflightError, "a #{longest}-byte tree root plus the #{@profile.ceilings.path}-byte path ceiling " \

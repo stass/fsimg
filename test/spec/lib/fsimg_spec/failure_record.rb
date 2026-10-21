@@ -67,21 +67,24 @@ module FsimgSpec
     private_class_method def self.fixture(recipe)
       return { tool_versions: {} } unless recipe.reading?
 
-      { base: { builder: recipe.base.builder, parameters: recipe.base.parameters, tree: recipe.base.tree.map(&:to_h) },
+      { base: recipe.base.to_h,
         base_sha256: recipe.base_sha256, tool_versions: recipe.tool_versions }
     end
 
-    # The profile, the verdict, and each stage's outcome, timings and
-    # safety problems; extract's also the name-trial answers that judged
-    # it, which the recipe never records because they depend on the host
+    # The profile, the verdict, the oracles' observations, and each
+    # stage's outcome, timings, disk footprint and safety problems;
+    # extract's also the name-trial answers that judged it, which the
+    # recipe never records because they depend on the host
     # (specs/design-spec-testing.md#host-names).
     private_class_method def self.result_fields(result, profile, trial_answers:) = {
       profile: profile.name, verdict: result.verdict, detail: result.detail,
+      oracles: result.observations.sort.to_h.transform_values(&:to_h),
       stages: result.stages.map do |stage|
         execution = stage.execution
         { stage: stage.stage, outcome: stage.outcome.to_s, detail: stage.outcome.detail, problems: stage.problems,
           exit_status: execution.exit_status, signal: execution.signal, ended_by: execution.ended_by,
           wall_seconds: execution.wall_seconds.round(3), cpu_seconds: execution.cpu_seconds.round(3),
+          footprint: stage.footprint.to_h,
           **(stage.stage == "extract" ? { name_trials: trial_fields(trial_answers) } : {}) }
       end
     }

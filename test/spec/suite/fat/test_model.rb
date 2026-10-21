@@ -193,7 +193,7 @@ class TestFatModel < Minitest::Test
 
   def accepted(stage, records, tree: []) =
     FsimgSpec::StageResult.new(stage:, outcome: FsimgSpec::Outcome.new(kind: "accepted", records:), execution: nil,
-                               problems: [], tree:)
+                               problems: [], tree:, footprint: FsimgSpec::Footprint.new(files: 0, bytes: 0))
 
   def decode(bytes)
     Dir.mktmpdir do |directory|

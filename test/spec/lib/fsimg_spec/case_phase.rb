@@ -4,10 +4,10 @@
 
 module FsimgSpec
   # What the case phase of a run found: the sandbox status every invocation
-  # reported, and for each format its rule coverage, its case counts and
-  # the ids of its failed cases.
+  # reported, and for each format its rule coverage, its case counts, the
+  # oracles' observation counts and the ids of its failed cases.
   CasePhaseResult = Data.define(:sandbox, :formats)
-  FormatResult = Data.define(:rules, :cases, :failures)
+  FormatResult = Data.define(:rules, :cases, :oracles, :failures)
 
   # Why a run has no case phase result: it named its test files and
   # skipped the phase, or the phase failed as a whole.
@@ -46,15 +46,18 @@ module FsimgSpec
   # harness exits.
   module CasePhase
     SUBDIRECTORIES = %w[cases trials failures].freeze
+    # The oracles' HOME in the results directory.
+    ORACLE_HOME = "oracle-home"
 
-    # The profile, runner, sandbox status, fixture cache and name trials
-    # every case of a phase uses.
-    Setup = Data.define(:profile, :runner, :sandbox, :cache, :name_trials)
+    # The profile, runner, sandbox status, fixture cache, name trials and
+    # oracle shell, with the run's tools, that every case of a phase uses.
+    Setup = Data.define(:profile, :runner, :sandbox, :cache, :name_trials, :shell)
 
     # The format suites, each answering registry, cases(cache:, ceilings:,
-    # name_trials:, draws:) and replay(recipe, cache:, ceilings:,
-    # name_trials:) with PendingCases, and preflight_sample(directory). A
-    # run uses these; a test may pass its own.
+    # name_trials:, shell:, draws:) and replay(recipe, cache:, ceilings:,
+    # name_trials:, shell:) with PendingCases, and
+    # preflight_sample(directory). A run uses these; a test may pass its
+    # own.
     def self.suites = { "fat" => Fat::Suite }
 
     # The suite of a recipe's format: fat12, fat16 and fat32 are FAT's.
@@ -68,10 +71,10 @@ module FsimgSpec
     def self.prepare(results:, profile:, build_directory:, environment:, suites: CasePhase.suites)
       SUBDIRECTORIES.each { Dir.mkdir(File.join(results, _1), 0o700) }
       sample = suite_for(Preflight::CREATION.format, suites:).method(:preflight_sample)
-      runner, sandbox = Preflight.new(results:, build_directory:, profile:, fsimg: environment.fetch("FSIMG_BIN"),
-                                      environment:, sample:).call
+      runner, sandbox = Preflight.new(results:, profile:, fsimg: environment.fetch("FSIMG_BIN"), environment:, sample:).call
       Setup.new(profile:, runner:, sandbox:, cache: FixtureCache.new(File.join(build_directory, "test", "spec-cache")),
-                name_trials: NameTrials.new(File.join(results, "trials")))
+                name_trials: NameTrials.new(File.join(results, "trials")),
+                shell: OracleShell.new(home: File.join(results, ORACLE_HOME), environment:))
     end
 
     # How the phase ended, as a run takes it.
@@ -108,7 +111,7 @@ module FsimgSpec
       draws = Draws.new(seed:, count: profile.tree_draws, sample: profile.tree_sample,
                         cache: FixtureCache.new(File.join(results, "drawn")))
       pending = suites.transform_values do
-        _1.cases(cache: setup.cache, ceilings: profile.ceilings, name_trials: setup.name_trials, draws:)
+        _1.cases(cache: setup.cache, ceilings: profile.ceilings, name_trials: setup.name_trials, shell: setup.shell, draws:)
       end
       check_ids(pending.values.flatten.map(&:id))
       formats = pending.to_h do |format, cases|
@@ -130,7 +133,7 @@ module FsimgSpec
     private_class_method def self.run_suite(registry, cases, setup:, results:)
       entries = cases.sort_by(&:id).map { run_case(_1, setup:, results:) }
       FormatResult.new(rules: Coverage.rules(registry, entries), cases: Coverage.cases(entries),
-                       failures: entries.reject { passing?(_1.result) }.map(&:id))
+                       oracles: Coverage.oracles(entries), failures: entries.reject { passing?(_1.result) }.map(&:id))
     end
 
     # What one case came to: its Case and ImageView once classified, else
@@ -207,7 +210,8 @@ module FsimgSpec
       return CaseResult.new(id:, verdict: "host_skip", stages: [], detail: classified.kase.host_skip) if classified.kase.host_skip
 
       CaseRun.call(classified.kase, model: classified.model, image: classified.image, runner: setup.runner,
-                                    sandbox: setup.sandbox, cases_directory:, created: classified.created)
+                                    sandbox: setup.sandbox, cases_directory:, created: classified.created,
+                                    oracles: classified.oracles)
     end
 
     private_class_method def self.harness_error(id, error, context: nil) =
