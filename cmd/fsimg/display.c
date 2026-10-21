@@ -327,6 +327,8 @@ static const char help_settings_read[] =
 static const char help_policies[] =
     "    -S policy       Sandbox: auto (default), required or off\n"
     "    -T directory    Scratch parent; - disables scratch\n";
+static const char help_gzip_read[] =
+    "    -z              Decompress the image as gzip; fail if it is not gzip\n";
 static const char help_units[] =
     "\nOptions precede operands. K, M, G, T and P are powers of 1024.\n";
 
@@ -347,11 +349,15 @@ help(fsimg_cli_display_t *display)
 		return;
 	}
 	if (mode[0] == 'c') {
-		append(display, "    -C dir          Open the operands after it relative to dir\n"
+		append(display, "    -a              Compress as the image name's suffix says (.gz); a\n"
+		    "                    container suffix must name the stack's container\n"
+		    "    -C dir          Open the operands after it relative to dir\n"
 		    "    -d              With W, also read initialized file data\n"
 		    "    -e epoch        Reproducible Unix timestamp; requires -R\n"
-		    "    -F stack        Required filesystem: fat12, fat16, fat32, exfat, qnx6\n"
-		    "                    or qnx4\n"
+		    "    -F stack        Required: the filesystem (fat12, fat16, fat32, exfat,\n"
+		    "                    qnx6 or qnx4), optionally followed by gpt or mbr and\n"
+		    "                    by dmg, vhd or simg, joined by /, such as\n"
+		    "                    fat32/gpt/dmg\n"
 		    "    -f image        New image pathname; optional with -n\n"
 		    "    --free-space=bytes\n"
 		    "                    Minimum free space after allocation\n"
@@ -359,16 +365,20 @@ help(fsimg_cli_display_t *display)
 		    "    --json          Write newline-delimited JSON\n"
 		    "    -L label        Volume label (default FSIMG where the format has one)\n");
 		append(display, "%s%s", help_budgets, help_memory);
-		append(display, "    -n              Report a plan without creating an image\n"
-		    "    -o key=value    Filesystem setting: sector, cluster, endian, uuid,\n"
-		    "                    inodes or reserve\n"
+		append(display, "    -n              Without W, report a plan without creating an image\n"
+		    "    -o key=value    Setting: sector, cluster, endian, uuid, inodes or\n"
+		    "                    reserve, or layer:key for a layer the stack or the\n"
+		    "                    compression selects, such as gpt:type=esp,\n"
+		    "                    dmg:compress=none or gzip:level=9\n"
 		    "    -p              Import owner, group and permission bits\n"
 		    "    -R              Create reproducible image bytes\n");
 		append(display, "%s", help_policies);
 		append(display, "    -s bytes        Exact image size (default automatic)\n"
 		    "    -v              Repeat as -vv for progress, details and sampled\n"
 		    "                    metadata losses on stderr\n"
-		    "    -W              Verify the staged image before publication\n");
+		    "    -W              Verify the staged image before publication\n"
+		    "    -z              Compress the image with gzip; with -a its name must\n"
+		    "                    end in .gz\n");
 		append(display, "%s", help_units);
 		append(display, "Only -C dir may appear among the operands, for the operands after it.\n"
 		    "Each operand is stored under its own path; -C dir . stores the contents\n"
@@ -395,7 +405,7 @@ help(fsimg_cli_display_t *display)
 		append(display, "    -O              Write one member's bytes to stdout\n");
 		append(display, "%s%s", help_settings_read, help_policies);
 		append(display, "    -v              Repeat as -vv for progress and details on stderr\n");
-		append(display, "%s", help_units);
+		append(display, "%s%s", help_gzip_read, help_units);
 		append(display, "Extracts into a new directory named after the image, such as ./boot for\n"
 		    "boot.img, with private modes and without host timestamps. Symbolic links\n"
 		    "and other unsupported kinds fail unless -k skips them.\n\n"
@@ -416,7 +426,7 @@ help(fsimg_cli_display_t *display)
 		append(display, "    -v              Long listing; -vv adds details on stderr\n");
 	else
 		append(display, "    -v              Show capability, geometry and sandbox details on stderr\n");
-	append(display, "%s", help_units);
+	append(display, "%s%s", help_gzip_read, help_units);
 	if (strcmp(mode, "t") == 0)
 		append(display, "\nexamples:\n    fsimg tvf disk.img\n"
 		    "    fsimg tf disk.img --no-recursion /EFI\n");

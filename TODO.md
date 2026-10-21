@@ -496,11 +496,10 @@
   (`fsimg_writer_add_manifest()`, `lib/source/manifest.c`,
   `lib/source/generated.c`, `test/manifest.c`) and the `c` mode's `@file`
   operand (`cmd/fsimg/paths.c`, `cmd/fsimg/worker-child.c`, `test/cli.py`)
-  exist; what remains is `x --mtree=FILE` through the output coordinator,
-  the round trips through `x --mtree` for exFAT, QNX6 and QNX4, and a
-  content-path test across a nested mount where the host allows one. The
-  spec harness's creation cases then emit manifests instead of writing
-  `source/`.
+  exist. What remains is the export stage (`x --mtree=FILE` through the
+  output coordinator), the round trips through `x --mtree` for FAT, exFAT,
+  QNX6 and QNX4, and a content-path test across a nested mount where the
+  host allows one.
 
 * [Low] **Opt-in metadata restore** (`lib/extract/`): consider an opt-in that
   applies permission bits without setuid, setgid or sticky through opened

@@ -42,7 +42,8 @@ A format without full verification has no verify capability, and
 fails on it with
 .Dv FSIMG_EUNSUPPORTED
 before doing any work.
-It requires only libc and host OS APIs and is includable from C++.
+It requires only libc, host OS APIs and the system zlib, and is includable
+from C++.
 It neither prints diagnostics, exits, changes process-global policy nor
 sandboxes its embedding application.
 .Pp

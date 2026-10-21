@@ -58,5 +58,6 @@ cc -std=c11 $(pkg-config --cflags libfsimg) -Iexamples \
 ```
 
 The same public header works from C++. The installed static archive can be
-linked directly with the host compiler. No external filesystem tool or
+linked directly with the host compiler, together with the system zlib
+(`-lz`), which `libfsimg.pc` names. No external filesystem tool or other
 third-party runtime library is required.

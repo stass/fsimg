@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import string
 import struct
 import subprocess
 import sys
@@ -206,6 +207,20 @@ def test_posix_metadata(executable, root):
     invoke(executable, root, ["t", "-k", "-f", "posix.img"], expected=2)
 
 
+def accepted_letters(executable, root, mode):
+    """The option letters mode accepts: each is given with an argument, and
+    one the parser does not refuse as unknown or foreign to the mode is
+    accepted. Mode letters (except -W, which verifies in c), -V and -M are
+    left out."""
+    def accepted(letter):
+        stderr = invoke(executable, root, [mode, f"-{letter}", "1"], expected=None).stderr
+        return not any(refusal in stderr for refusal in [
+            b"unknown option", b"does not apply to mode", b"-V takes no other"])
+    skipped = set("cxtiM") | (set() if mode.startswith("c") else {"W"})
+    return [letter for letter in string.ascii_letters
+            if letter not in skipped and accepted(letter)]
+
+
 def test_human_help(executable, root):
     empty = invoke(executable, root, [], expected=2)
     assert empty.stdout == b"" and empty.stderr.startswith(b"usage: fsimg")
@@ -218,6 +233,17 @@ def test_human_help(executable, root):
         assert help_output.stdout.startswith(f"usage: fsimg {usage} ".encode())
         assert b"options:" in help_output.stdout and b"example" in help_output.stdout
         assert b"modes:" not in help_output.stdout and help_output.stderr == b""
+    # Each mode's help describes every option letter the mode accepts, as
+    # the parser itself reports acceptance, except mode letters, -V and -M,
+    # which is recognized only to be reported as unsupported.
+    for mode in ["c", "cW", "x", "t", "W", "i"]:
+        mode_help = invoke(executable, root, [mode, "-h"]).stdout.decode()
+        for letter in accepted_letters(executable, root, mode):
+            assert f"\n    -{letter} " in mode_help, (mode, letter)
+    create_help = invoke(executable, root, ["c", "-h"]).stdout.decode()
+    for option in ["--free-space=", "--json"]:
+        assert f"\n    {option}" in create_help, option
+    assert re.search(r"-F stack .*gpt", create_help, re.S), create_help
     missing = invoke(executable, root, ["i"], expected=2)
     assert missing.stderr == b"fsimg: -f image is required\nusage: fsimg i -f image [options]\n"
     for arguments, detail in [

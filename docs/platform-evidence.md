@@ -56,9 +56,10 @@ Private-prefix installation qualification passes on all three hosts. A clean
 distribution snapshot supplies generated build support; fresh builds install
 and uninstall the command, static/shared libraries, header, manuals, examples
 and notices. Installed C/C++ consumers execute successfully, a relocated CLI
-verifies an image, and runtime dependencies contain only native system support:
-libSystem on macOS, libc plus the native loader on Linux, and libc/libsys on
-FreeBSD. Controlled regressions reject foreign pkg-config metadata, relative
+verifies an image, and runtime dependencies contain only native system
+support and the system zlib: libSystem and libz on macOS, libc, libz and
+the native loader on Linux, and libc/libsys and libz on FreeBSD.
+Controlled regressions reject foreign pkg-config metadata, relative
 include/library flags and dependency additions, handle prefixes with spaces,
 and prevent caller installation-directory overrides from escaping the fixture.
 

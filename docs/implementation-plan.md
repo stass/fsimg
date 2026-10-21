@@ -73,7 +73,8 @@ Deliver in small increments:
 1. Establish BSD-2-Clause licensing, attribution conventions, directory layout,
    Autoconf/Automake/Libtool build, installation rules, a public `fsimg.h`, and
    native C test/fault-injection support. Keep the ordinary build dependency-free
-   beyond host tools and libc. Compile public-header examples as C11 and C++.
+   beyond host tools, libc and the system zlib. Compile public-header
+   examples as C11 and C++.
 2. Implement status/error values, context initialization, charged allocation,
    checked arithmetic, progress/cancellation, descriptor accounting, and explicit
    ownership. Make allocation failure injectable from the start.
@@ -367,7 +368,7 @@ transferred bytes, and fsimg memory from a RAM-backed scratch filesystem.
 Completion gate: the [acceptance contract](../specs/architecture.md#acceptance-contract)
 has reproducible evidence, no unresolved Critical/High defect, complete user/API
 documentation, a reviewed license manifest, and a release archive that builds
-and operates without third-party runtime libraries.
+and operates without third-party runtime libraries other than the system zlib.
 
 ## Architecture consolidation
 
