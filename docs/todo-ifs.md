@@ -83,7 +83,24 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   `mkifs` writes time 0 on every directory record, and the writer stores the
   catalog's time. The native qualification cycle checks that `dumpifs -x`
   accepts nonzero directory times; the result returns to the owner.
-* [Medium] **Writer API additions** (`include/fsimg.h`, worker job record):
-  `FSIMG_SETTING_MOUNTPOINT`, `FSIMG_SETTING_BOOT` and the emission copy
-  observer are specified in `specs/design-api.md` and
-  `specs/design-emission.md`; they land with the writer stage.
+* [High] **Writer registration after native qualification**
+  (`lib/formats/ifs/descriptor.c`, `tools/qnx/guest/`): stage 10. The
+  writer is implemented and tested but unregistered: it lives in
+  `fsimg_ifs_candidate_format`, outside the registry, so `formats` and
+  `create -F ifs` do not offer it. Stage 10 adds `test-ifs-write --create`,
+  which the [driver design](../specs/design-ifs-driver.md#tests) gives the
+  native qualification images and their manifests, and
+  `tools/qnx/guest/qualifyifs.sh`, runs the `dumpifs` cycle, records it in
+  the research record, then registers: move the writer and its write masks
+  into `fsimg_ifs_format`, delete the candidate, switch `test/ifs-write.c`
+  to `fsimg_writer_new()`, and update `README.md`, `docs/fsimg.1`,
+  `docs/libfsimg.3` and `NEWS`, and list `mountpoint`, `boot1` to `boot4`
+  and `script` in the `create` help's `-o` line. The CLI's check that a
+  cluster is not smaller than the sector assumes a 512-byte sector when
+  none is given, so `-o cluster=1` alone would fail for ImageFS; and a
+  scheme in an `ifs` stack needs its one refusal rule (the `qnxboot` item
+  above).
+* [Medium] **Writer scale** (`test/ifs-write.c`): the 2^32 - 4 byte limit
+  is emitted on a sparse sink; a catalog that spills to scratch, with
+  measured I/O calls, scratch and RSS as the
+  [driver design](../specs/design-ifs-driver.md#tests) asks, is not.

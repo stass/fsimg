@@ -94,7 +94,9 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/ifs/tree.c lib/formats/ifs/names.c \
 	lib/formats/ifs/directory.c lib/formats/ifs/read.c \
 	lib/formats/ifs/verify.c lib/codec/codec.h lib/codec/lzo1x.c \
-	lib/codec/nrv2b.c compat/host.c compat/host.h
+	lib/codec/nrv2b.c compat/host.c compat/host.h \
+	lib/formats/ifs/write-ifs.h lib/formats/ifs/write-plan.c \
+	lib/formats/ifs/write-emit.c
 # The system zlib is the core's one third-party library; never vendored.
 libfsimg_core_la_LIBADD = $(ZLIB_LIBS)
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
@@ -125,7 +127,8 @@ example_extract_LDADD = libfsimg.la
 test_programs = test-core test-private test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-ifs test-cli \
+	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-ifs \
+	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
 	test-containers test-compression test-gzip-write test-holes header-c \
 	header-cxx test-codec
@@ -197,6 +200,8 @@ test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h
 test_qnx4_write_LDADD = libfsimg.la
 test_ifs_SOURCES = test/ifs.c test/test.h
 test_ifs_LDADD = libfsimg.la
+test_ifs_write_SOURCES = test/ifs-write.c test/test.h
+test_ifs_write_LDADD = libfsimg.la
 test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
 test_exfat_scale_LDADD = libfsimg.la
 test_catalog_SOURCES = test/catalog.c test/test.h
@@ -312,7 +317,7 @@ check-installed-consumers:
 	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" $(ZLIB_LIBS) -o header-installed-cxx
 	./header-installed-cxx
 check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write \
-	    test-qnx4 test-qnx4-write test-ifs test-codec fsimg \
+	    test-qnx4 test-qnx4-write test-ifs test-ifs-write test-codec fsimg \
 	    test/fat-integration.sh test/exfat-integration.sh \
 	    test/qnx6-integration.sh test/qnx4-integration.sh \
 	    test/layers-integration.sh test/containers-integration.sh \
@@ -327,6 +332,7 @@ check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write 
 	./test/compression-integration.sh
 	./test/codec-integration.sh; result=$$?; test $$result = 0 -o $$result = 77
 	./test-ifs --native; result=$$?; test $$result = 0 -o $$result = 77
+	./test-ifs-write --native; result=$$?; test $$result = 0 -o $$result = 77
 # Regenerate the checked-in comparison baseline; test/baseline.sh only reads it.
 baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	./test/baseline.sh --record > $(srcdir)/test/baseline.txt.new || \

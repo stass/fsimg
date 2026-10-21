@@ -16,16 +16,31 @@ typedef struct fsimg_emit_region {
 	uint64_t	 capacity;
 } fsimg_emit_region_t;
 
+/* A copy observer sees every byte a payload copy writes: once per transfer
+ * batch, in the file's logical order, with the volume offset of the
+ * batch's first byte. Logical order is volume order only within one
+ * region. ZERO ranges and empty sources write nothing and are never
+ * observed, and batch sizes are unspecified, so an observer that needs
+ * alignment keeps its own phase. It runs inside the copy's work accounting
+ * and cannot fail: it records, and the driver judges after the copy
+ * returns.
+ */
+typedef void (*fsimg_emit_observer_t)(void *, const unsigned char *, size_t,
+    uint64_t);
+
 /* Where one file's payload goes. length is the file length the plan records
  * and must equal the catalog's. initialized is the prefix the format stores,
  * with initialized <= length <= total region capacity; everything after it
- * stays zero. An empty file has no regions.
+ * stays zero. An empty file has no regions. observe, when not NULL, is
+ * called with observer_argument over every byte written.
  */
 typedef struct fsimg_emit_payload {
 	const fsimg_emit_region_t *regions;
 	size_t		 region_count;
 	uint64_t	 length;
 	uint64_t	 initialized;
+	fsimg_emit_observer_t observe;
+	void		*observer_argument;
 } fsimg_emit_payload_t;
 
 /* Emission is the only way a format driver writes image bytes. The emission

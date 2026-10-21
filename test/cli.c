@@ -169,6 +169,11 @@ test_options(void)
 		{ "fsimg", "-cn", "-F", "qnx6", "-o", "inodes=4294967296", ".", NULL },
 		{ "fsimg", "-cn", "-F", "qnx6", "-o", "reserve=101", ".", NULL },
 		{ "fsimg", "-cn", "-F", "qnx6", "-o", "reserve=1K", ".", NULL },
+		{ "fsimg", "-i", "-f", "image", "-o", "mountpoint=/", NULL },
+		{ "fsimg", "-cn", "-F", "qnx6", "-o", "mountpoint=/", "-o",
+		    "mountpoint=/x", ".", NULL },
+		{ "fsimg", "-cn", "-F", "qnx6", "-o", "boot5=/x", ".", NULL },
+		{ "fsimg", "-cn", "-F", "qnx6", "-o", "script", ".", NULL },
 		{ "fsimg", "-cn", "-F", "fat32", "-M", "-s", "64M", ".", NULL },
 		{ "fsimg", "--formats", "-m", "16M", NULL }
 	};
@@ -191,6 +196,14 @@ test_options(void)
 	    "inodes=1000", "-o", "reserve=0", ".", NULL };
 	char *window[] = { "fsimg", "-i", "-f", "image", "--offset=512",
 	    "--length", "1M", NULL };
+	char *text[] = { "fsimg", "-cn", "-F", "qnx6", "-o", "mountpoint=",
+	    "-o", "boot1=/a", "-o", "boot4=/d", "-o", "script=/s", ".", NULL };
+	/* The text fields of the job record hold 1025 bytes and a NUL. */
+	char longest[11 + 1025 + 1], longer[6 + 1026 + 1];
+	char *text_longest[] = { "fsimg", "-cn", "-F", "qnx6", "-o", longest,
+	    ".", NULL };
+	char *text_longer[] = { "fsimg", "-cn", "-F", "qnx6", "-o", longer,
+	    ".", NULL };
 	static const unsigned char uuid[16] = {
 		0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
 		0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67
@@ -253,6 +266,25 @@ test_options(void)
 	memset(label, 'A', sizeof(label) - 1);
 	label[sizeof(label) - 1] = '\0';
 	check_syntax(large_label);
+	CHECK(parse(text, &options) == FSIMG_OK);
+	CHECK(options.request.write.mountpoint != NULL &&
+	    options.request.write.mountpoint[0] == '\0');
+	CHECK(strcmp(options.request.write.boot_programs[0], "/a") == 0);
+	CHECK(options.request.write.boot_programs[1] == NULL &&
+	    options.request.write.boot_programs[2] == NULL);
+	CHECK(strcmp(options.request.write.boot_programs[3], "/d") == 0);
+	CHECK(strcmp(options.request.write.script, "/s") == 0);
+	fsimg_cli_release(&options);
+	memcpy(longest, "mountpoint=", 11);
+	memset(longest + 11, 'm', 1025);
+	longest[sizeof(longest) - 1] = '\0';
+	CHECK(parse(text_longest, &options) == FSIMG_OK);
+	CHECK(strlen(options.request.write.mountpoint) == 1025);
+	fsimg_cli_release(&options);
+	memcpy(longer, "boot2=", 6);
+	memset(longer + 6, 'b', 1026);
+	longer[sizeof(longer) - 1] = '\0';
+	check_syntax(text_longer);
 }
 
 /* Mode selection: exactly one mode, or c with W; a dashless first argument

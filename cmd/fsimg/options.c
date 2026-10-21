@@ -168,7 +168,9 @@ typedef enum cli_limit_key {
 typedef enum cli_setting_key {
 	CLI_SETTING_SECTOR, CLI_SETTING_CLUSTER, CLI_SETTING_OEM,
 	CLI_SETTING_ENDIAN, CLI_SETTING_UUID, CLI_SETTING_INODES,
-	CLI_SETTING_RESERVE, CLI_SETTING_COUNT
+	CLI_SETTING_RESERVE, CLI_SETTING_MOUNTPOINT, CLI_SETTING_BOOT1,
+	CLI_SETTING_BOOT2, CLI_SETTING_BOOT3, CLI_SETTING_BOOT4,
+	CLI_SETTING_SCRIPT, CLI_SETTING_COUNT
 } cli_setting_key_t;
 
 /* Parsing state. Option arguments are borrowed from the command words;
@@ -910,9 +912,11 @@ parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
 /*
  * Typed settings. An unqualified key targets the filesystem: read-side
  * oem, and the creation-side byte quantities (sector, cluster), the byte
- * order, the volume UUID, the inode capacity and the reserve percentage,
- * which the writer validates for its format. A qualified key "layer:key"
- * targets one layer (parse_layer_setting).
+ * order, the volume UUID, the inode capacity, the reserve percentage, the
+ * mountpoint, the boot programs and the script, which the writer validates
+ * for its format. The text settings are taken as given, empty included,
+ * within the job record's field. A qualified key "layer:key" targets one
+ * layer (parse_layer_setting).
  */
 static fsimg_status_t
 parse_setting(cli_parse_t *parse, const char *text, unsigned *seen)
@@ -921,7 +925,11 @@ parse_setting(cli_parse_t *parse, const char *text, unsigned *seen)
 		[CLI_SETTING_SECTOR] = "sector", [CLI_SETTING_CLUSTER] = "cluster",
 		[CLI_SETTING_OEM] = "oem", [CLI_SETTING_ENDIAN] = "endian",
 		[CLI_SETTING_UUID] = "uuid", [CLI_SETTING_INODES] = "inodes",
-		[CLI_SETTING_RESERVE] = "reserve"
+		[CLI_SETTING_RESERVE] = "reserve",
+		[CLI_SETTING_MOUNTPOINT] = "mountpoint",
+		[CLI_SETTING_BOOT1] = "boot1", [CLI_SETTING_BOOT2] = "boot2",
+		[CLI_SETTING_BOOT3] = "boot3", [CLI_SETTING_BOOT4] = "boot4",
+		[CLI_SETTING_SCRIPT] = "script"
 	};
 	fsimg_write_options_t *write = &parse->options->request.write;
 	const char *value, *qualifier;
@@ -958,7 +966,22 @@ parse_setting(cli_parse_t *parse, const char *text, unsigned *seen)
 	}
 	if (!creating)
 		return (syntax_naming(parse, "setting applies only to creation", text));
+	if (key >= CLI_SETTING_MOUNTPOINT && key <= CLI_SETTING_SCRIPT &&
+	    strnlen(value, FSIMG_JOB_TEXT_BYTES) == FSIMG_JOB_TEXT_BYTES)
+		return (syntax(parse, "setting value exceeds the command's text representation"));
 	switch (key) {
+	case CLI_SETTING_MOUNTPOINT:
+		write->mountpoint = value;
+		return (FSIMG_OK);
+	case CLI_SETTING_BOOT1:
+	case CLI_SETTING_BOOT2:
+	case CLI_SETTING_BOOT3:
+	case CLI_SETTING_BOOT4:
+		write->boot_programs[key - CLI_SETTING_BOOT1] = value;
+		return (FSIMG_OK);
+	case CLI_SETTING_SCRIPT:
+		write->script = value;
+		return (FSIMG_OK);
 	case CLI_SETTING_ENDIAN:
 		if (strcmp(value, "little") == 0)
 			write->byte_order = FSIMG_BYTE_ORDER_LITTLE;

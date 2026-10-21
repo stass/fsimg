@@ -660,7 +660,10 @@ typedef struct fsimg_write_options {
 	 * whose capability record has no label capacity requires NULL.
 	 */
 	const char	*label;
-	uint32_t	 sector_bytes; /* Zero selects 512. */
+	/* Zero selects the format's sector size: 512, or 1 for a
+	 * byte-addressed format such as ImageFS.
+	 */
+	uint32_t	 sector_bytes;
 	uint32_t	 allocation_unit_bytes; /* Zero selects automatically. */
 	uint32_t	 fat_root_entries; /* FAT12/16 only; zero selects an adequate root. */
 	uint32_t	 volume_serial; /* Default zero; used verbatim in all modes. */
@@ -672,6 +675,15 @@ typedef struct fsimg_write_options {
 	uint32_t	 reserve_percent; /* Default 3; at most 100. */
 	/* Default zero; used verbatim in all modes, in textual byte order. */
 	unsigned char	 volume_uuid[16];
+	/* FSIMG_SETTING_MOUNTPOINT: the stored mount path, copied; NULL selects
+	 * the format's default, and "" stores an empty one.
+	 */
+	const char	*mountpoint;
+	/* FSIMG_SETTING_BOOT: the image paths of up to four boot programs, in
+	 * header slot order, and of the startup script; NULL when unused.
+	 */
+	const char	*boot_programs[4];
+	const char	*script;
 	/* Borrowed for construction and copied; NULL selects every default. */
 	const fsimg_layer_options_t *layers;
 	/* The compression wrapping the whole output, as -z says: a registered
@@ -905,6 +917,8 @@ typedef struct fsimg_volume_info {
 #define FSIMG_SETTING_VOLUME_UUID 0x02u
 #define FSIMG_SETTING_INODE_CAPACITY 0x04u
 #define FSIMG_SETTING_RESERVE 0x08u
+#define FSIMG_SETTING_MOUNTPOINT 0x10u
+#define FSIMG_SETTING_BOOT 0x20u
 
 typedef struct fsimg_format_info {
 	char		 name[16];

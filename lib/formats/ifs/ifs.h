@@ -210,6 +210,14 @@ fsimg_status_t ifs_unsupported(fsimg_error_t *, const char *);
 /* records.c: pure codecs over byte buffers, without I/O. */
 uint16_t ifs_u16(const unsigned char *, ifs_byte_order_t);
 uint32_t ifs_u32(const unsigned char *, ifs_byte_order_t);
+void ifs_put16(unsigned char *, uint16_t, ifs_byte_order_t);
+void ifs_put32(unsigned char *, uint32_t, ifs_byte_order_t);
+uint32_t ifs_path_offset(ifs_kind_t);
+void ifs_record_place(ifs_record_t *);
+uint64_t ifs_record_minimum(ifs_kind_t, uint32_t, uint32_t);
+void ifs_header_encode(const ifs_header_t *, unsigned char *);
+void ifs_record_encode(const ifs_record_t *, const unsigned char *,
+    ifs_byte_order_t, unsigned char *);
 fsimg_status_t ifs_header_decode(const unsigned char *, ifs_header_t *,
     fsimg_error_t *);
 fsimg_status_t ifs_header_bounds(const ifs_header_t *, uint64_t,

@@ -6,7 +6,7 @@
 #include <strings.h>
 
 #include "format.h"
-#include "ifs.h"
+#include "write-ifs.h"
 
 _Static_assert(IFS_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
     "the ImageFS link-target limit lies within the entry model's ceiling");
@@ -14,28 +14,37 @@ _Static_assert(IFS_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
 static fsimg_status_t ifs_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
-/* The one variant reads either byte order. Addressing is by byte, the
+/* The one profile reads either byte order. Addressing is by byte, the
  * largest image is the largest multiple of 4 that fits 32 bits, and names
  * and link targets reach the 1024-byte path limit. There is no label.
+ * write_units and settings are what the writer stores, zero in the
+ * registered descriptor, which has no writer.
+ */
+#define IFS_PROFILE(write_units, settings) {				\
+	.name = "ifs",							\
+	.profile = "little-endian/big-endian",				\
+	.entry_kinds = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
+	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO,			\
+	.metadata_fields = FSIMG_META_MODIFIED | FSIMG_META_OWNER |	\
+	    FSIMG_META_MODE,						\
+	.sector_size_mask = 1u << 0,					\
+	.allocation_unit_size_mask = 1u << 0,				\
+	.write_allocation_unit_size_mask = (write_units),		\
+	.max_file_bytes = IFS_FILE_MAX,					\
+	.max_volume_bytes = IFS_VOLUME_MAX,				\
+	.max_name_utf16_units = IFS_PATH_MAX,				\
+	.max_label_bytes = 0,						\
+	.max_link_target_bytes = IFS_LINK_TARGET_MAX,			\
+	.write_settings = (settings)					\
+}
+
+/* The registered descriptor reads and verifies. The registry lists a
+ * writer only after native QNX has checked its output, so the writer has
+ * its own candidate descriptor below.
  */
 static const fsimg_format_variant_t ifs_variants[] = {
 	{
-		.info = {
-			.name = "ifs",
-			.profile = "little-endian/big-endian",
-			.entry_kinds = FSIMG_ENTRY_FILE |
-			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
-			    FSIMG_ENTRY_FIFO,
-			.metadata_fields = FSIMG_META_MODIFIED |
-			    FSIMG_META_OWNER | FSIMG_META_MODE,
-			.sector_size_mask = 1u << 0,
-			.allocation_unit_size_mask = 1u << 0,
-			.max_file_bytes = IFS_FILE_MAX,
-			.max_volume_bytes = IFS_VOLUME_MAX,
-			.max_name_utf16_units = IFS_PATH_MAX,
-			.max_label_bytes = 0,
-			.max_link_target_bytes = IFS_LINK_TARGET_MAX
-		},
+		.info = IFS_PROFILE(0, 0),
 		.id = 0
 	}
 };
@@ -47,6 +56,25 @@ const fsimg_format_t fsimg_ifs_format = {
 	.probe = ifs_probe,
 	.reader = &fsimg_ifs_reader_ops,
 	.writer = NULL
+};
+
+/* The same profile with the writer, outside the registry (write-ifs.h). */
+static const fsimg_format_variant_t ifs_candidate_variants[] = {
+	{
+		.info = IFS_PROFILE(1u << 0, FSIMG_SETTING_BYTE_ORDER |
+		    FSIMG_SETTING_MOUNTPOINT | FSIMG_SETTING_BOOT),
+		.id = 0
+	}
+};
+
+const fsimg_format_t fsimg_ifs_candidate_format = {
+	.variants = ifs_candidate_variants,
+	.variant_count = sizeof(ifs_candidate_variants) /
+	    sizeof(ifs_candidate_variants[0]),
+	.probe_bytes = IFS_HEADER_BYTES,
+	.probe = ifs_probe,
+	.reader = &fsimg_ifs_reader_ops,
+	.writer = &fsimg_ifs_writer_ops
 };
 
 /* The identity signature is the seven bytes "imagefs" at offset 0; no FAT

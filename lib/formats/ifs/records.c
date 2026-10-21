@@ -8,10 +8,12 @@
 
 #include "ifs.h"
 
-/* Pure decoders of the header and of every record kind. They read only the
- * bytes they are given, perform no I/O and hold no state; each check names
- * its class, so a value ImageFS forbids is corruption and a value no native
- * image carries is unsupported.
+/* Pure codecs of the header and of every record kind. They read and write
+ * only the bytes they are given, perform no I/O and hold no state. Each
+ * decoder check names its class, so a value ImageFS forbids is corruption
+ * and a value no native image carries is unsupported. The encoders are
+ * their inverses for the values the writer plans, and they fill every
+ * padding byte with zero.
  */
 
 static fsimg_status_t record_path(const unsigned char *, size_t, uint32_t,
@@ -37,6 +39,143 @@ ifs_u32(const unsigned char *bytes, ifs_byte_order_t order)
 		    (uint32_t)bytes[2] << 8 | bytes[3]);
 	return ((uint32_t)bytes[0] | (uint32_t)bytes[1] << 8 |
 	    (uint32_t)bytes[2] << 16 | (uint32_t)bytes[3] << 24);
+}
+
+void
+ifs_put16(unsigned char *bytes, uint16_t value, ifs_byte_order_t order)
+{
+	if (order == IFS_BIG_ENDIAN) {
+		bytes[0] = (unsigned char)(value >> 8);
+		bytes[1] = (unsigned char)value;
+	} else {
+		bytes[0] = (unsigned char)value;
+		bytes[1] = (unsigned char)(value >> 8);
+	}
+}
+
+void
+ifs_put32(unsigned char *bytes, uint32_t value, ifs_byte_order_t order)
+{
+	for (unsigned i = 0; i < 4; i++)
+		bytes[order == IFS_BIG_ENDIAN ? 3 - i : i] =
+		    (unsigned char)(value >> (8 * i));
+}
+
+/* Where a record of each kind stores its path. */
+uint32_t
+ifs_path_offset(ifs_kind_t kind)
+{
+	switch (kind) {
+	case IFS_KIND_DIRECTORY:
+		return (IFS_REC_DIR_PATH);
+	case IFS_KIND_FILE:
+		return (IFS_REC_FILE_PATH);
+	case IFS_KIND_SYMLINK:
+		return (IFS_REC_LINK_PATH);
+	case IFS_KIND_FIFO:
+		return (IFS_REC_FIFO_PATH);
+	}
+	return (IFS_REC_PREFIX);
+}
+
+/* Place a record's path and, for a symbolic link, its target within the
+ * record from its kind and path_length: the path at the kind's path
+ * offset, the target right after the path's NUL. Encoding and the content
+ * copy both take the positions from here.
+ */
+void
+ifs_record_place(ifs_record_t *record)
+{
+	record->path_offset = ifs_path_offset(record->kind);
+	record->target_offset = record->kind == IFS_KIND_SYMLINK ?
+	    record->path_offset + record->path_length + 1 : 0;
+}
+
+/* A kind's minimum record length for a path of path_length bytes and, for
+ * a symbolic link, a target of target_length bytes: the payload, the path
+ * and its NUL, and the target and its NUL.
+ */
+uint64_t
+ifs_record_minimum(ifs_kind_t kind, uint32_t path_length,
+    uint32_t target_length)
+{
+	uint64_t minimum;
+
+	minimum = (uint64_t)ifs_path_offset(kind) + path_length + 1;
+	if (kind == IFS_KIND_SYMLINK)
+		minimum += (uint64_t)target_length + 1;
+	return (minimum);
+}
+
+/* Encode the fixed header: the signature, the flags byte of the byte order,
+ * the three sizes, the references, chain_paddr, the mount flags and ten
+ * zero spare words.
+ */
+void
+ifs_header_encode(const ifs_header_t *header, unsigned char *bytes)
+{
+	ifs_byte_order_t order = header->order;
+
+	bzero(bytes, IFS_HEADER_BYTES);
+	bcopy(IFS_SIGNATURE, bytes, IFS_SIGNATURE_BYTES);
+	bytes[IFS_HDR_FLAGS] = order == IFS_BIG_ENDIAN ? IFS_FLAGS_BIG :
+	    IFS_FLAGS_LITTLE;
+	ifs_put32(bytes + IFS_HDR_IMAGE_SIZE, header->image_size, order);
+	ifs_put32(bytes + IFS_HDR_DIR_SIZE, header->hdr_dir_size, order);
+	ifs_put32(bytes + IFS_HDR_DIR_OFFSET, header->dir_offset, order);
+	for (unsigned i = 0; i < IFS_BOOT_SLOTS; i++)
+		ifs_put32(bytes + IFS_HDR_BOOT_INO + 4 * i, header->boot_ino[i],
+		    order);
+	ifs_put32(bytes + IFS_HDR_SCRIPT_INO, header->script_ino, order);
+	ifs_put32(bytes + IFS_HDR_CHAIN_PADDR, header->chain_paddr, order);
+	ifs_put32(bytes + IFS_HDR_MOUNT_FLAGS, header->mount_flags, order);
+}
+
+/* Encode one record of record->length bytes, at least its kind's minimum,
+ * whose positions ifs_record_place() set: the prefix with a zero
+ * extended-attribute offset, the kind's payload, the path_length bytes of
+ * path at path_offset and their NUL, and zero everywhere else. A symbolic
+ * link's sym_offset is target_offset relative to the path and its sym_size
+ * target_length; the target itself is content, which the caller copies to
+ * target_offset, so its bytes and the NUL after them stay zero here.
+ */
+void
+ifs_record_encode(const ifs_record_t *record, const unsigned char *path,
+    ifs_byte_order_t order, unsigned char *bytes)
+{
+	static const uint32_t types[] = {
+		[IFS_KIND_DIRECTORY] = IFS_MODE_DIRECTORY,
+		[IFS_KIND_FILE] = IFS_MODE_FILE,
+		[IFS_KIND_SYMLINK] = IFS_MODE_SYMLINK,
+		[IFS_KIND_FIFO] = IFS_MODE_FIFO
+	};
+
+	bzero(bytes, record->length);
+	ifs_put16(bytes + IFS_REC_LENGTH, (uint16_t)record->length, order);
+	ifs_put32(bytes + IFS_REC_INODE, record->inode, order);
+	ifs_put32(bytes + IFS_REC_MODE, types[record->kind] |
+	    record->permissions, order);
+	ifs_put32(bytes + IFS_REC_GID, record->gid, order);
+	ifs_put32(bytes + IFS_REC_UID, record->uid, order);
+	ifs_put32(bytes + IFS_REC_MTIME, record->mtime, order);
+	switch (record->kind) {
+	case IFS_KIND_FILE:
+		ifs_put32(bytes + IFS_REC_FILE_OFFSET, record->data_offset,
+		    order);
+		ifs_put32(bytes + IFS_REC_FILE_SIZE, record->data_length, order);
+		break;
+	case IFS_KIND_SYMLINK:
+		ifs_put16(bytes + IFS_REC_LINK_OFFSET,
+		    (uint16_t)(record->target_offset - record->path_offset),
+		    order);
+		ifs_put16(bytes + IFS_REC_LINK_SIZE,
+		    (uint16_t)record->target_length, order);
+		break;
+	case IFS_KIND_DIRECTORY:
+	case IFS_KIND_FIFO:
+		break;
+	}
+	bcopy(path, bytes + record->path_offset, record->path_length);
 }
 
 /* Decode the fixed 0x58-byte header of an image whose prefix holds the

@@ -51,8 +51,18 @@ fsimg_write_options_init(fsimg_write_options_t *options)
 	options->version = FSIMG_OPTIONS_VERSION;
 	options->flags = FSIMG_WRITE_ALLOW_LOSS;
 	options->epoch = 315532800;
-	options->sector_bytes = 512;
 	options->reserve_percent = 3;
+}
+
+/* Whether any boot program or the startup script is set. */
+static bool
+boot_settings_set(const fsimg_write_options_t *options)
+{
+	for (size_t i = 0; i < sizeof(options->boot_programs) /
+	    sizeof(options->boot_programs[0]); i++)
+		if (options->boot_programs[i] != NULL)
+			return (true);
+	return (options->script != NULL);
 }
 
 /* Whether every format-specific setting outside the format's mask holds its
@@ -70,7 +80,10 @@ settings_supported(const fsimg_write_options_t *options, uint32_t settings)
 	    ((settings & FSIMG_SETTING_INODE_CAPACITY) != 0 ||
 	    options->inode_capacity == 0) &&
 	    ((settings & FSIMG_SETTING_RESERVE) != 0 ||
-	    options->reserve_percent == 3));
+	    options->reserve_percent == 3) &&
+	    ((settings & FSIMG_SETTING_MOUNTPOINT) != 0 ||
+	    options->mountpoint == NULL) &&
+	    ((settings & FSIMG_SETTING_BOOT) != 0 || !boot_settings_set(options)));
 }
 
 /* Whether variant is one of the descriptor's own capability records. */
@@ -262,6 +275,20 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 		status = driver->writer->validate(&selected, variant->id, error);
 	if (status == FSIMG_OK && disk.scheme != NULL && disk.fixed)
 		status = fit_volume(driver, variant, &disk, &selected, error);
+	/* The writer keeps copies of the label and the mountpoint only. A
+	 * format's validation refuses every boot setting, since no format has
+	 * the evidence to flag a boot record (specs/design-ifs.md, Boot
+	 * settings); one that accepted a boot path would leave the writer
+	 * holding the caller's pointer.
+	 */
+	if (status == FSIMG_OK && boot_settings_set(&selected))
+		status = fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "format validation accepted a boot setting");
+	if (status == FSIMG_OK && selected.mountpoint != NULL &&
+	    strnlen(selected.mountpoint, sizeof(writer->mountpoint)) ==
+	    sizeof(writer->mountpoint))
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "mountpoint exceeds common backing capacity");
 	length = 0;
 	if (status == FSIMG_OK && variant->info.max_label_bytes != 0) {
 		if (selected.label == NULL)
@@ -289,6 +316,11 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	if (selected.label != NULL) {
 		bcopy(selected.label, writer->label, length + 1);
 		writer->options.label = writer->label;
+	}
+	if (selected.mountpoint != NULL) {
+		bcopy(selected.mountpoint, writer->mountpoint,
+		    strlen(selected.mountpoint) + 1);
+		writer->options.mountpoint = writer->mountpoint;
 	}
 	*out = writer;
 	return (FSIMG_OK);

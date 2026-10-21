@@ -253,6 +253,10 @@ QNX4 names inode_capacity alone, the
 slot count, where zero selects 128 slots raised to the slots the names
 need.
 QNX6 and QNX4 store no volume_serial and ignore it.
+The settings mountpoint, a copied string under FSIMG_SETTING_MOUNTPOINT,
+and boot_programs and script, image paths under FSIMG_SETTING_BOOT,
+follow the same rule; no registered format names either bit.
+A zero sector_bytes, the default, selects the format's own sector size.
 Time bases distinguish UTC instants, known offsets and unknown-zone calendar
 values.
 .Pp

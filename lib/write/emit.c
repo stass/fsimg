@@ -29,8 +29,8 @@ typedef struct region_cursor {
 static fsimg_status_t check_payload(const fsimg_emit_t *,
     const fsimg_emit_payload_t *, fsimg_error_t *);
 static void region_seek(region_cursor_t *, uint64_t);
-static fsimg_status_t copy_data(fsimg_emit_t *, region_cursor_t *, uint64_t,
-    uint64_t, fsimg_error_t *);
+static fsimg_status_t copy_data(fsimg_emit_t *, const fsimg_emit_payload_t *,
+    region_cursor_t *, uint64_t, uint64_t, fsimg_error_t *);
 static fsimg_status_t copy_initialized(fsimg_emit_t *,
     const fsimg_emit_payload_t *, fsimg_error_t *);
 static void name_source(fsimg_writer_t *, uint64_t, fsimg_error_t *);
@@ -193,13 +193,14 @@ region_seek(region_cursor_t *cursor, uint64_t logical_offset)
  * clipped to the buffer and to the region holding its first byte, so one
  * batch never spans two regions. fsimg_source_read() reads exactly or fails:
  * a source that ends before its declared length is an error, never a short
- * success.
+ * success. The payload's observer sees each batch once it is written.
  */
 static fsimg_status_t
-copy_data(fsimg_emit_t *emit, region_cursor_t *cursor, uint64_t logical_offset,
-    uint64_t end, fsimg_error_t *error)
+copy_data(fsimg_emit_t *emit, const fsimg_emit_payload_t *payload,
+    region_cursor_t *cursor, uint64_t logical_offset, uint64_t end,
+    fsimg_error_t *error)
 {
-	uint64_t region_end, batch;
+	uint64_t region_end, batch, image_offset;
 	size_t transferred;
 	fsimg_status_t status;
 
@@ -215,11 +216,15 @@ copy_data(fsimg_emit_t *emit, region_cursor_t *cursor, uint64_t logical_offset,
 		    emit->buffer, (size_t)batch, &transferred, error);
 		if (status != FSIMG_OK)
 			return (status);
-		status = fsimg_emit_write(emit, cursor->region->image_offset +
-		    (logical_offset - cursor->logical_start), emit->buffer,
+		image_offset = cursor->region->image_offset +
+		    (logical_offset - cursor->logical_start);
+		status = fsimg_emit_write(emit, image_offset, emit->buffer,
 		    (size_t)batch, error);
 		if (status != FSIMG_OK)
 			return (status);
+		if (payload->observe != NULL)
+			payload->observe(payload->observer_argument, emit->buffer,
+			    (size_t)batch, image_offset);
 		logical_offset += batch;
 	}
 	return (FSIMG_OK);
@@ -251,8 +256,8 @@ copy_initialized(fsimg_emit_t *emit, const fsimg_emit_payload_t *payload,
 		if (range_end > payload->initialized)
 			range_end = payload->initialized;
 		if (range.kind == FSIMG_RANGE_DATA) {
-			status = copy_data(emit, &cursor, logical_offset, range_end,
-			    error);
+			status = copy_data(emit, payload, &cursor, logical_offset,
+			    range_end, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}

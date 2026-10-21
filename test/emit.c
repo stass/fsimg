@@ -118,6 +118,9 @@ static void place_regions(const uint64_t *, size_t, uint64_t,
     fsimg_emit_region_t *);
 static void check_placed(const memory_sink_t *, uint64_t,
     const fsimg_emit_payload_t *);
+static void observe_copy(void *, const unsigned char *, size_t, uint64_t);
+static void check_observed(const memory_sink_t *, uint64_t,
+    const fsimg_emit_payload_t *);
 static void test_direct_copies(void);
 
 /* The expected payload: a byte pattern that differs per file, with zeros
@@ -811,6 +814,64 @@ check_placed(const memory_sink_t *sink, uint64_t file,
 	free(expected);
 }
 
+/* What the copy observer saw: each observed byte at its volume offset, which
+ * offsets were observed, and the calls and bytes in total.
+ */
+static struct {
+	unsigned char	*bytes;
+	bool		*seen;
+	uint64_t	 length;
+	uint64_t	 calls;
+	uint64_t	 total;
+} observed;
+
+/* Every observed byte lies in the volume and is observed once. */
+static void
+observe_copy(void *argument, const unsigned char *bytes, size_t length,
+    uint64_t offset)
+{
+	CHECK(argument == &observed);
+	CHECK(length != 0 && offset <= observed.length &&
+	    length <= observed.length - offset);
+	for (size_t i = 0; i < length; i++) {
+		CHECK(!observed.seen[offset + i]);
+		observed.seen[offset + i] = true;
+		observed.bytes[offset + i] = bytes[i];
+	}
+	observed.calls++;
+	observed.total += length;
+}
+
+/* The observer saw exactly the bytes the copy wrote: every DATA byte below
+ * the initialized length, with its value and volume offset, and nothing of a
+ * ZERO range, of region slack or of the gaps.
+ */
+static void
+check_observed(const memory_sink_t *sink, uint64_t file,
+    const fsimg_emit_payload_t *payload)
+{
+	const fsimg_emit_region_t *region;
+	uint64_t logical, offset, expected;
+	bool data;
+
+	logical = 0;
+	expected = 0;
+	for (size_t i = 0; i < payload->region_count; i++) {
+		region = &payload->regions[i];
+		for (uint64_t k = 0; k < region->capacity; k++, logical++) {
+			offset = region->image_offset + k;
+			data = logical < payload->initialized &&
+			    file != FILE_ZEROS && !file_zero_at(file, logical);
+			CHECK(observed.seen[offset] == data);
+			if (data)
+				CHECK(observed.bytes[offset] == sink->bytes[offset]);
+			expected += data;
+		}
+	}
+	CHECK(observed.total == expected);
+	CHECK(expected == 0 || observed.calls != 0);
+}
+
 static void
 test_direct_copies(void)
 {
@@ -818,6 +879,14 @@ test_direct_copies(void)
 		{ .name = "fragmented mixed source", .file = FILE_MIXED,
 		    .capacities = { 1000, 0, 100000, 50000, 49500 },
 		    .region_count = 5, .length = 200000, .initialized = 200000,
+		    .expected = FSIMG_OK },
+		{ .name = "zero source", .file = FILE_ZEROS,
+		    .capacities = { 70004 }, .region_count = 1,
+		    .length = 70001, .initialized = 70001,
+		    .expected = FSIMG_OK },
+		{ .name = "source of one ZERO range", .file = FILE_SPARSE,
+		    .capacities = { 50000 }, .region_count = 1,
+		    .length = 50000, .initialized = 50000,
 		    .expected = FSIMG_OK },
 		{ .name = "initialized ends inside data", .file = FILE_LARGE,
 		    .capacities = { 301000 }, .region_count = 1,
@@ -878,6 +947,13 @@ test_direct_copies(void)
 		copy_run.payload.region_count = test->region_count;
 		copy_run.payload.length = test->length;
 		copy_run.payload.initialized = test->initialized;
+		copy_run.payload.observe = observe_copy;
+		copy_run.payload.observer_argument = &observed;
+		bzero(&observed, sizeof(observed));
+		observed.length = sink.length;
+		observed.bytes = calloc(1, (size_t)sink.length);
+		observed.seen = calloc((size_t)sink.length, sizeof(bool));
+		CHECK(observed.bytes != NULL && observed.seen != NULL);
 
 		status = emit_to(&fixture, &sink, &error);
 		/* The copy closes its source on every outcome. Only an operational
@@ -892,6 +968,7 @@ test_direct_copies(void)
 				    error.message);
 			CHECK(status == FSIMG_OK);
 			check_placed(&sink, test->file, &copy_run.payload);
+			check_observed(&sink, test->file, &copy_run.payload);
 		} else {
 			check_failed(&fixture, &sink, status, test->expected,
 			    &error, test->name);
@@ -901,6 +978,8 @@ test_direct_copies(void)
 		}
 		fixture_close(&fixture);
 		free(sink.bytes);
+		free(observed.bytes);
+		free(observed.seen);
 	}
 }
 

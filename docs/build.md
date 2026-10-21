@@ -1254,6 +1254,53 @@ bodies holding two symbolic-link records below a symbolic-link record open
 with those records shadowed. Images `dumpifs -u` decompresses are not compared:
 no such copies exist on this host.
 
+`test-ifs-write` creates ImageFS images with the writer. The registry lists
+only writers that native QNX has qualified, so the test builds writers from
+the driver's candidate descriptor through `fsimg_writer_new_variant()`,
+while `fsimg_writer_new("ifs")` must fail as unsupported. Every image is
+read back through fsimg's reader and payload verification, and checked by
+the test's own checker, written from [the format
+design](../specs/design-ifs.md) with separate offsets and sharing no code
+with `lib/formats/ifs/`. The checker decodes the header, the mountpoint,
+every record and every file's data, sums the image's words and requires
+the writer profile's layout: the root record first, inode numbers in record
+order, a directory record before every child, every record its kind's
+minimum padded to 4, files in record order each on the next 4-byte
+boundary, and the trailer last. That gives every byte a checked value, so
+over a sink poisoned with `0xa5` any byte the layout gives no meaning must
+be zero. The cases build one tree three times, in reverse source order,
+with a one-page and a 1024-page metadata cache, with and without scratch
+and in another time zone, and require identical bytes; the 128-byte empty
+image and the 176-byte one-file image `mkifs` also writes; mountpoints of
+0, 1 and 1024 bytes and refusals of 1025 bytes and of bytes outside the
+profile; both byte orders; 1024-byte paths, components and link targets
+and the 2080-byte record they make; owner and mode limits and time losses;
+every refused setting, boot settings included; mutations the checker must
+see; sink, source, allocation, metadata-storage and cancellation faults;
+and images one word below and at `2^32 - 4` bytes on a sink that keeps only
+their first and last 64 KiB, with one word more out of range.
+
+```sh
+FSIMG_IFS_NATIVE=/path/to/captures-ifs ./test-ifs-write --native
+```
+
+`make check-integration` runs `test-ifs-write --native`. Each image in the
+captures' `cases/ifs-basic`, the E1 trees and the E2, E4, E5 and E9 header,
+kind, metadata and byte-order cases, is decoded by the checker, its tree is
+written with the native byte order, mountpoint and time as the epoch, and
+the two images are compared record by record: the header flags, references,
+spare words and mount flags, `dir_offset`, the mountpoint, the root, and
+every native record's path, mode, owner, time, record length and content.
+The writer's other records must be the directory records of the parents
+the native table leaves implicit, with the values the reader synthesizes
+for them. Inode numbers, record order, data order and alignment, and the
+sizes they move, are the free choices the comparison skips. A capture whose
+records carry different times, as `mkifs -n` writes them, cannot be
+expressed with one epoch and is reported, not compared. On macOS the 26
+expressible images match with no difference, adding 9 directory records,
+and 5 are not expressible; it prints only counts and capture file names,
+and exits 77 without `FSIMG_IFS_NATIVE`.
+
 `test-codec`, in `make check`, tests the LZO1X and NRV2B decoders on
 streams written by hand from [the codec design](../specs/design-codecs.md).
 `test/codec-integration.sh`, run by `make check-integration` and not by

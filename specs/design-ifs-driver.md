@@ -368,14 +368,14 @@ declares no partition type, so a scheme in an `ifs` create stack is
 ## Planning
 
 The plan object embeds `fsimg_plan_t`, the byte order, the mountpoint and
-`dir_offset`, `hdr_dir_size`, the data end, `image_size`, the fallback
-time, the loss count, and one paged array of rows keyed by catalog ID with
-row 0 for the root. A row holds the kind, the record's table offset and
-length, the data offset and length for a file, the target length for a
-link, and the fields already encoded under the metadata policy: uid, gid,
-mode and time. The inode word is `ID + 1`, a pure function of the row's
-key, so it is not stored. Rows are the only per-entry state; no vector
-grows with the image.
+`dir_offset`, `hdr_dir_size`, `image_size`, the fallback time, the loss
+count, and one paged array of rows keyed by catalog ID with row 0 for the
+root. A row holds the kind, the stored path's length, the record's table
+offset and length, the data offset and length for a file, the target
+length for a link, and the fields already encoded under the metadata
+policy: uid, gid, mode and time. The inode word is `ID + 1`, a pure
+function of the row's key, so it is not stored. Rows are the only
+per-entry state; no vector grows with the image.
 
 Planning runs a fixed sequence of passes over the frozen catalog:
 
@@ -396,13 +396,14 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    directory record: one rule covers every kind, the record has the field,
    `dumpifs` lists whatever is stored, and `-R` makes fsimg and `mkifs`
    agree where agreement matters. Sibling collisions are exact byte
-   collisions, which catalog preparation has already rejected. Each boot
-   setting is resolved to its catalog ID and checked under the boot
-   settings rule, so a set slot fails here.
+   collisions, which catalog preparation has already rejected. Boot
+   settings never reach planning: `validate` refuses every slot the closed
+   flag table lacks, which is every slot.
 2. **Records.** `dir_offset` is `0x58 + mountpoint length + 1` rounded up
    to a multiple of 4. The root record is `0x18 + 1` bytes rounded up; each
-   entry's record length is its kind's minimum with the full image path as
-   `L` and the target length as `sym_size`, rounded up to a multiple of 4.
+   entry's record length is its kind's minimum with the stored path, the
+   image path without its leading slash, as `L` and the target length as
+   `sym_size`, rounded up to a multiple of 4.
    Table offsets are the running sum from `dir_offset`; `hdr_dir_size` is
    the sum plus the terminator.
 3. **Layout.** Each regular file in ID order takes the next multiple of 4
@@ -426,9 +427,10 @@ running 32-bit word sum in the plan's byte order and emits:
 1. The header from the plan, the mountpoint and its NUL; the padding to
    `dir_offset` is already zero.
 2. For each row in ID order: the record, encoded by `records.c` with zero
-   padding, at its table offset; then, for a file with content, the payload
-   copy into its one region `(data offset, length)`. The terminator is
-   already zero.
+   padding and zero bytes where a link's target goes, at its table offset;
+   then, for a file with content, the payload copy into its one region
+   `(data offset, length)`, and for a link the payload copy of its target
+   into the region after the path's NUL. The terminator is already zero.
 3. The trailer at `image_size - 4`: the additive inverse of the running
    sum.
 
@@ -440,8 +442,9 @@ offsets; every payload copy passes the
 batch's volume offset, so the lane of every byte follows from its offset
 alone, whatever the batch sizes and whether the copy skips zero ranges.
 Bytes the driver never feeds are the sink's zeros and add nothing, so the
-accumulator equals the word sum of the image on the sink. The driver therefore sums the image without
-reading the sink or a source, and common code holds no checksum. Every
+accumulator equals the word sum of the image on the sink. The driver
+therefore sums the image without reading the sink or a source, and common
+code holds no checksum. Every
 emitted byte comes from a row, the layout or a profile constant.
 
 ## Resource bounds
@@ -480,6 +483,7 @@ Writer:
 | A setting outside its type; a nonzero `volume_bytes` or `min_free_bytes`; a mountpoint over 1024 bytes or outside the byte rules; a boot setting naming no catalog file or an entry of another kind; a component outside the profile; a scheme in the create stack | `FSIMG_EINVAL` |
 | A label, from the common capability check; a boot setting for a slot the flag table lacks; a path over 1024 bytes; a file above `2^32 - 1` bytes; a kind the profile lacks; a time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
 | An image above `2^32 - 4` bytes; a non-reproducible fallback time outside `[0, 4294967295]` | `FSIMG_ERANGE` |
+| A plan row read back from metadata storage outside the profile's limits, or disagreeing with its catalog entry | `FSIMG_ECORRUPT` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
 
 Diagnostics quote at most one bounded, escaped name and never record bytes,

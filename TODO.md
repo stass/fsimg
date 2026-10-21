@@ -342,6 +342,14 @@
   when a growth exceeds it, while charging the logical length, so the
   scratch limit and physical-peak accounting stay exact.
 
+* [Medium] **QNX6 and QNX4 plan rows are trusted when read back**
+  (`lib/formats/qnx6/write-plan.c` `qnx6_row_get`,
+  `lib/formats/qnx4/write-plan.c` `qnx4_row_get`): both decode every field
+  from paged metadata storage, which may spill to untrusted scratch,
+  without validating it. Audit where a row field reaches a buffer size,
+  copy length or offset, and validate in the one row reader, as
+  `ifs_row_get` does for ImageFS.
+
 * [Low] **Source failures fail the writer from inside the source layer**
   (`lib/source/source.c`, `specs/design-sources.md`): an operational source
   failure calls `fsimg_writer_fail()` and releases collection storage while a

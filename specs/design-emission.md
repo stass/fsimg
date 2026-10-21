@@ -79,8 +79,9 @@ It offers two operations:
   planned initialized length. FAT and exFAT files have one region; an empty
   file has none; a fragmented QNX6 file has several. The driver may pass an
   observer, a callback `(argument, bytes, length, volume offset)` that the
-  copy invokes over every byte it writes, in volume order, once per
-  transfer batch and never for a ZERO range or an empty source. A format
+  copy invokes over every byte it writes, once per transfer batch in the
+  file's logical order, which is volume order only within one region, and
+  never for a ZERO range or an empty source. A format
   whose trailer depends on the payload, such as ImageFS's additive
   checksum, keeps its own running state in the argument; common code
   holds no checksum algorithm and makes no promise about batch sizes, so

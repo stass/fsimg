@@ -520,6 +520,15 @@ slot count, rounded up to a whole block of 8 slots; default and minimum
 .It Fl o Ar reserve=percent
 QNX6 reserved-block percentage recorded in the header and kept free; default
 3.
+.It Fl o Ar mountpoint=path
+The stored mount path of a format that has one, within the format's length
+limit;
+.Ar mountpoint=
+alone stores an empty one.
+No registered format stores a mountpoint.
+.It Fl o Ar boot1=path No ... Fl o Ar boot4=path , Fl o Ar script=path
+The image paths of a bootable image's boot programs and startup script.
+No registered format accepts them.
 .It Fl p
 Import each source object's owner, group and permission bits as optional
 metadata.

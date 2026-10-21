@@ -245,6 +245,10 @@ struct fsimg_writer {
 	unsigned	 variant;
 	/* A label of at most 48 bytes and its terminator. */
 	char		 label[49];
+	/* A mountpoint as long as the volume information reports, and its
+	 * terminator.
+	 */
+	char		 mountpoint[sizeof(((fsimg_volume_info_t *)0)->mountpoint)];
 };
 
 /* Common collection is private; public construction selects a format driver.

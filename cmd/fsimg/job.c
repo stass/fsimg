@@ -21,7 +21,7 @@
  * selector kind, partition index and GPT sector size as eight bytes each,
  * the three stack slot states as one byte each, the scheme and container
  * names in 16 bytes each (the format name is the filesystem slot's), and
- * the partition selector text in 112. The layer settings close the record:
+ * the partition selector text in 112. The layer settings follow:
  * the GPT and MBR disk lengths and the MBR identifier as eight bytes each,
  * one byte of MBR flags (identifier set, partition active) and seven zero
  * bytes, the disk and partition GUIDs in 16 bytes each, and the GPT type in
@@ -32,7 +32,10 @@
  * CRC32) with seven zero bytes; then the spool limit and the gzip level in
  * eight bytes each, and the compression's name in 16 bytes,
  * NUL-terminated. The GPT sector size travels with the selection, since
- * reading uses it too.
+ * reading uses it too. The text settings follow, each in a NUL-terminated
+ * field of FSIMG_JOB_TEXT_BYTES zero after its terminator: the mountpoint,
+ * the four boot programs and the script, then one byte whose bit n says
+ * that the nth is present and seven zero bytes.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
  *
@@ -92,8 +95,21 @@ typedef enum job_string_field {
 	JOB_GZIP_LEVEL_OFFSET = 808,
 	JOB_COMPRESSION_OFFSET = 816,
 	JOB_COMPRESSION_BYTES = 16,
-	JOB_RESERVED_OFFSET = 832
+	JOB_TEXT_OFFSET = 832,
+	JOB_TEXT_PRESENT = JOB_TEXT_OFFSET +
+	    FSIMG_JOB_TEXT_SETTINGS * FSIMG_JOB_TEXT_BYTES,
+	JOB_RESERVED_OFFSET = JOB_TEXT_PRESENT + 1
 } job_string_field_t;
+
+/* The text settings in job order. */
+#define JOB_BOOT_SLOTS \
+	(sizeof(((fsimg_write_options_t *)0)->boot_programs) / \
+	sizeof(((fsimg_write_options_t *)0)->boot_programs[0]))
+enum {
+	JOB_TEXT_MOUNTPOINT = 0,
+	JOB_TEXT_BOOT = 1,
+	JOB_TEXT_SCRIPT = JOB_TEXT_BOOT + JOB_BOOT_SLOTS
+};
 
 /* MBR flag bits at JOB_MBR_FLAGS. */
 #define JOB_MBR_ID_SET	0x01u
@@ -132,8 +148,13 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_CONTAINER_FLAGS + 8 == JOB_SPOOL_OFFSET &&
     JOB_SPOOL_OFFSET + 8 == JOB_GZIP_LEVEL_OFFSET &&
     JOB_GZIP_LEVEL_OFFSET + 8 == JOB_COMPRESSION_OFFSET &&
-    JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_RESERVED_OFFSET &&
-    JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the layer fields do not overlap");
+    JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_TEXT_OFFSET,
+    "the layer fields do not overlap");
+_Static_assert(JOB_RESERVED_OFFSET + 7 == FSIMG_JOB_BYTES &&
+    FSIMG_JOB_TEXT_SETTINGS == JOB_TEXT_SCRIPT + 1 &&
+    FSIMG_JOB_TEXT_SETTINGS <= 8 &&
+    sizeof(((fsimg_worker_request_t *)0)->text_storage[0]) ==
+    FSIMG_JOB_TEXT_BYTES, "the text settings close the record");
 _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     JOB_GPT_TYPE_BYTES &&
     sizeof(((fsimg_layer_options_t *)0)->gpt_name) == JOB_GPT_NAME_BYTES &&
@@ -162,6 +183,8 @@ static const unsigned slot_name_offsets[FSIMG_STACK_SLOTS] = {
 	[FSIMG_LAYER_CONTAINER] = JOB_CONTAINER_OFFSET
 };
 
+static const char *text_setting(const fsimg_write_options_t *, unsigned);
+static void set_text_setting(fsimg_write_options_t *, unsigned, const char *);
 static void put_field(unsigned char *, job_field_t, uint64_t);
 static uint64_t get_field(const unsigned char *, job_field_t);
 static const int *capability_field(const fsimg_worker_request_t *,
@@ -171,6 +194,30 @@ static bool string_field_valid(const unsigned char *, size_t);
 static void encode_layers(const fsimg_layer_options_t *, unsigned char *);
 static bool layers_valid(const unsigned char *);
 static void decode_layers(const unsigned char *, fsimg_layer_options_t *);
+
+/* Text setting n in job order: the mountpoint, the boot programs, then the
+ * script.
+ */
+static const char *
+text_setting(const fsimg_write_options_t *write, unsigned n)
+{
+	if (n == JOB_TEXT_MOUNTPOINT)
+		return (write->mountpoint);
+	if (n < JOB_TEXT_SCRIPT)
+		return (write->boot_programs[n - JOB_TEXT_BOOT]);
+	return (write->script);
+}
+
+static void
+set_text_setting(fsimg_write_options_t *write, unsigned n, const char *value)
+{
+	if (n == JOB_TEXT_MOUNTPOINT)
+		write->mountpoint = value;
+	else if (n < JOB_TEXT_SCRIPT)
+		write->boot_programs[n - JOB_TEXT_BOOT] = value;
+	else
+		write->script = value;
+}
 
 static void
 put_field(unsigned char *raw, job_field_t field, uint64_t value)
@@ -462,7 +509,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 {
 	uint64_t capabilities, paths_length;
 	size_t label_length;
-	const char *label;
+	const char *label, *text;
 	fsimg_status_t status;
 
 	if (fsimg_stack_validate(&request->stack, error) != FSIMG_OK ||
@@ -477,6 +524,12 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	label_length = strnlen(label, JOB_LABEL_BYTES);
 	if (label_length == JOB_LABEL_BYTES)
 		return (invalid_job(error));
+	for (unsigned n = 0; n < FSIMG_JOB_TEXT_SETTINGS; n++) {
+		text = text_setting(&request->write, n);
+		if (text != NULL &&
+		    strnlen(text, FSIMG_JOB_TEXT_BYTES) == FSIMG_JOB_TEXT_BYTES)
+			return (invalid_job(error));
+	}
 	status = fsimg_job_paths_length(request, &paths_length, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -538,6 +591,14 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	fsimg_wire_put64(raw + JOB_INODES_OFFSET, request->write.inode_capacity);
 	fsimg_wire_put64(raw + JOB_RESERVE_OFFSET, request->write.reserve_percent);
 	fsimg_wire_put64(raw + JOB_ROOTS_OFFSET, request->root_count);
+	for (unsigned n = 0; n < FSIMG_JOB_TEXT_SETTINGS; n++) {
+		text = text_setting(&request->write, n);
+		if (text == NULL)
+			continue;
+		bcopy(text, raw + JOB_TEXT_OFFSET + n * FSIMG_JOB_TEXT_BYTES,
+		    strlen(text));
+		raw[JOB_TEXT_PRESENT] |= (unsigned char)(1u << n);
+	}
 	return (FSIMG_OK);
 }
 
@@ -547,6 +608,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
     unsigned *capabilities, fsimg_error_t *error)
 {
 	const fsimg_layer_t *compression;
+	const unsigned char *field;
 	uint64_t epoch, roots, count;
 	uint32_t per_path_bytes;
 
@@ -582,8 +644,15 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
-	if (!layers_valid(raw))
+	if (!layers_valid(raw) ||
+	    raw[JOB_TEXT_PRESENT] >= 1u << FSIMG_JOB_TEXT_SETTINGS)
 		return (invalid_job(error));
+	for (unsigned n = 0; n < FSIMG_JOB_TEXT_SETTINGS; n++) {
+		field = raw + JOB_TEXT_OFFSET + n * FSIMG_JOB_TEXT_BYTES;
+		if (!string_field_valid(field, FSIMG_JOB_TEXT_BYTES) ||
+		    ((raw[JOB_TEXT_PRESENT] & (1u << n)) == 0 && field[0] != 0))
+			return (invalid_job(error));
+	}
 	for (unsigned i = JOB_RESERVED_OFFSET; i < FSIMG_JOB_BYTES; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
@@ -681,6 +750,13 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    (uint32_t)fsimg_wire_get64(raw + JOB_INODES_OFFSET);
 	request->write.reserve_percent =
 	    (uint32_t)fsimg_wire_get64(raw + JOB_RESERVE_OFFSET);
+	for (unsigned n = 0; n < FSIMG_JOB_TEXT_SETTINGS; n++) {
+		if ((raw[JOB_TEXT_PRESENT] & (1u << n)) == 0)
+			continue;
+		bcopy(raw + JOB_TEXT_OFFSET + n * FSIMG_JOB_TEXT_BYTES,
+		    request->text_storage[n], FSIMG_JOB_TEXT_BYTES);
+		set_text_setting(&request->write, n, request->text_storage[n]);
+	}
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);
 	/* Each path is at least "/" and its terminator. An image path is

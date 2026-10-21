@@ -15,6 +15,7 @@ static void test_frame_splits(uint32_t);
 static void test_malformed_frames(void);
 static void test_error_codec(void);
 static void test_job_label(void);
+static void test_job_text_settings(void);
 static void test_selection_budget(void);
 static void test_error_padding(void);
 static void test_entry_records(void);
@@ -673,6 +674,68 @@ test_job_qnx6_settings(void)
 	}
 }
 
+/* The text settings, the mountpoint, the four boot programs and the script,
+ * travel in fields of 1026 bytes from byte 800 with a presence byte at 6956
+ * and zero padding to the record's end. NULL and the empty string stay
+ * distinct, the longest value that fits round-trips, and every other
+ * encoding is refused.
+ */
+static void
+test_job_text_settings(void)
+{
+	enum { FIELD = 1026, MOUNTPOINT = 800, SCRIPT = 800 + 5 * 1026,
+	    PRESENT = 800 + 6 * 1026 };
+	static char longest[FIELD], longer[FIELD + 1];
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	CHECK(FSIMG_JOB_BYTES == PRESENT + 8);
+	memset(longest, 'm', FIELD - 1);
+	memset(longer, 'm', FIELD);
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	request.write.mountpoint = "";
+	request.write.boot_programs[1] = "/boot/two";
+	request.write.script = longest;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.write.mountpoint != NULL &&
+	    decoded.write.mountpoint[0] == '\0');
+	CHECK(decoded.write.boot_programs[0] == NULL &&
+	    decoded.write.boot_programs[2] == NULL &&
+	    decoded.write.boot_programs[3] == NULL);
+	CHECK(decoded.write.boot_programs[1] != NULL &&
+	    strcmp(decoded.write.boot_programs[1], "/boot/two") == 0);
+	CHECK(decoded.write.script != NULL &&
+	    strcmp(decoded.write.script, longest) == 0);
+	CHECK(raw[PRESENT] == (0x01 | 0x04 | 0x20));
+
+	/* A missing terminator, a byte after one, an unknown presence bit, a
+	 * value marked absent and nonzero padding are all refused.
+	 */
+	CHECK(!job_decodes(raw, SCRIPT + FIELD - 1, 'm'));
+	CHECK(!job_decodes(raw, MOUNTPOINT + 1, 'x'));
+	CHECK(!job_decodes(raw, PRESENT, 0x40));
+	CHECK(!job_decodes(raw, PRESENT, 0x01 | 0x04));
+	CHECK(job_decodes(raw, PRESENT, 0x01 | 0x04 | 0x20));
+	for (unsigned i = PRESENT + 1; i < FSIMG_JOB_BYTES; i++)
+		CHECK(!job_decodes(raw, i, 1));
+	request.write.script = NULL;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(!job_decodes(raw, SCRIPT, 'x'));
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK && decoded.write.script == NULL);
+
+	/* A value longer than its field does not encode. */
+	request.write.mountpoint = longer;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+}
+
 /* Roots travel with create jobs only: their count, the roots capability and
  * the packed path sequence length must agree, and the count cannot exceed
  * the descriptor limit.
@@ -948,6 +1011,7 @@ main(int argc, char **argv)
 	}
 	CHECK(argc == 1);
 	test_job_qnx6_settings();
+	test_job_text_settings();
 	test_job_selection();
 	test_job_layers();
 	test_image_records();
