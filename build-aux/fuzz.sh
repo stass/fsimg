@@ -134,7 +134,7 @@ run_fuzzer "$work_dir/fuzz-qnx4" "$qnx4_corpus" 1048576 10
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
-    "$source_dir/fuzz/ifs.c" "$fuzz_library" -o "$work_dir/fuzz-ifs"
+    "$source_dir/fuzz/ifs.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-ifs"
 ifs_corpus=ifs-fuzz-corpus
 mkdir -p "$ifs_corpus"
 if test ! -f "$ifs_corpus/sample.seed"; then
@@ -149,7 +149,7 @@ run_fuzzer "$work_dir/fuzz-ifs" "$ifs_corpus" 1048576 10
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/codec" \
-    "$source_dir/fuzz/codec.c" "$fuzz_library" -o "$work_dir/fuzz-codec"
+    "$source_dir/fuzz/codec.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-codec"
 codec_corpus=codec-fuzz-corpus
 mkdir -p "$codec_corpus"
 if test ! -f "$codec_corpus/lzo-00001.seed"; then
