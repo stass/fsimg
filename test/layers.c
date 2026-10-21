@@ -546,15 +546,16 @@ test_stack_rejections(void)
 }
 
 /* The registry lists every layer once, with the suffixes the command
- * strips, the capabilities of the schemes alone and the keys of each
- * layer's settings in table order.
+ * strips, the capabilities of the schemes and containers, which are read,
+ * written and verified, and the keys of each layer's settings in table
+ * order. The compressions are listed with their suffixes but no codec.
  */
 static void
 test_registry(void)
 {
 	static const unsigned scheme = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
 	    FSIMG_CAP_VERIFY;
-	static const unsigned container = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
+	static const unsigned container = scheme;
 	static const struct {
 		const char	*name;
 		const char	*suffix;
@@ -567,12 +568,15 @@ test_registry(void)
 		    FSIMG_LAYER_SCHEME, scheme },
 		{ "mbr", "", "disk,type,active,id", "", FSIMG_LAYER_SCHEME,
 		    scheme },
-		{ "dmg", ".dmg", "", "raw,zero,zlib", FSIMG_LAYER_CONTAINER,
+		{ "dmg", ".dmg", "compress,level,chunk,uuid", "raw,zero,zlib",
+		    FSIMG_LAYER_CONTAINER, container },
+		{ "vhd", ".vhd", "align,uuid", "raw", FSIMG_LAYER_CONTAINER,
 		    container },
-		{ "vhd", ".vhd", "", "raw", FSIMG_LAYER_CONTAINER, container },
-		{ "simg", ".simg", "", "raw,zero,fill", FSIMG_LAYER_CONTAINER,
-		    container },
-		{ "gzip", ".gz", "", "", FSIMG_LAYER_COMPRESSION, 0 }
+		{ "simg", ".simg", "block,crc", "raw,zero,fill",
+		    FSIMG_LAYER_CONTAINER, container },
+		{ "gzip", ".gz", "", "", FSIMG_LAYER_COMPRESSION, 0 },
+		{ "zstd", ".zst", "", "", FSIMG_LAYER_COMPRESSION, 0 },
+		{ "xz", ".xz", "", "", FSIMG_LAYER_COMPRESSION, 0 }
 	};
 	fsimg_layer_info_t info;
 	size_t cursor = 0;

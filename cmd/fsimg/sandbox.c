@@ -173,7 +173,7 @@ fsimg_sandbox_install(int input_fd, int destination_fd, int source_fd,
 	const fsimg_sandbox_caps_t caps = {
 		.input = input_fd, .staging = -1, .destination = destination_fd,
 		.scratch = -1, .roots = source_fd, .root_count = source_fd == -1 ? 0 : 1,
-		.job = -1, .control = -1, .data = -1, .cancel = -1
+		.raw = -1, .job = -1, .control = -1, .data = -1, .cancel = -1
 	};
 
 	return (fsimg_sandbox_install_caps(&caps, error));
@@ -194,7 +194,9 @@ fsimg_sandbox_backend(void)
 
 /* Every role must be the object its grant assumes before any backend runs:
  * the input a read-only regular file, the three writable roles
- * directories, and each root a read-only directory or regular file.
+ * directories, each root a read-only directory or regular file, and the
+ * raw intermediate a read/write regular file no name reaches. The library
+ * checks the raw file again when it adopts it.
  */
 static fsimg_status_t
 check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
@@ -228,6 +230,14 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 		    fstat(fd, &st) == -1 || (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox source requires read-only directory or file"));
+	}
+	if (caps->raw != -1) {
+		flags = fcntl(caps->raw, F_GETFL);
+		if (flags == -1 || (flags & O_ACCMODE) != O_RDWR ||
+		    fstat(caps->raw, &st) == -1 || !S_ISREG(st.st_mode) ||
+		    st.st_nlink != 0)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "sandbox raw intermediate requires an unlinked read/write file"));
 	}
 	return (FSIMG_OK);
 }
@@ -375,13 +385,22 @@ linux_fail:
 		if (restrict_descriptor(caps->roots + (int)i, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
 	}
+	if (caps->raw != -1) {
+		cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_SEEK, CAP_FSTAT,
+		    CAP_FTRUNCATE, CAP_FSYNC, CAP_FCNTL);
+		if (restrict_descriptor(caps->raw, &rights, CAP_FCNTL_GETFL) == -1)
+			goto freebsd_fail;
+	}
 	{
 		const int channels[] = { caps->job, caps->control, caps->data, caps->cancel };
 
+		/* A stream sink's identity is queried on the data channel. */
 		for (unsigned i = 0; i < 4; i++) {
 			if (channels[i] == -1)
 				continue;
 			cap_rights_init(&rights, i == 0 || i == 3 ? CAP_READ : CAP_WRITE);
+			if (i == 2)
+				cap_rights_set(&rights, CAP_FSTAT);
 			if (restrict_descriptor(channels[i], &rights, 0) == -1)
 				goto freebsd_fail;
 		}

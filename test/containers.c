@@ -192,6 +192,8 @@ static void test_dmg_table_shapes(void);
 static void test_dmg_seeded_failures(void);
 static void test_dmg_plist_limits(void);
 static void test_dmg_checksums(void);
+static uint64_t verify_read_bytes(fixture_t *);
+static void test_verify_declared_zeros(void);
 static void test_stray_trailer(void);
 static void test_vhd(void);
 static simg_spec_t simg_sample(unsigned char *);
@@ -1166,6 +1168,63 @@ test_dmg_checksums(void)
 	free(disk);
 }
 
+/* The bytes verification reads, through any I/O object of f's context. */
+static uint64_t
+verify_read_bytes(fixture_t *f)
+{
+	fsimg_layer_report_t report;
+	fsimg_stats_t before, after;
+
+	CHECK(fsimg_ctx_get_stats(f->ctx, &before, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_verify(f->image, FSIMG_VERIFY_PAYLOAD, &report,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(f->ctx, &after, NULL) == FSIMG_OK);
+	return (after.read_bytes - before.read_bytes);
+}
+
+/*
+ * Read-through verification folds a DMG zero run or an simg DONT_CARE
+ * chunk into its CRC32 arithmetically: the bytes it reads follow the
+ * stored data, not the 64 MiB of declared zeros.
+ */
+static void
+test_verify_declared_zeros(void)
+{
+	const uint64_t zeros = 64 * MIB;
+	unsigned char *disk = disk_new(zeros + MIB);
+	memory_file_t file;
+	dmg_spec_t dmg = { .disk = disk, .sectors = (zeros + MIB) / SECTOR,
+	    .tables = 1 };
+	simg_spec_t simg = { .disk = disk, .block_bytes = 4096, .chunks = 4 };
+	fixture_t f;
+
+	disk_pattern(disk, 32 * 1024, 8);
+	disk_pattern(disk + 32 * 1024 + zeros, MIB - 32 * 1024, 9);
+	dmg.table[0] = (dmg_table_t){ 0, dmg.sectors, 4, {
+		{ RUN_RAW, 0, 64, 0 },
+		{ RUN_ZERO, 64, zeros / SECTOR, 0 },
+		{ RUN_ZLIB, 64 + zeros / SECTOR, 1024, 0 },
+		{ RUN_ZLIB, 1088 + zeros / SECTOR, 960, 0 } } };
+	file = dmg_encode(&dmg);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(verify_read_bytes(&f) < 4 * MIB);
+	fixture_free(&f);
+	free(file.bytes);
+
+	simg.chunk[0] = (simg_chunk_t){ SIMG_RAW, 8, 0, 0, 0 };
+	simg.chunk[1] = (simg_chunk_t){ SIMG_DONT_CARE, zeros / 4096, 0, 0, 0 };
+	simg.chunk[2] = (simg_chunk_t){ SIMG_RAW, 248, 0, 0, 0 };
+	simg.chunk[3] = (simg_chunk_t){ SIMG_CRC32, 0, 0, 0, 0 };
+	file = simg_encode(&simg);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(verify_read_bytes(&f) < 4 * MIB);
+	fixture_free(&f);
+	free(file.bytes);
+	free(disk);
+}
+
 /*
  * A bare disk whose last sector happens to hold a koly trailer of another
  * file's length draws no claim and opens as a bare disk; forcing dmg on it
@@ -1538,7 +1597,7 @@ test_cache_decode_bound(void)
 	ops.get_size = file_size;
 	CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &file, &f.io, NULL) == FSIMG_OK);
 	fsimg_session_init(&session, f.ctx, "decode bound", 0);
-	CHECK(fsimg_chunk_index_new(&session, "test", 5 * chunk + (MIB << 20), 0,
+	CHECK(fsimg_chunk_index_new(&session, "test", "test", 5 * chunk + (MIB << 20), 0,
 	    file.length, &index, NULL) == FSIMG_OK);
 	for (unsigned i = 0; i < 5; i++) {
 		record = (fsimg_chunk_t){ i * chunk, chunk, offsets[i],
@@ -1620,7 +1679,7 @@ test_tampered_record(void)
 	ops.get_size = file_size;
 	CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &file, &f.io, NULL) == FSIMG_OK);
 	fsimg_session_init(&session, f.ctx, "tampered record", 0);
-	CHECK(fsimg_chunk_index_new(&session, "test", 16 * MIB, 0, file.length,
+	CHECK(fsimg_chunk_index_new(&session, "test", "test", 16 * MIB, 0, file.length,
 	    &index, NULL) == FSIMG_OK);
 	chunk = (fsimg_chunk_t){ 0, MIB, 0, encoded, FSIMG_CHUNK_COMPRESSED,
 	    FSIMG_CODEC_ZLIB };
@@ -1833,6 +1892,7 @@ main(int argc, char **argv)
 	test_dmg_seeded_failures();
 	test_dmg_plist_limits();
 	test_dmg_checksums();
+	test_verify_declared_zeros();
 	test_stray_trailer();
 	test_vhd();
 	test_simg();

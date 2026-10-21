@@ -130,6 +130,62 @@ fsimg_io_proven_zero(const fsimg_io_t *io)
 	return (io->root->known_zero);
 }
 
+/*
+ * A handed-over file: the descriptor is adopted on every outcome, and
+ * accepted only as what its creator promised, checked on the descriptor
+ * itself before any byte moves: a regular file, empty, with no name left
+ * to reach it (link count zero), open for reading and writing without
+ * O_APPEND, which would move every write to the end. Those facts make its
+ * unwritten ranges proven zero.
+ */
+fsimg_status_t
+fsimg_io_adopt_handed_over(fsimg_ctx_t *ctx, int fd, const char *role,
+    fsimg_io_t **out, fsimg_error_t *error)
+{
+	struct stat st;
+	fsimg_status_t status;
+	int flags;
+
+	*out = NULL;
+	flags = fcntl(fd, F_GETFL);
+	if (flags == -1 || fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) ||
+	    st.st_size != 0 || st.st_nlink != 0 ||
+	    (flags & O_ACCMODE) != O_RDWR || (flags & O_APPEND) != 0) {
+		close(fd);
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
+		    "a handed-over file must be an empty, unlinked, read/write "
+		    "regular file");
+		fsimg_error_path(error, role);
+		return (FSIMG_EINVAL);
+	}
+	status = fsimg_fd_reserve(ctx, error);
+	if (status != FSIMG_OK) {
+		close(fd);
+		return (status);
+	}
+	status = fsimg_io_adopt_fd(ctx, fd, FSIMG_IO_READ | FSIMG_IO_WRITE, out,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	(*out)->known_zero = true;
+	return (FSIMG_OK);
+}
+
+void
+fsimg_io_next_hole(fsimg_io_t *io, uint64_t offset, uint64_t *hole_start,
+    uint64_t *hole_end)
+{
+	fsimg_io_t *root = io->root;
+
+	*hole_start = *hole_end = io->length;
+	if (root->fd == -1 || offset >= io->length)
+		return;
+	fsimg_host_next_hole(root->fd, io->base + offset, io->base + io->length,
+	    hole_start, hole_end);
+	*hole_start -= io->base;
+	*hole_end -= io->base;
+}
+
 void
 fsimg_io_ops_init(fsimg_io_ops_t *ops)
 {

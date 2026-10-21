@@ -44,12 +44,16 @@
 
 /* A growable object in memory, as the library's sink or input. reads
  * counts the bytes read through the callbacks, so a test can tell how
- * often an input was read.
+ * often an input was read. A nonzero flip_offset makes the input change
+ * under its reader: the byte there reads as stored the first time a read
+ * covers it and as 0x5a every later time.
  */
 typedef struct memory {
 	unsigned char	*bytes;
 	uint64_t	 length;
 	uint64_t	 reads;
+	uint64_t	 flip_offset;
+	unsigned	 flip_reads;
 } memory_t;
 
 /* One context with a private scratch and output directory. */
@@ -80,6 +84,8 @@ static void memory_free(memory_t *);
 static bool cancel_at(void *);
 static void fixture_init(fixture_t *);
 static void fixture_free(fixture_t *);
+static void test_stream_budget(void);
+static void test_simg_changed_input(void);
 static void write_options(fsimg_write_options_t *, unsigned, int64_t,
     const fsimg_layer_options_t *);
 static fsimg_status_t create(fixture_t *, const char *,
@@ -214,6 +220,10 @@ memory_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	CHECK(offset <= memory->length && length <= memory->length - offset);
 	bcopy(memory->bytes + offset, buffer, length);
 	memory->reads += length;
+	if (memory->flip_offset != 0 && offset <= memory->flip_offset &&
+	    memory->flip_offset - offset < length &&
+	    memory->flip_reads++ != 0)
+		((unsigned char *)buffer)[memory->flip_offset - offset] = 0x5a;
 	*transferred = length;
 	return (FSIMG_OK);
 }
@@ -714,8 +724,14 @@ test_settings(void)
 	CHECK(plan_only(&f, "fat12/mbr", &options, &info, NULL) == FSIMG_OK);
 	CHECK(info.image.mbr_disk_id == 0);
 
-	expect_refused(&f, "fat12/gpt/vhd", MIB, NULL, FSIMG_WRITE_REPRODUCIBLE,
-	    FSIMG_EUNSUPPORTED, NULL);
+	/* A container's identifier follows the same rule. */
+	expect_refused(&f, "fat12/vhd", MIB, NULL, 0, FSIMG_EINVAL, "vhd:uuid");
+	expect_refused(&f, "fat12/dmg", MIB, NULL, 0, FSIMG_EINVAL, "dmg:uuid");
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = MIB;
+	CHECK(plan_only(&f, "fat12/gpt/vhd", &options, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.image.container, "vhd") == 0 &&
+	    info.output_bytes == info.image.disk_bytes + 512);
 	expect_refused(&f, "gpt", MIB, NULL, FSIMG_WRITE_REPRODUCIBLE,
 	    FSIMG_EINVAL, NULL);
 	fixture_free(&f);
@@ -1308,10 +1324,22 @@ test_sinks(void)
 	CHECK(fsimg_image_wrap(f.ctx, input, "gpt", &options, &sink,
 	    NULL) == FSIMG_EINVAL);
 	CHECK(fcntl(fd, F_GETFD) == -1);
+	/* A stream receives the file's bytes, written in order. */
+	fd = openat(f.directory_fd, "streamed.img", O_RDWR | O_CREAT | O_EXCL,
+	    0600);
+	CHECK(fd != -1);
 	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
-	sink.stream_fd = 1;
+	sink.stream_fd = fd;
 	CHECK(fsimg_image_wrap(f.ctx, input, "gpt", &options, &sink,
-	    NULL) == FSIMG_EUNSUPPORTED);
+	    NULL) == FSIMG_OK);
+	CHECK(fstat(fd, &status) == 0 &&
+	    (uint64_t)status.st_size == 2 * MIB + 33 * 512);
+	bytes = malloc(MIB);
+	CHECK(bytes != NULL && pread(fd, bytes, MIB, (off_t)MIB) == (ssize_t)MIB);
+	CHECK(bcmp(bytes, volume.bytes, MIB) == 0);
+	free(bytes);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(f.directory_fd, "streamed.img", 0) == 0);
 	CHECK(fsimg_image_wrap(f.ctx, input, "gpt", &options, NULL,
 	    NULL) == FSIMG_EINVAL);
 
@@ -1808,6 +1836,111 @@ test_allocation_failures(void)
 	fixture_free(&f);
 }
 
+/*
+ * A stream holds the raw disk in its intermediate while it copies it out,
+ * so it costs twice the disk of output budget. A limit between the two
+ * refuses the stream before anything is written, closes the handed-over
+ * descriptor and leaves the writer usable for a file, which costs the disk
+ * alone. A writer that is not there closes the descriptor too.
+ */
+static void
+test_stream_budget(void)
+{
+	fsimg_options_t context_options;
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_ctx_t *ctx;
+	struct stat status;
+	int raw, stream;
+	fixture_t f;
+
+	fixture_init(&f);
+	fsimg_options_init(&context_options);
+	context_options.memory_bytes = 64 * MIB;
+	context_options.scratch_directory_fd = f.directory_fd;
+	context_options.max_output_bytes = MIB + MIB / 2;
+	CHECK(fsimg_ctx_new(&context_options, &ctx, NULL) == FSIMG_OK);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = MIB;
+	CHECK(fsimg_writer_new(ctx, "fat12", &options, &writer, NULL) ==
+	    FSIMG_OK);
+	stream = openat(f.directory_fd, "stream.img", O_RDWR | O_CREAT | O_EXCL,
+	    0600);
+	raw = openat(f.directory_fd, "raw", O_RDWR | O_CREAT | O_EXCL, 0600);
+	CHECK(stream != -1 && raw != -1);
+	CHECK(unlinkat(f.directory_fd, "raw", 0) == 0);
+	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
+	sink.stream_fd = stream;
+	sink.raw_fd = raw;
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_writer_output(writer, &sink, &error) == FSIMG_ELIMIT);
+	CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+	CHECK(fcntl(raw, F_GETFD) == -1);
+	CHECK(fstat(stream, &status) == 0 && status.st_size == 0);
+	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
+	sink.parent_fd = f.directory_fd;
+	sink.name = "file.img";
+	CHECK(fsimg_writer_output(writer, &sink, NULL) == FSIMG_OK);
+	CHECK(fstatat(f.directory_fd, "file.img", &status, 0) == 0 &&
+	    (uint64_t)status.st_size == MIB);
+	fsimg_writer_free(writer);
+
+	raw = openat(f.directory_fd, "raw", O_RDWR | O_CREAT | O_EXCL, 0600);
+	CHECK(raw != -1);
+	CHECK(unlinkat(f.directory_fd, "raw", 0) == 0);
+	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
+	sink.stream_fd = stream;
+	sink.raw_fd = raw;
+	CHECK(fsimg_writer_output(NULL, &sink, NULL) != FSIMG_OK);
+	CHECK(fcntl(raw, F_GETFD) == -1);
+	CHECK(close(stream) == 0);
+	CHECK(unlinkat(f.directory_fd, "stream.img", 0) == 0);
+	CHECK(unlinkat(f.directory_fd, "file.img", 0) == 0);
+	fsimg_ctx_free(ctx);
+	fixture_free(&f);
+}
+
+/*
+ * simg counts its chunks on a first pass, writes the count in its header,
+ * and emits the chunks on a second. Wrap reads its input on both, so an
+ * input whose middle zero unit turns to data between them would emit a
+ * chunk the header does not count: the second pass refuses it as a
+ * changed source, leaving the output it touched incomplete.
+ */
+static void
+test_simg_changed_input(void)
+{
+	fsimg_write_options_t options;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_io_t *input, *output;
+	memory_t volume, image;
+	fixture_t f;
+
+	fixture_init(&f);
+	make_volume(&f, "fat12", 3 * MIB, &volume);
+	CHECK(all_zero(volume.bytes + MIB, 2 * MIB));
+	volume.flip_offset = MIB + MIB / 2;
+	input = memory_io(&f, &volume);
+	bzero(&image, sizeof(image));
+	output = memory_io(&f, &image);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_image_wrap(f.ctx, input, "simg", &options, &sink,
+	    &error) == FSIMG_ESOURCE_CHANGED);
+	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	CHECK(volume.flip_reads == 2);
+	fsimg_io_free(output);
+	fsimg_io_free(input);
+	memory_free(&image);
+	memory_free(&volume);
+	fixture_free(&f);
+}
+
 int
 main(void)
 {
@@ -1821,6 +1954,8 @@ main(void)
 	test_epochs_change_only_identifiers();
 	test_wrap_unwrap();
 	test_sinks();
+	test_stream_budget();
+	test_simg_changed_input();
 	test_compose();
 	test_compose_refusals();
 	test_aliases();

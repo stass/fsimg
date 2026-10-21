@@ -25,6 +25,27 @@ GUID or MBR byte, or by byte range, which never reads the table. `fsimg t`,
 stack, the table and the selected partition, and still reports the table
 when no single partition holds a filesystem.
 
+Creation writes containers and streams. A stack naming dmg, vhd or simg
+emits the disk into a raw intermediate, an unlinked file the coordinator
+creates beside the staged image (or in scratch for a stream) and hands to
+the worker, then one sequential transcode writes the container: a
+flattened UDZO or UDRO DMG with one whole-disk block table, CRC32 checksums
+and image variant 2, which hdiutil verifies and attaches with or without a
+partition map; a fixed VHD; or a sparse image with an optional CRC32
+chunk. Zero chunks become DMG zero runs, VHD holes and DONT_CARE chunks,
+and holes in the raw disk are skipped without being read. The `dmg:`,
+`vhd:` and `simg:` keys set compression, level, chunk, alignment, block
+size, CRC and identifiers; the plan reports the output bound, the
+container padding and the zlib version. `c -f -` streams the image to
+stdout and refuses a terminal; a failure after the first byte reports
+incomplete output. `cW` verifies the container before the table and the
+volume and names the failing layer, which the library now reports in
+`error.path`. `-a` requires a container suffix to name the stack's
+container and refuses the reserved `.zst` and `.xz` compressions. The
+library adds `fsimg_writer_output` stream sinks and container output, and
+`W -d` folds DMG zero runs and DONT_CARE chunks into its CRC32s without
+reading them.
+
 Creation writes partitioned disks. A stack naming gpt or mbr places the
 volume at 1 MiB as the disk's one partition, emitted into a checked slice
 of the staged disk, with the tables written beside it and every other byte

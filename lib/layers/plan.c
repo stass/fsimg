@@ -16,13 +16,14 @@
  * for each default, identifier and limit, and placement lays partitions
  * out as sgdisk and fdisk do: each at the first 1 MiB boundary after the
  * scheme's leading tables or the previous partition, whole sectors long,
- * with the trailing tables at the end of the disk.
+ * with the trailing tables at the end of the disk. A container rounds the
+ * disk up to its granularity first, so those tables end the disk it
+ * declares, and states the bound of the output it will encode.
  */
 #define PARTITION_ALIGNMENT	(UINT64_C(1) << 20)
 
 static bool round_up(uint64_t, uint64_t, uint64_t *);
 static bool guid_unset(const unsigned char *);
-static fsimg_status_t keyed_error(fsimg_error_t *, const char *, const char *);
 static const char *disk_key(const fsimg_disk_plan_t *);
 static void request_key(const fsimg_disk_plan_t *,
     const fsimg_partition_request_t *, uint32_t, const char *, char *, size_t);
@@ -32,6 +33,10 @@ static fsimg_status_t resolve_type(fsimg_disk_plan_t *,
 static fsimg_status_t resolve_name(fsimg_partition_record_t *, const char *,
     const char *, fsimg_error_t *);
 static fsimg_status_t check_identities(const fsimg_disk_plan_t *,
+    fsimg_error_t *);
+static fsimg_status_t resolve_container(fsimg_disk_plan_t *,
+    const fsimg_stack_t *, const fsimg_layer_options_t *, fsimg_error_t *);
+static fsimg_status_t size_disk(fsimg_disk_plan_t *, uint64_t,
     fsimg_error_t *);
 
 /*
@@ -55,6 +60,23 @@ fsimg_identifier_derive(int64_t epoch, fsimg_identifier_role_t role,
 	guid[8] = (unsigned char)((guid[8] & 0x3f) | 0x80);
 }
 
+fsimg_status_t
+fsimg_container_identifier(const unsigned char *given, const char *key,
+    fsimg_identifier_role_t role, uint32_t flags, int64_t epoch,
+    unsigned char guid[static 16], fsimg_error_t *error)
+{
+	if (!guid_unset(given)) {
+		bcopy(given, guid, 16);
+		return (FSIMG_OK);
+	}
+	if ((flags & FSIMG_WRITE_REPRODUCIBLE) != 0) {
+		fsimg_identifier_derive(epoch, role, 0, guid);
+		return (FSIMG_OK);
+	}
+	return (fsimg_setting_error(error, key,
+	    "the identifier must be set outside reproducible mode"));
+}
+
 static bool
 round_up(uint64_t value, uint64_t unit, uint64_t *out)
 {
@@ -75,9 +97,9 @@ guid_unset(const unsigned char *guid)
 	return (bcmp(guid, unset, sizeof(unset)) == 0);
 }
 
-/* FSIMG_EINVAL naming the setting or partition it concerns. */
-static fsimg_status_t
-keyed_error(fsimg_error_t *error, const char *key, const char *message)
+fsimg_status_t
+fsimg_setting_error(fsimg_error_t *error, const char *key,
+    const char *message)
 {
 	fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE, message);
 	fsimg_error_path(error, key);
@@ -104,11 +126,28 @@ request_key(const fsimg_disk_plan_t *plan,
 		snprintf(key, capacity, "%s:%s", plan->scheme->name, setting);
 }
 
+/* The stack's container and its resolved settings; none leaves the disk
+ * unencoded, with a granularity of one byte, copied in 1 MiB chunks.
+ */
+static fsimg_status_t
+resolve_container(fsimg_disk_plan_t *plan, const fsimg_stack_t *stack,
+    const fsimg_layer_options_t *layers, fsimg_error_t *error)
+{
+	plan->container_settings.granularity = 1;
+	plan->container_settings.chunk_bytes = FSIMG_TRANSCODE_CHUNK_BYTES;
+	plan->container = fsimg_stack_layer(stack, FSIMG_LAYER_CONTAINER);
+	if (plan->container == NULL)
+		return (FSIMG_OK);
+	return (plan->container->container->plan(layers, plan->flags,
+	    plan->epoch, &plan->container_settings, error));
+}
+
 /*
- * Resolve the stack's scheme and the disk-level settings: the sector size,
- * a fixed disk length, and the disk identifier, which is taken as given,
- * derived from the epoch in reproducible mode, or refused. The disk holds
- * count partitions, each made an empty record in slot order.
+ * Resolve the stack's scheme and container and the disk-level settings:
+ * the sector size, a fixed disk length, and the disk identifier, which is
+ * taken as given, derived from the epoch in reproducible mode, or refused.
+ * The disk holds count partitions, each made an empty record in slot
+ * order.
  */
 fsimg_status_t
 fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
@@ -125,11 +164,10 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	plan->epoch = epoch;
 	plan->flags = flags;
 	status = fsimg_layer_options_check(stack, layers, true, error);
+	if (status == FSIMG_OK)
+		status = resolve_container(plan, stack, layers, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (stack->slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_IMAGE, "image containers are not supported"));
 	plan->scheme = fsimg_stack_layer(stack, FSIMG_LAYER_SCHEME);
 	if (plan->scheme == NULL)
 		return (FSIMG_OK);
@@ -150,7 +188,7 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 		table->sector_bytes = layers->gpt_sector_bytes == 0 ? 512 :
 		    layers->gpt_sector_bytes;
 		if (table->sector_bytes != 512 && table->sector_bytes != 4096)
-			return (keyed_error(error, "gpt:sector",
+			return (fsimg_setting_error(error, "gpt:sector",
 			    "gpt:sector must be 512 or 4096"));
 		plan->disk_bytes = layers->gpt_disk_bytes;
 		if (!guid_unset(layers->gpt_disk_guid))
@@ -159,27 +197,30 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 			fsimg_identifier_derive(epoch, FSIMG_ROLE_DISK, 0,
 			    table->disk_guid);
 		else
-			return (keyed_error(error, "gpt:disk-guid",
+			return (fsimg_setting_error(error, "gpt:disk-guid",
 			    "the disk GUID must be set outside reproducible mode"));
 	} else {
 		table->kind = FSIMG_SCHEME_MBR;
 		table->sector_bytes = 512;
 		plan->disk_bytes = layers->mbr_disk_bytes;
 		if (plan->disk_bytes / 512 > plan->scheme->scheme->max_disk_sectors)
-			return (keyed_error(error, "mbr:disk",
+			return (fsimg_setting_error(error, "mbr:disk",
 			    "an MBR disk holds at most 2^32 sectors"));
 		if (layers->mbr_id_set)
 			table->mbr_disk_id = layers->mbr_id;
 		else if (reproducible)
 			table->mbr_disk_id = (uint32_t)(uint64_t)epoch;
 		else
-			return (keyed_error(error, "mbr:id",
+			return (fsimg_setting_error(error, "mbr:id",
 			    "the disk identifier must be set outside reproducible mode"));
 	}
 	key = disk_key(plan);
 	if (plan->disk_bytes % table->sector_bytes != 0)
-		return (keyed_error(error, key,
+		return (fsimg_setting_error(error, key,
 		    "the disk length is not a multiple of the sector size"));
+	if (plan->disk_bytes % plan->container_settings.granularity != 0)
+		return (fsimg_setting_error(error, key, "the disk length is not a "
+		    "multiple of the container's granularity"));
 	plan->fixed = plan->disk_bytes != 0;
 
 	table->records = fsimg_alloc(ctx, (size_t)count * sizeof(*table->records),
@@ -214,7 +255,7 @@ resolve_type(fsimg_disk_plan_t *plan, fsimg_partition_record_t *record,
 		if (request->filesystem != NULL)
 			selector.type = fsimg_partition_type_find(request->filesystem);
 		if (selector.type == NULL)
-			return (keyed_error(error, key,
+			return (fsimg_setting_error(error, key,
 			    "no filesystem gives the partition a type; set one"));
 	}
 	status = fsimg_partition_type_assign(&selector, plan->table.kind, record,
@@ -279,7 +320,7 @@ fsimg_disk_plan_partition(fsimg_disk_plan_t *plan, uint32_t index,
 		request_key(plan, request, index, "name", key, sizeof(key));
 		if ((request->name != NULL && request->name[0] != '\0') ||
 		    guid_given)
-			return (keyed_error(error, key,
+			return (fsimg_setting_error(error, key,
 			    "MBR partitions have no name or GUID"));
 		record->active = request->active;
 		record->used = true;
@@ -287,7 +328,7 @@ fsimg_disk_plan_partition(fsimg_disk_plan_t *plan, uint32_t index,
 	}
 	request_key(plan, request, index, "active", key, sizeof(key));
 	if (request->active)
-		return (keyed_error(error, key, "GPT partitions have no active flag"));
+		return (fsimg_setting_error(error, key, "GPT partitions have no active flag"));
 	request_key(plan, request, index, "name", key, sizeof(key));
 	status = resolve_name(record, request->name != NULL &&
 	    request->name[0] != '\0' ? request->name : default_name, key, error);
@@ -300,7 +341,7 @@ fsimg_disk_plan_partition(fsimg_disk_plan_t *plan, uint32_t index,
 		fsimg_identifier_derive(plan->epoch, FSIMG_ROLE_PARTITION,
 		    (uint8_t)record->index, record->guid);
 	else
-		return (keyed_error(error, key,
+		return (fsimg_setting_error(error, key,
 		    "the partition GUID must be set outside reproducible mode"));
 	record->used = true;
 	return (FSIMG_OK);
@@ -320,27 +361,56 @@ fsimg_disk_plan_fit(const fsimg_disk_plan_t *plan, uint32_t granule,
 	plan->scheme->scheme->footprint(sector, &leading, &trailing);
 	if (!round_up(leading * sector, PARTITION_ALIGNMENT, &start) ||
 	    plan->disk_bytes < trailing * sector)
-		return (keyed_error(error, disk_key(plan),
+		return (fsimg_setting_error(error, disk_key(plan),
 		    "the disk is too small for a partition"));
 	end = plan->disk_bytes - trailing * sector;
 	if (end <= start || (end - start) / granule == 0)
-		return (keyed_error(error, disk_key(plan),
+		return (fsimg_setting_error(error, disk_key(plan),
 		    "the disk is too small for a partition"));
 	longest = (end - start) / granule * granule;
 	if (*volume_bytes == 0)
 		*volume_bytes = longest;
 	else if (*volume_bytes > longest)
-		return (keyed_error(error, disk_key(plan),
+		return (fsimg_setting_error(error, disk_key(plan),
 		    "the disk is too small for its partitions and tables"));
 	return (FSIMG_OK);
+}
+
+/*
+ * The disk's length once its contents need `used` bytes: a fixed disk's
+ * own, else used rounded up to the container's granularity, the padding
+ * zeros that become unallocated space. Then the output's bound: the disk
+ * itself, or the most its container encoding can take, which also refuses
+ * a disk the container cannot describe.
+ */
+static fsimg_status_t
+size_disk(fsimg_disk_plan_t *plan, uint64_t used, fsimg_error_t *error)
+{
+	const fsimg_container_ops_t *container;
+
+	if (!plan->fixed) {
+		if (!round_up(used, plan->container_settings.granularity,
+		    &plan->disk_bytes))
+			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_IMAGE, "the disk exceeds the disk range"));
+		plan->padding_bytes = plan->disk_bytes - used;
+	}
+	plan->output_bytes = plan->disk_bytes;
+	if (plan->container == NULL)
+		return (FSIMG_OK);
+	container = plan->container->container;
+	return (container->bound(&plan->container_settings, plan->disk_bytes,
+	    &plan->output_bytes, error));
 }
 
 /*
  * Lay the records out in slot order: each at the first 1 MiB boundary at
  * or after the end of the leading tables or the previous partition, its
  * volume rounded up to whole sectors, the trailing tables after the last.
- * A fixed disk must hold the result; otherwise it is the disk. Every value
- * is computed with checked arithmetic.
+ * A fixed disk must hold the result; otherwise it is the disk, rounded up
+ * to the container's granularity, and the trailing tables end the rounded
+ * disk because the scheme encodes them at the disk's end. Every value is
+ * computed with checked arithmetic.
  */
 fsimg_status_t
 fsimg_disk_plan_place(fsimg_disk_plan_t *plan, const uint64_t *volume_bytes,
@@ -349,12 +419,11 @@ fsimg_disk_plan_place(fsimg_disk_plan_t *plan, const uint64_t *volume_bytes,
 	fsimg_partition_record_t *record;
 	uint64_t leading, trailing, cursor, start, length, end;
 	uint32_t sector;
+	fsimg_status_t status;
 	char key[32];
 
-	if (plan->scheme == NULL) {
-		plan->disk_bytes = volume_bytes[0];
-		return (FSIMG_OK);
-	}
+	if (plan->scheme == NULL)
+		return (size_disk(plan, volume_bytes[0], error));
 	sector = plan->table.sector_bytes;
 	plan->scheme->scheme->footprint(sector, &leading, &trailing);
 	cursor = leading * sector;
@@ -362,7 +431,7 @@ fsimg_disk_plan_place(fsimg_disk_plan_t *plan, const uint64_t *volume_bytes,
 		record = &plan->table.records[i];
 		if (volume_bytes[i] == 0) {
 			snprintf(key, sizeof(key), "partition %u", (unsigned)i + 1);
-			return (keyed_error(error, key, "a partition cannot be empty"));
+			return (fsimg_setting_error(error, key, "a partition cannot be empty"));
 		}
 		if (!round_up(cursor, PARTITION_ALIGNMENT, &start) ||
 		    !round_up(volume_bytes[i], sector, &length) ||
@@ -376,10 +445,11 @@ fsimg_disk_plan_place(fsimg_disk_plan_t *plan, const uint64_t *volume_bytes,
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_IMAGE,
 		    "the partitions exceed the disk range"));
 	if (plan->fixed && end > plan->disk_bytes)
-		return (keyed_error(error, disk_key(plan),
+		return (fsimg_setting_error(error, disk_key(plan),
 		    "the disk is too small for its partitions and tables"));
-	if (!plan->fixed)
-		plan->disk_bytes = end;
+	status = size_disk(plan, end, error);
+	if (status != FSIMG_OK)
+		return (status);
 	if (plan->disk_bytes / sector > plan->scheme->scheme->max_disk_sectors)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "the disk exceeds the 2^32 sectors an MBR addresses"));
@@ -426,6 +496,12 @@ fsimg_disk_plan_report(const fsimg_disk_plan_t *plan, uint32_t slot,
 	bzero(image, sizeof(*image));
 	bzero(partition, sizeof(*partition));
 	image->disk_bytes = plan->disk_bytes;
+	if (plan->container != NULL) {
+		snprintf(image->container, sizeof(image->container), "%s",
+		    plan->container->name);
+		bcopy(plan->container_settings.guid, image->container_guid,
+		    sizeof(image->container_guid));
+	}
 	if (plan->scheme == NULL || slot == 0 || slot > table->count)
 		return;
 	snprintf(image->scheme, sizeof(image->scheme), "%s", plan->scheme->name);
@@ -438,6 +514,36 @@ fsimg_disk_plan_report(const fsimg_disk_plan_t *plan, uint32_t slot,
 		image->mbr_disk_id = table->mbr_disk_id;
 	fsimg_partition_report(table->kind, &table->records[slot - 1],
 	    partition);
+}
+
+/*
+ * The output budget of a placed plan: the output's bound, plus the disk
+ * itself when raw says a raw intermediate holds it while the output is
+ * written from it. An explicit output limit below that fails before
+ * anything is written, naming both parts.
+ */
+fsimg_status_t
+fsimg_disk_plan_budget(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
+    bool raw, fsimg_error_t *error)
+{
+	uint64_t limit = ctx->options.max_output_bytes;
+	uint64_t needed;
+
+	needed = plan->output_bytes;
+	if (raw)
+		fsimg_stat_add(&needed, plan->disk_bytes);
+	if (limit == 0 || needed <= limit)
+		return (FSIMG_OK);
+	fsimg_limit_error(error, FSIMG_RESOURCE_OUTPUT, limit, needed);
+	if (raw && error != NULL)
+		snprintf(error->message, sizeof(error->message),
+		    "the raw disk of %llu bytes and its %s%s of up to %llu "
+		    "bytes exceed the output limit",
+		    (unsigned long long)plan->disk_bytes,
+		    plan->container != NULL ? plan->container->name : "copy",
+		    plan->container != NULL ? " encoding" : "",
+		    (unsigned long long)plan->output_bytes);
+	return (FSIMG_ELIMIT);
 }
 
 void

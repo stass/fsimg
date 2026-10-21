@@ -20,7 +20,8 @@ static fsimg_status_t create_staging(fsimg_ctx_t *, int, char *, size_t,
     int *, bool *, fsimg_error_t *);
 static fsimg_status_t finish_staging(fsimg_ctx_t *, int, const char *, int,
     bool, bool, fsimg_status_t, fsimg_error_t *);
-static fsimg_status_t emit_writer(void *, fsimg_io_t *, fsimg_error_t *);
+static fsimg_status_t emit_writer(void *, fsimg_io_t *, uint64_t *,
+    fsimg_error_t *);
 
 static fsimg_status_t
 create_staging(fsimg_ctx_t *ctx, int parent, char *name, size_t capacity,
@@ -119,53 +120,103 @@ fsimg_sink_init(fsimg_sink_t *sink, fsimg_sink_kind_t kind)
 }
 
 /*
- * Take a sink for an output that needs no raw intermediate. A sink
- * fsimg_sink_init did not make is refused untouched, since its raw_fd
- * cannot be trusted to be one the caller handed over. Otherwise the raw
- * intermediate descriptor is adopted, so it is closed here on every
- * outcome, and a sink that supplies one is refused. A file sink must name
- * its basename and an I/O sink its object; this build writes no stream.
+ * Take a sink. The raw intermediate descriptor is adopted on every outcome:
+ * returned in *raw_fd when the output needs one, for the caller to adopt in
+ * turn, and closed here when it needs none or the sink is refused. A FILE
+ * sink must name its basename, an IO sink its object and a STREAM sink its
+ * descriptor; an output that needs a raw intermediate and has none, or has
+ * one it does not need, is refused before anything is written.
  */
 fsimg_status_t
-fsimg_sink_adopt(const fsimg_sink_t *sink, fsimg_error_t *error)
+fsimg_sink_adopt(const fsimg_sink_t *sink, fsimg_raw_need_t need, int *raw_fd,
+    fsimg_error_t *error)
 {
+	const char *invalid;
+	bool needed;
+
+	*raw_fd = -1;
 	if (sink == NULL || sink->size != sizeof(*sink))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
 		    "missing or uninitialized output sink"));
-	if (sink->raw_fd != -1) {
-		if (sink->raw_fd >= 0)
-			close(sink->raw_fd);
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
-		    "this output needs no raw intermediate"));
-	}
+	invalid = NULL;
 	switch (sink->kind) {
 	case FSIMG_SINK_FILE:
 		if (sink->name == NULL)
-			break;
-		return (FSIMG_OK);
+			invalid = "a file sink needs a name";
+		break;
 	case FSIMG_SINK_IO:
 		if (sink->io == NULL)
-			break;
-		return (FSIMG_OK);
+			invalid = "an I/O sink needs an object";
+		break;
 	case FSIMG_SINK_STREAM:
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_PUBLISH, "stream output is not supported"));
+		if (sink->stream_fd < 0)
+			invalid = "a stream sink needs a descriptor";
+		break;
+	default:
+		invalid = "invalid output sink";
+		break;
 	}
-	return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
-	    "invalid output sink"));
+	needed = need == FSIMG_RAW_ALWAYS ||
+	    (need == FSIMG_RAW_FOR_STREAM && sink->kind == FSIMG_SINK_STREAM);
+	if (invalid == NULL && needed && sink->raw_fd < 0)
+		invalid = "this output needs a raw intermediate";
+	if (invalid == NULL && !needed && sink->raw_fd != -1)
+		invalid = "this output needs no raw intermediate";
+	if (invalid != NULL) {
+		if (sink->raw_fd >= 0)
+			close(sink->raw_fd);
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
+		    invalid));
+	}
+	*raw_fd = sink->raw_fd;
+	return (FSIMG_OK);
 }
 
-static fsimg_status_t
-emit_writer(void *argument, fsimg_io_t *output, fsimg_error_t *error)
+/*
+ * The host file an adopted sink writes, for alias checks: an IO sink's
+ * backing, or a STREAM sink's descriptor, which a caller may point at a
+ * regular file. A FILE sink writes a file created exclusively in private
+ * staging, which no input can be, so it has none.
+ */
+fsimg_status_t
+fsimg_sink_identity(const fsimg_sink_t *sink, fsimg_host_file_t *identity,
+    bool *known, fsimg_error_t *error)
 {
-	return (fsimg_writer_emit(argument, output, error));
+	*known = false;
+	bzero(identity, sizeof(*identity));
+	switch (sink->kind) {
+	case FSIMG_SINK_IO:
+		return (fsimg_io_identity(sink->io, identity, known, error));
+	case FSIMG_SINK_STREAM:
+		if (fsimg_host_file(sink->stream_fd, identity) == -1)
+			return (fsimg_error_set(error, FSIMG_EIO, errno,
+			    FSIMG_OP_PUBLISH, "stream output identity query failed"));
+		*known = true;
+		return (FSIMG_OK);
+	default:
+		return (FSIMG_OK);
+	}
+}
+
+/* A writer's raw disk fills the staged file, which ends at the disk. */
+static fsimg_status_t
+emit_writer(void *argument, fsimg_io_t *output, uint64_t *length,
+    fsimg_error_t *error)
+{
+	fsimg_writer_t *writer = argument;
+	fsimg_status_t status;
+
+	status = fsimg_writer_emit(writer, output, error);
+	if (status == FSIMG_OK)
+		*length = writer->plan->info.image.disk_bytes;
+	return (status);
 }
 
 fsimg_status_t
 fsimg_output_write(fsimg_writer_t *writer, int parent, const char *name,
-    uint64_t length, const fsimg_publish_ops_t *hooks, fsimg_error_t *error)
+    const fsimg_publish_ops_t *hooks, fsimg_error_t *error)
 {
-	return (fsimg_output_stage(writer->ctx, parent, name, length, emit_writer,
+	return (fsimg_output_stage(writer->ctx, parent, name, emit_writer,
 	    writer, hooks, error));
 }
 
@@ -178,10 +229,11 @@ fsimg_output_write(fsimg_writer_t *writer, int parent, const char *name,
  */
 fsimg_status_t
 fsimg_output_stage(fsimg_ctx_t *ctx, int parent, const char *name,
-    uint64_t length, fsimg_output_fill_t fill, void *argument,
+    fsimg_output_fill_t fill, void *argument,
     const fsimg_publish_ops_t *hooks, fsimg_error_t *error)
 {
 	fsimg_io_t *output;
+	uint64_t length;
 	char staging_name[96];
 	fsimg_status_t status;
 	int staging, fd, saved;
@@ -213,7 +265,8 @@ fsimg_output_stage(fsimg_ctx_t *ctx, int parent, const char *name,
 	status = fsimg_io_adopt_empty_output(ctx, fd, &output, error);
 	if (status != FSIMG_OK)
 		goto done;
-	status = fill(argument, output, error);
+	length = 0;
+	status = fill(argument, output, &length, error);
 	if (status != FSIMG_OK)
 		goto done;
 	/* Close errors are observed before publication. No descriptor can still

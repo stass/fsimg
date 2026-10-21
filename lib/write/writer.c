@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "emit.h"
 #include "io.h"
@@ -15,8 +16,8 @@
 #include "format.h"
 #include "writer.h"
 
-static fsimg_status_t reject_aliases(fsimg_writer_t *, fsimg_io_t *,
-    fsimg_error_t *);
+static fsimg_status_t reject_aliases(fsimg_writer_t *,
+    const fsimg_host_file_t *, fsimg_error_t *);
 static fsimg_status_t check_capabilities(fsimg_writer_t *, fsimg_error_t *);
 static fsimg_status_t check_entry_capabilities(fsimg_writer_t *,
     const fsimg_entry_t *, bool, fsimg_error_t *);
@@ -31,6 +32,13 @@ static fsimg_status_t plan_disk(fsimg_writer_t *, fsimg_error_t *);
 static fsimg_status_t emit_volume(void *, fsimg_io_t *, fsimg_error_t *);
 static fsimg_status_t emit_disk(fsimg_writer_t *, fsimg_io_t *,
     fsimg_error_t *);
+static fsimg_status_t emission_start(fsimg_writer_t *, bool, fsimg_error_t *);
+static fsimg_status_t emit_raw_disk(fsimg_writer_t *, fsimg_io_t *, bool,
+    bool *, fsimg_error_t *);
+static fsimg_status_t emission_end(fsimg_writer_t *, fsimg_status_t, bool,
+    fsimg_error_t *);
+static fsimg_status_t output_through_raw(fsimg_writer_t *,
+    const fsimg_sink_t *, fsimg_io_t *, fsimg_error_t *);
 
 void
 fsimg_write_options_init(fsimg_write_options_t *options)
@@ -519,9 +527,11 @@ fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
 	return (FSIMG_OK);
 }
 
-/* Place the planned volume in its disk and report the disk as an opened
- * image would: the stack, the scheme and its identifiers, and the
- * volume's partition holding the planned filesystem.
+/* Place the planned volume in its disk, check the output limit, and
+ * report the disk as an opened image would: the stack, the scheme and
+ * container and their identifiers, and the volume's partition holding the
+ * planned filesystem; then the output's bound, the container's padding and
+ * the codec the output depends on.
  */
 static fsimg_status_t
 plan_disk(fsimg_writer_t *writer, fsimg_error_t *error)
@@ -530,9 +540,16 @@ plan_disk(fsimg_writer_t *writer, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	status = fsimg_disk_plan_place(&writer->disk, &info->volume_bytes, error);
+	if (status == FSIMG_OK)
+		status = fsimg_disk_plan_budget(writer->ctx, &writer->disk,
+		    writer->disk.container != NULL, error);
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_disk_plan_report(&writer->disk, 1, &info->image, &info->partition);
+	info->output_bytes = writer->disk.output_bytes;
+	info->padding_bytes = writer->disk.padding_bytes;
+	fsimg_disk_plan_codec(&writer->disk, info->codec_version,
+	    sizeof(info->codec_version));
 	fsimg_stack_format(&writer->stack, info->image.stack,
 	    sizeof(info->image.stack));
 	if (writer->disk.scheme != NULL) {
@@ -636,17 +653,14 @@ fsimg_plan_get_info(const fsimg_plan_t *plan, fsimg_plan_info_t *out,
 	return (FSIMG_OK);
 }
 
+/* No collected host source may be the file the output writes. */
 static fsimg_status_t
-reject_aliases(fsimg_writer_t *writer, fsimg_io_t *output, fsimg_error_t *error)
+reject_aliases(fsimg_writer_t *writer, const fsimg_host_file_t *output,
+    fsimg_error_t *error)
 {
 	const fsimg_catalog_entry_t *catalog;
-	fsimg_host_file_t identity;
 	fsimg_status_t status;
-	bool known;
 
-	status = fsimg_io_identity(output, &identity, &known, error);
-	if (status != FSIMG_OK || !known)
-		return (status);
 	for (uint64_t id = 1; id <= writer->count; id++) {
 		status = fsimg_catalog_get(writer, id, &catalog, error);
 		if (status != FSIMG_OK)
@@ -656,8 +670,8 @@ reject_aliases(fsimg_writer_t *writer, fsimg_io_t *output, fsimg_error_t *error)
 		status = fsimg_source_open(writer, id, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (writer->source.identity.device == identity.device &&
-		    writer->source.identity.inode == identity.inode) {
+		if (writer->source.identity.device == output->device &&
+		    writer->source.identity.inode == output->inode) {
 			fsimg_source_close(writer);
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_WRITER, "output aliases a collected host source"));
@@ -675,39 +689,35 @@ emit_volume(void *writer, fsimg_io_t *volume, fsimg_error_t *error)
 	return (fsimg_emit_image(writer, volume, error));
 }
 
-/* A bare volume is the disk; a volume in a scheme is emitted into its
- * partition's slice of the disk the layered output lays out.
+/* A bare volume that fills the disk is the disk; otherwise the volume is
+ * emitted into its slice of the disk the layered output lays out, after a
+ * scheme's leading tables or before a container's padding.
  */
 static fsimg_status_t
 emit_disk(fsimg_writer_t *writer, fsimg_io_t *output, fsimg_error_t *error)
 {
-	if (writer->disk.scheme == NULL)
+	uint64_t volume_bytes = writer->plan->info.volume_bytes;
+
+	if (writer->disk.scheme == NULL &&
+	    writer->disk.disk_bytes == volume_bytes)
 		return (fsimg_emit_image(writer, output, error));
-	return (fsimg_disk_plan_emit(&writer->disk,
-	    writer->plan->info.volume_bytes, output, &writer->session,
-	    emit_volume, writer, error));
+	return (fsimg_disk_plan_emit(&writer->disk, volume_bytes, output,
+	    &writer->session, emit_volume, writer, error));
 }
 
-/* Emission order (specs/design-emission.md): plan, reject source aliases,
- * check sink capabilities and the output limit, resize, then zero the sink and
- * run the driver (fsimg_emit_image) inside its disk, then flush. Nothing
- * before the resize mutates the sink, so a rejected alias or capability
- * leaves it untouched; every failure after that point marks the output
- * incomplete. The sink holds the whole disk, which is the volume when the
- * stack has no scheme.
+/*
+ * Start a writer's one emission: the writer must not have emitted, and
+ * plans now if it has not. through_intermediate says the caller emits the
+ * raw disk into a raw intermediate and encodes the output from it, the
+ * only way a stack with a container is written; refusing a container
+ * here leaves the writer usable.
  */
-fsimg_status_t
-fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
+static fsimg_status_t
+emission_start(fsimg_writer_t *writer, bool through_intermediate,
     fsimg_error_t *error)
 {
 	const fsimg_plan_t *plan;
-	fsimg_error_t local;
-	uint64_t disk_bytes;
 	fsimg_status_t status;
-	bool resize, mutated;
-
-	if (error == NULL)
-		error = &local;
 
 	status = fsimg_ctx_ready(writer == NULL ? NULL : writer->ctx, error);
 	if (status != FSIMG_OK)
@@ -716,91 +726,198 @@ fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
 	    writer->state != FSIMG_WRITER_SEALED)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_WRITER, "writer emission is single-use"));
-	mutated = false;
-	if (fsimg_io_context(output) != writer->ctx) {
-		status = fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_WRITER, "writer and output require the same context");
-		goto fail;
-	}
-	status = fsimg_writer_plan(writer, &plan, error);
-	if (status != FSIMG_OK)
-		goto fail;
+	if (!through_intermediate && writer->disk.container != NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "a container is written only through an output sink with a "
+		    "raw intermediate"));
+	return (fsimg_writer_plan(writer, &plan, error));
+}
+
+/*
+ * Emission order (specs/design-emission.md): reject source aliases, check
+ * the output's capabilities, resize it, then zero it and run the driver
+ * (fsimg_emit_image) inside its disk, then flush. Nothing before the
+ * resize mutates the output, so a rejected alias or capability leaves it
+ * untouched and *mutated false. The output holds the whole raw disk, which
+ * is the volume when the stack has neither a scheme nor padding.
+ */
+static fsimg_status_t
+emit_raw_disk(fsimg_writer_t *writer, fsimg_io_t *output, bool durable,
+    bool *mutated, fsimg_error_t *error)
+{
+	fsimg_host_file_t identity;
+	uint64_t disk_bytes;
+	fsimg_status_t status;
+	bool known, resize;
+
+	*mutated = false;
+	if (fsimg_io_context(output) != writer->ctx)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_WRITER, "writer and output require the same context"));
 	writer->state = FSIMG_WRITER_EMITTING;
 	writer->session.progress.phase = "image emission";
-	status = reject_aliases(writer, output, error);
+	status = fsimg_io_identity(output, &identity, &known, error);
+	if (status == FSIMG_OK && known)
+		status = reject_aliases(writer, &identity, error);
 	if (status != FSIMG_OK)
-		goto fail;
-	disk_bytes = plan->info.image.disk_bytes;
-	status = fsimg_io_check_output(output, disk_bytes,
-	    (writer->options.flags & FSIMG_WRITE_DURABLE) != 0, &resize, error);
+		return (status);
+	disk_bytes = writer->plan->info.image.disk_bytes;
+	status = fsimg_io_check_output(output, disk_bytes, durable, &resize,
+	    error);
 	if (status != FSIMG_OK)
-		goto fail;
-	if (writer->ctx->options.max_output_bytes != 0 &&
-	    disk_bytes > writer->ctx->options.max_output_bytes) {
-		status = fsimg_limit_error(error, FSIMG_RESOURCE_OUTPUT,
-		    writer->ctx->options.max_output_bytes, disk_bytes);
-		goto fail;
-	}
-	mutated = true;
+		return (status);
+	*mutated = true;
 	if (resize) {
 		status = fsimg_io_resize(output, disk_bytes, error);
 		if (status != FSIMG_OK)
-			goto fail;
+			return (status);
 	}
 	status = emit_disk(writer, output, error);
-	if (status != FSIMG_OK)
-		goto fail;
-	status = fsimg_io_flush(output,
-	    (writer->options.flags & FSIMG_WRITE_DURABLE) != 0, error);
-	if (status != FSIMG_OK)
-		goto fail;
-	fsimg_sources_release(writer);
-	writer->state = FSIMG_WRITER_FINISHED;
-	return (FSIMG_OK);
-fail:
+	if (status == FSIMG_OK)
+		status = fsimg_io_flush(output, durable, error);
+	return (status);
+}
+
+/* A finished emission releases its sources; a failed one fails the
+ * writer, leaving an output it may have changed incomplete.
+ */
+static fsimg_status_t
+emission_end(fsimg_writer_t *writer, fsimg_status_t status, bool mutated,
+    fsimg_error_t *error)
+{
+	if (status == FSIMG_OK) {
+		fsimg_sources_release(writer);
+		writer->state = FSIMG_WRITER_FINISHED;
+		return (FSIMG_OK);
+	}
 	if (mutated && error != NULL)
 		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
 	return (fsimg_writer_fail(writer, status));
 }
 
 fsimg_status_t
+fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
+    fsimg_error_t *error)
+{
+	fsimg_error_t local;
+	fsimg_status_t status;
+	bool mutated;
+
+	if (error == NULL)
+		error = &local;
+	status = emission_start(writer, false, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = emit_raw_disk(writer, output,
+	    (writer->options.flags & FSIMG_WRITE_DURABLE) != 0, &mutated, error);
+	return (emission_end(writer, status, mutated, error));
+}
+
+fsimg_status_t
 fsimg_writer_write_at(fsimg_writer_t *writer, int parent, const char *name,
     fsimg_error_t *error)
 {
-	const fsimg_plan_t *plan;
 	fsimg_status_t status;
 
-	status = fsimg_ctx_ready(writer == NULL ? NULL : writer->ctx, error);
+	status = emission_start(writer, false, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (writer->state != FSIMG_WRITER_COLLECTING &&
-	    writer->state != FSIMG_WRITER_SEALED)
-		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-		    FSIMG_OP_WRITER, "writer emission is single-use"));
-	status = fsimg_writer_plan(writer, &plan, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = fsimg_output_write(writer, parent, name,
-	    plan->info.image.disk_bytes, NULL, error);
+	status = fsimg_output_write(writer, parent, name, NULL, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
 	return (FSIMG_OK);
 }
 
-/* The sink cases of a writer whose stack needs no raw intermediate; this
- * build writes no container, compression or stream.
+/*
+ * The output passes through the raw intermediate raw: the writer emits
+ * the raw disk into it, never durably since it has no name, then one
+ * transcode encodes it through the container, or copies it, to the sink.
+ * The sink may be neither a collected source nor the raw intermediate
+ * itself. A failure while the raw disk is emitted leaves the sink
+ * untouched; the transcode reports its own output state.
+ */
+static fsimg_status_t
+output_through_raw(fsimg_writer_t *writer, const fsimg_sink_t *sink,
+    fsimg_io_t *raw, fsimg_error_t *error)
+{
+	fsimg_host_file_t output, intermediate;
+	uint64_t written;
+	fsimg_status_t status;
+	bool known, raw_known, mutated;
+
+	status = emission_start(writer, true, error);
+	if (status != FSIMG_OK)
+		return (status);
+	/* Planning charged the raw disk only for a container; a stream
+	 * without one holds it too. Nothing is written yet, so a refusal
+	 * leaves the writer usable for a smaller output.
+	 */
+	status = fsimg_disk_plan_budget(writer->ctx, &writer->disk, true,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_sink_identity(sink, &output, &known, error);
+	if (status == FSIMG_OK)
+		status = fsimg_io_identity(raw, &intermediate, &raw_known, error);
+	if (status == FSIMG_OK && known && raw_known &&
+	    output.device == intermediate.device &&
+	    output.inode == intermediate.inode)
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "output aliases the raw intermediate");
+	if (status == FSIMG_OK && known)
+		status = reject_aliases(writer, &output, error);
+	if (status != FSIMG_OK)
+		return (fsimg_writer_fail(writer, status));
+	status = emit_raw_disk(writer, raw, false, &mutated, error);
+	if (status != FSIMG_OK) {
+		error->output_state = FSIMG_OUTPUT_ABSENT;
+		return (fsimg_writer_fail(writer, status));
+	}
+	writer->session.progress.phase = "image transcode";
+	status = fsimg_disk_output(&writer->session, raw, &writer->disk, sink,
+	    (writer->options.flags & FSIMG_WRITE_DURABLE) != 0, &written, error);
+	return (emission_end(writer, status, false, error));
+}
+
+/*
+ * The sink cases. Without a container, a FILE sink stages the raw disk as
+ * write_at does and an IO sink receives it as emit does; a container or a
+ * STREAM sink goes through the raw intermediate, which the sink hands over
+ * and this call adopts on every outcome.
  */
 fsimg_status_t
 fsimg_writer_output(fsimg_writer_t *writer, const fsimg_sink_t *sink,
     fsimg_error_t *error)
 {
+	fsimg_error_t local;
+	fsimg_io_t *raw;
+	fsimg_raw_need_t need;
 	fsimg_status_t status;
+	int raw_fd;
 
-	status = fsimg_sink_adopt(sink, error);
+	if (error == NULL)
+		error = &local;
+	need = writer != NULL && writer->disk.container != NULL ?
+	    FSIMG_RAW_ALWAYS : FSIMG_RAW_FOR_STREAM;
+	status = fsimg_sink_adopt(sink, need, &raw_fd, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (sink->kind == FSIMG_SINK_FILE)
+	status = fsimg_ctx_ready(writer == NULL ? NULL : writer->ctx, error);
+	if (status != FSIMG_OK) {
+		if (raw_fd != -1)
+			close(raw_fd);
+		return (status);
+	}
+	if (raw_fd == -1 && sink->kind == FSIMG_SINK_FILE)
 		return (fsimg_writer_write_at(writer, sink->parent_fd, sink->name,
 		    error));
-	return (fsimg_writer_emit(writer, sink->io, error));
+	if (raw_fd == -1)
+		return (fsimg_writer_emit(writer, sink->io, error));
+	status = fsimg_io_adopt_handed_over(writer->ctx, raw_fd,
+	    "raw intermediate", &raw, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = output_through_raw(writer, sink, raw, error);
+	fsimg_io_free(raw);
+	return (status);
 }

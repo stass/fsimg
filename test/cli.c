@@ -25,7 +25,7 @@ static void test_options(void);
 static void test_modes(void);
 static void test_create_operands(void);
 static bool argument_starts(char *const *, const char *);
-static bool every_layer_key_in(char *const *, char *const *);
+static bool every_layer_key_in(char *const *const *);
 static void test_stacks(void);
 static void test_extract_options(void);
 static void test_stems(void);
@@ -368,11 +368,13 @@ argument_starts(char *const *arguments, const char *prefix)
 }
 
 /* Whether every "layer:key" the layer registry lists is set, as
- * "layer:key=...", by one of two command lines.
+ * "layer:key=...", by one of the NULL-terminated list of command lines.
  */
 static bool
-every_layer_key_in(char *const *first, char *const *second)
+every_layer_key_in(char *const *const *commands)
 {
+	bool found;
+
 	fsimg_layer_info_t info;
 	const char *key, *end;
 	size_t cursor;
@@ -384,8 +386,10 @@ every_layer_key_in(char *const *first, char *const *second)
 			end = key + strcspn(key, ",");
 			snprintf(prefix, sizeof(prefix), "%s:%.*s=", info.name,
 			    (int)(end - key), key);
-			if (!argument_starts(first, prefix) &&
-			    !argument_starts(second, prefix)) {
+			found = false;
+			for (unsigned i = 0; commands[i] != NULL; i++)
+				found |= argument_starts(commands[i], prefix);
+			if (!found) {
 				fprintf(stderr, "no command line sets %s\n", prefix);
 				return (false);
 			}
@@ -447,23 +451,61 @@ test_stacks(void)
 		{ "fsimg", "-cn", "-F", "fat32/mbr", "-o", "mbr:active=maybe", ".", NULL },
 		{ "fsimg", "-cn", "-F", "fat32/mbr", "-o", "mbr:type=0x0c", "-o",
 		    "mbr:type=0x0b", ".", NULL },
-		{ "fsimg", "-cn", "-F", "fat32/mbr", "-o", "gpt:sector=4096", ".", NULL }
+		{ "fsimg", "-cn", "-F", "fat32/mbr", "-o", "gpt:sector=4096", ".", NULL },
+		{ "fsimg", "-cn", "-F", "exfat/gpt/vhd", "-o", "vhd:x=1", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "dmg:compress=lzfse", ".",
+		    NULL },
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "dmg:level=0", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "dmg:level=6K", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "dmg:chunk=8G", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "dmg:uuid=nil", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/vhd", "-o", "vhd:align=0", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/simg", "-o", "simg:crc=1", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/gpt", "-o", "dmg:level=1", ".", NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32/gpt", "-f", "out.dmg", ".", NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32/vhd", "-f", "out.dmg.gz", ".",
+		    NULL },
+		{ "fsimg", "-cz", "-a", "-F", "fat32", "-f", "out.img.zst", ".",
+		    NULL },
+		{ "fsimg", "-cW", "-F", "fat32/dmg", "-f", "-", ".", NULL },
+		{ "fsimg", "-c", "--json", "-F", "fat32/dmg", "-f", "-", ".", NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32/dmg", "-f", "-", ".", NULL },
+		{ "fsimg", "-c", "-T", "-", "-F", "fat32/dmg", "-f", "-", ".", NULL }
 	};
 	char *unsupported[][12] = {
-		{ "fsimg", "-cn", "-F", "fat32/-/vhd", ".", NULL },
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
 		{ "fsimg", "-cz", "-F", "fat32", "-f", "out.img.gz", ".", NULL },
 		{ "fsimg", "-cM", "-F", "fat32", "-f", "out.img", ".", NULL },
-		{ "fsimg", "-c", "-F", "fat32", "-f", "-", ".", NULL },
 		{ "fsimg", "-t", "-f", "-", NULL },
-		{ "fsimg", "-cn", "-F", "fat32/gpt/dmg", ".", NULL },
-		{ "fsimg", "-cn", "-F", "fat32/-/simg", ".", NULL },
 		{ "fsimg", "-t", "-f", "image", "/a", "/b", NULL },
 		{ "fsimg", "-tz", "-f", "image", NULL },
-		{ "fsimg", "-cn", "-F", "exfat/gpt/vhd", "-o", "gpt:type=esp", ".", NULL },
-		{ "fsimg", "-cn", "-F", "exfat/gpt/vhd", "-o", "vhd:x=1", ".", NULL },
-		{ "fsimg", "-cz", "-F", "fat32", "-o", "gzip:level=9", "-f", "o.img.gz", ".", NULL }
+		{ "fsimg", "-cz", "-F", "fat32", "-o", "gzip:level=9", "-f", "o.img.gz", ".", NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32/dmg", "-f", "out.dmg.gz", ".",
+		    NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.zst", ".", NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.XZ", ".", NULL }
 	};
+	/* Containers and streams are written; with -a a container suffix
+	 * must name the stack's container and selects nothing more.
+	 */
+	char *accepted[][12] = {
+		{ "fsimg", "-cn", "-F", "fat32/-/vhd", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/gpt/dmg", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/-/simg", ".", NULL },
+		{ "fsimg", "-cn", "-F", "exfat/gpt/vhd", "-o", "gpt:type=esp", ".", NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32/gpt/dmg", "-f", "out.DMG", ".",
+		    NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img", ".", NULL }
+	};
+	char *stream[] = { "fsimg", "-c", "-F", "fat32/vhd", "-f", "-", ".", NULL };
+	char *dmg_settings[] = { "fsimg", "-cn", "-F", "fat32/dmg", "-o",
+	    "dmg:compress=zlib", "-o", "dmg:level=9", "-o", "dmg:chunk=512K", "-o",
+	    "dmg:uuid=11111111-2222-4333-8444-555555555555", ".", NULL };
+	char *vhd_settings[] = { "fsimg", "-cn", "-F", "fat32/vhd", "-o",
+	    "vhd:align=1M", "-o", "vhd:uuid=66666666-7777-4888-8999-aaaaaaaaaaaa",
+	    ".", NULL };
+	char *simg_settings[] = { "fsimg", "-cn", "-F", "fat32/simg", "-o",
+	    "simg:block=64K", "-o", "simg:crc=yes", ".", NULL };
 	char *empty_slots[] = { "fsimg", "-cn", "-F", "fat32/-/-", ".", NULL };
 	char *gpt_settings[] = { "fsimg", "-cn", "-F", "fat32/gpt", "-o",
 	    "gpt:type=esp", "-o", "gpt:name=EFI", "-o", "gpt:disk=64M", "-o",
@@ -504,12 +546,36 @@ test_stacks(void)
 	 * commands above set, so a library setting the CLI cannot parse fails
 	 * here.
 	 */
-	CHECK(every_layer_key_in(gpt_settings, mbr_settings));
+	CHECK(every_layer_key_in((char *const *const []){ gpt_settings,
+	    mbr_settings, dmg_settings, vhd_settings, simg_settings, NULL }));
 	CHECK(parse(mbr_settings, &options) == FSIMG_OK);
 	layers = &options.request.layers;
 	CHECK(layers->mbr_id == 0xdeadbeef && layers->mbr_id_set &&
 	    layers->mbr_active && strcmp(layers->mbr_type, "0x0e") == 0);
 	CHECK(layers->mbr_disk_bytes == UINT64_C(1) << 30);
+	fsimg_cli_release(&options);
+	CHECK(parse(dmg_settings, &options) == FSIMG_OK);
+	layers = &options.request.layers;
+	CHECK(layers->dmg_compress == FSIMG_DMG_ZLIB && layers->dmg_level == 9 &&
+	    layers->dmg_chunk_bytes == 512 * 1024 &&
+	    layers->dmg_uuid[0] == 0x11 && layers->dmg_uuid[15] == 0x55);
+	fsimg_cli_release(&options);
+	CHECK(parse(vhd_settings, &options) == FSIMG_OK);
+	layers = &options.request.layers;
+	CHECK(layers->vhd_align_bytes == 1024 * 1024 &&
+	    layers->vhd_uuid[0] == 0x66 && layers->vhd_uuid[15] == 0xaa);
+	fsimg_cli_release(&options);
+	CHECK(parse(simg_settings, &options) == FSIMG_OK);
+	layers = &options.request.layers;
+	CHECK(layers->simg_block_bytes == 64 * 1024 && layers->simg_crc);
+	fsimg_cli_release(&options);
+	for (unsigned i = 0; i < sizeof(accepted) / sizeof(accepted[0]); i++) {
+		CHECK(parse(accepted[i], &options) == FSIMG_OK);
+		fsimg_cli_release(&options);
+	}
+	/* A creation on standard output streams; nothing is staged. */
+	CHECK(parse(stream, &options) == FSIMG_OK);
+	CHECK((options.request.flags & FSIMG_JOB_STREAM) != 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(empty_slots, &options) == FSIMG_OK);
 	CHECK(strcmp(fsimg_job_format(&options.request), "fat32") == 0);
@@ -1190,17 +1256,29 @@ test_staged_verification_failure(void)
 	    "verification; nothing was published\n") != NULL);
 	CHECK(strstr(display.buffer, "output was published") == NULL);
 
-	/* On a partitioned disk a table failure names the scheme, and a
-	 * filesystem failure the volume.
+	/* A layer's failure names the layer, which the library puts in
+	 * error.path: a table failure the scheme, a container failure the
+	 * container; a filesystem failure names the volume.
 	 */
-	CHECK(fsimg_stack_parse("fat32/gpt", &options.request.stack, NULL) ==
+	CHECK(fsimg_stack_parse("fat32/gpt/dmg", &options.request.stack, NULL) ==
 	    FSIMG_OK);
 	fsimg_error_set(&error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
 	    "GPT primary entry array CRC32 mismatch");
+	snprintf(error.path, sizeof(error.path), "gpt");
 	fsimg_cli_display_init(&display, &options, &result, &paths);
 	display.failure = &error;
 	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "fsimg: GPT primary entry array CRC32 "
+	    "mismatch \"gpt\"\n") != NULL);
 	CHECK(strstr(display.buffer, "fsimg: the staged gpt partition table "
+	    "failed verification; nothing was published\n") != NULL);
+	fsimg_error_set(&error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
+	    "DMG data fork checksum does not match");
+	snprintf(error.path, sizeof(error.path), "dmg");
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.failure = &error;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "fsimg: the staged dmg container "
 	    "failed verification; nothing was published\n") != NULL);
 	fsimg_error_set(&error, FSIMG_ECORRUPT, 0, FSIMG_OP_VERIFY,
 	    "FAT copies differ");

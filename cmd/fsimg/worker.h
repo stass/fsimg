@@ -36,14 +36,19 @@ typedef enum fsimg_confinement {
 #define FSIMG_JOB_VERBOSE 0x04u
 /* Extraction omits entries of kinds the safe profile does not create. */
 #define FSIMG_JOB_SKIP_UNSUPPORTED 0x08u
+/* Creation writes the image to the raw data channel, not to staging. */
+#define FSIMG_JOB_STREAM 0x10u
 
 /* The job record's capability bits: which prepared descriptors the worker
  * receives. Scratch is optional for every kind; the others follow the kind.
+ * RAW is the raw intermediate a creation with a container or to a stream
+ * needs.
  */
 #define FSIMG_JOB_CAP_INPUT 0x01u
 #define FSIMG_JOB_CAP_OUTPUT 0x02u
 #define FSIMG_JOB_CAP_SCRATCH 0x04u
 #define FSIMG_JOB_CAP_ROOTS 0x08u
+#define FSIMG_JOB_CAP_RAW 0x10u
 /* Coordinator, at most one parser, and at most one output relay. */
 #define FSIMG_CLI_PROCESS_BOUND 3u
 /* Fixed sanitizer options reserve this status for runtime failures. */
@@ -107,6 +112,10 @@ typedef struct fsimg_worker_request {
 	/* The staging directory of CREATE, or the destination of EXTRACT. */
 	int		 output_fd;
 	int		 scratch_fd;
+	/* The unlinked raw intermediate of a CREATE that transcodes or
+	 * streams (specs/design-layers.md#handed-over-files), or -1.
+	 */
+	int		 raw_fd;
 	/* --partition name= or type= text; a GPT name holds at most 36 UTF-16
 	 * units, so 111 bytes cover every name that can match.
 	 */
@@ -196,6 +205,7 @@ fsimg_status_t fsimg_job_decode(const unsigned char *, uint32_t,
 #define FSIMG_CHILD_OUTPUT 7
 #define FSIMG_CHILD_SCRATCH 8
 #define FSIMG_CHILD_CANCEL 9
-#define FSIMG_CHILD_ROOTS 10
+#define FSIMG_CHILD_RAW 10
+#define FSIMG_CHILD_ROOTS 11
 
 #endif

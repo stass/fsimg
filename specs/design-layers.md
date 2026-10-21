@@ -143,8 +143,10 @@ covered by all three without a second list: stripping an image name to its
 extraction stem; choosing the compression under `-a`, which selects
 compression from the suffix and never a container; and the `-a` conflict
 check between an output name's container suffix and the stack's container.
-A reserved compression name is not a registered layer, so its suffix is
-neither stripped nor selected.
+A reserved compression name (`zstd`, `xz`) is registered with its suffix
+but no profile: its suffix is stripped like gzip's, and `-a` selects it so
+that creation fails as unsupported rather than writing an uncompressed
+image under a compressed name.
 
 The read-side result of every peel is an ordinary `fsimg_io_t`: a container
 yields a positional object over the disk; a scheme yields slices of it. A
@@ -395,9 +397,10 @@ transcode or a stream needs a raw disk to read from:
 | Stack | Output | Staged file | Raw intermediate |
 | --- | --- | --- | --- |
 | Filesystem only; filesystem and scheme | File | The raw volume or disk is the staged output | None |
-| Filesystem only; filesystem and scheme | Stream or caller-supplied sink | None | The raw volume or disk, copied sequentially to the sink |
+| Filesystem only; filesystem and scheme | Caller-supplied positional sink | None; the sink receives the raw volume or disk | None |
+| Filesystem only; filesystem and scheme | Stream | None | The raw volume or disk, copied sequentially to the stream |
 | Container or compression present | File | `image`, written by the transcode | The raw disk the transcode reads |
-| Container or compression present | Stream or caller-supplied sink | None | The raw disk the transcode reads |
+| Container or compression present | Stream or caller-supplied positional sink | None | The raw disk the transcode reads |
 
 The raw intermediate is charged against the output limit together with the
 staged output, never against scratch, whichever directory holds it: while a
@@ -429,9 +432,11 @@ Each container's sequential order is fixed by the format and listed in its
 profile: DMG writes the data fork, then the XML plist, then the koly trailer;
 VHD writes the disk then its footer; simg writes its header, then chunks.
 simg's header carries the chunk count, which the zero decisions determine, so
-simg runs the inspection pass twice: the first counts chunks and reads only
-data ranges, the second emits. This keeps positional and stream sinks
-identical and the bytes deterministic.
+simg runs the inspection pass twice: the first counts chunks and ends by
+writing the header, the second emits the chunks and fails as a changed
+source if it emits another count, as an input read twice by wrap or compose
+can. Both passes skip only reported holes. This keeps positional and stream
+sinks identical and the bytes deterministic.
 
 Chunk records that a container must emit after its data (the DMG block
 table) go through a metadata scratch record stream as they are decided, and
@@ -949,7 +954,7 @@ All integers are big-endian. The trailer:
 | 224 | 8 | XML length |
 | 232 | 120 | Reserved |
 | 352 | 136 | Master checksum, same layout |
-| 488 | 4 | Image variant (1) |
+| 488 | 4 | Image variant (2; `hdiutil` writes 1 beside per-region tables) |
 | 492 | 8 | Sector count |
 | 500 | 12 | Reserved |
 
@@ -971,8 +976,8 @@ and a QEMU read of an fsimg image before the writer is accepted:
 | 8 | 8 | First sector of the table within the disk | 0 |
 | 16 | 8 | Sector count of the table | The disk's |
 | 24 | 8 | Data offset: the base, relative to the data fork start, that every run's compressed offset adds to | 0 |
-| 32 | 4 | Buffers needed | 0x208, as `libdmg-hfsplus` writes |
-| 36 | 4 | Block descriptor: the partition number the table describes, not a count | The plist `ID`, 0 |
+| 32 | 4 | Buffers needed | The chunk's sector count plus 8, as `hdiutil` writes (0x808 for 2048-sector chunks) |
+| 36 | 4 | Block descriptor: the partition number the table describes, not a count | 0xFFFFFFFE, the whole disk, as `hdiutil convert` writes for a single table |
 | 40 | 24 | Reserved | Zero |
 | 64 | 136 | Checksum of the table's decoded bytes, every run but Ignore runs: type (2 = CRC32), bit size (32), 32 x 32-bit values, the first used | CRC32 |
 | 200 | 4 | Run count, terminator included | |
@@ -1033,13 +1038,14 @@ Writing: one block table covering the whole disk, `ID` 0, `Name` and
 last run, zero runs merged, a terminator entry, data runs as UDZO at
 `dmg:level` under the default `dmg:compress=zlib` and raw under `none`, the
 table's CRC32 over the decompressed disk bytes, and the data-fork CRC32 and
-master CRC32 in the trailer. Whether macOS attaches an image whose single
-table spans the disk, and whether it attaches a bare filesystem with no
-partition map at all
-(a FAT volume; an APFS container), is unverified and is the first `hdiutil`
-evidence gate; if a per-partition table split is required, the transcode
-splits tables at the scheme's region boundaries, which it knows from the
-plan, without changing anything else in this design.
+master CRC32 in the trailer. Zero runs carry the current data fork end as
+their compressed offset, as `hdiutil` writes them. `hdiutil` verifies,
+attaches and mounts such an image with a GPT, an MBR or a bare FAT volume
+and no partition map, as an ordinary user, under image variant 2; it refuses
+to attach variant 1 when the single table spans a partitioned disk, so
+variant 2 is written for every stack. `qemu-img convert` expands each of
+them to the raw disk byte for byte, including a zero run of more than
+64 MiB.
 
 ### Fixed VHD
 
@@ -1198,9 +1204,3 @@ format correctness; the oracle rows do.
 Oracle availability is reported, not assumed: a missing `hdiutil`, `sgdisk`
 or `simg2img` skips its gate explicitly, and the release gate requires each on
 its platform.
-
-## Open questions
-
-* **Default DMG chunk table shape.** One table for the whole disk is the
-  simplest; `hdiutil` writes one per partition-map region. Recommendation:
-  decide by the `hdiutil attach` gate; both shapes are supported on read.

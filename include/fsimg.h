@@ -424,7 +424,21 @@ typedef struct fsimg_layer_info {
  * mbr_id_set. An unset identifier is derived from the epoch in reproducible
  * mode and is otherwise FSIMG_EINVAL naming its key. mbr_active marks the
  * partition active (status 0x80).
+ *
+ * The container settings: dmg_compress stores data chunks as zlib (UDZO)
+ * or raw; dmg_level is the zlib level, 1 to 9, zero selecting 6;
+ * dmg_chunk_bytes is the chunk size, a multiple of 512 up to 16 MiB, zero
+ * selecting 1 MiB. vhd_align_bytes is the disk-length granularity, a power
+ * of two from 512 to 1 GiB, zero selecting 512. simg_block_bytes is the
+ * block size, a power of two from 1 KiB to 1 MiB, zero selecting 4096, and
+ * simg_crc appends a CRC32 chunk. dmg_uuid (the segment ID) and vhd_uuid
+ * are identifiers like the GUIDs above.
  */
+typedef enum fsimg_dmg_compression {
+	FSIMG_DMG_ZLIB = 0,
+	FSIMG_DMG_NONE = 1
+} fsimg_dmg_compression_t;
+
 struct fsimg_layer_options {
 	uint32_t	 gpt_sector_bytes;
 	uint64_t	 gpt_disk_bytes;
@@ -437,6 +451,14 @@ struct fsimg_layer_options {
 	uint32_t	 mbr_id;
 	bool		 mbr_id_set;
 	bool		 mbr_active;
+	fsimg_dmg_compression_t dmg_compress;
+	uint32_t	 dmg_level;
+	uint32_t	 dmg_chunk_bytes;
+	unsigned char	 dmg_uuid[16];
+	uint32_t	 vhd_align_bytes;
+	unsigned char	 vhd_uuid[16];
+	uint32_t	 simg_block_bytes;
+	bool		 simg_crc;
 	uint64_t	 reserved[4];
 };
 
@@ -600,28 +622,47 @@ typedef struct fsimg_plan_info {
 	unsigned	 required_io_flags;
 	/* The image around the volume, reported as an opened image reports
 	 * it, with every identifier the plan derived. image.disk_bytes is the
-	 * whole output and equals volume_bytes without a scheme; image.scope is
-	 * zero. With a scheme, partition is the volume's slot (image.selected):
-	 * partition.offset is the volume offset and partition.length the
-	 * partition's whole sectors, at least volume_bytes. Without one,
-	 * partition is zero.
+	 * disk, which equals volume_bytes without a scheme or container;
+	 * image.scope is zero. With a scheme, partition is the volume's slot
+	 * (image.selected): partition.offset is the volume offset and
+	 * partition.length the partition's whole sectors, at least
+	 * volume_bytes. Without one, partition is zero. With a container,
+	 * image.container and image.container_guid name it and its identifier.
 	 */
 	fsimg_image_info_t image;
 	fsimg_partition_info_t partition;
+	/* output_bytes is the most bytes the output can take: exactly the disk
+	 * without a container, else the container's largest encoding of it,
+	 * which always exceeds the disk since it adds the container's own
+	 * metadata. A raw intermediate holds the disk while a container's
+	 * output is encoded or a stream is written, so the output budget is
+	 * then image.disk_bytes + output_bytes.
+	 * padding_bytes is the zero padding the container's disk-length
+	 * granularity added to the disk. codec_version names the compression
+	 * library the output depends on ("zlib 1.3.1"), empty for none.
+	 */
+	uint64_t	 output_bytes;
+	uint64_t	 padding_bytes;
+	char		 codec_version[32];
 } fsimg_plan_info_t;
 
 /* Where an output operation writes. FILE stages a new file beneath the
  * trusted directory parent_fd and publishes it as name without replacing
  * anything, durably, as write_at does. IO writes the positional object io
- * from offset zero, as emit does. STREAM writes stream_fd sequentially.
- * raw_fd is the raw intermediate a container, compression or stream output
- * of a writer needs: an exclusively created, empty, unlinked read/write
- * regular file, or -1. fsimg_sink_init makes an empty sink of a kind,
- * with size set and every descriptor -1, so a caller fills in only what
- * its kind uses. A sink whose size fsimg_sink_init did not set is refused
- * untouched, so a zeroed value never hands over descriptor 0. The value
- * and io are borrowed for the call; once the sink is accepted, raw_fd is
- * adopted, and closed, on every outcome.
+ * from offset zero, as emit does. STREAM writes stream_fd sequentially,
+ * borrowed for the call. raw_fd is the raw intermediate a container or
+ * stream output of a writer needs: an exclusively created, empty, unlinked
+ * read/write regular file without O_APPEND, or -1; every other output
+ * takes -1. fsimg_sink_init makes an empty sink of a kind, with size set
+ * and every descriptor -1, so a caller fills in only what its kind uses. A
+ * sink whose size fsimg_sink_init did not set is refused untouched, so a
+ * zeroed value never hands over descriptor 0. The value and io are
+ * borrowed for the call; once its size is valid, raw_fd is adopted, and
+ * closed, on every outcome, a refused sink included. A stream has no publication: a failure after
+ * its first byte reports FSIMG_OUTPUT_INCOMPLETE, and the caller must
+ * discard what it received. A container output to an IO sink needs a
+ * resizable whole object, since the encoded length is known only at the
+ * end; the sink ends at that length.
  */
 typedef enum fsimg_sink_kind {
 	FSIMG_SINK_FILE = 1,
@@ -667,9 +708,9 @@ void fsimg_sink_init(fsimg_sink_t *, fsimg_sink_kind_t);
  * On unsupported publication error.path names the retained image relative to
  * parent_fd; when cleanup_error is nonzero it names the retained directory.
  * The format is a stack naming the filesystem: "fat32" writes a bare
- * volume and "fat32/gpt" a disk holding it in one partition, whose layout
- * the plan reports and whose size every sink must accept; a container is
- * unsupported in this build.
+ * volume, "fat32/gpt" a disk holding it in one partition, whose layout
+ * the plan reports and whose size every sink must accept, and
+ * "fat32/gpt/dmg" that disk in a container, which only output writes.
  */
 void fsimg_write_options_init(fsimg_write_options_t *);
 fsimg_status_t fsimg_writer_new(fsimg_ctx_t *, const char *,
@@ -687,9 +728,11 @@ fsimg_status_t fsimg_plan_get_info(const fsimg_plan_t *, fsimg_plan_info_t *,
 fsimg_status_t fsimg_writer_emit(fsimg_writer_t *, fsimg_io_t *, fsimg_error_t *);
 fsimg_status_t fsimg_writer_write_at(fsimg_writer_t *, int, const char *,
     fsimg_error_t *);
-/* output is emit for an IO sink and write_at for a FILE sink; a stream
- * sink, and any stack needing a raw intermediate, is unsupported in this
- * build.
+/* output generalises emit (an IO sink) and write_at (a FILE sink), which
+ * write only stacks without a container and refuse others. A container or
+ * a STREAM sink needs the sink's raw intermediate: the writer emits the
+ * raw disk into it, then one sequential transcode writes the container,
+ * or copies the disk, to the sink.
  */
 fsimg_status_t fsimg_writer_output(fsimg_writer_t *, const fsimg_sink_t *,
     fsimg_error_t *);
@@ -901,11 +944,14 @@ typedef struct fsimg_part {
  * wrap puts a raw volume into the stack's scheme as its one partition,
  * typed by gpt_type or mbr_type, else by the filesystem the stack names or
  * the volume's prefix identifies; without a scheme the volume is the
- * output. unwrap writes the bytes a selector names. compose places count
- * volumes in order, each 1 MiB aligned, under a stack naming only a
- * scheme; the layer options' partition fields must hold their defaults,
- * since each part carries its own. A container is unsupported in this
- * build.
+ * disk. unwrap writes the bytes a selector names. compose places count
+ * volumes in order, each 1 MiB aligned, under a stack naming a scheme and
+ * no filesystem; the layer options' partition fields must hold their
+ * defaults, since each part carries its own. A container in the stack of
+ * wrap or compose encodes the disk on its way to the sink, in the one
+ * transcode a writer uses. None of the three stages a raw disk, so each
+ * refuses a sink's raw intermediate, and a STREAM sink receives the bytes
+ * as they are produced.
  */
 fsimg_status_t fsimg_image_wrap(fsimg_ctx_t *, fsimg_io_t *, const char *,
     const fsimg_write_options_t *, const fsimg_sink_t *, fsimg_error_t *);

@@ -99,14 +99,17 @@ def test_formats(executable, root):
               if record["type"] == "format" and record["kind"] != "filesystem"}
     assert {name: record["kind"] for name, record in layers.items()} == {
         "gpt": "scheme", "mbr": "scheme", "dmg": "container", "vhd": "container",
-        "simg": "container", "gzip": "compression"}
+        "simg": "container", "gzip": "compression", "zstd": "compression",
+        "xz": "compression"}
     assert layers["gpt"]["settings"] == ["sector", "disk", "type", "name", "disk-guid", "guid"]
     assert layers["mbr"]["settings"] == ["disk", "type", "active", "id"]
-    assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 5
-    assert layers["gzip"]["capabilities"] == 0
+    assert layers["dmg"]["settings"] == ["compress", "level", "chunk", "uuid"]
+    assert layers["simg"]["settings"] == ["block", "crc"]
+    assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 7
+    assert layers["gzip"]["capabilities"] == 0 and layers["zstd"]["suffix"] == ".zst"
     assert {name: record["codecs"] for name, record in layers.items()} == {
         "gpt": None, "mbr": None, "dmg": "raw,zero,zlib", "vhd": "raw",
-        "simg": "raw,zero,fill", "gzip": None}
+        "simg": "raw,zero,fill", "gzip": None, "zstd": None, "xz": None}
     assert re.fullmatch(r"zlib [0-9][0-9A-Za-z.-]*", layers["dmg"]["codec_version"])
     assert layers["vhd"]["codec_version"] is None
     assert layers["vhd"]["suffix"] == ".vhd" and layers["gpt"]["suffix"] is None
@@ -239,10 +242,13 @@ def test_human_help(executable, root):
                               b"sector,disk,type,name,disk-guid,guid\n"
                               b"mbr    scheme       yes   yes    yes     -              "
                               b"disk,type,active,id\n"
-                              b"dmg    container    yes   no     yes     raw,zero,zlib  -\n"
-                              b"vhd    container    yes   no     yes     raw            -\n"
-                              b"simg   container    yes   no     yes     raw,zero,fill  -\n"
-                              b"gzip   compression  no    no     no      -              -\n")
+                              b"dmg    container    yes   yes    yes     raw,zero,zlib  "
+                              b"compress,level,chunk,uuid\n"
+                              b"vhd    container    yes   yes    yes     raw            align,uuid\n"
+                              b"simg   container    yes   yes    yes     raw,zero,fill  block,crc\n"
+                              b"gzip   compression  no    no     no      -              -\n"
+                              b"zstd   compression  no    no     no      -              -\n"
+                              b"xz     compression  no    no     no      -              -\n")
     assert formats.stderr == b""
     verbose = invoke(executable, root, ["--formats", "-v"])
     assert verbose.stdout == formats.stdout and b"Sandbox backend:" in verbose.stderr
@@ -390,25 +396,23 @@ def test_option_syntax(executable, root):
         # Options precede operands: after the first member, -v is a member.
         (["t", "-f", "human.img", "/nested", "-v"], b"selecting several members is not supported"),
         (["t", "-z", "-f", "human.img"], b"compressed images are not supported"),
-        (["cf", "syntax.img", "-F", "fat32/gpt/vhd", "-C", "source", "."],
-         b"writing image containers is not supported"),
         (["t", "-f", "-"], b"reading an image from standard input is not supported"),
         # A forced container runs only its own probe, which a bare volume fails.
         (["t", "-F", "fat32/-/vhd", "-f", "human.img"], b"no VHD footer"),
-        (["cf", "syntax.img", "-F", "fat32/dmg", "-C", "source", "."],
-         b"writing image containers is not supported"),
-        (["cf", "syntax.img", "-a", "-F", "fat32", "-C", "source", "."],
-         b"compressed images are not supported"),
+        # -a takes gzip or a reserved compression from the outermost suffix.
+        (["cf", "syntax.img.zst", "-a", "-F", "fat32", "-C", "source", "."],
+         b"writing compressed images is not supported"),
+        (["cf", "syntax.dmg.gz", "-a", "-F", "fat32/dmg", "-C", "source", "."],
+         b"writing compressed images is not supported"),
         (["cf", "syntax.img", "-M", "-F", "fat32", "-C", "source", "."],
          b"-M minimization is not supported"),
         (["cf", "syntax.img", "-F", "apfs", "-C", "source", "."],
          b"the named filesystem is reserved and not supported"),
-        (["cf", "-", "-F", "fat32", "-C", "source", "."],
-         b"writing an image to standard output is not supported"),
     ]:
         result = invoke(executable, root, arguments, expected=1)
         assert detail in result.stderr and result.stdout == b"", (arguments, result.stderr)
-    assert not (root / "syntax.img").exists() and not (root / "-").exists()
+    assert not [path for path in root.iterdir() if path.name.startswith("syntax.")]
+    assert not (root / "-").exists()
     (root / "dotdot-parent").mkdir()
     result = invoke(executable, root, ["xf", "human.img", "-C", "dotdot-parent", "../x"], expected=2)
     assert b'a member contains a .. component "../x"' in result.stderr
@@ -1227,11 +1231,6 @@ def test_containers(executable, root):
     assert listing(executable, root, "damaged.dmg") == names
     result = invoke(executable, root, ["W", "-f", "damaged.dmg"], expected=1)
     assert b"DMG data fork checksum does not match" in result.stderr, result.stderr
-    # Writing a container stays refused, publishing nothing.
-    result = invoke(executable, root, ["cf", "made.dmg", "-F", "fat12/gpt/dmg",
-                                       "-C", "source", "."], expected=1)
-    assert b"writing image containers is not supported" in result.stderr
-    assert not (root / "made.dmg").exists()
 
 
 BASIC_TYPE = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
@@ -1337,6 +1336,45 @@ def test_partitioned_create(executable, root):
     assert b"setting applies only to creation" in result.stderr, result.stderr
 
 
+def test_container_create(executable, root):
+    """c writes each container; c -f - streams the same bytes to stdout and
+    refuses a terminal; -a accepts a container suffix naming the stack's
+    container; cW verifies the container before publishing; without -R
+    the container identifier is random and differs between runs."""
+    for container in ["dmg", "vhd", "simg"]:
+        image = f"made.{container}"
+        invoke(executable, root, ["cf", image, "-R", "-a", "-F", f"fat12/gpt/{container}",
+                                  "-C", "source", "."])
+        assert sorted(listing(executable, root, image)) == ['"/HELLO.TXT"', '"/nested"',
+                                                    '"/nested/caf\u00e9.txt"'], image
+        streamed = invoke(executable, root, ["cf", "-", "-R", "-F", f"fat12/gpt/{container}",
+                                             "-C", "source", "."])
+        assert streamed.stdout == (root / image).read_bytes(), container
+        assert b"output is incomplete" not in streamed.stderr
+        verified = invoke(executable, root, ["W", "-d", "-f", image]).stdout
+        assert f"{container} container,".encode() in verified, verified
+    plan = records(invoke(executable, root, ["c", "-n", "--json", "-R", "-F", "fat12/dmg",
+                                              "-C", "source", "."]))
+    planned = next(record for record in plan if record["type"] == "plan")
+    assert planned["codec"].startswith("zlib ") and int(planned["output_bytes"]) > 0
+    invoke(executable, root, ["cWf", "checked.dmg", "-F", "fat12/gpt/dmg", "-C", "source", "."])
+    invoke(executable, root, ["cf", "random.dmg", "-F", "fat12/dmg", "-C", "source", "."])
+    first = (root / "checked.dmg").read_bytes()[-512 + 64:-512 + 80]
+    assert first != (root / "random.dmg").read_bytes()[-512 + 64:-512 + 80]
+    # A terminal on stdout never receives an image, and nothing is left.
+    primary, secondary = os.openpty()
+    try:
+        result = subprocess.run(
+            [str(executable), "cf", "-", "-F", "fat12/dmg", "-C", "source", "."],
+            cwd=root, stdout=secondary, stderr=subprocess.PIPE, timeout=30)
+    finally:
+        os.close(secondary)
+        os.close(primary)
+    assert result.returncode == 1 and b"refusing to write an image to a terminal" in result.stderr
+    for name in ["made.dmg", "made.vhd", "made.simg", "checked.dmg", "random.dmg"]:
+        (root / name).unlink()
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -1368,6 +1406,7 @@ def main():
         test_partitioned(executable, root)
         test_containers(executable, root)
         test_partitioned_create(executable, root)
+        test_container_create(executable, root)
         assert not list(root.glob(".fsimg-*"))
     print("CLI commands, independent JSON decoding, publication and failure checks pass")
 

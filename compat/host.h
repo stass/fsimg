@@ -45,6 +45,10 @@ int fsimg_host_random(void *, size_t);
 
 bool fsimg_host_offset(uint64_t, off_t *);
 int fsimg_host_dup(int);
+/* The first reported hole at or after an offset of a file's first length
+ * bytes, as [start, end); none reported is start == end == length.
+ */
+void fsimg_host_next_hole(int, uint64_t, uint64_t, uint64_t *, uint64_t *);
 int fsimg_host_spawn_worker(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_spawn_output(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_executable(char *, size_t);

@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include <getopt.h>
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -213,7 +214,11 @@ static fsimg_status_t validate_creation(cli_parse_t *);
 static fsimg_status_t check_image_name(cli_parse_t *);
 static void note_unsupported(cli_parse_t *, const char *);
 static bool strip_suffix(char *, const char *);
+static size_t suffix_layer(const char *, fsimg_layer_kind_t,
+    fsimg_layer_info_t *);
 static size_t layer_suffix_length(const char *, fsimg_layer_kind_t);
+static bool gzip_named(const char *);
+static fsimg_status_t select_compression(cli_parse_t *);
 
 static fsimg_status_t
 syntax(cli_parse_t *parse, const char *message)
@@ -700,11 +705,13 @@ setting_repeats(const cli_parse_t *parse, unsigned index)
 /* How a layer setting's value is written on the command line. */
 typedef enum layer_syntax {
 	LAYER_SECTOR,		/* 512 or 4096 */
-	LAYER_BYTES,		/* a nonzero byte quantity, in a uint64_t */
+	LAYER_BYTES,		/* a nonzero byte quantity, in its field's width */
+	LAYER_COUNT,		/* a nonzero decimal count, in a uint32_t */
 	LAYER_TEXT,		/* text the library validates */
 	LAYER_GUID,		/* RFC 4122 text, not the nil GUID */
-	LAYER_YES_NO,		/* yes or no */
-	LAYER_HEX32		/* 0x and one to eight hex digits */
+	LAYER_YES_NO,		/* yes or no, in a bool */
+	LAYER_HEX32,		/* 0x and one to eight hex digits */
+	LAYER_COMPRESSION	/* zlib or none, as fsimg_dmg_compression_t */
 } layer_syntax_t;
 
 /* The command-line syntax of each layer setting and the field it fills.
@@ -729,7 +736,15 @@ static const struct layer_key {
 	LAYER_KEY("mbr:disk", LAYER_BYTES, mbr_disk_bytes, false),
 	LAYER_KEY("mbr:type", LAYER_TEXT, mbr_type, false),
 	LAYER_KEY("mbr:active", LAYER_YES_NO, mbr_active, false),
-	LAYER_KEY("mbr:id", LAYER_HEX32, mbr_id, false)
+	LAYER_KEY("mbr:id", LAYER_HEX32, mbr_id, false),
+	LAYER_KEY("dmg:compress", LAYER_COMPRESSION, dmg_compress, false),
+	LAYER_KEY("dmg:level", LAYER_COUNT, dmg_level, false),
+	LAYER_KEY("dmg:chunk", LAYER_BYTES, dmg_chunk_bytes, false),
+	LAYER_KEY("dmg:uuid", LAYER_GUID, dmg_uuid, false),
+	LAYER_KEY("vhd:align", LAYER_BYTES, vhd_align_bytes, false),
+	LAYER_KEY("vhd:uuid", LAYER_GUID, vhd_uuid, false),
+	LAYER_KEY("simg:block", LAYER_BYTES, simg_block_bytes, false),
+	LAYER_KEY("simg:crc", LAYER_YES_NO, simg_crc, false)
 #undef LAYER_KEY
 };
 
@@ -770,10 +785,12 @@ parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
 	fsimg_layer_options_t *layers = &parse->options->request.layers;
 	const struct layer_key *entry;
 	fsimg_layer_info_t layer;
+	fsimg_dmg_compression_t compression;
 	unsigned char *field;
 	uint64_t number;
-	uint32_t id;
+	uint32_t id, narrow;
 	size_t length, i;
+	bool yes;
 
 	if (!find_layer(text, (size_t)(qualifier - text), &layer))
 		return (syntax_naming(parse, "unknown setting layer", text));
@@ -808,10 +825,23 @@ parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
 		return (FSIMG_OK);
 	case LAYER_BYTES:
 		if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK ||
-		    number == 0)
+		    number == 0 ||
+		    (entry->bytes == sizeof(narrow) && number > UINT32_MAX))
 			return (syntax_naming(parse,
-			    "setting requires a nonzero byte quantity", text));
-		bcopy(&number, field, sizeof(number));
+			    "setting requires a nonzero byte quantity in range", text));
+		if (entry->bytes == sizeof(narrow)) {
+			narrow = (uint32_t)number;
+			bcopy(&narrow, field, sizeof(narrow));
+		} else
+			bcopy(&number, field, sizeof(number));
+		return (FSIMG_OK);
+	case LAYER_COUNT:
+		if (fsimg_cli_number(value, false, &number, parse->error) != FSIMG_OK ||
+		    number == 0 || number > UINT32_MAX)
+			return (syntax_naming(parse,
+			    "setting requires a positive decimal count", text));
+		narrow = (uint32_t)number;
+		bcopy(&narrow, field, sizeof(narrow));
 		return (FSIMG_OK);
 	case LAYER_TEXT:
 		if (strlen(value) >= entry->bytes)
@@ -827,7 +857,16 @@ parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
 	case LAYER_YES_NO:
 		if (strcmp(value, "yes") != 0 && strcmp(value, "no") != 0)
 			return (syntax_naming(parse, "setting must be yes or no", text));
-		layers->mbr_active = strcmp(value, "yes") == 0;
+		yes = strcmp(value, "yes") == 0;
+		bcopy(&yes, field, sizeof(yes));
+		return (FSIMG_OK);
+	case LAYER_COMPRESSION:
+		if (strcmp(value, "zlib") != 0 && strcmp(value, "none") != 0)
+			return (syntax_naming(parse, "setting must be zlib or none",
+			    text));
+		compression = strcmp(value, "none") == 0 ? FSIMG_DMG_NONE :
+		    FSIMG_DMG_ZLIB;
+		bcopy(&compression, field, sizeof(compression));
 		return (FSIMG_OK);
 	case LAYER_HEX32:
 		if (!parse_hex32(value, &id))
@@ -1082,8 +1121,50 @@ interpret_common(cli_parse_t *parse)
 
 	if (parse->reserved)
 		note_unsupported(parse, "the named filesystem is reserved and not supported");
-	if (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0)
+	if ((parse->mode & MODES_CREATE) == 0 && option_count(parse, 'z') != 0)
 		note_unsupported(parse, "compressed images are not supported");
+	return (FSIMG_OK);
+}
+
+/*
+ * The compression a creation selects: gzip under -z, or under -a whatever
+ * the image name's outermost suffix declares in the layer registry, which
+ * includes the reserved compressions. A container suffix beneath it
+ * selects nothing but must name the stack's container, so the name cannot
+ * promise a container the image lacks. This build writes no compression,
+ * so a selected one is refused as unsupported once the command line is
+ * otherwise valid.
+ */
+static fsimg_status_t
+select_compression(cli_parse_t *parse)
+{
+	const fsimg_worker_request_t *request = &parse->options->request;
+	const fsimg_stack_slot_t *container;
+	const char *image, *base;
+	fsimg_layer_info_t layer;
+	char name[NAME_MAX + 1];
+	size_t length;
+	bool compressed;
+
+	compressed = option_count(parse, 'z') != 0;
+	image = parse->options->image;
+	if (option_count(parse, 'a') != 0 && image != NULL) {
+		base = strrchr(image, '/');
+		base = base == NULL ? image : base + 1;
+		snprintf(name, sizeof(name), "%s", base);
+		length = suffix_layer(name, FSIMG_LAYER_COMPRESSION, &layer);
+		compressed |= length != 0;
+		name[strlen(name) - length] = '\0';
+		length = suffix_layer(name, FSIMG_LAYER_CONTAINER, &layer);
+		container = &request->stack.slots[FSIMG_LAYER_CONTAINER];
+		if (length != 0 && (container->state != FSIMG_SLOT_NAMED ||
+		    strcmp(container->name, layer.name) != 0))
+			return (syntax_naming(parse,
+			    "-a: the image suffix names a container the stack does not",
+			    image));
+	}
+	if (compressed)
+		note_unsupported(parse, "writing compressed images is not supported");
 	return (FSIMG_OK);
 }
 
@@ -1141,16 +1222,16 @@ interpret_create(cli_parse_t *parse)
 		if (strcmp(options->scratch, "-") == 0)
 			return (syntax(parse, "-T - conflicts with an image on standard output"));
 		if (request->kind == FSIMG_JOB_CREATE)
-			note_unsupported(parse, "writing an image to standard output is not supported");
+			request->flags |= FSIMG_JOB_STREAM;
 	}
 	if (option_count(parse, 'z') != 0 && option_count(parse, 'a') != 0 &&
-	    options->image != NULL &&
-	    layer_suffix_length(options->image, FSIMG_LAYER_COMPRESSION) == 0)
+	    options->image != NULL && !gzip_named(options->image))
 		return (syntax(parse, "-z with -a requires a .gz image name"));
+	status = select_compression(parse);
+	if (status != FSIMG_OK)
+		return (status);
 	if (option_count(parse, 'M') != 0)
 		note_unsupported(parse, "-M minimization is not supported");
-	if (request->stack.slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED)
-		note_unsupported(parse, "writing image containers is not supported");
 	status = read_create_operands(parse);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1469,25 +1550,46 @@ strip_suffix(char *name, const char *suffix)
 	return (true);
 }
 
-/* The length of the registered suffix of the given layer kind that ends
- * name, ASCII case-insensitively, leaving a nonempty remainder; zero when
- * none does. The layer registry owns these suffixes.
+/* The layer of the given kind whose registered suffix ends name, ASCII
+ * case-insensitively, leaving a nonempty remainder, and that suffix's
+ * length; zero when none does. The layer registry owns these suffixes.
  */
 static size_t
-layer_suffix_length(const char *name, fsimg_layer_kind_t kind)
+suffix_layer(const char *name, fsimg_layer_kind_t kind,
+    fsimg_layer_info_t *layer)
 {
-	fsimg_layer_info_t layer;
 	size_t cursor, length, suffix_length;
 
 	length = strlen(name);
 	cursor = 0;
-	while (fsimg_layer_next(&cursor, &layer, NULL) == FSIMG_OK) {
-		suffix_length = strlen(layer.suffix);
-		if (layer.kind == kind && suffix_length != 0 && length > suffix_length &&
-		    strcasecmp(name + length - suffix_length, layer.suffix) == 0)
+	while (fsimg_layer_next(&cursor, layer, NULL) == FSIMG_OK) {
+		suffix_length = strlen(layer->suffix);
+		if (layer->kind == kind && suffix_length != 0 &&
+		    length > suffix_length &&
+		    strcasecmp(name + length - suffix_length, layer->suffix) == 0)
 			return (suffix_length);
 	}
 	return (0);
+}
+
+static size_t
+layer_suffix_length(const char *name, fsimg_layer_kind_t kind)
+{
+	fsimg_layer_info_t layer;
+
+	return (suffix_layer(name, kind, &layer));
+}
+
+/* Whether name ends in gzip's suffix, the one -z and -a may agree on: -z
+ * selects gzip, and a reserved compression's suffix names another.
+ */
+static bool
+gzip_named(const char *name)
+{
+	fsimg_layer_info_t layer;
+
+	return (suffix_layer(name, FSIMG_LAYER_COMPRESSION, &layer) != 0 &&
+	    strcmp(layer.name, "gzip") == 0);
 }
 
 /*

@@ -15,8 +15,9 @@
 
 /*
  * The layer registry is the one list of layer names and file suffixes.
- * Containers are read in this build and not written; compression is
- * recognized by name and suffix, and its record carries no operations.
+ * Schemes and containers are read and written; compression is recognized
+ * by name and suffix, and its record carries no operations: gzip is the
+ * one profile, zstd and xz are names reserved for later ones.
  */
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme },
@@ -27,7 +28,9 @@ static const fsimg_layer_t layers[] = {
 	    .container = &fsimg_vhd_container },
 	{ .name = "simg", .suffix = ".simg", .kind = FSIMG_LAYER_CONTAINER,
 	    .container = &fsimg_simg_container },
-	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION }
+	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION },
+	{ .name = "zstd", .suffix = ".zst", .kind = FSIMG_LAYER_COMPRESSION },
+	{ .name = "xz", .suffix = ".xz", .kind = FSIMG_LAYER_COMPRESSION }
 };
 
 #define LAYER_COUNT	(sizeof(layers) / sizeof(layers[0]))
@@ -64,7 +67,15 @@ static const layer_setting_t layer_settings[] = {
 	{ "mbr", "disk", SETTING_FIELD(mbr_disk_bytes), false, false, false },
 	{ "mbr", "type", SETTING_FIELD(mbr_type), true, false, true },
 	{ "mbr", "active", SETTING_FIELD(mbr_active), false, false, true },
-	{ "mbr", "id", SETTING_FIELD(mbr_id_set), false, false, false }
+	{ "mbr", "id", SETTING_FIELD(mbr_id_set), false, false, false },
+	{ "dmg", "compress", SETTING_FIELD(dmg_compress), false, false, false },
+	{ "dmg", "level", SETTING_FIELD(dmg_level), false, false, false },
+	{ "dmg", "chunk", SETTING_FIELD(dmg_chunk_bytes), false, false, false },
+	{ "dmg", "uuid", SETTING_FIELD(dmg_uuid), false, false, false },
+	{ "vhd", "align", SETTING_FIELD(vhd_align_bytes), false, false, false },
+	{ "vhd", "uuid", SETTING_FIELD(vhd_uuid), false, false, false },
+	{ "simg", "block", SETTING_FIELD(simg_block_bytes), false, false, false },
+	{ "simg", "crc", SETTING_FIELD(simg_crc), false, false, false }
 };
 
 #define SETTING_COUNT	(sizeof(layer_settings) / sizeof(layer_settings[0]))
@@ -380,7 +391,8 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
 		    FSIMG_CAP_VERIFY;
 	if (layer->container != NULL) {
-		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
+		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
+		    FSIMG_CAP_VERIFY;
 		snprintf(out->codecs, sizeof(out->codecs), "%s",
 		    layer->container->codecs);
 		if (layer->container->zlib)

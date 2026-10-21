@@ -9,6 +9,7 @@
 #include <strings.h>
 
 #include "cli.h"
+#include "layer.h"
 #include "sandbox.h"
 #include "unicode.h"
 
@@ -49,6 +50,7 @@ static void limits(fsimg_cli_display_t *);
 static void output_counts(fsimg_cli_display_t *);
 static bool progress_milestone(fsimg_cli_display_t *, const unsigned char *);
 static void summary(fsimg_cli_display_t *);
+static const char *layer_noun(fsimg_layer_kind_t);
 static void failure(fsimg_cli_display_t *);
 static fsimg_status_t finish_span(fsimg_cli_display_t *, bool,
     fsimg_worker_text_t *, fsimg_error_t *);
@@ -880,16 +882,24 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 	    (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_VERIFY) != 0 ? ", verify" : "");
 }
 
+/*
+ * The plan record. output_bytes is the image's length, or with a container
+ * the most its encoding can take; padding_bytes the zeros the container's
+ * granularity added to the disk; codec the compression library the image
+ * depends on, so a reproducible build can name it.
+ */
 static void
 plan(fsimg_cli_display_t *display, const unsigned char *raw)
 {
 	static const unsigned offsets[] = { FSIMG_WIRE_PLAN_VOLUME, FSIMG_WIRE_PLAN_PAYLOAD,
 	    FSIMG_WIRE_PLAN_INITIALIZED, FSIMG_WIRE_PLAN_ALLOCATED, FSIMG_WIRE_PLAN_METADATA,
 	    FSIMG_WIRE_PLAN_FREE, FSIMG_WIRE_PLAN_ENTRIES, FSIMG_WIRE_PLAN_LOSSES,
-	    FSIMG_WIRE_PLAN_SCRATCH };
+	    FSIMG_WIRE_PLAN_SCRATCH, FSIMG_WIRE_PLAN_OUTPUT, FSIMG_WIRE_PLAN_PADDING };
 	static const char *const keys[] = { "volume_bytes", "payload_bytes", "initialized_bytes",
 	    "allocated_bytes", "metadata_bytes", "free_bytes", "entries", "metadata_losses",
-	    "scratch_observed_bytes" };
+	    "scratch_observed_bytes", "output_bytes", "padding_bytes" };
+	const char *codec = (const char *)raw + FSIMG_WIRE_PLAN_CODEC;
+	uint64_t padding = fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_PADDING);
 
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"plan\",\"format\":");
@@ -898,6 +908,11 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, ",\"%s\":", keys[i]);
 			uint_value(display, fsimg_wire_get64(raw + offsets[i]));
 		}
+		append(display, ",\"codec\":");
+		if (codec[0] != '\0')
+			string_value(display, codec);
+		else
+			append(display, "null");
 		append(display, ",\"sector_bytes\":%llu,\"cluster_bytes\":%llu,"
 		    "\"future_resource_estimates\":null,\"source_device_open_exclusion\":false}\n",
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SECTOR),
@@ -920,6 +935,17 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 		append(display, "\nEntries:      %llu\nScratch used: ",
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_ENTRIES));
 		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SCRATCH));
+		append(display, "\nImage size:   %s",
+		    display->image[FSIMG_WIRE_IMAGE_CONTAINER] != '\0' ? "at most " : "");
+		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_OUTPUT));
+		if (padding != 0) {
+			append(display, "\nPadding:      ");
+			byte_size(display, padding);
+		}
+		if (codec[0] != '\0') {
+			append(display, "\nCodec:        ");
+			prose(display, codec);
+		}
 		append(display, "\n");
 	}
 }
@@ -1291,6 +1317,23 @@ summary(fsimg_cli_display_t *display)
 	}
 }
 
+/* What a staged layer of each kind is called in a verification verdict. */
+static const char *
+layer_noun(fsimg_layer_kind_t kind)
+{
+	switch (kind) {
+	case FSIMG_LAYER_FILESYSTEM:
+		return ("volume");
+	case FSIMG_LAYER_SCHEME:
+		return ("partition table");
+	case FSIMG_LAYER_CONTAINER:
+		return ("container");
+	case FSIMG_LAYER_COMPRESSION:
+		return ("compressed image");
+	}
+	return ("layer");
+}
+
 static void
 failure(fsimg_cli_display_t *display)
 {
@@ -1298,6 +1341,7 @@ failure(fsimg_cli_display_t *display)
 	    "entries", "output", "work", "depth", "path" };
 	static const char *const states[] = { "absent", "incomplete", "published", "uncertain" };
 	const fsimg_error_t *error = display->failure;
+	const fsimg_layer_t *layer;
 	const char *resource, *state;
 
 	resource = (unsigned)error->resource < sizeof(resources) / sizeof(resources[0]) ?
@@ -1335,6 +1379,11 @@ failure(fsimg_cli_display_t *display)
 		usage(display, true);
 		return;
 	}
+	/* A layer reports its own failures as image operations naming the
+	 * layer in path, printed like any other path.
+	 */
+	layer = error->operation == FSIMG_OP_IMAGE ? fsimg_layer_find(error->path) :
+	    NULL;
 	append(display, "fsimg: ");
 	prose(display, error->message[0] != '\0' ? error->message : fsimg_status_string(error->status));
 	if (error->message_truncated)
@@ -1366,15 +1415,11 @@ failure(fsimg_cli_display_t *display)
 		append(display, "; finalization failed; do not retry blindly\n");
 	} else if (error->output_state == FSIMG_OUTPUT_UNCERTAIN)
 		append(display, "fsimg: output publication or durability is uncertain; inspect the destination before retrying\n");
-	/* A layer reports its own failures as image operations; any other
-	 * verdict is the filesystem's.
-	 */
-	if (display->paths->verification_failed && error->operation == FSIMG_OP_IMAGE &&
-	    display->options->request.stack.slots[FSIMG_LAYER_SCHEME].state ==
-	    FSIMG_SLOT_NAMED)
-		append(display, "fsimg: the staged %s partition table failed verification; "
-		    "nothing was published\n", display->options->request.stack.slots[
-		    FSIMG_LAYER_SCHEME].name);
+	/* Any verdict but a layer's is the filesystem's. */
+	if (display->paths->verification_failed && layer != NULL)
+		append(display, "fsimg: the staged %s %s failed verification; "
+		    "nothing was published\n", layer->name,
+		    layer_noun(layer->kind));
 	else if (display->paths->verification_failed)
 		append(display, "fsimg: the staged %s volume failed verification; nothing was published\n",
 		    fsimg_job_format(&display->options->request));

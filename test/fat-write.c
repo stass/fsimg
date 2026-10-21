@@ -872,16 +872,14 @@ test_retained_staging(void)
 	    .link_at = unsupported_link, .unlink_at = publication_unlink };
 	writer_fixture_t fixture;
 	const fsimg_plan_t *plan;
-	fsimg_plan_info_t info;
 	fsimg_error_t error;
 	char *separator;
 	int directory;
 
 	fixture_open(&fixture, "fat12", NULL, 1);
 	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
-	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
 	CHECK(fsimg_output_write(fixture.writer, fixture.parent, "unsupported",
-	    info.volume_bytes, &hooks, &error) == FSIMG_EUNSUPPORTED);
+	    &hooks, &error) == FSIMG_EUNSUPPORTED);
 	CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
 	separator = strchr(error.path, '/');
 	CHECK(separator != NULL && strcmp(separator, "/image") == 0);

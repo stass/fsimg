@@ -35,6 +35,7 @@ struct fsimg_ctx {
 	unsigned	 meta_fault_point;
 	int		 meta_fault_errno;
 	bool		 in_callback;
+	bool		 no_hole_discovery;	/* Test control: read every hole */
 };
 
 /* One session is embedded in each reader/writer; never reset per API call. */
@@ -90,5 +91,10 @@ uint64_t fsimg_report_loss(fsimg_ctx_t *, const char *, uint32_t);
 void fsimg_error_path(fsimg_error_t *, const char *);
 /* Private fault injection: zero disables; n fails the nth subsequent attempt. */
 void fsimg_test_fail_alloc_after(fsimg_ctx_t *, uint64_t);
+/* Private test control: whether a transcode may skip reading the holes the
+ * host reports in its raw disk (the default) or reads every byte, which
+ * must produce the same output.
+ */
+void fsimg_test_hole_discovery(fsimg_ctx_t *, bool);
 
 #endif

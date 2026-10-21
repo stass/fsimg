@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 728u
+#define FSIMG_JOB_BYTES 800u
 #define FSIMG_WIRE_ERROR_BYTES 592u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These
@@ -105,7 +105,13 @@ typedef enum fsimg_wire_partition_field {
 _Static_assert(FSIMG_WIRE_PARTITION_NAME + FSIMG_WIRE_PARTITION_NAME_BYTES ==
     FSIMG_WIRE_PARTITION_BYTES, "the partition record ends with the name");
 
-#define FSIMG_WIRE_PLAN_BYTES 112u
+/* OUTPUT is the most bytes the image can take: the volume or disk, or the
+ * container's largest encoding of the disk. PADDING is the zero padding
+ * the container's disk granularity added, and CODEC the compression
+ * library the output depends on, empty for none.
+ */
+#define FSIMG_WIRE_PLAN_BYTES 160u
+#define FSIMG_WIRE_PLAN_CODEC_BYTES 32u
 typedef enum fsimg_wire_plan_field {
 	FSIMG_WIRE_PLAN_VOLUME = 0,
 	FSIMG_WIRE_PLAN_PAYLOAD = 8,
@@ -119,8 +125,13 @@ typedef enum fsimg_wire_plan_field {
 	FSIMG_WIRE_PLAN_SECTOR = 72,
 	FSIMG_WIRE_PLAN_CLUSTER = 80,
 	FSIMG_WIRE_PLAN_IO_FLAGS = 88,
-	FSIMG_WIRE_PLAN_FORMAT = 96
+	FSIMG_WIRE_PLAN_FORMAT = 96,
+	FSIMG_WIRE_PLAN_OUTPUT = 112,
+	FSIMG_WIRE_PLAN_PADDING = 120,
+	FSIMG_WIRE_PLAN_CODEC = 128
 } fsimg_wire_plan_field_t;
+_Static_assert(FSIMG_WIRE_PLAN_CODEC + FSIMG_WIRE_PLAN_CODEC_BYTES ==
+    FSIMG_WIRE_PLAN_BYTES, "the plan record ends with the codec");
 
 #define FSIMG_WIRE_ENTRY_BYTES 232u
 typedef enum fsimg_wire_entry_field {

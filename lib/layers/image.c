@@ -101,6 +101,8 @@ static fsimg_status_t read_prefix(fsimg_ctx_t *, fsimg_io_t *,
 static fsimg_status_t claim_volume(fsimg_image_t *, uint64_t, uint64_t,
     fsimg_claim_t *, char [static FORMAT_NAME_BYTES], fsimg_error_t *);
 static void container_input(fsimg_image_t *, fsimg_container_input_t *);
+static fsimg_status_t layer_failed(const fsimg_layer_t *, fsimg_status_t,
+    fsimg_error_t *);
 static fsimg_status_t identify_container(fsimg_image_t *,
     const fsimg_layer_t *, const fsimg_layer_t **, fsimg_error_t *);
 static fsimg_status_t peel_container(fsimg_image_t *, fsimg_error_t *);
@@ -519,6 +521,21 @@ identify_container(fsimg_image_t *image, const fsimg_layer_t *forced,
 }
 
 /*
+ * A layer's own failure names the layer in error.path, so a caller can
+ * attribute it, as cW does, without parsing the message. Failures of the
+ * image object itself, a limit or an I/O error keep their own path.
+ */
+static fsimg_status_t
+layer_failed(const fsimg_layer_t *layer, fsimg_status_t status,
+    fsimg_error_t *error)
+{
+	if (status != FSIMG_OK && layer != NULL &&
+	    error->operation == FSIMG_OP_IMAGE && error->path[0] == '\0')
+		snprintf(error->path, sizeof(error->path), "%s", layer->name);
+	return (status);
+}
+
+/*
  * Peel the container, once, at open. A container slot forced empty, or no
  * claim, leaves the file as the disk; otherwise the claimant validates its
  * tables and yields the disk every later step reads.
@@ -538,11 +555,11 @@ peel_container(fsimg_image_t *image, fsimg_error_t *error)
 	    NULL;
 	status = identify_container(image, forced, &container, error);
 	if (status != FSIMG_OK || container == NULL)
-		return (status);
+		return (layer_failed(forced, status, error));
 	container_input(image, &input);
 	status = container->container->open(&input, &image->opened, error);
 	if (status != FSIMG_OK)
-		return (status);
+		return (layer_failed(container, status, error));
 	image->container = container;
 	image->disk = image->opened.disk;
 	image->disk_bytes = image->opened.disk_bytes;
@@ -648,12 +665,12 @@ detect_scheme(fsimg_image_t *image, fsimg_error_t *error)
 	    NULL;
 	status = identify_disk(image, forced, &scheme, error);
 	if (status != FSIMG_OK)
-		return (status);
+		return (layer_failed(forced, status, error));
 	if (scheme != NULL) {
 		scheme_input(image, &input);
 		status = scheme->scheme->open(&input, &image->table, error);
 		if (status != FSIMG_OK)
-			return (status);
+			return (layer_failed(scheme, status, error));
 	}
 	image->scheme = scheme;
 	image->detected = true;
@@ -1047,7 +1064,7 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		status = image->container->container->verify(&container,
 		    &image->opened, payload, error);
 		if (status != FSIMG_OK)
-			return (status);
+			return (layer_failed(image->container, status, error));
 		snprintf(out->container, sizeof(out->container), "%s",
 		    image->container->name);
 	}
@@ -1058,7 +1075,7 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		scheme_input(image, &input);
 		status = image->scheme->scheme->verify(&input, &image->table, error);
 		if (status != FSIMG_OK)
-			return (status);
+			return (layer_failed(image->scheme, status, error));
 		snprintf(out->scheme, sizeof(out->scheme), "%s", image->scheme->name);
 		for (uint32_t i = 0; i < image->table.count; i++) {
 			if (image->table.records[i].used)

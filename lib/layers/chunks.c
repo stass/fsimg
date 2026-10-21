@@ -65,6 +65,7 @@ enum {
 struct fsimg_chunk_index {
 	fsimg_session_t	*session;
 	const char	*owner;		/* Names the container in messages */
+	const char	*layer;		/* The container's registry name */
 	fsimg_stream_t	*appended;	/* Records as appended, until sealed */
 	fsimg_store_t	*records;	/* Sealed records in disk order */
 	uint64_t	 disk_bytes;
@@ -227,7 +228,7 @@ record_compare(const void *left, size_t left_length, const void *right,
 
 fsimg_status_t
 fsimg_chunk_index_new(fsimg_session_t *session, const char *owner,
-    uint64_t disk_bytes, uint64_t data_offset, uint64_t data_bytes,
+    const char *layer, uint64_t disk_bytes, uint64_t data_offset, uint64_t data_bytes,
     fsimg_chunk_index_t **out, fsimg_error_t *error)
 {
 	fsimg_chunk_index_t *index;
@@ -240,6 +241,7 @@ fsimg_chunk_index_new(fsimg_session_t *session, const char *owner,
 	bzero(index, sizeof(*index));
 	index->session = session;
 	index->owner = owner;
+	index->layer = layer;
 	index->disk_bytes = disk_bytes;
 	index->data_offset = data_offset;
 	index->data_bytes = data_bytes;
@@ -826,10 +828,16 @@ disk_resolve(void *argument, uint64_t offset, void *buffer, size_t length,
 			break;
 		default:
 			/* lookup returns only valid records */
-			return (chunk_corrupt(disk->index, error, "has an unknown kind"));
+			status = chunk_corrupt(disk->index, error, "has an unknown kind");
+			break;
 		}
-		if (status != FSIMG_OK)
+		/* A decode failure is the container's, and names it. */
+		if (status != FSIMG_OK) {
+			if (error->operation == FSIMG_OP_IMAGE && error->path[0] == '\0')
+				snprintf(error->path, sizeof(error->path), "%s",
+				    disk->index->layer);
 			return (status);
+		}
 		*transferred += piece;
 	}
 	return (FSIMG_OK);

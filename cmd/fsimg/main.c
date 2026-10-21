@@ -132,9 +132,18 @@ main(int argc, char **argv)
 		if (status == FSIMG_OK)
 			status = fsimg_worker_run(executable, &options.request,
 			    fsimg_cli_event, &display, STDOUT_FILENO, &interrupted, &result, &error);
+		/* The raw intermediate is spent once its worker exits; closing
+		 * it frees its blocks before verification and publication.
+		 */
+		if (options.request.raw_fd != -1) {
+			close(options.request.raw_fd);
+			options.request.raw_fd = -1;
+		}
 		if (status == FSIMG_OK && options.verify_staged)
 			status = verify_staged(executable, &options, &paths, &display, &error);
-		if (status == FSIMG_OK && options.request.kind == FSIMG_JOB_CREATE)
+		/* A stream has no publication; its bytes are already delivered. */
+		if (status == FSIMG_OK && options.request.kind == FSIMG_JOB_CREATE &&
+		    (options.request.flags & FSIMG_JOB_STREAM) == 0)
 			status = fsimg_cli_publish(&options, &paths, &result, &interrupted, &error);
 		status = fsimg_cli_cleanup(&options, &paths, status, &error);
 	}

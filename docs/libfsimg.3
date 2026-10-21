@@ -172,7 +172,22 @@ writes to an
 that
 .Fn fsimg_sink_init
 makes empty for its kind, with every descriptor -1: a new file published
-beneath a parent directory, or a positional I/O object.
+beneath a parent directory, a positional I/O object, or a stream descriptor
+written in order.
+A stack naming a container, such as
+.Ql fat32/gpt/dmg ,
+or a stream sink needs the sink's raw_fd: an exclusively created, empty,
+unlinked read/write regular file the writer emits the raw disk into before
+one sequential transcode writes the container, or copies the disk, to the
+sink; it is adopted and closed on every outcome.
+The layer options add the DMG compression, level, chunk size and segment
+ID, the VHD alignment and unique ID, and the sparse image block size and
+CRC32 chunk; the plan adds the output bound, the container padding and the
+zlib version the output depends on.
+A stream has no publication: a failure after its first byte reports
+FSIMG_OUTPUT_INCOMPLETE.
+A failure of a layer, on open, verification or a container read, is
+FSIMG_OP_IMAGE with the layer's name in error.path.
 .Fn fsimg_image_wrap
 puts a raw volume into a scheme,
 .Fn fsimg_image_unwrap

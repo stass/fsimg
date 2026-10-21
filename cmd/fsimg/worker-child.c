@@ -26,6 +26,7 @@ typedef enum worker_capability_slot {
 	CHILD_INPUT_CAP,
 	CHILD_OUTPUT_CAP,
 	CHILD_SCRATCH_CAP,
+	CHILD_RAW_CAP,
 	CHILD_CAP_COUNT
 } worker_capability_slot_t;
 
@@ -84,6 +85,7 @@ static fsimg_status_t report_unselected(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t send_plan(const fsimg_plan_info_t *, fsimg_error_t *);
 static fsimg_status_t send_entry(const fsimg_entry_t *, fsimg_error_t *);
 static fsimg_status_t read_job(worker_child_t *, fsimg_error_t *);
+static int take_raw(worker_child_t *);
 static fsimg_status_t create_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t list_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t cat_job(worker_child_t *, fsimg_error_t *);
@@ -156,7 +158,9 @@ child_loss(void *argument, const char *path, uint32_t fields)
 /* Each job kind has one shape of filesystem authority: reads have an
  * input, creation has roots, and creation and extraction write into their
  * output directory, which is staging for one and the destination for the
- * other. Scratch is optional for every kind.
+ * other. A creation to a stream writes the data channel instead of
+ * staging; it, and a creation with a container, also holds the raw
+ * intermediate. Scratch is optional for every kind.
  */
 static fsimg_status_t
 prepare_capabilities(worker_child_t *child, unsigned capabilities,
@@ -164,11 +168,17 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 {
 	fsimg_job_kind_t kind = child->request.kind;
 	unsigned expected;
-	bool output;
+	bool output, stream;
 
+	stream = kind == FSIMG_JOB_CREATE &&
+	    (child->request.flags & FSIMG_JOB_STREAM) != 0;
 	expected = fsimg_job_has_roots(kind) ? FSIMG_JOB_CAP_ROOTS : FSIMG_JOB_CAP_INPUT;
-	if (kind == FSIMG_JOB_CREATE || kind == FSIMG_JOB_EXTRACT)
+	if ((kind == FSIMG_JOB_CREATE && !stream) || kind == FSIMG_JOB_EXTRACT)
 		expected |= FSIMG_JOB_CAP_OUTPUT;
+	if (kind == FSIMG_JOB_CREATE && (stream ||
+	    child->request.stack.slots[FSIMG_LAYER_CONTAINER].state ==
+	    FSIMG_SLOT_NAMED))
+		expected |= FSIMG_JOB_CAP_RAW;
 	if ((capabilities & ~FSIMG_JOB_CAP_SCRATCH) != expected)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "worker job has excess or missing filesystem authority"));
@@ -181,18 +191,21 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 		    FSIMG_CHILD_SCRATCH : -1,
 		.roots = child->request.root_count != 0 ? FSIMG_CHILD_ROOTS : -1,
 		.root_count = child->request.root_count,
+		.raw = (capabilities & FSIMG_JOB_CAP_RAW) != 0 ? FSIMG_CHILD_RAW : -1,
 		.job = FSIMG_CHILD_JOB, .control = FSIMG_CHILD_CONTROL,
-		.data = kind == FSIMG_JOB_CAT ? FSIMG_CHILD_DATA : -1,
+		.data = kind == FSIMG_JOB_CAT || stream ? FSIMG_CHILD_DATA : -1,
 		.cancel = FSIMG_CHILD_CANCEL
 	};
 	child->raw_caps[CHILD_INPUT_CAP] = caps->input;
 	child->raw_caps[CHILD_OUTPUT_CAP] = output ? FSIMG_CHILD_OUTPUT : -1;
 	child->raw_caps[CHILD_SCRATCH_CAP] = caps->scratch;
+	child->raw_caps[CHILD_RAW_CAP] = caps->raw;
 	{
 		static const int numbers[CHILD_CAP_COUNT] = {
 			[CHILD_INPUT_CAP] = FSIMG_CHILD_INPUT,
 			[CHILD_OUTPUT_CAP] = FSIMG_CHILD_OUTPUT,
-			[CHILD_SCRATCH_CAP] = FSIMG_CHILD_SCRATCH
+			[CHILD_SCRATCH_CAP] = FSIMG_CHILD_SCRATCH,
+			[CHILD_RAW_CAP] = FSIMG_CHILD_RAW
 		};
 
 		for (unsigned i = 0; i < CHILD_CAP_COUNT; i++) {
@@ -501,6 +514,10 @@ send_plan(const fsimg_plan_info_t *info, fsimg_error_t *error)
 	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_CLUSTER, info->allocation_unit_bytes);
 	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_IO_FLAGS, info->required_io_flags);
 	bcopy(info->format, raw + FSIMG_WIRE_PLAN_FORMAT, strlen(info->format));
+	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_OUTPUT, info->output_bytes);
+	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_PADDING, info->padding_bytes);
+	bcopy(info->codec_version, raw + FSIMG_WIRE_PLAN_CODEC,
+	    strnlen(info->codec_version, FSIMG_WIRE_PLAN_CODEC_BYTES - 1));
 	return (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PLAN, raw,
 	    sizeof(raw), error));
 }
@@ -905,11 +922,23 @@ add_synthesized_parents(worker_child_t *child, const char *path,
 	return (status);
 }
 
+/* Hand the raw intermediate, or -1 when the job has none, to its user. */
+static int
+take_raw(worker_child_t *child)
+{
+	int fd = child->raw_caps[CHILD_RAW_CAP];
+
+	child->raw_caps[CHILD_RAW_CAP] = -1;
+	return (fd);
+}
+
 /*
- * Plan the image and report it: for a partitioned disk the IMAGE record and
- * the one PARTITION record, the volume's place on the disk, then the PLAN;
- * for a bare volume the PLAN alone. A create job then emits the whole disk
- * into the staged file.
+ * Plan the image and report it: for a partitioned disk or a container the
+ * IMAGE record, for a partitioned disk the one PARTITION record, the
+ * volume's place on it, then the PLAN; for a bare volume the PLAN alone. A
+ * create job then writes the image: into the staged file, or under
+ * FSIMG_JOB_STREAM to the data channel, through the raw intermediate when
+ * the coordinator handed one over.
  */
 static fsimg_status_t
 create_job(worker_child_t *child, fsimg_error_t *error)
@@ -918,6 +947,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	fsimg_plan_info_t info;
 	unsigned char raw[FSIMG_WIRE_PARTITION_BYTES];
 	char stack[FSIMG_WIRE_IMAGE_STACK_BYTES];
+	fsimg_sink_t sink;
 	fsimg_io_t *output;
 	fsimg_status_t status;
 	int fd, saved;
@@ -931,8 +961,8 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	    &child->writer, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (child->request.kind == FSIMG_JOB_CREATE) {
-		if (fsimg_host_file(FSIMG_CHILD_OUTPUT, &child->writer->output_root) == -1)
+	if (child->output_root != -1) {
+		if (fsimg_host_file(child->output_root, &child->writer->output_root) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_SOURCE, "prepared output identity query failed"));
 		child->writer->output_root_known = true;
@@ -946,21 +976,35 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	status = fsimg_plan_get_info(plan, &info, error);
 	if (status != FSIMG_OK)
 		return (status);
-	child->result.image_bytes = info.image.disk_bytes;
 	child->result.entries = info.entries;
 	child->result.logical_bytes = info.payload_bytes;
-	if (info.image.scheme[0] != '\0') {
+	if (info.image.scheme[0] != '\0' || info.image.container[0] != '\0') {
 		status = send_image(&info.image, NULL, NULL, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (info.image.scheme[0] != '\0') {
 		fsimg_wire_partition_encode(raw, &info.partition);
-		if (status == FSIMG_OK)
-			status = fsimg_frame_write(FSIMG_CHILD_CONTROL,
-			    FSIMG_FRAME_PARTITION, raw, sizeof(raw), error);
+		status = fsimg_frame_write(FSIMG_CHILD_CONTROL,
+		    FSIMG_FRAME_PARTITION, raw, sizeof(raw), error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
 	status = send_plan(&info, error);
 	if (status != FSIMG_OK || child->request.kind == FSIMG_JOB_PLAN)
 		return (status);
+	/* The raw intermediate stays in raw_caps, which the worker's
+	 * cleanup closes, until fsimg_writer_output takes it over.
+	 */
+	if ((child->request.flags & FSIMG_JOB_STREAM) != 0) {
+		/* The coordinator counts what reaches stdout; DONE reports
+		 * no staged image.
+		 */
+		fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
+		sink.stream_fd = FSIMG_CHILD_DATA;
+		sink.raw_fd = take_raw(child);
+		return (fsimg_writer_output(child->writer, &sink, error));
+	}
 	status = fsimg_fd_reserve(child->ctx, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -975,7 +1019,16 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	status = fsimg_io_adopt_empty_output(child->ctx, fd, &output, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_writer_emit(child->writer, output, error);
+	/* The staged file ends at the image's length, which a container
+	 * knows only once it has encoded the disk.
+	 */
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+	sink.raw_fd = take_raw(child);
+	status = fsimg_writer_output(child->writer, &sink, error);
+	if (status == FSIMG_OK)
+		status = fsimg_io_get_size(output, &child->result.image_bytes,
+		    error);
 	if (status != FSIMG_OK) {
 		fsimg_io_free(output);
 		return (status);

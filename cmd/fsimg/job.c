@@ -25,8 +25,12 @@
  * MBR disk lengths and the MBR identifier as eight bytes each, one byte
  * of MBR flags (identifier set, partition active) and seven zero bytes,
  * the disk and partition GUIDs in 16 bytes each, and the GPT type in 40,
- * the GPT name in 112 and the MBR type in 16, NUL-terminated. The GPT
- * sector size travels with the selection, since reading uses it too.
+ * the GPT name in 112 and the MBR type in 16, NUL-terminated; then the
+ * container settings: the DMG segment ID and VHD unique identifier in 16
+ * bytes each, the DMG chunk, VHD alignment, simg block and DMG level as
+ * eight bytes each, and one byte of container flags (DMG raw chunks, simg
+ * CRC32) with seven zero bytes. The GPT sector size travels with the
+ * selection, since reading uses it too.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
  *
@@ -73,12 +77,22 @@ typedef enum job_string_field {
 	JOB_GPT_NAME_BYTES = 112,
 	JOB_MBR_TYPE_OFFSET = 712,
 	JOB_MBR_TYPE_BYTES = 16,
-	JOB_RESERVED_OFFSET = 728
+	JOB_DMG_UUID_OFFSET = 728,
+	JOB_VHD_UUID_OFFSET = 744,
+	JOB_DMG_CHUNK_OFFSET = 760,
+	JOB_VHD_ALIGN_OFFSET = 768,
+	JOB_SIMG_BLOCK_OFFSET = 776,
+	JOB_DMG_LEVEL_OFFSET = 784,
+	JOB_CONTAINER_FLAGS = 792,
+	JOB_RESERVED_OFFSET = 800
 } job_string_field_t;
 
 /* MBR flag bits at JOB_MBR_FLAGS. */
 #define JOB_MBR_ID_SET	0x01u
 #define JOB_MBR_ACTIVE	0x02u
+/* Container flag bits at JOB_CONTAINER_FLAGS. */
+#define JOB_DMG_RAW	0x01u
+#define JOB_SIMG_CRC	0x02u
 _Static_assert(JOB_FORMAT_OFFSET + JOB_FORMAT_BYTES == JOB_LABEL_OFFSET &&
     JOB_LABEL_PRESENT < JOB_UUID_OFFSET, "the string fields do not overlap");
 _Static_assert(sizeof(((fsimg_stack_slot_t *)0)->name) == JOB_FORMAT_BYTES &&
@@ -93,23 +107,32 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_GUID_OFFSET + 16 == JOB_GPT_TYPE_OFFSET &&
     JOB_GPT_TYPE_OFFSET + JOB_GPT_TYPE_BYTES == JOB_GPT_NAME_OFFSET &&
     JOB_GPT_NAME_OFFSET + JOB_GPT_NAME_BYTES == JOB_MBR_TYPE_OFFSET &&
-    JOB_MBR_TYPE_OFFSET + JOB_MBR_TYPE_BYTES == JOB_RESERVED_OFFSET &&
+    JOB_MBR_TYPE_OFFSET + JOB_MBR_TYPE_BYTES == JOB_DMG_UUID_OFFSET &&
+    JOB_DMG_UUID_OFFSET + 16 == JOB_VHD_UUID_OFFSET &&
+    JOB_VHD_UUID_OFFSET + 16 == JOB_DMG_CHUNK_OFFSET &&
+    JOB_DMG_CHUNK_OFFSET + 8 == JOB_VHD_ALIGN_OFFSET &&
+    JOB_VHD_ALIGN_OFFSET + 8 == JOB_SIMG_BLOCK_OFFSET &&
+    JOB_SIMG_BLOCK_OFFSET + 8 == JOB_DMG_LEVEL_OFFSET &&
+    JOB_DMG_LEVEL_OFFSET + 8 == JOB_CONTAINER_FLAGS &&
+    JOB_CONTAINER_FLAGS + 8 == JOB_RESERVED_OFFSET &&
     JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the layer fields do not overlap");
 _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     JOB_GPT_TYPE_BYTES &&
     sizeof(((fsimg_layer_options_t *)0)->gpt_name) == JOB_GPT_NAME_BYTES &&
     sizeof(((fsimg_layer_options_t *)0)->mbr_type) == JOB_MBR_TYPE_BYTES &&
     sizeof(((fsimg_layer_options_t *)0)->gpt_guid) == 16 &&
-    sizeof(((fsimg_layer_options_t *)0)->gpt_disk_guid) == 16,
+    sizeof(((fsimg_layer_options_t *)0)->gpt_disk_guid) == 16 &&
+    sizeof(((fsimg_layer_options_t *)0)->dmg_uuid) == 16 &&
+    sizeof(((fsimg_layer_options_t *)0)->vhd_uuid) == 16,
     "the request holds each layer field");
 /* encode_layers and decode_layers carry every member of the layout below,
- * which ends with mbr_active at 229 and reserved at 232. A new layer
- * setting moves reserved or grows the record and stops the build until
- * they carry it and this layout is updated.
+ * which ends with simg_crc at 284 and reserved at 288. A new layer setting
+ * moves reserved or grows the record and stops the build until they carry
+ * it and this layout is updated.
  */
-_Static_assert(offsetof(fsimg_layer_options_t, mbr_active) == 229 &&
-    offsetof(fsimg_layer_options_t, reserved) == 232 &&
-    sizeof(fsimg_layer_options_t) == 264,
+_Static_assert(offsetof(fsimg_layer_options_t, simg_crc) == 284 &&
+    offsetof(fsimg_layer_options_t, reserved) == 288 &&
+    sizeof(fsimg_layer_options_t) == 320,
     "every layer setting travels in the job record");
 
 /* Where each stack slot's name travels: the filesystem's in the format
@@ -176,15 +199,26 @@ encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
 	    strlen(layers->gpt_name));
 	bcopy(layers->mbr_type, raw + JOB_MBR_TYPE_OFFSET,
 	    strlen(layers->mbr_type));
+	bcopy(layers->dmg_uuid, raw + JOB_DMG_UUID_OFFSET, 16);
+	bcopy(layers->vhd_uuid, raw + JOB_VHD_UUID_OFFSET, 16);
+	fsimg_wire_put64(raw + JOB_DMG_CHUNK_OFFSET, layers->dmg_chunk_bytes);
+	fsimg_wire_put64(raw + JOB_VHD_ALIGN_OFFSET, layers->vhd_align_bytes);
+	fsimg_wire_put64(raw + JOB_SIMG_BLOCK_OFFSET, layers->simg_block_bytes);
+	fsimg_wire_put64(raw + JOB_DMG_LEVEL_OFFSET, layers->dmg_level);
+	raw[JOB_CONTAINER_FLAGS] = (unsigned char)((layers->dmg_compress ==
+	    FSIMG_DMG_NONE ? JOB_DMG_RAW : 0) | (layers->simg_crc ?
+	    JOB_SIMG_CRC : 0));
 }
 
 /* One encoding per settings value: known flags, a 32-bit identifier that
- * is zero unless set, zero padding and terminated text. The library
- * validates the values themselves.
+ * is zero unless set, 32-bit container quantities, zero padding and
+ * terminated text. The library validates the values themselves.
  */
 static bool
 layers_valid(const unsigned char *raw)
 {
+	static const unsigned quantities[] = { JOB_DMG_CHUNK_OFFSET,
+	    JOB_VHD_ALIGN_OFFSET, JOB_SIMG_BLOCK_OFFSET, JOB_DMG_LEVEL_OFFSET };
 	uint64_t id;
 
 	id = fsimg_wire_get64(raw + JOB_MBR_ID_OFFSET);
@@ -193,6 +227,16 @@ layers_valid(const unsigned char *raw)
 	    (id != 0 && (raw[JOB_MBR_FLAGS] & JOB_MBR_ID_SET) == 0))
 		return (false);
 	for (unsigned i = JOB_MBR_FLAGS + 1; i < JOB_DISK_GUID_OFFSET; i++) {
+		if (raw[i] != 0)
+			return (false);
+	}
+	for (unsigned i = 0; i < sizeof(quantities) / sizeof(quantities[0]); i++) {
+		if (fsimg_wire_get64(raw + quantities[i]) > UINT32_MAX)
+			return (false);
+	}
+	if (raw[JOB_CONTAINER_FLAGS] > (JOB_DMG_RAW | JOB_SIMG_CRC))
+		return (false);
+	for (unsigned i = JOB_CONTAINER_FLAGS + 1; i < JOB_RESERVED_OFFSET; i++) {
 		if (raw[i] != 0)
 			return (false);
 	}
@@ -214,6 +258,18 @@ decode_layers(const unsigned char *raw, fsimg_layer_options_t *layers)
 	bcopy(raw + JOB_GPT_TYPE_OFFSET, layers->gpt_type, JOB_GPT_TYPE_BYTES);
 	bcopy(raw + JOB_GPT_NAME_OFFSET, layers->gpt_name, JOB_GPT_NAME_BYTES);
 	bcopy(raw + JOB_MBR_TYPE_OFFSET, layers->mbr_type, JOB_MBR_TYPE_BYTES);
+	bcopy(raw + JOB_DMG_UUID_OFFSET, layers->dmg_uuid, 16);
+	bcopy(raw + JOB_VHD_UUID_OFFSET, layers->vhd_uuid, 16);
+	layers->dmg_chunk_bytes =
+	    (uint32_t)fsimg_wire_get64(raw + JOB_DMG_CHUNK_OFFSET);
+	layers->vhd_align_bytes =
+	    (uint32_t)fsimg_wire_get64(raw + JOB_VHD_ALIGN_OFFSET);
+	layers->simg_block_bytes =
+	    (uint32_t)fsimg_wire_get64(raw + JOB_SIMG_BLOCK_OFFSET);
+	layers->dmg_level = (uint32_t)fsimg_wire_get64(raw + JOB_DMG_LEVEL_OFFSET);
+	layers->dmg_compress = (raw[JOB_CONTAINER_FLAGS] & JOB_DMG_RAW) != 0 ?
+	    FSIMG_DMG_NONE : FSIMG_DMG_ZLIB;
+	layers->simg_crc = (raw[JOB_CONTAINER_FLAGS] & JOB_SIMG_CRC) != 0;
 }
 
 static fsimg_status_t
@@ -232,7 +288,7 @@ fsimg_worker_request_init(fsimg_worker_request_t *request)
 	fsimg_layer_options_init(&request->layers);
 	request->selection = "/";
 	request->codepage = 437;
-	request->input_fd = request->output_fd = -1;
+	request->input_fd = request->output_fd = request->raw_fd = -1;
 	request->scratch_fd = -1;
 }
 
@@ -340,7 +396,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	capabilities = (request->input_fd != -1 ? FSIMG_JOB_CAP_INPUT : 0) |
 	    (request->output_fd != -1 ? FSIMG_JOB_CAP_OUTPUT : 0) |
 	    (request->scratch_fd != -1 ? FSIMG_JOB_CAP_SCRATCH : 0) |
-	    (request->root_count != 0 ? FSIMG_JOB_CAP_ROOTS : 0);
+	    (request->root_count != 0 ? FSIMG_JOB_CAP_ROOTS : 0) |
+	    (request->raw_fd != -1 ? FSIMG_JOB_CAP_RAW : 0);
 	put_field(raw, JOB_CAPABILITIES, capabilities);
 	put_field(raw, JOB_SELECTION, paths_length);
 	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
@@ -382,9 +439,10 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_KIND) > FSIMG_JOB_PLAN ||
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
-	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED)) != 0 ||
+	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STREAM)) != 0 ||
 	    get_field(raw, JOB_CAPABILITIES) > (FSIMG_JOB_CAP_INPUT |
-	    FSIMG_JOB_CAP_OUTPUT | FSIMG_JOB_CAP_SCRATCH | FSIMG_JOB_CAP_ROOTS) ||
+	    FSIMG_JOB_CAP_OUTPUT | FSIMG_JOB_CAP_SCRATCH | FSIMG_JOB_CAP_ROOTS |
+	    FSIMG_JOB_CAP_RAW) ||
 	    !string_field_valid(raw + JOB_FORMAT_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_LABEL_OFFSET, JOB_LABEL_BYTES) ||
 	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||

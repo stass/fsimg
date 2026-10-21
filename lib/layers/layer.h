@@ -209,7 +209,8 @@ typedef struct fsimg_chunk_index fsimg_chunk_index_t;
 /*
  * new makes an empty index for a disk of disk_bytes whose encoded bytes
  * lie in the file range [data_offset, data_offset + data_bytes); owner
- * names the container in messages and must outlive the index. Records are
+ * names the container in messages and layer is its registry name, which
+ * a read's failure carries in error.path; both must outlive the index. Records are
  * charged to the session's scratch. append accepts records in any order
  * and fails with FSIMG_ECORRUPT for a record outside the disk or the data
  * or whose lengths disagree with its kind. seal sorts the records and
@@ -218,7 +219,8 @@ typedef struct fsimg_chunk_index fsimg_chunk_index_t;
  * record containing a disk offset. On any failure discard the index.
  */
 fsimg_status_t fsimg_chunk_index_new(fsimg_session_t *, const char *,
-    uint64_t, uint64_t, uint64_t, fsimg_chunk_index_t **, fsimg_error_t *);
+    const char *, uint64_t, uint64_t, uint64_t, fsimg_chunk_index_t **,
+    fsimg_error_t *);
 fsimg_status_t fsimg_chunk_index_append(fsimg_chunk_index_t *,
     const fsimg_chunk_t *, fsimg_error_t *);
 fsimg_status_t fsimg_chunk_index_seal(fsimg_chunk_index_t *, fsimg_error_t *);
@@ -299,6 +301,22 @@ fsimg_layer_be64(const unsigned char *p)
 	return ((uint64_t)fsimg_layer_be32(p) << 32 | fsimg_layer_be32(p + 4));
 }
 
+static inline void
+fsimg_layer_put_be32(unsigned char *p, uint32_t value)
+{
+	p[0] = (unsigned char)(value >> 24);
+	p[1] = (unsigned char)(value >> 16);
+	p[2] = (unsigned char)(value >> 8);
+	p[3] = (unsigned char)value;
+}
+
+static inline void
+fsimg_layer_put_be64(unsigned char *p, uint64_t value)
+{
+	fsimg_layer_put_be32(p, (uint32_t)(value >> 32));
+	fsimg_layer_put_be32(p + 4, (uint32_t)value);
+}
+
 /* What a container reads: the file, its length, and the session that
  * charges its reads and decoding.
  */
@@ -323,6 +341,78 @@ typedef struct fsimg_container {
 } fsimg_container_t;
 
 /*
+ * A container's write settings, resolved once by the disk plan from the
+ * layer options. guid is the DMG segment ID or VHD unique identifier in
+ * textual byte order; timestamp the VHD creation time in Unix seconds, the
+ * epoch under FSIMG_WRITE_REPRODUCIBLE and the host clock otherwise.
+ * granularity is the unit the disk length is rounded up to, and
+ * chunk_bytes the transcode's inspection unit: a DMG chunk, or
+ * FSIMG_TRANSCODE_CHUNK_BYTES, which a plan without a container also uses.
+ * level is the DMG zlib level, zero for raw chunks; block_bytes the simg
+ * block size; crc whether simg ends with a CRC32 chunk.
+ */
+#define FSIMG_TRANSCODE_CHUNK_BYTES	(UINT32_C(1) << 20)
+
+typedef struct fsimg_container_settings {
+	unsigned char	 guid[16];
+	int64_t		 timestamp;
+	uint64_t	 granularity;
+	uint32_t	 chunk_bytes;
+	uint32_t	 block_bytes;
+	uint32_t	 level;
+	bool		 crc;
+} fsimg_container_settings_t;
+
+/*
+ * The sequential sink at the end of a transcode (lib/layers/transcode.c):
+ * the staged output written at increasing offsets, a caller's object, or a
+ * stream descriptor. write appends bytes and zero appends a run of zeros,
+ * which a proven-zero output keeps as a hole; neither ever seeks back.
+ * Every byte counts against the output's planned bound, and crossing it is
+ * an internal error, so an encoder that misjudged its bound cannot write
+ * past what the plan charged. written is the output's length so far.
+ */
+typedef struct fsimg_seq_sink fsimg_seq_sink_t;
+
+fsimg_status_t fsimg_seq_write(fsimg_seq_sink_t *, const void *, size_t,
+    fsimg_error_t *);
+fsimg_status_t fsimg_seq_zero(fsimg_seq_sink_t *, uint64_t, fsimg_error_t *);
+uint64_t fsimg_seq_written(const fsimg_seq_sink_t *);
+
+/* What a container encoder writes: a disk of disk_bytes, encoded with the
+ * resolved settings into sink, charging scratch and work to session.
+ */
+typedef struct fsimg_encode {
+	fsimg_ctx_t	*ctx;
+	fsimg_session_t	*session;
+	fsimg_seq_sink_t *sink;
+	const fsimg_container_settings_t *settings;
+	uint64_t	 disk_bytes;
+} fsimg_encode_t;
+
+/*
+ * A container encoder, driven by the transcode. open makes the encoder's
+ * state, which may not keep encode itself. The transcode then makes passes
+ * over the disk in order; in each it hands every chunk_bytes unit (the
+ * last one shorter) to chunk, bytes NULL for a unit of zeros, and calls
+ * finish at the pass's end. Only the last pass writes its chunks; an
+ * earlier pass, such as simg's count of its chunks, inspects them, and its
+ * finish may write what that inspection completes, such as simg's header,
+ * before the next pass begins. close releases the state
+ * on every outcome, including whatever a failed open left in it; a state
+ * still NULL is never closed. The zero decision depends only on the disk's
+ * bytes, so the output does too.
+ */
+typedef struct fsimg_encoder_ops {
+	unsigned	 passes;
+	fsimg_status_t	(*open)(const fsimg_encode_t *, void **, fsimg_error_t *);
+	fsimg_status_t	(*chunk)(void *, unsigned, const unsigned char *, size_t,
+			    fsimg_error_t *);
+	fsimg_status_t	(*finish)(void *, unsigned, fsimg_error_t *);
+	void		(*close)(void *);
+} fsimg_encoder_ops_t;
+
+/*
  * A container format.
  *
  * probe is a pure function of at most probe_bytes of the file's prefix,
@@ -338,6 +428,13 @@ typedef struct fsimg_container {
  * checksum, so read-through verification has payload scope. codecs names
  * the chunk encodings it reads, for the capability record; zlib is true
  * when it depends on zlib.
+ *
+ * The write side. plan validates the container's layer settings and
+ * resolves them, its identifier under the identifier rule, given the
+ * FSIMG_WRITE_* mode and the epoch; a failure is FSIMG_EINVAL naming the
+ * key. bound states the most bytes the encoding of a disk of the given
+ * length can take, and refuses with FSIMG_EUNSUPPORTED, naming the field,
+ * a disk the format cannot describe. encoder writes the container.
  */
 #define FSIMG_CONTAINER_TAIL_BYTES	512u
 typedef struct fsimg_container_ops {
@@ -349,10 +446,20 @@ typedef struct fsimg_container_ops {
 			    fsimg_container_t *, fsimg_error_t *);
 	fsimg_status_t	(*verify)(const fsimg_container_input_t *,
 			    const fsimg_container_t *, bool, fsimg_error_t *);
+	fsimg_status_t	(*plan)(const fsimg_layer_options_t *, uint32_t, int64_t,
+			    fsimg_container_settings_t *, fsimg_error_t *);
+	fsimg_status_t	(*bound)(const fsimg_container_settings_t *, uint64_t,
+			    uint64_t *, fsimg_error_t *);
+	const fsimg_encoder_ops_t *encoder;
 	const char	*codecs;
 	bool		 payload_checks;
 	bool		 zlib;
 } fsimg_container_ops_t;
+
+/* The CRC32 of crc's bytes followed by length zero bytes, computed in time
+ * logarithmic in length rather than by reading the zeros.
+ */
+unsigned long fsimg_crc32_zeros(unsigned long, uint64_t);
 
 /* A registered layer. Every layer name the stack grammar accepts outside
  * the filesystem slot is one record; a scheme has scheme operations and a
@@ -453,13 +560,20 @@ bool fsimg_guid_parse(const char *, unsigned char *);
  * each at the first 1 MiB boundary after the previous one, and sets the
  * disk length. Identifiers left unset are derived from the epoch under
  * FSIMG_WRITE_REPRODUCIBLE and are otherwise FSIMG_EINVAL naming the key.
- * Without a scheme the plan has no records and the volume is the disk.
+ * Without a scheme the plan has no records and the volume starts the
+ * disk. A container in the stack has its settings resolved by init, and
+ * place rounds the disk up to its granularity, puts the scheme's trailing
+ * tables at the end of the rounded disk, and states the output's bound.
  * Records are charged to the context; free releases them.
  */
 typedef struct fsimg_disk_plan {
 	const fsimg_layer_t *scheme;
+	const fsimg_layer_t *container;
 	fsimg_scheme_table_t table;
+	fsimg_container_settings_t container_settings;
 	uint64_t	 disk_bytes;	/* A fixed length until placed, else 0 */
+	uint64_t	 padding_bytes;	/* What the container's granularity added */
+	uint64_t	 output_bytes;	/* The disk, or the bound of its encoding */
 	int64_t		 epoch;
 	uint32_t	 flags;		/* FSIMG_WRITE_* mode */
 	bool		 fixed;		/* gpt:disk or mbr:disk set the length */
@@ -498,8 +612,8 @@ fsimg_status_t fsimg_disk_plan_fit(const fsimg_disk_plan_t *, uint32_t,
  */
 fsimg_status_t fsimg_disk_plan_place(fsimg_disk_plan_t *, const uint64_t *,
     fsimg_error_t *);
-/* The placed plan as an opened image of it would report its disk and the
- * partition in slot (from 1).
+/* The placed plan as an opened image of it would report its disk, its
+ * container and the partition in slot (from 1).
  */
 void fsimg_disk_plan_report(const fsimg_disk_plan_t *, uint32_t,
     fsimg_image_info_t *, fsimg_partition_info_t *);
@@ -514,6 +628,34 @@ fsimg_status_t fsimg_disk_plan_emit(const fsimg_disk_plan_t *, uint64_t,
     fsimg_io_t *, fsimg_session_t *, fsimg_volume_emit_t, void *,
     fsimg_error_t *);
 void fsimg_disk_plan_free(fsimg_disk_plan_t *);
+/* Check a placed plan against the output limit: the output's bound, plus
+ * the disk when raw says a raw intermediate holds it while the output is
+ * written from it, as for a container or a stream
+ * (specs/architecture.md#bounded-resources).
+ */
+fsimg_status_t fsimg_disk_plan_budget(fsimg_ctx_t *, const fsimg_disk_plan_t *,
+    bool, fsimg_error_t *);
+
+/*
+ * Write a placed plan's disk, held in the positional object disk, to a sink
+ * in one sequential pass (lib/layers/transcode.c): through the plan's
+ * container encoder, or unchanged without one. A FILE sink stages the
+ * output and publishes it through the output coordinator, an IO sink is
+ * written from offset zero and ends at the output's length, and a STREAM
+ * sink receives the bytes in order. The pass reads the disk in chunks,
+ * may skip reading what the host reports as holes, and polls cancellation
+ * at every chunk. Failure after the first mutation marks the output
+ * incomplete, except that a staged file is removed and so is absent.
+ * written receives the output's length. The caller has checked aliases
+ * and the output budget, and adopted the sink.
+ */
+fsimg_status_t fsimg_disk_output(fsimg_session_t *, fsimg_io_t *,
+    const fsimg_disk_plan_t *, const fsimg_sink_t *, bool, uint64_t *,
+    fsimg_error_t *);
+/* The compression library a plan's output depends on, as "zlib 1.3.1",
+ * or empty when its bytes depend on none.
+ */
+void fsimg_disk_plan_codec(const fsimg_disk_plan_t *, char *, size_t);
 
 /* What the filesystem probes, the one forced by name or all of them, say
  * about the volume at a byte range of an I/O object; format receives the
@@ -522,6 +664,12 @@ void fsimg_disk_plan_free(fsimg_disk_plan_t *);
 fsimg_status_t fsimg_volume_claim(fsimg_ctx_t *, fsimg_io_t *,
     fsimg_session_t *, uint64_t, uint64_t, const char *, fsimg_claim_t *,
     char [static 16], fsimg_error_t *);
+
+/* FSIMG_EINVAL naming the setting ("vhd:align") or partition it concerns
+ * in error.path.
+ */
+fsimg_status_t fsimg_setting_error(fsimg_error_t *, const char *,
+    const char *);
 
 /* Identifier roles of the derivation (specs/design-layers.md#identifiers). */
 typedef enum fsimg_identifier_role {
@@ -536,5 +684,13 @@ typedef enum fsimg_identifier_role {
  */
 void fsimg_identifier_derive(int64_t, fsimg_identifier_role_t, uint8_t,
     unsigned char [static 16]);
+/*
+ * A container identifier under the identifier rule: the setting when given
+ * (not all zero), else under FSIMG_WRITE_REPRODUCIBLE the GUID derived from
+ * the epoch and role, else FSIMG_EINVAL naming key.
+ */
+fsimg_status_t fsimg_container_identifier(const unsigned char *,
+    const char *, fsimg_identifier_role_t, uint32_t, int64_t,
+    unsigned char [static 16], fsimg_error_t *);
 
 #endif

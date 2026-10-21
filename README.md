@@ -59,8 +59,16 @@ typed and named after its filesystem unless `-o gpt:type=`, `gpt:name=`,
 fixed by `gpt:disk=`/`mbr:disk=` and 4096-byte GPT sectors on request.
 Identifiers are random, or under `-R` derived from the epoch. The library
 also wraps a raw volume in a scheme, unwraps a partition back to its raw
-bytes, and composes several volumes into one disk. Writing containers and
-compression are not implemented.
+bytes, and composes several volumes into one disk.
+
+A container in the stack is written too: `fsimg cf disk.dmg -F fat32/gpt/dmg
+-C esp .` writes a UDZO DMG that `hdiutil` verifies and attaches, and
+`fat32/vhd` and `fat32/gpt/simg` write a fixed VHD and an Android sparse
+image. The disk is emitted to a private raw file and encoded in one
+sequential pass, all-zero chunks becoming zero runs; `-o dmg:compress=`,
+`dmg:level=`, `dmg:chunk=`, `vhd:align=`, `simg:block=` and `simg:crc=` tune
+it. `fsimg cf - ...` streams the image to standard output instead, refusing
+a terminal. Writing compression is not implemented.
 
 [System qualification](docs/qualification.md) includes ten-million-file format
 planning, a million-fragment content round trip, sustained fuzzing and combined

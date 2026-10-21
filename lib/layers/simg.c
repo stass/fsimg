@@ -19,11 +19,13 @@
  * them, DONT_CARE nothing (its blocks read as zeros), and CRC32 the CRC of
  * the expanded bytes before it. The chunks are walked from the file once
  * on open, each becoming a chunk record, and once more for verification.
+ * Writing emits RAW and DONT_CARE chunks and an optional CRC32 chunk.
  */
 #define SIMG_MAGIC		UINT32_C(0xed26ff3a)
 #define SIMG_HEADER_BYTES	28u
 #define SIMG_CHUNK_HEADER_BYTES	12u
 #define SIMG_VALUE_BYTES	4u
+#define SIMG_COUNT_PASS		0u	/* The pass that only counts chunks */
 #define CHUNK_RAW		0xcac1u
 #define CHUNK_FILL		0xcac2u
 #define CHUNK_DONT_CARE		0xcac3u
@@ -79,6 +81,20 @@ typedef struct simg_verify {
 	bool		 payload;
 } simg_verify_t;
 
+/* The encoder's state: the chunks the first pass counted and the header
+ * declares, the chunks the second pass emitted, the zero run not yet
+ * emitted, and the CRC32 of the expanded image so far.
+ */
+typedef struct simg_encoder {
+	fsimg_seq_sink_t *sink;
+	const fsimg_container_settings_t *settings;
+	uint64_t	 disk_bytes;
+	uint64_t	 chunks;
+	uint64_t	 emitted;
+	uint64_t	 zero_bytes;
+	uLong		 crc;
+} simg_encoder_t;
+
 static fsimg_status_t simg_corrupt(fsimg_error_t *, const char *);
 static fsimg_status_t simg_probe(const unsigned char *, size_t,
     const unsigned char *, size_t, uint64_t, fsimg_error_t *);
@@ -99,12 +115,38 @@ static fsimg_status_t verify_chunk(void *, const simg_chunk_t *,
     fsimg_error_t *);
 static fsimg_status_t simg_verify(const fsimg_container_input_t *,
     const fsimg_container_t *, bool, fsimg_error_t *);
+static fsimg_status_t simg_plan(const fsimg_layer_options_t *, uint32_t,
+    int64_t, fsimg_container_settings_t *, fsimg_error_t *);
+static fsimg_status_t simg_bound(const fsimg_container_settings_t *,
+    uint64_t, uint64_t *, fsimg_error_t *);
+static fsimg_status_t simg_encode_open(const fsimg_encode_t *, void **,
+    fsimg_error_t *);
+static fsimg_status_t simg_chunk(simg_encoder_t *, bool, uint16_t,
+    uint64_t, uint32_t, fsimg_error_t *);
+static fsimg_status_t simg_header(simg_encoder_t *, fsimg_error_t *);
+static fsimg_status_t simg_zero_run(simg_encoder_t *, bool,
+    fsimg_error_t *);
+static fsimg_status_t simg_encode_chunk(void *, unsigned,
+    const unsigned char *, size_t, fsimg_error_t *);
+static fsimg_status_t simg_encode_finish(void *, unsigned, fsimg_error_t *);
+static void simg_encode_close(void *);
+
+static const fsimg_encoder_ops_t simg_encoder = {
+	.passes = 2,
+	.open = simg_encode_open,
+	.chunk = simg_encode_chunk,
+	.finish = simg_encode_finish,
+	.close = simg_encode_close
+};
 
 const fsimg_container_ops_t fsimg_simg_container = {
 	.probe_bytes = SIMG_HEADER_BYTES,
 	.probe = simg_probe,
 	.open = simg_open,
 	.verify = simg_verify,
+	.plan = simg_plan,
+	.bound = simg_bound,
+	.encoder = &simg_encoder,
 	.codecs = "raw,zero,fill",
 	.payload_checks = true,
 	.zlib = false
@@ -317,7 +359,7 @@ simg_open(const fsimg_container_input_t *input, fsimg_container_t *out,
 	status = read_header(input, &header, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_chunk_index_new(input->session, "sparse image",
+	status = fsimg_chunk_index_new(input->session, "sparse image", "simg",
 	    header.disk_bytes, 0, input->file_bytes, &index, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -341,8 +383,9 @@ simg_open(const fsimg_container_input_t *input, fsimg_container_t *out,
 
 /*
  * Under read-through, each chunk's expanded bytes join a running CRC32,
- * DONT_CARE blocks as zeros, and a CRC32 chunk must hold the CRC of
- * everything before it.
+ * DONT_CARE blocks as zeros, joined arithmetically so their declared
+ * length costs no reads, and a CRC32 chunk must hold the CRC of everything
+ * before it.
  */
 static fsimg_status_t
 verify_chunk(void *argument, const simg_chunk_t *chunk, fsimg_error_t *error)
@@ -358,6 +401,10 @@ verify_chunk(void *argument, const simg_chunk_t *chunk, fsimg_error_t *error)
 		if (verify->crc != chunk->value)
 			return (simg_corrupt(error,
 			    "CRC32 chunk does not match the expanded image"));
+		return (FSIMG_OK);
+	}
+	if (chunk->type == CHUNK_DONT_CARE) {
+		verify->crc = fsimg_crc32_zeros(verify->crc, chunk->length);
 		return (FSIMG_OK);
 	}
 	offset = chunk->disk_offset;
@@ -401,4 +448,203 @@ simg_verify(const fsimg_container_input_t *input,
 	status = walk_chunks(input, &header, verify_chunk, &verify, error);
 	fsimg_dealloc(verify.piece);
 	return (status);
+}
+
+/*
+ * The write side. The disk is rounded up to simg:block and inspected in
+ * FSIMG_TRANSCODE_CHUNK_BYTES units, each a whole number of blocks: a data
+ * unit becomes one RAW chunk, consecutive zero units one DONT_CARE chunk,
+ * and simg:crc appends a CRC32 chunk over the expanded image. The header
+ * states the chunk count, so the first pass counts chunks and ends by
+ * writing the header, and the second emits them; a second pass emitting
+ * another count means the disk changed between the passes.
+ */
+static fsimg_status_t
+simg_plan(const fsimg_layer_options_t *layers, uint32_t flags FSIMG_UNUSED,
+    int64_t epoch FSIMG_UNUSED, fsimg_container_settings_t *settings,
+    fsimg_error_t *error)
+{
+	uint32_t block;
+
+	block = layers->simg_block_bytes == 0 ? 4096 : layers->simg_block_bytes;
+	if ((block & (block - 1)) != 0 || block < 1024 ||
+	    block > FSIMG_TRANSCODE_CHUNK_BYTES)
+		return (fsimg_setting_error(error, "simg:block",
+		    "the block size must be a power of two from 1 KiB to 1 MiB"));
+	settings->granularity = block;
+	settings->block_bytes = block;
+	settings->crc = layers->simg_crc;
+	return (FSIMG_OK);
+}
+
+/*
+ * The most a disk's encoding can take: the header, every unit a chunk
+ * with its header, the disk's bytes and the CRC32 chunk. The header's
+ * 32-bit block count bounds the disk.
+ */
+static fsimg_status_t
+simg_bound(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
+    uint64_t *out, fsimg_error_t *error)
+{
+	uint64_t units;
+
+	if (disk_bytes / settings->block_bytes > UINT32_MAX) {
+		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
+		    "the disk has more blocks than a sparse image's 32-bit "
+		    "total blocks field holds");
+		fsimg_error_path(error, "simg:block");
+		return (FSIMG_EUNSUPPORTED);
+	}
+	/* At most one chunk per unit, the last one partial, and the CRC32. */
+	units = disk_bytes / FSIMG_TRANSCODE_CHUNK_BYTES + 1;
+	if (units + 1 > UINT32_MAX)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_IMAGE, "the disk may need more chunks than a "
+		    "sparse image's 32-bit total chunks field holds"));
+	*out = SIMG_HEADER_BYTES + units * SIMG_CHUNK_HEADER_BYTES +
+	    disk_bytes + (settings->crc ?
+	    SIMG_CHUNK_HEADER_BYTES + SIMG_VALUE_BYTES : 0);
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+simg_encode_open(const fsimg_encode_t *encode, void **state,
+    fsimg_error_t *error)
+{
+	simg_encoder_t *encoder;
+
+	encoder = fsimg_alloc(encode->ctx, sizeof(*encoder), error);
+	if (encoder == NULL)
+		return (error->status);
+	*encoder = (simg_encoder_t){ .sink = encode->sink,
+	    .settings = encode->settings, .disk_bytes = encode->disk_bytes,
+	    .crc = crc32(0, Z_NULL, 0) };
+	*state = encoder;
+	return (FSIMG_OK);
+}
+
+/*
+ * One chunk: counted while counting, else emitted as its header, which
+ * gives type, size in blocks and total size; the caller writes the
+ * payload. Both passes reach every chunk through here, so the count and
+ * the emitted chunks agree unless the disk changed.
+ */
+static fsimg_status_t
+simg_chunk(simg_encoder_t *encoder, bool counting, uint16_t type,
+    uint64_t blocks, uint32_t payload, fsimg_error_t *error)
+{
+	unsigned char header[SIMG_CHUNK_HEADER_BYTES];
+
+	if (counting) {
+		encoder->chunks++;
+		return (FSIMG_OK);
+	}
+	encoder->emitted++;
+	bzero(header, sizeof(header));
+	fsimg_layer_put_le16(header + CHUNK_TYPE, type);
+	fsimg_layer_put_le32(header + CHUNK_BLOCKS, (uint32_t)blocks);
+	fsimg_layer_put_le32(header + CHUNK_TOTAL_SIZE,
+	    SIMG_CHUNK_HEADER_BYTES + payload);
+	return (fsimg_seq_write(encoder->sink, header, sizeof(header), error));
+}
+
+/* The file header, written once the first pass has counted the chunks. */
+static fsimg_status_t
+simg_header(simg_encoder_t *encoder, fsimg_error_t *error)
+{
+	unsigned char header[SIMG_HEADER_BYTES];
+	uint32_t block = encoder->settings->block_bytes;
+
+	bzero(header, sizeof(header));
+	fsimg_layer_put_le32(header + HEADER_MAGIC, SIMG_MAGIC);
+	fsimg_layer_put_le16(header + HEADER_MAJOR, 1);
+	fsimg_layer_put_le16(header + HEADER_MINOR, 0);
+	fsimg_layer_put_le16(header + HEADER_SIZE, SIMG_HEADER_BYTES);
+	fsimg_layer_put_le16(header + HEADER_CHUNK_HEADER_SIZE,
+	    SIMG_CHUNK_HEADER_BYTES);
+	fsimg_layer_put_le32(header + HEADER_BLOCK_SIZE, block);
+	fsimg_layer_put_le32(header + HEADER_TOTAL_BLOCKS,
+	    (uint32_t)(encoder->disk_bytes / block));
+	fsimg_layer_put_le32(header + HEADER_TOTAL_CHUNKS,
+	    (uint32_t)encoder->chunks);
+	return (fsimg_seq_write(encoder->sink, header, sizeof(header), error));
+}
+
+/* Close the pending zero run as one DONT_CARE chunk, folding its zeros
+ * into the CRC once when emitting.
+ */
+static fsimg_status_t
+simg_zero_run(simg_encoder_t *encoder, bool counting, fsimg_error_t *error)
+{
+	uint64_t length = encoder->zero_bytes;
+
+	encoder->zero_bytes = 0;
+	if (length == 0)
+		return (FSIMG_OK);
+	if (!counting)
+		encoder->crc = fsimg_crc32_zeros(encoder->crc, length);
+	return (simg_chunk(encoder, counting, CHUNK_DONT_CARE,
+	    length / encoder->settings->block_bytes, 0, error));
+}
+
+static fsimg_status_t
+simg_encode_chunk(void *state, unsigned pass, const unsigned char *bytes,
+    size_t length, fsimg_error_t *error)
+{
+	simg_encoder_t *encoder = state;
+	fsimg_status_t status;
+	bool counting = pass == SIMG_COUNT_PASS;
+
+	if (bytes == NULL) {
+		encoder->zero_bytes += length;
+		return (FSIMG_OK);
+	}
+	status = simg_zero_run(encoder, counting, error);
+	if (status == FSIMG_OK)
+		status = simg_chunk(encoder, counting, CHUNK_RAW,
+		    length / encoder->settings->block_bytes, (uint32_t)length,
+		    error);
+	if (status != FSIMG_OK || counting)
+		return (status);
+	encoder->crc = crc32(encoder->crc, bytes, (uInt)length);
+	return (fsimg_seq_write(encoder->sink, bytes, length, error));
+}
+
+/*
+ * A pass ends with the pending DONT_CARE run and the CRC32 chunk. The
+ * first then writes the header its count completes; the second checks it
+ * emitted the chunks the header declares.
+ */
+static fsimg_status_t
+simg_encode_finish(void *state, unsigned pass, fsimg_error_t *error)
+{
+	simg_encoder_t *encoder = state;
+	unsigned char value[SIMG_VALUE_BYTES];
+	fsimg_status_t status;
+	bool counting = pass == SIMG_COUNT_PASS;
+
+	status = simg_zero_run(encoder, counting, error);
+	if (status == FSIMG_OK && encoder->settings->crc) {
+		status = simg_chunk(encoder, counting, CHUNK_CRC32, 0,
+		    sizeof(value), error);
+		if (status == FSIMG_OK && !counting) {
+			fsimg_layer_put_le32(value, (uint32_t)encoder->crc);
+			status = fsimg_seq_write(encoder->sink, value,
+			    sizeof(value), error);
+		}
+	}
+	if (status != FSIMG_OK)
+		return (status);
+	if (counting)
+		return (simg_header(encoder, error));
+	if (encoder->emitted != encoder->chunks)
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED,
+		    0, FSIMG_OP_IMAGE, "disk changed while it was encoded"));
+	return (FSIMG_OK);
+}
+
+static void
+simg_encode_close(void *state)
+{
+	fsimg_dealloc(state);
 }

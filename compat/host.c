@@ -77,6 +77,39 @@ fsimg_host_dup(int fd)
 	return (fcntl(fd, F_DUPFD_CLOEXEC, 0));
 }
 
+/*
+ * The first hole the filesystem reports at or after offset, clamped to the
+ * file's first length bytes: [*hole_start, *hole_end), hole_end being the
+ * next data or length. A host or filesystem that cannot report holes, and
+ * any query that fails, reports none (hole_start == length), so a caller
+ * that skips reported holes merely reads more; a hole is zero by
+ * definition, so skipping one never changes what is read. The queries move
+ * the descriptor's file offset, which positional I/O never uses.
+ */
+void
+fsimg_host_next_hole(int fd FSIMG_UNUSED, uint64_t offset FSIMG_UNUSED,
+    uint64_t length, uint64_t *hole_start, uint64_t *hole_end)
+{
+#if defined(SEEK_HOLE) && defined(SEEK_DATA)
+	off_t hole, data;
+
+	*hole_start = *hole_end = length;
+	if (offset >= length || offset > INT64_MAX)
+		return;
+	hole = lseek(fd, (off_t)offset, SEEK_HOLE);
+	if (hole == -1 || (uint64_t)hole >= length)
+		return;
+	data = lseek(fd, hole, SEEK_DATA);
+	if (data == -1 && errno != ENXIO)
+		return;
+	*hole_start = (uint64_t)hole;
+	if (data != -1 && (uint64_t)data < length)
+		*hole_end = (uint64_t)data;
+#else
+	*hole_start = *hole_end = length;
+#endif
+}
+
 int
 fsimg_host_source_open(int parent, const char *name, bool directory)
 {

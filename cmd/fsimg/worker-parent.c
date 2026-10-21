@@ -38,10 +38,11 @@ typedef enum worker_phase {
  * IMAGE record leads to WAIT_HEADER, or for i without a selected volume to
  * UNSELECTED, after which only the table's PARTITION records and DONE may
  * follow. i's PARTITION records arrive in WAIT_HEADER or UNSELECTED. A
- * create job of a partitioned disk starts in WAIT_IMAGE too: its IMAGE
- * record describes the planned disk and its one PARTITION record the
- * volume's place on it, and then its PLAN follows. A create job of a bare
- * volume starts in WAIT_HEADER, for its PLAN.
+ * create job of a partitioned disk or a container starts in WAIT_IMAGE
+ * too: its IMAGE record describes the planned disk, a partitioned disk's
+ * one PARTITION record the volume's place on it, and then its PLAN
+ * follows. A create job of a bare volume starts in WAIT_HEADER, for its
+ * PLAN.
  */
 typedef enum worker_output_state {
 	WORKER_WAIT_HEADER,
@@ -140,6 +141,13 @@ typedef struct worker_supervisor {
 	uint64_t	 volume_limit;
 	/* The read job's input file size, or the create job's planned disk. */
 	uint64_t	 disk_bytes;
+	/* The create job's planned output: the most bytes its image takes. */
+	uint64_t	 planned_output;
+	/* Raw data bytes are expected from now on, at most raw_bound of them:
+	 * CAT's selected file after its entry, a streamed image after its plan.
+	 */
+	uint64_t	 raw_bound;
+	bool		 raw_open;
 	uint64_t	 table_slots;	/* From the IMAGE record */
 	uint64_t	 selected_slot;	/* From the IMAGE record */
 	uint64_t	 last_partition; /* Slot of the last PARTITION record */
@@ -154,8 +162,16 @@ static fsimg_status_t queue_text(worker_supervisor_t *, const fsimg_worker_text_
     bool, fsimg_error_t *);
 static fsimg_status_t deliver_event(worker_supervisor_t *, fsimg_error_t *);
 static bool bound_volume(worker_supervisor_t *);
+static bool streaming(const fsimg_worker_request_t *);
+static const char *slot_name(const fsimg_worker_request_t *, fsimg_layer_kind_t);
+static bool read_disk_expected(const worker_supervisor_t *,
+    const unsigned char *);
+static bool output_length_expected(const worker_supervisor_t *, uint64_t);
 static bool image_frame_expected(const worker_supervisor_t *,
     const fsimg_frame_t *);
+static bool plan_frame_expected(const worker_supervisor_t *,
+    const fsimg_frame_t *);
+static bool image_length_expected(const worker_supervisor_t *, uint64_t);
 static bool partition_frame_expected(const worker_supervisor_t *,
     const fsimg_frame_t *);
 static fsimg_status_t handle_frame(worker_supervisor_t *, fsimg_error_t *);
@@ -296,20 +312,53 @@ bound_volume(worker_supervisor_t *state)
 	return (true);
 }
 
+/* A creation that writes its image to the raw data channel, not staging. */
+static bool
+streaming(const fsimg_worker_request_t *request)
+{
+	return (request->kind == FSIMG_JOB_CREATE &&
+	    (request->flags & FSIMG_JOB_STREAM) != 0);
+}
+
+/* The name a create request gives a layer slot, "" when it names none. */
+static const char *
+slot_name(const fsimg_worker_request_t *request, fsimg_layer_kind_t kind)
+{
+	const fsimg_stack_slot_t *slot = &request->stack.slots[kind];
+
+	return (slot->state == FSIMG_SLOT_NAMED ? slot->name : "");
+}
+
+/*
+ * Whether the disk a read job's IMAGE record reports fits its input file.
+ * A fixed VHD is its disk and a 512-byte footer, so the file fixes the
+ * disk's length; any other input's disk is accepted here, a container's
+ * as its own tables declare it.
+ */
+static bool
+read_disk_expected(const worker_supervisor_t *state, const unsigned char *raw)
+{
+	if (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "vhd") != 0)
+		return (true);
+	return (state->disk_bytes >= 512 &&
+	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) ==
+	    state->disk_bytes - 512);
+}
+
 /*
  * A read job's IMAGE record describes the input it opened: its disk is the
- * input file's size, or the length a container's tables declare. A create
- * job's describes the disk it plans: it names the request's scheme and
- * selects the one partition. Either way the handler then takes the disk
- * length as the bound of the partitions, the volume and the image. Only i
- * reports a disk without a volume; only W verifies layers.
+ * input file's size, or the length a container's tables declare (see
+ * read_disk_expected). A create job's describes the disk it plans: it
+ * names the request's scheme and container, and selects the one
+ * partition when a scheme is named. Either way the handler then takes the
+ * disk length as the bound of the partitions, the volume and the image.
+ * Only i reports a disk without a volume; only W verifies layers.
  */
 static bool
 image_frame_expected(const worker_supervisor_t *state,
     const fsimg_frame_t *frame)
 {
 	const unsigned char *raw = frame->payload;
-	const fsimg_stack_slot_t *scheme;
 	fsimg_job_kind_t kind = state->request->kind;
 	uint64_t flags, disk_bytes;
 
@@ -325,10 +374,76 @@ image_frame_expected(const worker_supervisor_t *state,
 	if (((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 && kind != FSIMG_JOB_INFO) ||
 	    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && kind != FSIMG_JOB_VERIFY))
 		return (false);
-	scheme = &state->request->stack.slots[FSIMG_LAYER_SCHEME];
-	return (kind < FSIMG_JOB_CREATE ||
-	    (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME, scheme->name) == 0 &&
-	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED) == 1));
+	if (kind < FSIMG_JOB_CREATE)
+		return (read_disk_expected(state, raw));
+	return (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME,
+	    slot_name(state->request, FSIMG_LAYER_SCHEME)) == 0 &&
+	    strcmp((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER,
+	    slot_name(state->request,
+	    FSIMG_LAYER_CONTAINER)) == 0 &&
+	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED) ==
+	    (raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0' ? 1 : 0));
+}
+
+/*
+ * A create job's PLAN: a planned disk holds its volume, which the one
+ * PARTITION record placed when a scheme is named, and without a container
+ * the image is that disk, or the bare volume, exactly; a container's
+ * largest encoding strictly exceeds the disk it holds, since it adds its
+ * own metadata (the output_bytes contract of fsimg_plan_info_t).
+ */
+static bool
+plan_frame_expected(const worker_supervisor_t *state,
+    const fsimg_frame_t *frame)
+{
+	const fsimg_worker_request_t *request = state->request;
+	uint64_t volume, output;
+	bool scheme, container;
+
+	if (request->kind < FSIMG_JOB_CREATE ||
+	    state->output_state != WORKER_WAIT_HEADER ||
+	    !fsimg_wire_plan_frame_valid(frame))
+		return (false);
+	volume = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PLAN_VOLUME);
+	output = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PLAN_OUTPUT);
+	scheme = slot_name(request, FSIMG_LAYER_SCHEME)[0] != '\0';
+	container = slot_name(request, FSIMG_LAYER_CONTAINER)[0] != '\0';
+	if (scheme && state->last_partition == 0)
+		return (false);
+	if (!scheme && !container)
+		return (output == volume);
+	if (volume > state->disk_bytes)
+		return (false);
+	if (container)
+		return (output > state->disk_bytes);
+	return (output == state->disk_bytes);
+}
+
+/*
+ * A created image's length, staged or streamed: the planned image exactly,
+ * or with a container no more than its largest encoding.
+ */
+static bool
+output_length_expected(const worker_supervisor_t *state, uint64_t length)
+{
+	if (slot_name(state->request, FSIMG_LAYER_CONTAINER)[0] == '\0')
+		return (length == state->planned_output);
+	return (length != 0 && length <= state->planned_output);
+}
+
+/*
+ * DONE's image length: the staged file's for a creation to a file; zero
+ * for every other job, a streamed image included, whose bytes the relay
+ * counts instead.
+ */
+static bool
+image_length_expected(const worker_supervisor_t *state, uint64_t length)
+{
+	const fsimg_worker_request_t *request = state->request;
+
+	if (request->kind != FSIMG_JOB_CREATE || streaming(request))
+		return (length == 0);
+	return (output_length_expected(state, length));
 }
 
 /* i lists every used slot, also when no volume was selected; a create job
@@ -438,15 +553,19 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		state->output_state = WORKER_OUTPUT_READY;
 		break;
 	case FSIMG_FRAME_PLAN:
-		/* A planned disk holds its volume; a bare volume is the image. */
-		if (kind < FSIMG_JOB_CREATE || state->output_state != WORKER_WAIT_HEADER ||
-		    !fsimg_wire_plan_frame_valid(frame) ||
-		    (state->table_slots != 0 && (state->last_partition == 0 ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME) > state->disk_bytes)))
+		if (!plan_frame_expected(state, frame))
 			return (worker_error(error, "invalid worker image plan"));
 		state->output_state = WORKER_OUTPUT_READY;
-		state->result->image_bytes = state->table_slots != 0 ? state->disk_bytes :
-		    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME);
+		state->planned_output = fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_OUTPUT);
+		if (streaming(state->request)) {
+			/* A stream's only bound is the plan, unless -l output
+			 * sets a lower one.
+			 */
+			if (state->output_limit == 0)
+				state->output_limit = state->planned_output;
+			state->raw_open = true;
+			state->raw_bound = state->planned_output;
+		}
 		break;
 	case FSIMG_FRAME_ENTRY:
 		path_limit = state->request->limits.max_path_bytes == 0 ? 65536 :
@@ -483,6 +602,10 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 			return (worker_error(error, "incomplete worker entry name"));
 		state->output_state = WORKER_OUTPUT_READY;
 		state->entry_count++;
+		if (kind == FSIMG_JOB_CAT) {
+			state->raw_open = true;
+			state->raw_bound = state->entry_size;
+		}
 		break;
 	case FSIMG_FRAME_VERIFY:
 		if (kind != FSIMG_JOB_VERIFY || state->output_state != WORKER_OUTPUT_READY ||
@@ -522,10 +645,12 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		    (state->request->flags & FSIMG_JOB_SKIP_UNSUPPORTED) == 0) &&
 		    state->result->skipped_entries != 0)
 			return (worker_error(error, "worker skipped entries it was not asked to skip"));
-		if (fsimg_wire_get64(raw + FSIMG_WIRE_DONE_IMAGE) != state->result->image_bytes ||
+		if (!image_length_expected(state,
+		    fsimg_wire_get64(raw + FSIMG_WIRE_DONE_IMAGE)) ||
 		    fsimg_wire_get64(raw + FSIMG_WIRE_DONE_RAW) != (kind == FSIMG_JOB_CAT ?
 		    state->entry_size : 0))
 			return (worker_error(error, "worker raw completion length differs"));
+		state->result->image_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_IMAGE);
 		state->phase = WORKER_COMPLETE;
 		/* Completion is delivered only after successful process exit. */
 		return (FSIMG_OK);
@@ -783,6 +908,8 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
 		parser[FSIMG_CHILD_OUTPUT] = request->output_fd;
 	if (request->scratch_fd != -1)
 		parser[FSIMG_CHILD_SCRATCH] = request->scratch_fd;
+	if (request->raw_fd != -1)
+		parser[FSIMG_CHILD_RAW] = request->raw_fd;
 	for (uint32_t i = 0; i < request->root_count; i++)
 		parser[FSIMG_CHILD_ROOTS + i] = request->root_fds[i];
 	code = fsimg_host_spawn_worker(executable, parser, parser_count,
@@ -820,15 +947,17 @@ read_raw(worker_supervisor_t *state, fsimg_error_t *error)
 		state->raw_eof = true;
 		return (FSIMG_OK);
 	}
-	if (state->request->kind != FSIMG_JOB_CAT)
+	if (!state->raw_open)
 		return (worker_error(error, "unexpected worker raw output"));
 	observed = UINT64_MAX;
 	if (!fsimg_add_u64(relay->received, (uint64_t)count, &observed) ||
 	    observed > state->output_limit)
 		return (fsimg_limit_error(error, FSIMG_RESOURCE_OUTPUT,
 		    state->output_limit, observed));
-	if (observed > state->entry_size)
-		return (worker_error(error, "worker raw output exceeds its selected file"));
+	if (observed > state->raw_bound)
+		return (worker_error(error, state->request->kind == FSIMG_JOB_CAT ?
+		    "worker raw output exceeds its selected file" :
+		    "worker image stream exceeds its plan"));
 	relay->received = observed;
 	text = (fsimg_worker_text_t){ .data = relay->buffer, .length = (size_t)count };
 	return (queue_text(state, &text, true, error));
@@ -907,7 +1036,7 @@ read_relay(worker_supervisor_t *state, fsimg_error_t *error)
 		state->budget->confirmed[stream] = totals[stream];
 		relay->confirmed[stream] = confirmed[stream];
 	}
-	if (state->request->kind == FSIMG_JOB_CAT)
+	if (state->request->kind == FSIMG_JOB_CAT || streaming(state->request))
 		state->result->raw_bytes = confirmed[0];
 	relay->report_bytes = 0;
 	if (failure != 0)
@@ -1059,11 +1188,14 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 		if (control_allowed)
 			channels[CHANNEL_CONTROL] = (struct pollfd){
 			    .fd = state->channels[CHANNEL_CONTROL][0], .events = POLLIN };
-		/* Hold raw bytes in their kernel pipe until the complete CAT entry.
-		 * A pending text/raw record also retains its one borrowed buffer.
+		/* Hold raw bytes in their kernel pipe until the complete CAT entry
+		 * or the streamed image's plan; any other job's raw bytes are an
+		 * error. A pending text/raw record also retains its one borrowed
+		 * buffer.
 		 */
 		if (!state->raw_eof && relay->phase == RELAY_IDLE &&
-		    (state->request->kind != FSIMG_JOB_CAT || state->entry_count == 1))
+		    (state->raw_open || (state->request->kind != FSIMG_JOB_CAT &&
+		    !streaming(state->request))))
 			channels[CHANNEL_RAW] = (struct pollfd){
 			    .fd = state->channels[CHANNEL_RAW][0], .events = POLLIN };
 		if (relay->phase == RELAY_HEADER || relay->phase == RELAY_PAYLOAD)
@@ -1108,9 +1240,18 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 		    WEXITSTATUS(state->processes[role].status) != 0)
 			return (worker_error(error, "child process exited unsuccessfully"));
 	}
+	/* Every raw byte received was confirmed written, CAT received its
+	 * whole file, and a stream the planned length: exactly, without a
+	 * container, else no more than the largest encoding. A truncated
+	 * encoding within that bound is caught only by the worker's own
+	 * failure.
+	 */
 	if (state->phase != WORKER_COMPLETE || !relay->final ||
+	    state->result->raw_bytes != relay->received ||
 	    (state->request->kind == FSIMG_JOB_CAT &&
-	    state->result->raw_bytes != state->entry_size))
+	    relay->received != state->entry_size) ||
+	    (streaming(state->request) &&
+	    !output_length_expected(state, relay->received)))
 		return (worker_error(error, "worker or raw output was incomplete"));
 	return (FSIMG_OK);
 }
@@ -1174,7 +1315,8 @@ supervisor_init(worker_supervisor_t *state, const fsimg_worker_request_t *reques
 	state->stdout_available = standard_output != -1;
 	state->producer_done = true;
 	state->output_state = request->kind < FSIMG_JOB_CREATE ||
-	    request->stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_NAMED ?
+	    slot_name(request, FSIMG_LAYER_SCHEME)[0] != '\0' ||
+	    slot_name(request, FSIMG_LAYER_CONTAINER)[0] != '\0' ?
 	    WORKER_WAIT_IMAGE : WORKER_WAIT_HEADER;
 	if (request->output_budget == NULL) {
 		fsimg_output_budget_init(&state->local_budget, &request->limits);

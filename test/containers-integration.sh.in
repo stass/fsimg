@@ -9,12 +9,14 @@
 # tree, verify with read-through, and read as the raw disk the same tools
 # expand it to (hdiutil convert to UDTO, qemu-img convert to raw, simg2img).
 # Each missing tool is reported; the test skips only when no oracle is
-# available.
+# available. The write side checks the containers fsimg writes with the
+# same tools, hdiutil attach and sgdisk -v included.
 set -eu
 hdiutil=${HDIUTIL:-'@HDIUTIL@'}
 qemu_img=${QEMU_IMG:-'@QEMU_IMG@'}
 simg2img=${SIMG2IMG:-'@SIMG2IMG@'}
 img2simg=${IMG2SIMG:-'@IMG2SIMG@'}
+sgdisk=${SGDISK:-'@SGDISK@'}
 fsimg="$(pwd)/fsimg"
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-containers-oracle-XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
@@ -120,6 +122,90 @@ if test -n "$img2simg" && test -n "$simg2img"; then
     ran=$((ran + 1))
 else
     echo 'SKIP: img2simg and simg2img are required for the sparse image oracle'
+fi
+
+# The write side: fsimg's own containers, read by the same tools. Each
+# stack's raw disk is the fixed VHD less its footer, so every expansion
+# is compared with it byte for byte. A 200 MiB volume gives DMG a zero run
+# longer than QEMU's 64 MiB limit for data runs. hdiutil attach needs no
+# privilege for an image file; its failure is reported, not skipped.
+for stack in fat16 fat16/gpt fat16/mbr; do
+    name=$(echo "$stack" | tr / _)
+    for container in dmg vhd simg; do
+        "$fsimg" cf "w-$name.$container" -R -F "$stack/$container" -s 200M \
+            -C source . 2>/dev/null || fail "$stack/$container: creation"
+        check_container "w-$name.$container" "$stack/$container"
+    done
+    "$fsimg" cf "w-$name-none.dmg" -R -F "$stack/dmg" -s 200M \
+        -o dmg:compress=none -C source . 2>/dev/null || fail "$stack/dmg: raw chunks"
+    size=$(wc -c < "w-$name.vhd")
+    head -c $((size - 512)) "w-$name.vhd" > "w-$name.raw"
+    "$fsimg" cf - -R -F "$stack/dmg" -s 200M -C source . 2>/dev/null > "w-$name.stream" ||
+        fail "$stack/dmg: stream"
+    cmp -s "w-$name.stream" "w-$name.dmg" || fail "$stack/dmg: stream differs from the file"
+done
+if test -n "$hdiutil"; then
+    for image in w-*.dmg; do
+        "$hdiutil" verify -quiet "$image" || fail "$image: hdiutil verify"
+        device=$("$hdiutil" attach -nomount -readonly -noverify "$image" | head -1 |
+            awk '{ print $1 }') || fail "$image: hdiutil attach"
+        "$hdiutil" detach -quiet "$device" || fail "$image: hdiutil detach"
+        "$hdiutil" convert -quiet "$image" -format UDTO -o "$image.cdr"
+        cmp -s "$image.cdr" "$(echo "$image" | sed 's/\(-none\)*\.dmg$//').raw" ||
+            fail "$image: hdiutil expands it to another disk"
+    done
+    # A flipped data fork byte fails hdiutil's checksum and fsimg's.
+    cp w-fat16_gpt.dmg flipped.dmg
+    printf '\377' | dd of=flipped.dmg bs=1 seek=100 conv=notrunc 2>/dev/null
+    if "$hdiutil" verify -quiet flipped.dmg 2>/dev/null; then
+        fail "hdiutil accepts a flipped data fork byte"
+    fi
+    if "$fsimg" Wdf flipped.dmg > /dev/null 2>&1; then
+        fail "fsimg accepts a flipped data fork byte"
+    fi
+    ran=$((ran + 1))
+fi
+if test -n "$qemu_img"; then
+    for name in fat16 fat16_gpt fat16_mbr; do
+        "$qemu_img" info -f vpc "w-$name.vhd" |
+            grep -q "^virtual size: .*($(wc -c < "w-$name.raw" | tr -d ' ') bytes)" ||
+            fail "w-$name.vhd: qemu-img info size"
+        "$qemu_img" convert -f vpc -O raw "w-$name.vhd" "w-$name.vhd.qemu"
+        cmp -s "w-$name.vhd.qemu" "w-$name.raw" || fail "w-$name.vhd: qemu-img expands it to another disk"
+        for image in "w-$name.dmg" "w-$name-none.dmg"; do
+            "$qemu_img" convert -f dmg -O raw "$image" "$image.qemu"
+            cmp -s "$image.qemu" "w-$name.raw" || fail "$image: qemu-img expands it to another disk"
+        done
+    done
+    # qemu-img check has no checks for the vpc format; say so.
+    "$qemu_img" check -f vpc w-fat16.vhd > /dev/null 2>&1 ||
+        echo 'NOTE: qemu-img check does not check fixed VHDs'
+    ran=$((ran + 1))
+fi
+# simg rounds the disk to its 4 KiB block, so its GPT disk is longer than
+# the others and its backup header sits at its own end: it lists the same
+# and, below, passes sgdisk.
+if test -n "$simg2img"; then
+    for name in fat16 fat16_gpt fat16_mbr; do
+        "$simg2img" "w-$name.simg" "w-$name.simg.raw"
+        if test "$name" = fat16_gpt; then
+            same_listing "w-$name.simg.raw" "w-$name.raw"
+        else
+            cmp -s "w-$name.simg.raw" "w-$name.raw" ||
+                fail "w-$name.simg: simg2img expands it to another disk"
+        fi
+    done
+    ran=$((ran + 1))
+fi
+if test -n "$sgdisk"; then
+    for disk in w-fat16_gpt.raw w-fat16_gpt.simg.raw; do
+        test -f "$disk" || continue
+        "$sgdisk" -v "$disk" | grep -q 'No problems found' ||
+            fail "$disk: sgdisk rejects the GPT inside the container"
+    done
+    ran=$((ran + 1))
+else
+    echo 'SKIP: sgdisk is required to check the GPT inside written containers'
 fi
 
 if test "$ran" -eq 0; then

@@ -64,6 +64,7 @@ typedef enum worker_scenario {
 	SCENARIO_IMAGE_WRONG_DISK,
 	SCENARIO_PARTITION_OUTSIDE,
 	SCENARIO_PARTITION_UNSELECTED_LIST,
+	SCENARIO_VHD_WHOLE_FILE,
 } worker_scenario_t;
 
 /* Create jobs in these tests copy one source directory to the image root. */
@@ -125,6 +126,9 @@ static void test_skipped_extraction(void);
 static void test_mount_source(const char *);
 static void test_multiple_roots(worker_fixture_t *);
 static void test_partitioned_create(void);
+static int raw_intermediate(const worker_fixture_t *);
+static void create_request(worker_fixture_t *, const char *);
+static void test_container_create(void);
 static void test_transport(worker_scenario_t);
 static int fake_worker(worker_scenario_t);
 static int fake_output(void);
@@ -571,6 +575,119 @@ test_partitioned_create(void)
 	fixture_close(&fixture);
 }
 
+/* An unlinked, empty read/write file in scratch, as the coordinator makes
+ * the raw intermediate.
+ */
+static int
+raw_intermediate(const worker_fixture_t *fixture)
+{
+	int fd;
+
+	fd = openat(fixture->scratch, "raw", O_RDWR | O_CREAT | O_EXCL |
+	    O_NOFOLLOW | O_CLOEXEC, 0600);
+	CHECK(fd != -1 && unlinkat(fixture->scratch, "raw", 0) == 0);
+	return (fd);
+}
+
+/* A reproducible creation of the source tree as stack into staging. */
+static void
+create_request(worker_fixture_t *fixture, const char *stack)
+{
+	fixture->request.kind = FSIMG_JOB_CREATE;
+	fixture->request.flags = 0;
+	fixture->request.selection = "/";
+	fixture->request.input_fd = -1;
+	fixture->request.root_fds = &fixture->source;
+	fixture->request.root_paths = image_root;
+	fixture->request.root_count = 1;
+	fixture->request.output_fd = fixture->output;
+	fixture->request.write.flags |= FSIMG_WRITE_REPRODUCIBLE;
+	CHECK(fsimg_stack_parse(stack, &fixture->request.stack, NULL) ==
+	    FSIMG_OK);
+}
+
+/*
+ * A creation with a container writes the container through the raw
+ * intermediate the coordinator hands over: the IMAGE record names it, and
+ * DONE reports the staged file's length, which the plan bounds. Without
+ * the raw intermediate the worker refuses its authority. A stream writes
+ * the same bytes to the data channel, which the coordinator relays to
+ * stdout and counts. A fault the staged file acquires afterwards fails the
+ * verification job, which names the container in error.path; that is
+ * what cW reports before publishing nothing.
+ */
+static void
+test_container_create(void)
+{
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	struct stat st;
+	unsigned char *staged, *streamed, byte;
+	int fd, stream;
+
+	fixture_open(&fixture);
+	create_request(&fixture, "fat12/gpt/dmg");
+	fixture.request.raw_fd = raw_intermediate(&fixture);
+	CHECK(run(&fixture, &error) == FSIMG_OK);
+	CHECK(close(fixture.request.raw_fd) == 0);
+	CHECK(fixture.images == 1 && fixture.partitions == 1 && fixture.plans == 1);
+	fd = openat(fixture.output, "image", O_RDWR | O_NOFOLLOW);
+	CHECK(fd != -1 && fstat(fd, &st) == 0);
+	CHECK(st.st_size > 0 && (uint64_t)st.st_size == fixture.result.image_bytes);
+	staged = malloc((size_t)st.st_size);
+	CHECK(staged != NULL &&
+	    pread(fd, staged, (size_t)st.st_size, 0) == st.st_size);
+	CHECK(bcmp(staged + st.st_size - 512, "koly", 4) == 0);
+
+	/* The same creation streamed: nothing staged, the bytes relayed. */
+	stream = openat(fixture.parent, "stream", O_RDWR | O_CREAT | O_EXCL, 0600);
+	CHECK(stream != -1);
+	fixture.request.flags = FSIMG_JOB_STREAM;
+	fixture.request.output_fd = -1;
+	fixture.request.raw_fd = raw_intermediate(&fixture);
+	fixture.ready = false;
+	CHECK(fsimg_worker_run(fixture.executable, &fixture.request, event,
+	    &fixture, stream, NULL, &fixture.result, &error) == FSIMG_OK);
+	CHECK(close(fixture.request.raw_fd) == 0);
+	CHECK(fixture.result.image_bytes == 0 &&
+	    fixture.result.raw_bytes == (uint64_t)st.st_size);
+	streamed = malloc((size_t)st.st_size);
+	CHECK(streamed != NULL &&
+	    pread(stream, streamed, (size_t)st.st_size, 0) == st.st_size);
+	CHECK(bcmp(staged, streamed, (size_t)st.st_size) == 0);
+	CHECK(close(stream) == 0 && unlinkat(fixture.parent, "stream", 0) == 0);
+	free(streamed);
+	free(staged);
+
+	/* A creation needing a raw intermediate refuses to run without one. */
+	fixture.request.flags = 0;
+	fixture.request.output_fd = fixture.output;
+	fixture.request.raw_fd = -1;
+	CHECK(run(&fixture, &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "filesystem authority") != NULL);
+
+	/* A data fork byte flipped after the creation fails verification. */
+	CHECK(pread(fd, &byte, 1, 64) == 1);
+	byte ^= 0xff;
+	CHECK(pwrite(fd, &byte, 1, 64) == 1);
+	CHECK(close(fd) == 0);
+	fixture.request.kind = FSIMG_JOB_VERIFY;
+	fixture.request.flags = FSIMG_JOB_PAYLOAD;
+	fixture.request.root_fds = NULL;
+	fixture.request.root_paths = NULL;
+	fixture.request.root_count = 0;
+	fixture.request.output_fd = -1;
+	fixture.request.input_fd = openat(fixture.output, "image", O_RDONLY);
+	CHECK(fixture.request.input_fd != -1);
+	bzero(&error, sizeof(error));
+	CHECK(run(&fixture, &error) == FSIMG_ECORRUPT);
+	CHECK(error.operation == FSIMG_OP_IMAGE && strcmp(error.path, "dmg") == 0);
+	CHECK(close(fixture.request.input_fd) == 0);
+	fixture.request.input_fd = -1;
+	CHECK(unlinkat(fixture.output, "image", 0) == 0);
+	fixture_close(&fixture);
+}
+
 /* A plan job with several roots: the source directory at the image root and
  * again at "/a/b" beneath a synthesized "/a", and one of its files as a
  * regular-file root. The worker validates every root path and refuses an
@@ -799,6 +916,9 @@ fake_worker(worker_scenario_t mode)
 		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
 		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
 	}
+	/* A fixed VHD's disk is the file less its footer, never the file. */
+	if (mode == SCENARIO_VHD_WHOLE_FILE)
+		strcpy((char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "vhd");
 	if (mode == SCENARIO_PARTITION_UNSELECTED_LIST) {
 		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_UNSELECTED);
 		strcpy((char *)raw + FSIMG_WIRE_IMAGE_REASON, "no single filesystem");
@@ -959,7 +1079,8 @@ test_forged(void)
 		SCENARIO_VERIFY_HEADER_SCOPE, SCENARIO_VERIFY_UNREQUESTED_PAYLOAD,
 		SCENARIO_VERIFY_MISSING_PAYLOAD, SCENARIO_RUNTIME_FAILURE,
 		SCENARIO_INFO_WITHOUT_IMAGE, SCENARIO_IMAGE_WRONG_DISK,
-		SCENARIO_PARTITION_OUTSIDE, SCENARIO_PARTITION_UNSELECTED_LIST
+		SCENARIO_PARTITION_OUTSIDE, SCENARIO_PARTITION_UNSELECTED_LIST,
+		SCENARIO_VHD_WHOLE_FILE
 #ifdef FSIMG_TEST_ASAN
 		, SCENARIO_ASAN_FAILURE
 #endif
@@ -1265,6 +1386,7 @@ main(int argc, char **argv)
 	test_operations("fat16");
 	test_operations("exfat");
 	test_partitioned_create();
+	test_container_create();
 	test_prompt_completion();
 	test_text_output();
 	test_startup();

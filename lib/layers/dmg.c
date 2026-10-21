@@ -11,6 +11,7 @@
 
 #include "io.h"
 #include "layer.h"
+#include "meta.h"
 
 /*
  * Apple UDIF disk images (DMG). The file is a data fork of chunks, an XML
@@ -25,7 +26,8 @@
  *
  * hdiutil writes one table per partition-map region; fsimg reads any
  * number of tables in any order. A file whose sectors no run covers is
- * corrupt rather than read as zeros.
+ * corrupt rather than read as zeros. fsimg writes one table for the whole
+ * disk.
  */
 #define DMG_SECTOR_BYTES	512u
 #define KOLY_VERSION		4u
@@ -36,12 +38,20 @@
 #define CHECKSUM_NONE		0u
 #define CHECKSUM_CRC32		2u
 #define VERIFY_PIECE_BYTES	(64u * 1024)
+#define DMG_FLATTENED		1u
+#define DMG_WHOLE_DISK		UINT32_C(0xfffffffe)
+#define DMG_VARIANT		2u
+#define DMG_DEFAULT_LEVEL	6u
+#define DMG_BASE64_LINE		44u	/* Characters per line, as hdiutil */
+#define DMG_BASE64_INDENT	4u	/* Tabs before each line */
+#define DMG_REPLAY_BYTES	(MISH_RUN_BYTES * 1024u)
 
 /* Trailer fields. */
 enum {
 	KOLY_SIGNATURE = 0,
 	KOLY_VERSION_FIELD = 4,
 	KOLY_HEADER_SIZE = 8,
+	KOLY_FLAGS = 12,
 	KOLY_DATA_OFFSET = 24,
 	KOLY_DATA_LENGTH = 32,
 	KOLY_SEGMENT_NUMBER = 56,
@@ -51,6 +61,7 @@ enum {
 	KOLY_XML_OFFSET = 216,
 	KOLY_XML_LENGTH = 224,
 	KOLY_MASTER_CHECKSUM = 352,
+	KOLY_VARIANT = 488,
 	KOLY_SECTOR_COUNT = 492
 };
 
@@ -61,6 +72,8 @@ enum {
 	MISH_FIRST_SECTOR = 8,
 	MISH_SECTOR_COUNT = 16,
 	MISH_DATA_OFFSET = 24,
+	MISH_BUFFERS = 32,
+	MISH_DESCRIPTOR = 36,
 	MISH_CHECKSUM = 64,
 	MISH_RUN_COUNT = 200
 };
@@ -210,6 +223,69 @@ typedef struct dmg_verify {
 	bool		 payload;
 } dmg_verify_t;
 
+/*
+ * The encoder's state. The next run starts at sector, after the pending
+ * zero run of zero_sectors that ends the disk described so far; runs holds
+ * the run_count recorded runs, encoded. table_crc covers the disk's bytes
+ * and fork_crc the data fork's. Under zlib, stream deflates one chunk at a
+ * time into packed, and allocates through zlib_error. carry and line hold
+ * the base64 text of the table not yet written.
+ */
+typedef struct dmg_encoder {
+	fsimg_ctx_t	*ctx;
+	fsimg_seq_sink_t *sink;
+	const fsimg_container_settings_t *settings;
+	uint64_t	 disk_bytes;
+	fsimg_store_t	*runs;
+	uint64_t	 run_count;
+	uint64_t	 sector;
+	uint64_t	 zero_sectors;
+	uLong		 table_crc;
+	uLong		 fork_crc;
+	z_stream	 stream;
+	bool		 stream_ready;
+	unsigned char	*packed;
+	fsimg_error_t	 zlib_error;
+	unsigned char	 carry[3];
+	unsigned	 carried;
+	char		 line[DMG_BASE64_LINE];
+	size_t		 column;
+} dmg_encoder_t;
+
+/*
+ * The plist template around the base64 table, in hdiutil's layout: tab
+ * indentation, one blkx entry whose name says it describes the whole disk,
+ * and nothing that varies between runs.
+ */
+static const char plist_head[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "\t<key>resource-fork</key>\n"
+    "\t<dict>\n"
+    "\t\t<key>blkx</key>\n"
+    "\t\t<array>\n"
+    "\t\t\t<dict>\n"
+    "\t\t\t\t<key>Attributes</key>\n"
+    "\t\t\t\t<string>0x0050</string>\n"
+    "\t\t\t\t<key>CFName</key>\n"
+    "\t\t\t\t<string>whole disk (fsimg : 0)</string>\n"
+    "\t\t\t\t<key>Data</key>\n"
+    "\t\t\t\t<data>\n";
+static const char plist_tail[] =
+    "\t\t\t\t</data>\n"
+    "\t\t\t\t<key>ID</key>\n"
+    "\t\t\t\t<string>0</string>\n"
+    "\t\t\t\t<key>Name</key>\n"
+    "\t\t\t\t<string>whole disk (fsimg : 0)</string>\n"
+    "\t\t\t</dict>\n"
+    "\t\t</array>\n"
+    "\t</dict>\n"
+    "</dict>\n"
+    "</plist>\n";
+
 static void checksum_decode(const unsigned char *, dmg_checksum_t *);
 static fsimg_status_t dmg_corrupt(fsimg_error_t *, const char *);
 static fsimg_status_t dmg_probe(const unsigned char *, size_t,
@@ -250,12 +326,49 @@ static fsimg_status_t verify_data_fork(const fsimg_container_input_t *,
     const dmg_trailer_t *, unsigned char *, fsimg_error_t *);
 static fsimg_status_t dmg_verify(const fsimg_container_input_t *,
     const fsimg_container_t *, bool, fsimg_error_t *);
+static fsimg_status_t dmg_plan(const fsimg_layer_options_t *, uint32_t,
+    int64_t, fsimg_container_settings_t *, fsimg_error_t *);
+static uint64_t plist_bytes(uint64_t);
+static fsimg_status_t dmg_bound(const fsimg_container_settings_t *, uint64_t,
+    uint64_t *, fsimg_error_t *);
+static voidpf dmg_zlib_alloc(voidpf, uInt, uInt);
+static void dmg_zlib_free(voidpf, voidpf);
+static fsimg_status_t dmg_encode_open(const fsimg_encode_t *, void **,
+    fsimg_error_t *);
+static fsimg_status_t record_run(dmg_encoder_t *, uint32_t, uint64_t,
+    uint64_t, uint64_t, fsimg_error_t *);
+static fsimg_status_t record_zero_run(dmg_encoder_t *, fsimg_error_t *);
+static fsimg_status_t deflate_chunk(dmg_encoder_t *, const unsigned char *,
+    size_t, size_t *, fsimg_error_t *);
+static fsimg_status_t dmg_encode_chunk(void *, unsigned,
+    const unsigned char *, size_t, fsimg_error_t *);
+static fsimg_status_t base64_line(dmg_encoder_t *, fsimg_error_t *);
+static fsimg_status_t base64_group(dmg_encoder_t *, fsimg_error_t *);
+static fsimg_status_t base64_put(dmg_encoder_t *, const unsigned char *,
+    size_t, fsimg_error_t *);
+static fsimg_status_t base64_end(dmg_encoder_t *, fsimg_error_t *);
+static fsimg_status_t write_table(dmg_encoder_t *, uint64_t, fsimg_error_t *);
+static fsimg_status_t write_trailer(dmg_encoder_t *, uint64_t, uint64_t,
+    fsimg_error_t *);
+static fsimg_status_t dmg_encode_finish(void *, unsigned, fsimg_error_t *);
+static void dmg_encode_close(void *);
+
+static const fsimg_encoder_ops_t dmg_encoder = {
+	.passes = 1,
+	.open = dmg_encode_open,
+	.chunk = dmg_encode_chunk,
+	.finish = dmg_encode_finish,
+	.close = dmg_encode_close
+};
 
 const fsimg_container_ops_t fsimg_dmg_container = {
 	.probe_bytes = 0,
 	.probe = dmg_probe,
 	.open = dmg_open,
 	.verify = dmg_verify,
+	.plan = dmg_plan,
+	.bound = dmg_bound,
+	.encoder = &dmg_encoder,
 	.codecs = "raw,zero,zlib",
 	.payload_checks = true,
 	.zlib = true
@@ -731,8 +844,9 @@ dmg_open(const fsimg_container_input_t *input, fsimg_container_t *out,
 	status = read_trailer(input, &trailer, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_chunk_index_new(input->session, "DMG", trailer.disk_bytes,
-	    trailer.data_offset, trailer.data_bytes, &index, error);
+	status = fsimg_chunk_index_new(input->session, "DMG", "dmg",
+	    trailer.disk_bytes, trailer.data_offset, trailer.data_bytes, &index,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
 
@@ -783,6 +897,7 @@ verify_table(void *argument, const dmg_table_t *table,
  * Under read-through, a run's decoded bytes join its table's CRC32. hdiutil
  * computes a table's checksum over every run but the ignored ones, which
  * contribute nothing: a table of free space alone has the empty CRC, zero.
+ * A zero run joins arithmetically, so its declared length costs no reads.
  */
 static fsimg_status_t
 verify_run(void *argument, const dmg_table_t *table, const dmg_run_t *run,
@@ -795,6 +910,11 @@ verify_run(void *argument, const dmg_table_t *table, const dmg_run_t *run,
 
 	if (!verify->payload || run->type == RUN_IGNORE)
 		return (FSIMG_OK);
+	if (run->type == RUN_ZERO) {
+		verify->table_crc = fsimg_crc32_zeros(verify->table_crc,
+		    run->sectors * DMG_SECTOR_BYTES);
+		return (FSIMG_OK);
+	}
 	offset = (table->first_sector + run->sector) * DMG_SECTOR_BYTES;
 	remaining = run->sectors * DMG_SECTOR_BYTES;
 	while (remaining != 0) {
@@ -906,4 +1026,486 @@ dmg_verify(const fsimg_container_input_t *input,
 	    verify.master != trailer.master_checksum.value)
 		return (dmg_corrupt(error, "master checksum does not match"));
 	return (FSIMG_OK);
+}
+
+/*
+ * The write side: one block table covering the whole disk, one run per
+ * dmg:chunk of the disk, the last shorter. A data chunk is deflated at
+ * dmg:level and stored as a zlib run when that makes it smaller, and raw
+ * otherwise or under dmg:compress=none; consecutive zero chunks merge into
+ * one zero-fill run. Runs are recorded in a metadata scratch store as they
+ * are decided, since the plist that carries them follows the data fork,
+ * and are replayed into its base64 text from there. The data fork's CRC32,
+ * the table's CRC32 over the disk's bytes and the master CRC32 over the
+ * table's go into the table header and the trailer.
+ */
+static fsimg_status_t
+dmg_plan(const fsimg_layer_options_t *layers, uint32_t flags, int64_t epoch,
+    fsimg_container_settings_t *settings, fsimg_error_t *error)
+{
+	uint32_t chunk, level;
+
+	level = layers->dmg_level;
+	switch (layers->dmg_compress) {
+	case FSIMG_DMG_ZLIB:
+		if (level == 0)
+			level = DMG_DEFAULT_LEVEL;
+		if (level > 9)
+			return (fsimg_setting_error(error, "dmg:level",
+			    "the zlib level must be from 1 to 9"));
+		break;
+	case FSIMG_DMG_NONE:
+		if (level != 0)
+			return (fsimg_setting_error(error, "dmg:level",
+			    "a level applies only to zlib compression"));
+		break;
+	default:
+		return (fsimg_setting_error(error, "dmg:compress",
+		    "the compression must be zlib or none"));
+	}
+	chunk = layers->dmg_chunk_bytes == 0 ? FSIMG_TRANSCODE_CHUNK_BYTES :
+	    layers->dmg_chunk_bytes;
+	if (chunk % DMG_SECTOR_BYTES != 0 || chunk > FSIMG_CHUNK_MAX_DECODED)
+		return (fsimg_setting_error(error, "dmg:chunk",
+		    "the chunk must be a multiple of 512 bytes up to 16 MiB"));
+	settings->granularity = DMG_SECTOR_BYTES;
+	settings->chunk_bytes = chunk;
+	settings->level = level;
+	return (fsimg_container_identifier(layers->dmg_uuid, "dmg:uuid",
+	    FSIMG_ROLE_DMG, flags, epoch, settings->guid, error));
+}
+
+/* The plist's length around a block table of table_bytes: the template,
+ * and the table in base64, in lines of DMG_BASE64_LINE characters each
+ * indented by four tabs.
+ */
+static uint64_t
+plist_bytes(uint64_t table_bytes)
+{
+	uint64_t text, lines;
+
+	text = (table_bytes + 2) / 3 * 4;
+	lines = (text + DMG_BASE64_LINE - 1) / DMG_BASE64_LINE;
+	return (strlen(plist_head) + strlen(plist_tail) + text +
+	    lines * (DMG_BASE64_INDENT + 1));
+}
+
+/*
+ * The most a disk's encoding can take: every chunk stored raw, which is
+ * never shorter than a zlib run because a chunk deflate cannot shrink is
+ * stored raw; every chunk its own run, plus the terminator; the plist; and
+ * the trailer. A disk whose runs a table's 32-bit run count cannot hold is
+ * refused, naming dmg:chunk, which sets the run count.
+ */
+static fsimg_status_t
+dmg_bound(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
+    uint64_t *out, fsimg_error_t *error)
+{
+	uint64_t runs;
+
+	runs = disk_bytes / settings->chunk_bytes + 2;
+	if (runs > UINT32_MAX) {
+		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
+		    "the disk needs more runs than a DMG block table holds");
+		fsimg_error_path(error, "dmg:chunk");
+		return (FSIMG_EUNSUPPORTED);
+	}
+	if (!fsimg_add_u64(disk_bytes, plist_bytes(MISH_HEADER_BYTES +
+	    runs * MISH_RUN_BYTES) + KOLY_HEADER_BYTES, out))
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_IMAGE, "the disk is too large for a DMG"));
+	return (FSIMG_OK);
+}
+
+static voidpf
+dmg_zlib_alloc(voidpf opaque, uInt items, uInt size)
+{
+	dmg_encoder_t *encoder = opaque;
+
+	if (size != 0 && items > SIZE_MAX / size)
+		return (Z_NULL);
+	return (fsimg_alloc(encoder->ctx, (size_t)items * size,
+	    &encoder->zlib_error));
+}
+
+static void
+dmg_zlib_free(voidpf opaque FSIMG_UNUSED, voidpf address)
+{
+	fsimg_dealloc(address);
+}
+
+/* The encoder: its run store, and under zlib the deflate state and an
+ * output buffer of one chunk, all charged to the context.
+ */
+static fsimg_status_t
+dmg_encode_open(const fsimg_encode_t *encode, void **state,
+    fsimg_error_t *error)
+{
+	dmg_encoder_t *encoder;
+	fsimg_status_t status;
+
+	*state = NULL;
+	encoder = fsimg_alloc(encode->ctx, sizeof(*encoder), error);
+	if (encoder == NULL)
+		return (error->status);
+	bzero(encoder, sizeof(*encoder));
+	encoder->ctx = encode->ctx;
+	encoder->sink = encode->sink;
+	encoder->settings = encode->settings;
+	encoder->disk_bytes = encode->disk_bytes;
+	encoder->table_crc = crc32(0, Z_NULL, 0);
+	encoder->fork_crc = crc32(0, Z_NULL, 0);
+	*state = encoder;
+	status = fsimg_store_new(encode->session, &encoder->runs, error);
+	if (status != FSIMG_OK || encoder->settings->level == 0)
+		return (status);
+	encoder->packed = fsimg_alloc(encode->ctx, encoder->settings->chunk_bytes,
+	    error);
+	if (encoder->packed == NULL)
+		return (error->status);
+	encoder->stream.zalloc = dmg_zlib_alloc;
+	encoder->stream.zfree = dmg_zlib_free;
+	encoder->stream.opaque = encoder;
+	if (deflateInit(&encoder->stream, (int)encoder->settings->level) !=
+	    Z_OK) {
+		*error = encoder->zlib_error;
+		if (error->status == FSIMG_OK)
+			fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
+			    "zlib initialization failed");
+		return (error->status);
+	}
+	encoder->stream_ready = true;
+	return (FSIMG_OK);
+}
+
+/* Record one run, its sector range from the encoder's next sector. */
+static fsimg_status_t
+record_run(dmg_encoder_t *encoder, uint32_t type, uint64_t sectors,
+    uint64_t offset, uint64_t length, fsimg_error_t *error)
+{
+	unsigned char run[MISH_RUN_BYTES];
+	uint64_t slot;
+	fsimg_status_t status;
+
+	/* The store grows a replay piece at a time. */
+	slot = encoder->run_count * MISH_RUN_BYTES;
+	if (slot + MISH_RUN_BYTES > fsimg_store_size(encoder->runs)) {
+		status = fsimg_store_grow(encoder->runs, slot + DMG_REPLAY_BYTES,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	bzero(run, sizeof(run));
+	fsimg_layer_put_be32(run + RUN_TYPE, type);
+	fsimg_layer_put_be64(run + RUN_SECTOR, encoder->sector);
+	fsimg_layer_put_be64(run + RUN_SECTORS, sectors);
+	fsimg_layer_put_be64(run + RUN_COMPRESSED_OFFSET, offset);
+	fsimg_layer_put_be64(run + RUN_COMPRESSED_LENGTH, length);
+	status = fsimg_store_write(encoder->runs, slot, run, sizeof(run),
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	encoder->run_count++;
+	encoder->sector += sectors;
+	return (FSIMG_OK);
+}
+
+/* Record the pending zero run, which names no data fork bytes, and fold
+ * its zeros into the image CRC at once. Its offset is the data fork's end
+ * so far, as hdiutil writes it, so the run is recorded before the next
+ * data chunk extends the fork.
+ */
+static fsimg_status_t
+record_zero_run(dmg_encoder_t *encoder, fsimg_error_t *error)
+{
+	uint64_t sectors = encoder->zero_sectors;
+
+	if (sectors == 0)
+		return (FSIMG_OK);
+	encoder->zero_sectors = 0;
+	encoder->table_crc = fsimg_crc32_zeros(encoder->table_crc,
+	    sectors * DMG_SECTOR_BYTES);
+	return (record_run(encoder, RUN_ZERO, sectors,
+	    fsimg_seq_written(encoder->sink), 0, error));
+}
+
+/*
+ * Deflate one chunk into the packed buffer, which holds no more than the
+ * chunk itself: *packed_length is the zlib stream's length when it is
+ * shorter than the chunk, and zero when the chunk does not shrink.
+ */
+static fsimg_status_t
+deflate_chunk(dmg_encoder_t *encoder, const unsigned char *bytes,
+    size_t length, size_t *packed_length, fsimg_error_t *error)
+{
+	z_stream *stream = &encoder->stream;
+	int result;
+
+	*packed_length = 0;
+	if (deflateReset(stream) != Z_OK)
+		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
+		    "zlib reset failed"));
+	stream->next_in = (Bytef *)(uintptr_t)bytes;
+	stream->avail_in = (uInt)length;
+	stream->next_out = encoder->packed;
+	stream->avail_out = (uInt)length;
+	result = deflate(stream, Z_FINISH);
+	if (result == Z_STREAM_END && stream->total_out < length)
+		*packed_length = (size_t)stream->total_out;
+	else if (result != Z_OK && result != Z_STREAM_END &&
+	    result != Z_BUF_ERROR)
+		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
+		    "zlib compression failed"));
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+dmg_encode_chunk(void *state, unsigned pass FSIMG_UNUSED,
+    const unsigned char *bytes, size_t length, fsimg_error_t *error)
+{
+	dmg_encoder_t *encoder = state;
+	const unsigned char *stored;
+	uint64_t offset;
+	size_t packed_length;
+	uint32_t type;
+	fsimg_status_t status;
+
+	if (bytes == NULL) {
+		encoder->zero_sectors += length / DMG_SECTOR_BYTES;
+		return (FSIMG_OK);
+	}
+	status = record_zero_run(encoder, error);
+	if (status != FSIMG_OK)
+		return (status);
+	encoder->table_crc = crc32(encoder->table_crc, bytes, (uInt)length);
+	packed_length = 0;
+	if (encoder->settings->level != 0) {
+		status = deflate_chunk(encoder, bytes, length, &packed_length,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	type = packed_length != 0 ? RUN_ZLIB : RUN_RAW;
+	stored = packed_length != 0 ? encoder->packed : bytes;
+	if (packed_length == 0)
+		packed_length = length;
+	offset = fsimg_seq_written(encoder->sink);
+	status = fsimg_seq_write(encoder->sink, stored, packed_length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	encoder->fork_crc = crc32(encoder->fork_crc, stored,
+	    (uInt)packed_length);
+	return (record_run(encoder, type, length / DMG_SECTOR_BYTES, offset,
+	    packed_length, error));
+}
+
+/* Write one line of base64 text, indented, once it is full or the text
+ * ends.
+ */
+static fsimg_status_t
+base64_line(dmg_encoder_t *encoder, fsimg_error_t *error)
+{
+	char line[DMG_BASE64_INDENT + DMG_BASE64_LINE + 1];
+	size_t length;
+
+	if (encoder->column == 0)
+		return (FSIMG_OK);
+	memset(line, '\t', DMG_BASE64_INDENT);
+	bcopy(encoder->line, line + DMG_BASE64_INDENT, encoder->column);
+	length = DMG_BASE64_INDENT + encoder->column;
+	line[length++] = '\n';
+	encoder->column = 0;
+	return (fsimg_seq_write(encoder->sink, line, length, error));
+}
+
+/* Encode the carried group of one to three bytes, padded with '='. */
+static fsimg_status_t
+base64_group(dmg_encoder_t *encoder, fsimg_error_t *error)
+{
+	static const char alphabet[] =
+	    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	const unsigned char *carry = encoder->carry;
+	uint32_t group;
+	char text[4];
+
+	group = (uint32_t)carry[0] << 16 | (uint32_t)carry[1] << 8 | carry[2];
+	for (unsigned i = 0; i < 4; i++)
+		text[i] = i <= encoder->carried ?
+		    alphabet[(group >> (18 - 6 * i)) & 0x3f] : '=';
+	bzero(encoder->carry, sizeof(encoder->carry));
+	encoder->carried = 0;
+	bcopy(text, encoder->line + encoder->column, sizeof(text));
+	encoder->column += sizeof(text);
+	if (encoder->column < DMG_BASE64_LINE)
+		return (FSIMG_OK);
+	return (base64_line(encoder, error));
+}
+
+/* Append bytes to the table's base64 text. */
+static fsimg_status_t
+base64_put(dmg_encoder_t *encoder, const unsigned char *bytes, size_t length,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = FSIMG_OK;
+	for (size_t i = 0; status == FSIMG_OK && i < length; i++) {
+		encoder->carry[encoder->carried++] = bytes[i];
+		if (encoder->carried == sizeof(encoder->carry))
+			status = base64_group(encoder, error);
+	}
+	return (status);
+}
+
+/* End the base64 text: the partial group padded, the partial line. */
+static fsimg_status_t
+base64_end(dmg_encoder_t *encoder, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = FSIMG_OK;
+	if (encoder->carried != 0)
+		status = base64_group(encoder, error);
+	if (status == FSIMG_OK)
+		status = base64_line(encoder, error);
+	return (status);
+}
+
+/*
+ * The block table in base64: its header, the recorded runs replayed from
+ * the store in pieces, and the terminator, which ends the disk and names
+ * the data fork's end.
+ */
+static fsimg_status_t
+write_table(dmg_encoder_t *encoder, uint64_t fork_bytes, fsimg_error_t *error)
+{
+	unsigned char header[MISH_HEADER_BYTES], run[MISH_RUN_BYTES];
+	unsigned char *piece;
+	uint64_t sectors, total, done;
+	size_t step;
+	fsimg_status_t status;
+
+	sectors = encoder->disk_bytes / DMG_SECTOR_BYTES;
+	bzero(header, sizeof(header));
+	bcopy("mish", header + MISH_SIGNATURE, 4);
+	fsimg_layer_put_be32(header + MISH_VERSION_FIELD, MISH_VERSION);
+	fsimg_layer_put_be64(header + MISH_SECTOR_COUNT, sectors);
+	fsimg_layer_put_be32(header + MISH_BUFFERS,
+	    encoder->settings->chunk_bytes / DMG_SECTOR_BYTES + 8);
+	fsimg_layer_put_be32(header + MISH_DESCRIPTOR, DMG_WHOLE_DISK);
+	fsimg_layer_put_be32(header + MISH_CHECKSUM, CHECKSUM_CRC32);
+	fsimg_layer_put_be32(header + MISH_CHECKSUM + 4, 32);
+	fsimg_layer_put_be32(header + MISH_CHECKSUM + 8,
+	    (uint32_t)encoder->table_crc);
+	fsimg_layer_put_be32(header + MISH_RUN_COUNT,
+	    (uint32_t)(encoder->run_count + 1));
+	status = base64_put(encoder, header, sizeof(header), error);
+	if (status != FSIMG_OK)
+		return (status);
+
+	piece = fsimg_alloc(encoder->ctx, DMG_REPLAY_BYTES, error);
+	if (piece == NULL)
+		return (error->status);
+	total = encoder->run_count * MISH_RUN_BYTES;
+	for (done = 0; status == FSIMG_OK && done < total; done += step) {
+		step = total - done > DMG_REPLAY_BYTES ? DMG_REPLAY_BYTES :
+		    (size_t)(total - done);
+		status = fsimg_store_read(encoder->runs, done, piece, step,
+		    error);
+		if (status == FSIMG_OK)
+			status = base64_put(encoder, piece, step, error);
+	}
+	fsimg_dealloc(piece);
+	if (status != FSIMG_OK)
+		return (status);
+
+	bzero(run, sizeof(run));
+	fsimg_layer_put_be32(run + RUN_TYPE, RUN_TERMINATOR);
+	fsimg_layer_put_be64(run + RUN_SECTOR, sectors);
+	fsimg_layer_put_be64(run + RUN_COMPRESSED_OFFSET, fork_bytes);
+	status = base64_put(encoder, run, sizeof(run), error);
+	if (status == FSIMG_OK)
+		status = base64_end(encoder, error);
+	return (status);
+}
+
+/*
+ * The trailer of a single-segment image whose data fork starts the file:
+ * flattened, its segment ID the dmg:uuid, CRC32 data and master
+ * checksums, and variant 2. hdiutil writes variant 1 beside its
+ * per-region tables, but refuses to attach a variant 1 image whose one
+ * table spans a partitioned disk; it attaches variant 2 with or without a
+ * partition map.
+ */
+static fsimg_status_t
+write_trailer(dmg_encoder_t *encoder, uint64_t fork_bytes, uint64_t xml_bytes,
+    fsimg_error_t *error)
+{
+	unsigned char koly[KOLY_HEADER_BYTES], value[4];
+	uLong master;
+
+	fsimg_layer_put_be32(value, (uint32_t)encoder->table_crc);
+	master = crc32(crc32(0, Z_NULL, 0), value, sizeof(value));
+	bzero(koly, sizeof(koly));
+	bcopy("koly", koly + KOLY_SIGNATURE, 4);
+	fsimg_layer_put_be32(koly + KOLY_VERSION_FIELD, KOLY_VERSION);
+	fsimg_layer_put_be32(koly + KOLY_HEADER_SIZE, KOLY_HEADER_BYTES);
+	fsimg_layer_put_be32(koly + KOLY_FLAGS, DMG_FLATTENED);
+	fsimg_layer_put_be64(koly + KOLY_DATA_LENGTH, fork_bytes);
+	fsimg_layer_put_be32(koly + KOLY_SEGMENT_NUMBER, 1);
+	fsimg_layer_put_be32(koly + KOLY_SEGMENT_COUNT, 1);
+	bcopy(encoder->settings->guid, koly + KOLY_SEGMENT_ID, 16);
+	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM, CHECKSUM_CRC32);
+	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM + 4, 32);
+	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM + 8,
+	    (uint32_t)encoder->fork_crc);
+	fsimg_layer_put_be64(koly + KOLY_XML_OFFSET, fork_bytes);
+	fsimg_layer_put_be64(koly + KOLY_XML_LENGTH, xml_bytes);
+	fsimg_layer_put_be32(koly + KOLY_MASTER_CHECKSUM, CHECKSUM_CRC32);
+	fsimg_layer_put_be32(koly + KOLY_MASTER_CHECKSUM + 4, 32);
+	fsimg_layer_put_be32(koly + KOLY_MASTER_CHECKSUM + 8, (uint32_t)master);
+	fsimg_layer_put_be32(koly + KOLY_VARIANT, DMG_VARIANT);
+	fsimg_layer_put_be64(koly + KOLY_SECTOR_COUNT,
+	    encoder->disk_bytes / DMG_SECTOR_BYTES);
+	return (fsimg_seq_write(encoder->sink, koly, sizeof(koly), error));
+}
+
+/* After the data fork: the plist from its fixed template, then the
+ * trailer.
+ */
+static fsimg_status_t
+dmg_encode_finish(void *state, unsigned pass FSIMG_UNUSED,
+    fsimg_error_t *error)
+{
+	dmg_encoder_t *encoder = state;
+	uint64_t fork_bytes;
+	fsimg_status_t status;
+
+	status = record_zero_run(encoder, error);
+	if (status != FSIMG_OK)
+		return (status);
+	fork_bytes = fsimg_seq_written(encoder->sink);
+	status = fsimg_seq_write(encoder->sink, plist_head, strlen(plist_head),
+	    error);
+	if (status == FSIMG_OK)
+		status = write_table(encoder, fork_bytes, error);
+	if (status == FSIMG_OK)
+		status = fsimg_seq_write(encoder->sink, plist_tail,
+		    strlen(plist_tail), error);
+	if (status == FSIMG_OK)
+		status = write_trailer(encoder, fork_bytes,
+		    fsimg_seq_written(encoder->sink) - fork_bytes, error);
+	return (status);
+}
+
+static void
+dmg_encode_close(void *state)
+{
+	dmg_encoder_t *encoder = state;
+
+	if (encoder->stream_ready)
+		deflateEnd(&encoder->stream);
+	fsimg_store_free(encoder->runs);
+	fsimg_dealloc(encoder->packed);
+	fsimg_dealloc(encoder);
 }

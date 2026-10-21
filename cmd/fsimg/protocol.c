@@ -603,9 +603,13 @@ fsimg_wire_plan_frame_valid(const fsimg_frame_t *frame)
 	if (fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SECTOR) > UINT32_MAX ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_CLUSTER) > UINT32_MAX)
 		return (false);
-	if (fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_IO_FLAGS) > 7)
+	if (fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_IO_FLAGS) > 7 ||
+	    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_OUTPUT) <
+	    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME))
 		return (false);
-	return (memchr(raw + FSIMG_WIRE_PLAN_FORMAT, '\0', 16) != NULL);
+	return (memchr(raw + FSIMG_WIRE_PLAN_FORMAT, '\0', 16) != NULL &&
+	    memchr(raw + FSIMG_WIRE_PLAN_CODEC, '\0',
+	    FSIMG_WIRE_PLAN_CODEC_BYTES) != NULL);
 }
 
 bool

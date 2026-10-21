@@ -15,6 +15,7 @@
  * destination	create directories and files beneath it; remove nothing
  * scratch	create, use and unlink its own files; no directories
  * roots	read beneath each directory root, or read a file root
+ * raw		read, write and resize the unlinked raw intermediate
  *
  * The coordinator, not the worker, removes staging and destination
  * objects. -1 marks an absent role. roots is the first of root_count
@@ -27,6 +28,7 @@ typedef struct fsimg_sandbox_caps {
 	int		 scratch;
 	int		 roots;
 	unsigned	 root_count;
+	int		 raw;
 	int		 job;
 	int		 control;
 	int		 data;

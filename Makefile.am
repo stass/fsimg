@@ -52,7 +52,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/layers/image.c lib/layers/gpt.c lib/layers/mbr.c \
 	lib/layers/plan.c lib/layers/output.c \
 	lib/layers/chunks.c lib/layers/plist.c lib/layers/dmg.c \
-	lib/layers/vhd.c lib/layers/simg.c \
+	lib/layers/vhd.c lib/layers/simg.c lib/layers/transcode.c \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \

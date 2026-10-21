@@ -141,7 +141,7 @@ Defaults are product policy, not a measurement claim:
 | Image path | 64 KiB | Encoded UTF-8 bytes, including separators and terminating NUL |
 | Open descriptors | 128 | Aggregate descriptors owned by a context, further limited by host availability |
 | Extracted logical bytes | Selected volume length | Sum of file lengths, including holes and repeated references; caller may explicitly change it |
-| Created output bytes | Planned length | Logical bytes of the staged output plus, while a transcode holds both, the raw intermediate: the plan sums the disk length and the layers' worst-case encoded length, and an explicit lower limit fails at planning naming both parts |
+| Created output bytes | Planned length | Logical bytes of the staged output plus, while a transcode holds both, the raw intermediate: the plan sums the disk length and the layers' worst-case encoded length, and an explicit lower limit fails before anything is written, naming both parts; a stream holds the raw intermediate too, so it is charged the same way |
 | Diagnostic frame | 64 KiB | Maximum single worker control message |
 
 Limits are configurable and failures identify the exhausted resource. Lower

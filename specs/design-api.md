@@ -620,7 +620,9 @@ available through `fsimg_status_string(status)` without allocation.
 reserved words. Its `flags` field accepts zero. `FSIMG_RESOURCE_SPOOL`
 identifies the spool limit in errors, and `FSIMG_OP_IMAGE` identifies a
 failure in an image's scheme, container or compression layer, or in wrap,
-unwrap or compose. Progress snapshots borrow a phase string for the duration
+unwrap or compose; a layer's own failure, on open, verification or a read
+through its chunks, carries the layer's registry name in `error.path`, so
+a caller such as `cW` attributes it without parsing the message. Progress snapshots borrow a phase string for the duration
 of the synchronous callback. Destructors called from a callback do nothing;
 fallible reentry returns `FSIMG_ESTATE`. This protects the active context without
 introducing deferred destruction or callback-driven lifecycle transitions.

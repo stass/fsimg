@@ -38,6 +38,7 @@ static fsimg_status_t generate_identifiers(fsimg_cli_options_t *, fsimg_error_t 
 static bool random_uuid(unsigned char [static 16]);
 static fsimg_status_t prepare_staging(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
+static fsimg_status_t prepare_raw(fsimg_cli_options_t *, fsimg_error_t *);
 static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t, bool,
     const char *);
 static bool remove_fresh_directory(int, const char *, int);
@@ -405,10 +406,11 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 }
 
 /* Without -R every volume receives a random serial, a format storing a
- * UUID a random version 4 UUID unless one is given, and a partition scheme
+ * UUID a random version 4 UUID unless one is given, a partition scheme
  * random identifiers for those its settings leave unset: version 4 disk
- * and partition GUIDs for GPT, a 32-bit disk identifier for MBR. Under -R
- * the library derives them from the epoch instead.
+ * and partition GUIDs for GPT, a 32-bit disk identifier for MBR, and a DMG
+ * or VHD container a version 4 identifier unless dmg:uuid or vhd:uuid
+ * gives one. Under -R the library derives them from the epoch instead.
  */
 static fsimg_status_t
 generate_identifiers(fsimg_cli_options_t *options, fsimg_error_t *error)
@@ -416,13 +418,22 @@ generate_identifiers(fsimg_cli_options_t *options, fsimg_error_t *error)
 	static const unsigned char nil[16];
 	fsimg_write_options_t *write = &options->request.write;
 	fsimg_layer_options_t *layers = &options->request.layers;
-	const fsimg_stack_slot_t *scheme;
+	const fsimg_stack_slot_t *scheme, *container;
 
 	if ((write->flags & FSIMG_WRITE_REPRODUCIBLE) != 0)
 		return (FSIMG_OK);
 	if (fsimg_host_random(&write->volume_serial, sizeof(write->volume_serial)) == -1 ||
 	    (options->random_uuid && !random_uuid(write->volume_uuid)))
 		return (host_error(error, "volume identifier generation failed"));
+	container = &options->request.stack.slots[FSIMG_LAYER_CONTAINER];
+	if (container->state == FSIMG_SLOT_NAMED &&
+	    ((strcmp(container->name, "dmg") == 0 &&
+	    bcmp(layers->dmg_uuid, nil, sizeof(nil)) == 0 &&
+	    !random_uuid(layers->dmg_uuid)) ||
+	    (strcmp(container->name, "vhd") == 0 &&
+	    bcmp(layers->vhd_uuid, nil, sizeof(nil)) == 0 &&
+	    !random_uuid(layers->vhd_uuid))))
+		return (host_error(error, "container identifier generation failed"));
 	scheme = &options->request.stack.slots[FSIMG_LAYER_SCHEME];
 	if (scheme->state != FSIMG_SLOT_NAMED)
 		return (FSIMG_OK);
@@ -492,6 +503,54 @@ prepare_staging(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	if (count < 0 || (size_t)count >= sizeof(paths->retained_output))
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 		    FSIMG_OP_IO, "private output pathname exceeds host path bound"));
+	return (FSIMG_OK);
+}
+
+/*
+ * The raw intermediate of a creation that writes a container or a stream
+ * (specs/design-layers.md#handed-over-files): created exclusively with
+ * mode 0600 beside the staged image, or in the scratch tree for a stream,
+ * and unlinked at once, so the worker holds a file no name reaches and
+ * nothing is left to clean up on any outcome.
+ */
+static fsimg_status_t
+prepare_raw(fsimg_cli_options_t *options, fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
+	uint64_t random[2];
+	char name[96];
+	int directory, saved;
+	bool stream;
+
+	stream = (request->flags & FSIMG_JOB_STREAM) != 0;
+	if (request->kind != FSIMG_JOB_CREATE || (!stream &&
+	    request->stack.slots[FSIMG_LAYER_CONTAINER].state != FSIMG_SLOT_NAMED))
+		return (FSIMG_OK);
+	directory = stream ? request->scratch_fd : request->output_fd;
+	if (directory == -1)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
+		    "an image on standard output needs scratch for its raw disk"));
+	for (unsigned attempt = 0; attempt < 128 && request->raw_fd == -1;
+	    attempt++) {
+		if (fsimg_host_random(random, sizeof(random)) == -1)
+			return (host_error(error, "raw intermediate randomness failed"));
+		snprintf(name, sizeof(name), ".fsimg-raw-%016llx%016llx",
+		    (unsigned long long)random[0], (unsigned long long)random[1]);
+		request->raw_fd = openat(directory, name, O_RDWR | O_CREAT |
+		    O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+		if (request->raw_fd == -1 && errno != EEXIST)
+			return (host_error(error, "raw intermediate creation failed"));
+	}
+	if (request->raw_fd == -1)
+		return (fsimg_error_set(error, FSIMG_EEXISTS, EEXIST,
+		    FSIMG_OP_IO, "raw intermediate name attempts exhausted"));
+	if (unlinkat(directory, name, 0) == -1) {
+		saved = errno;
+		close(request->raw_fd);
+		request->raw_fd = -1;
+		errno = saved;
+		return (host_error(error, "raw intermediate unlink failed"));
+	}
 	return (FSIMG_OK);
 }
 
@@ -647,11 +706,19 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	switch (request->kind) {
 	case FSIMG_JOB_CREATE:
 	case FSIMG_JOB_PLAN:
+		/* An image stream is binary; a terminal is no place for it. */
+		if ((request->flags & FSIMG_JOB_STREAM) != 0 &&
+		    isatty(STDOUT_FILENO))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
+			    "refusing to write an image to a terminal"));
 		status = open_roots(options, paths, error);
 		if (status == FSIMG_OK)
 			status = generate_identifiers(options, error);
-		if (status == FSIMG_OK && request->kind == FSIMG_JOB_CREATE)
+		if (status == FSIMG_OK && request->kind == FSIMG_JOB_CREATE &&
+		    (request->flags & FSIMG_JOB_STREAM) == 0)
 			status = prepare_staging(options, paths, error);
+		if (status == FSIMG_OK)
+			status = prepare_raw(options, error);
 		break;
 	case FSIMG_JOB_EXTRACT:
 		status = open_input(options, error);
@@ -694,7 +761,8 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	verify->root_fds = NULL;
 	verify->root_paths = NULL;
 	verify->root_count = 0;
-	verify->output_fd = -1;
+	verify->output_fd = verify->raw_fd = -1;
+	verify->flags &= ~FSIMG_JOB_STREAM;
 	verify->offset = verify->length = 0;
 	verify->selector = FSIMG_SELECT_AUTOMATIC;
 	/* Reading takes only the GPT sector size of the layer settings. */
@@ -810,7 +878,8 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	char *last_component;
 	int cleanup, failure;
 	int *descriptors[] = { &request->input_fd, &request->output_fd,
-	    &request->scratch_fd, &paths->parent, &paths->scratch_parent };
+	    &request->scratch_fd, &request->raw_fd, &paths->parent,
+	    &paths->scratch_parent };
 
 	cleanup = 0;
 	if (paths->staging_created && !paths->retain_staging) {
@@ -865,11 +934,17 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 			    cleanup, FSIMG_OP_IO, "private capability cleanup incomplete");
 		error->cleanup_error = cleanup;
 	}
+	/* A stream has no publication: once any byte may have reached stdout,
+	 * the consumer holds an incomplete image; before that, none.
+	 */
 	if (status != FSIMG_OK) {
 		if (paths->published)
 			error->output_state = FSIMG_OUTPUT_PUBLISHED;
 		else if (error->output_state != FSIMG_OUTPUT_UNCERTAIN) {
-			if (paths->extraction_prepared)
+			if (paths->extraction_prepared ||
+			    ((request->flags & FSIMG_JOB_STREAM) != 0 &&
+			    request->output_budget != NULL &&
+			    request->output_budget->stdout_possible))
 				error->output_state = FSIMG_OUTPUT_INCOMPLETE;
 			else if (request->kind == FSIMG_JOB_CREATE)
 				error->output_state = FSIMG_OUTPUT_ABSENT;

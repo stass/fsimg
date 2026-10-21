@@ -436,7 +436,8 @@ Reproducible bytes with stable ordering, identifiers and padding.
 Positive exact logical volume size; omission chooses automatic sizing.
 .It Fl W
 Verify the staged image in a second worker under the image-reading profile
-before publication: the partition table first, then the volume;
+before publication: the container first, then the partition table, then
+the volume;
 .Fl d
 adds payload reads.
 A failed verification discards the staged image, names the layer that
@@ -501,6 +502,82 @@ and six zero bytes, with the version 4 and RFC 4122 variant bits set; the
 MBR identifier is the epoch's low 32 bits.
 Two reproducible disks built at the same epoch therefore share their
 identifiers; set them explicitly to attach such disks side by side.
+.Ss Containers and streams
+A stack naming dmg, vhd or simg, such as
+.Ql fat32/gpt/dmg ,
+writes the disk inside that container.
+The disk is emitted to a private raw file first, then encoded in one
+sequential pass that inspects it in chunks: an all-zero chunk becomes a DMG
+zero run, an unwritten range of a VHD or a sparse image DONT_CARE chunk,
+and a run of them one entry.
+The raw file and the image are both charged to the output limit; an
+explicit
+.Fl l Ar output
+below their sum fails at planning, naming both.
+The disk is rounded up to the container's granularity, which the plan
+reports as padding, with the GPT backup header at its last sector.
+A DMG is a flattened UDIF image with one block table for the whole disk,
+CRC32 table, data fork and master checksums and image variant 2;
+.Xr hdiutil 1
+verifies and attaches it.
+A VHD is the disk and a fixed-disk footer.
+A sparse image is its header, its chunks and an optional CRC32 chunk.
+.Bl -tag -width Ds
+.It Fl o Ar dmg:compress=zlib|none
+Store data chunks zlib-compressed (UDZO) or raw (UDRO); default zlib.
+A chunk that does not shrink is stored raw.
+.It Fl o Ar dmg:level=1..9
+The zlib level; default 6; refused with
+.Ar compress=none .
+.It Fl o Ar dmg:chunk=bytes
+The chunk size, a multiple of 512 up to 16 MiB; default 1 MiB.
+.It Fl o Ar dmg:uuid=guid , Ar vhd:uuid=guid
+The DMG segment ID and the VHD unique ID, as RFC 4122 text, not nil.
+.It Fl o Ar vhd:align=bytes
+Round the disk up to this power of two from 512 bytes to 1 GiB; default
+512.
+.It Fl o Ar simg:block=bytes
+The block size, a power of two from 1 KiB to 1 MiB; default 4096.
+.It Fl o Ar simg:crc=yes|no
+End the image with a CRC32 chunk of the expanded disk; default no.
+.El
+.Pp
+Container identifiers follow the scheme's rule: random without
+.Fl R ,
+derived from the epoch with role byte 3 for the VHD and 4 for the DMG under
+it.
+The VHD timestamp is the creation time, or the epoch under
+.Fl R .
+Reproducible zlib output depends on the zlib version, which the plan and
+.Fl -formats
+name.
+.Pp
+.Fl f Ar -
+writes the image to standard output instead of a file, through a raw file
+in the scratch tree, which is charged to
+.Fl l Ar output
+with the image even without a container;
+it is refused when standard output is a terminal, and
+.Fl W ,
+.Fl a ,
+.Fl -json
+and
+.Fl T Ar -
+are syntax errors with it.
+A stream has no publication: a failure after any byte was written reports
+the output incomplete, and the receiver must discard what it got.
+.Pp
+With
+.Fl a ,
+a
+.Pa .dmg ,
+.Pa .vhd
+or
+.Pa .simg
+suffix, under any compression suffix, must name the stack's container; a
+compression suffix
+.Pq Pa .gz , .zst , .xz
+selects compression, which this version cannot write.
 .Pp
 Import accepts regular files, directories and symbolic links, hierarchy,
 content and representable timestamps.

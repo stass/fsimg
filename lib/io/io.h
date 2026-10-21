@@ -58,6 +58,18 @@ fsimg_status_t fsimg_io_adopt_empty_output(fsimg_ctx_t *, int, fsimg_io_t **,
  * since it never writes that range afterwards.
  */
 bool fsimg_io_proven_zero(const fsimg_io_t *);
+/* Adopt a handed-over file, the spool or the raw intermediate, on every
+ * outcome: only an empty, unlinked, read/write regular file without
+ * O_APPEND is accepted, as a proven-zero object; anything else is
+ * FSIMG_EINVAL naming role in error.path.
+ */
+fsimg_status_t fsimg_io_adopt_handed_over(fsimg_ctx_t *, int, const char *,
+    fsimg_io_t **, fsimg_error_t *);
+/* The first hole the host reports at or after offset of a file-backed
+ * object, as [hole_start, hole_end) within the object; an object or host
+ * that reports none gives hole_start == hole_end == its length.
+ */
+void fsimg_io_next_hole(fsimg_io_t *, uint64_t, uint64_t *, uint64_t *);
 fsimg_status_t fsimg_io_set_times(fsimg_io_t *, const struct timespec *,
     fsimg_error_t *);
 

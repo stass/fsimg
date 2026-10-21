@@ -15,13 +15,13 @@
  * Layered output. Every disk is laid out once, as an assembled disk: a
  * sequence of regions that covers it in order, each a run of table bytes
  * in charged memory, a volume or a run of zeros. Wrap, unwrap and compose
- * stage nothing: one sequential copy writes their assembled disk through
- * the output coordinator, reading each borrowed input once. A writer's disk
- * is staged raw and filled in place from the same regions
+ * stage nothing: their assembled disk is a read-only object over its
+ * regions, which the transcode (fsimg_disk_output) reads once, as it reads
+ * a writer's raw intermediate, so the output path has one input type. A
+ * writer's disk is staged raw and filled in place from the same regions
  * (fsimg_disk_plan_emit): zeros, then the volume its driver emits into a
  * slice, then the tables.
  */
-#define COPY_BUFFER_BYTES	65536u
 
 typedef enum region_kind {
 	REGION_ZERO,
@@ -41,8 +41,8 @@ typedef struct disk_region {
 } disk_region_t;
 
 /* Regions in disk order, contiguous from offset zero to length. session
- * charges the sequential copy of wrap, unwrap and compose; a writer's
- * in-place emission charges the writer's session and leaves it idle.
+ * charges the transcode of wrap, unwrap and compose; a writer's in-place
+ * emission charges the writer's session and leaves it idle.
  */
 typedef struct assembled_disk {
 	disk_region_t	*regions;
@@ -67,13 +67,11 @@ static fsimg_status_t assemble_plan(assembled_disk_t *,
 static fsimg_status_t build_disk(fsimg_ctx_t *, const fsimg_disk_plan_t *,
     fsimg_io_t *const *, const uint64_t *, bool, assembled_disk_t *,
     fsimg_scheme_tables_t *, fsimg_error_t *);
-static fsimg_status_t reject_aliases(const assembled_disk_t *, fsimg_io_t *,
-    fsimg_error_t *);
-static fsimg_status_t copy_disk(assembled_disk_t *, fsimg_io_t *,
-    fsimg_error_t *);
-static fsimg_status_t fill_output(void *, fsimg_io_t *, fsimg_error_t *);
-static fsimg_status_t write_disk(fsimg_ctx_t *, assembled_disk_t *,
+static fsimg_status_t reject_aliases(const assembled_disk_t *,
     const fsimg_sink_t *, fsimg_error_t *);
+static fsimg_status_t disk_resolve(void *, uint64_t, void *, size_t,
+    size_t *, fsimg_error_t *);
+static void disk_keep(void *);
 static fsimg_status_t identify_volume(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
     const char *, char [static 16], fsimg_error_t *);
 static fsimg_status_t write_plan(fsimg_ctx_t *, fsimg_disk_plan_t *,
@@ -263,8 +261,8 @@ assemble_plan(assembled_disk_t *disk, const fsimg_disk_plan_t *plan,
 
 /* A placed plan's assembled disk: its tables encoded and its regions in
  * disk order, the volume regions reading volumes[i]. Without a scheme the
- * one volume is the disk. The caller frees tables and disk->regions on
- * every outcome.
+ * one volume starts the disk, followed by the container's padding. The
+ * caller frees tables and disk->regions on every outcome.
  */
 static fsimg_status_t
 build_disk(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
@@ -284,9 +282,13 @@ build_disk(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
 	    disk, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (plan->scheme == NULL)
-		return (disk_append(disk, REGION_VOLUME, 0, volume_bytes[0], NULL,
-		    volumes[0], error));
+	if (plan->scheme == NULL) {
+		status = disk_append(disk, REGION_VOLUME, 0, volume_bytes[0], NULL,
+		    volumes[0], error);
+		if (status == FSIMG_OK)
+			status = disk_finish(disk, plan->disk_bytes, error);
+		return (status);
+	}
 	status = plan->scheme->scheme->encode(ctx, &plan->table, plan->disk_bytes,
 	    tables, error);
 	if (status == FSIMG_OK)
@@ -299,15 +301,15 @@ build_disk(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
  * name, before the output is touched.
  */
 static fsimg_status_t
-reject_aliases(const assembled_disk_t *disk, fsimg_io_t *output,
+reject_aliases(const assembled_disk_t *disk, const fsimg_sink_t *sink,
     fsimg_error_t *error)
 {
-	fsimg_host_file_t sink, input;
-	bool sink_known, input_known;
+	fsimg_host_file_t output, input;
+	bool output_known, input_known;
 	fsimg_status_t status;
 
-	status = fsimg_io_identity(output, &sink, &sink_known, error);
-	if (status != FSIMG_OK || !sink_known)
+	status = fsimg_sink_identity(sink, &output, &output_known, error);
+	if (status != FSIMG_OK || !output_known)
 		return (status);
 	for (size_t i = 0; i < disk->count; i++) {
 		if (disk->regions[i].kind != REGION_VOLUME)
@@ -316,8 +318,8 @@ reject_aliases(const assembled_disk_t *disk, fsimg_io_t *output,
 		    &input_known, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (input_known && input.device == sink.device &&
-		    input.inode == sink.inode)
+		if (input_known && input.device == output.device &&
+		    input.inode == output.inode)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_IMAGE, "output aliases an input"));
 	}
@@ -325,109 +327,54 @@ reject_aliases(const assembled_disk_t *disk, fsimg_io_t *output,
 }
 
 /*
- * The sequential copy: every region in order, in buffer-sized steps, each
- * charged to the work budget and polled for cancellation. A sink proven
- * zero before the first write keeps zero runs and all-zero input blocks
- * as holes, which the copy never writes afterwards; any other sink gets
- * every byte written.
+ * The assembled disk's bytes at offset: table bytes from memory, zeros,
+ * and volume bytes read through the disk's session, region by region.
+ * The object's bounds keep a request within the disk.
  */
 static fsimg_status_t
-copy_disk(assembled_disk_t *disk, fsimg_io_t *output, fsimg_error_t *error)
-{
-	static const unsigned char zeros[COPY_BUFFER_BYTES];
-	const disk_region_t *region;
-	const unsigned char *bytes;
-	unsigned char *buffer;
-	uint64_t done;
-	size_t batch, transferred;
-	fsimg_status_t status;
-	bool proven_zero, zero_batch;
-
-	buffer = fsimg_alloc(disk->session.ctx, COPY_BUFFER_BYTES, error);
-	if (buffer == NULL)
-		return (error->status);
-	proven_zero = fsimg_io_proven_zero(output);
-	status = FSIMG_OK;
-	for (size_t i = 0; status == FSIMG_OK && i < disk->count; i++) {
-		region = &disk->regions[i];
-		for (done = 0; status == FSIMG_OK && done < region->length;
-		    done += batch) {
-			batch = region->length - done > COPY_BUFFER_BYTES ?
-			    COPY_BUFFER_BYTES : (size_t)(region->length - done);
-			status = fsimg_session_charge(&disk->session, 0, 0, 1, error);
-			if (status != FSIMG_OK)
-				break;
-			bytes = zeros;
-			zero_batch = region->kind == REGION_ZERO;
-			if (region->kind == REGION_TABLE)
-				bytes = region->bytes + done;
-			else if (region->kind == REGION_VOLUME) {
-				status = fsimg_io_read_session(region->volume,
-				    &disk->session, done, buffer, batch, &transferred,
-				    error);
-				if (status != FSIMG_OK)
-					break;
-				bytes = buffer;
-				zero_batch = bcmp(buffer, zeros, batch) == 0;
-			}
-			/* A proven-zero sink already holds a zero batch. */
-			if (proven_zero && zero_batch)
-				continue;
-			status = fsimg_io_write_session(output, &disk->session,
-			    region->offset + done, bytes, batch, &transferred, error);
-		}
-	}
-	fsimg_dealloc(buffer);
-	return (status);
-}
-
-/* Fill the output with the disk: alias, capability and limit checks
- * before any mutation, then resize, copy and flush; a failure after the
- * first mutation leaves the output incomplete.
- */
-static fsimg_status_t
-fill_output(void *argument, fsimg_io_t *output, fsimg_error_t *error)
+disk_resolve(void *argument, uint64_t offset, void *buffer, size_t length,
+    size_t *done, fsimg_error_t *error)
 {
 	assembled_disk_t *disk = argument;
-	fsimg_ctx_t *ctx = disk->session.ctx;
+	unsigned char *out = buffer;
+	const disk_region_t *region;
+	uint64_t within;
+	size_t step, transferred;
 	fsimg_status_t status;
-	bool resize;
 
-	if (fsimg_io_context(output) != ctx)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "inputs and output require the same context"));
-	status = reject_aliases(disk, output, error);
-	if (status == FSIMG_OK)
-		status = fsimg_io_check_output(output, disk->length, disk->durable,
-		    &resize, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (ctx->options.max_output_bytes != 0 &&
-	    disk->length > ctx->options.max_output_bytes)
-		return (fsimg_limit_error(error, FSIMG_RESOURCE_OUTPUT,
-		    ctx->options.max_output_bytes, disk->length));
-	if (resize)
-		status = fsimg_io_resize(output, disk->length, error);
-	if (status == FSIMG_OK)
-		status = copy_disk(disk, output, error);
-	if (status == FSIMG_OK)
-		status = fsimg_io_flush(output, disk->durable, error);
-	if (status != FSIMG_OK && error != NULL)
-		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
+	*done = 0;
+	status = FSIMG_OK;
+	for (size_t i = 0; status == FSIMG_OK && i < disk->count &&
+	    *done < length; i++) {
+		region = &disk->regions[i];
+		if (offset + *done >= region->offset + region->length)
+			continue;
+		within = offset + *done - region->offset;
+		step = region->length - within < length - *done ?
+		    (size_t)(region->length - within) : length - *done;
+		switch (region->kind) {
+		case REGION_ZERO:
+			bzero(out + *done, step);
+			break;
+		case REGION_TABLE:
+			bcopy(region->bytes + within, out + *done, step);
+			break;
+		case REGION_VOLUME:
+			status = fsimg_io_read_session(region->volume,
+			    &disk->session, within, out + *done, step,
+			    &transferred, error);
+			break;
+		}
+		if (status == FSIMG_OK)
+			*done += step;
+	}
 	return (status);
 }
 
-/* A file sink stages, fills and publishes through the output coordinator;
- * an I/O sink is filled in place.
- */
-static fsimg_status_t
-write_disk(fsimg_ctx_t *ctx, assembled_disk_t *disk, const fsimg_sink_t *sink,
-    fsimg_error_t *error)
+/* The object borrows the disk, which write_plan frees. */
+static void
+disk_keep(void *argument FSIMG_UNUSED)
 {
-	if (sink->kind == FSIMG_SINK_FILE)
-		return (fsimg_output_stage(ctx, sink->parent_fd, sink->name,
-		    disk->length, fill_output, disk, NULL, error));
-	return (fill_output(disk, sink->io, error));
 }
 
 /* The filesystem a volume's prefix identifies, forced or detected; name is
@@ -449,8 +396,10 @@ identify_volume(fsimg_ctx_t *ctx, fsimg_io_t *volume, uint64_t length,
 	return (status);
 }
 
-/* Place a resolved plan's volumes, encode its tables and copy the
- * assembled disk to the sink. Without a scheme the one volume is the disk.
+/*
+ * Place a resolved plan's volumes, encode its tables, check the output
+ * limit and the sink against every input, and transcode the assembled
+ * disk to the sink through the plan's container, or copy it without one.
  */
 static fsimg_status_t
 write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
@@ -459,15 +408,27 @@ write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 {
 	assembled_disk_t disk;
 	fsimg_scheme_tables_t tables;
+	fsimg_io_t *object;
+	uint64_t written;
 	fsimg_status_t status;
 
+	object = NULL;
 	status = fsimg_disk_plan_place(plan, volume_bytes, error);
+	if (status == FSIMG_OK)
+		status = fsimg_disk_plan_budget(ctx, plan, false, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = build_disk(ctx, plan, volumes, volume_bytes, durable, &disk,
 	    &tables, error);
 	if (status == FSIMG_OK)
-		status = write_disk(ctx, &disk, sink, error);
+		status = reject_aliases(&disk, sink, error);
+	if (status == FSIMG_OK)
+		status = fsimg_io_resolver(ctx, NULL, disk.length, disk_resolve,
+		    disk_keep, &disk, &object, error);
+	if (status == FSIMG_OK)
+		status = fsimg_disk_output(&disk.session, object, plan, sink,
+		    durable, &written, error);
+	fsimg_io_free(object);
 	fsimg_scheme_tables_free(&tables);
 	fsimg_dealloc(disk.regions);
 	return (status);
@@ -493,12 +454,13 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 	char filesystem[16];
 	uint64_t length;
 	fsimg_error_t local;
+	int raw_fd;
 	fsimg_status_t status;
 
 	if (error == NULL)
 		error = &local;
 	bzero(&plan, sizeof(plan));
-	status = fsimg_sink_adopt(sink, error);
+	status = fsimg_sink_adopt(sink, FSIMG_RAW_NEVER, &raw_fd, error);
 	if (status == FSIMG_OK)
 		status = fsimg_ctx_ready(ctx, error);
 	if (status != FSIMG_OK)
@@ -558,13 +520,14 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	fsimg_ctx_t *ctx;
 	uint64_t length;
 	fsimg_error_t local;
+	int raw_fd;
 	fsimg_status_t status;
 
 	if (error == NULL)
 		error = &local;
 	volume = NULL;
 	bzero(&stack, sizeof(stack));
-	status = fsimg_sink_adopt(sink, error);
+	status = fsimg_sink_adopt(sink, FSIMG_RAW_NEVER, &raw_fd, error);
 	if (status == FSIMG_OK)
 		status = check_mode(options, &selected, &layers, error);
 	if (status == FSIMG_OK)
@@ -607,12 +570,13 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 	bool typed;
 	char filesystem[16], key[32];
 	fsimg_error_t local;
+	int raw_fd;
 	fsimg_status_t status;
 
 	if (error == NULL)
 		error = &local;
 	bzero(&plan, sizeof(plan));
-	status = fsimg_sink_adopt(sink, error);
+	status = fsimg_sink_adopt(sink, FSIMG_RAW_NEVER, &raw_fd, error);
 	if (status == FSIMG_OK)
 		status = fsimg_ctx_ready(ctx, error);
 	if (status != FSIMG_OK)

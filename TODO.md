@@ -33,21 +33,28 @@
   * The split staging, destination, scratch and root grants and the
     destination fixtures have run only on macOS, which has no sandbox
     backend; run `test-sandbox`, `test-sandbox-setup` and the CLI
-    destination tests on Linux (Landlock) and FreeBSD (Capsicum).
+    destination tests on Linux (Landlock) and FreeBSD (Capsicum). The raw
+    intermediate role and a stream creation's data channel, with its
+    `CAP_FSTAT` right, have likewise run only unconfined
+    (`cmd/fsimg/sandbox.c`).
   * `c -v` and `x -v` do not yet print one line per entry: the writer and
     extractor have no per-entry callback for the worker to relay
     (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
-  * On creation, container and compression `-o` keys are accepted unread
-    once their layer is selected, without the layer's key table, and `-a`
-    does not yet apply the container-suffix and reserved-suffix rules of the
-    contract; both arrive with stages 3 and 4 (`cmd/fsimg/options.c`).
+  * On creation, compression `-o` keys such as `gzip:level` are accepted
+    unread once `-z` selects gzip, without the layer's key table; it arrives
+    with stage 4 (`cmd/fsimg/options.c`).
   * Tests do not yet feed the worker a malformed path sequence (a count
     differing from the record, a missing terminator, an extra or empty
-    SELECTION frame), and no test drives a `cW` whose staged image fails
-    verification to show it is discarded unpublished and, for a
-    partitioned disk, that the failure names the partition table or the
-    volume; the display's attribution is tested only with synthetic errors
-    (`cmd/fsimg/worker-child.c`, `test/worker.c`, `test/cli.py`).
+    SELECTION frame), and no test drives a whole `cW` whose staged image
+    fails verification: `test/worker.c` runs the verification job on a
+    container corrupted after creation and checks the layer it names, and
+    the display's attribution is tested with that error, but the command
+    has no fault hook to corrupt its own staged file between the two
+    workers (`cmd/fsimg/worker-child.c`, `test/worker.c`, `test/cli.py`).
+  * [Low] The forged-worker tests cover no creation job, so the
+    coordinator's checks of a container's PLAN output, of DONE's staged
+    length and of a stream's raw bytes against its plan run only against
+    the real worker (`cmd/fsimg/worker-parent.c`, `test/worker.c`).
   * `x` and `t` accept one member; several members, the union of their
     subtrees resolved by each format's lookup rules, are refused with exit 1
     (`cmd/fsimg/options.c`, `lib/read/`).
@@ -56,21 +63,12 @@
     `survey_layers` beside the filesystems' `fsimg_format_survey`, so the
     two claim rules must be kept in step. One survey over both registries
     would remove the obligation (`lib/layers/image.c`).
-  * [Medium] `W -d` on a container computes its checksums over every
-    declared disk byte, zero runs and DONT_CARE chunks included, by reading
-    them; a small image declaring a vast zero disk costs time in proportion
-    to the declared length, bounded only by the work limit and the
-    deadline. Combining the CRC32 of a zero run arithmetically
-    (`crc32_combine` over a zero CRC built by doubling) would make it cost
-    in proportion to the image (`lib/layers/dmg.c` `verify_run`,
-    `lib/layers/simg.c` `verify_chunk`).
   * [Medium] The coordinator bounds default output by the disk length the
-    worker reports for a container image, which it cannot check against
-    the file; a compromised worker could raise it. A fixed VHD's disk must
-    be the file less 512 bytes, which the IMAGE frame check could enforce,
-    and a default ceiling for container images derived from the file
-    length would take the rest of the trust out (`cmd/fsimg/protocol.c`,
-    `cmd/fsimg/worker-parent.c` `bound_volume`).
+    worker reports for a DMG or sparse image, which it cannot check against
+    the file; a compromised worker could raise it. A fixed VHD's disk is
+    checked to be the file less its footer; a default ceiling for the
+    other containers derived from the file length would take the rest of
+    the trust out (`cmd/fsimg/worker-parent.c` `bound_volume`).
   The layer write side leaves these open:
   * [Medium] A fixed disk without `-s` fits the volume to whole 512-byte
     sectors (or `-o sector=`) before the driver chooses its geometry. Every
@@ -79,9 +77,50 @@
     into a geometry error. Fitting to the planned geometry, or re-checking
     the volume against it after planning, would hold by construction
     (`lib/write/writer.c` `plan_layers`).
-  * [Low] `cW` attributes a staged failure to the partition table from the
-    error's operation (`FSIMG_OP_IMAGE`) rather than from a layer the
-    verification reports (`cmd/fsimg/display.c`).
+  * [Medium] The transcode asks the host for holes (`SEEK_HOLE`) in the raw
+    intermediate it has just written without a durable flush. OpenZFS
+    2.2.0 and 2.2.1 could report dirty, unsynced data as a hole, which
+    would encode written blocks as zeros. Owner decision: `fsync` the raw
+    intermediate before the transcode when discovery is on, or rely on the
+    zero test alone and drop discovery for the intermediate
+    (`lib/layers/transcode.c` `transcode_pass`).
+  * [Medium] Wrap and compose transcode from a resolver object, which
+    reports no holes, so every zero byte of a large sparse input is read
+    and compared rather than skipped; the resolver could report the holes
+    of the ranges it maps (`lib/layers/output.c`, `lib/io/io.c`
+    `fsimg_io_next_hole`).
+  * [Low] Whether a creation needs a raw intermediate is decided in four
+    places that must agree: `prepare_raw` in `cmd/fsimg/paths.c`, the
+    capability set in `cmd/fsimg/job.c` and `cmd/fsimg/worker-child.c`,
+    and `fsimg_writer_output`'s need in `lib/write/writer.c`. One
+    predicate over the stack and the sink, shared by all four, would hold
+    it by construction.
+  * [Low] The coordinator takes a container's largest encoding from the
+    worker's PLAN, checked only to exceed the disk, and a stream without
+    `-l output` is bounded by it; a ceiling the coordinator derives from
+    the request's container and disk would remove that trust
+    (`cmd/fsimg/worker-parent.c` `plan_frame_expected`). Likewise a fixed
+    VHD's 512-byte footer is known to the coordinator by name
+    (`read_disk_expected`) rather than from the layer registry.
+  * [Low] A container output's sink is checked and sized to the largest
+    encoding only after the whole raw disk is emitted, so a sink that
+    cannot take a container fails late, and a host without sparse files
+    allocates the bound until the sink is trimmed at close
+    (`lib/write/writer.c` `output_through_raw`, `lib/layers/transcode.c`
+    `sink_open`).
+  * [Low] A layer's failure is attributed by `layer_failed` at each of its
+    call sites in `lib/layers/image.c` and by the chunk index in
+    `lib/layers/chunks.c`; a new layer entry point must remember to call
+    it. The DMG encoder and the chunk index each carry their own zlib
+    allocator over the context (`lib/layers/dmg.c`,
+    `lib/layers/chunks.c`).
+  * [Low] `fsimg_writer_output` holds the bare raw descriptor between the
+    sink's adoption and its handover to `fsimg_io_adopt_handed_over`, so
+    an early return added between them must close it; one helper that
+    either returns the adopted object or has closed the descriptor would
+    hold it by construction (`lib/write/writer.c`). `-z -a` compares the
+    suffix's layer with the name "gzip" rather than with the compression
+    `-z` selects (`cmd/fsimg/options.c` `gzip_named`).
   * [Low] No oracle checks the MBR CHS fields fsimg writes (`sfdisk` and
     `fdisk` compare start, size and type), mtools never reads a FAT volume
     through a GPT disk, and unwrap is tested only to I/O sinks with the

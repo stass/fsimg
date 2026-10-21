@@ -388,6 +388,12 @@ fsimg_test_fail_alloc_after(fsimg_ctx_t *ctx, uint64_t attempt)
 	ctx->fail_allocation = attempt;
 }
 
+void
+fsimg_test_hole_discovery(fsimg_ctx_t *ctx, bool enabled)
+{
+	ctx->no_hole_discovery = !enabled;
+}
+
 fsimg_status_t
 fsimg_fd_reserve(fsimg_ctx_t *ctx, fsimg_error_t *error)
 {

@@ -30,7 +30,13 @@ images. `test/containers-integration.sh` checks that fsimg reads what each
 writes exactly as the raw disk the tools expand it to, reports each missing
 tool and skips only when none is present. `img2simg` aborts on a disk that
 is not a whole number of 4 KiB blocks, so its fixture sets the GPT disk
-length.
+length. The same script checks the containers fsimg writes: `hdiutil
+verify`, `attach -nomount` and `detach` (no privilege is needed for an
+image file) and `convert -format UDTO`, `qemu-img info` and `convert` of
+the DMGs and VHDs, `simg2img`, and `sgdisk -v` on the disk inside, each
+expansion compared byte for byte with the raw disk; a DMG with a flipped
+data fork byte must fail both `hdiutil verify` and `fsimg W -d`.
+`qemu-img check` has no checks for fixed VHDs, and the script says so.
 Release archives include generated Autotools support and build without those
 generators. The installed library's one third-party runtime dependency is
 the system zlib, which DMG chunks (and gzip) require: `configure` finds it
