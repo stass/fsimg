@@ -16,9 +16,6 @@ static fsimg_status_t ifs_resolve(fsimg_reader_t *, uint64_t,
 static void add_detail(fsimg_volume_info_t *, const char *, uint64_t);
 static void report_info(fsimg_reader_t *);
 
-/* Full verification is a later addition; until it exists the format
- * advertises no verify capability.
- */
 const fsimg_reader_ops_t fsimg_ifs_reader_ops = {
 	.open = ifs_open,
 	.close = ifs_close,
@@ -29,7 +26,7 @@ const fsimg_reader_ops_t fsimg_ifs_reader_ops = {
 	.ambiguous = "duplicate ImageFS path",
 	.name_profile = FSIMG_NAME_PROFILE_QNX,
 	.resolve = ifs_resolve,
-	.verify = NULL
+	.verify = ifs_verify
 };
 
 fsimg_ifs_reader_t *
@@ -116,9 +113,9 @@ report_info(fsimg_reader_t *reader)
 	fsimg_volume_info_t *info = &reader->info;
 	bool bootable;
 
-	bootable = header->script_ino != 0;
-	for (unsigned i = 0; i < IFS_BOOT_SLOTS; i++)
-		if (header->boot_ino[i] != 0)
+	bootable = false;
+	for (unsigned i = 0; i < IFS_REFERENCES; i++)
+		if (ifs_reference(header, i) != 0)
 			bootable = true;
 	strcpy(info->format, "ifs");
 	strcpy(info->profile, header->order == IFS_BIG_ENDIAN ?

@@ -123,6 +123,12 @@ returned; when that last record is a file, symbolic link or FIFO, no
 record below its path is returned, and info counts both kinds of hidden
 record as shadowed.
 .Fn fsimg_verify
+on an ImageFS checks the additive checksum over the whole image, the
+volume's length against the image size, and that each nonzero boot or
+script reference names exactly one entry, omitted ones included, and that
+entry a regular file; an invalid mountpoint makes it
+.Dv FSIMG_EUNSUPPORTED .
+.Fn fsimg_verify
 requires an untouched reader and consumes traversal.
 FSIMG_VERIFY_PAYLOAD also reads initialized payload bytes.
 Its report is complete only after the entire requested scope succeeds.

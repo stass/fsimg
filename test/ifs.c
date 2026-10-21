@@ -541,9 +541,21 @@ typedef struct model {
 	uint64_t	 omitted;
 	uint64_t	 omitted_references;
 	uint32_t	 references[5];
+	/* Per reference, the nodes carrying its inode word, the root and
+	 * omitted ones included, and the kind of the last of them.
+	 */
+	uint64_t	 reference_matches[5];
+	gen_kind_t	 reference_kind[5];
+	/* The content bytes of every walked file and link, omitted ones
+	 * included: what payload verification reads.
+	 */
+	uint64_t	 walked_bytes;
 	uint32_t	 mount_flags;
 	uint32_t	 chain;
 	uint32_t	 image_size;
+	/* The slice length, and the word sum of [0, image_size). */
+	size_t		 length;
+	uint32_t	 sum;
 	bool		 big;
 	bool		 mountpoint_valid;
 	char		 mountpoint[1025];
@@ -810,6 +822,24 @@ model_records_below(const model_t *m, size_t node)
 	return (count);
 }
 
+/* A node's record matches each nonzero reference carrying its inode word;
+ * hidden names a node at or below a name outside the profile.
+ */
+static void
+model_match(model_t *m, long record, bool hidden)
+{
+	const model_record_t *rec = &m->records[record];
+
+	for (unsigned r = 0; r < 5; r++) {
+		if (m->references[r] == 0 || m->references[r] != rec->inode)
+			continue;
+		m->reference_matches[r]++;
+		m->reference_kind[r] = rec->kind;
+		if (hidden)
+			m->omitted_references++;
+	}
+}
+
 /* List the subtree of node depth first, children in component order;
  * hidden is set below a name outside the profile. Below a node whose last
  * record is not a directory nothing is listed and every record is
@@ -869,10 +899,13 @@ model_list(model_t *m, size_t node, const char *path, bool hidden)
 			m->omitted++;
 		if (c->record < 0)
 			m->implicit++;
-		for (unsigned r = 0; r < 5 && c->record >= 0; r++)
-			if (m->references[r] != 0 && (hidden || outside) &&
-			    m->references[r] == m->records[c->record].inode)
-				m->omitted_references++;
+		else {
+			model_match(m, c->record, hidden || outside);
+			if (m->records[c->record].kind == GEN_FILE ||
+			    m->records[c->record].kind == GEN_LINK)
+				m->walked_bytes +=
+				    m->records[c->record].content_length;
+		}
 		if (!hidden && !outside)
 			model_deliver(m, c, child_path);
 		model_list(m, children[i], child_path, hidden || outside);
@@ -903,9 +936,12 @@ model_build(model_t *m, const unsigned char *image, size_t length)
 	uint32_t dir_offset, hdr_dir_size, offset, record_length;
 
 	bzero(m, sizeof(*m));
+	m->length = length;
 	m->status = model_header(m, image, length, &dir_offset, &hdr_dir_size);
 	if (m->status != FSIMG_OK)
 		return;
+	for (uint32_t o = 0; o < m->image_size; o += 4)
+		m->sum += model_u32(m, image + o);
 	for (offset = dir_offset; offset < hdr_dir_size - 4;
 	    offset += record_length) {
 		m->status = model_record(m, image, offset, hdr_dir_size - 4,
@@ -948,7 +984,34 @@ model_build(model_t *m, const unsigned char *image, size_t length)
 	}
 	if (m->nodes[0].record < 0)
 		m->implicit++;
+	else
+		model_match(m, m->nodes[0].record, false);
 	model_list(m, 0, "", false);
+}
+
+/* What full verification of an image that opens must return: an invalid
+ * mountpoint is out of scope, a volume longer than image_size and a
+ * nonzero word sum are corrupt, and each nonzero reference must name
+ * exactly one node, a regular file.
+ */
+static fsimg_status_t
+model_verify(const model_t *m)
+{
+	if (m->status != FSIMG_OK)
+		return (m->status);
+	if (!m->mountpoint_valid)
+		return (FSIMG_EUNSUPPORTED);
+	if (m->length != m->image_size || m->sum != 0)
+		return (FSIMG_ECORRUPT);
+	for (unsigned r = 0; r < 5; r++) {
+		if (m->references[r] == 0)
+			continue;
+		if (m->reference_matches[r] != 1)
+			return (FSIMG_ECORRUPT);
+		if (m->reference_kind[r] != GEN_FILE)
+			return (FSIMG_EUNSUPPORTED);
+	}
+	return (FSIMG_OK);
 }
 
 /*
@@ -1268,8 +1331,100 @@ listing_matches(const listing_t *l, const model_t *m, const char *label)
 	return (true);
 }
 
+/* Open the first length bytes of image and verify them with flags; the
+ * status of open is returned when it fails. A failed report must be
+ * incomplete and count no allocation, and only a completed verification
+ * makes info report the free bytes, which are zero.
+ */
+static fsimg_status_t
+verify_slice(const unsigned char *image, size_t length, unsigned flags,
+    fsimg_verify_report_t *report, fsimg_error_t *error)
+{
+	fsimg_volume_info_t info;
+	fsimg_status_t status;
+	fixture_t f;
+
+	bzero(report, sizeof(*report));
+	fixture_open(&f, image, length, 600);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, error);
+	if (status == FSIMG_OK) {
+		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+		CHECK((info.valid & FSIMG_VOLUME_FREE) == 0);
+		CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
+		status = fsimg_verify(f.reader, flags, report, error);
+		CHECK(report->complete == (status == FSIMG_OK));
+		/* A failed verification reports no allocation and leaves no
+		 * volume information to read.
+		 */
+		CHECK(status == FSIMG_OK || (report->allocated_clusters == 0 &&
+		    fsimg_reader_get_info(f.reader, &info, NULL) ==
+		    FSIMG_ESTATE));
+	}
+	if (status == FSIMG_OK) {
+		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+		CHECK((info.valid & FSIMG_VOLUME_FREE) != 0 &&
+		    info.free_bytes == 0);
+	}
+	fixture_close(&f);
+	return (status);
+}
+
+/* Verify an image that opens, structurally and with payload reads, and
+ * compare the status with the model's and each report with the model's
+ * counts: the delivered entries, the root included, and the payload of
+ * every walked file and link, omitted ones included.
+ */
+static bool
+verify_matches(const unsigned char *image, size_t length, const model_t *m,
+    const char *label)
+{
+	static const unsigned scopes[] = { 0, FSIMG_VERIFY_PAYLOAD };
+	fsimg_status_t expected = model_verify(m);
+
+	for (size_t i = 0; i < sizeof(scopes) / sizeof(scopes[0]); i++) {
+		fsimg_verify_report_t report;
+		fsimg_error_t error;
+		fsimg_status_t status;
+		uint64_t files = 0, directories = 1, bytes = 0;
+
+		bzero(&error, sizeof(error));
+		status = verify_slice(image, length, scopes[i], &report, &error);
+		if (status != expected) {
+			fprintf(stderr, "%s: verify %d (%s), model %d\n", label,
+			    status, error.message, expected);
+			return (false);
+		}
+		if (status != FSIMG_OK)
+			continue;
+		for (size_t e = 0; e < m->entry_count; e++) {
+			if (m->entries[e].kind == GEN_DIR) {
+				directories++;
+				continue;
+			}
+			files++;
+			if (m->entries[e].kind != GEN_FIFO)
+				bytes += m->entries[e].content_length;
+		}
+		if (report.scope != (scopes[i] == 0 ?
+		    FSIMG_VALIDATION_STRUCTURAL : FSIMG_VALIDATION_PAYLOAD) ||
+		    report.files != files || report.directories != directories ||
+		    report.logical_bytes != bytes ||
+		    report.payload_bytes_read != (scopes[i] == 0 ? 0 :
+		    m->walked_bytes) ||
+		    report.allocated_clusters != m->image_size ||
+		    report.free_clusters != 0 || report.bad_clusters != 0 ||
+		    report.omitted_entries != m->omitted) {
+			fprintf(stderr, "%s: verification report differs from "
+			    "the model\n", label);
+			return (false);
+		}
+	}
+	return (true);
+}
+
 /* Read the first length bytes of image and require status, and agreement
- * with the model, which must predict the same status.
+ * with the model, which must predict the same status. An image that opens
+ * is also verified against the model.
  */
 static void
 expect_slice(const unsigned char *image, size_t length, fsimg_status_t status,
@@ -1285,6 +1440,8 @@ expect_slice(const unsigned char *image, size_t length, fsimg_status_t status,
 		    label, status, l.status, l.error.message, m.status);
 	CHECK(l.status == status && m.status == status);
 	CHECK(listing_matches(&l, &m, label));
+	if (m.status == FSIMG_OK)
+		CHECK(verify_matches(image, length, &m, label));
 	listing_free(&l);
 	model_free(&m);
 }
@@ -1293,6 +1450,21 @@ static void
 expect(gen_t *g, fsimg_status_t status, const char *label)
 {
 	expect_slice(g->image, g->length, status, label);
+}
+
+/* Require an image that opens to verify with status. */
+static void
+expect_verify(gen_t *g, fsimg_status_t status, const char *label)
+{
+	model_t m;
+
+	expect(g, FSIMG_OK, label);
+	model_build(&m, g->image, g->length);
+	if (model_verify(&m) != status)
+		fprintf(stderr, "%s: the model verifies %d, expected %d\n",
+		    label, model_verify(&m), status);
+	CHECK(model_verify(&m) == status);
+	model_free(&m);
 }
 
 /* Require the image to list exactly the paths in order, NULL-terminated,
@@ -1384,7 +1556,7 @@ test_sample(void)
 	CHECK(strcmp(l.info.profile, "little-endian") == 0);
 	CHECK(l.info.valid == (FSIMG_VOLUME_GEOMETRY | FSIMG_VOLUME_MOUNTPOINT));
 	CHECK(strcmp(l.info.mountpoint, "/") == 0);
-	CHECK(l.info.capabilities == FSIMG_CAP_READ);
+	CHECK(l.info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 	CHECK(l.info.volume_bytes == g.image_size);
 	CHECK(l.info.allocation_units == g.image_size);
 	CHECK(l.info.time_basis == FSIMG_TIME_UTC);
@@ -2176,6 +2348,8 @@ test_hierarchy(void)
 	    m.implicit == 512);
 	list_image(g.image, g.length, 600, &l);
 	CHECK(listing_matches(&l, &m, "depth 512"));
+	CHECK(m.status != FSIMG_OK ||
+	    verify_matches(g.image, g.length, &m, "depth 512"));
 	listing_free(&l);
 	list_image(g.image, g.length, 0, &l);
 	CHECK(l.status == FSIMG_ELIMIT &&
@@ -2766,12 +2940,42 @@ test_metadata(void)
 	gen_free(&g);
 }
 
+/* An image of the given members, then a boot program and a script, with
+ * boot_ino[0] naming the boot program, script_ino the script and
+ * boot_ino[slot] the member at index.
+ */
+static void
+reference_image(gen_t *g, const char *const *members, unsigned slot,
+    size_t index)
+{
+	size_t boot;
+
+	tree_image(g, members);
+	boot = gen_file(g, "proc/boot/procnto", "kernel");
+	g->members[boot].inode |= 0xe0000000u;
+	g->script = g->members[gen_file(g, "proc/boot/.script", "script")].inode;
+	g->boot[0] = g->members[boot].inode;
+	g->boot[slot] = g->members[index].inode;
+	gen_finish(g);
+}
+
+static void
+expect_reference(const char *const *members, size_t index,
+    fsimg_status_t status, const char *label)
+{
+	gen_t g;
+
+	reference_image(&g, members, 1, index);
+	expect_verify(&g, status, label);
+	gen_free(&g);
+}
+
 static void
 test_references(void)
 {
 	fsimg_volume_info_t info;
 	gen_t g;
-	size_t boot, script;
+	size_t boot, script, twin;
 
 	gen_init(&g);
 	gen_root(&g);
@@ -2781,25 +2985,323 @@ test_references(void)
 	g.boot[0] = g.members[boot].inode;
 	g.script = g.members[script].inode;
 	gen_finish(&g);
-	expect(&g, FSIMG_OK, "a bootable image");
+	expect_verify(&g, FSIMG_OK, "a bootable image");
 	image_info(&g, &info);
 	CHECK(strcmp(info.profile, "little-endian, bootable") == 0);
 	CHECK(detail(&info, "boot_ino_0") == g.members[boot].inode);
 	CHECK(detail(&info, "script_ino") == g.members[script].inode);
 	CHECK(detail(&info, "flags_e") == 1);
 	CHECK(detail(&info, "omitted_references") == 0);
+	/* The flag nibble is part of the inode word a reference names. */
+	g.boot[0] = g.members[boot].inode & 0x0fffffffu;
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_ECORRUPT, "a reference without the flag nibble");
+	g.boot[0] = g.members[boot].inode;
+	/* Two records carrying one word. */
+	twin = gen_file(&g, "proc/boot/twin", "twin");
+	g.members[twin].inode = g.members[script].inode;
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_ECORRUPT, "a reference naming two records");
 	gen_free(&g);
 
 	/* Any nonzero slot makes the image bootable; open does not judge a
 	 * reference, which verification checks.
 	 */
 	sample(&g);
+	expect_verify(&g, FSIMG_OK, "all references zero");
 	g.boot[3] = 0x12345;
 	gen_finish(&g);
-	expect(&g, FSIMG_OK, "a reference naming no record");
+	expect_verify(&g, FSIMG_ECORRUPT, "a reference naming no record");
 	image_info(&g, &info);
 	CHECK(strcmp(info.profile, "little-endian, bootable") == 0);
 	CHECK(detail(&info, "boot_ino_3") == 0x12345);
+	g.boot[3] = g.members[1].inode;
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_OK, "boot_ino[3] naming one file");
+	gen_free(&g);
+
+	/* A shadowed record has no entry: a reference naming only an earlier
+	 * duplicate or a record below a link names nothing, while the
+	 * duplicate's entry is named.
+	 */
+	expect_reference((const char *[]){ "d:", "f:dup", "f:dup", NULL }, 1,
+	    FSIMG_ECORRUPT, "a reference naming an earlier duplicate");
+	expect_reference((const char *[]){ "d:", "f:dup", "f:dup", NULL }, 2,
+	    FSIMG_OK, "a reference naming the duplicate's entry");
+	expect_reference((const char *[]){ "d:", "l:L", "f:L/x", NULL }, 2,
+	    FSIMG_ECORRUPT, "a reference naming a record below a link");
+	/* Every other kind is refused, the root record's included. */
+	expect_reference((const char *[]){ "d:", "d:dir", NULL }, 1,
+	    FSIMG_EUNSUPPORTED, "a reference naming a directory");
+	expect_reference((const char *[]){ "d:", "f:x", NULL }, 0,
+	    FSIMG_EUNSUPPORTED, "a reference naming the root");
+	expect_reference((const char *[]){ "d:", "l:link", NULL }, 1,
+	    FSIMG_EUNSUPPORTED, "a reference naming a link");
+	expect_reference((const char *[]){ "d:", "p:pipe", NULL }, 1,
+	    FSIMG_EUNSUPPORTED, "a reference naming a FIFO");
+
+	/* Matching counts nodes only, so a shadowed record carrying the word
+	 * of the entry a reference names does not disturb it. Whether
+	 * verification should refuse such an image is open
+	 * (docs/todo-ifs.md).
+	 */
+	reference_image(&g, (const char *[]){ "d:", "f:dup", "f:dup", NULL }, 1,
+	    2);
+	g.members[1].inode = g.members[2].inode;
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_OK, "a shadowed duplicate carrying the word");
+	gen_free(&g);
+	reference_image(&g, (const char *[]){ "d:", "f:x", "l:L", "f:L/y", NULL },
+	    1, 1);
+	g.members[3].inode = g.members[1].inode;
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_OK, "a record below a link carrying the word");
+	gen_free(&g);
+}
+
+/*
+ * Verification.
+ */
+
+/* Flip one byte of a finished image: it still opens, and only the
+ * checksum notices; flipped back, it verifies again.
+ */
+static void
+expect_flip(gen_t *g, size_t offset, const char *label)
+{
+	g->image[offset] ^= 0x10;
+	expect_verify(g, FSIMG_ECORRUPT, label);
+	g->image[offset] ^= 0x10;
+	expect_verify(g, FSIMG_OK, label);
+}
+
+/* Fill every byte no decision reads with 0xee: each record's bytes after
+ * its path, or its link target, and their NUL, and the gaps in the data
+ * region; then recompute the trailer.
+ */
+static void
+fill_padding(gen_t *g)
+{
+	unsigned char *used;
+
+	for (size_t i = 0; i < g->count; i++) {
+		const gen_member_t *m = &g->members[i];
+		size_t end = kinds[m->kind].path + m->path_length + 1;
+
+		if (m->kind == GEN_LINK)
+			end += m->bytes_length + 1;
+		memset(g->image + m->table_offset + end, 0xee, m->length - end);
+	}
+	used = calloc(1, g->image_size);
+	CHECK(used != NULL);
+	for (size_t i = 0; i < g->count; i++)
+		if (g->members[i].kind == GEN_FILE)
+			memset(used + g->members[i].data_offset, 1,
+			    g->members[i].bytes_length);
+	for (size_t o = g->hdr_dir_size; o < g->image_size - 4; o++)
+		if (!used[o])
+			g->image[o] = 0xee;
+	free(used);
+	gen_trailer(g);
+}
+
+/* Open image under a work limit and verify it; *opened tells whether open
+ * succeeded, and the status is the first failure.
+ */
+static fsimg_status_t
+verify_with_work(const unsigned char *image, size_t length, uint64_t work,
+    bool *opened, fsimg_error_t *error)
+{
+	fsimg_verify_report_t report;
+	fsimg_options_t options;
+	fsimg_io_ops_t ops;
+	fsimg_status_t status;
+	fixture_t f;
+
+	bzero(&f, sizeof(f));
+	f.image = image;
+	f.length = length;
+	fsimg_options_init(&options);
+	options.max_work = work;
+	CHECK(fsimg_ctx_new(&options, &f.ctx, NULL) == FSIMG_OK);
+	fsimg_io_ops_init(&ops);
+	ops.read_at = image_read;
+	ops.get_size = image_size;
+	CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &f, &f.io, NULL) ==
+	    FSIMG_OK);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, error);
+	*opened = status == FSIMG_OK;
+	if (*opened)
+		status = fsimg_verify(f.reader, 0, &report, error);
+	fsimg_reader_free(f.reader);
+	fsimg_io_free(f.io);
+	fsimg_ctx_free(f.ctx);
+	return (status);
+}
+
+/* The work verification of a root and one file of length bytes needs
+ * beyond what opening it needs: the smallest limits under which each
+ * succeeds, found by trying every limit. Just below verification's,
+ * opening succeeds and verification runs out of work.
+ */
+static uint64_t
+verify_work(size_t length)
+{
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t work, open_work;
+	size_t index;
+	bool opened;
+	gen_t g;
+
+	gen_init(&g);
+	gen_root(&g);
+	index = gen_add_bytes(&g, GEN_FILE, "f", 1, NULL, 0);
+	free(g.members[index].bytes);
+	g.members[index].bytes = xmalloc(length);
+	memset(g.members[index].bytes, 'w', length);
+	g.members[index].bytes_length = length;
+	gen_finish(&g);
+	open_work = 0;
+	for (work = 1;; work++) {
+		CHECK(work < 1000);
+		bzero(&error, sizeof(error));
+		status = verify_with_work(g.image, g.length, work, &opened,
+		    &error);
+		if (opened && open_work == 0)
+			open_work = work;
+		if (status == FSIMG_OK)
+			break;
+		CHECK(status == FSIMG_ELIMIT &&
+		    error.resource == FSIMG_RESOURCE_WORK);
+	}
+	CHECK(open_work != 0 && open_work < work);
+	gen_free(&g);
+	return (work - open_work);
+}
+
+static void
+test_verify(void)
+{
+	fsimg_verify_report_t report;
+	unsigned char trailer[4];
+	gen_t g;
+
+	/* The sample's report: five files of 24 bytes, the link target
+	 * included, and four directories, the root and the two implicit ones
+	 * included; every byte of the image is an allocation unit in use.
+	 */
+	sample(&g);
+	expect_verify(&g, FSIMG_OK, "the sample");
+	CHECK(verify_slice(g.image, g.length, FSIMG_VERIFY_PAYLOAD, &report,
+	    NULL) == FSIMG_OK);
+	CHECK(report.files == 5 && report.directories == 4 &&
+	    report.logical_bytes == 24 && report.payload_bytes_read == 24 &&
+	    report.allocated_clusters == g.image_size &&
+	    report.free_clusters == 0 && report.omitted_entries == 0);
+
+	/* One flipped byte in each region, and a byte-swapped trailer. */
+	expect_flip(&g, H_MOUNT_FLAGS, "a flipped header byte");
+	expect_flip(&g, H_MOUNTPOINT, "a flipped mountpoint byte");
+	expect_flip(&g, H_MOUNTPOINT + 2, "flipped mountpoint padding");
+	expect_flip(&g, g.members[1].table_offset + R_UID,
+	    "a flipped record byte");
+	expect_flip(&g, g.members[1].table_offset + g.members[1].length - 1,
+	    "flipped record padding");
+	expect_flip(&g, g.members[1].data_offset, "a flipped data byte");
+	expect_flip(&g, g.image_size - 1, "a flipped trailer byte");
+	bcopy(g.image + g.image_size - 4, trailer, sizeof(trailer));
+	for (unsigned i = 0; i < 4; i++)
+		g.image[g.image_size - 4 + i] = trailer[3 - i];
+	CHECK(bcmp(trailer, g.image + g.image_size - 4, 4) != 0);
+	expect_verify(&g, FSIMG_ECORRUPT, "a byte-swapped trailer");
+	gen_free(&g);
+
+	/* A big-endian image sums in its own order. */
+	gen_init(&g);
+	g.big = true;
+	gen_root(&g);
+	gen_file(&g, "a.txt", "hello");
+	gen_link(&g, "l", "a.txt");
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_OK, "a big-endian image");
+	g.big = false;
+	gen_trailer(&g);
+	g.big = true;
+	expect_verify(&g, FSIMG_ECORRUPT,
+	    "a big-endian image summed little-endian");
+	gen_free(&g);
+
+	/* Nonzero padding in the mountpoint, the records and the data gaps
+	 * verifies under a correct trailer.
+	 */
+	gen_init(&g);
+	g.mountpoint_pad = 0x5a;
+	g.data_align = 8;
+	gen_root(&g);
+	g.members[gen_file(&g, "f", "abc")].pad = 8;
+	gen_link(&g, "l", "f");
+	gen_file(&g, "g", "defgh");
+	gen_finish(&g);
+	fill_padding(&g);
+	CHECK(g.image[g.members[1].data_offset + 3] == 0xee);
+	expect_verify(&g, FSIMG_OK, "nonzero padding");
+	gen_free(&g);
+
+	/* The volume must be exactly image_size long: one byte and one
+	 * sector more are corrupt.
+	 */
+	for (size_t extra = 1; extra <= 512; extra += 511) {
+		sample(&g);
+		gen_finish_extra(&g, extra);
+		expect_verify(&g, FSIMG_ECORRUPT, "a volume past image_size");
+		gen_free(&g);
+	}
+
+	/* An invalid mountpoint leaves the volume unverifiable. */
+	gen_init(&g);
+	gen_mountpoint(&g, "/m\xff", 3);
+	gen_root(&g);
+	gen_file(&g, "f", "data");
+	gen_finish(&g);
+	expect_verify(&g, FSIMG_EUNSUPPORTED, "an invalid mountpoint");
+	gen_free(&g);
+
+	/* Omitted subtrees are walked and checked, their payload read, and
+	 * reported only as omitted_entries; the boot reference naming an
+	 * omitted file is satisfied.
+	 */
+	omitted_image(&g);
+	expect_verify(&g, FSIMG_OK, "the omitted image");
+	CHECK(verify_slice(g.image, g.length, FSIMG_VERIFY_PAYLOAD, &report,
+	    NULL) == FSIMG_OK);
+	CHECK(report.omitted_entries == OMITTED_ROOTS && report.files == 2 &&
+	    report.directories == 2 && report.logical_bytes == 2 &&
+	    report.payload_bytes_read == 11);
+	gen_free(&g);
+
+	/* Shadowed records, an earlier duplicate and a record below a link,
+	 * were validated at open and are no entries.
+	 */
+	tree_image(&g, (const char *[]){ "d:", "l:dup", "f:dup", "l:L",
+	    "f:L/x", NULL });
+	expect_verify(&g, FSIMG_OK, "shadowed records");
+	CHECK(verify_slice(g.image, g.length, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.files == 2 && report.directories == 1);
+	gen_free(&g);
+
+	/* The checksum pass charges a unit per 64 KiB window, and its read
+	 * another: an image holding a 1 MiB file spans 17 windows, one
+	 * holding a 4-byte file one, and their trees and walks cost the same.
+	 */
+	CHECK(verify_work(1u << 20) - verify_work(4) == 2 * 16);
+
+	/* An unsupported record fails open, so no report is complete. */
+	one_record(&g, GEN_FILE);
+	put32(&g, gen_record(&g, 1) + R_MODE, 0060644);
+	gen_trailer(&g);
+	CHECK(verify_slice(g.image, g.length, 0, &report, NULL) ==
+	    FSIMG_EUNSUPPORTED && !report.complete);
 	gen_free(&g);
 }
 
@@ -2845,6 +3347,8 @@ test_long_records(void)
 		CHECK(m.status == FSIMG_OK);
 		list_image(g.image, g.length, 0, &l);
 		CHECK(listing_matches(&l, &m, "a long record"));
+		CHECK(m.status != FSIMG_OK ||
+		    verify_matches(g.image, g.length, &m, "a long record"));
 		listing_free(&l);
 		model_free(&m);
 		gen_free(&g);
@@ -2876,6 +3380,8 @@ test_long_records(void)
 	CHECK(m.status == FSIMG_OK);
 	list_image(g.image, g.length, 0, &l);
 	CHECK(listing_matches(&l, &m, "a table of several windows"));
+	CHECK(m.status != FSIMG_OK ||
+	    verify_matches(g.image, g.length, &m, "a table of several windows"));
 	listing_free(&l);
 	model_free(&m);
 	gen_free(&g);
@@ -2934,6 +3440,8 @@ test_random(void)
 		model_build(&m, g.image, g.length);
 		list_image(g.image, g.length, 0, &l);
 		CHECK(listing_matches(&l, &m, "a random tree"));
+		CHECK(m.status != FSIMG_OK ||
+		    verify_matches(g.image, g.length, &m, "a random tree"));
 		opened += m.status == FSIMG_OK ? 1 : 0;
 		below += m.below != 0 ? 1 : 0;
 		listing_free(&l);
@@ -2995,6 +3503,10 @@ read_file(const char *path, size_t *length)
 	return (bytes);
 }
 
+/* What the native images did. Every image the reader opens is verified;
+ * verified counts those that pass, rejected those that fail with the
+ * model's class.
+ */
 typedef struct native_counts {
 	unsigned	 images;
 	unsigned	 opened;
@@ -3002,10 +3514,18 @@ typedef struct native_counts {
 	unsigned	 corrupt;
 	unsigned	 skipped;
 	unsigned	 mismatched;
+	unsigned	 verified;
+	unsigned	 rejected;
 } native_counts_t;
 
+/* Compare every ImageFS in directory with the model. In a group of
+ * mutations, the E10 copies, every image but the one whose name holds
+ * "unchanged" must fail verification; in any other group every image that
+ * opens must verify.
+ */
 static void
-native_directory(const char *directory, native_counts_t *counts)
+native_directory(const char *directory, bool mutations,
+    native_counts_t *counts)
 {
 	struct dirent *entry;
 	DIR *dir;
@@ -3019,6 +3539,7 @@ native_directory(const char *directory, native_counts_t *counts)
 		size_t length;
 		listing_t l;
 		model_t m;
+		bool verifies, should_verify;
 
 		if (entry->d_name[0] == '.')
 			continue;
@@ -3032,14 +3553,28 @@ native_directory(const char *directory, native_counts_t *counts)
 		counts->images++;
 		model_build(&m, image, length);
 		list_image(image, length, 600, &l);
-		if (!listing_matches(&l, &m, entry->d_name))
+		verifies = model_verify(&m) == FSIMG_OK;
+		should_verify = mutations ?
+		    strstr(entry->d_name, "unchanged") != NULL :
+		    m.status == FSIMG_OK;
+		if (!listing_matches(&l, &m, entry->d_name) ||
+		    (m.status == FSIMG_OK &&
+		    !verify_matches(image, length, &m, entry->d_name)))
 			counts->mismatched++;
-		else if (l.status == FSIMG_OK)
+		else if (verifies != should_verify) {
+			fprintf(stderr, "%s: verification %s\n", entry->d_name,
+			    verifies ? "passes" : "fails");
+			counts->mismatched++;
+		} else if (l.status == FSIMG_OK)
 			counts->opened++;
 		else if (l.status == FSIMG_EUNSUPPORTED)
 			counts->unsupported++;
 		else
 			counts->corrupt++;
+		if (verifies)
+			counts->verified++;
+		else
+			counts->rejected++;
 		listing_free(&l);
 		model_free(&m);
 		free(image);
@@ -3050,9 +3585,13 @@ native_directory(const char *directory, native_counts_t *counts)
 static int
 native_run(void)
 {
-	static const char *const groups[] = {
-		"cases/ifs-basic", "cases/ifs-names", "cases/ifs-extra",
-		"cases/ifs-data", "decoded"
+	static const struct {
+		const char	*path;
+		bool		 mutations;
+	} groups[] = {
+		{ "cases/ifs-basic", false }, { "cases/ifs-names", false },
+		{ "cases/ifs-extra", false }, { "cases/ifs-data", false },
+		{ "cases/ifs-e10-sense", true }, { "decoded", false }
 	};
 	const char *root = getenv("FSIMG_IFS_NATIVE");
 	native_counts_t counts;
@@ -3064,13 +3603,15 @@ native_run(void)
 	}
 	bzero(&counts, sizeof(counts));
 	for (size_t i = 0; i < sizeof(groups) / sizeof(groups[0]); i++) {
-		snprintf(directory, sizeof(directory), "%s/%s", root, groups[i]);
-		native_directory(directory, &counts);
+		snprintf(directory, sizeof(directory), "%s/%s", root,
+		    groups[i].path);
+		native_directory(directory, groups[i].mutations, &counts);
 	}
 	printf("native: %u images, %u opened, %u unsupported, %u corrupt, "
-	    "%u mismatched; %u files without an ImageFS at offset 0\n",
-	    counts.images, counts.opened, counts.unsupported, counts.corrupt,
-	    counts.mismatched, counts.skipped);
+	    "%u mismatched; %u verified, %u rejected; %u files without an "
+	    "ImageFS at offset 0\n", counts.images, counts.opened,
+	    counts.unsupported, counts.corrupt, counts.mismatched,
+	    counts.verified, counts.rejected, counts.skipped);
 	return (counts.mismatched == 0 && counts.images != 0 ? 0 : 1);
 }
 
@@ -3112,6 +3653,7 @@ main(int argc, char **argv)
 	test_links();
 	test_metadata();
 	test_references();
+	test_verify();
 	test_long_records();
 	test_random();
 	test_extract();

@@ -312,7 +312,12 @@ QNX4 and QNX6. The volume information gains a mountpoint and a table of up
 to sixteen named format details, which `fsimg i` prints and its JSON record
 carries; an ImageFS reports its boot references, mount flags, record counts
 by inode flag and the implicit, shadowed and omitted counts there. Common
-directory names grow to 1024-byte components.
+directory names grow to 1024-byte components. Full verification of an
+ImageFS checks the additive checksum over the whole image, requires the
+volume to end at the image's size, requires each boot and script
+reference to name exactly one delivered or omitted file, never a shadowed
+record, and walks every directory, omitted ones included; `fsimg W` adds
+the shadowed count, and the references to omitted entries, to its result.
 
 The fsimg command is shaped like tar: modes c (create, cW to verify before
 publication), x (extract, x -O for one member's bytes), t (list, recursive by

@@ -172,10 +172,7 @@ match_references(fsimg_ifs_reader_t *ifs, uint32_t inode, ifs_kind_t kind,
 	uint32_t reference;
 
 	for (unsigned i = 0; i < IFS_REFERENCES; i++) {
-		if (i < IFS_BOOT_SLOTS)
-			reference = ifs->header.boot_ino[i];
-		else
-			reference = ifs->header.script_ino;
+		reference = ifs_reference(&ifs->header, i);
 		if (reference == 0 || reference != inode)
 			continue;
 		ifs->counts.reference_matches[i]++;

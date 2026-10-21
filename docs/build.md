@@ -1203,7 +1203,9 @@ and the tests mutate the finished bytes. A second oracle, a model written
 with a different algorithm from the driver's, inserts every record into an
 in-memory tree in table order, a later record replacing an earlier one with
 the same path and missing parents synthesized, and predicts the status of
-open, every delivered entry and every `info` count. The cases cover probe
+open, every delivered entry and every `info` count, and the status and
+report of full verification: every image that opens is verified
+structurally and with payload reads and compared with it. The cases cover probe
 exclusivity against fsimg's FAT12, exFAT, QNX6 and QNX4 volumes and a QNX4
 root block at byte 512 that both formats claim; each header bound at `x -
 1`, `x` and `x + 1`; the mountpoint's terminator, padding and profile;
@@ -1215,8 +1217,15 @@ link and a FIFO in either table order and at several depths, and odd
 paths; components of 1, 255, 256 and 1024 bytes and names outside the
 profile, omitted with their subtrees and counted; content ranges at and across the trailer and the table, shared
 ranges and zero-length files; every off-by-one of a symbolic link's target;
-boundary owners, modes and times; boot and script references; extraction;
-and 400 random trees in either byte order compared with the model.
+boundary owners, modes and times; boot and script references naming one
+file, none, two records, only a shadowed record, a directory, the root, a
+link and a FIFO; a flipped byte in the header, the mountpoint, its padding,
+a record, record padding, file data and the trailer, a byte-swapped
+trailer and a big-endian image summed in the wrong order; nonzero padding
+under a correct trailer; a volume one byte and one sector past the image;
+an invalid mountpoint; omitted and shadowed accounting; the checksum
+pass's work charge per window; extraction; and
+400 random trees in either byte order compared with the model.
 
 ```sh
 FSIMG_IFS_NATIVE=/path/to/captures-ifs ./test-ifs --native
@@ -1226,15 +1235,21 @@ FSIMG_IFS_NATIVE=/path/to/captures-ifs ./test-ifs --native
 evidence that is never redistributed. `FSIMG_IFS_NATIVE` names the native
 captures directory described in [the ImageFS research
 record](ifs-research.md); every file in its `cases/ifs-basic`,
-`cases/ifs-names`, `cases/ifs-extra`, `cases/ifs-data` and `decoded`
-subdirectories that holds an ImageFS at offset 0 is read and compared with
-the model: the status of open and, for an image that opens, every entry's
-kind, metadata and bytes and every `info` count. It prints only counts, and
+`cases/ifs-names`, `cases/ifs-extra`, `cases/ifs-data`,
+`cases/ifs-e10-sense` and `decoded` subdirectories that holds an ImageFS at
+offset 0 is read and compared with the model: the status of open and, for
+an image that opens, every entry's kind, metadata and bytes, every `info`
+count, and the status and report of verification. Every image that opens
+must verify, except in `cases/ifs-e10-sense`, the E10 mutations, where
+every image but the unchanged one must fail. It prints only counts, and
 the capture's file name on a mismatch, never a member name; without the
 variable it prints `SKIP: FSIMG_IFS_NATIVE is not set` and exits 77. On
-macOS the 72 images give 71 opened, 1 unsupported and none mismatched, in
-0.4 seconds. The unsupported one is the capture made to hold odd paths;
-the capture holding a file record's descendant and the six decoded H3 boot
+macOS the 84 images give 77 opened, 2 unsupported, 5 corrupt and none
+mismatched, and 72 verified and 12 rejected, in 0.8 seconds: the eleven E10
+mutations and the unsupported capture made to hold odd paths are the
+rejected ones, and every decoded S1 and S2 body verifies. The other
+unsupported image is the E10 copy with a flipped mode. The capture holding
+a file record's descendant and the six decoded H3 boot
 bodies holding two symbolic-link records below a symbolic-link record open
 with those records shadowed. Images `dumpifs -u` decompresses are not compared:
 no such copies exist on this host.

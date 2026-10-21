@@ -144,6 +144,10 @@ typedef struct fsimg_cli_display {
 	 * and W names the verified table.
 	 */
 	unsigned char	 image[FSIMG_WIRE_IMAGE_BYTES];
+	/* The read job's VOLUME record, whose named details W adds for an
+	 * ImageFS.
+	 */
+	unsigned char	 volume[FSIMG_WIRE_INFO_BYTES];
 	/* Human listing suffix for the open entry's kind. */
 	const char	*entry_marker;
 	fsimg_validation_scope_t scope;

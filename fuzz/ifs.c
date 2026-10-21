@@ -10,12 +10,12 @@
 
 /* An ImageFS is read as the exact slice: the decoder is forced, so every
  * input reaches the probe, open, the table pass, the derived hierarchy,
- * traversal and content under finite limits. Bytes past image_size are
- * never interpreted, so each input is also run cut to the image_size its
- * header declares, when that is shorter, so length-changing mutations keep
- * reaching the table; on that run every read must lie inside the declared
- * image. An opened image must fit the slice, and no resource may outlive
- * the reader.
+ * traversal, content and full verification under finite limits. Bytes
+ * past image_size are never interpreted, so each input is also run cut to
+ * the image_size its header declares, when that is shorter, so
+ * length-changing mutations keep reaching the table; on that run every
+ * read must lie inside the declared image. An opened image must fit the
+ * slice, and no resource may outlive the reader.
  */
 typedef struct fuzz_input {
 	const uint8_t	*data;
@@ -82,6 +82,8 @@ exercise(const uint8_t *data, size_t size)
 	fsimg_options_t options;
 	fsimg_read_options_t read_options;
 	fsimg_volume_info_t info;
+	fsimg_verify_report_t report;
+	fsimg_status_t status;
 	fsimg_io_ops_t ops;
 	fsimg_ctx_t *ctx;
 	fsimg_io_t *io;
@@ -128,6 +130,16 @@ exercise(const uint8_t *data, size_t size)
 			    &count, NULL) != FSIMG_OK)
 				break;
 		}
+		fsimg_reader_free(reader);
+	}
+	/* Full verification: a passing report holds a volume exactly the
+	 * slice's length, every byte of it in use and complete.
+	 */
+	if (fsimg_reader_open(ctx, io, &read_options, &reader, NULL) == FSIMG_OK) {
+		status = fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, NULL);
+		if (status == FSIMG_OK && (!report.complete ||
+		    report.allocated_clusters != size || report.free_clusters != 0))
+			abort();
 		fsimg_reader_free(reader);
 	}
 	fsimg_io_free(io);

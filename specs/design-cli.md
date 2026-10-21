@@ -482,8 +482,9 @@ result is emitted only after successful worker exit and finalization,
 stating structural or initialized-payload scope. Entries the reader omitted
 for a name outside its profile are reported by the omitted-entry warning
 and summary field next to a complete result, never as corruption; for
-ImageFS the result also prints the `omitted_references` detail when a boot
-or script reference resolves to an omitted node.
+ImageFS the result also prints the `shadowed` detail when records are
+shadowed, and the `omitted_references` detail when a boot or script
+reference resolves to an omitted node.
 
 A byte range (`--offset`, `--length`) never reads a partition table, so it
 conflicts with a scheme named in `-F` as it does with `--partition`; a

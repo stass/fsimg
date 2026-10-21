@@ -218,6 +218,7 @@ uint32_t ifs_record_length(const unsigned char *, ifs_byte_order_t);
 fsimg_status_t ifs_record_decode(const unsigned char *, size_t, uint32_t,
     ifs_byte_order_t, ifs_record_t *, fsimg_error_t *);
 unsigned ifs_flag_index(uint32_t);
+uint32_t ifs_reference(const ifs_header_t *, unsigned);
 
 /* names.c: path components and the profile. */
 fsimg_status_t ifs_path_check(const unsigned char *, size_t,
@@ -236,6 +237,8 @@ enum {
 	IFS_PATH_ENTRY_FIXED = 9		/* the path follows */
 };
 #define IFS_PATH_ENTRY_BYTES	(IFS_PATH_ENTRY_FIXED + IFS_PATH_MAX)
+fsimg_status_t ifs_read_exact(fsimg_reader_t *, uint64_t, void *, size_t,
+    fsimg_error_t *);
 fsimg_status_t ifs_volume_open(fsimg_reader_t *, fsimg_stream_t **,
     fsimg_error_t *);
 fsimg_status_t ifs_record_read(fsimg_reader_t *, uint32_t, ifs_record_t *,
@@ -284,5 +287,9 @@ fsimg_status_t ifs_keys(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
 fsimg_status_t ifs_key(fsimg_reader_t *, const char *, unsigned char *,
     size_t *, fsimg_error_t *);
+
+/* verify.c */
+fsimg_status_t ifs_verify(fsimg_reader_t *, unsigned, fsimg_verify_report_t *,
+    fsimg_error_t *);
 
 #endif

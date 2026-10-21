@@ -338,7 +338,15 @@ A path with
 .Pa \&. ,
 .Pa ..
 or empty components is unsupported.
-ImageFS images cannot be verified.
+.Cm W
+checks an ImageFS's additive checksum over the whole image, requires the
+volume to end exactly at the image's size, and requires each boot and
+script inode reference to name exactly one file, delivered or omitted for
+its name; a reference naming only a shadowed record names nothing.
+Its result adds, when nonzero, the number of shadowed records and of boot
+and script references naming an entry omitted for its name.
+An ImageFS whose mountpoint is outside the name rules is reported as
+unsupported, since it has no observed form to check.
 .Pp
 A gzip-compressed image, a file or standard input, is detected from its
 first bytes and decoded, member after member as

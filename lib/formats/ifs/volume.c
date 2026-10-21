@@ -46,8 +46,8 @@ static fsimg_status_t table_walk(fsimg_reader_t *, fsimg_stream_t *,
 /* Read exactly length bytes at volume offset into buffer; a short read is
  * a truncated image.
  */
-static fsimg_status_t
-read_exact(fsimg_reader_t *reader, uint64_t offset, void *buffer,
+fsimg_status_t
+ifs_read_exact(fsimg_reader_t *reader, uint64_t offset, void *buffer,
     size_t length, fsimg_error_t *error)
 {
 	size_t transferred;
@@ -82,7 +82,7 @@ read_header(fsimg_reader_t *reader, fsimg_error_t *error)
 	if (ifs->volume_bytes < IFS_HEADER_BYTES)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no ImageFS header"));
-	status = read_exact(reader, 0, bytes, sizeof(bytes), error);
+	status = ifs_read_exact(reader, 0, bytes, sizeof(bytes), error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (bcmp(bytes, IFS_SIGNATURE, IFS_SIGNATURE_BYTES) != 0)
@@ -130,7 +130,7 @@ read_mountpoint(fsimg_reader_t *reader, fsimg_error_t *error)
 
 	region = ifs->header.dir_offset - IFS_HEADER_BYTES;
 	length = region < sizeof(bytes) ? region : sizeof(bytes);
-	status = read_exact(reader, IFS_HEADER_BYTES, bytes, length, error);
+	status = ifs_read_exact(reader, IFS_HEADER_BYTES, bytes, length, error);
 	if (status != FSIMG_OK)
 		return (status);
 	nul = length == 0 ? NULL : memchr(bytes, '\0', length);
@@ -174,7 +174,7 @@ window_cover(fsimg_reader_t *reader, table_window_t *window, uint64_t offset,
 	window->length = 0;
 	if (fill < length)
 		return (ifs_corrupt(error, "ImageFS record crosses the table end"));
-	status = read_exact(reader, offset, window->bytes, fill, error);
+	status = ifs_read_exact(reader, offset, window->bytes, fill, error);
 	if (status != FSIMG_OK)
 		return (status);
 	window->length = fill;
@@ -348,7 +348,7 @@ ifs_record_read(fsimg_reader_t *reader, uint32_t offset, ifs_record_t *record,
 	if (offset < header->dir_offset ||
 	    (uint64_t)offset + IFS_REC_PREFIX > (uint64_t)header->hdr_dir_size - 4)
 		return (ifs_corrupt(error, "invalid prepared ImageFS record offset"));
-	status = read_exact(reader, offset, ifs->record, 2, error);
+	status = ifs_read_exact(reader, offset, ifs->record, 2, error);
 	if (status != FSIMG_OK)
 		return (status);
 	length = ifs_record_length(ifs->record, header->order);
@@ -361,7 +361,7 @@ ifs_record_read(fsimg_reader_t *reader, uint32_t offset, ifs_record_t *record,
 		    "ImageFS record length is not a multiple of 4"));
 	available = length < IFS_RECORD_DECODE_BYTES ? length :
 	    IFS_RECORD_DECODE_BYTES;
-	status = read_exact(reader, offset, ifs->record, available, error);
+	status = ifs_read_exact(reader, offset, ifs->record, available, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = ifs_record_decode(ifs->record, available, length,

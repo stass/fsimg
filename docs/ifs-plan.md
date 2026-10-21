@@ -682,8 +682,9 @@ repository records only pass and fail counts.
 
 * `verify.c` runs the common walker once and checks:
   * the ImageFS checksum, in one sequential pass;
-  * the table rule and the range rule (decision 3);
-  * the boot and script references, each matching one record's full inode
+  * the table rule and the range rule (decision 3), which open applies to
+    every record, shadowed and omitted ones included, and replay again;
+  * the boot and script references, each matching one node's full inode
     word;
   * shadowed records, the earlier records of duplicate paths and the
     records below a non-directory, reported by count; a reference that a

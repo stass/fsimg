@@ -19,18 +19,20 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   (owner decision 10). They answer owner decision 6 and decision 10's growth
   refusal, and gate the wrap stage.
 * [Medium] **References and shadowed records** (`lib/formats/ifs/tree.c`,
-  `lib/formats/ifs/volume.c`, the verifier,
-  `specs/design-ifs-driver.md#verification`): reference matching counts
-  only the nodes the tree emits, and inode words need not be unique, so a
-  shadowed record (an earlier duplicate, or a whole subtree below a link)
-  can carry the inode word of a delivered boot program unseen. If the
+  `lib/formats/ifs/verify.c`, `specs/design-ifs-driver.md#verification`):
+  reference matching counts only the nodes the tree emits, and inode words
+  need not be unique, so a shadowed record (an earlier duplicate, or a
+  whole subtree below a link) can carry the inode word of a delivered boot
+  program unseen; `test/ifs.c` pins that such an image verifies. If the
   native startup finds `boot_ino` records by scanning the table rather
   than by path (untested), it could load the shadowed record's bytes while
-  fsimg verifies the delivered one. Recommended: count reference matches
-  over every record in the table pass as well, and have verification
-  refuse a reference that a shadowed record also carries; test it when
-  verification lands, with the acceptance matrix's "naming only a
-  shadowed record" cases. The reference rule is an owner decision.
+  fsimg verifies the delivered one. Verification cannot note it without
+  failing: `fsimg_verify_report_t` has no field for it, and the findings
+  stream `specs/design-api.md` describes has no public interface. The
+  owner chooses one of: refuse it, counting reference matches over every
+  record in the table pass as well, with its status class; count it in a
+  sixteenth `info` detail, `shadowed_references`, which `W` prints; or
+  report it as a non-fatal finding once a findings interface exists.
 * [Medium] **`dumpifs -u` copies of the H3 boot images**
   (`docs/ifs-research.md`): the eight images exceed `load.py`'s 3 MiB
   budget. Write them into `big.img` while the VM is stopped, run

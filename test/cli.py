@@ -104,7 +104,7 @@ def test_formats(executable, root):
     assert decoded[-1]["command"] == "formats"
     formats = filesystems(decoded)
     assert set(formats) == {"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs"}
-    assert formats.pop("ifs")["capabilities"] == 1
+    assert formats.pop("ifs")["capabilities"] == 5
     layers = {record["name"]: record for record in decoded
               if record["type"] == "format" and record["kind"] != "filesystem"}
     assert {name: record["kind"] for name, record in layers.items()} == {
@@ -284,7 +284,7 @@ def test_human_help(executable, root):
                               b"exfat   yes   yes    yes\n"
                               b"qnx6    yes   yes    yes\n"
                               b"qnx4    yes   yes    yes\n"
-                              b"ifs     yes   no     no\n"
+                              b"ifs     yes   no     yes\n"
                               b"\n"
                               b"Layer  Kind         Read  Write  Verify  Codecs         Settings\n"
                               b"gpt    scheme       yes   yes    yes     -              "
@@ -2054,11 +2054,13 @@ def test_mtree_reporting(executable, root):
     assert (work / "json.mtree").exists()
 
 
-def ifs_image(payload):
+def ifs_image(payload, shadowed=0, motd=b"motd", script=0):
     """A big-endian ImageFS encoded here from the published layout: the
     mountpoint /proc/boot, a directory etc holding the file motd, and the
-    symbolic link bin/sh, whose parent bin has no record. Boot inode 0 names
-    the file, so the image is bootable."""
+    symbolic link bin/sh, whose parent bin has no record; shadowed adds that
+    many directory records below the link, and motd renames the file. Boot
+    inode 0 names the file, so the image is bootable; script sets the
+    script reference."""
     def record(mode, inode, tail, path, extra=b""):
         body = tail + path + b"\0" + extra
         length = (0x18 + len(body) + 3) // 4 * 4
@@ -2067,23 +2069,26 @@ def ifs_image(payload):
                   (9).to_bytes(4, "big") + (86400).to_bytes(4, "big"))
         return (prefix + body).ljust(length, b"\0")
 
+    def table(data_offset):
+        return (record(0o40755, 1, b"", b"etc") +
+                record(0o100640, 2, data_offset.to_bytes(4, "big") +
+                       len(payload).to_bytes(4, "big"), b"etc/" + motd) +
+                record(0o120777, 3, (7).to_bytes(2, "big") +
+                       len(target).to_bytes(2, "big"), b"bin/sh", target + b"\0") +
+                b"".join(record(0o40755, 4 + i, b"", b"bin/sh/x%d" % i)
+                         for i in range(shadowed)) +
+                bytes(4))
+
     mountpoint = b"/proc/boot\0"
     dir_offset = (0x58 + len(mountpoint) + 3) // 4 * 4
     target = b"/proc/boot/ksh"
-    table_bytes = 0x1c + 0x2c + 0x34 + 4
     # The file's data starts at the table's end.
-    hdr_dir_size = data_offset = dir_offset + table_bytes
-    table = (record(0o40755, 1, b"", b"etc") +
-             record(0o100640, 2, data_offset.to_bytes(4, "big") +
-                    len(payload).to_bytes(4, "big"), b"etc/motd") +
-             record(0o120777, 3, (7).to_bytes(2, "big") +
-                    len(target).to_bytes(2, "big"), b"bin/sh", target + b"\0") +
-             bytes(4))
-    assert len(table) == table_bytes
+    hdr_dir_size = data_offset = dir_offset + len(table(0))
+    table = table(data_offset)
     image_size = (data_offset + len(payload) + 3) // 4 * 4 + 4
     header = (b"imagefs\x05" + image_size.to_bytes(4, "big") +
               hdr_dir_size.to_bytes(4, "big") + dir_offset.to_bytes(4, "big") +
-              (2).to_bytes(4, "big") + bytes(12) + bytes(4) + bytes(4) +
+              (2).to_bytes(4, "big") + bytes(12) + script.to_bytes(4, "big") + bytes(4) +
               bytes(40) + (3).to_bytes(4, "big"))
     assert len(header) == 0x58
     image = ((header + mountpoint).ljust(dir_offset, b"\0") + table +
@@ -2116,6 +2121,36 @@ def test_ifs(executable, root, payload):
     assert entries["/etc/motd"]["mode"] == 0o640 and entries["/etc/motd"]["uid"] == 9
     assert entries["/etc/motd"]["gid"] == 7
     assert invoke(executable, root, ["x", "-O", "-f", "boot.ifs", "/etc/motd"]).stdout == payload
+    # W checks the checksum and the boot reference and walks the tree; a
+    # record below the link counts as shadowed, and a flipped data byte
+    # fails the checksum.
+    verified = invoke(executable, root, ["W", "-d", "-f", "boot.ifs"]).stdout
+    assert verified == (b'"boot.ifs": filesystem structure and initialized file data '
+                        b'verified (2 files, 3 directories)\n'), verified
+    report = next(record for record in completed(invoke(
+        executable, root, ["W", "--json", "-f", "boot.ifs"])) if record["type"] == "verify")
+    assert report["files"] == "2" and report["directories"] == "3", report
+    (root / "shadowed.ifs").write_bytes(ifs_image(payload, shadowed=1))
+    verified = invoke(executable, root, ["W", "-f", "shadowed.ifs"]).stdout
+    assert verified == (b'"shadowed.ifs": filesystem structure verified '
+                        b'(2 files, 3 directories, 1 shadowed record)\n'), verified
+    # A boot program whose name is outside the profile is omitted, still
+    # verified, and its reference counted.
+    (root / "omitted.ifs").write_bytes(ifs_image(payload, shadowed=2, motd=b"mo\xe9td"))
+    verified = invoke(executable, root, ["W", "-f", "omitted.ifs"])
+    assert verified.stdout == (b'"omitted.ifs": filesystem structure verified '
+                               b'(1 files, 3 directories, 2 shadowed records, '
+                               b'1 boot or script reference to an omitted entry)\n'), verified
+    (root / "omitted2.ifs").write_bytes(ifs_image(payload, motd=b"mo\xe9td", script=2))
+    verified = invoke(executable, root, ["W", "-f", "omitted2.ifs"])
+    assert verified.stdout == (b'"omitted2.ifs": filesystem structure verified '
+                               b'(1 files, 3 directories, '
+                               b'2 boot or script references to omitted entries)\n'), verified
+    damaged = bytearray(ifs_image(payload))
+    damaged[damaged.index(payload)] ^= 0x01
+    (root / "damaged.ifs").write_bytes(damaged)
+    result = invoke(executable, root, ["W", "-f", "damaged.ifs"], expected=1)
+    assert b"ImageFS checksum does not match" in result.stderr, result.stderr
 
 
 def main():

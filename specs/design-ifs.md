@@ -270,11 +270,12 @@ own entry. [D], [X1], [S1]
 `boot_ino[0]` is `0xe0000002` and `script_ino` is 3; each names exactly one
 regular-file record by its full 32-bit inode word, flag nibble included. A
 nonzero reference is checked by verification under that rule, against the
-delivered entries only, since a [shadowed record](#duplicates) has no
-entry and the loader could not open it by name: a reference that names no
-entry, or more than one, is `FSIMG_ECORRUPT`, and a reference whose only
-match is a shadowed record names no entry; one that names an entry of
-another kind is `FSIMG_EUNSUPPORTED`. The referenced members, `.script`
+nodes of the derived tree, entries omitted for their names included, since
+a [shadowed record](#duplicates) has no entry and the loader could not open
+it by name: a reference that names no entry, or more than one, is
+`FSIMG_ECORRUPT`, and a reference whose only match is a shadowed record
+names no entry; one that names an entry of another kind is
+`FSIMG_EUNSUPPORTED`. The referenced members, `.script`
 and the boot programs, are ordinary file entries delivered as bytes.
 Nonbootable images carry zeros, which are never checked. [S1], [S2], [X1]
 

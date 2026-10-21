@@ -291,8 +291,9 @@ exactly one of the four accepted nibbles, so it is the sum of the four
 the omitted subtree roots the child pass found, which is what a full walk
 reports in `omitted_entries`;
 `omitted_references` counts the boot and script references that resolve to
-an omitted node, which `info` and the `W` result print when nonzero, since
-a boot program fsimg cannot name is worth saying. Every value is known when
+an omitted node. `info` always prints it, and the `W` result adds it
+when it is nonzero, since a boot program fsimg cannot name is worth
+saying. Every value is known when
 open returns, so info discloses no scan.
 
 ## Verification
@@ -300,13 +301,17 @@ open returns, so info discloses no scan.
 Full verification needs no ownership stream: an ImageFS has no allocation
 to reconcile, and the table pass validated every record at open. It runs:
 
+* **Scope.** An invalid mountpoint makes verification incomplete with
+  `FSIMG_EUNSUPPORTED` before any work, as an invalid QNX4 label does.
+
 * **Length.** The [volume-length rule](design-ifs.md#volume-layout):
   the volume length must equal `image_size`, else `FSIMG_ECORRUPT` before
   any work. A boot image whose `imagefs_size` disagrees with its body, or a
   bare image with a tail, fails here.
 * **Checksum.** One sequential pass over `[0, image_size)` in windows sums
   the 32-bit words in the image's byte order; a nonzero result is
-  `FSIMG_ECORRUPT`. The pass charges one work unit per window.
+  `FSIMG_ECORRUPT`. The pass charges one work unit per window, beside the
+  unit bounded I/O charges for each read.
 * **References.** For each nonzero `boot_ino[i]` and `script_ino`, the
   child pass's match count over nodes, omitted ones included and shadowed
   records never, must be exactly 1, else `FSIMG_ECORRUPT`, and the match
@@ -319,7 +324,8 @@ to reconcile, and the table pass validated every record at open. It runs:
   read-through, when requested, reads each file's and link's bytes through
   common delivery.
 * **Shadowed records.** The count is reported as the `shadowed` detail of
-  the volume information, and the CLI's `W` result prints it; it counts
+  the volume information, and the CLI's `W` result prints it when
+  nonzero; it counts
   earlier duplicates and records below a non-directory together. A
   shadowed record is validated at open like any other, so it does not
   make the verification incomplete: every H3 boot image carries three and
@@ -327,10 +333,9 @@ to reconcile, and the table pass validated every record at open. It runs:
 
 The report counts delivered files and directories, the root and the
 synthesized ones included and omitted subtrees excluded, logical bytes and
-bytes read; allocated units are the image's words and free, bad and padding
-counts are zero; the omitted subtree roots are in `omitted_entries`. An
-invalid mountpoint makes verification incomplete with `FSIMG_EUNSUPPORTED`
-before any work, as an invalid QNX4 label does. An unsupported record or
+bytes read; allocated units are the image's bytes (its allocation unit is
+one byte); free, bad and padding counts are zero; the omitted subtree
+roots are in `omitted_entries`. An unsupported record or
 path anywhere has already failed open, and an omitted node is checked like
 any other, so the report is complete whenever verification returns
 `FSIMG_OK`.

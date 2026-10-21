@@ -123,6 +123,15 @@ ifs_flag_index(uint32_t inode)
 	return (IFS_FLAG_NIBBLES);
 }
 
+/* Reference slot i: boot_ino[0] to boot_ino[3], then script_ino. Zero
+ * means unused.
+ */
+uint32_t
+ifs_reference(const ifs_header_t *header, unsigned i)
+{
+	return (i < IFS_BOOT_SLOTS ? header->boot_ino[i] : header->script_ino);
+}
+
 /* The prefix fields common to every kind, and the kind its mode's type
  * selects. Mode bits above the type and permissions, an unknown type, a
  * nonzero extended-attribute offset, a zero inode word and an unknown flag

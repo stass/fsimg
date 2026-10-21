@@ -57,6 +57,8 @@ static void plan(fsimg_cli_display_t *, const unsigned char *);
 static void civil_time(int64_t, char *, size_t);
 static void long_listing_columns(fsimg_cli_display_t *, const unsigned char *);
 static void entry_start(fsimg_cli_display_t *, const unsigned char *);
+static uint64_t volume_detail(const fsimg_cli_display_t *, const char *);
+static void ifs_counts(fsimg_cli_display_t *);
 static void verification(fsimg_cli_display_t *, const unsigned char *);
 static void format(fsimg_cli_display_t *, const fsimg_format_info_t *);
 static void limits(fsimg_cli_display_t *);
@@ -1174,6 +1176,49 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 	display->entry_open = true;
 }
 
+/* The value of the volume detail name, or 0 when the volume has none. The
+ * protocol checked the count and every name.
+ */
+static uint64_t
+volume_detail(const fsimg_cli_display_t *display, const char *name)
+{
+	uint64_t count = fsimg_wire_get64(display->volume +
+	    FSIMG_WIRE_INFO_DETAIL_COUNT);
+
+	for (uint64_t i = 0; i < count; i++) {
+		const unsigned char *detail = display->volume +
+		    FSIMG_WIRE_INFO_DETAILS + i * FSIMG_WIRE_INFO_DETAIL_BYTES;
+
+		if (strcmp((const char *)detail, name) == 0)
+			return (fsimg_wire_get64(detail +
+			    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES));
+	}
+	return (0);
+}
+
+/* An ImageFS result also counts, when nonzero, the records no entry
+ * delivers and the boot or script references naming an omitted entry.
+ */
+static void
+ifs_counts(fsimg_cli_display_t *display)
+{
+	uint64_t shadowed, references;
+
+	if (strcmp((const char *)display->volume + FSIMG_WIRE_INFO_FORMAT,
+	    "ifs") != 0)
+		return;
+	shadowed = volume_detail(display, "shadowed");
+	references = volume_detail(display, "omitted_references");
+	if (shadowed != 0)
+		append(display, ", %llu shadowed record%s",
+		    (unsigned long long)shadowed, shadowed == 1 ? "" : "s");
+	if (references != 0)
+		append(display, ", %llu boot or script %s",
+		    (unsigned long long)references, references == 1 ?
+		    "reference to an omitted entry" :
+		    "references to omitted entries");
+}
+
 static void
 verification(fsimg_cli_display_t *display, const unsigned char *raw)
 {
@@ -1235,10 +1280,12 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 			    strcmp(scheme, "gpt") == 0 ? "GPT" : "MBR",
 			    (unsigned long long)checked, checked == 1 ? "" : "s",
 			    (unsigned long long)selected);
-		append(display, " filesystem structure%s verified (%llu files, %llu directories)\n",
+		append(display, " filesystem structure%s verified (%llu files, %llu directories",
 		    display->scope == FSIMG_VALIDATION_PAYLOAD ? " and initialized file data" : "",
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES),
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_DIRECTORIES));
+		ifs_counts(display);
+		append(display, ")\n");
 	}
 }
 
@@ -1693,6 +1740,7 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		    options->request.kind == FSIMG_JOB_CREATE;
 		break;
 	case FSIMG_FRAME_INFO:
+		bcopy(raw, display->volume, sizeof(display->volume));
 		/* cW reports the verification of its staged image, not its header. */
 		if (!display->verifying_staged &&
 		    (options->json || options->request.kind == FSIMG_JOB_INFO))

@@ -92,7 +92,9 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/ifs/ifs.h lib/formats/ifs/descriptor.c \
 	lib/formats/ifs/records.c lib/formats/ifs/volume.c \
 	lib/formats/ifs/tree.c lib/formats/ifs/names.c \
-	lib/formats/ifs/directory.c lib/formats/ifs/read.c
+	lib/formats/ifs/directory.c lib/formats/ifs/read.c \
+	lib/formats/ifs/verify.c lib/codec/codec.h lib/codec/lzo1x.c \
+	lib/codec/nrv2b.c compat/host.c compat/host.h
 # The system zlib is the core's one third-party library; never vendored.
 libfsimg_core_la_LIBADD = $(ZLIB_LIBS)
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined

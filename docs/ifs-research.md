@@ -93,7 +93,11 @@ Captures are in `~/qnx65-vm/captures-ifs/` (`FSIMG_IFS_NATIVE`), made with
 * **Into the guest.** `capture.sh -i IMAGE` loads a sector-padded host image
   onto `hd0` through `load.py` (encoded size at most 3 MiB), and the guest
   command copies each case out with `dd` by offset and length.
-  `tools/qnx/decode/ifsflip.py` builds such a disk of mutated copies. Larger
+  `tools/qnx/decode/ifsflip.py` builds such a disk of mutated copies; the
+  E10 disk's twelve uncompressed copies are cut from `inputs/e10.img` by
+  the slot offsets and lengths of `inputs/e10.cases` into
+  `cases/ifs-e10-sense/`, named `slotNN-CASE.ifs`; `test-ifs --native`
+  expects every copy but `slot00-unchanged.ifs` to fail verification. Larger
   images, such as the H3 boot images, need the stopped-VM `big.img` route of
   the QNX6 infrastructure, which this record has not used.
 * **Decoding.** `tools/qnx/decode/ifsdump.py` dumps an uncompressed boot
