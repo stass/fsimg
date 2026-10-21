@@ -369,7 +369,7 @@ test_variants(void)
 {
 	static const unsigned variants[] = { 16, 12, 32 };
 	static const char *const names[] = {
-		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4"
+		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs"
 	};
 	fixture_t f;
 	fsimg_read_options_t options;
@@ -382,15 +382,18 @@ test_variants(void)
 	size_t count, cursor;
 	fsimg_range_t range;
 
-	/* The registry lists every format in this order, and every one reads,
-	 * writes and verifies.
+	/* The registry lists every format in this order. Every one reads;
+	 * all but ImageFS also write and verify.
 	 */
 	cursor = 0;
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK(strcmp(format.name, names[i]) == 0);
-		CHECK(format.capabilities ==
-		    (FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
+		if (strcmp(format.name, "ifs") == 0)
+			CHECK(format.capabilities == FSIMG_CAP_READ);
+		else
+			CHECK(format.capabilities == (FSIMG_CAP_READ |
+			    FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
 	}
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
@@ -470,6 +473,9 @@ test_variants(void)
 			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EFORMAT);
 			CHECK(other == NULL);
 			options.format = "qnx4";
+			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EFORMAT);
+			CHECK(other == NULL);
+			options.format = "ifs";
 			CHECK(fsimg_reader_open(f.ctx, f.io, &options, &other, NULL) == FSIMG_EFORMAT);
 			CHECK(other == NULL);
 			/* An unknown format name is unsupported. */

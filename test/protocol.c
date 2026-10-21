@@ -21,6 +21,7 @@ static void test_entry_records(void);
 static void test_invalid_entry_records(void);
 static void test_info_uuid(void);
 static void test_info_label(void);
+static void test_info_mountpoint(void);
 static void test_job_posix_flags(void);
 static void test_job_roots(void);
 static void test_job_selection(void);
@@ -520,6 +521,94 @@ test_info_label(void)
 	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
 }
 
+/* The widest mountpoint, 1024 bytes, and a full detail table travel whole.
+ * A mountpoint without its terminator, bytes after it or in an absent one,
+ * a detail count above sixteen, an empty or unprintable detail name and a
+ * nonzero unused detail are refused.
+ */
+static void
+test_info_mountpoint(void)
+{
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_INFO,
+	    .length = FSIMG_WIRE_INFO_BYTES };
+	fsimg_volume_info_t info;
+	unsigned char *mountpoint = frame.payload + FSIMG_WIRE_INFO_MOUNTPOINT;
+	unsigned char *last;
+
+	bzero(&info, sizeof(info));
+	info.valid = FSIMG_VOLUME_MOUNTPOINT;
+	memset(info.mountpoint, 'm', 1024);
+	info.mountpoint[0] = '/';
+	info.volume_bytes = 4096;
+	info.time_basis = FSIMG_TIME_UTC;
+	info.scope = FSIMG_VALIDATION_HEADER;
+	strcpy(info.format, "ifs");
+	info.detail_count = FSIMG_VOLUME_DETAILS_MAX;
+	for (unsigned i = 0; i < FSIMG_VOLUME_DETAILS_MAX; i++) {
+		memset(info.details[i].name, 'n', 23);
+		info.details[i].name[0] = (char)('a' + i);
+		info.details[i].value = UINT64_MAX - i;
+	}
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(strlen((const char *)mountpoint) == 1024);
+	CHECK(bcmp(mountpoint, info.mountpoint, 1024) == 0);
+	CHECK(fsimg_wire_get64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT) ==
+	    FSIMG_VOLUME_DETAILS_MAX);
+	last = frame.payload + FSIMG_WIRE_INFO_DETAILS +
+	    (FSIMG_VOLUME_DETAILS_MAX - 1) * FSIMG_WIRE_INFO_DETAIL_BYTES;
+	CHECK(bcmp(last, info.details[15].name, 24) == 0);
+	CHECK(fsimg_wire_get64(last + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES) ==
+	    UINT64_MAX - 15);
+
+	mountpoint[1024] = 'm';
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	mountpoint[1024] = '\0';
+	/* The seven bytes between the mountpoint and the detail count. */
+	frame.payload[FSIMG_WIRE_INFO_DETAIL_COUNT - 1] = 1;
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	frame.payload[FSIMG_WIRE_INFO_DETAIL_COUNT - 1] = 0;
+	last[23] = 'n';
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	last[23] = '\0';
+	last[0] = ' ';
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	last[0] = 0x80;
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	last[0] = 'p';
+	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+
+	/* An encoder caps the count; a frame above sixteen is refused. */
+	info.detail_count = FSIMG_VOLUME_DETAILS_MAX + 1;
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(fsimg_wire_get64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT) ==
+	    FSIMG_VOLUME_DETAILS_MAX);
+	fsimg_wire_put64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT,
+	    FSIMG_VOLUME_DETAILS_MAX + 1);
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+
+	/* Two details: an empty name is refused, as is any byte past them. */
+	info.detail_count = 2;
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	frame.payload[FSIMG_WIRE_INFO_DETAILS + 2 * FSIMG_WIRE_INFO_DETAIL_BYTES +
+	    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES] = 1;
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	info.details[1].name[0] = '\0';
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+
+	/* An absent mountpoint travels as zero bytes. */
+	info.detail_count = 0;
+	info.valid = 0;
+	fsimg_wire_info_encode(frame.payload, &info);
+	for (unsigned i = 0; i < FSIMG_WIRE_INFO_MOUNTPOINT_BYTES; i++)
+		CHECK(mountpoint[i] == 0);
+	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	mountpoint[0] = '/';
+	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+}
+
 static void
 test_job_posix_flags(void)
 {
@@ -875,6 +964,7 @@ main(int argc, char **argv)
 	test_invalid_entry_records();
 	test_info_uuid();
 	test_info_label();
+	test_info_mountpoint();
 	test_job_posix_flags();
 	test_job_roots();
 	return (0);

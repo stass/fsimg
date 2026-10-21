@@ -134,7 +134,8 @@ and any value is accepted. [D], [X1], [S1], [S2]
 These relations hold in every image and are checked by the probe from the
 fixed header alone; a violation is `FSIMG_ECORRUPT`: [X1], [S1], [S2]
 
-* `0x58 <= dir_offset <= hdr_dir_size` and `hdr_dir_size + 4 <= image_size`,
+* `0x58 <= dir_offset`, `dir_offset + 4 <= hdr_dir_size`, since the table
+  holds at least its terminator, and `hdr_dir_size + 4 <= image_size`,
   computed in 64 bits so that no bound underflows;
 * `image_size` is a multiple of 4, so the image is whole words for the
   checksum;
@@ -241,8 +242,10 @@ path's NUL; it is `sym_size` bytes, followed by a NUL, then padding to the
 record's end. Relative, absolute, dangling, `..` and non-ASCII targets all
 follow it. The reader requires exactly this relationship, so no second
 candidate layout is ever tried: `sym_offset` other than
-`L + 1`, a target whose NUL lies outside the record, or a NUL missing after
-`sym_size` bytes is `FSIMG_EUNSUPPORTED`. The target is content, delivered
+`L + 1`, a NUL within the `sym_size` bytes, since a target [holds no
+NUL](design-metadata.md), or a NUL missing after them is
+`FSIMG_EUNSUPPORTED`. A record too short for the target and NUL it declares
+is below the kind's minimum, which the table rule makes `FSIMG_ECORRUPT`. The target is content, delivered
 as bytes, never resolved. `mkifs` accepts targets of up to 1024 bytes and
 refuses 4000, so the format's link-target limit, the capability record's
 `max_link_target_bytes`, is 1024 bytes, which is also the entry model's
@@ -345,7 +348,9 @@ empty-path record gets its root synthesized exactly as any other missing
 parent, which also covers the empty table. A record with the empty path and
 a kind other than directory is `FSIMG_EUNSUPPORTED`, whether it is the
 entry or shadowed: the decision is made on the record, and a root that is
-not a directory would put every other path below a non-directory. [X1]
+not a directory would put every other path below a non-directory. The
+root is never delivered as an entry, so a root record contributes only its
+kind and its inode word, which a boot or script reference may name. [X1]
 
 ### Duplicates
 

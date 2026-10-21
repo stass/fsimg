@@ -5,9 +5,9 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-qnx4, test-codec, test-protocol, test-layers,
-# test-containers, test-compression, test-mtree and test/spec.sh, which
-# write the seeds, with MAKE naming the make program
+# test-exfat, test-qnx6, test-qnx4, test-ifs, test-codec, test-protocol,
+# test-layers, test-containers, test-compression, test-mtree and
+# test/spec.sh, which write the seeds, with MAKE naming the make program
 # that drives that build (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX
 # select the compiler. The harnesses build against the instrumented
 # sanitizer-fuzz/ tree (see sanitize.sh) and keep their corpora here
@@ -127,6 +127,20 @@ if test ! -f "$qnx4_corpus/chain.seed"; then
     ./test-qnx4 --seed-chain "$qnx4_corpus/chain.seed"
 fi
 run_fuzzer "$work_dir/fuzz-qnx4" "$qnx4_corpus" 1048576 10
+
+# ImageFS reads the exact slice with the decoder forced; the seed is a
+# generated image with every record kind, implicit parents and names
+# outside the profile.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    "$source_dir/fuzz/ifs.c" "$fuzz_library" -o "$work_dir/fuzz-ifs"
+ifs_corpus=ifs-fuzz-corpus
+mkdir -p "$ifs_corpus"
+if test ! -f "$ifs_corpus/sample.seed"; then
+    ./test-ifs --seed "$ifs_corpus/sample.seed"
+fi
+run_fuzzer "$work_dir/fuzz-ifs" "$ifs_corpus" 1048576 10
 
 # The stream decoders parse every compressed byte of an untrusted boot
 # image. The harness decodes each LZO1X stream whole and in pieces and

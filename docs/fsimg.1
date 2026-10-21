@@ -48,7 +48,7 @@
 .Sh DESCRIPTION
 .Nm
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
-QNX6 Power-Safe and QNX4 volumes.
+QNX6 Power-Safe and QNX4 volumes, and reads QNX ImageFS images.
 FAT volumes with more than two FAT copies are reported as unsupported.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.
@@ -327,6 +327,15 @@ A QNX4 volume whose
 .Pa lost+found
 .Pa ..
 entry names the root record does not open, for the same reason.
+An ImageFS is read from the start of the slice, in either byte order; the
+startup code and compression of a boot or compressed image are not read.
+A parent without a record lists as a directory with mode 0755, owner 0 and
+time 0, and of records with the same path only the last lists.
+A path below a file, symbolic link or FIFO record, or with
+.Pa \&. ,
+.Pa ..
+or empty components, is unsupported.
+ImageFS images cannot be verified.
 .Pp
 A gzip-compressed image, a file or standard input, is detected from its
 first bytes and decoded, member after member as
@@ -376,7 +385,12 @@ syntax and its compression, gzip or none; with a container, its disk size,
 chunk count, chunk encodings and identifier; with a partition scheme, the disk and each used
 partition's slot, type, size, offset, filesystem and name, marking the
 selected one; then header validation, geometry, label, volume UUID when the
-format has one, time basis and known capabilities.
+format has one, the mountpoint and named format details when the format
+records them, time basis and known capabilities.
+An ImageFS's details are its header's mount flags, boot and script inode
+references and chain address, its record counts by inode flag nibble, and
+the numbers of implicit directories, shadowed records, omitted subtrees and
+references to omitted entries.
 When no single partition holds a filesystem,
 .Cm i
 still reports the table and states that no volume is selected; every other
@@ -1016,9 +1030,9 @@ An image entry of another kind, such as a symbolic link or FIFO, fails the
 extraction and is named in the error, unless
 .Fl k
 skips it.
-So does an entry a QNX4 or QNX6 reader omits because its name, though QNX
-accepts it, lies outside the profile: strict UTF-8 without control bytes or
-DEL, unless
+So does an entry a QNX4, QNX6 or ImageFS reader omits because its name,
+though QNX accepts it, lies outside the profile: strict UTF-8 without
+control bytes or DEL, unless
 .Fl k
 omits it.
 .Pp
@@ -1200,6 +1214,8 @@ Unknown values are null.
 Timestamp records state basis and precision.
 Entry records name their kind as file, directory, symlink or fifo and carry
 change time, uid, gid and mode, each null when absent.
+Information records also give the mountpoint, null when absent, and details,
+an object of each named format detail's decimal string value.
 Format records name their kind: filesystem, scheme, container or
 compression.
 A filesystem's record gives entry_kinds, metadata_fields and write_settings

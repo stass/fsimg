@@ -3,6 +3,17 @@
 Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
 [research record](ifs-research.md) owns the evidence and provenance.
 
+* [High] **H3 boot bodies with records below a symbolic link**
+  (`lib/formats/ifs/tree.c`, `specs/design-ifs.md`): six of the eight
+  decoded H3 boot bodies, the `PCM3_IFS1` family, hold a symbolic-link
+  record at the top level and two symbolic-link records whose paths lie
+  below it. Owner decision 11 makes a path below a non-directory
+  `FSIMG_EUNSUPPORTED`, so the reader refuses them, while the design's PCM
+  section says all eight bodies verify. The owner decides between refusing
+  them, as the reader does, and a rule that admits them, such as listing
+  the descendants below a synthesized directory or omitting them; the
+  `PCM3_Emergency` bodies, `PCM3_IFS2` and the X1 bodies open.
+
 * [Medium] **Boot experiments E8 and E12** (`tools/qnx/guest/popifs.sh`,
   `docs/ifs-research.md`): x86 `startup-bios` and `procnto` images,
   uncompressed and with each codec, with and without the BIOS prefix, the
@@ -43,8 +54,7 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   `mkifs` writes time 0 on every directory record, and the writer stores the
   catalog's time. The native qualification cycle checks that `dumpifs -x`
   accepts nonzero directory times; the result returns to the owner.
-* [Medium] **Public API additions** (`include/fsimg.h`, worker job record):
-  the volume information's `mountpoint` field and valid bit, the detail
-  table, `FSIMG_SETTING_MOUNTPOINT`, `FSIMG_SETTING_BOOT` and the emission
-  copy observer are specified in `specs/design-api.md` and
-  `specs/design-emission.md`; they land with the reader and writer stages.
+* [Medium] **Writer API additions** (`include/fsimg.h`, worker job record):
+  `FSIMG_SETTING_MOUNTPOINT`, `FSIMG_SETTING_BOOT` and the emission copy
+  observer are specified in `specs/design-api.md` and
+  `specs/design-emission.md`; they land with the writer stage.

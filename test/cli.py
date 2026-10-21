@@ -103,7 +103,8 @@ def test_formats(executable, root):
     decoded = completed(invoke(executable, root, ["--formats", "--json"]))
     assert decoded[-1]["command"] == "formats"
     formats = filesystems(decoded)
-    assert set(formats) == {"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4"}
+    assert set(formats) == {"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs"}
+    assert formats.pop("ifs")["capabilities"] == 1
     layers = {record["name"]: record for record in decoded
               if record["type"] == "format" and record["kind"] != "filesystem"}
     assert {name: record["kind"] for name, record in layers.items()} == {
@@ -143,7 +144,9 @@ def filesystems(decoded):
 def test_posix_metadata(executable, root):
     """FAT and exFAT store no POSIX fields or links: -p imports become counted
     losses that leave image bytes unchanged, and a link fails planning. The
-    QNX6 and QNX4 formats store every kind and the POSIX fields."""
+    QNX6 and QNX4 formats store every kind and the POSIX fields; the
+    read-only ImageFS stores every kind with modification time, owner and
+    mode."""
     decoded = completed(invoke(executable, root, ["--formats", "--json"]))
     formats = filesystems(decoded)
     qnx6 = formats.pop("qnx6")
@@ -154,6 +157,10 @@ def test_posix_metadata(executable, root):
     assert qnx4["entry_kinds"] == 15 and qnx4["metadata_fields"] == 0x77
     assert qnx4["max_label_bytes"] == 48 and qnx4["write_settings"] == 4
     assert qnx4["max_link_target_bytes"] == 1023
+    ifs = formats.pop("ifs")
+    assert ifs["entry_kinds"] == 15 and ifs["metadata_fields"] == 0x62
+    assert ifs["max_label_bytes"] == 0 and ifs["write_settings"] == 0
+    assert ifs["max_link_target_bytes"] == 1024
     assert all(record["write_settings"] == 0 for record in formats.values())
     assert all(record["entry_kinds"] == 3 for record in formats.values())
     assert all(record["metadata_fields"] == 15 for record in formats.values())
@@ -277,6 +284,7 @@ def test_human_help(executable, root):
                               b"exfat   yes   yes    yes\n"
                               b"qnx6    yes   yes    yes\n"
                               b"qnx4    yes   yes    yes\n"
+                              b"ifs     yes   no     no\n"
                               b"\n"
                               b"Layer  Kind         Read  Write  Verify  Codecs         Settings\n"
                               b"gpt    scheme       yes   yes    yes     -              "
@@ -2046,6 +2054,70 @@ def test_mtree_reporting(executable, root):
     assert (work / "json.mtree").exists()
 
 
+def ifs_image(payload):
+    """A big-endian ImageFS encoded here from the published layout: the
+    mountpoint /proc/boot, a directory etc holding the file motd, and the
+    symbolic link bin/sh, whose parent bin has no record. Boot inode 0 names
+    the file, so the image is bootable."""
+    def record(mode, inode, tail, path, extra=b""):
+        body = tail + path + b"\0" + extra
+        length = (0x18 + len(body) + 3) // 4 * 4
+        prefix = (length.to_bytes(2, "big") + bytes(2) + inode.to_bytes(4, "big") +
+                  mode.to_bytes(4, "big") + (7).to_bytes(4, "big") +
+                  (9).to_bytes(4, "big") + (86400).to_bytes(4, "big"))
+        return (prefix + body).ljust(length, b"\0")
+
+    mountpoint = b"/proc/boot\0"
+    dir_offset = (0x58 + len(mountpoint) + 3) // 4 * 4
+    target = b"/proc/boot/ksh"
+    table_bytes = 0x1c + 0x2c + 0x34 + 4
+    # The file's data starts at the table's end.
+    hdr_dir_size = data_offset = dir_offset + table_bytes
+    table = (record(0o40755, 1, b"", b"etc") +
+             record(0o100640, 2, data_offset.to_bytes(4, "big") +
+                    len(payload).to_bytes(4, "big"), b"etc/motd") +
+             record(0o120777, 3, (7).to_bytes(2, "big") +
+                    len(target).to_bytes(2, "big"), b"bin/sh", target + b"\0") +
+             bytes(4))
+    assert len(table) == table_bytes
+    image_size = (data_offset + len(payload) + 3) // 4 * 4 + 4
+    header = (b"imagefs\x05" + image_size.to_bytes(4, "big") +
+              hdr_dir_size.to_bytes(4, "big") + dir_offset.to_bytes(4, "big") +
+              (2).to_bytes(4, "big") + bytes(12) + bytes(4) + bytes(4) +
+              bytes(40) + (3).to_bytes(4, "big"))
+    assert len(header) == 0x58
+    image = ((header + mountpoint).ljust(dir_offset, b"\0") + table +
+             payload).ljust(image_size - 4, b"\0")
+    # The trailer makes the big-endian word sum of the image zero.
+    total = sum(int.from_bytes(image[o:o + 4], "big") for o in range(0, len(image), 4))
+    return image + ((-total) % 2**32).to_bytes(4, "big")
+
+
+def test_ifs(executable, root, payload):
+    """A read-only ImageFS through the command: i reports the mountpoint
+    and the named header details, the listing synthesizes the missing
+    parent, and the file reads back byte for byte."""
+    (root / "boot.ifs").write_bytes(ifs_image(payload))
+    info = completed(invoke(executable, root, ["i", "--json", "-f", "boot.ifs"]))[1]
+    assert info["format"] == "ifs" and info["profile"] == "big-endian, bootable"
+    assert info["mountpoint"] == "/proc/boot" and info["label"] is None
+    assert info["details"]["mount_flags"] == "3"
+    assert info["details"]["boot_ino_0"] == "2"
+    # The root and bin have no record.
+    assert info["details"]["implicit_directories"] == "2"
+    human = invoke(executable, root, ["i", "-f", "boot.ifs"]).stdout
+    assert b"Format:       IFS\n" in human and b'Mountpoint:   "/proc/boot"\n' in human
+    assert b"implicit_directories: 2\n" in human
+    listed = completed(invoke(executable, root, ["t", "--json", "-f", "boot.ifs"]))
+    entries = {record["path"]: record for record in listed if record["type"] == "entry"}
+    assert set(entries) == {"/bin", "/bin/sh", "/etc", "/etc/motd"}
+    assert entries["/bin"]["mode"] == 0o755 and entries["/bin"]["uid"] == 0
+    assert entries["/bin/sh"]["kind"] == "symlink"
+    assert entries["/etc/motd"]["mode"] == 0o640 and entries["/etc/motd"]["uid"] == 9
+    assert entries["/etc/motd"]["gid"] == 7
+    assert invoke(executable, root, ["x", "-O", "-f", "boot.ifs", "/etc/motd"]).stdout == payload
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -2073,6 +2145,7 @@ def main():
         test_posix_metadata(executable, root)
         test_qnx6(executable, root, payload)
         test_qnx4(executable, root, payload)
+        test_ifs(executable, root, payload)
         test_failures(executable, root)
         test_output_failures(executable, root)
         test_examples(executable, root)

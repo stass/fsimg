@@ -226,8 +226,9 @@ is the directory's children, never its subtree.
 
 An admitted record carries its class, its component as the
 [contract](design-directories.md#omitted-names) stores it per class, and a
-bounded payload: the kind, the node index, and the table offset or the
-synthesized marker, each an explicit little-endian field. `keys` emits
+bounded payload: the kind, the node index, the table offset or the
+synthesized marker, and the record's path length, each an explicit
+little-endian field. `keys` emits
 one key, the exact component bytes; `key` validates a query component
 against the same profile and
 returns its bytes. Two children of one directory never share a component,
@@ -236,7 +237,7 @@ namespace is unambiguous by construction; the `ambiguous` text, which names
 a duplicate ImageFS path, exists for the common contract and is unreachable.
 
 `replay` re-validates the payload, reads the record again at its table
-offset through the window, decodes it with `ifs_record_decode()`, requires
+offset, at most the decode buffer's bytes of it, decodes it with `ifs_record_decode()`, requires
 its kind and path length to agree with the payload, and fills the entry:
 owner, the twelve permission bits and the modification time as UTC seconds.
 A synthesized directory fills the entry from constants. For a regular file,

@@ -3,7 +3,7 @@
 fsimg is a BSD-2-Clause filesystem image tool and embeddable C11 library for
 64-bit FreeBSD, Linux, and macOS. It supports FAT, exFAT, classic QNX6
 Power-Safe and QNX4 image creation, reading, verification, and safe
-extraction without mounts or root.
+extraction without mounts or root, and reads QNX ImageFS (IFS) images.
 
 The library provides resource contexts, bounded positional I/O, and private
 bounded metadata storage with record streams, paged arrays/bitsets, and stable
@@ -150,6 +150,17 @@ volume is not bootable. It stores every entry kind and the POSIX fields.
 QNX 6.5.0 checks, mounts and remounts its volumes cleanly at every size
 from the 43-block minimum to a 52.6 GB volume, and modifies every one with
 free space cleanly.
+
+The ImageFS reader accepts the image filesystems QNX 6.5.0 `mkifs` makes,
+in either byte order, read from offset 0 of the selected slice, and reports
+files, directories, symbolic links and FIFOs with owner, mode and
+modification time. `fsimg i` reports the mountpoint and the header's boot
+references and mount flags. A parent without a record is listed as a
+directory with mode 0755, owner 0 and time 0; of records with the same path
+only the last is listed. A path below a file, symbolic link or FIFO record,
+and a path with `.`, `..` or empty components, is unsupported. A compressed
+or boot image's startup code and compression are not read, and ImageFS
+images cannot be verified or created.
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,

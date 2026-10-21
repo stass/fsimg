@@ -358,7 +358,15 @@ the verify request to fail as unsupported without work. Its seeds are the reader
 tests' sample volume, 2000 blocks holding every entry kind, 16-, 48- and
 505-byte names, a hard link and a 61-extent file, and a 400-block volume whose
 file has 122 extents in a three-block chain, with a 1 MiB input ceiling and the
-same budgets. `fuzz/codec.c` drives the LZO1X and NRV2B decoders directly:
+same budgets. `fuzz/ifs.c` forces the ImageFS decoder and reads each input
+as the exact slice and again cut to the `image_size` its header declares,
+since bytes past the image are never read and a length-changing mutation
+otherwise never reaches the record table. It lists every entry, reads the
+first and last bytes of each file and symbolic link, and requires every
+opened image to fit the slice and every resource to be released. Its seed,
+from `test-ifs --seed`, is a little-endian image with every record kind,
+implicit parents and names outside the profile, with a 1 MiB input ceiling
+and the same budgets. `fuzz/codec.c` drives the LZO1X and NRV2B decoders directly:
 the input's first four bytes choose the codec, the limit or capacity and the
 LZO1X call plan, and the rest is the stream. Each LZO1X stream is decoded in
 one call and again in pieces through a small window keeping 49151 bytes of
@@ -405,8 +413,8 @@ FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 The exact standalone commands from the top of a separate build directory are:
 
 ```sh
-make test-fat test-exfat test-qnx6 test-qnx4 test-codec test-protocol \
-    test-layers test-containers test-compression test-mtree
+make test-fat test-exfat test-qnx6 test-qnx4 test-ifs test-codec \
+    test-protocol test-layers test-containers test-compression test-mtree
 MAKE=make sh ../build-aux/fuzz.sh
 ```
 
@@ -416,11 +424,11 @@ instrumented library through `build-aux/sanitize.sh fuzz` and compiles the
 harnesses into `sanitizer-fuzz/` from the same read-only source copy.
 
 The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `qnx6-fuzz-corpus/`,
-`qnx4-fuzz-corpus/`, `codec-fuzz-corpus/`, `protocol-fuzz-corpus/`,
-`image-fuzz-corpus/`, `container-fuzz-corpus/`, `plist-fuzz-corpus/`,
-`gzip-fuzz-corpus/`, `mtree-fuzz-corpus/` and libFuzzer crash artifacts are
-disposable build outputs. Existing corpus seeds and mutations are reused;
-`make clean` keeps the
+`qnx4-fuzz-corpus/`, `ifs-fuzz-corpus/`, `codec-fuzz-corpus/`,
+`protocol-fuzz-corpus/`, `image-fuzz-corpus/`, `container-fuzz-corpus/`,
+`plist-fuzz-corpus/`, `gzip-fuzz-corpus/`, `mtree-fuzz-corpus/` and libFuzzer
+crash artifacts are disposable build outputs. Existing corpus seeds and
+mutations are reused; `make clean` keeps the
 corpora, `make distclean` removes them, and neither removes crash artifacts.
 `FUZZ_SECONDS=60 make check-fuzz` selects a finite wall-clock allowance per
 corpus instead of the 1000-mutation smoke budget. The value is decimal
@@ -1185,6 +1193,51 @@ cache, `fsimg W --offset=3232535040 --length=52617116160` takes 4.2 seconds
 of
 wall time and 0.22 seconds of CPU at a peak RSS of 41 MB as
 `/usr/bin/time -l` reports it, and `W -d` 7.9 seconds at 37 MB.
+
+`test-ifs` reads QNX ImageFS images built by its own generator, written
+from [the format design](../specs/design-ifs.md) with separate offset
+tables; it shares no code with `lib/formats/ifs/`. The generator lays out
+the header, the mountpoint, one record per member in table order, the
+terminator, the file data and the checksum trailer, in either byte order,
+and the tests mutate the finished bytes. A second oracle, a model written
+with a different algorithm from the driver's, inserts every record into an
+in-memory tree in table order, a later record replacing an earlier one with
+the same path and missing parents synthesized, and predicts the status of
+open, every delivered entry and every `info` count. The cases cover probe
+exclusivity against fsimg's FAT12, exFAT, QNX6 and QNX4 volumes and a QNX4
+root block at byte 512 that both formats claim; each header bound at `x -
+1`, `x` and `x + 1`; the mountpoint's terminator, padding and profile;
+record lengths 0, 1, 23 and 24, below each kind's minimum and crossing the
+table, the terminator, the inode flag nibbles, extended attributes and
+every field of the four kinds; implicit parents at depths 1, 32 and 512 and
+the default depth limit; duplicate paths, paths below a file, a link and a
+FIFO in either table order, and odd paths; components of 1, 255, 256 and
+1024 bytes and names outside the profile, omitted with their subtrees and
+counted; content ranges at and across the trailer and the table, shared
+ranges and zero-length files; every off-by-one of a symbolic link's target;
+boundary owners, modes and times; boot and script references; extraction;
+and 400 random trees in either byte order compared with the model.
+
+```sh
+FSIMG_IFS_NATIVE=/path/to/captures-ifs ./test-ifs --native
+```
+
+`make check-integration` runs `test-ifs --native`, which reads external
+evidence that is never redistributed. `FSIMG_IFS_NATIVE` names the native
+captures directory described in [the ImageFS research
+record](ifs-research.md); every file in its `cases/ifs-basic`,
+`cases/ifs-names`, `cases/ifs-extra`, `cases/ifs-data` and `decoded`
+subdirectories that holds an ImageFS at offset 0 is read and compared with
+the model: the status of open and, for an image that opens, every entry's
+kind, metadata and bytes and every `info` count. It prints only counts, and
+the capture's file name on a mismatch, never a member name; without the
+variable it prints `SKIP: FSIMG_IFS_NATIVE is not set` and exits 77. On
+macOS the 72 images give 64 opened, 8 unsupported and none mismatched, in
+0.7 seconds. The eight are the two captures made to hold a file record's
+descendant and odd paths, and six decoded H3 boot bodies, each holding two
+symbolic-link records below a symbolic-link record
+([TODO](todo-ifs.md)). Images `dumpifs -u` decompresses are not compared:
+no such copies exist on this host.
 
 `test-codec`, in `make check`, tests the LZO1X and NRV2B decoders on
 streams written by hand from [the codec design](../specs/design-codecs.md).

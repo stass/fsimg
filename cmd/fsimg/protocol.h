@@ -29,7 +29,7 @@ typedef enum fsimg_wire_error_field {
 	FSIMG_WIRE_ERROR_MESSAGE = 336
 } fsimg_wire_error_field_t;
 
-#define FSIMG_WIRE_INFO_BYTES 216u
+#define FSIMG_WIRE_INFO_BYTES 1768u
 typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_VALID = 0,
 	FSIMG_WIRE_INFO_CAPABILITIES = 8,
@@ -45,11 +45,22 @@ typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_FORMAT = 88,
 	FSIMG_WIRE_INFO_PROFILE = 104,
 	FSIMG_WIRE_INFO_LABEL = 144,	/* 48 bytes and a NUL, then zeros */
-	FSIMG_WIRE_INFO_UUID = 200
+	FSIMG_WIRE_INFO_UUID = 200,
+	FSIMG_WIRE_INFO_MOUNTPOINT = 216, /* 1024 bytes and a NUL, then zeros */
+	FSIMG_WIRE_INFO_DETAIL_COUNT = 1248,
+	FSIMG_WIRE_INFO_DETAILS = 1256	/* 16 of a 24-byte name and a value */
 } fsimg_wire_info_field_t;
 #define FSIMG_WIRE_INFO_LABEL_BYTES 49u
-_Static_assert(FSIMG_WIRE_INFO_UUID + 16 == FSIMG_WIRE_INFO_BYTES,
-    "the info record ends with the volume UUID");
+#define FSIMG_WIRE_INFO_MOUNTPOINT_BYTES 1025u
+#define FSIMG_WIRE_INFO_DETAIL_NAME_BYTES 24u
+#define FSIMG_WIRE_INFO_DETAIL_BYTES 32u
+_Static_assert(FSIMG_WIRE_INFO_UUID + 16 == FSIMG_WIRE_INFO_MOUNTPOINT,
+    "the mountpoint follows the volume UUID");
+_Static_assert(FSIMG_WIRE_INFO_MOUNTPOINT + FSIMG_WIRE_INFO_MOUNTPOINT_BYTES <=
+    FSIMG_WIRE_INFO_DETAIL_COUNT, "the detail count follows the mountpoint");
+_Static_assert(FSIMG_WIRE_INFO_DETAILS + FSIMG_VOLUME_DETAILS_MAX *
+    FSIMG_WIRE_INFO_DETAIL_BYTES == FSIMG_WIRE_INFO_BYTES,
+    "the info record ends with the details");
 
 /* The image a read job opened: the layers around its volume. STACK is the
  * canonical text of the forced and detected slots with the selected

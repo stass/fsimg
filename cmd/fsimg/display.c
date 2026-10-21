@@ -51,6 +51,7 @@ static const char *basis_name(uint64_t);
 static const char *verified_scope_name(fsimg_validation_scope_t);
 static const char *scope_name(const fsimg_cli_display_t *);
 static void timestamp(fsimg_cli_display_t *, const unsigned char *, bool);
+static void volume_details(fsimg_cli_display_t *, const unsigned char *);
 static void volume(fsimg_cli_display_t *, const unsigned char *);
 static void plan(fsimg_cli_display_t *, const unsigned char *);
 static void civil_time(int64_t, char *, size_t);
@@ -861,6 +862,34 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "%s%s\n", active ? ", active" : "", selected ? ", selected" : "");
 }
 
+/* The volume's named details in the driver's order, printed without
+ * interpreting a name: "name":"value" members of the JSON details object,
+ * or one "name: value" line each. The protocol checked every name.
+ */
+static void
+volume_details(fsimg_cli_display_t *display, const unsigned char *raw)
+{
+	uint64_t count = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_DETAIL_COUNT);
+
+	for (uint64_t i = 0; i < count; i++) {
+		const unsigned char *detail = raw + FSIMG_WIRE_INFO_DETAILS +
+		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
+		uint64_t value = fsimg_wire_get64(detail +
+		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES);
+
+		if (display->options->json) {
+			if (i != 0)
+				append(display, ",");
+			string_value(display, (const char *)detail);
+			append(display, ":");
+			uint_value(display, value);
+		} else {
+			prose(display, (const char *)detail);
+			append(display, ": %llu\n", (unsigned long long)value);
+		}
+	}
+}
+
 static void
 volume(fsimg_cli_display_t *display, const unsigned char *raw)
 {
@@ -887,6 +916,12 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 			string_value(display, (const char *)raw + FSIMG_WIRE_INFO_LABEL);
 		else
 			append(display, "null");
+		append(display, ",\"mountpoint\":");
+		if ((valid & FSIMG_VOLUME_MOUNTPOINT) != 0)
+			string_value(display,
+			    (const char *)raw + FSIMG_WIRE_INFO_MOUNTPOINT);
+		else
+			append(display, "null");
 		append(display, ",\"uuid\":");
 		if ((valid & FSIMG_VOLUME_UUID) != 0) {
 			append(display, "\"");
@@ -905,13 +940,16 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, "null");
 		append(display, ",\"sector_bytes\":%llu,\"cluster_bytes\":%llu,"
 		    "\"capabilities\":%llu,\"time_basis\":\"%s\",\"validation_scope\":\"header\","
-		    "\"entry_count\":null,\"clean_flag\":%s,\"io_error_flag\":%s}\n",
+		    "\"entry_count\":null,\"clean_flag\":%s,\"io_error_flag\":%s,"
+		    "\"details\":{",
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SECTOR),
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLUSTER),
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES),
 		    basis_name(fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS)),
 		    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLEAN) ? "true" : "false",
 		    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_IO_ERROR) ? "true" : "false");
+		volume_details(display, raw);
+		append(display, "}}\n");
 		return;
 	}
 	append(display, "Format:       ");
@@ -927,6 +965,10 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_LABEL);
 	else
 		append(display, "unknown");
+	if ((valid & FSIMG_VOLUME_MOUNTPOINT) != 0) {
+		append(display, "\nMountpoint:   ");
+		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_MOUNTPOINT);
+	}
 	if ((valid & FSIMG_VOLUME_UUID) != 0) {
 		append(display, "\nUUID:         ");
 		uuid_value(display, raw + FSIMG_WIRE_INFO_UUID);
@@ -948,6 +990,7 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "\nCapabilities: read%s%s\n",
 	    (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_WRITE) != 0 ? ", write" : "",
 	    (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_VERIFY) != 0 ? ", verify" : "");
+	volume_details(display, raw);
 }
 
 /*

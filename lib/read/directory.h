@@ -26,20 +26,21 @@ typedef enum fsimg_name_profile {
 	FSIMG_NAME_PROFILE_QNX
 } fsimg_name_profile_t;
 
-/* A component and its NUL: room for any component of at most 1020 bytes,
- * which includes every UTF-8 component of at most 255 UTF-16 units (765
- * bytes). Each driver bounds its own names.
+/* A component and its NUL: room for any component of at most 1024 bytes,
+ * the longest an ImageFS path stores, which includes every UTF-8 component
+ * of at most 255 UTF-16 units (765 bytes). Each driver bounds its own names.
  */
-#define FSIMG_DIRECTORY_NAME_BYTES 1021u
+#define FSIMG_DIRECTORY_NAME_BYTES 1025u
 #define FSIMG_DIRECTORY_PAYLOAD_BYTES 64u
 /* A record is a class byte, the component and its NUL, and the payload. */
 #define FSIMG_DIRECTORY_RECORD_BYTES \
 	(1u + FSIMG_DIRECTORY_NAME_BYTES + FSIMG_DIRECTORY_PAYLOAD_BYTES)
 /* A namespace key: opaque bytes the driver derives from one spelling. Every
- * key buffer handed to a driver holds this many bytes; 1020 fits four bytes
- * for each of a component's at most 255 UTF-16 units.
+ * key buffer handed to a driver holds this many bytes: the exact bytes of a
+ * 1024-byte component, and four bytes for each of a component's at most 255
+ * UTF-16 units.
  */
-#define FSIMG_DIRECTORY_KEY_BYTES 1020u
+#define FSIMG_DIRECTORY_KEY_BYTES 1024u
 #define FSIMG_DIRECTORY_KEYS 2u
 
 /* The keys one entry answers to, such as a long name and its alias. */

@@ -233,6 +233,18 @@ test_capability_records(void)
 		CHECK((info.max_link_target_bytes == 0) ==
 		    ((info.entry_kinds & FSIMG_ENTRY_SYMLINK) == 0));
 		CHECK(info.max_link_target_bytes <= FSIMG_SYMLINK_TARGET_MAX);
+		if (strcmp(info.name, "ifs") == 0) {
+			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
+			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
+			    FSIMG_ENTRY_FIFO));
+			CHECK(info.metadata_fields == (FSIMG_META_MODIFIED |
+			    FSIMG_META_OWNER | FSIMG_META_MODE));
+			CHECK(info.max_label_bytes == 0);
+			CHECK(info.max_link_target_bytes == 1024);
+			CHECK(info.max_name_utf16_units == 1024);
+			CHECK(info.capabilities == FSIMG_CAP_READ);
+			continue;
+		}
 		if (strcmp(info.name, "qnx6") == 0 ||
 		    strcmp(info.name, "qnx4") == 0) {
 			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
@@ -255,7 +267,7 @@ test_capability_records(void)
 		else
 			CHECK(info.max_label_bytes == 11);
 	}
-	CHECK(count == 6);
+	CHECK(count == 7);
 }
 
 /* Optional owner, mode and change time are counted once per field and

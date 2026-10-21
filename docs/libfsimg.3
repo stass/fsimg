@@ -36,7 +36,8 @@ lists
 .Fn fsimg_writer_add_manifest "fsimg_writer_t *writer" "int manifest_fd" "int contents_fd" "fsimg_error_t *error"
 .Sh DESCRIPTION
 The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
-classic QNX6 Power-Safe volumes in either byte order, and QNX4 volumes.
+classic QNX6 Power-Safe volumes in either byte order, and QNX4 volumes,
+and reads QNX ImageFS images in either byte order.
 A format without full verification has no verify capability, and
 .Fn fsimg_verify
 fails on it with
@@ -92,7 +93,8 @@ Iteration invalidates the previous current-entry snapshot.
 .Fn fsimg_reader_next
 enumerates depth-first in on-disk order and returns FSIMG_DONE at complete EOF.
 Directory preparation validates case/alias ambiguity before exposing children.
-A QNX4 or QNX6 entry whose name QNX accepts but lies outside the profile,
+A QNX4, QNX6 or ImageFS entry whose name QNX accepts but lies outside the
+profile,
 strict UTF-8 without control bytes or DEL, is omitted: it and its subtree are
 never returned, no selection can name it, and each omitted subtree root is
 counted in the context statistics' omitted_entries.
@@ -106,6 +108,18 @@ cluster bytes.
 .Pp
 .Fn fsimg_reader_get_info
 reports header scope, not complete filesystem verification.
+A format that records a mount point reports it in mountpoint, with
+FSIMG_VOLUME_MOUNTPOINT set in valid.
+Format-specific values follow in details, detail_count of at most
+FSIMG_VOLUME_DETAILS_MAX entries in the driver's order, each a name of
+printable ASCII of up to 23 bytes and a 64-bit value.
+An ImageFS reports its mount flags, boot and script inode references, chain
+address, record counts by inode flag nibble, and the numbers of implicit
+directories, shadowed records, omitted subtrees and references to omitted
+entries.
+An ImageFS parent without a record reads as a directory with mode 0755,
+owner 0 and time 0, and of records with the same path only the last is
+returned.
 .Fn fsimg_verify
 requires an untouched reader and consumes traversal.
 FSIMG_VERIFY_PAYLOAD also reads initialized payload bytes.

@@ -331,6 +331,12 @@ fsimg_wire_entry_encode(unsigned char *raw, const fsimg_entry_t *entry,
 
 _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->label) ==
     FSIMG_WIRE_INFO_LABEL_BYTES, "the wire label holds the public label");
+_Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->mountpoint) ==
+    FSIMG_WIRE_INFO_MOUNTPOINT_BYTES,
+    "the wire mountpoint holds the public mountpoint");
+_Static_assert(sizeof(((fsimg_volume_detail_t *)NULL)->name) ==
+    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
+    "the wire detail name holds the public detail name");
 
 /* Strings are copied up to their terminators, which the reader guarantees
  * inside each fixed array; the zeroed record supplies the wire terminator.
@@ -338,6 +344,8 @@ _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->label) ==
 void
 fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 {
+	uint32_t count;
+
 	bzero(raw, FSIMG_WIRE_INFO_BYTES);
 	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VALID, info->valid);
 	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CAPABILITIES, info->capabilities);
@@ -358,6 +366,22 @@ fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 	    strnlen(info->label, sizeof(info->label) - 1));
 	if ((info->valid & FSIMG_VOLUME_UUID) != 0)
 		bcopy(info->uuid, raw + FSIMG_WIRE_INFO_UUID, sizeof(info->uuid));
+	if ((info->valid & FSIMG_VOLUME_MOUNTPOINT) != 0)
+		bcopy(info->mountpoint, raw + FSIMG_WIRE_INFO_MOUNTPOINT,
+		    strnlen(info->mountpoint, sizeof(info->mountpoint) - 1));
+	count = info->detail_count < FSIMG_VOLUME_DETAILS_MAX ?
+	    info->detail_count : FSIMG_VOLUME_DETAILS_MAX;
+	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_DETAIL_COUNT, count);
+	for (uint32_t i = 0; i < count; i++) {
+		unsigned char *detail = raw + FSIMG_WIRE_INFO_DETAILS +
+		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
+
+		bcopy(info->details[i].name, detail,
+		    strnlen(info->details[i].name,
+		    sizeof(info->details[i].name) - 1));
+		fsimg_wire_put64(detail + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
+		    info->details[i].value);
+	}
 }
 
 /* Only a used slot crosses the boundary, so the record has no used flag. */
@@ -454,6 +478,46 @@ entry_metadata_valid(const unsigned char *raw)
 	return (true);
 }
 
+/* A NUL-terminated string field of length bytes: the terminator lies in
+ * the field and every byte after it is zero, as the encoder writes it.
+ */
+static bool
+string_field_valid(const unsigned char *raw, size_t length)
+{
+	const unsigned char *nul = memchr(raw, '\0', length);
+
+	return (nul != NULL && bytes_zero(nul, length - (size_t)(nul - raw)));
+}
+
+/* The detail table: at most sixteen used entries, each a nonempty name of
+ * printable ASCII and its value, and zeros after them.
+ */
+static bool
+details_valid(const unsigned char *raw)
+{
+	uint64_t count = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_DETAIL_COUNT);
+
+	if (count > FSIMG_VOLUME_DETAILS_MAX)
+		return (false);
+	for (uint64_t i = 0; i < FSIMG_VOLUME_DETAILS_MAX; i++) {
+		const unsigned char *detail = raw + FSIMG_WIRE_INFO_DETAILS +
+		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
+
+		if (i >= count) {
+			if (!bytes_zero(detail, FSIMG_WIRE_INFO_DETAIL_BYTES))
+				return (false);
+			continue;
+		}
+		if (detail[0] == '\0' || !string_field_valid(detail,
+		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES))
+			return (false);
+		for (size_t j = 0; detail[j] != '\0'; j++)
+			if (detail[j] <= 0x20 || detail[j] >= 0x7f)
+				return (false);
+	}
+	return (true);
+}
+
 bool
 fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 {
@@ -467,14 +531,23 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	basis = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS);
 	scope = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SCOPE);
 	if (valid > (FSIMG_VOLUME_GEOMETRY | FSIMG_VOLUME_LABEL | FSIMG_VOLUME_FREE |
-	    FSIMG_VOLUME_UUID) || capabilities > 7 || basis < FSIMG_TIME_UTC ||
-	    basis > FSIMG_TIME_PER_TIMESTAMP)
+	    FSIMG_VOLUME_UUID | FSIMG_VOLUME_MOUNTPOINT) || capabilities > 7 ||
+	    basis < FSIMG_TIME_UTC || basis > FSIMG_TIME_PER_TIMESTAMP)
 		return (false);
 	if (scope < FSIMG_VALIDATION_HEADER || scope > FSIMG_VALIDATION_PAYLOAD)
 		return (false);
 	if ((valid & FSIMG_VOLUME_UUID) == 0 &&
-	    !bytes_zero(raw + FSIMG_WIRE_INFO_UUID, FSIMG_WIRE_INFO_BYTES -
-	    FSIMG_WIRE_INFO_UUID))
+	    !bytes_zero(raw + FSIMG_WIRE_INFO_UUID, 16))
+		return (false);
+	if (!string_field_valid(raw + FSIMG_WIRE_INFO_MOUNTPOINT,
+	    FSIMG_WIRE_INFO_DETAIL_COUNT - FSIMG_WIRE_INFO_MOUNTPOINT) ||
+	    memchr(raw + FSIMG_WIRE_INFO_MOUNTPOINT, '\0',
+	    FSIMG_WIRE_INFO_MOUNTPOINT_BYTES) == NULL)
+		return (false);
+	if ((valid & FSIMG_VOLUME_MOUNTPOINT) == 0 &&
+	    raw[FSIMG_WIRE_INFO_MOUNTPOINT] != '\0')
+		return (false);
+	if (!details_valid(raw))
 		return (false);
 
 	if (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME) > volume_limit)

@@ -236,8 +236,8 @@ remove a class of special cases rather than handling each case.
    * **`ifs`.** The identity is the seven bytes `imagefs` at volume offset
      0. The probe reads the descriptor's fixed prefix, which covers the
      88-byte header. A flags byte outside the closed table is unsupported.
-     A violated bound is corrupt: `0x58 <= dir_offset <= hdr_dir_size <=
-     image_size - 4`, `image_size % 4 == 0`, and `image_size` within the
+     A violated bound is corrupt: `0x58 <= dir_offset <= hdr_dir_size - 4 <=
+     image_size - 8`, `image_size % 4 == 0`, and `image_size` within the
      volume. The mountpoint's NUL, the record table and the checksum belong
      to open and verification.
    * **`qnxboot`.** The identity is the startup signature `0x00FF7EEB`

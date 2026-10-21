@@ -845,6 +845,8 @@ void fsimg_writer_free(fsimg_writer_t *);
 #define FSIMG_VOLUME_LABEL 0x02u
 #define FSIMG_VOLUME_FREE 0x04u
 #define FSIMG_VOLUME_UUID 0x08u
+#define FSIMG_VOLUME_MOUNTPOINT 0x10u
+#define FSIMG_VOLUME_DETAILS_MAX 16u
 #define FSIMG_VERIFY_PAYLOAD 0x01u
 
 typedef struct fsimg_read_options {
@@ -856,6 +858,14 @@ typedef struct fsimg_read_options {
 	uint32_t	 fat_codepage;
 	uint64_t	 reserved[4];
 } fsimg_read_options_t;
+
+/* One named value a driver reports, such as a count collected while opening:
+ * an ASCII name of at most 23 bytes and its terminator.
+ */
+typedef struct fsimg_volume_detail {
+	char		 name[24];
+	uint64_t	 value;
+} fsimg_volume_detail_t;
 
 typedef struct fsimg_volume_info {
 	uint32_t	 valid;
@@ -878,6 +888,16 @@ typedef struct fsimg_volume_info {
 	 */
 	bool		 clean;
 	bool		 io_error;
+	/* The stored mount path of a format that has one, valid under
+	 * FSIMG_VOLUME_MOUNTPOINT: UTF-8 of at most 1024 bytes and its
+	 * terminator, which may be empty. It is distinct from the label.
+	 */
+	char		 mountpoint[1025];
+	/* Format-specific named values in the order the driver documents;
+	 * detail_count of them are filled and the rest are zero.
+	 */
+	uint32_t	 detail_count;
+	fsimg_volume_detail_t details[FSIMG_VOLUME_DETAILS_MAX];
 } fsimg_volume_info_t;
 
 /* Format-specific fields of fsimg_write_options_t. */
