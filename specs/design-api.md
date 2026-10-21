@@ -618,8 +618,9 @@ available through `fsimg_status_string(status)` without allocation.
 `fsimg_options_t` uses `uint64_t` byte/count limits, including `spool_bytes`,
 `uint32_t` depth/path/FD limits, separate callback arguments, and zeroed
 reserved words. Its `flags` field accepts zero. `FSIMG_RESOURCE_SPOOL`
-identifies the spool limit in errors, and `FSIMG_OP_LAYER` identifies a
-failure in a scheme, container or compression layer. Progress snapshots borrow a phase string for the duration
+identifies the spool limit in errors, and `FSIMG_OP_IMAGE` identifies a
+failure in an image's scheme, container or compression layer, or in wrap,
+unwrap or compose. Progress snapshots borrow a phase string for the duration
 of the synchronous callback. Destructors called from a callback do nothing;
 fallible reentry returns `FSIMG_ESTATE`. This protects the active context without
 introducing deferred destruction or callback-driven lifecycle transitions.
