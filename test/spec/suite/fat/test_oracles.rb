@@ -19,7 +19,7 @@ class TestFatOracles < Minitest::Test
 
   # A file of size bytes, or a directory without one.
   def self.entry(path, size: nil, seed: 1) =
-    FsimgSpec::TreeEntry.new(path:, type: size ? "file" : "directory", size: size || 0, seed: size ? seed : 0)
+    (size ? FsimgSpec::TreeEntry.file(path, size:, seed:) : FsimgSpec::TreeEntry.directory(path))
 
   # ASCII names that every tool reads, among them pattern characters
   # mtools must take literally and a directory whose name starts with -.
@@ -133,7 +133,25 @@ class TestFatOracles < Minitest::Test
     end
   end
 
+  # A read-back that disagrees fails an image fsimg created, except where
+  # its cluster count lies closer to a variant threshold than the 16
+  # clusters automatic sizing keeps; one that does not apply never fails
+  # it.
+  def test_a_disagreeing_read_back_fails_a_created_image_away_from_the_thresholds
+    disagrees = { "mtools" => FsimgSpec::Observation.disagrees("mtools lacks file \"a\"") }
+    failing = [4069, 4070, 4100, 4101, 65_510, 65_541].select { Fat::Oracles.read_back_problem(disagrees, counted(_1)) }
+
+    assert_equal [4069, 4101, 65_541], failing
+    assert_nil Fat::Oracles.read_back_problem({ "mtools" => FsimgSpec::Observation.not_applicable("beyond the BMP") }, counted(4101))
+  end
+
   private
+
+  Counted = Data.define(:geometry)
+  Geometry = Data.define(:cluster_count)
+
+  # A model that knows only its cluster count, all the verdict reads.
+  def counted(clusters) = Counted.new(geometry: Geometry.new(cluster_count: clusters))
 
   # Writes a builder image of tree into a case directory, plants the
   # named files beside it, and yields the observations of it as the known

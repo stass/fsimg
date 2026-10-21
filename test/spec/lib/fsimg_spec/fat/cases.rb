@@ -11,8 +11,8 @@ module FsimgSpec
     # model that judges its first stage, with the created hook a creation
     # case needs, or nil. defect is why the case cannot be trusted to judge
     # fsimg, or nil. oracles is the hook CaseRun calls with the case
-    # directory for the oracles' observations, or nil when no oracle reads
-    # the case's image.
+    # directory and the image's model for the oracles' observations, or
+    # nil when no oracle reads the case's image.
     class Classified < Data.define(:kase, :image, :model, :created, :defect, :oracles)
       include Checked
 
@@ -56,7 +56,7 @@ module FsimgSpec
         kase = Case.derive(recipe(witness, base:, path:, stages:, classification:, random_seed:), classification,
                            registry: @registry)
         kase = kase.with(recipe: kase.recorded)
-        Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect, oracles: oracles(kase.recipe, model))
+        Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect, oracles: oracles(kase.recipe))
       end
 
       # A valid reading case, named id, of base, whose tree mtools
@@ -93,7 +93,24 @@ module FsimgSpec
         kase = Case.derive(recipe, classification, registry: @registry)
         kase = kase.with(recipe: kase.recorded)
         Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect,
-                       oracles: ->(_directory) { fixture.observations })
+                       oracles: ->(_directory, _model) { Observed.new(observations: fixture.observations) })
+      end
+
+      # A creation witness (Witnesses.creations) as a case: valid, or
+      # targeted at its intended input rule, which create alone checks, so
+      # nothing runs after a create that must reject. A drawn tree's
+      # creation records the seed it was drawn from as random_seed.
+      def creation_witness(witness, random_seed: nil)
+        stages = witness.intended ? ["create"] : ["create", *READING_STAGES]
+        recipe = Recipe.new(
+          id: witness.id, format: witness.format, kind: witness.intended ? "targeted" : "valid",
+          intended_violation: witness.intended, stages:, random_seed:,
+          source: Source.new(tree: witness.tree, settings: witness.settings, root: witness.root),
+          expected: stages.to_h { [_1, Expectation.new(unclassified: true)] }
+        )
+        classified = creation(recipe)
+        kase = classified.kase.with(recipe: classified.kase.recorded)
+        classified.with(kase:, defect: kase.harness_defect)
       end
 
       # Whether a witness meant valid, classified in memory, shows a
@@ -148,7 +165,7 @@ module FsimgSpec
         kase = Case.derive(recipe, classification, registry: @registry)
         digest = base_digest(path)
         defect = digest == recipe.base_sha256 ? replay_defect(kase) : "#{recipe.id}: its base renders to #{digest}"
-        Classified.new(kase:, image:, model:, created: nil, defect:, oracles: oracles(recipe, model))
+        Classified.new(kase:, image:, model:, created: nil, defect:, oracles: oracles(recipe))
       end
 
       private
@@ -157,29 +174,45 @@ module FsimgSpec
       # the case's image is valid and unmutated, so its tree is known; an
       # image of another class would reach an oracle only under the
       # confinement the nightly and deep profiles name.
-      def oracles(recipe, model)
+      def oracles(recipe)
         return nil unless @shell && recipe.reading? && recipe.kind == "valid" && recipe.mutations.empty?
 
-        ->(directory) { Oracles.observe(@shell, image: Runner::IMAGE, chdir: directory, model:) }
+        ->(directory, model) { Observed.new(observations: Oracles.observe(@shell, image: Runner::IMAGE, chdir: directory, model:)) }
       end
 
       # A creation recipe as a case: create follows its source model, and
       # the reading stages the image it writes, which the created hook
-      # decodes once create has accepted. The source tree the case
-      # directory holds is the recipe's, since CaseDirectory makes a tree
-      # the host stores under other names a host skip. That source tree,
-      # written through the funnel and walked back, stands for the name
-      # trials of the created image's tree.
+      # decodes once create has accepted. A manifest case's tree reaches
+      # fsimg without touching the host, so the name trials of its tree
+      # classify its extract like any other case's; a host-tree case's
+      # source tree, written through the funnel and walked back, stands for
+      # them, since CaseDirectory makes a tree the host stores under other
+      # names a host skip. The oracles read the image create wrote, and
+      # their read-back gives a verdict. The known tree, which hashes every
+      # file, is built only once create has accepted, never to classify the
+      # case: a file create must refuse may be one past FAT's 4 GiB.
       def creation(recipe)
-        source = SourceModel.new(settings: recipe.source.settings, tree: recipe.source.tree)
+        tree = recipe.source.tree
+        source = SourceModel.new(settings: recipe.source.settings, tree:)
         source_classification = @registry.classify_source(source, Environment.new(forced_format: nil, trial_answers: NO_TRIAL))
-        kase = Case.derive(recipe, Case::CREATED_IMAGE, registry: @registry, source_classification:)
-        known_tree = KnownTree.of(recipe.source.tree)
+        trial_answers = recipe.source.manifest? ? @name_trials.answers_for(tree, stages: recipe.stages) : TrialAnswers::HELD
+        kase = Case.derive(recipe, Case::CREATED_IMAGE.with(trial_answers:), registry: @registry, source_classification:)
         created = lambda do |path|
-          model = Model.decode(ImageView.open(path), tree: known_tree)
-          [model, @registry.classify(model, Environment.new(forced_format: nil, trial_answers: TrialAnswers::HELD))]
+          model = Model.decode(ImageView.open(path), tree: KnownTree.of(tree))
+          [model, @registry.classify(model, Environment.new(forced_format: nil, trial_answers:))]
         end
-        Classified.new(kase:, image: nil, model: source, created:, defect: replay_defect(kase))
+        Classified.new(kase:, image: nil, model: source, created:, defect: replay_defect(kase), oracles: created_oracles)
+      end
+
+      # The oracles' hook for the image fsimg created, whose model the
+      # created hook decoded; nil when no oracle runs.
+      def created_oracles
+        return nil unless @shell
+
+        lambda do |directory, model|
+          observations = Oracles.observe(@shell, image: Runner::CREATED, chdir: directory, model:)
+          Observed.new(observations:, problem: Oracles.read_back_problem(observations, model))
+        end
       end
 
       # The image at path with mutations applied, its model, and its

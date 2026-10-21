@@ -13,7 +13,8 @@ module FsimgSpec
     # a long name beside the literal 8.3 name its short name would take
     # first. A path has at most DEPTH components, a directory at most
     # WIDTH entries and a tree at most ENTRIES, and a file is empty, one
-    # byte, one cluster less a byte, one cluster or several clusters long.
+    # byte, one cluster less a byte, one cluster or several clusters long,
+    # of each kind of generated content, sometimes with holes.
     #
     # Every name is one fsimg's reader accepts (Names.problem), and no two
     # siblings share a key, by construction: the alphabets hold no
@@ -48,8 +49,8 @@ module FsimgSpec
       # drawn from an explicit range.
       SIZE = 10
 
-      # A drawn file: its size and the seed of its bytes.
-      DrawnFile = Data.define(:size, :seed)
+      # A drawn file: its size and generated content (TreeEntry).
+      DrawnFile = Data.define(:size, :content, :seed, :holes)
 
       ALPHANUMERIC = [*"a".."z", *"A".."Z", *"0".."9"].freeze
       LOWER = [*"a".."z"].freeze
@@ -115,7 +116,7 @@ module FsimgSpec
 
       # A DrawnFile, or a directory as the Array of its entries' pairs.
       def self.content(depth, cluster_bytes:, names:)
-        file = G.tuple(file_size(cluster_bytes), G.choose(0..MAX_SEED)).map { |size, seed| DrawnFile.new(size:, seed:) }
+        file = file_size(cluster_bytes).bind { file_content(_1) }
         return file if depth == DEPTH
 
         G.frequency(3 => file, 1 => children(depth + 1, cluster_bytes:, names:))
@@ -125,6 +126,28 @@ module FsimgSpec
       # cluster less a byte, one cluster, or two or three clusters.
       def self.file_size(cluster) =
         G.one_of(G.constant(0), G.constant(1), G.constant(cluster - 1), G.constant(cluster), G.choose((cluster + 1)..(3 * cluster)))
+
+      # A file of size bytes: zero, or seeded or positional bytes with a
+      # seed and sometimes holes.
+      def self.file_content(size)
+        generated = G.tuple(G.one_of(G.constant("seeded"), G.constant("positional")), G.choose(0..MAX_SEED), holes(size))
+                     .map { |content, seed, holes| DrawnFile.new(size:, content:, seed:, holes:) }
+        G.frequency([[1, G.constant(DrawnFile.new(size:, content: "zero", seed: nil, holes: []))], [4, generated]])
+      end
+
+      # No holes, one in the second half of the file, or one in each half.
+      # The first ends a byte before the half, so the two never touch, as
+      # fsimg.holes requires (specs/design-mtree.md#generated-bytes).
+      def self.holes(size)
+        return G.constant([]) if size < 4
+
+        half = size / 2
+        second = span(half, size)
+        G.frequency([[2, G.constant([])], [1, second.map { [_1] }], [1, G.tuple(span(0, half - 1), second)]])
+      end
+
+      # A hole [offset, length] that starts at from or later and ends by to.
+      def self.span(from, to) = G.choose(from..(to - 1)).bind { |offset| G.choose(1..(to - offset)).map { [offset, _1] } }
 
       # One name, or the two names of a reserved pair. The weights are
       # pairs, not a Hash, since several repeat. For mtools, no name beyond
@@ -181,12 +204,12 @@ module FsimgSpec
         pairs.flat_map do |name, content|
           path = "#{prefix}#{name}"
           case content
-          in DrawnFile(size:, seed:) then [TreeEntry.new(path:, type: "file", size:, seed:)]
-          in Array then [TreeEntry.new(path:, type: "directory", size: 0, seed: 0), *entries(content, prefix: "#{path}/")]
+          in DrawnFile(size:, content: kind, seed:, holes:) then [TreeEntry.file(path, size:, content: kind, seed:, holes:)]
+          in Array then [TreeEntry.directory(path), *entries(content, prefix: "#{path}/")]
           end
         end
 
-      private_class_method :children, :content, :file_size, :name_group, :short_name, :long_name, :mixed, :reserved,
+      private_class_method :children, :content, :file_size, :file_content, :holes, :span, :name_group, :short_name, :long_name, :mixed, :reserved,
                            :extension, :cased, :word, :list, :entries
     end
   end

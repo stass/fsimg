@@ -53,9 +53,10 @@ module FsimgSpec
         Suite.cases(cache:, ceilings:, name_trials: NameTrials::NONE, shell: nil, draws: Draws::NONE).reject(&:skip)
              .map { CasePhase.classify(_1) }.select { seeds?(_1.kase.recipe) }
 
-      # Whether recipe's case seeds the fuzzer: a targeted or promoted case
-      # whose format the fuzzer detects itself.
-      def self.seeds?(recipe) = (recipe.kind == "targeted" || recipe.promoted?) && recipe.forced_format.nil?
+      # Whether recipe's case seeds the fuzzer: a targeted or promoted
+      # reading case whose format the fuzzer detects itself. A creation
+      # case has no image until fsimg writes one.
+      def self.seeds?(recipe) = recipe.reading? && (recipe.kind == "targeted" || recipe.promoted?) && recipe.forced_format.nil?
 
       # The case's image when it fits the fuzzer's input, else its image up
       # to its last byte that is not zero.

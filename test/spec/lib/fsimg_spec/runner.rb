@@ -46,6 +46,19 @@ module FsimgSpec
   class Runner
     IMAGE = "image.img"
     CREATED = "out/created.img"
+    REVERSED = "out/reversed.img"
+    # The second create of a manifest case, which reads the manifest's
+    # lines reversed and must write the bytes create wrote
+    # (specs/design-spec-testing.md#cases). It runs as a stage of its own
+    # name, with captures of that name, but no recipe lists it: the case
+    # runs it once create has accepted, and judges it by those bytes.
+    REPRODUCTION = "create-reversed"
+    # The image each create stage writes.
+    WRITES = { "create" => CREATED, REPRODUCTION => REVERSED }.freeze
+    MANIFESTS = [Manifest::NAME, Manifest::REVERSED].freeze
+    # How the two created images are opened and compared.
+    READ_FLAGS = File::RDONLY | File::NOFOLLOW | File::NONBLOCK | File::BINARY
+    COMPARE_BYTES = 1 << 20
     # Longer than the coordinator's two two-second diagnostic attempts, so
     # fsimg's own deadline fires first and reports itself.
     GRACE_SECONDS = 10
@@ -73,25 +86,29 @@ module FsimgSpec
     end
 
     # Runs stage of recipe in case_directory, an absolute path. sandbox is
-    # the status the preflight established, or nil while it runs.
+    # the status the preflight established, or nil while it runs. stage is
+    # one the recipe lists, or REPRODUCTION for a manifest case.
     def run(stage, recipe:, case_directory:, sandbox:)
       raise Error, "#{recipe.id}: the case directory #{case_directory} is not absolute" unless case_directory.start_with?("/")
-      raise Error, "#{recipe.id} does not run #{FsimgSpec.shown(stage)}" unless recipe.stages.include?(stage)
+      raise Error, "#{recipe.id} does not run #{FsimgSpec.shown(stage)}" unless runs?(recipe, stage)
 
-      image_before = image_identity(case_directory, stage, recipe)
+      inputs_before = input_identities(case_directory, stage, recipe)
       create_destination(case_directory, recipe) if stage == "extract"
       execution = Invocation.run(command(stage, recipe), chdir: case_directory, env: fsimg_environment(case_directory),
                                                           limits:, observer: @observer)
       capture_problems = capture(case_directory, stage, execution)
-      outcome = Outcome.classify(execution, stage:, sandbox:)
+      outcome = Outcome.classify(execution, stage: WRITES.key?(stage) ? "create" : stage, sandbox:)
       tree = stage == "extract" ? walk_destination(case_directory) : []
-      problems = capture_problems + problems(case_directory, stage:, recipe:, execution:, outcome:, image_before:, tree:)
+      problems = capture_problems + problems(case_directory, stage:, recipe:, execution:, outcome:, inputs_before:, tree:)
       StageResult.new(stage:, outcome:, execution:, tree:, problems:, footprint: Footprint.of(case_directory))
     end
 
     # fsimg's argv for stage of recipe, with relative operands. A listing
-    # recurses by default, extract fills the dest/ the runner created (-E),
-    # and create stores the contents of source/ at the image root.
+    # recurses by default, and extract fills the dest/ the runner created
+    # (-E). create reads the manifest as an @ operand, with no -C: the case
+    # directory is the working directory, and a manifest of generated
+    # content opens nothing beneath it (specs/design-mtree.md#command-line).
+    # A host-tree case stores the contents of source/ at the image root.
     def command(stage, recipe)
       case stage
       in "info" then [@fsimg, "i", *reading_options(recipe), "-f", image(recipe)]
@@ -99,10 +116,33 @@ module FsimgSpec
       in "extract" then [@fsimg, "x", *reading_options(recipe), "-E", "-f", image(recipe), "-C", "dest"]
       in "verify" then [@fsimg, "W", *reading_options(recipe), "-f", image(recipe)]
       in "verify-deep" then [@fsimg, "W", *reading_options(recipe), "-d", "-f", image(recipe)]
-      in "create"
-        [@fsimg, "c", *common_options, "-R", "-F", recipe.format, *settings(recipe), "-f", CREATED, "-C", "source", "."]
+      in "create" if recipe.source.manifest? then [*create_options(recipe), "-f", CREATED, "@#{Manifest::NAME}"]
+      in "create" then [*create_options(recipe), "-f", CREATED, "-C", "source", "."]
+      in REPRODUCTION then [*create_options(recipe), "-f", REVERSED, "@#{Manifest::REVERSED}"]
       else raise Error, "#{recipe.id}: unknown stage #{FsimgSpec.shown(stage)}"
       end
+    end
+
+    # Compares the image the second create wrote with the one create wrote
+    # and answers why they differ, or nil
+    # (specs/design-spec-testing.md#cases). A matching image is consumed:
+    # it is removed, so the case holds one image through the reading
+    # stages, and a second call finds nothing to compare. The runner's
+    # checks left both regular files with one link; each is read through a
+    # descriptor that follows no link and does not block.
+    def settle_reproduction(case_directory)
+      reversed_path = File.join(case_directory, REVERSED)
+      problem = File.open(File.join(case_directory, CREATED), READ_FLAGS) do |created|
+        File.open(reversed_path, READ_FLAGS) do |reversed|
+          sizes = [created.size, reversed.size]
+          next "#{REVERSED} has #{sizes.last} bytes, #{CREATED} #{sizes.first}" unless sizes.uniq.one?
+
+          offset = first_difference(created, reversed)
+          "#{REVERSED} differs from #{CREATED} in the #{COMPARE_BYTES}-byte block at #{offset}" if offset
+        end
+      end
+      File.unlink(reversed_path) unless problem
+      problem
     end
 
     def limits
@@ -127,6 +167,30 @@ module FsimgSpec
     private
 
     def image(recipe) = recipe.reading? ? IMAGE : CREATED
+
+    def runs?(recipe, stage) = run_order(recipe).include?(stage)
+
+    # The stages of recipe in the order a case runs them: its own, with a
+    # manifest case's second create right after create.
+    def run_order(recipe) =
+      recipe.stages.flat_map { _1 == "create" && manifest_case?(recipe) ? ["create", REPRODUCTION] : [_1] }
+
+    # The stages a case has run once stage has, stage last.
+    def stages_run(recipe, stage) = run_order(recipe).then { _1.take(_1.index(stage) + 1) }
+
+    # The offset of the first block in which two files of one size differ,
+    # or nil.
+    def first_difference(one, other)
+      offset = 0
+      while (block = one.read(COMPARE_BYTES))
+        return offset unless block == other.read(COMPARE_BYTES)
+
+        offset += block.bytesize
+      end
+      nil
+    end
+
+    def create_options(recipe) = [@fsimg, "c", *common_options, "-R", "-F", recipe.format, *settings(recipe)]
 
     def reading_options(recipe) = [*common_options, *(recipe.forced_format ? ["-F", recipe.forced_format] : [])]
 
@@ -165,18 +229,23 @@ module FsimgSpec
       raise Error, "#{recipe.id}: dest could not be created before extract (#{answer})" unless answer == :created
     end
 
-    # The image's identity, or nil before create: its inode, size and
-    # times, so a rewrite that restores the modification time still shows
-    # in the change time. The image must be a regular file with one link,
-    # never a hard link to a host file.
-    def image_identity(case_directory, stage, recipe)
-      return nil if stage == "create"
+    # The identities of the files stage reads, which no stage may change:
+    # the image, which create has written by any stage after it, and a
+    # manifest case's manifests. An identity is the inode, size and times,
+    # so a rewrite that restores the modification time still shows in the
+    # change time. Each must be a regular file with one link, never a hard
+    # link to a host file.
+    def input_identities(case_directory, stage, recipe)
+      inputs = [*(stage == "create" ? [] : [image(recipe)]), *(manifest_case?(recipe) ? MANIFESTS : [])]
+      inputs.to_h do |name|
+        found = identity(File.lstat(File.join(case_directory, name)))
+        raise Error, "#{recipe.id}: #{name} is not a regular file with one link" unless found
 
-      found = identity(File.lstat(File.join(case_directory, image(recipe))))
-      raise Error, "#{recipe.id}: #{image(recipe)} is not a regular file with one link" unless found
-
-      found
+        [name, found]
+      end
     end
+
+    def manifest_case?(recipe) = !recipe.reading? && recipe.source.manifest?
 
     def identity(stat) = stat.file? && stat.nlink == 1 ? [stat.ino, stat.size, stat.mtime, stat.ctime] : nil
 
@@ -196,40 +265,45 @@ module FsimgSpec
 
     # The checks after every stage. Any problem fails the case under every
     # policy and ends it.
-    def problems(case_directory, stage:, recipe:, execution:, outcome:, image_before:, tree:)
+    def problems(case_directory, stage:, recipe:, execution:, outcome:, inputs_before:, tree:)
       [
-        *image_problems(case_directory, recipe, image_before),
+        *input_problems(case_directory, inputs_before),
         *directory_problems(case_directory, recipe:, stage:),
         *tree_problems(tree),
-        *residue_problems(case_directory, recipe, outcome),
+        *residue_problems(case_directory, recipe, stage, outcome),
         *created_problems(case_directory, stage, outcome),
         ("a process of the group outlived fsimg" if execution.leftover)
       ].compact
     end
 
-    def image_problems(case_directory, recipe, image_before)
-      return [] unless image_before
-
-      identity(File.lstat(File.join(case_directory, image(recipe)))) == image_before ? [] : ["#{image(recipe)} changed"]
-    rescue Errno::ENOENT
-      ["#{image(recipe)} disappeared"]
-    end
+    def input_problems(case_directory, inputs_before) =
+      inputs_before.filter_map do |name, before|
+        identity(File.lstat(File.join(case_directory, name))) == before ? nil : "#{name} changed"
+      rescue Errno::ENOENT
+        "#{name} disappeared"
+      end
 
     # The names the case directory may hold once stage has run, each with
-    # the type lstat must report: the image, or the source tree of a
-    # creation case, scratch/ and out/, dest/ once extract has run, and
-    # the captures of the stages run so far. Recipes list their stages in
-    # run order. A link in place of any could send a capture or a walk to a
-    # host path, and any other name is a write fsimg had no business
-    # making.
+    # the type lstat must report: the image, or a creation case's manifests
+    # or source tree, scratch/ and out/, dest/ once extract has run, and
+    # the captures of the stages run so far. A link in place of any could
+    # send a capture or a walk to a host path, and any other name is a
+    # write fsimg had no business making.
     def case_entries(recipe, stage)
-      ran = recipe.stages.take(recipe.stages.index(stage) + 1)
+      ran = stages_run(recipe, stage)
       {
-        **(recipe.reading? ? { IMAGE => "file" } : { "source" => "directory" }),
+        **inputs(recipe),
         "scratch" => "directory", "out" => "directory",
         **(ran.include?("extract") ? { "dest" => "directory" } : {}),
         **ran.flat_map { ["#{_1}.stdout", "#{_1}.stderr"] }.to_h { [_1, "file"] }
       }.transform_keys(&:b)
+    end
+
+    def inputs(recipe)
+      if recipe.reading? then { IMAGE => "file" }
+      elsif recipe.source.manifest? then MANIFESTS.to_h { [_1, "file"] }
+      else { "source" => "directory" }
+      end
     end
 
     # Every name in the case directory must be one the case may hold at
@@ -246,17 +320,19 @@ module FsimgSpec
     end
 
     # An accepted create must leave its image as a regular file, which the
-    # reading stages and the model then open.
+    # reading stages and the model then open, and so must the second
+    # create, whose image is compared with it.
     def created_problems(case_directory, stage, outcome)
-      return [] unless stage == "create" && outcome.kind == "accepted"
+      written = WRITES[stage]
+      return [] unless written && outcome.kind == "accepted"
 
-      stat = File.lstat(File.join(case_directory, CREATED))
-      if !stat.file? then ["#{CREATED} is a #{stat.ftype}, not a file"]
-      elsif stat.nlink != 1 then ["#{CREATED} has #{stat.nlink} links"]
+      stat = File.lstat(File.join(case_directory, written))
+      if !stat.file? then ["#{written} is a #{stat.ftype}, not a file"]
+      elsif stat.nlink != 1 then ["#{written} has #{stat.nlink} links"]
       else []
       end
     rescue Errno::ENOENT
-      ["create accepted but wrote no #{CREATED}"]
+      ["#{stage} accepted but wrote no #{written}"]
     end
 
     def tree_problems(tree)
@@ -268,15 +344,26 @@ module FsimgSpec
       ].compact
     end
 
-    # scratch/ must be empty and out/ hold nothing beyond a creation
-    # case's created.img, except what an error record names as retained.
-    def residue_problems(case_directory, recipe, outcome)
+    # scratch/ must be empty and out/ hold nothing beyond the created
+    # images, except what an error record names as retained.
+    def residue_problems(case_directory, recipe, stage, outcome)
       error = outcome.records.find { _1["type"] == "error" } || {}
-      created = recipe.reading? ? nil : File.basename(CREATED)
+      written = created_images(recipe, stage, outcome).map { File.basename(_1) }
       [
         *leftovers(case_directory, "scratch", allowed: [retained_entry(error["retained_scratch"], "scratch")]),
-        *leftovers(case_directory, "out", allowed: [created, retained_entry(error["retained_output"], "out")])
+        *leftovers(case_directory, "out", allowed: [*written, retained_entry(error["retained_output"], "out")])
       ]
+    end
+
+    # The images out/ may hold once stage has ended with outcome: the
+    # image of each create stage that has accepted, the second create's
+    # only until settle_reproduction removes it. A case runs
+    # on past a create stage only when it accepts, so only stage itself
+    # may not have.
+    def created_images(recipe, stage, outcome)
+      ran = stages_run(recipe, stage)
+      ran.pop unless outcome.kind == "accepted"
+      ran.filter_map { WRITES[_1] unless _1 == REPRODUCTION && _1 != stage }
     end
 
     # The entry of directory that a retained path reported by fsimg lies

@@ -22,10 +22,10 @@ class TestKnownTreeFsimg < Minitest::Test
   PROFILE = FsimgSpec.fetch_profile("quick")
   REPLAY = File.expand_path("../../bin/replay", __dir__)
   TREE = [
-    FsimgSpec::TreeEntry.new(path: "d", type: "directory", size: 0, seed: 0),
-    FsimgSpec::TreeEntry.new(path: "d/a.txt", type: "file", size: 5, seed: 1),
-    FsimgSpec::TreeEntry.new(path: "d/b.bin", type: "file", size: 3000, seed: 2),
-    FsimgSpec::TreeEntry.new(path: "empty.txt", type: "file", size: 0, seed: 0)
+    FsimgSpec::TreeEntry.directory("d"),
+    FsimgSpec::TreeEntry.file("d/a.txt", size: 5, seed: 1),
+    FsimgSpec::TreeEntry.file("d/b.bin", size: 3000, seed: 2),
+    FsimgSpec::TreeEntry.file("empty.txt", size: 0, content: "zero")
   ].freeze
 
   # The FAT suite cut to one creation case, which runs create and ls.
@@ -79,7 +79,8 @@ class TestKnownTreeFsimg < Minitest::Test
                                 seed: 1, suites: { "fat" => CreationSuite })
       record = File.join(results, "failures", "fat.create.listed")
 
-      assert_equal %w[case.json create.stderr create.stdout fixture.json ls.stderr ls.stdout replay.sh result.json],
+      assert_equal %w[case.json create-reversed.stderr create-reversed.stdout create.stderr create.stdout fixture.json ls.stderr
+                      ls.stdout replay.sh result.json],
                    Dir.children(record).sort
       assert_equal({ "tool_versions" => {} }, JSON.parse(File.read(File.join(record, "fixture.json"))))
       case_json = File.join(record, "case.json")
@@ -103,7 +104,7 @@ class TestKnownTreeFsimg < Minitest::Test
   # image holds TREE, keeps fsimg's exit status, and leaves every other stage
   # and tree, the preflight's among them, to fsimg alone.
   def faulty_fsimg(directory)
-    flipped = FsimgSpec::FileContent.bytes(seed: 1, offset: 0, length: 1).ord ^ 0xff
+    flipped = FsimgSpec::FileContent.bytes(TREE.fetch(1), offset: 0, length: 1).ord ^ 0xff
     path = File.join(directory, "faulty-fsimg")
     File.write(path, <<~SH)
       #!/bin/sh

@@ -107,7 +107,7 @@ class TestFatBases < Minitest::Test
     skip_without(:mmd, :mcopy)
     skip_without_checkers
     short = Module.new do
-      def self.each_chunk(seed:, size:) = FsimgSpec::FileContent.each_chunk(seed:, size: [size - 1, 0].max)
+      def self.each_chunk(entry) = FsimgSpec::FileContent.each_chunk(entry.with(size: [entry.size - 1, 0].max))
     end
     with_cache do |cache, shell|
       fixture = Fat::Bases.materialize(populated_builder_base, cache:, shell:, ceilings: CEILINGS, content: short)
@@ -148,7 +148,7 @@ class TestFatBases < Minitest::Test
        "unknown mkfs.fat parameters color"],
     "a formatter base whose tree outgrows its image" =>
       [{ builder: "mkfs.fat", parameters: { blocks: 1440, fat_bits: 12 }, population: "mtools",
-         tree: [FsimgSpec::TreeEntry.new(path: "BIG", type: "file", size: 2 << 20, seed: 1)] }, "tree exceeds"],
+         tree: [FsimgSpec::TreeEntry.file("BIG", size: 2 << 20, seed: 1)] }, "tree exceeds"],
     "an unknown builder" => [{ builder: "mformat", parameters: {}, tree: [] }, "unknown builder mformat"],
     "a builder base its builder refuses" => [{ builder: "independent", parameters: { clusters: 0 }, tree: [] }, "clusters"],
     "a base beyond the image ceiling" =>

@@ -30,22 +30,29 @@ module FsimgSpec
     # worker has reported its confinement, and a worker makes every
     # acceptance.
     SANDBOX_STATUSES = %w[active unavailable disabled].freeze
-    # The creation the preflight runs: one file on FAT16.
+    # The creation the preflight runs, on FAT16 from a manifest whose names
+    # need every escape a FAT name can (specs/design-spec-testing.md#runner):
+    # a space, a #, which would start a comment, and the bytes of a
+    # non-ASCII character. A FAT name holds no backslash, the one other
+    # escape, so no creation case's name needs it.
     CREATION = Recipe.new(
       id: "preflight", format: "fat16", kind: "valid", stages: ["create"],
-      source: Source.new(tree: [TreeEntry.new(path: "file.txt", type: "file", size: 4096, seed: 1)],
+      source: Source.new(tree: [TreeEntry.directory("a b#c"), TreeEntry.file("a b#c/caf\u00e9 #1.txt", size: 4096, seed: 1)],
                          settings: { size: 16 << 20 }),
       expected: { "create" => Expectation.parse("accept") }
     )
 
     # sample renders the reading sample into a directory and answers its
     # valid reading recipe and image (Fat::Bases.preflight_sample).
-    def initialize(results:, profile:, fsimg:, environment:, sample:)
+    # manifest writes the creation's manifest (Manifest); a test may pass
+    # a faulty one.
+    def initialize(results:, profile:, fsimg:, environment:, sample:, manifest: Manifest)
       @results = results
       @profile = profile
       @fsimg = fsimg
       @environment = environment
       @sample = sample
+      @manifest = manifest
     end
 
     # Runs every check and answers the run's Runner and the sandbox status
@@ -183,7 +190,7 @@ module FsimgSpec
     # Runs every stage of recipe in a new case directory and answers the
     # results; a stage that does not accept safely fails the preflight.
     def run_case(directory, recipe, image:, runner:, sandbox:)
-      refusal = CaseDirectory.prepare(directory, recipe:, image:)
+      refusal = CaseDirectory.prepare(directory, recipe:, image:, manifest: @manifest)
       raise PreflightError, "the host cannot hold the preflight's source tree: #{refusal}" if refusal
 
       recipe.stages.map do |stage|

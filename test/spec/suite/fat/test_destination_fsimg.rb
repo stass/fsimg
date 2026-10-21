@@ -76,7 +76,7 @@ class TestDestinationFsimg < Minitest::Test
   def test_host_storing_other_names_skips_the_case
     composed = Fat::Witnesses::Witness.new(
       id: "fat.test.composed", parameters: { clusters: 100 }, mutations: [], forced_format: nil, intended: nil, rule: nil,
-      tree: [FsimgSpec::TreeEntry.new(path: NFC, type: "file", size: 1, seed: 1)]
+      tree: [FsimgSpec::TreeEntry.file(NFC, size: 1, seed: 1)]
     )
     with_phase do |phase|
       _, result = phase.run(composed, FsimgSpec::NameTrials.new(File.join(phase.results, "trials"), funnel: DecomposingFunnel))
@@ -138,7 +138,7 @@ class TestDestinationFsimg < Minitest::Test
   # A valid recipe on a builder base whose root holds the pair, run
   # through every reading stage, as a regression would be promoted.
   def promoted_recipe(cache)
-    tree = [NFC, NFD].each_with_index.map { FsimgSpec::TreeEntry.new(path: _1, type: "file", size: 10, seed: _2 + 1) }
+    tree = [NFC, NFD].each_with_index.map { FsimgSpec::TreeEntry.file(_1, size: 10, seed: _2 + 1) }
     base = FsimgSpec::Base.new(builder: Fat::Builder::NAME, parameters: { clusters: 100 }, tree:)
     path = Fat::Bases.render(base, cache:, ceilings: PROFILE.ceilings)
     FsimgSpec::Recipe.new(

@@ -268,11 +268,14 @@ case-equivalent to a sibling. A creation case carries two classifications:
 created image's, which the harness decodes once `create` accepts. The
 created image is classified like any other and must violate no rule,
 including a writer `profile` rule that every byte outside allocated metadata
-and file content is zero. The [oracles](#independence-and-oracles) then read
-the image, the mtools read-back with a verdict, and a second `create` in the
-same case reads `source-reversed.mtree`, the same lines in reverse order,
-and writes `out/reversed.img`, whose bytes must equal `out/created.img`.
-fsimg's reading stages then run on the created image as secondary evidence.
+and file content is zero. A second `create` in the same case then reads
+`source-reversed.mtree`, the same lines in reverse order, and writes
+`out/reversed.img`, whose bytes must equal `out/created.img`; once they
+do, the harness removes it, so the case holds one image from there on.
+fsimg's reading stages then run on the created image as secondary
+evidence, and
+once the last has run the [oracles](#independence-and-oracles) read the
+image, the mtools read-back with a verdict.
 
 Two deterministic **host-tree creation cases** per run, one valid and one
 `input` witness, keep the host scanner, the sandbox and the worker protocol
@@ -321,14 +324,16 @@ stage the case can run; a profile runs the subset it selects, and a [promoted
 case](#reports-and-regressions) runs all of them. A reading case carries
 `base`, `base_sha256`, `tool_versions` and `mutations`, plus an optional
 `forced_format` passed to every reading stage; a creation case carries a
-`source` object holding the `tree` and the `settings` instead. A `base` names
-its `builder`, `tree` and `parameters`, and an optional `population` of
-`mtools` when mtools populates the builder's empty volume with the tree
-instead of the builder rendering it; a formatter writes no tree, so a
-formatter base always names it. A tree is a list
-of entries, each with a relative `path` and a `type` of `file` or `directory`;
-a file also has a `size` and a `content` of `zero`, `seeded` or `positional`,
-the last two with a `seed` and optional `holes`, the manifest's generated
+`source` object holding the `tree`, the `settings` and the `root` create
+reads the tree from, `manifest` or, for a host-tree case, `directory`,
+instead. A `base` names its `builder`, `tree` and `parameters`, and an
+optional `population` of `mtools` when mtools populates the builder's empty
+volume with the tree instead of the builder rendering it; a formatter
+writes no tree, so a formatter base always names it. A tree is a list of
+entries, each with a relative `path` and a `type` of `file` or `directory`;
+a directory has nothing more, and a file also has a `size` and a `content`
+of `zero`, `seeded` or `positional`, the last two with a `seed` and
+optional `holes`, the manifest's generated
 [content](design-mtree.md#generated-bytes) in the recipe's own fields. The
 harness generates each file's bytes from its seed and offset with its own
 function, never with PropCheck's random source, so a tree stays stable across
@@ -371,9 +376,11 @@ targeted or missing from one that is; an `expected` that does not name exactly
 the `stages`; a reading case that runs `create` or a creation case that does
 not; more than 4096 mutations; a promoted case without a `reason`; and any
 size, parameter, mutation or `resource_limits` value beyond the profile's
-ceilings. Refusal messages cut the values they quote short. Recipe values check
-the format when they are built, so a recipe a generator builds in code obeys it
-too; only the ceilings are the loader's. Because every string is UTF-8, source
+ceilings. A tree path counts against the path ceiling as fsimg counts an
+image path: with its leading `/` and terminating NUL. Refusal messages cut
+the values they quote short. Recipe values check the format when they are
+built, so a recipe a generator builds in code obeys it too; only the
+ceilings are the loader's. Because every string is UTF-8, source
 names that are not UTF-8 are outside what a recipe can express. The canonical
 form has a fixed field order, sorted map keys apart from `expected`, which
 follows the order of `stages`, and two-space indentation; the
@@ -535,13 +542,12 @@ recorded per tool, never resolved by majority. The one oracle with a verdict
 is the **mtools read-back** of an image fsimg created: `mdir -b -/ -a ::/`
 lists every path, a directory with a trailing `/`, and `mtype` streams each
 file's bytes to stdout, where the harness hashes them. It must reproduce the
-source tree in
-path, type, size and SHA-256, because that is fsimg's own creation contract
-rather than an interpretation of the format. A mismatch fails the case,
-except when the
-image's cluster count lies within 16 clusters of a variant threshold (4085 or
-65525), where some implementations disagree on the variant; there it is
-recorded only. `fsimg c` followed by fsimg's own reading stages is never
+source tree in path, type, size and SHA-256, because that is fsimg's own
+creation contract rather than an interpretation of the format. A mismatch
+fails the case, except when the image's cluster count lies closer to a
+variant threshold (4085 or 65525) than the 16 clusters automatic sizing
+keeps from it, where some implementations disagree on the variant; there it
+is recorded only. `fsimg c` followed by fsimg's own reading stages is never
 evidence on its own, because both paths can share a defect.
 
 ## Runner
@@ -561,13 +567,18 @@ and home paths.
 | `extract` | `fsimg x --json -E -f image.img -C dest` |
 | `verify`, `verify-deep` | `fsimg W --json [-d] -f image.img` |
 | `create` | `fsimg c --json -R -F FORMAT [-s BYTES] [-o sector=N] [-o cluster=N] -f out/created.img @source.mtree`, or `-C source .` for a host-tree case |
+| second create | As `create`, with `-f out/reversed.img @source-reversed.mtree` |
 
 The commands are the [command-line contract](design-cli.md)'s. `t` lists
 subtrees by default. The extraction stage creates `dest` empty with mode
 0700 before it runs, since `x -E` extracts only into an empty private
 directory. A creation case names its manifest as an `@` operand, as
-[manifest import](design-mtree.md#command-line) defines; a host-tree case
-stores the contents of `source/` at the image root. A reading stage adds
+[manifest import](design-mtree.md#command-line) defines, with no `-C`:
+the case directory is the working directory, and a manifest of generated
+content opens nothing beneath it. A host-tree case
+stores the contents of `source/` at the image root. A manifest case's
+second create runs once `create` has accepted and is not a recipe stage;
+its captures are named `create-reversed`. A reading stage adds
 `-F FORMAT` when the recipe forces a format. Every
 invocation passes the profile's ceilings: `-m` with the memory ceiling, `-l`
 values for `seconds`, `entries`, `depth`, `path`, `output`, `scratch` and
@@ -636,7 +647,8 @@ test/spec-results/<profile>/
 Before any case, a **preflight** establishes the host in `preflight/`, which it
 removes when it finishes. A valid builder base runs through every reading
 stage, and one valid creation runs, with the run's options, from a manifest
-whose names hold a space, `#`, `\` and a non-ASCII character; any failure
+whose names hold a space, `#` and a non-ASCII character, every escape a
+FAT name can need (no FAT name holds a backslash); any failure
 stops the run with `harness_error`. A manifest writer that mis-encodes a
 name therefore stops the run, instead of making fsimg's refusal of the
 manifest, `FSIMG_EINVAL` like a refused setting, read as a case failure.
@@ -730,8 +742,8 @@ cases/<id>/      working directory and fsimg's HOME; the only place tools write
   source.mtree   the creation manifest
   source-reversed.mtree  the same lines in reverse order, for the second create
   source/        a host-tree creation case's input tree
-  out/           created.img, reversed.img and their staging
-  STAGE.stdout   bounded captures, one pair per stage
+  out/           created.img, reversed.img until compared, and their staging
+  STAGE.stdout   bounded captures, one pair per stage and the second create
   STAGE.stderr
 ```
 
@@ -746,14 +758,17 @@ After every stage the runner checks the following:
 * the case directory holds only the names above that the case and the stages
   run so far allow: `image.img`, or the manifests or `source/`, `dest/`
   only once extract has run, and the captures of the stages run so far,
-  each of its type; the manifests are the bytes the harness wrote;
+  each of its type; the manifests, and the created image once `create` has
+  run, are the same regular files with one link, unchanged as the image
+  is;
 * `dest/`, walked with `lstat` without following links, holds only
   directories and regular files with one link, whose total logical size
   stays within the `output` limit. Each entry records its path, type and
   size, and each file its SHA-256 when the total is within the limit;
-* `scratch/` is empty and `out/` holds nothing beyond a creation case's
-  `created.img` and `reversed.img`, except a path the error record names in
-  `retained_scratch` or `retained_output`;
+* `scratch/` is empty and `out/` holds nothing beyond the image of each
+  `create` that has accepted, `created.img` and, until the harness has
+  compared it, a manifest case's `reversed.img`, except a path the error
+  record names in `retained_scratch` or `retained_output`;
 * no leftover was recorded in step 4.
 
 The walk of the case directory these checks make also counts the files it

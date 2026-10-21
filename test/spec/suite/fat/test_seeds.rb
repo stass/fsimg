@@ -16,8 +16,12 @@ class TestFatSeeds < Minitest::Test
   Fat = FsimgSpec::Fat
   CEILINGS = FsimgSpec.fetch_profile("quick").ceilings
   FUZZ_SH = File.expand_path("../../../../build-aux/fuzz.sh", __dir__)
-  Recipe = Data.define(:id, :kind, :forced_format) do
+  Recipe = Data.define(:id, :kind, :forced_format, :reading) do
+    def initialize(reading: true, **fields) = super
+
     def promoted? = id.start_with?(FsimgSpec::Recipe::PROMOTED_PREFIX)
+
+    def reading? = reading
   end
   Exported = Data.define(:corpus, :names, :cases)
 
@@ -56,14 +60,15 @@ class TestFatSeeds < Minitest::Test
     end
   end
 
-  # Targeted and promoted cases seed the fuzzer, unless they force a
-  # format, which the fuzzer cannot.
+  # Targeted and promoted reading cases seed the fuzzer, unless they
+  # force a format, which the fuzzer cannot; a creation case has no image.
   def test_targeted_and_promoted_cases_without_a_forced_format_are_seeded
     seeds = { Recipe.new(id: "fat.x.1", kind: "targeted", forced_format: nil) => true,
               Recipe.new(id: "fat.valid.1", kind: "valid", forced_format: nil) => false,
               Recipe.new(id: "regression.fat.valid.1", kind: "valid", forced_format: nil) => true,
               Recipe.new(id: "regression.fat.m.1", kind: "malformed", forced_format: nil) => true,
-              Recipe.new(id: "fat.x.2", kind: "targeted", forced_format: "fat16") => false }
+              Recipe.new(id: "fat.x.2", kind: "targeted", forced_format: "fat16") => false,
+              Recipe.new(id: "fat.create.x.1", kind: "targeted", forced_format: nil, reading: false) => false }
 
     assert_equal seeds, seeds.keys.to_h { [_1, Fat::Seeds.seeds?(_1)] }
   end

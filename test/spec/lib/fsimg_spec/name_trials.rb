@@ -43,19 +43,20 @@ module FsimgSpec
     end
 
     # The answers that classify a case running stages over tree, a known
-    # tree or Undefined: the trials of its sibling sets when the case
-    # extracts a known tree, and NO_TRIAL for any other case, which creates
-    # no host names or whose names are unknown. Every format's reading
-    # cases ask here, so the rule of which case is tried has one owner.
+    # tree, a recipe tree or Undefined, of which only the paths are read:
+    # the trials of its sibling sets when the case extracts a known tree,
+    # and NO_TRIAL for any other case, which creates no host names or
+    # whose names are unknown. Every format's cases ask here, so the rule
+    # of which case is tried has one owner.
     def answers_for(tree, stages:)
       return NO_TRIAL if FsimgSpec.undefined?(tree) || !stages.include?("extract")
 
       call(tree)
     end
 
-    # The TrialAnswers of tree, an Array of WalkedEntry as KnownTree gives
-    # it: every refused name with its path, and the first directory whose
-    # names the host stored otherwise, if any.
+    # The TrialAnswers of tree, entries with a path: every refused name
+    # with its binary path, and the first directory whose names the host
+    # stored otherwise, if any.
     def call(tree)
       sets = sibling_sets(tree).transform_values { set_answers(_1) }
       refused = sets.flat_map { |parent, set| refusals_under(parent, set) }
@@ -69,7 +70,7 @@ module FsimgSpec
     # Each directory's path, "" for the root, with the names of the
     # entries directly in it.
     def sibling_sets(tree) =
-      tree.map { _1.path.rpartition("/".b) }.group_by(&:first).transform_values { |parts| parts.map(&:last) }
+      tree.map { _1.path.b.rpartition("/".b) }.group_by(&:first).transform_values { |parts| parts.map(&:last) }
 
     # The answers for the sibling names, from the cache or a new trial. The
     # key is the set's bytes in byte order, which is also the order the

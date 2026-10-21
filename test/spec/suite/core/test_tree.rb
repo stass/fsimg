@@ -84,12 +84,13 @@ class TestTree < Minitest::Test
 
   def test_source_tree_is_written_and_walked_back
     in_directory do |directory|
-      tree = [entry("d", type: "directory"), entry("d/f", size: 100, seed: 3), entry("e", size: 0)]
+      file = FsimgSpec::TreeEntry.file("d/f", size: 100, seed: 3, holes: [[10, 5]])
+      tree = [FsimgSpec::TreeEntry.directory("d"), file, entry("e")]
 
       assert_nil FsimgSpec::SourceTree.write(directory, tree)
       walked = FsimgSpec::TreeWalk.entries(directory)
       assert_equal [["d", "directory"], ["d/f", "file"], ["e", "file"]], walked.map { [_1.path, _1.type] }
-      assert_equal FsimgSpec::FileContent.bytes(seed: 3, offset: 0, length: 100), File.binread(File.join(directory, "d", "f"))
+      assert_equal FsimgSpec::FileContent.bytes(file, offset: 0, length: 100), File.binread(File.join(directory, "d", "f"))
     end
   end
 
@@ -107,15 +108,35 @@ class TestTree < Minitest::Test
     end
   end
 
-  # File content follows from the seed and offset alone, so any slice can
-  # be produced without the bytes before it.
+  # File content follows from the entry and offset alone, so any slice can
+  # be produced without the bytes before it, holes included.
   def test_file_content_slices_agree_with_the_whole
-    whole = FsimgSpec::FileContent.bytes(seed: 9, offset: 0, length: 200)
+    %w[seeded positional].each do |content|
+      file = FsimgSpec::TreeEntry.file("f", size: 200, content:, seed: 9, holes: [[20, 30], [120, 1]])
+      whole = FsimgSpec::FileContent.bytes(file, offset: 0, length: 200)
 
-    assert_equal whole.byteslice(33, 100), FsimgSpec::FileContent.bytes(seed: 9, offset: 33, length: 100)
-    refute_equal whole, FsimgSpec::FileContent.bytes(seed: 10, offset: 0, length: 200)
+      assert_equal whole.byteslice(33, 100), FsimgSpec::FileContent.bytes(file, offset: 33, length: 100), content
+      assert_equal whole, FsimgSpec::FileContent.each_chunk(file).to_a.join, content
+      refute_equal whole, FsimgSpec::FileContent.bytes(file.with(seed: 10), offset: 0, length: 200), content
+    end
   end
 
+  # The generators as specs/design-mtree.md#generated-bytes defines them,
+  # the bytes fsimg's own generators must give: seeded blocks are
+  # SHA-256(LE64(seed) || LE64(i)), positional ones LE64(seed) ||
+  # LE64(offset), zero is zeros, and holes read as zeros within either.
+  def test_file_content_follows_the_manifest_generators
+    seeded = FsimgSpec::TreeEntry.file("s", size: 40, seed: 5)
+    positional = FsimgSpec::TreeEntry.file("p", size: 40, content: "positional", seed: 5, holes: [[18, 4]])
+    zero = FsimgSpec::TreeEntry.file("z", size: 40, content: "zero")
+    blocks = [0, 1].map { Digest::SHA256.digest([5, _1].pack("Q<Q<")) }.join
+    second = [5, 16].pack("Q<Q<")
+
+    assert_equal blocks.byteslice(0, 40), FsimgSpec::FileContent.bytes(seeded, offset: 0, length: 40)
+    assert_equal [5, 0].pack("Q<Q<") + second.byteslice(0, 2) + ("\0".b * 4) + second.byteslice(6, 10) + [5, 32].pack("Q<Q<").byteslice(0, 8),
+                 FsimgSpec::FileContent.bytes(positional, offset: 0, length: 40)
+    assert_equal "\0".b * 40, FsimgSpec::FileContent.bytes(zero, offset: 0, length: 40)
+  end
 
   # A tree beyond its bound is listed without hashing its files.
   def test_files_are_hashed_only_within_the_bound
@@ -131,7 +152,7 @@ class TestTree < Minitest::Test
 
   def in_directory(&) = Dir.mktmpdir { yield _1.b }
 
-  def entry(path, type: "file", size: 0, seed: 0) = FsimgSpec::TreeEntry.new(path:, type:, size:, seed:)
+  def entry(path) = FsimgSpec::TreeEntry.file(path, size: 0, content: "zero")
 
   # Whether this host stores first and second as one name, probed with the
   # plain file API in a directory of its own.

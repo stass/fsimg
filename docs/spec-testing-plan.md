@@ -517,7 +517,7 @@ review and commit gates.
       name validity, case-equivalent siblings and file size. The two
       host-tree cases keep `source/` and the funnel; `SourceTree.write`
       serves them alone. The preflight's creation runs from a manifest whose
-      names need every escape.
+      names need every escape a FAT name can need.
     - After an accepting `create`, the mtools read-back of `out/created.img`
       gives the verdict the design gives it, `fsck -n` and fatcat are
       recorded, and the second `create` from `source-reversed.mtree` writes
@@ -631,19 +631,24 @@ review and commit gates.
 
 The rules are cited by structure and field name from the Microsoft FAT
 specification; `test/spec/lib/fsimg_spec/fat/rules.rb` registers them. Every
-rule but the two name rules and the host's destination rules reads the boot
-sector, which the reader checks when it opens the volume, so its scope is
-`open`; the name rules read the known tree's names, scope `directories`, and
-their witnesses run `ls`. The category column names the policy when it is not
-`must_reject`. The column "fsimg (observed)" records what the S6 witnesses
-observed. A witness of a rule whose policy is not `must_accept` runs the
-first stage that checks its rule, `info` for the `open` scope. A valid
-witness, or one of a `must_accept` rule, runs every reading stage. On an unmutated base, each stage asserts acceptance, and `ls`,
-`extract` and `verify` compare their records with the base's known tree; a
-mutated base leaves the directory, file and verification scopes unclassified,
-so there `ls`, `extract` and `verify` assert only that they run without a
-fault. All 153 deterministic witnesses agree with the expectations their rules
-derive.
+rule but the two name rules, the host's destination rules and the creation
+rules reads the boot sector, which the reader checks when it opens the
+volume, so its scope is `open`; the name rules read the known tree's names,
+scope `directories`, and their witnesses run `ls`. The creation rules,
+`fat.create.*`, read a creation case's settings and source tree, scope
+`input`; a witness that violates one runs `create` alone, and a valid one
+runs `create`, the second `create` and every reading stage. The category
+column names the policy when it is not `must_reject`. The column "fsimg
+(observed)" records what the S6 witnesses observed. A witness of a rule
+whose policy is not `must_accept` runs the first stage that checks its rule,
+`info` for the `open` scope. A valid witness, or one of a `must_accept` rule,
+runs every reading stage. On an unmutated base, each stage asserts
+acceptance, and `ls`, `extract` and `verify` compare their records with the
+base's known tree; a mutated base leaves the directory, file and
+verification scopes unclassified, so there `ls`, `extract` and `verify`
+assert only that they run without a fault. All 153 deterministic
+witnesses, and the 40 creation witnesses of the `quick` profile, agree with
+the expectations their rules derive.
 
 | Rule ID | Requirement | Category | fsimg (observed) |
 | --- | --- | --- | --- |
@@ -677,8 +682,15 @@ derive.
 | `fat32.bpb.backup_boot_sector` | `BPB_BkBootSec` is 0, `0xFFFF` or a reserved-area sector after the boot sector | normative | `info`: `ECORRUPT` for 32 of 32 reserved sectors and `0xFFFE` |
 | `fat32.bpb.backup_boot_sector.recommended` | `BPB_BkBootSec` is 0 or 6 | advisory (`must_accept`) | Accepted by `info` at 29 |
 | `fat32.bpb.backup_boot_sector.absent` | `BPB_BkBootSec` is not `0xFFFF` | advisory (`must_accept`) | Accepted by `info` as no backup |
-| `fat.directory.name` | No name is empty, `.` or `..`, holds a C0 control, DEL or one of `"*/:<>?\|`, starts with a space, ends with a space or period, or exceeds 255 UTF-16 units | profile | `ls`: `ECORRUPT` for a trailing space or period, a leading space, a colon, U+0001, DEL, and 256 units of ASCII or of supplementary characters; 255 units accepted by every stage |
+| `fat.directory.name` | No name is empty, `.` or `..`, holds a C0 control, DEL or one of `"*/:<>?\|`, starts with a space, ends with a space or period, or exceeds 255 UTF-16 units | profile | `ls`: `ECORRUPT` for a trailing space or period, a leading space, a colon, U+0001, DEL, and 256 units of ASCII or of 127 supplementary characters and two ASCII letters; 255 units accepted by every stage |
 | `fat.directory.unique_names` | No two names of a directory have one simple-uppercase key | profile | `ls`: `ECORRUPT` for an ASCII and a Deseret case pair; a long name beside the 8.3 name its basis name spells is accepted |
+| `fat.create.sector_bytes` | `-o sector=` is 512, 1024, 2048 or 4096 | normative (scope `input`) | `create`: `EINVAL` for 256, 1000 and 8192; each legal size accepted, read back by mtools and by every reading stage |
+| `fat.create.cluster_bytes` | `-o cluster=` is a power-of-two multiple of the sector, 1 to 128 sectors | normative (scope `input`) | `create`: `EINVAL` for 256, 1000, 131072, and 1024 with 2048-byte sectors; 512, 2048, 32768, and 4096 with 4096-byte sectors accepted |
+| `fat.create.cluster_bytes.supported` | The writer's clusters are at most 32 KiB | profile (scope `input`) | `create`: `EINVAL` for 65536, also with 4096-byte sectors; 32768 accepted |
+| `fat.create.volume_bytes` | `-s` is a positive whole number of sectors | profile (scope `input`) | `create`: `EINVAL` for 0, 1000, and 2134528 with 4096-byte sectors; 2134016 bytes for FAT16 accepted |
+| `fat.create.name` | Source names obey `fat.directory.name` | profile (scope `input`) | `create`: `EINVAL` for every invalid name of `fat.directory.name`, from a manifest, and for a trailing period from a host tree; 255 units accepted |
+| `fat.create.unique_names` | No two source names of a directory have one simple-uppercase key where simple and full uppercase agree | profile (scope `input`) | `create`: `EINVAL` for the ASCII and Deseret case pairs; a long name beside a literal 8.3 name, and `F0000000` beside a long name, accepted |
+| `fat.create.file_size` | A source file fits `DIR_FileSize`, at most 0xFFFFFFFF bytes | normative (scope `input`) | `create`: `ERANGE` for a 4 GiB file of zeros, a witness only `deep` has the output ceiling to run |
 
 Twelve well-isolated rules are worth more than thirty unverified ones.
 

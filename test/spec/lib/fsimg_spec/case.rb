@@ -22,9 +22,9 @@ module FsimgSpec
 
     # What an image fsimg created must classify to: no violation, and no
     # scope left unclassified, since the harness knows the tree it holds
-    # (specs/design-spec-testing.md#cases). The host held that tree as the
-    # case's source/, so it holds its names at the destination too
-    # (specs/design-spec-testing.md#host-names).
+    # (specs/design-spec-testing.md#cases). It is a template: each creation
+    # case sets the trial_answers of its own tree's name trials, which say
+    # whether the host holds its names at the destination.
     CREATED_IMAGE = Classification.new(violations: [].freeze, unclassified: [].freeze, trial_answers: TrialAnswers::HELD)
 
     def initialize(recipe:, classification:, intended_rule:, expected:, source_classification: nil)

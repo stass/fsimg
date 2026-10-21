@@ -46,11 +46,11 @@ module FsimgSpec
       # An 8.3 name, a long Unicode name, a nested directory and a
       # multi-cluster file.
       STANDARD_TREE = [
-        TreeEntry.new(path: "HELLO.TXT", type: "file", size: 13, seed: 1),
-        TreeEntry.new(path: "Long name \u00e9t\u00e9.txt", type: "file", size: 700, seed: 2),
-        TreeEntry.new(path: "DIR", type: "directory", size: 0, seed: 0),
-        TreeEntry.new(path: "DIR/Nested", type: "directory", size: 0, seed: 0),
-        TreeEntry.new(path: "DIR/Nested/blocks.bin", type: "file", size: 5000, seed: 3)
+        TreeEntry.file("HELLO.TXT", size: 13, seed: 1),
+        TreeEntry.file("Long name \u00e9t\u00e9.txt", size: 700, seed: 2),
+        TreeEntry.directory("DIR"),
+        TreeEntry.directory("DIR/Nested"),
+        TreeEntry.file("DIR/Nested/blocks.bin", size: 5000, seed: 3)
       ].freeze
 
       # The formatter base of each variant, holding the standard tree: an
@@ -253,7 +253,7 @@ module FsimgSpec
           command, input =
             case entry.type
             in "directory" then [[shell.tools.fetch(:mmd), "-D", "s", "-i", image], nil]
-            in "file" then [[shell.tools.fetch(:mcopy), "-D", "s", "-i", image, "-"], content.each_chunk(seed: entry.seed, size: entry.size)]
+            in "file" then [[shell.tools.fetch(:mcopy), "-D", "s", "-i", image, "-"], content.each_chunk(entry)]
             end
           run_tool(shell, [*command, mtools_target(entry.path)], chdir: File.dirname(path), input:, refusal: PopulationError)
         end

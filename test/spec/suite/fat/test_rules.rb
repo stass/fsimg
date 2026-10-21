@@ -18,23 +18,57 @@ class TestFatRules < Minitest::Test
   REGISTRY = Fat::Rules.registry
   CEILINGS = FsimgSpec.fetch_profile("quick").ceilings
   WITNESSES = Fat::Witnesses.deterministic(REGISTRY)
+  # The creation witnesses of the profile with the most room, which runs
+  # them all.
+  CREATIONS = Fat::Witnesses.creations(REGISTRY, ceilings: FsimgSpec.fetch_profile("deep").ceilings)
 
   def test_witness_ids_are_unique
-    assert_equal WITNESSES.size, WITNESSES.map(&:id).uniq.size
+    ids = (WITNESSES + CREATIONS).map(&:id)
+
+    assert_equal ids.size, ids.uniq.size
   end
 
   # Classification is the generator's check: a valid witness violates
   # nothing, and a targeted one violates its intended rule.
   def test_every_witness_classifies_as_its_generator_meant
     with_cases do |cases|
-      defects = WITNESSES.filter_map { cases.call(_1).defect }
+      defects = WITNESSES.filter_map { cases.call(_1).defect } + CREATIONS.filter_map { cases.creation_witness(_1).defect }
 
       assert_empty defects
     end
   end
 
+  # A witness whose tree exceeds a profile's output ceiling is left to a
+  # profile with room for it: quick runs no file past FAT's 4 GiB.
+  def test_creation_witnesses_stay_within_the_profile
+    quick = Fat::Witnesses.creations(REGISTRY, ceilings: CEILINGS).map(&:id)
+
+    assert_equal CREATIONS.map(&:id) - ["fat.create.file_size.4294967296"], quick
+  end
+
+  # Every tree path fits the path ceiling as fsimg counts an image path,
+  # so no witness meets a path limit before its rule, and each one's
+  # record loads again for replay.
+  def test_witness_paths_fit_the_path_ceiling
+    long = (WITNESSES + CREATIONS).flat_map { Array(_1.tree) }.reject { _1.image_path_bytes <= CEILINGS.path }
+
+    assert_empty long.map(&:path)
+  end
+
+  # A setting counted in sectors is judged only beside a legal sector
+  # size, so beside an illegal one a cluster and a volume size the writer
+  # supports violate nothing more than fat.create.sector_bytes.
+  def test_illegal_sector_alone_classifies_a_creation
+    environment = FsimgSpec::Environment.new(forced_format: nil, trial_answers: FsimgSpec::TrialAnswers::HELD)
+    ids = [{ sector: 0, cluster: 512 }, { sector: 0, size: 1000 }].map do |settings|
+      REGISTRY.classify_source(FsimgSpec::SourceModel.new(settings:, tree: []), environment).rule_ids
+    end
+
+    assert_equal [["fat.create.sector_bytes"]] * 2, ids
+  end
+
   def test_every_rule_has_a_witness_that_violates_it
-    targeted = WITNESSES.filter_map(&:intended).uniq
+    targeted = (WITNESSES + CREATIONS).filter_map(&:intended).uniq
 
     assert_equal REGISTRY.rules.map(&:id).sort, targeted.sort
   end

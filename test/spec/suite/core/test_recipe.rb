@@ -21,8 +21,8 @@ class TestRecipe < Minitest::Test
       "base": {
         "builder": "independent",
         "tree": [
-          {"path": "DIR", "type": "directory", "size": 0, "seed": 0},
-          {"path": "DIR/HELLO.TXT", "type": "file", "size": 12, "seed": 7}
+          {"path": "DIR", "type": "directory"},
+          {"path": "DIR/HELLO.TXT", "type": "file", "size": 12, "content": "positional", "seed": 7, "holes": [[0, 2], [4, 1]]}
         ],
         "parameters": {"bytes_per_sector": 1000, "fat_count": 2}
       },
@@ -50,7 +50,7 @@ class TestRecipe < Minitest::Test
       "schema_version": 1,
       "id": "regression.fat32.create.case_pair",
       "format": "fat32",
-      "source": {"tree": [{"path": "a", "type": "file", "size": 1, "seed": 1}], "settings": {"size": 65536}},
+      "source": {"root": "manifest", "tree": [{"path": "a", "type": "file", "size": 1, "content": "zero"}], "settings": {"size": 65536}},
       "stages": ["create", "verify"],
       "kind": "valid",
       "intended_violation": null,
@@ -110,6 +110,7 @@ class TestRecipe < Minitest::Test
         "id": "regression.fat32.create.case_pair",
         "format": "fat32",
         "source": {
+          "root": "manifest",
           "tree": [],
           "settings": {
             "alpha": 2,
@@ -157,7 +158,7 @@ class TestRecipe < Minitest::Test
 
   def self.with_base(recipe, fields) = recipe.merge("base" => recipe["base"].merge(fields))
 
-  def self.entry(path, type: "file") = { "path" => path, "type" => type, "size" => 0, "seed" => 0 }
+  def self.entry(path) = { "path" => path, "type" => "file", "size" => 0, "content" => "zero" }
 
   def self.creation(source) = JSON.parse(CREATION).merge("source" => source)
 
@@ -197,11 +198,27 @@ class TestRecipe < Minitest::Test
     "tree path with NUL" => [/contains NUL/, ->(r) { with_entry(r, "path" => "a\0b") }],
     "tree path deeper than the ceiling" => [/is deeper than 3/, ->(r) { with_entry(r, "path" => "a/b/c/d") }],
     "tree path longer than the ceiling" => [/longer than 32 bytes/, ->(r) { with_entry(r, "path" => "a" * 33) }],
+    "tree path whose image path with its NUL exceeds the ceiling" =>
+      [/longer than 32 bytes/, ->(r) { with_entry(r, "path" => "a" * 31) }],
     "tree path that repeats" => [/a tree path repeats/, ->(r) { with_entry(r, "path" => "DIR") }],
     "tree path under an undeclared directory" => [/no directory of the tree/, ->(r) { with_entry(r, "path" => "OTHER/x") }],
     "tree path under a file" =>
       [/no directory of the tree/, ->(r) { with_base(r, "tree" => [entry("f"), entry("f/x")]) }],
-    "directory with a size" => [/a directory has no size or seed/, ->(r) { with_entry(r, "path" => "SUB", "type" => "directory") }],
+    "directory with a size" =>
+      [/a directory has no size, content, seed or holes/, ->(r) { with_entry(r, "path" => "SUB", "type" => "directory") }],
+    "unknown content" => [/unknown content "random"/, ->(r) { with_entry(r, "content" => "random") }],
+    "file without a size" => [/size is not an integer/, ->(r) { with_entry(r, "size" => nil) }],
+    "generated content without a seed" => [/positional content needs a seed/, ->(r) { with_entry(r, "seed" => nil) }],
+    "zero content with a seed" => [/zero content takes no seed or holes/, ->(r) { with_entry(r, "content" => "zero", "holes" => []) }],
+    "zero content with holes" => [/zero content takes no seed or holes/, ->(r) { with_entry(r, "content" => "zero", "seed" => nil) }],
+    "unknown tree entry field" => [/a tree entry is not an object/, ->(r) { with_entry(r, "mode" => 420) }],
+    "empty hole" => [/a hole is empty/, ->(r) { with_entry(r, "holes" => [[0, 0]]) }],
+    "touching holes" => [/out of order, overlap or touch/, ->(r) { with_entry(r, "holes" => [[0, 2], [2, 1]]) }],
+    "holes out of order" => [/out of order, overlap or touch/, ->(r) { with_entry(r, "holes" => [[4, 1], [0, 2]]) }],
+    "hole beyond the file" => [/a hole ends beyond the file's 12 bytes/, ->(r) { with_entry(r, "holes" => [[10, 3]]) }],
+    "hole that is no pair" => [/holes are not a list/, ->(r) { with_entry(r, "holes" => [[1, 2, 3]]) }],
+    "more holes than a manifest names" =>
+      [/holes are not a list of at most 64/, ->(r) { with_entry(r, "size" => 200, "holes" => (0..64).map { [2 * _1, 1] }) }],
     "file size beyond the ceiling" => [/tree content exceeds 4096 bytes/, ->(r) { with_entry(r, "size" => 4097) }],
     "more entries than the ceiling" => [/5 tree entries exceed 4/, ->(r) { with_base(r, "tree" => (1..5).map { entry("f#{_1}") }) }],
     "mutation beyond the ceiling" =>
@@ -226,7 +243,10 @@ class TestRecipe < Minitest::Test
       [/only a targeted case names an intended violation/, ->(r) { r.merge("kind" => "valid") }],
     "promoted case without a reason" => [/needs a reason/, ->(r) { r.merge("id" => "regression.fat16.x") }],
     "creation setting that is not an integer" =>
-      [/a number that is not an integer/, ->(_) { creation("tree" => [], "settings" => { "size" => FRACTION }) }]
+      [/a number that is not an integer/, ->(_) { creation("root" => "manifest", "tree" => [], "settings" => { "size" => FRACTION }) }],
+    "unknown source root" =>
+      [/unknown source root "archive"/, ->(_) { creation("root" => "archive", "tree" => [], "settings" => {}) }],
+    "source without a root" => [/source is not an object of root/, ->(_) { creation("tree" => [], "settings" => {}) }]
   }.freeze
 
   def test_loader_refuses_each_listed_recipe
@@ -276,7 +296,8 @@ class TestRecipe < Minitest::Test
   # one: each value refuses what the loader would.
   def test_recipe_values_check_themselves_when_built
     built = {
-      "absolute tree path" => -> { FsimgSpec::TreeEntry.new(path: "/etc/x", type: "file", size: 0, seed: 0) },
+      "absolute tree path" => -> { FsimgSpec::TreeEntry.file("/etc/x", size: 0, content: "zero") },
+      "seeded file without a seed" => -> { FsimgSpec::TreeEntry.file("x", size: 1) },
       "builder that is no name" => -> { FsimgSpec::Base.new(builder: "a b; rm", parameters: {}, tree: []) },
       "setting name that is no identifier" => -> { FsimgSpec::Source.new(tree: [], settings: { "-o x": 1 }) },
       "id naming a parent" => -> { FsimgSpec::Recipe.new(**load(canonical(READING)).to_h, id: "../x") },

@@ -66,7 +66,7 @@ class TestFatTrees < Minitest::Test
   # its case reports the generator defect rather than running fsimg.
   def test_a_generator_that_emits_a_trailing_space_name_is_a_generator_defect
     faulty = lambda { |cluster_bytes:|
-      Fat::Trees.tree(cluster_bytes:).map { _1 + [FsimgSpec::TreeEntry.new(path: "trailing ", type: "file", size: 1, seed: 1)] }
+      Fat::Trees.tree(cluster_bytes:).map { _1 + [FsimgSpec::TreeEntry.file("trailing ", size: 1, seed: 1)] }
     }
     with_cases do |_cases, cache, directory|
       draws = FsimgSpec::Draws.new(seed: SEED, count: 3, sample: 1, populated: 0, cache:)

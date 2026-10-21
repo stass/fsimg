@@ -120,37 +120,60 @@ module FsimgSpec
 end
 
 module FsimgSpec
-  # A file's bytes as a recipe tree gives them: SHA-256 in counter mode
-  # over the seed, so the bytes at any offset follow from the seed alone,
-  # never from PropCheck's random source, and stay the same across
-  # upgrades.
+  # A file's bytes as a recipe tree entry gives them: the manifest's
+  # generated content (specs/design-mtree.md#generated-bytes), which
+  # follows at any offset from the entry alone, never from PropCheck's
+  # random source, so it stays the same across upgrades. zero is zero
+  # bytes. seeded is SHA-256 in counter mode, 32-byte blocks
+  # SHA-256(LE64(seed) || LE64(i)). positional is 16-byte blocks
+  # LE64(seed) || LE64(16 * j), each naming the file and its own offset,
+  # so a misplaced cluster shows where it came from. Holes read as zeros
+  # within either.
   module FileContent
-    BLOCK_BYTES = 32
+    BLOCK_BYTES = { "seeded" => 32, "positional" => 16 }.freeze
     CHUNK_BYTES = 1 << 16
 
-    def self.write(io, seed:, size:) = each_chunk(seed:, size:) { io.write(_1) }
+    def self.write(io, entry) = each_chunk(entry) { io.write(_1) }
 
     # The SHA-256 of the bytes, computed without holding them whole.
-    def self.sha256(seed:, size:)
+    def self.sha256(entry)
       digest = Digest::SHA256.new
-      each_chunk(seed:, size:) { digest << _1 }
+      each_chunk(entry) { digest << _1 }
       digest.hexdigest
     end
 
     # Yields the bytes in chunks of CHUNK_BYTES, or answers an Enumerator
     # of them without a block, such as a tool's stdin reads.
-    def self.each_chunk(seed:, size:)
-      return enum_for(:each_chunk, seed:, size:) unless block_given?
+    def self.each_chunk(entry)
+      return enum_for(:each_chunk, entry) unless block_given?
 
-      (0...size).step(CHUNK_BYTES) { yield bytes(seed:, offset: _1, length: [CHUNK_BYTES, size - _1].min) }
+      (0...entry.size).step(CHUNK_BYTES) { yield bytes(entry, offset: _1, length: [CHUNK_BYTES, entry.size - _1].min) }
     end
 
-    def self.bytes(seed:, offset:, length:)
-      first = offset / BLOCK_BYTES
-      last = (offset + length - 1) / BLOCK_BYTES
-      stream = (first..last).map { Digest::SHA256.digest([seed, _1].pack("Q<Q<")) }.join
-      stream.byteslice(offset - (first * BLOCK_BYTES), length)
+    # The length bytes at offset, with every hole that overlaps them
+    # zeroed.
+    def self.bytes(entry, offset:, length:)
+      stream = generated(entry, offset:, length:)
+      entry.holes.each do |start, hole|
+        from = [start, offset].max
+        to = [start + hole, offset + length].min
+        stream[from - offset, to - from] = "\0".b * (to - from) if from < to
+      end
+      stream
     end
+
+    private_class_method def self.generated(entry, offset:, length:)
+      return "\0".b * length if entry.content == "zero"
+
+      size = BLOCK_BYTES.fetch(entry.content)
+      first = offset / size
+      last = (offset + length - 1) / size
+      stream = (first..last).map { block(entry, _1) }.join.b
+      stream.byteslice(offset - (first * size), length)
+    end
+
+    private_class_method def self.block(entry, index) =
+      entry.content == "seeded" ? Digest::SHA256.digest([entry.seed, index].pack("Q<Q<")) : [entry.seed, 16 * index].pack("Q<Q<")
   end
 
   # The tree a model knows an image to hold, until it decodes directories
@@ -200,7 +223,7 @@ module FsimgSpec
     private_class_method def self.walked_entry(entry)
       return WalkedEntry.new(path: entry.path.b, type: "directory", size: nil, sha256: nil) if entry.type == "directory"
 
-      WalkedEntry.new(path: entry.path.b, type: "file", size: entry.size, sha256: FileContent.sha256(seed: entry.seed, size: entry.size))
+      WalkedEntry.new(path: entry.path.b, type: "file", size: entry.size, sha256: FileContent.sha256(entry))
     end
   end
 
@@ -226,7 +249,7 @@ module FsimgSpec
       directory = parent.empty? ? root : root + "/".b + parent
       answer =
         if entry.type == "directory" then NameFunnel.create_directory(directory, name)
-        else NameFunnel.create_file(directory, name) { FileContent.write(_1, seed: entry.seed, size: entry.size) }
+        else NameFunnel.create_file(directory, name) { FileContent.write(_1, entry) }
         end
       "#{FsimgSpec.shown(entry.path)}: #{answer}" unless answer == :created
     end

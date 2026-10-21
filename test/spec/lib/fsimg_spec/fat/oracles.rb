@@ -72,6 +72,29 @@ module FsimgSpec
         end
       end
 
+      # The cluster counts at which the variant changes (section 3.5), and
+      # how near them implementations disagree on the variant: the margin
+      # fsimg's automatic sizing keeps (specs/design-fat-writer.md#geometry-and-allocation).
+      THRESHOLDS = [4085, 65_525].freeze
+      THRESHOLD_MARGIN = 16
+
+      # Why the observations of an image fsimg created, whose model
+      # decodes it, fail its case, or nil
+      # (specs/design-spec-testing.md#independence-and-oracles): its mtools
+      # read-back must reproduce the source tree, which is fsimg's creation
+      # contract, except where the cluster count lies closer to a
+      # threshold than the margin, where the read-back is recorded only.
+      # A read-back that is not applicable or unavailable gives no verdict.
+      def self.read_back_problem(observations, model)
+        read_back = observations.fetch("mtools")
+        return nil unless read_back.state == "disagrees"
+
+        count = model.geometry.cluster_count
+        return nil if count.is_a?(Integer) && THRESHOLDS.any? { (count - _1).abs < THRESHOLD_MARGIN }
+
+        "the mtools read-back of the created image disagrees: #{read_back.detail}"
+      end
+
       # fsck.fat -n or fsck_msdosfs -n agrees when it exits 0.
       private_class_method def self.checker(shell, image:, chdir:, fat_count:)
         tool = shell.tools.values_at(:fsck_fat, :fsck_msdosfs).compact.first

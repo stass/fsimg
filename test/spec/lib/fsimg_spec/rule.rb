@@ -55,6 +55,12 @@ module FsimgSpec
   # Either may answer Undefined, as FsimgSpec.derive does when an input is
   # undefined, and the rule then does not apply: a rule applies only when
   # every input it reads is defined, without listing those inputs twice.
+  #
+  # domain, which generates the rule's witnesses, takes one of three
+  # shapes: a Domain of a field rule's values; for a relational rule, a
+  # callable of the bases' layouts answering its witnesses; and for an
+  # input rule, a callable of no arguments answering its creation
+  # witnesses. A rule without witnesses of its own has none.
   class Rule < Data.define(:id, :applies_to, :predicate, :domain, :category, :policy, :scopes,
                            :status, :source, :related)
     include Checked
@@ -128,12 +134,13 @@ module FsimgSpec
     def unclassified_scopes = FsimgSpec.undefined?(trial_answers) ? ["destination"] : []
   end
 
-  # What the input rules read about a creation case: its settings and the
-  # tree the harness wrote into source/ and walked back
-  # (specs/design-spec-testing.md#cases). Every input is known, so it
-  # leaves no scope unclassified. It judges create, whose records describe
-  # a plan no rule models; the image create wrote is judged by the image
-  # model the created hook decodes, so no record is compared here.
+  # What the input rules read about a creation case: its settings and its
+  # recipe's tree, which the harness writes as the case's manifest or, for
+  # a host-tree case, into source/ (specs/design-spec-testing.md#cases).
+  # Every input is known, so it leaves no scope unclassified. It judges
+  # create, whose records describe a plan no rule models; the image create
+  # wrote is judged by the image model the created hook decodes, so no
+  # record is compared here.
   SourceModel = Data.define(:settings, :tree) do
     def unclassified_scopes = []
 

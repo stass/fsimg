@@ -50,7 +50,7 @@ class TestFatBuilder < Minitest::Test
   def test_fat12_entries_share_their_middle_bytes
     Dir.mktmpdir do |directory|
       path = File.join(directory, "image.img")
-      tree = [FsimgSpec::TreeEntry.new(path: "THREE.BIN", type: "file", size: 1500, seed: 1)]
+      tree = [FsimgSpec::TreeEntry.file("THREE.BIN", size: 1500, seed: 1)]
       layout = write_image(path, parameters: { clusters: 100 }, tree:)
 
       assert_equal "f8ffff034000ff0f00", File.binread(path, 9, layout.fat_offset(0)).unpack1("H*")
@@ -200,7 +200,7 @@ class TestFatBuilder < Minitest::Test
 
   def write_image(path, parameters:, tree: []) = Fat::Builder.write(path, parameters:, tree:, max_bytes: MAX_BYTES)
 
-  def file(name) = FsimgSpec::TreeEntry.new(path: name, type: "file", size: 0, seed: 0)
+  def file(name) = FsimgSpec::TreeEntry.file(name, size: 0, content: "zero")
 
   # The units one long-name entry holds (section 7: LDIR_Name1, 2 and 3),
   # up to the 0x0000 that ends the name.

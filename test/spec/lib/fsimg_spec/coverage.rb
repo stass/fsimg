@@ -86,10 +86,11 @@ module FsimgSpec
       end
     end
 
-    # The stages fsimg ran with an expectation the model derived.
+    # The recipe stages fsimg ran with an expectation the model derived. A
+    # manifest case's second create is no recipe stage.
     private_class_method def self.asserted_stages(ran)
       asserted = ran.flat_map do |entry|
-        entry.result.stages.map(&:stage).reject { |stage| entry.kase.expected.fetch(stage).unclassified }
+        entry.kase.expected.slice(*entry.result.stages.map(&:stage)).reject { |_, expected| expected.unclassified }.keys
       end
       asserted.uniq.sort_by { STAGES.index(_1) }
     end

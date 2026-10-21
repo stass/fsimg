@@ -139,13 +139,13 @@ class TestFatModel < Minitest::Test
   # ls, extract and verify are compared with the known tree, and a tree
   # that differs everywhere is named in a few differences and a count.
   def test_records_are_compared_with_the_known_tree
-    tree = FsimgSpec::KnownTree.of([FsimgSpec::TreeEntry.new(path: "d", type: "directory", size: 0, seed: 0),
-                                    *(1..5).map { FsimgSpec::TreeEntry.new(path: "d/f#{_1}", type: "file", size: _1, seed: _1) }])
+    tree = FsimgSpec::KnownTree.of([FsimgSpec::TreeEntry.directory("d"),
+                                    *(1..5).map { FsimgSpec::TreeEntry.file("d/f#{_1}", size: _1, seed: _1) }])
     model = decode(FAT16_SECTOR).with(tree:)
     listed = tree.map { { "type" => "entry", "kind" => _1.type, "path" => "/#{_1.path}", "size_bytes" => _1.size.to_s } }
     counts = { "type" => "verify", "complete" => true, "validation_scope" => "initialized-payload", "files" => "5",
                "directories" => "2", "logical_bytes" => "15" }
-    as_file = tree.first.with(type: "file", size: 0, sha256: FsimgSpec::FileContent.sha256(seed: 0, size: 0))
+    as_file = tree.first.with(type: "file", size: 0, sha256: Digest::SHA256.hexdigest(""))
 
     assert_empty model.record_problems(accepted("ls", listed))
     assert_empty model.record_problems(accepted("extract", [], tree:))

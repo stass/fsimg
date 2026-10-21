@@ -23,6 +23,7 @@ module FsimgSpec
     READING_KEYS = %i[base base_sha256 tool_versions mutations].freeze
     COMMON_KEYS = %i[schema_version id format stages kind intended_violation actual_violations isolation expected].freeze
     OPTIONAL_KEYS = %i[random_seed source_revision resource_limits reason].freeze
+    TREE_CONTENT_KEYS = %i[size content seed holes].freeze
     TEXT_BYTES = 64 << 20
     STRING_BYTES = 1 << 20
     MAX_MUTATIONS = 4096
@@ -129,10 +130,10 @@ module FsimgSpec
 
     def source(value)
       case value
-      in { tree: Array => tree, settings: Hash => settings, **nil }
-        Source.new(tree: tree(tree), settings: within_image(settings, "setting"))
+      in { root:, tree: Array => tree, settings: Hash => settings, **nil }
+        Source.new(root:, tree: tree(tree), settings: within_image(settings, "setting"))
       else
-        raise RecipeError, "source is not an object of tree and settings"
+        raise RecipeError, "source is not an object of root, tree and settings"
       end
     end
 
@@ -141,18 +142,19 @@ module FsimgSpec
       raise RecipeError, "#{entries.size} tree entries exceed #{@ceilings.entries}" if entries.size > @ceilings.entries
 
       loaded = entries.map { tree_entry(_1) }
-      deep = loaded.find { _1.depth > @ceilings.depth || _1.path.bytesize > @ceilings.path }
+      deep = loaded.find { _1.depth > @ceilings.depth || _1.image_path_bytes > @ceilings.path }
       raise RecipeError, "tree path #{FsimgSpec.shown(deep.path)} is deeper than #{@ceilings.depth} " \
-                         "or longer than #{@ceilings.path} bytes" if deep
-      raise RecipeError, "tree content exceeds #{@ceilings.output} bytes" if loaded.sum(&:size) > @ceilings.output
+                         "or, as an image path, longer than #{@ceilings.path} bytes" if deep
+      raise RecipeError, "tree content exceeds #{@ceilings.output} bytes" if loaded.sum { _1.size || 0 } > @ceilings.output
 
       loaded
     end
 
+    # An entry's path and type, and the content fields TreeEntry checks.
     def tree_entry(value)
       case value
-      in { path:, type:, size:, seed:, **nil } then TreeEntry.new(path:, type:, size:, seed:)
-      else raise RecipeError, "a tree entry is not an object of path, type, size and seed"
+      in { path:, type:, **content } if (content.keys - TREE_CONTENT_KEYS).empty? then TreeEntry.new(path:, type:, **content)
+      else raise RecipeError, "a tree entry is not an object of path, type and optionally #{TREE_CONTENT_KEYS.join(", ")}"
       end
     end
 

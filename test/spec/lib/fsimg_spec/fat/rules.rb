@@ -75,7 +75,7 @@ module FsimgSpec
       # The registry's rules. Rules of one field are listed normative
       # first: a value that several of them exclude targets the first
       # (Witnesses.deterministic).
-      def self.all = [*boot_rules, *bpb_rules, *geometry_rules, *fat32_rules, *name_rules, *destination_rules]
+      def self.all = [*boot_rules, *bpb_rules, *geometry_rules, *fat32_rules, *name_rules, *destination_rules, *creation_rules]
 
       # The rules of the host's names, with FAT's witnesses.
       def self.destination_rules =
@@ -153,6 +153,90 @@ module FsimgSpec
 
         keys_by_directory.all? { _1.uniq.size == _1.size }
       end
+
+      WRITER = "specs/design-fat-writer.md"
+      # The sector sizes BPB_BytsPerSec may hold, the sector size create
+      # takes without -o sector=, the most sectors a cluster holds
+      # (BPB_SecPerClus), and the largest cluster the writer's profile
+      # writes.
+      SECTOR_BYTES = [512, 1024, 2048, 4096].freeze
+      DEFAULT_SECTOR_BYTES = 512
+      MAX_SECTORS_PER_CLUSTER = 128
+      MAX_WRITER_CLUSTER_BYTES = 32 << 10
+      # DIR_FileSize is a 32-bit count of bytes.
+      MAX_FILE_BYTES = 0xFFFF_FFFF
+
+      # The domain of creation input (specs/design-spec-testing.md#cases):
+      # create's settings, and the names and sizes of the tree it reads.
+      # Each rule reads a SourceModel and has scope input, so create checks
+      # it, and fsimg refuses a violation before it writes an image. A
+      # setting rule applies only when the case gives the setting. The
+      # name rules state for the writer what fat.directory.name and
+      # fat.directory.unique_names state for the reader, since the
+      # writer's name profile is the reader's.
+      def self.creation_rules = [
+        Rule.new(
+          id: "fat.create.sector_bytes", category: "normative", policy: "must_reject", status: "FSIMG_EINVAL",
+          scopes: ["input"], applies_to: setting?(:sector), domain: Witnesses::CREATE_SECTOR,
+          predicate: ->(source, _) { SECTOR_BYTES.include?(source.settings.fetch(:sector)) },
+          source: "#{cite("3.1", "BPB_BytsPerSec")}; #{WRITER}#geometry-and-allocation: legal sectors are 512, 1024, " \
+                  "2048 or 4096 bytes"
+        ),
+        Rule.new(
+          id: "fat.create.cluster_bytes", category: "normative", policy: "must_reject", status: "FSIMG_EINVAL",
+          scopes: ["input"], applies_to: sectored_setting?(:cluster), domain: Witnesses::CREATE_CLUSTER,
+          predicate: lambda { |source, _|
+            sectors, rest = source.settings.fetch(:cluster).divmod(sector_bytes(source))
+            rest.zero? && (1..MAX_SECTORS_PER_CLUSTER).cover?(sectors) && sectors.nobits?(sectors - 1)
+          },
+          source: "#{cite("3.1", "BPB_SecPerClus")}: a power of two from 1 to 128 sectors; create's cluster is in " \
+                  "bytes (specs/design-cli.md, typed settings)"
+        ),
+        Rule.new(
+          id: "fat.create.cluster_bytes.supported", category: "profile", policy: "must_reject", status: "FSIMG_EINVAL",
+          scopes: ["input"], applies_to: setting?(:cluster), domain: Witnesses::CREATE_CLUSTER_SUPPORTED,
+          predicate: ->(source, _) { source.settings.fetch(:cluster) <= MAX_WRITER_CLUSTER_BYTES },
+          source: "#{WRITER}#geometry-and-allocation: the interoperable writer profile limits clusters to powers of " \
+                  "two between the sector size and 32 KiB"
+        ),
+        Rule.new(
+          id: "fat.create.volume_bytes", category: "profile", policy: "must_reject", status: "FSIMG_EINVAL",
+          scopes: ["input"], applies_to: sectored_setting?(:size), domain: Witnesses::CREATE_VOLUME,
+          predicate: ->(source, _) { source.settings.fetch(:size).then { _1.positive? && (_1 % sector_bytes(source)).zero? } },
+          source: "specs/design-cli.md, creation options: -s is a positive exact logical volume size; " \
+                  "#{cite("3.1", "BPB_TotSec16 and BPB_TotSec32")}: the volume is a count of whole sectors"
+        ),
+        Rule.new(
+          id: "fat.create.name", category: "profile", policy: "must_reject", status: "FSIMG_EINVAL",
+          scopes: ["input"], applies_to: ALWAYS, domain: Witnesses::CREATE_NAME,
+          predicate: ->(source, _) { source.tree.none? { Names.problem(base_name(_1)) } },
+          source: "#{WRITER}#names-and-directory-layout: the name profile matches the FAT reader's; #{NAMES_SOURCE}"
+        ),
+        Rule.new(
+          id: "fat.create.unique_names", category: "profile", policy: "must_reject", status: "FSIMG_EINVAL",
+          scopes: ["input"], applies_to: ALWAYS, domain: Witnesses::CREATE_UNIQUE_NAMES,
+          predicate: ->(source, _) { distinct_siblings(source.tree) },
+          source: "#{WRITER}#names-and-directory-layout: duplicate and case-equivalent siblings are rejected before " \
+                  "an image is allocated, under the reader's simple-uppercase comparison"
+        ),
+        Rule.new(
+          id: "fat.create.file_size", category: "normative", policy: "must_reject", status: "FSIMG_ERANGE",
+          scopes: ["input"], applies_to: ALWAYS, domain: Witnesses::CREATE_FILE_SIZE,
+          predicate: ->(source, _) { source.tree.none? { _1.type == "file" && _1.size > MAX_FILE_BYTES } },
+          source: "#{SPECIFICATION}, section 6, DIR_FileSize: a 32-bit count of the file's bytes"
+        )
+      ]
+
+      # A rule that applies when the case gives the setting name.
+      def self.setting?(name) = ->(source, _) { source.settings.key?(name) }
+
+      # A rule of a setting counted in sectors, which applies when the case
+      # gives the setting beside a legal sector size; beside an illegal
+      # one it defers to fat.create.sector_bytes.
+      def self.sectored_setting?(name) =
+        ->(source, _) { source.settings.key?(name) && SECTOR_BYTES.include?(sector_bytes(source)) }
+
+      def self.sector_bytes(source) = source.settings.fetch(:sector, DEFAULT_SECTOR_BYTES)
 
       # BS_jmpBoot takes two forms: EB ?? 90 and E9 ?? ??.
       def self.jump?(bytes) = (bytes.getbyte(0) == 0xEB && bytes.getbyte(2) == 0x90) || bytes.getbyte(0) == 0xE9
@@ -417,8 +501,8 @@ module FsimgSpec
       def self.active_fat_exists(flags, fat_count) = flags.nobits?(0x80) || (flags & 0x0F) < fat_count
 
       private_class_method :field_rule, :cite, :boot_rules, :bpb_rules, :geometry_rules, :fat32_rules, :name_rules,
-                           :base_name, :parent_path, :distinct_siblings, :reserved_area_rule, :recommended_sector_rule,
-                           :absent_sector_rule
+                           :creation_rules, :setting?, :sectored_setting?, :base_name, :parent_path, :distinct_siblings, :reserved_area_rule,
+                           :recommended_sector_rule, :absent_sector_rule
     end
   end
 end

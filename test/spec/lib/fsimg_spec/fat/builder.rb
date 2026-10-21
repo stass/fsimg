@@ -699,7 +699,7 @@ module FsimgSpec
         def write_files
           @allocation.files.each do |file|
             @out.seek(@layout.cluster_offset(@allocation.first_cluster(file.path)))
-            FileContent.write(@out, seed: file.seed, size: file.size)
+            FileContent.write(@out, file)
           end
         end
 

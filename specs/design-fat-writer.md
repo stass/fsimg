@@ -33,8 +33,9 @@ cluster for `..` is zero when the parent is the volume root.
 
 ## Geometry and allocation
 
-Legal sectors are 512, 1024, 2048, or 4096 bytes. The interoperable writer
-profile limits clusters to powers of two between the sector size and 32 KiB.
+Legal sectors are 512, the default, 1024, 2048, or 4096 bytes. The
+interoperable writer profile limits clusters to powers of two between the
+sector size and 32 KiB.
 Two identical FAT copies are emitted. FAT12/16 reserve one sector; FAT32
 reserves 32, uses FSInfo sector 1 and backup boot/FSInfo sectors 6/7.
 

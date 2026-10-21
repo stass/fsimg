@@ -37,11 +37,17 @@ class TestRunner < Minitest::Test
     assert_equal({ "info" => "i", "ls" => "t", "extract" => "x", "verify" => "W", "verify-deep" => "W" }, modes)
   end
 
-  def test_create_command_maps_the_settings
-    command = runner_for("/opt/fsimg").command("create", creation_recipe(settings: { size: 65_536, cluster: 4096 }))
+  # create reads the manifest as an @ operand, the second create its
+  # reversal, and a host-tree case the contents of source/.
+  def test_create_command_maps_the_settings_and_the_source_root
+    runner = runner_for("/opt/fsimg")
+    recipe = creation_recipe(settings: { size: 65_536, cluster: 4096 })
+    host_tree = recipe.with(source: recipe.source.with(root: "directory"))
 
-    assert_equal "c", command[1]
-    assert_equal %w[-R -F fat16 -o cluster=4096 -s 65536 -f out/created.img -C source .], command.last(12)
+    assert_equal "c", runner.command("create", recipe)[1]
+    assert_equal %w[-R -F fat16 -o cluster=4096 -s 65536 -f out/created.img @source.mtree], runner.command("create", recipe).last(10)
+    assert_equal %w[-f out/reversed.img @source-reversed.mtree], runner.command("create-reversed", recipe).last(3)
+    assert_equal %w[-f out/created.img -C source .], runner.command("create", host_tree).last(5)
   end
 
   def test_required_sandbox_passes_s_required
@@ -135,9 +141,9 @@ class TestRunner < Minitest::Test
   # stages that ran.
   def test_an_oracle_that_raises_keeps_the_stages_and_fsimg_verdict
     Dir.mktmpdir do |cases|
-      passed = run_case(write_stub(cases, ACCEPT), cases, oracles: ->(_directory) { raise "fsck answered nothing" })
+      passed = run_case(write_stub(cases, ACCEPT), cases, oracles: ->(_directory, _model) { raise "fsck answered nothing" })
       FileUtils.rm_rf(File.join(cases, "t.case"))
-      raising = ->(_directory) { raise FsimgSpec::HarnessError, "fsck could not start" }
+      raising = ->(_directory, _model) { raise FsimgSpec::HarnessError, "fsck could not start" }
       failed = run_case(write_stub(cases, "echo x; #{ACCEPT}"), cases, oracles: raising)
 
       assert_equal ["harness_error", STAGES, 'oracles: RuntimeError: "fsck answered nothing"'],
@@ -224,7 +230,7 @@ class TestRunner < Minitest::Test
     Dir.mktmpdir do |cases|
       stub = write_stub(cases, "echo x > .mtoolsrc; #{ACCEPT}")
       observed = []
-      result = run_case(stub, cases, oracles: ->(directory) { observed << directory })
+      result = run_case(stub, cases, oracles: ->(directory, _model) { observed << directory })
 
       assert_equal "failed", result.verdict
       assert_equal ["info"], result.stages.map(&:stage)
@@ -239,8 +245,9 @@ class TestRunner < Minitest::Test
   # they observed.
   def test_passing_case_runs_every_stage_then_the_oracles_and_removes_its_directory
     Dir.mktmpdir do |cases|
-      oracles = lambda do |directory|
-        { "t.tool" => FsimgSpec::Observation.new(state: File.file?(File.join(directory, "image.img")) ? "agrees" : "disagrees") }
+      oracles = lambda do |directory, _model|
+        state = File.file?(File.join(directory, "image.img")) ? "agrees" : "disagrees"
+        FsimgSpec::Observed.new(observations: { "t.tool" => FsimgSpec::Observation.new(state:) })
       end
       result = run_case(write_stub(cases, ACCEPT), cases, oracles:)
 
@@ -259,14 +266,14 @@ class TestRunner < Minitest::Test
     end
   end
 
-  # A creation tree whose names collide on the host cannot be held there:
-  # the case is a host skip and fsimg never runs.
-  def test_creation_tree_the_host_cannot_hold_is_a_host_skip
+  # A host tree whose names collide on the host cannot be held there: the
+  # case is a host skip and fsimg never runs.
+  def test_host_tree_the_host_cannot_hold_is_a_host_skip
     Dir.mktmpdir do |cases|
       marker = File.join(cases, "ran")
       stub = write_stub(cases, "touch '#{marker}'; : > out/created.img; #{ACCEPT}")
-      tree = %w[README readme].map { FsimgSpec::TreeEntry.new(path: _1, type: "file", size: 1, seed: 1) }
-      kase = plain_case(creation_recipe(settings: {}).with(source: FsimgSpec::Source.new(tree:, settings: {})))
+      tree = %w[README readme].map { FsimgSpec::TreeEntry.file(_1, size: 1, seed: 1) }
+      kase = plain_case(creation_recipe(settings: {}).with(source: FsimgSpec::Source.new(tree:, settings: {}, root: "directory")))
       result = FsimgSpec::CaseRun.call(kase, model: NoRecords.new, image: nil, runner: runner_for(stub),
                                              cases_directory: cases, sandbox: "unavailable", created: CREATED_VALID)
 
@@ -328,6 +335,93 @@ class TestRunner < Minitest::Test
 
       assert_equal ["failed", "create: out/created.img is a fifo, not a file"], [result.verdict, result.detail]
       refute opened
+    end
+  end
+
+  # The second create reads the manifest's lines reversed and must write
+  # the bytes create wrote: a stub that writes other bytes for it fails
+  # the case, and one that writes the same passes.
+  def test_second_create_must_write_the_same_bytes
+    Dir.mktmpdir do |cases|
+      results = %w[a b].map do |reversed|
+        FileUtils.rm_rf(File.join(cases, "t.create"))
+        stub = write_stub(cases, <<~SH)
+          case "$*" in
+          *@source-reversed.mtree*) printf #{reversed} > out/reversed.img ;;
+          *) printf a > out/created.img ;;
+          esac
+          #{ACCEPT}
+        SH
+        FsimgSpec::CaseRun.call(plain_case(creation_recipe(settings: {})), model: NoRecords.new, image: nil,
+                                runner: runner_for(stub), cases_directory: cases, sandbox: "unavailable", created: CREATED_VALID)
+      end
+
+      assert_equal [["passed", nil], ["failed", "create-reversed: out/reversed.img differs from out/created.img in the " \
+                                                "1048576-byte block at 0"]],
+                   results.map { [_1.verdict, _1.detail] }
+      assert_equal %w[create create-reversed], results.last.stages.map(&:stage)
+    end
+  end
+
+  # out/ may hold created.img only once create has accepted, and
+  # reversed.img only once the second create has: a rejected create that
+  # leaves an image, or a create that writes the reversal's, left it behind.
+  def test_created_images_are_allowed_only_after_their_create_accepts
+    rejection = '{"schema":1,"type":"error","code":-1,"resource":"none","sandbox":"unavailable"}'
+    {
+      "printf a > out/created.img; echo '#{rejection}'; exit 1" => %r{out/"created.img" was left behind},
+      "printf a > out/created.img; printf a > out/reversed.img; #{ACCEPT}" => %r{out/"reversed.img" was left behind}
+    }.each do |script, problem|
+      Dir.mktmpdir do |root|
+        stub = write_stub(root, script)
+        directory = File.join(root, "case")
+        FsimgSpec::CaseDirectory.prepare(directory, recipe: creation_recipe(settings: {}), image: nil)
+        result = runner_for(stub).run("create", recipe: creation_recipe(settings: {}), case_directory: directory,
+                                                sandbox: "unavailable")
+
+        assert_match problem, result.problems.join("; "), script
+      end
+    end
+  end
+
+  # A second image that matches the first is removed once compared, so the
+  # case holds one image from there on, and a later stage that writes one
+  # left it behind.
+  def test_matching_second_image_is_removed
+    Dir.mktmpdir do |root|
+      stub = write_stub(root, <<~SH)
+        case "$*" in
+        *@source-reversed.mtree*|"i "*) printf a > out/reversed.img ;;
+        *) printf a > out/created.img ;;
+        esac
+        #{ACCEPT}
+      SH
+      directory = File.join(root, "case")
+      recipe = creation_recipe(settings: {}).with(stages: %w[create info], expected: %w[create info].to_h { [_1, FsimgSpec::Expectation.parse("accept")] })
+      FsimgSpec::CaseDirectory.prepare(directory, recipe:, image: nil)
+      runner = runner_for(stub)
+      run = ->(stage) { runner.run(stage, recipe:, case_directory: directory, sandbox: "unavailable") }
+      reproduced = ["create", FsimgSpec::Runner::REPRODUCTION].map(&run)
+
+      assert_equal [[], []], reproduced.map(&:problems)
+      assert_nil runner.settle_reproduction(directory)
+      assert_equal ["created.img"], Dir.children(File.join(directory, "out"))
+      assert_equal ['out/"reversed.img" was left behind'], run.call("info").problems
+    end
+  end
+
+  # A manifest case's directory holds its manifest and the same lines
+  # reversed, and no source tree.
+  def test_creation_case_directory_holds_the_manifest_and_its_reversal
+    Dir.mktmpdir do |root|
+      tree = [FsimgSpec::TreeEntry.directory("d"), FsimgSpec::TreeEntry.file("d/f", size: 3, seed: 1)]
+      recipe = creation_recipe(settings: {}).with(source: FsimgSpec::Source.new(tree:, settings: {}))
+      directory = File.join(root, "case")
+      FsimgSpec::CaseDirectory.prepare(directory, recipe:, image: nil)
+
+      lines = FsimgSpec::Manifest.lines(tree)
+      assert_equal %w[out scratch source-reversed.mtree source.mtree], Dir.children(directory).sort
+      assert_equal [lines.join, lines.reverse.join], %w[source.mtree source-reversed.mtree].map { File.binread(File.join(directory, _1)) }
     end
   end
 

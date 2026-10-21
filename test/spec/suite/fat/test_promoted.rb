@@ -122,7 +122,7 @@ class TestFatPromoted < Minitest::Test
 
   def promoted_creation(name, ls:) = FsimgSpec::Recipe.new(
     id: "regression.fat.create.#{name}", format: "fat16", kind: "valid", stages: %w[create ls],
-    source: FsimgSpec::Source.new(tree: [FsimgSpec::TreeEntry.new(path: "a.txt", type: "file", size: 5, seed: 1)], settings: {}),
+    source: FsimgSpec::Source.new(tree: [FsimgSpec::TreeEntry.file("a.txt", size: 5, seed: 1)], settings: {}),
     expected: { "create" => "accept", "ls" => ls }.transform_values { FsimgSpec::Expectation.parse(_1) },
     reason: "A creation recipe written for this test."
   )

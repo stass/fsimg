@@ -160,6 +160,14 @@
   version differs. Rebuild such a base through `Bases.materialize` when the
   host has its tools, and skip it otherwise.
 
+* [Medium] **Spec harness read-back skips drawn creations with supplementary names**
+  (`test/spec/lib/fsimg_spec/fat/oracles.rb`, `fat/trees.rb`): mtools
+  drops long names beyond the BMP, so the read-back that gives a creation
+  case its independent verdict is not applicable to a drawn tree holding
+  one, which is most of them (12 of the 15 drawn creations of one quick
+  run). Compare the entries mtools can name and report the rest, or draw a
+  share of the creation trees from BMP names only.
+
 * [Low] **Spec harness fatcat ignores case bits**
   (`test/spec/lib/fsimg_spec/fat/oracles.rb`): fatcat ignores the case
   bits of a short entry, so a lowercase 8.3 name mtools wrote with them

@@ -56,13 +56,63 @@ module FsimgSpec
         "fat.valid.cluster_bytes_524288" => { clusters: 16, bytes_per_sector: 4096, sectors_per_cluster: 128 }
       }.freeze
 
-      # Every deterministic witness of registry's rules.
+      # Every deterministic reading witness of registry's rules; the input
+      # rules' witnesses are creations (Witnesses.creations).
       def self.deterministic(registry)
         layouts = BASES.transform_values { Builder::Layout.new(_1) }
         valid = VALID.map { |id, parameters| Witness.new(id:, parameters:, tree: [], mutations: [], forced_format: nil, intended: nil, rule: nil) }
-        relational = registry.rules.reject { Rules::FIELDS.key?(_1.id) || _1.domain.nil? }
+        relational = registry.rules.reject { Rules::FIELDS.key?(_1.id) || _1.domain.nil? || _1.input? }
         valid + field_rules(registry).flat_map { |field, rules| field_witnesses(field, rules) } +
           relational.flat_map { |rule| rule.domain.call(layouts).map { witness(rule, _1) } }
+      end
+
+      # A tree of each kind of entry and content: an 8.3 name, a long
+      # Unicode name, a nested directory, an empty file, a file of several
+      # clusters with two holes, positional bytes, and zeros. The valid
+      # creations read it, the host-tree one from source/.
+      CREATION_TREE = [
+        TreeEntry.file("HELLO.TXT", size: 13, seed: 1),
+        TreeEntry.file("Long name \u00e9t\u00e9.txt", size: 700, content: "positional", seed: 2),
+        TreeEntry.directory("DIR"),
+        TreeEntry.directory("DIR/Nested"),
+        TreeEntry.file("DIR/Nested/blocks.bin", size: 5000, seed: 3, holes: [[100, 1000], [2048, 512]]),
+        TreeEntry.file("DIR/empty", size: 0, content: "zero"),
+        TreeEntry.file("DIR/zeros.bin", size: 70_000, content: "zero")
+      ].freeze
+
+      # One witness of a creation rule (specs/design-spec-testing.md#cases):
+      # the format create writes, the tree and settings it reads, the kind
+      # of source root (Source), and whether it is meant to violate the
+      # rule.
+      class Creation < Data.define(:label, :format, :tree, :settings, :root, :violates)
+        include Checked
+
+        def initialize(label:, violates:, format: "fat12", tree: CREATION_TREE, settings: {}, root: "manifest") = super
+      end
+
+      # A creation case before classification: its id, the format, tree,
+      # settings and source root of its Source, the rule it targets, or
+      # nil for a case meant valid, and the rule whose domain generated it,
+      # or nil.
+      CreationWitness = Data.define(:id, :format, :tree, :settings, :root, :intended, :rule)
+
+      # Every deterministic creation witness of registry's input rules, and
+      # a valid creation of each variant from a manifest and of FAT16 from
+      # a host tree, whose tree content stays within ceilings: a witness
+      # beyond the output ceiling, such as a file past FAT's 4 GiB, is one
+      # only a profile with room for it runs.
+      def self.creations(registry, ceilings:)
+        valid = %w[fat12 fat16 fat32].map { Creation.new(label: _1, format: _1, violates: false) } +
+                [Creation.new(label: "host_tree", format: "fat16", root: "directory", violates: false)]
+        witnesses = valid.map { creation_witness(nil, _1) } +
+                    registry.rules.select(&:input?).flat_map { |rule| rule.domain.call.map { creation_witness(rule, _1) } }
+        witnesses.select { |witness| witness.tree.sum { _1.size || 0 } <= ceilings.output }
+      end
+
+      private_class_method def self.creation_witness(rule, creation)
+        CreationWitness.new(id: rule ? "#{rule.id}.#{creation.label}" : "fat.create.valid.#{creation.label}",
+                            format: creation.format, tree: creation.tree, settings: creation.settings, root: creation.root,
+                            intended: rule && creation.violates ? rule.id : nil, rule: rule&.id)
       end
 
       # The witness of value drawn for field: always a mutation of the
@@ -380,34 +430,104 @@ module FsimgSpec
       private_class_method def self.named(label, *names, violates:) =
         Variation.new(label:, base: "fat12", violates:, tree: files(*names))
 
-      # Names at each limit of Names.problem. 255 UTF-16 units are the
-      # most a long name holds; 128 supplementary characters, two units
-      # each, are one unit more.
-      NAME = lambda { |_layouts|
-        [named("units_255", "x" * 255, violates: false), named("units_256", "x" * 256, violates: true),
-         named("pairs_256", "\u{1F600}" * 128, violates: true), named("trailing_space", "a ", violates: true),
-         named("trailing_period", "a.", violates: true), named("leading_space", " a", violates: true),
-         named("colon", "a:b", violates: true), named("control", "a\u0001b", violates: true),
-         named("del", "a\u007Fb", violates: true)]
+      # Names at each limit of Names.problem, by label, each with whether it
+      # breaks the name rules. 255 UTF-16 units are the most a long name
+      # holds; 127 supplementary characters, two units each, and two ASCII
+      # letters are one unit more in 129 characters, and their 510 UTF-8
+      # bytes keep the image path within the 512-byte path ceiling.
+      NAMES = {
+        "units_255" => ["x" * 255, false], "units_256" => ["x" * 256, true],
+        "pairs_256" => ["#{"\u{1F600}" * 127}ab", true],
+        "trailing_space" => ["a ", true], "trailing_period" => ["a.", true], "leading_space" => [" a", true],
+        "colon" => ["a:b", true], "control" => ["a\u0001b", true], "del" => ["a\u007Fb", true]
+      }.freeze
+
+      # Sibling names, by label, each with whether they break the unique
+      # name rules: case pairs, of ASCII and of the supplementary Deseret
+      # letters whose simple upper case maps U+10428 to U+10400; and the
+      # design's reserved pair, a long name beside the literal 8.3 name its
+      # short name would take first, which the builder gives the long name
+      # another one beside
+      # (specs/design-spec-testing.md#generation-and-shrinking).
+      SIBLINGS = {
+        "ascii_case_pair" => [%w[abc ABC], true], "deseret_case_pair" => [%W[\u{10428} \u{10400}], true],
+        "alias_pair" => [["name file.txt", "NAMEFI~1.TXT"], false]
+      }.freeze
+
+      NAME = ->(_layouts) { NAMES.map { |label, (name, violates)| named(label, name, violates:) } }
+
+      UNIQUE_NAMES = ->(_layouts) { SIBLINGS.map { |label, (names, violates)| named(label, *names, violates:) } }
+
+      # The creation witnesses of the input rules: each setting's values
+      # around its domain on the FAT12 base's variant, and the names of
+      # the reading witnesses as a creation's source
+      # (specs/design-spec-testing.md#generation-and-shrinking), which runs
+      # on every host. A trailing period also reaches create through the
+      # host scanner, from source/.
+      CREATE_SECTOR = lambda {
+        Rules::SECTOR_BYTES.map { creation(sector: _1, violates: false) } + [256, 1000, 8192].map { creation(sector: _1, violates: true) }
       }
 
-      # Case pairs, of ASCII and of the supplementary Deseret letters whose
-      # simple upper case maps U+10428 to U+10400; and the design's reserved
-      # pair, a long name beside the literal 8.3 name its short name would
-      # take first, which the builder gives the long name another one
-      # beside (specs/design-spec-testing.md#generation-and-shrinking).
-      UNIQUE_NAMES = lambda { |_layouts|
-        [named("ascii_case_pair", "abc", "ABC", violates: true),
-         named("deseret_case_pair", "\u{10428}", "\u{10400}", violates: true),
-         named("alias_pair", "name file.txt", "NAMEFI~1.TXT", violates: false)]
+      # Clusters of 1, 4 and 64 sectors of 512 bytes and of one 4096-byte
+      # sector; one below the sector size, one that is no power of two, and
+      # 256 sectors, beyond what BPB_SecPerClus counts. 128 sectors of 512
+      # bytes, which it counts, exceed the writer's profile instead
+      # (CREATE_CLUSTER_SUPPORTED).
+      CREATE_CLUSTER = lambda {
+        [creation(cluster: 512, violates: false), creation(cluster: 2048, violates: false),
+         creation(cluster: 32_768, violates: false), creation(sector: 4096, cluster: 4096, violates: false),
+         creation(cluster: 256, violates: true), creation(sector: 2048, cluster: 1024, violates: true),
+         creation(cluster: 1000, violates: true), creation(cluster: 131_072, violates: true)]
       }
+
+      CREATE_CLUSTER_SUPPORTED = lambda {
+        [creation(cluster: 32_768, violates: false), creation(cluster: 65_536, violates: true),
+         creation(sector: 4096, cluster: 65_536, violates: true)]
+      }
+
+      # An exact size of whole sectors, which gives the FAT16 volume 4101
+      # clusters of 512 bytes; none; and sizes of a part sector.
+      CREATE_VOLUME = lambda {
+        [Creation.new(label: "2134016", format: "fat16", settings: { size: 2_134_016 }, violates: false),
+         creation(size: 0, violates: true), creation(size: 1000, violates: true),
+         creation(sector: 4096, size: 2_134_528, violates: true)]
+      }
+
+      CREATE_NAME = lambda {
+        NAMES.map { |label, (name, violates)| Creation.new(label:, tree: files(name), violates:) } +
+          [Creation.new(label: "host_trailing_period", format: "fat16", tree: files("a."), root: "directory", violates: true)]
+      }
+
+      # The reading witnesses' sibling names, and an 8.3 name in the
+      # writer's alias family beside a long name, which must take the next
+      # alias (specs/design-fat-writer.md#names-and-directory-layout).
+      CREATE_UNIQUE_NAMES = lambda {
+        SIBLINGS.map { |label, (names, violates)| Creation.new(label:, tree: files(*names), violates:) } +
+          [Creation.new(label: "alias_family", tree: files("F0000000", "long name.txt"), violates: false)]
+      }
+
+      # A file one byte past what DIR_FileSize counts, of zeros, which
+      # create refuses before writing. Writing its manifest still hashes
+      # its 4 GiB for the digest, which only the deep profile has the
+      # output ceiling for.
+      CREATE_FILE_SIZE = lambda {
+        [Creation.new(label: "4294967296", tree: [TreeEntry.file("big", size: Rules::MAX_FILE_BYTES + 1, content: "zero")],
+                      violates: true)]
+      }
+
+      # A FAT12 creation of CREATION_TREE with settings, labelled by the
+      # value of one setting, and by each name and value of several.
+      private_class_method def self.creation(violates:, **settings)
+        label = settings.one? ? settings.values.first.to_s : settings.map { |name, value| "#{name}_#{value}" }.join("_")
+        Creation.new(label:, settings:, violates:)
+      end
 
       # A destination witness is a valid FAT volume whose names some hosts
       # cannot hold (specs/design-spec-testing.md#host-names). Each is meant
       # to violate its rule, but only the host's name trials decide whether
       # it does; on a host that holds its names it runs as an ordinary case.
       private_class_method def self.files(*names) =
-        names.each_with_index.map { TreeEntry.new(path: _1, type: "file", size: 1, seed: _2 + 1) }
+        names.each_with_index.map { TreeEntry.file(_1, size: 1, seed: _2 + 1) }
 
       # U+00E9 and e with U+0301: distinct FAT names, since FAT compares
       # names by simple uppercase and not by normalization, which a

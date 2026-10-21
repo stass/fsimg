@@ -71,7 +71,7 @@ class TestFatPopulatedFsimg < Minitest::Test
   # before fsimg runs.
   def test_a_tree_the_read_back_does_not_reproduce_is_a_host_skip
     short = Module.new do
-      def self.each_chunk(seed:, size:) = FsimgSpec::FileContent.each_chunk(seed:, size: [size - 1, 0].max)
+      def self.each_chunk(entry) = FsimgSpec::FileContent.each_chunk(entry.with(size: [entry.size - 1, 0].max))
     end
     with_populating do |cases, drawn, shell|
       base = populated_base(Fat::Trees::BASES.fetch("fat12"), Fat::Bases::STANDARD_TREE)
@@ -87,7 +87,7 @@ class TestFatPopulatedFsimg < Minitest::Test
   # naming the refusal, not a harness error.
   def test_a_tree_mtools_refuses_is_a_host_skip_that_names_why
     with_populating do |cases|
-      tree = [FsimgSpec::TreeEntry.new(path: "CON", type: "file", size: 1, seed: 1)]
+      tree = [FsimgSpec::TreeEntry.file("CON", size: 1, seed: 1)]
 
       error = assert_raises(FsimgSpec::HostSkip) { cases.populated(populated_base(Fat::Trees::BASES.fetch("fat12"), tree), id: "t.device") }
       assert_match(/\Amtools did not write the tree: mcopy exited 1: /, error.message)

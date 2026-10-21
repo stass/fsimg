@@ -115,7 +115,7 @@ class TestRunnerFsimg < Minitest::Test
     FsimgSpec::Runner.new(fsimg: @fsimg, profile: PROFILE, environment: ENV.to_h, observer:,
                           text_bytes: 64 << 20, address_space: false)
 
-  def entry(path, type) = FsimgSpec::TreeEntry.new(path:, type:, size: type == "file" ? 10 : 0, seed: type == "file" ? 1 : 0)
+  def entry(path, type) = type == "file" ? FsimgSpec::TreeEntry.file(path, size: 10, seed: 1) : FsimgSpec::TreeEntry.directory(path)
 
   def creation_case(id, tree, stages: %w[create extract])
     recipe = FsimgSpec::Recipe.new(
@@ -135,10 +135,11 @@ class TestRunnerFsimg < Minitest::Test
   # The created hook for an image these cases do not classify.
   CREATED_VALID = ->(_image) { [NoRecords.new, FsimgSpec::Case::CREATED_IMAGE] }
 
-  # An observer that, for the second invocation (ls after create), kills
-  # every member of its group but the coordinator once one appears, and
-  # stops looking once that invocation ends. A group with members keeps
-  # its ID, so pgrep -g names only that invocation's processes.
+  # An observer that, for the third invocation (ls, after create and the
+  # second create from the reversed manifest), kills every member of its
+  # group but the coordinator once one appears, and stops looking once
+  # that invocation ends. A group with members keeps its ID, so pgrep -g
+  # names only that invocation's processes.
   class WorkerKiller < FsimgSpec::GroupObserver
     def initialize
       super
@@ -147,7 +148,7 @@ class TestRunnerFsimg < Minitest::Test
 
     def started(pgid)
       @invocations += 1
-      return unless @invocations == 2
+      return unless @invocations == 3
 
       @target = pgid
       @thread = Thread.new { kill_workers(pgid) }
