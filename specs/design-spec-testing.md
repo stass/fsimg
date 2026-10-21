@@ -438,11 +438,10 @@ in 1024-byte blocks. A tree is populated into an empty base of either builder
 with `mmd` and `mcopy - ::/path`, each file's bytes generated from its seed
 and piped to mtools' stdin, so population writes no host file; with
 `SOURCE_DATE_EPOCH` set, mtools stamps every entry with the time the tree
-carries. The empty volume is cached under its own key, its parameters and
-the version of what formats it (the builder's sources, or the formatter's
-executable and the harness code that spells its command), and each tree is
-populated into a sparse copy of it, so any number of trees of one geometry
-cost one formatter run. The
+carries. Each image is formatted where it lies and populated in place: a
+formatter base is cached under its own key like any base, and a drawn tree
+is populated into a sparse builder volume rendered at the case's own path,
+so no draw costs a formatter run. The
 manifest records each oracle's observation of the base: the
 read-only checker (`fsck.fat -n` or `fsck_msdosfs -n`), the mtools read-back
 and fatcat. Formatter
@@ -926,8 +925,8 @@ extension, or a long name whose generated short alias could collide with a
 sibling's literal 8.3 name, such as `NAMEFI~1.TXT` beside a long
 `name file.txt`. A
 drawn tree reaches fsimg in three ways: rendered by the independent builder, as
-a creation case's source, and populated by mtools into a copy of one cached
-empty base, so no draw costs a formatter run. The trees mtools populates are
+a creation case's source, and populated by mtools into a builder volume
+rendered for it, never a formatter run per draw. The trees mtools populates are
 drawn apart, as many as the profile sets, and every one mtools writes as
 drawn runs fsimg. Their
 generator offers mtools only names it writes as drawn: no name beyond the

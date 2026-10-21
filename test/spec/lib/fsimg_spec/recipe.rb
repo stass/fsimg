@@ -123,7 +123,7 @@ module FsimgSpec
     def to_h = { builder:, population:, tree: tree.map(&:to_h), parameters: }.compact
   end
 
-  # A creation case's input: the tree fsimg create reads and its settings.
+  # A creation case's input: the tree the create stage reads and its settings.
   class Source < Data.define(:tree, :settings)
     include Checked
 

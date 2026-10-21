@@ -25,11 +25,11 @@ module FsimgSpec
         reserved_sectors: "-R", media: "-M"
       }.freeze
       BUILDER_SOURCES = [File.join(__dir__, "builder.rb"), File.expand_path("../tree.rb", __dir__)].freeze
-      # The harness code that pipes a base's tree into its volume: the
+      # The harness code that runs a base's tools: mkfs.fat's command, the
       # population, the file contents, the stdin feed and the oracles'
       # environment.
-      POPULATION_SOURCES = [__FILE__, File.join(__dir__, "oracles.rb"), File.expand_path("../tree.rb", __dir__),
-                            File.expand_path("../process.rb", __dir__), File.expand_path("../fixtures.rb", __dir__)].freeze
+      HARNESS_SOURCES = [__FILE__, File.join(__dir__, "oracles.rb"), File.expand_path("../tree.rb", __dir__),
+                         File.expand_path("../process.rb", __dir__), File.expand_path("../fixtures.rb", __dir__)].freeze
       # The tools that format a formatter base, populate a base and read a
       # populated tree back.
       FORMAT_TOOLS = { FORMATTER => %i[mkfs_fat] }.freeze
@@ -85,18 +85,15 @@ module FsimgSpec
 
       # Builds base into cache unless a run already published it, and
       # answers the Fixture, with the tools shell carries. A formatter base
-      # needs mkfs.fat, and a base mtools populates mmd and mcopy. A tree
-      # mtools populates goes into a copy of the base's empty volume, which
-      # volume_cache keeps, so a caller may build images into a cache it
-      # empties while their volumes last. The image must stay within the
-      # profile's image ceiling. content gives each file's bytes (FileContent); a test may
-      # pass a faulty one, into a private cache only, since content is no
-      # part of the cache key.
-      def self.materialize(base, cache:, shell:, ceilings:, content: FileContent, volume_cache: cache)
+      # needs mkfs.fat, and a base mtools populates mmd and mcopy. The
+      # image must stay within the profile's image ceiling. content gives
+      # each file's bytes (FileContent); a test may pass a faulty one, into
+      # a private cache only, since content is no part of the cache key.
+      def self.materialize(base, cache:, shell:, ceilings:, content: FileContent)
         check_buildable(base, ceilings)
         versions = tool_versions(base, shell.tools)
         key = cache.key(base, versions)
-        image = cache.fetch(key) { build(base, _1, shell:, ceilings:, content:, volume_cache:) }
+        image = cache.fetch(key) { build(base, _1, shell:, ceilings:, content:) }
         model = Model.decode(ImageView.open(image), tree: KnownTree.of(base.tree))
         observations = Oracles.observe(shell, image: File.basename(image), chdir: File.dirname(image), model:)
         problems = geometry_problems(base, image) + observations.slice(*GATING_ORACLES).filter_map do |tool, observation|
@@ -160,12 +157,12 @@ module FsimgSpec
       private_class_method def self.tool_versions(base, tools) =
         format_versions(base, tools).merge(population_versions(base, tools))
 
-      # The builder's sources, or mkfs.fat's executable and this file,
-      # which spells its command.
+      # The builder's sources, or mkfs.fat's executable and the harness
+      # code that spells its command.
       private_class_method def self.format_versions(base, tools)
         return builder_versions if base.builder == Builder::NAME
 
-        executable_versions(FORMAT_TOOLS.fetch(FORMATTER), tools, base:).merge("formatter-command" => Tools.source_version(__FILE__))
+        executable_versions(FORMAT_TOOLS.fetch(FORMATTER), tools, base:).merge(harness_version)
       end
 
       # Nothing for a tree the builder renders; for one mtools populates,
@@ -173,8 +170,10 @@ module FsimgSpec
       private_class_method def self.population_versions(base, tools)
         return {} unless base.population
 
-        executable_versions(POPULATION_TOOLS, tools, base:).merge("harness" => Tools.source_version(*POPULATION_SOURCES))
+        executable_versions(POPULATION_TOOLS, tools, base:).merge(harness_version)
       end
+
+      private_class_method def self.harness_version = { "harness" => Tools.source_version(*HARNESS_SOURCES) }
 
       private_class_method def self.executable_versions(names, tools, base:)
         missing = names.reject { tools[_1] }
@@ -212,30 +211,17 @@ module FsimgSpec
         raise FixtureError, "a #{FORMATTER} base needs #{missing.join(" and ")}" unless missing.empty?
       end
 
-      # Writes the image for base at path. The builder renders a tree of
-      # its own with the volume; a tree mtools populates goes into a sparse
-      # copy of the base's empty volume, so every tree populated into one
-      # geometry costs one formatter run between them.
-      private_class_method def self.build(base, path, shell:, ceilings:, content:, volume_cache:)
-        return Builder.write(path, parameters: base.parameters, tree: base.tree, max_bytes: ceilings.image) unless base.population
-
-        ImageView.open(empty_volume(base, cache: volume_cache, shell:, ceilings:)).write(path)
-        populate(base.tree, path, shell:, content:)
-      end
-
-      # The empty volume of base in cache: the builder's or mkfs.fat's
-      # image of its parameters, keyed by them and the formatting tool's
-      # version alone, so it is one entry whatever tree it receives. The
-      # builder's entry is the one render answers for the same parameters.
-      private_class_method def self.empty_volume(base, cache:, shell:, ceilings:)
-        empty = base.with(tree: [], population: nil)
-        cache.fetch(cache.key(empty, format_versions(base, shell.tools))) do |path|
-          if base.builder == Builder::NAME
-            Builder.write(path, parameters: base.parameters, tree: [], max_bytes: ceilings.image)
-          else
-            run_tool(shell, format_command(base, path, shell.tools), chdir: File.dirname(path))
-          end
+      # Writes the image for base at path: the builder's volume, holding
+      # the tree unless mtools populates it, or mkfs.fat's empty volume,
+      # then the population. Nothing is copied: each image is formatted at
+      # path.
+      private_class_method def self.build(base, path, shell:, ceilings:, content:)
+        if base.builder == Builder::NAME
+          Builder.write(path, parameters: base.parameters, tree: base.population ? [] : base.tree, max_bytes: ceilings.image)
+        else
+          run_tool(shell, format_command(base, path, shell.tools), chdir: File.dirname(path))
         end
+        populate(base.tree, path, shell:, content:) if base.population
       end
 
       # How a base is built, for its manifest: the builder's name or the

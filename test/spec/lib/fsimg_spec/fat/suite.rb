@@ -37,7 +37,7 @@ module FsimgSpec
                           classify: -> { cases.call(witness) })
         end
         witnesses + external(cases, shell:) +
-          drawn(draws, cases:, registry:, cache:, ceilings:, name_trials:, shell:, tree_generator:) +
+          drawn(draws, cases:, registry:, ceilings:, name_trials:, shell:, tree_generator:) +
           promoted(directory, ceilings:).map { pending(_1, cases) }
       end
 
@@ -61,10 +61,9 @@ module FsimgSpec
       # The drawn trees that run as cases (specs/design-spec-testing.md#generation-and-shrinking),
       # whose recipes record the run's seed: the trees the builder renders,
       # then those mtools populates. Each image is built into the draws' own
-      # cache; a populated tree's empty volume is copied from the fixture
-      # cache, cache, where it lasts beyond the case.
-      def self.drawn(draws, cases:, registry:, cache:, ceilings:, name_trials:, shell:, tree_generator:)
-        building = Cases.new(registry:, cache: draws.cache, volume_cache: cache, ceilings:, name_trials:, shell:)
+      # cache, formatted and populated where it lies.
+      def self.drawn(draws, cases:, registry:, ceilings:, name_trials:, shell:, tree_generator:)
+        building = Cases.new(registry:, cache: draws.cache, ceilings:, name_trials:, shell:)
         rendered_draws(draws, cases:, building:, tree_generator:) + populated_draws(draws, cases:, building:, shell:)
       end
 
@@ -81,7 +80,7 @@ module FsimgSpec
         end
 
       # draws.populated trees drawn for mtools (Trees.populated_tree), each
-      # populated into a copy of the empty builder volume of its variant.
+      # populated into an empty builder volume of its variant.
       # Their generator is the builder draws' with fewer names, so the
       # builder's many in-memory draws already test it for defects, and
       # only these few are drawn. A host without mtools skips them, which

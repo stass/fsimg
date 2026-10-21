@@ -500,11 +500,11 @@ review and commit gates.
       serves no case.
     - **Gate:** an mtools-populated builder base decodes to its recipe's
       tree and passes the checkers, or the report says per host why not;
-      building it writes nothing under `test/spec-cache/` but the image,
-      its manifest and the empty volume it copies.
+      building it writes nothing under `test/spec-cache/` but the image
+      and its manifest.
   - **B1e, external create, fsimg read.**
     - mtools-populated cases run in the case phase; each drawn tree is
-      populated into a copy of one cached empty base, never a formatter run
+      populated into a builder volume rendered for it, never a formatter run
       per draw.
     - **Gate:** fsimg `x` of every populated case equals the known
       tree in path, type, size and SHA-256, and the quick budget holds.

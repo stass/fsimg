@@ -33,12 +33,10 @@ module FsimgSpec
       # name_trials is the run's NameTrials, or NameTrials::NONE where
       # nothing extracts, as when fuzz seeds are exported. shell is the
       # run's OracleShell, or nil where no oracle runs. Bases render into
-      # cache; the empty volumes mtools populates are copied from
-      # volume_cache (Bases.materialize).
-      def initialize(registry:, cache:, ceilings:, name_trials:, shell:, volume_cache: cache)
+      # cache.
+      def initialize(registry:, cache:, ceilings:, name_trials:, shell:)
         @registry = registry
         @cache = cache
-        @volume_cache = volume_cache
         @ceilings = ceilings
         @name_trials = name_trials
         @shell = shell
@@ -73,7 +71,7 @@ module FsimgSpec
       # so those observations are the case's.
       def populated(base, id:, random_seed: nil)
         fixture = begin
-          Bases.materialize(base, cache: @cache, volume_cache: @volume_cache, shell: @shell, ceilings: @ceilings)
+          Bases.materialize(base, cache: @cache, shell: @shell, ceilings: @ceilings)
         rescue PopulationError => e
           raise HostSkip, "mtools did not write the tree: #{e.message}"
         end
