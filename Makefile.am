@@ -323,9 +323,9 @@ check-installed-consumers:
 	$(CXX) "-I$(includedir)" $(CPPFLAGS) $(CXXFLAGS) -std=c++11 $(LDFLAGS) \
 	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" $(ZLIB_LIBS) -o header-installed-cxx
 	./header-installed-cxx
-check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write \
-	    test-qnx4 test-qnx4-write test-ifs test-ifs-write test-ifsboot \
-	    test-codec fsimg \
+# The scripts call test programs and helpers, so every check program is a
+# prerequisite rather than a list kept in step with the scripts.
+check-integration: $(check_PROGRAMS) fsimg \
 	    test/fat-integration.sh test/exfat-integration.sh \
 	    test/qnx6-integration.sh test/qnx4-integration.sh \
 	    test/layers-integration.sh test/containers-integration.sh \

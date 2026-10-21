@@ -276,13 +276,19 @@
   bad revision to `bin/replay`. Split the host faults out so that they make the
   case a `harness_error`.
 
-* [Low] **SIGTERM harness test times out under load**
-  (`test/spec/suite/core/test_invocation.rb`):
+* [Low] **Spec harness tests time out under load**
+  (`test/spec/suite/core/test_invocation.rb`,
+  `test/spec/suite/core/test_runner.rb`):
   `test_sigterm_to_the_harness_leaves_no_group` waits ten seconds for the
   spawned harness to start its stub, then reads the pid file without
   checking it appeared, so under a loaded `make -j32 check` the wait can
   expire and the read raises `ENOENT`. Assert the file's presence with a
-  message and give the start a load-independent deadline.
+  message and give the start a load-independent deadline. The runner tests
+  in `test/spec/suite/core/test_runner.rb` share the same exposure: their
+  profile's one-second ceiling gives each stub an 11-second wall clock, and
+  `test_scratch_file_at_the_ceiling_is_allowed` (a 2 MiB `dd`) has ended
+  `timed_out` while other builds loaded the host. Tests that do not test the
+  deadline should run under a profile whose wall clock tolerates load.
 * [Low] **Spec harness reports and records** (`test/spec/lib/fsimg_spec/coverage.rb`,
   `failure_record.rb`):
   - Coverage reports `targeted_witnesses` as only `available` or

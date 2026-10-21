@@ -657,9 +657,9 @@ claim_name(uint64_t claim)
 
 /*
  * A detail table of a record, printed without interpreting a name:
- * "name":value members of a JSON object, or one "name: value" line each,
- * the value in hexadecimal when hex is set. The protocol checked the count
- * and every name.
+ * "name":"decimal" members of a JSON object, or one "name: value" line
+ * each, the value in hexadecimal when hex is set. The protocol checked the
+ * count and every name.
  */
 static void
 details_report(fsimg_cli_display_t *display, const unsigned char *raw,

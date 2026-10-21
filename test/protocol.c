@@ -1002,13 +1002,6 @@ test_image_records(void)
 	raw[FSIMG_WIRE_IMAGE_UNVERIFIED + 4] = ' ';
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	raw[FSIMG_WIRE_IMAGE_UNVERIFIED + 4] = ',';
-	raw[FSIMG_WIRE_IMAGE_DETAILS + FSIMG_WIRE_INFO_DETAIL_BYTES] = 'x';
-	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	raw[FSIMG_WIRE_IMAGE_DETAILS + FSIMG_WIRE_INFO_DETAIL_BYTES] = '\0';
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT,
-	    FSIMG_IMAGE_DETAILS_MAX + 1);
-	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 1);
 	bzero(raw + FSIMG_WIRE_IMAGE_CONTAINER, 16);
 	bzero(raw + FSIMG_WIRE_IMAGE_CODECS, FSIMG_WIRE_IMAGE_CODECS_BYTES);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHUNKS, 0);

@@ -19,13 +19,14 @@
 #   FSIMG_HBCIFS_IMAGE    the hbcifs container PCM3_IFS2.ifs of the PCM 3.1
 #   FSIMG_HBCIFS_DECODED  update disc, and its payload decoded by the
 #                     out-of-tree liblzo2 oracle (docs/ifs-research.md)
+#
 # Generated boot images of each prefix and compression value, which
 # test-ifsboot emits, list, extract and verify through the command as
 # their bare body does. The captures are compared with test-ifs's model by
 # test-ifs --native, the boot images and E7 and E10 captures with their
-# decoded bodies by test-ifsboot --native, and,
-# through the command, with the research decoder ifsdump.py by
-# test/ifs-native.py, which first checks itself on two generated images.
+# decoded bodies by test-ifsboot --native, and, through the command, with
+# the research decoder ifsdump.py by test/ifs-native.py, which first checks
+# itself on two generated images.
 # dumpifs and qnxprobe, when given, must accept every bare image fsimg
 # verifies. The hbcifs container must decode to the oracle's bytes, list and
 # extract as that decode's manifest says, verify with its two unidentified

@@ -1062,37 +1062,35 @@ fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,
  * seekable. Opening validates the options and the forced stack (a
  * container that carries a filesystem, ifsboot or hbcifs, holds that
  * filesystem and no scheme; any other stack around it is FSIMG_EINVAL
- * naming the container), then
- * decides compression: the compression probes run on the input's prefix
- * with the container, scheme and filesystem probes. A compression claiming
- * alone means compressed; a compression and another probe claiming is an
- * ambiguity that a stack with any slot named or empty resolves as not
- * compressed. A forced compression runs its probe alone, and an input it
- * does not claim is FSIMG_EFORMAT naming it. A compressed input is decoded into
- * the spool, member by member, each member's CRC32 and length checked and
- * bytes after the last member refused, with the spool's logical length
- * reserved against spool_bytes before each step; the spool is then the
- * file. open_stream reads stream_fd, a blocking descriptor borrowed for the
+ * naming the container), then decides compression: the compression probes
+ * run on the input's prefix with the container, scheme and filesystem
+ * probes. A compression claiming alone means compressed; a compression and
+ * another probe claiming is an ambiguity that a stack with any slot named
+ * or empty resolves as not compressed. A forced compression runs its probe
+ * alone, and an input it does not claim is FSIMG_EFORMAT naming it. A
+ * compressed input is decoded into the spool, member by member, each
+ * member's CRC32 and length checked and bytes after the last member
+ * refused, with the spool's logical length reserved against spool_bytes
+ * before each step; the spool is then the file. open_stream reads
+ * stream_fd, a blocking descriptor borrowed for the
  * call, to its end into the spool, decoding it when compressed and copying
  * it unchanged otherwise; its probes run on the first block without the
  * container probes, which need the end of the file. Without a spool,
  * compressed and stream input fail as a FSIMG_RESOURCE_SPOOL limit of
- * zero. Then opening peels
- * the container: the DMG, fixed VHD, sparse-image, QNX boot image and
- * hbcifs probes run on the input's prefix and last 512 bytes, or only the
- * forced one, and
- * a claim's tables are validated completely, so the disk has a fixed
- * length before any other byte is read; a damaged or unsupported container
- * fails the open and is never read as a raw disk. A detected container
- * that carries a filesystem is checked against the forced stack as a named
- * one is, and its disk is then read with that filesystem's probe alone and
- * no scheme. The scheme is detected, and its
- * tables validated completely, at most once, on the first get_info,
- * next_partition, verify or partition-based select. A range or disk
- * selection never consults the scheme, so a damaged table cannot block it.
- * next_partition yields each slot from 1, then DONE. select returns a
- * read-only slice for fsimg_reader_open; the slice borrows the image and
- * is released with fsimg_io_free before it. verify checks every table and
+ * zero. Then opening peels the container: the DMG, fixed VHD, sparse-image,
+ * QNX boot image and hbcifs probes run on the input's prefix and last 512
+ * bytes, or only the forced one, and a claim's tables are validated
+ * completely, so the disk has a fixed length before any other byte is
+ * read; a damaged or unsupported container fails the open and is never
+ * read as a raw disk. A detected container that carries a filesystem is
+ * checked against the forced stack as a named one is, and its disk is then
+ * read with that filesystem's probe alone and no scheme. The scheme is
+ * detected, and its tables validated completely, at most once, on the
+ * first get_info, next_partition, verify or partition-based select. A range
+ * or disk selection never consults the scheme, so a damaged table cannot
+ * block it. next_partition yields each slot from 1, then DONE. select
+ * returns a read-only slice for fsimg_reader_open; the slice borrows the
+ * image and is released with fsimg_io_free before it. verify checks every table and
  * the container's checksums, decoding every chunk under
  * FSIMG_VERIFY_PAYLOAD, and consumes nothing.
  */

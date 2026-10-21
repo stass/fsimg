@@ -402,11 +402,12 @@ memory and descriptors. Its seeds, written by `test-mtree
 --seed`, are `mtree -c` and bsdtar manifests of one host tree and a
 generated-content manifest, with a 64 KiB input ceiling.
 `fuzz/container.c` opens each input under detection and under each forced
-container, `hbcifs` among them with a fresh unlinked spool under a 16 MiB
-limit, so its header checks and LZO1X decode see every mutation; its seeds
-are the images `test-containers --seed-dmg`, `--seed-vhd` and `--seed-simg`
-and `test-hbcifs --seed-hbcifs` write, with a 1 MiB input ceiling. Set
-`FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults to its
+container, `ifsboot` and `hbcifs` among them, each with a fresh unlinked
+spool under a 16 MiB limit, so their header checks and LZO1X and NRV2B
+decodes see every mutation; its seeds are the images `test-containers
+--seed-dmg`, `--seed-vhd` and `--seed-simg`, `test-ifsboot --seed-raw`,
+`--seed-lzo` and `--seed-ucl`, and `test-hbcifs --seed-hbcifs` write, with
+a 1 MiB input ceiling. Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults to its
 sibling `clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
 validation uses Homebrew LLVM:
 

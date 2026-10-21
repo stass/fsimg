@@ -359,12 +359,11 @@ shares storage with an input before writing.
 .Pp
 .Fn fsimg_image_open
 peels a DMG, fixed VHD, Android sparse image, QNX boot image or hbcifs
-container before anything else reads the input: the container probes run on the
-input's first bytes and last 512 bytes, or only the one the stack's
-container slot forces, and
-a claimed container's tables are validated completely, so a damaged or
-unsupported container fails the open with FSIMG_ECORRUPT or
-FSIMG_EUNSUPPORTED and is never read as a raw disk.
+container before anything else reads the input: the container probes run
+on the input's first bytes and last 512 bytes, or only the one the stack's
+container slot forces, and a claimed container's tables are validated
+completely, so a damaged or unsupported container fails the open with
+FSIMG_ECORRUPT or FSIMG_EUNSUPPORTED and is never read as a raw disk.
 Selections then address the container's disk, served through a cache of
 four decoded chunks of at most 16 MiB each, allocated at open within the
 memory limit; decoded bytes count as work.
