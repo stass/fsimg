@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -20,6 +21,16 @@ static fsimg_status_t check_capabilities(fsimg_writer_t *, fsimg_error_t *);
 static fsimg_status_t check_entry_capabilities(fsimg_writer_t *,
     const fsimg_entry_t *, bool, fsimg_error_t *);
 static bool variant_of(const fsimg_format_t *, const fsimg_format_variant_t *);
+static fsimg_status_t plan_layers(fsimg_ctx_t *, const fsimg_stack_t *,
+    fsimg_write_options_t *, fsimg_layer_options_t *, fsimg_disk_plan_t *,
+    fsimg_error_t *);
+static fsimg_status_t writer_new_stack(fsimg_ctx_t *, const fsimg_stack_t *,
+    const fsimg_format_t *, const fsimg_format_variant_t *,
+    const fsimg_write_options_t *, fsimg_writer_t **, fsimg_error_t *);
+static fsimg_status_t plan_disk(fsimg_writer_t *, fsimg_error_t *);
+static fsimg_status_t emit_volume(void *, fsimg_io_t *, fsimg_error_t *);
+static fsimg_status_t emit_disk(fsimg_writer_t *, fsimg_io_t *,
+    fsimg_error_t *);
 
 void
 fsimg_write_options_init(fsimg_write_options_t *options)
@@ -61,9 +72,9 @@ variant_of(const fsimg_format_t *driver, const fsimg_format_variant_t *variant)
 	return (false);
 }
 
-/* Public construction selects the writer by name among the registered
- * descriptors; a descriptor the registry does not list cannot be reached
- * through it.
+/* Public construction parses the stack and selects the filesystem's writer
+ * by name among the registered descriptors; a descriptor the registry does
+ * not list cannot be reached through it.
  */
 fsimg_status_t
 fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
@@ -72,6 +83,7 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 {
 	const fsimg_format_t *driver;
 	const fsimg_format_variant_t *variant;
+	fsimg_stack_t stack;
 	fsimg_status_t status;
 
 	if (out != NULL)
@@ -82,22 +94,97 @@ fsimg_writer_new(fsimg_ctx_t *ctx, const char *format,
 	if (out == NULL || format == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "missing writer format or output"));
-	driver = fsimg_format_find(format, &variant);
-	return (fsimg_writer_new_variant(ctx, driver, variant, options, out,
+	status = fsimg_stack_parse(format, &stack, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (stack.slots[FSIMG_LAYER_FILESYSTEM].state != FSIMG_SLOT_NAMED)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "the stack names no filesystem to write"));
+	driver = fsimg_format_find(stack.slots[FSIMG_LAYER_FILESYSTEM].name,
+	    &variant);
+	return (writer_new_stack(ctx, &stack, driver, variant, options, out,
 	    error));
 }
 
+/* A descriptor's variant alone: a bare volume. */
 fsimg_status_t
 fsimg_writer_new_variant(fsimg_ctx_t *ctx, const fsimg_format_t *driver,
     const fsimg_format_variant_t *variant,
     const fsimg_write_options_t *options, fsimg_writer_t **out,
     fsimg_error_t *error)
 {
+	fsimg_stack_t stack;
+
+	bzero(&stack, sizeof(stack));
+	if (variant != NULL) {
+		stack.slots[FSIMG_LAYER_FILESYSTEM].state = FSIMG_SLOT_NAMED;
+		snprintf(stack.slots[FSIMG_LAYER_FILESYSTEM].name,
+		    sizeof(stack.slots[FSIMG_LAYER_FILESYSTEM].name), "%s",
+		    variant->info.name);
+	}
+	return (writer_new_stack(ctx, &stack, driver, variant, options, out,
+	    error));
+}
+
+/*
+ * Resolve the disk around the volume before the format validates its
+ * options: the scheme's settings, the partition's type, name and identity,
+ * and a fixed disk's room for the volume are all checked here, before any
+ * source is read. A fixed disk without a volume size gives the volume the
+ * partition's whole usable length, rounded down to the filesystem's
+ * sector, as an exact size; every driver's default sector is 512 bytes.
+ * A derived disk is sized from the planned volume, so its MBR limit is
+ * checked when the plan is placed.
+ */
+static fsimg_status_t
+plan_layers(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
+    fsimg_write_options_t *selected, fsimg_layer_options_t *layers,
+    fsimg_disk_plan_t *disk, fsimg_error_t *error)
+{
+	fsimg_partition_request_t request;
+	bool gpt;
+	fsimg_status_t status;
+
+	fsimg_layer_options_init(layers);
+	if (selected->layers != NULL)
+		*layers = *selected->layers;
+	selected->layers = NULL;
+	status = fsimg_disk_plan_init(ctx, stack, layers, 1, selected->epoch,
+	    selected->flags, disk, error);
+	if (status != FSIMG_OK || disk->scheme == NULL)
+		return (status);
+	gpt = disk->table.kind == FSIMG_SCHEME_GPT;
+	request = (fsimg_partition_request_t){
+		.type = gpt ? layers->gpt_type : layers->mbr_type,
+		.name = layers->gpt_name,
+		.guid = layers->gpt_guid,
+		.filesystem = stack->slots[FSIMG_LAYER_FILESYSTEM].name,
+		.active = layers->mbr_active
+	};
+	status = fsimg_disk_plan_partition(disk, 0, &request, error);
+	if (status == FSIMG_OK && disk->fixed)
+		status = fsimg_disk_plan_fit(disk, selected->sector_bytes == 0 ?
+		    512 : selected->sector_bytes, &selected->volume_bytes, error);
+	return (status);
+}
+
+static fsimg_status_t
+writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
+    const fsimg_format_t *driver, const fsimg_format_variant_t *variant,
+    const fsimg_write_options_t *options, fsimg_writer_t **out,
+    fsimg_error_t *error)
+{
 	fsimg_write_options_t selected;
+	fsimg_layer_options_t layers;
+	fsimg_disk_plan_t disk;
 	fsimg_writer_t *writer;
+	fsimg_error_t local;
 	size_t length;
 	fsimg_status_t status;
 
+	/* The layer functions record every failure in an error record. */
+	if (error == NULL)
+		error = &local;
 	if (out != NULL)
 		*out = NULL;
 	status = fsimg_ctx_ready(ctx, error);
@@ -138,26 +225,33 @@ fsimg_writer_new_variant(fsimg_ctx_t *ctx, const fsimg_format_t *driver,
 	if (!settings_supported(&selected, variant->info.write_settings))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "write setting does not apply to the image format"));
-	status = driver->writer->validate(&selected, variant->id, error);
-	if (status != FSIMG_OK)
-		return (status);
+	status = plan_layers(ctx, stack, &selected, &layers, &disk, error);
+	if (status == FSIMG_OK)
+		status = driver->writer->validate(&selected, variant->id, error);
 	length = 0;
-	if (variant->info.max_label_bytes != 0) {
+	if (status == FSIMG_OK && variant->info.max_label_bytes != 0) {
 		if (selected.label == NULL)
-			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-			    FSIMG_OP_WRITER, "format validation did not select a label"));
-		length = strnlen(selected.label, sizeof(writer->label));
-		if (length == sizeof(writer->label))
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_WRITER, "volume label exceeds common backing capacity"));
+			status = fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_WRITER, "format validation did not select a label");
+		else if ((length = strnlen(selected.label,
+		    sizeof(writer->label))) == sizeof(writer->label))
+			status = fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_WRITER, "volume label exceeds common backing capacity");
 	}
-	status = fsimg_writer_collect_new(ctx, &writer, error);
-	if (status != FSIMG_OK)
+	if (status == FSIMG_OK)
+		status = fsimg_writer_collect_new(ctx, &writer, error);
+	if (status != FSIMG_OK) {
+		fsimg_disk_plan_free(&disk);
 		return (status);
+	}
 	writer->format = driver;
 	writer->capabilities = &variant->info;
 	writer->variant = variant->id;
 	writer->options = selected;
+	writer->stack = *stack;
+	writer->layers = layers;
+	writer->options.layers = &writer->layers;
+	writer->disk = disk;
 	if (selected.label != NULL) {
 		bcopy(selected.label, writer->label, length + 1);
 		writer->options.label = writer->label;
@@ -269,6 +363,7 @@ fsimg_writer_free(fsimg_writer_t *writer)
 	fsimg_stream_free(writer->entries);
 	fsimg_dealloc(writer->record);
 	fsimg_dealloc(writer->source_record);
+	fsimg_disk_plan_free(&writer->disk);
 	fsimg_dealloc(writer);
 }
 
@@ -384,8 +479,11 @@ fsimg_status_t
 fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
     fsimg_error_t *error)
 {
+	fsimg_error_t local;
 	fsimg_status_t status;
 
+	if (error == NULL)
+		error = &local;
 	if (out != NULL)
 		*out = NULL;
 	status = fsimg_ctx_ready(writer == NULL ? NULL : writer->ctx, error);
@@ -412,10 +510,36 @@ fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
 	status = writer->format->writer->plan(writer, error);
+	if (status == FSIMG_OK)
+		status = plan_disk(writer, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
 	fsimg_stat_add(&writer->plan->info.metadata_losses, writer->omitted_fields);
 	*out = writer->plan;
+	return (FSIMG_OK);
+}
+
+/* Place the planned volume in its disk and report the disk as an opened
+ * image would: the stack, the scheme and its identifiers, and the
+ * volume's partition holding the planned filesystem.
+ */
+static fsimg_status_t
+plan_disk(fsimg_writer_t *writer, fsimg_error_t *error)
+{
+	fsimg_plan_info_t *info = &writer->plan->info;
+	fsimg_status_t status;
+
+	status = fsimg_disk_plan_place(&writer->disk, &info->volume_bytes, error);
+	if (status != FSIMG_OK)
+		return (status);
+	fsimg_disk_plan_report(&writer->disk, 1, &info->image, &info->partition);
+	fsimg_stack_format(&writer->stack, info->image.stack,
+	    sizeof(info->image.stack));
+	if (writer->disk.scheme != NULL) {
+		info->partition.claim = FSIMG_CLAIM_FORMAT;
+		snprintf(info->partition.format, sizeof(info->partition.format),
+		    "%s", info->format);
+	}
 	return (FSIMG_OK);
 }
 
@@ -545,19 +669,45 @@ reject_aliases(fsimg_writer_t *writer, fsimg_io_t *output, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+static fsimg_status_t
+emit_volume(void *writer, fsimg_io_t *volume, fsimg_error_t *error)
+{
+	return (fsimg_emit_image(writer, volume, error));
+}
+
+/* A bare volume is the disk; a volume in a scheme is emitted into its
+ * partition's slice of the disk the layered output lays out.
+ */
+static fsimg_status_t
+emit_disk(fsimg_writer_t *writer, fsimg_io_t *output, fsimg_error_t *error)
+{
+	if (writer->disk.scheme == NULL)
+		return (fsimg_emit_image(writer, output, error));
+	return (fsimg_disk_plan_emit(&writer->disk,
+	    writer->plan->info.volume_bytes, output, &writer->session,
+	    emit_volume, writer, error));
+}
+
 /* Emission order (specs/design-emission.md): plan, reject source aliases,
  * check sink capabilities and the output limit, resize, then zero the sink and
- * run the driver (fsimg_emit_image), then flush. Nothing before the resize
- * mutates the sink, so a rejected alias or capability leaves it untouched;
- * every failure after that point marks the output incomplete.
+ * run the driver (fsimg_emit_image) inside its disk, then flush. Nothing
+ * before the resize mutates the sink, so a rejected alias or capability
+ * leaves it untouched; every failure after that point marks the output
+ * incomplete. The sink holds the whole disk, which is the volume when the
+ * stack has no scheme.
  */
 fsimg_status_t
 fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
     fsimg_error_t *error)
 {
 	const fsimg_plan_t *plan;
+	fsimg_error_t local;
+	uint64_t disk_bytes;
 	fsimg_status_t status;
 	bool resize, mutated;
+
+	if (error == NULL)
+		error = &local;
 
 	status = fsimg_ctx_ready(writer == NULL ? NULL : writer->ctx, error);
 	if (status != FSIMG_OK)
@@ -580,23 +730,24 @@ fsimg_writer_emit(fsimg_writer_t *writer, fsimg_io_t *output,
 	status = reject_aliases(writer, output, error);
 	if (status != FSIMG_OK)
 		goto fail;
-	status = fsimg_io_check_output(output, plan->info.volume_bytes,
+	disk_bytes = plan->info.image.disk_bytes;
+	status = fsimg_io_check_output(output, disk_bytes,
 	    (writer->options.flags & FSIMG_WRITE_DURABLE) != 0, &resize, error);
 	if (status != FSIMG_OK)
 		goto fail;
 	if (writer->ctx->options.max_output_bytes != 0 &&
-	    plan->info.volume_bytes > writer->ctx->options.max_output_bytes) {
+	    disk_bytes > writer->ctx->options.max_output_bytes) {
 		status = fsimg_limit_error(error, FSIMG_RESOURCE_OUTPUT,
-		    writer->ctx->options.max_output_bytes, plan->info.volume_bytes);
+		    writer->ctx->options.max_output_bytes, disk_bytes);
 		goto fail;
 	}
 	mutated = true;
 	if (resize) {
-		status = fsimg_io_resize(output, plan->info.volume_bytes, error);
+		status = fsimg_io_resize(output, disk_bytes, error);
 		if (status != FSIMG_OK)
 			goto fail;
 	}
-	status = fsimg_emit_image(writer, output, error);
+	status = emit_disk(writer, output, error);
 	if (status != FSIMG_OK)
 		goto fail;
 	status = fsimg_io_flush(output,
@@ -629,9 +780,27 @@ fsimg_writer_write_at(fsimg_writer_t *writer, int parent, const char *name,
 	status = fsimg_writer_plan(writer, &plan, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_output_write(writer, parent, name, plan->info.volume_bytes,
-	    NULL, error);
+	status = fsimg_output_write(writer, parent, name,
+	    plan->info.image.disk_bytes, NULL, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
 	return (FSIMG_OK);
+}
+
+/* The sink cases of a writer whose stack needs no raw intermediate; this
+ * build writes no container, compression or stream.
+ */
+fsimg_status_t
+fsimg_writer_output(fsimg_writer_t *writer, const fsimg_sink_t *sink,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fsimg_sink_adopt(sink, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (sink->kind == FSIMG_SINK_FILE)
+		return (fsimg_writer_write_at(writer, sink->parent_fd, sink->name,
+		    error));
+	return (fsimg_writer_emit(writer, sink->io, error));
 }

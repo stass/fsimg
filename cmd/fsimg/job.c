@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include <stddef.h>
 #include <string.h>
 #include <strings.h>
 
@@ -20,8 +21,14 @@
  * kind, partition index and GPT sector size as eight bytes each, the three
  * stack slot states as one byte each, the scheme and container names in 16
  * bytes each (the format name is the filesystem slot's), and the partition
- * selector text in 112. These enums name wire positions and sizes only and
- * are independent of native struct layout or padding.
+ * selector text in 112. The layer settings close the record: the GPT and
+ * MBR disk lengths and the MBR identifier as eight bytes each, one byte
+ * of MBR flags (identifier set, partition active) and seven zero bytes,
+ * the disk and partition GUIDs in 16 bytes each, and the GPT type in 40,
+ * the GPT name in 112 and the MBR type in 16, NUL-terminated. The GPT
+ * sector size travels with the selection, since reading uses it too.
+ * These enums name wire positions and sizes only and are independent of
+ * native struct layout or padding.
  *
  * The job's image paths follow the record in SELECTION frames, as one
  * sequence of NUL-terminated paths whose total length the record states:
@@ -54,8 +61,24 @@ typedef enum job_string_field {
 	JOB_CONTAINER_OFFSET = 368,
 	JOB_PARTITION_TEXT_OFFSET = 384,
 	JOB_PARTITION_TEXT_BYTES = 112,
-	JOB_RESERVED_OFFSET = 496
+	JOB_GPT_DISK_OFFSET = 496,
+	JOB_MBR_DISK_OFFSET = 504,
+	JOB_MBR_ID_OFFSET = 512,
+	JOB_MBR_FLAGS = 520,
+	JOB_DISK_GUID_OFFSET = 528,
+	JOB_GUID_OFFSET = 544,
+	JOB_GPT_TYPE_OFFSET = 560,
+	JOB_GPT_TYPE_BYTES = 40,
+	JOB_GPT_NAME_OFFSET = 600,
+	JOB_GPT_NAME_BYTES = 112,
+	JOB_MBR_TYPE_OFFSET = 712,
+	JOB_MBR_TYPE_BYTES = 16,
+	JOB_RESERVED_OFFSET = 728
 } job_string_field_t;
+
+/* MBR flag bits at JOB_MBR_FLAGS. */
+#define JOB_MBR_ID_SET	0x01u
+#define JOB_MBR_ACTIVE	0x02u
 _Static_assert(JOB_FORMAT_OFFSET + JOB_FORMAT_BYTES == JOB_LABEL_OFFSET &&
     JOB_LABEL_PRESENT < JOB_UUID_OFFSET, "the string fields do not overlap");
 _Static_assert(sizeof(((fsimg_stack_slot_t *)0)->name) == JOB_FORMAT_BYTES &&
@@ -64,8 +87,30 @@ _Static_assert(sizeof(((fsimg_stack_slot_t *)0)->name) == JOB_FORMAT_BYTES &&
     JOB_PARTITION_TEXT_BYTES, "the request holds each string field");
 _Static_assert(JOB_SCHEME_OFFSET + JOB_FORMAT_BYTES == JOB_CONTAINER_OFFSET &&
     JOB_CONTAINER_OFFSET + JOB_FORMAT_BYTES == JOB_PARTITION_TEXT_OFFSET &&
-    JOB_PARTITION_TEXT_OFFSET + JOB_PARTITION_TEXT_BYTES == JOB_RESERVED_OFFSET &&
-    JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the selection fields do not overlap");
+    JOB_PARTITION_TEXT_OFFSET + JOB_PARTITION_TEXT_BYTES ==
+    JOB_GPT_DISK_OFFSET, "the selection fields do not overlap");
+_Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
+    JOB_GUID_OFFSET + 16 == JOB_GPT_TYPE_OFFSET &&
+    JOB_GPT_TYPE_OFFSET + JOB_GPT_TYPE_BYTES == JOB_GPT_NAME_OFFSET &&
+    JOB_GPT_NAME_OFFSET + JOB_GPT_NAME_BYTES == JOB_MBR_TYPE_OFFSET &&
+    JOB_MBR_TYPE_OFFSET + JOB_MBR_TYPE_BYTES == JOB_RESERVED_OFFSET &&
+    JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the layer fields do not overlap");
+_Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
+    JOB_GPT_TYPE_BYTES &&
+    sizeof(((fsimg_layer_options_t *)0)->gpt_name) == JOB_GPT_NAME_BYTES &&
+    sizeof(((fsimg_layer_options_t *)0)->mbr_type) == JOB_MBR_TYPE_BYTES &&
+    sizeof(((fsimg_layer_options_t *)0)->gpt_guid) == 16 &&
+    sizeof(((fsimg_layer_options_t *)0)->gpt_disk_guid) == 16,
+    "the request holds each layer field");
+/* encode_layers and decode_layers carry every member of the layout below,
+ * which ends with mbr_active at 229 and reserved at 232. A new layer
+ * setting moves reserved or grows the record and stops the build until
+ * they carry it and this layout is updated.
+ */
+_Static_assert(offsetof(fsimg_layer_options_t, mbr_active) == 229 &&
+    offsetof(fsimg_layer_options_t, reserved) == 232 &&
+    sizeof(fsimg_layer_options_t) == 264,
+    "every layer setting travels in the job record");
 
 /* Where each stack slot's name travels: the filesystem's in the format
  * field, the others in their own.
@@ -80,6 +125,9 @@ static void put_field(unsigned char *, job_field_t, uint64_t);
 static uint64_t get_field(const unsigned char *, job_field_t);
 static fsimg_status_t invalid_job(fsimg_error_t *);
 static bool string_field_valid(const unsigned char *, size_t);
+static void encode_layers(const fsimg_layer_options_t *, unsigned char *);
+static bool layers_valid(const unsigned char *);
+static void decode_layers(const unsigned char *, fsimg_layer_options_t *);
 
 static void
 put_field(unsigned char *raw, job_field_t field, uint64_t value)
@@ -111,6 +159,63 @@ string_field_valid(const unsigned char *field, size_t bytes)
 	return (true);
 }
 
+/* The layer settings after gpt:sector, which travels with the selection. */
+static void
+encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
+{
+	fsimg_wire_put64(raw + JOB_GPT_DISK_OFFSET, layers->gpt_disk_bytes);
+	fsimg_wire_put64(raw + JOB_MBR_DISK_OFFSET, layers->mbr_disk_bytes);
+	fsimg_wire_put64(raw + JOB_MBR_ID_OFFSET, layers->mbr_id);
+	raw[JOB_MBR_FLAGS] = (unsigned char)((layers->mbr_id_set ?
+	    JOB_MBR_ID_SET : 0) | (layers->mbr_active ? JOB_MBR_ACTIVE : 0));
+	bcopy(layers->gpt_disk_guid, raw + JOB_DISK_GUID_OFFSET, 16);
+	bcopy(layers->gpt_guid, raw + JOB_GUID_OFFSET, 16);
+	bcopy(layers->gpt_type, raw + JOB_GPT_TYPE_OFFSET,
+	    strlen(layers->gpt_type));
+	bcopy(layers->gpt_name, raw + JOB_GPT_NAME_OFFSET,
+	    strlen(layers->gpt_name));
+	bcopy(layers->mbr_type, raw + JOB_MBR_TYPE_OFFSET,
+	    strlen(layers->mbr_type));
+}
+
+/* One encoding per settings value: known flags, a 32-bit identifier that
+ * is zero unless set, zero padding and terminated text. The library
+ * validates the values themselves.
+ */
+static bool
+layers_valid(const unsigned char *raw)
+{
+	uint64_t id;
+
+	id = fsimg_wire_get64(raw + JOB_MBR_ID_OFFSET);
+	if (raw[JOB_MBR_FLAGS] > (JOB_MBR_ID_SET | JOB_MBR_ACTIVE) ||
+	    id > UINT32_MAX ||
+	    (id != 0 && (raw[JOB_MBR_FLAGS] & JOB_MBR_ID_SET) == 0))
+		return (false);
+	for (unsigned i = JOB_MBR_FLAGS + 1; i < JOB_DISK_GUID_OFFSET; i++) {
+		if (raw[i] != 0)
+			return (false);
+	}
+	return (string_field_valid(raw + JOB_GPT_TYPE_OFFSET, JOB_GPT_TYPE_BYTES) &&
+	    string_field_valid(raw + JOB_GPT_NAME_OFFSET, JOB_GPT_NAME_BYTES) &&
+	    string_field_valid(raw + JOB_MBR_TYPE_OFFSET, JOB_MBR_TYPE_BYTES));
+}
+
+static void
+decode_layers(const unsigned char *raw, fsimg_layer_options_t *layers)
+{
+	layers->gpt_disk_bytes = fsimg_wire_get64(raw + JOB_GPT_DISK_OFFSET);
+	layers->mbr_disk_bytes = fsimg_wire_get64(raw + JOB_MBR_DISK_OFFSET);
+	layers->mbr_id = (uint32_t)fsimg_wire_get64(raw + JOB_MBR_ID_OFFSET);
+	layers->mbr_id_set = (raw[JOB_MBR_FLAGS] & JOB_MBR_ID_SET) != 0;
+	layers->mbr_active = (raw[JOB_MBR_FLAGS] & JOB_MBR_ACTIVE) != 0;
+	bcopy(raw + JOB_DISK_GUID_OFFSET, layers->gpt_disk_guid, 16);
+	bcopy(raw + JOB_GUID_OFFSET, layers->gpt_guid, 16);
+	bcopy(raw + JOB_GPT_TYPE_OFFSET, layers->gpt_type, JOB_GPT_TYPE_BYTES);
+	bcopy(raw + JOB_GPT_NAME_OFFSET, layers->gpt_name, JOB_GPT_NAME_BYTES);
+	bcopy(raw + JOB_MBR_TYPE_OFFSET, layers->mbr_type, JOB_MBR_TYPE_BYTES);
+}
+
 static fsimg_status_t
 invalid_job(fsimg_error_t *error)
 {
@@ -124,6 +229,7 @@ fsimg_worker_request_init(fsimg_worker_request_t *request)
 	bzero(request, sizeof(*request));
 	fsimg_options_init(&request->limits);
 	fsimg_write_options_init(&request->write);
+	fsimg_layer_options_init(&request->layers);
 	request->selection = "/";
 	request->codepage = 437;
 	request->input_fd = request->output_fd = -1;
@@ -195,6 +301,9 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 
 	if (fsimg_stack_validate(&request->stack, error) != FSIMG_OK ||
 	    memchr(request->partition_text, '\0', JOB_PARTITION_TEXT_BYTES) == NULL ||
+	    memchr(request->layers.gpt_type, '\0', JOB_GPT_TYPE_BYTES) == NULL ||
+	    memchr(request->layers.gpt_name, '\0', JOB_GPT_NAME_BYTES) == NULL ||
+	    memchr(request->layers.mbr_type, '\0', JOB_MBR_TYPE_BYTES) == NULL ||
 	    fsimg_job_has_roots(request->kind) != (request->root_count != 0))
 		return (invalid_job(error));
 	label = request->write.label == NULL ? "" : request->write.label;
@@ -242,7 +351,9 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	}
 	fsimg_wire_put64(raw + JOB_SELECTOR_OFFSET, request->selector);
 	fsimg_wire_put64(raw + JOB_PARTITION_INDEX_OFFSET, request->partition_index);
-	fsimg_wire_put64(raw + JOB_GPT_SECTOR_OFFSET, request->gpt_sector);
+	fsimg_wire_put64(raw + JOB_GPT_SECTOR_OFFSET,
+	    request->layers.gpt_sector_bytes);
+	encode_layers(&request->layers, raw);
 	bcopy(request->partition_text, raw + JOB_PARTITION_TEXT_OFFSET,
 	    strlen(request->partition_text));
 	bcopy(label, raw + JOB_LABEL_OFFSET, label_length);
@@ -292,6 +403,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
+	if (!layers_valid(raw))
+		return (invalid_job(error));
 	for (unsigned i = JOB_RESERVED_OFFSET; i < FSIMG_JOB_BYTES; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
@@ -364,7 +477,9 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    JOB_SELECTOR_OFFSET);
 	request->partition_index = (uint32_t)fsimg_wire_get64(raw +
 	    JOB_PARTITION_INDEX_OFFSET);
-	request->gpt_sector = (uint32_t)fsimg_wire_get64(raw + JOB_GPT_SECTOR_OFFSET);
+	request->layers.gpt_sector_bytes =
+	    (uint32_t)fsimg_wire_get64(raw + JOB_GPT_SECTOR_OFFSET);
+	decode_layers(raw, &request->layers);
 	bcopy(raw + JOB_PARTITION_TEXT_OFFSET, request->partition_text,
 	    JOB_PARTITION_TEXT_BYTES);
 	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, JOB_LABEL_BYTES);

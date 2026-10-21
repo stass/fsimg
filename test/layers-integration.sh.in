@@ -4,14 +4,20 @@
 #
 # fsimg reads the partition tables independent tools write: sgdisk (GPT)
 # and sfdisk (MBR) tables around mtools-formatted FAT volumes, and the GPT
-# and MBR raw disks hdiutil creates on macOS. Each missing tool is reported;
-# the test skips only when no oracle is available.
+# and MBR raw disks hdiutil creates on macOS. The same tools read the disks
+# fsimg writes: sgdisk verifies the GPT around every filesystem and lists
+# a composed disk, sfdisk verifies 4096-byte-sector tables, which sgdisk
+# cannot address in a file, sfdisk and fdisk list MBR disks, mtools reads
+# the FAT volume inside one, and hdiutil attaches a GPT disk on macOS.
+# Each missing tool is reported; the test skips only when no oracle is
+# available.
 set -eu
 sgdisk=${SGDISK:-'@SGDISK@'}
 sfdisk=${SFDISK:-'@SFDISK@'}
 mformat=${MFORMAT:-'@MFORMAT@'}
 hdiutil=${HDIUTIL:-'@HDIUTIL@'}
 fsimg="$(pwd)/fsimg"
+compose="$(pwd)/layers-compose"
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-layers-oracle-XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 cd "$fixture"
@@ -51,10 +57,10 @@ if test -n "$sgdisk" && test -n "$mformat"; then
         sgdisk.img > /dev/null
     populate sgdisk.img
     check_disk sgdisk.img fat12/gpt
-    grep -q '^Partition 1:  esp, 2 MiB at 1 MiB, fat12, name "EFI", selected$' info.txt ||
-        fail "sgdisk.img: partition 1"
-    grep -q '^Partition 2:  linux, 2 MiB at 3 MiB, no filesystem, name "data"$' info.txt ||
-        fail "sgdisk.img: partition 2"
+    grep -Eq '^Partition 1:  esp, 2 MiB at 1 MiB, fat12, name "EFI", GUID [0-9a-f-]{36}, selected$' \
+        info.txt || fail "sgdisk.img: partition 1"
+    grep -Eq '^Partition 2:  linux, 2 MiB at 3 MiB, no filesystem, name "data", GUID [0-9a-f-]{36}$' \
+        info.txt || fail "sgdisk.img: partition 2"
     # The disk and partition GUIDs decode to the text sgdisk prints.
     expected=$("$sgdisk" -p sgdisk.img | sed -n 's/^Disk identifier (GUID): //p' |
         tr 'A-F' 'a-f')
@@ -96,6 +102,114 @@ if test -n "$hdiutil"; then
     ran=$((ran + 1))
 else
     echo 'SKIP: hdiutil is required for the macOS disk oracle'
+fi
+
+# The GPT name and type GUID fsimg derives for each filesystem.
+gpt_name() {
+    case "$1" in
+    qnx6) echo 'QNX6 Power-Safe' ;;
+    qnx4) echo 'Linux filesystem' ;;
+    *) echo 'Microsoft basic data' ;;
+    esac
+}
+gpt_type() {
+    case "$1" in
+    qnx6) echo 'CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1' ;;
+    qnx4) echo '0FC63DAF-8483-4772-8E79-3D69D8477DE4' ;;
+    *) echo 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7' ;;
+    esac
+}
+
+# A GPT disk of each filesystem; QNX4 has no GPT type of its own.
+for fs in fat12 fat16 fat32 exfat qnx6 qnx4; do
+    if test "$fs" = qnx4; then
+        "$fsimg" c -R -F "$fs/gpt" -o gpt:type=linux -f "$fs-gpt.img" -C source . \
+            2>/dev/null || fail "$fs/gpt: creation"
+    else
+        "$fsimg" c -R -F "$fs/gpt" -f "$fs-gpt.img" -C source . 2>/dev/null ||
+            fail "$fs/gpt: creation"
+    fi
+done
+
+if test -n "$sgdisk"; then
+    for fs in fat12 fat16 fat32 exfat qnx6 qnx4; do
+        "$sgdisk" -v "$fs-gpt.img" > verify.txt
+        grep -q '^No problems found' verify.txt || fail "$fs-gpt.img: sgdisk -v"
+        "$sgdisk" -p "$fs-gpt.img" | grep -Eq '^ +1 +2048 ' ||
+            fail "$fs-gpt.img: partition 1 is not at 1 MiB"
+        "$sgdisk" -i 1 "$fs-gpt.img" > partition.txt
+        grep -q "^Partition GUID code: $(gpt_type "$fs") " partition.txt ||
+            fail "$fs-gpt.img: type GUID"
+        grep -q "^Partition name: '$(gpt_name "$fs")'\$" partition.txt ||
+            fail "$fs-gpt.img: partition name"
+    done
+    # A bit flipped in the entry array (the first LBA's low byte, zero)
+    # fails sgdisk, so it reads the table fsimg claims to write.
+    cp fat12-gpt.img flipped.img
+    printf '\001' | dd of=flipped.img bs=1 seek=1064 conv=notrunc 2>/dev/null
+    "$sgdisk" -v flipped.img > verify.txt 2>&1 || true
+    grep -q 'CRC for the main partition table is invalid' verify.txt ||
+        fail "flipped.img: sgdisk -v found no problem"
+
+    # Three volumes composed into one disk, each with its type and name.
+    "$fsimg" c -R -F fat12 -s 1M -f first.img -C source . 2>/dev/null
+    dd if=/dev/zero of=second.img bs=524288 count=1 2>/dev/null
+    "$compose" composed.img gpt first.img second.img:linux:data \
+        first.img:esp:EFI || fail "composed.img: compose"
+    "$sgdisk" -v composed.img | grep -q '^No problems found' ||
+        fail "composed.img: sgdisk -v"
+    "$sgdisk" -p composed.img > table.txt
+    grep -Eq '^ +1 +2048 +4095 .* 0700 +Microsoft basic data$' table.txt ||
+        fail "composed.img: partition 1"
+    grep -Eq '^ +2 +4096 +5119 .* 8300 +data$' table.txt ||
+        fail "composed.img: partition 2"
+    grep -Eq '^ +3 +6144 +8191 .* EF00 +EFI$' table.txt ||
+        fail "composed.img: partition 3"
+    test "$("$fsimg" tf composed.img --partition=3 2>/dev/null)" = '"/HELLO.TXT"' ||
+        fail "composed.img: partition 3 listing"
+    ran=$((ran + 1))
+else
+    echo 'SKIP: sgdisk is required to verify the GPT disks fsimg writes'
+fi
+
+if test -n "$sfdisk"; then
+    fdisk="$(dirname "$sfdisk")/fdisk"
+    "$fsimg" c -R -F exfat/gpt -o gpt:sector=4096 -f 4kn.img -C source . \
+        2>/dev/null || fail "4kn.img: creation"
+    "$sfdisk" --sector-size 4096 --verify 4kn.img | grep -q '^No errors detected' ||
+        fail "4kn.img: sfdisk --verify"
+    "$sfdisk" --sector-size 4096 -d 4kn.img > table.txt
+    grep -q '^sector-size: 4096$' table.txt && grep -q 'start= *256, size= *256,' table.txt ||
+        fail "4kn.img: partition 1 is not at 1 MiB"
+    "$fsimg" c -R -F fat16/mbr -o mbr:active=yes -o mbr:id=0x0badcafe -f mbr.img \
+        -C source . 2>/dev/null || fail "mbr.img: creation"
+    "$sfdisk" -d mbr.img > table.txt
+    grep -q '^label-id: 0x0badcafe$' table.txt || fail "mbr.img: disk identifier"
+    grep -Eq 'start= *2048, size= *[0-9]+, type=6, bootable$' table.txt ||
+        fail "mbr.img: partition 1"
+    if test -x "$fdisk"; then
+        "$fdisk" -l mbr.img | grep -Eq '^mbr.img1 +\* +2048 .* 6 FAT16$' ||
+            fail "mbr.img: fdisk -l"
+    fi
+    if test -n "$mformat"; then
+        "$(dirname "$mformat")/mdir" -i "mbr.img@@1M" -b :: | grep -q 'HELLO.TXT' ||
+            fail "mbr.img: mdir"
+    fi
+    ran=$((ran + 1))
+else
+    echo 'SKIP: sfdisk is required to verify 4096-byte GPT and MBR disks fsimg writes'
+fi
+
+if test -n "$hdiutil"; then
+    attached=$("$hdiutil" attach -nomount -noverify \
+        -imagekey diskimage-class=CRawDiskImage fat32-gpt.img) ||
+        fail "fat32-gpt.img: hdiutil attach"
+    device=$(echo "$attached" | sed -n '1s/[[:space:]].*//p')
+    "$hdiutil" detach "$device" > /dev/null
+    echo "$attached" | grep -q 'GUID_partition_scheme' ||
+        fail "fat32-gpt.img: hdiutil saw no GPT"
+    echo "$attached" | grep -q 's1[[:space:]]*Microsoft Basic Data' ||
+        fail "fat32-gpt.img: hdiutil saw no basic data partition"
 fi
 
 if test "$ran" -eq 0; then

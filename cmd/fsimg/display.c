@@ -29,6 +29,7 @@ static const char *kind_name(uint64_t);
 static void uuid_value(fsimg_cli_display_t *, const unsigned char *);
 static void owner_fields(fsimg_cli_display_t *, const unsigned char *, uint64_t);
 static void format_details(fsimg_cli_display_t *, const fsimg_format_info_t *);
+static void layer(fsimg_cli_display_t *, const fsimg_layer_info_t *);
 static void string_value(fsimg_cli_display_t *, const char *);
 static void path_excerpt(fsimg_cli_display_t *, const char *);
 static void uint_value(fsimg_cli_display_t *, uint64_t);
@@ -737,6 +738,10 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 		append(display, ", name ");
 		string_value(display, name);
 	}
+	if (gpt) {
+		append(display, ", GUID ");
+		uuid_value(display, raw + FSIMG_WIRE_PARTITION_GUID);
+	}
 	append(display, "%s%s\n", active ? ", active" : "", selected ? ", selected" : "");
 }
 
@@ -1054,7 +1059,8 @@ static void
 format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 {
 	if (display->options->json) {
-		append(display, "{\"schema\":1,\"type\":\"format\",\"name\":");
+		append(display, "{\"schema\":1,\"type\":\"format\",\"kind\":\"filesystem\","
+		    "\"name\":");
 		string_value(display, info->name);
 		append(display, ",\"profile\":");
 		string_value(display, info->profile);
@@ -1078,6 +1084,48 @@ format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 		    (info->capabilities & FSIMG_CAP_WRITE) != 0 ? "yes" : "no",
 		    (info->capabilities & FSIMG_CAP_VERIFY) != 0 ? "yes" : "no");
 	}
+}
+
+/* One scheme, container or compression: its kind, support and the keys
+ * of its settings, which -o qualifies with its name.
+ */
+static void
+layer(fsimg_cli_display_t *display, const fsimg_layer_info_t *info)
+{
+	static const char *const kinds[] = { [FSIMG_LAYER_SCHEME] = "scheme",
+	    [FSIMG_LAYER_CONTAINER] = "container",
+	    [FSIMG_LAYER_COMPRESSION] = "compression" };
+	const char *kind;
+	size_t length;
+
+	kind = (unsigned)info->kind < sizeof(kinds) / sizeof(kinds[0]) &&
+	    kinds[info->kind] != NULL ? kinds[info->kind] : "unknown";
+	if (display->options->json) {
+		append(display, "{\"schema\":1,\"type\":\"format\",\"kind\":\"%s\","
+		    "\"name\":", kind);
+		string_value(display, info->name);
+		append(display, ",\"suffix\":");
+		if (info->suffix[0] != '\0')
+			string_value(display, info->suffix);
+		else
+			append(display, "null");
+		append(display, ",\"capabilities\":%u,\"settings\":[",
+		    info->capabilities);
+		for (const char *key = info->settings; *key != '\0'; key += length) {
+			if (*key == ',')
+				key++;
+			length = strcspn(key, ",");
+			append(display, "%s\"%.*s\"", key == info->settings ? "" : ",",
+			    (int)length, key);
+		}
+		append(display, "]}\n");
+		return;
+	}
+	append(display, "%-5s  %-11s  %-4s  %-5s  %-6s  %s\n", info->name, kind,
+	    (info->capabilities & FSIMG_CAP_READ) != 0 ? "yes" : "no",
+	    (info->capabilities & FSIMG_CAP_WRITE) != 0 ? "yes" : "no",
+	    (info->capabilities & FSIMG_CAP_VERIFY) != 0 ? "yes" : "no",
+	    info->settings[0] != '\0' ? info->settings : "-");
 }
 
 static void
@@ -1238,7 +1286,16 @@ failure(fsimg_cli_display_t *display)
 		append(display, "; finalization failed; do not retry blindly\n");
 	} else if (error->output_state == FSIMG_OUTPUT_UNCERTAIN)
 		append(display, "fsimg: output publication or durability is uncertain; inspect the destination before retrying\n");
-	if (display->paths->verification_failed)
+	/* A layer reports its own failures as image operations; any other
+	 * verdict is the filesystem's.
+	 */
+	if (display->paths->verification_failed && error->operation == FSIMG_OP_IMAGE &&
+	    display->options->request.stack.slots[FSIMG_LAYER_SCHEME].state ==
+	    FSIMG_SLOT_NAMED)
+		append(display, "fsimg: the staged %s partition table failed verification; "
+		    "nothing was published\n", display->options->request.stack.slots[
+		    FSIMG_LAYER_SCHEME].name);
+	else if (display->paths->verification_failed)
 		append(display, "fsimg: the staged %s volume failed verification; nothing was published\n",
 		    fsimg_job_format(&display->options->request));
 	if (error->cleanup_error != 0) {
@@ -1291,12 +1348,20 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 	fsimg_cli_display_t *display = argument;
 	const fsimg_cli_options_t *options = display->options;
 	const unsigned char *raw = frame->payload;
-	bool diagnostic, listing;
+	bool diagnostic, listing, planning;
 	fsimg_status_t status;
 
 	display->used = 0;
 	diagnostic = false;
 	listing = options->request.kind == FSIMG_JOB_LIST;
+	/* A creation reports its plan, and the planned disk's IMAGE and
+	 * PARTITION records before it, under --json, -n or -v; c -v reports
+	 * them as diagnostics. cW's verification worker reports none of them.
+	 */
+	planning = !display->verifying_staged &&
+	    options->request.kind >= FSIMG_JOB_CREATE && (options->json ||
+	    options->request.kind == FSIMG_JOB_PLAN ||
+	    (options->request.flags & FSIMG_JOB_VERBOSE) != 0);
 	switch (frame->type) {
 	case FSIMG_FRAME_READY:
 		/* cW's verification worker reuses the creation command's result,
@@ -1318,12 +1383,18 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		break;
 	case FSIMG_FRAME_IMAGE:
 		bcopy(raw, display->image, sizeof(display->image));
-		if (!display->verifying_staged &&
-		    (options->json || options->request.kind == FSIMG_JOB_INFO))
+		if (planning || (!display->verifying_staged &&
+		    options->request.kind < FSIMG_JOB_CREATE &&
+		    (options->json || options->request.kind == FSIMG_JOB_INFO)))
 			image_report(display, raw);
+		diagnostic = planning && !options->json &&
+		    options->request.kind == FSIMG_JOB_CREATE;
 		break;
 	case FSIMG_FRAME_PARTITION:
-		partition(display, raw);
+		if (planning || options->request.kind < FSIMG_JOB_CREATE)
+			partition(display, raw);
+		diagnostic = planning && !options->json &&
+		    options->request.kind == FSIMG_JOB_CREATE;
 		break;
 	case FSIMG_FRAME_INFO:
 		/* cW reports the verification of its staged image, not its header. */
@@ -1332,8 +1403,7 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 			volume(display, raw);
 		break;
 	case FSIMG_FRAME_PLAN:
-		if (options->json || options->request.kind == FSIMG_JOB_PLAN ||
-		    (options->request.flags & FSIMG_JOB_VERBOSE) != 0) {
+		if (planning) {
 			plan(display, raw);
 			diagnostic = !options->json && options->request.kind == FSIMG_JOB_CREATE;
 		}
@@ -1438,6 +1508,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 	fsimg_cli_display_t *display = argument;
 	const fsimg_cli_options_t *options = display->options;
 	fsimg_format_info_t info;
+	fsimg_layer_info_t layer_info;
 	fsimg_status_t status;
 	bool diagnostic, first;
 
@@ -1463,6 +1534,22 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 				if (first && !options->json)
 					append(display, "Format  Read  Write  Verify\n");
 				format(display, &info);
+				return (finish_span(display, false, text, error));
+			}
+			if (status != FSIMG_DONE)
+				return (status);
+			display->format_cursor = 0;
+			display->phase = FSIMG_CLI_OUTPUT_LAYERS;
+		}
+		if (display->phase == FSIMG_CLI_OUTPUT_LAYERS) {
+			first = display->format_cursor == 0;
+			status = fsimg_layer_next(&display->format_cursor, &layer_info,
+			    error);
+			if (status == FSIMG_OK) {
+				if (first && !options->json)
+					append(display, "\nLayer  Kind         Read  Write  "
+					    "Verify  Settings\n");
+				layer(display, &layer_info);
 				return (finish_span(display, false, text, error));
 			}
 			if (status != FSIMG_DONE)

@@ -40,8 +40,17 @@ the disk as a bare volume. The volume is the one partition holding a
 recognized filesystem unless `--partition=N`, `name=TEXT` or `type=NAME`
 selects one; `--offset=`/`--length=` bypass the table. `fsimg i` lists the
 table and marks the selected partition, and `fsimg W` checks the table with
-the volume. Creating a partitioned disk, containers and compression are not
-implemented.
+the volume.
+
+Creating with a scheme in the stack writes a disk: `fsimg cf disk.img -F
+fat32/gpt -C esp .` puts the volume at 1 MiB as the disk's one partition,
+typed and named after its filesystem unless `-o gpt:type=`, `gpt:name=`,
+`mbr:type=` or `mbr:active=` say otherwise, with the disk length derived or
+fixed by `gpt:disk=`/`mbr:disk=` and 4096-byte GPT sectors on request.
+Identifiers are random, or under `-R` derived from the epoch. The library
+also wraps a raw volume in a scheme, unwraps a partition back to its raw
+bytes, and composes several volumes into one disk. Containers and
+compression are not implemented.
 
 [System qualification](docs/qualification.md) includes ten-million-file format
 planning, a million-fragment content round trip, sustained fuzzing and combined

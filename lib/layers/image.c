@@ -56,15 +56,15 @@ static fsimg_status_t image_ready(fsimg_image_t *, fsimg_error_t *);
 static const char *forced_filesystem(const fsimg_image_t *);
 static fsimg_status_t validate_forced_stack(const fsimg_image_options_t *,
     fsimg_error_t *);
-static fsimg_status_t read_prefix(fsimg_image_t *, uint64_t, uint64_t,
-    size_t, unsigned char **, size_t *, fsimg_error_t *);
+static fsimg_status_t read_prefix(fsimg_ctx_t *, fsimg_io_t *,
+    fsimg_session_t *, uint64_t, uint64_t, size_t, unsigned char **, size_t *,
+    fsimg_error_t *);
 static fsimg_status_t claim_volume(fsimg_image_t *, uint64_t, uint64_t,
     fsimg_claim_t *, char [static FORMAT_NAME_BYTES], fsimg_error_t *);
 static fsimg_status_t identify_disk(fsimg_image_t *, const fsimg_layer_t *,
     const fsimg_layer_t **, fsimg_error_t *);
 static fsimg_status_t detect_scheme(fsimg_image_t *, fsimg_error_t *);
 static void scheme_input(fsimg_image_t *, fsimg_scheme_input_t *);
-static void name_to_utf8(const uint16_t *, char *, size_t);
 static fsimg_status_t select_slice(fsimg_image_t *, uint64_t, uint64_t,
     uint32_t, fsimg_io_t **, fsimg_error_t *);
 static fsimg_status_t select_record(fsimg_image_t *,
@@ -101,8 +101,9 @@ forced_filesystem(const fsimg_image_t *image)
 /*
  * A forced stack must be well formed, and each layer it forces must be
  * readable in this build: a filesystem with a reader, an implemented
- * scheme, and no container. gpt:sector forces the GPT LBA size, so it
- * requires gpt in the scheme slot.
+ * scheme, and no container. Of the layer settings reading uses only
+ * gpt:sector, which forces the GPT LBA size and so requires gpt in the
+ * scheme slot.
  */
 static fsimg_status_t
 validate_forced_stack(const fsimg_image_options_t *options,
@@ -135,18 +136,16 @@ validate_forced_stack(const fsimg_image_options_t *options,
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_IMAGE, "image containers are not supported"));
 
+	status = fsimg_layer_options_check(&options->stack, &options->layers,
+	    false, error);
+	if (status != FSIMG_OK)
+		return (status);
 	sector = options->layers.gpt_sector_bytes;
-	if (sector != 0 && sector != 512 && sector != 4096)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "gpt:sector must be 512 or 4096"));
-	if (sector != 0 && (slots[FSIMG_LAYER_SCHEME].state != FSIMG_SLOT_NAMED ||
-	    strcmp(slots[FSIMG_LAYER_SCHEME].name, "gpt") != 0))
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "gpt:sector requires gpt in the forced stack"));
-	for (unsigned i = 0; i < 4; i++) {
-		if (options->layers.reserved[i] != 0)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IMAGE, "nonzero reserved layer option"));
+	if (sector != 0 && sector != 512 && sector != 4096) {
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "gpt:sector must be 512 or 4096");
+		fsimg_error_path(error, "gpt:sector");
+		return (FSIMG_EINVAL);
 	}
 	return (FSIMG_OK);
 }
@@ -230,12 +229,13 @@ fsimg_image_free(fsimg_image_t *image)
 	fsimg_dealloc(image);
 }
 
-/* Read up to want bytes at a disk offset, cut to the length available
- * there, into a buffer charged to the context. Zero bytes need no buffer.
+/* Read up to want bytes at an offset, cut to the length available there,
+ * into a buffer charged to the context. Zero bytes need no buffer.
  */
 static fsimg_status_t
-read_prefix(fsimg_image_t *image, uint64_t offset, uint64_t available,
-    size_t want, unsigned char **prefix, size_t *length, fsimg_error_t *error)
+read_prefix(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
+    uint64_t offset, uint64_t available, size_t want, unsigned char **prefix,
+    size_t *length, fsimg_error_t *error)
 {
 	size_t transferred;
 	fsimg_status_t status;
@@ -244,11 +244,11 @@ read_prefix(fsimg_image_t *image, uint64_t offset, uint64_t available,
 	*length = available < want ? (size_t)available : want;
 	if (*length == 0)
 		return (FSIMG_OK);
-	*prefix = fsimg_alloc(image->ctx, *length, error);
+	*prefix = fsimg_alloc(ctx, *length, error);
 	if (*prefix == NULL)
 		return (error->status);
-	status = fsimg_io_read_session(image->disk, &image->session, offset,
-	    *prefix, *length, &transferred, error);
+	status = fsimg_io_read_session(io, session, offset, *prefix, *length,
+	    &transferred, error);
 	if (status != FSIMG_OK) {
 		fsimg_dealloc(*prefix);
 		*prefix = NULL;
@@ -256,13 +256,19 @@ read_prefix(fsimg_image_t *image, uint64_t offset, uint64_t available,
 	return (status);
 }
 
-/* What the filesystem probes, the forced one or all of them, say about the
- * volume at a disk range. format receives the identified format's name.
- */
 static fsimg_status_t
 claim_volume(fsimg_image_t *image, uint64_t offset, uint64_t length,
     fsimg_claim_t *claim, char format[static FORMAT_NAME_BYTES],
     fsimg_error_t *error)
+{
+	return (fsimg_volume_claim(image->ctx, image->disk, &image->session,
+	    offset, length, forced_filesystem(image), claim, format, error));
+}
+
+fsimg_status_t
+fsimg_volume_claim(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
+    uint64_t offset, uint64_t length, const char *forced, fsimg_claim_t *claim,
+    char format[static FORMAT_NAME_BYTES], fsimg_error_t *error)
 {
 	fsimg_format_survey_t survey;
 	unsigned char *prefix;
@@ -271,13 +277,12 @@ claim_volume(fsimg_image_t *image, uint64_t offset, uint64_t length,
 
 	*claim = FSIMG_CLAIM_NONE;
 	format[0] = '\0';
-	status = read_prefix(image, offset, length,
-	    fsimg_format_probe_bytes(forced_filesystem(image)), &prefix,
-	    &prefix_length, error);
+	status = read_prefix(ctx, io, session, offset, length,
+	    fsimg_format_probe_bytes(forced), &prefix, &prefix_length, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_format_identify(forced_filesystem(image), prefix,
-	    prefix_length, length, &survey, error);
+	status = fsimg_format_identify(forced, prefix, prefix_length, length,
+	    &survey, error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);
@@ -324,8 +329,8 @@ identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
 		if (layer->scheme != NULL && layer->scheme->probe_bytes > want)
 			want = layer->scheme->probe_bytes;
 	}
-	status = read_prefix(image, 0, image->disk_bytes, want, &prefix, &length,
-	    error);
+	status = read_prefix(image->ctx, image->disk, &image->session, 0,
+	    image->disk_bytes, want, &prefix, &length, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (forced != NULL) {
@@ -479,44 +484,11 @@ fsimg_image_get_info(fsimg_image_t *image, fsimg_image_info_t *out,
 	return (FSIMG_OK);
 }
 
-/* A GPT name as UTF-8 for display. Names are untrusted, so an unpaired
- * surrogate becomes U+FFFD instead of failing the listing; selection by
- * name compares the stored units, not this text.
- */
-static void
-name_to_utf8(const uint16_t *units, char *text, size_t capacity)
-{
-	static const uint16_t replacement = 0xfffd;
-	const uint16_t *span;
-	size_t length, span_length, used, written;
-
-	length = 0;
-	while (length < FSIMG_GPT_NAME_UNITS && units[length] != 0)
-		length++;
-	used = 0;
-	for (size_t i = 0; i < length; i += span_length) {
-		span = &units[i];
-		span_length = 1;
-		if (units[i] >= 0xd800 && units[i] <= 0xdbff && i + 1 < length &&
-		    units[i + 1] >= 0xdc00 && units[i + 1] <= 0xdfff)
-			span_length = 2;
-		else if (units[i] >= 0xd800 && units[i] <= 0xdfff)
-			span = &replacement;
-		/* 36 units need at most 108 bytes, so the text always fits. */
-		if (fsimg_utf16_to_utf8(span, span == &replacement ? 1 : span_length,
-		    text + used, capacity - 1 - used, &written, NULL) != FSIMG_OK)
-			break;
-		used += written;
-	}
-	text[used] = '\0';
-}
-
 fsimg_status_t
 fsimg_image_next_partition(fsimg_image_t *image, fsimg_partition_info_t *out,
     fsimg_error_t *error)
 {
 	const fsimg_partition_record_t *record;
-	const char *type;
 	fsimg_error_t local;
 	fsimg_status_t status;
 
@@ -536,22 +508,8 @@ fsimg_image_next_partition(fsimg_image_t *image, fsimg_partition_info_t *out,
 		return (FSIMG_DONE);
 
 	record = &image->table.records[image->cursor];
-	out->index = record->index;
+	fsimg_partition_report(image->table.kind, record, out);
 	if (record->used) {
-		out->used = true;
-		out->offset = record->offset;
-		out->length = record->length;
-		type = fsimg_partition_type_name(image->table.kind, record);
-		if (type != NULL)
-			snprintf(out->type, sizeof(out->type), "%s", type);
-		if (image->table.kind == FSIMG_SCHEME_GPT) {
-			bcopy(record->type_guid, out->type_guid, sizeof(out->type_guid));
-			bcopy(record->guid, out->guid, sizeof(out->guid));
-			name_to_utf8(record->name, out->name, sizeof(out->name));
-		} else {
-			out->mbr_type = record->mbr_type;
-			out->active = record->active;
-		}
 		status = claim_volume(image, record->offset, record->length,
 		    &out->claim, out->format, error);
 		if (status != FSIMG_OK)

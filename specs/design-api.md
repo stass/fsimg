@@ -319,7 +319,15 @@ The caller's descriptor is borrowed for the call. Publication and durability
 outcomes follow the [security/output contract](design-security.md#image-publication).
 The helper does not enter an OS sandbox on behalf of an embedding application.
 
+`fsimg_plan_get_info()` reports the image around the volume as an opened
+image reports it: an `fsimg_image_info_t` whose disk length is the whole
+output, and, with a scheme, the volume's `fsimg_partition_info_t` (its offset,
+its whole-sector length, type, name and unique GUID). Every identifier the
+plan derived appears there, so a caller prints them before any byte is
+written.
+
 ```c
+void fsimg_sink_init(fsimg_sink_t *sink, fsimg_sink_kind_t kind);
 fsimg_status_t fsimg_writer_output(fsimg_writer_t *writer,
     const fsimg_sink_t *sink, fsimg_error_t *error);
 ```
@@ -329,8 +337,12 @@ file (parent descriptor and basename, as `write_at()`), a positional I/O
 object (as `emit()`), or a stream descriptor written sequentially, plus
 `raw_fd`, the [raw intermediate](design-layers.md#handed-over-files): an
 exclusively created, empty, read/write regular file the caller has unlinked,
-adopted on every outcome, required whenever the stack has a container or
-compression or the sink is a stream, and `-1` otherwise. The library never
+adopted on every outcome once the sink is accepted, required whenever the
+stack has a container or compression or the sink is a stream, and `-1`
+otherwise. `fsimg_sink_init()` makes an empty sink of a kind, its `size`
+set and every descriptor `-1`. A sink whose `size` it did not set is
+`FSIMG_EINVAL` with nothing adopted, so a zeroed value never hands over
+descriptor 0. The library never
 creates that file by name, and checks the one it adopts: a sink that needs
 one and has none, or whose descriptor is not a regular file of size zero
 with link count zero open for reading and writing, is `FSIMG_EINVAL` before

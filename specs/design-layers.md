@@ -38,7 +38,8 @@ layers add to it.
 | Layer descriptor, one per layer | Probe, read-side open (peel), write-side plan/encode/transcode, verification, settings and capability record |
 | Image (`lib/layers/image.c`) | Read-side peeling order, detection and forcing, partition enumeration and selection, the spool, the layer verification report |
 | Container adapter and chunk index (`lib/layers/chunks.c`, `lib/meta/`) | Disk-offset to chunk resolution, the decompressed-chunk cache, chunk validation |
-| Layered output (`lib/layers/output.c`) | Disk sizing around a volume, the staged raw disk, the assembled disk, the transcode pass, the sequential sink, raw-intermediate lifetime |
+| Disk plan (`lib/layers/plan.c`) | Disk sizing around a volume, partition placement, partition types and names, identifiers, the plan's disk and partition report |
+| Layered output (`lib/layers/output.c`) | The scheme tables written into the staged raw disk, the assembled disk, the transcode pass, the sequential sink, raw-intermediate lifetime |
 | Output coordinator (`lib/output/`) | Staging directory, publication, durability, unchanged |
 | Filesystem drivers | The volume only; they never see a layer |
 
@@ -107,6 +108,9 @@ In the library every layer setting is a typed field of
 `fsimg_layer_options_t`; a layer's capability record declares the settings it
 stores, and a field for a layer absent from the stack must hold its default,
 the rule already applied to filesystem settings.
+On creation a key of a layer with no write support, a container or a
+compression, is accepted without being read until that layer is written; a
+key of a scheme is validated against the [settings table](#settings).
 
 ## Layer contract
 
@@ -468,9 +472,8 @@ is never published.
 ## Wrap, unwrap and compose
 
 Three image-level operations reuse the same machinery without a filesystem
-writer. They are library operations. This design gives them no command-line
-form; their CLI spelling needs an owner decision and its own design before
-implementation.
+writer: `fsimg_image_wrap`, `fsimg_image_unwrap` and `fsimg_image_compose`.
+They are library operations with no command-line form.
 
 * **Wrap** takes an existing raw volume or disk and a stack whose filesystem
   slot is empty or names the volume's format, and produces the stacked image.
@@ -485,6 +488,9 @@ implementation.
   with an empty filesystem slot and a scheme. Each volume becomes one
   partition, placed in order with the same alignment as a written disk; MBR
   accepts at most four. Partition types default from probing each volume.
+  Every partition setting comes from its part, so a compose whose layer
+  options carry a partition key (`gpt:type`, `gpt:name`, `gpt:guid`,
+  `mbr:type`, `mbr:active`) fails; the disk keys apply to the whole disk.
 
 Wrap and compose do not stage a raw disk. The disk is **assembled**: a
 read-only positional object over ordered regions, each a scheme table buffer
@@ -507,9 +513,9 @@ absent layer.
 
 | Key | Type | Default | Validation |
 | --- | --- | --- | --- |
-| `gpt:type` | type name, or GUID text | Derived from the filesystem: `basic` for FAT and exFAT, `qnx6` for QNX6; none for QNX4, which must name its type | Name from the [type table](#partition-types) or RFC 4122 text |
-| `gpt:name` | UTF-8 text | The type's conventional name from the [type table](#partition-types) | At most 36 UTF-16LE units after conversion; validated UTF-8 |
-| `gpt:disk-guid`, `gpt:guid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text |
+| `gpt:type` | type name, or GUID text | Derived from the filesystem: `basic` for FAT and exFAT, `qnx6` for QNX6; none for QNX4, which must name its type | Name from the [type table](#partition-types) or RFC 4122 text; not nil, which marks an unused entry |
+| `gpt:name` | UTF-8 text | The type's conventional name from the [type table](#partition-types); an empty value is the default | At most 36 UTF-16LE units after conversion; validated UTF-8 |
+| `gpt:disk-guid`, `gpt:guid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text; not nil, which the library reads as unset |
 | `gpt:disk` | bytes | Derived from the volume | Multiple of the sector size and the container granularity; large enough for the volume and tables |
 | `gpt:sector` | bytes | 512 | 512 or 4096; the LBA size of the tables. On read it resolves a disk carrying a header at both offsets and requires `gpt` in the forced stack |
 | `mbr:type` | type name, or `0x` byte | Derived: `fat12` 0x01, `fat16` 0x06, `fat32` 0x0C, `exfat` 0x07, `qnx6` 0xB2, `qnx4` 0x4D | Nonzero byte; not 0x05, 0x0F or 0x85 (extended containers) and not 0xEE (GPT protective) |
@@ -685,7 +691,8 @@ at most the 128 entries a written table holds; a violation is
 Under reproducible mode an unset identifier is derived from the epoch and a
 role, as a 128-bit GUID value: its 16 bytes in RFC 4122 text order are the
 epoch as a little-endian 64-bit value, one role byte (1 disk, 2 partition,
-3 VHD, 4 DMG segment), one partition index byte and six zero bytes; then
+3 VHD, 4 DMG segment), one byte holding the partition's 1-based slot
+(zero for every other role) and six zero bytes; then
 the version nibble replaces the high nibble of byte 6 with 4 and the
 variant bits replace the top two bits of byte 8 with `10`, so tools accept
 the GUID as well-formed. That value is then encoded as each format stores
@@ -1147,7 +1154,7 @@ format correctness; the oracle rows do.
 | --- | --- | --- |
 | Stack parsing | Every legal combination of present slots; `-` in each later slot, shorthand (`fat32/dmg`) and spelled-out (`fat32/-/dmg`) forms parse to the same slots; `i` text re-parses to the same slots | Repeated kind, descending order (`fat32/-/gpt`), `-` in the filesystem slot, unknown name, empty token, trailing `/`; each a syntax error naming the token |
 | Settings | Each key at its bounds; derived defaults per filesystem; `disk=` with and without `-s` | Key for an absent layer; out-of-range chunk, block and level; 36-unit name limit crossed; `apfs` on MBR; `disk=` smaller than the volume |
-| GPT write | `sgdisk -v` reports no problems on disks of every filesystem; `sgdisk -p` shows the type, name and 1 MiB alignment; 4Kn tables verified with `sgdisk` at 4096 | A flipped bit in the written entry array fails `sgdisk -v`, proving the oracle sees the table fsimg claims to write |
+| GPT write | `sgdisk -v` reports no problems on disks of every filesystem; `sgdisk -p` shows the type, name and 1 MiB alignment; 4Kn tables verified with `sfdisk --sector-size 4096`, since `sgdisk` takes the sector size of a file as 512 | A flipped bit in the written entry array fails `sgdisk -v`, proving the oracle sees the table fsimg claims to write |
 | GPT read | Disks from `sgdisk` and `qemu-img` open; auto-selection with one filesystem; index, name and type selectors; names compared as UTF-16 units; `gpt:sector=4096` with `-F fat32/gpt` resolves a disk carrying both headers | Header CRC, entry CRC, alternate LBA, usable range, overlapping entries, backup mismatch, truncated backup, protective MBR with no header: each `FSIMG_ECORRUPT` naming the check and never a bare-volume read; two headers at 512 and 4096 without `gpt:sector`: ambiguity |
 | MBR | `fdisk -l` and `mtools` read fsimg disks; `sfdisk` disks open; types 0x04, 0x0B and 0x0E accepted; a partition ending at sector 2^32; CHS saturation at 1023 | Missing signature, overlapping entries, entry beyond the disk (`FSIMG_ECORRUPT`), 0xEE entry (routes to GPT), FAT boot sector resembling a table (ambiguity), `mbr:type=0x85` refused |
 | DMG write | `hdiutil imageinfo` and `hdiutil verify` accept zlib and `none` images; `hdiutil attach` mounts the FAT volume with and without GPT; `qemu-img convert` yields the raw disk byte for byte; zero runs become zero-fill entries | A flipped data-fork byte fails `hdiutil verify` and fsimg's own verification; `dmg:level=0` and `10` refused |

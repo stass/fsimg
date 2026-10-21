@@ -1,0 +1,457 @@
+/* SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (c) 2026, fsimg contributors
+ */
+#include "config.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+
+#include "layer.h"
+#include "unicode.h"
+
+/*
+ * The disk plan: what a writer, wrap or compose puts around its volumes.
+ * Every layer setting is resolved here once, so the three share one rule
+ * for each default, identifier and limit, and placement lays partitions
+ * out as sgdisk and fdisk do: each at the first 1 MiB boundary after the
+ * scheme's leading tables or the previous partition, whole sectors long,
+ * with the trailing tables at the end of the disk.
+ */
+#define PARTITION_ALIGNMENT	(UINT64_C(1) << 20)
+
+static bool round_up(uint64_t, uint64_t, uint64_t *);
+static bool guid_unset(const unsigned char *);
+static fsimg_status_t keyed_error(fsimg_error_t *, const char *, const char *);
+static const char *disk_key(const fsimg_disk_plan_t *);
+static void request_key(const fsimg_disk_plan_t *,
+    const fsimg_partition_request_t *, uint32_t, const char *, char *, size_t);
+static fsimg_status_t resolve_type(fsimg_disk_plan_t *,
+    fsimg_partition_record_t *, const fsimg_partition_request_t *,
+    const char *, const char **, fsimg_error_t *);
+static fsimg_status_t resolve_name(fsimg_partition_record_t *, const char *,
+    const char *, fsimg_error_t *);
+static fsimg_status_t check_identities(const fsimg_disk_plan_t *,
+    fsimg_error_t *);
+
+/*
+ * The identifier derivation: the epoch as a little-endian 64-bit value,
+ * the role byte, the index byte and six zero bytes, in RFC 4122 text
+ * order; then version 4 in the high nibble of byte 6 and the variant bits
+ * 10 at the top of byte 8, so tools accept the GUID as well formed.
+ */
+void
+fsimg_identifier_derive(int64_t epoch, fsimg_identifier_role_t role,
+    uint8_t index, unsigned char guid[static 16])
+{
+	uint64_t value = (uint64_t)epoch;
+
+	for (unsigned i = 0; i < 8; i++)
+		guid[i] = (unsigned char)(value >> (8 * i));
+	guid[8] = (unsigned char)role;
+	guid[9] = index;
+	bzero(guid + 10, 6);
+	guid[6] = (unsigned char)((guid[6] & 0x0f) | 0x40);
+	guid[8] = (unsigned char)((guid[8] & 0x3f) | 0x80);
+}
+
+static bool
+round_up(uint64_t value, uint64_t unit, uint64_t *out)
+{
+	uint64_t remainder = value % unit;
+
+	if (remainder == 0) {
+		*out = value;
+		return (true);
+	}
+	return (fsimg_add_u64(value, unit - remainder, out));
+}
+
+static bool
+guid_unset(const unsigned char *guid)
+{
+	static const unsigned char unset[16];
+
+	return (bcmp(guid, unset, sizeof(unset)) == 0);
+}
+
+/* FSIMG_EINVAL naming the setting or partition it concerns. */
+static fsimg_status_t
+keyed_error(fsimg_error_t *error, const char *key, const char *message)
+{
+	fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE, message);
+	fsimg_error_path(error, key);
+	return (FSIMG_EINVAL);
+}
+
+static const char *
+disk_key(const fsimg_disk_plan_t *plan)
+{
+	return (plan->table.kind == FSIMG_SCHEME_GPT ? "gpt:disk" : "mbr:disk");
+}
+
+/* A partition's failure names its setting ("gpt:type") when the layer
+ * options supplied it, and the partition ("partition 2") in a compose.
+ */
+static void
+request_key(const fsimg_disk_plan_t *plan,
+    const fsimg_partition_request_t *request, uint32_t index,
+    const char *setting, char *key, size_t capacity)
+{
+	if (request->composed)
+		snprintf(key, capacity, "partition %u", (unsigned)index + 1);
+	else
+		snprintf(key, capacity, "%s:%s", plan->scheme->name, setting);
+}
+
+/*
+ * Resolve the stack's scheme and the disk-level settings: the sector size,
+ * a fixed disk length, and the disk identifier, which is taken as given,
+ * derived from the epoch in reproducible mode, or refused. The disk holds
+ * count partitions, each made an empty record in slot order.
+ */
+fsimg_status_t
+fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
+    const fsimg_layer_options_t *layers, uint32_t count, int64_t epoch,
+    uint32_t flags, fsimg_disk_plan_t *plan, fsimg_error_t *error)
+{
+	fsimg_scheme_table_t *table = &plan->table;
+	const char *key;
+	char message[64];
+	fsimg_status_t status;
+	bool reproducible;
+
+	bzero(plan, sizeof(*plan));
+	plan->epoch = epoch;
+	plan->flags = flags;
+	status = fsimg_layer_options_check(stack, layers, true, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (stack->slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_IMAGE, "image containers are not supported"));
+	plan->scheme = fsimg_stack_layer(stack, FSIMG_LAYER_SCHEME);
+	if (plan->scheme == NULL)
+		return (FSIMG_OK);
+	if (count == 0 || count > plan->scheme->scheme->slots) {
+		snprintf(message, sizeof(message), "a %s disk holds 1 to %u partitions",
+		    plan->scheme->name, (unsigned)plan->scheme->scheme->slots);
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE, message);
+		if (error != NULL) {
+			error->limit = plan->scheme->scheme->slots;
+			error->observed = count;
+		}
+		return (FSIMG_EINVAL);
+	}
+
+	reproducible = (flags & FSIMG_WRITE_REPRODUCIBLE) != 0;
+	if (strcmp(plan->scheme->name, "gpt") == 0) {
+		table->kind = FSIMG_SCHEME_GPT;
+		table->sector_bytes = layers->gpt_sector_bytes == 0 ? 512 :
+		    layers->gpt_sector_bytes;
+		if (table->sector_bytes != 512 && table->sector_bytes != 4096)
+			return (keyed_error(error, "gpt:sector",
+			    "gpt:sector must be 512 or 4096"));
+		plan->disk_bytes = layers->gpt_disk_bytes;
+		if (!guid_unset(layers->gpt_disk_guid))
+			bcopy(layers->gpt_disk_guid, table->disk_guid, 16);
+		else if (reproducible)
+			fsimg_identifier_derive(epoch, FSIMG_ROLE_DISK, 0,
+			    table->disk_guid);
+		else
+			return (keyed_error(error, "gpt:disk-guid",
+			    "the disk GUID must be set outside reproducible mode"));
+	} else {
+		table->kind = FSIMG_SCHEME_MBR;
+		table->sector_bytes = 512;
+		plan->disk_bytes = layers->mbr_disk_bytes;
+		if (plan->disk_bytes / 512 > plan->scheme->scheme->max_disk_sectors)
+			return (keyed_error(error, "mbr:disk",
+			    "an MBR disk holds at most 2^32 sectors"));
+		if (layers->mbr_id_set)
+			table->mbr_disk_id = layers->mbr_id;
+		else if (reproducible)
+			table->mbr_disk_id = (uint32_t)(uint64_t)epoch;
+		else
+			return (keyed_error(error, "mbr:id",
+			    "the disk identifier must be set outside reproducible mode"));
+	}
+	key = disk_key(plan);
+	if (plan->disk_bytes % table->sector_bytes != 0)
+		return (keyed_error(error, key,
+		    "the disk length is not a multiple of the sector size"));
+	plan->fixed = plan->disk_bytes != 0;
+
+	table->records = fsimg_alloc(ctx, (size_t)count * sizeof(*table->records),
+	    error);
+	if (table->records == NULL)
+		return (error->status);
+	table->count = count;
+	for (uint32_t i = 0; i < count; i++)
+		table->records[i].index = i + 1;
+	return (FSIMG_OK);
+}
+
+/* The record's type: the requested text, or the type-table entry named
+ * after the filesystem. default_name receives the type's GPT name.
+ */
+static fsimg_status_t
+resolve_type(fsimg_disk_plan_t *plan, fsimg_partition_record_t *record,
+    const fsimg_partition_request_t *request, const char *key,
+    const char **default_name, fsimg_error_t *error)
+{
+	fsimg_type_selector_t selector;
+	fsimg_status_t status;
+
+	bzero(&selector, sizeof(selector));
+	if (request->type != NULL && request->type[0] != '\0') {
+		status = fsimg_partition_type_parse(request->type, &selector, error);
+		if (status != FSIMG_OK) {
+			fsimg_error_path(error, key);
+			return (status);
+		}
+	} else {
+		if (request->filesystem != NULL)
+			selector.type = fsimg_partition_type_find(request->filesystem);
+		if (selector.type == NULL)
+			return (keyed_error(error, key,
+			    "no filesystem gives the partition a type; set one"));
+	}
+	status = fsimg_partition_type_assign(&selector, plan->table.kind, record,
+	    default_name, error);
+	if (status != FSIMG_OK)
+		fsimg_error_path(error, key);
+	return (status);
+}
+
+/* A GPT name: validated UTF-8 of at most 36 UTF-16 units, stored as units
+ * with zero padding.
+ */
+static fsimg_status_t
+resolve_name(fsimg_partition_record_t *record, const char *name,
+    const char *key, fsimg_error_t *error)
+{
+	size_t units;
+	fsimg_status_t status;
+
+	status = fsimg_utf8_to_utf16(name, strlen(name), NULL, 0, &units, error);
+	if (status == FSIMG_OK && units > FSIMG_GPT_NAME_UNITS)
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the GPT name exceeds 36 UTF-16 units");
+	if (status == FSIMG_OK)
+		status = fsimg_utf8_to_utf16(name, strlen(name), record->name,
+		    FSIMG_GPT_NAME_UNITS, &units, error);
+	if (status != FSIMG_OK) {
+		if (error != NULL)
+			error->status = FSIMG_EINVAL;
+		fsimg_error_path(error, key);
+		return (FSIMG_EINVAL);
+	}
+	return (FSIMG_OK);
+}
+
+/*
+ * Resolve one partition: its type; for GPT its name and unique GUID, the
+ * GUID taken as given, derived from the epoch and the slot number in
+ * reproducible mode, or refused; for MBR its status. A setting the scheme
+ * does not store is refused rather than dropped.
+ */
+fsimg_status_t
+fsimg_disk_plan_partition(fsimg_disk_plan_t *plan, uint32_t index,
+    const fsimg_partition_request_t *request, fsimg_error_t *error)
+{
+	fsimg_partition_record_t *record;
+	const char *default_name;
+	char key[32];
+	bool guid_given;
+	fsimg_status_t status;
+
+	if (plan->scheme == NULL || index >= plan->table.count)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "the disk plan has no such partition"));
+	record = &plan->table.records[index];
+	request_key(plan, request, index, "type", key, sizeof(key));
+	status = resolve_type(plan, record, request, key, &default_name, error);
+	if (status != FSIMG_OK)
+		return (status);
+	guid_given = request->guid != NULL && !guid_unset(request->guid);
+	if (plan->table.kind == FSIMG_SCHEME_MBR) {
+		request_key(plan, request, index, "name", key, sizeof(key));
+		if ((request->name != NULL && request->name[0] != '\0') ||
+		    guid_given)
+			return (keyed_error(error, key,
+			    "MBR partitions have no name or GUID"));
+		record->active = request->active;
+		record->used = true;
+		return (FSIMG_OK);
+	}
+	request_key(plan, request, index, "active", key, sizeof(key));
+	if (request->active)
+		return (keyed_error(error, key, "GPT partitions have no active flag"));
+	request_key(plan, request, index, "name", key, sizeof(key));
+	status = resolve_name(record, request->name != NULL &&
+	    request->name[0] != '\0' ? request->name : default_name, key, error);
+	if (status != FSIMG_OK)
+		return (status);
+	request_key(plan, request, index, "guid", key, sizeof(key));
+	if (guid_given)
+		bcopy(request->guid, record->guid, 16);
+	else if ((plan->flags & FSIMG_WRITE_REPRODUCIBLE) != 0)
+		fsimg_identifier_derive(plan->epoch, FSIMG_ROLE_PARTITION,
+		    (uint8_t)record->index, record->guid);
+	else
+		return (keyed_error(error, key,
+		    "the partition GUID must be set outside reproducible mode"));
+	record->used = true;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_disk_plan_fit(const fsimg_disk_plan_t *plan, uint32_t granule,
+    uint64_t *volume_bytes, fsimg_error_t *error)
+{
+	uint64_t leading, trailing, start, end, longest;
+	uint32_t sector;
+
+	if (plan->scheme == NULL || !plan->fixed || granule == 0)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "only a fixed disk has a volume length to fit"));
+	sector = plan->table.sector_bytes;
+	plan->scheme->scheme->footprint(sector, &leading, &trailing);
+	if (!round_up(leading * sector, PARTITION_ALIGNMENT, &start) ||
+	    plan->disk_bytes < trailing * sector)
+		return (keyed_error(error, disk_key(plan),
+		    "the disk is too small for a partition"));
+	end = plan->disk_bytes - trailing * sector;
+	if (end <= start || (end - start) / granule == 0)
+		return (keyed_error(error, disk_key(plan),
+		    "the disk is too small for a partition"));
+	longest = (end - start) / granule * granule;
+	if (*volume_bytes == 0)
+		*volume_bytes = longest;
+	else if (*volume_bytes > longest)
+		return (keyed_error(error, disk_key(plan),
+		    "the disk is too small for its partitions and tables"));
+	return (FSIMG_OK);
+}
+
+/*
+ * Lay the records out in slot order: each at the first 1 MiB boundary at
+ * or after the end of the leading tables or the previous partition, its
+ * volume rounded up to whole sectors, the trailing tables after the last.
+ * A fixed disk must hold the result; otherwise it is the disk. Every value
+ * is computed with checked arithmetic.
+ */
+fsimg_status_t
+fsimg_disk_plan_place(fsimg_disk_plan_t *plan, const uint64_t *volume_bytes,
+    fsimg_error_t *error)
+{
+	fsimg_partition_record_t *record;
+	uint64_t leading, trailing, cursor, start, length, end;
+	uint32_t sector;
+	char key[32];
+
+	if (plan->scheme == NULL) {
+		plan->disk_bytes = volume_bytes[0];
+		return (FSIMG_OK);
+	}
+	sector = plan->table.sector_bytes;
+	plan->scheme->scheme->footprint(sector, &leading, &trailing);
+	cursor = leading * sector;
+	for (uint32_t i = 0; i < plan->table.count; i++) {
+		record = &plan->table.records[i];
+		if (volume_bytes[i] == 0) {
+			snprintf(key, sizeof(key), "partition %u", (unsigned)i + 1);
+			return (keyed_error(error, key, "a partition cannot be empty"));
+		}
+		if (!round_up(cursor, PARTITION_ALIGNMENT, &start) ||
+		    !round_up(volume_bytes[i], sector, &length) ||
+		    !fsimg_add_u64(start, length, &cursor))
+			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_IMAGE, "the partitions exceed the disk range"));
+		record->offset = start;
+		record->length = length;
+	}
+	if (!fsimg_add_u64(cursor, trailing * sector, &end))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_IMAGE,
+		    "the partitions exceed the disk range"));
+	if (plan->fixed && end > plan->disk_bytes)
+		return (keyed_error(error, disk_key(plan),
+		    "the disk is too small for its partitions and tables"));
+	if (!plan->fixed)
+		plan->disk_bytes = end;
+	if (plan->disk_bytes / sector > plan->scheme->scheme->max_disk_sectors)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the disk exceeds the 2^32 sectors an MBR addresses"));
+	return (check_identities(plan, error));
+}
+
+/* Unique GUIDs differ from each other and from the disk GUID, so no two
+ * GPT objects of one disk share an identity.
+ */
+static fsimg_status_t
+check_identities(const fsimg_disk_plan_t *plan, fsimg_error_t *error)
+{
+	const fsimg_partition_record_t *records = plan->table.records;
+	char message[80];
+
+	if (plan->table.kind != FSIMG_SCHEME_GPT)
+		return (FSIMG_OK);
+	for (uint32_t i = 0; i < plan->table.count; i++) {
+		if (bcmp(records[i].guid, plan->table.disk_guid, 16) == 0) {
+			snprintf(message, sizeof(message),
+			    "partition %u has the disk GUID", (unsigned)i + 1);
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, message));
+		}
+		for (uint32_t j = 0; j < i; j++) {
+			if (bcmp(records[i].guid, records[j].guid, 16) != 0)
+				continue;
+			snprintf(message, sizeof(message),
+			    "partitions %u and %u have the same GUID",
+			    (unsigned)j + 1, (unsigned)i + 1);
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, message));
+		}
+	}
+	return (FSIMG_OK);
+}
+
+void
+fsimg_disk_plan_report(const fsimg_disk_plan_t *plan, uint32_t slot,
+    fsimg_image_info_t *image, fsimg_partition_info_t *partition)
+{
+	const fsimg_scheme_table_t *table = &plan->table;
+
+	bzero(image, sizeof(*image));
+	bzero(partition, sizeof(*partition));
+	image->disk_bytes = plan->disk_bytes;
+	if (plan->scheme == NULL || slot == 0 || slot > table->count)
+		return;
+	snprintf(image->scheme, sizeof(image->scheme), "%s", plan->scheme->name);
+	image->sector_bytes = table->sector_bytes;
+	image->partition_count = plan->scheme->scheme->slots;
+	image->selected = slot;
+	if (table->kind == FSIMG_SCHEME_GPT)
+		bcopy(table->disk_guid, image->disk_guid, sizeof(image->disk_guid));
+	else
+		image->mbr_disk_id = table->mbr_disk_id;
+	fsimg_partition_report(table->kind, &table->records[slot - 1],
+	    partition);
+}
+
+void
+fsimg_disk_plan_free(fsimg_disk_plan_t *plan)
+{
+	fsimg_dealloc(plan->table.records);
+	plan->table.records = NULL;
+	plan->table.count = 0;
+}
+
+void
+fsimg_scheme_tables_free(fsimg_scheme_tables_t *tables)
+{
+	for (unsigned i = 0; i < tables->count; i++)
+		fsimg_dealloc(tables->regions[i].bytes);
+	bzero(tables, sizeof(*tables));
+}

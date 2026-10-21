@@ -24,6 +24,7 @@ static void test_info_label(void);
 static void test_job_posix_flags(void);
 static void test_job_roots(void);
 static void test_job_selection(void);
+static void test_job_layers(void);
 static void test_image_records(void);
 
 /* Create jobs in these tests populate the image root from one root. */
@@ -36,7 +37,7 @@ write_seed(const char *path)
 {
 	fsimg_worker_request_t request;
 	fsimg_error_t error = { .status = FSIMG_ECORRUPT };
-	unsigned char raw[FSIMG_WIRE_ERROR_BYTES];
+	unsigned char raw[FSIMG_JOB_BYTES];
 	int fd;
 
 	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
@@ -583,12 +584,12 @@ test_job_selection(void)
 	CHECK(fsimg_stack_parse("fat32/gpt", &request.stack, NULL) == FSIMG_OK);
 	request.selector = FSIMG_SELECT_NAME;
 	strcpy(request.partition_text, "EFI system");
-	request.gpt_sector = 4096;
+	request.layers.gpt_sector_bytes = 4096;
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
 	CHECK(bcmp(&decoded.stack, &request.stack, sizeof(request.stack)) == 0);
-	CHECK(decoded.selector == FSIMG_SELECT_NAME && decoded.gpt_sector == 4096);
+	CHECK(decoded.selector == FSIMG_SELECT_NAME && decoded.layers.gpt_sector_bytes == 4096);
 	CHECK(strcmp(decoded.partition_text, "EFI system") == 0);
 	CHECK(strcmp(fsimg_job_format(&decoded), "fat32") == 0);
 
@@ -611,6 +612,70 @@ test_job_selection(void)
 	strcpy((char *)mutated + 368, "mbr");
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
+}
+
+/* Every layer setting crosses the job wire unchanged. Unknown MBR flags,
+ * an identifier past 32 bits or present without its flag, nonzero padding
+ * and unterminated text each fail, so a record has one encoding.
+ */
+static void
+test_job_layers(void)
+{
+	static const struct {
+		unsigned	 offset;
+		uint64_t	 value;
+	} bad[] = {
+		{ 512, UINT64_C(1) << 32 }, { 520, 4 }, { 520, 0x100 }
+	};
+	static const unsigned text_ends[] = { 599, 711, 727 };
+	static const unsigned char guid[16] = { 0x11, 0x22, 0x33, 0x44, 0x55,
+	    0x66, 0x47, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01 };
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES], mutated[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_INFO;
+	CHECK(fsimg_stack_parse("fat32/mbr", &request.stack, NULL) == FSIMG_OK);
+	request.layers.gpt_sector_bytes = 4096;
+	request.layers.gpt_disk_bytes = UINT64_C(1) << 40;
+	request.layers.mbr_disk_bytes = UINT64_C(3) << 20;
+	request.layers.mbr_id = 0xdeadbeef;
+	request.layers.mbr_id_set = true;
+	request.layers.mbr_active = true;
+	bcopy(guid, request.layers.gpt_disk_guid, sizeof(guid));
+	bcopy(guid, request.layers.gpt_guid, sizeof(guid));
+	request.layers.gpt_guid[15] = 0x02;
+	memset(request.layers.gpt_type, 't', sizeof(request.layers.gpt_type) - 1);
+	memset(request.layers.gpt_name, 'n', sizeof(request.layers.gpt_name) - 1);
+	strcpy(request.layers.mbr_type, "0x0c");
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(bcmp(&decoded.layers, &request.layers, sizeof(request.layers)) == 0);
+
+	for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		bcopy(raw, mutated, sizeof(raw));
+		fsimg_wire_put64(mutated + bad[i].offset, bad[i].value);
+		CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded,
+		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
+	}
+	bcopy(raw, mutated, sizeof(raw));
+	mutated[520] = 0x02;
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	/* The last byte of each text field: the full GPT type's and name's
+	 * terminators, and padding after the MBR type's.
+	 */
+	for (unsigned i = 0; i < sizeof(text_ends) / sizeof(text_ends[0]); i++) {
+		bcopy(raw, mutated, sizeof(raw));
+		mutated[text_ends[i]] = 'x';
+		CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded,
+		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
+	}
+	memset(request.layers.mbr_type, 'm', sizeof(request.layers.mbr_type));
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
 }
 
 /* The parent accepts an image record only for the disk it opened, with a
@@ -685,6 +750,7 @@ main(int argc, char **argv)
 	CHECK(argc == 1);
 	test_job_qnx6_settings();
 	test_job_selection();
+	test_job_layers();
 	test_image_records();
 	test_frame_splits(0);
 	test_frame_splits(127);

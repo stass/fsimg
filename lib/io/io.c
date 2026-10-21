@@ -115,6 +115,12 @@ fsimg_io_adopt_empty_output(fsimg_ctx_t *ctx, int fd, fsimg_io_t **out,
 	return (FSIMG_OK);
 }
 
+bool
+fsimg_io_proven_zero(const fsimg_io_t *io)
+{
+	return (io->root->known_zero);
+}
+
 void
 fsimg_io_ops_init(fsimg_io_ops_t *ops)
 {

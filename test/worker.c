@@ -87,6 +87,8 @@ typedef struct worker_fixture {
 	uint64_t	 plan_losses;
 	unsigned	 info;
 	unsigned	 plans;
+	unsigned	 images;
+	unsigned	 partitions;
 	bool		 ready;
 	bool		 refuse_ready;
 	bool		 dirty_event;
@@ -122,6 +124,7 @@ static void test_incomplete_extraction(void);
 static void test_skipped_extraction(void);
 static void test_mount_source(const char *);
 static void test_multiple_roots(worker_fixture_t *);
+static void test_partitioned_create(void);
 static void test_transport(worker_scenario_t);
 static int fake_worker(worker_scenario_t);
 static int fake_output(void);
@@ -378,6 +381,10 @@ event(void *argument, const fsimg_frame_t *frame,
 			text->data = "printed information\n";
 			text->length = strlen(text->data);
 		}
+		if (frame->type == FSIMG_FRAME_IMAGE)
+			fixture->images++;
+		if (frame->type == FSIMG_FRAME_PARTITION)
+			fixture->partitions++;
 		if (frame->type == FSIMG_FRAME_PLAN) {
 			fixture->plans++;
 			fixture->plan_losses = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PLAN_LOSSES);
@@ -514,6 +521,53 @@ test_operations(const char *format)
 	CHECK(fixture.plans == 2);
 	CHECK(fixture.result.metadata_losses == fixture.plan_losses);
 	test_multiple_roots(&fixture);
+	fixture_close(&fixture);
+}
+
+/*
+ * A create job of a partitioned disk reports the planned disk's IMAGE and
+ * PARTITION records before its PLAN, carries its layer settings across
+ * the job record, and stages the whole disk, whose length the parent
+ * accepts as the image's.
+ */
+static void
+test_partitioned_create(void)
+{
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	struct stat st;
+	unsigned char bytes[8];
+	int fd;
+
+	fixture_open(&fixture);
+	fixture.request.kind = FSIMG_JOB_CREATE;
+	fixture.request.selection = "/";
+	fixture.request.input_fd = -1;
+	fixture.request.root_fds = &fixture.source;
+	fixture.request.root_paths = image_root;
+	fixture.request.root_count = 1;
+	fixture.request.output_fd = fixture.output;
+	fixture.request.write.flags |= FSIMG_WRITE_REPRODUCIBLE;
+	CHECK(fsimg_stack_parse("fat12/mbr", &fixture.request.stack, NULL) ==
+	    FSIMG_OK);
+	fixture.request.layers.mbr_id = 0x0badcafe;
+	fixture.request.layers.mbr_id_set = true;
+	CHECK(run(&fixture, &error) == FSIMG_OK);
+	CHECK(fixture.images == 1 && fixture.partitions == 1 && fixture.plans == 1);
+	fd = openat(fixture.output, "image", O_RDONLY | O_NOFOLLOW);
+	CHECK(fd != -1 && fstat(fd, &st) == 0);
+	CHECK((uint64_t)st.st_size == fixture.result.image_bytes);
+	CHECK(pread(fd, bytes, 4, 440) == 4 && bytes[0] == 0xfe && bytes[3] == 0x0b);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture.output, "image", 0) == 0);
+
+	/* A refused setting fails the job in the worker, naming the key. */
+	snprintf(fixture.request.layers.mbr_type,
+	    sizeof(fixture.request.layers.mbr_type), "0xee");
+	bzero(&error, sizeof(error));
+	CHECK(run(&fixture, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "mbr:type") == 0);
+	CHECK(faccessat(fixture.output, "image", F_OK, 0) == -1);
 	fixture_close(&fixture);
 }
 
@@ -1210,6 +1264,7 @@ main(int argc, char **argv)
 	}
 	test_operations("fat16");
 	test_operations("exfat");
+	test_partitioned_create();
 	test_prompt_completion();
 	test_text_output();
 	test_startup();

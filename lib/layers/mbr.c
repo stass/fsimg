@@ -46,12 +46,20 @@ static fsimg_status_t mbr_open(const fsimg_scheme_input_t *,
     fsimg_scheme_table_t *, fsimg_error_t *);
 static fsimg_status_t mbr_verify(const fsimg_scheme_input_t *,
     const fsimg_scheme_table_t *, fsimg_error_t *);
+static void mbr_footprint(uint32_t, uint64_t *, uint64_t *);
+static void encode_chs(uint64_t, unsigned char *);
+static fsimg_status_t mbr_encode(fsimg_ctx_t *, const fsimg_scheme_table_t *,
+    uint64_t, fsimg_scheme_tables_t *, fsimg_error_t *);
 
 const fsimg_scheme_ops_t fsimg_mbr_scheme = {
 	.probe_bytes = MBR_SECTOR_BYTES,
 	.probe = mbr_probe,
 	.open = mbr_open,
-	.verify = mbr_verify
+	.verify = mbr_verify,
+	.slots = MBR_SLOTS,
+	.max_disk_sectors = MBR_ADDRESSABLE_SECTORS,
+	.footprint = mbr_footprint,
+	.encode = mbr_encode
 };
 
 /* Decode one entry. False when it is neither all zero nor legal: a status
@@ -212,5 +220,97 @@ mbr_verify(const fsimg_scheme_input_t *input FSIMG_UNUSED,
     const fsimg_scheme_table_t *table FSIMG_UNUSED,
     fsimg_error_t *error FSIMG_UNUSED)
 {
+	return (FSIMG_OK);
+}
+
+/* The table is the first sector; nothing trails the partitions. */
+static void
+mbr_footprint(uint32_t sector_bytes FSIMG_UNUSED, uint64_t *leading,
+    uint64_t *trailing)
+{
+	*leading = 1;
+	*trailing = 0;
+}
+
+/* A CHS address under the 255-head, 63-sector convention, saturating at
+ * cylinder 1023, head 254, sector 63 as fdisk writes it: the head, then
+ * the sector with the cylinder's two high bits above it, then the
+ * cylinder's low byte.
+ */
+static void
+encode_chs(uint64_t lba, unsigned char *raw)
+{
+	uint64_t cylinder, head, sector;
+
+	cylinder = lba / (255 * 63);
+	head = lba / 63 % 255;
+	sector = lba % 63 + 1;
+	if (cylinder > 1023) {
+		cylinder = 1023;
+		head = 254;
+		sector = 63;
+	}
+	raw[0] = (unsigned char)head;
+	raw[1] = (unsigned char)(sector | (cylinder >> 2 & 0xc0));
+	raw[2] = (unsigned char)(cylinder & 0xff);
+}
+
+/*
+ * The one sector: a zero code area, the disk identifier, the placed
+ * records in their slots with status, CHS start, type, CHS end, first LBA
+ * and count, unused slots zero, and the signature. The plan placed every
+ * record after the sector and within the 2^32 sectors an entry
+ * addresses; anything else is an internal error, never an encoded table.
+ */
+static fsimg_status_t
+mbr_encode(fsimg_ctx_t *ctx, const fsimg_scheme_table_t *table,
+    uint64_t disk_bytes, fsimg_scheme_tables_t *out, fsimg_error_t *error)
+{
+	const fsimg_partition_record_t *record;
+	unsigned char *sector, *raw;
+	uint64_t first, count;
+
+	bzero(out, sizeof(*out));
+	if (table->sector_bytes != MBR_SECTOR_BYTES || table->count > MBR_SLOTS ||
+	    disk_bytes % MBR_SECTOR_BYTES != 0 ||
+	    disk_bytes / MBR_SECTOR_BYTES > MBR_ADDRESSABLE_SECTORS)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "MBR table geometry was not planned"));
+	for (uint32_t i = 0; i < table->count; i++) {
+		record = &table->records[i];
+		first = record->offset / MBR_SECTOR_BYTES;
+		count = record->length / MBR_SECTOR_BYTES;
+		if (record->index == 0 || record->index > MBR_SLOTS ||
+		    (record->used && (record->offset % MBR_SECTOR_BYTES != 0 ||
+		    record->length % MBR_SECTOR_BYTES != 0 || first == 0 ||
+		    count == 0 || first + count > disk_bytes / MBR_SECTOR_BYTES ||
+		    record->mbr_type == 0)))
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_IMAGE, "MBR partition was not placed"));
+	}
+
+	sector = fsimg_alloc(ctx, MBR_SECTOR_BYTES, error);
+	if (sector == NULL)
+		return (error->status);
+	fsimg_layer_put_le32(sector + MBR_DISK_ID, table->mbr_disk_id);
+	for (uint32_t i = 0; i < table->count; i++) {
+		record = &table->records[i];
+		if (!record->used)
+			continue;
+		raw = sector + MBR_ENTRIES + (record->index - 1) * MBR_ENTRY_BYTES;
+		first = record->offset / MBR_SECTOR_BYTES;
+		count = record->length / MBR_SECTOR_BYTES;
+		raw[0] = record->active ? 0x80 : 0x00;
+		encode_chs(first, raw + 1);
+		raw[4] = record->mbr_type;
+		encode_chs(first + count - 1, raw + 5);
+		fsimg_layer_put_le32(raw + 8, (uint32_t)first);
+		fsimg_layer_put_le32(raw + 12, (uint32_t)count);
+	}
+	sector[MBR_SIGNATURE] = 0x55;
+	sector[MBR_SIGNATURE + 1] = 0xaa;
+	out->regions[0] = (fsimg_table_region_t){ .bytes = sector, .offset = 0,
+	    .length = MBR_SECTOR_BYTES };
+	out->count = 1;
 	return (FSIMG_OK);
 }

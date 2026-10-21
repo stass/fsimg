@@ -91,8 +91,17 @@ def private_directory(root, name, mode=0o700):
 def test_formats(executable, root):
     decoded = completed(invoke(executable, root, ["--formats", "--json"]))
     assert decoded[-1]["command"] == "formats"
-    formats = {record["name"]: record for record in decoded if record["type"] == "format"}
+    formats = filesystems(decoded)
     assert set(formats) == {"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4"}
+    layers = {record["name"]: record for record in decoded
+              if record["type"] == "format" and record["kind"] != "filesystem"}
+    assert {name: record["kind"] for name, record in layers.items()} == {
+        "gpt": "scheme", "mbr": "scheme", "dmg": "container", "vhd": "container",
+        "simg": "container", "gzip": "compression"}
+    assert layers["gpt"]["settings"] == ["sector", "disk", "type", "name", "disk-guid", "guid"]
+    assert layers["mbr"]["settings"] == ["disk", "type", "active", "id"]
+    assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 0
+    assert layers["vhd"]["suffix"] == ".vhd" and layers["gpt"]["suffix"] is None
     assert all(record["capabilities"] == 7 for record in formats.values())
     assert formats["exfat"]["write_cluster_bytes"][-1] == 32 * 1024 * 1024
     assert isinstance(formats["exfat"]["max_file_bytes"], str)
@@ -103,12 +112,18 @@ def test_formats(executable, root):
     assert invoke(executable, root, ["-V"]).stdout.startswith(b"fsimg ")
 
 
+def filesystems(decoded):
+    """The --formats JSON records of the filesystem formats, by name."""
+    return {record["name"]: record for record in decoded
+            if record["type"] == "format" and record["kind"] == "filesystem"}
+
+
 def test_posix_metadata(executable, root):
     """FAT and exFAT store no POSIX fields or links: -p imports become counted
     losses that leave image bytes unchanged, and a link fails planning. The
     QNX6 and QNX4 formats store every kind and the POSIX fields."""
     decoded = completed(invoke(executable, root, ["--formats", "--json"]))
-    formats = {record["name"]: record for record in decoded if record["type"] == "format"}
+    formats = filesystems(decoded)
     qnx6 = formats.pop("qnx6")
     assert qnx6["entry_kinds"] == 15 and qnx6["metadata_fields"] == 0x77
     assert qnx6["max_label_bytes"] == 0 and qnx6["write_settings"] == 15
@@ -206,7 +221,16 @@ def test_human_help(executable, root):
                               b"fat32   yes   yes    yes\n"
                               b"exfat   yes   yes    yes\n"
                               b"qnx6    yes   yes    yes\n"
-                              b"qnx4    yes   yes    yes\n")
+                              b"qnx4    yes   yes    yes\n"
+                              b"\n"
+                              b"Layer  Kind         Read  Write  Verify  Settings\n"
+                              b"gpt    scheme       yes   yes    yes     "
+                              b"sector,disk,type,name,disk-guid,guid\n"
+                              b"mbr    scheme       yes   yes    yes     disk,type,active,id\n"
+                              b"dmg    container    no    no     no      -\n"
+                              b"vhd    container    no    no     no      -\n"
+                              b"simg   container    no    no     no      -\n"
+                              b"gzip   compression  no    no     no      -\n")
     assert formats.stderr == b""
     verbose = invoke(executable, root, ["--formats", "-v"])
     assert verbose.stdout == formats.stdout and b"Sandbox backend:" in verbose.stderr
@@ -354,8 +378,8 @@ def test_option_syntax(executable, root):
         # Options precede operands: after the first member, -v is a member.
         (["t", "-f", "human.img", "/nested", "-v"], b"selecting several members is not supported"),
         (["t", "-z", "-f", "human.img"], b"compressed images are not supported"),
-        (["cf", "syntax.img", "-F", "fat32/gpt", "-C", "source", "."],
-         b"creating a partition scheme is not supported"),
+        (["cf", "syntax.img", "-F", "fat32/gpt/vhd", "-C", "source", "."],
+         b"image containers are not supported"),
         (["t", "-f", "-"], b"reading an image from standard input is not supported"),
         (["t", "-F", "fat32/-/vhd", "-f", "human.img"], b"image containers are not supported"),
         (["cf", "syntax.img", "-F", "fat32/dmg", "-C", "source", "."],
@@ -953,8 +977,10 @@ def test_partitioned(executable, root):
         "Stack:        fat12/gpt\nCompression:  none\n"
         "Scheme:       GPT, 512-byte sectors\nDisk size:    4 MiB\n"
         f"Disk GUID:    {DISK_GUID}\n"
-        'Partition 1:  esp, 1 MiB at 1 MiB, fat12, name "EFI", selected\n'
-        'Partition 2:  linux, 1 MiB at 2 MiB, no filesystem, name "data"\n'
+        'Partition 1:  esp, 1 MiB at 1 MiB, fat12, name "EFI", '
+        "GUID 00000000-0000-0000-0000-000000000001, selected\n"
+        'Partition 2:  linux, 1 MiB at 2 MiB, no filesystem, name "data", '
+        "GUID 00000000-0000-0000-0000-000000000002\n"
         "Format:       FAT12\n"), info
     decoded = completed(invoke(executable, root, ["i", "--json", "-f", "gpt.img"]))
     assert [record["type"] for record in decoded] == \
@@ -1044,6 +1070,109 @@ def test_partitioned(executable, root):
     assert b"several partitions have that type" in info.stderr
 
 
+BASIC_TYPE = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
+
+
+def test_partitioned_create(executable, root):
+    """c writes a disk around its volume: the volume at 1 MiB is the bare
+    volume byte for byte, the tables around it carry the derived or given
+    identifiers and settings, the plan reports each layer, and an invalid
+    setting publishes nothing."""
+    common = ["-R", "-e", "1700000000", "-C", "source", "."]
+    invoke(executable, root, ["c", "-F", "fat32", "-f", "bare.img", *common])
+    invoke(executable, root, ["c", "-F", "fat32/gpt", "-f", "made-gpt.img", *common])
+    bare = (root / "bare.img").read_bytes()
+    disk = (root / "made-gpt.img").read_bytes()
+    assert disk[1 << 20:(1 << 20) + len(bare)] == bare
+    # Epoch 1700000000 is 0x6553f100: its eight little-endian bytes, the
+    # role (0x81 disk, 0x82 partition) and the slot, version 4.
+    disk_guid = "00f15365-0000-4000-8100-000000000000"
+    partition_guid = "00f15365-0000-4000-8201-000000000000"
+    info = invoke(executable, root, ["i", "-f", "made-gpt.img"]).stdout.decode()
+    assert "Stack:        fat32/gpt\nCompression:  none\nScheme:       GPT, 512-byte sectors\n" \
+        in info, info
+    assert f"Disk GUID:    {disk_guid}\n" in info, info
+    assert re.search(r'Partition 1:  basic, [^\n]* at 1 MiB, fat32, name "Microsoft basic data", '
+                     f"GUID {partition_guid}, selected\n", info), info
+    assert disk[450] == 0xEE and disk[510:512] == b"\x55\xaa" and disk[512:520] == b"EFI PART"
+    assert disk[512 + 56:512 + 72] == uuid.UUID(disk_guid).bytes_le
+    assert disk[1024:1040] == uuid.UUID(BASIC_TYPE).bytes_le
+    assert disk[1040:1056] == uuid.UUID(partition_guid).bytes_le
+    invoke(executable, root, ["cW", "-F", "fat32/gpt", "-f", "made-gpt-2.img", *common])
+    same_bytes(root / "made-gpt.img", root / "made-gpt-2.img")
+    assert listing(executable, root, "made-gpt.img") == listing(executable, root, "bare.img")
+
+    # The plan reports the disk, the volume's place on it and the volume.
+    decoded = completed(invoke(executable, root, [
+        "c", "-n", "--json", "-F", "fat16/mbr", "-o", "mbr:disk=64M", *common]))
+    assert [record["type"] for record in decoded] == ["stack", "partition", "plan", "summary"]
+    stack, partition, plan = decoded[:3]
+    assert stack["disk_bytes"] == str(64 << 20) and stack["mbr_disk_id"] == 0x6553F100
+    assert partition["offset_bytes"] == str(1 << 20) and partition["mbr_type"] == 6
+    assert plan["volume_bytes"] == partition["length_bytes"] == str(63 << 20)
+
+    # Settings: type, name and disk length, the MBR status and identifier,
+    # and 4096-byte GPT sectors.
+    invoke(executable, root, ["c", "-F", "fat12/gpt", "-f", "esp.img", "-o", "gpt:type=esp",
+                              "-o", "gpt:name=EFI", "-o", "gpt:disk=8M", *common])
+    assert (root / "esp.img").stat().st_size == 8 << 20
+    info = invoke(executable, root, ["i", "-f", "esp.img"]).stdout.decode()
+    assert 'Partition 1:  esp, ' in info and 'name "EFI"' in info, info
+    invoke(executable, root, ["c", "-F", "fat16/mbr", "-f", "made-mbr.img", "-o", "mbr:active=yes",
+                              "-o", "mbr:id=0x0badcafe", *common])
+    disk = (root / "made-mbr.img").read_bytes()
+    assert disk[440:444] == struct.pack("<I", 0x0BADCAFE) and disk[446] == 0x80 and disk[450] == 0x06
+    info = invoke(executable, root, ["i", "-f", "made-mbr.img"]).stdout.decode()
+    assert "Disk ID:      0x0badcafe\n" in info and "fat16, active, selected\n" in info, info
+    invoke(executable, root, ["c", "-F", "exfat/gpt", "-f", "4kn.img", "-o", "gpt:sector=4096",
+                              *common])
+    assert (root / "4kn.img").read_bytes()[4096:4104] == b"EFI PART"
+    assert b"GPT, 4096-byte sectors" in invoke(executable, root, ["i", "-f", "4kn.img"]).stdout
+
+    # Without -R each identifier is random, version 4.
+    for name in ["random-1.img", "random-2.img"]:
+        invoke(executable, root, ["c", "-F", "fat12/gpt", "-f", name, "-C", "source", "."])
+    guids = [records(invoke(executable, root, ["i", "--json", "-f", name]))[0]["disk_guid"]
+             for name in ["random-1.img", "random-2.img"]]
+    assert guids[0] != guids[1] and all(uuid.UUID(guid).version == 4 for guid in guids)
+
+    for arguments, detail in [
+        (["-F", "qnx4/gpt"], b'the partition type has no GPT GUID "gpt:type"'),
+        (["-F", "fat32/gpt", "-o", "gpt:name=" + "x" * 37],
+         b'the GPT name exceeds 36 UTF-16 units "gpt:name"'),
+        (["-F", "fat12/gpt", "-o", "gpt:disk=1M"],
+         b'the disk is too small for a partition "gpt:disk"'),
+        (["-F", "fat12/mbr", "-o", "mbr:type=0x85"],
+         b'extended and GPT protective types cannot be written "mbr:type"'),
+        (["-F", "fat12/mbr", "-o", "mbr:type=0xee"],
+         b'extended and GPT protective types cannot be written "mbr:type"'),
+        (["-F", "fat12/mbr", "-o", "mbr:type=apfs"],
+         b'the partition type has no MBR byte "mbr:type"'),
+        (["-F", "fat12/mbr", "-o", "mbr:disk=3T"],
+         b'an MBR disk holds at most 2^32 sectors "mbr:disk"'),
+    ]:
+        result = invoke(executable, root, ["c", "-f", "refused.img", *arguments, *common],
+                        expected=1)
+        assert detail in result.stderr, (arguments, result.stderr)
+        assert not (root / "refused.img").exists()
+    for arguments, detail in [
+        (["-F", "fat32/mbr", "-o", "gpt:type=esp"],
+         b"setting names a layer the stack does not contain"),
+        (["-F", "fat32/gpt", "-o", "gpt:guid=00000000-0000-0000-0000-000000000000"],
+         b"GUID setting must be RFC 4122 text other than nil"),
+        (["-F", "fat32/mbr", "-o", "mbr:id=12"],
+         b"setting requires 0x and at most eight hex digits"),
+        (["-F", "fat32/mbr", "-o", "mbr:active=1"], b"setting must be yes or no"),
+        (["-F", "fat32/gpt", "-o", "gpt:color=red"], b"unknown layer setting"),
+    ]:
+        result = invoke(executable, root, ["c", "-f", "refused.img", *arguments, *common],
+                        expected=2)
+        assert detail in result.stderr, (arguments, result.stderr)
+    result = invoke(executable, root, ["tf", "made-gpt.img", "-F", "fat32/gpt",
+                                       "-o", "gpt:type=esp"], expected=2)
+    assert b"setting applies only to creation" in result.stderr, result.stderr
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -1073,6 +1202,7 @@ def main():
         test_examples(executable, root)
         test_merged_operands(executable, root)
         test_partitioned(executable, root)
+        test_partitioned_create(executable, root)
         assert not list(root.glob(".fsimg-*"))
     print("CLI commands, independent JSON decoding, publication and failure checks pass")
 

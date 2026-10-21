@@ -715,7 +715,7 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 
 	fsimg_image_options_init(&options);
 	options.stack = request->stack;
-	options.layers.gpt_sector_bytes = request->gpt_sector;
+	options.layers.gpt_sector_bytes = request->layers.gpt_sector_bytes;
 	status = fsimg_image_open(child->ctx, child->input, &options, &child->image,
 	    error);
 	if (status != FSIMG_OK)
@@ -900,17 +900,30 @@ add_synthesized_parents(worker_child_t *child, const char *path,
 	return (status);
 }
 
+/*
+ * Plan the image and report it: for a partitioned disk the IMAGE record and
+ * the one PARTITION record, the volume's place on the disk, then the PLAN;
+ * for a bare volume the PLAN alone. A create job then emits the whole disk
+ * into the staged file.
+ */
 static fsimg_status_t
 create_job(worker_child_t *child, fsimg_error_t *error)
 {
 	const fsimg_plan_t *plan;
 	fsimg_plan_info_t info;
+	unsigned char raw[FSIMG_WIRE_PARTITION_BYTES];
+	char stack[FSIMG_WIRE_IMAGE_STACK_BYTES];
 	fsimg_io_t *output;
 	fsimg_status_t status;
 	int fd, saved;
 
-	status = fsimg_writer_new(child->ctx, fsimg_job_format(&child->request),
-	    &child->request.write, &child->writer, error);
+	if (fsimg_stack_format(&child->request.stack, stack, sizeof(stack)) >=
+	    sizeof(stack))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
+		    "invalid worker stack"));
+	child->request.write.layers = &child->request.layers;
+	status = fsimg_writer_new(child->ctx, stack, &child->request.write,
+	    &child->writer, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (child->request.kind == FSIMG_JOB_CREATE) {
@@ -928,9 +941,18 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	status = fsimg_plan_get_info(plan, &info, error);
 	if (status != FSIMG_OK)
 		return (status);
-	child->result.image_bytes = info.volume_bytes;
+	child->result.image_bytes = info.image.disk_bytes;
 	child->result.entries = info.entries;
 	child->result.logical_bytes = info.payload_bytes;
+	if (info.image.scheme[0] != '\0') {
+		status = send_image(&info.image, info.format, NULL, NULL, error);
+		fsimg_wire_partition_encode(raw, &info.partition);
+		if (status == FSIMG_OK)
+			status = fsimg_frame_write(FSIMG_CHILD_CONTROL,
+			    FSIMG_FRAME_PARTITION, raw, sizeof(raw), error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	status = send_plan(&info, error);
 	if (status != FSIMG_OK || child->request.kind == FSIMG_JOB_PLAN)
 		return (status);

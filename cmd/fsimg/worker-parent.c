@@ -38,7 +38,10 @@ typedef enum worker_phase {
  * IMAGE record leads to WAIT_HEADER, or for i without a selected volume to
  * UNSELECTED, after which only the table's PARTITION records and DONE may
  * follow. i's PARTITION records arrive in WAIT_HEADER or UNSELECTED. A
- * create job starts in WAIT_HEADER, for its PLAN.
+ * create job of a partitioned disk starts in WAIT_IMAGE too: its IMAGE
+ * record describes the planned disk and its one PARTITION record the
+ * volume's place on it, and then its PLAN follows. A create job of a bare
+ * volume starts in WAIT_HEADER, for its PLAN.
  */
 typedef enum worker_output_state {
 	WORKER_WAIT_HEADER,
@@ -135,8 +138,10 @@ typedef struct worker_supervisor {
 	uint64_t	 entry_count;
 	uint64_t	 output_limit;
 	uint64_t	 volume_limit;
-	uint64_t	 disk_bytes;	/* The read job's input file size */
+	/* The read job's input file size, or the create job's planned disk. */
+	uint64_t	 disk_bytes;
 	uint64_t	 table_slots;	/* From the IMAGE record */
+	uint64_t	 selected_slot;	/* From the IMAGE record */
 	uint64_t	 last_partition; /* Slot of the last PARTITION record */
 	bool		 raw_eof;
 	bool		 stdout_available;
@@ -148,6 +153,10 @@ static fsimg_status_t worker_error(fsimg_error_t *, const char *);
 static fsimg_status_t queue_text(worker_supervisor_t *, const fsimg_worker_text_t *,
     bool, fsimg_error_t *);
 static fsimg_status_t deliver_event(worker_supervisor_t *, fsimg_error_t *);
+static bool image_frame_expected(const worker_supervisor_t *,
+    const fsimg_frame_t *);
+static bool partition_frame_expected(const worker_supervisor_t *,
+    const fsimg_frame_t *);
 static fsimg_status_t handle_frame(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t read_control(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t prepare_request(worker_supervisor_t *, fsimg_error_t *);
@@ -261,6 +270,63 @@ deliver_event(worker_supervisor_t *state, fsimg_error_t *error)
 	return (queue_text(state, &text, false, error));
 }
 
+/*
+ * A read job's IMAGE record describes the input it opened, so its disk is
+ * the input file's size. A create job's describes the disk it plans: it
+ * names the request's scheme and selects the one partition, and the
+ * handler then takes its disk length as the bound of the partition and
+ * the image. Only i reports a disk without a volume; only W verifies
+ * tables.
+ */
+static bool
+image_frame_expected(const worker_supervisor_t *state,
+    const fsimg_frame_t *frame)
+{
+	const unsigned char *raw = frame->payload;
+	const fsimg_stack_slot_t *scheme;
+	fsimg_job_kind_t kind = state->request->kind;
+	uint64_t flags, disk_bytes;
+
+	if (state->output_state != WORKER_WAIT_IMAGE ||
+	    frame->length != FSIMG_WIRE_IMAGE_BYTES)
+		return (false);
+	disk_bytes = state->disk_bytes;
+	if (kind >= FSIMG_JOB_CREATE)
+		disk_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK);
+	if (!fsimg_wire_image_frame_valid(frame, disk_bytes))
+		return (false);
+	flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
+	if (((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 && kind != FSIMG_JOB_INFO) ||
+	    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && kind != FSIMG_JOB_VERIFY))
+		return (false);
+	scheme = &state->request->stack.slots[FSIMG_LAYER_SCHEME];
+	return (kind < FSIMG_JOB_CREATE ||
+	    (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME, scheme->name) == 0 &&
+	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED) == 1));
+}
+
+/* i lists every used slot, also when no volume was selected; a create job
+ * reports the one partition its IMAGE record selected.
+ */
+static bool
+partition_frame_expected(const worker_supervisor_t *state,
+    const fsimg_frame_t *frame)
+{
+	fsimg_job_kind_t kind = state->request->kind;
+	uint64_t index;
+
+	if (!fsimg_wire_partition_frame_valid(frame, state->table_slots,
+	    state->disk_bytes))
+		return (false);
+	index = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PARTITION_INDEX);
+	if (kind == FSIMG_JOB_INFO)
+		return ((state->output_state == WORKER_WAIT_HEADER ||
+		    state->output_state == WORKER_UNSELECTED) &&
+		    index > state->last_partition);
+	return (kind >= FSIMG_JOB_CREATE &&
+	    state->output_state == WORKER_WAIT_HEADER &&
+	    state->last_partition == 0 && index == state->selected_slot);
+}
 
 static fsimg_status_t
 handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
@@ -322,25 +388,20 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		return (worker_error(error, "worker interrupted an entry name"));
 	switch (frame->type) {
 	case FSIMG_FRAME_IMAGE:
-		/* Only i reports a disk without a volume; only W verifies tables. */
-		if (kind >= FSIMG_JOB_CREATE || state->output_state != WORKER_WAIT_IMAGE ||
-		    !fsimg_wire_image_frame_valid(frame, state->disk_bytes))
+		if (!image_frame_expected(state, frame))
 			return (worker_error(error, "invalid worker image information"));
 		flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
-		if (((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 && kind != FSIMG_JOB_INFO) ||
-		    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && kind != FSIMG_JOB_VERIFY))
-			return (worker_error(error, "invalid worker image information"));
 		state->table_slots = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SLOTS);
+		state->selected_slot = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
+		/* A create job's planned disk bounds what follows it. */
+		if (state->request->kind >= FSIMG_JOB_CREATE)
+			state->disk_bytes = fsimg_wire_get64(raw +
+			    FSIMG_WIRE_IMAGE_DISK);
 		state->output_state = (flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 ?
 		    WORKER_UNSELECTED : WORKER_WAIT_HEADER;
 		break;
 	case FSIMG_FRAME_PARTITION:
-		if (kind != FSIMG_JOB_INFO || (state->output_state != WORKER_WAIT_HEADER &&
-		    state->output_state != WORKER_UNSELECTED) ||
-		    !fsimg_wire_partition_frame_valid(frame, state->table_slots,
-		    state->disk_bytes) ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX) <=
-		    state->last_partition)
+		if (!partition_frame_expected(state, frame))
 			return (worker_error(error, "invalid worker partition record"));
 		state->last_partition = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX);
 		break;
@@ -351,11 +412,15 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		state->output_state = WORKER_OUTPUT_READY;
 		break;
 	case FSIMG_FRAME_PLAN:
+		/* A planned disk holds its volume; a bare volume is the image. */
 		if (kind < FSIMG_JOB_CREATE || state->output_state != WORKER_WAIT_HEADER ||
-		    !fsimg_wire_plan_frame_valid(frame))
+		    !fsimg_wire_plan_frame_valid(frame) ||
+		    (state->table_slots != 0 && (state->last_partition == 0 ||
+		    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME) > state->disk_bytes)))
 			return (worker_error(error, "invalid worker image plan"));
 		state->output_state = WORKER_OUTPUT_READY;
-		state->result->image_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME);
+		state->result->image_bytes = state->table_slots != 0 ? state->disk_bytes :
+		    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME);
 		break;
 	case FSIMG_FRAME_ENTRY:
 		path_limit = state->request->limits.max_path_bytes == 0 ? 65536 :
@@ -1089,8 +1154,9 @@ supervisor_init(worker_supervisor_t *state, const fsimg_worker_request_t *reques
 	state->interrupted = interrupted;
 	state->stdout_available = standard_output != -1;
 	state->producer_done = true;
-	state->output_state = request->kind < FSIMG_JOB_CREATE ? WORKER_WAIT_IMAGE :
-	    WORKER_WAIT_HEADER;
+	state->output_state = request->kind < FSIMG_JOB_CREATE ||
+	    request->stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_NAMED ?
+	    WORKER_WAIT_IMAGE : WORKER_WAIT_HEADER;
 	if (request->output_budget == NULL) {
 		fsimg_output_budget_init(&state->local_budget, &request->limits);
 		state->budget = &state->local_budget;

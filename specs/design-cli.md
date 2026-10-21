@@ -594,7 +594,10 @@ disk GUID or MBR identifier, the selected partition's slot and whether a
 volume was selected, with the reason when none was. `i` follows it with one
 partition record per used slot: slot, type name, type GUID, unique GUID and
 name (GPT) or type byte and active flag (MBR), offset, length, the
-filesystem claim and format, and whether it is selected. A verify record
+filesystem claim and format, and whether it is selected. A creation whose
+stack names a scheme reports the planned disk the same way before its plan
+record: a stack record and the volume's partition record, with every
+identifier the plan derived. A verify record
 also names the verified scheme, the partitions whose bounds it checked and
 the selected slot, each null when the selection read no table. Byte
 quantities, counts, Unix seconds and nanosecond precision are decimal

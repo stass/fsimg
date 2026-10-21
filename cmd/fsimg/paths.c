@@ -35,6 +35,7 @@ static fsimg_status_t open_operand(int, const fsimg_cli_operand_t *, int,
 static fsimg_status_t open_roots(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
 static fsimg_status_t generate_identifiers(fsimg_cli_options_t *, fsimg_error_t *);
+static bool random_uuid(unsigned char [static 16]);
 static fsimg_status_t prepare_staging(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
 static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t, bool,
@@ -415,24 +416,51 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	return (status);
 }
 
-/* Without -R every volume receives a random serial, and a format storing a
- * UUID a random version 4 UUID unless one is given.
+/* Without -R every volume receives a random serial, a format storing a
+ * UUID a random version 4 UUID unless one is given, and a partition scheme
+ * random identifiers for those its settings leave unset: version 4 disk
+ * and partition GUIDs for GPT, a 32-bit disk identifier for MBR. Under -R
+ * the library derives them from the epoch instead.
  */
 static fsimg_status_t
 generate_identifiers(fsimg_cli_options_t *options, fsimg_error_t *error)
 {
+	static const unsigned char nil[16];
 	fsimg_write_options_t *write = &options->request.write;
+	fsimg_layer_options_t *layers = &options->request.layers;
+	const fsimg_stack_slot_t *scheme;
 
-	if ((write->flags & FSIMG_WRITE_REPRODUCIBLE) == 0 &&
-	    fsimg_host_random(&write->volume_serial, sizeof(write->volume_serial)) == -1)
-		return (host_error(error, "volume identifier generation failed"));
-	if (!options->random_uuid)
+	if ((write->flags & FSIMG_WRITE_REPRODUCIBLE) != 0)
 		return (FSIMG_OK);
-	if (fsimg_host_random(write->volume_uuid, sizeof(write->volume_uuid)) == -1)
+	if (fsimg_host_random(&write->volume_serial, sizeof(write->volume_serial)) == -1 ||
+	    (options->random_uuid && !random_uuid(write->volume_uuid)))
 		return (host_error(error, "volume identifier generation failed"));
-	write->volume_uuid[6] = (unsigned char)((write->volume_uuid[6] & 0x0f) | 0x40);
-	write->volume_uuid[8] = (unsigned char)((write->volume_uuid[8] & 0x3f) | 0x80);
+	scheme = &options->request.stack.slots[FSIMG_LAYER_SCHEME];
+	if (scheme->state != FSIMG_SLOT_NAMED)
+		return (FSIMG_OK);
+	if (strcmp(scheme->name, "gpt") == 0 &&
+	    ((bcmp(layers->gpt_disk_guid, nil, sizeof(nil)) == 0 &&
+	    !random_uuid(layers->gpt_disk_guid)) ||
+	    (bcmp(layers->gpt_guid, nil, sizeof(nil)) == 0 &&
+	    !random_uuid(layers->gpt_guid))))
+		return (host_error(error, "disk identifier generation failed"));
+	if (strcmp(scheme->name, "mbr") == 0 && !layers->mbr_id_set) {
+		if (fsimg_host_random(&layers->mbr_id, sizeof(layers->mbr_id)) == -1)
+			return (host_error(error, "disk identifier generation failed"));
+		layers->mbr_id_set = true;
+	}
 	return (FSIMG_OK);
+}
+
+/* A random RFC 4122 version 4 UUID in textual byte order. */
+static bool
+random_uuid(unsigned char uuid[static 16])
+{
+	if (fsimg_host_random(uuid, 16) == -1)
+		return (false);
+	uuid[6] = (unsigned char)((uuid[6] & 0x0f) | 0x40);
+	uuid[8] = (unsigned char)((uuid[8] & 0x3f) | 0x80);
+	return (true);
 }
 
 /* A fresh private staging directory beside the final name, which must not
@@ -661,8 +689,8 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 /* The request of cW's verification worker: the staged image, opened
  * read-only and no-follow through the staging descriptor, checked with the
  * ordinary verification under the image-reading profile, with the
- * creation's filesystem forced on a bare volume and its limits and
- * scratch.
+ * creation's stack forced, an unnamed scheme or container forced empty,
+ * and its limits and scratch.
  */
 fsimg_status_t
 fsimg_cli_verification_request(const fsimg_cli_options_t *options,
@@ -681,7 +709,9 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	verify->output_fd = -1;
 	verify->offset = verify->length = 0;
 	verify->selector = FSIMG_SELECT_AUTOMATIC;
-	verify->gpt_sector = 0;
+	/* Reading takes only the GPT sector size of the layer settings. */
+	fsimg_layer_options_init(&verify->layers);
+	verify->layers.gpt_sector_bytes = create->layers.gpt_sector_bytes;
 	for (unsigned i = FSIMG_LAYER_SCHEME; i < FSIMG_STACK_SLOTS; i++) {
 		if (verify->stack.slots[i].state == FSIMG_SLOT_UNSPECIFIED)
 			verify->stack.slots[i].state = FSIMG_SLOT_EMPTY;

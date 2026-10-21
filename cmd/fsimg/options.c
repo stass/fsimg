@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include <getopt.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -696,36 +697,147 @@ setting_repeats(const cli_parse_t *parse, unsigned index)
 	return (false);
 }
 
+/* How a layer setting's value is written on the command line. */
+typedef enum layer_syntax {
+	LAYER_SECTOR,		/* 512 or 4096 */
+	LAYER_BYTES,		/* a nonzero byte quantity, in a uint64_t */
+	LAYER_TEXT,		/* text the library validates */
+	LAYER_GUID,		/* RFC 4122 text, not the nil GUID */
+	LAYER_YES_NO,		/* yes or no */
+	LAYER_HEX32		/* 0x and one to eight hex digits */
+} layer_syntax_t;
+
+/* The command-line syntax of each layer setting and the field it fills.
+ * The library owns what each value means and validates it.
+ */
+static const struct layer_key {
+	const char	*key;		/* qualified, as "layer:key" */
+	layer_syntax_t	 syntax;
+	size_t		 field;		/* offset in fsimg_layer_options_t */
+	size_t		 bytes;		/* field size: text capacity, GUID 16 */
+	bool		 reads;		/* also a read-side setting */
+} layer_keys[] = {
+#define LAYER_KEY(key, syntax, field, reads) { key, syntax, \
+	offsetof(fsimg_layer_options_t, field), \
+	sizeof(((fsimg_layer_options_t *)0)->field), reads }
+	LAYER_KEY("gpt:sector", LAYER_SECTOR, gpt_sector_bytes, true),
+	LAYER_KEY("gpt:disk", LAYER_BYTES, gpt_disk_bytes, false),
+	LAYER_KEY("gpt:type", LAYER_TEXT, gpt_type, false),
+	LAYER_KEY("gpt:name", LAYER_TEXT, gpt_name, false),
+	LAYER_KEY("gpt:disk-guid", LAYER_GUID, gpt_disk_guid, false),
+	LAYER_KEY("gpt:guid", LAYER_GUID, gpt_guid, false),
+	LAYER_KEY("mbr:disk", LAYER_BYTES, mbr_disk_bytes, false),
+	LAYER_KEY("mbr:type", LAYER_TEXT, mbr_type, false),
+	LAYER_KEY("mbr:active", LAYER_YES_NO, mbr_active, false),
+	LAYER_KEY("mbr:id", LAYER_HEX32, mbr_id, false)
+#undef LAYER_KEY
+};
+
+/* "0x" and one to eight hexadecimal digits. */
+static bool
+parse_hex32(const char *text, uint32_t *out)
+{
+	static const char digits[] = "0123456789abcdef";
+	const char *digit;
+	size_t i;
+
+	*out = 0;
+	if (text[0] != '0' || (text[1] != 'x' && text[1] != 'X') ||
+	    text[2] == '\0')
+		return (false);
+	for (i = 2; text[i] != '\0'; i++) {
+		digit = strchr(digits, text[i] >= 'A' && text[i] <= 'F' ?
+		    text[i] - 'A' + 'a' : text[i]);
+		if (digit == NULL || i >= 10)
+			return (false);
+		*out = *out << 4 | (uint32_t)(digit - digits);
+	}
+	return (true);
+}
+
 /*
  * A qualified key "layer:key" targets one layer, which the stack must name
- * (or -z/-a select, for gzip). On read the one layer setting is
- * gpt:sector, which forces the GPT LBA size. Creating a layer is refused
- * as unsupported once the command line is otherwise valid, so its keys are
- * accepted here unread.
+ * (or -z/-a select, for gzip). Reading takes the one read-side setting,
+ * gpt:sector, which forces the GPT LBA size; creating takes every key of
+ * layer_keys. The value's syntax is checked here and stored in its typed
+ * field; the library validates the settings as a whole.
  */
 static fsimg_status_t
 parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
     const char *value)
 {
-	static const char sector_key[] = "sector=";
+	static const unsigned char nil[16];
+	fsimg_layer_options_t *layers = &parse->options->request.layers;
+	const struct layer_key *entry;
 	fsimg_layer_info_t layer;
+	unsigned char *field;
 	uint64_t number;
+	uint32_t id;
+	size_t length, i;
 
 	if (!find_layer(text, (size_t)(qualifier - text), &layer))
 		return (syntax_naming(parse, "unknown setting layer", text));
 	if (!layer_selected(parse, &layer))
 		return (syntax_naming(parse,
 		    "setting names a layer the stack does not contain", text));
-	if ((parse->mode & MODES_CREATE) != 0)
+	/* A layer this build cannot write is refused as unsupported once the
+	 * command line is otherwise valid, so its keys are accepted unread.
+	 */
+	if ((parse->mode & MODES_CREATE) != 0 &&
+	    (layer.capabilities & FSIMG_CAP_WRITE) == 0)
 		return (FSIMG_OK);
-	if (strcmp(layer.name, "gpt") != 0 ||
-	    strncmp(qualifier + 1, sector_key, sizeof(sector_key) - 1) != 0)
-		return (syntax_naming(parse, "unknown read-side layer setting", text));
-	if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK ||
-	    (number != 512 && number != 4096))
-		return (syntax_naming(parse, "gpt:sector must be 512 or 4096", text));
-	parse->options->request.gpt_sector = (uint32_t)number;
-	return (FSIMG_OK);
+	length = (size_t)(value - 1 - text);
+	for (i = 0; i < sizeof(layer_keys) / sizeof(layer_keys[0]); i++) {
+		if (strlen(layer_keys[i].key) == length &&
+		    strncmp(text, layer_keys[i].key, length) == 0)
+			break;
+	}
+	if (i == sizeof(layer_keys) / sizeof(layer_keys[0]))
+		return (syntax_naming(parse, "unknown layer setting", text));
+	entry = &layer_keys[i];
+	if ((parse->mode & MODES_CREATE) == 0 && !entry->reads)
+		return (syntax_naming(parse, "setting applies only to creation", text));
+	field = (unsigned char *)layers + entry->field;
+	switch (entry->syntax) {
+	case LAYER_SECTOR:
+		if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK ||
+		    (number != 512 && number != 4096))
+			return (syntax_naming(parse, "gpt:sector must be 512 or 4096",
+			    text));
+		layers->gpt_sector_bytes = (uint32_t)number;
+		return (FSIMG_OK);
+	case LAYER_BYTES:
+		if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK ||
+		    number == 0)
+			return (syntax_naming(parse,
+			    "setting requires a nonzero byte quantity", text));
+		bcopy(&number, field, sizeof(number));
+		return (FSIMG_OK);
+	case LAYER_TEXT:
+		if (strlen(value) >= entry->bytes)
+			return (syntax_naming(parse, "setting value is too long", text));
+		bcopy(value, field, strlen(value) + 1);
+		return (FSIMG_OK);
+	case LAYER_GUID:
+		if (parse_uuid(parse, value, field) != FSIMG_OK ||
+		    bcmp(field, nil, sizeof(nil)) == 0)
+			return (syntax_naming(parse,
+			    "GUID setting must be RFC 4122 text other than nil", text));
+		return (FSIMG_OK);
+	case LAYER_YES_NO:
+		if (strcmp(value, "yes") != 0 && strcmp(value, "no") != 0)
+			return (syntax_naming(parse, "setting must be yes or no", text));
+		layers->mbr_active = strcmp(value, "yes") == 0;
+		return (FSIMG_OK);
+	case LAYER_HEX32:
+		if (!parse_hex32(value, &id))
+			return (syntax_naming(parse,
+			    "setting requires 0x and at most eight hex digits", text));
+		layers->mbr_id = id;
+		layers->mbr_id_set = true;
+		return (FSIMG_OK);
+	}
+	return (syntax_naming(parse, "unknown layer setting", text));
 }
 
 /*
@@ -970,9 +1082,6 @@ interpret_common(cli_parse_t *parse)
 
 	if (parse->reserved)
 		note_unsupported(parse, "the named filesystem is reserved and not supported");
-	if ((parse->mode & MODES_CREATE) != 0 &&
-	    request->stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_NAMED)
-		note_unsupported(parse, "creating a partition scheme is not supported");
 	if (request->stack.slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED)
 		note_unsupported(parse, "image containers are not supported");
 	if (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0)
@@ -1098,7 +1207,8 @@ interpret_read(cli_parse_t *parse)
 	    request->stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_EMPTY)
 		return (syntax(parse,
 		    "--partition requires a partition scheme, which -F forces empty"));
-	if (request->selector == FSIMG_SELECT_RANGE && request->gpt_sector != 0)
+	if (request->selector == FSIMG_SELECT_RANGE &&
+	    request->layers.gpt_sector_bytes != 0)
 		return (syntax(parse, "gpt:sector conflicts with --offset and --length"));
 	if (option_count(parse, OPT_OFFSET) != 0) {
 		status = parse_byte_option(parse, OPT_OFFSET, false, &request->offset);

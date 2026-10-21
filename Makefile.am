@@ -49,6 +49,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/read/selection.c lib/read/selection.h \
 	lib/layers/layer.h lib/layers/stack.c lib/layers/types.c \
 	lib/layers/image.c lib/layers/gpt.c lib/layers/mbr.c \
+	lib/layers/plan.c lib/layers/output.c \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
@@ -103,12 +104,15 @@ example_read_slice_SOURCES = examples/read-slice.c examples/example.h
 example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
-check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-format \
+test_programs = test-core test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
-	test-qualify test-fragment test-posix test-layers header-c header-cxx
-TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh \
+	test-qualify test-fragment test-posix test-layers test-layers-write \
+	header-c header-cxx
+# layers-compose is a helper of test/layers-integration.sh, not a test.
+check_PROGRAMS = $(test_programs) layers-compose
+TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh \
 	test/cli.sh test/baseline.sh test/spec.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
@@ -137,6 +141,10 @@ test_format_SOURCES = test/format.c test/test.h
 test_format_LDADD = libfsimg.la
 test_layers_SOURCES = test/layers.c test/test.h
 test_layers_LDADD = libfsimg-core.la
+test_layers_write_SOURCES = test/layers-write.c test/test.h
+test_layers_write_LDADD = libfsimg-core.la
+layers_compose_SOURCES = test/layers-compose.c
+layers_compose_LDADD = libfsimg.la
 test_posix_SOURCES = test/posix.c test/test.h
 test_posix_LDADD = libfsimg.la
 test_exfat_SOURCES = test/exfat.c test/test.h \

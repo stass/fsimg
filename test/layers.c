@@ -546,23 +546,28 @@ test_stack_rejections(void)
 }
 
 /* The registry lists every layer once, with the suffixes the command
- * strips and the read capability of the schemes alone.
+ * strips, the capabilities of the schemes alone and the keys of each
+ * layer's settings in table order.
  */
 static void
 test_registry(void)
 {
+	static const unsigned scheme = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
+	    FSIMG_CAP_VERIFY;
 	static const struct {
 		const char	*name;
 		const char	*suffix;
+		const char	*settings;
 		fsimg_layer_kind_t kind;
 		unsigned	 capabilities;
 	} expected[] = {
-		{ "gpt", "", FSIMG_LAYER_SCHEME, FSIMG_CAP_READ | FSIMG_CAP_VERIFY },
-		{ "mbr", "", FSIMG_LAYER_SCHEME, FSIMG_CAP_READ | FSIMG_CAP_VERIFY },
-		{ "dmg", ".dmg", FSIMG_LAYER_CONTAINER, 0 },
-		{ "vhd", ".vhd", FSIMG_LAYER_CONTAINER, 0 },
-		{ "simg", ".simg", FSIMG_LAYER_CONTAINER, 0 },
-		{ "gzip", ".gz", FSIMG_LAYER_COMPRESSION, 0 }
+		{ "gpt", "", "sector,disk,type,name,disk-guid,guid",
+		    FSIMG_LAYER_SCHEME, scheme },
+		{ "mbr", "", "disk,type,active,id", FSIMG_LAYER_SCHEME, scheme },
+		{ "dmg", ".dmg", "", FSIMG_LAYER_CONTAINER, 0 },
+		{ "vhd", ".vhd", "", FSIMG_LAYER_CONTAINER, 0 },
+		{ "simg", ".simg", "", FSIMG_LAYER_CONTAINER, 0 },
+		{ "gzip", ".gz", "", FSIMG_LAYER_COMPRESSION, 0 }
 	};
 	fsimg_layer_info_t info;
 	size_t cursor = 0;
@@ -571,6 +576,7 @@ test_registry(void)
 		CHECK(fsimg_layer_next(&cursor, &info, NULL) == FSIMG_OK);
 		CHECK(strcmp(info.name, expected[i].name) == 0);
 		CHECK(strcmp(info.suffix, expected[i].suffix) == 0);
+		CHECK(strcmp(info.settings, expected[i].settings) == 0);
 		CHECK(info.kind == expected[i].kind);
 		CHECK(info.capabilities == expected[i].capabilities);
 	}
@@ -970,7 +976,9 @@ test_gpt_sector_sizes(void)
 	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_ECORRUPT);
 	CHECK(strcmp(error.message, "GPT primary header size is out of range") == 0);
 	CHECK(fixture_open(&f, &disk, "fat12", 4096, &error) == FSIMG_EINVAL);
-	CHECK(strcmp(error.message, "gpt:sector requires gpt in the forced stack") == 0);
+	CHECK(strcmp(error.message,
+	    "setting names a layer the stack does not contain") == 0 &&
+	    strcmp(error.path, "gpt:sector") == 0);
 	fixture_free(&f);
 	free(disk.bytes);
 }

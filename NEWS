@@ -25,6 +25,24 @@ GUID or MBR byte, or by byte range, which never reads the table. `fsimg t`,
 stack, the table and the selected partition, and still reports the table
 when no single partition holds a filesystem.
 
+Creation writes partitioned disks. A stack naming gpt or mbr places the
+volume at 1 MiB as the disk's one partition, emitted into a checked slice
+of the staged disk, with the tables written beside it and every other byte
+zero. The `gpt:` and `mbr:` creation keys set the type, name, identifiers,
+active flag, exact disk length and 4096-byte GPT sectors; the library
+validates them and derives defaults from the filesystem, including the
+QNX4 MBR type 0x4D and its refusal on GPT without an explicit type.
+Identifiers are random v4 values from the command line, or under `-R`
+derived from the epoch, and the plan reports each. `cW` verifies the table
+before the volume and names the layer that failed. The library adds
+`fsimg_image_wrap`, `fsimg_image_unwrap` and `fsimg_image_compose`, which
+assemble a disk from table bytes, borrowed inputs and zero runs and copy it
+once through the output coordinator, refusing an output that aliases an
+input, and `fsimg_writer_output`, which takes a file or I/O sink that
+`fsimg_sink_init` starts empty.
+`--formats` lists the schemes, containers and compressions with their kind,
+support and settings.
+
 Resource contexts account for memory and owned descriptors, enforce session
 quotas, and report cancellation and structured errors. Bounded positional I/O
 supports regular files, callbacks, fixed sinks, and nested slices. Private
@@ -169,9 +187,8 @@ each operand keeps its own path in the image and equal directories merge.
 Extraction creates one fresh private directory named after the image, or with
 -E fills an empty private directory; both refuse destinations carrying a
 non-trivial ACL. The long listing shows mode, size and UTC modification time.
-Compression, minimization, partition selection, standard input or output
-images, partition schemes, containers and several members are recognized and
-reported as not supported. Strict option parsing, streaming NDJSON, bounded progress and command-wide output accounting share
+Compression, minimization, standard input or output images, containers and
+several members are recognized and reported as not supported. Strict option parsing, streaming NDJSON, bounded progress and command-wide output accounting share
 the supervised worker/relay path. Manuals, public-API examples, pkg-config
 metadata and private-prefix installation checks accompany the command and
 static/shared library.

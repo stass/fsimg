@@ -74,6 +74,7 @@ typedef struct fsimg_cli_paths {
 
 typedef enum fsimg_cli_output_phase {
 	FSIMG_CLI_OUTPUT_RECORDS,
+	FSIMG_CLI_OUTPUT_LAYERS,	/* --formats: schemes, containers, compressions */
 	FSIMG_CLI_OUTPUT_CAPABILITIES,
 	FSIMG_CLI_OUTPUT_SUMMARY,
 	FSIMG_CLI_OUTPUT_DONE

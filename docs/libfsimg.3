@@ -143,6 +143,39 @@ finalization.
 Known source aliases are rejected before output mutation.
 Inspect output_state and cleanup_error before any recovery decision.
 Retained staging paths are relative to the supplied parent.
+.Sh LAYERS
+The format argument of
+.Fn fsimg_writer_new
+is a stack naming the filesystem first, such as
+.Ql fat32/gpt :
+a gpt or mbr scheme writes a disk holding the volume as its one
+partition at 1 MiB, with every byte outside the tables and the volume
+zero.
+The layers member of the write options points to an
+.Vt fsimg_layer_options_t ,
+initialized with
+.Fn fsimg_layer_options_init ,
+whose fields hold the scheme's type, name, identifiers, active flag, disk
+length and GPT sector size; an unset disk or partition identifier is
+derived from the epoch under FSIMG_WRITE_REPRODUCIBLE and is otherwise
+FSIMG_EINVAL naming its key.
+The plan reports the disk and the partition as an opened image would.
+.Pp
+.Fn fsimg_writer_output
+writes to an
+.Vt fsimg_sink_t
+that
+.Fn fsimg_sink_init
+makes empty for its kind, with every descriptor -1: a new file published
+beneath a parent directory, or a positional I/O object.
+.Fn fsimg_image_wrap
+puts a raw volume into a scheme,
+.Fn fsimg_image_unwrap
+writes the bytes an opened image's selection names, raw, and
+.Fn fsimg_image_compose
+builds a disk from several volumes, one partition each.
+They copy the disk once, read each input once, and refuse an output that
+shares storage with an input before writing.
 .Sh EXTRACTION
 .Fn fsimg_extract_at
 requires an untouched reader and a fresh destination basename beneath a trusted

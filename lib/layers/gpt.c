@@ -12,18 +12,22 @@
 #include "layer.h"
 
 /*
- * GUID Partition Table, read side. With S the sector size (512 or 4096)
- * and L the disk's last LBA, LBA 0 holds a protective MBR, LBA 1 the
- * primary header, which points at the primary entry array, and LBA L the
- * backup header, which points at the backup array just before it. A table
- * is accepted only when both copies are intact and agree: a disk whose
- * copies disagree, including a truncated disk whose backup is gone, is
- * reported as corrupt rather than repaired from one copy.
+ * GUID Partition Table. With S the sector size (512 or 4096) and L the
+ * disk's last LBA, LBA 0 holds a protective MBR, LBA 1 the primary header,
+ * which points at the primary entry array, and LBA L the backup header,
+ * which points at the backup array just before it. A table is accepted
+ * only when both copies are intact and agree: a disk whose copies
+ * disagree, including a truncated disk whose backup is gone, is reported
+ * as corrupt rather than repaired from one copy. A written table has the
+ * standard 128 entries, so its array fills 16 KiB at either sector size.
  */
 #define GPT_SIGNATURE		"EFI PART"
 #define GPT_SIGNATURE_BYTES	8
 #define GPT_HEADER_MIN_BYTES	92
+#define GPT_REVISION		UINT32_C(0x00010000)
 #define GPT_ENTRY_BYTES		128
+#define GPT_WRITE_ENTRIES	128u
+#define GPT_ARRAY_BYTES		(GPT_WRITE_ENTRIES * GPT_ENTRY_BYTES)
 #define GPT_PROBE_BYTES		(4096 + GPT_SIGNATURE_BYTES)
 #define MBR_SIGNATURE_OFFSET	510
 #define MBR_ENTRIES_OFFSET	446
@@ -31,6 +35,7 @@
 
 /* Header fields, as UEFI lays them out. */
 enum {
+	HEADER_REVISION = 8,
 	HEADER_SIZE = 12,
 	HEADER_CRC = 16,
 	HEADER_MY_LBA = 24,
@@ -86,7 +91,7 @@ static fsimg_status_t gpt_probe(const unsigned char *, size_t, uint64_t,
     fsimg_error_t *);
 static fsimg_status_t gpt_corrupt(fsimg_error_t *, const char *,
     const char *);
-static void guid_decode(const unsigned char *, unsigned char *);
+static void guid_swap(const unsigned char *, unsigned char *);
 static fsimg_status_t read_bytes(const fsimg_scheme_input_t *, uint64_t,
     void *, size_t, fsimg_error_t *);
 static fsimg_status_t read_signature(const fsimg_scheme_input_t *, uint64_t,
@@ -114,12 +119,23 @@ static fsimg_status_t gpt_open(const fsimg_scheme_input_t *,
     fsimg_scheme_table_t *, fsimg_error_t *);
 static fsimg_status_t gpt_verify(const fsimg_scheme_input_t *,
     const fsimg_scheme_table_t *, fsimg_error_t *);
+static void gpt_footprint(uint32_t, uint64_t *, uint64_t *);
+static void encode_protective_mbr(unsigned char *, uint64_t);
+static void encode_entries(unsigned char *, const fsimg_scheme_table_t *);
+static void encode_header(unsigned char *, const unsigned char *,
+    const gpt_header_t *);
+static fsimg_status_t gpt_encode(fsimg_ctx_t *, const fsimg_scheme_table_t *,
+    uint64_t, fsimg_scheme_tables_t *, fsimg_error_t *);
 
 const fsimg_scheme_ops_t fsimg_gpt_scheme = {
 	.probe_bytes = GPT_PROBE_BYTES,
 	.probe = gpt_probe,
 	.open = gpt_open,
-	.verify = gpt_verify
+	.verify = gpt_verify,
+	.slots = GPT_WRITE_ENTRIES,
+	.max_disk_sectors = UINT64_MAX,
+	.footprint = gpt_footprint,
+	.encode = gpt_encode
 };
 
 /* CRC-32 as UEFI and zlib define it: reflected polynomial 0xEDB88320, all
@@ -196,16 +212,17 @@ gpt_corrupt(fsimg_error_t *error, const char *copy, const char *check)
 }
 
 /* GPT stores the first three GUID groups little-endian and the rest in
- * text order; reports use the text order throughout.
+ * text order; settings and reports use the text order throughout. The
+ * reordering is its own inverse, so it both decodes and encodes.
  */
 static void
-guid_decode(const unsigned char *raw, unsigned char *guid)
+guid_swap(const unsigned char *from, unsigned char *to)
 {
 	static const unsigned char order[16] = { 3, 2, 1, 0, 5, 4, 7, 6,
 	    8, 9, 10, 11, 12, 13, 14, 15 };
 
 	for (unsigned i = 0; i < 16; i++)
-		guid[i] = raw[order[i]];
+		to[i] = from[order[i]];
 }
 
 static fsimg_status_t
@@ -295,7 +312,7 @@ read_header(const fsimg_scheme_input_t *input, const gpt_geometry_t *geometry,
 	if (gpt_crc32(raw, header_bytes) != recorded_crc)
 		return (gpt_corrupt(error, copy, "header CRC32 mismatch"));
 
-	guid_decode(raw + HEADER_DISK_GUID, header->disk_guid);
+	guid_swap(raw + HEADER_DISK_GUID, header->disk_guid);
 	header->my_lba = fsimg_layer_le64(raw + HEADER_MY_LBA);
 	header->alternate_lba = fsimg_layer_le64(raw + HEADER_ALTERNATE_LBA);
 	header->first_usable = fsimg_layer_le64(raw + HEADER_FIRST_USABLE);
@@ -435,8 +452,8 @@ decode_entries(const unsigned char *array, const gpt_header_t *header,
 			return (gpt_corrupt(error, "", check));
 		}
 		record->used = true;
-		guid_decode(raw + ENTRY_TYPE_GUID, record->type_guid);
-		guid_decode(raw + ENTRY_GUID, record->guid);
+		guid_swap(raw + ENTRY_TYPE_GUID, record->type_guid);
+		guid_swap(raw + ENTRY_GUID, record->guid);
 		for (unsigned unit = 0; unit < FSIMG_GPT_NAME_UNITS; unit++)
 			record->name[unit] = fsimg_layer_le16(raw + ENTRY_NAME +
 			    unit * 2);
@@ -595,4 +612,165 @@ gpt_verify(const fsimg_scheme_input_t *input,
 	}
 	return (gpt_corrupt(error, "",
 	    "protective MBR has no 0xEE entry starting at LBA 1"));
+}
+
+/* A written table occupies the protective MBR, the primary header and its
+ * array at the start of the disk, and the backup array and header at the
+ * end: 34 and 33 sectors at 512 bytes, 6 and 5 at 4096.
+ */
+static void
+gpt_footprint(uint32_t sector_bytes, uint64_t *leading, uint64_t *trailing)
+{
+	uint64_t array_sectors = GPT_ARRAY_BYTES / sector_bytes;
+
+	*leading = 2 + array_sectors;
+	*trailing = array_sectors + 1;
+}
+
+/* LBA 0 as UEFI defines the protective MBR: a zero code area and disk
+ * identifier, one entry of type 0xEE from LBA 1 over the rest of the disk
+ * (capped at 2^32 - 1 sectors) with CHS start 0x000200 and end 0xFFFFFF,
+ * the other entries zero, and the signature. The sector is zeroed.
+ */
+static void
+encode_protective_mbr(unsigned char *sector, uint64_t last_lba)
+{
+	unsigned char *entry = sector + MBR_ENTRIES_OFFSET;
+
+	entry[2] = 0x02;
+	entry[4] = MBR_PROTECTIVE_TYPE;
+	entry[5] = entry[6] = entry[7] = 0xff;
+	fsimg_layer_put_le32(entry + 8, 1);
+	fsimg_layer_put_le32(entry + 12, last_lba > UINT32_MAX ? UINT32_MAX :
+	    (uint32_t)last_lba);
+	sector[MBR_SIGNATURE_OFFSET] = 0x55;
+	sector[MBR_SIGNATURE_OFFSET + 1] = 0xaa;
+}
+
+/* The used records into a zeroed 128-entry array: type and unique GUIDs in
+ * GPT byte order, first and last LBA, zero attributes, and the name's
+ * units little-endian with zero padding.
+ */
+static void
+encode_entries(unsigned char *array, const fsimg_scheme_table_t *table)
+{
+	const fsimg_partition_record_t *record;
+	unsigned char *raw;
+	uint64_t first;
+
+	for (uint32_t i = 0; i < table->count; i++) {
+		record = &table->records[i];
+		if (!record->used)
+			continue;
+		raw = array + (size_t)(record->index - 1) * GPT_ENTRY_BYTES;
+		first = record->offset / table->sector_bytes;
+		guid_swap(record->type_guid, raw + ENTRY_TYPE_GUID);
+		guid_swap(record->guid, raw + ENTRY_GUID);
+		fsimg_layer_put_le64(raw + ENTRY_FIRST_LBA, first);
+		fsimg_layer_put_le64(raw + ENTRY_LAST_LBA, first - 1 +
+		    record->length / table->sector_bytes);
+		for (unsigned unit = 0; unit < FSIMG_GPT_NAME_UNITS; unit++)
+			fsimg_layer_put_le16(raw + ENTRY_NAME + unit * 2,
+			    record->name[unit]);
+	}
+}
+
+/* One header copy into a zeroed sector, its CRC32 computed last over the
+ * 92 bytes with the CRC field still zero.
+ */
+static void
+encode_header(unsigned char *raw, const unsigned char *disk_guid,
+    const gpt_header_t *header)
+{
+	bcopy(GPT_SIGNATURE, raw, GPT_SIGNATURE_BYTES);
+	fsimg_layer_put_le32(raw + HEADER_REVISION, GPT_REVISION);
+	fsimg_layer_put_le32(raw + HEADER_SIZE, GPT_HEADER_MIN_BYTES);
+	fsimg_layer_put_le64(raw + HEADER_MY_LBA, header->my_lba);
+	fsimg_layer_put_le64(raw + HEADER_ALTERNATE_LBA, header->alternate_lba);
+	fsimg_layer_put_le64(raw + HEADER_FIRST_USABLE, header->first_usable);
+	fsimg_layer_put_le64(raw + HEADER_LAST_USABLE, header->last_usable);
+	guid_swap(disk_guid, raw + HEADER_DISK_GUID);
+	fsimg_layer_put_le64(raw + HEADER_ENTRIES_LBA, header->entries_lba);
+	fsimg_layer_put_le32(raw + HEADER_ENTRY_COUNT, header->entry_count);
+	fsimg_layer_put_le32(raw + HEADER_ENTRY_SIZE, header->entry_size);
+	fsimg_layer_put_le32(raw + HEADER_ENTRIES_CRC, header->entries_crc);
+	fsimg_layer_put_le32(raw + HEADER_CRC,
+	    gpt_crc32(raw, GPT_HEADER_MIN_BYTES));
+}
+
+/*
+ * Both copies of a 128-entry table for a disk of disk_bytes: the leading
+ * run of protective MBR, primary header and array, and the trailing run of
+ * backup array and backup header, which mirrors the primary with the two
+ * LBAs exchanged. The usable range is what sgdisk writes, from the sector
+ * after the primary array to the one before the backup array. The plan
+ * placed every record inside it; a record outside is an internal error,
+ * never an encoded table.
+ */
+static fsimg_status_t
+gpt_encode(fsimg_ctx_t *ctx, const fsimg_scheme_table_t *table,
+    uint64_t disk_bytes, fsimg_scheme_tables_t *out, fsimg_error_t *error)
+{
+	const fsimg_partition_record_t *record;
+	gpt_header_t header;
+	unsigned char *leading, *trailing, *array;
+	uint64_t leading_sectors, trailing_sectors, last_lba, first, end;
+	uint32_t sector;
+
+	bzero(out, sizeof(*out));
+	sector = table->sector_bytes;
+	gpt_footprint(sector, &leading_sectors, &trailing_sectors);
+	if ((sector != 512 && sector != 4096) || disk_bytes % sector != 0 ||
+	    disk_bytes / sector < leading_sectors + trailing_sectors + 1 ||
+	    table->count > GPT_WRITE_ENTRIES)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "GPT table geometry was not planned"));
+	last_lba = disk_bytes / sector - 1;
+	bzero(&header, sizeof(header));
+	header.first_usable = leading_sectors;
+	header.last_usable = last_lba - trailing_sectors;
+	for (uint32_t i = 0; i < table->count; i++) {
+		record = &table->records[i];
+		first = record->offset / sector;
+		end = first + record->length / sector;
+		if (record->index == 0 || record->index > GPT_WRITE_ENTRIES ||
+		    (record->used && (record->offset % sector != 0 ||
+		    record->length % sector != 0 || record->length == 0 ||
+		    first < header.first_usable || end - 1 > header.last_usable)))
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_IMAGE, "GPT partition was not placed"));
+	}
+
+	leading = fsimg_alloc(ctx, (size_t)(leading_sectors * sector), error);
+	if (leading == NULL)
+		return (error->status);
+	trailing = fsimg_alloc(ctx, (size_t)(trailing_sectors * sector), error);
+	if (trailing == NULL) {
+		fsimg_dealloc(leading);
+		return (error->status);
+	}
+	array = leading + 2 * (size_t)sector;
+	encode_entries(array, table);
+	encode_protective_mbr(leading, last_lba);
+	header.entry_count = GPT_WRITE_ENTRIES;
+	header.entry_size = GPT_ENTRY_BYTES;
+	header.entries_crc = gpt_crc32(array, GPT_ARRAY_BYTES);
+
+	header.my_lba = 1;
+	header.alternate_lba = last_lba;
+	header.entries_lba = 2;
+	encode_header(leading + sector, table->disk_guid, &header);
+	bcopy(array, trailing, GPT_ARRAY_BYTES);
+	header.my_lba = last_lba;
+	header.alternate_lba = 1;
+	header.entries_lba = last_lba - (trailing_sectors - 1);
+	encode_header(trailing + GPT_ARRAY_BYTES, table->disk_guid, &header);
+
+	out->regions[0] = (fsimg_table_region_t){ .bytes = leading,
+	    .offset = 0, .length = (size_t)(leading_sectors * sector) };
+	out->regions[1] = (fsimg_table_region_t){ .bytes = trailing,
+	    .offset = header.entries_lba * sector,
+	    .length = (size_t)(trailing_sectors * sector) };
+	out->count = 2;
+	return (FSIMG_OK);
 }

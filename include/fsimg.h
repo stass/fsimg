@@ -24,6 +24,7 @@ typedef struct fsimg_writer fsimg_writer_t;
 typedef struct fsimg_plan fsimg_plan_t;
 typedef struct fsimg_reader fsimg_reader_t;
 typedef struct fsimg_image fsimg_image_t;
+typedef struct fsimg_layer_options fsimg_layer_options_t;
 
 typedef enum fsimg_status {
 	FSIMG_OK = 0,
@@ -350,6 +351,180 @@ typedef struct fsimg_source_ops {
  */
 void fsimg_source_ops_init(fsimg_source_ops_t *);
 
+typedef enum fsimg_validation_scope {
+	FSIMG_VALIDATION_HEADER = 1,
+	FSIMG_VALIDATION_STRUCTURAL,
+	FSIMG_VALIDATION_PAYLOAD
+} fsimg_validation_scope_t;
+
+/* The layers around a volume. A stack has three slots in fixed order,
+ * indexed by the layer kind that fills them; compression wraps the whole
+ * file and is not a slot.
+ */
+typedef enum fsimg_layer_kind {
+	FSIMG_LAYER_FILESYSTEM = 0,
+	FSIMG_LAYER_SCHEME = 1,
+	FSIMG_LAYER_CONTAINER = 2,
+	FSIMG_LAYER_COMPRESSION = 3
+} fsimg_layer_kind_t;
+
+#define FSIMG_STACK_SLOTS 3
+
+/* An unspecified slot is detected on read and empty on create; an empty
+ * slot is forced empty; a named slot is forced to its layer.
+ */
+typedef enum fsimg_slot_state {
+	FSIMG_SLOT_UNSPECIFIED = 0,
+	FSIMG_SLOT_EMPTY = 1,
+	FSIMG_SLOT_NAMED = 2
+} fsimg_slot_state_t;
+
+typedef struct fsimg_stack_slot {
+	fsimg_slot_state_t state;
+	char		 name[16];	/* NUL-terminated; empty unless NAMED */
+} fsimg_stack_slot_t;
+
+/* A zeroed stack leaves every slot to detection. */
+typedef struct fsimg_stack {
+	fsimg_stack_slot_t slots[FSIMG_STACK_SLOTS];
+} fsimg_stack_t;
+
+/* One registered scheme, container or compression. capabilities holds the
+ * FSIMG_CAP_* operations this build implements; suffix is the file suffix
+ * naming a container or compression, empty for a scheme. settings lists
+ * the keys the layer stores, comma-separated and unqualified ("type,name"),
+ * empty for none.
+ */
+typedef struct fsimg_layer_info {
+	char		 name[16];
+	char		 suffix[8];
+	char		 settings[64];
+	fsimg_layer_kind_t kind;
+	unsigned	 capabilities;
+} fsimg_layer_info_t;
+
+/* Typed layer settings, one field per key of a layer, zero (empty) for its
+ * default. A field of a layer the stack does not name must hold its
+ * default, and so must every field reading does not use: on read only
+ * gpt_sector_bytes, which requires gpt in the forced stack.
+ *
+ * gpt_sector_bytes is the GPT LBA size, 512 or 4096: zero detects it on
+ * read and selects 512 on write. gpt_disk_bytes and mbr_disk_bytes fix the
+ * disk length, a multiple of the scheme's sector; zero derives it from the
+ * volume. gpt_type is a type-table name or GUID text and mbr_type a name or
+ * "0x" and two hex digits; empty selects the type named after the
+ * filesystem. gpt_name is UTF-8 of at most 36 UTF-16 units; empty selects
+ * the type's conventional name. The GUIDs are in textual (RFC 4122) byte
+ * order; all zero leaves the identifier unset, and so does a clear
+ * mbr_id_set. An unset identifier is derived from the epoch in reproducible
+ * mode and is otherwise FSIMG_EINVAL naming its key. mbr_active marks the
+ * partition active (status 0x80).
+ */
+struct fsimg_layer_options {
+	uint32_t	 gpt_sector_bytes;
+	uint64_t	 gpt_disk_bytes;
+	uint64_t	 mbr_disk_bytes;
+	char		 gpt_type[40];
+	char		 gpt_name[112];
+	char		 mbr_type[16];
+	unsigned char	 gpt_disk_guid[16];
+	unsigned char	 gpt_guid[16];
+	uint32_t	 mbr_id;
+	bool		 mbr_id_set;
+	bool		 mbr_active;
+	uint64_t	 reserved[4];
+};
+
+typedef struct fsimg_image_options {
+	size_t		 size;
+	uint32_t	 version;
+	uint32_t	 flags;
+	fsimg_stack_t	 stack;		/* The forced slots */
+	fsimg_layer_options_t layers;
+	uint64_t	 reserved[4];
+} fsimg_image_options_t;
+
+/* stack is the canonical text of the layers found: the scheme when one was
+ * detected or forced, and the filesystem when forced or once select() has
+ * identified the selected volume. GUIDs are in textual (RFC 4122) byte
+ * order. selected is the slot of the last partition select() returned,
+ * zero for none. The scope is the validation the tables received.
+ */
+typedef struct fsimg_image_info {
+	char		 stack[64];
+	char		 compression[16];
+	char		 scheme[16];
+	unsigned char	 disk_guid[16];
+	uint64_t	 disk_bytes;
+	uint32_t	 sector_bytes;	/* Zero without a scheme */
+	uint32_t	 partition_count; /* Table slots, used or not */
+	uint32_t	 selected;
+	uint32_t	 mbr_disk_id;
+	fsimg_validation_scope_t scope;
+} fsimg_image_info_t;
+
+/* What the filesystem probes say about a partition's first bytes. */
+typedef enum fsimg_claim {
+	FSIMG_CLAIM_NONE = 0,
+	FSIMG_CLAIM_FORMAT = 1,		/* format names the filesystem */
+	FSIMG_CLAIM_UNSUPPORTED = 2,
+	FSIMG_CLAIM_CORRUPT = 3,
+	FSIMG_CLAIM_AMBIGUOUS = 4
+} fsimg_claim_t;
+
+/* One table slot, numbered from 1 as sgdisk and /dev/sda1 count. type is
+ * the type table's name, or empty for a type the table lacks. A GPT entry
+ * fills type_guid, guid and name (UTF-8; an unpaired surrogate reads as
+ * U+FFFD); an MBR entry fills mbr_type and active. An unused slot has only
+ * index set; its claim is NONE.
+ */
+typedef struct fsimg_partition_info {
+	char		 type[16];
+	char		 format[16];
+	char		 name[112];
+	unsigned char	 type_guid[16];
+	unsigned char	 guid[16];
+	uint64_t	 offset;	/* Disk offset in bytes */
+	uint64_t	 length;
+	uint32_t	 index;
+	uint32_t	 mbr_type;
+	fsimg_claim_t	 claim;
+	bool		 used;
+	bool		 active;
+} fsimg_partition_info_t;
+
+typedef enum fsimg_selector_kind {
+	FSIMG_SELECT_AUTOMATIC = 0,
+	FSIMG_SELECT_INDEX,
+	FSIMG_SELECT_NAME,
+	FSIMG_SELECT_TYPE,
+	FSIMG_SELECT_RANGE,
+	FSIMG_SELECT_DISK
+} fsimg_selector_kind_t;
+
+/* index for INDEX; text for NAME (UTF-8) and TYPE (a type-table name, GUID
+ * text or "0x" and two hex digits), borrowed for the call; offset and
+ * length for RANGE, where a zero length extends to the end of the disk.
+ */
+typedef struct fsimg_selector {
+	fsimg_selector_kind_t kind;
+	uint32_t	 index;
+	const char	*text;
+	uint64_t	 offset;
+	uint64_t	 length;
+} fsimg_selector_t;
+
+/* scheme names the verified table, empty without one; partitions counts
+ * the used slots whose bounds were checked. The filesystem of a selected
+ * partition is verified separately, and no other partition's contents.
+ */
+typedef struct fsimg_layer_report {
+	char		 scheme[16];
+	uint32_t	 partitions;
+	fsimg_validation_scope_t scope;
+	bool		 complete;
+} fsimg_layer_report_t;
+
 #define FSIMG_WRITE_ALLOW_LOSS 0x01u
 #define FSIMG_WRITE_REPRODUCIBLE 0x02u
 #define FSIMG_WRITE_DURABLE 0x04u
@@ -385,6 +560,8 @@ typedef struct fsimg_write_options {
 	uint32_t	 reserve_percent; /* Default 3; at most 100. */
 	/* Default zero; used verbatim in all modes, in textual byte order. */
 	unsigned char	 volume_uuid[16];
+	/* Borrowed for construction and copied; NULL selects every default. */
+	const fsimg_layer_options_t *layers;
 	uint64_t	 reserved[4];
 } fsimg_write_options_t;
 
@@ -402,7 +579,48 @@ typedef struct fsimg_plan_info {
 	uint32_t	 sector_bytes;
 	uint32_t	 allocation_unit_bytes;
 	unsigned	 required_io_flags;
+	/* The image around the volume, reported as an opened image reports
+	 * it, with every identifier the plan derived. image.disk_bytes is the
+	 * whole output and equals volume_bytes without a scheme; image.scope is
+	 * zero. With a scheme, partition is the volume's slot (image.selected):
+	 * partition.offset is the volume offset and partition.length the
+	 * partition's whole sectors, at least volume_bytes. Without one,
+	 * partition is zero.
+	 */
+	fsimg_image_info_t image;
+	fsimg_partition_info_t partition;
 } fsimg_plan_info_t;
+
+/* Where an output operation writes. FILE stages a new file beneath the
+ * trusted directory parent_fd and publishes it as name without replacing
+ * anything, durably, as write_at does. IO writes the positional object io
+ * from offset zero, as emit does. STREAM writes stream_fd sequentially.
+ * raw_fd is the raw intermediate a container, compression or stream output
+ * of a writer needs: an exclusively created, empty, unlinked read/write
+ * regular file, or -1. fsimg_sink_init makes an empty sink of a kind,
+ * with size set and every descriptor -1, so a caller fills in only what
+ * its kind uses. A sink whose size fsimg_sink_init did not set is refused
+ * untouched, so a zeroed value never hands over descriptor 0. The value
+ * and io are borrowed for the call; once the sink is accepted, raw_fd is
+ * adopted, and closed, on every outcome.
+ */
+typedef enum fsimg_sink_kind {
+	FSIMG_SINK_FILE = 1,
+	FSIMG_SINK_IO,
+	FSIMG_SINK_STREAM
+} fsimg_sink_kind_t;
+
+typedef struct fsimg_sink {
+	size_t		 size;
+	fsimg_sink_kind_t kind;
+	int		 parent_fd;
+	const char	*name;
+	fsimg_io_t	*io;
+	int		 stream_fd;
+	int		 raw_fd;
+} fsimg_sink_t;
+
+void fsimg_sink_init(fsimg_sink_t *, fsimg_sink_kind_t);
 
 /* Writers copy options/labels and own their borrowed plan until destruction.
  * plan seals collection; subsequent plan queries return the same object.
@@ -429,6 +647,10 @@ typedef struct fsimg_plan_info {
  * publishes without replacement, and always performs durable publication.
  * On unsupported publication error.path names the retained image relative to
  * parent_fd; when cleanup_error is nonzero it names the retained directory.
+ * The format is a stack naming the filesystem: "fat32" writes a bare
+ * volume and "fat32/gpt" a disk holding it in one partition, whose layout
+ * the plan reports and whose size every sink must accept; a container is
+ * unsupported in this build.
  */
 void fsimg_write_options_init(fsimg_write_options_t *);
 fsimg_status_t fsimg_writer_new(fsimg_ctx_t *, const char *,
@@ -446,6 +668,12 @@ fsimg_status_t fsimg_plan_get_info(const fsimg_plan_t *, fsimg_plan_info_t *,
 fsimg_status_t fsimg_writer_emit(fsimg_writer_t *, fsimg_io_t *, fsimg_error_t *);
 fsimg_status_t fsimg_writer_write_at(fsimg_writer_t *, int, const char *,
     fsimg_error_t *);
+/* output is emit for an IO sink and write_at for a FILE sink; a stream
+ * sink, and any stack needing a raw intermediate, is unsupported in this
+ * build.
+ */
+fsimg_status_t fsimg_writer_output(fsimg_writer_t *, const fsimg_sink_t *,
+    fsimg_error_t *);
 void fsimg_writer_free(fsimg_writer_t *);
 
 #define FSIMG_CAP_READ 0x01u
@@ -456,12 +684,6 @@ void fsimg_writer_free(fsimg_writer_t *);
 #define FSIMG_VOLUME_FREE 0x04u
 #define FSIMG_VOLUME_UUID 0x08u
 #define FSIMG_VERIFY_PAYLOAD 0x01u
-
-typedef enum fsimg_validation_scope {
-	FSIMG_VALIDATION_HEADER = 1,
-	FSIMG_VALIDATION_STRUCTURAL,
-	FSIMG_VALIDATION_PAYLOAD
-} fsimg_validation_scope_t;
 
 typedef struct fsimg_read_options {
 	size_t		 size;
@@ -598,148 +820,6 @@ void fsimg_extract_options_init(fsimg_extract_options_t *);
 fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,
     const fsimg_extract_options_t *, fsimg_error_t *);
 
-/* The layers around a volume. A stack has three slots in fixed order,
- * indexed by the layer kind that fills them; compression wraps the whole
- * file and is not a slot.
- */
-typedef enum fsimg_layer_kind {
-	FSIMG_LAYER_FILESYSTEM = 0,
-	FSIMG_LAYER_SCHEME = 1,
-	FSIMG_LAYER_CONTAINER = 2,
-	FSIMG_LAYER_COMPRESSION = 3
-} fsimg_layer_kind_t;
-
-#define FSIMG_STACK_SLOTS 3
-
-/* An unspecified slot is detected on read and empty on create; an empty
- * slot is forced empty; a named slot is forced to its layer.
- */
-typedef enum fsimg_slot_state {
-	FSIMG_SLOT_UNSPECIFIED = 0,
-	FSIMG_SLOT_EMPTY = 1,
-	FSIMG_SLOT_NAMED = 2
-} fsimg_slot_state_t;
-
-typedef struct fsimg_stack_slot {
-	fsimg_slot_state_t state;
-	char		 name[16];	/* NUL-terminated; empty unless NAMED */
-} fsimg_stack_slot_t;
-
-/* A zeroed stack leaves every slot to detection. */
-typedef struct fsimg_stack {
-	fsimg_stack_slot_t slots[FSIMG_STACK_SLOTS];
-} fsimg_stack_t;
-
-/* One registered scheme, container or compression. capabilities holds the
- * FSIMG_CAP_* operations this build implements; suffix is the file suffix
- * naming a container or compression, empty for a scheme.
- */
-typedef struct fsimg_layer_info {
-	char		 name[16];
-	char		 suffix[8];
-	fsimg_layer_kind_t kind;
-	unsigned	 capabilities;
-} fsimg_layer_info_t;
-
-/* Typed layer settings. A field of a layer the stack does not name must
- * hold its default. gpt_sector_bytes is the GPT LBA size: zero detects it
- * on read; 512 or 4096 forces it and requires gpt in the forced stack.
- */
-typedef struct fsimg_layer_options {
-	uint32_t	 gpt_sector_bytes;
-	uint64_t	 reserved[4];
-} fsimg_layer_options_t;
-
-typedef struct fsimg_image_options {
-	size_t		 size;
-	uint32_t	 version;
-	uint32_t	 flags;
-	fsimg_stack_t	 stack;		/* The forced slots */
-	fsimg_layer_options_t layers;
-	uint64_t	 reserved[4];
-} fsimg_image_options_t;
-
-/* stack is the canonical text of the layers found: the scheme when one was
- * detected or forced, and the filesystem when forced or once select() has
- * identified the selected volume. GUIDs are in textual (RFC 4122) byte
- * order. selected is the slot of the last partition select() returned,
- * zero for none. The scope is the validation the tables received.
- */
-typedef struct fsimg_image_info {
-	char		 stack[64];
-	char		 compression[16];
-	char		 scheme[16];
-	unsigned char	 disk_guid[16];
-	uint64_t	 disk_bytes;
-	uint32_t	 sector_bytes;	/* Zero without a scheme */
-	uint32_t	 partition_count; /* Table slots, used or not */
-	uint32_t	 selected;
-	uint32_t	 mbr_disk_id;
-	fsimg_validation_scope_t scope;
-} fsimg_image_info_t;
-
-/* What the filesystem probes say about a partition's first bytes. */
-typedef enum fsimg_claim {
-	FSIMG_CLAIM_NONE = 0,
-	FSIMG_CLAIM_FORMAT = 1,		/* format names the filesystem */
-	FSIMG_CLAIM_UNSUPPORTED = 2,
-	FSIMG_CLAIM_CORRUPT = 3,
-	FSIMG_CLAIM_AMBIGUOUS = 4
-} fsimg_claim_t;
-
-/* One table slot, numbered from 1 as sgdisk and /dev/sda1 count. type is
- * the type table's name, or empty for a type the table lacks. A GPT entry
- * fills type_guid, guid and name (UTF-8; an unpaired surrogate reads as
- * U+FFFD); an MBR entry fills mbr_type and active. An unused slot has only
- * index set; its claim is NONE.
- */
-typedef struct fsimg_partition_info {
-	char		 type[16];
-	char		 format[16];
-	char		 name[112];
-	unsigned char	 type_guid[16];
-	unsigned char	 guid[16];
-	uint64_t	 offset;	/* Disk offset in bytes */
-	uint64_t	 length;
-	uint32_t	 index;
-	uint32_t	 mbr_type;
-	fsimg_claim_t	 claim;
-	bool		 used;
-	bool		 active;
-} fsimg_partition_info_t;
-
-typedef enum fsimg_selector_kind {
-	FSIMG_SELECT_AUTOMATIC = 0,
-	FSIMG_SELECT_INDEX,
-	FSIMG_SELECT_NAME,
-	FSIMG_SELECT_TYPE,
-	FSIMG_SELECT_RANGE,
-	FSIMG_SELECT_DISK
-} fsimg_selector_kind_t;
-
-/* index for INDEX; text for NAME (UTF-8) and TYPE (a type-table name, GUID
- * text or "0x" and two hex digits), borrowed for the call; offset and
- * length for RANGE, where a zero length extends to the end of the disk.
- */
-typedef struct fsimg_selector {
-	fsimg_selector_kind_t kind;
-	uint32_t	 index;
-	const char	*text;
-	uint64_t	 offset;
-	uint64_t	 length;
-} fsimg_selector_t;
-
-/* scheme names the verified table, empty without one; partitions counts
- * the used slots whose bounds were checked. The filesystem of a selected
- * partition is verified separately, and no other partition's contents.
- */
-typedef struct fsimg_layer_report {
-	char		 scheme[16];
-	uint32_t	 partitions;
-	fsimg_validation_scope_t scope;
-	bool		 complete;
-} fsimg_layer_report_t;
-
 /* parse applies the one stack grammar and fails with FSIMG_EINVAL naming
  * the offending token in error.path. format writes the canonical text,
  * omitting empty and unspecified slots, NUL-terminated within capacity, and
@@ -774,6 +854,42 @@ fsimg_status_t fsimg_image_select(fsimg_image_t *, const fsimg_selector_t *,
 fsimg_status_t fsimg_image_verify(fsimg_image_t *, unsigned,
     fsimg_layer_report_t *, fsimg_error_t *);
 void fsimg_image_free(fsimg_image_t *);
+
+/* One partition of a composed disk: a borrowed volume, its GPT name (UTF-8,
+ * NULL for the type's conventional name), its type as gpt_type or mbr_type
+ * spell it (NULL for the type of the filesystem the volume's prefix
+ * identifies), and its unique GPT GUID in textual byte order (all zero is
+ * unset, as for gpt_guid).
+ */
+typedef struct fsimg_part {
+	fsimg_io_t	*volume;
+	const char	*name;
+	const char	*type;
+	unsigned char	 guid[16];
+} fsimg_part_t;
+
+/* Image operations without a filesystem writer. Each reads its inputs once,
+ * in disk order, and writes the sink sequentially; inputs are borrowed for
+ * the call and refused when they share storage with the sink. Write options
+ * supply only the mode flags, epoch and layers; every filesystem setting
+ * must hold its default.
+ *
+ * wrap puts a raw volume into the stack's scheme as its one partition,
+ * typed by gpt_type or mbr_type, else by the filesystem the stack names or
+ * the volume's prefix identifies; without a scheme the volume is the
+ * output. unwrap writes the bytes a selector names. compose places count
+ * volumes in order, each 1 MiB aligned, under a stack naming only a
+ * scheme; the layer options' partition fields must hold their defaults,
+ * since each part carries its own. A container is unsupported in this
+ * build.
+ */
+fsimg_status_t fsimg_image_wrap(fsimg_ctx_t *, fsimg_io_t *, const char *,
+    const fsimg_write_options_t *, const fsimg_sink_t *, fsimg_error_t *);
+fsimg_status_t fsimg_image_unwrap(fsimg_image_t *, const fsimg_selector_t *,
+    const fsimg_write_options_t *, const fsimg_sink_t *, fsimg_error_t *);
+fsimg_status_t fsimg_image_compose(fsimg_ctx_t *, const char *,
+    const fsimg_part_t *, size_t, const fsimg_write_options_t *,
+    const fsimg_sink_t *, fsimg_error_t *);
 
 #ifdef __cplusplus
 }

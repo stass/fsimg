@@ -79,12 +79,13 @@ typedef struct fsimg_worker_request {
 	 * read its named and empty slots are forced and the rest detected.
 	 */
 	fsimg_stack_t	 stack;
+	/* The -o layer settings; reading uses only gpt_sector_bytes. */
+	fsimg_layer_options_t layers;
 	/* Read jobs: how the volume is selected. INDEX uses partition_index,
 	 * NAME and TYPE partition_text, RANGE offset and length.
 	 */
 	fsimg_selector_kind_t selector;
 	uint32_t	 partition_index;
-	uint32_t	 gpt_sector;	/* -o gpt:sector; zero detects */
 	uint64_t	 offset;
 	uint64_t	 length;
 	uint64_t	 seconds;

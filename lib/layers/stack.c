@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -26,12 +27,53 @@ static const fsimg_layer_t layers[] = {
 
 #define LAYER_COUNT	(sizeof(layers) / sizeof(layers[0]))
 
+/*
+ * Every setting fsimg_layer_options_t holds: the layer and key naming it,
+ * its field, whether reading uses it, and whether it describes the one
+ * partition a writer or wrap creates rather than the disk. A field holds
+ * its default when all its bytes are zero, or for text when it is empty.
+ * This table is the one list of layer settings: checking options, compose's
+ * refusal of partition settings and the capability record all read it, so
+ * a setting added here is covered by each.
+ */
+typedef struct layer_setting {
+	const char	*layer;
+	const char	*key;
+	size_t		 offset;
+	size_t		 size;
+	bool		 text;
+	bool		 read;
+	bool		 partition;
+} layer_setting_t;
+
+#define SETTING_FIELD(member)	offsetof(fsimg_layer_options_t, member), \
+	sizeof(((fsimg_layer_options_t *)NULL)->member)
+
+static const layer_setting_t layer_settings[] = {
+	{ "gpt", "sector", SETTING_FIELD(gpt_sector_bytes), false, true, false },
+	{ "gpt", "disk", SETTING_FIELD(gpt_disk_bytes), false, false, false },
+	{ "gpt", "type", SETTING_FIELD(gpt_type), true, false, true },
+	{ "gpt", "name", SETTING_FIELD(gpt_name), true, false, true },
+	{ "gpt", "disk-guid", SETTING_FIELD(gpt_disk_guid), false, false, false },
+	{ "gpt", "guid", SETTING_FIELD(gpt_guid), false, false, true },
+	{ "mbr", "disk", SETTING_FIELD(mbr_disk_bytes), false, false, false },
+	{ "mbr", "type", SETTING_FIELD(mbr_type), true, false, true },
+	{ "mbr", "active", SETTING_FIELD(mbr_active), false, false, true },
+	{ "mbr", "id", SETTING_FIELD(mbr_id_set), false, false, false }
+};
+
+#define SETTING_COUNT	(sizeof(layer_settings) / sizeof(layer_settings[0]))
+
 /* Filesystem names the grammar reserves without a driver. */
 static const char *const reserved_filesystems[] = { "apfs", "hfs" };
 
 #define RESERVED_COUNT	(sizeof(reserved_filesystems) / sizeof(reserved_filesystems[0]))
 
 static void put_text(char *, size_t, size_t *, char);
+static bool setting_is_default(const fsimg_layer_options_t *,
+    const layer_setting_t *);
+static fsimg_status_t setting_error(fsimg_error_t *, const layer_setting_t *,
+    const char *);
 static bool slot_of_name(const char *, fsimg_layer_kind_t *);
 static fsimg_status_t stack_syntax(fsimg_error_t *, const char *, const char *,
     size_t);
@@ -220,10 +262,101 @@ fsimg_stack_validate(const fsimg_stack_t *stack, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+const fsimg_layer_t *
+fsimg_stack_layer(const fsimg_stack_t *stack, fsimg_layer_kind_t kind)
+{
+	const fsimg_stack_slot_t *slot = &stack->slots[kind];
+
+	return (slot->state == FSIMG_SLOT_NAMED ? fsimg_layer_find(slot->name) :
+	    NULL);
+}
+
+static bool
+setting_is_default(const fsimg_layer_options_t *options,
+    const layer_setting_t *setting)
+{
+	const unsigned char *field;
+
+	field = (const unsigned char *)options + setting->offset;
+	if (setting->text)
+		return (field[0] == '\0');
+	for (size_t i = 0; i < setting->size; i++) {
+		if (field[i] != 0)
+			return (false);
+	}
+	return (true);
+}
+
+static fsimg_status_t
+setting_error(fsimg_error_t *error, const layer_setting_t *setting,
+    const char *message)
+{
+	char key[32];
+
+	fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE, message);
+	snprintf(key, sizeof(key), "%s:%s", setting->layer, setting->key);
+	fsimg_error_path(error, key);
+	return (FSIMG_EINVAL);
+}
+
+fsimg_status_t
+fsimg_layer_options_check(const fsimg_stack_t *stack,
+    const fsimg_layer_options_t *options, bool writing, fsimg_error_t *error)
+{
+	const layer_setting_t *setting;
+	const fsimg_layer_t *layer;
+	const char *field;
+
+	for (unsigned i = 0; i < 4; i++) {
+		if (options->reserved[i] != 0)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, "nonzero reserved layer option"));
+	}
+	for (size_t i = 0; i < SETTING_COUNT; i++) {
+		setting = &layer_settings[i];
+		field = (const char *)options + setting->offset;
+		if (setting->text && memchr(field, '\0', setting->size) == NULL)
+			return (setting_error(error, setting,
+			    "layer setting text is not terminated"));
+		if (setting_is_default(options, setting))
+			continue;
+		layer = fsimg_stack_layer(stack,
+		    fsimg_layer_find(setting->layer)->kind);
+		if (layer == NULL || strcmp(layer->name, setting->layer) != 0)
+			return (setting_error(error, setting,
+			    "setting names a layer the stack does not contain"));
+		if (!writing && !setting->read)
+			return (setting_error(error, setting,
+			    "layer setting applies only to creation"));
+	}
+	/* The MBR identifier's value means something only once it is set. */
+	if (!options->mbr_id_set && options->mbr_id != 0) {
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the MBR identifier has a value but is not set");
+		fsimg_error_path(error, "mbr:id");
+		return (FSIMG_EINVAL);
+	}
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_layer_options_disk_only(const fsimg_layer_options_t *options,
+    fsimg_error_t *error)
+{
+	for (size_t i = 0; i < SETTING_COUNT; i++) {
+		if (layer_settings[i].partition &&
+		    !setting_is_default(options, &layer_settings[i]))
+			return (setting_error(error, &layer_settings[i],
+			    "compose takes partition settings from its parts"));
+	}
+	return (FSIMG_OK);
+}
+
 fsimg_status_t
 fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 {
 	const fsimg_layer_t *layer;
+	size_t used;
 
 	fsimg_error_clear(error);
 	if (cursor == NULL || out == NULL)
@@ -239,7 +372,18 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 		snprintf(out->suffix, sizeof(out->suffix), "%s", layer->suffix);
 	out->kind = layer->kind;
 	if (layer->scheme != NULL)
-		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
+		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
+		    FSIMG_CAP_VERIFY;
+	/* The layer's keys in table order; the longest list fits. */
+	used = 0;
+	for (size_t i = 0; i < SETTING_COUNT; i++) {
+		if (strcmp(layer_settings[i].layer, layer->name) != 0)
+			continue;
+		if (used != 0)
+			put_text(out->settings, sizeof(out->settings), &used, ',');
+		for (const char *c = layer_settings[i].key; *c != '\0'; c++)
+			put_text(out->settings, sizeof(out->settings), &used, *c);
+	}
 	(*cursor)++;
 	return (FSIMG_OK);
 }

@@ -1,0 +1,683 @@
+/* SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (c) 2026, fsimg contributors
+ */
+#include "config.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+
+#include "io.h"
+#include "layer.h"
+#include "publish.h"
+
+/*
+ * Layered output. Every disk is laid out once, as an assembled disk: a
+ * sequence of regions that covers it in order, each a run of table bytes
+ * in charged memory, a volume or a run of zeros. Wrap, unwrap and compose
+ * stage nothing: one sequential copy writes their assembled disk through
+ * the output coordinator, reading each borrowed input once. A writer's disk
+ * is staged raw and filled in place from the same regions
+ * (fsimg_disk_plan_emit): zeros, then the volume its driver emits into a
+ * slice, then the tables.
+ */
+#define COPY_BUFFER_BYTES	65536u
+
+typedef enum region_kind {
+	REGION_ZERO,
+	REGION_TABLE,
+	REGION_VOLUME
+} region_kind_t;
+
+/* A TABLE region's bytes, or the VOLUME read from its offset zero; a
+ * writer's volume, which its driver emits in place, has none.
+ */
+typedef struct disk_region {
+	region_kind_t	 kind;
+	uint64_t	 offset;
+	uint64_t	 length;
+	const unsigned char *bytes;
+	fsimg_io_t	*volume;
+} disk_region_t;
+
+/* Regions in disk order, contiguous from offset zero to length. session
+ * charges the sequential copy of wrap, unwrap and compose; a writer's
+ * in-place emission charges the writer's session and leaves it idle.
+ */
+typedef struct assembled_disk {
+	disk_region_t	*regions;
+	size_t		 count;
+	size_t		 capacity;
+	uint64_t	 length;
+	bool		 durable;
+	fsimg_session_t	 session;
+} assembled_disk_t;
+
+static fsimg_status_t check_mode(const fsimg_write_options_t *,
+    fsimg_write_options_t *, fsimg_layer_options_t *, fsimg_error_t *);
+static fsimg_status_t disk_new(fsimg_ctx_t *, size_t, bool,
+    assembled_disk_t *, fsimg_error_t *);
+static fsimg_status_t disk_append(assembled_disk_t *, region_kind_t,
+    uint64_t, uint64_t, const unsigned char *, fsimg_io_t *, fsimg_error_t *);
+static fsimg_status_t disk_finish(assembled_disk_t *, uint64_t,
+    fsimg_error_t *);
+static fsimg_status_t assemble_plan(assembled_disk_t *,
+    const fsimg_disk_plan_t *, const fsimg_scheme_tables_t *,
+    fsimg_io_t *const *, const uint64_t *, fsimg_error_t *);
+static fsimg_status_t build_disk(fsimg_ctx_t *, const fsimg_disk_plan_t *,
+    fsimg_io_t *const *, const uint64_t *, bool, assembled_disk_t *,
+    fsimg_scheme_tables_t *, fsimg_error_t *);
+static fsimg_status_t reject_aliases(const assembled_disk_t *, fsimg_io_t *,
+    fsimg_error_t *);
+static fsimg_status_t copy_disk(assembled_disk_t *, fsimg_io_t *,
+    fsimg_error_t *);
+static fsimg_status_t fill_output(void *, fsimg_io_t *, fsimg_error_t *);
+static fsimg_status_t write_disk(fsimg_ctx_t *, assembled_disk_t *,
+    const fsimg_sink_t *, fsimg_error_t *);
+static fsimg_status_t identify_volume(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
+    const char *, char [static 16], fsimg_error_t *);
+static fsimg_status_t write_plan(fsimg_ctx_t *, fsimg_disk_plan_t *,
+    fsimg_io_t *const *, const uint64_t *, bool, const fsimg_sink_t *,
+    fsimg_error_t *);
+
+/*
+ * Fill a writer's staged disk in place from its assembled regions, in
+ * three passes: zero every ZERO region, let emit write the volume into a
+ * checked slice, then write the tables, each after a cancellation poll.
+ * The zeros come first because a fresh staged disk is known to be zero
+ * until its first write, so zeroing it then writes nothing and a fixed
+ * disk's long gaps stay holes; the volume's emission relies on the same
+ * knowledge, so the tables come last.
+ */
+fsimg_status_t
+fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
+    fsimg_io_t *output, fsimg_session_t *session, fsimg_volume_emit_t emit,
+    void *argument, fsimg_error_t *error)
+{
+	static const region_kind_t passes[] = { REGION_ZERO, REGION_VOLUME,
+	    REGION_TABLE };
+	/* The driver writes the volume in place, so no input backs it. */
+	fsimg_io_t *const no_input[1] = { NULL };
+	assembled_disk_t disk;
+	fsimg_scheme_tables_t tables;
+	const disk_region_t *region;
+	fsimg_io_t *volume;
+	size_t transferred;
+	fsimg_status_t status;
+
+	status = build_disk(session->ctx, plan, no_input, &volume_bytes, false,
+	    &disk, &tables, error);
+	for (size_t pass = 0; status == FSIMG_OK &&
+	    pass < sizeof(passes) / sizeof(passes[0]); pass++) {
+		for (size_t i = 0; status == FSIMG_OK && i < disk.count; i++) {
+			region = &disk.regions[i];
+			if (region->kind != passes[pass])
+				continue;
+			switch (region->kind) {
+			case REGION_ZERO:
+				status = fsimg_io_zero_session(output, session,
+				    region->offset, region->length, error);
+				break;
+			case REGION_VOLUME:
+				status = fsimg_io_slice(output, region->offset,
+				    region->length, &volume, error);
+				if (status != FSIMG_OK)
+					break;
+				status = emit(argument, volume, error);
+				fsimg_io_free(volume);
+				break;
+			case REGION_TABLE:
+				status = fsimg_poll(session->ctx, NULL, error);
+				if (status == FSIMG_OK)
+					status = fsimg_io_write_session(output, session,
+					    region->offset, region->bytes,
+					    region->length, &transferred, error);
+				break;
+			}
+		}
+	}
+	fsimg_scheme_tables_free(&tables);
+	fsimg_dealloc(disk.regions);
+	return (status);
+}
+
+/*
+ * Without a filesystem writer, write options carry only the mode: the
+ * reproducible, durable and loss flags, the epoch and the layer settings.
+ * Every other field must hold its default, as a setting a format does not
+ * store must, so none is silently ignored: a copy of the options with the
+ * three mode fields reset must equal the defaults. selected is the
+ * defaults with the caller's flags and epoch, and layers a copy of the
+ * caller's layer settings, so selected carries no layers pointer.
+ */
+static fsimg_status_t
+check_mode(const fsimg_write_options_t *options,
+    fsimg_write_options_t *selected, fsimg_layer_options_t *layers,
+    fsimg_error_t *error)
+{
+	fsimg_write_options_t defaults, others;
+
+	fsimg_write_options_init(&defaults);
+	*selected = defaults;
+	fsimg_layer_options_init(layers);
+	if (options == NULL)
+		return (FSIMG_OK);
+	if (options->size != sizeof(*options) ||
+	    options->version != FSIMG_OPTIONS_VERSION ||
+	    (options->flags & ~(FSIMG_WRITE_ALLOW_LOSS | FSIMG_WRITE_REPRODUCIBLE |
+	    FSIMG_WRITE_DURABLE)) != 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "unsupported write options size, version or flags"));
+	others = *options;
+	others.flags = defaults.flags;
+	others.epoch = defaults.epoch;
+	others.layers = defaults.layers;
+	if (bcmp(&others, &defaults, sizeof(defaults)) != 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "filesystem settings must hold their defaults without a "
+		    "filesystem writer"));
+	selected->flags = options->flags;
+	selected->epoch = options->epoch;
+	if (options->layers != NULL)
+		*layers = *options->layers;
+	return (FSIMG_OK);
+}
+
+/* An empty disk with room for capacity regions, charging its copy to a
+ * session of its own.
+ */
+static fsimg_status_t
+disk_new(fsimg_ctx_t *ctx, size_t capacity, bool durable,
+    assembled_disk_t *disk, fsimg_error_t *error)
+{
+	bzero(disk, sizeof(*disk));
+	disk->durable = durable;
+	fsimg_session_init(&disk->session, ctx, "image output", 0);
+	disk->regions = fsimg_alloc(ctx, capacity * sizeof(*disk->regions),
+	    error);
+	if (disk->regions == NULL)
+		return (error->status);
+	disk->capacity = capacity;
+	return (FSIMG_OK);
+}
+
+/* Append one region at offset, after a run of zeros to reach it. Regions
+ * arrive in disk order; one that would overlap its predecessor is an
+ * internal error.
+ */
+static fsimg_status_t
+disk_append(assembled_disk_t *disk, region_kind_t kind, uint64_t offset,
+    uint64_t length, const unsigned char *bytes, fsimg_io_t *volume,
+    fsimg_error_t *error)
+{
+	if (offset < disk->length || length > UINT64_MAX - offset ||
+	    disk->capacity - disk->count < 2)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "assembled disk regions are out of order"));
+	if (offset > disk->length)
+		disk->regions[disk->count++] = (disk_region_t){ .kind = REGION_ZERO,
+		    .offset = disk->length, .length = offset - disk->length };
+	if (length != 0)
+		disk->regions[disk->count++] = (disk_region_t){ .kind = kind,
+		    .offset = offset, .length = length, .bytes = bytes,
+		    .volume = volume };
+	disk->length = offset + length;
+	return (FSIMG_OK);
+}
+
+/* Zeros from the last region to the end of the disk. */
+static fsimg_status_t
+disk_finish(assembled_disk_t *disk, uint64_t length, fsimg_error_t *error)
+{
+	return (disk_append(disk, REGION_ZERO, length, 0, NULL, NULL, error));
+}
+
+/* The placed plan's disk: the leading tables, each volume at its
+ * partition's offset, the trailing tables, and zeros everywhere between,
+ * including a partition's padding past its volume.
+ */
+static fsimg_status_t
+assemble_plan(assembled_disk_t *disk, const fsimg_disk_plan_t *plan,
+    const fsimg_scheme_tables_t *tables, fsimg_io_t *const *volumes,
+    const uint64_t *volume_bytes, fsimg_error_t *error)
+{
+	const fsimg_table_region_t *region;
+	fsimg_status_t status;
+
+	region = &tables->regions[0];
+	status = disk_append(disk, REGION_TABLE, region->offset, region->length,
+	    region->bytes, NULL, error);
+	for (uint32_t i = 0; status == FSIMG_OK && i < plan->table.count; i++)
+		status = disk_append(disk, REGION_VOLUME,
+		    plan->table.records[i].offset, volume_bytes[i], NULL,
+		    volumes[i], error);
+	for (unsigned i = 1; status == FSIMG_OK && i < tables->count; i++) {
+		region = &tables->regions[i];
+		status = disk_append(disk, REGION_TABLE, region->offset,
+		    region->length, region->bytes, NULL, error);
+	}
+	if (status == FSIMG_OK)
+		status = disk_finish(disk, plan->disk_bytes, error);
+	return (status);
+}
+
+/* A placed plan's assembled disk: its tables encoded and its regions in
+ * disk order, the volume regions reading volumes[i]. Without a scheme the
+ * one volume is the disk. The caller frees tables and disk->regions on
+ * every outcome.
+ */
+static fsimg_status_t
+build_disk(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
+    fsimg_io_t *const *volumes, const uint64_t *volume_bytes, bool durable,
+    assembled_disk_t *disk, fsimg_scheme_tables_t *tables,
+    fsimg_error_t *error)
+{
+	size_t count;
+	fsimg_status_t status;
+
+	bzero(tables, sizeof(*tables));
+	count = plan->scheme == NULL ? 1 : plan->table.count;
+	/* Each volume and table may follow a run of zeros, and so may the
+	 * disk's end.
+	 */
+	status = disk_new(ctx, 2 * (count + FSIMG_TABLE_REGIONS) + 1, durable,
+	    disk, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (plan->scheme == NULL)
+		return (disk_append(disk, REGION_VOLUME, 0, volume_bytes[0], NULL,
+		    volumes[0], error));
+	status = plan->scheme->scheme->encode(ctx, &plan->table, plan->disk_bytes,
+	    tables, error);
+	if (status == FSIMG_OK)
+		status = assemble_plan(disk, plan, tables, volumes, volume_bytes,
+		    error);
+	return (status);
+}
+
+/* No input may share its storage with the output, through any slice or
+ * name, before the output is touched.
+ */
+static fsimg_status_t
+reject_aliases(const assembled_disk_t *disk, fsimg_io_t *output,
+    fsimg_error_t *error)
+{
+	fsimg_host_file_t sink, input;
+	bool sink_known, input_known;
+	fsimg_status_t status;
+
+	status = fsimg_io_identity(output, &sink, &sink_known, error);
+	if (status != FSIMG_OK || !sink_known)
+		return (status);
+	for (size_t i = 0; i < disk->count; i++) {
+		if (disk->regions[i].kind != REGION_VOLUME)
+			continue;
+		status = fsimg_io_identity(disk->regions[i].volume, &input,
+		    &input_known, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (input_known && input.device == sink.device &&
+		    input.inode == sink.inode)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, "output aliases an input"));
+	}
+	return (FSIMG_OK);
+}
+
+/*
+ * The sequential copy: every region in order, in buffer-sized steps, each
+ * charged to the work budget and polled for cancellation. A sink proven
+ * zero before the first write keeps zero runs and all-zero input blocks
+ * as holes, which the copy never writes afterwards; any other sink gets
+ * every byte written.
+ */
+static fsimg_status_t
+copy_disk(assembled_disk_t *disk, fsimg_io_t *output, fsimg_error_t *error)
+{
+	static const unsigned char zeros[COPY_BUFFER_BYTES];
+	const disk_region_t *region;
+	const unsigned char *bytes;
+	unsigned char *buffer;
+	uint64_t done;
+	size_t batch, transferred;
+	fsimg_status_t status;
+	bool proven_zero, zero_batch;
+
+	buffer = fsimg_alloc(disk->session.ctx, COPY_BUFFER_BYTES, error);
+	if (buffer == NULL)
+		return (error->status);
+	proven_zero = fsimg_io_proven_zero(output);
+	status = FSIMG_OK;
+	for (size_t i = 0; status == FSIMG_OK && i < disk->count; i++) {
+		region = &disk->regions[i];
+		for (done = 0; status == FSIMG_OK && done < region->length;
+		    done += batch) {
+			batch = region->length - done > COPY_BUFFER_BYTES ?
+			    COPY_BUFFER_BYTES : (size_t)(region->length - done);
+			status = fsimg_session_charge(&disk->session, 0, 0, 1, error);
+			if (status != FSIMG_OK)
+				break;
+			bytes = zeros;
+			zero_batch = region->kind == REGION_ZERO;
+			if (region->kind == REGION_TABLE)
+				bytes = region->bytes + done;
+			else if (region->kind == REGION_VOLUME) {
+				status = fsimg_io_read_session(region->volume,
+				    &disk->session, done, buffer, batch, &transferred,
+				    error);
+				if (status != FSIMG_OK)
+					break;
+				bytes = buffer;
+				zero_batch = bcmp(buffer, zeros, batch) == 0;
+			}
+			/* A proven-zero sink already holds a zero batch. */
+			if (proven_zero && zero_batch)
+				continue;
+			status = fsimg_io_write_session(output, &disk->session,
+			    region->offset + done, bytes, batch, &transferred, error);
+		}
+	}
+	fsimg_dealloc(buffer);
+	return (status);
+}
+
+/* Fill the output with the disk: alias, capability and limit checks
+ * before any mutation, then resize, copy and flush; a failure after the
+ * first mutation leaves the output incomplete.
+ */
+static fsimg_status_t
+fill_output(void *argument, fsimg_io_t *output, fsimg_error_t *error)
+{
+	assembled_disk_t *disk = argument;
+	fsimg_ctx_t *ctx = disk->session.ctx;
+	fsimg_status_t status;
+	bool resize;
+
+	if (fsimg_io_context(output) != ctx)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "inputs and output require the same context"));
+	status = reject_aliases(disk, output, error);
+	if (status == FSIMG_OK)
+		status = fsimg_io_check_output(output, disk->length, disk->durable,
+		    &resize, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (ctx->options.max_output_bytes != 0 &&
+	    disk->length > ctx->options.max_output_bytes)
+		return (fsimg_limit_error(error, FSIMG_RESOURCE_OUTPUT,
+		    ctx->options.max_output_bytes, disk->length));
+	if (resize)
+		status = fsimg_io_resize(output, disk->length, error);
+	if (status == FSIMG_OK)
+		status = copy_disk(disk, output, error);
+	if (status == FSIMG_OK)
+		status = fsimg_io_flush(output, disk->durable, error);
+	if (status != FSIMG_OK && error != NULL)
+		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
+	return (status);
+}
+
+/* A file sink stages, fills and publishes through the output coordinator;
+ * an I/O sink is filled in place.
+ */
+static fsimg_status_t
+write_disk(fsimg_ctx_t *ctx, assembled_disk_t *disk, const fsimg_sink_t *sink,
+    fsimg_error_t *error)
+{
+	if (sink->kind == FSIMG_SINK_FILE)
+		return (fsimg_output_stage(ctx, sink->parent_fd, sink->name,
+		    disk->length, fill_output, disk, NULL, error));
+	return (fill_output(disk, sink->io, error));
+}
+
+/* The filesystem a volume's prefix identifies, forced or detected; name is
+ * empty when no single format claims it.
+ */
+static fsimg_status_t
+identify_volume(fsimg_ctx_t *ctx, fsimg_io_t *volume, uint64_t length,
+    const char *forced, char name[static 16], fsimg_error_t *error)
+{
+	fsimg_session_t session;
+	fsimg_claim_t claim;
+	fsimg_status_t status;
+
+	fsimg_session_init(&session, ctx, "volume identification", 0);
+	status = fsimg_volume_claim(ctx, volume, &session, 0, length, forced,
+	    &claim, name, error);
+	if (status == FSIMG_OK && claim != FSIMG_CLAIM_FORMAT)
+		name[0] = '\0';
+	return (status);
+}
+
+/* Place a resolved plan's volumes, encode its tables and copy the
+ * assembled disk to the sink. Without a scheme the one volume is the disk.
+ */
+static fsimg_status_t
+write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
+    fsimg_io_t *const *volumes, const uint64_t *volume_bytes, bool durable,
+    const fsimg_sink_t *sink, fsimg_error_t *error)
+{
+	assembled_disk_t disk;
+	fsimg_scheme_tables_t tables;
+	fsimg_status_t status;
+
+	status = fsimg_disk_plan_place(plan, volume_bytes, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = build_disk(ctx, plan, volumes, volume_bytes, durable, &disk,
+	    &tables, error);
+	if (status == FSIMG_OK)
+		status = write_disk(ctx, &disk, sink, error);
+	fsimg_scheme_tables_free(&tables);
+	fsimg_dealloc(disk.regions);
+	return (status);
+}
+
+/*
+ * Wrap one raw volume. A filesystem the stack names must be the one the
+ * volume holds. With a scheme the volume is the one partition, typed by
+ * the layer settings or else by its filesystem; without one it is the
+ * output.
+ */
+fsimg_status_t
+fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
+    const fsimg_write_options_t *options, const fsimg_sink_t *sink,
+    fsimg_error_t *error)
+{
+	fsimg_write_options_t selected;
+	fsimg_layer_options_t layers;
+	fsimg_partition_request_t request;
+	fsimg_disk_plan_t plan;
+	fsimg_stack_t stack;
+	const char *named;
+	char filesystem[16];
+	uint64_t length;
+	fsimg_error_t local;
+	fsimg_status_t status;
+
+	if (error == NULL)
+		error = &local;
+	bzero(&plan, sizeof(plan));
+	status = fsimg_sink_adopt(sink, error);
+	if (status == FSIMG_OK)
+		status = fsimg_ctx_ready(ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (input == NULL || text == NULL || fsimg_io_context(input) != ctx)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "wrap needs a stack and an input in its context"));
+	status = fsimg_stack_parse(text, &stack, error);
+	if (status == FSIMG_OK)
+		status = check_mode(options, &selected, &layers, error);
+	if (status == FSIMG_OK)
+		status = fsimg_io_get_size(input, &length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	named = stack.slots[FSIMG_LAYER_FILESYSTEM].state == FSIMG_SLOT_NAMED ?
+	    stack.slots[FSIMG_LAYER_FILESYSTEM].name : NULL;
+	status = identify_volume(ctx, input, length, named, filesystem, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (named != NULL && strcmp(filesystem, named) != 0) {
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the volume does not hold the filesystem the stack names");
+		fsimg_error_path(error, named);
+		return (FSIMG_EINVAL);
+	}
+	status = fsimg_disk_plan_init(ctx, &stack, &layers, 1, selected.epoch,
+	    selected.flags, &plan, error);
+	if (status == FSIMG_OK && plan.scheme != NULL) {
+		request = (fsimg_partition_request_t){
+			.type = plan.table.kind == FSIMG_SCHEME_GPT ?
+			    layers.gpt_type : layers.mbr_type,
+			.name = layers.gpt_name,
+			.guid = layers.gpt_guid,
+			.filesystem = filesystem[0] != '\0' ? filesystem : NULL,
+			.active = layers.mbr_active
+		};
+		status = fsimg_disk_plan_partition(&plan, 0, &request, error);
+	}
+	if (status == FSIMG_OK)
+		status = write_plan(ctx, &plan, &input, &length,
+		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
+	fsimg_disk_plan_free(&plan);
+	return (status);
+}
+
+/* The bytes a selector names, raw: a partition, a range or the disk. */
+fsimg_status_t
+fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
+    const fsimg_write_options_t *options, const fsimg_sink_t *sink,
+    fsimg_error_t *error)
+{
+	fsimg_write_options_t selected;
+	fsimg_layer_options_t layers;
+	fsimg_disk_plan_t plan;
+	fsimg_stack_t stack;
+	fsimg_io_t *volume;
+	fsimg_ctx_t *ctx;
+	uint64_t length;
+	fsimg_error_t local;
+	fsimg_status_t status;
+
+	if (error == NULL)
+		error = &local;
+	volume = NULL;
+	bzero(&stack, sizeof(stack));
+	status = fsimg_sink_adopt(sink, error);
+	if (status == FSIMG_OK)
+		status = check_mode(options, &selected, &layers, error);
+	if (status == FSIMG_OK)
+		status = fsimg_layer_options_check(&stack, &layers, true, error);
+	if (status == FSIMG_OK)
+		status = fsimg_image_select(image, selector, &volume, error);
+	if (status != FSIMG_OK)
+		return (status);
+	ctx = fsimg_io_context(volume);
+	status = fsimg_io_get_size(volume, &length, error);
+	if (status == FSIMG_OK)
+		status = fsimg_disk_plan_init(ctx, &stack, &layers, 1,
+		    selected.epoch, selected.flags, &plan, error);
+	if (status == FSIMG_OK)
+		status = write_plan(ctx, &plan, &volume, &length,
+		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
+	fsimg_io_free(volume);
+	return (status);
+}
+
+/*
+ * A partitioned disk from volumes in order. The stack names the scheme
+ * and nothing to write inside it; each part carries its own type, name
+ * and GUID, so the layer options' partition settings must hold their
+ * defaults. A part without a type takes its filesystem's.
+ */
+fsimg_status_t
+fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
+    const fsimg_part_t *parts, size_t count,
+    const fsimg_write_options_t *options, const fsimg_sink_t *sink,
+    fsimg_error_t *error)
+{
+	fsimg_write_options_t selected;
+	fsimg_layer_options_t layers;
+	fsimg_partition_request_t request;
+	fsimg_disk_plan_t plan;
+	fsimg_stack_t stack;
+	fsimg_io_t **volumes;
+	uint64_t *lengths;
+	bool typed;
+	char filesystem[16], key[32];
+	fsimg_error_t local;
+	fsimg_status_t status;
+
+	if (error == NULL)
+		error = &local;
+	bzero(&plan, sizeof(plan));
+	status = fsimg_sink_adopt(sink, error);
+	if (status == FSIMG_OK)
+		status = fsimg_ctx_ready(ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (text == NULL || (parts == NULL && count != 0))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "compose needs a stack and its parts"));
+	status = fsimg_stack_parse(text, &stack, error);
+	if (status == FSIMG_OK)
+		status = check_mode(options, &selected, &layers, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (stack.slots[FSIMG_LAYER_FILESYSTEM].state == FSIMG_SLOT_NAMED ||
+	    stack.slots[FSIMG_LAYER_SCHEME].state != FSIMG_SLOT_NAMED)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "compose needs a stack naming a scheme and no filesystem"));
+	status = fsimg_layer_options_disk_only(&layers, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_disk_plan_init(ctx, &stack, &layers,
+	    count > UINT32_MAX ? UINT32_MAX : (uint32_t)count, selected.epoch,
+	    selected.flags, &plan, error);
+	if (status != FSIMG_OK)
+		return (status);
+
+	/* plan_init bounded count by the scheme's slots, so these are small. */
+	lengths = NULL;
+	volumes = fsimg_alloc(ctx, count * sizeof(*volumes), error);
+	if (volumes != NULL)
+		lengths = fsimg_alloc(ctx, count * sizeof(*lengths), error);
+	if (lengths == NULL)
+		status = error->status;
+	for (size_t i = 0; status == FSIMG_OK && i < count; i++) {
+		snprintf(key, sizeof(key), "partition %u", (unsigned)i + 1);
+		volumes[i] = parts[i].volume;
+		if (volumes[i] == NULL || fsimg_io_context(volumes[i]) != ctx) {
+			status = fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, "a part needs a volume in the context");
+			fsimg_error_path(error, key);
+			break;
+		}
+		status = fsimg_io_get_size(volumes[i], &lengths[i], error);
+		/* An untyped part, NULL or empty, is typed by its filesystem. */
+		typed = parts[i].type != NULL && parts[i].type[0] != '\0';
+		filesystem[0] = '\0';
+		if (status == FSIMG_OK && !typed)
+			status = identify_volume(ctx, volumes[i], lengths[i], NULL,
+			    filesystem, error);
+		if (status != FSIMG_OK)
+			break;
+		request = (fsimg_partition_request_t){
+			.type = typed ? parts[i].type : NULL,
+			.name = parts[i].name,
+			.guid = parts[i].guid,
+			.filesystem = filesystem[0] != '\0' ? filesystem : NULL,
+			.composed = true
+		};
+		status = fsimg_disk_plan_partition(&plan, (uint32_t)i, &request,
+		    error);
+	}
+	if (status == FSIMG_OK)
+		status = write_plan(ctx, &plan, volumes, lengths,
+		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
+	fsimg_dealloc(lengths);
+	fsimg_dealloc(volumes);
+	fsimg_disk_plan_free(&plan);
+	return (status);
+}

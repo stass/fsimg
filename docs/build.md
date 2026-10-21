@@ -8,9 +8,15 @@ use Python 3 and pkg-config as development tools. On FreeBSD these are
 Independent FAT tests additionally use `brew install mtools
 dosfstools cmake`. Linux exFAT interoperability uses `exfatprogs`.
 Partition-table oracles use `sgdisk` (`brew install gptfdisk`) and `sfdisk`
-(`brew install util-linux`, found in its keg's `sbin`), with mtools formatting
-the partitions, and `hdiutil` on macOS; `test/layers-integration.sh` reports
-each missing tool and skips only when none is present.
+(`brew install util-linux`, found in its keg's `sbin` with its `fdisk`), with
+mtools formatting and listing the partitions, and `hdiutil` on macOS. They
+read the disks `sgdisk` and `sfdisk` write and verify the disks fsimg writes:
+`sgdisk -v` on a GPT around every filesystem and on a disk composed by the
+`layers-compose` check program, `sfdisk --sector-size 4096 --verify` on
+4096-byte-sector tables (`sgdisk` has no sector-size setting for a file),
+`sfdisk -d`, `fdisk -l` and `mdir` on MBR disks, and `hdiutil attach` of a
+raw GPT disk. `test/layers-integration.sh` reports each missing tool and
+skips only when none is present.
 FreeBSD uses native `newfs_msdos`/`fsck_msdosfs`; install
 missing development tools through ports, including `filesystems/mtools`.
 The additional fatcat oracle is built from a pinned upstream checkout.

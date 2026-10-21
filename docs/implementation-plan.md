@@ -471,14 +471,13 @@ stage again one reviewed commit:
    pass on each platform.
 2. **Stacks and schemes.** Stack parsing, the layered reader with GPT and MBR
    detection, partition selection and the stack in info; creation into a
-   staged raw disk with a scheme; unwrap and compose as library operations
-   only, since their command-line spelling needs an owner decision and its
-   own design first. Complete: sgdisk/gdisk and fdisk read fsimg disks, and
-   fsimg reads theirs.
+   staged raw disk with a scheme; wrap of a raw volume in a scheme, unwrap
+   and compose as library operations with no command-line form. Complete:
+   sgdisk/gdisk and fdisk read fsimg disks, and fsimg reads theirs.
 3. **Containers.** Fixed VHD, simg, and DMG with the bounded plist parser,
    chunk index and zlib chunks; the transcode pass, the raw intermediate,
-   stream output and wrap. Complete: the hdiutil and qemu-img gates of the
-   layer design, both directions.
+   stream output and wrap into a container. Complete: the hdiutil and
+   qemu-img gates of the layer design, both directions.
 4. **Compression.** gzip output, the budgeted spool with the coordinator's
    stdin pipe for gzip and stream input, and the zlib version in capability
    output; the sandbox admits pipe input and rights-limits the handed-over

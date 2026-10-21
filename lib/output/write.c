@@ -20,6 +20,7 @@ static fsimg_status_t create_staging(fsimg_ctx_t *, int, char *, size_t,
     int *, bool *, fsimg_error_t *);
 static fsimg_status_t finish_staging(fsimg_ctx_t *, int, const char *, int,
     bool, bool, fsimg_status_t, fsimg_error_t *);
+static fsimg_status_t emit_writer(void *, fsimg_io_t *, fsimg_error_t *);
 
 static fsimg_status_t
 create_staging(fsimg_ctx_t *ctx, int parent, char *name, size_t capacity,
@@ -109,18 +110,83 @@ finish_staging(fsimg_ctx_t *ctx, int parent, const char *name, int staging,
 	return (status);
 }
 
+/* An empty sink of a kind: no descriptors and no objects. */
+void
+fsimg_sink_init(fsimg_sink_t *sink, fsimg_sink_kind_t kind)
+{
+	*sink = (fsimg_sink_t){ .size = sizeof(*sink), .kind = kind,
+	    .parent_fd = -1, .stream_fd = -1, .raw_fd = -1 };
+}
+
+/*
+ * Take a sink for an output that needs no raw intermediate. A sink
+ * fsimg_sink_init did not make is refused untouched, since its raw_fd
+ * cannot be trusted to be one the caller handed over. Otherwise the raw
+ * intermediate descriptor is adopted, so it is closed here on every
+ * outcome, and a sink that supplies one is refused. A file sink must name
+ * its basename and an I/O sink its object; this build writes no stream.
+ */
+fsimg_status_t
+fsimg_sink_adopt(const fsimg_sink_t *sink, fsimg_error_t *error)
+{
+	if (sink == NULL || sink->size != sizeof(*sink))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
+		    "missing or uninitialized output sink"));
+	if (sink->raw_fd != -1) {
+		if (sink->raw_fd >= 0)
+			close(sink->raw_fd);
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
+		    "this output needs no raw intermediate"));
+	}
+	switch (sink->kind) {
+	case FSIMG_SINK_FILE:
+		if (sink->name == NULL)
+			break;
+		return (FSIMG_OK);
+	case FSIMG_SINK_IO:
+		if (sink->io == NULL)
+			break;
+		return (FSIMG_OK);
+	case FSIMG_SINK_STREAM:
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_PUBLISH, "stream output is not supported"));
+	}
+	return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
+	    "invalid output sink"));
+}
+
+static fsimg_status_t
+emit_writer(void *argument, fsimg_io_t *output, fsimg_error_t *error)
+{
+	return (fsimg_writer_emit(argument, output, error));
+}
+
 fsimg_status_t
 fsimg_output_write(fsimg_writer_t *writer, int parent, const char *name,
     uint64_t length, const fsimg_publish_ops_t *hooks, fsimg_error_t *error)
 {
-	fsimg_ctx_t *ctx;
+	return (fsimg_output_stage(writer->ctx, parent, name, length, emit_writer,
+	    writer, hooks, error));
+}
+
+/*
+ * The output coordinator's file case: a private staging directory beside
+ * the final name, a staged file created exclusively there, filled by the
+ * caller's operation, closed with its errors observed, and published
+ * without replacement only after the fill succeeded. Every failure removes
+ * what was staged, so nothing partial is ever published.
+ */
+fsimg_status_t
+fsimg_output_stage(fsimg_ctx_t *ctx, int parent, const char *name,
+    uint64_t length, fsimg_output_fill_t fill, void *argument,
+    const fsimg_publish_ops_t *hooks, fsimg_error_t *error)
+{
 	fsimg_io_t *output;
 	char staging_name[96];
 	fsimg_status_t status;
 	int staging, fd, saved;
 	bool created, retain;
 
-	ctx = writer->ctx;
 	output = NULL;
 	staging = -1;
 	created = retain = false;
@@ -147,7 +213,7 @@ fsimg_output_write(fsimg_writer_t *writer, int parent, const char *name,
 	status = fsimg_io_adopt_empty_output(ctx, fd, &output, error);
 	if (status != FSIMG_OK)
 		goto done;
-	status = fsimg_writer_emit(writer, output, error);
+	status = fill(argument, output, error);
 	if (status != FSIMG_OK)
 		goto done;
 	/* Close errors are observed before publication. No descriptor can still

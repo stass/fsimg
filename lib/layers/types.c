@@ -3,10 +3,12 @@
  */
 #include "config.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
 #include "layer.h"
+#include "unicode.h"
 
 #define BASIC_GUID	"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
 #define BASIC_NAME	"Microsoft basic data"
@@ -48,6 +50,7 @@ static bool hex_digit(char, unsigned *);
 static bool type_carries_byte(const fsimg_partition_type_t *, uint8_t);
 static bool type_carries_guid(const fsimg_partition_type_t *,
     const unsigned char *);
+static void name_to_utf8(const uint16_t *, char *, size_t);
 
 static bool
 hex_digit(char c, unsigned *value)
@@ -167,6 +170,138 @@ fsimg_partition_type_match(const fsimg_type_selector_t *selector,
 	    selector->mbr_type == record->mbr_type :
 	    type_carries_byte(selector->type, record->mbr_type);
 	return (FSIMG_OK);
+}
+
+const fsimg_partition_type_t *
+fsimg_partition_type_find(const char *name)
+{
+	for (size_t i = 0; i < TYPE_COUNT; i++) {
+		if (strcmp(name, partition_types[i].name) == 0)
+			return (&partition_types[i]);
+	}
+	return (NULL);
+}
+
+/*
+ * A GPT record takes the selected type's GUID: a table type needs one, and
+ * a literal GUID is taken as given, with the conventional name of the
+ * first table type carrying it. An MBR record takes the type's written
+ * byte (its first) or the literal byte; an extended partition would need
+ * logical partitions inside it and 0xEE claims the disk for GPT, so
+ * neither can type a written partition.
+ */
+fsimg_status_t
+fsimg_partition_type_assign(const fsimg_type_selector_t *selector,
+    fsimg_scheme_kind_t scheme, fsimg_partition_record_t *record,
+    const char **name, fsimg_error_t *error)
+{
+	static const unsigned char nil_guid[16];
+	const fsimg_partition_type_t *type;
+	uint8_t byte;
+
+	*name = "";
+	if (scheme == FSIMG_SCHEME_GPT) {
+		if (selector->literal_byte)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, "an MBR type byte cannot type a GPT partition"));
+		if (selector->literal_guid) {
+			/* A nil type marks an entry unused, so readers
+			 * would not see the partition.
+			 */
+			if (bcmp(selector->guid, nil_guid, sizeof(nil_guid)) == 0)
+				return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+				    FSIMG_OP_IMAGE,
+				    "the nil GUID marks an unused GPT entry"));
+			bcopy(selector->guid, record->type_guid, 16);
+			for (size_t i = 0; i < TYPE_COUNT; i++) {
+				type = &partition_types[i];
+				if (type_carries_guid(type, selector->guid)) {
+					*name = type->gpt_name;
+					break;
+				}
+			}
+			return (FSIMG_OK);
+		}
+		type = selector->type;
+		if (type->gpt_guid == NULL || !fsimg_guid_parse(type->gpt_guid,
+		    record->type_guid))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, "the partition type has no GPT GUID"));
+		*name = type->gpt_name;
+		return (FSIMG_OK);
+	}
+	if (selector->literal_guid)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "a GPT type GUID cannot type an MBR partition"));
+	byte = selector->literal_byte ? selector->mbr_type :
+	    selector->type->mbr_types[0];
+	if (byte == 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the partition type has no MBR byte"));
+	if (byte == 0x05 || byte == 0x0f || byte == 0x85 || byte == 0xee)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "extended and GPT protective types cannot be written"));
+	record->mbr_type = byte;
+	return (FSIMG_OK);
+}
+
+/* A GPT name as UTF-8 for display. Names are untrusted, so an unpaired
+ * surrogate becomes U+FFFD instead of failing the listing; selection by
+ * name compares the stored units, not this text.
+ */
+static void
+name_to_utf8(const uint16_t *units, char *text, size_t capacity)
+{
+	static const uint16_t replacement = 0xfffd;
+	const uint16_t *span;
+	size_t length, span_length, used, written;
+
+	length = 0;
+	while (length < FSIMG_GPT_NAME_UNITS && units[length] != 0)
+		length++;
+	used = 0;
+	for (size_t i = 0; i < length; i += span_length) {
+		span = &units[i];
+		span_length = 1;
+		if (units[i] >= 0xd800 && units[i] <= 0xdbff && i + 1 < length &&
+		    units[i + 1] >= 0xdc00 && units[i + 1] <= 0xdfff)
+			span_length = 2;
+		else if (units[i] >= 0xd800 && units[i] <= 0xdfff)
+			span = &replacement;
+		/* 36 units need at most 108 bytes, so the text always fits. */
+		if (fsimg_utf16_to_utf8(span, span == &replacement ? 1 : span_length,
+		    text + used, capacity - 1 - used, &written, NULL) != FSIMG_OK)
+			break;
+		used += written;
+	}
+	text[used] = '\0';
+}
+
+/* The public record of a slot; the claim is the caller's. */
+void
+fsimg_partition_report(fsimg_scheme_kind_t scheme,
+    const fsimg_partition_record_t *record, fsimg_partition_info_t *out)
+{
+	const char *type;
+
+	bzero(out, sizeof(*out));
+	out->index = record->index;
+	if (!record->used)
+		return;
+	out->used = true;
+	out->offset = record->offset;
+	out->length = record->length;
+	type = fsimg_partition_type_name(scheme, record);
+	if (type != NULL)
+		snprintf(out->type, sizeof(out->type), "%s", type);
+	if (scheme == FSIMG_SCHEME_GPT) {
+		bcopy(record->type_guid, out->type_guid, sizeof(out->type_guid));
+		bcopy(record->guid, out->guid, sizeof(out->guid));
+		name_to_utf8(record->name, out->name, sizeof(out->name));
+	} else {
+		out->mbr_type = record->mbr_type;
+		out->active = record->active;
+	}
 }
 
 const char *

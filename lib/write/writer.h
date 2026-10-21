@@ -5,6 +5,7 @@
 #define FSIMG_WRITER_H
 
 #include "host.h"
+#include "layer.h"
 #include "meta.h"
 
 #define FSIMG_CATALOG_HEADER 192u
@@ -147,6 +148,13 @@ struct fsimg_writer {
 	/* The selected variant's capability record; NULL for catalog-only use. */
 	const fsimg_format_info_t *capabilities;
 	fsimg_write_options_t options;
+	/* The stack being written, its layer settings (options.layers points
+	 * here), and the disk around the volume: no scheme for a bare volume,
+	 * otherwise one partition, placed once the volume is planned.
+	 */
+	fsimg_stack_t	 stack;
+	fsimg_layer_options_t layers;
+	fsimg_disk_plan_t disk;
 	/* Prepared worker output authority cannot be imported as source content. */
 	fsimg_host_file_t output_root;
 	fsimg_session_t	 session;

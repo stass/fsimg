@@ -36,6 +36,12 @@ fsimg_status_t fsimg_io_zero_session(fsimg_io_t *, fsimg_session_t *,
  */
 fsimg_status_t fsimg_io_adopt_empty_output(fsimg_ctx_t *, int, fsimg_io_t **,
     fsimg_error_t *);
+/* Whether every byte of the object's backing is proven zero: such a fresh
+ * file before any write has been attempted on it. A sequential writer that
+ * asks once, before its first write, may leave a zero range unwritten,
+ * since it never writes that range afterwards.
+ */
+bool fsimg_io_proven_zero(const fsimg_io_t *);
 fsimg_status_t fsimg_io_set_times(fsimg_io_t *, const struct timespec *,
     fsimg_error_t *);
 

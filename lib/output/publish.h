@@ -20,6 +20,17 @@ typedef struct fsimg_publish_ops {
 
 fsimg_status_t fsimg_publish(fsimg_ctx_t *, int, const char *, uint64_t,
     int, const char *, const fsimg_publish_ops_t *, fsimg_error_t *);
+
+/* Fill a fresh staged file, whose descriptor the output coordinator owns
+ * and closes; the fill writes, resizes and flushes it but neither closes
+ * nor publishes it. The staged file must end at the stated length.
+ */
+typedef fsimg_status_t (*fsimg_output_fill_t)(void *, fsimg_io_t *,
+    fsimg_error_t *);
+
+fsimg_status_t fsimg_sink_adopt(const fsimg_sink_t *, fsimg_error_t *);
+fsimg_status_t fsimg_output_stage(fsimg_ctx_t *, int, const char *, uint64_t,
+    fsimg_output_fill_t, void *, const fsimg_publish_ops_t *, fsimg_error_t *);
 fsimg_status_t fsimg_output_write(fsimg_writer_t *, int, const char *,
     uint64_t, const fsimg_publish_ops_t *, fsimg_error_t *);
 

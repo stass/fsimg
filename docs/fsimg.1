@@ -182,7 +182,9 @@ Creation settings are described under
 .Sx CREATION .
 A key qualified by a layer name, such as
 .Ar gpt:type=esp ,
-names a layer the stack must contain.
+names a layer the stack must contain; the partition-scheme keys are
+described under
+.Sx CREATION .
 .It Fl S Ar auto|required|off
 Select sandbox policy.
 Required mode refuses an unavailable backend; off explicitly disables
@@ -418,11 +420,71 @@ Reproducible bytes with stable ordering, identifiers and padding.
 Positive exact logical volume size; omission chooses automatic sizing.
 .It Fl W
 Verify the staged image in a second worker under the image-reading profile
-before publication;
+before publication: the partition table first, then the volume;
 .Fl d
 adds payload reads.
-A failed verification discards the staged image and publishes nothing.
+A failed verification discards the staged image, names the layer that
+failed and publishes nothing.
 .El
+.Ss Partition schemes
+A stack naming gpt or mbr, such as
+.Ql fat32/gpt ,
+writes a disk holding the volume as its one partition.
+The partition starts at 1 MiB, a whole number of sectors long, with the
+GPT's backup table after it; every byte outside the tables and the volume
+is zero.
+The disk length is derived from the volume, or fixed with
+.Ar gpt:disk
+or
+.Ar mbr:disk ;
+a fixed disk without
+.Fl s
+gives the volume all the space the partition can hold.
+The plan
+.Pq Fl n
+reports the disk length, the volume's offset and length, and every
+identifier.
+.Bl -tag -width Ds
+.It Fl o Ar gpt:type=name|guid
+The partition type: a name from the type list under
+.Sx READING
+or RFC 4122 text.
+Default basic data for FAT and exFAT and the QNX6 Power-Safe type for QNX6;
+QNX4 has no GPT type and must name one.
+.It Fl o Ar gpt:name=text
+The partition name, at most 36 UTF-16 units; default the type's
+conventional name, such as
+.Ql Microsoft basic data .
+.It Fl o Ar gpt:disk-guid=guid , Ar gpt:guid=guid
+The disk GUID and the partition's unique GUID as RFC 4122 text, not nil.
+.It Fl o Ar gpt:sector=512|4096
+The sector size of the tables; default 512.
+.It Fl o Ar gpt:disk=bytes , Ar mbr:disk=bytes
+The exact disk length, a multiple of the sector size; an MBR disk holds at
+most 2^32 sectors (2 TiB).
+.It Fl o Ar mbr:type=name|0xNN
+The partition type byte; default 0x01 for FAT12, 0x06 for FAT16, 0x0c for
+FAT32, 0x07 for exFAT, 0xb2 for QNX6 and 0x4d for QNX4.
+Extended types (0x05, 0x0f and 0x85) and the GPT protective type 0xee are
+refused.
+.It Fl o Ar mbr:active=yes|no
+Mark the partition active; default no.
+.It Fl o Ar mbr:id=0xNNNNNNNN
+The 32-bit disk identifier.
+.El
+.Pp
+Without
+.Fl R
+each identifier not given is random: version 4 GUIDs and a random MBR
+identifier.
+With
+.Fl R
+each is derived from the epoch: the epoch's eight little-endian bytes, a
+role byte (1 for the disk, 2 for a partition), the partition's slot number
+and six zero bytes, with the version 4 and RFC 4122 variant bits set; the
+MBR identifier is the epoch's low 32 bits.
+Two reproducible disks built at the same epoch therefore share their
+identifiers; set them explicitly to attach such disks side by side.
 .Pp
 Import accepts regular files, directories and symbolic links, hierarchy,
 content and representable timestamps.
@@ -606,6 +668,8 @@ compression, the scheme, the disk size and identifier and the selected
 partition, and states whether a volume was selected.
 Partition records, one per used slot, follow it for
 .Cm i .
+A creation's plan record follows the planned disk's stack record and its
+one partition record when the stack names a scheme.
 Information records carry the stack and a null compression.
 .Cm cW
 writes a verify record for its staged image.
@@ -615,8 +679,11 @@ Unknown values are null.
 Timestamp records state basis and precision.
 Entry records name their kind as file, directory, symlink or fifo and carry
 change time, uid, gid and mode, each null when absent.
-Format records give entry_kinds, metadata_fields and write_settings as bit
-masks and max_label_bytes, zero for a format without a label.
+Format records name their kind: filesystem, scheme, container or
+compression.
+A filesystem's record gives entry_kinds, metadata_fields and write_settings
+as bit masks and max_label_bytes, zero for a format without a label; a
+layer's gives its suffix, its capabilities and the keys of its settings.
 .Pp
 The operation deadline spans processing and successful output.
 Failure reporting has a two-second grace and one further two-second stderr-only
@@ -640,10 +707,6 @@ minimization
 .Pq Fl M No with Cm c ,
 an image on standard input or output
 .Pq Fl f Fl ,
-creating a partition scheme, such as
-.Fl F Ar fat32/gpt
-with
-.Cm c ,
 a stack naming a container, such as
 .Ql fat32/dmg ,
 the reserved filesystem names apfs and hfs,
@@ -657,6 +720,8 @@ fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .
 fsimg cRf data.img -F exfat -C files .
 fsimg cWf data.img -F exfat -C esp . -C extra EFI
 fsimg cn -F exfat -R -m 64M -T /scratch -C files .
+fsimg cWf esp.img -F fat32/gpt -o gpt:type=esp -o gpt:name=EFI -C esp .
+fsimg cf sd.img -F fat32/mbr -o mbr:disk=4G -o mbr:active=yes -C boot .
 fsimg tf data.img --json /
 fsimg tvf data.img
 fsimg xOf data.img /documents/readme.txt > readme.txt
