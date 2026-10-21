@@ -289,33 +289,26 @@ open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 }
 
 /*
- * The no-follow scanned-object open of a command-line path. O_NOFOLLOW
- * covers only the final component, and a path ending in "/" or "/." makes
- * the kernel resolve a symbolic link before that component, so trailing
- * slashes and "." components are removed first: "link/." then names the
- * link itself and fails. A path left with no component means the base
- * directory itself (".") or the root ("/"). A refused link fails with ELOOP
- * on every host: a no-follow directory open of one reports ENOTDIR on
- * macOS, so an lstat of the same name, used only to choose the errno,
- * tells the two apart.
+ * Copy path into trimmed, a PATH_MAX buffer, without its trailing slashes
+ * and "." components, setting *removed when there were any, since a
+ * trailing slash names a directory. O_NOFOLLOW covers only the final
+ * component, and a path ending in "/" or "/." makes the kernel resolve a
+ * symbolic link before that component; once they are removed, "link/."
+ * names the link itself. A path left with no component names the base
+ * directory itself (".") or the root ("/"). Fails with ENAMETOOLONG.
  */
-static int
-open_nofollow(int base, const char *path, bool directory)
+static bool
+trim_final(const char *path, char *trimmed, bool *removed)
 {
-	char trimmed[PATH_MAX];
-	struct stat st;
 	size_t length;
-	int fd;
-	bool trimmed_slash;
 
 	length = strlen(path);
-	if (length >= sizeof(trimmed)) {
+	if (length >= PATH_MAX) {
 		errno = ENAMETOOLONG;
-		return (-1);
+		return (false);
 	}
 	bcopy(path, trimmed, length + 1);
-	/* A trailing slash names a directory, so it stays a requirement. */
-	trimmed_slash = false;
+	*removed = false;
 	for (;;) {
 		if (length > 1 && trimmed[length - 1] == '/')
 			length--;
@@ -327,16 +320,46 @@ open_nofollow(int base, const char *path, bool directory)
 		else
 			break;
 		trimmed[length] = '\0';
-		trimmed_slash = true;
+		*removed = true;
 	}
-	if (trimmed_slash)
-		directory = true;
 	if (length == 0)
-		return (fsimg_host_source_open(base, ".", directory));
+		bcopy(".", trimmed, sizeof("."));
+	return (true);
+}
+
+/*
+ * The no-follow scanned-object open of a command-line path, trimmed by
+ * trim_final; a trailing slash stays a requirement for a directory. A
+ * refused link fails with ELOOP on every host (fsimg_host_source_open).
+ *
+ * A directory open failing with ENOTDIR or ENXIO met either an existing
+ * object of another kind or, for ENOTDIR, a non-directory earlier in the
+ * path, which names nothing. When other_kind is not NULL, an lstat of the
+ * trimmed name tells the two apart and sets it for the first; it only
+ * classifies the failure, and errno is preserved.
+ */
+static int
+open_nofollow(int base, const char *path, bool directory, bool *other_kind)
+{
+	char trimmed[PATH_MAX];
+	struct stat st;
+	int fd, saved;
+	bool removed;
+
+	if (other_kind != NULL)
+		*other_kind = false;
+	if (!trim_final(path, trimmed, &removed))
+		return (-1);
+	if (removed)
+		directory = true;
 	fd = fsimg_host_source_open(base, trimmed, directory);
-	if (fd == -1 && errno == ENOTDIR &&
-	    fstatat(base, trimmed, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode))
-		errno = ELOOP;
+	if (fd == -1 && directory && other_kind != NULL &&
+	    (errno == ENOTDIR || errno == ENXIO)) {
+		saved = errno;
+		*other_kind = fstatat(base, trimmed, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+		    !S_ISDIR(st.st_mode);
+		errno = saved;
+	}
 	return (fd);
 }
 
@@ -357,7 +380,7 @@ open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
 	bool kind_valid;
 
 	fd = open_nofollow(operand->host_path[0] == '/' ? AT_FDCWD : directory,
-	    operand->host_path, false);
+	    operand->host_path, false, NULL);
 	if (fd == -1) {
 		if (errno == ELOOP)
 			return (kind_error(error, ELOOP, operand->manifest ?
@@ -822,13 +845,18 @@ prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	const char *parent_path;
 	fsimg_status_t status;
 	int count;
+	bool other_kind;
 
 	parent_path = options->directory == NULL ? "." : options->directory;
 	if (options->extract_here) {
-		request->output_fd = open_nofollow(AT_FDCWD, parent_path, true);
+		request->output_fd = open_nofollow(AT_FDCWD, parent_path, true,
+		    &other_kind);
 		if (request->output_fd == -1 && errno == ELOOP)
 			return (kind_error(error, ELOOP,
 			    "-C directory is a symbolic link", parent_path));
+		if (request->output_fd == -1 && other_kind)
+			return (kind_error(error, errno,
+			    "-C directory is not a directory", parent_path));
 		if (request->output_fd == -1)
 			return (path_error(error, "cannot open -C directory",
 			    parent_path));

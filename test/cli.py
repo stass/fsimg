@@ -719,7 +719,8 @@ def test_extraction_names(executable, root):
 def test_extract_here(executable, root):
     """-E extracts into the -C directory itself, which must be empty and
     private: owned by the user and not writable by group or others. A
-    symbolic link is not followed."""
+    symbolic link is not followed, and it or any other existing object that
+    is not a directory is refused as unsupported."""
     private_directory(root, "into-empty")
     invoke(executable, root, ["xEf", "human.img", "-C", "into-empty"])
     same_bytes(root / "source/nested/caf\u00e9.txt", root / "into-empty/nested/caf\u00e9.txt")
@@ -750,6 +751,24 @@ def test_extract_here(executable, root):
                           expected=1))
     assert error["status"] == "unsupported capability", error
     assert not list((root / "into-target").iterdir())
+    # So is any other existing object that is not a directory, however it
+    # is spelled; a path through one names nothing and fails to open.
+    (root / "into-file").write_bytes(b"")
+    os.mkfifo(root / "into-fifo")
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(os.path.relpath(root / "into-socket"))
+    for name in ["into-file", "into-file/", "into-file/.", "into-fifo", "into-socket"]:
+        error = failed(invoke(executable, root, ["xEf", "human.img", "--json", "-C", name],
+                              expected=1))
+        assert error["status"] == "unsupported capability", (name, error)
+        assert error["message"] == "-C directory is not a directory", (name, error)
+        assert error["path"] == name, (name, error)
+    error = failed(invoke(executable, root, ["xEf", "human.img", "--json", "-C",
+                                             "into-file/inner"], expected=1))
+    assert error["status"] == "I/O failure", error
+    listener.close()
+    for name in ["into-file", "into-fifo", "into-socket"]:
+        (root / name).unlink()
     result = invoke(executable, root, ["xEf", "human.img"], expected=1)
     assert b'extraction destination is not empty "."' in result.stderr
 

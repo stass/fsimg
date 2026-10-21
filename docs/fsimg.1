@@ -866,7 +866,8 @@ Read and search permission for others is allowed.
 With
 .Fl E
 the directory is opened without following a symbolic link and must also be
-empty.
+empty; a symbolic link or any other existing object that is not a directory
+fails as unsupported.
 A fresh directory that inherits a non-trivial ACL from its parent is removed
 again and the error names the parent.
 .Nm

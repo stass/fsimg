@@ -281,10 +281,12 @@ never the parent. There are two ways to obtain it, and the
   link, fails. A name fsimg cannot derive is not invented; the user then
   chooses the second way.
 * With `-E` the user designates the destination itself. The coordinator opens
-  it with `O_DIRECTORY | O_NOFOLLOW`, so a symbolic link fails, and uses only
-  that descriptor afterwards: `fstat` must show a directory owned by the
-  effective user without group or other write permission; a read of the
-  directory through the descriptor must find it empty; and the access
+  it with `O_DIRECTORY | O_NOFOLLOW`, so a symbolic link fails, and with it
+  any other existing object that is not a directory, both as
+  `FSIMG_EUNSUPPORTED`; it uses only that descriptor afterwards: `fstat`
+  must show a directory owned by the effective user without group or
+  other write permission; a read of the directory through the descriptor
+  must find it empty; and the access
   control list must be trivial, as defined next. This accepts exactly the
   state a fresh directory is in, so the worker's behaviour is the same for
   both: every entry is created exclusively and no-follow beneath a verified

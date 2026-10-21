@@ -293,6 +293,14 @@
 
 ## Bugs by subsystem
 
+* [Low] **A `-C` that names a non-directory is an I/O failure outside
+  `-E`** (`cmd/fsimg/paths.c` `prepare_destination`, `open_roots`):
+  `x -C file` and `c -C file op` report `FSIMG_EIO` "cannot open -C
+  directory: Not a directory", while `x -E -C file` reports the object
+  kind as `FSIMG_EUNSUPPORTED`. These `-C` opens follow links, as tar's
+  `-C` does, so classify the followed object the same way, or decide that
+  a working-directory change reports a plain open failure and document it.
+
 * [Medium] **FreeBSD fsck_msdosfs rejects the FAT16 builder base at 4085
   clusters** (`test/spec/suite/fat/test_bases.rb`,
   `test/spec/lib/fsimg_spec/fat/builder.rb`): on FreeBSD 16.0-CURRENT,
