@@ -56,7 +56,7 @@ module FsimgSpec
       fsimg_binary if test_files.nil?
       ResultsDirectory.hold(directory) do
         report, interrupted = run_tests(profile, test_files || suite_files)
-        ending = case_phase(profile, directory, named: !test_files.nil?, interrupted:)
+        ending = case_phase(profile, directory, named: !test_files.nil?, interrupted:, seed: report.seed)
         report = report.with(cases: ending.cases)
         begin
           report.write(directory)
@@ -108,12 +108,13 @@ module FsimgSpec
     end
 
     # How the case phase ended (CasePhase.guarded): a run that names its
-    # test files or was interrupted skips it.
-    private_class_method def self.case_phase(profile, directory, named:, interrupted:)
+    # test files or was interrupted skips it. Its random draws follow the
+    # run's Minitest seed.
+    private_class_method def self.case_phase(profile, directory, named:, interrupted:, seed:)
       return CasePhase::Ending.new(cases: CasesSkipped.new(reason: "test files named"), fatal: nil) if named
       return CasePhase::Ending.new(cases: CasesSkipped.new(reason: "interrupted"), fatal: nil) if interrupted
 
-      CasePhase.guarded(profile:, results: directory, build_directory:, environment: ENV.to_h)
+      CasePhase.guarded(profile:, results: directory, build_directory:, environment: ENV.to_h, seed:)
     end
 
     # The report of the Minitest run, and whether it was interrupted.

@@ -20,7 +20,7 @@ module FsimgSpec
     include Checked
 
     # Bumped by any change to the meaning or shape of coverage.json.
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def initialize(cases: CasesSkipped.new(reason: "not run"), **fields) = super
 
@@ -61,10 +61,10 @@ module FsimgSpec
 
     private
 
-    # A format's case counts in summary.txt: the total, then the count of
-    # each verdict. bin/report, which loads none of the harness, prints
-    # them in the same form.
-    def case_counts(counts) = "#{counts.fetch(:total)} (#{counted(counts.except(:total))})"
+    # A format's case counts in summary.txt: the total, the count of each
+    # verdict, and how many drawn cases fsimg ran. bin/report, which loads
+    # none of the harness, prints them in the same form.
+    def case_counts(counts) = "#{counts.fetch(:total)} (#{counted(counts.except(:total, :drawn))}), #{counts.fetch(:drawn)} drawn"
 
     # "COUNT LABEL" for each label and count.
     def counted(pairs) = pairs.map { |label, count| "#{count} #{label}" }.join(", ")

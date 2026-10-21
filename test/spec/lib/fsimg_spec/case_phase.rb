@@ -14,11 +14,26 @@ module FsimgSpec
   CasesSkipped = Data.define(:reason)
   CasesFailed = Data.define(:reason)
 
+  # The random trees of a run (specs/design-spec-testing.md#generation-and-shrinking):
+  # the seed every draw follows, the number of trees to draw and classify,
+  # how many of the first of them run fsimg, and the FixtureCache their
+  # bases render into. NONE draws nothing, for a caller that runs no case
+  # phase, such as the fuzz seed export.
+  Draws = Data.define(:seed, :count, :sample, :cache)
+  Draws::NONE = Draws.new(seed: 0, count: 0, sample: 0, cache: nil)
+
   # A case before it is classified, as a format suite lists it: its id, the
   # rules it counts toward in the coverage report, why the host cannot run
   # it or nil, and a callable that classifies it, answering a Classified.
   # Classifying is deferred so that a fault in it is the case's own.
-  PendingCase = Data.define(:id, :rules, :skip, :classify)
+  # release, or nil, removes what classifying left on disk for this case
+  # alone, such as a drawn tree's base image; the phase calls it once the
+  # case is recorded, whatever its verdict, and only then.
+  class PendingCase < Data.define(:id, :rules, :skip, :classify, :release)
+    include Checked
+
+    def initialize(release: nil, **fields) = super
+  end
 
   # The case phase of a run (specs/design-spec-testing.md#runner): after the
   # preflight, every case of every format suite runs through fsimg, and
@@ -37,9 +52,9 @@ module FsimgSpec
     Setup = Data.define(:profile, :runner, :sandbox, :cache, :name_trials)
 
     # The format suites, each answering registry, cases(cache:, ceilings:,
-    # name_trials:) and replay(recipe, cache:, ceilings:, name_trials:) with
-    # PendingCases, and preflight_sample(directory). A run uses these; a
-    # test may pass its own.
+    # name_trials:, draws:) and replay(recipe, cache:, ceilings:,
+    # name_trials:) with PendingCases, and preflight_sample(directory). A
+    # run uses these; a test may pass its own.
     def self.suites = { "fat" => Fat::Suite }
 
     # The suite of a recipe's format: fat12, fat16 and fat32 are FAT's.
@@ -84,9 +99,17 @@ module FsimgSpec
       else true
       end
 
-    def self.call(profile:, results:, build_directory:, environment:, suites: CasePhase.suites)
+    # The run's random draws follow seed, the run's Minitest seed, so the
+    # SEED that repeats a run's tests repeats its draws too. The bases of
+    # those that run render into drawn/ of the results directory, not the
+    # fixture cache, which would otherwise keep every run's draws.
+    def self.call(profile:, results:, build_directory:, environment:, seed:, suites: CasePhase.suites)
       setup = prepare(results:, profile:, build_directory:, environment:, suites:)
-      pending = suites.transform_values { _1.cases(cache: setup.cache, ceilings: profile.ceilings, name_trials: setup.name_trials) }
+      draws = Draws.new(seed:, count: profile.tree_draws, sample: profile.tree_sample,
+                        cache: FixtureCache.new(File.join(results, "drawn")))
+      pending = suites.transform_values do
+        _1.cases(cache: setup.cache, ceilings: profile.ceilings, name_trials: setup.name_trials, draws:)
+      end
       check_ids(pending.values.flatten.map(&:id))
       formats = pending.to_h do |format, cases|
         [format, run_suite(suites.fetch(format).registry, cases, setup:, results:)]
@@ -124,6 +147,8 @@ module FsimgSpec
                  record_failure(pending.id, attempt, failures: File.join(results, "failures"), profile: setup.profile)
                end
       CaseEntry.new(id: pending.id, rules: pending.rules, kase: attempt.kase, result:)
+    ensure
+      pending.release&.call
     end
 
     # Classifies and runs a case. Any StandardError makes the case a harness

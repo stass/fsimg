@@ -375,6 +375,33 @@ module FsimgSpec
         [mutated(field, Rules::ABSENT_SECTOR, base: "fat32", violates: true)]
       }
 
+      # A FAT12 volume holding one file of each name. Each witness of an
+      # invalid name runs ls alone, so no host creates it.
+      private_class_method def self.named(label, *names, violates:) =
+        Variation.new(label:, base: "fat12", violates:, tree: files(*names))
+
+      # Names at each limit of Names.problem. 255 UTF-16 units are the
+      # most a long name holds; 128 supplementary characters, two units
+      # each, are one unit more.
+      NAME = lambda { |_layouts|
+        [named("units_255", "x" * 255, violates: false), named("units_256", "x" * 256, violates: true),
+         named("pairs_256", "\u{1F600}" * 128, violates: true), named("trailing_space", "a ", violates: true),
+         named("trailing_period", "a.", violates: true), named("leading_space", " a", violates: true),
+         named("colon", "a:b", violates: true), named("control", "a\u0001b", violates: true),
+         named("del", "a\u007Fb", violates: true)]
+      }
+
+      # Case pairs, of ASCII and of the supplementary Deseret letters whose
+      # simple upper case maps U+10428 to U+10400; and the design's reserved
+      # pair, a long name beside the literal 8.3 name its short name would
+      # take first, which the builder gives the long name another one
+      # beside (specs/design-spec-testing.md#generation-and-shrinking).
+      UNIQUE_NAMES = lambda { |_layouts|
+        [named("ascii_case_pair", "abc", "ABC", violates: true),
+         named("deseret_case_pair", "\u{10428}", "\u{10400}", violates: true),
+         named("alias_pair", "name file.txt", "NAMEFI~1.TXT", violates: false)]
+      }
+
       # A destination witness is a valid FAT volume whose names some hosts
       # cannot hold (specs/design-spec-testing.md#host-names). Each is meant
       # to violate its rule, but only the host's name trials decide whether
@@ -386,7 +413,8 @@ module FsimgSpec
       # names by simple uppercase and not by normalization, which a
       # normalization-insensitive host such as APFS takes for one. A case
       # pair is no witness: FAT takes it for one name, an ambiguous
-      # directory that fsimg rejects before it creates anything.
+      # directory that fsimg rejects before it creates anything, as
+      # fat.directory.unique_names states.
       HOST_COLLISION = lambda { |_layouts|
         [Variation.new(label: "nfc_nfd", base: "fat12", violates: true, tree: files("\u00e9", "e\u0301"))]
       }

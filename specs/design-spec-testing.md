@@ -811,11 +811,14 @@ PropCheck explores beyond the enumerated points. It generates recipes, not raw
 images, so shrinking yields meaningful minimal cases. Random invalid draws need
 no filter, because classification derives their expectation. Random draws
 mutate shared bases and never invoke a formatter per draw; they are classified
-in memory, apart from name trials for sibling sets not yet tried in the run, and
-only a sample sized by the profile runs fsimg. The profile sets the number of
-draws and the size of that sample; the case phase draws the sample from a
-generator seeded per run, and each sampled recipe records the seed as
-`random_seed`.
+in memory, writing nothing of the draw, and only a sample sized by the profile
+runs fsimg. A draw outside the sample runs no stage, so it needs no name trial;
+one whose classification shows a generator defect joins the run as a case,
+which reports the defect. The profile sets the number of draws and the size of
+that sample; the case phase draws the sample, the first draws, from a
+generator seeded with the run's Minitest seed, and each sampled recipe records
+the seed as `random_seed`. A recipe carries its whole tree, so it replays
+without the seed. A sampled draw's base image lasts only as long as its case.
 
 Tree generators draw small trees: names that are 8.3, long, Unicode BMP and
 non-BMP, or reserved; nesting depth; files that are empty, one byte, one
@@ -825,13 +828,18 @@ directory width. A **reserved** name is a DOS device name (`CON`, `NUL`,
 extension, or a long name whose generated short alias could collide with a
 sibling's literal 8.3 name, such as `NAMEFI~1.TXT` beside a long
 `name file.txt`. A
-drawn tree reaches fsimg in both directions: as a creation case's source, and
-populated by mtools into a copy of one cached empty base, so no draw costs a
-formatter run. A witness of case-equivalent siblings draws only characters
-whose simple and full uppercase mappings agree, so Ruby's `String#upcase` and
-fsimg's simple-uppercase table decide alike; on a case-insensitive host
-filesystem the funnel answers `EEXIST` for the second sibling and the case is a
-host skip.
+drawn tree reaches fsimg in three ways: rendered by the independent builder, as
+a creation case's source, and populated by mtools into a copy of one cached
+empty base, so no draw costs a formatter run. A drawn valid tree holds only
+names fsimg's reader accepts, with no two siblings of one key; the rules
+`fat.directory.name` and `fat.directory.unique_names` state both, so a draw
+that breaks either is a generator defect. A drawn tree, and a witness of
+case-equivalent siblings, draw only characters whose simple and full uppercase
+mappings agree, so Ruby's `String#upcase` and fsimg's simple-uppercase table
+decide alike. A reading witness of case-equivalent siblings runs `ls` alone and
+never reaches the host; a creation witness writes its source through the
+funnel, which on a case-insensitive host filesystem answers `EEXIST` for the
+second sibling, so the case is a host skip there.
 
 Shrinking starts with PropCheck's shrinker on recipes. Recipe shrinkers then
 remove unrelated files and directories, shrink files and chains, reduce a cycle
@@ -865,7 +873,7 @@ rule families, and would then stay optional and outside CI.
 
 | Profile | Entry point | Contents | Target |
 | --- | --- | --- | --- |
-| `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness through fsimg: a valid one or one of a `must_accept` rule through every reading stage, and one of any other policy through the first stage that checks its rule; 100-300 PropCheck examples, of which about 30 per variant run fsimg; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
+| `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness through fsimg: a valid one or one of a `must_accept` rule through every reading stage, and one of any other policy through the first stage that checks its rule; 100-300 PropCheck examples, of which a sample of a few per variant runs fsimg; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
 | `nightly` | `make check-spec-extended` | Thousands of random examples, deterministic witnesses through every stage, 50-150 oracle cross-checks, class C cases | 10-30 min |
 | `deep` | `make check-spec-deep` | Large volumes, broad mutation matrices, every oracle on every case | Explicit opt-in |
 
@@ -894,7 +902,8 @@ profile, the Ruby version and the Minitest seed, and count the run's Minitest
 outcomes. A run holds an
 exclusive lock on that directory, so concurrent runs of one profile take turns,
 and empties it when it starts, so no case, trial or failure directory outlives
-the next run. For each rule the report records the attempted, passed, failed
+the next run. For each format it counts the cases by verdict and the drawn
+cases fsimg ran. For each rule the report records the attempted, passed, failed
 and skipped counts, the boundaries exercised, the stages asserted, the
 [oracle observations](#independence-and-oracles) per tool, the promoted
 regression cases and the isolation: `single_rule` when

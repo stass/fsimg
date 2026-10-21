@@ -18,7 +18,8 @@ require "fsimg_spec/fat"
 # one case is that case's harness error, and the phase goes on.
 class TestCasePhaseFsimg < Minitest::Test
   Fat = FsimgSpec::Fat
-  PROFILE = FsimgSpec.fetch_profile("quick")
+  # The quick profile without random draws, which these cases select away.
+  PROFILE = FsimgSpec.fetch_profile("quick").with(tree_draws: 0, tree_sample: 0)
   FAULTY = "fat.bpb.bytes_per_sector.0201"
   REPLAY = File.expand_path("../../bin/replay", __dir__)
 
@@ -29,8 +30,8 @@ class TestCasePhaseFsimg < Minitest::Test
       rule.id == "fat.bpb.bytes_per_sector" ? rule.with(status: FsimgSpec::Status.new(name: "FSIMG_ECORRUPT")) : rule
     end)
 
-    def self.cases(cache:, ceilings:, name_trials:) =
-      Fat::Suite.cases(cache:, ceilings:, name_trials:, registry:).select { [FAULTY, VALID].include?(_1.id) }
+    def self.cases(cache:, ceilings:, name_trials:, draws:) =
+      Fat::Suite.cases(cache:, ceilings:, name_trials:, draws:, registry:).select { [FAULTY, VALID].include?(_1.id) }
 
     def self.replay(recipe, cache:, ceilings:, name_trials:) = Fat::Suite.replay(recipe, cache:, ceilings:, name_trials:, registry:)
 
@@ -48,7 +49,7 @@ class TestCasePhaseFsimg < Minitest::Test
     Dir.mktmpdir do |build_directory|
       results = File.join(build_directory, "results")
       Dir.mkdir(results)
-      phase = FsimgSpec::CasePhase.call(profile: PROFILE, results:, build_directory:, environment: ENV.to_h,
+      phase = FsimgSpec::CasePhase.call(profile: PROFILE, results:, build_directory:, environment: ENV.to_h, seed: 1,
                                         suites: { "fat" => FaultySuite })
       fat = phase.formats.fetch("fat")
       record = File.join(results, "failures", FAULTY)
@@ -110,7 +111,7 @@ class TestCasePhaseFsimg < Minitest::Test
         Dir.mkdir(File.join(results, "failures", "t.blocked"))
         raise FsimgSpec::RuleError, "unknown rule fat.bpb.renamed"
       end
-      phase = FsimgSpec::CasePhase.call(profile: PROFILE, results:, build_directory:, environment: ENV.to_h,
+      phase = FsimgSpec::CasePhase.call(profile: PROFILE, results:, build_directory:, environment: ENV.to_h, seed: 1,
                                         suites: { "fat" => suite_of(blocked) })
 
       assert_equal({ total: 2, passed: 1, harness_error: 1 }, phase.formats.fetch("fat").cases.slice(:total, :passed, :harness_error))
@@ -156,7 +157,7 @@ class TestCasePhaseFsimg < Minitest::Test
     Dir.mktmpdir do |build_directory|
       results = File.join(build_directory, "results")
       FileUtils.mkdir_p(File.join(results, "cases"))
-      ending = FsimgSpec::CasePhase.guarded(profile: PROFILE, results:, build_directory:, environment: ENV.to_h)
+      ending = FsimgSpec::CasePhase.guarded(profile: PROFILE, results:, build_directory:, environment: ENV.to_h, seed: 1)
 
       assert_match(/\AEEXIST: /, ending.cases.reason)
       assert_nil ending.fatal
@@ -202,8 +203,8 @@ class TestCasePhaseFsimg < Minitest::Test
     Module.new do
       define_singleton_method(:registry) { Fat::Suite.registry }
       define_singleton_method(:preflight_sample) { |directory| Fat::Suite.preflight_sample(directory) }
-      define_singleton_method(:cases) do |cache:, ceilings:, name_trials:|
-        [Fat::Suite.cases(cache:, ceilings:, name_trials:).find { _1.id == VALID }, *extra]
+      define_singleton_method(:cases) do |cache:, ceilings:, name_trials:, draws:|
+        [Fat::Suite.cases(cache:, ceilings:, name_trials:, draws:).find { _1.id == VALID }, *extra]
       end
     end
   end
@@ -214,7 +215,7 @@ class TestCasePhaseFsimg < Minitest::Test
     Dir.mktmpdir do |build_directory|
       results = File.join(build_directory, "results")
       Dir.mkdir(results)
-      ending = FsimgSpec::CasePhase.guarded(profile: PROFILE, results:, build_directory:, environment: ENV.to_h,
+      ending = FsimgSpec::CasePhase.guarded(profile: PROFILE, results:, build_directory:, environment: ENV.to_h, seed: 1,
                                             suites: { "fat" => suite })
       fatal = ending.fatal
       raise fatal if fatal.is_a?(SignalException) && fatal.message != "injected"
@@ -227,7 +228,7 @@ class TestCasePhaseFsimg < Minitest::Test
     Dir.mktmpdir do |build_directory|
       results = File.join(build_directory, "results")
       Dir.mkdir(results)
-      phase = FsimgSpec::CasePhase.call(profile: PROFILE, results:, build_directory:, environment: ENV.to_h,
+      phase = FsimgSpec::CasePhase.call(profile: PROFILE, results:, build_directory:, environment: ENV.to_h, seed: 1,
                                         suites: { "fat" => suite })
       yield phase, results
     end

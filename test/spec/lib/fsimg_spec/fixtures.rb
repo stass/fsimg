@@ -165,6 +165,10 @@ module FsimgSpec
       final
     end
 
+    # Removes every entry, for a cache whose owner alone builds into it,
+    # one build at a time, such as a run's drawn bases.
+    def clear = Dir.children(@directory).each { FileUtils.rm_rf(File.join(@directory, _1), secure: true) }
+
     def publish_manifest(key, manifest)
       temporary = "#{manifest_path(key)}.#{SecureRandom.hex(8)}.tmp"
       File.write(temporary, "#{CanonicalJson.generate(manifest)}\n")

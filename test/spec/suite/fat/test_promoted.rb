@@ -37,7 +37,8 @@ class TestFatPromoted < Minitest::Test
     Dir.mktmpdir do |directory|
       File.write(File.join(directory, "#{recipe.id}.json"), edited.dump)
       with_cache do |cache|
-        promoted = Fat::Suite.cases(cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE, directory:).find { _1.id == recipe.id }
+        promoted = Fat::Suite.cases(cache:, ceilings: CEILINGS, name_trials: FsimgSpec::NameTrials::NONE,
+                                    draws: FsimgSpec::Draws::NONE, directory:).find { _1.id == recipe.id }
 
         assert_match(/drifted: expected: recorded info=accept, derived info=reject:/, promoted.classify.call.defect)
       end

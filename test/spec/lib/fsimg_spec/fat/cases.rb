@@ -33,16 +33,42 @@ module FsimgSpec
       end
 
       # The witness's case, image and model, with the generator defect the
-      # case shows, or nil.
-      def call(witness)
-        base = Base.new(builder: Builder::NAME, parameters: witness.parameters, tree: witness.tree)
+      # case shows, or nil. A drawn witness's recipe records the seed it
+      # was drawn from as random_seed; its tree and parameters, not the
+      # seed, reproduce it.
+      def call(witness, random_seed: nil)
+        base = base_of(witness)
         path = Bases.render(base, cache: @cache, ceilings: @ceilings)
         stages = stages_for(witness)
         image, model, classification = decode(path, tree: base.tree, mutations: witness.mutations,
                                               forced_format: witness.forced_format, stages:)
-        kase = Case.derive(recipe(witness, base:, path:, stages:, classification:), classification, registry: @registry)
+        kase = Case.derive(recipe(witness, base:, path:, stages:, classification:, random_seed:), classification,
+                           registry: @registry)
         kase = kase.with(recipe: kase.recorded)
         Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect)
+      end
+
+      # Whether a witness meant valid, classified in memory, shows a
+      # generator defect: a tree the builder cannot lay out, or a rule it
+      # violates. Nothing of the witness is written. The builder writes a
+      # tree only into the tables, the directories, the data region and
+      # FSInfo, none of which the model decodes, so the model is the empty
+      # base's, rendered once into the cache, with the witness's tree as
+      # its known tree. No name trial runs, so only the host's destination
+      # rules, which no witness's validity depends on, stay unclassified.
+      # A defective witness's own case reports how, and a sampled one's
+      # case checks this answer (Suite.drawn). A fault in rendering the
+      # empty base is no defect of the witness, and propagates.
+      def defective?(witness)
+        begin
+          Builder.plan(parameters: witness.parameters, tree: witness.tree)
+        rescue BuilderError
+          return true
+        end
+        empty = Bases.render(Base.new(builder: Builder::NAME, parameters: witness.parameters, tree: []),
+                             cache: @cache, ceilings: @ceilings)
+        model = Model.decode(ImageView.open(empty), tree: KnownTree.of(witness.tree))
+        @registry.classify(model, Environment.new(forced_format: nil, trial_answers: NO_TRIAL)).violations.any?
       end
 
       # Why recipe cannot be replayed on this host, or nil: only a reading
@@ -111,15 +137,17 @@ module FsimgSpec
       # The witness's recipe. Its format is the base's variant, which picks
       # the format suite on replay; a mutation may change the variant the
       # image decodes to, which the classification records.
-      def recipe(witness, base:, path:, stages:, classification:)
+      def recipe(witness, base:, path:, stages:, classification:, random_seed:)
         Recipe.new(
           id: witness.id, format: Fat.variant_of(witness.parameters.fetch(:clusters)),
           kind: witness.intended ? "targeted" : "valid", intended_violation: witness.intended,
           base:, base_sha256: base_digest(path), tool_versions: Bases.builder_versions.transform_keys(&:to_sym),
           mutations: witness.mutations, forced_format: witness.forced_format, stages:,
-          expected: stages.to_h { [_1, Expectation.derive(classification, _1)] }
+          expected: stages.to_h { [_1, Expectation.derive(classification, _1)] }, random_seed:
         )
       end
+
+      def base_of(witness) = Base.new(builder: Builder::NAME, parameters: witness.parameters, tree: witness.tree)
 
       # The stages the witness runs. A valid witness, or one whose intended
       # rule is must_accept, runs every reading stage, so a fault at any

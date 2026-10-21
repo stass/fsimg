@@ -36,8 +36,8 @@ class TestReport < Minitest::Test
   # A failed case and a case's harness error each fail the run; a host
   # skip does not.
   def test_a_failed_case_fails_the_run
-    passing = phase(failures: [], cases: { total: 2, passed: 1, host_skip: 1 })
-    failing = phase(failures: ["fat.x"], cases: { total: 2, passed: 1, harness_error: 1 })
+    passing = phase(failures: [], cases: { total: 2, passed: 1, host_skip: 1, drawn: 0 })
+    failing = phase(failures: ["fat.x"], cases: { total: 2, passed: 1, harness_error: 1, drawn: 0 })
 
     assert_predicate report(passing), :passed?
     refute_predicate report(failing), :passed?
@@ -48,13 +48,14 @@ class TestReport < Minitest::Test
   # bin/report reads what Report#write writes, at the same schema version,
   # and refuses any other version.
   def test_bin_report_reads_the_written_report
-    report = report(phase(failures: [], cases: { total: 1, passed: 1, failed: 0 }))
+    report = report(phase(failures: [], cases: { total: 1, passed: 1, failed: 0, drawn: 1 }))
     Dir.mktmpdir do |directory|
       report.write(directory)
       path = File.join(directory, "coverage.json")
       output = IO.popen([RbConfig.ruby, BIN_REPORT, path], err: %i[child out], &:read)
       assert_equal 0, Process.last_status.exitstatus, output
-      assert_match(/^fat: 1 \(1 passed, 0 failed\)$/, output)
+      assert_match(/^fat: 1 \(1 passed, 0 failed\), 1 drawn$/, output)
+      assert_match(/^fat cases: 1 \(1 passed, 0 failed\), 1 drawn; /, report.summary)
 
       File.write(path, JSON.generate(report.coverage.merge(schema_version: FsimgSpec::Report::SCHEMA_VERSION + 1)))
       output = IO.popen([RbConfig.ruby, BIN_REPORT, path], err: %i[child out], &:read)

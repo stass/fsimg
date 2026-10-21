@@ -34,7 +34,7 @@ class TestKnownTreeFsimg < Minitest::Test
 
     def self.preflight_sample(directory) = Fat::Suite.preflight_sample(directory)
 
-    def self.cases(cache:, ceilings:, name_trials:) =
+    def self.cases(cache:, ceilings:, name_trials:, draws:) =
       [Fat::Suite.replay(TestKnownTreeFsimg.creation("fat.create.listed", %w[create ls]), cache:, ceilings:, name_trials:)]
   end
 
@@ -75,7 +75,7 @@ class TestKnownTreeFsimg < Minitest::Test
       Dir.mkdir(results)
       faulty = faulty_fsimg(build_directory)
       FsimgSpec::CasePhase.call(profile: PROFILE, results:, build_directory:, environment: ENV.to_h.merge("FSIMG_BIN" => faulty),
-                                suites: { "fat" => CreationSuite })
+                                seed: 1, suites: { "fat" => CreationSuite })
       record = File.join(results, "failures", "fat.create.listed")
 
       assert_equal %w[case.json create.stderr create.stdout fixture.json ls.stderr ls.stdout replay.sh result.json],

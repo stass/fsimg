@@ -152,6 +152,34 @@ class TestFatBuilder < Minitest::Test
     assert_raises(Fat::BuilderError) { Fat::Builder::ShortNames.numbered("BASIS", "TXT", 10_000_000) }
   end
 
+  # The basis-name algorithm (section 6.1, the generation of short names):
+  # upper case, spaces and leading periods stripped, the primary part up
+  # to the first period cut to fit its numeric tail, the extension after
+  # the last period, and any character no short name holds lossily "_".
+  # The numeric tail follows unless the name in upper case is itself a
+  # valid 8.3 name, as readme is.
+  def test_generated_short_names_follow_the_basis_name_algorithm
+    names = ["name file.txt", ".profile", "a.b.c", "x+y", "readme"]
+
+    assert_equal ["NAMEFI~1TXT", "PROFIL~1   ", "A~1     C  ", "X_Y~1      ", "README     "],
+                 names.map { Fat::Builder::ShortNames.assign([_1]).first.short }
+  end
+
+  # Every name of an entry, long or short, is a key of its directory, and
+  # a key that two entries share makes the directory ambiguous
+  # (specs/design-fat-reader.md#directory-preparation). A generated short
+  # name therefore never spells a sibling's name, whichever comes first:
+  # abcdef~1 keeps ABCDEF~1 from abc def, and the literal NAMEFI~1.TXT
+  # keeps its own short name from the long name before it.
+  def test_a_generated_short_name_never_spells_a_sibling_name
+    spelled = lambda { |names|
+      Fat::Builder::ShortNames.assign(names).map { Fat::Builder::ShortNames.spelled(_1.short) }
+    }
+
+    assert_equal ["ABCDEF~2", "ABCDEF~1"], spelled.(["abc def", "abcdef~1"])
+    assert_equal ["NAMEFI~2.TXT", "NAMEFI~1.TXT"], spelled.(["NAME FILE.TXT", "NAMEFI~1.TXT"])
+  end
+
   # The builder is evidence about the geometry decoder only if it does
   # not share it: it must choose the variant from section 3.5's cluster
   # thresholds with fsimg_spec/fat/geometry.rb never loaded.

@@ -50,7 +50,7 @@ module FsimgSpec
       # image, which seeds the fuzzer as well as any. A seed needs the
       # image, not the host's answers for its names, so no name trial runs.
       def self.seeded(cache:, ceilings:) =
-        Suite.cases(cache:, ceilings:, name_trials: NameTrials::NONE).reject(&:skip)
+        Suite.cases(cache:, ceilings:, name_trials: NameTrials::NONE, draws: Draws::NONE).reject(&:skip)
              .map { CasePhase.classify(_1) }.select { seeds?(_1.kase.recipe) }
 
       # Whether recipe's case seeds the fuzzer: a targeted or promoted case

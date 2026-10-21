@@ -88,6 +88,11 @@ module FsimgSpec
         layout
       end
 
+      # The Allocation the image of parameters and tree would have,
+      # computed in memory, or a BuilderError where the builder cannot lay
+      # them out.
+      def self.plan(parameters:, tree:) = Allocation.new(Layout.new(parameters), tree)
+
       # An on-disk record given as its fields in order, each
       # [specification field name, pack directive, value], so every row
       # can be checked against the specification's table for the record.
@@ -328,8 +333,19 @@ module FsimgSpec
 
       # Short names (section 6.1): a name its own 8.3 short name spells
       # exactly is stored as itself; any other takes a long name and a
-      # generated short name, a basis of up to six characters, ~ and a
-      # number unique in the directory.
+      # short name the basis-name and numeric-tail algorithms generate.
+      #
+      # Every name of an entry is a key of its directory, compared without
+      # case, and a reader takes a key that two entries share for an
+      # ambiguous directory (specs/design-fat-reader.md#directory-preparation).
+      # A generated short name therefore never spells the name of another
+      # entry, whichever entry comes first: a long abc~1 keeps ABC~1 from
+      # a sibling, and a literal NAMEFI~1.TXT keeps its own short name from
+      # the long name file.txt. The keys are the builder's own upper case,
+      # not the model's, so an error in either cannot hide in both. The
+      # builder's OEM character set is ASCII: every other character of a
+      # basis name is lossy and becomes "_", which the specification
+      # allows for a character the OEM code page lacks.
       module ShortNames
         Names = Data.define(:short, :long)
         CHARACTERS = /\A[A-Z0-9$%'\-_@~`!(){}^#&]+\z/
@@ -338,15 +354,35 @@ module FsimgSpec
         # short names given so far, and tried the next number to try for
         # each generated basis, so every name costs constant work.
         def self.assign(names)
+          keys = names.to_set { upper(_1) }
           taken = Set.new
           tried = Hash.new(1)
           names.map do |name|
-            short = plain(name)
-            assigned = short && !taken.include?(short) ? Names.new(short:, long: nil) : generated(name, taken, tried)
+            # A short name is free when no entry before this one took it
+            # and it spells no other entry's name: a key it spells is the
+            # entry's own only when it is the entry's name in upper case.
+            spells_another = ->(short) { spelled(short) != upper(name) && keys.include?(spelled(short)) }
+            free = ->(short) { !taken.include?(short) && !spells_another.(short) }
+            assigned = untailed(name, free) || numbered_name(name, free, tried)
             taken << assigned.short
             assigned
           end
         end
+
+        # name's short name without a numeric tail when name in upper case
+        # is a valid 8.3 name and that short name is free, or nil. Only a
+        # name that is its own short name needs no long name.
+        def self.untailed(name, free)
+          short = plain(upper(name))
+          return nil unless short && free.(short)
+
+          Names.new(short:, long: name == spelled(short) ? nil : name)
+        end
+
+        # name in upper case, character by character, keeping a character
+        # whose upper case is several characters, such as U+00DF, as the
+        # simple case mapping a reader compares with keeps it.
+        def self.upper(name) = name.each_char.map { |char| char.upcase.then { _1.length == 1 ? _1 : char } }.join
 
         # The 11-byte DIR_Name of name when it is a valid upper-case 8.3
         # name that DIR_Name spells back exactly, or nil. HELLO. fits as
@@ -374,14 +410,25 @@ module FsimgSpec
           extension.empty? ? base : "#{base}.#{extension}"
         end
 
-        def self.generated(name, taken, tried)
-          stem, _, extension = name.include?(".") ? name.rpartition(".") : [name, "", ""]
-          basis = clean(stem)[0, 6].then { _1.empty? ? "_" : _1 }
-          suffix = clean(extension)[0, 3]
-          key = [basis, suffix]
-          number = (tried[key]..).find { !taken.include?(numbered(basis, suffix, _1)) }
+        # name with the short name basis~N, N the first number whose short
+        # name is free.
+        def self.numbered_name(name, free, tried)
+          key = basis(name)
+          number = (tried[key]..).find { free.(numbered(*key, _1)) }
           tried[key] = number + 1
-          Names.new(short: numbered(basis, suffix, number), long: name)
+          Names.new(short: numbered(*key, number), long: name)
+        end
+
+        # The basis name of name, as its primary part and extension: in
+        # upper case, every space and the leading periods stripped, the
+        # primary part up to the first period and the extension after the
+        # last, of at most 8 and 3 characters, each character no short
+        # name holds made "_". A name of nothing but periods and spaces,
+        # which no directory holds validly, takes "_".
+        def self.basis(name)
+          stripped = upper(name).delete(" ").sub(/\A\.+/, "")
+          extension = stripped.include?(".") ? stripped.rpartition(".").last : ""
+          [clean(stripped.partition(".").first)[0, 8].then { _1.empty? ? "_" : _1 }, clean(extension)[0, 3]]
         end
 
         # The DIR_Name of basis~number with suffix, the basis cut so the
@@ -394,7 +441,7 @@ module FsimgSpec
           ("#{basis[0, 8 - tail.length]}#{tail}".ljust(8) + suffix.ljust(3)).b
         end
 
-        def self.clean(text) = text.upcase.chars.map { CHARACTERS.match?(_1) ? _1 : "_" }.join
+        def self.clean(text) = text.chars.map { CHARACTERS.match?(_1) ? _1 : "_" }.join
       end
 
       # Long-name entries (section 7): the name in UTF-16, 13 units per

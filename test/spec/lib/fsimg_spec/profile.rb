@@ -12,10 +12,12 @@ module FsimgSpec
     def limit(resource) = to_h.fetch(resource)
   end
 
-  # A named run configuration (specs/design-spec-testing.md#profiles). Each
+  # A named run configuration (specs/design-spec-testing.md#profiles): its
+  # ceilings, the number of random trees a run draws and classifies, and
+  # the sample of them, the first tree_sample, that runs fsimg. Each
   # profile writes its report into its own results directory under the
   # build directory, so runs of different profiles never share one.
-  Profile = Data.define(:name, :ceilings) do
+  Profile = Data.define(:name, :ceilings, :tree_draws, :tree_sample) do
     def results_directory(build_directory) =
       File.join(build_directory, "test", "spec-results", name)
   end
@@ -26,15 +28,15 @@ module FsimgSpec
     Profile.new(name: "quick", ceilings: Ceilings.new(
       image: 1024 * MIB, memory: 64 * MIB, scratch: 256 * MIB, entries: 10_000, depth: 32,
       path: 512, fds: 128, output: 256 * MIB, work: 1 << 40, seconds: 20
-    )),
+    ), tree_draws: 150, tree_sample: 15),
     Profile.new(name: "nightly", ceilings: Ceilings.new(
       image: 4096 * MIB, memory: 64 * MIB, scratch: 1024 * MIB, entries: 100_000, depth: 64,
       path: 512, fds: 128, output: 1024 * MIB, work: 1 << 40, seconds: 60
-    )),
+    ), tree_draws: 3000, tree_sample: 300),
     Profile.new(name: "deep", ceilings: Ceilings.new(
       image: 65_536 * MIB, memory: 64 * MIB, scratch: 8192 * MIB, entries: 1_000_000, depth: 96,
       path: 512, fds: 160, output: 8192 * MIB, work: 1 << 40, seconds: 600
-    ))
+    ), tree_draws: 30_000, tree_sample: 3000)
   ].to_h { [_1.name, _1] }.freeze
 
   def self.fetch_profile(name) =

@@ -7,8 +7,9 @@
 #
 #   test/spec/bin/report test/spec-results/PROFILE/coverage.json
 #
-# One line per rule: its state, how many of its cases were attempted,
-# passed and failed, its isolation and the stages fsimg was held to. A
+# One line per format with its case counts, then one line per rule: its
+# state, how many of its cases were attempted, passed and failed, its
+# isolation and the stages fsimg was held to. A
 # coverage.json may come from a downloaded CI artifact, so the file is read
 # within a bound and every string from it is printed with its control
 # characters escaped. It reads only the schema version the harness writes
@@ -18,7 +19,7 @@ require "json"
 require_relative "../lib/fsimg_spec/terminal"
 
 LIMIT = 64 << 20
-SCHEMA_VERSION = 2 # FsimgSpec::Report::SCHEMA_VERSION; test_report.rb checks both agree.
+SCHEMA_VERSION = 3 # FsimgSpec::Report::SCHEMA_VERSION; test_report.rb checks both agree.
 
 def escaped(value) = FsimgSpec::Terminal.escaped(value)
 
@@ -61,13 +62,13 @@ end
 
 def format_lines(name, result)
   counts = result.fetch("cases")
-  verdicts = counts.reject { |verdict, _| verdict == "total" }.map { |verdict, count| "#{count} #{verdict}" }
+  verdicts = counts.except("total", "drawn").map { |verdict, count| "#{count} #{verdict}" }
   rules = result.fetch("rules").map do |rule|
     tally = "#{rule.fetch("attempted")} attempted, #{rule.fetch("passed")} passed, #{rule.fetch("failed")} failed"
     format(RULE_LINE, rule.fetch("id"), rule.fetch("state"), tally, rule.fetch("isolation") || "-",
            rule.fetch("stages_asserted").join(" "))
   end
-  ["#{name}: #{counts.fetch("total")} (#{verdicts.join(", ")})", *rules]
+  ["#{name}: #{counts.fetch("total")} (#{verdicts.join(", ")}), #{counts.fetch("drawn")} drawn", *rules]
 end
 
 begin

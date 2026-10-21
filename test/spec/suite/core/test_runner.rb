@@ -14,7 +14,7 @@ require_relative "synthetic"
 class TestRunner < Minitest::Test
   CEILINGS = FsimgSpec::Ceilings.new(image: 1 << 20, memory: 64 << 20, scratch: 2 << 20, entries: 100, depth: 8,
                                      path: 256, fds: 64, output: 1 << 20, work: 1 << 20, seconds: 1)
-  PROFILE = FsimgSpec::Profile.new(name: "test", ceilings: CEILINGS)
+  PROFILE = FsimgSpec::Profile.new(name: "test", ceilings: CEILINGS, tree_draws: 0, tree_sample: 0)
   SUMMARY = '{"schema":1,"type":"summary","complete":true,"sandbox":"unavailable"}'
   ACCEPT = "echo '#{SUMMARY}'".freeze
   STAGES = %w[info ls extract verify].freeze

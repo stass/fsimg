@@ -9,11 +9,13 @@ module FsimgSpec
     # 2005 by section and field, as the PDF numbers them; each profile rule
     # cites the fsimg design that states the policy.
     #
-    # Every rule here reads the boot sector, which the reader checks when
-    # it opens the volume (specs/design-fat-reader.md#identification-and-geometry),
-    # so every scope is open. That includes the range of BPB_FSInfo and
+    # Every rule but the name and destination rules reads the boot sector,
+    # which the reader checks when it opens the volume
+    # (specs/design-fat-reader.md#identification-and-geometry), so its
+    # scope is open. That includes the range of BPB_FSInfo and
     # BPB_BkBootSec; the structures they locate are checked within the
-    # verification scope. A field rule's domain is a Domain over the
+    # verification scope. The name rules read the tree's names, which the
+    # reader checks as it prepares each directory. A field rule's domain is a Domain over the
     # field's values, and FIELDS says where the field lies and which
     # builder parameter renders it. A relational rule's
     # domain is a function of the bases that answers its witnesses
@@ -73,7 +75,7 @@ module FsimgSpec
       # The registry's rules. Rules of one field are listed normative
       # first: a value that several of them exclude targets the first
       # (Witnesses.deterministic).
-      def self.all = [*boot_rules, *bpb_rules, *geometry_rules, *fat32_rules, *destination_rules]
+      def self.all = [*boot_rules, *bpb_rules, *geometry_rules, *fat32_rules, *name_rules, *destination_rules]
 
       # The rules of the host's names, with FAT's witnesses.
       def self.destination_rules =
@@ -111,6 +113,46 @@ module FsimgSpec
                                          domain: Domain.new(legal: [0xAA55], invalid: [0, 0x55AA], boundaries: [0xAA55]),
                                          source: cite("3.2 and 3.3", "Signature_word"))
       ]
+
+      NAMES_SOURCE = "specs/design-fat-reader.md, Names and metadata"
+
+      # The names of a directory as fsimg's reader takes them (Names): each
+      # one it accepts, and no two siblings with one key, which makes the
+      # directory ambiguous (specs/design-fat-reader.md#directory-preparation).
+      # Both read the tree, so neither applies where the tree is unknown.
+      # A directory with a name whose key Ruby cannot give leaves the
+      # second rule undefined.
+      def self.name_rules = [
+        Rule.new(
+          id: "fat.directory.name", category: "profile", policy: "must_reject", status: "FSIMG_ECORRUPT",
+          scopes: ["directories"], applies_to: ALWAYS, domain: Witnesses::NAME,
+          predicate: ->(model, _) { FsimgSpec.derive(model.tree) { |tree| tree.none? { Names.problem(base_name(_1)) } } },
+          source: "#{NAMES_SOURCE}: forbidden FAT characters, empty names, dot/dotdot, and leading/trailing spaces " \
+                  "or trailing periods are rejected; #{SPECIFICATION}, section 7, a long name of at most 255 characters"
+        ),
+        Rule.new(
+          id: "fat.directory.unique_names", category: "profile", policy: "must_reject", status: "FSIMG_ECORRUPT",
+          scopes: ["directories"], applies_to: ALWAYS, domain: Witnesses::UNIQUE_NAMES,
+          predicate: ->(model, _) { FsimgSpec.derive(model.tree) { distinct_siblings(_1) } },
+          source: "#{NAMES_SOURCE}: the unicode-17-simple-upper comparison, under which a key may not belong to two " \
+                  "entries; Directory preparation: equal keys from different entries make the directory ambiguous"
+        )
+      ]
+
+      # The last component of a known tree entry's path, and the path of
+      # the directory holding it, empty for the root.
+      def self.base_name(entry) = entry.path.rpartition("/".b).last
+
+      def self.parent_path(entry) = entry.path.rpartition("/".b).first
+
+      # Whether no two entries of one directory of tree share a key, or
+      # Undefined where a key is unknown.
+      def self.distinct_siblings(tree)
+        keys_by_directory = tree.group_by { parent_path(_1) }.values.map { |siblings| siblings.map { Names.key(base_name(_1)) } }
+        return Undefined.new(reason: "a name's simple upper case is unknown") if keys_by_directory.flatten.include?(nil)
+
+        keys_by_directory.all? { _1.uniq.size == _1.size }
+      end
 
       # BS_jmpBoot takes two forms: EB ?? 90 and E9 ?? ??.
       def self.jump?(bytes) = (bytes.getbyte(0) == 0xEB && bytes.getbyte(2) == 0x90) || bytes.getbyte(0) == 0xE9
@@ -374,8 +416,9 @@ module FsimgSpec
       # mirrored volume ignores them.
       def self.active_fat_exists(flags, fat_count) = flags.nobits?(0x80) || (flags & 0x0F) < fat_count
 
-      private_class_method :field_rule, :cite, :boot_rules, :bpb_rules, :geometry_rules, :fat32_rules,
-                           :reserved_area_rule, :recommended_sector_rule, :absent_sector_rule
+      private_class_method :field_rule, :cite, :boot_rules, :bpb_rules, :geometry_rules, :fat32_rules, :name_rules,
+                           :base_name, :parent_path, :distinct_siblings, :reserved_area_rule, :recommended_sector_rule,
+                           :absent_sector_rule
     end
   end
 end

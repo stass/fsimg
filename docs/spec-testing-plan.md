@@ -606,16 +606,18 @@ review and commit gates.
 
 The rules are cited by structure and field name from the Microsoft FAT
 specification; `test/spec/lib/fsimg_spec/fat/rules.rb` registers them. Every
-rule reads the boot sector, which the reader checks when it opens the volume,
-so every scope is `open`. The category column names the policy when it is not
+rule but the two name rules and the host's destination rules reads the boot
+sector, which the reader checks when it opens the volume, so its scope is
+`open`; the name rules read the known tree's names, scope `directories`, and
+their witnesses run `ls`. The category column names the policy when it is not
 `must_reject`. The column "fsimg (observed)" records what the S6 witnesses
-observed. A witness of a rule whose policy is not `must_accept` runs `info`,
-the first stage that checks its rule. A valid witness, or one of a `must_accept` rule, runs every
-reading stage. On an unmutated base, each stage asserts acceptance, and `ls`,
+observed. A witness of a rule whose policy is not `must_accept` runs the
+first stage that checks its rule, `info` for the `open` scope. A valid
+witness, or one of a `must_accept` rule, runs every reading stage. On an unmutated base, each stage asserts acceptance, and `ls`,
 `extract` and `verify` compare their records with the base's known tree; a
 mutated base leaves the directory, file and verification scopes unclassified,
 so there `ls`, `extract` and `verify` assert only that they run without a
-fault. All 139 deterministic witnesses agree with the expectations their rules
+fault. All 153 deterministic witnesses agree with the expectations their rules
 derive.
 
 | Rule ID | Requirement | Category | fsimg (observed) |
@@ -650,6 +652,8 @@ derive.
 | `fat32.bpb.backup_boot_sector` | `BPB_BkBootSec` is 0, `0xFFFF` or a reserved-area sector after the boot sector | normative | `info`: `ECORRUPT` for 32 of 32 reserved sectors and `0xFFFE` |
 | `fat32.bpb.backup_boot_sector.recommended` | `BPB_BkBootSec` is 0 or 6 | advisory (`must_accept`) | Accepted by `info` at 29 |
 | `fat32.bpb.backup_boot_sector.absent` | `BPB_BkBootSec` is not `0xFFFF` | advisory (`must_accept`) | Accepted by `info` as no backup |
+| `fat.directory.name` | No name is empty, `.` or `..`, holds a C0 control, DEL or one of `"*/:<>?\|`, starts with a space, ends with a space or period, or exceeds 255 UTF-16 units | profile | `ls`: `ECORRUPT` for a trailing space or period, a leading space, a colon, U+0001, DEL, and 256 units of ASCII or of supplementary characters; 255 units accepted by every stage |
+| `fat.directory.unique_names` | No two names of a directory have one simple-uppercase key | profile | `ls`: `ECORRUPT` for an ASCII and a Deseret case pair; a long name beside the 8.3 name its basis name spells is accepted |
 
 Twelve well-isolated rules are worth more than thirty unverified ones.
 

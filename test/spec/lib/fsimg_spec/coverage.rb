@@ -23,10 +23,13 @@ module FsimgSpec
       end
     end
 
-    # The counts over every case of the run.
+    # The counts over every case of the run: the total, each verdict's,
+    # and the drawn cases fsimg ran, those whose recipe records the
+    # random_seed it was drawn from.
     def self.cases(entries) = {
       total: entries.size,
-      **VERDICTS.to_h { |verdict| [verdict.to_sym, entries.count { _1.result.verdict == verdict }] }
+      **VERDICTS.to_h { |verdict| [verdict.to_sym, entries.count { _1.result.verdict == verdict }] },
+      drawn: entries.count { _1.kase&.recipe&.random_seed && ran?(_1) }
     }
 
     # The counts of one rule over the cases generated for it, and those of

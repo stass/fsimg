@@ -95,7 +95,7 @@ class TestCoverage < Minitest::Test
     assert_equal rules(entries), rules(entries.reverse)
     assert_equal %w[t.format.0 t.format.1 t.format.2], format[:witnesses]
     assert_equal({ attempted: 3, passed: 1, failed: 1, host_skip: 1 }, format.slice(:attempted, :passed, :failed, :host_skip))
-    assert_equal({ total: 3, passed: 1, failed: 1, host_skip: 1, harness_error: 0 },
+    assert_equal({ total: 3, passed: 1, failed: 1, host_skip: 1, harness_error: 0, drawn: 0 },
                  FsimgSpec::Coverage.cases(entries))
   end
 

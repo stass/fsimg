@@ -154,6 +154,10 @@
   a mutated image leaves them unclassified, so its `ls`, `extract` and
   `verify` assert only safety. Milestone B2's table and directory decoder
   replaces the known tree and must decode those images to the same tree.
+  Drawn trees outside the profile's sample are classified in memory from the
+  empty base's boot sector and the drawn tree (`Fat::Cases#defective?`);
+  once the model decodes directories, that check must read the decoded tree,
+  for example from an image rendered in memory, still without writing it.
   The writer `profile` rule that every byte outside allocated metadata and
   file content is zero needs the decoder's allocation map and lands with it.
 
