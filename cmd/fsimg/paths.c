@@ -30,6 +30,10 @@ static fsimg_status_t reject_ancestor(int, int, fsimg_error_t *);
 static fsimg_status_t prepare_scratch(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
 static fsimg_status_t open_input(fsimg_cli_options_t *, fsimg_error_t *);
+static fsimg_status_t open_contents(int, const fsimg_cli_operand_t *, int,
+    int *, fsimg_error_t *);
+static fsimg_status_t hold_descriptor(int, int, const char *, const char *, int *,
+    fsimg_error_t *);
 static fsimg_status_t open_operand(int, const fsimg_cli_operand_t *, int,
     int *, fsimg_error_t *);
 static fsimg_status_t open_roots(fsimg_cli_options_t *, fsimg_cli_paths_t *,
@@ -312,9 +316,9 @@ open_nofollow(int base, const char *path, bool directory)
  * Open one create operand with the no-follow, nonblocking,
  * no-controlling-terminal open used for every scanned object, so a symbolic
  * link operand fails and a FIFO cannot block. Only a directory or a regular
- * file becomes a root. The descriptor is moved above the worker's
- * descriptor layout, at least first_free, so starting the worker passes it
- * without another copy.
+ * file becomes a root, and only a regular file a manifest. The descriptor
+ * is moved above the worker's descriptor layout, at least first_free, so
+ * starting the worker passes it without another copy.
  */
 static fsimg_status_t
 open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
@@ -322,30 +326,77 @@ open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
 {
 	fsimg_host_file_t identity;
 	int fd, saved;
+	bool kind_valid;
 
 	fd = open_nofollow(operand->host_path[0] == '/' ? AT_FDCWD : directory,
 	    operand->host_path, false);
-	if (fd == -1)
-		return (path_error(error, errno == ELOOP ? "operand is a symbolic link" :
-		    "cannot open operand", operand->host_path));
+	if (fd == -1) {
+		if (errno == ELOOP)
+			return (path_error(error, operand->manifest ?
+			    "manifest is a symbolic link" : "operand is a symbolic link",
+			    operand->host_path));
+		return (path_error(error, operand->manifest ?
+		    "cannot open manifest" : "cannot open operand", operand->host_path));
+	}
 	if (fsimg_host_file(fd, &identity) == -1) {
 		saved = errno;
 		close(fd);
 		errno = saved;
-		return (path_error(error, "operand identity query failed", operand->host_path));
-	}
-	if (identity.kind != FSIMG_HOST_DIRECTORY && identity.kind != FSIMG_HOST_FILE) {
-		close(fd);
-		errno = 0;
-		return (path_error(error, "operand is not a regular file or directory",
+		return (path_error(error, operand->manifest ?
+		    "manifest identity query failed" : "operand identity query failed",
 		    operand->host_path));
 	}
+	kind_valid = identity.kind == FSIMG_HOST_FILE ||
+	    (!operand->manifest && identity.kind == FSIMG_HOST_DIRECTORY);
+	if (!kind_valid) {
+		close(fd);
+		errno = 0;
+		return (path_error(error, operand->manifest ?
+		    "manifest is not a regular file" :
+		    "operand is not a regular file or directory", operand->host_path));
+	}
+	return (hold_descriptor(fd, first_free, operand->manifest ?
+	    "cannot hold manifest" : "cannot hold operand", operand->host_path,
+	    out, error));
+}
+
+/*
+ * A manifest's candidate content directory: the -C directory in effect, or
+ * the working directory, opened as an operand of "." is, beneath which the
+ * worker reads a file's bytes only when the manifest's entry needs them.
+ */
+static fsimg_status_t
+open_contents(int directory, const fsimg_cli_operand_t *operand,
+    int first_free, int *out, fsimg_error_t *error)
+{
+	const char *name;
+	int fd;
+
+	name = operand->directory == NULL ? "." : operand->directory;
+	fd = fsimg_host_source_open(directory, ".", true);
+	if (fd == -1)
+		return (path_error(error, "cannot open the manifest's content directory",
+		    name));
+	return (hold_descriptor(fd, first_free,
+	    "cannot hold the manifest's content directory", name, out, error));
+}
+
+/* Move fd to the lowest descriptor at or above first_free, close-on-exec,
+ * and close the original on every outcome; a failure reports message and
+ * the object's name.
+ */
+static fsimg_status_t
+hold_descriptor(int fd, int first_free, const char *message, const char *name,
+    int *out, fsimg_error_t *error)
+{
+	int saved;
+
 	*out = fcntl(fd, F_DUPFD_CLOEXEC, first_free);
 	saved = errno;
 	close(fd);
 	if (*out == -1) {
 		errno = saved;
-		return (path_error(error, "cannot hold operand", operand->host_path));
+		return (path_error(error, message, name));
 	}
 	return (FSIMG_OK);
 }
@@ -355,12 +406,15 @@ open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
  * the worker's whole source authority, so it never receives a -C directory
  * or a name to resolve. Each operand is opened relative to the -C directory
  * that precedes it, or the working directory, and an absolute operand as
- * given. The worker holds one descriptor per root besides its own: the
- * staging directory of a create job, scratch unless it is disabled, and two
- * while scanning, a directory and the entry read from it; the staged image
- * is opened after scanning, in one of those two. The operands must leave
- * room for those within the fds limit, so an oversized command line fails
- * here, before the worker starts.
+ * given. A host operand is one root descriptor; a manifest is two
+ * consecutive ones, the manifest and its candidate content directory, each
+ * with the path FSIMG_JOB_MANIFEST, which the worker adopts together as one
+ * source root. The worker holds one descriptor per root descriptor
+ * besides its own: the staging directory of a create job, scratch unless
+ * it is disabled, and two while scanning, a directory and the entry read
+ * from it; the staged image is opened after scanning, in one of those two.
+ * The operands must leave room for those within the fds limit, so an
+ * oversized command line fails here, before the worker starts.
  */
 static fsimg_status_t
 open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
@@ -369,12 +423,14 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	fsimg_worker_request_t *request = &options->request;
 	const fsimg_cli_operand_t *operand;
 	const char *directory_name;
-	unsigned count;
+	unsigned count, slot;
 	fsimg_status_t status;
 	uint64_t needed;
 	int directory, first_free;
 
-	count = options->operand_count;
+	count = 0;
+	for (unsigned i = 0; i < options->operand_count; i++)
+		count += options->operands[i].manifest ? 2 : 1;
 	needed = (uint64_t)count + 2 + (request->kind == FSIMG_JOB_CREATE ? 1 : 0) +
 	    (request->scratch_fd != -1 ? 1 : 0);
 	if (needed > request->limits.max_open_files)
@@ -397,7 +453,8 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	directory = AT_FDCWD;
 	directory_name = NULL;
 	status = FSIMG_OK;
-	for (unsigned i = 0; i < count && status == FSIMG_OK; i++) {
+	slot = 0;
+	for (unsigned i = 0; i < options->operand_count && status == FSIMG_OK; i++) {
 		operand = &options->operands[i];
 		/* Operands after one -C borrow the same argv string, so a new
 		 * pointer, not new text, marks the next -C: two -C words naming
@@ -414,9 +471,22 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 				break;
 			}
 		}
-		status = open_operand(directory, operand, first_free, &paths->root_fds[i],
-		    error);
-		paths->root_paths[i] = operand->image_path;
+		/* Each slot's path is set even when its open fails; the loop
+		 * then ends, and cleanup reads only the descriptors.
+		 */
+		status = open_operand(directory, operand, first_free,
+		    &paths->root_fds[slot], error);
+		if (operand->manifest) {
+			paths->root_paths[slot] = FSIMG_JOB_MANIFEST;
+			paths->root_paths[slot + 1] = FSIMG_JOB_MANIFEST;
+			if (status == FSIMG_OK)
+				status = open_contents(directory, operand,
+				    first_free, &paths->root_fds[slot + 1], error);
+			slot += 2;
+		} else {
+			paths->root_paths[slot] = operand->image_path;
+			slot++;
+		}
 	}
 	if (directory != AT_FDCWD && directory != -1)
 		close(directory);

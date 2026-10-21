@@ -52,6 +52,13 @@ void fsimg_sources_release(fsimg_writer_t *);
  */
 fsimg_status_t fsimg_writer_adopt_tree(fsimg_writer_t *, int, const char *,
     fsimg_error_t *);
+/* fsimg_writer_add_manifest() over descriptors it consumes: an already
+ * reserved manifest file and an already reserved content directory or -1,
+ * each consumed with its reservation on every outcome, so a confined
+ * worker never duplicates a descriptor.
+ */
+fsimg_status_t fsimg_writer_adopt_manifest(fsimg_writer_t *, int, int,
+    fsimg_error_t *);
 fsimg_status_t fsimg_source_open(fsimg_writer_t *, uint64_t, fsimg_error_t *);
 fsimg_status_t fsimg_source_read(fsimg_writer_t *, uint64_t, void *,
     size_t, size_t *, fsimg_error_t *);

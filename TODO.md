@@ -386,9 +386,22 @@
   import has the same dependency: the content-path walk inspects each
   final name with `fstatat(AT_SYMLINK_NOFOLLOW)` before opening it, so a
   device or FIFO a manifest names is never opened
-  (`inspect_import_file()` in `lib/source/source.c`); the coordinator hook
-  must serve that inspection too before the `@file` operand runs confined
-  on Linux.
+  (`inspect_import_file()` in `lib/source/source.c`), so a confined Linux
+  `fsimg c` with an `@file` operand fails as unsupported ("contents path
+  inspection is not permitted") as soon as an entry reads host bytes, as
+  `docs/fsimg.1` states; the coordinator hook must serve that inspection
+  too, and `test_manifest_host` in `test/cli.py` then requires success.
+* [High] **Regular-file roots under the Linux sandbox** (`lib/source/source.c`
+  `open_root_file()`, `lib/io/io.c`, `cmd/fsimg/sandbox.c`): emission reads a
+  regular-file root through `fsimg_io_from_fd()`, which duplicates the root
+  descriptor with `fcntl(F_DUPFD_CLOEXEC)`; the seccomp filter allows
+  `fcntl` only for `F_GETFL`, so a confined Linux worker should fail
+  `fsimg cf disk.img FILE` with "descriptor duplication failed". Found by
+  reading the code on macOS, not reproduced. Confirm on Linux with the
+  sandbox active; if it fails, read the root through a borrowed I/O view of
+  the registry's descriptor instead of a duplicate, as the worker adopts
+  manifest descriptors (`fsimg_writer_adopt_manifest()`), and add the
+  Linux-confined case to `test/cli.py`.
 * [Medium] **Hashing a large sparse generated file** (`lib/source/manifest.c`,
   `specs/design-mtree.md` "Digests"): planning checks a generated file's
   `sha256digest` only after the image accepted its size, so the bytes hashed
@@ -437,14 +450,15 @@
 
 * [Medium] **Manifest import and export** (`lib/source/`, `lib/extract/`,
   `lib/core/`, `cmd/fsimg/`, `fuzz/`): implement the
-  [manifest design](specs/design-mtree.md). The parser and the source
-  root (`fsimg_writer_add_manifest()`, `lib/source/manifest.c`,
-  `lib/source/generated.c`, `test/manifest.c`) exist; what remains is the
-  `@file` operand with its CLI tests (two descriptors per operand against
-  `fds`), `x --mtree=FILE` through the output coordinator, the round trips
-  through `x --mtree` for exFAT, QNX6 and QNX4, and a content-path test
-  across a nested mount where the host allows one. The spec harness's
-  creation cases then emit manifests instead of writing `source/`.
+  [manifest design](specs/design-mtree.md). The parser, the source root
+  (`fsimg_writer_add_manifest()`, `lib/source/manifest.c`,
+  `lib/source/generated.c`, `test/manifest.c`) and the `c` mode's `@file`
+  operand (`cmd/fsimg/paths.c`, `cmd/fsimg/worker-child.c`, `test/cli.py`)
+  exist; what remains is `x --mtree=FILE` through the output coordinator,
+  the round trips through `x --mtree` for exFAT, QNX6 and QNX4, and a
+  content-path test across a nested mount where the host allows one. The
+  spec harness's creation cases then emit manifests instead of writing
+  `source/`.
 
 * [Low] **Opt-in metadata restore** (`lib/extract/`): consider an opt-in that
   applies permission bits without setuid, setgid or sticky through opened

@@ -42,7 +42,8 @@ typedef struct worker_child {
 	fsimg_selection_t *selector;
 	fsimg_writer_t	*writer;
 	/* The job's NUL-terminated paths, back to back: the member of a read
-	 * job, or one image path per root of a create job.
+	 * job, or one per root descriptor of a create job, the image path of a
+	 * host root or FSIMG_JOB_MANIFEST for each of a manifest root's two.
 	 */
 	char		*paths;
 	uint64_t	 paths_length;
@@ -71,6 +72,8 @@ static fsimg_status_t validate_paths(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t add_synthesized_parents(worker_child_t *, const char *,
     fsimg_error_t *);
 static fsimg_status_t adopt_roots(worker_child_t *, fsimg_error_t *);
+static fsimg_status_t adopt_manifest(worker_child_t *, int, const char *,
+    fsimg_error_t *);
 static fsimg_status_t child_setup(worker_child_t *, fsimg_sandbox_caps_t *,
     fsimg_error_t *);
 static fsimg_status_t child_ready(worker_child_t *, const fsimg_sandbox_caps_t *,
@@ -311,8 +314,13 @@ read_paths(worker_child_t *child, uint64_t paths_length, fsimg_error_t *error)
 }
 
 /* The sequence holds exactly the job's paths, one for a read job and one
- * per root for a create job, each terminated and each a valid absolute
- * image path within the context's limits.
+ * per root descriptor for a create job, each terminated. Each is a valid
+ * absolute image path within the context's limits, except that a create
+ * job's manifest roots carry FSIMG_JOB_MANIFEST for both of their
+ * descriptors, so those paths come in pairs. A path other than
+ * FSIMG_JOB_MANIFEST where a pair's second belongs is a malformed manifest
+ * root; a pair the sequence ends inside is a miscounted sequence, refused
+ * as any other framing error.
  */
 static fsimg_status_t
 validate_paths(worker_child_t *child, fsimg_error_t *error)
@@ -321,25 +329,35 @@ validate_paths(worker_child_t *child, fsimg_error_t *error)
 	size_t length, validated;
 	uint32_t depth, count, expected;
 	fsimg_status_t status;
+	bool roots, manifest_open;
 
 	expected = fsimg_job_path_count(&child->request);
+	roots = fsimg_job_has_roots(child->request.kind);
 	end = child->paths + child->paths_length;
 	if (child->paths_length == 0 || end[-1] != '\0')
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
 	count = 0;
+	manifest_open = false;
 	for (path = child->paths; path < end; path += length + 1) {
 		length = strlen(path);
 		if (count == expected)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
+		count++;
+		if (roots && strcmp(path, FSIMG_JOB_MANIFEST) == 0) {
+			manifest_open = !manifest_open;
+			continue;
+		}
+		if (manifest_open)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "invalid worker manifest root"));
 		status = fsimg_path_validate(child->ctx, path, true, &validated,
 		    &depth, error);
 		if (status != FSIMG_OK)
 			return (status);
-		count++;
 	}
-	if (count != expected)
+	if (count != expected || manifest_open)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
 	return (FSIMG_OK);
@@ -881,33 +899,76 @@ read_job(worker_child_t *child, fsimg_error_t *error)
  * Give every root to the writer at its image path. A root at "/" adds its
  * contents only; any other root also adds its own entry, and its ancestors
  * that no root names are added as synthesized directories with no metadata
- * field, so the format's defaults apply to them. The writer merges a
- * directory that several roots or synthesized parents supply and fails on
- * any other repeated path.
+ * field, so the format's defaults apply to them. A manifest root is parsed
+ * here, after acknowledgement, and its entries are rooted at "/". The
+ * writer merges a directory that several roots or synthesized parents
+ * supply and fails on any other repeated path. The walk over the paths
+ * relies on validate_paths, which proved one terminated path per root
+ * descriptor and the "@" paths in pairs, so skipping a manifest's second
+ * path stays inside the sequence.
  */
 static fsimg_status_t
 adopt_roots(worker_child_t *child, fsimg_error_t *error)
 {
-	const char *path;
+	const char *path, *next;
 	fsimg_status_t status;
+	int fd;
 
 	path = child->paths;
-	for (uint32_t i = 0; i < child->request.root_count; i++) {
+	while (child->roots_adopted < child->request.root_count) {
+		fd = FSIMG_CHILD_ROOTS + (int)child->roots_adopted;
+		next = path + strlen(path) + 1;
+		if (strcmp(path, FSIMG_JOB_MANIFEST) == 0) {
+			status = adopt_manifest(child, fd, next, error);
+			if (status != FSIMG_OK)
+				return (status);
+			path = next + strlen(next) + 1;
+			continue;
+		}
 		status = fsimg_fd_reserve(child->ctx, error);
 		if (status != FSIMG_OK)
 			return (status);
 		/* Adoption consumes the descriptor on every outcome. */
 		child->roots_adopted++;
-		status = fsimg_writer_adopt_tree(child->writer, FSIMG_CHILD_ROOTS + (int)i,
-		    path, error);
+		status = fsimg_writer_adopt_tree(child->writer, fd, path, error);
 		if (status != FSIMG_OK)
 			return (status);
 		status = add_synthesized_parents(child, path, error);
 		if (status != FSIMG_OK)
 			return (status);
-		path += strlen(path) + 1;
+		path = next;
 	}
 	return (FSIMG_OK);
+}
+
+/* A manifest root is two raw descriptors, the manifest at fd and its
+ * candidate content directory at fd + 1, whose paths validate_paths
+ * paired; second_path is the second one's. Both are reserved, the two
+ * descriptors the coordinator counted for this root, and given to the
+ * writer, which consumes them without duplicating either, so the
+ * sandbox's refusal of descriptor duplication never applies.
+ */
+static fsimg_status_t
+adopt_manifest(worker_child_t *child, int fd, const char *second_path,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	if (child->roots_adopted + 1 >= child->request.root_count ||
+	    strcmp(second_path, FSIMG_JOB_MANIFEST) != 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CONTEXT, "invalid worker manifest root"));
+	status = fsimg_fd_reserve(child->ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_fd_reserve(child->ctx, error);
+	if (status != FSIMG_OK) {
+		fsimg_fd_release(child->ctx, -1);
+		return (status);
+	}
+	/* Adoption consumes both descriptors on every outcome. */
+	child->roots_adopted += 2;
+	return (fsimg_writer_adopt_manifest(child->writer, fd, fd + 1, error));
 }
 
 /* Add each proper ancestor of path below the image root, "/a" and "/a/b"

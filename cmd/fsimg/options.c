@@ -1383,6 +1383,7 @@ interpret_read(cli_parse_t *parse)
  * from there "-C dir" or "-Cdir" changes the directory for the operands
  * after it, until a "--" makes every later word an operand. Every -C must
  * apply to at least one operand, so a misplaced one is not silently lost.
+ * An operand "@name" is a manifest (specs/design-mtree.md, "Command line").
  */
 static fsimg_status_t
 read_create_operands(cli_parse_t *parse)
@@ -1425,10 +1426,22 @@ read_create_operands(cli_parse_t *parse)
 		}
 		operand = &options->operands[options->operand_count];
 		operand->directory = directory;
-		operand->host_path = word;
-		status = normalize_path(parse, word, false, &operand->image_path);
-		if (status != FSIMG_OK)
-			return (status);
+		if (word[0] == '@') {
+			/* A manifest, in every position, after "--" too, as
+			 * tar reads an archive operand; "./@name" names a
+			 * host object.
+			 */
+			if (word[1] == '\0')
+				return (syntax(parse, "@ requires a manifest name"));
+			operand->manifest = true;
+			operand->host_path = word + 1;
+		} else {
+			operand->host_path = word;
+			status = normalize_path(parse, word, false,
+			    &operand->image_path);
+			if (status != FSIMG_OK)
+				return (status);
+		}
 		options->operand_count++;
 		pending = false;
 	}

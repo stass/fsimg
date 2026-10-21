@@ -113,8 +113,10 @@ typedef struct fsimg_worker_request {
 	fsimg_output_budget_t *output_budget;
 	/* The selected member of a read job; create jobs use the roots. */
 	const char	*selection;
-	/* Create jobs: root_count opened roots, a directory or a regular file
-	 * each, and the image path each populates, in command-line order.
+	/* Create jobs: root_count opened root descriptors in command-line
+	 * order, a directory or a regular file each, and one path for each:
+	 * the image path a host root populates, or FSIMG_JOB_MANIFEST for
+	 * both descriptors of a manifest root.
 	 */
 	const int	*root_fds;
 	const char *const *root_paths;
@@ -203,9 +205,15 @@ int fsimg_output_main(void);
 int fsimg_input_main(void);
 fsimg_status_t fsimg_output_run(const char *, fsimg_output_producer_fn_t, void *,
     int, uint64_t, const volatile sig_atomic_t *, fsimg_output_budget_t *, fsimg_error_t *);
-/* A create or plan job reads source roots and carries one image path per
- * root; every other kind reads an image and carries its one selection.
- * These are the job's paths in wire order.
+/* A manifest root holds two consecutive root descriptors, the manifest
+ * file and then its candidate content directory, and each carries this
+ * path in place of an image path; no image path is "@".
+ */
+#define FSIMG_JOB_MANIFEST "@"
+
+/* A create or plan job reads source roots and carries one path per root
+ * descriptor; every other kind reads an image and carries its one
+ * selection. These are the job's paths in wire order.
  */
 bool fsimg_job_has_roots(fsimg_job_kind_t);
 /* The filesystem the stack names, or "" when its slot is not named. */
@@ -231,8 +239,9 @@ fsimg_status_t fsimg_job_decode(const unsigned char *, uint32_t,
     fsimg_worker_request_t *, uint64_t *, unsigned *, fsimg_error_t *);
 
 /* Child FD numbers are a closed startup layout, not descriptor-opening
- * requests. A create job's roots follow the fixed descriptors in order:
- * root i is FSIMG_CHILD_ROOTS + i, and the job record states their count.
+ * requests. A create job's root descriptors follow the fixed descriptors
+ * in order: root descriptor i is FSIMG_CHILD_ROOTS + i, and the job record
+ * states their count.
  */
 #define FSIMG_CHILD_JOB 3
 #define FSIMG_CHILD_CONTROL 4

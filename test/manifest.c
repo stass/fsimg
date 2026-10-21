@@ -1195,6 +1195,82 @@ test_unused_content_directory(void)
 	free(without.bytes);
 }
 
+/* The adopting form the worker uses consumes both reserved descriptors on
+ * every outcome: an offered content directory that is not a directory, a
+ * manifest that is not a regular file and a writer no longer collecting
+ * are refused with both descriptors closed and both reservations
+ * returned, and an accepted pair imports, its unused directory released.
+ */
+static void
+test_adopted_descriptors(void)
+{
+	const fsimg_plan_t *plan;
+	fixture_t fixture;
+	fsimg_error_t error;
+	fsimg_stats_t stats;
+	image_t image;
+	int contents, manifest;
+
+	fixture_open(&fixture, "fat12", 0);
+	put_file(fixture.parent, "plain", "x");
+	manifest = write_manifest(&fixture, generated_manifest);
+	contents = openat(fixture.parent, "plain", O_RDONLY | O_CLOEXEC);
+	CHECK(contents != -1);
+	CHECK(fsimg_fd_reserve(fixture.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_fd_reserve(fixture.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_adopt_manifest(fixture.writer, manifest, contents,
+	    &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "readable directory") != NULL);
+	CHECK(fcntl(manifest, F_GETFD) == -1 && errno == EBADF);
+	CHECK(fcntl(contents, F_GETFD) == -1 && errno == EBADF);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.descriptors == fixture.baseline.descriptors);
+	fixture_close(&fixture);
+
+	fixture_open(&fixture, "fat12", 0);
+	manifest = put_directory(fixture.parent, "not-a-manifest");
+	contents = put_directory(fixture.parent, "contents");
+	CHECK(fsimg_fd_reserve(fixture.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_fd_reserve(fixture.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_adopt_manifest(fixture.writer, manifest, contents,
+	    &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "not a regular file") != NULL);
+	CHECK(fcntl(manifest, F_GETFD) == -1 && errno == EBADF);
+	CHECK(fcntl(contents, F_GETFD) == -1 && errno == EBADF);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.descriptors == fixture.baseline.descriptors);
+	fixture_close(&fixture);
+
+	fixture_open(&fixture, "fat12", 0);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	manifest = write_manifest(&fixture, generated_manifest);
+	contents = openat(fixture.parent, ".", O_RDONLY | O_DIRECTORY |
+	    O_CLOEXEC);
+	CHECK(contents != -1);
+	CHECK(fsimg_fd_reserve(fixture.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_fd_reserve(fixture.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_adopt_manifest(fixture.writer, manifest, contents,
+	    NULL) != FSIMG_OK);
+	CHECK(fcntl(manifest, F_GETFD) == -1 && errno == EBADF);
+	CHECK(fcntl(contents, F_GETFD) == -1 && errno == EBADF);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.descriptors == fixture.baseline.descriptors);
+	fixture_close(&fixture);
+
+	fixture_open(&fixture, "fat12", 0);
+	manifest = write_manifest(&fixture, generated_manifest);
+	contents = put_directory(fixture.parent, "contents");
+	CHECK(fsimg_fd_reserve(fixture.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_fd_reserve(fixture.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_adopt_manifest(fixture.writer, manifest, contents,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.descriptors == fixture.baseline.descriptors);
+	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
+	free(image.bytes);
+	fixture_close(&fixture);
+}
+
 /* A format that stores owner, mode, links and FIFOs carries the
  * manifest's keywords exactly, with no host object behind them.
  */
@@ -1370,6 +1446,7 @@ main(void)
 	test_duplicates();
 	test_line_order();
 	test_unused_content_directory();
+	test_adopted_descriptors();
 	test_qnx6_metadata();
 	test_external_writers();
 	return (0);

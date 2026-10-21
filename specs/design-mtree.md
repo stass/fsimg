@@ -41,8 +41,8 @@ and the relative path; reopening (`lib/source/source.c`,
 root, no-follow, and compares the identity before and after copying. The
 catalog sorts entries by path and resolves equal paths by rank
 (`lib/write/catalog.c`). Owner and mode reach the catalog only under
-`FSIMG_WRITE_IMPORT_POSIX`. The CLI worker receives one opened root per
-create operand and nothing it could resolve a pathname against. The safe
+`FSIMG_WRITE_IMPORT_POSIX`. The CLI worker receives the opened roots of
+the create operands and nothing it could resolve a pathname against. The safe
 extractor (`lib/extract/extract.c`) creates files and directories with private
 modes, restores no owner, mode or change time, and creates no links or
 FIFOs, so an extracted QNX6 tree loses exactly the fields a manifest can
@@ -62,9 +62,15 @@ host contents are walked by the same component walk reopening uses
 the copy. Digests claimed for generated content are kept, with their line
 and image path, in a writer stream that `fsimg_writer_plan()` checks once
 the image has accepted every size (`fsimg_manifest_check_digests()`).
-The CLI does not yet accept a manifest operand and the extractor writes no
-manifest; the [command line](#command-line) and
-[extraction](#extraction-writing-a-manifest) sections describe the target.
+In mode `c` an `@file` operand (`read_create_operands()` in
+`cmd/fsimg/options.c`) is opened by the coordinator with its candidate
+content directory (`open_roots()` in `cmd/fsimg/paths.c`), and the two
+descriptors reach the worker as consecutive root descriptors whose job
+paths are both `@` (`FSIMG_JOB_MANIFEST`), which the worker pairs and hands
+to `fsimg_writer_adopt_manifest()`, the form of `fsimg_writer_add_manifest()`
+that consumes its descriptors instead of duplicating them. The extractor
+writes no manifest; the [extraction](#extraction-writing-a-manifest)
+section describes the target.
 The SHA-256 implementation is the one [Digests](#digests) describes,
 `lib/core/sha256.c`.
 
@@ -110,9 +116,9 @@ The requirements follow from this one construction:
   not change image bytes; the image is a function of the manifest bytes, the
   content bytes and the options.
 * **The same worker and protocol.** The coordinator opens the manifest and
-  its content directory and passes both descriptors as one root; the worker
-  parses the manifest after acknowledgement, where it parses image bytes,
-  under the creation profile.
+  its content directory and passes both descriptors, which the worker
+  adopts together as one root; the worker parses the manifest after
+  acknowledgement, where it parses image bytes, under the creation profile.
 
 Generated content is a private fourth storage class beside none, zero,
 provider and host. Its source record holds the generator and its
@@ -129,20 +135,22 @@ carries the provider. The public source kinds do not change.
 
 In mode `c` an operand beginning with `@` names a manifest, as it names an
 archive for `tar(1)`: `fsimg cf disk.img -F qnx6 -C rootfs @METALOG`. The
-word after `@` is opened relative to the `-C` directory in effect, with the
-no-follow, nonblocking, no-controlling-terminal open every root gets, and
-must be a regular file. That same `-C` directory, the working directory
-until a `-C` is given, is opened as the manifest's candidate content
-directory. It becomes the content directory only when an entry needs host
-bytes: a manifest whose files are all generated reads nothing beneath it,
-and its root is descriptorless, as the [library
-interface](#library-interface) defines, so a directory that holds other
-files, such as the harness's case directory with `out/` and `scratch/`,
-serves as the working directory without becoming a source. No option spells
-"no content directory". A host object whose own name begins with `@` is
-named `./@name`. The `@` form is recognized in every operand position,
-including after `--`. A manifest operand holds two descriptors, so it counts
-twice against `fds`.
+word after `@` is opened relative to the `-C` directory in effect, or as
+given when it is absolute, with the no-follow, nonblocking,
+no-controlling-terminal open every root gets, and must be a regular file.
+That same `-C` directory, the working directory until a `-C` is given, is
+opened as the manifest's candidate content directory. It becomes the
+content directory only when an entry needs host bytes: a manifest whose
+files are all generated reads nothing beneath it, and its root is
+descriptorless, as the [library interface](#library-interface) defines, so
+a directory that holds other files, such as the harness's case directory
+with `out/` and `scratch/`, serves as the working directory without
+becoming a source. No option spells "no content directory". A host object
+whose own name begins with `@` is named `./@name`. A bare `@` is a syntax
+error. The word after `@` is a host path, never an image path, so unlike
+another operand it may contain `..`. The `@` form is recognized in every
+operand position, including after `--`. A manifest operand holds two
+descriptors, so it counts twice against `fds`.
 
 The manifest's entries are rooted at the image root; there is no prefix
 form. A manifest that should land beneath `/a` says so in its paths.
@@ -430,7 +438,9 @@ where the bytes are read, during the emission copy: the source cursor
 hashes the bytes it serves in order from offset zero and `finish()`
 compares once every byte was served, so a mismatch is
 `FSIMG_ESOURCE_CHANGED` naming the path, the staged output is discarded and
-nothing is published. Finishing a cursor asserts that it served the file:
+nothing is published; a stream receives no byte, since the raw disk is
+emitted to its [raw intermediate](design-layers.md#handed-over-files) before
+the first byte is sent. Finishing a cursor asserts that it served the file:
 one that served less than all of it in order is an internal fault
 (`FSIMG_ECORRUPT`), never a silently skipped check, and the alias
 preflight, which opens every host source only to compare identities,
@@ -513,14 +523,17 @@ manifest file and the content directory as it opens every root and passes
 descriptors, never names. The worker's only new act is to resolve relative
 paths taken from the manifest beneath the content directory, which is the
 component walk source reopening already performs; the content directory is
-the `-C` directory the user named, the same authority an operand of `.`
-grants, and the [source-root profile's](design-security.md#source-root-profile)
-device limitation applies to it unchanged. A link target is bytes stored in
-the image and is never opened or resolved. A `contents=` path never follows
-a link and never leaves the content directory, because every component is
-opened relative to the previous one with no-follow and `..` is refused as
-text. The output and scratch identities are compared with every collected
-host source before any sink mutation, as for scanned sources.
+the `-C` directory in effect, or the working directory, the same authority
+an operand of `.` grants, and the worker holds it even for a manifest of
+generated content, which reads nothing beneath it but whose entries could
+name any file there. The [source-root
+profile's](design-security.md#source-root-profile) device limitation
+applies to it unchanged. A link target is bytes stored in the image and is
+never opened or resolved. A `contents=` path never follows a link and never
+leaves the content directory, because every component is opened relative to
+the previous one with no-follow and `..` is refused as text. The output and
+scratch identities are compared with every collected host source before any
+sink mutation, as for scanned sources.
 
 | Bound | Value | Failure |
 | --- | --- | --- |

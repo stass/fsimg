@@ -125,6 +125,7 @@ static void test_incomplete_extraction(void);
 static void test_skipped_extraction(void);
 static void test_mount_source(const char *);
 static void test_multiple_roots(worker_fixture_t *);
+static void test_manifest_roots(worker_fixture_t *);
 static void test_partitioned_create(void);
 static int raw_intermediate(const worker_fixture_t *);
 static void create_request(worker_fixture_t *, const char *);
@@ -526,6 +527,7 @@ test_operations(const char *format)
 	CHECK(fixture.plans == 2);
 	CHECK(fixture.result.metadata_losses == fixture.plan_losses);
 	test_multiple_roots(&fixture);
+	test_manifest_roots(&fixture);
 	fixture_close(&fixture);
 }
 
@@ -781,6 +783,59 @@ test_multiple_roots(worker_fixture_t *fixture)
 	CHECK(run(fixture, &error) == FSIMG_EINVAL);
 	CHECK(strcmp(error.path, "/HELLO.TXT") == 0);
 	CHECK(close(roots[2]) == 0);
+	fixture->request.root_fds = &fixture->source;
+	fixture->request.root_paths = image_root;
+	fixture->request.root_count = 1;
+}
+
+/* A manifest root is two root descriptors, the manifest and its content
+ * directory, whose paths are both FSIMG_JOB_MANIFEST: the worker parses
+ * the manifest, reads a host file's bytes beneath the directory, and merges
+ * its entries with a host root's. A manifest path without its pair is
+ * refused before any root is read.
+ */
+static void
+test_manifest_roots(worker_fixture_t *fixture)
+{
+	static const char manifest[] =
+	    ". type=dir\n"
+	    "./HELLO.TXT type=file\n"
+	    "./generated type=file fsimg.content=seeded fsimg.seed=1 size=40\n";
+	static const char *const paths[] = { FSIMG_JOB_MANIFEST,
+	    FSIMG_JOB_MANIFEST, "/copy" };
+	static const char *const unpaired[] = { FSIMG_JOB_MANIFEST, "/",
+	    "/copy" };
+	static const char *const trailing[] = { "/copy", "/",
+	    FSIMG_JOB_MANIFEST };
+	fsimg_error_t error;
+	int roots[3], fd;
+
+	fd = openat(fixture->parent, "manifest", O_CREAT | O_EXCL | O_WRONLY |
+	    O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	CHECK(write(fd, manifest, sizeof(manifest) - 1) ==
+	    (ssize_t)(sizeof(manifest) - 1));
+	CHECK(close(fd) == 0);
+	roots[0] = openat(fixture->parent, "manifest", O_RDONLY | O_CLOEXEC);
+	CHECK(roots[0] != -1);
+	roots[1] = fixture->source;
+	roots[2] = fixture->source;
+	fixture->request.kind = FSIMG_JOB_PLAN;
+	fixture->request.root_fds = roots;
+	fixture->request.root_paths = paths;
+	fixture->request.root_count = 3;
+	CHECK(run(fixture, &error) == FSIMG_OK);
+	/* The manifest's two files, and "/copy" holding the source's file. */
+	CHECK(fixture->result.entries == 4);
+
+	fixture->request.root_paths = unpaired;
+	CHECK(run(fixture, &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "manifest root") != NULL);
+	fixture->request.root_paths = trailing;
+	CHECK(run(fixture, &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "framing") != NULL);
+	CHECK(close(roots[0]) == 0);
+	CHECK(unlinkat(fixture->parent, "manifest", 0) == 0);
 	fixture->request.root_fds = &fixture->source;
 	fixture->request.root_paths = image_root;
 	fixture->request.root_count = 1;

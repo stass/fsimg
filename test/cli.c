@@ -331,10 +331,18 @@ test_create_operands(void)
 		{ "fsimg", "-cn", "-F", "fat32", "", NULL },
 		{ "fsimg", "-cn", "-F", "fat32", "a", "-Cdir", NULL },
 		{ "fsimg", "-cn", "-F", "fat32", "-C", "", "a", NULL },
-		{ "fsimg", "-cn", "-F", "fat32", "a", "-C", "", "b", NULL }
+		{ "fsimg", "-cn", "-F", "fat32", "a", "-C", "", "b", NULL },
+		{ "fsimg", "-cn", "-F", "fat32", "@", NULL },
+		{ "fsimg", "-cn", "-F", "fat32", "--", "@", NULL },
+		{ "fsimg", "-cn", "-F", "fat32", "@m", "-C", "dir", NULL }
 	};
 	char *operands[] = { "fsimg", "-cn", "-F", "fat32", "-C", "dir", "a//./b/",
 	    "-Cother", "c", "/abs", ".", "--", "-C", "x", NULL };
+	/* "@" names a manifest in every position and keeps its -C; "./@n"
+	 * is a host object; a manifest's name is a host path, ".." included.
+	 */
+	char *manifests[] = { "fsimg", "-cn", "-F", "fat32", "-C", "dir", "@m",
+	    "./@n", "--", "@../x", NULL };
 	fsimg_cli_options_t options;
 
 	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
@@ -353,6 +361,21 @@ test_create_operands(void)
 	CHECK(strcmp(options.operands[4].host_path, "-C") == 0);
 	CHECK(strcmp(options.operands[4].image_path, "/-C") == 0);
 	CHECK(strcmp(options.operands[5].image_path, "/x") == 0);
+	for (unsigned i = 0; i < options.operand_count; i++)
+		CHECK(!options.operands[i].manifest);
+	fsimg_cli_release(&options);
+
+	CHECK(parse(manifests, &options) == FSIMG_OK);
+	CHECK(options.operand_count == 3);
+	CHECK(options.operands[0].manifest &&
+	    strcmp(options.operands[0].host_path, "m") == 0 &&
+	    strcmp(options.operands[0].directory, "dir") == 0 &&
+	    options.operands[0].image_path == NULL);
+	CHECK(!options.operands[1].manifest &&
+	    strcmp(options.operands[1].image_path, "/@n") == 0);
+	CHECK(options.operands[2].manifest &&
+	    strcmp(options.operands[2].host_path, "../x") == 0 &&
+	    strcmp(options.operands[2].directory, "dir") == 0);
 	fsimg_cli_release(&options);
 }
 

@@ -372,12 +372,16 @@ help(fsimg_cli_display_t *display)
 		append(display, "%s", help_units);
 		append(display, "Only -C dir may appear among the operands, for the operands after it.\n"
 		    "Each operand is stored under its own path; -C dir . stores the contents\n"
-		    "of dir at the image root. The output must be new. Keep the sources stable\n"
-		    "during creation.\n\n"
+		    "of dir at the image root. An operand @file is an mtree(5) manifest,\n"
+		    "opened relative to the -C directory unless absolute; its files' bytes\n"
+		    "are read beneath that -C directory. Name a host object beginning with @\n"
+		    "as ./@name. The output must be new. Keep the sources stable during\n"
+		    "creation.\n\n"
 		    "examples:\n"
 		    "    fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .\n"
 		    "    fsimg cRf data.img -F exfat rootfs extra\n"
 		    "    fsimg cWf data.img -F exfat -C esp . -C extra EFI\n"
+		    "    fsimg cf disk.img -F qnx6 -C rootfs @METALOG\n"
 		    "    fsimg cn -F exfat -R rootfs\n");
 		return;
 	}

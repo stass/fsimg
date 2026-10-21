@@ -58,9 +58,10 @@ _Static_assert(CLAIM_LINE + 8u == CLAIM_LINE_OFFSET &&
  * the end, so it behaves the same with or without one. Without a candidate
  * an entry needing host bytes is refused.
  *
- * The manifest itself is read through a bounded I/O object over a
- * duplicate of the caller's descriptor, from offset zero to the length it
- * had when the call began, and must be unchanged when the parse ends.
+ * The manifest itself is read through a bounded I/O object over the
+ * adopted descriptor, a duplicate of the public caller's, from offset zero
+ * to the length it had when the call began, and must be unchanged when the
+ * parse ends.
  */
 typedef struct manifest_import {
 	fsimg_writer_t	*writer;
@@ -78,10 +79,11 @@ typedef struct manifest_import {
 	int		 candidate;
 } manifest_import_t;
 
+static fsimg_status_t duplicate_reserved(fsimg_writer_t *, int, int *,
+    const char *, fsimg_error_t *);
 static fsimg_status_t open_manifest(manifest_import_t *, int,
     fsimg_error_t *);
-static fsimg_status_t offer_contents(manifest_import_t *, int,
-    fsimg_error_t *);
+static fsimg_status_t check_contents(manifest_import_t *, fsimg_error_t *);
 static fsimg_status_t allocate_buffers(manifest_import_t *, fsimg_error_t *);
 static fsimg_status_t register_root(manifest_import_t *, fsimg_error_t *);
 static fsimg_status_t check_manifest_unchanged(manifest_import_t *,
@@ -114,20 +116,78 @@ fsimg_status_t
 fsimg_writer_add_manifest(fsimg_writer_t *writer, int manifest_fd,
     int contents_fd, fsimg_error_t *error)
 {
-	manifest_import_t import;
-	fsimg_mtree_input_t input;
 	fsimg_status_t status;
+	int contents, manifest;
 
 	status = fsimg_writer_collect_ready(writer, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if (contents_fd < -1) {
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_SOURCE,
+		    "content directory descriptor is neither open nor -1");
+		return (fsimg_writer_fail(writer, status));
+	}
+	contents = -1;
+	status = duplicate_reserved(writer, manifest_fd, &manifest,
+	    "manifest descriptor duplication failed", error);
+	if (status == FSIMG_OK && contents_fd != -1) {
+		status = duplicate_reserved(writer, contents_fd, &contents,
+		    "content directory descriptor duplication failed", error);
+		if (status != FSIMG_OK)
+			fsimg_fd_release(writer->ctx, manifest);
+	}
+	if (status != FSIMG_OK)
+		return (fsimg_writer_fail(writer, status));
+	return (fsimg_writer_adopt_manifest(writer, manifest, contents, error));
+}
+
+/* The public call borrows the caller's descriptors: both are duplicated,
+ * each against its own reservation, so the caller's offsets and lifetimes
+ * are left as they were. A failed duplication reports message.
+ */
+static fsimg_status_t
+duplicate_reserved(fsimg_writer_t *writer, int fd, int *out,
+    const char *message, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+	int saved;
+
+	status = fsimg_fd_reserve(writer->ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	*out = fsimg_host_dup(fd);
+	if (*out == -1) {
+		saved = errno;
+		fsimg_fd_release(writer->ctx, -1);
+		return (fsimg_error_set(error, FSIMG_EIO, saved,
+		    FSIMG_OP_SOURCE, message));
+	}
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_writer_adopt_manifest(fsimg_writer_t *writer, int manifest_fd,
+    int contents_fd, fsimg_error_t *error)
+{
+	manifest_import_t import;
+	fsimg_mtree_input_t input;
+	fsimg_status_t status;
+
+	/* Both descriptors belong to the import from here: the candidate is
+	 * released at the end unless the root adopted it, and the manifest
+	 * is consumed by its I/O object whatever open_manifest returns, or
+	 * released here when the writer cannot accept a root.
+	 */
 	bzero(&import, sizeof(import));
 	import.writer = writer;
-	import.candidate = -1;
-
-	status = open_manifest(&import, manifest_fd, error);
-	if (status == FSIMG_OK && contents_fd != -1)
-		status = offer_contents(&import, contents_fd, error);
+	import.candidate = contents_fd;
+	status = fsimg_writer_collect_ready(writer, error);
+	if (status == FSIMG_OK)
+		status = open_manifest(&import, manifest_fd, error);
+	else
+		fsimg_fd_release(writer->ctx, manifest_fd);
+	if (status == FSIMG_OK && import.candidate != -1)
+		status = check_contents(&import, error);
 	if (status == FSIMG_OK)
 		status = allocate_buffers(&import, error);
 	if (status == FSIMG_OK)
@@ -154,8 +214,8 @@ fsimg_writer_add_manifest(fsimg_writer_t *writer, int manifest_fd,
 	return (FSIMG_OK);
 }
 
-/* The manifest is borrowed: reading goes through a duplicate, so the
- * caller's descriptor, its offset included, is left as it was.
+/* The manifest descriptor becomes the import's I/O object, which reads it
+ * by offset, so its file offset is never used.
  */
 static fsimg_status_t
 open_manifest(manifest_import_t *import, int manifest_fd, fsimg_error_t *error)
@@ -164,7 +224,7 @@ open_manifest(manifest_import_t *import, int manifest_fd, fsimg_error_t *error)
 	fsimg_status_t status;
 	bool known;
 
-	status = fsimg_io_from_fd(writer->ctx, manifest_fd, FSIMG_IO_READ,
+	status = fsimg_io_adopt_fd(writer->ctx, manifest_fd, FSIMG_IO_READ,
 	    &import->manifest, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -182,38 +242,23 @@ open_manifest(manifest_import_t *import, int manifest_fd, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* Validate and duplicate the offered content directory without taking
- * its identity: that happens when an entry first needs host bytes.
+/* The offered content directory must be a readable directory; its identity
+ * is taken only when an entry first needs host bytes.
  */
 static fsimg_status_t
-offer_contents(manifest_import_t *import, int contents_fd, fsimg_error_t *error)
+check_contents(manifest_import_t *import, fsimg_error_t *error)
 {
-	fsimg_writer_t *writer = import->writer;
 	fsimg_host_file_t identity;
-	fsimg_status_t status;
-	int flags, saved;
+	int flags;
 
-	if (contents_fd < 0)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_SOURCE,
-		    "content directory descriptor is neither open nor -1"));
-	flags = fcntl(contents_fd, F_GETFL);
-	if (flags == -1 || fsimg_host_file(contents_fd, &identity) == -1)
+	flags = fcntl(import->candidate, F_GETFL);
+	if (flags == -1 || fsimg_host_file(import->candidate, &identity) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_SOURCE, "content directory inspection failed"));
 	if (identity.kind != FSIMG_HOST_DIRECTORY ||
 	    (flags & O_ACCMODE) != O_RDONLY || fsimg_host_unsupported_io(flags))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_SOURCE,
 		    "content directory must be a readable directory"));
-	status = fsimg_fd_reserve(writer->ctx, error);
-	if (status != FSIMG_OK)
-		return (status);
-	import->candidate = fsimg_host_dup(contents_fd);
-	if (import->candidate == -1) {
-		saved = errno;
-		fsimg_fd_release(writer->ctx, -1);
-		return (fsimg_error_set(error, FSIMG_EIO, saved,
-		    FSIMG_OP_SOURCE, "content directory duplication failed"));
-	}
 	return (FSIMG_OK);
 }
 

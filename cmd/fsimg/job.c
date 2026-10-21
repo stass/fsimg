@@ -17,15 +17,15 @@
  * whether a label is present. Then come the write settings: the 16-byte
  * UUID, the byte order as one byte, and the inode capacity and reserve
  * percentage as eight little-endian bytes each, and the number of create
- * roots as eight bytes. The read-side selection follows: the selector
- * kind, partition index and GPT sector size as eight bytes each, the three
- * stack slot states as one byte each, the scheme and container names in 16
- * bytes each (the format name is the filesystem slot's), and the partition
- * selector text in 112. The layer settings close the record: the GPT and
- * MBR disk lengths and the MBR identifier as eight bytes each, one byte
- * of MBR flags (identifier set, partition active) and seven zero bytes,
- * the disk and partition GUIDs in 16 bytes each, and the GPT type in 40,
- * the GPT name in 112 and the MBR type in 16, NUL-terminated; then the
+ * root descriptors as eight bytes. The read-side selection follows: the
+ * selector kind, partition index and GPT sector size as eight bytes each,
+ * the three stack slot states as one byte each, the scheme and container
+ * names in 16 bytes each (the format name is the filesystem slot's), and
+ * the partition selector text in 112. The layer settings close the record:
+ * the GPT and MBR disk lengths and the MBR identifier as eight bytes each,
+ * one byte of MBR flags (identifier set, partition active) and seven zero
+ * bytes, the disk and partition GUIDs in 16 bytes each, and the GPT type in
+ * 40, the GPT name in 112 and the MBR type in 16, NUL-terminated; then the
  * container settings: the DMG segment ID and VHD unique identifier in 16
  * bytes each, the DMG chunk, VHD alignment, simg block and DMG level as
  * eight bytes each, and one byte of container flags (DMG raw chunks, simg
@@ -38,7 +38,8 @@
  *
  * The job's image paths follow the record in SELECTION frames, as one
  * sequence of NUL-terminated paths whose total length the record states:
- * a read job sends its one member, a create job one path per root.
+ * a read job sends its one member, a create job one path per root
+ * descriptor, FSIMG_JOB_MANIFEST for each of a manifest root's two.
  */
 typedef enum job_field {
 	JOB_KIND, JOB_SANDBOX, JOB_FLAGS, JOB_MEMORY, JOB_SCRATCH, JOB_ENTRIES,
@@ -554,8 +555,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    fsimg_wire_get64(raw + JOB_INODES_OFFSET) > UINT32_MAX ||
 	    fsimg_wire_get64(raw + JOB_RESERVE_OFFSET) > UINT32_MAX)
 		return (invalid_job(error));
-	/* Roots exist exactly for create jobs, at most one per permitted
-	 * descriptor, and arrive with the roots capability.
+	/* Root descriptors exist exactly for create jobs, at most one per
+	 * permitted descriptor, and arrive with the roots capability.
 	 */
 	roots = fsimg_wire_get64(raw + JOB_ROOTS_OFFSET);
 	if (fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND)) !=

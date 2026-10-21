@@ -240,8 +240,8 @@ Signs, whitespace, fractions and overflow fail.
 Defaults are 64 GiB scratch, 10,000,000 entries, depth 256, 64 KiB image paths
 including separators and NUL, and 128 owned descriptors.
 The fds limit also caps the number of create operands: the worker holds one
-open root per operand besides its staging directory, scratch directory and
-two scanning descriptors.
+open root per operand, two for a manifest, besides its staging directory,
+scratch directory and two scanning descriptors.
 Logical extraction output defaults to the selected volume slice length,
 including holes.
 Work and time have no hidden short default limit.
@@ -399,6 +399,9 @@ directory is resolved against the working directory, must exist and must
 apply to at least one operand.
 An operand is a directory or a regular file; it is opened without following
 a final symbolic link, so a symbolic link operand fails.
+An operand beginning with @ is a manifest, as
+.Sx Manifests
+describes.
 .Pp
 An operand is stored under its own path with empty and
 .Pa \&.
@@ -487,6 +490,109 @@ adds payload reads.
 A failed verification discards the staged image, names the layer that
 failed and publishes nothing.
 .El
+.Ss Manifests
+An operand
+.Ar @file
+names an
+.Xr mtree 5
+manifest, as an @ operand names an archive for
+.Xr tar 1 :
+.Ql fsimg cf disk.img -F qnx6 -C rootfs @METALOG .
+The file is opened relative to the
+.Fl C
+directory in force, or as given when absolute, without following a
+final symbolic link, and must be a regular file.
+The manifest's entries are rooted at the image root and merge with the
+other operands as their directories do.
+That
+.Fl C
+directory, or the working directory, is the manifest's content directory:
+a file entry reads its bytes from the file beneath it at its
+.Cm contents
+path or at its own path, walked without following any link and never
+leaving the directory.
+Nothing beneath it is read unless an entry needs host bytes, so a manifest
+of generated files can be used from a directory that holds other files.
+Any file beneath it may still be named by an entry, so a manifest from an
+untrusted source should be given a
+.Fl C
+directory that holds only what it may read.
+The Linux sandbox denies the worker the path-based query that inspects a
+content file before it is opened, so a confined Linux import of a manifest
+with a file read from the content directory fails as unsupported; a
+manifest of generated files is unaffected.
+A host object whose name begins with @ is named
+.Pa ./@name ;
+an @ word is a manifest after
+.Fl Fl
+too.
+A manifest operand holds two descriptors and counts twice against the fds
+limit.
+.Pp
+The manifest is read as untrusted input.
+Lines may continue with a final backslash; comments, the
+.Ql #mtree
+signature,
+.Ql /set ,
+.Ql /unset ,
+.Ql ..
+and both relative and full entries are read, and names use the
+.Ql \eooo
+escapes of
+.Xr vis 3 .
+Every directory must have its own line, and a path may appear only once,
+except a directory repeated with the same keywords.
+The keywords used are
+.Cm type
+.Pq dir, file, link or fifo ,
+.Cm uid
+and
+.Cm gid
+together,
+.Cm mode ,
+.Cm time ,
+.Cm size ,
+.Cm link ,
+.Cm contents
+and
+.Cm sha256digest
+.Pq or Cm sha256 .
+.Cm nlink ,
+.Cm inode ,
+.Cm device ,
+.Cm resdevice ,
+.Cm tags ,
+.Cm uname ,
+.Cm gname
+beside a numeric id and
+.Cm flags=none
+are checked and ignored; any other keyword fails.
+Owner, mode and time come only from the keywords, whatever
+.Fl p
+says, and
+.Fl R
+replaces every time with the epoch as for host files.
+.Cm fsimg.content Ns = Ns Cm zero ,
+.Cm seeded
+or
+.Cm positional
+generates a file's bytes from its
+.Cm size ,
+.Cm fsimg.seed
+and optional
+.Cm fsimg.holes
+zero ranges instead of reading them; other tools do not read these
+keywords.
+A host file's
+.Cm sha256digest
+is checked as its bytes are copied, so
+.Fl n
+does not check it; a generated file's is checked by planning, by
+.Fl n
+too.
+A refused line is named by number.
+.Pa specs/design-mtree.md
+in the source distribution defines the subset.
 .Ss Partition schemes
 A stack naming gpt or mbr, such as
 .Ql fat32/gpt ,
@@ -892,6 +998,7 @@ or
 fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .
 fsimg cRf data.img -F exfat -C files .
 fsimg cWf data.img -F exfat -C esp . -C extra EFI
+fsimg cRf disk.img -F qnx6 -C rootfs @METALOG
 fsimg cn -F exfat -R -m 64M -T /scratch -C files .
 fsimg cWf esp.img -F fat32/gpt -o gpt:type=esp -o gpt:name=EFI -C esp .
 fsimg cf sd.img -F fat32/mbr -o mbr:disk=4G -o mbr:active=yes -C boot .
@@ -913,4 +1020,5 @@ fsimg --formats --json
 .Ed
 .Sh SEE ALSO
 .Xr tar 1 ,
-.Xr libfsimg 3
+.Xr libfsimg 3 ,
+.Xr mtree 5

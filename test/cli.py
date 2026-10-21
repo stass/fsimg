@@ -4,6 +4,7 @@
 
 import base64
 import gzip
+import hashlib
 import json
 import os
 import pty
@@ -22,11 +23,13 @@ import zlib
 
 
 def invoke(executable, root, arguments, expected=0, **kwargs):
+    """Run the command in root; expected is its exit status, or None for any."""
     result = subprocess.run(
         [str(executable), *arguments], cwd=root, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, timeout=30, **kwargs,
     )
-    assert result.returncode == expected, (arguments, result.returncode, result.stderr)
+    assert expected is None or result.returncode == expected, \
+        (arguments, result.returncode, result.stderr)
     return result
 
 
@@ -476,6 +479,138 @@ def test_merged_operands(executable, root):
     invoke(executable, root, ["cf", "file.img", "-F", "fat12", "-C", "source", "HELLO.TXT"])
     assert listing(executable, root, "file.img") == ['"/HELLO.TXT"']
     assert invoke(executable, root, ["xOf", "file.img", "/HELLO.TXT"]).stdout == b"hello\n"
+
+
+def seeded_bytes(seed, size):
+    """Seeded generated content as specs/design-mtree.md defines it."""
+    blocks = (hashlib.sha256(struct.pack("<QQ", seed, index)).digest()
+              for index in range((size + 31) // 32))
+    return b"".join(blocks)[:size]
+
+
+def generated_manifest(directory, name):
+    """Write a manifest of generated files only into a new directory that
+    also holds an unrelated file, and return the seeded file's bytes."""
+    directory.mkdir()
+    (directory / "unrelated.txt").write_bytes(b"not a source\n")
+    seeded = seeded_bytes(7, 100)
+    lines = [
+        ". type=dir",
+        "./sub type=dir mode=0755",
+        f"./sub/gen type=file fsimg.content=seeded fsimg.seed=7 size=100 "
+        f"sha256digest={hashlib.sha256(seeded).hexdigest()}",
+        "./zero type=file fsimg.content=zero size=5000",
+    ]
+    (directory / name).write_text("\n".join(lines) + "\n")
+    (directory / f"reversed-{name}").write_text("\n".join(reversed(lines)) + "\n")
+    return seeded
+
+
+def test_manifest_generated(executable, root):
+    """An @file operand is an mtree manifest opened relative to the -C in
+    effect. Generated files need no content directory, so a working
+    directory holding other files is never a source; reordered lines
+    produce the same reproducible image; after -- an @ word is still a
+    manifest; and a manifest image streams to stdout and compresses like
+    any other."""
+    work = root / "manifest-generated"
+    seeded = generated_manifest(work, "gen.mtree")
+    created = completed(invoke(executable, work, [
+        "cf", "gen.img", "-F", "fat12", "--json", "-R", "@gen.mtree"]))
+    assert created[-1]["entries_processed"] == "3"
+    assert listing(executable, work, "gen.img") == ['"/sub"', '"/sub/gen"', '"/zero"']
+    assert invoke(executable, work, ["xOf", "gen.img", "/sub/gen"]).stdout == seeded
+    assert invoke(executable, work, ["xOf", "gen.img", "/zero"]).stdout == bytes(5000)
+    invoke(executable, work, ["cf", "reversed.img", "-F", "fat12", "-R",
+                              "@reversed-gen.mtree"])
+    same_bytes(work / "gen.img", work / "reversed.img")
+    invoke(executable, root, ["cf", "dashed.img", "-F", "fat12", "-R",
+                              "-C", "manifest-generated", "--", "@gen.mtree"])
+    same_bytes(work / "gen.img", root / "dashed.img")
+    streamed = invoke(executable, work, ["cf", "-", "-z", "-F", "fat12", "-R",
+                                         "@gen.mtree"]).stdout
+    assert gzip.decompress(streamed) == (work / "gen.img").read_bytes()
+
+
+def test_manifest_host(executable, root):
+    """A manifest's host files are read beneath the -C directory in effect,
+    by the entry's own path or its contents= path; a manifest merges with a
+    host root; and ./@name names a host object whose name begins with @."""
+    work = root / "manifest-host"
+    (work / "content/sub").mkdir(parents=True)
+    (work / "content/sub/file.txt").write_bytes(b"host bytes\n")
+    (work / "content/elsewhere.bin").write_bytes(b"other bytes\n")
+    (work / "content/host.mtree").write_text(
+        ". type=dir\n./sub type=dir\n./sub/file.txt type=file size=11\n"
+        "./sub/named type=file contents=elsewhere.bin\n")
+    (work / "tree/sub").mkdir(parents=True)
+    (work / "tree/sub/x").write_bytes(b"x")
+    operands = ["-C", "content", "@host.mtree", "-C", "tree", "."]
+    # The Linux sandbox denies the inspection of a content file before it
+    # is opened, so a confined worker may refuse; unconfined it succeeds.
+    confined = invoke(executable, work, ["cf", "host.img", "-F", "fat12", *operands],
+                      expected=None)
+    if confined.returncode != 0:
+        assert confined.returncode == 1, confined.returncode
+        assert b"contents path inspection is not permitted" in confined.stderr, \
+            confined.stderr
+        assert not (work / "host.img").exists()
+        invoke(executable, work, ["cf", "host.img", "-F", "fat12", "-S", "off", *operands])
+    assert sorted(listing(executable, work, "host.img")) == [
+        '"/sub"', '"/sub/file.txt"', '"/sub/named"', '"/sub/x"']
+    assert invoke(executable, work, ["xOf", "host.img", "/sub/file.txt"]).stdout == \
+        b"host bytes\n"
+    assert invoke(executable, work, ["xOf", "host.img", "/sub/named"]).stdout == \
+        b"other bytes\n"
+
+    (work / "@odd").mkdir()
+    (work / "@odd/inside").write_bytes(b"odd\n")
+    invoke(executable, work, ["cf", "odd.img", "-F", "fat12", "./@odd"])
+    assert listing(executable, work, "odd.img") == ['"/@odd"', '"/@odd/inside"']
+
+
+def test_manifest_refusals(executable, root):
+    """A manifest operand must name an existing regular file, never followed,
+    and a bare @ is a syntax error. A manifest counts twice against fds. -n
+    checks a generated digest, which needs no payload, but not a host
+    file's, which would."""
+    work = root / "manifest-refused"
+    generated_manifest(work, "gen.mtree")
+    (work / "directory").mkdir()
+    (work / "link.mtree").symlink_to("gen.mtree")
+    os.mkfifo(work / "fifo.mtree")
+    for operand, detail in [("@link.mtree", b"manifest is a symbolic link"),
+                            ("@missing.mtree", b"cannot open manifest"),
+                            ("@directory", b"manifest is not a regular file"),
+                            ("@fifo.mtree", b"manifest is not a regular file")]:
+        result = invoke(executable, work, ["cf", "refused.img", "-F", "fat12", operand],
+                        expected=1)
+        assert detail in result.stderr, (operand, result.stderr)
+    result = invoke(executable, work, ["cf", "refused.img", "-F", "fat12", "@"], expected=2)
+    assert b"@ requires a manifest name" in result.stderr
+    result = invoke(executable, work, ["cf", "refused.img", "-F", "fat12", "-l", "fds=5",
+                                       "@gen.mtree"], expected=1)
+    assert b"fds limit 5" in result.stderr, result.stderr
+    assert not (work / "refused.img").exists()
+    invoke(executable, work, ["cf", "fds.img", "-F", "fat12", "-l", "fds=5", "unrelated.txt"])
+
+    wrong = "0" * 64
+    (work / "wrong.mtree").write_text(
+        f"./gen type=file fsimg.content=seeded fsimg.seed=7 size=100 sha256digest={wrong}\n")
+    error = failed(invoke(executable, work, ["cn", "-F", "fat12", "--json", "@wrong.mtree"],
+                          expected=1))
+    assert error["message"].startswith("manifest line 1: "), error
+    # A host file is inspected before it is opened, which the Linux sandbox
+    # denies (see test_manifest_host), so these run unconfined.
+    (work / "unrelated.mtree").write_text(
+        f"./unrelated.txt type=file sha256digest={wrong}\n")
+    plan = completed(invoke(executable, work, ["cn", "-F", "fat12", "--json", "-S", "off",
+                                               "@unrelated.mtree"]))
+    assert next(record for record in plan if record["type"] == "plan")["entries"] == "1"
+    result = invoke(executable, work, ["cf", "wrong-host.img", "-F", "fat12", "-S", "off",
+                                       "@unrelated.mtree"], expected=1)
+    assert b"do not match the manifest's sha256digest" in result.stderr, result.stderr
+    assert not (work / "wrong-host.img").exists()
 
 
 def test_extraction_names(executable, root):
@@ -1546,6 +1681,9 @@ def main():
         test_output_failures(executable, root)
         test_examples(executable, root)
         test_merged_operands(executable, root)
+        test_manifest_generated(executable, root)
+        test_manifest_host(executable, root)
+        test_manifest_refusals(executable, root)
         test_partitioned(executable, root)
         test_containers(executable, root)
         test_compressed_and_streams(executable, root)

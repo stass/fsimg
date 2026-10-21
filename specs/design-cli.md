@@ -95,7 +95,8 @@ an integer deadline measured on the monotonic clock, where zero selects the
 default of no additional deadline. `spool` bounds the temporary file that
 holds a stream or compressed input, defined in the
 [layer design](design-layers.md#budget). `fds` (default 128) also caps the
-number of create operands, since the worker holds one open root per operand
+number of create operands, since the worker holds one open root per operand,
+two for a manifest operand (the manifest and its content directory),
 besides its own staging directory, scratch directory and two scanning
 descriptors (a directory and the entry read from it); a command line
 leaving no room for those fails before the worker starts, naming the
@@ -228,7 +229,12 @@ directory, applies to the operands after it, and may repeat:
 `-C esp . -C extra EFI`. Each `-C` is resolved against the working
 directory, not against the previous `-C`, so the operand list reads the same
 in any order. A `-C` that applies to no operand (two in a row, or one at the
-end) is a syntax error. An operand may be a regular file.
+end) is a syntax error. An operand may be a regular file. An operand
+`@file` names an mtree(5) manifest, opened relative to the `-C` directory
+in effect, whose entries are rooted at the image root and whose host bytes
+come from beneath that directory, as the
+[manifest design](design-mtree.md#command-line) specifies; `./@name` names
+a host object beginning with `@`, and `@` is recognized after `--` too.
 
 The image name of an operand is its path with empty and `.` components
 removed; a `..` component is a syntax error, not stripped. An operand with
