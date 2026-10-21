@@ -675,7 +675,8 @@ test_job_qnx6_settings(void)
 }
 
 /* The text settings, the mountpoint, the four boot programs and the script,
- * travel in fields of 1026 bytes from byte 800 with a presence byte at 6956
+ * travel in fields of 1026 bytes from byte 832, after the spool limit, the
+ * gzip level and the compression, with a presence byte at 6988
  * and zero padding to the record's end. NULL and the empty string stay
  * distinct, the longest value that fits round-trips, and every other
  * encoding is refused.
@@ -683,8 +684,8 @@ test_job_qnx6_settings(void)
 static void
 test_job_text_settings(void)
 {
-	enum { FIELD = 1026, MOUNTPOINT = 800, SCRIPT = 800 + 5 * 1026,
-	    PRESENT = 800 + 6 * 1026 };
+	enum { FIELD = 1026, MOUNTPOINT = 832, SCRIPT = 832 + 5 * 1026,
+	    PRESENT = 832 + 6 * 1026 };
 	static char longest[FIELD], longer[FIELD + 1];
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES];
