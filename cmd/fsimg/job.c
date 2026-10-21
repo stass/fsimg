@@ -29,8 +29,8 @@
  * container settings: the DMG segment ID and VHD unique identifier in 16
  * bytes each, the DMG chunk, VHD alignment, simg block and DMG level as
  * eight bytes each, and one byte of container flags (DMG raw chunks, simg
- * CRC32) with seven zero bytes. The GPT sector size travels with the
- * selection, since reading uses it too.
+ * CRC32) with seven zero bytes; then the spool limit in eight bytes. The
+ * GPT sector size travels with the selection, since reading uses it too.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
  *
@@ -84,7 +84,8 @@ typedef enum job_string_field {
 	JOB_SIMG_BLOCK_OFFSET = 776,
 	JOB_DMG_LEVEL_OFFSET = 784,
 	JOB_CONTAINER_FLAGS = 792,
-	JOB_RESERVED_OFFSET = 800
+	JOB_SPOOL_OFFSET = 800,
+	JOB_RESERVED_OFFSET = 808
 } job_string_field_t;
 
 /* MBR flag bits at JOB_MBR_FLAGS. */
@@ -114,7 +115,8 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_VHD_ALIGN_OFFSET + 8 == JOB_SIMG_BLOCK_OFFSET &&
     JOB_SIMG_BLOCK_OFFSET + 8 == JOB_DMG_LEVEL_OFFSET &&
     JOB_DMG_LEVEL_OFFSET + 8 == JOB_CONTAINER_FLAGS &&
-    JOB_CONTAINER_FLAGS + 8 == JOB_RESERVED_OFFSET &&
+    JOB_CONTAINER_FLAGS + 8 == JOB_SPOOL_OFFSET &&
+    JOB_SPOOL_OFFSET + 8 == JOB_RESERVED_OFFSET &&
     JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the layer fields do not overlap");
 _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     JOB_GPT_TYPE_BYTES &&
@@ -236,7 +238,7 @@ layers_valid(const unsigned char *raw)
 	}
 	if (raw[JOB_CONTAINER_FLAGS] > (JOB_DMG_RAW | JOB_SIMG_CRC))
 		return (false);
-	for (unsigned i = JOB_CONTAINER_FLAGS + 1; i < JOB_RESERVED_OFFSET; i++) {
+	for (unsigned i = JOB_CONTAINER_FLAGS + 1; i < JOB_SPOOL_OFFSET; i++) {
 		if (raw[i] != 0)
 			return (false);
 	}
@@ -289,7 +291,7 @@ fsimg_worker_request_init(fsimg_worker_request_t *request)
 	request->selection = "/";
 	request->codepage = 437;
 	request->input_fd = request->output_fd = request->raw_fd = -1;
-	request->scratch_fd = -1;
+	request->scratch_fd = request->spool_fd = -1;
 }
 
 const char *
@@ -375,6 +377,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	put_field(raw, JOB_FLAGS, request->flags);
 	put_field(raw, JOB_MEMORY, request->limits.memory_bytes);
 	put_field(raw, JOB_SCRATCH, request->limits.scratch_bytes);
+	fsimg_wire_put64(raw + JOB_SPOOL_OFFSET, request->limits.spool_bytes);
 	put_field(raw, JOB_ENTRIES, request->limits.max_entries);
 	put_field(raw, JOB_OUTPUT, request->limits.max_output_bytes);
 	put_field(raw, JOB_WORK, request->limits.max_work);
@@ -393,11 +396,14 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	put_field(raw, JOB_SERIAL, request->write.volume_serial);
 	put_field(raw, JOB_CODEPAGE, request->codepage);
 	put_field(raw, JOB_SECONDS, request->seconds);
-	capabilities = (request->input_fd != -1 ? FSIMG_JOB_CAP_INPUT : 0) |
+	/* A read job's image is a file or, for a stream, the input pipe. */
+	capabilities = (request->input_fd != -1 ||
+	    (request->flags & FSIMG_JOB_STDIN) != 0 ? FSIMG_JOB_CAP_INPUT : 0) |
 	    (request->output_fd != -1 ? FSIMG_JOB_CAP_OUTPUT : 0) |
 	    (request->scratch_fd != -1 ? FSIMG_JOB_CAP_SCRATCH : 0) |
 	    (request->root_count != 0 ? FSIMG_JOB_CAP_ROOTS : 0) |
-	    (request->raw_fd != -1 ? FSIMG_JOB_CAP_RAW : 0);
+	    (request->raw_fd != -1 ? FSIMG_JOB_CAP_RAW : 0) |
+	    (request->spool_fd != -1 ? FSIMG_JOB_CAP_SPOOL : 0);
 	put_field(raw, JOB_CAPABILITIES, capabilities);
 	put_field(raw, JOB_SELECTION, paths_length);
 	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
@@ -439,10 +445,15 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_KIND) > FSIMG_JOB_PLAN ||
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
-	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STREAM)) != 0 ||
+	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STDOUT |
+	    FSIMG_JOB_GZIP | FSIMG_JOB_STDIN)) != 0 ||
+	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDOUT) != 0 &&
+	    get_field(raw, JOB_KIND) != FSIMG_JOB_CREATE) ||
+	    ((get_field(raw, JOB_FLAGS) & (FSIMG_JOB_GZIP | FSIMG_JOB_STDIN)) != 0 &&
+	    fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
 	    get_field(raw, JOB_CAPABILITIES) > (FSIMG_JOB_CAP_INPUT |
 	    FSIMG_JOB_CAP_OUTPUT | FSIMG_JOB_CAP_SCRATCH | FSIMG_JOB_CAP_ROOTS |
-	    FSIMG_JOB_CAP_RAW) ||
+	    FSIMG_JOB_CAP_RAW | FSIMG_JOB_CAP_SPOOL) ||
 	    !string_field_valid(raw + JOB_FORMAT_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_LABEL_OFFSET, JOB_LABEL_BYTES) ||
 	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||
@@ -517,6 +528,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	request->limits.max_depth = (uint32_t)get_field(raw, JOB_DEPTH);
 	request->limits.max_path_bytes = (uint32_t)get_field(raw, JOB_PATH);
 	request->limits.max_open_files = (uint32_t)get_field(raw, JOB_FDS);
+	request->limits.spool_bytes = fsimg_wire_get64(raw + JOB_SPOOL_OFFSET);
 	request->offset = get_field(raw, JOB_OFFSET);
 	request->length = get_field(raw, JOB_LENGTH);
 	request->seconds = get_field(raw, JOB_SECONDS);

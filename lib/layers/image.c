@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "format.h"
 #include "io.h"
@@ -15,13 +16,17 @@
 /*
  * An image is the input peeled down to its disk, with the disk's partition
  * table enumerated and nothing of the filesystem opened. Reading peels
- * from the outside in. Compression is not implemented, so the input is the
- * file. The container step runs once, at open: the container probes run on
- * the file's prefix and its last 512 bytes, and a claim's tables are
- * validated and become the disk, a positional object of the length they
- * declare; without a claim the file is the disk. Then one step decides
- * between a partition scheme and a bare volume by running the scheme
- * probes and the filesystem probes on the disk prefix together. In both
+ * from the outside in. The compression step decides, once, whether the
+ * input is compressed, by running the compression probes on its prefix
+ * together with every other probe that can run there; a compressed input
+ * is decoded into the spool, and a stream, which cannot be read in place,
+ * is copied there unchanged. The spool is then the file, and nothing later
+ * sees how it was filled. The container step runs once, at open: the
+ * container probes run on the file's prefix and its last 512 bytes, and a
+ * claim's tables are validated and become the disk, a positional object of
+ * the length they declare; without a claim the file is the disk. Then one
+ * step decides between a partition scheme and a bare volume by running the
+ * scheme probes and the filesystem probes on the disk prefix together. In both
  * steps exactly one claim decides, so a boot sector that also resembles a
  * partition table is an ambiguity the caller resolves by forcing a slot,
  * never a guess.
@@ -37,11 +42,18 @@ _Static_assert(sizeof(((fsimg_partition_info_t *)NULL)->format) ==
 
 struct fsimg_image {
 	fsimg_ctx_t	*ctx;
-	fsimg_io_t	*input;		/* Borrowed file */
-	fsimg_io_t	*disk;		/* The input, or the container's disk */
+	fsimg_io_t	*input;		/* The file: borrowed, or the spool's view */
+	fsimg_io_t	*disk;		/* The file, or the container's disk */
 	fsimg_session_t	 session;
 	fsimg_stack_t	 forced;
 	fsimg_layer_options_t layers;
+	unsigned	 flags;		/* FSIMG_IMAGE_* */
+	/* The adopted spool, NULL once an uncompressed file proves it unused;
+	 * spooled is its read-only view when it holds the file.
+	 */
+	fsimg_spool_t	*spool;
+	fsimg_io_t	*spooled;
+	const fsimg_layer_t *compression;	/* NULL for none */
 	uint64_t	 file_bytes;
 	uint64_t	 disk_bytes;
 	/* The container the disk was peeled from, NULL for none; opened owns
@@ -85,6 +97,20 @@ typedef struct layer_survey {
 } layer_survey_t;
 
 static fsimg_status_t image_ready(fsimg_image_t *, fsimg_error_t *);
+static fsimg_status_t open_image(fsimg_ctx_t *, fsimg_io_t *, int,
+    const fsimg_image_options_t *, fsimg_image_t **, fsimg_error_t *);
+static fsimg_status_t check_open(fsimg_ctx_t *, fsimg_io_t *,
+    const fsimg_image_options_t *, fsimg_error_t *);
+static bool explicit_stack(const fsimg_image_t *);
+static fsimg_status_t read_first_block(fsimg_image_t *, int, size_t,
+    unsigned char **, probe_input_t *, unsigned char *, fsimg_error_t *);
+static fsimg_status_t decide_compression(fsimg_image_t *,
+    const probe_input_t *, bool, fsimg_error_t *);
+static fsimg_status_t peel_compression(fsimg_image_t *, int,
+    fsimg_error_t *);
+static void read_in_place(fsimg_image_t *);
+static fsimg_status_t fill_spool(fsimg_image_t *, int, const unsigned char *,
+    size_t, fsimg_error_t *);
 static bool probes(const fsimg_layer_t *, fsimg_layer_kind_t);
 static size_t probe_bytes(const fsimg_layer_t *);
 static size_t survey_bytes(fsimg_layer_kind_t, const fsimg_layer_t *, size_t);
@@ -211,6 +237,7 @@ fsimg_image_options_init(fsimg_image_options_t *options)
 	options->size = sizeof(*options);
 	options->version = FSIMG_OPTIONS_VERSION;
 	fsimg_layer_options_init(&options->layers);
+	options->spool_fd = -1;
 }
 
 fsimg_status_t
@@ -218,55 +245,107 @@ fsimg_image_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
     const fsimg_image_options_t *options, fsimg_image_t **out,
     fsimg_error_t *error)
 {
+	return (open_image(ctx, input, -1, options, out, error));
+}
+
+fsimg_status_t
+fsimg_image_open_stream(fsimg_ctx_t *ctx, int stream_fd,
+    const fsimg_image_options_t *options, fsimg_image_t **out,
+    fsimg_error_t *error)
+{
+	return (open_image(ctx, NULL, stream_fd, options, out, error));
+}
+
+/* What an open checks before it adopts the spool or reads a byte. */
+static fsimg_status_t
+check_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
+    const fsimg_image_options_t *options, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fsimg_ctx_ready(ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (file != NULL && fsimg_io_context(file) != ctx)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "image input belongs to another context"));
+	if ((options->flags & ~FSIMG_IMAGE_GZIP) != 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "unknown image option flags"));
+	if (options->spool_fd < -1)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "invalid spool descriptor"));
+	for (unsigned i = 0; i < 4; i++) {
+		if (options->reserved[i] != 0)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, "nonzero reserved image option"));
+	}
+	return (validate_forced_stack(options, error));
+}
+
+/*
+ * Both opens: file is a seekable input, or NULL for the stream on
+ * stream_fd. Once the options' size and version are valid, the spool
+ * descriptor belongs to the open on every outcome: it is checked before
+ * any input byte is read, closed when the open fails, and closed as soon
+ * as a seekable input proves uncompressed.
+ */
+static fsimg_status_t
+open_image(fsimg_ctx_t *ctx, fsimg_io_t *file, int stream_fd,
+    const fsimg_image_options_t *options, fsimg_image_t **out,
+    fsimg_error_t *error)
+{
 	fsimg_image_options_t defaults;
 	fsimg_image_t *image;
+	fsimg_spool_t *spool;
 	fsimg_error_t local;
-	uint64_t file_bytes;
 	fsimg_status_t status;
 
 	if (error == NULL)
 		error = &local;
 	if (out != NULL)
 		*out = NULL;
-	status = fsimg_ctx_ready(ctx, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (out == NULL || input == NULL || fsimg_io_context(input) != ctx)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "image needs input and output in its context"));
 	if (options == NULL) {
 		fsimg_image_options_init(&defaults);
 		options = &defaults;
 	}
 	if (options->size != sizeof(*options) ||
-	    options->version != FSIMG_OPTIONS_VERSION || options->flags != 0)
+	    options->version != FSIMG_OPTIONS_VERSION)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "invalid image options size, version or flags"));
-	for (unsigned i = 0; i < 4; i++) {
-		if (options->reserved[i] != 0)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IMAGE, "nonzero reserved image option"));
+		    "invalid image options size or version"));
+	status = check_open(ctx, file, options, error);
+	if (status == FSIMG_OK &&
+	    (out == NULL || (file == NULL && stream_fd < 0)))
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "image needs an input and an output");
+	if (status != FSIMG_OK) {
+		if (options->spool_fd > -1)
+			close(options->spool_fd);
+		return (status);
 	}
-	status = validate_forced_stack(options, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = fsimg_io_get_size(input, &file_bytes, error);
-	if (status != FSIMG_OK)
-		return (status);
+	spool = NULL;
+	if (options->spool_fd != -1) {
+		status = fsimg_spool_adopt(ctx, options->spool_fd, &spool, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 
 	image = fsimg_alloc(ctx, sizeof(*image), error);
-	if (image == NULL)
+	if (image == NULL) {
+		fsimg_spool_free(spool);
 		return (error->status);
+	}
 	bzero(image, sizeof(*image));
 	image->ctx = ctx;
-	image->input = input;
-	image->disk = input;
+	image->input = file;
 	image->forced = options->stack;
 	image->layers = options->layers;
-	image->file_bytes = file_bytes;
-	image->disk_bytes = file_bytes;
+	image->flags = options->flags;
+	image->spool = spool;
 	fsimg_session_init(&image->session, ctx, "image layers", 0);
-	status = peel_container(image, error);
+	status = peel_compression(image, stream_fd, error);
+	if (status == FSIMG_OK)
+		status = peel_container(image, error);
 	if (status != FSIMG_OK) {
 		fsimg_image_free(image);
 		return (status);
@@ -281,8 +360,215 @@ fsimg_image_free(fsimg_image_t *image)
 	if (image == NULL || image->ctx->in_callback)
 		return;
 	fsimg_io_free(image->opened.disk);
+	fsimg_io_free(image->spooled);
+	fsimg_spool_free(image->spool);
 	fsimg_dealloc(image->table.records);
 	fsimg_dealloc(image);
+}
+
+/* Whether the caller named or emptied any slot, which resolves a
+ * compression-step ambiguity as uncompressed.
+ */
+static bool
+explicit_stack(const fsimg_image_t *image)
+{
+	for (unsigned i = 0; i < FSIMG_STACK_SLOTS; i++) {
+		if (image->forced.slots[i].state != FSIMG_SLOT_UNSPECIFIED)
+			return (true);
+	}
+	return (false);
+}
+
+/*
+ * The first block of the input, which every compression-step probe sees:
+ * from a seekable file its prefix, its last bytes and its length; from a
+ * stream as much as it gives up to want bytes, with no tail and an
+ * unknown length (UINT64_MAX), which lets a length check pass rather than
+ * hide a claim. *block holds the prefix for the caller to free.
+ */
+static fsimg_status_t
+read_first_block(fsimg_image_t *image, int stream_fd, size_t want,
+    unsigned char **block, probe_input_t *input, unsigned char *tail,
+    fsimg_error_t *error)
+{
+	fsimg_spool_input_t stream = { .ctx = image->ctx, .fd = stream_fd };
+	size_t count, transferred;
+	fsimg_status_t status;
+
+	bzero(input, sizeof(*input));
+	*block = NULL;
+	if (image->input != NULL) {
+		input->tail = tail;
+		input->tail_length = image->file_bytes < FSIMG_CONTAINER_TAIL_BYTES ?
+		    (size_t)image->file_bytes : FSIMG_CONTAINER_TAIL_BYTES;
+		input->bytes = image->file_bytes;
+		status = fsimg_io_read_session(image->input, &image->session,
+		    image->file_bytes - input->tail_length, tail,
+		    input->tail_length, &transferred, error);
+		if (status == FSIMG_OK)
+			status = read_prefix(image->ctx, image->input,
+			    &image->session, 0, image->file_bytes, want, block,
+			    &input->length, error);
+		input->prefix = *block;
+		return (status);
+	}
+
+	input->bytes = UINT64_MAX;
+	*block = fsimg_alloc(image->ctx, want, error);
+	if (*block == NULL)
+		return (error->status);
+	input->prefix = *block;
+	do {
+		status = fsimg_spool_input_read(&stream, *block + input->length,
+		    want - input->length, &count, error);
+		input->length += count;
+	} while (status == FSIMG_OK && count != 0 && input->length < want);
+	return (status);
+}
+
+/*
+ * Step 1's decision (specs/design-layers.md#peeling-order), made here and
+ * nowhere else. Forced gzip runs only its probe, which must claim.
+ * Otherwise the compression probes run with the scheme and filesystem
+ * probes and, on a seekable file, the container probes: a compression
+ * claiming alone decides compressed; with any other claim the input is
+ * ambiguous unless the caller gave a stack, which resolves it as
+ * uncompressed; no compression claim decides uncompressed. Other claims
+ * decide nothing further: their own steps run later on the file.
+ */
+static fsimg_status_t
+decide_compression(fsimg_image_t *image, const probe_input_t *input,
+    bool seekable, fsimg_error_t *error)
+{
+	layer_survey_t compressions, schemes, containers;
+	fsimg_format_survey_t filesystems;
+	const fsimg_layer_t *gzip;
+	fsimg_status_t status;
+
+	if ((image->flags & FSIMG_IMAGE_GZIP) != 0) {
+		gzip = fsimg_layer_find("gzip");
+		status = probe_layer(gzip, input, error);
+		if (status == FSIMG_OK)
+			image->compression = gzip;
+		return (layer_failed(gzip, status, error));
+	}
+	survey_layers(FSIMG_LAYER_COMPRESSION, input, &compressions);
+	if (compressions.claims == 0)
+		return (FSIMG_OK);
+	survey_layers(FSIMG_LAYER_SCHEME, input, &schemes);
+	bzero(&containers, sizeof(containers));
+	if (seekable)
+		survey_layers(FSIMG_LAYER_CONTAINER, input, &containers);
+	status = fsimg_format_identify(NULL, input->prefix, input->length,
+	    input->bytes, &filesystems, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (compressions.claims + schemes.claims + containers.claims +
+	    filesystems.claims > 1) {
+		if (explicit_stack(image))
+			return (FSIMG_OK);
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
+		    "the input passes for both a compressed and an uncompressed "
+		    "image; force gzip or a stack"));
+	}
+	if (compressions.verdict != FSIMG_OK) {
+		*error = compressions.reason;
+		return (layer_failed(compressions.first, compressions.verdict,
+		    error));
+	}
+	image->compression = compressions.first;
+	return (FSIMG_OK);
+}
+
+/*
+ * The compression step. A seekable file that is not compressed is read in
+ * place; anything else becomes the spool. Without a spool, a stream fails
+ * as a spool limit of zero before a byte is read, and a compressed file
+ * once the probes have named it.
+ */
+static fsimg_status_t
+peel_compression(fsimg_image_t *image, int stream_fd, fsimg_error_t *error)
+{
+	unsigned char tail[FSIMG_CONTAINER_TAIL_BYTES], *block;
+	probe_input_t input;
+	size_t want;
+	bool seekable;
+	fsimg_status_t status;
+
+	seekable = image->input != NULL;
+	if (!seekable && image->spool == NULL)
+		return (fsimg_limit_error(error, FSIMG_RESOURCE_SPOOL, 0, 0));
+	if (seekable) {
+		status = fsimg_io_get_size(image->input, &image->file_bytes,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	/* The first block serves every probe that runs on it. */
+	want = fsimg_format_probe_bytes(NULL);
+	want = survey_bytes(FSIMG_LAYER_CONTAINER, NULL, want);
+	want = survey_bytes(FSIMG_LAYER_SCHEME, NULL, want);
+	want = survey_bytes(FSIMG_LAYER_COMPRESSION, NULL, want);
+	status = read_first_block(image, stream_fd, want, &block, &input, tail,
+	    error);
+	if (status == FSIMG_OK)
+		status = decide_compression(image, &input, seekable, error);
+	if (status == FSIMG_OK) {
+		if (seekable && image->compression == NULL)
+			read_in_place(image);
+		else
+			status = fill_spool(image, stream_fd, block, input.length,
+			    error);
+	}
+	fsimg_dealloc(block);
+	return (status);
+}
+
+/* The file is the input as it is; the spool, unused, is closed. */
+static void
+read_in_place(fsimg_image_t *image)
+{
+	fsimg_spool_free(image->spool);
+	image->spool = NULL;
+	image->disk = image->input;
+	image->disk_bytes = image->file_bytes;
+}
+
+/*
+ * Fill the spool, starting with the block the probes read: decoded when
+ * the input is compressed, else (a stream) copied unchanged. The sealed
+ * spool then replaces the input as the file the later steps read.
+ */
+static fsimg_status_t
+fill_spool(fsimg_image_t *image, int stream_fd, const unsigned char *block,
+    size_t block_length, fsimg_error_t *error)
+{
+	fsimg_spool_input_t source = { .ctx = image->ctx, .prefix = block,
+	    .prefix_length = block_length, .file = image->input,
+	    .session = &image->session, .offset = block_length,
+	    .file_bytes = image->file_bytes, .fd = stream_fd };
+	const fsimg_layer_t *compression = image->compression;
+	fsimg_status_t status;
+
+	if (image->spool == NULL)
+		return (fsimg_limit_error(error, FSIMG_RESOURCE_SPOOL, 0, 0));
+	if (compression != NULL)
+		status = layer_failed(compression,
+		    compression->compression->decode(&source, image->spool,
+		    error), error);
+	else
+		status = fsimg_spool_fill(image->spool, &source, error);
+	if (status == FSIMG_OK)
+		status = fsimg_spool_seal(image->spool, &image->spooled, error);
+	if (status == FSIMG_OK)
+		status = fsimg_io_get_size(image->spooled, &image->file_bytes,
+		    error);
+	if (status != FSIMG_OK)
+		return (status);
+	image->input = image->spooled;
+	image->disk = image->spooled;
+	image->disk_bytes = image->file_bytes;
+	return (FSIMG_OK);
 }
 
 /* Read up to want bytes at an offset, cut to the length available there,
@@ -379,6 +665,8 @@ probes(const fsimg_layer_t *layer, fsimg_layer_kind_t kind)
 		return (layer->scheme != NULL);
 	case FSIMG_LAYER_CONTAINER:
 		return (layer->container != NULL);
+	case FSIMG_LAYER_COMPRESSION:
+		return (layer->compression != NULL);
 	default:
 		return (false);
 	}
@@ -393,6 +681,8 @@ probe_bytes(const fsimg_layer_t *layer)
 		return (layer->scheme->probe_bytes);
 	case FSIMG_LAYER_CONTAINER:
 		return (layer->container->probe_bytes);
+	case FSIMG_LAYER_COMPRESSION:
+		return (layer->compression->probe_bytes);
 	default:
 		return (0);
 	}
@@ -429,6 +719,8 @@ probe_layer(const fsimg_layer_t *layer, const probe_input_t *input,
 	if (layer->kind == FSIMG_LAYER_SCHEME)
 		return (layer->scheme->probe(input->prefix, length, input->bytes,
 		    error));
+	if (layer->kind == FSIMG_LAYER_COMPRESSION)
+		return (layer->compression->probe(input->prefix, length, error));
 	return (layer->container->probe(input->prefix, length, input->tail,
 	    input->tail_length, input->bytes, error));
 }
@@ -699,6 +991,10 @@ fsimg_image_get_info(fsimg_image_t *image, fsimg_image_info_t *out,
 
 	bzero(out, sizeof(*out));
 	bzero(&stack, sizeof(stack));
+	if (image->compression != NULL)
+		snprintf(out->compression, sizeof(out->compression), "%s",
+		    image->compression->name);
+	out->file_bytes = image->file_bytes;
 	stack.slots[FSIMG_LAYER_FILESYSTEM] =
 	    image->forced.slots[FSIMG_LAYER_FILESYSTEM];
 	if (image->container != NULL) {
@@ -1059,6 +1355,10 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		    "missing layer report or unknown verification flags"));
 	bzero(out, sizeof(*out));
 	payload = (flags & FSIMG_VERIFY_PAYLOAD) != 0;
+	/* Every member was checked as the spool filled. */
+	if (image->compression != NULL)
+		snprintf(out->compression, sizeof(out->compression), "%s",
+		    image->compression->name);
 	if (image->container != NULL) {
 		container_input(image, &container);
 		status = image->container->container->verify(&container,

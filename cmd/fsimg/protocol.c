@@ -254,7 +254,7 @@ fsimg_wire_error_decode(const unsigned char *raw, uint32_t length,
 	if (code < (uint64_t)(int64_t)FSIMG_EDURABILITY ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OS_ERROR) > INT32_MAX ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OPERATION) > FSIMG_OP_IMAGE ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_RESOURCE) > FSIMG_RESOURCE_PATH ||
+	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_RESOURCE) > FSIMG_RESOURCE_SPOOL ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OUTPUT) > FSIMG_OUTPUT_UNCERTAIN ||
 	    flags > 7 ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_CLEANUP) > INT32_MAX ||
@@ -496,15 +496,16 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 }
 
 /*
- * Without a container the disk is the input file the parent opened, so
- * its size must match exactly, and every container field is zero; a
- * container is a registered one, and its disk is the length its tables
- * declare, which bounds what follows. Without a scheme every table field
- * is zero; with one, the sector size is GPT's or MBR's and the selection
- * lies in the table.
+ * The compression is none or a registered one the build reads. Without a
+ * container the disk is the file the layers were peeled from, so the two
+ * lengths match exactly, and every container field is zero; a container
+ * is a registered one, and its disk is the length its tables declare,
+ * which bounds what follows. Without a scheme every table field is zero;
+ * with one, the sector size is GPT's or MBR's and the selection lies in
+ * the table. The caller checks the file against the input it knows.
  */
 bool
-fsimg_wire_image_frame_valid(const fsimg_frame_t *frame, uint64_t file_bytes)
+fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 {
 	const unsigned char *raw = frame->payload;
 	const fsimg_layer_t *layer;
@@ -523,15 +524,23 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame, uint64_t file_bytes)
 	    memchr(raw + FSIMG_WIRE_IMAGE_CONTAINER, '\0', 16) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_CODECS, '\0',
 	    FSIMG_WIRE_IMAGE_CODECS_BYTES) == NULL ||
+	    memchr(raw + FSIMG_WIRE_IMAGE_COMPRESSION, '\0', 16) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_REASON, '\0',
 	    FSIMG_WIRE_IMAGE_REASON_BYTES) == NULL)
 		return (false);
+	if (raw[FSIMG_WIRE_IMAGE_COMPRESSION] != '\0') {
+		layer = fsimg_layer_find((const char *)raw +
+		    FSIMG_WIRE_IMAGE_COMPRESSION);
+		if (layer == NULL || layer->compression == NULL)
+			return (false);
+	}
 	if ((flags & ~(uint64_t)(FSIMG_WIRE_IMAGE_UNSELECTED |
 	    FSIMG_WIRE_IMAGE_VERIFIED)) != 0 ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID) > UINT32_MAX)
 		return (false);
 	if (raw[FSIMG_WIRE_IMAGE_CONTAINER] == '\0') {
-		if (fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) != file_bytes ||
+		if (fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) !=
+		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FILE) ||
 		    raw[FSIMG_WIRE_IMAGE_CODECS] != '\0' ||
 		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHUNKS) != 0 ||
 		    !bytes_zero(raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID, 16))

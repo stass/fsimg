@@ -52,6 +52,15 @@ work. `fsimg W` checks the container's checksums, and `W -d` decodes every
 chunk. Other DMG compressions, multi-segment DMGs and dynamic VHDs are
 refused as unsupported.
 
+A gzip-compressed image is read too, as a file or on standard input:
+`fsimg tf sd.img.gz`, or `curl -s URL | fsimg xf - -C out`. The decoder
+checks every member's CRC32 and length and refuses trailing bytes; it
+writes the image into the spool, an unlinked file in scratch whose logical
+size `-l spool=` bounds (64 GiB by default) before each step, so a
+decompression bomb stops at the limit. An uncompressed image on standard
+input is copied there unchanged. When gzip's signature and another format
+both claim the first bytes, `-z` or `-F` says which reading is meant.
+
 Creating with a scheme in the stack writes a disk: `fsimg cf disk.img -F
 fat32/gpt -C esp .` puts the volume at 1 MiB as the disk's one partition,
 typed and named after its filesystem unless `-o gpt:type=`, `gpt:name=`,

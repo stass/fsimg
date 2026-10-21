@@ -53,6 +53,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/layers/plan.c lib/layers/output.c \
 	lib/layers/chunks.c lib/layers/plist.c lib/layers/dmg.c \
 	lib/layers/vhd.c lib/layers/simg.c lib/layers/transcode.c \
+	lib/layers/spool.c lib/layers/gzip.c \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
@@ -114,15 +115,17 @@ test_programs = test-core test-io test-meta test-meta-sort test-unicode test-for
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
-	test-containers header-c header-cxx
+	test-containers test-compression header-c header-cxx
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh \
-	test/containers-integration.sh test/cli.sh test/baseline.sh test/spec.sh
+	test/containers-integration.sh test/compression-integration.sh \
+	test/cli.sh test/baseline.sh test/spec.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh \
-	test/containers-integration.sh test/cli.sh test/baseline.sh test/spec.sh
+	test/containers-integration.sh test/compression-integration.sh \
+	test/cli.sh test/baseline.sh test/spec.sh
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
@@ -150,6 +153,8 @@ test_layers_write_SOURCES = test/layers-write.c test/test.h
 test_layers_write_LDADD = libfsimg-core.la
 test_containers_SOURCES = test/containers.c test/test.h
 test_containers_LDADD = libfsimg-core.la
+test_compression_SOURCES = test/compression.c test/test.h
+test_compression_LDADD = libfsimg-core.la
 layers_compose_SOURCES = test/layers-compose.c
 layers_compose_LDADD = libfsimg.la
 test_posix_SOURCES = test/posix.c test/test.h
@@ -234,9 +239,9 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
-	test/containers-integration.sh.in \
+	test/containers-integration.sh.in test/compression-integration.sh.in \
 	fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/protocol.c fuzz/image.c \
-	fuzz/container.c fuzz/plist.c \
+	fuzz/container.c fuzz/plist.c fuzz/gzip.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
@@ -268,13 +273,14 @@ check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write 
 	    test-qnx4 test-qnx4-write fsimg test/fat-integration.sh \
 	    test/exfat-integration.sh test/qnx6-integration.sh \
 	    test/qnx4-integration.sh test/layers-integration.sh \
-	    test/containers-integration.sh
+	    test/containers-integration.sh test/compression-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
 	./test/qnx6-integration.sh
 	./test/qnx4-integration.sh
 	./test/layers-integration.sh
 	./test/containers-integration.sh
+	./test/compression-integration.sh
 # Regenerate the checked-in comparison baseline; test/baseline.sh only reads it.
 baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	./test/baseline.sh --record > $(srcdir)/test/baseline.txt.new || \
@@ -293,11 +299,11 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx4 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
 check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-protocol test-layers \
-	    test-containers test/spec.sh
+	    test-containers test-compression test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-protocol \
-	    test-layers test-containers test/spec.sh
+	    test-layers test-containers test-compression test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard
@@ -338,7 +344,7 @@ clean-local:
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
 	    protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
-	    plist-fuzz-corpus
+	    plist-fuzz-corpus gzip-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77

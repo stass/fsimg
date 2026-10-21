@@ -51,6 +51,7 @@ int fsimg_host_dup(int);
 void fsimg_host_next_hole(int, uint64_t, uint64_t, uint64_t *, uint64_t *);
 int fsimg_host_spawn_worker(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_spawn_output(const char *, const int *, unsigned, pid_t *);
+int fsimg_host_spawn_input(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_executable(char *, size_t);
 /* Failure is fatal to worker startup; no resource-limit-bounded fallback. */
 int fsimg_host_closefrom(int);

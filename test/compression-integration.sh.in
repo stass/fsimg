@@ -1,0 +1,71 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+#
+# fsimg reads the gzip files independent compressors write: gzip(1) and
+# pigz output of a raw image, a file and a stream, and members gzip wrote
+# separately and concatenated, each reading exactly as the raw image and
+# as zcat expands it. Each missing tool is reported; the test skips only
+# when no oracle is available.
+set -eu
+gzip=${GZIP_PROGRAM:-'@GZIP_PROGRAM@'}
+pigz=${PIGZ:-'@PIGZ@'}
+fsimg="$(pwd)/fsimg"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-compression-oracle-XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+cd "$fixture"
+mkdir source
+printf 'hello\n' > source/HELLO.TXT
+awk 'BEGIN { for (i = 0; i < 40000; i++) printf "line %d of a compressible file\n", i }' \
+    > source/TEXT.TXT
+"$fsimg" cf raw.img -F fat16 -s 16M -C source . 2>/dev/null
+"$fsimg" tf raw.img > raw.txt 2>/dev/null
+ran=0
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# A compressed file lists as the raw image, from the file and from
+# standard input, reports gzip and verifies.
+check_gzip() {
+    "$fsimg" tf "$1" > listed.txt 2>/dev/null || fail "$1: listing"
+    cmp -s listed.txt raw.txt || fail "$1 lists differently from raw.img"
+    "$fsimg" tf - < "$1" > listed.txt 2>/dev/null || fail "$1: stream listing"
+    cmp -s listed.txt raw.txt || fail "$1 streamed lists differently"
+    "$fsimg" if "$1" 2>/dev/null | grep -q '^Compression:  gzip$' ||
+        fail "$1: compression not reported"
+    "$fsimg" Wf "$1" > /dev/null 2>&1 || fail "$1: verification"
+}
+
+if test -n "$gzip"; then
+    "$gzip" -c raw.img > gzip.img.gz
+    "$gzip" -dc gzip.img.gz | cmp -s - raw.img || fail "gzip round trip"
+    check_gzip gzip.img.gz
+    # Two halves compressed apart, then concatenated: gzip -d reads them as
+    # one file, and so must fsimg.
+    head -c 8388608 raw.img | "$gzip" -c > halves.img.gz
+    tail -c +8388609 raw.img | "$gzip" -nc >> halves.img.gz
+    "$gzip" -dc halves.img.gz | cmp -s - raw.img || fail "gzip members"
+    check_gzip halves.img.gz
+    ran=$((ran + 1))
+else
+    echo 'SKIP: gzip is required for the gzip oracle'
+fi
+if test -n "$pigz"; then
+    "$pigz" -c -p 4 -b 128 raw.img > pigz.img.gz
+    "$pigz" -dc pigz.img.gz | cmp -s - raw.img || fail "pigz round trip"
+    check_gzip pigz.img.gz
+    # Independent blocks reset the dictionary at each block boundary.
+    "$pigz" -c -p 4 -b 128 -i raw.img > independent.img.gz
+    check_gzip independent.img.gz
+    ran=$((ran + 1))
+else
+    echo 'SKIP: pigz is required for the pigz oracle'
+fi
+
+if test "$ran" -eq 0; then
+    exit 77
+fi
+echo "PASS: $ran compression oracles"

@@ -28,6 +28,10 @@ lists
 .Fn fsimg_reader_open "fsimg_ctx_t *context" "fsimg_io_t *io" "const fsimg_read_options_t *options" "fsimg_reader_t **reader" "fsimg_error_t *error"
 .Ft fsimg_status_t
 .Fn fsimg_writer_new "fsimg_ctx_t *context" "const char *format" "const fsimg_write_options_t *options" "fsimg_writer_t **writer" "fsimg_error_t *error"
+.Ft fsimg_status_t
+.Fn fsimg_image_open "fsimg_ctx_t *context" "fsimg_io_t *io" "const fsimg_image_options_t *options" "fsimg_image_t **image" "fsimg_error_t *error"
+.Ft fsimg_status_t
+.Fn fsimg_image_open_stream "fsimg_ctx_t *context" "int fd" "const fsimg_image_options_t *options" "fsimg_image_t **image" "fsimg_error_t *error"
 .Sh DESCRIPTION
 The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
 classic QNX6 Power-Safe volumes in either byte order, and QNX4 volumes.
@@ -46,7 +50,7 @@ Zero resource values choose documented defaults.
 All dynamic library allocations and owned descriptors share one resource
 context.
 Payload copying, metadata, allocation indexes and sorting obey separate memory,
-scratch, work and traversal limits.
+scratch, spool, work and traversal limits.
 A handle is used serially; independent contexts may be used concurrently.
 Callbacks cannot re-enter an active context.
 .Sh OWNERSHIP
@@ -213,6 +217,30 @@ reports the container's name, chunk count, chunk encodings and identifier;
 checks its checksums and, under FSIMG_VERIFY_PAYLOAD, decodes every chunk.
 .Fn fsimg_layer_next
 reports each container's chunk encodings and the zlib version it uses.
+.Pp
+Before the container, the open decides whether the input is gzip:
+alone, gzip's signature makes it compressed; when an uncompressed layer's
+probe also claims the first bytes, the open fails as ambiguous unless the
+image options name any part of the stack, which reads it as uncompressed,
+or set FSIMG_IMAGE_GZIP, which runs only the gzip probe, so an input that
+is not gzip fails with FSIMG_EFORMAT.
+A compressed input is decoded, member after member with each member's
+CRC32 and length checked, into the spool: the image options' spool_fd, an
+exclusively created, empty, unlinked read/write regular file the open
+adopts and closes on every outcome, and refuses with FSIMG_EINVAL naming
+the spool in error.path otherwise.
+.Fn fsimg_image_open_stream
+reads a non-seekable descriptor, such as a pipe, in order, decoding it or
+copying it unchanged into the spool; container probes, which need the last
+512 bytes, do not run on a stream.
+Each step's logical length is reserved against the spool_bytes limit, 64
+GiB by default, before the spool grows, so a decompression bomb fails with
+FSIMG_ELIMIT and FSIMG_RESOURCE_SPOOL with the file still within the limit;
+zero blocks stay holes.
+The statistics report spool_bytes, spool_peak and the spool's allocated
+spool_physical_bytes; image information reports the compression and
+file_bytes, the length of the file the layers were peeled from, input or
+spool.
 .Sh EXTRACTION
 .Fn fsimg_extract_at
 requires an untouched reader and a fresh destination basename beneath a trusted

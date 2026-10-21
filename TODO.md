@@ -15,27 +15,20 @@
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
   the [layer design](specs/design-layers.md) in the four stages of the
-  [plan](docs/implementation-plan.md#extension-sequence). Containers are
-  read; the command line recognizes and refuses with exit 1 what the rest
-  of stage 3 and stage 4 implement (writing containers, compression and
-  `-f -`) and `-M` minimization, which no stage schedules yet. The
-  `hdiutil attach` gate of the container writer settles the layer design's
-  DMG-table-split question.
-  The remaining sandbox gaps against the authority mapping of
-  [design-security.md](specs/design-security.md#coordinator-and-worker)
-  (`cmd/fsimg/sandbox.c`) belong to stage 4: the input check accepts only a
-  regular file (pipes are specified), and handed-over spool and
-  raw-intermediate descriptors are not rights-limited under Capsicum. State
-  which naming constraints only worker behaviour enforces; whether the input
-  relay runs confined is also unstated in
-  [architecture.md](specs/architecture.md).
+  [plan](docs/implementation-plan.md#extension-sequence). Containers and
+  gzip are read, containers are written, and `-f -` reads and writes
+  streams; the command line recognizes and refuses with exit 1 what the
+  rest of stage 4 implements (writing compression) and `-M` minimization,
+  which no stage schedules yet. The `hdiutil attach` gate of the container
+  writer settles the layer design's DMG-table-split question.
   Stage 1 leaves these open:
   * The split staging, destination, scratch and root grants and the
     destination fixtures have run only on macOS, which has no sandbox
     backend; run `test-sandbox`, `test-sandbox-setup` and the CLI
     destination tests on Linux (Landlock) and FreeBSD (Capsicum). The raw
-    intermediate role and a stream creation's data channel, with its
-    `CAP_FSTAT` right, have likewise run only unconfined
+    intermediate and spool roles with their Capsicum rights, a stream
+    creation's data channel, with its `CAP_FSTAT` right, and a stream
+    read's input pipe have likewise run only unconfined
     (`cmd/fsimg/sandbox.c`).
   * `c -v` and `x -v` do not yet print one line per entry: the writer and
     extractor have no per-entry callback for the worker to relay
@@ -126,6 +119,17 @@
     through a GPT disk, and unwrap is tested only to I/O sinks with the
     automatic and range selections (`test/layers-integration.sh.in`,
     `test/layers-write.c`).
+  * [Low] gzip decoding counts no work: a seekable gzip input charges its
+    compressed reads to the session's work and a stream charges nothing,
+    while container decoding charges its decoded bytes, so `-l work=`
+    bounds the three differently and only the spool limit, cancellation
+    and the deadline stop a long decode. Decide whether decoded bytes count
+    as work, as for containers (`lib/layers/gzip.c`, `lib/layers/spool.c`).
+  * [Low] When the worker dies without an error frame while the input relay
+    is still blocked reading a slow standard input, the relay's channel
+    closes by force and the command reports that child exit and channel
+    closure did not complete, not that the worker failed
+    (`cmd/fsimg/worker-parent.c` `supervise_operation`).
 
 * [Medium] **QNX4 interoperability** (`lib/formats/qnx4/`): the
   [format design](specs/design-qnx4.md) and [driver design](specs/design-qnx4-driver.md)
@@ -365,6 +369,18 @@
   can call it outside the public contract. Export only the public header's symbols
   (a libtool `-export-symbols-regex` or a symbol file, with test programs
   linking the convenience library for internals).
+
+* [Low] **Coordinator trusts the reported compression** (`cmd/fsimg/worker-parent.c`
+  `read_disk_expected`): a worker's IMAGE record naming a compression moves
+  the coordinator's bound on the file from the input's exact length to the
+  spool limit, so a compromised worker claiming gzip for a raw file widens
+  the volume and output bounds the coordinator derives, up to the spool
+  limit. The coordinator cannot check the claim without reading image
+  bytes; the bound still holds the worker to the spool limit, as container
+  disk lengths are already trusted.
+* [Low] **Spool rights carry `CAP_FSYNC`** (`cmd/fsimg/sandbox.c`): the
+  spool shares the raw intermediate's Capsicum rights, including
+  `CAP_FSYNC`, which the spool never uses.
 
 ## Planned features
 

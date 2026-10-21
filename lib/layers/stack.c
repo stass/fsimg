@@ -15,9 +15,9 @@
 
 /*
  * The layer registry is the one list of layer names and file suffixes.
- * Schemes and containers are read and written; compression is recognized
- * by name and suffix, and its record carries no operations: gzip is the
- * one profile, zstd and xz are names reserved for later ones.
+ * Schemes and containers are read and written; gzip is read, and zstd
+ * and xz are compression names reserved for later profiles, recognized by
+ * name and suffix with no operations.
  */
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme },
@@ -28,7 +28,8 @@ static const fsimg_layer_t layers[] = {
 	    .container = &fsimg_vhd_container },
 	{ .name = "simg", .suffix = ".simg", .kind = FSIMG_LAYER_CONTAINER,
 	    .container = &fsimg_simg_container },
-	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION },
+	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION,
+	    .compression = &fsimg_gzip_compression },
 	{ .name = "zstd", .suffix = ".zst", .kind = FSIMG_LAYER_COMPRESSION },
 	{ .name = "xz", .suffix = ".xz", .kind = FSIMG_LAYER_COMPRESSION }
 };
@@ -398,6 +399,11 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 		if (layer->container->zlib)
 			snprintf(out->codec_version, sizeof(out->codec_version),
 			    "zlib %s", zlibVersion());
+	}
+	if (layer->compression != NULL) {
+		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
+		snprintf(out->codec_version, sizeof(out->codec_version),
+		    "zlib %s", zlibVersion());
 	}
 	/* The layer's keys in table order; the longest list fits. */
 	used = 0;

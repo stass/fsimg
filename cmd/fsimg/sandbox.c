@@ -173,7 +173,8 @@ fsimg_sandbox_install(int input_fd, int destination_fd, int source_fd,
 	const fsimg_sandbox_caps_t caps = {
 		.input = input_fd, .staging = -1, .destination = destination_fd,
 		.scratch = -1, .roots = source_fd, .root_count = source_fd == -1 ? 0 : 1,
-		.raw = -1, .job = -1, .control = -1, .data = -1, .cancel = -1
+		.raw = -1, .spool = -1, .job = -1, .control = -1, .data = -1,
+		.cancel = -1
 	};
 
 	return (fsimg_sandbox_install_caps(&caps, error));
@@ -193,15 +194,17 @@ fsimg_sandbox_backend(void)
 }
 
 /* Every role must be the object its grant assumes before any backend runs:
- * the input a read-only regular file, the three writable roles
- * directories, each root a read-only directory or regular file, and the
- * raw intermediate a read/write regular file no name reaches. The library
- * checks the raw file again when it adopts it.
+ * the input a read-only regular file, or the read end of a pipe exactly
+ * when input_pipe says so; the three writable roles directories; each
+ * root a read-only directory or regular file; and the raw intermediate
+ * and the spool read/write regular files no name reaches. The library
+ * checks those two files again when it adopts them.
  */
 static fsimg_status_t
 check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 {
 	const int directories[] = { caps->staging, caps->destination, caps->scratch };
+	const int handed_over[] = { caps->raw, caps->spool };
 	struct stat st;
 	int flags, fd;
 
@@ -210,9 +213,12 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 		if (flags == -1 || fstat(caps->input, &st) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_CONTEXT, "sandbox input validation failed"));
-		if ((flags & O_ACCMODE) != O_RDONLY || !S_ISREG(st.st_mode))
+		if ((flags & O_ACCMODE) != O_RDONLY || (caps->input_pipe ?
+		    !S_ISFIFO(st.st_mode) : !S_ISREG(st.st_mode)))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CONTEXT, "sandbox input requires read-only regular file"));
+			    FSIMG_OP_CONTEXT, caps->input_pipe ?
+			    "sandbox input requires the read end of a pipe" :
+			    "sandbox input requires read-only regular file"));
 	}
 	for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
 		if (directories[i] != -1 &&
@@ -231,13 +237,16 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox source requires read-only directory or file"));
 	}
-	if (caps->raw != -1) {
-		flags = fcntl(caps->raw, F_GETFL);
+	for (unsigned i = 0; i < 2; i++) {
+		fd = handed_over[i];
+		if (fd == -1)
+			continue;
+		flags = fcntl(fd, F_GETFL);
 		if (flags == -1 || (flags & O_ACCMODE) != O_RDWR ||
-		    fstat(caps->raw, &st) == -1 || !S_ISREG(st.st_mode) ||
+		    fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) ||
 		    st.st_nlink != 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CONTEXT, "sandbox raw intermediate requires an unlinked read/write file"));
+			    FSIMG_OP_CONTEXT, "sandbox handed-over file requires an unlinked read/write file"));
 	}
 	return (FSIMG_OK);
 }
@@ -385,11 +394,21 @@ linux_fail:
 		if (restrict_descriptor(caps->roots + (int)i, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
 	}
-	if (caps->raw != -1) {
-		cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_SEEK, CAP_FSTAT,
-		    CAP_FTRUNCATE, CAP_FSYNC, CAP_FCNTL);
-		if (restrict_descriptor(caps->raw, &rights, CAP_FCNTL_GETFL) == -1)
-			goto freebsd_fail;
+	/* A handed-over file is read, written and resized through its
+	 * descriptor; its holes are found with lseek.
+	 */
+	{
+		const int handed_over[] = { caps->raw, caps->spool };
+
+		for (unsigned i = 0; i < 2; i++) {
+			if (handed_over[i] == -1)
+				continue;
+			cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_SEEK,
+			    CAP_FSTAT, CAP_FTRUNCATE, CAP_FSYNC, CAP_FCNTL);
+			if (restrict_descriptor(handed_over[i], &rights,
+			    CAP_FCNTL_GETFL) == -1)
+				goto freebsd_fail;
+		}
 	}
 	{
 		const int channels[] = { caps->job, caps->control, caps->data, caps->cancel };

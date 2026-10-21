@@ -131,9 +131,12 @@ The image: input for
 .Cm x , t , W
 and
 .Cm i ,
-a seekable regular file; output for
+a regular file, or standard input for
+.Ar - ;
+output for
 .Cm c ,
-a pathname that must not exist.
+a pathname that must not exist, or standard output for
+.Ar - .
 Required except with
 .Cm c Fl n .
 .It Fl F Ar stack
@@ -192,9 +195,15 @@ confinement.
 .It Fl T Ar directory|-
 Scratch parent, defaulting to TMPDIR when set, otherwise
 .Pa /tmp .
-A dash disables scratch.
-Fresh private scratch contains metadata, never a payload copy.
-Use disk-backed storage for massive catalogs.
+A dash disables scratch, and with it the spool, so a compressed image
+cannot be read; with
+.Fl f Ar -
+it is a syntax error.
+Fresh private scratch contains metadata and the two unlinked payload-sized
+files described under
+.Sx READING ,
+never a copy of a source tree.
+Use disk-backed storage for massive catalogs and spooled images.
 .It Fl v
 Verbosity, repeatable as
 .Fl vv .
@@ -301,6 +310,32 @@ A QNX4 volume whose
 .Pa ..
 entry names the root record does not open, for the same reason.
 .Pp
+A gzip-compressed image, a file or standard input, is detected from its
+first bytes and decoded, member after member as
+.Xr gzip 1
+writes them, into the spool, an unlinked file in the scratch tree, which
+is then read as the image; standard input that is not compressed is copied
+there unchanged, since a container's trailer cannot be reached in a pipe.
+Each member's CRC32 and length are checked, and any byte after the last
+member, a reserved header flag, a damaged header CRC16 or a file name or
+comment longer than 64 KiB fails the command.
+The spool's logical size is reserved against
+.Fl l Ar spool
+(default 64 GiB) before each step of the decode, so a decompression bomb
+stops at the step that would cross the limit; runs of zeros are left as
+holes.
+When the first bytes pass for both gzip and an uncompressed image, the
+input is ambiguous:
+.Fl z
+reads it as compressed, and
+.Fl F ,
+or a range or disk selection, which takes the bytes as they are, as not
+compressed.
+.Fl z
+on an input that is not gzip fails.
+Standard input is relayed to the worker unread by a separate process and
+must not be a terminal.
+.Pp
 A DMG, a fixed VHD or an Android sparse image is read as the disk it
 holds, detected from the file's first bytes and its last 512 bytes, or
 forced by naming it in the stack's container slot.
@@ -315,8 +350,8 @@ the memory limit; decoding counts as work.
 .Cm i
 reports the stack in
 .Fl F
-syntax and its compression; with a container, its disk size, chunk count,
-chunk encodings and identifier; with a partition scheme, the disk and each used
+syntax and its compression, gzip or none; with a container, its disk size,
+chunk count, chunk encodings and identifier; with a partition scheme, the disk and each used
 partition's slot, type, size, offset, filesystem and name, marking the
 selected one; then header validation, geometry, label, volume UUID when the
 format has one, time basis and known capabilities.
@@ -756,15 +791,15 @@ The summary's command field names the mode:
 .Ql i
 or
 .Ql formats .
-A stack record precedes the information record: it carries the stack, a null
-compression, the container with its chunk count, chunk encodings and
-identifier, each null without one, the scheme, the disk size and identifier
+A stack record precedes the information record: it carries the stack, the
+compression (gzip or null), the container with its chunk count, chunk
+encodings and identifier, each null without one, the scheme, the disk size and identifier
 and the selected partition, and states whether a volume was selected.
 Partition records, one per used slot, follow it for
 .Cm i .
 A creation's plan record follows the planned disk's stack record and its
 one partition record when the stack names a scheme.
-Information records carry the stack and a null compression.
+Information records carry the stack and the compression.
 .Cm cW
 writes a verify record for its staged image.
 Large integers are decimal strings; bounded geometry, flags, nanoseconds and
@@ -797,14 +832,10 @@ A sandbox-unavailable warning under automatic mode alone is not failure.
 .Nm
 recognizes the following and reports each as not supported, with status 1,
 after the rest of the command line is checked:
-compression
+writing compression
 .Pq Fl z , No and Fl a No with Cm c ,
 minimization
 .Pq Fl M No with Cm c ,
-an image on standard input or output
-.Pq Fl f Fl ,
-creating an image in a container, such as
-.Ql fat32/dmg ,
 the reserved filesystem names apfs and hfs,
 and more than one member for
 .Cm x
@@ -818,6 +849,8 @@ fsimg cWf data.img -F exfat -C esp . -C extra EFI
 fsimg cn -F exfat -R -m 64M -T /scratch -C files .
 fsimg cWf esp.img -F fat32/gpt -o gpt:type=esp -o gpt:name=EFI -C esp .
 fsimg cf sd.img -F fat32/mbr -o mbr:disk=4G -o mbr:active=yes -C boot .
+fsimg tf sd.img.gz
+curl -s https://example.org/sd.img.gz | fsimg xf - -E -C restored
 fsimg tf data.img --json /
 fsimg tvf data.img
 fsimg xOf data.img /documents/readme.txt > readme.txt

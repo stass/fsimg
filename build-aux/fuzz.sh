@@ -6,7 +6,8 @@
 #
 # Run from the top of a configured build directory holding test-fat,
 # test-exfat, test-qnx6, test-qnx4, test-protocol, test-layers,
-# test-containers and test/spec.sh, which write the seeds, with MAKE naming the make program
+# test-containers, test-compression and test/spec.sh, which write the
+# seeds, with MAKE naming the make program
 # that drives that build (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX
 # select the compiler. The harnesses build against the instrumented
 # sanitizer-fuzz/ tree (see sanitize.sh) and keep their corpora here
@@ -190,3 +191,18 @@ if test ! -f "$plist_corpus/udif.seed"; then
     ./test-containers --seed-plist "$plist_corpus/udif.seed"
 fi
 run_fuzzer "$work_dir/fuzz-plist" "$plist_corpus" 65536 5
+
+# The gzip harness opens each input as a gzip file and as a stream into a
+# spool under a small limit, driving the member header parser (FEXTRA,
+# FNAME, FCOMMENT, the header CRC16), inflate, the trailer checks and the
+# trailing-byte rule. The seed is the compression tests' two-member file.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    "$source_dir/fuzz/gzip.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-gzip"
+gzip_corpus=gzip-fuzz-corpus
+mkdir -p "$gzip_corpus"
+if test ! -f "$gzip_corpus/members.seed"; then
+    ./test-compression --seed-gzip "$gzip_corpus/members.seed"
+fi
+run_fuzzer "$work_dir/fuzz-gzip" "$gzip_corpus" 262144 10

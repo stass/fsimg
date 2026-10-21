@@ -7,6 +7,7 @@
 #include <sys/resource.h>
 
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -18,6 +19,16 @@
  * bytes. Status records report cumulative confirmed bytes, errno, and marker:
  * zero means progress, one acknowledges a record, two ends the complete stream.
  * It has no parser, pathname, source, image, or scratch authority.
+ */
+/*
+ * The input relay is the other direction: it copies standard input to the
+ * worker's input pipe on descriptor 3, byte for byte, and interprets
+ * nothing. It holds no other descriptor and no pathname, source, scratch
+ * or output authority, and exits zero only after copying all of standard
+ * input. A failed read of standard input exits FSIMG_INPUT_UNREADABLE_EXIT,
+ * so the coordinator can name it as the cause of the early end the worker
+ * saw; any other failure, a worker that stopped reading included, exits
+ * one. A non-blocking standard input is waited on, not treated as failed.
  */
 static int report(const uint64_t [2], int, unsigned);
 static int read_exact(void *, size_t, bool);
@@ -70,6 +81,43 @@ read_exact(void *buffer, size_t length, bool between_records)
 		offset += (size_t)count;
 	}
 	return (1);
+}
+
+int
+fsimg_input_main(void)
+{
+	struct pollfd readable = { .fd = STDIN_FILENO, .events = POLLIN };
+	struct rlimit core = { 0, 0 };
+	unsigned char buffer[65536];
+	ssize_t count, written;
+
+	if (setrlimit(RLIMIT_CORE, &core) == -1 || chdir("/") == -1 ||
+	    signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+		return (1);
+	for (;;) {
+		count = read(STDIN_FILENO, buffer, sizeof(buffer));
+		if (count == -1 && errno == EINTR)
+			continue;
+		if (count == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (poll(&readable, 1, -1) == -1 && errno != EINTR)
+				return (FSIMG_INPUT_UNREADABLE_EXIT);
+			continue;
+		}
+		if (count == -1)
+			return (FSIMG_INPUT_UNREADABLE_EXIT);
+		/* An interrupted close has still released the descriptor on
+		 * every supported host, so the worker sees end of input.
+		 */
+		if (count == 0)
+			return (close(3) == 0 || errno == EINTR ? 0 : 1);
+		for (ssize_t done = 0; done < count; done += written) {
+			written = write(3, buffer + done, (size_t)(count - done));
+			if (written == -1 && errno == EINTR)
+				written = 0;
+			else if (written <= 0)
+				return (1);
+		}
+	}
 }
 
 int

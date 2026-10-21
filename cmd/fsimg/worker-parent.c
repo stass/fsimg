@@ -60,12 +60,20 @@ typedef enum worker_channel {
 	CHANNEL_CANCEL,
 	CHANNEL_OUTPUT,
 	CHANNEL_STATUS,
+	/* A stream's image: the input relay writes, the worker reads, and the
+	 * coordinator closes both ends once both children hold them.
+	 */
+	CHANNEL_INPUT,
 	CHANNEL_COUNT
 } worker_channel_t;
 
+/* The input relay runs only for a read job whose image is a stream; it is
+ * otherwise recorded as already exited.
+ */
 typedef enum worker_process_role {
 	PROCESS_PARSER,
 	PROCESS_OUTPUT,
+	PROCESS_INPUT,
 	PROCESS_COUNT
 } worker_process_role_t;
 
@@ -163,6 +171,7 @@ static fsimg_status_t queue_text(worker_supervisor_t *, const fsimg_worker_text_
 static fsimg_status_t deliver_event(worker_supervisor_t *, fsimg_error_t *);
 static bool bound_volume(worker_supervisor_t *);
 static bool streaming(const fsimg_worker_request_t *);
+static bool reading_stream(const fsimg_worker_request_t *);
 static const char *slot_name(const fsimg_worker_request_t *, fsimg_layer_kind_t);
 static bool read_disk_expected(const worker_supervisor_t *,
     const unsigned char *);
@@ -316,8 +325,14 @@ bound_volume(worker_supervisor_t *state)
 static bool
 streaming(const fsimg_worker_request_t *request)
 {
-	return (request->kind == FSIMG_JOB_CREATE &&
-	    (request->flags & FSIMG_JOB_STREAM) != 0);
+	return ((request->flags & FSIMG_JOB_STDOUT) != 0);
+}
+
+/* A read job whose image arrives on the input pipe. */
+static bool
+reading_stream(const fsimg_worker_request_t *request)
+{
+	return ((request->flags & FSIMG_JOB_STDIN) != 0);
 }
 
 /* The name a create request gives a layer slot, "" when it names none. */
@@ -330,19 +345,30 @@ slot_name(const fsimg_worker_request_t *request, fsimg_layer_kind_t kind)
 }
 
 /*
- * Whether the disk a read job's IMAGE record reports fits its input file.
- * A fixed VHD is its disk and a 512-byte footer, so the file fixes the
- * disk's length; any other input's disk is accepted here, a container's
- * as its own tables declare it.
+ * Whether the file and disk a read job's IMAGE record reports fit its
+ * input. The file is the input file the coordinator opened, of a length
+ * it knows; a stream or a compressed input is peeled from the spool,
+ * whose length only the worker sees and the spool limit bounds. A fixed
+ * VHD is its disk and a 512-byte footer, so the file fixes the disk's
+ * length; any other container's disk is accepted here, as its own tables
+ * declare it.
  */
 static bool
 read_disk_expected(const worker_supervisor_t *state, const unsigned char *raw)
 {
+	uint64_t file;
+	bool spooled;
+
+	file = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FILE);
+	spooled = reading_stream(state->request) ||
+	    raw[FSIMG_WIRE_IMAGE_COMPRESSION] != '\0';
+	if (spooled ? file > state->request->limits.spool_bytes :
+	    file != state->disk_bytes)
+		return (false);
 	if (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "vhd") != 0)
 		return (true);
-	return (state->disk_bytes >= 512 &&
-	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) ==
-	    state->disk_bytes - 512);
+	return (file >= 512 &&
+	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) == file - 512);
 }
 
 /*
@@ -360,15 +386,11 @@ image_frame_expected(const worker_supervisor_t *state,
 {
 	const unsigned char *raw = frame->payload;
 	fsimg_job_kind_t kind = state->request->kind;
-	uint64_t flags, disk_bytes;
+	uint64_t flags;
 
 	if (state->output_state != WORKER_WAIT_IMAGE ||
-	    frame->length != FSIMG_WIRE_IMAGE_BYTES)
-		return (false);
-	disk_bytes = state->disk_bytes;
-	if (kind >= FSIMG_JOB_CREATE)
-		disk_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK);
-	if (!fsimg_wire_image_frame_valid(frame, disk_bytes))
+	    frame->length != FSIMG_WIRE_IMAGE_BYTES ||
+	    !fsimg_wire_image_frame_valid(frame))
 		return (false);
 	flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
 	if (((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 && kind != FSIMG_JOB_INFO) ||
@@ -376,7 +398,11 @@ image_frame_expected(const worker_supervisor_t *state,
 		return (false);
 	if (kind < FSIMG_JOB_CREATE)
 		return (read_disk_expected(state, raw));
-	return (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME,
+	/* A planned disk is its own file, written uncompressed. */
+	return (raw[FSIMG_WIRE_IMAGE_COMPRESSION] == '\0' &&
+	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FILE) ==
+	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) &&
+	    strcmp((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME,
 	    slot_name(state->request, FSIMG_LAYER_SCHEME)) == 0 &&
 	    strcmp((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER,
 	    slot_name(state->request,
@@ -824,8 +850,11 @@ setup_channels(worker_supervisor_t *state, fsimg_error_t *error)
 				return (fsimg_error_set(error, FSIMG_EIO, errno,
 				    FSIMG_OP_CONTEXT, "worker pipe inheritance setup failed"));
 			/* Only owned supervisor ends and the child's cancellation read
-			 * are nonblocking. Borrowed sink flags never change.
+			 * are nonblocking. Borrowed sink flags never change, and the
+			 * input pipe belongs to the children alone.
 			 */
+			if (role == CHANNEL_INPUT)
+				continue;
 			nonblocking = end == 0 ? role != CHANNEL_JOB && role != CHANNEL_OUTPUT :
 			    role == CHANNEL_JOB || role == CHANNEL_OUTPUT;
 			if (!nonblocking)
@@ -844,14 +873,10 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
     fsimg_error_t *error)
 {
 	const fsimg_worker_request_t *request = state->request;
-	int *parser, output[5];
+	int *parser, output[5], input[4];
 	unsigned parser_count;
-	fsimg_status_t status;
 	int null_fd, code, saved;
 
-	status = setup_channels(state, error);
-	if (status != FSIMG_OK)
-		return (status);
 	null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
 	if (null_fd == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
@@ -910,16 +935,40 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
 		parser[FSIMG_CHILD_SCRATCH] = request->scratch_fd;
 	if (request->raw_fd != -1)
 		parser[FSIMG_CHILD_RAW] = request->raw_fd;
+	if (request->spool_fd != -1)
+		parser[FSIMG_CHILD_SPOOL] = request->spool_fd;
+	if (reading_stream(request))
+		parser[FSIMG_CHILD_INPUT] = state->channels[CHANNEL_INPUT][0];
 	for (uint32_t i = 0; i < request->root_count; i++)
 		parser[FSIMG_CHILD_ROOTS + i] = request->root_fds[i];
 	code = fsimg_host_spawn_worker(executable, parser, parser_count,
 	    &state->processes[PROCESS_PARSER].pid);
 	saved = errno;
 	free(parser);
-	close(null_fd);
-	if (code == -1)
+	if (code == -1) {
+		close(null_fd);
 		return (fsimg_error_set(error, FSIMG_EIO, saved,
 		    FSIMG_OP_CONTEXT, "fresh worker execution failed"));
+	}
+	/* The input relay holds standard input and the pipe's write end. */
+	if (reading_stream(request)) {
+		input[STDIN_FILENO] = STDIN_FILENO;
+		input[STDOUT_FILENO] = input[STDERR_FILENO] = null_fd;
+		input[3] = state->channels[CHANNEL_INPUT][1];
+		code = fsimg_host_spawn_input(executable, input, 4,
+		    &state->processes[PROCESS_INPUT].pid);
+		saved = errno;
+		if (code == -1) {
+			close(null_fd);
+			return (fsimg_error_set(error, FSIMG_EIO, saved,
+			    FSIMG_OP_CONTEXT, "input relay execution failed"));
+		}
+		state->processes[PROCESS_INPUT].exited = false;
+		state->processes[PROCESS_INPUT].channel_eof = false;
+	}
+	close(null_fd);
+	close_channel(&state->channels[CHANNEL_INPUT][0]);
+	close_channel(&state->channels[CHANNEL_INPUT][1]);
 
 	close_channel(&state->channels[CHANNEL_JOB][0]);
 	close_channel(&state->channels[CHANNEL_CONTROL][1]);
@@ -1160,6 +1209,12 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 		    (state->phase == WORKER_STREAMING || state->phase == WORKER_COMPLETE))
 			fsimg_frame_advance(&state->decoder);
 
+		/* The input relay's only channel is the worker's input pipe,
+		 * spent once the worker exits; a relay still running then gets
+		 * the same exit grace as any child whose channel closed.
+		 */
+		if (state->processes[PROCESS_PARSER].exited)
+			state->processes[PROCESS_INPUT].channel_eof = true;
 		finished = state->raw_eof;
 		for (unsigned role = 0; role < PROCESS_COUNT; role++) {
 			status = observe_process(&state->processes[role], error);
@@ -1235,6 +1290,13 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 				return (status);
 		}
 	}
+	/* A relay that failed may have ended the stream early, whatever the
+	 * worker made of the bytes it had. A relay that never ran is recorded
+	 * as exited with status zero.
+	 */
+	if (!WIFEXITED(state->processes[PROCESS_INPUT].status) ||
+	    WEXITSTATUS(state->processes[PROCESS_INPUT].status) != 0)
+		return (worker_error(error, "standard input could not be relayed"));
 	for (unsigned role = 0; role < PROCESS_COUNT; role++) {
 		if (!WIFEXITED(state->processes[role].status) ||
 		    WEXITSTATUS(state->processes[role].status) != 0)
@@ -1327,6 +1389,8 @@ supervisor_init(worker_supervisor_t *state, const fsimg_worker_request_t *reques
 		state->channels[role][0] = state->channels[role][1] = -1;
 	for (unsigned role = 0; role < PROCESS_COUNT; role++)
 		state->processes[role].pid = -1;
+	state->processes[PROCESS_INPUT].exited = true;
+	state->processes[PROCESS_INPUT].channel_eof = true;
 }
 
 static fsimg_status_t
@@ -1336,6 +1400,18 @@ finish_operation(worker_supervisor_t *state, fsimg_status_t status,
 	cleanup_operation(state);
 	if (state->relay.forwarded[0] != 0)
 		state->budget->stdout_possible = true;
+	/* An input relay that could not read standard input ended the stream
+	 * early; that, not whatever the worker concluded from the bytes it
+	 * had, is the cause. The relay closes the worker's pipe only by
+	 * exiting, so by the time the worker can have seen that early end,
+	 * the relay's status is final.
+	 */
+	if (state->processes[PROCESS_INPUT].exited &&
+	    WIFEXITED(state->processes[PROCESS_INPUT].status) &&
+	    WEXITSTATUS(state->processes[PROCESS_INPUT].status) ==
+	    FSIMG_INPUT_UNREADABLE_EXIT)
+		status = fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IO,
+		    "standard input could not be read");
 	/* Runtime failures are never an expected malformed-input result, even if
 	 * channel EOF or a structured error was observed before process reaping.
 	 */
@@ -1378,7 +1454,9 @@ fsimg_worker_run(const char *executable, const fsimg_worker_request_t *request,
 	selected = *request;
 	supervisor_init(&state, &selected, result, argument, standard_output, interrupted);
 	state.event = event;
-	status = prepare_request(&state, error);
+	status = setup_channels(&state, error);
+	if (status == FSIMG_OK)
+		status = prepare_request(&state, error);
 	if (status == FSIMG_OK)
 		status = start_processes(&state, executable, standard_output, error);
 	if (status == FSIMG_OK)
@@ -1408,7 +1486,9 @@ fsimg_output_run(const char *executable, fsimg_output_producer_fn_t produce,
 	state.produce = produce;
 	state.producer_done = false;
 	state.deadline = deadline;
-	status = start_processes(&state, executable, standard_output, error);
+	status = setup_channels(&state, error);
+	if (status == FSIMG_OK)
+		status = start_processes(&state, executable, standard_output, error);
 	if (status == FSIMG_OK)
 		status = supervise_operation(&state, error);
 	return (finish_operation(&state, status, error));

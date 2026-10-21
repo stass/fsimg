@@ -574,7 +574,8 @@ test_registry(void)
 		    container },
 		{ "simg", ".simg", "block,crc", "raw,zero,fill",
 		    FSIMG_LAYER_CONTAINER, container },
-		{ "gzip", ".gz", "", "", FSIMG_LAYER_COMPRESSION, 0 },
+		{ "gzip", ".gz", "", "", FSIMG_LAYER_COMPRESSION,
+		    FSIMG_CAP_READ | FSIMG_CAP_VERIFY },
 		{ "zstd", ".zst", "", "", FSIMG_LAYER_COMPRESSION, 0 },
 		{ "xz", ".xz", "", "", FSIMG_LAYER_COMPRESSION, 0 }
 	};
@@ -589,8 +590,11 @@ test_registry(void)
 		CHECK(info.kind == expected[i].kind);
 		CHECK(info.capabilities == expected[i].capabilities);
 		CHECK(strcmp(info.codecs, expected[i].codecs) == 0);
-		/* Only a layer whose chunks use zlib names its version. */
-		CHECK((strstr(info.codecs, "zlib") != NULL) ==
+		/* Only a layer that inflates names zlib's version: a
+		 * container whose chunks use zlib, and gzip.
+		 */
+		CHECK((strstr(info.codecs, "zlib") != NULL ||
+		    strcmp(info.name, "gzip") == 0) ==
 		    (strncmp(info.codec_version, "zlib ", 5) == 0));
 	}
 	CHECK(fsimg_layer_next(&cursor, &info, NULL) == FSIMG_DONE);

@@ -27,6 +27,7 @@ typedef enum worker_capability_slot {
 	CHILD_OUTPUT_CAP,
 	CHILD_SCRATCH_CAP,
 	CHILD_RAW_CAP,
+	CHILD_SPOOL_CAP,
 	CHILD_CAP_COUNT
 } worker_capability_slot_t;
 
@@ -167,19 +168,21 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
     fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 {
 	fsimg_job_kind_t kind = child->request.kind;
-	unsigned expected;
-	bool output, stream;
+	unsigned expected, optional;
+	bool output, stream, reading;
 
-	stream = kind == FSIMG_JOB_CREATE &&
-	    (child->request.flags & FSIMG_JOB_STREAM) != 0;
+	reading = !fsimg_job_has_roots(kind);
+	stream = (child->request.flags & FSIMG_JOB_STDOUT) != 0;
 	expected = fsimg_job_has_roots(kind) ? FSIMG_JOB_CAP_ROOTS : FSIMG_JOB_CAP_INPUT;
+	/* Scratch is optional for every job, and a spool for a read job. */
+	optional = FSIMG_JOB_CAP_SCRATCH | (reading ? FSIMG_JOB_CAP_SPOOL : 0);
 	if ((kind == FSIMG_JOB_CREATE && !stream) || kind == FSIMG_JOB_EXTRACT)
 		expected |= FSIMG_JOB_CAP_OUTPUT;
 	if (kind == FSIMG_JOB_CREATE && (stream ||
 	    child->request.stack.slots[FSIMG_LAYER_CONTAINER].state ==
 	    FSIMG_SLOT_NAMED))
 		expected |= FSIMG_JOB_CAP_RAW;
-	if ((capabilities & ~FSIMG_JOB_CAP_SCRATCH) != expected)
+	if ((capabilities & ~optional) != expected)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "worker job has excess or missing filesystem authority"));
 	output = (capabilities & FSIMG_JOB_CAP_OUTPUT) != 0;
@@ -192,6 +195,9 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 		.roots = child->request.root_count != 0 ? FSIMG_CHILD_ROOTS : -1,
 		.root_count = child->request.root_count,
 		.raw = (capabilities & FSIMG_JOB_CAP_RAW) != 0 ? FSIMG_CHILD_RAW : -1,
+		.spool = (capabilities & FSIMG_JOB_CAP_SPOOL) != 0 ?
+		    FSIMG_CHILD_SPOOL : -1,
+		.input_pipe = (child->request.flags & FSIMG_JOB_STDIN) != 0,
 		.job = FSIMG_CHILD_JOB, .control = FSIMG_CHILD_CONTROL,
 		.data = kind == FSIMG_JOB_CAT || stream ? FSIMG_CHILD_DATA : -1,
 		.cancel = FSIMG_CHILD_CANCEL
@@ -200,12 +206,14 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 	child->raw_caps[CHILD_OUTPUT_CAP] = output ? FSIMG_CHILD_OUTPUT : -1;
 	child->raw_caps[CHILD_SCRATCH_CAP] = caps->scratch;
 	child->raw_caps[CHILD_RAW_CAP] = caps->raw;
+	child->raw_caps[CHILD_SPOOL_CAP] = caps->spool;
 	{
 		static const int numbers[CHILD_CAP_COUNT] = {
 			[CHILD_INPUT_CAP] = FSIMG_CHILD_INPUT,
 			[CHILD_OUTPUT_CAP] = FSIMG_CHILD_OUTPUT,
 			[CHILD_SCRATCH_CAP] = FSIMG_CHILD_SCRATCH,
-			[CHILD_RAW_CAP] = FSIMG_CHILD_RAW
+			[CHILD_RAW_CAP] = FSIMG_CHILD_RAW,
+			[CHILD_SPOOL_CAP] = FSIMG_CHILD_SPOOL
 		};
 
 		for (unsigned i = 0; i < CHILD_CAP_COUNT; i++) {
@@ -246,7 +254,8 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	if (caps->input != -1) {
+	/* A stream stays a bare descriptor until the image reads it. */
+	if (caps->input != -1 && !caps->input_pipe) {
 		status = fsimg_fd_reserve(child->ctx, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -445,6 +454,9 @@ send_image(const fsimg_image_info_t *info, const fsimg_layer_report_t *report,
 	bcopy(info->container_guid, raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID,
 	    sizeof(info->container_guid));
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHUNKS, info->chunk_count);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, info->file_bytes);
+	bcopy(info->compression, raw + FSIMG_WIRE_IMAGE_COMPRESSION,
+	    strnlen(info->compression, sizeof(info->compression) - 1));
 	flags = 0;
 	if (unselected != NULL) {
 		/* A reason cut here or by the library ends in "...". */
@@ -730,6 +742,8 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 	fsimg_image_options_init(&options);
 	options.stack = request->stack;
 	options.layers.gpt_sector_bytes = request->layers.gpt_sector_bytes;
+	if ((request->flags & FSIMG_JOB_GZIP) != 0)
+		options.flags |= FSIMG_IMAGE_GZIP;
 	if (request->selector == FSIMG_SELECT_RANGE ||
 	    request->selector == FSIMG_SELECT_DISK) {
 		bzero(&options.stack.slots[FSIMG_LAYER_SCHEME],
@@ -737,8 +751,16 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 		options.stack.slots[FSIMG_LAYER_SCHEME].state = FSIMG_SLOT_EMPTY;
 		options.layers.gpt_sector_bytes = 0;
 	}
-	status = fsimg_image_open(child->ctx, child->input, &options, &child->image,
-	    error);
+	/* The image adopts the spool on every outcome. */
+	options.spool_fd = child->raw_caps[CHILD_SPOOL_CAP];
+	child->raw_caps[CHILD_SPOOL_CAP] = -1;
+	if (child->input != NULL)
+		status = fsimg_image_open(child->ctx, child->input, &options,
+		    &child->image, error);
+	else
+		status = fsimg_image_open_stream(child->ctx,
+		    child->raw_caps[CHILD_INPUT_CAP], &options, &child->image,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
 	bzero(&selector, sizeof(selector));
@@ -937,7 +959,7 @@ take_raw(worker_child_t *child)
  * IMAGE record, for a partitioned disk the one PARTITION record, the
  * volume's place on it, then the PLAN; for a bare volume the PLAN alone. A
  * create job then writes the image: into the staged file, or under
- * FSIMG_JOB_STREAM to the data channel, through the raw intermediate when
+ * FSIMG_JOB_STDOUT to the data channel, through the raw intermediate when
  * the coordinator handed one over.
  */
 static fsimg_status_t
@@ -996,7 +1018,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	/* The raw intermediate stays in raw_caps, which the worker's
 	 * cleanup closes, until fsimg_writer_output takes it over.
 	 */
-	if ((child->request.flags & FSIMG_JOB_STREAM) != 0) {
+	if ((child->request.flags & FSIMG_JOB_STDOUT) != 0) {
 		/* The coordinator counts what reaches stdout; DONE reports
 		 * no staged image.
 		 */

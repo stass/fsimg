@@ -495,7 +495,8 @@ fsimg_disk_plan_report(const fsimg_disk_plan_t *plan, uint32_t slot,
 
 	bzero(image, sizeof(*image));
 	bzero(partition, sizeof(*partition));
-	image->disk_bytes = plan->disk_bytes;
+	/* The planned disk is its own file, before any container wraps it. */
+	image->disk_bytes = image->file_bytes = plan->disk_bytes;
 	if (plan->container != NULL) {
 		snprintf(image->container, sizeof(image->container), "%s",
 		    plan->container->name);

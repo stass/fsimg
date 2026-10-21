@@ -36,23 +36,38 @@ typedef enum fsimg_confinement {
 #define FSIMG_JOB_VERBOSE 0x04u
 /* Extraction omits entries of kinds the safe profile does not create. */
 #define FSIMG_JOB_SKIP_UNSUPPORTED 0x08u
-/* Creation writes the image to the raw data channel, not to staging. */
-#define FSIMG_JOB_STREAM 0x10u
+/* Creation only: the image goes to standard output through the raw data
+ * channel, not to staging.
+ */
+#define FSIMG_JOB_STDOUT 0x10u
+/* Reading only: -z, the image is gzip-compressed. */
+#define FSIMG_JOB_GZIP 0x20u
+/* Reading only: the image is standard input, arriving on the input pipe
+ * the input relay fills.
+ */
+#define FSIMG_JOB_STDIN 0x40u
 
 /* The job record's capability bits: which prepared descriptors the worker
  * receives. Scratch is optional for every kind; the others follow the kind.
  * RAW is the raw intermediate a creation with a container or to a stream
- * needs.
+ * needs; SPOOL is the spool a read job holds whenever it has scratch.
  */
 #define FSIMG_JOB_CAP_INPUT 0x01u
 #define FSIMG_JOB_CAP_OUTPUT 0x02u
 #define FSIMG_JOB_CAP_SCRATCH 0x04u
 #define FSIMG_JOB_CAP_ROOTS 0x08u
 #define FSIMG_JOB_CAP_RAW 0x10u
-/* Coordinator, at most one parser, and at most one output relay. */
-#define FSIMG_CLI_PROCESS_BOUND 3u
+#define FSIMG_JOB_CAP_SPOOL 0x20u
+/* Coordinator, at most one parser, at most one output relay and at most
+ * one input relay.
+ */
+#define FSIMG_CLI_PROCESS_BOUND 4u
 /* Fixed sanitizer options reserve this status for runtime failures. */
 #define FSIMG_WORKER_RUNTIME_EXIT 86
+/* The input relay's status when standard input itself failed a read, as
+ * distinct from one (any other failure) when the worker stopped reading.
+ */
+#define FSIMG_INPUT_UNREADABLE_EXIT 2
 
 #define FSIMG_OUTPUT_ERROR_RESERVE 131072u
 /* One coordinator-owned ledger spans processing and final reporting. Counts
@@ -108,6 +123,7 @@ typedef struct fsimg_worker_request {
 	uint32_t	 root_count;
 	unsigned	 flags;
 	uint32_t	 codepage;
+	/* A read job's image file, or -1 when the image is standard input. */
 	int		 input_fd;
 	/* The staging directory of CREATE, or the destination of EXTRACT. */
 	int		 output_fd;
@@ -116,6 +132,10 @@ typedef struct fsimg_worker_request {
 	 * streams (specs/design-layers.md#handed-over-files), or -1.
 	 */
 	int		 raw_fd;
+	/* The unlinked spool of a read job, created in the scratch tree, or
+	 * -1 without scratch.
+	 */
+	int		 spool_fd;
 	/* --partition name= or type= text; a GPT name holds at most 36 UTF-16
 	 * units, so 111 bytes cover every name that can match.
 	 */
@@ -176,6 +196,7 @@ fsimg_status_t fsimg_worker_run(const char *, const fsimg_worker_request_t *,
     fsimg_worker_result_t *, fsimg_error_t *);
 int fsimg_worker_main(void);
 int fsimg_output_main(void);
+int fsimg_input_main(void);
 fsimg_status_t fsimg_output_run(const char *, fsimg_output_producer_fn_t, void *,
     int, uint64_t, const volatile sig_atomic_t *, fsimg_output_budget_t *, fsimg_error_t *);
 /* A create or plan job reads source roots and carries one image path per
@@ -206,6 +227,7 @@ fsimg_status_t fsimg_job_decode(const unsigned char *, uint32_t,
 #define FSIMG_CHILD_SCRATCH 8
 #define FSIMG_CHILD_CANCEL 9
 #define FSIMG_CHILD_RAW 10
-#define FSIMG_CHILD_ROOTS 11
+#define FSIMG_CHILD_SPOOL 11
+#define FSIMG_CHILD_ROOTS 12
 
 #endif

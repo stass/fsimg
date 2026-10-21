@@ -459,10 +459,15 @@ input turns out to be gzip and
 otherwise closes it; `open_stream()` requires it and reads `stream_fd`, a
 pipe or other non-seekable descriptor borrowed for the call, to EOF into it,
 deciding compression from the first block. Without a spool, stream and gzip
-input fail as a spool limit error with limit zero.
+input fail as a spool limit error with limit zero. The options' `flags`
+accept `FSIMG_IMAGE_GZIP`, the library's `-z`: only the gzip probe runs at
+step 1, so an input gzip does not claim fails with `FSIMG_EFORMAT` and the
+gzip layer's name, and an ambiguous input reads as compressed.
 
 The image information record exposes the canonical detected stack text, the
-compression name, disk length, the container's name, chunk count, the
+compression name, the length of the file the layers were peeled from (the
+input, or the spool holding a stream or a decoded gzip; a plan reports its
+planned disk), disk length, the container's name, chunk count, the
 encodings its chunks use and its identifier (the DMG segment ID or the VHD
 unique ID), the scheme's sector size, disk identifier and partition count,
 and the layer validation scope. `next_partition()` iterates the scheme's slots in order
@@ -486,7 +491,7 @@ checks every layer with the [layer verification scope](design-layers.md#verifica
 `FSIMG_VERIFY_PAYLOAD` adds the read-through checks. Its report names the
 container and the scheme it checked and the partitions whose bounds it
 checked, with payload scope when read-through decoded the container's
-chunks. It does not require an untouched image and does not consume
+chunks, and the compression whose member checks passed at open. It does not require an untouched image and does not consume
 anything.
 
 ```c
@@ -618,7 +623,9 @@ available through `fsimg_status_string(status)` without allocation.
 `fsimg_options_t` uses `uint64_t` byte/count limits, including `spool_bytes`,
 `uint32_t` depth/path/FD limits, separate callback arguments, and zeroed
 reserved words. Its `flags` field accepts zero. `FSIMG_RESOURCE_SPOOL`
-identifies the spool limit in errors, and `FSIMG_OP_IMAGE` identifies a
+identifies the spool limit in errors, and the statistics report the live
+spool length, its peak and the storage the spool file allocated (its
+`st_blocks`, sampled when the spool is sealed), and `FSIMG_OP_IMAGE` identifies a
 failure in an image's scheme, container or compression layer, or in wrap,
 unwrap or compose; a layer's own failure, on open, verification or a read
 through its chunks, carries the layer's registry name in `error.path`, so

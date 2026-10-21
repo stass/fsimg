@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 800u
+#define FSIMG_JOB_BYTES 808u
 #define FSIMG_WIRE_ERROR_BYTES 592u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These
@@ -59,7 +59,7 @@ _Static_assert(FSIMG_WIRE_INFO_UUID + 16 == FSIMG_WIRE_INFO_BYTES,
  * selected when UNSELECTED is set. DISK is the disk the container yields,
  * or the input file's length without one.
  */
-#define FSIMG_WIRE_IMAGE_BYTES 352u
+#define FSIMG_WIRE_IMAGE_BYTES 376u
 #define FSIMG_WIRE_IMAGE_UNSELECTED 0x1u	/* i only: no volume follows */
 #define FSIMG_WIRE_IMAGE_VERIFIED 0x2u		/* W only: layers verified */
 typedef enum fsimg_wire_image_field {
@@ -77,7 +77,12 @@ typedef enum fsimg_wire_image_field {
 	FSIMG_WIRE_IMAGE_CODECS = 168,
 	FSIMG_WIRE_IMAGE_CONTAINER_GUID = 200,
 	FSIMG_WIRE_IMAGE_CHUNKS = 216,
-	FSIMG_WIRE_IMAGE_REASON = 224
+	/* The file the layers were peeled from: the input or the spool. A
+	 * created image is never compressed, so its FILE equals its DISK.
+	 */
+	FSIMG_WIRE_IMAGE_FILE = 224,
+	FSIMG_WIRE_IMAGE_COMPRESSION = 232,
+	FSIMG_WIRE_IMAGE_REASON = 248
 } fsimg_wire_image_field_t;
 #define FSIMG_WIRE_IMAGE_STACK_BYTES 64u
 #define FSIMG_WIRE_IMAGE_CODECS_BYTES 32u
@@ -280,7 +285,7 @@ bool fsimg_wire_info_frame_valid(const fsimg_frame_t *, uint64_t);
  * partition record lies within a disk of the given size, in a table of the
  * given slot count.
  */
-bool fsimg_wire_image_frame_valid(const fsimg_frame_t *, uint64_t);
+bool fsimg_wire_image_frame_valid(const fsimg_frame_t *);
 bool fsimg_wire_partition_frame_valid(const fsimg_frame_t *, uint64_t,
     uint64_t);
 bool fsimg_wire_plan_frame_valid(const fsimg_frame_t *);

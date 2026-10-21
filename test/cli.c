@@ -198,7 +198,7 @@ test_options(void)
 	CHECK(parse(defaults, &options) == FSIMG_OK);
 	CHECK(options.request.limits.memory_bytes == UINT64_C(256) * 1024 * 1024);
 	CHECK(options.request.limits.max_open_files == 128);
-	CHECK(options.spool_bytes == UINT64_C(1024) * 1024);
+	CHECK(options.request.limits.spool_bytes == UINT64_C(1024) * 1024);
 	CHECK(options.request.kind == FSIMG_JOB_INFO && strcmp(options.mode, "i") == 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(listing, &options) == FSIMG_OK);
@@ -476,9 +476,7 @@ test_stacks(void)
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
 		{ "fsimg", "-cz", "-F", "fat32", "-f", "out.img.gz", ".", NULL },
 		{ "fsimg", "-cM", "-F", "fat32", "-f", "out.img", ".", NULL },
-		{ "fsimg", "-t", "-f", "-", NULL },
 		{ "fsimg", "-t", "-f", "image", "/a", "/b", NULL },
-		{ "fsimg", "-tz", "-f", "image", NULL },
 		{ "fsimg", "-cz", "-F", "fat32", "-o", "gzip:level=9", "-f", "o.img.gz", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32/dmg", "-f", "out.dmg.gz", ".",
 		    NULL },
@@ -575,7 +573,7 @@ test_stacks(void)
 	}
 	/* A creation on standard output streams; nothing is staged. */
 	CHECK(parse(stream, &options) == FSIMG_OK);
-	CHECK((options.request.flags & FSIMG_JOB_STREAM) != 0);
+	CHECK((options.request.flags & FSIMG_JOB_STDOUT) != 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(empty_slots, &options) == FSIMG_OK);
 	CHECK(strcmp(fsimg_job_format(&options.request), "fat32") == 0);

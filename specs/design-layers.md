@@ -168,7 +168,11 @@ of the next:
    thing, whether the input is compressed, and decides it here and nowhere
    else: gzip claims and nothing else claims, compressed; gzip and any other
    probe claim, ambiguous, which `-z` resolves as compressed and an explicit
-   read-side stack as not compressed; otherwise not compressed. A non-gzip
+   read-side stack (one naming or emptying any slot) as not compressed;
+   otherwise not compressed. A stream's first block is probed as the start
+   of a file of unbounded length, so a probe's check against the length
+   passes rather than hiding a claim, and an ambiguity is reported instead
+   of a silent choice. A non-gzip
    claim at this step decides nothing further; containers, schemes and
    filesystems are decided by their own steps below, so a fixed VHD whose
    raw disk also draws a filesystem claim is not ambiguous here. A
@@ -1152,8 +1156,12 @@ byte 3 (Unix); then the CRC32 and modular length of the raw bytes.
 Reading: identity is the identification bytes, method 8 and zero reserved
 flag bits. The optional fields are bounded reads (FEXTRA
 by its 16-bit length; FNAME and FCOMMENT as zero-terminated strings of at
-most 64 KiB, discarded); the header CRC16 is checked when present, and a
-failure is corrupt. Decoding follows the [spool](#stream-input-and-the-spool)
+most 64 KiB counting the terminator, discarded); the header CRC16 is checked
+when present, and a failure is corrupt. A second member's identification
+bytes are checked like the first's, and anything else after a member,
+zero padding included, is trailing bytes. Inflate writes through a 256 KiB
+buffer, so the spool reservation step is at most 256 KiB, and the hole
+rule skips each zero 4 KiB block of an append, counted from its start. Decoding follows the [spool](#stream-input-and-the-spool)
 rules.
 
 ## Later profiles

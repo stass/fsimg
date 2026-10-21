@@ -642,7 +642,7 @@ test_container_create(void)
 	/* The same creation streamed: nothing staged, the bytes relayed. */
 	stream = openat(fixture.parent, "stream", O_RDWR | O_CREAT | O_EXCL, 0600);
 	CHECK(stream != -1);
-	fixture.request.flags = FSIMG_JOB_STREAM;
+	fixture.request.flags = FSIMG_JOB_STDOUT;
 	fixture.request.output_fd = -1;
 	fixture.request.raw_fd = raw_intermediate(&fixture);
 	fixture.ready = false;
@@ -911,6 +911,7 @@ fake_worker(worker_scenario_t mode)
 	bzero(raw, FSIMG_WIRE_IMAGE_BYTES);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, mode == SCENARIO_IMAGE_WRONG_DISK ?
 	    (uint64_t)mode + 1 : (uint64_t)mode);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, (uint64_t)mode);
 	if (mode == SCENARIO_PARTITION_OUTSIDE || mode == SCENARIO_PARTITION_UNSELECTED_LIST) {
 		strcpy((char *)raw + FSIMG_WIRE_IMAGE_SCHEME, "mbr");
 		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);

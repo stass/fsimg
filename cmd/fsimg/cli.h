@@ -42,7 +42,6 @@ typedef struct fsimg_cli_options {
 	fsimg_cli_operand_t *operands;	/* Owned create operands in command-line order. */
 	unsigned	 operand_count;
 	char		*member;	/* Owned absolute member path of a read mode, or NULL. */
-	uint64_t	 spool_bytes;	/* -l spool; zero selects the default. */
 	char		 stem[NAME_MAX + 1]; /* x: the fresh destination's name. */
 	unsigned	 verbosity;	/* Number of -v flags, at most two. */
 	bool		 json;

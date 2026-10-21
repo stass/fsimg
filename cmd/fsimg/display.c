@@ -649,6 +649,8 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 {
 	const char *stack = (const char *)raw + FSIMG_WIRE_IMAGE_STACK;
 	const char *scheme = (const char *)raw + FSIMG_WIRE_IMAGE_SCHEME;
+	const char *compression = (const char *)raw +
+	    FSIMG_WIRE_IMAGE_COMPRESSION;
 	uint64_t flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
 	uint64_t selected = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
 	bool gpt = strcmp(scheme, "gpt") == 0;
@@ -657,7 +659,11 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"stack\",\"stack\":");
 		string_value(display, stack);
-		append(display, ",\"compression\":null");
+		append(display, ",\"compression\":");
+		if (compression[0] != '\0')
+			string_value(display, compression);
+		else
+			append(display, "null");
 		if (container)
 			container_report(display, raw);
 		else
@@ -705,7 +711,8 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	}
 	append(display, "Stack:        ");
 	prose(display, stack[0] != '\0' ? stack : "none");
-	append(display, "\nCompression:  none\n");
+	append(display, "\nCompression:  %s\n",
+	    compression[0] != '\0' ? compression : "none");
 	if (container)
 		container_report(display, raw);
 	if (scheme[0] == '\0')
@@ -807,10 +814,16 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 	bool json = display->options->json;
 
 	if (json) {
-		/* The stack is the IMAGE record's; compression is not read. */
+		/* The stack and compression are the IMAGE record's. */
 		append(display, "{\"schema\":1,\"type\":\"info\",\"stack\":");
 		string_value(display, (const char *)display->image + FSIMG_WIRE_IMAGE_STACK);
-		append(display, ",\"compression\":null,\"format\":");
+		append(display, ",\"compression\":");
+		if (display->image[FSIMG_WIRE_IMAGE_COMPRESSION] != '\0')
+			string_value(display, (const char *)display->image +
+			    FSIMG_WIRE_IMAGE_COMPRESSION);
+		else
+			append(display, "null");
+		append(display, ",\"format\":");
 		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_FORMAT);
 		append(display, ",\"profile\":");
 		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_PROFILE);
@@ -1265,9 +1278,11 @@ limits(fsimg_cli_display_t *display)
 	const fsimg_worker_request_t *r = &display->options->request;
 
 	append(display, "\"limits\":{\"memory_bytes\":\"%llu\",\"scratch_bytes\":\"%llu\","
+	    "\"spool_bytes\":\"%llu\","
 	    "\"entries\":\"%llu\",\"depth\":\"%u\",\"path_bytes\":\"%u\",\"fds\":\"%u\","
 	    "\"output_bytes\":\"%llu\",\"work\":\"%llu\",\"seconds\":\"%llu\",\"scratch_enabled\":%s}",
 	    (unsigned long long)r->limits.memory_bytes, (unsigned long long)r->limits.scratch_bytes,
+	    (unsigned long long)r->limits.spool_bytes,
 	    (unsigned long long)r->limits.max_entries, r->limits.max_depth, r->limits.max_path_bytes,
 	    r->limits.max_open_files, (unsigned long long)r->limits.max_output_bytes,
 	    (unsigned long long)r->limits.max_work, (unsigned long long)r->seconds,
@@ -1338,7 +1353,7 @@ static void
 failure(fsimg_cli_display_t *display)
 {
 	static const char *const resources[] = { "none", "memory", "scratch", "fds",
-	    "entries", "output", "work", "depth", "path" };
+	    "entries", "output", "work", "depth", "path", "spool" };
 	static const char *const states[] = { "absent", "incomplete", "published", "uncertain" };
 	const fsimg_error_t *error = display->failure;
 	const fsimg_layer_t *layer;
@@ -1384,6 +1399,13 @@ failure(fsimg_cli_display_t *display)
 	 */
 	layer = error->operation == FSIMG_OP_IMAGE ? fsimg_layer_find(error->path) :
 	    NULL;
+	/* -T - creates no spool, so its limit is zero: say why. */
+	if (error->resource == FSIMG_RESOURCE_SPOOL && error->limit == 0 &&
+	    strcmp(display->options->scratch, "-") == 0) {
+		append(display, "fsimg: a compressed image needs a spool in "
+		    "scratch, which -T - disables\n");
+		return;
+	}
 	append(display, "fsimg: ");
 	prose(display, error->message[0] != '\0' ? error->message : fsimg_status_string(error->status));
 	if (error->message_truncated)

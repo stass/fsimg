@@ -461,10 +461,72 @@ typedef struct fsimg_container_ops {
  */
 unsigned long fsimg_crc32_zeros(unsigned long, uint64_t);
 
+/*
+ * The spool (specs/design-layers.md#stream-input-and-the-spool): the
+ * handed-over file that holds a stream or a decompressed input. adopt
+ * takes the descriptor on every outcome and accepts only an empty,
+ * unlinked, read/write regular file. append reserves its length against
+ * the context's spool limit, then grows the file and writes the bytes,
+ * skipping blocks of zeros, which stay holes; so a decompression bomb
+ * fails with FSIMG_RESOURCE_SPOOL at the append that would cross the
+ * limit, before the file grows past it. seal samples the allocated
+ * blocks and yields a read-only view of the bytes appended, which the
+ * spool must outlive. free releases the reservation and the file.
+ */
+typedef struct fsimg_spool fsimg_spool_t;
+
+fsimg_status_t fsimg_spool_adopt(fsimg_ctx_t *, int, fsimg_spool_t **,
+    fsimg_error_t *);
+fsimg_status_t fsimg_spool_append(fsimg_spool_t *, const unsigned char *,
+    size_t, fsimg_error_t *);
+fsimg_status_t fsimg_spool_seal(fsimg_spool_t *, fsimg_io_t **,
+    fsimg_error_t *);
+void fsimg_spool_free(fsimg_spool_t *);
+
+/*
+ * The input of a compression or a spool fill, read once from its start:
+ * first the bytes the probes already read (prefix), then the rest of a
+ * seekable file through session from offset, or of a stream descriptor
+ * (fd, file NULL) until its end. read fills at most length bytes and
+ * transfers zero only at the end of the input; it polls cancellation.
+ */
+typedef struct fsimg_spool_input {
+	fsimg_ctx_t	*ctx;
+	const unsigned char *prefix;
+	size_t		 prefix_length;
+	fsimg_io_t	*file;
+	fsimg_session_t	*session;
+	uint64_t	 offset;
+	uint64_t	 file_bytes;
+	int		 fd;
+} fsimg_spool_input_t;
+
+fsimg_status_t fsimg_spool_input_read(fsimg_spool_input_t *, unsigned char *, size_t,
+    size_t *, fsimg_error_t *);
+/* Copy the whole source into the spool unchanged. */
+fsimg_status_t fsimg_spool_fill(fsimg_spool_t *, fsimg_spool_input_t *,
+    fsimg_error_t *);
+
+/*
+ * A whole-file compression. probe follows the bounded probe contract on
+ * at most probe_bytes of the file's prefix: FSIMG_EFORMAT without its
+ * identity, otherwise a claim. decode reads the whole source and appends
+ * the decoded bytes to the spool, checking every member as it ends; a
+ * corrupt input is FSIMG_ECORRUPT with FSIMG_OP_IMAGE, and any failure is
+ * final.
+ */
+typedef struct fsimg_compression_ops {
+	size_t		 probe_bytes;
+	fsimg_status_t	(*probe)(const unsigned char *, size_t, fsimg_error_t *);
+	fsimg_status_t	(*decode)(fsimg_spool_input_t *, fsimg_spool_t *,
+			    fsimg_error_t *);
+} fsimg_compression_ops_t;
+
 /* A registered layer. Every layer name the stack grammar accepts outside
- * the filesystem slot is one record; a scheme has scheme operations and a
- * container container operations, and both are NULL for a layer this build
- * recognizes but does not implement.
+ * the filesystem slot is one record; a scheme has scheme operations, a
+ * container container operations and a compression compression
+ * operations, all NULL for a layer this build recognizes but does not
+ * implement.
  */
 typedef struct fsimg_layer {
 	const char	*name;
@@ -472,6 +534,7 @@ typedef struct fsimg_layer {
 	fsimg_layer_kind_t kind;
 	const fsimg_scheme_ops_t *scheme;
 	const fsimg_container_ops_t *container;
+	const fsimg_compression_ops_t *compression;
 } fsimg_layer_t;
 
 extern const fsimg_scheme_ops_t fsimg_gpt_scheme;
@@ -479,6 +542,7 @@ extern const fsimg_scheme_ops_t fsimg_mbr_scheme;
 extern const fsimg_container_ops_t fsimg_dmg_container;
 extern const fsimg_container_ops_t fsimg_vhd_container;
 extern const fsimg_container_ops_t fsimg_simg_container;
+extern const fsimg_compression_ops_t fsimg_gzip_compression;
 
 /* The registry, in reporting order; NULL past the end. */
 const fsimg_layer_t *fsimg_layer_at(size_t);

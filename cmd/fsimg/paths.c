@@ -38,7 +38,12 @@ static fsimg_status_t generate_identifiers(fsimg_cli_options_t *, fsimg_error_t 
 static bool random_uuid(unsigned char [static 16]);
 static fsimg_status_t prepare_staging(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
+static fsimg_status_t handed_over_error(fsimg_error_t *, const char *,
+    const char *);
+static fsimg_status_t handed_over_file(int, const char *, int *,
+    fsimg_error_t *);
 static fsimg_status_t prepare_raw(fsimg_cli_options_t *, fsimg_error_t *);
+static fsimg_status_t prepare_spool(fsimg_worker_request_t *, fsimg_error_t *);
 static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t, bool,
     const char *);
 static bool remove_fresh_directory(int, const char *, int);
@@ -215,18 +220,31 @@ prepare_scratch(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	return (status);
 }
 
-/* The image of a read mode: a regular file. A volume range given by
- * --offset and --length addresses the disk, which a container inside the
- * file can make longer than the file, so only the worker, which peels the
- * container, can check that the range fits; the selected volume then
- * bounds what extraction may write unless -l output says otherwise.
+/* The image of a read mode: a regular file, or standard input under -f -,
+ * which the coordinator relays to the worker unread and which must not be
+ * a terminal. A volume range given by --offset and --length addresses the
+ * disk, which a container or compression can make longer than the file,
+ * so only the worker, which peels them, can check that the range fits;
+ * the selected volume then bounds what extraction may write unless
+ * -l output says otherwise. Every read job with scratch receives a spool,
+ * since only the worker learns whether the input needs one.
  */
 static fsimg_status_t
 open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 {
 	fsimg_worker_request_t *request = &options->request;
 	fsimg_host_file_t identity;
+	fsimg_status_t status;
 
+	status = prepare_spool(request, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if ((request->flags & FSIMG_JOB_STDIN) != 0) {
+		if (isatty(STDIN_FILENO))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
+			    "refusing to read an image from a terminal"));
+		return (FSIMG_OK);
+	}
 	request->input_fd = fsimg_host_source_open(AT_FDCWD, options->image, false);
 	if (request->input_fd == -1)
 		return (path_error(error, "cannot open image", options->image));
@@ -517,12 +535,10 @@ static fsimg_status_t
 prepare_raw(fsimg_cli_options_t *options, fsimg_error_t *error)
 {
 	fsimg_worker_request_t *request = &options->request;
-	uint64_t random[2];
-	char name[96];
-	int directory, saved;
+	int directory;
 	bool stream;
 
-	stream = (request->flags & FSIMG_JOB_STREAM) != 0;
+	stream = (request->flags & FSIMG_JOB_STDOUT) != 0;
 	if (request->kind != FSIMG_JOB_CREATE || (!stream &&
 	    request->stack.slots[FSIMG_LAYER_CONTAINER].state != FSIMG_SLOT_NAMED))
 		return (FSIMG_OK);
@@ -530,28 +546,70 @@ prepare_raw(fsimg_cli_options_t *options, fsimg_error_t *error)
 	if (directory == -1)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
 		    "an image on standard output needs scratch for its raw disk"));
-	for (unsigned attempt = 0; attempt < 128 && request->raw_fd == -1;
-	    attempt++) {
+	return (handed_over_file(directory, "raw", &request->raw_fd, error));
+}
+
+/* The spool of a read job (specs/design-layers.md#handed-over-files), in
+ * the scratch tree; without scratch (-T -) there is none.
+ */
+static fsimg_status_t
+prepare_spool(fsimg_worker_request_t *request, fsimg_error_t *error)
+{
+	if (request->scratch_fd == -1)
+		return (FSIMG_OK);
+	return (handed_over_file(request->scratch_fd, "spool", &request->spool_fd,
+	    error));
+}
+
+/*
+ * A handed-over file: created exclusively with mode 0600 under a random
+ * name in directory and unlinked at once, so the worker holds a file no
+ * name reaches and nothing is left to clean up on any outcome. role names
+ * it ("raw" or "spool").
+ */
+static fsimg_status_t
+handed_over_file(int directory, const char *role, int *fd,
+    fsimg_error_t *error)
+{
+	uint64_t random[2];
+	char name[96];
+	int saved;
+
+	for (unsigned attempt = 0; attempt < 128 && *fd == -1; attempt++) {
 		if (fsimg_host_random(random, sizeof(random)) == -1)
-			return (host_error(error, "raw intermediate randomness failed"));
-		snprintf(name, sizeof(name), ".fsimg-raw-%016llx%016llx",
+			return (handed_over_error(error, role, "randomness failed"));
+		snprintf(name, sizeof(name), ".fsimg-%s-%016llx%016llx", role,
 		    (unsigned long long)random[0], (unsigned long long)random[1]);
-		request->raw_fd = openat(directory, name, O_RDWR | O_CREAT |
-		    O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-		if (request->raw_fd == -1 && errno != EEXIST)
-			return (host_error(error, "raw intermediate creation failed"));
+		*fd = openat(directory, name, O_RDWR | O_CREAT | O_EXCL |
+		    O_NOFOLLOW | O_CLOEXEC, 0600);
+		if (*fd == -1 && errno != EEXIST)
+			return (handed_over_error(error, role, "creation failed"));
 	}
-	if (request->raw_fd == -1)
-		return (fsimg_error_set(error, FSIMG_EEXISTS, EEXIST,
-		    FSIMG_OP_IO, "raw intermediate name attempts exhausted"));
+	if (*fd == -1) {
+		errno = EEXIST;
+		return (handed_over_error(error, role, "name attempts exhausted"));
+	}
 	if (unlinkat(directory, name, 0) == -1) {
 		saved = errno;
-		close(request->raw_fd);
-		request->raw_fd = -1;
+		close(*fd);
+		*fd = -1;
 		errno = saved;
-		return (host_error(error, "raw intermediate unlink failed"));
+		return (handed_over_error(error, role, "unlink failed"));
 	}
 	return (FSIMG_OK);
+}
+
+/* A host failure naming the handed-over file by its role, errno intact. */
+static fsimg_status_t
+handed_over_error(fsimg_error_t *error, const char *role, const char *failure)
+{
+	char message[96];
+	int saved;
+
+	saved = errno;
+	snprintf(message, sizeof(message), "%s file %s", role, failure);
+	errno = saved;
+	return (host_error(error, message));
 }
 
 /* A destination that fails the privacy rule. A fresh directory carrying an
@@ -707,7 +765,7 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	case FSIMG_JOB_CREATE:
 	case FSIMG_JOB_PLAN:
 		/* An image stream is binary; a terminal is no place for it. */
-		if ((request->flags & FSIMG_JOB_STREAM) != 0 &&
+		if ((request->flags & FSIMG_JOB_STDOUT) != 0 &&
 		    isatty(STDOUT_FILENO))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
 			    "refusing to write an image to a terminal"));
@@ -715,7 +773,7 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		if (status == FSIMG_OK)
 			status = generate_identifiers(options, error);
 		if (status == FSIMG_OK && request->kind == FSIMG_JOB_CREATE &&
-		    (request->flags & FSIMG_JOB_STREAM) == 0)
+		    (request->flags & FSIMG_JOB_STDOUT) == 0)
 			status = prepare_staging(options, paths, error);
 		if (status == FSIMG_OK)
 			status = prepare_raw(options, error);
@@ -761,8 +819,7 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	verify->root_fds = NULL;
 	verify->root_paths = NULL;
 	verify->root_count = 0;
-	verify->output_fd = verify->raw_fd = -1;
-	verify->flags &= ~FSIMG_JOB_STREAM;
+	verify->output_fd = verify->raw_fd = verify->spool_fd = -1;
 	verify->offset = verify->length = 0;
 	verify->selector = FSIMG_SELECT_AUTOMATIC;
 	/* Reading takes only the GPT sector size of the layer settings. */
@@ -780,7 +837,7 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	if (identity.kind != FSIMG_HOST_FILE)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_IO, "staged image is not a regular file"));
-	return (FSIMG_OK);
+	return (prepare_spool(verify, error));
 }
 
 static bool
@@ -878,7 +935,8 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	char *last_component;
 	int cleanup, failure;
 	int *descriptors[] = { &request->input_fd, &request->output_fd,
-	    &request->scratch_fd, &request->raw_fd, &paths->parent,
+	    &request->scratch_fd, &request->raw_fd, &request->spool_fd,
+	    &paths->parent,
 	    &paths->scratch_parent };
 
 	cleanup = 0;
@@ -942,7 +1000,7 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 			error->output_state = FSIMG_OUTPUT_PUBLISHED;
 		else if (error->output_state != FSIMG_OUTPUT_UNCERTAIN) {
 			if (paths->extraction_prepared ||
-			    ((request->flags & FSIMG_JOB_STREAM) != 0 &&
+			    ((request->flags & FSIMG_JOB_STDOUT) != 0 &&
 			    request->output_budget != NULL &&
 			    request->output_budget->stdout_possible))
 				error->output_state = FSIMG_OUTPUT_INCOMPLETE;

@@ -166,8 +166,9 @@ executable/shared-library mappings, allocator bookkeeping, thread stacks, and
 the kernel page cache. These exclusions are reported honestly. RSS is measured
 as a separate acceptance criterion. The CLI uses a bounded control process
 and one single-threaded parser worker, plus one bounded output relay so blocked
-stdout/stderr sinks cannot block supervision. The relay owns no library cache.
-The process RSS allowance includes this relay. Caches do not multiply by CPU count.
+stdout/stderr sinks cannot block supervision, and for a stream read one input
+relay: at most four processes. The relays own no library cache.
+The process RSS allowance includes the relays. Caches do not multiply by CPU count.
 Resource exhaustion cannot trigger an unbounded fallback. With scratch
 disabled, an operation either fits in memory or fails with `FSIMG_ELIMIT`.
 
@@ -178,7 +179,10 @@ the other way through an input relay: a child from the same executable
 holding only the standard input descriptor and one pipe to the worker, under
 the same supervision and deadline, carrying bytes it never interprets; those
 bytes are image payload, not text, and are charged to the spool limit by the
-worker, not to the ledger. One absolute monotonic deadline spans command
+worker, not to the ledger. Both relays run unconfined: each holds only the
+descriptors it copies between and interprets nothing, so the
+[security design](design-security.md#coordinator-and-worker) confines the
+parser worker alone. One absolute monotonic deadline spans command
 preparation, worker processing, publication and successful output; phase changes
 cannot restart its time allowance. After failure, diagnostic delivery receives
 at most two seconds, with one further two-second stderr-only attempt if stdout

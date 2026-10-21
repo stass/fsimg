@@ -69,7 +69,8 @@ typedef enum fsimg_resource {
 	FSIMG_RESOURCE_OUTPUT,
 	FSIMG_RESOURCE_WORK,
 	FSIMG_RESOURCE_DEPTH,
-	FSIMG_RESOURCE_PATH
+	FSIMG_RESOURCE_PATH,
+	FSIMG_RESOURCE_SPOOL
 } fsimg_resource_t;
 
 typedef enum fsimg_output_state {
@@ -115,6 +116,10 @@ typedef struct fsimg_options {
 	uint32_t	 flags;
 	uint64_t	 memory_bytes;
 	uint64_t	 scratch_bytes;
+	/* The logical bytes of every live spool, holding a stream or a
+	 * decompressed input; default 64 GiB.
+	 */
+	uint64_t	 spool_bytes;
 	uint64_t	 max_entries;
 	uint64_t	 max_output_bytes;
 	uint64_t	 max_work;
@@ -147,6 +152,12 @@ typedef struct fsimg_stats {
 	uint64_t	 metadata_losses;
 	/* Entries safe extraction omitted under FSIMG_EXTRACT_SKIP_UNSUPPORTED. */
 	uint64_t	 skipped_entries;
+	/* Logical spool bytes reserved, and the allocated blocks sampled once
+	 * a spool is filled, which holes for zero input keep below them.
+	 */
+	uint64_t	 spool_bytes;
+	uint64_t	 spool_peak;
+	uint64_t	 spool_physical_bytes;
 } fsimg_stats_t;
 
 /* Options and callback tables must have exactly this size and version.
@@ -462,12 +473,26 @@ struct fsimg_layer_options {
 	uint64_t	 reserved[4];
 };
 
+/* The input is gzip-compressed, as -z says: only the gzip probe runs at
+ * the compression step and must claim the input.
+ */
+#define FSIMG_IMAGE_GZIP 0x01u
+
+/* spool_fd is the spool, an exclusively created, empty, read/write regular
+ * file without O_APPEND that the caller has unlinked, or -1 for none, the
+ * value fsimg_image_options_init() sets: zero-filled options name standard
+ * input as the spool, which the open adopts, refuses and closes. Once the
+ * options' size and version are valid it is adopted on every outcome;
+ * open() keeps it only when the input is compressed and otherwise closes
+ * it, and open_stream() requires it.
+ */
 typedef struct fsimg_image_options {
 	size_t		 size;
 	uint32_t	 version;
 	uint32_t	 flags;
 	fsimg_stack_t	 stack;		/* The forced slots */
 	fsimg_layer_options_t layers;
+	int		 spool_fd;
 	uint64_t	 reserved[4];
 } fsimg_image_options_t;
 
@@ -478,8 +503,12 @@ typedef struct fsimg_image_options {
  * chunk encodings its index holds ("raw,zero,zlib"), chunk_count its
  * chunks (one for a fixed VHD, whose disk is one raw run), and
  * container_guid the VHD unique identifier or DMG segment ID, all zero
- * when it has none. disk_bytes is the disk the container yields, or the
- * input's length without one. GUIDs are in textual (RFC 4122) byte order.
+ * when it has none. compression names the compression decoded into the
+ * spool, empty for none. file_bytes is the length of the file the layers
+ * were peeled from: the input, or the spool holding a stream or a
+ * decompressed input; a plan reports its planned disk as the file.
+ * disk_bytes is the disk the container yields, or file_bytes without one.
+ * GUIDs are in textual (RFC 4122) byte order.
  * selected is the slot of the last partition select() returned, zero for
  * none. The scope is the validation the tables received.
  */
@@ -492,6 +521,7 @@ typedef struct fsimg_image_info {
 	unsigned char	 container_guid[16];
 	unsigned char	 disk_guid[16];
 	uint64_t	 chunk_count;
+	uint64_t	 file_bytes;
 	uint64_t	 disk_bytes;
 	uint32_t	 sector_bytes;	/* Zero without a scheme */
 	uint32_t	 partition_count; /* Table slots, used or not */
@@ -559,6 +589,7 @@ typedef struct fsimg_selector {
  * partition's contents.
  */
 typedef struct fsimg_layer_report {
+	char		 compression[16];	/* Members checked at spool time */
 	char		 container[16];
 	char		 scheme[16];
 	uint32_t	 partitions;
@@ -888,7 +919,22 @@ fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,
  * returns the length it needs without the terminator.
  *
  * An image borrows its input until destruction; the input must be
- * seekable. Opening validates the options and the forced stack, then peels
+ * seekable. Opening validates the options and the forced stack, then
+ * decides compression: the gzip probe runs on the input's prefix with the
+ * container, scheme and filesystem probes. gzip claiming alone means
+ * compressed; gzip and another probe claiming is an ambiguity that
+ * FSIMG_IMAGE_GZIP resolves as compressed and a stack with any slot named
+ * or empty as not compressed; FSIMG_IMAGE_GZIP on an input gzip does not
+ * claim is FSIMG_EFORMAT naming gzip. A compressed input is decoded into
+ * the spool, member by member, each member's CRC32 and length checked and
+ * bytes after the last member refused, with the spool's logical length
+ * reserved against spool_bytes before each step; the spool is then the
+ * file. open_stream reads stream_fd, a blocking descriptor borrowed for the
+ * call, to its end into the spool, decoding it when compressed and copying
+ * it unchanged otherwise; its probes run on the first block without the
+ * container probes, which need the end of the file. Without a spool,
+ * compressed and stream input fail as a FSIMG_RESOURCE_SPOOL limit of
+ * zero. Then opening peels
  * the container: the DMG, fixed VHD and sparse-image probes run on the
  * input's prefix and last 512 bytes, or only the forced one, and a claim's
  * tables are validated completely, so the disk has a fixed length before
@@ -911,6 +957,8 @@ fsimg_status_t fsimg_layer_next(size_t *, fsimg_layer_info_t *,
 void fsimg_layer_options_init(fsimg_layer_options_t *);
 void fsimg_image_options_init(fsimg_image_options_t *);
 fsimg_status_t fsimg_image_open(fsimg_ctx_t *, fsimg_io_t *,
+    const fsimg_image_options_t *, fsimg_image_t **, fsimg_error_t *);
+fsimg_status_t fsimg_image_open_stream(fsimg_ctx_t *, int,
     const fsimg_image_options_t *, fsimg_image_t **, fsimg_error_t *);
 fsimg_status_t fsimg_image_get_info(fsimg_image_t *, fsimg_image_info_t *,
     fsimg_error_t *);

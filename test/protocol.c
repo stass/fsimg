@@ -196,6 +196,54 @@ job_decodes(const unsigned char *raw, unsigned offset, unsigned char value)
 	    &capabilities, NULL) == FSIMG_OK);
 }
 
+/* Standard input and gzip belong to read jobs, standard output to a
+ * creation; the worker refuses each flag on a job of the other side.
+ */
+static void
+test_job_stream_flags(void)
+{
+	static const struct {
+		fsimg_job_kind_t kind;
+		unsigned	 flags;
+		bool		 valid;
+	} cases[] = {
+		{ FSIMG_JOB_LIST, FSIMG_JOB_STDIN | FSIMG_JOB_GZIP, true },
+		{ FSIMG_JOB_VERIFY, FSIMG_JOB_GZIP, true },
+		{ FSIMG_JOB_LIST, FSIMG_JOB_STDOUT, false },
+		{ FSIMG_JOB_CREATE, FSIMG_JOB_STDOUT, true },
+		{ FSIMG_JOB_CREATE, FSIMG_JOB_STDIN, false },
+		{ FSIMG_JOB_CREATE, FSIMG_JOB_GZIP, false },
+		{ FSIMG_JOB_PLAN, FSIMG_JOB_STDOUT, false },
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_worker_request_init(&request);
+		request.kind = cases[i].kind;
+		request.flags = cases[i].flags;
+		if (fsimg_job_has_roots(request.kind)) {
+			request.root_paths = image_root;
+			request.root_count = 1;
+		}
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK((fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK) == cases[i].valid);
+		if (cases[i].valid)
+			CHECK(decoded.flags == cases[i].flags);
+	}
+	/* A read job's standard input is its input capability. */
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.flags = FSIMG_JOB_STDIN;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK((capabilities & FSIMG_JOB_CAP_INPUT) != 0);
+}
+
 static void
 test_job_label(void)
 {
@@ -678,9 +726,9 @@ test_job_layers(void)
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
 }
 
-/* The parent accepts an image record only for the disk it opened, with a
- * table only under a scheme, and a partition record only within the disk
- * and the table.
+/* An image record's disk is its file without a container, its compression
+ * is one the build reads, it has a table only under a scheme, and a
+ * partition record lies within the disk and the table.
  */
 static void
 test_image_records(void)
@@ -693,29 +741,39 @@ test_image_records(void)
 	frame.type = FSIMG_FRAME_IMAGE;
 	frame.length = FSIMG_WIRE_IMAGE_BYTES;
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 8388608);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "fat32");
-	CHECK(fsimg_wire_image_frame_valid(&frame, 8388608));
-	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388607));
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 8388607);
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "gzip");
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "zstd");
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "dmg");
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	bzero(raw + FSIMG_WIRE_IMAGE_COMPRESSION, 16);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
-	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_SCHEME, "mbr");
-	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
-	CHECK(fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(fsimg_wire_image_frame_valid(&frame));
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 5);
-	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 1);
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_REASON, "stale");
-	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_UNSELECTED);
-	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 0);
-	CHECK(fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(fsimg_wire_image_frame_valid(&frame));
 	raw[FSIMG_WIRE_IMAGE_REASON] = '\0';
-	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	raw[FSIMG_WIRE_IMAGE_REASON] = 's';
 	memset(raw + FSIMG_WIRE_IMAGE_STACK, 'x', FSIMG_WIRE_IMAGE_STACK_BYTES);
-	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
 
 	bzero(&partition, sizeof(partition));
 	partition.index = 2;
@@ -758,6 +816,7 @@ main(int argc, char **argv)
 	test_malformed_frames();
 	test_error_codec();
 	test_job_label();
+	test_job_stream_flags();
 	test_selection_budget();
 	test_error_padding();
 	test_entry_records();

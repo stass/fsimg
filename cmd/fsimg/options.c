@@ -607,7 +607,7 @@ parse_limit(cli_parse_t *parse, const char *text, unsigned *seen)
 		return (FSIMG_OK);
 	switch (key) {
 	case CLI_LIMIT_SCRATCH: request->limits.scratch_bytes = number; break;
-	case CLI_LIMIT_SPOOL: parse->options->spool_bytes = number; break;
+	case CLI_LIMIT_SPOOL: request->limits.spool_bytes = number; break;
 	case CLI_LIMIT_ENTRIES: request->limits.max_entries = number; break;
 	case CLI_LIMIT_DEPTH: request->limits.max_depth = (uint32_t)number; break;
 	case CLI_LIMIT_PATH: request->limits.max_path_bytes = (uint32_t)number; break;
@@ -1122,7 +1122,7 @@ interpret_common(cli_parse_t *parse)
 	if (parse->reserved)
 		note_unsupported(parse, "the named filesystem is reserved and not supported");
 	if ((parse->mode & MODES_CREATE) == 0 && option_count(parse, 'z') != 0)
-		note_unsupported(parse, "compressed images are not supported");
+		parse->options->request.flags |= FSIMG_JOB_GZIP;
 	return (FSIMG_OK);
 }
 
@@ -1222,7 +1222,7 @@ interpret_create(cli_parse_t *parse)
 		if (strcmp(options->scratch, "-") == 0)
 			return (syntax(parse, "-T - conflicts with an image on standard output"));
 		if (request->kind == FSIMG_JOB_CREATE)
-			request->flags |= FSIMG_JOB_STREAM;
+			request->flags |= FSIMG_JOB_STDOUT;
 	}
 	if (option_count(parse, 'z') != 0 && option_count(parse, 'a') != 0 &&
 	    options->image != NULL && !gzip_named(options->image))
@@ -1318,7 +1318,7 @@ interpret_read(cli_parse_t *parse)
 	if (strcmp(options->image, "-") == 0) {
 		if (strcmp(options->scratch, "-") == 0)
 			return (syntax(parse, "-T - conflicts with an image on standard input"));
-		note_unsupported(parse, "reading an image from standard input is not supported");
+		request->flags |= FSIMG_JOB_STDIN;
 	}
 	if (fsimg_job_format(request)[0] == '\0' || parse->reserved)
 		return (FSIMG_OK);

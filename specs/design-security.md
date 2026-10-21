@@ -80,6 +80,19 @@ handed-over file (spool, raw intermediate) is a descriptor only, with no
 name to create or remove. Source roots and the image input are read-only.
 The platform profiles below install exactly these rights.
 
+The profiles bound each grant to its directory, not to the names within
+it: the worker may create any regular file in staging, create and unlink
+any file in the scratch tree, and create any file or directory beneath an
+extraction destination. Three naming constraints therefore rest on the
+worker's own behaviour, with the coordinator's checks behind them. The
+staged output is the single file `image`, the only name the coordinator
+publishes or opens for verification; another entry in staging is never
+published and only keeps the private staging directory from being removed.
+Scratch holds only the worker's own files, which the coordinator removes
+whatever their names. Extracted names are the validated, host-representable
+names the extractor derives from the image. A compromised worker can misuse
+names within its grants but cannot reach beyond them.
+
 The worker establishes its profile and reports readiness and confinement status.
 It waits for the coordinator's acknowledgement before reading image data or
 scanning source names. The coordinator emits any automatic-mode warning before
@@ -103,6 +116,25 @@ writes; the coordinator supervises and terminates both children on cancellation.
 Neither child changes borrowed sink flags. Formatted command output and warnings
 use the same relay; warnings are confirmed before parsing is acknowledged.
 Success requires exact confirmed transfer and successful exit of both children.
+
+Standard input reaches the worker through the mirror-image input relay, a
+same-executable child holding only the caller's standard input, the write
+end of the worker's input pipe, and the null device for its own output.
+Like the output relay it runs unconfined: it interprets nothing, its two
+descriptors are all the authority it has, and a sandbox would remove
+nothing it holds. It disables core dumps, ignores SIGPIPE, waits on a
+non-blocking standard input rather than failing, changes no flags on the
+borrowed descriptor and exits non-zero on any failed transfer, with a status
+of its own when standard input itself failed a read. The coordinator
+supervises it with the worker; a stream read succeeds only when the relay
+exited successfully after delivering end of file, and a failed read of
+standard input is reported as the cause, whatever the worker concluded from
+the bytes before it. The relay closes the worker's pipe only by exiting, so
+its status is final by the time the worker can see the early end. A closed
+standard descriptor is held from startup with the null device opened the
+opposite way, so it fails every use as a closed one does while no
+descriptor the coordinator opens later can take its number and be handed
+to a relay as the caller's stream.
 
 The coordinator validates protocol lengths before allocation, escapes names
 and control characters before terminal output, and never treats worker text

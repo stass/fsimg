@@ -3,8 +3,10 @@
 """Exercise the installed command contract through independent JSON decoding."""
 
 import base64
+import gzip
 import json
 import os
+import pty
 import random
 from pathlib import Path
 import re
@@ -106,7 +108,8 @@ def test_formats(executable, root):
     assert layers["dmg"]["settings"] == ["compress", "level", "chunk", "uuid"]
     assert layers["simg"]["settings"] == ["block", "crc"]
     assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 7
-    assert layers["gzip"]["capabilities"] == 0 and layers["zstd"]["suffix"] == ".zst"
+    assert layers["gzip"]["capabilities"] == 5 and layers["zstd"]["suffix"] == ".zst"
+    assert layers["gzip"]["codec_version"] == layers["dmg"]["codec_version"]
     assert {name: record["codecs"] for name, record in layers.items()} == {
         "gpt": None, "mbr": None, "dmg": "raw,zero,zlib", "vhd": "raw",
         "simg": "raw,zero,fill", "gzip": None, "zstd": None, "xz": None}
@@ -226,10 +229,12 @@ def test_human_help(executable, root):
         assert detail in result.stderr and b"usage:" in result.stderr, (arguments, result.stderr)
         assert b"errno" not in result.stderr and result.stdout == b""
     formats = invoke(executable, root, ["--formats"])
-    # The DMG row is followed by the zlib version fsimg runs against.
+    # The DMG and gzip rows are each followed by the zlib version fsimg runs
+    # against.
     version = re.search(rb"\n {20}(zlib [0-9][0-9A-Za-z.-]*)\n", formats.stdout)
     assert version is not None, formats.stdout
-    assert formats.stdout.replace(version.group(0), b"\n", 1) == (b"Format  Read  Write  Verify\n"
+    assert formats.stdout.count(version.group(0)) == 2, formats.stdout
+    assert formats.stdout.replace(version.group(0), b"\n") == (b"Format  Read  Write  Verify\n"
                               b"fat12   yes   yes    yes\n"
                               b"fat16   yes   yes    yes\n"
                               b"fat32   yes   yes    yes\n"
@@ -246,7 +251,7 @@ def test_human_help(executable, root):
                               b"compress,level,chunk,uuid\n"
                               b"vhd    container    yes   yes    yes     raw            align,uuid\n"
                               b"simg   container    yes   yes    yes     raw,zero,fill  block,crc\n"
-                              b"gzip   compression  no    no     no      -              -\n"
+                              b"gzip   compression  yes   no     yes     -              -\n"
                               b"zstd   compression  no    no     no      -              -\n"
                               b"xz     compression  no    no     no      -              -\n")
     assert formats.stderr == b""
@@ -395,8 +400,7 @@ def test_option_syntax(executable, root):
     for arguments, detail in [
         # Options precede operands: after the first member, -v is a member.
         (["t", "-f", "human.img", "/nested", "-v"], b"selecting several members is not supported"),
-        (["t", "-z", "-f", "human.img"], b"compressed images are not supported"),
-        (["t", "-f", "-"], b"reading an image from standard input is not supported"),
+
         # A forced container runs only its own probe, which a bare volume fails.
         (["t", "-F", "fat32/-/vhd", "-f", "human.img"], b"no VHD footer"),
         # -a takes gzip or a reserved compression from the outermost suffix.
@@ -1233,6 +1237,90 @@ def test_containers(executable, root):
     assert b"DMG data fork checksum does not match" in result.stderr, result.stderr
 
 
+def test_compressed_and_streams(executable, root):
+    """t, x, i and W read standard input through the coordinator's relay,
+    raw, DMG and gzip alike, and gzip files in place; a terminal on stdin
+    is refused; -z on a raw file is an absent signature; a raw stream that
+    also passes for gzip is ambiguous until -z or -F resolves it; -T -
+    leaves no spool for a gzip file; and a spool limit stops the decode."""
+    names = listing(executable, root, "gpt.img")
+    disk = (root / "gpt.img").read_bytes()
+    (root / "gpt.img.gz").write_bytes(gzip.compress(disk, mtime=0))
+    for image in ["gpt.img", "gpt.dmg", "gpt.img.gz"]:
+        with (root / image).open("rb") as stream:
+            listed = invoke(executable, root, ["tf", "-"], stdin=stream)
+        assert listed.stdout.decode().splitlines() == names, image
+    assert listing(executable, root, "gpt.img.gz") == names
+    info = invoke(executable, root, ["i", "-f", "gpt.img.gz"]).stdout.decode()
+    assert info.startswith("Stack:        fat12/gpt\nCompression:  gzip\n"), info
+    with (root / "gpt.img.gz").open("rb") as stream:
+        stack = next(record for record in completed(invoke(
+            executable, root, ["i", "--json", "-f", "-"], stdin=stream))
+            if record["type"] == "stack")
+    assert stack["compression"] == "gzip" and stack["stack"] == "fat12/gpt"
+    invoke(executable, root, ["Wf", "gpt.img.gz"])
+    private_directory(root, "from-stdin")
+    with (root / "gpt.img.gz").open("rb") as stream:
+        invoke(executable, root, ["xf", "-", "-E", "-C", "from-stdin"], stdin=stream)
+    assert (root / "from-stdin/HELLO.TXT").read_bytes() == b"hello\n"
+
+    leader, follower = pty.openpty()
+    try:
+        result = invoke(executable, root, ["tf", "-"], expected=1, stdin=follower)
+    finally:
+        os.close(leader)
+        os.close(follower)
+    assert b"refusing to read an image from a terminal" in result.stderr, result.stderr
+    # A standard input the relay cannot read fails as that, not as the
+    # verdict the worker reaches on the bytes it got before the early end:
+    # a closed descriptor, which the coordinator holds with an unreadable
+    # placeholder so no descriptor of its own takes its place, and a
+    # directory.
+    result = invoke(executable, root, ["tf", "-"], expected=1,
+                    preexec_fn=lambda: os.close(0))
+    assert b"standard input could not be read" in result.stderr, result.stderr
+    directory = os.open(root, os.O_RDONLY)
+    try:
+        result = invoke(executable, root, ["tf", "-"], expected=1, stdin=directory)
+    finally:
+        os.close(directory)
+    assert b"standard input could not be read" in result.stderr, result.stderr
+    # A non-blocking standard input with no data yet is waited for.
+    reader, writer = os.pipe()
+    os.set_blocking(reader, False)
+    process = subprocess.Popen([str(executable), "tf", "-"], cwd=root,
+                               stdin=reader, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+    os.close(reader)
+    time.sleep(0.5)
+    with os.fdopen(writer, "wb") as stream:
+        stream.write((root / "gpt.img.gz").read_bytes())
+    output, errors = process.communicate(timeout=30)
+    assert process.returncode == 0, errors
+    assert output.decode().splitlines() == names
+    result = invoke(executable, root, ["t", "-z", "-f", "gpt.img"], expected=1)
+    assert b"no gzip signature" in result.stderr, result.stderr
+
+    # gzip's identity in the protective MBR's boot code.
+    (root / "ambiguous.img").write_bytes(b"\x1f\x8b\x08\x00" + disk[4:])
+    for arguments, expected, detail in [
+        ([], 1, b"passes for both a compressed and an uncompressed image"),
+        (["-F", "fat12"], 0, b""),
+        (["-z"], 1, b"DEFLATE data is invalid"),
+    ]:
+        with (root / "ambiguous.img").open("rb") as stream:
+            result = invoke(executable, root, ["t", *arguments, "-f", "-"],
+                            expected=expected, stdin=stream)
+        assert detail in result.stderr, (arguments, result.stderr)
+        if expected == 0:
+            assert result.stdout.decode().splitlines() == names
+    result = invoke(executable, root, ["tf", "gpt.img.gz", "-T", "-"], expected=1)
+    assert b"-T - disables" in result.stderr, result.stderr
+    result = invoke(executable, root, ["tf", "gpt.img.gz", "-l", "spool=1M"],
+                    expected=1)
+    assert b"spool limit 1048576" in result.stderr, result.stderr
+
+
 BASIC_TYPE = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
 
 
@@ -1405,6 +1493,7 @@ def main():
         test_merged_operands(executable, root)
         test_partitioned(executable, root)
         test_containers(executable, root)
+        test_compressed_and_streams(executable, root)
         test_partitioned_create(executable, root)
         test_container_create(executable, root)
         assert not list(root.glob(".fsimg-*"))

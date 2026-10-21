@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <string.h>
 #include <strings.h>
@@ -17,9 +18,29 @@ static volatile sig_atomic_t interrupted;
 
 static void catch_signal(int);
 static bool install_signals(void);
+static bool hold_standard_descriptors(void);
 static void output_failure_state(const fsimg_cli_paths_t *, fsimg_error_t *);
 static fsimg_status_t verify_staged(const char *, fsimg_cli_options_t *,
     fsimg_cli_paths_t *, fsimg_cli_display_t *, fsimg_error_t *);
+
+/*
+ * Hold each closed standard descriptor with the null device opened the
+ * opposite way, so it fails every use as a closed one does, while no
+ * descriptor the coordinator opens later (scratch, staging, the spool)
+ * can take its number and be handed to a relay as the caller's stream.
+ * Descriptors are tried in order, so each open takes the closed number.
+ */
+static bool
+hold_standard_descriptors(void)
+{
+	for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
+		if (fcntl(fd, F_GETFD) != -1 || errno != EBADF)
+			continue;
+		if (open("/dev/null", fd == STDIN_FILENO ? O_WRONLY : O_RDONLY) != fd)
+			return (false);
+	}
+	return (true);
+}
 
 static void
 catch_signal(int number)
@@ -76,6 +97,8 @@ verify_staged(const char *executable, fsimg_cli_options_t *options,
 	}
 	if (verify.input_fd != -1)
 		close(verify.input_fd);
+	if (verify.spool_fd != -1)
+		close(verify.spool_fd);
 	/* Only a verdict on the image is a failed verification; cancellation,
 	 * a deadline, a resource limit or unavailable confinement leaves the
 	 * image unjudged, and the error itself says so.
@@ -102,6 +125,10 @@ main(int argc, char **argv)
 		return (fsimg_worker_main());
 	if (argc == 2 && strcmp(argv[1], "--internal-output") == 0)
 		return (fsimg_output_main());
+	if (argc == 2 && strcmp(argv[1], "--internal-input") == 0)
+		return (fsimg_input_main());
+	if (!hold_standard_descriptors())
+		return (1);
 	/* Without a reliable executable identity or signal setup there is no
 	 * supervised output path. Refuse startup instead of writing unsupervised.
 	 */
@@ -132,18 +159,23 @@ main(int argc, char **argv)
 		if (status == FSIMG_OK)
 			status = fsimg_worker_run(executable, &options.request,
 			    fsimg_cli_event, &display, STDOUT_FILENO, &interrupted, &result, &error);
-		/* The raw intermediate is spent once its worker exits; closing
-		 * it frees its blocks before verification and publication.
+		/* The raw intermediate and the spool are spent once their worker
+		 * exits; closing them frees their blocks before verification and
+		 * publication.
 		 */
 		if (options.request.raw_fd != -1) {
 			close(options.request.raw_fd);
 			options.request.raw_fd = -1;
 		}
+		if (options.request.spool_fd != -1) {
+			close(options.request.spool_fd);
+			options.request.spool_fd = -1;
+		}
 		if (status == FSIMG_OK && options.verify_staged)
 			status = verify_staged(executable, &options, &paths, &display, &error);
 		/* A stream has no publication; its bytes are already delivered. */
 		if (status == FSIMG_OK && options.request.kind == FSIMG_JOB_CREATE &&
-		    (options.request.flags & FSIMG_JOB_STREAM) == 0)
+		    (options.request.flags & FSIMG_JOB_STDOUT) == 0)
 			status = fsimg_cli_publish(&options, &paths, &result, &interrupted, &error);
 		status = fsimg_cli_cleanup(&options, &paths, status, &error);
 	}

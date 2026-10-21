@@ -160,6 +160,13 @@ fsimg_host_spawn_output(const char *executable, const int *descriptors,
 }
 
 int
+fsimg_host_spawn_input(const char *executable, const int *descriptors,
+    unsigned count, pid_t *child)
+{
+	return (spawn_entry(executable, "--internal-input", descriptors, count, child));
+}
+
+int
 fsimg_host_executable(char *path, size_t capacity)
 {
 #if defined(__APPLE__)

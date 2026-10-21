@@ -37,6 +37,14 @@ the DMGs and VHDs, `simg2img`, and `sgdisk -v` on the disk inside, each
 expansion compared byte for byte with the raw disk; a DMG with a flipped
 data fork byte must fail both `hdiutil verify` and `fsimg W -d`.
 `qemu-img check` has no checks for fixed VHDs, and the script says so.
+Compression oracles use `gzip` and `pigz` (`brew install pigz`):
+`test/compression-integration.sh` compresses a raw image with each, as one
+member, as two members `gzip` wrote separately and concatenated, and as
+`pigz` blocks with and without independent dictionaries, and checks that
+fsimg lists each as the raw image from the file and from standard input,
+reports gzip and verifies it. It reports each missing tool and skips only
+when neither is present. configure records `gzip` as `GZIP_PROGRAM`,
+because gzip itself reads `GZIP` from the environment as options.
 Release archives include generated Autotools support and build without those
 generators. The installed library's one third-party runtime dependency is
 the system zlib, which DMG chunks (and gzip) require: `configure` finds it
@@ -348,7 +356,12 @@ same budgets. The same target builds `fuzz/protocol.c` and runs 1000 mutations
 with a 64 KiB input ceiling and five-second timeout. It exercises production
 framing, job codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker
 lifecycle ordering is covered by `test-worker`, not inferred from pure wire
-fuzzing. Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults
+fuzzing. `fuzz/gzip.c` forces gzip on each input and opens it as a file
+and, up to 16 KiB, as a pipe stream, each into a fresh unlinked spool under
+a 4 MiB limit, so the member header parser, inflate, the trailer checks,
+the trailing-byte rule and the spool reservation see every mutation; its
+seed is a two-member file with FEXTRA, FNAME, FCOMMENT and FHCRC that
+`test-compression --seed-gzip` writes, with a 256 KiB input ceiling. Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults
 to its sibling `clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
 validation uses Homebrew LLVM:
 

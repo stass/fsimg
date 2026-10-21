@@ -51,6 +51,9 @@ FSIMG_DEV_TOOL([FSCK_EXFAT], [fsck.exfat], [exfatprogs exFAT checker], [$fsimg_s
 FSIMG_DEV_TOOL([QEMU_IMG], [qemu-img], [QEMU disk image tool])
 FSIMG_DEV_TOOL([SIMG2IMG], [simg2img], [Android sparse image expander])
 FSIMG_DEV_TOOL([IMG2SIMG], [img2simg], [Android sparse image producer])
+dnl Not GZIP: gzip(1) reads options from an environment variable of that name.
+FSIMG_DEV_TOOL([GZIP_PROGRAM], [gzip], [gzip compressor])
+FSIMG_DEV_TOOL([PIGZ], [pigz], [parallel gzip compressor])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
 # The system zlib is the one third-party library the core links: DMG zlib
 # chunks and gzip need it, and inflate parses untrusted images, so the
@@ -81,13 +84,15 @@ CPPFLAGS=$fsimg_saved_CPPFLAGS
 LIBS=$fsimg_saved_LIBS
 AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integration.sh
     test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh
-    test/containers-integration.sh test/cli.sh test/baseline.sh test/spec.sh],
+    test/containers-integration.sh test/compression-integration.sh
+    test/cli.sh test/baseline.sh test/spec.sh],
     [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
      test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh
      test ! -f test/qnx6-integration.sh || chmod +x test/qnx6-integration.sh
      test ! -f test/qnx4-integration.sh || chmod +x test/qnx4-integration.sh
      test ! -f test/layers-integration.sh || chmod +x test/layers-integration.sh
      test ! -f test/containers-integration.sh || chmod +x test/containers-integration.sh
+     test ! -f test/compression-integration.sh || chmod +x test/compression-integration.sh
      test ! -f test/cli.sh || chmod +x test/cli.sh
      test ! -f test/baseline.sh || chmod +x test/baseline.sh
      test ! -f test/spec.sh || chmod +x test/spec.sh])

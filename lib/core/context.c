@@ -171,6 +171,7 @@ fsimg_options_init(fsimg_options_t *opts)
 	opts->version = FSIMG_OPTIONS_VERSION;
 	opts->memory_bytes = UINT64_C(256) * 1024 * 1024;
 	opts->scratch_bytes = UINT64_C(64) * 1024 * 1024 * 1024;
+	opts->spool_bytes = UINT64_C(64) * 1024 * 1024 * 1024;
 	opts->max_entries = 10000000;
 	opts->max_depth = 256;
 	opts->max_path_bytes = 64 * 1024;
@@ -215,6 +216,7 @@ fsimg_ctx_new(const fsimg_options_t *opts, fsimg_ctx_t **out,
 } while (0)
 	DEFAULT_LIMIT(memory_bytes);
 	DEFAULT_LIMIT(scratch_bytes);
+	DEFAULT_LIMIT(spool_bytes);
 	DEFAULT_LIMIT(max_entries);
 	DEFAULT_LIMIT(max_depth);
 	DEFAULT_LIMIT(max_path_bytes);

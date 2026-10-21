@@ -10,12 +10,14 @@
  * The worker's complete filesystem authority, one field per role. The
  * profile grants each role exactly what the worker does with it:
  *
- * input	read a read-only regular image file
+ * input	read a read-only regular image file, or under input_pipe
+ *		the read end of the coordinator's input pipe
  * staging	create the staged image inside it; remove nothing
  * destination	create directories and files beneath it; remove nothing
  * scratch	create, use and unlink its own files; no directories
  * roots	read beneath each directory root, or read a file root
  * raw		read, write and resize the unlinked raw intermediate
+ * spool	read, write and resize the unlinked spool
  *
  * The coordinator, not the worker, removes staging and destination
  * objects. -1 marks an absent role. roots is the first of root_count
@@ -29,6 +31,8 @@ typedef struct fsimg_sandbox_caps {
 	int		 roots;
 	unsigned	 root_count;
 	int		 raw;
+	int		 spool;
+	bool		 input_pipe;
 	int		 job;
 	int		 control;
 	int		 data;
