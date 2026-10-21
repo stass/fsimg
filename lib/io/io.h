@@ -67,9 +67,13 @@ fsimg_status_t fsimg_io_adopt_handed_over(fsimg_ctx_t *, int, const char *,
     fsimg_io_t **, fsimg_error_t *);
 /* The first hole the host reports at or after offset of a file-backed
  * object, as [hole_start, hole_end) within the object; an object or host
- * that reports none gives hole_start == hole_end == its length.
+ * that reports none gives hole_start == hole_end == its length. The file
+ * is synced before the object's first lookup and before any lookup after
+ * a write or resize through the object, so a hole is never unsynced data;
+ * a failed sync is the error.
  */
-void fsimg_io_next_hole(fsimg_io_t *, uint64_t, uint64_t *, uint64_t *);
+fsimg_status_t fsimg_io_next_hole(fsimg_io_t *, uint64_t, uint64_t *,
+    uint64_t *, fsimg_error_t *);
 fsimg_status_t fsimg_io_set_times(fsimg_io_t *, const struct timespec *,
     fsimg_error_t *);
 

@@ -289,11 +289,38 @@ fsimg_stack_layer(const fsimg_stack_t *stack, fsimg_layer_kind_t kind)
 	    NULL);
 }
 
-const fsimg_layer_t *
-fsimg_write_compression(uint32_t flags)
+fsimg_status_t
+fsimg_compression_named(const char *name, size_t size, bool writing,
+    const fsimg_layer_t **out, fsimg_error_t *error)
 {
-	return ((flags & FSIMG_WRITE_GZIP) != 0 ? fsimg_layer_find("gzip") :
-	    NULL);
+	const fsimg_layer_t *layer;
+	bool implemented;
+
+	*out = NULL;
+	if (memchr(name, '\0', size) == NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "compression name is not terminated"));
+	if (name[0] == '\0')
+		return (FSIMG_OK);
+	layer = fsimg_layer_find(name);
+	if (layer == NULL || layer->kind != FSIMG_LAYER_COMPRESSION) {
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "not a registered compression");
+		fsimg_error_path(error, name);
+		return (FSIMG_EINVAL);
+	}
+	implemented = layer->compression != NULL && (writing ?
+	    layer->compression->encoder != NULL :
+	    layer->compression->decode != NULL);
+	if (!implemented) {
+		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
+		    writing ? "writing this compression is not supported" :
+		    "reading this compression is not supported");
+		fsimg_error_path(error, name);
+		return (FSIMG_EUNSUPPORTED);
+	}
+	*out = layer;
+	return (FSIMG_OK);
 }
 
 static bool
@@ -412,11 +439,15 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 			snprintf(out->codec_version, sizeof(out->codec_version),
 			    "zlib %s", zlibVersion());
 	}
+	/* The operations fsimg_compression_named accepts, read and write. */
 	if (layer->compression != NULL) {
-		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY |
+		out->capabilities =
+		    (layer->compression->decode != NULL ? FSIMG_CAP_READ |
+		    FSIMG_CAP_VERIFY : 0) |
 		    (layer->compression->encoder != NULL ? FSIMG_CAP_WRITE : 0);
-		snprintf(out->codec_version, sizeof(out->codec_version),
-		    "zlib %s", zlibVersion());
+		if (layer->compression->zlib)
+			snprintf(out->codec_version, sizeof(out->codec_version),
+			    "zlib %s", zlibVersion());
 	}
 	/* The layer's keys in table order; the longest list fits. */
 	used = 0;

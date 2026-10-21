@@ -446,7 +446,7 @@ typedef struct fsimg_layer_info {
  * are identifiers like the GUIDs above.
  *
  * The compression setting: gzip_level is the DEFLATE level of an output
- * FSIMG_WRITE_GZIP compresses, 1 to 9, zero selecting 6.
+ * the write options compress with gzip, 1 to 9, zero selecting 6.
  */
 typedef enum fsimg_dmg_compression {
 	FSIMG_DMG_ZLIB = 0,
@@ -477,18 +477,20 @@ struct fsimg_layer_options {
 	uint64_t	 reserved[4];
 };
 
-/* The input is gzip-compressed, as -z says: only the gzip probe runs at
- * the compression step and must claim the input.
- */
-#define FSIMG_IMAGE_GZIP 0x01u
-
-/* spool_fd is the spool, an exclusively created, empty, read/write regular
+/* No image option flags are defined; flags must be zero.
+ *
+ * compression forces the input's compression, as -z does: a registered
+ * compression's name, NUL-terminated, whose probe alone runs at the
+ * compression step and must claim the input; empty detects it.
+ *
+ * spool_fd is the spool, an exclusively created, empty, read/write regular
  * file without O_APPEND that the caller has unlinked, or -1 for none, the
- * value fsimg_image_options_init() sets: zero-filled options name standard
- * input as the spool, which the open adopts, refuses and closes. Once the
- * options' size and version are valid it is adopted on every outcome;
- * open() keeps it only when the input is compressed and otherwise closes
- * it, and open_stream() requires it.
+ * value fsimg_image_options_init() sets. Options whose size
+ * fsimg_image_options_init() did not set are refused before spool_fd is
+ * examined, so zero-filled options never hand over descriptor 0. Once the
+ * options' size and version are valid spool_fd is adopted on every
+ * outcome; open() keeps it only when the input is compressed and
+ * otherwise closes it, and open_stream() requires it.
  */
 typedef struct fsimg_image_options {
 	size_t		 size;
@@ -496,6 +498,7 @@ typedef struct fsimg_image_options {
 	uint32_t	 flags;
 	fsimg_stack_t	 stack;		/* The forced slots */
 	fsimg_layer_options_t layers;
+	char		 compression[16];
 	int		 spool_fd;
 	uint64_t	 reserved[4];
 } fsimg_image_options_t;
@@ -606,10 +609,6 @@ typedef struct fsimg_layer_report {
 #define FSIMG_WRITE_DURABLE 0x04u
 /* Host trees also record uid, gid and permission bits as optional fields. */
 #define FSIMG_WRITE_IMPORT_POSIX 0x08u
-/* The output is gzip-compressed, as -z says: one gzip member wraps
- * whatever the stack writes, and the layer options' gzip_level applies.
- */
-#define FSIMG_WRITE_GZIP 0x10u
 
 /* The on-disk byte order of a format that offers both, such as QNX6. */
 typedef enum fsimg_byte_order {
@@ -642,6 +641,13 @@ typedef struct fsimg_write_options {
 	unsigned char	 volume_uuid[16];
 	/* Borrowed for construction and copied; NULL selects every default. */
 	const fsimg_layer_options_t *layers;
+	/* The compression wrapping the whole output, as -z says: a registered
+	 * compression's name, NUL-terminated, such as "gzip", whose layer
+	 * settings then apply; empty for none, the default. A name the
+	 * registry lacks is FSIMG_EINVAL and one this build cannot write
+	 * FSIMG_EUNSUPPORTED, each naming it in error.path.
+	 */
+	char		 compression[16];
 	uint64_t	 reserved[4];
 } fsimg_write_options_t;
 
@@ -676,7 +682,7 @@ typedef struct fsimg_plan_info {
 	 * since each adds its own metadata. A raw intermediate holds the disk
 	 * while an encoded output or a stream is written, so the output
 	 * budget is then image.disk_bytes + output_bytes. image.compression
-	 * names the compression FSIMG_WRITE_GZIP selects, empty for none.
+	 * names the compression the write options name, empty for none.
 	 * padding_bytes is the zero padding the container's disk-length
 	 * granularity added to the disk. codec_version names the compression
 	 * library the output depends on ("zlib 1.3.1"), empty for none.
@@ -930,12 +936,12 @@ fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,
  *
  * An image borrows its input until destruction; the input must be
  * seekable. Opening validates the options and the forced stack, then
- * decides compression: the gzip probe runs on the input's prefix with the
- * container, scheme and filesystem probes. gzip claiming alone means
- * compressed; gzip and another probe claiming is an ambiguity that
- * FSIMG_IMAGE_GZIP resolves as compressed and a stack with any slot named
- * or empty as not compressed; FSIMG_IMAGE_GZIP on an input gzip does not
- * claim is FSIMG_EFORMAT naming gzip. A compressed input is decoded into
+ * decides compression: the compression probes run on the input's prefix
+ * with the container, scheme and filesystem probes. A compression claiming
+ * alone means compressed; a compression and another probe claiming is an
+ * ambiguity that a stack with any slot named or empty resolves as not
+ * compressed. A forced compression runs its probe alone, and an input it
+ * does not claim is FSIMG_EFORMAT naming it. A compressed input is decoded into
  * the spool, member by member, each member's CRC32 and length checked and
  * bytes after the last member refused, with the spool's logical length
  * reserved against spool_bytes before each step; the spool is then the
@@ -996,8 +1002,8 @@ typedef struct fsimg_part {
 /* Image operations without a filesystem writer. Each reads its inputs once,
  * in disk order, and writes the sink sequentially; inputs are borrowed for
  * the call and refused when they share storage with the sink. Write options
- * supply only the mode flags, epoch and layers; every filesystem setting
- * must hold its default.
+ * supply only the mode flags, epoch, layers and compression; every
+ * filesystem setting must hold its default.
  *
  * wrap puts a raw volume into the stack's scheme as its one partition,
  * typed by gpt_type or mbr_type, else by the filesystem the stack names or
@@ -1007,8 +1013,8 @@ typedef struct fsimg_part {
  * no filesystem; the layer options' partition fields must hold their
  * defaults, since each part carries its own. A container in the stack of
  * wrap or compose encodes the disk on its way to the sink, in the one
- * transcode a writer uses, and FSIMG_WRITE_GZIP compresses the output of
- * any of the three. None of the three stages a raw disk, so each
+ * transcode a writer uses, and the options' compression compresses the
+ * output of any of the three. None of the three stages a raw disk, so each
  * refuses a sink's raw intermediate, and a STREAM sink receives the bytes
  * as they are produced.
  */

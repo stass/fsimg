@@ -180,12 +180,16 @@ beneath a parent directory, a positional I/O object, or a stream descriptor
 written in order.
 A stack naming a container, such as
 .Ql fat32/gpt/dmg ,
-the FSIMG_WRITE_GZIP flag, or a stream sink needs the sink's raw_fd: an
+a compression, or a stream sink needs the sink's raw_fd: an
 exclusively created, empty, unlinked read/write regular file the writer
 emits the raw disk into before one sequential transcode writes the
 container, then gzip around it, or copies the disk, to the sink; it is
 adopted and closed on every outcome.
-FSIMG_WRITE_GZIP writes one gzip member with a fixed header: no name,
+The write options' compression names one registered compression, such as
+.Ql gzip ,
+or is empty for none; a name the registry lacks is FSIMG_EINVAL and one
+this build cannot write FSIMG_EUNSUPPORTED.
+gzip writes one member with a fixed header: no name,
 comment or header CRC, OS 3, extra flags by level, and as its time the
 epoch under FSIMG_WRITE_REPRODUCIBLE or the host clock otherwise, zero when
 outside the field's 32 bits.
@@ -205,7 +209,7 @@ puts a raw volume into a scheme,
 writes the bytes an opened image's selection names, raw, and
 .Fn fsimg_image_compose
 builds a disk from several volumes, one partition each; each compresses
-its output under FSIMG_WRITE_GZIP.
+its output with the write options' compression.
 They copy the disk once, read each input once, and refuse an output that
 shares storage with an input before writing.
 .Pp
@@ -226,12 +230,16 @@ checks its checksums and, under FSIMG_VERIFY_PAYLOAD, decodes every chunk.
 .Fn fsimg_layer_next
 reports each container's chunk encodings and the zlib version it uses.
 .Pp
-Before the container, the open decides whether the input is gzip:
-alone, gzip's signature makes it compressed; when an uncompressed layer's
-probe also claims the first bytes, the open fails as ambiguous unless the
-image options name any part of the stack, which reads it as uncompressed,
-or set FSIMG_IMAGE_GZIP, which runs only the gzip probe, so an input that
-is not gzip fails with FSIMG_EFORMAT.
+Before the container, the open decides whether the input is compressed:
+alone, a compression's signature makes it compressed; when an
+uncompressed layer's probe also claims the first bytes, the open fails as
+ambiguous unless the image options name any part of the stack, which reads
+it as uncompressed, or name the compression, which runs only its probe, so
+an input it does not claim fails with FSIMG_EFORMAT.
+Image options whose size
+.Fn fsimg_image_options_init
+did not set are refused before spool_fd is examined, as a sink is before
+its raw_fd.
 A compressed input is decoded, member after member with each member's
 CRC32 and length checked, into the spool: the image options' spool_fd, an
 exclusively created, empty, unlinked read/write regular file the open
@@ -245,6 +253,9 @@ Each step's logical length is reserved against the spool_bytes limit, 64
 GiB by default, before the spool grows, so a decompression bomb fails with
 FSIMG_ELIMIT and FSIMG_RESOURCE_SPOOL with the file still within the limit;
 zero blocks stay holes.
+Compressed bytes read and decoded bytes produced count as work, for a file
+and a stream alike, so the work limit bounds a decode as it bounds a
+container's.
 The statistics report spool_bytes, spool_peak and the spool's allocated
 spool_physical_bytes; image information reports the compression and
 file_bytes, the length of the file the layers were peeled from, input or

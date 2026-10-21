@@ -814,9 +814,9 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	*verify = *create;
 	verify->kind = FSIMG_JOB_VERIFY;
 	verify->flags = create->flags & (FSIMG_JOB_PAYLOAD | FSIMG_JOB_VERBOSE);
-	/* Every slot is forced below, so only -z reads a compressed image. */
-	if (fsimg_job_compression(create)[0] != '\0')
-		verify->flags |= FSIMG_JOB_GZIP;
+	/* Every slot is forced below, and so is the created compression,
+	 * which the copied request names.
+	 */
 	verify->selection = "/";
 	verify->root_fds = NULL;
 	verify->root_paths = NULL;

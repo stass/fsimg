@@ -141,13 +141,14 @@ fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
 
 /*
  * Without a filesystem writer, write options carry only the mode: the
- * reproducible, durable, loss and gzip flags, the epoch and the layer
- * settings.
+ * reproducible, durable and loss flags, the epoch, the layer settings and
+ * the compression.
  * Every other field must hold its default, as a setting a format does not
  * store must, so none is silently ignored: a copy of the options with the
- * three mode fields reset must equal the defaults. selected is the
- * defaults with the caller's flags and epoch, and layers a copy of the
- * caller's layer settings, so selected carries no layers pointer.
+ * four mode fields reset must equal the defaults. selected is the
+ * defaults with the caller's flags, epoch and compression, which the disk
+ * plan resolves, and layers a copy of the caller's layer settings, so
+ * selected carries no layers pointer.
  */
 static fsimg_status_t
 check_mode(const fsimg_write_options_t *options,
@@ -164,13 +165,15 @@ check_mode(const fsimg_write_options_t *options,
 	if (options->size != sizeof(*options) ||
 	    options->version != FSIMG_OPTIONS_VERSION ||
 	    (options->flags & ~(FSIMG_WRITE_ALLOW_LOSS | FSIMG_WRITE_REPRODUCIBLE |
-	    FSIMG_WRITE_DURABLE | FSIMG_WRITE_GZIP)) != 0)
+	    FSIMG_WRITE_DURABLE)) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "unsupported write options size, version or flags"));
 	others = *options;
 	others.flags = defaults.flags;
 	others.epoch = defaults.epoch;
 	others.layers = defaults.layers;
+	bcopy(defaults.compression, others.compression,
+	    sizeof(others.compression));
 	if (bcmp(&others, &defaults, sizeof(defaults)) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "filesystem settings must hold their defaults without a "
@@ -179,6 +182,8 @@ check_mode(const fsimg_write_options_t *options,
 	selected->epoch = options->epoch;
 	if (options->layers != NULL)
 		*layers = *options->layers;
+	bcopy(options->compression, selected->compression,
+	    sizeof(selected->compression));
 	return (FSIMG_OK);
 }
 
@@ -488,8 +493,9 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 		fsimg_error_path(error, named);
 		return (FSIMG_EINVAL);
 	}
-	status = fsimg_disk_plan_init(ctx, &stack, &layers, 1, selected.epoch,
-	    selected.flags, &plan, error);
+	status = fsimg_disk_plan_init(ctx, &stack, &layers,
+	    selected.compression, 1, selected.epoch, selected.flags, &plan,
+	    error);
 	if (status == FSIMG_OK && plan.scheme != NULL) {
 		request = (fsimg_partition_request_t){
 			.type = plan.table.kind == FSIMG_SCHEME_GPT ?
@@ -533,17 +539,15 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	if (status == FSIMG_OK)
 		status = check_mode(options, &selected, &layers, error);
 	if (status == FSIMG_OK)
-		status = fsimg_layer_options_check(&stack,
-		    fsimg_write_compression(selected.flags), &layers, true, error);
-	if (status == FSIMG_OK)
 		status = fsimg_image_select(image, selector, &volume, error);
 	if (status != FSIMG_OK)
 		return (status);
 	ctx = fsimg_io_context(volume);
 	status = fsimg_io_get_size(volume, &length, error);
 	if (status == FSIMG_OK)
-		status = fsimg_disk_plan_init(ctx, &stack, &layers, 1,
-		    selected.epoch, selected.flags, &plan, error);
+		status = fsimg_disk_plan_init(ctx, &stack, &layers,
+		    selected.compression, 1, selected.epoch, selected.flags,
+		    &plan, error);
 	if (status == FSIMG_OK)
 		status = write_plan(ctx, &plan, &volume, &length,
 		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
@@ -600,6 +604,7 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_disk_plan_init(ctx, &stack, &layers,
+	    selected.compression,
 	    count > UINT32_MAX ? UINT32_MAX : (uint32_t)count, selected.epoch,
 	    selected.flags, &plan, error);
 	if (status != FSIMG_OK)

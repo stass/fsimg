@@ -30,7 +30,8 @@
  * Zero decisions depend only on the disk's bytes. Hole discovery may only
  * spare the read of a range the host already knows is zero, so the output
  * is the same with it, without it (fsimg_test_hole_discovery) and for any
- * buffer or budget size.
+ * buffer or budget size. Bounded I/O syncs a freshly written disk before
+ * its first hole lookup (fsimg_io_next_hole).
  */
 #define SINK_BUFFER_BYTES	65536u
 
@@ -389,9 +390,12 @@ transcode_pass(const disk_output_t *output, const fsimg_encoder_ops_t *ops,
 		status = fsimg_session_charge(output->session, 0, 0, 1, error);
 		if (status != FSIMG_OK)
 			break;
-		if (discover && offset >= hole_end)
-			fsimg_io_next_hole(output->disk, offset, &hole_start,
-			    &hole_end);
+		if (discover && offset >= hole_end) {
+			status = fsimg_io_next_hole(output->disk, offset,
+			    &hole_start, &hole_end, error);
+			if (status != FSIMG_OK)
+				break;
+		}
 		zero = discover && hole_start <= offset && offset < hole_end &&
 		    length <= hole_end - offset;
 		if (!zero) {
@@ -557,14 +561,14 @@ copy_close(void *state FSIMG_UNUSED)
 }
 
 /* The codec a plan's output depends on: zlib for the DMG chunks it
- * deflates and for gzip.
+ * deflates and for a zlib compression.
  */
 void
 fsimg_disk_plan_codec(const fsimg_disk_plan_t *plan, char *out,
     size_t capacity)
 {
 	if ((plan->container != NULL && plan->container_settings.level != 0) ||
-	    plan->compression != NULL)
+	    (plan->compression != NULL && plan->compression->compression->zlib))
 		snprintf(out, capacity, "zlib %s", zlibVersion());
 	else if (capacity != 0)
 		out[0] = '\0';

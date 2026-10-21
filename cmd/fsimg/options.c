@@ -1073,6 +1073,7 @@ interpret_common(cli_parse_t *parse)
 {
 	fsimg_cli_options_t *options = parse->options;
 	fsimg_worker_request_t *request = &options->request;
+	fsimg_layer_info_t layer;
 	const char *value;
 	uint64_t number;
 	unsigned limit_keys, setting_keys;
@@ -1126,8 +1127,10 @@ interpret_common(cli_parse_t *parse)
 
 	if (parse->reserved)
 		note_unsupported(parse, "the named filesystem is reserved and not supported");
-	if ((parse->mode & MODES_CREATE) == 0 && option_count(parse, 'z') != 0)
-		parse->options->request.flags |= FSIMG_JOB_GZIP;
+	if ((parse->mode & MODES_CREATE) == 0 && compression_selected(parse,
+	    &layer))
+		snprintf(request->compression, sizeof(request->compression),
+		    "%s", layer.name);
 	return (FSIMG_OK);
 }
 
@@ -1151,10 +1154,13 @@ compression_suffix(const char *image, char *name, size_t capacity,
 	return (length);
 }
 
+/* The compression -z selects, as tar's -z does. */
+#define CLI_Z_COMPRESSION	"gzip"
+
 /*
- * Whether a command selects a compression, and which one in layer: gzip
- * under -z, and on creation under -a whatever the image name's outermost
- * suffix declares in the layer registry, which includes the reserved
+ * Whether a command selects a compression, and which one in layer: -z's,
+ * and on creation under -a whatever the image name's outermost suffix
+ * declares in the layer registry, which includes the reserved
  * compressions.
  */
 static bool
@@ -1164,21 +1170,21 @@ compression_selected(const cli_parse_t *parse, fsimg_layer_info_t *layer)
 	char name[NAME_MAX + 1];
 
 	if (option_count(parse, 'z') != 0)
-		return (find_layer("gzip", strlen("gzip"), layer));
+		return (find_layer(CLI_Z_COMPRESSION, strlen(CLI_Z_COMPRESSION),
+		    layer));
 	return ((parse->mode & MODES_CREATE) != 0 && option_count(parse, 'a') != 0 &&
 	    image != NULL &&
 	    compression_suffix(image, name, sizeof(name), layer) != 0);
 }
 
 /*
- * Apply the compression a creation selects. -z selects gzip, so with -a
- * the image name must end in gzip's suffix. Under -a a container suffix
+ * Apply the compression a creation selects. With -z and -a the image name
+ * must end in the suffix of -z's compression. Under -a a container suffix
  * beneath the compression's selects nothing but must name the stack's
- * container, so the name cannot promise a container the image lacks. gzip
- * becomes FSIMG_WRITE_GZIP; any other compression, which this build
- * cannot write, is refused as unsupported once the command line is
- * otherwise valid. cW opens the compressed image through a spool, which
- * needs scratch.
+ * container, so the name cannot promise a container the image lacks. The
+ * job carries the compression's name; one this build cannot write is
+ * refused as unsupported once the command line is otherwise valid. cW
+ * opens the compressed image through a spool, which needs scratch.
  */
 static fsimg_status_t
 apply_compression(cli_parse_t *parse)
@@ -1193,8 +1199,9 @@ apply_compression(cli_parse_t *parse)
 		length = compression_suffix(options->image, name, sizeof(name),
 		    &suffix);
 		if (option_count(parse, 'z') != 0 &&
-		    (length == 0 || strcmp(suffix.name, "gzip") != 0))
-			return (syntax(parse, "-z with -a requires a .gz image name"));
+		    (length == 0 || strcmp(suffix.name, CLI_Z_COMPRESSION) != 0))
+			return (syntax(parse,
+			    "-z with -a requires the image name to end in its suffix"));
 		length = suffix_layer(name, FSIMG_LAYER_CONTAINER, &layer);
 		container = &options->request.stack.slots[FSIMG_LAYER_CONTAINER];
 		if (length != 0 && (container->state != FSIMG_SLOT_NAMED ||
@@ -1205,11 +1212,12 @@ apply_compression(cli_parse_t *parse)
 	}
 	if (!compression_selected(parse, &layer))
 		return (FSIMG_OK);
-	if (strcmp(layer.name, "gzip") != 0) {
+	if ((layer.capabilities & FSIMG_CAP_WRITE) == 0) {
 		note_unsupported(parse, "writing this compression is not supported");
 		return (FSIMG_OK);
 	}
-	options->request.write.flags |= FSIMG_WRITE_GZIP;
+	snprintf(options->request.compression,
+	    sizeof(options->request.compression), "%s", layer.name);
 	if (options->verify_staged && strcmp(options->scratch, "-") == 0)
 		return (syntax(parse,
 		    "cW of a compressed image needs scratch for its spool, not -T -"));

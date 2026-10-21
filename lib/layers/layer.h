@@ -487,7 +487,8 @@ void fsimg_spool_free(fsimg_spool_t *);
  * The input of a compression or a spool fill, read once from its start:
  * first the bytes the probes already read (prefix), then the rest of a
  * seekable file through session from offset, or of a stream descriptor
- * (fd, file NULL) until its end. read fills at most length bytes and
+ * (fd, file NULL) until its end. A decoder charges its work to session
+ * for either. read fills at most length bytes and
  * transfers zero only at the end of the input; it polls cancellation.
  */
 typedef struct fsimg_spool_input {
@@ -542,7 +543,9 @@ typedef struct fsimg_compressor_ops {
  * A whole-file compression. probe follows the bounded probe contract on
  * at most probe_bytes of the file's prefix: FSIMG_EFORMAT without its
  * identity, otherwise a claim. decode reads the whole source and appends
- * the decoded bytes to the spool, checking every member as it ends; a
+ * the decoded bytes to the spool, checking every member as it ends and
+ * charging every compressed byte it reads, headers and trailers included,
+ * and every byte it produces to the source's session as work; a
  * corrupt input is FSIMG_ECORRUPT with FSIMG_OP_IMAGE, and any failure is
  * final.
  *
@@ -550,7 +553,9 @@ typedef struct fsimg_compressor_ops {
  * resolves them, given the FSIMG_WRITE_* mode and the epoch; a failure is
  * FSIMG_EINVAL naming the key. bound states the most bytes the encoding of
  * an input of the given length can take, FSIMG_EUNSUPPORTED when that
- * exceeds the 64-bit range. encoder writes the compression.
+ * exceeds the 64-bit range. encoder writes the compression. zlib says the
+ * codec is zlib's, whose version the capability record and the plan
+ * report.
  */
 typedef struct fsimg_compression_ops {
 	size_t		 probe_bytes;
@@ -561,6 +566,7 @@ typedef struct fsimg_compression_ops {
 			    fsimg_compression_settings_t *, fsimg_error_t *);
 	fsimg_status_t	(*bound)(uint64_t, uint64_t *, fsimg_error_t *);
 	const fsimg_compressor_ops_t *encoder;
+	bool		 zlib;
 } fsimg_compression_ops_t;
 
 /* A registered layer. Every layer name the stack grammar accepts outside
@@ -595,10 +601,15 @@ fsimg_status_t fsimg_stack_validate(const fsimg_stack_t *, fsimg_error_t *);
 /* The layer named in a stack slot, NULL when the slot names none. */
 const fsimg_layer_t *fsimg_stack_layer(const fsimg_stack_t *,
     fsimg_layer_kind_t);
-/* The compression FSIMG_WRITE_* flags select: gzip under
- * FSIMG_WRITE_GZIP, else NULL.
+/*
+ * The compression a caller's options name in a field of size bytes, for
+ * writing or reading: NULL for an empty name, else the registered
+ * compression. An unterminated name, or one the registry lacks as a
+ * compression, is FSIMG_EINVAL; a registered compression without the
+ * operation is FSIMG_EUNSUPPORTED; each names it in error.path.
  */
-const fsimg_layer_t *fsimg_write_compression(uint32_t);
+fsimg_status_t fsimg_compression_named(const char *, size_t, bool,
+    const fsimg_layer_t **, fsimg_error_t *);
 /*
  * Check layer options against a stack and the compression the operation
  * names (NULL for none): reserved words zero, text fields terminated,
@@ -672,9 +683,11 @@ bool fsimg_guid_parse(const char *, unsigned char *);
  * disk length. Identifiers left unset are derived from the epoch under
  * FSIMG_WRITE_REPRODUCIBLE and are otherwise FSIMG_EINVAL naming the key.
  * Without a scheme the plan has no records and the volume starts the
- * disk. A container in the stack, and the compression the FSIMG_WRITE_*
- * flags select, have their settings resolved by init, and place rounds the
- * disk up to the container's granularity, puts the scheme's trailing
+ * disk. init resolves the stack's container and the compression its
+ * argument names, a write options' compression field (empty for none),
+ * with their settings. It zeroes the plan before anything can fail, so a
+ * plan init refuses is still safe to free. place rounds the disk up to
+ * the container's granularity, puts the scheme's trailing
  * tables at the end of the rounded disk, and states the output's bound:
  * the container's bound of the disk (container_bytes), then the
  * compression's bound of that. Records are charged to the context; free
@@ -719,8 +732,8 @@ typedef struct fsimg_partition_request {
 } fsimg_partition_request_t;
 
 fsimg_status_t fsimg_disk_plan_init(fsimg_ctx_t *, const fsimg_stack_t *,
-    const fsimg_layer_options_t *, uint32_t, int64_t, uint32_t,
-    fsimg_disk_plan_t *, fsimg_error_t *);
+    const fsimg_layer_options_t *, const char *, uint32_t, int64_t,
+    uint32_t, fsimg_disk_plan_t *, fsimg_error_t *);
 fsimg_status_t fsimg_disk_plan_partition(fsimg_disk_plan_t *, uint32_t,
     const fsimg_partition_request_t *, fsimg_error_t *);
 /* Fit a volume to a fixed disk's one partition: a zero *volume_bytes

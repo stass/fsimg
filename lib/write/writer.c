@@ -25,6 +25,9 @@ static bool variant_of(const fsimg_format_t *, const fsimg_format_variant_t *);
 static fsimg_status_t plan_layers(fsimg_ctx_t *, const fsimg_stack_t *,
     fsimg_write_options_t *, fsimg_layer_options_t *, fsimg_disk_plan_t *,
     fsimg_error_t *);
+static fsimg_status_t fit_volume(const fsimg_format_t *,
+    const fsimg_format_variant_t *, const fsimg_disk_plan_t *,
+    fsimg_write_options_t *, fsimg_error_t *);
 static fsimg_status_t writer_new_stack(fsimg_ctx_t *, const fsimg_stack_t *,
     const fsimg_format_t *, const fsimg_format_variant_t *,
     const fsimg_write_options_t *, fsimg_writer_t **, fsimg_error_t *);
@@ -136,13 +139,11 @@ fsimg_writer_new_variant(fsimg_ctx_t *ctx, const fsimg_format_t *driver,
 
 /*
  * Resolve the disk around the volume before the format validates its
- * options: the scheme's settings, the partition's type, name and identity,
- * and a fixed disk's room for the volume are all checked here, before any
- * source is read. A fixed disk without a volume size gives the volume the
- * partition's whole usable length, rounded down to the filesystem's
- * sector, as an exact size; every driver's default sector is 512 bytes.
- * A derived disk is sized from the planned volume, so its MBR limit is
- * checked when the plan is placed.
+ * options: the compression, the scheme's settings and the partition's
+ * type, name and identity are all checked here, before any source is
+ * read. A derived disk is sized from the planned volume, so its MBR limit
+ * is checked when the plan is placed; a fixed disk's room for the volume
+ * is checked by fit_volume once the format has resolved its sector.
  */
 static fsimg_status_t
 plan_layers(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
@@ -157,8 +158,8 @@ plan_layers(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	if (selected->layers != NULL)
 		*layers = *selected->layers;
 	selected->layers = NULL;
-	status = fsimg_disk_plan_init(ctx, stack, layers, 1, selected->epoch,
-	    selected->flags, disk, error);
+	status = fsimg_disk_plan_init(ctx, stack, layers, selected->compression,
+	    1, selected->epoch, selected->flags, disk, error);
 	if (status != FSIMG_OK || disk->scheme == NULL)
 		return (status);
 	gpt = disk->table.kind == FSIMG_SCHEME_GPT;
@@ -169,10 +170,33 @@ plan_layers(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 		.filesystem = stack->slots[FSIMG_LAYER_FILESYSTEM].name,
 		.active = layers->mbr_active
 	};
-	status = fsimg_disk_plan_partition(disk, 0, &request, error);
-	if (status == FSIMG_OK && disk->fixed)
-		status = fsimg_disk_plan_fit(disk, selected->sector_bytes == 0 ?
-		    512 : selected->sector_bytes, &selected->volume_bytes, error);
+	return (fsimg_disk_plan_partition(disk, 0, &request, error));
+}
+
+/*
+ * The volume of a fixed disk, once the format's validation has resolved
+ * its sector into selected: without a volume size the volume takes the
+ * partition's whole usable length, rounded down to that sector, as an
+ * exact size, which the format then validates in turn; a given size must
+ * fit. The fit therefore rounds to the sector the format writes, whatever
+ * sector the format chose.
+ */
+static fsimg_status_t
+fit_volume(const fsimg_format_t *driver, const fsimg_format_variant_t *variant,
+    const fsimg_disk_plan_t *disk, fsimg_write_options_t *selected,
+    fsimg_error_t *error)
+{
+	bool sized;
+	fsimg_status_t status;
+
+	sized = selected->volume_bytes != 0;
+	if (selected->sector_bytes == 0)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "format validation did not resolve a sector size"));
+	status = fsimg_disk_plan_fit(disk, selected->sector_bytes,
+	    &selected->volume_bytes, error);
+	if (status == FSIMG_OK && !sized)
+		status = driver->writer->validate(selected, variant->id, error);
 	return (status);
 }
 
@@ -216,7 +240,7 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	}
 	if (selected.version != FSIMG_OPTIONS_VERSION ||
 	    (selected.flags & ~(FSIMG_WRITE_ALLOW_LOSS | FSIMG_WRITE_REPRODUCIBLE |
-	    FSIMG_WRITE_DURABLE | FSIMG_WRITE_IMPORT_POSIX | FSIMG_WRITE_GZIP)) != 0)
+	    FSIMG_WRITE_DURABLE | FSIMG_WRITE_IMPORT_POSIX)) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "unsupported write options version or flags"));
 	for (size_t i = 0; i < 4; i++) {
@@ -236,6 +260,8 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	status = plan_layers(ctx, stack, &selected, &layers, &disk, error);
 	if (status == FSIMG_OK)
 		status = driver->writer->validate(&selected, variant->id, error);
+	if (status == FSIMG_OK && disk.scheme != NULL && disk.fixed)
+		status = fit_volume(driver, variant, &disk, &selected, error);
 	length = 0;
 	if (status == FSIMG_OK && variant->info.max_label_bytes != 0) {
 		if (selected.label == NULL)

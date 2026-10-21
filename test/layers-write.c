@@ -675,6 +675,17 @@ test_settings(void)
 	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, &layers);
 	CHECK(plan_only(&f, "fat16/mbr", &options, &info, NULL) == FSIMG_OK);
 	CHECK(info.volume_bytes == 15 * MIB && info.image.disk_bytes == 16 * MIB);
+	/* The fit rounds to the sector the format resolves, here 4096 bytes,
+	 * which does not divide the partition's usable length.
+	 */
+	fsimg_layer_options_init(&layers);
+	layers.gpt_disk_bytes = 8 * MIB;
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, &layers);
+	options.sector_bytes = 4096;
+	CHECK(plan_only(&f, "fat12/gpt", &options, &info, NULL) == FSIMG_OK);
+	CHECK(info.sector_bytes == 4096 &&
+	    info.volume_bytes == (7 * MIB - 33 * 512) / 4096 * 4096);
+	fsimg_layer_options_init(&layers);
 	layers.mbr_disk_bytes = (UINT64_C(1) << 32) * 512 + 512;
 	expect_refused(&f, "fat16/mbr", 0, &layers, FSIMG_WRITE_REPRODUCIBLE,
 	    FSIMG_EINVAL, "mbr:disk");

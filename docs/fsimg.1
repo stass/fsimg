@@ -326,6 +326,10 @@ The spool's logical size is reserved against
 (default 64 GiB) before each step of the decode, so a decompression bomb
 stops at the step that would cross the limit; runs of zeros are left as
 holes.
+Decoding counts as work, the compressed bytes read and the bytes decoded,
+for a file and standard input alike, so
+.Fl l Ar work
+bounds it.
 When the first bytes pass for both gzip and an uncompressed image, the
 input is ambiguous:
 .Fl z

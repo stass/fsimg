@@ -98,9 +98,9 @@ static fsimg_status_t file_size(void *, uint64_t *, fsimg_error_t *);
 static void fixture_init(fixture_t *, uint64_t);
 static void fixture_free(fixture_t *);
 static int spool_new(fixture_t *);
-static fsimg_status_t open_file(fixture_t *, memory_file_t *, unsigned,
+static fsimg_status_t open_file(fixture_t *, memory_file_t *, const char *,
     const char *, int, fsimg_error_t *);
-static fsimg_status_t open_pipe(fixture_t *, int, unsigned, int,
+static fsimg_status_t open_pipe(fixture_t *, int, const char *, int,
     fsimg_error_t *);
 static pid_t feed(const unsigned char *, size_t, int *);
 static void reap(pid_t);
@@ -112,6 +112,8 @@ static void test_detection(void);
 static void test_spool_limit(void);
 static void test_spool_holes(void);
 static void test_spool_descriptor(void);
+static void test_zeroed_options(void);
+static void test_decode_work(void);
 static void test_streams(void);
 static void test_faults(void);
 static void test_spool_write_failure(void);
@@ -303,7 +305,7 @@ spool_new(fixture_t *f)
 }
 
 static fsimg_status_t
-open_file(fixture_t *f, memory_file_t *file, unsigned flags,
+open_file(fixture_t *f, memory_file_t *file, const char *compression,
     const char *stack, int spool, fsimg_error_t *error)
 {
 	fsimg_image_options_t options;
@@ -315,7 +317,8 @@ open_file(fixture_t *f, memory_file_t *file, unsigned flags,
 	ops.get_size = file_size;
 	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, file, &f->io, NULL) == FSIMG_OK);
 	fsimg_image_options_init(&options);
-	options.flags = flags;
+	snprintf(options.compression, sizeof(options.compression), "%s",
+	    compression);
 	options.spool_fd = spool;
 	if (stack != NULL)
 		CHECK(fsimg_stack_parse(stack, &options.stack, NULL) == FSIMG_OK);
@@ -326,13 +329,14 @@ open_file(fixture_t *f, memory_file_t *file, unsigned flags,
 }
 
 static fsimg_status_t
-open_pipe(fixture_t *f, int stream, unsigned flags, int spool,
+open_pipe(fixture_t *f, int stream, const char *compression, int spool,
     fsimg_error_t *error)
 {
 	fsimg_image_options_t options;
 
 	fsimg_image_options_init(&options);
-	options.flags = flags;
+	snprintf(options.compression, sizeof(options.compression), "%s",
+	    compression);
 	options.spool_fd = spool;
 	return (fsimg_image_open_stream(f->ctx, stream, &options, &f->image,
 	    error));
@@ -401,7 +405,7 @@ expect_corrupt(const buffer_t *gzip, const char *message)
 	fixture_t f;
 
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, 0, NULL, spool_new(&f), &error) ==
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), &error) ==
 	    FSIMG_ECORRUPT);
 	if (strcmp(error.message, message) != 0)
 		fprintf(stderr, "expected \"%s\", got \"%s\"\n", message,
@@ -447,7 +451,7 @@ test_members(void)
 		file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length,
 		    .piece = piece };
 		fixture_init(&f, 0);
-		CHECK(open_file(&f, &file, 0, NULL, spool_new(&f), NULL) ==
+		CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) ==
 		    FSIMG_OK);
 		CHECK(fsimg_image_get_info(f.image, &info, NULL) != FSIMG_OK);
 		expect_disk(&f, expected, 370 * KIB);
@@ -456,7 +460,7 @@ test_members(void)
 	/* Forcing gzip reads the same; the info record names it. */
 	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, FSIMG_IMAGE_GZIP, "fat12/-/-", spool_new(&f),
+	CHECK(open_file(&f, &file, "gzip", "fat12/-/-", spool_new(&f),
 	    NULL) == FSIMG_OK);
 	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
 	CHECK(strcmp(info.compression, "gzip") == 0 &&
@@ -579,21 +583,32 @@ test_detection(void)
 	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
 	fixture_init(&f, 0);
 	spool = spool_new(&f);
-	CHECK(open_file(&f, &file, 0, "fat12/-/-", spool, NULL) == FSIMG_OK);
+	CHECK(open_file(&f, &file, "", "fat12/-/-", spool, NULL) == FSIMG_OK);
 	CHECK(fcntl(spool, F_GETFD) == -1 && errno == EBADF);
 	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
 	CHECK(info.compression[0] == '\0' && info.disk_bytes == gzip.length);
 	fixture_free(&f);
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, FSIMG_IMAGE_GZIP, NULL, spool_new(&f),
+	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 	    &error) == FSIMG_EFORMAT);
 	CHECK(strcmp(error.path, "gzip") == 0);
 	fixture_free(&f);
 	file = (memory_file_t){ .bytes = data, .length = 64 * KIB };
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, FSIMG_IMAGE_GZIP, NULL, spool_new(&f),
+	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 	    &error) == FSIMG_EFORMAT);
 	CHECK(strcmp(error.path, "gzip") == 0);
+	fixture_free(&f);
+	/* A forced name the registry cannot decode, or lacks, is refused. */
+	fixture_init(&f, 0);
+	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f),
+	    &error) == FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "zstd") == 0);
+	fixture_free(&f);
+	fixture_init(&f, 0);
+	CHECK(open_file(&f, &file, "dmg", NULL, spool_new(&f),
+	    &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "dmg") == 0);
 	fixture_free(&f);
 	free(gzip.bytes);
 
@@ -608,18 +623,18 @@ test_detection(void)
 	disk[511] = 0xaa;
 	file = (memory_file_t){ .bytes = disk, .length = 2 * MIB };
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, 0, NULL, spool_new(&f), &error) ==
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), &error) ==
 	    FSIMG_EFORMAT);
 	CHECK(strstr(error.message, "both a compressed and an uncompressed") !=
 	    NULL);
 	fixture_free(&f);
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, 0, "fat12", spool_new(&f), NULL) == FSIMG_OK);
+	CHECK(open_file(&f, &file, "", "fat12", spool_new(&f), NULL) == FSIMG_OK);
 	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
 	CHECK(info.compression[0] == '\0' && strcmp(info.scheme, "mbr") == 0);
 	fixture_free(&f);
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, FSIMG_IMAGE_GZIP, NULL, spool_new(&f),
+	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 	    &error) == FSIMG_ECORRUPT);
 	CHECK(strcmp(error.path, "gzip") == 0);
 	fixture_free(&f);
@@ -650,12 +665,12 @@ test_spool_limit(void)
 	gzip = gzip_of(data, MIB);
 	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
 	fixture_init(&f, MIB);
-	CHECK(open_file(&f, &file, 0, NULL, spool_new(&f), NULL) == FSIMG_OK);
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 	CHECK(stats.spool_bytes == MIB && stats.spool_peak == MIB);
 	fixture_free(&f);
 	fixture_init(&f, MIB - 1);
-	CHECK(open_file(&f, &file, 0, NULL, spool_new(&f), &error) ==
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), &error) ==
 	    FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_SPOOL && error.limit == MIB - 1);
 	fixture_free(&f);
@@ -668,7 +683,7 @@ test_spool_limit(void)
 	spool = spool_new(&f);
 	watch = dup(spool);
 	CHECK(watch != -1);
-	CHECK(open_file(&f, &file, 0, NULL, spool, &error) == FSIMG_ELIMIT);
+	CHECK(open_file(&f, &file, "", NULL, spool, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_SPOOL &&
 	    error.limit == 8 * MIB && error.observed > 8 * MIB);
 	CHECK(fstat(watch, &st) == 0 && st.st_size > 0 &&
@@ -700,7 +715,7 @@ test_spool_holes(void)
 	gzip = gzip_of(zeros, 32 * MIB);
 	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, 0, NULL, spool_new(&f), NULL) == FSIMG_OK);
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 	CHECK(stats.spool_bytes == 32 * MIB &&
 	    stats.spool_physical_bytes < MIB);
@@ -710,7 +725,7 @@ test_spool_holes(void)
 
 	fixture_init(&f, 0);
 	child = feed(zeros, 32 * MIB, &stream);
-	CHECK(open_pipe(&f, stream, 0, spool_new(&f), NULL) == FSIMG_OK);
+	CHECK(open_pipe(&f, stream, "", spool_new(&f), NULL) == FSIMG_OK);
 	reap(child);
 	CHECK(close(stream) == 0);
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
@@ -741,7 +756,7 @@ test_spool_descriptor(void)
 	gzip = gzip_of(data, 64 * KIB);
 	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
 	fixture_init(&f, 0);
-	CHECK(open_file(&f, &file, 0, NULL, -1, &error) == FSIMG_ELIMIT);
+	CHECK(open_file(&f, &file, "", NULL, -1, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_SPOOL && error.limit == 0);
 	fixture_free(&f);
 
@@ -781,19 +796,19 @@ test_spool_descriptor(void)
 		CHECK(kind == 0 || spool != -1);
 		if (kind == 5) {
 			stream = -1;
-			CHECK(open_pipe(&f, -1, 0, spool, &error) == FSIMG_EINVAL);
+			CHECK(open_pipe(&f, -1, "", spool, &error) == FSIMG_EINVAL);
 			CHECK(strcmp(error.message, "invalid spool descriptor") == 0);
 			fixture_free(&f);
 			continue;
 		}
 		child = feed(gzip.bytes, gzip.length, &stream);
 		if (kind == 0) {
-			CHECK(open_pipe(&f, stream, 0, spool, &error) ==
+			CHECK(open_pipe(&f, stream, "", spool, &error) ==
 			    FSIMG_ELIMIT);
 			CHECK(error.resource == FSIMG_RESOURCE_SPOOL &&
 			    error.limit == 0);
 		} else {
-			CHECK(open_pipe(&f, stream, 0, spool, &error) ==
+			CHECK(open_pipe(&f, stream, "", spool, &error) ==
 			    FSIMG_EINVAL);
 			CHECK(strcmp(error.path, "spool") == 0);
 			CHECK(fcntl(spool, F_GETFD) == -1 && errno == EBADF);
@@ -806,6 +821,103 @@ test_spool_descriptor(void)
 		fixture_free(&f);
 	}
 	free(gzip.bytes);
+	free(data);
+}
+
+/*
+ * Zero-filled image options name descriptor 0, standard input, as the
+ * spool. Their size is not the one fsimg_image_options_init sets, so both
+ * opens refuse them before the spool is examined and descriptor 0 stays
+ * open.
+ */
+static void
+test_zeroed_options(void)
+{
+	fsimg_image_options_t options;
+	fsimg_image_t *image;
+	fsimg_io_ops_t ops;
+	fsimg_error_t error;
+	memory_file_t file;
+	unsigned char byte = 0;
+	fixture_t f;
+	int ends[2];
+
+	/* With descriptor 0 closed, the lowest free descriptor fills it. */
+	if (fcntl(0, F_GETFD) == -1)
+		CHECK(open("/dev/null", O_RDONLY) == 0);
+	bzero(&options, sizeof(options));
+	file = (memory_file_t){ .bytes = &byte, .length = 1 };
+	fixture_init(&f, 0);
+	fsimg_io_ops_init(&ops);
+	ops.read_at = file_read;
+	ops.get_size = file_size;
+	CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &file, &f.io, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_open(f.ctx, f.io, &options, &image, &error) ==
+	    FSIMG_EINVAL && image == NULL);
+	CHECK(strcmp(error.message, "invalid image options size or version") == 0);
+	CHECK(fcntl(0, F_GETFD) != -1);
+	CHECK(pipe(ends) == 0);
+	CHECK(fsimg_image_open_stream(f.ctx, ends[0], &options, &image,
+	    &error) == FSIMG_EINVAL && image == NULL);
+	CHECK(fcntl(0, F_GETFD) != -1);
+	CHECK(close(ends[0]) == 0 && close(ends[1]) == 0);
+	fixture_free(&f);
+}
+
+/*
+ * Decoding counts work as a container's chunk decoding does: every
+ * compressed byte read, headers included, and every byte produced, for a
+ * file and a stream alike. A work limit of half a MiB stops either the
+ * decode of 1 MiB of data or the read of 1 MiB of member headers around
+ * nearly empty members, with FSIMG_RESOURCE_WORK.
+ */
+static void
+test_decode_work(void)
+{
+	unsigned char *data = pattern(MIB, 8);
+	member_t member = { .data = data, .length = 16, .flags = FLAG_FNAME |
+	    FLAG_FCOMMENT, .name_length = 64 * KIB - 1,
+	    .comment_length = 64 * KIB - 1 };
+	fsimg_options_t options;
+	fsimg_stats_t stats;
+	fsimg_error_t error;
+	memory_file_t file;
+	buffer_t inputs[2] = { { 0 } };
+	fixture_t f;
+	pid_t child;
+	int stream;
+
+	inputs[0] = gzip_of(data, MIB);
+	for (unsigned i = 0; i < 8; i++)
+		member_append(&inputs[1], &member);
+	for (unsigned run = 0; run < 4; run++) {
+		const buffer_t *input = &inputs[run / 2];
+
+		fixture_init(&f, 0);
+		fsimg_ctx_free(f.ctx);
+		fsimg_options_init(&options);
+		options.memory_bytes = 16 * MIB;
+		options.max_work = MIB / 2;
+		CHECK(fsimg_ctx_new(&options, &f.ctx, NULL) == FSIMG_OK);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+		f.baseline_memory = stats.memory_bytes;
+		if (run % 2 != 0) {
+			child = feed(input->bytes, input->length, &stream);
+			CHECK(open_pipe(&f, stream, "", spool_new(&f), &error) ==
+			    FSIMG_ELIMIT);
+			CHECK(close(stream) == 0);
+			reap(child);
+		} else {
+			file = (memory_file_t){ .bytes = input->bytes,
+			    .length = input->length };
+			CHECK(open_file(&f, &file, "", NULL, spool_new(&f),
+			    &error) == FSIMG_ELIMIT);
+		}
+		CHECK(error.resource == FSIMG_RESOURCE_WORK);
+		fixture_free(&f);
+	}
+	free(inputs[0].bytes);
+	free(inputs[1].bytes);
 	free(data);
 }
 
@@ -827,7 +939,7 @@ test_streams(void)
 
 	fixture_init(&f, 0);
 	child = feed(data, 3 * MIB + 17, &stream);
-	CHECK(open_pipe(&f, stream, 0, spool_new(&f), NULL) == FSIMG_OK);
+	CHECK(open_pipe(&f, stream, "", spool_new(&f), NULL) == FSIMG_OK);
 	reap(child);
 	CHECK(close(stream) == 0);
 	CHECK(fsimg_image_get_info(f.image, &info, NULL) != FSIMG_OK);
@@ -837,7 +949,7 @@ test_streams(void)
 	gzip = gzip_of(data, 3 * MIB + 17);
 	fixture_init(&f, 0);
 	child = feed(gzip.bytes, gzip.length, &stream);
-	CHECK(open_pipe(&f, stream, 0, spool_new(&f), NULL) == FSIMG_OK);
+	CHECK(open_pipe(&f, stream, "", spool_new(&f), NULL) == FSIMG_OK);
 	reap(child);
 	CHECK(close(stream) == 0);
 	expect_disk(&f, data, 3 * MIB + 17);
@@ -845,7 +957,7 @@ test_streams(void)
 
 	fixture_init(&f, 0);
 	child = feed(gzip.bytes, gzip.length / 2, &stream);
-	CHECK(open_pipe(&f, stream, 0, spool_new(&f), &error) ==
+	CHECK(open_pipe(&f, stream, "", spool_new(&f), &error) ==
 	    FSIMG_ECORRUPT);
 	CHECK(strcmp(error.path, "gzip") == 0);
 	reap(child);
@@ -884,7 +996,7 @@ test_faults(void)
 				f.fail_allocation = attempt;
 			else
 				file.fail_at = attempt;
-			status = open_file(&f, &file, 0, NULL, spool_new(&f), NULL);
+			status = open_file(&f, &file, "", NULL, spool_new(&f), NULL);
 			if (status == FSIMG_OK)
 				expect_disk(&f, data, 600 * KIB);
 			fixture_free(&f);
@@ -925,7 +1037,7 @@ test_spool_write_failure(void)
 		CHECK(signal(SIGXFSZ, SIG_IGN) != SIG_ERR);
 		CHECK(setrlimit(RLIMIT_FSIZE, &limit) == 0);
 		fixture_init(&f, 0);
-		CHECK(open_file(&f, &file, 0, NULL, spool_new(&f), &error) ==
+		CHECK(open_file(&f, &file, "", NULL, spool_new(&f), &error) ==
 		    FSIMG_EIO);
 		CHECK(error.os_error == EFBIG);
 		fixture_free(&f);
@@ -967,6 +1079,8 @@ main(int argc, char **argv)
 	test_spool_limit();
 	test_spool_holes();
 	test_spool_descriptor();
+	test_zeroed_options();
+	test_decode_work();
 	test_streams();
 	test_faults();
 	test_spool_write_failure();

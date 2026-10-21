@@ -75,9 +75,15 @@ struct fsimg_plan {
 	fsimg_plan_info_t info;
 };
 
-/* emit places the plan's bytes through the emission object (emit.h). The
- * driver runs only after the writer has checked and resized the sink and
- * fsimg_emit_image() has zeroed it.
+/*
+ * validate checks a variant's options and resolves their defaults in
+ * place, the sector size always: it keeps a nonzero sector_bytes and
+ * replaces zero with its default. It accepts volume_bytes zero (automatic
+ * sizing), and validating its own result again changes nothing, since a
+ * fixed disk's fit (writer.c fit_volume) rounds the volume to that sector
+ * and validates once more. emit places the plan's bytes through the
+ * emission object (emit.h); the driver runs only after the writer has
+ * checked and resized the sink and fsimg_emit_image() has zeroed it.
  */
 typedef struct fsimg_writer_ops {
 	fsimg_status_t (*validate)(fsimg_write_options_t *, unsigned,

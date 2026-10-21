@@ -68,7 +68,7 @@ static void fixture_init(fixture_t *, uint64_t);
 static void fixture_free(fixture_t *);
 static int raw_file(fixture_t *);
 static void options_for(fsimg_write_options_t *, fsimg_layer_options_t *,
-    unsigned, int64_t, uint32_t);
+    const char *, unsigned, int64_t, uint32_t);
 static fsimg_status_t write_image(fixture_t *, const char *,
     const fsimg_write_options_t *, memory_t *, fsimg_error_t *);
 static fsimg_status_t wrap(fixture_t *, memory_t *, const char *,
@@ -82,6 +82,7 @@ static void test_stacks_and_operations(void);
 static void test_incompressible_and_containers(void);
 static void test_output_limit(void);
 static void test_faults(void);
+static void test_compression_names(void);
 
 static fsimg_status_t
 memory_read(void *argument, uint64_t offset, void *buffer, size_t length,
@@ -233,11 +234,13 @@ raw_file(fixture_t *f)
 
 static void
 options_for(fsimg_write_options_t *options, fsimg_layer_options_t *layers,
-    unsigned flags, int64_t epoch, uint32_t level)
+    const char *compression, unsigned flags, int64_t epoch, uint32_t level)
 {
 	fsimg_layer_options_init(layers);
 	layers->gzip_level = level;
 	fsimg_write_options_init(options);
+	snprintf(options->compression, sizeof(options->compression), "%s",
+	    compression);
 	options->flags = flags;
 	options->epoch = epoch;
 	options->layers = layers;
@@ -262,13 +265,75 @@ write_image(fixture_t *f, const char *stack,
 		return (status);
 	fsimg_sink_init(&sink, FSIMG_SINK_IO);
 	sink.io = memory_io(f, out);
-	if ((options->flags & FSIMG_WRITE_GZIP) != 0 ||
+	if (options->compression[0] != '\0' ||
 	    strstr(stack, "dmg") != NULL)
 		sink.raw_fd = raw_file(f);
 	status = fsimg_writer_output(writer, &sink, error);
 	fsimg_io_free(sink.io);
 	fsimg_writer_free(writer);
 	return (status);
+}
+
+/*
+ * Fill the stack below the caller with a nonzero pattern, so a callee that
+ * reads an uninitialized local sees garbage rather than a lucky zero.
+ */
+static void
+dirty_stack(void)
+{
+	volatile unsigned char bytes[64 * 1024];
+
+	for (size_t i = 0; i < sizeof(bytes); i++)
+		bytes[i] = 0x41;
+}
+
+/*
+ * The compression is a registry name: one the registry lacks as a
+ * compression is FSIMG_EINVAL, one it cannot write FSIMG_EUNSUPPORTED, and
+ * an unterminated one FSIMG_EINVAL. The writer and wrap refuse each at
+ * construction, before anything is planned or written.
+ */
+static void
+test_compression_names(void)
+{
+	static const struct {
+		const char	*name;		/* NULL: 16 bytes, no NUL */
+		fsimg_status_t	 status;
+	} cases[] = {
+		{ "nosuch", FSIMG_EINVAL },
+		{ "dmg", FSIMG_EINVAL },
+		{ "zstd", FSIMG_EUNSUPPORTED },
+		{ NULL, FSIMG_EINVAL },
+	};
+	fsimg_write_options_t options;
+	fsimg_layer_options_t layers;
+	fsimg_writer_t *writer;
+	fsimg_error_t error;
+	memory_t volume, image;
+	fixture_t f;
+
+	fixture_init(&f, 0);
+	options_for(&options, &layers, "", FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
+	CHECK(write_image(&f, "fat12", &options, &volume, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		options_for(&options, &layers, cases[i].name == NULL ? "" :
+		    cases[i].name, FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
+		if (cases[i].name == NULL)
+			memset(options.compression, 'x', sizeof(options.compression));
+		writer = NULL;
+		dirty_stack();
+		CHECK(fsimg_writer_new(f.ctx, "fat12/gpt", &options, &writer,
+		    &error) == cases[i].status && writer == NULL);
+		if (cases[i].name != NULL)
+			CHECK(strcmp(error.path, cases[i].name) == 0);
+		bzero(&image, sizeof(image));
+		dirty_stack();
+		CHECK(wrap(&f, &volume, "fat12/gpt", &options, &image, NULL) ==
+		    cases[i].status);
+		free(image.bytes);
+	}
+	free(volume.bytes);
+	fixture_free(&f);
 }
 
 static fsimg_status_t
@@ -363,7 +428,7 @@ test_header_and_levels(void)
 	fixture_t f;
 
 	fixture_init(&f, 0);
-	options_for(&options, &layers, FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
+	options_for(&options, &layers, "", FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
 	options.volume_bytes = MIB;
 	bzero(&raw, sizeof(raw));
 	CHECK(fsimg_writer_new(f.ctx, "fat12", &options, &writer, NULL) == FSIMG_OK);
@@ -372,8 +437,8 @@ test_header_and_levels(void)
 	fsimg_io_free(io);
 	fsimg_writer_free(writer);
 	for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
-		options_for(&options, &layers, FSIMG_WRITE_REPRODUCIBLE |
-		    FSIMG_WRITE_GZIP, EPOCH, levels[i].level);
+		options_for(&options, &layers, "gzip", FSIMG_WRITE_REPRODUCIBLE,
+		    EPOCH, levels[i].level);
 		options.volume_bytes = MIB;
 		CHECK(write_image(&f, "fat12", &options, &image, NULL) == FSIMG_OK);
 		header[8] = levels[i].xfl;
@@ -394,13 +459,13 @@ test_header_and_levels(void)
 		free(decoded.bytes);
 	}
 	for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
-		options_for(&options, &layers, FSIMG_WRITE_REPRODUCIBLE |
-		    FSIMG_WRITE_GZIP, EPOCH, refused[i]);
+		options_for(&options, &layers, "gzip", FSIMG_WRITE_REPRODUCIBLE,
+		    EPOCH, refused[i]);
 		CHECK(fsimg_writer_new(f.ctx, "fat12", &options, &writer,
 		    &error) == FSIMG_EINVAL);
 		CHECK(strcmp(error.path, "gzip:level") == 0);
 	}
-	options_for(&options, &layers, FSIMG_WRITE_REPRODUCIBLE, EPOCH, 9);
+	options_for(&options, &layers, "", FSIMG_WRITE_REPRODUCIBLE, EPOCH, 9);
 	CHECK(fsimg_writer_new(f.ctx, "fat12", &options, &writer, &error) ==
 	    FSIMG_EINVAL);
 	CHECK(strcmp(error.path, "gzip:level") == 0);
@@ -430,11 +495,11 @@ test_mtime(void)
 	fixture_t f;
 
 	fixture_init(&f, 0);
-	options_for(&options, &layers, FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
+	options_for(&options, &layers, "", FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
 	CHECK(write_image(&f, "fat12", &options, &volume, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		options_for(&options, &layers, FSIMG_WRITE_REPRODUCIBLE |
-		    FSIMG_WRITE_GZIP, cases[i].epoch, 0);
+		options_for(&options, &layers, "gzip", FSIMG_WRITE_REPRODUCIBLE,
+		    cases[i].epoch, 0);
 		CHECK(wrap(&f, &volume, "fat12", &options, &image, NULL) ==
 		    FSIMG_OK);
 		CHECK(mtime_of(&image) == cases[i].mtime);
@@ -450,7 +515,7 @@ test_mtime(void)
 		}
 	}
 	free(first.bytes);
-	options_for(&options, &layers, FSIMG_WRITE_GZIP, EPOCH, 0);
+	options_for(&options, &layers, "gzip", 0, EPOCH, 0);
 	before = time(NULL);
 	CHECK(wrap(&f, &volume, "fat12", &options, &image, NULL) == FSIMG_OK);
 	after = time(NULL);
@@ -484,9 +549,8 @@ test_stacks_and_operations(void)
 	int stream;
 
 	fixture_init(&f, 0);
-	options_for(&plain, &layers, FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
-	options_for(&gzip, &layers, FSIMG_WRITE_REPRODUCIBLE | FSIMG_WRITE_GZIP,
-	    EPOCH, 0);
+	options_for(&plain, &layers, "", FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
+	options_for(&gzip, &layers, "gzip", FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
 	CHECK(write_image(&f, "fat12/gpt/dmg", &plain, &dmg, NULL) == FSIMG_OK);
 	CHECK(write_image(&f, "fat12/gpt/dmg", &gzip, &packed, NULL) == FSIMG_OK);
 	gunzip(&packed, &decoded);
@@ -598,7 +662,7 @@ test_incompressible_and_containers(void)
 	srandom(1);
 	for (uint64_t i = 0; i < noise.length; i++)
 		noise.bytes[i] = (unsigned char)random();
-	options_for(&plain, &layers, FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
+	options_for(&plain, &layers, "", FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
 	part = (fsimg_part_t){ .volume = memory_io(&f, &noise), .type = "basic" };
 	fsimg_sink_init(&sink, FSIMG_SINK_IO);
 	bzero(&expected, sizeof(expected));
@@ -607,8 +671,8 @@ test_incompressible_and_containers(void)
 	    FSIMG_OK);
 	fsimg_io_free(sink.io);
 	for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
-		options_for(&gzip, &layers, FSIMG_WRITE_REPRODUCIBLE |
-		    FSIMG_WRITE_GZIP, EPOCH, levels[i]);
+		options_for(&gzip, &layers, "gzip", FSIMG_WRITE_REPRODUCIBLE,
+		    EPOCH, levels[i]);
 		bzero(&packed, sizeof(packed));
 		sink.io = memory_io(&f, &packed);
 		CHECK(fsimg_image_compose(f.ctx, "gpt", &part, 1, &gzip, &sink,
@@ -624,8 +688,7 @@ test_incompressible_and_containers(void)
 	free(expected.bytes);
 	free(noise.bytes);
 
-	options_for(&gzip, &layers, FSIMG_WRITE_REPRODUCIBLE | FSIMG_WRITE_GZIP,
-	    EPOCH, 0);
+	options_for(&gzip, &layers, "gzip", FSIMG_WRITE_REPRODUCIBLE, EPOCH, 0);
 	CHECK(write_image(&f, "fat12", &plain, &volume, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < sizeof(stacks) / sizeof(stacks[0]); i++) {
 		CHECK(wrap(&f, &volume, stacks[i], &plain, &expected, NULL) ==
@@ -676,8 +739,8 @@ test_output_limit(void)
 
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		fixture_init(&f, 0);
-		options_for(&options, &layers, FSIMG_WRITE_REPRODUCIBLE |
-		    FSIMG_WRITE_GZIP, EPOCH, 0);
+		options_for(&options, &layers, "gzip", FSIMG_WRITE_REPRODUCIBLE,
+		    EPOCH, 0);
 		options.volume_bytes = MIB;
 		CHECK(fsimg_writer_new(f.ctx, cases[i].stack, &options, &writer,
 		    NULL) == FSIMG_OK);
@@ -726,8 +789,9 @@ test_faults(void)
 	fixture_t f;
 
 	fixture_init(&f, 0);
-	options_for(&options, &layers, FSIMG_WRITE_REPRODUCIBLE |
-	    FSIMG_WRITE_GZIP | FSIMG_WRITE_DURABLE, EPOCH, 0);
+	options_for(&options, &layers, "gzip",
+	    FSIMG_WRITE_REPRODUCIBLE | FSIMG_WRITE_DURABLE,
+	    EPOCH, 0);
 	options.volume_bytes = MIB;
 	CHECK(write_image(&f, "fat12", &options, &image, NULL) == FSIMG_OK);
 	cuts[0] = 1;
@@ -817,6 +881,7 @@ main(void)
 	test_incompressible_and_containers();
 	test_output_limit();
 	test_faults();
+	test_compression_names();
 	printf("gzip write tests passed\n");
 	return (0);
 }

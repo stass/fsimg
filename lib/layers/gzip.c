@@ -146,7 +146,8 @@ const fsimg_compression_ops_t fsimg_gzip_compression = {
 	.decode = gzip_decode,
 	.plan = gzip_plan,
 	.bound = gzip_bound,
-	.encoder = &gzip_encoder
+	.encoder = &gzip_encoder,
+	.zlib = true
 };
 
 static fsimg_status_t
@@ -206,7 +207,11 @@ gzip_corrupt(fsimg_error_t *error, const char *message)
 	    message));
 }
 
-/* Take the next piece of the source when no input waits. */
+/*
+ * Take the next piece of the source when no input waits. Every compressed
+ * byte enters here, headers and trailers included, and is charged as work
+ * as it arrives, from a file or a stream alike.
+ */
 static fsimg_status_t
 refill(gzip_decoder_t *decoder, fsimg_error_t *error)
 {
@@ -217,6 +222,9 @@ refill(gzip_decoder_t *decoder, fsimg_error_t *error)
 		return (FSIMG_OK);
 	status = fsimg_spool_input_read(decoder->source, decoder->input,
 	    GZIP_INPUT_BYTES, &count, error);
+	if (status == FSIMG_OK)
+		status = fsimg_session_charge(decoder->source->session, 0, 0,
+		    count, error);
 	if (status != FSIMG_OK)
 		return (status);
 	decoder->stream.next_in = decoder->input;
@@ -372,6 +380,14 @@ inflate_member(gzip_decoder_t *decoder, uLong *crc, uint64_t *length,
 			return (gzip_corrupt(error,
 			    "gzip member's DEFLATE data is invalid"));
 		produced = GZIP_OUTPUT_BYTES - stream->avail_out;
+		/* The bytes produced are work, as the compressed bytes were
+		 * when refill took them, so a decode costs what a container's
+		 * chunk decoding costs.
+		 */
+		status = fsimg_session_charge(decoder->source->session, 0, 0,
+		    produced, error);
+		if (status != FSIMG_OK)
+			return (status);
 		*crc = crc32(*crc, decoder->output, (uInt)produced);
 		*length += produced;
 		status = fsimg_spool_append(decoder->spool, decoder->output,

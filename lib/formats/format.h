@@ -47,29 +47,50 @@ extern const fsimg_format_t fsimg_exfat_format;
 extern const fsimg_format_t fsimg_qnx6_format;
 extern const fsimg_format_t fsimg_qnx4_format;
 
-/* What a set of probes says about one prefix: how many claimed it and the
- * first claimant's verdict, its reason, and on a match its variant. A
- * forced descriptor is the only probe run.
+/*
+ * What a set of probes says about one input, under the one claim rule for
+ * filesystems and image layers alike: a probe failing with FSIMG_EFORMAT
+ * does not claim the input, and any other verdict, a corrupt or
+ * unsupported one included, is a claim. claims counts them; the first
+ * claim's verdict and reason are kept with its claimant, a filesystem
+ * format (with its variant on a match) or an image layer. A survey that
+ * ran a forced probe alone keeps that probe's verdict even when it does
+ * not claim, since its absent signature is the answer.
  */
-typedef struct fsimg_format_survey {
-	const fsimg_format_t *claimant;
+struct fsimg_layer;
+
+typedef struct fsimg_survey {
+	const fsimg_format_t *format;
 	const fsimg_format_variant_t *variant;
+	const struct fsimg_layer *layer;
 	unsigned	 claims;
 	fsimg_status_t	 status;
 	fsimg_error_t	 reason;
-} fsimg_format_survey_t;
+} fsimg_survey_t;
+
+/* An empty survey: no claim, status FSIMG_EFORMAT. */
+void fsimg_survey_init(fsimg_survey_t *);
+/* Count one probe's verdict under the claim rule; true when it is the
+ * first claim, whose claimant the caller records.
+ */
+bool fsimg_survey_count(fsimg_survey_t *, fsimg_status_t,
+    const fsimg_error_t *);
+/* What the count decides: no claim, several (AMBIGUOUS), or the one
+ * claim as a match, an unsupported or a corrupt input.
+ */
+fsimg_claim_t fsimg_survey_claim(const fsimg_survey_t *);
 
 const fsimg_format_t *fsimg_format_find(const char *,
     const fsimg_format_variant_t **);
 void fsimg_format_survey(const fsimg_format_t *const *, size_t,
     const fsimg_format_t *, const unsigned char *, size_t, uint64_t,
-    fsimg_format_survey_t *);
+    fsimg_survey_t *);
 /* The registry's survey for the image layers: every reader format, or the
  * one named by forced_name, which must name a format with a reader. The
  * prefix needs at most fsimg_format_probe_bytes(forced_name) bytes.
  */
 fsimg_status_t fsimg_format_identify(const char *, const unsigned char *,
-    size_t, uint64_t, fsimg_format_survey_t *, fsimg_error_t *);
+    size_t, uint64_t, fsimg_survey_t *, fsimg_error_t *);
 size_t fsimg_format_probe_bytes(const char *);
 fsimg_status_t fsimg_format_claim(const fsimg_format_t *const *, size_t,
     const fsimg_format_t *, const unsigned char *, size_t, uint64_t,

@@ -196,7 +196,7 @@ job_decodes(const unsigned char *raw, unsigned offset, unsigned char value)
 	    &capabilities, NULL) == FSIMG_OK);
 }
 
-/* Standard input and gzip belong to read jobs, standard output to a
+/* Standard input belongs to read jobs, standard output to a
  * creation; the worker refuses each flag on a job of the other side.
  */
 static void
@@ -207,13 +207,26 @@ test_job_stream_flags(void)
 		unsigned	 flags;
 		bool		 valid;
 	} cases[] = {
-		{ FSIMG_JOB_LIST, FSIMG_JOB_STDIN | FSIMG_JOB_GZIP, true },
-		{ FSIMG_JOB_VERIFY, FSIMG_JOB_GZIP, true },
+		{ FSIMG_JOB_LIST, FSIMG_JOB_STDIN, true },
 		{ FSIMG_JOB_LIST, FSIMG_JOB_STDOUT, false },
 		{ FSIMG_JOB_CREATE, FSIMG_JOB_STDOUT, true },
 		{ FSIMG_JOB_CREATE, FSIMG_JOB_STDIN, false },
-		{ FSIMG_JOB_CREATE, FSIMG_JOB_GZIP, false },
 		{ FSIMG_JOB_PLAN, FSIMG_JOB_STDOUT, false },
+	};
+	/* The compression a job carries must be one its side can apply: a
+	 * create writes it and a read decodes it.
+	 */
+	static const struct {
+		fsimg_job_kind_t kind;
+		const char	*name;
+		bool		 valid;
+	} compressions[] = {
+		{ FSIMG_JOB_LIST, "gzip", true },
+		{ FSIMG_JOB_VERIFY, "gzip", true },
+		{ FSIMG_JOB_CREATE, "gzip", true },
+		{ FSIMG_JOB_LIST, "zstd", false },
+		{ FSIMG_JOB_CREATE, "zstd", false },
+		{ FSIMG_JOB_LIST, "dmg", false },
 	};
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES];
@@ -233,6 +246,22 @@ test_job_stream_flags(void)
 		    &capabilities, NULL) == FSIMG_OK) == cases[i].valid);
 		if (cases[i].valid)
 			CHECK(decoded.flags == cases[i].flags);
+	}
+	for (unsigned i = 0; i < sizeof(compressions) / sizeof(compressions[0]);
+	    i++) {
+		fsimg_worker_request_init(&request);
+		request.kind = compressions[i].kind;
+		snprintf(request.compression, sizeof(request.compression), "%s",
+		    compressions[i].name);
+		if (fsimg_job_has_roots(request.kind)) {
+			request.root_paths = image_root;
+			request.root_count = 1;
+		}
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK((fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK) == compressions[i].valid);
+		if (compressions[i].valid)
+			CHECK(strcmp(decoded.compression, compressions[i].name) == 0);
 	}
 	/* A read job's standard input is its input capability. */
 	fsimg_worker_request_init(&request);

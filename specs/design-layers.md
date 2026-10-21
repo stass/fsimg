@@ -162,18 +162,20 @@ layer boundary.
 Opening an image peels from the outside in, and each step produces the input
 of the next:
 
-1. **Compression.** The gzip probe runs on the input's prefix together with
-   every other probe that can run there: the scheme and filesystem probes,
-   and for a seekable input the container probes. This step decides one
-   thing, whether the input is compressed, and decides it here and nowhere
-   else: gzip claims and nothing else claims, compressed; gzip and any other
-   probe claim, ambiguous, which `-z` resolves as compressed and an explicit
-   read-side stack (one naming or emptying any slot) as not compressed;
-   otherwise not compressed. A stream's first block is probed as the start
+1. **Compression.** The compression probes run on the input's prefix and,
+   when one claims, so does every other probe that can run there: the
+   scheme and filesystem probes, and for a seekable input the container
+   probes. This step decides one thing, whether the input is compressed,
+   and decides it here and nowhere else: one compression claims and
+   nothing else claims, compressed by it; a compression and any other
+   probe, another compression included, claim, ambiguous, which an
+   explicit read-side stack (one naming or emptying any slot) resolves as
+   not compressed; otherwise not compressed. A forced compression, as `-z`
+   forces gzip, runs only its own probe, which must claim. A stream's first block is probed as the start
    of a file of unbounded length, so a probe's check against the length
    passes rather than hiding a claim, and an ambiguity is reported instead
-   of a silent choice. A non-gzip
-   claim at this step decides nothing further; containers, schemes and
+   of a silent choice. A claim other than a compression's at this step
+   decides nothing further; containers, schemes and
    filesystems are decided by their own steps below, so a fixed VHD whose
    raw disk also draws a filesystem claim is not ambiguous here. A
    compressed input is decoded into the [spool](#stream-input-and-the-spool);
@@ -222,9 +224,18 @@ disables a check.
 
 Compression is not a slot, so no stack forces it: the
 [step-1 rule](#peeling-order) decides it whether or not a stack is given,
-and `-z` or an explicit read-side stack only resolves a step-1 ambiguity.
-`-z` on an input that gzip does not claim fails as any forced layer with an
-absent signature does.
+and an explicit read-side stack only resolves a step-1 ambiguity. The image
+options force a compression by its registered name instead, as `-z` forces
+gzip; a forced compression runs only its own probe, and an input it does
+not claim fails as any forced layer with an absent signature does.
+
+One survey runs every probe a step needs, layers and filesystems alike,
+and counts the claims under one rule: a probe's `FSIMG_EFORMAT` is no
+claim, and any other verdict, a corrupt or unsupported one included, is a
+claim whose first instance is kept with its reason. Each step reads its
+outcome from that count, none, exactly one or several, so the scheme,
+container, compression and filesystem probes cannot drift apart in what
+counts as a claim.
 
 ### Partition selection
 
@@ -333,6 +344,11 @@ errors.
 * Members are decoded in sequence, as `gzip(1)` does; each member's CRC32 and
   modular length are checked. Bytes after the last member are an error, not a
   warning. The decoder's state and window are charged to memory.
+* Decoding counts work as a container's chunk decoding does: every
+  compressed byte the decoder reads, member headers and trailers included,
+  and every decoded byte it produces is charged to the work counter, for a seekable file and a stream alike, so
+  `-l work=` and the deadline bound a decode, and a stream stops at the work
+  limit with `FSIMG_RESOURCE_WORK`.
 * Cancellation and I/O errors stop the fill; a partially filled spool is
   discarded with the image.
 
@@ -383,7 +399,9 @@ constraint like an explicit volume size: with `-s` the volume must fit between
 the aligned start and the trailing tables, and the remainder stays
 unallocated; without `-s` the volume takes the whole usable range, rounded
 down to the filesystem's sector size, and that length is passed to the
-filesystem as its exact size. `disk=` must be a multiple of the container's
+filesystem as its exact size. The filesystem resolves its sector from its
+options before the fit and validates the fitted length after it, so the fit
+rounds to the sector the filesystem writes, whichever it chooses. `disk=` must be a multiple of the container's
 granularity and the scheme's sector size. `FSIMG_WRITE_MINIMIZE` minimises the
 volume; the scheme adds its fixed overhead and never changes the result.
 
@@ -429,7 +447,15 @@ Zero decisions depend only on the bytes: an all-zero chunk becomes a DMG
 zero-fill entry, a simg `DONT_CARE` chunk, an unwritten range of a VHD or a
 raw copy, or a run of zeros for gzip. Host sparse-file behaviour may only
 skip reading a hole, which is zero by definition; it cannot change an output
-byte. Consecutive zero chunks merge into one entry where the container allows
+byte. Bounded I/O asks the host for holes in a file only once the file is
+synced (`fsync`): before an I/O object's first lookup, since a file may
+arrive with dirty data, and again after any write or resize through the
+object, so every hole lookup, the transcode's of its raw intermediate
+included, sees synced data: OpenZFS 2.2.0 and 2.2.1 could report dirty, unsynced data as
+a hole, which would encode written blocks as zeros. The spool, the only
+other file fsimg writes and then reads, is never asked for holes: wrap,
+compose and unwrap transcode through a resolver object, which reports
+none, and the readers do not ask. Consecutive zero chunks merge into one entry where the container allows
 it, so a sparse 128 TiB disk yields a few table entries, not 128 million.
 
 Each container's sequential order is fixed by the format and listed in its
@@ -541,7 +567,7 @@ absent layer.
 | `vhd:uuid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text |
 | `simg:block` | bytes | 4096 | Power of two from 1 KiB to 1 MiB, so the 1 MiB inspection unit is whole blocks |
 | `simg:crc` | `yes`, `no` | `no` | Appends a CRC32 chunk |
-| `gzip:level` | integer | 6 | 1 to 9; only when gzip is selected (`-z`, a `.gz` name under `-a`, or the library's `FSIMG_WRITE_GZIP`) |
+| `gzip:level` | integer | 6 | 1 to 9; only when gzip is selected (`-z`, a `.gz` name under `-a`, or the library's write options naming `gzip`) |
 
 Values use the CLI's existing byte-quantity, integer, UUID and boolean
 syntax. A key whose layer is absent from the stack fails as an unknown
@@ -1153,8 +1179,8 @@ comment or header CRC), modification time as [reproducibility](#reproducibility)
 states, extra flags 2 for level 9 and 4 for level 1 and 0 otherwise, OS
 byte 3 (Unix); then the CRC32 and modular length of the raw bytes.
 `gzip:level` is the DEFLATE level. Selected by `-z` or by the output name's
-`.gz` suffix under `-a`, and in the library by the `FSIMG_WRITE_GZIP` write
-flag, since compression fills no stack slot. The encoder deflates in 64 KiB
+`.gz` suffix under `-a`, and in the library by the write options'
+`compression` naming `gzip`, since compression fills no stack slot. The encoder deflates in 64 KiB
 pieces, a zero run from a buffer of zeros, and its deflate state and buffers
 are charged to the memory budget.
 

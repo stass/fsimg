@@ -50,10 +50,6 @@
     subtrees resolved by each format's lookup rules, are refused with exit 1
     (`cmd/fsimg/options.c`, `lib/read/`).
   The layer read side leaves these open:
-  * [Medium] The container and scheme steps count claims with
-    `survey_layers` beside the filesystems' `fsimg_format_survey`, so the
-    two claim rules must be kept in step. One survey over both registries
-    would remove the obligation (`lib/layers/image.c`).
   * [Medium] The coordinator bounds default output by the disk length the
     worker reports for a DMG or sparse image, which it cannot check against
     the file; a compromised worker could raise it. A fixed VHD's disk is
@@ -61,25 +57,14 @@
     other containers derived from the file length would take the rest of
     the trust out (`cmd/fsimg/worker-parent.c` `bound_volume`).
   The layer write side leaves these open:
-  * [Medium] A fixed disk without `-s` fits the volume to whole 512-byte
-    sectors (or `-o sector=`) before the driver chooses its geometry. Every
-    driver defaults to 512-byte sectors, so the two agree; a driver that
-    chooses a larger sector from an exact size would turn such a creation
-    into a geometry error. Fitting to the planned geometry, or re-checking
-    the volume against it after planning, would hold by construction
-    (`lib/write/writer.c` `plan_layers`).
-  * [Medium] The transcode asks the host for holes (`SEEK_HOLE`) in the raw
-    intermediate it has just written without a durable flush. OpenZFS
-    2.2.0 and 2.2.1 could report dirty, unsynced data as a hole, which
-    would encode written blocks as zeros. Owner decision: `fsync` the raw
-    intermediate before the transcode when discovery is on, or rely on the
-    zero test alone and drop discovery for the intermediate
-    (`lib/layers/transcode.c` `transcode_pass`).
   * [Medium] Wrap and compose transcode from a resolver object, which
     reports no holes, so every zero byte of a large sparse input is read
     and compared rather than skipped; the resolver could report the holes
-    of the ranges it maps (`lib/layers/output.c`, `lib/io/io.c`
-    `fsimg_io_next_hole`).
+    of the ranges it maps. Hole lookups sync the file first, so an input
+    descriptor would then need `CAP_FSYNC` under Capsicum, or discovery
+    should degrade to none when a never-written object cannot sync
+    (`lib/layers/output.c`, `lib/io/io.c` `fsimg_io_next_hole`,
+    `cmd/fsimg/sandbox.c`).
   * [Low] Whether a creation needs a raw intermediate is decided twice:
     the command line's `fsimg_job_needs_raw` (`cmd/fsimg/job.c`, which the
     coordinator and the worker share) and the library's
@@ -101,16 +86,6 @@
     never leaves holes, so its sink could grow as it is written instead
     (`lib/write/writer.c` `output_through_raw`, `lib/layers/transcode.c`
     `sink_open`).
-  * [Medium] Compression is selected by one flag per codec on each side
-    (`FSIMG_WRITE_GZIP`, `FSIMG_IMAGE_GZIP`), and the command line names
-    gzip itself where it maps `-z` and `-a` to the flag, reports the job's
-    compression and asks cW's verification for gzip
-    (`cmd/fsimg/options.c` `apply_compression`, `cmd/fsimg/job.c`
-    `fsimg_job_compression`, `cmd/fsimg/paths.c`). Before a second
-    compression gains an encoder, decide whether options carry one
-    compression value resolved through the layer registry, so only one is
-    representable and a new codec is one registry entry
-    (`include/fsimg.h`, `lib/layers/stack.c` `fsimg_write_compression`).
   * [Low] `cW` of a compressed image decodes it into the spool, so a disk
     larger than the spool limit fails verification only after the whole
     creation; the coordinator knows the planned disk from the IMAGE record
@@ -131,12 +106,6 @@
     through a GPT disk, and unwrap is tested only to I/O sinks with the
     automatic and range selections (`test/layers-integration.sh.in`,
     `test/layers-write.c`).
-  * [Low] gzip decoding counts no work: a seekable gzip input charges its
-    compressed reads to the session's work and a stream charges nothing,
-    while container decoding charges its decoded bytes, so `-l work=`
-    bounds the three differently and only the spool limit, cancellation
-    and the deadline stop a long decode. Decide whether decoded bytes count
-    as work, as for containers (`lib/layers/gzip.c`, `lib/layers/spool.c`).
   * [Low] When the worker dies without an error frame while the input relay
     is still blocked reading a slow standard input, the relay's channel
     closes by force and the command reports that child exit and channel

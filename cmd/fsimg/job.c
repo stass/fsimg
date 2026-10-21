@@ -29,8 +29,10 @@
  * container settings: the DMG segment ID and VHD unique identifier in 16
  * bytes each, the DMG chunk, VHD alignment, simg block and DMG level as
  * eight bytes each, and one byte of container flags (DMG raw chunks, simg
- * CRC32) with seven zero bytes; then the spool limit in eight bytes. The
- * GPT sector size travels with the selection, since reading uses it too.
+ * CRC32) with seven zero bytes; then the spool limit and the gzip level in
+ * eight bytes each, and the compression's name in 16 bytes,
+ * NUL-terminated. The GPT sector size travels with the selection, since
+ * reading uses it too.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
  *
@@ -86,7 +88,9 @@ typedef enum job_string_field {
 	JOB_CONTAINER_FLAGS = 792,
 	JOB_SPOOL_OFFSET = 800,
 	JOB_GZIP_LEVEL_OFFSET = 808,
-	JOB_RESERVED_OFFSET = 816
+	JOB_COMPRESSION_OFFSET = 816,
+	JOB_COMPRESSION_BYTES = 16,
+	JOB_RESERVED_OFFSET = 832
 } job_string_field_t;
 
 /* MBR flag bits at JOB_MBR_FLAGS. */
@@ -100,7 +104,14 @@ _Static_assert(JOB_FORMAT_OFFSET + JOB_FORMAT_BYTES == JOB_LABEL_OFFSET &&
 _Static_assert(sizeof(((fsimg_stack_slot_t *)0)->name) == JOB_FORMAT_BYTES &&
     sizeof(((fsimg_worker_request_t *)0)->label_storage) == JOB_LABEL_BYTES &&
     sizeof(((fsimg_worker_request_t *)0)->partition_text) ==
-    JOB_PARTITION_TEXT_BYTES, "the request holds each string field");
+    JOB_PARTITION_TEXT_BYTES &&
+    sizeof(((fsimg_worker_request_t *)0)->compression) ==
+    JOB_COMPRESSION_BYTES &&
+    sizeof(((fsimg_write_options_t *)0)->compression) ==
+    JOB_COMPRESSION_BYTES &&
+    sizeof(((fsimg_image_options_t *)0)->compression) ==
+    JOB_COMPRESSION_BYTES,
+    "the request holds each string field");
 _Static_assert(JOB_SCHEME_OFFSET + JOB_FORMAT_BYTES == JOB_CONTAINER_OFFSET &&
     JOB_CONTAINER_OFFSET + JOB_FORMAT_BYTES == JOB_PARTITION_TEXT_OFFSET &&
     JOB_PARTITION_TEXT_OFFSET + JOB_PARTITION_TEXT_BYTES ==
@@ -118,7 +129,8 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_DMG_LEVEL_OFFSET + 8 == JOB_CONTAINER_FLAGS &&
     JOB_CONTAINER_FLAGS + 8 == JOB_SPOOL_OFFSET &&
     JOB_SPOOL_OFFSET + 8 == JOB_GZIP_LEVEL_OFFSET &&
-    JOB_GZIP_LEVEL_OFFSET + 8 == JOB_RESERVED_OFFSET &&
+    JOB_GZIP_LEVEL_OFFSET + 8 == JOB_COMPRESSION_OFFSET &&
+    JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_RESERVED_OFFSET &&
     JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the layer fields do not overlap");
 _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     JOB_GPT_TYPE_BYTES &&
@@ -315,8 +327,7 @@ fsimg_job_has_roots(fsimg_job_kind_t kind)
 const char *
 fsimg_job_compression(const fsimg_worker_request_t *request)
 {
-	return (fsimg_job_has_roots(request->kind) &&
-	    (request->write.flags & FSIMG_WRITE_GZIP) != 0 ? "gzip" : "");
+	return (fsimg_job_has_roots(request->kind) ? request->compression : "");
 }
 
 bool
@@ -388,6 +399,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 
 	if (fsimg_stack_validate(&request->stack, error) != FSIMG_OK ||
 	    memchr(request->partition_text, '\0', JOB_PARTITION_TEXT_BYTES) == NULL ||
+	    memchr(request->compression, '\0', JOB_COMPRESSION_BYTES) == NULL ||
 	    memchr(request->layers.gpt_type, '\0', JOB_GPT_TYPE_BYTES) == NULL ||
 	    memchr(request->layers.gpt_name, '\0', JOB_GPT_NAME_BYTES) == NULL ||
 	    memchr(request->layers.mbr_type, '\0', JOB_MBR_TYPE_BYTES) == NULL ||
@@ -448,6 +460,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	encode_layers(&request->layers, raw);
 	bcopy(request->partition_text, raw + JOB_PARTITION_TEXT_OFFSET,
 	    strlen(request->partition_text));
+	bcopy(request->compression, raw + JOB_COMPRESSION_OFFSET,
+	    strnlen(request->compression, sizeof(request->compression) - 1));
 	bcopy(label, raw + JOB_LABEL_OFFSET, label_length);
 	raw[JOB_LABEL_PRESENT] = request->write.label != NULL ? 1 : 0;
 	bcopy(request->write.volume_uuid, raw + JOB_UUID_OFFSET,
@@ -464,6 +478,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
     fsimg_worker_request_t *request, uint64_t *selection_length,
     unsigned *capabilities, fsimg_error_t *error)
 {
+	const fsimg_layer_t *compression;
 	uint64_t epoch, roots, count;
 	uint32_t path_limit;
 
@@ -475,10 +490,10 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
 	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STDOUT |
-	    FSIMG_JOB_GZIP | FSIMG_JOB_STDIN)) != 0 ||
+	    FSIMG_JOB_STDIN)) != 0 ||
 	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDOUT) != 0 &&
 	    get_field(raw, JOB_KIND) != FSIMG_JOB_CREATE) ||
-	    ((get_field(raw, JOB_FLAGS) & (FSIMG_JOB_GZIP | FSIMG_JOB_STDIN)) != 0 &&
+	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDIN) != 0 &&
 	    fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
 	    get_field(raw, JOB_CAPABILITIES) > (FSIMG_JOB_CAP_INPUT |
 	    FSIMG_JOB_CAP_OUTPUT | FSIMG_JOB_CAP_SCRATCH | FSIMG_JOB_CAP_ROOTS |
@@ -511,6 +526,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    !string_field_valid(raw + JOB_CONTAINER_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_PARTITION_TEXT_OFFSET,
 	    JOB_PARTITION_TEXT_BYTES) ||
+	    !string_field_valid(raw + JOB_COMPRESSION_OFFSET,
+	    JOB_COMPRESSION_BYTES) ||
 	    fsimg_wire_get64(raw + JOB_SELECTOR_OFFSET) > FSIMG_SELECT_DISK ||
 	    fsimg_wire_get64(raw + JOB_PARTITION_INDEX_OFFSET) > UINT32_MAX ||
 	    fsimg_wire_get64(raw + JOB_GPT_SECTOR_OFFSET) > UINT32_MAX)
@@ -581,6 +598,13 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	decode_layers(raw, &request->layers);
 	bcopy(raw + JOB_PARTITION_TEXT_OFFSET, request->partition_text,
 	    JOB_PARTITION_TEXT_BYTES);
+	bcopy(raw + JOB_COMPRESSION_OFFSET, request->compression,
+	    JOB_COMPRESSION_BYTES);
+	/* A create writes its compression and a read decodes it. */
+	if (fsimg_compression_named(request->compression,
+	    sizeof(request->compression), fsimg_job_has_roots(request->kind),
+	    &compression, error) != FSIMG_OK)
+		return (invalid_job(error));
 	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, JOB_LABEL_BYTES);
 	request->write.label = raw[JOB_LABEL_PRESENT] == 0 ? NULL :
 	    request->label_storage;

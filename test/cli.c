@@ -580,10 +580,10 @@ test_stacks(void)
 	/* -z, or -a with a .gz name, selects gzip and its level. */
 	CHECK(parse(gzip_settings, &options) == FSIMG_OK);
 	CHECK(options.request.layers.gzip_level == 9 &&
-	    (options.request.write.flags & FSIMG_WRITE_GZIP) != 0);
+	    strcmp(options.request.compression, "gzip") == 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(gzip_suffix, &options) == FSIMG_OK);
-	CHECK((options.request.write.flags & FSIMG_WRITE_GZIP) != 0 &&
+	CHECK(strcmp(options.request.compression, "gzip") == 0 &&
 	    fsimg_job_needs_raw(&options.request));
 	fsimg_cli_release(&options);
 	for (unsigned i = 0; i < sizeof(accepted) / sizeof(accepted[0]); i++) {

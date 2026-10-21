@@ -741,8 +741,8 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 	fsimg_image_options_init(&options);
 	options.stack = request->stack;
 	options.layers.gpt_sector_bytes = request->layers.gpt_sector_bytes;
-	if ((request->flags & FSIMG_JOB_GZIP) != 0)
-		options.flags |= FSIMG_IMAGE_GZIP;
+	bcopy(request->compression, options.compression,
+	    sizeof(options.compression));
 	if (request->selector == FSIMG_SELECT_RANGE ||
 	    request->selector == FSIMG_SELECT_DISK) {
 		bzero(&options.stack.slots[FSIMG_LAYER_SCHEME],
@@ -979,6 +979,8 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
 		    "invalid worker stack"));
 	child->request.write.layers = &child->request.layers;
+	bcopy(child->request.compression, child->request.write.compression,
+	    sizeof(child->request.write.compression));
 	status = fsimg_writer_new(child->ctx, stack, &child->request.write,
 	    &child->writer, error);
 	if (status != FSIMG_OK)

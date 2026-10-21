@@ -75,24 +75,55 @@ format_probe(const fsimg_format_t *format, const unsigned char *prefix,
 	return (status);
 }
 
-/* Run the forced probe, or every probe in the registry, counting claims and
- * keeping the first claimant's verdict and reason. A forced probe's verdict
- * is kept even when it does not claim, since its absent signature is the
- * answer. Several claims are counted, not resolved: what they mean is the
+void
+fsimg_survey_init(fsimg_survey_t *survey)
+{
+	bzero(survey, sizeof(*survey));
+	survey->status = FSIMG_EFORMAT;
+}
+
+bool
+fsimg_survey_count(fsimg_survey_t *survey, fsimg_status_t status,
+    const fsimg_error_t *detail)
+{
+	if (status == FSIMG_EFORMAT)
+		return (false);
+	survey->claims++;
+	if (survey->claims > 1)
+		return (false);
+	survey->status = status;
+	survey->reason = *detail;
+	return (true);
+}
+
+fsimg_claim_t
+fsimg_survey_claim(const fsimg_survey_t *survey)
+{
+	if (survey->claims == 0)
+		return (FSIMG_CLAIM_NONE);
+	if (survey->claims > 1)
+		return (FSIMG_CLAIM_AMBIGUOUS);
+	if (survey->status == FSIMG_OK)
+		return (FSIMG_CLAIM_FORMAT);
+	return (survey->status == FSIMG_EUNSUPPORTED ?
+	    FSIMG_CLAIM_UNSUPPORTED : FSIMG_CLAIM_CORRUPT);
+}
+
+/* Run the forced probe, or every probe in the registry, under the claim
+ * rule. Several claims are counted, not resolved: what they mean is the
  * caller's decision.
  */
 void
 fsimg_format_survey(const fsimg_format_t *const *registry, size_t count,
     const fsimg_format_t *forced, const unsigned char *prefix, size_t length,
-    uint64_t volume_bytes, fsimg_format_survey_t *survey)
+    uint64_t volume_bytes, fsimg_survey_t *survey)
 {
 	const fsimg_format_variant_t *variant;
 	const fsimg_format_t *format;
 	fsimg_error_t detail;
 	fsimg_status_t status;
 
-	bzero(survey, sizeof(*survey));
-	survey->status = FSIMG_EFORMAT;
+	fsimg_survey_init(survey);
 	if (forced != NULL) {
 		registry = &forced;
 		count = 1;
@@ -101,16 +132,13 @@ fsimg_format_survey(const fsimg_format_t *const *registry, size_t count,
 		format = registry[i];
 		status = format_probe(format, prefix, length, volume_bytes,
 		    &variant, &detail);
-		if (status == FSIMG_EFORMAT && forced == NULL)
-			continue;
-		if (status != FSIMG_EFORMAT)
-			survey->claims++;
-		if (survey->claimant != NULL)
-			continue;
-		survey->claimant = format;
-		survey->status = status;
-		survey->reason = detail;
-		survey->variant = status == FSIMG_OK ? variant : NULL;
+		if (fsimg_survey_count(survey, status, &detail)) {
+			survey->format = format;
+			survey->variant = status == FSIMG_OK ? variant : NULL;
+		} else if (forced != NULL) {
+			survey->format = format;
+			survey->reason = detail;
+		}
 	}
 }
 
@@ -126,12 +154,12 @@ fsimg_format_claim(const fsimg_format_t *const *registry, size_t count,
     const fsimg_format_t *forced, const unsigned char *prefix, size_t length,
     uint64_t volume_bytes, const fsimg_format_t **claimed, fsimg_error_t *error)
 {
-	fsimg_format_survey_t survey;
+	fsimg_survey_t survey;
 
 	*claimed = NULL;
 	fsimg_format_survey(registry, count, forced, prefix, length,
 	    volume_bytes, &survey);
-	if (survey.claimant == NULL)
+	if (survey.format == NULL)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "unrecognized image format"));
 	if (survey.claims > 1)
@@ -142,10 +170,10 @@ fsimg_format_claim(const fsimg_format_t *const *registry, size_t count,
 			*error = survey.reason;
 		return (survey.status);
 	}
-	if (survey.claimant->reader == NULL)
+	if (survey.format->reader == NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_READER, "recognized format has no reader"));
-	*claimed = survey.claimant;
+	*claimed = survey.format;
 	fsimg_error_clear(error);
 	return (FSIMG_OK);
 }
@@ -174,7 +202,7 @@ fsimg_format_probe_bytes(const char *forced_name)
 
 fsimg_status_t
 fsimg_format_identify(const char *forced_name, const unsigned char *prefix,
-    size_t length, uint64_t volume_bytes, fsimg_format_survey_t *survey,
+    size_t length, uint64_t volume_bytes, fsimg_survey_t *survey,
     fsimg_error_t *error)
 {
 	const fsimg_format_variant_t *variant;

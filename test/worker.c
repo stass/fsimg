@@ -707,7 +707,8 @@ test_compressed_create(void)
 
 	fixture_open(&fixture);
 	create_request(&fixture, "fat12");
-	fixture.request.write.flags |= FSIMG_WRITE_GZIP;
+	snprintf(fixture.request.compression, sizeof(fixture.request.compression),
+	    "gzip");
 	fixture.request.raw_fd = raw_intermediate(&fixture);
 	CHECK(run(&fixture, &error) == FSIMG_OK);
 	CHECK(close(fixture.request.raw_fd) == 0);
@@ -721,9 +722,9 @@ test_compressed_create(void)
 	byte ^= 0xff;
 	CHECK(pwrite(fd, &byte, 1, st.st_size - 8) == 1);
 	CHECK(close(fd) == 0);
-	/* The request cW sends: every slot forced, so only -z reads gzip. */
+	/* The request cW sends: every slot and the compression forced. */
 	fixture.request.kind = FSIMG_JOB_VERIFY;
-	fixture.request.flags = FSIMG_JOB_GZIP;
+	fixture.request.flags = 0;
 	for (unsigned i = FSIMG_LAYER_SCHEME; i < FSIMG_STACK_SLOTS; i++) {
 		if (fixture.request.stack.slots[i].state == FSIMG_SLOT_UNSPECIFIED)
 			fixture.request.stack.slots[i].state = FSIMG_SLOT_EMPTY;

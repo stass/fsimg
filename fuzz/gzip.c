@@ -81,7 +81,7 @@ open_once(fsimg_ctx_t *ctx, fsimg_io_t *io, int stream_fd)
 	fsimg_io_t *disk;
 
 	fsimg_image_options_init(&options);
-	options.flags = FSIMG_IMAGE_GZIP;
+	snprintf(options.compression, sizeof(options.compression), "gzip");
 	options.spool_fd = spool_new();
 	if ((io != NULL ? fsimg_image_open(ctx, io, &options, &image, NULL) :
 	    fsimg_image_open_stream(ctx, stream_fd, &options, &image, NULL)) !=

@@ -145,12 +145,11 @@ resolve_container(fsimg_disk_plan_t *plan, const fsimg_stack_t *stack,
 	    plan->epoch, &plan->container_settings, error));
 }
 
-/* The compression the mode flags select and its resolved settings. */
+/* The plan's compression's resolved settings. */
 static fsimg_status_t
 resolve_compression(fsimg_disk_plan_t *plan,
     const fsimg_layer_options_t *layers, fsimg_error_t *error)
 {
-	plan->compression = fsimg_write_compression(plan->flags);
 	if (plan->compression == NULL)
 		return (FSIMG_OK);
 	return (plan->compression->compression->plan(layers, plan->flags,
@@ -172,8 +171,9 @@ fsimg_disk_plan_encoded(const fsimg_disk_plan_t *plan)
  */
 fsimg_status_t
 fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
-    const fsimg_layer_options_t *layers, uint32_t count, int64_t epoch,
-    uint32_t flags, fsimg_disk_plan_t *plan, fsimg_error_t *error)
+    const fsimg_layer_options_t *layers, const char *compression,
+    uint32_t count, int64_t epoch, uint32_t flags, fsimg_disk_plan_t *plan,
+    fsimg_error_t *error)
 {
 	fsimg_scheme_table_t *table = &plan->table;
 	const char *key;
@@ -184,8 +184,13 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	bzero(plan, sizeof(*plan));
 	plan->epoch = epoch;
 	plan->flags = flags;
-	status = fsimg_layer_options_check(stack, fsimg_write_compression(flags),
-	    layers, true, error);
+	/* compression is a write options' field, whose size bounds the name. */
+	status = fsimg_compression_named(compression,
+	    sizeof(((fsimg_write_options_t *)NULL)->compression), true,
+	    &plan->compression, error);
+	if (status == FSIMG_OK)
+		status = fsimg_layer_options_check(stack, plan->compression,
+		    layers, true, error);
 	if (status == FSIMG_OK)
 		status = resolve_container(plan, stack, layers, error);
 	if (status == FSIMG_OK)

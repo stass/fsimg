@@ -175,7 +175,11 @@ compression is decided by the layer design's
 [step-1 rule](design-layers.md#peeling-order): `-z` forces it, and when a
 file passes for both compressed and raw, `-z` resolves it as compressed and
 an explicit `-F` as raw. Compressed and stream inputs are decoded into the
-budgeted spool inside the worker.
+budgeted spool inside the worker. The command line names no codec itself
+beyond `-z`'s: the compression `-z` or `-a` selects travels in the worker's
+job record as its registered name, which the worker hands to the library's
+write or image options, so a codec the registry gains reaches `-a`
+through the suffix it declares with no change to the command line.
 
 `-o key=value` is the repeatable typed setting, each key at most once. An
 unqualified key always targets the filesystem: `oem=cp437` on read; on

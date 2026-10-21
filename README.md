@@ -57,7 +57,8 @@ A gzip-compressed image is read too, as a file or on standard input:
 checks every member's CRC32 and length and refuses trailing bytes; it
 writes the image into the spool, an unlinked file in scratch whose logical
 size `-l spool=` bounds (64 GiB by default) before each step, so a
-decompression bomb stops at the limit. An uncompressed image on standard
+decompression bomb stops at the limit, and the decoding counts as work,
+which `-l work=` bounds. An uncompressed image on standard
 input is copied there unchanged. When gzip's signature and another format
 both claim the first bytes, `-z` or `-F` says which reading is meant.
 

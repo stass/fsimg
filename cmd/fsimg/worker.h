@@ -40,8 +40,6 @@ typedef enum fsimg_confinement {
  * channel, not to staging.
  */
 #define FSIMG_JOB_STDOUT 0x10u
-/* Reading only: -z, the image is gzip-compressed. */
-#define FSIMG_JOB_GZIP 0x20u
 /* Reading only: the image is standard input, arriving on the input pipe
  * the input relay fills.
  */
@@ -140,6 +138,12 @@ typedef struct fsimg_worker_request {
 	 * units, so 111 bytes cover every name that can match.
 	 */
 	char		 partition_text[112];
+	/* The compression -z or -a selects, a registered compression's name:
+	 * written around the image on create, forced on read; empty for none
+	 * on create and for detection on read. The worker hands it to the
+	 * write or image options.
+	 */
+	char		 compression[16];
 	/* Decoder-owned backing only; write.label is the authoritative value.
 	 * It holds the longest label any format stores, the volume
 	 * information's, and its NUL.
@@ -207,8 +211,8 @@ bool fsimg_job_has_roots(fsimg_job_kind_t);
 /* The filesystem the stack names, or "" when its slot is not named. */
 const char *fsimg_job_format(const fsimg_worker_request_t *);
 /*
- * What a create or plan job writes around its disk: the compression its
- * write flags select ("gzip", or "" for none); whether its output is an
+ * What a create or plan job writes around its disk: its compression,
+ * "" for none and for every other job; whether its output is an
  * encoding of the disk, under a container or a compression, rather than
  * the disk; and whether a create job needs a raw intermediate, for an
  * encoded output or a stream. The coordinator and the worker decide each

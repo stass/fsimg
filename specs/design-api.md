@@ -94,6 +94,16 @@ unknown flags, nonzero reserved fields, and unsupported struct sizes fail with
 `FSIMG_EINVAL`; reading beyond the caller-provided size is forbidden. This
 strict rule can be extended deliberately when ABI compatibility requires it.
 
+A struct that hands the library a descriptor, to adopt or to duplicate,
+begins with `size` too and is checked by it before any descriptor field is
+examined: the context options' scratch directory, the image options'
+spool and the sink's raw intermediate. Each initializer sets every
+descriptor field to `-1`, and a struct whose `size` its initializer did not
+set is `FSIMG_EINVAL` with nothing adopted, duplicated or closed, so a
+zero-filled struct never hands over descriptor 0, standard input. Write
+options and the wrap, unwrap and compose arguments carry no descriptor:
+their output's descriptors travel in the sink.
+
 | `fsimg_options_t` field group | Contract |
 | --- | --- |
 | Limits | Memory, scratch, spool, entries, depth, path bytes, open files, optional work/deadline ceilings; defaults in the architecture |
@@ -256,12 +266,17 @@ structures. A layer setting whose layer is absent from the stack must hold its
 default, exactly as a format setting a format does not store; an
 [identifier](design-layers.md#identifiers) of a layer in the stack must be
 set unless the reproducible flag is given. Compression is not a stack slot:
-`FSIMG_WRITE_GZIP`, the library's `-z` and the write-side counterpart of
-`FSIMG_IMAGE_GZIP`, selects gzip around whatever the stack writes, and
-`gzip_level` is then the one compression setting; without the flag it must
-hold its default like the setting of any absent layer. The flag applies
-equally to wrap, unwrap and compose, whose write options carry the mode
-flags. Raw emission
+the write options' `compression` field, the library's `-z` and the
+write-side counterpart of the image options' field of that name, names one
+registered compression around whatever the stack writes, or is empty for
+none. It is resolved through the [layer registry](design-layers.md#the-stack),
+so exactly one compression is representable and a new codec is one registry
+entry: a name the registry lacks as a compression is `FSIMG_EINVAL`, and one
+this build cannot write `FSIMG_EUNSUPPORTED`, each naming it. The named
+compression's settings, `gzip_level` for gzip, then apply; without it they
+must hold their defaults like the settings of any absent layer. The field
+applies equally to wrap, unwrap and compose, whose write options carry the
+mode. Raw emission
 defaults to logical completion; the file-publication helper always performs
 its durable publication protocol.
 Automatic sizing
@@ -301,7 +316,7 @@ Plan information contains logical volume size, payload bytes, initialized data
 bytes, allocated bytes, metadata bytes, free bytes, geometry, entry counts,
 required output capabilities, and observed/estimated scratch use identified as
 such. Its image record reports the planned disk as an opened image of it
-would, the compression `FSIMG_WRITE_GZIP` selects included; the output
+would, the compression the write options name included; the output
 bound is the disk's encoding by the container and then the compression. It does not return an O(entries) list. No progress callback can mutate a
 sealed plan.
 
@@ -348,9 +363,8 @@ exclusively created, empty, read/write regular file the caller has unlinked,
 adopted on every outcome once the sink is accepted, required whenever the
 stack has a container or compression or the sink is a stream, and `-1`
 otherwise. `fsimg_sink_init()` makes an empty sink of a kind, its `size`
-set and every descriptor `-1`. A sink whose `size` it did not set is
-`FSIMG_EINVAL` with nothing adopted, so a zeroed value never hands over
-descriptor 0. The library never
+set and every descriptor `-1`, under the
+[descriptor rule](#options-context-and-callbacks). The library never
 creates that file by name, and checks the one it adopts: a sink that needs
 one and has none, or whose descriptor is not a regular file of size zero
 with link count zero open for reading and writing, is `FSIMG_EINVAL` before
@@ -463,14 +477,16 @@ accepted only for a layer the forced stack names, and `spool_fd`: the
 read/write regular file the caller has unlinked, adopted on every outcome
 after the same check as `raw_fd` (regular, size zero, link count zero,
 read/write, else `FSIMG_EINVAL`), or `-1`. `open()` uses it only when the
-input turns out to be gzip and
+input turns out to be compressed and
 otherwise closes it; `open_stream()` requires it and reads `stream_fd`, a
 pipe or other non-seekable descriptor borrowed for the call, to EOF into it,
-deciding compression from the first block. Without a spool, stream and gzip
-input fail as a spool limit error with limit zero. The options' `flags`
-accept `FSIMG_IMAGE_GZIP`, the library's `-z`: only the gzip probe runs at
-step 1, so an input gzip does not claim fails with `FSIMG_EFORMAT` and the
-gzip layer's name, and an ambiguous input reads as compressed.
+deciding compression from the first block. Without a spool, stream and
+compressed input fail as a spool limit error with limit zero. The options'
+`compression`, the library's `-z`, forces a registered compression by
+name, resolved as the write options' field is, and empty detects one: only
+the forced compression's probe runs at step 1, so an input it does not
+claim fails with `FSIMG_EFORMAT` naming it, and an ambiguous input reads as
+compressed. No image option flags are defined; `flags` must be zero.
 
 The image information record exposes the canonical detected stack text, the
 compression name, the length of the file the layers were peeled from (the

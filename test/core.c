@@ -146,7 +146,7 @@ progress_callback(void *argument, const fsimg_progress_t *progress)
 static void
 test_context(void)
 {
-	fsimg_options_t options;
+	fsimg_options_t options, zeroed;
 	fsimg_error_t error;
 	fsimg_stats_t before, after;
 	fsimg_session_t session, other;
@@ -166,6 +166,12 @@ test_context(void)
 	options.size--;
 	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_EINVAL);
 	options.size++;
+	/* Zero-filled options name descriptor 0 as the scratch directory; their
+	 * size refuses them before it is duplicated.
+	 */
+	bzero(&zeroed, sizeof(zeroed));
+	CHECK(fsimg_ctx_new(&zeroed, &ctx, &error) == FSIMG_EINVAL && ctx == NULL);
+	CHECK(strcmp(error.message, "unsupported options size") == 0);
 	options.version++;
 	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_EINVAL);
 	options.version--;

@@ -35,6 +35,10 @@ struct fsimg_io {
 	fsimg_io_t	*backing;
 	bool		 known_zero;
 	bool		 unsized;	/* scratch: length is only the host range */
+	/* Synced since the object was made and since its last write or
+	 * resize, so the host's hole reports describe what was written.
+	 */
+	bool		 holes_synced;
 };
 
 static fsimg_status_t io_range(fsimg_io_t *, uint64_t, uint64_t,
@@ -171,19 +175,34 @@ fsimg_io_adopt_handed_over(fsimg_ctx_t *ctx, int fd, const char *role,
 	return (FSIMG_OK);
 }
 
-void
+/*
+ * The host is asked about holes only once the file is synced, first when
+ * the object makes its first lookup, since a file may arrive dirty, and
+ * again after any write through the object: OpenZFS 2.2.0 and 2.2.1
+ * could report dirty, unsynced data as a hole, which a caller would read
+ * as zeros.
+ */
+fsimg_status_t
 fsimg_io_next_hole(fsimg_io_t *io, uint64_t offset, uint64_t *hole_start,
-    uint64_t *hole_end)
+    uint64_t *hole_end, fsimg_error_t *error)
 {
 	fsimg_io_t *root = io->root;
+	fsimg_status_t status;
 
 	*hole_start = *hole_end = io->length;
 	if (root->fd == -1 || offset >= io->length)
-		return;
+		return (FSIMG_OK);
+	if (!root->holes_synced) {
+		status = fsimg_io_flush(io, false, error);
+		if (status != FSIMG_OK)
+			return (status);
+		root->holes_synced = true;
+	}
 	fsimg_host_next_hole(root->fd, io->base + offset, io->base + io->length,
 	    hole_start, hole_end);
 	*hole_start -= io->base;
 	*hole_end -= io->base;
+	return (FSIMG_OK);
 }
 
 void
@@ -553,8 +572,10 @@ adapter_transfer(fsimg_io_t *root, uint64_t offset, void *buffer,
 	/* Once any write is attempted, even a failing one, unwritten ranges no
 	 * longer describe the whole object. Reused sinks always take real zeroing.
 	 */
-	if (writing)
+	if (writing) {
 		root->known_zero = false;
+		root->holes_synced = false;
+	}
 	if (root->resolve != NULL)
 		return (root->resolve(root->argument, offset, buffer, length,
 		    transferred, error));
@@ -751,6 +772,7 @@ fsimg_io_resize(fsimg_io_t *io, uint64_t length, fsimg_error_t *error)
 			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 			    FSIMG_OP_IO, "length exceeds host range"));
 		fsimg_stat_add(&io->ctx->stats.io_calls, 1);
+		io->holes_synced = false;
 		if (ftruncate(io->fd, host_length) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_IO, "resize failed"));

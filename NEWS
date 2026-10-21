@@ -37,9 +37,14 @@ holes. gzip alone is detected from its signature; when another probe also
 claims the first bytes the input is ambiguous until `-z` or `-F` resolves
 it. A separate relay process copies standard input to the worker over a
 pipe without reading it, and a terminal on standard input is refused. The
-library adds `fsimg_image_open_stream`, `FSIMG_IMAGE_GZIP`, the image
-options' `spool_fd`, `FSIMG_RESOURCE_SPOOL`, spool statistics and the
-reported compression and file length. Under Capsicum the spool, like the
+library adds `fsimg_image_open_stream`, the image options' `compression`,
+which forces a registered compression by name, and `spool_fd`,
+`FSIMG_RESOURCE_SPOOL`, spool statistics and the reported compression and
+file length; image options whose size `fsimg_image_options_init` did not
+set are refused before `spool_fd` is examined. Compressed bytes read and
+decoded bytes produced count as work, for a file and a stream alike, so
+`-l work=` bounds a gzip decode as it bounds a container's. Under
+Capsicum the spool, like the
 raw intermediate, is limited to the rights a file the worker reads and
 writes needs.
 
@@ -54,8 +59,9 @@ raw intermediate and the compressed output are both charged to the output
 limit, `c -f -` streams the member, `cW` reads it back through the spool
 before publishing, and the plan reports gzip, its bound and the zlib
 version. With `-z` and `-a` together the name must end in `.gz`. The
-library adds `FSIMG_WRITE_GZIP` and the layer options' `gzip_level`, and
-wrap, unwrap and compose compress under the flag too.
+library adds the write options' `compression`, one registered
+compression's name or empty for none, and the layer options'
+`gzip_level`, and wrap, unwrap and compose compress with it too.
 
 Creation writes containers and streams. A stack naming dmg, vhd or simg
 emits the disk into a raw intermediate, an unlinked file the coordinator
