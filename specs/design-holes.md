@@ -15,7 +15,7 @@ callback through which an application contributes knowledge of its own.
 
 | Owner | Owns |
 | --- | --- |
-| Bounded I/O (`lib/io/`) | The written-range record of a fresh file, the zero-range operation, pass validation, the translation of all three through slices, zeroing that writes only where the record cannot prove zeros |
+| Bounded I/O (`lib/io/`) | The written-range record of a fresh file, the zero-range operation, the translation of both through slices, zeroing that writes only where the record cannot prove zeros |
 | Container adapter (`lib/layers/chunks.c`) | The zero-range answer of a container's disk, from its chunk index |
 | Assembled disk (`lib/layers/output.c`) | The zero-range answer of a wrap or compose disk, region by region |
 | Compatibility layer (`compat/host.c`) | The one host hole query, `SEEK_HOLE` then `SEEK_DATA`, for files fsimg did not write |
@@ -66,9 +66,10 @@ or after an offset**, from what it is:
 * an assembled disk, region by region: its own zero gaps, and for an input
   slice whatever that input answers;
 * a caller's positional object, through an optional callback;
-* a file fsimg did not write, an external file whichever constructor built
-  its object, from the host's hole report, after syncing the file and
-  clipped to the file's observed length;
+* a read-only file fsimg did not write, an external file whichever
+  constructor built its object, from the host's hole report, after syncing
+  the file once, bounded by the length the query observes and never for the
+  chunk holding its last byte;
 * anything else, nothing.
 
 Zeroing a range of a writable object means making it read as zero. The
@@ -266,11 +267,12 @@ answers is about the number of zero runs, not of chunks.
 | Object | Answer at or after `offset` |
 | --- | --- |
 | Fresh file root | The next run of clear granules, clipped to `[offset, length)`; `start` is `offset` itself when it lies inside such a run |
-| Slice, read-only slice | The root's answer for `base + offset`, clipped to the slice and translated back |
+| Slice, read-only slice | The root's answer for `base + offset`, clipped to the slice and translated back; over an external root, clipped further to end before the slice's own last byte |
 | Container adapter | From the chunk index: the record containing `offset`; a zero record, or a fill record whose value is zero, yields the run through consecutive such records; any other record yields the empty answer at its end |
 | Assembled disk | The region containing `offset`: a zero gap yields the gap; a table yields the empty answer at its end; an input volume yields that input's answer, translated into the disk and clipped to the region |
 | Callback object | Its `next_zero_range` callback when present, validated against the contract; otherwise nothing |
-| External file | The host's hole report for the file, `SEEK_HOLE` then `SEEK_DATA`, clipped to the file's current length, once the file has been synced; nothing once a sync has failed |
+| External file, read-only | The host's hole report for the file, `SEEK_HOLE` then `SEEK_DATA`, clipped to the length `fstat` then observes and to end before the object's last byte, once the file has been synced; `FSIMG_ESOURCE_CHANGED` when the observed length is below the declared one; nothing once the sync has failed or the host lacks the interface |
+| External file, writable | Nothing: a sink is never asked for reads |
 | Scratch object | Nothing; it is never asked |
 
 A container's answer costs record reads through the index's cached-record
@@ -284,101 +286,102 @@ limit, fails the answer and with it the operation, as the same failure
 fails a read. An assembled disk's answer is one region lookup and at most
 one input answer; adapters stack at most two deep, so there is no recursion.
 A resolver object, the internal construction behind the container adapter
-and the assembled disk, takes its zero-range function and its
-[pass-validation](#pass-validation) function beside its resolve function;
-all three are library code.
-
-### Pass validation
-
-A zero range spares reads, so a pass that took one has not touched every
-byte of its inputs, and an input that changed under it would otherwise go
-unnoticed where nothing read. Bounded I/O therefore offers one operation,
-`fsimg_io_validate_pass(io, error)`, which every object answers about itself
-and its parts, and which the transcode invokes at the end of every pass,
-before the encoder's finish, failing the pass with the operation's error:
-
-| Object | Validation |
-| --- | --- |
-| External file | `fstat` the file; a length below the object's declared length is `FSIMG_ESOURCE_CHANGED` naming the input |
-| Fresh file root | Nothing to check: fsimg is its only writer and its length is the object's |
-| Slice, read-only slice | Its root's validation |
-| Container adapter | Its backing file's validation |
-| Assembled disk | Each input volume's validation, in region order |
-| Callback object, scratch object | Nothing |
-
-Validation is a property of the object's construction, not of which answers
-a pass happened to take: the assembled disk reaches its inputs through its
-regions, a container through its backing file, a slice through its root, so
-no consumer keeps a list of the files it trusted, and a compose whose first
-input shrinks while its second is being processed fails at the end of the
-pass however the first was answered. The transcode is the one caller; the
-sequential copy is its encoder-less pass and validates the same way.
+and the assembled disk, takes its zero-range function beside its resolve
+function; both are library code.
 
 ### External files: the host's report
 
 An external file, as [defined above](#which-objects-keep-one), is one fsimg
 did not write: the image a reader opens, the input a wrap or compose reads, a
 positional sink an application supplies, a writer's source file. fsimg knows
-nothing of its contents and has no proof to rest an answer on, so such an
-object answers from the host's report, `fsimg_host_next_hole` in the
-compatibility layer: `lseek(SEEK_HOLE)` from the offset, then
-`lseek(SEEK_DATA)` from the hole's start, and then the file's current length
-by `fstat`. The query moves the descriptor's file position, which positional
-I/O never uses.
+nothing of its contents and has no proof to rest an answer on. A read-only
+external object answers from the host's report, `fsimg_host_next_hole` in
+the compatibility layer: `lseek(SEEK_HOLE)` from the offset, then
+`lseek(SEEK_DATA)` from the hole's start, then `fstat` for the file's
+current length, mapped onto the contract as the hole `[start, end)`. The
+query moves the descriptor's file position, which positional I/O never
+uses. A writable external object, a sink an application supplies, answers
+nothing: nothing asks a sink for reads, and read-only is what makes the
+object a source.
 
-The report maps onto the contract as the hole `[start, end)` with these
-rules, which keep a file that shrinks from acquiring a fabricated zero tail.
-The end of a file is a virtual hole that `SEEK_HOLE` reports and `SEEK_DATA`
-answers with `ENXIO`, not a range of readable zeros, so the host's answer is
-never extended past the length `fstat` observes after both seeks: `end` is
-the data offset `SEEK_DATA` found, or that observed length, whichever is
-smaller, and then clipped to the object's length. A file whose observed
-length is below the object's declared length has shrunk, and the lookup
-fails at once with `FSIMG_ESOURCE_CHANGED` naming the input: a change
-already observed is never set aside for a later read to find, since the file
-may grow back before that read, and through a prefix slice no read may ever
-reach the lost range. A shrink after a lookup whose answer covered the
-file's tail would go unnoticed, since nothing reads there, which is what
-[pass validation](#pass-validation) catches at the end of the pass. The
-"answer nothing" fallback is reserved for discovery that is unsupported or
-fails: a host that lacks the interface, a query that fails, or a sync that
-fails under the rules below.
+**The length check.** The end of a file is a virtual hole that `SEEK_HOLE`
+reports and `SEEK_DATA` answers with `ENXIO`, not a range of readable zeros,
+so inside the one host query the observed length bounds the answer: `end`
+is the data offset found or the observed length, whichever is smaller. If
+the observed length is below the object's declared length the file has
+shrunk, and the lookup fails at once with `FSIMG_ESOURCE_CHANGED` naming
+the input: a shrink seen at a lookup is never left for a later read to
+find, since the file may be restored, data and all, before the copy reaches
+the range the answer covered, and that read would then succeed over a
+cached answer that calls the restored data zero. The check is local to the
+query; it brings back no end-of-pass validation and no second sync.
 
-Before its first lookup, and before the first lookup after any write or
-resize through the object, the object syncs the file. The sync is a
-**workaround**, not a fix: the OpenZFS fault above reported a hole over data
-that was written but not yet synced, and the fault's fix is the upgrade.
-Upstream does not document `fsync` as closing the race, and OpenZFS's
-`fsync` commits the intent log without waiting for the transaction group
-whose sync the race lives in, so this design claims only that the sync
-narrows the window, not by how much, and not that the report is then
-correct. The decision to accept that residual risk, and why, is in
-[Decisions](#decisions).
+**The tail rule.** An external object never reports any byte at or after
+its own length minus one as zero: every nonempty answer is clipped to end
+at most at `length - 1`, and when no eligible range remains the answer is
+the empty one at `length`, so an empty object or a lookup at its last byte
+answers nothing and never subtracts from a zero length. The chunk holding the object's last byte is never covered
+by an answer and is always read, with an ordinary exact read. This applies
+at each object's own end: a slice over an external root clips its root's
+answer to its own range and then to its own last byte, and in a wrap or
+compose each input's last chunk is read as the transcode reaches that
+input's end, whether or not that end falls on a chunk boundary, since a
+chunk not wholly covered is read. The rule catches truncation after the
+lookup: a file still short when its tail chunk is read comes back short,
+and the operation fails as the exact-read path fails today, so zeros the
+host invented past a new end are never published. The cost is one extra
+chunk read per external input.
 
-The object is in one of three states for this: **needs sync**, its state
-when built and again after any write or resize through it while it is not
-disabled; **ready**, once a sync has succeeded, in which lookups ask the
-host without syncing; and **disabled**, once a sync has failed, in which
-lookups answer nothing and no sync or host query is ever made again, through
-any later write or resize. A sync fails with `EINVAL` or `EBADF` on a
-descriptor the host cannot sync, `ENOTCAPABLE` under Capsicum when the
-descriptor lacks `CAP_FSYNC`, or an I/O error; `EINTR` is retried as the
-flush loop retries it. The failure is not an error: the operation continues
-and every byte is read and compared, which is always correct, and nothing in
-the result depends on the sync. This discovery sync is its own internal
-call, not `fsimg_io_flush`: an explicit flush of an output, which the writer
-requires and whose failure fails the operation, and cancellation, which the
-operation polls, are outside this fallback and unaffected by it.
+**What is and is not detected.** fsimg detects the truncation it can
+observe: a file shorter than declared at a lookup, through the length
+check, or at the exact read of a raw file's or slice's tail, through the
+tail rule. A shrink that is undone between those observations, outside any
+lookup, is concurrent modification of an input, which fsimg does not claim
+to detect for any read, sparse or not; a shrink after an input's tail has
+been consumed is the same case, as it is for a read without any hole
+knowledge. A container's logical tail may come from a zero or fill record
+or from the decoded-chunk cache without touching the backing file, so
+reading it proves nothing about the backing file's length; payload bytes
+still come only from records, whose reads validate every offset against
+the file, so a backing file that shrank yields a failed read or a corrupt
+record, never invented payload.
+
+Before its first lookup the object syncs the file, once; it is never synced
+again. The sync is a **workaround**, not a fix: the OpenZFS fault above
+reported a hole over data that was written but not yet synced, and the
+fault's fix is the upgrade. Upstream does not document `fsync` as closing
+the race, and OpenZFS's `fsync` commits the intent log without waiting for
+the transaction group whose sync the race lives in, so this design claims
+only that the sync narrows the window, not by how much, and not that the
+report is then correct. The decision to accept that residual risk, and why,
+is in [Decisions](#decisions).
+
+The object's state for this takes one of three values and only ever moves
+forward: **not synced**, its state when built, in which the first lookup
+syncs before it asks; **synced**, once the sync succeeded, in which lookups
+ask the host without syncing; and **off**, terminal, in which lookups answer
+nothing and no sync or host query is ever made again. The object moves to
+off when the sync fails, with `EINVAL` or `EBADF` on a descriptor the host
+cannot sync, `ENOTCAPABLE` under Capsicum when the descriptor lacks
+`CAP_FSYNC`, or an I/O error, `EINTR` being retried as the flush loop
+retries it; and when the host lacks `SEEK_HOLE` or a query fails. No write
+or resize changes the state. The failure is not an error: the
+operation continues and every byte is read and compared, which is always
+correct, and nothing in the result depends on the sync. This discovery sync
+is its own internal call, not `fsimg_io_flush`: an explicit flush of an
+output, which the writer requires and whose failure fails the operation,
+and cancellation, which the operation polls, are outside this fallback and
+unaffected by it.
 
 Under Capsicum the descriptors that may be asked therefore carry `CAP_FSYNC`
 beside `CAP_READ` and `CAP_SEEK`: the image input of a read job in the CLI's
-worker, and in an embedding application whatever it hands to
-`fsimg_io_from_fd` and wants answered. A descriptor without the right is
-still valid; its object is disabled by its first lookup. The writer's
-source files are external files too, but the payload copy takes a source's
-ZERO ranges from its storage kind or its provider and never asks its I/O
-object for zero ranges, so source roots need no right for this; the spool
-and every other fresh file never ask, so their rights carry none.
+worker, and in an embedding application whatever read-only descriptor it
+hands to `fsimg_io_from_fd` and wants answered. A descriptor without the
+right is still valid; its object moves to off at its first lookup.
+The writer's source files are external files too, but the payload copy
+takes a source's ZERO ranges from its storage kind or its provider and never
+asks its I/O object for zero ranges, so source roots need no right for this;
+the spool and every other fresh file never ask, so their rights carry none.
 
 ### The callback
 
@@ -416,47 +419,17 @@ API, which the API states.
   which writes nothing; the volume is emitted into a checked slice; a table
   is written. The result is sparse wherever the host keeps holes, in that
   order or any other.
-* **Transcode.** Each pass asks the disk object for the next zero range once
-  its position passes the last answer. The whole chunks lying inside the
-  range, from the pass's position to the range's end rounded down to a chunk
-  boundary, or to the disk's end when the range reaches it, so that a final
-  short chunk belongs to the run, are handed to the encoder as one **zero
-  run**. Before the hand-over the pass charges the work counter one unit per
-  chunk the run covers, the count computed with checked arithmetic from the
-  run's length; a count the work limit cannot admit fails there with
-  `FSIMG_RESOURCE_WORK`. Every other chunk is read and inspected, and its
-  zero decision is made on its bytes. A private test control makes the pass
-  read every chunk, and the output is identical. At the end of each pass the
-  transcode invokes [pass validation](#pass-validation) on the disk object
-  before the encoder's finish.
-* **The zero-run boundary.** An encoder receives data and zeros through two
-  distinct operations: `chunk`, one bounded buffer of at most the chunk size
-  with a `size_t` length, and `zeros`, a run whose length is a `uint64_t`
-  count of bytes and never a buffer. No logical run length is ever narrowed
-  to `size_t`. No format field needs a run split: a DMG zero-fill entry
-  carries a 64-bit sector count and takes any run as one entry; simg's
-  per-chunk block count is 32-bit, but the whole disk is already refused at
-  plan time above `UINT32_MAX` blocks, so every run of a valid disk fits one
-  `DONT_CARE` chunk, and the encoder converts the run's bytes to blocks with
-  checked arithmetic and emits one chunk, counted identically in both
-  passes; VHD and the raw copy append the run to the sequential sink, whose
-  zero operation takes a `uint64_t`. A run's last chunk may be short only
-  when it is the disk's last chunk.
-* **Linear work on a run polls cancellation.** Charging a run's chunks at
-  hand-over moves the per-chunk poll away from consumers that still do work
-  proportional to the run: gzip compresses the logical zeros, a stream
-  receives them, a reused sink has them written. Every such consumer does
-  its linear work through the sequential sink's zero operation,
-  `fsimg_seq_zero`, which is the one funnel for appended zeros and advances
-  in bounded steps, polling cancellation after each: after each input piece
-  it feeds the compression filter, after each successful stream-write
-  batch, and after each batch the zeroing operation writes. The steps add no
-  further charge for the run's logical chunks, which were charged once at
-  hand-over; the ordinary charges of the I/O they perform stay as they are,
-  one unit per transfer batch and per zero-range callback batch, as
-  bounded I/O charges every write. Container encoders that record a run as
-  one entry do constant work and need no step. So a run the work limit admitted stops within one
-  bounded step of cancellation, as a chunk-by-chunk pass would.
+* **Transcode.** Each pass proceeds one chunk per step, and every step
+  charges the work counter one unit, which polls cancellation. Before
+  reading a chunk the pass asks the disk object for the next zero range,
+  once its position has passed the last answer. A chunk lying wholly inside
+  a reported zero range goes to the encoder as a zero chunk without a read;
+  every other chunk is read and tested for zeros, and its decision is made
+  on its bytes. Consecutive zero chunks merge in the encoders, into one DMG
+  zero-fill entry, one simg `DONT_CARE` chunk, one unwritten run of a VHD or
+  a raw copy, as the [layer design](design-layers.md#transcode) states. A
+  private test control makes the pass read every chunk, and the output is
+  identical.
 * **Sequential sink.** A run of zeros appended to a positional output is
   zeroed through the zeroing operation at the sink's offset: on a fresh
   staged output that writes nothing and the run stays a hole; on any other
@@ -469,12 +442,13 @@ API, which the API states.
   answers from the spool's record, so an unwrap or compose that reads a
   spooled image spares the reads of its unwritten blocks.
 * **Wrap, compose and readers over a user's file.** An input volume or an
-  opened image that is an external file answers from the host's report
-  after a sync. The assembled disk passes that answer through for its input
-  regions, so a sparse host file is wrapped or composed reading only its
-  data where the host reports its holes, and in full where it does not or
-  where the sync failed. Pass validation reaches every input through the
-  assembled disk's regions.
+  opened image that is a read-only external file answers from the host's
+  report after its one sync. The assembled disk passes that answer through
+  for its input regions, so a sparse host file is wrapped or composed
+  reading only its data where the host reports its holes, and in full where
+  it does not or where host answers are off. Each input's last chunk is
+  always read, under the tail rule, as the transcode reaches that input's
+  end, so an input that shrank fails there with a short exact read.
 * **Extraction.** Each extracted file is a fresh output: DATA ranges are
   written and ZERO ranges skipped as the reader reports them. The skip rests
   on the extractor's own proof, not on zeroing: the file was created
@@ -496,22 +470,21 @@ API, which the API states.
   may use the bounded metadata page cache those reads go through, including
   its growth within budget and its scratch I/O; an assembled disk's answer
   costs one region lookup and at most one input answer.
-* No answer reads payload bytes or decodes a chunk. Only an external file's
-  answer calls the host for the file: one sync per object, and again after a
-  write or resize, then two seeks and one `fstat` per answer.
-* **Discovery is not the whole cost.** A zero range spares reads; the
-  transcode still owes its encoder every chunk of the declared disk. With
-  zero runs handed over whole, a container or a raw copy owes one encoder
-  call and one merged entry per run, so a hostile DMG declaring a 1 PiB disk
-  in one zero record costs compose a few records and a few calls. gzip has
-  no zero entry: it compresses the logical zeros, which is work linear in
-  the declared length however the input declares it, and a copy to a
-  reused sink or a stream writes them. The work counter charges one unit per
-  chunk a run covers, so the work limit and the deadline, which are trusted
-  settings, bound both; the output limit does not, since its default is the
-  planned length and the plan trusts the declared disk. A compose under a
-  work limit fails at the run that crosses it, with `FSIMG_RESOURCE_WORK`,
-  in one step rather than after a billion iterations.
+* No answer reads payload bytes or decodes a chunk. Only a read-only
+  external file's answer calls the host for the file: one sync per object,
+  then two seeks and one `fstat` per answer. The tail rule costs one chunk
+  read per external input beyond its data.
+* **Discovery is not the whole cost.** Discovery costs the zero ranges a
+  few records. The transcode's own cost stays linear in the declared disk:
+  one charged and polled step per chunk, whether the chunk is read or taken
+  as zero from an answer, and for gzip, which has no zero entry, the
+  compression of the logical zeros, and for a copy to a reused sink or a
+  stream the writing of them. A hostile DMG declaring a 1 PiB disk in one
+  zero record therefore costs compose a billion steps, each charged. The
+  work limit and the deadline, which are trusted settings, bound that; the
+  output limit does not, since its default is the planned length and the
+  plan trusts the declared disk. A compose under a work limit fails with
+  `FSIMG_RESOURCE_WORK` at the chunk whose charge crosses it.
 
 ## Security
 
@@ -542,8 +515,12 @@ API, which the API states.
   confined to files fsimg did not write, and a reader that only lists,
   extracts or verifies a user's image reads every byte it reports, so a
   wrong hole report can affect only the bytes a wrap, compose or unwrap
-  copies out of such a file. A shrunk file is not part of that risk: the
-  length rules above and pass validation make it `FSIMG_ESOURCE_CHANGED`.
+  copies out of such a file. A shrunk file is not part of that risk where
+  fsimg can observe it: the length check fails a lookup that sees the file
+  short, and the tail rule keeps the chunk holding each raw external
+  object's last byte out of every answer, so its exact read fails short on
+  a file still truncated. A shrink undone between observations is
+  concurrent modification, undetected for sparse and ordinary reads alike.
 * The build check allows `SEEK_HOLE` and `SEEK_DATA` only in
   `compat/host.c`, so the one host query is the one the compatibility layer
   owns and no other path can grow one.
@@ -580,16 +557,16 @@ on trust, and a false one changes the bytes, which is the accepted risk of
 * A container's answer fails with the chunk index's error when a record
   cannot be read, an I/O error or a limit from the metadata store, and the
   operation fails with it, as a read of that chunk would.
-* A failed discovery sync on an external file is not an error: the object is
-  disabled and the operation reads every byte. An explicit output flush that
-  fails remains the error it is.
-* An external file observed shorter than its declared length fails the
-  operation with `FSIMG_ESOURCE_CHANGED` naming the input, at the lookup
-  that observes it or at the pass validation that ends every pass; the
-  observation is never deferred to a later read.
-* A zero run whose chunk count the work limit cannot admit fails with
-  `FSIMG_RESOURCE_WORK` before the hand-over; cancellation during a run's
-  linear work is reported within one bounded step, as for a read chunk.
+* A failed discovery sync, or a host without `SEEK_HOLE`, is not an error:
+  the object moves to off and the operation reads every byte. An explicit
+  output flush that fails remains the error it is.
+* An external file observed shorter than declared at a lookup fails the
+  operation with `FSIMG_ESOURCE_CHANGED` naming the input; one still short
+  when the chunk holding its last byte is read fails with the exact-read
+  path's premature-EOF error. Nothing is published in either case.
+* A transcode over a disk declared larger than the work limit admits fails
+  with `FSIMG_RESOURCE_WORK` at the chunk whose charge crosses the limit;
+  cancellation is reported at the chunk on which it is polled, read or not.
 * Zeroing that fails after a zero was written reports incomplete output, as
   every partial mutation does.
 
@@ -605,38 +582,44 @@ under test ran.
 | --- | --- | --- |
 | Record marking | Writes through two slices of one fresh file mark the root; the next zero range answers exactly the clear runs; zeroing a disjoint range leaves `written_bytes` unchanged | A write failed by fault injection, and a short write, leave their whole requested range marked: the answer excludes it and zeroing it writes zeros |
 | Zeros after writes | A table written at the end of a fresh disk, then the gap zeroed: `written_bytes` counts the table alone | The same sequence on an external file the test opened writes every zero byte |
-| Zeroing never consults answers | A reused sink whose host hole report, through a private test hook, falsely claims the whole file is a hole, and a callback sink whose `next_zero_range` claims the same, are zeroed in full: `written_bytes` or `zero_range` calls cover every byte and the hook records no consultation from zeroing | The hook is consulted by a read-side lookup on the same objects, proving it is live |
+| Zeroing never consults answers | A reused sink, whose host hole report through a private test hook would falsely claim the whole file is a hole, and a callback sink whose `next_zero_range` claims the same, are zeroed in full: `written_bytes` or `zero_range` calls cover every byte, the hook records no query at all from the writable object, and the callback records none from zeroing | The hook is consulted by a read-side lookup on a read-only object over the same file, and the callback by a read-side lookup, proving both are live |
 | Scheme emission order | `test_fixed_disk_stays_sparse`: a 256 MiB fixed GPT disk around a 1 MiB volume writes a few MiB; and a direct test of the scheme emitter whose volume emit callback reads the staged file finds the protective MBR and primary GPT header already present and the backup header still absent, so the regions were visited in disk order | The same plan emitted into an external file writes 256 MiB; under a zero-volume-table pass order the primary header would be absent at the volume emit, and the order assertion fails |
 | Granule and resize | A sparse 40 GiB fresh file keeps every possibly-nonzero granule across the fold to 8 KiB: a granule whose odd half alone was set reads set as a whole, and a clear pair reads clear; an unaligned shrink keeps its straddling granule set and the bytes below the new length, and the regrowth answers zero beyond that granule | Allocation failure, and a host truncation failure injected after the record was prepared, leave the committed record and the file unchanged and the object usable at its old length; a fold that clears any granule which held a set half, or a shrink that leaves a wholly removed granule set, fails the assertions. Hosts without sparse files skip the physical case explicitly |
 | Record, not host | Zeros written explicitly to a fresh file, a hole on a filesystem that detects zero blocks, are reported possibly nonzero and not reported zero; an unwritten range of a fresh file on a filesystem without holes is reported zero | The build check fails on `SEEK_HOLE` or `SEEK_DATA` anywhere outside `compat/host.c` |
 | Own files never ask | A private counter of discovery syncs, counting only the sync made before a host hole query and no ordinary flush, stays at zero across a writer's emission into a fresh staged file, the transcode of its raw intermediate, the extraction of files and the sealing and reading of a spool; the spool's Capsicum rights lack `CAP_FSYNC` and a spooled stream is read under them | The counter reads one at an external file's first lookup, proving it observes discovery syncs; separately, an ordinary flush failure injected at the writer's output flush fails the emission and publishes nothing, so suppressing required flushes cannot pass the counter test |
-| User file, host report | A sparse external file is wrapped and composed reading only its data (`read_bytes`), with the discovery sync counted once before the first lookup and once more after a write through a writable external sink; the image input of a read job is unwrapped under the worker's Capsicum rights with the same reads | Hole knowledge ignored reads the whole file with identical output; a file on a filesystem without holes reads the whole file |
-| Truncated input | An external file whose holes are reported is wrapped correctly when it is intact, and so is a prefix slice of it | The file truncated below its declared length before the first lookup fails `FSIMG_ESOURCE_CHANGED` at that lookup; truncated between the two seeks, by a hook that runs between them, the lookup observes the shorter length and fails the same way, and the answer never passes the observed length; truncated and regrown to its length by a hook between the lookup and the next read, the operation still fails, since the lookup's observation was not deferred; a prefix slice of the file, through which no read reaches the lost tail, fails the same way at the lookup and, when truncated after a lookup, at pass validation; truncated after a lookup that covered the tail, pass validation fails the operation |
-| Pass validation | A compose of two external inputs completes when both stay intact; every object kind answers validation (fresh file, slice, container adapter, assembled disk, callback) without error | The first input truncated while the second is being processed fails the compose at the end of the pass with `FSIMG_ESOURCE_CHANGED` naming the first input; under simg the failure is produced in the counting pass and, injected after it, in the writing pass, and nothing is published in either case |
-| Cancellation in a run | A 16 GiB zero run admitted by the work limit is composed to gzip on a stream, to a raw stream and to a reused sink, each completing without cancellation | Cancellation requested after the run's chunks were charged, with every write succeeding and no interruption injected, stops each consumer within one bounded step: the gzip filter after an input piece, the stream after a write batch, the reused sink after a zeroing batch; the work counter, read after the hand-over and again at the end, shows the run's logical chunks charged once in the first reading and only the I/O batches' own units added by the second, so the steps charged no chunk twice |
-| Sync failure fallback | An external file whose discovery sync fails (fault control; `ENOTCAPABLE` on a descriptor the test limits without `CAP_FSYNC`) is read in full, the output is identical and the operation reports success with no error | After the failure the fault control is cleared, a hole is punched in the file and a write goes through the object: the discovery sync counter does not move and the hole is still read, proving the disabled state is terminal; the ordinary flush of a writable external sink still succeeds and is still required |
+| User file, host report | A sparse read-only external file is wrapped and composed reading only its data chunks and its final chunk (`read_bytes`), with the discovery sync counted exactly once, before the first lookup; the image input of a read job is unwrapped under the worker's Capsicum rights with the same reads; a writable external sink is never synced or queried | Hole knowledge ignored reads the whole file with identical output; a file on a filesystem without holes reads the whole file |
+| Shrink seen at a lookup | A sparse external file whose data lies after a long hole wraps correctly when intact | The file truncated below its data by a hook between the two seeks, so `SEEK_DATA` answers `ENXIO`, fails that lookup with `FSIMG_ESOURCE_CHANGED` naming the input even when the hook restores the file, data and all, before the copy continues; with the length check disabled by a private test control the same case publishes zeros over the restored data, proving the check is what catches it; truncated before the first lookup it fails the same way |
+| Truncated input | A sparse external file, intact, wraps correctly, through a prefix slice, as the first of two compose inputs and as a compose input whose end falls inside a transcode chunk | The file truncated by a hook after a lookup and before its tail chunk is read fails at that read with the exact-read error and nothing published: for the whole file, for a prefix slice of it and for the first of two compose inputs truncated before its tail is reached, each ending on a chunk boundary, and under simg in the counting pass, the failure asserted within that pass; with the tail clip disabled by a private test control each of these publishes an image with zeros over the lost tail, proving the clip is what catches it. Under simg in the writing pass the file is truncated after the counting pass completed, and the same control publishes zeros. A compose input whose end falls inside a chunk fails at that chunk's read with or without the clip, because the assembled disk's answer stops at the region boundary and a chunk not wholly covered is read; its seeded control is a private switch that accepts partial chunk coverage, with which the same case publishes zeros |
+| Undetected modification | The documented limit: the first of two compose inputs truncated by a hook after its tail chunk was consumed, while the second is processed, publishes an image holding the bytes read before the truncation, as a copy without hole knowledge would; a DMG input whose backing file is truncated behind a zero-record tail publishes its declared zeros, and one truncated under a compressed record that is not in the decode cache fails the chunk read with the exact-read premature-end error (`FSIMG_EIO`); corruption is expected only from malformed compressed bytes | The same truncations moved before the tail read, or under the record being read, fail as the rows above require |
+| Tail cost | A 100 GiB sparse external input is wrapped reading only its data chunks plus its final chunk (`read_bytes`) | Hole knowledge ignored reads 100 GiB with identical output |
+| Cancellation in skipped zeros | A run of chunks wholly covered by a zero answer is composed with no read, each chunk charged one unit and polled | Cancellation requested while the pass is inside the run stops it at the next chunk with no further charge; with the per-chunk poll omitted by a private test control the run finishes, proving the poll is what stops it |
+| Sync failure fallback | An external file whose discovery sync fails (fault control; `ENOTCAPABLE` on a descriptor the test limits without `CAP_FSYNC`) is read in full, the output is identical and the operation reports success with no error; a second lookup on a synced object makes no sync | After the failure the fault control is cleared and a hole is punched in the file: the discovery sync counter does not move and the hole is still read, proving the off state is terminal; a host hook reporting no `SEEK_HOLE` support moves the object to off the same way |
 | False host answer | A sparse external file whose report is truthful after a sync wraps to an image identical to one wrapped with hole knowledge ignored | A private hook that answers a hole over a data range after a successful sync yields an output with zeros there, and the test asserts it, documenting the accepted outcome as the callback row does |
 | Transcode of fsimg's files | A 1 GiB sparse FAT32 raw intermediate to DMG reads at most the chunks that intersect its possibly-nonzero granules (`read_bytes`); a spooled sparse raw image unwrapped reads the same | The test control that ignores hole knowledge reads the whole disk; the output is identical |
 | Container input | A DMG with a 16 MiB zero record composed into a GPT disk: `read_bytes` and the work counter show no chunk read or decoded for the run, and the output is byte-identical to the compose of the same disk with that record replaced by a compressed record of zeros, which the work counter shows decoded in full | The compressed counterpart with its compressed bytes corrupted fails the compose with `FSIMG_ECORRUPT` naming the layer, proving the decode ran |
 | Container index metadata | A DMG whose index spilled to scratch under a small page cache answers zero ranges identically with a cold cache and with a warm one, with scratch reads visible in the counters | A metadata I/O failure injected at the record store read fails the compose with the store's error, and nothing is published |
 | Callback input | A callback object whose `next_zero_range` reports its holes is wrapped reading only its data | An answer with `start < offset`, `end > length` or no progress fails `FSIMG_EIO` naming the callback; an answer claiming zero over data yields an output with zeros there, which the test asserts to document the obligation |
 | Determinism | Byte-identical output with hole knowledge consulted and ignored for every container and gzip, across budgets and chunk-cache sizes | Inputs differing in one byte differ |
-| Bounds | A 128 TiB fresh file's record is at most 1 MiB in the memory counters; a DMG declaring a 1 PiB zero disk opens and answers in record reads; composed to a DMG it costs one encoder call per run and the work counter one unit per chunk; composed under a fixed work limit it fails with `FSIMG_RESOURCE_WORK` at the run that crosses the limit, before any iteration over its chunks, and under gzip the same limit stops the zero compression | Allocation failure injected at record growth fails the resize with the file unchanged; the work limit raised above the run's chunk count lets the DMG compose complete, proving the limit was what stopped it |
-| Zero-run boundary | A zero run of 8 GiB, longer than `UINT32_MAX` bytes, reaches each encoder as one `uint64_t` run: DMG writes one zero-fill entry, simg one `DONT_CARE` chunk of 2,097,152 blocks counted identically in both passes, VHD and the raw copy append it whole, gzip compresses it; a run reaching the disk's end carries the final short chunk and the output equals the chunk-by-chunk result; a simg disk of exactly `UINT32_MAX` blocks plans and its all-zero run is one chunk | A disk of `UINT32_MAX + 1` blocks is refused at plan time as unsupported, naming `simg:block`; a block conversion whose checked arithmetic would overflow fails as a range error rather than wrapping; a chunk count that overflows the work charge's checked arithmetic fails as a limit rather than wrapping |
+| Bounds | A 128 TiB fresh file's record is at most 1 MiB in the memory counters; a DMG declaring a 1 PiB zero disk opens and answers in record reads, with no chunk read or decoded; composed to a DMG under a fixed work limit it fails with `FSIMG_RESOURCE_WORK` through the per-chunk charge, at the chunk whose charge crosses the limit, with `read_bytes` grown over the zero run by nothing beyond the assembled table prefix and the index's record reads, measured as the difference between a reading taken once the pass enters the run and one taken at the failure, and under gzip the same limit stops the zero compression | Allocation failure injected at record growth fails the resize with the file unchanged; the same compose of a disk small enough for the limit completes, proving the limit was what stopped it |
 | Sandbox | The spool's Capsicum rights lack `CAP_FSYNC` and the read job's image input carries it; the worker spools a stream, transcodes, and unwraps a sparse input under them | `fsync` on the spool descriptor in capability mode fails with `ENOTCAPABLE`, and an image input limited without `CAP_FSYNC` is read in full, proving the installed rights are the ones specified |
 
 ## Decisions
 
-1. **Files fsimg did not write answer from the host's report, synced
-   first.** This covers every external file, whichever constructor built
-   its object: the image a reader opens, the input a wrap or compose reads,
-   a sink an application supplies. The object syncs before its first lookup
-   and after any write or resize through it, then asks `SEEK_HOLE` and
-   `SEEK_DATA` and clips the answer to the file's observed length; a file
-   observed shorter than declared is a changed input at once; a failed
-   sync disables it for good. The sync is a workaround for the OpenZFS
-   15526 class of fault, not a proven fix, as [the host's
-   report](#external-files-the-hosts-report) states with its evidence.
+1. **Read-only files fsimg did not write answer from the host's report,
+   synced once first, never for their last chunk.** This covers every
+   read-only external file, whichever constructor built its object: the
+   image a reader opens, the input a wrap or compose reads. A writable
+   external object, a sink an application supplies, answers nothing. The
+   object syncs once before its first lookup, then asks `SEEK_HOLE` and
+   `SEEK_DATA`, fails as a changed input when `fstat` shows the file shorter
+   than declared, and clips every answer to the observed length and to end
+   before its own last byte, so the chunk holding that byte is always read
+   and a file still short there fails; a failed sync or an absent interface
+   moves the object to off for good. fsimg detects the truncation it can
+   observe, at a lookup or at that read, and not a shrink undone between
+   them. The sync is a workaround for the OpenZFS 15526 class of fault, not
+   a proven fix, as [the host's report](#external-files-the-hosts-report)
+   states with its evidence.
 
    Rationale: fsimg has no knowledge of its own about such a file, so the
    choice is between the host's report and reading every byte. Reading a

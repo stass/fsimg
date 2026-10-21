@@ -155,13 +155,16 @@ adapters reject `O_APPEND` and unsupported direct-I/O modes. The constructor
 does not clear shared status flags, change the caller's file position, or take
 ownership of the original descriptor. The caller must keep shared file-status
 flags stable for the adapter's lifetime. Raw devices are not accepted.
-The object is an external file: it answers zero ranges from the host's hole
-report after syncing the file, clipped to the length the file then has, and
-answers nothing once a sync fails, as the
+The object is an external file. Read-only, it answers zero ranges from the
+host's hole report after syncing the file once, bounded by the length the
+query observes and never covering the chunk that holds its last byte, fails
+with `FSIMG_ESOURCE_CHANGED` when the file is observed shorter than its
+declared length, and answers nothing once the sync fails, as the
 [hole design](design-holes.md#external-files-the-hosts-report) states;
 under Capsicum a descriptor needs `CAP_FSYNC` for that, and without it the
-file is simply read in full. Zeroing a writable object never consults that
-report; a sink without a fresh file's record is zeroed in full.
+file is simply read in full. Writable, it answers nothing; zeroing never
+consults a hole report, and a sink without a fresh file's record is zeroed
+in full.
 A slice borrows its parent, retains backing identity/ranges for alias checks,
 and has a fixed length; it never resizes its parent. The parent must outlive it.
 A reader/writer borrows its I/O object for the documented operation lifetime.

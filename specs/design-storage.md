@@ -69,11 +69,13 @@ as zero, under the [hole design](design-holes.md): a file fsimg created
 empty answers from the written-range record its root keeps, so its unwritten
 ranges are known zero however many other ranges have been written; a
 container's disk answers from its chunk index; an assembled disk from its
-regions; a callback object through an optional callback; a file fsimg did
-not write, an external file whichever constructor built its object, from
-the host's hole report after the file is synced, clipped to the file's
-observed length, and nothing once a sync has failed; any other object
-knows nothing. Only a fresh file's record lets zeroing skip a write; every
+regions; a callback object through an optional callback; a read-only file
+fsimg did not write, an external file whichever constructor built its
+object, from the host's hole report after one sync of the file, bounded by
+the length the query observes and never covering the chunk that holds the
+object's last byte, a file observed shorter than declared being a changed
+input, and nothing once the sync has failed; a writable external object and
+any other object know nothing. Only a fresh file's record lets zeroing skip a write; every
 other object is zeroed explicitly whatever it, the host or a callback
 reports, since a zero-range answer spares reads alone. A callback's
 zero-range operation promises logical zeros, not
@@ -400,22 +402,18 @@ and the sink's own fixed trailer or footer buffer. Zero decisions inspect the
 buffer; a zero range the disk object reports under the
 [hole design](design-holes.md#the-zero-range-operation) spares the read of a
 chunk lying inside it and nothing more. simg, whose header needs the chunk
-count, runs the inspection pass
-twice, the first over data ranges only. The raw intermediate is the
+count, runs the inspection pass twice; both passes visit and charge every
+chunk and read only the chunks no zero answer wholly covers, so the counts
+agree. The raw intermediate is the
 handed-over file of the [resource model](#resource-model), charged to the
 output limit together with the staged output. Cancellation is polled per
-chunk read and, within a zero run handed to the encoder whole, after each
-bounded step of the sequential sink's zero operation, the one funnel for
-appended zeros. Work is `O(disk data bytes + chunk records + table bytes)`
-for a container or a raw copy to a fresh file: a sparse disk costs its data
-plus a few merged zero records, since a reported zero run reaches the
-encoder as one call with a `uint64_t` length, never a buffer. gzip
-compresses the logical zeros and a copy to a reused sink or a stream writes
-them, so their work is linear in the disk length; the work counter charges
-every chunk a run covers before the hand-over, so the work limit and the
-deadline bound a disk declared vast by its tables, and each pass ends with
-the disk object's pass validation
-([hole design](design-holes.md#resource-bounds)).
+chunk. Work is one charged step per chunk of the disk, read or taken as
+zero, plus the data bytes read, the chunk records and the table bytes; a
+sparse disk costs its data plus a few merged zero records on top of its
+steps. gzip compresses the logical zeros and a copy to a reused sink or a
+stream writes them, so their work is linear in the disk length as well; the
+per-chunk charge lets the work limit and the deadline bound a disk declared
+vast by its tables ([hole design](design-holes.md#resource-bounds)).
 
 ## Reading and traversal
 

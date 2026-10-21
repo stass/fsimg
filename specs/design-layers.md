@@ -502,12 +502,12 @@ failing layer and states that nothing was published.
 Every failure from the first mutation of the staged disk on marks the output
 incomplete; the coordinator removes staged files and publishes nothing. The
 raw intermediate has no name and needs no cleanup; the staged output is
-removed by the existing cleanup. Cancellation is polled at every chunk the
-transcode reads, at every bounded step of a zero run's linear work in the
-sequential sink, and at every scheme table write. Every pass ends with the
-disk object's pass validation, so an input that shrank under a spared read
-fails the operation as a changed input
-([hole design](design-holes.md#pass-validation)). A partial container, a missing
+removed by the existing cleanup. Cancellation is polled at every chunk of the
+transcode and at every scheme table write. An external input observed
+shorter than declared at a hole lookup is a changed input, and the chunk
+holding such an input's last byte is always read, so an input still short
+there fails at that read
+([hole design](design-holes.md#external-files-the-hosts-report)). A partial container, a missing
 trailer, a plist without its koly, or a disk with primary but no backup GPT
 is never published.
 
@@ -545,8 +545,9 @@ answers the transcode's zero-range question region by region, under the
 a table never is, and an input slice answers as its source does, a
 container adapter from its chunk index, a spooled image from its spool's
 record, a caller's object through its callback, and a user's file from the
-host's hole report after a sync, or nothing when the sync fails, so that
-file is read in full. An input slice may itself sit above a
+host's hole report after one sync, never for the chunk holding its last
+byte, which is always read, or nothing when the sync fails, so that file is
+read in full. An input slice may itself sit above a
 container adapter; that is the one place an adapter sits above another, and
 the depth stops there. Compose with a container therefore reads every input
 once, sparing the ranges its inputs prove zero, and writes the output once.

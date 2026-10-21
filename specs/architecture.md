@@ -235,10 +235,13 @@ property of holding a descriptor: each object reports the next range at or
 after an offset that it knows reads as zero, from what it is. A file fsimg
 created empty answers from the record of the ranges written through it, a
 container's disk from its chunk index, an assembled disk from its regions, a
-caller's object through an optional callback, and a file fsimg did not write,
-an external file whichever constructor built its object, from the host's
-hole report after a sync of the file, clipped to the length the file then
-has. fsimg never asks the host whether a file it wrote has holes: a
+caller's object through an optional callback, and a read-only file fsimg did
+not write, an external file whichever constructor built its object, from the
+host's hole report after one sync of the file, bounded by the length the
+query observes, a file observed shorter being a changed input, and never
+for the chunk holding its last byte, which is always read so that a file
+still short there fails.
+fsimg never asks the host whether a file it wrote has holes: a
 host hole report describes storage, not contents, and has been wrong for
 written, unsynced data (OpenZFS issue 15526), whereas what fsimg wrote is a
 fact it owns. For a user's file fsimg has no fact of its own, so it accepts
