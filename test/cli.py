@@ -711,7 +711,10 @@ def test_failures(executable, root):
         ["c", "--json", "-n", "-F", "qnx4", "-L", "A" * 49, "-C", "source", "."],
     ]:
         failed(invoke(executable, root, arguments, expected=2))
-    failed(invoke(executable, root, ["i", "--json", "-f", "-"], expected=1))
+    # An empty standard input is an unrecognised image, not a hang on
+    # whatever input the test runner happens to hold.
+    assert failed(invoke(executable, root, ["i", "--json", "-f", "-"], expected=1,
+                         stdin=subprocess.DEVNULL))["code"] == -4
     # The command carries QNX4's 48-byte label; exFAT's own limit refuses it.
     assert completed(invoke(executable, root, [
         "c", "--json", "-n", "-F", "qnx4", "-L", "A" * 48, "-C", "source", ".",
