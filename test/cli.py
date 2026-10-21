@@ -450,6 +450,22 @@ def test_create_operands(executable, root):
         result = invoke(executable, root, ["cf", "linked.img", "-F", "fat12", operand], expected=1)
         assert b"operand is a symbolic link" in result.stderr, (operand, result.stderr)
     assert not (root / "linked.img").exists()
+    # A refused kind is unsupported, as the scanner reports it, not an I/O
+    # failure.
+    os.mkfifo(root / "operand-fifo")
+    for operand in ["source-link", "source-link//./", "operand-fifo"]:
+        error = failed(invoke(executable, root, ["cf", "kind.img", "-F", "fat12", "--json",
+                                                 operand], expected=1))
+        assert error["status"] == "unsupported capability", error
+        assert error["path"] == operand, error
+    assert not (root / "kind.img").exists()
+    # So is an image that is a link or a FIFO.
+    (root / "image-link").symlink_to("disjoint.img")
+    for image in ["image-link", "operand-fifo"]:
+        error = failed(invoke(executable, root, ["tf", image, "--json"], expected=1))
+        assert error["status"] == "unsupported capability" and error["path"] == image, error
+    (root / "image-link").unlink()
+    (root / "operand-fifo").unlink()
     # A trailing slash requires a directory, as it does for the host.
     result = invoke(executable, root, ["cf", "slashed.img", "-F", "fat12", "-C", "source",
                                        "HELLO.TXT/"], expected=1)
@@ -589,6 +605,10 @@ def test_manifest_refusals(executable, root):
         result = invoke(executable, work, ["cf", "refused.img", "-F", "fat12", operand],
                         expected=1)
         assert detail in result.stderr, (operand, result.stderr)
+        error = failed(invoke(executable, work, ["cf", "refused.img", "-F", "fat12",
+                                                 "--json", operand], expected=1))
+        assert error["status"] == ("I/O failure" if operand == "@missing.mtree" else
+                                   "unsupported capability"), (operand, error)
     result = invoke(executable, work, ["cf", "refused.img", "-F", "fat12", "@"], expected=2)
     assert b"@ requires a manifest name" in result.stderr
     result = invoke(executable, work, ["cf", "refused.img", "-F", "fat12", "-l", "fds=5",
@@ -688,6 +708,9 @@ def test_extract_here(executable, root):
     for spelling in ["into-link/", "into-link/."]:
         result = invoke(executable, root, ["xEf", "human.img", "-C", spelling], expected=1)
         assert b"-C directory is a symbolic link" in result.stderr, (spelling, result.stderr)
+    error = failed(invoke(executable, root, ["xEf", "human.img", "--json", "-C", "into-link"],
+                          expected=1))
+    assert error["status"] == "unsupported capability", error
     assert not list((root / "into-target").iterdir())
     result = invoke(executable, root, ["xEf", "human.img"], expected=1)
     assert b'extraction destination is not empty "."' in result.stderr

@@ -506,7 +506,9 @@ on these codes, which image content can cause:
 * `FSIMG_EUNSUPPORTED`: fsimg or the host lacks a feature or capability. The
   image can cause it with a feature outside the supported profile; the host
   can cause it with unavailable required confinement, no publication without
-  replacement, or a name the destination cannot represent.
+  replacement, a name the destination cannot represent, or an object of a
+  kind fsimg does not read where it is given, such as a symbolic link or
+  FIFO as an operand, manifest, image or `-E` directory.
 
 It also relies on these fault codes:
 

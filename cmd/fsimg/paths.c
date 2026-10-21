@@ -23,6 +23,8 @@
 
 static fsimg_status_t host_error(fsimg_error_t *, const char *);
 static fsimg_status_t path_error(fsimg_error_t *, const char *, const char *);
+static fsimg_status_t kind_error(fsimg_error_t *, int, const char *,
+    const char *);
 static fsimg_status_t split_output(const char *, char *, char *, fsimg_error_t *);
 static fsimg_status_t private_directory(int, const char *, char *, int *, bool *,
     fsimg_error_t *);
@@ -91,6 +93,24 @@ path_error(fsimg_error_t *error, const char *message, const char *path)
 		count = snprintf(error->path, sizeof(error->path), "%s", path);
 		error->path_truncated = count < 0 || (size_t)count >= sizeof(error->path);
 	}
+	return (status);
+}
+
+/* A host object of a kind the command refuses, such as a symbolic link or
+ * a FIFO where a directory or regular file is required, is unsupported, as
+ * the library's scanner reports it, naming path. os_error is the errno
+ * that revealed the kind (ELOOP from a no-follow open), or zero when its
+ * identity did.
+ */
+static fsimg_status_t
+kind_error(fsimg_error_t *error, int os_error, const char *message,
+    const char *path)
+{
+	fsimg_status_t status;
+
+	status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, os_error,
+	    FSIMG_OP_IO, message);
+	fsimg_error_path(error, path);
 	return (status);
 }
 
@@ -252,13 +272,16 @@ open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 		return (FSIMG_OK);
 	}
 	request->input_fd = fsimg_host_source_open(AT_FDCWD, options->image, false);
+	if (request->input_fd == -1 && errno == ELOOP)
+		return (kind_error(error, ELOOP, "image is a symbolic link",
+		    options->image));
 	if (request->input_fd == -1)
 		return (path_error(error, "cannot open image", options->image));
 	if (fsimg_host_file(request->input_fd, &identity) == -1)
 		return (host_error(error, "image identity query failed"));
 	if (identity.kind != FSIMG_HOST_FILE)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_IO, "input image must be a seekable regular file"));
+		return (kind_error(error, 0, "image is not a regular file",
+		    options->image));
 	return (FSIMG_OK);
 }
 
@@ -334,7 +357,7 @@ open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
 	    operand->host_path, false);
 	if (fd == -1) {
 		if (errno == ELOOP)
-			return (path_error(error, operand->manifest ?
+			return (kind_error(error, ELOOP, operand->manifest ?
 			    "manifest is a symbolic link" : "operand is a symbolic link",
 			    operand->host_path));
 		return (path_error(error, operand->manifest ?
@@ -352,8 +375,7 @@ open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
 	    (!operand->manifest && identity.kind == FSIMG_HOST_DIRECTORY);
 	if (!kind_valid) {
 		close(fd);
-		errno = 0;
-		return (path_error(error, operand->manifest ?
+		return (kind_error(error, 0, operand->manifest ?
 		    "manifest is not a regular file" :
 		    "operand is not a regular file or directory", operand->host_path));
 	}
@@ -796,9 +818,11 @@ prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	parent_path = options->directory == NULL ? "." : options->directory;
 	if (options->extract_here) {
 		request->output_fd = open_nofollow(AT_FDCWD, parent_path, true);
+		if (request->output_fd == -1 && errno == ELOOP)
+			return (kind_error(error, ELOOP,
+			    "-C directory is a symbolic link", parent_path));
 		if (request->output_fd == -1)
-			return (path_error(error, errno == ELOOP ?
-			    "-C directory is a symbolic link" : "cannot open -C directory",
+			return (path_error(error, "cannot open -C directory",
 			    parent_path));
 		if (fsimg_host_private_directory(request->output_fd, &verdict) == -1)
 			return (path_error(error, "cannot inspect -C directory", parent_path));
