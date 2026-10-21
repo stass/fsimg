@@ -34,6 +34,12 @@ static void test_context(void);
 static void test_descriptor_cleanup(void);
 static void test_sha256_split_updates(void);
 static void test_sha256_vectors(void);
+static void check_render(const char *, const bool *, size_t, const char *,
+    bool);
+static void test_path_render(void);
+static void test_rendered_tail(void);
+static void loss_callback(void *, const char *, uint32_t);
+static void test_loss_rendering(void);
 static bool cancel_callback(void *);
 static void progress_callback(void *, const fsimg_progress_t *);
 static void sha256_hex_of(const void *, size_t, char *);
@@ -360,6 +366,156 @@ test_sha256_split_updates(void)
 	}
 }
 
+/* Render path, with components classed by omitted, into a buffer of size
+ * bytes and expect exactly the rendering and truncation flag given. The
+ * buffer is poisoned first, so a byte written past the terminator shows.
+ */
+static void
+check_render(const char *path, const bool *omitted, size_t size,
+    const char *expected, bool truncated)
+{
+	char out[64];
+
+	CHECK(size <= sizeof(out));
+	memset(out, 0x5a, sizeof(out));
+	if (fsimg_path_render(path, omitted, out, size) != truncated ||
+	    strcmp(out, expected) != 0) {
+		fprintf(stderr, "rendering into %zu bytes: expected \"%s\"%s, "
+		    "got \"%s\"\n", size, expected, truncated ?
+		    " truncated" : "", out);
+		CHECK(!"rendering differs");
+	}
+	for (size_t i = strlen(expected) + 1; i < sizeof(out); i++)
+		CHECK(out[i] == 0x5a);
+}
+
+/* The one rendering every library path passes through. A backslash is
+ * always doubled; an omitted component also writes every byte outside
+ * 0x20 to 0x7e as \xNN; a delivered component is otherwise unchanged. The
+ * expected strings are written out by hand from that rule, independently
+ * of the implementation's unit scanner.
+ */
+static void
+test_path_render(void)
+{
+	static const bool second_omitted[] = { false, true };
+	static const bool first_omitted[] = { true, false };
+
+	/* A plain path is all delivered: only backslashes change. */
+	check_render("/dir/name", NULL, 64, "/dir/name", false);
+	check_render("/a\\b", NULL, 64, "/a\\\\b", false);
+	check_render("/caf\xc3\xa9/\x01", NULL, 64, "/caf\xc3\xa9/\x01", false);
+	check_render("relative/name", NULL, 64, "relative/name", false);
+
+	/* Omitted components escape everything outside printable ASCII,
+	 * DEL included; printable bytes and later components stay as they
+	 * are.
+	 */
+	check_render("/dir/a\xe9", second_omitted, 64, "/dir/a\\xe9", false);
+	check_render("/\x01\x7f~ /next", first_omitted, 64,
+	    "/\\x01\\x7f~ /next", false);
+	check_render("/a\\\xff", first_omitted, 64, "/a\\\\\\xff", false);
+
+	/* Injectivity: a delivered name spelling "a\xe9" and an omitted
+	 * name "a" followed by the byte 0xe9 render apart.
+	 */
+	check_render("/a\\xe9", NULL, 64, "/a\\\\xe9", false);
+	check_render("/a\xe9", first_omitted, 64, "/a\\xe9", false);
+
+	/* A rendering too long keeps its tail and drops whole units from
+	 * the front: never part of an escape or of a UTF-8 sequence. Here
+	 * "/\x01\x02" is nine bytes; six bytes hold five and the NUL, so
+	 * the separator and the first escape go.
+	 */
+	check_render("/\x01\x02", first_omitted, 10, "/\\x01\\x02", false);
+	check_render("/\x01\x02", first_omitted, 9, "\\x01\\x02", true);
+	check_render("/\x01\x02", first_omitted, 8, "\\x02", true);
+	check_render("/\x01\x02", first_omitted, 6, "\\x02", true);
+	check_render("/\x01\x02", first_omitted, 5, "\\x02", true);
+	check_render("/\x01\x02", first_omitted, 4, "", true);
+	check_render("/\xc3\xa9\xc3\xa9\xc3\xa9", NULL, 4, "\xc3\xa9", true);
+	check_render("/\xc3\xa9\xc3\xa9\xc3\xa9", NULL, 5, "\xc3\xa9\xc3\xa9",
+	    true);
+	check_render("/\\\\", NULL, 4, "\\\\", true);
+	check_render("/\\\\", NULL, 3, "\\\\", true);
+	check_render("/\\\\", NULL, 2, "", true);
+	check_render("/x", NULL, 1, "", true);
+	check_render("/ab/\x01", second_omitted, 6, "/\\x01", true);
+	check_render("/\x80\x80\x80\x80\x80", NULL, 3, "\x80", true);
+}
+
+/* A rendered path's tail starts on a whole unit: never inside "\\\\",
+ * "\\xNN" or a UTF-8 sequence.
+ */
+static void
+test_rendered_tail(void)
+{
+	CHECK(fsimg_rendered_tail("/ab", 3, 3) == 0);
+	CHECK(fsimg_rendered_tail("/ab", 3, 2) == 1);
+	CHECK(fsimg_rendered_tail("/a\\\\b", 5, 3) == 2);
+	CHECK(fsimg_rendered_tail("/a\\\\b", 5, 2) == 4);
+	CHECK(fsimg_rendered_tail("/\\x01z", 6, 4) == 5);
+	CHECK(fsimg_rendered_tail("/\\x01z", 6, 5) == 1);
+	CHECK(fsimg_rendered_tail("/\xc3\xa9\xc3\xa9", 5, 3) == 3);
+	CHECK(fsimg_rendered_tail("/\xc3\xa9\xc3\xa9", 5, 0) == 5);
+}
+
+typedef struct loss_record {
+	char		 path[64];
+	unsigned	 calls;
+} loss_record_t;
+
+static void
+loss_callback(void *argument, const char *path, uint32_t fields)
+{
+	loss_record_t *record = argument;
+
+	CHECK(fields == FSIMG_META_OWNER);
+	CHECK(strlen(path) < sizeof(record->path));
+	strcpy(record->path, path);
+	record->calls++;
+}
+
+/* The loss callback's path is rendered into a buffer for the worst case of
+ * the longest path, so a path of nothing but backslashes at the path limit
+ * still arrives whole; the error path, 256 bytes, keeps the tail of a
+ * longer rendering instead.
+ */
+static void
+test_loss_rendering(void)
+{
+	fsimg_options_t options;
+	fsimg_error_t error;
+	loss_record_t record = { .calls = 0 };
+	fsimg_ctx_t *ctx;
+	char path[300], expected[64];
+
+	fsimg_options_init(&options);
+	options.max_path_bytes = 16;
+	options.loss = loss_callback;
+	options.loss_argument = &record;
+	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
+	path[0] = '/';
+	memset(path + 1, '\\', 14);
+	path[15] = '\0';
+	expected[0] = '/';
+	memset(expected + 1, '\\', 28);
+	expected[29] = '\0';
+	CHECK(fsimg_report_loss(ctx, path, FSIMG_META_OWNER) == 1);
+	CHECK(record.calls == 1 && strcmp(record.path, expected) == 0);
+	fsimg_ctx_free(ctx);
+
+	memset(path, 'p', sizeof(path) - 1);
+	path[0] = '/';
+	path[sizeof(path) - 1] = '\0';
+	fsimg_error_path(&error, path);
+	CHECK(error.path_truncated);
+	CHECK(strlen(error.path) == sizeof(error.path) - 1);
+	CHECK(strcmp(error.path, path + sizeof(path) - sizeof(error.path)) == 0);
+	fsimg_error_path(&error, "/short\\name");
+	CHECK(!error.path_truncated && strcmp(error.path, "/short\\\\name") == 0);
+}
+
 int
 main(void)
 {
@@ -368,5 +524,8 @@ main(void)
 	test_descriptor_cleanup();
 	test_sha256_vectors();
 	test_sha256_split_updates();
+	test_path_render();
+	test_rendered_tail();
+	test_loss_rendering();
 	return (0);
 }

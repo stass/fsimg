@@ -245,20 +245,16 @@ syntax(cli_parse_t *parse, const char *message)
 	    message));
 }
 
-/* A syntax error quoting the offending word, which the display escapes. */
+/* A syntax error quoting the offending word, rendered like every path an
+ * error carries; the display escapes the rendering.
+ */
 static fsimg_status_t
 syntax_naming(cli_parse_t *parse, const char *message, const char *word)
 {
 	fsimg_status_t status;
-	int count;
 
 	status = syntax(parse, message);
-	if (parse->error != NULL) {
-		count = snprintf(parse->error->path, sizeof(parse->error->path),
-		    "%s", word);
-		parse->error->path_truncated = count < 0 ||
-		    (size_t)count >= sizeof(parse->error->path);
-	}
+	fsimg_error_path(parse->error, word);
 	return (status);
 }
 

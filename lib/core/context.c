@@ -26,6 +26,29 @@ typedef union fsimg_allocation {
 	} owner;
 } fsimg_allocation_t;
 
+/* A position in a path being rendered. separators counts the slashes
+ * passed, so a byte after the first lies in component separators - 1.
+ */
+typedef struct render_cursor {
+	const unsigned char *at;
+	const bool	*omitted;
+	size_t		 separators;
+} render_cursor_t;
+
+/* One rendered unit: the input bytes it consumes and the bytes they
+ * render to.
+ */
+typedef struct render_unit {
+	size_t		 input;
+	size_t		 output;
+} render_unit_t;
+
+static bool render_in_omitted(const render_cursor_t *);
+static render_unit_t render_measure(const render_cursor_t *);
+static void render_advance(render_cursor_t *, const render_unit_t *);
+static size_t render_write(const render_cursor_t *, const render_unit_t *,
+    char *);
+
 bool
 fsimg_add_u64(uint64_t a, uint64_t b, uint64_t *out)
 {
@@ -78,26 +101,149 @@ fsimg_report_loss(fsimg_ctx_t *ctx, const char *path, uint32_t fields)
 		count++;
 	fsimg_stat_add(&ctx->stats.metadata_losses, count);
 	if (ctx->options.loss != NULL) {
+		/* The buffer holds the rendering of any path within the path
+		 * limit, which bounds every path reported here.
+		 */
+		(void)fsimg_path_render(path, NULL, ctx->loss_path,
+		    ctx->loss_path_bytes);
 		ctx->in_callback = true;
-		ctx->options.loss(ctx->options.loss_argument, path, fields);
+		ctx->options.loss(ctx->options.loss_argument, ctx->loss_path,
+		    fields);
 		ctx->in_callback = false;
 	}
 	return (count);
 }
 
+static bool
+render_in_omitted(const render_cursor_t *cursor)
+{
+	return (cursor->omitted != NULL && cursor->separators != 0 &&
+	    cursor->omitted[cursor->separators - 1]);
+}
+
+/* The unit at the cursor: a backslash, rendered as two; in an omitted
+ * component one byte, rendered as four unless printable ASCII; otherwise
+ * one byte, or a UTF-8 lead byte with the continuation bytes after it, kept
+ * whole so truncation never splits a sequence. A separator is one byte.
+ */
+static render_unit_t
+render_measure(const render_cursor_t *cursor)
+{
+	const unsigned char *at = cursor->at;
+	render_unit_t unit = { .input = 1, .output = 1 };
+
+	if (at[0] == '\\') {
+		unit.output = 2;
+	} else if (at[0] != '/' && render_in_omitted(cursor)) {
+		if (at[0] < 0x20 || at[0] > 0x7e)
+			unit.output = 4;
+	} else if (at[0] >= 0x80) {
+		while (unit.input < 4 && (at[unit.input] & 0xc0) == 0x80)
+			unit.input++;
+		unit.output = unit.input;
+	}
+	return (unit);
+}
+
+static void
+render_advance(render_cursor_t *cursor, const render_unit_t *unit)
+{
+	if (cursor->at[0] == '/')
+		cursor->separators++;
+	cursor->at += unit->input;
+}
+
+/* Write the unit at the cursor to out, which has room for it and a NUL. */
+static size_t
+render_write(const render_cursor_t *cursor, const render_unit_t *unit,
+    char *out)
+{
+	static const char hex[] = "0123456789abcdef";
+	unsigned byte = cursor->at[0];
+
+	if (byte == '\\') {
+		out[0] = '\\';
+		out[1] = '\\';
+	} else if (unit->output == 4) {
+		out[0] = '\\';
+		out[1] = 'x';
+		out[2] = hex[byte >> 4];
+		out[3] = hex[byte & 0xf];
+	} else
+		bcopy(cursor->at, out, unit->input);
+	return (unit->output);
+}
+
+/* Measure the whole rendering, drop whole units from the front until the
+ * rest fits beside the NUL, then write the rest. Two passes over the input
+ * need no buffer beyond out, however long the path.
+ */
+size_t
+fsimg_rendered_tail(const char *rendered, size_t length, size_t limit)
+{
+	const unsigned char *bytes = (const unsigned char *)rendered;
+	size_t at, unit;
+
+	for (at = 0; length - at > limit; at += unit) {
+		unit = 1;
+		if (bytes[at] == '\\')
+			unit = bytes[at + 1] == 'x' ? 4 : 2;
+		else if (bytes[at] >= 0x80) {
+			while (unit < 4 && (bytes[at + unit] & 0xc0) == 0x80)
+				unit++;
+		}
+		/* The rendering is NUL-terminated; a unit never passes its end. */
+		if (unit > length - at)
+			unit = length - at;
+	}
+	return (at);
+}
+
+bool
+fsimg_path_render(const char *path, const bool *omitted, char *out,
+    size_t size)
+{
+	render_cursor_t cursor;
+	render_unit_t unit;
+	uint64_t total, excess, dropped;
+	size_t used;
+
+	if (size == 0)
+		return (true);
+	cursor = (render_cursor_t){ .at = (const unsigned char *)path,
+	    .omitted = omitted };
+	total = 0;
+	while (cursor.at[0] != '\0') {
+		unit = render_measure(&cursor);
+		total += unit.output;
+		render_advance(&cursor, &unit);
+	}
+
+	cursor = (render_cursor_t){ .at = (const unsigned char *)path,
+	    .omitted = omitted };
+	excess = total > size - 1 ? total - (size - 1) : 0;
+	for (dropped = 0; dropped < excess; dropped += unit.output) {
+		unit = render_measure(&cursor);
+		render_advance(&cursor, &unit);
+	}
+
+	used = 0;
+	while (cursor.at[0] != '\0') {
+		unit = render_measure(&cursor);
+		used += render_write(&cursor, &unit, out + used);
+		render_advance(&cursor, &unit);
+	}
+	out[used] = '\0';
+	return (excess != 0);
+}
+
 void
 fsimg_error_path(fsimg_error_t *error, const char *path)
 {
-	size_t length;
-
 	if (error == NULL)
 		return;
-	length = strlen(path);
-	error->path_truncated = length >= sizeof(error->path);
-	if (error->path_truncated)
-		length = sizeof(error->path) - 1;
-	bcopy(path, error->path, length);
-	error->path[length] = '\0';
+	error->path_truncated = fsimg_path_render(path, NULL, error->path,
+	    sizeof(error->path));
 }
 
 void
@@ -197,8 +343,10 @@ fsimg_ctx_new(const fsimg_options_t *opts, fsimg_ctx_t **out,
     fsimg_error_t *error)
 {
 	fsimg_options_t defaults, options;
+	fsimg_error_t detail;
 	fsimg_ctx_t *ctx;
 	struct stat st;
+	uint64_t loss_bytes;
 	fsimg_status_t status;
 	int fd, saved;
 
@@ -249,6 +397,23 @@ fsimg_ctx_new(const fsimg_options_t *opts, fsimg_ctx_t **out,
 	ctx->options.scratch_directory_fd = -1;
 	ctx->stats.memory_bytes = sizeof(*ctx);
 	ctx->stats.memory_peak = sizeof(*ctx);
+	/* A rendered path is at most four bytes per input byte. */
+	if (options.loss != NULL) {
+		if (!fsimg_mul_u64(options.max_path_bytes, 4, &loss_bytes) ||
+		    !fsimg_add_u64(loss_bytes, 1, &loss_bytes) ||
+		    !fsimg_to_size(loss_bytes, &ctx->loss_path_bytes)) {
+			status = fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_CONTEXT, "loss path buffer size overflow");
+			goto fail;
+		}
+		ctx->loss_path = fsimg_alloc(ctx, ctx->loss_path_bytes, &detail);
+		if (ctx->loss_path == NULL) {
+			status = detail.status;
+			if (error != NULL)
+				*error = detail;
+			goto fail;
+		}
+	}
 	if (options.scratch_directory_fd != -1) {
 		if (fsimg_host_fstat(options.scratch_directory_fd, &st) == -1) {
 			status = fsimg_error_set(error, FSIMG_EIO, errno,
@@ -276,6 +441,7 @@ fsimg_ctx_new(const fsimg_options_t *opts, fsimg_ctx_t **out,
 	*out = ctx;
 	return (FSIMG_OK);
 fail:
+	fsimg_dealloc(ctx->loss_path);
 	free(ctx);
 	return (status);
 }
@@ -287,6 +453,7 @@ fsimg_ctx_free(fsimg_ctx_t *ctx)
 		return;
 	if (ctx->options.scratch_directory_fd != -1)
 		fsimg_fd_release(ctx, ctx->options.scratch_directory_fd);
+	fsimg_dealloc(ctx->loss_path);
 	free(ctx);
 }
 

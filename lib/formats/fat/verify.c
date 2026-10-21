@@ -257,17 +257,11 @@ fsimg_fat_verify(fsimg_reader_t *reader, unsigned flags,
 			break;
 		if (status != FSIMG_OK)
 			goto done;
-		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY) {
-			report->directories++;
-			continue;
-		}
-		report->files++;
-		if (!fsimg_add_u64(report->logical_bytes, reader->entry.size,
-		    &report->logical_bytes)) {
-			status = fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_VERIFY, "verification logical-byte total overflow");
+		status = fsimg_verify_account(reader, report, error);
+		if (status != FSIMG_OK)
 			goto done;
-		}
+		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
+			continue;
 		status = verify_file(reader, buffer, report, error);
 		if (status != FSIMG_OK)
 			goto done;

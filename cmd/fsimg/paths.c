@@ -131,13 +131,9 @@ static fsimg_status_t
 path_error(fsimg_error_t *error, const char *message, const char *path)
 {
 	fsimg_status_t status;
-	int count;
 
 	status = host_error(error, message);
-	if (error != NULL) {
-		count = snprintf(error->path, sizeof(error->path), "%s", path);
-		error->path_truncated = count < 0 || (size_t)count >= sizeof(error->path);
-	}
+	fsimg_error_path(error, path);
 	return (status);
 }
 

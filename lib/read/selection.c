@@ -146,6 +146,8 @@ relate_entry(fsimg_selection_t *selection, fsimg_selection_relation_t *relation,
 	selection->next_component = separator == NULL ? selection->requested_length :
 	    (size_t)(separator - selection->requested) + 1;
 	*relation = selection_found(selection) ? FSIMG_SELECTION_TARGET : FSIMG_SELECTION_ANCESTOR;
+	if (*relation == FSIMG_SELECTION_TARGET)
+		fsimg_walk_scope_below_current(reader);
 	return (FSIMG_OK);
 }
 
@@ -159,6 +161,12 @@ advance_selection(fsimg_selection_t *selection, const fsimg_entry_t **out,
 
 	*out = NULL;
 	*relation = FSIMG_SELECTION_OUTSIDE;
+	/* Omitted entries count only within the selected scope: below the
+	 * root, nothing until the target resolves. The scope is set as the
+	 * walk starts, so a selection never used leaves the reader as it was.
+	 */
+	if (reader->state == FSIMG_READER_NEW && selection->requested_length != 1)
+		fsimg_walk_scope_nothing(reader);
 	/* A selected entry other than a directory has no subtree to visit. */
 	if (selection_found(selection) && reader->entry.path != NULL &&
 	    reader->entry.kind != FSIMG_ENTRY_DIRECTORY &&

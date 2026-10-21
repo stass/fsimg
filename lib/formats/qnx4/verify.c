@@ -402,9 +402,10 @@ read_payload(fsimg_reader_t *reader, unsigned char *buffer,
 	return (FSIMG_OK);
 }
 
-/* Walk every entry once; preparing each directory accounts its names. A
- * later name of an .inodes object has its first name's bytes, which were
- * read already.
+/* Walk every entry once, omitted ones included; preparing each directory
+ * accounts its names. The payload of every entry is read, except a later
+ * name of an .inodes object, which has its first name's bytes, read
+ * already.
  */
 static fsimg_status_t
 traverse(fsimg_reader_t *reader, unsigned char *payload,
@@ -419,15 +420,11 @@ traverse(fsimg_reader_t *reader, unsigned char *payload,
 			return (FSIMG_OK);
 		if (status != FSIMG_OK)
 			return (status);
-		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY) {
-			report->directories++;
+		status = fsimg_verify_account(reader, report, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
 			continue;
-		}
-		report->files++;
-		if (!fsimg_add_u64(report->logical_bytes, reader->entry.size,
-		    &report->logical_bytes))
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_VERIFY, "QNX4 logical-byte total overflow"));
 		if (payload != NULL && !qnx4_state(reader)->later_name) {
 			status = read_payload(reader, payload, report, error);
 			if (status != FSIMG_OK)

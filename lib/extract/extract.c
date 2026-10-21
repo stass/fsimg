@@ -635,6 +635,11 @@ fsimg_extract_into(fsimg_reader_t *reader, int root,
 	    FSIMG_SELECTION_TREE, &state.selection, error);
 	if (status != FSIMG_OK)
 		goto done;
+	/* The walker fails at an omitted entry in scope unless asked to skip:
+	 * a partial output is never success.
+	 */
+	reader->omission.refuse =
+	    (state.options.flags & FSIMG_EXTRACT_SKIP_UNSUPPORTED) == 0;
 	limit = state.options.max_output_bytes;
 	if (limit != 0) {
 		if (reader->ctx->options.max_output_bytes != 0 &&
@@ -695,6 +700,7 @@ done:
 	if (result != NULL) {
 		result->entries = state.completed_entries;
 		result->skipped_entries = state.skipped_entries;
+		result->omitted_entries = reader->omission.count;
 		result->logical_bytes = reader->session.output_bytes;
 	}
 	while (state.depth != 0) {
@@ -755,13 +761,15 @@ fsimg_extract_at(fsimg_reader_t *reader, int parent, const char *name,
 	return (status);
 }
 
-/* The destination name a failed extraction leaves behind, incomplete. */
+/* Mark a failed extraction's output incomplete. An error that already
+ * names an image entry keeps it; any other names the destination.
+ */
 static void
 report_destination(fsimg_error_t *error, const char *name)
 {
 	if (error != NULL) {
 		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
-		snprintf(error->path, sizeof(error->path), "%s", name);
-		error->path_truncated = strlen(name) >= sizeof(error->path);
+		if (error->path[0] == '\0')
+			fsimg_error_path(error, name);
 	}
 }

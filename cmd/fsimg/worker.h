@@ -180,6 +180,7 @@ typedef struct fsimg_worker_result {
 	uint64_t	 metadata_losses;
 	uint64_t	 image_bytes;
 	uint64_t	 skipped_entries;
+	uint64_t	 omitted_entries;
 	fsimg_confinement_t confinement; /* UNKNOWN until a valid READY arrives. */
 } fsimg_worker_result_t;
 

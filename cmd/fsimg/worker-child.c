@@ -140,18 +140,21 @@ child_loss(void *argument, const char *path, uint32_t fields)
 {
 	worker_child_t *child = argument;
 	unsigned char raw[FSIMG_WIRE_LOSS_BYTES + FSIMG_WIRE_LOSS_PATH_BYTES];
-	size_t length;
+	size_t length, start;
 
 	/* Frames provide bounded examples; DONE retains the exact aggregate. */
 	if (!child->processing || child->losses_sent >= FSIMG_WIRE_LOSS_EVENTS)
 		return;
 	child->losses_sent++;
-	length = strnlen(path, FSIMG_WIRE_LOSS_PATH_BYTES);
+	/* The excerpt is the rendered path's tail, which names the entry. */
+	length = strlen(path);
+	start = fsimg_rendered_tail(path, length, FSIMG_WIRE_LOSS_PATH_BYTES);
+	length -= start;
 	bzero(raw, sizeof(raw));
 	fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_FIELDS, fields);
-	fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_TRUNCATED, length == FSIMG_WIRE_LOSS_PATH_BYTES ? 1 : 0);
+	fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_TRUNCATED, start != 0 ? 1 : 0);
 	fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_LENGTH, length);
-	bcopy(path, raw + FSIMG_WIRE_LOSS_PATH, length);
+	bcopy(path + start, raw + FSIMG_WIRE_LOSS_PATH, length);
 	if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_LOSS, raw,
 	    (uint32_t)(FSIMG_WIRE_LOSS_BYTES + length), NULL) != FSIMG_OK)
 		child->channel_failed = true;
@@ -1208,8 +1211,10 @@ fsimg_worker_main(void)
 		else
 			status = read_job(&child, &error);
 	}
-	if (child.ctx != NULL && fsimg_ctx_get_stats(child.ctx, &stats, NULL) == FSIMG_OK)
+	if (child.ctx != NULL && fsimg_ctx_get_stats(child.ctx, &stats, NULL) == FSIMG_OK) {
 		child.result.metadata_losses = stats.metadata_losses;
+		child.result.omitted_entries = stats.omitted_entries;
+	}
 	child_cleanup(&child);
 	if (status != FSIMG_OK) {
 		fsimg_wire_error_encode(raw, &error);
@@ -1223,6 +1228,7 @@ fsimg_worker_main(void)
 	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_RAW, child.result.raw_bytes);
 	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_IMAGE, child.result.image_bytes);
 	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_SKIPPED, child.result.skipped_entries);
+	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_OMITTED, child.result.omitted_entries);
 	status = fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
 	return (status == FSIMG_OK ? 0 : 1);
 }

@@ -15,10 +15,21 @@
 
 static void append(fsimg_cli_display_t *, const char *, ...);
 static void copy_bytes(fsimg_cli_display_t *, const void *, size_t);
+/* How text is escaped: as a JSON string, for human output, or for human
+ * output of a path the library rendered (fsimg_path_render()), whose
+ * backslashes are already escapes and stay as they are. An entry path from
+ * a NAME frame is raw, so a backslash in it is escaped like any other text.
+ */
+typedef enum escape_style {
+	ESCAPE_HUMAN,
+	ESCAPE_RENDERED,
+	ESCAPE_JSON
+} escape_style_t;
+
 static void escape_scalar(fsimg_cli_display_t *, uint32_t, const unsigned char *,
-    unsigned, bool);
+    unsigned, escape_style_t);
 static fsimg_status_t escape_span(fsimg_cli_display_t *, const void *, size_t,
-    bool, bool, bool, fsimg_error_t *);
+    escape_style_t, bool, bool, fsimg_error_t *);
 static void prose(fsimg_cli_display_t *, const char *);
 static void byte_size(fsimg_cli_display_t *, uint64_t);
 static void usage(fsimg_cli_display_t *, bool);
@@ -32,6 +43,7 @@ static void owner_fields(fsimg_cli_display_t *, const unsigned char *, uint64_t)
 static void format_details(fsimg_cli_display_t *, const fsimg_format_info_t *);
 static void layer(fsimg_cli_display_t *, const fsimg_layer_info_t *);
 static void string_value(fsimg_cli_display_t *, const char *);
+static void rendered_value(fsimg_cli_display_t *, const char *);
 static void path_excerpt(fsimg_cli_display_t *, const char *);
 static void uint_value(fsimg_cli_display_t *, uint64_t);
 static const char *confinement_name(fsimg_confinement_t);
@@ -94,14 +106,19 @@ uint_value(fsimg_cli_display_t *display, uint64_t value)
 
 /* Escape terminal controls and directional/invisible formatting in either
  * representation. JSON escapes preserve the scalar's value; human escapes
- * are unambiguous inside a quoted pathname.
+ * are unambiguous inside a quoted pathname, where a rendered path's
+ * backslashes already are.
  */
 static void
 escape_scalar(fsimg_cli_display_t *display, uint32_t scalar,
-    const unsigned char *encoded, unsigned length, bool json)
+    const unsigned char *encoded, unsigned length, escape_style_t style)
 {
 	bool control;
 
+	if (scalar == '\\' && style == ESCAPE_RENDERED) {
+		copy_bytes(display, encoded, length);
+		return;
+	}
 	if (scalar == '"' || scalar == '\\') {
 		append(display, "\\%c", (int)scalar);
 		return;
@@ -117,7 +134,7 @@ escape_scalar(fsimg_cli_display_t *display, uint32_t scalar,
 	}
 	if (scalar <= 0xffff)
 		append(display, "\\u%04x", scalar);
-	else if (json) {
+	else if (style == ESCAPE_JSON) {
 		scalar -= 0x10000;
 		append(display, "\\u%04x\\u%04x", 0xd800 + (scalar >> 10),
 		    0xdc00 + (scalar & 0x3ff));
@@ -126,10 +143,11 @@ escape_scalar(fsimg_cli_display_t *display, uint32_t scalar,
 }
 
 static void
-escape_invalid(fsimg_cli_display_t *display, bool json)
+escape_invalid(fsimg_cli_display_t *display, escape_style_t style)
 {
 	for (unsigned i = 0; i < display->utf8_used; i++)
-		append(display, json ? "\\\\x%02x" : "\\x%02x", display->utf8[i]);
+		append(display, style == ESCAPE_JSON ? "\\\\x%02x" : "\\x%02x",
+		    display->utf8[i]);
 	display->utf8_used = display->utf8_needed = 0;
 }
 
@@ -139,7 +157,7 @@ escape_invalid(fsimg_cli_display_t *display, bool json)
  */
 static fsimg_status_t
 escape_span(fsimg_cli_display_t *display, const void *data, size_t length,
-    bool json, bool strict, bool final, fsimg_error_t *error)
+    escape_style_t style, bool strict, bool final, fsimg_error_t *error)
 {
 	const unsigned char *bytes = data;
 	uint16_t units[2];
@@ -154,13 +172,13 @@ escape_span(fsimg_cli_display_t *display, const void *data, size_t length,
 		if (display->utf8_used != 0 && (byte & 0xc0) != 0x80) {
 			if (strict)
 				goto invalid;
-			escape_invalid(display, json);
+			escape_invalid(display, style);
 			continue;
 		}
 		offset++;
 		if (display->utf8_used == 0) {
 			if (byte < 0x80) {
-				escape_scalar(display, byte, &byte, 1, json);
+				escape_scalar(display, byte, &byte, 1, style);
 				continue;
 			}
 			display->utf8_needed = byte >= 0xc2 && byte <= 0xdf ? 2 :
@@ -175,18 +193,18 @@ escape_span(fsimg_cli_display_t *display, const void *data, size_t length,
 		if (status != FSIMG_OK) {
 			if (strict)
 				goto invalid;
-			escape_invalid(display, json);
+			escape_invalid(display, style);
 			continue;
 		}
 		scalar = count == 1 ? units[0] :
 		    0x10000 + ((uint32_t)(units[0] - 0xd800) << 10) + units[1] - 0xdc00;
-		escape_scalar(display, scalar, display->utf8, display->utf8_used, json);
+		escape_scalar(display, scalar, display->utf8, display->utf8_used, style);
 		display->utf8_used = display->utf8_needed = 0;
 	}
 	if (final && display->utf8_used != 0) {
 		if (strict)
 			goto invalid;
-		escape_invalid(display, json);
+		escape_invalid(display, style);
 	}
 	return (FSIMG_OK);
 invalid:
@@ -198,7 +216,18 @@ static void
 string_value(fsimg_cli_display_t *display, const char *value)
 {
 	append(display, "\"");
-	escape_span(display, value, strlen(value), display->options->json, false, true, NULL);
+	escape_span(display, value, strlen(value), display->options->json ?
+	    ESCAPE_JSON : ESCAPE_HUMAN, false, true, NULL);
+	append(display, "\"");
+}
+
+/* A path the library rendered: JSON carries the rendering as its value. */
+static void
+rendered_value(fsimg_cli_display_t *display, const char *value)
+{
+	append(display, "\"");
+	escape_span(display, value, strlen(value), display->options->json ?
+	    ESCAPE_JSON : ESCAPE_RENDERED, false, true, NULL);
 	append(display, "\"");
 }
 
@@ -216,7 +245,7 @@ path_excerpt(fsimg_cli_display_t *display, const char *path)
 	if (truncated)
 		length = 256;
 	append(display, "\"");
-	escape_span(display, path, length, false, false, true, NULL);
+	escape_span(display, path, length, ESCAPE_HUMAN, false, true, NULL);
 	append(display, "\"%s", truncated ? " [path truncated]" : "");
 }
 
@@ -224,7 +253,7 @@ path_excerpt(fsimg_cli_display_t *display, const char *path)
 static void
 prose(fsimg_cli_display_t *display, const char *value)
 {
-	escape_span(display, value, strlen(value), false, false, true, NULL);
+	escape_span(display, value, strlen(value), ESCAPE_HUMAN, false, true, NULL);
 }
 
 static void
@@ -491,6 +520,7 @@ loss_notice(fsimg_cli_display_t *display)
 {
 	uint64_t losses = display->result->metadata_losses;
 	uint64_t skipped = display->result->skipped_entries;
+	uint64_t omitted = display->result->omitted_entries;
 	const char *mode = display->options->mode;
 
 	/* Examples are a stderr detail: -vv in c and x, whose -v is the entry
@@ -507,6 +537,11 @@ loss_notice(fsimg_cli_display_t *display)
 		    (unsigned long long)skipped, skipped == 1 ?
 		    "entry of an unsupported kind was" :
 		    "entries of unsupported kinds were");
+	if (omitted != 0)
+		append(display, "fsimg: warning: %llu %s omitted\n",
+		    (unsigned long long)omitted, omitted == 1 ?
+		    "entry with a name outside the profile was" :
+		    "entries with names outside the profile were");
 }
 
 /* A UUID's sixteen bytes in textual order, as RFC 4122 groups them. */
@@ -1342,10 +1377,12 @@ summary(fsimg_cli_display_t *display)
 		string_value(display, display->options->mode);
 		append(display, ",\"validation_scope\":\"%s\",\"entries_processed\":\"%llu\","
 		    "\"logical_bytes\":\"%llu\",\"raw_bytes\":\"%llu\",\"metadata_losses\":\"%llu\","
-		    "\"skipped_entries\":\"%llu\",\"sandbox\":\"%s\",\"published\":%s,", scope_name(display),
+		    "\"skipped_entries\":\"%llu\",\"omitted_entries\":\"%llu\","
+		    "\"sandbox\":\"%s\",\"published\":%s,", scope_name(display),
 		    (unsigned long long)r->entries, (unsigned long long)r->logical_bytes,
 		    (unsigned long long)r->raw_bytes, (unsigned long long)r->metadata_losses,
 		    (unsigned long long)r->skipped_entries,
+		    (unsigned long long)r->omitted_entries,
 		    confinement_name(r->confinement),
 		    fsimg_cli_published(display->paths) ? "true" : "false");
 		limits(display);
@@ -1435,7 +1472,7 @@ failure(fsimg_cli_display_t *display)
 		append(display, ",\"message\":");
 		string_value(display, error->message);
 		append(display, ",\"path\":");
-		string_value(display, error->path);
+		rendered_value(display, error->path);
 		append(display, ",\"resource\":\"%s\",\"output_state\":\"%s\",\"os_error\":%d,"
 		    "\"cleanup_error\":%d,\"limit\":\"%llu\",\"observed\":\"%llu\","
 		    "\"path_truncated\":%s,\"message_truncated\":%s,\"offset_bytes\":",
@@ -1479,7 +1516,7 @@ failure(fsimg_cli_display_t *display)
 		append(display, " [message truncated]");
 	if (error->path[0] != '\0') {
 		append(display, " ");
-		string_value(display, error->path);
+		rendered_value(display, error->path);
 		if (error->path_truncated)
 			append(display, " [path truncated]");
 	}
@@ -1629,13 +1666,15 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		break;
 	case FSIMG_FRAME_NAME:
 		if (listing) {
-			status = escape_span(display, raw, frame->length, options->json, true, false, error);
+			status = escape_span(display, raw, frame->length, options->json ?
+			    ESCAPE_JSON : ESCAPE_HUMAN, true, false, error);
 			if (status != FSIMG_OK) return (status);
 		}
 		break;
 	case FSIMG_FRAME_ENTRY_END:
 		if (listing) {
-			status = escape_span(display, NULL, 0, options->json, true, true, error);
+			status = escape_span(display, NULL, 0, options->json ?
+			    ESCAPE_JSON : ESCAPE_HUMAN, true, true, error);
 			if (status != FSIMG_OK) return (status);
 			if (options->json)
 				append(display, "\",\"complete\":true}\n");
@@ -1676,7 +1715,8 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 			append(display, " could not be preserved exactly for \"");
 		}
 		escape_span(display, raw + FSIMG_WIRE_LOSS_PATH,
-		    (size_t)fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_LENGTH), options->json, false, true, NULL);
+		    (size_t)fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_LENGTH),
+		    options->json ? ESCAPE_JSON : ESCAPE_RENDERED, false, true, NULL);
 		if (options->json)
 			append(display, "\"}\n");
 		else

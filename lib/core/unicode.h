@@ -16,6 +16,11 @@ fsimg_status_t fsimg_utf8_to_utf16(const char *, size_t, uint16_t *, size_t,
     size_t *, fsimg_error_t *);
 fsimg_status_t fsimg_utf16_to_utf8(const uint16_t *, size_t, char *, size_t,
     size_t *, fsimg_error_t *);
+/* Whether a component of length bytes lies in the QNX-family name profile:
+ * nonempty strict UTF-8 without NUL, slash, control bytes or DEL, and
+ * neither "." nor "..". Each format bounds the length itself.
+ */
+bool fsimg_name_in_qnx_profile(const char *, size_t);
 fsimg_status_t fsimg_path_validate(fsimg_ctx_t *, const char *, bool,
     size_t *, uint32_t *, fsimg_error_t *);
 fsimg_status_t fsimg_metadata_validate(const fsimg_metadata_t *,

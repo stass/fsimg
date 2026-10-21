@@ -244,8 +244,14 @@ fsimg_reader_next(fsimg_reader_t *reader, const fsimg_entry_t **out,
 	bzero(&reader->entry, sizeof(reader->entry));
 	reader->state = FSIMG_READER_ITERATING;
 	status = fsimg_reader_stable(reader, error);
-	if (status == FSIMG_OK)
+	/* Iteration delivers only entries whose names and ancestors are all
+	 * delivered; the walker counts the omitted ones it passes.
+	 */
+	while (status == FSIMG_OK) {
 		status = fsimg_walk_next(reader, error);
+		if (status == FSIMG_OK && fsimg_walk_delivered(reader))
+			break;
+	}
 	if (status == FSIMG_DONE) {
 		return (fsimg_reader_end_scope(reader));
 	}
@@ -424,6 +430,24 @@ fsimg_reader_next_range(fsimg_reader_t *reader, uint64_t offset,
 }
 
 fsimg_status_t
+fsimg_verify_account(fsimg_reader_t *reader, fsimg_verify_report_t *report,
+    fsimg_error_t *error)
+{
+	if (!fsimg_walk_delivered(reader))
+		return (FSIMG_OK);
+	if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY) {
+		report->directories++;
+		return (FSIMG_OK);
+	}
+	report->files++;
+	if (!fsimg_add_u64(report->logical_bytes, reader->entry.size,
+	    &report->logical_bytes))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_VERIFY,
+		    "verification logical-byte total overflow"));
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
 fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
     fsimg_error_t *error)
 {
@@ -449,12 +473,17 @@ fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
 		    FSIMG_OP_VERIFY, "format has no full verification"));
 	out->scope = (flags & FSIMG_VERIFY_PAYLOAD) != 0 ?
 	    FSIMG_VALIDATION_PAYLOAD : FSIMG_VALIDATION_STRUCTURAL;
+	/* Full verification checks what delivery omits, so the walker
+	 * descends into omitted directories too.
+	 */
+	reader->omission.descend = true;
 	reader->state = FSIMG_READER_ITERATING;
 	status = reader->ops->verify(reader, flags, out, error);
 	bzero(&reader->entry, sizeof(reader->entry));
 	if (status != FSIMG_OK)
 		return (fsimg_reader_abort(reader, status));
 	reader->state = FSIMG_READER_DONE;
+	out->omitted_entries = reader->omission.count;
 	out->complete = true;
 	return (FSIMG_OK);
 }

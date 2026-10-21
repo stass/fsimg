@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -60,13 +61,15 @@ static fsimg_status_t
 finish_staging(fsimg_ctx_t *ctx, int parent, const char *name, int staging,
     bool created, bool retain, fsimg_status_t status, fsimg_error_t *error)
 {
+	char staged[NAME_MAX + sizeof("/image")];
 	int cleanup_error;
 
 	if (retain) {
 		if (staging != -1)
 			fsimg_fd_release(ctx, staging);
-		if (error != NULL)
-			snprintf(error->path, sizeof(error->path), "%s/image", name);
+		/* The name created a directory, so it is at most NAME_MAX. */
+		(void)snprintf(staged, sizeof(staged), "%s/image", name);
+		fsimg_error_path(error, staged);
 		return (status);
 	}
 	cleanup_error = 0;
@@ -91,10 +94,9 @@ finish_staging(fsimg_ctx_t *ctx, int parent, const char *name, int staging,
 		if (error != NULL)
 			error->output_state = FSIMG_OUTPUT_PUBLISHED;
 	}
-	if (error != NULL) {
+	if (error != NULL)
 		error->cleanup_error = cleanup_error;
-		snprintf(error->path, sizeof(error->path), "%s", name);
-	}
+	fsimg_error_path(error, name);
 	return (status);
 }
 

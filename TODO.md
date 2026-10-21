@@ -472,57 +472,15 @@
   it back; a positive result raises `max_link_target_bytes` to 1024 in the
   format designs and descriptors.
 
-* [Medium] **QNX readers omit out-of-profile names** (`lib/formats/qnx4/`,
-  `lib/formats/qnx6/`, `lib/formats/format.h`, `lib/read/directory.c`,
-  `lib/read/reader.c`, `lib/extract/`, `cmd/fsimg/`): implement the
-  [omitted-names rule](specs/architecture.md#names-and-metadata) through
-  the [prepared-directory contract](specs/design-directories.md#omitted-names).
-  The descriptor declares the QNX-family name profile; common preparation
-  applies the one profile function (replacing `qnx4_name_profile()` and
-  `qnx6_name_profile()`, whose drivers keep only their native corruption
-  checks) and assigns the class; the walker marks the current entry by
-  class and ancestry, filters `next()` and selection on it, descends into
-  omitted directories only under full verification, and is the only owner
-  of `omitted_entries`, a new field of `fsimg_stats_t`,
-  `fsimg_extract_result_t`, the worker result and the DONE frame, distinct
-  from `skipped_entries`. A new `fsimg_path_render()` in
-  `lib/core/context.c` renders a path into a caller-supplied buffer and
-  returns whether it truncated; it is the one rendering funnel for every
-  library path except `fsimg_entry_t.path`, with three callers:
-  `fsimg_error_path()` (fills `fsimg_error_t.path` and `path_truncated`,
-  keeping the tail instead of the head and cutting on a whole rendered
-  unit), the loss-report callback (`context.c:81`, rendered into a
-  `4 * max_path_bytes + 1` byte buffer so it is never truncated) and
-  verification findings (reported as `fsimg_error_t`, so the error
-  record's rule); its input is a walker path with component classes or a
-  plain path treated as all delivered; every backslash is written `\\`
-  and, in an omitted component, every byte outside `0x20` to `0x7e` as
-  `\xNN` (lowercase hex). This is a contract change for library callers,
-  stated in the `fsimg_loss_fn_t` comment at `include/fsimg.h:106` and in
-  `docs/libfsimg.3`: callback and finding paths are rendered, `\\` where
-  `fsimg_entry_t.path` has `\`. Entry names travel only in path fields, never in
-  message text (the namespace-collision diagnostic names the second entry
-  through the path and the first by position). `cmd/fsimg/display.c`
-  escapes by field type: entry paths in full, every other library path
-  without touching backslashes; `docs/fsimg.1`'s output section documents
-  that a backslash shows as `\\` in listings and errors alike, and that a
-  JSON entry-path value holds a raw `\` while an error-path value holds
-  `\\` per the rendering. The ImageFS `records` detail is not
-  emitted, being the sum of the four `flags_*` details. Extraction of a
-  scope holding an omitted entry fails with
-  `FSIMG_EUNSUPPORTED` naming it unless `FSIMG_EXTRACT_SKIP_UNSUPPORTED`
-  / `-k` omits it. The CLI prints `N entries with names outside the
-  profile were omitted` after `t`, `x` and `W` and an `omitted_entries`
-  JSON summary field; `docs/fsimg.1`, `docs/libfsimg.3` and the
-  statistics comments in `include/fsimg.h` describe both counts. Tests,
-  per reader: a Latin-1 and a control-byte name as a file, a link and a
-  directory with descendants, listed, verified, extracted with and without
-  `-k`, and selected by a sibling, with `omitted_entries` checked each
-  time, `skipped_entries` zero, verification complete, the rendering in
-  the extraction error, a corrupt structure below the omitted directory
-  still `FSIMG_ECORRUPT` under verification, and a query spelling the name
-  refused as `FSIMG_EINVAL`. The ImageFS reader lands with the rule, the
-  `omitted` and `omitted_references` details built in.
+* [Medium] **End-to-end CLI tests of omitted names** (`test/cli.py`,
+  `test/spec/`): the omission contract is tested in the library
+  (`test_omitted_names` in `test/qnx4.c` and `test/qnx6.c`) and in the CLI
+  display and worker parent with fabricated results, but no test runs the
+  real worker on a QNX image holding an out-of-profile name. fsimg's
+  writers refuse such names, so the image needs a synthetic fixture or a
+  spec-harness generator; then check `t`, `W` and `x -k` print the warning
+  and the JSON `omitted_entries`, `x` without `-k` fails naming the
+  rendered path, and `t -v` shows no omitted entry.
 
 * [Medium] **More than two FATs** (`lib/formats/fat/`, `cmd/fsimg/options.c`,
   `specs/design-fat-reader.md`, `specs/design-fat-writer.md`,

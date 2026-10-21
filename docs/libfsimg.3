@@ -92,6 +92,10 @@ Iteration invalidates the previous current-entry snapshot.
 .Fn fsimg_reader_next
 enumerates depth-first in on-disk order and returns FSIMG_DONE at complete EOF.
 Directory preparation validates case/alias ambiguity before exposing children.
+A QNX4 or QNX6 entry whose name QNX accepts but lies outside the profile,
+strict UTF-8 without control bytes or DEL, is omitted: it and its subtree are
+never returned, no selection can name it, and each omitted subtree root is
+counted in the context statistics' omitted_entries.
 .Fn fsimg_reader_read_at
 reads only the current regular file or symbolic link, clips to EOF and returns
 confirmed bytes separately from status.
@@ -106,7 +110,25 @@ reports header scope, not complete filesystem verification.
 requires an untouched reader and consumes traversal.
 FSIMG_VERIFY_PAYLOAD also reads initialized payload bytes.
 Its report is complete only after the entire requested scope succeeds.
+Verification also checks omitted subtrees, reading their payload; its files,
+directories and logical bytes count only entries iteration would return.
 No reader modifies or repairs an input image.
+.Pp
+Every path the library emits other than an entry's own path is rendered:
+the path of an error and of the loss callback.
+A backslash is written
+.Ql \e\e ,
+so such a path holds
+.Ql \e\e
+where the entry path holds
+.Ql \e ,
+and in an omitted name every byte outside 0x20 to 0x7e is written
+.Ql \exNN
+in lowercase hexadecimal.
+The rendering is reversible.
+An error path too long for its field keeps its tail, is cut only between whole
+escapes and characters, and sets path_truncated; the loss callback's path is
+never truncated.
 .Sh WRITERS
 Collect host trees, manifests, explicit zero sources or one callback
 provider before planning.
@@ -391,6 +413,9 @@ Owners, permission bits and change times are never restored.
 A symbolic link, FIFO or other kind fails extraction unless
 FSIMG_EXTRACT_SKIP_UNSUPPORTED omits it and counts it in the context
 statistics' skipped_entries.
+An omitted entry within the selected scope fails extraction the same way
+unless FSIMG_EXTRACT_SKIP_UNSUPPORTED leaves it and its subtree out; it is
+counted in omitted_entries, never in skipped_entries.
 An entry name the host filesystem cannot represent, such as one longer than
 its component limit, fails with FSIMG_EUNSUPPORTED.
 Explicit timestamp restoration requires a time-basis policy and does not

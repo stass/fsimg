@@ -107,7 +107,12 @@ typedef struct fsimg_progress {
 
 typedef void (*fsimg_progress_fn_t)(void *, const fsimg_progress_t *);
 typedef bool (*fsimg_cancel_fn_t)(void *);
-/* path is borrowed for this callback; fields is a FSIMG_META_* mask. */
+/* path is borrowed for this callback; fields is a FSIMG_META_* mask. path
+ * is rendered, never truncated: every backslash is written "\\", so it
+ * holds "\\" where fsimg_entry_t.path holds "\". Error paths are rendered
+ * the same way, and in a name a reader omits, every byte outside 0x20 to
+ * 0x7e is written "\xNN" in lowercase hex.
+ */
 typedef void (*fsimg_loss_fn_t)(void *, const char *, uint32_t);
 
 typedef struct fsimg_options {
@@ -150,7 +155,9 @@ typedef struct fsimg_stats {
 	uint64_t	 scratch_physical_bytes;
 	uint64_t	 scratch_physical_peak;
 	uint64_t	 metadata_losses;
-	/* Entries safe extraction omitted under FSIMG_EXTRACT_SKIP_UNSUPPORTED. */
+	/* Entries of unsupported kinds safe extraction skipped under
+	 * FSIMG_EXTRACT_SKIP_UNSUPPORTED.
+	 */
 	uint64_t	 skipped_entries;
 	/* Logical spool bytes reserved, and the allocated blocks sampled once
 	 * a spool is filled, which holes for zero input keep below them.
@@ -158,6 +165,10 @@ typedef struct fsimg_stats {
 	uint64_t	 spool_bytes;
 	uint64_t	 spool_peak;
 	uint64_t	 spool_physical_bytes;
+	/* Subtree roots a reader passed without delivering, their names
+	 * outside the format's name profile; a child below one is not counted.
+	 */
+	uint64_t	 omitted_entries;
 } fsimg_stats_t;
 
 /* Options and callback tables must have exactly this size and version.
@@ -911,6 +922,11 @@ typedef struct fsimg_verify_report {
 	uint64_t	 allocated_clusters;
 	uint64_t	 free_clusters;
 	uint64_t	 bad_clusters;
+	/* Subtree roots omitted for names outside the format's name profile;
+	 * verification checks them and their subtrees, but files,
+	 * directories and logical_bytes count only delivered entries.
+	 */
+	uint64_t	 omitted_entries;
 } fsimg_verify_report_t;
 
 /* Input and its storage remain borrowed and stable until reader destruction.
@@ -973,7 +989,11 @@ typedef struct fsimg_extract_options {
  * and are reported through the context callback/statistics. Required losses fail.
  * Owners, modes and change times are never restored. A symbolic link, FIFO
  * or other kind fails with EUNSUPPORTED unless SKIP_UNSUPPORTED omits it and
- * counts it in the statistics' skipped_entries.
+ * counts it in the statistics' skipped_entries. An entry the reader omits
+ * for a name outside the format's profile fails the same way unless
+ * SKIP_UNSUPPORTED omits it and its subtree; the statistics'
+ * omitted_entries counts it. An error naming an image entry keeps that
+ * rendered path; any other failure after creation names the destination.
  * With manifest_fd, every visited entry, a skipped one included, gets one
  * mtree(5) line carrying its kind, mode, owner and modification time (a
  * wall time read at wall_offset_minutes), a file's size and the SHA-256 of

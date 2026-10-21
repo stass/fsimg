@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "qnx6.h"
+#include "unicode.h"
 
 /* QNX6's part of directory preparation (specs/design-directories.md). A
  * directory is an array of 32-byte slots: "." and ".." first, then live
@@ -249,7 +250,7 @@ qnx6_replay(fsimg_reader_t *reader, const char *name,
 	parent = fsimg_meta_get_u32(payload + 4);
 	if (parent == 0 || parent > qnx6->geometry.inode_count)
 		return (qnx6_corrupt(error, "invalid prepared QNX6 entry payload"));
-	if (qnx6_name_profile((const unsigned char *)name, strlen(name),
+	if (qnx6_name_native((const unsigned char *)name, strlen(name),
 	    NULL) != FSIMG_OK)
 		return (qnx6_corrupt(error, "invalid prepared QNX6 file name"));
 	status = qnx6_inode_read(reader, inode, &qnx6->current, error);
@@ -279,8 +280,8 @@ qnx6_replay(fsimg_reader_t *reader, const char *name,
 _Static_assert(QNX6_NAME_MAX <= FSIMG_DIRECTORY_KEY_BYTES,
     "a QNX6 name key fits a directory key buffer");
 
-/* The namespace key is the exact name bytes: QNX6 names are compared
- * byte for byte, case preserved and significant.
+/* The namespace key is the exact name bytes, raw for an omitted name: QNX6
+ * names are compared byte for byte, case preserved and significant.
  */
 fsimg_status_t
 qnx6_keys(fsimg_reader_t *reader FSIMG_UNUSED, const char *name,
@@ -290,7 +291,7 @@ qnx6_keys(fsimg_reader_t *reader FSIMG_UNUSED, const char *name,
 	size_t bytes = strlen(name);
 
 	keys->count = 0;
-	if (qnx6_name_profile((const unsigned char *)name, bytes, NULL) !=
+	if (qnx6_name_native((const unsigned char *)name, bytes, NULL) !=
 	    FSIMG_OK)
 		return (qnx6_corrupt(error, "invalid QNX6 file name"));
 	bcopy(name, keys->key[0], bytes);
@@ -299,6 +300,9 @@ qnx6_keys(fsimg_reader_t *reader FSIMG_UNUSED, const char *name,
 	return (FSIMG_OK);
 }
 
+/* A query spells a delivered name, so a component outside the profile
+ * matches nothing and is refused before any directory is consulted.
+ */
 fsimg_status_t
 qnx6_key(fsimg_reader_t *reader FSIMG_UNUSED, const char *component,
     unsigned char *key, size_t *length, fsimg_error_t *error)
@@ -306,8 +310,7 @@ qnx6_key(fsimg_reader_t *reader FSIMG_UNUSED, const char *component,
 	size_t bytes = strlen(component);
 
 	*length = 0;
-	if (qnx6_name_profile((const unsigned char *)component, bytes, NULL) !=
-	    FSIMG_OK)
+	if (bytes > QNX6_NAME_MAX || !fsimg_name_in_qnx_profile(component, bytes))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_READER,
 		    "selection component is not representable in QNX6"));
 	bcopy(component, key, bytes);

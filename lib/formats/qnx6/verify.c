@@ -370,8 +370,8 @@ qnx6_verify(fsimg_reader_t *reader, unsigned flags,
 		}
 	}
 
-	/* One traversal: every index built records its blocks and every
-	 * prepared directory records its slot references.
+	/* One traversal, omitted entries included: every index built records
+	 * its blocks and every prepared directory records its slot references.
 	 */
 	report->directories = 1;
 	for (;;) {
@@ -380,17 +380,11 @@ qnx6_verify(fsimg_reader_t *reader, unsigned flags,
 			break;
 		if (status != FSIMG_OK)
 			goto done;
-		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY) {
-			report->directories++;
-			continue;
-		}
-		report->files++;
-		if (!fsimg_add_u64(report->logical_bytes, reader->entry.size,
-		    &report->logical_bytes)) {
-			status = fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_VERIFY, "QNX6 logical-byte total overflow");
+		status = fsimg_verify_account(reader, report, error);
+		if (status != FSIMG_OK)
 			goto done;
-		}
+		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
+			continue;
 		/* A later name of an inode has the same bytes as its first
 		 * name, which was read already.
 		 */

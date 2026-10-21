@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "qnx4.h"
+#include "unicode.h"
 
 /*
  * QNX4's part of directory preparation (specs/design-directories.md). A
@@ -392,7 +393,7 @@ qnx4_replay(fsimg_reader_t *reader, const char *name,
 	if (parent / QNX4_SLOTS_PER_BLOCK > qnx4->geometry.blocks ||
 	    position / QNX4_SLOTS_PER_BLOCK > qnx4->geometry.blocks)
 		return (qnx4_corrupt(error, "invalid prepared QNX4 entry payload"));
-	if (qnx4_name_profile((const unsigned char *)name, strlen(name),
+	if (qnx4_name_native((const unsigned char *)name, strlen(name),
 	    NULL) != FSIMG_OK)
 		return (qnx4_corrupt(error, "invalid prepared QNX4 file name"));
 	status = qnx4_object_read(reader, position, &qnx4->current, &place,
@@ -431,8 +432,8 @@ qnx4_replay(fsimg_reader_t *reader, const char *name,
 _Static_assert(QNX4_NAME_MAX <= FSIMG_DIRECTORY_KEY_BYTES,
     "a QNX4 name key fits a directory key buffer");
 
-/* The namespace key is the exact name bytes: QNX4 names are compared byte
- * for byte, case preserved and significant.
+/* The namespace key is the exact name bytes, raw for an omitted name: QNX4
+ * names are compared byte for byte, case preserved and significant.
  */
 fsimg_status_t
 qnx4_keys(fsimg_reader_t *reader FSIMG_UNUSED, const char *name,
@@ -442,7 +443,7 @@ qnx4_keys(fsimg_reader_t *reader FSIMG_UNUSED, const char *name,
 	size_t bytes = strlen(name);
 
 	keys->count = 0;
-	if (qnx4_name_profile((const unsigned char *)name, bytes, NULL) !=
+	if (qnx4_name_native((const unsigned char *)name, bytes, NULL) !=
 	    FSIMG_OK)
 		return (qnx4_corrupt(error, "invalid QNX4 file name"));
 	bcopy(name, keys->key[0], bytes);
@@ -451,6 +452,9 @@ qnx4_keys(fsimg_reader_t *reader FSIMG_UNUSED, const char *name,
 	return (FSIMG_OK);
 }
 
+/* A query spells a delivered name, so a component outside the profile
+ * matches nothing and is refused before any directory is consulted.
+ */
 fsimg_status_t
 qnx4_key(fsimg_reader_t *reader FSIMG_UNUSED, const char *component,
     unsigned char *key, size_t *length, fsimg_error_t *error)
@@ -458,8 +462,7 @@ qnx4_key(fsimg_reader_t *reader FSIMG_UNUSED, const char *component,
 	size_t bytes = strlen(component);
 
 	*length = 0;
-	if (qnx4_name_profile((const unsigned char *)component, bytes, NULL) !=
-	    FSIMG_OK)
+	if (bytes > QNX4_NAME_MAX || !fsimg_name_in_qnx_profile(component, bytes))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_READER,
 		    "selection component is not representable in QNX4"));
 	bcopy(component, key, bytes);

@@ -169,17 +169,18 @@ typedef enum fsimg_wire_time_field {
 _Static_assert(FSIMG_WIRE_ENTRY_CHANGED + FSIMG_WIRE_TIME_BYTES ==
     FSIMG_WIRE_ENTRY_UID, "owner fields follow the last timestamp");
 
-#define FSIMG_WIRE_DONE_BYTES 48u
+#define FSIMG_WIRE_DONE_BYTES 56u
 typedef enum fsimg_wire_done_field {
 	FSIMG_WIRE_DONE_ENTRIES = 0,
 	FSIMG_WIRE_DONE_LOGICAL = 8,
 	FSIMG_WIRE_DONE_LOSSES = 16,
 	FSIMG_WIRE_DONE_RAW = 24,
 	FSIMG_WIRE_DONE_IMAGE = 32,
-	FSIMG_WIRE_DONE_SKIPPED = 40
+	FSIMG_WIRE_DONE_SKIPPED = 40,
+	FSIMG_WIRE_DONE_OMITTED = 48
 } fsimg_wire_done_field_t;
-_Static_assert(FSIMG_WIRE_DONE_SKIPPED + 8 == FSIMG_WIRE_DONE_BYTES,
-    "the completion record ends with the skipped count");
+_Static_assert(FSIMG_WIRE_DONE_OMITTED + 8 == FSIMG_WIRE_DONE_BYTES,
+    "the completion record ends with the omitted count");
 
 #define FSIMG_WIRE_VERIFY_BYTES 72u
 typedef enum fsimg_wire_verify_field {

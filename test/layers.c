@@ -530,6 +530,8 @@ test_stack_rejections(void)
 		{ "-/gpt", "- cannot fill the filesystem slot", "-" },
 		{ "fat33", "unknown stack name", "fat33" },
 		{ "fat32/gzip", "unknown stack name", "gzip" },
+		/* The token is rendered like every path an error carries. */
+		{ "fat\\32/gpt", "unknown stack name", "fat\\\\32" },
 		{ "fat32//dmg", "the stack has an empty token", "fat32//dmg" },
 		{ "fat32/", "the stack has an empty token", "fat32/" },
 		{ "fat32/-/-/-", "the stack has too many tokens", "fat32/-/-/-" },
@@ -537,12 +539,26 @@ test_stack_rejections(void)
 	};
 	fsimg_stack_t stack;
 	fsimg_error_t error;
+	char long_text[sizeof(error.path) + 16];
 
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		CHECK(fsimg_stack_parse(cases[i].text, &stack, &error) == FSIMG_EINVAL);
 		CHECK(strcmp(error.message, cases[i].message) == 0);
 		CHECK(strcmp(error.path, cases[i].named) == 0);
 	}
+
+	/* A token too long for the field keeps its tail, as every rendered
+	 * path does, and is marked truncated.
+	 */
+	memset(long_text, 'x', sizeof(long_text) - 1);
+	long_text[0] = 'b';
+	long_text[sizeof(long_text) - 2] = 'e';
+	long_text[sizeof(long_text) - 1] = '\0';
+	CHECK(fsimg_stack_parse(long_text, &stack, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.message, "unknown stack name") == 0);
+	CHECK(error.path_truncated);
+	CHECK(strlen(error.path) == sizeof(error.path) - 1);
+	CHECK(error.path[0] == 'x' && error.path[sizeof(error.path) - 2] == 'e');
 }
 
 /* The registry lists every layer once, with the suffixes the command

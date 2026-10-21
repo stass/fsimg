@@ -412,6 +412,9 @@ def test_option_syntax(executable, root):
         (["tt", "-f", "human.img"], b"a mode is given more than once"),
         (["-f", "human.img"], b"a mode is required"),
         (["if", "human.img", "extra"], b'unexpected operand "extra"'),
+        # The quoted word is rendered like every error path: a backslash
+        # shows as two, so it cannot pose as an escape.
+        (["if", "human.img", "back\\x41"], b'unexpected operand "back\\\\x41"'),
         (["x", "-O", "-C", "source", "-f", "human.img", "/HELLO.TXT"],
          b"-O rejects --json, --mtree, -C, -E and -k"),
         (["x", "-O", "-E", "-f", "human.img", "/HELLO.TXT"], b"-O rejects --json, --mtree, -C, -E and -k"),

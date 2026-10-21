@@ -295,7 +295,7 @@ fsimg_status_t qnx4_inode_entry(const qnx4_inode_t *, fsimg_entry_t *,
     fsimg_error_t *);
 
 /* names.c */
-fsimg_status_t qnx4_name_profile(const unsigned char *, size_t,
+fsimg_status_t qnx4_name_native(const unsigned char *, size_t,
     fsimg_error_t *);
 bool qnx4_label_valid(const unsigned char *, size_t);
 void qnx4_long_prefix(const unsigned char *, uint32_t, unsigned char *);

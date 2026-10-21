@@ -675,6 +675,15 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		    (state->request->flags & FSIMG_JOB_SKIP_UNSUPPORTED) == 0) &&
 		    state->result->skipped_entries != 0)
 			return (worker_error(error, "worker skipped entries it was not asked to skip"));
+		/* Only a listing, a verification and an extraction asked to skip
+		 * pass an omitted entry and succeed.
+		 */
+		state->result->omitted_entries = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_OMITTED);
+		if (kind != FSIMG_JOB_LIST && kind != FSIMG_JOB_VERIFY &&
+		    (kind != FSIMG_JOB_EXTRACT ||
+		    (state->request->flags & FSIMG_JOB_SKIP_UNSUPPORTED) == 0) &&
+		    state->result->omitted_entries != 0)
+			return (worker_error(error, "worker omitted entries it could not omit"));
 		if (!image_length_expected(state,
 		    fsimg_wire_get64(raw + FSIMG_WIRE_DONE_IMAGE)) ||
 		    fsimg_wire_get64(raw + FSIMG_WIRE_DONE_RAW) != (kind == FSIMG_JOB_CAT ?

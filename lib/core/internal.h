@@ -52,6 +52,12 @@ typedef struct fsimg_hole_test {
 struct fsimg_ctx {
 	fsimg_options_t	 options;
 	fsimg_stats_t	 stats;
+	/* With a loss callback, the buffer its path is rendered into:
+	 * loss_path_bytes, 4 * max_path_bytes + 1, holds the worst-case
+	 * rendering of any path within the path limit.
+	 */
+	char		*loss_path;
+	size_t		 loss_path_bytes;
 	uint64_t	 allocation_attempts;
 	uint64_t	 fail_allocation;
 	fsimg_meta_cache_t *meta_cache;
@@ -135,11 +141,32 @@ void fsimg_session_init(fsimg_session_t *, fsimg_ctx_t *, const char *,
 fsimg_status_t fsimg_session_charge(fsimg_session_t *, uint64_t, uint64_t,
     uint64_t, fsimg_error_t *);
 void fsimg_stat_add(uint64_t *, uint64_t);
-/* fields is a validated FSIMG_META_* mask; path is borrowed for the callback.
- * The context counts one loss per field; the result is that count.
+/* fields is a validated FSIMG_META_* mask; path is a plain path, which the
+ * callback receives rendered and whole. The context counts one loss per
+ * field; the result is that count.
  */
 uint64_t fsimg_report_loss(fsimg_ctx_t *, const char *, uint32_t);
-/* Name the object an error concerns, truncating to the error's path field. */
+/* Render a library path for emission into out, which holds size bytes and
+ * its NUL, and return whether the rendering was truncated. It is the one
+ * rendering of every path the library emits other than fsimg_entry_t.path.
+ * omitted gives the class of each component of a walker path, the first
+ * after the root at index 0; NULL renders a plain path, every component
+ * delivered. Every backslash is written "\\" and, in an omitted component,
+ * every byte outside 0x20 to 0x7e "\xNN" in lowercase hex; nothing else
+ * changes, so the rendering is injective. A rendering too long for out
+ * keeps its tail, which names the entry, and drops whole units from the
+ * front: a byte, an escape or a UTF-8 sequence, never part of one.
+ */
+bool fsimg_path_render(const char *, const bool *, char *, size_t);
+/* Where the tail of a rendered path of length bytes, at most limit bytes
+ * long, starts: on a whole rendered unit, "\\\\", "\\xNN", a UTF-8 lead
+ * byte with its continuation bytes, or one byte, which parse apart left to
+ * right. Zero when the whole rendering fits.
+ */
+size_t fsimg_rendered_tail(const char *, size_t, size_t);
+/* Name the object an error concerns: path, a plain path, rendered into the
+ * error's path field, with path_truncated set when its tail was kept.
+ */
 void fsimg_error_path(fsimg_error_t *, const char *);
 /* Private fault injection: zero disables; n fails the nth subsequent attempt. */
 void fsimg_test_fail_alloc_after(fsimg_ctx_t *, uint64_t);

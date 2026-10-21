@@ -908,8 +908,9 @@ Extract directly into the
 .Fl C
 directory, which must be empty and private.
 .It Fl k
-Skip entries of unsupported kinds; the number skipped is reported in a
-warning and in the JSON summary.
+Skip entries of unsupported kinds and omit entries with names outside the
+profile instead of failing; the numbers skipped and omitted are reported in
+warnings and in the JSON summary.
 .It Fl Fl mtree Ns = Ns Ar file
 Also write an
 .Xr mtree 5
@@ -1015,6 +1016,11 @@ An image entry of another kind, such as a symbolic link or FIFO, fails the
 extraction and is named in the error, unless
 .Fl k
 skips it.
+So does an entry a QNX4 or QNX6 reader omits because its name, though QNX
+accepts it, lies outside the profile: strict UTF-8 without control bytes or
+DEL, unless
+.Fl k
+omits it.
 .Pp
 .Fl O
 takes exactly one member, a regular file or a symbolic link, whose bytes are
@@ -1103,6 +1109,22 @@ the manifest in place and reports the output published.
 It holds one descriptor against the fds limit.
 .Sh OUTPUT
 Human names and controls are escaped.
+A backslash shows as
+.Ql \e\e
+in listings and errors alike.
+In an error, a name outside the profile shows each byte outside 0x20 to 0x7e
+as
+.Ql \exNN ;
+an error path too long to report keeps its end and is labeled truncated.
+A JSON entry path holds the name itself, while a JSON error path holds the
+same rendering, with
+.Ql \e\e
+for a backslash.
+Listings, extraction with
+.Fl k
+and verification never show an omitted entry; a warning,
+.Dq N entries with names outside the profile were omitted ,
+and the JSON summary's omitted_entries count each omitted subtree once.
 Diagnostics and bounded progress use stderr; payloads and records use stdout.
 Successful creation and extraction are silent by default.
 Listings contain one quoted pathname per line, without a completion trailer;

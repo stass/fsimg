@@ -42,6 +42,8 @@ static void test_posix_options(void);
 static void test_posix_listing(bool);
 static void test_posix_volume(bool);
 static void test_skipped_summary(void);
+static void test_omitted_summary(void);
+static void test_rendered_paths(bool);
 static void test_format_masks(bool);
 static size_t list_entry(fsimg_cli_display_t *, const fsimg_entry_t *, char *,
     size_t);
@@ -1165,6 +1167,120 @@ test_skipped_summary(void)
 	CHECK(strstr(display.buffer, "\"skipped_entries\":\"2\"") != NULL);
 }
 
+/* Omitted entries are never silent either: their own notice and count. */
+static void
+test_omitted_summary(void)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { .entries = 3, .omitted_entries = 2 };
+	fsimg_cli_display_t display;
+	fsimg_worker_text_t text;
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_LIST;
+	options.mode = "t";
+	options.scratch = "-";
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(text.diagnostic);
+	CHECK(strstr(display.buffer, "fsimg: warning: 2 entries with names "
+	    "outside the profile were omitted\n") != NULL);
+	CHECK(strstr(display.buffer, "skipped") == NULL);
+	result.omitted_entries = 1;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "fsimg: warning: 1 entry with a name "
+	    "outside the profile was omitted\n") != NULL);
+
+	options.json = true;
+	result.omitted_entries = 2;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "\"omitted_entries\":\"2\"") != NULL);
+	CHECK(strstr(display.buffer, "\"skipped_entries\":\"0\"") != NULL);
+}
+
+/* A backslash shows as two in human listings and errors alike: an entry
+ * path is raw and escaped here, while an error or loss path arrives
+ * rendered, its backslashes already escapes. JSON carries each value as
+ * it is: the entry path raw, the rendered paths rendered.
+ */
+static void
+test_rendered_paths(bool json)
+{
+	fsimg_cli_options_t options;
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_ENTRY, .length = FSIMG_WIRE_ENTRY_BYTES };
+	fsimg_worker_text_t text;
+	fsimg_error_t error;
+	char output[512];
+	size_t used;
+
+	bzero(&options, sizeof(options));
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_LIST;
+	options.request.flags |= FSIMG_JOB_VERBOSE;
+	options.scratch = "-";
+	options.json = json;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	fsimg_wire_put64(frame.payload + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	bcopy(text.data, output, text.length);
+	used = text.length;
+	frame.type = FSIMG_FRAME_NAME;
+	frame.length = 4;
+	bcopy("/a\\b", frame.payload, frame.length);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	bcopy(text.data, output + used, text.length);
+	used += text.length;
+	frame.type = FSIMG_FRAME_ENTRY_END;
+	frame.length = 0;
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	bcopy(text.data, output + used, text.length);
+	used += text.length;
+
+	frame.type = FSIMG_FRAME_LOSS;
+	frame.length = FSIMG_WIRE_LOSS_BYTES + 5;
+	bzero(frame.payload, frame.length);
+	fsimg_wire_put64(frame.payload + FSIMG_WIRE_LOSS_FIELDS, FSIMG_META_OWNER);
+	fsimg_wire_put64(frame.payload + FSIMG_WIRE_LOSS_LENGTH, 5);
+	bcopy("/c\\\\d", frame.payload + FSIMG_WIRE_LOSS_PATH, 5);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	bcopy(text.data, output + used, text.length);
+	used += text.length;
+	output[used] = '\0';
+	CHECK(strstr(output, "\"/a\\\\b\"") != NULL);
+	if (json)
+		CHECK(strstr(output, "\"/c\\\\\\\\d\"") != NULL);
+	else
+		CHECK(strstr(output, "\"/c\\\\d\"") != NULL);
+
+	fsimg_error_set(&error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_EXTRACT,
+	    "safe extraction cannot deliver this name");
+	strcpy(error.path, "/e\\\\f\\xe9");
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.failure = &error;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	if (json)
+		CHECK(strstr(display.buffer,
+		    "\"path\":\"/e\\\\\\\\f\\\\xe9\"") != NULL);
+	else
+		CHECK(strstr(display.buffer, "\"/e\\\\f\\xe9\"") != NULL);
+
+	/* Rendering escapes only omitted names, so a control byte in a
+	 * rendered path is still escaped for the terminal.
+	 */
+	strcpy(error.path, "/g\033h");
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.failure = &error;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(memchr(text.data, '\033', text.length) == NULL);
+	CHECK(strstr(display.buffer, "/g\\u001bh") != NULL);
+}
+
 /* formats reports kinds and fields as masks in JSON and by name in detail. */
 static void
 test_format_masks(bool json)
@@ -1573,6 +1689,9 @@ main(int argc, char **argv)
 	test_posix_volume(false);
 	test_posix_volume(true);
 	test_skipped_summary();
+	test_omitted_summary();
+	test_rendered_paths(false);
+	test_rendered_paths(true);
 	test_format_masks(false);
 	test_format_masks(true);
 	test_final_diagnostics();

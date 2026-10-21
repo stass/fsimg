@@ -25,30 +25,21 @@ static fsimg_status_t long_name(fsimg_reader_t *, const qnx4_link_t *,
 static fsimg_status_t field_name(const unsigned char *, size_t, bool, char *,
     fsimg_error_t *);
 
-/* Check a name against the fsimg profile: 1 to 505 bytes of strict UTF-8
- * without control bytes or DEL, and neither "." nor "..". QNX itself
- * forbids NUL, slash and the dot names, so they are corruption; a name QNX
- * accepts but the profile does not is unsupported.
+/* Check a name against QNX4's own rules: 1 to 505 bytes without NUL or
+ * slash, and neither "." nor "..". A name breaking them is corruption.
+ * Any other byte is native; preparation classes a name outside the
+ * QNX-family profile as omitted.
  */
 fsimg_status_t
-qnx4_name_profile(const unsigned char *name, size_t length,
+qnx4_name_native(const unsigned char *name, size_t length,
     fsimg_error_t *error)
 {
-	size_t units;
-
 	if (length == 0 || length > QNX4_NAME_MAX ||
 	    memchr(name, '\0', length) != NULL ||
 	    memchr(name, '/', length) != NULL ||
 	    (length == 1 && name[0] == '.') ||
 	    (length == 2 && name[0] == '.' && name[1] == '.'))
 		return (qnx4_corrupt(error, "invalid QNX4 file name"));
-	for (size_t i = 0; i < length; i++)
-		if (name[i] < 0x20 || name[i] == 0x7f)
-			return (qnx4_unsupported(error,
-			    "QNX4 file name contains a control byte"));
-	if (fsimg_utf8_to_utf16((const char *)name, length, NULL, 0, &units,
-	    NULL) != FSIMG_OK)
-		return (qnx4_unsupported(error, "QNX4 file name is not UTF-8"));
 	return (FSIMG_OK);
 }
 
@@ -70,7 +61,7 @@ qnx4_label_valid(const unsigned char *label, size_t length)
 
 /* Copy a NUL-padded name field of `length` bytes into out after checking
  * it: the padding after the name must be zero, else the field holds a NUL
- * inside a name, and the name must satisfy the profile.
+ * inside a name, and the name must be native.
  */
 static fsimg_status_t
 field_name(const unsigned char *name, size_t length, bool padding_zero,
@@ -80,7 +71,7 @@ field_name(const unsigned char *name, size_t length, bool padding_zero,
 
 	if (!padding_zero)
 		return (qnx4_corrupt(error, "QNX4 file name contains a NUL"));
-	status = qnx4_name_profile(name, length, error);
+	status = qnx4_name_native(name, length, error);
 	if (status != FSIMG_OK)
 		return (status);
 	bcopy(name, out, length);
@@ -88,8 +79,8 @@ field_name(const unsigned char *name, size_t length, bool padding_zero,
 	return (FSIMG_OK);
 }
 
-/* The displayed name of a direct record, into a buffer of at least
- * QNX4_NAME_MAX + 1 bytes.
+/* The name of a direct record, into a buffer of at least QNX4_NAME_MAX + 1
+ * bytes.
  */
 fsimg_status_t
 qnx4_direct_name(const qnx4_inode_t *inode, char *out, fsimg_error_t *error)
@@ -177,8 +168,8 @@ long_name(fsimg_reader_t *reader, const qnx4_link_t *link, uint64_t position,
 	return (FSIMG_OK);
 }
 
-/* The displayed name of the link record at position, into a buffer of at
- * least QNX4_NAME_MAX + 1 bytes: its own field, or the long-name record its
+/* The name of the link record at position, into a buffer of at least
+ * QNX4_NAME_MAX + 1 bytes: its own field, or the long-name record its
  * pointer names.
  */
 fsimg_status_t

@@ -136,22 +136,26 @@ slot_of_name(const char *name, fsimg_layer_kind_t *slot)
 }
 
 /* A syntax error naming the offending token, which need not be terminated
- * in the stack text.
+ * in the stack text. The token is rendered like every path an error
+ * carries; one too long for the field keeps its tail, as the rendering
+ * itself does.
  */
 static fsimg_status_t
 stack_syntax(fsimg_error_t *error, const char *message, const char *token,
     size_t length)
 {
+	char text[sizeof(error->path)];
 	fsimg_status_t status;
-	int count;
+	size_t tail_start;
 
 	status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE, message);
 	if (error != NULL) {
-		count = snprintf(error->path, sizeof(error->path), "%.*s",
-		    (int)(length < sizeof(error->path) ? length :
-		    sizeof(error->path)), token);
-		error->path_truncated = count < 0 ||
-		    length >= sizeof(error->path);
+		tail_start = length < sizeof(text) ? 0 :
+		    length - (sizeof(text) - 1);
+		bcopy(token + tail_start, text, length - tail_start);
+		text[length - tail_start] = '\0';
+		fsimg_error_path(error, text);
+		error->path_truncated = error->path_truncated || tail_start != 0;
 	}
 	return (status);
 }

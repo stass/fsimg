@@ -22,6 +22,7 @@ const fsimg_reader_ops_t fsimg_qnx6_reader_ops = {
 	.keys = qnx6_keys,
 	.key = qnx6_key,
 	.ambiguous = "duplicate QNX6 directory name",
+	.name_profile = FSIMG_NAME_PROFILE_QNX,
 	.resolve = qnx6_resolve,
 	.verify = qnx6_verify
 };

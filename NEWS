@@ -280,6 +280,23 @@ blocks of the PCM 3.1 navigation partition, modifies every one with free
 space cleanly, and fsimg verifies what QNX wrote to them. `fsimg c -L`
 accepts QNX4's 48-byte label.
 
+Symbolic-link targets of up to 1024 bytes enter the entry model, and each
+capability record states the longest target its format stores in
+max_link_target_bytes: 1023 bytes for QNX4 and QNX6, none for FAT and
+exFAT. Planning refuses a longer target as unsupported, naming the entry.
+
+QNX4 and QNX6 entries whose names QNX accepts but lie outside the profile,
+strict UTF-8 without control bytes or DEL, are omitted rather than failing
+the read: listings and selections never show them or their subtrees,
+verification still checks them, and extraction fails on one unless `fsimg x -k`
+omits it. Each omitted subtree is counted in omitted_entries, reported in
+the statistics, the extraction and verification results, a CLI warning and
+the JSON summary. Every library path other than an entry's own is
+rendered, with a backslash doubled and an omitted name's bytes outside
+printable ASCII written as \xNN; an error path too long for its field
+keeps its tail. A namespace collision names the second entry by its path
+and the first by its position, never quoting a name in the message.
+
 The fsimg command is shaped like tar: modes c (create, cW to verify before
 publication), x (extract, x -O for one member's bytes), t (list, recursive by
 default), W (verify), i (information) and --formats, with -f naming the image,

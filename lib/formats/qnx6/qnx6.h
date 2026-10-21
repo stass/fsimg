@@ -285,7 +285,7 @@ fsimg_status_t qnx6_inode_entry(const qnx6_inode_t *, fsimg_entry_t *,
     fsimg_error_t *);
 
 /* names.c */
-fsimg_status_t qnx6_name_profile(const unsigned char *, size_t,
+fsimg_status_t qnx6_name_native(const unsigned char *, size_t,
     fsimg_error_t *);
 fsimg_status_t qnx6_slot_name(fsimg_reader_t *, const qnx6_slot_t *, char *,
     fsimg_error_t *);

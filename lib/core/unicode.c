@@ -156,6 +156,23 @@ fsimg_utf16_to_utf8(const uint16_t *input, size_t length, char *output,
 	return (FSIMG_OK);
 }
 
+bool
+fsimg_name_in_qnx_profile(const char *name, size_t length)
+{
+	const unsigned char *bytes = (const unsigned char *)name;
+	size_t units;
+
+	if (length == 0 || (length == 1 && bytes[0] == '.') ||
+	    (length == 2 && bytes[0] == '.' && bytes[1] == '.'))
+		return (false);
+	for (size_t i = 0; i < length; i++) {
+		if (bytes[i] < 0x20 || bytes[i] == 0x7f || bytes[i] == '/')
+			return (false);
+	}
+	return (fsimg_utf8_to_utf16(name, length, NULL, 0, &units, NULL) ==
+	    FSIMG_OK);
+}
+
 fsimg_status_t
 fsimg_path_validate(fsimg_ctx_t *ctx, const char *path, bool allow_root,
     size_t *length, uint32_t *depth, fsimg_error_t *error)

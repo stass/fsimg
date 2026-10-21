@@ -7,6 +7,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "unicode.h"
 #include "write-qnx4.h"
 
 /*
@@ -423,9 +424,7 @@ plan_entry(qnx4_plan_t *plan, const fsimg_catalog_entry_t *catalog,
 		return (status);
 	name = strrchr(entry->path, '/') + 1;
 	length = strlen(name);
-	if (length > QNX4_NAME_MAX ||
-	    qnx4_name_profile((const unsigned char *)name, length, NULL) !=
-	    FSIMG_OK) {
+	if (length > QNX4_NAME_MAX || !fsimg_name_in_qnx_profile(name, length)) {
 		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "name is outside the QNX4 name profile");
 		fsimg_error_path(error, entry->path);

@@ -7,32 +7,22 @@
 #include <strings.h>
 
 #include "qnx6.h"
-#include "unicode.h"
 
-/* Check a name against the fsimg profile: 1..510 bytes of strict UTF-8
- * without control bytes or DEL, and neither "." nor "..". QNX itself
- * forbids NUL, slash and the dot names, so they are corruption; a name QNX
- * accepts but the profile does not is unsupported.
+/* Check a name against QNX6's own rules: 1 to 510 bytes without NUL or
+ * slash, and neither "." nor "..". A name breaking them is corruption.
+ * Any other byte is native; preparation classes a name outside the
+ * QNX-family profile as omitted.
  */
 fsimg_status_t
-qnx6_name_profile(const unsigned char *name, size_t length,
+qnx6_name_native(const unsigned char *name, size_t length,
     fsimg_error_t *error)
 {
-	size_t units;
-
 	if (length == 0 || length > QNX6_NAME_MAX ||
 	    memchr(name, '\0', length) != NULL ||
 	    memchr(name, '/', length) != NULL ||
 	    (length == 1 && name[0] == '.') ||
 	    (length == 2 && name[0] == '.' && name[1] == '.'))
 		return (qnx6_corrupt(error, "invalid QNX6 file name"));
-	for (size_t i = 0; i < length; i++)
-		if (name[i] < 0x20 || name[i] == 0x7f)
-			return (qnx6_unsupported(error,
-			    "QNX6 file name contains a control byte"));
-	if (fsimg_utf8_to_utf16((const char *)name, length, NULL, 0, &units,
-	    NULL) != FSIMG_OK)
-		return (qnx6_unsupported(error, "QNX6 file name is not UTF-8"));
 	return (FSIMG_OK);
 }
 
@@ -75,7 +65,7 @@ long_name_read(fsimg_reader_t *reader, const qnx6_slot_t *slot,
 }
 
 /* Decode a live slot's name into a NUL-terminated buffer of at least
- * QNX6_NAME_MAX + 1 bytes and check it against the profile.
+ * QNX6_NAME_MAX + 1 bytes and check that it is native.
  */
 fsimg_status_t
 qnx6_slot_name(fsimg_reader_t *reader, const qnx6_slot_t *slot, char *out,
@@ -95,7 +85,7 @@ qnx6_slot_name(fsimg_reader_t *reader, const qnx6_slot_t *slot, char *out,
 		length = slot->length;
 		bcopy(slot->name, name, length);
 	}
-	status = qnx6_name_profile(name, length, error);
+	status = qnx6_name_native(name, length, error);
 	if (status != FSIMG_OK)
 		return (status);
 	bcopy(name, out, length);

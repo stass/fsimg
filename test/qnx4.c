@@ -21,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "extract.h"
 #include "format.h"
 #include "fsimg.h"
 #include "qnx4.h"
@@ -2414,8 +2415,9 @@ test_names(void)
 	uint32_t file, other;
 	char *name;
 
-	/* Byte rules: corruption for what QNX forbids, unsupported for what
-	 * QNX allows but the profile does not.
+	/* Byte rules: corruption for what QNX forbids. A name QNX allows
+	 * but the profile does not omits its entry, which lists without it;
+	 * test_omitted_names covers omission.
 	 */
 	static const struct {
 		const char	*name;
@@ -2427,9 +2429,9 @@ test_names(void)
 		{ ".", 1, FSIMG_ECORRUPT },
 		{ "..", 2, FSIMG_ECORRUPT },
 		{ "", 0, FSIMG_ECORRUPT },
-		{ "a\001b", 3, FSIMG_EUNSUPPORTED },
-		{ "a\177b", 3, FSIMG_EUNSUPPORTED },
-		{ "a\377b", 3, FSIMG_EUNSUPPORTED },
+		{ "a\001b", 3, FSIMG_OK },
+		{ "a\177b", 3, FSIMG_OK },
+		{ "a\377b", 3, FSIMG_OK },
 		{ "\xc3\xa9", 2, FSIMG_OK },
 		{ "...", 3, FSIMG_OK }
 	};
@@ -3963,6 +3965,292 @@ check_file(fixture_t *f, const char *path, const void *bytes, size_t length)
 	CHECK(close(fd) == 0);
 }
 
+/*
+ * Names outside the profile. The omitted sample holds, beside delivered
+ * siblings, six omitted subtree roots: a file named with a control byte in
+ * the delivered directory /mixed, a Latin-1 file, a symbolic link
+ * named with a control byte, a FIFO named with DEL, a 60-byte Latin-1 long
+ * name in .longfilenames and a directory with a subtree of its own. Its
+ * plain twin holds only the delivered entries, laid out first and in the
+ * same order, so it is the oracle for what a listing, an extraction and a
+ * verification of the omitted sample must deliver.
+ */
+typedef struct omitted_sample {
+	uint32_t	 keep;		/* "/keep", delivered */
+	uint32_t	 kept;		/* "/kept", a delivered directory */
+	uint32_t	 directory;	/* "/dir\xff" */
+	uint32_t	 deep;		/* "/dir\xff/sub/deep" */
+	uint32_t	 long_name;	/* 59 'l' bytes and 0xe9 */
+} omitted_sample_t;
+
+#define OMITTED_ROOTS		6u
+/* Bytes a payload read-through reads beyond the plain twin's: one byte in
+ * each of five omitted files and the link's 4-byte target.
+ */
+#define OMITTED_PAYLOAD_BYTES	9u
+
+static void
+omitted_sample_build(gen_t *g, omitted_sample_t *s, bool omitted)
+{
+	uint32_t mixed, sub;
+	char *name;
+
+	gen_init(g, GEN_DEFAULT_N);
+	s->keep = gen_file(g, OBJ_ROOT, "keep", (const unsigned char *)"k", 1);
+	s->kept = gen_dir(g, OBJ_ROOT, "kept");
+	gen_file(g, s->kept, "inner", (const unsigned char *)"i", 1);
+	mixed = gen_dir(g, OBJ_ROOT, "mixed");
+	gen_file(g, mixed, "ok", (const unsigned char *)"o", 1);
+	if (omitted)
+		gen_file(g, mixed, "bad\x02", (const unsigned char *)"b", 1);
+	if (omitted) {
+		gen_file(g, OBJ_ROOT, "caf\xe9", (const unsigned char *)"c", 1);
+		gen_symlink(g, OBJ_ROOT, "ctl\x01", "keep");
+		gen_fifo(g, OBJ_ROOT, "del\x7f", 0);
+		name = repeat('l', 60);
+		name[59] = (char)0xe9;
+		s->long_name = gen_file(g, OBJ_ROOT, name,
+		    (const unsigned char *)"n", 1);
+		free(name);
+		s->directory = gen_dir(g, OBJ_ROOT, "dir\xff");
+		gen_file(g, s->directory, "child", (const unsigned char *)"x",
+		    1);
+		sub = gen_dir(g, s->directory, "sub");
+		s->deep = gen_file(g, sub, "deep", (const unsigned char *)"y",
+		    1);
+	}
+	gen_finish(g);
+}
+
+/* The context statistics after an operation: omitted subtree roots, and
+ * never an entry skipped for its kind.
+ */
+static void
+check_omission_counts(fixture_t *f, uint64_t omitted)
+{
+	fsimg_stats_t stats;
+
+	CHECK(fsimg_ctx_get_stats(f->ctx, &stats, NULL) == FSIMG_OK);
+	if (stats.omitted_entries != omitted)
+		fprintf(stderr, "omitted entries: expected %" PRIu64
+		    ", got %" PRIu64 "\n", omitted, stats.omitted_entries);
+	CHECK(stats.omitted_entries == omitted);
+	CHECK(stats.skipped_entries == 0);
+}
+
+/* Extract selection from the fixture's image into a fresh directory "out"
+ * beneath its scratch directory through the extractor's internal entry
+ * point, which leaves the error naming the failing entry rather than the
+ * destination. The caller removes "out".
+ */
+static fsimg_status_t
+extract_omitted(fixture_t *f, const char *selection, bool skip,
+    fsimg_extract_result_t *result, fsimg_error_t *error)
+{
+	fsimg_extract_options_t options;
+	fsimg_status_t status;
+	int root;
+
+	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) ==
+	    FSIMG_OK);
+	fsimg_extract_options_init(&options);
+	options.selection = selection;
+	if (skip)
+		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	CHECK(mkdirat(f->scratch, "out", 0700) == 0);
+	root = openat(f->scratch, "out", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(root != -1);
+	status = fsimg_extract_into(f->reader, root, &options, result, error);
+	CHECK(close(root) == 0);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+	return (status);
+}
+
+/* The number of names in directory path beneath the fixture's scratch. */
+static unsigned
+directory_names(fixture_t *f, const char *path)
+{
+	struct dirent *entry;
+	unsigned names;
+	DIR *dir;
+	int fd;
+
+	fd = openat(f->scratch, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(fd != -1);
+	dir = fdopendir(fd);
+	CHECK(dir != NULL);
+	names = 0;
+	while ((entry = readdir(dir)) != NULL)
+		if (strcmp(entry->d_name, ".") != 0 &&
+		    strcmp(entry->d_name, "..") != 0)
+			names++;
+	CHECK(closedir(dir) == 0);
+	return (names);
+}
+
+static void
+test_omitted_names(void)
+{
+	gen_t g, plain;
+	omitted_sample_t s, p;
+	fixture_t f;
+	fsimg_verify_report_t report, plain_report;
+	fsimg_extract_options_t options;
+	fsimg_extract_result_t result;
+	fsimg_error_t error;
+	uint64_t entries, plain_entries;
+	unsigned plain_names;
+	unsigned char *record;
+
+	omitted_sample_build(&g, &s, true);
+	omitted_sample_build(&plain, &p, false);
+
+	/* A listing delivers exactly the plain twin's entries and counts
+	 * each omitted subtree root once, never its descendants.
+	 */
+	CHECK(run_image(plain.image, plain.length, &plain_entries, NULL) ==
+	    FSIMG_OK);
+	fixture_new(&f, g.image, g.length);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+	    FSIMG_OK);
+	CHECK(walk_all(&f, &entries, NULL) == FSIMG_OK);
+	CHECK(entries == plain_entries);
+	check_omission_counts(&f, OMITTED_ROOTS);
+	fixture_free(&f);
+
+	/* Verification walks the omitted subtrees: their blocks are owned
+	 * and their names counted, so it completes. Files, directories and
+	 * logical bytes count delivered entries; payload bytes cover all.
+	 */
+	fixture_new(&f, plain.image, plain.length);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+	    FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &plain_report,
+	    NULL) == FSIMG_OK);
+	fixture_free(&f);
+	fixture_new(&f, g.image, g.length);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+	    FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) ==
+	    FSIMG_OK);
+	CHECK(report.complete);
+	CHECK(report.files == plain_report.files);
+	CHECK(report.directories == plain_report.directories);
+	CHECK(report.logical_bytes == plain_report.logical_bytes);
+	CHECK(report.payload_bytes_read == plain_report.payload_bytes_read +
+	    OMITTED_PAYLOAD_BYTES);
+	CHECK(report.allocated_clusters > plain_report.allocated_clusters);
+	CHECK(report.omitted_entries == OMITTED_ROOTS);
+	CHECK(plain_report.omitted_entries == 0);
+	check_omission_counts(&f, OMITTED_ROOTS);
+	fixture_free(&f);
+
+	/* Extracting a scope that holds an omitted entry fails naming the
+	 * first one in traversal order, rendered, and no name byte enters
+	 * the message; -k omits all six and extracts what the plain twin
+	 * does.
+	 */
+	fixture_new(&f, plain.image, plain.length);
+	CHECK(extract_omitted(&f, "/", false, &result, NULL) == FSIMG_OK);
+	plain_names = directory_names(&f, "out");
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+	fixture_new(&f, g.image, g.length);
+	bzero(&error, sizeof(error));
+	CHECK(extract_omitted(&f, "/", false, &result, &error) ==
+	    FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "/mixed/bad\\x02") == 0 &&
+	    !error.path_truncated);
+	CHECK(strchr(error.message, '\x02') == NULL);
+	CHECK(result.omitted_entries == 1);
+	remove_tree(f.scratch, "out");
+	CHECK(extract_omitted(&f, "/", true, &result, NULL) == FSIMG_OK);
+	CHECK(result.omitted_entries == OMITTED_ROOTS);
+	CHECK(result.skipped_entries == 0);
+	check_file(&f, "out/keep", "k", 1);
+	check_file(&f, "out/kept/inner", "i", 1);
+	CHECK(directory_names(&f, "out") == plain_names);
+	CHECK(directory_names(&f, "out/kept") == 1);
+	CHECK(directory_names(&f, "out/mixed") == 1);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+
+	/* An omitted entry below a delivered directory is in that
+	 * directory's scope. The public entry point keeps the entry's path
+	 * in the error rather than naming the destination.
+	 */
+	fixture_new(&f, g.image, g.length);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+	    FSIMG_OK);
+	fsimg_extract_options_init(&options);
+	options.selection = "/mixed";
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, &error) ==
+	    FSIMG_EUNSUPPORTED);
+	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	CHECK(strcmp(error.path, "/mixed/bad\\x02") == 0);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	remove_tree(f.scratch, "out");
+	CHECK(extract_omitted(&f, "/mixed", true, &result, NULL) == FSIMG_OK);
+	CHECK(result.omitted_entries == 1);
+	CHECK(directory_names(&f, "out/mixed") == 1);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+
+	/* A sibling's scope holds no omitted entry: it extracts without -k
+	 * and counts nothing, though the walker passes the omitted roots.
+	 */
+	fixture_new(&f, g.image, g.length);
+	CHECK(extract_omitted(&f, "/kept", false, &result, NULL) == FSIMG_OK);
+	CHECK(result.omitted_entries == 0);
+	check_omission_counts(&f, 0);
+	check_file(&f, "out/kept/inner", "i", 1);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+
+	/* No query can spell an omitted name: invalid UTF-8 fails path
+	 * validation and a control byte fails the driver's key.
+	 */
+	fixture_new(&f, g.image, g.length);
+	CHECK(extract_omitted(&f, "/caf\xe9", true, &result, NULL) ==
+	    FSIMG_EINVAL);
+	remove_tree(f.scratch, "out");
+	CHECK(extract_omitted(&f, "/ctl\x01", true, &result, NULL) ==
+	    FSIMG_EINVAL);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+
+	/* Verification still finds what is wrong below an omitted name: an
+	 * extent past N, a link count disagreeing with the names of an
+	 * omitted .inodes object, and an omitted directory's link count.
+	 * Listing never opens the subtree or reads a link count.
+	 */
+	record = record_of(&g, s.deep);
+	put32(record + INODE_FIRST, g.blocks);
+	expect_verify(&g, FSIMG_OK, FSIMG_ECORRUPT,
+	    "an extent past N below an omitted directory");
+	put32(record + INODE_FIRST, g.objects[s.deep].extents[0].first);
+	expect_link_count_checked(&g, record_of(&g, s.long_name),
+	    "an omitted long-named file's link count");
+	expect_link_count_checked(&g, record_of(&g, s.directory),
+	    "an omitted directory's link count");
+	expect(&g, FSIMG_OK, "the omitted sample restored");
+
+	/* An omitted name is still a key: a duplicate is corruption. */
+	record = record_of(&g, s.keep);
+	memcpy(record + INODE_NAME, "caf\xe9", 4);
+	expect(&g, FSIMG_ECORRUPT, "a duplicate omitted name");
+	bzero(&error, sizeof(error));
+	CHECK(run_image(g.image, g.length, NULL, &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.path, "/caf\\xe9") == 0);
+	CHECK(strstr(error.message, "collides with entry") != NULL &&
+	    strchr(error.message, '\xe9') == NULL);
+	gen_free(&g);
+	gen_free(&plain);
+}
+
 static void
 test_extract(void)
 {
@@ -4792,6 +5080,7 @@ main(int argc, char **argv)
 	test_eof();
 	test_source_change();
 	test_extract();
+	test_omitted_names();
 	test_scale(false);
 	test_depth_limit();
 	if (skipped != 0)

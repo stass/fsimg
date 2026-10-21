@@ -1741,16 +1741,21 @@ test_long_names(void)
 			CHECK(status == FSIMG_OK && strlen(entry->path) == 256);
 			CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_DONE);
 		} else if (scenario == 1) {
-			/* A collision names both entries by their displayed names. */
+			/* A collision names the second entry by its path and the
+			 * first by its position, so no name enters the message.
+			 */
 			CHECK(status == FSIMG_ECORRUPT && entry == NULL);
 			CHECK(strcmp(error.message, "ambiguous FAT long-name or alias "
-			    "namespace: \"HELLO.TXT\" and \"HELLO.TXT\"") == 0);
-			CHECK(!error.message_truncated);
+			    "namespace: collides with entry 1 of its directory") == 0);
+			CHECK(strcmp(error.path, "/HELLO.TXT") == 0);
+			CHECK(!error.message_truncated && !error.path_truncated);
 		} else if (scenario == 8) {
 			CHECK(status == FSIMG_ECORRUPT && entry == NULL);
-			CHECK(strncmp(error.message, "ambiguous FAT long-name or alias "
-			    "namespace: \"aaa", 47) == 0);
-			CHECK(error.message_truncated);
+			CHECK(strcmp(error.message, "ambiguous FAT long-name or alias "
+			    "namespace: collides with entry 1 of its directory") == 0);
+			CHECK(error.path[0] == '/' && strlen(error.path) == 121 &&
+			    strspn(error.path + 1, "a") == 120);
+			CHECK(!error.message_truncated && !error.path_truncated);
 		} else {
 			CHECK(status == FSIMG_ECORRUPT && entry == NULL);
 		}
@@ -1765,20 +1770,32 @@ test_cached_name(void)
 	const fsimg_entry_t *entry;
 	fsimg_store_t *store;
 	unsigned char invalid[2] = { 0xc0, 0x80 };
+	static const unsigned char classes[] = { 1, 2 };
 	uint64_t cursor;
 
-	fixture_init(&f, 16);
-	fixture_open(&f);
-	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
-	/* A record starts with its displayed name, after the 8-byte frame. */
-	fsimg_test_walk_cursor(f.reader, &store, &cursor);
-	CHECK(store != NULL);
-	CHECK(fsimg_store_write(store, cursor + 8, invalid, sizeof(invalid),
-	    NULL) == FSIMG_OK);
-	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ECORRUPT);
-	CHECK(entry == NULL);
-	fixture_close(&f);
+	/* A record starts with its class byte, after the 8-byte frame, and
+	 * then its name. Replay checks both again: an invalid name, and a
+	 * stored class other than the one its name has.
+	 */
+	for (unsigned scenario = 0; scenario < 3; scenario++) {
+		fixture_init(&f, 16);
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+		fsimg_test_walk_cursor(f.reader, &store, &cursor);
+		CHECK(store != NULL);
+		if (scenario == 0)
+			CHECK(fsimg_store_write(store, cursor + 9, invalid,
+			    sizeof(invalid), NULL) == FSIMG_OK);
+		else
+			CHECK(fsimg_store_write(store, cursor + 8,
+			    &classes[scenario - 1], 1, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_next(f.reader, &entry, NULL) ==
+		    FSIMG_ECORRUPT);
+		CHECK(entry == NULL);
+		fixture_close(&f);
+	}
 }
 
 /* Replace the first root entry with INDEX.BIN, a file of the given number

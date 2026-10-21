@@ -9,6 +9,10 @@
 typedef struct fsimg_extract_result {
 	uint64_t	 entries; /* Completed entries, excluding the implicit root. */
 	uint64_t	 skipped_entries; /* Unsupported kinds omitted on request. */
+	/* Omitted subtree roots, names outside the profile, the walker passed
+	 * in scope under FSIMG_EXTRACT_SKIP_UNSUPPORTED.
+	 */
+	uint64_t	 omitted_entries;
 	uint64_t	 logical_bytes; /* File lengths charged, including partial files. */
 } fsimg_extract_result_t;
 

@@ -61,6 +61,7 @@ typedef enum worker_scenario {
 	SCENARIO_PARTIAL_EXTRACTION,
 	SCENARIO_ASAN_FAILURE,
 	SCENARIO_SKIPPED_EXTRACTION,
+	SCENARIO_OMITTED_EXTRACTION,
 	SCENARIO_INFO_WITHOUT_IMAGE,
 	SCENARIO_IMAGE_WRONG_DISK,
 	SCENARIO_PARTITION_OUTSIDE,
@@ -126,6 +127,7 @@ static void test_forged_publication(void);
 static void test_text_output(void);
 static void test_incomplete_extraction(void);
 static void test_skipped_extraction(void);
+static void test_omitted_extraction(void);
 static void test_mount_source(const char *);
 static void test_multiple_roots(worker_fixture_t *);
 static void test_manifest_roots(worker_fixture_t *);
@@ -1220,6 +1222,8 @@ fake_worker(worker_scenario_t mode)
 	fsimg_wire_put64(raw, mode == SCENARIO_LONG_LIST_NAME ? 1 : 0);
 	if (mode == SCENARIO_SKIPPED_EXTRACTION)
 		fsimg_wire_put64(raw + FSIMG_WIRE_DONE_SKIPPED, 1);
+	if (mode == SCENARIO_OMITTED_EXTRACTION)
+		fsimg_wire_put64(raw + FSIMG_WIRE_DONE_OMITTED, 1);
 	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL) == FSIMG_OK);
 	if (mode == SCENARIO_DUPLICATE_DONE)
 		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
@@ -1278,6 +1282,38 @@ test_skipped_extraction(void)
 	if (status != FSIMG_OK)
 		fprintf(stderr, "skipped extraction: %d: %s\n", status, error.message);
 	CHECK(status == FSIMG_OK && fixture.result.skipped_entries == 1);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
+	fixture_close(&fixture);
+}
+
+/* Likewise omitted entries: an extraction that did not ask to skip fails
+ * at the first one, so a count there could only be forged.
+ */
+static void
+test_omitted_extraction(void)
+{
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	int fd;
+
+	fixture_open(&fixture);
+	fd = openat(fixture.parent, "fake", O_CREAT | O_EXCL | O_RDWR, 0700);
+	CHECK(fd != -1);
+	CHECK(ftruncate(fd, SCENARIO_OMITTED_EXTRACTION) == 0);
+	CHECK(fchmod(fd, 0700) == 0);
+	fixture.request.input_fd = fd;
+	fixture.request.output_fd = fixture.output;
+	fixture.request.kind = FSIMG_JOB_EXTRACT;
+	fixture.request.sandbox = FSIMG_SANDBOX_OFF;
+	CHECK(run(&fixture, &error) == FSIMG_EIO);
+	fixture.request.flags = FSIMG_JOB_SKIP_UNSUPPORTED;
+	status = run(&fixture, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "omitted extraction: %d: %s\n", status, error.message);
+	CHECK(status == FSIMG_OK && fixture.result.omitted_entries == 1);
+	CHECK(fixture.result.skipped_entries == 0);
 	CHECK(close(fd) == 0);
 	CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
 	fixture_close(&fixture);
@@ -1638,6 +1674,7 @@ main(int argc, char **argv)
 	test_forged_publication();
 	test_incomplete_extraction();
 	test_skipped_extraction();
+	test_omitted_extraction();
 	test_output_ledger();
 	{
 		test_transport(SCENARIO_STARTUP_NONREADER);
