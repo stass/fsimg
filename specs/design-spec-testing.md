@@ -571,15 +571,14 @@ its own, because both paths can share a defect.
 
 ### Oracle exceptions
 
-An **oracle exception** documents a disagreement that is no fault of the
-image: a defect of the tool, or the variant disagreement the specification
-warns of near the cutovers. The exceptions are one frozen list,
+An **oracle exception** documents a disagreement that is a defect of the
+tool rather than of the image. The exceptions are one frozen list,
 `Fat::Oracles::EXCEPTIONS`, reviewed like rules, and they cover the checker
 and the read-back alike. Each entry has five parts:
 
 * an id, which records and reports name it by;
 * the tool it excuses;
-* the cluster counts of the volumes it covers;
+* the exact cluster counts of the volumes it covers, never a range;
 * a pattern the disagreement's detail must match, which for a checker
   names the program, since `fsck.fat` and `fsck_msdosfs` have different
   defects, and is anchored on the symptom of the defect;
@@ -600,26 +599,26 @@ serving one; only a populated tree needs more, a read-back that agrees, as
 
 | Exception | Tool | Matches | Reason |
 | --- | --- | --- | --- |
-| `mtools.variant_margin` | read-back | Any disagreement on a volume closer than 16 clusters to 4085 or 65525 | Implementations disagree on the variant near the cutovers, which is why Microsoft's formatting recommendation and fsimg's automatic sizing keep 16 clusters from them |
 | `fsck_msdosfs.fat16_4085` | checker | `fsck_msdosfs` exiting 8 on a volume of 4085 clusters once its boot sector checks passed, so that it reached Phase 1 | FreeBSD's `readboot` (`sbin/fsck_msdosfs/boot.c`) takes a 12-bit FAT below `CLUST_RSRVD & CLUST12_MASK`, 4086 clusters, where section 3.5 makes 4085 clusters FAT16, so it misreads every chain |
 | `fsck_msdosfs.fat32_65525` | checker | `fsck_msdosfs` exiting 8 with `Filesystem too small (65525 clusters) for FAT32 partition` right after the image line, or after its warning about the sector after FSInfo, whose boot signature section 5 does not define and neither fsimg nor `mkfs.fat` writes | `readboot` refuses FAT32 below `CLUST_RSRVD & CLUST16_MASK`, 65526 clusters, where section 3.5 makes 65525 clusters FAT32 |
 
-The variant margin is the read-back's alone. The checker's verdict is the
-evidence that a threshold volume's tables are the ones its variant
-requires; a margin for the checker would excuse every diagnostic on the
-very volumes whose variant is easiest to get wrong. A checker that departs
-from section 3.5 is documented exactly instead, as FreeBSD's is. The
-read-back keeps the margin because the checker, which has none, still
-judges those volumes' tables where it reads them: `fsck.fat` reads every
-threshold volume fsimg creates. On a host whose only checker is
-`fsck_msdosfs`, both its exception and the margin apply to a volume of
-exactly 4085 or 65525 clusters, so there that host judges only the boot
-sector, the checks `readboot` makes before it decides the variant, and at
-65525 not even all of those: its one FSInfo warning covers every FSInfo
-signature, so a defect in any of them is excused there. Its other
+No exception covers a range of counts near the variant cutovers. A
+volume there is one whose variant is easiest to get wrong, and both
+verdicts are the evidence that its tables and tree are the ones that
+variant requires: `fsck.fat` and mtools read every threshold volume fsimg
+creates, at 4085 and 65525 clusters too, and the FAT16 and FAT32 builder
+bases, which lie at those two counts, serve no case if either disagrees
+with them. A tool that departs from section 3.5 is documented at the
+exact counts where it does, as FreeBSD's checker is.
+
+On a host whose only checker is `fsck_msdosfs`, its exceptions leave a
+volume of exactly 4085 or 65525 clusters to the read-back and to the
+checks `readboot` makes of the boot sector before it decides the variant.
+At 65525 not even all of those remain: its one FSInfo warning covers every
+FSInfo signature, so a defect in any of them is excused there. Its other
 diagnostics at 4085, such as a Phase 2 directory problem, are excused with
-the misread table. Such a host judges every other count in
-full, and a host with `fsck.fat` judges those two as well.
+the misread table. Such a host judges every other count in full, and a
+host with `fsck.fat` judges those two as well.
 
 ## Runner
 

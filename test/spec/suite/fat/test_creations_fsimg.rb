@@ -62,14 +62,15 @@ class TestFatCreationsFsimg < Minitest::Test
   # what FreeBSD's fsck_msdosfs reports of a 4085-cluster FAT16 volume
   # fails a created image of any other count, and the documented
   # exception for that checker's off-by-one cutover excuses it at 4085,
-  # where the case passes and records the exception.
+  # where the case passes and records the exception, since the host's
+  # mtools reads that volume back.
   def test_a_checker_disagreement_fails_a_created_image_unless_an_exception_excuses_it
     Dir.mktmpdir do |stubs|
       checker = File.join(stubs, "fsck_msdosfs")
       File.write(checker, "#!/bin/sh\necho \"** $2\"\necho '** Phase 1 - Read FAT and checking connectivity'\n" \
                           "echo 'Cluster 8 crossed another chain at 7'\nexit 8\n")
       File.chmod(0o700, checker)
-      with_run(checkers: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
+      with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
         _, failed = run.call("fat.create.valid.fat16")
         _, excused = run.call("fat.create.cluster_count.fat16_4085")
         skip "no oracle runs on this host" if failed.observations.fetch("fsck").state == "unavailable"
@@ -78,6 +79,29 @@ class TestFatCreationsFsimg < Minitest::Test
         assert_match(/fsck: fsck_msdosfs -n exited 8: "\*\* out\/created.img \| \*\* Phase 1 .* \| Cluster 8 crossed/, failed.detail)
         assert_equal ["passed", "excused", "fsck_msdosfs.fat16_4085"],
                      [excused.verdict, *excused.observations.fetch("fsck").to_h.values_at(:state, :exception_id)], excused.detail
+      end
+    end
+  end
+
+  # The seeded failure of the read-back's verdict at a cutover: an mdir
+  # that lists nothing fails the created FAT16 volume of exactly 4085
+  # clusters, which no exception excuses, as at any other count. No
+  # checker runs, so the read-back alone fails the case, and an empty
+  # listing reads no file, so mtype is never run.
+  def test_a_read_back_disagreement_fails_a_created_image_at_a_cutover
+    Dir.mktmpdir do |stubs|
+      mdir, mtype = %w[mdir mtype].map { File.join(stubs, _1) }
+      [mdir, mtype].each do
+        File.write(_1, "#!/bin/sh\nexit 0\n")
+        File.chmod(0o700, _1)
+      end
+      with_run(tools: { mdir:, mtype:, fsck_fat: nil, fsck_msdosfs: nil }) do |run|
+        _, result = run.call("fat.create.cluster_count.fat16_4085")
+        read_back = result.observations.fetch("mtools")
+        skip "no oracle runs on this host" if read_back.state == "unavailable"
+
+        assert_equal %w[failed disagrees], [result.verdict, read_back.state]
+        assert_match(/\Athe oracles disagree with the created image: mtools: mtools lacks directory "DIR"/, result.detail)
       end
     end
   end
@@ -105,15 +129,17 @@ class TestFatCreationsFsimg < Minitest::Test
   # Yields a callable that classifies the creation witness of an id and
   # runs it, answering its Case and CaseResult, after one preflight for
   # the whole test. A witness whose case shows a generator defect fails
-  # the test instead. checkers replaces the host's read-only checkers in
+  # the test instead. tools replaces those of the host's tools it names in
   # the oracles' shell.
-  def with_run(checkers: {})
+  def with_run(tools: {})
     Dir.mktmpdir do |root|
       results = File.join(root, "results")
       Dir.mkdir(results)
       setup = FsimgSpec::CasePhase.prepare(results:, profile: PROFILE, build_directory: root, environment: ENV.to_h)
+      unknown = tools.keys - setup.shell.tools.keys
+      flunk "no such tool: #{unknown.join(", ")}" unless unknown.empty?
       shell = FsimgSpec::OracleShell.new(home: File.join(root, "checker-home"), environment: ENV.to_h,
-                                         tools: setup.shell.tools.merge(checkers))
+                                         tools: setup.shell.tools.merge(tools))
       cases = Fat::Cases.new(registry: REGISTRY, cache: setup.cache, ceilings: PROFILE.ceilings, name_trials: setup.name_trials,
                              shell:)
       witnesses = Fat::Witnesses.creations(REGISTRY, ceilings: PROFILE.ceilings).to_h { [_1.id, _1] }

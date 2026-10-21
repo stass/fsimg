@@ -157,7 +157,7 @@ class TestFatOracles < Minitest::Test
   # all match is excused and names the exception; any other observation
   # stays as it was.
   def test_a_disagreement_a_documented_exception_matches_is_excused
-    exceptions = [Fat::OracleException.new(id: "t.crossed", tool: "fsck", clusters: [4085, 5000..5010], diagnostic: /crossed/,
+    exceptions = [Fat::OracleException.new(id: "t.crossed", tool: "fsck", clusters: [4085, 5005], diagnostic: /crossed/,
                                            reason: "a test")]
     crossed = FsimgSpec::Observation.disagrees("fsck_msdosfs -n exited 8: crossed chain")
     excused = ->(observations, count) { Fat::Oracles.excused(observations, cluster_count: count, exceptions:) }
@@ -170,18 +170,26 @@ class TestFatOracles < Minitest::Test
     unexcused.each { |observations, count| assert_equal observations, excused.call(observations, count) }
   end
 
-  # The read-back keeps the variant margin: its disagreement within 16
-  # clusters of 4085 or 65525 is excused, one further away is not, and
-  # the margin excuses no checker.
-  def test_the_variant_margin_excuses_the_read_back_alone
-    read_back = { "mtools" => FsimgSpec::Observation.disagrees("mtools lacks file \"a\"") }
-    excused = [4069, 4070, 4100, 4101, 65_509, 65_510, 65_540, 65_541].select do
-      Fat::Oracles.excused(read_back, cluster_count: _1).fetch("mtools").state == "excused"
+  # An exception names the exact counts a defect was observed at: a range
+  # of counts, or none, is refused when the exception is built.
+  def test_an_exception_names_exact_cluster_counts
+    [[4070..4100], 4070..4100, [], [4085.0]].each do |clusters|
+      assert_raises(FsimgSpec::HarnessError, clusters.inspect) do
+        Fat::OracleException.new(id: "t.range", tool: "mtools", clusters:, diagnostic: //, reason: "a test")
+      end
     end
-    checker = { "fsck" => FsimgSpec::Observation.disagrees('fsck.fat -n exited 1: "FATs differ"') }
+  end
 
-    assert_equal [4070, 4100, 65_510, 65_540], excused
-    assert_equal checker, Fat::Oracles.excused(checker, cluster_count: 4085)
+  # The read-back is a verdict at every cluster count: no exception
+  # excuses its disagreement, not even at the variant cutovers or within
+  # the 16 clusters automatic sizing keeps from them, and none excuses
+  # fsck.fat's there.
+  def test_no_exception_excuses_the_read_back_or_fsck_fat_near_the_cutovers
+    observations = { "mtools" => FsimgSpec::Observation.disagrees("mtools lacks file \"a\""),
+                     "fsck" => FsimgSpec::Observation.disagrees('fsck.fat -n exited 1: "FATs differ"') }
+    counts = [4069, 4070, 4084, 4085, 4086, 4100, 4101, 65_509, 65_510, 65_524, 65_525, 65_526, 65_540, 65_541]
+
+    assert_empty counts.reject { Fat::Oracles.excused(observations, cluster_count: _1) == observations }
   end
 
   # FreeBSD's fsck_msdosfs takes the variant one cluster off section
@@ -219,7 +227,7 @@ class TestFatOracles < Minitest::Test
   def test_only_the_verdict_tools_disagreements_count
     observations = {
       "fsck" => FsimgSpec::Observation.disagrees("fsck.fat -n exited 1: \"x\""),
-      "mtools" => FsimgSpec::Observation.disagrees("mtools lacks file \"a\"").excused_by("mtools.variant_margin"),
+      "mtools" => FsimgSpec::Observation.disagrees("mtools lacks file \"a\"").excused_by("t.exception"),
       "fatcat" => FsimgSpec::Observation.disagrees("fatcat lacks file \"a\"")
     }
 
@@ -237,7 +245,6 @@ class TestFatOracles < Minitest::Test
     exceptions.each do |exception|
       assert_includes Fat::Oracles::VERDICT_TOOLS, exception.tool, exception.id
       assert_kind_of Regexp, exception.diagnostic, exception.id
-      refute_empty exception.clusters, exception.id
       assert_match(%r{https://|specs/}, exception.reason, exception.id)
     end
   end

@@ -9,18 +9,27 @@ module FsimgSpec
   module Fat
     # A documented exception for an oracle tool
     # (specs/design-spec-testing.md#oracle-exceptions): a disagreement of
-    # tool, on an image whose cluster count is one of clusters (Integers
-    # and Ranges), whose detail matches diagnostic, is the tool's defect,
-    # or the variant disagreement the specification warns of, rather than
-    # the image's. reason says why, citing the tool's source or the
-    # specification section it departs from.
+    # tool, on an image whose cluster count is one of clusters, whose
+    # detail matches diagnostic, is the tool's defect rather than the
+    # image's. reason says why, citing the tool's source or the
+    # specification section it departs from. clusters are exact counts,
+    # never a range: a defect is traced to the counts it was observed at.
     OracleException = Data.define(:id, :tool, :clusters, :diagnostic, :reason) do
+      include Checked
+
+      def initialize(clusters:, **fields)
+        raise HarnessError, "an oracle exception names exact cluster counts" unless
+          clusters.is_a?(Array) && !clusters.empty? && clusters.all?(Integer)
+
+        super(clusters: clusters.dup.freeze, **fields)
+      end
+
       # Whether this excuses observation, the view that the tool named
       # observed_by took of an image of cluster_count clusters, which is
       # Undefined where the BPB is.
       def excuses?(observation, observed_by:, cluster_count:) =
-        observed_by == tool && observation.state == "disagrees" && cluster_count.is_a?(Integer) &&
-        clusters.any? { _1 === cluster_count } && diagnostic.match?(observation.detail)
+        observed_by == tool && observation.state == "disagrees" && clusters.include?(cluster_count) &&
+        diagnostic.match?(observation.detail)
     end
 
     # The independent tools that read a FAT image beside fsimg
@@ -71,41 +80,27 @@ module FsimgSpec
       # recorded only.
       VERDICT_TOOLS = %w[fsck mtools].freeze
 
-      # The cluster counts at which the variant changes (section 3.5), and
-      # how near them implementations disagree on the variant: the margin
-      # fsimg's automatic sizing keeps (specs/design-fat-writer.md#geometry-and-allocation).
-      THRESHOLDS = [4085, 65_525].freeze
-      THRESHOLD_MARGIN = 16
-
       FREEBSD_BOOT_C = "https://cgit.freebsd.org/src/tree/sbin/fsck_msdosfs/boot.c"
 
       # The documented oracle exceptions (specs/design-spec-testing.md#oracle-exceptions),
       # each reviewed like a rule: a disagreement one of them excuses fails
-      # nothing and is recorded as excused, naming it. A tool's defect is
-      # added only once it was observed and traced to the tool's source.
+      # nothing and is recorded as excused, naming it. Each is a tool's
+      # defect, added only once it was observed and traced to the tool's
+      # source.
       EXCEPTIONS = [
-        OracleException.new(
-          id: "mtools.variant_margin", tool: "mtools",
-          # The counts closer than the margin to each threshold.
-          clusters: THRESHOLDS.map { (_1 - THRESHOLD_MARGIN + 1)...(_1 + THRESHOLD_MARGIN) }.freeze,
-          diagnostic: //, # any disagreement
-          reason: "Within #{THRESHOLD_MARGIN} clusters of a variant cutover implementations disagree on the variant, " \
-                  "which is why Microsoft's formatting recommendation and fsimg's automatic sizing keep that margin " \
-                  "(specs/design-fat-writer.md#geometry-and-allocation).".freeze
-        ),
         # readboot found the boot sector sound, since Phase 1 follows the
         # image line at once, so every diagnostic comes from the table it
         # misreads: crossed chains in Phase 1, or lost ones in Phase 3 of
         # an empty volume.
         OracleException.new(
-          id: "fsck_msdosfs.fat16_4085", tool: "fsck", clusters: [4085].freeze,
+          id: "fsck_msdosfs.fat16_4085", tool: "fsck", clusters: [4085],
           diagnostic: /\Afsck_msdosfs -n exited 8: "\*\* [^|]* \| \*\* Phase 1 - Read FAT and checking connectivity \|/,
           reason: "FreeBSD's fsck_msdosfs (#{FREEBSD_BOOT_C}, readboot) takes a 12-bit FAT while the cluster count is " \
                   "below CLUST_RSRVD & CLUST12_MASK, 4086, where section 3.5 makes 4085 clusters FAT16; it decodes the " \
                   "16-bit table at 12 bits, so every chain it reports is misread.".freeze
         ),
         OracleException.new(
-          id: "fsck_msdosfs.fat32_65525", tool: "fsck", clusters: [65_525].freeze,
+          id: "fsck_msdosfs.fat32_65525", tool: "fsck", clusters: [65_525],
           # The refusal follows the image line, or readboot's one earlier
           # warning on every FAT32 volume fsimg and mkfs.fat write: it
           # wants a boot signature at the end of the sector after FSInfo,

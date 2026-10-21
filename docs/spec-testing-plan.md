@@ -762,8 +762,9 @@ The rule set reads the specification as follows where it is not decisive:
   the variant cutovers unless `-s` is given. B1 checks the exact-threshold
   images that `-s` permits against fsck and mtools, which may themselves
   disagree. Disagreements are recorded per tool, not resolved by majority,
-  and one of the checker or the read-back fails the case unless a
-  documented [oracle exception](../specs/design-spec-testing.md#oracle-exceptions)
+  and one of the checker or the read-back fails the case at any cluster
+  count, the cutovers included, unless a documented
+  [oracle exception](../specs/design-spec-testing.md#oracle-exceptions)
   excuses it.
 
 ## Risks
