@@ -683,48 +683,19 @@ platform-specific subcheck explicitly skips elsewhere. See the
 measurements, memory methods and limitations.
 
 Stage reviews include the required independent code-review agent and an external
-read-only OpenCode review through the Z.ai coding-plan subscription. Write a
-prompt covering correctness, design, security/information leaks, and the style
-guide's readability review, mark new files with `git add -N`, and run from the
-checkout:
-
-```sh
-build-aux/opencode-review.sh "${TMPDIR:-/tmp}/review.md" prompt.txt
-```
-
-The script copies only the tracked files of the working tree into a fresh review
-directory under `$TMPDIR` (or `/tmp`), without the checkout's Git metadata,
-local configuration, credentials or build products, and adds the change as
-`CHANGE.diff` and the prompt as `REVIEW.md`. `CHANGE.diff` is `git diff HEAD`:
-every staged and unstaged change to a tracked file is sent, not only the files
-meant for review, so keep unrelated or sensitive edits out of the tree. The
-copy is initialized as its own Git work tree so that OpenCode looks for project
-instructions and configuration only inside it. The script runs `opencode run
---pure --agent plan --model zai-coding-plan/glm-5.3 --variant max --format
-json` there with a scrubbed environment: sharing and Claude Code instruction
-files disabled, and a fresh private home and configuration, data, state and
-cache directories that hold only a copy of OpenCode's credentials; proxy and
-CA variables pass through when set. The copy is removed on exit, except after
-`SIGKILL`, which leaves the private `fsimg-review-*` directory with the
-credential copy behind. Every permission
-is denied except `read`, `glob` and `grep`, including access outside the
-review directory. Before any model request the script checks the agent's tools
-and permissions as OpenCode resolves them (`opencode debug agent plan`), and
-refuses to run unless exactly those three tools are enabled and every rule
-after the final deny-all keeps access inside the review directory. An attempt
-is killed with its process group and retried, three attempts in all, when no
-event arrives within 5 minutes of starting, no further event arrives for 20
-minutes, or it runs past 90 minutes; `OPENCODE_REVIEW_ATTEMPTS`,
-`OPENCODE_REVIEW_STARTUP`, `OPENCODE_REVIEW_STALL` and
-`OPENCODE_REVIEW_DEADLINE` override these limits in seconds, from 1 to 999999.
-A review is accepted, and written to the output file, only when its final step
-stops without tool calls and its text has a body ending with the line `END OF
-REVIEW`; otherwise the script exits nonzero. The output file must be a new
-name outside the checkout. Each attempt's events and diagnostics are kept beside it as
-`OUTPUT.N.jsonl` and `OUTPUT.N.stderr`.
-
-Review substantive fixes again. Report failed or unavailable reviews explicitly.
-OpenCode is a development tool and introduces no library runtime dependency.
+read-only review. Write a prompt covering correctness, design, security and
+information leaks, and the style guide's readability review, mark new files
+with `git add -N`, and run `aireview "${TMPDIR:-/tmp}/review.md" prompt.txt`
+from the checkout. `aireview`, installed from `~/aireview` and documented in
+its README, reviews a confined, read-only copy of the tracked files and of
+`git diff HEAD` with Codex `gpt-6.1-sol` at reasoning effort `xhigh`. It
+switches to OpenCode `zai-coding-plan/glm-5.3 --variant max`, with a warning,
+only when Codex is out of quota or rate limited, and the first line of the
+review names the reviewer used. The diff holds every staged and unstaged
+change to a tracked file, so keep unrelated or sensitive edits out of the
+tree. Review substantive fixes again, and report a failed or unavailable
+review explicitly. The reviewers are development tools and introduce no
+library runtime dependency.
 
 The FAT writer has a completed `zai-coding-plan/glm-5.3 --variant max` review
 and focused follow-ups of alias-cursor structure, cleanup ownership, and
@@ -910,7 +881,7 @@ inference. The FSInfo next-free value remains an advisory search hint; the
 native checker's warning does not trigger fixture repair.
 
 Extraction/worker code, packaging, native-oracle integration, volume labels,
-and automatic sizing margins receive read-only OpenCode reviews with
+and automatic sizing margins have completed read-only OpenCode reviews with
 `zai-coding-plan/glm-5.3 --variant max` on the Z.ai coding-plan subscription.
 No Critical/High/Medium or readability finding remains in those paths. The
 local reviewer checks the same criteria before pre-commit test runs.

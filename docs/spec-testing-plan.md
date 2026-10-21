@@ -14,7 +14,7 @@ fsimg. It is a Ruby test layer built on Minitest, PropCheck and BinData:
 FAT12, FAT16 and FAT32 come first, then exFAT. QNX6 and later formats follow.
 
 The working agreement applies unchanged. The design document comes before
-code. Each stage gets the review subagent and the OpenCode GLM 5.3 max review,
+code. Each stage gets the review subagent and the external `aireview` review,
 and a failing regression test comes before any fix. Each stage ends in one
 coherent commit, and skipped checks are reported. No calendar estimate
 substitutes for a gate.

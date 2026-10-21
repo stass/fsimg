@@ -21,7 +21,7 @@ Reproducing a complete replacement HDD also needs disk composition. That is a
 separate design and is not part of this plan.
 
 The working agreement applies unchanged. Designs come before code. Every
-stage gets the review subagent and the OpenCode GLM 5.3 max review. A failing
+stage gets the review subagent and the external `aireview` review. A failing
 regression test comes before any non-trivial fix. Each stage ends in one
 coherent commit, or a few, and skipped checks are reported. No calendar
 estimate substitutes for a gate.
@@ -583,9 +583,8 @@ reader half moves into stage 3 if the H1 survey requires it.
 
   Address every Critical and High finding. Fix each Medium finding or record
   it in `TODO.md` or the commit message.
-* **External review.** Run the OpenCode review through
-  `build-aux/opencode-review.sh` with `zai-coding-plan/glm-5.3 --variant max`
-  over `git diff`. Substantive fixes are reviewed again. A failed or
+* **External review.** Run the external review with `aireview` over
+  `git diff HEAD`. Substantive fixes are reviewed again. A failed or
   unavailable review is reported, never replaced.
 * **Tests.** Write a failing regression test before any non-trivial fix.
   Run `make -j32 check` at every stage.

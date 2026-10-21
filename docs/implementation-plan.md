@@ -56,9 +56,9 @@ particular, launch the required reviewer before the pre-commit test run and
 ask explicitly about correctness, architecture, security/information leaks,
 and the style guide's readability criteria. For an architectural change, the
 review compares concepts and maintenance obligations removed and introduced.
-Each stage also receives a read-only OpenCode review with the Z.ai coding-plan
-subscription, `zai-coding-plan/glm-5.3`, and `--variant max`. Substantive fixes
-receive another external review before committing.
+Each stage also receives a read-only external review run with `aireview`, as
+[build.md](build.md) describes. Substantive fixes receive another external
+review before committing.
 
 ## 1. Contracts, build, and platform substrate
 
@@ -398,7 +398,7 @@ adds a layer around the retained walkers. Code that a stage rewrites or moves
 leaves it readable: any complicated passage without comments gains comments
 stating its purpose, invariants, and failure paths, and the stage review checks
 for this. Every stage follows the review and
-validation gates above, including the external OpenCode review, and ends with
+validation gates above, including the external review, and ends with
 one coherent commit.
 
 ## Extension sequence

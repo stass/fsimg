@@ -14,7 +14,6 @@
 !/build-aux/fatcat-freebsd.patch
 !/build-aux/check-install.sh
 !/build-aux/check-installed.py
-!/build-aux/opencode-review.sh
 !/build-aux/linux-check.sh
 !/build-aux/linux-check/
 *~

@@ -457,9 +457,8 @@ Address readability findings and every Critical/High finding; fix Medium
 findings or record actionable residuals in `TODO.md` or the commit message.
 
 Each implementation stage also receives the required external, read-only
-OpenCode review through the Z.ai coding-plan subscription using
-`zai-coding-plan/glm-5.3` and `--variant max`. Re-review substantive fixes.
-Report an unavailable or failed review explicitly.
+review run with `aireview`, as [build.md](build.md) describes. Re-review
+substantive fixes. Report an unavailable or failed review explicitly.
 
 Use the actual commands and platform requirements in [build.md](build.md):
 `make check` for the full ordinary suite, `make check-integration` for

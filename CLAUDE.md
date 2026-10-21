@@ -290,15 +290,17 @@ worker. Every report names the platforms that ran and those that did not.
   - Address every CRITICAL and HIGH finding before committing. Note MEDIUM
     findings in `TODO.md` or the commit message if not fixed.
 * The QEMU/QNX evidence harness and research scripts under `tools/qnx/` are
-  exempt from the style guide and from the code-review and OpenCode review
+  exempt from the style guide and from the code-review and external review
   gates.
-* Each implementation stage also receives an external, read-only review through
-  OpenCode using the Z.ai coding-plan subscription, model
-  `zai-coding-plan/glm-5.3`, and `--variant max`. This supplements the required
+* Each implementation stage also receives an external, read-only review run
+  with `aireview` (`~/aireview`): Codex `gpt-6.1-sol` at reasoning effort
+  `xhigh` first, switching to zai `zai-coding-plan/glm-5.3` with `--variant
+  max`, with a warning, only when Codex is out of quota or rate limited. The
+  review output names the reviewer used. This supplements the required
   code-review subagent and covers the same correctness, design,
   security/information-leak, and readability criteria. Re-review substantive
   fixes before committing the stage. Report an unavailable or failed external
-  review explicitly; do not silently substitute another provider, model, or
+  review explicitly; never substitute any other provider, model, or
   reasoning level.
 
 ## Documents

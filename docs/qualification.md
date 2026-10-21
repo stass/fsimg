@@ -214,7 +214,7 @@ are described in [build.md](build.md). Third-party development oracles remain
 outside the core and default CLI. The [reference manifest](references.md)
 records the licenses and attribution for adapted code and generated tables.
 The required local architecture/security/readability review and read-only
-OpenCode review use the criteria and exact model in the
+external review use the criteria in the
 [implementation plan](implementation-plan.md). Actionable residual work is
 kept in [TODO.md](../TODO.md).
 
