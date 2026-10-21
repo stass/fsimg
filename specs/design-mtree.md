@@ -362,9 +362,17 @@ root. The path is decoded bytes split on `/`; an absolute path or an empty,
 `.` or `..` component is refused. The parser walks it exactly as reopening
 walks a scanned path: each directory component opened `O_DIRECTORY |
 O_NOFOLLOW`, each opened object checked for the root's device and mount
-identity, the final component inspected without following a link, opened
-no-follow only when it is a regular file, so a device or FIFO the manifest
-names is never opened, and required again to be a regular file once open.
+identity. On FreeBSD and macOS the final component is inspected without
+following a link and opened no-follow only when it is a regular file, so a
+device or FIFO the manifest names is not opened unless it replaces the file
+after the inspection. The Linux worker sandbox admits no path-based metadata
+query, so on Linux the final component is opened without inspection, as the
+scanner opens every object: no-follow, nonblocking and without acquiring a
+controlling terminal. A FIFO's open therefore never waits for a writer, and a
+socket or a device without a driver fails the open as unsupported; a device
+on a file system mounted without device access fails it with a permission
+error, which is indistinguishable from any other and so an I/O failure. On
+every host the opened object must be a regular file.
 A symbolic link anywhere on the path fails as unsupported, as the scanner
 fails one it cannot record; a directory, FIFO or special file at the
 end fails as unsupported; a missing file, a path that continues through

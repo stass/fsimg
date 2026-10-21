@@ -126,6 +126,9 @@ static void test_skipped_extraction(void);
 static void test_mount_source(const char *);
 static void test_multiple_roots(worker_fixture_t *);
 static void test_manifest_roots(worker_fixture_t *);
+static void test_manifest_fifo(worker_fixture_t *);
+static int open_manifest(const worker_fixture_t *, const char *,
+    const char *);
 static void test_partitioned_create(void);
 static int raw_intermediate(const worker_fixture_t *);
 static void create_request(worker_fixture_t *, const char *);
@@ -528,6 +531,7 @@ test_operations(const char *format)
 	CHECK(fixture.result.metadata_losses == fixture.plan_losses);
 	test_multiple_roots(&fixture);
 	test_manifest_roots(&fixture);
+	test_manifest_fifo(&fixture);
 	fixture_close(&fixture);
 }
 
@@ -808,16 +812,9 @@ test_manifest_roots(worker_fixture_t *fixture)
 	static const char *const trailing[] = { "/copy", "/",
 	    FSIMG_JOB_MANIFEST };
 	fsimg_error_t error;
-	int roots[3], fd;
+	int roots[3];
 
-	fd = openat(fixture->parent, "manifest", O_CREAT | O_EXCL | O_WRONLY |
-	    O_CLOEXEC, 0600);
-	CHECK(fd != -1);
-	CHECK(write(fd, manifest, sizeof(manifest) - 1) ==
-	    (ssize_t)(sizeof(manifest) - 1));
-	CHECK(close(fd) == 0);
-	roots[0] = openat(fixture->parent, "manifest", O_RDONLY | O_CLOEXEC);
-	CHECK(roots[0] != -1);
+	roots[0] = open_manifest(fixture, "manifest", manifest);
 	roots[1] = fixture->source;
 	roots[2] = fixture->source;
 	fixture->request.kind = FSIMG_JOB_PLAN;
@@ -839,6 +836,80 @@ test_manifest_roots(worker_fixture_t *fixture)
 	fixture->request.root_fds = &fixture->source;
 	fixture->request.root_paths = image_root;
 	fixture->request.root_count = 1;
+}
+
+/* A manifest file entry whose host file is a FIFO is refused as not a
+ * regular file, by the confined worker and without blocking: the worker
+ * either inspects the name before opening it or opens it without waiting
+ * for a writer and checks the descriptor. Where the host has a sandbox the
+ * job requires it, so an unconfined run cannot pass for a confined one; a
+ * kernel that cannot confine creation refuses the job instead, which
+ * leaves the refusal untested there, as test-sandbox reports.
+ */
+static void
+test_manifest_fifo(worker_fixture_t *fixture)
+{
+	static const char *const paths[] = { FSIMG_JOB_MANIFEST,
+	    FSIMG_JOB_MANIFEST };
+	fsimg_error_t error;
+	fsimg_sandbox_policy_t sandbox;
+	int roots[2];
+
+	CHECK(mkdirat(fixture->parent, "fifo-contents", 0700) == 0);
+	roots[1] = openat(fixture->parent, "fifo-contents",
+	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(roots[1] != -1);
+	CHECK(mkfifoat(roots[1], "pipe", 0600) == 0);
+	roots[0] = open_manifest(fixture, "fifo-manifest",
+	    ". type=dir\n./pipe type=file\n");
+	fixture->request.kind = FSIMG_JOB_PLAN;
+	fixture->request.root_fds = roots;
+	fixture->request.root_paths = paths;
+	fixture->request.root_count = 2;
+	sandbox = fixture->request.sandbox;
+#if defined(__linux__) || defined(__FreeBSD__)
+	fixture->request.sandbox = FSIMG_SANDBOX_REQUIRED;
+#endif
+
+	CHECK(run(fixture, &error) == FSIMG_EUNSUPPORTED);
+	if (fixture->request.sandbox == FSIMG_SANDBOX_REQUIRED &&
+	    fixture->result.confinement != FSIMG_CONFINEMENT_ACTIVE)
+		fprintf(stderr, "manifest FIFO refusal untested: creation "
+		    "cannot be confined here\n");
+	else
+		CHECK(strstr(error.message, "not name a regular file") != NULL);
+	fixture->request.sandbox = sandbox;
+
+	CHECK(close(roots[0]) == 0);
+	CHECK(unlinkat(fixture->parent, "fifo-manifest", 0) == 0);
+	CHECK(unlinkat(roots[1], "pipe", 0) == 0);
+	CHECK(close(roots[1]) == 0);
+	CHECK(unlinkat(fixture->parent, "fifo-contents", AT_REMOVEDIR) == 0);
+	fixture->request.root_fds = &fixture->source;
+	fixture->request.root_paths = image_root;
+	fixture->request.root_count = 1;
+}
+
+/* Write text to a new file name beneath the fixture's directory and
+ * return a read-only descriptor for it, as the coordinator opens a
+ * manifest root.
+ */
+static int
+open_manifest(const worker_fixture_t *fixture, const char *name,
+    const char *text)
+{
+	size_t length;
+	int fd;
+
+	length = strlen(text);
+	fd = openat(fixture->parent, name, O_CREAT | O_EXCL | O_WRONLY |
+	    O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	CHECK(write(fd, text, length) == (ssize_t)length);
+	CHECK(close(fd) == 0);
+	fd = openat(fixture->parent, name, O_RDONLY | O_CLOEXEC);
+	CHECK(fd != -1);
+	return (fd);
 }
 
 /* Children close their channels just before they exit, and no descriptor

@@ -232,11 +232,17 @@ uses safe creation modes, opened-object metadata queries, and no arbitrary
 on each supported architecture. `io_uring`, descriptor acquisition through
 other processes, hardlink creation, and unnecessary fd duplication paths are
 not part of the worker profile. New syscall needs require a security review.
+Without a path-based query, the Linux worker opens a file a manifest names
+nonblocking and no-follow and then checks that it is a regular file, rather
+than inspecting the name before the open as on FreeBSD and macOS.
 
 The source profile requires the descriptor-only Linux statx form: a NULL path,
 AT_EMPTY_PATH, and an explicit descriptor other than AT_FDCWD. Setup proves
-that form is supported before restricting the process; an older kernel reports
-the source profile unavailable. Seccomp checks both halves of the path pointer
+that form is supported before restricting the process; an older kernel, one
+before Linux 6.11 and its
+[commit 0ef625bba6fb](https://git.kernel.org/torvalds/c/0ef625bba6fb2bc0c8ed2aab9524fdf423f67dd5)
+("vfs: support statx(..., NULL, AT_EMPTY_PATH, ...)"), reports the source
+profile unavailable. Seccomp checks both halves of the path pointer
 and flags and denies every pathname form. Unconfined library callers retain an
 empty-string fallback for older kernels. FreeBSD source capabilities include
 descriptor mount queries, so mount identity checks require no ambient lookup.

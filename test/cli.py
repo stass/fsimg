@@ -546,16 +546,7 @@ def test_manifest_host(executable, root):
     (work / "tree/sub").mkdir(parents=True)
     (work / "tree/sub/x").write_bytes(b"x")
     operands = ["-C", "content", "@host.mtree", "-C", "tree", "."]
-    # The Linux sandbox denies the inspection of a content file before it
-    # is opened, so a confined worker may refuse; unconfined it succeeds.
-    confined = invoke(executable, work, ["cf", "host.img", "-F", "fat12", *operands],
-                      expected=None)
-    if confined.returncode != 0:
-        assert confined.returncode == 1, confined.returncode
-        assert b"contents path inspection is not permitted" in confined.stderr, \
-            confined.stderr
-        assert not (work / "host.img").exists()
-        invoke(executable, work, ["cf", "host.img", "-F", "fat12", "-S", "off", *operands])
+    invoke(executable, work, ["cf", "host.img", "-F", "fat12", *operands])
     assert sorted(listing(executable, work, "host.img")) == [
         '"/sub"', '"/sub/file.txt"', '"/sub/named"', '"/sub/x"']
     assert invoke(executable, work, ["xOf", "host.img", "/sub/file.txt"]).stdout == \
@@ -600,14 +591,12 @@ def test_manifest_refusals(executable, root):
     error = failed(invoke(executable, work, ["cn", "-F", "fat12", "--json", "@wrong.mtree"],
                           expected=1))
     assert error["message"].startswith("manifest line 1: "), error
-    # A host file is inspected before it is opened, which the Linux sandbox
-    # denies (see test_manifest_host), so these run unconfined.
     (work / "unrelated.mtree").write_text(
         f"./unrelated.txt type=file sha256digest={wrong}\n")
-    plan = completed(invoke(executable, work, ["cn", "-F", "fat12", "--json", "-S", "off",
+    plan = completed(invoke(executable, work, ["cn", "-F", "fat12", "--json",
                                                "@unrelated.mtree"]))
     assert next(record for record in plan if record["type"] == "plan")["entries"] == "1"
-    result = invoke(executable, work, ["cf", "wrong-host.img", "-F", "fat12", "-S", "off",
+    result = invoke(executable, work, ["cf", "wrong-host.img", "-F", "fat12",
                                        "@unrelated.mtree"], expected=1)
     assert b"do not match the manifest's sha256digest" in result.stderr, result.stderr
     assert not (work / "wrong-host.img").exists()

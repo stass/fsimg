@@ -67,7 +67,12 @@ struct fsimg_io {
 	uint64_t	 base;
 	uint64_t	 length;
 	unsigned	 access;
+	/* A host-backed root's descriptor, -1 otherwise. The object owns it,
+	 * with its reservation, unless borrowed: then the caller that lent it
+	 * keeps it open for the object's whole life and freeing leaves it.
+	 */
 	int		 fd;
+	bool		 borrowed;
 	root_kind_t	 kind;		/* A root's; slices read their root's */
 	fsimg_io_ops_t	 ops;
 	void		*argument;
@@ -89,7 +94,15 @@ static fsimg_status_t io_transfer(fsimg_io_t *, uint64_t, void *, size_t,
 static fsimg_status_t adapter_transfer(fsimg_io_t *, uint64_t, void *,
     size_t, size_t *, bool, fsimg_error_t *);
 static fsimg_status_t callback_result(fsimg_status_t, fsimg_error_t *);
-static fsimg_status_t io_from_fd(fsimg_ctx_t *, int, unsigned, bool,
+
+/* How an object built over a descriptor comes to hold it. */
+typedef enum io_holding {
+	IO_DUPLICATE,	/* reserve and own a duplicate; the caller keeps fd */
+	IO_ADOPT,	/* own fd and the reservation already made for it */
+	IO_BORROW	/* use fd itself; its owner keeps it open longer */
+} io_holding_t;
+
+static fsimg_status_t io_from_fd(fsimg_ctx_t *, int, unsigned, io_holding_t,
     fsimg_io_t **, fsimg_error_t *);
 static fsimg_status_t adopt_fresh(fsimg_ctx_t *, int, unsigned,
     fsimg_io_t **, fsimg_error_t *);
@@ -760,14 +773,14 @@ fsimg_io_resolver(fsimg_ctx_t *ctx, fsimg_io_t *backing, uint64_t length,
 }
 
 static fsimg_status_t
-io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, bool reserved,
+io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, io_holding_t holding,
     fsimg_io_t **out, fsimg_error_t *error)
 {
 	fsimg_error_t detail;
 	fsimg_io_t *io;
 	struct stat st;
 	fsimg_status_t status;
-	int duplicate, flags, mode, saved;
+	int flags, held, mode, saved;
 
 	if (out != NULL)
 		*out = NULL;
@@ -802,15 +815,15 @@ io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, bool reserved,
 			*error = detail;
 		return (detail.status);
 	}
-	duplicate = fd;
-	if (!reserved) {
+	held = fd;
+	if (holding == IO_DUPLICATE) {
 		status = fsimg_fd_reserve(ctx, error);
 		if (status != FSIMG_OK) {
 			fsimg_dealloc(io);
 			return (status);
 		}
-		duplicate = fsimg_host_dup(fd);
-		if (duplicate == -1) {
+		held = fsimg_host_dup(fd);
+		if (held == -1) {
 			saved = errno;
 			fsimg_fd_release(ctx, -1);
 			fsimg_dealloc(io);
@@ -820,7 +833,8 @@ io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, bool reserved,
 	}
 	io->ctx = ctx;
 	io->root = io;
-	io->fd = duplicate;
+	io->fd = held;
+	io->borrowed = holding == IO_BORROW;
 	/* Every file root is external unless its adoption makes it fresh or
 	 * scratch.
 	 */
@@ -837,7 +851,7 @@ fsimg_status_t
 fsimg_io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, fsimg_io_t **out,
     fsimg_error_t *error)
 {
-	return (io_from_fd(ctx, fd, access, false, out, error));
+	return (io_from_fd(ctx, fd, access, IO_DUPLICATE, out, error));
 }
 
 fsimg_status_t
@@ -846,10 +860,17 @@ fsimg_io_adopt_fd(fsimg_ctx_t *ctx, int fd, unsigned access, fsimg_io_t **out,
 {
 	fsimg_status_t status;
 
-	status = io_from_fd(ctx, fd, access, true, out, error);
+	status = io_from_fd(ctx, fd, access, IO_ADOPT, out, error);
 	if (status != FSIMG_OK)
 		fsimg_fd_release(ctx, fd);
 	return (status);
+}
+
+fsimg_status_t
+fsimg_io_borrow_fd(fsimg_ctx_t *ctx, int fd, fsimg_io_t **out,
+    fsimg_error_t *error)
+{
+	return (io_from_fd(ctx, fd, FSIMG_IO_READ, IO_BORROW, out, error));
 }
 
 fsimg_status_t
@@ -936,6 +957,12 @@ fsimg_io_close_output(fsimg_io_t *io, fsimg_error_t *error)
 {
 	int result, saved;
 
+	/* Only an owned output reaches here; its owner closes a borrowed FD. */
+	if (io->borrowed) {
+		fsimg_dealloc(io);
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_IO, "a borrowed descriptor is not an output to close"));
+	}
 	result = close(io->fd);
 	saved = errno;
 	fsimg_fd_release(io->ctx, -1);
@@ -970,7 +997,7 @@ fsimg_io_free(fsimg_io_t *io)
 {
 	if (io == NULL || io->ctx->in_callback)
 		return;
-	if (io->fd != -1)
+	if (io->fd != -1 && !io->borrowed)
 		fsimg_fd_release(io->ctx, io->fd);
 	if (io->root == io)
 		root_release(io);

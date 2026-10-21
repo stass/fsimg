@@ -123,10 +123,11 @@ fsimg_status_t fsimg_source_walk(fsimg_writer_t *, const fsimg_source_root_t *,
     char *, fsimg_source_walk_t, int *, char **, fsimg_error_t *);
 /* Open parent/name without following a link, with O_DIRECTORY when
  * directory is true, inspect it, and check it for the root's device and
- * mount and against the output and scratch directories. An import walk
- * opens a final name only if it is a regular file when inspected. On
- * success *fd is a reserved descriptor the caller releases and *identity
- * describes it.
+ * mount and against the output and scratch directories. An import walk's
+ * final name succeeds only as a regular file: where the host inspects names
+ * it is opened only if it is one when inspected, and the opened object
+ * must be one on every host. On success *fd is a reserved descriptor the
+ * caller releases and *identity describes it.
  */
 fsimg_status_t fsimg_source_open_child(fsimg_writer_t *,
     const fsimg_source_root_t *, int, const char *, bool, fsimg_source_walk_t,

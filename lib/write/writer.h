@@ -120,7 +120,7 @@ typedef enum fsimg_source_storage {
 /* The writer's single current source owns io. fd is only a borrowed alias
  * used for identity checks: the reopened descriptor io owns, which freeing
  * io closes and releases, or a regular-file root's descriptor, which the
- * root registry owns while io reads a duplicate of it.
+ * root registry owns and io borrows.
  * A symbolic link, host, provider or generated, has no descriptor: opening
  * it reads and checks its whole target into link_target, link is set, and
  * io delivers those bytes as one data range. Generated file content has

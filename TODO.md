@@ -428,26 +428,22 @@
   awkward. Record the design in the security, CLI and metadata specs, then
   test it on Linux with the sandbox active, including forged worker requests.
   FreeBSD Capsicum permits both calls: a confined `create -S required` reads
-  ordinary and dangling links (verified on FreeBSD 16.0-CURRENT). Manifest
-  import has the same dependency: the content-path walk inspects each
-  final name with `fstatat(AT_SYMLINK_NOFOLLOW)` before opening it, so a
-  device or FIFO a manifest names is never opened
-  (`inspect_import_file()` in `lib/source/source.c`), so a confined Linux
-  `fsimg c` with an `@file` operand fails as unsupported ("contents path
-  inspection is not permitted") as soon as an entry reads host bytes, as
-  `docs/fsimg.1` states; the coordinator hook must serve that inspection
-  too, and `test_manifest_host` in `test/cli.py` then requires success.
-* [High] **Regular-file roots under the Linux sandbox** (`lib/source/source.c`
-  `open_root_file()`, `lib/io/io.c`, `cmd/fsimg/sandbox.c`): emission reads a
-  regular-file root through `fsimg_io_from_fd()`, which duplicates the root
-  descriptor with `fcntl(F_DUPFD_CLOEXEC)`; the seccomp filter allows
-  `fcntl` only for `F_GETFL`, so a confined Linux worker should fail
-  `fsimg cf disk.img FILE` with "descriptor duplication failed". Found by
-  reading the code on macOS, not reproduced. Confirm on Linux with the
-  sandbox active; if it fails, read the root through a borrowed I/O view of
-  the registry's descriptor instead of a duplicate, as the worker adopts
-  manifest descriptors (`fsimg_writer_adopt_manifest()`), and add the
-  Linux-confined case to `test/cli.py`.
+  ordinary and dangling links (verified on FreeBSD 16.0-CURRENT).
+* [Medium] **Confined creation on Linux kernels without null-path `statx`**
+  (`cmd/fsimg/sandbox.c` `fsimg_sandbox_install_caps()`,
+  `lib/source/source.c`, `compat/host.c` `fsimg_host_mount_id()`): the
+  worker checks each source object's mount against its root's with
+  `statx(fd, NULL, AT_EMPTY_PATH, STATX_MNT_ID)`, the only `statx` form the
+  seccomp filter admits, and kernels before 6.11 reject a null path, so
+  setup reports the source profile unavailable and creation runs unconfined
+  with a warning (`-S required` refuses). That covers current LTS kernels
+  that have Landlock ABI 3, such as Ubuntu 24.04's stock 6.8, hence Medium:
+  confined creation is unavailable on many supported Linux hosts. Design
+  question: the coordinator could take each root's mount ID before the
+  worker starts, and the worker would then need another way to detect a
+  mount crossing beneath a root, such as a per-directory check that a
+  child's device and inode do not belong to a mount point, without a
+  path-based query.
 * [Medium] **Hashing a large sparse generated file** (`lib/source/manifest.c`,
   `specs/design-mtree.md` "Digests"): planning checks a generated file's
   `sha256digest` only after the image accepted its size, so the bytes hashed

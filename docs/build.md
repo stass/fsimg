@@ -862,9 +862,10 @@ installs current packages on every run. When a result differs from CI,
 refresh the toolchain: `docker pull ubuntu:24.04` and
 `docker image prune -a --filter label=fsimg-linux-check` make the next check
 rebuild the image from current packages.
-It needs Docker, for example through colima. For the Linux sandbox profiles
-to run rather than skip, the Docker VM's kernel must accept `statx` with a
-null path and `AT_EMPTY_PATH`: Ubuntu 24.04's stock 6.8 kernel returns
+It needs Docker, for example through colima. For the Linux sandbox's
+source-root profiles to run rather than skip, and so for confined creation,
+the Docker VM's kernel must accept `statx` with a null path and
+`AT_EMPTY_PATH`: Ubuntu 24.04's stock 6.8 kernel returns
 `EFAULT` for it, and its `linux-generic-hwe-24.04` kernel (7.0) accepts it.
 
 Configure searches the standard system sbin directories for formatter/checker

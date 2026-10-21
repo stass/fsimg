@@ -461,9 +461,10 @@ open_host_link(fsimg_writer_t *writer, fsimg_source_root_t *root, int parent,
 /* Open a regular-file root's source without reopening a name: the root
  * descriptor, which the registry keeps open, must still describe the
  * recorded identity, checked as for a reopened file. Its bytes are read
- * through an I/O object over a duplicate of that descriptor. The object
- * reads at explicit offsets, so the offset the duplicate shares with the
- * root never matters, and freeing it closes only the duplicate.
+ * through an I/O object that borrows that descriptor. The registry holds
+ * the root until the writer releases its sources, which closes the current
+ * source first, so the descriptor outlives the object; freeing the object
+ * leaves it open.
  */
 static fsimg_status_t
 open_root_file(fsimg_writer_t *writer, const fsimg_source_root_t *root,
@@ -485,8 +486,7 @@ open_root_file(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 	if (!fsimg_source_identity_equal(&opened, &source->identity))
 		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
 		    FSIMG_OP_SOURCE, "source root file differs from its recorded identity"));
-	status = fsimg_io_from_fd(writer->ctx, root->fd, FSIMG_IO_READ,
-	    &source->io, error);
+	status = fsimg_io_borrow_fd(writer->ctx, root->fd, &source->io, error);
 	if (status != FSIMG_OK)
 		return (status);
 	source->fd = root->fd;
@@ -665,18 +665,23 @@ open_failure(int saved, fsimg_source_walk_t walk, fsimg_error_t *error)
 }
 
 /* A manifest, not a directory listing, names the final object of an
- * import walk, so it is inspected before it is opened and only a regular
- * file is opened: a device or FIFO a manifest points at is refused
- * without the side effects an open can have. The name can change after
- * the inspection, so the opened object is checked again.
+ * import walk, so where the host inspects names it is inspected before it
+ * is opened and only a regular file is opened: a device or FIFO a manifest
+ * points at is refused without the side effects an open can have. The
+ * name can change after the inspection, and a host that does not inspect
+ * opens it without blocking, so fsimg_source_open_child checks the opened
+ * object as well.
  */
 static fsimg_status_t
 inspect_import_file(int parent, const char *name, fsimg_error_t *error)
 {
 	fsimg_host_file_t named;
-	int saved;
+	int inspected, saved;
 
-	if (fsimg_host_link(parent, name, &named) == -1) {
+	inspected = fsimg_host_inspect_unopened(parent, name, &named);
+	if (inspected == 0)
+		return (FSIMG_OK);
+	if (inspected == -1) {
 		saved = errno;
 		/* As for a link the scanner meets: confinement that denies
 		 * the inspection is a missing capability, not an I/O error.
@@ -701,12 +706,15 @@ fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 {
 	fsimg_status_t status;
 	int fd, saved;
+	bool manifest_file;
 
+	/* The final name of an import walk is a file a manifest names. */
+	manifest_file = walk == FSIMG_WALK_IMPORT && !directory;
 	*out = -1;
 	status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (walk == FSIMG_WALK_IMPORT && !directory) {
+	if (manifest_file) {
 		status = inspect_import_file(parent, name, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -718,6 +726,13 @@ fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 	if (fd == -1) {
 		saved = errno;
 		fsimg_fd_release(writer->ctx, -1);
+		/* A host that opens a manifest's file uninspected learns that
+		 * a socket or a device without a driver is no regular file
+		 * from the open's ENXIO or ENODEV.
+		 */
+		if (manifest_file && (saved == ENXIO || saved == ENODEV))
+			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, saved,
+			    FSIMG_OP_SOURCE, "contents path does not name a regular file"));
 		return (open_failure(saved, walk, error));
 	}
 	if (fsimg_host_file(fd, identity) == -1) {
@@ -725,6 +740,11 @@ fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 		fsimg_fd_release(writer->ctx, fd);
 		return (fsimg_error_set(error, FSIMG_EIO, saved,
 		    FSIMG_OP_SOURCE, "opened source object inspection failed"));
+	}
+	if (manifest_file && identity->kind != FSIMG_HOST_FILE) {
+		fsimg_fd_release(writer->ctx, fd);
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_SOURCE, "contents path does not name a regular file"));
 	}
 	status = fsimg_source_check_object(writer, fd, identity, root, error);
 	if (status != FSIMG_OK) {

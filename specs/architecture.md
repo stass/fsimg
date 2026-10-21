@@ -227,8 +227,12 @@ slice nesting does not introduce recursive I/O or an unbounded traversal stack.
 Public FD adapters duplicate borrowed descriptors. Private constructors consume
 already reserved, library-owned descriptors without duplication, so confined
 workers can wrap newly created output and scratch files without gaining a
-descriptor-duplication syscall capability. Both paths share flag, type, and
-range validation and the context's descriptor accounting.
+descriptor-duplication syscall capability. A private read-only constructor
+instead borrows a descriptor that library code keeps open for longer than the
+object, such as a regular-file source root held by the root registry; freeing
+the object leaves the descriptor open. Every path shares flag, type, and range
+validation, and every descriptor counts once in the context's descriptor
+accounting, against its owner.
 
 Knowledge of zero contents is an operation of every I/O object, not a
 property of holding a descriptor: each object reports the next range at or

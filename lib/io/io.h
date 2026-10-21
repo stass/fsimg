@@ -48,7 +48,9 @@ fsimg_status_t fsimg_io_check_output(fsimg_io_t *, uint64_t, bool, bool *,
     fsimg_error_t *);
 fsimg_status_t fsimg_io_write_session(fsimg_io_t *, fsimg_session_t *,
     uint64_t, const void *, size_t, size_t *, fsimg_error_t *);
-/* Consumes an owned whole FD adapter and reports its final close outcome. */
+/* Consumes an owned whole FD adapter and reports its final close outcome;
+ * a borrowing object is freed and refused, its FD left open.
+ */
 fsimg_status_t fsimg_io_close_output(fsimg_io_t *, fsimg_error_t *);
 fsimg_status_t fsimg_io_zero_session(fsimg_io_t *, fsimg_session_t *,
     uint64_t, uint64_t, fsimg_error_t *);

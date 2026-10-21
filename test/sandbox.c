@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 #include <unistd.h>
 
@@ -27,7 +28,9 @@
 #include "sandbox.h"
 #include "host.h"
 #include "internal.h"
+#include "source.h"
 #include "test.h"
+#include "writer.h"
 
 /* The worker's three descriptor profiles: a read job writing beneath an
  * extraction destination, and a create job writing a staged image from one
@@ -72,6 +75,7 @@ typedef enum sandbox_attempt {
 } sandbox_attempt_t;
 
 static void close_unlisted(void);
+static bool read_source(sandbox_profile_t);
 static bool attempt_operation(sandbox_attempt_t, sandbox_profile_t);
 static int run_child(const int *, sandbox_attempt_t, sandbox_profile_t);
 
@@ -83,6 +87,56 @@ close_unlisted(void)
 	close(0);
 	close(1);
 	close(2);
+}
+
+/* Read the root's one file, "source" beneath a directory root or a file
+ * root itself, through the library as a confined worker does: adopt the
+ * scratch directory and the root, catalog the root and copy the file's
+ * first byte from its source. A file root is read through the root
+ * descriptor the writer keeps, which confinement must allow without
+ * duplicating it.
+ */
+static bool
+read_source(sandbox_profile_t profile)
+{
+	const fsimg_catalog_entry_t *entry;
+	const char *image_path;
+	fsimg_writer_t *writer;
+	fsimg_ctx_t *ctx;
+	size_t transferred;
+	char byte;
+
+	if (fsimg_ctx_new(NULL, &ctx, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_fd_reserve(ctx, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_ctx_adopt_scratch(ctx, 6, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_writer_collect_new(ctx, &writer, NULL) != FSIMG_OK)
+		return (false);
+
+	image_path = profile == PROFILE_FILE_ROOT ? "/source" : "/";
+	if (fsimg_fd_reserve(ctx, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_writer_adopt_tree(writer, 5, image_path, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_writer_prepare(writer, NULL, NULL) != FSIMG_OK)
+		return (false);
+	/* Entry 0 is the image root; the file is the only other entry. */
+	if (fsimg_catalog_get(writer, 1, &entry, NULL) != FSIMG_OK ||
+	    strcmp(entry->entry.path, "/source") != 0)
+		return (false);
+
+	if (fsimg_source_open(writer, 1, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_source_read(writer, 0, &byte, 1, &transferred,
+	    NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_source_finish(writer, NULL) != FSIMG_OK)
+		return (false);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(ctx);
+	return (transferred == 1 && byte == 'S');
 }
 
 /* Each attempt runs in its own child: an accidental successful exec, mutation,
@@ -137,14 +191,7 @@ attempt_operation(sandbox_attempt_t attempt, sandbox_profile_t profile)
 			return (false);
 		return (unlinkat(4, "work-directory", AT_REMOVEDIR) == -1);
 	case ATTEMPT_SOURCE_READ:
-		if (profile == PROFILE_FILE_ROOT)
-			return (pread(5, &byte, 1, 0) == 1 && byte == 'S');
-		fd = openat(5, "source", O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-		if (fd == -1)
-			return (false);
-		result = (int)read(fd, &byte, 1);
-		close(fd);
-		return (result == 1 && byte == 'S');
+		return (read_source(profile));
 	case ATTEMPT_OUTPUT_REMOVE_FILE:
 		fd = openat(4, "delete-file", O_WRONLY | O_CREAT | O_EXCL, 0600);
 		if (fd == -1)
@@ -377,8 +424,9 @@ main(void)
 	char path[] = "sandbox-fixture-XXXXXX";
 	struct stat before, after;
 	char sentinel;
-	int parent, work, source, source_file, scratch, input, fd, result, skipped;
-	bool enforce;
+	unsigned unsupported_profiles;
+	int parent, work, source, source_file, scratch, input, fd, result;
+	bool enforce, unsupported;
 
 	CHECK(mkdtemp(path) != NULL);
 	parent = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -421,17 +469,22 @@ main(void)
 	CHECK(source_file != -1);
 	CHECK(close(fd) == 0);
 
-	skipped = 0;
+	/* A profile the kernel cannot confine, such as a root profile on a
+	 * Linux kernel without descriptor-only mount queries, skips each of
+	 * its attempts; the others still run.
+	 */
+	unsupported_profiles = 0;
 	enforce = false;
 #if defined(__linux__) || defined(__FreeBSD__)
 	enforce = true;
 #endif
 	if (!enforce) {
 		CHECK(fsimg_sandbox_install(input, work, -1, NULL) == FSIMG_EUNSUPPORTED);
-		skipped = 1;
+		unsupported_profiles = PROFILE_COUNT;
 	}
 	for (sandbox_profile_t profile = 0; enforce && profile < PROFILE_COUNT;
 	    profile++) {
+		unsupported = false;
 		for (sandbox_attempt_t attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
 			const int fds[] = { input, work, source, source_file, scratch };
 
@@ -440,7 +493,7 @@ main(void)
 				continue;
 			result = run_child(fds, attempt, profile);
 			if (result == 77) {
-				skipped++;
+				unsupported = true;
 				continue;
 			}
 			if (result != 0)
@@ -454,6 +507,8 @@ main(void)
 			if (attempt == ATTEMPT_WORK_MKDIR && profile == PROFILE_EXTRACT)
 				CHECK(unlinkat(work, "work-directory", AT_REMOVEDIR) == 0);
 		}
+		if (unsupported)
+			unsupported_profiles++;
 	}
 #ifdef __FreeBSD__
 	if (test_sync_rights(parent, input) == 77)
@@ -476,8 +531,10 @@ main(void)
 	CHECK(unlinkat(parent, "source-root", AT_REMOVEDIR) == 0);
 	CHECK(close(parent) == 0);
 	CHECK(rmdir(path) == 0);
-	if (skipped != 0) {
-		puts("SKIP: no supported sandbox profile; actual-kernel enforcement untested");
+	if (unsupported_profiles != 0) {
+		printf("SKIP: %u of %u sandbox profiles unsupported on this host; "
+		    "their actual-kernel enforcement is untested\n",
+		    unsupported_profiles, (unsigned)PROFILE_COUNT);
 		return (77);
 	}
 	return (0);

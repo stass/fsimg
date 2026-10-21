@@ -243,6 +243,29 @@ fsimg_host_link(int parent, const char *name, fsimg_host_file_t *out)
 	return (host_identity(&st, out));
 }
 
+/*
+ * Linux inspects nothing before an open. Its confined worker cannot stat
+ * by name: the seccomp filter admits only descriptor queries. A caller
+ * opens the name with fsimg_host_source_open instead, whose O_NONBLOCK
+ * and O_NOCTTY keep a FIFO's open from waiting for a writer and a
+ * terminal from becoming the controlling one, and checks the descriptor.
+ * Other hosts' confinement permits the inspection, which refuses a FIFO
+ * or device without opening it at all.
+ */
+int
+fsimg_host_inspect_unopened(int parent FSIMG_UNUSED,
+    const char *name FSIMG_UNUSED, fsimg_host_file_t *out)
+{
+#if defined(__linux__)
+	bzero(out, sizeof(*out));
+	return (0);
+#else
+	if (fsimg_host_link(parent, name, out) == -1)
+		return (-1);
+	return (1);
+#endif
+}
+
 /* Translate one stat result. Owner and permission bits are recorded without
  * validity bits; the scanner marks them valid only when asked to import them.
  */

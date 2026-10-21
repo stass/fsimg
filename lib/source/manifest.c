@@ -733,8 +733,5 @@ inspect_contents_path(manifest_import_t *import, const char *relative,
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_fd_release(writer->ctx, fd);
-	if (identity->kind != FSIMG_HOST_FILE)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_SOURCE, "contents path does not name a regular file"));
 	return (FSIMG_OK);
 }

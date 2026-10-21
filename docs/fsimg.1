@@ -110,6 +110,15 @@ The coordinator prepares capabilities, supervises output and publishes
 completed images without replacement.
 The default sandbox policy uses available OS confinement and warns if
 unavailable.
+On Linux, confining creation, including a dry run, also needs a kernel whose
+.Xr statx 2
+accepts a null path with
+.Dv AT_EMPTY_PATH ,
+as Linux 6.11 and later do; on an older kernel creation runs unconfined with
+a warning, and
+.Fl S Cm required
+refuses it.
+Reading and extraction do not depend on that query.
 Unexpected confinement failures never trigger an unrestricted retry.
 The library API does not sandbox its embedding application.
 .Sh COMMON OPTIONS
@@ -517,10 +526,6 @@ Any file beneath it may still be named by an entry, so a manifest from an
 untrusted source should be given a
 .Fl C
 directory that holds only what it may read.
-The Linux sandbox denies the worker the path-based query that inspects a
-content file before it is opened, so a confined Linux import of a manifest
-with a file read from the content directory fails as unsupported; a
-manifest of generated files is unaffected.
 A host object whose name begins with @ is named
 .Pa ./@name ;
 an @ word is a manifest after
