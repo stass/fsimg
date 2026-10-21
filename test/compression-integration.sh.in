@@ -5,11 +5,14 @@
 # fsimg reads the gzip files independent compressors write: gzip(1) and
 # pigz output of a raw image, a file and a stream, and members gzip wrote
 # separately and concatenated, each reading exactly as the raw image and
-# as zcat expands it. Each missing tool is reported; the test skips only
-# when no oracle is available.
+# as zcat expands it. The gzip files fsimg writes pass gzip -t and expand
+# under zcat to the image fsimg writes without gzip, and a gzipped DMG
+# expands to a DMG hdiutil verifies. Each missing tool is reported; the
+# test skips only when no oracle is available.
 set -eu
 gzip=${GZIP_PROGRAM:-'@GZIP_PROGRAM@'}
 pigz=${PIGZ:-'@PIGZ@'}
+hdiutil=${HDIUTIL:-'@HDIUTIL@'}
 fsimg="$(pwd)/fsimg"
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-compression-oracle-XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
@@ -52,6 +55,46 @@ if test -n "$gzip"; then
     ran=$((ran + 1))
 else
     echo 'SKIP: gzip is required for the gzip oracle'
+fi
+
+# What fsimg writes: gzip -t accepts it and zcat yields the raw image, bare
+# and as a stream, at the fastest and slowest levels.
+if test -n "$gzip"; then
+    "$fsimg" cf raw-r.img -R -F fat16 -s 16M -C source . 2>/dev/null
+    for level in 1 9; do
+        "$fsimg" cf written.img.gz -a -R -F fat16 -s 16M -o "gzip:level=$level" \
+            -C source . 2>/dev/null || fail "gzip output at level $level"
+        "$gzip" -t written.img.gz || fail "gzip -t rejects level $level output"
+        "$gzip" -dc written.img.gz | cmp -s - raw-r.img ||
+            fail "zcat of level $level output differs from the raw image"
+        rm -f written.img.gz
+    done
+    # A flipped CRC32 byte proves gzip -t checks the member fsimg wrote.
+    "$fsimg" cf flipped.img.gz -a -R -F fat16 -s 16M -C source . \
+        2>/dev/null || fail "gzip output for the flipped CRC32"
+    size=$(wc -c < flipped.img.gz)
+    byte=$(od -An -tu1 -j $((size - 8)) -N1 flipped.img.gz | tr -d ' ')
+    printf "$(printf '\\%03o' $((byte ^ 255)))" |
+        dd of=flipped.img.gz bs=1 seek=$((size - 8)) conv=notrunc 2>/dev/null
+    if "$gzip" -t flipped.img.gz 2>/dev/null; then
+        fail "gzip -t accepts a member with a flipped CRC32"
+    fi
+    "$fsimg" cf - -z -R -F fat16 -s 16M -C source . 2>/dev/null > streamed.gz ||
+        fail "gzip stream output"
+    "$gzip" -t streamed.gz || fail "gzip -t rejects the streamed output"
+    "$gzip" -dc streamed.gz | cmp -s - raw-r.img || fail "zcat of the stream differs"
+    ran=$((ran + 1))
+    if test -n "$hdiutil"; then
+        "$fsimg" cf disk.dmg.gz -a -R -F fat16/gpt/dmg -s 16M -C source . \
+            2>/dev/null || fail "gzipped DMG output"
+        "$gzip" -t disk.dmg.gz || fail "gzip -t rejects the gzipped DMG"
+        "$gzip" -dc disk.dmg.gz > disk.dmg
+        "$hdiutil" verify disk.dmg > /dev/null 2>&1 ||
+            fail "hdiutil verify rejects the DMG inside gzip"
+        ran=$((ran + 1))
+    else
+        echo 'SKIP: hdiutil is required to verify the DMG inside gzip output'
+    fi
 fi
 if test -n "$pigz"; then
     "$pigz" -c -p 4 -b 128 raw.img > pigz.img.gz

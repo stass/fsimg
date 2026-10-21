@@ -77,7 +77,10 @@ image. The disk is emitted to a private raw file and encoded in one
 sequential pass, all-zero chunks becoming zero runs; `-o dmg:compress=`,
 `dmg:level=`, `dmg:chunk=`, `vhd:align=`, `simg:block=` and `simg:crc=` tune
 it. `fsimg cf - ...` streams the image to standard output instead, refusing
-a terminal. Writing compression is not implemented.
+a terminal. `-z`, or `-a` with a `.gz` name such as `disk.dmg.gz`,
+compresses whatever the stack writes into one gzip member that `gzip -t`
+accepts, at `-o gzip:level=` 1 to 9; under `-R` its bytes are reproducible
+for one zlib version.
 
 [System qualification](docs/qualification.md) includes ten-million-file format
 planning, a million-fragment content round trip, sustained fuzzing and combined

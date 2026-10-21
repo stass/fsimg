@@ -16,11 +16,11 @@
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
   the [layer design](specs/design-layers.md) in the four stages of the
   [plan](docs/implementation-plan.md#extension-sequence). Containers and
-  gzip are read, containers are written, and `-f -` reads and writes
-  streams; the command line recognizes and refuses with exit 1 what the
-  rest of stage 4 implements (writing compression) and `-M` minimization,
-  which no stage schedules yet. The `hdiutil attach` gate of the container
-  writer settles the layer design's DMG-table-split question.
+  gzip are read and written, and `-f -` reads and writes streams; the
+  command line recognizes and refuses with exit 1 the reserved zstd and xz
+  compressions and `-M` minimization, which no stage schedules yet. The
+  `hdiutil attach` gate of the container writer settles the layer design's
+  DMG-table-split question.
   Stage 1 leaves these open:
   * The split staging, destination, scratch and root grants and the
     destination fixtures have run only on macOS, which has no sandbox
@@ -33,9 +33,6 @@
   * `c -v` and `x -v` do not yet print one line per entry: the writer and
     extractor have no per-entry callback for the worker to relay
     (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
-  * On creation, compression `-o` keys such as `gzip:level` are accepted
-    unread once `-z` selects gzip, without the layer's key table; it arrives
-    with stage 4 (`cmd/fsimg/options.c`).
   * Tests do not yet feed the worker a malformed path sequence (a count
     differing from the record, a missing terminator, an extra or empty
     SELECTION frame), and no test drives a whole `cW` whose staged image
@@ -45,9 +42,10 @@
     has no fault hook to corrupt its own staged file between the two
     workers (`cmd/fsimg/worker-child.c`, `test/worker.c`, `test/cli.py`).
   * [Low] The forged-worker tests cover no creation job, so the
-    coordinator's checks of a container's PLAN output, of DONE's staged
-    length and of a stream's raw bytes against its plan run only against
-    the real worker (`cmd/fsimg/worker-parent.c`, `test/worker.c`).
+    coordinator's checks of an encoded output's PLAN, of a created IMAGE
+    record's compression against the job's, of DONE's staged length and of
+    a stream's raw bytes against its plan run only against the real worker
+    (`cmd/fsimg/worker-parent.c`, `test/worker.c`).
   * `x` and `t` accept one member; several members, the union of their
     subtrees resolved by each format's lookup rules, are refused with exit 1
     (`cmd/fsimg/options.c`, `lib/read/`).
@@ -82,38 +80,52 @@
     and compared rather than skipped; the resolver could report the holes
     of the ranges it maps (`lib/layers/output.c`, `lib/io/io.c`
     `fsimg_io_next_hole`).
-  * [Low] Whether a creation needs a raw intermediate is decided in four
-    places that must agree: `prepare_raw` in `cmd/fsimg/paths.c`, the
-    capability set in `cmd/fsimg/job.c` and `cmd/fsimg/worker-child.c`,
-    and `fsimg_writer_output`'s need in `lib/write/writer.c`. One
-    predicate over the stack and the sink, shared by all four, would hold
-    it by construction.
-  * [Low] The coordinator takes a container's largest encoding from the
-    worker's PLAN, checked only to exceed the disk, and a stream without
-    `-l output` is bounded by it; a ceiling the coordinator derives from
-    the request's container and disk would remove that trust
+  * [Low] Whether a creation needs a raw intermediate is decided twice:
+    the command line's `fsimg_job_needs_raw` (`cmd/fsimg/job.c`, which the
+    coordinator and the worker share) and the library's
+    `fsimg_disk_plan_encoded` with the sink's kind (`lib/layers/plan.c`,
+    `lib/write/writer.c`). A public predicate over the stack, the write
+    flags and the sink kind would let the command line ask the library.
+  * [Low] The coordinator takes an encoded output's largest length (a
+    container's or gzip's) from the worker's PLAN, checked only to exceed
+    the disk, and a stream without `-l output` is bounded by it; a ceiling
+    the coordinator derives from the request's layers and disk would
+    remove that trust
     (`cmd/fsimg/worker-parent.c` `plan_frame_expected`). Likewise a fixed
     VHD's 512-byte footer is known to the coordinator by name
     (`read_disk_expected`) rather than from the layer registry.
-  * [Low] A container output's sink is checked and sized to the largest
+  * [Low] An encoded output's sink is checked and sized to the largest
     encoding only after the whole raw disk is emitted, so a sink that
-    cannot take a container fails late, and a host without sparse files
-    allocates the bound until the sink is trimmed at close
+    cannot take a container or gzip fails late, and a host without sparse
+    files allocates the bound until the sink is trimmed at close. gzip
+    never leaves holes, so its sink could grow as it is written instead
     (`lib/write/writer.c` `output_through_raw`, `lib/layers/transcode.c`
     `sink_open`).
+  * [Medium] Compression is selected by one flag per codec on each side
+    (`FSIMG_WRITE_GZIP`, `FSIMG_IMAGE_GZIP`), and the command line names
+    gzip itself where it maps `-z` and `-a` to the flag, reports the job's
+    compression and asks cW's verification for gzip
+    (`cmd/fsimg/options.c` `apply_compression`, `cmd/fsimg/job.c`
+    `fsimg_job_compression`, `cmd/fsimg/paths.c`). Before a second
+    compression gains an encoder, decide whether options carry one
+    compression value resolved through the layer registry, so only one is
+    representable and a new codec is one registry entry
+    (`include/fsimg.h`, `lib/layers/stack.c` `fsimg_write_compression`).
+  * [Low] `cW` of a compressed image decodes it into the spool, so a disk
+    larger than the spool limit fails verification only after the whole
+    creation; the coordinator knows the planned disk from the IMAGE record
+    and could refuse at planning (`cmd/fsimg/worker-parent.c`).
   * [Low] A layer's failure is attributed by `layer_failed` at each of its
     call sites in `lib/layers/image.c` and by the chunk index in
     `lib/layers/chunks.c`; a new layer entry point must remember to call
-    it. The DMG encoder and the chunk index each carry their own zlib
-    allocator over the context (`lib/layers/dmg.c`,
-    `lib/layers/chunks.c`).
+    it. The DMG encoder, the chunk index and gzip each carry their own
+    zlib allocator over the context (`lib/layers/dmg.c`,
+    `lib/layers/chunks.c`, `lib/layers/gzip.c`).
   * [Low] `fsimg_writer_output` holds the bare raw descriptor between the
     sink's adoption and its handover to `fsimg_io_adopt_handed_over`, so
     an early return added between them must close it; one helper that
     either returns the adopted object or has closed the descriptor would
-    hold it by construction (`lib/write/writer.c`). `-z -a` compares the
-    suffix's layer with the name "gzip" rather than with the compression
-    `-z` selects (`cmd/fsimg/options.c` `gzip_named`).
+    hold it by construction (`lib/write/writer.c`).
   * [Low] No oracle checks the MBR CHS fields fsimg writes (`sfdisk` and
     `fdisk` compare start, size and type), mtools never reads a FAT volume
     through a GPT disk, and unwrap is tested only to I/O sinks with the

@@ -462,7 +462,9 @@ reports absent output.
 
 A create-then-verify operation (CLI `cW`) opens the staged file as an image,
 verifies every layer and then the filesystem with the ordinary verification
-scopes, and only then publishes it. It applies to file output only: a stream
+scopes, and only then publishes it. A compressed staged file is opened as
+gzip, decoded with its member checks into a [spool](#stream-input-and-the-spool)
+under the spool limit, and verified from there, so it needs scratch. It applies to file output only: a stream
 has no complete artefact to open before its bytes are gone, and the
 [CLI design](design-cli.md#creation) refuses the combination. A verification
 failure discards the staged files and publishes nothing; the error names the
@@ -539,7 +541,7 @@ absent layer.
 | `vhd:uuid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text |
 | `simg:block` | bytes | 4096 | Power of two from 1 KiB to 1 MiB, so the 1 MiB inspection unit is whole blocks |
 | `simg:crc` | `yes`, `no` | `no` | Appends a CRC32 chunk |
-| `gzip:level` | integer | 6 | 1 to 9 |
+| `gzip:level` | integer | 6 | 1 to 9; only when gzip is selected (`-z`, a `.gz` name under `-a`, or the library's `FSIMG_WRITE_GZIP`) |
 
 Values use the CLI's existing byte-quantity, integer, UUID and boolean
 syntax. A key whose layer is absent from the stack fails as an unknown
@@ -1151,7 +1153,19 @@ comment or header CRC), modification time as [reproducibility](#reproducibility)
 states, extra flags 2 for level 9 and 4 for level 1 and 0 otherwise, OS
 byte 3 (Unix); then the CRC32 and modular length of the raw bytes.
 `gzip:level` is the DEFLATE level. Selected by `-z` or by the output name's
-`.gz` suffix under `-a`.
+`.gz` suffix under `-a`, and in the library by the `FSIMG_WRITE_GZIP` write
+flag, since compression fills no stack slot. The encoder deflates in 64 KiB
+pieces, a zero run from a buffer of zeros, and its deflate state and buffers
+are charged to the memory budget.
+
+The output's bound, which the plan charges to the output limit with the raw
+intermediate, is the 18 header and trailer bytes plus the larger of zlib's
+two conservative DEFLATE bounds for n input bytes: n + n/8 + n/256 + n/512 +
+4 for fixed Huffman codes and n + n/32 + n/128 + n/2048 + 7 for stored
+blocks (each division rounding down). They hold for any window and memory
+level, and the first covers the nine-bit literals zlib-ng's fastest level
+can emit, so the bound does not depend on the zlib the library runs
+against; the sink refuses a byte past it as an internal error.
 
 Reading: identity is the identification bytes, method 8 and zero reserved
 flag bits. The optional fields are bounded reads (FEXTRA

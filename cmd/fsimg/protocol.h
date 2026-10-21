@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 808u
+#define FSIMG_JOB_BYTES 816u
 #define FSIMG_WIRE_ERROR_BYTES 592u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These
@@ -78,7 +78,8 @@ typedef enum fsimg_wire_image_field {
 	FSIMG_WIRE_IMAGE_CONTAINER_GUID = 200,
 	FSIMG_WIRE_IMAGE_CHUNKS = 216,
 	/* The file the layers were peeled from: the input or the spool. A
-	 * created image is never compressed, so its FILE equals its DISK.
+	 * created image's FILE is its planned DISK, before the compression
+	 * COMPRESSION names, as a reader would peel it from its spool.
 	 */
 	FSIMG_WIRE_IMAGE_FILE = 224,
 	FSIMG_WIRE_IMAGE_COMPRESSION = 232,
@@ -111,9 +112,9 @@ _Static_assert(FSIMG_WIRE_PARTITION_NAME + FSIMG_WIRE_PARTITION_NAME_BYTES ==
     FSIMG_WIRE_PARTITION_BYTES, "the partition record ends with the name");
 
 /* OUTPUT is the most bytes the image can take: the volume or disk, or the
- * container's largest encoding of the disk. PADDING is the zero padding
- * the container's disk granularity added, and CODEC the compression
- * library the output depends on, empty for none.
+ * largest encoding of the disk by its container and compression. PADDING
+ * is the zero padding the container's disk granularity added, and CODEC
+ * the compression library the output depends on, empty for none.
  */
 #define FSIMG_WIRE_PLAN_BYTES 160u
 #define FSIMG_WIRE_PLAN_CODEC_BYTES 32u

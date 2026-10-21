@@ -508,18 +508,59 @@ fsimg_status_t fsimg_spool_fill(fsimg_spool_t *, fsimg_spool_input_t *,
     fsimg_error_t *);
 
 /*
+ * A compression's write settings, resolved once by the disk plan: level
+ * is the codec's level, and timestamp the modification time in Unix
+ * seconds, the epoch under FSIMG_WRITE_REPRODUCIBLE and the host clock
+ * otherwise. An encoder writes a time its format cannot hold as the
+ * format's "no time" value, which for gzip is zero.
+ */
+typedef struct fsimg_compression_settings {
+	int64_t		 timestamp;
+	uint32_t	 level;
+} fsimg_compression_settings_t;
+
+/*
+ * A compression encoder: a sequential sink wrapping the next one
+ * (specs/design-layers.md#transcode). open makes its state over sink,
+ * which outlives it, charging its memory to ctx, and may write the
+ * format's fixed header, nothing that depends on input not yet seen;
+ * write encodes length bytes, or length zeros when bytes is NULL; finish
+ * completes the encoding and writes what ends it. close releases the
+ * state on every outcome, including whatever a failed open left in it;
+ * a state still NULL is never closed.
+ */
+typedef struct fsimg_compressor_ops {
+	fsimg_status_t	(*open)(fsimg_ctx_t *, const fsimg_compression_settings_t *,
+			    fsimg_seq_sink_t *, void **, fsimg_error_t *);
+	fsimg_status_t	(*write)(void *, const unsigned char *, uint64_t,
+			    fsimg_error_t *);
+	fsimg_status_t	(*finish)(void *, fsimg_error_t *);
+	void		(*close)(void *);
+} fsimg_compressor_ops_t;
+
+/*
  * A whole-file compression. probe follows the bounded probe contract on
  * at most probe_bytes of the file's prefix: FSIMG_EFORMAT without its
  * identity, otherwise a claim. decode reads the whole source and appends
  * the decoded bytes to the spool, checking every member as it ends; a
  * corrupt input is FSIMG_ECORRUPT with FSIMG_OP_IMAGE, and any failure is
  * final.
+ *
+ * The write side. plan validates the compression's layer settings and
+ * resolves them, given the FSIMG_WRITE_* mode and the epoch; a failure is
+ * FSIMG_EINVAL naming the key. bound states the most bytes the encoding of
+ * an input of the given length can take, FSIMG_EUNSUPPORTED when that
+ * exceeds the 64-bit range. encoder writes the compression.
  */
 typedef struct fsimg_compression_ops {
 	size_t		 probe_bytes;
 	fsimg_status_t	(*probe)(const unsigned char *, size_t, fsimg_error_t *);
 	fsimg_status_t	(*decode)(fsimg_spool_input_t *, fsimg_spool_t *,
 			    fsimg_error_t *);
+	fsimg_status_t	(*plan)(const fsimg_layer_options_t *, uint32_t, int64_t,
+			    fsimg_compression_settings_t *, fsimg_error_t *);
+	fsimg_status_t	(*bound)(uint64_t, uint64_t *, fsimg_error_t *);
+	const fsimg_compressor_ops_t *encoder;
 } fsimg_compression_ops_t;
 
 /* A registered layer. Every layer name the stack grammar accepts outside
@@ -554,14 +595,20 @@ fsimg_status_t fsimg_stack_validate(const fsimg_stack_t *, fsimg_error_t *);
 /* The layer named in a stack slot, NULL when the slot names none. */
 const fsimg_layer_t *fsimg_stack_layer(const fsimg_stack_t *,
     fsimg_layer_kind_t);
+/* The compression FSIMG_WRITE_* flags select: gzip under
+ * FSIMG_WRITE_GZIP, else NULL.
+ */
+const fsimg_layer_t *fsimg_write_compression(uint32_t);
 /*
- * Check layer options against a stack: reserved words zero, text fields
- * terminated, every setting of a layer the stack does not name at its
- * default, and on read (writing false) every setting but gpt:sector at its
- * default. A failure is FSIMG_EINVAL naming the key in error.path.
+ * Check layer options against a stack and the compression the operation
+ * names (NULL for none): reserved words zero, text fields terminated,
+ * every setting of a layer neither names at its default, and on read
+ * (writing false) every setting but gpt:sector at its default. A failure
+ * is FSIMG_EINVAL naming the key in error.path.
  */
 fsimg_status_t fsimg_layer_options_check(const fsimg_stack_t *,
-    const fsimg_layer_options_t *, bool, fsimg_error_t *);
+    const fsimg_layer_t *, const fsimg_layer_options_t *, bool,
+    fsimg_error_t *);
 /* Every partition setting (gpt:type, gpt:name, gpt:guid, mbr:type,
  * mbr:active) at its default, as compose requires; a failure is
  * FSIMG_EINVAL naming the key.
@@ -625,23 +672,35 @@ bool fsimg_guid_parse(const char *, unsigned char *);
  * disk length. Identifiers left unset are derived from the epoch under
  * FSIMG_WRITE_REPRODUCIBLE and are otherwise FSIMG_EINVAL naming the key.
  * Without a scheme the plan has no records and the volume starts the
- * disk. A container in the stack has its settings resolved by init, and
- * place rounds the disk up to its granularity, puts the scheme's trailing
- * tables at the end of the rounded disk, and states the output's bound.
- * Records are charged to the context; free releases them.
+ * disk. A container in the stack, and the compression the FSIMG_WRITE_*
+ * flags select, have their settings resolved by init, and place rounds the
+ * disk up to the container's granularity, puts the scheme's trailing
+ * tables at the end of the rounded disk, and states the output's bound:
+ * the container's bound of the disk (container_bytes), then the
+ * compression's bound of that. Records are charged to the context; free
+ * releases them.
  */
 typedef struct fsimg_disk_plan {
 	const fsimg_layer_t *scheme;
 	const fsimg_layer_t *container;
+	const fsimg_layer_t *compression;
 	fsimg_scheme_table_t table;
 	fsimg_container_settings_t container_settings;
+	fsimg_compression_settings_t compression_settings;
 	uint64_t	 disk_bytes;	/* A fixed length until placed, else 0 */
 	uint64_t	 padding_bytes;	/* What the container's granularity added */
-	uint64_t	 output_bytes;	/* The disk, or the bound of its encoding */
+	uint64_t	 container_bytes; /* The disk, or its container's bound */
+	uint64_t	 output_bytes;	/* container_bytes, or its compressed bound */
 	int64_t		 epoch;
 	uint32_t	 flags;		/* FSIMG_WRITE_* mode */
 	bool		 fixed;		/* gpt:disk or mbr:disk set the length */
 } fsimg_disk_plan_t;
+
+/* Whether the output is an encoding of the disk rather than the disk: a
+ * container or a compression is present, so the output is written by the
+ * transcode from a raw intermediate or an assembled disk.
+ */
+bool fsimg_disk_plan_encoded(const fsimg_disk_plan_t *);
 
 /* What one partition asks for: type and name text as gpt_type, mbr_type
  * and gpt_name spell them, NULL or empty for the defaults; a unique GUID
@@ -694,7 +753,7 @@ fsimg_status_t fsimg_disk_plan_emit(const fsimg_disk_plan_t *, uint64_t,
 void fsimg_disk_plan_free(fsimg_disk_plan_t *);
 /* Check a placed plan against the output limit: the output's bound, plus
  * the disk when raw says a raw intermediate holds it while the output is
- * written from it, as for a container or a stream
+ * written from it, as for an encoded output or a stream
  * (specs/architecture.md#bounded-resources).
  */
 fsimg_status_t fsimg_disk_plan_budget(fsimg_ctx_t *, const fsimg_disk_plan_t *,
@@ -703,7 +762,8 @@ fsimg_status_t fsimg_disk_plan_budget(fsimg_ctx_t *, const fsimg_disk_plan_t *,
 /*
  * Write a placed plan's disk, held in the positional object disk, to a sink
  * in one sequential pass (lib/layers/transcode.c): through the plan's
- * container encoder, or unchanged without one. A FILE sink stages the
+ * container encoder, or unchanged without one, and then through its
+ * compression encoder when it has one. A FILE sink stages the
  * output and publishes it through the output coordinator, an IO sink is
  * written from offset zero and ends at the output's length, and a STREAM
  * sink receives the bytes in order. The pass reads the disk in chunks,
@@ -717,7 +777,7 @@ fsimg_status_t fsimg_disk_output(fsimg_session_t *, fsimg_io_t *,
     const fsimg_disk_plan_t *, const fsimg_sink_t *, bool, uint64_t *,
     fsimg_error_t *);
 /* The compression library a plan's output depends on, as "zlib 1.3.1",
- * or empty when its bytes depend on none.
+ * or empty when its bytes depend on none: DMG's zlib chunks or gzip.
  */
 void fsimg_disk_plan_codec(const fsimg_disk_plan_t *, char *, size_t);
 

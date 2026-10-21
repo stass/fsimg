@@ -43,6 +43,20 @@ reported compression and file length. Under Capsicum the spool, like the
 raw intermediate, is limited to the rights a file the worker reads and
 writes needs.
 
+Creation writes gzip. `c -z`, or `-a` with a `.gz` image name, wraps any
+stack, a bare volume, a disk or a container, in one gzip member with a
+fixed header (no name, comment or header CRC; OS 3; extra flags by level;
+the creation time, or the epoch under `-R`, clamped to the 32-bit field),
+written by a gzip encoder that the transcode stacks under the container
+encoder, with its deflate state charged to the memory limit.
+`-o gzip:level=` sets the level, 1 to 9, which the library validates. The
+raw intermediate and the compressed output are both charged to the output
+limit, `c -f -` streams the member, `cW` reads it back through the spool
+before publishing, and the plan reports gzip, its bound and the zlib
+version. With `-z` and `-a` together the name must end in `.gz`. The
+library adds `FSIMG_WRITE_GZIP` and the layer options' `gzip_level`, and
+wrap, unwrap and compose compress under the flag too.
+
 Creation writes containers and streams. A stack naming dmg, vhd or simg
 emits the disk into a raw intermediate, an unlinked file the coordinator
 creates beside the staged image (or in scratch for a stream) and hands to

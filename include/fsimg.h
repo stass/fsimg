@@ -444,6 +444,9 @@ typedef struct fsimg_layer_info {
  * block size, a power of two from 1 KiB to 1 MiB, zero selecting 4096, and
  * simg_crc appends a CRC32 chunk. dmg_uuid (the segment ID) and vhd_uuid
  * are identifiers like the GUIDs above.
+ *
+ * The compression setting: gzip_level is the DEFLATE level of an output
+ * FSIMG_WRITE_GZIP compresses, 1 to 9, zero selecting 6.
  */
 typedef enum fsimg_dmg_compression {
 	FSIMG_DMG_ZLIB = 0,
@@ -470,6 +473,7 @@ struct fsimg_layer_options {
 	unsigned char	 vhd_uuid[16];
 	uint32_t	 simg_block_bytes;
 	bool		 simg_crc;
+	uint32_t	 gzip_level;
 	uint64_t	 reserved[4];
 };
 
@@ -602,6 +606,10 @@ typedef struct fsimg_layer_report {
 #define FSIMG_WRITE_DURABLE 0x04u
 /* Host trees also record uid, gid and permission bits as optional fields. */
 #define FSIMG_WRITE_IMPORT_POSIX 0x08u
+/* The output is gzip-compressed, as -z says: one gzip member wraps
+ * whatever the stack writes, and the layer options' gzip_level applies.
+ */
+#define FSIMG_WRITE_GZIP 0x10u
 
 /* The on-disk byte order of a format that offers both, such as QNX6. */
 typedef enum fsimg_byte_order {
@@ -663,11 +671,12 @@ typedef struct fsimg_plan_info {
 	fsimg_image_info_t image;
 	fsimg_partition_info_t partition;
 	/* output_bytes is the most bytes the output can take: exactly the disk
-	 * without a container, else the container's largest encoding of it,
-	 * which always exceeds the disk since it adds the container's own
-	 * metadata. A raw intermediate holds the disk while a container's
-	 * output is encoded or a stream is written, so the output budget is
-	 * then image.disk_bytes + output_bytes.
+	 * without a container or compression, else the largest encoding of
+	 * it, the container's and then gzip's, which always exceeds the disk
+	 * since each adds its own metadata. A raw intermediate holds the disk
+	 * while an encoded output or a stream is written, so the output
+	 * budget is then image.disk_bytes + output_bytes. image.compression
+	 * names the compression FSIMG_WRITE_GZIP selects, empty for none.
 	 * padding_bytes is the zero padding the container's disk-length
 	 * granularity added to the disk. codec_version names the compression
 	 * library the output depends on ("zlib 1.3.1"), empty for none.
@@ -681,8 +690,9 @@ typedef struct fsimg_plan_info {
  * trusted directory parent_fd and publishes it as name without replacing
  * anything, durably, as write_at does. IO writes the positional object io
  * from offset zero, as emit does. STREAM writes stream_fd sequentially,
- * borrowed for the call. raw_fd is the raw intermediate a container or
- * stream output of a writer needs: an exclusively created, empty, unlinked
+ * borrowed for the call. raw_fd is the raw intermediate a container,
+ * compressed or stream output of a writer needs: an exclusively created,
+ * empty, unlinked
  * read/write regular file without O_APPEND, or -1; every other output
  * takes -1. fsimg_sink_init makes an empty sink of a kind, with size set
  * and every descriptor -1, so a caller fills in only what its kind uses. A
@@ -691,9 +701,9 @@ typedef struct fsimg_plan_info {
  * borrowed for the call; once its size is valid, raw_fd is adopted, and
  * closed, on every outcome, a refused sink included. A stream has no publication: a failure after
  * its first byte reports FSIMG_OUTPUT_INCOMPLETE, and the caller must
- * discard what it received. A container output to an IO sink needs a
- * resizable whole object, since the encoded length is known only at the
- * end; the sink ends at that length.
+ * discard what it received. A container or compressed output to an IO
+ * sink needs a resizable whole object, since the encoded length is known
+ * only at the end; the sink ends at that length.
  */
 typedef enum fsimg_sink_kind {
 	FSIMG_SINK_FILE = 1,
@@ -997,7 +1007,8 @@ typedef struct fsimg_part {
  * no filesystem; the layer options' partition fields must hold their
  * defaults, since each part carries its own. A container in the stack of
  * wrap or compose encodes the disk on its way to the sink, in the one
- * transcode a writer uses. None of the three stages a raw disk, so each
+ * transcode a writer uses, and FSIMG_WRITE_GZIP compresses the output of
+ * any of the three. None of the three stages a raw disk, so each
  * refuses a sink's raw intermediate, and a STREAM sink receives the bytes
  * as they are produced.
  */

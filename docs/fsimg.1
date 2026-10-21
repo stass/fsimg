@@ -197,8 +197,10 @@ Scratch parent, defaulting to TMPDIR when set, otherwise
 .Pa /tmp .
 A dash disables scratch, and with it the spool, so a compressed image
 cannot be read; with
-.Fl f Ar -
-it is a syntax error.
+.Fl f Ar - ,
+or with
+.Cm cW
+of a compressed image, it is a syntax error.
 Fresh private scratch contains metadata and the two unlinked payload-sized
 files described under
 .Sx READING ,
@@ -537,7 +539,7 @@ and six zero bytes, with the version 4 and RFC 4122 variant bits set; the
 MBR identifier is the epoch's low 32 bits.
 Two reproducible disks built at the same epoch therefore share their
 identifiers; set them explicitly to attach such disks side by side.
-.Ss Containers and streams
+.Ss Containers, compression and streams
 A stack naming dmg, vhd or simg, such as
 .Ql fat32/gpt/dmg ,
 writes the disk inside that container.
@@ -583,7 +585,8 @@ derived from the epoch with role byte 3 for the VHD and 4 for the DMG under
 it.
 The VHD timestamp is the creation time, or the epoch under
 .Fl R .
-Reproducible zlib output depends on the zlib version, which the plan and
+Reproducible zlib output, DMG chunks and gzip alike, depends on the zlib
+version, which the plan and
 .Fl -formats
 name.
 .Pp
@@ -602,6 +605,20 @@ are syntax errors with it.
 A stream has no publication: a failure after any byte was written reports
 the output incomplete, and the receiver must discard what it got.
 .Pp
+.Fl z ,
+or
+.Fl a
+with an image name ending in
+.Pa .gz ,
+compresses whatever the stack writes, bare volume, disk or container, into
+one gzip member, through the same raw file; the raw file and the
+compressed image are both charged to
+.Fl l Ar output .
+The member has no name, comment or header CRC; its time is the creation
+time, or the epoch under
+.Fl R ,
+and zero when the time is not between 1970 and 2106; its extra flags name
+level 1 or 9, and its OS byte is 3 (Unix).
 With
 .Fl a ,
 a
@@ -609,10 +626,29 @@ a
 .Pa .vhd
 or
 .Pa .simg
-suffix, under any compression suffix, must name the stack's container; a
-compression suffix
-.Pq Pa .gz , .zst , .xz
-selects compression, which this version cannot write.
+suffix, under any compression suffix, must name the stack's container,
+and with
+.Fl z
+the name must end in
+.Pa .gz ;
+.Pa .zst
+and
+.Pa .xz
+select compressions this version cannot write.
+.Cm cW
+reads a compressed image back through the spool, so it needs scratch and
+.Fl l Ar spool
+room for the uncompressed image.
+.Bl -tag -width Ds
+.It Fl o Ar gzip:level=1..9
+The DEFLATE level; default 6.
+Only with
+.Fl z
+or a
+.Pa .gz
+name under
+.Fl a .
+.El
 .Pp
 Import accepts regular files, directories and symbolic links, hierarchy,
 content and representable timestamps.
@@ -832,8 +868,8 @@ A sandbox-unavailable warning under automatic mode alone is not failure.
 .Nm
 recognizes the following and reports each as not supported, with status 1,
 after the rest of the command line is checked:
-writing compression
-.Pq Fl z , No and Fl a No with Cm c ,
+writing zstd or xz
+.Pq Fl a No with Cm c ,
 minimization
 .Pq Fl M No with Cm c ,
 the reserved filesystem names apfs and hfs,

@@ -42,8 +42,11 @@ Compression oracles use `gzip` and `pigz` (`brew install pigz`):
 member, as two members `gzip` wrote separately and concatenated, and as
 `pigz` blocks with and without independent dictionaries, and checks that
 fsimg lists each as the raw image from the file and from standard input,
-reports gzip and verifies it. It reports each missing tool and skips only
-when neither is present. configure records `gzip` as `GZIP_PROGRAM`,
+reports gzip and verifies it. It also checks what fsimg writes: `gzip -t`
+accepts its output at levels 1 and 9 and as a stream, `gzip -dc` (zcat)
+expands each to the image fsimg writes without `-z`, and the DMG inside a
+`.dmg.gz` passes `hdiutil verify` on macOS. It reports each missing tool
+and skips only when neither `gzip` nor `pigz` is present. configure records `gzip` as `GZIP_PROGRAM`,
 because gzip itself reads `GZIP` from the environment as options.
 Release archives include generated Autotools support and build without those
 generators. The installed library's one third-party runtime dependency is

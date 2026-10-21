@@ -49,8 +49,8 @@ typedef enum fsimg_confinement {
 
 /* The job record's capability bits: which prepared descriptors the worker
  * receives. Scratch is optional for every kind; the others follow the kind.
- * RAW is the raw intermediate a creation with a container or to a stream
- * needs; SPOOL is the spool a read job holds whenever it has scratch.
+ * RAW is the raw intermediate fsimg_job_needs_raw names; SPOOL is the
+ * spool a read job holds whenever it has scratch.
  */
 #define FSIMG_JOB_CAP_INPUT 0x01u
 #define FSIMG_JOB_CAP_OUTPUT 0x02u
@@ -206,6 +206,17 @@ fsimg_status_t fsimg_output_run(const char *, fsimg_output_producer_fn_t, void *
 bool fsimg_job_has_roots(fsimg_job_kind_t);
 /* The filesystem the stack names, or "" when its slot is not named. */
 const char *fsimg_job_format(const fsimg_worker_request_t *);
+/*
+ * What a create or plan job writes around its disk: the compression its
+ * write flags select ("gzip", or "" for none); whether its output is an
+ * encoding of the disk, under a container or a compression, rather than
+ * the disk; and whether a create job needs a raw intermediate, for an
+ * encoded output or a stream. The coordinator and the worker decide each
+ * from these alone.
+ */
+const char *fsimg_job_compression(const fsimg_worker_request_t *);
+bool fsimg_job_encoded(const fsimg_worker_request_t *);
+bool fsimg_job_needs_raw(const fsimg_worker_request_t *);
 uint32_t fsimg_job_path_count(const fsimg_worker_request_t *);
 const char *fsimg_job_path(const fsimg_worker_request_t *, uint32_t);
 fsimg_status_t fsimg_job_paths_length(const fsimg_worker_request_t *,

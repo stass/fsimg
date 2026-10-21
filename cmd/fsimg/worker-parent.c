@@ -38,11 +38,11 @@ typedef enum worker_phase {
  * IMAGE record leads to WAIT_HEADER, or for i without a selected volume to
  * UNSELECTED, after which only the table's PARTITION records and DONE may
  * follow. i's PARTITION records arrive in WAIT_HEADER or UNSELECTED. A
- * create job of a partitioned disk or a container starts in WAIT_IMAGE
- * too: its IMAGE record describes the planned disk, a partitioned disk's
- * one PARTITION record the volume's place on it, and then its PLAN
- * follows. A create job of a bare volume starts in WAIT_HEADER, for its
- * PLAN.
+ * create job of a partitioned disk or an encoded output (a container or a
+ * compression) starts in WAIT_IMAGE too: its IMAGE record describes the
+ * planned disk, a partitioned disk's one PARTITION record the volume's
+ * place on it, and then its PLAN follows. A create job of a bare volume
+ * written as it is starts in WAIT_HEADER, for its PLAN.
  */
 typedef enum worker_output_state {
 	WORKER_WAIT_HEADER,
@@ -398,8 +398,11 @@ image_frame_expected(const worker_supervisor_t *state,
 		return (false);
 	if (kind < FSIMG_JOB_CREATE)
 		return (read_disk_expected(state, raw));
-	/* A planned disk is its own file, written uncompressed. */
-	return (raw[FSIMG_WIRE_IMAGE_COMPRESSION] == '\0' &&
+	/* A planned disk is its own file, with the compression the job
+	 * selects around it.
+	 */
+	return (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION,
+	    fsimg_job_compression(state->request)) == 0 &&
 	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FILE) ==
 	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) &&
 	    strcmp((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME,
@@ -414,9 +417,10 @@ image_frame_expected(const worker_supervisor_t *state,
 /*
  * A create job's PLAN: a planned disk holds its volume, which the one
  * PARTITION record placed when a scheme is named, and without a container
- * the image is that disk, or the bare volume, exactly; a container's
- * largest encoding strictly exceeds the disk it holds, since it adds its
- * own metadata (the output_bytes contract of fsimg_plan_info_t).
+ * or compression the image is that disk, or the bare volume, exactly; an
+ * encoding's largest length strictly exceeds the disk it holds, since
+ * each layer adds its own metadata (the output_bytes contract of
+ * fsimg_plan_info_t).
  */
 static bool
 plan_frame_expected(const worker_supervisor_t *state,
@@ -424,7 +428,7 @@ plan_frame_expected(const worker_supervisor_t *state,
 {
 	const fsimg_worker_request_t *request = state->request;
 	uint64_t volume, output;
-	bool scheme, container;
+	bool scheme, encoded;
 
 	if (request->kind < FSIMG_JOB_CREATE ||
 	    state->output_state != WORKER_WAIT_HEADER ||
@@ -433,26 +437,26 @@ plan_frame_expected(const worker_supervisor_t *state,
 	volume = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PLAN_VOLUME);
 	output = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PLAN_OUTPUT);
 	scheme = slot_name(request, FSIMG_LAYER_SCHEME)[0] != '\0';
-	container = slot_name(request, FSIMG_LAYER_CONTAINER)[0] != '\0';
+	encoded = fsimg_job_encoded(request);
 	if (scheme && state->last_partition == 0)
 		return (false);
-	if (!scheme && !container)
+	if (!scheme && !encoded)
 		return (output == volume);
 	if (volume > state->disk_bytes)
 		return (false);
-	if (container)
+	if (encoded)
 		return (output > state->disk_bytes);
 	return (output == state->disk_bytes);
 }
 
 /*
  * A created image's length, staged or streamed: the planned image exactly,
- * or with a container no more than its largest encoding.
+ * or when encoded no more than its largest encoding.
  */
 static bool
 output_length_expected(const worker_supervisor_t *state, uint64_t length)
 {
-	if (slot_name(state->request, FSIMG_LAYER_CONTAINER)[0] == '\0')
+	if (!fsimg_job_encoded(state->request))
 		return (length == state->planned_output);
 	return (length != 0 && length <= state->planned_output);
 }
@@ -1304,9 +1308,9 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 	}
 	/* Every raw byte received was confirmed written, CAT received its
 	 * whole file, and a stream the planned length: exactly, without a
-	 * container, else no more than the largest encoding. A truncated
-	 * encoding within that bound is caught only by the worker's own
-	 * failure.
+	 * container or compression, else no more than the largest
+	 * encoding. A truncated encoding within that bound is caught only by
+	 * the worker's own failure.
 	 */
 	if (state->phase != WORKER_COMPLETE || !relay->final ||
 	    state->result->raw_bytes != relay->received ||
@@ -1378,8 +1382,7 @@ supervisor_init(worker_supervisor_t *state, const fsimg_worker_request_t *reques
 	state->producer_done = true;
 	state->output_state = request->kind < FSIMG_JOB_CREATE ||
 	    slot_name(request, FSIMG_LAYER_SCHEME)[0] != '\0' ||
-	    slot_name(request, FSIMG_LAYER_CONTAINER)[0] != '\0' ?
-	    WORKER_WAIT_IMAGE : WORKER_WAIT_HEADER;
+	    fsimg_job_encoded(request) ? WORKER_WAIT_IMAGE : WORKER_WAIT_HEADER;
 	if (request->output_budget == NULL) {
 		fsimg_output_budget_init(&state->local_budget, &request->limits);
 		state->budget = &state->local_budget;

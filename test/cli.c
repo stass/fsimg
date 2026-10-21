@@ -470,21 +470,23 @@ test_stacks(void)
 		{ "fsimg", "-cW", "-F", "fat32/dmg", "-f", "-", ".", NULL },
 		{ "fsimg", "-c", "--json", "-F", "fat32/dmg", "-f", "-", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32/dmg", "-f", "-", ".", NULL },
-		{ "fsimg", "-c", "-T", "-", "-F", "fat32/dmg", "-f", "-", ".", NULL }
+		{ "fsimg", "-c", "-T", "-", "-F", "fat32/dmg", "-f", "-", ".", NULL },
+		{ "fsimg", "-cz", "-F", "fat32", "-o", "gzip:level=0", "-f", "o.gz", ".",
+		    NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32", "-o", "gzip:level=9", "-f",
+		    "out.img", ".", NULL },
+		{ "fsimg", "-cWz", "-T", "-", "-F", "fat32", "-f", "out.img.gz", ".",
+		    NULL }
 	};
 	char *unsupported[][12] = {
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
-		{ "fsimg", "-cz", "-F", "fat32", "-f", "out.img.gz", ".", NULL },
 		{ "fsimg", "-cM", "-F", "fat32", "-f", "out.img", ".", NULL },
 		{ "fsimg", "-t", "-f", "image", "/a", "/b", NULL },
-		{ "fsimg", "-cz", "-F", "fat32", "-o", "gzip:level=9", "-f", "o.img.gz", ".", NULL },
-		{ "fsimg", "-c", "-a", "-F", "fat32/dmg", "-f", "out.dmg.gz", ".",
-		    NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.zst", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.XZ", ".", NULL }
 	};
-	/* Containers and streams are written; with -a a container suffix
-	 * must name the stack's container and selects nothing more.
+	/* Containers, gzip and streams are written; with -a a container
+	 * suffix must name the stack's container and selects nothing more.
 	 */
 	char *accepted[][12] = {
 		{ "fsimg", "-cn", "-F", "fat32/-/vhd", ".", NULL },
@@ -493,8 +495,15 @@ test_stacks(void)
 		{ "fsimg", "-cn", "-F", "exfat/gpt/vhd", "-o", "gpt:type=esp", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32/gpt/dmg", "-f", "out.DMG", ".",
 		    NULL },
-		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img", ".", NULL }
+		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img", ".", NULL },
+		{ "fsimg", "-cz", "-F", "fat32", "-f", "-", ".", NULL },
+		{ "fsimg", "-cWz", "-a", "-F", "fat32/dmg", "-f", "out.dmg.gz", ".",
+		    NULL }
 	};
+	char *gzip_settings[] = { "fsimg", "-cnz", "-F", "fat32", "-o",
+	    "gzip:level=9", ".", NULL };
+	char *gzip_suffix[] = { "fsimg", "-c", "-a", "-F", "fat32/gpt", "-f",
+	    "disk.img.gz", ".", NULL };
 	char *stream[] = { "fsimg", "-c", "-F", "fat32/vhd", "-f", "-", ".", NULL };
 	char *dmg_settings[] = { "fsimg", "-cn", "-F", "fat32/dmg", "-o",
 	    "dmg:compress=zlib", "-o", "dmg:level=9", "-o", "dmg:chunk=512K", "-o",
@@ -545,7 +554,8 @@ test_stacks(void)
 	 * here.
 	 */
 	CHECK(every_layer_key_in((char *const *const []){ gpt_settings,
-	    mbr_settings, dmg_settings, vhd_settings, simg_settings, NULL }));
+	    mbr_settings, dmg_settings, vhd_settings, simg_settings,
+	    gzip_settings, NULL }));
 	CHECK(parse(mbr_settings, &options) == FSIMG_OK);
 	layers = &options.request.layers;
 	CHECK(layers->mbr_id == 0xdeadbeef && layers->mbr_id_set &&
@@ -566,6 +576,15 @@ test_stacks(void)
 	CHECK(parse(simg_settings, &options) == FSIMG_OK);
 	layers = &options.request.layers;
 	CHECK(layers->simg_block_bytes == 64 * 1024 && layers->simg_crc);
+	fsimg_cli_release(&options);
+	/* -z, or -a with a .gz name, selects gzip and its level. */
+	CHECK(parse(gzip_settings, &options) == FSIMG_OK);
+	CHECK(options.request.layers.gzip_level == 9 &&
+	    (options.request.write.flags & FSIMG_WRITE_GZIP) != 0);
+	fsimg_cli_release(&options);
+	CHECK(parse(gzip_suffix, &options) == FSIMG_OK);
+	CHECK((options.request.write.flags & FSIMG_WRITE_GZIP) != 0 &&
+	    fsimg_job_needs_raw(&options.request));
 	fsimg_cli_release(&options);
 	for (unsigned i = 0; i < sizeof(accepted) / sizeof(accepted[0]); i++) {
 		CHECK(parse(accepted[i], &options) == FSIMG_OK);

@@ -574,8 +574,7 @@ test_registry(void)
 		    container },
 		{ "simg", ".simg", "block,crc", "raw,zero,fill",
 		    FSIMG_LAYER_CONTAINER, container },
-		{ "gzip", ".gz", "", "", FSIMG_LAYER_COMPRESSION,
-		    FSIMG_CAP_READ | FSIMG_CAP_VERIFY },
+		{ "gzip", ".gz", "level", "", FSIMG_LAYER_COMPRESSION, container },
 		{ "zstd", ".zst", "", "", FSIMG_LAYER_COMPRESSION, 0 },
 		{ "xz", ".xz", "", "", FSIMG_LAYER_COMPRESSION, 0 }
 	};

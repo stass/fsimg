@@ -129,6 +129,7 @@ static void test_partitioned_create(void);
 static int raw_intermediate(const worker_fixture_t *);
 static void create_request(worker_fixture_t *, const char *);
 static void test_container_create(void);
+static void test_compressed_create(void);
 static void test_transport(worker_scenario_t);
 static int fake_worker(worker_scenario_t);
 static int fake_output(void);
@@ -684,6 +685,62 @@ test_container_create(void)
 	CHECK(error.operation == FSIMG_OP_IMAGE && strcmp(error.path, "dmg") == 0);
 	CHECK(close(fixture.request.input_fd) == 0);
 	fixture.request.input_fd = -1;
+	CHECK(unlinkat(fixture.output, "image", 0) == 0);
+	fixture_close(&fixture);
+}
+
+/*
+ * A gzip creation writes one member through the raw intermediate and sends
+ * an IMAGE record for it, as for a container. A CRC32 flipped in the staged
+ * member afterwards fails the verification job, which decodes the member
+ * into its spool and names gzip in error.path; that is what cW reports
+ * before publishing nothing.
+ */
+static void
+test_compressed_create(void)
+{
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	struct stat st;
+	unsigned char header[2], byte;
+	int fd;
+
+	fixture_open(&fixture);
+	create_request(&fixture, "fat12");
+	fixture.request.write.flags |= FSIMG_WRITE_GZIP;
+	fixture.request.raw_fd = raw_intermediate(&fixture);
+	CHECK(run(&fixture, &error) == FSIMG_OK);
+	CHECK(close(fixture.request.raw_fd) == 0);
+	CHECK(fixture.images == 1 && fixture.plans == 1);
+	fd = openat(fixture.output, "image", O_RDWR | O_NOFOLLOW);
+	CHECK(fd != -1 && fstat(fd, &st) == 0);
+	CHECK((uint64_t)st.st_size == fixture.result.image_bytes);
+	CHECK(pread(fd, header, 2, 0) == 2 && header[0] == 0x1f &&
+	    header[1] == 0x8b);
+	CHECK(pread(fd, &byte, 1, st.st_size - 8) == 1);
+	byte ^= 0xff;
+	CHECK(pwrite(fd, &byte, 1, st.st_size - 8) == 1);
+	CHECK(close(fd) == 0);
+	/* The request cW sends: every slot forced, so only -z reads gzip. */
+	fixture.request.kind = FSIMG_JOB_VERIFY;
+	fixture.request.flags = FSIMG_JOB_GZIP;
+	for (unsigned i = FSIMG_LAYER_SCHEME; i < FSIMG_STACK_SLOTS; i++) {
+		if (fixture.request.stack.slots[i].state == FSIMG_SLOT_UNSPECIFIED)
+			fixture.request.stack.slots[i].state = FSIMG_SLOT_EMPTY;
+	}
+	fixture.request.root_fds = NULL;
+	fixture.request.root_paths = NULL;
+	fixture.request.root_count = 0;
+	fixture.request.output_fd = fixture.request.raw_fd = -1;
+	fixture.request.spool_fd = raw_intermediate(&fixture);
+	fixture.request.input_fd = openat(fixture.output, "image", O_RDONLY);
+	CHECK(fixture.request.input_fd != -1);
+	bzero(&error, sizeof(error));
+	CHECK(run(&fixture, &error) == FSIMG_ECORRUPT);
+	CHECK(error.operation == FSIMG_OP_IMAGE && strcmp(error.path, "gzip") == 0);
+	CHECK(close(fixture.request.input_fd) == 0 &&
+	    close(fixture.request.spool_fd) == 0);
+	fixture.request.input_fd = fixture.request.spool_fd = -1;
 	CHECK(unlinkat(fixture.output, "image", 0) == 0);
 	fixture_close(&fixture);
 }
@@ -1388,6 +1445,7 @@ main(int argc, char **argv)
 	test_operations("exfat");
 	test_partitioned_create();
 	test_container_create();
+	test_compressed_create();
 	test_prompt_completion();
 	test_text_output();
 	test_startup();

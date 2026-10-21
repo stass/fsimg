@@ -15,9 +15,9 @@
 
 /*
  * The layer registry is the one list of layer names and file suffixes.
- * Schemes and containers are read and written; gzip is read, and zstd
- * and xz are compression names reserved for later profiles, recognized by
- * name and suffix with no operations.
+ * Schemes, containers and gzip are read and written; zstd and xz are
+ * compression names reserved for later profiles, recognized by name and
+ * suffix with no operations.
  */
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme },
@@ -76,7 +76,8 @@ static const layer_setting_t layer_settings[] = {
 	{ "vhd", "align", SETTING_FIELD(vhd_align_bytes), false, false, false },
 	{ "vhd", "uuid", SETTING_FIELD(vhd_uuid), false, false, false },
 	{ "simg", "block", SETTING_FIELD(simg_block_bytes), false, false, false },
-	{ "simg", "crc", SETTING_FIELD(simg_crc), false, false, false }
+	{ "simg", "crc", SETTING_FIELD(simg_crc), false, false, false },
+	{ "gzip", "level", SETTING_FIELD(gzip_level), false, false, false }
 };
 
 #define SETTING_COUNT	(sizeof(layer_settings) / sizeof(layer_settings[0]))
@@ -288,6 +289,13 @@ fsimg_stack_layer(const fsimg_stack_t *stack, fsimg_layer_kind_t kind)
 	    NULL);
 }
 
+const fsimg_layer_t *
+fsimg_write_compression(uint32_t flags)
+{
+	return ((flags & FSIMG_WRITE_GZIP) != 0 ? fsimg_layer_find("gzip") :
+	    NULL);
+}
+
 static bool
 setting_is_default(const fsimg_layer_options_t *options,
     const layer_setting_t *setting)
@@ -318,10 +326,12 @@ setting_error(fsimg_error_t *error, const layer_setting_t *setting,
 
 fsimg_status_t
 fsimg_layer_options_check(const fsimg_stack_t *stack,
-    const fsimg_layer_options_t *options, bool writing, fsimg_error_t *error)
+    const fsimg_layer_t *compression, const fsimg_layer_options_t *options,
+    bool writing, fsimg_error_t *error)
 {
 	const layer_setting_t *setting;
 	const fsimg_layer_t *layer;
+	fsimg_layer_kind_t kind;
 	const char *field;
 
 	for (unsigned i = 0; i < 4; i++) {
@@ -337,8 +347,10 @@ fsimg_layer_options_check(const fsimg_stack_t *stack,
 			    "layer setting text is not terminated"));
 		if (setting_is_default(options, setting))
 			continue;
-		layer = fsimg_stack_layer(stack,
-		    fsimg_layer_find(setting->layer)->kind);
+		/* A compression fills no slot; the operation names it. */
+		kind = fsimg_layer_find(setting->layer)->kind;
+		layer = kind == FSIMG_LAYER_COMPRESSION ? compression :
+		    fsimg_stack_layer(stack, kind);
 		if (layer == NULL || strcmp(layer->name, setting->layer) != 0)
 			return (setting_error(error, setting,
 			    "setting names a layer the stack does not contain"));
@@ -401,7 +413,8 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 			    "zlib %s", zlibVersion());
 	}
 	if (layer->compression != NULL) {
-		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
+		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY |
+		    (layer->compression->encoder != NULL ? FSIMG_CAP_WRITE : 0);
 		snprintf(out->codec_version, sizeof(out->codec_version),
 		    "zlib %s", zlibVersion());
 	}

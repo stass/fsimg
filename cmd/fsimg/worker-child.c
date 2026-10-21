@@ -160,8 +160,9 @@ child_loss(void *argument, const char *path, uint32_t fields)
  * input, creation has roots, and creation and extraction write into their
  * output directory, which is staging for one and the destination for the
  * other. A creation to a stream writes the data channel instead of
- * staging; it, and a creation with a container, also holds the raw
- * intermediate. Scratch is optional for every kind.
+ * staging. A creation that fsimg_job_needs_raw names, to a stream or with
+ * a container or a compression, also holds the raw intermediate. Scratch
+ * is optional for every kind.
  */
 static fsimg_status_t
 prepare_capabilities(worker_child_t *child, unsigned capabilities,
@@ -178,9 +179,7 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 	optional = FSIMG_JOB_CAP_SCRATCH | (reading ? FSIMG_JOB_CAP_SPOOL : 0);
 	if ((kind == FSIMG_JOB_CREATE && !stream) || kind == FSIMG_JOB_EXTRACT)
 		expected |= FSIMG_JOB_CAP_OUTPUT;
-	if (kind == FSIMG_JOB_CREATE && (stream ||
-	    child->request.stack.slots[FSIMG_LAYER_CONTAINER].state ==
-	    FSIMG_SLOT_NAMED))
+	if (fsimg_job_needs_raw(&child->request))
 		expected |= FSIMG_JOB_CAP_RAW;
 	if ((capabilities & ~optional) != expected)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
@@ -955,9 +954,10 @@ take_raw(worker_child_t *child)
 }
 
 /*
- * Plan the image and report it: for a partitioned disk or a container the
- * IMAGE record, for a partitioned disk the one PARTITION record, the
- * volume's place on it, then the PLAN; for a bare volume the PLAN alone. A
+ * Plan the image and report it: for a partitioned disk or an encoded
+ * output the IMAGE record, for a partitioned disk the one PARTITION
+ * record, the volume's place on it, then the PLAN; for a bare volume
+ * written as it is the PLAN alone. A
  * create job then writes the image: into the staged file, or under
  * FSIMG_JOB_STDOUT to the data channel, through the raw intermediate when
  * the coordinator handed one over.
@@ -1000,7 +1000,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 		return (status);
 	child->result.entries = info.entries;
 	child->result.logical_bytes = info.payload_bytes;
-	if (info.image.scheme[0] != '\0' || info.image.container[0] != '\0') {
+	if (info.image.scheme[0] != '\0' || fsimg_job_encoded(&child->request)) {
 		status = send_image(&info.image, NULL, NULL, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -1041,8 +1041,8 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	status = fsimg_io_adopt_empty_output(child->ctx, fd, &output, error);
 	if (status != FSIMG_OK)
 		return (status);
-	/* The staged file ends at the image's length, which a container
-	 * knows only once it has encoded the disk.
+	/* The staged file ends at the image's length, which an encoded
+	 * output knows only once it has encoded the disk.
 	 */
 	fsimg_sink_init(&sink, FSIMG_SINK_IO);
 	sink.io = output;

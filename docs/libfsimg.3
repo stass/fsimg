@@ -180,14 +180,21 @@ beneath a parent directory, a positional I/O object, or a stream descriptor
 written in order.
 A stack naming a container, such as
 .Ql fat32/gpt/dmg ,
-or a stream sink needs the sink's raw_fd: an exclusively created, empty,
-unlinked read/write regular file the writer emits the raw disk into before
-one sequential transcode writes the container, or copies the disk, to the
-sink; it is adopted and closed on every outcome.
+the FSIMG_WRITE_GZIP flag, or a stream sink needs the sink's raw_fd: an
+exclusively created, empty, unlinked read/write regular file the writer
+emits the raw disk into before one sequential transcode writes the
+container, then gzip around it, or copies the disk, to the sink; it is
+adopted and closed on every outcome.
+FSIMG_WRITE_GZIP writes one gzip member with a fixed header: no name,
+comment or header CRC, OS 3, extra flags by level, and as its time the
+epoch under FSIMG_WRITE_REPRODUCIBLE or the host clock otherwise, zero when
+outside the field's 32 bits.
 The layer options add the DMG compression, level, chunk size and segment
-ID, the VHD alignment and unique ID, and the sparse image block size and
-CRC32 chunk; the plan adds the output bound, the container padding and the
-zlib version the output depends on.
+ID, the VHD alignment and unique ID, the sparse image block size and CRC32
+chunk, and the gzip level, 1 to 9; the plan adds the compression, the
+output bound, the container padding and the zlib version the output
+depends on, and the output limit must hold the raw disk and that bound
+together.
 A stream has no publication: a failure after its first byte reports
 FSIMG_OUTPUT_INCOMPLETE.
 A failure of a layer, on open, verification or a container read, is
@@ -197,7 +204,8 @@ puts a raw volume into a scheme,
 .Fn fsimg_image_unwrap
 writes the bytes an opened image's selection names, raw, and
 .Fn fsimg_image_compose
-builds a disk from several volumes, one partition each.
+builds a disk from several volumes, one partition each; each compresses
+its output under FSIMG_WRITE_GZIP.
 They copy the disk once, read each input once, and refuse an output that
 shares storage with an input before writing.
 .Pp

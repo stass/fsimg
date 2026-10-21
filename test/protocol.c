@@ -663,8 +663,9 @@ test_job_selection(void)
 }
 
 /* Every layer setting crosses the job wire unchanged. Unknown MBR flags,
- * an identifier past 32 bits or present without its flag, nonzero padding
- * and unterminated text each fail, so a record has one encoding.
+ * an identifier past 32 bits or present without its flag, a gzip level
+ * past 32 bits, nonzero padding and unterminated text each fail, so a
+ * record has one encoding.
  */
 static void
 test_job_layers(void)
@@ -673,7 +674,8 @@ test_job_layers(void)
 		unsigned	 offset;
 		uint64_t	 value;
 	} bad[] = {
-		{ 512, UINT64_C(1) << 32 }, { 520, 4 }, { 520, 0x100 }
+		{ 512, UINT64_C(1) << 32 }, { 520, 4 }, { 520, 0x100 },
+		{ 808, UINT64_C(1) << 32 }
 	};
 	static const unsigned text_ends[] = { 599, 711, 727 };
 	static const unsigned char guid[16] = { 0x11, 0x22, 0x33, 0x44, 0x55,
@@ -698,6 +700,7 @@ test_job_layers(void)
 	memset(request.layers.gpt_type, 't', sizeof(request.layers.gpt_type) - 1);
 	memset(request.layers.gpt_name, 'n', sizeof(request.layers.gpt_name) - 1);
 	strcpy(request.layers.mbr_type, "0x0c");
+	request.layers.gzip_level = 9;
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);

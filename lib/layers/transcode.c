@@ -21,9 +21,11 @@
  * sequential sink. Each chunk of the disk is read, or recognised as a hole
  * the host reports, and handed to an encoder as data or as zeros; the
  * container's encoder, or the copy encoder without one, decides what bytes
- * that becomes and appends them to the sink. The sink is the only writer of
- * the output, so the encoders never seek, and it holds the output to the
- * bound the plan charged against the output limit.
+ * that becomes and appends them to the sink. With a compression, that sink
+ * is a filter: the compression's encoder takes what the container appends
+ * and writes its own encoding to the output's sink. The output's sink is
+ * the only writer of the output, so no encoder seeks, and each sink holds
+ * what is appended to it to the bound the plan charged.
  *
  * Zero decisions depend only on the disk's bytes. Hole discovery may only
  * spare the read of a range the host already knows is zero, so the output
@@ -33,22 +35,29 @@
 #define SINK_BUFFER_BYTES	65536u
 
 /*
- * The sequential sink. Bytes collect in buffer and are written at offset,
- * the output length so far excluding them, to exactly one destination: the
- * positional object io, or when io is NULL the stream fd. A sink therefore
- * appends in one of three ways, which fsimg_seq_zero spells out: to a
- * proven-zero object, where a zero run stays a hole because the sink never
- * writes behind itself; to any other object, where zeros are written; or
- * to a stream, which receives every byte.
+ * The sequential sink. A filter sink hands everything appended to it to
+ * its compression encoder (filter, filter_state), which writes the next
+ * sink, and offset counts what it accepted. Any other sink is the
+ * output's: bytes collect in buffer and are written at offset, the output
+ * length so far excluding them, to exactly one destination: the
+ * positional object io, or when io is NULL the stream fd. An output's sink
+ * therefore appends in one of three ways, which fsimg_seq_zero spells out:
+ * to a proven-zero object, where a zero run stays a hole because the sink
+ * never writes behind itself; to any other object, where zeros are
+ * written; or to a stream, which receives every byte.
  */
 struct fsimg_seq_sink {
 	fsimg_session_t	*session;
+	uint64_t	 offset;	/* Accepted, or output written so far */
+	uint64_t	 bound;		/* The most it may accept or write */
+	/* A filter: its encoder, NULL for an output's sink, and state. */
+	const fsimg_compressor_ops_t *filter;
+	void		*filter_state;
+	/* An output's sink only; unused in a filter, whose fd is -1. */
 	fsimg_io_t	*io;		/* The positional object, or NULL */
 	int		 fd;		/* The stream when io is NULL */
 	unsigned char	*buffer;	/* SINK_BUFFER_BYTES */
 	size_t		 used;		/* Buffered bytes not yet written */
-	uint64_t	 offset;	/* Output written so far */
-	uint64_t	 bound;		/* The most the output may take */
 	bool		 resized;	/* io was sized to bound; trim at close */
 	bool		 proven_zero;	/* io reads as zeros where unwritten */
 	bool		 touched;	/* The output may differ from before */
@@ -71,6 +80,9 @@ static fsimg_status_t stream_write(fsimg_seq_sink_t *, const unsigned char *,
     size_t, fsimg_error_t *);
 static fsimg_status_t sink_room(const fsimg_seq_sink_t *, uint64_t,
     fsimg_error_t *);
+static fsimg_status_t filter_open(fsimg_seq_sink_t *, fsimg_session_t *,
+    const fsimg_disk_plan_t *, fsimg_seq_sink_t *, fsimg_error_t *);
+static void filter_close(fsimg_seq_sink_t *);
 static bool all_zero(const unsigned char *, size_t);
 static fsimg_status_t transcode_pass(const disk_output_t *,
     const fsimg_encoder_ops_t *, void *, unsigned, unsigned char *, size_t,
@@ -129,12 +141,36 @@ sink_open(fsimg_seq_sink_t *sink, fsimg_session_t *session, fsimg_io_t *io,
 		return (status);
 	if (!resize && !exact)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IO,
-		    "a container output needs a resizable sink"));
+		    "an encoded output needs a resizable sink"));
 	sink->proven_zero = fsimg_io_proven_zero(io);
 	if (!resize)
 		return (FSIMG_OK);
 	sink->touched = sink->resized = true;
 	return (fsimg_io_resize(io, bound, error));
+}
+
+/*
+ * Open a filter sink over the output's sink out: the plan's compression
+ * encodes what the container, or the copy, appends, at most the
+ * container's bound. The encoder may write its header to out at once.
+ */
+static fsimg_status_t
+filter_open(fsimg_seq_sink_t *sink, fsimg_session_t *session,
+    const fsimg_disk_plan_t *plan, fsimg_seq_sink_t *out, fsimg_error_t *error)
+{
+	*sink = (fsimg_seq_sink_t){ .session = session, .fd = -1,
+	    .bound = plan->container_bytes,
+	    .filter = plan->compression->compression->encoder };
+	return (sink->filter->open(session->ctx, &plan->compression_settings,
+	    out, &sink->filter_state, error));
+}
+
+static void
+filter_close(fsimg_seq_sink_t *sink)
+{
+	if (sink->filter_state != NULL)
+		sink->filter->close(sink->filter_state);
+	sink->filter_state = NULL;
 }
 
 /* Write the buffered bytes and empty the buffer. */
@@ -242,6 +278,13 @@ fsimg_seq_write(fsimg_seq_sink_t *sink, const void *bytes, size_t length,
 	fsimg_status_t status;
 
 	status = sink_room(sink, length, error);
+	if (status == FSIMG_OK && sink->filter != NULL) {
+		status = sink->filter->write(sink->filter_state, bytes, length,
+		    error);
+		if (status == FSIMG_OK)
+			sink->offset += length;
+		return (status);
+	}
 	while (status == FSIMG_OK && length > 0) {
 		if (sink->used == SINK_BUFFER_BYTES) {
 			status = sink_flush(sink, error);
@@ -259,10 +302,10 @@ fsimg_seq_write(fsimg_seq_sink_t *sink, const void *bytes, size_t length,
 }
 
 /*
- * Append length zeros, in the sink's way: a proven-zero object already
- * reads as zeros there, so the range stays a hole and only the offset
- * moves; any other object has zeros written through it; a stream is sent
- * zero-filled bytes from the emptied buffer.
+ * Append length zeros, in the sink's way: a filter encodes them; a
+ * proven-zero object already reads as zeros there, so the range stays a
+ * hole and only the offset moves; any other object has zeros written
+ * through it; a stream is sent zero-filled bytes from the emptied buffer.
  */
 fsimg_status_t
 fsimg_seq_zero(fsimg_seq_sink_t *sink, uint64_t length, fsimg_error_t *error)
@@ -271,6 +314,13 @@ fsimg_seq_zero(fsimg_seq_sink_t *sink, uint64_t length, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	status = sink_room(sink, length, error);
+	if (status == FSIMG_OK && sink->filter != NULL) {
+		status = sink->filter->write(sink->filter_state, NULL, length,
+		    error);
+		if (status == FSIMG_OK)
+			sink->offset += length;
+		return (status);
+	}
 	if (status == FSIMG_OK)
 		status = sink_flush(sink, error);
 	if (status != FSIMG_OK || length == 0)
@@ -397,27 +447,40 @@ transcode(const disk_output_t *output, fsimg_seq_sink_t *sink,
 }
 
 /*
- * Transcode into a positional object or a stream. A failure once the
- * output may have changed leaves it incomplete; output->written is the
- * output's length when the transcode succeeds.
+ * Transcode into a positional object or a stream: the encoders append to
+ * the output's sink, or with a compression to a filter over it, which is
+ * finished before the output's sink is closed. A failure once the output
+ * may have changed leaves it incomplete; output->written is the output's
+ * length when the transcode succeeds.
  */
 static fsimg_status_t
 output_to(disk_output_t *output, fsimg_io_t *io, int fd, fsimg_error_t *error)
 {
 	const fsimg_disk_plan_t *plan = output->plan;
-	fsimg_seq_sink_t sink;
+	fsimg_seq_sink_t sink, filter;
+	fsimg_seq_sink_t *head;
 	fsimg_status_t status;
 
+	filter = (fsimg_seq_sink_t){ .filter = NULL };
+	head = &sink;
 	status = sink_open(&sink, output->session, io, fd, plan->output_bytes,
-	    plan->container == NULL, output->durable, error);
+	    !fsimg_disk_plan_encoded(plan), output->durable, error);
+	if (status == FSIMG_OK && plan->compression != NULL) {
+		head = &filter;
+		status = filter_open(&filter, output->session, plan, &sink,
+		    error);
+	}
 	if (status == FSIMG_OK)
-		status = transcode(output, &sink, error);
+		status = transcode(output, head, error);
+	if (status == FSIMG_OK && head == &filter)
+		status = filter.filter->finish(filter.filter_state, error);
 	if (status == FSIMG_OK)
 		status = sink_close(&sink, output->durable, error);
 	if (status == FSIMG_OK)
 		output->written = sink.offset;
 	else if (sink.touched && error != NULL)
 		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
+	filter_close(&filter);
 	fsimg_dealloc(sink.buffer);
 	return (status);
 }
@@ -493,12 +556,15 @@ copy_close(void *state FSIMG_UNUSED)
 {
 }
 
-/* The codec a plan's output depends on: zlib for DMG chunks it deflates. */
+/* The codec a plan's output depends on: zlib for the DMG chunks it
+ * deflates and for gzip.
+ */
 void
 fsimg_disk_plan_codec(const fsimg_disk_plan_t *plan, char *out,
     size_t capacity)
 {
-	if (plan->container != NULL && plan->container_settings.level != 0)
+	if ((plan->container != NULL && plan->container_settings.level != 0) ||
+	    plan->compression != NULL)
 		snprintf(out, capacity, "zlib %s", zlibVersion());
 	else if (capacity != 0)
 		out[0] = '\0';

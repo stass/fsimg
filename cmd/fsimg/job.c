@@ -85,7 +85,8 @@ typedef enum job_string_field {
 	JOB_DMG_LEVEL_OFFSET = 784,
 	JOB_CONTAINER_FLAGS = 792,
 	JOB_SPOOL_OFFSET = 800,
-	JOB_RESERVED_OFFSET = 808
+	JOB_GZIP_LEVEL_OFFSET = 808,
+	JOB_RESERVED_OFFSET = 816
 } job_string_field_t;
 
 /* MBR flag bits at JOB_MBR_FLAGS. */
@@ -116,7 +117,8 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_SIMG_BLOCK_OFFSET + 8 == JOB_DMG_LEVEL_OFFSET &&
     JOB_DMG_LEVEL_OFFSET + 8 == JOB_CONTAINER_FLAGS &&
     JOB_CONTAINER_FLAGS + 8 == JOB_SPOOL_OFFSET &&
-    JOB_SPOOL_OFFSET + 8 == JOB_RESERVED_OFFSET &&
+    JOB_SPOOL_OFFSET + 8 == JOB_GZIP_LEVEL_OFFSET &&
+    JOB_GZIP_LEVEL_OFFSET + 8 == JOB_RESERVED_OFFSET &&
     JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the layer fields do not overlap");
 _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     JOB_GPT_TYPE_BYTES &&
@@ -128,13 +130,13 @@ _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     sizeof(((fsimg_layer_options_t *)0)->vhd_uuid) == 16,
     "the request holds each layer field");
 /* encode_layers and decode_layers carry every member of the layout below,
- * which ends with simg_crc at 284 and reserved at 288. A new layer setting
- * moves reserved or grows the record and stops the build until they carry
- * it and this layout is updated.
+ * which ends with gzip_level at 288 and reserved at 296. A new layer
+ * setting moves reserved or grows the record and stops the build until
+ * they carry it and this layout is updated.
  */
-_Static_assert(offsetof(fsimg_layer_options_t, simg_crc) == 284 &&
-    offsetof(fsimg_layer_options_t, reserved) == 288 &&
-    sizeof(fsimg_layer_options_t) == 320,
+_Static_assert(offsetof(fsimg_layer_options_t, gzip_level) == 288 &&
+    offsetof(fsimg_layer_options_t, reserved) == 296 &&
+    sizeof(fsimg_layer_options_t) == 328,
     "every layer setting travels in the job record");
 
 /* Where each stack slot's name travels: the filesystem's in the format
@@ -210,6 +212,7 @@ encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
 	raw[JOB_CONTAINER_FLAGS] = (unsigned char)((layers->dmg_compress ==
 	    FSIMG_DMG_NONE ? JOB_DMG_RAW : 0) | (layers->simg_crc ?
 	    JOB_SIMG_CRC : 0));
+	fsimg_wire_put64(raw + JOB_GZIP_LEVEL_OFFSET, layers->gzip_level);
 }
 
 /* One encoding per settings value: known flags, a 32-bit identifier that
@@ -220,7 +223,8 @@ static bool
 layers_valid(const unsigned char *raw)
 {
 	static const unsigned quantities[] = { JOB_DMG_CHUNK_OFFSET,
-	    JOB_VHD_ALIGN_OFFSET, JOB_SIMG_BLOCK_OFFSET, JOB_DMG_LEVEL_OFFSET };
+	    JOB_VHD_ALIGN_OFFSET, JOB_SIMG_BLOCK_OFFSET, JOB_DMG_LEVEL_OFFSET,
+	    JOB_GZIP_LEVEL_OFFSET };
 	uint64_t id;
 
 	id = fsimg_wire_get64(raw + JOB_MBR_ID_OFFSET);
@@ -272,6 +276,8 @@ decode_layers(const unsigned char *raw, fsimg_layer_options_t *layers)
 	layers->dmg_compress = (raw[JOB_CONTAINER_FLAGS] & JOB_DMG_RAW) != 0 ?
 	    FSIMG_DMG_NONE : FSIMG_DMG_ZLIB;
 	layers->simg_crc = (raw[JOB_CONTAINER_FLAGS] & JOB_SIMG_CRC) != 0;
+	layers->gzip_level =
+	    (uint32_t)fsimg_wire_get64(raw + JOB_GZIP_LEVEL_OFFSET);
 }
 
 static fsimg_status_t
@@ -304,6 +310,29 @@ bool
 fsimg_job_has_roots(fsimg_job_kind_t kind)
 {
 	return (kind == FSIMG_JOB_CREATE || kind == FSIMG_JOB_PLAN);
+}
+
+const char *
+fsimg_job_compression(const fsimg_worker_request_t *request)
+{
+	return (fsimg_job_has_roots(request->kind) &&
+	    (request->write.flags & FSIMG_WRITE_GZIP) != 0 ? "gzip" : "");
+}
+
+bool
+fsimg_job_encoded(const fsimg_worker_request_t *request)
+{
+	return (fsimg_job_has_roots(request->kind) &&
+	    (request->stack.slots[FSIMG_LAYER_CONTAINER].state ==
+	    FSIMG_SLOT_NAMED || fsimg_job_compression(request)[0] != '\0'));
+}
+
+bool
+fsimg_job_needs_raw(const fsimg_worker_request_t *request)
+{
+	return (request->kind == FSIMG_JOB_CREATE &&
+	    ((request->flags & FSIMG_JOB_STDOUT) != 0 ||
+	    fsimg_job_encoded(request)));
 }
 
 uint32_t

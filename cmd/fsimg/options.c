@@ -217,8 +217,10 @@ static bool strip_suffix(char *, const char *);
 static size_t suffix_layer(const char *, fsimg_layer_kind_t,
     fsimg_layer_info_t *);
 static size_t layer_suffix_length(const char *, fsimg_layer_kind_t);
-static bool gzip_named(const char *);
-static fsimg_status_t select_compression(cli_parse_t *);
+static size_t compression_suffix(const char *, char *, size_t,
+    fsimg_layer_info_t *);
+static bool compression_selected(const cli_parse_t *, fsimg_layer_info_t *);
+static fsimg_status_t apply_compression(cli_parse_t *);
 
 static fsimg_status_t
 syntax(cli_parse_t *parse, const char *message)
@@ -668,15 +670,17 @@ find_layer(const char *name, size_t length, fsimg_layer_info_t *info)
 }
 
 /* Whether the command selects a layer: the scheme or container its -F
- * stack names, or gzip when -z or -a asks for compression.
+ * stack names, or the compression -z or -a selects.
  */
 static bool
 layer_selected(const cli_parse_t *parse, const fsimg_layer_info_t *layer)
 {
 	const fsimg_stack_slot_t *slot;
+	fsimg_layer_info_t compression;
 
 	if (layer->kind == FSIMG_LAYER_COMPRESSION)
-		return (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0);
+		return (compression_selected(parse, &compression) &&
+		    strcmp(compression.name, layer->name) == 0);
 	slot = &parse->options->request.stack.slots[layer->kind];
 	return (slot->state == FSIMG_SLOT_NAMED && strcmp(slot->name, layer->name) == 0);
 }
@@ -744,7 +748,8 @@ static const struct layer_key {
 	LAYER_KEY("vhd:align", LAYER_BYTES, vhd_align_bytes, false),
 	LAYER_KEY("vhd:uuid", LAYER_GUID, vhd_uuid, false),
 	LAYER_KEY("simg:block", LAYER_BYTES, simg_block_bytes, false),
-	LAYER_KEY("simg:crc", LAYER_YES_NO, simg_crc, false)
+	LAYER_KEY("simg:crc", LAYER_YES_NO, simg_crc, false),
+	LAYER_KEY("gzip:level", LAYER_COUNT, gzip_level, false)
 #undef LAYER_KEY
 };
 
@@ -1127,44 +1132,87 @@ interpret_common(cli_parse_t *parse)
 }
 
 /*
- * The compression a creation selects: gzip under -z, or under -a whatever
- * the image name's outermost suffix declares in the layer registry, which
- * includes the reserved compressions. A container suffix beneath it
- * selects nothing but must name the stack's container, so the name cannot
- * promise a container the image lacks. This build writes no compression,
- * so a selected one is refused as unsupported once the command line is
- * otherwise valid.
+ * The compression suffix outermost in an image name's basename, whose
+ * remainder is left in name: its registry record and length, zero when it
+ * has none.
+ */
+static size_t
+compression_suffix(const char *image, char *name, size_t capacity,
+    fsimg_layer_info_t *layer)
+{
+	const char *base;
+	size_t length;
+
+	base = strrchr(image, '/');
+	base = base == NULL ? image : base + 1;
+	snprintf(name, capacity, "%s", base);
+	length = suffix_layer(name, FSIMG_LAYER_COMPRESSION, layer);
+	name[strlen(name) - length] = '\0';
+	return (length);
+}
+
+/*
+ * Whether a command selects a compression, and which one in layer: gzip
+ * under -z, and on creation under -a whatever the image name's outermost
+ * suffix declares in the layer registry, which includes the reserved
+ * compressions.
+ */
+static bool
+compression_selected(const cli_parse_t *parse, fsimg_layer_info_t *layer)
+{
+	const char *image = parse->options->image;
+	char name[NAME_MAX + 1];
+
+	if (option_count(parse, 'z') != 0)
+		return (find_layer("gzip", strlen("gzip"), layer));
+	return ((parse->mode & MODES_CREATE) != 0 && option_count(parse, 'a') != 0 &&
+	    image != NULL &&
+	    compression_suffix(image, name, sizeof(name), layer) != 0);
+}
+
+/*
+ * Apply the compression a creation selects. -z selects gzip, so with -a
+ * the image name must end in gzip's suffix. Under -a a container suffix
+ * beneath the compression's selects nothing but must name the stack's
+ * container, so the name cannot promise a container the image lacks. gzip
+ * becomes FSIMG_WRITE_GZIP; any other compression, which this build
+ * cannot write, is refused as unsupported once the command line is
+ * otherwise valid. cW opens the compressed image through a spool, which
+ * needs scratch.
  */
 static fsimg_status_t
-select_compression(cli_parse_t *parse)
+apply_compression(cli_parse_t *parse)
 {
-	const fsimg_worker_request_t *request = &parse->options->request;
+	fsimg_cli_options_t *options = parse->options;
 	const fsimg_stack_slot_t *container;
-	const char *image, *base;
-	fsimg_layer_info_t layer;
+	fsimg_layer_info_t layer, suffix;
 	char name[NAME_MAX + 1];
 	size_t length;
-	bool compressed;
 
-	compressed = option_count(parse, 'z') != 0;
-	image = parse->options->image;
-	if (option_count(parse, 'a') != 0 && image != NULL) {
-		base = strrchr(image, '/');
-		base = base == NULL ? image : base + 1;
-		snprintf(name, sizeof(name), "%s", base);
-		length = suffix_layer(name, FSIMG_LAYER_COMPRESSION, &layer);
-		compressed |= length != 0;
-		name[strlen(name) - length] = '\0';
+	if (option_count(parse, 'a') != 0 && options->image != NULL) {
+		length = compression_suffix(options->image, name, sizeof(name),
+		    &suffix);
+		if (option_count(parse, 'z') != 0 &&
+		    (length == 0 || strcmp(suffix.name, "gzip") != 0))
+			return (syntax(parse, "-z with -a requires a .gz image name"));
 		length = suffix_layer(name, FSIMG_LAYER_CONTAINER, &layer);
-		container = &request->stack.slots[FSIMG_LAYER_CONTAINER];
+		container = &options->request.stack.slots[FSIMG_LAYER_CONTAINER];
 		if (length != 0 && (container->state != FSIMG_SLOT_NAMED ||
 		    strcmp(container->name, layer.name) != 0))
 			return (syntax_naming(parse,
 			    "-a: the image suffix names a container the stack does not",
-			    image));
+			    options->image));
 	}
-	if (compressed)
-		note_unsupported(parse, "writing compressed images is not supported");
+	if (!compression_selected(parse, &layer))
+		return (FSIMG_OK);
+	if (strcmp(layer.name, "gzip") != 0) {
+		note_unsupported(parse, "writing this compression is not supported");
+		return (FSIMG_OK);
+	}
+	options->request.write.flags |= FSIMG_WRITE_GZIP;
+	if (options->verify_staged && strcmp(options->scratch, "-") == 0)
+		return (syntax(parse,
+		    "cW of a compressed image needs scratch for its spool, not -T -"));
 	return (FSIMG_OK);
 }
 
@@ -1224,10 +1272,7 @@ interpret_create(cli_parse_t *parse)
 		if (request->kind == FSIMG_JOB_CREATE)
 			request->flags |= FSIMG_JOB_STDOUT;
 	}
-	if (option_count(parse, 'z') != 0 && option_count(parse, 'a') != 0 &&
-	    options->image != NULL && !gzip_named(options->image))
-		return (syntax(parse, "-z with -a requires a .gz image name"));
-	status = select_compression(parse);
+	status = apply_compression(parse);
 	if (status != FSIMG_OK)
 		return (status);
 	if (option_count(parse, 'M') != 0)
@@ -1578,18 +1623,6 @@ layer_suffix_length(const char *name, fsimg_layer_kind_t kind)
 	fsimg_layer_info_t layer;
 
 	return (suffix_layer(name, kind, &layer));
-}
-
-/* Whether name ends in gzip's suffix, the one -z and -a may agree on: -z
- * selects gzip, and a reserved compression's suffix names another.
- */
-static bool
-gzip_named(const char *name)
-{
-	fsimg_layer_info_t layer;
-
-	return (suffix_layer(name, FSIMG_LAYER_COMPRESSION, &layer) != 0 &&
-	    strcmp(layer.name, "gzip") == 0);
 }
 
 /*

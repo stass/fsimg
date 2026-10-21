@@ -525,11 +525,11 @@ prepare_staging(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 }
 
 /*
- * The raw intermediate of a creation that writes a container or a stream
- * (specs/design-layers.md#handed-over-files): created exclusively with
- * mode 0600 beside the staged image, or in the scratch tree for a stream,
- * and unlinked at once, so the worker holds a file no name reaches and
- * nothing is left to clean up on any outcome.
+ * The raw intermediate of a creation that writes a container, a compressed
+ * image or a stream (specs/design-layers.md#handed-over-files): created
+ * exclusively with mode 0600 beside the staged image, or in the scratch
+ * tree for a stream, and unlinked at once, so the worker holds a file no
+ * name reaches and nothing is left to clean up on any outcome.
  */
 static fsimg_status_t
 prepare_raw(fsimg_cli_options_t *options, fsimg_error_t *error)
@@ -538,10 +538,9 @@ prepare_raw(fsimg_cli_options_t *options, fsimg_error_t *error)
 	int directory;
 	bool stream;
 
-	stream = (request->flags & FSIMG_JOB_STDOUT) != 0;
-	if (request->kind != FSIMG_JOB_CREATE || (!stream &&
-	    request->stack.slots[FSIMG_LAYER_CONTAINER].state != FSIMG_SLOT_NAMED))
+	if (!fsimg_job_needs_raw(request))
 		return (FSIMG_OK);
+	stream = (request->flags & FSIMG_JOB_STDOUT) != 0;
 	directory = stream ? request->scratch_fd : request->output_fd;
 	if (directory == -1)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
@@ -815,6 +814,9 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	*verify = *create;
 	verify->kind = FSIMG_JOB_VERIFY;
 	verify->flags = create->flags & (FSIMG_JOB_PAYLOAD | FSIMG_JOB_VERBOSE);
+	/* Every slot is forced below, so only -z reads a compressed image. */
+	if (fsimg_job_compression(create)[0] != '\0')
+		verify->flags |= FSIMG_JOB_GZIP;
 	verify->selection = "/";
 	verify->root_fds = NULL;
 	verify->root_paths = NULL;

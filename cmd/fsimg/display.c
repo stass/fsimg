@@ -897,9 +897,9 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 
 /*
  * The plan record. output_bytes is the image's length, or with a container
- * the most its encoding can take; padding_bytes the zeros the container's
- * granularity added to the disk; codec the compression library the image
- * depends on, so a reproducible build can name it.
+ * or compression the most its encoding can take; padding_bytes the zeros
+ * the container's granularity added to the disk; codec the compression
+ * library the image depends on, so a reproducible build can name it.
  */
 static void
 plan(fsimg_cli_display_t *display, const unsigned char *raw)

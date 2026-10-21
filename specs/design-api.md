@@ -255,7 +255,13 @@ settings of every layer (NULL selects every default). The writer copies both
 structures. A layer setting whose layer is absent from the stack must hold its
 default, exactly as a format setting a format does not store; an
 [identifier](design-layers.md#identifiers) of a layer in the stack must be
-set unless the reproducible flag is given. Raw emission
+set unless the reproducible flag is given. Compression is not a stack slot:
+`FSIMG_WRITE_GZIP`, the library's `-z` and the write-side counterpart of
+`FSIMG_IMAGE_GZIP`, selects gzip around whatever the stack writes, and
+`gzip_level` is then the one compression setting; without the flag it must
+hold its default like the setting of any absent layer. The flag applies
+equally to wrap, unwrap and compose, whose write options carry the mode
+flags. Raw emission
 defaults to logical completion; the file-publication helper always performs
 its durable publication protocol.
 Automatic sizing
@@ -294,7 +300,9 @@ not expose resident arrays and is never freed by the caller.
 Plan information contains logical volume size, payload bytes, initialized data
 bytes, allocated bytes, metadata bytes, free bytes, geometry, entry counts,
 required output capabilities, and observed/estimated scratch use identified as
-such. It does not return an O(entries) list. No progress callback can mutate a
+such. Its image record reports the planned disk as an opened image of it
+would, the compression `FSIMG_WRITE_GZIP` selects included; the output
+bound is the disk's encoding by the container and then the compression. It does not return an O(entries) list. No progress callback can mutate a
 sealed plan.
 
 `emit()` borrows output only for the call and requires a compatible writable

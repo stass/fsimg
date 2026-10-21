@@ -107,8 +107,9 @@ def test_formats(executable, root):
     assert layers["mbr"]["settings"] == ["disk", "type", "active", "id"]
     assert layers["dmg"]["settings"] == ["compress", "level", "chunk", "uuid"]
     assert layers["simg"]["settings"] == ["block", "crc"]
+    assert layers["gzip"]["settings"] == ["level"]
     assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 7
-    assert layers["gzip"]["capabilities"] == 5 and layers["zstd"]["suffix"] == ".zst"
+    assert layers["gzip"]["capabilities"] == 7 and layers["zstd"]["suffix"] == ".zst"
     assert layers["gzip"]["codec_version"] == layers["dmg"]["codec_version"]
     assert {name: record["codecs"] for name, record in layers.items()} == {
         "gpt": None, "mbr": None, "dmg": "raw,zero,zlib", "vhd": "raw",
@@ -251,7 +252,7 @@ def test_human_help(executable, root):
                               b"compress,level,chunk,uuid\n"
                               b"vhd    container    yes   yes    yes     raw            align,uuid\n"
                               b"simg   container    yes   yes    yes     raw,zero,fill  block,crc\n"
-                              b"gzip   compression  yes   no     yes     -              -\n"
+                              b"gzip   compression  yes   yes    yes     -              level\n"
                               b"zstd   compression  no    no     no      -              -\n"
                               b"xz     compression  no    no     no      -              -\n")
     assert formats.stderr == b""
@@ -403,11 +404,9 @@ def test_option_syntax(executable, root):
 
         # A forced container runs only its own probe, which a bare volume fails.
         (["t", "-F", "fat32/-/vhd", "-f", "human.img"], b"no VHD footer"),
-        # -a takes gzip or a reserved compression from the outermost suffix.
+        # -a takes a reserved compression from the outermost suffix.
         (["cf", "syntax.img.zst", "-a", "-F", "fat32", "-C", "source", "."],
-         b"writing compressed images is not supported"),
-        (["cf", "syntax.dmg.gz", "-a", "-F", "fat32/dmg", "-C", "source", "."],
-         b"writing compressed images is not supported"),
+         b"writing this compression is not supported"),
         (["cf", "syntax.img", "-M", "-F", "fat32", "-C", "source", "."],
          b"-M minimization is not supported"),
         (["cf", "syntax.img", "-F", "apfs", "-C", "source", "."],
@@ -1473,6 +1472,52 @@ def test_container_create(executable, root):
         (root / name).unlink()
 
 
+def test_compressed_create(executable, root):
+    """c -z, and -a with a .gz name, write one gzip member around any stack:
+    gzip -t accepts it, its header is fsimg's (no name, the -R epoch as
+    MTIME, XFL by level, OS 3), it decodes to the image written without
+    gzip, and it reads back as that image. -f - streams the same bytes, cW
+    verifies the member before publishing, -n reports gzip, its bound and
+    zlib, and gzip:level outside 1 to 9 is refused before anything is
+    written."""
+    stacks = [("fat12", "gz-bare.img"), ("fat12/gpt", "gz-disk.img"),
+              ("fat12/gpt/dmg", "gz-disk.dmg")]
+    for stack, name in stacks:
+        invoke(executable, root, ["cf", name, "-R", "-F", stack, "-C", "source", "."])
+        invoke(executable, root, ["cf", name + ".gz", "-R", "-a", "-F", stack,
+                                  "-C", "source", "."])
+        packed = (root / (name + ".gz")).read_bytes()
+        assert packed[:10] == b"\x1f\x8b\x08\x00" + struct.pack("<I", 315532800) + \
+            b"\x00\x03", packed[:10]
+        assert gzip.decompress(packed) == (root / name).read_bytes(), stack
+        streamed = invoke(executable, root, ["cf", "-", "-z", "-R", "-F", stack,
+                                             "-C", "source", "."]).stdout
+        assert streamed == packed, stack
+        listed = invoke(executable, root, ["tf", name + ".gz"]).stdout
+        assert b"/HELLO.TXT" in listed, listed
+        (root / name).unlink()
+        (root / (name + ".gz")).unlink()
+    for level, xfl in [("1", 4), ("9", 2)]:
+        invoke(executable, root, ["cf", "level.gz", "-z", "-R", "-F", "fat12",
+                                  "-o", f"gzip:level={level}", "-C", "source", "."])
+        assert (root / "level.gz").read_bytes()[8] == xfl
+        (root / "level.gz").unlink()
+    result = invoke(executable, root, ["cf", "level.gz", "-z", "-F", "fat12",
+                                       "-o", "gzip:level=10", "-C", "source", "."],
+                    expected=1)
+    assert b"gzip:level" in result.stderr and not (root / "level.gz").exists()
+    invoke(executable, root, ["cWf", "checked.img.gz", "-a", "-F", "fat12/gpt",
+                              "-C", "source", "."])
+    assert gzip.decompress((root / "checked.img.gz").read_bytes())[510:512] == b"\x55\xaa"
+    (root / "checked.img.gz").unlink()
+    plan = records(invoke(executable, root, ["c", "-n", "-z", "--json", "-R", "-F",
+                                              "fat12/dmg", "-C", "source", "."]))
+    stack = next(record for record in plan if record["type"] == "stack")
+    planned = next(record for record in plan if record["type"] == "plan")
+    assert stack["compression"] == "gzip" and planned["codec"].startswith("zlib ")
+    assert int(planned["output_bytes"]) > int(planned["volume_bytes"])
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -1506,6 +1551,7 @@ def main():
         test_compressed_and_streams(executable, root)
         test_partitioned_create(executable, root)
         test_container_create(executable, root)
+        test_compressed_create(executable, root)
         assert not list(root.glob(".fsimg-*"))
     print("CLI commands, independent JSON decoding, publication and failure checks pass")
 

@@ -81,7 +81,7 @@ After `--` every word is an operand, including one spelled `-C`.
 | `-f image` | The image: input for `x`, `t`, `W`, `i`; output for `c`; `-` is stdin or stdout. Required except with `c -n` |
 | `-C dir` | An existing directory: the parent of the extraction destination; the base of create operands |
 | `-S auto|required|off` | Sandbox policy; default `auto`, with a visible warning when confinement is unavailable |
-| `-T directory|-` | Scratch parent; default `TMPDIR` when set, otherwise `/tmp`. `-T -` disables scratch: no spool is created, so gzip input then fails with a diagnostic naming `-T -` rather than a limit figure; with `-f -`, whose stream needs the scratch tree for its spool or raw intermediate, `-T -` is a syntax error |
+| `-T directory|-` | Scratch parent; default `TMPDIR` when set, otherwise `/tmp`. `-T -` disables scratch: no spool is created, so gzip input then fails with a diagnostic naming `-T -` rather than a limit figure; with `-f -`, whose stream needs the scratch tree for its spool or raw intermediate, and with `cW` of a compressed image, whose verification reads it through the spool, `-T -` is a syntax error |
 | `-l key=value` | Repeatable resource limit; each key at most once |
 | `-m bytes` | Aggregate fsimg memory budget; default 256 MiB |
 | `-v` | Repeatable verbosity, defined per mode below |

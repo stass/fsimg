@@ -115,7 +115,7 @@ test_programs = test-core test-io test-meta test-meta-sort test-unicode test-for
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
-	test-containers test-compression header-c header-cxx
+	test-containers test-compression test-gzip-write header-c header-cxx
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
@@ -155,6 +155,8 @@ test_containers_SOURCES = test/containers.c test/test.h
 test_containers_LDADD = libfsimg-core.la
 test_compression_SOURCES = test/compression.c test/test.h
 test_compression_LDADD = libfsimg-core.la
+test_gzip_write_SOURCES = test/gzip-write.c test/test.h
+test_gzip_write_LDADD = libfsimg-core.la
 layers_compose_SOURCES = test/layers-compose.c
 layers_compose_LDADD = libfsimg.la
 test_posix_SOURCES = test/posix.c test/test.h

@@ -18,7 +18,8 @@
  * scheme's leading tables or the previous partition, whole sectors long,
  * with the trailing tables at the end of the disk. A container rounds the
  * disk up to its granularity first, so those tables end the disk it
- * declares, and states the bound of the output it will encode.
+ * declares, and states the bound of the output it will encode; a
+ * compression states the bound of its encoding of that.
  */
 #define PARTITION_ALIGNMENT	(UINT64_C(1) << 20)
 
@@ -36,6 +37,8 @@ static fsimg_status_t check_identities(const fsimg_disk_plan_t *,
     fsimg_error_t *);
 static fsimg_status_t resolve_container(fsimg_disk_plan_t *,
     const fsimg_stack_t *, const fsimg_layer_options_t *, fsimg_error_t *);
+static fsimg_status_t resolve_compression(fsimg_disk_plan_t *,
+    const fsimg_layer_options_t *, fsimg_error_t *);
 static fsimg_status_t size_disk(fsimg_disk_plan_t *, uint64_t,
     fsimg_error_t *);
 
@@ -142,6 +145,24 @@ resolve_container(fsimg_disk_plan_t *plan, const fsimg_stack_t *stack,
 	    plan->epoch, &plan->container_settings, error));
 }
 
+/* The compression the mode flags select and its resolved settings. */
+static fsimg_status_t
+resolve_compression(fsimg_disk_plan_t *plan,
+    const fsimg_layer_options_t *layers, fsimg_error_t *error)
+{
+	plan->compression = fsimg_write_compression(plan->flags);
+	if (plan->compression == NULL)
+		return (FSIMG_OK);
+	return (plan->compression->compression->plan(layers, plan->flags,
+	    plan->epoch, &plan->compression_settings, error));
+}
+
+bool
+fsimg_disk_plan_encoded(const fsimg_disk_plan_t *plan)
+{
+	return (plan->container != NULL || plan->compression != NULL);
+}
+
 /*
  * Resolve the stack's scheme and container and the disk-level settings:
  * the sector size, a fixed disk length, and the disk identifier, which is
@@ -163,9 +184,12 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	bzero(plan, sizeof(*plan));
 	plan->epoch = epoch;
 	plan->flags = flags;
-	status = fsimg_layer_options_check(stack, layers, true, error);
+	status = fsimg_layer_options_check(stack, fsimg_write_compression(flags),
+	    layers, true, error);
 	if (status == FSIMG_OK)
 		status = resolve_container(plan, stack, layers, error);
+	if (status == FSIMG_OK)
+		status = resolve_compression(plan, layers, error);
 	if (status != FSIMG_OK)
 		return (status);
 	plan->scheme = fsimg_stack_layer(stack, FSIMG_LAYER_SCHEME);
@@ -381,12 +405,14 @@ fsimg_disk_plan_fit(const fsimg_disk_plan_t *plan, uint32_t granule,
  * own, else used rounded up to the container's granularity, the padding
  * zeros that become unallocated space. Then the output's bound: the disk
  * itself, or the most its container encoding can take, which also refuses
- * a disk the container cannot describe.
+ * a disk the container cannot describe, and then the most the compression
+ * of that can take.
  */
 static fsimg_status_t
 size_disk(fsimg_disk_plan_t *plan, uint64_t used, fsimg_error_t *error)
 {
 	const fsimg_container_ops_t *container;
+	fsimg_status_t status;
 
 	if (!plan->fixed) {
 		if (!round_up(used, plan->container_settings.granularity,
@@ -395,11 +421,18 @@ size_disk(fsimg_disk_plan_t *plan, uint64_t used, fsimg_error_t *error)
 			    FSIMG_OP_IMAGE, "the disk exceeds the disk range"));
 		plan->padding_bytes = plan->disk_bytes - used;
 	}
-	plan->output_bytes = plan->disk_bytes;
-	if (plan->container == NULL)
+	plan->container_bytes = plan->disk_bytes;
+	if (plan->container != NULL) {
+		container = plan->container->container;
+		status = container->bound(&plan->container_settings,
+		    plan->disk_bytes, &plan->container_bytes, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	plan->output_bytes = plan->container_bytes;
+	if (plan->compression == NULL)
 		return (FSIMG_OK);
-	container = plan->container->container;
-	return (container->bound(&plan->container_settings, plan->disk_bytes,
+	return (plan->compression->compression->bound(plan->container_bytes,
 	    &plan->output_bytes, error));
 }
 
@@ -495,8 +528,13 @@ fsimg_disk_plan_report(const fsimg_disk_plan_t *plan, uint32_t slot,
 
 	bzero(image, sizeof(*image));
 	bzero(partition, sizeof(*partition));
-	/* The planned disk is its own file, before any container wraps it. */
+	/* The planned disk is its own file, before any container wraps it,
+	 * as an opened image reports the file it peeled once decompressed.
+	 */
 	image->disk_bytes = image->file_bytes = plan->disk_bytes;
+	if (plan->compression != NULL)
+		snprintf(image->compression, sizeof(image->compression), "%s",
+		    plan->compression->name);
 	if (plan->container != NULL) {
 		snprintf(image->container, sizeof(image->container), "%s",
 		    plan->container->name);
@@ -529,6 +567,7 @@ fsimg_disk_plan_budget(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
 {
 	uint64_t limit = ctx->options.max_output_bytes;
 	uint64_t needed;
+	char encoding[40];
 
 	needed = plan->output_bytes;
 	if (raw)
@@ -536,14 +575,19 @@ fsimg_disk_plan_budget(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
 	if (limit == 0 || needed <= limit)
 		return (FSIMG_OK);
 	fsimg_limit_error(error, FSIMG_RESOURCE_OUTPUT, limit, needed);
-	if (raw && error != NULL)
-		snprintf(error->message, sizeof(error->message),
-		    "the raw disk of %llu bytes and its %s%s of up to %llu "
-		    "bytes exceed the output limit",
-		    (unsigned long long)plan->disk_bytes,
-		    plan->container != NULL ? plan->container->name : "copy",
-		    plan->container != NULL ? " encoding" : "",
-		    (unsigned long long)plan->output_bytes);
+	if (!raw || error == NULL)
+		return (FSIMG_ELIMIT);
+	/* The encoding's layers, "dmg", "gzip" or "dmg/gzip", or a copy. */
+	snprintf(encoding, sizeof(encoding), "%s%s%s",
+	    plan->container != NULL ? plan->container->name : "",
+	    plan->container != NULL && plan->compression != NULL ? "/" : "",
+	    plan->compression != NULL ? plan->compression->name : "");
+	snprintf(error->message, sizeof(error->message),
+	    "the raw disk of %llu bytes and its %s%s of up to %llu bytes exceed "
+	    "the output limit", (unsigned long long)plan->disk_bytes,
+	    encoding[0] != '\0' ? encoding : "copy",
+	    encoding[0] != '\0' ? " encoding" : "",
+	    (unsigned long long)plan->output_bytes);
 	return (FSIMG_ELIMIT);
 }
 

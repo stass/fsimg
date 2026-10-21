@@ -210,8 +210,9 @@ validate_forced_stack(const fsimg_image_options_t *options,
 			    FSIMG_OP_IMAGE, "the named container is not supported"));
 	}
 
-	status = fsimg_layer_options_check(&options->stack, &options->layers,
-	    false, error);
+	status = fsimg_layer_options_check(&options->stack,
+	    (options->flags & FSIMG_IMAGE_GZIP) != 0 ? fsimg_layer_find("gzip") :
+	    NULL, &options->layers, false, error);
 	if (status != FSIMG_OK)
 		return (status);
 	sector = options->layers.gpt_sector_bytes;

@@ -141,7 +141,8 @@ fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
 
 /*
  * Without a filesystem writer, write options carry only the mode: the
- * reproducible, durable and loss flags, the epoch and the layer settings.
+ * reproducible, durable, loss and gzip flags, the epoch and the layer
+ * settings.
  * Every other field must hold its default, as a setting a format does not
  * store must, so none is silently ignored: a copy of the options with the
  * three mode fields reset must equal the defaults. selected is the
@@ -163,7 +164,7 @@ check_mode(const fsimg_write_options_t *options,
 	if (options->size != sizeof(*options) ||
 	    options->version != FSIMG_OPTIONS_VERSION ||
 	    (options->flags & ~(FSIMG_WRITE_ALLOW_LOSS | FSIMG_WRITE_REPRODUCIBLE |
-	    FSIMG_WRITE_DURABLE)) != 0)
+	    FSIMG_WRITE_DURABLE | FSIMG_WRITE_GZIP)) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "unsupported write options size, version or flags"));
 	others = *options;
@@ -399,7 +400,8 @@ identify_volume(fsimg_ctx_t *ctx, fsimg_io_t *volume, uint64_t length,
 /*
  * Place a resolved plan's volumes, encode its tables, check the output
  * limit and the sink against every input, and transcode the assembled
- * disk to the sink through the plan's container, or copy it without one.
+ * disk to the sink through the plan's container and compression, or copy
+ * it without either.
  */
 static fsimg_status_t
 write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
@@ -531,7 +533,8 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	if (status == FSIMG_OK)
 		status = check_mode(options, &selected, &layers, error);
 	if (status == FSIMG_OK)
-		status = fsimg_layer_options_check(&stack, &layers, true, error);
+		status = fsimg_layer_options_check(&stack,
+		    fsimg_write_compression(selected.flags), &layers, true, error);
 	if (status == FSIMG_OK)
 		status = fsimg_image_select(image, selector, &volume, error);
 	if (status != FSIMG_OK)
