@@ -423,8 +423,8 @@
   `lib/core/`, `cmd/fsimg/`, `fuzz/`): implement the
   [manifest design](specs/design-mtree.md): the mtree(5) parser as a source
   root (`@file` operand, `fsimg_writer_add_manifest()`), generated zero,
-  seeded and positional content with holes, FreeBSD's `sha256c.c` imported
-  into `lib/core/`, host digests checked in the source cursor,
+  seeded and positional content with holes, host digests checked through
+  `lib/core/sha256.h` in the source cursor,
   `x --mtree=FILE` through the output coordinator, `fuzz/mtree.c`, and the
   oracle tests against `mtree -c` and `bsdtar --format=mtree`. The spec
   harness's creation cases then emit manifests instead of writing `source/`.

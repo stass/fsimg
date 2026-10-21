@@ -25,7 +25,8 @@ pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libfsimg.pc
 dist_man_MANS = docs/fsimg.1 docs/libfsimg.3
 dist_doc_DATA = LICENSE README.md docs/examples.md docs/references.md third-party/Unicode-LICENSE.txt \
-	third-party/libarchive-msdosfs-LICENSE.txt
+	third-party/libarchive-msdosfs-LICENSE.txt \
+	third-party/FreeBSD-sha256-LICENSE.txt
 examplesdir = $(datadir)/fsimg/examples
 dist_examples_DATA = examples/example.h examples/create-tree.c examples/provider.c \
 	examples/read-slice.c examples/extract.c
@@ -35,7 +36,7 @@ libfsimg_la_SOURCES =
 libfsimg_la_LIBADD = libfsimg-core.la
 libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/core/unicode.c lib/core/unicode.h lib/core/case-tables.h \
-	lib/core/calendar.c \
+	lib/core/calendar.c lib/core/sha256.c lib/core/sha256.h \
 	lib/formats/format.c lib/formats/format.h \
 	lib/io/io.c lib/output/publish.c lib/output/publish.h \
 	lib/output/write.c \

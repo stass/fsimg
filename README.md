@@ -200,6 +200,7 @@ vendored. Development tests run unprivileged in disposable fixtures.
 Project-owned files carry SPDX BSD-2-Clause notices and contributor copyright;
 [LICENSE](LICENSE) contains the terms. Autotools generates its own build support
 with upstream notices intact. FAT codec examples adapted from the author's
-libarchive reader and writer retain their BSD-2-Clause notices. Pinned Unicode/CP437 data
+libarchive reader and writer retain their BSD-2-Clause notices, as does the
+SHA-256 implementation adapted from FreeBSD. Pinned Unicode/CP437 data
 uses the Unicode-3.0 license. The [reference manifest](docs/references.md) records
 provenance; installed documentation includes the required notices.

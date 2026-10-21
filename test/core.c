@@ -11,7 +11,6 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
-#include <strings.h>
 #include <unistd.h>
 
 #include "digest.h"
@@ -33,9 +32,12 @@ typedef struct callback_state {
 static void test_arithmetic(void);
 static void test_context(void);
 static void test_descriptor_cleanup(void);
-static void test_sha256(void);
+static void test_sha256_split_updates(void);
+static void test_sha256_vectors(void);
 static bool cancel_callback(void *);
 static void progress_callback(void *, const fsimg_progress_t *);
+static void sha256_hex_of(const void *, size_t, char *);
+static bool sha256_hex_matches(const char *, const char *, const char *);
 
 static void
 test_arithmetic(void)
@@ -245,40 +247,117 @@ test_context(void)
 	fsimg_ctx_free(ctx);
 }
 
-/* FIPS 180-4 example vectors: one block, a 448-bit message whose padding
- * needs a second block, and a million bytes absorbed in uneven pieces that
- * straddle block boundaries.
+/* SHA-256 of a message absorbed in one update, as lowercase hexadecimal. */
+static void
+sha256_hex_of(const void *message, size_t length, char *hex)
+{
+	fsimg_sha256_t digest;
+
+	fsimg_sha256_init(&digest);
+	fsimg_sha256_update(&digest, message, length);
+	sha256_final_hex(&digest, hex);
+}
+
+/* Compare a digest with its expectation, naming the message on mismatch. */
+static bool
+sha256_hex_matches(const char *what, const char *hex, const char *expected)
+{
+	if (strcmp(hex, expected) == 0)
+		return (true);
+	fprintf(stderr, "sha256 of %s = %s, expected %s\n", what, hex,
+	    expected);
+	return (false);
+}
+
+/* The FIPS 180-4 example messages: the empty message, "abc" in one block,
+ * the 448-bit message whose padding needs a second block, the 896-bit
+ * message, and one million 'a' characters absorbed in 7-byte pieces that
+ * straddle block boundaries. The expected digests are NIST's. A comparison
+ * that accepted a wrong digest would prove nothing, so a corrupted
+ * expectation must fail it.
  */
 static void
-test_sha256(void)
+test_sha256_vectors(void)
 {
 	static const sha256_vector_t vectors[] = {
 		{ "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
 		{ "abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
 		{ "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
-		    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" }
+		    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" },
+		{ "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn"
+		    "hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+		    "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1" }
 	};
-	char hex[SHA256_HEX_BYTES], chunk[7];
-	sha256_t digest;
+	char hex[FSIMG_SHA256_DIGEST_STRING_LENGTH], chunk[7];
+	fsimg_sha256_t digest;
 	unsigned take;
 
 	for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
-		sha256_init(&digest);
-		sha256_update(&digest, vectors[i].message, strlen(vectors[i].message));
-		sha256_final_hex(&digest, hex);
-		if (strcmp(hex, vectors[i].expected) != 0)
-			fprintf(stderr, "sha256(\"%s\") = %s\n", vectors[i].message, hex);
-		CHECK(strcmp(hex, vectors[i].expected) == 0);
+		sha256_hex_of(vectors[i].message, strlen(vectors[i].message),
+		    hex);
+		CHECK(sha256_hex_matches(vectors[i].message, hex,
+		    vectors[i].expected));
 	}
 
+	sha256_hex_of("abc", 3, hex);
+	CHECK(!sha256_hex_matches("abc (this mismatch is expected)", hex,
+	    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ae"));
+
 	memset(chunk, 'a', sizeof(chunk));
-	sha256_init(&digest);
+	fsimg_sha256_init(&digest);
 	for (unsigned remaining = 1000000; remaining > 0; remaining -= take) {
 		take = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
-		sha256_update(&digest, chunk, take);
+		fsimg_sha256_update(&digest, chunk, take);
 	}
 	sha256_final_hex(&digest, hex);
-	CHECK(strcmp(hex, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0") == 0);
+	CHECK(sha256_hex_matches("one million 'a'", hex,
+	    "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"));
+}
+
+/* A multi-block message (bytes 0, 1, 2, ...) absorbed in two updates, cut
+ * at every offset 0..64. Each cut leaves a different number of bytes
+ * pending in the block buffer, so the second update completes that block,
+ * compresses whole blocks straight from its input and buffers the rest.
+ * The 192-byte message is three whole blocks, so the second update ends
+ * exactly on a block boundary; the 200-byte message leaves an 8-byte tail.
+ * An empty update passing NULL between the pieces must change nothing.
+ * Every cut must give the digest Python's hashlib computes for the whole
+ * message.
+ */
+static void
+test_sha256_split_updates(void)
+{
+	static const struct {
+		size_t		 length;
+		const char	*expected;
+	} messages[] = {
+		{ 192, "8b4a544837a1a0280fa8a7c82865c27a1064b3cc6281fda0753566b9bb104a87" },
+		{ 200, "1901da1c9f699b48f6b2636e65cbf73abf99d0441ef67f5c540a42f7051dec6f" }
+	};
+	char hex[FSIMG_SHA256_DIGEST_STRING_LENGTH], what[48];
+	unsigned char message[200];
+	fsimg_sha256_t digest;
+	size_t length;
+
+	for (size_t i = 0; i < sizeof(message); i++)
+		message[i] = (unsigned char)i;
+
+	for (size_t m = 0; m < sizeof(messages) / sizeof(messages[0]); m++) {
+		length = messages[m].length;
+		CHECK(length <= sizeof(message));
+		for (size_t cut = 0; cut <= FSIMG_SHA256_BLOCK_LENGTH; cut++) {
+			fsimg_sha256_init(&digest);
+			fsimg_sha256_update(&digest, message, cut);
+			fsimg_sha256_update(&digest, NULL, 0);
+			fsimg_sha256_update(&digest, message + cut,
+			    length - cut);
+			sha256_final_hex(&digest, hex);
+			snprintf(what, sizeof(what), "bytes 0..%zu cut at %zu",
+			    length - 1, cut);
+			CHECK(sha256_hex_matches(what, hex,
+			    messages[m].expected));
+		}
+	}
 }
 
 int
@@ -287,6 +366,7 @@ main(void)
 	test_arithmetic();
 	test_context();
 	test_descriptor_cleanup();
-	test_sha256();
+	test_sha256_vectors();
+	test_sha256_split_updates();
 	return (0);
 }

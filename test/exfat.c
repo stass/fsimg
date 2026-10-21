@@ -1291,12 +1291,12 @@ baseline_zero_tail(void)
 	exfat_fixture_t f;
 	const fsimg_entry_t *entry;
 	fsimg_stats_t stats;
-	sha256_t digest;
-	char hex[SHA256_HEX_BYTES];
+	fsimg_sha256_t digest;
+	char hex[FSIMG_SHA256_DIGEST_STRING_LENGTH];
 
 	fixture_new(&f);
 	entry = open_file(&f);
-	sha256_init(&digest);
+	fsimg_sha256_init(&digest);
 	baseline_digest_read(f.reader, 0, entry->size, &digest);
 	sha256_final_hex(&digest, hex);
 	/* Sampled while Data.bin is still current, before teardown, so
@@ -1319,14 +1319,14 @@ baseline_fragmented(void)
 	exfat_fixture_t f;
 	const fsimg_entry_t *entry;
 	fsimg_stats_t stats;
-	sha256_t digest;
-	char hex[SHA256_HEX_BYTES];
+	fsimg_sha256_t digest;
+	char hex[FSIMG_SHA256_DIGEST_STRING_LENGTH];
 
 	fixture_new(&f);
 	CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
 	make_fragmented_file(&f, 512);
 	entry = open_file(&f);
-	sha256_init(&digest);
+	fsimg_sha256_init(&digest);
 	baseline_read_script(f.reader, entry->size, &digest);
 	sha256_final_hex(&digest, hex);
 	/* Sampled while Data.bin is still current, before teardown, so

@@ -1811,9 +1811,9 @@ baseline_fragmented(void)
 	fixture_t f;
 	const fsimg_entry_t *entry;
 	fsimg_stats_t stats;
-	sha256_t digest;
+	fsimg_sha256_t digest;
 	unsigned char data[512];
-	char hex[SHA256_HEX_BYTES];
+	char hex[FSIMG_SHA256_DIGEST_STRING_LENGTH];
 	const uint32_t fragments = 1000;
 
 	fixture_init(&f, 16);
@@ -1832,7 +1832,7 @@ baseline_fragmented(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(strcmp(entry->path, "/INDEX.BIN") == 0);
-	sha256_init(&digest);
+	fsimg_sha256_init(&digest);
 	baseline_read_script(f.reader, entry->size, &digest);
 	sha256_final_hex(&digest, hex);
 	/* Sampled while INDEX.BIN is still current, before teardown, so

@@ -46,7 +46,9 @@ create operand and nothing it could resolve a pathname against. The safe
 extractor (`lib/extract/extract.c`) creates files and directories with private
 modes, restores no owner, mode or change time, and creates no links or
 FIFOs, so an extracted QNX6 tree loses exactly the fields a manifest can
-carry. The tree has no SHA-256 implementation and no manifest parser.
+carry. The tree has no manifest parser; its SHA-256 implementation is the
+one [Digests](#digests) describes, `lib/core/sha256.c`, which only the tests
+call.
 
 ## A manifest is a source root
 
@@ -356,8 +358,10 @@ contract](design-cli.md#creation) forbids.
 The project has one SHA-256 implementation in `lib/core/`, used by the
 generators, the digest checks and the extraction writer: FreeBSD's
 `sys/crypto/sha2/sha256c.c` (BSD-2-Clause, Colin Percival), imported with its
-copyright and license notice preserved and adapted only to the project's
-build, and tested against the FIPS 180-4 vectors.
+copyright and license notice preserved, adapted to the project's build, to
+hosts with a 32-bit `size_t` and to empty updates (the [implementation
+references](../docs/references.md) list each change), and tested against the
+FIPS 180-4 vectors.
 
 ## Metadata mapping
 

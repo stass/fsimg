@@ -63,12 +63,12 @@ typedef struct image_sink {
  * sampled separately while the last file is current.
  */
 typedef struct tree_record {
-	char		 image_sha256[SHA256_HEX_BYTES];
+	char		 image_sha256[FSIMG_SHA256_DIGEST_STRING_LENGTH];
 	uint64_t	 image_bytes;
 	fsimg_stats_t	 write_stats;
 	uint64_t	 write_work;
-	char		 traversal_sha256[SHA256_HEX_BYTES];
-	char		 content_sha256[SHA256_HEX_BYTES];
+	char		 traversal_sha256[FSIMG_SHA256_DIGEST_STRING_LENGTH];
+	char		 content_sha256[FSIMG_SHA256_DIGEST_STRING_LENGTH];
 	fsimg_stats_t	 read_stats;
 	uint64_t	 read_memory_retained;
 	uint64_t	 read_work;
@@ -98,8 +98,8 @@ static void write_tree(const char *, int, image_sink_t *, tree_record_t *);
 static void dump_image(const char *, const image_sink_t *);
 static void read_tree(int, image_sink_t *, tree_record_t *);
 static void check_range(fsimg_reader_t *, uint64_t, uint64_t);
-static void digest_entry(sha256_t *, const fsimg_entry_t *);
-static void digest_timestamp(sha256_t *, const char *,
+static void digest_entry(fsimg_sha256_t *, const fsimg_entry_t *);
+static void digest_timestamp(fsimg_sha256_t *, const char *,
     const fsimg_timestamp_t *);
 
 static fsimg_ctx_t *
@@ -344,7 +344,7 @@ write_tree(const char *format, int scratch, image_sink_t *sink,
 	fsimg_writer_t *writer;
 	fsimg_ctx_t *ctx;
 	fsimg_io_t *output;
-	sha256_t digest;
+	fsimg_sha256_t digest;
 
 	ctx = tree_context(scratch);
 	fsimg_write_options_init(&options);
@@ -366,8 +366,8 @@ write_tree(const char *format, int scratch, image_sink_t *sink,
 	output = sink_io(ctx, sink, true);
 	CHECK(fsimg_writer_emit(writer, output, NULL) == FSIMG_OK);
 
-	sha256_init(&digest);
-	sha256_update(&digest, sink->bytes, (size_t)sink->length);
+	fsimg_sha256_init(&digest);
+	fsimg_sha256_update(&digest, sink->bytes, (size_t)sink->length);
 	sha256_final_hex(&digest, record->image_sha256);
 	record->image_bytes = sink->length;
 	CHECK(fsimg_ctx_get_stats(ctx, &record->write_stats, NULL) == FSIMG_OK);
@@ -406,7 +406,7 @@ dump_image(const char *fixture, const image_sink_t *sink)
 static void
 read_tree(int scratch, image_sink_t *sink, tree_record_t *record)
 {
-	sha256_t traversal, content;
+	fsimg_sha256_t traversal, content;
 	const fsimg_entry_t *entry;
 	fsimg_stats_t current;
 	fsimg_reader_t *reader;
@@ -417,8 +417,8 @@ read_tree(int scratch, image_sink_t *sink, tree_record_t *record)
 	ctx = tree_context(scratch);
 	input = sink_io(ctx, sink, false);
 	CHECK(fsimg_reader_open(ctx, input, NULL, &reader, NULL) == FSIMG_OK);
-	sha256_init(&traversal);
-	sha256_init(&content);
+	fsimg_sha256_init(&traversal);
+	fsimg_sha256_init(&content);
 	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
 		digest_entry(&traversal, entry);
 		if (entry->kind != FSIMG_ENTRY_FILE)
@@ -441,22 +441,22 @@ read_tree(int scratch, image_sink_t *sink, tree_record_t *record)
 
 /* One text line per entry: path, kind, size, then each valid metadata field. */
 static void
-digest_entry(sha256_t *digest, const fsimg_entry_t *entry)
+digest_entry(fsimg_sha256_t *digest, const fsimg_entry_t *entry)
 {
 	const fsimg_metadata_t *metadata = &entry->metadata;
 	char line[128];
 	int length;
 
-	sha256_update(digest, entry->path, strlen(entry->path));
+	fsimg_sha256_update(digest, entry->path, strlen(entry->path));
 	length = snprintf(line, sizeof(line), " kind=%d size=%" PRIu64
 	    " valid=%#" PRIx32, (int)entry->kind, entry->size, metadata->valid);
 	CHECK(length > 0 && (size_t)length < sizeof(line));
-	sha256_update(digest, line, (size_t)length);
+	fsimg_sha256_update(digest, line, (size_t)length);
 	if ((metadata->valid & FSIMG_META_ATTRIBUTES) != 0) {
 		length = snprintf(line, sizeof(line), " attributes=%#" PRIx32,
 		    metadata->attributes);
 		CHECK(length > 0 && (size_t)length < sizeof(line));
-		sha256_update(digest, line, (size_t)length);
+		fsimg_sha256_update(digest, line, (size_t)length);
 	}
 	if ((metadata->valid & FSIMG_META_CREATED) != 0)
 		digest_timestamp(digest, "created", &metadata->created);
@@ -464,11 +464,11 @@ digest_entry(sha256_t *digest, const fsimg_entry_t *entry)
 		digest_timestamp(digest, "modified", &metadata->modified);
 	if ((metadata->valid & FSIMG_META_ACCESSED) != 0)
 		digest_timestamp(digest, "accessed", &metadata->accessed);
-	sha256_update(digest, "\n", 1);
+	fsimg_sha256_update(digest, "\n", 1);
 }
 
 static void
-digest_timestamp(sha256_t *digest, const char *name,
+digest_timestamp(fsimg_sha256_t *digest, const char *name,
     const fsimg_timestamp_t *timestamp)
 {
 	char text[128];
@@ -479,12 +479,12 @@ digest_timestamp(sha256_t *digest, const char *name,
 	    timestamp->nanoseconds, timestamp->precision_ns,
 	    (int)timestamp->basis, timestamp->offset_minutes);
 	CHECK(length > 0 && (size_t)length < sizeof(text));
-	sha256_update(digest, text, (size_t)length);
+	fsimg_sha256_update(digest, text, (size_t)length);
 }
 
 void
 baseline_digest_read(fsimg_reader_t *reader, uint64_t offset, uint64_t length,
-    sha256_t *digest)
+    fsimg_sha256_t *digest)
 {
 	unsigned char buffer[READ_CHUNK_BYTES];
 	size_t request, count;
@@ -497,7 +497,7 @@ baseline_digest_read(fsimg_reader_t *reader, uint64_t offset, uint64_t length,
 		CHECK(fsimg_reader_read_at(reader, offset, buffer, request, &count,
 		    NULL) == FSIMG_OK);
 		CHECK(count > 0 && count <= request);
-		sha256_update(digest, buffer, count);
+		fsimg_sha256_update(digest, buffer, count);
 		offset += count;
 		length -= count;
 	}
@@ -586,7 +586,8 @@ baseline_tree(const char *fixture, const char *format)
  * validity (see check_range) but not recorded.
  */
 void
-baseline_read_script(fsimg_reader_t *reader, uint64_t size, sha256_t *digest)
+baseline_read_script(fsimg_reader_t *reader, uint64_t size,
+    fsimg_sha256_t *digest)
 {
 	static const unsigned seek_permille[] = { 999, 0, 502, 13, 587 };
 	const size_t seeks = sizeof(seek_permille) / sizeof(seek_permille[0]);

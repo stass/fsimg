@@ -497,7 +497,8 @@ Manifest import and export follow [the manifest design](../specs/design-mtree.md
 each stage one reviewed commit:
 
 1. **SHA-256.** FreeBSD's `sha256c.c` imported into `lib/core/` with its
-   notice, adapted only to the build. Complete: the FIPS 180-4 vectors pass.
+   notice, adapted to the build, to a 32-bit `size_t` and to empty updates.
+   Complete: the FIPS 180-4 vectors pass.
 2. **Parser.** The bounded mtree subset as a self-contained parser: escapes,
    `/set` and `/unset`, continuations, the keyword classes and every bound.
    Complete: valid and malformed unit cases, and `fuzz/mtree.c` runs.

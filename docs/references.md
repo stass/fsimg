@@ -58,6 +58,25 @@ source, and emits source hashes. The mapping's
 DOS end-of-file byte is excluded from records, and included in its source hash.
 No locale or host Unicode library supplies comparison behavior at runtime.
 
+`lib/core/sha256.c` and `lib/core/sha256.h`, the project's one SHA-256
+implementation, are FreeBSD's `sys/crypto/sha2/sha256c.c` and
+`sys/crypto/sha2/sha256.h` by Colin Percival, under a BSD-2-Clause notice,
+taken from the FreeBSD src repository at commit
+`975e3605ebb15cbaf5a25c1c9d1f51aed41291d0`:
+
+| File | SHA-256 of the upstream file |
+| --- | --- |
+| `sys/crypto/sha2/sha256c.c` | `9eed9976f45476f7dd0dd452861416ff1f45b2a7035909171dc6fef836ba9b61` |
+| `sys/crypto/sha2/sha256.h` | `10f3fd28a59056ad4701c58570d55cd4de4dcebfbaa490c154b7005f8e16dabe` |
+
+Both files retain the notice, which
+`third-party/FreeBSD-sha256-LICENSE.txt` repeats for binary distributions,
+and list their adaptations in a comment after it: the SHA-224 variant, the
+arm64 instruction dispatch and the libmd glue are removed, the names take the
+`fsimg_` prefix, portable byte-order helpers replace `<sys/endian.h>`, an
+update's byte count is widened before it is converted to bits, an empty
+update returns before `memcpy`, and `bzero` replaces `explicit_bzero`.
+
 `test/fat.c` owns BSD-2-Clause synthetic fixture generation. The fixed layouts,
 geometry matrix, corruption mutations, and content patterns are encoded
 independently of production decoders. `test/fat-integration.sh.in` creates
