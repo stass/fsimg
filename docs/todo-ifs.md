@@ -38,6 +38,32 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   budget. Write them into `big.img` while the VM is stopped, run
   `dumpifs -u` into `/dev/shmem` and compare with the oracle decodes, before
   the decoder stage's gate.
+* [Low] **External ImageFS readers** (`test/ifs-integration.sh`): build
+  `lclevy/dumpifs` and `qnxprobe` at pinned revisions outside the tree and
+  run the integration script with `DUMPIFS` and `QNXPROBE`, then with
+  `FSIMG_IFS_IMAGES` once uncompressed S1 and S2 copies exist; record the
+  results in `docs/build.md`, where both are skips. Whether either exits
+  nonzero on an image it rejects is unconfirmed; the script counts a zero
+  exit as acceptance.
+* [Low] **ImageFS scale RSS bound off macOS** (`test/ifs.c`,
+  `docs/build.md`): `make check-scale` asserts the 32 MiB RSS growth bound
+  on every host, but it has been measured only on macOS, under
+  `MallocSpaceEfficient=1`. Run it on FreeBSD and Linux, whose allocators
+  also keep freed pages resident, and record the figures or set the
+  allocator's return policy there too.
+* [Low] **Decoder manifest framing** (`tools/qnx/decode/ifsdump.py`,
+  `test/ifs-native.py`): `--manifest` writes names and link targets raw in
+  tab- and newline-separated lines, so a capture whose name or target holds
+  either byte fails the comparison as a decoder-manifest mismatch although
+  fsimg may be right. Escape both fields (hex, as `test-ifs --manifest`
+  writes targets) when a capture needs it. The CLI's refused count is not
+  cross-checked against `test-ifs --native`'s refusal classes either.
+* [Low] **Native `dumpifs` cycle in the integration script**
+  (`test/ifs-integration.sh`, `tools/qnx/`): the driver design's
+  integration paragraph runs the QNX 6.5.0 guest's `dumpifs` list, check
+  and extract cycle over the reader's fixtures; the script has no step that
+  starts the guest. Add it, skipped when the VM is absent, with the writer's
+  native qualification harness, which drives the same guest.
 * [Medium] **`hbcifs` header fields** (`specs/design-layers.md`): the
   fields at `0x10`, `0x14`, `0x18` and `0x1c` of `PCM3_IFS2.ifs` are
   unidentified; `0x14` is neither CRC-32 nor the additive sum. Until one is

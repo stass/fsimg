@@ -4,7 +4,9 @@
 #include "config.h"
 
 #include <sys/types.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -14,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "extract.h"
@@ -306,6 +309,68 @@ gen_trailer(gen_t *g)
 	put32(g, g->image + g->image_size - 4, (uint32_t)(0 - sum));
 }
 
+/* Encode the header from g's layout into out, which holds dir_offset
+ * zeroed bytes: the fixed fields, the mountpoint, its NUL, and the padding
+ * to dir_offset filled with mountpoint_pad.
+ */
+static void
+gen_encode_header(const gen_t *g, unsigned char *out)
+{
+	memcpy(out, "imagefs", 7);
+	out[H_FLAGS] = g->big ? 0x05 : 0x04;
+	put32(g, out + H_IMAGE_SIZE, g->image_size);
+	put32(g, out + H_HDR_DIR_SIZE, g->hdr_dir_size);
+	put32(g, out + H_DIR_OFFSET, g->dir_offset);
+	for (unsigned i = 0; i < 4; i++)
+		put32(g, out + H_BOOT_INO + 4 * i, g->boot[i]);
+	put32(g, out + H_SCRIPT_INO, g->script);
+	put32(g, out + H_CHAIN_PADDR, g->chain);
+	put32(g, out + H_MOUNT_FLAGS, g->mount_flags);
+	memcpy(out + H_MOUNTPOINT, g->mountpoint, g->mountpoint_length);
+	for (size_t o = H_MOUNTPOINT + g->mountpoint_length + 1;
+	    o < g->dir_offset; o++)
+		out[o] = g->mountpoint_pad;
+}
+
+/* Encode member m's record into r, which holds m->length zeroed bytes: the
+ * prefix, the kind's fields and the path, and a link's target. A file's
+ * data lies elsewhere and is not copied here.
+ */
+static void
+gen_encode_record(const gen_t *g, const gen_member_t *m, unsigned char *r)
+{
+	put16(g, r + R_LENGTH, m->length);
+	put32(g, r + R_INODE, m->inode);
+	put32(g, r + R_MODE, m->mode);
+	put32(g, r + R_GID, m->gid);
+	put32(g, r + R_UID, m->uid);
+	put32(g, r + R_MTIME, m->mtime);
+	memcpy(r + kinds[m->kind].path, m->path, m->path_length);
+	if (m->kind == GEN_FILE) {
+		put32(g, r + R_FILE_OFFSET, m->data_offset);
+		put32(g, r + R_FILE_SIZE, (uint32_t)m->bytes_length);
+	}
+	if (m->kind == GEN_LINK) {
+		put16(g, r + R_LINK_OFFSET, (uint32_t)m->path_length + 1);
+		put16(g, r + R_LINK_SIZE, (uint32_t)m->bytes_length);
+		memcpy(r + kinds[m->kind].path + m->path_length + 1, m->bytes,
+		    m->bytes_length);
+	}
+}
+
+/* The bytes of a member's record before padding: its kind's path offset,
+ * the path and its NUL, and a link's target and its NUL.
+ */
+static uint64_t
+gen_record_bytes(gen_kind_t kind, size_t path_length, size_t target_length)
+{
+	uint64_t length = kinds[kind].path + path_length + 1;
+
+	if (kind == GEN_LINK)
+		length += target_length + 1;
+	return (length);
+}
+
 /* Lay the image out and encode it: the header, the mountpoint padded to
  * dir_offset, each record padded with zeros to a multiple of 4 plus its
  * extra padding, the terminator, each file's data at the next multiple of
@@ -322,12 +387,10 @@ gen_finish_extra(gen_t *g, size_t extra)
 	offset = g->dir_offset;
 	for (size_t i = 0; i < g->count; i++) {
 		gen_member_t *m = &g->members[i];
-		uint64_t length = kinds[m->kind].path + m->path_length + 1;
 
-		if (m->kind == GEN_LINK)
-			length += m->bytes_length + 1;
 		m->table_offset = (uint32_t)offset;
-		m->length = round4(length) + m->pad;
+		m->length = round4(gen_record_bytes(m->kind, m->path_length,
+		    m->bytes_length)) + m->pad;
 		offset += m->length;
 	}
 	g->hdr_dir_size = (uint32_t)offset + 4;
@@ -351,45 +414,14 @@ gen_finish_extra(gen_t *g, size_t extra)
 	CHECK(g->image != NULL);
 	memset(g->image + g->image_size, GEN_POISON, extra);
 
-	memcpy(g->image, "imagefs", 7);
-	g->image[H_FLAGS] = g->big ? 0x05 : 0x04;
-	put32(g, g->image + H_IMAGE_SIZE, g->image_size);
-	put32(g, g->image + H_HDR_DIR_SIZE, g->hdr_dir_size);
-	put32(g, g->image + H_DIR_OFFSET, g->dir_offset);
-	for (unsigned i = 0; i < 4; i++)
-		put32(g, g->image + H_BOOT_INO + 4 * i, g->boot[i]);
-	put32(g, g->image + H_SCRIPT_INO, g->script);
-	put32(g, g->image + H_CHAIN_PADDR, g->chain);
-	put32(g, g->image + H_MOUNT_FLAGS, g->mount_flags);
-	memcpy(g->image + H_MOUNTPOINT, g->mountpoint, g->mountpoint_length);
-	for (size_t o = H_MOUNTPOINT + g->mountpoint_length + 1;
-	    o < g->dir_offset; o++)
-		g->image[o] = g->mountpoint_pad;
-
+	gen_encode_header(g, g->image);
 	for (size_t i = 0; i < g->count; i++) {
 		gen_member_t *m = &g->members[i];
-		unsigned char *r = g->image + m->table_offset;
 
-		put16(g, r + R_LENGTH, m->length);
-		put32(g, r + R_INODE, m->inode);
-		put32(g, r + R_MODE, m->mode);
-		put32(g, r + R_GID, m->gid);
-		put32(g, r + R_UID, m->uid);
-		put32(g, r + R_MTIME, m->mtime);
-		memcpy(r + kinds[m->kind].path, m->path, m->path_length);
-		if (m->kind == GEN_FILE) {
-			put32(g, r + R_FILE_OFFSET, m->data_offset);
-			put32(g, r + R_FILE_SIZE, (uint32_t)m->bytes_length);
+		gen_encode_record(g, m, g->image + m->table_offset);
+		if (m->kind == GEN_FILE)
 			memcpy(g->image + m->data_offset, m->bytes,
 			    m->bytes_length);
-		}
-		if (m->kind == GEN_LINK) {
-			put16(g, r + R_LINK_OFFSET,
-			    (uint32_t)m->path_length + 1);
-			put16(g, r + R_LINK_SIZE, (uint32_t)m->bytes_length);
-			memcpy(r + kinds[m->kind].path + m->path_length + 1,
-			    m->bytes, m->bytes_length);
-		}
 	}
 	gen_trailer(g);
 }
@@ -1015,19 +1047,86 @@ model_verify(const model_t *m)
 }
 
 /*
- * Reading through the library.
+ * Reading through the library. A fixture is an image behind the callback
+ * adapter, in a context with a 16 MiB budget and a private scratch
+ * directory, with read accounting and fault injection; fixture_close
+ * checks that nothing outlived the reader.
  */
 
+/* The regions of an image a scale case counts reads by, so that the bytes
+ * read from each give the passes over it.
+ */
+typedef enum region_kind {
+	REGION_HEADER,		/* [0, dir_offset): the header and mountpoint */
+	REGION_TABLE,		/* [dir_offset, hdr_dir_size) */
+	REGION_DATA,		/* [hdr_dir_size, image_size - 4) */
+	REGION_TRAILER,
+	REGION_KINDS
+} region_kind_t;
+
+/* What one operation read: image calls and bytes in all, and bytes by
+ * region. The first read is the format registry's probe of the image
+ * prefix every registered probe may inspect; it is counted apart, as no
+ * pass over ImageFS metadata.
+ */
+typedef struct read_account {
+	uint64_t	 table_start;	/* dir_offset */
+	uint64_t	 data_start;	/* hdr_dir_size */
+	uint64_t	 trailer_start;	/* image_size - 4 */
+	uint64_t	 calls;
+	uint64_t	 bytes;
+	uint64_t	 probe_bytes;
+	uint64_t	 region_bytes[REGION_KINDS];
+} read_account_t;
+
+typedef struct scale_image scale_image_t;
+
+/* The image is image's first length bytes, or synthesized from scale. A
+ * read touching [fail_first, fail_end) fails; one starting in [eof_at,
+ * eof_end) makes no progress, and one crossing eof_at stops there; no read
+ * returns more than short_max bytes when it is nonzero. Counting read
+ * calls from 1, call fail_call fails and call stall_call makes no
+ * progress, either recording its offset in injected_offset. The context's
+ * cancellation callback counts polls and cancels from cancel_after on
+ * when that is nonzero. Zeroed fields inject nothing.
+ */
 typedef struct fixture {
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*io;
 	fsimg_reader_t	*reader;
 	const unsigned char *image;
+	const scale_image_t *scale;
 	uint64_t	 length;
-	uint64_t	 memory;
+	uint64_t	 memory;	/* charged before any I/O object */
+	uint64_t	 fail_first;
+	uint64_t	 fail_end;
+	uint64_t	 eof_at;
+	uint64_t	 eof_end;
+	size_t		 short_max;
+	uint64_t	 calls;
+	uint64_t	 fail_call;
+	uint64_t	 stall_call;
+	uint64_t	 injected_offset;
+	uint64_t	 polls;
+	uint64_t	 cancel_after;
+	read_account_t	*account;	/* nonnull: count every read */
 	int		 scratch;
 	char		 directory[256];
 } fixture_t;
+
+/* How a fixture's context and image differ from the defaults; a zero field
+ * keeps its default.
+ */
+typedef struct fixture_spec {
+	const scale_image_t *scale;	/* nonnull: synthesize the image */
+	uint64_t	 scratch_bytes;	/* the context's scratch budget */
+	uint64_t	 max_work;	/* the session's work limit */
+	uint32_t	 cache_pages;	/* a smaller metadata cache, to spill */
+	uint32_t	 max_depth;	/* the directory depth limit */
+} fixture_spec_t;
+
+static void scale_fill(const scale_image_t *, uint64_t, unsigned char *,
+    size_t);
 
 /* One entry the reader delivered, with its content read completely. */
 typedef struct seen {
@@ -1054,14 +1153,65 @@ typedef struct listing {
 	bool		 opened;
 } listing_t;
 
+/* Count one read: the first apart, as the probe's, the rest by region. */
+static void
+account_read(read_account_t *a, uint64_t offset, size_t length)
+{
+	const uint64_t starts[REGION_KINDS] = {
+		0, a->table_start, a->data_start, a->trailer_start
+	};
+	uint64_t end = offset + length;
+
+	a->calls++;
+	a->bytes += length;
+	if (a->calls == 1) {
+		CHECK(offset == 0);
+		a->probe_bytes = length;
+		return;
+	}
+	for (unsigned r = 0; r < REGION_KINDS; r++) {
+		uint64_t first = starts[r];
+		uint64_t last = r + 1 < REGION_KINDS ? starts[r + 1] : UINT64_MAX;
+
+		first = first > offset ? first : offset;
+		last = last < end ? last : end;
+		if (first < last)
+			a->region_bytes[r] += last - first;
+	}
+}
+
 static fsimg_status_t
 image_read(void *argument, uint64_t offset, void *buffer, size_t length,
-    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+    size_t *transferred, fsimg_error_t *error)
 {
 	fixture_t *f = argument;
+	bool eof = f->eof_end > f->eof_at;
 
 	CHECK(offset <= f->length && length <= f->length - offset);
-	memcpy(buffer, f->image + offset, length);
+	*transferred = 0;
+	f->calls++;
+	if (f->calls == f->fail_call || f->calls == f->stall_call)
+		f->injected_offset = offset;
+	if (f->calls == f->fail_call)
+		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
+		    "injected ImageFS read failure"));
+	if (f->calls == f->stall_call)
+		return (FSIMG_OK);
+	if (offset < f->fail_end && offset + length > f->fail_first)
+		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
+		    "injected ImageFS read failure"));
+	if (eof && offset >= f->eof_at && offset < f->eof_end)
+		return (FSIMG_OK);
+	if (eof && offset < f->eof_at && length > f->eof_at - offset)
+		length = (size_t)(f->eof_at - offset);
+	if (f->short_max != 0 && length > f->short_max)
+		length = f->short_max;
+	if (f->account != NULL)
+		account_read(f->account, offset, length);
+	if (f->scale != NULL)
+		scale_fill(f->scale, offset, buffer, length);
+	else
+		memcpy(buffer, f->image + offset, length);
 	*transferred = length;
 	return (FSIMG_OK);
 }
@@ -1082,12 +1232,21 @@ charged_memory(fsimg_ctx_t *ctx)
 	return (stats.memory_bytes);
 }
 
-/* A context with a private scratch directory over the first length bytes
- * of image; max_depth, when nonzero, replaces the default depth limit.
+static bool
+cancel_poll(void *argument)
+{
+	fixture_t *f = argument;
+
+	f->polls++;
+	return (f->cancel_after != 0 && f->polls >= f->cancel_after);
+}
+
+/* A fixture over the first length bytes of image, or over the synthetic
+ * image spec names, as spec describes.
  */
 static void
-fixture_open(fixture_t *f, const unsigned char *image, uint64_t length,
-    uint32_t max_depth)
+fixture_new(fixture_t *f, const unsigned char *image, uint64_t length,
+    const fixture_spec_t *spec)
 {
 	fsimg_options_t options;
 	fsimg_io_ops_t ops;
@@ -1095,6 +1254,7 @@ fixture_open(fixture_t *f, const unsigned char *image, uint64_t length,
 
 	bzero(f, sizeof(*f));
 	f->image = image;
+	f->scale = spec->scale;
 	f->length = length;
 	CHECK((size_t)snprintf(f->directory, sizeof(f->directory),
 	    "%s/fsimg-ifs-XXXXXX", tmp != NULL && tmp[0] != '\0' ? tmp :
@@ -1105,15 +1265,36 @@ fixture_open(fixture_t *f, const unsigned char *image, uint64_t length,
 	fsimg_options_init(&options);
 	options.memory_bytes = 16 * 1024 * 1024;
 	options.scratch_directory_fd = f->scratch;
-	if (max_depth != 0)
-		options.max_depth = max_depth;
+	if (spec->scratch_bytes != 0)
+		options.scratch_bytes = spec->scratch_bytes;
+	if (spec->max_work != 0)
+		options.max_work = spec->max_work;
+	if (spec->max_depth != 0)
+		options.max_depth = spec->max_depth;
+	options.cancelled = cancel_poll;
+	options.cancel_argument = f;
 	CHECK(fsimg_ctx_new(&options, &f->ctx, NULL) == FSIMG_OK);
+	if (spec->cache_pages != 0)
+		CHECK(fsimg_test_meta_cache(f->ctx, spec->cache_pages, NULL) ==
+		    FSIMG_OK);
 	f->memory = charged_memory(f->ctx);
 	fsimg_io_ops_init(&ops);
 	ops.read_at = image_read;
 	ops.get_size = image_size;
 	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, f, &f->io, NULL) ==
 	    FSIMG_OK);
+}
+
+/* A fixture over the first length bytes of image; max_depth, when nonzero,
+ * replaces the default depth limit.
+ */
+static void
+fixture_open(fixture_t *f, const unsigned char *image, uint64_t length,
+    uint32_t max_depth)
+{
+	fixture_spec_t spec = { .max_depth = max_depth };
+
+	fixture_new(f, image, length, &spec);
 }
 
 /* Free the fixture and check that the reader released everything. */
@@ -1167,24 +1348,15 @@ read_content(fixture_t *f, seen_t *s, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* Open the fixture's image (forced to ifs when forced is set) and list it,
- * reading every file and link. l->status is the first failure.
+/* List the fixture's open reader, reading every file and link; l->status
+ * is the first failure. The reader is freed when the listing completes.
  */
 static void
-fixture_list(fixture_t *f, bool forced, listing_t *l)
+listing_walk(fixture_t *f, listing_t *l)
 {
-	fsimg_read_options_t options;
 	const fsimg_entry_t *entry;
 	fsimg_status_t status;
 
-	bzero(l, sizeof(*l));
-	fsimg_read_options_init(&options);
-	if (forced)
-		options.format = "ifs";
-	l->status = fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
-	    &l->error);
-	if (l->status != FSIMG_OK)
-		return;
 	l->opened = true;
 	CHECK(fsimg_reader_get_info(f->reader, &l->info, NULL) == FSIMG_OK);
 	for (;;) {
@@ -1222,6 +1394,24 @@ fixture_list(fixture_t *f, bool forced, listing_t *l)
 	}
 	fsimg_reader_free(f->reader);
 	f->reader = NULL;
+}
+
+/* Open the fixture's image (forced to ifs when forced is set) and list it,
+ * reading every file and link. l->status is the first failure.
+ */
+static void
+fixture_list(fixture_t *f, bool forced, listing_t *l)
+{
+	fsimg_read_options_t options;
+
+	bzero(l, sizeof(*l));
+	fsimg_read_options_init(&options);
+	if (forced)
+		options.format = "ifs";
+	l->status = fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &l->error);
+	if (l->status == FSIMG_OK)
+		listing_walk(f, l);
 }
 
 /* List the first length bytes of image in a fresh fixture. */
@@ -3477,6 +3667,1161 @@ test_extract(void)
 }
 
 /*
+ * Faults. Each case fails one resource or one read during an operation and
+ * requires the operation to end with that failure's class; fixture_close
+ * then checks that the reader released all charged memory, scratch and
+ * descriptors and left the scratch directory empty.
+ */
+
+/* What a fault case runs: open and a listing that reads every file and
+ * link, which covers the table pass, the hierarchy, traversal and content
+ * reads; or open and full verification with payload read-through.
+ */
+typedef enum operation {
+	OPERATION_LIST = 1,
+	OPERATION_VERIFY
+} operation_t;
+
+/* The fault image: the sample's kinds, explicit and implicit directories,
+ * and 200 files in one directory, so that the table spans two of the
+ * reader's 8 KiB table reads and a one-page metadata cache spills.
+ */
+static void
+fault_image(gen_t *g)
+{
+	char path[32], data[32];
+
+	gen_init(g);
+	gen_root(g);
+	gen_file(g, "a.txt", "hello");
+	gen_dir(g, "dir");
+	gen_file(g, "dir/inner", "inner data");
+	gen_link(g, "dir/up", "../a.txt");
+	gen_fifo(g, "pipe");
+	gen_file(g, "deep/implicit/file", "x");
+	for (unsigned i = 0; i < 200; i++) {
+		snprintf(path, sizeof(path), "many/file-%03u", i);
+		snprintf(data, sizeof(data), "content %u", i);
+		gen_file(g, path, data);
+	}
+	gen_finish(g);
+	/* The last record lies beyond the reader's first table read. */
+	CHECK(g->members[g->count - 1].table_offset >= g->dir_offset +
+	    IFS_TEST_WINDOW);
+}
+
+/* Run operation on the fixture's image, forced to ifs when forced is set,
+ * so that the forced format's probe reads only the 88-byte ImageFS header
+ * and every later read is the driver's own.
+ */
+static fsimg_status_t
+run_operation(fixture_t *f, operation_t operation, bool forced,
+    fsimg_error_t *error)
+{
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	listing_t l;
+	fsimg_status_t status;
+
+	if (operation == OPERATION_LIST) {
+		fixture_list(f, forced, &l);
+		status = l.status;
+		if (error != NULL)
+			*error = l.error;
+		listing_free(&l);
+		return (status);
+	}
+	fsimg_read_options_init(&options);
+	if (forced)
+		options.format = "ifs";
+	status = fsimg_reader_open(f->ctx, f->io, &options, &f->reader, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_verify(f->reader, FSIMG_VERIFY_PAYLOAD, &report, error);
+	CHECK(report.complete == (status == FSIMG_OK));
+	return (status);
+}
+
+/* Cancellation at every poll and the work limit at every value, each until
+ * the operation needs no more, end it cleanly with the failure's class.
+ * The polls and work units grow with the entries, so these run on a small
+ * image.
+ */
+static void
+check_interrupts(const gen_t *g, operation_t operation)
+{
+	const fixture_spec_t defaults = { 0 };
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t n, failures;
+	fixture_t f;
+
+	failures = 0;
+	for (n = 1;; n++) {
+		fixture_new(&f, g->image, g->length, &defaults);
+		f.cancel_after = n;
+		status = run_operation(&f, operation, false, NULL);
+		fixture_close(&f);
+		if (status == FSIMG_OK)
+			break;
+		CHECK(status == FSIMG_ECANCELLED);
+		failures++;
+		CHECK(n < 100000);
+	}
+	CHECK(failures > 0);
+
+	failures = 0;
+	for (n = 1;; n++) {
+		const fixture_spec_t limited = { .max_work = n };
+
+		fixture_new(&f, g->image, g->length, &limited);
+		bzero(&error, sizeof(error));
+		status = run_operation(&f, operation, false, &error);
+		fixture_close(&f);
+		if (status == FSIMG_OK)
+			break;
+		CHECK(status == FSIMG_ELIMIT &&
+		    error.resource == FSIMG_RESOURCE_WORK);
+		failures++;
+		CHECK(n < 100000);
+	}
+	CHECK(failures > 0);
+}
+
+/* Allocation at every occurrence and every kind of scratch operation at
+ * every occurrence, or at growing steps past the 64th, each until the
+ * operation needs no more, end it cleanly with the failure's class. Reads
+ * of at most one and seven bytes change nothing: the listing still matches
+ * the model.
+ */
+static void
+check_faults(const gen_t *g, operation_t operation)
+{
+	static const size_t short_reads[] = { 1, 7 };
+	const fixture_spec_t defaults = { 0 }, spill = { .cache_pages = 1 };
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t n, failures;
+	fixture_t f;
+	listing_t l;
+	model_t m;
+
+	for (n = 1;; n++) {
+		fixture_new(&f, g->image, g->length, &defaults);
+		fsimg_test_fail_alloc_after(f.ctx, n);
+		status = run_operation(&f, operation, false, NULL);
+		fsimg_test_fail_alloc_after(f.ctx, 0);
+		fixture_close(&f);
+		if (status == FSIMG_OK)
+			break;
+		CHECK(status == FSIMG_ENOMEM);
+		CHECK(n < 100000);
+	}
+	CHECK(n > 1);
+
+	/* In a context whose single cache page makes every store spill. */
+	for (unsigned point = FSIMG_META_OPEN; point <= FSIMG_META_WRITE;
+	    point++) {
+		failures = 0;
+		for (n = 1;; n += n < 64 ? 1 : n / 8) {
+			fixture_new(&f, g->image, g->length, &spill);
+			fsimg_test_meta_fail_after(f.ctx, (fsimg_meta_fault_t)point,
+			    n, ENOSPC);
+			bzero(&error, sizeof(error));
+			status = run_operation(&f, operation, false, &error);
+			fsimg_test_meta_fail_after(f.ctx, (fsimg_meta_fault_t)point,
+			    0, 0);
+			fixture_close(&f);
+			if (status == FSIMG_OK)
+				break;
+			CHECK(status == FSIMG_EIO && error.os_error == ENOSPC);
+			failures++;
+			CHECK(n < 100000);
+		}
+		CHECK(failures > 0);
+	}
+
+	model_build(&m, g->image, g->length);
+	for (size_t i = 0; i < sizeof(short_reads) / sizeof(short_reads[0]);
+	    i++) {
+		fixture_new(&f, g->image, g->length, &defaults);
+		f.short_max = short_reads[i];
+		if (operation == OPERATION_LIST) {
+			fixture_list(&f, false, &l);
+			CHECK(listing_matches(&l, &m, "short reads"));
+			listing_free(&l);
+		} else {
+			CHECK(run_operation(&f, operation, false, NULL) ==
+			    FSIMG_OK);
+		}
+		fixture_close(&f);
+	}
+	model_free(&m);
+}
+
+/* The read calls of an operation, forced to ifs, one after another: the
+ * n-th call fails, or makes no progress, for n from 1 until the operation
+ * makes fewer calls. Every read site of open, replay, content and
+ * verification thus fails once, and the operation ends with FSIMG_EIO at
+ * that call's offset, an end of the source reported as EOF.
+ */
+static void
+check_read_calls(const gen_t *g, operation_t operation)
+{
+	const fixture_spec_t defaults = { 0 };
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t n;
+	fixture_t f;
+
+	for (unsigned stall = 0; stall <= 1; stall++) {
+		for (n = 1;; n++) {
+			fixture_new(&f, g->image, g->length, &defaults);
+			if (stall)
+				f.stall_call = n;
+			else
+				f.fail_call = n;
+			bzero(&error, sizeof(error));
+			status = run_operation(&f, operation, true, &error);
+			fixture_close(&f);
+			if (status == FSIMG_OK) {
+				CHECK(f.calls < n);
+				break;
+			}
+			if (status != FSIMG_EIO || !error.offset_valid ||
+			    error.offset != f.injected_offset)
+				fprintf(stderr, "read call %" PRIu64 " (operation "
+				    "%d): %d at %" PRIu64 " (%s), expected EIO at %"
+				    PRIu64 "\n", n, (int)operation, status,
+				    error.offset, error.message, f.injected_offset);
+			CHECK(status == FSIMG_EIO);
+			CHECK(error.offset_valid &&
+			    error.offset == f.injected_offset);
+			CHECK(!stall || strstr(error.message, "EOF") != NULL);
+		}
+		CHECK(n > 4);
+	}
+}
+
+/* A read failure of [first, end), forced to ifs: the listing must end with
+ * list_status and verification with verify_status.
+ */
+static void
+check_read_failure(const gen_t *g, uint64_t first, uint64_t end,
+    fsimg_status_t list_status, fsimg_status_t verify_status,
+    const char *label)
+{
+	const fixture_spec_t defaults = { 0 };
+	fsimg_error_t error;
+	fsimg_status_t status, expected;
+	fixture_t f;
+
+	for (operation_t operation = OPERATION_LIST;
+	    operation <= OPERATION_VERIFY; operation++) {
+		expected = operation == OPERATION_LIST ? list_status :
+		    verify_status;
+		fixture_new(&f, g->image, g->length, &defaults);
+		f.fail_first = first;
+		f.fail_end = end;
+		bzero(&error, sizeof(error));
+		status = run_operation(&f, operation, true, &error);
+		if (status != expected)
+			fprintf(stderr, "%s (operation %d): %d (%s), expected %d\n",
+			    label, (int)operation, status, error.message, expected);
+		CHECK(status == expected);
+		fixture_close(&f);
+	}
+}
+
+/* When the source ends: during open, or after a successful open, during a
+ * listing that reads every file or a verification with payload.
+ */
+typedef enum eof_stage {
+	EOF_OPEN = 1,
+	EOF_LIST,
+	EOF_VERIFY
+} eof_stage_t;
+
+/* One end of the source: no read makes progress in [end, end + span),
+ * which isolates one structure from those after it, from stage on, with
+ * reads cut to short_max bytes when it is nonzero.
+ */
+typedef struct eof_case {
+	const char	*label;
+	uint64_t	 end;
+	uint64_t	 span;
+	eof_stage_t	 stage;
+	size_t		 short_max;
+} eof_case_t;
+
+/* Make the source end as the case says. */
+static void
+eof_arm(fixture_t *f, const eof_case_t *c)
+{
+	f->eof_at = c->end;
+	f->eof_end = c->end + c->span;
+}
+
+/* The read that reaches the case's end fails with an I/O error at exactly
+ * that offset, whether the source ends before open or after it. The
+ * offset is exact because image_read cuts a read that crosses end there,
+ * and the bounded I/O layer's exact-read loop then asks for the rest from
+ * end and reports the zero progress at that offset. So each case puts end
+ * one byte past the start of a structure the operation reads from its
+ * start, and span covers the rest of it.
+ */
+static void
+check_eof(const gen_t *g, const eof_case_t *c)
+{
+	const fixture_spec_t defaults = { 0 };
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	listing_t l;
+	fixture_t f;
+
+	fixture_new(&f, g->image, g->length, &defaults);
+	f.short_max = c->short_max;
+	if (c->stage == EOF_OPEN)
+		eof_arm(&f, c);
+	fsimg_read_options_init(&options);
+	options.format = "ifs";
+	bzero(&error, sizeof(error));
+	status = fsimg_reader_open(f.ctx, f.io, &options, &f.reader, &error);
+	if (c->stage != EOF_OPEN) {
+		CHECK(status == FSIMG_OK);
+		eof_arm(&f, c);
+	}
+	if (c->stage == EOF_LIST) {
+		bzero(&l, sizeof(l));
+		listing_walk(&f, &l);
+		status = l.status;
+		error = l.error;
+		listing_free(&l);
+	} else if (c->stage == EOF_VERIFY) {
+		status = fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report,
+		    &error);
+		CHECK(!report.complete);
+	}
+	if (status != FSIMG_EIO || error.offset != c->end)
+		fprintf(stderr, "%s: expected EIO at %" PRIu64 ", got %d at %"
+		    PRIu64 " (%s)\n", c->label, c->end, status, error.offset,
+		    error.message);
+	CHECK(status == FSIMG_EIO && error.status == FSIMG_EIO);
+	CHECK(error.offset_valid && error.offset == c->end);
+	CHECK(strstr(error.message, "EOF") != NULL);
+	fixture_close(&f);
+}
+
+/* The member at path in the generator's table, which must exist. */
+static const gen_member_t *
+gen_find(const gen_t *g, const char *path)
+{
+	for (size_t i = 0; i < g->count; i++)
+		if (g->members[i].path_length == strlen(path) &&
+		    memcmp(g->members[i].path, path, strlen(path)) == 0)
+			return (&g->members[i]);
+	CHECK(false);
+	return (NULL);
+}
+
+static void
+test_faults(void)
+{
+	static const size_t short_reads[] = { 0, 3 };
+	const gen_member_t *inner, *up, *last;
+	eof_case_t c;
+	gen_t g;
+
+	sample(&g);
+	check_interrupts(&g, OPERATION_LIST);
+	check_interrupts(&g, OPERATION_VERIFY);
+	check_read_calls(&g, OPERATION_LIST);
+	check_read_calls(&g, OPERATION_VERIFY);
+	gen_free(&g);
+
+	fault_image(&g);
+	check_faults(&g, OPERATION_LIST);
+	check_faults(&g, OPERATION_VERIFY);
+
+	/* Where a failed read ends each operation: one of the mountpoint, a
+	 * record or the terminator fails the open; of file content the
+	 * listing, after open; of the trailer only verification, which also
+	 * reads every byte the listing reads.
+	 */
+	inner = gen_find(&g, "dir/inner");
+	check_read_failure(&g, H_MOUNTPOINT, H_MOUNTPOINT + 1, FSIMG_EIO,
+	    FSIMG_EIO, "a mountpoint read failure");
+	check_read_failure(&g, inner->table_offset, inner->table_offset + 4,
+	    FSIMG_EIO, FSIMG_EIO, "a record read failure");
+	check_read_failure(&g, g.hdr_dir_size - 4, g.hdr_dir_size, FSIMG_EIO,
+	    FSIMG_EIO, "a terminator read failure");
+	check_read_failure(&g, inner->data_offset, inner->data_offset + 1,
+	    FSIMG_EIO, FSIMG_EIO, "a content read failure");
+	check_read_failure(&g, g.image_size - 4, g.image_size, FSIMG_OK,
+	    FSIMG_EIO, "a trailer read failure");
+
+	/* The source ends inside each structure open, a listing or
+	 * verification reads: the mountpoint, a record of the first and of a
+	 * later table read, and the terminator at open; a record replay, a
+	 * link's record and file content in a listing, also behind short
+	 * reads; and the trailer in verification.
+	 */
+	up = gen_find(&g, "dir/up");
+	last = &g.members[g.count - 1];
+	c = (eof_case_t){
+		.label = "EOF in the mountpoint",
+		.end = H_MOUNTPOINT + 1,
+		.span = g.dir_offset - H_MOUNTPOINT - 1,
+		.stage = EOF_OPEN
+	};
+	check_eof(&g, &c);
+	c = (eof_case_t){
+		.label = "EOF in a record at open",
+		.end = inner->table_offset + 1,
+		.span = inner->length - 1,
+		.stage = EOF_OPEN
+	};
+	check_eof(&g, &c);
+	c = (eof_case_t){
+		.label = "EOF in the table's last record at open",
+		.end = last->table_offset + 1,
+		.span = last->length - 1,
+		.stage = EOF_OPEN
+	};
+	check_eof(&g, &c);
+	c = (eof_case_t){
+		.label = "EOF in the terminator",
+		.end = g.hdr_dir_size - 4 + 1,
+		.span = 3,
+		.stage = EOF_OPEN
+	};
+	check_eof(&g, &c);
+	for (size_t i = 0; i < sizeof(short_reads) / sizeof(short_reads[0]);
+	    i++) {
+		size_t short_max = short_reads[i];
+
+		c = (eof_case_t){
+			.label = "EOF in a record at replay",
+			.end = inner->table_offset + 1,
+			.span = inner->length - 1,
+			.stage = EOF_LIST,
+			.short_max = short_max
+		};
+		check_eof(&g, &c);
+		c = (eof_case_t){
+			.label = "EOF in a link's record at replay",
+			.end = up->table_offset + 1,
+			.span = up->length - 1,
+			.stage = EOF_LIST,
+			.short_max = short_max
+		};
+		check_eof(&g, &c);
+		c = (eof_case_t){
+			.label = "EOF in file content",
+			.end = inner->data_offset + 1,
+			.span = inner->bytes_length - 1,
+			.stage = EOF_LIST,
+			.short_max = short_max
+		};
+		check_eof(&g, &c);
+	}
+	c = (eof_case_t){
+		.label = "EOF in the trailer",
+		.end = g.image_size - 4 + 1,
+		.span = 3,
+		.stage = EOF_VERIFY
+	};
+	check_eof(&g, &c);
+	gen_free(&g);
+}
+
+/*
+ * Scale. Each case grows one dimension of an image: the body to 2^32 - 4
+ * bytes, the record table to a million records, the root to a million
+ * files, every path to the 1024-byte limit, or the depth to 512 levels,
+ * the most a 1024-byte path holds. The image is never stored: scale_fill
+ * synthesizes any range of it from its description, so neither the test
+ * process nor the disk holds it, and the growth of the reading process's
+ * resident set is the reader's own.
+ *
+ * Each case is listed, reading every file, and verified with payload, each
+ * in a fresh context and a child process of its own. Ordinary runs use each
+ * case's small size; --scale the large one, and prints the measurements.
+ * The checks restate the driver design's resource bounds for these images:
+ *
+ * - the listing delivers every member, with its name and bytes, and every
+ *   synthesized directory, and verification counts them all;
+ * - charged memory stays below SCALE_MEMORY, and at the large sizes the
+ *   child's resident set grows by at most SCALE_RSS_GROWTH, below a
+ *   resident table, where that is measurable (see rss_measurable);
+ * - scratch stays within a budget the context enforces, a small multiple
+ *   of the table (see scale_scratch);
+ * - the large record-table and root cases spill: their scratch peaks above
+ *   the context's memory budget;
+ * - open reads the table once, re-reading less than one record per table
+ *   read; a listing then reads each delivered record once more, at
+ *   replay, and each file's bytes once; verification also reads the whole
+ *   image once more, for the checksum.
+ */
+
+/* The charged-memory ceiling, half the context's 16 MiB budget: the
+ * reader's fixed state, about 3.1 MiB, and the metadata cache, which grows
+ * to at most a quarter of the budget before stores spill to scratch.
+ */
+#define SCALE_MEMORY		(UINT64_C(8) << 20)
+/* The most an operation may raise its process's peak resident set: below
+ * the 44 MB table of a million records and the scratch its tree takes.
+ */
+#define SCALE_RSS_GROWTH	(UINT64_C(32) << 20)
+/* The context's memory budget, which a spilled case's scratch exceeds. */
+#define SCALE_BUDGET		(UINT64_C(16) << 20)
+/* dir_offset for the mountpoint "/", and the root record. */
+#define SCALE_DIR_OFFSET	0x5cu
+#define SCALE_ROOT_RECORD	0x1cu
+#define SCALE_PATH_MAX		1024u
+/* A member's record: a file's fields and a path of up to 1024 bytes. */
+#define SCALE_RECORD_MAX	(0x20u + SCALE_PATH_MAX + 4u)
+
+/* An image of `members` files below an explicit root, little-endian with
+ * the mountpoint "/": the header and the root record, then member i's
+ * record, record_length bytes at first_record + i * record_length, the
+ * terminator, zeros, the data and the trailer. Member i's path is
+ * path_of(i), path_length bytes, and its data the four bytes at
+ * data_base + 4 i, each a function of its offset (scale_data_byte); when
+ * spanning is set member 0's range starts at hdr_dir_size instead, so the
+ * zeros before data_base are its content. Every case names its members so
+ * that component order is index order: the k-th file a listing delivers
+ * is member k.
+ */
+struct scale_image {
+	gen_t		 layout;	/* the header's fields; no members */
+	uint64_t	 members;
+	uint64_t	 implicit;	/* directories the table omits */
+	size_t		 path_length;
+	void		(*path_of)(const scale_image_t *, uint64_t, char *);
+	bool		 spanning;
+	uint32_t	 first_record;
+	uint32_t	 record_length;
+	uint32_t	 data_base;
+	unsigned char	 head[SCALE_DIR_OFFSET + SCALE_ROOT_RECORD];
+	unsigned char	 trailer[4];
+};
+
+/* The byte at image offset o of the data members own. */
+static unsigned char
+scale_data_byte(uint64_t o)
+{
+	return ((unsigned char)(0x5a ^ o ^ o >> 8 ^ o >> 16 ^ o >> 24));
+}
+
+/* Member i as the generator describes a member; path receives its path. */
+static void
+scale_member(const scale_image_t *s, uint64_t i, gen_member_t *m,
+    char path[SCALE_PATH_MAX + 1])
+{
+	bzero(m, sizeof(*m));
+	s->path_of(s, i, path);
+	m->kind = GEN_FILE;
+	m->path = (unsigned char *)path;
+	m->path_length = s->path_length;
+	m->mode = 0100644;
+	m->mtime = GEN_MTIME;
+	m->inode = (uint32_t)i + 2;
+	m->table_offset = s->first_record + (uint32_t)i * s->record_length;
+	m->length = s->record_length;
+	m->data_offset = s->data_base + 4 * (uint32_t)i;
+	m->bytes_length = 4;
+	if (s->spanning && i == 0) {
+		m->data_offset = s->layout.hdr_dir_size;
+		m->bytes_length = s->data_base + 4 - s->layout.hdr_dir_size;
+	}
+}
+
+/* Copy the part of [bytes_offset, bytes_offset + bytes_length) that lies
+ * in [offset, offset + length) into buffer, which holds the latter.
+ */
+static void
+copy_overlap(unsigned char *buffer, uint64_t offset, size_t length,
+    const unsigned char *bytes, uint64_t bytes_offset, size_t bytes_length)
+{
+	uint64_t first, last;
+
+	first = bytes_offset > offset ? bytes_offset : offset;
+	last = bytes_offset + bytes_length < offset + length ?
+	    bytes_offset + bytes_length : offset + length;
+	if (first < last)
+		memcpy(buffer + (first - offset), bytes + (first - bytes_offset),
+		    (size_t)(last - first));
+}
+
+/* Synthesize [offset, offset + length) of the image. */
+static void
+scale_fill(const scale_image_t *s, uint64_t offset, unsigned char *buffer,
+    size_t length)
+{
+	unsigned char record[SCALE_RECORD_MAX];
+	char path[SCALE_PATH_MAX + 1];
+	uint64_t end, table_end, data_end, first;
+	gen_member_t m;
+
+	end = offset + length;
+	bzero(buffer, length);
+	copy_overlap(buffer, offset, length, s->head, 0, s->first_record);
+	table_end = s->first_record + s->members * s->record_length;
+	if (offset < table_end && end > s->first_record) {
+		first = offset > s->first_record ?
+		    (offset - s->first_record) / s->record_length : 0;
+		for (uint64_t i = first; i < s->members &&
+		    s->first_record + i * s->record_length < end; i++) {
+			scale_member(s, i, &m, path);
+			bzero(record, s->record_length);
+			gen_encode_record(&s->layout, &m, record);
+			copy_overlap(buffer, offset, length, record,
+			    m.table_offset, s->record_length);
+		}
+	}
+	data_end = s->data_base + 4 * s->members;
+	for (uint64_t o = offset > s->data_base ? offset : s->data_base;
+	    o < end && o < data_end; o++)
+		buffer[o - offset] = scale_data_byte(o);
+	copy_overlap(buffer, offset, length, s->trailer,
+	    s->layout.image_size - 4, 4);
+}
+
+/* The 32-bit word sum of [first, last), both multiples of 4. */
+static uint32_t
+scale_sum(const scale_image_t *s, uint64_t first, uint64_t last)
+{
+	static unsigned char window[65536];
+	uint32_t sum = 0;
+	size_t batch;
+
+	for (uint64_t o = first; o < last; o += batch) {
+		batch = last - o < sizeof(window) ? (size_t)(last - o) :
+		    sizeof(window);
+		scale_fill(s, o, window, batch);
+		for (size_t i = 0; i < batch; i += 4)
+			sum += get32(&s->layout, window + i);
+	}
+	return (sum);
+}
+
+/* Lay the image out once its members and paths are set, for image_size
+ * bytes, or as few as the data needs when image_size is zero, and encode
+ * the header, the root record and the trailer. The bytes between the
+ * terminator and data_base are zero, so the checksum skips them.
+ */
+static void
+scale_layout(scale_image_t *s, uint64_t image_size)
+{
+	gen_member_t root = {
+		.kind = GEN_DIR,
+		.path = (unsigned char *)"",
+		.mode = 040755,
+		.mtime = GEN_MTIME,
+		.inode = 1,
+		.length = SCALE_ROOT_RECORD
+	};
+	uint64_t hdr_dir_size, data_end;
+
+	CHECK(s->path_length <= SCALE_PATH_MAX);
+	gen_init(&s->layout);
+	CHECK(round4(GEN_HEADER + s->layout.mountpoint_length + 1) ==
+	    SCALE_DIR_OFFSET);
+	CHECK(round4(gen_record_bytes(GEN_DIR, 0, 0)) == SCALE_ROOT_RECORD);
+	s->layout.dir_offset = SCALE_DIR_OFFSET;
+	s->first_record = SCALE_DIR_OFFSET + SCALE_ROOT_RECORD;
+	s->record_length = round4(gen_record_bytes(GEN_FILE, s->path_length, 0));
+	hdr_dir_size = s->first_record + s->members * s->record_length + 4;
+	if (image_size == 0)
+		image_size = hdr_dir_size + 4 * s->members + 4;
+	CHECK(image_size % 4 == 0 && image_size <= UINT32_C(0xfffffffc) &&
+	    hdr_dir_size + 4 * s->members + 4 <= image_size);
+	s->layout.hdr_dir_size = (uint32_t)hdr_dir_size;
+	s->layout.image_size = (uint32_t)image_size;
+	s->data_base = (uint32_t)(image_size - 4 - 4 * s->members);
+	data_end = s->data_base + 4 * s->members;
+
+	bzero(s->head, sizeof(s->head));
+	bzero(s->trailer, sizeof(s->trailer));
+	gen_encode_header(&s->layout, s->head);
+	gen_encode_record(&s->layout, &root, s->head + SCALE_DIR_OFFSET);
+	put32(&s->layout, s->trailer, 0 - (scale_sum(s, 0, hdr_dir_size) +
+	    scale_sum(s, s->data_base, data_end)));
+}
+
+/* "f0000000", "f0000001", ...: one component of eight bytes. */
+static void
+scale_flat_path(const scale_image_t *s FSIMG_UNUSED, uint64_t i, char *path)
+{
+	snprintf(path, SCALE_PATH_MAX + 1, "f%07" PRIu64, i);
+}
+
+/* "d000/f000" to "d999/f999": a thousand files in each implicit
+ * directory.
+ */
+static void
+scale_grouped_path(const scale_image_t *s FSIMG_UNUSED, uint64_t i,
+    char *path)
+{
+	snprintf(path, SCALE_PATH_MAX + 1, "d%03" PRIu64 "/f%03" PRIu64,
+	    i / 1000, i % 1000);
+}
+
+/* Five components of 204 bytes, 1024 in all: four implicit directories
+ * of 'c' and a name of 'n' ending in the index's eight digits.
+ */
+static void
+scale_long_path(const scale_image_t *s FSIMG_UNUSED, uint64_t i, char *path)
+{
+	char *p = path;
+
+	for (unsigned c = 0; c < 4; c++) {
+		memset(p, 'c', 204);
+		p[204] = '/';
+		p += 205;
+	}
+	memset(p, 'n', 196);
+	snprintf(p + 196, 9, "%08" PRIu64, i);
+}
+
+/* "a/a/.../a/i": the index's digit below path_length / 2 directories. */
+static void
+scale_deep_path(const scale_image_t *s, uint64_t i, char *path)
+{
+	for (size_t o = 0; o + 1 < s->path_length; o += 2) {
+		path[o] = 'a';
+		path[o + 1] = '/';
+	}
+	path[s->path_length - 1] = (char)('0' + i);
+}
+
+/* The body grows to size bytes: a file spanning it, whose content is its
+ * zeros, and a four-byte file whose range ends at the trailer.
+ */
+static void
+scale_body(scale_image_t *s, uint64_t size)
+{
+	bzero(s, sizeof(*s));
+	s->members = 2;
+	s->path_length = 8;
+	s->path_of = scale_flat_path;
+	s->spanning = true;
+	scale_layout(s, size);
+}
+
+/* The table grows to n records in implicit directories of a thousand. */
+static void
+scale_records(scale_image_t *s, uint64_t n)
+{
+	bzero(s, sizeof(*s));
+	s->members = n;
+	s->implicit = (n + 999) / 1000;
+	s->path_length = 9;
+	s->path_of = scale_grouped_path;
+	scale_layout(s, 0);
+}
+
+/* The root widens to n files. */
+static void
+scale_width(scale_image_t *s, uint64_t n)
+{
+	bzero(s, sizeof(*s));
+	s->members = n;
+	s->path_length = 8;
+	s->path_of = scale_flat_path;
+	scale_layout(s, 0);
+}
+
+/* n records, each with a path of the 1024-byte limit. */
+static void
+scale_paths(scale_image_t *s, uint64_t n)
+{
+	bzero(s, sizeof(*s));
+	s->members = n;
+	s->implicit = 4;
+	s->path_length = SCALE_PATH_MAX;
+	s->path_of = scale_long_path;
+	scale_layout(s, 0);
+}
+
+/* Ten files at depth levels, below levels - 1 implicit directories. */
+static void
+scale_depth(scale_image_t *s, uint64_t levels)
+{
+	bzero(s, sizeof(*s));
+	s->members = 10;
+	s->implicit = levels - 1;
+	s->path_length = 2 * (levels - 1) + 1;
+	s->path_of = scale_deep_path;
+	scale_layout(s, 0);
+}
+
+/* The bytes [image_offset, image_offset + length) of a member's range
+ * must be its data: zero before data_base, the pattern from there.
+ */
+static bool
+scale_bytes_match(const scale_image_t *s, uint64_t image_offset,
+    const unsigned char *bytes, size_t length)
+{
+	static const unsigned char zeros[65536];
+	size_t i = 0;
+
+	while (i < length && image_offset + i < s->data_base) {
+		size_t run = length - i < sizeof(zeros) ? length - i :
+		    sizeof(zeros);
+
+		if (s->data_base - (image_offset + i) < run)
+			run = (size_t)(s->data_base - (image_offset + i));
+		if (memcmp(bytes + i, zeros, run) != 0)
+			return (false);
+		i += run;
+	}
+	for (; i < length; i++)
+		if (bytes[i] != scale_data_byte(image_offset + i))
+			return (false);
+	return (true);
+}
+
+/* List every entry, requiring each file's name, size and bytes; *entries
+ * counts files and directories.
+ */
+static fsimg_status_t
+scale_list(fixture_t *f, const scale_image_t *s, uint64_t *entries,
+    fsimg_error_t *error)
+{
+	static unsigned char buffer[65536];
+	char path[SCALE_PATH_MAX + 1];
+	const fsimg_entry_t *entry;
+	uint64_t files, offset;
+	gen_member_t m;
+	size_t count;
+	fsimg_status_t status;
+
+	files = 0;
+	for (;;) {
+		status = fsimg_reader_next(f->reader, &entry, error);
+		if (status == FSIMG_DONE)
+			break;
+		if (status != FSIMG_OK)
+			return (status);
+		(*entries)++;
+		if (entry->kind == FSIMG_ENTRY_DIRECTORY)
+			continue;
+		CHECK(entry->kind == FSIMG_ENTRY_FILE && files < s->members);
+		scale_member(s, files++, &m, path);
+		CHECK(entry->path[0] == '/' &&
+		    strlen(entry->path + 1) == s->path_length &&
+		    memcmp(entry->path + 1, path, s->path_length) == 0);
+		CHECK(entry->size == m.bytes_length);
+		for (offset = 0; offset < entry->size; offset += count) {
+			size_t want = entry->size - offset < sizeof(buffer) ?
+			    (size_t)(entry->size - offset) : sizeof(buffer);
+
+			status = fsimg_reader_read_at(f->reader, offset, buffer,
+			    want, &count, error);
+			if (status != FSIMG_OK)
+				return (status);
+			CHECK(count != 0 && count <= want);
+			CHECK(scale_bytes_match(s, m.data_offset + offset,
+			    buffer, count));
+		}
+	}
+	CHECK(files == s->members);
+	return (FSIMG_OK);
+}
+
+/* What one operation of a case did. */
+typedef struct scale_run {
+	read_account_t	 opening;	/* the reads of open */
+	read_account_t	 reads;		/* every read of the operation */
+	uint64_t	 entries;	/* listed, or files and directories verified */
+	uint64_t	 io_calls;	/* image and scratch */
+	uint64_t	 memory_peak;
+	uint64_t	 scratch_peak;
+	uint64_t	 rss;		/* the child's peak resident set */
+	uint64_t	 rss_growth;	/* how far the operation raised it */
+	double		 seconds;
+} scale_run_t;
+
+/* The scratch budget the context enforces: the path stream, its sorted
+ * copy, the child stream, its sorted copy and the group table, of which
+ * the sorts keep at most three at a time, hold a small multiple of the
+ * table, as the driver design bounds them; common directory preparation
+ * adds 64 bytes per entry, and 1 MiB covers store headers and partly
+ * filled pages. A million eight-byte names peak at 3.6 times the table.
+ */
+static uint64_t
+scale_scratch(const scale_image_t *s)
+{
+	return (4 * (uint64_t)s->layout.hdr_dir_size +
+	    64 * (s->members + s->implicit) + (UINT64_C(1) << 20));
+}
+
+/* The process's peak resident set so far, in bytes. */
+static uint64_t
+peak_rss(void)
+{
+	struct rusage usage;
+
+	CHECK(getrusage(RUSAGE_SELF, &usage) == 0 && usage.ru_maxrss >= 0);
+#if defined(__APPLE__)
+	return ((uint64_t)usage.ru_maxrss);
+#else
+	return ((uint64_t)usage.ru_maxrss * 1024);
+#endif
+}
+
+/* One operation over the image, in the calling process. */
+static void
+scale_operate(const scale_image_t *s, operation_t operation,
+    uint32_t max_depth, scale_run_t *run)
+{
+	const fixture_spec_t spec = {
+		.scale = s,
+		.scratch_bytes = scale_scratch(s),
+		.max_depth = max_depth
+	};
+	read_account_t account = {
+		.table_start = s->layout.dir_offset,
+		.data_start = s->layout.hdr_dir_size,
+		.trailer_start = s->layout.image_size - 4
+	};
+	fsimg_verify_report_t report;
+	struct timespec start, end;
+	fsimg_stats_t stats;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t baseline;
+	fixture_t f;
+
+	bzero(run, sizeof(*run));
+	baseline = peak_rss();
+	fixture_new(&f, NULL, s->layout.image_size, &spec);
+	f.account = &account;
+	bzero(&error, sizeof(error));
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+	run->opening = account;
+	if (status == FSIMG_OK && operation == OPERATION_VERIFY) {
+		status = fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report,
+		    &error);
+		CHECK(report.complete == (status == FSIMG_OK));
+		run->entries = report.files + report.directories;
+		if (status == FSIMG_OK) {
+			CHECK(report.files == s->members);
+			CHECK(report.directories == s->implicit + 1);
+			CHECK(report.allocated_clusters == s->layout.image_size);
+		}
+	} else if (status == FSIMG_OK) {
+		status = scale_list(&f, s, &run->entries, &error);
+	}
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "scale: %d %s\n", status, error.message);
+	CHECK(status == FSIMG_OK);
+
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	run->reads = account;
+	run->io_calls = stats.io_calls;
+	run->memory_peak = stats.memory_peak;
+	run->scratch_peak = stats.scratch_peak;
+	run->seconds = (double)(end.tv_sec - start.tv_sec) +
+	    (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+	fixture_close(&f);
+	run->rss = peak_rss();
+	run->rss_growth = run->rss - baseline;
+}
+
+/* Run one operation in a child process and collect its measurements. A
+ * failed check in the child exits it with status 1, which fails here.
+ */
+static void
+scale_measure(const scale_image_t *s, operation_t operation,
+    uint32_t max_depth, scale_run_t *run)
+{
+	int channel[2], status;
+	pid_t child;
+
+	CHECK(pipe(channel) == 0);
+	CHECK(fflush(stdout) == 0);
+	CHECK(fflush(stderr) == 0);
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		CHECK(close(channel[0]) == 0);
+		scale_operate(s, operation, max_depth, run);
+		CHECK(write(channel[1], run, sizeof(*run)) ==
+		    (ssize_t)sizeof(*run));
+		_exit(0);
+	}
+	CHECK(close(channel[1]) == 0);
+	CHECK(waitpid(child, &status, 0) == child);
+	if (WIFSIGNALED(status))
+		fprintf(stderr, "scale: the child died of signal %d\n",
+		    WTERMSIG(status));
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(read(channel[0], run, sizeof(*run)) == (ssize_t)sizeof(*run));
+	CHECK(close(channel[0]) == 0);
+}
+
+static void
+scale_print(const char *name, uint64_t size, const char *what,
+    const scale_image_t *s, const scale_run_t *run)
+{
+	uint64_t table = s->layout.hdr_dir_size - s->layout.dir_offset;
+	const uint64_t *bytes = run->reads.region_bytes;
+
+	printf("ifs scale %s=%" PRIu64 " %s entries=%" PRIu64 " table=%"
+	    PRIu64 " image_calls=%" PRIu64 " image_read=%" PRIu64
+	    " table_read=%" PRIu64 " table_passes=%.2f data_read=%" PRIu64
+	    " io_calls=%" PRIu64 " memory_peak=%" PRIu64 " scratch_peak=%"
+	    PRIu64 " rss=%" PRIu64 " rss_growth=%" PRIu64 " seconds=%.3f\n",
+	    name, size, what, run->entries, table, run->reads.calls,
+	    run->reads.bytes, bytes[REGION_TABLE],
+	    (double)bytes[REGION_TABLE] / (double)table, bytes[REGION_DATA],
+	    run->io_calls, run->memory_peak, run->scratch_peak, run->rss,
+	    run->rss_growth, run->seconds);
+}
+
+/* The bounds every run of a case must hold; rss tells whether to check the
+ * growth of the resident set (see rss_measurable).
+ *
+ * The open pass reads the table once in reads of several KiB. When a
+ * record does not fit what a read left, the next read starts at that
+ * record, so the bytes read again are less than one record per read; a
+ * table read covering at least 4 KiB advances at least 4096 -
+ * record_length bytes each time, and the first read and the terminator's
+ * add two more. That ceiling restates the reader's access pattern, not a
+ * design bound. Replay reads each file's record again, its two-byte length
+ * and then the whole record.
+ */
+static void
+scale_check(const scale_image_t *s, const scale_run_t *run,
+    operation_t operation, bool rss)
+{
+	bool verify = operation == OPERATION_VERIFY;
+	uint64_t table, data, logical, opened, walked, reread;
+
+	table = s->layout.hdr_dir_size - s->layout.dir_offset;
+	data = (uint64_t)s->layout.image_size - 4 - s->layout.hdr_dir_size;
+	logical = 4 * s->members + (s->spanning ? s->data_base -
+	    s->layout.hdr_dir_size : 0);
+	opened = run->opening.region_bytes[REGION_TABLE];
+	walked = run->reads.region_bytes[REGION_TABLE] - opened;
+	CHECK(s->record_length < 4096);
+	reread = (table / (4096 - s->record_length) + 2) * s->record_length;
+
+	CHECK(run->entries == s->members + s->implicit + (verify ? 1 : 0));
+	CHECK(run->memory_peak <= SCALE_MEMORY);
+	CHECK(!rss || run->rss_growth <= SCALE_RSS_GROWTH);
+	CHECK(opened >= table && opened <= table + reread);
+	CHECK(run->opening.region_bytes[REGION_DATA] == 0);
+	CHECK(walked == s->members * (2 + s->record_length) +
+	    (verify ? table : 0));
+	CHECK(run->reads.region_bytes[REGION_DATA] == logical +
+	    (verify ? data : 0));
+}
+
+/* Whether the resident set measures the memory an operation holds, rather
+ * than memory its allocator keeps after a free. Only the large sizes are
+ * measured: check-scale runs them without sanitizers, whose allocators
+ * keep freed memory resident in quarantine, and the small sizes stay
+ * below the bound anyway. macOS's default allocator also keeps freed
+ * blocks resident: a million-record listing grows the resident set by 18
+ * to 73 MB from one run to the next at a 5.4 MB charged peak.
+ * MallocSpaceEfficient=1, which check-scale sets, makes it return them,
+ * and the growth stays below 8 MB.
+ */
+static bool
+rss_measurable(bool large)
+{
+#if defined(__APPLE__)
+	const char *efficient = getenv("MallocSpaceEfficient");
+
+	if (efficient == NULL || strcmp(efficient, "1") != 0)
+		return (false);
+#endif
+	return (large);
+}
+
+typedef struct scale_case {
+	const char	*name;
+	void		(*build)(scale_image_t *, uint64_t);
+	uint64_t	 small;
+	uint64_t	 large;
+	bool		 deep;		/* the size is a depth past the default */
+	bool		 spills;	/* the large size must spill */
+} scale_case_t;
+
+static void
+test_scale(bool large)
+{
+	static const scale_case_t cases[] = {
+		{
+			.name = "body",
+			.build = scale_body,
+			.small = UINT64_C(1) << 20,
+			.large = UINT64_C(0xfffffffc)
+		}, {
+			.name = "records",
+			.build = scale_records,
+			.small = 20000,
+			.large = 1000000,
+			.spills = true
+		}, {
+			.name = "width",
+			.build = scale_width,
+			.small = 20000,
+			.large = 1000000,
+			.spills = true
+		}, {
+			.name = "paths",
+			.build = scale_paths,
+			.small = 200,
+			.large = 65536
+		}, {
+			.name = "depth",
+			.build = scale_depth,
+			.small = 64,
+			.large = 512,
+			.deep = true
+		}
+	};
+	scale_image_t *s;
+	scale_run_t list, verify;
+	uint64_t size;
+	uint32_t max_depth;
+	bool rss;
+
+	rss = rss_measurable(large);
+	if (large && !rss)
+		printf("SKIP: ifs scale RSS growth is not checked without "
+		    "MallocSpaceEfficient=1\n");
+	s = xmalloc(sizeof(*s));
+	for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+		size = large ? cases[c].large : cases[c].small;
+		cases[c].build(s, size);
+		max_depth = cases[c].deep ? (uint32_t)size : 0;
+		scale_measure(s, OPERATION_LIST, max_depth, &list);
+		scale_measure(s, OPERATION_VERIFY, max_depth, &verify);
+		if (large) {
+			scale_print(cases[c].name, size, "list", s, &list);
+			scale_print(cases[c].name, size, "verify", s, &verify);
+		}
+		scale_check(s, &list, OPERATION_LIST, rss);
+		scale_check(s, &verify, OPERATION_VERIFY, rss);
+		if (large && cases[c].spills)
+			CHECK(list.scratch_peak > SCALE_BUDGET &&
+			    verify.scratch_peak > SCALE_BUDGET);
+	}
+	free(s);
+	CHECK(fflush(stdout) == 0);
+}
+
+/*
  * Native images. FSIMG_IFS_NATIVE names the captures directory: every
  * bare ImageFS in its cases/ subdirectories and in decoded/ is compared
  * with the model. Only counts and image file names are printed, never a
@@ -3615,30 +4960,208 @@ native_run(void)
 	return (counts.mismatched == 0 && counts.images != 0 ? 0 : 1);
 }
 
-/* Write the sample image as a fuzzing seed. */
+/*
+ * Command modes for the fuzzing seed and test/ifs-integration.sh.
+ */
+
+/* An image of shadowed records and implicit parents: a duplicate file
+ * path, records below a file and below a link, a link record shadowing a
+ * directory record with a child, and a file below two implicit parents.
+ */
 static void
-emit_seed(const char *path)
+shadowed_image(gen_t *g)
 {
-	gen_t g;
+	gen_init(g);
+	gen_root(g);
+	gen_file(g, "twice", "first");
+	gen_file(g, "twice", "second");
+	gen_file(g, "file", "f");
+	gen_file(g, "file/below", "b");
+	gen_link(g, "link", "file");
+	gen_file(g, "link/below", "b");
+	gen_dir(g, "dir");
+	gen_file(g, "dir/child", "c");
+	gen_link(g, "dir", "file");
+	gen_fifo(g, "pipe");
+	gen_file(g, "p/q/r", "deep");
+	gen_finish(g);
+}
+
+static void
+write_image(const char *path, const gen_t *g)
+{
 	FILE *out;
 
-	omitted_image(&g);
 	out = fopen(path, "wb");
 	CHECK(out != NULL);
-	CHECK(fwrite(g.image, 1, g.length, out) == g.length);
+	CHECK(fwrite(g->image, 1, g->length, out) == g->length);
 	CHECK(fclose(out) == 0);
-	gen_free(&g);
+}
+
+/* POSIX cksum(1): CRC-32 with polynomial 0x04C11DB7, most significant bit
+ * first; cksum_finish appends the length in as few bytes as hold it, least
+ * significant first, and complements the register.
+ */
+static uint32_t
+cksum_update(uint32_t crc, const unsigned char *bytes, size_t length)
+{
+	for (size_t i = 0; i < length; i++) {
+		crc ^= (uint32_t)bytes[i] << 24;
+		for (unsigned bit = 0; bit < 8; bit++)
+			crc = (crc & 0x80000000u) != 0 ?
+			    (crc << 1) ^ 0x04c11db7u : crc << 1;
+	}
+	return (crc);
+}
+
+static uint32_t
+cksum_finish(uint32_t crc, uint64_t length)
+{
+	unsigned char byte;
+
+	for (; length != 0; length >>= 8) {
+		byte = (unsigned char)length;
+		crc = cksum_update(crc, &byte, 1);
+	}
+	return (~crc);
+}
+
+/* The content read by manifest_file and manifest_link. */
+static unsigned char manifest_buffer[65536];
+
+/* Print a file's manifest line, once all of its bytes are read. */
+static fsimg_status_t
+manifest_file(fsimg_reader_t *reader, const fsimg_entry_t *entry)
+{
+	fsimg_status_t status;
+	uint64_t offset;
+	uint32_t crc;
+	size_t count;
+
+	crc = 0;
+	for (offset = 0; offset < entry->size; offset += count) {
+		size_t want = entry->size - offset < sizeof(manifest_buffer) ?
+		    (size_t)(entry->size - offset) : sizeof(manifest_buffer);
+
+		status = fsimg_reader_read_at(reader, offset, manifest_buffer,
+		    want, &count, NULL);
+		if (status != FSIMG_OK)
+			return (status);
+		CHECK(count != 0 && count <= want);
+		crc = cksum_update(crc, manifest_buffer, count);
+	}
+	printf("F\t%s\t%" PRIu32 "\t%" PRIu64 "\n", entry->path,
+	    cksum_finish(crc, entry->size), entry->size);
+	return (FSIMG_OK);
+}
+
+/* Print a link's manifest line, once its whole target is read. */
+static fsimg_status_t
+manifest_link(fsimg_reader_t *reader, const fsimg_entry_t *entry)
+{
+	fsimg_status_t status;
+	size_t count, done;
+
+	CHECK(entry->size <= sizeof(manifest_buffer));
+	for (done = 0; done < entry->size; done += count) {
+		status = fsimg_reader_read_at(reader, done,
+		    manifest_buffer + done, (size_t)entry->size - done, &count,
+		    NULL);
+		if (status != FSIMG_OK)
+			return (status);
+		CHECK(count != 0 && count <= entry->size - done);
+	}
+	printf("L\t%s\t", entry->path);
+	for (size_t i = 0; i < done; i++)
+		printf("%02x", manifest_buffer[i]);
+	printf("\n");
+	return (FSIMG_OK);
+}
+
+/*
+ * Print the content of every file and symbolic link of the bare ImageFS
+ * at path, for test/ifs-native.py to compare with a decoder's manifest:
+ * "F\tPATH\tCKSUM\tSIZE" for a file, with its POSIX cksum, and
+ * "L\tPATH\tTARGET" for a link, the target in hexadecimal, since it may
+ * hold any byte. A delivered path is inside the name profile, so it holds
+ * no tab or newline. The names travel through the pipe, never through a
+ * command line; diagnostics give the status alone.
+ */
+static int
+manifest(const char *path)
+{
+	fsimg_options_t options;
+	fsimg_ctx_t *ctx;
+	fsimg_io_t *io;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	char directory[256];
+	const char *tmp = getenv("TMPDIR");
+	int fd, scratch;
+
+	CHECK((size_t)snprintf(directory, sizeof(directory),
+	    "%s/fsimg-ifs-XXXXXX", tmp != NULL && tmp[0] != '\0' ? tmp :
+	    "/tmp") < sizeof(directory));
+	CHECK(mkdtemp(directory) != NULL);
+	scratch = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(scratch != -1);
+	fsimg_options_init(&options);
+	options.memory_bytes = 64 * 1024 * 1024;
+	options.scratch_directory_fd = scratch;
+	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	CHECK(fd != -1);
+	CHECK(fsimg_io_from_fd(ctx, fd, FSIMG_IO_READ, &io, NULL) == FSIMG_OK);
+	reader = NULL;
+	status = fsimg_reader_open(ctx, io, NULL, &reader, NULL);
+	while (status == FSIMG_OK) {
+		status = fsimg_reader_next(reader, &entry, NULL);
+		if (status != FSIMG_OK)
+			break;
+		if (entry->kind == FSIMG_ENTRY_FILE)
+			status = manifest_file(reader, entry);
+		else if (entry->kind == FSIMG_ENTRY_SYMLINK)
+			status = manifest_link(reader, entry);
+	}
+	if (status == FSIMG_DONE)
+		status = FSIMG_OK;
+	if (status != FSIMG_OK)
+		fprintf(stderr, "manifest: status %d\n", status);
+	fsimg_reader_free(reader);
+	fsimg_io_free(io);
+	fsimg_ctx_free(ctx);
+	CHECK(close(scratch) == 0);
+	CHECK(rmdir(directory) == 0);
+	CHECK(fflush(stdout) == 0);
+	return (status == FSIMG_OK ? 0 : 1);
 }
 
 int
 main(int argc, char **argv)
 {
+	gen_t g;
+
 	if (argc == 3 && strcmp(argv[1], "--seed") == 0) {
-		emit_seed(argv[2]);
+		omitted_image(&g);
+		write_image(argv[2], &g);
+		gen_free(&g);
 		return (0);
 	}
+	if (argc == 3 && strcmp(argv[1], "--seed-shadowed") == 0) {
+		shadowed_image(&g);
+		write_image(argv[2], &g);
+		gen_free(&g);
+		return (0);
+	}
+	if (argc == 3 && strcmp(argv[1], "--manifest") == 0)
+		return (manifest(argv[2]));
 	if (argc == 2 && strcmp(argv[1], "--native") == 0)
 		return (native_run());
+	if (argc == 2 && strcmp(argv[1], "--scale") == 0) {
+		test_scale(true);
+		return (0);
+	}
 	CHECK(argc == 1);
 	test_sample();
 	test_probe();
@@ -3657,5 +5180,7 @@ main(int argc, char **argv)
 	test_long_records();
 	test_random();
 	test_extract();
+	test_faults();
+	test_scale(false);
 	return (0);
 }

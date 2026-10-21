@@ -1,0 +1,227 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+#
+# Independent QNX ImageFS evidence. The fixtures are external inputs that
+# are never redistributed:
+#   FSIMG_IFS_NATIVE  the QNX 6.5.0 captures directory
+#                     (docs/ifs-research.md): bare images under cases/ and
+#                     the decoded S1 and S2 bodies under decoded/
+#   FSIMG_IFS_IMAGES  a directory of the licensed S1 (H3) and S2 (X1) boot
+#                     images and their `dumpifs -u` copies; only the bodies
+#                     of bare and uncompressed images are read, through
+#                     info and verification alone
+#   DUMPIFS           an lclevy/dumpifs command at a pinned revision, run
+#                     as $DUMPIFS IMAGE
+#   QNXPROBE          a qnxprobe command at a pinned revision, run as
+#                     $QNXPROBE IMAGE
+# The captures are compared with test-ifs's model by test-ifs --native and,
+# through the command, with the research decoder ifsdump.py by
+# test/ifs-native.py, which first checks itself on two generated images.
+# dumpifs and qnxprobe, when given, must accept every bare image fsimg
+# verifies. Member names are image data: only counts and image file names
+# are printed, and fsimg's and the oracles' diagnostics, which can quote a
+# name, are discarded. Each unavailable check is reported as a skip.
+set -eu
+ran=0
+python='@PYTHON3@'
+native_tool='@abs_top_srcdir@/test/ifs-native.py'
+ifsdump='@abs_top_srcdir@/tools/qnx/decode/ifsdump.py'
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-ifs-oracle-XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# Full verification of the image at byte $2 of file $1, $3 bytes long, with
+# payload read-through; the JSON verify record goes to the file $4. It
+# fails unless the report is complete.
+fsimg_verify() {
+    ./fsimg W --json -d --offset="$2" --length="$3" -f "$1" > "$4" \
+        2> /dev/null && grep -q '"type":"verify","complete":true' "$4"
+}
+
+# The value of counter $1 in the verify record file $2, which must hold it.
+verify_count() {
+    value=$(sed -n 's/.*"type":"verify".*"'"$1"'":"\([0-9]*\)".*/\1/p' "$2")
+    test -n "$value" || fail "the verify record has no $1"
+    echo "$value"
+}
+
+# Whether oracle command $1 accepts the image file $2. Its output names
+# members, so it is discarded.
+oracle_accepts() {
+    # DUMPIFS and QNXPROBE may hold arguments, so they are split into
+    # words on purpose, without pathname expansion.
+    set -f
+    # shellcheck disable=SC2086
+    if $1 "$2" > /dev/null 2>&1; then
+        set +f
+        return 0
+    fi
+    set +f
+    return 1
+}
+
+# Every bare image fsimg verifies, among the files $@, must be accepted by
+# each oracle given; prints the counts.
+oracle_compare() {
+    verified=0
+    for image in "$@"; do
+        test -f "$image" || continue
+        test "$(head -c 7 "$image" | tr -d '\000')" = imagefs || continue
+        length=$(wc -c < "$image" | tr -d ' ')
+        fsimg_verify "$image" 0 "$length" "$fixture/verify" || continue
+        verified=$((verified + 1))
+        if test -n "$dumpifs" &&
+            ! oracle_accepts "$dumpifs" "$image"; then
+            fail "dumpifs refuses $(basename "$image"), which fsimg verifies"
+        fi
+        if test -n "$probe" &&
+            ! oracle_accepts "$probe" "$image"; then
+            fail "qnxprobe refuses $(basename "$image"), which fsimg verifies"
+        fi
+    done
+    test -z "$dumpifs" ||
+        echo "dumpifs accepts the $verified images fsimg verifies"
+    test -z "$probe" ||
+        echo "qnxprobe accepts the $verified images fsimg verifies"
+}
+
+# Fails unless the comparison's output holds a line matching pattern $1.
+expect_line() {
+    grep -q "$1" "$fixture/compare" ||
+        fail "the generated images' comparison lacks the line $1"
+}
+
+dumpifs=${DUMPIFS:-}
+probe=${QNXPROBE:-}
+
+# Two generated images, verified through the command and, as a test of the
+# comparison itself, compared with ifsdump.py: the fuzzing seed, whose
+# names outside the profile are omitted with their subtrees, a link, a
+# FIFO among them, implicit parents inside and outside an omitted subtree
+# and a boot reference; and an image of shadowed records, duplicates and
+# paths below a file, a link and a link that shadows a directory.
+./test-ifs --seed "$fixture/omitted.ifs"
+./test-ifs --seed-shadowed "$fixture/shadowed.ifs"
+for image in "$fixture/omitted.ifs" "$fixture/shadowed.ifs"; do
+    length=$(wc -c < "$image" | tr -d ' ')
+    fsimg_verify "$image" 0 "$length" "$fixture/verify" ||
+        fail "the generated $(basename "$image") does not verify"
+done
+if test -n "$python"; then
+    result=0
+    "$python" -I "$native_tool" compare ./fsimg ./test-ifs "$ifsdump" \
+        "$fixture/omitted.ifs" "$fixture/shadowed.ifs" > "$fixture/compare" ||
+        result=$?
+    cat "$fixture/compare"
+    test "$result" = 0 ||
+        fail "fsimg differs from ifsdump.py on the generated images"
+    # Both must open, with the counts the generator builds in, so that the
+    # comparison's rules stay exercised.
+    expect_line '^compare: 2 images, 0 refused,'
+    expect_line '^omitted.ifs: .* 4 implicit directories, 0 shadowed records, 6 omitted subtrees$'
+    expect_line '^shadowed.ifs: .* 2 implicit directories, 5 shadowed records, 0 omitted subtrees$'
+    ran=1
+else
+    echo 'SKIP: the ifsdump.py comparison requires the Python 3 development tool'
+fi
+if test -n "$dumpifs" || test -n "$probe"; then
+    oracle_compare "$fixture/omitted.ifs" "$fixture/shadowed.ifs"
+    ran=1
+fi
+
+native=${FSIMG_IFS_NATIVE:-}
+if test -n "$native"; then
+    ./test-ifs --native || fail "test-ifs --native"
+    set --
+    for group in cases/ifs-basic cases/ifs-names cases/ifs-extra \
+        cases/ifs-data decoded; do
+        for image in "$native/$group"/*; do
+            if test -f "$image"; then
+                set -- "$@" "$image"
+            fi
+        done
+    done
+    test "$#" != 0 || fail "$native holds no captures"
+    if test -n "$python"; then
+        "$python" -I "$native_tool" compare ./fsimg ./test-ifs "$ifsdump" \
+            "$@" || fail "fsimg differs from ifsdump.py on the native captures"
+    fi
+    if test -n "$dumpifs" || test -n "$probe"; then
+        oracle_compare "$@"
+    fi
+    ran=1
+else
+    echo 'SKIP: FSIMG_IFS_NATIVE is not set (QNX 6.5.0 captures)'
+fi
+test -n "$dumpifs" || echo 'SKIP: DUMPIFS is not set (lclevy/dumpifs comparison)'
+test -n "$probe" || echo 'SKIP: QNXPROBE is not set (qnxprobe comparison)'
+
+# The licensed images, read in place through info and verification with
+# payload read-through alone, which reads every file; only counts and the
+# images' file names are printed.
+images=${FSIMG_IFS_IMAGES:-}
+if test -n "$images" && test -z "$python"; then
+    echo 'SKIP: FSIMG_IFS_IMAGES requires the Python 3 development tool'
+elif test -n "$images"; then
+    read_bodies=0
+    compressed=0
+    other=0
+    for image in "$images"/*; do
+        test -f "$image" || continue
+        name=$(basename "$image")
+        bounds=$("$python" -I "$native_tool" body "$image") ||
+            fail "cannot read $name"
+        case $bounds in
+        compressed)
+            compressed=$((compressed + 1))
+            continue
+            ;;
+        none)
+            other=$((other + 1))
+            continue
+            ;;
+        esac
+        # "OFFSET LENGTH PATH", the path last since it may hold blanks.
+        offset=${bounds%% *}
+        bounds=${bounds#* }
+        length=${bounds%% *}
+        body_file=${bounds#* }
+        ./fsimg i --json --offset="$offset" --length="$length" \
+            -f "$body_file" > "$fixture/info" 2> /dev/null ||
+            fail "fsimg i failed on $name"
+        grep -q '"format":"ifs"' "$fixture/info" ||
+            fail "$name is not read as an ImageFS"
+        fsimg_verify "$body_file" "$offset" "$length" "$fixture/verify" ||
+            fail "$name does not verify"
+        directories=$(verify_count directories "$fixture/verify")
+        files=$(verify_count files "$fixture/verify")
+        read_bytes=$(verify_count initialized_bytes_read "$fixture/verify")
+        echo "$name: verified, $directories directories with the root and" \
+            "$files other entries, $read_bytes bytes read"
+        read_bodies=$((read_bodies + 1))
+    done
+    if test "$compressed" != 0; then
+        echo "SKIP: $compressed compressed boot images in FSIMG_IFS_IMAGES;" \
+            "only bare and uncompressed bodies are read here"
+    fi
+    if test "$other" != 0; then
+        echo "$other files in FSIMG_IFS_IMAGES are neither an ImageFS nor a" \
+            "little-endian boot image"
+    fi
+    if test "$read_bodies" = 0; then
+        echo 'SKIP: FSIMG_IFS_IMAGES holds no bare or uncompressed image'
+    else
+        ran=1
+    fi
+else
+    echo 'SKIP: FSIMG_IFS_IMAGES is not set (S1 and S2 images, counts only)'
+fi
+
+if test "$ran" = 0; then
+    exit 77
+fi

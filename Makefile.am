@@ -135,13 +135,14 @@ test_programs = test-core test-private test-io test-meta test-meta-sort test-uni
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
-	test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh \
-	test/containers-integration.sh test/compression-integration.sh \
-	test/cli.sh test/baseline.sh test/spec.sh
+	test/qnx6-integration.sh test/qnx4-integration.sh test/ifs-integration.sh \
+	test/layers-integration.sh test/containers-integration.sh \
+	test/compression-integration.sh test/cli.sh test/baseline.sh test/spec.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
-	test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh \
-	test/containers-integration.sh test/compression-integration.sh \
-	test/cli.sh test/baseline.sh test/spec.sh test/codec-integration.sh
+	test/qnx6-integration.sh test/qnx4-integration.sh test/ifs-integration.sh \
+	test/layers-integration.sh test/containers-integration.sh \
+	test/compression-integration.sh test/cli.sh test/baseline.sh test/spec.sh \
+	test/codec-integration.sh
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
@@ -284,10 +285,10 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
-	test/codec-integration.sh.in \
-	fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/protocol.c fuzz/image.c \
-	fuzz/container.c fuzz/plist.c fuzz/gzip.c fuzz/mtree.c fuzz/codec.c \
-	fuzz/ifs.c \
+	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c \
+	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/gzip.c \
+	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c test/ifs-integration.sh.in \
+	test/ifs-native.py \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
@@ -322,7 +323,7 @@ check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write 
 	    test/qnx6-integration.sh test/qnx4-integration.sh \
 	    test/layers-integration.sh test/containers-integration.sh \
 	    test/compression-integration.sh \
-	    test/codec-integration.sh
+	    test/codec-integration.sh test/ifs-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
 	./test/qnx6-integration.sh
@@ -331,7 +332,7 @@ check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write 
 	./test/containers-integration.sh
 	./test/compression-integration.sh
 	./test/codec-integration.sh; result=$$?; test $$result = 0 -o $$result = 77
-	./test-ifs --native; result=$$?; test $$result = 0 -o $$result = 77
+	./test/ifs-integration.sh; result=$$?; test $$result = 0 -o $$result = 77
 	./test-ifs-write --native; result=$$?; test $$result = 0 -o $$result = 77
 # Regenerate the checked-in comparison baseline; test/baseline.sh only reads it.
 baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
@@ -339,7 +340,7 @@ baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	    { rm -f $(srcdir)/test/baseline.txt.new; exit 1; }
 	mv $(srcdir)/test/baseline.txt.new $(srcdir)/test/baseline.txt
 check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale \
-	    test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write
+	    test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-ifs
 	./test-meta-sort --scale
 	./test-catalog --wide 100000
 	./test-catalog --scale 100000
@@ -350,6 +351,7 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx6 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
+	MallocSpaceEfficient=1 ./test-ifs --scale
 check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-ifs test-codec \
 	    test-protocol test-layers test-containers test-compression test-mtree \
 	    test/spec.sh

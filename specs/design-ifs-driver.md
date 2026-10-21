@@ -98,8 +98,9 @@ next reads:
 2. **Mountpoint.** Apply the format design's
    [mountpoint rule](design-ifs.md#mountpoint): one bounded read, the NUL
    search with its two failure classes, the `dir_offset` check, and the
-   byte rules that decide whether info reports it. Nothing between the
-   NUL and `dir_offset` is read.
+   byte rules that decide whether info reports it. The bounded read
+   covers the padding between the NUL and `dir_offset`, which nothing
+   interprets.
 3. **Table pass.** Walk the records from `dir_offset` to the terminator as
    the [table pass](#the-table-pass) states, validating each one and
    appending its path and table offset to the path stream.
@@ -520,7 +521,7 @@ EOF, source-change and cancellation failures at every stage and check
 cleanup.
 
 Scale tests record I/O calls, metadata passes, peak scratch and RSS. The
-reader's grow the image to `2^32 - 4` bytes on a sparse fixture, the table
+reader's grow the image, synthesized on demand, to `2^32 - 4` bytes, the table
 to a million records, which must spill to scratch, one directory's width to
 a million files, one path to 1024 bytes, and depth to 512, the most a path
 holds. The writer's emit, into a sink that holds only nonzero pages, an
@@ -529,9 +530,11 @@ image on both sides of the limit.
 
 `test/ifs-integration.sh` runs the independent oracles the build finds and
 skips the others explicitly: `lclevy/dumpifs` and `qnxprobe` as comparisons
-when their paths are given; the native captures under `FSIMG_IFS_NATIVE`;
-the S1 and S2 bodies under `FSIMG_IFS_IMAGES` with slice bounds from the
-environment, running only `info` and `verify` and printing counts, never a
+when their paths are given; the native captures under `FSIMG_IFS_NATIVE`,
+against the model and, through the command, against the research
+decoder's manifests; the S1 and S2 bodies under `FSIMG_IFS_IMAGES`, bare or
+behind the startup section of an uncompressed copy, whose header gives the
+slice bounds, running only `info` and `verify` and printing counts, never a
 member name; and the QNX 6.5.0 harness for the native `dumpifs` list, check
 and extract cycle. `fuzz/ifs.c` feeds the probe, open, traversal, content
 and verification paths under finite budgets with seeds generated at run

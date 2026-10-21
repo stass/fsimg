@@ -115,8 +115,9 @@ read_header(fsimg_reader_t *reader, fsimg_error_t *error)
  * header, no NUL in 1025 bytes when dir_offset lies further is a
  * mountpoint over the path limit, and a NUL whose rounding is not
  * dir_offset is an unobserved header shape. The bytes between the NUL and
- * dir_offset are padding and are never read. A mountpoint outside the
- * byte rules is kept from info but never blocks reading.
+ * dir_offset are padding: the read covers them, and nothing interprets
+ * them. A mountpoint outside the byte rules is kept from info but never
+ * blocks reading.
  */
 static fsimg_status_t
 read_mountpoint(fsimg_reader_t *reader, fsimg_error_t *error)

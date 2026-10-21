@@ -714,7 +714,7 @@ repository records only pass and fail counts.
     the script runs only info and verification and prints counts. A
     mismatch against an out-of-tree manifest reports counts only, never a
     member name.
-* Scale cases, on sparse fixtures:
+* Scale cases, on images synthesized on demand:
   * a body of `2^32 - 4` bytes;
   * a record table of a million entries, which must spill to scratch;
   * a flat root of a million files;

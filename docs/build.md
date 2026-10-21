@@ -613,6 +613,75 @@ The long-name cases plan in about a minute each and the directory cases in
 five to nine minutes each, so the run needs about 21 GiB of free scratch
 space and a quarter of an hour.
 
+The ImageFS scale case grows one dimension of an image `test-ifs`
+synthesizes on demand from its description, so neither the test process
+nor the disk ever holds it: the body to 2^32 - 4 bytes, holding a file
+whose content is the 4 GiB of zeros between the table and the data and the
+first four bytes of the data, and a four-byte file ending at the trailer;
+the record table to a million file
+records in a thousand implicit directories; the root to a million files;
+65,536 records whose paths are all at the 1024-byte limit, five components
+of 204 bytes; and ten files at depth 512, the most a 1024-byte path holds,
+below 511 implicit directories. Each image is listed, every file's name
+and bytes checked, and verified with payload, each in a fresh 16 MiB
+context and a child process of its own:
+
+```sh
+MallocSpaceEfficient=1 ./test-ifs --scale
+```
+
+It checks the driver design's resource bounds for these images: every
+member and implicit directory listed and verified; charged memory at most
+8 MiB, the reader's fixed state and a metadata cache of at most a quarter
+of the budget; scratch within a budget the context enforces, four times
+the table and 64 bytes per entry; the operation's growth of the child's
+peak RSS at most 32 MiB, below the million-record table; the million-record
+and million-file cases spilling past the 16 MiB budget; open reading the
+table once, where a table read cut a record re-reading it, less than one
+record per 4 KiB of table; a listing reading each file's record once more
+at replay, two bytes and then the record, and each file's bytes once; and
+verification adding exactly one pass over the image for the checksum.
+macOS's default allocator keeps freed blocks resident, so that the
+million-record listing's RSS growth varies from 18 to 73 MB between runs
+at the same 5.4 MB charged peak; `MallocSpaceEfficient=1`, which
+`make check-scale` sets, makes it return them, and on macOS the RSS bound
+is checked only under it, the run printing a skip otherwise. Ordinary
+`test-ifs` checks no RSS bound: its cases are small, and a sanitizer's
+quarantine keeps freed memory resident. On APFS:
+
+| Case | Operation | Image calls | Image bytes | Table bytes | Table passes | Data bytes | Memory peak | Scratch peak | RSS growth | Seconds |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2^32 - 4 body | list | 65,545 | 4,294,976,084 | 212 | 1.77 | 4,294,967,076 | 3,239,249 | 0 | 4,673,536 | 0.203 |
+| 2^32 - 4 body | verify | 131,081 | 8,589,943,376 | 332 | 2.77 | 8,589,934,152 | 3,304,801 | 0 | 4,562,944 | 1.529 |
+| 1,000,000 records | list | 3,005,380 | 94,051,852 | 90,043,056 | 2.05 | 4,000,000 | 5,356,513 | 105,105,496 | 6,959,104 | 10.876 |
+| 1,000,000 records | verify | 3,006,113 | 142,051,980 | 134,043,088 | 3.05 | 8,000,000 | 5,422,065 | 105,105,496 | 6,975,488 | 11.619 |
+| 1,000,000 root files | list | 3,005,380 | 94,051,852 | 90,043,056 | 2.05 | 4,000,000 | 5,356,929 | 160,000,512 | 6,955,008 | 10.435 |
+| 1,000,000 root files | verify | 3,006,113 | 142,051,980 | 134,043,088 | 3.05 | 8,000,000 | 5,422,481 | 160,000,512 | 7,192,576 | 10.526 |
+| 65,536 1024-byte paths | list | 205,974 | 146,565,800 | 146,294,860 | 2.11 | 262,144 | 5,356,929 | 204,670,147 | 7,163,904 | 5.332 |
+| 65,536 1024-byte paths | verify | 207,039 | 216,296,232 | 215,763,052 | 3.11 | 524,288 | 5,422,481 | 204,670,147 | 6,991,872 | 4.674 |
+| depth 512 | list | 35 | 30,780 | 21,944 | 2.07 | 40 | 3,249,745 | 0 | 4,550,656 | 0.121 |
+| depth 512 | verify | 36 | 41,508 | 32,536 | 3.07 | 80 | 3,315,297 | 0 | 4,640,768 | 0.124 |
+
+The per-region byte counts exclude the format registry's probe of the
+image's prefix, which the image bytes include. Table passes are the table
+bytes read over the table's length: one pass at open, one more as replay
+reads each file's record again, which with its two-byte length read is a
+little more than a pass, and verification's checksum pass; the tiny body
+and deep tables have few records, so the probe's share and the replay of
+records longer than their share of the table move the ratio. The million
+records take 44,000,032 table bytes; their path and child streams, sorted
+copies and group table peak at 105 MB of scratch, 2.4 times the table,
+while the one directory of a million files adds common directory
+preparation's sorted keys and peaks at 160 MB, 3.6 times. Charged memory
+peaks at 5.4 MB, of which about 3.2 MB is the reader's fixed state and the
+rest the metadata cache before stores spill, and RSS grows by at most
+7.2 MB. The 4 GiB body costs the listing one 64 KiB read per 64 KiB of the
+spanning file and verification twice that, the checksum and the payload.
+The whole run takes about 56 seconds on a loaded host. Ordinary
+`test-ifs` runs the same cases at a 1 MiB body, 20,000 records, 20,000
+files in the root, 200 paths at the limit and depth 64. The RSS bound has
+been measured on macOS alone ([TODO](todo-ifs.md)).
+
 The extended ten-million-file catalog uses the same generated provider, 10,000
 explicit directories, a 256 MiB budget, and no retained per-file object or FD:
 
@@ -1227,11 +1296,38 @@ an invalid mountpoint; omitted and shadowed accounting; the checksum
 pass's work charge per window; extraction; and
 400 random trees in either byte order compared with the model.
 
+The fault cases run a listing that reads every file and link, and full
+verification with payload read-through, under every failure the library
+can inject, and after each one require the context to hold no charged
+memory, scratch or descriptor beyond its own and the scratch directory to
+be empty. On an image whose 207 records span two 8 KiB table reads,
+allocation fails at every occurrence and each kind of scratch operation
+(open, resize, read and write, with a one-page metadata cache so every
+store spills) at every occurrence up to the 64th and at growing steps after
+it, until the operation needs no more; allocation failures end the
+operation with `FSIMG_ENOMEM` and scratch failures with `FSIMG_EIO`
+carrying the injected `ENOSPC`; reads of at most one and seven bytes change
+nothing, the listing still matching the model. On the sample image,
+cancellation at every poll and the work limit at every value end each
+operation with `FSIMG_ECANCELLED` or `FSIMG_ELIMIT`. With the format
+forced, so that the probe reads only the 88-byte header and every later
+read is the driver's own, the n-th read of the image fails, and in a
+second loop returns no bytes, for every n until the operation makes fewer
+reads, which reaches every read site of open, replay, content and
+verification; each ends the operation with `FSIMG_EIO` at that read's
+offset, an end of the source reported as EOF. On the 207-record image a failed
+read of the mountpoint, a record or the terminator fails open, of file
+content the listing, and of the trailer only verification; and the source
+ending inside the mountpoint, a record of the first and of a later table
+read, the terminator, a record at replay, a link's record, file content
+(also behind three-byte reads) and the trailer fails with `FSIMG_EIO` at
+exactly that offset.
+
 ```sh
 FSIMG_IFS_NATIVE=/path/to/captures-ifs ./test-ifs --native
 ```
 
-`make check-integration` runs `test-ifs --native`, which reads external
+`test/ifs-integration.sh` runs `test-ifs --native`, which reads external
 evidence that is never redistributed. `FSIMG_IFS_NATIVE` names the native
 captures directory described in [the ImageFS research
 record](ifs-research.md); every file in its `cases/ifs-basic`,
@@ -1253,6 +1349,79 @@ a file record's descendant and the six decoded H3 boot
 bodies holding two symbolic-link records below a symbolic-link record open
 with those records shadowed. Images `dumpifs -u` decompresses are not compared:
 no such copies exist on this host.
+
+`make check-integration` runs `test/ifs-integration.sh`, which skips what
+is absent:
+
+```sh
+FSIMG_IFS_NATIVE=/path/to/captures-ifs ./test/ifs-integration.sh
+FSIMG_IFS_IMAGES=/path/to/images ./test/ifs-integration.sh
+DUMPIFS='/path/to/dumpifs' QNXPROBE='/path/to/qnxprobe' \
+    ./test/ifs-integration.sh
+```
+
+`test/ifs-native.py compare` derives the tree fsimg must list from the
+manifest the research decoder `tools/qnx/decode/ifsdump.py --manifest`
+writes from the record table, by the format design's rules, and compares
+it with the command's view both ways. The last record of a path places
+it, and the earlier records and every path below a non-directory make the
+`shadowed` count; each prefix of a placed path that no record names, and
+the root when no record names it, is a synthesized directory, all of them
+the `implicit_directories` count; and each placed or synthesized node
+whose own name lies outside the name profile while every ancestor's lies
+inside is the root of an omitted subtree, all of them the `omitted`
+count. `fsimg t --json` must list exactly the placed and
+synthesized nodes no omission hides: a recorded one with its last record's
+kind, permissions, owner and time, every file the size and POSIX `cksum`
+of its bytes and every link the target, both as `test-ifs --manifest`
+reads them through the library, which hands the names over a pipe, never
+a command line; a synthesized one with the implicit-directory values. An
+image fsimg refuses, exiting with status 1 and a corrupt or unsupported
+error record, counts as refused, and `test-ifs --native` checks the
+library's refusal of each capture against its model; any other failure of
+fsimg, the decoder or the library reading, such as a crash or a leak
+report, is a mismatch.
+The script prints one line of counts per image and a mismatch by category
+and count, never a member name, and discards the diagnostics of fsimg,
+`test-ifs` and the decoder; an unexpected failure of the comparison prints
+only its exception type.
+
+The script first writes two images with `test-ifs`: `--seed`, the fuzzing
+seed, whose names outside the profile, control bytes and Latin-1 among
+them, are omitted with their subtrees, with implicit parents inside and
+outside an omitted subtree and a boot reference; and `--seed-shadowed`,
+whose duplicates and paths below a file, a link and a link that shadows a
+directory are shadowed. `fsimg W -d` must verify both completely, and when
+Python 3 is present the comparison checks itself on them: neither may be
+refused, the first must give 4 implicit directories and 6 omitted
+subtrees, and the second 2 implicit directories and 5 shadowed records.
+With `FSIMG_IFS_NATIVE` it runs `test-ifs --native` and then the
+comparison over every bare image in the
+`cases/ifs-basic`, `cases/ifs-names`, `cases/ifs-extra`, `cases/ifs-data`
+and `decoded` subdirectories. On macOS all 72 bare images agree: 2,620
+entries, 1,659 files' bytes and 514 link targets, the odd-paths capture
+refused as `test-ifs --native` expects, and nine boot images among the
+captures skipped. The whole script takes about 53 seconds, most of it the
+decoder's checksums.
+
+`FSIMG_IFS_IMAGES` is the directory the codec integration reads, whose
+files may be symbolic links. Each file in it that is a bare ImageFS, or an
+uncompressed boot image such as a `dumpifs -u` copy, whose startup header
+(at offset 0 or after the 1,088-byte BIOS loader) gives the body's offset
+and length, is read in place through `fsimg i`, which must report `ifs`,
+and `fsimg W -d`, and the script prints the image's file name with the
+verify record's counts only. Compressed boot images are counted and
+reported as a skip, as are files that hold neither. `DUMPIFS` and
+`QNXPROBE` name an `lclevy/dumpifs` and a `qnxprobe` command at pinned
+revisions, split into words, run as `$DUMPIFS IMAGE` and `$QNXPROBE IMAGE`
+on the two generated images and every bare capture fsimg verifies; each
+must accept them all, and only the number accepted is printed. Without
+the variables the three are skips: "FSIMG_IFS_IMAGES is not set (S1 and S2
+images, counts only)", "DUMPIFS is not set (lclevy/dumpifs comparison)"
+and "QNXPROBE is not set (qnxprobe comparison)"; the decoded S1 and S2
+bodies in the captures' `decoded/` are compared above
+([TODO](todo-ifs.md)). The script exits 77 when it runs nothing, without
+Python 3 and every variable.
 
 `test-ifs-write` creates ImageFS images with the writer. The registry lists
 only writers that native QNX has qualified, so the test builds writers from
