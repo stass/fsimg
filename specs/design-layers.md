@@ -230,7 +230,7 @@ volume uses one of these selectors:
 | Name `TEXT` | GPT only. `TEXT` is validated UTF-8, converted to UTF-16LE code units and compared unit for unit with the entry's name truncated at its first zero unit; no case folding or normalisation. Exactly one entry must match. |
 | Type `NAME` | A name from the [type table](#partition-types) or a literal GUID or MBR type byte. Exactly one used partition must carry that type. |
 | Range `offset, length` | A checked slice of the disk. Step 3 is skipped entirely: no scheme probe runs, so a damaged partition table does not block it. The escape hatch for unusual layouts. |
-| Disk | The whole disk, for unwrap, layer verification and raw access. It is a slice like any other, so `fsimg_reader_open()` accepts it; on a partitioned disk the filesystem probes then meet the partition table and report an unrecognised image, which is the honest result. |
+| Disk | The whole disk, for unwrap, layer verification and raw access. Like Range, it runs no scheme probe. It is a slice like any other, so `fsimg_reader_open()` accepts it; on a partitioned disk the filesystem probes then meet the partition table and report an unrecognised image, which is the honest result. |
 
 A disk without a scheme, detected or forced empty, has no partition table and
 no slot numbers: Automatic yields the whole disk as the volume, Range and
@@ -507,12 +507,12 @@ absent layer.
 
 | Key | Type | Default | Validation |
 | --- | --- | --- | --- |
-| `gpt:type` | type name, or GUID text | Derived from the filesystem: `basic` for FAT and exFAT, `qnx6` for QNX6 | Name from the [type table](#partition-types) or RFC 4122 text |
+| `gpt:type` | type name, or GUID text | Derived from the filesystem: `basic` for FAT and exFAT, `qnx6` for QNX6; none for QNX4, which must name its type | Name from the [type table](#partition-types) or RFC 4122 text |
 | `gpt:name` | UTF-8 text | The type's conventional name from the [type table](#partition-types) | At most 36 UTF-16LE units after conversion; validated UTF-8 |
 | `gpt:disk-guid`, `gpt:guid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text |
 | `gpt:disk` | bytes | Derived from the volume | Multiple of the sector size and the container granularity; large enough for the volume and tables |
 | `gpt:sector` | bytes | 512 | 512 or 4096; the LBA size of the tables. On read it resolves a disk carrying a header at both offsets and requires `gpt` in the forced stack |
-| `mbr:type` | type name, or `0x` byte | Derived: `fat12` 0x01, `fat16` 0x06, `fat32` 0x0C, `exfat` 0x07, `qnx6` 0xB1 (to verify) | Nonzero byte; not 0x05, 0x0F or 0x85 (extended containers) and not 0xEE (GPT protective) |
+| `mbr:type` | type name, or `0x` byte | Derived: `fat12` 0x01, `fat16` 0x06, `fat32` 0x0C, `exfat` 0x07, `qnx6` 0xB1, `qnx4` 0x4D | Nonzero byte; not 0x05, 0x0F or 0x85 (extended containers) and not 0xEE (GPT protective) |
 | `mbr:active` | `yes`, `no` | `no` | Sets the 0x80 status |
 | `mbr:id` | `0x` 32-bit | See [identifiers](#identifiers) | Any value |
 | `mbr:disk` | bytes | Derived | As `gpt:disk`; at most 2 TiB, the 2^32 sectors an entry can address |
@@ -551,14 +551,23 @@ One table serves `type=` on write, the Type selector on read, compose and
 | `linux` | `0FC63DAF-8483-4772-8E79-3D69D8477DE4` | 0x83 | `Linux filesystem` | Linux filesystem data |
 | `apfs` | `7C3457EF-0000-11AA-AA11-00306543ECAC` | none | `Apple APFS` | APFS container |
 | `hfs` | `48465300-0000-11AA-AA11-00306543ECAC` | 0xAF | `Apple HFS/HFS+` | Apple HFS+ |
-| `qnx6` | `CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1` (to verify) | 0xB1 (to verify) | `QNX6 Power-Safe` | QNX6 Power-Safe |
+| `qnx6` | `CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1` | 0xB1 | `QNX6 Power-Safe` | QNX6 Power-Safe; 0xB2 and 0xB3 accepted on read |
+| `qnx4` | none | 0x4D | none | QNX4 POSIX volume; 0x4E and 0x4F, the secondary and tertiary volumes, accepted on read |
 
 The default GPT names are the ones `sgdisk` assigns, so a disk fsimg writes
 lists like one it made. A GPT type that is not in the table is reported as
-its GUID text; an MBR type as `0x` and two hex digits. The GUID and byte
-values marked "to verify" are confirmed against the UEFI specification's and
-the QNX documentation's published lists before the table is compiled in. A
-type with no MBR byte cannot be requested on an MBR disk.
+its GUID text; an MBR type as `0x` and two hex digits. The QNX values come
+from QNX's own documentation: the QNX6 GUID is the one the `io-blk.so` and
+`diskimage` references assign to Power-Safe partitions, also listed by
+gptfdisk (`0xb300`, "QNX6 Power-Safe") and util-linux ("QNX6 file system");
+0xB1, 0xB2 and 0xB3 are the Power-Safe types and 0x4D, 0x4E and 0x4F the QNX4
+types of the QNX system architecture guide's partition table and the QNX
+`fdisk` reference. Other operating systems' lists also give 0xB1 and 0xB3 to
+HP volume expansion, which a type selection cannot tell apart. A
+type with no MBR byte cannot be requested on an MBR disk. A filesystem with no
+GPT type has no `gpt:type` default: QNX4 predates GPT and no published list
+registers a GUID for it, so `qnx4/gpt` without `gpt:type=` is `FSIMG_EINVAL`
+naming the key rather than an identity no other tool recognises.
 
 ## Resource bounds
 
@@ -681,9 +690,15 @@ variant bits replace the top two bits of byte 8 with `10`, so tools accept
 the GUID as well-formed. That value is then encoded as each format stores
 GUIDs: GPT in its mixed byte order, VHD and DMG in text byte order. The MBR
 disk identifier is the low 32 bits of the epoch. Two reproducible images at
-the same epoch therefore share identifiers, a consequence the
-[open question](#open-questions) weighs; a build that attaches such images
-side by side sets them explicitly.
+the same epoch therefore share identifiers. Two such images attached to one
+host collide: Linux `by-partuuid` links name only one of them, and Windows
+takes a disk with a duplicate signature offline. The plan and `i` print every
+derived value, and a build that attaches such images side by side sets them
+explicitly. The derivation stays the default because a reproducible build
+must not fail for an option its non-reproducible twin never needed, and a
+digest of the volume bytes would cost one more sequential read of the staged
+volume for a collision that arises only when same-epoch images meet on one
+host.
 
 ## Reproducibility
 
@@ -850,6 +865,9 @@ sorted in memory by first LBA and adjacent pairs checked for overlap. Any
 failure is `FSIMG_ECORRUPT`; there is no fallback to the backup copy alone,
 because a disk whose copies disagree is reported, not repaired. A truncated
 image whose backup is missing is therefore corrupt, which is what it is.
+Truncated images are common, but a silent fallback would hide the damage; a
+forced degraded open that reports it in the layer report is the extension if
+demand appears.
 
 ### MBR
 
@@ -877,7 +895,8 @@ the shape of the entry area, since a FAT boot sector carries the same
 signature: every entry all zero or with a legal status (0x00 or 0x80), a
 nonzero type and a nonzero count, at least one entry used, and no entry of
 type 0xEE, which belongs to GPT's protective MBR, so a hybrid MBR is a GPT
-disk. Validation then requires first LBA plus count within the disk and no
+disk. Validation then requires each used entry to start after the MBR's own
+sector (first LBA at least 1), first LBA plus count within the disk, and no
 overlap between used entries; a failure is `FSIMG_ECORRUPT`. Extended
 partitions (types 0x05, 0x0F and 0x85) are listed with their type and are
 unsupported as a selection: logical partitions inside them need their own
@@ -1154,26 +1173,6 @@ its platform.
   alternative is to read them as zeros, as QEMU does. Recommendation: keep
   the strict rule unless the evidence gate shows real images need the other,
   then change the rule here rather than special-casing a producer.
-* **GPT with a missing or damaged backup.** Truncated disk images are common
-  in the wild. This design refuses them. Recommendation: keep refusing on
-  open; if demand appears, add a forced `gpt` open mode that reports the
-  damage in the layer report rather than a silent fallback.
-* **Reproducible identifiers collide.** Under `-R` without explicit settings
-  every image at the same epoch gets the same disk and partition GUIDs, MBR
-  identifier and VHD UUID. Two such images attached to one host collide:
-  Linux `by-partuuid` links name only one of them, and Windows takes a disk
-  with a duplicate signature offline. The options are the epoch-and-role
-  derivation this design specifies, with explicit settings as the remedy; a
-  derivation from a digest of the volume bytes, which separates distinct
-  images and keeps identical ones identical but costs one more sequential
-  read of the staged volume before the tables are written; or refusing `-R`
-  with an unset identifier, so a reproducible build names its identifiers
-  as it names its epoch. Recommendation: keep the derivation as the default
-  and print the derived values in the plan and in `i`, because a
-  reproducible build must not fail for an option its non-reproducible twin
-  never needed, and the collision arises only when two same-epoch images
-  meet on one host, where the explicit settings are the right tool; revisit
-  the digest derivation if that case turns out to be common.
 * **Default DMG chunk table shape.** One table for the whole disk is the
   simplest; `hdiutil` writes one per partition-map region. Recommendation:
   decide by the `hdiutil attach` gate; both shapes are supported on read.

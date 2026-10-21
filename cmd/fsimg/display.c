@@ -307,15 +307,20 @@ static const char help_budgets[] =
 static const char help_memory[] =
     "    -m bytes        Memory budget (default 256M, minimum 16M)\n";
 static const char help_read_common[] =
-    "    -F stack        Force the filesystem decoder, retaining validation\n"
+    "    -F stack        Force layers, such as fat32, fat32/gpt or fat32/-/-,\n"
+    "                    retaining validation\n"
     "    -f image        Read a seekable regular image file\n"
     "    -h              Show mode help\n"
     "    --json          Write newline-delimited JSON\n";
 static const char help_slice[] =
     "    --length=bytes  Volume slice length (default the rest of the image)\n";
 static const char help_settings_read[] =
-    "    -o oem=cp437    Set FAT short-name encoding\n"
-    "    --offset=bytes  Volume slice offset (default 0)\n";
+    "    -o key=value    Setting: oem=cp437 for FAT short names; gpt:sector=512\n"
+    "                    or 4096 with -F naming gpt\n"
+    "    --offset=bytes  Volume slice offset (default 0)\n"
+    "    --partition=N|name=TEXT|type=NAME\n"
+    "                    The partition holding the volume (default the one\n"
+    "                    with a recognized filesystem)\n";
 static const char help_policies[] =
     "    -S policy       Sandbox: auto (default), required or off\n"
     "    -T directory    Scratch parent; - disables scratch\n";
@@ -576,6 +581,165 @@ timestamp(fsimg_cli_display_t *display, const unsigned char *raw, bool valid)
 	    (long long)fsimg_wire_get_signed64(raw + FSIMG_WIRE_TIME_OFFSET));
 }
 
+static const char *
+claim_name(uint64_t claim)
+{
+	switch (claim) {
+	case FSIMG_CLAIM_FORMAT: return ("format");
+	case FSIMG_CLAIM_UNSUPPORTED: return ("unsupported");
+	case FSIMG_CLAIM_CORRUPT: return ("corrupt");
+	case FSIMG_CLAIM_AMBIGUOUS: return ("ambiguous");
+	default: return ("none");
+	}
+}
+
+/*
+ * The layers around the volume, from the IMAGE record: the stack, the
+ * compression and, with a scheme, the disk and its table. JSON emits one
+ * "stack" record; a disk without a selected volume carries the reason.
+ */
+static void
+image_report(fsimg_cli_display_t *display, const unsigned char *raw)
+{
+	const char *stack = (const char *)raw + FSIMG_WIRE_IMAGE_STACK;
+	const char *scheme = (const char *)raw + FSIMG_WIRE_IMAGE_SCHEME;
+	uint64_t flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
+	uint64_t selected = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
+	bool gpt = strcmp(scheme, "gpt") == 0;
+
+	if (display->options->json) {
+		append(display, "{\"schema\":1,\"type\":\"stack\",\"stack\":");
+		string_value(display, stack);
+		append(display, ",\"compression\":null,\"scheme\":");
+		if (scheme[0] != '\0')
+			string_value(display, scheme);
+		else
+			append(display, "null");
+		append(display, ",\"disk_bytes\":");
+		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK));
+		append(display, ",\"sector_bytes\":");
+		if (scheme[0] != '\0')
+			append(display, "%llu", (unsigned long long)
+			    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SECTOR));
+		else
+			append(display, "null");
+		append(display, ",\"disk_guid\":");
+		if (gpt) {
+			append(display, "\"");
+			uuid_value(display, raw + FSIMG_WIRE_IMAGE_DISK_GUID);
+			append(display, "\"");
+		} else
+			append(display, "null");
+		append(display, ",\"mbr_disk_id\":");
+		if (scheme[0] != '\0' && !gpt)
+			append(display, "%llu", (unsigned long long)
+			    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID));
+		else
+			append(display, "null");
+		append(display, ",\"selected_partition\":");
+		if (selected != 0)
+			append(display, "%llu", (unsigned long long)selected);
+		else
+			append(display, "null");
+		append(display, ",\"volume_selected\":%s,\"reason\":",
+		    (flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 ? "false" : "true");
+		if ((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0)
+			string_value(display, (const char *)raw + FSIMG_WIRE_IMAGE_REASON);
+		else
+			append(display, "null");
+		append(display, "}\n");
+		return;
+	}
+	append(display, "Stack:        ");
+	prose(display, stack[0] != '\0' ? stack : "none");
+	append(display, "\nCompression:  none\n");
+	if (scheme[0] == '\0')
+		return;
+	append(display, "Scheme:       %s, %llu-byte sectors\nDisk size:    ",
+	    gpt ? "GPT" : "MBR",
+	    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SECTOR));
+	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK));
+	if (gpt) {
+		append(display, "\nDisk GUID:    ");
+		uuid_value(display, raw + FSIMG_WIRE_IMAGE_DISK_GUID);
+	} else
+		append(display, "\nDisk ID:      0x%08llx", (unsigned long long)
+		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID));
+	append(display, "\n");
+}
+
+/* One used table slot; the selected one is marked. */
+static void
+partition(fsimg_cli_display_t *display, const unsigned char *raw)
+{
+	static const char *const claims[] = { "no filesystem", "",
+	    "unsupported filesystem", "damaged filesystem", "ambiguous filesystem" };
+	const char *type = (const char *)raw + FSIMG_WIRE_PARTITION_TYPE;
+	const char *format_name = (const char *)raw + FSIMG_WIRE_PARTITION_FORMAT;
+	const char *name = (const char *)raw + FSIMG_WIRE_PARTITION_NAME;
+	uint64_t index = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX);
+	uint64_t claim = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_CLAIM);
+	bool gpt = strcmp((const char *)display->image + FSIMG_WIRE_IMAGE_SCHEME, "gpt") == 0;
+	bool active = (fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_FLAGS) &
+	    FSIMG_WIRE_PARTITION_ACTIVE) != 0;
+	bool selected = index == fsimg_wire_get64(display->image + FSIMG_WIRE_IMAGE_SELECTED);
+	char label[24];
+
+	if (display->options->json) {
+		append(display, "{\"schema\":1,\"type\":\"partition\",\"index\":%llu",
+		    (unsigned long long)index);
+		append(display, ",\"partition_type\":");
+		if (type[0] != '\0')
+			string_value(display, type);
+		else
+			append(display, "null");
+		append(display, ",\"type_guid\":");
+		if (gpt) {
+			append(display, "\"");
+			uuid_value(display, raw + FSIMG_WIRE_PARTITION_TYPE_GUID);
+			append(display, "\",\"guid\":\"");
+			uuid_value(display, raw + FSIMG_WIRE_PARTITION_GUID);
+			append(display, "\",\"name\":");
+			string_value(display, name);
+			append(display, ",\"mbr_type\":null,\"active\":null");
+		} else
+			append(display, "null,\"guid\":null,\"name\":null,\"mbr_type\":%llu,"
+			    "\"active\":%s", (unsigned long long)fsimg_wire_get64(raw +
+			    FSIMG_WIRE_PARTITION_MBR_TYPE), active ? "true" : "false");
+		append(display, ",\"offset_bytes\":");
+		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_OFFSET));
+		append(display, ",\"length_bytes\":");
+		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_LENGTH));
+		append(display, ",\"filesystem_claim\":\"%s\",\"format\":", claim_name(claim));
+		if (format_name[0] != '\0')
+			string_value(display, format_name);
+		else
+			append(display, "null");
+		append(display, ",\"selected\":%s}\n", selected ? "true" : "false");
+		return;
+	}
+	snprintf(label, sizeof(label), "Partition %llu:", (unsigned long long)index);
+	append(display, "%-13s ", label);
+	if (type[0] != '\0')
+		prose(display, type);
+	else if (gpt)
+		uuid_value(display, raw + FSIMG_WIRE_PARTITION_TYPE_GUID);
+	else
+		append(display, "type 0x%02llx", (unsigned long long)
+		    fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE));
+	append(display, ", ");
+	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_LENGTH));
+	append(display, " at ");
+	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_OFFSET));
+	append(display, ", ");
+	prose(display, claim == FSIMG_CLAIM_FORMAT ? format_name : claims[claim]);
+	if (name[0] != '\0') {
+		append(display, ", name ");
+		string_value(display, name);
+	}
+	append(display, "%s%s\n", active ? ", active" : "", selected ? ", selected" : "");
+}
+
 static void
 volume(fsimg_cli_display_t *display, const unsigned char *raw)
 {
@@ -584,11 +748,9 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 	bool json = display->options->json;
 
 	if (json) {
-		/* A bare volume's stack is its filesystem alone, and it is not
-		 * compressed.
-		 */
+		/* The stack is the IMAGE record's; compression is not read. */
 		append(display, "{\"schema\":1,\"type\":\"info\",\"stack\":");
-		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_FORMAT);
+		string_value(display, (const char *)display->image + FSIMG_WIRE_IMAGE_STACK);
 		append(display, ",\"compression\":null,\"format\":");
 		string_value(display, (const char *)raw + FSIMG_WIRE_INFO_FORMAT);
 		append(display, ",\"profile\":");
@@ -625,9 +787,7 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 		    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_IO_ERROR) ? "true" : "false");
 		return;
 	}
-	append(display, "Stack:        ");
-	prose(display, (const char *)raw + FSIMG_WIRE_INFO_FORMAT);
-	append(display, "\nCompression:  none\nFormat:       ");
+	append(display, "Format:       ");
 	bcopy(raw + FSIMG_WIRE_INFO_FORMAT, format_name, sizeof(format_name));
 	format_name[sizeof(format_name) - 1] = '\0';
 	for (size_t i = 0; format_name[i] != '\0'; i++) {
@@ -825,7 +985,15 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 {
 	static const char *const keys[] = { "files", "directories", "logical_bytes",
 	    "initialized_bytes_read", "allocated_clusters", "free_clusters", "bad_clusters" };
+	const unsigned char *image = display->image;
+	const char *scheme = (const char *)image + FSIMG_WIRE_IMAGE_SCHEME;
+	uint64_t checked = fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_CHECKED);
+	uint64_t selected = fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_SELECTED);
+	bool table;
 
+	/* A partition table is verified only when the selection read it. */
+	table = (fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_FLAGS) &
+	    FSIMG_WIRE_IMAGE_VERIFIED) != 0 && scheme[0] != '\0';
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"verify\",\"complete\":true,\"validation_scope\":\"%s\"",
 		    verified_scope_name(display->scope));
@@ -833,10 +1001,34 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, ",\"%s\":", keys[i]);
 			uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES + i * 8));
 		}
+		append(display, ",\"scheme\":");
+		if (table)
+			string_value(display, scheme);
+		else
+			append(display, "null");
+		append(display, ",\"partitions_checked\":");
+		if (table)
+			append(display, "%llu", (unsigned long long)checked);
+		else
+			append(display, "null");
+		append(display, ",\"partition\":");
+		if (selected != 0)
+			append(display, "%llu", (unsigned long long)selected);
+		else
+			append(display, "null");
 		append(display, "}\n");
 	} else {
 		path_excerpt(display, display->options->image);
-		append(display, ": filesystem structure%s verified (%llu files, %llu directories)\n",
+		/* "image": [GPT partition table (2 partitions) and partition 1]
+		 * filesystem structure verified (...)
+		 */
+		append(display, ":");
+		if (table)
+			append(display, " %s partition table (%llu partition%s) and partition %llu",
+			    strcmp(scheme, "gpt") == 0 ? "GPT" : "MBR",
+			    (unsigned long long)checked, checked == 1 ? "" : "s",
+			    (unsigned long long)selected);
+		append(display, " filesystem structure%s verified (%llu files, %llu directories)\n",
 		    display->scope == FSIMG_VALIDATION_PAYLOAD ? " and initialized file data" : "",
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES),
 		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_DIRECTORIES));
@@ -1048,7 +1240,7 @@ failure(fsimg_cli_display_t *display)
 		append(display, "fsimg: output publication or durability is uncertain; inspect the destination before retrying\n");
 	if (display->paths->verification_failed)
 		append(display, "fsimg: the staged %s volume failed verification; nothing was published\n",
-		    display->options->request.format);
+		    fsimg_job_format(&display->options->request));
 	if (error->cleanup_error != 0) {
 		append(display, "fsimg: cleanup failed: ");
 		prose(display, strerror(error->cleanup_error));
@@ -1123,6 +1315,15 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 					append(display, "fsimg: source profile requires isolated storage to exclude special-node opens\n");
 			}
 		}
+		break;
+	case FSIMG_FRAME_IMAGE:
+		bcopy(raw, display->image, sizeof(display->image));
+		if (!display->verifying_staged &&
+		    (options->json || options->request.kind == FSIMG_JOB_INFO))
+			image_report(display, raw);
+		break;
+	case FSIMG_FRAME_PARTITION:
+		partition(display, raw);
 		break;
 	case FSIMG_FRAME_INFO:
 		/* cW reports the verification of its staged image, not its header. */
@@ -1318,7 +1519,14 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 			summary(display);
 		else if (options->request.kind == FSIMG_JOB_VERIFY)
 			verification(display, display->verification);
-		else if ((options->request.flags & FSIMG_JOB_VERBOSE) != 0) {
+		else if (options->request.kind == FSIMG_JOB_INFO &&
+		    (fsimg_wire_get64(display->image + FSIMG_WIRE_IMAGE_FLAGS) &
+		    FSIMG_WIRE_IMAGE_UNSELECTED) != 0) {
+			/* i's volume section, after the table it could not choose from. */
+			append(display, "Volume:       none selected: ");
+			prose(display, (const char *)display->image + FSIMG_WIRE_IMAGE_REASON);
+			append(display, "; choose one with --partition\n");
+		} else if ((options->request.flags & FSIMG_JOB_VERBOSE) != 0) {
 			summary(display);
 			diagnostic = true;
 		} else

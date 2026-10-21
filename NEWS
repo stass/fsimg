@@ -11,6 +11,20 @@ Failed commands omit trailing metadata-loss notices. FAT sizing errors identify
 oversized source trees without displaying automatic-size or unused-reserve
 sentinels as zero-byte requests.
 
+Reading accepts layered disks. The library parses the `-F` stack grammar,
+owns the layer registry and its file suffixes, and opens an image as a disk
+whose GPT or MBR partition table is detected together with the filesystem
+probes, so a boot sector that also resembles a table is an ambiguity the
+caller resolves by forcing a slot. GPT requires both header and entry-array
+CRC32s, matching copies, the alternate LBA, the usable range and
+non-overlapping entries; MBR requires entries within the disk and the 2^32
+sectors it can address, without overlap. Partitions are selected
+automatically, by slot, by GPT name compared as UTF-16 units, by type name,
+GUID or MBR byte, or by byte range, which never reads the table. `fsimg t`,
+`x`, `W` and `i` accept `--partition=` and `-o gpt:sector=`; `i` reports the
+stack, the table and the selected partition, and still reports the table
+when no single partition holds a filesystem.
+
 Resource contexts account for memory and owned descriptors, enforce session
 quotas, and report cancellation and structured errors. Bounded positional I/O
 supports regular files, callbacks, fixed sinks, and nested slices. Private

@@ -365,6 +365,18 @@ fsimg_io_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
 }
 
 fsimg_status_t
+fsimg_io_read_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
+    fsimg_io_t **out, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fsimg_io_slice(parent, offset, length, out, error);
+	if (status == FSIMG_OK)
+		(*out)->access &= ~(unsigned)(FSIMG_IO_WRITE | FSIMG_IO_DURABLE);
+	return (status);
+}
+
+fsimg_status_t
 fsimg_io_close_output(fsimg_io_t *io, fsimg_error_t *error)
 {
 	int result, saved;

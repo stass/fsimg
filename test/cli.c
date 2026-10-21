@@ -282,7 +282,7 @@ test_modes(void)
 
 	CHECK(parse(bundle, &options) == FSIMG_OK);
 	CHECK(strcmp(options.mode, "c") == 0 && strcmp(options.image, "out.img") == 0);
-	CHECK(strcmp(options.request.format, "fat32") == 0);
+	CHECK(strcmp(fsimg_job_format(&options.request), "fat32") == 0);
 	CHECK(strcmp(options.request.write.label, "BOOT") == 0);
 	CHECK(options.verbosity == 2 && (options.request.flags & FSIMG_JOB_VERBOSE) != 0);
 	CHECK(options.operand_count == 1 && options.request.kind == FSIMG_JOB_CREATE);
@@ -373,7 +373,20 @@ test_stacks(void)
 		{ "fsimg", "-t", "-f", "image", "--partition", "1", "--offset", "0", NULL },
 		{ "fsimg", "-cn", "-F", "fat32", "-o", "gzip:level=9", ".", NULL },
 		{ "fsimg", "-cn", "-F", "fat32/gpt", "-o", "mbr:x=1", ".", NULL },
-		{ "fsimg", "-cn", "-F", "fat32", "-o", "oem=cp437", ".", NULL }
+		{ "fsimg", "-cn", "-F", "fat32", "-o", "oem=cp437", ".", NULL },
+		{ "fsimg", "-t", "-f", "image", "-o", "gpt:sector=4096", NULL },
+		{ "fsimg", "-t", "-f", "image", "-F", "fat32/gpt", "-o", "gpt:sector=1024", NULL },
+		{ "fsimg", "-t", "-f", "image", "-F", "fat32/gpt", "-o", "gpt:type=esp", NULL },
+		{ "fsimg", "-t", "-f", "image", "-F", "gpt", "-o", "gpt:sector=512",
+		    "-o", "gpt:sector=512", NULL },
+		{ "fsimg", "-t", "-f", "image", "--partition", "0", NULL },
+		{ "fsimg", "-t", "-f", "image", "--partition", "4294967296", NULL },
+		{ "fsimg", "-t", "-f", "image", "--partition", "name=", NULL },
+		{ "fsimg", "-t", "-f", "image", "--partition", "type=bogus", NULL },
+		{ "fsimg", "-t", "-f", "image", "--partition", "label=EFI", NULL },
+		{ "fsimg", "-t", "-f", "image", "-F", "fat32/-", "--partition", "1", NULL },
+		{ "fsimg", "-t", "-f", "image", "-F", "gpt", "-o", "gpt:sector=512",
+		    "--offset", "0", NULL }
 	};
 	char *unsupported[][12] = {
 		{ "fsimg", "-cn", "-F", "fat32/gpt", ".", NULL },
@@ -384,7 +397,7 @@ test_stacks(void)
 		{ "fsimg", "-cM", "-F", "fat32", "-f", "out.img", ".", NULL },
 		{ "fsimg", "-c", "-F", "fat32", "-f", "-", ".", NULL },
 		{ "fsimg", "-t", "-f", "-", NULL },
-		{ "fsimg", "-t", "-f", "image", "--partition", "1", NULL },
+		{ "fsimg", "-t", "-f", "image", "-F", "fat32/-/dmg", NULL },
 		{ "fsimg", "-t", "-f", "image", "/a", "/b", NULL },
 		{ "fsimg", "-tz", "-f", "image", NULL },
 		{ "fsimg", "-cn", "-F", "exfat/gpt/vhd", "-o", "gpt:type=esp", ".", NULL },
@@ -392,6 +405,14 @@ test_stacks(void)
 		{ "fsimg", "-cz", "-F", "fat32", "-o", "gzip:level=9", "-f", "o.img.gz", ".", NULL }
 	};
 	char *empty_slots[] = { "fsimg", "-cn", "-F", "fat32/-/-", ".", NULL };
+	char *sector[] = { "fsimg", "-t", "-f", "image", "-F", "gpt", "-o",
+	    "gpt:sector=4096", NULL };
+	char *by_index[] = { "fsimg", "-t", "-f", "image", "--partition", "2", NULL };
+	char *by_name[] = { "fsimg", "-x", "-f", "disk.img", "--partition",
+	    "name=EFI system", NULL };
+	char *by_type[] = { "fsimg", "-W", "-f", "image", "--partition", "type=0x0c",
+	    NULL };
+	char *by_range[] = { "fsimg", "-i", "-f", "image", "--offset", "1M", NULL };
 	fsimg_cli_options_t options;
 
 	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
@@ -399,7 +420,30 @@ test_stacks(void)
 	for (unsigned i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++)
 		check_unsupported(unsupported[i]);
 	CHECK(parse(empty_slots, &options) == FSIMG_OK);
-	CHECK(strcmp(options.request.format, "fat32") == 0);
+	CHECK(strcmp(fsimg_job_format(&options.request), "fat32") == 0);
+	CHECK(options.request.stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_EMPTY);
+	fsimg_cli_release(&options);
+	CHECK(parse(sector, &options) == FSIMG_OK);
+	CHECK(options.request.gpt_sector == 4096 &&
+	    strcmp(options.request.stack.slots[FSIMG_LAYER_SCHEME].name, "gpt") == 0 &&
+	    options.request.stack.slots[FSIMG_LAYER_FILESYSTEM].state ==
+	    FSIMG_SLOT_UNSPECIFIED);
+	fsimg_cli_release(&options);
+	CHECK(parse(by_index, &options) == FSIMG_OK);
+	CHECK(options.request.selector == FSIMG_SELECT_INDEX &&
+	    options.request.partition_index == 2);
+	fsimg_cli_release(&options);
+	CHECK(parse(by_name, &options) == FSIMG_OK);
+	CHECK(options.request.selector == FSIMG_SELECT_NAME &&
+	    strcmp(options.request.partition_text, "EFI system") == 0);
+	fsimg_cli_release(&options);
+	CHECK(parse(by_type, &options) == FSIMG_OK);
+	CHECK(options.request.selector == FSIMG_SELECT_TYPE &&
+	    strcmp(options.request.partition_text, "0x0c") == 0);
+	fsimg_cli_release(&options);
+	CHECK(parse(by_range, &options) == FSIMG_OK);
+	CHECK(options.request.selector == FSIMG_SELECT_RANGE &&
+	    options.request.offset == 1048576);
 	fsimg_cli_release(&options);
 }
 
@@ -1034,7 +1078,7 @@ test_staged_verification_failure(void)
 	bzero(&options, sizeof(options));
 	fsimg_worker_request_init(&options.request);
 	options.request.kind = FSIMG_JOB_CREATE;
-	strcpy(options.request.format, "fat32");
+	CHECK(fsimg_stack_parse("fat32", &options.request.stack, NULL) == FSIMG_OK);
 	options.mode = "cW";
 	options.image = "out.img";
 	options.scratch = "-";

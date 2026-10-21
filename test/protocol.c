@@ -23,6 +23,8 @@ static void test_info_uuid(void);
 static void test_info_label(void);
 static void test_job_posix_flags(void);
 static void test_job_roots(void);
+static void test_job_selection(void);
+static void test_image_records(void);
 
 /* Create jobs in these tests populate the image root from one root. */
 static const char *const image_root[] = { "/" };
@@ -556,6 +558,123 @@ test_job_roots(void)
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_ELIMIT);
 }
 
+/* The stack and selector cross the job wire unchanged. A slot state or
+ * selector outside its enum, an unterminated name or selector text, and a
+ * stack the grammar refuses (a scheme name in the container slot) fail.
+ */
+static void
+test_job_selection(void)
+{
+	static const struct {
+		unsigned	 offset;
+		uint64_t	 value;
+	} bad[] = {
+		{ 320, FSIMG_SELECT_DISK + 1 }, { 328, UINT64_C(1) << 32 },
+		{ 336, UINT64_C(1) << 32 }
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES], mutated[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.selection = "/";
+	CHECK(fsimg_stack_parse("fat32/gpt", &request.stack, NULL) == FSIMG_OK);
+	request.selector = FSIMG_SELECT_NAME;
+	strcpy(request.partition_text, "EFI system");
+	request.gpt_sector = 4096;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(bcmp(&decoded.stack, &request.stack, sizeof(request.stack)) == 0);
+	CHECK(decoded.selector == FSIMG_SELECT_NAME && decoded.gpt_sector == 4096);
+	CHECK(strcmp(decoded.partition_text, "EFI system") == 0);
+	CHECK(strcmp(fsimg_job_format(&decoded), "fat32") == 0);
+
+	for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		bcopy(raw, mutated, sizeof(raw));
+		fsimg_wire_put64(mutated + bad[i].offset, bad[i].value);
+		CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded,
+		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
+	}
+	bcopy(raw, mutated, sizeof(raw));
+	mutated[344 + FSIMG_LAYER_CONTAINER] = FSIMG_SLOT_NAMED + 1;
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	bcopy(raw, mutated, sizeof(raw));
+	memset(mutated + 384, 'A', 112);
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	bcopy(raw, mutated, sizeof(raw));
+	mutated[344 + FSIMG_LAYER_CONTAINER] = FSIMG_SLOT_NAMED;
+	strcpy((char *)mutated + 368, "mbr");
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+}
+
+/* The parent accepts an image record only for the disk it opened, with a
+ * table only under a scheme, and a partition record only within the disk
+ * and the table.
+ */
+static void
+test_image_records(void)
+{
+	fsimg_partition_info_t partition;
+	fsimg_frame_t frame;
+	unsigned char *raw = frame.payload;
+
+	bzero(&frame, sizeof(frame));
+	frame.type = FSIMG_FRAME_IMAGE;
+	frame.length = FSIMG_WIRE_IMAGE_BYTES;
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 8388608);
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "fat32");
+	CHECK(fsimg_wire_image_frame_valid(&frame, 8388608));
+	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388607));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
+	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_SCHEME, "mbr");
+	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
+	CHECK(fsimg_wire_image_frame_valid(&frame, 8388608));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 5);
+	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 1);
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_REASON, "stale");
+	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_UNSELECTED);
+	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 0);
+	CHECK(fsimg_wire_image_frame_valid(&frame, 8388608));
+	raw[FSIMG_WIRE_IMAGE_REASON] = '\0';
+	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+	raw[FSIMG_WIRE_IMAGE_REASON] = 's';
+	memset(raw + FSIMG_WIRE_IMAGE_STACK, 'x', FSIMG_WIRE_IMAGE_STACK_BYTES);
+	CHECK(!fsimg_wire_image_frame_valid(&frame, 8388608));
+
+	bzero(&partition, sizeof(partition));
+	partition.index = 2;
+	partition.offset = 1048576;
+	partition.length = 1048576;
+	partition.claim = FSIMG_CLAIM_FORMAT;
+	strcpy(partition.format, "fat12");
+	strcpy(partition.name, "EFI");
+	bzero(&frame, sizeof(frame));
+	frame.type = FSIMG_FRAME_PARTITION;
+	frame.length = FSIMG_WIRE_PARTITION_BYTES;
+	fsimg_wire_partition_encode(raw, &partition);
+	CHECK(fsimg_wire_partition_frame_valid(&frame, 4, 2097152));
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 4, 2097151));
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 1, 2097152));
+	partition.claim = FSIMG_CLAIM_NONE;
+	fsimg_wire_partition_encode(raw, &partition);
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 4, 2097152));
+	partition.format[0] = '\0';
+	partition.offset = UINT64_MAX;
+	fsimg_wire_partition_encode(raw, &partition);
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 4, UINT64_MAX));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -565,6 +684,8 @@ main(int argc, char **argv)
 	}
 	CHECK(argc == 1);
 	test_job_qnx6_settings();
+	test_job_selection();
+	test_image_records();
 	test_frame_splits(0);
 	test_frame_splits(127);
 	test_frame_splits(FSIMG_FRAME_BYTES);

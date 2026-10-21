@@ -14,6 +14,7 @@
 #include "cli.h"
 #include "host.h"
 #include "internal.h"
+#include "layer.h"
 
 /*
  * Command parsing turns argv into a validated fsimg_cli_options_t in five
@@ -139,52 +140,8 @@ static const struct {
 	{ OPT_FORMATS, MODE_FORMATS }
 };
 
-/* Layer names the stack grammar knows besides filesystems, with the file
- * suffix that names each container and compression. These are the layer
- * registry's names: a scheme or container in a stack is recognized and
- * refused as unsupported, and the suffixes shorten extraction stems.
- */
-typedef enum cli_slot {
-	CLI_SLOT_FILESYSTEM,
-	CLI_SLOT_SCHEME,
-	CLI_SLOT_CONTAINER,
-	CLI_SLOT_COMPRESSION	/* Not a stack slot; named only by settings */
-} cli_slot_t;
-
-typedef struct cli_layer {
-	const char	*name;
-	cli_slot_t	 slot;
-	const char	*suffix;
-} cli_layer_t;
-
-static const cli_layer_t layer_names[] = {
-	{ "dmg", CLI_SLOT_CONTAINER, ".dmg" },
-	{ "gpt", CLI_SLOT_SCHEME, NULL },
-	{ "gzip", CLI_SLOT_COMPRESSION, ".gz" },
-	{ "mbr", CLI_SLOT_SCHEME, NULL },
-	{ "simg", CLI_SLOT_CONTAINER, ".simg" },
-	{ "vhd", CLI_SLOT_CONTAINER, ".vhd" }
-};
-
-/* Filesystem names reserved by the stack grammar without a driver. */
-static const char *const reserved_filesystems[] = { "apfs", "hfs" };
-
 /* The only image suffixes the command keeps itself. */
 static const char *const generic_suffixes[] = { ".bin", ".dd", ".img", ".raw" };
-
-typedef enum cli_slot_state {
-	CLI_SLOT_UNFILLED,
-	CLI_SLOT_EMPTY,
-	CLI_SLOT_NAMED
-} cli_slot_state_t;
-
-/* A parsed -F stack: each slot unfilled, explicitly empty or named. */
-typedef struct cli_stack {
-	cli_slot_state_t state[3];
-	const char	*layer[3];	/* Borrowed name of a NAMED slot */
-	size_t		 length[3];
-	bool		 reserved;	/* The filesystem name has no driver */
-} cli_stack_t;
 
 typedef enum cli_limit_key {
 	CLI_LIMIT_SCRATCH, CLI_LIMIT_SPOOL, CLI_LIMIT_ENTRIES, CLI_LIMIT_DEPTH,
@@ -215,7 +172,7 @@ typedef struct cli_parse {
 	const char	**settings;
 	unsigned	 setting_count;
 	unsigned	 mode;		/* One MODE_* bit after selection */
-	cli_stack_t	 stack;
+	bool		 reserved;	/* The -F filesystem has no driver */
 	const char	*unsupported;	/* First recognized, unimplemented feature */
 	bool		 options_ended;	/* "--" ended option parsing */
 } cli_parse_t;
@@ -234,11 +191,14 @@ static fsimg_status_t select_mode(cli_parse_t *);
 static fsimg_status_t check_option_modes(cli_parse_t *);
 static fsimg_status_t parse_limit(cli_parse_t *, const char *, unsigned *);
 static fsimg_status_t parse_uuid(cli_parse_t *, const char *, unsigned char *);
-static bool layer_selected(const cli_parse_t *, const cli_layer_t *);
+static bool find_layer(const char *, size_t, fsimg_layer_info_t *);
+static bool layer_selected(const cli_parse_t *, const fsimg_layer_info_t *);
+static bool setting_repeats(const cli_parse_t *, unsigned);
+static fsimg_status_t parse_layer_setting(cli_parse_t *, const char *,
+    const char *, const char *);
 static fsimg_status_t parse_setting(cli_parse_t *, const char *, unsigned *);
-static fsimg_status_t classify_stack_name(cli_parse_t *, const char *,
-    cli_slot_t *);
 static fsimg_status_t parse_stack(cli_parse_t *, const char *);
+static fsimg_status_t parse_partition(cli_parse_t *);
 static fsimg_status_t parse_byte_option(cli_parse_t *, int, bool, uint64_t *);
 static fsimg_status_t interpret_common(cli_parse_t *);
 static fsimg_status_t interpret_create(cli_parse_t *);
@@ -252,7 +212,7 @@ static fsimg_status_t validate_creation(cli_parse_t *);
 static fsimg_status_t check_image_name(cli_parse_t *);
 static void note_unsupported(cli_parse_t *, const char *);
 static bool strip_suffix(char *, const char *);
-static bool strip_layer_suffix(char *, cli_slot_t);
+static size_t layer_suffix_length(const char *, fsimg_layer_kind_t);
 
 static fsimg_status_t
 syntax(cli_parse_t *parse, const char *message)
@@ -686,31 +646,95 @@ parse_uuid(cli_parse_t *parse, const char *text, unsigned char *uuid)
 	return (FSIMG_OK);
 }
 
+/* The registry record of a layer name that need not be terminated. */
+static bool
+find_layer(const char *name, size_t length, fsimg_layer_info_t *info)
+{
+	size_t cursor;
+
+	cursor = 0;
+	while (fsimg_layer_next(&cursor, info, NULL) == FSIMG_OK) {
+		if (strlen(info->name) == length &&
+		    strncmp(name, info->name, length) == 0)
+			return (true);
+	}
+	return (false);
+}
+
+/* Whether the command selects a layer: the scheme or container its -F
+ * stack names, or gzip when -z or -a asks for compression.
+ */
+static bool
+layer_selected(const cli_parse_t *parse, const fsimg_layer_info_t *layer)
+{
+	const fsimg_stack_slot_t *slot;
+
+	if (layer->kind == FSIMG_LAYER_COMPRESSION)
+		return (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0);
+	slot = &parse->options->request.stack.slots[layer->kind];
+	return (slot->state == FSIMG_SLOT_NAMED && strcmp(slot->name, layer->name) == 0);
+}
+
+/* Whether the qualified key of setting index repeats an earlier setting's.
+ * Unqualified keys are tracked by parse_setting's bit set.
+ */
+static bool
+setting_repeats(const cli_parse_t *parse, unsigned index)
+{
+	const char *key, *other;
+	size_t length;
+
+	key = parse->settings[index];
+	length = strcspn(key, "=");
+	if (memchr(key, ':', length) == NULL)
+		return (false);
+	for (unsigned i = 0; i < index; i++) {
+		other = parse->settings[i];
+		if (strcspn(other, "=") == length && strncmp(key, other, length) == 0)
+			return (true);
+	}
+	return (false);
+}
+
+/*
+ * A qualified key "layer:key" targets one layer, which the stack must name
+ * (or -z/-a select, for gzip). On read the one layer setting is
+ * gpt:sector, which forces the GPT LBA size. Creating a layer is refused
+ * as unsupported once the command line is otherwise valid, so its keys are
+ * accepted here unread.
+ */
+static fsimg_status_t
+parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
+    const char *value)
+{
+	static const char sector_key[] = "sector=";
+	fsimg_layer_info_t layer;
+	uint64_t number;
+
+	if (!find_layer(text, (size_t)(qualifier - text), &layer))
+		return (syntax_naming(parse, "unknown setting layer", text));
+	if (!layer_selected(parse, &layer))
+		return (syntax_naming(parse,
+		    "setting names a layer the stack does not contain", text));
+	if ((parse->mode & MODES_CREATE) != 0)
+		return (FSIMG_OK);
+	if (strcmp(layer.name, "gpt") != 0 ||
+	    strncmp(qualifier + 1, sector_key, sizeof(sector_key) - 1) != 0)
+		return (syntax_naming(parse, "unknown read-side layer setting", text));
+	if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK ||
+	    (number != 512 && number != 4096))
+		return (syntax_naming(parse, "gpt:sector must be 512 or 4096", text));
+	parse->options->request.gpt_sector = (uint32_t)number;
+	return (FSIMG_OK);
+}
+
 /*
  * Typed settings. An unqualified key targets the filesystem: read-side
  * oem, and the creation-side byte quantities (sector, cluster), the byte
  * order, the volume UUID, the inode capacity and the reserve percentage,
  * which the writer validates for its format. A qualified key "layer:key"
- * targets one layer, which the stack must name; a stack naming a layer is
- * itself refused as unsupported, so such a key is accepted here unread.
+ * targets one layer (parse_layer_setting).
  */
-/* Whether the command selects a layer: a scheme or container named in its
- * -F slot, whose token is not terminated within the -F word, or gzip when
- * -z or -a asks for compression.
- */
-static bool
-layer_selected(const cli_parse_t *parse, const cli_layer_t *layer)
-{
-	const cli_stack_t *stack = &parse->stack;
-
-	if (layer->slot == CLI_SLOT_COMPRESSION)
-		return (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0);
-	return (stack->state[layer->slot] == CLI_SLOT_NAMED &&
-	    stack->length[layer->slot] == strlen(layer->name) &&
-	    strncmp(stack->layer[layer->slot], layer->name,
-	    stack->length[layer->slot]) == 0);
-}
-
 static fsimg_status_t
 parse_setting(cli_parse_t *parse, const char *text, unsigned *seen)
 {
@@ -734,18 +758,8 @@ parse_setting(cli_parse_t *parse, const char *text, unsigned *seen)
 	length = (size_t)(value - text);
 	value++;
 	qualifier = memchr(text, ':', length);
-	if (qualifier != NULL) {
-		for (size_t i = 0; i < sizeof(layer_names) / sizeof(layer_names[0]); i++) {
-			if (strlen(layer_names[i].name) != (size_t)(qualifier - text) ||
-			    strncmp(text, layer_names[i].name, (size_t)(qualifier - text)) != 0)
-				continue;
-			if (!layer_selected(parse, &layer_names[i]))
-				return (syntax_naming(parse,
-				    "setting names a layer the stack does not contain", text));
-			return (FSIMG_OK);
-		}
-		return (syntax_naming(parse, "unknown setting layer", text));
-	}
+	if (qualifier != NULL)
+		return (parse_layer_setting(parse, text, qualifier, value));
 	for (key = 0; key < CLI_SETTING_COUNT; key++) {
 		if (strlen(keys[key]) == length && strncmp(text, keys[key], length) == 0)
 			break;
@@ -806,92 +820,67 @@ parse_setting(cli_parse_t *parse, const char *text, unsigned *seen)
 	return (FSIMG_OK);
 }
 
-/* The slot a stack name fills: a registered filesystem, a reserved
- * filesystem name without a driver, or a scheme or container. A
- * compression is not a slot, so its name is unknown here.
- */
-static fsimg_status_t
-classify_stack_name(cli_parse_t *parse, const char *name, cli_slot_t *slot)
-{
-	fsimg_format_info_t info;
-	size_t cursor;
-	fsimg_status_t status;
-
-	*slot = CLI_SLOT_FILESYSTEM;
-	cursor = 0;
-	while ((status = fsimg_format_next(&cursor, &info, parse->error)) == FSIMG_OK) {
-		if (strcmp(info.name, name) == 0)
-			return (FSIMG_OK);
-	}
-	if (status != FSIMG_DONE)
-		return (status);
-	for (size_t i = 0; i < sizeof(reserved_filesystems) / sizeof(reserved_filesystems[0]); i++) {
-		if (strcmp(name, reserved_filesystems[i]) == 0) {
-			parse->stack.reserved = true;
-			return (FSIMG_OK);
-		}
-	}
-	for (size_t i = 0; i < sizeof(layer_names) / sizeof(layer_names[0]); i++) {
-		if (strcmp(name, layer_names[i].name) == 0 &&
-		    layer_names[i].slot != CLI_SLOT_COMPRESSION) {
-			*slot = layer_names[i].slot;
-			return (FSIMG_OK);
-		}
-	}
-	return (syntax_naming(parse, "unknown stack name", name));
-}
-
-/*
- * The stack grammar: tokens separated by "/", each a layer name or "-".
- * A name fills the slot of its kind; "-" fills the next slot and marks it
- * empty. Every token must fill a slot later than every slot filled before
- * it, so a repeated kind or a misordered name is rejected as it is read.
+/* The -F stack, parsed by the library's one grammar. A filesystem name
+ * the grammar reserves has no driver; it is refused as unsupported once
+ * the rest of the command line is known to be valid.
  */
 static fsimg_status_t
 parse_stack(cli_parse_t *parse, const char *text)
 {
-	cli_stack_t *stack = &parse->stack;
-	const char *token, *end;
-	char name[16];
-	size_t length;
-	unsigned next;
-	cli_slot_t slot;
+	fsimg_stack_t *stack = &parse->options->request.stack;
+	fsimg_format_info_t info;
+	size_t cursor;
 	fsimg_status_t status;
 
-	if (text[0] == '\0')
-		return (syntax(parse, "the stack is empty"));
-	next = CLI_SLOT_FILESYSTEM;
-	for (token = text;; token = end + 1) {
-		end = strchr(token, '/');
-		length = end == NULL ? strlen(token) : (size_t)(end - token);
-		if (length == 0)
-			return (syntax_naming(parse, "the stack has an empty token", text));
-		if (length >= sizeof(name))
-			return (syntax_naming(parse, "unknown stack name", text));
-		bcopy(token, name, length);
-		name[length] = '\0';
-		if (strcmp(name, "-") == 0) {
-			if (next == CLI_SLOT_FILESYSTEM)
-				return (syntax_naming(parse,
-				    "- cannot fill the filesystem slot", text));
-			if (next > CLI_SLOT_CONTAINER)
-				return (syntax_naming(parse, "the stack has too many tokens", text));
-			stack->state[next++] = CLI_SLOT_EMPTY;
-		} else {
-			status = classify_stack_name(parse, name, &slot);
-			if (status != FSIMG_OK)
-				return (status);
-			if (slot < next)
-				return (syntax_naming(parse,
-				    "stack name repeats or misorders a slot", name));
-			stack->state[slot] = CLI_SLOT_NAMED;
-			stack->layer[slot] = token;
-			stack->length[slot] = length;
-			next = slot + 1;
-		}
-		if (end == NULL)
-			break;
+	status = fsimg_stack_parse(text, stack, parse->error);
+	if (status == FSIMG_EINVAL)
+		parse->options->syntax_error = true;
+	if (status != FSIMG_OK ||
+	    stack->slots[FSIMG_LAYER_FILESYSTEM].state != FSIMG_SLOT_NAMED)
+		return (status);
+	parse->reserved = true;
+	cursor = 0;
+	while ((status = fsimg_format_next(&cursor, &info, parse->error)) == FSIMG_OK) {
+		if (strcmp(info.name, stack->slots[FSIMG_LAYER_FILESYSTEM].name) == 0)
+			parse->reserved = false;
 	}
+	return (status == FSIMG_DONE ? FSIMG_OK : status);
+}
+
+/*
+ * --partition=N, name=TEXT or type=NAME. A type must be one the library's
+ * type table, a GUID or an MBR byte expresses; whether the disk carries
+ * it is the worker's question.
+ */
+static fsimg_status_t
+parse_partition(cli_parse_t *parse)
+{
+	fsimg_worker_request_t *request = &parse->options->request;
+	fsimg_type_selector_t type;
+	const char *value, *text;
+	uint64_t number;
+
+	value = option_value(parse, OPT_PARTITION);
+	if (strncmp(value, "name=", 5) == 0 || strncmp(value, "type=", 5) == 0) {
+		text = value + 5;
+		request->selector = value[0] == 'n' ? FSIMG_SELECT_NAME :
+		    FSIMG_SELECT_TYPE;
+		if (text[0] == '\0' || strlen(text) >= sizeof(request->partition_text))
+			return (syntax_naming(parse,
+			    "partition selector text must be 1 to 111 bytes", value));
+		if (request->selector == FSIMG_SELECT_TYPE &&
+		    fsimg_partition_type_parse(text, &type, parse->error) != FSIMG_OK)
+			return (syntax_naming(parse, "unknown partition type", text));
+		snprintf(request->partition_text, sizeof(request->partition_text),
+		    "%s", text);
+		return (FSIMG_OK);
+	}
+	if (fsimg_cli_number(value, false, &number, parse->error) != FSIMG_OK ||
+	    number == 0 || number > UINT32_MAX)
+		return (syntax_naming(parse,
+		    "--partition requires N, name=TEXT or type=NAME", value));
+	request->selector = FSIMG_SELECT_INDEX;
+	request->partition_index = (uint32_t)number;
 	return (FSIMG_OK);
 }
 
@@ -968,25 +957,23 @@ interpret_common(cli_parse_t *parse)
 		status = parse_stack(parse, option_value(parse, 'F'));
 		if (status != FSIMG_OK)
 			return (status);
-		if (parse->stack.state[CLI_SLOT_FILESYSTEM] == CLI_SLOT_NAMED &&
-		    !parse->stack.reserved) {
-			bcopy(parse->stack.layer[CLI_SLOT_FILESYSTEM], request->format,
-			    parse->stack.length[CLI_SLOT_FILESYSTEM]);
-			request->format[parse->stack.length[CLI_SLOT_FILESYSTEM]] = '\0';
-		}
 	}
 	setting_keys = 0;
 	for (unsigned i = 0; i < parse->setting_count; i++) {
+		if (setting_repeats(parse, i))
+			return (syntax_naming(parse, "setting key is given more than once",
+			    parse->settings[i]));
 		status = parse_setting(parse, parse->settings[i], &setting_keys);
 		if (status != FSIMG_OK)
 			return (status);
 	}
 
-	if (parse->stack.reserved)
+	if (parse->reserved)
 		note_unsupported(parse, "the named filesystem is reserved and not supported");
-	if (parse->stack.state[CLI_SLOT_SCHEME] == CLI_SLOT_NAMED)
-		note_unsupported(parse, "partition schemes are not supported");
-	if (parse->stack.state[CLI_SLOT_CONTAINER] == CLI_SLOT_NAMED)
+	if ((parse->mode & MODES_CREATE) != 0 &&
+	    request->stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_NAMED)
+		note_unsupported(parse, "creating a partition scheme is not supported");
+	if (request->stack.slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED)
 		note_unsupported(parse, "image containers are not supported");
 	if (option_count(parse, 'z') != 0 || option_count(parse, 'a') != 0)
 		note_unsupported(parse, "compressed images are not supported");
@@ -1005,7 +992,7 @@ interpret_create(cli_parse_t *parse)
 	options->verify_staged = parse->mode == MODE_CREATE_VERIFY;
 	if (option_count(parse, 'd') != 0)
 		request->flags |= FSIMG_JOB_PAYLOAD;
-	if (parse->stack.state[CLI_SLOT_FILESYSTEM] != CLI_SLOT_NAMED)
+	if (request->stack.slots[FSIMG_LAYER_FILESYSTEM].state != FSIMG_SLOT_NAMED)
 		return (syntax(parse, "c requires -F with a filesystem"));
 	if (option_count(parse, 'e') != 0 && option_count(parse, 'R') == 0)
 		return (syntax(parse, "-e requires -R"));
@@ -1050,11 +1037,9 @@ interpret_create(cli_parse_t *parse)
 			note_unsupported(parse, "writing an image to standard output is not supported");
 	}
 	if (option_count(parse, 'z') != 0 && option_count(parse, 'a') != 0 &&
-	    options->image != NULL) {
-		number = strlen(options->image);
-		if (number < 3 || strcasecmp(options->image + number - 3, ".gz") != 0)
-			return (syntax(parse, "-z with -a requires a .gz image name"));
-	}
+	    options->image != NULL &&
+	    layer_suffix_length(options->image, FSIMG_LAYER_COMPRESSION) == 0)
+		return (syntax(parse, "-z with -a requires a .gz image name"));
 	if (option_count(parse, 'M') != 0)
 		note_unsupported(parse, "-M minimization is not supported");
 	status = read_create_operands(parse);
@@ -1101,6 +1086,20 @@ interpret_read(cli_parse_t *parse)
 	if (option_count(parse, OPT_PARTITION) != 0 &&
 	    (option_count(parse, OPT_OFFSET) != 0 || option_count(parse, OPT_LENGTH) != 0))
 		return (syntax(parse, "--partition conflicts with --offset and --length"));
+	if (option_count(parse, OPT_PARTITION) != 0) {
+		status = parse_partition(parse);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (option_count(parse, OPT_OFFSET) != 0 || option_count(parse, OPT_LENGTH) != 0)
+		request->selector = FSIMG_SELECT_RANGE;
+	/* A partition needs a table to be read; a range never reads one. */
+	if (option_count(parse, OPT_PARTITION) != 0 &&
+	    request->stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_EMPTY)
+		return (syntax(parse,
+		    "--partition requires a partition scheme, which -F forces empty"));
+	if (request->selector == FSIMG_SELECT_RANGE && request->gpt_sector != 0)
+		return (syntax(parse, "gpt:sector conflicts with --offset and --length"));
 	if (option_count(parse, OPT_OFFSET) != 0) {
 		status = parse_byte_option(parse, OPT_OFFSET, false, &request->offset);
 		if (status != FSIMG_OK)
@@ -1126,11 +1125,9 @@ interpret_read(cli_parse_t *parse)
 			return (syntax(parse, "-T - conflicts with an image on standard input"));
 		note_unsupported(parse, "reading an image from standard input is not supported");
 	}
-	if (option_count(parse, OPT_PARTITION) != 0)
-		note_unsupported(parse, "partition selection is not supported");
-	if (request->format[0] == '\0')
+	if (fsimg_job_format(request)[0] == '\0' || parse->reserved)
 		return (FSIMG_OK);
-	return (find_format(parse, request->format, &info));
+	return (find_format(parse, fsimg_job_format(request), &info));
 }
 
 /*
@@ -1304,9 +1301,9 @@ validate_creation(cli_parse_t *parse)
 	unsigned shift;
 	fsimg_status_t status;
 
-	if (parse->stack.reserved)
+	if (parse->reserved)
 		return (FSIMG_OK);
-	status = find_format(parse, request->format, &info);
+	status = find_format(parse, fsimg_job_format(request), &info);
 	if (status != FSIMG_OK)
 		return (status);
 	if (option_count(parse, 'L') == 0)
@@ -1358,16 +1355,25 @@ strip_suffix(char *name, const char *suffix)
 	return (true);
 }
 
-/* Remove the one suffix of the given layer class that ends name, if any. */
-static bool
-strip_layer_suffix(char *name, cli_slot_t slot)
+/* The length of the registered suffix of the given layer kind that ends
+ * name, ASCII case-insensitively, leaving a nonempty remainder; zero when
+ * none does. The layer registry owns these suffixes.
+ */
+static size_t
+layer_suffix_length(const char *name, fsimg_layer_kind_t kind)
 {
-	for (size_t i = 0; i < sizeof(layer_names) / sizeof(layer_names[0]); i++) {
-		if (layer_names[i].slot == slot && layer_names[i].suffix != NULL &&
-		    strip_suffix(name, layer_names[i].suffix))
-			return (true);
+	fsimg_layer_info_t layer;
+	size_t cursor, length, suffix_length;
+
+	length = strlen(name);
+	cursor = 0;
+	while (fsimg_layer_next(&cursor, &layer, NULL) == FSIMG_OK) {
+		suffix_length = strlen(layer.suffix);
+		if (layer.kind == kind && suffix_length != 0 && length > suffix_length &&
+		    strcasecmp(name + length - suffix_length, layer.suffix) == 0)
+			return (suffix_length);
 	}
-	return (false);
+	return (0);
 }
 
 /*
@@ -1381,7 +1387,11 @@ strip_layer_suffix(char *name, cli_slot_t slot)
 bool
 fsimg_cli_stem(const char *image, char *stem, size_t capacity)
 {
+	static const fsimg_layer_kind_t outer_layers[] = {
+		FSIMG_LAYER_COMPRESSION, FSIMG_LAYER_CONTAINER
+	};
 	const char *base;
+	size_t length;
 	bool stripped;
 
 	if (image == NULL || strcmp(image, "-") == 0)
@@ -1391,8 +1401,12 @@ fsimg_cli_stem(const char *image, char *stem, size_t capacity)
 	if (strlen(base) >= capacity)
 		return (false);
 	strcpy(stem, base);
-	stripped = strip_layer_suffix(stem, CLI_SLOT_COMPRESSION);
-	stripped |= strip_layer_suffix(stem, CLI_SLOT_CONTAINER);
+	stripped = false;
+	for (size_t i = 0; i < sizeof(outer_layers) / sizeof(outer_layers[0]); i++) {
+		length = layer_suffix_length(stem, outer_layers[i]);
+		stem[strlen(stem) - length] = '\0';
+		stripped |= length != 0;
+	}
 	for (size_t i = 0; i < sizeof(generic_suffixes) / sizeof(generic_suffixes[0]); i++) {
 		if (strip_suffix(stem, generic_suffixes[i])) {
 			stripped = true;

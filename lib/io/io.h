@@ -10,6 +10,11 @@
 #include "internal.h"
 
 fsimg_ctx_t *fsimg_io_context(const fsimg_io_t *);
+/* A slice that refuses writes whatever the parent's access, for handing
+ * one partition of a disk to a reader.
+ */
+fsimg_status_t fsimg_io_read_slice(fsimg_io_t *, uint64_t, uint64_t,
+    fsimg_io_t **, fsimg_error_t *);
 /* A per-call session never attaches borrowed input to a reader's lifetime. */
 fsimg_status_t fsimg_io_read_session(fsimg_io_t *, fsimg_session_t *,
     uint64_t, void *, size_t, size_t *, fsimg_error_t *);

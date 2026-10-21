@@ -8,10 +8,13 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
+import zlib
 
 
 def invoke(executable, root, arguments, expected=0, **kwargs):
@@ -137,7 +140,7 @@ def test_posix_metadata(executable, root):
     assert entries["/HELLO.TXT"]["kind"] == "file"
     assert all(record["uid"] is None and record["mode"] is None and
                record["changed"] is None for record in entries.values())
-    info = completed(invoke(executable, root, ["i", "--json", "-f", "posix.img"]))[0]
+    info = completed(invoke(executable, root, ["i", "--json", "-f", "posix.img"]))[1]
     assert info["uuid"] is None
     assert b"UUID" not in invoke(executable, root, ["i", "-f", "posix.img"]).stdout
 
@@ -296,8 +299,9 @@ def test_bundled_modes(executable, root):
     ]))
     assert created[-1]["command"] == "c" and created[-1]["published"] is True
     information = completed(invoke(executable, root, ["if", "bundled.img", "--json"]))
-    assert information[0]["format"] == "fat32" and information[0]["stack"] == "fat32"
-    assert information[0]["compression"] is None and information[-1]["command"] == "i"
+    assert information[0]["type"] == "stack" and information[0]["scheme"] is None
+    assert information[1]["format"] == "fat32" and information[1]["stack"] == "fat32"
+    assert information[1]["compression"] is None and information[-1]["command"] == "i"
     assert listing(executable, root, "bundled.img") == \
         invoke(executable, root, ["t", "-f", "bundled.img"]).stdout.decode().splitlines()
     assert invoke(executable, root, ["xOf", "bundled.img", "/HELLO.TXT"]).stdout == b"hello\n"
@@ -350,9 +354,10 @@ def test_option_syntax(executable, root):
         # Options precede operands: after the first member, -v is a member.
         (["t", "-f", "human.img", "/nested", "-v"], b"selecting several members is not supported"),
         (["t", "-z", "-f", "human.img"], b"compressed images are not supported"),
-        (["t", "--partition=1", "-f", "human.img"], b"partition selection is not supported"),
+        (["cf", "syntax.img", "-F", "fat32/gpt", "-C", "source", "."],
+         b"creating a partition scheme is not supported"),
         (["t", "-f", "-"], b"reading an image from standard input is not supported"),
-        (["t", "-F", "fat32/gpt", "-f", "human.img"], b"partition schemes are not supported"),
+        (["t", "-F", "fat32/-/vhd", "-f", "human.img"], b"image containers are not supported"),
         (["cf", "syntax.img", "-F", "fat32/dmg", "-C", "source", "."],
          b"image containers are not supported"),
         (["cf", "syntax.img", "-a", "-F", "fat32", "-C", "source", "."],
@@ -605,7 +610,8 @@ def test_format(executable, root, profile, payload):
     assert (root / image).stat().st_mode & 0o077 == 0
 
     information = completed(invoke(executable, root, ["i", "--json", "-T", "-", "-f", image]))
-    info = information[0]
+    info = information[1]
+    assert information[0]["stack"] == profile and information[0]["volume_selected"]
     assert info["format"] == profile and info["label"] == "FSIMG"
     assert info["stack"] == profile and info["compression"] is None
     assert info["validation_scope"] == "header" and info["entry_count"] is None
@@ -812,7 +818,7 @@ def test_qnx6(executable, root, payload):
     assert image[8192 + 32:8192 + 48] == bytes.fromhex(uuid.replace("-", ""))
     assert int.from_bytes(image[8192 + 52:8192 + 56], "big") == 112
 
-    info = completed(invoke(executable, root, ["i", "--json", "-f", "qnx6.img"]))[0]
+    info = completed(invoke(executable, root, ["i", "--json", "-f", "qnx6.img"]))[1]
     assert info["format"] == "qnx6" and info["uuid"] == uuid
     listed = completed(invoke(executable, root, ["t", "--json", "-f", "qnx6.img"]))
     entries = {record["path"]: record for record in listed if record["type"] == "entry"}
@@ -834,7 +840,7 @@ def test_qnx6(executable, root, payload):
     completed(invoke(executable, root, ["c", "--json", "-S", "off", "-F", "qnx6",
                                         "-f", "qnx6-random.img", *operands]))
     random_uuid = completed(invoke(executable, root, [
-        "i", "--json", "-f", "qnx6-random.img"]))[0]["uuid"]
+        "i", "--json", "-f", "qnx6-random.img"]))[1]["uuid"]
     assert random_uuid[14] == "4" and random_uuid[19] in "89ab"
     error = failed(invoke(executable, root, [
         "c", "-n", "--json", "-F", "qnx6", "-L", "LABEL", *operands,
@@ -863,7 +869,7 @@ def test_qnx4(executable, root, payload):
     assert int.from_bytes(image[512 + 0x50:512 + 0x54], "little") == 200 * 64
     assert image[512 + 0x1c0:512 + 0x1f0] == label.encode()
 
-    info = completed(invoke(executable, root, ["i", "--json", "-f", "qnx4.img"]))[0]
+    info = completed(invoke(executable, root, ["i", "--json", "-f", "qnx4.img"]))[1]
     assert info["format"] == "qnx4" and info["label"] == label
     listed = completed(invoke(executable, root, ["t", "--json", "-f", "qnx4.img"]))
     entries = {record["path"]: record for record in listed if record["type"] == "entry"}
@@ -884,6 +890,158 @@ def test_qnx4(executable, root, payload):
     assert report["validation_scope"] == "initialized-payload"
     completed(invoke(executable, root, [*arguments, "-f", "qnx4-second.img", *operands]))
     same_bytes(root / "qnx4.img", root / "qnx4-second.img")
+
+
+ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+LINUX_TYPE = "0fc63daf-8483-4772-8e79-3d69d8477de4"
+DISK_GUID = "12345678-9abc-4def-8123-456789abcdef"
+
+
+def gpt_disk(sectors, partitions):
+    """A GPT disk laid out as sgdisk does: protective MBR, primary header at
+    LBA 1 with 128 entries from LBA 2, backup entries and header at the end.
+    Each partition is (first_lba, last_lba, type, name, payload)."""
+    disk = bytearray(sectors * 512)
+    disk[446:462] = struct.pack("<B3sB3sII", 0, b"\0\x02\0", 0xEE, b"\xff\xff\xff",
+                                1, min(sectors - 1, 0xFFFFFFFF))
+    disk[510:512] = b"\x55\xaa"
+    entries = bytearray(128 * 128)
+    for index, (first, last, kind, name, payload) in enumerate(partitions):
+        entries[index * 128:(index + 1) * 128] = (
+            uuid.UUID(kind).bytes_le + uuid.UUID(int=index + 1).bytes_le +
+            struct.pack("<QQQ", first, last, 0) + name.encode("utf-16-le").ljust(72, b"\0"))
+        disk[first * 512:first * 512 + len(payload)] = payload
+    entries_crc = zlib.crc32(entries)
+
+    def header(current, alternate, entries_lba):
+        fields = struct.pack("<8sIIIIQQQQ16sQIII", b"EFI PART", 0x10000, 92, 0, 0,
+                             current, alternate, 34, sectors - 34,
+                             uuid.UUID(DISK_GUID).bytes_le, entries_lba, 128, 128, entries_crc)
+        return fields[:16] + struct.pack("<I", zlib.crc32(fields)) + fields[20:]
+
+    disk[512:604] = header(1, sectors - 1, 2)
+    disk[1024:1024 + len(entries)] = entries
+    disk[(sectors - 33) * 512:(sectors - 1) * 512] = entries
+    disk[(sectors - 1) * 512:(sectors - 1) * 512 + 92] = header(sectors - 1, 1, sectors - 33)
+    return disk
+
+
+def mbr_disk(sectors, partitions):
+    """An MBR disk; each partition is (first_lba, sector_count, type, payload)
+    and the first is active."""
+    disk = bytearray(sectors * 512)
+    disk[440:444] = struct.pack("<I", 0xA1B2C3D4)
+    for index, (first, count, kind, payload) in enumerate(partitions):
+        disk[446 + 16 * index:462 + 16 * index] = struct.pack(
+            "<B3sB3sII", 0x80 if index == 0 else 0, b"\0\0\0", kind, b"\0\0\0", first, count)
+        disk[first * 512:first * 512 + len(payload)] = payload
+    disk[510:512] = b"\x55\xaa"
+    return disk
+
+
+def test_partitioned(executable, root):
+    invoke(executable, root, ["c", "-R", "-F", "fat12", "-s", "1M", "-f", "part.img",
+                              "-C", "source", "."])
+    volume = (root / "part.img").read_bytes()
+    names = listing(executable, root, "part.img")
+    (root / "gpt.img").write_bytes(gpt_disk(8192, [
+        (2048, 4095, ESP_TYPE, "EFI", volume), (4096, 6143, LINUX_TYPE, "data", b""),
+    ]))
+
+    info = invoke(executable, root, ["i", "-f", "gpt.img"]).stdout.decode()
+    assert info.startswith(
+        "Stack:        fat12/gpt\nCompression:  none\n"
+        "Scheme:       GPT, 512-byte sectors\nDisk size:    4 MiB\n"
+        f"Disk GUID:    {DISK_GUID}\n"
+        'Partition 1:  esp, 1 MiB at 1 MiB, fat12, name "EFI", selected\n'
+        'Partition 2:  linux, 1 MiB at 2 MiB, no filesystem, name "data"\n'
+        "Format:       FAT12\n"), info
+    decoded = completed(invoke(executable, root, ["i", "--json", "-f", "gpt.img"]))
+    assert [record["type"] for record in decoded] == \
+        ["stack", "partition", "partition", "info", "summary"]
+    stack, first, second, volume_info = decoded[:4]
+    assert stack["stack"] == "fat12/gpt" and stack["scheme"] == "gpt"
+    assert stack["disk_guid"] == DISK_GUID and stack["selected_partition"] == 1
+    assert first["partition_type"] == "esp" and first["type_guid"] == ESP_TYPE
+    assert first["name"] == "EFI" and first["format"] == "fat12" and first["selected"]
+    assert first["offset_bytes"] == str(1 << 20) and first["length_bytes"] == str(1 << 20)
+    assert second["filesystem_claim"] == "none" and second["format"] is None
+    assert volume_info["stack"] == "fat12/gpt"
+
+    for selection in [[], ["--partition=1"], ["--partition=name=EFI"],
+                      ["--partition=type=esp"], ["--partition", f"type={ESP_TYPE}"],
+                      ["-F", "fat12/gpt", "-o", "gpt:sector=512"],
+                      ["--offset=1M", "--length=1M"]]:
+        assert invoke(executable, root, ["tf", "gpt.img", *selection]).stdout.decode() \
+            .splitlines() == names, selection
+    for selection, detail in [
+        (["--partition=3"], b"the selected partition slot is unused"),
+        (["--partition=200"], b"the partition table has no slot of that number"),
+        (["--partition=name=efi"], b"no partition has that name"),
+        (["--partition=type=0x0c"], b"an MBR type byte cannot select a GPT partition"),
+        (["-F", "gpt", "-o", "gpt:sector=4096"], b"GPT"),
+        (["-F", "fat12/mbr"], b"no MBR partition table"),
+    ]:
+        result = invoke(executable, root, ["tf", "gpt.img", *selection], expected=1)
+        assert detail in result.stderr, (selection, result.stderr)
+    invoke(executable, root, ["tf", "gpt.img", "--partition=2"], expected=1)
+
+    verified = invoke(executable, root, ["Wf", "gpt.img"]).stdout
+    assert b'"gpt.img": GPT partition table (2 partitions) and partition 1 filesystem ' \
+        b"structure verified" in verified, verified
+    report = next(record for record in completed(invoke(
+        executable, root, ["W", "--json", "-f", "gpt.img"])) if record["type"] == "verify")
+    assert report["scheme"] == "gpt" and report["partitions_checked"] == 2
+    assert report["partition"] == 1 and isinstance(stack["sector_bytes"], int)
+    invoke(executable, root, ["xf", "gpt.img"])
+    assert (root / "gpt/HELLO.TXT").read_bytes() == b"hello\n"
+
+    # A partition name is untrusted text: terminal controls are escaped.
+    (root / "hostile.img").write_bytes(gpt_disk(8192, [
+        (2048, 4095, ESP_TYPE, "E\x1b]0;x\x07\x9b2J", volume),
+    ]))
+    info = invoke(executable, root, ["i", "-f", "hostile.img"]).stdout
+    assert b"Partition 1:  esp" in info, info
+    assert not any(control in info for control in [b"\x1b", b"\x07", b"\xc2\x9b"]), info
+
+    # A damaged table fails every partition selection, never a raw range.
+    damaged = bytearray((root / "gpt.img").read_bytes())
+    damaged[512 + 16] ^= 1
+    (root / "damaged-gpt.img").write_bytes(damaged)
+    result = invoke(executable, root, ["tf", "damaged-gpt.img"], expected=1)
+    assert b"GPT primary header CRC32 mismatch" in result.stderr, result.stderr
+    assert invoke(executable, root, [
+        "tf", "damaged-gpt.img", "--offset=1M", "--length=1M",
+    ]).stdout.decode().splitlines() == names
+
+    # Two filesystems leave i without a volume and every other mode failing.
+    (root / "mbr.img").write_bytes(mbr_disk(8192, [
+        (2048, 2048, 0x01, volume), (4096, 2048, 0x01, volume),
+    ]))
+    info = invoke(executable, root, ["i", "-f", "mbr.img"]).stdout.decode()
+    assert info == (
+        "Stack:        mbr\nCompression:  none\n"
+        "Scheme:       MBR, 512-byte sectors\nDisk size:    4 MiB\n"
+        "Disk ID:      0xa1b2c3d4\n"
+        "Partition 1:  fat12, 1 MiB at 1 MiB, fat12, active\n"
+        "Partition 2:  fat12, 1 MiB at 2 MiB, fat12\n"
+        "Volume:       none selected: several partitions hold a filesystem: 1, 2; "
+        "choose one with --partition\n"), info
+    decoded = completed(invoke(executable, root, ["i", "--json", "-f", "mbr.img"]))
+    assert [record["type"] for record in decoded] == \
+        ["stack", "partition", "partition", "summary"]
+    assert decoded[0]["volume_selected"] is False and decoded[0]["mbr_disk_id"] == 0xA1B2C3D4
+    assert decoded[0]["selected_partition"] is None and decoded[1]["index"] == 1
+    assert decoded[1]["mbr_type"] == 1 and decoded[1]["active"] is True
+    result = invoke(executable, root, ["tf", "mbr.img"], expected=1)
+    assert b"several partitions hold a filesystem: 1, 2" in result.stderr
+    assert invoke(executable, root, ["tf", "mbr.img", "--partition=2"]).stdout.decode() \
+        .splitlines() == names
+    result = invoke(executable, root, ["tf", "mbr.img", "--partition=name=EFI"], expected=1)
+    assert b"partition names exist only in GPT" in result.stderr
+    info = invoke(executable, root, ["i", "-f", "mbr.img", "--partition=type=0x01"],
+                  expected=1)
+    assert b"several partitions have that type" in info.stderr
 
 
 def main():
@@ -914,6 +1072,7 @@ def main():
         test_output_failures(executable, root)
         test_examples(executable, root)
         test_merged_operands(executable, root)
+        test_partitioned(executable, root)
         assert not list(root.glob(".fsimg-*"))
     print("CLI commands, independent JSON decoding, publication and failure checks pass")
 

@@ -8,6 +8,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/output \
 	-I$(top_srcdir)/lib/extract \
 	-I$(top_srcdir)/lib/read -I$(top_srcdir)/lib/formats \
+	-I$(top_srcdir)/lib/layers \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
 	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
@@ -46,6 +47,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/io/io.h lib/read/directory.c lib/read/directory.h \
 	lib/read/reader.h lib/read/reader.c \
 	lib/read/selection.c lib/read/selection.h \
+	lib/layers/layer.h lib/layers/stack.c lib/layers/types.c \
+	lib/layers/image.c lib/layers/gpt.c lib/layers/mbr.c \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
@@ -104,13 +107,13 @@ check_PROGRAMS = test-core test-io test-meta test-meta-sort test-unicode test-fo
 	test-catalog test-source test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
-	test-qualify test-fragment test-posix header-c header-cxx
+	test-qualify test-fragment test-posix test-layers header-c header-cxx
 TESTS = $(check_PROGRAMS) test/fat-integration.sh test/exfat-integration.sh \
-	test/qnx6-integration.sh test/qnx4-integration.sh test/cli.sh \
-	test/baseline.sh test/spec.sh
+	test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh \
+	test/cli.sh test/baseline.sh test/spec.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
-	test/qnx6-integration.sh test/qnx4-integration.sh test/cli.sh \
-	test/baseline.sh test/spec.sh
+	test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh \
+	test/cli.sh test/baseline.sh test/spec.sh
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
@@ -132,6 +135,8 @@ test_unicode_SOURCES = test/unicode.c test/test.h
 test_unicode_LDADD = libfsimg.la
 test_format_SOURCES = test/format.c test/test.h
 test_format_LDADD = libfsimg.la
+test_layers_SOURCES = test/layers.c test/test.h
+test_layers_LDADD = libfsimg-core.la
 test_posix_SOURCES = test/posix.c test/test.h
 test_posix_LDADD = libfsimg.la
 test_exfat_SOURCES = test/exfat.c test/test.h \
@@ -198,7 +203,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
 	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
 	specs/design-qnx6-driver.md specs/design-qnx4.md specs/design-qnx4-driver.md \
-	specs/design-metadata.md specs/design-sizing.md \
+	specs/design-metadata.md specs/design-sizing.md specs/design-layers.md \
+	specs/design-content.md specs/design-directories.md specs/design-emission.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
 	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh tools/qnx/guest/manifest4.sh \
@@ -212,7 +218,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/vm/vmstart.sh \
 	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
-	test/qnx4-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/protocol.c \
+	test/qnx4-integration.sh.in test/layers-integration.sh.in \
+	fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/protocol.c fuzz/image.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
@@ -243,11 +250,12 @@ check-installed-consumers:
 check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write \
 	    test-qnx4 test-qnx4-write fsimg test/fat-integration.sh \
 	    test/exfat-integration.sh test/qnx6-integration.sh \
-	    test/qnx4-integration.sh
+	    test/qnx4-integration.sh test/layers-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
 	./test/qnx6-integration.sh
 	./test/qnx4-integration.sh
+	./test/layers-integration.sh
 # Regenerate the checked-in comparison baseline; test/baseline.sh only reads it.
 baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	./test/baseline.sh --record > $(srcdir)/test/baseline.txt.new || \
@@ -265,11 +273,12 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx6 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
-check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-protocol test/spec.sh
+check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-protocol test-layers \
+	    test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-protocol \
-	    test/spec.sh
+	    test-layers test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard
@@ -309,7 +318,7 @@ clean-local:
 # Fuzz corpora persist across clean so later runs reuse their mutations.
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
-	    protocol-fuzz-corpus
+	    protocol-fuzz-corpus image-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77

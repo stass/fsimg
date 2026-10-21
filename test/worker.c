@@ -60,6 +60,10 @@ typedef enum worker_scenario {
 	SCENARIO_PARTIAL_EXTRACTION,
 	SCENARIO_ASAN_FAILURE,
 	SCENARIO_SKIPPED_EXTRACTION,
+	SCENARIO_INFO_WITHOUT_IMAGE,
+	SCENARIO_IMAGE_WRONG_DISK,
+	SCENARIO_PARTITION_OUTSIDE,
+	SCENARIO_PARTITION_UNSELECTED_LIST,
 } worker_scenario_t;
 
 /* Create jobs in these tests copy one source directory to the image root. */
@@ -224,7 +228,7 @@ test_mount_source(const char *path)
 	fixture.request.root_count = 1;
 	fixture.request.kind = FSIMG_JOB_PLAN;
 	fixture.request.sandbox = FSIMG_SANDBOX_REQUIRED;
-	strcpy(fixture.request.format, "fat12");
+	CHECK(fsimg_stack_parse("fat12", &fixture.request.stack, NULL) == FSIMG_OK);
 	CHECK(run(&fixture, &error) == FSIMG_EUNSUPPORTED);
 	CHECK(fixture.ready && fixture.result.confinement == FSIMG_CONFINEMENT_ACTIVE);
 	CHECK(error.operation == FSIMG_OP_SOURCE && fixture.plans == 0);
@@ -481,7 +485,8 @@ test_operations(const char *format)
 	fixture.request.root_paths = image_root;
 	fixture.request.root_count = 1;
 	fixture.request.output_fd = fixture.output;
-	strcpy(fixture.request.format, strcmp(format, "exfat") == 0 ? "exfat" : "fat12");
+	CHECK(fsimg_stack_parse(strcmp(format, "exfat") == 0 ? "exfat" : "fat12",
+	    &fixture.request.stack, NULL) == FSIMG_OK);
 	if (strcmp(format, "exfat") == 0)
 		fixture.request.write.label = "";
 	CHECK(run(&fixture, &error) == FSIMG_OK);
@@ -731,6 +736,30 @@ fake_worker(worker_scenario_t mode)
 		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_NAME, "X", 1, NULL);
 		return (0);
 	}
+	/* The IMAGE record describes the input, whose size is the scenario. */
+	bzero(raw, FSIMG_WIRE_IMAGE_BYTES);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, mode == SCENARIO_IMAGE_WRONG_DISK ?
+	    (uint64_t)mode + 1 : (uint64_t)mode);
+	if (mode == SCENARIO_PARTITION_OUTSIDE || mode == SCENARIO_PARTITION_UNSELECTED_LIST) {
+		strcpy((char *)raw + FSIMG_WIRE_IMAGE_SCHEME, "mbr");
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
+	}
+	if (mode == SCENARIO_PARTITION_UNSELECTED_LIST) {
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_UNSELECTED);
+		strcpy((char *)raw + FSIMG_WIRE_IMAGE_REASON, "no single filesystem");
+	}
+	if (mode != SCENARIO_INFO_WITHOUT_IMAGE)
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_IMAGE, raw,
+		    FSIMG_WIRE_IMAGE_BYTES, NULL) == FSIMG_OK);
+	if (mode == SCENARIO_PARTITION_OUTSIDE) {
+		bzero(raw, FSIMG_WIRE_PARTITION_BYTES);
+		fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_INDEX, 1);
+		fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_OFFSET, 1);
+		fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_LENGTH, (uint64_t)mode);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PARTITION, raw,
+		    FSIMG_WIRE_PARTITION_BYTES, NULL) == FSIMG_OK);
+	}
 	bzero(raw, FSIMG_WIRE_INFO_BYTES);
 	fsimg_wire_put64(raw + 56, mode == SCENARIO_INVALID_TIME_BASIS ? UINT64_MAX : FSIMG_TIME_WALL);
 	fsimg_wire_put64(raw + 64, FSIMG_VALIDATION_HEADER);
@@ -874,7 +903,9 @@ test_forged(void)
 		SCENARIO_STALLED_PARSER, SCENARIO_LONG_LIST_NAME,
 		SCENARIO_INVALID_TIME_BASIS, SCENARIO_VERIFY_INVALID_SCOPE,
 		SCENARIO_VERIFY_HEADER_SCOPE, SCENARIO_VERIFY_UNREQUESTED_PAYLOAD,
-		SCENARIO_VERIFY_MISSING_PAYLOAD, SCENARIO_RUNTIME_FAILURE
+		SCENARIO_VERIFY_MISSING_PAYLOAD, SCENARIO_RUNTIME_FAILURE,
+		SCENARIO_INFO_WITHOUT_IMAGE, SCENARIO_IMAGE_WRONG_DISK,
+		SCENARIO_PARTITION_OUTSIDE, SCENARIO_PARTITION_UNSELECTED_LIST
 #ifdef FSIMG_TEST_ASAN
 		, SCENARIO_ASAN_FAILURE
 #endif
@@ -901,6 +932,9 @@ test_forged(void)
 			fixture.request.kind = FSIMG_JOB_LIST;
 			expected = FSIMG_OK;
 		}
+		/* Only i may report a disk without a selected volume. */
+		if (mode == SCENARIO_PARTITION_UNSELECTED_LIST)
+			fixture.request.kind = FSIMG_JOB_LIST;
 		if (mode >= SCENARIO_VERIFY_INVALID_SCOPE && mode <= SCENARIO_VERIFY_MISSING_PAYLOAD)
 			fixture.request.kind = FSIMG_JOB_VERIFY;
 		if (mode == SCENARIO_VERIFY_MISSING_PAYLOAD)

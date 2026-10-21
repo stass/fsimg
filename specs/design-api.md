@@ -417,7 +417,7 @@ fsimg_status_t fsimg_image_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 fsimg_status_t fsimg_image_open_stream(fsimg_ctx_t *ctx, int stream_fd,
     const fsimg_image_options_t *opts, fsimg_image_t **out,
     fsimg_error_t *error);
-fsimg_status_t fsimg_image_get_info(const fsimg_image_t *image,
+fsimg_status_t fsimg_image_get_info(fsimg_image_t *image,
     fsimg_image_info_t *out, fsimg_error_t *error);
 fsimg_status_t fsimg_image_next_partition(fsimg_image_t *image,
     fsimg_partition_info_t *out, fsimg_error_t *error);
@@ -456,7 +456,9 @@ validation scope. `next_partition()` iterates the scheme's slots in order
 from 1, returning DONE at the end: slot number, used flag, disk offset and
 length, type as table name and raw value, name as UTF-8 (GPT), unique
 identifier, active flag (MBR), and the bounded probe's claim for the
-partition's prefix (format name, unsupported, corrupt or none). A disk
+partition's prefix (format name, unsupported, corrupt, ambiguous when
+several formats claim it, or none). `get_info()` takes a mutable image
+because the scheme step runs on the first operation that needs it. A disk
 without a scheme has no partitions: the information record reports no
 scheme and a partition count of zero, `next_partition()` returns DONE at
 once, and `select()` accepts only the automatic, range and disk selectors

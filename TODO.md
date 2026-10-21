@@ -17,12 +17,17 @@
   the [layer design](specs/design-layers.md) in the four stages of the
   [plan](docs/implementation-plan.md#extension-sequence). The command
   line recognizes and refuses with exit 1 what stages 2 to 4 implement
-  (stacks beyond a bare filesystem, containers, compression, `-f -` and
-  `--partition`) and `-M` minimization, which no stage schedules yet. Configure gains the required system zlib. The layer
+  (creating a partition scheme, containers, compression and `-f -`) and `-M`
+  minimization, which no stage schedules yet. Configure gains the required
+  system zlib. The layer
   design's evidence gates (hdiutil, qemu-img) settle its uncovered-DMG-sector
-  and DMG-table-split questions; its degraded-GPT and reproducible-identifier
-  questions, and the command-line spelling of wrap, unwrap and compose, are
-  owner decisions to take before the stages that need them.
+  and DMG-table-split questions; the command-line spelling of wrap, unwrap
+  and compose is an owner decision to take before it is implemented. Stage 2's
+  write side remains (`lib/layers/`): scheme write,
+  disk sizing, identifiers, unwrap and compose, the `gpt:` and `mbr:` creation
+  keys, and the oracle half "sgdisk and fdisk read fsimg disks". `--formats`
+  does not yet list the registered schemes, containers and compressions with
+  their `kind` (`cmd/fsimg/display.c`).
   The remaining sandbox gaps against the authority mapping of
   [design-security.md](specs/design-security.md#coordinator-and-worker)
   (`cmd/fsimg/sandbox.c`) belong to stage 4: the input check accepts only a
@@ -39,10 +44,10 @@
   * `c -v` and `x -v` do not yet print one line per entry: the writer and
     extractor have no per-entry callback for the worker to relay
     (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
-  * Layer-qualified `-o` keys are accepted unread once their layer is
-    selected, without each layer's key table, and `-a` does not yet apply
-    the container-suffix and reserved-suffix rules of the contract; both
-    arrive with the layers (`cmd/fsimg/options.c`).
+  * On creation, layer-qualified `-o` keys are accepted unread once their
+    layer is selected, without each layer's key table, and `-a` does not yet
+    apply the container-suffix and reserved-suffix rules of the contract;
+    both arrive with the write side of the layers (`cmd/fsimg/options.c`).
   * Tests do not yet feed the worker a malformed path sequence (a count
     differing from the record, a missing terminator, an extra or empty
     SELECTION frame), and no test drives a `cW` whose staged image fails
@@ -51,6 +56,17 @@
   * `x` and `t` accept one member; several members, the union of their
     subtrees resolved by each format's lookup rules, are refused with exit 1
     (`cmd/fsimg/options.c`, `lib/read/`).
+  The layer read side leaves these open, each [Medium]:
+  * No allocation-failure injection reaches
+    `fsimg_image_open`, `gpt_open`'s four charged allocations or
+    `check_overlap` (`lib/layers/`, `test/layers.c`).
+  * The scheme step counts scheme claims with its own loop beside
+    `fsimg_format_survey`, so the two claim rules must be kept in step; and
+    the image's stack text has two composers, `fsimg_image_get_info` (from
+    the last selection's probe) and the worker's `send_image` (from the
+    opened reader). One survey over both registries, and one composer, would
+    remove both obligations (`lib/layers/image.c`,
+    `cmd/fsimg/worker-child.c`).
 
 * [Medium] **QNX4 interoperability** (`lib/formats/qnx4/`): the
   [format design](specs/design-qnx4.md) and [driver design](specs/design-qnx4-driver.md)

@@ -33,8 +33,17 @@ typedef enum worker_phase {
 	WORKER_COMPLETE
 } worker_phase_t;
 
+/*
+ * The order of a job's result frames. A read job starts in WAIT_IMAGE: its
+ * IMAGE record leads to WAIT_HEADER, or for i without a selected volume to
+ * UNSELECTED, after which only the table's PARTITION records and DONE may
+ * follow. i's PARTITION records arrive in WAIT_HEADER or UNSELECTED. A
+ * create job starts in WAIT_HEADER, for its PLAN.
+ */
 typedef enum worker_output_state {
 	WORKER_WAIT_HEADER,
+	WORKER_WAIT_IMAGE,
+	WORKER_UNSELECTED,
 	WORKER_OUTPUT_READY,
 	WORKER_IN_ENTRY,
 	WORKER_VERIFIED
@@ -126,6 +135,9 @@ typedef struct worker_supervisor {
 	uint64_t	 entry_count;
 	uint64_t	 output_limit;
 	uint64_t	 volume_limit;
+	uint64_t	 disk_bytes;	/* The read job's input file size */
+	uint64_t	 table_slots;	/* From the IMAGE record */
+	uint64_t	 last_partition; /* Slot of the last PARTITION record */
 	bool		 raw_eof;
 	bool		 stdout_available;
 	bool		 producer_done;
@@ -258,7 +270,7 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 	fsimg_job_kind_t kind;
 	fsimg_worker_text_t warning;
 	fsimg_error_t detail;
-	uint64_t path_limit, count;
+	uint64_t path_limit, count, flags;
 	fsimg_status_t status;
 
 	frame = &state->decoder.frame;
@@ -309,6 +321,29 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 	    frame->type != FSIMG_FRAME_ENTRY_END)
 		return (worker_error(error, "worker interrupted an entry name"));
 	switch (frame->type) {
+	case FSIMG_FRAME_IMAGE:
+		/* Only i reports a disk without a volume; only W verifies tables. */
+		if (kind >= FSIMG_JOB_CREATE || state->output_state != WORKER_WAIT_IMAGE ||
+		    !fsimg_wire_image_frame_valid(frame, state->disk_bytes))
+			return (worker_error(error, "invalid worker image information"));
+		flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
+		if (((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 && kind != FSIMG_JOB_INFO) ||
+		    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && kind != FSIMG_JOB_VERIFY))
+			return (worker_error(error, "invalid worker image information"));
+		state->table_slots = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SLOTS);
+		state->output_state = (flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 ?
+		    WORKER_UNSELECTED : WORKER_WAIT_HEADER;
+		break;
+	case FSIMG_FRAME_PARTITION:
+		if (kind != FSIMG_JOB_INFO || (state->output_state != WORKER_WAIT_HEADER &&
+		    state->output_state != WORKER_UNSELECTED) ||
+		    !fsimg_wire_partition_frame_valid(frame, state->table_slots,
+		    state->disk_bytes) ||
+		    fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX) <=
+		    state->last_partition)
+			return (worker_error(error, "invalid worker partition record"));
+		state->last_partition = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX);
+		break;
 	case FSIMG_FRAME_INFO:
 		if (kind >= FSIMG_JOB_CREATE || state->output_state != WORKER_WAIT_HEADER ||
 		    !fsimg_wire_info_frame_valid(frame, state->volume_limit))
@@ -379,7 +414,9 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		break;
 	case FSIMG_FRAME_DONE:
 		if ((state->output_state != (kind == FSIMG_JOB_VERIFY ?
-		    WORKER_VERIFIED : WORKER_OUTPUT_READY)) || frame->length != FSIMG_WIRE_DONE_BYTES ||
+		    WORKER_VERIFIED : WORKER_OUTPUT_READY) &&
+		    state->output_state != WORKER_UNSELECTED) ||
+		    frame->length != FSIMG_WIRE_DONE_BYTES ||
 		    (kind == FSIMG_JOB_CAT && state->entry_count != 1))
 			return (worker_error(error, "worker completion arrived before its result"));
 		count = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_ENTRIES);
@@ -469,6 +506,10 @@ prepare_request(worker_supervisor_t *state, fsimg_error_t *error)
 		if (identity.kind != FSIMG_HOST_FILE || request->offset > identity.length)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "worker input must be a bounded regular file"));
+		/* Only a range selector sets offset and length; any other
+		 * volume lies within the whole file.
+		 */
+		state->disk_bytes = identity.length;
 		state->volume_limit = request->length == 0 ? identity.length - request->offset :
 		    request->length;
 		if (state->volume_limit > identity.length - request->offset)
@@ -1048,6 +1089,8 @@ supervisor_init(worker_supervisor_t *state, const fsimg_worker_request_t *reques
 	state->interrupted = interrupted;
 	state->stdout_available = standard_output != -1;
 	state->producer_done = true;
+	state->output_state = request->kind < FSIMG_JOB_CREATE ? WORKER_WAIT_IMAGE :
+	    WORKER_WAIT_HEADER;
 	if (request->output_budget == NULL) {
 		fsimg_output_budget_init(&state->local_budget, &request->limits);
 		state->budget = &state->local_budget;

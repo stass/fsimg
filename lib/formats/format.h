@@ -25,7 +25,9 @@ struct fsimg_format_variant {
  * empty), and is a pure function of those bytes and the volume length. It
  * returns FSIMG_EFORMAT when the format's identity signature is absent (no
  * claim). Once the signature matches it claims the image: FSIMG_OK to open
- * it, or FSIMG_EUNSUPPORTED or FSIMG_ECORRUPT with a reason in error.
+ * it, or FSIMG_EUNSUPPORTED or FSIMG_ECORRUPT with a reason in error. With
+ * FSIMG_OK it also names the variant it identified, so a claim reported
+ * without opening the volume names a public format.
  *
  * reader and writer are independently optional.
  */
@@ -34,7 +36,7 @@ struct fsimg_format {
 	size_t		 variant_count;
 	size_t		 probe_bytes;
 	fsimg_status_t	(*probe)(const unsigned char *, size_t, uint64_t,
-			    fsimg_error_t *);
+			    const fsimg_format_variant_t **, fsimg_error_t *);
 	const fsimg_reader_ops_t *reader;
 	const fsimg_writer_ops_t *writer;
 };
@@ -45,8 +47,30 @@ extern const fsimg_format_t fsimg_exfat_format;
 extern const fsimg_format_t fsimg_qnx6_format;
 extern const fsimg_format_t fsimg_qnx4_format;
 
+/* What a set of probes says about one prefix: how many claimed it and the
+ * first claimant's verdict, its reason, and on a match its variant. A
+ * forced descriptor is the only probe run.
+ */
+typedef struct fsimg_format_survey {
+	const fsimg_format_t *claimant;
+	const fsimg_format_variant_t *variant;
+	unsigned	 claims;
+	fsimg_status_t	 status;
+	fsimg_error_t	 reason;
+} fsimg_format_survey_t;
+
 const fsimg_format_t *fsimg_format_find(const char *,
     const fsimg_format_variant_t **);
+void fsimg_format_survey(const fsimg_format_t *const *, size_t,
+    const fsimg_format_t *, const unsigned char *, size_t, uint64_t,
+    fsimg_format_survey_t *);
+/* The registry's survey for the image layers: every reader format, or the
+ * one named by forced_name, which must name a format with a reader. The
+ * prefix needs at most fsimg_format_probe_bytes(forced_name) bytes.
+ */
+fsimg_status_t fsimg_format_identify(const char *, const unsigned char *,
+    size_t, uint64_t, fsimg_format_survey_t *, fsimg_error_t *);
+size_t fsimg_format_probe_bytes(const char *);
 fsimg_status_t fsimg_format_claim(const fsimg_format_t *const *, size_t,
     const fsimg_format_t *, const unsigned char *, size_t, uint64_t,
     const fsimg_format_t **, fsimg_error_t *);

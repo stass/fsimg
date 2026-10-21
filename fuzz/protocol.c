@@ -42,6 +42,12 @@ LLVMFuzzerTestOneInput(const uint8_t *bytes, size_t length)
 		case FSIMG_FRAME_INFO:
 			fsimg_wire_info_frame_valid(&decoder.frame, UINT64_MAX);
 			break;
+		case FSIMG_FRAME_IMAGE:
+			fsimg_wire_image_frame_valid(&decoder.frame, length);
+			break;
+		case FSIMG_FRAME_PARTITION:
+			fsimg_wire_partition_frame_valid(&decoder.frame, 1024, length);
+			break;
 		case FSIMG_FRAME_PLAN:
 			fsimg_wire_plan_frame_valid(&decoder.frame);
 			break;

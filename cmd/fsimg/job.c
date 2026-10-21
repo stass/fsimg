@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "internal.h"
+#include "layer.h"
 #include "worker.h"
 
 /* Each numeric field occupies eight little-endian bytes. Fixed strings
@@ -15,7 +16,11 @@
  * whether a label is present. Then come the write settings: the 16-byte
  * UUID, the byte order as one byte, and the inode capacity and reserve
  * percentage as eight little-endian bytes each, and the number of create
- * roots as eight bytes. These enums name wire positions and sizes only and
+ * roots as eight bytes. The read-side selection follows: the selector
+ * kind, partition index and GPT sector size as eight bytes each, the three
+ * stack slot states as one byte each, the scheme and container names in 16
+ * bytes each (the format name is the filesystem slot's), and the partition
+ * selector text in 112. These enums name wire positions and sizes only and
  * are independent of native struct layout or padding.
  *
  * The job's image paths follow the record in SELECTION frames, as one
@@ -41,13 +46,35 @@ typedef enum job_string_field {
 	JOB_INODES_OFFSET = 296,
 	JOB_RESERVE_OFFSET = 304,
 	JOB_ROOTS_OFFSET = 312,
-	JOB_RESERVED_OFFSET = 320
+	JOB_SELECTOR_OFFSET = 320,
+	JOB_PARTITION_INDEX_OFFSET = 328,
+	JOB_GPT_SECTOR_OFFSET = 336,
+	JOB_SLOT_STATES_OFFSET = 344,
+	JOB_SCHEME_OFFSET = 352,
+	JOB_CONTAINER_OFFSET = 368,
+	JOB_PARTITION_TEXT_OFFSET = 384,
+	JOB_PARTITION_TEXT_BYTES = 112,
+	JOB_RESERVED_OFFSET = 496
 } job_string_field_t;
 _Static_assert(JOB_FORMAT_OFFSET + JOB_FORMAT_BYTES == JOB_LABEL_OFFSET &&
     JOB_LABEL_PRESENT < JOB_UUID_OFFSET, "the string fields do not overlap");
-_Static_assert(sizeof(((fsimg_worker_request_t *)0)->format) ==
-    JOB_FORMAT_BYTES && sizeof(((fsimg_worker_request_t *)0)->label_storage) ==
-    JOB_LABEL_BYTES, "the request holds each string field");
+_Static_assert(sizeof(((fsimg_stack_slot_t *)0)->name) == JOB_FORMAT_BYTES &&
+    sizeof(((fsimg_worker_request_t *)0)->label_storage) == JOB_LABEL_BYTES &&
+    sizeof(((fsimg_worker_request_t *)0)->partition_text) ==
+    JOB_PARTITION_TEXT_BYTES, "the request holds each string field");
+_Static_assert(JOB_SCHEME_OFFSET + JOB_FORMAT_BYTES == JOB_CONTAINER_OFFSET &&
+    JOB_CONTAINER_OFFSET + JOB_FORMAT_BYTES == JOB_PARTITION_TEXT_OFFSET &&
+    JOB_PARTITION_TEXT_OFFSET + JOB_PARTITION_TEXT_BYTES == JOB_RESERVED_OFFSET &&
+    JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the selection fields do not overlap");
+
+/* Where each stack slot's name travels: the filesystem's in the format
+ * field, the others in their own.
+ */
+static const unsigned slot_name_offsets[FSIMG_STACK_SLOTS] = {
+	[FSIMG_LAYER_FILESYSTEM] = JOB_FORMAT_OFFSET,
+	[FSIMG_LAYER_SCHEME] = JOB_SCHEME_OFFSET,
+	[FSIMG_LAYER_CONTAINER] = JOB_CONTAINER_OFFSET
+};
 
 static void put_field(unsigned char *, job_field_t, uint64_t);
 static uint64_t get_field(const unsigned char *, job_field_t);
@@ -101,6 +128,12 @@ fsimg_worker_request_init(fsimg_worker_request_t *request)
 	request->codepage = 437;
 	request->input_fd = request->output_fd = -1;
 	request->scratch_fd = -1;
+}
+
+const char *
+fsimg_job_format(const fsimg_worker_request_t *request)
+{
+	return (request->stack.slots[FSIMG_LAYER_FILESYSTEM].name);
 }
 
 bool
@@ -160,7 +193,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	const char *label;
 	fsimg_status_t status;
 
-	if (memchr(request->format, '\0', JOB_FORMAT_BYTES) == NULL ||
+	if (fsimg_stack_validate(&request->stack, error) != FSIMG_OK ||
+	    memchr(request->partition_text, '\0', JOB_PARTITION_TEXT_BYTES) == NULL ||
 	    fsimg_job_has_roots(request->kind) != (request->root_count != 0))
 		return (invalid_job(error));
 	label = request->write.label == NULL ? "" : request->write.label;
@@ -200,7 +234,17 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	    (request->root_count != 0 ? FSIMG_JOB_CAP_ROOTS : 0);
 	put_field(raw, JOB_CAPABILITIES, capabilities);
 	put_field(raw, JOB_SELECTION, paths_length);
-	bcopy(request->format, raw + JOB_FORMAT_OFFSET, strlen(request->format));
+	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
+		raw[JOB_SLOT_STATES_OFFSET + slot] =
+		    (unsigned char)request->stack.slots[slot].state;
+		bcopy(request->stack.slots[slot].name, raw + slot_name_offsets[slot],
+		    strlen(request->stack.slots[slot].name));
+	}
+	fsimg_wire_put64(raw + JOB_SELECTOR_OFFSET, request->selector);
+	fsimg_wire_put64(raw + JOB_PARTITION_INDEX_OFFSET, request->partition_index);
+	fsimg_wire_put64(raw + JOB_GPT_SECTOR_OFFSET, request->gpt_sector);
+	bcopy(request->partition_text, raw + JOB_PARTITION_TEXT_OFFSET,
+	    strlen(request->partition_text));
 	bcopy(label, raw + JOB_LABEL_OFFSET, label_length);
 	raw[JOB_LABEL_PRESENT] = request->write.label != NULL ? 1 : 0;
 	bcopy(request->write.volume_uuid, raw + JOB_UUID_OFFSET,
@@ -243,10 +287,33 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
+	for (unsigned i = JOB_SLOT_STATES_OFFSET + FSIMG_STACK_SLOTS;
+	    i < JOB_SCHEME_OFFSET; i++) {
+		if (raw[i] != 0)
+			return (invalid_job(error));
+	}
 	for (unsigned i = JOB_RESERVED_OFFSET; i < FSIMG_JOB_BYTES; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
+	if (!string_field_valid(raw + JOB_SCHEME_OFFSET, JOB_FORMAT_BYTES) ||
+	    !string_field_valid(raw + JOB_CONTAINER_OFFSET, JOB_FORMAT_BYTES) ||
+	    !string_field_valid(raw + JOB_PARTITION_TEXT_OFFSET,
+	    JOB_PARTITION_TEXT_BYTES) ||
+	    fsimg_wire_get64(raw + JOB_SELECTOR_OFFSET) > FSIMG_SELECT_DISK ||
+	    fsimg_wire_get64(raw + JOB_PARTITION_INDEX_OFFSET) > UINT32_MAX ||
+	    fsimg_wire_get64(raw + JOB_GPT_SECTOR_OFFSET) > UINT32_MAX)
+		return (invalid_job(error));
+	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
+		if (raw[JOB_SLOT_STATES_OFFSET + slot] > FSIMG_SLOT_NAMED)
+			return (invalid_job(error));
+		request->stack.slots[slot].state =
+		    (fsimg_slot_state_t)raw[JOB_SLOT_STATES_OFFSET + slot];
+		bcopy(raw + slot_name_offsets[slot], request->stack.slots[slot].name,
+		    JOB_FORMAT_BYTES);
+	}
+	if (fsimg_stack_validate(&request->stack, error) != FSIMG_OK)
+		return (invalid_job(error));
 	for (job_field_t field = JOB_DEPTH; field <= JOB_FDS; field++) {
 		if (get_field(raw, field) > UINT32_MAX)
 			return (invalid_job(error));
@@ -293,7 +360,13 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	request->write.fat_root_entries = (uint32_t)get_field(raw, JOB_ROOT);
 	request->write.volume_serial = (uint32_t)get_field(raw, JOB_SERIAL);
 	request->codepage = (uint32_t)get_field(raw, JOB_CODEPAGE);
-	bcopy(raw + JOB_FORMAT_OFFSET, request->format, JOB_FORMAT_BYTES);
+	request->selector = (fsimg_selector_kind_t)fsimg_wire_get64(raw +
+	    JOB_SELECTOR_OFFSET);
+	request->partition_index = (uint32_t)fsimg_wire_get64(raw +
+	    JOB_PARTITION_INDEX_OFFSET);
+	request->gpt_sector = (uint32_t)fsimg_wire_get64(raw + JOB_GPT_SECTOR_OFFSET);
+	bcopy(raw + JOB_PARTITION_TEXT_OFFSET, request->partition_text,
+	    JOB_PARTITION_TEXT_BYTES);
 	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, JOB_LABEL_BYTES);
 	request->write.label = raw[JOB_LABEL_PRESENT] == 0 ? NULL :
 	    request->label_storage;

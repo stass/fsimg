@@ -1,0 +1,105 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+#
+# fsimg reads the partition tables independent tools write: sgdisk (GPT)
+# and sfdisk (MBR) tables around mtools-formatted FAT volumes, and the GPT
+# and MBR raw disks hdiutil creates on macOS. Each missing tool is reported;
+# the test skips only when no oracle is available.
+set -eu
+sgdisk=${SGDISK:-'@SGDISK@'}
+sfdisk=${SFDISK:-'@SFDISK@'}
+mformat=${MFORMAT:-'@MFORMAT@'}
+hdiutil=${HDIUTIL:-'@HDIUTIL@'}
+fsimg="$(pwd)/fsimg"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-layers-oracle-XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+cd "$fixture"
+printf 'hello\n' > hello.txt
+mkdir source
+cp hello.txt source/HELLO.TXT
+ran=0
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# The disk's stack, its one file, and verification of table and volume.
+check_disk() {
+    "$fsimg" if "$1" > info.txt 2>/dev/null
+    grep -q "^Stack:        $2\$" info.txt || fail "$1: stack is not $2"
+    test "$("$fsimg" tf "$1" 2>/dev/null)" = '"/HELLO.TXT"' || fail "$1: listing"
+    "$fsimg" xOf "$1" /HELLO.TXT 2>/dev/null | cmp -s - hello.txt || fail "$1: payload"
+    "$fsimg" Wf "$1" 2>/dev/null | grep -q "partition table" || fail "$1: verification"
+}
+
+# A zeroed disk image of eight MiB.
+blank() {
+    dd if=/dev/zero of="$1" bs=1048576 count=8 2>/dev/null
+}
+
+# Format the partition at one MiB with mtools and store the file.
+populate() {
+    "$mformat" -i "$1@@1M" -T 4096 -v FSIMG ::
+    "$(dirname "$mformat")/mcopy" -i "$1@@1M" hello.txt ::HELLO.TXT
+}
+
+if test -n "$sgdisk" && test -n "$mformat"; then
+    blank sgdisk.img
+    "$sgdisk" -n 1:2048:+2M -t 1:ef00 -c 1:EFI -n 2:0:+2M -t 2:8300 -c 2:data \
+        sgdisk.img > /dev/null
+    populate sgdisk.img
+    check_disk sgdisk.img fat12/gpt
+    grep -q '^Partition 1:  esp, 2 MiB at 1 MiB, fat12, name "EFI", selected$' info.txt ||
+        fail "sgdisk.img: partition 1"
+    grep -q '^Partition 2:  linux, 2 MiB at 3 MiB, no filesystem, name "data"$' info.txt ||
+        fail "sgdisk.img: partition 2"
+    # The disk and partition GUIDs decode to the text sgdisk prints.
+    expected=$("$sgdisk" -p sgdisk.img | sed -n 's/^Disk identifier (GUID): //p' |
+        tr 'A-F' 'a-f')
+    grep -q "^Disk GUID:    $expected\$" info.txt || fail "sgdisk.img: disk GUID"
+    expected=$("$sgdisk" -i 1 sgdisk.img | sed -n 's/^Partition unique GUID: //p' |
+        tr 'A-F' 'a-f')
+    "$fsimg" i --json -f sgdisk.img 2>/dev/null | grep -q "\"guid\":\"$expected\"" ||
+        fail "sgdisk.img: partition GUID"
+    test "$("$fsimg" tf sgdisk.img --partition=name=EFI 2>/dev/null)" = '"/HELLO.TXT"' ||
+        fail "sgdisk.img: name selector"
+    ran=$((ran + 1))
+else
+    echo 'SKIP: sgdisk and mtools mformat are required for the GPT oracle'
+fi
+
+if test -n "$sfdisk" && test -n "$mformat"; then
+    blank sfdisk.img
+    printf 'label: dos\nlabel-id: 0x12345678\nstart=2048, size=4096, type=1, bootable\nstart=6144, size=4096, type=83\n' |
+        "$sfdisk" -q sfdisk.img
+    populate sfdisk.img
+    check_disk sfdisk.img fat12/mbr
+    grep -q '^Disk ID:      0x12345678$' info.txt || fail "sfdisk.img: disk identifier"
+    grep -q '^Partition 1:  fat12, 2 MiB at 1 MiB, fat12, active, selected$' info.txt ||
+        fail "sfdisk.img: partition 1"
+    grep -q '^Partition 2:  linux, 2 MiB at 3 MiB, no filesystem$' info.txt ||
+        fail "sfdisk.img: partition 2"
+    ran=$((ran + 1))
+else
+    echo 'SKIP: sfdisk and mtools mformat are required for the MBR oracle'
+fi
+
+if test -n "$hdiutil"; then
+    for layout in GPTSPUD MBRSPUD; do
+        "$hdiutil" create -quiet -srcfolder source -size 8m -fs 'MS-DOS FAT16' \
+            -volname FSIMG -layout "$layout" -format UDTO -o "$layout"
+    done
+    check_disk GPTSPUD.cdr fat16/gpt
+    check_disk MBRSPUD.cdr fat16/mbr
+    ran=$((ran + 1))
+else
+    echo 'SKIP: hdiutil is required for the macOS disk oracle'
+fi
+
+if test "$ran" -eq 0; then
+    echo 'SKIP: no partitioning oracle is available'
+    exit 77
+fi
+echo "partition-table oracles pass ($ran tools)"

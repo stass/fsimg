@@ -7,7 +7,7 @@
 #include "write-qnx6.h"
 
 static fsimg_status_t qnx6_probe(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    const fsimg_format_variant_t **, fsimg_error_t *);
 
 /* The classic profile, read and written at every classic block size. Files
  * are bounded by the 32-bit block references, a slice by nothing below the
@@ -61,12 +61,14 @@ const fsimg_format_t fsimg_qnx6_format = {
  */
 static fsimg_status_t
 qnx6_probe(const unsigned char *prefix, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, fsimg_error_t *error)
+    uint64_t volume_bytes FSIMG_UNUSED, const fsimg_format_variant_t **variant,
+    fsimg_error_t *error)
 {
 	const unsigned char *header;
 	uint32_t block_size;
 	bool big, at_zero, at_header;
 
+	*variant = &qnx6_variants[0];
 	at_zero = length >= 4 && qnx6_magic_order(prefix, &big);
 	at_header = length >= QNX6_PROBE_BYTES &&
 	    qnx6_magic_order(prefix + QNX6_HEADER_OFFSET, &big);

@@ -59,12 +59,59 @@ fsimg_format_find(const char *name, const fsimg_format_variant_t **variant)
  */
 static fsimg_status_t
 format_probe(const fsimg_format_t *format, const unsigned char *prefix,
-    size_t length, uint64_t volume_bytes, fsimg_error_t *error)
+    size_t length, uint64_t volume_bytes, const fsimg_format_variant_t **variant,
+    fsimg_error_t *error)
 {
+	fsimg_status_t status;
+
 	fsimg_error_clear(error);
+	*variant = NULL;
 	if (length > format->probe_bytes)
 		length = format->probe_bytes;
-	return (format->probe(prefix, length, volume_bytes, error));
+	status = format->probe(prefix, length, volume_bytes, variant, error);
+	/* A claim always names a variant: the probe's, else the first. */
+	if (*variant == NULL)
+		*variant = &format->variants[0];
+	return (status);
+}
+
+/* Run the forced probe, or every probe in the registry, counting claims and
+ * keeping the first claimant's verdict and reason. A forced probe's verdict
+ * is kept even when it does not claim, since its absent signature is the
+ * answer. Several claims are counted, not resolved: what they mean is the
+ * caller's decision.
+ */
+void
+fsimg_format_survey(const fsimg_format_t *const *registry, size_t count,
+    const fsimg_format_t *forced, const unsigned char *prefix, size_t length,
+    uint64_t volume_bytes, fsimg_format_survey_t *survey)
+{
+	const fsimg_format_variant_t *variant;
+	const fsimg_format_t *format;
+	fsimg_error_t detail;
+	fsimg_status_t status;
+
+	bzero(survey, sizeof(*survey));
+	survey->status = FSIMG_EFORMAT;
+	if (forced != NULL) {
+		registry = &forced;
+		count = 1;
+	}
+	for (size_t i = 0; i < count; i++) {
+		format = registry[i];
+		status = format_probe(format, prefix, length, volume_bytes,
+		    &variant, &detail);
+		if (status == FSIMG_EFORMAT && forced == NULL)
+			continue;
+		if (status != FSIMG_EFORMAT)
+			survey->claims++;
+		if (survey->claimant != NULL)
+			continue;
+		survey->claimant = format;
+		survey->status = status;
+		survey->reason = detail;
+		survey->variant = status == FSIMG_OK ? variant : NULL;
+	}
 }
 
 /* Decide which descriptor may open an image from its prefix. A forced
@@ -79,54 +126,69 @@ fsimg_format_claim(const fsimg_format_t *const *registry, size_t count,
     const fsimg_format_t *forced, const unsigned char *prefix, size_t length,
     uint64_t volume_bytes, const fsimg_format_t **claimed, fsimg_error_t *error)
 {
-	const fsimg_format_t *claimant;
-	fsimg_error_t detail, claim_error;
-	fsimg_status_t status, claim_status;
+	fsimg_format_survey_t survey;
 
 	*claimed = NULL;
-	if (forced != NULL) {
-		claimant = forced;
-		claim_status = format_probe(forced, prefix, length, volume_bytes,
-		    &claim_error);
-	} else {
-		/* Keep the first claimant's status and reason; they decide only
-		 * when no other probe claims the image.
-		 */
-		size_t claim_count;
-
-		claimant = NULL;
-		claim_status = FSIMG_EFORMAT;
-		fsimg_error_clear(&claim_error);
-		claim_count = 0;
-		for (size_t i = 0; i < count; i++) {
-			status = format_probe(registry[i], prefix, length,
-			    volume_bytes, &detail);
-			if (status == FSIMG_EFORMAT)
-				continue;
-			claim_count++;
-			if (claim_count == 1) {
-				claimant = registry[i];
-				claim_status = status;
-				claim_error = detail;
-			}
-		}
-		if (claim_count == 0)
-			return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
-			    FSIMG_OP_READER, "unrecognized image format"));
-		if (claim_count > 1)
-			return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
-			    FSIMG_OP_READER, "image matches several formats; force one"));
-	}
-	if (claim_status != FSIMG_OK) {
+	fsimg_format_survey(registry, count, forced, prefix, length,
+	    volume_bytes, &survey);
+	if (survey.claimant == NULL)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "unrecognized image format"));
+	if (survey.claims > 1)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "image matches several formats; force one"));
+	if (survey.status != FSIMG_OK) {
 		if (error != NULL)
-			*error = claim_error;
-		return (claim_status);
+			*error = survey.reason;
+		return (survey.status);
 	}
-	if (claimant->reader == NULL)
+	if (survey.claimant->reader == NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_READER, "recognized format has no reader"));
-	*claimed = claimant;
+	*claimed = survey.claimant;
 	fsimg_error_clear(error);
+	return (FSIMG_OK);
+}
+
+/* The prefix the forced reader format's probe reads, or the largest any
+ * registered probe reads. An unknown name reads nothing.
+ */
+size_t
+fsimg_format_probe_bytes(const char *forced_name)
+{
+	const fsimg_format_variant_t *variant;
+	const fsimg_format_t *forced;
+	size_t length;
+
+	if (forced_name != NULL) {
+		forced = fsimg_format_find(forced_name, &variant);
+		return (forced == NULL ? 0 : forced->probe_bytes);
+	}
+	length = 0;
+	for (size_t i = 0; i < FORMAT_COUNT; i++) {
+		if (formats[i]->probe_bytes > length)
+			length = formats[i]->probe_bytes;
+	}
+	return (length);
+}
+
+fsimg_status_t
+fsimg_format_identify(const char *forced_name, const unsigned char *prefix,
+    size_t length, uint64_t volume_bytes, fsimg_format_survey_t *survey,
+    fsimg_error_t *error)
+{
+	const fsimg_format_variant_t *variant;
+	const fsimg_format_t *forced;
+
+	forced = NULL;
+	if (forced_name != NULL) {
+		forced = fsimg_format_find(forced_name, &variant);
+		if (forced == NULL || forced->reader == NULL)
+			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			    FSIMG_OP_READER, "unsupported reader format"));
+	}
+	fsimg_format_survey(formats, FORMAT_COUNT, forced, prefix, length,
+	    volume_bytes, survey);
 	return (FSIMG_OK);
 }
 
@@ -177,19 +239,13 @@ fsimg_format_open(fsimg_reader_t *reader, const char *forced_name,
 
 	forced = NULL;
 	variant = NULL;
-	length = 0;
 	if (forced_name != NULL) {
 		forced = fsimg_format_find(forced_name, &variant);
 		if (forced == NULL || forced->reader == NULL)
 			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 			    FSIMG_OP_READER, "unsupported reader format"));
-		length = forced->probe_bytes;
-	} else {
-		for (size_t i = 0; i < FORMAT_COUNT; i++) {
-			if (formats[i]->probe_bytes > length)
-				length = formats[i]->probe_bytes;
-		}
 	}
+	length = fsimg_format_probe_bytes(forced_name);
 	status = fsimg_io_get_size(reader->input, &volume_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);

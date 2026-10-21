@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
@@ -33,7 +34,8 @@ typedef struct worker_child {
 	fsimg_worker_result_t result;
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*input;
-	fsimg_io_t	*volume;
+	fsimg_image_t	*image;		/* The input's layers */
+	fsimg_io_t	*volume;	/* The selected slice of the image */
 	fsimg_reader_t	*reader;
 	fsimg_selection_t *selector;
 	fsimg_writer_t	*writer;
@@ -71,7 +73,14 @@ static fsimg_status_t child_setup(worker_child_t *, fsimg_sandbox_caps_t *,
     fsimg_error_t *);
 static fsimg_status_t child_ready(worker_child_t *, const fsimg_sandbox_caps_t *,
     fsimg_error_t *);
-static fsimg_status_t send_info(worker_child_t *, fsimg_error_t *);
+static fsimg_status_t send_info(const fsimg_volume_info_t *, fsimg_error_t *);
+static fsimg_status_t send_image(const fsimg_image_info_t *, const char *,
+    const fsimg_layer_report_t *, const fsimg_error_t *, fsimg_error_t *);
+static fsimg_status_t send_partitions(worker_child_t *, fsimg_error_t *);
+static fsimg_status_t select_volume(worker_child_t *, fsimg_error_t *);
+static fsimg_status_t describe_image(worker_child_t *, fsimg_image_info_t *,
+    fsimg_layer_report_t *, fsimg_error_t *);
+static fsimg_status_t report_unselected(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t send_plan(const fsimg_plan_info_t *, fsimg_error_t *);
 static fsimg_status_t send_entry(const fsimg_entry_t *, fsimg_error_t *);
 static fsimg_status_t read_job(worker_child_t *, fsimg_error_t *);
@@ -390,18 +399,93 @@ child_ready(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 }
 
 static fsimg_status_t
-send_info(worker_child_t *child, fsimg_error_t *error)
+send_info(const fsimg_volume_info_t *info, fsimg_error_t *error)
 {
-	fsimg_volume_info_t info;
 	unsigned char raw[FSIMG_WIRE_INFO_BYTES];
-	fsimg_status_t status;
 
-	status = fsimg_reader_get_info(child->reader, &info, error);
-	if (status != FSIMG_OK)
-		return (status);
-	fsimg_wire_info_encode(raw, &info);
+	fsimg_wire_info_encode(raw, info);
 	return (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO, raw,
 	    sizeof(raw), error));
+}
+
+/*
+ * The IMAGE record. Its stack is what this job actually read: the scheme
+ * found or forced and the filesystem the reader opened, none when no
+ * volume was selected. A range or disk selection bypasses the scheme, so
+ * its image carries no table (info is zero apart from the disk size).
+ */
+static fsimg_status_t
+send_image(const fsimg_image_info_t *info, const char *format,
+    const fsimg_layer_report_t *report, const fsimg_error_t *unselected,
+    fsimg_error_t *error)
+{
+	unsigned char raw[FSIMG_WIRE_IMAGE_BYTES];
+	fsimg_stack_t stack;
+	uint64_t flags;
+	int count;
+
+	bzero(raw, sizeof(raw));
+	bzero(&stack, sizeof(stack));
+	if (format[0] != '\0') {
+		stack.slots[FSIMG_LAYER_FILESYSTEM].state = FSIMG_SLOT_NAMED;
+		snprintf(stack.slots[FSIMG_LAYER_FILESYSTEM].name,
+		    sizeof(stack.slots[FSIMG_LAYER_FILESYSTEM].name), "%s", format);
+	}
+	if (info->scheme[0] != '\0') {
+		stack.slots[FSIMG_LAYER_SCHEME].state = FSIMG_SLOT_NAMED;
+		snprintf(stack.slots[FSIMG_LAYER_SCHEME].name,
+		    sizeof(stack.slots[FSIMG_LAYER_SCHEME].name), "%s", info->scheme);
+	}
+	fsimg_stack_format(&stack, (char *)raw + FSIMG_WIRE_IMAGE_STACK,
+	    FSIMG_WIRE_IMAGE_STACK_BYTES);
+	flags = 0;
+	if (unselected != NULL) {
+		/* A reason cut here or by the library ends in "...". */
+		flags |= FSIMG_WIRE_IMAGE_UNSELECTED;
+		count = snprintf((char *)raw + FSIMG_WIRE_IMAGE_REASON,
+		    FSIMG_WIRE_IMAGE_REASON_BYTES, "%s%s", unselected->message,
+		    unselected->message_truncated ? "..." : "");
+		if (count < 0 || (size_t)count >= FSIMG_WIRE_IMAGE_REASON_BYTES)
+			bcopy("...", raw + FSIMG_WIRE_IMAGE_REASON +
+			    FSIMG_WIRE_IMAGE_REASON_BYTES - 4, 3);
+	}
+	if (report != NULL) {
+		flags |= FSIMG_WIRE_IMAGE_VERIFIED;
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHECKED, report->partitions);
+	}
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, flags);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, info->disk_bytes);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, info->sector_bytes);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SLOTS, info->partition_count);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, info->selected);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK_ID, info->mbr_disk_id);
+	bcopy(info->disk_guid, raw + FSIMG_WIRE_IMAGE_DISK_GUID,
+	    sizeof(info->disk_guid));
+	bcopy(info->scheme, raw + FSIMG_WIRE_IMAGE_SCHEME,
+	    strnlen(info->scheme, sizeof(info->scheme) - 1));
+	return (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_IMAGE, raw,
+	    sizeof(raw), error));
+}
+
+/* One PARTITION record per used slot, in slot order. */
+static fsimg_status_t
+send_partitions(worker_child_t *child, fsimg_error_t *error)
+{
+	fsimg_partition_info_t partition;
+	unsigned char raw[FSIMG_WIRE_PARTITION_BYTES];
+	fsimg_status_t status;
+
+	while ((status = fsimg_image_next_partition(child->image, &partition,
+	    error)) == FSIMG_OK) {
+		if (!partition.used)
+			continue;
+		fsimg_wire_partition_encode(raw, &partition);
+		status = fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PARTITION,
+		    raw, sizeof(raw), error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (status == FSIMG_DONE ? FSIMG_OK : status);
 }
 
 static fsimg_status_t
@@ -618,33 +702,119 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 	return (status);
 }
 
+/* Open the image over the input with the forced stack and select the
+ * request's volume into child->volume.
+ */
+static fsimg_status_t
+select_volume(worker_child_t *child, fsimg_error_t *error)
+{
+	const fsimg_worker_request_t *request = &child->request;
+	fsimg_image_options_t options;
+	fsimg_selector_t selector;
+	fsimg_status_t status;
+
+	fsimg_image_options_init(&options);
+	options.stack = request->stack;
+	options.layers.gpt_sector_bytes = request->gpt_sector;
+	status = fsimg_image_open(child->ctx, child->input, &options, &child->image,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	bzero(&selector, sizeof(selector));
+	selector.kind = request->selector;
+	selector.index = request->partition_index;
+	selector.text = request->partition_text;
+	selector.offset = request->offset;
+	selector.length = request->length;
+	return (fsimg_image_select(child->image, &selector, &child->volume, error));
+}
+
+/*
+ * The layers around the selected volume. A range or disk selection never
+ * reads the partition table, so a damaged table cannot block it, and its
+ * image is only the disk size. Any other selection consulted the table,
+ * which W also verifies (report->complete).
+ */
+static fsimg_status_t
+describe_image(worker_child_t *child, fsimg_image_info_t *info,
+    fsimg_layer_report_t *report, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	bzero(info, sizeof(*info));
+	bzero(report, sizeof(*report));
+	if (child->request.selector == FSIMG_SELECT_RANGE ||
+	    child->request.selector == FSIMG_SELECT_DISK)
+		return (fsimg_io_get_size(child->input, &info->disk_bytes, error));
+	if (child->request.kind == FSIMG_JOB_VERIFY) {
+		status = fsimg_image_verify(child->image, 0, report, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (fsimg_image_get_info(child->image, info, error));
+}
+
+/*
+ * i on a partitioned disk where automatic selection found no single
+ * filesystem: report the table without a volume, so the user can choose.
+ * A disk without a table has nothing to show and fails with the reason.
+ */
+static fsimg_status_t
+report_unselected(worker_child_t *child, fsimg_error_t *error)
+{
+	fsimg_image_info_t info;
+	fsimg_error_t reason;
+	fsimg_status_t status;
+
+	reason = *error;
+	status = fsimg_image_get_info(child->image, &info, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (info.scheme[0] == '\0') {
+		*error = reason;
+		return (reason.status);
+	}
+	status = send_image(&info, "", NULL, &reason, error);
+	if (status != FSIMG_OK)
+		return (status);
+	return (send_partitions(child, error));
+}
+
 static fsimg_status_t
 read_job(worker_child_t *child, fsimg_error_t *error)
 {
 	fsimg_read_options_t options;
-	uint64_t length, input_length;
+	fsimg_image_info_t image;
+	fsimg_layer_report_t report;
+	fsimg_volume_info_t volume;
+	const char *format;
 	fsimg_status_t status;
 
-	status = fsimg_io_get_size(child->input, &input_length, error);
+	status = select_volume(child, error);
+	if (status == FSIMG_EFORMAT && child->request.kind == FSIMG_JOB_INFO &&
+	    child->request.selector == FSIMG_SELECT_AUTOMATIC)
+		return (report_unselected(child, error));
+	if (status == FSIMG_OK)
+		status = describe_image(child, &image, &report, error);
 	if (status != FSIMG_OK)
 		return (status);
-	length = child->request.length;
-	if (child->request.offset > input_length)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_IO, "input slice starts past EOF"));
-	if (length == 0)
-		length = input_length - child->request.offset;
-	status = fsimg_io_slice(child->input, child->request.offset, length,
-	    &child->volume, error);
-	if (status != FSIMG_OK)
-		return (status);
+	format = fsimg_job_format(&child->request);
 	fsimg_read_options_init(&options);
-	options.format = child->request.format[0] == '\0' ? NULL : child->request.format;
+	options.format = format[0] == '\0' ? NULL : format;
 	options.fat_codepage = child->request.codepage;
 	status = fsimg_reader_open(child->ctx, child->volume, &options, &child->reader, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = send_info(child, error);
+	status = fsimg_reader_get_info(child->reader, &volume, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = send_image(&image, volume.format, report.complete ? &report : NULL,
+	    NULL, error);
+	if (status == FSIMG_OK && child->request.kind == FSIMG_JOB_INFO &&
+	    image.scheme[0] != '\0')
+		status = send_partitions(child, error);
+	if (status == FSIMG_OK)
+		status = send_info(&volume, error);
 	if (status != FSIMG_OK)
 		return (status);
 	switch (child->request.kind) {
@@ -739,7 +909,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	fsimg_status_t status;
 	int fd, saved;
 
-	status = fsimg_writer_new(child->ctx, child->request.format,
+	status = fsimg_writer_new(child->ctx, fsimg_job_format(&child->request),
 	    &child->request.write, &child->writer, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -792,6 +962,7 @@ child_cleanup(worker_child_t *child)
 	fsimg_selection_free(child->selector);
 	fsimg_reader_free(child->reader);
 	fsimg_io_free(child->volume);
+	fsimg_image_free(child->image);
 	fsimg_io_free(child->input);
 	fsimg_writer_free(child->writer);
 	fsimg_dealloc(child->paths);

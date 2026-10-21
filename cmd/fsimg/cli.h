@@ -96,6 +96,10 @@ typedef struct fsimg_cli_display {
 	uint64_t	 progress_records;
 	/* The result is announced only after worker exit and finalization. */
 	unsigned char	 verification[FSIMG_WIRE_VERIFY_BYTES];
+	/* The read job's IMAGE record: its stack heads the volume report,
+	 * and W names the verified table.
+	 */
+	unsigned char	 image[FSIMG_WIRE_IMAGE_BYTES];
 	/* Human listing suffix for the open entry's kind. */
 	const char	*entry_marker;
 	fsimg_validation_scope_t scope;

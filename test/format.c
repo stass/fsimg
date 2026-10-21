@@ -17,11 +17,11 @@ static fsimg_status_t empty_read(void *, uint64_t, void *, size_t, size_t *,
 static fsimg_status_t empty_size(void *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t fake_probe(unsigned, size_t, fsimg_error_t *);
 static fsimg_status_t fake_probe_0(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    const fsimg_format_variant_t **, fsimg_error_t *);
 static fsimg_status_t fake_probe_1(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    const fsimg_format_variant_t **, fsimg_error_t *);
 static fsimg_status_t fake_probe_2(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    const fsimg_format_variant_t **, fsimg_error_t *);
 static void fake_reset(fsimg_status_t, fsimg_status_t, fsimg_status_t);
 static void test_probe_contract(void);
 static void test_driver_probes(void);
@@ -72,21 +72,24 @@ fake_probe(unsigned index, size_t length, fsimg_error_t *error)
 
 static fsimg_status_t
 fake_probe_0(const unsigned char *prefix FSIMG_UNUSED, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, fsimg_error_t *error)
+    uint64_t volume_bytes FSIMG_UNUSED,
+    const fsimg_format_variant_t **variant FSIMG_UNUSED, fsimg_error_t *error)
 {
 	return (fake_probe(0, length, error));
 }
 
 static fsimg_status_t
 fake_probe_1(const unsigned char *prefix FSIMG_UNUSED, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, fsimg_error_t *error)
+    uint64_t volume_bytes FSIMG_UNUSED,
+    const fsimg_format_variant_t **variant FSIMG_UNUSED, fsimg_error_t *error)
 {
 	return (fake_probe(1, length, error));
 }
 
 static fsimg_status_t
 fake_probe_2(const unsigned char *prefix FSIMG_UNUSED, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, fsimg_error_t *error)
+    uint64_t volume_bytes FSIMG_UNUSED,
+    const fsimg_format_variant_t **variant FSIMG_UNUSED, fsimg_error_t *error)
 {
 	return (fake_probe(2, length, error));
 }

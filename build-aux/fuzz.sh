@@ -5,11 +5,12 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-qnx4, test-protocol and test/spec.sh, which
-# write the seeds, with MAKE naming the make program that drives that build
-# (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX select the compiler.
-# The harnesses build against the instrumented sanitizer-fuzz/ tree (see
-# sanitize.sh) and keep their corpora here between runs.
+# test-exfat, test-qnx6, test-qnx4, test-protocol, test-layers and
+# test/spec.sh, which write the seeds, with MAKE naming the make program
+# that drives that build (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX
+# select the compiler. The harnesses build against the instrumented
+# sanitizer-fuzz/ tree (see sanitize.sh) and keep their corpora here
+# between runs.
 set -eu
 fuzz_seconds=${FUZZ_SECONDS:-0}
 case "$fuzz_seconds" in
@@ -126,7 +127,7 @@ run_fuzzer "$work_dir/fuzz-qnx4" "$qnx4_corpus" 1048576 10
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \
-    -I"$source_dir/lib/core" -I"$source_dir/cmd/fsimg" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/layers" -I"$source_dir/cmd/fsimg" \
     "$source_dir/fuzz/protocol.c" "$source_dir/cmd/fsimg/protocol.c" \
     "$source_dir/cmd/fsimg/job.c" "$fuzz_library" -o "$work_dir/fuzz-protocol"
 protocol_corpus=protocol-fuzz-corpus
@@ -135,3 +136,21 @@ if test ! -f "$protocol_corpus/frames.seed"; then
     ./test-protocol --seed "$protocol_corpus/frames.seed"
 fi
 run_fuzzer "$work_dir/fuzz-protocol" "$protocol_corpus" 65536 5
+
+# The image harness reads each input as a whole disk and drives the scheme
+# step, partition enumeration, selection and layer verification under
+# several forced stacks. The seeds are the GPT and MBR disks of the layer
+# tests.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    "$source_dir/fuzz/image.c" "$fuzz_library" -o "$work_dir/fuzz-image"
+image_corpus=image-fuzz-corpus
+mkdir -p "$image_corpus"
+if test ! -f "$image_corpus/gpt.seed"; then
+    ./test-layers --seed-gpt "$image_corpus/gpt.seed"
+fi
+if test ! -f "$image_corpus/mbr.seed"; then
+    ./test-layers --seed-mbr "$image_corpus/mbr.seed"
+fi
+run_fuzzer "$work_dir/fuzz-image" "$image_corpus" 1048576 10

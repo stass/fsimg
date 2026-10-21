@@ -587,11 +587,20 @@ JSON uses valid UTF-8, escapes JSON controls and quotes, and encodes
 untrusted invalid diagnostic bytes visibly.
 
 Schema version 1 records use numeric schema=1 and string type, of which
-there are info, plan, entry, verify, format, capabilities, loss, progress,
-error and summary. Byte quantities, counts, Unix seconds and nanosecond
-precision are decimal strings with stated units; bounded kind and flag
-fields, nanoseconds, offset minutes, geometry sizes, enumerated size arrays
-and the UTF-16 name-unit limit are JSON integers; unknown values are null; a
+there are stack, partition, info, plan, entry, verify, format, capabilities,
+loss, progress, error and summary. A read mode's stack record precedes its
+info record: the stack text, compression, scheme, disk size, sector size,
+disk GUID or MBR identifier, the selected partition's slot and whether a
+volume was selected, with the reason when none was. `i` follows it with one
+partition record per used slot: slot, type name, type GUID, unique GUID and
+name (GPT) or type byte and active flag (MBR), offset, length, the
+filesystem claim and format, and whether it is selected. A verify record
+also names the verified scheme, the partitions whose bounds it checked and
+the selected slot, each null when the selection read no table. Byte
+quantities, counts, Unix seconds and nanosecond precision are decimal
+strings with stated units; bounded kind and flag fields, nanoseconds, offset
+minutes, geometry sizes, enumerated size arrays and the UTF-16 name-unit
+limit are JSON integers; unknown values are null; a
 timestamp includes basis and resolution. Progress and sampled loss details
 use stderr; data, summary and error records use stdout. Entry records carry
 complete=true only after all name frames and ENTRY_END validate; an error

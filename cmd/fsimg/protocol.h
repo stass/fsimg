@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 320u
+#define FSIMG_JOB_BYTES 496u
 #define FSIMG_WIRE_ERROR_BYTES 592u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These
@@ -50,6 +50,52 @@ typedef enum fsimg_wire_info_field {
 #define FSIMG_WIRE_INFO_LABEL_BYTES 49u
 _Static_assert(FSIMG_WIRE_INFO_UUID + 16 == FSIMG_WIRE_INFO_BYTES,
     "the info record ends with the volume UUID");
+
+/* The image a read job opened: the layers around its volume. STACK is the
+ * canonical text of the forced and detected slots with the filesystem the
+ * reader opened, SCHEME the partition scheme or empty, and REASON why no
+ * volume was selected when UNSELECTED is set.
+ */
+#define FSIMG_WIRE_IMAGE_BYTES 280u
+#define FSIMG_WIRE_IMAGE_UNSELECTED 0x1u	/* i only: no volume follows */
+#define FSIMG_WIRE_IMAGE_VERIFIED 0x2u		/* W only: tables verified */
+typedef enum fsimg_wire_image_field {
+	FSIMG_WIRE_IMAGE_FLAGS = 0,
+	FSIMG_WIRE_IMAGE_DISK = 8,
+	FSIMG_WIRE_IMAGE_SECTOR = 16,
+	FSIMG_WIRE_IMAGE_SLOTS = 24,
+	FSIMG_WIRE_IMAGE_SELECTED = 32,
+	FSIMG_WIRE_IMAGE_DISK_ID = 40,
+	FSIMG_WIRE_IMAGE_CHECKED = 48,	/* Used partitions verified */
+	FSIMG_WIRE_IMAGE_DISK_GUID = 56,
+	FSIMG_WIRE_IMAGE_STACK = 72,
+	FSIMG_WIRE_IMAGE_SCHEME = 136,
+	FSIMG_WIRE_IMAGE_REASON = 152
+} fsimg_wire_image_field_t;
+#define FSIMG_WIRE_IMAGE_STACK_BYTES 64u
+#define FSIMG_WIRE_IMAGE_REASON_BYTES 128u
+_Static_assert(FSIMG_WIRE_IMAGE_REASON + FSIMG_WIRE_IMAGE_REASON_BYTES ==
+    FSIMG_WIRE_IMAGE_BYTES, "the image record ends with the reason");
+
+/* One used partition-table slot, for i. */
+#define FSIMG_WIRE_PARTITION_BYTES 224u
+#define FSIMG_WIRE_PARTITION_ACTIVE 0x1u
+typedef enum fsimg_wire_partition_field {
+	FSIMG_WIRE_PARTITION_INDEX = 0,
+	FSIMG_WIRE_PARTITION_FLAGS = 8,
+	FSIMG_WIRE_PARTITION_OFFSET = 16,
+	FSIMG_WIRE_PARTITION_LENGTH = 24,
+	FSIMG_WIRE_PARTITION_MBR_TYPE = 32,
+	FSIMG_WIRE_PARTITION_CLAIM = 40,
+	FSIMG_WIRE_PARTITION_TYPE = 48,
+	FSIMG_WIRE_PARTITION_FORMAT = 64,
+	FSIMG_WIRE_PARTITION_TYPE_GUID = 80,
+	FSIMG_WIRE_PARTITION_GUID = 96,
+	FSIMG_WIRE_PARTITION_NAME = 112
+} fsimg_wire_partition_field_t;
+#define FSIMG_WIRE_PARTITION_NAME_BYTES 112u
+_Static_assert(FSIMG_WIRE_PARTITION_NAME + FSIMG_WIRE_PARTITION_NAME_BYTES ==
+    FSIMG_WIRE_PARTITION_BYTES, "the partition record ends with the name");
 
 #define FSIMG_WIRE_PLAN_BYTES 112u
 typedef enum fsimg_wire_plan_field {
@@ -158,7 +204,10 @@ typedef enum fsimg_frame_type {
 	FSIMG_FRAME_LOSS,
 	FSIMG_FRAME_VERIFY,
 	FSIMG_FRAME_ERROR,
-	FSIMG_FRAME_DONE
+	FSIMG_FRAME_DONE,
+	FSIMG_FRAME_IMAGE,
+	FSIMG_FRAME_PARTITION,
+	FSIMG_FRAME_LAST = FSIMG_FRAME_PARTITION
 } fsimg_frame_type_t;
 
 typedef struct fsimg_frame {
@@ -198,6 +247,7 @@ void fsimg_wire_error_encode(unsigned char *, const fsimg_error_t *);
  */
 void fsimg_wire_entry_encode(unsigned char *, const fsimg_entry_t *, size_t);
 void fsimg_wire_info_encode(unsigned char *, const fsimg_volume_info_t *);
+void fsimg_wire_partition_encode(unsigned char *, const fsimg_partition_info_t *);
 fsimg_status_t fsimg_wire_error_decode(const unsigned char *, uint32_t,
     fsimg_error_t *);
 
@@ -206,6 +256,12 @@ fsimg_status_t fsimg_wire_error_decode(const unsigned char *, uint32_t,
  * a regular file or a symbolic link.
  */
 bool fsimg_wire_info_frame_valid(const fsimg_frame_t *, uint64_t);
+/* An image record for a disk of the given size; a partition record within
+ * it, in a table of the given slot count.
+ */
+bool fsimg_wire_image_frame_valid(const fsimg_frame_t *, uint64_t);
+bool fsimg_wire_partition_frame_valid(const fsimg_frame_t *, uint64_t,
+    uint64_t);
 bool fsimg_wire_plan_frame_valid(const fsimg_frame_t *);
 bool fsimg_wire_entry_frame_valid(const fsimg_frame_t *, bool, uint64_t);
 bool fsimg_wire_verify_frame_valid(const fsimg_frame_t *, bool);

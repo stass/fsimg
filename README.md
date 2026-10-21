@@ -31,6 +31,18 @@ output; Linux/FreeBSD profiles have actual kernel tests. The
 [implementation plan](docs/implementation-plan.md) and [open work](TODO.md)
 record qualification gates and remaining work.
 
+Reading a disk peels its layers: `-F` names them inner to outer
+(`fat32/gpt`), and an unnamed slot is detected. GPT and MBR partition tables
+are read and checked completely before any partition is used: both GPT
+copies must be intact and agree, entries must lie within the usable range
+without overlapping, and a damaged table fails rather than falling back to
+the disk as a bare volume. The volume is the one partition holding a
+recognized filesystem unless `--partition=N`, `name=TEXT` or `type=NAME`
+selects one; `--offset=`/`--length=` bypass the table. `fsimg i` lists the
+table and marks the selected partition, and `fsimg W` checks the table with
+the volume. Creating a partitioned disk, containers and compression are not
+implemented.
+
 [System qualification](docs/qualification.md) includes ten-million-file format
 planning, a million-fragment content round trip, sustained fuzzing and combined
 CLI memory checks. The extended targets run separately from ordinary tests.
@@ -62,8 +74,8 @@ The QNX6 reader accepts the classic QNX 6.5.0 layout in either byte order at
 512 through 4096-byte blocks, selects the newer of the two snapshot headers,
 and reports files, directories, symbolic links and FIFOs with owner, mode and
 all four timestamps. It finds the second header from the slice length, so a
-partition is read with `--offset=` and `--length=` set to its exact offset
-and length. Hard links appear as separate entries with the same content, and names are
+partition is read through its partition table or with `--offset=` and
+`--length=` set to its exact offset and length. Hard links appear as separate entries with the same content, and names are
 compared byte for byte. QNX6 names reach 510 bytes; extracting one longer
 than the host filesystem allows, 255 bytes on most, fails as unsupported.
 Bootless and Audi MMI layouts and later Power-Safe extensions are recognized
@@ -77,7 +89,8 @@ The QNX4 reader accepts the volumes QNX 6.5.0 `dinit` makes, with or without
 `.longfilenames`, and reports files, directories, symbolic links and FIFOs
 with owner, mode and all four timestamps, and the label of up to 48 bytes.
 It derives the block count from the slice length, so a partition is read
-with `--offset=` and `--length=` set to its exact offset and length. Names
+through its partition table or with `--offset=` and `--length=` set to its
+exact offset and length. Names
 reach 505 bytes
 on a volume with `.longfilenames` and 48 bytes without; they compare byte for
 byte, and hard links appear as separate entries with the same content. The

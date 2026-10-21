@@ -75,6 +75,16 @@ typedef struct fsimg_worker_request {
 	fsimg_write_options_t write;
 	fsimg_job_kind_t	 kind;
 	fsimg_sandbox_policy_t sandbox;
+	/* The -F stack: on create its filesystem slot names the format; on
+	 * read its named and empty slots are forced and the rest detected.
+	 */
+	fsimg_stack_t	 stack;
+	/* Read jobs: how the volume is selected. INDEX uses partition_index,
+	 * NAME and TYPE partition_text, RANGE offset and length.
+	 */
+	fsimg_selector_kind_t selector;
+	uint32_t	 partition_index;
+	uint32_t	 gpt_sector;	/* -o gpt:sector; zero detects */
 	uint64_t	 offset;
 	uint64_t	 length;
 	uint64_t	 seconds;
@@ -96,7 +106,10 @@ typedef struct fsimg_worker_request {
 	/* The staging directory of CREATE, or the destination of EXTRACT. */
 	int		 output_fd;
 	int		 scratch_fd;
-	char		 format[16];
+	/* --partition name= or type= text; a GPT name holds at most 36 UTF-16
+	 * units, so 111 bytes cover every name that can match.
+	 */
+	char		 partition_text[112];
 	/* Decoder-owned backing only; write.label is the authoritative value.
 	 * It holds the longest label any format stores, the volume
 	 * information's, and its NUL.
@@ -160,6 +173,8 @@ fsimg_status_t fsimg_output_run(const char *, fsimg_output_producer_fn_t, void *
  * These are the job's paths in wire order.
  */
 bool fsimg_job_has_roots(fsimg_job_kind_t);
+/* The filesystem the stack names, or "" when its slot is not named. */
+const char *fsimg_job_format(const fsimg_worker_request_t *);
 uint32_t fsimg_job_path_count(const fsimg_worker_request_t *);
 const char *fsimg_job_path(const fsimg_worker_request_t *, uint32_t);
 fsimg_status_t fsimg_job_paths_length(const fsimg_worker_request_t *,

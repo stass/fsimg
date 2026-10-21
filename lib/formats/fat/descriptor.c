@@ -22,7 +22,7 @@
 	((UINT64_C(65535) * 3 + 512 + UINT64_C(clusters) * 128 - 1) * 4096)
 
 static fsimg_status_t fat_probe(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    const fsimg_format_variant_t **, fsimg_error_t *);
 
 static const fsimg_reader_ops_t fat_reader = {
 	.open = fsimg_fat_open,
@@ -129,16 +129,20 @@ fsimg_fat_variant(unsigned id)
 /* The boot record decides: its signature and legal BPB make the claim, and
  * the remaining geometry checks decide between a match, an unsupported table
  * count, FAT32 revision or field, and corruption. The variant follows from
- * the cluster count when the volume is opened.
+ * the cluster count, as it does when the volume is opened.
  */
 static fsimg_status_t
 fat_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    fsimg_error_t *error)
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	fat_geometry_t geometry;
+	fsimg_status_t status;
 
 	if (length < 512)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "volume is smaller than a boot record"));
-	return (fsimg_fat_geometry_decode(prefix, volume_bytes, &geometry, error));
+	status = fsimg_fat_geometry_decode(prefix, volume_bytes, &geometry, error);
+	if (status == FSIMG_OK)
+		*variant = fsimg_fat_variant(geometry.variant);
+	return (status);
 }

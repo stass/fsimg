@@ -11,7 +11,7 @@
 #define EXFAT_SIGNATURE_BYTES	64
 
 static fsimg_status_t exfat_probe(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    const fsimg_format_variant_t **, fsimg_error_t *);
 
 static const fsimg_format_variant_t exfat_variants[] = {
 	{
@@ -53,9 +53,11 @@ const fsimg_format_t fsimg_exfat_format = {
  */
 static fsimg_status_t
 exfat_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    fsimg_error_t *error)
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	static const unsigned char legacy_zero[EXFAT_SIGNATURE_BYTES - 11] = { 0 };
+
+	*variant = &exfat_variants[0];
 
 	if (length < EXFAT_SIGNATURE_BYTES ||
 	    bcmp(prefix, "\xeb\x76\x90" "EXFAT   ", 11) != 0 ||

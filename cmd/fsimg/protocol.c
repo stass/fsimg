@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "internal.h"
+#include "layer.h"
 #include "protocol.h"
 
 static void encode_time(unsigned char *, const fsimg_timestamp_t *, bool);
@@ -60,7 +61,7 @@ fsimg_frame_header(unsigned char *header, fsimg_frame_type_t type,
     uint32_t length, fsimg_error_t *error)
 {
 	if (length > FSIMG_FRAME_BYTES || type < FSIMG_FRAME_JOB ||
-	    type > FSIMG_FRAME_DONE)
+	    type > FSIMG_FRAME_LAST)
 		return (protocol_error(error, "invalid worker frame type or length"));
 	bzero(header, FSIMG_FRAME_HEADER);
 	bcopy("FSIP", header, 4);
@@ -78,7 +79,7 @@ decode_header(fsimg_frame_decoder_t *decoder, fsimg_error_t *error)
 	length = fsimg_wire_get64(decoder->header + 8);
 	if (bcmp(decoder->header, "FSIP", 4) != 0 || decoder->header[4] != 1 ||
 	    decoder->header[6] != 0 || decoder->header[7] != 0 ||
-	    decoder->header[5] < FSIMG_FRAME_JOB || decoder->header[5] > FSIMG_FRAME_DONE ||
+	    decoder->header[5] < FSIMG_FRAME_JOB || decoder->header[5] > FSIMG_FRAME_LAST ||
 	    length > FSIMG_FRAME_BYTES)
 		return (protocol_error(error, "malformed worker frame header"));
 	decoder->frame.type = (fsimg_frame_type_t)decoder->header[5];
@@ -252,7 +253,7 @@ fsimg_wire_error_decode(const unsigned char *raw, uint32_t length,
 	flags = fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_FLAGS);
 	if (code < (uint64_t)(int64_t)FSIMG_EDURABILITY ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OS_ERROR) > INT32_MAX ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OPERATION) > FSIMG_OP_EXTRACT ||
+	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OPERATION) > FSIMG_OP_IMAGE ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_RESOURCE) > FSIMG_RESOURCE_PATH ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OUTPUT) > FSIMG_OUTPUT_UNCERTAIN ||
 	    flags > 7 ||
@@ -357,6 +358,29 @@ fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 	    strnlen(info->label, sizeof(info->label) - 1));
 	if ((info->valid & FSIMG_VOLUME_UUID) != 0)
 		bcopy(info->uuid, raw + FSIMG_WIRE_INFO_UUID, sizeof(info->uuid));
+}
+
+/* Only a used slot crosses the boundary, so the record has no used flag. */
+void
+fsimg_wire_partition_encode(unsigned char *raw, const fsimg_partition_info_t *info)
+{
+	bzero(raw, FSIMG_WIRE_PARTITION_BYTES);
+	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_INDEX, info->index);
+	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_FLAGS,
+	    info->active ? FSIMG_WIRE_PARTITION_ACTIVE : 0);
+	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_OFFSET, info->offset);
+	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_LENGTH, info->length);
+	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE, info->mbr_type);
+	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_CLAIM, info->claim);
+	bcopy(info->type, raw + FSIMG_WIRE_PARTITION_TYPE,
+	    strnlen(info->type, sizeof(info->type) - 1));
+	bcopy(info->format, raw + FSIMG_WIRE_PARTITION_FORMAT,
+	    strnlen(info->format, sizeof(info->format) - 1));
+	bcopy(info->type_guid, raw + FSIMG_WIRE_PARTITION_TYPE_GUID,
+	    sizeof(info->type_guid));
+	bcopy(info->guid, raw + FSIMG_WIRE_PARTITION_GUID, sizeof(info->guid));
+	bcopy(info->name, raw + FSIMG_WIRE_PARTITION_NAME,
+	    strnlen(info->name, FSIMG_WIRE_PARTITION_NAME_BYTES - 1));
 }
 
 static bool
@@ -469,6 +493,86 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	    memchr(raw + FSIMG_WIRE_INFO_PROFILE, '\0', 40) != NULL &&
 	    memchr(raw + FSIMG_WIRE_INFO_LABEL, '\0',
 	    FSIMG_WIRE_INFO_LABEL_BYTES) != NULL);
+}
+
+/*
+ * The disk is the input file the parent opened, so its size must match
+ * exactly. Without a scheme every table field is zero; with one, the
+ * sector size is GPT's or MBR's and the selection lies in the table.
+ */
+bool
+fsimg_wire_image_frame_valid(const fsimg_frame_t *frame, uint64_t disk_bytes)
+{
+	const unsigned char *raw = frame->payload;
+	const fsimg_layer_t *layer;
+	uint64_t flags, sector, slots, selected, checked;
+	bool scheme;
+
+	if (frame->length != FSIMG_WIRE_IMAGE_BYTES)
+		return (false);
+	flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
+	sector = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SECTOR);
+	slots = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SLOTS);
+	selected = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
+	checked = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHECKED);
+	if (memchr(raw + FSIMG_WIRE_IMAGE_STACK, '\0', FSIMG_WIRE_IMAGE_STACK_BYTES) == NULL ||
+	    memchr(raw + FSIMG_WIRE_IMAGE_SCHEME, '\0', 16) == NULL ||
+	    memchr(raw + FSIMG_WIRE_IMAGE_REASON, '\0',
+	    FSIMG_WIRE_IMAGE_REASON_BYTES) == NULL)
+		return (false);
+	if ((flags & ~(uint64_t)(FSIMG_WIRE_IMAGE_UNSELECTED |
+	    FSIMG_WIRE_IMAGE_VERIFIED)) != 0 ||
+	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) != disk_bytes ||
+	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID) > UINT32_MAX)
+		return (false);
+	/* A reason exactly when no volume was selected, and then no slot. */
+	if ((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 ?
+	    raw[FSIMG_WIRE_IMAGE_REASON] == '\0' || selected != 0 :
+	    raw[FSIMG_WIRE_IMAGE_REASON] != '\0')
+		return (false);
+	scheme = raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0';
+	if (!scheme)
+		return (sector == 0 && slots == 0 && selected == 0 && checked == 0 &&
+		    (flags & FSIMG_WIRE_IMAGE_UNSELECTED) == 0 &&
+		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID) == 0 &&
+		    bytes_zero(raw + FSIMG_WIRE_IMAGE_DISK_GUID, 16));
+	layer = fsimg_layer_find((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME);
+	/* MBR sectors are 512 bytes; GPT's are 512 or 4096. */
+	return (layer != NULL && layer->scheme != NULL && (sector == 512 ||
+	    (sector == 4096 && strcmp(layer->name, "gpt") == 0)) && slots != 0 &&
+	    slots <= FSIMG_GPT_MAX_ENTRIES && selected <= slots && checked <= slots);
+}
+
+/* A used slot of a table with slots entries, lying within the disk. */
+bool
+fsimg_wire_partition_frame_valid(const fsimg_frame_t *frame, uint64_t slots,
+    uint64_t disk_bytes)
+{
+	const unsigned char *raw = frame->payload;
+	uint64_t index, offset, length, claim;
+	bool named;
+
+	if (frame->length != FSIMG_WIRE_PARTITION_BYTES)
+		return (false);
+	index = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX);
+	offset = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_OFFSET);
+	length = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_LENGTH);
+	claim = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_CLAIM);
+	if (index == 0 || index > slots || length == 0 || offset > disk_bytes ||
+	    length > disk_bytes - offset)
+		return (false);
+	if (fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_FLAGS) >
+	    FSIMG_WIRE_PARTITION_ACTIVE ||
+	    fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE) > UINT8_MAX ||
+	    claim > FSIMG_CLAIM_AMBIGUOUS)
+		return (false);
+	if (memchr(raw + FSIMG_WIRE_PARTITION_TYPE, '\0', 16) == NULL ||
+	    memchr(raw + FSIMG_WIRE_PARTITION_FORMAT, '\0', 16) == NULL ||
+	    memchr(raw + FSIMG_WIRE_PARTITION_NAME, '\0',
+	    FSIMG_WIRE_PARTITION_NAME_BYTES) == NULL)
+		return (false);
+	named = raw[FSIMG_WIRE_PARTITION_FORMAT] != '\0';
+	return (named == (claim == FSIMG_CLAIM_FORMAT));
 }
 
 bool

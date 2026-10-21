@@ -213,8 +213,9 @@ prepare_scratch(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	return (status);
 }
 
-/* The image of a read mode: a regular file, which the requested volume
- * slice must fit.
+/* The image of a read mode: a regular file, which a volume range given by
+ * --offset and --length must fit. The selected volume, at most the whole
+ * image, bounds what extraction may write unless -l output says otherwise.
  */
 static fsimg_status_t
 open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
@@ -230,16 +231,20 @@ open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 	if (identity.kind != FSIMG_HOST_FILE)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_IO, "input image must be a seekable regular file"));
-	if (request->offset > identity.length)
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-		    FSIMG_OP_IO, "volume slice starts past the input image"));
-	if (request->length == 0)
-		request->length = identity.length - request->offset;
-	if (request->length > identity.length - request->offset)
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-		    FSIMG_OP_IO, "volume slice exceeds the input image"));
+	if (request->selector == FSIMG_SELECT_RANGE) {
+		if (request->offset > identity.length)
+			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_IO, "volume slice starts past the input image"));
+		if (request->length == 0)
+			request->length = identity.length - request->offset;
+		if (request->length > identity.length - request->offset)
+			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_IO, "volume slice exceeds the input image"));
+	}
 	if (request->limits.max_output_bytes == 0)
-		request->limits.max_output_bytes = request->length;
+		request->limits.max_output_bytes =
+		    request->selector == FSIMG_SELECT_RANGE ? request->length :
+		    identity.length;
 	return (FSIMG_OK);
 }
 
@@ -656,7 +661,8 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 /* The request of cW's verification worker: the staged image, opened
  * read-only and no-follow through the staging descriptor, checked with the
  * ordinary verification under the image-reading profile, with the
- * creation's filesystem forced and its limits and scratch.
+ * creation's filesystem forced on a bare volume and its limits and
+ * scratch.
  */
 fsimg_status_t
 fsimg_cli_verification_request(const fsimg_cli_options_t *options,
@@ -674,6 +680,12 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	verify->root_count = 0;
 	verify->output_fd = -1;
 	verify->offset = verify->length = 0;
+	verify->selector = FSIMG_SELECT_AUTOMATIC;
+	verify->gpt_sector = 0;
+	for (unsigned i = FSIMG_LAYER_SCHEME; i < FSIMG_STACK_SLOTS; i++) {
+		if (verify->stack.slots[i].state == FSIMG_SLOT_UNSPECIFIED)
+			verify->stack.slots[i].state = FSIMG_SLOT_EMPTY;
+	}
 	verify->input_fd = fsimg_host_source_open(create->output_fd, "image", false);
 	if (verify->input_fd == -1)
 		return (host_error(error, "cannot open the staged image for verification"));

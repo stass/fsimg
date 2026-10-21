@@ -72,7 +72,7 @@ Verify an image; as
 .Cm cW ,
 verify the staged image before it is published.
 .It Cm i , Fl Fl info
-Report the stack and the volume information.
+Report the stack, the partition table and the volume information.
 .It Fl Fl formats
 Report compiled and usable capabilities; takes no image.
 .El
@@ -142,8 +142,12 @@ The image's layers, inner to outer, separated by
 the filesystem name is fat12, fat16, fat32, exfat, qnx6 or qnx4.
 Required for
 .Cm c .
-On reading it forces the named decoder while retaining every validation; the
-default requires unambiguous detection.
+The slots are the filesystem, the partition scheme (gpt or mbr) and the
+container (dmg, vhd or simg), in that order, so
+.Ql fat32/gpt
+is a FAT32 volume in a GPT partition.
+On reading a named slot forces that layer while retaining every validation;
+an unnamed slot is detected, and detection must be unambiguous.
 .Ql -
 marks a slot empty, so
 .Ql fat32/-/-
@@ -169,7 +173,11 @@ Aggregate library memory budget; default 256 MiB, minimum 16 MiB.
 A typed filesystem setting; repeatable, each key at most once.
 On reading, only
 .Ar oem=cp437 ,
-the FAT short-name codepage, is accepted.
+the FAT short-name codepage, and
+.Ar gpt:sector=512|4096 ,
+which forces the GPT sector size and requires gpt in
+.Fl F ,
+are accepted.
 Creation settings are described under
 .Sx CREATION .
 A key qualified by a layer name, such as
@@ -231,13 +239,40 @@ and
 .Cm i
 also accept:
 .Bl -tag -width Ds
+.It Fl Fl partition Ns = Ns Ar N | Ns Cm name= Ns Ar text | Ns Cm type= Ns Ar name
+The partition holding the volume: slot
+.Ar N ,
+counted from 1; the one GPT partition whose name is
+.Ar text ,
+compared exactly; or the one partition of a type, given as a type name
+(basic, esp, fat12, fat16, fat32, exfat, linux, apfs, hfs, qnx6, qnx4), a GPT
+type GUID or an MBR type byte such as 0x0c.
+On GPT, basic, fat12, fat16, fat32 and exfat all name the basic-data type, so
+each selects any basic-data partition.
+Without it the volume is the one partition holding a recognized filesystem;
+a disk without a partition table is itself the volume.
 .It Fl Fl offset Ns = Ns Ar bytes
 Volume offset within the image; default zero.
 .It Fl Fl length Ns = Ns Ar bytes
 Positive volume length; default the rest of the image.
 .El
 .Pp
-A volume slice is selected explicitly by byte range; no partition is guessed.
+.Fl Fl offset
+and
+.Fl Fl length
+select a volume slice by byte range and conflict with
+.Fl Fl partition .
+A range never reads the partition table, so a damaged table does not block
+it.
+Both GPT copies must be intact and agree, MBR entries must lie within the disk
+without overlapping, and a table that fails a check fails the command rather
+than falling back to the disk as a bare volume.
+A disk whose first sectors are both a valid partition table and a filesystem
+is refused as ambiguous; force the scheme slot to choose:
+.Ql gpt
+names the table and
+.Ql fat12/-
+forces it empty.
 QNX6 locates its second superblock in the last whole 4096-byte unit of the
 slice, so
 .Fl Fl length
@@ -265,8 +300,14 @@ entry names the root record does not open, for the same reason.
 .Cm i
 reports the stack in
 .Fl F
-syntax and its compression, then header validation, geometry, label, volume
-UUID when the format has one, time basis and known capabilities.
+syntax and its compression; with a partition scheme, the disk and each used
+partition's slot, type, size, offset, filesystem and name, marking the
+selected one; then header validation, geometry, label, volume UUID when the
+format has one, time basis and known capabilities.
+When no single partition holds a filesystem,
+.Cm i
+still reports the table and states that no volume is selected; every other
+mode fails.
 Unknown counts remain unknown.
 .Pp
 .Cm t
@@ -560,8 +601,12 @@ The summary's command field names the mode:
 .Ql i
 or
 .Ql formats .
-Information records carry the stack and a null compression for a bare,
-uncompressed volume.
+A stack record precedes the information record: it carries the stack, a null
+compression, the scheme, the disk size and identifier and the selected
+partition, and states whether a volume was selected.
+Partition records, one per used slot, follow it for
+.Cm i .
+Information records carry the stack and a null compression.
 .Cm cW
 writes a verify record for its staged image.
 Large integers are decimal strings; bounded geometry, flags, nanoseconds and
@@ -593,12 +638,14 @@ compression
 .Pq Fl z , No and Fl a No with Cm c ,
 minimization
 .Pq Fl M No with Cm c ,
-partition selection
-.Pq Fl Fl partition No when reading ,
 an image on standard input or output
 .Pq Fl f Fl ,
-a stack naming a partition scheme or a container, such as
-.Ql fat32/gpt ,
+creating a partition scheme, such as
+.Fl F Ar fat32/gpt
+with
+.Cm c ,
+a stack naming a container, such as
+.Ql fat32/dmg ,
 the reserved filesystem names apfs and hfs,
 and more than one member for
 .Cm x
@@ -617,6 +664,9 @@ fsimg xf data.img -S required -C /tmp /documents
 fsimg xEf data.img -C ./empty-dir
 fsimg Wdf data.img
 fsimg if disk.img --offset=1M --length=1G
+fsimg tf disk.img --partition=2 /EFI
+fsimg xf disk.img --partition=name=EFI
+fsimg Wf disk.img -F fat32/gpt -o gpt:sector=4096
 fsimg --formats --json
 .Ed
 .Sh SEE ALSO

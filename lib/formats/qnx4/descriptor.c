@@ -9,7 +9,7 @@
 #include "write-qnx4.h"
 
 static fsimg_status_t qnx4_probe(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    const fsimg_format_variant_t **, fsimg_error_t *);
 
 /* The native profile, the only variant: 512-byte blocks, names of up to
  * 505 bytes and a 48-byte label.
@@ -62,8 +62,9 @@ const fsimg_format_t fsimg_qnx4_format = {
  */
 static fsimg_status_t
 qnx4_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    fsimg_error_t *error)
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
+	*variant = &qnx4_variants[0];
 	if (length < QNX4_PROBE_BYTES)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no QNX4 root block"));
