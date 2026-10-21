@@ -250,8 +250,10 @@ Defaults are 64 GiB scratch, 10,000,000 entries, depth 256, 64 KiB image paths
 including separators and NUL, and 128 owned descriptors.
 The fds limit also caps the number of create operands: the worker holds one
 open root per operand, two for a manifest with a content directory,
-besides its staging directory,
-scratch directory and two scanning descriptors.
+besides its scratch directory, the staging directory of an image written
+to a file, the raw file of a container, compressed image or stream, and
+two scanning descriptors; a source tree holds one more descriptor per
+directory level while it is scanned or copied.
 Logical extraction output defaults to the selected volume slice length,
 including holes.
 Work and time have no hidden short default limit.

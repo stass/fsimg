@@ -224,12 +224,14 @@ const char *fsimg_job_format(const fsimg_worker_request_t *);
  * What a create or plan job writes around its disk: its compression,
  * "" for none and for every other job; whether its output is an
  * encoding of the disk, under a container or a compression, rather than
- * the disk; and whether a create job needs a raw intermediate, for an
- * encoded output or a stream. The coordinator and the worker decide each
- * from these alone.
+ * the disk; whether a create job needs a staging directory, as an image
+ * written to a file and published does; and whether it needs a raw
+ * intermediate, for an encoded output or a stream. The coordinator and the
+ * worker decide each from these alone.
  */
 const char *fsimg_job_compression(const fsimg_worker_request_t *);
 bool fsimg_job_encoded(const fsimg_worker_request_t *);
+bool fsimg_job_needs_staging(const fsimg_worker_request_t *);
 bool fsimg_job_needs_raw(const fsimg_worker_request_t *);
 uint32_t fsimg_job_path_count(const fsimg_worker_request_t *);
 const char *fsimg_job_path(const fsimg_worker_request_t *, uint32_t);

@@ -1655,6 +1655,25 @@ def test_compressed_create(executable, root):
     assert stack["compression"] == "gzip" and planned["codec"].startswith("zlib ")
     assert int(planned["output_bytes"]) > int(planned["volume_bytes"])
 
+    # An encoded image's worker holds the raw intermediate beside its
+    # staging directory, so the coordinator counts both against fds and
+    # refuses, naming no source path, a limit the worker would exceed. The
+    # operand is one directory of files, which the count covers; a deeper
+    # tree holds one more descriptor per level while it is scanned or copied.
+    for stack, name in [("fat12", "fds.img.gz"), ("fat12/gpt/dmg", "fds.dmg")]:
+        compress = ["-z"] if name.endswith(".gz") else []
+        error = failed(invoke(executable, root, [
+            "cf", name, *compress, "--json", "-F", stack, "-l", "fds=5",
+            "-C", "source", "nested"], expected=1))
+        assert error["path"] == "" and error["resource"] == "fds", error
+        assert (error["limit"], error["observed"]) == ("5", "6"), error
+        invoke(executable, root, ["cf", name, *compress, "-F", stack, "-l", "fds=6",
+                                  "-C", "source", "nested"])
+        (root / name).unlink()
+    # Planning writes no raw intermediate and stages nothing.
+    invoke(executable, root, ["c", "-n", "-z", "-F", "fat12/gpt/dmg", "-l", "fds=4",
+                              "-C", "source", "nested"])
+
 
 def main():
     executable = Path(sys.argv[1]).resolve()

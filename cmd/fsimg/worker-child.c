@@ -181,7 +181,7 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 	expected = fsimg_job_has_roots(kind) ? FSIMG_JOB_CAP_ROOTS : FSIMG_JOB_CAP_INPUT;
 	/* Scratch is optional for every job, and a spool for a read job. */
 	optional = FSIMG_JOB_CAP_SCRATCH | (reading ? FSIMG_JOB_CAP_SPOOL : 0);
-	if ((kind == FSIMG_JOB_CREATE && !stream) || kind == FSIMG_JOB_EXTRACT)
+	if (fsimg_job_needs_staging(&child->request) || kind == FSIMG_JOB_EXTRACT)
 		expected |= FSIMG_JOB_CAP_OUTPUT;
 	if (fsimg_job_needs_raw(&child->request))
 		expected |= FSIMG_JOB_CAP_RAW;

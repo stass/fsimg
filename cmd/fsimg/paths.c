@@ -33,6 +33,7 @@ static fsimg_status_t open_input(fsimg_cli_options_t *, fsimg_error_t *);
 static fsimg_status_t open_contents(int, const fsimg_cli_operand_t *, int,
     int *, fsimg_error_t *);
 static unsigned operand_roots(const fsimg_cli_operand_t *);
+static uint64_t worker_descriptors(const fsimg_worker_request_t *, unsigned);
 static fsimg_status_t hold_descriptor(int, int, const char *, const char *, int *,
     fsimg_error_t *);
 static fsimg_status_t open_operand(int, const fsimg_cli_operand_t *, int,
@@ -393,6 +394,28 @@ operand_roots(const fsimg_cli_operand_t *operand)
 	return (operand->manifest && operand->directory != NULL ? 2 : 1);
 }
 
+/*
+ * The descriptors a create or plan job's worker needs for a flat source
+ * tree: its root descriptors, scratch unless it is disabled, the staging
+ * directory and raw intermediate when the job needs them, and two working
+ * ones. Scanning a flat root uses those two for a directory and the entry
+ * read from it; copying, the staged image and a source file. A deeper tree
+ * holds one more per directory level while it is scanned, and one more
+ * while a file below the top level is copied, which the worker refuses
+ * against the same limit.
+ */
+static uint64_t
+worker_descriptors(const fsimg_worker_request_t *request, unsigned roots)
+{
+	bool scratch, staging, raw;
+
+	scratch = request->scratch_fd != -1;
+	staging = fsimg_job_needs_staging(request);
+	raw = fsimg_job_needs_raw(request);
+	return ((uint64_t)roots + (scratch ? 1 : 0) + (staging ? 1 : 0) +
+	    (raw ? 1 : 0) + 2);
+}
+
 /* Move fd to the lowest descriptor at or above first_free, close-on-exec,
  * and close the original on every outcome; a failure reports message and
  * the object's name.
@@ -422,12 +445,9 @@ hold_descriptor(int fd, int first_free, const char *message, const char *name,
  * descriptor for the manifest file, path FSIMG_JOB_MANIFEST, followed,
  * when a -C is in force, by one for its content directory, path
  * FSIMG_JOB_CONTENTS; the worker adopts them as one source root. The
- * worker holds one descriptor per root descriptor besides its own: the
- * staging directory of a create job, scratch unless
- * it is disabled, and two while scanning, a directory and the entry read
- * from it; the staged image is opened after scanning, in one of those two.
- * The operands must leave room for those within the fds limit, so an
- * oversized command line fails here, before the worker starts.
+ * operands must leave the worker room within the fds limit
+ * (worker_descriptors), so an oversized command line fails here, before
+ * the worker starts.
  */
 static fsimg_status_t
 open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
@@ -444,8 +464,7 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	count = 0;
 	for (unsigned i = 0; i < options->operand_count; i++)
 		count += operand_roots(&options->operands[i]);
-	needed = (uint64_t)count + 2 + (request->kind == FSIMG_JOB_CREATE ? 1 : 0) +
-	    (request->scratch_fd != -1 ? 1 : 0);
+	needed = worker_descriptors(request, count);
 	if (needed > request->limits.max_open_files)
 		return (fsimg_limit_error(error, FSIMG_RESOURCE_DESCRIPTORS,
 		    request->limits.max_open_files, needed));
@@ -852,8 +871,7 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		status = open_roots(options, paths, error);
 		if (status == FSIMG_OK)
 			status = generate_identifiers(options, error);
-		if (status == FSIMG_OK && request->kind == FSIMG_JOB_CREATE &&
-		    (request->flags & FSIMG_JOB_STDOUT) == 0)
+		if (status == FSIMG_OK && fsimg_job_needs_staging(request))
 			status = prepare_staging(options, paths, error);
 		if (status == FSIMG_OK)
 			status = prepare_raw(options, error);

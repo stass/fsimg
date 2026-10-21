@@ -341,6 +341,13 @@ fsimg_job_encoded(const fsimg_worker_request_t *request)
 }
 
 bool
+fsimg_job_needs_staging(const fsimg_worker_request_t *request)
+{
+	return (request->kind == FSIMG_JOB_CREATE &&
+	    (request->flags & FSIMG_JOB_STDOUT) == 0);
+}
+
+bool
 fsimg_job_needs_raw(const fsimg_worker_request_t *request)
 {
 	return (request->kind == FSIMG_JOB_CREATE &&

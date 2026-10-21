@@ -471,7 +471,7 @@ image_length_expected(const worker_supervisor_t *state, uint64_t length)
 {
 	const fsimg_worker_request_t *request = state->request;
 
-	if (request->kind != FSIMG_JOB_CREATE || streaming(request))
+	if (!fsimg_job_needs_staging(request))
 		return (length == 0);
 	return (output_length_expected(state, length));
 }

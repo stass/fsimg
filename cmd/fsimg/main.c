@@ -174,8 +174,7 @@ main(int argc, char **argv)
 		if (status == FSIMG_OK && options.verify_staged)
 			status = verify_staged(executable, &options, &paths, &display, &error);
 		/* A stream has no publication; its bytes are already delivered. */
-		if (status == FSIMG_OK && options.request.kind == FSIMG_JOB_CREATE &&
-		    (options.request.flags & FSIMG_JOB_STDOUT) == 0)
+		if (status == FSIMG_OK && fsimg_job_needs_staging(&options.request))
 			status = fsimg_cli_publish(&options, &paths, &result, &interrupted, &error);
 		status = fsimg_cli_cleanup(&options, &paths, status, &error);
 	}

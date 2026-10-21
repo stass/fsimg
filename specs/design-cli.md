@@ -98,11 +98,14 @@ holds a stream or compressed input, defined in the
 number of create operands, since the worker holds one open root per operand,
 two for a manifest operand with a content directory (the manifest and
 the directory),
-besides its own staging directory, scratch directory and two scanning
-descriptors (a directory and the entry read from it); a command line
+besides its own scratch directory, the staging directory of an image
+written to a file, the [raw intermediate](design-layers.md#handed-over-files)
+of a container, compressed image or stream, and two scanning descriptors
+(a directory and the entry read from it); a command line
 leaving no room for those fails before the worker starts, naming the
-descriptor limit, and a deep source tree can still reach the limit while
-scanning. Work counts primitive metadata steps, adapter calls
+descriptor limit, and a deep source tree, which holds one more descriptor
+per directory level, can still reach the limit while it is scanned or
+copied. Work counts primitive metadata steps, adapter calls
 and every byte decompressed from a container chunk or a gzip member, not
 just payload bytes, so `work` and `seconds` bound decompression time.
 The deadline is also supervised by the coordinator. Unset work and time
