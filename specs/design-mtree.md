@@ -46,8 +46,16 @@ create operand and nothing it could resolve a pathname against. The safe
 extractor (`lib/extract/extract.c`) creates files and directories with private
 modes, restores no owner, mode or change time, and creates no links or
 FIFOs, so an extracted QNX6 tree loses exactly the fields a manifest can
-carry. The tree has no manifest parser; its SHA-256 implementation is the
-one [Digests](#digests) describes, `lib/core/sha256.c`, which only the tests
+carry. The manifest parser, `lib/source/mtree.c` (`fsimg_mtree_parse()`),
+implements the [grammar](#grammar) and the parser's bounds: it reads a
+manifest through a read callback, one bounded logical line at a time, and
+hands each entry line to an entry callback as a decoded, validated entry
+(image path, kind, size, owner, mode, time, link target, `contents=` path,
+digest, content kind, seed and holes). It opens nothing, has no catalog or
+writer, and only its tests (`test/mtree.c`) and `fuzz/mtree.c` call it;
+`fsimg_writer_add_manifest()`, generated content, host contents and the
+digest checks do not exist yet. The SHA-256 implementation is the one
+[Digests](#digests) describes, `lib/core/sha256.c`, which only the tests
 call.
 
 ## A manifest is a source root
@@ -178,21 +186,35 @@ them.
 ### Bytes, lines and words
 
 The manifest is a byte sequence. A NUL byte anywhere refuses it. A physical
-line ends at LF. A backslash as the last byte before an LF joins the next
+line ends at LF. An unescaped backslash ending a physical line, the last
+of an odd run of backslashes since `\\` is an escaped one, joins the next
 physical line: the backslash and LF are removed, so what follows is
 separated by the whitespace the continuation line starts with. This is how
-`mtree -c` wraps long entries. A logical line is bounded as [Security and
-bounds](#security-and-bounds) states.
+`mtree -c` wraps long entries. A comment never continues: `mtree -c`
+writes a directory's raw path into the comment before it, so the comment
+before a directory named `d\` ends in a backslash, and joining would
+swallow the directory's own line. A logical line is bounded as
+[Security and bounds](#security-and-bounds) states. The manifest ends with
+an LF: input that stops inside a line, including after a continuation, is
+refused, because a manifest cut short inside a line could otherwise lose
+keywords and still parse.
 
 Leading spaces and tabs are ignored. An empty line is ignored. A line whose
 first word begins with `#` is a comment, so the `#mtree` and `#mtree v2.0`
-signatures are comments and are not required. Elsewhere `#` is refused: a
-`#` in a name is encoded `\043`, as `mtree -c` and bsdtar write it.
+signatures are comments and are not required. The joined text decides: a
+continuation backslash at the start of a line, removed by the join, does
+not hide a `#` after it, and that comment then ends at its own LF, so
+there is one answer to whether a line is a comment. A comment may hold any byte
+but NUL, since `mtree -c` writes raw directory paths into its comments.
+Elsewhere `#` is refused: a `#` in a name is encoded `\043`, as `mtree -c`
+and bsdtar write it.
 
 Words are separated by spaces and tabs and consist of bytes `0x21` through
 `0x7E`; any other byte in a word refuses the line. There is no quoting:
 makefs's quoted words and `$VAR` substitution are not mtree(5) and are not
-read. A line has a first word and up to 63 keyword words.
+read. A line has a first word and up to 63 keyword words; the bound is
+checked before the words are read, and no valid line reaches it, since
+fewer keywords exist and none may repeat.
 
 ### Escapes
 
@@ -210,9 +232,13 @@ The first word decides the line:
 
 * `/set key=value ...` sets defaults for the keywords it names; `/unset key
   ...` removes them, and `/unset all` removes every default. Any accepted
-  keyword can be set. Any other word beginning with `/` is refused.
-* `..` moves the current directory to its parent. It takes no keywords and
-  is refused at the image root.
+  keyword can be set. A name on `/unset` follows the keyword classes as on
+  any line, and a repeat, `all` included, is refused. Any other word
+  beginning with `/` is refused.
+* `..` moves the current directory to its parent. It takes no keywords.
+  The relative `.` entry at the image root opens the root as the current
+  directory, so the `..` that `mtree -c` writes after the root's children
+  closes it; a `..` with no open directory is refused.
 * A word whose decoded bytes contain no `/` is a **relative entry**: a name
   in the current directory. `.` names the current directory itself. A
   relative entry of `type=dir` becomes the current directory for the lines
@@ -223,7 +249,13 @@ The first word decides the line:
   entry never changes the current directory.
 
 An entry's effective keywords are the current defaults overridden by the
-line's own. A keyword repeated on one line is refused. Both forms produce
+line's own. A keyword that does not apply to the entry's kind and content,
+by the "refused" rules of the value table below, is refused when the line
+gives it and passed over when it is only a default, so one `/set` serves
+entries of every kind. A keyword repeated on one line, an alias such as
+`sha256` beside `sha256digest` included, is refused. The syntax words
+`/set`, `/unset` and `..` are recognized before decoding; a decoded `.` is
+the current directory and a decoded `..` is an invalid name. Both forms produce
 one absolute image path, which collection validates as it validates every
 path: UTF-8 scalar values only, no empty or `.` or `..` components, within
 the path and depth limits. A manifest neither normalizes nor folds names,
@@ -267,16 +299,22 @@ Values of the carried keywords:
 | Keyword | Value | Meaning |
 | --- | --- | --- |
 | `type` | `dir`, `file`, `link`, `fifo` | The entry kind; required for every entry, usually through `/set` |
-| `uid`, `gid` | Decimal, at most `4294967295` | `FSIMG_META_OWNER`, valid and optional |
+| `uid`, `gid` | Decimal, at most `4294967295` | `FSIMG_META_OWNER`, valid and optional; one catalog field, so both or neither |
 | `mode` | Octal digits with or without a leading `0`, at most `07777`; bsdtar writes `644`, `mtree -c` writes `0644` | `FSIMG_META_MODE`, valid and optional |
 | `time` | `seconds[.fraction]`: seconds a signed decimal within `int64_t`; the fraction one to nine digits, right-padded to nanoseconds | `FSIMG_META_MODIFIED`, UTC, precision 1 ns, valid and optional |
-| `size` | Decimal, at most `18446744073709551615` | A file's logical length or a link's target length; checked against the bytes as [Content](#content) states |
+| `size` | Decimal, at most `18446744073709551615` | A file's logical length or a link's target length; checked against the bytes as [Content](#content) states; required for generated content, which has no host file to supply a length; a `/set` default applies to files, while a link checks only a size its own line gives, as `mtree -c` writes one |
 | `link` | vis-encoded target, 1 through 1023 bytes, no NUL | Required with `type=link`, refused with any other type |
-| `contents` | vis-encoded host path | A file's bytes; refused with any other type |
+| `contents` | vis-encoded host path | A file's bytes; refused with any other type and with generated content |
 | `sha256digest`, `sha256` | 64 hexadecimal digits, either case | The SHA-256 of the file's logical bytes; refused with any other type |
 | `fsimg.content` | `host`, `zero`, `seeded`, `positional`; default `host` | How a file's bytes are obtained; refused with any other type |
 | `fsimg.seed` | Decimal, at most `18446744073709551615` | The generator parameter; required by `seeded` and `positional`, refused otherwise |
 | `fsimg.holes` | `offset:length[,offset:length]...`, decimal, at most 64 ranges | Zero runs inside generated content; refused with `host` and `zero` |
+
+A host-object keyword is well-formed when `nlink` and `inode` are decimal
+within 64 bits, `device` and `resdevice` are one to four comma-separated
+fields of letters and digits (a number, or `native,1,4` as bsdtar writes),
+and `tags`, `uname` and `gname` are any plain value. Every value is
+nonempty.
 
 Access, change and creation times, attributes and precision have no mtree
 keyword and are absent; the owner decided that they are counted losses of
@@ -441,13 +479,13 @@ host source before any sink mutation, as for scanned sources.
 
 | Bound | Value | Failure |
 | --- | --- | --- |
-| Logical line | `4 * path limit + 4 * 1023 + 4096` bytes, charged to the memory budget: an encoded path, an encoded link and the keywords | `FSIMG_ELIMIT`, resource `PATH` |
+| Logical line | `8 * path limit + 4 * 1023 + 4096` bytes, charged to the memory budget: two encoded paths (the name and a `contents=` path), an encoded link and the other keywords | `FSIMG_ELIMIT`, resource `PATH` |
 | Words per line | 64 | `FSIMG_EINVAL` |
 | Keyword name | 32 bytes | `FSIMG_EINVAL` |
 | Numeric value | 20 decimal or 22 octal digits, checked accumulation | `FSIMG_ERANGE` |
 | Entries, depth, path | The context's limits, through collection | `FSIMG_ELIMIT` naming the resource |
 | Holes | 64 ranges per entry | `FSIMG_EINVAL` |
-| Manifest length | Not bounded separately: lines are streamed and each is work-charged | `FSIMG_ELIMIT`, resource `WORK` |
+| Manifest length | Not bounded separately: lines are streamed and each physical line, one that only continues included, is one unit of work, which also polls cancellation | `FSIMG_ELIMIT`, resource `WORK` |
 
 All offsets, sizes, hole bounds and block indices use checked arithmetic.
 The parser retains no per-entry heap object. `fuzz/mtree.c` feeds arbitrary
@@ -460,7 +498,7 @@ drive their parsers; `build-aux/fuzz.sh` runs it with the others.
 
 | Condition | Status | Where |
 | --- | --- | --- |
-| NUL, a byte outside the word range, a bad escape, a word beginning with `/` other than `/set` and `/unset`, keywords on `..`, `..` at the root, a repeated keyword, an unknown keyword, a bare keyword, a malformed value, `link` or `contents` or a digest on the wrong type, a `type=link` without `link`, `fsimg.seed` or `fsimg.holes` with the wrong content, a `size` that disagrees with the host file, a generated digest mismatch, a `contents=` path that is absolute or contains `..` or names a missing file | `FSIMG_EINVAL`, operation `SOURCE`; `offset` is the byte offset of the line, `path` the entry's image path when one exists | Input |
+| NUL, a byte outside the word range, a bad escape, a word beginning with `/` other than `/set` and `/unset`, keywords on `..`, `..` with no open directory, input ending inside a line, a repeated keyword, an unknown keyword, a bare keyword, a malformed value, `link` or `contents` or a digest on the wrong type, an entry without `type`, a `type=link` without `link`, `uid` without `gid` or the reverse, generated content without `size`, `fsimg.seed` or `fsimg.holes` with the wrong content, a `size` that disagrees with a link target or the host file, a generated digest mismatch, a `contents=` path that is absolute or contains `..` or names a missing file | `FSIMG_EINVAL`, operation `SOURCE`; `offset` is the byte offset of the line, the message begins with its line number, `path` the entry's image path when one exists | Input |
 | A keyword of the unsupported class, a symbolic link on a `contents=` path, a directory or special file at its end | `FSIMG_EUNSUPPORTED` | Input |
 | A value beyond its numeric range | `FSIMG_ERANGE` | Input |
 | A line, entry count, depth or path beyond its limit | `FSIMG_ELIMIT` naming the resource | Input |
@@ -470,9 +508,12 @@ drive their parsers; `build-aux/fuzz.sh` runs it with the others.
 | A content file changed, replaced or not matching its digest | `FSIMG_ESOURCE_CHANGED` | Emission |
 | `--mtree` name already present, or its publication failed | The output coordinator's existing results | Extraction |
 
-The error record names the line by byte offset and, where an entry exists,
-its path; a diagnostic never quotes the manifest's bytes beyond the bounded
-path excerpt every diagnostic allows.
+The error record names the line by byte offset and line number and, where
+an entry exists, its path; a diagnostic never quotes the manifest's bytes
+beyond the bounded path excerpt every diagnostic allows, except a keyword
+name, which is at most 32 bytes of `0x21` through `0x7E`. An error the
+image-path validation reports keeps that validation's operation, `CATALOG`,
+as it would at collection.
 
 ## Determinism
 

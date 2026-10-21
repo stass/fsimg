@@ -367,8 +367,17 @@ and, up to 16 KiB, as a pipe stream, each into a fresh unlinked spool under
 a 4 MiB limit, so the member header parser, inflate, the trailer checks,
 the trailing-byte rule and the spool reservation see every mutation; its
 seed is a two-member file with FEXTRA, FNAME, FCOMMENT and FHCRC that
-`test-compression --seed-gzip` writes, with a 256 KiB input ceiling. Set `FUZZ_CC` to a Clang with the required runtime; `FUZZ_CXX` defaults
-to its sibling `clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
+`test-compression --seed-gzip` writes, with a 256 KiB input ceiling.
+`fuzz/mtree.c` feeds each input to the mtree(5) manifest parser
+twice, whole and in 13-byte reads, under a 256-byte path limit, depth eight
+and a 100,000-line work limit; both parses must reach the same status after
+the same entries, every accepted entry must satisfy the parser's contract
+(valid image path, link, contents path, holes within size, metadata), and
+the parser must return all its memory. Its seeds, written by `test-mtree
+--seed`, are `mtree -c` and bsdtar manifests of one host tree and a
+generated-content manifest, with a 64 KiB input ceiling. Set `FUZZ_CC` to
+a Clang with the required runtime; `FUZZ_CXX` defaults to its sibling
+`clang++`. Apple Clang lacks the libFuzzer runtime; macOS fuzz
 validation uses Homebrew LLVM:
 
 ```sh
@@ -379,7 +388,8 @@ FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 The exact standalone commands from the top of a separate build directory are:
 
 ```sh
-make test-fat test-exfat test-qnx6 test-qnx4 test-protocol
+make test-fat test-exfat test-qnx6 test-qnx4 test-protocol test-layers \
+    test-containers test-compression test-mtree
 MAKE=make sh ../build-aux/fuzz.sh
 ```
 
@@ -389,7 +399,9 @@ instrumented library through `build-aux/sanitize.sh fuzz` and compiles the
 harnesses into `sanitizer-fuzz/` from the same read-only source copy.
 
 The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `qnx6-fuzz-corpus/`,
-`qnx4-fuzz-corpus/`, `protocol-fuzz-corpus/` and libFuzzer crash artifacts are disposable build
+`qnx4-fuzz-corpus/`, `protocol-fuzz-corpus/`, `image-fuzz-corpus/`,
+`container-fuzz-corpus/`, `plist-fuzz-corpus/`, `gzip-fuzz-corpus/`,
+`mtree-fuzz-corpus/` and libFuzzer crash artifacts are disposable build
 outputs. Existing corpus seeds and mutations are reused; `make clean` keeps the
 corpora, `make distclean` removes them, and neither removes crash artifacts.
 `FUZZ_SECONDS=60 make check-fuzz` selects a finite wall-clock allowance per

@@ -46,6 +46,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/write/writer.h lib/write/writer.c lib/write/catalog.c \
 	lib/write/emit.h lib/write/emit.c \
 	lib/source/source.h lib/source/source.c lib/source/scan.c \
+	lib/source/mtree.h lib/source/mtree.c \
 	lib/io/io.h lib/read/directory.c lib/read/directory.h \
 	lib/read/reader.h lib/read/reader.c \
 	lib/read/selection.c lib/read/selection.h \
@@ -112,7 +113,7 @@ example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
 test_programs = test-core test-io test-meta test-meta-sort test-unicode test-format \
-	test-catalog test-source test-publish test-fat test-fat-write test-emit \
+	test-catalog test-source test-mtree test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
@@ -181,6 +182,8 @@ test_catalog_SOURCES = test/catalog.c test/test.h
 test_catalog_LDADD = libfsimg.la
 test_source_SOURCES = test/source.c test/test.h
 test_source_LDADD = libfsimg.la
+test_mtree_SOURCES = test/mtree.c test/test.h
+test_mtree_LDADD = libfsimg.la
 test_fat_SOURCES = test/fat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_LDADD = libfsimg.la
@@ -247,7 +250,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
 	fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/protocol.c fuzz/image.c \
-	fuzz/container.c fuzz/plist.c fuzz/gzip.c \
+	fuzz/container.c fuzz/plist.c fuzz/gzip.c fuzz/mtree.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
@@ -305,11 +308,11 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx4 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
 check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-protocol test-layers \
-	    test-containers test-compression test/spec.sh
+	    test-containers test-compression test-mtree test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-protocol \
-	    test-layers test-containers test-compression test/spec.sh
+	    test-layers test-containers test-compression test-mtree test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard
@@ -359,7 +362,7 @@ clean-local:
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
 	    protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
-	    plist-fuzz-corpus gzip-fuzz-corpus
+	    plist-fuzz-corpus gzip-fuzz-corpus mtree-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77

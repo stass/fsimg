@@ -421,13 +421,18 @@
 
 * [Medium] **Manifest import and export** (`lib/source/`, `lib/extract/`,
   `lib/core/`, `cmd/fsimg/`, `fuzz/`): implement the
-  [manifest design](specs/design-mtree.md): the mtree(5) parser as a source
-  root (`@file` operand, `fsimg_writer_add_manifest()`), generated zero,
-  seeded and positional content with holes, host digests checked through
-  `lib/core/sha256.h` in the source cursor,
-  `x --mtree=FILE` through the output coordinator, `fuzz/mtree.c`, and the
-  oracle tests against `mtree -c` and `bsdtar --format=mtree`. The spec
-  harness's creation cases then emit manifests instead of writing `source/`.
+  [manifest design](specs/design-mtree.md). The parser
+  (`lib/source/mtree.c`, `test/mtree.c`, `fuzz/mtree.c`) exists; what
+  remains is the source root (`fsimg_writer_add_manifest()` wiring the
+  parser's entries to collection, generated zero, seeded and positional
+  content with holes through the source cursor, the generated-digest check
+  at input, host contents beneath the content directory with digests
+  checked through `lib/core/sha256.h` during the copy), the `@file`
+  operand, `x --mtree=FILE` through the output coordinator, extending
+  `fuzz/mtree.c` to the public call and the generated sources' `read_at()`
+  and `next_range()`, and the round-trip tests against `mtree -c` and
+  `bsdtar --format=mtree`. The spec harness's creation cases then emit
+  manifests instead of writing `source/`.
 
 * [Low] **Opt-in metadata restore** (`lib/extract/`): consider an opt-in that
   applies permission bits without setuid, setgid or sticky through opened

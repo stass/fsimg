@@ -6,8 +6,8 @@
 #
 # Run from the top of a configured build directory holding test-fat,
 # test-exfat, test-qnx6, test-qnx4, test-protocol, test-layers,
-# test-containers, test-compression and test/spec.sh, which write the
-# seeds, with MAKE naming the make program
+# test-containers, test-compression, test-mtree and test/spec.sh, which
+# write the seeds, with MAKE naming the make program
 # that drives that build (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX
 # select the compiler. The harnesses build against the instrumented
 # sanitizer-fuzz/ tree (see sanitize.sh) and keep their corpora here
@@ -206,3 +206,19 @@ if test ! -f "$gzip_corpus/members.seed"; then
     ./test-compression --seed-gzip "$gzip_corpus/members.seed"
 fi
 run_fuzzer "$work_dir/fuzz-gzip" "$gzip_corpus" 262144 10
+
+# The manifest harness parses each input twice, whole and in small reads,
+# and checks every accepted entry against the parser's contract. The seeds
+# are mtree -c and bsdtar manifests of one tree and a generated-content
+# manifest, from the parser's unit test.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/source" \
+    "$source_dir/fuzz/mtree.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-mtree"
+mtree_corpus=mtree-fuzz-corpus
+mkdir -p "$mtree_corpus"
+if test ! -f "$mtree_corpus/mtree-c.seed"; then
+    ./test-mtree --seed "$mtree_corpus"
+fi
+run_fuzzer "$work_dir/fuzz-mtree" "$mtree_corpus" 65536 10
