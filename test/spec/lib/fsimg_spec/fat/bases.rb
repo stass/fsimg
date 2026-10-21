@@ -30,6 +30,11 @@ module FsimgSpec
       # environment.
       POPULATION_SOURCES = [__FILE__, File.join(__dir__, "oracles.rb"), File.expand_path("../tree.rb", __dir__),
                             File.expand_path("../process.rb", __dir__), File.expand_path("../fixtures.rb", __dir__)].freeze
+      # The tools that format a formatter base, populate a base and read a
+      # populated tree back.
+      FORMAT_TOOLS = { FORMATTER => %i[mkfs_fat] }.freeze
+      POPULATION_TOOLS = %i[mmd mcopy].freeze
+      READ_BACK_TOOLS = %i[mdir mtype].freeze
       # The oracles whose disagreement keeps a base from serving a case:
       # the read-only checker and the mtools read-back. fatcat is recorded
       # only.
@@ -48,18 +53,20 @@ module FsimgSpec
         TreeEntry.new(path: "DIR/Nested/blocks.bin", type: "file", size: 5000, seed: 3)
       ].freeze
 
-      # The base set every run starts from. FAT12 and FAT16 are empty; the
-      # FAT32 base holds the standard tree.
+      # The formatter base of each variant, holding the standard tree: an
+      # image that neither fsimg nor the independent builder wrote any byte
+      # of, which the case phase reads as a deterministic case.
       def self.standard = {
-        "fat12" => formatter_base(blocks: 1440, fat_bits: 12, tree: []),
-        "fat16" => formatter_base(blocks: 16_384, fat_bits: 16, tree: []),
-        "fat32" => formatter_base(blocks: 65_536, fat_bits: 32, tree: STANDARD_TREE)
+        "fat12" => formatter_base(blocks: 1440, fat_bits: 12),
+        "fat16" => formatter_base(blocks: 16_384, fat_bits: 16),
+        "fat32" => formatter_base(blocks: 65_536, fat_bits: 32)
       }
 
       # A formatter base of blocks KiB with one sector per cluster. A
       # formatter writes no tree, so mtools populates it.
-      private_class_method def self.formatter_base(blocks:, fat_bits:, tree:) =
-        Base.new(builder: FORMATTER, parameters: { blocks:, fat_bits:, sectors_per_cluster: 1 }, tree:, population: "mtools")
+      private_class_method def self.formatter_base(blocks:, fat_bits:) =
+        Base.new(builder: FORMATTER, parameters: { blocks:, fat_bits:, sectors_per_cluster: 1 }, tree: STANDARD_TREE,
+                 population: "mtools")
 
       # The preflight's reading sample (Preflight): a FAT16 image of the
       # standard tree that the independent builder writes into directory,
@@ -78,15 +85,18 @@ module FsimgSpec
 
       # Builds base into cache unless a run already published it, and
       # answers the Fixture, with the tools shell carries. A formatter base
-      # needs mkfs.fat, and a base mtools populates mmd and mcopy. The image
-      # must stay within the profile's image ceiling. content gives each
-      # file's bytes (FileContent); a test may pass a faulty one, into a
-      # private cache only, since content is no part of the cache key.
-      def self.materialize(base, cache:, shell:, ceilings:, content: FileContent)
+      # needs mkfs.fat, and a base mtools populates mmd and mcopy. A tree
+      # mtools populates goes into a copy of the base's empty volume, which
+      # volume_cache keeps, so a caller may build images into a cache it
+      # empties while their volumes last. The image must stay within the
+      # profile's image ceiling. content gives each file's bytes (FileContent); a test may
+      # pass a faulty one, into a private cache only, since content is no
+      # part of the cache key.
+      def self.materialize(base, cache:, shell:, ceilings:, content: FileContent, volume_cache: cache)
         check_buildable(base, ceilings)
         versions = tool_versions(base, shell.tools)
         key = cache.key(base, versions)
-        image = cache.fetch(key) { build(base, _1, shell:, ceilings:, content:) }
+        image = cache.fetch(key) { build(base, _1, shell:, ceilings:, content:, volume_cache:) }
         model = Model.decode(ImageView.open(image), tree: KnownTree.of(base.tree))
         observations = Oracles.observe(shell, image: File.basename(image), chdir: File.dirname(image), model:)
         problems = geometry_problems(base, image) + observations.slice(*GATING_ORACLES).filter_map do |tool, observation|
@@ -94,8 +104,27 @@ module FsimgSpec
         end
         manifest = manifest(base, image, versions:, command: command(base, shell.tools), observations:)
         cache.publish_manifest(key, manifest)
-        Fixture.new(image:, manifest:, problems:)
+        Fixture.new(image:, manifest:, observations:, problems:)
       end
+
+      # Why this host cannot build base and check its tree, or nil: shell
+      # is nil where no tool may run, or the host lacks a tool that formats
+      # or populates it, the read-back that checks a populated tree, or the
+      # UTF-8 locale mtools needs for Unicode names.
+      def self.unbuildable(base, shell)
+        needed = FORMAT_TOOLS.fetch(base.builder, [])
+        needed += POPULATION_TOOLS + READ_BACK_TOOLS if base.population
+        return nil if needed.empty?
+        return "no tool runs here to build this #{base.builder} base" if shell.nil?
+
+        missing = needed.reject { shell.tools[_1] }
+        return "#{missing.join(" and ")} unavailable" unless missing.empty?
+
+        base.population ? shell.unavailable_reason : nil
+      end
+
+      # The FAT variant base's parameters fix.
+      def self.variant(base) = expected(base).fetch(:variant)
 
       # Renders a builder base into cache unless a run already published
       # it, and answers the image's path. Unlike materialize it runs no
@@ -131,16 +160,20 @@ module FsimgSpec
       private_class_method def self.tool_versions(base, tools) =
         format_versions(base, tools).merge(population_versions(base, tools))
 
-      # The builder's sources, or mkfs.fat's executable.
-      private_class_method def self.format_versions(base, tools) =
-        base.builder == Builder::NAME ? builder_versions : executable_versions(%i[mkfs_fat], tools, base:)
+      # The builder's sources, or mkfs.fat's executable and this file,
+      # which spells its command.
+      private_class_method def self.format_versions(base, tools)
+        return builder_versions if base.builder == Builder::NAME
+
+        executable_versions(FORMAT_TOOLS.fetch(FORMATTER), tools, base:).merge("formatter-command" => Tools.source_version(__FILE__))
+      end
 
       # Nothing for a tree the builder renders; for one mtools populates,
       # mmd, mcopy and the harness code that pipes the tree.
       private_class_method def self.population_versions(base, tools)
         return {} unless base.population
 
-        executable_versions(%i[mmd mcopy], tools, base:).merge("harness" => Tools.source_version(*POPULATION_SOURCES))
+        executable_versions(POPULATION_TOOLS, tools, base:).merge("harness" => Tools.source_version(*POPULATION_SOURCES))
       end
 
       private_class_method def self.executable_versions(names, tools, base:)
@@ -179,15 +212,30 @@ module FsimgSpec
         raise FixtureError, "a #{FORMATTER} base needs #{missing.join(" and ")}" unless missing.empty?
       end
 
-      # Writes the image for base at path: formats it, then populates it
-      # unless the builder rendered the tree.
-      private_class_method def self.build(base, path, shell:, ceilings:, content:)
-        if base.builder == Builder::NAME
-          Builder.write(path, parameters: base.parameters, tree: base.population ? [] : base.tree, max_bytes: ceilings.image)
-        else
-          run_tool(shell, format_command(base, path, shell.tools), chdir: File.dirname(path))
+      # Writes the image for base at path. The builder renders a tree of
+      # its own with the volume; a tree mtools populates goes into a sparse
+      # copy of the base's empty volume, so every tree populated into one
+      # geometry costs one formatter run between them.
+      private_class_method def self.build(base, path, shell:, ceilings:, content:, volume_cache:)
+        return Builder.write(path, parameters: base.parameters, tree: base.tree, max_bytes: ceilings.image) unless base.population
+
+        ImageView.open(empty_volume(base, cache: volume_cache, shell:, ceilings:)).write(path)
+        populate(base.tree, path, shell:, content:)
+      end
+
+      # The empty volume of base in cache: the builder's or mkfs.fat's
+      # image of its parameters, keyed by them and the formatting tool's
+      # version alone, so it is one entry whatever tree it receives. The
+      # builder's entry is the one render answers for the same parameters.
+      private_class_method def self.empty_volume(base, cache:, shell:, ceilings:)
+        empty = base.with(tree: [], population: nil)
+        cache.fetch(cache.key(empty, format_versions(base, shell.tools))) do |path|
+          if base.builder == Builder::NAME
+            Builder.write(path, parameters: base.parameters, tree: [], max_bytes: ceilings.image)
+          else
+            run_tool(shell, format_command(base, path, shell.tools), chdir: File.dirname(path))
+          end
         end
-        populate(base.tree, path, shell:, content:) if base.population
       end
 
       # How a base is built, for its manifest: the builder's name or the
@@ -211,7 +259,8 @@ module FsimgSpec
       # host file. mtools stamps every entry with SOURCE_DATE_EPOCH, the
       # time the trees carry. -D s skips a name that clashes with one
       # already made, such as a case-equivalent sibling, instead of asking
-      # on the terminal; the tool then fails, and the build with it.
+      # on the terminal; the tool then fails, and the build with it. A tool
+      # that ran and failed refused the tree: a PopulationError.
       private_class_method def self.populate(tree, path, shell:, content:)
         image = File.basename(path)
         tree.sort_by { [_1.path.count("/"), _1.path] }.each do |entry|
@@ -220,7 +269,7 @@ module FsimgSpec
             in "directory" then [[shell.tools.fetch(:mmd), "-D", "s", "-i", image], nil]
             in "file" then [[shell.tools.fetch(:mcopy), "-D", "s", "-i", image, "-"], content.each_chunk(seed: entry.seed, size: entry.size)]
             end
-          run_tool(shell, [*command, mtools_target(entry.path)], chdir: File.dirname(path), input:)
+          run_tool(shell, [*command, mtools_target(entry.path)], chdir: File.dirname(path), input:, refusal: PopulationError)
         end
       end
 
@@ -232,12 +281,17 @@ module FsimgSpec
         parent.empty? ? "::/".b + name : "::/".b + Oracles.literal(parent) + "/".b + name
       end
 
-      private_class_method def self.run_tool(shell, argv, chdir:, input: nil)
+      # Runs argv through shell, raising unless it ran to its end and exited
+      # 0: refusal for a tool that ran to its end with another status, and a
+      # FixtureError for one that could not start, was stopped, died by a
+      # signal or left a process behind.
+      private_class_method def self.run_tool(shell, argv, chdir:, input: nil, refusal: FixtureError)
         execution = shell.run(argv, chdir:, input:)
-        return if execution.exit_status == 0 && execution.ended_by.nil? && !execution.leftover
+        ran_to_end = !execution.exit_status.nil? && execution.ended_by.nil? && !execution.leftover
+        return if ran_to_end && execution.exit_status == 0
 
-        raise FixtureError, "#{File.basename(argv.first)} #{ending(execution)}: " \
-                            "#{FsimgSpec.shown(text(execution.stderr), limit: 400)}"
+        error = ran_to_end ? refusal : FixtureError
+        raise error, "#{File.basename(argv.first)} #{ending(execution)}: #{FsimgSpec.shown(text(execution.stderr), limit: 400)}"
       end
 
       # How a tool's run ended: it could not start, was stopped by the

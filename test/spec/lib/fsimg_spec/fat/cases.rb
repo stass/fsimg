@@ -32,10 +32,13 @@ module FsimgSpec
     class Cases
       # name_trials is the run's NameTrials, or NameTrials::NONE where
       # nothing extracts, as when fuzz seeds are exported. shell is the
-      # run's OracleShell, or nil where no oracle runs.
-      def initialize(registry:, cache:, ceilings:, name_trials:, shell:)
+      # run's OracleShell, or nil where no oracle runs. Bases render into
+      # cache; the empty volumes mtools populates are copied from
+      # volume_cache (Bases.materialize).
+      def initialize(registry:, cache:, ceilings:, name_trials:, shell:, volume_cache: cache)
         @registry = registry
         @cache = cache
+        @volume_cache = volume_cache
         @ceilings = ceilings
         @name_trials = name_trials
         @shell = shell
@@ -56,6 +59,43 @@ module FsimgSpec
                            registry: @registry)
         kase = kase.with(recipe: kase.recorded)
         Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect, oracles: oracles(kase.recipe, model))
+      end
+
+      # A valid reading case, named id, of base, whose tree mtools
+      # populates (specs/design-spec-testing.md#fixtures): an image whose
+      # directories neither fsimg nor the independent builder wrote, read
+      # through every reading stage. A volume off its parameters is the
+      # harness's fault, a FixtureError. The tree judges fsimg only once
+      # mtools wrote it, its read-back reproduced it and the checker did not
+      # refuse the image; otherwise mtools did not write the tree the recipe
+      # states, and the case is a HostSkip naming why. The oracles observed
+      # the very bytes the case reads, unmutated, when the base was built,
+      # so those observations are the case's.
+      def populated(base, id:, random_seed: nil)
+        fixture = begin
+          Bases.materialize(base, cache: @cache, volume_cache: @volume_cache, shell: @shell, ceilings: @ceilings)
+        rescue PopulationError => e
+          raise HostSkip, "mtools did not write the tree: #{e.message}"
+        end
+        geometry = Bases.geometry_problems(base, fixture.image)
+        raise FixtureError, "#{id}: its volume is off its recipe: #{geometry.join("; ")}" unless geometry.empty?
+
+        read_back, checker = fixture.observations.values_at("mtools", "fsck")
+        raise HostSkip, "the mtools read-back did not agree (#{read_back.state}): #{read_back.detail}" unless
+          read_back.state == "agrees"
+        raise HostSkip, "the checker refuses the image: #{checker.detail}" if checker.state == "disagrees"
+
+        image, model, classification = decode(fixture.image, tree: base.tree, mutations: [], forced_format: nil,
+                                              stages: READING_STAGES)
+        recipe = Recipe.new(
+          id:, format: Bases.variant(base), kind: "valid", base:, base_sha256: base_digest(fixture.image),
+          tool_versions: fixture.manifest.fetch(:tool_versions).transform_keys(&:to_sym), mutations: [],
+          stages: READING_STAGES, expected: READING_STAGES.to_h { [_1, Expectation.derive(classification, _1)] }, random_seed:
+        )
+        kase = Case.derive(recipe, classification, registry: @registry)
+        kase = kase.with(recipe: kase.recorded)
+        Classified.new(kase:, image:, model:, created: nil, defect: kase.harness_defect,
+                       oracles: ->(_directory) { fixture.observations })
       end
 
       # Whether a witness meant valid, classified in memory, shows a

@@ -438,12 +438,38 @@ in 1024-byte blocks. A tree is populated into an empty base of either builder
 with `mmd` and `mcopy - ::/path`, each file's bytes generated from its seed
 and piped to mtools' stdin, so population writes no host file; with
 `SOURCE_DATE_EPOCH` set, mtools stamps every entry with the time the tree
-carries. The manifest records each oracle's observation of the base: the
+carries. The empty volume is cached under its own key, its parameters and
+the version of what formats it (the builder's sources, or the formatter's
+executable and the harness code that spells its command), and each tree is
+populated into a sparse copy of it, so any number of trees of one geometry
+cost one formatter run. The
+manifest records each oracle's observation of the base: the
 read-only checker (`fsck.fat -n` or `fsck_msdosfs -n`), the mtools read-back
 and fatcat. Formatter
 bases test both the model and fsimg against images neither produced, and an
 mtools-populated builder base tests them against a directory tree neither
-wrote.
+wrote. Every run whose host has the tools reads the formatter base of each
+variant, holding a small standard tree, as a valid case.
+
+A populated tree judges fsimg only once mtools wrote it, the mtools
+read-back reproduced it and the checker did not refuse the image; a host
+without the read-back skips populated cases outright. Otherwise the host's
+mtools did not write the tree the recipe states, and a drawn tree's case is
+a host skip whose detail names why: the refusal of a populating tool that
+ran to its end, the read-back's difference or the checker's report. The
+standard tree holds only names every mtools writes, so the same failure on
+a formatter base's case is a harness error, which keeps a defect of
+population itself from passing as a run of host skips. A volume whose
+geometry differs from its parameters is always a harness error. mtools
+4.0.49 writes some short names
+that mix characters of its code page with others as a short name cut at
+the first other character, with no long name, so a child of such a
+directory cannot be created at all, and lists a lower-case non-ASCII short
+name in upper case; the read-back or the refusal shows each. A name
+whose loss the read-back cannot catch is never offered to mtools, as
+[generation](#generation-and-shrinking) states. The oracles observed the
+very bytes such a case reads when its base was built, so those
+observations are the case's.
 
 **The independent builder**, one per format, renders an image from explicit
 parameters: for FAT, the boot sector and BPB, any number of tables with their
@@ -901,7 +927,15 @@ sibling's literal 8.3 name, such as `NAMEFI~1.TXT` beside a long
 `name file.txt`. A
 drawn tree reaches fsimg in three ways: rendered by the independent builder, as
 a creation case's source, and populated by mtools into a copy of one cached
-empty base, so no draw costs a formatter run. A drawn valid tree holds only
+empty base, so no draw costs a formatter run. The trees mtools populates are
+drawn apart, as many as the profile sets, and every one mtools writes as
+drawn runs fsimg. Their
+generator offers mtools only names it writes as drawn: no name beyond the
+BMP, whose surrogate pairs mtools drops when it writes the name as well as
+when it reads it back, so the read-back could not catch the loss, and no DOS
+device name without an extension, which `mcopy` and `mmd` refuse. Any other
+name mtools refuses or alters makes the case a host skip, as
+[fixtures](#fixtures) state. A drawn valid tree holds only
 names fsimg's reader accepts, with no two siblings of one key; the rules
 `fat.directory.name` and `fat.directory.unique_names` state both, so a draw
 that breaks either is a generator defect. A drawn tree, and a witness of
@@ -943,8 +977,8 @@ rule families, and would then stay optional and outside CI.
 
 | Profile | Entry point | Contents | Target |
 | --- | --- | --- | --- |
-| `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness through fsimg: a valid one or one of a `must_accept` rule through every reading stage, and one of any other policy through the first stage that checks its rule; 100-300 PropCheck examples, of which a sample of a few per variant runs fsimg; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
-| `nightly` | `make check-spec-extended` | Thousands of random examples, deterministic witnesses through every stage, 50-150 oracle cross-checks, class C cases | 10-30 min |
+| `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness through fsimg: a valid one or one of a `must_accept` rule through every reading stage, and one of any other policy through the first stage that checks its rule; 100-300 PropCheck examples, of which a sample of a few per variant runs fsimg; a few trees mtools populates and the formatter base of each variant, through every reading stage; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
+| `nightly` | `make check-spec-extended` | Thousands of random examples, deterministic witnesses through every stage, 50-150 oracle cross-checks, 150 trees mtools populates, class C cases | 10-30 min |
 | `deep` | `make check-spec-deep` | Large volumes, broad mutation matrices, every oracle on every case | Explicit opt-in |
 
 The budgets are targets, which measurement adjusts. Every profile sets ceilings
@@ -989,7 +1023,8 @@ It keeps these states distinct:
 * behaviour asserted against fsimg, only the Ruby predicate tested, or
   unclassified;
 * base accepted by its formatter, or a geometry the tool does not support;
-* case run, or a host skip because the host cannot hold its tree;
+* case run, or a host skip because the host cannot hold its tree or its
+  tools did not build its image as its recipe states;
 * oracle agrees, disagrees, is not applicable or is unavailable;
 * run confined by a sandbox or not.
 

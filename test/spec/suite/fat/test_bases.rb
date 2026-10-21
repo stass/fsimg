@@ -86,17 +86,19 @@ class TestFatBases < Minitest::Test
   # Population is separate from formatting: mtools pipes the standard tree
   # into the builder's empty volume, the checker and the mtools read-back
   # agree with the tree, and the build leaves nothing in the cache but the
-  # image and its manifest.
+  # image, its manifest and the empty volume it copied, the one the
+  # builder renders for the same parameters.
   def test_mtools_populated_builder_base_holds_its_tree
     skip_without(:mmd, :mcopy)
     skip_without_checkers
     with_cache do |cache, shell, _results, directory|
       fixture = Fat::Bases.materialize(populated_builder_base, cache:, shell:, ceilings: CEILINGS)
       key = File.basename(fixture.image, ".img")
+      volume = Fat::Bases.render(populated_builder_base.with(tree: [], population: nil), cache:, ceilings: CEILINGS)
 
       assert fixture.usable?, fixture.problems.join("; ")
       assert_equal %w[fsck mtools], fixture.manifest.fetch(:validators).select { _2[:state] == "agrees" }.keys.sort
-      assert_equal ["#{key}.img", "#{key}.json"], Dir.children(File.join(directory, "cache")).sort
+      assert_equal ["#{key}.img", "#{key}.json", File.basename(volume)].sort, Dir.children(File.join(directory, "cache")).sort
     end
   end
 

@@ -11,6 +11,11 @@ module FsimgSpec
   # its recipe says.
   class FixtureError < Error; end
 
+  # A population tool that ran to its end and refused the tree, such as
+  # mcopy refusing a DOS device name or a parent directory mtools wrote
+  # under another name.
+  class PopulationError < FixtureError; end
+
   # The development tools the harness runs, as the wrapper's environment
   # names them. A tool that is not configured as an absolute path to an
   # executable file is nil: unavailable for its own evidence only. Tools
@@ -177,9 +182,10 @@ module FsimgSpec
     end
   end
 
-  # A materialized base: the cached image, its manifest, and the problems
-  # that keep it from serving any case.
-  Fixture = Data.define(:image, :manifest, :problems) do
+  # A materialized base: the cached image, its manifest, the oracles'
+  # observations of it (tool => Observation), and the problems that keep
+  # it from serving any case.
+  Fixture = Data.define(:image, :manifest, :observations, :problems) do
     def usable? = problems.empty?
   end
 

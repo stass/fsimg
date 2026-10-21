@@ -22,6 +22,10 @@ module FsimgSpec
     # upper-case character, or none, so Names.key and a case-insensitive
     # host see the same siblings as fsimg. A draw the rules still refuse is
     # a generator defect, which its classification reports.
+    #
+    # A tree mtools populates holds only names mtools writes as they are
+    # drawn (Trees.populated_tree): none beyond the BMP, and no DOS device
+    # name without an extension.
     module Trees
       G = PropCheck::Generators
 
@@ -71,41 +75,50 @@ module FsimgSpec
 
       # count trees drawn from seed, each a valid Witness on the base of
       # the variant whose turn it is, so any first part of the draws
-      # spreads over the variants evenly. generator answers the PropCheck
-      # generator of one tree for a cluster size; a test may pass one that
-      # stands for a faulty generator.
-      def self.draw(seed:, count:, generator: method(:tree))
+      # spreads over the variants evenly, with an id of prefix, the
+      # variant, the seed and the draw's index. generator answers the
+      # PropCheck generator of one tree for a cluster size; a test may pass
+      # one that stands for a faulty generator.
+      def self.draw(seed:, count:, generator: method(:tree), prefix: "fat.drawn")
         rng = Random.new(seed)
         Array.new(count) do |index|
           variant = BASES.keys[index % BASES.size]
           parameters = BASES.fetch(variant)
           tree = generator.call(cluster_bytes: Builder::Layout.new(parameters).cluster_bytes).call(size: SIZE, rng:)
-          Witnesses::Witness.new(id: "fat.drawn.#{variant}.#{seed}.#{index}", parameters:, tree:, mutations: [],
+          Witnesses::Witness.new(id: "#{prefix}.#{variant}.#{seed}.#{index}", parameters:, tree:, mutations: [],
                                  forced_format: nil, intended: nil, rule: nil)
         end
       end
 
       # The generator of one tree, as recipe tree entries in preorder: the
       # first ENTRIES entries of a drawn hierarchy, so every entry's
-      # parent precedes it. The root holds at least one entry.
-      def self.tree(cluster_bytes:) =
-        children(1, cluster_bytes:, groups: 1..WIDTH).map { entries(_1, prefix: "").first(ENTRIES) }
+      # parent precedes it. The root holds at least one entry. names
+      # generates one name group.
+      def self.tree(cluster_bytes:, names: name_group) =
+        children(1, cluster_bytes:, names:, groups: 1..WIDTH).map { entries(_1, prefix: "").first(ENTRIES) }
+
+      # The generator of one tree that mtools populates as drawn. mtools
+      # drops the surrogate pairs of a name beyond the BMP when it writes
+      # the name as well as when it reads it back, so its read-back could
+      # not catch the loss, and mcopy and mmd refuse a DOS device name
+      # without an extension. Such a tree draws neither.
+      def self.populated_tree(cluster_bytes:) = tree(cluster_bytes:, names: name_group(mtools: true))
 
       # The generator of the [name, content] pairs of a directory whose
       # entries' paths have depth components: from a count of name groups
       # in groups, at most WIDTH names with distinct keys, each a file or,
       # while depth is less than DEPTH, sometimes a directory.
-      def self.children(depth, cluster_bytes:, groups: 0..WIDTH) =
-        list(name_group, groups).map { |drawn| drawn.flatten.uniq { Names.key(_1) }.first(WIDTH) }.bind do |names|
-          G.tuple(*names.map { |name| content(depth, cluster_bytes:).map { [name, _1] } })
+      def self.children(depth, cluster_bytes:, names:, groups: 0..WIDTH) =
+        list(names, groups).map { |drawn| drawn.flatten.uniq { Names.key(_1) }.first(WIDTH) }.bind do |chosen|
+          G.tuple(*chosen.map { |name| content(depth, cluster_bytes:, names:).map { [name, _1] } })
         end
 
       # A DrawnFile, or a directory as the Array of its entries' pairs.
-      def self.content(depth, cluster_bytes:)
+      def self.content(depth, cluster_bytes:, names:)
         file = G.tuple(file_size(cluster_bytes), G.choose(0..MAX_SEED)).map { |size, seed| DrawnFile.new(size:, seed:) }
         return file if depth == DEPTH
 
-        G.frequency(3 => file, 1 => children(depth + 1, cluster_bytes:))
+        G.frequency(3 => file, 1 => children(depth + 1, cluster_bytes:, names:))
       end
 
       # A file size relative to the cluster size: none, one byte, one
@@ -114,10 +127,14 @@ module FsimgSpec
         G.one_of(G.constant(0), G.constant(1), G.constant(cluster - 1), G.constant(cluster), G.choose((cluster + 1)..(3 * cluster)))
 
       # One name, or the two names of a reserved pair. The weights are
-      # pairs, not a Hash, since several repeat.
-      def self.name_group =
-        G.frequency([[3, short_name.map { [_1] }], [2, long_name.map { [_1] }], [2, mixed(BMP).map { [_1] }],
-                     [2, mixed(NON_BMP).map { [_1] }], [1, reserved]])
+      # pairs, not a Hash, since several repeat. For mtools, no name beyond
+      # the BMP and no device name without an extension.
+      def self.name_group(mtools: false)
+        groups = [[3, short_name.map { [_1] }], [2, long_name.map { [_1] }], [2, mixed(BMP).map { [_1] }]]
+        groups << [2, mixed(NON_BMP).map { [_1] }] unless mtools
+        groups << [1, reserved(device_extension: mtools)]
+        G.frequency(groups)
+      end
 
       # An 8.3 name in upper case, or in lower case, which the builder
       # stores with a long name.
@@ -131,14 +148,16 @@ module FsimgSpec
       # characters of alphabet.
       def self.mixed(alphabet) = G.tuple(word(ALPHANUMERIC, 0..4), word(alphabet, 1..6), word(ALPHANUMERIC, 0..4)).map(&:join)
 
-      # A DOS device name, with or without an extension and in either
-      # case, or a long name beside the literal 8.3 name that its basis
-      # name with the first numeric tail spells, which the builder must
-      # leave to the literal. For two lower-case words and an extension,
-      # the basis name (section 6.1) is the words in upper case without
-      # the space between them, cut to six characters for the tail ~1.
-      def self.reserved
-        device = cased(G.tuple(word(DEVICES, 1..1), extension(ALPHANUMERIC)).map(&:join)).map { [_1] }
+      # A DOS device name in either case, with an extension or, unless
+      # device_extension, without one; or a long name beside the literal 8.3
+      # name that its basis name with the first numeric tail spells, which
+      # the builder must leave to the literal. For two lower-case words and
+      # an extension, the basis name (section 6.1) is the words in upper
+      # case without the space between them, cut to six characters for the
+      # tail ~1.
+      def self.reserved(device_extension:)
+        suffix = device_extension ? word(ALPHANUMERIC, 1..3).map { ".#{_1}" } : extension(ALPHANUMERIC)
+        device = cased(G.tuple(word(DEVICES, 1..1), suffix).map(&:join)).map { [_1] }
         pair = G.tuple(word(LOWER, 3..6), word(LOWER, 3..6), word(LOWER, 3..3)).map do |first, second, suffix|
           ["#{first} #{second}.#{suffix}", "#{(first + second).upcase[0, 6]}~1.#{suffix.upcase}"]
         end

@@ -33,6 +33,18 @@ class TestFatTrees < Minitest::Test
     end
   end
 
+  # A tree mtools populates draws only names mtools writes as drawn: none
+  # beyond the BMP, which it would drop unseen, and no device name
+  # without an extension, which it refuses. Device names with one remain.
+  def test_populated_trees_draw_only_names_mtools_writes
+    draws = Fat::Trees.draw(seed: SEED, count: PROFILE.tree_draws, generator: Fat::Trees.method(:populated_tree))
+    names = draws.flat_map { |witness| witness.tree.map { _1.path.split("/").last } }
+
+    draws.each { assert_within_bounds(_1) }
+    assert_equal %i[short long bmp device], names.map { kind(_1) }.uniq.sort_by { %i[short long bmp device].index(_1) }
+    assert(names.select { kind(_1) == :device }.all? { _1.include?(".") }, "a device name without an extension")
+  end
+
   # A tree's draw follows the seed alone, so the run's SEED repeats it.
   def test_one_seed_draws_one_set_of_trees
     assert_equal Fat::Trees.draw(seed: SEED, count: 6), Fat::Trees.draw(seed: SEED, count: 6)
@@ -57,7 +69,7 @@ class TestFatTrees < Minitest::Test
       Fat::Trees.tree(cluster_bytes:).map { _1 + [FsimgSpec::TreeEntry.new(path: "trailing ", type: "file", size: 1, seed: 1)] }
     }
     with_cases do |_cases, cache, directory|
-      draws = FsimgSpec::Draws.new(seed: SEED, count: 3, sample: 1, cache:)
+      draws = FsimgSpec::Draws.new(seed: SEED, count: 3, sample: 1, populated: 0, cache:)
       promoted = File.join(directory, "promoted")
       Dir.mkdir(promoted)
       drawn = Fat::Suite.cases(cache:, ceilings: PROFILE.ceilings, name_trials: FsimgSpec::NameTrials::NONE, shell: nil, draws:,

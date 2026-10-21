@@ -151,16 +151,22 @@
   preflight checks but no oracle runs through yet, and report those
   observations unavailable without it.
 
-* [Low] **Spec harness names mtools and fatcat do not round-trip**
-  (`test/spec/lib/fsimg_spec/fat/bases.rb`, `fat/oracles.rb`): `mcopy` and
-  `mmd` 4.0.49 refuse to create a bare DOS device name such as `CON` or
-  `NUL`, which drawn trees hold; a lowercase non-ASCII name that fits 8.3,
-  such as `café`, is stored with the case bits and read back with only
-  its ASCII letters lowered; and fatcat ignores the case bits, so a
-  lowercase 8.3 name mtools wrote reads back in upper case. Once drawn
-  trees are mtools-populated, report such a tree as a tool limitation of
-  its case, and fatcat's view of it as not applicable, rather than as a
-  fixture error or a disagreement.
+* [Medium] **Spec harness replays no tool-built base**
+  (`test/spec/lib/fsimg_spec/fat/cases.rb` `Cases.unreplayable`,
+  `test/spec/lib/fsimg_spec/replay.rb`): replay refuses a recipe whose base
+  a formatter or mtools builds, so the failure record of an
+  mtools-populated case answers 125 under `git bisect run`, although the
+  design's replay rebuilds any base and re-classifies one whose tool
+  version differs. Rebuild such a base through `Bases.materialize` when the
+  host has its tools, and skip it otherwise.
+
+* [Low] **Spec harness fatcat ignores case bits**
+  (`test/spec/lib/fsimg_spec/fat/oracles.rb`): fatcat ignores the case
+  bits of a short entry, so a lowercase 8.3 name mtools wrote with them
+  reads back in upper case, and fatcat disagrees on an mtools-populated
+  case whose tree holds one. Once the model decodes directories (B2),
+  report fatcat as not applicable to a name stored with case bits rather
+  than as a disagreement.
 
 * [Medium] **Spec harness field draws never reach fsimg**
   (`test/spec/suite/fat/test_rules.rb`, `test/spec/lib/fsimg_spec/fat/witnesses.rb`):

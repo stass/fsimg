@@ -5,7 +5,8 @@
 module FsimgSpec
   module Fat
     # The FAT cases of a run: every deterministic witness of the rules, the
-    # sample of the run's drawn trees
+    # formatter bases mtools populates (specs/design-spec-testing.md#fixtures),
+    # the sample of the run's drawn trees
     # (specs/design-spec-testing.md#generation-and-shrinking), and every
     # promoted regression recipe under test/spec/cases/fat/
     # (specs/design-spec-testing.md#reports-and-regressions).
@@ -21,12 +22,13 @@ module FsimgSpec
       def self.preflight_sample(directory) = Bases.preflight_sample(directory)
 
       # The pending cases of a run under registry: every deterministic
-      # witness, then the drawn trees that run, then every promoted recipe
-      # in directory, loaded within ceilings, each classified with the
-      # run's name trials and oracle shell (Cases.new). A promoted file that
-      # does not load is no case, so it fails the whole phase, before any
-      # case runs. tree_generator draws one tree (Trees.draw); a test may
-      # pass a faulty one.
+      # witness, then the formatter bases mtools populates, then the drawn
+      # trees that run, then every promoted recipe in directory, loaded
+      # within ceilings, each classified with the run's name trials and
+      # oracle shell (Cases.new). A promoted file that does not load is no
+      # case, so it fails the whole phase, before any case runs.
+      # tree_generator draws one tree the builder renders (Trees.draw); a
+      # test may pass a faulty one.
       def self.cases(cache:, ceilings:, name_trials:, shell:, draws:, registry: Suite.registry, directory: PROMOTED,
                      tree_generator: Trees.method(:tree))
         cases = Cases.new(registry:, cache:, ceilings:, name_trials:, shell:)
@@ -34,43 +36,84 @@ module FsimgSpec
           PendingCase.new(id: witness.id, rules: [witness.rule, witness.intended].compact.uniq, skip: nil,
                           classify: -> { cases.call(witness) })
         end
-        witnesses + drawn(draws, cases:, registry:, ceilings:, name_trials:, shell:, tree_generator:) +
+        witnesses + external(cases, shell:) +
+          drawn(draws, cases:, registry:, cache:, ceilings:, name_trials:, shell:, tree_generator:) +
           promoted(directory, ceilings:).map { pending(_1, cases) }
       end
 
-      # The drawn trees that run as cases (specs/design-spec-testing.md#generation-and-shrinking):
-      # cases classifies every draw in memory, and the first draws.sample
-      # of them, with every later one that shows a generator defect, run
-      # as cases whose recipes record the run's seed. Only those render,
-      # into the draws' own cache, so a draw found sound costs neither a
-      # file nor an fsimg run.
-      def self.drawn(draws, cases:, registry:, ceilings:, name_trials:, shell:, tree_generator:)
-        rendering = Cases.new(registry:, cache: draws.cache, ceilings:, name_trials:, shell:)
+      # The formatter base of each variant with the standard tree mtools
+      # populates (Bases.standard), as valid reading cases: images no byte
+      # of which fsimg or the independent builder wrote. A host without
+      # the tools skips them. The standard tree holds only names every
+      # mtools writes, so these cases guard population itself: mtools
+      # refusing or altering it is a harness error, not a host skip.
+      def self.external(cases, shell:) =
+        Bases.standard.map do |variant, base|
+          id = "fat.mtools.#{variant}"
+          classify = lambda do
+            cases.populated(base, id:)
+          rescue HostSkip => e
+            raise FixtureError, "the standard tree must populate: #{e.message}"
+          end
+          PendingCase.new(id:, rules: [], skip: Bases.unbuildable(base, shell), classify:)
+        end
+
+      # The drawn trees that run as cases (specs/design-spec-testing.md#generation-and-shrinking),
+      # whose recipes record the run's seed: the trees the builder renders,
+      # then those mtools populates. Each image is built into the draws' own
+      # cache; a populated tree's empty volume is copied from the fixture
+      # cache, cache, where it lasts beyond the case.
+      def self.drawn(draws, cases:, registry:, cache:, ceilings:, name_trials:, shell:, tree_generator:)
+        building = Cases.new(registry:, cache: draws.cache, volume_cache: cache, ceilings:, name_trials:, shell:)
+        rendered_draws(draws, cases:, building:, tree_generator:) + populated_draws(draws, cases:, building:, shell:)
+      end
+
+      # cases classifies every draw of tree_generator in memory, and the
+      # first draws.sample of them, with every later one that shows a
+      # generator defect, run as cases. Only those render, so a draw found
+      # sound costs neither a file nor an fsimg run.
+      def self.rendered_draws(draws, cases:, building:, tree_generator:) =
         Trees.draw(seed: draws.seed, count: draws.count, generator: tree_generator).each_with_index.filter_map do |witness, index|
           defective = cases.defective?(witness)
           next unless index < draws.sample || defective
 
-          drawn_case(witness, defective:, cases: rendering, draws:)
+          drawn_case(witness, defective:, draws:, skip: nil) { building.call(witness, random_seed: draws.seed) }
         end
-      end
 
-      # The pending case of a drawn witness, which cases renders into the
-      # draws' cache and classifies. Its case must find a generator defect
-      # exactly where the in-memory classification, defective, did, or
-      # that classification is wrong, and the case reports that instead.
-      # Only drawn cases render into the draws' cache, one at a time, so
-      # emptying it once the case is recorded leaves nothing of the case
-      # behind, however its classification ended.
-      def self.drawn_case(witness, defective:, cases:, draws:)
+      # draws.populated trees drawn for mtools (Trees.populated_tree), each
+      # populated into a copy of the empty builder volume of its variant.
+      # Their generator is the builder draws' with fewer names, so the
+      # builder's many in-memory draws already test it for defects, and
+      # only these few are drawn. A host without mtools skips them, which
+      # the listing decides before any case is classified.
+      def self.populated_draws(draws, cases:, building:, shell:) =
+        Trees.draw(seed: draws.seed, count: draws.populated, generator: Trees.method(:populated_tree),
+                   prefix: "fat.mtools.drawn").map do |witness|
+          base = Base.new(builder: Builder::NAME, parameters: witness.parameters, tree: witness.tree, population: "mtools")
+          defective = cases.defective?(witness)
+          skip = Bases.unbuildable(base, shell)
+          drawn_case(witness, defective:, draws:, skip:) { building.populated(base, id: witness.id, random_seed: draws.seed) }
+        end
+
+      # The pending case of a drawn witness, which the block builds into
+      # the draws' cache and classifies, or a host skip for skip. A case
+      # the block classifies must find a generator defect exactly where the
+      # in-memory classification, defective, did, or that classification
+      # is wrong, and the case reports that instead; a HostSkip while
+      # building ends the case before that comparison. Only drawn cases build into the
+      # draws' cache, one at a time, so emptying it once the case is
+      # recorded leaves nothing of the case behind, however its
+      # classification ended.
+      def self.drawn_case(witness, defective:, draws:, skip:, &build)
         classify = lambda do
-          classified = cases.call(witness, random_seed: draws.seed)
+          classified = build.call
           found_defect = !classified.defect.nil?
           next classified if found_defect == defective
 
           memory = defective ? "the in-memory classification found a defect" : "the in-memory classification found none"
           classified.with(defect: "#{witness.id}: #{memory}, but its case #{found_defect ? "shows #{classified.defect}" : "is sound"}")
         end
-        PendingCase.new(id: witness.id, rules: DRAWN_RULES, skip: nil, classify:, release: -> { draws.cache.clear })
+        PendingCase.new(id: witness.id, rules: DRAWN_RULES, skip:, classify:, release: -> { draws.cache.clear })
       end
 
       # recipe as a pending case under registry.
@@ -97,7 +140,7 @@ module FsimgSpec
         end
       end
 
-      private_class_method :drawn, :drawn_case
+      private_class_method :external, :drawn, :rendered_draws, :populated_draws, :drawn_case
 
       private_class_method def self.pending(recipe, cases) =
         PendingCase.new(id: recipe.id, rules: [recipe.intended_violation].compact, skip: Cases.unreplayable(recipe),

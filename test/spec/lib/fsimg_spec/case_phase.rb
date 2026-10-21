@@ -16,11 +16,18 @@ module FsimgSpec
 
   # The random trees of a run (specs/design-spec-testing.md#generation-and-shrinking):
   # the seed every draw follows, the number of trees to draw and classify,
-  # how many of the first of them run fsimg, and the FixtureCache their
-  # bases render into. NONE draws nothing, for a caller that runs no case
-  # phase, such as the fuzz seed export.
-  Draws = Data.define(:seed, :count, :sample, :cache)
-  Draws::NONE = Draws.new(seed: 0, count: 0, sample: 0, cache: nil)
+  # how many of the first of them the builder renders for fsimg, how many
+  # trees are drawn for mtools to populate, and the
+  # FixtureCache their images are built into. NONE draws nothing, for a
+  # caller that runs no case phase, such as the fuzz seed export.
+  Draws = Data.define(:seed, :count, :sample, :populated, :cache)
+  Draws::NONE = Draws.new(seed: 0, count: 0, sample: 0, populated: 0, cache: nil)
+
+  # Raised while a case is classified when the host cannot build the image
+  # its recipe states, such as a tree the host's mtools does not write as
+  # drawn (specs/design-spec-testing.md#fixtures). The case is a host skip
+  # that gives the message as its reason, never a result of fsimg's.
+  class HostSkip < Error; end
 
   # A case before it is classified, as a format suite lists it: its id, the
   # rules it counts toward in the coverage report, why the host cannot run
@@ -108,7 +115,7 @@ module FsimgSpec
     # fixture cache, which would otherwise keep every run's draws.
     def self.call(profile:, results:, build_directory:, environment:, seed:, suites: CasePhase.suites)
       setup = prepare(results:, profile:, build_directory:, environment:, suites:)
-      draws = Draws.new(seed:, count: profile.tree_draws, sample: profile.tree_sample,
+      draws = Draws.new(seed:, count: profile.tree_draws, sample: profile.tree_sample, populated: profile.populated_trees,
                         cache: FixtureCache.new(File.join(results, "drawn")))
       pending = suites.transform_values do
         _1.cases(cache: setup.cache, ceilings: profile.ceilings, name_trials: setup.name_trials, shell: setup.shell, draws:)
@@ -154,15 +161,20 @@ module FsimgSpec
       pending.release&.call
     end
 
-    # Classifies and runs a case. Any StandardError makes the case a harness
-    # error; a ContainmentError or a signal is no StandardError, and ends the
-    # phase. classified is still nil in the rescue when classifying raised,
-    # and holds the classification when running raised, which the failure
+    # Classifies and runs a case. A HostSkip while classifying makes it a
+    # host skip, and any other StandardError a harness error; a
+    # ContainmentError or a signal is no StandardError, and ends the phase.
+    # classified is still nil in the rescue when classifying raised, and
+    # holds the classification when running raised, which the failure
     # record keeps so that it can replay the case.
     private_class_method def self.attempt_case(pending, setup:, cases_directory:)
       return Attempt.new(kase: nil, image: nil, result: skipped(pending)) if pending.skip
 
-      classified = classify(pending)
+      classified = begin
+        classify(pending)
+      rescue HostSkip => e
+        return Attempt.new(kase: nil, image: nil, result: skipped(pending.with(skip: e.message)))
+      end
       Attempt.new(kase: classified.kase, image: classified.image, result: result_of(classified, setup:, cases_directory:))
     rescue StandardError => e
       Attempt.new(kase: classified&.kase, image: classified&.image, result: harness_error(pending.id, e))
@@ -185,11 +197,14 @@ module FsimgSpec
     # The pending case classified. A refusal of the harness's own while
     # classifying, such as a rule the recipe names that these rules lack,
     # means the case cannot be judged under the current rules: a
-    # RecipeError. Any other exception is a fault of the harness and
-    # propagates, as does a classification under another id.
+    # RecipeError. A HostSkip propagates, as does any other exception,
+    # which is a fault of the harness, and a classification under another
+    # id.
     def self.classify(pending)
       classified = begin
         pending.classify.call
+      rescue HostSkip
+        raise
       rescue Error => e
         raise RecipeError, "#{pending.id} cannot be classified: #{FsimgSpec.error_class(e)}: #{e.message}"
       end

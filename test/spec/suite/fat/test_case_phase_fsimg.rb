@@ -19,7 +19,7 @@ require "fsimg_spec/fat"
 class TestCasePhaseFsimg < Minitest::Test
   Fat = FsimgSpec::Fat
   # The quick profile without random draws, which these cases select away.
-  PROFILE = FsimgSpec.fetch_profile("quick").with(tree_draws: 0, tree_sample: 0)
+  PROFILE = FsimgSpec.fetch_profile("quick").with(tree_draws: 0, tree_sample: 0, populated_trees: 0)
   FAULTY = "fat.bpb.bytes_per_sector.0201"
   REPLAY = File.expand_path("../../bin/replay", __dir__)
 
@@ -76,14 +76,16 @@ class TestCasePhaseFsimg < Minitest::Test
 
   # A case whose classification raises is that case's harness error, with
   # a record of its result alone; the other cases still run, and the rule
-  # it counts toward has only its predicate tested by it.
+  # it counts toward has only its predicate tested by it. A HostSkip while
+  # classifying is a host skip instead, which writes no record.
   def test_a_fault_in_one_case_fails_only_that_case
     broken = pending("t.broken") { raise FsimgSpec::RuleError, "unknown rule fat.bpb.renamed" }
     skipped = FsimgSpec::PendingCase.new(id: "t.skipped", rules: ["fat.bpb.media"], skip: "no tools", classify: nil)
-    with_phase(suite_of(broken, skipped)) do |phase, results|
+    unbuilt = pending("t.unbuilt") { raise FsimgSpec::HostSkip, "mtools did not write the tree" }
+    with_phase(suite_of(broken, skipped, unbuilt)) do |phase, results|
       fat = phase.formats.fetch("fat")
 
-      assert_equal({ total: 3, passed: 1, host_skip: 1, harness_error: 1 },
+      assert_equal({ total: 4, passed: 1, host_skip: 2, harness_error: 1 },
                    fat.cases.slice(:total, :passed, :host_skip, :harness_error))
       assert_equal ["t.broken"], fat.failures
       assert_equal ["result.json"], Dir.children(File.join(results, "failures", "t.broken"))
