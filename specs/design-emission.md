@@ -24,13 +24,18 @@ Driver designs ([FAT](design-fat-writer.md), [exFAT](design-exfat.md),
 `fsimg_writer_emit()` performs these steps; each completes before the next
 begins:
 
-1. Seal and plan the catalog.
+1. Seal and plan the catalog. Planning refuses an output whose bound, plus
+   the raw intermediate of an encoded output ([layer
+   design](design-layers.md)), exceeds the output limit, then checks the
+   digests a manifest claims for generated content, as the [manifest
+   design](design-mtree.md#digests) states. The raw intermediate of a bare
+   stream is charged when the stream is written, before any byte is emitted.
 2. Reject a sink that aliases any collected host source, using the backing
    identity rule in the [architecture](architecture.md#output-and-determinism).
    The same inode is rejected even when two slices look disjoint, because
    finalization can change the whole file's length.
 3. Check sink capabilities: write, resize or exact fixed size, and durability
-   when requested. Check the planned length against the output limit.
+   when requested.
 4. Resize a resizable whole-object sink to the planned length.
 5. Zero every byte of the planned volume through the zeroing operation,
    which writes only where zeros are not already proven. On a fresh file,

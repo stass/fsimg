@@ -389,14 +389,16 @@
   (`inspect_import_file()` in `lib/source/source.c`); the coordinator hook
   must serve that inspection too before the `@file` operand runs confined
   on Linux.
-* [Medium] **Input digest of a huge generated file** (`lib/source/manifest.c`,
-  `specs/design-mtree.md`): a generated file's `sha256digest` is checked
-  at input by hashing the whole content, before planning could reject a
-  size no format stores, so one manifest line such as `size=2^64-1` with a
-  digest costs work proportional to its size, bounded only by `max_work`
-  and cancellation, both unlimited by default. Decide between checking
-  generated digests after planning (which rejects impossible sizes cheaply)
-  and a default work budget for the CLI's create mode.
+* [Medium] **Hashing a large sparse generated file** (`lib/source/manifest.c`,
+  `specs/design-mtree.md` "Digests"): planning checks a generated file's
+  `sha256digest` only after the image accepted its size, so the bytes hashed
+  never exceed the planned volume, but emission skips zero runs while the
+  digest covers every byte. In an automatically sized exFAT or QNX6 volume
+  one manifest line such as a 1 TiB `fsimg.content=zero` file with a digest
+  costs about an hour of hashing, bounded only by `max_work`, `seconds` and
+  cancellation, which are unlimited by default. Decide between a default
+  work budget for create mode and a fixed bound on the size a generated
+  digest may cover.
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself

@@ -14,7 +14,8 @@
  * for i = 0, 1, ..., cut to the length. POSITIONAL is the stream of
  * 16-byte blocks LE64(seed) || LE64(16 * j), each naming the file's
  * identity and its own offset. ZERO is all zeros; a zero file is stored as
- * the zero source and this generator only computes its digest. LINK is a
+ * the zero source, so this generator only describes a digest claimed for
+ * one and never appears in a source record. LINK is a
  * symbolic link's target, whose bytes the record holds. Holes are runs of
  * a SEEDED or POSITIONAL file that read as zero.
  */
@@ -48,8 +49,8 @@ typedef struct fsimg_generated {
 _Static_assert(FSIMG_GENERATED_HEADER + FSIMG_SYMLINK_TARGET_MAX <=
     FSIMG_GENERATED_RECORD_MAX, "a link record fits the largest record");
 
-/* Encode a valid SEEDED, POSITIONAL or LINK description into record, which
- * holds FSIMG_GENERATED_RECORD_MAX bytes, and return the record's length.
+/* Encode a valid description into record, which holds
+ * FSIMG_GENERATED_RECORD_MAX bytes, and return the record's length.
  */
 size_t fsimg_generated_encode(const fsimg_generated_t *, unsigned char *);
 /* Decode and validate a record as its writer encoded it; a LINK's target

@@ -13,10 +13,37 @@
 #include "mtree.h"
 #include "source.h"
 
-/* Generated content is hashed through a buffer of this size when its
- * manifest line claims a digest.
+/* Generated content is hashed through a buffer of this size when planning
+ * checks the digests manifests claim for it.
  */
 #define MANIFEST_DIGEST_BUFFER	(64u * 1024)
+
+/* A digest claim on generated content, kept in writer->generated_digests
+ * from the manifest's parse until planning checks it: the claiming line's
+ * number and byte offset as little-endian u64s, the 32-byte digest, the
+ * generated record's length as a u64, the generated record
+ * (fsimg_generated_encode), then the entry's image path and its NUL. The
+ * line and path are kept so that the refusal names the line although the
+ * manifest itself is long gone.
+ */
+#define CLAIM_LINE		0u
+#define CLAIM_LINE_OFFSET	8u
+#define CLAIM_DIGEST		16u
+#define CLAIM_GENERATED_LENGTH	48u
+#define CLAIM_HEADER		56u
+
+typedef struct digest_claim {
+	fsimg_generated_t generated;
+	const char	*path;
+	uint64_t	 line;
+	uint64_t	 line_offset;
+	unsigned char	 digest[FSIMG_SHA256_DIGEST_LENGTH];
+} digest_claim_t;
+_Static_assert(CLAIM_LINE + 8u == CLAIM_LINE_OFFSET &&
+    CLAIM_LINE_OFFSET + 8u == CLAIM_DIGEST &&
+    CLAIM_DIGEST + FSIMG_SHA256_DIGEST_LENGTH == CLAIM_GENERATED_LENGTH &&
+    CLAIM_GENERATED_LENGTH + 8u == CLAIM_HEADER,
+    "the claim header's fields are contiguous");
 
 /* A manifest is a source root whose scanner is the mtree(5) parser: every
  * entry line becomes exactly what the host scanner appends for a host
@@ -39,11 +66,12 @@ typedef struct manifest_import {
 	fsimg_writer_t	*writer;
 	fsimg_source_root_t *root;
 	fsimg_io_t	*manifest;
-	/* One charged allocation: digest_buffer, MANIFEST_DIGEST_BUFFER bytes,
-	 * then walk_path, the path limit's bytes.
+	/* One charged allocation: claim, claim_capacity bytes, then
+	 * walk_path, the path limit's bytes.
 	 */
-	unsigned char	*digest_buffer;
+	unsigned char	*claim;
 	char		*walk_path;
+	size_t		 claim_capacity;
 	uint64_t	 manifest_length;
 	uint64_t	 manifest_offset;
 	fsimg_host_file_t manifest_identity;
@@ -70,6 +98,13 @@ static fsimg_status_t import_host_file(manifest_import_t *,
     const fsimg_mtree_entry_t *, fsimg_error_t *);
 static fsimg_status_t append_generated(manifest_import_t *,
     const fsimg_entry_t *, const fsimg_generated_t *, fsimg_error_t *);
+static fsimg_status_t claim_capacity(const fsimg_ctx_t *, size_t *,
+    fsimg_error_t *);
+static fsimg_status_t append_claim(manifest_import_t *,
+    const fsimg_mtree_entry_t *, const fsimg_generated_t *, fsimg_error_t *);
+static bool decode_claim(const unsigned char *, size_t, digest_claim_t *);
+static fsimg_status_t check_claim(fsimg_writer_t *, const digest_claim_t *,
+    unsigned char *, fsimg_error_t *);
 static fsimg_status_t adopt_content_directory(manifest_import_t *,
     fsimg_error_t *);
 static fsimg_status_t inspect_contents_path(manifest_import_t *,
@@ -112,7 +147,7 @@ fsimg_writer_add_manifest(fsimg_writer_t *writer, int manifest_fd,
 	 */
 	if (import.candidate != -1)
 		fsimg_fd_release(writer->ctx, import.candidate);
-	fsimg_dealloc(import.digest_buffer);
+	fsimg_dealloc(import.claim);
 	fsimg_io_free(import.manifest);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
@@ -187,23 +222,41 @@ allocate_buffers(manifest_import_t *import, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = import->writer;
 	fsimg_error_t detail;
-	uint64_t total;
-	size_t allocation_size;
+	fsimg_status_t status;
+	size_t path_bytes;
 
-	if (!fsimg_add_u64(MANIFEST_DIGEST_BUFFER,
-	    writer->ctx->options.max_path_bytes, &total) ||
-	    !fsimg_to_size(total, &allocation_size))
+	status = claim_capacity(writer->ctx, &import->claim_capacity, error);
+	if (status != FSIMG_OK)
+		return (status);
+	path_bytes = writer->ctx->options.max_path_bytes;
+	if (import->claim_capacity > SIZE_MAX - path_bytes)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_SOURCE,
 		    "manifest import buffers exceed the host range"));
-	import->digest_buffer = fsimg_alloc(writer->ctx, allocation_size,
-	    &detail);
-	if (import->digest_buffer == NULL) {
+	import->claim = fsimg_alloc(writer->ctx,
+	    import->claim_capacity + path_bytes, &detail);
+	if (import->claim == NULL) {
 		if (error != NULL)
 			*error = detail;
 		return (detail.status);
 	}
-	import->walk_path = (char *)import->digest_buffer +
-	    MANIFEST_DIGEST_BUFFER;
+	import->walk_path = (char *)import->claim + import->claim_capacity;
+	return (FSIMG_OK);
+}
+
+/* The largest claim: its header, the largest generated record and a path
+ * at the context's limit, its NUL included. A stream's records are
+ * bounded by a u32.
+ */
+static fsimg_status_t
+claim_capacity(const fsimg_ctx_t *ctx, size_t *capacity, fsimg_error_t *error)
+{
+	uint64_t total;
+
+	total = (uint64_t)CLAIM_HEADER + FSIMG_GENERATED_RECORD_MAX +
+	    ctx->options.max_path_bytes;
+	if (total > UINT32_MAX || !fsimg_to_size(total, capacity))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_SOURCE,
+		    "manifest digest claims exceed the internal range"));
 	return (FSIMG_OK);
 }
 
@@ -318,16 +371,15 @@ import_link(manifest_import_t *import, const fsimg_mtree_entry_t *entry,
 	return (append_generated(import, &entry->entry, &generated, error));
 }
 
-/* Zero, seeded and positional content. A claimed digest is checked here,
- * where the bytes already exist, so a manifest whose generator and digest
- * disagree fails before any plan. A zero file is the zero source, which
- * has no record.
+/* Zero, seeded and positional content. A claimed digest is kept to be
+ * checked after planning: the size is the manifest's word, so hashing
+ * here would be work no budget bounds. A zero file is the zero source,
+ * which has no record.
  */
 static fsimg_status_t
 import_generated_file(manifest_import_t *import,
     const fsimg_mtree_entry_t *entry, fsimg_error_t *error)
 {
-	unsigned char digest[FSIMG_SHA256_DIGEST_LENGTH];
 	fsimg_generated_t generated;
 	fsimg_status_t status;
 
@@ -341,6 +393,8 @@ import_generated_file(manifest_import_t *import,
 		generated.generator = FSIMG_GENERATOR_POSITIONAL;
 		break;
 	case FSIMG_MTREE_CONTENT_ZERO:
+		generated.generator = FSIMG_GENERATOR_ZERO;
+		break;
 	case FSIMG_MTREE_CONTENT_HOST:
 		/* Unreachable: import_entry sends host content to
 		 * import_host_file.
@@ -358,14 +412,9 @@ import_generated_file(manifest_import_t *import,
 		    entry->hole_count * sizeof(generated.holes[0]));
 
 	if (entry->digest_given) {
-		status = fsimg_generated_digest(&import->writer->session,
-		    &generated, import->digest_buffer, MANIFEST_DIGEST_BUFFER,
-		    digest, error);
+		status = append_claim(import, entry, &generated, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (bcmp(digest, entry->digest, sizeof(digest)) != 0)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_SOURCE, "generated content does not match sha256digest"));
 	}
 	if (generated.generator == FSIMG_GENERATOR_ZERO)
 		return (fsimg_writer_collect(import->writer, &entry->entry,
@@ -389,6 +438,142 @@ append_generated(manifest_import_t *import, const fsimg_entry_t *entry,
 		return (status);
 	return (fsimg_writer_collect(writer, entry, FSIMG_STORAGE_GENERATED,
 	    reference, import->root, error));
+}
+
+/* Keep a generated file's digest claim, with its line and image path, for
+ * planning to check. The parser has bounded the path by the path limit,
+ * which the claim's capacity includes.
+ */
+static fsimg_status_t
+append_claim(manifest_import_t *import, const fsimg_mtree_entry_t *entry,
+    const fsimg_generated_t *generated, fsimg_error_t *error)
+{
+	fsimg_writer_t *writer = import->writer;
+	unsigned char *claim = import->claim;
+	size_t generated_length, path_length;
+	fsimg_status_t status;
+
+	if (writer->generated_digests == NULL) {
+		status = fsimg_stream_new(&writer->session,
+		    (uint32_t)import->claim_capacity, &writer->generated_digests,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	path_length = strlen(entry->entry.path) + 1;
+	if (path_length > writer->ctx->options.max_path_bytes)
+		return (fsimg_limit_error(error, FSIMG_RESOURCE_PATH,
+		    writer->ctx->options.max_path_bytes, path_length));
+	fsimg_meta_put_u64(claim + CLAIM_LINE, entry->line);
+	fsimg_meta_put_u64(claim + CLAIM_LINE_OFFSET, entry->line_offset);
+	bcopy(entry->digest, claim + CLAIM_DIGEST, FSIMG_SHA256_DIGEST_LENGTH);
+	generated_length = fsimg_generated_encode(generated,
+	    claim + CLAIM_HEADER);
+	fsimg_meta_put_u64(claim + CLAIM_GENERATED_LENGTH, generated_length);
+	bcopy(entry->entry.path, claim + CLAIM_HEADER + generated_length,
+	    path_length);
+	return (fsimg_stream_append(writer->generated_digests, claim,
+	    CLAIM_HEADER + generated_length + path_length, NULL, error));
+}
+
+/* Decode a claim as append_claim wrote it: a valid generated record of the
+ * stated length and a NUL-terminated path with no other NUL.
+ */
+static bool
+decode_claim(const unsigned char *record, size_t length, digest_claim_t *out)
+{
+	uint64_t generated_length;
+	size_t path_length;
+	const char *path;
+
+	if (length < CLAIM_HEADER)
+		return (false);
+	out->line = fsimg_meta_get_u64(record + CLAIM_LINE);
+	out->line_offset = fsimg_meta_get_u64(record + CLAIM_LINE_OFFSET);
+	bcopy(record + CLAIM_DIGEST, out->digest, sizeof(out->digest));
+	generated_length = fsimg_meta_get_u64(record + CLAIM_GENERATED_LENGTH);
+	if (generated_length >= length - CLAIM_HEADER ||
+	    !fsimg_generated_decode(record + CLAIM_HEADER,
+	    (size_t)generated_length, &out->generated) ||
+	    out->generated.generator == FSIMG_GENERATOR_LINK)
+		return (false);
+	path = (const char *)record + CLAIM_HEADER + generated_length;
+	path_length = length - CLAIM_HEADER - (size_t)generated_length;
+	if (memchr(path, '\0', path_length) != path + path_length - 1)
+		return (false);
+	out->path = path;
+	return (true);
+}
+
+fsimg_status_t
+fsimg_manifest_check_digests(fsimg_writer_t *writer, fsimg_error_t *error)
+{
+	digest_claim_t claim;
+	unsigned char *buffer;
+	uint64_t cursor;
+	size_t capacity, length;
+	fsimg_error_t detail;
+	fsimg_status_t status;
+
+	if (writer->generated_digests == NULL)
+		return (FSIMG_OK);
+	/* One charged allocation: a claim of the stream's largest record, then
+	 * the MANIFEST_DIGEST_BUFFER bytes its content is hashed through.
+	 */
+	capacity = writer->generated_digests->max_record;
+	if (capacity > SIZE_MAX - MANIFEST_DIGEST_BUFFER)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_SOURCE,
+		    "manifest digest claims exceed the host range"));
+	buffer = fsimg_alloc(writer->ctx, capacity + MANIFEST_DIGEST_BUFFER,
+	    &detail);
+	if (buffer == NULL) {
+		if (error != NULL)
+			*error = detail;
+		return (detail.status);
+	}
+	cursor = 0;
+	while ((status = fsimg_stream_next(writer->generated_digests, &cursor,
+	    buffer, capacity, &length, error)) == FSIMG_OK) {
+		if (!decode_claim(buffer, length, &claim)) {
+			status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+			    FSIMG_OP_SOURCE, "invalid generated digest claim");
+			break;
+		}
+		status = check_claim(writer, &claim, buffer + capacity, error);
+		if (status != FSIMG_OK)
+			break;
+	}
+	if (status == FSIMG_DONE)
+		status = FSIMG_OK;
+	fsimg_dealloc(buffer);
+	fsimg_stream_free(writer->generated_digests);
+	writer->generated_digests = NULL;
+	return (status);
+}
+
+/* Generate the claimed file's bytes through buffer, MANIFEST_DIGEST_BUFFER
+ * bytes, and compare their digest with the claim. Any failure names the
+ * claim's line and path, as the parser would have named them.
+ */
+static fsimg_status_t
+check_claim(fsimg_writer_t *writer, const digest_claim_t *claim,
+    unsigned char *buffer, fsimg_error_t *error)
+{
+	unsigned char digest[FSIMG_SHA256_DIGEST_LENGTH];
+	fsimg_status_t status;
+
+	status = fsimg_generated_digest(&writer->session, &claim->generated,
+	    buffer, MANIFEST_DIGEST_BUFFER, digest, error);
+	if (status == FSIMG_OK &&
+	    bcmp(digest, claim->digest, sizeof(digest)) != 0)
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_SOURCE,
+		    "generated content does not match sha256digest");
+	if (status != FSIMG_OK) {
+		fsimg_error_path(error, claim->path);
+		fsimg_mtree_name_line(error, claim->line, claim->line_offset);
+	}
+	return (status);
 }
 
 /* A file whose bytes are a host file beneath the content directory: the

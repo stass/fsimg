@@ -43,8 +43,9 @@ fsimg_generated_encode(const fsimg_generated_t *generated,
 
 /* The record is read back from scratch storage, so every field is checked
  * against what the encoder can write: a LINK has no seed or holes and a
- * target of 1 through 1023 bytes without a NUL; byte content has at most
- * FSIMG_MTREE_HOLES_MAX valid holes; the length covers exactly the fields.
+ * target of 1 through 1023 bytes without a NUL; ZERO has neither seed nor
+ * holes; seeded and positional content has at most FSIMG_MTREE_HOLES_MAX
+ * valid holes; the length covers exactly the fields.
  */
 bool
 fsimg_generated_decode(const unsigned char *record, size_t length,
@@ -69,6 +70,11 @@ fsimg_generated_decode(const unsigned char *record, size_t length,
 		    memchr(cursor, '\0', (size_t)out->length) != NULL)
 			return (false);
 		out->target = cursor;
+		break;
+	case FSIMG_GENERATOR_ZERO:
+		if (out->seed != 0 || hole_count != 0 ||
+		    length != FSIMG_GENERATED_HEADER)
+			return (false);
 		break;
 	case FSIMG_GENERATOR_SEEDED:
 	case FSIMG_GENERATOR_POSITIONAL:

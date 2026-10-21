@@ -68,6 +68,15 @@ fsimg_status_t fsimg_source_scan(fsimg_writer_t *, fsimg_source_root_t *,
 fsimg_status_t fsimg_source_append_host(fsimg_writer_t *,
     const fsimg_source_root_t *, const fsimg_host_file_t *,
     const unsigned char *, const char *, uint64_t *, fsimg_error_t *);
+/* Check every sha256digest a manifest claimed for generated content
+ * (manifest.c), generating each file's bytes once, one unit of work per
+ * piece, and release the claims. Planning calls it after the image has
+ * accepted every size. A mismatch is FSIMG_EINVAL; it, and any other
+ * failure while a claim is checked, names the claim's line and image path
+ * as the parser names a refused line.
+ */
+fsimg_status_t fsimg_manifest_check_digests(fsimg_writer_t *,
+    fsimg_error_t *);
 bool fsimg_source_identity_equal(const fsimg_host_file_t *,
     const fsimg_host_file_t *);
 /* fd is ignored (pass -1) when identity is a symbolic link, which has no

@@ -375,9 +375,11 @@ the same entries, every accepted entry must satisfy the parser's contract
 (valid image path, link, contents path, holes within size, metadata), and
 the parser must return all its memory. The same bytes are then written to
 a file and imported through `fsimg_writer_add_manifest()`, without a content
-directory and with a small fixed one, under a 512-unit work limit, since a
-claimed digest hashes the whole generated file at input; an accepted
-manifest's generated and zero sources must tile under `next_range()` and
+directory and with a small fixed one, under a 512-unit work limit; an
+accepted manifest's catalog is prepared and its digest claims on generated
+content are checked as planning checks them, which hashes each claimed file
+whole with no image to bound its size, and its generated and zero sources
+must tile under `next_range()` and
 read back, zero inside every ZERO run, and each import must return all its
 memory and descriptors. Its seeds, written by `test-mtree
 --seed`, are `mtree -c` and bsdtar manifests of one host tree and a

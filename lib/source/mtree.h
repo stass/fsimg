@@ -52,6 +52,8 @@ typedef struct fsimg_mtree_hole {
  * path of a host file, each NUL-terminated (decoding refuses a NUL byte)
  * and NULL when absent. content, seed and holes describe a file's bytes;
  * seed and holes are set only for seeded and positional content.
+ * line and line_offset name the entry's line as a failure names it: the
+ * number of its first physical line and the logical line's byte offset.
  */
 typedef struct fsimg_mtree_entry {
 	fsimg_entry_t	 entry;
@@ -59,6 +61,8 @@ typedef struct fsimg_mtree_entry {
 	const char	*contents;
 	const fsimg_mtree_hole_t *holes;
 	uint64_t	 seed;
+	uint64_t	 line;
+	uint64_t	 line_offset;
 	size_t		 link_length;
 	size_t		 contents_length;
 	size_t		 hole_count;
@@ -102,5 +106,12 @@ fsimg_status_t fsimg_mtree_parse(fsimg_session_t *,
  * other keywords, at four bytes per encoded byte.
  */
 uint64_t fsimg_mtree_line_limit(const fsimg_ctx_t *);
+
+/* Name a manifest line in a failure's record as the parser names the line
+ * that failed: offset holds the logical line's byte offset and the message
+ * gains the prefix "manifest line N: ". A caller that refuses an entry
+ * after the parse, by its line and line_offset, so reports the same record.
+ */
+void fsimg_mtree_name_line(fsimg_error_t *, uint64_t, uint64_t);
 
 #endif

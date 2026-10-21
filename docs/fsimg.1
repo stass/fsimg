@@ -444,6 +444,9 @@ Collect, validate and report a plan without creating an output image or reading
 file payloads;
 .Fl f
 is then optional.
+Planning refuses an image larger than the output limit, as creation does;
+the raw copy an unencoded image on standard output is written from is
+charged only when it is written.
 Scratch use is allowed.
 .It Fl o Ar sector=bytes
 Sector size within the selected profile.

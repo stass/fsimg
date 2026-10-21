@@ -190,6 +190,15 @@ struct fsimg_writer {
 	fsimg_writer_state_t state;
 	fsimg_stream_t	*entries;
 	fsimg_stream_t	*host_sources;
+	/* The sha256digest claims manifests make for generated content, NULL
+	 * until one is made. Planning checks them once the image has accepted
+	 * every size, and releases them (fsimg_manifest_check_digests). That
+	 * every claim is checked, and only at a size the plan accepted, rests
+	 * on two facts: a file is never dropped by preparation (only
+	 * directories merge), so each claim's file is in the plan; and both
+	 * emission entry points plan first.
+	 */
+	fsimg_stream_t	*generated_digests;
 	fsimg_stream_t	*ordered;
 	fsimg_stream_t	*children;
 	fsimg_array_t	*index;

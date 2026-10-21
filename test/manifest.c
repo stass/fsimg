@@ -57,8 +57,8 @@ typedef struct found_file {
 	unsigned char	 bytes[80000];
 } found_file_t;
 
-/* A manifest that must be refused at input: status, the image path named,
- * and the line, all three asserted.
+/* A manifest that must be refused, at input or by planning: status, the
+ * image path named and the line, all three asserted.
  */
 typedef struct refusal {
 	const char	*manifest;
@@ -106,6 +106,8 @@ static const char generated_manifest[] =
     "./dir/empty fsimg.content=zero size=0\n";
 
 static void fixture_open(fixture_t *, const char *, uint32_t);
+static void fixture_open_limited(fixture_t *, const char *, uint32_t,
+    uint64_t);
 static void fixture_writer(fixture_t *, const char *, uint32_t);
 static void fixture_close(fixture_t *);
 static void append_text(char *, size_t, const char *);
@@ -133,10 +135,14 @@ static void put_file(int, const char *, const char *);
 static int put_directory(int, const char *);
 static uint64_t line_offset(const char *, unsigned);
 static void check_refusal(const refusal_t *, int);
+static void check_named_line(const refusal_t *, const fsimg_error_t *);
 static int run_tool(const char *const *, int);
 static void remove_tree(const char *);
 static void test_generated_files(void);
 static void test_generated_digest_refused(void);
+static uint64_t refused_plan_work(const char *, uint64_t, uint64_t,
+    const char *, fsimg_status_t);
+static void test_generated_digest_after_planning(void);
 static void test_generated_ranges(void);
 static void test_host_contents(void);
 static void test_host_refusals(void);
@@ -154,6 +160,16 @@ static void rebuild_from_tool(fixture_t *, const char *const *, int,
 static void
 fixture_open(fixture_t *fixture, const char *format, uint32_t flags)
 {
+	fixture_open_limited(fixture, format, flags, 0);
+}
+
+/* A fixture whose context refuses output beyond max_output_bytes, zero
+ * for no limit.
+ */
+static void
+fixture_open_limited(fixture_t *fixture, const char *format, uint32_t flags,
+    uint64_t max_output_bytes)
+{
 	fsimg_options_t options;
 
 	bzero(fixture, sizeof(*fixture));
@@ -167,6 +183,7 @@ fixture_open(fixture_t *fixture, const char *format, uint32_t flags)
 	options.memory_bytes = UINT64_C(64) * 1024 * 1024;
 	options.scratch_directory_fd = fixture->parent;
 	options.max_open_files = 16;
+	options.max_output_bytes = max_output_bytes;
 	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline,
 	    NULL) == FSIMG_OK);
@@ -498,21 +515,28 @@ check_refusal(const refusal_t *refusal, int contents)
 {
 	fixture_t fixture;
 	fsimg_error_t error;
-	char prefix[32];
 
 	fixture_open(&fixture, "fat12", 0);
 	CHECK(add_manifest(&fixture, refusal->manifest, contents,
 	    &error) == refusal->status);
-	CHECK(error.status == refusal->status);
-	CHECK(error.offset_valid &&
-	    error.offset == line_offset(refusal->manifest, refusal->line));
-	snprintf(prefix, sizeof(prefix), "manifest line %u: ", refusal->line);
-	CHECK(strncmp(error.message, prefix, strlen(prefix)) == 0);
-	CHECK(strcmp(error.path, refusal->path) == 0);
-	CHECK(strstr(error.message, "manifest-") == NULL);
+	check_named_line(refusal, &error);
 	CHECK(fsimg_writer_add_manifest(fixture.writer, -1, -1,
 	    NULL) == FSIMG_ESTATE);
 	fixture_close(&fixture);
+}
+
+static void
+check_named_line(const refusal_t *refusal, const fsimg_error_t *error)
+{
+	char prefix[32];
+
+	CHECK(error->status == refusal->status);
+	CHECK(error->offset_valid &&
+	    error->offset == line_offset(refusal->manifest, refusal->line));
+	snprintf(prefix, sizeof(prefix), "manifest line %u: ", refusal->line);
+	CHECK(strncmp(error->message, prefix, strlen(prefix)) == 0);
+	CHECK(strcmp(error->path, refusal->path) == 0);
+	CHECK(strstr(error->message, "manifest-") == NULL);
 }
 
 /* Run a tool with stdout to output, or -1 when it is not installed. */
@@ -590,12 +614,16 @@ test_generated_files(void)
 	free(file);
 }
 
-/* A digest that disagrees with the generator refuses the manifest at the
- * line that claims it, for each generator.
+/* A digest that disagrees with the generator is refused by planning, at
+ * the line that claims it, for each generator: the manifest's import
+ * succeeds, planning fails the writer, and no plan is kept.
  */
 static void
 test_generated_digest_refused(void)
 {
+	fixture_t fixture;
+	fsimg_error_t error;
+	const fsimg_plan_t *plan;
 	static const refusal_t refusals[] = {
 		{ ". type=dir\n"
 		  "./s type=file fsimg.content=seeded fsimg.seed=8 size=100 "
@@ -613,8 +641,92 @@ test_generated_digest_refused(void)
 		  FSIMG_EINVAL, 2, "/z" }
 	};
 
-	for (size_t i = 0; i < sizeof(refusals) / sizeof(refusals[0]); i++)
-		check_refusal(&refusals[i], -1);
+	for (size_t i = 0; i < sizeof(refusals) / sizeof(refusals[0]); i++) {
+		fixture_open(&fixture, "fat12", 0);
+		CHECK(add_manifest(&fixture, refusals[i].manifest, -1,
+		    &error) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan,
+		    &error) == refusals[i].status);
+		check_named_line(&refusals[i], &error);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan,
+		    NULL) == FSIMG_ESTATE);
+		fixture_close(&fixture);
+	}
+}
+
+/* Plan manifest in a fresh fixture, with an exact volume size and an
+ * output limit (zero for neither), expect the planning refusal status, and
+ * return the work the writer was charged.
+ */
+static uint64_t
+refused_plan_work(const char *format, uint64_t volume_bytes,
+    uint64_t max_output_bytes, const char *manifest, fsimg_status_t status)
+{
+	fsimg_write_options_t write_options;
+	fixture_t fixture;
+	fsimg_error_t error;
+	const fsimg_plan_t *plan;
+	uint64_t work;
+
+	fixture_open_limited(&fixture, format, 0, max_output_bytes);
+	fsimg_writer_free(fixture.writer);
+	fsimg_write_options_init(&write_options);
+	write_options.volume_bytes = volume_bytes;
+	CHECK(fsimg_writer_new(fixture.ctx, format, &write_options,
+	    &fixture.writer, NULL) == FSIMG_OK);
+	CHECK(add_manifest(&fixture, manifest, -1, &error) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, &error) == status);
+	/* The one limit a caller here sets is the output limit. */
+	CHECK(status != FSIMG_ELIMIT || error.resource == FSIMG_RESOURCE_OUTPUT);
+	work =fixture.writer->session.progress.work;
+	fixture_close(&fixture);
+	return (work);
+}
+
+/* A generated file's digest is hashed only after planning has accepted its
+ * size: a 1 GiB seeded file claiming a wrong digest is refused as too large
+ * for a 1 MiB FAT12 volume, and for a 1 MiB output limit on an
+ * automatically sized exFAT volume, not as a mismatch. Hashing it would
+ * charge the writer 16384 units of work, one per 64 KiB; keeping the claim
+ * may add only a few units over planning the same file without a digest.
+ */
+static void
+test_generated_digest_after_planning(void)
+{
+	static const struct {
+		const char	*format;
+		uint64_t	 volume_bytes;
+		uint64_t	 max_output_bytes;
+		fsimg_status_t	 status;
+	} images[] = {
+		{ "fat12", 1024 * 1024, 0, FSIMG_ERANGE },
+		{ "exfat", 0, 1024 * 1024, FSIMG_ELIMIT }
+	};
+	static const char claimed[] =
+	    ". type=dir\n"
+	    "./small type=file fsimg.content=seeded fsimg.seed=7 size=100 "
+	    "sha256digest=" SEEDED_7_100 "\n"
+	    "./huge type=file fsimg.content=seeded fsimg.seed=1 "
+	    "size=1073741824 sha256digest=" SEEDED_7_100 "\n";
+	static const char unclaimed[] =
+	    ". type=dir\n"
+	    "./small type=file fsimg.content=seeded fsimg.seed=7 size=100 "
+	    "sha256digest=" SEEDED_7_100 "\n"
+	    "./huge type=file fsimg.content=seeded fsimg.seed=1 "
+	    "size=1073741824\n";
+
+	uint64_t with_claim, without_claim;
+
+	for (size_t i = 0; i < sizeof(images) / sizeof(images[0]); i++) {
+		with_claim = refused_plan_work(images[i].format,
+		    images[i].volume_bytes, images[i].max_output_bytes, claimed,
+		    images[i].status);
+		without_claim = refused_plan_work(images[i].format,
+		    images[i].volume_bytes, images[i].max_output_bytes, unclaimed,
+		    images[i].status);
+		CHECK(with_claim >= without_claim &&
+		    with_claim - without_claim < 64);
+	}
 }
 
 /* The source cursor serves generated content: next_range() tiles the file
@@ -1248,6 +1360,7 @@ main(void)
 {
 	test_generated_files();
 	test_generated_digest_refused();
+	test_generated_digest_after_planning();
 	test_generated_ranges();
 	test_host_contents();
 	test_host_refusals();

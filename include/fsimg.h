@@ -753,10 +753,13 @@ void fsimg_sink_init(fsimg_sink_t *, fsimg_sink_kind_t);
 /* Writers copy options/labels and own their borrowed plan until destruction.
  * plan seals collection; subsequent plan queries return the same object.
  * emit/write_at plan automatically and attempt emission only once. A failed
- * writer retains an already completed plan for inspection. Raw sinks may be
- * incomplete on failure; known source aliases are rejected before mutation.
- * Callback source/sink storage must be disjoint. Fixed sinks must match the
- * planned size; whole resizable sinks are resized. Every byte is defined.
+ * writer retains a plan that plan returned for inspection; a plan a later
+ * planning step refused is not kept. Raw sinks may be incomplete on failure;
+ * known source aliases are rejected before mutation. Callback source/sink
+ * storage must be disjoint. Planning refuses an output whose bound, plus the
+ * raw disk an encoded output is written from, exceeds max_output_bytes; output
+ * charges a stream's raw intermediate before emitting. Fixed sinks must match
+ * the planned size; whole resizable sinks are resized. Every byte is defined.
  * ALLOW_LOSS permits optional timestamp rounding/omission, time-basis loss and
  * omission of a field the format does not store, counted once per field;
  * required losses and entry kinds the format lacks always fail planning.
@@ -780,8 +783,11 @@ void fsimg_sink_init(fsimg_sink_t *, fsimg_sink_kind_t);
  * without one fails. Its records rank as that root's scanned records. A
  * failure while reading the manifest names the line by byte offset in
  * error.offset and by number in error.message, and the entry's image path
- * in error.path. A host file that changed, or whose bytes differ from the
- * manifest's sha256digest, fails emission with FSIMG_ESOURCE_CHANGED.
+ * in error.path. Planning checks the sha256digest of generated content
+ * once the image has accepted every size, and a mismatch fails it with
+ * FSIMG_EINVAL naming the line and path the same way. A host file that
+ * changed, or whose bytes differ from the manifest's sha256digest, fails
+ * emission with FSIMG_ESOURCE_CHANGED.
  * write_at requires a single basename beneath a trusted directory descriptor,
  * publishes without replacement, and always performs durable publication.
  * On unsupported publication error.path names the retained image relative to

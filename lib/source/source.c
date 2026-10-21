@@ -1044,6 +1044,7 @@ open_generated(fsimg_writer_t *writer, uint64_t reference,
 		return (status);
 	if (!fsimg_generated_decode(writer->source_record, length,
 	    &source->generated) ||
+	    source->generated.generator == FSIMG_GENERATOR_ZERO ||
 	    source->generated.length != source->length ||
 	    (source->generated.generator == FSIMG_GENERATOR_LINK) !=
 	    (kind == FSIMG_ENTRY_SYMLINK))

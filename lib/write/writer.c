@@ -386,6 +386,8 @@ fsimg_writer_fail(fsimg_writer_t *writer, fsimg_status_t status)
 	writer->source_record = NULL;
 	fsimg_stream_free(writer->host_sources);
 	writer->host_sources = NULL;
+	fsimg_stream_free(writer->generated_digests);
+	writer->generated_digests = NULL;
 	/* A successfully published catalog remains inspectable after failure. */
 	if (!writer->catalog_ready)
 		fsimg_catalog_discard(writer);
@@ -402,6 +404,7 @@ fsimg_writer_free(fsimg_writer_t *writer)
 		writer->format->writer->free(writer->plan);
 	fsimg_catalog_discard(writer);
 	fsimg_stream_free(writer->host_sources);
+	fsimg_stream_free(writer->generated_digests);
 	fsimg_stream_free(writer->entries);
 	fsimg_dealloc(writer->record);
 	fsimg_dealloc(writer->source_record);
@@ -554,8 +557,20 @@ fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
 	status = writer->format->writer->plan(writer, error);
 	if (status == FSIMG_OK)
 		status = plan_disk(writer, error);
-	if (status != FSIMG_OK)
+	/* The digests a manifest claims for generated content are checked
+	 * last, once the image, and plan_disk's output limit, have accepted
+	 * every file's size: the bytes hashed never exceed the planned volume.
+	 */
+	if (status == FSIMG_OK)
+		status = fsimg_manifest_check_digests(writer, error);
+	if (status != FSIMG_OK) {
+		/* A plan is complete only once every step accepted it; one a
+		 * later step refused is not kept for inspection.
+		 */
+		writer->format->writer->free(writer->plan);
+		writer->plan = NULL;
 		return (fsimg_writer_fail(writer, status));
+	}
 	fsimg_stat_add(&writer->plan->info.metadata_losses, writer->omitted_fields);
 	*out = writer->plan;
 	return (FSIMG_OK);

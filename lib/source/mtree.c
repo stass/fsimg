@@ -396,12 +396,19 @@ callback_status(fsimg_status_t status, fsimg_error_t *error)
 	return (status);
 }
 
+/* Name the line being parsed in a failure's record. */
+static void
+name_failed_line(const mtree_parser_t *parser, fsimg_error_t *error)
+{
+	fsimg_mtree_name_line(error, parser->line_number, parser->line_offset);
+}
+
 /* Prefix the failure with the line it concerns: the logical line's byte
  * offset in offset and its first physical line's number in the message.
  * The record carries the failure's status, as every failure path sets it.
  */
-static void
-name_failed_line(const mtree_parser_t *parser, fsimg_error_t *error)
+void
+fsimg_mtree_name_line(fsimg_error_t *error, uint64_t line, uint64_t offset)
 {
 	char message[sizeof(error->message)];
 	int count;
@@ -411,10 +418,10 @@ name_failed_line(const mtree_parser_t *parser, fsimg_error_t *error)
 	/* The terminator is forced rather than assumed of the record. */
 	bcopy(error->message, message, sizeof(message));
 	message[sizeof(message) - 1] = '\0';
-	error->offset = parser->line_offset;
+	error->offset = offset;
 	error->offset_valid = true;
 	count = snprintf(error->message, sizeof(error->message),
-	    "manifest line %ju: %s", (uintmax_t)parser->line_number, message);
+	    "manifest line %ju: %s", (uintmax_t)line, message);
 	if (count < 0 || (size_t)count >= sizeof(error->message))
 		error->message_truncated = true;
 }
@@ -762,6 +769,8 @@ deliver_entry(mtree_parser_t *parser, mtree_entry_form_t form,
 		parser->root_open = true;
 		return (FSIMG_OK);
 	}
+	entry->line = parser->line_number;
+	entry->line_offset = parser->line_offset;
 	status = parser->input->entry(parser->input->entry_argument, entry,
 	    error);
 	return (callback_status(status, error));

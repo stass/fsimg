@@ -162,13 +162,19 @@ and
 .Cm fsimg.holes .
 A generated file's
 .Cm sha256digest
-is checked at input; a host file's is checked as emission copies it, and a
-mismatch fails emission with
+is checked by
+.Fn fsimg_writer_plan
+once the image and the output limit have accepted every size, so no more
+bytes are hashed than the planned volume holds, and a mismatch fails
+planning with
+.Dv FSIMG_EINVAL ;
+a host file's is checked as emission copies it, and a mismatch fails
+emission with
 .Dv FSIMG_ESOURCE_CHANGED
 naming the path.
-An input failure names the manifest line by byte offset in the error's
-offset and by number at the start of its message, and the entry's image
-path.
+An input failure, and a generated digest mismatch, names the manifest line
+by byte offset in the error's offset and by number at the start of its
+message, and the entry's image path.
 Host identity checks detect ordinary metadata-visible changes;
 hostile concurrent mutation requires immutable inputs or a snapshot.
 Provider content and state remain borrowed until writer destruction.

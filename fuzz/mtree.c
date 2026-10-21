@@ -33,12 +33,14 @@
  * The same bytes then go through the public fsimg_writer_add_manifest(),
  * from a file, once without a content directory and once with a small
  * fixed one holding a file, a nested file and a symbolic link. When the
- * manifest is accepted and its catalog prepares, every generated and zero
- * source is opened through the writer's source cursor: next_range() must
- * tile the file, and reads at offsets drawn from the input must succeed
- * and read zero wherever a range says ZERO. Every call must return all its
- * memory and descriptors. The work limit is small because a claimed digest
- * is computed over the whole generated file at input.
+ * manifest is accepted and its catalog prepares, the digest claims on
+ * generated content are checked as planning checks them, and every
+ * generated and zero source is opened through the writer's source cursor:
+ * next_range() must tile the file, and reads at offsets drawn from the
+ * input must succeed and read zero wherever a range says ZERO. Every call
+ * must return all its memory and descriptors. The work limit is small
+ * because checking a claim hashes the whole generated file, and no image
+ * bounds a fuzzed size here.
  */
 typedef struct fuzz_input {
 	const uint8_t	*data;
@@ -338,8 +340,12 @@ import_manifest(const uint8_t *data, size_t size, int contents, uint64_t seed)
 	if (status != FSIMG_OK && error.status != status)
 		abort();
 	if (status == FSIMG_OK &&
-	    fsimg_writer_prepare(writer, NULL, &error) == FSIMG_OK)
+	    fsimg_writer_prepare(writer, NULL, &error) == FSIMG_OK) {
+		status = fsimg_manifest_check_digests(writer, &error);
+		if (status != FSIMG_OK && error.status != status)
+			abort();
 		serve_sources(writer, seed);
+	}
 	fsimg_writer_free(writer);
 	if (fsimg_ctx_get_stats(ctx, &stats, &error) != FSIMG_OK ||
 	    stats.memory_bytes != baseline.memory_bytes ||
