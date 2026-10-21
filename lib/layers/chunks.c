@@ -9,6 +9,7 @@
 
 #include <zlib.h>
 
+#include "codec.h"
 #include "io.h"
 #include "layer.h"
 #include "meta.h"
@@ -33,13 +34,14 @@
  *
  * The adapter resolves each read through the index. Raw records read the
  * file at the translated offset, zero and fill records synthesize bytes,
- * and compressed records are inflated whole into a least-recently-used
- * cache of four chunk buffers, each the size of the largest compressed
- * chunk the index holds. Sequential reads and any access confined to four
- * chunks therefore decode each chunk once; a pattern alternating across
- * more chunks pays one decode per read until the work limit, or without
- * one the decode bound of 64 times the compressed chunks' decoded length
- * plus 1 GiB, stops it. The bound counts only bytes a compressed record
+ * and compressed records are decoded whole, by zlib or by the project's
+ * LZO1X and NRV2B decoders, into a least-recently-used cache of four chunk
+ * buffers, each the size of the largest compressed chunk the index holds.
+ * Sequential reads and any access confined to four chunks therefore
+ * decode each chunk once; a pattern alternating across more chunks pays
+ * one decode per read until the work limit, or without one the decode
+ * bound of 64 times the compressed chunks' decoded length plus 1 GiB,
+ * stops it. The bound counts only bytes a compressed record
  * declares, so a disk declared vast with zero runs does not raise it.
  * The cache changes no byte a read returns.
  */
@@ -51,6 +53,8 @@
 
 _Static_assert(FSIMG_CHUNK_MAX_DECODED <= UINT32_MAX,
     "a chunk's decoded length fits zlib's output counter");
+_Static_assert(CHUNK_INPUT_BYTES >= FSIMG_FRAMED_MAX_ENCODED,
+    "a framed chunk's encoded bytes fit the input buffer whole");
 
 /* Record fields, little-endian. */
 enum {
@@ -75,6 +79,7 @@ struct fsimg_chunk_index {
 	uint64_t	 max_decoded;
 	uint64_t	 compressed_decoded;	/* Compressed records' lengths, summed */
 	unsigned	 kinds;
+	unsigned	 codecs;
 	bool		 sealed;
 	/* The last record a lookup returned, already decoded and checked. */
 	fsimg_chunk_t	 last;
@@ -92,7 +97,9 @@ typedef struct cache_slot {
 /*
  * The adapter's state. The file and the session are borrowed from the
  * image, which outlives the adapter; the index, the cache buffers and the
- * inflate state are owned and released with the adapter.
+ * inflate state are owned and released with the adapter. The inflate state
+ * exists only for an index holding zlib chunks; input holds a chunk's
+ * encoded bytes in pieces for zlib and whole for a framed chunk.
  */
 typedef struct chunk_disk {
 	fsimg_ctx_t	*ctx;
@@ -131,6 +138,8 @@ static fsimg_status_t charge_decode(chunk_disk_t *, const fsimg_chunk_t *,
     fsimg_error_t *);
 static fsimg_status_t inflate_chunk(chunk_disk_t *, const fsimg_chunk_t *,
     unsigned char *, fsimg_error_t *);
+static fsimg_status_t decode_framed(chunk_disk_t *, const fsimg_chunk_t *,
+    unsigned char *, fsimg_error_t *);
 static fsimg_status_t cache_fetch(chunk_disk_t *, const fsimg_chunk_t *,
     const unsigned char **, fsimg_error_t *);
 static void fill_pattern(unsigned char *, size_t, uint32_t, uint64_t);
@@ -160,9 +169,11 @@ chunk_corrupt(const fsimg_chunk_index_t *index, fsimg_error_t *error,
 /*
  * A record is valid when it names a nonempty range of the disk and its
  * encoded bytes, if any, lie in the container's data range: raw bytes as
- * many as the range, compressed bytes at least one and at most zlib's
- * bound for the decoded length, which is at most the 16 MiB a cache slot
- * holds. Zero and fill records name no file bytes.
+ * many as the range; compressed bytes at least one, and at most zlib's
+ * bound for a zlib chunk's decoded length, which is at most the 16 MiB a
+ * cache slot holds, or the framing's 65535 for an LZO1X or NRV2B chunk,
+ * which decodes to at most 65536. Zero and fill records name no file
+ * bytes.
  */
 static bool
 chunk_valid(const fsimg_chunk_index_t *index, const fsimg_chunk_t *chunk)
@@ -182,10 +193,19 @@ chunk_valid(const fsimg_chunk_index_t *index, const fsimg_chunk_t *chunk)
 			return (false);
 		break;
 	case FSIMG_CHUNK_COMPRESSED:
-		if (chunk->argument != FSIMG_CODEC_ZLIB ||
-		    chunk->length > FSIMG_CHUNK_MAX_DECODED ||
-		    chunk->encoded_length == 0 ||
-		    chunk->encoded_length > compressBound((uLong)chunk->length))
+		if (chunk->encoded_length == 0)
+			return (false);
+		if (chunk->argument == FSIMG_CODEC_ZLIB) {
+			if (chunk->length > FSIMG_CHUNK_MAX_DECODED ||
+			    chunk->encoded_length >
+			    compressBound((uLong)chunk->length))
+				return (false);
+		} else if (chunk->argument == FSIMG_CODEC_LZO1X ||
+		    chunk->argument == FSIMG_CODEC_NRV2B) {
+			if (chunk->length > FSIMG_FRAMED_MAX_DECODED ||
+			    chunk->encoded_length > FSIMG_FRAMED_MAX_ENCODED)
+				return (false);
+		} else
 			return (false);
 		break;
 	default:
@@ -298,6 +318,7 @@ fsimg_chunk_index_append(fsimg_chunk_index_t *index,
 	index->count++;
 	index->kinds |= 1u << chunk->kind;
 	if (chunk->kind == FSIMG_CHUNK_COMPRESSED) {
+		index->codecs |= 1u << chunk->argument;
 		if (chunk->length > index->max_decoded)
 			index->max_decoded = chunk->length;
 		/* Overlapping records fail at seal; until then saturate. */
@@ -402,6 +423,7 @@ fsimg_chunk_index_summary(const fsimg_chunk_index_t *index,
 	out->count = index->count;
 	out->max_decoded = index->max_decoded;
 	out->kinds = index->kinds;
+	out->codecs = index->codecs;
 }
 
 /* Every record read back from scratch is decoded and checked here. */
@@ -500,15 +522,21 @@ fsimg_test_chunk_records(const fsimg_chunk_index_t *index)
 	return (index == NULL ? NULL : index->records);
 }
 
+/* A compressed record is named by its codec, so a kind bit and a codec bit
+ * each select one name of one list.
+ */
 void
-fsimg_chunk_kinds_text(unsigned kinds, char *text, size_t capacity)
+fsimg_chunk_kinds_text(unsigned kinds, unsigned codecs, char *text,
+    size_t capacity)
 {
 	static const struct {
-		fsimg_chunk_kind_t kind;
+		bool codec;
+		unsigned value;
 		const char *name;
 	} names[] = {
-		{ FSIMG_CHUNK_RAW, "raw" }, { FSIMG_CHUNK_ZERO, "zero" },
-		{ FSIMG_CHUNK_FILL, "fill" }, { FSIMG_CHUNK_COMPRESSED, "zlib" }
+		{ false, FSIMG_CHUNK_RAW, "raw" }, { false, FSIMG_CHUNK_ZERO, "zero" },
+		{ false, FSIMG_CHUNK_FILL, "fill" }, { true, FSIMG_CODEC_ZLIB, "zlib" },
+		{ true, FSIMG_CODEC_LZO1X, "lzo1x" }, { true, FSIMG_CODEC_NRV2B, "nrv2b" }
 	};
 	size_t used;
 	int count;
@@ -516,7 +544,7 @@ fsimg_chunk_kinds_text(unsigned kinds, char *text, size_t capacity)
 	used = 0;
 	text[0] = '\0';
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-		if ((kinds & (1u << names[i].kind)) == 0)
+		if (((names[i].codec ? codecs : kinds) & (1u << names[i].value)) == 0)
 			continue;
 		count = snprintf(text + used, capacity - used, "%s%s",
 		    used == 0 ? "" : ",", names[i].name);
@@ -560,7 +588,8 @@ disk_release(void *argument)
  * Open the adapter over a sealed index. The cache is allocated here, four
  * buffers of the largest compressed chunk, so a budget that cannot hold it
  * fails the open as a memory limit naming the chunk cache rather than a
- * later read. The adapter adopts the index on every outcome.
+ * later read; so are the input buffer and, for zlib chunks, the inflate
+ * state. The adapter adopts the index on every outcome.
  */
 fsimg_status_t
 fsimg_chunk_disk_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
@@ -607,6 +636,8 @@ fsimg_chunk_disk_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
 			status = error->status;
 			goto fail;
 		}
+	}
+	if ((index->codecs & (1u << FSIMG_CODEC_ZLIB)) != 0) {
 		disk->stream.zalloc = zlib_alloc;
 		disk->stream.zfree = zlib_free;
 		disk->stream.opaque = disk;
@@ -735,6 +766,74 @@ inflate_chunk(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 	return (FSIMG_OK);
 }
 
+fsimg_status_t
+fsimg_framed_decode(fsimg_chunk_codec_t codec, const unsigned char *in,
+    size_t length, uint64_t file_offset, unsigned char *out, size_t capacity,
+    size_t *produced, fsimg_error_t *error)
+{
+	fsimg_lzo1x_decoder_t lzo;
+	fsimg_codec_step_t step;
+	fsimg_status_t status;
+
+	/* The stream is given whole and its output limited to capacity, so
+	 * each decoder itself refuses output past capacity, input left after
+	 * the end marker and input ending before it.
+	 */
+	*produced = 0;
+	if (codec == FSIMG_CODEC_LZO1X) {
+		fsimg_lzo1x_decoder_init(&lzo, capacity);
+		status = fsimg_lzo1x_decode(&lzo, in, length, true, out, 0,
+		    capacity, &step, error);
+	} else
+		status = fsimg_nrv2b_decode(in, length, out, capacity, &step,
+		    error);
+	if (status != FSIMG_OK) {
+		/* A damaged stream is the image's failure, at a file offset. */
+		if (status == FSIMG_ECORRUPT && error != NULL) {
+			error->operation = FSIMG_OP_IMAGE;
+			if (error->offset_valid)
+				error->offset += file_offset;
+		}
+		return (status);
+	}
+	if (!step.done)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
+		    "compressed chunk does not end within its bound"));
+	*produced = step.produced;
+	return (FSIMG_OK);
+}
+
+/*
+ * Decode one framed LZO1X or NRV2B chunk into out, which holds exactly its
+ * declared length. The encoded bytes, at most 65535, are read whole and
+ * decoded with the declared length as the output bound; the stream must
+ * end there exactly, as the learning pass that declared it found.
+ */
+static fsimg_status_t
+decode_framed(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
+    unsigned char *out, fsimg_error_t *error)
+{
+	size_t encoded, decoded, produced, transferred;
+	fsimg_status_t status;
+
+	/* chunk_valid bounded both lengths by the framing. */
+	encoded = (size_t)chunk->encoded_length;
+	decoded = (size_t)chunk->length;
+	status = fsimg_io_read_session(disk->file, disk->session,
+	    chunk->file_offset, disk->input, encoded, &transferred, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_framed_decode((fsimg_chunk_codec_t)chunk->argument,
+	    disk->input, encoded, chunk->file_offset, out, decoded, &produced,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (produced != decoded)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
+		    "compressed chunk decodes to fewer bytes than declared"));
+	return (FSIMG_OK);
+}
+
 /* The decoded bytes of a compressed chunk, from the cache or decoded into
  * its least recently used slot. A slot matches only the identical record,
  * so a record cannot be served another record's bytes. The record comes
@@ -772,7 +871,10 @@ cache_fetch(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 	status = charge_decode(disk, chunk, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = inflate_chunk(disk, chunk, victim->bytes, error);
+	if (chunk->argument == FSIMG_CODEC_ZLIB)
+		status = inflate_chunk(disk, chunk, victim->bytes, error);
+	else
+		status = decode_framed(disk, chunk, victim->bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
 	victim->chunk = *chunk;

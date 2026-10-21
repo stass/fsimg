@@ -1355,6 +1355,46 @@ bodies holding two symbolic-link records below a symbolic-link record open
 with those records shadowed. Images `dumpifs -u` decompresses are not compared:
 no such copies exist on this host.
 
+`test-ifsboot` reads QNX boot images through the `ifsboot` container
+with the public API alone. A generator builds each image in memory: an
+opaque boot prefix (none, or the 1,088-byte x86 BIOS loader), a startup
+section of random opaque bytes behind a header from the profile's closed
+tables, its checksum word last, and a body that is the ImageFS raw or
+framed as LZO1X or NRV2B chunks of literal and run streams, with the zero
+terminator, zero padding and the stored checksum trailer. The tests open,
+list, read and verify each prefix and compression value; mutate every
+header field, each bound, the framing (a length word or chunk reaching the
+trailer, a missing terminator, a short non-final chunk, a chunk decoding
+past 65,536 bytes or `imagefs_size`, bytes after a stream's end), the
+padding and both sums, each failing with its class and naming `ifsboot`;
+check the probe's offsets and ties and the ImageFS signature inside the
+startup code; read a `dumpifs -u`-style copy as corrupt; refuse a stack
+that names a scheme or another filesystem with `ifsboot`, and writing it;
+fail a body of 1,000 minimum-size chunks before reading past the index
+bound or growing scratch past 64 KiB; confine reads to four cached chunks
+and stop a five-chunk alternation at the work limit; fail a read of a
+chunk whose stream changed after the open; and sweep injected read and
+allocation failures through open, verification and reading. `--seed-lzo`, `--seed-ucl` and
+`--seed-raw PATH` write the container fuzzer's seeds, and `--emit DIR` the
+body and the six images of each prefix and compression value.
+
+```sh
+FSIMG_IFS_NATIVE=/path/to/captures-ifs FSIMG_IFS_IMAGES=/path/to/images \
+    ./test-ifsboot --native
+```
+
+`test-ifsboot --native` reads the E7 `mkifs` compressed captures (LZO,
+UCL and UCL with `+compress`, each verified with 2, 2 and 1 entries; the
+big-endian one draws no claim), the E10 disk's four 49,184-byte slots
+(the unchanged one verifies, the chunk-byte flip fails open and the
+stored-trailer and startup-byte flips fail verification, each corrupt),
+and, with `FSIMG_IFS_IMAGES`, every compressed boot image there directly,
+whose decoded bytes must equal the oracle body in `decoded/`
+(`h3-NAME.imagefs` or `x1-NAME.imagefs`). It prints counts and the
+images' file names only. On macOS the eight H3 images (LZO1X, 120 to 294
+chunks) and the three X1 images (NRV2B, 51 chunks) all decode to their
+oracle bodies and verify.
+
 `make check-integration` runs `test/ifs-integration.sh`, which skips what
 is absent:
 
@@ -1394,7 +1434,10 @@ and count, never a member name, and discards the diagnostics of fsimg,
 `test-ifs` and the decoder; an unexpected failure of the comparison prints
 only its exception type.
 
-The script first writes two images with `test-ifs`: `--seed`, the fuzzing
+The script writes the six boot images of `test-ifsboot --emit` and
+requires each to report the `ifs/ifsboot` stack, verify completely under
+`fsimg W -d`, list the same entry records as its bare body and extract the
+same tree with `-k`. It also writes two images with `test-ifs`: `--seed`, the fuzzing
 seed, whose names outside the profile, control bytes and Latin-1 among
 them, are omitted with their subtrees, with implicit parents inside and
 outside an omitted subtree and a boot reference; and `--seed-shadowed`,
@@ -1403,8 +1446,8 @@ directory are shadowed. `fsimg W -d` must verify both completely, and when
 Python 3 is present the comparison checks itself on them: neither may be
 refused, the first must give 4 implicit directories and 6 omitted
 subtrees, and the second 2 implicit directories and 5 shadowed records.
-With `FSIMG_IFS_NATIVE` it runs `test-ifs --native` and then the
-comparison over every bare image in the
+With `FSIMG_IFS_NATIVE` it runs `test-ifs --native` and
+`test-ifsboot --native` and then the comparison over every bare image in the
 `cases/ifs-basic`, `cases/ifs-names`, `cases/ifs-extra`, `cases/ifs-data`
 and `decoded` subdirectories. On macOS all 72 bare images agree: 2,620
 entries, 1,659 files' bytes and 514 link targets, the odd-paths capture
@@ -1418,8 +1461,9 @@ uncompressed boot image such as a `dumpifs -u` copy, whose startup header
 (at offset 0 or after the 1,088-byte BIOS loader) gives the body's offset
 and length, is read in place through `fsimg i`, which must report `ifs`,
 and `fsimg W -d`, and the script prints the image's file name with the
-verify record's counts only. Compressed boot images are counted and
-reported as a skip, as are files that hold neither. `DUMPIFS` and
+verify record's counts only. A compressed boot image is read whole
+through `fsimg W -d`, which must report the `ifsboot` container and
+verify completely; files that hold neither are counted. `DUMPIFS` and
 `QNXPROBE` name an `lclevy/dumpifs` and a `qnxprobe` command at pinned
 revisions, split into words, run as `$DUMPIFS IMAGE` and `$QNXPROBE IMAGE`
 on the two generated images and every bare capture fsimg verifies; each
@@ -1428,8 +1472,8 @@ the variables the three are skips: "FSIMG_IFS_IMAGES is not set (S1 and S2
 images, counts only)", "DUMPIFS is not set (lclevy/dumpifs comparison)"
 and "QNXPROBE is not set (qnxprobe comparison)"; the decoded S1 and S2
 bodies in the captures' `decoded/` are compared above
-([TODO](todo-ifs.md)). The script exits 77 when it runs nothing, without
-Python 3 and every variable.
+([TODO](todo-ifs.md)). The generated boot images need neither Python 3
+nor a variable, so the script always runs them.
 
 `test/ifs-native.py container` compares an ImageFS inside a container with
 the decoder's manifest of an oracle's decode of the container's payload:

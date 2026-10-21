@@ -546,7 +546,7 @@ typedef struct fsimg_volume_detail {
 	uint64_t	 value;
 } fsimg_volume_detail_t;
 
-#define FSIMG_IMAGE_DETAILS_MAX 16u
+#define FSIMG_IMAGE_DETAILS_MAX 24u
 
 /* stack is the canonical text of the layers found: the container and the
  * scheme when detected or forced, and the filesystem when forced or once
@@ -564,7 +564,8 @@ typedef struct fsimg_volume_detail {
  * selected is the slot of the last partition select() returned, zero for
  * none. The scope is the validation the tables received. details holds the
  * container's header fields in the order its profile documents, such as
- * hbcifs's decoded and payload lengths and its unidentified words;
+ * hbcifs's decoded and payload lengths and its unidentified words, or a
+ * QNX boot image's startup-header fields and chunk statistics;
  * detail_count of them are filled and the rest are zero.
  */
 typedef struct fsimg_image_info {
@@ -1058,7 +1059,10 @@ fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,
  * returns the length it needs without the terminator.
  *
  * An image borrows its input until destruction; the input must be
- * seekable. Opening validates the options and the forced stack, then
+ * seekable. Opening validates the options and the forced stack (a
+ * container that carries a filesystem, ifsboot or hbcifs, holds that
+ * filesystem and no scheme; any other stack around it is FSIMG_EINVAL
+ * naming the container), then
  * decides compression: the compression probes run on the input's prefix
  * with the container, scheme and filesystem probes. A compression claiming
  * alone means compressed; a compression and another probe claiming is an
@@ -1074,11 +1078,15 @@ fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,
  * container probes, which need the end of the file. Without a spool,
  * compressed and stream input fail as a FSIMG_RESOURCE_SPOOL limit of
  * zero. Then opening peels
- * the container: the DMG, fixed VHD and sparse-image probes run on the
- * input's prefix and last 512 bytes, or only the forced one, and a claim's
- * tables are validated completely, so the disk has a fixed length before
- * any other byte is read; a damaged or unsupported container fails the
- * open and is never read as a raw disk. The scheme is detected, and its
+ * the container: the DMG, fixed VHD, sparse-image, QNX boot image and
+ * hbcifs probes run on the input's prefix and last 512 bytes, or only the
+ * forced one, and
+ * a claim's tables are validated completely, so the disk has a fixed
+ * length before any other byte is read; a damaged or unsupported container
+ * fails the open and is never read as a raw disk. A detected container
+ * that carries a filesystem is checked against the forced stack as a named
+ * one is, and its disk is then read with that filesystem's probe alone and
+ * no scheme. The scheme is detected, and its
  * tables validated completely, at most once, on the first get_info,
  * next_partition, verify or partition-based select. A range or disk
  * selection never consults the scheme, so a damaged table cannot block it.

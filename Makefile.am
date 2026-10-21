@@ -59,7 +59,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/layers/plan.c lib/layers/output.c \
 	lib/layers/chunks.c lib/layers/plist.c lib/layers/dmg.c \
 	lib/layers/vhd.c lib/layers/simg.c lib/layers/transcode.c \
-	lib/layers/spool.c lib/layers/gzip.c lib/layers/hbcifs.c \
+	lib/layers/spool.c lib/layers/gzip.c lib/layers/ifsboot.c \
+	lib/layers/hbcifs.c \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
@@ -131,7 +132,7 @@ test_programs = test-core test-private test-io test-meta test-meta-sort test-uni
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
 	test-containers test-compression test-gzip-write test-holes header-c \
-	header-cxx test-codec test-hbcifs
+	header-cxx test-codec test-hbcifs test-ifsboot
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
@@ -174,6 +175,8 @@ test_layers_write_SOURCES = test/layers-write.c test/test.h
 test_layers_write_LDADD = libfsimg-core.la
 test_containers_SOURCES = test/containers.c test/test.h
 test_containers_LDADD = libfsimg-core.la
+test_ifsboot_SOURCES = test/ifsboot.c test/test.h
+test_ifsboot_LDADD = libfsimg-core.la
 test_compression_SOURCES = test/compression.c test/test.h
 test_compression_LDADD = libfsimg-core.la
 test_hbcifs_SOURCES = test/hbcifs.c test/test.h
@@ -321,7 +324,8 @@ check-installed-consumers:
 	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" $(ZLIB_LIBS) -o header-installed-cxx
 	./header-installed-cxx
 check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write \
-	    test-qnx4 test-qnx4-write test-ifs test-ifs-write test-codec fsimg \
+	    test-qnx4 test-qnx4-write test-ifs test-ifs-write test-ifsboot \
+	    test-codec fsimg \
 	    test/fat-integration.sh test/exfat-integration.sh \
 	    test/qnx6-integration.sh test/qnx4-integration.sh \
 	    test/layers-integration.sh test/containers-integration.sh \
@@ -356,14 +360,13 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
 	MallocSpaceEfficient=1 ./test-ifs --scale
 check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-ifs test-codec \
-	    test-protocol test-layers test-containers test-compression test-hbcifs \
-	    test-mtree test/spec.sh
+	    test-protocol test-layers test-containers test-compression \
+	    test-hbcifs test-mtree test-ifsboot test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-ifs \
-	    test-codec test-protocol test-layers test-containers test-compression \
-	    test-hbcifs test-mtree \
-	    test/spec.sh
+	    test-codec test-protocol test-layers test-containers \
+	    test-compression test-hbcifs test-mtree test-ifsboot test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard

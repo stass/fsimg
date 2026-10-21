@@ -1132,8 +1132,8 @@ fsimg_image_get_info(fsimg_image_t *image, fsimg_image_info_t *out,
 			snprintf(out->codecs, sizeof(out->codecs), "%s",
 			    image->container->container->codecs);
 		else
-			fsimg_chunk_kinds_text(image->opened.kinds, out->codecs,
-			    sizeof(out->codecs));
+			fsimg_chunk_kinds_text(image->opened.kinds,
+			    image->opened.codecs, out->codecs, sizeof(out->codecs));
 		bcopy(image->opened.guid, out->container_guid,
 		    sizeof(out->container_guid));
 		out->chunk_count = image->opened.chunks;

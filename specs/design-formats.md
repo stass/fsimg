@@ -206,7 +206,7 @@ little- and big-endian images, four record kinds, one symbolic-link layout,
 four inode-flag values; an unobserved value is unsupported, a contradiction
 is corrupt. The [driver design](design-ifs-driver.md) defines the code. The
 driver reads a bare ImageFS; the startup header, boot prefix and compressed
-chunking of a boot image belong to the `qnxboot` container and the
+chunking of a boot image belong to the `ifsboot` container and the
 Harman-Becker header to the `hbcifs` container, both
 [layer profiles](design-layers.md#layer-profiles).
 
@@ -215,7 +215,7 @@ size is exact, so the format has no free space and no geometry to size;
 its boot settings are honored only for the slots its closed flag table
 names. Native `dumpifs` list, check and extract testing gates the writer
 capability, as native mounting does for QNX6 and QNX4; wrapping a new
-ImageFS in an existing boot image is the `qnxboot` container's, gated by a
+ImageFS in an existing boot image is the `ifsboot` container's, gated by a
 native boot.
 
 ## Verification and compatibility claims

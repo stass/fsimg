@@ -65,9 +65,9 @@ ifs-native.py body IMAGE
   PATH the file's real path, since fsimg opens no symbolic link: at 0 in a
   bare ImageFS, or after the startup section of an uncompressed boot
   image, such as a `dumpifs -u` copy, whose little-endian startup header
-  the qnxboot profile of specs/design-layers.md describes. Print
-  "compressed" for a boot image with a compressed body and "none" for
-  anything else.
+  the ifsboot profile of specs/design-layers.md describes. Print
+  "compressed PATH" for a boot image with a compressed body, which fsimg
+  reads whole through that container, and "none" for anything else.
 
 Member names are data of the images and never printed or passed on a
 command line: each line gives counts only, a mismatch is reported by
@@ -455,7 +455,7 @@ def body_report(image):
                     header[:4] != STARTUP_SIGNATURE:
                 continue
             if header[6] & COMPRESSION_BITS:
-                return "compressed"
+                return f"compressed {os.path.realpath(image)}"
             startup_size, = struct.unpack_from("<I", header, 0x20)
             imagefs_size, = struct.unpack_from("<I", header, 0x2C)
             offset = start + startup_size

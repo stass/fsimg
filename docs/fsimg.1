@@ -147,9 +147,13 @@ the filesystem name is fat12, fat16, fat32, exfat, qnx6, qnx4 or ifs.
 Required for
 .Cm c .
 The slots are the filesystem, the partition scheme (gpt or mbr) and the
-container (dmg, vhd, simg, or hbcifs, which is only read), in that order, so
+container (dmg, vhd or simg, or ifsboot or hbcifs, which are only read), in
+that order, so
 .Ql fat32/gpt
 is a FAT32 volume in a GPT partition.
+An ifsboot or hbcifs container carries one ImageFS and no partition
+table: a stack that names a scheme or another filesystem with it, or
+forces one around a detected one, is invalid.
 On reading a named slot forces that layer while retaining every validation;
 an unnamed slot is detected, and detection must be unambiguous.
 .Ql -
@@ -407,6 +411,10 @@ forced by naming it in the stack's container slot.
 DMG chunks may be stored, zero, free or zlib-compressed; other DMG
 compressions (ADC, bzip2, LZFSE, LZMA), multi-segment DMGs and dynamic or
 differencing VHDs are refused as unsupported.
+A QNX boot image is read as the ImageFS it carries, detected from its
+startup header at offset 0 or behind the 1088-byte x86 BIOS loader, or
+forced as ifsboot; its body may be raw or LZO1X or NRV2B (UCL) chunks.
+Its startup code is never interpreted, and ifsboot cannot be written.
 A container's tables are checked completely when the image opens, and a
 damaged one fails the command rather than being read as a raw disk.
 Decompressed chunks are cached four at a time, each at most 16 MiB, within
@@ -422,8 +430,6 @@ values; the stream is decoded into the spool, reserved against
 .Fl l Ar spool
 in 64 KiB steps, and must produce exactly the decoded length the header
 states.
-It holds only an ImageFS: a stack naming a partition scheme or another
-filesystem with it is refused.
 An hbcifs image that is gzip-compressed or read from standard input would
 need a second spool and is refused.
 .Pp
@@ -432,7 +438,8 @@ reports the stack in
 .Fl F
 syntax and its compression, gzip or none; with a container, its disk size,
 chunk count, chunk encodings and identifier, then its header fields, one
-per line in hexadecimal; with a partition scheme, the disk and each used
+per line in hexadecimal, such as a boot image's startup-header fields and
+chunk statistics; with a partition scheme, the disk and each used
 partition's slot, type, size, offset, filesystem and name, marking the
 selected one; then header validation, geometry, label, volume UUID when the
 format has one, the mountpoint and named format details when the format
@@ -456,7 +463,8 @@ selected file itself.
 .Pp
 .Cm W
 checks the container, the partition table and the complete supported
-structure of the volume, including a DMG's data fork and master checksums;
+structure of the volume, including a DMG's data fork and master checksums
+and a boot image's startup and stored checksums and RAM size;
 .Fl d
 also reads initialized payload bytes and decodes every container chunk to
 check the DMG block-table and sparse-image checksums.
@@ -1266,8 +1274,10 @@ or
 .Ql formats .
 A stack record precedes the information record: it carries the stack, the
 compression (gzip or null), the container with its chunk count, chunk
-encodings, identifier and container_details object of header fields, each
-null without one, the scheme, the disk size and identifier
+encodings, identifier, null without one, and container_details, an object
+of each named header field's decimal string value, empty for a container
+without header fields, all null without a container, the scheme, the disk
+size and identifier
 and the selected partition, and states whether a volume was selected.
 Partition records, one per used slot, follow it for
 .Cm i .

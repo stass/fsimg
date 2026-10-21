@@ -141,6 +141,23 @@ dependency, found by configure and never vendored. A range given with
 `--offset` addresses the container's disk, so the worker, not the
 coordinator, checks it.
 
+Reading accepts QNX boot images. The read-only `ifsboot` container is
+detected from a startup header at offset 0 or behind the 1088-byte x86
+BIOS loader, tied to its offset by `preboot_size`, and yields the ImageFS
+it carries: a raw body as a slice, an LZO1X or NRV2B (UCL) body through a
+chunk index learned in one bounded pass over its 16-bit length words, at
+most `imagefs_size / 4096 + 1` chunks, with the zero terminator, the zero
+padding and the decoded total checked. The startup header's version,
+flags, compression value and machine come from closed tables (42 for SH-4,
+3 for x86 behind the BIOS loader, 0 for `mkifs` nonbootable output), and
+the startup code is never interpreted. `W` checks the startup and stored
+additive checksums and, for a boot machine, `ram_size`. A stack naming a
+scheme or another filesystem inside a container that carries a filesystem
+is invalid, named; writing `ifsboot` is refused as read only. `i` and its
+JSON stack record report the startup-header fields and chunk statistics as
+the container's details, which `fsimg_image_info_t` carries as a table of
+up to 24 named values.
+
 Resource contexts account for memory and owned descriptors, enforce session
 quotas, and report cancellation and structured errors. Bounded positional I/O
 supports regular files, callbacks, fixed sinks, and nested slices. Private
@@ -327,12 +344,10 @@ producer's constant fields are checked, and the LZO1X payload is decoded
 into the spool, reserved against the spool limit in 64 KiB steps, to
 exactly the decoded length the header states. An `hbcifs` image inside
 gzip or on standard input, which would need a second spool, is refused
-naming both layers. A container that carries one filesystem refuses a
-stack naming a scheme or another filesystem with it. `fsimg i` prints the
-stack as `ifs/hbcifs` and the header's fields, which the image information
-carries as container details; `fsimg W` names the two fields no known rule
-checks, which the layer report lists as unverified, and calls the
-verification incomplete.
+naming both layers. `fsimg i` prints the stack as `ifs/hbcifs` and the
+header's fields, which the image information carries as container
+details; `fsimg W` names the two fields no known rule checks, which the
+layer report lists as unverified, and calls the verification incomplete.
 
 ImageFS images are written, nonbootable, in either byte order: the root and
 an explicit record for every directory, then files, symbolic links and

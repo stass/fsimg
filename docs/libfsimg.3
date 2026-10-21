@@ -345,6 +345,8 @@ A stream has no publication: a failure after its first byte reports
 FSIMG_OUTPUT_INCOMPLETE.
 A failure of a layer, on open, verification or a container read, is
 FSIMG_OP_IMAGE with the layer's name in error.path.
+A container without a writer, such as ifsboot or hbcifs, is refused as
+FSIMG_EUNSUPPORTED naming it.
 .Fn fsimg_image_wrap
 puts a raw volume into a scheme,
 .Fn fsimg_image_unwrap
@@ -356,18 +358,23 @@ They copy the disk once, read each input once, and refuse an output that
 shares storage with an input before writing.
 .Pp
 .Fn fsimg_image_open
-peels a DMG, fixed VHD or Android sparse image container before anything
-else reads the input: the container probes run on the input's first bytes
-and last 512 bytes, or only the one the stack's container slot forces, and
+peels a DMG, fixed VHD, Android sparse image, QNX boot image or hbcifs
+container before anything else reads the input: the container probes run on the
+input's first bytes and last 512 bytes, or only the one the stack's
+container slot forces, and
 a claimed container's tables are validated completely, so a damaged or
 unsupported container fails the open with FSIMG_ECORRUPT or
 FSIMG_EUNSUPPORTED and is never read as a raw disk.
 Selections then address the container's disk, served through a cache of
 four decoded chunks of at most 16 MiB each, allocated at open within the
 memory limit; decoded bytes count as work.
+A QNX boot image carries one ImageFS: its disk is that volume, read with
+the ImageFS probe alone.
 .Fn fsimg_image_get_info
-reports the container's name, chunk count, chunk encodings, identifier and
-header fields as named details;
+reports the container's name, chunk count, chunk encodings and identifier,
+and in details, detail_count of at most FSIMG_IMAGE_DETAILS_MAX, its
+header fields in the order its profile documents, such as a boot image's
+startup-header fields and chunk statistics;
 .Fn fsimg_image_verify
 checks its checksums and, under FSIMG_VERIFY_PAYLOAD, decodes every chunk,
 and names in the report's unverified list the container's fields no known
@@ -376,8 +383,10 @@ An hbcifs container, read only, holds an ImageFS as one LZO1X stream, which
 the open decodes into the spool under the spool limit; it needs a spool,
 is refused inside gzip or on a stream, which would need a second one, and
 reports its fields 0x14 and 0x1c as unverified.
-A stack naming a scheme or another filesystem with a container that
-carries one filesystem is FSIMG_EINVAL naming the container.
+A stack that names a scheme or another filesystem with a container that
+carries one filesystem, ifsboot or hbcifs, or forces one around such a
+container when it is detected, fails with FSIMG_EINVAL naming the
+container.
 .Fn fsimg_layer_next
 reports each container's chunk encodings and the zlib version it uses.
 .Pp

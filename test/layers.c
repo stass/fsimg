@@ -563,8 +563,9 @@ test_stack_rejections(void)
 
 /* The registry lists every layer once, with the suffixes the command
  * strips, the capabilities of the schemes and containers, which are read,
- * written and verified, and the keys of each layer's settings in table
- * order. The compressions are listed with their suffixes but no codec.
+ * written and verified but for the read-only ifsboot and hbcifs, and the
+ * keys of each layer's settings in table order. The compressions are
+ * listed with their suffixes but no codec.
  */
 static void
 test_registry(void)
@@ -572,6 +573,7 @@ test_registry(void)
 	static const unsigned scheme = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
 	    FSIMG_CAP_VERIFY;
 	static const unsigned container = scheme;
+	static const unsigned read_only = FSIMG_CAP_READ | FSIMG_CAP_VERIFY;
 	static const struct {
 		const char	*name;
 		const char	*suffix;
@@ -590,8 +592,10 @@ test_registry(void)
 		    container },
 		{ "simg", ".simg", "block,crc", "raw,zero,fill",
 		    FSIMG_LAYER_CONTAINER, container },
+		{ "ifsboot", "", "", "raw,lzo1x,nrv2b", FSIMG_LAYER_CONTAINER,
+		    read_only },
 		{ "hbcifs", "", "", "lzo1x", FSIMG_LAYER_CONTAINER,
-		    FSIMG_CAP_READ | FSIMG_CAP_VERIFY },
+		    read_only },
 		{ "gzip", ".gz", "level", "", FSIMG_LAYER_COMPRESSION, container },
 		{ "zstd", ".zst", "", "", FSIMG_LAYER_COMPRESSION, 0 },
 		{ "xz", ".xz", "", "", FSIMG_LAYER_COMPRESSION, 0 }

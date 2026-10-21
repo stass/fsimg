@@ -25,7 +25,7 @@ questions is not a source of rules.
 Everything that surrounds an ImageFS belongs to other owners and is only
 referenced here. The startup header, boot prefix, startup section, chunk
 framing, startup and stored checksums and the boot-image wrap belong to the
-`qnxboot` container; the Harman-Becker header and its unframed stream belong
+`ifsboot` container; the Harman-Becker header and its unframed stream belong
 to the `hbcifs` container; both are
 [layer profiles](design-layers.md#layer-profiles). The LZO1X and NRV2B
 decoders and the LZO1X encoder are the
@@ -574,7 +574,7 @@ refused and every writer image is nonbootable; the
 [research record](../docs/ifs-research.md#evidence-questions) names the
 experiment that fills it. The writer never reads an image: wrapping the
 result in a boot image's startup section, and the template it copies, are
-the `qnxboot` container's. [S1], [S2]
+the `ifsboot` container's. [S1], [S2]
 
 ### Settings and sizing
 
@@ -618,7 +618,7 @@ links), 2 implicit directories, zero header padding and the same references
 as H3. All twelve bodies open and verify under every rule above, the
 shadowed records reported, not refused. [S1], [S2]
 
-Reading a boot image is the `qnxboot` container's peel followed by this
+Reading a boot image is the `ifsboot` container's peel followed by this
 reader on the body; reading `PCM3_IFS2.ifs` is the `hbcifs` container's
 spool-backed peel followed by this reader. A `dumpifs -u` copy, whose
 startup header stays in place and whose body is decoded, is read as a

@@ -10,7 +10,7 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   beyond the derived ones when an image grows (the wrap's growth refusal
   stays until it is known); whether processed members' bytes depend on their
   image offset (if so, the wrap scope returns to the owner); raw members;
-  the native uncompressed layout the `qnxboot` profile assumes for
+  the native uncompressed layout the `ifsboot` profile assumes for
   compression `0x00` (`stored_size = startup_size + imagefs_size`, no stored
   trailer); the inode-flag nibble the writer's boot settings give referenced
   records, whose closed table is empty until then, so every `boot1=` to
@@ -74,19 +74,16 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   decoded into the spool before the claim refuses a second spool;
   `validate_forced_stack` could refuse the pair before any byte is read.
 * [Low] **Detail type naming** (`include/fsimg.h`): `fsimg_volume_detail_t`
-  also carries container details, and `FSIMG_IMAGE_DETAILS_MAX` repeats
-  `FSIMG_VOLUME_DETAILS_MAX`; a neutral type and one constant would say so
-  before the API is released.
+  also carries container details; a neutral type name would say so before
+  the API is released.
 * [Medium] **Container stages and the layer machinery** (`lib/layers/`):
-  the `qnxboot` read stage can use the container reading, chunk index and
-  chunk cache of `lib/layers/chunks.c`, adding LZO1X and NRV2B record kinds,
-  and the wrap stage waits for container writing (the write half of the
-  layer plan's stage 3). Until then compressed boot images are read through
-  uncompressed copies as slices.
-* [Medium] **`qnxboot` design against the implemented layers**
+  the `ifsboot` write stage waits for container writing (the write half of
+  the layer plan's stage 3); until then `ifsboot` is registered read only,
+  with no plan, bound or encoder, and writing it is refused naming it.
+* [Medium] **`ifsboot` design against the implemented layers**
   (`specs/design-layers.md`, `lib/layers/`): the profile was written before
-  the stack and container code. Owner decisions, before the `qnxboot` stages:
-  * `qnxboot:template` is an I/O object, but layer settings are a flat
+  the stack and container code. Owner decisions, before the `ifsboot` stages:
+  * `ifsboot:template` is an I/O object, but layer settings are a flat
     record carried on the wire (`fsimg_layer_options_t`, 264 bytes) with no
     path or descriptor kind, and the worker's descriptor set is closed
     (`specs/design-security.md`); the template needs a coordinator-opened
@@ -94,19 +91,14 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   * The template must outlive writer construction until
     `fsimg_writer_output()` or the wrap returns; no ownership row in
     `specs/design-api.md` covers it.
-  * The carried-volume refusal has no field in the layer record;
-    `fsimg_stack_validate()` checks slot kinds only. It can be stated as the
-    forced filesystem plus an empty scheme slot.
-  * `qnxboot` has no rows in `layer_settings` and `layer_keys`, and the IFS
+  * `ifsboot` has no rows in `layer_settings` and `layer_keys`, and the IFS
     settings rows do not mark `compress` and `template` creation-only.
   * The LZO1X transcode reads its input once per pass, while the layer
     design says wrap and compose read each input once.
   * Smaller gaps: owners of the template read, the second pass and the
     4-byte sizing; the `.ifs` suffix rationale against the CLI's generic
     suffix list; `fsimg_layer_info_t` lacks carries and codec version
-    fields. The container descriptor's `carries`, `spooled` and
-    `unverified` facts, the image information's container details and the
-    layer report's unverified list serve `ifsboot` too.
+    fields.
 * [Medium] **Exact volumes in unnamed wraps and composes**
   (`lib/layers/output.c`, `specs/design-layers.md#exact-volumes`): the
   disk plan applies the exact-volume rule to the filesystem a stack names,

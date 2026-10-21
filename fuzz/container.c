@@ -11,11 +11,12 @@
 
 /*
  * The input is a whole image file. Each run opens it under detection and
- * under each forced container (DMG, fixed VHD, sparse image, hbcifs),
- * which drives the koly trailer, the plist, the mish tables, the VHD
- * footer, the sparse header and chunk walk, the chunk index's sort and
- * tiling pass, and the hbcifs header and its LZO1X stream decoded into a
- * spool under a small spool limit. An opened container is verified with
+ * under each forced container (DMG, fixed VHD, sparse image, QNX boot
+ * image, hbcifs), which drives the koly trailer, the plist, the mish
+ * tables, the VHD footer, the sparse header and chunk walk, the startup
+ * header and the framed chunk walk, the chunk index's sort and tiling
+ * pass, and the hbcifs header and its LZO1X stream decoded into a spool
+ * under a small spool limit. An opened container is verified with
  * read-through, which decodes every chunk through the cache, and its disk
  * is read in pieces from both ends. A VHD footer's checksum rarely
  * survives a mutation, so each input also runs with the footer in its
@@ -136,7 +137,9 @@ exercise_stack(fsimg_ctx_t *ctx, fsimg_io_t *io, const char *stack,
 	if (fsimg_image_open(ctx, io, &options, &image, NULL) != FSIMG_OK)
 		return;
 	if (fsimg_image_get_info(image, &info, NULL) == FSIMG_OK &&
-	    info.container[0] == '\0' && info.chunk_count != 0)
+	    ((info.container[0] == '\0' && (info.chunk_count != 0 ||
+	    info.detail_count != 0)) ||
+	    info.detail_count > FSIMG_IMAGE_DETAILS_MAX))
 		abort();
 	fsimg_image_verify(image, FSIMG_VERIFY_PAYLOAD, &report, NULL);
 	if (fsimg_image_select(image, &selector, &disk, NULL) == FSIMG_OK) {
@@ -154,10 +157,14 @@ static void
 exercise(const uint8_t *data, size_t size)
 {
 	/* The scheme slot is forced empty so a container's disk need hold
-	 * no table; the container slot is detected or forced.
+	 * no table; the container slot is detected or forced. A boot image
+	 * and an hbcifs container carry an ImageFS, so their stacks name that
+	 * filesystem: detected, which the carried rule then checks, and
+	 * forced.
 	 */
 	static const char *const stacks[] = { "fat12/-", "fat12/-/dmg",
-	    "fat12/-/vhd", "fat12/-/simg", "ifs/-/hbcifs" };
+	    "fat12/-/vhd", "fat12/-/simg", "ifs/-", "ifs/-/ifsboot",
+	    "ifs/-/hbcifs" };
 	fuzz_input_t input = { .data = data, .size = size };
 	fsimg_options_t options;
 	fsimg_io_ops_t ops;

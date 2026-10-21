@@ -163,8 +163,11 @@ below a link at boot the same way); `fsimg i` counts both kinds as
 shadowed. A path with `.`, `..` or empty components is unsupported.
 `fsimg W` checks the image's additive checksum, its length against the
 image size, and that each boot and script reference names exactly one
-file. A compressed or boot image's startup code and compression are not
-read. The ImageFS writer creates nonbootable images in either byte order
+file. A QNX boot image (`ifsboot`), raw or with an LZO1X or NRV2B body,
+at offset 0 or behind the x86 BIOS loader, is read as the ImageFS it
+carries, and `fsimg W` checks its startup and stored checksums; its
+startup code is never interpreted, and boot images cannot be written.
+The ImageFS writer creates nonbootable images in either byte order
 with a mountpoint setting (default `/`): the root and a record for every
 directory, then files, symbolic links and FIFOs with owner, mode and
 modification time, each file's data on a 4-byte boundary. The image's size
@@ -182,6 +185,7 @@ gzip-compressed or on standard input. `fsimg i` prints the stack as
 `ifs/hbcifs` with the header's fields; `fsimg W` names the two fields no
 known rule checks, 0x14 and 0x1c, and reports the verification as
 incomplete.
+
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,

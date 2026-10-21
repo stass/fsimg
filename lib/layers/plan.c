@@ -136,7 +136,7 @@ request_key(const fsimg_disk_plan_t *plan,
 /* The stack's container and its resolved settings; none leaves the disk
  * unencoded, with a granularity of one byte, copied in 1 MiB chunks. A
  * container that carries a filesystem holds nothing else, and one without
- * a writer, such as hbcifs, is refused naming it.
+ * a writer, such as ifsboot or hbcifs, is refused naming it.
  */
 static fsimg_status_t
 resolve_container(fsimg_disk_plan_t *plan, const fsimg_stack_t *stack,

@@ -15,7 +15,7 @@ The driver implements the common contracts without exceptions: the
 [logical content](design-content.md), [emission](design-emission.md) and
 the [POSIX metadata extension](design-metadata.md). Common code gains no
 ImageFS-specific branch. The driver opens an ordinary `fsimg_io_t`: a bare
-image file, a slice of one, or the body a `qnxboot` or `hbcifs`
+image file, a slice of one, or the body an `ifsboot` or `hbcifs`
 [container](design-layers.md#layer-profiles) has peeled. It knows nothing
 about startup headers, chunk framing or the
 [codecs](design-codecs.md). The QNX4 driver is the structural template; the

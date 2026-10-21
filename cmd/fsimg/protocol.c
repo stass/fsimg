@@ -337,22 +337,22 @@ _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->mountpoint) ==
 _Static_assert(sizeof(((fsimg_volume_detail_t *)NULL)->name) ==
     FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
     "the wire detail name holds the public detail name");
-_Static_assert(FSIMG_IMAGE_DETAILS_MAX == FSIMG_VOLUME_DETAILS_MAX,
-    "the info and image records hold detail tables of one size");
 _Static_assert(sizeof(((fsimg_layer_report_t *)NULL)->unverified) ==
     FSIMG_WIRE_IMAGE_UNVERIFIED_BYTES,
     "the wire unverified fields hold the public list");
 
 /* A detail table as the info and image records lay it out: the count at
  * count_offset of raw, then one entry of FSIMG_WIRE_INFO_DETAIL_BYTES per
- * detail from table_offset, its name and then its value; raw is zeroed.
+ * detail from table_offset, its name and then its value, at most capacity
+ * of them; raw is zeroed.
  */
 void
 fsimg_wire_details_encode(unsigned char *raw, size_t count_offset,
-    size_t table_offset, const fsimg_volume_detail_t *details, uint32_t count)
+    size_t table_offset, uint32_t capacity,
+    const fsimg_volume_detail_t *details, uint32_t count)
 {
-	if (count > FSIMG_VOLUME_DETAILS_MAX)
-		count = FSIMG_VOLUME_DETAILS_MAX;
+	if (count > capacity)
+		count = capacity;
 	fsimg_wire_put64(raw + count_offset, count);
 	for (uint32_t i = 0; i < count; i++) {
 		unsigned char *detail = raw + table_offset +
@@ -395,7 +395,8 @@ fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 		bcopy(info->mountpoint, raw + FSIMG_WIRE_INFO_MOUNTPOINT,
 		    strnlen(info->mountpoint, sizeof(info->mountpoint) - 1));
 	fsimg_wire_details_encode(raw, FSIMG_WIRE_INFO_DETAIL_COUNT,
-	    FSIMG_WIRE_INFO_DETAILS, info->details, info->detail_count);
+	    FSIMG_WIRE_INFO_DETAILS, FSIMG_VOLUME_DETAILS_MAX, info->details,
+	    info->detail_count);
 }
 
 /* Only a used slot crosses the boundary, so the record has no used flag. */
@@ -517,18 +518,18 @@ word_field_valid(const unsigned char *raw, size_t length)
 }
 
 /* A detail table laid out as fsimg_wire_details_encode() writes it: at
- * most sixteen used entries, each a nonempty name of printable ASCII and
+ * most capacity used entries, each a nonempty name of printable ASCII and
  * its value, and zeros after them.
  */
 static bool
 details_valid(const unsigned char *raw, size_t count_offset,
-    size_t table_offset)
+    size_t table_offset, uint32_t capacity)
 {
 	uint64_t count = fsimg_wire_get64(raw + count_offset);
 
-	if (count > FSIMG_VOLUME_DETAILS_MAX)
+	if (count > capacity)
 		return (false);
-	for (uint64_t i = 0; i < FSIMG_VOLUME_DETAILS_MAX; i++) {
+	for (uint64_t i = 0; i < capacity; i++) {
 		const unsigned char *detail = raw + table_offset +
 		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
 
@@ -574,7 +575,7 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	    raw[FSIMG_WIRE_INFO_MOUNTPOINT] != '\0')
 		return (false);
 	if (!details_valid(raw, FSIMG_WIRE_INFO_DETAIL_COUNT,
-	    FSIMG_WIRE_INFO_DETAILS))
+	    FSIMG_WIRE_INFO_DETAILS, FSIMG_VOLUME_DETAILS_MAX))
 		return (false);
 
 	if (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME) > volume_limit)
@@ -630,7 +631,7 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	    FSIMG_WIRE_IMAGE_REASON_BYTES) == NULL)
 		return (false);
 	if (!details_valid(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
-	    FSIMG_WIRE_IMAGE_DETAILS) ||
+	    FSIMG_WIRE_IMAGE_DETAILS, FSIMG_IMAGE_DETAILS_MAX) ||
 	    !word_field_valid(raw + FSIMG_WIRE_IMAGE_UNVERIFIED,
 	    FSIMG_WIRE_IMAGE_UNVERIFIED_BYTES))
 		return (false);

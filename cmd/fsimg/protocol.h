@@ -77,7 +77,7 @@ _Static_assert(FSIMG_WIRE_INFO_DETAILS + FSIMG_VOLUME_DETAILS_MAX *
  * reports unverified, which makes its verification incomplete. DISK is the
  * disk the container yields, or the input file's length without one.
  */
-#define FSIMG_WIRE_IMAGE_BYTES 928u
+#define FSIMG_WIRE_IMAGE_BYTES 1184u
 #define FSIMG_WIRE_IMAGE_UNSELECTED 0x1u	/* i only: no volume follows */
 #define FSIMG_WIRE_IMAGE_VERIFIED 0x2u		/* W only: layers verified */
 typedef enum fsimg_wire_image_field {
@@ -104,7 +104,7 @@ typedef enum fsimg_wire_image_field {
 	FSIMG_WIRE_IMAGE_UNVERIFIED = 248,
 	FSIMG_WIRE_IMAGE_DETAIL_COUNT = 280,
 	FSIMG_WIRE_IMAGE_DETAILS = 288,
-	FSIMG_WIRE_IMAGE_REASON = 800
+	FSIMG_WIRE_IMAGE_REASON = 1056
 } fsimg_wire_image_field_t;
 #define FSIMG_WIRE_IMAGE_STACK_BYTES 64u
 #define FSIMG_WIRE_IMAGE_CODECS_BYTES 32u
@@ -302,9 +302,9 @@ void fsimg_wire_error_encode(unsigned char *, const fsimg_error_t *);
 void fsimg_wire_entry_encode(unsigned char *, const fsimg_entry_t *, size_t);
 void fsimg_wire_info_encode(unsigned char *, const fsimg_volume_info_t *);
 /* A detail table into a zeroed record at the given count and table
- * offsets, at most sixteen details.
+ * offsets, at most the given capacity of details.
  */
-void fsimg_wire_details_encode(unsigned char *, size_t, size_t,
+void fsimg_wire_details_encode(unsigned char *, size_t, size_t, uint32_t,
     const fsimg_volume_detail_t *, uint32_t);
 void fsimg_wire_partition_encode(unsigned char *, const fsimg_partition_info_t *);
 fsimg_status_t fsimg_wire_error_decode(const unsigned char *, uint32_t,

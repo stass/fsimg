@@ -550,8 +550,9 @@ compression name, the length of the file the layers were peeled from (the
 input, or the spool holding a stream or a decoded gzip; a plan reports its
 planned disk), disk length, the container's name, chunk count, the
 encodings its chunks use, its identifier (the DMG segment ID or the VHD
-unique ID) and its header fields as up to sixteen named details in the
-volume details' form (the `hbcifs` lengths and unidentified words), the
+unique ID) and its header fields as up to 24 named details in the
+volume details' form (the `hbcifs` lengths and unidentified words, the
+`ifsboot` startup-header fields and chunk statistics), the
 scheme's sector size, disk identifier and partition count, and the layer
 validation scope. `next_partition()` iterates the scheme's slots in order
 from 1, returning DONE at the end: slot number, used flag, disk offset and

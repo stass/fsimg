@@ -315,7 +315,7 @@ compressed input into a spool file first, then peels each layer down to a
 bounded I/O slice, which the filesystem driver opens as it opens a raw
 image. The design also owns `--partition` selection and the spool budget.
 
-The QNX boot image (`qnxboot`) and the Harman-Becker flash image (`hbcifs`)
+The QNX boot image (`ifsboot`) and the Harman-Becker flash image (`hbcifs`)
 are containers in that design, each packaging one ImageFS for one loader
 with metadata and integrity fields of its own, as the compression inside
 each is the container's property, like DMG's zlib chunks. Carrying them
@@ -382,7 +382,7 @@ sorted paths through the common external sort and the common walker, never
 holding the table in RAM, delivers one extent per file through the shared
 extent index, and plans one deterministic layout whose size is exact, so
 the format has no free space to size. The boot machinery around an ImageFS
-is the `qnxboot` container's, so the driver reads the bare body and the
+is the `ifsboot` container's, so the driver reads the bare body and the
 same native `dumpifs` qualification gates its writer.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver

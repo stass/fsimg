@@ -1427,14 +1427,14 @@ layer(fsimg_cli_display_t *display, const fsimg_layer_info_t *info)
 		append(display, "}\n");
 		return;
 	}
-	append(display, "%-6s  %-11s  %-4s  %-5s  %-6s  %-13s  %s\n", info->name,
+	append(display, "%-7s  %-11s  %-4s  %-5s  %-6s  %-15s  %s\n", info->name,
 	    kind, (info->capabilities & FSIMG_CAP_READ) != 0 ? "yes" : "no",
 	    (info->capabilities & FSIMG_CAP_WRITE) != 0 ? "yes" : "no",
 	    (info->capabilities & FSIMG_CAP_VERIFY) != 0 ? "yes" : "no",
 	    info->codecs[0] != '\0' ? info->codecs : "-",
 	    info->settings[0] != '\0' ? info->settings : "-");
 	if (info->codec_version[0] != '\0')
-		append(display, "%-6s  %-11s  %s\n", "", "", info->codec_version);
+		append(display, "%-7s  %-11s  %s\n", "", "", info->codec_version);
 }
 
 static void
@@ -1937,8 +1937,8 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 			    error);
 			if (status == FSIMG_OK) {
 				if (first && !options->json)
-					append(display, "\nLayer   Kind         Read  Write  "
-					    "Verify  Codecs         Settings\n");
+					append(display, "\nLayer    Kind         Read  Write  "
+					    "Verify  Codecs           Settings\n");
 				layer(display, &layer_info);
 				return (finish_span(display, false, text, error));
 			}

@@ -1005,7 +1005,8 @@ test_image_records(void)
 	raw[FSIMG_WIRE_IMAGE_DETAILS + FSIMG_WIRE_INFO_DETAIL_BYTES] = 'x';
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	raw[FSIMG_WIRE_IMAGE_DETAILS + FSIMG_WIRE_INFO_DETAIL_BYTES] = '\0';
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 17);
+	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+	    FSIMG_IMAGE_DETAILS_MAX + 1);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 1);
 	bzero(raw + FSIMG_WIRE_IMAGE_CONTAINER, 16);
@@ -1018,6 +1019,53 @@ test_image_records(void)
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 0);
 	bzero(raw + FSIMG_WIRE_IMAGE_DETAILS, FSIMG_WIRE_INFO_DETAIL_BYTES);
 	CHECK(fsimg_wire_image_frame_valid(&frame));
+	/* Only a container has header fields, a full table of them at most,
+	 * each a printable name, and zeros past the count. */
+	{
+		fsimg_volume_detail_t details[FSIMG_IMAGE_DETAILS_MAX + 1];
+
+		bzero(details, sizeof(details));
+		for (size_t i = 0; i < FSIMG_IMAGE_DETAILS_MAX + 1; i++) {
+			snprintf(details[i].name, sizeof(details[i].name),
+			    "field_%zu", i);
+			details[i].value = 0x1000 + i;
+		}
+		bzero(&frame, sizeof(frame));
+		frame.type = FSIMG_FRAME_IMAGE;
+		frame.length = FSIMG_WIRE_IMAGE_BYTES;
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 65536);
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 49184);
+		strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "ifs/ifsboot");
+		strcpy((char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "ifsboot");
+		fsimg_wire_details_encode(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+		    FSIMG_WIRE_IMAGE_DETAILS, FSIMG_IMAGE_DETAILS_MAX, details,
+		    FSIMG_IMAGE_DETAILS_MAX + 1);
+		CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT) ==
+		    FSIMG_IMAGE_DETAILS_MAX);
+		CHECK(fsimg_wire_image_frame_valid(&frame));
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+		    FSIMG_IMAGE_DETAILS_MAX + 1);
+		CHECK(!fsimg_wire_image_frame_valid(&frame));
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 2);
+		CHECK(!fsimg_wire_image_frame_valid(&frame));
+		bzero(raw + FSIMG_WIRE_IMAGE_DETAILS + 2 *
+		    FSIMG_WIRE_INFO_DETAIL_BYTES, (FSIMG_IMAGE_DETAILS_MAX - 2) *
+		    FSIMG_WIRE_INFO_DETAIL_BYTES);
+		CHECK(fsimg_wire_image_frame_valid(&frame));
+		raw[FSIMG_WIRE_IMAGE_DETAILS + 3] = ' ';
+		CHECK(!fsimg_wire_image_frame_valid(&frame));
+		raw[FSIMG_WIRE_IMAGE_DETAILS + 3] = 'l';
+		raw[FSIMG_WIRE_IMAGE_DETAILS] = '\0';
+		CHECK(!fsimg_wire_image_frame_valid(&frame));
+		raw[FSIMG_WIRE_IMAGE_DETAILS] = 'f';
+		CHECK(fsimg_wire_image_frame_valid(&frame));
+		bzero(raw + FSIMG_WIRE_IMAGE_CONTAINER, 16);
+		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 49184);
+		CHECK(!fsimg_wire_image_frame_valid(&frame));
+		bzero(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 8 + 2 *
+		    FSIMG_WIRE_INFO_DETAIL_BYTES);
+		CHECK(fsimg_wire_image_frame_valid(&frame));
+	}
 
 	bzero(&partition, sizeof(partition));
 	partition.index = 2;

@@ -873,6 +873,7 @@ dmg_open(const fsimg_container_input_t *input, fsimg_container_t *out,
 	out->disk_bytes = trailer.disk_bytes;
 	out->chunks = summary.count;
 	out->kinds = summary.kinds;
+	out->codecs = summary.codecs;
 	return (FSIMG_OK);
 }
 

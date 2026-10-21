@@ -15,9 +15,9 @@
 
 /*
  * The layer registry is the one list of layer names and file suffixes.
- * Schemes, containers and gzip are read and written, except hbcifs, which
- * is read only; zstd and xz are compression names reserved for later
- * profiles, recognized by name and suffix with no operations.
+ * Schemes, containers and gzip are read and written, except ifsboot and
+ * hbcifs, which are read only; zstd and xz are compression names reserved
+ * for later profiles, recognized by name and suffix with no operations.
  */
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme },
@@ -28,6 +28,8 @@ static const fsimg_layer_t layers[] = {
 	    .container = &fsimg_vhd_container },
 	{ .name = "simg", .suffix = ".simg", .kind = FSIMG_LAYER_CONTAINER,
 	    .container = &fsimg_simg_container },
+	{ .name = "ifsboot", .kind = FSIMG_LAYER_CONTAINER,
+	    .container = &fsimg_ifsboot_container },
 	{ .name = "hbcifs", .kind = FSIMG_LAYER_CONTAINER,
 	    .container = &fsimg_hbcifs_container },
 	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION,

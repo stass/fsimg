@@ -14,7 +14,7 @@ Terms:
 * **Container**: a file format that stores a disk with tables, framing and
   checksums of its own: a disk-image format (DMG/UDIF, fixed VHD, Android
   sparse image (simg)) or a loader's package around one volume (the QNX boot
-  image, `qnxboot`; the Harman-Becker `hbcifs` header). "Container" alone
+  image, `ifsboot`; the Harman-Becker `hbcifs` header). "Container" alone
   always means this. The APFS container, the APFS structure that holds APFS
   volumes, is always written out as "APFS container" and is out of scope
   here.
@@ -59,7 +59,7 @@ An image is a stack with three slots in fixed order, each at most once:
 | --- | --- | --- |
 | 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`; reserved: `apfs`, `hfs` |
 | 2 | Scheme | `gpt`, `mbr` |
-| 3 | Container | `dmg`, `vhd`, `simg`, `qnxboot`, `hbcifs` |
+| 3 | Container | `dmg`, `vhd`, `simg`, `ifsboot`, `hbcifs` |
 
 The text form is `fs[/scheme][/container]`: the present slots inner to outer,
 separated by `/`, the same order as file suffixes. A token is a layer name or
@@ -156,7 +156,7 @@ format descriptors are. Its operations form a closed set per kind:
 | Encode (write) | Writes its tables at fixed disk offsets through bounded metadata writes | Transcodes a disk sequentially into the sink, from a read-only [template input](#wrap-unwrap-and-compose) where its profile declares one | Wraps a sequential sink |
 | Verify | Table checksums, consistency, partition bounds and overlap | Container checksums, chunk tiling and bounds; a profile may name fields it cannot verify, which make its [scope incomplete](#verification-scope) | Member checksums and length, at spool time |
 | Capability | Settings, read/write flags, sector sizes | Settings, codecs, codec version, the filesystem it carries when it carries a volume | Codec version |
-| Suffixes | None | The file suffixes that name it: `.dmg`, `.vhd`, `.simg`; `qnxboot` and `hbcifs` declare none, because `.ifs` names the filesystem they carry | `.gz` |
+| Suffixes | None | The file suffixes that name it: `.dmg`, `.vhd`, `.simg`; `ifsboot` and `hbcifs` declare none, because `.ifs` names the filesystem they carry | `.gz` |
 
 Probes follow the [bounded probe contract](design-formats.md#format-descriptors-and-profiles):
 pure functions of fixed bytes and the input length, no I/O, no allocation,
@@ -178,7 +178,7 @@ loader packages:
   loader, each inside the declared prefix. The probe tests its identity at
   every table offset in table order, and a header is a claim only where a
   field of the header ties it to that offset (`preboot_size` for
-  `qnxboot`); the first tie decides. The table is closed: a header at any
+  `ifsboot`); the first tie decides. The table is closed: a header at any
   other offset draws no claim, and no probe scans for a signature, because
   a signature inside loader code (the string `imagefs` occurs inside SH-4
   startup code) must never be a claim.
@@ -188,11 +188,14 @@ loader packages:
   executes or alters those bytes, reports nothing from inside them, and a
   wrap copies them verbatim from its template.
 * **Carried volume.** A container that packages one volume for a loader
-  declares the filesystem it **carries** (`qnxboot` and `hbcifs` carry
+  declares the filesystem it **carries** (`ifsboot` and `hbcifs` carry
   `ifs`). The declaration is one fact with three consequences: a create,
   wrap or read-side stack that puts a scheme, or a different filesystem,
   inside such a container is `FSIMG_EINVAL` naming the container, before
-  any byte moves; the [scheme step](#peeling-order) inside it runs that
+  any byte moves, and a forced scheme or filesystem around a detected one
+  is the same error once its probe claims the file, before its disk is
+  opened (the error says which of the two the stack named); the
+  [scheme step](#peeling-order) inside it runs that
   filesystem's probe alone, as if the stack named it with an empty scheme
   slot; and a wrap probes its input with that filesystem's bounded probe
   and requires its claim. The declaration is a field of the container's
@@ -256,7 +259,7 @@ of the next:
    object backed by the [chunk index](#chunk-index-and-cache), or by the
    spool when the profile's payload is one unframed stream
    ([spool-backed peel](#spool-backed-peel)). The DMG koly trailer, VHD
-   footer, simg header, `qnxboot` startup header and `hbcifs` header all
+   footer, simg header, `ifsboot` startup header and `hbcifs` header all
    state the disk length, so the disk object has a fixed length before any
    volume byte is read.
 3. **Scheme or bare volume.** The scheme probes and the filesystem probes run
@@ -588,7 +591,7 @@ can. Both passes spare only the reads of reported zero ranges. This keeps
 positional and stream sinks identical and the bytes deterministic.
 
 A container whose leading bytes depend on its encoded length runs the pass
-twice in the same way. The `qnxboot` startup header carries `stored_size`,
+twice in the same way. The `ifsboot` startup header carries `stored_size`,
 and the checksum covering the header precedes the body, so the first pass
 compresses the body to learn its framed length and the second emits. The
 LZO1X encoder is deterministic ([codec design](design-codecs.md)), so the
@@ -698,9 +701,9 @@ absent layer.
 
 A container profile may declare a **template input**: a second read-only
 input from which the wrap encoder copies its opaque section and every
-field it does not derive. `qnxboot` requires one, the boot image whose
+field it does not derive. `ifsboot` requires one, the boot image whose
 startup section the output reuses. The template is a typed field of the
-layer options, an I/O object (`qnxboot:template`; the CLI opens the named
+layer options, an I/O object (`ifsboot:template`; the CLI opens the named
 file and passes the object), and a template for a container absent from
 the stack fails as any setting of an absent layer does. The encoder opens
 the template as an image with its own container forced, verifies it at
@@ -730,8 +733,8 @@ once per transcode pass and writes the output once.
 | `vhd:uuid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text |
 | `simg:block` | bytes | 4096 | Power of two from 1 KiB to 1 MiB, so the 1 MiB inspection unit is whole blocks |
 | `simg:crc` | `yes`, `no` | `no` | Appends a CRC32 chunk |
-| `qnxboot:compress` | `lzo`, `none` | `lzo` | `none` stores the body raw; see the [profile](#qnx-boot-image-qnxboot) |
-| `qnxboot:template` | I/O object; a file path in the CLI | None; required whenever `qnxboot` is written | A boot image the `qnxboot` profile reads and verifies |
+| `ifsboot:compress` | `lzo`, `none` | `lzo` | `none` stores the body raw; see the [profile](#qnx-boot-image-ifsboot) |
+| `ifsboot:template` | I/O object; a file path in the CLI | None; required whenever `ifsboot` is written | A boot image the `ifsboot` profile reads and verifies |
 | `gzip:level` | integer | 6 | 1 to 9; only when gzip is selected (`-z`, a `.gz` name under `-a`, or the library's write options naming `gzip`) |
 
 Values use the CLI's existing byte-quantity, integer, UUID and boolean
@@ -793,7 +796,7 @@ argument at 36 holding the fill value for a fill record, the codec number
 for a compressed record (zlib, LZO1X or UCL NRV2B), and zero otherwise.
 DMG and simg both fill it from their tables; a fixed VHD is the degenerate
 case, one raw record covering the file before the footer, so its disk
-object is simply a slice; and a `qnxboot` boot image fills a
+object is simply a slice; and an `ifsboot` boot image fills a
 [learned index](#learned-index) by decoding. The index owns:
 
 * append of validated records to a sealed scratch record stream, charged to
@@ -860,15 +863,15 @@ it read and the disk offset and length it learned. The same sealed stream,
 sort and tiling pass follow, so there is one index path; the tiling is met
 by construction and is still run. Opening a compressed boot image thus
 costs one full decode, and the chunk cache then serves reads exactly as
-for DMG, sized by the profile's largest chunk rather than a declared one:
-four chunks of 65536 bytes for `qnxboot`.
+for DMG, sized by the largest chunk the pass learned rather than a
+declared one: at most four chunks of 65536 bytes for `ifsboot`.
 
 The learning pass is where every framing rule of the profile is enforced,
 and the profile's bounds bound the index: the pass refuses a non-final
 chunk smaller than the profile's smallest, stops when the decoded total
 reaches the declared disk length, and so appends at most the declared
 length divided by that smallest chunk, plus one, records
-(`imagefs_size / 4096 + 1` for `qnxboot`), a fixed small fraction of the
+(`imagefs_size / 4096 + 1` for `ifsboot`), a fixed small fraction of the
 declared length that never scales with the stored length. Stored bytes
 read and decoded bytes produced are charged to the work counter, and the
 pass polls cancellation per chunk.
@@ -970,7 +973,7 @@ version: zlib-ng in compatibility mode, which some distributions ship as
 their zlib, produces different, equally valid, streams. Capability output
 and the plan report the zlib version string so a reproducibility claim can
 name it. `dmg:compress=none`, `simg` and `vhd` output is reproducible without
-that qualification, and so is a `qnxboot` wrap: its codec is project-owned
+that qualification, and so is an `ifsboot` wrap: its codec is project-owned
 and deterministic, and every other output byte comes from the template or
 the input.
 
@@ -984,7 +987,7 @@ Layer verification runs before the filesystem's and reports its own scope:
 | DMG | koly fields and ranges, the data-fork CRC32 by one sequential pass over the data fork where the koly declares it, the master CRC32 over the tables' checksum values where the koly declares it, each block table's CRC32 over its decoded bytes under payload read-through, chunk tiling and bounds, every chunk decoded once under read-through |
 | VHD | Footer checksum and the constant fields (format version, data offset, saved state); the cookie, type 2 and the size tie are identity and already hold at open |
 | simg | Header and chunk-header consistency, block totals, CRC32 chunk where present under read-through |
-| qnxboot | The startup checksum over the startup section and the stored checksum over the whole stored image, each one sequential sum over the file; `ram_size` against its rule where the [machine table](#qnx-boot-image-qnxboot) says so; the closed tables, the bounds and the framing (every chunk decoded, the terminator, the zero padding, the decoded total) are identity, open and learning-pass checks and already hold |
+| ifsboot | The startup checksum over the startup section and the stored checksum over the whole stored image, each one sequential sum over the file; `ram_size` against its rule where the [machine table](#qnx-boot-image-ifsboot) says so; the closed tables, the bounds and the framing (every chunk decoded, the terminator, the zero padding, the decoded total) are identity, open and learning-pass checks and already hold |
 | hbcifs | The identity, the length tie, the header constants and the exact decode already hold at open; the fields at `0x14` and `0x1c` are unidentified and are reported unverified, so the scope is incomplete |
 | GPT | Protective MBR, primary and backup header CRC32 and entry-array CRC32, primary and backup consistency (disk GUID, usable range, entry arrays byte-identical), partitions within the usable range and non-overlapping |
 | MBR | Signature, entry field sanity, partitions within the disk and non-overlapping |
@@ -994,7 +997,7 @@ Partitions not selected are not verified, and the report says so. Ordinary
 open already performs every table check: header, trailer and entry
 validation, chunk tiling and bounds, partition bounds and overlap, so a
 damaged table never yields a volume. Verification adds the passes that read
-beyond the tables: the DMG data-fork and master CRC32s, the `qnxboot` sums,
+beyond the tables: the DMG data-fork and master CRC32s, the `ifsboot` sums,
 and under read-through the per-table, simg and member checksums with every
 chunk decoded.
 
@@ -1027,7 +1030,7 @@ The LZO1X decoder and encoder and the UCL NRV2B decoder are project-owned
 code with no knowledge of IFS or of any container, specified in the
 [codec design](design-codecs.md): bounded on both sides, deterministic on
 the encoding side, charged to the work counter, and always available, so
-no boot image needs an optional dependency. The `qnxboot` zlib compression
+no boot image needs an optional dependency. The `ifsboot` zlib compression
 value is unsupported and fails naming the value, because QNX 6.5.0's
 `mkifs` cannot produce it and no fixture exists.
 
@@ -1398,7 +1401,11 @@ total blocks times block size, which two 32-bit fields cannot overflow, is
 the disk length. The chunks feed the chunk index in file
 order, which is also disk order.
 
-### QNX boot image (qnxboot)
+### QNX boot image (ifsboot)
+
+`ifsboot` is QNX's startup header (`struct startup_header`) and startup
+program in front of an ImageFS: the layer that turns an image filesystem
+into a bootable QNX image.
 
 Reference: the QNX startup header as the vendor's IPL and startup
 documentation describes it; every value a table below accepts comes from
@@ -1485,9 +1492,9 @@ follows the compression value:
 
 | Value | Body | Read | Write |
 | --- | --- | --- | --- |
-| 0x00 | The ImageFS bytes, `imagefs_size` long; `stored_size = startup_size + imagefs_size`; no stored trailer: the ImageFS's own checksum closes the whole-image sum | Slice | `qnxboot:compress=none` |
+| 0x00 | The ImageFS bytes, `imagefs_size` long; `stored_size = startup_size + imagefs_size`; no stored trailer: the ImageFS's own checksum closes the whole-image sum | Slice | `ifsboot:compress=none` |
 | 0x04 | zlib | Unsupported, naming the value: 6.5.0 `mkifs` fails to produce it (E7) and no fixture exists | Never |
-| 0x08 | LZO1X chunks in the framing below | Learned index | `qnxboot:compress=lzo` |
+| 0x08 | LZO1X chunks in the framing below | Learned index | `ifsboot:compress=lzo` |
 | 0x0c | UCL NRV2B chunks in the framing below | Learned index | Never: no encoder |
 | Other | | Unsupported, naming the value | Never |
 
@@ -1519,7 +1526,7 @@ imagefs_size`, and under a framed value `stored_size` at least
 `startup_size + 8`, room for the terminator, its padding and the trailer,
 so that the trailer offset `B + stored_size - 4` lies at or after the
 body start and every range below is computed without underflow. The disk
-length is `imagefs_size`, and `i` prints the stack as `ifs/qnxboot`.
+length is `imagefs_size`, and `i` prints the stack as `ifs/ifsboot`.
 
 Peel of an uncompressed body is the slice `[B + startup_size, B +
 stored_size)`. Peel of a framed body is the
@@ -1558,15 +1565,26 @@ length ([volume layout](design-ifs.md#volume-layout)), as the
 [verification scope](#verification-scope) states.
 
 Info reports the prefix length, every header field above except the
-opaque ones (the version, the virtual bit, the compression value by name,
-the machine by number and name, the five target addresses, `ram_size`,
+opaque ones (the version, the virtual bit, the compression value, the
+machine by number, the five target addresses, `ram_size`,
 `startup_size`, `stored_size`, `imagefs_size` and `preboot_size`), the
 codec, and the chunk statistics: the chunk count, the stored body length,
-the smallest and largest decoded chunk and the largest stored chunk.
+the smallest and largest decoded chunk and the largest stored chunk. The
+numbers are the container's details, named values in this order:
+`prefix_bytes`, `version`, `virtual` (0 or 1), `compression` (the value),
+`machine`, `startup_vaddr`, `paddr_bias`, `image_paddr`, `ram_paddr`,
+`ram_size`, `startup_size`, `stored_size`, `imagefs_paddr`,
+`imagefs_size`, `preboot_size`, `body_bytes` (`stored_size -
+startup_size`), `min_chunk_bytes`, `max_chunk_bytes` and
+`max_stored_chunk_bytes` (a chunk's stream, without its length word). A
+raw body is one raw chunk of `imagefs_size` bytes. A detail holds a
+number, so the compression value's name is the image's codec list
+(`raw`, `lzo1x` or `nrv2b`), the chunk count is its chunk count, and the
+machine's architecture is the machine table's.
 
 Writing packages an ImageFS volume in a template boot image under the
 [template input](#wrap-unwrap-and-compose) rule: a wrap of an existing
-volume, or a create stack `ifs/qnxboot`, whose transcode reads the staged
+volume, or a create stack `ifs/ifsboot`, whose transcode reads the staged
 raw volume the `ifs` writer emitted; the encoder is the same and its
 disk-length granularity is 4 bytes, which an ImageFS already satisfies.
 The output is the template's bytes `[0, B + startup_size)` with exactly
@@ -1616,7 +1634,7 @@ states; the template contributes no host-dependent byte.
 
 Refusals, each before any mutation:
 
-* no template: `FSIMG_EINVAL` naming `qnxboot:template`;
+* no template: `FSIMG_EINVAL` naming `ifsboot:template`;
 * a template that this profile does not read and verify: the template's
   own error, naming the template. The closed tables and the end-of-file
   tie are what refuse a template with an unobserved `flags1` bit, an
@@ -1682,7 +1700,7 @@ the exact decode hold at open. It reports the fields at 0x14 and 0x1c as
 unverified, so the layer scope is incomplete, as the
 [verification scope](#verification-scope) states, until evidence
 identifies the checksum field; the tie between the decoded length and the
-ImageFS's `image_size` is the driver's check, as for `qnxboot`.
+ImageFS's `image_size` is the driver's check, as for `ifsboot`.
 
 Info reports the decoded and payload lengths, the four unidentified fields
 as hexadecimal values, and the codec: the image information's container
@@ -1778,8 +1796,8 @@ format correctness; the oracle rows do.
 | DMG read | `hdiutil create` images in UDRO, UDZO and zero-filled variants open and extract, and list as the raw disks `hdiutil convert -format UDTO` and `qemu-img convert` expand them to (`qemu-img` reads DMG but cannot write it); both table shapes; per-table CRC under read-through | Overlapping tables, uncovered sectors, run beyond the data fork, run with zero sectors, run decompressing short and long, run over 16 MiB, bzip2 run (unsupported), unknown type, segment count 2, koly ranges overlapping, plist depth 33, undeclared entity, 5 KiB key; a bare volume whose last sector is a koly whose ranges do not end at the file's end opens as a bare volume |
 | VHD | `qemu-img check` and `info` report fixed VHD of the declared size; `vhd:align=1M` lengths; footer checksum; creator fields and original size as written | Flipped checksum (`FSIMG_ECORRUPT`, not a raw read), dynamic type 3 (`FSIMG_EUNSUPPORTED`), size mismatch with file length (no VHD claim: the file is whatever its prefix claims, or unrecognised) |
 | simg | `simg2img` expands to the raw disk byte for byte; `img2simg` output opens; `crc=yes` chunk verified | Chunk total mismatch, block sum mismatch, zero-size RAW chunk, FILL with wrong size, CRC mismatch under read-through, block size not a multiple of 4, 2^32 blocks refused at plan time |
-| qnxboot read | The eight H3 and three X1 boot images list and extract against their native manifests with no `dumpifs -u` step, and verify; `mkifs` LZO and UCL nonbootable output (machine 0) opens; generator-built images with opaque startup bytes for each prefix and each compression value, including 0x00; `i` prints `ifs/qnxboot` and the startup fields; sequential and confined reads decode each chunk once | A header at an offset outside the table, and `preboot_size` not equal to its offset: no claim; the signature inside SH-4 startup code: no claim; each closed-table field mutated: `FSIMG_EUNSUPPORTED` naming it; each bound mutated, `stored_size` equal to `startup_size + 4` under a framed value, trailing bytes after the stored image, the zlib value: the named class; a length word or chunk reaching the trailer, a missing terminator, a non-final chunk below 4096 (unsupported), a chunk decoding past 65536 or past `imagefs_size`, a decoded total short of `imagefs_size`, nonzero padding, each sum flipped: `FSIMG_ECORRUPT` naming the check; a body of minimum-size chunks longer than the index bound fails before scratch grows past it; a pattern alternating across five chunks stops at `-l work=`; a `dumpifs -u` copy is corrupt at the first chunk |
-| qnxboot wrap | A wrap of a standalone writer image, peeled again, yields that image's bytes under `lzo` and `none`; the output verifies, both sums and `ram_size`; byte-identical output across hosts and budgets; an incompressible 65536-byte chunk and an incompressible final chunk of 65400 bytes each split into two halves that read back; the x86 and SH-4 boot gates in the [IFS plan](../docs/ifs-plan.md) | No template; a template failing its probe, a bound or a sum, named as the template's error; an input without an `ifs` claim; a big-endian input (`FSIMG_EUNSUPPORTED` naming the byte order) under both modes; an input with a flipped ImageFS checksum word refused as `FSIMG_ECORRUPT` under both modes before any output byte; an input longer than the template's `imagefs_size`; the input changed between the two passes (`FSIMG_ESOURCE_CHANGED`); template, input and output aliasing |
+| ifsboot read | The eight H3 and three X1 boot images list and extract against their native manifests with no `dumpifs -u` step, and verify; `mkifs` LZO and UCL nonbootable output (machine 0) opens; generator-built images with opaque startup bytes for each prefix and each compression value, including 0x00; `i` prints `ifs/ifsboot` and the startup fields; sequential and confined reads decode each chunk once | A header at an offset outside the table, and `preboot_size` not equal to its offset: no claim; the signature inside SH-4 startup code: no claim; each closed-table field mutated: `FSIMG_EUNSUPPORTED` naming it; each bound mutated, `stored_size` equal to `startup_size + 4` under a framed value, trailing bytes after the stored image, the zlib value: the named class; a length word or chunk reaching the trailer, a missing terminator, a non-final chunk below 4096 (unsupported), a chunk decoding past 65536 or past `imagefs_size`, a decoded total short of `imagefs_size`, nonzero padding, each sum flipped: `FSIMG_ECORRUPT` naming the check; a body of minimum-size chunks longer than the index bound fails before scratch grows past it; a pattern alternating across five chunks stops at `-l work=`; a `dumpifs -u` copy is corrupt at the first chunk |
+| ifsboot wrap | A wrap of a standalone writer image, peeled again, yields that image's bytes under `lzo` and `none`; the output verifies, both sums and `ram_size`; byte-identical output across hosts and budgets; an incompressible 65536-byte chunk and an incompressible final chunk of 65400 bytes each split into two halves that read back; the x86 and SH-4 boot gates in the [IFS plan](../docs/ifs-plan.md) | No template; a template failing its probe, a bound or a sum, named as the template's error; an input without an `ifs` claim; a big-endian input (`FSIMG_EUNSUPPORTED` naming the byte order) under both modes; an input with a flipped ImageFS checksum word refused as `FSIMG_ECORRUPT` under both modes before any output byte; an input longer than the template's `imagefs_size`; the input changed between the two passes (`FSIMG_ESOURCE_CHANGED`); template, input and output aliasing |
 | hbcifs | `PCM3_IFS2.ifs` lists and extracts against its manifest; verification passes every check it makes, names the two unverified fields and reports an incomplete scope; `i` prints `ifs/hbcifs` | Payload length off by one (`FSIMG_ECORRUPT`); the field at 0x10, 0x18 or a reserved byte changed (`FSIMG_EUNSUPPORTED` naming the field); a stream ending short, producing more, or with bytes after its end; a spool limit crossed at the step that crosses it with `FSIMG_RESOURCE_SPOOL`, before the host file grows past it; the image under gzip or on stdin refused naming both layers; a scheme in `ifs/mbr/hbcifs` refused naming the container |
 | gzip | `gzip -t` accepts output; `zcat` yields the raw file; header bytes fixed (OS 3, flags 0, XFL by level); `gzip` and `pigz` input spools; concatenated members; MTIME clamp at an epoch of -1 and 2^32 | Trailing garbage, CRC mismatch, length mismatch, reserved flag bit, truncated member, 65 KiB FNAME; `-z` on a raw file fails as an absent signature |
 | Spool | Stdin of a raw, DMG and gzip image through the coordinator's pipe; all-zero input leaves holes (physical blocks sampled); limit exactly reached; a raw stream whose prefix also passes for gzip is ambiguous and `-z` or `-F` resolves it | A gzip bomb failing at the step that crosses the limit with `FSIMG_RESOURCE_SPOOL`, before the host file grows past it; no spool descriptor; spool descriptor not a fresh empty file; a terminal on stdin refused |

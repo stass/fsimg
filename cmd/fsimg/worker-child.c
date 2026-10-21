@@ -502,6 +502,9 @@ send_image(const fsimg_image_info_t *info, const fsimg_layer_report_t *report,
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, info->file_bytes);
 	bcopy(info->compression, raw + FSIMG_WIRE_IMAGE_COMPRESSION,
 	    strnlen(info->compression, sizeof(info->compression) - 1));
+	fsimg_wire_details_encode(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+	    FSIMG_WIRE_IMAGE_DETAILS, FSIMG_IMAGE_DETAILS_MAX, info->details,
+	    info->detail_count);
 	flags = 0;
 	if (unselected != NULL) {
 		/* A reason cut here or by the library ends in "...". */
@@ -519,8 +522,6 @@ send_image(const fsimg_image_info_t *info, const fsimg_layer_report_t *report,
 		bcopy(report->unverified, raw + FSIMG_WIRE_IMAGE_UNVERIFIED,
 		    strnlen(report->unverified, sizeof(report->unverified) - 1));
 	}
-	fsimg_wire_details_encode(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
-	    FSIMG_WIRE_IMAGE_DETAILS, info->details, info->detail_count);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, flags);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, info->disk_bytes);
 	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, info->sector_bytes);

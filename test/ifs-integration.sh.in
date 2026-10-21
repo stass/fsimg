@@ -8,9 +8,10 @@
 #                     (docs/ifs-research.md): bare images under cases/ and
 #                     the decoded S1 and S2 bodies under decoded/
 #   FSIMG_IFS_IMAGES  a directory of the licensed S1 (H3) and S2 (X1) boot
-#                     images and their `dumpifs -u` copies; only the bodies
-#                     of bare and uncompressed images are read, through
-#                     info and verification alone
+#                     images and their `dumpifs -u` copies; a compressed
+#                     boot image is read whole through the ifsboot
+#                     container, and the body of a bare or uncompressed one
+#                     as a slice, through info and verification alone
 #   DUMPIFS           an lclevy/dumpifs command at a pinned revision, run
 #                     as $DUMPIFS IMAGE
 #   QNXPROBE          a qnxprobe command at a pinned revision, run as
@@ -18,7 +19,11 @@
 #   FSIMG_HBCIFS_IMAGE    the hbcifs container PCM3_IFS2.ifs of the PCM 3.1
 #   FSIMG_HBCIFS_DECODED  update disc, and its payload decoded by the
 #                     out-of-tree liblzo2 oracle (docs/ifs-research.md)
-# The captures are compared with test-ifs's model by test-ifs --native and,
+# Generated boot images of each prefix and compression value, which
+# test-ifsboot emits, list, extract and verify through the command as
+# their bare body does. The captures are compared with test-ifs's model by
+# test-ifs --native, the boot images and E7 and E10 captures with their
+# decoded bodies by test-ifsboot --native, and,
 # through the command, with the research decoder ifsdump.py by
 # test/ifs-native.py, which first checks itself on two generated images.
 # dumpifs and qnxprobe, when given, must accept every bare image fsimg
@@ -47,6 +52,16 @@ fail() {
 fsimg_verify() {
     ./fsimg W --json -d --offset="$2" --length="$3" -f "$1" > "$4" \
         2> /dev/null && grep -q '"type":"verify","complete":true' "$4"
+}
+
+# Full verification of the boot image file $1 through the ifsboot
+# container it is detected as, with payload read-through; the JSON verify
+# record goes to the file $2. It fails unless the report is complete and
+# names the container.
+boot_verify() {
+    ./fsimg W --json -d -f "$1" > "$2" 2> /dev/null &&
+        grep -q '"type":"verify","complete":true' "$2" &&
+        grep -q '"type":"verify".*"container":"ifsboot"' "$2"
 }
 
 # The value of counter $1 in the verify record file $2, which must hold it.
@@ -166,9 +181,60 @@ if test -n "$dumpifs" || test -n "$probe"; then
     ran=1
 fi
 
+# The listing's entry records of image $1 into file $2, without the stack
+# and info records, which name the layers.
+entry_records() {
+    ./fsimg t --json -f "$1" 2> /dev/null | grep '"type":"entry"' > "$2"
+}
+
+# Each generated boot image reads as its bare body: the same entry records
+# and extracted tree (the link, which safe extraction does not create, is
+# skipped), verified with read-through under the ifsboot stack.
+mkdir "$fixture/boot" "$fixture/boot-body"
+./test-ifsboot --emit "$fixture/boot"
+entry_records "$fixture/boot/body.imagefs" "$fixture/boot-body.entries" ||
+    fail "fsimg t failed on the generated body"
+./fsimg x -E -k -C "$fixture/boot-body" -f "$fixture/boot/body.imagefs" \
+    > /dev/null 2>&1 || fail "fsimg x failed on the generated body"
+boot_images=0
+for image in "$fixture/boot"/*.ifs; do
+    name=$(basename "$image")
+    ./fsimg i --json -f "$image" > "$fixture/info" 2> /dev/null ||
+        fail "fsimg i failed on $name"
+    grep -q '"stack":"ifs/ifsboot"' "$fixture/info" ||
+        fail "$name is not read through the ifsboot container"
+    # The startup header's fields: the machine and its prefix tell the
+    # x86 images, behind the BIOS loader, from the SH-4 ones.
+    case $name in
+    bios-*) machine=3 prefix=1088 ;;
+    *) machine=42 prefix=0 ;;
+    esac
+    grep -q '"container_details":{"prefix_bytes":"'"$prefix"'",.*"machine":"'"$machine"'",' \
+        "$fixture/info" || fail "$name reports other header fields"
+    ./fsimg i -f "$image" 2> /dev/null |
+        grep -q "^machine: $(printf '0x%08x' "$machine")\$" ||
+        fail "$name prints other header fields"
+    boot_verify "$image" "$fixture/verify" || fail "$name does not verify"
+    entry_records "$image" "$fixture/boot.entries" ||
+        fail "fsimg t failed on $name"
+    cmp -s "$fixture/boot.entries" "$fixture/boot-body.entries" ||
+        fail "$name lists differently from its body"
+    rm -rf "$fixture/boot-tree"
+    mkdir "$fixture/boot-tree"
+    ./fsimg x -E -k -C "$fixture/boot-tree" -f "$image" > /dev/null 2>&1 ||
+        fail "fsimg x failed on $name"
+    diff -r "$fixture/boot-tree" "$fixture/boot-body" > /dev/null ||
+        fail "$name extracts differently from its body"
+    boot_images=$((boot_images + 1))
+done
+test "$boot_images" = 6 || fail "test-ifsboot emitted $boot_images boot images"
+echo "generated boot images: $boot_images list, extract and verify as their body"
+ran=1
+
 native=${FSIMG_IFS_NATIVE:-}
 if test -n "$native"; then
     ./test-ifs --native || fail "test-ifs --native"
+    ./test-ifsboot --native || fail "test-ifsboot --native"
     set --
     for group in cases/ifs-basic cases/ifs-names cases/ifs-extra \
         cases/ifs-data decoded; do
@@ -242,13 +308,14 @@ fi
 
 # The licensed images, read in place through info and verification with
 # payload read-through alone, which reads every file; only counts and the
-# images' file names are printed.
+# images' file names are printed. A compressed boot image is read whole,
+# its body decoded through the ifsboot container.
 images=${FSIMG_IFS_IMAGES:-}
 if test -n "$images" && test -z "$python"; then
     echo 'SKIP: FSIMG_IFS_IMAGES requires the Python 3 development tool'
 elif test -n "$images"; then
     read_bodies=0
-    compressed=0
+    read_boot=0
     other=0
     for image in "$images"/*; do
         test -f "$image" || continue
@@ -256,8 +323,14 @@ elif test -n "$images"; then
         bounds=$("$python" -I "$native_tool" body "$image") ||
             fail "cannot read $name"
         case $bounds in
-        compressed)
-            compressed=$((compressed + 1))
+        compressed\ *)
+            boot_verify "${bounds#compressed }" "$fixture/verify" ||
+                fail "$name does not verify as a boot image"
+            files=$(verify_count files "$fixture/verify")
+            read_bytes=$(verify_count initialized_bytes_read "$fixture/verify")
+            echo "$name: boot image verified, $files files, $read_bytes" \
+                "bytes read"
+            read_boot=$((read_boot + 1))
             continue
             ;;
         none)
@@ -284,16 +357,12 @@ elif test -n "$images"; then
             "$files other entries, $read_bytes bytes read"
         read_bodies=$((read_bodies + 1))
     done
-    if test "$compressed" != 0; then
-        echo "SKIP: $compressed compressed boot images in FSIMG_IFS_IMAGES;" \
-            "only bare and uncompressed bodies are read here"
-    fi
     if test "$other" != 0; then
         echo "$other files in FSIMG_IFS_IMAGES are neither an ImageFS nor a" \
             "little-endian boot image"
     fi
-    if test "$read_bodies" = 0; then
-        echo 'SKIP: FSIMG_IFS_IMAGES holds no bare or uncompressed image'
+    if test "$read_bodies" = 0 && test "$read_boot" = 0; then
+        echo 'SKIP: FSIMG_IFS_IMAGES holds no boot image or ImageFS'
     else
         ran=1
     fi

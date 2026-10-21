@@ -276,6 +276,13 @@
   bad revision to `bin/replay`. Split the host faults out so that they make the
   case a `harness_error`.
 
+* [Low] **SIGTERM harness test times out under load**
+  (`test/spec/suite/core/test_invocation.rb`):
+  `test_sigterm_to_the_harness_leaves_no_group` waits ten seconds for the
+  spawned harness to start its stub, then reads the pid file without
+  checking it appeared, so under a loaded `make -j32 check` the wait can
+  expire and the read raises `ENOENT`. Assert the file's presence with a
+  message and give the start a load-independent deadline.
 * [Low] **Spec harness reports and records** (`test/spec/lib/fsimg_spec/coverage.rb`,
   `failure_record.rb`):
   - Coverage reports `targeted_witnesses` as only `available` or
@@ -301,13 +308,11 @@
   Both verifiers keep their format-specific reconciliation.
 
 * [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/codec/`,
-  `lib/layers/`): read ImageFS bodies, bare or inside the `qnxboot` and
-  `hbcifs` containers (QNX boot images and the PCM 3.1 Harman-Becker
-  wrapper), with project-owned LZO1X and NRV2B decoders; wrap a new
-  ImageFS in an existing boot image. The
+  `lib/layers/`): wrap a new ImageFS in an existing QNX boot image
+  through the `ifsboot` container, with a project-owned LZO1X encoder. The
   [plan](docs/ifs-plan.md) orders the work; the
   [format](specs/design-ifs.md), [driver](specs/design-ifs-driver.md) and
-  [codec](specs/design-codecs.md) designs and the layer design's `qnxboot`
+  [codec](specs/design-codecs.md) designs and the layer design's `ifsboot`
   and `hbcifs` profiles are the contract; the
   [research record](docs/ifs-research.md) holds the evidence; the
   [qualification work](docs/todo-ifs.md) lists the open items.

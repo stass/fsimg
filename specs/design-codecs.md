@@ -8,10 +8,10 @@ fsimg owns three stream codecs: an LZO1X decoder, an NRV2B decoder for the
 they serve. A codec sees one compressed stream and one output; it never sees
 a chunk length, a header or a checksum. The framing of QNX boot images, a
 sequence of chunks each introduced by a 16-bit big-endian stored length, is
-the `qnxboot` container's in the [layer design](design-layers.md); the
+the `ifsboot` container's in the [layer design](design-layers.md); the
 single unframed stream behind the 64-byte Harman-Becker header is the
 `hbcifs` container's, in the same design. Both containers call the decoders
-specified here, and the `qnxboot` wrap calls the encoder.
+specified here, and the `ifsboot` wrap calls the encoder.
 
 The codecs are project-owned rather than linked from `liblzo2` and `libucl`,
 and the [IFS plan](../docs/ifs-plan.md#codecs-and-dependencies) records why:
@@ -590,7 +590,7 @@ three-byte end marker gives `n + n / 255 + 5` in real arithmetic and
 bytes, the table's offset width; a longer block is `FSIMG_EINVAL`.
 
 A 65536-byte block has a bound of 65799, more than a 16-bit stored length
-holds. The [`qnxboot` profile](design-layers.md#qnx-boot-image-qnxboot) in
+holds. The [`ifsboot` profile](design-layers.md#qnx-boot-image-ifsboot) in
 the layer design owns the rule: the body is chunks of 65536 decoded bytes,
 and a chunk whose encoding is longer than 65535 bytes is emitted as two
 chunks of 32768, which always fit the bound.
@@ -600,7 +600,7 @@ chunks of 32768, which always fit the bound.
 Three checks establish the encoder, in the order the plan runs them: every
 stream it writes decodes to its input under the project's decoder; every
 stream decodes to its input under the `liblzo2` oracle; and the native
-startup code boots a wrapped image at the `qnxboot` wrap's native gate.
+startup code boots a wrapped image at the `ifsboot` wrap's native gate.
 
 ## Concurrency and failure
 

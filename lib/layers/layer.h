@@ -171,7 +171,10 @@ typedef struct fsimg_scheme_ops {
  * lie at a file offset, encoded_length equal to length; zero and fill
  * chunks name no file bytes, a fill chunk repeating argument every four
  * bytes little-endian; a compressed chunk has encoded_length bytes of the
- * codec argument names, decoding to length bytes, at most 16 MiB.
+ * codec argument names, decoding to length bytes, at most 16 MiB. A zlib
+ * chunk's encoded bytes are at most zlib's bound of its length; an LZO1X
+ * or NRV2B chunk is a framed boot-image chunk, at most 65535 encoded bytes
+ * decoding to at most 65536.
  */
 typedef enum fsimg_chunk_kind {
 	FSIMG_CHUNK_RAW = 1,
@@ -181,10 +184,28 @@ typedef enum fsimg_chunk_kind {
 } fsimg_chunk_kind_t;
 
 typedef enum fsimg_chunk_codec {
-	FSIMG_CODEC_ZLIB = 1
+	FSIMG_CODEC_ZLIB = 1,
+	FSIMG_CODEC_LZO1X = 2,
+	FSIMG_CODEC_NRV2B = 3
 } fsimg_chunk_codec_t;
 
 #define FSIMG_CHUNK_MAX_DECODED	(UINT64_C(16) * 1024 * 1024)
+/* A framed chunk: a 16-bit stored length and at most 64 KiB decoded. */
+#define FSIMG_FRAMED_MAX_ENCODED	UINT64_C(65535)
+#define FSIMG_FRAMED_MAX_DECODED	UINT64_C(65536)
+
+/*
+ * Decode one framed LZO1X or NRV2B stream, the length bytes in, into out:
+ * the one decode of a framed chunk, for the container that learns its
+ * index and for the cache that serves it. On FSIMG_OK the stream reached
+ * its end marker exactly at its last byte within capacity bytes of
+ * output, *produced of them. A stream that wants more output, leaves
+ * bytes after its end marker or ends before it is FSIMG_ECORRUPT, the
+ * image's failure with the decoder's message, at the file offset of the
+ * failing byte, the stream lying at file_offset.
+ */
+fsimg_status_t fsimg_framed_decode(fsimg_chunk_codec_t, const unsigned char *,
+    size_t, uint64_t, unsigned char *, size_t, size_t *, fsimg_error_t *);
 
 typedef struct fsimg_chunk {
 	uint64_t	 disk_offset;
@@ -196,12 +217,14 @@ typedef struct fsimg_chunk {
 } fsimg_chunk_t;
 
 /* What an index holds: its record count, its largest compressed chunk's
- * decoded length (zero without one), and a bit (1u << kind) per kind.
+ * decoded length (zero without one), a bit (1u << kind) per kind and a bit
+ * (1u << codec) per codec of its compressed chunks.
  */
 typedef struct fsimg_chunk_summary {
 	uint64_t	 count;
 	uint64_t	 max_decoded;
 	unsigned	 kinds;
+	unsigned	 codecs;
 } fsimg_chunk_summary_t;
 
 typedef struct fsimg_chunk_index fsimg_chunk_index_t;
@@ -231,8 +254,10 @@ void fsimg_chunk_index_summary(const fsimg_chunk_index_t *,
 void fsimg_chunk_index_free(fsimg_chunk_index_t *);
 /* Validation control: the sealed index's private record store. */
 struct fsimg_store *fsimg_test_chunk_records(const fsimg_chunk_index_t *);
-/* The kinds of a summary as text in a fixed order: "raw,zero,fill,zlib". */
-void fsimg_chunk_kinds_text(unsigned, char *, size_t);
+/* The kinds and codecs of a summary as text in a fixed order: the kinds
+ * but compressed, then the codecs ("raw,zero,fill,zlib,lzo1x,nrv2b").
+ */
+void fsimg_chunk_kinds_text(unsigned, unsigned, char *, size_t);
 /*
  * The container adapter: a read-only object over a sealed index's disk,
  * reading raw and compressed bytes from file through session, which both
@@ -336,8 +361,8 @@ typedef struct fsimg_container_input {
 /* An opened container: the disk it yields, owned and freed with
  * fsimg_io_free, and what the image reports of it. guid is the VHD unique
  * identifier or the DMG segment ID in textual byte order, all zero for a
- * container without one. kinds is a summary's kind bits. details are the
- * header fields info reports, in the order the profile documents.
+ * container without one. kinds and codecs are a summary's bits. details
+ * are the header fields info reports, in the order the profile documents.
  */
 typedef struct fsimg_container {
 	fsimg_io_t	*disk;
@@ -345,6 +370,7 @@ typedef struct fsimg_container {
 	uint64_t	 disk_bytes;
 	uint64_t	 chunks;
 	unsigned	 kinds;
+	unsigned	 codecs;
 	uint32_t	 detail_count;
 	fsimg_volume_detail_t details[FSIMG_IMAGE_DETAILS_MAX];
 } fsimg_container_t;
@@ -612,6 +638,7 @@ extern const fsimg_container_ops_t fsimg_dmg_container;
 extern const fsimg_container_ops_t fsimg_vhd_container;
 extern const fsimg_container_ops_t fsimg_simg_container;
 extern const fsimg_container_ops_t fsimg_hbcifs_container;
+extern const fsimg_container_ops_t fsimg_ifsboot_container;
 extern const fsimg_compression_ops_t fsimg_gzip_compression;
 
 /* The registry, in reporting order; NULL past the end. */
