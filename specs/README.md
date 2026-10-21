@@ -15,6 +15,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Prepared directories](design-directories.md) | Directory preparation, namespace keys, common traversal and selection |
 | [Logical content](design-content.md) | Logical, initialized and mapped content; common delivery; optional extent index |
 | [Emission](design-emission.md) | Emission order, sink initialization, emission object, complete source copies |
+| [Hole knowledge](design-holes.md) | The written-range record of a fresh file, the zero-range operation every I/O object answers, and the reads a transcode may spare |
 | [Automatic sizing](design-sizing.md) | The default first-fit sizing policy and the minimization option, per format |
 | [Security](design-security.md) | Threat model, extraction, sandboxing, publication, and adversarial tests |
 | [Extraction and workers](design-extraction-worker.md) | Safe host output, bounded descriptor traversal, and worker protocol/lifecycle |

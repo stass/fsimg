@@ -101,7 +101,7 @@ flowchart TD
 | Owner | Owns | Does not own |
 | --- | --- | --- |
 | Resource context | All fsimg allocations, scratch files, limits, counters, cancellation | Application allocations and global process policy |
-| I/O adapter | Byte ranges, exact I/O, host offset conversion, zero-range capability | Filesystem geometry or image paths |
+| I/O adapter | Byte ranges, exact I/O, host offset conversion, zeroing, knowledge of which of its own ranges read as zero | Filesystem geometry or image paths |
 | Source catalog | Target entries, stable source identities, external ordering | File payload storage |
 | Writer | Collection, immutable planning, emission order, sink initialization, payload copying and its source lifecycle | Format placement or metadata encoding; editing an existing image |
 | Reader | Probe dispatch, directory preparation and namespace validation, traversal and selection, current entry, logical content delivery | Format fields or name folding; host path creation |
@@ -229,6 +229,29 @@ already reserved, library-owned descriptors without duplication, so confined
 workers can wrap newly created output and scratch files without gaining a
 descriptor-duplication syscall capability. Both paths share flag, type, and
 range validation and the context's descriptor accounting.
+
+Knowledge of zero contents is an operation of every I/O object, not a
+property of holding a descriptor: each object reports the next range at or
+after an offset that it knows reads as zero, from what it is. A file fsimg
+created empty answers from the record of the ranges written through it, a
+container's disk from its chunk index, an assembled disk from its regions, a
+caller's object through an optional callback, and a file fsimg did not write,
+an external file whichever constructor built its object, from the host's
+hole report after a sync of the file, clipped to the length the file then
+has. fsimg never asks the host whether a file it wrote has holes: a
+host hole report describes storage, not contents, and has been wrong for
+written, unsynced data (OpenZFS issue 15526), whereas what fsimg wrote is a
+fact it owns. For a user's file fsimg has no fact of its own, so it accepts
+the host's report once the file is synced, a workaround for that fault class
+rather than a fix, and reads every byte when the sync fails; the read job's
+image input therefore carries the sync right under Capsicum, while the
+spool's rights do not. Only a fresh file's record lets zeroing skip a write;
+a zero-range answer, the host's or a callback's, spares reads alone, so the
+accepted risk of the host's report cannot leave a stale byte in a reused
+output. Because the record is per range, emitters need neither an order nor
+a "still zero" state to keep a fresh output sparse. The
+[hole design](design-holes.md) owns the record, the operation, each object's
+answer and the decision's rationale.
 
 Offsets, logical sizes, counts, and persistent record references use
 `uint64_t`. Buffer lengths use `size_t` only after a checked conversion.
@@ -412,8 +435,9 @@ descriptor ownership, postorder finalization, and the readiness/protocol boundar
 ### Output and determinism
 
 Writer output covers every logical byte with either defined data or a proven
-zero range. A hole is safe only when the adapter guarantees its zero contents;
-skipping a write into a reused file is not zeroing. The default CLI publishes a
+zero range. A hole is safe only when the adapter guarantees its zero contents,
+which the [hole design](design-holes.md) defines; skipping a write into a
+reused file is not zeroing. The default CLI publishes a
 completed image without replacing an existing pathname. A caller-supplied raw
 I/O sink can contain partial output after failure and must be discarded.
 

@@ -303,11 +303,16 @@ any byte moves: `fstat` must show a regular file of size zero with link
 count zero, and the open mode must be read/write without `O_APPEND`
 (which would move every write to the end and corrupt skipped holes);
 anything else is
-`FSIMG_EINVAL` naming the descriptor. Those checked facts, an empty regular
-file that no name can reach, are what the
-[zero-proof rule](design-emission.md#order) rests on, so unwritten ranges
-are proven zero, all-zero blocks are skipped and stay holes, and the proof
-does not depend on the caller's word. The CLI coordinator's placement rules
+`FSIMG_EINVAL` naming the descriptor. The creator keeps no other descriptor
+or mapping of the file and gives none to anyone, so the library's object is
+the file's only writer for its lifetime; that is part of the handover
+contract, since no check on the descriptor can establish it. The checked
+facts, an empty regular file that no name can reach, and the contracted
+one, a single writer, are together what the file's
+[written-range record](design-holes.md#the-written-range-record) rests on,
+so unwritten ranges are proven zero, all-zero blocks are skipped and stay
+holes, and the proof of emptiness does not depend on the caller's word or
+on the host's report of its holes. The CLI coordinator's placement rules
 are in the [CLI design](design-cli.md#coordinator-and-streaming-representation).
 
 ### Budget
@@ -430,9 +435,9 @@ transcode runs, the image costs (disk length + encoded output length) of
 output budget, and the [architecture](architecture.md#bounded-resources)
 states how the default output limit covers both. A sink that needs a raw
 intermediate and has none is an argument error before any mutation. The
-transcode reads the file in chunk-sized buffers; it may use sparse-range
-discovery to skip
-reading holes and nothing else.
+transcode reads the file in chunk-sized buffers and spares only the reads of
+the ranges the file's own [written-range
+record](design-holes.md#the-written-range-record) proves zero.
 
 ### Transcode
 
@@ -445,17 +450,13 @@ each chunk, decides by inspecting its bytes whether it is all zero.
 
 Zero decisions depend only on the bytes: an all-zero chunk becomes a DMG
 zero-fill entry, a simg `DONT_CARE` chunk, an unwritten range of a VHD or a
-raw copy, or a run of zeros for gzip. Host sparse-file behaviour may only
-skip reading a hole, which is zero by definition; it cannot change an output
-byte. Bounded I/O asks the host for holes in a file only once the file is
-synced (`fsync`): before an I/O object's first lookup, since a file may
-arrive with dirty data, and again after any write or resize through the
-object, so every hole lookup, the transcode's of its raw intermediate
-included, sees synced data: OpenZFS 2.2.0 and 2.2.1 could report dirty, unsynced data as
-a hole, which would encode written blocks as zeros. The spool, the only
-other file fsimg writes and then reads, is never asked for holes: wrap,
-compose and unwrap transcode through a resolver object, which reports
-none, and the readers do not ask. Consecutive zero chunks merge into one entry where the container allows
+raw copy, or a run of zeros for gzip. A zero range the disk object reports,
+under the [hole design](design-holes.md#the-zero-range-operation), may only
+spare the read of a chunk lying wholly inside it; it cannot change an output
+byte. The raw intermediate answers from the written-range record its
+emission built, an assembled disk answers its zero gaps and its inputs'
+answers, and the host is never asked about holes in a file fsimg wrote.
+Consecutive zero chunks merge into one entry where the container allows
 it, so a sparse 128 TiB disk yields a few table entries, not 128 million.
 
 Each container's sequential order is fixed by the format and listed in its
@@ -465,8 +466,8 @@ simg's header carries the chunk count, which the zero decisions determine, so
 simg runs the inspection pass twice: the first counts chunks and ends by
 writing the header, the second emits the chunks and fails as a changed
 source if it emits another count, as an input read twice by wrap or compose
-can. Both passes skip only reported holes. This keeps positional and stream
-sinks identical and the bytes deterministic.
+can. Both passes spare only the reads of reported zero ranges. This keeps
+positional and stream sinks identical and the bytes deterministic.
 
 Chunk records that a container must emit after its data (the DMG block
 table) go through a metadata scratch record stream as they are decided, and
@@ -501,8 +502,12 @@ failing layer and states that nothing was published.
 Every failure from the first mutation of the staged disk on marks the output
 incomplete; the coordinator removes staged files and publishes nothing. The
 raw intermediate has no name and needs no cleanup; the staged output is
-removed by the existing cleanup. Cancellation is polled at every chunk of the
-transcode and at every scheme table write. A partial container, a missing
+removed by the existing cleanup. Cancellation is polled at every chunk the
+transcode reads, at every bounded step of a zero run's linear work in the
+sequential sink, and at every scheme table write. Every pass ends with the
+disk object's pass validation, so an input that shrank under a spared read
+fails the operation as a changed input
+([hole design](design-holes.md#pass-validation)). A partial container, a missing
 trailer, a plist without its koly, or a disk with primary but no backup GPT
 is never published.
 
@@ -534,12 +539,20 @@ read-only positional object over ordered regions, each a scheme table buffer
 held in charged memory (at most the two GPT header and entry copies plus the
 MBR, under 64 KiB), a borrowed slice of an input, or a zero gap. The transcode
 and the sequential copy read the assembled disk exactly as they read a raw
-intermediate, so the output path has one input type. An input slice may
-itself sit above a container adapter; that is the one place an adapter sits
-above another, and the depth stops there. Compose with a container therefore
-reads every input once and writes the output once. Unwrap is the sequential
-copy with no encoder. Inputs are checked against the output for
-backing-identity aliases before any mutation, like writer sources.
+intermediate, so the output path has one input type. The assembled disk
+answers the transcode's zero-range question region by region, under the
+[hole design](design-holes.md#what-each-object-answers): a zero gap is zero,
+a table never is, and an input slice answers as its source does, a
+container adapter from its chunk index, a spooled image from its spool's
+record, a caller's object through its callback, and a user's file from the
+host's hole report after a sync, or nothing when the sync fails, so that
+file is read in full. An input slice may itself sit above a
+container adapter; that is the one place an adapter sits above another, and
+the depth stops there. Compose with a container therefore reads every input
+once, sparing the ranges its inputs prove zero, and writes the output once.
+Unwrap is the sequential copy with no encoder. Inputs are checked against
+the output for backing-identity aliases before any mutation, like writer
+sources.
 
 All three accept the write options for mode (reproducible flag, epoch,
 durability) and the layer options; filesystem settings must hold their
@@ -841,9 +854,11 @@ Layers add attack surface before any filesystem byte is read. The rules:
   the [security design](design-security.md#other-boundaries) states. The
   coordinator's publication check still sees exactly one staged `image`.
 * **Zero bytes are written, not assumed.** Transcode output zeros come from
-  explicit zero chunks or a proven-zero fresh file, never from a reused
-  file's old contents. Alignment padding, reserved table fields and the MBR
-  code area are emitted as zeros.
+  explicit zero chunks or from the unwritten ranges of a fresh file, which
+  its [written-range record](design-holes.md#the-written-range-record)
+  proves, never from a reused file's old contents or a host's report of its
+  holes. Alignment padding, reserved table fields and the MBR code area are
+  emitted as zeros.
 * **Forcing selects, never relaxes.** A forced layer runs full validation;
   the range selector bypasses the scheme but not the slice checks.
 * **No path from a name.** Partition names and DMG `Name` strings are
@@ -1242,11 +1257,11 @@ format correctness; the oracle rows do.
 | simg | `simg2img` expands to the raw disk byte for byte; `img2simg` output opens; `crc=yes` chunk verified | Chunk total mismatch, block sum mismatch, zero-size RAW chunk, FILL with wrong size, CRC mismatch under read-through, block size not a multiple of 4, 2^32 blocks refused at plan time |
 | gzip | `gzip -t` accepts output; `zcat` yields the raw file; header bytes fixed (OS 3, flags 0, XFL by level); `gzip` and `pigz` input spools; concatenated members; MTIME clamp at an epoch of -1 and 2^32 | Trailing garbage, CRC mismatch, length mismatch, reserved flag bit, truncated member, 65 KiB FNAME; `-z` on a raw file fails as an absent signature |
 | Spool | Stdin of a raw, DMG and gzip image through the coordinator's pipe; all-zero input leaves holes (physical blocks sampled); limit exactly reached; a raw stream whose prefix also passes for gzip is ambiguous and `-z` or `-F` resolves it | A gzip bomb failing at the step that crosses the limit with `FSIMG_RESOURCE_SPOOL`, before the host file grows past it; no spool descriptor; spool descriptor not a fresh empty file; a terminal on stdin refused |
-| Transcode | Output bytes identical with and without sparse-range discovery, across budgets and chunk-cache sizes; raw intermediate absent from every directory after success and failure; output-limit accounting of both files, in the staging directory and in the scratch tree | Short write, flush failure and cancellation at each chunk: staged files removed, nothing published, stream reports incomplete output after the first byte; a sink needing a raw intermediate without one, or with a descriptor that is linked, non-empty, not regular or read-only, fails before any mutation; `cf -` with a terminal on stdout refused |
+| Transcode | Output bytes identical with hole knowledge consulted and ignored, across budgets and chunk-cache sizes; a sparse raw intermediate read only where its record marks writes; raw intermediate absent from every directory after success and failure; output-limit accounting of both files, in the staging directory and in the scratch tree | Short write, flush failure and cancellation at each chunk: staged files removed, nothing published, stream reports incomplete output after the first byte; a sink needing a raw intermediate without one, or with a descriptor that is linked, non-empty, not regular or read-only, fails before any mutation; `cf -` with a terminal on stdout refused |
 | Chunk cache | Sequential reads of a UDZO image decode each chunk once; a pattern confined to four chunks decodes each once; decoded bytes appear in the work counter | A pattern alternating across five maximum chunks pays one decode per read and stops at `-l work=` with `FSIMG_RESOURCE_WORK`, and without a work limit at the decode bound; a 16 MiB memory budget fails the open as a memory limit |
-| Wrap, unwrap, compose | Wrap then unwrap is the identity; compose of three volumes lists three partitions with the given names and types in `sgdisk`; inputs read once | Aliased input and output; five partitions on MBR; unrecognised volume without `type=` |
+| Wrap, unwrap, compose | Wrap then unwrap is the identity; compose of three volumes lists three partitions with the given names and types in `sgdisk`; inputs read once; a DMG input's zero run composed without a read or a decode, as the [hole design](design-holes.md#tests-and-evidence) details | Aliased input and output; five partitions on MBR; unrecognised volume without `type=` |
 | Create then verify | Verification runs on the staged file before publication | A fault injected into the staged file after transcode discards it, publishes nothing, and names the layer; `cW` with `-f -` is a syntax error |
-| Reproducibility | Byte-identical output across host order, budget, scratch placement, cache size and sparse discovery for every container, under `compress=none` and under zlib with one zlib version; identifiers follow the derivation under `-R` | Different epochs differ only in the derived fields; an unset identifier without `-R` fails in the library with the key named; zlib version reported |
+| Reproducibility | Byte-identical output across host order, budget, scratch placement, cache size and hole knowledge for every container, under `compress=none` and under zlib with one zlib version; identifiers follow the derivation under `-R` | Different epochs differ only in the derived fields; an unset identifier without `-R` fails in the library with the key named; zlib version reported |
 | Fuzzing | koly, plist, mish, GPT, MBR, VHD footer, simg header and gzip header parsers under sanitizers with small budgets | Corpus seeded from every fixture above |
 
 Oracle availability is reported, not assumed: a missing `hdiutil`, `sgdisk`

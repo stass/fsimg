@@ -63,19 +63,32 @@ is returned as an I/O error retaining EINTR. Cancellation is polled between
 retries, including flush retries, so interruption cannot create an endless
 uncancellable loop.
 
-Capabilities distinguish positional access, resize, flush, known-zero ranges,
-and optional host sparse-range discovery. Only an adapter that owns a fresh,
-exclusively created file can advertise its unwritten ranges as known zero.
-A callback's zero-range operation promises logical zeros, not just a seek.
-For a generic reused sink, the emitter explicitly writes zeros or invokes a
-verified zero-range operation for every gap. Extending a file does not prove
-that bytes already inside its old length are zero.
+Capabilities distinguish positional access, resize, flush and zeroing. Every
+object also answers the next range at or after an offset that it knows reads
+as zero, under the [hole design](design-holes.md): a file fsimg created
+empty answers from the written-range record its root keeps, so its unwritten
+ranges are known zero however many other ranges have been written; a
+container's disk answers from its chunk index; an assembled disk from its
+regions; a callback object through an optional callback; a file fsimg did
+not write, an external file whichever constructor built its object, from
+the host's hole report after the file is synced, clipped to the file's
+observed length, and nothing once a sync has failed; any other object
+knows nothing. Only a fresh file's record lets zeroing skip a write; every
+other object is zeroed explicitly whatever it, the host or a callback
+reports, since a zero-range answer spares reads alone. A callback's
+zero-range operation promises logical zeros, not
+just a seek. For a generic reused sink, the emitter explicitly writes zeros
+or invokes a verified zero-range operation for every gap. Extending a file
+does not prove that bytes already inside its old length are zero.
 
-Sparse source discovery is an optimization. A reported hole supplies zeros;
-the absence of hole support causes ordinary bounded copying. A host-file hole
-does not mean that a filesystem allocation unit is free. Reflinks and
-`copy_file_range` are not required and cannot bypass source validation or slice
-bounds. Metadata and content copies remain correct without them.
+A reported zero range spares a read and nothing more; where none is reported
+ordinary bounded copying proceeds. The host is not asked about holes in a
+file fsimg wrote; for a file it did not write the sync before the host's
+report is a workaround for a known host fault, which the hole design states
+with its evidence. A host-file hole does not mean that a filesystem
+allocation unit is free. Reflinks and `copy_file_range` are not required and
+cannot bypass source validation or slice bounds. Metadata and content copies
+remain correct without them.
 
 ### Container adapter
 
@@ -88,14 +101,17 @@ the bounded chunk cache and served from it, and cache capacity changes no
 result. A read crossing chunk boundaries continues across them in one call
 and reports confirmed bytes on failure. A slice above the adapter translates
 to one checked disk offset, as above a file. The adapter retains the backing
-file's identity for alias checks.
+file's identity for alias checks, and answers zero ranges from the index's
+zero records and zero-valued fill records, in record reads and never in
+bytes.
 
 An assembled disk, used by wrap and compose, is a read-only adapter over
 ordered regions: bounded table buffers in charged memory, borrowed input
-slices, and zero gaps. It has the same translation and identity rules.
-Adapters stack at most two deep, an assembled disk above a container
-adapter, so there is still no recursive I/O and no unbounded traversal
-stack.
+slices, and zero gaps. It has the same translation and identity rules, and
+answers zero ranges region by region: a gap is zero, a table never is, and
+an input slice answers as its source does. Adapters stack at most two deep,
+an assembled disk above a container adapter, so there is still no recursive
+I/O and no unbounded traversal stack.
 
 ## Metadata scratch primitives
 
@@ -381,13 +397,25 @@ the chain seeks.
 Its bounds: one chunk-sized transfer buffer (the container's chunk size, or
 1 MiB without one), one compression state, chunk records in a scratch stream,
 and the sink's own fixed trailer or footer buffer. Zero decisions inspect the
-buffer; sparse-range discovery may skip reading a known hole and nothing
-more. simg, whose header needs the chunk count, runs the inspection pass
+buffer; a zero range the disk object reports under the
+[hole design](design-holes.md#the-zero-range-operation) spares the read of a
+chunk lying inside it and nothing more. simg, whose header needs the chunk
+count, runs the inspection pass
 twice, the first over data ranges only. The raw intermediate is the
 handed-over file of the [resource model](#resource-model), charged to the
 output limit together with the staged output. Cancellation is polled per
-chunk. Work is `O(disk data bytes + chunk records + table bytes)`; a sparse
-disk costs its data plus a few merged zero records.
+chunk read and, within a zero run handed to the encoder whole, after each
+bounded step of the sequential sink's zero operation, the one funnel for
+appended zeros. Work is `O(disk data bytes + chunk records + table bytes)`
+for a container or a raw copy to a fresh file: a sparse disk costs its data
+plus a few merged zero records, since a reported zero run reaches the
+encoder as one call with a `uint64_t` length, never a buffer. gzip
+compresses the logical zeros and a copy to a reused sink or a stream writes
+them, so their work is linear in the disk length; the work counter charges
+every chunk a run covers before the hand-over, so the work limit and the
+deadline bound a disk declared vast by its tables, and each pass ends with
+the disk object's pass validation
+([hole design](design-holes.md#resource-bounds)).
 
 ## Reading and traversal
 
@@ -503,4 +531,4 @@ scratch ENOSPC, descriptor exhaustion, and arithmetic near supported limits.
 Layer tests add: one decode per compressed chunk under sequential reads, a
 chunk index that spills with a small scratch budget and answers identically,
 spool holes for all-zero input, and a transcode whose output bytes do not
-change with the chunk cache size or sparse-range discovery.
+change with the chunk cache size or with hole knowledge consulted or ignored.

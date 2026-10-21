@@ -155,13 +155,20 @@ adapters reject `O_APPEND` and unsupported direct-I/O modes. The constructor
 does not clear shared status flags, change the caller's file position, or take
 ownership of the original descriptor. The caller must keep shared file-status
 flags stable for the adapter's lifetime. Raw devices are not accepted.
+The object is an external file: it answers zero ranges from the host's hole
+report after syncing the file, clipped to the length the file then has, and
+answers nothing once a sync fails, as the
+[hole design](design-holes.md#external-files-the-hosts-report) states;
+under Capsicum a descriptor needs `CAP_FSYNC` for that, and without it the
+file is simply read in full. Zeroing a writable object never consults that
+report; a sink without a fresh file's record is zeroed in full.
 A slice borrows its parent, retains backing identity/ranges for alias checks,
 and has a fixed length; it never resizes its parent. The parent must outlive it.
 A reader/writer borrows its I/O object for the documented operation lifetime.
 Objects from different contexts cannot be combined.
 
 `fsimg_io_ops_t` provides `read_at`, `write_at`, `get_size`, and optional
-`resize`, `flush`, `zero_range`, and `next_sparse_range` operations. Offset and
+`resize`, `flush`, `zero_range`, and `next_zero_range` operations. Offset and
 logical-size arguments are `uint64_t`; transfer lengths/counts are `size_t`.
 Read/write operations receive an explicit byte-count output and error output.
 The table and capability declarations are copied; its argument is borrowed
@@ -180,8 +187,14 @@ capabilities fail before any sink mutation.
 A successful read at EOF returns zero bytes. A short successful read is legal
 at this layer; exact format reads reject premature EOF. A zero-length request
 does not invoke the adapter. Custom zero-range callbacks must actually establish
-zeros. An application-supplied callback is trusted application code; the
-library cannot sandbox it or account for allocations it makes independently.
+zeros. A `next_zero_range` callback reports the next range at or after an
+offset that reads as zero, under the contract in the
+[hole design](design-holes.md#the-callback): it requires `read_at`, the
+library checks that its answer lies within the object and makes progress,
+and the library relies on the answer's contents as it relies on
+`zero_range`, encoding a reported range as zeros without reading it. An
+application-supplied callback is trusted application code; the library
+cannot sandbox it or account for allocations it makes independently.
 
 ## Entries and sources
 
@@ -662,7 +675,8 @@ introducing deferred destruction or callback-driven lifecycle transitions.
 each callback request; zero selects the host transfer maximum. Read/write
 capabilities follow callback presence. `FSIMG_IO_DURABLE` requires a flush
 callback and is the only table flag. Built-in regular-file FDs advertise durable
-flush. Sparse-range discovery is optional and has no bearing on byte correctness.
+flush. `next_zero_range` is optional and spares reads only; output bytes never
+depend on it.
 
 Byte helpers use the same status/error convention:
 

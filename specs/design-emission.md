@@ -32,17 +32,19 @@ begins:
 3. Check sink capabilities: write, resize or exact fixed size, and durability
    when requested. Check the planned length against the output limit.
 4. Resize a resizable whole-object sink to the planned length.
-5. Initialize every byte not yet known to be zero, through the zero-range
-   capability. Only the adapter for a fresh empty file knows that its
-   contents, including later extension, are zero, and only two facts
-   establish that: exclusive empty creation, which the output coordinator
-   performs for the staged output, or the adoption check of a
-   [handed-over file](design-layers.md#handed-over-files), the raw
+5. Zero every byte of the planned volume through the zeroing operation,
+   which writes only where zeros are not already proven. On a fresh file,
+   one fsimg adopted empty, the operation writes nothing: the file's
+   [written-range record](design-holes.md#the-written-range-record) proves
+   every unwritten range zero, and keeps proving it for the ranges later
+   writes do not touch, so those ranges stay sparse without any guess from
+   names or sizes and whatever order the writes come in. Only two facts
+   establish that a file is fresh: exclusive empty creation, which the
+   output coordinator performs for the staged output, or the adoption check
+   of a [handed-over file](design-layers.md#handed-over-files), the raw
    intermediate and the spool, which proves on the descriptor that it is an
-   empty regular file with no link. The adapter clears that knowledge before
-   its first write, so those ranges stay sparse without any guess from names
-   or sizes. Any other sink, a reused file or a caller's positional object,
-   never has it and is zeroed explicitly.
+   empty regular file with no link. Any other sink, a reused file or a
+   caller's positional object, has no record and is zeroed explicitly.
 6. Construct the emission object and pass it to the driver.
 7. Flush the sink after the driver returns successfully.
 
