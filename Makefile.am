@@ -11,7 +11,8 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/layers \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
 	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4 \
-	$(ZLIB_CFLAGS)
+	$(ZLIB_CFLAGS) \
+	-I$(top_srcdir)/lib/codec
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
 # The sanitizer and fuzz scripts run `make distdir` and `make check` as
@@ -85,7 +86,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx4/directory.c lib/formats/qnx4/read.c \
 	lib/formats/qnx4/verify.c lib/formats/qnx4/write-qnx4.h \
 	lib/formats/qnx4/write-plan.c lib/formats/qnx4/write-emit.c \
-	compat/host.c compat/host.h compat/private.c compat/private.h
+	compat/host.c compat/host.h compat/private.c compat/private.h \
+	lib/codec/codec.h lib/codec/lzo1x.c lib/codec/nrv2b.c
 # The system zlib is the core's one third-party library; never vendored.
 libfsimg_core_la_LIBADD = $(ZLIB_LIBS)
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
@@ -118,7 +120,8 @@ test_programs = test-core test-private test-io test-meta test-meta-sort test-uni
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
-	test-containers test-compression test-gzip-write test-holes header-c header-cxx
+	test-containers test-compression test-gzip-write test-holes header-c \
+	header-cxx test-codec
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
@@ -128,7 +131,7 @@ TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh \
 	test/containers-integration.sh test/compression-integration.sh \
-	test/cli.sh test/baseline.sh test/spec.sh
+	test/cli.sh test/baseline.sh test/spec.sh test/codec-integration.sh
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
@@ -170,6 +173,10 @@ layers_compose_SOURCES = test/layers-compose.c
 layers_compose_LDADD = libfsimg.la
 test_posix_SOURCES = test/posix.c test/test.h
 test_posix_LDADD = libfsimg.la
+test_codec_SOURCES = test/codec.c test/test.h
+# test/codec-integration.sh runs test-codec once per stream; linking the
+# convenience library makes it a plain binary, not a libtool wrapper.
+test_codec_LDADD = libfsimg-core.la
 test_exfat_SOURCES = test/exfat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_exfat_LDADD = libfsimg.la
@@ -263,8 +270,9 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
+	test/codec-integration.sh.in \
 	fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/protocol.c fuzz/image.c \
-	fuzz/container.c fuzz/plist.c fuzz/gzip.c fuzz/mtree.c \
+	fuzz/container.c fuzz/plist.c fuzz/gzip.c fuzz/mtree.c fuzz/codec.c \
 	test/cli.sh.in test/cli.py test/qualify-cli.py \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
@@ -294,10 +302,11 @@ check-installed-consumers:
 	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" $(ZLIB_LIBS) -o header-installed-cxx
 	./header-installed-cxx
 check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write \
-	    test-qnx4 test-qnx4-write fsimg test/fat-integration.sh \
+	    test-qnx4 test-qnx4-write test-codec fsimg test/fat-integration.sh \
 	    test/exfat-integration.sh test/qnx6-integration.sh \
 	    test/qnx4-integration.sh test/layers-integration.sh \
-	    test/containers-integration.sh test/compression-integration.sh
+	    test/containers-integration.sh test/compression-integration.sh \
+	    test/codec-integration.sh
 	./test/fat-integration.sh
 	./test/exfat-integration.sh
 	./test/qnx6-integration.sh
@@ -305,6 +314,7 @@ check-integration: test-fat test-fat-write test-exfat test-qnx6 test-qnx6-write 
 	./test/layers-integration.sh
 	./test/containers-integration.sh
 	./test/compression-integration.sh
+	./test/codec-integration.sh; result=$$?; test $$result = 0 -o $$result = 77
 # Regenerate the checked-in comparison baseline; test/baseline.sh only reads it.
 baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	./test/baseline.sh --record > $(srcdir)/test/baseline.txt.new || \
@@ -322,12 +332,13 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx6 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
-check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-protocol test-layers \
-	    test-containers test-compression test-mtree test/spec.sh
+check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-codec test-protocol \
+	    test-layers test-containers test-compression test-mtree test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
-check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-protocol \
-	    test-layers test-containers test-compression test-mtree test/spec.sh
+check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-codec \
+	    test-protocol test-layers test-containers test-compression test-mtree \
+	    test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard
@@ -388,7 +399,8 @@ clean-local:
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
 	    protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
-	    plist-fuzz-corpus gzip-fuzz-corpus mtree-fuzz-corpus
+	    plist-fuzz-corpus gzip-fuzz-corpus mtree-fuzz-corpus \
+	    codec-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77

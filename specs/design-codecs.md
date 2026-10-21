@@ -386,9 +386,12 @@ fsimg_status_t fsimg_nrv2b_decode(const uint8_t *in, size_t in_len,
   `history = 0` and a window the size of the limit. The `hbcifs` container
   drains its window to the spool when it fills, moves the last 64 KiB to
   the front and continues.
-* **LZO1X stopping.** A call returns `FSIMG_OK` only at an edge: it has
-  consumed all its input, filled its capacity, or decoded the end marker,
-  whichever comes first; `done` reports the last. A caller's loop therefore
+* **LZO1X stopping.** A call returns `FSIMG_OK` only at an edge: its next
+  transition needs an input byte beyond its input or an output byte beyond
+  its capacity, or it has decoded the end marker; `done` reports the last.
+  Instruction bytes that produce nothing are still consumed once the
+  window is full, so a stream whose output fills the window exactly ends
+  in that call. A caller's loop therefore
   ends every call by presenting the next input piece or draining the
   window, and the loop finishes within the stream's length plus the limit.
 * **Matches.** The copy source is `distance` bytes before the write
@@ -398,7 +401,12 @@ fsimg_status_t fsimg_nrv2b_decode(const uint8_t *in, size_t in_len,
   be the bytes produced before the match and `available` the history plus
   the bytes produced by this call so far: a distance within `total` but
   greater than `available` means the caller kept too little history; that
-  is a contract failure, `FSIMG_ESTATE`, never blamed on the image.
+  is a contract failure, `FSIMG_ESTATE`, never blamed on the image. The
+  image's own verdicts on a match, its distance against `total` and a far
+  match's length against the limit, come before it. A match still being
+  copied when a call returns is checked again when the next call starts,
+  against that call's history, so a caller that keeps less between calls
+  gets the same `FSIMG_ESTATE` rather than a copy from outside its window.
 * **Verdicts the decoder owns.** The three corrupt cases of the plan and
   the two framing cases all end in the decoder, because the caller tells it
   where the stream ends:
@@ -453,8 +461,12 @@ fsimg_status_t fsimg_nrv2b_decode(const uint8_t *in, size_t in_len,
   offset is checked against the bytes produced once `L` is read, and the
   length is held against the remaining capacity as `G` accumulates.
   Carried literals after an LZO1X match and the literals of a first run
-  are checked against the limit like the literals of a long run, one byte
-  before it is written. A stream that breaks two rules therefore has one
+  are held against the limit as a count, like a long run's length: a
+  first run when its first byte is read, carried literals once their
+  match has been copied, in both cases before the first of them is
+  written. Every LZO1X copy therefore starts within the limit, and no
+  byte of it is checked against the limit again. A stream that breaks
+  two rules therefore has one
   definite verdict, the first in this order, and the unit tests expect it
   exactly.
 
@@ -687,10 +699,10 @@ in this design, in test code that shares nothing with `lib/codec/`.
 | --- | --- | --- |
 | LZO1X instruction forms (`test/codec.c`) | First runs of 1, 3, 4, 238 and 239 literals; long runs with 0, 1 and 2 extension zero bytes; short matches after state 1, 2 and 3 at distances 1 and 1024; mid-distance short matches after state 4 at 2049 and 3072; near matches of 3, 4, 5 and 8 at distances 1 and 2048; long matches of 3, 33, 34 and 289 at 1 and 16384; far matches of 3, 9, 10 and 265 at 16385 and 49151; 0 to 3 carried literals after each class; the end marker canonical, with `S = 1`, and with `L = 0` and an extension; a stream whose output already equals the limit followed by `11 00 00`, and the same followed by `10 01 00 00`, both `done`; the worked streams above; each decodes to the bytes the oracle produced | Each stream mutated once: distance raised by one past the bytes produced (`FSIMG_ECORRUPT` naming the distance), a near match in place of the marker (unterminated), one byte appended after the marker (trailing), a far match with `H = 1` where the marker was expected; each names its check and the offset |
 | NRV2B forms | Examples A to F; reuse before any new offset; `H = 3` with `L` read at a control-byte boundary; `F = 1, 2, 3` and `G = 2, 3, 63`; offsets 0xD00 and 0xD01 with the bonus; offset equal to the bytes produced; `H = 0x1000002` with `L = 0xFF`; the last control byte's unused bits set to ones; the empty stream | Offset one past the bytes produced; a reuse at the start; `H = 0x1000003` (offset out of range); `H = 0x1000002` with `L = 0xFE` (distance before the output start); the marker's `0xFF` dropped (unterminated); a byte after it (trailing); `in_len` of 65536 and `capacity` of 65537 (`FSIMG_EINVAL`) |
-| Truncation at every byte | Every proper prefix of every valid stream is unterminated: NRV2B in its one call, LZO1X with `final`; an LZO1X prefix with `final` clear returns `FSIMG_OK` and later decodes to the full output when the rest is presented; the output beyond `produced` keeps its poison in every case | The complete stream through the same loop is `done` with the expected bytes, so a loop that ignored `final` would pass a prefix and break the pairing; the poison check is proven live by a deliberately written byte it must report |
+| Truncation at every byte | Every proper prefix of every valid stream is unterminated: NRV2B in its one call, LZO1X with `final`; an LZO1X prefix with `final` clear returns `FSIMG_OK` and later decodes to the full output when the rest is presented; the output beyond `produced` keeps its poison in every case. A stream longer than 4096 bytes, whose length comes from the literals that give its matches room, is cut at a stride of points and at every point of its last 64 bytes, where the instructions under test are | The complete stream through the same loop is `done` with the expected bytes, so a loop that ignored `final` would pass a prefix and break the pairing; the poison check is proven live by a deliberately written byte it must report |
 | LZO1X split invariance | Every valid LZO1X stream decoded in one call, with every input split point, with output capacity 1, and with history exactly 49151 produces identical bytes and the same `consumed`, `produced` sums and `done` | A history of 49150 for a stream whose last match reaches 49151 back gives `FSIMG_ESTATE`, not `FSIMG_ECORRUPT`, proving the two verdicts are told apart |
 | Bounds | A stream whose output is exactly the limit or capacity decodes, end marker included; one byte more is corrupt the moment the length is known (for an LZO1X far match, once its distance word shows it is not the marker), with `produced` unchanged; an LZO1X window of `n - 1` stops with `produced = n - 1`, not `done`, and nothing written beyond it; a long match of 2^32 - 1 claimed under a limit of 65536 is refused at the header with work of a few bytes; a far match whose extension passes 2^32 - 1 is refused before its distance word; a run of 1000 extension zero bytes claiming 255000 literals is refused likewise | The limit raised to cover the claim makes the same stream decode until its input runs out, proving the limit was the operative check |
-| Decompression-bomb ratio | A 20-byte NRV2B stream claiming 64 KiB within a 64 KiB capacity decodes in one call, and a 300-byte LZO1X stream (one literal, then a long match of 65535 at distance 1) claiming 64 KiB within a 64 KiB limit decodes in calls of 4 KiB windows; the charged work equals consumed plus produced and the elapsed steps are below a fixed multiple of it | The capacity or limit lowered to 32 KiB refuses the same streams at the length field, before any byte of the match is copied: `produced` is the one literal, and the work is the few bytes of the header |
+| Decompression-bomb ratio | A 20-byte NRV2B stream claiming 64 KiB within a 64 KiB capacity decodes in one call, and a 265-byte LZO1X stream (one literal, then a long match of 65535 at distance 1, then the end marker) claiming 64 KiB within a 64 KiB limit decodes in calls of 4 KiB windows; the charged work equals consumed plus produced and the elapsed steps are below a fixed multiple of it | The capacity or limit lowered to 32 KiB refuses the same streams at the length field, before any byte of the match is copied: `produced` is the one literal, and the work is the few bytes of the header |
 | Encoder round trip | Blocks of zeros, random bytes, text, period-2 and period-49152 patterns, boundary cases at distances 2048, 2049, 16384, 16385 and 49151, and every 64 KiB slice of each decoded native ImageFS available through `FSIMG_IFS_NATIVE`; each decodes to its input under `fsimg_lzo1x_decode`, and its length never exceeds the bound | A byte flipped in an encoded stream fails the round trip; a capacity one below the bound is `FSIMG_EINVAL` before any write |
 | Encoder determinism | A block encoded on a fresh encoder, again after other blocks on the same encoder, in two processes, and under the ASan build with allocation poisoning gives identical bytes | Two blocks are first encoded to plant table entries that a missing check would turn into matches: one leaves, in the bucket of a four-byte group `G` that the block under test contains, the position of a later occurrence of `G`, so the candidate lies after the current position; the other leaves the position of a group that collides with `G` in the hash (found by the test from the hash in this design) but differs in bytes, so the candidate lies before the current position with wrong bytes. The block under test then encodes to the fresh stream; the test documents that dropping the position check or the byte comparison would make it differ |
 | Fuzzing (`fuzz/codec.c`) | The input's first bytes choose the codec, the limit or capacity and, for LZO1X, the window sizes; the rest is the stream, decoded in one call and, for LZO1X, again at random split points under ASan and UBSan; the target asserts LZO1X split invariance, progress on every call, no consumption after `done`, and no byte beyond the buffers | Corpus seeded from every stream above and from chunks of the native images |

@@ -1,0 +1,385 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026, fsimg contributors
+#
+# The LZO1X and NRV2B decoders against black-box oracles, out of the tree
+# and never redistributed:
+#   FSIMG_CODEC_ORACLE  the oracle, a wrapper around liblzo2 2.10 and
+#                       libucl 1.03 built outside the tree (default
+#                       ~/.local/share/fsimg-oracles/ifs-codecs/oracle)
+#   FSIMG_IFS_IMAGES    the native boot images under their original names:
+#                       the eight PCM 3.1 PCM3_IFS1* and PCM3_Emergency*
+#                       images, PCM3_IFS2.ifs and the QNX 6.5.0 live CD's
+#                       qnxbase.ifs, qnxbasedma.ifs and qnxbasesmp.ifs
+#   FSIMG_IFS_NATIVE    the native captures, whose decoded/ directory holds
+#                       the oracle's decoded ImageFS bodies
+#   FSIMG_CODEC_SEED    the random sequence (default 1)
+#   FSIMG_CODEC_COUNT   random streams per codec (default 300)
+#   FSIMG_CODEC_FUZZ_CHUNKS  a directory to receive sample native chunks
+#                       for the fuzz corpus (build-aux/fuzz.sh reads it)
+# The checks compare accept against reject and, on accept, the output
+# bytes, never the error codes, whose order of checks differs. A missing
+# oracle skips everything; each other missing input is reported as a skip.
+set -eu
+oracle=${FSIMG_CODEC_ORACLE:-$HOME/.local/share/fsimg-oracles/ifs-codecs/oracle}
+if ! test -x "$oracle"; then
+    echo "SKIP: no codec oracle at $oracle"
+    exit 77
+fi
+seed=${FSIMG_CODEC_SEED:-1}
+count=${FSIMG_CODEC_COUNT:-300}
+# fsimg's NRV2B capacity is at most 65536, a framed chunk's; LZO1X random
+# streams get a 1 MiB limit. The oracle gets 1 MiB for both, more than any
+# output fsimg may accept, so libucl's write one byte past its capacity
+# never applies; an oracle output larger than fsimg's bound is a stream
+# fsimg must refuse.
+oracle_bound=1048576
+failures=0
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-codec-oracle-XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL: $*"
+    failures=$((failures + 1))
+}
+
+oracle_mode() {
+    case $1 in
+    lzo) echo lzo ;;
+    nrv2b) echo ucl ;;
+    esac
+}
+
+fsimg_bound() {
+    case $1 in
+    lzo) echo 1048576 ;;
+    nrv2b) echo 65536 ;;
+    esac
+}
+
+# Write the bytes named in hex to a file.
+hex_file() {
+    hex_out=$1
+    shift
+    : > "$hex_out"
+    for hex_byte in "$@"; do
+        # shellcheck disable=SC2059
+        printf "\\$(printf '%03o' "$((0x$hex_byte))")" >> "$hex_out"
+    done
+}
+
+# oracle_decodes CODEC IN OUT BOUND: does the oracle accept the stream?
+# Its decode error is status 1; anything else is the oracle failing.
+oracle_decodes() {
+    rm -f "$3"
+    if "$oracle" "$(oracle_mode "$1")" "$2" "$3" "$4" >/dev/null 2>&1; then
+        return 0
+    else
+        oracle_status=$?
+    fi
+    if test "$oracle_status" != 1; then
+        echo "FAIL: the oracle exited $oracle_status on $2" >&2
+        exit 1
+    fi
+    return 1
+}
+
+# fsimg_decodes CODEC IN OUT BOUND: the same through test-codec --decode.
+fsimg_decodes() {
+    rm -f "$3"
+    if ./test-codec --decode "$1" "$2" "$3" "$4" 2>/dev/null; then
+        return 0
+    else
+        fsimg_status=$?
+    fi
+    if test "$fsimg_status" != 1; then
+        echo "FAIL: test-codec exited $fsimg_status on $2" >&2
+        exit 1
+    fi
+    return 1
+}
+
+# compare CODEC IN FSIMG-BOUND ORACLE-BOUND: both decoders give the same
+# verdict and, on accept, the same bytes. Sets verdict to the outcome.
+compare() {
+    expected=reject
+    if oracle_decodes "$1" "$2" "$fixture/oracle.out" "$4" &&
+        test "$(wc -c < "$fixture/oracle.out" | tr -d ' ')" -le "$3"; then
+        expected=accept
+    fi
+    verdict=reject
+    if fsimg_decodes "$1" "$2" "$fixture/fsimg.out" "$3"; then
+        verdict=accept
+    fi
+    if test "$verdict" != "$expected"; then
+        fail "$(basename "$2"): fsimg would $verdict, the oracle" \
+            "$expected ($1)"
+    elif test "$verdict" = accept &&
+        ! cmp -s "$fixture/fsimg.out" "$fixture/oracle.out"; then
+        fail "$2: the decoders' output differs ($1)"
+    fi
+}
+
+# The self-check table: streams whose oracle verdict is known. A mislisted
+# entry must be caught, or the comparisons below would prove nothing.
+table_entry_holds() {
+    table_codec=$1
+    table_expected=$2
+    shift 2
+    hex_file "$fixture/table.in" "$@"
+    table_verdict=reject
+    if oracle_decodes "$table_codec" "$fixture/table.in" \
+        "$fixture/table.out" 64; then
+        table_verdict=accept
+    fi
+    test "$table_verdict" = "$table_expected"
+}
+
+table_entry_holds lzo accept 12 41 11 00 00 ||
+    fail 'self-check: the oracle rejects a valid LZO1X stream'
+table_entry_holds lzo reject 13 41 42 08 00 11 00 00 ||
+    fail 'self-check: the oracle accepts a distance before the start'
+table_entry_holds lzo reject 12 41 11 00 00 00 ||
+    fail 'self-check: the oracle accepts a byte after the end marker'
+table_entry_holds nrv2b accept c0 41 42 00 00 00 00 01 20 ff ||
+    fail 'self-check: the oracle rejects a valid NRV2B stream'
+table_entry_holds nrv2b reject 00 00 00 00 00 04 80 fe ||
+    fail 'self-check: the oracle accepts offset 0xffffffff'
+if table_entry_holds lzo accept 13 41 42 08 00 11 00 00; then
+    fail 'self-check: a rejected stream listed as accepted went unnoticed'
+fi
+echo 'PASS: the oracle self-check table holds and its check is live'
+
+# Every hand-built stream of test-codec: the oracle gives the verdict and
+# the bytes the unit tests expect, and fsimg agrees.
+mkdir "$fixture/cases"
+./test-codec --emit-cases "$fixture/cases"
+cases=0
+for stream in "$fixture/cases"/*.in; do
+    name=$(basename "$stream" .in)
+    codec=${name%%-*}
+    limit=$(cat "$fixture/cases/$name.limit")
+    compare "$codec" "$stream" "$limit" "$limit"
+    if test -f "$fixture/cases/$name.out"; then
+        if test "$expected" != accept; then
+            fail "$stream: the oracle rejects a stream the tests accept"
+        elif ! cmp -s "$fixture/oracle.out" "$fixture/cases/$name.out"; then
+            fail "$stream: the oracle's output differs from the tests'"
+        fi
+    elif test "$expected" != reject; then
+        fail "$stream: the oracle accepts a stream the tests reject"
+    fi
+    cases=$((cases + 1))
+done
+echo "PASS: $cases hand-built streams decode as the oracle decodes them"
+
+# Random byte strings, and every hand-built stream mutated three times.
+mkdir "$fixture/random"
+for codec in lzo nrv2b; do
+    ./test-codec --random "$codec" "$seed" "$count" "$fixture/random"
+    # shellcheck disable=SC2046
+    ./test-codec --mutate "$codec" "$seed" 3 "$fixture/random" \
+        $(ls "$fixture/cases/$codec"-*.in)
+done
+
+# compare_directory DIR: compare every DIR/CODEC-*.in at the random bounds.
+compare_directory() {
+    accepted=0
+    rejected=0
+    for stream in "$1"/*.in; do
+        codec=$(basename "$stream")
+        codec=${codec%%-*}
+        compare "$codec" "$stream" "$(fsimg_bound "$codec")" "$oracle_bound"
+        if test "$verdict" = accept; then
+            accepted=$((accepted + 1))
+        else
+            rejected=$((rejected + 1))
+        fi
+    done
+}
+compare_directory "$fixture/random"
+echo "PASS: random and mutated streams: $accepted accepted and" \
+    "$rejected rejected alike"
+
+# Little-endian 32-bit field of FILE at OFFSET, from its bytes.
+le32() {
+    od -An -tu1 -j "$2" -N 4 "$1" |
+        awk 'NF == 4 { print $1 + 256 * ($2 + 256 * ($3 + 256 * $4)) }'
+}
+
+# The ImageFS additive checksum: the sum of its little-endian 32-bit words
+# modulo 2^32, zero for a whole body. od reads words in host order, so the
+# sum is taken only on a little-endian host.
+little_endian=0
+if test "$(printf '\001\000\000\000' | od -An -tu4 | tr -d ' \n')" = 1; then
+    little_endian=1
+else
+    echo 'SKIP: the ImageFS checksum check needs a little-endian host'
+fi
+word_sum() {
+    od -An -tu4 -v "$1" |
+        awk '{ for (i = 1; i <= NF; i++) s = (s + $i) % 4294967296 }
+            END { print s + 0 }'
+}
+
+# change_byte IN OFFSET OUT: IN with the byte at OFFSET incremented.
+change_byte() {
+    change_value=$(od -An -tu1 -j "$2" -N 1 "$1" | tr -d ' ')
+    head -c "$2" "$1" > "$3"
+    # shellcheck disable=SC2059
+    printf "\\$(printf '%03o' $(( (change_value + 1) % 256 )))" >> "$3"
+    tail -c +$(( $2 + 2 )) "$1" >> "$3"
+}
+
+# check_boot_image NAME IMAGE: split the framed chunks with the oracle's
+# chunks mode, decode each with fsimg and compare it with the oracle's.
+check_boot_image() {
+    boot_name=$1
+    boot_image=$2
+    # The startup header is at 0, or after the 1088-byte BIOS loader.
+    boot_prefix=0
+    if test "$(od -An -tx1 -N 4 "$boot_image" | tr -d ' \n')" != eb7eff00
+    then
+        boot_prefix=1088
+    fi
+    boot_flags=$(od -An -tu1 -j $((boot_prefix + 6)) -N 1 "$boot_image" |
+        tr -d ' ')
+    case $((boot_flags & 28)) in
+    8) boot_codec=lzo; boot_tag=h3 ;;
+    12) boot_codec=nrv2b; boot_tag=x1 ;;
+    *) fail "$boot_name: compression bits $((boot_flags & 28))"; return ;;
+    esac
+    boot_dir=$fixture/$boot_name
+    mkdir "$boot_dir"
+    "$oracle" chunks "$boot_image" "$boot_prefix" "$boot_dir" \
+        > "$fixture/summary"
+    : > "$fixture/body"
+    boot_chunks=0
+    for chunk in "$boot_dir"/*.c; do
+        if ! fsimg_decodes "$boot_codec" "$chunk" "$fixture/chunk.d" 65536
+        then
+            fail "$boot_name: fsimg refuses chunk $(basename "$chunk")"
+        elif ! cmp -s "$fixture/chunk.d" "${chunk%.c}.d"; then
+            fail "$boot_name: chunk $(basename "$chunk") differs"
+        fi
+        cat "$fixture/chunk.d" >> "$fixture/body"
+        boot_chunks=$((boot_chunks + 1))
+    done
+    # chunks N decoded M imagefs_size S end E
+    read -r _ summary_chunks _ summary_decoded _ summary_size _ _ \
+        < "$fixture/summary"
+    boot_bytes=$(wc -c < "$fixture/body" | tr -d ' ')
+    if test "$boot_chunks" != "$summary_chunks" ||
+        test "$boot_bytes" != "$summary_decoded" ||
+        test "$boot_bytes" != "$summary_size"; then
+        fail "$boot_name: $boot_chunks chunks of $boot_bytes bytes," \
+            "oracle $summary_chunks of $summary_decoded, imagefs_size" \
+            "$summary_size"
+    fi
+    if test -n "$native" && test -f "$native/decoded/$boot_tag-$boot_name.imagefs"
+    then
+        cmp -s "$fixture/body" \
+            "$native/decoded/$boot_tag-$boot_name.imagefs" ||
+            fail "$boot_name: the body differs from the decoded capture"
+    fi
+    if test "$little_endian" = 1 && test "$(word_sum "$fixture/body")" != 0
+    then
+        fail "$boot_name: the body's additive checksum is not zero"
+    fi
+    # The ImageFS part of the native dumpifs -u copy of qnxbase.ifs.
+    if test "$boot_name" = qnxbase &&
+        test "$(cksum < "$fixture/body" | tr -s ' ' ' ')" != \
+        '2731401004 3296204'; then
+        fail 'qnxbase: the body differs from the dumpifs -u copy'
+    fi
+    # A chunk with one byte changed fails to decode or to match.
+    change_byte "$boot_dir/000000.c" 40 "$fixture/changed.c"
+    if fsimg_decodes "$boot_codec" "$fixture/changed.c" "$fixture/chunk.d" \
+        65536 && cmp -s "$fixture/chunk.d" "$boot_dir/000000.d"; then
+        fail "$boot_name: a changed chunk still decodes to the same bytes"
+    fi
+    # Three chunks of each image join the mutated streams.
+    for chunk_number in 000000 000001 000002; do
+        cp "$boot_dir/$chunk_number.c" \
+            "$fixture/corpus/$boot_codec-$boot_name-$chunk_number.in"
+    done
+    echo "PASS: $boot_name: $boot_chunks $boot_codec chunks decode to" \
+        "the oracle's $boot_bytes bytes"
+    rm -rf "$boot_dir"
+}
+
+images=${FSIMG_IFS_IMAGES:-}
+native=${FSIMG_IFS_NATIVE:-}
+if test -z "$images"; then
+    echo 'SKIP: FSIMG_IFS_IMAGES is not set (native boot images)'
+else
+    if test -z "$native"; then
+        echo 'SKIP: FSIMG_IFS_NATIVE is not set (decoded captures)'
+    fi
+    mkdir "$fixture/corpus"
+    for name in PCM3_IFS1 PCM3_IFS1_9x1 PCM3_IFS1_Macan PCM3_IFS1_MOPF \
+        PCM3_IFS1_MOPF_9x1 PCM3_IFS1_MOPF_Macan PCM3_Emergency \
+        PCM3_Emergency_LOW qnxbase qnxbasedma qnxbasesmp; do
+        if test -f "$images/$name.ifs"; then
+            check_boot_image "$name" "$images/$name.ifs"
+        else
+            echo "SKIP: $name.ifs is not in $images"
+        fi
+    done
+
+    # PCM3_IFS2.ifs: a 64-byte header, then one LZO1X stream, consumed
+    # exactly, decoding to the header's length.
+    ifs2=$images/PCM3_IFS2.ifs
+    if test -f "$ifs2"; then
+        ifs2_length=$(le32 "$ifs2" 8)
+        tail -c +65 "$ifs2" > "$fixture/ifs2.lzo"
+        if ! fsimg_decodes lzo "$fixture/ifs2.lzo" "$fixture/ifs2.fsimg" \
+            "$ifs2_length"; then
+            fail 'PCM3_IFS2: fsimg refuses the stream'
+        fi
+        oracle_decodes lzo "$fixture/ifs2.lzo" "$fixture/ifs2.oracle" \
+            "$ifs2_length" || fail 'PCM3_IFS2: the oracle refuses the stream'
+        cmp -s "$fixture/ifs2.fsimg" "$fixture/ifs2.oracle" ||
+            fail 'PCM3_IFS2: the decoders differ'
+        test "$(wc -c < "$fixture/ifs2.fsimg" | tr -d ' ')" = \
+            "$ifs2_length" ||
+            fail "PCM3_IFS2: the output is not the header's $ifs2_length bytes"
+        if test -n "$native" &&
+            test -f "$native/decoded/h3-PCM3_IFS2.imagefs"; then
+            cmp -s "$fixture/ifs2.fsimg" \
+                "$native/decoded/h3-PCM3_IFS2.imagefs" ||
+                fail 'PCM3_IFS2: the body differs from the decoded capture'
+        fi
+        echo "PASS: PCM3_IFS2: $(wc -c < "$fixture/ifs2.lzo" | tr -d ' ')" \
+            "stream bytes decode to $(wc -c < "$fixture/ifs2.fsimg" |
+            tr -d ' ') bytes, as the oracle's"
+        rm -f "$fixture/ifs2.lzo" "$fixture/ifs2.fsimg" "$fixture/ifs2.oracle"
+    else
+        echo "SKIP: PCM3_IFS2.ifs is not in $images"
+    fi
+
+    # Corpus chunks mutated, against the oracle; FSIMG_CODEC_FUZZ_CHUNKS
+    # names a directory that keeps the chunks as fuzz seeds.
+    if ls "$fixture/corpus"/*.in >/dev/null 2>&1; then
+        if test -n "${FSIMG_CODEC_FUZZ_CHUNKS:-}" &&
+            test -d "$FSIMG_CODEC_FUZZ_CHUNKS"; then
+            cp "$fixture/corpus"/*.in "$FSIMG_CODEC_FUZZ_CHUNKS/"
+        fi
+        mkdir "$fixture/mutated"
+        for codec in lzo nrv2b; do
+            if ls "$fixture/corpus/$codec"-*.in >/dev/null 2>&1; then
+                # shellcheck disable=SC2046
+                ./test-codec --mutate "$codec" "$seed" 20 \
+                    "$fixture/mutated" $(ls "$fixture/corpus/$codec"-*.in)
+            fi
+        done
+        compare_directory "$fixture/mutated"
+        echo "PASS: mutated corpus chunks: $accepted accepted and" \
+            "$rejected rejected alike"
+    fi
+fi
+
+if test "$failures" != 0; then
+    echo "FAIL: $failures disagreements"
+    exit 1
+fi

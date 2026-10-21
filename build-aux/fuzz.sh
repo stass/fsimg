@@ -5,7 +5,7 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-qnx4, test-protocol, test-layers,
+# test-exfat, test-qnx6, test-qnx4, test-codec, test-protocol, test-layers,
 # test-containers, test-compression, test-mtree and test/spec.sh, which
 # write the seeds, with MAKE naming the make program
 # that drives that build (sanitize.sh inherits it). FUZZ_CC and FUZZ_CXX
@@ -127,6 +127,35 @@ if test ! -f "$qnx4_corpus/chain.seed"; then
     ./test-qnx4 --seed-chain "$qnx4_corpus/chain.seed"
 fi
 run_fuzzer "$work_dir/fuzz-qnx4" "$qnx4_corpus" 1048576 10
+
+# The stream decoders parse every compressed byte of an untrusted boot
+# image. The harness decodes each LZO1X stream whole and in pieces and
+# requires the same result; the seeds are the unit tests' worked streams.
+"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/codec" \
+    "$source_dir/fuzz/codec.c" "$fuzz_library" -o "$work_dir/fuzz-codec"
+codec_corpus=codec-fuzz-corpus
+mkdir -p "$codec_corpus"
+if test ! -f "$codec_corpus/lzo-00001.seed"; then
+    ./test-codec --seed "$codec_corpus"
+fi
+# Native chunks, never in the tree, join the corpus when
+# FSIMG_CODEC_FUZZ_CHUNKS names a directory of lzo-*.in and nrv2b-*.in
+# chunk files, each given a 65536-byte bound.
+for chunk in "${FSIMG_CODEC_FUZZ_CHUNKS:-/nonexistent}"/*.in; do
+    test -f "$chunk" || continue
+    case $(basename "$chunk") in
+    lzo-*) header='\000\000\020\123' ;;
+    nrv2b-*) header='\003\377\377\123' ;;
+    *) continue ;;
+    esac
+    seed="$codec_corpus/chunk-$(basename "$chunk" .in).seed"
+    test -f "$seed" && continue
+    { printf "$header"; cat "$chunk"; } > "$seed"
+done
+run_fuzzer "$work_dir/fuzz-codec" "$codec_corpus" 65540 10
 
 "$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \

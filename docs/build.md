@@ -358,7 +358,16 @@ the verify request to fail as unsupported without work. Its seeds are the reader
 tests' sample volume, 2000 blocks holding every entry kind, 16-, 48- and
 505-byte names, a hard link and a 61-extent file, and a 400-block volume whose
 file has 122 extents in a three-block chain, with a 1 MiB input ceiling and the
-same budgets. The same target builds `fuzz/protocol.c` and runs 1000 mutations
+same budgets. `fuzz/codec.c` drives the LZO1X and NRV2B decoders directly:
+the input's first four bytes choose the codec, the limit or capacity and the
+LZO1X call plan, and the rest is the stream. Each LZO1X stream is decoded in
+one call and again in pieces through a small window keeping 49151 bytes of
+history, and the two must give the same verdict at the same offset and the
+same bytes; every call must progress or stop at an edge and leave its
+unreported output poisoned. Its seeds, from `test-codec --seed`, are every
+stream the unit tests check, valid and refused, and, when
+`FSIMG_CODEC_FUZZ_CHUNKS` names the directory `test/codec-integration.sh`
+filled, native boot-image chunks; the input ceiling is 65540 bytes. The same target builds `fuzz/protocol.c` and runs 1000 mutations
 with a 64 KiB input ceiling and five-second timeout. It exercises production
 framing, job codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker
 lifecycle ordering is covered by `test-worker`, not inferred from pure wire
@@ -396,8 +405,8 @@ FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 The exact standalone commands from the top of a separate build directory are:
 
 ```sh
-make test-fat test-exfat test-qnx6 test-qnx4 test-protocol test-layers \
-    test-containers test-compression test-mtree
+make test-fat test-exfat test-qnx6 test-qnx4 test-codec test-protocol \
+    test-layers test-containers test-compression test-mtree
 MAKE=make sh ../build-aux/fuzz.sh
 ```
 
@@ -407,10 +416,11 @@ instrumented library through `build-aux/sanitize.sh fuzz` and compiles the
 harnesses into `sanitizer-fuzz/` from the same read-only source copy.
 
 The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `qnx6-fuzz-corpus/`,
-`qnx4-fuzz-corpus/`, `protocol-fuzz-corpus/`, `image-fuzz-corpus/`,
-`container-fuzz-corpus/`, `plist-fuzz-corpus/`, `gzip-fuzz-corpus/`,
-`mtree-fuzz-corpus/` and libFuzzer crash artifacts are disposable build
-outputs. Existing corpus seeds and mutations are reused; `make clean` keeps the
+`qnx4-fuzz-corpus/`, `codec-fuzz-corpus/`, `protocol-fuzz-corpus/`,
+`image-fuzz-corpus/`, `container-fuzz-corpus/`, `plist-fuzz-corpus/`,
+`gzip-fuzz-corpus/`, `mtree-fuzz-corpus/` and libFuzzer crash artifacts are
+disposable build outputs. Existing corpus seeds and mutations are reused;
+`make clean` keeps the
 corpora, `make distclean` removes them, and neither removes crash artifacts.
 `FUZZ_SECONDS=60 make check-fuzz` selects a finite wall-clock allowance per
 corpus instead of the 1000-mutation smoke budget. The value is decimal
@@ -1175,6 +1185,53 @@ cache, `fsimg W --offset=3232535040 --length=52617116160` takes 4.2 seconds
 of
 wall time and 0.22 seconds of CPU at a peak RSS of 41 MB as
 `/usr/bin/time -l` reports it, and `W -d` 7.9 seconds at 37 MB.
+
+`test-codec`, in `make check`, tests the LZO1X and NRV2B decoders on
+streams written by hand from [the codec design](../specs/design-codecs.md).
+`test/codec-integration.sh`, run by `make check-integration` and not by
+`make check`, compares them with black-box oracles that never enter the
+tree: `tools/qnx/oracle/build.sh` builds a wrapper around Homebrew's
+GPL `liblzo2` 2.10 and `libucl` 1.03 into
+`~/.local/share/fsimg-oracles/ifs-codecs/oracle` (`FSIMG_CODEC_ORACLE`
+names another path), and without it the script is a skip. The native
+images are reached only through the environment:
+
+```sh
+FSIMG_IFS_IMAGES=/path/to/images FSIMG_IFS_NATIVE=/path/to/captures-ifs \
+    ./test/codec-integration.sh
+```
+
+`FSIMG_IFS_IMAGES` is a directory holding, under their original names, the
+nine PCM 3.1 images (`PCM3_IFS1*.ifs` and `PCM3_Emergency*.ifs` from the
+ISO's `HEADUNIT/ADR*/` directories, and `PCM3_IFS2.ifs`) and the QNX 6.5.0
+live CD's `boot/fs/qnxbase.ifs`, `qnxbasedma.ifs` and `qnxbasesmp.ifs`;
+symbolic links serve. `FSIMG_IFS_NATIVE` names the captures directory
+whose `decoded/` holds the oracle's decoded bodies. Its output goes under
+`TMPDIR`. The script checks its self-check table against the oracle and
+that a mislisted entry is caught; requires the oracle's verdict and bytes
+on every stream `test-codec --emit-cases` writes; compares the two decoders
+on `FSIMG_CODEC_COUNT` (300) random strings per codec and three mutations
+of each hand-built stream from `FSIMG_CODEC_SEED` (1), by verdict and, on
+accept, bytes, never by error code; splits every boot image's chunks with
+the oracle's `chunks` mode and requires fsimg's decode of each chunk to
+equal the oracle's, the joined body to equal the decoded capture and to
+have the `imagefs_size` length and a zero additive checksum (on a
+little-endian host), and `qnxbase`'s body to have the `dumpifs -u` copy's
+POSIX `cksum` 2731401004 over 3296204 bytes; decodes `PCM3_IFS2.ifs`'s
+stream through 64 KiB windows to the header's length and the oracle's
+bytes; and compares 20 mutations of three chunks of each image. With
+`FSIMG_CODEC_FUZZ_CHUNKS` naming a directory, those sample chunks are
+also copied there for `build-aux/fuzz.sh` to seed the codec corpus. The
+chunks are licensed bytes: that directory, and a build directory whose
+`codec-fuzz-corpus/` holds them, must stay outside the repository. On macOS every check passes: 180 hand-built streams; 129
+random and mutated streams accepted and 1011 rejected by both; 1,966 LZO1X
+chunks of the eight H3 images and 153 NRV2B chunks of the three X1 images;
+`PCM3_IFS2.ifs`'s 33,575,140 stream bytes to 68,849,668, consumed exactly;
+and 286 mutated corpus chunks accepted and 374 rejected by both. The H3
+chunks are compared with the oracle's decodes, not with native `dumpifs
+-u` copies, which the serial transport cannot carry
+([TODO](todo-ifs.md)). The run takes about 400 seconds of wall time on a
+loaded host, most of it process start-up.
 
 The sparse exFAT qualification uses a 64 MiB library budget:
 
