@@ -107,10 +107,17 @@ archive for `tar(1)`: `fsimg cf disk.img -F qnx6 -C rootfs @METALOG`. The
 word after `@` is opened relative to the `-C` directory in effect, with the
 no-follow, nonblocking, no-controlling-terminal open every root gets, and
 must be a regular file. That same `-C` directory, the working directory
-until a `-C` is given, is opened as the manifest's content directory. A
-host object whose own name begins with `@` is named `./@name`. The `@` form
-is recognized in every operand position, including after `--`. A manifest
-operand holds two descriptors, so it counts twice against `fds`.
+until a `-C` is given, is opened as the manifest's candidate content
+directory. It becomes the content directory only when an entry needs host
+bytes: a manifest whose files are all generated reads nothing beneath it,
+and its root is descriptorless, as the [library
+interface](#library-interface) defines, so a directory that holds other
+files, such as the harness's case directory with `out/` and `scratch/`,
+serves as the working directory without becoming a source. No option spells
+"no content directory". A host object whose own name begins with `@` is
+named `./@name`. The `@` form is recognized in every operand position,
+including after `--`. A manifest operand holds two descriptors, so it counts
+twice against `fds`.
 
 The manifest's entries are rooted at the image root; there is no prefix
 form. A manifest that should land beneath `/a` says so in its paths.
@@ -142,10 +149,14 @@ fsimg_status_t fsimg_writer_add_manifest(fsimg_writer_t *writer,
 offset zero to its end. `contents_fd` is an opened directory, duplicated and
 registered as a root like the descriptor of `add_tree()`, consuming one
 descriptor reservation, or `-1` when the manifest supplies no host bytes.
-Either way the call registers one charged root record; with `-1` it is a
+Either way the call registers one charged root record. With `-1` it is a
 descriptorless root that holds no descriptor, identity or mount ID and
 consumes no reservation, and the parser refuses at input, naming the line,
-any entry that needs host bytes, so no host record names that root. The
+any entry that needs host bytes, so no host record names that root. With a
+directory, the root takes the directory's identity and mount ID when the
+first entry needing host bytes is parsed; if none does, the duplicate is
+closed and the root stays descriptorless, so a manifest of generated files
+behaves the same whether or not a directory was offered. The
 manifest's records are scanned records whose order is that root's ID under
 the [merging rule](design-sources.md#merging-roots), whatever their storage:
 none, host or generated. The call is valid in the COLLECTING state and is
@@ -227,10 +238,12 @@ root is implicit and carries no entry, the same as a host root scanned at
 
 A manifest describes each path once. A second line for the same path, in
 either form, is a duplicate definition and fails preparation as a
-collision, as it does in makefs. The one exception falls out of the
-[merging rule](design-sources.md#merging-roots), since both lines have the
-manifest's rank: a directory repeated with the same effective keywords
-encodes equally and merges with itself. Every directory must be listed
+collision (`FSIMG_EINVAL`, naming the path). The one exception falls out of the [merging
+rule](design-sources.md#merging-roots), since both lines have the manifest's
+rank: a directory repeated with the same effective keywords encodes equally
+and merges with itself, as two host roots supplying the same directory do.
+makefs refuses every repeat unless given `-D`; fsimg follows its own merging
+rule rather than add a manifest-only exception to it. Every directory must be listed
 before preparation needs it: a full entry whose parent no directory line
 defines fails preparation with the catalog's missing-parent error.
 `mtree -c`, bsdtar and `x --mtree` all list every directory; makefs and
