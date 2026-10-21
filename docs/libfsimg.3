@@ -60,6 +60,23 @@ Read authority requires an O_RDONLY descriptor.
 Slices borrow their parent, have checked fixed bounds and cannot resize it.
 Callback tables are copied; callback state, buffers and backing storage remain
 caller-owned and stable for the documented lifetime.
+The optional next_zero_range callback, which requires read_at, reports the
+next range at or after an offset that reads as zero, within the object and
+making progress; the library fails an answer outside that shape with
+FSIMG_EIO and otherwise encodes the reported range as zeros without reading
+it, so a callback that reports data as zero puts zeros in the output.
+Zeroing never consults it: an object the library did not create empty is
+zeroed with zero_range or written zeros in full.
+A read-only descriptor object answers from the host's hole report instead,
+after syncing its file once, and never for the chunk holding its last byte,
+which is read so that a file truncated after the lookup fails the read; a
+lookup that finds the file shorter than the object fails with
+FSIMG_ESOURCE_CHANGED, and a failed sync turns the report off for that
+object.
+Its queries seek the file offset the descriptor shares with the caller's
+and restore it before returning, so nothing else, another context included,
+may use that offset while an operation reads the object.
+A writable descriptor object answers nothing.
 No library handle owns an embedding application's memory implicitly.
 .Pp
 Free readers and writers before their context.
@@ -181,7 +198,8 @@ written in order.
 A stack naming a container, such as
 .Ql fat32/gpt/dmg ,
 a compression, or a stream sink needs the sink's raw_fd: an
-exclusively created, empty, unlinked read/write regular file the writer
+exclusively created, empty, unlinked read/write regular file, of which the
+caller keeps no other descriptor or mapping, the writer
 emits the raw disk into before one sequential transcode writes the
 container, then gzip around it, or copies the disk, to the sink; it is
 adopted and closed on every outcome.
@@ -242,7 +260,8 @@ did not set are refused before spool_fd is examined, as a sink is before
 its raw_fd.
 A compressed input is decoded, member after member with each member's
 CRC32 and length checked, into the spool: the image options' spool_fd, an
-exclusively created, empty, unlinked read/write regular file the open
+exclusively created, empty, unlinked read/write regular file, of which the
+caller keeps no other descriptor or mapping, the open
 adopts and closes on every outcome, and refuses with FSIMG_EINVAL naming
 the spool in error.path otherwise.
 .Fn fsimg_image_open_stream

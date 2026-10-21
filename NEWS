@@ -71,7 +71,7 @@ flattened UDZO or UDRO DMG with one whole-disk block table, CRC32 checksums
 and image variant 2, which hdiutil verifies and attaches with or without a
 partition map; a fixed VHD; or a sparse image with an optional CRC32
 chunk. Zero chunks become DMG zero runs, VHD holes and DONT_CARE chunks,
-and holes in the raw disk are skipped without being read. The `dmg:`,
+and ranges of the raw disk never written are skipped without being read. The `dmg:`,
 `vhd:` and `simg:` keys set compression, level, chunk, alignment, block
 size, CRC and identifiers; the plan reports the output bound, the
 container padding and the zlib version. `c -f -` streams the image to
@@ -83,6 +83,24 @@ container and refuses the reserved `.zst` and `.xz` compressions. The
 library adds `fsimg_writer_output` stream sinks and container output, and
 `W -d` folds DMG zero runs and DONT_CARE chunks into its CRC32s without
 reading them.
+
+Every I/O object reports which of its ranges read as zero, and the
+transcode skips reading a chunk inside one. A file fsimg creates empty, the
+staged image, the raw intermediate, the spool or an extracted file, keeps a
+record of the ranges written through it, at most 1 MiB of charged memory
+however large the file, so its never-written ranges stay holes in any
+order of writes and are never read back; the host is not asked about holes
+in files fsimg wrote. A DMG or sparse image answers from its chunk index,
+and wrap and compose answer region by region from their inputs, so a
+container's zero runs and a spooled image's holes are composed without a
+read or a decode. A read-only input file fsimg did not write is synced once
+and answers from the host's hole report, never for the chunk holding its
+last byte, and an input found shorter than when it was opened fails with
+`FSIMG_ESOURCE_CHANGED`. An application's I/O object may report its zero
+ranges through the new optional `next_zero_range` callback, whose answers
+the library checks for shape and trusts for contents; zeroing never
+consults it. Under Capsicum the spool lacks `CAP_FSYNC`, and the read
+job's image input carries it for the one sync.
 
 Creation writes partitioned disks. A stack naming gpt or mbr places the
 volume at 1 MiB as the disk's one partition, emitted into a checked slice

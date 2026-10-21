@@ -134,8 +134,17 @@ static fsimg_status_t inflate_chunk(chunk_disk_t *, const fsimg_chunk_t *,
 static fsimg_status_t cache_fetch(chunk_disk_t *, const fsimg_chunk_t *,
     const unsigned char **, fsimg_error_t *);
 static void fill_pattern(unsigned char *, size_t, uint32_t, uint64_t);
+static bool chunk_reads_zero(const fsimg_chunk_t *);
+static fsimg_status_t disk_next_zero(void *, uint64_t, uint64_t *, uint64_t *,
+    fsimg_error_t *);
 static fsimg_status_t disk_resolve(void *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
+
+static const fsimg_io_resolver_ops_t disk_ops = {
+	.resolve = disk_resolve,
+	.next_zero = disk_next_zero,
+	.release = disk_release
+};
 
 static fsimg_status_t
 chunk_corrupt(const fsimg_chunk_index_t *index, fsimg_error_t *error,
@@ -611,8 +620,8 @@ fsimg_chunk_disk_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
 		}
 		disk->stream_ready = true;
 	}
-	return (fsimg_io_resolver(ctx, file, index->disk_bytes, disk_resolve,
-	    disk_release, disk, out, error));
+	return (fsimg_io_resolver(ctx, file, index->disk_bytes, &disk_ops, disk,
+	    out, error));
 
 fail:
 	disk_release(disk);
@@ -839,6 +848,54 @@ disk_resolve(void *argument, uint64_t offset, void *buffer, size_t length,
 			return (status);
 		}
 		*transferred += piece;
+	}
+	return (FSIMG_OK);
+}
+
+/* Whether a record's bytes are all zero without reading anything: a zero
+ * record, or a fill record whose value is zero.
+ */
+static bool
+chunk_reads_zero(const fsimg_chunk_t *chunk)
+{
+	return (chunk->kind == FSIMG_CHUNK_ZERO ||
+	    (chunk->kind == FSIMG_CHUNK_FILL && chunk->argument == 0));
+}
+
+/*
+ * The disk's next zero range from the sealed index: when the record containing
+ * offset reads as zero, the run through it and every consecutive record that
+ * also does; otherwise the empty answer at that record's end. Lookups go
+ * through the cached record and its successor, so a sequential consumer
+ * crosses each record once; each record read from the index store is one
+ * charged unit of work, which polls cancellation, so a run of many tiny
+ * records is bounded by the work limit. A failure to read a record fails the
+ * answer as it would fail a read.
+ */
+static fsimg_status_t
+disk_next_zero(void *argument, uint64_t offset, uint64_t *start,
+    uint64_t *end, fsimg_error_t *error)
+{
+	chunk_disk_t *disk = argument;
+	fsimg_chunk_t chunk;
+	uint64_t position;
+	fsimg_status_t status;
+
+	position = offset;
+	do {
+		status = fsimg_chunk_index_lookup(disk->index, position, &chunk,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (!chunk_reads_zero(&chunk))
+			break;
+		position = chunk.disk_offset + chunk.length;
+	} while (position < disk->index->disk_bytes);
+	if (position == offset)
+		*start = *end = chunk.disk_offset + chunk.length;
+	else {
+		*start = offset;
+		*end = position;
 	}
 	return (FSIMG_OK);
 }

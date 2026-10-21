@@ -367,7 +367,7 @@ typedef struct fsimg_container_settings {
  * The sequential sink at the end of a transcode (lib/layers/transcode.c):
  * the staged output written at increasing offsets, a caller's object, or a
  * stream descriptor. write appends bytes and zero appends a run of zeros,
- * which a proven-zero output keeps as a hole; neither ever seeks back.
+ * which a fresh output keeps as a hole; neither ever seeks back.
  * Every byte counts against the output's planned bound, and crossing it is
  * an internal error, so an encoder that misjudged its bound cannot write
  * past what the plan charged. written is the output's length so far.
@@ -780,7 +780,7 @@ fsimg_status_t fsimg_disk_plan_budget(fsimg_ctx_t *, const fsimg_disk_plan_t *,
  * output and publishes it through the output coordinator, an IO sink is
  * written from offset zero and ends at the output's length, and a STREAM
  * sink receives the bytes in order. The pass reads the disk in chunks,
- * may skip reading what the host reports as holes, and polls cancellation
+ * may skip reading the chunks the disk reports zero, and polls cancellation
  * at every chunk. Failure after the first mutation marks the output
  * incomplete, except that a staged file is removed and so is absent.
  * written receives the output's length. The caller has checked aliases

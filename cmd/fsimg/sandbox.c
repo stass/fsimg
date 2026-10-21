@@ -353,8 +353,12 @@ linux_fail:
 			    FSIMG_OP_CONTEXT, "Capsicum unavailable"));
 		goto freebsd_fail;
 	}
+	/* The image input is a read-only external file: its object syncs it
+	 * once before asking the host for its holes.
+	 */
 	if (caps->input != -1) {
-		cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT, CAP_FCNTL);
+		cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT, CAP_FSYNC,
+		    CAP_FCNTL);
 		if (restrict_descriptor(caps->input, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
 	}
@@ -395,17 +399,25 @@ linux_fail:
 			goto freebsd_fail;
 	}
 	/* A handed-over file is read, written and resized through its
-	 * descriptor; its holes are found with lseek.
+	 * descriptor. Its own record answers which ranges are zero, so the
+	 * host is never asked and the spool, which is never flushed, gets no
+	 * CAP_FSYNC; the raw intermediate keeps it for the writer's flush of
+	 * its sink.
 	 */
 	{
-		const int handed_over[] = { caps->raw, caps->spool };
+		const struct {
+			int	 fd;
+			bool	 flushed;
+		} handed_over[] = { { caps->raw, true }, { caps->spool, false } };
 
 		for (unsigned i = 0; i < 2; i++) {
-			if (handed_over[i] == -1)
+			if (handed_over[i].fd == -1)
 				continue;
 			cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_SEEK,
-			    CAP_FSTAT, CAP_FTRUNCATE, CAP_FSYNC, CAP_FCNTL);
-			if (restrict_descriptor(handed_over[i], &rights,
+			    CAP_FSTAT, CAP_FTRUNCATE, CAP_FCNTL);
+			if (handed_over[i].flushed)
+				cap_rights_set(&rights, CAP_FSYNC);
+			if (restrict_descriptor(handed_over[i].fd, &rights,
 			    CAP_FCNTL_GETFL) == -1)
 				goto freebsd_fail;
 		}

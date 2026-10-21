@@ -49,9 +49,9 @@ fsimg_emit_image(fsimg_writer_t *writer, fsimg_io_t *output,
 			*error = detail;
 		return (detail.status);
 	}
-	/* Only the adapter for a freshly created private file already knows its
-	 * contents are zero and skips this; every other sink is zeroed here.
-	 * The emission object is bound only once this succeeds.
+	/* A fresh file writes zeros only where it was written before, by its
+	 * record; every other sink is zeroed in full here. The emission
+	 * object is bound only once this succeeds.
 	 */
 	status = fsimg_io_zero_session(output, &writer->session, 0,
 	    writer->plan->info.volume_bytes, error);

@@ -23,6 +23,27 @@
 
 typedef struct fsimg_meta_cache fsimg_meta_cache_t;
 
+/*
+ * Private test controls and observations of hole knowledge. All zero is the
+ * library's own behaviour; each switch disables one protection so a test can
+ * show that protection is what catches its case.
+ */
+typedef struct fsimg_hole_test {
+	uint64_t	 discovery_syncs;	/* Syncs made before host queries */
+	int		 sync_errno;	/* Nonzero: discovery syncs fail so */
+	int		 flush_errno;	/* Nonzero: descriptor flushes fail so */
+	bool		 no_length_check;	/* Answers ignore a shorter file */
+	bool		 no_tail_clip;	/* Answers may cover the last byte */
+	bool		 partial_chunks;	/* A partly covered chunk is zero */
+	bool		 unpolled_zeros;	/* Answered chunks are not charged */
+	/* Replaces the host's query, as fsimg_host_next_hole, when set. */
+	int		(*host_query)(void *, int, uint64_t, uint64_t *,
+			    uint64_t *, uint64_t *);
+	/* Runs between the host query's two seeks, when set. */
+	void		(*between_seeks)(void *);
+	void		*argument;
+} fsimg_hole_test_t;
+
 struct fsimg_ctx {
 	fsimg_options_t	 options;
 	fsimg_stats_t	 stats;
@@ -36,6 +57,7 @@ struct fsimg_ctx {
 	int		 meta_fault_errno;
 	bool		 in_callback;
 	bool		 no_hole_discovery;	/* Test control: read every hole */
+	fsimg_hole_test_t hole_test;
 };
 
 /* One session is embedded in each reader/writer; never reset per API call. */
@@ -91,10 +113,12 @@ uint64_t fsimg_report_loss(fsimg_ctx_t *, const char *, uint32_t);
 void fsimg_error_path(fsimg_error_t *, const char *);
 /* Private fault injection: zero disables; n fails the nth subsequent attempt. */
 void fsimg_test_fail_alloc_after(fsimg_ctx_t *, uint64_t);
-/* Private test control: whether a transcode may skip reading the holes the
- * host reports in its raw disk (the default) or reads every byte, which
+/* Private test control: whether a transcode consults the zero ranges its
+ * disk reports (the default) or reads every chunk, which
  * must produce the same output.
  */
 void fsimg_test_hole_discovery(fsimg_ctx_t *, bool);
+/* The context's hole-knowledge test controls, which a test sets directly. */
+fsimg_hole_test_t *fsimg_test_holes(fsimg_ctx_t *);
 
 #endif

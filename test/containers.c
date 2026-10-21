@@ -3,6 +3,8 @@
  */
 #include "config.h"
 
+#include <sys/stat.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -18,6 +20,7 @@
 
 #include "fsimg.h"
 #include "host.h"
+#include "io.h"
 #include "layer.h"
 #include "meta.h"
 #include "test.h"
@@ -54,7 +57,7 @@
  */
 #define DETECT		"fat12/-"
 
-#define MAX_RUNS	8
+#define MAX_RUNS	2100
 #define MAX_TABLES	4
 #define MAX_SIMG_CHUNKS	8
 
@@ -72,6 +75,8 @@ typedef struct memory_file {
 	uint64_t	 read_bytes;
 	uint64_t	 reads;
 	uint64_t	 fail_at;	/* The read that fails with EIO; 0 never */
+	uint64_t	 cut;		/* Nonzero: reads end here, as after a
+					   truncation behind an open image */
 } memory_file_t;
 
 /* One DMG run; sector is relative to its table. offset_bias moves the
@@ -142,6 +147,8 @@ typedef struct fixture {
 	uint64_t	 baseline_memory;
 	char		 directory[1024];
 	int		 scratch;
+	uint64_t	 work;		/* The most work any session reported */
+	const char	*compression;	/* compose_disk's, NULL for none */
 } fixture_t;
 
 static const unsigned char segment_id[16] = { 0x10, 0x11, 0x12, 0x13, 0x14,
@@ -208,6 +215,16 @@ static void test_tampered_record(void);
 static fsimg_status_t exercise_image(fixture_t *);
 static void fault_sweep(memory_file_t);
 static void test_fault_sweeps(void);
+static memory_file_t three_run_dmg(uint32_t, unsigned char **);
+static fsimg_status_t compose_disk(fixture_t *, const char *,
+    unsigned char **, uint64_t *, fsimg_error_t *);
+static void progress_work(void *, const fsimg_progress_t *);
+static void test_container_zero_runs(void);
+static void test_container_index_faults(void);
+static void test_vast_declared_zeros(void);
+static memory_file_t tail_dmg(uint32_t, unsigned char **);
+static void test_truncated_container(void);
+static void test_many_zero_records(void);
 static void write_seed(const char *, memory_file_t);
 
 /* CRC-32 (ISO-HDLC) continued from crc, which starts at zero; a byte
@@ -374,6 +391,8 @@ file_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	if (++file->reads == file->fail_at)
 		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
 		    "injected read failure"));
+	if (file->cut != 0 && offset + length > file->cut)
+		length = offset < file->cut ? (size_t)(file->cut - offset) : 0;
 	bcopy(file->bytes + offset, buffer, length);
 	file->read_bytes += length;
 	*transferred = length;
@@ -405,15 +424,17 @@ dmg_run_bytes(const dmg_spec_t *spec, const dmg_table_t *table,
 
 	first = (table->first + run->sector) * SECTOR;
 	length = run->sectors * SECTOR;
-	if (run->type == RUN_COMMENT || first > spec->sectors * SECTOR ||
+	/* Free space names no bytes and no checksum, so a vast one costs
+	 * nothing here.
+	 */
+	if (run->type == RUN_COMMENT || run->type == RUN_IGNORE ||
+	    first > spec->sectors * SECTOR ||
 	    length > spec->sectors * SECTOR - first)
 		return (0);
 	bytes = spec->disk + first;
-	if (run->type != RUN_IGNORE)
-		*crc = crc32_update(*crc, bytes, (size_t)length);
+	*crc = crc32_update(*crc, bytes, (size_t)length);
 	switch (run->type) {
 	case RUN_ZERO:
-	case RUN_IGNORE:
 		return (0);
 	case RUN_RAW:
 		buffer_append(fork, bytes, (size_t)length);
@@ -693,6 +714,8 @@ fixture_init(fixture_t *f, uint64_t memory, uint64_t work)
 	options.memory_bytes = memory;
 	options.max_work = work;
 	options.scratch_directory_fd = f->scratch;
+	options.progress = progress_work;
+	options.progress_argument = f;
 	CHECK(fsimg_ctx_new(&options, &f->ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(f->ctx, &stats, NULL) == FSIMG_OK);
 	f->baseline_memory = stats.memory_bytes;
@@ -1828,6 +1851,366 @@ test_fault_sweeps(void)
 }
 
 static void
+progress_work(void *argument, const fsimg_progress_t *progress)
+{
+	fixture_t *f = argument;
+
+	if (progress->work > f->work)
+		f->work = progress->work;
+}
+
+/*
+ * An 18 MiB disk as one DMG table: 1 MiB of raw pattern, 16 MiB of zeros
+ * as one run of the middle type, and 1 MiB of raw pattern. *disk receives
+ * the disk, which the caller frees.
+ */
+static memory_file_t
+three_run_dmg(uint32_t middle, unsigned char **disk)
+{
+	const uint64_t sectors = 18 * MIB / SECTOR;
+	dmg_spec_t spec = { .sectors = sectors, .tables = 1 };
+
+	*disk = disk_new(18 * MIB);
+	disk_pattern(*disk, 18 * MIB, 7);
+	bzero(*disk + MIB, 16 * MIB);
+	spec.disk = *disk;
+	spec.table[0] = (dmg_table_t){ 0, sectors, 3, {
+		{ RUN_RAW, 0, MIB / SECTOR, 0 },
+		{ middle, MIB / SECTOR, 16 * MIB / SECTOR, 0 },
+		{ RUN_RAW, 17 * MIB / SECTOR, MIB / SECTOR, 0 } } };
+	return (dmg_encode(&spec));
+}
+
+/*
+ * Compose the open image's whole disk as the one partition of a GPT disk,
+ * published as a file in the scratch directory under name. On success
+ * *out receives the composed disk and *length its length, and the file is
+ * removed; on failure nothing may have been published.
+ */
+static fsimg_status_t
+compose_disk(fixture_t *f, const char *name, unsigned char **out,
+    uint64_t *length, fsimg_error_t *error)
+{
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	fsimg_write_options_t options;
+	fsimg_part_t part;
+	fsimg_sink_t sink;
+	fsimg_io_t *disk;
+	struct stat st;
+	fsimg_status_t status;
+	int fd;
+
+	*out = NULL;
+	*length = 0;
+	CHECK(fsimg_image_select(f->image, &selector, &disk, NULL) == FSIMG_OK);
+	part = (fsimg_part_t){ .volume = disk, .type = "linux" };
+	fsimg_write_options_init(&options);
+	if (f->compression != NULL)
+		snprintf(options.compression, sizeof(options.compression), "%s",
+		    f->compression);
+	options.flags = FSIMG_WRITE_REPRODUCIBLE;
+	options.epoch = INT64_C(1700000000);
+	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
+	sink.parent_fd = f->scratch;
+	sink.name = name;
+	status = fsimg_image_compose(f->ctx, "gpt", &part, 1, &options, &sink,
+	    error);
+	fsimg_io_free(disk);
+	fd = openat(f->scratch, name, O_RDONLY | O_CLOEXEC);
+	if (status != FSIMG_OK) {
+		CHECK(fd == -1 && errno == ENOENT);
+		return (status);
+	}
+	CHECK(fd != -1 && fstat(fd, &st) == 0);
+	*length = (uint64_t)st.st_size;
+	*out = malloc((size_t)*length);
+	CHECK(*out != NULL);
+	CHECK(pread(fd, *out, (size_t)*length, 0) == (ssize_t)*length);
+	CHECK(close(fd) == 0 && unlinkat(f->scratch, name, 0) == 0);
+	return (FSIMG_OK);
+}
+
+/*
+ * A DMG's zero run is composed from its chunk index without a read or a
+ * decode: the file's bytes read and the work reported stay far below the
+ * run, while the same disk with the run stored as zlib-compressed zeros
+ * decodes all 16 MiB. Both compose to the same bytes. Corrupting the
+ * compressed counterpart fails the compose as corrupt, naming the layer,
+ * which proves the decode ran.
+ */
+static void
+test_container_zero_runs(void)
+{
+	memory_file_t files[2];
+	unsigned char *disks[2], *composed[2];
+	uint64_t lengths[2], read[2], work[2];
+	fsimg_error_t error;
+	fixture_t f;
+
+	files[0] = three_run_dmg(RUN_ZERO, &disks[0]);
+	files[1] = three_run_dmg(RUN_ZLIB, &disks[1]);
+	for (unsigned i = 0; i < 2; i++) {
+		fixture_init(&f, 256 * MIB, 0);
+		CHECK(fixture_open(&f, &files[i], DETECT, NULL) == FSIMG_OK);
+		files[i].read_bytes = 0;
+		f.work = 0;
+		CHECK(compose_disk(&f, "composed", &composed[i], &lengths[i],
+		    NULL) == FSIMG_OK);
+		read[i] = files[i].read_bytes;
+		work[i] = f.work;
+		fixture_free(&f);
+	}
+	CHECK(read[0] <= 2 * MIB + 64 * KIB && work[0] < MIB);
+	CHECK(work[1] >= 16 * MIB);
+	CHECK(lengths[0] == lengths[1] &&
+	    bcmp(composed[0], composed[1], (size_t)lengths[0]) == 0);
+
+	/* The zlib stream, whose header this spoils, starts right after the
+	 * first raw run.
+	 */
+	free(composed[1]);
+	files[1].bytes[MIB] ^= 0x55;
+	fixture_init(&f, 256 * MIB, 0);
+	CHECK(fixture_open(&f, &files[1], DETECT, NULL) == FSIMG_OK);
+	CHECK(compose_disk(&f, "corrupt", &composed[1], &lengths[1], &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.path, "dmg") == 0);
+	fixture_free(&f);
+	for (unsigned i = 0; i < 2; i++) {
+		free(composed[i]);
+		free(files[i].bytes);
+		free(disks[i]);
+	}
+}
+
+/*
+ * With a one-page metadata cache the chunk index lives in scratch, and the
+ * zero-range answers come from record reads through it: composing twice,
+ * from a cold cache and a warm one, gives the same bytes with scratch
+ * reads in the counters. A metadata read failure at every attempt in turn
+ * fails the open or the compose with the store's error and publishes
+ * nothing.
+ */
+static void
+test_container_index_faults(void)
+{
+	memory_file_t file;
+	unsigned char *disk, *composed[2];
+	uint64_t lengths[2];
+	fsimg_stats_t stats;
+	fsimg_status_t status;
+	fixture_t f;
+
+	file = three_run_dmg(RUN_ZERO, &disk);
+	fixture_init(&f, 256 * MIB, 0);
+	CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	for (unsigned i = 0; i < 2; i++)
+		CHECK(compose_disk(&f, "composed", &composed[i], &lengths[i],
+		    NULL) == FSIMG_OK);
+	CHECK(lengths[0] == lengths[1] &&
+	    bcmp(composed[0], composed[1], (size_t)lengths[0]) == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.read_bytes > file.read_bytes);
+	fixture_free(&f);
+	free(composed[1]);
+
+	for (uint64_t attempt = 1;; attempt++) {
+		CHECK(attempt < 1000);
+		fixture_init(&f, 256 * MIB, 0);
+		CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
+		fsimg_test_meta_fail_after(f.ctx, FSIMG_META_READ, attempt, EIO);
+		status = fixture_open(&f, &file, DETECT, NULL);
+		if (status == FSIMG_OK)
+			status = compose_disk(&f, "faulted", &composed[1],
+			    &lengths[1], NULL);
+		fsimg_test_meta_fail_after(f.ctx, FSIMG_META_READ, 0, 0);
+		fixture_free(&f);
+		if (status == FSIMG_OK) {
+			CHECK(attempt > 1 && lengths[1] == lengths[0] &&
+			    bcmp(composed[0], composed[1], (size_t)lengths[0]) == 0);
+			free(composed[1]);
+			break;
+		}
+		CHECK(status == FSIMG_EIO);
+	}
+	free(composed[0]);
+	free(file.bytes);
+	free(disk);
+}
+
+/*
+ * A DMG declaring a 1 PiB disk of free space in one record opens and
+ * answers that whole disk zero in record reads, never in bytes. Composing
+ * it still owes its encoder every chunk, which the work limit bounds: the
+ * compose fails with FSIMG_RESOURCE_WORK at the limit, plain and under
+ * gzip, having read only the table chunks of the assembled disk, where
+ * the same compose with hole knowledge ignored reads every chunk it
+ * reaches. A 64 MiB disk of the same kind composes within the limit.
+ */
+static void
+test_vast_declared_zeros(void)
+{
+	const uint64_t sectors = UINT64_C(1) << 41;
+	dmg_spec_t spec = { .sectors = sectors, .tables = 1 };
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	unsigned char *composed;
+	memory_file_t file, small;
+	fsimg_error_t error;
+	fsimg_stats_t stats;
+	fsimg_io_t *disk;
+	uint64_t start, end, length, before, read[2];
+	fixture_t f;
+
+	spec.table[0] = (dmg_table_t){ 0, sectors, 1, {
+		{ RUN_IGNORE, 0, sectors, 0 } } };
+	file = dmg_encode(&spec);
+	fixture_init(&f, 64 * MIB, 4096);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_select(f.image, &selector, &disk, NULL) == FSIMG_OK);
+	file.read_bytes = 0;
+	CHECK(fsimg_io_next_zero_range(disk, 0, &start, &end, NULL) == FSIMG_OK);
+	CHECK(start == 0 && end == sectors * SECTOR && file.read_bytes == 0);
+	fsimg_io_free(disk);
+	for (unsigned gzip = 0; gzip < 2; gzip++) {
+		f.compression = gzip ? "gzip" : NULL;
+		for (unsigned consult = 0; consult < 2; consult++) {
+			fsimg_test_hole_discovery(f.ctx, consult == 1);
+			CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+			before = stats.read_bytes;
+			CHECK(compose_disk(&f, "vast", &composed, &length, &error) ==
+			    FSIMG_ELIMIT);
+			CHECK(error.resource == FSIMG_RESOURCE_WORK);
+			CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+			read[consult] = stats.read_bytes - before;
+		}
+		CHECK(read[1] < 4 * MIB && read[0] >= 64 * MIB);
+	}
+	f.compression = NULL;
+
+	spec.sectors = 64 * MIB / SECTOR;
+	spec.table[0] = (dmg_table_t){ 0, spec.sectors, 1, {
+		{ RUN_IGNORE, 0, spec.sectors, 0 } } };
+	small = dmg_encode(&spec);
+	CHECK(fixture_open(&f, &small, DETECT, NULL) == FSIMG_OK);
+	CHECK(compose_disk(&f, "small", &composed, &length, NULL) == FSIMG_OK);
+	free(composed);
+	fixture_free(&f);
+	free(small.bytes);
+	free(file.bytes);
+}
+
+/*
+ * One zero answer joins every consecutive zero record, however small: 2100
+ * one-sector zero runs answer as one range, so composing them skips the
+ * whole transcode chunk they cover, and the compose reads at least 1 MiB
+ * less than with hole knowledge ignored. Each record read is a charged
+ * unit of work in the index store, which bounds the walk.
+ */
+static void
+test_many_zero_records(void)
+{
+	static dmg_spec_t spec = { .sectors = 2100, .tables = 1 };
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	unsigned char *bytes, *composed;
+	memory_file_t file;
+	fsimg_stats_t stats;
+	fsimg_io_t *disk;
+	uint64_t start, end, length, before, read[2];
+	fixture_t f;
+
+	bytes = disk_new(2100 * SECTOR);
+	spec.disk = bytes;
+	spec.table[0].first = 0;
+	spec.table[0].count = 2100;
+	spec.table[0].runs = 2100;
+	for (unsigned i = 0; i < 2100; i++)
+		spec.table[0].run[i] = (dmg_run_t){ RUN_ZERO, i, 1, 0 };
+	file = dmg_encode(&spec);
+	fixture_init(&f, 64 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_select(f.image, &selector, &disk, NULL) == FSIMG_OK);
+	CHECK(fsimg_io_next_zero_range(disk, 0, &start, &end, NULL) == FSIMG_OK);
+	CHECK(start == 0 && end == 2100 * SECTOR);
+	fsimg_io_free(disk);
+	for (unsigned consult = 0; consult < 2; consult++) {
+		fsimg_test_hole_discovery(f.ctx, consult == 1);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+		before = stats.read_bytes;
+		CHECK(compose_disk(&f, "many", &composed, &length, NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+		read[consult] = stats.read_bytes - before;
+		free(composed);
+	}
+	CHECK(read[1] + MIB <= read[0]);
+	fixture_free(&f);
+	free(file.bytes);
+	free(bytes);
+}
+
+/* A 17 MiB disk as one DMG table: 1 MiB of raw pattern, whose bytes start
+ * the file, and 16 MiB of zeros as one run of the tail type.
+ */
+static memory_file_t
+tail_dmg(uint32_t tail, unsigned char **disk)
+{
+	const uint64_t sectors = 17 * MIB / SECTOR;
+	dmg_spec_t spec = { .sectors = sectors, .tables = 1 };
+
+	*disk = disk_new(17 * MIB);
+	disk_pattern(*disk, MIB, 9);
+	spec.disk = *disk;
+	spec.table[0] = (dmg_table_t){ 0, sectors, 2, {
+		{ RUN_RAW, 0, MIB / SECTOR, 0 },
+		{ tail, MIB / SECTOR, 16 * MIB / SECTOR, 0 } } };
+	return (dmg_encode(&spec));
+}
+
+/*
+ * A DMG input whose file is cut short after the image opened. Cut behind
+ * a zero record, its tail needs no bytes, so the compose publishes the
+ * declared zeros, the image the intact file composes to. Cut under the raw
+ * record, or under a compressed record never decoded, the chunk read
+ * fails with the exact-read premature-end error, FSIMG_EIO, and nothing
+ * is published.
+ */
+static void
+test_truncated_container(void)
+{
+	memory_file_t files[2];
+	unsigned char *disks[2], *composed[2];
+	uint64_t lengths[2];
+	fixture_t f;
+
+	files[0] = tail_dmg(RUN_ZERO, &disks[0]);
+	files[1] = tail_dmg(RUN_ZLIB, &disks[1]);
+	fixture_init(&f, 256 * MIB, 0);
+	CHECK(fixture_open(&f, &files[0], DETECT, NULL) == FSIMG_OK);
+	CHECK(compose_disk(&f, "intact", &composed[0], &lengths[0], NULL) ==
+	    FSIMG_OK);
+	files[0].cut = MIB;
+	CHECK(compose_disk(&f, "cut", &composed[1], &lengths[1], NULL) ==
+	    FSIMG_OK);
+	CHECK(lengths[0] == lengths[1] &&
+	    bcmp(composed[0], composed[1], (size_t)lengths[0]) == 0);
+	free(composed[1]);
+	files[0].cut = MIB / 2;
+	CHECK(compose_disk(&f, "cut", &composed[1], &lengths[1], NULL) ==
+	    FSIMG_EIO);
+	CHECK(fixture_open(&f, &files[1], DETECT, NULL) == FSIMG_OK);
+	files[1].cut = MIB + 1;
+	CHECK(compose_disk(&f, "cut", &composed[1], &lengths[1], NULL) ==
+	    FSIMG_EIO);
+	fixture_free(&f);
+	for (unsigned i = 0; i < 2; i++) {
+		free(files[i].bytes);
+		free(disks[i]);
+	}
+	free(composed[0]);
+}
+
+static void
 write_seed(const char *path, memory_file_t file)
 {
 	FILE *out;
@@ -1903,5 +2286,10 @@ main(int argc, char **argv)
 	test_cache_memory();
 	test_tampered_record();
 	test_fault_sweeps();
+	test_container_zero_runs();
+	test_container_index_faults();
+	test_vast_declared_zeros();
+	test_truncated_container();
+	test_many_zero_records();
 	return (0);
 }

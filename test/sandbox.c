@@ -313,6 +313,64 @@ run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile)
 	return (WEXITSTATUS(wait_status));
 }
 
+#ifdef __FreeBSD__
+/*
+ * The Capsicum rights hole knowledge relies on: the read job's image
+ * input may sync before its object asks the host for holes, the raw
+ * intermediate keeps CAP_FSYNC for the writer's flush of its sink, and the
+ * spool, which answers its zero ranges from its own record and is never
+ * flushed, cannot sync in capability mode. Returns 77 when the kernel
+ * lacks Capsicum.
+ */
+static int
+test_sync_rights(int parent, int input)
+{
+	struct rlimit no_core = { 0, 0 };
+	fsimg_status_t status;
+	pid_t child;
+	int raw, spool, wait_status;
+
+	raw = openat(parent, "raw", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	spool = openat(parent, "spool", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC,
+	    0600);
+	CHECK(raw != -1 && spool != -1);
+	CHECK(unlinkat(parent, "raw", 0) == 0 && unlinkat(parent, "spool", 0) == 0);
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		fsimg_sandbox_caps_t caps = {
+			.input = 5, .staging = -1, .destination = -1,
+			.scratch = -1, .roots = -1, .root_count = 0, .raw = 3,
+			.spool = 4, .job = -1, .control = -1, .data = -1,
+			.cancel = -1
+		};
+
+		if (setrlimit(RLIMIT_CORE, &no_core) == -1 ||
+		    dup2(raw, 3) == -1 || dup2(spool, 4) == -1 ||
+		    dup2(input, 5) == -1)
+			_exit(1);
+		close_unlisted();
+		status = fsimg_sandbox_install_caps(&caps, NULL);
+		if (status == FSIMG_EUNSUPPORTED)
+			_exit(77);
+		if (status != FSIMG_OK)
+			_exit(2);
+		if (fsync(3) != 0)
+			_exit(3);
+		if (fsync(4) != -1 || errno != ENOTCAPABLE)
+			_exit(4);
+		if (fsync(5) != 0)
+			_exit(5);
+		_exit(0);
+	}
+	CHECK(waitpid(child, &wait_status, 0) == child);
+	CHECK(WIFEXITED(wait_status) && (WEXITSTATUS(wait_status) == 0 ||
+	    WEXITSTATUS(wait_status) == 77));
+	CHECK(close(raw) == 0 && close(spool) == 0);
+	return (WEXITSTATUS(wait_status));
+}
+#endif
+
 int
 main(void)
 {
@@ -397,6 +455,10 @@ main(void)
 				CHECK(unlinkat(work, "work-directory", AT_REMOVEDIR) == 0);
 		}
 	}
+#ifdef __FreeBSD__
+	if (test_sync_rights(parent, input) == 77)
+		skipped++;
+#endif
 	CHECK(fstat(input, &after) == 0);
 	CHECK(before.st_size == after.st_size && before.st_mode == after.st_mode);
 	CHECK(pread(input, &sentinel, 1, 0) == 1 && sentinel == 'I');

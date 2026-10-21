@@ -54,6 +54,15 @@ typedef struct memory {
 	uint64_t	 reads;
 	uint64_t	 flip_offset;
 	unsigned	 flip_reads;
+	/* Write order: writes counts the writes, and each *_write is the
+	 * number of the first one to reach the first sector, the byte at
+	 * volume_offset and the last sector, zero for none.
+	 */
+	unsigned	 writes;
+	unsigned	 first_write, volume_write, last_write;
+	uint64_t	 volume_offset;
+	/* The object's next_zero_range callback, when not ZEROS_NONE. */
+	enum { ZEROS_NONE, ZEROS_TRUE, ZEROS_ALL } zeros;
 } memory_t;
 
 /* One context with a private scratch and output directory. */
@@ -79,6 +88,8 @@ static fsimg_status_t memory_write(void *, uint64_t, const void *, size_t,
     size_t *, fsimg_error_t *);
 static fsimg_status_t memory_size(void *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t memory_resize(void *, uint64_t, fsimg_error_t *);
+static fsimg_status_t memory_next_zero(void *, uint64_t, uint64_t,
+    uint64_t *, uint64_t *, fsimg_error_t *);
 static fsimg_io_t *memory_io(fixture_t *, memory_t *);
 static void memory_free(memory_t *);
 static bool cancel_at(void *);
@@ -115,6 +126,8 @@ static void test_compose(void);
 static void test_compose_refusals(void);
 static void test_aliases(void);
 static void test_fixed_disk_stays_sparse(void);
+static void test_emission_in_disk_order(void);
+static void test_callback_input_zero_ranges(void);
 static void expect_cancelled(fixture_t *, fsimg_status_t,
     const fsimg_error_t *, const char *);
 static void test_cancellation(void);
@@ -236,7 +249,35 @@ memory_write(void *argument, uint64_t offset, const void *buffer,
 
 	CHECK(offset <= memory->length && length <= memory->length - offset);
 	bcopy(buffer, memory->bytes + offset, length);
+	memory->writes++;
+	if (memory->first_write == 0 && offset < 512)
+		memory->first_write = memory->writes;
+	if (memory->volume_write == 0 && offset <= memory->volume_offset &&
+	    memory->volume_offset - offset < length)
+		memory->volume_write = memory->writes;
+	if (memory->last_write == 0 && offset + length > memory->length - 512)
+		memory->last_write = memory->writes;
 	*transferred = length;
+	return (FSIMG_OK);
+}
+
+/* ZEROS_TRUE answers the next run of zero bytes truthfully; ZEROS_ALL
+ * claims every byte from offset zero, data included.
+ */
+static fsimg_status_t
+memory_next_zero(void *argument, uint64_t offset, uint64_t length,
+    uint64_t *start, uint64_t *end, fsimg_error_t *error FSIMG_UNUSED)
+{
+	const memory_t *memory = argument;
+
+	*start = offset;
+	*end = length;
+	if (memory->zeros == ZEROS_ALL)
+		return (FSIMG_OK);
+	while (*start < length && memory->bytes[*start] != 0)
+		(*start)++;
+	for (*end = *start; *end < length && memory->bytes[*end] == 0; (*end)++)
+		continue;
 	return (FSIMG_OK);
 }
 
@@ -274,6 +315,8 @@ memory_io(fixture_t *f, memory_t *memory)
 	ops.write_at = memory_write;
 	ops.get_size = memory_size;
 	ops.resize = memory_resize;
+	if (memory->zeros != ZEROS_NONE)
+		ops.next_zero_range = memory_next_zero;
 	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, memory, &io, NULL) == FSIMG_OK);
 	return (io);
 }
@@ -1608,6 +1651,97 @@ test_fixed_disk_stays_sparse(void)
 }
 
 /*
+ * The scheme emitter fills a disk in one pass in disk order: the
+ * protective MBR and primary GPT header reach the sink before any byte of
+ * the volume, and the backup header after the volume. The sink here is a
+ * caller's object, which no record proves zero, so the same 256 MiB plan
+ * that leaves a fresh file sparse has every zero gap written in full.
+ */
+static void
+test_emission_in_disk_order(void)
+{
+	fsimg_layer_options_t layers;
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_stats_t before, after;
+	fsimg_io_t *output;
+	memory_t disk;
+	fixture_t f;
+
+	fixture_init(&f);
+	fsimg_layer_options_init(&layers);
+	layers.gpt_disk_bytes = 256 * MIB;
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, &layers);
+	options.volume_bytes = MIB;
+	CHECK(fsimg_writer_new(f.ctx, "fat12/gpt", &options, &writer, NULL) ==
+	    FSIMG_OK);
+	bzero(&disk, sizeof(disk));
+	disk.volume_offset = MIB;
+	output = memory_io(&f, &disk);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_emit(writer, output, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
+	fsimg_io_free(output);
+	fsimg_writer_free(writer);
+	CHECK(disk.length == 256 * MIB);
+	CHECK(disk.first_write != 0 && disk.first_write < disk.volume_write &&
+	    disk.volume_write < disk.last_write);
+	CHECK(after.written_bytes - before.written_bytes >= 256 * MIB);
+	CHECK(gpt_check(&disk, 512) == NULL);
+	memory_free(&disk);
+	fixture_free(&f);
+}
+
+/*
+ * A caller's volume whose next_zero_range reports its zero runs is
+ * wrapped reading only the chunks holding its data, with the output of
+ * the volume read in full. The answer's contents are the application's
+ * promise: one claiming the whole volume zero yields a partition of
+ * zeros, which is what the API documents for a callback that lies.
+ */
+static void
+test_callback_input_zero_ranges(void)
+{
+	fsimg_write_options_t options;
+	fsimg_sink_t sink;
+	fsimg_io_t *input, *output;
+	memory_t volume, consulted, ignored, lied;
+	memory_t *outputs[] = { &consulted, &ignored, &lied };
+	uint64_t reads[3];
+	fixture_t f;
+
+	fixture_init(&f);
+	make_volume(&f, "fat12", 4 * MIB, &volume);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	for (unsigned i = 0; i < 3; i++) {
+		volume.zeros = i == 2 ? ZEROS_ALL : ZEROS_TRUE;
+		volume.reads = 0;
+		fsimg_test_hole_discovery(f.ctx, i != 1);
+		input = memory_io(&f, &volume);
+		bzero(outputs[i], sizeof(*outputs[i]));
+		output = memory_io(&f, outputs[i]);
+		fsimg_sink_init(&sink, FSIMG_SINK_IO);
+		sink.io = output;
+		CHECK(fsimg_image_wrap(f.ctx, input, "fat12/gpt", &options, &sink,
+		    NULL) == FSIMG_OK);
+		fsimg_io_free(output);
+		fsimg_io_free(input);
+		reads[i] = volume.reads;
+	}
+	fsimg_test_hole_discovery(f.ctx, true);
+	CHECK(reads[0] < 2 * MIB && reads[1] >= 4 * MIB);
+	CHECK(consulted.length == ignored.length &&
+	    bcmp(consulted.bytes, ignored.bytes, (size_t)consulted.length) == 0);
+	CHECK(lied.length == consulted.length && !all_zero(volume.bytes, 4 * MIB) &&
+	    all_zero(lied.bytes + MIB, 4 * MIB));
+	memory_free(&consulted);
+	memory_free(&ignored);
+	memory_free(&lied);
+	memory_free(&volume);
+	fixture_free(&f);
+}
+
+/*
  * An output sharing storage with an input is refused before the output is
  * touched, whether the input is the volume itself or a slice of it, and
  * so is an output in another context.
@@ -1971,6 +2105,8 @@ main(void)
 	test_compose_refusals();
 	test_aliases();
 	test_fixed_disk_stays_sparse();
+	test_emission_in_disk_order();
+	test_callback_input_zero_ranges();
 	test_cancellation();
 	test_allocation_failures();
 	printf("layer write tests passed\n");

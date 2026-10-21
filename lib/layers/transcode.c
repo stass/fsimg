@@ -18,20 +18,20 @@
 /*
  * The transcode (specs/design-layers.md#transcode): one sequential pass
  * over a disk object, a raw intermediate or an assembled disk, into a
- * sequential sink. Each chunk of the disk is read, or recognised as a hole
- * the host reports, and handed to an encoder as data or as zeros; the
- * container's encoder, or the copy encoder without one, decides what bytes
- * that becomes and appends them to the sink. With a compression, that sink
+ * sequential sink. Each chunk of the disk is read, or recognised as lying
+ * in a range the disk reports zero, and handed to an encoder as data or as
+ * zeros; the container's encoder, or the copy encoder without one, decides
+ * what bytes that becomes and appends them to the sink. With a compression, that sink
  * is a filter: the compression's encoder takes what the container appends
  * and writes its own encoding to the output's sink. The output's sink is
  * the only writer of the output, so no encoder seeks, and each sink holds
  * what is appended to it to the bound the plan charged.
  *
- * Zero decisions depend only on the disk's bytes. Hole discovery may only
- * spare the read of a range the host already knows is zero, so the output
- * is the same with it, without it (fsimg_test_hole_discovery) and for any
- * buffer or budget size. Bounded I/O syncs a freshly written disk before
- * its first hole lookup (fsimg_io_next_hole).
+ * Zero decisions depend only on the disk's bytes. A zero range the disk
+ * object reports (fsimg_io_next_zero_range) may
+ * only spare the read of a chunk lying wholly inside it, so the output is
+ * the same with hole knowledge consulted, ignored
+ * (fsimg_test_hole_discovery) and for any buffer or budget size.
  */
 #define SINK_BUFFER_BYTES	65536u
 
@@ -41,11 +41,10 @@
  * sink, and offset counts what it accepted. Any other sink is the
  * output's: bytes collect in buffer and are written at offset, the output
  * length so far excluding them, to exactly one destination: the
- * positional object io, or when io is NULL the stream fd. An output's sink
- * therefore appends in one of three ways, which fsimg_seq_zero spells out:
- * to a proven-zero object, where a zero run stays a hole because the sink
- * never writes behind itself; to any other object, where zeros are
- * written; or to a stream, which receives every byte.
+ * positional object io, or when io is NULL the stream fd. A zero run
+ * appended to io goes through the zeroing operation, which writes nothing
+ * on a fresh file's unwritten ranges and zeros everywhere else; a stream
+ * receives every byte. The sink keeps no knowledge of its own about io.
  */
 struct fsimg_seq_sink {
 	fsimg_session_t	*session;
@@ -60,7 +59,6 @@ struct fsimg_seq_sink {
 	unsigned char	*buffer;	/* SINK_BUFFER_BYTES */
 	size_t		 used;		/* Buffered bytes not yet written */
 	bool		 resized;	/* io was sized to bound; trim at close */
-	bool		 proven_zero;	/* io reads as zeros where unwritten */
 	bool		 touched;	/* The output may differ from before */
 };
 
@@ -143,7 +141,6 @@ sink_open(fsimg_seq_sink_t *sink, fsimg_session_t *session, fsimg_io_t *io,
 	if (!resize && !exact)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IO,
 		    "an encoded output needs a resizable sink"));
-	sink->proven_zero = fsimg_io_proven_zero(io);
 	if (!resize)
 		return (FSIMG_OK);
 	sink->touched = sink->resized = true;
@@ -303,10 +300,10 @@ fsimg_seq_write(fsimg_seq_sink_t *sink, const void *bytes, size_t length,
 }
 
 /*
- * Append length zeros, in the sink's way: a filter encodes them; a
- * proven-zero object already reads as zeros there, so the range stays a
- * hole and only the offset moves; any other object has zeros written
- * through it; a stream is sent zero-filled bytes from the emptied buffer.
+ * Append length zeros, in the sink's way: a filter encodes them; an
+ * object has the range zeroed, which on a fresh file's never-written
+ * range writes nothing, so it stays a hole; a stream is sent zero-filled
+ * bytes from the emptied buffer.
  */
 fsimg_status_t
 fsimg_seq_zero(fsimg_seq_sink_t *sink, uint64_t length, fsimg_error_t *error)
@@ -326,10 +323,6 @@ fsimg_seq_zero(fsimg_seq_sink_t *sink, uint64_t length, fsimg_error_t *error)
 		status = sink_flush(sink, error);
 	if (status != FSIMG_OK || length == 0)
 		return (status);
-	if (sink->io != NULL && sink->proven_zero) {
-		sink->offset += length;
-		return (FSIMG_OK);
-	}
 	sink->touched = true;
 	if (sink->io != NULL)
 		status = fsimg_io_zero_session(sink->io, sink->session,
@@ -364,40 +357,44 @@ all_zero(const unsigned char *bytes, size_t length)
 /*
  * One pass over the disk in chunks of the buffer's length, the last one
  * shorter. Every chunk charges a unit of work, which polls cancellation.
- * A chunk wholly inside the hole [hole_start, hole_end) the host reports
- * is zero without a read; the next hole is looked up only once the pass
- * leaves the last one, so the lookups number about the holes, not the
- * chunks. A lookup finding none reports an empty hole at the object's end.
+ * A chunk wholly inside the zero range [zero_start, zero_end) the disk
+ * reports is zero without a read. The disk is asked again only once the
+ * pass reaches the end of its last answer, which for an empty answer is
+ * where the next range may begin, so the answers number about the zero
+ * runs, not the chunks.
  */
 static fsimg_status_t
 transcode_pass(const disk_output_t *output, const fsimg_encoder_ops_t *ops,
     void *state, unsigned pass, unsigned char *buffer, size_t chunk,
     fsimg_error_t *error)
 {
+	const fsimg_hole_test_t *test = &output->session->ctx->hole_test;
 	uint64_t disk_bytes = output->plan->disk_bytes;
-	uint64_t hole_start, hole_end;
+	uint64_t zero_start, zero_end;
 	size_t length, transferred;
 	fsimg_status_t status;
-	bool discover, zero;
+	bool consult, zero;
 
-	discover = !output->session->ctx->no_hole_discovery;
-	hole_start = hole_end = 0;
+	consult = !output->session->ctx->no_hole_discovery;
+	zero_start = zero_end = 0;
 	status = FSIMG_OK;
 	for (uint64_t offset = 0; status == FSIMG_OK && offset < disk_bytes;
 	    offset += length) {
 		length = disk_bytes - offset > chunk ? chunk :
 		    (size_t)(disk_bytes - offset);
-		status = fsimg_session_charge(output->session, 0, 0, 1, error);
-		if (status != FSIMG_OK)
-			break;
-		if (discover && offset >= hole_end) {
-			status = fsimg_io_next_hole(output->disk, offset,
-			    &hole_start, &hole_end, error);
+		if (consult && offset >= zero_end) {
+			status = fsimg_io_next_zero_range(output->disk, offset,
+			    &zero_start, &zero_end, error);
 			if (status != FSIMG_OK)
 				break;
 		}
-		zero = discover && hole_start <= offset && offset < hole_end &&
-		    length <= hole_end - offset;
+		zero = consult && zero_start <= offset && offset < zero_end &&
+		    (length <= zero_end - offset || test->partial_chunks);
+		if (!zero || !test->unpolled_zeros)
+			status = fsimg_session_charge(output->session, 0, 0, 1,
+			    error);
+		if (status != FSIMG_OK)
+			break;
 		if (!zero) {
 			status = fsimg_io_read_session(output->disk,
 			    output->session, offset, buffer, length, &transferred,

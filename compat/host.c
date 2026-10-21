@@ -78,35 +78,69 @@ fsimg_host_dup(int fd)
 }
 
 /*
- * The first hole the filesystem reports at or after offset, clamped to the
- * file's first length bytes: [*hole_start, *hole_end), hole_end being the
- * next data or length. A host or filesystem that cannot report holes, and
- * any query that fails, reports none (hole_start == length), so a caller
- * that skips reported holes merely reads more; a hole is zero by
- * definition, so skipping one never changes what is read. The queries move
- * the descriptor's file offset, which positional I/O never uses.
+ * The host's report of the first hole at or after offset: SEEK_HOLE from
+ * offset, SEEK_DATA from that hole, then the file's length by fstat, so
+ * *observed is the length after both seeks. *hole is where the hole
+ * starts and *data where data follows it, each UINT64_MAX when the host
+ * answers ENXIO, which it does past the end of the file: the end is a
+ * virtual hole, never a range of readable zeros, so the caller bounds both
+ * by *observed. between, when not NULL, runs between the two seeks, for
+ * tests that change the file there. The descriptor may share its file
+ * offset with an application's, so the offset is restored before
+ * returning. Returns -1 with errno when the host lacks the interface, a
+ * query fails or the offset cannot be restored.
  */
-void
+int
 fsimg_host_next_hole(int fd FSIMG_UNUSED, uint64_t offset FSIMG_UNUSED,
-    uint64_t length, uint64_t *hole_start, uint64_t *hole_end)
+    void (*between)(void *) FSIMG_UNUSED, void *argument FSIMG_UNUSED,
+    uint64_t *hole, uint64_t *data, uint64_t *observed)
 {
 #if defined(SEEK_HOLE) && defined(SEEK_DATA)
-	off_t hole, data;
+	struct stat st;
+	off_t found, next, position;
+	int failed, saved;
 
-	*hole_start = *hole_end = length;
-	if (offset >= length || offset > INT64_MAX)
-		return;
-	hole = lseek(fd, (off_t)offset, SEEK_HOLE);
-	if (hole == -1 || (uint64_t)hole >= length)
-		return;
-	data = lseek(fd, hole, SEEK_DATA);
-	if (data == -1 && errno != ENXIO)
-		return;
-	*hole_start = (uint64_t)hole;
-	if (data != -1 && (uint64_t)data < length)
-		*hole_end = (uint64_t)data;
+	*hole = *data = UINT64_MAX;
+	*observed = 0;
+	if (offset > INT64_MAX) {
+		errno = EOVERFLOW;
+		return (-1);
+	}
+	position = lseek(fd, 0, SEEK_CUR);
+	if (position == -1)
+		return (-1);
+	failed = 0;
+	found = lseek(fd, (off_t)offset, SEEK_HOLE);
+	if (found == -1 && errno != ENXIO)
+		failed = -1;
+	if (failed == 0 && between != NULL)
+		between(argument);
+	if (failed == 0 && found != -1) {
+		*hole = (uint64_t)found;
+		next = lseek(fd, found, SEEK_DATA);
+		if (next == -1 && errno != ENXIO)
+			failed = -1;
+		else if (next != -1)
+			*data = (uint64_t)next;
+	}
+	if (failed == 0 && fstat(fd, &st) == -1)
+		failed = -1;
+	if (failed == 0 && st.st_size < 0) {
+		errno = EOVERFLOW;
+		failed = -1;
+	}
+	if (failed == 0)
+		*observed = (uint64_t)st.st_size;
+	saved = errno;
+	if (lseek(fd, position, SEEK_SET) == -1)
+		return (-1);
+	errno = saved;
+	return (failed);
 #else
-	*hole_start = *hole_end = length;
+	*hole = *data = UINT64_MAX;
+	*observed = 0;
+	errno = EOPNOTSUPP;
+	return (-1);
 #endif
 }
 

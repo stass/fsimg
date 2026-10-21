@@ -19,7 +19,8 @@
  * cannot seek to a container's trailer, or a compressed file, which offers
  * no random access (specs/design-layers.md#stream-input-and-the-spool).
  * It is a handed-over file: the caller created it exclusively and unlinked
- * it, so no name reaches it and its unwritten ranges are proven zero.
+ * it, so no name reaches it, fsimg is its only writer, and its unwritten
+ * ranges are proven zero by its written-range record.
  *
  * Bytes only ever arrive at the end. Each append first reserves its length
  * against the context's spool limit, which every live spool shares, then
@@ -36,7 +37,6 @@
 struct fsimg_spool {
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*file;
-	int		 fd;		/* The file's descriptor, owned by file */
 	uint64_t	 length;	/* Bytes appended, all reserved */
 	uint64_t	 physical;	/* Allocated bytes sampled at seal */
 };
@@ -62,7 +62,6 @@ fsimg_spool_adopt(fsimg_ctx_t *ctx, int fd, fsimg_spool_t **out,
 	}
 	bzero(spool, sizeof(*spool));
 	spool->ctx = ctx;
-	spool->fd = fd;
 	status = fsimg_io_adopt_handed_over(ctx, fd, "spool", &spool->file,
 	    error);
 	if (status != FSIMG_OK) {
@@ -179,16 +178,14 @@ fsimg_status_t
 fsimg_spool_seal(fsimg_spool_t *spool, fsimg_io_t **view, fsimg_error_t *error)
 {
 	fsimg_ctx_t *ctx = spool->ctx;
-	struct stat st;
 	uint64_t bytes;
+	fsimg_status_t status;
 
 	*view = NULL;
-	if (fstat(spool->fd, &st) == -1)
-		return (fsimg_error_set(error, FSIMG_EIO, errno, FSIMG_OP_IO,
-		    "spool allocation stat failed"));
-	if (st.st_blocks < 0 ||
-	    !fsimg_mul_u64((uint64_t)st.st_blocks, 512, &bytes) ||
-	    !fsimg_add_u64(ctx->stats.spool_physical_bytes, bytes,
+	status = fsimg_io_allocated_bytes(spool->file, &bytes, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!fsimg_add_u64(ctx->stats.spool_physical_bytes, bytes,
 	    &ctx->stats.spool_physical_bytes))
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_IO,
 		    "spool allocation size overflow"));

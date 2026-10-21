@@ -185,6 +185,15 @@ typedef fsimg_status_t (*fsimg_resize_fn_t)(void *, uint64_t, fsimg_error_t *);
 typedef fsimg_status_t (*fsimg_flush_fn_t)(void *, fsimg_error_t *);
 typedef fsimg_status_t (*fsimg_zero_fn_t)(void *, uint64_t, uint64_t,
     fsimg_error_t *);
+/* The next range at or after offset, below the object's declared length,
+ * that reads as zero: offset <= *start <= *end <= length, and an empty
+ * answer (*start == *end) says no zero range begins before *start. Each
+ * answer makes progress: *start < *end, *start > offset, or
+ * *start == *end == length. The library checks the shape and relies on
+ * the contents, encoding a reported range as zeros without reading it.
+ */
+typedef fsimg_status_t (*fsimg_next_zero_fn_t)(void *, uint64_t, uint64_t,
+    uint64_t *, uint64_t *, fsimg_error_t *);
 
 typedef struct fsimg_io_ops {
 	size_t		 size;
@@ -197,6 +206,7 @@ typedef struct fsimg_io_ops {
 	fsimg_resize_fn_t resize;
 	fsimg_flush_fn_t	 flush;
 	fsimg_zero_fn_t	 zero_range;
+	fsimg_next_zero_fn_t next_zero_range;
 	uint64_t	 reserved[4];
 } fsimg_io_ops_t;
 
@@ -211,6 +221,14 @@ typedef struct fsimg_io_ops {
  * A slice borrows its parent, has fixed length, and cannot resize its parent.
  * Raw writes can leave partial output. No-flush sinks give logical completion;
  * durable completion requires FSIMG_IO_DURABLE plus a flush callback.
+ * next_zero_range is optional, requires read_at and spares reads only; a
+ * read-only descriptor object instead answers from the host's hole report
+ * after syncing the file once, never for the chunk holding its last byte,
+ * and reads in full when the sync fails. Its queries seek the file offset
+ * the descriptor shares with the caller's and restore it before
+ * returning, so nothing else may use that offset while an operation reads
+ * the object. A writable descriptor object answers nothing. Zeroing never
+ * consults either answer.
  */
 void fsimg_io_ops_init(fsimg_io_ops_t *);
 fsimg_status_t fsimg_io_from_fd(fsimg_ctx_t *, int, unsigned, fsimg_io_t **,
@@ -485,6 +503,8 @@ struct fsimg_layer_options {
  *
  * spool_fd is the spool, an exclusively created, empty, read/write regular
  * file without O_APPEND that the caller has unlinked, or -1 for none, the
+ * caller keeping no other descriptor or mapping of it and never writing
+ * it, since fsimg reads back as zero what it never wrote there; the
  * value fsimg_image_options_init() sets. Options whose size
  * fsimg_image_options_init() did not set are refused before spool_fd is
  * examined, so zero-filled options never hand over descriptor 0. Once the
@@ -698,8 +718,9 @@ typedef struct fsimg_plan_info {
  * from offset zero, as emit does. STREAM writes stream_fd sequentially,
  * borrowed for the call. raw_fd is the raw intermediate a container,
  * compressed or stream output of a writer needs: an exclusively created,
- * empty, unlinked
- * read/write regular file without O_APPEND, or -1; every other output
+ * empty, unlinked read/write regular file without O_APPEND, of which the
+ * caller keeps no other descriptor or mapping and which nothing else
+ * writes, or -1; every other output
  * takes -1. fsimg_sink_init makes an empty sink of a kind, with size set
  * and every descriptor -1, so a caller fills in only what its kind uses. A
  * sink whose size fsimg_sink_init did not set is refused untouched, so a

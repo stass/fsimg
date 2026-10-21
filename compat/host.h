@@ -45,10 +45,14 @@ int fsimg_host_random(void *, size_t);
 
 bool fsimg_host_offset(uint64_t, off_t *);
 int fsimg_host_dup(int);
-/* The first reported hole at or after an offset of a file's first length
- * bytes, as [start, end); none reported is start == end == length.
+/* The host's first hole at or after an offset: its start and the data
+ * after it, UINT64_MAX where the host answers ENXIO, and the file length
+ * observed after both seeks; -1 with errno when the host cannot say. The
+ * callback, when not NULL, runs between the two seeks. The descriptor's
+ * file offset is restored.
  */
-void fsimg_host_next_hole(int, uint64_t, uint64_t, uint64_t *, uint64_t *);
+int fsimg_host_next_hole(int, uint64_t, void (*)(void *), void *, uint64_t *,
+    uint64_t *, uint64_t *);
 int fsimg_host_spawn_worker(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_spawn_output(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_spawn_input(const char *, const int *, unsigned, pid_t *);

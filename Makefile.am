@@ -115,7 +115,7 @@ test_programs = test-core test-io test-meta test-meta-sort test-unicode test-for
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
-	test-containers test-compression test-gzip-write header-c header-cxx
+	test-containers test-compression test-gzip-write test-holes header-c header-cxx
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
@@ -157,6 +157,8 @@ test_compression_SOURCES = test/compression.c test/test.h
 test_compression_LDADD = libfsimg-core.la
 test_gzip_write_SOURCES = test/gzip-write.c test/test.h
 test_gzip_write_LDADD = libfsimg-core.la
+test_holes_SOURCES = test/holes.c test/test.h
+test_holes_LDADD = libfsimg-core.la
 layers_compose_SOURCES = test/layers-compose.c
 layers_compose_LDADD = libfsimg.la
 test_posix_SOURCES = test/posix.c test/test.h
@@ -210,7 +212,7 @@ header_cxx_SOURCES = test/header_cpp.cc
 header_cxx_LDADD = libfsimg.la
 EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	libfsimg.pc.in docs/examples.md \
-	build-aux/check-ascii.sh build-aux/sanitize.sh \
+	build-aux/check-ascii.sh build-aux/check-seek-holes.sh build-aux/sanitize.sh \
 	build-aux/check-install.sh build-aux/check-installed.py \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
@@ -227,6 +229,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-qnx6-driver.md specs/design-qnx4.md specs/design-qnx4-driver.md \
 	specs/design-metadata.md specs/design-sizing.md specs/design-layers.md \
 	specs/design-content.md specs/design-directories.md specs/design-emission.md \
+	specs/design-holes.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
 	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh tools/qnx/guest/manifest4.sh \
@@ -251,8 +254,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/spec/Gemfile test/spec/Gemfile.lock test/spec/run.rb \
 	test/spec/bundle.rb test/spec/bin test/spec/cases test/spec/lib \
 	test/spec/suite
-check-local: check-ascii
-.PHONY: check-ascii check-asan check-ubsan check-lsan check-msan check-security
+check-local: check-ascii check-seek-holes
+.PHONY: check-ascii check-seek-holes check-asan check-ubsan check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz check-fuzz-extended check-cli-rss check-extended
 .PHONY: check-integration baseline-record
 .PHONY: check-spec check-spec-extended check-spec-deep
@@ -327,6 +330,15 @@ check-spec-deep: fsimg test/spec.sh
 	./test/spec.sh deep; result=$$?; test $$result = 0 -o $$result = 77
 check-ascii:
 	$(SHELL) $(top_srcdir)/build-aux/check-ascii.sh $(top_srcdir)
+# The tree passes, and a seeded SEEK_DATA outside compat/host.c fails.
+check-seek-holes:
+	$(SHELL) $(top_srcdir)/build-aux/check-seek-holes.sh $(top_srcdir)
+	rm -rf seek-holes-seed && mkdir -p seek-holes-seed/lib && \
+	    echo 'off_t data = SEEK_DATA;' > seek-holes-seed/lib/seed.c && \
+	    if $(SHELL) $(top_srcdir)/build-aux/check-seek-holes.sh \
+	    seek-holes-seed 2>/dev/null; then rm -rf seek-holes-seed; \
+	    echo "check-seek-holes missed a seeded SEEK_DATA" >&2; exit 1; fi; \
+	    rm -rf seek-holes-seed
 check-asan:
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh asan
@@ -341,7 +353,7 @@ check-msan:
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh msan
 clean-local:
 	-rm -rf sanitizer-asan sanitizer-ubsan sanitizer-lsan sanitizer-msan \
-	    sanitizer-fuzz test/spec-results test/spec-cache
+	    sanitizer-fuzz test/spec-results test/spec-cache seek-holes-seed
 # Fuzz corpora persist across clean so later runs reuse their mutations.
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \

@@ -551,6 +551,9 @@ The disk is emitted to a private raw file first, then encoded in one
 sequential pass that inspects it in chunks: an all-zero chunk becomes a DMG
 zero run, an unwritten range of a VHD or a sparse image DONT_CARE chunk,
 and a run of them one entry.
+A chunk of the raw file that was never written is not read, since fsimg
+records the ranges it writes into its own files; neither is a chunk an
+input container declares zero, nor a hole of a spooled input.
 The raw file and the image are both charged to the output limit; an
 explicit
 .Fl l Ar output

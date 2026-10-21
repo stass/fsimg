@@ -18,9 +18,8 @@
  * stage nothing: their assembled disk is a read-only object over its
  * regions, which the transcode (fsimg_disk_output) reads once, as it reads
  * a writer's raw intermediate, so the output path has one input type. A
- * writer's disk is staged raw and filled in place from the same regions
- * (fsimg_disk_plan_emit): zeros, then the volume its driver emits into a
- * slice, then the tables.
+ * writer's disk is staged raw and filled in place from the same regions in
+ * disk order (fsimg_disk_plan_emit).
  */
 
 typedef enum region_kind {
@@ -71,6 +70,8 @@ static fsimg_status_t reject_aliases(const assembled_disk_t *,
     const fsimg_sink_t *, fsimg_error_t *);
 static fsimg_status_t disk_resolve(void *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
+static fsimg_status_t disk_next_zero(void *, uint64_t, uint64_t *, uint64_t *,
+    fsimg_error_t *);
 static void disk_keep(void *);
 static fsimg_status_t identify_volume(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
     const char *, char [static 16], fsimg_error_t *);
@@ -78,22 +79,25 @@ static fsimg_status_t write_plan(fsimg_ctx_t *, fsimg_disk_plan_t *,
     fsimg_io_t *const *, const uint64_t *, bool, const fsimg_sink_t *,
     fsimg_error_t *);
 
+static const fsimg_io_resolver_ops_t disk_ops = {
+	.resolve = disk_resolve,
+	.next_zero = disk_next_zero,
+	.release = disk_keep
+};
+
 /*
- * Fill a writer's staged disk in place from its assembled regions, in
- * three passes: zero every ZERO region, let emit write the volume into a
- * checked slice, then write the tables, each after a cancellation poll.
- * The zeros come first because a fresh staged disk is known to be zero
- * until its first write, so zeroing it then writes nothing and a fixed
- * disk's long gaps stay holes; the volume's emission relies on the same
- * knowledge, so the tables come last.
+ * Fill a writer's staged disk in place from its assembled regions, in one pass
+ * in disk order: a ZERO region is zeroed, emit writes the volume into a
+ * checked slice, and a table is written after a cancellation poll. On a fresh
+ * staged disk the zeroing writes nothing, since its record proves every range
+ * not written zero whatever the order of the writes, so a fixed disk's long
+ * gaps stay holes; any other output is zeroed in full.
  */
 fsimg_status_t
 fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
     fsimg_io_t *output, fsimg_session_t *session, fsimg_volume_emit_t emit,
     void *argument, fsimg_error_t *error)
 {
-	static const region_kind_t passes[] = { REGION_ZERO, REGION_VOLUME,
-	    REGION_TABLE };
 	/* The driver writes the volume in place, so no input backs it. */
 	fsimg_io_t *const no_input[1] = { NULL };
 	assembled_disk_t disk;
@@ -105,33 +109,28 @@ fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
 
 	status = build_disk(session->ctx, plan, no_input, &volume_bytes, false,
 	    &disk, &tables, error);
-	for (size_t pass = 0; status == FSIMG_OK &&
-	    pass < sizeof(passes) / sizeof(passes[0]); pass++) {
-		for (size_t i = 0; status == FSIMG_OK && i < disk.count; i++) {
-			region = &disk.regions[i];
-			if (region->kind != passes[pass])
-				continue;
-			switch (region->kind) {
-			case REGION_ZERO:
-				status = fsimg_io_zero_session(output, session,
-				    region->offset, region->length, error);
+	for (size_t i = 0; status == FSIMG_OK && i < disk.count; i++) {
+		region = &disk.regions[i];
+		switch (region->kind) {
+		case REGION_TABLE:
+			status = fsimg_poll(session->ctx, NULL, error);
+			if (status == FSIMG_OK)
+				status = fsimg_io_write_session(output, session,
+				    region->offset, region->bytes, region->length,
+				    &transferred, error);
+			break;
+		case REGION_VOLUME:
+			status = fsimg_io_slice(output, region->offset,
+			    region->length, &volume, error);
+			if (status != FSIMG_OK)
 				break;
-			case REGION_VOLUME:
-				status = fsimg_io_slice(output, region->offset,
-				    region->length, &volume, error);
-				if (status != FSIMG_OK)
-					break;
-				status = emit(argument, volume, error);
-				fsimg_io_free(volume);
-				break;
-			case REGION_TABLE:
-				status = fsimg_poll(session->ctx, NULL, error);
-				if (status == FSIMG_OK)
-					status = fsimg_io_write_session(output, session,
-					    region->offset, region->bytes,
-					    region->length, &transferred, error);
-				break;
-			}
+			status = emit(argument, volume, error);
+			fsimg_io_free(volume);
+			break;
+		case REGION_ZERO:
+			status = fsimg_io_zero_session(output, session,
+			    region->offset, region->length, error);
+			break;
 		}
 	}
 	fsimg_scheme_tables_free(&tables);
@@ -377,6 +376,60 @@ disk_resolve(void *argument, uint64_t offset, void *buffer, size_t length,
 	return (status);
 }
 
+/*
+ * The assembled disk's next zero range, from the region containing offset: a
+ * zero gap is zero to its end, a table is the empty answer at its end, and a
+ * volume answers as its input does, translated into the disk; the input's
+ * answer already lies within the region, whose length is the input's. Regions
+ * are few, a scheme's tables and volumes, so the lookup scans.
+ */
+static fsimg_status_t
+disk_next_zero(void *argument, uint64_t offset, uint64_t *start,
+    uint64_t *end, fsimg_error_t *error)
+{
+	const assembled_disk_t *disk = argument;
+	const disk_region_t *region;
+	uint64_t low, high;
+	fsimg_status_t status;
+	unsigned input;
+	size_t i;
+	char name[32];
+
+	/* The regions cover the disk, and the offset is below its length. */
+	input = 0;
+	for (i = 0; i + 1 < disk->count &&
+	    offset >= disk->regions[i].offset + disk->regions[i].length; i++)
+		input += disk->regions[i].kind == REGION_VOLUME;
+	region = &disk->regions[i];
+	*start = *end = region->offset + region->length;
+	switch (region->kind) {
+	case REGION_TABLE:
+		break;
+	case REGION_VOLUME:
+		status = fsimg_io_next_zero_range(region->volume,
+		    offset - region->offset, &low, &high, error);
+		if (status != FSIMG_OK) {
+			/* Name the input, counting from 1 in disk order. */
+			if (error != NULL && error->path[0] == '\0') {
+				snprintf(name, sizeof(name), "input %u",
+				    input + 1);
+				fsimg_error_path(error, name);
+			}
+			return (status);
+		}
+		/* The input is the region's length; clip in case it is not. */
+		high = high < region->length ? high : region->length;
+		low = low < high ? low : high;
+		*start = region->offset + low;
+		*end = region->offset + high;
+		break;
+	case REGION_ZERO:
+		*start = offset;
+		break;
+	}
+	return (FSIMG_OK);
+}
+
 /* The object borrows the disk, which write_plan frees. */
 static void
 disk_keep(void *argument FSIMG_UNUSED)
@@ -430,8 +483,8 @@ write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 	if (status == FSIMG_OK)
 		status = reject_aliases(&disk, sink, error);
 	if (status == FSIMG_OK)
-		status = fsimg_io_resolver(ctx, NULL, disk.length, disk_resolve,
-		    disk_keep, &disk, &object, error);
+		status = fsimg_io_resolver(ctx, NULL, disk.length, &disk_ops,
+		    &disk, &object, error);
 	if (status == FSIMG_OK)
 		status = fsimg_disk_output(&disk.session, object, plan, sink,
 		    durable, &written, error);
