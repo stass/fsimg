@@ -24,11 +24,9 @@
 #include "ifs/write-ifs.h"
 
 /*
- * ImageFS writer tests. The writer is not registered, so the fixture builds
- * its writers from the driver's candidate descriptor through
- * fsimg_writer_new_variant(); the driver's write-ifs.h declares it, and
- * test_tampered_rows() uses that header's row functions. The checker below
- * uses nothing from lib/formats/ifs/.
+ * ImageFS writer tests. The fixture builds its writers by name through the
+ * registry; test_tampered_rows() uses the row functions of the driver's
+ * write-ifs.h. The checker below uses nothing from lib/formats/ifs/.
  *
  * Images are checked three ways: by fsimg's reader, by its verifier, and by
  * the independent checker below, written from the format design
@@ -658,13 +656,12 @@ cancel_poll(void *argument)
 	    ++fixture->polls >= fixture->cancel_after);
 }
 
-/* A writer from the unregistered candidate descriptor. */
+/* An ImageFS writer, constructed by name as any caller does. */
 static fsimg_status_t
-candidate_writer(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
+ifs_writer(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
     fsimg_writer_t **writer, fsimg_error_t *error)
 {
-	return (fsimg_writer_new_variant(ctx, &fsimg_ifs_candidate_format,
-	    &fsimg_ifs_candidate_format.variants[0], options, writer, error));
+	return (fsimg_writer_new(ctx, "ifs", options, writer, error));
 }
 
 /* Open a fixture. pages sizes the metadata cache; scratch false keeps all
@@ -703,7 +700,7 @@ fixture_open_with(fixture_t *fixture, const fsimg_write_options_t *write_options
 	CHECK(fsimg_test_meta_cache(fixture->ctx, pages, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline, NULL) ==
 	    FSIMG_OK);
-	CHECK(candidate_writer(fixture->ctx, write_options, &fixture->writer,
+	CHECK(ifs_writer(fixture->ctx, write_options, &fixture->writer,
 	    NULL) == FSIMG_OK);
 	fsimg_source_ops_init(&source_ops);
 	source_ops.validate = provider_validate;
@@ -1213,7 +1210,7 @@ test_mountpoints(void)
 	for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
 		reproducible_options(&options);
 		options.mountpoint = refused[i];
-		CHECK(candidate_writer(ctx, &options, &writer, NULL) ==
+		CHECK(ifs_writer(ctx, &options, &writer, NULL) ==
 		    FSIMG_EINVAL);
 	}
 	fsimg_ctx_free(ctx);
@@ -1434,6 +1431,24 @@ test_links(void)
 	fixture_close(&fixture);
 }
 
+/* The write settings the registry lists for a format it lists as
+ * writable.
+ */
+static uint32_t
+listed_writer_settings(const char *name)
+{
+	fsimg_format_info_t info;
+	size_t cursor = 0;
+
+	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK)
+		if (strcmp(info.name, name) == 0) {
+			CHECK((info.capabilities & FSIMG_CAP_WRITE) != 0);
+			return (info.write_settings);
+		}
+	CHECK(!"the format is listed");
+	return (0);
+}
+
 /* Writer construction with options fails with status. */
 static void
 check_refused(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
@@ -1441,14 +1456,15 @@ check_refused(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
 {
 	fsimg_writer_t *writer;
 
-	CHECK(candidate_writer(ctx, options, &writer, NULL) == status);
+	CHECK(ifs_writer(ctx, options, &writer, NULL) == status);
 }
 
 /* Settings: byte addressing only, no FAT root, no size or free space, no
  * label, a 32-bit reproducible epoch, a known byte order, no UUID, inode
  * capacity or reserve, and every boot setting refused, since the closed
- * flag table is empty. The registry does not reach the candidate, and a
- * format that stores no mountpoint or boot program refuses them.
+ * flag table is empty. The registry lists the writer with its settings, a
+ * variant of another format is refused, and a format that stores no
+ * mountpoint or boot program refuses them.
  */
 static void
 test_validation(void)
@@ -1460,20 +1476,20 @@ test_validation(void)
 	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
 	fsimg_write_options_init(&options);
 	CHECK(options.sector_bytes == 0);
-	CHECK(candidate_writer(ctx, &options, &writer, NULL) == FSIMG_OK);
+	CHECK(ifs_writer(ctx, &options, &writer, NULL) == FSIMG_OK);
 	fsimg_writer_free(writer);
 	o = options;
 	o.sector_bytes = 1;
 	o.allocation_unit_bytes = 1;
-	CHECK(candidate_writer(ctx, &o, &writer, NULL) == FSIMG_OK);
+	CHECK(ifs_writer(ctx, &o, &writer, NULL) == FSIMG_OK);
 	fsimg_writer_free(writer);
 	reproducible_options(&o);
 	o.epoch = UINT32_MAX;
-	CHECK(candidate_writer(ctx, &o, &writer, NULL) == FSIMG_OK);
+	CHECK(ifs_writer(ctx, &o, &writer, NULL) == FSIMG_OK);
 	fsimg_writer_free(writer);
-	CHECK(fsimg_writer_new(ctx, "ifs", &options, &writer, NULL) ==
-	    FSIMG_EUNSUPPORTED);
-	CHECK(fsimg_writer_new_variant(ctx, &fsimg_ifs_candidate_format,
+	CHECK(listed_writer_settings("ifs") == (FSIMG_SETTING_BYTE_ORDER |
+	    FSIMG_SETTING_MOUNTPOINT | FSIMG_SETTING_BOOT));
+	CHECK(fsimg_writer_new_variant(ctx, &fsimg_ifs_format,
 	    &fsimg_qnx6_format.variants[0], &options, &writer, NULL) ==
 	    FSIMG_EINVAL);
 

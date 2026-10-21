@@ -333,6 +333,20 @@ carries as container details; `fsimg W` names the two fields no known rule
 checks, which the layer report lists as unverified, and calls the
 verification incomplete.
 
+ImageFS images are written, nonbootable, in either byte order: the root and
+an explicit record for every directory, then files, symbolic links and
+FIFOs with owner, mode and modification time in catalog order, each file's
+data on a 4-byte boundary, and the trailer checksum, every other byte zero.
+`-o mountpoint=` sets the mountpoint, default `/`; the size follows from
+the contents, so a size or free-space request is refused, and `boot1=` to
+`boot4=` and `script=` are refused until a boot slot's inode-flag rule is
+observed. QNX 6.5.0 `dumpifs` lists and extracts fsimg's images of one
+file, the name and path limits, every kind, the owner, mode and time
+limits, data sizes around 4 bytes and 64 KiB, shared contents, an empty
+image and empty and 1024-byte mountpoints as it does the `mkifs` images of
+the same trees. `create` compares a cluster with the sector only when a
+sector size is given, so ImageFS takes `-o cluster=1`.
+
 The fsimg command is shaped like tar: modes c (create, cW to verify before
 publication), x (extract, x -O for one member's bytes), t (list, recursive by
 default), W (verify), i (information) and --formats, with -f naming the image,

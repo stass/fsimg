@@ -104,7 +104,6 @@ def test_formats(executable, root):
     assert decoded[-1]["command"] == "formats"
     formats = filesystems(decoded)
     assert set(formats) == {"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs"}
-    assert formats.pop("ifs")["capabilities"] == 5
     layers = {record["name"]: record for record in decoded
               if record["type"] == "format" and record["kind"] != "filesystem"}
     assert {name: record["kind"] for name, record in layers.items()} == {
@@ -146,9 +145,9 @@ def filesystems(decoded):
 def test_posix_metadata(executable, root):
     """FAT and exFAT store no POSIX fields or links: -p imports become counted
     losses that leave image bytes unchanged, and a link fails planning. The
-    QNX6 and QNX4 formats store every kind and the POSIX fields; the
-    read-only ImageFS stores every kind with modification time, owner and
-    mode."""
+    QNX6 and QNX4 formats store every kind and the POSIX fields; ImageFS
+    stores every kind with modification time, owner and mode, and takes the
+    byte order, mountpoint and boot settings."""
     decoded = completed(invoke(executable, root, ["--formats", "--json"]))
     formats = filesystems(decoded)
     qnx6 = formats.pop("qnx6")
@@ -161,7 +160,7 @@ def test_posix_metadata(executable, root):
     assert qnx4["max_link_target_bytes"] == 1023
     ifs = formats.pop("ifs")
     assert ifs["entry_kinds"] == 15 and ifs["metadata_fields"] == 0x62
-    assert ifs["max_label_bytes"] == 0 and ifs["write_settings"] == 0
+    assert ifs["max_label_bytes"] == 0 and ifs["write_settings"] == 0x31
     assert ifs["max_link_target_bytes"] == 1024
     assert all(record["write_settings"] == 0 for record in formats.values())
     assert all(record["entry_kinds"] == 3 for record in formats.values())
@@ -286,7 +285,7 @@ def test_human_help(executable, root):
                               b"exfat   yes   yes    yes\n"
                               b"qnx6    yes   yes    yes\n"
                               b"qnx4    yes   yes    yes\n"
-                              b"ifs     yes   no     yes\n"
+                              b"ifs     yes   yes    yes\n"
                               b"\n"
                               b"Layer   Kind         Read  Write  Verify  Codecs         Settings\n"
                               b"gpt     scheme       yes   yes    yes     -              "
@@ -2156,6 +2155,50 @@ def test_ifs(executable, root, payload):
     assert b"ImageFS checksum does not match" in result.stderr, result.stderr
 
 
+def test_ifs_create(executable, root, payload):
+    """ImageFS creation through the command: the byte order and mountpoint
+    settings cross the worker job record into the image, which stores
+    files, directories and links with owner, mode and time, reads back,
+    verifies and is reproducible. A 1-byte cluster needs no sector size; a
+    size, a boot setting and a label are refused."""
+    source = root / "ifs-source"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested/caf\u00e9.txt").write_bytes(payload)
+    (source / "nested/caf\u00e9.txt").chmod(0o640)
+    os.symlink("nested/caf\u00e9.txt", source / "link")
+    arguments = ["c", "--json", "-R", "-p", "-S", "off", "-F", "ifs",
+                 "-o", "endian=big", "-o", "mountpoint=/proc/boot"]
+    operands = ["-C", "ifs-source", "."]
+    completed(invoke(executable, root, [*arguments, "-f", "made.ifs", *operands]))
+    image = (root / "made.ifs").read_bytes()
+    assert image[:8] == b"imagefs\x05" and image[0x58:0x63] == b"/proc/boot\0"
+    info = completed(invoke(executable, root, ["i", "--json", "-f", "made.ifs"]))[1]
+    assert info["format"] == "ifs" and info["profile"] == "big-endian"
+    assert info["mountpoint"] == "/proc/boot" and info["label"] is None
+    listed = completed(invoke(executable, root, ["t", "--json", "-f", "made.ifs"]))
+    entries = {record["path"]: record for record in listed if record["type"] == "entry"}
+    assert set(entries) == {"/link", "/nested", "/nested/caf\u00e9.txt"}
+    assert entries["/link"]["kind"] == "symlink"
+    assert entries["/nested/caf\u00e9.txt"]["mode"] == 0o640
+    assert invoke(executable, root, [
+        "x", "-O", "-f", "made.ifs", "/nested/caf\u00e9.txt"]).stdout == payload
+    verification = completed(invoke(executable, root, ["W", "--json", "-d", "-f", "made.ifs"]))
+    report = next(record for record in verification if record["type"] == "verify")
+    assert report["validation_scope"] == "initialized-payload"
+    completed(invoke(executable, root, [*arguments, "-o", "cluster=1", "-f", "second.ifs",
+                                        *operands]))
+    same_bytes(root / "made.ifs", root / "second.ifs")
+    for extra, detail in [
+        (["-s", "1M"], b"an ImageFS image has no free space"),
+        (["-o", "boot1=/nested/caf\u00e9.txt"], b"no ImageFS boot slot has an observed flag rule"),
+        (["-L", "LABEL"], b"the image format has no volume label"),
+    ]:
+        result = invoke(executable, root, ["c", "-S", "off", "-F", "ifs", *extra,
+                                           "-f", "refused.ifs", *operands], expected=1)
+        assert detail in result.stderr, (extra, result.stderr)
+        assert not (root / "refused.ifs").exists()
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -2184,6 +2227,7 @@ def main():
         test_qnx6(executable, root, payload)
         test_qnx4(executable, root, payload)
         test_ifs(executable, root, payload)
+        test_ifs_create(executable, root, payload)
         test_failures(executable, root)
         test_output_failures(executable, root)
         test_examples(executable, root)

@@ -2,8 +2,8 @@
 
 fsimg is a BSD-2-Clause filesystem image tool and embeddable C11 library for
 64-bit FreeBSD, Linux, and macOS. It supports FAT, exFAT, classic QNX6
-Power-Safe and QNX4 image creation, reading, verification, and safe
-extraction without mounts or root, and reads QNX ImageFS (IFS) images.
+Power-Safe, QNX4 and QNX ImageFS (IFS) image creation, reading,
+verification, and safe extraction without mounts or root.
 
 The library provides resource contexts, bounded positional I/O, and private
 bounded metadata storage with record streams, paged arrays/bitsets, and stable
@@ -163,8 +163,14 @@ below a link at boot the same way); `fsimg i` counts both kinds as
 shadowed. A path with `.`, `..` or empty components is unsupported.
 `fsimg W` checks the image's additive checksum, its length against the
 image size, and that each boot and script reference names exactly one
-file. A QNX boot image's startup code and compression are not read, and
-ImageFS images cannot be created.
+file. A compressed or boot image's startup code and compression are not
+read. The ImageFS writer creates nonbootable images in either byte order
+with a mountpoint setting (default `/`): the root and a record for every
+directory, then files, symbolic links and FIFOs with owner, mode and
+modification time, each file's data on a 4-byte boundary. The image's size
+follows from its contents, and boot programs and scripts are refused until
+a boot flag rule is observed. QNX 6.5.0 `dumpifs` lists and extracts its
+images as it does the `mkifs` images of the same trees.
 
 An ImageFS inside a Harman-Becker `hbcifs` container, such as `PCM3_IFS2.ifs`
 on the PCM 3.1 update disc, is read through the container: its header is

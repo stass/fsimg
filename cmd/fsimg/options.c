@@ -1650,7 +1650,10 @@ validate_creation(cli_parse_t *parse)
 		if ((masks[i] & (UINT32_C(1) << shift)) == 0)
 			return (syntax(parse, "geometry is outside the selected writer profile"));
 	}
-	if (sizes[1] != 0 && sizes[1] < (sizes[0] == 0 ? 512 : sizes[0]))
+	/* Without a sector size, the profile's cluster mask already holds no
+	 * cluster below its smallest sector, and the writer pairs the two.
+	 */
+	if (sizes[0] != 0 && sizes[1] != 0 && sizes[1] < sizes[0])
 		return (syntax(parse, "cluster size is smaller than sector size"));
 	return (FSIMG_OK);
 }

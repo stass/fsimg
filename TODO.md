@@ -303,8 +303,8 @@
 * [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/codec/`,
   `lib/layers/`): read ImageFS bodies, bare or inside the `qnxboot` and
   `hbcifs` containers (QNX boot images and the PCM 3.1 Harman-Becker
-  wrapper), with project-owned LZO1X and NRV2B decoders; write standalone
-  ImageFS volumes; then wrap a new ImageFS in an existing boot image. The
+  wrapper), with project-owned LZO1X and NRV2B decoders; wrap a new
+  ImageFS in an existing boot image. The
   [plan](docs/ifs-plan.md) orders the work; the
   [format](specs/design-ifs.md), [driver](specs/design-ifs-driver.md) and
   [codec](specs/design-codecs.md) designs and the layer design's `qnxboot`

@@ -157,6 +157,9 @@ test_options(void)
 		{ "fsimg", "-cn", ".", NULL },
 		{ "fsimg", "-cn", "-F", "exfat", "-o", "cluster=3K", ".", NULL },
 		{ "fsimg", "-cn", "-F", "fat16", "-o", "cluster=64K", ".", NULL },
+		/* Outside the profile's cluster sizes. */
+		{ "fsimg", "-cn", "-F", "fat16", "-o", "cluster=256", ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs", "-o", "cluster=2", ".", NULL },
 		{ "fsimg", "-cn", "-F", "qnx6", "-o", "endian=middle", ".", NULL },
 		{ "fsimg", "-cn", "-F", "qnx6", "-o", "uuid=1-2-3-4-5", ".", NULL },
 		{ "fsimg", "-cn", "-F", "qnx6", "-o",
@@ -194,6 +197,9 @@ test_options(void)
 	char *qnx6[] = { "fsimg", "-cn", "-F", "qnx6", "-o", "endian=big",
 	    "-o", "uuid=89ABCDEF-0123-4567-89ab-cdef01234567", "-o",
 	    "inodes=1000", "-o", "reserve=0", ".", NULL };
+	/* ImageFS addresses bytes: its 1-byte cluster needs no sector size. */
+	char *byte_cluster[] = { "fsimg", "-cn", "-F", "ifs", "-o", "cluster=1",
+	    ".", NULL };
 	char *window[] = { "fsimg", "-i", "-f", "image", "--offset=512",
 	    "--length", "1M", NULL };
 	char *text[] = { "fsimg", "-cn", "-F", "qnx6", "-o", "mountpoint=",
@@ -257,6 +263,10 @@ test_options(void)
 	CHECK(bcmp(options.request.write.volume_uuid, uuid, 16) == 0);
 	CHECK(options.request.write.inode_capacity == 1000);
 	CHECK(options.request.write.reserve_percent == 0);
+	fsimg_cli_release(&options);
+	CHECK(parse(byte_cluster, &options) == FSIMG_OK);
+	CHECK(options.request.write.allocation_unit_bytes == 1 &&
+	    options.request.write.sector_bytes == 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(window, &options) == FSIMG_OK);
 	CHECK(options.request.offset == 512);

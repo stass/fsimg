@@ -108,7 +108,12 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
     `specs/design-api.md` covers it.
   * A scheme in an `ifs` stack: the profile refuses it, while `plan.c`
     refuses only a missing partition type, as for QNX4; choose one rule.
-    The writer registration item below depends on it.
+    No design states one for a padding container (`vhd`, `dmg`, `simg`)
+    below `ifs`; `create` must not publish a padded ImageFS that `W`
+    reports as longer than its image size.
+  * The carried-volume refusal has no field in the layer record;
+    `fsimg_stack_validate()` checks slot kinds only. It can be stated as the
+    forced filesystem plus an empty scheme slot.
   * `qnxboot` has no rows in `layer_settings` and `layer_keys`, and the IFS
     settings rows do not mark `compress` and `template` creation-only.
   * The LZO1X transcode reads its input once per pass, while the layer
@@ -129,29 +134,6 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   empty mountpoint. `dumpifs` accepts both. The owner chooses
   whether the default stays `/` (one default for the wrap's bodies too) or
   follows nonbootable `mkifs`.
-* [High] **Writer registration after native qualification**
-  (`lib/formats/ifs/descriptor.c`, `lib/layers/plan.c`): QNX 6.5.0
-  `dumpifs` accepts every native qualification image
-  ([research record](ifs-research.md#fsimg-writer-output)), which meets
-  owner decision 7's bar, but the writer stays in
-  `fsimg_ifs_candidate_format`, outside the registry. Registering it would
-  let `create` put an ImageFS inside a layer that pads it: `-F ifs/vhd`,
-  `ifs/dmg` and `ifs/simg`, and `ifs/mbr` or `ifs/gpt` with an explicit
-  partition type, publish images whose volume runs past `image_size`, which
-  `W` reports as corrupt ("ImageFS volume is longer than its image size",
-  `verify.c`) and `cW` refuses. Registration waits for the owner's stack
-  rule. The format, driver and layer designs refuse a scheme below `ifs`
-  (the scheme bullet of the `qnxboot` item above), but no design states a
-  rule for padding containers: either all three designs gain a refusal of
-  every padding container below `ifs`, or verification accepts zero
-  padding to the slice end and the designs say so. With the rule settled,
-  registration moves the writer and its write masks into
-  `fsimg_ifs_format`, deletes the candidate, switches `test/ifs-write.c`
-  to `fsimg_writer_new()`, lists `ifs` and the `mountpoint`, `boot1` to
-  `boot4` and `script` keys in the `create` help, lets `-o cluster=1`
-  through the CLI's cluster check (which assumes a 512-byte sector when
-  none is given), tests creation through the command, and updates
-  `README.md`, `docs/fsimg.1`, `docs/libfsimg.3` and `NEWS`.
 * [Medium] **Writer scale** (`test/ifs-write.c`): the 2^32 - 4 byte limit
   is emitted on a sparse sink; a catalog that spills to scratch, with
   measured I/O calls, scratch and RSS as the

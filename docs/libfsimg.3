@@ -36,8 +36,8 @@ lists
 .Fn fsimg_writer_add_manifest "fsimg_writer_t *writer" "int manifest_fd" "int contents_fd" "fsimg_error_t *error"
 .Sh DESCRIPTION
 The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
-classic QNX6 Power-Safe volumes in either byte order, and QNX4 volumes,
-and reads QNX ImageFS images in either byte order.
+classic QNX6 Power-Safe volumes in either byte order, QNX4 volumes, and
+nonbootable QNX ImageFS images in either byte order.
 A format without full verification has no verify capability, and
 .Fn fsimg_verify
 fails on it with
@@ -255,7 +255,17 @@ need.
 QNX6 and QNX4 store no volume_serial and ignore it.
 The settings mountpoint, a copied string under FSIMG_SETTING_MOUNTPOINT,
 and boot_programs and script, image paths under FSIMG_SETTING_BOOT,
-follow the same rule; no registered format names either bit.
+follow the same rule.
+ImageFS names FSIMG_SETTING_BYTE_ORDER, FSIMG_SETTING_MOUNTPOINT and
+FSIMG_SETTING_BOOT:
+a NULL mountpoint stores
+.Pa / ,
+an empty one stores an empty mountpoint, and one longer than 1024 bytes,
+not UTF-8 or holding a control byte fails with FSIMG_EINVAL; every boot program and script fails with
+FSIMG_EUNSUPPORTED, since no boot slot has an observed inode-flag rule.
+An ImageFS has no free space and its size follows from its contents, so
+a nonzero volume_bytes or min_free_bytes fails with FSIMG_EINVAL; its
+sector and allocation unit are 1 byte, and it stores no volume_serial.
 A zero sector_bytes, the default, selects the format's own sector size.
 Time bases distinguish UTC instants, known offsets and unknown-zone calendar
 values.

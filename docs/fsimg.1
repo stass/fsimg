@@ -48,7 +48,7 @@
 .Sh DESCRIPTION
 .Nm
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
-QNX6 Power-Safe and QNX4 volumes, and reads QNX ImageFS images.
+QNX6 Power-Safe and QNX4 volumes and QNX ImageFS images.
 FAT volumes with more than two FAT copies are reported as unsupported.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.
@@ -143,7 +143,7 @@ Required except with
 .It Fl F Ar stack
 The image's layers, inner to outer, separated by
 .Ql / ;
-the filesystem name is fat12, fat16, fat32, exfat, qnx6 or qnx4.
+the filesystem name is fat12, fat16, fat32, exfat, qnx6, qnx4 or ifs.
 Required for
 .Cm c .
 The slots are the filesystem, the partition scheme (gpt or mbr) and the
@@ -347,6 +347,21 @@ Its result adds, when nonzero, the number of shadowed records and of boot
 and script references naming an entry omitted for its name.
 An ImageFS whose mountpoint is outside the name rules is reported as
 unsupported, since it has no observed form to check.
+.Cm c
+writes a nonbootable ImageFS in one layout: the root and an explicit record
+for every directory, files, symbolic links and FIFOs with owner, mode and
+modification time, each file's data on a 4-byte boundary, and the trailer
+checksum.
+Its size follows from its contents, so
+.Fl s
+and
+.Fl Fl free-space
+are refused.
+QNX 6.5.0
+.Ql dumpifs
+lists and extracts fsimg's images as it does the
+.Ql mkifs
+images of the same trees.
 .Pp
 A gzip-compressed image, a file or standard input, is detected from its
 first bytes and decoded, member after member as
@@ -520,9 +535,10 @@ Scratch use is allowed.
 Sector size within the selected profile.
 .It Fl o Ar cluster=bytes
 Allocation-unit size within the selected profile; for QNX6 the block size,
-512, 1024 (the default), 2048 or 4096.
+512, 1024 (the default), 2048 or 4096; for ImageFS, which addresses bytes,
+1.
 .It Fl o Ar endian=little|big
-QNX6 on-disk byte order; default little.
+QNX6 and ImageFS on-disk byte order; default little.
 .It Fl o Ar uuid=uuid
 QNX6 volume UUID as RFC 4122 text, stored in textual byte order.
 Without it,
@@ -544,10 +560,13 @@ The stored mount path of a format that has one, within the format's length
 limit;
 .Ar mountpoint=
 alone stores an empty one.
-No registered format stores a mountpoint.
+ImageFS stores one of at most 1024 bytes of UTF-8 text without control
+bytes; default
+.Pa / .
 .It Fl o Ar boot1=path No ... Fl o Ar boot4=path , Fl o Ar script=path
 The image paths of a bootable image's boot programs and startup script.
-No registered format accepts them.
+ImageFS refuses every one as unsupported until a boot slot has an observed
+inode-flag rule, so it writes only nonbootable images.
 .It Fl p
 Import each source object's owner, group and permission bits as optional
 metadata.

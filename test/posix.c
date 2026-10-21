@@ -243,7 +243,7 @@ test_capability_records(void)
 			CHECK(info.max_link_target_bytes == 1024);
 			CHECK(info.max_name_utf16_units == 1024);
 			CHECK(info.capabilities == (FSIMG_CAP_READ |
-			    FSIMG_CAP_VERIFY));
+			    FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
 			continue;
 		}
 		if (strcmp(info.name, "qnx6") == 0 ||

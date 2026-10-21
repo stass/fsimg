@@ -387,8 +387,8 @@ help(fsimg_cli_display_t *display)
 		    "    -d              With W, also read initialized file data\n"
 		    "    -e epoch        Reproducible Unix timestamp; requires -R\n"
 		    "    -F stack        Required: the filesystem (fat12, fat16, fat32, exfat,\n"
-		    "                    qnx6 or qnx4), optionally followed by gpt or mbr and\n"
-		    "                    by dmg, vhd or simg, joined by /, such as\n"
+		    "                    qnx6, qnx4 or ifs), optionally followed by gpt or\n"
+		    "                    mbr and by dmg, vhd or simg, joined by /, such as\n"
 		    "                    fat32/gpt/dmg\n"
 		    "    -f image        New image pathname; optional with -n\n"
 		    "    --free-space=bytes\n"
@@ -398,10 +398,11 @@ help(fsimg_cli_display_t *display)
 		    "    -L label        Volume label (default FSIMG where the format has one)\n");
 		append(display, "%s%s", help_budgets, help_memory);
 		append(display, "    -n              Without W, report a plan without creating an image\n"
-		    "    -o key=value    Setting: sector, cluster, endian, uuid, inodes or\n"
-		    "                    reserve, or layer:key for a layer the stack or the\n"
-		    "                    compression selects, such as gpt:type=esp,\n"
-		    "                    dmg:compress=none or gzip:level=9\n"
+		    "    -o key=value    Setting: sector, cluster, endian, uuid, inodes,\n"
+		    "                    reserve, mountpoint, boot1 to boot4 or script, or\n"
+		    "                    layer:key for a layer the stack or the compression\n"
+		    "                    selects, such as gpt:type=esp, dmg:compress=none\n"
+		    "                    or gzip:level=9\n"
 		    "    -p              Import owner, group and permission bits\n"
 		    "    -R              Create reproducible image bytes\n");
 		append(display, "%s", help_policies);

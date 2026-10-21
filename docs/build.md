@@ -1458,14 +1458,12 @@ about 17 seconds. Without both variables the script prints "SKIP:
 FSIMG_HBCIFS_IMAGE and FSIMG_HBCIFS_DECODED are not set (PCM3_IFS2.ifs and
 its oracle decode)".
 
-`test-ifs-write` creates ImageFS images with the writer. The registry lists
-only writers that native QNX has qualified, so the test builds writers from
-the driver's candidate descriptor through `fsimg_writer_new_variant()`,
-while `fsimg_writer_new("ifs")` must fail as unsupported. Every image is
-read back through fsimg's reader and payload verification, and checked by
-the test's own checker, written from [the format
-design](../specs/design-ifs.md) with separate offsets and sharing no code
-with `lib/formats/ifs/`. The checker decodes the header, the mountpoint,
+`test-ifs-write` creates ImageFS images with the writer, constructed by
+name through the registry, which must list it as writable with its byte
+order, mountpoint and boot settings. Every image is read back through
+fsimg's reader and payload verification, and checked by the test's own
+checker, written from [the format design](../specs/design-ifs.md) with
+separate offsets and sharing no code with `lib/formats/ifs/`. The checker decodes the header, the mountpoint,
 every record and every file's data, sums the image's words and requires
 the writer profile's layout: the root record first, inode numbers in record
 order, a directory record before every child, every record its kind's

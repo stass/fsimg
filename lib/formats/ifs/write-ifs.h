@@ -83,10 +83,6 @@ typedef struct ifs_plan {
 } ifs_plan_t;
 
 extern const fsimg_writer_ops_t fsimg_ifs_writer_ops;
-/* The descriptor with the writer, outside the registry until native QNX
- * qualifies its output (specs/design-formats.md).
- */
-extern const fsimg_format_t fsimg_ifs_candidate_format;
 
 fsimg_status_t ifs_row_get(ifs_plan_t *, uint64_t, ifs_row_t *,
     fsimg_error_t *);
