@@ -26,6 +26,7 @@ captures into a new directory, and never format or modify the originals.
 | `~/qnx65-vm/captures-qnx4/` | QNX4 native captures in the same format, named `q4-KIND-BLOCKS-OPTION`; `FSIMG_QNX4_NATIVE`. The [QNX4 research record](qnx4-research.md) lists them and their method |
 | `~/qnx65-vm/bin4/` | QNX 6.5.0 `dinit`, `chkfsys` and `fs-qnx4.so`, copied out of the guest |
 | `~/qnx65-vm/writer-captures/` | Native qualification of fsimg writer output, in the same capture format |
+| `~/qnx65-vm/writer-captures-ifs/` | Native qualification of fsimg's ImageFS writer: the capture and, in `NAME-cases/`, the images and manifests `ifsqual.py compare` reads |
 | `~/qnx65-vm/bin/`, `~/qnx65-vm/boot/`, `~/qnx65-vm/rtkit/` | QNX 6.5.0 binaries copied out of the live CD for disassembly (source X2): `mkqnx6fs`, `chkqnx6fs`, `fs-qnx6.so`, `io-blk.so`, `fsysinfo`, and the other filesystem modules |
 | `~/qnx65-vm/workbench/` | The full working set of the original native and PCM analysis: decoders, disassembly listings (`*.s`, `rv-*`), symbol tables and intermediate images |
 | `~/PCM-3.1-v4.76-disc-image.iso` | The PCM 3.1 update disc |
@@ -141,6 +142,23 @@ tools/qnx/vm/put.sh tools/qnx/guest/qualify.sh /tmp/qualify.sh
 FSIMG_QNX_CAPTURES=~/qnx65-vm/writer-captures tools/qnx/vm/capture.sh \
     -i /tmp/q/writer.img writer-b2048-be-uuid-qualify 'sh /tmp/qualify.sh'
 ```
+
+The ImageFS writer's cycle, `tools/qnx/guest/qualifyifs.sh`, takes every
+qualification image on one disk that `tools/qnx/decode/ifsqual.py` packs
+and judges ([research record](ifs-research.md#fsimg-writer-output)):
+
+```sh
+mkdir /tmp/cases
+./test-ifs-write --create /tmp/cases
+tools/qnx/decode/ifsqual.py pack /tmp/cases /tmp/qualify.img
+tools/qnx/vm/put.sh tools/qnx/guest/qualifyifs.sh /tmp/qualifyifs.sh
+FSIMG_QNX_CAPTURES=~/qnx65-vm/writer-captures-ifs tools/qnx/vm/capture.sh \
+    -i /tmp/qualify.img ifs-writer-qualify 'sh /tmp/qualifyifs.sh INDEX-BYTES'
+tools/qnx/decode/ifsqual.py compare /tmp/cases \
+    ~/qnx65-vm/writer-captures-ifs/ifs-writer-qualify.txt
+```
+
+`pack` prints the index length the guest script takes.
 
 Host-side edits between two guest steps, such as the torn-header experiment,
 are recorded byte for byte in the capture's `.txt` file.

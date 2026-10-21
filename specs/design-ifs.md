@@ -148,9 +148,11 @@ mountpoint, the root record, the terminator and the trailer. [X1]
 
 ### Mountpoint
 
-The mountpoint is the NUL-terminated string at `0x58`. Its default is `/`;
-`mkifs`'s buildfile attribute `mount=` sets it, and an empty value stores an
-empty mountpoint, as H3's application image has. In every image
+The mountpoint is the NUL-terminated string at `0x58`. `mkifs`'s buildfile
+attribute `mount=` sets it, and an empty value stores an empty mountpoint,
+as H3's application image has. Without `mount=`, `mkifs` stores `/` in a
+bootable image, the value of every boot image surveyed, and an empty
+mountpoint in a nonbootable one. In every image
 `dir_offset` is the position after the NUL rounded up to a multiple of 4:
 `0x5c` for `/`, `0x60` for `/foo`. The bytes between the NUL and
 `dir_offset`, at most three, are padding: zero in 6.5.0 output, but one to
@@ -569,9 +571,9 @@ The image has no free space and no geometry: its size is exactly the header,
 the mountpoint, the records, the terminator, the data and the trailer. A
 requested `volume_bytes` or `min_free_bytes` is refused with `FSIMG_EINVAL`,
 [sizing](design-sizing.md) has no dimension to search, and the plan reports
-the derived size. The settings are the mountpoint, default `/`; the byte
-order, default little, big allowed because `mkifs +bigendian` produces
-big-endian bodies natively; and the epoch, within 0 to 4294967295, the
+the derived size. The settings are the mountpoint, default `/`, the value
+every boot image carries; the byte order, default little, big allowed
+because `mkifs +bigendian` produces big-endian bodies natively; and the epoch, within 0 to 4294967295, the
 range the time field stores. The mountpoint, byte order and boot settings
 are filesystem settings, so their keys are bare: `mountpoint=`, `endian=`,
 the latter shared with QNX6, `boot1=` to `boot4=` and `script=`; the epoch

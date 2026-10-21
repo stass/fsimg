@@ -273,6 +273,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/guest/qualify.sh tools/qnx/guest/qualify4.sh \
 	tools/qnx/guest/popifs.sh tools/qnx/decode/ifsdump.py \
 	tools/qnx/decode/ifschunks.py tools/qnx/decode/ifsflip.py \
+	tools/qnx/decode/ifsqual.py tools/qnx/guest/qualifyifs.sh \
 	tools/qnx/oracle/oracle.c tools/qnx/oracle/build.sh tools/qnx/vm/load.py \
 	tools/qnx/decode/q4dump.py tools/qnx/pcm/pcmq4.py tools/qnx/pcm/pcmq6.py tools/qnx/pcm/shdis.py \
 	tools/qnx/pcm/shrange.py tools/qnx/vm/boot.sh \

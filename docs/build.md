@@ -1470,6 +1470,25 @@ expressible images match with no difference, adding 9 directory records,
 and 5 are not expressible; it prints only counts and capture file names,
 and exits 77 without `FSIMG_IFS_NATIVE`.
 
+```sh
+./test-ifs-write --create DIRECTORY
+```
+
+writes the native qualification images and their manifests into an
+existing empty `DIRECTORY`; the plain run builds and checks the same
+images without writing them. They are one file, the name and path limits
+within and beyond what `dumpifs` shows, every kind, the owner, mode and
+time limits, the data sizes and shared contents, the root alone, empty and
+1024-byte mountpoints and a big-endian image. Each is checked strictly
+against the mountpoint, byte order, entries, metadata and contents that
+built it, read and verified before it is written, and the manifest is the
+checker's decoding.
+`tools/qnx/decode/ifsqual.py` packs them for the QNX 6.5.0 guest's
+`tools/qnx/guest/qualifyifs.sh` and compares the capture with the
+manifests; [the infrastructure page](qnx6-infrastructure.md) gives the
+commands and [the research record](ifs-research.md#fsimg-writer-output) the
+result.
+
 `test-codec`, in `make check`, tests the LZO1X and NRV2B decoders on
 streams written by hand from [the codec design](../specs/design-codecs.md).
 `test/codec-integration.sh`, run by `make check-integration` and not by

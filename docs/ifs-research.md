@@ -123,10 +123,13 @@ Captures are in `~/qnx65-vm/captures-ifs/` (`FSIMG_IFS_NATIVE`), made with
 
 * The ImageFS header flags are `0x04` little-endian and `0x05` big-endian
   (`+bigendian`) in every native image; no other value occurs.
-* The mountpoint is `/` by default, the `mount=` value otherwise; `mount=`
-  with an empty value stores an empty mountpoint, as H3's `PCM3_IFS2` has.
-  `dir_offset` is the mountpoint's NUL rounded up to 4 (`0x5c` for `/`,
-  `0x60` for `/foo`).
+* The mountpoint is the `mount=` value; `mount=` with an empty value stores
+  an empty mountpoint, as H3's `PCM3_IFS2` has. Without `mount=`, a
+  nonbootable image stores an empty mountpoint (`e1-one-nn` matches
+  `e2-mount-x` byte for byte) and a bootable one `/` (E12's `cAr.ifs`), the
+  value of every H3 and X1 boot image. `dumpifs -v` names a nonempty
+  mountpoint only. `dir_offset` is the mountpoint's NUL rounded up to 4
+  (`0x5c` for `/` and for the empty mountpoint, `0x60` for `/foo`).
 * The bytes between the mountpoint's NUL and `dir_offset` are zero in every
   6.5.0 image but not in H3: every H3 image has one to three nonzero bytes
   there. Padding is therefore not a closed rule.
@@ -365,6 +368,74 @@ padding, and the same boot and script references as H3. `dumpifs -u`
 copies the image with its startup header unchanged (the compression value
 stays set) and the body decoded.
 
+## fsimg writer output
+
+`tools/qnx/guest/qualifyifs.sh` ran the native cycle on the images
+`test-ifs-write --create` builds; `tools/qnx/decode/ifsqual.py pack` put
+them on one `hd0` disk, loaded by `capture.sh -i`, and `ifsqual.py
+compare` judged the record. The capture is
+`~/qnx65-vm/writer-captures-ifs/ifs-writer-qualify`, with the images and
+manifests in `ifs-writer-qualify-cases/`; its record names the disk's
+SHA-256, and the guest's `cksum` of every one of the 97 members matched the
+host's. The images are not reproducible: every entry without a time of its
+own, every directory included, carries the planning clock, so each image
+has nonzero directory times. For each image the cycle is:
+
+1. `dumpifs -v` and `dumpifs -m`, compared with the manifest the
+   independent checker of `test-ifs-write` decodes: every record in table
+   order with its offset, size, name, link target, owner, mode, inode and
+   time, the header and table geometry and the mountpoint, and with the
+   image itself for every file's MD5 and the trailer word;
+2. `dumpifs -x` into an empty directory on a QNX4 scratch volume (a 2 MiB
+   file on the RAM `/tmp`, mounted for the run), then `ls -ldn` and `cksum`
+   of every path, compared with the manifest's size, cksum, mode and time
+   of every file and with the extraction of the native image of step 3;
+3. `mkifs -nn` of the same tree from a generated buildfile (`type=dir` for
+   every directory, every owner and mode given, the contents copied off the
+   disk), then steps 1 and 2 on that native image, whose listing must agree
+   with fsimg's in every name, kind, size, owner, mode and MD5, apart from
+   the `01000` bit `mkifs` adds (below);
+4. no mount: 6.5.0 has none for a nonbootable image (E11).
+
+| Image | Records | Content | Result |
+| --- | --- | --- | --- |
+| `one` | 2 | One 9-byte file | All three steps pass |
+| `names` | 218 | Components of 1, 48, 49, 255, 256 and 505 bytes; two-, three- and four-byte UTF-8; a space; names differing by case; depth 201; a 991-byte path | All three steps pass |
+| `limits` | 515 | A 992-byte path, a 1024-byte component and path, depth 512 | Steps 1 and 3 pass with 14 names past `dumpifs`'s record buffer; `dumpifs -x` stops with status 1 on both images at a path past the buffer, which it names with unrelated memory: on fsimg's at the depth-512 file ("Invalid argument"), on the native image at the 1024-byte name ("Filename too long") |
+| `kinds` | 23 | Files of 0 to 33, 5000, 65537 and 70001 bytes, a zero source, nested and empty directories, relative, absolute, `..`, dangling, non-ASCII and 1024-byte link targets, a FIFO | All three steps pass; the 1024-byte target lies past the record buffer |
+| `metadata` | 19 | Owners 0, 65535 and 2^32 - 1; modes 0000, 0644, 0755, 4755 and 7777 on files, 0000, 0700 and 7777 on directories, 0755 on a link, 0600 and 7777 on FIFOs; times 0, 2^31 - 1 and 2^32 - 1 on files and directories, 2^32 - 1 on the link, 0 and 2^31 - 1 on the FIFOs | All three steps pass |
+| `data` | 11 | Files of 0, 1, 3, 4, 65535, 65536 and 65537 bytes, two with the same contents, a zero-filled file | All three steps pass |
+| `empty` | 1 | The root only | All three steps pass |
+| `mount-empty` | 2 | One file, the empty mountpoint | All three steps pass |
+| `mount-long` | 2 | One file, a 1024-byte mountpoint | All three steps pass |
+| `big-endian` | 23 | `kinds` in big-endian order | All three steps pass |
+
+`dumpifs` accepts every image: each `-v` and `-m` run exits 0 and prints
+nothing beyond its own `Early end reading directory` line, which it prints
+for the native images too. Nonzero directory times, which `mkifs` never
+writes, list as stored and leave `dumpifs -x` unaffected: it applies no
+directory metadata. That meets owner decision 7's registration bar.
+
+What the cycle showed about the native tools, for fsimg's and the native
+images alike:
+
+* `dumpifs` reads each record into a 1024-byte buffer and prints its path,
+  and a link's target, only as far as the record's first 1024 bytes:
+  1000 bytes of a directory's path, 992 of a file's or FIFO's, and 996 of
+  a link's path, its NUL and its target together. Past that it prints
+  unrelated memory, so `dumpifs -x` fails on such a file with "Invalid
+  argument" or "Filename too long". The longest file path it shows whole
+  is 991 bytes. It prints at most 512 bytes of the mountpoint.
+* `dumpifs` prints the trailer word in little-endian order whatever the
+  image's byte order.
+* `dumpifs -x` creates no directories (an image path below a missing
+  directory fails, "No such file or directory"), no symbolic links and no
+  FIFOs, stops at the first failure with status 1, and restores each
+  file's mode and time but not its owner.
+* `mkifs` sets the `01000` bit on every file and link with an execute bit,
+  whatever `perms=` says, and only `dperms=` sets a directory's mode.
+* The guest's `rm -r` stops at 50 levels unless given `-l`.
+
 ## Owner decisions from this evidence
 
 * **Duplicate paths.** The last record with a path is the entry, as
@@ -387,7 +458,7 @@ stays set) and the body decoded.
 | Question | Answer | Evidence |
 | --- | --- | --- |
 | Root record; explicit versus implicit directories; metadata of implicit parents | The root is always the first record (empty path, inode 1, `040755`, time 0 with `-n`). Only `type=dir` names get records. No native reader shows implicit parents' metadata (no mount); fsimg gives them the explicit-directory record's values: `040755`, uid 0, gid 0, time 0 | E1, E3, S1 |
-| Header flags, mountpoint default, `dir_offset` padding, mount flags | `0x04` and `0x05`; `/`; NUL rounded up to 4 with unchecked contents; zero | E1, E2, E9, S1 |
+| Header flags, mountpoint default, `dir_offset` padding, mount flags | `0x04` and `0x05`; empty when nonbootable, `/` when bootable; NUL rounded up to 4 with unchecked contents; zero | E1, E2, E9, E12, S1 |
 | Table terminator; zero-length and zero-inode records | Four zero bytes at `hdr_dir_size - 4`; no zero-length or zero-inode record occurs | E1, S1 |
 | Nonbootable output ends at `image_size`; padding contents | Yes; padding is not a closed rule (H3 has nonzero header padding and record tails) | E1, E6, S1 |
 | Inode numbering, flag nibble, boot and script matching | Buildfile order from 2; nibbles `0x0`, `0x8`, `0xc`, `0xe`; references match one record's full inode word | E1, S1 |

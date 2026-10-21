@@ -795,8 +795,10 @@ Depends on stages 4 and 6 and on layer stages 2 to 4.
 
 * `write-ifs.h`, `write-plan.c` and `write-emit.c`.
 * Settings:
-  * `mountpoint`: at most the length the header layout allows; the default
-    from E2;
+  * `mountpoint`: at most the length the header layout allows; default
+    `/`, the value every boot image carries (E2; the owner's choice
+    between it and nonbootable `mkifs`'s empty default is open in
+    [todo-ifs.md](todo-ifs.md));
   * `endian`: little, or big if E9 qualified it;
   * epoch: within 32 bits.
 

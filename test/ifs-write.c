@@ -148,6 +148,34 @@ digest(uint32_t h, const unsigned char *p, uint64_t n)
 	return (h);
 }
 
+/* The POSIX cksum CRC: polynomial 0x04c11db7 over the bytes, most
+ * significant bit first, then over the length's bytes, least significant
+ * first, complemented.
+ */
+static uint32_t
+crc_update(uint32_t crc, const unsigned char *p, uint64_t n)
+{
+	for (uint64_t i = 0; i < n; i++) {
+		crc ^= (uint32_t)p[i] << 24;
+		for (unsigned bit = 0; bit < 8; bit++)
+			crc = (crc & 0x80000000u) != 0 ?
+			    (crc << 1) ^ 0x04c11db7u : crc << 1;
+	}
+	return (crc);
+}
+
+static uint32_t
+crc_finish(uint32_t crc, uint64_t length)
+{
+	unsigned char b;
+
+	for (; length != 0; length >>= 8) {
+		b = (unsigned char)(length & 0xff);
+		crc = crc_update(crc, &b, 1);
+	}
+	return (~crc);
+}
+
 static char *
 copy_text(const unsigned char *bytes, size_t length)
 {
@@ -465,9 +493,10 @@ typedef struct memory_sink {
 } memory_sink_t;
 
 /* One fixture entry. source is a provider ID, or zero for the zero source.
- * Provider 3 serves "hello.txt", provider 4 lowercase letters and provider
- * 9 a target holding a NUL byte; every other provider serves a pattern of
- * its ID and the offset.
+ * Provider 3 serves "hello.txt", provider 4 lowercase letters, provider 9
+ * a target holding a NUL byte, and providers 14 to 16 the absolute, ".."
+ * and non-ASCII link targets of the qualification images; every other
+ * provider serves a pattern of its ID and the offset.
  */
 typedef struct spec {
 	const char	*path;
@@ -533,14 +562,25 @@ static unsigned char
 content_byte(uint64_t id, uint64_t offset)
 {
 	static const char target[] = "hello.txt", bad[] = "a\0b";
+	static const char absolute[] = "/proc/boot/hello.txt";
+	static const char up[] = "../hello.txt", accented[] = "caf\xc3\xa9";
 
-	if (id == 3)
+	switch (id) {
+	case 3:
 		return ((unsigned char)target[offset % 9]);
-	if (id == 4)
+	case 4:
 		return ((unsigned char)('a' + offset % 26));
-	if (id == 9)
+	case 9:
 		return ((unsigned char)bad[offset % 3]);
-	return ((unsigned char)(offset * 37 + id * 11 + (offset >> 13)));
+	case 14:
+		return ((unsigned char)absolute[offset % 20]);
+	case 15:
+		return ((unsigned char)up[offset % 12]);
+	case 16:
+		return ((unsigned char)accented[offset % 5]);
+	default:
+		return ((unsigned char)(offset * 37 + id * 11 + (offset >> 13)));
+	}
 }
 
 static uint32_t
@@ -651,6 +691,10 @@ fixture_open_with(fixture_t *fixture, const fsimg_write_options_t *write_options
 	 * verifier add their own.
 	 */
 	options.max_open_files = 64;
+	/* Depth 512, the deepest tree a 1024-byte path reaches, above the
+	 * default 256; the qualification limits case needs it.
+	 */
+	options.max_depth = 512;
 	options.loss = loss_report;
 	options.loss_argument = fixture;
 	options.cancelled = cancel_poll;
@@ -867,61 +911,80 @@ reproducible_options(fsimg_write_options_t *options)
 	options->epoch = EPOCH;
 }
 
-/* The tree's entries in the checker's decoding: kind, owner, mode, time,
- * size and content, and nothing else but the root. fallback is the time of
- * the root and of every entry without its own time; in reproducible mode
- * every time is the epoch.
+/* The checker decoded a record for the spec's path, and it holds what the
+ * spec asked for: the kind and, for a file or link, the size and contents;
+ * the owner, mode and time of the spec's metadata, or else the defaults:
+ *   owner	0
+ *   mode	0644 for a file, 0755 for a directory, 0777 for a link or FIFO
+ *   time	fallback, the time the root carries
+ * In reproducible mode every time is the fallback. A mismatch names the
+ * label (the image's case) and the path.
+ */
+static void
+check_stored(const chk_t *c, const char *label, const spec_t *spec,
+    uint32_t fallback, bool reproducible)
+{
+	const fsimg_metadata_t *m = spec->metadata;
+	uint32_t type, permissions, uid, gid, mtime;
+	const chk_entry_t *e;
+	bool ok;
+
+	e = chk_find(c, spec->path);
+	if (e == NULL)
+		fprintf(stderr, "%s %s: no record\n", label, spec->path);
+	CHECK(e != NULL);
+
+	switch (spec->kind) {
+	case FSIMG_ENTRY_DIRECTORY:
+		type = T_DIR;
+		permissions = 0755;
+		break;
+	case FSIMG_ENTRY_FIFO:
+		type = T_FIFO;
+		permissions = 0777;
+		break;
+	case FSIMG_ENTRY_SYMLINK:
+		type = T_LINK;
+		permissions = 0777;
+		break;
+	default:
+		type = T_FILE;
+		permissions = 0644;
+		break;
+	}
+	uid = gid = 0;
+	mtime = fallback;
+	if (m != NULL && (m->valid & FSIMG_META_MODE) != 0)
+		permissions = m->mode;
+	if (m != NULL && (m->valid & FSIMG_META_OWNER) != 0) {
+		uid = m->uid;
+		gid = m->gid;
+	}
+	if (m != NULL && (m->valid & FSIMG_META_MODIFIED) != 0 && !reproducible)
+		mtime = (uint32_t)m->modified.seconds;
+	ok = e->mode == (type | permissions) && e->uid == uid &&
+	    e->gid == gid && e->mtime == mtime;
+	if (type == T_FILE || type == T_LINK)
+		ok = ok && e->size == spec->size &&
+		    e->digest == expected_digest(spec->source, spec->size);
+	if (type == T_LINK)
+		ok = ok && strlen(e->target) == spec->size;
+	if (!ok)
+		fprintf(stderr, "%s %s: the stored record differs from its "
+		    "spec\n", label, spec->path);
+	CHECK(ok);
+}
+
+/* The tree's entries in the checker's decoding, and nothing else but the
+ * root, which carries fallback.
  */
 static void
 check_tree_entries(const chk_t *c, uint32_t fallback, bool reproducible)
 {
-	const fsimg_metadata_t *m;
-	const chk_entry_t *e;
-	uint32_t type, permissions;
-
 	CHECK(c->count == TREE_COUNT + 1);
 	CHECK(c->entries[0].mtime == fallback);
-	for (size_t i = 0; i < TREE_COUNT; i++) {
-		e = chk_find(c, tree[i].path);
-		CHECK(e != NULL);
-		m = tree[i].metadata;
-		switch (tree[i].kind) {
-		case FSIMG_ENTRY_DIRECTORY:
-			type = T_DIR;
-			permissions = 0755;
-			break;
-		case FSIMG_ENTRY_FIFO:
-			type = T_FIFO;
-			permissions = 0777;
-			break;
-		case FSIMG_ENTRY_SYMLINK:
-			type = T_LINK;
-			permissions = 0777;
-			break;
-		default:
-			type = T_FILE;
-			permissions = 0644;
-			break;
-		}
-		if (m != NULL && (m->valid & FSIMG_META_MODE) != 0)
-			permissions = m->mode;
-		CHECK(e->mode == (type | permissions));
-		if (m != NULL && (m->valid & FSIMG_META_OWNER) != 0)
-			CHECK(e->uid == m->uid && e->gid == m->gid);
-		else
-			CHECK(e->uid == 0 && e->gid == 0);
-		if (m != NULL && (m->valid & FSIMG_META_MODIFIED) != 0 &&
-		    !reproducible)
-			CHECK(e->mtime == (uint32_t)m->modified.seconds);
-		else
-			CHECK(e->mtime == fallback);
-		if (type != T_FILE && type != T_LINK)
-			continue;
-		CHECK(e->size == tree[i].size);
-		CHECK(e->digest == expected_digest(tree[i].source, tree[i].size));
-		if (type == T_LINK)
-			CHECK(strlen(e->target) == tree[i].size);
-	}
+	for (size_t i = 0; i < TREE_COUNT; i++)
+		check_stored(c, "tree", &tree[i], fallback, reproducible);
 }
 
 /* Read the image back through fsimg: every entry matches the checker's, the
@@ -2273,11 +2336,471 @@ compare_native(void)
 	return (differing == 0 ? 0 : 1);
 }
 
+/*
+ * Native qualification images. Each case is one image of the native
+ * qualification cycle (docs/ifs-research.md, "fsimg writer output"); the
+ * plain run builds and checks every case in memory, and --create DIRECTORY
+ * also writes DIRECTORY/NAME.ifs and DIRECTORY/NAME.manifest, which
+ * tools/qnx/decode/ifsqual.py packs for tools/qnx/guest/qualifyifs.sh and
+ * compares with what QNX 6.5.0 lists, extracts and rebuilds.
+ *
+ * The images are deliberately not reproducible, so that every entry
+ * without a time of its own, directories included, carries the planning
+ * clock: every case has the nonzero directory times mkifs never writes, and
+ * the cycle shows whether dumpifs accepts them.
+ */
+
+/* A case's entries, built at run time because several paths are too long
+ * to spell. Every path is allocated.
+ */
+typedef struct spec_list {
+	spec_t		*specs;
+	size_t		 count;
+	size_t		 capacity;
+} spec_list_t;
+
+static void
+spec_push(spec_list_t *list, const char *path, fsimg_entry_kind_t kind,
+    uint64_t size, uint64_t source, const fsimg_metadata_t *metadata)
+{
+	spec_t *grown;
+	char *copy;
+
+	if (list->count == list->capacity) {
+		list->capacity = list->capacity == 0 ? 64 : 2 * list->capacity;
+		grown = realloc(list->specs, list->capacity *
+		    sizeof(list->specs[0]));
+		CHECK(grown != NULL);
+		list->specs = grown;
+	}
+	copy = strdup(path);
+	CHECK(copy != NULL);
+	list->specs[list->count++] = (spec_t){ copy, kind, size, source,
+	    metadata };
+}
+
+static void
+spec_list_free(spec_list_t *list)
+{
+	for (size_t i = 0; i < list->count; i++)
+		free((char *)(uintptr_t)list->specs[i].path);
+	free(list->specs);
+	bzero(list, sizeof(*list));
+}
+
+/* A slash, then length copies of c: a root-level path of one component,
+ * or a component to append to a path, in a buffer of size bytes.
+ */
+static char *
+slash_run(char *buffer, size_t size, char c, size_t length)
+{
+	CHECK(length + 2 <= size);
+	buffer[0] = '/';
+	memset(buffer + 1, c, length);
+	buffer[1 + length] = '\0';
+	return (buffer);
+}
+
+/* Directories /D, /D/D and so on to depth - 1, then the file /D/.../D at
+ * depth, where D is the one-byte component c. Every case names each parent
+ * directory itself; build_case() relies on that.
+ */
+static void
+push_deep(spec_list_t *list, char c, unsigned depth, uint64_t source)
+{
+	char path[2 * 512 + 1];
+	size_t length = 0;
+
+	CHECK(depth >= 1 && depth <= 512);
+	for (unsigned i = 1; i <= depth; i++) {
+		path[length++] = '/';
+		path[length++] = c;
+		path[length] = '\0';
+		if (i < depth)
+			spec_push(list, path, FSIMG_ENTRY_DIRECTORY, 0, 0, NULL);
+	}
+	spec_push(list, path, FSIMG_ENTRY_FILE, 3, source, NULL);
+}
+
+/* E3 within what dumpifs shows and extracts: components of 1, 48, 49,
+ * 255, 256 and 505 bytes (48 is the longest name the guest's RAM /tmp
+ * holds, 505 the longest its QNX4 scratch volume holds); two-, three- and
+ * four-byte UTF-8; a space; names differing only by case; depth 201; and a
+ * 991-byte path, the longest whose file record fits the 1024-byte record
+ * buffer dumpifs reads.
+ */
+static void
+qualify_names(spec_list_t *list)
+{
+	static const unsigned lengths[] = { 1, 48, 49, 255, 256, 505 };
+	static const char *const others[] = { "/caf\xc3\xa9",
+	    "/\xe6\x97\xa5\xe6\x9c\xac", "/\xf0\x9f\x98\x80", "/with space",
+	    "/case", "/Case", "/CASE" };
+	char path[PATH_BYTES + 2], first[512], second[512];
+	unsigned source = 20;
+
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++)
+		spec_push(list, slash_run(path, sizeof(path), 'n', lengths[i]),
+		    FSIMG_ENTRY_FILE, lengths[i] % 7, source++, NULL);
+	for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++)
+		spec_push(list, others[i], FSIMG_ENTRY_FILE, 2 + i, source++,
+		    NULL);
+	push_deep(list, 'd', 201, source++);
+	/* /ppp and /ppp/qqq with 505- and 480-byte names, and the file
+	 * /ppp/qqq/rrrr.
+	 */
+	slash_run(first, sizeof(first), 'p', 505);
+	slash_run(second, sizeof(second), 'q', 480);
+	spec_push(list, first, FSIMG_ENTRY_DIRECTORY, 0, 0, NULL);
+	snprintf(path, sizeof(path), "%s%s", first, second);
+	spec_push(list, path, FSIMG_ENTRY_DIRECTORY, 0, 0, NULL);
+	CHECK(snprintf(path, sizeof(path), "%s%s/rrrr", first, second) ==
+	    1 + 991);
+	spec_push(list, path, FSIMG_ENTRY_FILE, 5, source, NULL);
+}
+
+/* E3 beyond what dumpifs shows whole: a 992-byte path, the shortest whose
+ * file record outgrows dumpifs's 1024-byte record buffer; a single
+ * 1024-byte component, which is also the longest path; and depth 512, the
+ * most a path holds.
+ */
+static void
+qualify_limits(spec_list_t *list)
+{
+	char path[PATH_BYTES + 2];
+
+	spec_push(list, slash_run(path, sizeof(path), 's', 992),
+	    FSIMG_ENTRY_FILE, 2, 29, NULL);
+	spec_push(list, slash_run(path, sizeof(path), 'n', PATH_BYTES),
+	    FSIMG_ENTRY_FILE, 4, 30, NULL);
+	push_deep(list, 'a', 512, 31);
+}
+
+/* E4: the fixture tree (every kind, nested and case-differing names,
+ * relative and 1024-byte link targets, a zero source) with absolute, "..",
+ * non-ASCII link targets and an empty directory.
+ */
+static void
+qualify_kinds(spec_list_t *list)
+{
+	for (size_t i = 0; i < TREE_COUNT; i++)
+		spec_push(list, tree[i].path, tree[i].kind, tree[i].size,
+		    tree[i].source, tree[i].metadata);
+	spec_push(list, "/abs", FSIMG_ENTRY_SYMLINK, 20, 14, NULL);
+	spec_push(list, "/dir/up", FSIMG_ENTRY_SYMLINK, 12, 15, NULL);
+	spec_push(list, "/non-ascii", FSIMG_ENTRY_SYMLINK, 5, 16, NULL);
+	spec_push(list, "/empty-dir", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL);
+}
+
+/* E5: owners 0, 65535 and 2^32 - 1 on files and nonzero owners on every
+ * other kind; modes 0000, 0644, 0755, 4755 and 7777 on files, 0000, 0700
+ * and 7777 on directories, 0755 on a link and 0600 and 7777 on FIFOs;
+ * times 0, 2^31 - 1 and 2^32 - 1 on files and directories, 2^32 - 1 on
+ * the link and 0 and 2^31 - 1 on the FIFOs.
+ * Rows that test no time carry time 1. One file inside a directory has no
+ * metadata of its own and takes the writer's defaults.
+ */
+static void
+qualify_metadata(spec_list_t *list)
+{
+	static const struct {
+		const char	*path;
+		fsimg_entry_kind_t kind;
+		uint64_t	 source;
+		bool		 defaults;	/* no metadata of its own */
+		uint32_t	 uid, gid, time;
+		uint16_t	 mode;
+	} rows[] = {
+		{ .path = "/id-0", .kind = FSIMG_ENTRY_FILE, .source = 40,
+		    .uid = 0, .gid = 0, .time = 1, .mode = 0644 },
+		{ .path = "/id-65535", .kind = FSIMG_ENTRY_FILE, .source = 41,
+		    .uid = 65535, .gid = 65535, .time = 1, .mode = 0644 },
+		{ .path = "/id-max", .kind = FSIMG_ENTRY_FILE, .source = 42,
+		    .uid = 4294967295u, .gid = 4294967295u, .time = 1, .mode = 0644 },
+		{ .path = "/mode-0000", .kind = FSIMG_ENTRY_FILE, .source = 43,
+		    .uid = 0, .gid = 0, .time = 1, .mode = 0 },
+		{ .path = "/mode-0755", .kind = FSIMG_ENTRY_FILE, .source = 44,
+		    .uid = 0, .gid = 0, .time = 1, .mode = 0755 },
+		{ .path = "/mode-4755", .kind = FSIMG_ENTRY_FILE, .source = 45,
+		    .uid = 0, .gid = 0, .time = 1, .mode = 04755 },
+		{ .path = "/mode-7777", .kind = FSIMG_ENTRY_FILE, .source = 46,
+		    .uid = 0, .gid = 0, .time = 1, .mode = 07777 },
+		{ .path = "/time-0", .kind = FSIMG_ENTRY_FILE, .source = 47,
+		    .uid = 0, .gid = 0, .time = 0, .mode = 0644 },
+		{ .path = "/time-2038", .kind = FSIMG_ENTRY_FILE, .source = 48,
+		    .uid = 0, .gid = 0, .time = 2147483647u, .mode = 0644 },
+		{ .path = "/time-max", .kind = FSIMG_ENTRY_FILE, .source = 49,
+		    .uid = 0, .gid = 0, .time = 4294967295u, .mode = 0644 },
+		{ .path = "/dir-0700", .kind = FSIMG_ENTRY_DIRECTORY, .source = 0,
+		    .uid = 7, .gid = 8, .time = 2147483647u, .mode = 0700 },
+		{ .path = "/dir-0700/f", .kind = FSIMG_ENTRY_FILE, .source = 50,
+		    .defaults = true },
+		{ .path = "/dir-7777", .kind = FSIMG_ENTRY_DIRECTORY, .source = 0,
+		    .uid = 4294967295u, .gid = 1, .time = 4294967295u, .mode = 07777 },
+		{ .path = "/dir-0000", .kind = FSIMG_ENTRY_DIRECTORY, .source = 0,
+		    .uid = 0, .gid = 0, .time = 0, .mode = 0 },
+		{ .path = "/dir-0000/f", .kind = FSIMG_ENTRY_FILE, .source = 51,
+		    .uid = 0, .gid = 0, .time = 0, .mode = 0 },
+		{ .path = "/link", .kind = FSIMG_ENTRY_SYMLINK, .source = 3,
+		    .uid = 3, .gid = 4, .time = 4294967295u, .mode = 0755 },
+		{ .path = "/fifo", .kind = FSIMG_ENTRY_FIFO, .source = 0,
+		    .uid = 5, .gid = 6, .time = 2147483647u, .mode = 0600 },
+		{ .path = "/fifo-7777", .kind = FSIMG_ENTRY_FIFO, .source = 0,
+		    .uid = 65535, .gid = 0, .time = 0, .mode = 07777 }
+	};
+	/* Static: each spec keeps a pointer to its row's metadata until the
+	 * case's image is built, after this function returns.
+	 */
+	static fsimg_metadata_t metadata[sizeof(rows) / sizeof(rows[0])];
+	uint64_t size;
+
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		metadata[i] = (fsimg_metadata_t){
+			.valid = FSIMG_META_OWNER | FSIMG_META_MODE |
+			    FSIMG_META_MODIFIED,
+			.uid = rows[i].uid,
+			.gid = rows[i].gid,
+			.mode = rows[i].mode,
+			.modified = { .seconds = rows[i].time,
+			    .precision_ns = 1000000000, .basis = FSIMG_TIME_UTC }
+		};
+		/* Files hold 3 bytes; the link's target is "hello.txt". */
+		size = rows[i].kind == FSIMG_ENTRY_FILE ? 3 :
+		    rows[i].kind == FSIMG_ENTRY_SYMLINK ? 9 : 0;
+		spec_push(list, rows[i].path, rows[i].kind, size, rows[i].source,
+		    rows[i].defaults ? NULL : &metadata[i]);
+	}
+}
+
+/* E6: sizes on both sides of 4 bytes and of 65536, two files with the same
+ * contents, which the writer stores twice as mkifs does, and a zero source.
+ */
+static void
+qualify_data(spec_list_t *list)
+{
+	static const uint64_t sizes[] = { 0, 1, 3, 4, 65535, 65536, 65537 };
+	char path[32];
+
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		snprintf(path, sizeof(path), "/f%" PRIu64, sizes[i]);
+		spec_push(list, path, FSIMG_ENTRY_FILE, sizes[i], 60 + i, NULL);
+	}
+	spec_push(list, "/same-a", FSIMG_ENTRY_FILE, 65537, 70, NULL);
+	spec_push(list, "/same-b", FSIMG_ENTRY_FILE, 65537, 70, NULL);
+	spec_push(list, "/zero", FSIMG_ENTRY_FILE, 4096, 0, NULL);
+}
+
+static void
+qualify_one(spec_list_t *list)
+{
+	spec_push(list, "/hello.txt", FSIMG_ENTRY_FILE, 9, 3, NULL);
+}
+
+static void
+qualify_empty(spec_list_t *list FSIMG_UNUSED)
+{
+}
+
+typedef struct qualify_case {
+	const char	*name;
+	void		(*build)(spec_list_t *);
+	const char	*mountpoint;	/* NULL for the default */
+	fsimg_byte_order_t byte_order;
+} qualify_case_t;
+
+/* The manifest of an image as the checker decodes it, one line per record
+ * in table order and tab separated:
+ *   H flags dir_offset hdr_dir_size image_size trailer mountpoint
+ *   E path mode uid gid mtime inode data size [target]
+ *   C path cksum size		(every regular file)
+ * flags is the header's flags byte. Numbers are decimal but for
+ * flags, the H offsets and sizes, mtime, data and the trailer in
+ * hexadecimal and mode in octal, as dumpifs prints them; the trailer word
+ * is in the image's byte order, while dumpifs prints it little-endian.
+ * Paths are stored paths, the root's empty; cksum is the POSIX cksum CRC.
+ */
+static void
+write_manifest(const chk_t *c, FILE *out)
+{
+	const chk_entry_t *e;
+	uint32_t crc;
+
+	/* The manifest's fields are tab separated, one record a line. */
+	CHECK(strpbrk(c->mountpoint, "\t\n") == NULL);
+	fprintf(out, "H\t%x\t%" PRIx32 "\t%" PRIx32 "\t%" PRIx32 "\t%" PRIx32
+	    "\t%s\n", (unsigned)c->image[7], c->dir_offset, c->table_end,
+	    c->image_size, get32(c, c->image + c->image_size - 4),
+	    c->mountpoint);
+	for (size_t i = 0; i < c->count; i++) {
+		e = &c->entries[i];
+		CHECK(strpbrk(e->path, "\t\n") == NULL);
+		CHECK(e->target == NULL || strpbrk(e->target, "\t\n") == NULL);
+		fprintf(out, "E\t%s\t%" PRIo32 "\t%" PRIu32 "\t%" PRIu32 "\t%"
+		    PRIx32 "\t%" PRIu32 "\t%" PRIx32 "\t%" PRIu32 "%s%s\n",
+		    e->path, e->mode, e->uid, e->gid, e->mtime, e->inode,
+		    e->data, e->size, e->target != NULL ? "\t" : "",
+		    e->target != NULL ? e->target : "");
+		if ((e->mode & T_TYPE) != T_FILE)
+			continue;
+		crc = crc_update(0, c->image + e->data, e->size);
+		fprintf(out, "C\t%s\t%" PRIu32 "\t%" PRIu32 "\n", e->path,
+		    crc_finish(crc, e->size), e->size);
+	}
+}
+
+/* Create parent/name exclusively, failing with its name. */
+static FILE *
+create_file(int parent, const char *name)
+{
+	FILE *out;
+	int fd;
+
+	fd = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+	    0644);
+	if (fd == -1) {
+		fprintf(stderr, "cannot create %s: %s\n", name,
+		    strerror(errno));
+		exit(1);
+	}
+	out = fdopen(fd, "w");
+	CHECK(out != NULL);
+	return (out);
+}
+
+/* Write a checked case's image and manifest into parent as NAME.ifs and
+ * NAME.manifest, failing on any write error.
+ */
+static void
+write_case(int parent, const char *case_name, const memory_sink_t *sink,
+    const chk_t *c)
+{
+	char name[64];
+	FILE *out;
+
+	snprintf(name, sizeof(name), "%s.ifs", case_name);
+	out = create_file(parent, name);
+	CHECK(fwrite(sink->bytes, 1, (size_t)sink->length, out) ==
+	    sink->length);
+	CHECK(ferror(out) == 0 && fclose(out) == 0);
+	snprintf(name, sizeof(name), "%s.manifest", case_name);
+	out = create_file(parent, name);
+	write_manifest(c, out);
+	CHECK(ferror(out) == 0 && fclose(out) == 0);
+	printf("%s: %" PRIu64 " bytes, %zu records\n", case_name,
+	    sink->length, c->count);
+}
+
+/* Build one case's image over a poisoned sink, check it strictly with the
+ * checker, which must decode the case's mountpoint, byte order and
+ * exactly its entries and the root (so every builder names each parent
+ * directory itself) with their contents, and read and verify it through
+ * fsimg. With a parent directory, also write the image and its manifest
+ * there.
+ */
+static void
+build_case(const qualify_case_t *q, int parent)
+{
+	fsimg_write_options_t options;
+	spec_list_t list;
+	fixture_t fixture;
+	memory_sink_t sink;
+	bool header_ok;
+	chk_t c;
+
+	fsimg_write_options_init(&options);
+	options.mountpoint = q->mountpoint;
+	options.byte_order = q->byte_order;
+	bzero(&list, sizeof(list));
+	q->build(&list);
+	fixture_open(&fixture, &options);
+	add_specs(&fixture, list.specs, list.count, false);
+	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+	CHECK(fixture.losses == 0);
+	chk_image(&c, sink.bytes, sink.length, true, false);
+	/* The root carries the planning clock, which is never zero. */
+	header_ok = c.errors == 0 && c.count == list.count + 1 &&
+	    strcmp(c.mountpoint, q->mountpoint != NULL ? q->mountpoint :
+	    "/") == 0 && c.big == (q->byte_order == FSIMG_BYTE_ORDER_BIG) &&
+	    c.entries[0].mtime != 0;
+	if (!header_ok)
+		fprintf(stderr, "%s: the image's header or record count differs "
+		    "from its case\n", q->name);
+	CHECK(header_ok);
+	for (size_t i = 0; i < list.count; i++)
+		check_stored(&c, q->name, &list.specs[i], c.entries[0].mtime,
+		    false);
+	check_reader(fixture.ctx, &sink, &c);
+	fixture_close(&fixture);
+
+	if (parent != -1)
+		write_case(parent, q->name, &sink, &c);
+	chk_free(&c);
+	spec_list_free(&list);
+	free(sink.bytes);
+}
+
+/* Every qualification case; with a parent directory, written there. */
+static void
+build_cases(int parent)
+{
+	static char long_mountpoint[PATH_BYTES + 1];
+	const qualify_case_t cases[] = {
+		{ "one", qualify_one, NULL, FSIMG_BYTE_ORDER_LITTLE },
+		{ "names", qualify_names, NULL, FSIMG_BYTE_ORDER_LITTLE },
+		{ "limits", qualify_limits, NULL, FSIMG_BYTE_ORDER_LITTLE },
+		{ "kinds", qualify_kinds, NULL, FSIMG_BYTE_ORDER_LITTLE },
+		{ "metadata", qualify_metadata, NULL, FSIMG_BYTE_ORDER_LITTLE },
+		{ "data", qualify_data, NULL, FSIMG_BYTE_ORDER_LITTLE },
+		{ "empty", qualify_empty, NULL, FSIMG_BYTE_ORDER_LITTLE },
+		{ "mount-empty", qualify_one, "", FSIMG_BYTE_ORDER_LITTLE },
+		{ "mount-long", qualify_one, long_mountpoint,
+		    FSIMG_BYTE_ORDER_LITTLE },
+		{ "big-endian", qualify_kinds, NULL, FSIMG_BYTE_ORDER_BIG }
+	};
+
+	/* The longest mountpoint: 1024 bytes. */
+	(void)slash_run(long_mountpoint, sizeof(long_mountpoint), 'm',
+	    PATH_BYTES - 1);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+		build_case(&cases[i], parent);
+}
+
+/* The qualification images build and check, so a writer change that
+ * breaks one fails the plain run before anyone repeats the guest cycle.
+ */
+static void
+test_qualification_images(void)
+{
+	static const unsigned char hello[] = "hello.txt";
+
+	/* The manifest's checksum is POSIX cksum's: printf hello.txt | cksum */
+	CHECK(crc_finish(crc_update(0, hello, 9), 9) == 233972757u);
+	build_cases(-1);
+}
+
+static int
+create_external(const char *directory)
+{
+	int parent;
+
+	parent = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (parent == -1) {
+		fprintf(stderr, "cannot open the directory %s: %s\n", directory,
+		    strerror(errno));
+		return (1);
+	}
+	build_cases(parent);
+	CHECK(close(parent) == 0);
+	return (0);
+}
+
 int
 main(int argc, char **argv)
 {
 	if (argc == 2 && strcmp(argv[1], "--native") == 0)
 		return (compare_native());
+	if (argc == 3 && strcmp(argv[1], "--create") == 0)
+		return (create_external(argv[2]));
 	CHECK(argc == 1);
 	test_validation();
 	test_small();
@@ -2293,5 +2816,6 @@ main(int argc, char **argv)
 	test_injected();
 	test_tampered_rows();
 	test_limits();
+	test_qualification_images();
 	return (0);
 }
