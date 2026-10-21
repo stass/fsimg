@@ -254,6 +254,23 @@ Test names describe behaviour, such as
   coordinating session runs them once, on the integrated tree, before the
   work lands; subagents run the plain suite with `make -j32 check`.
 
+### Linux and FreeBSD
+
+Development happens on macOS. Check Linux and FreeBSD before work that touches
+platform behaviour lands, such as the sandbox, host I/O, `compat/` or the
+worker. Every report names the platforms that ran and those that did not.
+
+* **Linux** runs in a container: `build-aux/linux-check.sh [-r REV]
+  [COMMAND]` checks a committed revision in the environment of the CI Linux
+  job. [docs/build.md](docs/build.md) gives its contract and the kernel its
+  Docker VM needs for the sandbox profiles to run. LeakSanitizer and
+  MemorySanitizer run there, not on macOS.
+* **FreeBSD** runs on a FreeBSD host. The procedure is the commands inside
+  the `su -c` string of the FreeBSD job in `.github/workflows/check.yml`, run
+  as yourself with `gmake` for `make`: they install the spec gems and build
+  the fatcat oracle first, and a run counts only when `test/spec.sh` passed
+  rather than skipped.
+
 ## Committing
 
 * Each solid progress should be committed in the git repository.

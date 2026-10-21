@@ -843,6 +843,30 @@ Sanitizer execution evidence:
 | Linux | `make check-msan` | 26 pass |
 | FreeBSD 16/ZFS | `make check-asan` | 24 pass, 2 tool/platform skips |
 
+From a macOS development host, `build-aux/linux-check.sh [-r REV] [COMMAND]`
+checks a committed revision, `HEAD` by default, on Linux. It builds an Ubuntu
+24.04 image from `build-aux/linux-check/Dockerfile` (the CI Linux job's
+packages with their recommendations, the runner tools the tests use as
+oracles, a UTF-8 locale, and the revision's spec gems), feeds the revision in
+as an archive, configures it out of tree with clang, and runs COMMAND, a
+single shell string, in the build directory as an unprivileged user. COMMAND
+defaults to `make -j8 check` plus the CI check that the specification suite
+passed; sanitizer targets such as `make check-lsan check-msan` run the same
+way. When it fails, the script prints the tail of each failed test's log.
+Building the image uses the network, and runs the revision's Gemfile; the
+check itself runs without network access. Uncommitted changes are not
+checked, and nothing built on Linux lands in the working tree. Each image
+rebuild leaves the previous image behind; `docker image prune` reclaims them.
+Docker caches the base image and the package layer indefinitely, while CI
+installs current packages on every run. When a result differs from CI,
+refresh the toolchain: `docker pull ubuntu:24.04` and
+`docker image prune -a --filter label=fsimg-linux-check` make the next check
+rebuild the image from current packages.
+It needs Docker, for example through colima. For the Linux sandbox profiles
+to run rather than skip, the Docker VM's kernel must accept `statx` with a
+null path and `AT_EMPTY_PATH`: Ubuntu 24.04's stock 6.8 kernel returns
+`EFAULT` for it, and its `linux-generic-hwe-24.04` kernel (7.0) accepts it.
+
 Configure searches the standard system sbin directories for formatter/checker
 tools. Linux runs dosfstools/mtools and exfatprogs interoperability in its
 ordinary and sanitizer suites. macOS and the provided FreeBSD host include

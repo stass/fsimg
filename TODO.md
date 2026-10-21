@@ -388,6 +388,21 @@
   [spec-testing stage policy](specs/design-spec-testing.md#stage-policy).
   Write the failing open/verify tests first.
 
+* [Medium] **Local Linux and FreeBSD checks copy the CI job by hand**
+  (`build-aux/linux-check/Dockerfile`, `build-aux/linux-check.sh`, `CLAUDE.md`,
+  `.github/workflows/check.yml`): the image repeats the job's package list and
+  the runner tools it relies on, the script repeats its spec-pass check, and
+  the FreeBSD procedure is the job's `run:` block followed by hand. Make one
+  copy authoritative: a build-and-check script that CI, `linux-check.sh` and
+  the FreeBSD host all call, and a CI Linux job that runs in the same image.
+
+* [Low] **Project-owned build-aux helpers need three per-file lists**
+  (`.gitignore`, `Makefile.am` `EXTRA_DIST`, `build-aux/check-ascii.sh`):
+  autotools installs its own files into `build-aux/`, so each helper is
+  re-included, distributed and ASCII-checked by name, and a new helper missing
+  from one list goes unnoticed. Move the helpers to a directory autotools never
+  writes, so one rule in each place covers every file there.
+
 ## Security residuals
 
 * [High] **Symbolic-link import under the Linux sandbox** (`cmd/fsimg/sandbox.c`,
