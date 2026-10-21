@@ -32,6 +32,7 @@ static fsimg_status_t prepare_scratch(fsimg_cli_options_t *, fsimg_cli_paths_t *
 static fsimg_status_t open_input(fsimg_cli_options_t *, fsimg_error_t *);
 static fsimg_status_t open_contents(int, const fsimg_cli_operand_t *, int,
     int *, fsimg_error_t *);
+static unsigned operand_roots(const fsimg_cli_operand_t *);
 static fsimg_status_t hold_descriptor(int, int, const char *, const char *, int *,
     fsimg_error_t *);
 static fsimg_status_t open_operand(int, const fsimg_cli_operand_t *, int,
@@ -361,24 +362,35 @@ open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
 }
 
 /*
- * A manifest's candidate content directory: the -C directory in effect, or
- * the working directory, opened as an operand of "." is, beneath which the
- * worker reads a file's bytes only when the manifest's entry needs them.
+ * A manifest's content directory: the -C directory in force, opened again
+ * as an operand of "." is, beneath which the worker reads a file's bytes
+ * only when the manifest's entry needs them. Only a manifest given with -C
+ * has one (operand_roots).
  */
 static fsimg_status_t
 open_contents(int directory, const fsimg_cli_operand_t *operand,
     int first_free, int *out, fsimg_error_t *error)
 {
-	const char *name;
 	int fd;
 
-	name = operand->directory == NULL ? "." : operand->directory;
 	fd = fsimg_host_source_open(directory, ".", true);
 	if (fd == -1)
 		return (path_error(error, "cannot open the manifest's content directory",
-		    name));
+		    operand->directory));
 	return (hold_descriptor(fd, first_free,
-	    "cannot hold the manifest's content directory", name, out, error));
+	    "cannot hold the manifest's content directory", operand->directory,
+	    out, error));
+}
+
+/* The root descriptors an operand holds: one, and for a manifest with a
+ * -C directory in force a second, its content directory. A manifest
+ * without one has no content directory, so the worker's writer refuses
+ * every entry that needs host bytes.
+ */
+static unsigned
+operand_roots(const fsimg_cli_operand_t *operand)
+{
+	return (operand->manifest && operand->directory != NULL ? 2 : 1);
 }
 
 /* Move fd to the lowest descriptor at or above first_free, close-on-exec,
@@ -406,11 +418,12 @@ hold_descriptor(int fd, int first_free, const char *message, const char *name,
  * the worker's whole source authority, so it never receives a -C directory
  * or a name to resolve. Each operand is opened relative to the -C directory
  * that precedes it, or the working directory, and an absolute operand as
- * given. A host operand is one root descriptor; a manifest is two
- * consecutive ones, the manifest and its candidate content directory, each
- * with the path FSIMG_JOB_MANIFEST, which the worker adopts together as one
- * source root. The worker holds one descriptor per root descriptor
- * besides its own: the staging directory of a create job, scratch unless
+ * given. A host operand is one root descriptor. A manifest is one root
+ * descriptor for the manifest file, path FSIMG_JOB_MANIFEST, followed,
+ * when a -C is in force, by one for its content directory, path
+ * FSIMG_JOB_CONTENTS; the worker adopts them as one source root. The
+ * worker holds one descriptor per root descriptor besides its own: the
+ * staging directory of a create job, scratch unless
  * it is disabled, and two while scanning, a directory and the entry read
  * from it; the staged image is opened after scanning, in one of those two.
  * The operands must leave room for those within the fds limit, so an
@@ -430,7 +443,7 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 
 	count = 0;
 	for (unsigned i = 0; i < options->operand_count; i++)
-		count += options->operands[i].manifest ? 2 : 1;
+		count += operand_roots(&options->operands[i]);
 	needed = (uint64_t)count + 2 + (request->kind == FSIMG_JOB_CREATE ? 1 : 0) +
 	    (request->scratch_fd != -1 ? 1 : 0);
 	if (needed > request->limits.max_open_files)
@@ -476,17 +489,15 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		 */
 		status = open_operand(directory, operand, first_free,
 		    &paths->root_fds[slot], error);
-		if (operand->manifest) {
-			paths->root_paths[slot] = FSIMG_JOB_MANIFEST;
-			paths->root_paths[slot + 1] = FSIMG_JOB_MANIFEST;
+		paths->root_paths[slot] = operand->manifest ? FSIMG_JOB_MANIFEST :
+		    operand->image_path;
+		if (operand_roots(operand) == 2) {
+			paths->root_paths[slot + 1] = FSIMG_JOB_CONTENTS;
 			if (status == FSIMG_OK)
 				status = open_contents(directory, operand,
 				    first_free, &paths->root_fds[slot + 1], error);
-			slot += 2;
-		} else {
-			paths->root_paths[slot] = operand->image_path;
-			slot++;
 		}
+		slot += operand_roots(operand);
 	}
 	if (directory != AT_FDCWD && directory != -1)
 		close(directory);

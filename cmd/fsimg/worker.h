@@ -115,8 +115,8 @@ typedef struct fsimg_worker_request {
 	const char	*selection;
 	/* Create jobs: root_count opened root descriptors in command-line
 	 * order, a directory or a regular file each, and one path for each:
-	 * the image path a host root populates, or FSIMG_JOB_MANIFEST for
-	 * both descriptors of a manifest root.
+	 * the image path a host root populates, or FSIMG_JOB_MANIFEST and
+	 * FSIMG_JOB_CONTENTS for a manifest root's descriptors.
 	 */
 	const int	*root_fds;
 	const char *const *root_paths;
@@ -205,11 +205,13 @@ int fsimg_output_main(void);
 int fsimg_input_main(void);
 fsimg_status_t fsimg_output_run(const char *, fsimg_output_producer_fn_t, void *,
     int, uint64_t, const volatile sig_atomic_t *, fsimg_output_budget_t *, fsimg_error_t *);
-/* A manifest root holds two consecutive root descriptors, the manifest
- * file and then its candidate content directory, and each carries this
- * path in place of an image path; no image path is "@".
+/* A manifest root is the manifest file's root descriptor, whose path is
+ * FSIMG_JOB_MANIFEST, followed by its content directory's, whose path is
+ * FSIMG_JOB_CONTENTS, only when the manifest has one (-C). Neither is an
+ * image path, which always begins with "/".
  */
 #define FSIMG_JOB_MANIFEST "@"
+#define FSIMG_JOB_CONTENTS "@contents"
 
 /* A create or plan job reads source roots and carries one path per root
  * descriptor; every other kind reads an image and carries its one

@@ -534,7 +534,9 @@ def test_manifest_generated(executable, root):
 
 def test_manifest_host(executable, root):
     """A manifest's host files are read beneath the -C directory in effect,
-    by the entry's own path or its contents= path; a manifest merges with a
+    by the entry's own path or its contents= path; without a -C the manifest
+    has no content directory, so an entry needing host bytes is refused even
+    where the working directory holds the file; a manifest merges with a
     host root; and ./@name names a host object whose name begins with @."""
     work = root / "manifest-host"
     (work / "content/sub").mkdir(parents=True)
@@ -553,6 +555,16 @@ def test_manifest_host(executable, root):
         b"host bytes\n"
     assert invoke(executable, work, ["xOf", "host.img", "/sub/named"]).stdout == \
         b"other bytes\n"
+    error = failed(invoke(executable, work / "content", [
+        "cf", "unanchored.img", "-F", "fat12", "--json", "@host.mtree"], expected=1))
+    assert error["status"] == "invalid argument" and error["path"] == "/sub/file.txt", error
+    assert error["message"] == ("manifest line 3: entry needs host bytes but the "
+                                "manifest has no content directory"), error
+    assert not (work / "content/unanchored.img").exists()
+    invoke(executable, work / "content", ["cf", "anchored.img", "-F", "fat12",
+                                          "-C", ".", "@host.mtree"])
+    assert invoke(executable, work, ["xOf", "content/anchored.img",
+                                     "/sub/file.txt"]).stdout == b"host bytes\n"
 
     (work / "@odd").mkdir()
     (work / "@odd/inside").write_bytes(b"odd\n")
@@ -562,9 +574,9 @@ def test_manifest_host(executable, root):
 
 def test_manifest_refusals(executable, root):
     """A manifest operand must name an existing regular file, never followed,
-    and a bare @ is a syntax error. A manifest counts twice against fds. -n
-    checks a generated digest, which needs no payload, but not a host
-    file's, which would."""
+    and a bare @ is a syntax error. A manifest counts once against fds, and
+    its content directory, given by -C, once more. -n checks a generated
+    digest, which needs no payload, but not a host file's, which would."""
     work = root / "manifest-refused"
     generated_manifest(work, "gen.mtree")
     (work / "directory").mkdir()
@@ -580,10 +592,12 @@ def test_manifest_refusals(executable, root):
     result = invoke(executable, work, ["cf", "refused.img", "-F", "fat12", "@"], expected=2)
     assert b"@ requires a manifest name" in result.stderr
     result = invoke(executable, work, ["cf", "refused.img", "-F", "fat12", "-l", "fds=5",
-                                       "@gen.mtree"], expected=1)
+                                       "-C", ".", "@gen.mtree"], expected=1)
     assert b"fds limit 5" in result.stderr, result.stderr
     assert not (work / "refused.img").exists()
     invoke(executable, work, ["cf", "fds.img", "-F", "fat12", "-l", "fds=5", "unrelated.txt"])
+    invoke(executable, work, ["cf", "fds-manifest.img", "-F", "fat12", "-l", "fds=5",
+                              "@gen.mtree"])
 
     wrong = "0" * 64
     (work / "wrong.mtree").write_text(
@@ -594,10 +608,10 @@ def test_manifest_refusals(executable, root):
     (work / "unrelated.mtree").write_text(
         f"./unrelated.txt type=file sha256digest={wrong}\n")
     plan = completed(invoke(executable, work, ["cn", "-F", "fat12", "--json",
-                                               "@unrelated.mtree"]))
+                                               "-C", ".", "@unrelated.mtree"]))
     assert next(record for record in plan if record["type"] == "plan")["entries"] == "1"
     result = invoke(executable, work, ["cf", "wrong-host.img", "-F", "fat12",
-                                       "@unrelated.mtree"], expected=1)
+                                       "-C", ".", "@unrelated.mtree"], expected=1)
     assert b"do not match the manifest's sha256digest" in result.stderr, result.stderr
     assert not (work / "wrong-host.img").exists()
 

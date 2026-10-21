@@ -580,9 +580,9 @@ The commands are the [command-line contract](design-cli.md)'s. `t` lists
 subtrees by default. The extraction stage creates `dest` empty with mode
 0700 before it runs, since `x -E` extracts only into an empty private
 directory. A creation case names its manifest as an `@` operand, as
-[manifest import](design-mtree.md#command-line) defines, with no `-C`:
-the case directory is the working directory, and a manifest of generated
-content opens nothing beneath it. A host-tree case
+[manifest import](design-mtree.md#command-line) defines, with no `-C`,
+so the manifest has no content directory and the case directory, the
+working directory, is never a source. A host-tree case
 stores the contents of `source/` at the image root. A manifest case's
 second create runs once `create` has accepted and is not a recipe stage;
 its captures are named `create-reversed`. A reading stage adds

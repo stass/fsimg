@@ -49,8 +49,9 @@ include policy, backend, and active/unavailable/disabled status.
 
 The policy applies to all image-consuming modes, including `i`, `t`, `x -O`
 and `W`; probes are parsers too. Creation uses a separate profile with read
-access to its source roots, one per create operand and two, the manifest
-and its candidate content directory, per manifest operand. `--formats` and usage
+access to its source roots, one per create operand and, for a manifest
+operand, the manifest and the content directory `-C` gives it, if any.
+`--formats` and usage
 output do not require an image-processing worker.
 
 ## Coordinator and worker
@@ -158,8 +159,9 @@ host path access.
 ## Source-root profile
 
 The creation worker can open objects beneath explicitly authorized source roots.
-The coordinator opens one root per create operand, two for a
-[manifest](design-mtree.md#security-and-bounds), with the same no-follow,
+The coordinator opens one root per create operand; for a
+[manifest](design-mtree.md#security-and-bounds), the manifest file and,
+when a `-C` gives it one, its content directory, with the same no-follow,
 nonblocking, no-controlling-terminal open that scanning uses, and passes the
 descriptors as the worker's complete source authority: the worker never
 receives the `-C` directory, an operand's parent, or a pathname to resolve,

@@ -20,12 +20,15 @@ typedef enum fsimg_cli_command {
  * force when it appeared, and the image path it populates. The image path
  * is the host path without empty and "." components, so "a//./b" populates
  * "/a/b" and "." populates the image root. An operand "@name" is a
- * manifest: host_path is the name after the "@", the -C directory is also
- * its candidate content directory, and it has no image path, since a
- * manifest's entries are rooted at the image root.
+ * manifest: host_path is the name after the "@", the -C directory, when
+ * one is in force, is also its content directory, and it has no image
+ * path, since a manifest's entries are rooted at the image root.
  */
 typedef struct fsimg_cli_operand {
-	const char	*directory;	/* Borrowed -C argument; NULL is the working directory. */
+	/* Borrowed -C argument; NULL opens the operand relative to the
+	 * working directory, and then a manifest has no content directory.
+	 */
+	const char	*directory;
 	const char	*host_path;	/* Borrowed command word, after the "@" of a manifest. */
 	char		*image_path;	/* Owned; "/" for an operand without components; NULL for a manifest. */
 	bool		 manifest;
@@ -60,10 +63,11 @@ typedef struct fsimg_cli_options {
 typedef struct fsimg_cli_paths {
 	int		 parent;
 	int		 scratch_parent;
-	/* Owned root descriptors, one per host operand and two per manifest
-	 * operand, and an owned array of their borrowed job paths: the
-	 * operand's image path, or FSIMG_JOB_MANIFEST for each of a
-	 * manifest's two.
+	/* Owned root descriptors, one per host operand and one or two per
+	 * manifest operand, and an owned array of their borrowed job paths:
+	 * the operand's image path, or for a manifest's descriptors
+	 * FSIMG_JOB_MANIFEST, then FSIMG_JOB_CONTENTS when it has a content
+	 * directory.
 	 */
 	int		*root_fds;
 	const char	**root_paths;

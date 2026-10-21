@@ -39,7 +39,8 @@
  * The job's image paths follow the record in SELECTION frames, as one
  * sequence of NUL-terminated paths whose total length the record states:
  * a read job sends its one member, a create job one path per root
- * descriptor, FSIMG_JOB_MANIFEST for each of a manifest root's two.
+ * descriptor: for a manifest root's descriptors FSIMG_JOB_MANIFEST, then
+ * FSIMG_JOB_CONTENTS when it has a content directory.
  */
 typedef enum job_field {
 	JOB_KIND, JOB_SANDBOX, JOB_FLAGS, JOB_MEMORY, JOB_SCRATCH, JOB_ENTRIES,

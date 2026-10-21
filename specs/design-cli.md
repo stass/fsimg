@@ -96,7 +96,8 @@ default of no additional deadline. `spool` bounds the temporary file that
 holds a stream or compressed input, defined in the
 [layer design](design-layers.md#budget). `fds` (default 128) also caps the
 number of create operands, since the worker holds one open root per operand,
-two for a manifest operand (the manifest and its content directory),
+two for a manifest operand with a content directory (the manifest and
+the directory),
 besides its own staging directory, scratch directory and two scanning
 descriptors (a directory and the entry read from it); a command line
 leaving no room for those fails before the worker starts, naming the
@@ -232,7 +233,8 @@ in any order. A `-C` that applies to no operand (two in a row, or one at the
 end) is a syntax error. An operand may be a regular file. An operand
 `@file` names an mtree(5) manifest, opened relative to the `-C` directory
 in effect, whose entries are rooted at the image root and whose host bytes
-come from beneath that directory, as the
+come from beneath that directory; before any `-C` a manifest has no content
+directory and accepts only generated files, as the
 [manifest design](design-mtree.md#command-line) specifies; `./@name` names
 a host object beginning with `@`, and `@` is recognized after `--` too.
 

@@ -310,7 +310,7 @@ source identity and reopening, and immutable catalog preparation independently
 of format planning. Common collection uses private interfaces; public writer
 construction selects an accepted format driver.
 The [manifest design](design-mtree.md) adds a third source root, an mtree(5)
-manifest paired with a content directory, whose parser appends the same entry
+manifest with an optional content directory, whose parser appends the same entry
 and source records as the host scanner, so merging, planning, reopening and
 emission do not distinguish it; it also defines the manifest the extractor
 writes.

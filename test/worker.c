@@ -792,11 +792,15 @@ test_multiple_roots(worker_fixture_t *fixture)
 	fixture->request.root_count = 1;
 }
 
-/* A manifest root is two root descriptors, the manifest and its content
- * directory, whose paths are both FSIMG_JOB_MANIFEST: the worker parses
- * the manifest, reads a host file's bytes beneath the directory, and merges
- * its entries with a host root's. A manifest path without its pair is
- * refused before any root is read.
+/* A manifest root is the manifest's root descriptor, with the path
+ * FSIMG_JOB_MANIFEST, and its content directory's, with the path
+ * FSIMG_JOB_CONTENTS, when it has one: the worker parses the manifest,
+ * reads a host file's bytes beneath the directory, and merges its entries
+ * with a host root's. Without the directory the manifest's generated files
+ * are imported and an entry needing host bytes is refused, naming its line
+ * and path, although the next root is a directory holding that file; such
+ * a manifest may be the last root. A content directory path anywhere but
+ * right after a manifest's is refused before any root is read.
  */
 static void
 test_manifest_roots(worker_fixture_t *fixture)
@@ -805,12 +809,20 @@ test_manifest_roots(worker_fixture_t *fixture)
 	    ". type=dir\n"
 	    "./HELLO.TXT type=file\n"
 	    "./generated type=file fsimg.content=seeded fsimg.seed=1 size=40\n";
+	static const char generated[] =
+	    "./generated type=file fsimg.content=seeded fsimg.seed=1 size=40\n";
 	static const char *const paths[] = { FSIMG_JOB_MANIFEST,
-	    FSIMG_JOB_MANIFEST, "/copy" };
-	static const char *const unpaired[] = { FSIMG_JOB_MANIFEST, "/",
+	    FSIMG_JOB_CONTENTS, "/copy" };
+	static const char *const without_contents[] = { FSIMG_JOB_MANIFEST,
 	    "/copy" };
-	static const char *const trailing[] = { "/copy", "/",
+	static const char *const last[] = { FSIMG_JOB_MANIFEST, "/copy",
 	    FSIMG_JOB_MANIFEST };
+	static const char *const leading[] = { FSIMG_JOB_CONTENTS, "/copy",
+	    "/other" };
+	static const char *const orphaned[] = { "/copy", FSIMG_JOB_CONTENTS,
+	    "/other" };
+	static const char *const repeated[] = { FSIMG_JOB_MANIFEST,
+	    FSIMG_JOB_CONTENTS, FSIMG_JOB_CONTENTS };
 	fsimg_error_t error;
 	int roots[3];
 
@@ -825,12 +837,38 @@ test_manifest_roots(worker_fixture_t *fixture)
 	/* The manifest's two files, and "/copy" holding the source's file. */
 	CHECK(fixture->result.entries == 4);
 
-	fixture->request.root_paths = unpaired;
+	fixture->request.root_paths = without_contents;
+	fixture->request.root_count = 2;
+	CHECK(run(fixture, &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "manifest line 2: ") == error.message);
+	CHECK(strstr(error.message, "no content directory") != NULL);
+	CHECK(strcmp(error.path, "/HELLO.TXT") == 0);
+	CHECK(close(roots[0]) == 0);
+	CHECK(unlinkat(fixture->parent, "manifest", 0) == 0);
+	roots[0] = open_manifest(fixture, "manifest", generated);
+	CHECK(run(fixture, &error) == FSIMG_OK);
+	/* The generated file, and "/copy" holding the source's file. */
+	CHECK(fixture->result.entries == 3);
+	/* A manifest as the last root: the next path is never read. */
+	roots[2] = open_manifest(fixture, "second",
+	    "./other type=file fsimg.content=zero size=3\n");
+	fixture->request.root_count = 3;
+	fixture->request.root_paths = last;
+	CHECK(run(fixture, &error) == FSIMG_OK);
+	CHECK(fixture->result.entries == 4);
+	CHECK(close(roots[2]) == 0);
+	CHECK(unlinkat(fixture->parent, "second", 0) == 0);
+	roots[2] = fixture->source;
+
+	fixture->request.root_paths = leading;
 	CHECK(run(fixture, &error) == FSIMG_EINVAL);
 	CHECK(strstr(error.message, "manifest root") != NULL);
-	fixture->request.root_paths = trailing;
+	fixture->request.root_paths = orphaned;
 	CHECK(run(fixture, &error) == FSIMG_EINVAL);
-	CHECK(strstr(error.message, "framing") != NULL);
+	CHECK(strstr(error.message, "manifest root") != NULL);
+	fixture->request.root_paths = repeated;
+	CHECK(run(fixture, &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "manifest root") != NULL);
 	CHECK(close(roots[0]) == 0);
 	CHECK(unlinkat(fixture->parent, "manifest", 0) == 0);
 	fixture->request.root_fds = &fixture->source;
@@ -850,7 +888,7 @@ static void
 test_manifest_fifo(worker_fixture_t *fixture)
 {
 	static const char *const paths[] = { FSIMG_JOB_MANIFEST,
-	    FSIMG_JOB_MANIFEST };
+	    FSIMG_JOB_CONTENTS };
 	fsimg_error_t error;
 	fsimg_sandbox_policy_t sandbox;
 	int roots[2];

@@ -63,11 +63,13 @@ the copy. Digests claimed for generated content are kept, with their line
 and image path, in a writer stream that `fsimg_writer_plan()` checks once
 the image has accepted every size (`fsimg_manifest_check_digests()`).
 In mode `c` an `@file` operand (`read_create_operands()` in
-`cmd/fsimg/options.c`) is opened by the coordinator with its candidate
-content directory (`open_roots()` in `cmd/fsimg/paths.c`), and the two
-descriptors reach the worker as consecutive root descriptors whose job
-paths are both `@` (`FSIMG_JOB_MANIFEST`), which the worker pairs and hands
-to `fsimg_writer_adopt_manifest()`, the form of `fsimg_writer_add_manifest()`
+`cmd/fsimg/options.c`) is opened by the coordinator with the `-C` directory
+in force as its content directory, when there is one (`open_roots()` in
+`cmd/fsimg/paths.c`). The manifest's descriptor reaches the worker as a root
+descriptor whose job path is `@` (`FSIMG_JOB_MANIFEST`), followed by the
+content directory's, whose job path is `@contents` (`FSIMG_JOB_CONTENTS`),
+and the worker hands them, or the manifest and `-1`, to
+`fsimg_writer_adopt_manifest()`, the form of `fsimg_writer_add_manifest()`
 that consumes its descriptors instead of duplicating them. The extractor
 writes no manifest; the [extraction](#extraction-writing-a-manifest)
 section describes the target.
@@ -116,9 +118,10 @@ The requirements follow from this one construction:
   not change image bytes; the image is a function of the manifest bytes, the
   content bytes and the options.
 * **The same worker and protocol.** The coordinator opens the manifest and
-  its content directory and passes both descriptors, which the worker
-  adopts together as one root; the worker parses the manifest after
-  acknowledgement, where it parses image bytes, under the creation profile.
+  its content directory, when it has one, and passes their descriptors,
+  which the worker adopts together as one root; the worker parses the
+  manifest after acknowledgement, where it parses image bytes, under the
+  creation profile.
 
 Generated content is a private fourth storage class beside none, zero,
 provider and host. Its source record holds the generator and its
@@ -138,26 +141,30 @@ archive for `tar(1)`: `fsimg cf disk.img -F qnx6 -C rootfs @METALOG`. The
 word after `@` is opened relative to the `-C` directory in effect, or as
 given when it is absolute, with the no-follow, nonblocking,
 no-controlling-terminal open every root gets, and must be a regular file.
-That same `-C` directory, the working directory until a `-C` is given, is
-opened as the manifest's candidate content directory. It becomes the
-content directory only when an entry needs host bytes: a manifest whose
-files are all generated reads nothing beneath it, and its root is
-descriptorless, as the [library interface](#library-interface) defines, so
-a directory that holds other files, such as the harness's case directory
-with `out/` and `scratch/`, serves as the working directory without
-becoming a source. No option spells "no content directory". A host object
-whose own name begins with `@` is named `./@name`. A bare `@` is a syntax
-error. The word after `@` is a host path, never an image path, so unlike
-another operand it may contain `..`. The `@` form is recognized in every
-operand position, including after `--`. A manifest operand holds two
-descriptors, so it counts twice against `fds`.
+That same `-C` directory is the manifest's content directory, offered to
+the library as `contents_fd`; a manifest whose files are all generated
+reads nothing beneath it, as the [library interface](#library-interface)
+defines. A manifest given before any `-C` has no content directory: the
+working directory is never one implicitly, so the CLI passes `-1`, its
+generated files need nothing more, and the library refuses at input any
+entry that needs host bytes, naming the line and path. A content directory
+is source authority over every file beneath it, so it is granted only by
+naming it, never by where the command happens to run; a directory that
+holds other files, such as the harness's case directory with `out/` and
+`scratch/`, can then be the working directory of a run from a generated
+manifest without becoming a source. A host object whose own name begins
+with `@` is named `./@name`. A bare `@` is a syntax error. The word after
+`@` is a host path, never an image path, so unlike another operand it may
+contain `..`. The `@` form is recognized in every operand position,
+including after `--`. A manifest operand holds one descriptor against
+`fds`, and its content directory one more.
 
 The manifest's entries are rooted at the image root; there is no prefix
 form. A manifest that should land beneath `/a` says so in its paths.
 
 | Option | Effect on a manifest operand |
 | --- | --- |
-| `-C dir` | Content directory and base of the manifest's own path |
+| `-C dir` | Content directory and base of the manifest's own path; without it there is no content directory |
 | `-p` | None: owner and mode come from keywords, never from content files |
 | `-R`, `-e` | As for every entry: every stored time becomes the epoch |
 | `-n` | Parses the manifest, inspects content files and checks generated digests; reads no payload, so host digests are not checked |
@@ -531,10 +538,11 @@ manifest file and the content directory as it opens every root and passes
 descriptors, never names. The worker's only new act is to resolve relative
 paths taken from the manifest beneath the content directory, which is the
 component walk source reopening already performs; the content directory is
-the `-C` directory in effect, or the working directory, the same authority
-an operand of `.` grants, and the worker holds it even for a manifest of
-generated content, which reads nothing beneath it but whose entries could
-name any file there. The [source-root
+the `-C` directory in effect, the same authority an operand of `.` grants,
+and the worker holds it even for a manifest of generated content, which
+reads nothing beneath it but whose entries could name any file there.
+Without a `-C` the worker holds no content directory, so no manifest entry
+can name a host file at all. The [source-root
 profile's](design-security.md#source-root-profile) device limitation
 applies to it unchanged. A link target is bytes stored in the image and is
 never opened or resolved. A `contents=` path never follows a link and never
@@ -652,6 +660,10 @@ Each passing case has a seeded failure that proves the check ran.
 * **An operand, not an option.** `@file` gives a manifest an operand's rank
   and `-C` with no further rule; a `--manifest=FILE` option would need its own
   rank and content-directory rules.
+* **No implicit content directory.** Only `-C` grants one, so a manifest
+  reads host files only from a directory its user named; a manifest run
+  from a working directory full of unrelated files cannot reach them, and
+  its generated files still need nothing.
 * **Host digests during the copy,** as [Digests](#digests) explains: each file
   is read once and `-n` reads no payload.
 * **Generated digests after planning,** as [Digests](#digests) explains: the

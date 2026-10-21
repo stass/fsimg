@@ -249,7 +249,8 @@ Signs, whitespace, fractions and overflow fail.
 Defaults are 64 GiB scratch, 10,000,000 entries, depth 256, 64 KiB image paths
 including separators and NUL, and 128 owned descriptors.
 The fds limit also caps the number of create operands: the worker holds one
-open root per operand, two for a manifest, besides its staging directory,
+open root per operand, two for a manifest with a content directory,
+besides its staging directory,
 scratch directory and two scanning descriptors.
 Logical extraction output defaults to the selected volume slice length,
 including holes.
@@ -515,24 +516,31 @@ The manifest's entries are rooted at the image root and merge with the
 other operands as their directories do.
 That
 .Fl C
-directory, or the working directory, is the manifest's content directory:
+directory is the manifest's content directory:
 a file entry reads its bytes from the file beneath it at its
 .Cm contents
 path or at its own path, walked without following any link and never
 leaving the directory.
-Nothing beneath it is read unless an entry needs host bytes, so a manifest
-of generated files can be used from a directory that holds other files.
-Any file beneath it may still be named by an entry, so a manifest from an
-untrusted source should be given a
+Nothing beneath it is read unless an entry needs host bytes.
+A manifest given before any
 .Fl C
-directory that holds only what it may read.
+has no content directory, not even the working directory: its generated
+files need none, and an entry that needs host bytes fails, naming its line
+and path.
+Any file beneath a content directory may be named by an entry, so a
+manifest from an untrusted source should be given a
+.Fl C
+directory that holds only what it may read, or none: a
+.Fl C
+applies to every later operand, so such a manifest comes before the first
+one.
 A host object whose name begins with @ is named
 .Pa ./@name ;
 an @ word is a manifest after
 .Fl Fl
 too.
-A manifest operand holds two descriptors and counts twice against the fds
-limit.
+A manifest operand holds one descriptor, and its content directory one
+more, against the fds limit.
 .Pp
 The manifest is read as untrusted input.
 Lines may continue with a final backslash; comments, the
