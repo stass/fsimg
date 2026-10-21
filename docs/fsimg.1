@@ -524,6 +524,8 @@ a file entry reads its bytes from the file beneath it at its
 .Cm contents
 path or at its own path, walked without following any link and never
 leaving the directory.
+That file is opened without blocking on a FIFO and must then be a regular
+file; a device node an entry names is opened before it is refused.
 Nothing beneath it is read unless an entry needs host bytes.
 A manifest given before any
 .Fl C

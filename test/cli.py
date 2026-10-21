@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import string
 import struct
 import subprocess
@@ -479,7 +480,11 @@ def test_create_operands(executable, root):
     # A refused kind is unsupported, as the scanner reports it, not an I/O
     # failure.
     os.mkfifo(root / "operand-fifo")
-    for operand in ["source-link", "source-link//./", "operand-fifo"]:
+    # A socket address holds a short path, so the socket is bound by its
+    # path relative to the working directory, which holds root.
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(os.path.relpath(root / "operand-socket"))
+    for operand in ["source-link", "source-link//./", "operand-fifo", "operand-socket"]:
         error = failed(invoke(executable, root, ["cf", "kind.img", "-F", "fat12", "--json",
                                                  operand], expected=1))
         assert error["status"] == "unsupported capability", error
@@ -487,11 +492,13 @@ def test_create_operands(executable, root):
     assert not (root / "kind.img").exists()
     # So is an image that is a link or a FIFO.
     (root / "image-link").symlink_to("disjoint.img")
-    for image in ["image-link", "operand-fifo"]:
+    for image in ["image-link", "operand-fifo", "operand-socket"]:
         error = failed(invoke(executable, root, ["tf", image, "--json"], expected=1))
         assert error["status"] == "unsupported capability" and error["path"] == image, error
     (root / "image-link").unlink()
     (root / "operand-fifo").unlink()
+    listener.close()
+    (root / "operand-socket").unlink()
     # A trailing slash requires a directory, as it does for the host.
     result = invoke(executable, root, ["cf", "slashed.img", "-F", "fat12", "-C", "source",
                                        "HELLO.TXT/"], expected=1)

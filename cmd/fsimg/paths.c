@@ -275,6 +275,9 @@ open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 	if (request->input_fd == -1 && errno == ELOOP)
 		return (kind_error(error, ELOOP, "image is a symbolic link",
 		    options->image));
+	if (request->input_fd == -1 && errno == ENXIO)
+		return (kind_error(error, ENXIO, "image is not a regular file",
+		    options->image));
 	if (request->input_fd == -1)
 		return (path_error(error, "cannot open image", options->image));
 	if (fsimg_host_file(request->input_fd, &identity) == -1)
@@ -359,6 +362,11 @@ open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
 		if (errno == ELOOP)
 			return (kind_error(error, ELOOP, operand->manifest ?
 			    "manifest is a symbolic link" : "operand is a symbolic link",
+			    operand->host_path));
+		if (errno == ENXIO)
+			return (kind_error(error, ENXIO, operand->manifest ?
+			    "manifest is not a regular file" :
+			    "operand is not a regular file or directory",
 			    operand->host_path));
 		return (path_error(error, operand->manifest ?
 		    "cannot open manifest" : "cannot open operand", operand->host_path));

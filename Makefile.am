@@ -181,12 +181,12 @@ test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
 test_exfat_scale_LDADD = libfsimg.la
 test_catalog_SOURCES = test/catalog.c test/test.h
 test_catalog_LDADD = libfsimg.la
-test_source_SOURCES = test/source.c test/test.h
+test_source_SOURCES = test/source.c test/test.h test/socket.c test/socket.h
 test_source_LDADD = libfsimg.la
 test_mtree_SOURCES = test/mtree.c test/test.h
 test_mtree_LDADD = libfsimg.la
 test_manifest_SOURCES = test/manifest.c test/test.h test/digest.c \
-	test/digest.h
+	test/digest.h test/socket.c test/socket.h
 test_manifest_LDADD = libfsimg.la
 test_fat_SOURCES = test/fat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
@@ -201,7 +201,7 @@ test_extract_LDADD = libfsimg.la
 test_protocol_SOURCES = test/protocol.c test/test.h \
 	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/job.c cmd/fsimg/worker.h
 test_protocol_LDADD = libfsimg-core.la
-test_worker_SOURCES = test/worker.c test/test.h \
+test_worker_SOURCES = test/worker.c test/test.h test/socket.c test/socket.h \
 	cmd/fsimg/worker.h cmd/fsimg/job.c cmd/fsimg/protocol.c cmd/fsimg/protocol.h \
 	cmd/fsimg/worker-parent.c cmd/fsimg/worker-child.c cmd/fsimg/worker-output.c \
 	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/spawn.c

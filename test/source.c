@@ -16,6 +16,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "socket.h"
 #include "source.h"
 #include "test.h"
 
@@ -523,6 +524,7 @@ test_rejection(void)
 {
 	source_fixture_t fixture;
 	fsimg_error_t error;
+	int listener;
 
 	fixture_open(&fixture);
 	CHECK(mkfifoat(fixture.root, "fifo", 0600) == 0);
@@ -531,6 +533,14 @@ test_rejection(void)
 	alarm(0);
 	/* A rejected object is named by its image path. */
 	CHECK(strcmp(error.path, "/fifo") == 0);
+	fixture_close(&fixture);
+	/* A socket, which no host opens, is rejected the same way. */
+	fixture_open(&fixture);
+	listener = bind_socket(fixture.root, "socket");
+	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", &error) == FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "/socket") == 0);
+	CHECK(close(listener) == 0);
+	CHECK(unlinkat(fixture.root, "socket", 0) == 0);
 	fixture_close(&fixture);
 	fixture_open(&fixture);
 	CHECK(fsimg_writer_add_tree(fixture.writer,

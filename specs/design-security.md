@@ -174,7 +174,10 @@ descriptor. Normal
 scanning uses nonblocking, no-controlling-terminal, no-follow opens and checks
 the opened object's type before reading; FIFOs cannot make an ordinary open
 wait for a writer, and special files are rejected. A prior directory type check
-alone cannot prevent replacement before open.
+alone cannot prevent replacement before open, so an object is opened before
+its kind is checked, on every host and including the file a manifest names,
+which must then be a regular file; a name is inspected only to classify a
+failed open or to read a link.
 
 Opening a device can have effects before `fstat()` rejects it. Neither a
 read-only directory capability nor a filesystem path allowlist universally
@@ -234,9 +237,8 @@ uses safe creation modes, opened-object metadata queries, and no arbitrary
 on each supported architecture. `io_uring`, descriptor acquisition through
 other processes, hardlink creation, and unnecessary fd duplication paths are
 not part of the worker profile. New syscall needs require a security review.
-Without a path-based query, the Linux worker opens a file a manifest names
-nonblocking and no-follow and then checks that it is a regular file, rather
-than inspecting the name before the open as on FreeBSD and macOS.
+Importing a manifest needs no path-based query: the file it names is opened
+and then checked, as the source-root profile states.
 
 The source profile requires the descriptor-only Linux statx form: a NULL path,
 AT_EMPTY_PATH, and an explicit descriptor other than AT_FDCWD. Setup proves

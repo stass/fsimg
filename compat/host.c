@@ -159,6 +159,12 @@ fsimg_host_source_open(int parent, const char *name, bool directory)
 	if (fd == -1 && errno == EMLINK)
 		errno = ELOOP;
 #endif
+	/* An object no open can read, a socket (EOPNOTSUPP on FreeBSD and
+	 * macOS, ENXIO on Linux) or a device without a driver (ENXIO or
+	 * ENODEV), is named ENXIO on every host.
+	 */
+	if (fd == -1 && (errno == EOPNOTSUPP || errno == ENODEV))
+		errno = ENXIO;
 	/* macOS refuses a symlink opened with O_DIRECTORY as ENOTDIR, as it
 	 * refuses a regular file; inspecting the name without following it
 	 * tells the two apart. The inspection only classifies the failure.
@@ -241,29 +247,6 @@ fsimg_host_link(int parent, const char *name, fsimg_host_file_t *out)
 	if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) == -1)
 		return (-1);
 	return (host_identity(&st, out));
-}
-
-/*
- * Linux inspects nothing before an open. Its confined worker cannot stat
- * by name: the seccomp filter admits only descriptor queries. A caller
- * opens the name with fsimg_host_source_open instead, whose O_NONBLOCK
- * and O_NOCTTY keep a FIFO's open from waiting for a writer and a
- * terminal from becoming the controlling one, and checks the descriptor.
- * Other hosts' confinement permits the inspection, which refuses a FIFO
- * or device without opening it at all.
- */
-int
-fsimg_host_inspect_unopened(int parent FSIMG_UNUSED,
-    const char *name FSIMG_UNUSED, fsimg_host_file_t *out)
-{
-#if defined(__linux__)
-	bzero(out, sizeof(*out));
-	return (0);
-#else
-	if (fsimg_host_link(parent, name, out) == -1)
-		return (-1);
-	return (1);
-#endif
 }
 
 /* Translate one stat result. Owner and permission bits are recorded without

@@ -63,8 +63,12 @@ open_object(fsimg_writer_t *writer, int parent, const char *name, bool directory
 		if (saved == ELOOP && !directory)
 			return (fsimg_source_read_link(writer, parent, name,
 			    identity, target, error));
+		/* A link beneath a directory open, and an object no open
+		 * reads (ENXIO: a socket or a device without a driver), are
+		 * kinds import rejects, as it rejects a FIFO once opened.
+		 */
 		return (fsimg_error_set(error,
-		    saved == ELOOP ? FSIMG_EUNSUPPORTED :
+		    saved == ELOOP || saved == ENXIO ? FSIMG_EUNSUPPORTED :
 		    saved == ENOENT ? FSIMG_ESOURCE_CHANGED : FSIMG_EIO,
 		    saved, FSIMG_OP_SOURCE, "source object open failed"));
 	}

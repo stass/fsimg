@@ -21,6 +21,7 @@
 
 #include "host.h"
 #include "io.h"
+#include "socket.h"
 #include "test.h"
 #include "worker.h"
 
@@ -126,7 +127,7 @@ static void test_skipped_extraction(void);
 static void test_mount_source(const char *);
 static void test_multiple_roots(worker_fixture_t *);
 static void test_manifest_roots(worker_fixture_t *);
-static void test_manifest_fifo(worker_fixture_t *);
+static void test_manifest_special_files(worker_fixture_t *);
 static int open_manifest(const worker_fixture_t *, const char *,
     const char *);
 static void test_partitioned_create(void);
@@ -531,7 +532,7 @@ test_operations(const char *format)
 	CHECK(fixture.result.metadata_losses == fixture.plan_losses);
 	test_multiple_roots(&fixture);
 	test_manifest_roots(&fixture);
-	test_manifest_fifo(&fixture);
+	test_manifest_special_files(&fixture);
 	fixture_close(&fixture);
 }
 
@@ -876,30 +877,34 @@ test_manifest_roots(worker_fixture_t *fixture)
 	fixture->request.root_count = 1;
 }
 
-/* A manifest file entry whose host file is a FIFO is refused as not a
- * regular file, by the confined worker and without blocking: the worker
- * either inspects the name before opening it or opens it without waiting
- * for a writer and checks the descriptor. Where the host has a sandbox the
- * job requires it, so an unconfined run cannot pass for a confined one; a
- * kernel that cannot confine creation refuses the job instead, which
- * leaves the refusal untested there, as test-sandbox reports.
+/* A manifest file entry whose host file is a FIFO or a socket is refused
+ * as unsupported, not a regular file, by the confined worker and without
+ * blocking: every host opens the name no-follow and nonblocking and checks
+ * the descriptor, and a socket, which no host opens, fails the open with
+ * the same refusal. Where the host has a sandbox the job requires it, so
+ * an unconfined run cannot pass for a confined one; a kernel that cannot
+ * confine creation refuses the job instead, which leaves the refusals
+ * untested there, as test-sandbox reports.
  */
 static void
-test_manifest_fifo(worker_fixture_t *fixture)
+test_manifest_special_files(worker_fixture_t *fixture)
 {
 	static const char *const paths[] = { FSIMG_JOB_MANIFEST,
 	    FSIMG_JOB_CONTENTS };
+	static const char *const manifests[] = {
+	    ". type=dir\n./pipe type=file\n",
+	    ". type=dir\n./socket type=file\n"
+	};
 	fsimg_error_t error;
 	fsimg_sandbox_policy_t sandbox;
-	int roots[2];
+	int roots[2], listener;
 
-	CHECK(mkdirat(fixture->parent, "fifo-contents", 0700) == 0);
-	roots[1] = openat(fixture->parent, "fifo-contents",
+	CHECK(mkdirat(fixture->parent, "special-contents", 0700) == 0);
+	roots[1] = openat(fixture->parent, "special-contents",
 	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	CHECK(roots[1] != -1);
 	CHECK(mkfifoat(roots[1], "pipe", 0600) == 0);
-	roots[0] = open_manifest(fixture, "fifo-manifest",
-	    ". type=dir\n./pipe type=file\n");
+	listener = bind_socket(roots[1], "socket");
 	fixture->request.kind = FSIMG_JOB_PLAN;
 	fixture->request.root_fds = roots;
 	fixture->request.root_paths = paths;
@@ -909,20 +914,26 @@ test_manifest_fifo(worker_fixture_t *fixture)
 	fixture->request.sandbox = FSIMG_SANDBOX_REQUIRED;
 #endif
 
-	CHECK(run(fixture, &error) == FSIMG_EUNSUPPORTED);
-	if (fixture->request.sandbox == FSIMG_SANDBOX_REQUIRED &&
-	    fixture->result.confinement != FSIMG_CONFINEMENT_ACTIVE)
-		fprintf(stderr, "manifest FIFO refusal untested: creation "
-		    "cannot be confined here\n");
-	else
-		CHECK(strstr(error.message, "not name a regular file") != NULL);
+	for (size_t i = 0; i < sizeof(manifests) / sizeof(manifests[0]); i++) {
+		roots[0] = open_manifest(fixture, "special-manifest", manifests[i]);
+		CHECK(run(fixture, &error) == FSIMG_EUNSUPPORTED);
+		if (fixture->request.sandbox == FSIMG_SANDBOX_REQUIRED &&
+		    fixture->result.confinement != FSIMG_CONFINEMENT_ACTIVE)
+			fprintf(stderr, "manifest special-file refusal untested: "
+			    "creation cannot be confined here\n");
+		else
+			CHECK(strstr(error.message, "not name a regular file") !=
+			    NULL);
+		CHECK(close(roots[0]) == 0);
+		CHECK(unlinkat(fixture->parent, "special-manifest", 0) == 0);
+	}
 	fixture->request.sandbox = sandbox;
 
-	CHECK(close(roots[0]) == 0);
-	CHECK(unlinkat(fixture->parent, "fifo-manifest", 0) == 0);
+	CHECK(close(listener) == 0);
+	CHECK(unlinkat(roots[1], "socket", 0) == 0);
 	CHECK(unlinkat(roots[1], "pipe", 0) == 0);
 	CHECK(close(roots[1]) == 0);
-	CHECK(unlinkat(fixture->parent, "fifo-contents", AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(fixture->parent, "special-contents", AT_REMOVEDIR) == 0);
 	fixture->request.root_fds = &fixture->source;
 	fixture->request.root_paths = image_root;
 	fixture->request.root_count = 1;

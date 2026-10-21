@@ -121,12 +121,12 @@ typedef enum fsimg_source_walk {
  */
 fsimg_status_t fsimg_source_walk(fsimg_writer_t *, const fsimg_source_root_t *,
     char *, fsimg_source_walk_t, int *, char **, fsimg_error_t *);
-/* Open parent/name without following a link, with O_DIRECTORY when
- * directory is true, inspect it, and check it for the root's device and
+/* Open parent/name without following a link, nonblocking and without
+ * acquiring a controlling terminal, with O_DIRECTORY when directory is
+ * true, inspect the opened object, and check it for the root's device and
  * mount and against the output and scratch directories. An import walk's
- * final name succeeds only as a regular file: where the host inspects names
- * it is opened only if it is one when inspected, and the opened object
- * must be one on every host. On success *fd is a reserved descriptor the
+ * final name, which a manifest chose, is opened the same way and succeeds
+ * only as a regular file. On success *fd is a reserved descriptor the
  * caller releases and *identity describes it.
  */
 fsimg_status_t fsimg_source_open_child(fsimg_writer_t *,

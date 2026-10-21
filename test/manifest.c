@@ -18,6 +18,7 @@
 
 #include "digest.h"
 #include "internal.h"
+#include "socket.h"
 #include "source.h"
 #include "test.h"
 
@@ -893,6 +894,8 @@ test_host_refusals(void)
 		  FSIMG_EUNSUPPORTED, 2, "/x" },
 		{ ". type=dir\n./x type=file contents=p\n",
 		  FSIMG_EUNSUPPORTED, 2, "/x" },
+		{ ". type=dir\n./x type=file contents=s\n",
+		  FSIMG_EUNSUPPORTED, 2, "/x" },
 		{ ". type=dir\n./x type=file contents=missing\n",
 		  FSIMG_EINVAL, 2, "/x" },
 		{ ". type=dir\n./x type=file contents=f/inner\n",
@@ -913,7 +916,7 @@ test_host_refusals(void)
 		FSIMG_EINVAL, 2, "/f"
 	};
 	fixture_t fixture;
-	int contents, directory;
+	int contents, directory, listener;
 
 	/* The content tree lives in its own fixture; each refusal opens a
 	 * writer of its own beside it.
@@ -927,11 +930,13 @@ test_host_refusals(void)
 	CHECK(symlinkat("d", contents, "ln") == 0);
 	CHECK(symlinkat("f", contents, "lf") == 0);
 	CHECK(mkfifoat(contents, "p", 0600) == 0);
+	listener = bind_socket(contents, "s");
 
 	for (size_t i = 0; i < sizeof(refusals) / sizeof(refusals[0]); i++)
 		check_refusal(&refusals[i], contents);
 	check_refusal(&descriptorless, -1);
 
+	CHECK(close(listener) == 0);
 	CHECK(close(contents) == 0);
 	fixture_close(&fixture);
 }

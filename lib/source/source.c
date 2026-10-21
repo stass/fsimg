@@ -37,7 +37,6 @@ static fsimg_status_t read_host_record(fsimg_writer_t *, uint64_t,
 static fsimg_status_t adopt_reopened_file(fsimg_writer_t *, int,
     const fsimg_host_file_t *, fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t open_failure(int, fsimg_source_walk_t, fsimg_error_t *);
-static fsimg_status_t inspect_import_file(int, const char *, fsimg_error_t *);
 static fsimg_status_t open_generated(fsimg_writer_t *, uint64_t,
     fsimg_entry_kind_t, fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t check_digest(fsimg_source_cursor_t *, fsimg_error_t *);
@@ -640,18 +639,19 @@ adopt_reopened_file(fsimg_writer_t *writer, int fd,
 }
 
 /* A failed open beneath a root, reported for why the path was walked. A
- * recorded path whose object vanished, became a link or stopped being a
- * directory names a changed source. A manifest's contents path that has a
- * link is unsupported, as the scanner cannot record one there, and one
- * that names nothing, or a name its file system cannot hold, is invalid
- * input.
+ * recorded path whose object vanished, became a link, stopped being a
+ * directory or became an object no open reads (ENXIO) names a changed
+ * source. A manifest's contents path that has a link is unsupported, as
+ * the scanner cannot record one there, and one that names nothing, or a
+ * name its file system cannot hold, is invalid input.
  */
 static fsimg_status_t
 open_failure(int saved, fsimg_source_walk_t walk, fsimg_error_t *error)
 {
 	if (walk == FSIMG_WALK_REOPEN)
 		return (fsimg_error_set(error,
-		    saved == ENOENT || saved == ELOOP || saved == ENOTDIR ?
+		    saved == ENOENT || saved == ELOOP || saved == ENOTDIR ||
+		    saved == ENXIO ?
 		    FSIMG_ESOURCE_CHANGED : FSIMG_EIO, saved,
 		    FSIMG_OP_SOURCE, "source component cannot be reopened"));
 	if (saved == ELOOP)
@@ -664,41 +664,10 @@ open_failure(int saved, fsimg_source_walk_t walk, fsimg_error_t *error)
 	    "contents path component cannot be opened"));
 }
 
-/* A manifest, not a directory listing, names the final object of an
- * import walk, so where the host inspects names it is inspected before it
- * is opened and only a regular file is opened: a device or FIFO a manifest
- * points at is refused without the side effects an open can have. The
- * name can change after the inspection, and a host that does not inspect
- * opens it without blocking, so fsimg_source_open_child checks the opened
- * object as well.
+/* A manifest, not a directory listing, names the final object of an import
+ * walk, so it may name anything; it is opened as every object is and then
+ * checked, as specs/design-mtree.md ("Host bytes") explains.
  */
-static fsimg_status_t
-inspect_import_file(int parent, const char *name, fsimg_error_t *error)
-{
-	fsimg_host_file_t named;
-	int inspected, saved;
-
-	inspected = fsimg_host_inspect_unopened(parent, name, &named);
-	if (inspected == 0)
-		return (FSIMG_OK);
-	if (inspected == -1) {
-		saved = errno;
-		/* As for a link the scanner meets: confinement that denies
-		 * the inspection is a missing capability, not an I/O error.
-		 */
-		if (saved == EPERM || saved == EACCES)
-			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, saved,
-			    FSIMG_OP_SOURCE, "contents path inspection is not permitted"));
-		return (open_failure(saved, FSIMG_WALK_IMPORT, error));
-	}
-	if (named.kind == FSIMG_HOST_LINK)
-		return (open_failure(ELOOP, FSIMG_WALK_IMPORT, error));
-	if (named.kind != FSIMG_HOST_FILE)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_SOURCE, "contents path does not name a regular file"));
-	return (FSIMG_OK);
-}
-
 fsimg_status_t
 fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
     int parent, const char *name, bool directory, fsimg_source_walk_t walk,
@@ -714,11 +683,6 @@ fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 	status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (manifest_file) {
-		status = inspect_import_file(parent, name, error);
-		if (status != FSIMG_OK)
-			return (status);
-	}
 	status = fsimg_fd_reserve(writer->ctx, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -726,11 +690,10 @@ fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 	if (fd == -1) {
 		saved = errno;
 		fsimg_fd_release(writer->ctx, -1);
-		/* A host that opens a manifest's file uninspected learns that
-		 * a socket or a device without a driver is no regular file
-		 * from the open's ENXIO or ENODEV.
+		/* The open itself refuses a socket or a device without a
+		 * driver (ENXIO, fsimg_host_source_open): no regular file.
 		 */
-		if (manifest_file && (saved == ENXIO || saved == ENODEV))
+		if (manifest_file && saved == ENXIO)
 			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, saved,
 			    FSIMG_OP_SOURCE, "contents path does not name a regular file"));
 		return (open_failure(saved, walk, error));

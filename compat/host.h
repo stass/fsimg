@@ -63,13 +63,10 @@ bool fsimg_host_unsupported_io(int);
 int fsimg_host_file(int, fsimg_host_file_t *);
 /* Inspect parent/name without following a final symbolic link. */
 int fsimg_host_link(int, const char *, fsimg_host_file_t *);
-/* Inspect parent/name as fsimg_host_link does where the host inspects a
- * name before opening it: 1 with the object described, 0 when this host
- * opens the name without inspecting it, -1 with errno on failure.
- */
-int fsimg_host_inspect_unopened(int, const char *, fsimg_host_file_t *);
 /* Source opens never follow links or acquire a controlling terminal/block on
- * a FIFO. ELOOP identifies a no-follow symlink refusal on every host. The
+ * a FIFO. ELOOP identifies a no-follow symlink refusal on every host, and
+ * ENXIO an object of a kind no open reads, a socket or a device without a
+ * driver, in place of the host's own errno, which is not kept. The
  * O_NONBLOCK that keeps a FIFO's open from waiting leaves reads of a
  * regular file unchanged.
  */
