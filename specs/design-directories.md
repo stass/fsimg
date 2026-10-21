@@ -138,12 +138,13 @@ whole-volume tree is materialized.
 A driver admits a child once its name has passed the driver's native checks,
 the ones whose failure is corruption, such as an embedded NUL or an empty
 name. Preparation then assigns the child one of two classes. A format whose
-descriptor declares the QNX-family name profile (QNX4, QNX6 and ImageFS)
-has every child's component checked by the one common profile function:
+reader operations, which its descriptor names, declare the QNX-family name
+profile (QNX4, QNX6 and ImageFS) has every child's component checked by the
+one common profile function:
 strict UTF-8, no NUL, slash, control byte or `0x7f`, neither `.` nor `..`.
 A component under the profile makes the child *delivered*; a natively legal
 component outside it makes the child *omitted*, under the
-[architecture's rule](architecture.md#names-and-metadata). A descriptor
+[architecture's rule](architecture.md#names-and-metadata). A format
 that declares no profile, FAT and exFAT, admits every child as delivered,
 since its driver derives validated names by its own rules. Common code
 branches on the declared property, never on a format name, and no driver
@@ -171,10 +172,11 @@ the extractor, treated as all delivered. It has three callers.
 result in `path_truncated`. The loss-report callback's path is rendered
 into a buffer sized for the worst case of its input, four bytes per input
 byte up to the complete-path limit `max_path_bytes` plus the terminator,
-`4 * max_path_bytes + 1`, so it is never truncated. A verification finding
-reaches the caller as an `fsimg_error_t`, which is what the bounded
-reporting interface supports, so its path has the error record's bound,
-truncation rule and flag. For library callers this is a contract: a
+`4 * max_path_bytes + 1`, so it is never truncated. The walker renders the
+paths of its own errors, such as a namespace collision or an extraction
+refused for an omitted entry; a verification finding is one of these and
+reaches the caller as an `fsimg_error_t`, so its path has the error record's
+bound, truncation rule and flag. For library callers this is a contract: a
 callback or finding path is rendered, so it holds `\\` where
 `fsimg_entry_t.path` holds `\`. The rendering is an escaping:
 in every component, delivered or omitted, a backslash is written `\\`; in
@@ -207,7 +209,9 @@ to callers filters on that mark:
   the omission is an explicit choice.
 * The walker counts each omitted subtree root it passes within the
   traversal scope, an omitted entry whose ancestors are all delivered, in
-  the operation's result as `omitted_entries` and in the context
+  the operation's result (`fsimg_extract_result_t` for extraction,
+  `fsimg_verify_report_t` for verification) as `omitted_entries` and in the
+  context
   statistics' field of the same name; the result field is the count an
   operation reports, the statistic accumulates over the context. A child
   below an omitted directory is never counted. The walker is the only

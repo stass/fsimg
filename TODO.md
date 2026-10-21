@@ -480,7 +480,11 @@
   writers refuse such names, so the image needs a synthetic fixture or a
   spec-harness generator; then check `t`, `W` and `x -k` print the warning
   and the JSON `omitted_entries`, `x` without `-k` fails naming the
-  rendered path, and `t -v` shows no omitted entry.
+  rendered path, and `t -v` shows no omitted entry. The same fixture covers
+  the worker's LIST and VERIFY jobs carrying a nonzero omitted count, and
+  the parent's refusal of one from a CAT job (`test/worker.c` checks only a
+  forged extraction count today), and a namespace collision, whose
+  scratch-record path check has no test seam.
 
 * [Medium] **More than two FATs** (`lib/formats/fat/`, `cmd/fsimg/options.c`,
   `specs/design-fat-reader.md`, `specs/design-fat-writer.md`,
