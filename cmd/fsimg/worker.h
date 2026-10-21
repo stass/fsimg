@@ -212,6 +212,10 @@ fsimg_status_t fsimg_output_run(const char *, fsimg_output_producer_fn_t, void *
  */
 #define FSIMG_JOB_MANIFEST "@"
 #define FSIMG_JOB_CONTENTS "@contents"
+/* The longest tag with its terminator, which the path limit never bounds. */
+#define FSIMG_JOB_TAG_BYTES sizeof(FSIMG_JOB_CONTENTS)
+_Static_assert(sizeof(FSIMG_JOB_MANIFEST) <= FSIMG_JOB_TAG_BYTES,
+    "FSIMG_JOB_TAG_BYTES bounds every manifest tag");
 
 /* A create or plan job reads source roots and carries one path per root
  * descriptor; every other kind reads an image and carries its one

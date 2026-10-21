@@ -368,9 +368,21 @@ fsimg_job_path(const fsimg_worker_request_t *request, uint32_t index)
 	    request->selection);
 }
 
+/* Whether path is a create job's manifest tag: protocol naming a root
+ * descriptor's role, not an image path, so the path limit never applies.
+ */
+static bool
+manifest_tag(const fsimg_worker_request_t *request, const char *path)
+{
+	return (fsimg_job_has_roots(request->kind) &&
+	    (strcmp(path, FSIMG_JOB_MANIFEST) == 0 ||
+	    strcmp(path, FSIMG_JOB_CONTENTS) == 0));
+}
+
 /* The bytes of the job's path sequence, each path with its terminator.
- * Every path must be shorter than the path limit; since there are at most
- * UINT32_MAX paths of at most UINT32_MAX bytes, the total fits a uint64_t.
+ * Every image path must be shorter than the path limit, and a manifest
+ * tag is at most FSIMG_JOB_TAG_BYTES; since there are at most UINT32_MAX
+ * paths of at most UINT32_MAX bytes, the total fits a uint64_t.
  */
 fsimg_status_t
 fsimg_job_paths_length(const fsimg_worker_request_t *request, uint64_t *total,
@@ -388,6 +400,10 @@ fsimg_job_paths_length(const fsimg_worker_request_t *request, uint64_t *total,
 		path = fsimg_job_path(request, i);
 		if (path == NULL)
 			return (invalid_job(error));
+		if (manifest_tag(request, path)) {
+			*total += strlen(path) + 1;
+			continue;
+		}
 		length = strnlen(path, path_limit);
 		if (length >= path_limit)
 			return (fsimg_limit_error(error, FSIMG_RESOURCE_PATH,
@@ -489,7 +505,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 {
 	const fsimg_layer_t *compression;
 	uint64_t epoch, roots, count;
-	uint32_t path_limit;
+	uint32_t per_path_bytes;
 
 	fsimg_worker_request_init(request);
 	if (length != FSIMG_JOB_BYTES)
@@ -626,14 +642,17 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    (uint32_t)fsimg_wire_get64(raw + JOB_RESERVE_OFFSET);
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);
-	/* Each path is at least "/" and its terminator, and shorter than the
-	 * path limit.
+	/* Each path is at least "/" and its terminator. An image path is
+	 * shorter than the path limit, and a create job's manifest tag has its
+	 * own fixed length, whatever the limit.
 	 */
-	path_limit = request->limits.max_path_bytes == 0 ? 65536 :
+	per_path_bytes = request->limits.max_path_bytes == 0 ? 65536 :
 	    request->limits.max_path_bytes;
+	if (roots != 0 && per_path_bytes < FSIMG_JOB_TAG_BYTES)
+		per_path_bytes = FSIMG_JOB_TAG_BYTES;
 	count = roots == 0 ? 1 : roots;
 	if (*selection_length < 2 * count ||
-	    *selection_length > count * path_limit)
+	    *selection_length > count * per_path_bytes)
 		return (invalid_job(error));
 	/* Last, so a refused record leaves no roots for cleanup to close. */
 	request->root_count = (uint32_t)roots;

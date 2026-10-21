@@ -614,6 +614,11 @@ def test_manifest_host(executable, root):
                                           "-C", ".", "@host.mtree"])
     assert invoke(executable, work, ["xOf", "content/anchored.img",
                                      "/sub/file.txt"]).stdout == b"host bytes\n"
+    # The path limit bounds image paths only: a limit shorter than the
+    # worker's tag for the content directory still admits /x.
+    (work / "content/short.mtree").write_text("./x type=file fsimg.content=zero size=1\n")
+    invoke(executable, work, ["c", "-n", "-F", "fat12", "-l", "path=4",
+                              "-C", "content", "@short.mtree"])
 
     (work / "@odd").mkdir()
     (work / "@odd/inside").write_bytes(b"odd\n")

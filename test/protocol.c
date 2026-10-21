@@ -592,6 +592,9 @@ static void
 test_job_roots(void)
 {
 	static const char *const paths[] = { "/", "/EFI", "/a/b" };
+	static const char *const tagged[] = {
+		FSIMG_JOB_MANIFEST, FSIMG_JOB_CONTENTS, "/x"
+	};
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES], mutated[FSIMG_JOB_BYTES];
 	uint64_t selection;
@@ -631,9 +634,18 @@ test_job_roots(void)
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 
-	/* The path limit bounds every root path. */
+	/* The path limit bounds every root's image path, but not a manifest
+	 * root's tags, which are protocol: a limit shorter than
+	 * FSIMG_JOB_CONTENTS still carries them, on both sides of the wire.
+	 */
 	request.limits.max_path_bytes = 4;
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_ELIMIT);
+	request.root_paths = tagged;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(selection == sizeof(FSIMG_JOB_MANIFEST) +
+	    sizeof(FSIMG_JOB_CONTENTS) + 3);
 }
 
 /* The stack and selector cross the job wire unchanged. A slot state or

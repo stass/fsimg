@@ -67,10 +67,12 @@ In mode `c` an `@file` operand (`read_create_operands()` in
 in force as its content directory, when there is one (`open_roots()` in
 `cmd/fsimg/paths.c`). The manifest's descriptor reaches the worker as a root
 descriptor whose job path is `@` (`FSIMG_JOB_MANIFEST`), followed by the
-content directory's, whose job path is `@contents` (`FSIMG_JOB_CONTENTS`),
-and the worker hands them, or the manifest and `-1`, to
-`fsimg_writer_adopt_manifest()`, the form of `fsimg_writer_add_manifest()`
-that consumes its descriptors instead of duplicating them. The extractor
+content directory's, whose job path is `@contents` (`FSIMG_JOB_CONTENTS`).
+These tags are protocol, not image paths, so the path limit does not bound
+them; the job record's path budget allows for them. The worker hands
+them, or the manifest and `-1`, to `fsimg_writer_adopt_manifest()`, the
+form of `fsimg_writer_add_manifest()` that consumes its descriptors instead
+of duplicating them. The extractor
 writes no manifest; the [extraction](#extraction-writing-a-manifest)
 section describes the target.
 The SHA-256 implementation is the one [Digests](#digests) describes,
