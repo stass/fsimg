@@ -148,8 +148,10 @@ typedef struct ifs_record {
 /* The counts the table pass and the child pass collect, which info
  * reports. records_by_flag counts every record, shadowed and omitted ones
  * included, by its inode flag nibble 0x0, 0x8, 0xc and 0xe in that order.
- * omitted counts the roots of omitted subtrees, omitted_references the
- * boot and script references naming an omitted node. reference_matches and
+ * shadowed counts the records the tree gives no node: each earlier record
+ * of a duplicate path and each record below a non-directory. omitted
+ * counts the roots of omitted subtrees, omitted_references the boot and
+ * script references naming an omitted node. reference_matches and
  * reference_kind record, per reference slot, how many nodes carry its
  * inode word and the kind of the last one, for verification.
  */

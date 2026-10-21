@@ -110,6 +110,7 @@ Captures are in `~/qnx65-vm/captures-ifs/` (`FSIMG_IFS_NATIVE`), made with
 | `ifs-e10-sense` | E10 `dumpifs` sensitivity, through `capture.sh -i` |
 | `ifs-e3-extract` | `dumpifs -x` of the odd-path and duplicate images |
 | `ifs-s2-qnxbase-u`, `-u2` | `dumpifs -u` of X1 `qnxbase.ifs` against the oracle |
+| `e12-links` | E12 boot of records below a symbolic link: buildfiles, scripts, captures and serial transcripts |
 | `ifs-tools`, `ifs-tools-mkxfs` | Tool binaries for the identities above |
 
 ## Observations
@@ -228,6 +229,71 @@ extraction oracle only; checksum verification has no native oracle.
 6.5.0 has no `mount_ifs`, and `procnto` mounts only the image it boots. A
 nonbootable image has no native runtime reader.
 
+### Paths below a link at boot (E12)
+
+**Method.** Everything is in `e12-links/`; the scripts ran from a scratch
+copy of it and name that directory, so a rerun first edits their `cd`
+lines. The guest's `mkifs` builds each image in `/dev/shmem/e12`
+(`build.sh`) from a buildfile that starts with the attribute
+`[linker="ntox86-ld -T/lib/nto.link %(h!=0, -Ttext 0x%t%)%(d!=0, -Tdata 0x%d%) -o%o %i %[M -L%^i -uinit_%n -lmod_%n%]"]`,
+boots `[virtual=x86,bios +compress]` (or without `+compress`) with
+`startup-bios -D8250.3f8.115200 -v` and `procnto -v`, and marks its members
+`[data=copy]`. `capn.sh` prints each buildfile and `dumpifs -v`, writes the
+images to `hd0` at 2 MiB slots and captures the disk; `cut.py` cuts them
+out on the host and the guest's `cksum` matched. `mkfd.py` writes each
+`bios.boot`-prefixed image over the boot image inside a copy of the live
+CD's El Torito 2.88 MB floppy (the boot catalog's image at ISO LBA 31,
+extracted as `eltorito.img`), at byte 22528, which the floppy's own loader
+reads; the new image must fit the old one's `0x440 + stored_size` bytes.
+`bootfd.sh` boots one floppy in a separate headless
+`qemu-system-i386 -accel tcg -m 256 -drive file=fd.img,format=raw,if=floppy -boot a -serial file:ser.txt -display none -no-reboot`;
+the startup's `-D8250.3f8.115200` puts the console on COM1, so the boot
+script's `display_msg` lines land in the serial file, and the script waits
+for its final marker (`E12-DONE`, 120 seconds at most) before stopping
+QEMU. Without `[data=copy]`, a program from the image starts once and
+every later start fails with
+`Unable to start "cat" (2)` (`v5`, `b2`), so a script that runs a tool
+twice needs it.
+
+**Cases.** `c0` is the control. `cL` holds a link `L -> /some/dir` (an
+existing directory holding the file `x`), a link `L/a` and a file `L/b`;
+`cM` the same with the link last in the buildfile; `cN` a link
+`N -> /nowhere` with `N/a` and `N/b`; `cD` a directory record `D` with a
+link `D/a` and a file `D/b`; `cP` a link with nothing below it; `cA` all of
+them in one image. `mkifs` placed `L/a` before `L` and `L/b` after it,
+`M` before both `M/a` and `M/b`, and `N/a` before `N`. `cAu` is `cA`'s
+buildfile without `+compress` (`flags1` `0x01` against `0x0d`), and `cAr`
+is `cAu` with every record after the root reversed in the table by
+`rev.py`, which keeps every record's bytes and alignment, so both
+checksums are unchanged.
+
+**Results** (`ser-*.txt`, `out-*.txt`).
+
+* `ls -la /L` and `ls -ld /L` show only the link,
+  `L -> /some/dir`; the root lists `L`, `M` and `N` as links and `D` as a
+  directory.
+* `ls -la /L/a`, `ls -la /L/b`, `cat /L/a` and `cat /L/b` report
+  `No such file or directory`, as do the same paths below `M` and `N`.
+* `cd /L` succeeds and lists `/some/dir`'s own `x`; `cd /N` fails with
+  `No such file or directory`. The records stored below a link never
+  appear, neither below the link nor in its target.
+* Below the directory `D`, `D/a` and `D/b` list, open and read normally.
+* `cA`, `cAu` and `cAr` give the same answers line for line: the result
+  depends neither on the table order nor on compression, and an
+  uncompressed image boots through the same floppy loader (its banner is
+  `Loading IFS...done` instead of `Loading IFS...decompressing...done`).
+* `dumpifs -v` lists the records below a link as ordinary table rows.
+
+So `procnto` shadows every record whose path lies below a symbolic-link
+record. Records below a regular file or a FIFO were not booted.
+
+**Side observations, not investigated.** Implicit parents show different
+times: `usr` shows the build time in `c0`; `some` and `usr` show time 0 in
+`cA` and `cAu` and the build time in `cAr`; the explicit directory `D`
+shows its record's time 0 throughout. The early `b1` and `b2` attempts,
+whose scripts ran tools without `[data=copy]` or started a serial driver,
+are kept for completeness.
+
 ### S1: H3 boot images
 
 All eight have the startup header at offset 0: version 1, `flags1` `0x09`
@@ -240,9 +306,11 @@ ending at the end of the file. `ram_size = startup_size + imagefs_size`.
 | Chunks | 278 to 294 | 120 |
 | Records | 206 to 230 | 174 |
 | Kinds (directory, file, link) | 1, 153 to 177, 52 | 1, 131, 42 |
-| Implicit directories | 22 | 16 |
+| Implicit directories | 21 | 16 |
 | Inode flag nibbles | `0x0`, `0x8`, `0xc`, `0xe` | the same |
 | Duplicate paths (link record before file record) | 1 | 3 |
+| Records below a non-directory | 2 link records below one top-level link, both before it in the table | 0 |
+| Depth (components) | at most 6 | at most 4 |
 | Zero-length files | 1 | 0 |
 
 Comparing the startup sections of `PCM3_IFS1`, `PCM3_IFS1_Macan` and
@@ -257,7 +325,10 @@ the startup build, not the ImageFS.
 In all of them the mountpoint is `/`, `boot_ino[0]` is `0xe0000002` and
 names exactly one regular file record by its full inode word, `script_ino`
 is 3 and names one file the same way, flagged members are 4-byte aligned and
-none page-aligned, every name is valid UTF-8, and depth is at most 4.
+none page-aligned, and every name is valid UTF-8. `ifsdump.py`'s survey
+reports 22 implied directories for the `PCM3_IFS1` family because it
+counts the top-level link, a parent of the two records below it; the
+derived tree has 21.
 
 `PCM3_IFS2.ifs` begins with a 64-byte `hbcifs` header:
 
@@ -295,12 +366,17 @@ stays set) and the body decoded.
 * **Duplicate paths.** The last record with a path is the entry, as
   `dumpifs -x` leaves it; earlier records with that path are shadowed:
   counted by info, reported by verification, never delivered. `procnto`'s
-  own rule is unknown until a boot test (E12) runs; a different result
-  reopens this.
+  own rule is unknown: E12's boot method can test it, and a different
+  result reopens this.
 * **Odd paths.** A stored path with a `.` or `..` component, an empty
-  component, a leading slash, or a parent that is not a directory makes
-  the image `FSIMG_EUNSUPPORTED`: `mkifs` writes such paths but fsimg does
-  not represent them.
+  component or a leading slash makes the image `FSIMG_EUNSUPPORTED`:
+  `mkifs` writes such paths but fsimg does not represent them.
+* **Paths below a non-directory.** A record whose path lies below the
+  entry of a symbolic link, a regular file or a FIFO is shadowed, exactly
+  like an earlier record of a duplicate path, whatever the table order;
+  the non-directory is delivered. E12 shows `procnto` doing so for
+  symbolic links; files and FIFOs were not boot-tested, and the owner
+  chose the same rule for them.
 
 ## Evidence questions
 
@@ -325,12 +401,14 @@ stays set) and the body decoded.
 | Whether `dumpifs` checks checksums | No | E10 |
 | Native mount of a nonbootable image | None | E11 |
 | `hbcifs` header fields and checksum | Identity, decoded length and payload length identified; four fields open | S1 |
-| Whether the x86 startup accepts uncompressed and LZO bodies; startup fields that change on growth; offset-dependent processed members; raw members | Open: E8 and E12 are not run. They feed only the wrap (stage 11) and owner decision 6 | |
-| How to boot an x86 image in QEMU | Open: E12. The live CD's El Torito entry is a 2.88 MB floppy image with its own loader, so replacing `boot/fs/qnxbase.ifs` in a rebuilt ISO is the first candidate | |
+| Whether the x86 startup accepts uncompressed and LZO bodies; startup fields that change on growth; offset-dependent processed members; raw members | Uncompressed and UCL bodies boot. The rest is open: E8 is not run. It feeds only the wrap (stage 11) and owner decision 6 | E12 |
+| How to boot an x86 image in QEMU | The image replaces the boot image inside a copy of the live CD's El Torito floppy, a headless QEMU boots it, and `display_msg` markers in the COM1 serial file detect the boot | E12 |
+| How `procnto` resolves a path below a symbolic-link record | Through the link; the records stored below it are unreachable in every table order tested | E12 |
 
 ## Open evidence
 
-* E8 and E12, before the wrap stage.
+* E8, and E12's remaining boots (each E8 image, a raw member, a
+  duplicated path), before the wrap stage.
 * `dumpifs -u` copies of the eight H3 boot images, through the `big.img`
   route, before the decoder stage's gate.
 * The four unidentified `hbcifs` header fields, before `hbcifs`

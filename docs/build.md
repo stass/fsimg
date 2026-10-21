@@ -1210,10 +1210,10 @@ root block at byte 512 that both formats claim; each header bound at `x -
 record lengths 0, 1, 23 and 24, below each kind's minimum and crossing the
 table, the terminator, the inode flag nibbles, extended attributes and
 every field of the four kinds; implicit parents at depths 1, 32 and 512 and
-the default depth limit; duplicate paths, paths below a file, a link and a
-FIFO in either table order, and odd paths; components of 1, 255, 256 and
-1024 bytes and names outside the profile, omitted with their subtrees and
-counted; content ranges at and across the trailer and the table, shared
+the default depth limit; duplicate paths, records shadowed below a file, a
+link and a FIFO in either table order and at several depths, and odd
+paths; components of 1, 255, 256 and 1024 bytes and names outside the
+profile, omitted with their subtrees and counted; content ranges at and across the trailer and the table, shared
 ranges and zero-length files; every off-by-one of a symbolic link's target;
 boundary owners, modes and times; boot and script references; extraction;
 and 400 random trees in either byte order compared with the model.
@@ -1232,11 +1232,11 @@ the model: the status of open and, for an image that opens, every entry's
 kind, metadata and bytes and every `info` count. It prints only counts, and
 the capture's file name on a mismatch, never a member name; without the
 variable it prints `SKIP: FSIMG_IFS_NATIVE is not set` and exits 77. On
-macOS the 72 images give 64 opened, 8 unsupported and none mismatched, in
-0.7 seconds. The eight are the two captures made to hold a file record's
-descendant and odd paths, and six decoded H3 boot bodies, each holding two
-symbolic-link records below a symbolic-link record
-([TODO](todo-ifs.md)). Images `dumpifs -u` decompresses are not compared:
+macOS the 72 images give 71 opened, 1 unsupported and none mismatched, in
+0.4 seconds. The unsupported one is the capture made to hold odd paths;
+the capture holding a file record's descendant and the six decoded H3 boot
+bodies holding two symbolic-link records below a symbolic-link record open
+with those records shadowed. Images `dumpifs -u` decompresses are not compared:
 no such copies exist on this host.
 
 `test-codec`, in `make check`, tests the LZO1X and NRV2B decoders on

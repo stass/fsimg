@@ -260,9 +260,10 @@ remove a class of special cases rather than handling each case.
    the common walker's `prepare` and `replay` per directory. A duplicate
    path appears as adjacent equal keys; the stable sort keeps table order
    among them, so the last is the entry and the others are shadowed (owner
-   decision 10). A path below a non-directory is unsupported (owner
-   decision 11). Missing parents are synthesized with the values `mkifs`
-   gives an explicit directory record: mode `040755`, uid 0, gid 0, time 0.
+   decision 10). A record below a non-directory entry is shadowed the same
+   way (owner decision 11). Missing parents are synthesized with the
+   values `mkifs` gives an explicit directory record: mode `040755`, uid 0,
+   gid 0, time 0.
    Nothing holds the record table in RAM.
 3. **One table rule and one range rule.**
    * **Table.** The records tile `[dir_offset, hdr_dir_size - 4)` and four
@@ -453,6 +454,7 @@ Experiments E1 to E12 and the surveys S1 and S2 are defined in stage 1.
 | Whether `dumpifs` checks the ImageFS and stored checksums | E10 | Oracle sensitivity |
 | A native way to mount a nonbootable image on 6.5.0, given no `mount_ifs` | E11 | Owner decision 7 |
 | How to boot an x86 image in QEMU, and how a successful boot is detected | E12 | Stage 11 x86 gate |
+| How `procnto` resolves a path below a symbolic-link record (files and FIFOs follow by policy) | E12 | Owner decision 11 |
 | `hbcifs` header fields and checksum | S1 | `hbcifs` verification, owner decision 8 |
 
 ## Work packages
@@ -477,10 +479,13 @@ Every stage leaves `make -j32 check` passing and follows the gates below.
     does not see host writes while the VM runs.
   * **Out of the guest.** A `capture.sh` image of `hd0` or `hd1`, with the
     IFS at a recorded offset and length.
-* Establish the x86 boot method (E12). Candidates are a QNX4 volume on `hd0`
-  whose `/.boot` holds the image, booted by QEMU from that disk, or an ISO
-  that replaces `boot/fs/qnxbase.ifs`. Decide how a boot is detected: serial
-  output if the build script opens one, otherwise `shot.sh`.
+* The x86 boot method (E12): the guest's `mkifs` builds a `bios.boot`
+  image whose startup puts the console on COM1, the image replaces the
+  boot image inside a copy of the live CD's El Torito floppy, a separate
+  headless QEMU boots that floppy with the serial port written to a file,
+  and the build script's `display_msg` markers in that file detect the
+  boot. The [research record](ifs-research.md#paths-below-a-link-at-boot-e12)
+  gives the exact attributes, offsets and commands.
 * Build the out-of-tree `liblzo2` and `libucl` oracles. The `liblzo2`
   decoder turns IFS2's payload into a bare ImageFS, whose own checksum
   witnesses the decode.
@@ -527,7 +532,7 @@ with its buildfile, its command record and `dumpifs -v` output:
 | E9 Byte order | A big-endian nonbootable image, if any attribute or target produces one |
 | E10 Oracle sensitivity | One flipped byte each in a record, in file data, in the ImageFS trailer and in the stored trailer: what `dumpifs` reports |
 | E11 Mounting | Whether 6.5.0 mounts a nonbootable image (`procnto` options, `mount` types) |
-| E12 Boot | The stage 0 method on an unmodified `qnxbase.ifs`, on each E8 image, and on the E8 raw-member image |
+| E12 Boot | The stage 0 method on records below a symbolic link, which `procnto` shadows; on a duplicated path; on an unmodified `qnxbase.ifs`, on each E8 image, and on the E8 raw-member image |
 
 The surveys are:
 
@@ -654,8 +659,8 @@ repository records only pass and fail counts.
     crossing the table end; a missing or nonzero terminator; a zero inode
     word; nonzero extended-attribute offsets.
   * **Hierarchy:** implicit parents at depth 1 and depth 32; a duplicate
-    path; a path below a file; an absolute path, `..` and empty components;
-    the root record present and absent.
+    path; a path below a file, shadowed; an absolute path, `..` and empty
+    components; the root record present and absent.
   * **Ranges:** a range ending exactly at the trailer; a range including
     the trailer; a range inside the record table; start plus length
     overflowing 32 bits; shared ranges, including extraction of a heavily
@@ -680,14 +685,17 @@ repository records only pass and fail counts.
   * the table rule and the range rule (decision 3);
   * the boot and script references, each matching one record's full inode
     word;
-  * shadowed duplicate paths, reported by name class and count.
+  * shadowed records, the earlier records of duplicate paths and the
+    records below a non-directory, reported by count; a reference that a
+    shadowed record also carries waits on the owner's answer to the
+    [references item](todo-ifs.md).
 * Tests cover:
   * a flipped byte in each region;
   * a trailer of the wrong byte order;
   * dangling and duplicate boot references;
   * a reference to a directory;
   * nonzero padding, which verifies;
-  * a shadowed duplicate path;
+  * a shadowed duplicate path and a record shadowed below a link;
   * verification incomplete after an unsupported record.
 * **Gate:**
   * every well-formed native capture and every S1 and S2 copy verifies;
@@ -1005,9 +1013,18 @@ The owner has settled all eleven.
     by verification, never delivered. A boot test showing that `procnto`
     resolves differently reopens this.
 11. **Paths `mkifs` writes but fsimg does not represent.** A stored path
-    with a `.` or `..` component, an empty component, a leading slash, or a
-    parent that is not a directory makes the image `FSIMG_EUNSUPPORTED`,
-    not corrupt: `mkifs` writes such paths verbatim.
+    with a `.` or `..` component, an empty component or a leading slash
+    makes the image `FSIMG_EUNSUPPORTED`, not corrupt: `mkifs` writes such
+    paths verbatim. A record whose path lies below a non-directory entry (a
+    symbolic link, a regular file or a FIFO, the last record at that path)
+    is shadowed, exactly like the earlier records of a duplicate path:
+    never delivered, counted in info's `shadowed` detail, reported by
+    verification, never an error, whatever the table order. The
+    non-directory entry itself is delivered normally. Boot test E12 shows
+    `procnto` hiding the records below a symbolic link in every table
+    order tested, and six of the eight H3 boot images hold two such
+    records; files and FIFOs follow the same rule as fsimg policy, so that
+    one rule covers every non-directory.
 
 ## Risks
 

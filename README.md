@@ -157,10 +157,12 @@ files, directories, symbolic links and FIFOs with owner, mode and
 modification time. `fsimg i` reports the mountpoint and the header's boot
 references and mount flags. A parent without a record is listed as a
 directory with mode 0755, owner 0 and time 0; of records with the same path
-only the last is listed. A path below a file, symbolic link or FIFO record,
-and a path with `.`, `..` or empty components, is unsupported. A compressed
-or boot image's startup code and compression are not read, and ImageFS
-images cannot be verified or created.
+only the last is listed. When that last record is a file, symbolic link or
+FIFO, no record below its path is listed (`procnto` hides the records
+below a link at boot the same way); `fsimg i` counts both kinds as
+shadowed. A path with `.`, `..` or empty components is unsupported. A
+compressed or boot image's startup code and compression are not read, and
+ImageFS images cannot be verified or created.
 FAT stores calendar fields without a timezone, and readers report wall times.
 Raw sinks may be incomplete on failure. Callback source and sink storage must
 be disjoint. File publication can report an existing target, uncertain outcome,

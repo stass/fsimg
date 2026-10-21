@@ -29,7 +29,7 @@ two share no code, since they decode different records.
 | `descriptor.c` | `fsimg_ifs_format`: the `ifs` name, its capability record, the probe and the reader and writer operations |
 | `records.c` | Byte-order codecs and decode/encode of the header and of every record kind; pure functions without I/O |
 | `volume.c` | Header validation, the mountpoint, and the record-table pass |
-| `tree.c` | The path sort, the derived hierarchy, synthesized parents, shadowed duplicates and the child groups |
+| `tree.c` | The path sort, the derived hierarchy, synthesized parents, shadowed records and the child groups |
 | `names.c` | Path components and the profile |
 | `directory.c` | `prepare`, `replay`, `keys` and `key` |
 | `read.c` | `fsimg_ifs_reader_ops`: open, close, resolve and volume information |
@@ -104,8 +104,8 @@ next reads:
    the [table pass](#the-table-pass) states, validating each one and
    appending its path and table offset to the path stream.
 4. **Hierarchy.** Sort the path stream and derive the
-   [child groups](#the-derived-hierarchy). Odd paths and non-directory
-   parents fail here.
+   [child groups](#the-derived-hierarchy). Records below a non-directory
+   are shadowed here; odd paths have already failed in the table pass.
 
 The reader state then holds the header, the mountpoint when valid, the
 counters the table pass collected, the group table, the sealed child
@@ -157,7 +157,8 @@ in three bounded steps over the metadata store:
    the last emitted path, the root at depth 0, so its depth is at most 512,
    the most a 1024-byte path holds, and no limit of the session bounds it.
    Every emitted node is pushed, whatever its kind, which is what makes
-   the parent-kind check hold by construction. The profile result is the
+   the parent-kind check hold by construction: a path below a non-directory
+   always meets that node on the stack. The profile result is the
    common profile function's answer for the node's own component, explicit
    or synthesized, the same function preparation applies when the node is
    admitted under the
@@ -178,21 +179,33 @@ in three bounded steps over the metadata store:
    * **Ancestors.** Let `m` be the number of leading components this path
      shares with the last emitted path, which is the stack's path; a
      shadowed record never changes it, so the entry after a shadowed run
-     meets the stack as the last emitted record left it. The stack is popped to depth
-     `m`, whose top is the path's nearest ancestor that has a node. If
-     that node's kind is not directory, this path lies below a file, link
-     or FIFO: `FSIMG_EUNSUPPORTED`. Since a shadowed record is never
-     pushed, a file record that shadows a directory record is the node its
-     descendants meet. Components `c(m+1) .. c(k-1)` name parents the
-     table omits: each is synthesized in turn, emitting a directory child
-     record with the synthesized marker and pushing its node. The path's
-     own record is then emitted and pushed with its kind.
+     meets the stack as the last emitted record left it. The stack is
+     popped to depth `m`, whose top is the path's nearest ancestor that
+     has a node.
+   * **Below a non-directory.** If that node's kind is not directory, this
+     path lies below a file, link or FIFO, and the record is
+     [shadowed](design-ifs.md#paths-below-a-non-directory): the shadowed
+     counter advances, nothing is synthesized, emitted or pushed, and the
+     stack stays popped to the non-directory, which every later path of
+     its subtree meets in turn. The node on the stack is the entry of its
+     path, the last record in table order, since an earlier duplicate is
+     never pushed: a link record that shadows a directory record is the
+     node the directory's descendants meet, and a directory record that
+     shadows a link record is a parent. The sorted order makes the
+     outcome independent of the table order, and since a path's nearest
+     node is found before any parent is synthesized, no parent below a
+     non-directory is ever synthesized or counted.
+   * **Placement.** Otherwise components `c(m+1) .. c(k-1)` name parents
+     the table omits: each is synthesized in turn, emitting a directory
+     child record with the synthesized marker and pushing its node. The
+     path's own record is then emitted and pushed with its kind.
    * **References.** The emitted node's inode word is compared with each
      nonzero `boot_ino[i]` and `script_ino`: a match advances that
      reference's count and records the node's kind. Five references at
-     most, so this is constant state. Shadowed records never match; an
-     omitted node matches like a delivered one, since it is the record at
-     its path and `procnto` names it by inode, not by fsimg's profile.
+     most, so this is constant state. Shadowed records, duplicates and
+     records below a non-directory alike, never match; an omitted node
+     matches like a delivered one, since it is the record at its path and
+     `procnto` names it by inode, not by fsimg's profile.
 3. **Group sort and table.** The child stream is sorted by parent index,
    stably, so each directory's children are one contiguous group in
    component order. One sequential pass writes a paged array
@@ -306,9 +319,11 @@ to reconcile, and the table pass validated every record at open. It runs:
   read-through, when requested, reads each file's and link's bytes through
   common delivery.
 * **Shadowed records.** The count is reported as the `shadowed` detail of
-  the volume information, and the CLI's `W` result prints it. A shadowed
-  record is validated, so it does not make the verification incomplete:
-  every H3 boot image carries them and verifies.
+  the volume information, and the CLI's `W` result prints it; it counts
+  earlier duplicates and records below a non-directory together. A
+  shadowed record is validated at open like any other, so it does not
+  make the verification incomplete: every H3 boot image carries three and
+  verifies.
 
 The report counts delivered files and directories, the root and the
 synthesized ones included and omitted subtrees excluded, logical bytes and
@@ -448,7 +463,7 @@ Reader:
 | Condition | Status |
 | --- | --- |
 | No `imagefs` at offset 0; a prefix shorter than `0x58` bytes | `FSIMG_EFORMAT` |
-| Recognized but unobserved: a flags byte other than `0x04` or `0x05`; a nonzero spare word; unaligned `dir_offset` or `hdr_dir_size`; a mountpoint over 1024 bytes or a `dir_offset` that is not its NUL rounded up to 4; a record length not a multiple of 4; a zero inode word; a nonzero extended-attribute offset; an unknown flag nibble, type or high mode bits; a nonzero FIFO word; a link layout other than the one tabled, or a target of 0 or above 1024 bytes; a path over 1024 bytes, absolute, with an empty, `.` or `..` component, or below a non-directory; a non-directory record with the empty path; a reference to a non-file; an invalid mountpoint under `verify` | `FSIMG_EUNSUPPORTED` |
+| Recognized but unobserved: a flags byte other than `0x04` or `0x05`; a nonzero spare word; unaligned `dir_offset` or `hdr_dir_size`; a mountpoint over 1024 bytes or a `dir_offset` that is not its NUL rounded up to 4; a record length not a multiple of 4; a zero inode word; a nonzero extended-attribute offset; an unknown flag nibble, type or high mode bits; a nonzero FIFO word; a link layout other than the one tabled, or a target of 0 or above 1024 bytes; a path over 1024 bytes, absolute, or with an empty, `.` or `..` component; a non-directory record with the empty path; a reference to a non-file; an invalid mountpoint under `verify` | `FSIMG_EUNSUPPORTED` |
 | A header bound violated; no mountpoint NUL before `dir_offset`; a record crossing the table end, a zero length, a length below 24 or below the kind's minimum, a path without a NUL; a nonzero terminator; a range outside `[hdr_dir_size, image_size - 4)` or overflowing; a reference naming no node or several; a volume longer than `image_size` or a nonzero checksum under `verify` | `FSIMG_ECORRUPT` |
 | Unrepresentable selection component | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |

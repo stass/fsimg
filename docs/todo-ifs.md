@@ -3,36 +3,34 @@
 Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
 [research record](ifs-research.md) owns the evidence and provenance.
 
-* [High] **H3 boot bodies with records below a symbolic link**
-  (`lib/formats/ifs/tree.c`, `specs/design-ifs.md`): six of the eight
-  decoded H3 boot bodies, the `PCM3_IFS1` family, hold a symbolic-link
-  record at the top level and two symbolic-link records whose paths lie
-  below it. Owner decision 11 makes a path below a non-directory
-  `FSIMG_EUNSUPPORTED`, so the reader refuses them, while the design's PCM
-  section says all eight bodies verify. The owner decides between refusing
-  them, as the reader does, and a rule that admits them, such as listing
-  the descendants below a synthesized directory or omitting them; the
-  `PCM3_Emergency` bodies, `PCM3_IFS2` and the X1 bodies open.
-
-* [Medium] **Boot experiments E8 and E12** (`tools/qnx/guest/popifs.sh`,
-  `docs/ifs-research.md`): x86 `startup-bios` and `procnto` images,
-  uncompressed and with each codec, with and without the BIOS prefix, the
-  growth and offset-dependence variants, raw members, and a QEMU boot
-  method with boot detection. They answer owner decision 6 and decision
-  10's growth refusal, and gate the wrap stage. Specifically: the native
-  uncompressed layout the `qnxboot` profile assumes for compression `0x00`
-  (`stored_size = startup_size + imagefs_size`, no stored trailer); whether
-  `mkifs` changes any startup field beyond the derived ones when an image
-  grows (the wrap's growth refusal stays until it is known); whether
-  processed members' bytes depend on their image offset (if so, the wrap
-  scope returns to the owner); and the inode-flag nibble the writer's boot
-  settings give referenced records, whose closed table is empty until then:
-  every `boot1=` to `boot4=` and `script=` setting is refused, so the
-  wrap's native boot gates use a native bootable body until it is filled. The live CD's El Torito
-  entry is a 2.88 MB floppy image with its own loader, so a rebuilt ISO
-  with a replaced `boot/fs/qnxbase.ifs` is the first boot candidate. The
-  same boot test settles how `procnto` resolves a duplicated path (owner
-  decision 10).
+* [Medium] **E8 and the remaining E12 boots** (`tools/qnx/guest/popifs.sh`,
+  `docs/ifs-research.md`), each run with the [E12 boot
+  method](ifs-research.md#paths-below-a-link-at-boot-e12): LZO bodies and an
+  image without the BIOS prefix; whether `mkifs` changes any startup field
+  beyond the derived ones when an image grows (the wrap's growth refusal
+  stays until it is known); whether processed members' bytes depend on their
+  image offset (if so, the wrap scope returns to the owner); raw members;
+  the native uncompressed layout the `qnxboot` profile assumes for
+  compression `0x00` (`stored_size = startup_size + imagefs_size`, no stored
+  trailer); the inode-flag nibble the writer's boot settings give referenced
+  records, whose closed table is empty until then, so every `boot1=` to
+  `boot4=` and `script=` setting is refused and the wrap's native boot gates
+  use a native bootable body; and how `procnto` resolves a duplicated path
+  (owner decision 10). They answer owner decision 6 and decision 10's growth
+  refusal, and gate the wrap stage.
+* [Medium] **References and shadowed records** (`lib/formats/ifs/tree.c`,
+  `lib/formats/ifs/volume.c`, the verifier,
+  `specs/design-ifs-driver.md#verification`): reference matching counts
+  only the nodes the tree emits, and inode words need not be unique, so a
+  shadowed record (an earlier duplicate, or a whole subtree below a link)
+  can carry the inode word of a delivered boot program unseen. If the
+  native startup finds `boot_ino` records by scanning the table rather
+  than by path (untested), it could load the shadowed record's bytes while
+  fsimg verifies the delivered one. Recommended: count reference matches
+  over every record in the table pass as well, and have verification
+  refuse a reference that a shadowed record also carries; test it when
+  verification lands, with the acceptance matrix's "naming only a
+  shadowed record" cases. The reference rule is an owner decision.
 * [Medium] **`dumpifs -u` copies of the H3 boot images**
   (`docs/ifs-research.md`): the eight images exceed `load.py`'s 3 MiB
   budget. Write them into `big.img` while the VM is stopped, run

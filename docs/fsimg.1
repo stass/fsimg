@@ -331,10 +331,13 @@ An ImageFS is read from the start of the slice, in either byte order; the
 startup code and compression of a boot or compressed image are not read.
 A parent without a record lists as a directory with mode 0755, owner 0 and
 time 0, and of records with the same path only the last lists.
-A path below a file, symbolic link or FIFO record, or with
+When that last record is a file, symbolic link or FIFO, no record below
+its path lists, and both kinds count as shadowed; QNX hides the records
+below a symbolic link at boot the same way.
+A path with
 .Pa \&. ,
 .Pa ..
-or empty components, is unsupported.
+or empty components is unsupported.
 ImageFS images cannot be verified.
 .Pp
 A gzip-compressed image, a file or standard input, is detected from its

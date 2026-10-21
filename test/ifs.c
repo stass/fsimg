@@ -537,6 +537,7 @@ typedef struct model {
 	uint64_t	 by_flag[4];
 	uint64_t	 implicit;
 	uint64_t	 shadowed;
+	uint64_t	 below;		/* the shadowed below a non-directory */
 	uint64_t	 omitted;
 	uint64_t	 omitted_references;
 	uint32_t	 references[5];
@@ -796,19 +797,40 @@ model_deliver(model_t *m, const model_node_t *node, const char *path)
 	e->content_length = rec->content_length;
 }
 
+/* The number of nodes below node that hold a record. */
+static uint64_t
+model_records_below(const model_t *m, size_t node)
+{
+	uint64_t count = 0;
+
+	for (size_t c = m->nodes[node].first_child; c != 0;
+	    c = m->nodes[c - 1].next_sibling)
+		count += (m->nodes[c - 1].record >= 0 ? 1 : 0) +
+		    model_records_below(m, c - 1);
+	return (count);
+}
+
 /* List the subtree of node depth first, children in component order;
- * hidden is set below a name outside the profile. A node with children
- * must be a directory.
+ * hidden is set below a name outside the profile. Below a node whose last
+ * record is not a directory nothing is listed and every record is
+ * shadowed, as procnto hides the records below a link (the format design
+ * extends this to files and FIFOs); the parents there are neither listed
+ * nor counted. model_records_below() counts nodes, one per path: the
+ * earlier records of a duplicate path were counted by model_build().
  */
-static fsimg_status_t
+static void
 model_list(model_t *m, size_t node, const char *path, bool hidden)
 {
 	size_t *children, count, capacity;
-	gen_kind_t kind;
-	fsimg_status_t status;
+	uint64_t below;
 
-	kind = m->nodes[node].record < 0 ? GEN_DIR :
-	    m->records[m->nodes[node].record].kind;
+	if (m->nodes[node].record >= 0 &&
+	    m->records[m->nodes[node].record].kind != GEN_DIR) {
+		below = model_records_below(m, node);
+		m->below += below;
+		m->shadowed += below;
+		return;
+	}
 	count = 0;
 	capacity = 16;
 	children = xmalloc(capacity * sizeof(*children));
@@ -822,9 +844,6 @@ model_list(model_t *m, size_t node, const char *path, bool hidden)
 		}
 		children[count++] = c - 1;
 	}
-	status = FSIMG_OK;
-	if (count != 0 && kind != GEN_DIR)
-		status = FSIMG_EUNSUPPORTED;
 	/* Insertion sort by component bytes. */
 	for (size_t i = 1; i < count; i++) {
 		for (size_t j = i; j > 0 && model_name_order(
@@ -836,7 +855,7 @@ model_list(model_t *m, size_t node, const char *path, bool hidden)
 			children[j - 1] = t;
 		}
 	}
-	for (size_t i = 0; i < count && status == FSIMG_OK; i++) {
+	for (size_t i = 0; i < count; i++) {
 		const model_node_t *c = &m->nodes[children[i]];
 		bool outside = !model_in_profile(c->name, c->name_length);
 		size_t prefix = strlen(path);
@@ -856,12 +875,10 @@ model_list(model_t *m, size_t node, const char *path, bool hidden)
 				m->omitted_references++;
 		if (!hidden && !outside)
 			model_deliver(m, c, child_path);
-		status = model_list(m, children[i], child_path,
-		    hidden || outside);
+		model_list(m, children[i], child_path, hidden || outside);
 		free(child_path);
 	}
 	free(children);
-	return (status);
 }
 
 static void
@@ -931,7 +948,7 @@ model_build(model_t *m, const unsigned char *image, size_t length)
 	}
 	if (m->nodes[0].record < 0)
 		m->implicit++;
-	m->status = model_list(m, 0, "", false);
+	model_list(m, 0, "", false);
 }
 
 /*
@@ -2087,6 +2104,20 @@ tree_detail(const char *const *members, const char *name)
 	return (detail(&info, name));
 }
 
+/* Require the tree to list exactly paths, as expect_tree_paths(), with
+ * shadowed records counted by info.
+ */
+static void
+expect_shadowed(const char *const *members, const char *const *paths,
+    uint64_t shadowed, const char *label)
+{
+	expect_tree_paths(members, paths, label);
+	if (tree_detail(members, "shadowed") != shadowed)
+		fprintf(stderr, "%s: shadowed is not %" PRIu64 "\n", label,
+		    shadowed);
+	CHECK(tree_detail(members, "shadowed") == shadowed);
+}
+
 /* A path of depth components "d/d/.../f", the last one a file. */
 static void
 deep_path(char *path, size_t size, unsigned depth)
@@ -2186,34 +2217,69 @@ test_hierarchy(void)
 	expect_tree((const char *[]){ "d:", "l:", NULL }, FSIMG_EUNSUPPORTED,
 	    "a link root");
 
-	/* A path below a file, a link or a FIFO, its record before and
-	 * after the descendant's.
+	/* A path below a file, a link or a FIFO is shadowed, its record
+	 * before and after the descendant's; no parent is synthesized for it.
 	 */
-	expect_tree((const char *[]){ "f:x", "f:x/y", NULL },
-	    FSIMG_EUNSUPPORTED, "a path below a file");
-	expect_tree((const char *[]){ "f:x/y", "f:x", NULL },
-	    FSIMG_EUNSUPPORTED, "a path below a later file");
-	expect_tree((const char *[]){ "l:x", "f:x/y/z", NULL },
-	    FSIMG_EUNSUPPORTED, "a path below a link");
-	expect_tree((const char *[]){ "f:x/y", "l:x", NULL },
-	    FSIMG_EUNSUPPORTED, "a path below a later link");
-	expect_tree((const char *[]){ "p:x", "d:x/y", NULL },
-	    FSIMG_EUNSUPPORTED, "a path below a FIFO");
-	expect_tree((const char *[]){ "f:x/y", "p:x", NULL },
-	    FSIMG_EUNSUPPORTED, "a path below a later FIFO");
-	/* A directory shadowed by a file leaves its descendants below the
-	 * file; a file shadowed by a directory is a parent.
+	expect_shadowed((const char *[]){ "f:x", "f:x/y", NULL },
+	    (const char *[]){ "/x", NULL }, 1, "a path below a file");
+	expect_shadowed((const char *[]){ "f:x/y", "f:x", NULL },
+	    (const char *[]){ "/x", NULL }, 1, "a path below a later file");
+	expect_shadowed((const char *[]){ "l:x", "f:x/y/z", NULL },
+	    (const char *[]){ "/x", NULL }, 1, "a path below a link");
+	CHECK(tree_detail((const char *[]){ "l:x", "f:x/y/z", NULL },
+	    "implicit_directories") == 1);
+	expect_shadowed((const char *[]){ "f:x/y", "l:x", NULL },
+	    (const char *[]){ "/x", NULL }, 1, "a path below a later link");
+	expect_shadowed((const char *[]){ "p:x", "d:x/y", NULL },
+	    (const char *[]){ "/x", NULL }, 1, "a path below a FIFO");
+	expect_shadowed((const char *[]){ "f:x/y", "p:x", NULL },
+	    (const char *[]){ "/x", NULL }, 1, "a path below a later FIFO");
+	/* Every record of a subtree below a link, at any depth and in any
+	 * order, as in the H3 boot images, and the walk continuing after it.
 	 */
-	expect_tree((const char *[]){ "d:d", "f:d/x", "f:d", NULL },
-	    FSIMG_EUNSUPPORTED, "a directory shadowed by a file");
-	expect_tree_paths((const char *[]){ "f:d", "d:d", "f:d/x", NULL },
-	    (const char *[]){ "/d", "/d/x", NULL },
+	expect_shadowed((const char *[]){ "d:", "f:L/c/d/e", "l:L/a", "l:L",
+	    "d:L/c", "f:L/b", "f:z", NULL }, (const char *[]){ "/L", "/z",
+	    NULL }, 4, "a subtree below a link");
+	expect_shadowed((const char *[]){ "d:", "f:a/L/x", "l:a/L", "f:a/b",
+	    NULL }, (const char *[]){ "/a", "/a/L", "/a/b", NULL }, 1,
+	    "a link with a sibling after its subtree");
+	expect_shadowed((const char *[]){ "l:L", "f:L/a", "f:L/a", NULL },
+	    (const char *[]){ "/L", NULL }, 2, "a duplicate below a link");
+	/* The record delivered at a path decides: a directory shadowed by a
+	 * file or link leaves its descendants below a non-directory, and a
+	 * file or link shadowed by a directory is a parent.
+	 */
+	expect_shadowed((const char *[]){ "d:d", "f:d/x", "f:d", NULL },
+	    (const char *[]){ "/d", NULL }, 2, "a directory shadowed by a file");
+	expect_shadowed((const char *[]){ "d:L", "f:L/x", "l:L", NULL },
+	    (const char *[]){ "/L", NULL }, 2, "a directory shadowed by a link");
+	expect_shadowed((const char *[]){ "f:d", "d:d", "f:d/x", NULL },
+	    (const char *[]){ "/d", "/d/x", NULL }, 1,
 	    "a file shadowed by a directory");
+	expect_shadowed((const char *[]){ "l:L", "f:L/x", "d:L", NULL },
+	    (const char *[]){ "/L", "/L/x", NULL }, 1,
+	    "a link shadowed by a directory");
 	/* d-x sorts beside d, not below it; d/x is below the file d. */
 	expect_tree_paths((const char *[]){ "f:d", "f:d-x", NULL },
 	    (const char *[]){ "/d", "/d-x", NULL }, "a file beside d-x");
-	expect_tree((const char *[]){ "f:d", "f:d-x", "f:d/x", NULL },
-	    FSIMG_EUNSUPPORTED, "a file d with d-x and d/x");
+	expect_shadowed((const char *[]){ "f:d", "f:d-x", "f:d/x", NULL },
+	    (const char *[]){ "/d", "/d-x", NULL }, 1,
+	    "a file d with d-x and d/x");
+	/* A link outside the profile is omitted once; the record below it is
+	 * shadowed, not omitted.
+	 */
+	CHECK(tree_detail((const char *[]){ "l:x\x01", "f:x\x01/y", NULL },
+	    "omitted") == 1);
+	expect_shadowed((const char *[]){ "l:x\x01", "f:x\x01/y", "f:z", NULL },
+	    (const char *[]){ "/z", NULL }, 1, "a path below an omitted link");
+	/* A shadowed record is validated like any other: a range inside the
+	 * table below a link still fails open.
+	 */
+	tree_image(&g, (const char *[]){ "l:L", "f:L/x", NULL });
+	expect(&g, FSIMG_OK, "a valid file below a link");
+	put32(&g, gen_record(&g, 1) + R_FILE_OFFSET, g.dir_offset);
+	expect(&g, FSIMG_ECORRUPT, "a corrupt range below a link");
+	gen_free(&g);
 	expect_tree_paths((const char *[]){ "f:a-b", "f:a/b", NULL },
 	    (const char *[]){ "/a", "/a/b", "/a-b", NULL },
 	    "siblings ordered by component");
@@ -2821,7 +2887,7 @@ test_random(void)
 	static const char *const components[] = {
 		"a", "b", "a-b", "B", "caf\xc3\xa9", "x\x01", "z"
 	};
-	unsigned outcomes[3] = { 0, 0, 0 };
+	unsigned opened = 0, below = 0;
 	char path[64], target[16];
 
 	for (unsigned round = 0; round < 400; round++) {
@@ -2868,14 +2934,14 @@ test_random(void)
 		model_build(&m, g.image, g.length);
 		list_image(g.image, g.length, 0, &l);
 		CHECK(listing_matches(&l, &m, "a random tree"));
-		outcomes[m.status == FSIMG_OK ? 0 :
-		    m.status == FSIMG_EUNSUPPORTED ? 1 : 2]++;
+		opened += m.status == FSIMG_OK ? 1 : 0;
+		below += m.below != 0 ? 1 : 0;
 		listing_free(&l);
 		model_free(&m);
 		gen_free(&g);
 	}
-	/* Both outcomes occur, and nothing else. */
-	CHECK(outcomes[0] > 50 && outcomes[1] > 50 && outcomes[2] == 0);
+	/* Every tree opens, and records below a non-directory are common. */
+	CHECK(opened == 400 && below > 50);
 }
 
 /* Extraction of a tree of files and directories. */

@@ -119,7 +119,9 @@ directories, shadowed records, omitted subtrees and references to omitted
 entries.
 An ImageFS parent without a record reads as a directory with mode 0755,
 owner 0 and time 0, and of records with the same path only the last is
-returned.
+returned; when that last record is a file, symbolic link or FIFO, no
+record below its path is returned, and info counts both kinds of hidden
+record as shadowed.
 .Fn fsimg_verify
 requires an untouched reader and consumes traversal.
 FSIMG_VERIFY_PAYLOAD also reads initialized payload bytes.

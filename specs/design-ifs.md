@@ -331,7 +331,7 @@ sorted order. [X1], [S1]
 ### Implicit directories
 
 `mkifs` writes a directory record only for a `type=dir` entry; every other
-parent is implicit. H3's boot images have one directory record and 16 to 22
+parent is implicit. H3's boot images have one directory record and 16 to 21
 implicit directories, X1's one and two. A missing parent is synthesized as a
 directory with mode `040755`, uid 0, gid 0 and time 0, the values `mkifs`
 gives an explicit directory record. No native reader exposes an implicit
@@ -347,10 +347,11 @@ produces only it. The reader does not require it: a table without an
 empty-path record gets its root synthesized exactly as any other missing
 parent, which also covers the empty table. A record with the empty path and
 a kind other than directory is `FSIMG_EUNSUPPORTED`, whether it is the
-entry or shadowed: the decision is made on the record, and a root that is
-not a directory would put every other path below a non-directory. The
-root is never delivered as an entry, so a root record contributes only its
-kind and its inode word, which a boot or script reference may name. [X1]
+entry or shadowed: the decision is made on the record, and a volume whose
+root is not a directory has no tree to deliver, since every other path
+would lie [below a non-directory](#paths-below-a-non-directory). The root
+is never delivered as an entry, so a root record contributes only its kind
+and its inode word, which a boot or script reference may name. [X1]
 
 ### Duplicates
 
@@ -362,22 +363,54 @@ keeps table order among them, so the last record in table order is the
 entry and the earlier ones are shadowed. A shadowed record is validated
 like any other, counted by info, reported by verification, and never
 delivered: it has no entry, no key and no content, and it is not a parent.
-A file record that shadows a directory record of the same path therefore
-makes every path below it a path below a non-directory. A duplicate root
-follows the same rule. [X1], [S1]
+A duplicate root follows the same rule. A record below a non-directory is
+[shadowed](#paths-below-a-non-directory) the same way. [X1], [S1]
+
+### Paths below a non-directory
+
+`mkifs` accepts a path below a regular file (`d` and `d/x`) or a symbolic
+link, and its table order puts such a record before or after the
+non-directory's own record depending on the buildfile; six of the eight H3
+boot images hold one top-level link with two link records below it.
+`procnto` shadows them: booted from such an image, it lists the link
+alone, resolves every path below it through the link's target, and never
+shows the records stored below it, in every table order tested.
+`dumpifs -v` lists them as table rows, and `dumpifs -x` fails on a file
+below a file.
+
+The record delivered at a path decides:
+
+* When the last record with a path, the entry, is a regular file,
+  symbolic link or FIFO, every record whose path lies below that path is
+  shadowed exactly as an earlier duplicate is: validated, counted by info
+  in the same `shadowed` count, reported by verification, matched by no
+  reference, and never delivered. No parent is synthesized for it, so a
+  shadowed subtree adds no implicit directory, and nothing below it is a
+  parent. The table order does not matter.
+* A shadowed duplicate never decides anything. A directory record followed
+  by a link record with the same path leaves the link as the entry and the
+  directory and every record below it shadowed; a link record followed by
+  a directory record leaves the directory as the entry, a parent like any
+  other, with only the link shadowed.
+* Shadowing is a property of the derived tree and comes before the
+  [profile](#names-and-the-profile): a record below a non-directory is
+  shadowed, not omitted, even when the non-directory or an ancestor lies
+  outside the profile.
+
+For symbolic links the rule is the observed `procnto` behavior. For files
+and FIFOs it is fsimg policy, one rule for every non-directory, since no
+path below a file or a FIFO names anything a POSIX lookup could reach.
+[E12], [X1], [S1]
 
 ### Odd paths
 
 `mkifs` strips a leading `./` and leading slashes but stores `x/../y` and
-`emp//ty` verbatim, and accepts a path below a regular file (`d` and
-`d/x`); `dumpifs -x` fails on the empty component and on the file parent.
-fsimg does not represent such paths: a stored path that is absolute, has an
-empty component, has a `.` or `..` component, or lies below a record whose
-entry is not a directory makes the image `FSIMG_EUNSUPPORTED`, not
-corrupt, because the producer writes them. The empty path is the root, not
-an empty component. The absolute, empty and dot cases are found in the
-table pass at open; the non-directory parent is found when the sorted run
-is read. [X1]
+`emp//ty` verbatim; `dumpifs -x` fails on the empty component. fsimg does
+not represent such paths: a stored path that is absolute, has an empty
+component, or has a `.` or `..` component makes the image
+`FSIMG_EUNSUPPORTED`, not corrupt, because the producer writes them. The
+empty path is the root, not an empty component. These cases are found in
+the table pass at open. [X1]
 
 ## Names and the profile
 
@@ -415,7 +448,7 @@ never truncates: a name the profile cannot store fails planning. [X1], [S1],
 | Inode flag nibble | `0x0`, `0x8`, `0xc`, `0xe` |
 | Mode | type as tabled; bits above `0177777` zero |
 | Owner and time | the full 32-bit ranges as stored |
-| Paths | relative, 0 to 1024 bytes, no empty, `.` or `..` component; a component outside the profile omits its node and is counted, never fatal |
+| Paths | relative, 0 to 1024 bytes, no empty, `.` or `..` component; a component outside the profile omits its node and is counted, never fatal; a path below a file, link or FIFO entry is shadowed and counted, never fatal |
 | Symbolic links | the link layout, targets of 1 to 1024 bytes |
 | Ranges | the range rule; overlaps allowed |
 | References | nonzero ones name one regular-file record |
@@ -551,16 +584,21 @@ partition type, so a scheme in an `ifs` create stack is refused with
 
 The eight H3 boot bodies are little-endian with flags `0x04`, a mountpoint
 of `/`, nonzero header padding, 206 to 230 records in the `PCM3_IFS1` family
-and 174 in `PCM3_Emergency`, one directory record each, 16 to 22 implicit
-directories, 42 to 52 symbolic links, inode nibbles `0x0`, `0x8`, `0xc` and
+and 174 in `PCM3_Emergency`, one directory record each, 21 and 16 implicit
+directories, 52 and 42 symbolic links, inode nibbles `0x0`, `0x8`, `0xc` and
 `0xe`, `boot_ino[0]` `0xe0000002` and `script_ino` 3 each naming one file,
-one to three shadowed link records, valid UTF-8 names and depth at most 4.
+valid UTF-8 names and depth at most 6 and 4. Each has three shadowed
+records: in the `PCM3_Emergency` pair, the link records of three paths
+stored as a link and then a file; in the `PCM3_IFS1` family, the link
+record of one such path and two link records below a top-level link,
+which precede it in the table.
 The application body `PCM3_IFS2` is 68849668 bytes, flags `0x04`, an empty
 mountpoint, no references, 336 records (2 directories, 214 files, 120
 links), data starting on a page boundary above `hdr_dir_size`, and no
 duplicate. The three X1 bodies have 45 records (1 directory, 40 files, 4
 links), 2 implicit directories, zero header padding and the same references
-as H3. All verify under every rule above. [S1], [S2]
+as H3. All twelve bodies open and verify under every rule above, the
+shadowed records reported, not refused. [S1], [S2]
 
 Reading a boot image is the `qnxboot` container's peel followed by this
 reader on the body; reading `PCM3_IFS2.ifs` is the `hbcifs` container's
@@ -617,12 +655,12 @@ code ran. The minimum matrix:
 | Mountpoint | empty, `/`, `/foo`, 70, 1024 and 1025 bytes; a NUL exactly at `dir_offset - 1` and none before `dir_offset`; a NUL whose rounding is below `dir_offset` (unsupported); nonzero padding (accepted); invalid UTF-8 (omitted by info, incomplete under verify) |
 | Records | lengths 0, 1, 23, 24, below each kind's minimum, exact minimum, and crossing the table end; a length of 25 (unsupported); a missing or nonzero terminator; a zero inode word; a nonzero extended-attribute offset; each unknown type value; mode bits above `0177777`; a path without a NUL; an empty table |
 | Inode flags | each accepted nibble; each other nibble; the counts reported; a flagged directory (accepted, counted) |
-| Hierarchy | implicit parents at depth 1 and 512; a tree whose record order is reversed; a duplicate path (link then file, file then link, two files, two directories), the last delivered and the earlier counted; a duplicate root; a root record present, absent and last; a file record with the empty path, as the entry and shadowed; a path below a file, below a link and below a FIFO, with the non-directory record before and after its descendants in the table; a directory record shadowed by a file record with descendants; a file `d` beside `d-x` and `d/x`; `x/y` then `z` twice, the first `z` shadowed, with `z` delivered at the root; an absolute path; `.` and `..` components; an empty component; `a-b` and `a/b` siblings ordered by component |
+| Hierarchy | implicit parents at depth 1 and 512; a tree whose record order is reversed; a duplicate path (link then file, file then link, two files, two directories), the last delivered and the earlier counted; a duplicate root; a root record present, absent and last; a file record with the empty path, as the entry and shadowed; a path below a file, below a link and below a FIFO, with the non-directory record before and after its descendants in the table, each shadowed and counted with no parent synthesized for it; a subtree of records at several depths below a link, in mixed table order, and a sibling after it delivered; a duplicate below a link, both records shadowed; a directory record shadowed by a file or a link record with descendants, the descendants shadowed; a link record shadowed by a directory record with descendants, the descendants delivered; a record below a link outside the profile, shadowed and not omitted; a corrupt range in a record below a link, still `FSIMG_ECORRUPT`; a file `d` beside `d-x` and `d/x`; `x/y` then `z` twice, the first `z` shadowed, with `z` delivered at the root; an absolute path; `.` and `..` components; an empty component; `a-b` and `a/b` siblings ordered by component |
 | Names | components of 1, 255, 256 and 1024 bytes; a 1025-byte path; non-ASCII UTF-8; a space; names differing only by case; Latin-1 bytes, a control byte and `0x7f` on a file, a link, an explicit directory with descendants and an implicit one, each omitted and counted once with its descendants undelivered and uncounted, verification complete, `info`'s `omitted` detail equal to the count, a reference to an omitted file satisfied and counted in `omitted_references`, extraction of the parent refused without the skip option and omitting with it, and a corrupt range below the omitted directory still `FSIMG_ECORRUPT` |
 | Ranges | a range ending exactly at the trailer; one including the trailer; one inside the table; one inside the header; start plus length overflowing 32 bits; shared ranges, including extraction of a heavily shared image under the default output ceiling; zero-length files with offsets 0, inside the table and past the image; sizes 0, 1, 3, 4, 65535, 65536, 65537 and above 16 MiB |
 | Symbolic links | `sym_offset` of `L`, `L + 1` and `L + 2`; `sym_size` 0, 1, 1023, 1024 and 1025; a target crossing the record; a missing NUL after the target; relative, absolute, dangling and `..` targets delivered as bytes |
 | Metadata | uid and gid 0, 65535 and 4294967295 read as stored; modes `0000`, `0644`, `0755`, `4755` and `7777`; times 0 and 4294967295; FIFO words nonzero |
-| References | `boot_ino[0]` and `script_ino` naming one file; naming no record; naming two records; naming only a shadowed record; naming a directory and a link; a nonzero `boot_ino[3]`; all zero |
+| References | `boot_ino[0]` and `script_ino` naming one file; naming no record; naming two records; naming only a shadowed record, an earlier duplicate or a record below a link; naming a directory and a link; a nonzero `boot_ino[3]`; all zero |
 | Checksum | a correct trailer; one flipped byte in the header, the mountpoint, a record, file data, padding and the trailer; a byte-swapped trailer; a big-endian image summed in its order |
 | Writer | an empty catalog, which is the root record alone; one file; the name limits; each kind; owner 4294967295 and mode `7777`; a time of 4294967296 as a counted loss and as a refusal when losses are forbidden; a 1024-byte target, and a 1025-byte one refused by collection; mountpoints of 0, 1, 1024 and 1025 bytes; both byte orders; `volume_bytes`, `min_free_bytes`, a label and each boot setting refused; a 1025-byte path refused; an image one word below and at `2^32 - 4` bytes on a sparse sink; byte identity across source order, cache size, scratch path and time zone; a poison scan of every padding byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |
@@ -642,12 +680,14 @@ Provenance details are in the [research record](../docs/ifs-research.md#sources)
 | --- | --- |
 | X1 | Native QNX 6.5.0 `mkifs` and `dumpifs` experiments E1 to E7 and E9 to E11: captures `ifs-basic`, `ifs-names`, `ifs-extra`, `ifs-data`, `ifs-e10-sense`, `ifs-e3-extract` |
 | E10 | The `dumpifs` sensitivity experiment, capture `ifs-e10-sense` |
-| S1 | PCM 3.1 update disc: the eight boot bodies through `dumpifs -u` and `PCM3_IFS2` through the oracle decode, structure-only survey |
+| E12 | The `procnto` boot test of records below a symbolic link, capture `e12-links` |
+| S1 | PCM 3.1 update disc: the eight boot bodies and `PCM3_IFS2` through the oracle decode, structure-only survey |
 | S2 | QNX 6.5.0 live CD: `qnxbase.ifs`, `qnxbasedma.ifs`, `qnxbasesmp.ifs`, structure-only survey |
 | D | The vendor documentation of the header and record layout, as the research record's sources list it |
 
 [X1]: ../docs/ifs-research.md#observations
 [E10]: ../docs/ifs-research.md#dumpifs-sensitivity-e10
+[E12]: ../docs/ifs-research.md#paths-below-a-link-at-boot-e12
 [S1]: ../docs/ifs-research.md#s1-h3-boot-images
 [S2]: ../docs/ifs-research.md#s2-x1-boot-images
 [D]: ../docs/ifs-research.md#sources

@@ -30,7 +30,12 @@
  *    whose top is the path's nearest existing ancestor, synthesizes a
  *    directory for each further component but the last, and then emits
  *    the path's own node. Every emitted node is pushed whatever its kind,
- *    so a path below a file, link or FIFO meets that node on the stack.
+ *    so a path below a file, link or FIFO meets that node on the stack and
+ *    is shadowed there, as procnto never reaches a record stored below a
+ *    link: nothing is synthesized or emitted for it, and the stack keeps
+ *    the non-directory on top for the rest of its subtree. A node is
+ *    pushed only onto a directory, so only the top of the stack can be a
+ *    non-directory.
  *
  * 3. Group sort and table. A stable sort of the child stream by parent
  *    makes each directory's children one contiguous run, still in
@@ -254,7 +259,9 @@ level_names(const tree_pass_t *pass, uint32_t level, const unsigned char *name,
 	    bcmp(pass->path + start, name, length) == 0);
 }
 
-/* Place one entry, the last record of its path, in the tree. */
+/* Place one entry, the last record of its path, in the tree, or count it
+ * shadowed when its nearest ancestor with a node is not a directory.
+ */
 static fsimg_status_t
 place_entry(tree_pass_t *pass, const path_entry_t *entry,
     fsimg_error_t *error)
@@ -296,9 +303,10 @@ place_entry(tree_pass_t *pass, const path_entry_t *entry,
 	}
 	pass->depth = shared;
 	pass->path_length = pass->levels[shared].path_end;
-	if (pass->levels[shared].kind != IFS_KIND_DIRECTORY)
-		return (ifs_unsupported(error,
-		    "ImageFS path lies below a non-directory"));
+	if (pass->levels[shared].kind != IFS_KIND_DIRECTORY) {
+		ifs->counts.shadowed++;
+		return (FSIMG_OK);
+	}
 
 	/* Synthesize the parents the table omits, then the entry itself. */
 	while (end != entry->path_length) {

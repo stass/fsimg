@@ -303,9 +303,11 @@ the mountpoint and every record of the table in one bounded pass, sorts the
 paths in scratch and derives the hierarchy from them: a parent without a
 record is a directory with mode 0755, owner 0 and time 0, and of records
 with the same path the last is delivered and the others are counted as
-shadowed. A path below a non-directory record, or with `.`, `..` or empty
-components, is unsupported. Entries carry symbolic links, FIFOs, owner,
-mode and modification time; names outside the profile are omitted as on
+shadowed. When that last record is a file, symbolic link or FIFO, every
+record below its path is shadowed too; `procnto` hides the records below
+a link at boot the same way. A path with `.`, `..` or empty components is
+unsupported. Entries carry symbolic links, FIFOs, owner, mode and
+modification time; names outside the profile are omitted as on
 QNX4 and QNX6. The volume information gains a mountpoint and a table of up
 to sixteen named format details, which `fsimg i` prints and its JSON record
 carries; an ImageFS reports its boot references, mount flags, record counts
