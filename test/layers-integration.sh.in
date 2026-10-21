@@ -174,13 +174,18 @@ fi
 
 if test -n "$sfdisk"; then
     fdisk="$(dirname "$sfdisk")/fdisk"
-    "$fsimg" c -R -F exfat/gpt -o gpt:sector=4096 -f 4kn.img -C source . \
-        2>/dev/null || fail "4kn.img: creation"
-    "$sfdisk" --sector-size 4096 --verify 4kn.img | grep -q '^No errors detected' ||
-        fail "4kn.img: sfdisk --verify"
-    "$sfdisk" --sector-size 4096 -d 4kn.img > table.txt
-    grep -q '^sector-size: 4096$' table.txt && grep -q 'start= *256, size= *256,' table.txt ||
-        fail "4kn.img: partition 1 is not at 1 MiB"
+    # An older sfdisk has no --sector-size to read 4096-byte-sector tables.
+    if "$sfdisk" --help 2>&1 | grep -q -- '--sector-size'; then
+        "$fsimg" c -R -F exfat/gpt -o gpt:sector=4096 -f 4kn.img -C source . \
+            2>/dev/null || fail "4kn.img: creation"
+        "$sfdisk" --sector-size 4096 --verify 4kn.img | grep -q '^No errors detected' ||
+            fail "4kn.img: sfdisk --verify"
+        "$sfdisk" --sector-size 4096 -d 4kn.img > table.txt
+        grep -q '^sector-size: 4096$' table.txt && grep -q 'start= *256, size= *256,' table.txt ||
+            fail "4kn.img: partition 1 is not at 1 MiB"
+    else
+        echo 'SKIP: 4096-byte GPT check (sfdisk lacks --sector-size)'
+    fi
     "$fsimg" c -R -F fat16/mbr -o mbr:active=yes -o mbr:id=0x0badcafe -f mbr.img \
         -C source . 2>/dev/null || fail "mbr.img: creation"
     "$sfdisk" -d mbr.img > table.txt
