@@ -493,8 +493,29 @@ QNX4 follows its own [plan](qnx4-plan.md): native evidence from QNX 6.5.0 and
 the PCM 3.1 navigation partition, a format and a driver design, a reader and
 verifier, and a writer registered only after native qualification.
 
-Other extensions receive their own designs before code: manifest import and
-export, designed in [the manifest design](../specs/design-mtree.md); a
+Manifest import and export follow [the manifest design](../specs/design-mtree.md),
+each stage one reviewed commit:
+
+1. **SHA-256.** FreeBSD's `sha256c.c` imported into `lib/core/` with its
+   notice, adapted only to the build. Complete: the FIPS 180-4 vectors pass.
+2. **Parser.** The bounded mtree subset as a self-contained parser: escapes,
+   `/set` and `/unset`, continuations, the keyword classes and every bound.
+   Complete: valid and malformed unit cases, and `fuzz/mtree.c` runs.
+3. **Source root.** `fsimg_writer_add_manifest()`, generated content through
+   the source cursor, host bytes beneath the content directory with digests
+   checked during the copy, and merging with other roots. Complete: library
+   round trips against `mtree -c` and `bsdtar --format=mtree`.
+4. **Command line.** The `@file` operand and the worker's second descriptor,
+   with the manual page. Complete: the CLI tests, and the specification
+   harness's creation cases run from manifests.
+5. **Export.** `x --mtree=FILE` through the output coordinator. Complete: an
+   extracted tree and its manifest re-create an image with equal contents and
+   metadata.
+
+The harness's creation stages (B1f and B1g of the
+[specification-testing plan](spec-testing-plan.md)) follow stage 4.
+
+Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order
 follows concrete user needs. They cannot weaken the core budgets; the only
