@@ -172,7 +172,7 @@ owns the grammar: three slots in fixed order, filesystem, scheme, container;
 a name fills the slot of its kind and `-` marks the next slot empty, so
 `fat32/-/dmg` spells `fat32/dmg` out and `fat32/-/-` is a bare volume. A
 repeated kind or misordered name is a syntax error, not a guess. Filesystem
-names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6` and `qnx4`.
+names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4` and `ifs`.
 
 `-F` is required for `c`, and its stack must begin with a filesystem name:
 `-F gpt` creates nothing and is a syntax error. On reading, a named slot is
@@ -208,7 +208,14 @@ unqualified key always targets the filesystem: `oem=cp437` on read; on
 create `sector` and `cluster` in bytes, and the QNX6 settings
 `endian=little|big`, `uuid=` RFC 4122 text, `inodes=` a positive inode count
 and `reserve=` a percentage up to 100, which every other format rejects
-unless at their defaults; QNX4 shares `inodes=` as its `.inodes` slot count.
+unless at their defaults; QNX4 shares `inodes=` as its `.inodes` slot count,
+and ImageFS shares `endian=` and adds `mountpoint=`, its stored mount path
+of at most 1024 bytes, default `/`, with `mountpoint=` alone storing an
+empty one, and the boot settings `boot1=` to `boot4=` and `script=`, each
+an image path, which the
+[ImageFS design](design-ifs.md#boot-settings) governs. ImageFS has no free
+space, so `-s` and `--free-space` fail with it as settings the format
+cannot honor, and `-e` is its only time setting.
 A qualified key targets one layer: `-o gpt:type=esp`,
 `-o gpt:name=EFI`, `-o dmg:compress=none`, `-o gzip:level=9`. A qualifier
 naming a layer absent from the stack, or a compression not selected, fails;
@@ -477,8 +484,11 @@ the length of the disk it holds, its chunk count, the encodings its chunks
 use and its identifier; when the stack has a scheme, a partition-table summary
 with each partition's index, type, name, offset, length and whether it holds
 a supported filesystem, marking the selected one; then the volume: format and
-profile, volume and allocation geometry, label, volume UUID when the format
-has one, time basis, implemented capabilities and validation scope. When no
+profile, volume and allocation geometry, label, mountpoint and volume UUID
+when the format has them, time basis, implemented capabilities, validation
+scope, and the volume's named details in the order the driver filled them,
+one `name: value` line each in the human form and one `details` object
+keyed by name in the `--json` volume record. When no
 partition is selected and none is unambiguous, `i` still succeeds with the
 stack and table and reports the volume section as unselected, so the user
 can choose; every other mode fails. `i` claims no verification and no

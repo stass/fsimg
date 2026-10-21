@@ -28,7 +28,8 @@ Shared helpers handle bounded I/O, endian conversion, UTF validation,
 resources, and [emission](design-emission.md); a driver does not acquire host
 descriptors or allocate outside its context.
 
-The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6` and `qnx4`. FAT12,
+The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4` and
+`ifs`. FAT12,
 FAT16, and FAT32 share one descriptor and driver; opening selects the variant
 from the validated cluster count. Detection follows one bounded probe contract:
 
@@ -187,6 +188,33 @@ contiguous extent per object. Native check, mount, modify and remount
 testing gates the writer capability, as for QNX6. Long names, device nodes
 and the head unit's own filesystem module have their own evidence gates in
 the [qualification work](../docs/todo-qnx4.md).
+
+## QNX ImageFS
+
+The [ImageFS design](design-ifs.md) defines the QNX image filesystem that
+`mkifs` builds and `procnto` mounts from a boot image: a fixed header
+identified by `imagefs` at offset 0, a mountpoint, a table of records that
+each carry a full relative path, file data, and a four-byte additive
+checksum. There is no allocation structure and no directory storage; the
+hierarchy is derived from the sorted paths, missing parents are
+synthesized, and a path stored twice has one entry, the last record, with
+the earlier ones counted as shadowed. Its acceptance tables are closed by
+native QNX 6.5.0 observation and by the PCM 3.1 and live-CD boot bodies:
+little- and big-endian images, four record kinds, one symbolic-link layout,
+four inode-flag values; an unobserved value is unsupported, a contradiction
+is corrupt. The [driver design](design-ifs-driver.md) defines the code. The
+driver reads a bare ImageFS; the startup header, boot prefix and compressed
+chunking of a boot image belong to the `qnxboot` container and the
+Harman-Becker header to the `hbcifs` container, both
+[layer profiles](design-layers.md#layer-profiles).
+
+The writer builds a standalone ImageFS in one deterministic layout whose
+size is exact, so the format has no free space and no geometry to size;
+its boot settings are honored only for the slots its closed flag table
+names. Native `dumpifs` list, check and extract testing gates the writer
+capability, as native mounting does for QNX6 and QNX4; wrapping a new
+ImageFS in an existing boot image is the `qnxboot` container's, gated by a
+native boot.
 
 ## Verification and compatibility claims
 

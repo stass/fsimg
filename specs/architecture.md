@@ -16,7 +16,8 @@ positional I/O callbacks. The default CLI handles regular files, not devices.
 It requires no privileges, kernel filesystem driver, or external formatter.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
-Power-Safe profiles and QNX4 with independent read and write support. The CLI is
+Power-Safe profiles, QNX4 and the QNX image filesystem (ImageFS) with
+independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
 `--formats` for capabilities, with `-f` naming the image. Each format
@@ -314,6 +315,26 @@ compressed input into a spool file first, then peels each layer down to a
 bounded I/O slice, which the filesystem driver opens as it opens a raw
 image. The design also owns `--partition` selection and the spool budget.
 
+The QNX boot image (`qnxboot`) and the Harman-Becker flash image (`hbcifs`)
+are containers in that design, each packaging one ImageFS for one loader
+with metadata and integrity fields of its own, as the compression inside
+each is the container's property, like DMG's zlib chunks. Carrying them
+changes the layer contract in six ways, each specified in the
+[layer design](design-layers.md) and recorded here because every layer
+shares the contract: a container probe may read at the fixed offsets of a
+closed table of boot prefixes, not only the file's prefix and last 512
+bytes; a container may hold an opaque, executable section that is neither a
+table nor a chunk; a chunk index may be filled by a decoding pass rather
+than from tables; a wrap encoder may take a second, read-only template
+input; a container whose header precedes the body it describes and carries
+the body's stored length is encoded in two deterministic passes, the first
+compressing the body to learn that length and the second emitting, rather
+than through the staged raw intermediate; and a container whose payload is
+one sequential stream peels through the spool rather than the chunk index,
+its read side still a positional I/O object over the volume. Beyond those
+six, both containers declare that they carry a volume, a declaration the
+layer design adds alongside them, so a scheme in their create stack is refused.
+
 The [sources and catalogs design](design-sources.md) defines common collection,
 source identity and reopening, and immutable catalog preparation independently
 of format planning. Common collection uses private interfaces; public writer
@@ -347,6 +368,17 @@ default layout with one extent per object; the
 feeding the shared extent index, a bitmap pager fixed by geometry, and the
 same planning and emission passes. The same native write-after-create
 qualification gates its writer.
+The [ImageFS design](design-ifs.md) defines the QNX image filesystem: a flat
+header, a table of records each carrying a full relative path, file data and
+an additive checksum, with closed acceptance tables fixed by native QNX
+6.5.0 `mkifs` output and by the PCM 3.1 and live-CD boot bodies; the
+[ImageFS driver design](design-ifs-driver.md) derives the hierarchy from the
+sorted paths through the common external sort and the common walker, never
+holding the table in RAM, delivers one extent per file through the shared
+extent index, and plans one deterministic layout whose size is exact, so
+the format has no free space to size. The boot machinery around an ImageFS
+is the `qnxboot` container's, so the driver reads the bare body and the
+same native `dumpifs` qualification gates its writer.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
@@ -561,6 +593,20 @@ become necessary for raw-image operations. Imported code and generated
 tables receive file-level provenance and license review; test tools do not
 imply permission to copy them.
 
+The compression codecs that QNX boot images need, the LZO1X and NRV2B
+decoders and the LZO1X encoder, are project-owned C under the
+[codec design](design-codecs.md); `liblzo2` and `libucl` are never linked,
+even optionally. Both are GPL-2.0-or-later, and linking either into
+libfsimg would bind every distributed fsimg binary to the GPL, which a
+BSD-2-Clause library and command cannot carry. Neither is a system library
+on macOS or FreeBSD, so an optional link would leave the default build
+unable to read the PCM images that are the main target. The decoders are a
+few hundred lines each; the work is in bounds checks, overlap-safe copies
+and tests, which fsimg needs whichever code decodes. The codecs are written
+from factual stream descriptions under a clean-room split, and the GPL
+libraries serve only as out-of-tree black-box oracles that never enter the
+repository or the link.
+
 The build uses Autoconf, Automake, and Libtool as development tools. Release
 archives contain generated build machinery; users need a C compiler, make,
 and standard host utilities. Public headers are C11 and C++ includable, do not
@@ -581,6 +627,7 @@ lib/formats/fat/     FAT codecs, reader, writer
 lib/formats/exfat/   exFAT codecs, reader, writer
 lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
 lib/formats/qnx4/    QNX4 codecs, reader, writer, verification
+lib/formats/ifs/     ImageFS codecs, reader, writer, verification
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests

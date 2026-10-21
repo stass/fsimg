@@ -77,7 +77,16 @@ It offers two operations:
   ordered list of `(image offset, capacity)` ranges that the driver supplies
   in logical order, together with the file length the plan records and the
   planned initialized length. FAT and exFAT files have one region; an empty
-  file has none; a fragmented QNX6 file has several.
+  file has none; a fragmented QNX6 file has several. The driver may pass an
+  observer, a callback `(argument, bytes, length, volume offset)` that the
+  copy invokes over every byte it writes, in volume order, once per
+  transfer batch and never for a ZERO range or an empty source. A format
+  whose trailer depends on the payload, such as ImageFS's additive
+  checksum, keeps its own running state in the argument; common code
+  holds no checksum algorithm and makes no promise about batch sizes, so
+  an observer that needs word alignment keeps the partial-word phase
+  itself. The observer runs inside the copy's work accounting and cannot
+  fail: it records, and the driver judges after the copy returns.
 
 ## Source copy
 

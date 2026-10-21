@@ -300,6 +300,18 @@
   [consolidation plan](docs/implementation-plan.md#architecture-consolidation).
   Both verifiers keep their format-specific reconciliation.
 
+* [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/codec/`,
+  `lib/layers/`): read ImageFS bodies, bare or inside the `qnxboot` and
+  `hbcifs` containers (QNX boot images and the PCM 3.1 Harman-Becker
+  wrapper), with project-owned LZO1X and NRV2B decoders; write standalone
+  ImageFS volumes; then wrap a new ImageFS in an existing boot image. The
+  [plan](docs/ifs-plan.md) orders the work; the
+  [format](specs/design-ifs.md), [driver](specs/design-ifs-driver.md) and
+  [codec](specs/design-codecs.md) designs and the layer design's `qnxboot`
+  and `hbcifs` profiles are the contract; the
+  [research record](docs/ifs-research.md) holds the evidence; the
+  [qualification work](docs/todo-ifs.md) lists the open items.
+
 ## Bugs by subsystem
 
 * [Low] **test-worker's relay scenario fails setpgid intermittently**
@@ -508,14 +520,3 @@
   is its own initiative above. Follow the
   [extension sequence](docs/implementation-plan.md#extension-sequence); each
   format needs a bounded-resource design and an independent compatibility corpus.
-
-* [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/layers/`):
-  read ImageFS bodies, bare or inside the `qnxboot` and `hbcifs` containers
-  (QNX boot images and the PCM 3.1 Harman-Becker wrapper), with
-  project-owned LZO1X and UCL decoders; write standalone ImageFS volumes;
-  then wrap a new ImageFS in an existing boot image's startup section. The
-  [plan](docs/ifs-plan.md) orders the work from native QNX 6.5.0 `mkifs`
-  and `dumpifs` evidence and the PCM 3.1 update-disc images, through the
-  designs, to writer registration and boot-gated wraps. Its owner decisions
-  are settled; the stage 1 evidence can return two of them (offset-dependent
-  boot members, `hbcifs` on non-IFS payloads) to the owner.

@@ -707,7 +707,7 @@ repository records only pass and fail counts.
   * a record table of a million entries, which must spill to scratch;
   * a flat root of a million files;
   * a path at the record-length limit;
-  * depth 4096.
+  * depth 512, the most a 1024-byte path holds.
 
   Each records I/O calls, metadata passes, peak scratch and RSS.
 * Faults: allocation, scratch, short read, EOF and cancellation at every

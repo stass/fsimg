@@ -27,6 +27,9 @@ Implementation status and sequencing belong in the implementation plan and
 | [QNX6 driver](design-qnx6-driver.md) | Module layout, driver state, tree walker, bitmap self-check, reservation domains, planning passes, emission order, and tests |
 | [QNX4 reader and writer](design-qnx4.md) | Derived geometry, the root block, inode, link, extent-block and long-name records, closed status tables, format-owned files, the native default layout the writer reproduces, and the PCM navigation partition |
 | [QNX4 driver](design-qnx4-driver.md) | Module layout, probe and open order, the one extent walker, bitmap pager, link resolution, verification, planning passes, emission order, and tests |
+| [QNX ImageFS reader and writer](design-ifs.md) | The flat header and record table, the table and range rules, kinds and the one symbolic-link layout, inode flags and boot references, the additive checksum, the hierarchy derived from sorted paths with shadowed duplicates and synthesized parents, closed acceptance tables, the writer's one deterministic layout, and the PCM and live-CD bodies |
+| [QNX ImageFS driver](design-ifs-driver.md) | Module layout, probe and open order, the single table pass, the two-sort hierarchy derivation feeding the common walker, content, verification, writer settings, planning passes, emission with the running word sum, and tests |
+| [Compression codecs](design-codecs.md) | LZO1X and NRV2B decoders and the LZO1X encoder |
 | [POSIX metadata](design-metadata.md) | Entry kinds beyond files and directories; owner, mode and change time across API, catalog, scanner, extractor and CLI |
 | [Manifests](design-mtree.md) | Creating from an mtree(5) manifest as a source root: grammar subset, generated content, host bytes beneath a content directory, keyword mapping, bounds; the manifest extraction writes |
 | [Layers](design-layers.md) | Partition schemes, disk-image containers, compression, spooling and composition |

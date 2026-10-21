@@ -234,15 +234,17 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/qnx6-research.md docs/qnx6-infrastructure.md docs/todo-qnx6.md \
 	docs/spec-testing-plan.md docs/qnx4-plan.md docs/qnx4-research.md \
 	docs/todo-qnx4.md docs/architecture-analysis.md docs/ifs-plan.md \
-	docs/ifs-research.md \
+	docs/ifs-research.md docs/todo-ifs.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
 	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
 	specs/design-qnx6-driver.md specs/design-qnx4.md specs/design-qnx4-driver.md \
 	specs/design-metadata.md specs/design-mtree.md specs/design-sizing.md \
-	specs/design-layers.md specs/design-content.md specs/design-directories.md \
-	specs/design-emission.md specs/design-holes.md \
+	specs/design-layers.md specs/design-content.md \
+	specs/design-directories.md specs/design-emission.md \
+	specs/design-holes.md specs/design-ifs.md specs/design-ifs-driver.md \
+	specs/design-codecs.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
 	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh tools/qnx/guest/manifest4.sh \

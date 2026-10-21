@@ -435,6 +435,31 @@ timestamp interpretation, and header-level validation scope, with validity bits
 for unknown totals. Querying it does not traverse directories or certify the
 whole volume; full verification has its own report.
 
+Two fields of the record serve formats whose header carries more than a
+label, and both change the public record's layout, so adding them is an
+ABI change of `fsimg_volume_info_t`. The record has no size or version
+field, so its layout is pre-stable like the rest of the interface and
+freezes at the first declared stable release:
+
+* `mountpoint[1025]`, valid under `FSIMG_VOLUME_MOUNTPOINT`: the stored
+  mount path of a format that has one, ImageFS, as validated UTF-8 of at
+  most 1024 bytes and a terminator. It is distinct from the label, which
+  stays 49 bytes; a format reports either, both or neither.
+* `details[16]` with `detail_count`: a bounded, format-neutral table of
+  named values, `fsimg_volume_detail_t`, each an ASCII `name[24]` of at
+  most 23 bytes and a `uint64_t value`. A driver fills at most 16 in a
+  fixed order it documents; common code and the CLI copy and print them
+  without interpreting a name. Counts a driver collects while opening
+  belong here, never a value that would need a traversal the record does
+  not disclose.
+
+The matching write settings are typed fields of `fsimg_write_options_t`
+behind `FSIMG_SETTING_*` bits, as the
+[metadata design](design-metadata.md#capability-records) states:
+`mountpoint`, a copied string with NULL selecting the format default under
+`FSIMG_SETTING_MOUNTPOINT`, and `boot_programs[4]` and `script`, copied
+image paths under `FSIMG_SETTING_BOOT`.
+
 `next()` validates a directory's effective lookup namespace through the bounded
 preparation specified in [prepared directories](design-directories.md) before
 exposing its children. Duplicate/case-equivalent names and FAT alias collisions

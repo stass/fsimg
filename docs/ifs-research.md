@@ -245,6 +245,15 @@ ending at the end of the file. `ram_size = startup_size + imagefs_size`.
 | Duplicate paths (link record before file record) | 1 | 3 |
 | Zero-length files | 1 | 0 |
 
+Comparing the startup sections of `PCM3_IFS1`, `PCM3_IFS1_Macan` and
+`PCM3_Emergency` byte by byte locates what varies. Between the two
+`PCM3_IFS1` variants only `ram_size`, `stored_size`, `imagefs_size` and the
+section's last word differ, so the startup checksum is the last 4 bytes of
+the startup section. `PCM3_Emergency` also differs in the header word at
+`0x44` and in the NUL-separated startup command line embedded near the end
+of the section (`-n48M -v -C1200,0` against `-m256M -n48M -v`); both follow
+the startup build, not the ImageFS.
+
 In all of them the mountpoint is `/`, `boot_ino[0]` is `0xe0000002` and
 names exactly one regular file record by its full inode word, `script_ino`
 is 3 and names one file the same way, flagged members are 4-byte aligned and
@@ -263,8 +272,9 @@ none page-aligned, every name is valid UTF-8, and depth is at most 4.
 | `0x1c` | `49 4f 33 f3` | Unidentified |
 | `0x20` | 32 zero bytes | |
 
-The payload is one unframed LZO1X stream decoding to a nonbootable ImageFS
-of 68849668 bytes: flags `0x04`, empty mountpoint, no boot or script
+The payload is one unframed LZO1X stream that ends exactly at the end of the
+file (the oracle's safe decoder consumes all of it) and decodes to a
+nonbootable ImageFS of 68849668 bytes: flags `0x04`, empty mountpoint, no boot or script
 references, 336 records (2 directories, 214 files, 120 links), inode
 nibbles `0x0`, `0x8` and `0xc`, nonzero header padding, data starting on a
 page boundary above `hdr_dir_size`, and no duplicate paths.
