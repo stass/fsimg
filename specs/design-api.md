@@ -110,7 +110,7 @@ their output's descriptors travel in the sink.
 | Scratch directory descriptor | Authorized parent for private metadata scratch; `-1` disables spill |
 | Progress callback and argument | Receives bounded counters and phase, never an accumulated event list |
 | Cancellation callback and argument | Polled at each batch and external-sort pass; true requests cancellation |
-| Loss-report callback and argument | Receives explicit optional-metadata losses; counts remain available when detailed reporting is capped |
+| Loss-report callback and argument | Receives explicit optional-metadata losses with a rendered, never truncated path; counts remain available when detailed reporting is capped |
 
 ```c
 void fsimg_options_init(fsimg_options_t *opts);
@@ -210,7 +210,10 @@ file, directory, symbolic link and FIFO, as the [POSIX metadata
 design](design-metadata.md) defines them; a symbolic link's size and content
 are its target. Directory and FIFO sizes are zero.
 Root is implicit; all other paths are absolute image paths with validated UTF-8
-components and explicit parent directory entries.
+components and explicit parent directory entries. An entry a reader
+[omits](design-directories.md#omitted-names) for a name outside its profile
+is never returned; where an error or diagnostic names one, the component
+appears in the common escaped ASCII rendering, never as raw bytes.
 
 Metadata has separate `valid` and `required` masks, timestamp values, and format
 attributes with documented meaning. Each timestamp carries signed seconds,
@@ -639,7 +642,10 @@ performs no repair, and never claims success for an incomplete traversal.
 A format without full verification advertises no verify capability, and
 `fsimg_verify` on it fails with `FSIMG_EUNSUPPORTED` before any work, leaving
 the reader untouched.
-Detailed findings stream through the bounded reporting interface; they do not
+Detailed findings stream through the bounded reporting interface, each as
+an `fsimg_error_t`, so a finding's path is in the
+[common rendering](design-directories.md#omitted-names) with the error
+record's bound, tail truncation and `path_truncated` flag; they do not
 accumulate in the report struct.
 
 ## Format inspection
@@ -653,7 +659,13 @@ Initialize the caller-owned cursor to zero. Each successful call returns one
 fixed-size capability record and advances it; exhaustion returns DONE.
 Records contain bounded format/profile names, independent reader/writer flags,
 entry and metadata capabilities, legal sector/allocation-unit masks and limits,
-and documented profile constraints. Enumeration uses the immutable compiled
+and documented profile constraints. The limits include
+`max_name_utf16_units`, `max_label_bytes` (zero for a format without a
+label) and `max_link_target_bytes`, the longest symbolic-link target the
+format stores (1024 for ImageFS, 1023 for QNX4 and QNX6, zero for FAT and
+exFAT, which store no links); the
+[metadata design](design-metadata.md#capability-records) states how writer
+construction and planning enforce each. Enumeration uses the immutable compiled
 registry and allocates no per-format catalog. It does not promise that a host
 can represent every theoretical format size. Runtime OS sandbox reporting is
 owned by the CLI and is separate from filesystem capabilities.
@@ -698,6 +710,22 @@ operation into success or remove a successfully published output.
 
 The public header defines fixed-size error and statistics records. Errors carry
 operation/resource/output-state enums and bounded 256-byte path/message arrays.
+Every error path is rendered: whichever producer fills it, it passes through
+`fsimg_path_render()`, the
+[common rendering](design-directories.md#omitted-names), as do the
+loss-report callback's path and the paths of verification findings, so the
+only unrendered path the library emits is `fsimg_entry_t.path`; a callback
+or finding path therefore holds `\\` where an entry path holds `\`. A
+rendered error path longer than the array keeps its tail, which names the
+entry, is cut on a whole rendered unit and sets `path_truncated`; the
+loss-report callback's path is rendered into a buffer of
+`4 * max_path_bytes + 1` bytes, the worst case, and is never truncated.
+The CLI's error frame carries the path in a field of the same 256 bytes, so
+it transports the rendered path and the flag unchanged. The statistics'
+`skipped_entries` counts entries of unsupported kinds the extractor skipped
+on request, and `omitted_entries` the omitted subtree roots the walker
+passed; both are cumulative over the context, and each operation's result
+reports its own count.
 Cumulative I/O statistics saturate at `UINT64_MAX`; live-resource counters are
 checked before reservation and retain their exact value on failure. Allocation
 accounting includes the context and alignment-preserving allocation headers.

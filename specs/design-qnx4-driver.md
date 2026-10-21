@@ -239,11 +239,16 @@ fixed targets. The name is then
 decoded: the direct field's 1 to 16 bytes, the link field's 1 to 48 bytes,
 or, with a nonzero long-name pointer, the long-name record found through the
 long-name locator, whose back-reference, state, length and mangled prefix
-with its zero byte must agree. The full name is checked against the fsimg
-profile; an empty name, a NUL before the length, a slash, or `.` or `..` in
-a slot beyond the first two is `FSIMG_ECORRUPT`.
+with its zero byte must agree. An empty name, a NUL before the length, a
+slash, or `.` or `..` in a slot beyond the first two is `FSIMG_ECORRUPT`.
+The decoded name is handed to preparation, which applies the QNX-family
+profile the descriptor declares and assigns the child's class under the
+[omitted-names contract](design-directories.md#omitted-names); the driver
+chooses no class. Every slot is validated before any child is admitted.
 
-An admitted record carries the displayed name and a 16-byte payload: the
+An admitted record carries its class, its component as the
+[contract](design-directories.md#omitted-names) stores it per class, and a
+16-byte payload: the
 object's position and the directory's own position, each a 64-bit
 little-endian value. `keys` emits one key, the exact name bytes; `key`
 validates a query component against the same profile and returns its bytes.
@@ -313,10 +318,18 @@ free blocks; bad blocks are zero, since `.bad_blks` is an ordinary file.
 
 An invalid label, or a used slot in `lost+found`, whose objects would never
 be walked and so never owned, makes verification incomplete with
-`FSIMG_EUNSUPPORTED` before any work. An unsupported kind, name or status
+`FSIMG_EUNSUPPORTED` before any work. An unsupported kind or status
 anywhere fails the walk the same way, since a directory's slots are
 validated before any is admitted; the report is never marked complete
-after skipping an object.
+after skipping an object for its kind. An omitted name is not such a skip:
+verification descends into an omitted directory and replays an omitted
+object under the
+[omitted-names contract](design-directories.md#omitted-names), so its
+blocks are claimed and owned, its names reach the link-count pass and its
+`.inodes` slot is referenced exactly as a delivered object's are; the
+omitted subtree roots are counted in `omitted_entries`, the report's
+files and directories exclude the omitted subtrees, and the report is
+complete.
 
 ## Writer settings
 
@@ -446,7 +459,7 @@ Reader:
 | Condition | Status |
 | --- | --- |
 | No root signature in block 2; image shorter than 1024 bytes | `FSIMG_EFORMAT` |
-| Recognized but unobserved: a status, type byte, reserved or spare byte, `.inodes` status or name field, zero root-block record 4, extent-block fill, kind, size above `2^31 - 1`, or name outside the profile, `lost+found`'s `..` naming `(2, 0)`; a used slot in `lost+found` or an invalid label under `verify` | `FSIMG_EUNSUPPORTED` |
+| Recognized but unobserved: a status, type byte, reserved or spare byte, `.inodes` status or name field, zero root-block record 4, extent-block fill, kind, size above `2^31 - 1`, link target above 1023 bytes, `lost+found`'s `..` naming `(2, 0)`; a used slot in `lost+found` or an invalid label under `verify` | `FSIMG_EUNSUPPORTED` |
 | Slice length not a multiple of 512; `N` outside `[43, 2^31]`; root extent not at `3 + B`; bitmap position, size or padding; used with link; empty name, NUL, slash or dot name; range, chain, count, signature, first-copy, claim, dot-entry, link-target, long-name, link-count, occupancy or free-bit inconsistency | `FSIMG_ECORRUPT` |
 | Unrepresentable selection component | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
@@ -456,7 +469,7 @@ Writer:
 | Condition | Status |
 | --- | --- |
 | Setting outside its type, name outside the profile, reserved root name | `FSIMG_EINVAL` |
-| Catalog `/.boot` or `/.altboot` of another kind; a size above `2^31 - 1`; a kind the profile lacks; an owner or time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
+| Catalog `/.boot` or `/.altboot` of another kind; a size above `2^31 - 1`; a kind the profile lacks or a link target above 1023 bytes, from the common capability check; an owner or time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
 | Content does not fit the exact size or `2^31` blocks; a directory, `.inodes` or `.longfilenames` above `2^31 - 1` bytes; a non-reproducible format time outside `[0, 2147483647]` | `FSIMG_ERANGE` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
 

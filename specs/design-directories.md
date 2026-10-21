@@ -10,7 +10,9 @@ about directory encodings, allocation, or name folding.
 The [architecture](architecture.md#writer-and-reader-independence) assigns the
 owners. [Storage](design-storage.md#reading-and-traversal) states the bounds.
 Driver designs ([FAT](design-fat-reader.md), [exFAT](design-exfat.md),
-[QNX6](design-qnx6.md), [QNX4](design-qnx4.md)) define only their decoding, keys, and locators.
+[QNX6](design-qnx6.md), [QNX4](design-qnx4.md),
+[ImageFS](design-ifs-driver.md)) define only their decoding, keys, and
+locators.
 Host source scanning and safe extraction have separate authority and lifetime
 rules and do not use this walker.
 
@@ -36,10 +38,12 @@ A prepared directory satisfies one invariant:
 > unambiguous, and its entries can be replayed in original order.
 
 It consists of a run of entry records, in on-disk order, on the walker's
-spillable directory stack. Each record holds the displayed component as
-validated, NUL-terminated UTF-8 followed by a bounded, explicitly encoded driver
-payload. The payload carries what the driver needs to rebuild the entry snapshot
-and its private locator: for example, the FAT 32-byte short entry and the
+spillable directory stack. Each record holds its class and its component,
+validated, NUL-terminated UTF-8 for a delivered entry and the raw bytes for
+an [omitted](#omitted-names) one, which only the rendering function reads,
+followed by a bounded, explicitly encoded driver payload. The payload
+carries what the driver needs to rebuild the entry snapshot and its private
+locator: for example, the FAT 32-byte short entry and the
 cluster its `..` record must name, or the exFAT file and stream extension
 entries. Records never contain native structures, pointers, or padding.
 
@@ -78,8 +82,10 @@ two names to share a key within a directory. Allocation-owner identity belongs
 to [ownership verification](design-storage.md#verification-scope).
 
 The driver supplies the error classification and diagnostic text for an
-ambiguous namespace. Common code identifies the colliding entries by their
-validated displayed names, never by raw key bytes.
+ambiguous namespace. Entry names travel only in path fields, never in
+message text: common code names the second of the colliding entries through
+the error's rendered path and describes the first by its position in the
+directory in the message, never by raw key bytes.
 
 ## Selection
 
@@ -126,6 +132,104 @@ already enforced. Decoding, cache misses, and sorting consume work units in the
 ordinary way. The first advance into a wide directory can therefore do work
 proportional to its width, but opening the volume stays bounded and no
 whole-volume tree is materialized.
+
+## Omitted names
+
+A driver admits a child once its name has passed the driver's native checks,
+the ones whose failure is corruption, such as an embedded NUL or an empty
+name. Preparation then assigns the child one of two classes. A format whose
+descriptor declares the QNX-family name profile (QNX4, QNX6 and ImageFS)
+has every child's component checked by the one common profile function:
+strict UTF-8, no NUL, slash, control byte or `0x7f`, neither `.` nor `..`.
+A component under the profile makes the child *delivered*; a natively legal
+component outside it makes the child *omitted*, under the
+[architecture's rule](architecture.md#names-and-metadata). A descriptor
+that declares no profile, FAT and exFAT, admits every child as delivered,
+since its driver derives validated names by its own rules. Common code
+branches on the declared property, never on a format name, and no driver
+chooses a class. The same function validates a query component in every
+QNX driver's `key`, and the ImageFS child pass calls it to count omitted
+nodes at open, so there is one rule for what the profile accepts.
+
+The class is the only difference between the two kinds of child. An
+omitted child is decoded, validated and charged like a delivered one, its
+record is spooled with its class, and its keys enter the namespace, so a
+duplicate of an omitted name is still a duplicate; the raw bytes are
+compared only as keys, for duplicate detection, and a query never matches
+them because a query component outside the profile is `FSIMG_EINVAL`
+before any directory is consulted.
+
+An omitted record carries no displayed UTF-8 name. The walker's path
+buffer, every path limit and every key work on raw bytes. Every path the
+library emits is rendered, with one exception: `fsimg_entry_t.path`, an API
+value that only a delivered entry ever has. The single rendering funnel is
+`fsimg_path_render()`, which renders a path into a caller-supplied buffer
+and returns whether it truncated; its input is either a walker path with
+its component classes or a plain path from the catalog, the source scan or
+the extractor, treated as all delivered. It has three callers.
+`fsimg_error_path()` renders into `fsimg_error_t.path` and stores the
+result in `path_truncated`. The loss-report callback's path is rendered
+into a buffer sized for the worst case of its input, four bytes per input
+byte up to the complete-path limit `max_path_bytes` plus the terminator,
+`4 * max_path_bytes + 1`, so it is never truncated. A verification finding
+reaches the caller as an `fsimg_error_t`, which is what the bounded
+reporting interface supports, so its path has the error record's bound,
+truncation rule and flag. For library callers this is a contract: a
+callback or finding path is rendered, so it holds `\\` where
+`fsimg_entry_t.path` holds `\`. The rendering is an escaping:
+in every component, delivered or omitted, a backslash is written `\\`; in
+an omitted component every byte outside `0x20` to `0x7e` is written `\xNN`
+with lowercase hex; a delivered component is otherwise unchanged. It is
+injective because the only backslashes in the output are the ones it
+writes, and `\\` and `\xNN` parse apart left to right, so unescaping
+recovers the raw bytes exactly. Truncation into the bounded error path
+keeps the tail, which names the entry, cuts only on a whole rendered unit,
+never inside `\\`, `\xNN` or a UTF-8 sequence, and sets the error's
+`path_truncated` flag.
+
+The walker owns what omission means. Every admitted child becomes the
+walker's current entry in traversal order, marked by its class and by
+whether an ancestor is omitted, which the ancestor cursors show; delivery
+to callers filters on that mark:
+
+* `next()` returns only a delivered entry with delivered ancestors, so a
+  listing never shows an omitted entry or anything below it. Selection
+  resolves only through delivered entries, and no query can spell an
+  omitted name.
+* The walker reports a marked omitted entry to the extractor through an
+  internal interface, so `fsimg_extract_at()` is the only consumer that
+  acts on it; a library caller copying through `next()` gets listing
+  behaviour, no failure and `omitted_entries` counted. Extraction of a
+  scope that contains an omitted entry fails with `FSIMG_EUNSUPPORTED`
+  naming the entry, rendered, unless the caller selects
+  `FSIMG_EXTRACT_SKIP_UNSUPPORTED`, which omits it instead, exactly as for
+  an entry of an unsupported kind. A partial output is never success, so
+  the omission is an explicit choice.
+* The walker counts each omitted subtree root it passes within the
+  traversal scope, an omitted entry whose ancestors are all delivered, in
+  the operation's result as `omitted_entries` and in the context
+  statistics' field of the same name; the result field is the count an
+  operation reports, the statistic accumulates over the context. A child
+  below an omitted directory is never counted. The walker is the only
+  owner of `omitted_entries`; the ImageFS `omitted` info detail precomputes
+  the same number with the same function. A listing, an extraction under
+  the skip option and a full verification of one scope report the same
+  number, absent pruning by a selection, and `skipped_entries` keeps its
+  one meaning, entries of unsupported kinds the extractor skipped on
+  request.
+* An operation that delivers entries never descends into an omitted
+  directory: preparation's cost stays the directory's children, and an
+  omitted subtree costs its root's record and nothing more.
+* Full verification descends into an omitted directory and replays every
+  omitted entry exactly as it does a delivered one, so the driver's claims,
+  ownership runs, reference records and index builds cover the omitted
+  subtree and the reconciliation that follows misses nothing; payload
+  read-through reads omitted files and links too. The report's files,
+  directories and logical bytes count delivered entries; bytes read and
+  allocated units cover everything walked; the omitted subtree roots are in
+  `omitted_entries`; and the report is complete, since every omitted
+  object was checked. Corruption below an omitted name is corruption,
+  found by the same checks as anywhere else.
 
 ## Snapshots and borrowing
 

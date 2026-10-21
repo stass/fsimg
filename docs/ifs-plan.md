@@ -295,8 +295,11 @@ remove a class of special cases rather than handling each case.
    under the QNX fsimg name profile: strict UTF-8, no NUL, slash, control
    byte or `0x7f`, and neither `.` nor `..`. A stored path that is absolute,
    has an empty component or has a `.` or `..` component is unsupported
-   (owner decision 11). A component outside the profile is
-   `FSIMG_EUNSUPPORTED`. The root is the empty path.
+   (owner decision 11). A natively legal component outside the profile
+   omits its node and everything below it, counted, never fatal to the
+   image and refused by extraction without the skip option, under
+   the [cross-reader rule](../specs/architecture.md#names-and-metadata).
+   The root is the empty path.
 7. **Boot-specific state stays visible but inert.** Info reports:
    * the mountpoint and mount flags;
    * `boot_ino[]`, `script_ino` and `chain_paddr`;

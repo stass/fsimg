@@ -7,7 +7,9 @@ A format descriptor is the only place that holds a format's identity:
 * It names its public format or formats, its probe, independently optional
   reader and writer operations, and one capability record per public name:
   profile, entry kinds, metadata fields, geometry masks, and format and
-  supported limits.
+  supported limits, including the name, label and symbolic-link target
+  limits the [metadata design](design-metadata.md#capability-records)
+  states.
 * Capability reporting copies those records. Common lifecycle and reporting
   code never branches on a format name or variant.
 * A reader's driver state is one private pointer that the descriptor's

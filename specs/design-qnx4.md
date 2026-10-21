@@ -239,7 +239,7 @@ The mode's type bits select the entry kind: [X1], [Q6]
 | --- | --- | --- | --- |
 | `0100000` | regular file | `size` bytes | exactly `ceil(size / 512)` blocks |
 | `0040000` | directory | `size` bytes of 64-byte slots | exactly `size / 512` blocks; `size` a nonzero multiple of 512 |
-| `0120000` | symbolic link | the target, `size` bytes | exactly `ceil(size / 512)` blocks |
+| `0120000` | symbolic link | the target, `size` bytes, 1 to 1023; a longer one is `FSIMG_EUNSUPPORTED` | exactly `ceil(size / 512)` blocks |
 | `0010000` | FIFO | none | any; the blocks are the FIFO's own and never delivered |
 
 Any other type, including device nodes, is `FSIMG_EUNSUPPORTED`: the
@@ -444,10 +444,16 @@ name, the long-name record's for a name over 48 bytes, never to the mangled
 prefix. Names are compared byte for byte and are case-sensitive. QNX forbids
 NUL, slash and the dot names, so a name carrying a NUL before its length, a
 slash, or equal to `.` or `..` in a slot beyond the first two is
-`FSIMG_ECORRUPT`; a natively legal name outside the profile is
-`FSIMG_EUNSUPPORTED`. The PCM partition's names are all ASCII, so the
-profile loses nothing there. The writer never truncates: a name the profile
-cannot store fails planning. [H1]
+`FSIMG_ECORRUPT`; a natively legal name outside the profile, such as a
+Latin-1 or control byte, is omitted under the
+[cross-reader rule](architecture.md#names-and-metadata): the slot is
+validated like any other, the object is neither listed nor selectable,
+nothing below it is delivered, extraction of a scope holding it needs the
+skip option, the omission is counted once as `omitted_entries`, and full
+verification still walks the object so its storage and link count are
+reconciled. The PCM partition's
+names are all ASCII, so the profile loses nothing there. The writer never
+truncates: a name the profile cannot store fails planning. [H1]
 
 ## The `.inodes` table
 
@@ -549,7 +555,8 @@ and every referenced slot is used. [X1], [H1]
 | Root directory | first extent at `3 + B`; slots 0 to 5 as tabled; `.longfilenames` by name |
 | Statuses, type byte, reserved and spare bytes | the closed tables |
 | Kinds | regular, directory, symbolic link, FIFO |
-| Names | 1 to 505 bytes under the profile |
+| Names | 1 to 505 bytes; one outside the profile is omitted and counted, never fatal |
+| Symbolic-link targets | 1 to 1023 bytes |
 | Owner and times | the full 16-bit and 32-bit ranges as stored |
 | Extents | chains of any length within the record's count |
 | Allocation | exact for files, directories and links; any for FIFOs |
@@ -559,7 +566,8 @@ and every referenced slot is used. [X1], [H1]
 
 The reader capability advertises files, directories, symbolic links and
 FIFOs; owner, mode and the four timestamps; a 512-byte sector and
-allocation unit; and a 48-byte label.
+allocation unit; a link-target limit of 1023 bytes, the bound fsimg holds
+evidence for; and a 48-byte label.
 
 ## Writer profile
 
@@ -736,7 +744,7 @@ ran. The minimum matrix:
 | Geometry and probe | Slice length not a multiple of 512; 1, 2 and 3 bitmap blocks; `N` of 43, 1000, 4095, 4096, 4097, 5001, 8192 and 8193; image shorter than 1024 bytes; root directory past the slice; probe exclusivity against FAT, exFAT and QNX6 fixtures in both directions, native QNX6 boot areas and fsimg's zeroed one included; forced format |
 | Root block | Each record's status and mode type, `0x13` on records 2 and 3 only; nonzero reserved ranges; label of 0, 1, 47 and 48 bytes; an invalid label and nonzero padding, omitted by `info` and incomplete under `verify`; zero record 4 |
 | Bitmap | Wrong position, extent, size; a clear padding bit; a padding byte not `0xff`; a referenced free block; an allocated orphan; a block with two owners |
-| Names | 1, 15, 16, 17, 47, 48, 49, 504 and 505 bytes with 16, 48 and 505 unterminated; a 16-byte name in a link record; an empty name in each record kind; duplicates; invalid bytes; a NUL inside, a slash, `.` and `..` as entry names; names differing only by case; a long name whose prefix, zero byte, pointer, back-reference or state disagrees; a pointer outside `.longfilenames` |
+| Names | 1, 15, 16, 17, 47, 48, 49, 504 and 505 bytes with 16, 48 and 505 unterminated; a 16-byte name in a link record; an empty name in each record kind; duplicates; a NUL inside, a slash, `.` and `..` as entry names; a Latin-1 byte, a control byte and `0x7f` on a file, a link and a directory with descendants, direct and long-name alike, each omitted and counted once in `omitted_entries` with its descendants undelivered and uncounted, a sibling selection uncounted, extraction of the parent refused without the skip option and omitting with it, full verification complete with its blocks owned and its names in the link count, and a corrupt extent below the omitted directory still `FSIMG_ECORRUPT`; names differing only by case; a long name whose prefix, zero byte, pointer, back-reference or state disagrees; a pointer outside `.longfilenames` |
 | Records | Every status value for each record kind, the modified bit on each kind; used with link; nonzero type, reserved or spare bytes; a nonzero `.inodes` name field; a freed `.inodes` slot with stale bytes; links with slot index 8, into the loader, root block, bitmap, a payload block, outside `.inodes`, to slot 0 or to a free slot; root slots 3 to 5 with wrong targets; a link into block 2 from any other slot |
 | Extents | 0, 1, 2, 60, 61, 62, 121 and 122 extents; each extent-block fault: loop, repeated block, wrong previous pointer, 0 or 61 used, nonzero spare, count disagreement, nonzero unused descriptor, bad signature, wrong first-extent copy, partial block followed by another; an extent crossing `N`; zero start with nonzero length; size short of, equal to and beyond allocation for each kind; FIFO with and without blocks |
 | Directories | Size not a multiple of 512, not equal to allocation; each dot-entry fault; a 2-block and a 16-block directory; a cycle; a second parent; a hard link listed twice and walked once; an unsupported kind; a wide directory that spills to scratch |

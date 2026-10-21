@@ -244,8 +244,9 @@ candidate layout is ever tried: `sym_offset` other than
 `L + 1`, a target whose NUL lies outside the record, or a NUL missing after
 `sym_size` bytes is `FSIMG_EUNSUPPORTED`. The target is content, delivered
 as bytes, never resolved. `mkifs` accepts targets of up to 1024 bytes and
-refuses 4000; the common entry model carries 1 to 1023 bytes, so `sym_size`
-0 or 1024 is `FSIMG_EUNSUPPORTED`. [X1], [S1]
+refuses 4000, so the format's link-target limit, the capability record's
+`max_link_target_bytes`, is 1024 bytes, which is also the entry model's
+ceiling; `sym_size` 0, or above 1024, is `FSIMG_EUNSUPPORTED`. [X1], [S1]
 
 ### Inode word
 
@@ -379,11 +380,17 @@ Path components are compared byte for byte and are case-sensitive, under the
 one name profile both QNX formats share: strict UTF-8, no NUL, slash, control
 byte or `0x7f`, and neither `.` nor `..`. `mkifs` stores names as given,
 UTF-8 and Latin-1 bytes alike, and refuses a space only in its buildfile
-parser, so a natively legal component outside the profile is
-`FSIMG_EUNSUPPORTED`; as for QNX4, it fails the image rather than one
-directory, because the open pass validates every path before any directory
-is prepared. A path is at most 1024 bytes: `mkifs` accepts 1024 and refuses
-1025, one component may use the whole length, and depth 200 is accepted, so
+parser, so a natively legal component outside the profile is omitted under
+the [cross-reader rule](architecture.md#names-and-metadata), as for QNX4
+and QNX6. The node that owns the component, explicit or
+[implicit](#implicit-directories), is validated like any other and is
+neither listed nor selectable. Every record below it is omitted with it,
+and every record that shares its path is shadowed or omitted with it.
+Extraction of a scope holding the node needs the skip option. The omission
+is counted once, as the `omitted` detail of info and as `omitted_entries`
+in the operation's result. Verification still checks the omitted records.
+A path is at most 1024 bytes: `mkifs` accepts 1024 and refuses 1025, one
+component may use the whole length, and depth 200 is accepted, so
 depth is bounded by the length alone, at 512 components. A longer path is
 `FSIMG_EUNSUPPORTED`. Every name in H3 and X1 is valid UTF-8. The writer
 never truncates: a name the profile cannot store fails planning. [X1], [S1],
@@ -403,8 +410,8 @@ never truncates: a name the profile cannot store fails planning. [X1], [S1],
 | Inode flag nibble | `0x0`, `0x8`, `0xc`, `0xe` |
 | Mode | type as tabled; bits above `0177777` zero |
 | Owner and time | the full 32-bit ranges as stored |
-| Paths | relative, 0 to 1024 bytes, components under the profile, no `.` or `..` |
-| Symbolic links | the link layout, targets of 1 to 1023 bytes |
+| Paths | relative, 0 to 1024 bytes, no empty, `.` or `..` component; a component outside the profile omits its node and is counted, never fatal |
+| Symbolic links | the link layout, targets of 1 to 1024 bytes |
 | Ranges | the range rule; overlaps allowed |
 | References | nonzero ones name one regular-file record |
 | Volume length | at least `image_size`; equal to it under verification |
@@ -414,7 +421,8 @@ The reader capability advertises files, directories, symbolic links and
 FIFOs; owner, mode and the modification time; byte addressing (a sector and
 allocation unit of 1 byte); a file limit of `2^32 - 1` bytes and a volume
 limit of `2^32 - 4` bytes, the largest `image_size` that is a multiple of 4;
-a name limit of 1024 bytes; and no label.
+a name limit of 1024 bytes; a link-target limit of 1024 bytes; and no
+label.
 
 ## Writer profile
 
@@ -487,10 +495,10 @@ caller that forbids losses. [X1]
 | --- | --- | --- |
 | Path, from the image root | 1024 bytes | `FSIMG_EUNSUPPORTED` |
 | Component | Within the path limit, under the profile | `FSIMG_EINVAL` for a profile violation |
-| Symbolic-link target | 1 to 1023 bytes, the common model's range | Rejected by collection |
+| Symbolic-link target | 1 to 1024 bytes, the format's limit and the common ceiling | Never reached: the ceiling equals the limit, so collection refuses a longer target first |
 | Mountpoint | 0 to 1024 bytes under the byte rules, slashes allowed | `FSIMG_EINVAL` |
 | File length | `2^32 - 1` bytes | `FSIMG_EUNSUPPORTED` |
-| Record length | 16 bits; by construction at most `0x1c + 1025 + 1024` | never reached |
+| Record length | 16 bits; by construction at most 2080 bytes, `0x1c + 1025 + 1025` rounded up to 4 | never reached |
 | Image | `2^32 - 4` bytes | `FSIMG_ERANGE` |
 
 An unrepresentable entry fails planning with `FSIMG_EUNSUPPORTED` and is
@@ -605,13 +613,13 @@ code ran. The minimum matrix:
 | Records | lengths 0, 1, 23, 24, below each kind's minimum, exact minimum, and crossing the table end; a length of 25 (unsupported); a missing or nonzero terminator; a zero inode word; a nonzero extended-attribute offset; each unknown type value; mode bits above `0177777`; a path without a NUL; an empty table |
 | Inode flags | each accepted nibble; each other nibble; the counts reported; a flagged directory (accepted, counted) |
 | Hierarchy | implicit parents at depth 1 and 512; a tree whose record order is reversed; a duplicate path (link then file, file then link, two files, two directories), the last delivered and the earlier counted; a duplicate root; a root record present, absent and last; a file record with the empty path, as the entry and shadowed; a path below a file, below a link and below a FIFO, with the non-directory record before and after its descendants in the table; a directory record shadowed by a file record with descendants; a file `d` beside `d-x` and `d/x`; `x/y` then `z` twice, the first `z` shadowed, with `z` delivered at the root; an absolute path; `.` and `..` components; an empty component; `a-b` and `a/b` siblings ordered by component |
-| Names | components of 1, 255, 256 and 1024 bytes; a 1025-byte path; non-ASCII UTF-8; Latin-1 bytes, a control byte, `0x7f` and a space; names differing only by case |
+| Names | components of 1, 255, 256 and 1024 bytes; a 1025-byte path; non-ASCII UTF-8; a space; names differing only by case; Latin-1 bytes, a control byte and `0x7f` on a file, a link, an explicit directory with descendants and an implicit one, each omitted and counted once with its descendants undelivered and uncounted, verification complete, `info`'s `omitted` detail equal to the count, a reference to an omitted file satisfied and counted in `omitted_references`, extraction of the parent refused without the skip option and omitting with it, and a corrupt range below the omitted directory still `FSIMG_ECORRUPT` |
 | Ranges | a range ending exactly at the trailer; one including the trailer; one inside the table; one inside the header; start plus length overflowing 32 bits; shared ranges, including extraction of a heavily shared image under the default output ceiling; zero-length files with offsets 0, inside the table and past the image; sizes 0, 1, 3, 4, 65535, 65536, 65537 and above 16 MiB |
-| Symbolic links | `sym_offset` of `L`, `L + 1` and `L + 2`; `sym_size` 0, 1, 1023 and 1024; a target crossing the record; a missing NUL after the target; relative, absolute, dangling and `..` targets delivered as bytes |
+| Symbolic links | `sym_offset` of `L`, `L + 1` and `L + 2`; `sym_size` 0, 1, 1023, 1024 and 1025; a target crossing the record; a missing NUL after the target; relative, absolute, dangling and `..` targets delivered as bytes |
 | Metadata | uid and gid 0, 65535 and 4294967295 read as stored; modes `0000`, `0644`, `0755`, `4755` and `7777`; times 0 and 4294967295; FIFO words nonzero |
 | References | `boot_ino[0]` and `script_ino` naming one file; naming no record; naming two records; naming only a shadowed record; naming a directory and a link; a nonzero `boot_ino[3]`; all zero |
 | Checksum | a correct trailer; one flipped byte in the header, the mountpoint, a record, file data, padding and the trailer; a byte-swapped trailer; a big-endian image summed in its order |
-| Writer | an empty catalog, which is the root record alone; one file; the name limits; each kind; owner 4294967295 and mode `7777`; a time of 4294967296 as a counted loss and as a refusal when losses are forbidden; a 1023-byte target; mountpoints of 0, 1, 1024 and 1025 bytes; both byte orders; `volume_bytes`, `min_free_bytes`, a label and each boot setting refused; a 1025-byte path refused; an image one word below and at `2^32 - 4` bytes on a sparse sink; byte identity across source order, cache size, scratch path and time zone; a poison scan of every padding byte |
+| Writer | an empty catalog, which is the root record alone; one file; the name limits; each kind; owner 4294967295 and mode `7777`; a time of 4294967296 as a counted loss and as a refusal when losses are forbidden; a 1024-byte target, and a 1025-byte one refused by collection; mountpoints of 0, 1, 1024 and 1025 bytes; both byte orders; `volume_bytes`, `min_free_bytes`, a label and each boot setting refused; a 1025-byte path refused; an image one word below and at `2^32 - 4` bytes on a sparse sink; byte identity across source order, cache size, scratch path and time zone; a poison scan of every padding byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |
 
 Independent acceptance is bidirectional: fsimg reads every native capture,

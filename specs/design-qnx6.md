@@ -572,7 +572,9 @@ hardlink inode format from the Linux prose description alone.
 
 Symbolic links have a distinct mode and their target bytes are the inode's
 content, exposed as the entry's content and never followed during fsimg path
-selection or extraction. An inode of a kind the entry model does not
+selection or extraction. The capability record's link-target limit is 1023
+bytes, the bound fsimg holds evidence for; a stored target above it is
+unsupported. An inode of a kind the entry model does not
 represent makes its directory unsupported, not a fabricated regular file or a
 silent omission. Full verification cannot report complete support after
 encountering such an object. [L2]
@@ -650,9 +652,14 @@ collisions remain the extractor's separate responsibility. QNX 6.5.0
 itself accepts 1 through 510 bytes, rejects NUL and slash, and rejects any
 component that its C library's multibyte decoder does not accept, which is
 UTF-8 under the 6.5.0 native locale. The fsimg profile is stricter. The
-writer never emits a name outside it; a reader reports a natively valid
-name outside it, such as one with control bytes, as unsupported rather than
-corrupt. [L4], [Q5], [X2]
+writer never emits a name outside it; a reader omits an entry whose name is
+natively valid but outside it, such as one with control bytes, under the
+[cross-reader rule](architecture.md#names-and-metadata): the entry and
+its subtree are neither listed nor selectable, extraction of a scope
+holding it needs the skip option, the omission is counted once as
+`omitted_entries`, and full verification still walks the subtree, so the
+image is neither unsupported nor corrupt for the name alone. [L4], [Q5],
+[X2]
 
 Directories follow the [prepared-directory contract](design-directories.md).
 Each entry's namespace key is its exact UTF-8 name bytes, which gives one
@@ -956,7 +963,7 @@ The minimum format matrix includes:
 | Snapshots | Either header newer; different namespaces in the two views; shared unchanged system block; active/inactive allocation differences; equal conflicting serials; bad CRC in either header; poisoned padding through byte 511 |
 | Trees | Zero-length object; valid block zero; 16/17 leaves; each indirect transition; fragmented leaves; maximum depth; overflowed capacity; unused required pointer; out-of-range pointer; ancestor cycle; same-block branches; metadata/data overlap |
 | Inodes | First/last ID; zero/out-of-range ID; truncated table; each accepted state; directory with status 3; nonzero link/extension word; unsupported special type and extension; timestamp boundaries |
-| Names | 1/27/28/510/511 bytes; multi-byte UTF-8 boundaries; long-name index zero; index vs inode confusion; checksum disabled/enabled; non-ASCII checksum vectors; embedded NUL/slash; invalid UTF-8; duplicate siblings; host collisions |
+| Names | 1/27/28/510/511 bytes; multi-byte UTF-8 boundaries; long-name index zero; index vs inode confusion; checksum disabled/enabled; non-ASCII checksum vectors; embedded NUL/slash; invalid UTF-8, a control byte and `0x7f` on a file, a link and a directory with descendants, inline and long-name alike, each omitted and counted once in `omitted_entries` with its descendants undelivered and uncounted, a sibling selection uncounted, extraction of the parent refused without the skip option and omitting with it, full verification complete with its blocks owned and its slots in the link count, and a corrupt tree below the omitted directory still `FSIMG_ECORRUPT`; duplicate siblings; host collisions |
 | Directories | Empty directory; unused slots before live ones; missing/duplicate/wrong dot entries; self/ancestor links; multiple parents; wide directory forced to scratch; unsupported entry without silent omission |
 | Allocation | Bitmap self-validation; system run order for system-tree depths 0, 1 and 2, including several top-level indirect blocks; both system reservations; bit 7/8 boundary; final padding bits; live unallocated block; cat/extract rejection of free payload and indirect blocks without prior verify; allocated preallocation beyond EOF; orphan allocation; free counters; full/near-full images; unused inode initialization |
 | Writer | Exact and automatic sizing; inode exhaustion; existing compatible `.boot` tree; synthesized `.boot`; wrong-kind/metadata conflict; both endian profiles; deterministic serials/identity; free reserve; root metadata; zero sources; complete byte initialization |

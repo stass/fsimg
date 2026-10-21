@@ -462,6 +462,46 @@ times encode calendar fields as if UTC without asserting a zone. This keeps
 generic metadata independent of the host timezone while preserving the basis
 needed by format codecs and extraction policy.
 
+A symbolic link's target length has two bounds. The entry model's ceiling,
+`FSIMG_SYMLINK_TARGET_MAX`, is 1024 bytes: the longest target any
+registered format stores, which is ImageFS's. It sizes every target buffer,
+and the source scan refuses a host target outside 1 to 1024 bytes as
+`FSIMG_EUNSUPPORTED`. Each format's capability record states its own limit
+in `max_link_target_bytes`, zero for a format that stores no symbolic links;
+common writer planning refuses a link whose target exceeds the selected
+format's limit as `FSIMG_EUNSUPPORTED`, naming the entry, before any driver
+sees it, and a reader classifies a stored target above its format's limit as
+that format's design states for an unobserved value. The limit is a format
+property because the formats differ: `mkifs` accepts 1024 bytes, while QNX4
+and QNX6 hold evidence to 1023. One ceiling with per-format limits keeps the
+buffers and the scan format-neutral while no format advertises more than it
+has been shown to store.
+
+The QNX4, QNX6 and ImageFS readers omit an entry whose name is natively
+legal but outside the QNX-family fsimg name profile, instead of failing the
+image, through the
+[prepared-directory contract](design-directories.md#omitted-names); FAT and
+exFAT keep their strict UTF-16 name rules, under which a name is either
+valid or corrupt. The profile is fsimg's, not the format's: one foreign
+name, such as a Latin-1 byte in an otherwise ordinary QNX volume, must not
+make the rest of an image unreadable. Omission is a filter on delivery
+only. The entry is validated like any other, enters no listing or
+selection, nothing below it is delivered, and full verification still
+walks it, so every allocation, reference and structure check covers the
+whole volume and an omission is never a finding against the image.
+Extraction of a scope containing an omitted entry fails with
+`FSIMG_EUNSUPPORTED` naming the entry unless the caller selects the
+extractor's skip option, as for an unsupported kind, so a partial output is
+never success. The omission is never silent: each omitted subtree root is
+counted in the operation's result and the context statistics as
+`omitted_entries`, distinct from `skipped_entries`, and the CLI reports it.
+An omitted name is rendered as escaped ASCII by one common function
+wherever an entry is named; the raw bytes are never printed. A name the
+format itself forbids remains `FSIMG_ECORRUPT`; a path shape a format's
+design refuses as unsupported, such as an ImageFS odd path, remains
+refused. The writer is unchanged: a name the profile cannot store fails
+planning.
+
 ### Extraction and sandboxing
 
 All parsers treat input as hostile, including probes and listing commands.

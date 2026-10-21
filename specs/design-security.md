@@ -151,7 +151,12 @@ to a relay as the caller's stream.
 
 The coordinator validates protocol lengths before allocation, escapes names
 and control characters before terminal output, and never treats worker text
-as a format string. A worker cannot forge a successful publication by sending
+as a format string. Every library path other than an entry's own reaches
+the coordinator already rendered by the library's one rendering function,
+so an omitted name's raw bytes never cross the protocol; the coordinator
+escapes such a field without touching its backslashes, as the
+[CLI design](design-cli.md#output-diagnostics-and-exit-status) states. A
+worker cannot forge a successful publication by sending
 an early success frame: the coordinator also requires the correct state,
 successful worker exit, and successful final output checks. Truncated messages,
 unknown types, duplicate completion, child signals, and EOF before completion
@@ -471,6 +476,11 @@ symlinks, hardlinks, devices, sockets, FIFOs, reparse-like objects, and unknown
 critical entry kinds: an image entry of such a kind fails the extraction, or
 is skipped and counted when the caller selects the explicit skip option of
 the [POSIX metadata design](design-metadata.md#reading-extraction-and-display).
+An entry a reader omits for a name outside its profile, under the
+[omitted-names contract](design-directories.md#omitted-names), fails the
+extraction the same way, naming the entry in the escaped rendering, unless
+the same skip option omits it; the walker counts the omission as
+`omitted_entries`, so no omission, for kind or for name, is silent.
 It does not restore owners, setuid/setgid bits, executable
 permissions, ACLs, xattrs, or host-specific privileged flags. Host case-folding
 or normalization collisions fail through exclusive creation; they are never

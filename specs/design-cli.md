@@ -419,7 +419,14 @@ directories and files, regular content only, no links, no privileged
 metadata, no existing-tree merge and no host timestamp restoration.
 Inspection still exposes image metadata. An entry of another kind, such as a
 symbolic link, fails the extraction unless `-k` skips it; skipped entries are
-counted in a warning and in the JSON summary. No force flag, lossy name
+counted in a warning and in the JSON summary. An entry the reader omits for
+a name outside its profile, under the
+[omitted-names contract](design-directories.md#omitted-names), fails the
+extraction the same way, named in the escaped rendering, unless `-k` omits
+it; omitted entries have their own count, `omitted_entries`, reported after
+`t`, `x` and `W` alike by the warning `N entries with names outside the
+profile were omitted` and the JSON summary field of that name. No force
+flag, lossy name
 rewriting or sandbox opt-out weakens the path and file-type checks.
 `--mtree=FILE` records what the safe profile cannot restore, skipped entries
 included, in a manifest the coordinator publishes beside the tree, as the
@@ -472,7 +479,11 @@ zero tails need no backing read.
 Verification reports unsupported critical features, corruption, incomplete
 work and resource limits distinctly, and never repairs an image. One human
 result is emitted only after successful worker exit and finalization,
-stating structural or initialized-payload scope.
+stating structural or initialized-payload scope. Entries the reader omitted
+for a name outside its profile are reported by the omitted-entry warning
+and summary field next to a complete result, never as corruption; for
+ImageFS the result also prints the `omitted_references` detail when a boot
+or script reference resolves to an omitted node.
 
 A byte range (`--offset`, `--length`) never reads a partition table, so it
 conflicts with a scheme named in `-F` as it does with `--partition`; a
@@ -531,8 +542,25 @@ Resource failures identify the resource, limit and observed demand. Actual
 cleanup failures, retained output and scratch paths, incomplete output,
 published output and uncertain durability remain visible in plain language.
 Truncated paths and messages are labeled; terminal escaping applies to prose
-as well as names. FAT layout failures identify the rejected constraint when
-all candidates fail for the same reason; otherwise they describe the
+as well as names. The CLI's escaping follows the field's type, not a list
+of producers. An entry path, the one unrendered path the library emits, is
+escaped in full:
+`"`, backslashes and control scalars. Every other library path, in an
+error record, a loss notice or a verification finding, arrives already
+rendered by the
+[one rendering function](design-directories.md#omitted-names), every
+backslash as `\\` and, in an omitted component, every byte outside `0x20`
+to `0x7e` as `\xNN`; the CLI escapes such a field without touching its
+backslashes, so the library's escapes survive unchanged, while `"` and
+control scalars, including the C1 and bidi formatting characters a
+delivered name may carry, are still escaped as `\"` and `\uXXXX`. The
+result stays unambiguous because every backslash sequence has one of these
+two origins, and a delivered backslash shows as `\\` in a listing and in an
+error alike. In JSON the rendered text is the string's value under ordinary
+JSON encoding, so an entry-path value holds a raw backslash while an
+error-path value holds the rendering's two. FAT layout failures identify
+the rejected constraint when all candidates fail for the same reason;
+otherwise they describe the
 conflicting requested settings without guessing a remedy or an uncomputed
 minimum image size.
 
@@ -551,8 +579,9 @@ creation and capability details.
 `--json` writes newline-delimited JSON records with a schema version and
 `type`. Entry records stream individually, followed by a completion summary.
 There is no JSON array proportional to entry count. Final records include
-validation scope, counters, selected limits, metadata-loss and skipped-entry
-counts and sandbox status. An error emits a bounded error record when the
+validation scope, counters, selected limits, metadata-loss, skipped-entry
+and omitted-entry counts and sandbox status. An error emits a bounded error
+record when the
 stream is usable; absence of a successful completion summary means
 incomplete output.
 

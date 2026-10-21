@@ -229,7 +229,7 @@ never names a free or malformed inode in a committed snapshot.
 | --- | --- | --- |
 | `0100000` | `FSIMG_ENTRY_FILE` | Payload of `size` bytes, `initialized == size` |
 | `0040000` | `FSIMG_ENTRY_DIRECTORY` | Slots, `size` a positive multiple of 32 |
-| `0120000` | `FSIMG_ENTRY_SYMLINK` | Target of `size` bytes |
+| `0120000` | `FSIMG_ENTRY_SYMLINK` | Target of `size` bytes, 1 to 1023; zero is corrupt, longer is unsupported |
 | `0010000` | `FSIMG_ENTRY_FIFO` | None; `size` must be zero |
 | other | unsupported | The containing directory's preparation fails |
 
@@ -259,12 +259,17 @@ the slot's name is the inline bytes, or the long-name record at logical byte
 7 and 16 through 31 are zero natively; anything else there is an unqualified
 extension. With flag `0x100` the stored
 checksum must equal the recurrence over the name bytes; without it the field
-must be zero. The name is then checked against the fsimg profile: strict
-UTF-8, no NUL, slash, control byte or `0x7f`, and neither `.` nor `..`. QNX
-itself forbids NUL, slash and the dot names, so they are corruption; a
-natively legal name outside the profile is `FSIMG_EUNSUPPORTED`.
+must be zero. QNX itself forbids NUL, slash and the dot names, so they are
+corruption. The decoded name is handed to preparation, which applies the
+QNX-family profile the descriptor declares (strict UTF-8, no NUL, slash,
+control byte or `0x7f`, neither `.` nor `..`) and assigns the child's class
+under the [omitted-names contract](design-directories.md#omitted-names);
+the driver chooses no class, and one foreign name never fails the directory
+or the image.
 
-An admitted record carries the displayed name and an 8-byte payload: the
+An admitted record carries its class, its component as the
+[contract](design-directories.md#omitted-names) stores it per class, and an
+8-byte payload: the
 inode number and the parent directory's inode number, each a 32-bit
 little-endian value. `keys` emits one key, the exact name bytes;
 `key` validates a query component against the same profile and returns its
@@ -332,9 +337,17 @@ including the root, logical bytes, bytes read, allocated and free blocks;
 bad blocks are always zero, since the format has no bad-block marking. A
 completed verification sets `FSIMG_VOLUME_FREE` from the counted free blocks.
 
-An unsupported inode type, name or extension encountered anywhere makes the
+An unsupported inode type or extension encountered anywhere makes the
 verification incomplete with `FSIMG_EUNSUPPORTED`; the report is never marked
-complete after skipping an object.
+complete after skipping an object for its kind. An omitted name is not such
+a skip: verification descends into an omitted directory and replays an
+omitted inode under the
+[omitted-names contract](design-directories.md#omitted-names), so its
+ownership runs and its slots' reference records are appended exactly as a
+delivered inode's are and the bitmap, link-count and inode-table
+reconciliation covers it; the omitted subtree roots are counted in
+`omitted_entries`, the report's files and directories exclude the omitted
+subtrees, and the report is complete.
 
 ## Writer settings
 
@@ -484,11 +497,11 @@ charged scratch. Every loop charges the session and observes cancellation.
 | Condition | Status |
 | --- | --- |
 | No classic magic at 8192 | `FSIMG_EFORMAT` |
-| Recognized but unqualified: byte-zero layouts, flags outside the table, nonminimal or deep system trees, oversized bitmap, extension bytes, unknown inode type or status bits, nonzero inode tail, preallocation past the logical end, name outside the profile | `FSIMG_EUNSUPPORTED` |
+| Recognized but unqualified: byte-zero layouts, flags outside the table, nonminimal or deep system trees, oversized bitmap, extension bytes, unknown inode type or status bits, nonzero inode tail, preallocation past the logical end, link target above 1023 bytes | `FSIMG_EUNSUPPORTED` |
 | CRC, range, sentinel, free-bit, sharing, dot-entry, name-checksum, link-count, tie or counter inconsistency | `FSIMG_ECORRUPT` |
 | Setting outside its type, name outside the profile, unrepresentable selection component | `FSIMG_EINVAL` |
 | Label for this profile | `FSIMG_EUNSUPPORTED`, from the common capability check |
-| Content and reserve do not fit the exact or any automatic size; required metadata or kind that the profile cannot store | `FSIMG_ERANGE` or `FSIMG_EUNSUPPORTED` as the common policy states |
+| Content and reserve do not fit the exact or any automatic size; required metadata, kind or link-target length that the profile cannot store | `FSIMG_ERANGE` or `FSIMG_EUNSUPPORTED` as the common policy states |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
 
 Diagnostics quote at most one bounded, escaped name and never directory slack,

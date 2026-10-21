@@ -22,7 +22,7 @@ capability record lists its supported kinds as a mask:
 | --- | --- | --- | --- | --- |
 | `FSIMG_ENTRY_FILE` | 1 | Logical length | Payload bytes | Required |
 | `FSIMG_ENTRY_DIRECTORY` | 2 | Zero | None | None |
-| `FSIMG_ENTRY_SYMLINK` | 4 | Target byte length, 1 through 1023 | The target bytes, without a terminator | Provider or host |
+| `FSIMG_ENTRY_SYMLINK` | 4 | Target byte length, 1 through 1024, within the format's `max_link_target_bytes` | The target bytes, without a terminator | Provider or host |
 | `FSIMG_ENTRY_FIFO` | 8 | Zero | None | None |
 
 A symbolic link's target is ordinary content: a reader delivers it through
@@ -88,7 +88,9 @@ reopening reads the target again into a bounded buffer and compares it with
 the recorded length, so a replaced link fails with `FSIMG_ESOURCE_CHANGED`
 like a changed file. Each read inspects the link before and after
 `readlinkat()`, so the target belongs to the identity compared; a target that
-is empty or longer than 1023 bytes fails the scan with `FSIMG_EUNSUPPORTED`.
+is empty or longer than `FSIMG_SYMLINK_TARGET_MAX`, 1024 bytes, fails the
+scan with `FSIMG_EUNSUPPORTED`. The format's own, possibly lower, limit is
+applied at planning, as the [capability records](#capability-records) state.
 Host FIFOs remain rejected: the scanner has no use for a host FIFO's identity,
 and image FIFOs come from the programmatic API.
 
@@ -110,8 +112,16 @@ extraction with `FSIMG_EUNSUPPORTED` naming the entry. The option
 `FSIMG_EXTRACT_SKIP_UNSUPPORTED`, CLI `-k`, instead skips such entries and
 reports their count in the context statistics' `skipped_entries`, which the
 CLI prints as a warning and as a JSON summary field; an omission is never
-silent. Owner, mode and change time, like other fields the extractor does not
-restore, are optional losses under the extraction loss policy. Selecting a
+silent. An entry a reader omits for a name outside its profile, under the
+[omitted-names contract](design-directories.md#omitted-names), is treated
+the same way: without the option it fails the extraction with
+`FSIMG_EUNSUPPORTED`, naming the entry in the escaped rendering; with it the
+entry is omitted. Omissions have their own count, `omitted_entries`, in the
+operation's result and the context statistics, one per omitted subtree
+root, which a listing or a verification reports as well, and the CLI prints
+as its own warning and JSON field. Owner, mode and change time, like other
+fields the extractor does not restore, are optional losses under the
+extraction loss policy. Selecting a
 symbolic link directly with `x -O` writes its target bytes, which is the
 content the entry declares.
 
@@ -141,3 +151,18 @@ and writer construction rejects a non-default value of any other one with
 `FSIMG_EINVAL` before the driver's `validate` runs, so no driver has to
 remember another format's settings. The CLI generates a random UUID, like
 the serial, without `-R` when the mask names the UUID and none is given.
+
+`max_link_target_bytes` is the longest symbolic-link target the format
+stores: 1024 for ImageFS, 1023 for QNX4 and QNX6, and zero for FAT and
+exFAT, whose `entry_kinds` lack links. The entry model's ceiling,
+`FSIMG_SYMLINK_TARGET_MAX`, is the largest of these, 1024, and bounds the
+buffers and the host scan; the
+[architecture](architecture.md#names-and-metadata) records the split.
+Common writer planning refuses a link whose target is longer than the
+selected format's limit with `FSIMG_EUNSUPPORTED`, naming the entry, next to
+the check that refuses a kind outside `entry_kinds`, so no driver checks a
+target length. A reader classifies a stored target above its format's limit
+as its design states for an unobserved value. The format-independent
+capability test over every registered record asserts that
+`max_link_target_bytes` is zero exactly when `entry_kinds` lacks
+`FSIMG_ENTRY_SYMLINK`, so the two never disagree.

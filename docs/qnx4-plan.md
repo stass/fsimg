@@ -631,9 +631,12 @@ The owner has settled the first five; the sixth waits for the H1 survey.
    hidden; `.boot` and `.altboot` are exposed (design decision 5).
 5. **One checker without modes.** The draft's strict, compatible and
    forensic modes are dropped (see the departures table).
-6. **Names outside the profile on H1.** Open until stage 1. If the survey
-   finds any, the choice is between refusing them as `FSIMG_EUNSUPPORTED`,
-   as QNX6 does, and a byte-name policy designed for both QNX formats.
+6. **Names outside the profile.** H1's names are all ASCII. A natively
+   legal name outside the profile omits its entry and subtree, counted,
+   never fatal to the image and refused by extraction without the skip
+   option, under the
+   [cross-reader rule](../specs/architecture.md#names-and-metadata) all
+   three QNX readers share.
 
 ## Risks
 

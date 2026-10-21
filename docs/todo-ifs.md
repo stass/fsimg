@@ -41,8 +41,8 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   16 MiB on a scratch volume if a design rule ever depends on body size.
 * [Low] **Directory times in writer output** (`specs/design-ifs-driver.md`):
   `mkifs` writes time 0 on every directory record, and the writer stores the
-  catalog's time. The native qualification cycle shows whether `dumpifs -x`
-  accepts nonzero directory times; if not, the writer zeroes them.
+  catalog's time. The native qualification cycle checks that `dumpifs -x`
+  accepts nonzero directory times; the result returns to the owner.
 * [Medium] **Public API additions** (`include/fsimg.h`, worker job record):
   the volume information's `mountpoint` field and valid bit, the detail
   table, `FSIMG_SETTING_MOUNTPOINT`, `FSIMG_SETTING_BOOT` and the emission

@@ -123,15 +123,16 @@ windows and applies the table rule at each position `p`:
   `FSIMG_EUNSUPPORTED`;
 * the record is decoded with `ifs_record_decode()`;
 * the path is checked: a leading slash, an empty component or a `.` or
-  `..` component is `FSIMG_EUNSUPPORTED`, a component outside the profile
-  is `FSIMG_EUNSUPPORTED`, and a path over 1024 bytes is
-  `FSIMG_EUNSUPPORTED`;
+  `..` component is `FSIMG_EUNSUPPORTED`, and a path over 1024 bytes is
+  `FSIMG_EUNSUPPORTED`; the profile is not applied here, since it decides
+  a node's admission class when preparation admits the node, never the
+  image's fate;
 * a regular file's range is checked against the
   [range rule](design-ifs.md#range-rule) with 64-bit arithmetic;
 * the record's path bytes, table offset, kind and inode word are appended
   to the path stream, whose declared maximum record length is 1024 bytes
   plus the fixed fields;
-* the counters advance: records by kind and by inode flag nibble.
+* the counters advance: records by inode flag nibble.
 
 The walk charges one work unit per record and the I/O of each window, and
 stops at the first failure. It is the only pass over the table; info reuses
@@ -151,13 +152,22 @@ in three bounded steps over the metadata store:
    record for every entry, each carrying its parent's node index, its
    component bytes, its kind, and its table offset or a synthesized marker.
    Node indexes are assigned in emission order; the root is node 0. The
-   pass keeps the last emitted path, at most 1024 bytes, and an
-   ancestor stack holding one `(node index, kind)` per component of the
-   last emitted path, the root at depth 0, so its depth is at most 512,
+   pass keeps the last emitted path, at most 1024 bytes, and an ancestor
+   stack holding one `(node index, kind, profile result)` per component of
+   the last emitted path, the root at depth 0, so its depth is at most 512,
    the most a 1024-byte path holds, and no limit of the session bounds it.
    Every emitted node is pushed, whatever its kind, which is what makes
-   the parent-kind check hold by construction. For each record, with
-   components `c1 .. ck`:
+   the parent-kind check hold by construction. The profile result is the
+   common profile function's answer for the node's own component, explicit
+   or synthesized, the same function preparation applies when the node is
+   admitted under the
+   [omitted-names contract](design-directories.md#omitted-names), so the
+   pass and preparation can never disagree about a node. It serves two
+   counters: `omitted` advances for a node outside the profile whose stack
+   ancestors are all inside it, the root of an omitted subtree, and a
+   node below one is not counted; `omitted_references` advances for each
+   reference that matches a node outside the profile or below one. For
+   each record, with components `c1 .. ck`:
    * **Root.** A record with the empty path (`k = 0`) is the root
      candidate; one whose kind is not directory is `FSIMG_EUNSUPPORTED`,
      entry or shadowed. When the first sorted record is not the empty
@@ -180,7 +190,9 @@ in three bounded steps over the metadata store:
    * **References.** The emitted node's inode word is compared with each
      nonzero `boot_ino[i]` and `script_ino`: a match advances that
      reference's count and records the node's kind. Five references at
-     most, so this is constant state, and shadowed records never match.
+     most, so this is constant state. Shadowed records never match; an
+     omitted node matches like a delivered one, since it is the record at
+     its path and `procnto` names it by inode, not by fsimg's profile.
 3. **Group sort and table.** The child stream is sorted by parent index,
    stably, so each directory's children are one contiguous group in
    component order. One sequential pass writes a paged array
@@ -205,15 +217,19 @@ the only resident state of the child pass.
 `prepare` reads the directory's group: `group[node]` gives the offset and
 count, and the children are read sequentially from the sealed child stream.
 The root is node 0 at level 0; deeper levels use the current entry's
-locator, which is its node index. Each child's displayed name is its
-component, already validated by the table pass; a synthesized child is
-admitted with its fixed metadata. Preparation's cost is the directory's
-children, never its subtree.
+locator, which is its node index. Each child is admitted with its component
+bytes, whose native shape the table pass checked, and preparation assigns
+its class under the
+[omitted-names contract](design-directories.md#omitted-names); a
+synthesized child is admitted with its fixed metadata. Preparation's cost
+is the directory's children, never its subtree.
 
-An admitted record carries the displayed name and a bounded payload: the
-kind, the node index, and the table offset or the synthesized marker, each
-an explicit little-endian field. `keys` emits one key, the exact component
-bytes; `key` validates a query component against the same profile and
+An admitted record carries its class, its component as the
+[contract](design-directories.md#omitted-names) stores it per class, and a
+bounded payload: the kind, the node index, and the table offset or the
+synthesized marker, each an explicit little-endian field. `keys` emits
+one key, the exact component bytes; `key` validates a query component
+against the same profile and
 returns its bytes. Two children of one directory never share a component,
 because equal paths collapsed to one entry in the child pass, so the
 namespace is unambiguous by construction; the `ambiguous` text, which names
@@ -253,9 +269,17 @@ completed verification, with zero free bytes.
 The boot-specific state and the counters open collects go through the
 volume information's [detail table](design-api.md#reader), in this order:
 `mount_flags`, `boot_ino_0` to `boot_ino_3`, `script_ino`, `chain_paddr`,
-`flags_0`, `flags_8`, `flags_c`, `flags_e`, `records`,
-`implicit_directories` and `shadowed`, fourteen of the sixteen the table
-holds. Every value is known when open returns, so info discloses no scan.
+`flags_0`, `flags_8`, `flags_c`, `flags_e`, `implicit_directories`,
+`shadowed`, `omitted` and `omitted_references`, fifteen of the sixteen the
+table holds. The record count is not a detail: every validated record has
+exactly one of the four accepted nibbles, so it is the sum of the four
+`flags_*` values, shadowed and omitted records included. `omitted` counts
+the omitted subtree roots the child pass found, which is what a full walk
+reports in `omitted_entries`;
+`omitted_references` counts the boot and script references that resolve to
+an omitted node, which `info` and the `W` result print when nonzero, since
+a boot program fsimg cannot name is worth saying. Every value is known when
+open returns, so info discloses no scan.
 
 ## Verification
 
@@ -270,26 +294,30 @@ to reconcile, and the table pass validated every record at open. It runs:
   the 32-bit words in the image's byte order; a nonzero result is
   `FSIMG_ECORRUPT`. The pass charges one work unit per window.
 * **References.** For each nonzero `boot_ino[i]` and `script_ino`, the
-  child pass's match count over delivered entries must be exactly 1, else
-  `FSIMG_ECORRUPT`, and the match must be a regular file, else
-  `FSIMG_EUNSUPPORTED`, as the
+  child pass's match count over nodes, omitted ones included and shadowed
+  records never, must be exactly 1, else `FSIMG_ECORRUPT`, and the match
+  must be a regular file, else `FSIMG_EUNSUPPORTED`, as the
   [reference rule](design-ifs.md#boot-and-script-references) states.
 * **Walk.** The common walker runs once over the derived tree, replaying
-  every directory, so every delivered record is decoded a second time and
-  every index is built. Payload read-through, when requested, reads each
-  file's and link's bytes through common delivery.
+  every directory, omitted ones included under the
+  [omitted-names contract](design-directories.md#omitted-names), so every
+  node's record is decoded a second time and every index is built. Payload
+  read-through, when requested, reads each file's and link's bytes through
+  common delivery.
 * **Shadowed records.** The count is reported as the `shadowed` detail of
   the volume information, and the CLI's `W` result prints it. A shadowed
   record is validated, so it does not make the verification incomplete:
   every H3 boot image carries them and verifies.
 
-The report counts files, directories including the root and the synthesized
-ones, logical bytes and bytes read; allocated units are the image's words
-and free, bad and padding counts are zero. An invalid mountpoint makes
-verification incomplete with `FSIMG_EUNSUPPORTED` before any work, as an
-invalid QNX4 label does. An unsupported record, path or name anywhere has
-already failed open, so the report is never marked complete after skipping
-a record.
+The report counts delivered files and directories, the root and the
+synthesized ones included and omitted subtrees excluded, logical bytes and
+bytes read; allocated units are the image's words and free, bad and padding
+counts are zero; the omitted subtree roots are in `omitted_entries`. An
+invalid mountpoint makes verification incomplete with `FSIMG_EUNSUPPORTED`
+before any work, as an invalid QNX4 label does. An unsupported record or
+path anywhere has already failed open, and an omitted node is checked like
+any other, so the report is complete whenever verification returns
+`FSIMG_OK`.
 
 ## Writer settings
 
@@ -342,7 +370,11 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    `FSIMG_EUNSUPPORTED`; accumulate `initialized_bytes`. A time is stored
    as unsigned UTC seconds; an absent one takes the fallback, and in
    reproducible mode every time is the epoch, a present time that differs
-   from it being a counted loss. Sibling collisions are exact byte
+   from it being a counted loss. A directory record stores the catalog's
+   time like every other kind, although `mkifs` writes time 0 on every
+   directory record: one rule covers every kind, the record has the field,
+   `dumpifs` lists whatever is stored, and `-R` makes fsimg and `mkifs`
+   agree where agreement matters. Sibling collisions are exact byte
    collisions, which catalog preparation has already rejected. Each boot
    setting is resolved to its catalog ID and checked under the boot
    settings rule, so a set slot fails here.
@@ -415,8 +447,8 @@ Reader:
 | Condition | Status |
 | --- | --- |
 | No `imagefs` at offset 0; a prefix shorter than `0x58` bytes | `FSIMG_EFORMAT` |
-| Recognized but unobserved: a flags byte other than `0x04` or `0x05`; a nonzero spare word; unaligned `dir_offset` or `hdr_dir_size`; a mountpoint over 1024 bytes or a `dir_offset` that is not its NUL rounded up to 4; a record length not a multiple of 4; a zero inode word; a nonzero extended-attribute offset; an unknown flag nibble, type or high mode bits; a nonzero FIFO word; a link layout other than the one tabled, or a target of 0 or 1024 bytes; a path over 1024 bytes, absolute, with an empty, `.` or `..` component, below a non-directory, or with a component outside the profile; a non-directory record with the empty path; a reference to a non-file; an invalid mountpoint under `verify` | `FSIMG_EUNSUPPORTED` |
-| A header bound violated; no mountpoint NUL before `dir_offset`; a record crossing the table end, a zero length, a length below 24 or below the kind's minimum, a path without a NUL; a nonzero terminator; a range outside `[hdr_dir_size, image_size - 4)` or overflowing; a reference naming no delivered entry or several; a volume longer than `image_size` or a nonzero checksum under `verify` | `FSIMG_ECORRUPT` |
+| Recognized but unobserved: a flags byte other than `0x04` or `0x05`; a nonzero spare word; unaligned `dir_offset` or `hdr_dir_size`; a mountpoint over 1024 bytes or a `dir_offset` that is not its NUL rounded up to 4; a record length not a multiple of 4; a zero inode word; a nonzero extended-attribute offset; an unknown flag nibble, type or high mode bits; a nonzero FIFO word; a link layout other than the one tabled, or a target of 0 or above 1024 bytes; a path over 1024 bytes, absolute, with an empty, `.` or `..` component, or below a non-directory; a non-directory record with the empty path; a reference to a non-file; an invalid mountpoint under `verify` | `FSIMG_EUNSUPPORTED` |
+| A header bound violated; no mountpoint NUL before `dir_offset`; a record crossing the table end, a zero length, a length below 24 or below the kind's minimum, a path without a NUL; a nonzero terminator; a range outside `[hdr_dir_size, image_size - 4)` or overflowing; a reference naming no node or several; a volume longer than `image_size` or a nonzero checksum under `verify` | `FSIMG_ECORRUPT` |
 | Unrepresentable selection component | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
 
@@ -479,13 +511,3 @@ member name; and the QNX 6.5.0 harness for the native `dumpifs` list, check
 and extract cycle. `fuzz/ifs.c` feeds the probe, open, traversal, content
 and verification paths under finite budgets with seeds generated at run
 time. Sanitizer runs follow the build documentation.
-
-## Open decisions
-
-* **Directory times.** `mkifs` writes time 0 on every directory record;
-  the writer stores the catalog's time, so a tree with directory times
-  differs from `mkifs` output outside reproducible mode. The alternative is
-  to zero directory times to match. Recommendation: store the catalog's
-  time, since one rule covers every kind, `dumpifs` lists whatever is
-  stored, and `-R` already makes both producers agree; the native
-  qualification cycle decides whether `dumpifs -x` or a mount accepts it.
