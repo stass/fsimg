@@ -37,7 +37,7 @@ layers add to it.
 | Owner | Owns |
 | --- | --- |
 | Stack parser (`lib/layers/stack.c`) | The three-slot representation, its text syntax, canonical printing, and the layer registry |
-| Layer descriptor, one per layer | Probe with its prefix table, read-side open (peel), write-side plan/encode/transcode with its template input where declared, verification, settings and capability record |
+| Layer descriptor, one per layer | Probe with its prefix table, read-side open (peel), write-side plan/encode/transcode with the file settings its profile declares, verification, settings and capability record |
 | Image (`lib/layers/image.c`) | Read-side peeling order, detection and forcing, partition enumeration and selection, the spool and the spool-backed peel, the layer verification report |
 | Container adapter and chunk index (`lib/layers/chunks.c`, `lib/meta/`) | Disk-offset to chunk resolution, the decompressed-chunk cache, chunk validation |
 | Disk plan (`lib/layers/plan.c`) | The exact-volume stack rule, disk sizing around a volume, partition placement, partition types and names, identifiers, the plan's disk and partition report |
@@ -113,10 +113,16 @@ list of names, so a container added to the registry is judged by how it
 sizes the disk. Compression encodes the disk byte for byte and never pads:
 `ifs` with gzip is written. A
 [carried-volume](#prefix-tables-opaque-sections-and-carried-volumes)
-container gives its filesystem a slot of exactly the declared length and
-states its own rules; since this rule refuses any scheme below `ifs`
-first, a scheme inside a carried container around `ifs` is refused here,
-naming the scheme, before the carried-volume rule applies.
+container declares a granularity of 1: it packages the volume at exactly
+its length, so this rule passes for it with no case of its own. Its
+format may still need a length rule: under `none` an `ifsboot` body's
+length is a multiple of 4, because `stored_size` is. That rule is the
+carried filesystem's own invariant. The filesystem's layout guarantees it
+on create, the wrap's verification of its input establishes it, and the
+container's bound refuses a disk that breaks it, naming the field. Since
+this rule refuses any scheme below `ifs` first, a scheme inside a carried
+container around `ifs` is refused here, naming the scheme, before the
+carried-volume rule applies.
 Reading is unaffected: a disk made otherwise, with
 an ImageFS in a partition, still reads, and its full verification reports
 a volume longer than the image as the filesystem's design says.
@@ -136,7 +142,9 @@ for a layer the forced stack names: `gpt:sector=4096` needs `fat32/gpt` or
 image byte is read. The per-layer keys, types, defaults and validation are in
 each [profile](#layer-profiles), summarised in the [settings table](#settings).
 In the library every layer setting is a typed field of
-`fsimg_layer_options_t`; a layer's capability record declares the settings it
+`fsimg_layer_options_t`, except a [file setting](#file-settings-and-sections),
+whose value is a byte string supplied as an I/O object beside that record;
+a layer's capability record declares the settings it
 stores, and a field for a layer absent from the stack must hold its default,
 the rule already applied to filesystem settings.
 On creation a key of a layer with no write support, a container or a
@@ -153,7 +161,7 @@ format descriptors are. Its operations form a closed set per kind:
 | Probe | Claims a disk from its prefix | Claims a file from its prefix, at offset 0 or at an offset of its closed [prefix table](#prefix-tables-opaque-sections-and-carried-volumes), and from its last 512 bytes | Claims a file from its prefix |
 | Peel (read) | Enumerates partitions as checked slices of the disk | Yields a read-only positional I/O object over the disk, backed by the chunk index or, for one unframed stream, by the [spool](#spool-backed-peel) | Decodes a sequential stream into the spool |
 | Plan (write) | Derives the disk length and the volume offset from the volume length and the container granularity | Declares its disk-length granularity | None |
-| Encode (write) | Writes its tables at fixed disk offsets through bounded metadata writes | Transcodes a disk sequentially into the sink, from a read-only [template input](#wrap-unwrap-and-compose) where its profile declares one | Wraps a sequential sink |
+| Encode (write) | Writes its tables at fixed disk offsets through bounded metadata writes | Transcodes a disk sequentially into the sink, copying in the [file settings](#file-settings-and-sections) its profile declares | Wraps a sequential sink |
 | Verify | Table checksums, consistency, partition bounds and overlap | Container checksums, chunk tiling and bounds; a profile may name fields it cannot verify, which make its [scope incomplete](#verification-scope) | Member checksums and length, at spool time |
 | Capability | Settings, read/write flags, sector sizes | Settings, codecs, codec version, the filesystem it carries when it carries a volume | Codec version |
 | Suffixes | None | The file suffixes that name it: `.dmg`, `.vhd`, `.simg`; `ifsboot` and `hbcifs` declare none, because `.ifs` names the filesystem they carry | `.gz` |
@@ -186,7 +194,8 @@ loader packages:
   startup bytes that are neither a table nor a chunk. A profile states its
   range and the checksum that covers it. The layer never interprets,
   executes or alters those bytes, reports nothing from inside them, and a
-  wrap copies them verbatim from its template.
+  writer copies them verbatim from the
+  [file settings](#file-settings-and-sections) the caller supplies.
 * **Carried volume.** A container that packages one volume for a loader
   declares the filesystem it **carries** (`ifsboot` and `hbcifs` carry
   `ifs`). The declaration is one fact with three consequences: a create,
@@ -592,12 +601,15 @@ positional and stream sinks identical and the bytes deterministic.
 
 A container whose leading bytes depend on its encoded length runs the pass
 twice in the same way. The `ifsboot` startup header carries `stored_size`,
-and the checksum covering the header precedes the body, so the first pass
-compresses the body to learn its framed length and the second emits. The
-LZO1X encoder is deterministic ([codec design](design-codecs.md)), so the
-second pass produces the lengths the first learned; it checks that it
-does, and a difference means the input changed between the passes,
-`FSIMG_ESOURCE_CHANGED`. The alternative, compressing once into a raw
+and the checksum covering the header precedes the body, so under a framed
+body the first pass compresses the body to learn its framed length and
+writes nothing, its finish writes the leading bytes, and the second pass
+emits the chunks. The LZO1X encoder is deterministic
+([codec design](design-codecs.md)), so the second pass produces the framed
+length the first learned; the encoder checks that one number at the end of
+the second pass, and a difference means the input changed between the
+passes, `FSIMG_ESOURCE_CHANGED`. A raw body needs no first pass: its length
+is the disk's. The alternative, compressing once into a raw
 intermediate and copying it behind the header, is not used: wrap has no
 raw intermediate, and adding one would add a handed-over file for the
 coordinator and every embedding application to supply, a second term in
@@ -699,18 +711,62 @@ durability) and the layer options; filesystem settings must hold their
 defaults because no filesystem is being written, the same rule as for any
 absent layer.
 
-A container profile may declare a **template input**: a second read-only
-input from which the wrap encoder copies its opaque section and every
-field it does not derive. `ifsboot` requires one, the boot image whose
-startup section the output reuses. The template is a typed field of the
-layer options, an I/O object (`ifsboot:template`; the CLI opens the named
-file and passes the object), and a template for a container absent from
-the stack fails as any setting of an absent layer does. The encoder opens
-the template as an image with its own container forced, verifies it at
-layer scope, and reads it as a positional object; the template is checked
-against the output for backing-identity aliases like any input, and it
-must not alias the wrap input. Wrap with a template reads both inputs
-once per transcode pass and writes the output once.
+### File settings and sections
+
+A container profile may declare **file settings**: layer settings whose
+value is a byte string rather than a number or a name. They are the bytes
+the container stores beside the disk and derives from nothing: `ifsboot`'s
+startup code and boot prefix. Like `compress`, a file setting is
+creation-only: every read mode refuses the key before any open, as it
+refuses any creation-only key.
+
+How one is supplied. In the library a file setting is a read-only
+`fsimg_io_t` field of `fsimg_layer_inputs_t`, a record the write options
+borrow beside the typed settings ([C API](design-api.md#writer)). In the
+CLI its value is a host path; the coordinator opens it read-only before
+the worker starts, and the worker receives the descriptor, never the name
+([CLI design](design-cli.md#stack-settings-and-selection)). The typed
+settings stay one flat record on the wire; file settings travel as
+descriptors. A file setting of a layer absent from the stack fails as any
+setting of an absent layer does.
+
+When one is read. The profile declares each file setting as bounded or
+streamed. A bounded one has a fixed small maximum (`ifsboot`'s prefix,
+at most the largest prefix-table length); the plan reads it whole, once,
+into charged memory the plan owns, checks its bytes there before any sink
+opens, and the encoder emits exactly those bytes; the buffer is released
+with the plan, on every outcome. A streamed one (the startup code) has
+only the plan reading its length; the encoder reads it once,
+sequentially, in bounded pieces, when the output reaches its place, and
+never holds it whole. Padding a profile adds is written as a count of
+zero bytes, never as the tail of a reused buffer.
+
+How one fails. An input is checked against the output for
+backing-identity aliases like any other input. A file setting that is a
+host file (the CLI's descriptor, or a library caller's descriptor
+adapter) is checked for change exactly as a regular-file source is under
+the [sources design](design-sources.md#host-scanning-and-reopening):
+common input handling records its identity, size and change metadata
+before the plan reads it and compares them after the copy, and a
+replacement, a size change or a metadata difference is
+`FSIMG_ESOURCE_CHANGED` naming the input; the check is not an atomic
+snapshot against a hostile concurrent writer. For a caller's callback I/O
+object, stability for the borrow is the caller's obligation. A read that
+ends short of the planned length is the same error; it emits nothing for
+the unfilled tail, and the output is incomplete as for every transcode
+failure.
+
+A container's **sections** are the byte strings unwrap writes raw: its
+disk, under the disk selector, plus one per file setting it declares,
+under the setting's unqualified name (`prefix`, `startup`). A disk-image
+container (DMG, VHD, simg) has only the disk. Unwrap takes a section
+through the section selector (`FSIMG_SELECT_SECTION` naming it), which no
+other operation accepts; a section the container does not declare is
+`FSIMG_EINVAL` naming it. The typed values a rebuild needs are the
+container's details in the image information, which carry every header
+field, so a create or wrap given a container's sections as its file
+settings and its reported fields as its typed settings reproduces the
+container's bytes around the same disk as far as the profile states.
 
 ## Settings
 
@@ -733,13 +789,17 @@ once per transcode pass and writes the output once.
 | `vhd:uuid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text |
 | `simg:block` | bytes | 4096 | Power of two from 1 KiB to 1 MiB, so the 1 MiB inspection unit is whole blocks |
 | `simg:crc` | `yes`, `no` | `no` | Appends a CRC32 chunk |
+| `ifsboot:startup` | [File setting](#file-settings-and-sections) | None: no startup code | The linked startup code, zero-padded to a multiple of 4; the [profile](#qnx-boot-image-ifsboot) says what the bytes are |
+| `ifsboot:prefix` | [File setting](#file-settings-and-sections) | None | The raw boot prefix, at most 1088 bytes, not beginning with the startup signature, zero-padded to a multiple of 4; the padded length is a value of the prefix table: 1088 bytes, or empty, which is none |
+| `ifsboot:machine` | integer | None; required | A value of the machine table, which also fixes whether a prefix is present |
+| `ifsboot:virtual` | `yes`, `no` | None; required | The virtual bit of `flags1` |
+| `ifsboot:startup_vaddr`, `ifsboot:paddr_bias`, `ifsboot:image_paddr`, `ifsboot:ram_paddr`, `ifsboot:imagefs_paddr` | `0x` 32-bit | None; each required | Any value, stored verbatim: target addresses fsimg never uses |
 | `ifsboot:compress` | `lzo`, `none` | `lzo` | `none` stores the body raw; see the [profile](#qnx-boot-image-ifsboot) |
-| `ifsboot:template` | I/O object; a file path in the CLI | None; required whenever `ifsboot` is written | A boot image the `ifsboot` profile reads and verifies |
 | `gzip:level` | integer | 6 | 1 to 9; only when gzip is selected (`-z`, a `.gz` name under `-a`, or the library's write options naming `gzip`) |
 
 Values use the CLI's existing byte-quantity, integer, UUID and boolean
-syntax. A key whose layer is absent from the stack fails as an unknown
-setting. Duplicate keys are syntax errors. `ifs` has no derived `gpt:type`
+syntax, and a file setting's value is a host path. A key whose layer is
+absent from the stack fails as an unknown setting. Duplicate keys are syntax errors. `ifs` has no derived `gpt:type`
 or `mbr:type`; a scheme below it on create is refused under
 [exact volumes](#exact-volumes).
 
@@ -973,9 +1033,9 @@ version: zlib-ng in compatibility mode, which some distributions ship as
 their zlib, produces different, equally valid, streams. Capability output
 and the plan report the zlib version string so a reproducibility claim can
 name it. `dmg:compress=none`, `simg` and `vhd` output is reproducible without
-that qualification, and so is an `ifsboot` wrap: its codec is project-owned
-and deterministic, and every other output byte comes from the template or
-the input.
+that qualification, and so is an `ifsboot` image: its codec is
+project-owned and deterministic, and every other output byte comes from
+the settings, the file settings or the input.
 
 ## Verification scope
 
@@ -1064,10 +1124,16 @@ Layers add attack surface before any filesystem byte is read. The rules:
   both charged to the work counter, and the index it builds is bounded by
   that length.
 * **Opaque sections are bytes.** Startup code and boot prefixes are never
-  executed, interpreted or reported from inside; a wrap copies them from a
-  template the caller names, under the template's own verification. The
-  address fields of a startup header are target addresses, reported and
-  never used as offsets.
+  executed, interpreted or reported from inside; a writer copies them from
+  the [file settings](#file-settings-and-sections) the caller supplies,
+  checked for length and, where a profile states one, a framing check
+  (the prefix's leading signature) and never parsed as an executable
+  format, and an unwrap writes them back as bytes.
+  The address fields of a startup header are target addresses, reported,
+  stored from settings verbatim and never used as offsets. A file setting
+  is a read-only descriptor the coordinator opened, bounded by the
+  profile's length rule and charged to the output it is copied into; the
+  worker gains no name authority from it.
 * **The layers add no name authority.** The spool and the raw intermediate
   are [handed-over files](#handed-over-files): the worker receives open
   descriptors to unlinked files, and its authority over names stays what
@@ -1414,8 +1480,8 @@ the native images in the [IFS research record](../docs/ifs-research.md)
 E7, `mkifs` compressed output), and a value no native image shows is not
 accepted. Oracles: QNX 6.5.0's `mkifs` and `dumpifs` in the guest, the
 eleven native boot images against their native manifests, the out-of-tree
-codec oracles for the framing, and for a wrap a native boot (E12 on x86 in
-QEMU; the PCM board for SH-4). The container carries `ifs`.
+codec oracles for the framing, and for a written image a native boot (E12
+on x86 in QEMU; the PCM board for SH-4). The container carries `ifs`.
 
 A boot image is an optional **boot prefix**, the **startup section** and
 the **stored body**, in that order, and nothing after. Let `B` be the
@@ -1463,11 +1529,19 @@ table, so the accepted `flags1` values are the products of the tables:
 | Compression bits 0x1c | 0x00, 0x08, 0x0c, per the compression table | S1, S2, E7; see the table |
 | Reserved bits 0xe0 | 0 | Clear in every image |
 
-| Machine | Architecture | Prefix | `ram_size` rule | Evidence |
-| --- | --- | --- | --- | --- |
-| 42 | SH-4 | None | Checked | S1: `flags1` 0x09, `startup_size` 53512 |
-| 3 | x86 | BIOS loader | Checked | S2: `flags1` 0x0d, `startup_size` 75056 |
-| 0 | None: nonbootable `mkifs` output | None | Reported, not checked | E7: `flags1` 0x08 or 0x0c, `startup_size` 260 |
+| Machine | Architecture | Prefix | `ram_size` rule | Writable modes | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| 42 | SH-4 | None | Checked | None: no boot of a written SH-4 image is recorded | S1: `flags1` 0x09, `startup_size` 53512 |
+| 3 | x86 | BIOS loader | Checked | None: no boot of a written x86 image is recorded | S2: `flags1` 0x0d, `startup_size` 75056 |
+| 0 | None: nonbootable `mkifs` output | None | Reported, not checked | `none`, `lzo`: no boot applies | E7: `flags1` 0x08 or 0x0c, `startup_size` 260 |
+
+Reading and writing have independent acceptance: every row is read, and
+the writable-modes column lists, per machine, the `ifsboot:compress`
+values the writer accepts, exactly the modes a native boot of a written
+image has passed for that machine ([IFS plan](../docs/ifs-plan.md)). A
+mode the column does not list for the resolved machine, the default
+`lzo` included, is `FSIMG_EUNSUPPORTED` naming the machine and the mode,
+at plan time; the default is never changed silently.
 
 Machine 0 is in the table because it is what `mkifs` writes for a
 compressed nonbootable image (`compress=2` or `compress=3` on a buildfile
@@ -1564,96 +1638,226 @@ table says so. The tie between `imagefs_size` and the ImageFS's
 length ([volume layout](design-ifs.md#volume-layout)), as the
 [verification scope](#verification-scope) states.
 
-Info reports the prefix length, every header field above except the
-opaque ones (the version, the virtual bit, the compression value, the
-machine by number, the five target addresses, `ram_size`,
-`startup_size`, `stored_size`, `imagefs_size` and `preboot_size`), the
-codec, and the chunk statistics: the chunk count, the stored body length,
-the smallest and largest decoded chunk and the largest stored chunk. The
-numbers are the container's details, named values in this order:
-`prefix_bytes`, `version`, `virtual` (0 or 1), `compression` (the value),
-`machine`, `startup_vaddr`, `paddr_bias`, `image_paddr`, `ram_paddr`,
-`ram_size`, `startup_size`, `stored_size`, `imagefs_paddr`,
-`imagefs_size`, `preboot_size`, `body_bytes` (`stored_size -
-startup_size`), `min_chunk_bytes`, `max_chunk_bytes` and
-`max_stored_chunk_bytes` (a chunk's stream, without its length word). A
+Info reports the prefix length, every header field above (the version,
+the virtual bit, the compression value, the machine by number, the five
+target addresses, `ram_size`, `startup_size`, `stored_size`,
+`imagefs_size` and `preboot_size`), the two opaque fields as `flags2` and
+the count of nonzero tail bytes, so that a rebuild's one difference from
+an H3 image is visible, the codec, and the chunk statistics: the chunk
+count, the stored body length, the smallest and largest decoded chunk and
+the largest stored chunk. The numbers are the container's details, named
+values in this order: `prefix_bytes`, `version`, `virtual` (0 or 1),
+`compression` (the value), `machine`, `startup_vaddr`, `paddr_bias`,
+`image_paddr`, `ram_paddr`, `ram_size`, `startup_size`, `stored_size`,
+`imagefs_paddr`, `imagefs_size`, `preboot_size`, `flags2`,
+`tail_nonzero`, `body_bytes` (`stored_size - startup_size`),
+`min_chunk_bytes`, `max_chunk_bytes` and `max_stored_chunk_bytes` (a
+chunk's stream, without its length word). A
 raw body is one raw chunk of `imagefs_size` bytes. A detail holds a
 number, so the compression value's name is the image's codec list
 (`raw`, `lzo1x` or `nrv2b`), the chunk count is its chunk count, and the
 machine's architecture is the machine table's.
 
-Writing packages an ImageFS volume in a template boot image under the
-[template input](#wrap-unwrap-and-compose) rule: a wrap of an existing
-volume, or a create stack `ifs/ifsboot`, whose transcode reads the staged
-raw volume the `ifs` writer emitted; the encoder is the same and its
-disk-length granularity is 4 bytes, which an ImageFS already satisfies.
-The output is the template's bytes `[0, B + startup_size)` with exactly
-these fields recomputed, then the body:
+Writing packages an ImageFS volume the way `mkifs` does
+([research record](../docs/ifs-research.md#startup-and-boot-file-sources-e13),
+E13): the header is synthesized, the startup code and the boot prefix are
+opaque bytes copied from inputs, and nothing in either is parsed. A
+create stack `ifs/ifsboot` transcodes the staged raw volume the `ifs`
+writer emitted; a wrap packages an existing volume; the encoder is the
+same in both. Its inputs are the profile's two
+[file settings](#file-settings-and-sections) and its typed settings:
 
-* `imagefs_size`: the input length;
-* `stored_size`: `startup_size` plus the body's length, the framed length
-  from the first transcode pass under `lzo` and the input length under
-  `none`;
-* `ram_size`: `startup_size + imagefs_size`;
-* the compression value in `flags1`: 0x08 under `lzo`, 0x00 under `none`;
-  the other `flags1` bits, and every other header and startup byte, are
-  the template's;
-* the startup checksum: the last word of the startup section, set so that
-  the section sums to zero. The rule is a sum, so recomputing the last
-  word satisfies it wherever `mkifs` keeps its own, provided that word is
-  free, which the 260-byte section of E7 shows it is;
-* the stored trailer, under `lzo`: the last word of the stored image, set
-  so that the whole stored image sums to zero.
+| Input | Kind | Value |
+| --- | --- | --- |
+| `ifsboot:startup` | File setting | The startup code, linked at its address, as it follows the header in an image: what unwrap's `startup` section returns. Linking is the caller's job, as `mkifs` leaves it to the linker named in the buildfile; fsimg takes the result. Absent, there is no code and the section is the header and its checksum word, the 260 bytes `mkifs` writes for a buildfile without a startup program (E7) |
+| `ifsboot:prefix` | File setting | The boot prefix, the raw bytes before the startup header: what unwrap's `prefix` section returns. `mkifs` takes it from the loader segment of the boot file `[virtual=...]` selects, after the file's attribute block (E13); a user takes it from `bios.boot` the same way or from unwrap |
+| `ifsboot:machine` | Setting, required | A value of the machine table |
+| `ifsboot:virtual` | Setting, required | The virtual bit of `flags1` |
+| `ifsboot:startup_vaddr`, `ifsboot:paddr_bias`, `ifsboot:image_paddr`, `ifsboot:ram_paddr`, `ifsboot:imagefs_paddr` | Settings, each required | The five target addresses |
+| `ifsboot:compress` | Setting, default `lzo` | The body's compression value: 0x08 under `lzo`, 0x00 under `none` |
+
+Each file input is padded with zeros to a multiple of 4, as `mkifs` pads
+the loader (E13: 1085 loader bytes become the 1088-byte prefix). The
+padding is a count of zero bytes the encoder writes after the file's
+bytes, and the derived sizes count it; a length that would overflow its
+32-bit field is refused before rounding. The padded prefix length must be
+a value of the prefix table, so it is 1088 bytes or none, and an empty
+file is none.
+
+The header is written whole from three sources, the fixed identity, the
+settings and the derivations, and the table says for each field which,
+and what `mkifs` does in its place: the settings stand where `mkifs`
+reads a buildfile attribute or the startup ELF, which fsimg does not
+parse.
+
+| Field | Source on write | What `mkifs` does (E13, E7, S1, S2) |
+| --- | --- | --- |
+| Signature, version, `header_size` | Fixed: the identity, 1 and 256 | The same constants |
+| `flags1` | The virtual bit from `ifsboot:virtual`, the compression bits from `ifsboot:compress`, the big-endian and reserved bits zero | The `virtual=`, `+compress` and `+bigendian` attributes |
+| `flags2` | Zero | Zero in every 6.5.0 image |
+| Machine | `ifsboot:machine` | The startup ELF's `e_machine`: 3 (`EM_386`), 42 (`EM_SH`), 0 without a startup program |
+| `startup_vaddr` | The setting, verbatim | The linked startup's entry point, an address inside the code |
+| `paddr_bias`, `image_paddr`, `ram_paddr` | The settings, verbatim | The buildfile's address attributes; `image_paddr` is the image address plus the prefix length |
+| `imagefs_paddr` | The setting, verbatim | Zero in E12; its rule is not identified |
+| `ram_size` | `startup_size + imagefs_size` | The same sum, in every boot image |
+| `startup_size` | 256 plus the padded code plus the 4-byte checksum word | Computed |
+| `stored_size` | `startup_size` plus the body's length: the framed length the first pass learns under `lzo`, `imagefs_size` under `none` | Computed |
+| `imagefs_size` | The disk length, the ImageFS's `image_size` by the carried-volume rule | Computed |
+| `preboot_size` | The padded prefix length | Computed |
+| Tail | Zero | Zero in every 6.5.0 image; six nonzero bytes of unknown origin in the H3 images, which only a rebuild with format-specific machinery could reproduce, so fsimg does not |
+
+The addresses and the machine have no defaults: fsimg does not know where
+a loader puts an image, and a guessed address boots nothing.
+
+Validation is the plan's, before any sink opens, with one emission
+invariant after it. The plan checks every argument: the settings against
+their tables, the mode against the machine's writable modes, the startup
+code's
+length, and the prefix, which it reads whole into its own buffer (the
+prefix is bounded by the largest prefix-table length, 1088 bytes), pads,
+and checks: the padded length is a value of the prefix table, and the
+bytes at offset 0 are not the startup signature, the probe's identity, so
+the reader, which takes the first tie in table order, can claim only at
+`B`. The plan then assembles the header's setting fields and runs the
+read side's closed-table check, which pairs each machine with its prefix.
+Nothing below this point refuses an argument. The emission invariant:
+before the first output byte, the encoder assembles the buffered prefix
+and the complete header, `B + 256` bytes, and runs the read side's whole
+header decode on them with the real output length, known at plan time
+under `none` and after the first pass under `lzo`, where `stored_size` is
+the actual framed length the pass learned, not the bound; the decode must
+succeed and must tie at offset `B`, else `FSIMG_ESTATE`, since every
+input to it was checked by the plan. The plan's output bound is
+`B + startup_size` plus the body's bound: `imagefs_size` under `none`,
+and under `lzo`
+`imagefs_size + imagefs_size / 255 + 20 * (imagefs_size / 65536 + 1) + 12`,
+the sum over chunks of each chunk's stored length (a chunk of `n` decoded
+bytes costs at most `n + n / 255 + 8` stored bytes unsplit and
+`n + n / 255 + 17` split, by the encoder's
+[worst-case bound](design-codecs.md#worst-case-bound)), the terminator,
+the padding and the trailer; a `stored_size` or `ram_size` past 32 bits
+at that bound is refused at plan time.
+
+The output is the prefix, the startup section and the body, in file
+order, the prefix from the plan's buffer and the rest from sequential
+sources read once:
+
+* the prefix, the bytes the plan buffered and checked, padding included;
+* the header, as derived above;
+* the code, the startup file's bytes and their padding, copied in bounded
+  pieces and summed in little-endian words as they pass, then the startup
+  checksum word, set so that the section sums to zero;
+* the body, under `none` the disk copied verbatim and under `lzo` chunks
+  of 65536 decoded bytes with a shorter last chunk, each encoded by the
+  project's deterministic LZO1X encoder. A chunk of `n` decoded bytes
+  whose encoding is longer than 65535 bytes, the most a 16-bit stored
+  length holds, is emitted as two chunks of `ceil(n / 2)` and
+  `floor(n / 2)` decoded bytes, in that order; the second keeps the
+  original's place, so it is final exactly when the original was. The
+  rule is deterministic and never produces a non-final chunk below the
+  profile's 4096 minimum: the encoder's output is at most
+  `n + n / 255 + 6` bytes, so only a chunk longer than 65273 bytes can
+  exceed 65535, and both halves of such a chunk exceed 4096, whichever is
+  final; a final chunk has no minimum. The sequence ends with the zero
+  length, zero padding to a 4-byte boundary, and the trailer, the last
+  word of the stored image, set so that the whole stored image sums to
+  zero: the startup section sums to zero on its own, so the trailer is the
+  negated sum of the stored body's words, which the encoder accumulates
+  as it writes them, from `B + startup_size`, a word boundary.
+
+In both modes the encoder keeps one accumulator over the plain body, the
+disk's little-endian words as the transcode hands them, and at the end of
+the copy requires it to be zero, the ImageFS's own checksum property;
+a nonzero sum is `FSIMG_ECORRUPT` naming the body, or
+`FSIMG_ESOURCE_CHANGED` for a wrap, whose input verified before the copy.
+So the body's checksum is checked by the encoder whatever the mode, a
+create's staged volume included; under `lzo` the stored trailer is a
+second accumulator over the stored bytes, and under `none` the plain sum
+is the stored sum.
+
+Under `lzo` the [transcode](#transcode) runs twice: the first pass encodes
+every chunk and keeps one number, the framed length, and writes nothing;
+its finish derives `stored_size`, writes the prefix, the header, the code
+and the startup checksum; the second pass emits the chunks and checks its
+framed length against the first pass's at its end. Under `none` the
+leading bytes are written before the first chunk and the disk is read
+once. The encode record (`fsimg_encode_t`) carries the file inputs to the
+encoder beside the resolved settings. The transcode hands an all-zero
+unit to the encoder as a NULL chunk; the framing has no zero record, so
+the encoder encodes or copies zeros like any other bytes. The encoder
+holds one 65536-byte input chunk, one output buffer of the encoder's bound
+for that length, the encoder's 64 KiB table and one 64 KiB file-copy
+buffer and the plan's prefix buffer, each charged to memory; the framed
+length and the two running sums are the only state carried between
+passes, so no table of chunks is kept anywhere. Stored and decoded bytes
+are charged to the work counter and cancellation is polled at every
+chunk, as for every transcode. The output is reproducible as the
+[reproducibility](#reproducibility) section states: nothing in it is
+host-dependent.
 
 Before any output is produced, the wrap operation, not the container,
 opens the input as an `ifs` volume and verifies it at structural scope,
 which includes the ImageFS checksum; a corrupt input is `FSIMG_ECORRUPT`
 naming the input, under `lzo` and `none` alike. A verified ImageFS is at
 most 2^32 - 4 bytes long and a multiple of 4, so every length the layout
-requires holds by construction, and under `none` the whole-image sum
-closes through the input's own checksum with no check in the copy.
+requires holds for it. A create's staged volume is the `ifs` writer's
+own and is not verified before the copy; the encoder's plain-body sum
+covers its checksum, and `cW` verifies the staged image before
+publication under [create then verify](#create-then-verify).
 
-Under `lzo` the body is chunks of 65536 decoded bytes with a shorter last
-chunk, each encoded by the project's deterministic LZO1X encoder. A chunk
-of `n` decoded bytes whose encoding is longer than 65535 bytes, the most a
-16-bit stored length holds, is emitted as two chunks of `ceil(n / 2)` and
-`floor(n / 2)` decoded bytes, in that order; the second keeps the
-original's place, so it is final exactly when the original was. The rule
-is deterministic and never produces a non-final chunk below the
-profile's 4096 minimum: the encoder's output is at most `n + n / 255 + 6`
-bytes ([worst-case bound](design-codecs.md#worst-case-bound)), so only a
-chunk longer than 65273 bytes can exceed 65535, and both halves of such a
-chunk exceed 4096, whichever is final; a final chunk has
-no minimum. The sequence ends with the zero length, zero padding to a
-4-byte boundary, and the trailer. The [transcode](#transcode) runs twice:
-the first pass learns the framed length, the second emits the header and
-startup section, then the chunks, checking each stored length against the
-first pass. Under `none` the body is the input copied verbatim. The
-output is reproducible as the [reproducibility](#reproducibility) section
-states; the template contributes no host-dependent byte.
+Unwrap writes the profile's [sections](#file-settings-and-sections): the
+`disk` selector gives the ImageFS, `prefix` the bytes `[0, B)`, empty
+without a prefix, and `startup` the code `[B + 256, B + startup_size - 4)`.
+The typed settings of a rebuild are the image's details, which carry
+every header field under the settings' names (`machine`, `virtual`, the
+five addresses, `compression`). A wrap of that disk with those sections
+and those values reproduces the file byte for byte when the body is raw
+and `flags2` and the tail are zero (E12's `cAu`): every byte is then
+copied or derived by a rule the native image satisfies too. A nonzero
+`flags2` or tail (the H3 images) is the one difference in the startup
+section, and info's `flags2` and `tail_nonzero` details show it. When the
+body is framed, the body is this encoder's rather than the native one's,
+so `stored_size`, the checksum words and, when the codec differs, the
+compression bits differ as well; the disk reads back identical in every
+case. The X1 images and every `+compress` build of 6.5.0 report
+compression `ucl`, a codec the writer refuses, so their rebuild chooses
+`lzo` or `none`, and byte identity holds only for raw natives.
 
-Refusals, each before any mutation:
+Refusals, each the plan's, before any sink opens:
 
-* no template: `FSIMG_EINVAL` naming `ifsboot:template`;
-* a template that this profile does not read and verify: the template's
-  own error, naming the template. The closed tables and the end-of-file
-  tie are what refuse a template with an unobserved `flags1` bit, an
-  IFSCSA array (which precedes the startup header, so the header is not
-  at a table offset) or a trailing signature, so the encoder has no list
-  of its own;
+* a required setting unset, or a value outside its table: `FSIMG_EINVAL`
+  naming the key;
+* a mode the machine table does not list as writable for the resolved
+  machine: `FSIMG_EUNSUPPORTED` naming the machine and the mode;
+* a prefix whose padded length is not in the prefix table, or whose
+  bytes begin with the startup signature: `FSIMG_EINVAL` naming the key;
+* a header the read side's closed-table check refuses, such as a machine
+  without its prefix or a prefix without its machine: `FSIMG_EINVAL`
+  naming `ifsboot:machine` with the reader's reason;
+* an `ifs` byte order other than little, the resolved `endian=` setting
+  of a create or the ImageFS flags (0x05) of a wrap's input:
+  `FSIMG_EUNSUPPORTED` naming the byte order, one precondition of the
+  plan for create and wrap alike under both compression modes, because
+  no native image pairs a little-endian startup header with a big-endian
+  body and the profile writes no other header;
+* a `stored_size` or `ram_size` past 32 bits at the bound:
+  `FSIMG_EUNSUPPORTED` naming the field. The bound also refuses a disk
+  longer than 2^32 - 4 bytes, or under `none` not a multiple of 4, naming
+  `imagefs_size`; a verified ImageFS satisfies both, so for a create and a
+  wrap that check is an invariant of the plan, kept because the bound is
+  the container's contract with the disk plan;
 * an input that draws no `ifs` claim: `FSIMG_EFORMAT` naming the input;
-* an input whose `ifs` claim is a big-endian body (ImageFS flags 0x05):
-  `FSIMG_EUNSUPPORTED` naming the byte order, under both compression
-  modes, because no big-endian boot image exists to copy a startup
-  section from;
 * an input that fails its structural verification: `FSIMG_ECORRUPT`
   naming the input;
-* an input longer than the template's `imagefs_size`: `FSIMG_EUNSUPPORTED`
-  naming the growth rule. The output never grows beyond the template's
-  decoded body; the stored length may differ freely, since it depends on
-  the codec;
-* a template or input aliasing the output, or each other, as for every
-  wrap input.
+* a file setting or the input aliasing the output, as for every input.
+
+After the first byte: a file setting the change check finds replaced,
+resized or modified, a startup read that ends short, a second pass whose
+framed length differs from the first, and a wrap's body whose plain sum
+is not zero are `FSIMG_ESOURCE_CHANGED` naming the input; a create's body
+whose plain sum is not zero is `FSIMG_ECORRUPT` naming the body; a header
+decode that fails or ties elsewhere than `B` is `FSIMG_ESTATE`. The output
+is then incomplete as for every transcode failure.
 
 ### Harman-Becker IFS container (hbcifs)
 
@@ -1797,7 +2001,7 @@ format correctness; the oracle rows do.
 | VHD | `qemu-img check` and `info` report fixed VHD of the declared size; `vhd:align=1M` lengths; footer checksum; creator fields and original size as written | Flipped checksum (`FSIMG_ECORRUPT`, not a raw read), dynamic type 3 (`FSIMG_EUNSUPPORTED`), size mismatch with file length (no VHD claim: the file is whatever its prefix claims, or unrecognised) |
 | simg | `simg2img` expands to the raw disk byte for byte; `img2simg` output opens; `crc=yes` chunk verified | Chunk total mismatch, block sum mismatch, zero-size RAW chunk, FILL with wrong size, CRC mismatch under read-through, block size not a multiple of 4, 2^32 blocks refused at plan time |
 | ifsboot read | The eight H3 and three X1 boot images list and extract against their native manifests with no `dumpifs -u` step, and verify; `mkifs` LZO and UCL nonbootable output (machine 0) opens; generator-built images with opaque startup bytes for each prefix and each compression value, including 0x00; `i` prints `ifs/ifsboot` and the startup fields; sequential and confined reads decode each chunk once | A header at an offset outside the table, and `preboot_size` not equal to its offset: no claim; the signature inside SH-4 startup code: no claim; each closed-table field mutated: `FSIMG_EUNSUPPORTED` naming it; each bound mutated, `stored_size` equal to `startup_size + 4` under a framed value, trailing bytes after the stored image, the zlib value: the named class; a length word or chunk reaching the trailer, a missing terminator, a non-final chunk below 4096 (unsupported), a chunk decoding past 65536 or past `imagefs_size`, a decoded total short of `imagefs_size`, nonzero padding, each sum flipped: `FSIMG_ECORRUPT` naming the check; a body of minimum-size chunks longer than the index bound fails before scratch grows past it; a pattern alternating across five chunks stops at `-l work=`; a `dumpifs -u` copy is corrupt at the first chunk |
-| ifsboot wrap | A wrap of a standalone writer image, peeled again, yields that image's bytes under `lzo` and `none`; the output verifies, both sums and `ram_size`; byte-identical output across hosts and budgets; an incompressible 65536-byte chunk and an incompressible final chunk of 65400 bytes each split into two halves that read back; the x86 and SH-4 boot gates in the [IFS plan](../docs/ifs-plan.md) | No template; a template failing its probe, a bound or a sum, named as the template's error; an input without an `ifs` claim; a big-endian input (`FSIMG_EUNSUPPORTED` naming the byte order) under both modes; an input with a flipped ImageFS checksum word refused as `FSIMG_ECORRUPT` under both modes before any output byte; an input longer than the template's `imagefs_size`; the input changed between the two passes (`FSIMG_ESOURCE_CHANGED`); template, input and output aliasing |
+| ifsboot write | A create `ifs/ifsboot` and a wrap of a standalone writer image, each with generator-built startup code and settings, peeled again, yield that image's bytes under `lzo` and `none`; the output verifies, both sums and `ram_size`, and `i` reports the settings' values and zero `flags2` and `tail_nonzero`; a 1085-byte prefix is padded to the 1088-byte prefix and no prefix is accepted without one, on a test build whose machine table lists every machine as writable, since the plan check and the emission are the same code for every machine; absent startup code gives `startup_size` 260; code of 4001 bytes is padded to 4004; the 1085-byte prefix copied through a poisoned buffer yields three zero padding bytes; the prefix buffer is released on success and on every failure; byte-identical output across hosts and budgets; an incompressible 65536-byte chunk and an incompressible final chunk of 65400 bytes each split into two halves that read back; every section of each native image, H3 included, unwraps to the bytes the profile names; for each native image whose machine and mode the table lists as writable, its disk wrapped again with those sections and the values `i` reports is byte-identical when the native body is raw and `flags2` and the tail are zero (E12's `cAu`) and otherwise identical in the prefix, the code and every header field but `stored_size`, the compression bits, the checksum words and a nonzero tail, with a disk that reads back identical; the native gates in the [IFS plan](../docs/ifs-plan.md) | Each required key unset, named; machine 42 under `none` and machine 3 under `lzo` refused naming the machine and the mode; on the test build, machine 3 without the prefix and machine 0 with it; a 1084-byte and a 1089-byte prefix; a prefix beginning with the startup signature, refused by the plan before the sink opens, with a caller sink that records every open and resize; a create with `endian=big` and a wrap of a big-endian body (`FSIMG_EUNSUPPORTED` naming the byte order) under both modes; a file-setting key on `t`, `x`, `i` and `W` refused before any open; a startup or prefix file replaced, grown or truncated between plan and emission (`FSIMG_ESOURCE_CHANGED` from the change check), the truncated one emitting no padding tail; an input without an `ifs` claim; a wrap input with a flipped ImageFS checksum word refused as `FSIMG_ECORRUPT` before any output byte; a create whose staged volume's checksum word a fault flips fails at the end of the copy with `FSIMG_ECORRUPT` naming the body under `lzo` and under `none`, and a wrap input changed after verification with `FSIMG_ESOURCE_CHANGED`; the input changed between the two passes (`FSIMG_ESOURCE_CHANGED`); a fault that makes the emission decode tie at 0 is `FSIMG_ESTATE`; a section name the container lacks, the section selector given to `select()`, and a section of a DMG; a startup or prefix file aliasing the output; `ifsboot:compress=ucl` refused naming the key; one address setting altered rebuilds an image whose `i` shows the altered value and whose startup checksum still verifies; an H3 image's `tail_nonzero` is 6 and a rebuilt one's 0 |
 | hbcifs | `PCM3_IFS2.ifs` lists and extracts against its manifest; verification passes every check it makes, names the two unverified fields and reports an incomplete scope; `i` prints `ifs/hbcifs` | Payload length off by one (`FSIMG_ECORRUPT`); the field at 0x10, 0x18 or a reserved byte changed (`FSIMG_EUNSUPPORTED` naming the field); a stream ending short, producing more, or with bytes after its end; a spool limit crossed at the step that crosses it with `FSIMG_RESOURCE_SPOOL`, before the host file grows past it; the image under gzip or on stdin refused naming both layers; a scheme in `ifs/mbr/hbcifs` refused naming the container |
 | gzip | `gzip -t` accepts output; `zcat` yields the raw file; header bytes fixed (OS 3, flags 0, XFL by level); `gzip` and `pigz` input spools; concatenated members; MTIME clamp at an epoch of -1 and 2^32 | Trailing garbage, CRC mismatch, length mismatch, reserved flag bit, truncated member, 65 KiB FNAME; `-z` on a raw file fails as an absent signature |
 | Spool | Stdin of a raw, DMG and gzip image through the coordinator's pipe; all-zero input leaves holes (physical blocks sampled); limit exactly reached; a raw stream whose prefix also passes for gzip is ambiguous and `-z` or `-F` resolves it | A gzip bomb failing at the step that crosses the limit with `FSIMG_RESOURCE_SPOOL`, before the host file grows past it; no spool descriptor; spool descriptor not a fresh empty file; a terminal on stdin refused |

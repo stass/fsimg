@@ -314,8 +314,9 @@
   Both verifiers keep their format-specific reconciliation.
 
 * [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/codec/`,
-  `lib/layers/`): wrap a new ImageFS in an existing QNX boot image
-  through the `ifsboot` container, with a project-owned LZO1X encoder. The
+  `lib/layers/`): write QNX boot images through the `ifsboot` container,
+  from a caller's startup program, optional boot prefix and header
+  settings, with a project-owned LZO1X encoder. The
   [plan](docs/ifs-plan.md) orders the work; the
   [format](specs/design-ifs.md), [driver](specs/design-ifs-driver.md) and
   [codec](specs/design-codecs.md) designs and the layer design's `ifsboot`

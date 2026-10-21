@@ -114,7 +114,7 @@ Captures are in `~/qnx65-vm/captures-ifs/` (`FSIMG_IFS_NATIVE`), made with
 | `ifs-e10-sense` | E10 `dumpifs` sensitivity, through `capture.sh -i` |
 | `ifs-e3-extract` | `dumpifs -x` of the odd-path and duplicate images |
 | `ifs-s2-qnxbase-u`, `-u2` | `dumpifs -u` of X1 `qnxbase.ifs` against the oracle |
-| `e12-links` | E12 boot of records below a symbolic link: buildfiles, scripts, captures and serial transcripts |
+| `e12-links` | E12 boot of records below a symbolic link: buildfiles, scripts, captures and serial transcripts; E13 reads `cAr.ifs` from it |
 | `ifs-tools`, `ifs-tools-mkxfs` | Tool binaries for the identities above |
 
 ## Observations
@@ -301,6 +301,49 @@ shows its record's time 0 throughout. The early `b1` and `b2` attempts,
 whose scripts ran tools without `[data=copy]` or started a serial driver,
 are kept for completeness.
 
+### Startup and boot file sources (E13)
+
+Where the three parts of an x86 boot image come from, read off the guest's
+`/boot/sys` files and E12's `cAr.ifs` (`e12-links/`):
+
+* **The startup header is synthesized by `mkifs`.** `startup-bios` and
+  `startup-apic` are ELF executables with no startup header inside:
+  `od -t x4 | grep 00ff7eeb` finds nothing. `cAr.ifs` holds the header at
+  offset 1088: signature `eb 7e ff 00`, version 1, `flags1` `0x01`,
+  `flags2` 0, `header_size` 256, machine 3, `startup_vaddr` `0x404d38`,
+  `paddr_bias` 0, `image_paddr` `0x400440`, `ram_paddr` `0x400440`,
+  `ram_size` `0x140c98`, `startup_size` `0x12530`, `stored_size`
+  `0x140c98`, `imagefs_paddr` 0, `imagefs_size` `0x12e768`,
+  `preboot_size` 1088, and a tail of 206 zero bytes. So `ram_size =
+  startup_size + imagefs_size`, `image_paddr` is 4 MiB plus the prefix
+  length (`bios.boot`'s attribute block says `default_image=4m`),
+  `startup_vaddr` lies inside the startup code, `imagefs_paddr` is zero,
+  and the machine value is the startup ELF's `e_machine` (3, `EM_386`; the
+  H3 images' 42 is `EM_SH`).
+* **The startup code is the startup ELF's first segment, linked at the
+  image address.** At 1088 + 256 `cAr.ifs` carries `startup-bios`'s `.text`
+  from ELF file offset 224 (the first segment, `vaddr 0x080480e0`),
+  relocated: `c7 04 24 ac 75 05 08` in the ELF is
+  `c7 04 24 0c fa 40 00` in the image. `mkifs` runs the buildfile's
+  `[linker=...]` command to place it; the code in the image is the linked
+  result, not the file.
+* **The BIOS prefix is the boot file's loader, zero-padded to 4 bytes.**
+  `[virtual=x86,bios]` selects `/boot/sys/bios.boot` (3642 bytes), an
+  i386 ELF whose loadable segment (file offset 0, `filesz 0x583`) starts at
+  the entry (offset 0x94) with the attribute block
+  `[default_image=4m attr="?-bigendian" attr="linker=..." vboot=0xf0000000 +rsvd_vaddr]`
+  and then `boot`; the loader code starts at file offset 326, and the
+  image's prefix equals `bios.boot[326:326 + 1085]` followed by zero
+  padding to 1088, byte for byte (the file's two following `.shstrtab`
+  bytes are the only difference). `elf.boot` and `nobios.boot` are
+  attribute-only boot files with no loader. `bios.boot`'s strings name
+  `FLAGS1`, `STARTUP_VADDR`, `PADDR_BIAS`, `IMAGE_PADDR`, `RAM_PADDR`,
+  `RAM_SIZE`, `STARTUP_SIZE`, `STORED_SIZE`, `IMAGEFS_PADDR`,
+  `IMAGEFS_SIZE`, `STARTUP_HDR_FLAGS1_COMPRESSED` and `STARTUP_INFO_*`: the
+  loader reads the header fields and fills startup info records.
+* **Not reproduced:** where H3's six nonzero tail bytes come from, an SH-4
+  `mkifs` or startup difference.
+
 ### S1: H3 boot images
 
 All eight have the startup header at offset 0: version 1, `flags1` `0x09`
@@ -471,22 +514,25 @@ images alike:
 | Extended attributes | Never used | E1 to E9, S1 |
 | Compression values, chunk sizing, padding after the terminator | LZO and UCL, not zlib; 65536-byte chunks with a smallest observed non-final 4096; zero padding to a 4-byte `stored_size` | E7, S1, S2 |
 | Startup and stored checksum domains | Additive, over the startup section and over the whole stored image | E7, S1, S2 |
-| Header tail variant | Opaque: zero in X1, six nonzero bytes in H3 | S1, S2 |
+| Header tail variant | Opaque: zero in X1 and E12, six nonzero bytes in H3 | S1, S2, E13 |
+| Where the startup header, the startup code and the BIOS prefix come from | `mkifs` synthesizes the header (the machine is the startup ELF's `e_machine`, `startup_vaddr` its linked entry, the sizes computed); the code is the startup ELF's first segment linked at the image address; the prefix is the boot file's loader after its attribute block, zero-padded to 4 | E13 |
 | Big-endian bodies | Produced natively by `+bigendian`, nonbootable and with LZO | E9, E7 |
 | Whether `dumpifs` checks checksums | No | E10 |
 | Native mount of a nonbootable image | None | E11 |
 | `hbcifs` header fields and checksum | Identity, decoded length and payload length identified; four fields open | S1 |
-| Whether the x86 startup accepts uncompressed and LZO bodies; startup fields that change on growth; offset-dependent processed members; raw members | Uncompressed and UCL bodies boot. The rest is open: E8 is not run. It feeds only the wrap (stage 11) and owner decision 6 | E12 |
+| Whether the x86 startup accepts uncompressed and LZO bodies; startup fields that change on growth; offset-dependent processed members; raw members | Uncompressed and UCL bodies boot. The rest is open: E8 is not run. It feeds only the boot-image writer (stage 11) and owner decision 6 | E12 |
 | How to boot an x86 image in QEMU | The image replaces the boot image inside a copy of the live CD's El Torito floppy, a headless QEMU boots it, and `display_msg` markers in the COM1 serial file detect the boot | E12 |
 | How `procnto` resolves a path below a symbolic-link record | Through the link; the records stored below it are unreachable in every table order tested | E12 |
 
 ## Open evidence
 
 * E8, and E12's remaining boots (each E8 image, a raw member, a
-  duplicated path), before the wrap stage.
+  duplicated path), before the boot-image writer stage.
 * `dumpifs -u` copies of the eight H3 boot images, through the `big.img`
   route, before the decoder stage's gate.
 * The four unidentified `hbcifs` header fields, before `hbcifs`
   verification can be complete.
+* The source of the six nonzero startup-header tail bytes in the H3
+  images (E13).
 * Images larger than 16 MiB built natively: the guest's RAM disk limits the
   experiments to small bodies; S1 covers bodies up to 68849668 bytes.

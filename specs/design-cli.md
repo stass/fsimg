@@ -219,7 +219,17 @@ cannot honor, and `-e` is its only time setting.
 A qualified key targets one layer: `-o gpt:type=esp`,
 `-o gpt:name=EFI`, `-o dmg:compress=none`, `-o gzip:level=9`. A qualifier
 naming a layer absent from the stack, or a compression not selected, fails;
-fsimg never guesses the target of a bare key. On read the layer must be
+fsimg never guesses the target of a bare key. A
+[file setting](design-layers.md#file-settings-and-sections) takes a host
+path (`-o ifsboot:startup=startup.bin`, `-o ifsboot:prefix=bios-prefix.bin`,
+the raw loader bytes),
+resolved against the working directory like `-f`, never against `-C`. The
+coordinator opens it before the worker starts, with the same no-follow,
+nonblocking, no-controlling-terminal open as an operand, requires a
+regular file, and passes the read-only descriptor to the worker in a slot
+of its own; the worker receives no name, the library checks the length
+rule the layer's profile states, and the sandbox admits the descriptor as
+it admits the image input. On read the layer must be
 named in `-F`, because detection runs later inside the worker and every key
 is validated first: `-F fat32/gpt -o gpt:sector=4096` is the remedy for a
 disk carrying GPT headers at both sector sizes, and `-o gpt:sector=4096`
@@ -672,7 +682,12 @@ cannot know whether the input will need it; the raw intermediate beside the
 staged output in the staging directory when the output is a file, and in the
 private scratch tree when it is a stream. With `-T -` there is no scratch
 tree and no spool, and the coordinator reports a worker that needed one as
-gzip input refused under `-T -`. The worker receives descriptors, never
+gzip input refused under `-T -`. A create's
+[file settings](design-layers.md#file-settings-and-sections) are
+read-only regular files the coordinator opened from the `-o` paths, one
+descriptor slot per key, absent as `-1`; the worker wraps each in a
+descriptor adapter and passes it to the library as the setting's I/O
+object. The worker receives descriptors, never
 names; its authority over names is the
 [mapping](design-security.md#coordinator-and-worker) in the security
 design.

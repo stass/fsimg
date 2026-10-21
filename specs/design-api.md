@@ -284,10 +284,19 @@ filesystem slot is present: `fat32` writes a bare volume and `fat32/gpt/dmg`
 a partitioned disk in a container. Write options specify exact or automatic
 volume size, minimum free bytes, sector/allocation-unit constraints, label,
 required/optional metadata policy, reproducibility policy and epoch,
-logical-completion versus required-durability mode, typed format options, and
+logical-completion versus required-durability mode, typed format options,
 a borrowed `layers` pointer to an `fsimg_layer_options_t` with the typed
-settings of every layer (NULL selects every default). The writer copies both
-structures. A layer setting whose layer is absent from the stack must hold its
+settings of every layer (NULL selects every default), and a borrowed
+`inputs` pointer to an `fsimg_layer_inputs_t`, one read-only `fsimg_io_t`
+per [file setting](design-layers.md#file-settings-and-sections) of every
+layer (`ifsboot_startup`, `ifsboot_prefix`; NULL, or a NULL field, is the
+setting's absence). The writer copies the two records; the I/O objects
+are borrowed, not copied, under one rule: each is valid, read-only and
+unchanged from writer construction, where the plan reads its length,
+until `fsimg_writer_output()` returns, and for a wrap until the call
+returns, as the [ownership summary](#ownership-summary) states. A layer
+setting whose
+layer is absent from the stack must hold its
 default, exactly as a format setting a format does not store; an
 [identifier](design-layers.md#identifiers) of a layer in the stack must be
 set unless the reproducible flag is given. Compression is not a stack slot:
@@ -595,15 +604,20 @@ fsimg_status_t fsimg_image_compose(fsimg_ctx_t *ctx, const char *stack,
 ```
 
 `wrap()` puts a raw volume or disk into a stack; `unwrap()` writes the bytes
-a selector names, raw; `compose()` builds a partitioned disk from `count`
+a selector names, raw: a volume selector's partition, range or disk, or a
+container [section](design-layers.md#file-settings-and-sections) under
+`FSIMG_SELECT_SECTION` with the section's name in `text`, which `select()`
+refuses with `FSIMG_EINVAL`, as `unwrap()` refuses a section the
+container does not declare; `compose()` builds a partitioned disk from `count`
 parts, each a borrowed volume I/O object with a partition name and type
 (NULL selects the derived default) and the partition's unique GUID, which
 follows the [identifier rule](design-layers.md#identifiers): required
 outside reproducible mode, `FSIMG_EINVAL` naming the partition when unset,
 derived from the partition index under it. Each follows the
 [wrap, unwrap and compose rules](design-layers.md#wrap-unwrap-and-compose).
-They take write options for the mode flags, epoch and `layers`; filesystem
-settings must hold their defaults. Inputs are borrowed for the call and
+They take write options for the mode flags, epoch, `layers` and `inputs`;
+filesystem settings must hold their defaults. Inputs, the file settings
+included, are borrowed for the call and
 checked against the sink for backing-identity aliases before any mutation.
 Outputs follow the same publication, stream and failure contracts as
 `fsimg_writer_output()`.
@@ -701,6 +715,7 @@ reproducibility claim for compressed bytes can name the zlib it depends on.
 | Entry returned by reader | Reader | Next iteration call, fatal error, or reader destruction |
 | Plan | Writer | Writer destruction after successful planning |
 | Input I/O passed to image open, wrap or compose | Caller, borrowed by the image or for the call | Image destruction or end of the call |
+| File-setting I/O objects in write options (`inputs`) | Caller, borrowed by the writer from construction, or for the wrap call; read-only and unchanged while borrowed | End of `fsimg_writer_output()`, or end of the wrap call |
 | Spool descriptor in image options | Adopted by the open on every outcome | Image destruction |
 | Raw intermediate descriptor in a sink | Adopted by the output call on every outcome | End of the call |
 | Volume slice returned by select | Caller, borrows the image | Slice destruction; image outlives it |

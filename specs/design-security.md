@@ -69,9 +69,14 @@ standard input unread (the [CLI design](design-cli.md#coordinator-and-streaming-
 states that rule and refuses a terminal), source roots, scratch authority,
 fresh output authority where needed, the unlinked
 [handed-over files](design-layers.md#handed-over-files), the staged
-[`x --mtree` manifest](design-mtree.md#extraction-writing-a-manifest), and
-bounded control/data channels. The sandbox's input check admits a regular file or a
-pipe and nothing else. Other descriptors, sockets, terminal handles, and
+[`x --mtree` manifest](design-mtree.md#extraction-writing-a-manifest), the
+read-only regular files a create's
+[file settings](design-layers.md#file-settings-and-sections) name (a boot
+image's startup program and boot prefix, opened by the coordinator from
+`-o` paths, copied into the output by length and never interpreted), and
+bounded control/data channels. The sandbox's input check admits a regular
+file or a pipe and nothing else, and a file setting passes the same check
+as a regular file. Other descriptors, sockets, terminal handles, and
 executable handles are closed. Core dumps are disabled. Runtime initialization
 needed by libc occurs before confinement; no locale, timezone, or plugin
 loading may cause ambient file opens while processing an image.
@@ -84,7 +89,7 @@ name to create or remove. The staged manifest of `x --mtree` is a
 write-only descriptor of one file the coordinator created in its own
 private staging directory: the worker may write, resize and flush it, and
 holds no name or directory through which to rename, replace or read it.
-Source roots and the image input are read-only.
+Source roots, the image input and the file settings are read-only.
 The platform profiles below install exactly these rights.
 
 The profiles bound each grant to its directory, not to the names within

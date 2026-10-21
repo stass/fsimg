@@ -325,15 +325,28 @@ shares the contract: a container probe may read at the fixed offsets of a
 closed table of boot prefixes, not only the file's prefix and last 512
 bytes; a container may hold an opaque, executable section that is neither a
 table nor a chunk; a chunk index may be filled by a decoding pass rather
-than from tables; a wrap encoder may take a second, read-only template
-input; a container whose header precedes the body it describes and carries
-the body's stored length is encoded in two deterministic passes, the first
+than from tables; a container profile may declare file settings; a
+container whose header precedes the body it describes and carries the
+body's stored length is encoded in two deterministic passes, the first
 compressing the body to learn that length and the second emitting, rather
-than through the staged raw intermediate; and a container whose payload is
-one sequential stream peels through the spool rather than the chunk index,
-its read side still a positional I/O object over the volume. Beyond those
-six, both containers declare that they carry a volume, a declaration the
-layer design adds alongside them, so a scheme in their create stack is refused.
+than through the staged raw intermediate; and a container whose payload
+is one sequential stream peels through the spool rather than the chunk
+index, its read side still a positional I/O object over the volume.
+
+A file setting is a byte string the container stores beside the disk and
+derives from nothing: a startup program, a boot prefix. A library caller
+supplies it as a read-only I/O object in a record the write options borrow
+beside the flat typed settings. The CLI coordinator opens it from an `-o`
+path as a read-only descriptor before the worker starts. It is
+creation-only. Unwrap writes it back as a named section, and the image
+information's details carry the typed header values, so a read image can
+be rebuilt.
+
+Beyond those six changes, both containers declare that they carry a
+volume, a declaration the layer design adds alongside them, so a scheme in
+their create stack is refused. A carried-volume container declares a disk
+granularity of 1, so the exact-volume rule that refuses a padding
+container around `ifs` passes for it with no case of its own.
 A container also declares the fields no evidence gives a rule to check;
 the library's layer report names them and calls the verification
 incomplete, the CLI worker carries them to the coordinator, and `W`

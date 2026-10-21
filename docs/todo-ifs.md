@@ -6,18 +6,23 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
 * [Medium] **E8 and the remaining E12 boots** (`tools/qnx/guest/popifs.sh`,
   `docs/ifs-research.md`), each run with the [E12 boot
   method](ifs-research.md#paths-below-a-link-at-boot-e12): LZO bodies and an
-  image without the BIOS prefix; whether `mkifs` changes any startup field
-  beyond the derived ones when an image grows (the wrap's growth refusal
-  stays until it is known); whether processed members' bytes depend on their
-  image offset (if so, the wrap scope returns to the owner); raw members;
-  the native uncompressed layout the `ifsboot` profile assumes for
-  compression `0x00` (`stored_size = startup_size + imagefs_size`, no stored
-  trailer); the inode-flag nibble the writer's boot settings give referenced
-  records, whose closed table is empty until then, so every `boot1=` to
-  `boot4=` and `script=` setting is refused and the wrap's native boot gates
-  use a native bootable body; and how `procnto` resolves a duplicated path
-  (owner decision 10). They answer owner decision 6 and decision 10's growth
-  refusal, and gate the wrap stage.
+  image without the BIOS prefix; whether two `mkifs` builds of one startup
+  program at two image sizes differ only in the derived header fields and
+  the checksum word, as S1 shows for SH-4, so that a rebuild from the
+  unwrapped program and settings reproduces an x86 startup section; whether
+  processed members' bytes depend on their image offset (if so, the
+  writer's scope returns to the owner); raw members; the native
+  uncompressed layout the `ifsboot` profile assumes for compression `0x00`
+  (`stored_size = startup_size + imagefs_size`, no stored trailer), which
+  E12's `cAu` already shows boots; the inode-flag nibble the writer's boot
+  settings give referenced records, whose closed table is empty until then,
+  so every `boot1=` to `boot4=` and `script=` setting is refused and the
+  boot-image writer's native gates use a native bootable body; and how
+  `procnto` resolves a duplicated path (owner decision 10). They answer
+  owner decision 6 and gate the boot-image writer's registration. If E8
+  shows that `startup-bios` rejects LZO bodies, a compressed x86 image
+  needs an NRV2B encoder: one more codec in the codec design and a write
+  entry in the profile's compression table, the framing unchanged.
   * [Low] Boot a body whose shadowed record carries `boot_ino[0]`'s word,
     to learn whether the startup finds boot programs by path or by
     scanning the table, which `shadowed_references` only counts.
@@ -80,25 +85,27 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   the `ifsboot` write stage waits for container writing (the write half of
   the layer plan's stage 3); until then `ifsboot` is registered read only,
   with no plan, bound or encoder, and writing it is refused naming it.
-* [Medium] **`ifsboot` design against the implemented layers**
-  (`specs/design-layers.md`, `lib/layers/`): the profile was written before
-  the stack and container code. Owner decisions, before the `ifsboot` stages:
-  * `ifsboot:template` is an I/O object, but layer settings are a flat
-    record carried on the wire (`fsimg_layer_options_t`, 264 bytes) with no
-    path or descriptor kind, and the worker's descriptor set is closed
-    (`specs/design-security.md`); the template needs a coordinator-opened
-    descriptor slot and its security and CLI entries.
-  * The template must outlive writer construction until
-    `fsimg_writer_output()` or the wrap returns; no ownership row in
-    `specs/design-api.md` covers it.
-  * `ifsboot` has no rows in `layer_settings` and `layer_keys`, and the IFS
-    settings rows do not mark `compress` and `template` creation-only.
-  * The LZO1X transcode reads its input once per pass, while the layer
-    design says wrap and compose read each input once.
-  * Smaller gaps: owners of the template read, the second pass and the
-    4-byte sizing; the `.ifs` suffix rationale against the CLI's generic
-    suffix list; `fsimg_layer_info_t` lacks carries and codec version
-    fields.
+* [Medium] **`ifsboot` writer against the implemented layers**
+  (`specs/design-layers.md`, `lib/layers/`, `cmd/fsimg/`,
+  `include/fsimg.h`): the profile's write side needs, in the code, what
+  the design names: `fsimg_layer_inputs_t` and the `inputs` pointer of
+  `fsimg_write_options_t`; the `ifsboot` typed settings with their
+  presence flags in `fsimg_layer_options_t` and their rows in
+  `layer_settings` and `layer_keys`, marked creation-only like
+  `compress`; the file-setting descriptor slots of the worker request
+  and the coordinator's open of `-o` paths; `FSIMG_SELECT_SECTION` and
+  the container's section table; a pass count that follows the resolved
+  settings (one under `none`, two under `lzo`), since
+  `fsimg_encoder_ops_t.passes` is static; the read side's `flags2` and
+  `tail_nonzero` details; and `fsimg_layer_info_t`'s missing carries
+  field. The `.ifs` suffix rationale against the CLI's generic suffix
+  list is unstated.
+* [Low] **Command-line wrap and unwrap** (`cmd/fsimg/`,
+  `specs/design-cli.md`): wrap, unwrap and compose are library operations
+  without a command-line form, so rebuilding a native boot image around
+  a new ImageFS from the shell needs a program against the library. A
+  command-line form comes for every container together, after the
+  `ifsboot` writer is registered.
 * [Medium] **Exact volumes in unnamed wraps and composes**
   (`lib/layers/output.c`, `specs/design-layers.md#exact-volumes`): the
   disk plan applies the exact-volume rule to the filesystem a stack names,

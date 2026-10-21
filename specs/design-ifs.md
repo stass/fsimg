@@ -24,7 +24,7 @@ questions is not a source of rules.
 
 Everything that surrounds an ImageFS belongs to other owners and is only
 referenced here. The startup header, boot prefix, startup section, chunk
-framing, startup and stored checksums and the boot-image wrap belong to the
+framing, startup and stored checksums and the boot-image writer belong to the
 `ifsboot` container; the Harman-Becker header and its unframed stream belong
 to the `hbcifs` container; both are
 [layer profiles](design-layers.md#layer-profiles). The LZO1X and NRV2B
@@ -176,7 +176,7 @@ is the one statement of the mountpoint rule; the driver cites it. [X1]
 Without a mountpoint setting the writer stores `/`, not the empty
 mountpoint a nonbootable `mkifs` image gets without `mount=`. `/` is the
 value of every bootable `mkifs` image and of every H3 and X1 boot image,
-so one default serves a standalone image and the body an `ifsboot` wrap
+so one default serves a standalone image and the body an `ifsboot` image
 packages, and `dumpifs` accepts both values; `mountpoint=` with an empty
 value writes the empty mountpoint. [X1], [S1], [S2]
 
@@ -572,9 +572,9 @@ nibble a referenced record receives comes from a closed writer table of
 lacks is `FSIMG_EUNSUPPORTED`. The table is empty, so every boot setting is
 refused and every writer image is nonbootable; the
 [research record](../docs/ifs-research.md#evidence-questions) names the
-experiment that fills it. The writer never reads an image: wrapping the
-result in a boot image's startup section, and the template it copies, are
-the `ifsboot` container's. [S1], [S2]
+experiment that fills it. The writer never reads an image: packaging the
+result behind a startup program, and the program and header settings the
+caller supplies for that, are the `ifsboot` container's. [S1], [S2]
 
 ### Settings and sizing
 

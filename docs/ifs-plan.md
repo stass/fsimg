@@ -6,8 +6,8 @@ fsimg. The work comes in three parts:
 * a reader and full verifier for ImageFS bodies, bare or inside QNX boot
   images;
 * a writer for standalone, nonbootable ImageFS volumes;
-* a gated wrap of a new ImageFS in an existing boot image's
-  startup section.
+* a gated writer for QNX boot images: an ImageFS packaged behind a
+  startup program and header settings the caller supplies.
 
 Its input is the research draft
 [QNX IFS / ImageFS interoperability specification](../fsspecs/QNX_IFS_fsimg_spec.md)
@@ -27,8 +27,8 @@ The concrete targets are the images on the Porsche PCM 3.1 update disc
 The QNX 6.5.0 live CD (X1) adds three x86 boot images, and its running guest
 adds the native producer and reader, `mkifs` and `dumpifs`. The owner keeps
 a separate plan, outside the repository, for a QEMU board that boots a
-trimmed PCM recovery image. That board needs exactly the wrap of stage
-11, and it is the only SH-4 boot evidence in reach.
+trimmed PCM recovery image. That board needs exactly the boot-image
+writer of stage 11, and it is the only SH-4 boot evidence in reach.
 
 The working agreement applies unchanged:
 
@@ -63,15 +63,20 @@ Goals:
    `dumpifs` lists, checks and extracts identically to `mkifs` output of the
    same tree. The writer capability is registered only after that native
    record exists.
-6. Wrap a new ImageFS in an existing boot image's startup section. The
-   derived sizes and both checksums are recomputed, and the body is stored
-   uncompressed or LZO-compressed. Each machine profile is registered only
-   after a native boot: x86 in the QEMU VM, SH-4 on the PCM QEMU board.
+6. Write QNX boot images: an ImageFS packaged behind a startup program
+   and a boot prefix the caller supplies as files, with the header's
+   machine, flags and addresses as settings; the sizes, the compression
+   value and both checksums are derived, and the body is stored
+   uncompressed or LZO-compressed. Unwrap gives the program and the
+   prefix back and info reports every header field, so a native image
+   can be rebuilt around a new ImageFS. Each machine profile is registered only after a native
+   boot: x86 in the QEMU VM, SH-4 on the PCM QEMU board.
 
 Non-goals:
 
-* Generating startup programs, boot prefixes or compiled boot scripts, that
-  is, new bootable images without a template (draft section 11.3).
+* Generating startup programs, boot prefixes or compiled boot scripts
+  (draft section 11.3): fsimg packages the program the caller supplies and
+  builds none.
 * Processing executables. Members are bytes. fsimg never strips, relocates
   or links ELF files.
 * Chained images, IFSCSA arrays, signed images, and ELF, UEFI or S-record
@@ -165,7 +170,7 @@ requires:
 | Concern | Owner |
 | --- | --- |
 | ImageFS header, record table, hierarchy, names, content, checksum | The `ifs` filesystem driver (`lib/formats/ifs/`), on an ordinary `fsimg_io_t` |
-| Startup header, boot prefix, startup section, chunk framing, startup and stored checksums, wrap | The `ifsboot` container layer |
+| Startup header, boot prefix, startup section, chunk framing, startup and stored checksums, the boot-image writer | The `ifsboot` container layer |
 | The 64-byte Harman-Becker header and its unframed stream | The `hbcifs` container layer |
 | LZO1X decode and encode, UCL NRV2B decode | Project-owned compression codecs with no knowledge of IFS |
 | Random access to a framed compressed body | The layer chunk index and decoded-chunk cache, filled by a decoding pass at peel |
@@ -188,8 +193,11 @@ stage 2 makes in the layer design and records in the architecture:
   section that is neither a table nor a chunk.
 * **Learned index.** The chunk index is filled by a decoding pass rather
   than from tables.
-* **Template input.** The wrap encoder takes a second, read-only input: the
-  template boot image.
+* **File settings.** A container profile declares settings whose values
+  are byte strings supplied as files: the startup program and the boot
+  prefix. The library takes them as I/O objects, the CLI as paths the
+  coordinator opens, and unwrap writes them back as sections; info's
+  details carry the typed header values.
 * **Header after body.** The startup header at the front carries
   `stored_size`, and the startup checksum covering it precedes the body, so
   a single sequential pass cannot emit the first bytes. The encoder makes
@@ -350,28 +358,32 @@ remove a class of special cases rather than handling each case.
 
    Sizes, uid, gid and times must fit 32 bits, and the whole image must fit
    `2^32 - 4` bytes. An unrepresentable entry fails and is never truncated.
-10. **A wrap keeps the template's startup section.** The `ifsboot` encoder
-    copies the template's prefix and startup section. It recomputes only
-    the derived fields:
-    * `imagefs_size`;
-    * `stored_size`;
-    * `ram_size`, as `startup_size + imagefs_size`;
-    * the compression value in `flags1`;
-    * the startup checksum;
-    * the stored trailer.
-
-    Every other startup byte is the template's. The encoder refuses:
-    * a template with any unobserved `flags1` bit;
-    * an IFSCSA or signature marker;
-    * a decoded ImageFS larger than the template's `imagefs_size`, until
-      E8's growth case shows that `mkifs` changes no other startup field
-      when an image grows. The stored length may differ freely, since it
-      depends on the codec.
+10. **The boot-image writer takes the startup program and the header
+    settings; it reads no boot image and parses nothing.** As `mkifs`
+    does (E13), the `ifsboot` encoder synthesizes the whole header and
+    copies two opaque inputs, the linked startup code and the raw boot
+    prefix, each zero-padded to 4 bytes. The header comes from three
+    sources: the fixed identity, the settings (machine, the virtual bit,
+    the five target addresses, the compression, standing where `mkifs`
+    reads a buildfile attribute or the startup ELF), and the derivations
+    (`startup_size`, `stored_size`, `imagefs_size`, `preboot_size`,
+    `ram_size` as `startup_size + imagefs_size`, both checksums);
+    `flags2` and the tail are zero, as in every 6.5.0 image, and the H3
+    images' six nonzero tail bytes are the one thing a rebuild does not
+    reproduce, reported by info. Linking the startup code and taking the
+    loader out of a boot file are the caller's job: no ELF, boot-file or
+    attribute parsing. The header is run through the read side's tables
+    and bounds before any byte is written, so an image the writer emits is
+    one its reader accepts, and the reader's machine table is the only
+    place a machine or prefix is accepted. Unwrap gives the prefix and
+    the code back, and info reports the header values. The
+    [profile](../specs/design-layers.md#qnx-boot-image-ifsboot) owns the
+    rules.
 
     The body is stored uncompressed or as LZO chunks of at most 65536
-    decoded bytes. If E8 shows that processed members depend on their image
-    offset, a wrap may not move them, and this decision reopens with owner
-    decision 6.
+    decoded bytes. If E8 shows that processed members depend on their
+    image offset, a rebuilt image may not move them, and this decision
+    reopens with owner decision 6.
 
 ## Codecs and dependencies
 
@@ -445,9 +457,9 @@ Experiments E1 to E12 and the surveys S1 and S2 are defined in stage 1.
 | Duplicate content, shared-range counts and hard links (draft question 7) | E6, S1 | Range rule; the default extraction ceiling on deduplicated images |
 | Extended-attribute use (draft question 6) | E1 to E8, S1 | Acceptance tables |
 | Compression values 6.5.0 accepts; chunk sizing and the smallest non-final chunk; padding after the terminator (draft question 4) | E7, S1, S2 | Decision 8, encoder |
-| Whether the x86 startup accepts uncompressed and LZO bodies | E8, E12 | Wrap profiles |
-| Startup and stored checksum domains (draft question 1) | S1, S2, E8 | `ifsboot` verification, wrap |
-| Which startup fields change when the same buildfile gains a file | E8 | Decision 10's growth refusal |
+| Whether the x86 startup accepts uncompressed and LZO bodies | E8, E12 | The writer's compression values per machine |
+| Startup and stored checksum domains (draft question 1) | S1, S2, E8 | `ifsboot` verification, the writer |
+| Whether a startup section built by `mkifs` is the program's bytes plus the derived and set header fields alone, so that a rebuild from the unwrapped program and settings reproduces it | E8 (two builds of one startup at two sizes), S1 | Decision 10; the round-trip test |
 | Whether processed members' bytes depend on their image offset (draft question 9) | E8 | Decision 10, owner decision 6, writer layout |
 | Whether `procnto` needs a member's processed-ELF flag, or a raw member runs unflagged | E8, E12 | Owner decision 6 |
 | Header tail variant in 6.5.0 and 6.3.2 images (draft question 2) | S1, S2 | Opaque-tail policy |
@@ -596,8 +608,8 @@ repository records only pass and fail counts.
 * Layer design updates:
   * an `ifsboot` profile: probe and the boot-prefix table, the closed
     `flags1` and machine tables, peel through the learned chunk index and
-    its bounds, both checksums, info fields, and the wrap encoder with its
-    template input;
+    its bounds, both checksums, info fields, and the writer with its file
+    settings, header settings and unwrap sections;
   * an `hbcifs` container profile: the probe, header checks, and peel
     through the spool;
   * the six contract changes listed under
@@ -863,33 +875,49 @@ Depends on stages 4 and 6 and on layer stages 2 to 4.
 * **Gate:** every cycle passes, and the registration bar of owner decision
   7 is met.
 
-### 11. Boot-image wrap
+### 11. Boot-image writer
 
-Depends on stages 7 and 10, on E8's answers for owner decision 6, and on
-the layer design's command-line spelling of wrap.
+Depends on stages 7 and 10 and on E8's answers for owner decision 6.
 
 * The LZO1X encoder, with determinism tests and the differential checker.
-* The `ifsboot` wrap encoder (decision 10): the template input, read and
-  verified through the stage 7 peel; the recomputed fields; chunked LZO or
-  uncompressed emission; and the refusals.
+* The `ifsboot` writer (decision 10): the file settings and their
+  descriptor slots through the coordinator, the header settings, the
+  derived fields and both checksums, chunked LZO or uncompressed
+  emission, the unwrap sections, and the refusals.
+  The container's plan, bound and encoder are written and tested before
+  registration; the descriptor gains `FSIMG_CAP_WRITE` at the gate below.
 * The ImageFS writer gains the boot-specific settings that owner decision 6
   chooses.
-* Tests:
-  * a wrap of a standalone writer image, peeled again, yields exactly that
-    writer image's bytes: the container never alters the body;
-  * each refusal;
-  * byte-identical output across hosts;
-  * a stored trailer and startup checksum that verify.
-* **x86 gate (E12):** a wrap of `qnxbase.ifs`'s own tree, rebuilt by the
-  writer, boots to a shell in QEMU. If the writer's image of that tree is
-  larger than the template's decoded ImageFS, this gate waits for E8's
-  growth evidence. If decision 10's growth refusal is
-  lifted, so does one with an added file, which the shell reads back. The
-  same holds for an E8 template, uncompressed and with LZO if E8 shows that
-  `startup-bios` accepts it. The x86 profile is registered then.
-* **SH-4 gate:** a wrapped, trimmed `PCM3_Emergency.ifs` boots on the PCM
-  QEMU board. Until that board exists, the SH-4 profile stays unregistered
-  and the gap is listed in `docs/todo-ifs.md`.
+* Tests: the `ifsboot write` row of the
+  [layer design's tests](../specs/design-layers.md#tests-and-evidence):
+  a create and a wrap of a standalone writer image, peeled again, yield
+  that image's bytes (the container never alters the body); each refusal;
+  byte-identical output across hosts; a stored trailer and startup
+  checksum that verify; unwrap of every native image, H3 included; the
+  unwrap-then-wrap round trip on each native image whose machine and
+  mode the table lists as writable, byte-identical on E12's uncompressed
+  `cAu` and identical outside the body-dependent fields on the X1 images,
+  while H3 rebuilds are refused naming the machine; the independent checker
+  (`tools/qnx/decode/ifsdump.py`) and the guest's `dumpifs` list every
+  written image.
+* **x86 gate (E12):** `qnxbase.ifs`'s startup code and prefix unwrapped
+  and its header values taken from `i`, its tree rebuilt by the writer and
+  packaged with them, boots to a shell in QEMU through the floppy method,
+  and so does the same image with an added file, which the shell reads
+  back. `qnxbase` is `ucl`, which the writer lacks: the gate runs with
+  LZO if E8 shows that `startup-bios` accepts it, and uncompressed with an
+  E12-sized tree, since a full `qnxbase` tree exceeds the floppy's slot
+  uncompressed. The machine table's writable modes for x86 are then
+  exactly the modes this gate booted, `none` and, if E8 and the boot
+  allow it, `lzo`; the container gains `FSIMG_CAP_WRITE` with machines 3
+  and 0 writable.
+* **SH-4 gate:** a trimmed `PCM3_Emergency.ifs` tree, packaged with the
+  native image's unwrapped startup program and settings, boots on the PCM
+  QEMU board. Until that board exists, the SH-4 row lists no writable
+  mode, an SH-4 image is refused naming the machine and the mode, and
+  the gap is listed in `docs/todo-ifs.md`. Write qualification is per
+  machine and mode: reading a machine never implies writing it, and a
+  boot under one mode never qualifies another.
 
 Unscheduled, each behind its own evidence:
 * zlib bodies;
@@ -921,7 +949,7 @@ flowchart LR
     L24[Layer stages 2-4] --> S8
     S4 --> S9[9. Writer]
     S9 --> S10[10. Native qualification]
-    S7 --> S11[11. Wrap]
+    S7 --> S11[11. Boot-image writer]
     S10 --> S11
 ```
 
@@ -969,7 +997,7 @@ when stage 6 completes, stages 9 and 10 go first.
 | Compressed body decoded into a temporary file (section 6) | The learned chunk index for framed bodies; the spool for `hbcifs` | Both owners exist in the layer design |
 | `hbcifs` as an OEM container to keep out of the core (section 9) | A container profile in the layer registry, read only | The PCM application image needs it |
 | Adapting the BSD-3-Clause `go-compressions/lzo` decoder (section 6) | A decoder written from the stream description | A Go source is a rewrite either way, and a decoder written from the description keeps one provenance story for both codecs |
-| Byte-exact no-change repack (section 14.2) | A wrap with recomputed fields | The output is a new image, not a preserved one |
+| Byte-exact no-change repack (section 14.2) | A written image from the unwrapped program and settings, its sizes and checksums derived | The output is a new image, not a preserved one; it is byte-identical only where every byte is copied or derived |
 | Big-endian reading in stage A2 | Only if a native producer exists | Closed tables accept only observed values |
 | Hard links inferred from aliases, or a sidecar manifest | Never inferred; every record is an entry | No common hardlink representation; draft question 7 |
 | `fsimg -t ifs -l` and similar | The tar-like CLI | The flags in the draft are not normative (section 12) |
@@ -981,7 +1009,8 @@ when stage 6 completes, stages 9 and 10 go first.
 The owner has settled all eleven.
 
 1. **Writer scope.** A standalone, nonbootable ImageFS writer first, then a
-   gated wrap of a new ImageFS in an existing boot image (stages 9 to 11).
+   gated boot-image writer around a startup program the caller supplies
+   (stages 9 to 11).
 2. **Placement.** `ifs` is the filesystem and the boot machinery is the
    `ifsboot` container layer. Bare ImageFS lands first.
 3. **Codecs.** LZO1X decode, UCL NRV2B decode and LZO1X encode are in scope.
@@ -992,14 +1021,15 @@ The owner has settled all eleven.
    clean-room split, with `liblzo2` and `libucl` used only as out-of-tree
    black-box oracles. No GPL library is linked, even optionally
    ([codecs](#codecs-and-dependencies)).
-6. **Boot attributes in a wrapped image.** The writer takes typed settings:
+6. **Boot attributes in a written boot image.** The writer takes typed settings:
    up to four boot programs and one script, named by path, plus an
    inode-flag rule that E8 must justify. The writer never reads an image,
-   and the template supplies only the startup section. Inheriting flags by
-   path from the template was rejected because it makes the writer plan
-   against a reader's catalog. If E8 finds members whose bytes depend on
-   their image offset, a wrap must keep them at the template's offsets, and
-   the wrap's scope returns to the owner.
+   and the `ifsboot` container takes only the startup program, the prefix
+   and header settings. Inheriting flags by path from an existing boot
+   image was rejected because it makes the writer plan against a reader's
+   catalog. If E8 finds members whose bytes depend on their image offset,
+   a rebuilt image must keep them at their native offsets, and the
+   writer's scope returns to the owner.
 7. **Writer registration bar.** `dumpifs` acceptance in the stage 10 cycle,
    plus the E11 mount if one exists. QNX 6.5.0 has no `mount_ifs`, so
    without an E11 mount the bar is `dumpifs` acceptance alone.
@@ -1034,21 +1064,22 @@ The owner has settled all eleven.
 ## Risks
 
 * **The layer schedule.** The `ifsboot` and `hbcifs` read stages rest on
-  layer stages 2 to 4, which the reader has. The wrap rests on container
-  writing, the write half of layer stage 3, which `ifsboot` lacks: it is
-  registered read only.
+  layer stages 2 to 4, which the reader has. The boot-image writer rests
+  on container writing, the write half of layer stage 3, which `ifsboot`
+  lacks: it is registered read only.
 * **QNX 6.5.0 is not the head unit.** The PCM images come from a 6.3.2-era
   SH-4 toolchain that is not available. `mkifs` 6.5.0 output qualifies the
   writer's ImageFS. Only the PCM QEMU board, or a bench unit, qualifies an
-  SH-4 wrap, and that board is a separate plan whose own risks apply.
+  SH-4 boot image, and that board is a separate plan whose own risks apply.
 * **Offset-dependent members.** If processed members encode their image
-  offset, a free layout cannot wrap them, and the wrap narrows to keeping
-  those members in place (owner decision 6). E8 tests this before any wrap
-  code exists.
+  offset, a free layout cannot repackage them, and the writer narrows to
+  keeping those members in place (owner decision 6). E8 tests this before
+  any writer code exists.
 * **Undocumented startup coupling.** The loader may depend on physical
-  placement, `ram_size` or `imagefs_paddr` in ways the header does not show.
-  Decision 10's refusals and the boot gates contain this. A wrap never
-  claims bootability without a recorded boot.
+  placement, `ram_size` or `imagefs_paddr` in ways the header does not
+  show, or the startup code may carry bytes `mkifs` derives from the image
+  beyond the header. The round-trip test and the boot gates contain this.
+  A written image never claims bootability without a recorded boot.
 * **Implicit directories.** If native readers derive implicit parents
   differently from each other, the synthesized metadata becomes a
   documented fsimg policy rather than an observation.

@@ -11,7 +11,7 @@ sequence of chunks each introduced by a 16-bit big-endian stored length, is
 the `ifsboot` container's in the [layer design](design-layers.md); the
 single unframed stream behind the 64-byte Harman-Becker header is the
 `hbcifs` container's, in the same design. Both containers call the decoders
-specified here, and the `ifsboot` wrap calls the encoder.
+specified here, and the `ifsboot` writer calls the encoder.
 
 The codecs are project-owned rather than linked from `liblzo2` and `libucl`,
 and the [IFS plan](../docs/ifs-plan.md#codecs-and-dependencies) records why:
@@ -600,7 +600,7 @@ chunks of 32768, which always fit the bound.
 Three checks establish the encoder, in the order the plan runs them: every
 stream it writes decodes to its input under the project's decoder; every
 stream decodes to its input under the `liblzo2` oracle; and the native
-startup code boots a wrapped image at the `ifsboot` wrap's native gate.
+startup code boots a written image at the `ifsboot` writer's native gate.
 
 ## Concurrency and failure
 
@@ -713,8 +713,8 @@ in this design, in test code that shares nothing with `lib/codec/`.
 ## Open decisions
 
 1. **Compression ratio.** Greedy matching with one candidate per bucket
-   compresses less than `mkifs`. A wrapped image that must fit its
-   template's slot could need a better ratio. Recommendation: keep the
-   greedy encoder, measure wrap sizes against the templates at the wrap's
-   native gate, and consider lazy matching or a second candidate only if an
-   image fails to fit.
+   compresses less than `mkifs`. A written image that must fit a loader's
+   slot, such as the E12 floppy's, could need a better ratio.
+   Recommendation: keep the greedy encoder, measure written sizes against
+   the native images at the writer's native gate, and consider lazy
+   matching or a second candidate only if an image fails to fit.
