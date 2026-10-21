@@ -229,10 +229,13 @@ struct fsimg_writer {
 	 */
 	uint32_t	 record_capacity;
 	uint32_t	 source_record_capacity;
-	/* Unions of every catalog entry's kind, valid and required fields,
+	/* Summaries of every catalog entry that planning compares with the
+	 * capability record: the longest symbolic-link target (zero without
+	 * links) and the unions of kinds, valid and required fields. They are
 	 * taken over the kept records when preparation indexes the catalog: a
 	 * dropped directory record's metadata never reaches the image.
 	 */
+	uint64_t	 catalog_link_target_max;
 	uint32_t	 catalog_kinds;
 	uint32_t	 catalog_fields;
 	uint32_t	 catalog_required;

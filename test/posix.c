@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "fsimg.h"
+#include "internal.h"
 #include "test.h"
 
 /* POSIX metadata against the registered writers. FAT and exFAT store none of
@@ -57,6 +58,9 @@ static void test_capability_records(void);
 static void test_omitted_fields(const char *);
 static void test_forbidden_losses(const char *);
 static void test_unsupported_kinds(const char *);
+static fsimg_status_t plan_link(posix_fixture_t *, const char *, uint64_t,
+    fsimg_error_t *);
+static void test_link_target_limits(void);
 
 /* The provider supplies a symbolic link target of repeated 't' bytes. */
 static fsimg_status_t
@@ -212,7 +216,8 @@ images_equal(posix_fixture_t *fixture, const char *left_name,
 
 /* FAT and exFAT advertise exactly the original kinds and fields, and a label
  * capacity in encoded bytes: eleven OEM bytes, or eleven UTF-16 units. QNX6
- * stores every kind and the POSIX fields, and has no label.
+ * stores every kind and the POSIX fields, and has no label. Every record
+ * states a symbolic-link target limit exactly when it stores links.
  */
 static void
 test_capability_records(void)
@@ -225,6 +230,9 @@ test_capability_records(void)
 	count = 0;
 	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
 		count++;
+		CHECK((info.max_link_target_bytes == 0) ==
+		    ((info.entry_kinds & FSIMG_ENTRY_SYMLINK) == 0));
+		CHECK(info.max_link_target_bytes <= FSIMG_SYMLINK_TARGET_MAX);
 		if (strcmp(info.name, "qnx6") == 0 ||
 		    strcmp(info.name, "qnx4") == 0) {
 			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
@@ -236,6 +244,7 @@ test_capability_records(void)
 			    FSIMG_META_MODE));
 			CHECK(info.max_label_bytes ==
 			    (strcmp(info.name, "qnx4") == 0 ? 48 : 0));
+			CHECK(info.max_link_target_bytes == 1023);
 			continue;
 		}
 		CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY));
@@ -363,10 +372,81 @@ test_unsupported_kinds(const char *format)
 	fixture_close(&fixture);
 }
 
+/* Collect a symbolic link of size target bytes for format and return what
+ * collection and planning make of it: collection refuses a target beyond
+ * the entry model's ceiling, planning one beyond the format's own limit,
+ * naming the entry.
+ */
+static fsimg_status_t
+plan_link(posix_fixture_t *fixture, const char *format, uint64_t size,
+    fsimg_error_t *error)
+{
+	fsimg_entry_t link = { .path = "/link", .kind = FSIMG_ENTRY_SYMLINK,
+	    .size = size };
+	fsimg_source_t target = { .kind = FSIMG_SOURCE_PROVIDER };
+	fsimg_source_ops_t provider;
+	fsimg_writer_t *writer;
+	const fsimg_plan_t *plan;
+	fsimg_status_t status;
+
+	fsimg_source_ops_init(&provider);
+	provider.validate = target_validate;
+	provider.read_at = target_read;
+	writer = new_writer(fixture, format, true);
+	CHECK(fsimg_writer_set_sources(writer, &provider, NULL, NULL) ==
+	    FSIMG_OK);
+	bzero(error, sizeof(*error));
+	status = fsimg_writer_add(writer, &link, &target, error);
+	if (status == FSIMG_OK)
+		status = fsimg_writer_plan(writer, &plan, error);
+	fsimg_writer_free(writer);
+	return (status);
+}
+
+/* Every writer that stores links plans a target of exactly its limit and
+ * refuses one byte more: in planning, before any driver sees it, when that
+ * still fits the entry model's ceiling, and in collection otherwise.
+ */
+static void
+test_link_target_limits(void)
+{
+	posix_fixture_t fixture;
+	fsimg_format_info_t info;
+	fsimg_error_t error;
+	size_t cursor;
+	unsigned tested;
+
+	fixture_open(&fixture);
+	cursor = 0;
+	tested = 0;
+	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
+		if ((info.capabilities & FSIMG_CAP_WRITE) == 0 ||
+		    (info.entry_kinds & FSIMG_ENTRY_SYMLINK) == 0)
+			continue;
+		tested++;
+		CHECK(plan_link(&fixture, info.name, info.max_link_target_bytes,
+		    &error) == FSIMG_OK);
+		if (info.max_link_target_bytes < FSIMG_SYMLINK_TARGET_MAX) {
+			CHECK(plan_link(&fixture, info.name,
+			    info.max_link_target_bytes + 1, &error) ==
+			    FSIMG_EUNSUPPORTED);
+			CHECK(strcmp(error.path, "/link") == 0);
+		} else {
+			CHECK(plan_link(&fixture, info.name,
+			    info.max_link_target_bytes + 1, &error) ==
+			    FSIMG_EINVAL);
+		}
+	}
+	/* At least one registered writer stores links, or nothing ran. */
+	CHECK(tested != 0);
+	fixture_close(&fixture);
+}
+
 int
 main(void)
 {
 	test_capability_records();
+	test_link_target_limits();
 	for (size_t i = 0; i < sizeof(writer_formats) / sizeof(writer_formats[0]); i++) {
 		test_omitted_fields(writer_formats[i]);
 		test_forbidden_losses(writer_formats[i]);

@@ -266,8 +266,9 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
 #define FSIMG_ATTR_ARCHIVE 0x08u
 
 /* Kinds are distinct bits so a capability record lists a set as a mask.
- * A symbolic link's size is its target length, 1 through 1023 bytes, and its
- * content is the target without a terminator; fsimg never resolves it.
+ * A symbolic link's size is its target length, 1 through 1024 bytes and
+ * within the format's max_link_target_bytes, and its content is the target
+ * without a terminator; fsimg never resolves it.
  * Directory and FIFO sizes are zero and they have no content.
  */
 typedef enum fsimg_entry_kind {
@@ -892,6 +893,10 @@ typedef struct fsimg_format_info {
 	uint32_t	 max_name_utf16_units;
 	/* Encoded on-disk label capacity; zero when the format has no label. */
 	uint32_t	 max_label_bytes;
+	/* Longest symbolic-link target stored; zero exactly when entry_kinds
+	 * lacks FSIMG_ENTRY_SYMLINK. Planning refuses a longer target.
+	 */
+	uint32_t	 max_link_target_bytes;
 	/* FSIMG_SETTING_* write options the format stores. */
 	uint32_t	 write_settings;
 } fsimg_format_info_t;

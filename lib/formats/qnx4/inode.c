@@ -96,7 +96,7 @@ qnx4_inode_validate(const qnx4_inode_t *inode, qnx4_place_t place,
 	case QNX4_MODE_SYMLINK:
 		if (inode->size == 0)
 			return (qnx4_corrupt(error, "QNX4 symbolic link is empty"));
-		if (inode->size > FSIMG_SYMLINK_TARGET_MAX)
+		if (inode->size > QNX4_LINK_TARGET_MAX)
 			return (qnx4_unsupported(error,
 			    "QNX4 symbolic link target is too long"));
 		break;

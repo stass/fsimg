@@ -2563,6 +2563,48 @@ test_names(void)
 	gen_free(&g);
 }
 
+/* A volume holding one symbolic link of `length` target bytes lists and
+ * verifies with expected; a delivered target reads back exactly.
+ */
+static void
+expect_link_target(size_t length, fsimg_status_t expected, const char *label)
+{
+	gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	char *target;
+
+	gen_init(&g, GEN_DEFAULT_N);
+	target = repeat('t', length);
+	gen_symlink(&g, OBJ_ROOT, "link", target);
+	gen_finish(&g);
+	expect(&g, expected, label);
+	if (expected == FSIMG_OK) {
+		fixture_new(&f, g.image, g.length);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+		    FSIMG_OK);
+		do
+			CHECK(fsimg_reader_next(f.reader, &entry, NULL) ==
+			    FSIMG_OK);
+		while (strcmp(entry->path, "/link") != 0);
+		CHECK(entry->kind == FSIMG_ENTRY_SYMLINK && entry->size == length);
+		check_content(&f, (const unsigned char *)target, length);
+		fixture_free(&f);
+	}
+	free(target);
+	gen_free(&g);
+}
+
+/* A stored target holds 1 to QNX4_LINK_TARGET_MAX, 1023, bytes, the limit
+ * QNX4's capability record declares, although the entry model carries 1024.
+ */
+static void
+test_link_targets(void)
+{
+	expect_link_target(1023, FSIMG_OK, "1023-byte link target");
+	expect_link_target(1024, FSIMG_EUNSUPPORTED, "1024-byte link target");
+}
+
 /* Names of every length boundary, direct and in links, read back
  * exactly; the 16-, 48- and 505-byte ones fill their fields unterminated.
  */
@@ -4737,6 +4779,7 @@ main(int argc, char **argv)
 	test_probe();
 	test_names();
 	test_name_lengths();
+	test_link_targets();
 	test_statuses();
 	test_records();
 	test_extents();

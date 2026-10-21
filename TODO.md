@@ -464,32 +464,6 @@
 
 ## Planned features
 
-* [Medium] **Per-format symbolic-link target limit** (`lib/core/internal.h`,
-  `include/fsimg.h`, `lib/write/`, `lib/formats/qnx4/inode.c`,
-  `lib/formats/qnx6/inode.c`, `lib/formats/ifs/`): the
-  [architecture](specs/architecture.md#names-and-metadata) and the
-  [capability records](specs/design-metadata.md#capability-records) split
-  the link-target bound into the entry model's ceiling and a per-format
-  limit. Raise `FSIMG_SYMLINK_TARGET_MAX` to 1024 (buffers in
-  `lib/source/scan.c`, `lib/source/source.c`, `lib/write/writer.h`,
-  `lib/write/catalog.c` follow, with the "longer than 1023 bytes" message
-  at `lib/source/source.c:254` and the wire rule comment at
-  `cmd/fsimg/protocol.c:504`), add `max_link_target_bytes` to
-  `fsimg_format_info_t` (ImageFS 1024, QNX4 and QNX6 1023, FAT and exFAT
-  0) with the capability test asserting it is zero exactly when
-  `entry_kinds` lacks links, refuse a longer target in common writer
-  planning with `FSIMG_EUNSUPPORTED` naming the entry, bound the QNX4 and
-  QNX6 readers by their own limit rather than the ceiling, and update the
-  1023 in `docs/fsimg.1:223`, `docs/libfsimg.3` and the header comments on
-  `fsimg_entry_kind_t` and `fsimg_format_info_t`. Tests: a 1024-byte
-  target accepted by the scan and refused by QNX4 and QNX6 planning, a
-  1025-byte one refused by the scan, and each reader's bound at its limit
-  and one past it. The host-scan cases at 1024 and 1025 bytes run on
-  Linux only, since macOS and FreeBSD `symlink(2)` cap a target at 1023
-  bytes and `lib/source` has no test seam around `readlinkat()`; once the
-  internal host-link hook of the sandbox item below exists, run them
-  everywhere through it.
-
 * [Low] **Native evidence for 1024-byte link targets on QNX4 and QNX6**
   (`tools/qnx/`, `docs/qnx4-research.md`, `docs/qnx6-research.md`): the
   QNX4 and QNX6 limits of 1023 bytes are the bound fsimg holds evidence

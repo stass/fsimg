@@ -634,8 +634,8 @@ fsimg_wire_verify_frame_valid(const fsimg_frame_t *frame, bool payload)
 }
 
 /* The kind is one of the closed set, with the size that kind allows:
- * any file length, a link target of 1 through 1023 bytes, and zero for
- * directories and FIFOs.
+ * any file length, a link target of 1 through FSIMG_SYMLINK_TARGET_MAX
+ * bytes, the entry model's ceiling, and zero for directories and FIFOs.
  */
 bool
 fsimg_wire_entry_frame_valid(const fsimg_frame_t *frame, bool content_only,

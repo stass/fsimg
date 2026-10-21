@@ -112,7 +112,7 @@ Collect host trees, manifests, explicit zero sources or one callback
 provider before planning.
 Paths are absolute UTF-8 image paths.
 Entries are regular files, directories, symbolic links, whose size is the
-target length of 1 through 1023 bytes and whose provider or host source
+target length of 1 through 1024 bytes and whose provider or host source
 supplies the target, and FIFOs, which have neither size nor source.
 Metadata validity bits cover creation, modification, access and change times,
 attributes, owner (uid and gid) and the permission bits 07777.
@@ -191,7 +191,10 @@ Reproducible mode fixes timestamps, identifiers, ordering and padding.
 Optional losses follow the explicit allow-loss policy; required losses fail.
 A field the selected format does not store, as its capability record states,
 is an omission under the same policy, counted once per field.
-An entry kind the format does not store always fails planning.
+An entry kind the format does not store always fails planning, as does a
+symbolic link whose target is longer than the record's
+max_link_target_bytes, which is zero exactly when the format stores no
+links.
 A format record whose max_label_bytes is zero has no volume label and accepts
 only a NULL label.
 The settings byte_order, volume_uuid, inode_capacity and reserve_percent

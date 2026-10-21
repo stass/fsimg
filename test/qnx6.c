@@ -2131,6 +2131,35 @@ test_names(void)
 	gen_free(&g);
 }
 
+/* A volume holding one symbolic link of `length` target bytes lists and
+ * verifies with expected.
+ */
+static void
+expect_link_target(size_t length, fsimg_status_t expected, const char *label)
+{
+	qnx6_gen_t g;
+	char target[FSIMG_SYMLINK_TARGET_MAX + 1];
+
+	CHECK(length < sizeof(target));
+	memset(target, 't', length);
+	target[length] = '\0';
+	gen_init(&g, 1024, false, 1048576, GEN_INODES, 0x100);
+	gen_symlink(&g, 1, "link", target);
+	gen_commit(&g, 0, 1, true, true);
+	expect(&g, RUN_LIST | RUN_VERIFY, expected, label);
+	gen_free(&g);
+}
+
+/* A stored target holds 1 to QNX6_LINK_TARGET_MAX, 1023, bytes, the limit
+ * QNX6's capability record declares, although the entry model carries 1024.
+ */
+static void
+test_link_targets(void)
+{
+	expect_link_target(1023, FSIMG_OK, "1023-byte link target");
+	expect_link_target(1024, FSIMG_EUNSUPPORTED, "1024-byte link target");
+}
+
 /* Dot entries, unused slots and directory sharing. */
 static void
 test_directories(void)
@@ -3527,6 +3556,7 @@ main(int argc, char **argv)
 	test_trees();
 	test_inodes();
 	test_names();
+	test_link_targets();
 	test_directories();
 	test_allocation();
 	test_failures();

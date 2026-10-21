@@ -313,7 +313,7 @@ test_posix_metadata(void)
 	const fsimg_catalog_entry_t *current;
 	fsimg_entry_t directory = { .path = "/dir", .kind = FSIMG_ENTRY_DIRECTORY };
 	fsimg_entry_t link = { .path = "/dir/link", .kind = FSIMG_ENTRY_SYMLINK,
-	    .size = 1023 };
+	    .size = 1024 };
 	fsimg_entry_t fifo = { .path = "/dir/pipe", .kind = FSIMG_ENTRY_FIFO };
 	fsimg_source_t target = { .kind = FSIMG_SOURCE_PROVIDER, .id = 9 };
 
@@ -351,7 +351,7 @@ test_posix_metadata(void)
 	CHECK(fsimg_catalog_get(fixture.writer, 2, &current, NULL) == FSIMG_OK);
 	CHECK(strcmp(current->entry.path, "/dir/link") == 0);
 	CHECK(current->entry.kind == FSIMG_ENTRY_SYMLINK);
-	CHECK(current->entry.size == 1023 &&
+	CHECK(current->entry.size == 1024 &&
 	    current->storage == FSIMG_STORAGE_PROVIDER && current->source_id == 9);
 	CHECK(current->entry.metadata.mode == 0777);
 	CHECK(current->entry.metadata.uid == 0 && current->entry.metadata.gid == 0);
@@ -399,7 +399,7 @@ test_invalid_kinds(void)
 		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 6 },
 		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 6, .source = FSIMG_SOURCE_ZERO },
 		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 0, .source = FSIMG_SOURCE_PROVIDER },
-		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 1024, .source = FSIMG_SOURCE_PROVIDER },
+		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 1025, .source = FSIMG_SOURCE_PROVIDER },
 		{ .kind = FSIMG_ENTRY_FIFO, .source = FSIMG_SOURCE_ZERO },
 		{ .kind = FSIMG_ENTRY_FIFO, .size = 1 },
 		{ .kind = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY },

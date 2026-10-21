@@ -27,6 +27,10 @@
 #define QNX4_LINK_NAME_MAX	48u
 #define QNX4_LONG_NAME_MIN	49u
 #define QNX4_NAME_MAX		505u
+/* The longest link target fsimg holds native evidence for; the format
+ * itself may store more.
+ */
+#define QNX4_LINK_TARGET_MAX	1023u
 #define QNX4_LONG_PREFIX	38u	/* name bytes kept in a mangled link */
 #define QNX4_LABEL_OFFSET	0x1c0u
 #define QNX4_LABEL_BYTES	48u

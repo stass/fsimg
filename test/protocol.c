@@ -409,9 +409,9 @@ test_invalid_entry_records(void)
 
 	entry = (fsimg_entry_t){ .path = "/x", .kind = FSIMG_ENTRY_SYMLINK };
 	CHECK(!entry_frame_valid(&entry, false));
-	entry.size = 1024;
+	entry.size = 1025;
 	CHECK(!entry_frame_valid(&entry, false));
-	entry.size = 1023;
+	entry.size = 1024;
 	CHECK(entry_frame_valid(&entry, false));
 	entry = (fsimg_entry_t){ .path = "/x", .kind = FSIMG_ENTRY_FIFO, .size = 1 };
 	CHECK(!entry_frame_valid(&entry, false));

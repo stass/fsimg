@@ -45,6 +45,10 @@ static fsimg_status_t check_digest(fsimg_source_cursor_t *, fsimg_error_t *);
 static bool generated_content(const fsimg_source_cursor_t *);
 static int64_t source_signed(uint64_t);
 
+/* The scan's refusal of a long host link states the ceiling in its text. */
+_Static_assert(FSIMG_SYMLINK_TARGET_MAX == 1024,
+    "the link-target diagnostic states the entry model's ceiling");
+
 bool
 fsimg_source_identity_equal(const fsimg_host_file_t *a, const fsimg_host_file_t *b)
 {
@@ -262,7 +266,7 @@ fsimg_source_read_link(fsimg_writer_t *writer, int parent, const char *name,
 		    FSIMG_OP_SOURCE, "source link changed while its target was read"));
 	if (length == 0 || (size_t)length > FSIMG_SYMLINK_TARGET_MAX)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_SOURCE, "symbolic link target is empty or longer than 1023 bytes"));
+		    FSIMG_OP_SOURCE, "symbolic link target is empty or longer than 1024 bytes"));
 	identity->length = (uint64_t)length;
 	return (FSIMG_OK);
 }

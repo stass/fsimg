@@ -1174,7 +1174,7 @@ test_format_masks(bool json)
 	fsimg_worker_result_t result = { 0 };
 	fsimg_cli_display_t display;
 	fsimg_worker_text_t text;
-	bool details;
+	bool details, links;
 
 	fsimg_worker_request_init(&options.request);
 	options.command = FSIMG_CLI_FORMATS;
@@ -1188,17 +1188,25 @@ test_format_masks(bool json)
 		CHECK(strstr(display.buffer, "\"name\":\"fat12\"") != NULL);
 		CHECK(strstr(display.buffer, "\"entry_kinds\":3,\"metadata_fields\":15,") != NULL);
 		CHECK(strstr(display.buffer, "\"max_label_bytes\":11") != NULL);
+		CHECK(strstr(display.buffer, "\"max_link_target_bytes\":0") != NULL);
 		return;
 	}
 	details = false;
+	links = false;
 	while (fsimg_cli_final(&display, &text, NULL) == FSIMG_OK) {
+		if (strstr(display.buffer, "qnx4:") != NULL) {
+			CHECK(strstr(display.buffer,
+			    "\n  Maximum link target: 1023 bytes\n") != NULL);
+			links = true;
+		}
 		if (strstr(display.buffer, "fat12:") == NULL)
 			continue;
 		CHECK(strstr(display.buffer, "\n  Entry kinds: file, directory\n") != NULL);
-		CHECK(strstr(display.buffer, "\n  Maximum label: 11 bytes\n") != NULL);
+		CHECK(strstr(display.buffer, "\n  Maximum label: 11 bytes\n"
+		    "  Maximum link target: none\n") != NULL);
 		details = true;
 	}
-	CHECK(details);
+	CHECK(details && links);
 }
 
 static void

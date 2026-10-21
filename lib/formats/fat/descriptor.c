@@ -61,7 +61,8 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.max_file_bytes = UINT64_C(4084) * 512 * 1024,
 			.max_volume_bytes = FAT_SMALL_VOLUME_BYTES(4085),
 			.max_name_utf16_units = 255,
-			.max_label_bytes = FAT_LABEL_BYTES
+			.max_label_bytes = FAT_LABEL_BYTES,
+			.max_link_target_bytes = 0
 		},
 		.id = 12
 	},
@@ -77,7 +78,8 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.max_file_bytes = UINT32_MAX,
 			.max_volume_bytes = FAT_SMALL_VOLUME_BYTES(65525),
 			.max_name_utf16_units = 255,
-			.max_label_bytes = FAT_LABEL_BYTES
+			.max_label_bytes = FAT_LABEL_BYTES,
+			.max_link_target_bytes = 0
 		},
 		.id = 16
 	},
@@ -93,7 +95,8 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.max_file_bytes = UINT32_MAX,
 			.max_volume_bytes = (uint64_t)UINT32_MAX * 4096,
 			.max_name_utf16_units = 255,
-			.max_label_bytes = FAT_LABEL_BYTES
+			.max_label_bytes = FAT_LABEL_BYTES,
+			.max_link_target_bytes = 0
 		},
 		.id = 32
 	}

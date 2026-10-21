@@ -612,13 +612,15 @@ plan_disk(fsimg_writer_t *writer, fsimg_error_t *error)
 /* Planning's first step compares the catalog with the selected format's
  * capability record, so no driver ever receives an entry kind it lacks and
  * the policy for a field a format does not store is the same for every
- * format. A kind is never optional. An omitted field follows the optional
- * loss policy: a required one fails, an optional one is counted once and
- * reported under ALLOW_LOSS and fails without it.
+ * format. An entry kind the format lacks or a symbolic-link target longer
+ * than its limit always fails; neither is a metadata loss. An omitted field
+ * follows the optional loss policy: a required one fails, an optional one
+ * is counted once and reported under ALLOW_LOSS and fails without it.
  *
- * The catalog's unions of kinds, valid fields and required fields decide
- * the outcome before any entry is read again, because each failure
- * condition holds for the catalog exactly when it holds for some entry.
+ * The catalog's unions of kinds, valid fields and required fields, and its
+ * longest link target, decide the outcome before any entry is read again,
+ * because each failure condition holds for the catalog exactly when it
+ * holds for some entry.
  * The pass over the catalog then either names the first failing entry or,
  * when nothing fails, reports each omission; a failed plan reports no loss.
  * When nothing is omitted the catalog is not read at all.
@@ -630,12 +632,13 @@ check_capabilities(fsimg_writer_t *writer, fsimg_error_t *error)
 	const fsimg_catalog_entry_t *catalog;
 	fsimg_status_t status;
 	uint32_t omitted;
-	bool fails;
+	bool fails, refused;
 
 	writer->omitted_fields = 0;
 	omitted = writer->catalog_fields & ~capabilities->metadata_fields;
-	fails = (writer->catalog_kinds & ~capabilities->entry_kinds) != 0 ||
-	    (writer->catalog_required & omitted) != 0 ||
+	refused = (writer->catalog_kinds & ~capabilities->entry_kinds) != 0 ||
+	    writer->catalog_link_target_max > capabilities->max_link_target_bytes;
+	fails = refused || (writer->catalog_required & omitted) != 0 ||
 	    (omitted != 0 && (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0);
 	if (!fails && omitted == 0)
 		return (FSIMG_OK);
@@ -670,6 +673,11 @@ check_entry_capabilities(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 	if ((entry->kind & ~capabilities->entry_kinds) != 0)
 		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "the image format cannot store this entry kind");
+	else if (entry->kind == FSIMG_ENTRY_SYMLINK &&
+	    entry->size > capabilities->max_link_target_bytes)
+		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_WRITER,
+		    "the image format cannot store a symbolic-link target this long");
 	else if ((entry->metadata.required & omitted) != 0 ||
 	    (omitted != 0 && (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0))
 		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,

@@ -6,6 +6,9 @@
 #include "format.h"
 #include "write-qnx6.h"
 
+_Static_assert(QNX6_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
+    "the QNX6 link-target limit lies within the entry model's ceiling");
+
 static fsimg_status_t qnx6_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
@@ -36,6 +39,7 @@ static const fsimg_format_variant_t qnx6_variants[] = {
 			 */
 			.max_name_utf16_units = QNX6_NAME_MAX,
 			.max_label_bytes = 0,
+			.max_link_target_bytes = QNX6_LINK_TARGET_MAX,
 			.write_settings = FSIMG_SETTING_BYTE_ORDER |
 			    FSIMG_SETTING_VOLUME_UUID |
 			    FSIMG_SETTING_INODE_CAPACITY | FSIMG_SETTING_RESERVE

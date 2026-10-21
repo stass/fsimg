@@ -1189,9 +1189,11 @@ format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 		append(display, ",\"profile\":");
 		string_value(display, info->profile);
 		append(display, ",\"capabilities\":%u,\"entry_kinds\":%u,\"metadata_fields\":%u,"
-		    "\"max_label_bytes\":%u,\"write_settings\":%u,\"max_file_bytes\":",
+		    "\"max_label_bytes\":%u,\"max_link_target_bytes\":%u,"
+		    "\"write_settings\":%u,\"max_file_bytes\":",
 		    info->capabilities, info->entry_kinds, info->metadata_fields,
-		    info->max_label_bytes, info->write_settings);
+		    info->max_label_bytes, info->max_link_target_bytes,
+		    info->write_settings);
 		uint_value(display, info->max_file_bytes);
 		append(display, ",\"max_volume_bytes\":");
 		uint_value(display, info->max_volume_bytes);
@@ -1287,9 +1289,14 @@ format_details(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 	append(display, "\n  Metadata: ");
 	metadata_fields(display, info->metadata_fields);
 	if (info->max_label_bytes != 0)
-		append(display, "\n  Maximum label: %u bytes\n", info->max_label_bytes);
+		append(display, "\n  Maximum label: %u bytes", info->max_label_bytes);
 	else
-		append(display, "\n  Maximum label: none\n");
+		append(display, "\n  Maximum label: none");
+	if (info->max_link_target_bytes != 0)
+		append(display, "\n  Maximum link target: %u bytes\n",
+		    info->max_link_target_bytes);
+	else
+		append(display, "\n  Maximum link target: none\n");
 }
 
 static void

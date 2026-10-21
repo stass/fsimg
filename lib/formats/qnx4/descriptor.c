@@ -8,6 +8,9 @@
 #include "format.h"
 #include "write-qnx4.h"
 
+_Static_assert(QNX4_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
+    "the QNX4 link-target limit lies within the entry model's ceiling");
+
 static fsimg_status_t qnx4_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
@@ -34,6 +37,7 @@ static const fsimg_format_variant_t qnx4_variants[] = {
 			/* A UTF-8 name has no more UTF-16 units than bytes. */
 			.max_name_utf16_units = QNX4_NAME_MAX,
 			.max_label_bytes = QNX4_LABEL_BYTES,
+			.max_link_target_bytes = QNX4_LINK_TARGET_MAX,
 			.write_settings = FSIMG_SETTING_INODE_CAPACITY
 		},
 		.id = 0

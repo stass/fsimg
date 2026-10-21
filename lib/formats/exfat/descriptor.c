@@ -30,7 +30,8 @@ static const fsimg_format_variant_t exfat_variants[] = {
 			.max_volume_bytes = INT64_MAX,
 			.max_name_utf16_units = 255,
 			/* Eleven UTF-16 units in the volume-label entry. */
-			.max_label_bytes = 22
+			.max_label_bytes = 22,
+			.max_link_target_bytes = 0
 		},
 		.id = 0		/* exFAT has a single variant. */
 	}

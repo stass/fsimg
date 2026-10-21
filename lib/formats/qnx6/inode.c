@@ -49,7 +49,7 @@ qnx6_inode_read(fsimg_reader_t *reader, uint32_t number, qnx6_inode_t *inode,
 	case QNX6_MODE_SYMLINK:
 		if (inode->size == 0)
 			return (qnx6_corrupt(error, "QNX6 symbolic link is empty"));
-		if (inode->size > FSIMG_SYMLINK_TARGET_MAX)
+		if (inode->size > QNX6_LINK_TARGET_MAX)
 			return (qnx6_unsupported(error, "QNX6 symbolic link target is too long"));
 		return (FSIMG_OK);
 	case QNX6_MODE_FIFO:

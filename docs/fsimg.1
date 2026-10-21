@@ -815,7 +815,8 @@ name under
 Import accepts regular files, directories and symbolic links, hierarchy,
 content and representable timestamps.
 A symbolic link is recorded with its target, which is never followed; a target
-longer than 1023 bytes fails.
+longer than 1024 bytes fails the import, and planning fails for a target
+longer than the selected format stores, 1023 bytes for QNX4 and QNX6.
 The Linux sandbox denies the worker the path-based queries that read a link,
 since they are not confined beneath the source, so a confined Linux import of
 a tree containing one fails as unsupported, naming the link.
@@ -1180,10 +1181,11 @@ change time, uid, gid and mode, each null when absent.
 Format records name their kind: filesystem, scheme, container or
 compression.
 A filesystem's record gives entry_kinds, metadata_fields and write_settings
-as bit masks and max_label_bytes, zero for a format without a label; a
-layer's gives its suffix, its capabilities, the keys of its settings, the
-chunk encodings it reads as codecs and, for a layer using zlib, the zlib
-version as codec_version.
+as bit masks, max_label_bytes, zero for a format without a label, and
+max_link_target_bytes, zero for a format without symbolic links; a layer's
+gives its suffix, its capabilities, the keys of its settings, the chunk
+encodings it reads as codecs and, for a layer using zlib, the zlib version as
+codec_version.
 .Pp
 The operation deadline spans processing and successful output.
 Failure reporting has a two-second grace and one further two-second stderr-only

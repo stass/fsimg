@@ -25,6 +25,10 @@
 #define QNX6_INLINE_NAME_MAX	27u
 #define QNX6_LONG_NAME_MIN	28u
 #define QNX6_NAME_MAX		510u
+/* The longest link target fsimg holds native evidence for; the format
+ * itself may store more.
+ */
+#define QNX6_LINK_TARGET_MAX	1023u
 #define QNX6_LONG_NAME_MARKER	0xffu
 #define QNX6_WINDOW_BYTES	4096u
 #define QNX6_BUFFER_BYTES	65536u

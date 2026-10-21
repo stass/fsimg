@@ -10,15 +10,18 @@
 
 #include "fsimg.h"
 
-/* The closed sets of public metadata fields and entry kinds, and the
- * longest symbolic-link target the entry model represents.
- */
+/* The closed sets of public metadata fields and entry kinds. */
 #define FSIMG_META_KNOWN	(FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
 	FSIMG_META_ACCESSED | FSIMG_META_ATTRIBUTES | FSIMG_META_CHANGED |	\
 	FSIMG_META_OWNER | FSIMG_META_MODE)
 #define FSIMG_ENTRY_KNOWN	(FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
 	FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO)
-#define FSIMG_SYMLINK_TARGET_MAX 1023u
+/* The entry model's bound on a symbolic-link target, chosen as the longest
+ * any supported format stores. It sizes every target buffer and bounds the
+ * host scan; each format's capability record states its own limit in
+ * max_link_target_bytes, never above this one, which planning enforces.
+ */
+#define FSIMG_SYMLINK_TARGET_MAX 1024u
 #define FSIMG_MODE_BITS		07777u
 
 typedef struct fsimg_meta_cache fsimg_meta_cache_t;

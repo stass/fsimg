@@ -491,7 +491,8 @@ find_parent(const catalog_ancestor_t *ancestors, size_t *top,
  * path length. The open directories are the last kept record (when it is a
  * directory) and its ancestors, so their paths are prefixes of kept_path.
  *
- * Planning's capability unions are taken here, over kept records only.
+ * Planning's capability summaries, the unions and the longest link target,
+ * are taken here, over kept records only.
  */
 static fsimg_status_t
 index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
@@ -591,6 +592,9 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		status = fsimg_array_set(writer->index, id, index, error);
 		if (status != FSIMG_OK)
 			goto done;
+		if (entry.entry.kind == FSIMG_ENTRY_SYMLINK &&
+		    entry.entry.size > writer->catalog_link_target_max)
+			writer->catalog_link_target_max = entry.entry.size;
 		writer->catalog_kinds |= (uint32_t)entry.entry.kind;
 		writer->catalog_fields |= entry.entry.metadata.valid;
 		writer->catalog_required |= entry.entry.metadata.required;

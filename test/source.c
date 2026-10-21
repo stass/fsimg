@@ -85,6 +85,7 @@ static void test_file_root(void);
 static void test_file_root_changes(void);
 static void test_file_root_rejection(void);
 static void test_symlink_import(void);
+static void check_long_target(size_t, fsimg_status_t);
 static void test_symlink_changes(void);
 static void test_posix_import(void);
 static void test_limits_and_failures(void);
@@ -1070,8 +1071,6 @@ test_symlink_import(void)
 {
 	source_fixture_t fixture;
 	const fsimg_catalog_entry_t *entry;
-	fsimg_error_t error;
-	char target[1025];
 	char bytes[64];
 	size_t count;
 
@@ -1099,18 +1098,56 @@ test_symlink_import(void)
 	CHECK(entry->entry.kind == FSIMG_ENTRY_SYMLINK && entry->entry.size == 3);
 	fixture_close(&fixture);
 
-	/* A target the entry model cannot represent fails the scan explicitly. */
-	fixture_open(&fixture);
-	memset(target, 'a', sizeof(target) - 1);
-	target[sizeof(target) - 1] = '\0';
-	for (size_t i = 64; i < sizeof(target) - 1; i += 64)
+	/* The entry model holds targets of up to 1024 bytes: one at the
+	 * ceiling is imported and one byte more fails the scan explicitly.
+	 * Every host stores a 1023-byte target; only Linux stores the two
+	 * longer ones, since macOS and FreeBSD cap a target at 1023 bytes.
+	 */
+	check_long_target(1023, FSIMG_OK);
+#if defined(__linux__)
+	check_long_target(1024, FSIMG_OK);
+	check_long_target(1025, FSIMG_EUNSUPPORTED);
+#endif
+}
+
+/* Import a link whose target is `length` bytes and expect the scan's
+ * status. An imported link's size is its length, and reopening reads the
+ * whole target back into the source cursor's ceiling-sized buffer. The
+ * target is split into 64-byte components, since a host can refuse a
+ * single component longer than its name limit.
+ */
+static void
+check_long_target(size_t length, fsimg_status_t expected)
+{
+	source_fixture_t fixture;
+	const fsimg_catalog_entry_t *entry;
+	fsimg_error_t error;
+	char target[FSIMG_SYMLINK_TARGET_MAX + 2], bytes[sizeof(target)];
+	size_t count;
+
+	CHECK(length < sizeof(target));
+	memset(target, 'a', length);
+	target[length] = '\0';
+	for (size_t i = 64; i < length; i += 64)
 		target[i] = '/';
-	if (symlinkat(target, fixture.root, "long") == 0) {
-		CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/",
-		    &error) == FSIMG_EUNSUPPORTED);
-		CHECK(strcmp(error.path, "/long") == 0);
+	fixture_open(&fixture);
+	CHECK(symlinkat(target, fixture.root, "long") == 0);
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/",
+	    &error) == expected);
+	if (expected == FSIMG_OK) {
+		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+		entry = find_entry(fixture.writer, "/long");
+		CHECK(entry->entry.kind == FSIMG_ENTRY_SYMLINK &&
+		    entry->entry.size == length);
+		CHECK(fsimg_source_open(fixture.writer, entry->id, NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes),
+		    &count, NULL) == FSIMG_OK);
+		CHECK(count == length && bcmp(bytes, target, length) == 0);
+		CHECK(fsimg_source_finish(fixture.writer, NULL) == FSIMG_OK);
 	} else
-		CHECK(errno == ENAMETOOLONG);
+		CHECK(strcmp(error.path, "/long") == 0);
 	fixture_close(&fixture);
 }
 

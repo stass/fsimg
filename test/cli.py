@@ -149,12 +149,15 @@ def test_posix_metadata(executable, root):
     qnx6 = formats.pop("qnx6")
     assert qnx6["entry_kinds"] == 15 and qnx6["metadata_fields"] == 0x77
     assert qnx6["max_label_bytes"] == 0 and qnx6["write_settings"] == 15
+    assert qnx6["max_link_target_bytes"] == 1023
     qnx4 = formats.pop("qnx4")
     assert qnx4["entry_kinds"] == 15 and qnx4["metadata_fields"] == 0x77
     assert qnx4["max_label_bytes"] == 48 and qnx4["write_settings"] == 4
+    assert qnx4["max_link_target_bytes"] == 1023
     assert all(record["write_settings"] == 0 for record in formats.values())
     assert all(record["entry_kinds"] == 3 for record in formats.values())
     assert all(record["metadata_fields"] == 15 for record in formats.values())
+    assert all(record["max_link_target_bytes"] == 0 for record in formats.values())
     assert formats["fat16"]["max_label_bytes"] == 11
     assert formats["exfat"]["max_label_bytes"] == 22
 
