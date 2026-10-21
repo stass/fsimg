@@ -262,6 +262,8 @@ fsimg_status_t fsimg_writer_add(fsimg_writer_t *writer,
     fsimg_error_t *error);
 fsimg_status_t fsimg_writer_add_tree(fsimg_writer_t *writer, int root_fd,
     const char *image_path, fsimg_error_t *error);
+fsimg_status_t fsimg_writer_add_manifest(fsimg_writer_t *writer,
+    int manifest_fd, int contents_fd, fsimg_error_t *error);
 fsimg_status_t fsimg_writer_plan(fsimg_writer_t *writer,
     const fsimg_plan_t **out, fsimg_error_t *error);
 fsimg_status_t fsimg_plan_get_info(const fsimg_plan_t *plan,
@@ -313,7 +315,10 @@ regular-file root one file at a non-root `image_path`. It scans
 synchronously, duplicates the root descriptor for subsequent source access
 (reopening beneath a directory, reading a regular file in place), and
 records metadata rather than payload bytes. It rejects symlinks and unsupported host file
-kinds. A non-root image destination directory must be explicitly represented
+kinds. `add_manifest()` collects an mtree(5) manifest as one more source
+root, its file bytes generated or read beneath an optional content
+directory, as the [manifest design](design-mtree.md#library-interface)
+defines. A non-root image destination directory must be explicitly represented
 in the catalog by planning time; insertion order is unrestricted.
 
 | State | Allowed operations | Transition |

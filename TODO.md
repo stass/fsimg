@@ -383,25 +383,21 @@
   default, including the QNX6 search over the open block sizes and the exact
   inode capacity that its driver design specifies.
 
-* [Medium] **Metadata round-trip through mtree** (`lib/extract/`,
-  `lib/source/`, `cmd/fsimg/`): the safe extractor never restores owner, mode
-  or change time and creates no links or FIFOs, so an extracted QNX6 tree
-  cannot be rebuilt with its metadata. Write an mtree(5) spec beside the
-  extracted tree on `x` and import one on `c`, through an option whose
-  spelling the design decides (`-F` is the stack), on
-  the model of FreeBSD `makefs -F` with a release `METALOG`: the host tree
-  supplies bytes, the spec supplies `type`, `uid`, `gid`, `mode`, `time`,
-  `link` and `sha256digest`, with no privileges. Plain mtree has only
-  modification time, so access, change and creation times are counted
-  losses rather than extension keywords that `mtree(8)` and bsdtar reject.
-  The parser handles untrusted input (`/set` and `/unset`, continuations,
-  vis(3) names) and needs the image parsers' bounds and fuzzing; `contents=`
-  stays beneath the source root and link targets are never followed. Write
-  the design first. Separately consider an opt-in that applies permission
-  bits without setuid, setgid or sticky through opened descriptors,
-  directories last, and an explicit trusted-restore profile (owners and full
-  modes, as `tar -p` does as root) outside the safe profile; either needs a
-  security review of the worker's metadata syscalls.
+* [Medium] **Manifest import and export** (`lib/source/`, `lib/extract/`,
+  `lib/core/`, `cmd/fsimg/`, `fuzz/`): implement the
+  [manifest design](specs/design-mtree.md): the mtree(5) parser as a source
+  root (`@file` operand, `fsimg_writer_add_manifest()`), generated zero,
+  seeded and positional content with holes, FreeBSD's `sha256c.c` imported
+  into `lib/core/`, host digests checked in the source cursor,
+  `x --mtree=FILE` through the output coordinator, `fuzz/mtree.c`, and the
+  oracle tests against `mtree -c` and `bsdtar --format=mtree`. The spec
+  harness's creation cases then emit manifests instead of writing `source/`.
+
+* [Low] **Opt-in metadata restore** (`lib/extract/`): consider an opt-in that
+  applies permission bits without setuid, setgid or sticky through opened
+  descriptors, directories last, and an explicit trusted-restore profile
+  (owners and full modes, as `tar -p` does as root) outside the safe profile;
+  either needs a security review of the worker's metadata syscalls.
 
 * [Medium] **Additional inputs and formats** (`lib/source/`, `lib/formats/`):
   design an independent NTFS reader profile as concrete needs arise; QNX4

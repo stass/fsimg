@@ -28,6 +28,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [QNX4 reader and writer](design-qnx4.md) | Derived geometry, the root block, inode, link, extent-block and long-name records, closed status tables, format-owned files, the native default layout the writer reproduces, and the PCM navigation partition |
 | [QNX4 driver](design-qnx4-driver.md) | Module layout, probe and open order, the one extent walker, bitmap pager, link resolution, verification, planning passes, emission order, and tests |
 | [POSIX metadata](design-metadata.md) | Entry kinds beyond files and directories; owner, mode and change time across API, catalog, scanner, extractor and CLI |
+| [Manifests](design-mtree.md) | Creating from an mtree(5) manifest as a source root: grammar subset, generated content, host bytes beneath a content directory, keyword mapping, bounds; the manifest extraction writes |
 | [Layers](design-layers.md) | Partition schemes, disk-image containers, compression, spooling and composition |
 | [Command line](design-cli.md) | Modes, bundled letters, options, stacks and settings, operands, destinations, output, and failure behavior |
 | [Specification-driven testing](design-spec-testing.md) | Rule-derived valid and invalid images, per-stage expectations, the CLI runner contract, fixtures and coverage reports |

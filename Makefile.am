@@ -227,9 +227,9 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
 	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
 	specs/design-qnx6-driver.md specs/design-qnx4.md specs/design-qnx4-driver.md \
-	specs/design-metadata.md specs/design-sizing.md specs/design-layers.md \
-	specs/design-content.md specs/design-directories.md specs/design-emission.md \
-	specs/design-holes.md \
+	specs/design-metadata.md specs/design-mtree.md specs/design-sizing.md \
+	specs/design-layers.md specs/design-content.md specs/design-directories.md \
+	specs/design-emission.md specs/design-holes.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
 	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh tools/qnx/guest/manifest4.sh \

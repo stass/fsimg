@@ -12,7 +12,10 @@ files beneath that root. A directory root contributes its tree beneath its
 image path and, when that path is not the root, its own directory entry from
 the directory's metadata. A regular-file root contributes exactly one file
 entry at its image path, which therefore cannot be the root, with the file
-as its source. Programmatic sources
+as its source. A [manifest](design-mtree.md#a-manifest-is-a-source-root) is
+a third kind: its root is the content directory, or a descriptorless root
+record that consumes no reservation when the manifest supplies no host
+bytes. Programmatic sources
 use one copied provider table and borrowed argument, with numeric source IDs.
 The caller keeps provider state alive until writer destruction. Zero sources
 have no backing storage. Directories have no source or payload length.
@@ -159,11 +162,12 @@ of several operands do, and otherwise collide. Under a scanned record they
 are all dropped whatever optional metadata they carry, so no choice between
 them arises. The full encoded record ends the sort key so that the stream
 order and the IDs are the same for any insertion order and sort structure.
-Within one root equal paths cannot occur, because a host
-directory enumerates each name once, so this is the only duplicate rule in
-preparation and it adds no state: the rank is a fixed-width field of the
-sort key, and the union of children falls out of the sort because every
-child record keeps its own path.
+Within one host root equal paths cannot occur, because a host directory
+enumerates each name once; within one manifest root they follow the same
+rule, as the [manifest design](design-mtree.md#lines) states. So this is
+the only duplicate rule in preparation and it adds no state: the rank is a
+fixed-width field of the sort key, and the union of children falls out of
+the sort because every child record keeps its own path.
 
 The catalog is independent of operand order except through this rank: IDs,
 parent links, generic ordering and every entry's content are the same for any
