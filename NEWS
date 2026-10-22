@@ -1,5 +1,25 @@
 fsimg 0.1.0 (unreleased)
 
+Writing creates QNX boot images. `-F ifs/ifsboot`, and
+`fsimg_image_wrap()` of an existing ImageFS, write the startup header from
+the `ifsboot:machine`, `virtual` and five address settings, which have no
+defaults, and copy the startup code and the boot prefix from files given as
+`-o ifsboot:startup=` and `-o ifsboot:prefix=`: file settings, which the
+coordinator opens without following links and hands to the worker as
+read-only descriptors, which the library takes as `fsimg_layer_inputs_t`,
+and whose change before the output completes fails it. The body is the
+ImageFS raw (`ifsboot:compress=none`) or in 64 KiB LZO1X chunks
+(`lzo`, the default) from the project's encoder, with both checksums
+derived; the encoder checks the ImageFS's own checksum as it copies, and
+the reader's header decode runs on every header before it is written.
+Only the modes a native boot has passed for a machine are written: machine
+0 (nonbootable) under either mode; machines 3 and 42 are refused naming the
+machine and the mode. `fsimg_image_unwrap()` takes a container section
+(`FSIMG_SELECT_SECTION`, `prefix` or `startup`), which with the values
+`i` reports, among them the new `flags2` and `tail_nonzero` details, is
+what a rebuild needs; `fsimg_layer_info_t` names the filesystem a
+container carries.
+
 Human CLI output uses contextual usage and help, quiet creation/extraction,
 readable volume information and plans, compact format tables and pathname-only
 listings. Metadata-loss notices count affected fields with bounded verbose
@@ -153,7 +173,7 @@ flags, compression value and machine come from closed tables (42 for SH-4,
 the startup code is never interpreted. `W` checks the startup and stored
 additive checksums and, for a boot machine, `ram_size`. A stack naming a
 scheme or another filesystem inside a container that carries a filesystem
-is invalid, named; writing `ifsboot` is refused as read only. `i` and its
+is invalid, named. `i` and its
 JSON stack record report the startup-header fields and chunk statistics as
 the container's details, which `fsimg_image_info_t` carries as a table of
 up to 24 named values.

@@ -147,7 +147,7 @@ the filesystem name is fat12, fat16, fat32, exfat, qnx6, qnx4 or ifs.
 Required for
 .Cm c .
 The slots are the filesystem, the partition scheme (gpt or mbr) and the
-container (dmg, vhd or simg, or the read-only ifsboot or hbcifs), in that
+container (dmg, vhd, simg or ifsboot, or the read-only hbcifs), in that
 order, so
 .Ql fat32/gpt
 is a FAT32 volume in a GPT partition.
@@ -414,7 +414,8 @@ differencing VHDs are refused as unsupported.
 A QNX boot image is read as the ImageFS it carries, detected from its
 startup header at offset 0 or behind the 1088-byte x86 BIOS loader, or
 forced as ifsboot; its body may be raw or LZO1X or NRV2B (UCL) chunks.
-Its startup code is never interpreted, and ifsboot cannot be written.
+Its startup code is never interpreted; writing one is described under
+.Cm c .
 A container's tables are checked completely when the image opens, and a
 damaged one fails the command rather than being read as a raw disk.
 Decompressed chunks are cached four at a time, each at most 16 MiB, within
@@ -829,6 +830,53 @@ The block size, a power of two from 1 KiB to 1 MiB; default 4096.
 .It Fl o Ar simg:crc=yes|no
 End the image with a CRC32 chunk of the expanded disk; default no.
 .El
+.Pp
+An ifsboot container packages the ImageFS of
+.Ql ifs/ifsboot
+as a QNX boot image: an optional boot prefix, a startup header fsimg
+writes, the startup code and the body, raw or in LZO1X chunks of 64 KiB.
+The startup code and the prefix are copied from files and never parsed;
+each is padded with zeros to a multiple of 4 bytes, and fsimg derives every
+size and both checksums.
+A machine is written only under the modes a native boot of a written
+image has passed: this version writes machine 0, the nonbootable output of
+QNX's mkifs, under either mode, and refuses machines 3 (x86) and 42 (SH-4)
+naming the machine and the mode.
+The settings without a default are required, since a guessed address boots
+nothing; each value is stored verbatim and checked only against its table,
+and a big-endian ImageFS is refused.
+.Bl -tag -width Ds
+.It Fl o Ar ifsboot:startup=path
+The linked startup code that follows the header; absent, the startup
+section is the header and its checksum word alone.
+.It Fl o Ar ifsboot:prefix=path
+The boot prefix before the header, such as the x86 BIOS loader: padded, it
+must be 1088 bytes, and it must not begin with the startup signature;
+empty or absent, there is none.
+.It Fl o Ar ifsboot:machine=number
+The machine: 0, 3 or 42.
+.It Fl o Ar ifsboot:virtual=yes|no
+The virtual-addressing bit.
+.It Fl o Ar ifsboot:startup_vaddr=0xN , Ar ifsboot:paddr_bias=0xN , \
+Ar ifsboot:image_paddr=0xN , Ar ifsboot:ram_paddr=0xN , \
+Ar ifsboot:imagefs_paddr=0xN
+The five target addresses.
+.It Fl o Ar ifsboot:compress=lzo|none
+The body's compression; default lzo.
+.El
+.Pp
+A file setting's path is resolved against the working directory, never
+against
+.Fl C ;
+fsimg opens it without following a symbolic link before the worker
+starts, requires a regular file, and fails the image if the file changes
+before the output is complete.
+Every read mode refuses the keys.
+.Fl i
+reports a boot image's header fields under these names, so those values,
+with the startup code and prefix the library's
+.Fn fsimg_image_unwrap
+writes back as sections, rebuild it.
 .Pp
 Container identifiers follow the scheme's rule: random without
 .Fl R ,

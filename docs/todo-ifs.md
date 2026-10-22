@@ -19,7 +19,7 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   so every `boot1=` to `boot4=` and `script=` setting is refused and the
   boot-image writer's native gates use a native bootable body; and how
   `procnto` resolves a duplicated path (owner decision 10). They answer
-  owner decision 6 and gate the boot-image writer's registration. If E8
+  owner decision 6 and gate the x86 row's writable modes. If E8
   shows that `startup-bios` rejects LZO bodies, a compressed x86 image
   needs an NRV2B encoder: one more codec in the codec design and a write
   entry in the profile's compression table, the framing unchanged.
@@ -81,31 +81,48 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
 * [Low] **Detail type naming** (`include/fsimg.h`): `fsimg_volume_detail_t`
   also carries container details; a neutral type name would say so before
   the API is released.
-* [Medium] **Container stages and the layer machinery** (`lib/layers/`):
-  the `ifsboot` write stage waits for container writing (the write half of
-  the layer plan's stage 3); until then `ifsboot` is registered read only,
-  with no plan, bound or encoder, and writing it is refused naming it.
-* [Medium] **`ifsboot` writer against the implemented layers**
-  (`specs/design-layers.md`, `lib/layers/`, `cmd/fsimg/`,
-  `include/fsimg.h`): the profile's write side needs, in the code, what
-  the design names: `fsimg_layer_inputs_t` and the `inputs` pointer of
-  `fsimg_write_options_t`; the `ifsboot` typed settings with their
-  presence flags in `fsimg_layer_options_t` and their rows in
-  `layer_settings` and `layer_keys`, marked creation-only like
-  `compress`; the file-setting descriptor slots of the worker request
-  and the coordinator's open of `-o` paths; `FSIMG_SELECT_SECTION` and
-  the container's section table; a pass count that follows the resolved
-  settings (one under `none`, two under `lzo`), since
-  `fsimg_encoder_ops_t.passes` is static; the read side's `flags2` and
-  `tail_nonzero` details; and `fsimg_layer_info_t`'s missing carries
-  field. The `.ifs` suffix rationale against the CLI's generic suffix
-  list is unstated.
+* [Medium] **Machine 0's `ram_size` in a rebuild** (`specs/design-layers.md`,
+  `lib/layers/ifsboot.c`): `mkifs` writes `ram_size` 0 in its nonbootable
+  machine-0 output (all three E7 images), but the profile's header table
+  derives `startup_size + imagefs_size` for every machine, so an E7
+  rebuild differs from the native image in `ram_size` too, which the
+  profile's rebuild claim ("every header field but `stored_size`, the
+  compression bits, the checksum words and a nonzero tail") does not
+  allow. The owner chooses: write 0 for machine 0, whose rule the machine
+  table marks as reported and not checked, or add `ram_size` to the
+  claim's exceptions for machine 0. `test-ifsboot-write --native` does not
+  compare the field for machine 0 until then.
+* [Medium] **Required `ifsboot` keys in four tables** (`lib/layers/ifsboot.c`,
+  `lib/layers/stack.c`, `cmd/fsimg/options.c`, `cmd/fsimg/job.c`): the seven
+  keys without a default are named in `ifsboot_plan`'s required list, and
+  their presence flags in the library's settings table, the option parser
+  and the job record. The job record's layout assertion catches a new
+  field, but nothing ties a key added to the settings table to the
+  required list. A `required` column in the library's settings table,
+  checked by the layer-options check of a write, would make the plan's
+  list unnecessary.
+* [Low] **File setting aliasing standard output** (`cmd/fsimg/paths.c`):
+  the library's alias check needs the sink's identity, and the CLI's sink
+  is private staging or the data channel, so `fsimg c ... -o
+  ifsboot:startup=x - > x` is not refused as an alias: the shell has
+  truncated `x`, and the image has no code or fails as changed, by relay
+  timing. Create roots have the same gap. Comparing `fstat(STDOUT_FILENO)`
+  with each setting's and root's identity in the coordinator would close
+  it.
+* [Low] **Wrap verifies before cheap refusals** (`lib/layers/output.c`):
+  `fsimg_image_wrap()` verifies its input whole before the disk plan
+  checks the layer settings, so a missing `ifsboot:machine` or a read-only
+  carried container is refused only after the input is read and summed.
+  The refusal still precedes any output; running the plan's argument checks
+  first would save the work.
+* [Low] **`.ifs` suffix** (`specs/design-layers.md`, `cmd/fsimg/`): the
+  rationale for `ifsboot` having no file suffix, against the CLI's generic
+  suffix list, is unstated.
 * [Low] **Command-line wrap and unwrap** (`cmd/fsimg/`,
   `specs/design-cli.md`): wrap, unwrap and compose are library operations
   without a command-line form, so rebuilding a native boot image around
   a new ImageFS from the shell needs a program against the library. A
-  command-line form comes for every container together, after the
-  `ifsboot` writer is registered.
+  command-line form comes for every container together.
 * [Medium] **Exact volumes in unnamed wraps and composes**
   (`lib/layers/output.c`, `specs/design-layers.md#exact-volumes`): the
   disk plan applies the exact-volume rule to the filesystem a stack names,

@@ -1376,7 +1376,8 @@ past 65,536 bytes or `imagefs_size`, bytes after a stream's end), the
 padding and both sums, each failing with its class and naming `ifsboot`;
 check the probe's offsets and ties and the ImageFS signature inside the
 startup code; read a `dumpifs -u`-style copy as corrupt; refuse a stack
-that names a scheme or another filesystem with `ifsboot`, and writing it;
+that names a scheme or another filesystem with `ifsboot`, and a wrap
+without the required settings;
 fail a body of 1,000 minimum-size chunks before reading past the index
 bound or growing scratch past 64 KiB; confine reads to four cached chunks
 and stop a five-chunk alternation at the work limit; fail a read of a
@@ -1397,10 +1398,50 @@ big-endian one draws no claim), the E10 disk's four 49,184-byte slots
 stored-trailer and startup-byte flips fail verification, each corrupt),
 and, with `FSIMG_IFS_IMAGES`, every compressed boot image there directly,
 whose decoded bytes must equal the oracle body in `decoded/`
-(`h3-NAME.imagefs` or `x1-NAME.imagefs`). It prints counts and the
-images' file names only. On macOS the eight H3 images (LZO1X, 120 to 294
-chunks) and the three X1 images (NRV2B, 51 chunks) all decode to their
-oracle bodies and verify.
+(`h3-NAME.imagefs` or `x1-NAME.imagefs`) and whose header tail holds six
+nonzero bytes in an H3 image and none in an X1 one; an image of another
+container there, such as `PCM3_IFS2.ifs`, opens through a spool and is
+skipped. It prints counts and the images' file names only. On macOS the
+eight H3 images (LZO1X, 120 to 294 chunks) and the three X1 images (NRV2B,
+51 chunks) all decode to their oracle bodies and verify.
+
+`test-ifsboot-write` writes boot images through the public API, a create
+of `ifs/ifsboot` and a wrap of the same ImageFS from the library's own
+ImageFS writer, and checks every byte with its own decoder of the
+profile's layout and its own LZO1X decoder, which share no code with
+`lib/layers/`: the prefix and its padding, each header field, a zero
+`flags2` and tail, the code and its padding, both sums, and the framing,
+whose units are each one chunk or two halves. The tests cover both
+compression modes; a create and a wrap writing the same bytes; peel,
+verification, `i`'s details and the unwrapped sections, from which a wrap
+with those values rebuilds the image byte for byte; absent, empty and
+padded startup code; the 1,085-byte loader padded to the 1,088-byte
+prefix, also through allocations the private poisoning control fills
+with 0xa5; incompressible 65,536-byte chunks and a final 65,400-byte one
+split in halves; every refusal of the plan, each against a sink that
+records writes and resizes; the bound's limits; sections a container
+lacks; a file setting aliasing the output; a startup or prefix file
+truncated, grown or rewritten between plan and output; a staged volume
+or a verified input whose checksum a fault flips; an input that changes
+between the two passes; the emission check's fault; allocation-failure,
+short-transfer and read-failure sweeps; and digests pinned for every host.
+Machine 3 and the x86 prefix run under the private control that lets the
+plan accept every mode its tables describe.
+
+```sh
+FSIMG_IFS_NATIVE=/path/to/captures-ifs FSIMG_IFS_IMAGES=/path/to/images \
+    ./test-ifsboot-write --native
+```
+
+`test-ifsboot-write --native` unwraps the prefix, startup and disk
+sections of each native boot image, checking each against the byte range
+the header names, and rebuilds the image from them and the values `i`
+reports: the E7 images, machine 0, rebuild under `lzo` identical outside
+the body-dependent fields with an identical disk; E12's uncompressed
+`cAu.ifs`, read from slot 0 of `e12-links/e12-au.img.gz` and rebuilt under
+the machine-3 control, byte for byte; and every H3 and X1 image under
+`FSIMG_IFS_IMAGES` is refused naming its machine. It exits 77 without
+`FSIMG_IFS_NATIVE`.
 
 `make check-integration` runs `test/ifs-integration.sh`, which skips what
 is absent:

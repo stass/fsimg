@@ -884,8 +884,12 @@ Depends on stages 7 and 10 and on E8's answers for owner decision 6.
   descriptor slots through the coordinator, the header settings, the
   derived fields and both checksums, chunked LZO or uncompressed
   emission, the unwrap sections, and the refusals.
-  The container's plan, bound and encoder are written and tested before
-  registration; the descriptor gains `FSIMG_CAP_WRITE` at the gate below.
+  The container's plan, bound and encoder are registered with
+  `FSIMG_CAP_WRITE` and the machine table's writable modes: machine 0,
+  which no boot gates, under `none` and `lzo`, and no mode for machines 3
+  and 42 until the gates below; a test-only control lets the plan accept
+  every mode its tables describe, so the emission is tested for every
+  machine before any gate.
 * The ImageFS writer gains the boot-specific settings that owner decision 6
   chooses.
 * Tests: the `ifsboot write` row of the
@@ -909,8 +913,7 @@ Depends on stages 7 and 10 and on E8's answers for owner decision 6.
   E12-sized tree, since a full `qnxbase` tree exceeds the floppy's slot
   uncompressed. The machine table's writable modes for x86 are then
   exactly the modes this gate booted, `none` and, if E8 and the boot
-  allow it, `lzo`; the container gains `FSIMG_CAP_WRITE` with machines 3
-  and 0 writable.
+  allow it, `lzo`.
 * **SH-4 gate:** a trimmed `PCM3_Emergency.ifs` tree, packaged with the
   native image's unwrapped startup program and settings, boots on the PCM
   QEMU board. Until that board exists, the SH-4 row lists no writable

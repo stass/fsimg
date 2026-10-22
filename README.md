@@ -166,7 +166,13 @@ image size, and that each boot and script reference names exactly one
 file. A QNX boot image (`ifsboot`), raw or with an LZO1X or NRV2B body,
 at offset 0 or behind the x86 BIOS loader, is read as the ImageFS it
 carries, and `fsimg W` checks its startup and stored checksums; its
-startup code is never interpreted, and boot images cannot be written.
+startup code is never interpreted. `-F ifs/ifsboot` writes one: the
+startup header with the machine and addresses given as `-o ifsboot:`
+settings, startup code and an optional boot prefix copied from files
+(`-o ifsboot:startup=`, `-o ifsboot:prefix=`), and the ImageFS raw or in
+LZO1X chunks. A machine is written only under the modes a native boot of
+a written image has passed, so this version writes machine 0, `mkifs`'s
+nonbootable output, and refuses the x86 and SH-4 machines.
 The ImageFS writer creates nonbootable images in either byte order
 with a mountpoint setting (default `/`): the root and a record for every
 directory, then files, symbolic links and FIFOs with owner, mode and
