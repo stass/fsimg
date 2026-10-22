@@ -164,7 +164,8 @@ typedef struct fsimg_stats {
  * Zero limits select defaults. Contexts are serial; callbacks cannot re-enter.
  * The context duplicates scratch_directory_fd; -1 disables scratch.
  * Supply a scratch directory protected from untrusted writers. Scratch holds
- * private disposable metadata and does not promise secure erasure.
+ * private disposable metadata and does not promise secure erasure; a host
+ * scan never imports it, nor anything in it, from a tree it lies inside.
  * Child handles must be freed before their context. Destructors accept NULL.
  */
 void fsimg_options_init(fsimg_options_t *);

@@ -110,8 +110,10 @@ scanning source names. The coordinator emits any automatic-mode warning before
 acknowledging, so the warning precedes parsing. The coordinator never
 parses image headers and never opens a host path requested by the worker.
 Image output staging directories can be prepared before this point; the image
-file itself is created only after successful planning. Source scanning rejects
-encounters with scratch/output objects rather than importing them.
+file itself is created only after successful planning. Source scanning passes
+over the prepared staging and scratch directories, matched by opened identity,
+without importing or entering them; a root or manifest content reference that
+names one is refused.
 
 The worker writes payload bytes directly through authorized descriptors.
 Gigantic image payloads do not pass through a per-file request broker. `x -O`

@@ -319,6 +319,15 @@ fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
 		 * Any failure names the object by its image path.
 		 */
 		status = open_object(writer, current->fd, name, false, &fd, &identity, error);
+		/* The writer's output root and the context's scratch directory
+		 * may lie inside the tree; such a descendant is neither
+		 * collected nor entered.
+		 */
+		if (status == FSIMG_OK && fsimg_source_is_working_storage(writer, &identity)) {
+			if (fd != -1)
+				fsimg_fd_release(writer->ctx, fd);
+			continue;
+		}
 		if (status == FSIMG_OK)
 			status = fsimg_source_check_object(writer, &identity, error);
 		if (status == FSIMG_OK)

@@ -309,9 +309,10 @@ Catalog preparation uses these passes:
 
 No phase lists all children of a directory in memory. The scanner itself uses
 bounded traversal state and descriptor accounting; a depth/descriptor limit
-failure is explicit. Scratch or output objects encountered beneath a source
-root cause an error rather than being recursively imported or silently ignored
-by filename patterns. Output image staging begins after collection/planning.
+failure is explicit. The scratch and output staging directories, recognized by
+opened identity rather than by filename pattern, are passed over beneath a
+source root, neither imported nor entered. The output image file is created
+only after collection and planning.
 
 ## Planning
 

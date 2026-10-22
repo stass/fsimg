@@ -957,6 +957,26 @@ def test_tree_at_depth_limit(executable, root):
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
+def test_output_inside_source(executable, root):
+    """An image created inside the tree it imports, with scratch there too:
+    the staging and scratch directories fsimg prepares are passed over, and
+    ordinary directories with similar names are imported."""
+    source = root / "inside-source"
+    (source / ".fsimg-output-ordinary").mkdir(parents=True)
+    (source / ".fsimg-output-ordinary/kept.txt").write_bytes(b"kept\n")
+    (source / ".fsimg-scratch-ordinary").mkdir()
+    (source / "hello.txt").write_bytes(b"hello\n")
+    private_directory(source, "tmp")
+    before = sorted(path.name for path in source.iterdir())
+    invoke(executable, source, ["cf", "out.img", "-F", "fat32", "-T", "tmp", "."])
+    assert sorted(listing(executable, source, "out.img")) == [
+        '"/.fsimg-output-ordinary"', '"/.fsimg-output-ordinary/kept.txt"',
+        '"/.fsimg-scratch-ordinary"', '"/hello.txt"', '"/tmp"']
+    assert sorted(path.name for path in source.iterdir()) == sorted([*before, "out.img"])
+    assert not list((source / "tmp").iterdir())
+    shutil.rmtree(source)
+
+
 def test_format(executable, root, profile, payload):
     image = f"{profile}.img"
     decoded = completed(invoke(executable, root, [
@@ -2039,6 +2059,7 @@ def main():
         test_failed_creation_output(executable, root)
         test_human_loss_bounds(executable, root)
         test_tree_at_depth_limit(executable, root)
+        test_output_inside_source(executable, root)
         test_formats(executable, root)
         for profile in ["fat12", "fat16", "fat32", "exfat"]:
             test_format(executable, root, profile, payload)

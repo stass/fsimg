@@ -13,6 +13,8 @@
 #include "unicode.h"
 
 static fsimg_status_t source_validate(fsimg_source_cursor_t *, fsimg_error_t *);
+static bool is_output_root(const fsimg_writer_t *, const fsimg_host_file_t *);
+static bool is_scratch(const fsimg_ctx_t *, const fsimg_host_file_t *);
 static fsimg_status_t source_abort(fsimg_source_cursor_t *, fsimg_status_t);
 static fsimg_status_t callback_status(fsimg_status_t, fsimg_error_t *);
 static fsimg_status_t link_failure(int, bool, fsimg_error_t *);
@@ -184,22 +186,42 @@ fail:
 	return (fsimg_writer_fail(writer, status));
 }
 
+static bool
+is_output_root(const fsimg_writer_t *writer,
+    const fsimg_host_file_t *identity)
+{
+	return (writer->output_root_known &&
+	    identity->device == writer->output_root.device &&
+	    identity->inode == writer->output_root.inode);
+}
+
+static bool
+is_scratch(const fsimg_ctx_t *ctx, const fsimg_host_file_t *identity)
+{
+	return (ctx->options.scratch_directory_fd != -1 &&
+	    identity->device == ctx->scratch_device &&
+	    identity->inode == ctx->scratch_inode);
+}
+
+bool
+fsimg_source_is_working_storage(const fsimg_writer_t *writer,
+    const fsimg_host_file_t *identity)
+{
+	return (identity->kind == FSIMG_HOST_DIRECTORY &&
+	    (is_output_root(writer, identity) ||
+	    is_scratch(writer->ctx, identity)));
+}
+
 fsimg_status_t
 fsimg_source_check_object(fsimg_writer_t *writer,
     const fsimg_host_file_t *identity, fsimg_error_t *error)
 {
-	const fsimg_ctx_t *ctx = writer->ctx;
-
-	if (writer->output_root_known &&
-	    identity->device == writer->output_root.device &&
-	    identity->inode == writer->output_root.inode)
+	if (is_output_root(writer, identity))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_SOURCE, "source tree encounters its output directory"));
-	if (ctx->options.scratch_directory_fd != -1 &&
-	    identity->device == ctx->scratch_device &&
-	    identity->inode == ctx->scratch_inode)
+		    FSIMG_OP_SOURCE, "source reaches its output directory"));
+	if (is_scratch(writer->ctx, identity))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_SOURCE, "source tree encounters its scratch directory"));
+		    FSIMG_OP_SOURCE, "source reaches its scratch directory"));
 	if (identity->kind != FSIMG_HOST_FILE && identity->kind != FSIMG_HOST_DIRECTORY &&
 	    identity->kind != FSIMG_HOST_LINK)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,

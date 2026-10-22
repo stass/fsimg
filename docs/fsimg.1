@@ -817,8 +817,10 @@ imports it confined;
 .Fl S Cm off
 runs the whole creation worker without OS confinement, for trusted sources
 and manifests only.
-Import rejects special files, including FIFOs, and encounters with its own
-scratch or staging trees.
+Import rejects special files, including FIFOs.
+It passes over its own scratch and staging directories when they lie inside
+the tree it imports, so an image can be created inside its source directory;
+an operand that names one of them is an error.
 Like
 .Xr tar 1 ,
 it crosses mount points: a filesystem mounted beneath an operand is imported

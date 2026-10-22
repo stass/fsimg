@@ -56,6 +56,8 @@ static void remove_contents(int);
 static void write_file(int, const char *, const char *);
 static void configure_provider(source_fixture_t *, uint64_t);
 static const fsimg_catalog_entry_t *find_entry(fsimg_writer_t *, const char *);
+static bool catalog_reaches(fsimg_writer_t *, const char *);
+static void test_working_storage(void);
 static fsimg_status_t provider_validate(void *, uint64_t, fsimg_error_t *);
 static fsimg_status_t provider_read(void *, uint64_t, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
@@ -591,10 +593,76 @@ test_rejection(void)
 	CHECK(fixture.writer->roots == NULL);
 	fixture_close(&fixture);
 	test_adopted_scratch();
+	test_working_storage();
+}
+
+/* Whether the catalog holds path or anything beneath it. */
+static bool
+catalog_reaches(fsimg_writer_t *writer, const char *path)
+{
+	const fsimg_catalog_entry_t *entry;
+	size_t length = strlen(path);
+
+	for (uint64_t id = 1; id <= writer->count; id++) {
+		CHECK(fsimg_catalog_get(writer, id, &entry, NULL) == FSIMG_OK);
+		if (strncmp(entry->entry.path, path, length) == 0 &&
+		    (entry->entry.path[length] == '\0' || entry->entry.path[length] == '/'))
+			return (true);
+	}
+	return (false);
+}
+
+/*
+ * The CLI may prepare its staging and scratch directories inside the tree
+ * it imports, as `cd src && fsimg cf out.img .` does. A scan passes over
+ * them, by identity, without importing or entering them; ordinary
+ * directories with similar names are imported. Named as a root, either is
+ * still refused.
+ */
+static void
+test_working_storage(void)
+{
+	source_fixture_t fixture;
+	fsimg_error_t error;
+	int output, child;
+
 	fixture_open(&fixture);
+	CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
+	output = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(output != -1);
+	write_file(output, "image", "staged");
+	CHECK(fsimg_host_file(output, &fixture.writer->output_root) == 0);
+	fixture.writer->output_root_known = true;
+	child = openat(fixture.parent, "scratch", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(child != -1);
+	write_file(child, "spool", "scratch");
+	CHECK(close(child) == 0);
+	CHECK(mkdirat(fixture.parent, "output-like", 0700) == 0);
+	CHECK(mkdirat(fixture.parent, ".fsimg-output-ordinary", 0700) == 0);
+	child = openat(fixture.parent, ".fsimg-output-ordinary", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(child != -1);
+	write_file(child, "kept", "ordinary");
+	CHECK(close(child) == 0);
+	CHECK(mkdirat(fixture.parent, ".fsimg-scratch-ordinary", 0700) == 0);
+	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.parent, "/", &error) == FSIMG_OK);
+	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
+	CHECK(!catalog_reaches(fixture.writer, "/output"));
+	CHECK(!catalog_reaches(fixture.writer, "/scratch"));
+	CHECK(catalog_reaches(fixture.writer, "/source"));
+	CHECK(catalog_reaches(fixture.writer, "/output-like"));
+	CHECK(catalog_reaches(fixture.writer, "/.fsimg-output-ordinary/kept"));
+	CHECK(catalog_reaches(fixture.writer, "/.fsimg-scratch-ordinary"));
+	CHECK(fixture.writer->count == 5);
+	fixture_close(&fixture);
+
+	fixture_open(&fixture);
+	CHECK(fsimg_host_file(fixture.parent, &fixture.writer->output_root) == 0);
+	fixture.writer->output_root_known = true;
 	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.parent, "/", &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "output directory") != NULL);
 	CHECK(fixture.writer->roots == NULL);
 	fixture_close(&fixture);
+	CHECK(close(output) == 0);
 }
 
 /* Make parent/name a directory and return a read-only descriptor for it. */

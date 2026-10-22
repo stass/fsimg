@@ -86,9 +86,15 @@ fsimg_status_t fsimg_manifest_check_digests(fsimg_writer_t *,
     fsimg_error_t *);
 bool fsimg_source_identity_equal(const fsimg_host_file_t *,
     const fsimg_host_file_t *);
-/* Refuse an opened source object that is the output root or the scratch
- * directory, by device and inode, or of a kind other than a regular file,
- * a directory or a symbolic link.
+/* Whether an opened object is the writer's working storage, its output
+ * root or its context's scratch directory: a directory with its device
+ * and inode. A scan passes over such a descendant; anything named for
+ * import is refused by fsimg_source_check_object().
+ */
+bool fsimg_source_is_working_storage(const fsimg_writer_t *,
+    const fsimg_host_file_t *);
+/* Refuse an opened source object that is working storage, or of a kind
+ * other than a regular file, a directory or a symbolic link.
  */
 fsimg_status_t fsimg_source_check_object(fsimg_writer_t *,
     const fsimg_host_file_t *, fsimg_error_t *);

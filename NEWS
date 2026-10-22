@@ -185,7 +185,9 @@ Sources copy directly into the destination image with validation around copying.
 Known source aliases are rejected before output mutation, including hardlinks
 and slices. Private fresh output preserves sparse zero space; reused sinks are
 explicitly initialized. Durable file publication never replaces an existing
-destination and reports retained staging and cleanup failures.
+destination and reports retained staging and cleanup failures. An image
+can be created inside the tree it imports: the scan passes over the staging
+and scratch directories fsimg prepares there.
 
 Safe extraction creates exclusive private trees with descriptor-relative
 no-follow operations, logical output quotas, filesystem-aware selections,

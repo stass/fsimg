@@ -116,9 +116,9 @@ target length of 1 through 1023 bytes and whose provider or host source
 supplies the target, and FIFOs, which have neither size nor source.
 Metadata validity bits cover creation, modification, access and change times,
 attributes, owner (uid and gid) and the permission bits 07777.
-Host scanning records symbolic links without following them and rejects
-special files and encountered scratch/output objects; it crosses mount
-points beneath a root.
+Host scanning records symbolic links without following them, rejects
+special files and passes over the context's scratch directory, which it
+refuses as a root; it crosses mount points beneath a root.
 FSIMG_WRITE_IMPORT_POSIX also records each object's owner and permission bits.
 A host root is a directory, whose tree populates its image path, or a
 regular file, which is the one file at a non-root image path.

@@ -117,13 +117,19 @@ return `FSIMG_ESOURCE_CHANGED`. These checks are not an atomic snapshot against
 a hostile concurrent writer; callers requiring one provide immutable sources
 or a filesystem snapshot.
 
-The scanner rejects the context's scratch directory by opened identity, its
-device and inode, before descending; an alias that reports another device,
-such as a FreeBSD nullfs mount of it, is not recognized. Scratch files are unlinked before source
-enumeration can import them; source-tree overlap with the authorized scratch
-directory is rejected, rather than excluded by a filename pattern. Output
-staging starts after collection. Output/source identity comparisons consume the
-host identity records before any sink mutation.
+The CLI prepares its staging directory before the scan, beside the image, and
+places scratch under `-T`; either can lie inside a tree it imports, as in
+`cd src && fsimg cf out.img .`. The scanner recognizes the context's scratch
+directory and the writer's output root by opened identity, their device and
+inode, and passes over a descendant that is either, neither collecting it nor
+descending into it. Recognition is by identity, not by a filename pattern, so
+an ordinary directory with a similar name is imported. A root or manifest
+content reference that names either is refused, since the caller asked for its
+contents. An alias that reports another device, such as a FreeBSD nullfs mount
+of one, is not recognized and is scanned as an ordinary directory. Scratch
+files are unlinked before source enumeration can reach them, and the image file
+is created in staging only after planning. Output/source identity comparisons
+consume the host identity records before any sink mutation.
 
 ## Catalog preparation
 
