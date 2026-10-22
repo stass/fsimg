@@ -363,6 +363,16 @@ take, such as reading ACLs and removing directories, besides creating
 them.
 The check reads the directory through one transient extra descriptor, which
 counts against max_open_files.
+It trusts the owner and permissions the filesystem reports, so a
+filesystem that does not enforce them defeats it.
+For example, on a volume that ignores ownership, such as an external macOS
+APFS or HFS+ volume by default, a directory passes while every local user
+can write it.
+Separately, on a filesystem that ignores the modes requested for new files, such as
+Linux vfat with a permissive fmask, a directory can pass while the files
+created in it are writable by others.
+Keep output and scratch off such filesystems when other users are not
+trusted.
 .Pp
 Logical lengths including holes count against output limits.
 Failure after creation can leave private incomplete output.

@@ -395,6 +395,28 @@ into it. A writer of
 the parent can still put another empty directory under the name between
 that check and the removal, which gains nothing it could not do itself.
 
+The check trusts the owner and modes the descriptor reports, and fsimg's
+own 0700 and 0600 creation modes protect only where the filesystem honours
+them. A filesystem that does not enforce what it reports therefore defeats
+the rule, and fsimg documents this rather than refusing such filesystems.
+One example is a volume that ignores ownership, such as an external APFS or
+HFS+ volume on macOS, where that is the default (`MNT_IGNORE_OWNERSHIP`):
+it reports every object as the caller's and lets every local user act as
+owner, so a 0700 directory there passes while others can read it or replace
+its contents. Others are a Linux FUSE mount with `allow_other` and without
+`default_permissions`
+and a CIFS mount with `noperm`. A second, separate case is a filesystem
+that ignores the modes fsimg asks for on the files it creates, such as Linux
+vfat mounted with a restrictive `dmask` and a permissive `fmask`: the
+directory check is right about the directory, but every file fsimg creates
+in it, including while an extraction is in progress, is writable by others.
+The class is open, so detecting its known members, such as by
+`MNT_IGNORE_OWNERSHIP` or by a created mode that differs from the one
+requested, would not make the rule hold, and refusing them would make the
+default mount of every external macOS drive unusable for output. The
+user-facing documentation tells users to keep output, staging and scratch
+off such filesystems when other users are not trusted.
+
 The selected parent comes from the user; image names never influence how
 that initial authority is obtained. Merging into a populated tree is not
 possible by any option.

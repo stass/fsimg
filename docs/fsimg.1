@@ -960,6 +960,29 @@ nor an image,
 file or scratch directory can be placed on an NFS server with ACL support,
 and the server-side ACLs of a CIFS mount are not visible to the check at all.
 .Pp
+The check trusts the owner and permissions the filesystem reports, so a
+filesystem that does not enforce them defeats it, and the modes
+.Nm
+gives what it creates protect nothing there.
+For example, a volume that ignores ownership, such as an external APFS or
+HFS+ volume on macOS, where that is the default and
+.Xr mount 8
+lists it as
+.Ql noowners ,
+shows every directory as the caller's while every local user can write it:
+the destination, staging and scratch directories pass, yet other users can
+read or replace what
+.Nm
+writes there.
+Separately, a filesystem that ignores the modes
+.Nm
+asks for on new files, such as Linux vfat mounted with a permissive fmask,
+can hold a directory that passes while the files
+.Nm
+creates in it are writable by others.
+Keep output, staging and scratch off such filesystems when other users are
+not trusted.
+.Pp
 Selected paths and necessary ancestors are preserved below the image root.
 Output uses private directories and regular files, no links, no merge,
 no privileged metadata and no host timestamp restoration.

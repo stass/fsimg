@@ -418,14 +418,6 @@
   glibc's sources, not run; glibc 2.39 (CI) passes. Run the sandbox suite on
   such a distribution, and if it fails, call the `fstat` syscall directly
   through `compat/`; seccomp cannot tell an empty path from another one.
-* [Medium] **macOS volumes that ignore ownership pass the private-directory
-  check** (`compat/private.c` `fsimg_host_private_directory`): an external
-  APFS or HFS+ volume mounted with ownership ignored, the default for
-  removable drives, reports every file as owned by the caller and lets every
-  user write as owner, so a 0700 directory there passes while other local
-  users can write it. Refuse when `fstatfs()` on the descriptor reports
-  `MNT_IGNORE_OWNERSHIP`, and test it on an `hdiutil` volume attached with
-  owners off.
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself

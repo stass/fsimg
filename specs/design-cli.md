@@ -102,7 +102,11 @@ and `path`, with the 1023-byte link-target limit, each line's length
 `fds` defaults to the depth limit plus 128. A source scan holds one
 descriptor per directory level along its path, and so does an extraction, so
 the default fits a tree as deep as the depth limit, whatever depth the
-command gives; the 128 cover everything else a command holds at once. The
+command gives; the 128 cover everything else that a command with up to
+about a hundred operands holds at once. A command with more operands is
+admitted while its open roots and fixed descriptors fit, and scanning a path
+at the depth limit can then still reach the limit and fail, naming the
+descriptor limit. The
 library keeps its own fixed default for embedders, whose descriptors it
 shares with the host program. `fds` also caps the number of create operands,
 since the worker holds one open root per operand, two for a manifest operand
