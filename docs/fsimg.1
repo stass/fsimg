@@ -616,6 +616,18 @@ is checked as its bytes are copied, so
 does not check it; a generated file's is checked by planning, by
 .Fl n
 too.
+Checking a generated file's digest takes time in proportion to the file's
+logical size, which the planned volume and
+.Fl l Ar output
+bound, since no writer stores a file sparsely; the check runs only once
+the image has been planned.
+Writing may skip a run of zeros and hashing does not, so
+.Fl l Ar work
+and
+.Fl l Ar seconds
+bound the time, and
+.Fl n
+hashes without writing.
 A refused line is named by number.
 .Pa specs/design-mtree.md
 in the source distribution defines the subset.

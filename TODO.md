@@ -473,16 +473,6 @@
   mount crossing beneath a root, such as a per-directory check that a
   child's device and inode do not belong to a mount point, without a
   path-based query.
-* [Medium] **Hashing a large sparse generated file** (`lib/source/manifest.c`,
-  `specs/design-mtree.md` "Digests"): planning checks a generated file's
-  `sha256digest` only after the image accepted its size, so the bytes hashed
-  never exceed the planned volume, but emission skips zero runs while the
-  digest covers every byte. In an automatically sized exFAT or QNX6 volume
-  one manifest line such as a 1 TiB `fsimg.content=zero` file with a digest
-  costs about an hour of hashing, bounded only by `max_work`, `seconds` and
-  cancellation, which are unlimited by default. Decide between a default
-  work budget for create mode and a fixed bound on the size a generated
-  digest may cover.
 * [Low] **The library's staging directory skips the privacy check**
   (`lib/output/write.c` `create_staging`): `fsimg_writer_write_at()` and
   transcoding stage beneath the caller's directory in a
