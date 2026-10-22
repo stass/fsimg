@@ -25,7 +25,7 @@ static fsimg_status_t serve_link(fsimg_writer_t *, fsimg_source_cursor_t *,
     fsimg_error_t *);
 static fsimg_status_t open_provider_link(fsimg_writer_t *,
     fsimg_source_cursor_t *, fsimg_error_t *);
-static fsimg_status_t open_host_link(fsimg_writer_t *, fsimg_source_root_t *,
+static fsimg_status_t open_host_link(fsimg_writer_t *,
     int, const char *, fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t open_root_file(fsimg_writer_t *,
     const fsimg_source_root_t *, fsimg_source_cursor_t *, fsimg_error_t *);
@@ -130,7 +130,7 @@ fsimg_writer_adopt_tree(fsimg_writer_t *writer, int fd,
 	size_t length;
 	uint32_t depth;
 	fsimg_status_t status;
-	int flags, saved;
+	int flags;
 
 	root = NULL;
 	status = fsimg_writer_collect_ready(writer, error);
@@ -158,7 +158,7 @@ fsimg_writer_adopt_tree(fsimg_writer_t *writer, int fd,
 		    "a regular-file source root cannot populate the image root");
 		goto fail;
 	}
-	status = fsimg_source_check_object(writer, fd, &identity, NULL, error);
+	status = fsimg_source_check_object(writer, &identity, error);
 	if (status != FSIMG_OK)
 		goto fail;
 	root = fsimg_alloc(writer->ctx, sizeof(*root), &detail);
@@ -170,13 +170,6 @@ fsimg_writer_adopt_tree(fsimg_writer_t *writer, int fd,
 	}
 	root->fd = fd;
 	root->identity = identity;
-	if (fsimg_host_mount_id(fd, &root->mount_id) == -1) {
-		saved = errno;
-		status = fsimg_error_set(error, saved == ENOTSUP ?
-		    FSIMG_EUNSUPPORTED : FSIMG_EIO, saved, FSIMG_OP_SOURCE,
-		    "source mount identity is unavailable");
-		goto fail;
-	}
 	root->id = writer->root_count;
 	writer->root_count++;
 	root->next = writer->roots;
@@ -192,13 +185,10 @@ fail:
 }
 
 fsimg_status_t
-fsimg_source_check_object(fsimg_writer_t *writer, int fd,
-    const fsimg_host_file_t *identity, const fsimg_source_root_t *root,
-    fsimg_error_t *error)
+fsimg_source_check_object(fsimg_writer_t *writer,
+    const fsimg_host_file_t *identity, fsimg_error_t *error)
 {
 	fsimg_host_file_t scratch;
-	uint64_t mount_id;
-	int saved;
 
 	if (writer->output_root_known &&
 	    identity->device == writer->output_root.device &&
@@ -218,27 +208,6 @@ fsimg_source_check_object(fsimg_writer_t *writer, int fd,
 	    identity->kind != FSIMG_HOST_LINK)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_SOURCE, "source object is not a regular file, directory or symbolic link"));
-	if (root == NULL)
-		return (FSIMG_OK);
-	/* A link cannot be a mount point and has no descriptor: it lives on
-	 * its parent directory's file system, whose mount was checked, so its
-	 * device is enough.
-	 */
-	if (identity->kind == FSIMG_HOST_LINK) {
-		if (identity->device != root->identity.device)
-			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-			    FSIMG_OP_SOURCE, "source traversal crosses a descendant mount"));
-		return (FSIMG_OK);
-	}
-	if (fsimg_host_mount_id(fd, &mount_id) == -1) {
-		saved = errno;
-		return (fsimg_error_set(error, saved == ENOTSUP ?
-		    FSIMG_EUNSUPPORTED : FSIMG_EIO, saved, FSIMG_OP_SOURCE,
-		    "source mount identity query failed"));
-	}
-	if (identity->device != root->identity.device || mount_id != root->mount_id)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_SOURCE, "source traversal crosses a descendant mount"));
 	return (FSIMG_OK);
 }
 
@@ -438,8 +407,8 @@ open_provider_link(fsimg_writer_t *writer, fsimg_source_cursor_t *source,
  * including the target length, then serve the bytes read.
  */
 static fsimg_status_t
-open_host_link(fsimg_writer_t *writer, fsimg_source_root_t *root, int parent,
-    const char *name, fsimg_source_cursor_t *source, fsimg_error_t *error)
+open_host_link(fsimg_writer_t *writer, int parent, const char *name,
+    fsimg_source_cursor_t *source, fsimg_error_t *error)
 {
 	fsimg_host_file_t opened;
 	fsimg_status_t status;
@@ -448,7 +417,7 @@ open_host_link(fsimg_writer_t *writer, fsimg_source_root_t *root, int parent,
 	    source->link_target, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_source_check_object(writer, -1, &opened, root, error);
+	status = fsimg_source_check_object(writer, &opened, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!fsimg_source_identity_equal(&opened, &source->identity))
@@ -478,8 +447,7 @@ open_root_file(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 	if (fsimg_host_file(root->fd, &opened) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_SOURCE, "source root file inspection failed"));
-	status = fsimg_source_check_object(writer, root->fd, &opened, root,
-	    error);
+	status = fsimg_source_check_object(writer, &opened, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!fsimg_source_identity_equal(&opened, &source->identity))
@@ -608,9 +576,9 @@ open_host_source(fsimg_writer_t *writer, uint64_t reference,
 	if (status != FSIMG_OK)
 		return (status);
 	if (kind == FSIMG_HOST_LINK) {
-		status = open_host_link(writer, root, parent, name, source, error);
+		status = open_host_link(writer, parent, name, source, error);
 	} else {
-		status = fsimg_source_open_child(writer, root, parent, name, false,
+		status = fsimg_source_open_child(writer, parent, name, false,
 		    FSIMG_WALK_REOPEN, &fd, &opened, error);
 		if (status == FSIMG_OK)
 			status = adopt_reopened_file(writer, fd, &opened, source,
@@ -670,8 +638,8 @@ open_failure(int saved, fsimg_source_walk_t walk, fsimg_error_t *error)
  * checked, as specs/design-mtree.md ("Host bytes") explains.
  */
 fsimg_status_t
-fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
-    int parent, const char *name, bool directory, fsimg_source_walk_t walk,
+fsimg_source_open_child(fsimg_writer_t *writer, int parent,
+    const char *name, bool directory, fsimg_source_walk_t walk,
     int *out, fsimg_host_file_t *identity, fsimg_error_t *error)
 {
 	fsimg_status_t status;
@@ -710,7 +678,7 @@ fsimg_source_open_child(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_SOURCE, "contents path does not name a regular file"));
 	}
-	status = fsimg_source_check_object(writer, fd, identity, root, error);
+	status = fsimg_source_check_object(writer, identity, error);
 	if (status != FSIMG_OK) {
 		fsimg_fd_release(writer->ctx, fd);
 		return (status);
@@ -752,7 +720,7 @@ fsimg_source_walk(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 			*name_out = component;
 			return (FSIMG_OK);
 		}
-		status = fsimg_source_open_child(writer, root, parent, component,
+		status = fsimg_source_open_child(writer, parent, component,
 		    true, walk, &fd, &opened, error);
 		*separator = '/';
 		if (status != FSIMG_OK)

@@ -201,10 +201,10 @@ while it is read fails as a short read. `contents_fd` is an opened
 registered as a root like the descriptor of `add_tree()`, consuming one
 descriptor reservation, or `-1` when the manifest supplies no host bytes.
 Either way the call registers one charged root record. With `-1` it is a
-descriptorless root that holds no descriptor, identity or mount ID and
+descriptorless root that holds no descriptor or identity and
 consumes no reservation, and the parser refuses at input, naming the line,
 any entry that needs host bytes, so no host record names that root. With a
-directory, the root takes the directory's identity and mount ID when the
+directory, the root takes the directory's identity when the
 first entry needing host bytes is parsed; if none does, the duplicate is
 closed and the root stays descriptorless, so a manifest of generated files
 behaves the same whether or not a directory was offered. The
@@ -375,8 +375,8 @@ path, which is makefs's rule and what makes a `METALOG` plus its tree one
 root. The path is decoded bytes split on `/`; an absolute path or an empty,
 `.` or `..` component is refused. The parser walks it exactly as reopening
 walks a scanned path: each directory component opened `O_DIRECTORY |
-O_NOFOLLOW`, each opened object checked for the root's device and mount
-identity. On every host the final component is opened without inspection,
+O_NOFOLLOW`, each opened object checked for its kind and against the output
+and scratch directories. On every host the final component is opened without inspection,
 as the scanner opens every object: no-follow, nonblocking and without
 acquiring a controlling terminal, and the opened object must be a regular
 file. A FIFO's open therefore never waits for a writer, and a socket or a
@@ -610,7 +610,6 @@ drive their parsers; `build-aux/fuzz.sh` runs it with the others.
 | A keyword of the unsupported class, a symbolic link on a `contents=` path, a directory or special file at its end | `FSIMG_EUNSUPPORTED` | Input |
 | A value beyond its numeric range | `FSIMG_ERANGE` | Input |
 | A line, entry count, depth or path beyond its limit | `FSIMG_ELIMIT` naming the resource | Input |
-| A mount crossing beneath the content directory | As the scanner reports it | Input |
 | A duplicate path within the manifest, a missing parent, a file or link against another root's entry | The catalog's existing preparation failures, naming the path | Planning |
 | A kind or field the format cannot store | `FSIMG_EUNSUPPORTED` under the loss policy | Planning |
 | A generated digest mismatch, once the plan has accepted every size | `FSIMG_EINVAL`, operation `SOURCE`, naming the line, its offset and the path as at input | Planning |
@@ -662,8 +661,8 @@ Each passing case has a seeded failure that proves the check ran.
   and offset, and check the SHA-256 implementation against the FIPS 180-4
   vectors; each with a corrupted expectation that must fail.
 * Content-path tests build a tree with a symbolic link component, a link at
-  the end, a directory, a FIFO, a `..` path, an absolute path and, where
-  the host allows, a nested mount, and expect each refusal; a file replaced
+  the end, a directory, a FIFO, a `..` path, and an absolute path, and
+  expect each refusal; a file replaced
   between collection and emission fails as changed, a file with a wrong
   digest fails during emission with nothing published, and `-n` with the
   same manifest succeeds.

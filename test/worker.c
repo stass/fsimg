@@ -212,29 +212,33 @@ test_output_ledger(bool prefix)
 }
 
 
+/*
+ * A confined plan of path, whose descendant path/alias a privileged caller
+ * has bind- or nullfs-mounted from path/../lower holding the 8-byte file
+ * payload (docs/build.md), scans across the mount as tar does: a mounted
+ * descendant is authorized content. alias showing lower's inode proves the
+ * mount is there, and the plan's one file of 8 bytes that it was crossed.
+ */
 static void
 test_mount_source(const char *path)
 {
 	worker_fixture_t fixture;
-	fsimg_host_file_t root_identity, alias_identity;
+	fsimg_host_file_t lower_identity, alias_identity;
 	fsimg_error_t error;
-	uint64_t root_mount, alias_mount;
-	int source, alias;
+	int source, alias, lower;
 
 	fixture_open(&fixture);
 	source = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 	CHECK(source != -1);
 	alias = openat(source, "alias", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 	CHECK(alias != -1);
-	CHECK(fsimg_host_file(source, &root_identity) == 0);
+	lower = openat(source, "../lower", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(lower != -1);
 	CHECK(fsimg_host_file(alias, &alias_identity) == 0);
-	CHECK(fsimg_host_mount_id(source, &root_mount) == 0);
-	CHECK(fsimg_host_mount_id(alias, &alias_mount) == 0);
-	CHECK(root_mount != alias_mount);
-#if defined(__linux__)
-	CHECK(root_identity.device == alias_identity.device);
-#endif
+	CHECK(fsimg_host_file(lower, &lower_identity) == 0);
+	CHECK(alias_identity.inode == lower_identity.inode);
 	CHECK(close(alias) == 0);
+	CHECK(close(lower) == 0);
 	fixture.request.input_fd = -1;
 	fixture.request.root_fds = &source;
 	fixture.request.root_paths = image_root;
@@ -242,13 +246,13 @@ test_mount_source(const char *path)
 	fixture.request.kind = FSIMG_JOB_PLAN;
 	fixture.request.sandbox = FSIMG_SANDBOX_REQUIRED;
 	CHECK(fsimg_stack_parse("fat12", &fixture.request.stack, NULL) == FSIMG_OK);
-	CHECK(run(&fixture, &error) == FSIMG_EUNSUPPORTED);
+	CHECK(run(&fixture, &error) == FSIMG_OK);
 	CHECK(fixture.ready && fixture.result.confinement == FSIMG_CONFINEMENT_ACTIVE);
-	CHECK(error.operation == FSIMG_OP_SOURCE && fixture.plans == 0);
-	printf("mount alias rejected: devices=%llu/%llu mounts=%llu/%llu\n",
-	    (unsigned long long)root_identity.device,
-	    (unsigned long long)alias_identity.device,
-	    (unsigned long long)root_mount, (unsigned long long)alias_mount);
+	CHECK(fixture.plans == 1);
+	/* The directory alias and the file payload beneath the mount. */
+	CHECK(fixture.result.entries == 2 && fixture.result.logical_bytes == 8);
+	printf("mount crossed: alias inode %llu\n",
+	    (unsigned long long)alias_identity.inode);
 	CHECK(close(source) == 0);
 	fixture_close(&fixture);
 }

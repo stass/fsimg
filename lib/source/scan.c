@@ -320,7 +320,7 @@ fsimg_source_scan(fsimg_writer_t *writer, fsimg_source_root_t *root,
 		 */
 		status = open_object(writer, current->fd, name, false, &fd, &identity, error);
 		if (status == FSIMG_OK)
-			status = fsimg_source_check_object(writer, fd, &identity, root, error);
+			status = fsimg_source_check_object(writer, &identity, error);
 		if (status == FSIMG_OK)
 			status = scan_entry(writer, root, &identity, image_path, relative_path, error);
 		if (status != FSIMG_OK) {

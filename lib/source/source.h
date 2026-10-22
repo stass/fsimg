@@ -32,7 +32,6 @@ struct fsimg_source_root {
 	fsimg_source_root_t *next;
 	fsimg_host_file_t identity;
 	uint64_t	 id;
-	uint64_t	 mount_id;
 	int		 fd;
 };
 
@@ -86,11 +85,12 @@ fsimg_status_t fsimg_manifest_check_digests(fsimg_writer_t *,
     fsimg_error_t *);
 bool fsimg_source_identity_equal(const fsimg_host_file_t *,
     const fsimg_host_file_t *);
-/* fd is ignored (pass -1) when identity is a symbolic link, which has no
- * descriptor and is checked by identity alone.
+/* Refuse an opened source object that is the output root or the scratch
+ * directory, by device and inode, or of a kind other than a regular file,
+ * a directory or a symbolic link.
  */
-fsimg_status_t fsimg_source_check_object(fsimg_writer_t *, int,
-    const fsimg_host_file_t *, const fsimg_source_root_t *, fsimg_error_t *);
+fsimg_status_t fsimg_source_check_object(fsimg_writer_t *,
+    const fsimg_host_file_t *, fsimg_error_t *);
 /* Read the link parent/name into target, which holds
  * FSIMG_SYMLINK_TARGET_MAX + 1 bytes, without following it. identity
  * describes the link, with length replaced by the bytes read. A target that
@@ -123,14 +123,13 @@ fsimg_status_t fsimg_source_walk(fsimg_writer_t *, const fsimg_source_root_t *,
     char *, fsimg_source_walk_t, int *, char **, fsimg_error_t *);
 /* Open parent/name without following a link, nonblocking and without
  * acquiring a controlling terminal, with O_DIRECTORY when directory is
- * true, inspect the opened object, and check it for the root's device and
- * mount and against the output and scratch directories. An import walk's
+ * true, inspect the opened object, and check it with
+ * fsimg_source_check_object(). An import walk's
  * final name, which a manifest chose, is opened the same way and succeeds
  * only as a regular file. On success *fd is a reserved descriptor the
  * caller releases and *identity describes it.
  */
-fsimg_status_t fsimg_source_open_child(fsimg_writer_t *,
-    const fsimg_source_root_t *, int, const char *, bool, fsimg_source_walk_t,
-    int *, fsimg_host_file_t *, fsimg_error_t *);
+fsimg_status_t fsimg_source_open_child(fsimg_writer_t *, int, const char *,
+    bool, fsimg_source_walk_t, int *, fsimg_host_file_t *, fsimg_error_t *);
 
 #endif

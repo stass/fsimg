@@ -19,8 +19,8 @@
 # with git archive, so nothing built on Linux lands in the working tree and
 # uncommitted changes are not checked. Building the image fetches packages
 # and the revision's gems over the network; the run itself has no network
-# and runs as an unprivileged user. The container's kernel must let statx
-# take a null path for the sandbox profiles to run (docs/build.md).
+# and runs as an unprivileged user. The container's kernel must provide
+# Landlock ABI 3 for the sandbox profiles to run (docs/build.md).
 set -eu
 
 usage() {

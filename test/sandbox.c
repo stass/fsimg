@@ -53,12 +53,8 @@ typedef enum sandbox_attempt {
 	ATTEMPT_OUTPUT_REMOVE_FILE,
 	ATTEMPT_SCRATCH_REMOVE,
 	ATTEMPT_SOURCE_READ,
-	ATTEMPT_SOURCE_MOUNT,
 	ATTEMPT_STATX_PATH,
-	ATTEMPT_STATX_EMPTY_PATH,
-	ATTEMPT_STATX_CWD,
-	ATTEMPT_STATX_HIGH_POINTER,
-	ATTEMPT_STATX_HIGH_FLAGS,
+	ATTEMPT_STATX_DESCRIPTOR,
 	ATTEMPT_OUTSIDE_OPEN,
 	ATTEMPT_PARENT_ESCAPE,
 	ATTEMPT_INPUT_WRITE,
@@ -226,7 +222,6 @@ attempt_operation(sandbox_attempt_t attempt, sandbox_profile_t profile)
 	int fd, result;
 	fsimg_ctx_t *ctx;
 	fsimg_io_t *io;
-	uint64_t mount_id;
 #ifdef __linux__
 	struct statx extended;
 #endif
@@ -279,8 +274,6 @@ attempt_operation(sandbox_attempt_t attempt, sandbox_profile_t profile)
 		if (unlinkat(6, "scratch-file", 0) == -1)
 			return (false);
 		return (mkdirat(6, "scratch-directory", 0700) == -1);
-	case ATTEMPT_SOURCE_MOUNT:
-		return (fsimg_host_mount_id(5, &mount_id) == 0 && mount_id != 0);
 	case ATTEMPT_STATX_PATH:
 #ifdef __linux__
 		return (syscall(__NR_statx, AT_FDCWD, "/etc/passwd", 0,
@@ -288,31 +281,11 @@ attempt_operation(sandbox_attempt_t attempt, sandbox_profile_t profile)
 #else
 		return (true);
 #endif
-	case ATTEMPT_STATX_EMPTY_PATH:
+	case ATTEMPT_STATX_DESCRIPTOR:
+		/* Even a descriptor-only statx is denied; fstat serves. */
 #ifdef __linux__
-		return (syscall(__NR_statx, 5, "", AT_EMPTY_PATH,
-		    STATX_MNT_ID, &extended) == -1 && errno == EPERM);
-#else
-		return (true);
-#endif
-	case ATTEMPT_STATX_CWD:
-#ifdef __linux__
-		return (syscall(__NR_statx, AT_FDCWD, NULL, AT_EMPTY_PATH,
-		    STATX_MNT_ID, &extended) == -1 && errno == EPERM);
-#else
-		return (true);
-#endif
-	case ATTEMPT_STATX_HIGH_POINTER:
-#ifdef __linux__
-		return (syscall(__NR_statx, 5, (void *)(uintptr_t)(UINT64_C(1) << 32),
-		    AT_EMPTY_PATH, STATX_MNT_ID, &extended) == -1 && errno == EPERM);
-#else
-		return (true);
-#endif
-	case ATTEMPT_STATX_HIGH_FLAGS:
-#ifdef __linux__
-		return (syscall(__NR_statx, 5, NULL, (UINT64_C(1) << 32) | AT_EMPTY_PATH,
-		    STATX_MNT_ID, &extended) == -1 && errno == EPERM);
+		return (syscall(__NR_statx, 5, NULL, AT_EMPTY_PATH,
+		    STATX_BASIC_STATS, &extended) == -1 && errno == EPERM);
 #else
 		return (true);
 #endif
@@ -614,9 +587,9 @@ main(void)
 	}
 	CHECK(close(readable) == 0);
 
-	/* A profile the kernel cannot confine, such as a root profile on a
-	 * Linux kernel without descriptor-only mount queries, skips each of
-	 * its attempts; the others still run.
+	/* A profile the kernel cannot confine, such as any profile on a
+	 * Linux kernel without Landlock ABI 3, skips each of its attempts;
+	 * the others still run.
 	 */
 	unsupported_profiles = 0;
 	enforce = false;
@@ -635,7 +608,7 @@ main(void)
 			    manifest };
 
 			if (profile == PROFILE_EXTRACT && (attempt == ATTEMPT_SOURCE_READ ||
-			    attempt == ATTEMPT_SOURCE_MOUNT || attempt == ATTEMPT_SOURCE_WRITE))
+			    attempt == ATTEMPT_SOURCE_WRITE))
 				continue;
 			if (profile != PROFILE_EXTRACT && attempt >= ATTEMPT_MANIFEST_WRITE)
 				continue;

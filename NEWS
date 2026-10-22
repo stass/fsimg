@@ -155,7 +155,7 @@ Private writer collection supports descriptor-relative source-tree scanning,
 zero and provider sources, strict Unicode codecs, and explicit timestamp and
 metadata validity contracts. External catalog ordering assigns stable IDs and
 parent links, validates sibling collisions, and retains paged result records.
-Source reopening validates identity and mount boundaries; one writer-owned
+Source reopening validates identity; one writer-owned
 current source is released on completion, failure, or destruction.
 Several directory or regular-file roots compose one catalog: a directory that
 more than one source supplies merges into one, keeping scanned metadata over a
@@ -192,8 +192,8 @@ no-follow operations, logical output quotas, filesystem-aware selections,
 optional timestamp restoration, and explicit incomplete-output reporting.
 Same-executable workers use bounded framed control, pre-parser confinement
 handshakes, fixed descriptor roles, and a supervised stdout/stderr relay.
-Linux and FreeBSD image/source profiles have actual-kernel attack and mount
-boundary tests; macOS reports its unavailable backend explicitly.
+Linux and FreeBSD image/source profiles have actual-kernel attack tests;
+macOS reports its unavailable backend explicitly.
 
 Automatic FAT geometry stays away from type cutovers following Microsoft's
 interoperability recommendation; explicit sizes retain legal boundary counts.

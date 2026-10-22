@@ -280,13 +280,15 @@ tree twice fails on its first file.
 The coordinator opens every operand before the worker starts, with the same
 no-follow, nonblocking, no-controlling-terminal open as any scanned object,
 so a symbolic link operand fails, and passes the opened roots to the worker
-as its only source authority. Scanning rules apply per root: no mount
-crossing beneath it, type checked before reading, special files rejected.
+as its only source authority. Scanning rules apply per root: type checked
+before reading, special files rejected, and mount points beneath it crossed
+as tar crosses them.
 The creation sandbox has broader source-root authority than the
 image-reading sandbox; read-only access alone does not prevent opening
-device nodes already beneath an authorized root, so adversarial sources
-needing device exclusion use an isolated filesystem with device nodes
-disabled. This [profile limitation](design-security.md#source-root-profile)
+device nodes already beneath an authorized root, a device filesystem
+mounted beneath it included, so adversarial sources needing device
+exclusion use an isolated filesystem with device nodes disabled and no
+descendant mount that allows them. This [profile limitation](design-security.md#source-root-profile)
 is reported with creation capabilities.
 
 | Option | Meaning |

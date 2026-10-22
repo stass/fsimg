@@ -85,13 +85,13 @@ the same programmatic path as any caller's directory, so the driver's
 documented defaults for absent fields apply and host directories the user
 did not name never influence the image.
 
-Every opened descendant must have the root's device and mount identity. Linux
-uses descriptor-based `statx` mount IDs; FreeBSD and macOS use the mount's unique
-`fstatfs` identifier. Unsupported identity queries return an explicit unsupported
-result. Post-open identity checking rejects static descendant mounts, including
-same-filesystem mount aliases, but does not exclude adversarial concurrent mount
-changes or effects of opening a device. Confinement and device-open limits follow
-the [source-root profile](design-security.md#source-root-profile).
+Scanning crosses mount points as tar does: a filesystem mounted beneath a
+root, a bind or nullfs alias included, is authorized content of that root.
+Each opened object is still checked for its kind and against the output and
+scratch identities, on every filesystem. Opening an object can have effects,
+such as those of a device node, before its kind is known. Confinement and
+device-open limits follow the
+[source-root profile](design-security.md#source-root-profile).
 
 Source records contain the root ID, bounded relative host path, device/inode,
 size, modification time, and change time. Directory records retain their
@@ -114,8 +114,9 @@ return `FSIMG_ESOURCE_CHANGED`. These checks are not an atomic snapshot against
 a hostile concurrent writer; callers requiring one provide immutable sources
 or a filesystem snapshot.
 
-The scanner rejects the context's scratch directory by opened identity, including
-an alias of it, before descending. Scratch files are unlinked before source
+The scanner rejects the context's scratch directory by opened identity, its
+device and inode, before descending; an alias that reports another device,
+such as a FreeBSD nullfs mount of it, is not recognized. Scratch files are unlinked before source
 enumeration can import them; source-tree overlap with the authorized scratch
 directory is rejected, rather than excluded by a filename pattern. Output
 staging starts after collection. Output/source identity comparisons consume the

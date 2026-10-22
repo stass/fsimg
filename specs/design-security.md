@@ -196,14 +196,23 @@ type-restricted opening mechanism. The profile still denies networking,
 execution, ioctl access, metadata mutation, and writes outside output/scratch.
 It is named and reported separately from the image-reading profile.
 
-Scanning rejects descendant mounts by comparing each opened object's device and
-native mount identity with its authorized root. An unavailable mount-identity
-query returns unsupported; matching device numbers alone are insufficient for
-same-filesystem mount aliases. Post-open checks do not prevent adversarial mount
-changes during resolution, and the security claim excludes those changes. For
-adversarial source trees requiring device-open exclusion, use an isolated
-source filesystem mounted with device
-nodes disabled, or a tested stronger host mechanism. A supported sandbox in
+Scanning crosses mount points as tar does: a filesystem mounted beneath a
+source root, a bind or nullfs alias included, is authorized content of that
+root, and the source grants already let the worker read it. The mount table
+beneath a root is trusted as the root's ownership is: on a host where an
+unprivileged user may mount, such as FreeBSD with `vfs.usermount` or a FUSE
+filesystem mounted with `allow_other`, that user chooses content the scan
+reads with the invoking user's credentials, or can block it; image a
+snapshot instead. Crossing a network or automounted filesystem performs its
+I/O on the worker's behalf. The opened-object checks still apply on every
+filesystem: only regular files, directories and symbolic links are
+imported, and nothing that is the output or scratch directory by device and
+inode.
+Depth and entry limits bound the traversal; they do not bound a filesystem
+operation that blocks. For adversarial source trees requiring device-open
+exclusion, use an isolated source filesystem mounted with device nodes
+disabled (`nodev`), and no descendant mount that allows them, or a tested
+stronger host mechanism. A supported sandbox in
 `required` mode guarantees the advertised profile, not stronger authority
 restriction than its source roots allow. Capability output and user docs state
 this limitation explicitly.
@@ -248,17 +257,6 @@ other processes, hardlink creation, and unnecessary fd duplication paths are
 not part of the worker profile. New syscall needs require a security review.
 Importing a manifest needs no path-based query: the file it names is opened
 and then checked, as the source-root profile states.
-
-The source profile requires the descriptor-only Linux statx form: a NULL path,
-AT_EMPTY_PATH, and an explicit descriptor other than AT_FDCWD. Setup proves
-that form is supported before restricting the process; an older kernel, one
-before Linux 6.11 and its
-[commit 0ef625bba6fb](https://git.kernel.org/torvalds/c/0ef625bba6fb2bc0c8ed2aab9524fdf423f67dd5)
-("vfs: support statx(..., NULL, AT_EMPTY_PATH, ...)"), reports the source
-profile unavailable. Seccomp checks both halves of the path pointer
-and flags and denies every pathname form. Unconfined library callers retain an
-empty-string fallback for older kernels. FreeBSD source capabilities include
-descriptor mount queries, so mount identity checks require no ambient lookup.
 
 ### macOS
 

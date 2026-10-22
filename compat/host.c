@@ -5,9 +5,6 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#if defined(__APPLE__) || defined(__FreeBSD__)
-#include <sys/mount.h>
-#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -32,7 +29,6 @@
 #endif
 
 #if defined(__linux__)
-#include <linux/stat.h>
 #include <sys/syscall.h>
 #endif
 
@@ -287,50 +283,6 @@ host_identity(const struct stat *st, fsimg_host_file_t *out)
 	out->metadata.valid |= FSIMG_META_CREATED;
 #endif
 	return (0);
-}
-
-int
-fsimg_host_mount_id(int fd FSIMG_UNUSED, uint64_t *out)
-{
-#if defined(__linux__) && defined(__NR_statx) && defined(STATX_MNT_ID)
-	struct statx st;
-	int code;
-
-	bzero(&st, sizeof(st));
-	/* A NULL path permits a sandbox to prove descriptor-only authority from
-	 * scalar syscall arguments. Older unconfined kernels need the empty name.
-	 */
-	code = (int)syscall(__NR_statx, fd, NULL, AT_EMPTY_PATH, STATX_MNT_ID, &st);
-	if (code == -1 && errno == EFAULT)
-		code = (int)syscall(__NR_statx, fd, "", AT_EMPTY_PATH, STATX_MNT_ID, &st);
-	if (code == -1) {
-		if (errno == ENOSYS || errno == EINVAL)
-			errno = ENOTSUP;
-		return (-1);
-	}
-	if ((st.stx_mask & STATX_MNT_ID) == 0) {
-		errno = ENOTSUP;
-		return (-1);
-	}
-	*out = st.stx_mnt_id;
-	return (0);
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-	struct statfs st;
-
-	if (fstatfs(fd, &st) == -1)
-		return (-1);
-	*out = (uint64_t)(uint32_t)st.f_fsid.val[0] << 32 |
-	    (uint32_t)st.f_fsid.val[1];
-	if (*out == 0) {
-		errno = ENOTSUP;
-		return (-1);
-	}
-	return (0);
-#else
-	*out = 0;
-	errno = ENOTSUP;
-	return (-1);
-#endif
 }
 
 int

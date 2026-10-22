@@ -11,19 +11,12 @@ a sandbox SKIP.
 | macOS confinement | Explicit unavailable result, automatic warning before ACK, required refusal, explicit off | Darwin 25.6.0 x86_64, Apple Clang 21.0.0, APFS |
 | Linux confinement | Landlock ABI >= 3, seccomp, image and source workers, forbidden operations | Debian 13, Linux 6.12.113+deb13-amd64 x86_64, Clang 19.1.7, ext4 |
 | FreeBSD confinement | Capsicum descriptor/ioctl/fcntl rights, image and source workers, forbidden operations | FreeBSD 15.1-RELEASE-p5/UFS and user-provided FreeBSD 16.0-CURRENT/ZFS, amd64, Clang 19.1.7 |
-| Source mount boundaries | Required-confined scans reject live descendant mount aliases before PLAN | Linux bind mount with equal device IDs; FreeBSD nullfs mount with distinct FSIDs |
 | Regular-file publication | Exclusive hardlink, staged unlink, directory syncs, failure/race reporting | APFS, ext4, UFS, ZFS; UFS immediate-reader identity qualification remains open |
 
 Linux and FreeBSD 15.1 run in local QEMU guests booted from checksum-verified
 upstream images. The user-provided FreeBSD host is 16.0-CURRENT, kernel
 `main-n285245-975e3605ebb1`, on ZFS; it runs the primary native FreeBSD checks.
-The library and ordinary suites run unprivileged. Only the
-separate mount qualification prepares bind/nullfs fixtures with guest root;
-its scanner remains unprivileged. Both fixtures preserve outside sentinel
-bytes. Linux reports devices 65025/65025 and mount IDs 29/68; FreeBSD reports
-devices 61/687931137 and FSID-derived mount IDs
-7650454420974902357/2954641735315095593. These IDs identify those live fixtures,
-not stable identifiers across boots.
+The library and ordinary suites run unprivileged.
 
 The ordinary suite contains twenty-six tests. macOS reports twenty-three passes
 and three explicit skips (unavailable backend, Linux-only setup-fault harness,
@@ -174,33 +167,21 @@ and [seccomp](https://docs.kernel.org/userspace-api/seccomp_filter.html)
 contracts. Actual libc syscall compatibility remains part of kernel testing.
 
 The library's source scanner uses bounded native directory batches (`getdents64`,
-`getdirentries`, or `getattrlistbulk`) and descriptor mount queries. Linux
-`statx` with `STATX_MNT_ID` distinguishes same-filesystem bind mounts; FreeBSD
-and macOS use each live mount's `fstatfs` FSID. Unsupported identity queries are
-explicit errors. Actual source tests on all three hosts exercise native enumeration and
+`getdirentries`, or `getattrlistbulk`) and crosses mount points as tar does.
+Actual source tests on all three hosts exercise native enumeration and
 reopening. Linux and FreeBSD also execute the source scan inside required
-confinement, including the descendant-mount rejection fixtures above. This
-does not qualify hostile concurrent mount races.
+confinement.
 
 The native macOS compiler reports a 20-byte `attribute_set_t` and an 8-byte
 `attrreference_t`. A real `getattrlistbulk` batch decodes its name reference at
 offset 24, after the length and returned attribute set. The parser derives
 these offsets from the SDK types; see Apple's
 [attribute definitions](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/sys/attr.h).
-FreeBSD's [nullfs mount implementation](https://raw.githubusercontent.com/freebsd/freebsd-src/main/sys/fs/nullfs/null_vfsops.c)
-allocates a fresh FSID and retains it during `statfs`; the
-[VFS allocator](https://raw.githubusercontent.com/freebsd/freebsd-src/main/sys/kern/vfs_subr.c)
-checks live mount IDs for collisions. Source inspection supports the mechanism
-choice; the live nullfs fixture provides separate kernel execution evidence.
 
 Confined source scans adopt prepared source and scratch descriptors without
-requiring duplication after restriction. Linux preflights the descriptor-only
-`statx(fd, NULL, AT_EMPTY_PATH, STATX_MNT_ID, ...)` form before installing the
-profile. The filter accepts only a null pointer (both halves), exact
-`AT_EMPTY_PATH`, and a descriptor other than `AT_FDCWD`. Older kernels lacking
-that form report the source profile unavailable before restriction. Pathname,
-empty-string, high-pointer-half, and high-flags-half bypass attempts are denied
-in the kernel tests. FreeBSD grants `CAP_FSTATFS` only for the source role.
+requiring duplication after restriction. The Linux filter denies `statx` in
+every form, the descriptor-only one included; the kernel tests check a
+pathname and a descriptor-only attempt.
 
 Worker descriptor cleanup uses macOS close-on-exec-default spawn policy or
 `posix_spawn_file_actions_addclosefrom_np` on Linux and FreeBSD. Failure to
@@ -212,7 +193,7 @@ either closes that descriptor or refuses to claim success.
 FreeBSD limits input to reading/seek/stat and flag inspection, output roots to
 creation/read/write/seek/stat/sync/truncation, scratch roots additionally to
 removal, and optional source roots
-to lookup/read/seek/stat/mount identity. No ioctl or metadata-mutation right is
+to lookup/read/seek/stat. No ioctl or metadata-mutation right is
 granted; input timestamp mutation is explicitly tested and denied.
 The prototype requires no inherited sockets or executable descriptors. Capsicum
 blocks ambient namespace access, as specified by

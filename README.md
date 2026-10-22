@@ -10,8 +10,8 @@ bounded metadata storage with record streams, paged arrays/bitsets, and stable
 external sorting. Private writer infrastructure scans host trees, reads zero
 and provider-backed sources, and prepares deterministic catalogs without a
 resident object or descriptor per entry. Source scanning records symbolic
-links by target without following them and rejects special files, descendant
-mounts, and scratch-directory overlap; identity checks
+links by target without following them, crosses mount points as tar does,
+and rejects special files and scratch-directory overlap; identity checks
 detect changes visible in host metadata; coarse timestamps and metadata-preserving
 mutation require immutable sources or a snapshot for consistency. Public
 FAT12/FAT16/FAT32/exFAT readers enumerate entries,

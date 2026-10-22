@@ -53,7 +53,7 @@ _Static_assert(CLAIM_LINE + 8u == CLAIM_LINE_OFFSET &&
  *
  * The root starts descriptorless. The caller's content directory, when
  * offered, is held as a candidate and becomes the root's descriptor, with
- * its identity and mount, only when the first entry needing host bytes is
+ * its identity, only when the first entry needing host bytes is
  * parsed; a manifest of generated files never touches it and closes it at
  * the end, so it behaves the same with or without one. Without a candidate
  * an entry needing host bytes is refused.
@@ -661,8 +661,8 @@ import_host_file(manifest_import_t *import, const fsimg_mtree_entry_t *entry,
 	    reference, import->root, error));
 }
 
-/* The root takes the candidate's identity and mount the first time an
- * entry needs host bytes; every later contents path is walked beneath it.
+/* The root takes the candidate's identity the first time an entry needs
+ * host bytes; every later contents path is walked beneath it.
  */
 static fsimg_status_t
 adopt_content_directory(manifest_import_t *import, fsimg_error_t *error)
@@ -670,9 +670,7 @@ adopt_content_directory(manifest_import_t *import, fsimg_error_t *error)
 	fsimg_writer_t *writer = import->writer;
 	fsimg_source_root_t *root = import->root;
 	fsimg_host_file_t identity;
-	uint64_t mount_id;
 	fsimg_status_t status;
-	int saved;
 
 	if (root->fd != -1)
 		return (FSIMG_OK);
@@ -682,19 +680,11 @@ adopt_content_directory(manifest_import_t *import, fsimg_error_t *error)
 	if (fsimg_host_file(import->candidate, &identity) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_SOURCE, "content directory inspection failed"));
-	status = fsimg_source_check_object(writer, import->candidate, &identity,
-	    NULL, error);
+	status = fsimg_source_check_object(writer, &identity, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (fsimg_host_mount_id(import->candidate, &mount_id) == -1) {
-		saved = errno;
-		return (fsimg_error_set(error, saved == ENOTSUP ?
-		    FSIMG_EUNSUPPORTED : FSIMG_EIO, saved, FSIMG_OP_SOURCE,
-		    "content directory mount identity is unavailable"));
-	}
 	root->fd = import->candidate;
 	root->identity = identity;
-	root->mount_id = mount_id;
 	import->candidate = -1;
 	return (FSIMG_OK);
 }
@@ -726,7 +716,7 @@ inspect_contents_path(manifest_import_t *import, const char *relative,
 	    FSIMG_WALK_IMPORT, &parent, &name, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_source_open_child(writer, root, parent, name, false,
+	status = fsimg_source_open_child(writer, parent, name, false,
 	    FSIMG_WALK_IMPORT, &fd, identity, error);
 	if (parent != root->fd)
 		fsimg_fd_release(writer->ctx, parent);

@@ -110,15 +110,6 @@ The coordinator prepares capabilities, supervises output and publishes
 completed images without replacement.
 The default sandbox policy uses available OS confinement and warns if
 unavailable.
-On Linux, confining creation, including a dry run, also needs a kernel whose
-.Xr statx 2
-accepts a null path with
-.Dv AT_EMPTY_PATH ,
-as Linux 6.11 and later do; on an older kernel creation runs unconfined with
-a warning, and
-.Fl S Cm required
-refuses it.
-Reading and extraction do not depend on that query.
 Unexpected confinement failures never trigger an unrestricted retry.
 The library API does not sandbox its embedding application.
 .Sh COMMON OPTIONS
@@ -817,8 +808,12 @@ A symbolic link is recorded with its target, which is never followed; a target
 longer than 1023 bytes fails.
 The Linux sandbox denies the worker the path-based queries that read a link,
 so a confined Linux import of a tree containing one fails as unsupported.
-Import rejects special files, including FIFOs, descendant mount crossings and
-encounters with its own scratch or staging trees.
+Import rejects special files, including FIFOs, and encounters with its own
+scratch or staging trees.
+Like
+.Xr tar 1 ,
+it crosses mount points: a filesystem mounted beneath an operand is imported
+as part of it.
 Hardlinked host files are copied as independent files.
 Keep source trees stable; hostile mutation requires immutable storage or a
 snapshot.
@@ -832,8 +827,10 @@ with
 on FAT and exFAT, is an optional loss counted in the usual notice and does not
 change the image bytes.
 The source-root sandbox cannot universally prevent opening device nodes already
-within its authority; use isolated source storage when that exclusion is
-required.
+within its authority, a device file system mounted beneath an operand
+included: a node is opened before its kind is refused.
+Use isolated source storage mounted without devices, with no mount beneath it
+that allows them, when that exclusion is required.
 .Pp
 The image file is created only after planning.
 Payloads are copied once to private staging on the destination filesystem.

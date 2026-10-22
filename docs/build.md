@@ -779,9 +779,10 @@ confirmation, and incomplete extraction. The extractor counts logical length
 before creating holes; format-specific initialized-data tails receive their
 own driver regressions.
 
-The separate actual-kernel mount fixture needs root only to mount a disposable
-alias. Run the test itself as an ordinary user, and always unmount before
-removing the fixture:
+The separate actual-kernel mount fixture checks that a confined scan crosses
+a mount point beneath a source root. It needs root only to mount a
+disposable alias. Run the test itself as an ordinary user, and always
+unmount before removing the fixture:
 
 ```sh
 fixture=$(mktemp -d)
@@ -833,11 +834,10 @@ installs current packages on every run. When a result differs from CI,
 refresh the toolchain: `docker pull ubuntu:24.04` and
 `docker image prune -a --filter label=fsimg-linux-check` make the next check
 rebuild the image from current packages.
-It needs Docker, for example through colima. For the Linux sandbox's
-source-root profiles to run rather than skip, and so for confined creation,
-the Docker VM's kernel must accept `statx` with a null path and
-`AT_EMPTY_PATH`: Ubuntu 24.04's stock 6.8 kernel returns
-`EFAULT` for it, and its `linux-generic-hwe-24.04` kernel (7.0) accepts it.
+It needs Docker, for example through colima. For the Linux sandbox
+profiles to run rather than skip, the Docker VM's kernel must provide
+Landlock ABI 3 (Linux 6.2 or later), as Ubuntu 24.04's stock 6.8 kernel
+does.
 
 Configure searches the standard system sbin directories for formatter/checker
 tools. Linux runs dosfstools/mtools and exfatprogs interoperability in its

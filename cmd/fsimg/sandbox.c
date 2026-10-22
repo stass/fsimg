@@ -27,7 +27,6 @@ static fsimg_status_t check_roles(const fsimg_sandbox_caps_t *, fsimg_error_t *)
 #include <linux/filter.h>
 #include <linux/landlock.h>
 #include <linux/seccomp.h>
-#include <linux/stat.h>
 
 /* Unknown architectures are unavailable, never a partially checked ABI. */
 #if defined(__x86_64__)
@@ -104,30 +103,8 @@ install_filter(void)
 		BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, O_PATH, 1, 0),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		/* The final gate permits only statx(fd, NULL, AT_EMPTY_PATH, ...).
-		 * Pointer halves are checked separately; AT_FDCWD would grant cwd
-		 * metadata instead of metadata for a prepared descriptor.
-		 */
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_statx, 1, 0),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
-		    offsetof(struct seccomp_data, args[1]) + sizeof(uint32_t)),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2])),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AT_EMPTY_PATH, 1, 0),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
-		    offsetof(struct seccomp_data, args[2]) + sizeof(uint32_t)),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)AT_FDCWD, 0, 1),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+		/* Every other call, statx and fstatat among them, is denied. */
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM)
 	};
 	struct sock_fprog program;
 
@@ -304,7 +281,6 @@ fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
 		    LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_TRUNCATE |
 		    LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_REMOVE_FILE }
 	};
-	struct statx mount_query = { 0 };
 	struct stat st;
 	int abi, ruleset, saved;
 #elif defined(__FreeBSD__)
@@ -328,18 +304,6 @@ fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
 	if (abi < 3)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_CONTEXT, "Landlock ABI 3 required"));
-	if (caps->root_count != 0) {
-		if (syscall(__NR_statx, caps->roots, NULL, AT_EMPTY_PATH,
-		    STATX_MNT_ID, &mount_query) == -1) {
-			if (errno == EFAULT || errno == ENOSYS || errno == EINVAL)
-				return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, errno,
-				    FSIMG_OP_CONTEXT, "descriptor-only mount queries unavailable"));
-			goto linux_fail;
-		}
-		if ((mount_query.stx_mask & STATX_MNT_ID) == 0)
-			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-			    FSIMG_OP_CONTEXT, "descriptor mount identity unavailable"));
-	}
 	ruleset = (int)syscall(__NR_landlock_create_ruleset, &rules,
 	    sizeof(rules), 0);
 	if (ruleset == -1)
@@ -421,8 +385,8 @@ linux_fail:
 		}
 	}
 	for (unsigned i = 0; i < caps->root_count; i++) {
-		cap_rights_init(&rights, CAP_READ, CAP_LOOKUP, CAP_FSTAT, CAP_FSTATFS,
-		    CAP_SEEK, CAP_FCNTL);
+		cap_rights_init(&rights, CAP_READ, CAP_LOOKUP, CAP_FSTAT, CAP_SEEK,
+		    CAP_FCNTL);
 		if (restrict_descriptor(caps->roots + (int)i, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
 	}

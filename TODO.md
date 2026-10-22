@@ -423,6 +423,14 @@
 
 ## Security residuals
 
+* [Medium] **Confined workers may fail `fstat` under glibc 2.33 to 2.38**
+  (`cmd/fsimg/sandbox.c` `install_filter`): those glibc releases implement
+  `fstat` on x86_64 and aarch64 as `newfstatat(fd, "", AT_EMPTY_PATH)`,
+  which the seccomp filter denies, so a confined worker on Debian 12,
+  Ubuntu 22.04 or RHEL 9 may see `EPERM` from every `fstat`. Inferred from
+  glibc's sources, not run; glibc 2.39 (CI) passes. Run the sandbox suite on
+  such a distribution, and if it fails, call the `fstat` syscall directly
+  through `compat/`; seccomp cannot tell an empty path from another one.
 * [High] **Symbolic-link import under the Linux sandbox** (`cmd/fsimg/sandbox.c`,
   `lib/source/source.c`, `specs/design-security.md`): the source scan reads a
   link with `fstatat(AT_SYMLINK_NOFOLLOW)` and `readlinkat()`, which the
@@ -447,21 +455,6 @@
   test it on Linux with the sandbox active, including forged worker requests.
   FreeBSD Capsicum permits both calls: a confined `create -S required` reads
   ordinary and dangling links (verified on FreeBSD 16.0-CURRENT).
-* [Medium] **Confined creation on Linux kernels without null-path `statx`**
-  (`cmd/fsimg/sandbox.c` `fsimg_sandbox_install_caps()`,
-  `lib/source/source.c`, `compat/host.c` `fsimg_host_mount_id()`): the
-  worker checks each source object's mount against its root's with
-  `statx(fd, NULL, AT_EMPTY_PATH, STATX_MNT_ID)`, the only `statx` form the
-  seccomp filter admits, and kernels before 6.11 reject a null path, so
-  setup reports the source profile unavailable and creation runs unconfined
-  with a warning (`-S required` refuses). That covers current LTS kernels
-  that have Landlock ABI 3, such as Ubuntu 24.04's stock 6.8, hence Medium:
-  confined creation is unavailable on many supported Linux hosts. Design
-  question: the coordinator could take each root's mount ID before the
-  worker starts, and the worker would then need another way to detect a
-  mount crossing beneath a root, such as a per-directory check that a
-  child's device and inode do not belong to a mount point, without a
-  path-based query.
 * [Medium] **The library's own directories skip the other-writer check**
   (`lib/output/write.c` `create_staging`, `lib/extract/extract.c`
   `fsimg_extract_at`): `fsimg_writer_write_at()` and transcoding stage
@@ -544,8 +537,7 @@
   `lib/source/generated.c`, `test/manifest.c`) and the `c` mode's `@file`
   operand (`cmd/fsimg/paths.c`, `cmd/fsimg/worker-child.c`, `test/cli.py`)
   and `x --mtree=FILE` (`lib/extract/mtree-writer.c`) exist. What remains
-  is a content-path test across a nested mount where the host allows one;
-  reading the manifest `x --mtree` writes with `mtree(8)` on FreeBSD and
+  is reading the manifest `x --mtree` writes with `mtree(8)` on FreeBSD and
   Linux (`test/manifest.c` checks it with bsdtar only); the refusal of an
   empty, overlong or NUL-holding link target (`record_skipped`), which
   needs a crafted image since the writers refuse such targets; FILE

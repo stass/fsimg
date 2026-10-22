@@ -71,8 +71,6 @@ int fsimg_host_link(int, const char *, fsimg_host_file_t *);
  * regular file unchanged.
  */
 int fsimg_host_source_open(int, const char *, bool);
-/* Descriptor-based mount identity; ENOTSUP means no enforceable identity. */
-int fsimg_host_mount_id(int, uint64_t *);
 /* Directory readers use only the supplied buffer, never a libc DIR buffer.
  * Names borrow that buffer until its next fill. Malformed host records fail.
  */
