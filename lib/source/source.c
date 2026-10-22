@@ -188,22 +188,18 @@ fsimg_status_t
 fsimg_source_check_object(fsimg_writer_t *writer,
     const fsimg_host_file_t *identity, fsimg_error_t *error)
 {
-	fsimg_host_file_t scratch;
+	const fsimg_ctx_t *ctx = writer->ctx;
 
 	if (writer->output_root_known &&
 	    identity->device == writer->output_root.device &&
 	    identity->inode == writer->output_root.inode)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_SOURCE, "source tree encounters its output directory"));
-	if (writer->ctx->options.scratch_directory_fd != -1) {
-		if (fsimg_host_file(writer->ctx->options.scratch_directory_fd,
-		    &scratch) == -1)
-			return (fsimg_error_set(error, FSIMG_EIO, errno,
-			    FSIMG_OP_SOURCE, "scratch identity inspection failed"));
-		if (identity->device == scratch.device && identity->inode == scratch.inode)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_SOURCE, "source tree encounters its scratch directory"));
-	}
+	if (ctx->options.scratch_directory_fd != -1 &&
+	    identity->device == ctx->scratch_device &&
+	    identity->inode == ctx->scratch_inode)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_SOURCE, "source tree encounters its scratch directory"));
 	if (identity->kind != FSIMG_HOST_FILE && identity->kind != FSIMG_HOST_DIRECTORY &&
 	    identity->kind != FSIMG_HOST_LINK)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
@@ -818,6 +814,7 @@ fsimg_source_read(fsimg_writer_t *writer, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
 	fsimg_source_cursor_t *source;
+	fsimg_error_t detail;
 	fsimg_status_t status;
 	size_t remaining;
 
@@ -837,9 +834,6 @@ fsimg_source_read(fsimg_writer_t *writer, uint64_t offset, void *buffer,
 	    (size_t)(source->length - offset) : length;
 	if (remaining == 0)
 		return (FSIMG_OK);
-	status = source_validate(source, error);
-	if (status != FSIMG_OK)
-		return (source_abort(source, status));
 	if (source->storage == FSIMG_STORAGE_ZERO) {
 		bzero(buffer, remaining);
 		*transferred = remaining;
@@ -850,12 +844,26 @@ fsimg_source_read(fsimg_writer_t *writer, uint64_t offset, void *buffer,
 	} else {
 		status = fsimg_io_read_exact(source->io, offset, buffer, remaining,
 		    transferred, error);
+		/* Identity is validated at open and at finish, not around each
+		 * read, so the bytes read are trusted only once finish succeeds.
+		 * A read that fails with an I/O error, such as one cut short by
+		 * truncation, reports a changed file as changed instead, keeping
+		 * where the read stopped.
+		 */
+		if (status == FSIMG_EIO) {
+			fsimg_error_clear(&detail);
+			if (source_validate(source, &detail) == FSIMG_ESOURCE_CHANGED) {
+				status = FSIMG_ESOURCE_CHANGED;
+				if (error != NULL) {
+					detail.offset = error->offset;
+					detail.offset_valid = error->offset_valid;
+					*error = detail;
+				}
+			}
+		}
 		if (status != FSIMG_OK)
 			return (source_abort(source, status));
 	}
-	status = source_validate(source, error);
-	if (status != FSIMG_OK)
-		return (source_abort(source, status));
 	/* Only a read continuing the hashed prefix extends it; finishing
 	 * tells a prefix that stopped short from one that covers the file.
 	 */

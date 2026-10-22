@@ -179,6 +179,18 @@ fsimg_options_init(fsimg_options_t *opts)
 	opts->scratch_directory_fd = -1;
 }
 
+/* Hold fd as the context's scratch directory, together with its identity,
+ * which stays fixed while the descriptor is held; the source scanner
+ * compares objects against it.
+ */
+static void
+take_scratch(fsimg_ctx_t *ctx, int fd, uint64_t device, uint64_t inode)
+{
+	ctx->options.scratch_directory_fd = fd;
+	ctx->scratch_device = device;
+	ctx->scratch_inode = inode;
+}
+
 fsimg_status_t
 fsimg_ctx_new(const fsimg_options_t *opts, fsimg_ctx_t **out,
     fsimg_error_t *error)
@@ -258,7 +270,7 @@ fsimg_ctx_new(const fsimg_options_t *opts, fsimg_ctx_t **out,
 			    FSIMG_OP_CONTEXT, "scratch descriptor duplication failed");
 			goto fail;
 		}
-		ctx->options.scratch_directory_fd = fd;
+		take_scratch(ctx, fd, (uint64_t)st.st_dev, (uint64_t)st.st_ino);
 	}
 	*out = ctx;
 	return (FSIMG_OK);
@@ -296,7 +308,7 @@ fsimg_ctx_adopt_scratch(fsimg_ctx_t *ctx, int fd, fsimg_error_t *error)
 		    FSIMG_OP_CONTEXT, "scratch adoption requires a directory");
 		goto fail;
 	}
-	ctx->options.scratch_directory_fd = fd;
+	take_scratch(ctx, fd, identity.device, identity.inode);
 	return (FSIMG_OK);
 fail:
 	fsimg_fd_release(ctx, fd);

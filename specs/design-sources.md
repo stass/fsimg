@@ -103,8 +103,11 @@ reopening, and the registry keeps ownership. The writer embeds one current
 source; its I/O handle owns a reopened file's descriptor. Opening accepts a stable catalog ID, reads and validates the
 catalog-owned source fields, and copies the scalar reference before reusing the
 source-record buffer for host reopening. A second open while active fails without
-disturbing that source. The file is validated before and after bounded reads,
-and at completion, including empty files. Failure, completion, and destruction
+disturbing that source. The file is validated when it opens and when its
+copy finishes, including empty and zero-only files, not around each bounded
+read: a change in between surfaces at finish, and a read that fails, such as
+one cut short by truncation, reports a file that changed as changed. Reads
+are bounded by the declared length and must be exact. Failure, completion, and destruction
 release it. No descriptor or heap object is retained per file. During emission
 the alias preflight and the [source copy operation](design-emission.md#source-copy)
 are the only callers of source access; format drivers never open, read, or

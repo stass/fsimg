@@ -36,7 +36,8 @@ struct fsimg_source_root {
 };
 
 /* Source state is embedded in the writer; callers retain no cursor handle.
- * Finish validates after the final read and closes it on every outcome.
+ * Open and finish validate the source, reads do not, so the bytes read are
+ * trusted only once finish succeeds; finish closes it on every outcome.
  * Writer failure/destruction also closes it. Source records have a separate
  * buffer, so source operations preserve the catalog's current snapshot.
  * Reads within the declared length are exact or fail; a request crossing it

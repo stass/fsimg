@@ -52,6 +52,12 @@ struct fsimg_ctx {
 	uint64_t	 allocation_attempts;
 	uint64_t	 fail_allocation;
 	fsimg_meta_cache_t *meta_cache;
+	/* The owned scratch directory's identity, fixed while its descriptor
+	 * options.scratch_directory_fd is held; valid when that is not -1.
+	 * take_scratch() in context.c sets all three together.
+	 */
+	uint64_t	 scratch_device;
+	uint64_t	 scratch_inode;
 	uint64_t	 scratch_sequence;
 	uint64_t	 meta_fault_after;
 	uint32_t	 meta_cache_pages;

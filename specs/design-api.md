@@ -239,7 +239,8 @@ The provider operations are `validate(argument, id, error)`,
 `read_at(argument, id, offset, buffer, length, transferred, error)`, and optional
 `next_range(argument, id, offset, range, error)`. They use the same status and
 partial-I/O rules as byte adapters. Validation checks the caller's immutable
-source contract before and after copying. An absent range callback means all
+source contract before and after copying, and once more after a read that
+fails with an I/O error, so that a changed source is reported as changed. An absent range callback means all
 declared bytes are data. A zero source requires no backing allocation.
 
 The provider table is copied; its argument and externally owned content remain

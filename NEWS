@@ -181,7 +181,7 @@ is an unrecognized format rather than a corrupt FAT volume.
 FAT12, FAT16, and FAT32 writers provide immutable paged layout plans, automatic
 and exact geometry, free-space reserves, deterministic short aliases and
 long names, explicit timestamp-loss reporting, and reproducible emission.
-Sources copy directly into the destination image with validation around reads.
+Sources copy directly into the destination image with validation around copying.
 Known source aliases are rejected before output mutation, including hardlinks
 and slices. Private fresh output preserves sparse zero space; reused sinks are
 explicitly initialized. Durable file publication never replaces an existing

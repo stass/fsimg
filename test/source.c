@@ -392,18 +392,24 @@ test_provider(void)
 		CHECK(fsimg_source_range(fixture.writer, 0, &range, NULL) == FSIMG_OK);
 		CHECK(range.offset == 0 && range.length == 1 && range.kind == FSIMG_RANGE_DATA);
 		status = fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes), &count, &error);
-		if (script <= PROVIDER_PARTIAL_INTERRUPTION) {
+		if (script <= PROVIDER_PARTIAL_INTERRUPTION ||
+		    script == PROVIDER_CHANGED) {
 			CHECK(status == FSIMG_OK && count == sizeof(bytes));
 			for (size_t i = 0; i < count; i++)
 				CHECK(bytes[i] == i + 7);
 			CHECK(fsimg_source_read(fixture.writer, 16, bytes, 1, &count, NULL) == FSIMG_OK);
 			CHECK(count == 0);
-			CHECK(fsimg_source_finish(fixture.writer, NULL) == FSIMG_OK);
-			CHECK(fixture.validations == 4);
+			/* Validation runs at open and at finish, not around each
+			 * read, so a change during the copy surfaces at finish.
+			 */
+			CHECK(fsimg_source_finish(fixture.writer, NULL) ==
+			    (script == PROVIDER_CHANGED ? FSIMG_ESOURCE_CHANGED : FSIMG_OK));
+			CHECK(fixture.validations == 2);
 		} else {
-			CHECK(status == (script == PROVIDER_CHANGED ? FSIMG_ESOURCE_CHANGED : FSIMG_EIO));
-			CHECK(count == (script == PROVIDER_PARTIAL_ERROR ? 2u :
-			    script == PROVIDER_CHANGED ? sizeof(bytes) : 0u));
+			CHECK(status == FSIMG_EIO);
+			CHECK(count == (script == PROVIDER_PARTIAL_ERROR ? 2u : 0u));
+			/* Open, and once more to classify the failed read. */
+			CHECK(fixture.validations == 2);
 			CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
 			CHECK(fixture.writer->catalog_ready);
 		}
@@ -477,11 +483,43 @@ test_host_tree(void)
 	fixture_close(&fixture);
 }
 
+/* A scratch directory the context adopts after it was made, as the worker's
+ * is, is refused as source content like one given at creation.
+ */
+static void
+test_adopted_scratch(void)
+{
+	fsimg_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_error_t error;
+	fsimg_ctx_t *ctx;
+	int parent, scratch;
+
+	parent = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(parent != -1);
+	CHECK(mkdirat(parent, "adopted-scratch", 0700) == 0);
+	scratch = openat(parent, "adopted-scratch", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(scratch != -1);
+	fsimg_options_init(&options);
+	options.memory_bytes = 16 * 1024 * 1024;
+	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_fd_reserve(ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_adopt_scratch(ctx, scratch, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_collect_new(ctx, &writer, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add_tree(writer, scratch, "/", &error) == FSIMG_EINVAL);
+	CHECK(strstr(error.message, "scratch directory") != NULL);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(ctx);
+	CHECK(unlinkat(parent, "adopted-scratch", AT_REMOVEDIR) == 0);
+	CHECK(close(parent) == 0);
+}
+
 static void
 test_mutation(void)
 {
 	source_fixture_t fixture;
 	const fsimg_catalog_entry_t *entry;
+	fsimg_error_t error;
 	char bytes[16];
 	size_t count;
 	int fd;
@@ -503,8 +541,13 @@ test_mutation(void)
 			CHECK(ftruncate(fd, 1) == 0);
 			CHECK(close(fd) == 0);
 			if (scenario == 1) {
-				CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes), &count, NULL) == FSIMG_ESOURCE_CHANGED);
-				CHECK(count == 0);
+				/* The read stops at the new end, and the file
+				 * is reported changed rather than short.
+				 */
+				CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes), &count, &error) == FSIMG_ESOURCE_CHANGED);
+				CHECK(count == 1);
+				CHECK(error.status == FSIMG_ESOURCE_CHANGED &&
+				    error.operation == FSIMG_OP_SOURCE && error.offset_valid);
 			} else {
 				CHECK(fsimg_source_finish(fixture.writer, NULL) == FSIMG_ESOURCE_CHANGED);
 			}
@@ -547,6 +590,7 @@ test_rejection(void)
 	    fixture.ctx->options.scratch_directory_fd, "/", &error) == FSIMG_EINVAL);
 	CHECK(fixture.writer->roots == NULL);
 	fixture_close(&fixture);
+	test_adopted_scratch();
 	fixture_open(&fixture);
 	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.parent, "/", &error) == FSIMG_EINVAL);
 	CHECK(fixture.writer->roots == NULL);
@@ -886,10 +930,16 @@ test_file_root_changes(void)
 			set_modified(fixture.parent, "single", 2000);
 		}
 
-		if (cases[i].while_open)
+		/* While open, the declared bytes still read; finish sees the
+		 * change.
+		 */
+		if (cases[i].while_open) {
 			CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes),
-			    &count, NULL) == FSIMG_ESOURCE_CHANGED);
-		else
+			    &count, NULL) == FSIMG_OK);
+			CHECK(count == strlen("original"));
+			CHECK(fsimg_source_finish(fixture.writer, NULL) ==
+			    FSIMG_ESOURCE_CHANGED);
+		} else
 			CHECK(fsimg_source_open(fixture.writer, entry->id, NULL) ==
 			    FSIMG_ESOURCE_CHANGED);
 		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
@@ -1212,8 +1262,10 @@ test_provider_work_limit(void)
 	fixture_open(&fixture);
 	configure_provider(&fixture, sizeof(bytes));
 	CHECK(fsimg_source_open(fixture.writer, fixture.provider_entry.id, NULL) == FSIMG_OK);
-	/* One validation and one short callback exhaust the cumulative allowance. */
-	fixture.ctx->options.max_work = fixture.writer->session.progress.work + 2;
+	/* One short callback exhausts the cumulative allowance; reads are not
+	 * validated, so they charge nothing else.
+	 */
+	fixture.ctx->options.max_work = fixture.writer->session.progress.work + 1;
 	CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes), &count, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_WORK && count == 2 && fixture.calls == 1);
 	fixture.ctx->options.max_work = 0;
@@ -1223,7 +1275,7 @@ test_provider_work_limit(void)
 	configure_provider(&fixture, sizeof(bytes));
 	CHECK(fsimg_source_open(fixture.writer, fixture.provider_entry.id, NULL) == FSIMG_OK);
 	fixture.script = PROVIDER_REPEATED_INTERRUPTION;
-	fixture.ctx->options.max_work = fixture.writer->session.progress.work + 4;
+	fixture.ctx->options.max_work = fixture.writer->session.progress.work + 3;
 	CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes), &count, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_WORK && count == 0 && fixture.calls == 3);
 	fixture.ctx->options.max_work = 0;
