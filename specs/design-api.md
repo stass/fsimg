@@ -162,7 +162,10 @@ with `FSIMG_ESOURCE_CHANGED` when the file is observed shorter than its
 declared length, and answers nothing once the sync fails, as the
 [hole design](design-holes.md#external-files-the-hosts-report) states;
 under Capsicum a descriptor needs `CAP_FSYNC` for that, and without it the
-file is simply read in full. Writable, it answers nothing; zeroing never
+file is simply read in full. Its hole queries seek the file offset the
+descriptor shares with the caller's and restore it before returning, so
+nothing else may use that offset while an operation reads the object.
+Writable, it answers nothing; zeroing never
 consults a hole report, and a sink without a fresh file's record is zeroed
 in full.
 A slice borrows its parent, retains backing identity/ranges for alias checks,

@@ -315,12 +315,12 @@ run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile)
 
 #ifdef __FreeBSD__
 /*
- * The Capsicum rights hole knowledge relies on: the read job's image
- * input may sync before its object asks the host for holes, the raw
- * intermediate keeps CAP_FSYNC for the writer's flush of its sink, and the
- * spool, which answers its zero ranges from its own record and is never
- * flushed, cannot sync in capability mode. Returns 77 when the kernel
- * lacks Capsicum.
+ * The Capsicum sync rights the worker installs: the raw intermediate
+ * keeps CAP_FSYNC for the writer's flush of its sink, while the spool,
+ * which answers its zero ranges from its own record and is never flushed,
+ * and the read job's image input, which no read job asks for zero ranges,
+ * cannot sync in capability mode. Returns 77 when the kernel lacks
+ * Capsicum.
  */
 static int
 test_sync_rights(int parent, int input)
@@ -359,7 +359,7 @@ test_sync_rights(int parent, int input)
 			_exit(3);
 		if (fsync(4) != -1 || errno != ENOTCAPABLE)
 			_exit(4);
-		if (fsync(5) != 0)
+		if (fsync(5) != -1 || errno != ENOTCAPABLE)
 			_exit(5);
 		_exit(0);
 	}

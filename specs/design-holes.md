@@ -299,8 +299,11 @@ external object answers from the host's report, `fsimg_host_next_hole` in
 the compatibility layer: `lseek(SEEK_HOLE)` from the offset, then
 `lseek(SEEK_DATA)` from the hole's start, then `fstat` for the file's
 current length, mapped onto the contract as the hole `[start, end)`. The
-query moves the descriptor's file position, which positional I/O never
-uses. A writable external object, a sink an application supplies, answers
+query moves the file offset the descriptor shares with the application's
+and restores it before returning; positional I/O never uses it, and the
+contract is that nothing else uses that offset while an operation reads
+the object, since another user of the same open file description could
+observe the moved offset. A writable external object, a sink an application supplies, answers
 nothing: nothing asks a sink for reads, and read-only is what makes the
 object a source.
 
@@ -373,11 +376,14 @@ output, which the writer requires and whose failure fails the operation,
 and cancellation, which the operation polls, are outside this fallback and
 unaffected by it.
 
-Under Capsicum the descriptors that may be asked therefore carry `CAP_FSYNC`
-beside `CAP_READ` and `CAP_SEEK`: the image input of a read job in the CLI's
-worker, and in an embedding application whatever read-only descriptor it
-hands to `fsimg_io_from_fd` and wants answered. A descriptor without the
-right is still valid; its object moves to off at its first lookup.
+Under Capsicum a descriptor that may be asked therefore carries `CAP_FSYNC`
+beside `CAP_READ` and `CAP_SEEK`: in an embedding application, whatever
+read-only descriptor it hands to `fsimg_io_from_fd` and wants answered. The
+CLI's worker grants the right to no input, because no CLI job asks an
+external input for zero ranges: a read job reads a filesystem through its
+tables, and wrap, compose and unwrap of an external input are
+library operations. A descriptor without the right is still valid; its
+object moves to off at its first lookup.
 The writer's source files are external files too, but the payload copy
 takes a source's ZERO ranges from its storage kind or its provider and never
 asks its I/O object for zero ranges, so source roots need no right for this;
@@ -507,8 +513,8 @@ API, which the API states.
 * No host hole query is made on any file fsimg writes, so no fresh file is
   synced for one, and the spool's descriptor rights do not include
   `CAP_FSYNC`. The raw intermediate keeps `CAP_FSYNC` for the writer's
-  ordinary flush of its sink. The image input of a read job carries
-  `CAP_FSYNC` so its object can sync before asking the host.
+  ordinary flush of its sink. The image input of a read job lacks it as the
+  spool does, since no read job asks it for zero ranges.
 * An external file's answer is the host's, and a host whose report is
   wrong after a sync yields a wrong image: a run of written bytes encoded as
   zeros. That residual risk is accepted in [Decisions](#decisions); it is
@@ -587,9 +593,9 @@ under test ran.
 | Granule and resize | A sparse 40 GiB fresh file keeps every possibly-nonzero granule across the fold to 8 KiB: a granule whose odd half alone was set reads set as a whole, and a clear pair reads clear; an unaligned shrink keeps its straddling granule set and the bytes below the new length, and the regrowth answers zero beyond that granule | Allocation failure, and a host truncation failure injected after the record was prepared, leave the committed record and the file unchanged and the object usable at its old length; a fold that clears any granule which held a set half, or a shrink that leaves a wholly removed granule set, fails the assertions. Hosts without sparse files skip the physical case explicitly |
 | Record, not host | Zeros written explicitly to a fresh file, a hole on a filesystem that detects zero blocks, are reported possibly nonzero and not reported zero; an unwritten range of a fresh file on a filesystem without holes is reported zero | The build check fails on `SEEK_HOLE` or `SEEK_DATA` anywhere outside `compat/host.c` |
 | Own files never ask | A private counter of discovery syncs, counting only the sync made before a host hole query and no ordinary flush, stays at zero across a writer's emission into a fresh staged file, the transcode of its raw intermediate, the extraction of files and the sealing and reading of a spool; the spool's Capsicum rights lack `CAP_FSYNC` and a spooled stream is read under them | The counter reads one at an external file's first lookup, proving it observes discovery syncs; separately, an ordinary flush failure injected at the writer's output flush fails the emission and publishes nothing, so suppressing required flushes cannot pass the counter test |
-| User file, host report | A sparse read-only external file is wrapped and composed reading only its data chunks and its final chunk (`read_bytes`), with the discovery sync counted exactly once, before the first lookup; the image input of a read job is unwrapped under the worker's Capsicum rights with the same reads; a writable external sink is never synced or queried | Hole knowledge ignored reads the whole file with identical output; a file on a filesystem without holes reads the whole file |
+| User file, host report | A sparse read-only external file is wrapped and composed reading only its data chunks and its final chunk (`read_bytes`), with the discovery sync counted exactly once, before the first lookup; a writable external sink is never synced or queried | Hole knowledge ignored reads the whole file with identical output; a file on a filesystem without holes reads the whole file |
 | Shrink seen at a lookup | A sparse external file whose data lies after a long hole wraps correctly when intact | The file truncated below its data by a hook between the two seeks, so `SEEK_DATA` answers `ENXIO`, fails that lookup with `FSIMG_ESOURCE_CHANGED` naming the input even when the hook restores the file, data and all, before the copy continues; with the length check disabled by a private test control the same case publishes zeros over the restored data, proving the check is what catches it; truncated before the first lookup it fails the same way |
-| Truncated input | A sparse external file, intact, wraps correctly, through a prefix slice, as the first of two compose inputs and as a compose input whose end falls inside a transcode chunk | The file truncated by a hook after a lookup and before its tail chunk is read fails at that read with the exact-read error and nothing published: for the whole file, for a prefix slice of it and for the first of two compose inputs truncated before its tail is reached, each ending on a chunk boundary, and under simg in the counting pass, the failure asserted within that pass; with the tail clip disabled by a private test control each of these publishes an image with zeros over the lost tail, proving the clip is what catches it. Under simg in the writing pass the file is truncated after the counting pass completed, and the same control publishes zeros. A compose input whose end falls inside a chunk fails at that chunk's read with or without the clip, because the assembled disk's answer stops at the region boundary and a chunk not wholly covered is read; its seeded control is a private switch that accepts partial chunk coverage, with which the same case publishes zeros |
+| Truncated input | A sparse external file, intact, wraps correctly, through a prefix slice, as the first of two compose inputs and as a compose input whose end falls inside a transcode chunk | The file truncated by a hook after a lookup and before its tail chunk is read fails at that read with the exact-read error and nothing published: for the whole file, for a prefix slice of it and for the first of two compose inputs truncated before its tail is reached, each ending on a chunk boundary, and under simg in the counting pass, the failure asserted within that pass with nothing written to the sink; with the tail clip disabled by a private test control each of the first three publishes an image with zeros over the lost tail, proving the clip is what catches it, and the simg case completes its counting pass and fails at the writing pass's first lookup of the input, after the leading table bytes reached the sink, with `FSIMG_ESOURCE_CHANGED`, the still-short file being observed there. Under simg in the writing pass the file is truncated after the counting pass completed, and the same control publishes zeros. A compose input whose end falls inside a chunk fails at that chunk's read with or without the clip, because the assembled disk's answer stops at the region boundary and a chunk not wholly covered is read; its seeded control is a private switch that accepts partial chunk coverage, with which the same case publishes zeros |
 | Undetected modification | The documented limit: the first of two compose inputs truncated by a hook after its tail chunk was consumed, while the second is processed, publishes an image holding the bytes read before the truncation, as a copy without hole knowledge would; a DMG input whose backing file is truncated behind a zero-record tail publishes its declared zeros, and one truncated under a compressed record that is not in the decode cache fails the chunk read with the exact-read premature-end error (`FSIMG_EIO`); corruption is expected only from malformed compressed bytes | The same truncations moved before the tail read, or under the record being read, fail as the rows above require |
 | Tail cost | A 100 GiB sparse external input is wrapped reading only its data chunks plus its final chunk (`read_bytes`) | Hole knowledge ignored reads 100 GiB with identical output |
 | Cancellation in skipped zeros | A run of chunks wholly covered by a zero answer is composed with no read, each chunk charged one unit and polled | Cancellation requested while the pass is inside the run stops it at the next chunk with no further charge; with the per-chunk poll omitted by a private test control the run finishes, proving the poll is what stops it |
@@ -601,7 +607,7 @@ under test ran.
 | Callback input | A callback object whose `next_zero_range` reports its holes is wrapped reading only its data | An answer with `start < offset`, `end > length` or no progress fails `FSIMG_EIO` naming the callback; an answer claiming zero over data yields an output with zeros there, which the test asserts to document the obligation |
 | Determinism | Byte-identical output with hole knowledge consulted and ignored for every container and gzip, across budgets and chunk-cache sizes | Inputs differing in one byte differ |
 | Bounds | A 128 TiB fresh file's record is at most 1 MiB in the memory counters; a DMG declaring a 1 PiB zero disk opens and answers in record reads, with no chunk read or decoded; composed to a DMG under a fixed work limit it fails with `FSIMG_RESOURCE_WORK` through the per-chunk charge, at the chunk whose charge crosses the limit, with `read_bytes` grown over the zero run by nothing beyond the assembled table prefix and the index's record reads, measured as the difference between a reading taken once the pass enters the run and one taken at the failure, and under gzip the same limit stops the zero compression | Allocation failure injected at record growth fails the resize with the file unchanged; the same compose of a disk small enough for the limit completes, proving the limit was what stopped it |
-| Sandbox | The spool's Capsicum rights lack `CAP_FSYNC` and the read job's image input carries it; the worker spools a stream, transcodes, and unwraps a sparse input under them | `fsync` on the spool descriptor in capability mode fails with `ENOTCAPABLE`, and an image input limited without `CAP_FSYNC` is read in full, proving the installed rights are the ones specified |
+| Sandbox | The Capsicum rights of the spool and of the read job's image input lack `CAP_FSYNC` and the raw intermediate's carry it; the worker spools a stream and transcodes under them | `fsync` in capability mode fails with `ENOTCAPABLE` on the spool and on the image input and succeeds on the raw intermediate, and an external input limited without `CAP_FSYNC` is read in full, proving the installed rights are the ones specified |
 
 ## Decisions
 
@@ -630,8 +636,9 @@ under test ran.
    The residual risk is confined to files fsimg did not write and to the
    bytes a wrap, compose or unwrap copies out of them; a wrong report cannot
    reach a file fsimg wrote, which answers from its record. The right the
-   sync needs under Capsicum, `CAP_FSYNC` on the read job's image input, is
-   a read-side right on a descriptor the worker already reads.
+   sync needs under Capsicum, `CAP_FSYNC`, is granted for this sync only to
+   a descriptor that is asked; the CLI's read job never asks its image input, which
+   therefore lacks it.
 
    Rejected: *trusting the report without a sync*, which leaves the
    reproduced fault open on the ordinary sequence `mkfs` then `fsimg` on

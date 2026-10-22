@@ -362,12 +362,12 @@ linux_fail:
 			    FSIMG_OP_CONTEXT, "Capsicum unavailable"));
 		goto freebsd_fail;
 	}
-	/* The image input is a read-only external file: its object syncs it
-	 * once before asking the host for its holes.
+	/* The image input is only read: no read job asks it for zero ranges,
+	 * so it gets no CAP_FSYNC for the sync that would precede the host's
+	 * hole report.
 	 */
 	if (caps->input != -1) {
-		cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT, CAP_FSYNC,
-		    CAP_FCNTL);
+		cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT, CAP_FCNTL);
 		if (restrict_descriptor(caps->input, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
 	}

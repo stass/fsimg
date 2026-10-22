@@ -58,24 +58,12 @@
     the trust out (`cmd/fsimg/worker-parent.c` `bound_volume`).
   The layer write side leaves these open:
   * [Medium] Hole knowledge tests lack the design's Sandbox and capability
-    cases: no test spools, transcodes and unwraps under the worker's
-    installed Capsicum rights, none reads an image input limited without
+    cases: no test spools and transcodes under the worker's installed
+    Capsicum rights, none reads an external input limited without
     `CAP_FSYNC` (a discovery sync failing `ENOTCAPABLE`), and none reads an
     input on a filesystem without holes or exercises extraction against
     the discovery-sync counter (`test/sandbox.c`, `test/holes.c`,
     specs/design-holes.md Tests and evidence).
-  * [Medium] A read-only descriptor object's hole queries seek the file
-    offset its duplicate shares with the application's descriptor and
-    restore it, so concurrent users of that open file description, such as
-    two contexts reading one descriptor, can see or keep a moved offset;
-    the contract forbids such sharing. A query on an independent open
-    file description, where the host can make one without a path, would
-    remove the restriction (`compat/host.c` `fsimg_host_next_hole`).
-  * [Medium] The read job's image input carries `CAP_FSYNC` for the
-    discovery sync, but no CLI path asks an external input for zero
-    ranges yet: a read job selects and reads, and wrap, compose and unwrap
-    are library operations only. Drop the right, or record which CLI
-    command needs it, when the CLI gains an unwrap (`cmd/fsimg/sandbox.c`).
   * [Low] Whether a creation needs a raw intermediate is decided twice:
     the command line's `fsimg_job_needs_raw` (`cmd/fsimg/job.c`, which the
     coordinator and the worker share) and the library's

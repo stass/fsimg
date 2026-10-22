@@ -246,9 +246,10 @@ host hole report describes storage, not contents, and has been wrong for
 written, unsynced data (OpenZFS issue 15526), whereas what fsimg wrote is a
 fact it owns. For a user's file fsimg has no fact of its own, so it accepts
 the host's report once the file is synced, a workaround for that fault class
-rather than a fix, and reads every byte when the sync fails; the read job's
-image input therefore carries the sync right under Capsicum, while the
-spool's rights do not. Only a fresh file's record lets zeroing skip a write;
+rather than a fix, and reads every byte when the sync fails. Under Capsicum
+the sync right goes only to a descriptor that is asked: the CLI's read jobs
+never ask their image input for zero ranges, so neither it nor the spool
+carries the right. Only a fresh file's record lets zeroing skip a write;
 a zero-range answer, the host's or a callback's, spares reads alone, so the
 accepted risk of the host's report cannot leave a stale byte in a reused
 output. Because the record is per range, emitters need neither an order nor

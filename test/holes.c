@@ -1351,7 +1351,9 @@ test_shrink_seen_at_lookup(void)
  * its last byte is read, fails at that exact read and publishes nothing,
  * for the whole file, a prefix slice of it, the first of two compose
  * inputs, and under simg in each of its two passes. With the tail clip
- * disabled each case publishes, zeros standing in for the lost tail. A
+ * disabled the first three cases publish, zeros standing in for the lost
+ * tail, and the simg counting-pass case fails at the writing pass's
+ * lookup of the still-short input instead. A
  * compose input whose end falls inside a chunk fails at that chunk with or
  * without the clip, since only a wholly covered chunk is skipped; accepting
  * partial coverage makes it publish.

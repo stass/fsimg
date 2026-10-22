@@ -99,8 +99,9 @@ last byte, and an input found shorter than when it was opened fails with
 `FSIMG_ESOURCE_CHANGED`. An application's I/O object may report its zero
 ranges through the new optional `next_zero_range` callback, whose answers
 the library checks for shape and trusts for contents; zeroing never
-consults it. Under Capsicum the spool lacks `CAP_FSYNC`, and the read
-job's image input carries it for the one sync.
+consults it. Under Capsicum neither the spool nor the read job's image
+input carries `CAP_FSYNC`: the spool answers from its own record, and no
+read job asks its input for zero ranges.
 
 Creation writes partitioned disks. A stack naming gpt or mbr places the
 volume at 1 MiB as the disk's one partition, emitted into a checked slice
