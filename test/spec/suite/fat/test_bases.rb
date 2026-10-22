@@ -24,6 +24,9 @@ class TestFatBases < Minitest::Test
   # and the BIOS drive number, which mkfs.fat sets to 0 on a floppy-sized
   # volume.
   EXTENSION_CHOICES = %i[bs_drv_num].freeze
+  # Where section 5 places FSInfo's three signatures within its sector;
+  # the FAT32 base keeps FSInfo in sector 1 of 512 bytes.
+  FSINFO_SIGNATURE_OFFSETS = { "lead" => 0, "structure" => 484, "trail" => 508 }.freeze
 
   # Builder bases at each variant threshold, with one, two and three FATs,
   # and with 4096-byte sectors.
@@ -118,7 +121,7 @@ class TestFatBases < Minitest::Test
   end
 
   # The seeded failure of the FSInfo signatures: a valid case of a FAT32
-  # base whose FSInfo lead signature is wrong violates
+  # base with any one of its three FSInfo signatures wrong violates
   # fat32.fsinfo.signatures, a generator defect, so the case is refused
   # before any oracle reads the base, whatever a checker such as
   # fsck_msdosfs, whose FSInfo warning at 65525 clusters an exception
@@ -131,12 +134,21 @@ class TestFatBases < Minitest::Test
       parameters = Fat::Witnesses::BASES.fetch("fat32")
       witness = Fat::Witnesses::Witness.new(id: "fat.test.fat32_base", parameters:, tree: [], mutations: [],
                                             forced_format: nil, intended: nil, rule: nil)
-      sound = cases.call(witness).defect
       image = Fat::Bases.render(builder_base(parameters, []), cache:, ceilings: CEILINGS)
-      File.open(image, "r+b") { _1.pwrite("\0\0\0\0".b, 512) }
+      fsinfo = File.binread(image, 512, 512)
+      # The defect of the witness's case with the signature at offset
+      # cleared in the cached base, which is then restored.
+      defect_with_cleared = lambda do |offset|
+        File.open(image, "r+b") { _1.pwrite("\0\0\0\0".b, 512 + offset) }
+        cases.call(witness).defect
+      ensure
+        File.open(image, "r+b") { _1.pwrite(fsinfo, 512) }
+      end
+      corrupted = FSINFO_SIGNATURE_OFFSETS.to_h { |label, offset| [label, defect_with_cleared.call(offset)] }
+      violated = "fat.test.fat32_base is meant valid but violates fat32.fsinfo.signatures"
 
-      assert_equal [nil, "fat.test.fat32_base is meant valid but violates fat32.fsinfo.signatures"],
-                   [sound, cases.call(witness).defect]
+      assert_nil cases.call(witness).defect
+      assert_equal FSINFO_SIGNATURE_OFFSETS.transform_values { violated }, corrupted
     end
   end
 

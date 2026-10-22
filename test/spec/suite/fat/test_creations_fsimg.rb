@@ -16,6 +16,8 @@ class TestFatCreationsFsimg < Minitest::Test
   Fat = FsimgSpec::Fat
   PROFILE = FsimgSpec.fetch_profile("quick")
   REGISTRY = Fat::Rules.registry
+  # Where section 5 places FSInfo's three signatures within its sector.
+  FSINFO_SIGNATURE_OFFSETS = { "lead" => 0, "structure" => 484, "trail" => 508 }.freeze
 
   def setup
     @fsimg = ENV.fetch("FSIMG_BIN", "")
@@ -108,28 +110,31 @@ class TestFatCreationsFsimg < Minitest::Test
     end
   end
 
-  # A created FAT32 image whose FSInfo lead signature is wrong violates
-  # fat32.fsinfo.signatures, so create fails it on the harness's own
-  # reading, whatever the checker reports: here fsck_msdosfs, whose one
-  # FSInfo warning at 65525 clusters the exception for its refusal
-  # excuses.
+  # A created FAT32 image with any one of its three FSInfo signatures
+  # wrong violates fat32.fsinfo.signatures, so create fails it on the
+  # harness's own reading, whatever the checker reports: here
+  # fsck_msdosfs, whose one FSInfo warning at 65525 clusters the
+  # exception for its refusal excuses.
   def test_a_created_image_with_a_bad_fsinfo_signature_fails_whatever_the_checker_reports
     Dir.mktmpdir do |stubs|
       checker = File.join(stubs, "fsck_msdosfs")
       File.write(checker, "#!/bin/sh\necho \"** $2\"\necho 'Invalid signature in fsinfo block'\necho 'Fix? no'\n" \
                           "echo 'Filesystem too small (65525 clusters) for FAT32 partition'\nexit 8\n")
       File.chmod(0o700, checker)
-      corrupt = lambda do |path|
-        File.open(path, "r+b") do |image|
-          sector, fsinfo = [11, 48].map { image.pread(2, _1).unpack1("v") }
-          image.pwrite("\0\0\0\0".b, sector * fsinfo)
+      # A failed case keeps its directory, so each corruption runs apart.
+      FSINFO_SIGNATURE_OFFSETS.each do |label, offset|
+        corrupt = lambda do |path|
+          File.open(path, "r+b") do |image|
+            sector, fsinfo = [11, 48].map { image.pread(2, _1).unpack1("v") }
+            image.pwrite("\0\0\0\0".b, (sector * fsinfo) + offset)
+          end
         end
-      end
-      with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
-        _, result = run.call("fat.create.cluster_count.fat32_65525", alter: corrupt)
+        with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
+          _, result = run.call("fat.create.cluster_count.fat32_65525", alter: corrupt)
 
-        assert_equal ["failed", ["create"]], [result.verdict, result.stages.map(&:stage)]
-        assert_match(/\Acreate: the image it wrote violates fat32\.fsinfo\.signatures/, result.detail)
+          assert_equal ["failed", ["create"]], [result.verdict, result.stages.map(&:stage)], label
+          assert_match(/\Acreate: the image it wrote violates fat32\.fsinfo\.signatures/, result.detail, label)
+        end
       end
     end
   end
