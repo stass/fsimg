@@ -237,7 +237,11 @@ Operands are host paths, as for tar: each is opened relative to the current
 operands as given) and stored under its own name, so
 `fsimg cf x.img -F fat32 rootfs` produces `/rootfs/...` and `-C rootfs .`
 places rootfs's contents at the image root. `-C` must name an existing
-directory, applies to the operands after it, and may repeat:
+directory, opened following symbolic links as tar's `-C` is; an existing
+object of another kind, judged on the object followed, fails as
+unsupported, and a path through a non-directory or a dangling or looping
+link as an open failure. It applies to the operands after it, and may
+repeat:
 `-C esp . -C extra EFI`. Each `-C` is resolved against the working
 directory, not against the previous `-C`, so the operand list reads the same
 in any order. A `-C` that applies to no operand (two in a row, or one at the

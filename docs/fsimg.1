@@ -416,8 +416,10 @@ Each
 directory is resolved against the working directory, following symbolic
 links as
 .Xr tar 1
-does, must exist and must apply to at least one operand; one that names an
-existing object of another kind fails as unsupported.
+does, must exist and must apply to at least one operand.
+One whose path reaches an existing object of another kind, judged on the
+object a symbolic link leads to, fails as unsupported; a dangling or
+looping link is an open failure.
 An operand is a directory or a regular file; it is opened without following
 a final symbolic link, so a symbolic link operand fails.
 An operand beginning with @ is a manifest, as
@@ -625,9 +627,9 @@ Writing may skip a run of zeros and hashing does not, so
 .Fl l Ar work
 and
 .Fl l Ar seconds
-bound the time, and
+bound the time;
 .Fl n
-hashes without writing.
+hashes the same bytes without writing.
 A refused line is named by number.
 .Pa specs/design-mtree.md
 in the source distribution defines the subset.
@@ -836,11 +838,15 @@ durability.
 Do not retry a published or uncertain outcome blindly.
 .Sh EXTRACTION
 .Fl C Ar dir
-names an existing directory, by default the working directory; an existing
-object of another kind fails as unsupported.
+names an existing directory, by default the working directory.
 Without
 .Fl E
-a symbolic link to a directory is followed.
+a symbolic link to a directory is followed, and an existing object of
+another kind, judged on the object the link leads to, fails as
+unsupported; a dangling or looping link is an open failure.
+With
+.Fl E
+a symbolic link fails as unsupported too.
 .Cm x
 creates exactly one fresh directory inside it, named after the image, with
 mode 0700, and extracts beneath that:

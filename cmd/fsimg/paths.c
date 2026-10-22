@@ -435,44 +435,52 @@ trim_final(const char *path, char *trimmed, bool *removed)
 }
 
 /*
- * Whether a directory open of path beneath base, failing with errno, met
- * an existing object that is not a directory: the object itself, or with
- * follow what a symbolic link there reaches. A failure with ENOTDIR or
- * ENXIO met either such an object or, for ENOTDIR, a non-directory earlier
- * in the path, which names nothing; this tells the two apart, trimming
- * path itself by trim_final. Any other failure met no such object. It
- * only classifies the failure, and errno is preserved.
+ * Whether path beneath base, trimmed by trim_final, names an existing
+ * object, which *st describes: with follow what a symbolic link there
+ * reaches, otherwise the link itself. It leaves errno unchanged.
  */
 static bool
-other_kind_at(int base, const char *path, bool follow)
+stat_at(int base, const char *path, bool follow, struct stat *st)
 {
 	char trimmed[PATH_MAX];
-	struct stat st;
 	int saved;
-	bool removed, other;
+	bool removed, found;
 
 	saved = errno;
-	if (saved != ENOTDIR && saved != ENXIO)
-		return (false);
-	other = trim_final(path, trimmed, &removed) &&
-	    fstatat(base, trimmed, &st, follow ? 0 : AT_SYMLINK_NOFOLLOW) == 0 &&
-	    !S_ISDIR(st.st_mode);
+	found = trim_final(path, trimmed, &removed) &&
+	    fstatat(base, trimmed, st, follow ? 0 : AT_SYMLINK_NOFOLLOW) == 0;
 	errno = saved;
-	return (other);
+	return (found);
 }
 
 /*
- * The failure of opening a -C directory, which follows symbolic links as
- * tar's -C does: an existing object of another kind, judged on the object
- * followed, is unsupported, as it is for -E; any other failure, a
- * non-directory earlier in the path included, is an open failure.
+ * The failure of opening the -C directory path, which failed with
+ * open_errno. Without -E the open follows symbolic links, as tar's -C
+ * does; under -E (follow false) it does not, and a symbolic link fails
+ * with ELOOP on every host (fsimg_host_source_open). The failure alone
+ * cannot say where it arose: ENOTDIR and ENXIO come from an existing object
+ * of another kind or, for ENOTDIR, a non-directory earlier in the path, and
+ * ELOOP from the final link or a loop earlier in the path. Looking the
+ * object up tells them apart: a final link under -E, or an existing object
+ * of another kind judged on the object the open met, is unsupported; any
+ * other failure is an open failure. The lookup only classifies the
+ * failure; nothing is opened or trusted on it.
  */
 static fsimg_status_t
-change_directory_error(fsimg_error_t *error, const char *path)
+change_directory_error(fsimg_error_t *error, const char *path, bool follow,
+    int open_errno)
 {
-	if (other_kind_at(AT_FDCWD, path, true))
-		return (kind_error(error, errno,
+	struct stat st;
+
+	if (!follow && open_errno == ELOOP &&
+	    stat_at(AT_FDCWD, path, false, &st) && S_ISLNK(st.st_mode))
+		return (kind_error(error, ELOOP,
+		    "-C directory is a symbolic link", path));
+	if ((open_errno == ENOTDIR || open_errno == ENXIO) &&
+	    stat_at(AT_FDCWD, path, follow, &st) && !S_ISDIR(st.st_mode))
+		return (kind_error(error, open_errno,
 		    "-C directory is not a directory", path));
+	errno = open_errno;
 	return (path_error(error, "cannot open -C directory", path));
 }
 
@@ -480,26 +488,18 @@ change_directory_error(fsimg_error_t *error, const char *path)
  * The no-follow scanned-object open of a command-line path, trimmed by
  * trim_final; a trailing slash stays a requirement for a directory. A
  * refused link fails with ELOOP on every host (fsimg_host_source_open).
- * When other_kind is not NULL, a directory open that fails sets it when
- * the name is an existing object of another kind (other_kind_at).
  */
 static int
-open_nofollow(int base, const char *path, bool directory, bool *other_kind)
+open_nofollow(int base, const char *path, bool directory)
 {
 	char trimmed[PATH_MAX];
-	int fd;
 	bool removed;
 
-	if (other_kind != NULL)
-		*other_kind = false;
 	if (!trim_final(path, trimmed, &removed))
 		return (-1);
 	if (removed)
 		directory = true;
-	fd = fsimg_host_source_open(base, trimmed, directory);
-	if (fd == -1 && directory && other_kind != NULL)
-		*other_kind = other_kind_at(base, trimmed, false);
-	return (fd);
+	return (fsimg_host_source_open(base, trimmed, directory));
 }
 
 /*
@@ -519,7 +519,7 @@ open_operand(int directory, const fsimg_cli_operand_t *operand, int first_free,
 	bool kind_valid;
 
 	fd = open_nofollow(operand->host_path[0] == '/' ? AT_FDCWD : directory,
-	    operand->host_path, false, NULL);
+	    operand->host_path, false);
 	if (fd == -1) {
 		if (errno == ELOOP)
 			return (kind_error(error, ELOOP, operand->manifest ?
@@ -692,7 +692,7 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 			directory_name = operand->directory;
 			if (directory == -1) {
 				status = change_directory_error(error,
-				    operand->directory);
+				    operand->directory, true, errno);
 				break;
 			}
 		}
@@ -1074,21 +1074,13 @@ prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	const char *parent_path;
 	fsimg_status_t status;
 	int count;
-	bool other_kind;
 
 	parent_path = options->directory == NULL ? "." : options->directory;
 	if (options->extract_here) {
-		request->output_fd = open_nofollow(AT_FDCWD, parent_path, true,
-		    &other_kind);
-		if (request->output_fd == -1 && errno == ELOOP)
-			return (kind_error(error, ELOOP,
-			    "-C directory is a symbolic link", parent_path));
-		if (request->output_fd == -1 && other_kind)
-			return (kind_error(error, errno,
-			    "-C directory is not a directory", parent_path));
+		request->output_fd = open_nofollow(AT_FDCWD, parent_path, true);
 		if (request->output_fd == -1)
-			return (path_error(error, "cannot open -C directory",
-			    parent_path));
+			return (change_directory_error(error, parent_path, false,
+			    errno));
 		if (fsimg_host_private_directory(request->output_fd, &verdict) == -1)
 			return (path_error(error, "cannot inspect -C directory", parent_path));
 		if (verdict != FSIMG_HOST_PRIVATE)
@@ -1102,7 +1094,7 @@ prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	paths->destination_parent = open(parent_path,
 	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	if (paths->destination_parent == -1)
-		return (change_directory_error(error, parent_path));
+		return (change_directory_error(error, parent_path, true, errno));
 	count = snprintf(paths->retained_destination,
 	    sizeof(paths->retained_destination), "%s/%s", parent_path, options->stem);
 	if (count < 0 || (size_t)count >= sizeof(paths->retained_destination))

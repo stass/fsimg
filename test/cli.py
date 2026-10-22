@@ -768,6 +768,14 @@ def test_extract_here(executable, root):
     error = failed(invoke(executable, root, ["xEf", "human.img", "--json", "-C",
                                              "into-file/inner"], expected=1))
     assert error["status"] == "I/O failure", error
+    # A link looping earlier in the path is no link at -C, only a failed open.
+    (root / "into-loop").symlink_to("into-loop")
+    error = failed(invoke(executable, root, ["xEf", "human.img", "--json", "-C",
+                                             "into-loop/inner"], expected=1))
+    assert error["status"] == "I/O failure", error
+    assert error["message"] == "cannot open -C directory", error
+    assert error["os_error"] == errno.ELOOP, error
+    (root / "into-loop").unlink()
     listener.close()
     for name in ["into-file", "into-fifo", "into-socket"]:
         (root / name).unlink()
@@ -784,23 +792,30 @@ def test_change_directory_kinds(executable, root):
     work.mkdir()
     (work / "file").write_bytes(b"x")
     (work / "to-file").symlink_to("file")
+    os.mkfifo(work / "fifo")
+    (work / "dangling").symlink_to("missing")
+    (work / "loop").symlink_to("loop")
     shutil.copyfile(root / "human.img", work / "human.img")
 
     def refusals(directory):
         return [["xf", "human.img", "--json", "-C", directory],
                 ["cf", "out.img", "-F", "fat12", "--json", "-C", directory, "."]]
 
-    for directory in ["file", "to-file", "file/"]:
+    for directory in ["file", "to-file", "file/", "fifo"]:
         for arguments in refusals(directory):
             error = failed(invoke(executable, work, arguments, expected=1))
             assert error["status"] == "unsupported capability", (arguments, error)
             assert error["message"] == "-C directory is not a directory", error
             assert error["path"] == directory, error
-    for arguments in refusals("file/inner"):
-        error = failed(invoke(executable, work, arguments, expected=1))
-        assert error["message"] == "cannot open -C directory", (arguments, error)
-        assert error["os_error"] == errno.ENOTDIR, error
-    assert sorted(path.name for path in work.iterdir()) == ["file", "human.img", "to-file"]
+    for directory, os_error in [("file/inner", errno.ENOTDIR),
+                                ("dangling", errno.ENOENT), ("loop", errno.ELOOP)]:
+        for arguments in refusals(directory):
+            error = failed(invoke(executable, work, arguments, expected=1))
+            assert error["status"] == "I/O failure", (arguments, error)
+            assert error["message"] == "cannot open -C directory", error
+            assert error["os_error"] == os_error, error
+    assert sorted(path.name for path in work.iterdir()) == [
+        "dangling", "fifo", "file", "human.img", "loop", "to-file"]
 
 
 def test_extraction_acls(executable, root):
