@@ -498,6 +498,14 @@ QNX6 reserved-block percentage recorded in the header and kept free; default
 .It Fl p
 Import each source object's owner, group and permission bits as optional
 metadata.
+The worker that reads the source runs with a fixed environment and, on
+Linux, queries descriptors with direct system calls, so an
+.Ev LD_PRELOAD
+interposer such as
+.Xr fakeroot 1
+does not reach it and is not a way to change them; an mtree manifest
+.Pq Ar @file
+is the way to give an image root or any other ownership.
 .It Fl R
 Reproducible bytes with stable ordering, identifiers and padding.
 .It Fl s Ar bytes
