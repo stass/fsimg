@@ -807,7 +807,14 @@ content and representable timestamps.
 A symbolic link is recorded with its target, which is never followed; a target
 longer than 1023 bytes fails.
 The Linux sandbox denies the worker the path-based queries that read a link,
-so a confined Linux import of a tree containing one fails as unsupported.
+since they are not confined beneath the source, so a confined Linux import of
+a tree containing one fails as unsupported, naming the link.
+A manifest that describes each link with
+.Ql type=link
+imports it confined;
+.Fl S Cm off
+runs the whole creation worker without OS confinement, for trusted sources
+and manifests only.
 Import rejects special files, including FIFOs, and encounters with its own
 scratch or staging trees.
 Like

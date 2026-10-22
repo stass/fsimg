@@ -258,6 +258,24 @@ not part of the worker profile. New syscall needs require a security review.
 Importing a manifest needs no path-based query: the file it names is opened
 and then checked, as the source-root profile states.
 
+Reading a symbolic link does need one: the scanner inspects a link with
+`fstatat(AT_SYMLINK_NOFOLLOW)` and reads it with `readlinkat()`, and neither
+is confined beneath the directory descriptor it names, since an absolute
+name ignores the descriptor and a relative one can climb with `..` or
+through another link. Seccomp cannot inspect the name and Landlock does not
+mediate either query, so admitting them would disclose metadata and link
+targets anywhere the user can reach. An `O_PATH | O_NOFOLLOW` open followed
+by `readlinkat(fd, "")` is the same escape, since Landlock does not mediate
+`O_PATH`, which the profile therefore refuses. A confined Linux import of a
+tree holding a symbolic link fails as unsupported, naming the link; a
+manifest that describes the link with `type=link` imports it confined, and
+`-S off` runs the whole creation worker unconfined. Having the coordinator
+read links for the worker is not an answer either: it would act on a
+descriptor and name a worker supplies, which the
+[coordinator never accepts](#coordinator-and-worker) as authority. FreeBSD's
+Capsicum confines both queries beneath the descriptor, so a confined
+FreeBSD import reads links.
+
 ### macOS
 
 The standalone CLI has no claimed equivalent built-in backend. Apple's

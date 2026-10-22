@@ -431,30 +431,6 @@
   glibc's sources, not run; glibc 2.39 (CI) passes. Run the sandbox suite on
   such a distribution, and if it fails, call the `fstat` syscall directly
   through `compat/`; seccomp cannot tell an empty path from another one.
-* [High] **Symbolic-link import under the Linux sandbox** (`cmd/fsimg/sandbox.c`,
-  `lib/source/source.c`, `specs/design-security.md`): the source scan reads a
-  link with `fstatat(AT_SYMLINK_NOFOLLOW)` and `readlinkat()`, which the
-  seccomp allowlist denies because Landlock does not mediate path-based
-  metadata queries. A confined Linux worker therefore fails a tree containing
-  a link with `FSIMG_EUNSUPPORTED` ("symbolic link inspection is not
-  permitted", naming the link) instead of importing it. Decide how a confined
-  scan reads links: allowing both calls lets a compromised worker probe
-  metadata and link targets outside the source tree; an `O_PATH | O_NOFOLLOW`
-  open plus `readlinkat(fd, "")` needs `O_PATH`, which the profile refuses for
-  the same reason; reading links in the coordinator moves source parsing out
-  of confinement. Decision: the coordinator reads link targets. The worker
-  sends the link's parent directory descriptor and a single name component
-  over a request/reply channel; the coordinator checks the descriptor is a
-  directory on the source device and the name is one component other than
-  `.` and `..`, then inspects the link, reads the target (at most 1023
-  bytes), inspects it again and returns target and identity. The library
-  scanner reads links through an internal host hook that defaults to
-  `readlinkat()` and that the Linux worker replaces. A walk of the image path
-  from the source root is the alternative if descriptor passing proves
-  awkward. Record the design in the security, CLI and metadata specs, then
-  test it on Linux with the sandbox active, including forged worker requests.
-  FreeBSD Capsicum permits both calls: a confined `create -S required` reads
-  ordinary and dangling links (verified on FreeBSD 16.0-CURRENT).
 * [Medium] **The library's own directories skip the other-writer check**
   (`lib/output/write.c` `create_staging`, `lib/extract/extract.c`
   `fsimg_extract_at`): `fsimg_writer_write_at()` and transcoding stage

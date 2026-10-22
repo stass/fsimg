@@ -312,12 +312,14 @@ declared source timestamp policy and generated identifiers apply. Geometry
 candidates and format defaults appear in the plan.
 
 Host import includes regular files, directories and symbolic links, content,
-hierarchy and representable timestamps; `-p` adds owner, group and
-permission bits. Special files are rejected. A format that cannot store a
-kind fails planning; a field it cannot store is an optional loss counted in
-the usual notice, so FAT and exFAT advertise no POSIX fidelity and `-p` never
-changes their image bytes. The default label applies only to formats with a
-label. Hardlinked host files are copied as independent files.
+hierarchy and representable timestamps, except that the Linux sandbox cannot
+read a host link ([security](design-security.md#linux)), so a confined Linux
+import refuses one; `-p` adds owner, group and permission bits. Special
+files are rejected. A format that cannot store a kind fails planning; a
+field it cannot store is an optional loss counted in the usual notice, so
+FAT and exFAT advertise no POSIX fidelity and `-p` never changes their image
+bytes. The default label applies only to formats with a label. Hardlinked
+host files are copied as independent files.
 
 The output name must not already exist. Planning completes before the image
 file is created; payloads are written once to a staged image on the
