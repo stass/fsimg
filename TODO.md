@@ -26,10 +26,9 @@
     destination fixtures have run only on macOS, which has no sandbox
     backend; run `test-sandbox`, `test-sandbox-setup` and the CLI
     destination tests on Linux (Landlock) and FreeBSD (Capsicum). The raw
-    intermediate and spool roles with their Capsicum rights, a stream
-    creation's data channel, with its `CAP_FSTAT` right, and a stream
-    read's input pipe have likewise run only unconfined
-    (`cmd/fsimg/sandbox.c`).
+    intermediate and spool roles with their Capsicum rights and a stream
+    creation's data channel, with its `CAP_FSTAT` right, have likewise run
+    only unconfined (`cmd/fsimg/sandbox.c`).
   * `c -v` and `x -v` do not yet print one line per entry: the writer and
     extractor have no per-entry callback for the worker to relay
     (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
@@ -310,16 +309,6 @@
   from the FreeBSD source whether its FAT12/FAT16 cutover differs from the
   specification's 4085; then either fix the builder or record the checker's
   deviation as a cited host-specific skip for that one base.
-
-* [Medium] **FreeBSD refuses an image on standard input that is not a pipe**
-  (`cmd/fsimg/sandbox.c` input check, `cmd/fsimg/worker-parent.c` stdin
-  relay): on FreeBSD 16.0-CURRENT with Capsicum active, `fsimg tf - <
-  file` and `fsimg i -f - < /dev/null` fail with "sandbox input requires
-  the read end of a pipe", so `test/cli.py` (test_failures) and
-  `test/compression-integration.sh` ("stream listing") fail there. The
-  relay that should hand the worker a pipe evidently passes a redirected
-  regular file or device through. Find which path skips the relay and make
-  every `-f -` input reach the worker as a pipe.
 
 * [Low] **The mtree -c round trip fails on FreeBSD** (`test/manifest.c`
   rebuild_from_tool): FreeBSD's `mtree -c` writes `flags=uarch` in its

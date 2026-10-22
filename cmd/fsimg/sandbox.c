@@ -193,16 +193,33 @@ fsimg_sandbox_backend(void)
 #endif
 }
 
+/* The input pipe's read end, from pipe(2): read-only, except on FreeBSD,
+ * whose pipes are bidirectional, so both ends are O_RDWR. There, when
+ * confined, Capsicum limits the input to reading; elsewhere nothing would
+ * stop the worker writing an O_RDWR FIFO, so only a read-only one is
+ * accepted.
+ */
+static bool
+readable_pipe(int flags, const struct stat *st)
+{
+	int mode = flags & O_ACCMODE;
+
+	if (!S_ISFIFO(st->st_mode))
+		return (false);
+#ifdef __FreeBSD__
+	return (mode == O_RDONLY || mode == O_RDWR);
+#else
+	return (mode == O_RDONLY);
+#endif
+}
+
 /* Every role must be the object its grant assumes before any backend runs:
- * the input a read-only regular file, or a readable pipe end exactly
- * when input_pipe says so; the three writable roles directories; each
+ * the input a read-only regular file, or the read end of a pipe exactly when
+ * input_pipe says so; the three writable roles directories; each
  * root a read-only directory or regular file; the raw intermediate
  * and the spool read/write regular files no name reaches; and the
  * manifest a write-only regular file with its one staged name. The
- * library checks those three files again when it adopts them. A pipe end
- * need only be readable, not O_RDONLY: Linux and macOS pipe ends are
- * one-way, but a FreeBSD pipe is bidirectional, so its read end reports
- * O_RDWR, and there Capsicum withholds the write right from the input.
+ * library checks those three files again when it adopts them.
  */
 static fsimg_status_t
 check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
@@ -210,7 +227,6 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 	const int directories[] = { caps->staging, caps->destination, caps->scratch };
 	const int handed_over[] = { caps->raw, caps->spool };
 	struct stat st;
-	bool valid;
 	int flags, fd;
 
 	if (caps->input != -1) {
@@ -218,17 +234,13 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 		if (flags == -1 || fstat(caps->input, &st) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_CONTEXT, "sandbox input validation failed"));
-		if (caps->input_pipe)
-			valid = S_ISFIFO(st.st_mode) &&
-			    (flags & O_ACCMODE) != O_WRONLY;
-		else
-			valid = S_ISREG(st.st_mode) &&
-			    (flags & O_ACCMODE) == O_RDONLY;
-		if (!valid)
+		if (caps->input_pipe && !readable_pipe(flags, &st))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CONTEXT, caps->input_pipe ?
-			    "sandbox input requires a readable pipe" :
-			    "sandbox input requires read-only regular file"));
+			    FSIMG_OP_CONTEXT, "sandbox input requires the read end of a pipe"));
+		if (!caps->input_pipe &&
+		    ((flags & O_ACCMODE) != O_RDONLY || !S_ISREG(st.st_mode)))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "sandbox input requires read-only regular file"));
 	}
 	for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
 		if (directories[i] != -1 &&

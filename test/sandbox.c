@@ -75,6 +75,16 @@ typedef enum sandbox_attempt {
 	ATTEMPT_COUNT
 } sandbox_attempt_t;
 
+/* How the sandbox takes a candidate input (take_input), as a child's exit
+ * status: values no stray exit is likely to produce.
+ */
+typedef enum input_outcome {
+	INPUT_REFUSED = 10,
+	INPUT_ACCEPTED,
+	INPUT_FAILED,		/* Any other status, or setup failure */
+	INPUT_WRITABLE		/* Confined, and still wrote its input */
+} input_outcome_t;
+
 static void close_unlisted(void);
 static bool read_source(sandbox_profile_t);
 static bool write_manifest(void);
@@ -83,6 +93,8 @@ static bool attempt_operation(sandbox_attempt_t, sandbox_profile_t);
 static int run_child(const int *, sandbox_attempt_t, sandbox_profile_t, bool);
 static bool manifest_denial(sandbox_attempt_t);
 static int refuse_readable_manifest(const int *, int);
+static input_outcome_t take_input(int, bool);
+static void test_input_roles(int);
 
 static void
 close_unlisted(void)
@@ -391,6 +403,75 @@ refuse_readable_manifest(const int *fds, int fd)
 	return (WIFEXITED(wait_status) ? WEXITSTATUS(wait_status) : 1);
 }
 
+/* Take fd as the sandbox input, a pipe when as_pipe is set, in a child:
+ * refused before anything is installed, or accepted, confining only that
+ * child, where a confined child must not be able to write its input.
+ */
+static input_outcome_t
+take_input(int fd, bool as_pipe)
+{
+	fsimg_sandbox_caps_t caps;
+	fsimg_status_t status;
+	pid_t child;
+	int wait_status;
+
+	fsimg_sandbox_caps_init(&caps);
+	caps.input = 3;
+	caps.input_pipe = as_pipe;
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		if (dup2(fd, 3) == -1)
+			_exit(INPUT_FAILED);
+		status = fsimg_sandbox_install_caps(&caps, NULL);
+		if (status == FSIMG_EINVAL)
+			_exit(INPUT_REFUSED);
+		if (status == FSIMG_OK && write(3, "x", 1) != -1)
+			_exit(INPUT_WRITABLE);
+		_exit(status == FSIMG_OK || status == FSIMG_EUNSUPPORTED ?
+		    INPUT_ACCEPTED : INPUT_FAILED);
+	}
+	CHECK(waitpid(child, &wait_status, 0) == child);
+	CHECK(WIFEXITED(wait_status));
+	return ((input_outcome_t)WEXITSTATUS(wait_status));
+}
+
+/*
+ * A piped input is the read end of a pipe(2), which on FreeBSD, whose pipes
+ * are bidirectional, is O_RDWR: Capsicum keeps the worker from writing it.
+ * Elsewhere an O_RDWR FIFO, which nothing would keep the worker from
+ * writing, is refused, as are a write-only FIFO end and a regular input
+ * that is not read-only.
+ */
+static void
+test_input_roles(int parent)
+{
+	int ends[2], both, writer, file;
+
+	CHECK(pipe(ends) == 0);
+	CHECK(take_input(ends[0], true) == INPUT_ACCEPTED);
+	CHECK(close(ends[0]) == 0 && close(ends[1]) == 0);
+	CHECK(mkfifoat(parent, "fifo", 0600) == 0);
+	both = openat(parent, "fifo", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+	CHECK(both != -1);
+	writer = openat(parent, "fifo", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	CHECK(writer != -1);
+#ifdef __FreeBSD__
+	CHECK(take_input(both, true) == INPUT_ACCEPTED);
+#else
+	CHECK(take_input(both, true) == INPUT_REFUSED);
+#endif
+	CHECK(take_input(writer, true) == INPUT_REFUSED);
+	CHECK(take_input(both, false) == INPUT_REFUSED);
+	CHECK(close(both) == 0 && close(writer) == 0);
+	CHECK(unlinkat(parent, "fifo", 0) == 0);
+	file = openat(parent, "input", O_RDWR | O_CLOEXEC);
+	CHECK(file != -1);
+	CHECK(take_input(file, false) == INPUT_REFUSED);
+	CHECK(take_input(file, true) == INPUT_REFUSED);
+	CHECK(close(file) == 0);
+}
+
 /* fds holds the input, work directory, directory root, file root, scratch
  * directory and staged manifest; the child installs them at the profile's
  * numbers and, when confine is set, enforces.
@@ -586,6 +667,7 @@ main(void)
 		CHECK(refuse_readable_manifest(fds, manifest) == 1);
 	}
 	CHECK(close(readable) == 0);
+	test_input_roles(parent);
 
 	/* A profile the kernel cannot confine, such as any profile on a
 	 * Linux kernel without Landlock ABI 3, skips each of its attempts;
