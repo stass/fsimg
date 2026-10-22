@@ -48,7 +48,10 @@ module FsimgSpec
   # image's geometry or names, or is unavailable on this host. A
   # disagreement that a documented oracle exception matches is excused:
   # it keeps its detail and carries the exception's id, so it is recorded
-  # as the tool's defect rather than dropped. A detail quotes the image's names
+  # as the tool's defect rather than dropped. A checker that does not
+  # apply because of a documented blind spot, a volume it cannot read,
+  # carries the blind spot's id in the same field, exception_id. A detail
+  # quotes the image's names
   # and the tool's output only through FsimgSpec.shown, and is cut to
   # DETAIL_LENGTH, so a hostile image cannot flood a report.
   class Observation < Data.define(:state, :detail, :exception_id)
@@ -59,8 +62,9 @@ module FsimgSpec
 
     def initialize(state:, detail: nil, exception_id: nil)
       raise HarnessError, "unknown observation #{FsimgSpec.shown(state)}" unless STATES.include?(state)
-      raise HarnessError, "an observation names an exception exactly when it is excused" unless
-        (state == "excused") == !exception_id.nil?
+      raise HarnessError, "an excused observation names its exception" if state == "excused" && exception_id.nil?
+      raise HarnessError, "only an excused or inapplicable observation names an exception or blind spot" if
+        exception_id && !%w[excused not_applicable].include?(state)
 
       super(state:, detail: detail && (detail.length > DETAIL_LENGTH ? "#{detail[0, DETAIL_LENGTH]}..." : detail), exception_id:)
     end
@@ -69,7 +73,7 @@ module FsimgSpec
 
     def self.disagrees(detail) = new(state: "disagrees", detail:)
 
-    def self.not_applicable(detail) = new(state: "not_applicable", detail:)
+    def self.not_applicable(detail, exception_id: nil) = new(state: "not_applicable", detail:, exception_id:)
 
     def self.unavailable(detail) = new(state: "unavailable", detail:)
 
@@ -82,9 +86,9 @@ module FsimgSpec
     end
 
     # The label the coverage report counts this observation under: its
-    # state, and for an excused one the exception that excused it, so a
-    # report shows which exceptions fired.
-    def tally_label = exception_id ? "excused:#{exception_id}" : state
+    # state, and the exception or blind spot it names, so a report shows
+    # which of them fired.
+    def tally_label = exception_id ? "#{state}:#{exception_id}" : state
 
     # The observation as reports and failure records write it.
     def to_h = super.compact

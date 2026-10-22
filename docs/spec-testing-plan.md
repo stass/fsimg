@@ -770,7 +770,11 @@ The rule set reads the specification as follows where it is not decisive:
   and one of the checker or the read-back fails the case at any cluster
   count, the cutovers included, unless a documented
   [oracle exception](../specs/design-spec-testing.md#oracle-exceptions)
-  excuses it.
+  excuses it. FreeBSD's `fsck_msdosfs` misreads a FAT16 volume of 4085
+  clusters as FAT12 and refuses a FAT32 volume of 65525. At 4085 it is a
+  blind spot and does not run, since what it prints there depends on the
+  image; at 65525 an exception excuses its refusal, a closed set of fixed
+  lines.
 
 ## Risks
 

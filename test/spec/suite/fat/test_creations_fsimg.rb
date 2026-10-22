@@ -60,52 +60,83 @@ class TestFatCreationsFsimg < Minitest::Test
     end
   end
 
-  # The seeded failure of the checker's verdict: a checker that reports
-  # what FreeBSD's fsck_msdosfs reports of a 4085-cluster FAT16 volume
+  # The checker's refusal in the form FreeBSD's fsck_msdosfs gives for a
+  # FAT32 volume of 65525 clusters. A checker that prints it before
+  # extra, the lines of extra, and exits 8.
+  def self.refusing_checker(path, extra: "")
+    File.write(path, "#!/bin/sh\necho \"** $2\"\necho 'Invalid signature in fsinfo block'\necho 'Fix? no'\n" \
+                     "#{extra}echo 'Filesystem too small (65525 clusters) for FAT32 partition'\nexit 8\n")
+    File.chmod(0o700, path)
+    path
+  end
+
+  # The seeded failure of the checker's verdict: a checker that refuses
+  # as FreeBSD's fsck_msdosfs refuses a FAT32 volume of 65525 clusters
   # fails a created image of any other count, and the documented
-  # exception for that checker's off-by-one cutover excuses it at 4085,
-  # where the case passes and records the exception, since the host's
-  # mtools reads that volume back.
+  # exception for that refusal excuses it at 65525, where the case
+  # passes and records the exception, since the host's mtools reads that
+  # volume back.
   def test_a_checker_disagreement_fails_a_created_image_unless_an_exception_excuses_it
     Dir.mktmpdir do |stubs|
-      checker = File.join(stubs, "fsck_msdosfs")
-      File.write(checker, "#!/bin/sh\necho \"** $2\"\necho '** Phase 1 - Read FAT and checking connectivity'\n" \
-                          "echo 'Cluster 8 crossed another chain at 7'\nexit 8\n")
-      File.chmod(0o700, checker)
+      checker = self.class.refusing_checker(File.join(stubs, "fsck_msdosfs"))
       with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
         _, failed = run.call("fat.create.valid.fat16")
-        _, excused = run.call("fat.create.cluster_count.fat16_4085")
+        _, excused = run.call("fat.create.cluster_count.fat32_65525")
         skip "no oracle runs on this host" if failed.observations.fetch("fsck").state == "unavailable"
 
         assert_equal "failed", failed.verdict
-        assert_match(/fsck: fsck_msdosfs -n exited 8: "\*\* out\/created.img \| \*\* Phase 1 .* \| Cluster 8 crossed/, failed.detail)
-        assert_equal ["passed", "excused", "fsck_msdosfs.fat16_4085"],
+        assert_match(/fsck: fsck_msdosfs -n exited 8: "\*\* out\/created.img \| Invalid signature in fsinfo block \|/, failed.detail)
+        assert_equal ["passed", "excused", "fsck_msdosfs.fat32_65525"],
                      [excused.verdict, *excused.observations.fetch("fsck").to_h.values_at(:state, :exception_id)], excused.detail
       end
     end
   end
 
-  # An exception excuses the checker's complete output only: at 4085
-  # clusters, a checker that reports FreeBSD's misread chains and then a
-  # directory with entries past its end, a diagnostic the misread table
-  # does not explain, fails the case, although that line falls beyond
-  # the lines the detail quotes, which names it first.
+  # An exception excuses the checker's complete output only: at 65525
+  # clusters, a checker that refuses the volume but also reports a
+  # backup boot sector that differs from the primary, a diagnostic the
+  # refusal does not explain, fails the case, and its detail names that
+  # line first.
   def test_a_checker_diagnostic_no_exception_explains_fails_a_created_image
     Dir.mktmpdir do |stubs|
+      checker = self.class.refusing_checker(File.join(stubs, "fsck_msdosfs"),
+                                            extra: "echo 'backup (block 6) mismatch with primary bootblock'\n")
+      with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
+        _, result = run.call("fat.create.cluster_count.fat32_65525")
+        checked = result.observations.fetch("fsck")
+        skip "no oracle runs on this host" if checked.state == "unavailable"
+
+        assert_equal %w[failed disagrees], [result.verdict, checked.state]
+        assert_match(/\Afsck_msdosfs\.fat32_65525 does not explain "backup \(block 6\) mismatch with primary bootblock": /,
+                     checked.detail)
+      end
+    end
+  end
+
+  # FreeBSD's fsck_msdosfs cannot read a FAT16 volume of 4085 clusters,
+  # so it does not judge one, whatever it would print, even lines that
+  # mimic its misread chains; the observation names the blind spot. The
+  # rules still judge the image: one whose boot signature is cleared
+  # fails create.
+  def test_fsck_msdosfs_does_not_judge_a_created_image_of_4085_clusters
+    Dir.mktmpdir do |stubs|
       checker = File.join(stubs, "fsck_msdosfs")
-      chains = "echo 'Cluster 8 crossed another chain at 7'\necho 'Truncate? no'\n" * 10
-      File.write(checker, "#!/bin/sh\necho \"** $2\"\necho '** Phase 1 - Read FAT and checking connectivity'\n#{chains}" \
-                          "echo '** Phase 2 - Checking Directories'\necho '/DIR has entries after end of directory'\n" \
-                          "echo 'Remove? no'\nexit 8\n")
+      File.write(checker, "#!/bin/sh\nprintf '** %s\\nCluster 8 crossed another chain at 7\\n/x is 10\\n' \"$2\"\nexit 8\n")
       File.chmod(0o700, checker)
+      unsigned = ->(path) { File.open(path, "r+b") { _1.pwrite("\0\0".b, 510) } }
       with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
         _, result = run.call("fat.create.cluster_count.fat16_4085")
         checked = result.observations.fetch("fsck")
         skip "no oracle runs on this host" if checked.state == "unavailable"
 
-        assert_equal %w[failed disagrees], [result.verdict, checked.state]
-        assert_match(/\Afsck_msdosfs\.fat16_4085 does not explain "\/DIR has entries after end of directory": fsck_msdosfs -n exited 8: /,
-                     checked.detail)
+        assert_equal ["passed", "not_applicable", "fsck_msdosfs.fat16_4085"],
+                     [result.verdict, *checked.to_h.values_at(:state, :exception_id)], result.detail
+      end
+      with_run(tools: { fsck_fat: nil, fsck_msdosfs: checker }) do |run|
+        _, result = run.call("fat.create.cluster_count.fat16_4085", alter: unsigned)
+
+        assert_equal ["failed", ["create"]], [result.verdict, result.stages.map(&:stage)]
+        assert_match(/\Acreate: the image it wrote violates fat\.boot\.signature/, result.detail)
       end
     end
   end
@@ -117,10 +148,7 @@ class TestFatCreationsFsimg < Minitest::Test
   # exception for its refusal excuses.
   def test_a_created_image_with_a_bad_fsinfo_signature_fails_whatever_the_checker_reports
     Dir.mktmpdir do |stubs|
-      checker = File.join(stubs, "fsck_msdosfs")
-      File.write(checker, "#!/bin/sh\necho \"** $2\"\necho 'Invalid signature in fsinfo block'\necho 'Fix? no'\n" \
-                          "echo 'Filesystem too small (65525 clusters) for FAT32 partition'\nexit 8\n")
-      File.chmod(0o700, checker)
+      checker = self.class.refusing_checker(File.join(stubs, "fsck_msdosfs"))
       # A failed case keeps its directory, so each corruption runs apart.
       FSINFO_SIGNATURE_OFFSETS.each do |label, offset|
         corrupt = lambda do |path|
@@ -141,9 +169,10 @@ class TestFatCreationsFsimg < Minitest::Test
 
   # The seeded failure of the read-back's verdict at a cutover: an mdir
   # that lists nothing fails the created FAT16 volume of exactly 4085
-  # clusters, which no exception excuses, as at any other count. No
-  # checker runs, so the read-back alone fails the case, and an empty
-  # listing reads no file, so mtype is never run.
+  # clusters, which no exception excuses, as at any other count. The
+  # only checker is fsck_msdosfs, which does not apply there, so the
+  # read-back alone fails the case, and an empty listing reads no file,
+  # so mtype is never run.
   def test_a_read_back_disagreement_fails_a_created_image_at_a_cutover
     Dir.mktmpdir do |stubs|
       mdir, mtype = %w[mdir mtype].map { File.join(stubs, _1) }
@@ -151,12 +180,16 @@ class TestFatCreationsFsimg < Minitest::Test
         File.write(_1, "#!/bin/sh\nexit 0\n")
         File.chmod(0o700, _1)
       end
-      with_run(tools: { mdir:, mtype:, fsck_fat: nil, fsck_msdosfs: nil }) do |run|
+      checker = File.join(stubs, "fsck_msdosfs")
+      File.write(checker, "#!/bin/sh\nexit 8\n")
+      File.chmod(0o700, checker)
+      with_run(tools: { mdir:, mtype:, fsck_fat: nil, fsck_msdosfs: checker }) do |run|
         _, result = run.call("fat.create.cluster_count.fat16_4085")
         read_back = result.observations.fetch("mtools")
         skip "no oracle runs on this host" if read_back.state == "unavailable"
 
-        assert_equal %w[failed disagrees], [result.verdict, read_back.state]
+        assert_equal %w[failed disagrees not_applicable],
+                     [result.verdict, read_back.state, result.observations.fetch("fsck").state]
         assert_match(/\Athe oracles disagree with the created image: mtools: mtools lacks directory "DIR"/, result.detail)
       end
     end

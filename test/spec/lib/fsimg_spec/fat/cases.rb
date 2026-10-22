@@ -69,7 +69,8 @@ module FsimgSpec
       # states, and the case is a HostSkip naming why. The read-back must
       # agree, since an excused one does not show that mtools wrote the
       # tree, while an excused checker refused nothing: its defect is no
-      # fault of the image (specs/design-spec-testing.md#oracle-exceptions).
+      # fault of the image, and a checker a blind spot keeps from the
+      # volume did not run (specs/design-spec-testing.md#oracle-exceptions).
       # The oracles observed the very bytes the case reads, unmutated, when
       # the base was built, so those observations are the case's.
       def populated(base, id:, random_seed: nil)

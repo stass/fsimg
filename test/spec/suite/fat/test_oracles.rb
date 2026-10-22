@@ -207,47 +207,60 @@ class TestFatOracles < Minitest::Test
     assert_empty excused
   end
 
-  # FreeBSD's fsck_msdosfs takes the variant one cluster off section
-  # 3.5's cutovers: it decodes a FAT16 volume of 4085 clusters with a
-  # 12-bit table and refuses a FAT32 volume of 65525. Its complete output
-  # there is excused when every line is one the misread table or the
-  # refusal explains, as observed on FreeBSD 16: chains crossed, cut,
-  # lost, or too short or too long for a file's size in any phase, and the
-  # refusal after its warning about the sector after FSInfo. Any other
-  # diagnostic, such as a boot sector problem or a directory's entries
-  # past its end, wherever it
-  # falls among the lines, leaves the disagreement unexcused, as do
-  # fsck.fat's output and another count.
-  def test_fsck_msdosfs_is_excused_only_for_output_its_defect_explains
+  # FreeBSD's fsck_msdosfs decodes a FAT16 volume of 4085 clusters with a
+  # 12-bit table, so it reads every chain and directory wrongly: on such a
+  # volume it does not apply and never runs, whatever it would print, and
+  # the observation names the blind spot and its reason. fsck.fat runs
+  # there, under either checker's slot and before fsck_msdosfs when both
+  # are configured, and fsck_msdosfs runs at every other count.
+  def test_fsck_msdosfs_does_not_apply_at_4085_clusters
+    Dir.mktmpdir do |stubs|
+      ran = File.join(stubs, "ran")
+      checkers = %w[fsck_msdosfs fsck.fat].to_h do |name|
+        path = File.join(stubs, name)
+        File.write(path, "#!/bin/sh\ntouch '#{ran}'\necho 'Cluster 8 crossed another chain at 7'\nexit 8\n")
+        File.chmod(0o700, path)
+        [name, path]
+      end
+      checked = lambda do |clusters, checker, fsck_fat: nil|
+        File.unlink(ran) if File.exist?(ran)
+        observe_image(tree: [], parameters: { clusters: }, tools: @tools.merge(fsck_fat:, fsck_msdosfs: checker)) do
+          [*_1.fetch("fsck").to_h.values_at(:state, :exception_id), File.exist?(ran)]
+        end
+      end
+      msdosfs, fat = checkers.values_at("fsck_msdosfs", "fsck.fat")
+
+      assert_equal [["not_applicable", "fsck_msdosfs.fat16_4085", false]] + ([["disagrees", nil, true]] * 4),
+                   [checked.call(4085, msdosfs), checked.call(4085, fat), checked.call(4085, msdosfs, fsck_fat: fat),
+                    checked.call(4084, msdosfs), checked.call(4086, msdosfs)]
+      observe_image(tree: [], parameters: { clusters: 4085 },
+                    tools: @tools.merge(fsck_fat: nil, fsck_msdosfs: checkers.fetch("fsck_msdosfs"))) do |observations|
+        assert_match(/readboot/, observations.fetch("fsck").detail)
+      end
+    end
+  end
+
+  # FreeBSD's fsck_msdosfs refuses a FAT32 volume of 65525 clusters, one
+  # cluster off section 3.5's cutover, before it reads any directory. Its
+  # complete output there is excused when it is the refusal alone or
+  # after its warning about the sector after FSInfo, as observed on
+  # FreeBSD 16. Any other line, such as a boot sector problem, leaves the
+  # disagreement unexcused, as do fsck.fat's output and another count.
+  def test_fsck_msdosfs_is_excused_only_for_its_refusal_of_65525_clusters
     observed = lambda do |lines, count, program: "fsck_msdosfs"|
       Fat::Oracles.excuse(Fat::Oracles::Disagreement.new("x", failure: failure(lines, program:)), tool: "fsck",
                                                                                                   cluster_count: count)
                   .exception_id
     end
-    crossed = ["** out/created.img", "** Phase 1 - Read FAT and checking connectivity",
-               *(["Cluster 8 crossed another chain at 7", "Truncate? no"] * 10),
-               "Cluster 23 continues with out of range cluster number 1", "Truncate? no",
-               "** Phase 2 - Checking Directories", "Cluster chain starting at 8 ends with cluster marked free",
-               "Truncate? no", "Cluster chain starting at 9 ends with cluster out of range (70000)", "Truncate? no",
-               "/DIR/big.bin has too many clusters allocated", "Drop superfluous clusters? no",
-               "size of /DIR/zeros.bin is 70000, should at most be 32768", "/DIR doesn't start a new cluster chain",
-               "Remove? no", "** Phase 3 - Checking for Lost Files", "Lost cluster chain at cluster 4096",
-               "1 Cluster(s) lost", "Reconnect? no", "Clear? no", "8 files, 1.9 MiB free (3932 clusters)"]
-    lost = ["** image.img", "** Phase 1 - Read FAT and checking connectivity", "** Phase 2 - Checking Directories",
-            "** Phase 3 - Checking for Lost Files", "Lost cluster chain at cluster 4096", "1 Cluster(s) lost",
-            "Reconnect? no", "Clear? no", "1 files, 2.0 MiB free (4094 clusters)"]
-    stale = [*crossed, "/DIR has entries after end of directory", "Remove? no"]
-    boot = ["** out/created.img", "Invalid signature in boot block: 0000", *crossed.drop(1)]
     refused = ["** out/created.img", "Filesystem too small (65525 clusters) for FAT32 partition"]
     warned = [refused.first, "Invalid signature in fsinfo block", "Fix? no", refused.last]
     backup = [refused.first, "backup (block 6) mismatch with primary bootblock", refused.last]
+    crossed = [refused.first, "** Phase 1 - Read FAT and checking connectivity", "Cluster 8 crossed another chain at 7"]
 
-    assert_equal ["fsck_msdosfs.fat16_4085"] * 2 + [nil] * 5,
-                 [observed.call(crossed, 4085), observed.call(lost, 4085), observed.call(stale, 4085), observed.call(boot, 4085),
-                  observed.call(crossed, 4086), observed.call(crossed, 4085, program: "fsck.fat"), observed.call(refused, 4085)]
-    assert_equal ["fsck_msdosfs.fat32_65525"] * 2 + [nil] * 3,
+    assert_equal ["fsck_msdosfs.fat32_65525"] * 2 + [nil] * 5,
                  [observed.call(refused, 65_525), observed.call(warned, 65_525), observed.call(backup, 65_525),
-                  observed.call(crossed, 65_525), observed.call(warned, 65_524)]
+                  observed.call(crossed, 65_525), observed.call(warned, 65_524), observed.call(warned, 65_525, program: "fsck.fat"),
+                  observed.call(warned, 4085)]
   end
 
   # Only the checker's and the read-back's disagreements count against
@@ -264,19 +277,25 @@ class TestFatOracles < Minitest::Test
     assert_empty Fat::Oracles.disagreements(observations.except("fsck"))
   end
 
-  # Every exception is documented: a unique id, a verdict tool, the
-  # program and exit status it matches, a symptom and the lines it
-  # explains, and a reason that cites where the tool departs from the
-  # specification.
-  def test_every_exception_is_documented
+  # Every exception and blind spot is documented: an id unique across
+  # both, the program it names, exact cluster counts, an exception's
+  # verdict tool, symptom and the lines it explains, and a reason that
+  # cites where the tool departs from the specification.
+  def test_every_exception_and_blind_spot_is_documented
     exceptions = Fat::Oracles::EXCEPTIONS
+    blind_spots = Fat::Oracles::BLIND_SPOTS
+    entries = exceptions + blind_spots
 
-    assert_equal exceptions.size, exceptions.map(&:id).uniq.size
+    assert_equal entries.size, entries.map(&:id).uniq.size
+    entries.each do |entry|
+      assert_kind_of String, entry.program, entry.id
+      assert(entry.clusters.all?(Integer), entry.id)
+      assert_match(%r{https://|specs/}, entry.reason, entry.id)
+    end
     exceptions.each do |exception|
       assert_includes Fat::Oracles::VERDICT_TOOLS, exception.tool, exception.id
       assert_kind_of Regexp, exception.symptom, exception.id
       assert(exception.explains.all?(Regexp), exception.id)
-      assert_match(%r{https://|specs/}, exception.reason, exception.id)
     end
   end
 

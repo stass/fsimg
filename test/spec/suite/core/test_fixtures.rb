@@ -60,4 +60,17 @@ class TestFixtures < Minitest::Test
     assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.new(state: "excused", detail: "x") }
     assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.new(state: "disagrees", detail: "x", exception_id: "t.exception") }
   end
+
+  # A tool that does not apply may name the documented blind spot that
+  # keeps it from running, and the coverage report counts it under that
+  # blind spot, as an excused observation is counted under its
+  # exception; an agreement names none.
+  def test_a_tool_that_does_not_apply_may_name_its_blind_spot
+    blind = FsimgSpec::Observation.not_applicable("fsck_msdosfs cannot read it", exception_id: "t.blind")
+
+    assert_equal ["not_applicable:t.blind", "excused:t.exception", "not_applicable"],
+                 [blind.tally_label, FsimgSpec::Observation.disagrees("x").excused_by("t.exception").tally_label,
+                  FsimgSpec::Observation.not_applicable("x").tally_label]
+    assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.new(state: "agrees", exception_id: "t.blind") }
+  end
 end

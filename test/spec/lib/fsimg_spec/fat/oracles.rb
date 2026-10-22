@@ -21,12 +21,8 @@ module FsimgSpec
     OracleException = Data.define(:id, :tool, :program, :exit_status, :clusters, :symptom, :explains, :reason) do
       include Checked
 
-      def initialize(clusters:, explains:, **fields)
-        raise HarnessError, "an oracle exception names exact cluster counts" unless
-          clusters.is_a?(Array) && !clusters.empty? && clusters.all?(Integer)
-
-        super(clusters: clusters.dup.freeze, explains: explains.dup.freeze, **fields)
-      end
+      def initialize(clusters:, explains:, **fields) =
+        super(clusters: Fat.exact_cluster_counts(clusters), explains: explains.dup.freeze, **fields)
 
       # Whether this is about failure, what the tool named observed_by
       # wrote when it failed on an image of cluster_count clusters, which
@@ -45,6 +41,35 @@ module FsimgSpec
         line = failure.lines.find { |written| !symptom.match?(written) && explains.none? { _1.match?(written) } }
         line && "#{id} does not explain #{FsimgSpec.shown(line)}"
       end
+    end
+
+    # A documented blind spot of the read-only checker
+    # (specs/design-spec-testing.md#oracle-exceptions): the checker
+    # program cannot read a volume whose cluster count is one of clusters,
+    # so there the checker does not apply and does not run, whatever it
+    # would write. Nothing it could print is matched, so nothing on the
+    # image can forge an excuse. Only the checker has blind spots: the
+    # read-back's verdict holds at every count. reason says why, citing
+    # the program's source or the specification section it departs from;
+    # clusters are exact counts, as an exception's are.
+    CheckerBlindSpot = Data.define(:id, :program, :clusters, :reason) do
+      include Checked
+
+      def initialize(clusters:, **fields) = super(clusters: Fat.exact_cluster_counts(clusters), **fields)
+
+      # Whether program, the checker's file name, cannot read a volume of
+      # cluster_count clusters, which is Undefined where the BPB is.
+      def covers?(program:, cluster_count:) = program == self.program && clusters.include?(cluster_count)
+    end
+
+    # clusters, the counts an oracle exception or blind spot names, as a
+    # frozen Array of exact counts: a defect is traced to the counts it was
+    # observed at, never to a range.
+    def self.exact_cluster_counts(clusters)
+      raise HarnessError, "an oracle exception or blind spot names exact cluster counts" unless
+        clusters.is_a?(Array) && !clusters.empty? && clusters.all?(Integer)
+
+      clusters.dup.freeze
     end
 
     # The independent tools that read a FAT image beside fsimg
@@ -112,10 +137,24 @@ module FsimgSpec
       VERDICT_TOOLS = %w[fsck mtools].freeze
 
       FREEBSD_BOOT_C = "https://cgit.freebsd.org/src/tree/sbin/fsck_msdosfs/boot.c"
-      # The lines fsck_msdosfs -n writes around its diagnostics: the image
-      # it reads, and the summary of a volume it read to the end.
+      # The line fsck_msdosfs -n writes first: the image it reads, as the
+      # harness names it.
       FSCK_MSDOSFS_IMAGE = /\A\*\* \S+\z/
-      FSCK_MSDOSFS_SUMMARY = /\A\d+ files?, \d+(?:\.\d+)? (?:[KMGTPE]i)?B free \(\d+ clusters?\)\z/
+
+      # The checker's documented blind spots (specs/design-spec-testing.md#oracle-exceptions),
+      # reviewed like the exceptions: a checker they cover is not
+      # applicable, naming the blind spot, and never runs.
+      BLIND_SPOTS = [
+        # The misread table sends the checker through chains and
+        # directories fsimg did not write, into file data it reads as
+        # directory entries, so what it then prints is open-ended and
+        # carries names from the image.
+        CheckerBlindSpot.new(
+          id: "fsck_msdosfs.fat16_4085", program: "fsck_msdosfs", clusters: [4085],
+          reason: "FreeBSD's fsck_msdosfs (#{FREEBSD_BOOT_C}, readboot) takes a 12-bit FAT while the cluster count is " \
+                  "below CLUST_RSRVD & CLUST12_MASK, 4086, where section 3.5 makes 4085 clusters FAT16.".freeze
+        )
+      ].freeze
 
       # The documented oracle exceptions (specs/design-spec-testing.md#oracle-exceptions),
       # each reviewed like a rule: a disagreement one of them excuses fails
@@ -124,33 +163,15 @@ module FsimgSpec
       # source, and explains only the lines that defect was observed to
       # write.
       EXCEPTIONS = [
-        # Every chain the misread table gives is wrong: crossed, cut short
-        # or run long in Phase 1 or 2, or lost in Phase 3, as on an empty
-        # volume, with the files whose chains they make shorter or longer
-        # than their sizes, the directories they leave without a chain, and
-        # the prompts -n answers.
-        OracleException.new(
-          id: "fsck_msdosfs.fat16_4085", tool: "fsck", program: "fsck_msdosfs", exit_status: 8, clusters: [4085],
-          symptom: Regexp.union(/\ACluster \d+ crossed another chain at \d+\z/,
-                                /\ACluster \d+ continues with out of range cluster number \d+\z/,
-                                /\ACluster chain starting at \d+ ends with cluster (?:marked free|out of range \(\d+\))\z/,
-                                /\ALost cluster chain at cluster \d+\z/),
-          explains: [
-            FSCK_MSDOSFS_IMAGE, FSCK_MSDOSFS_SUMMARY,
-            /\A\*\* Phase (?:1 - Read FAT and checking connectivity|2 - Checking Directories|3 - Checking for Lost Files)\z/,
-            /\Asize of \/.* is \d+, should at most be \d+\z/, %r{\A/.* has too many clusters allocated\z},
-            %r{\A/.* doesn't start a new cluster chain\z}, /\A\d+ Cluster\(s\) lost\z/,
-            /\A(?:Truncate|Clear|Reconnect|Remove|Drop superfluous clusters)\? no\z/
-          ],
-          reason: "FreeBSD's fsck_msdosfs (#{FREEBSD_BOOT_C}, readboot) takes a 12-bit FAT while the cluster count is " \
-                  "below CLUST_RSRVD & CLUST12_MASK, 4086, where section 3.5 makes 4085 clusters FAT16; it decodes the " \
-                  "16-bit table at 12 bits, so every chain it reports is misread.".freeze
-        ),
-        # The refusal may follow readboot's warning on every FAT32 volume
-        # fsimg and mkfs.fat write: it wants a boot signature at the end of
-        # the sector after FSInfo, which section 5 does not define. The
-        # warning names no signature, so the rule fat32.fsinfo.signatures
-        # checks the three section 5 does define on fsimg's side.
+        # readboot refuses the volume before it reads a FAT or a directory,
+        # so its output is a closed set: the image line, which names the
+        # path the harness gave, and fixed strings that carry no name or
+        # label from the image. The refusal may follow its warning on every
+        # FAT32 volume fsimg and mkfs.fat write: it wants a boot signature
+        # at the end of the sector after FSInfo, which section 5 does not
+        # define. The warning names no signature, so the rule
+        # fat32.fsinfo.signatures checks the three section 5 does define on
+        # fsimg's side.
         OracleException.new(
           id: "fsck_msdosfs.fat32_65525", tool: "fsck", program: "fsck_msdosfs", exit_status: 8, clusters: [65_525],
           symptom: /\AFilesystem too small \(65525 clusters\) for FAT32 partition\z/,
@@ -178,7 +199,7 @@ module FsimgSpec
         # directory is a fixed region, or Undefined with the BPB.
         root_cluster = FsimgSpec.derive(model.fat32_extension, model.extension) { _1 ? _2.bpb_root_clus : nil }
         {
-          "fsck" => -> { checker(shell, image:, chdir:, fat_count: geometry.fat_count) },
+          "fsck" => -> { checker(shell, image:, chdir:, fat_count: geometry.fat_count, cluster_count: geometry.cluster_count) },
           "mtools" => -> { mtools(shell, image:, chdir:, tree: model.tree) },
           "fatcat" => lambda {
             fatcat(shell, image:, chdir:, tree: model.tree, geometry:, root_cluster:)
@@ -214,16 +235,21 @@ module FsimgSpec
           "#{tool}: #{observation.detail}" if observation.state == "disagrees"
         end
 
-      # fsck.fat -n or fsck_msdosfs -n agrees when it exits 0. Its label
-      # names the program, whose failure an exception names, since the two
-      # checkers differ in their defects.
-      private_class_method def self.checker(shell, image:, chdir:, fat_count:)
+      # fsck.fat -n or fsck_msdosfs -n, the first configured, agrees when it
+      # exits 0. It does not run on a volume one of its blind spots covers.
+      # Its label names the program, its file name, which an exception and
+      # a blind spot name, since the two checkers differ in their defects.
+      private_class_method def self.checker(shell, image:, chdir:, fat_count:, cluster_count:)
         tool = shell.tools.values_at(:fsck_fat, :fsck_msdosfs).compact.first
         return Observation.unavailable("no read-only checker is configured") unless tool
         return Observation.not_applicable("the checkers read one or two FATs, not #{fat_count}") unless
           fat_count.is_a?(Integer) && CHECKER_FAT_COUNTS.cover?(fat_count)
 
-        output(shell, [tool, "-n", image], chdir:, cap: CHECKER_BYTES, label: "#{File.basename(tool)} -n")
+        program = File.basename(tool)
+        blind = BLIND_SPOTS.find { _1.covers?(program:, cluster_count:) }
+        return Observation.not_applicable(blind.reason, exception_id: blind.id) if blind
+
+        output(shell, [tool, "-n", image], chdir:, cap: CHECKER_BYTES, label: "#{program} -n")
         Observation.agrees
       end
 
