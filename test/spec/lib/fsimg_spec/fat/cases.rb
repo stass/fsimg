@@ -66,11 +66,9 @@ module FsimgSpec
       # harness's fault, a FixtureError. The tree judges fsimg only once
       # mtools wrote it, its read-back reproduced it and the checker did not
       # refuse the image; otherwise mtools did not write the tree the recipe
-      # states, and the case is a HostSkip naming why. The read-back must
-      # agree, since an excused one does not show that mtools wrote the
-      # tree, while an excused checker refused nothing: its defect is no
-      # fault of the image, and a checker a blind spot keeps from the
-      # volume did not run (specs/design-spec-testing.md#oracle-exceptions).
+      # states, and the case is a HostSkip naming why. A checker a blind
+      # spot keeps from the volume did not run, so it refused nothing
+      # (specs/design-spec-testing.md#checker-blind-spots).
       # The oracles observed the very bytes the case reads, unmutated, when
       # the base was built, so those observations are the case's.
       def populated(base, id:, random_seed: nil)
@@ -121,15 +119,11 @@ module FsimgSpec
       # generator defect: a tree the builder cannot lay out, or a rule it
       # violates. Nothing of the witness is written. The builder writes a
       # tree only into the tables, the directories, the data region and
-      # FSInfo's free-cluster hints. The model decodes the directories,
-      # but only to find a stale byte past an end marker, which the
-      # builder never leaves: it writes every directory into a
-      # zero-filled image. It decodes neither the tables nor the data
-      # region, and no rule reads the hints, only FSInfo's signatures,
-      # which no tree changes. So the model is the empty base's, rendered
-      # once into the cache, with the witness's tree as its known tree; a
-      # rule that reads the hints, or anything else of a directory, would
-      # need the witness's own image instead.
+      # FSInfo's free-cluster hints. The model decodes none of the first
+      # three, and no rule reads the hints, only FSInfo's signatures, which
+      # no tree changes. So the model is the empty base's, rendered once
+      # into the cache, with the witness's tree as its known tree; a rule
+      # that reads the hints would need the witness's own image instead.
       # No name trial runs, so only the host's destination rules, which no
       # witness's validity depends on, stay unclassified.
       # A defective witness's own case reports how, and a sampled one's
@@ -221,8 +215,8 @@ module FsimgSpec
 
       # The oracles' hook for the image fsimg created, whose model the
       # created hook decoded; nil when no oracle runs. A disagreement of
-      # the checker or the read-back that no exception excuses fails the
-      # case (specs/design-spec-testing.md#independence-and-oracles).
+      # the checker or the read-back fails the case
+      # (specs/design-spec-testing.md#independence-and-oracles).
       def created_oracles
         return nil unless @shell
 

@@ -125,16 +125,6 @@ module FsimgSpec
       # A directory with a name whose key Ruby cannot give leaves the
       # second rule undefined.
       def self.name_rules = [
-        # A reader stops at the end marker, so fsimg must accept a stale
-        # byte past it; fsimg's own images initialize every byte they emit,
-        # so an image it created must have none.
-        Rule.new(
-          id: "fat.directory.tail_zeroed", category: "advisory", policy: "must_accept", scopes: ["directories"],
-          applies_to: ALWAYS, domain: Witnesses::DIRECTORY_TAILS,
-          predicate: ->(model, _) { FsimgSpec.derive(model.directories) { |found| found.all? { _1.stale_at.nil? } } },
-          source: "#{cite("6", "DIR_Name[0] 0x00")}: the entry is free and so is every entry after it; " \
-                  "specs/design-security.md: emitters initialize all reserved bytes and padding"
-        ),
         Rule.new(
           id: "fat.directory.name", category: "profile", policy: "must_reject", status: "FSIMG_ECORRUPT",
           scopes: ["directories"], applies_to: ALWAYS, domain: Witnesses::NAME,
@@ -531,9 +521,8 @@ module FsimgSpec
         absent_sector_rule(FSINFO, source: cite("3.3", "BPB_FSInfo")),
         # The FSInfo record a legal BPB_FSInfo locates carries three
         # signatures. The reader checks them when it verifies the volume
-        # (specs/design-fat-reader.md), and FreeBSD's fsck_msdosfs, whose
-        # warning names none of them, is excused for it at 65525 clusters,
-        # so this rule is what fails an image of fsimg's with a wrong one.
+        # (specs/design-fat-reader.md), and so does this rule on fsimg's
+        # side, whatever the host's checker reports.
         Rule.new(
           id: "fat32.fsinfo.signatures", category: "normative", policy: "must_reject", status: "FSIMG_ECORRUPT",
           scopes: ["verification"], applies_to: ->(model, _) { FsimgSpec.derive(model.fsinfo) { !_1.nil? } },

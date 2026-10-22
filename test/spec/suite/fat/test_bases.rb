@@ -123,9 +123,7 @@ class TestFatBases < Minitest::Test
   # The seeded failure of the FSInfo signatures: a valid case of a FAT32
   # base with any one of its three FSInfo signatures wrong violates
   # fat32.fsinfo.signatures, a generator defect, so the case is refused
-  # before any oracle reads the base, whatever a checker such as
-  # fsck_msdosfs, whose FSInfo warning at 65525 clusters an exception
-  # excuses, would report.
+  # before any oracle reads the base, whatever a checker would report.
   # The same case of the sound base is no defect.
   def test_valid_case_of_a_fat32_base_with_a_bad_fsinfo_signature_is_a_generator_defect
     with_cache do |cache, shell, results|

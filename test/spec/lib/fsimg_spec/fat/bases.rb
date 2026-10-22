@@ -13,9 +13,8 @@ module FsimgSpec
     # population is mtools, piped into the empty volume with mmd and mcopy.
     # A base is then refused if its decoded geometry differs from its
     # parameters, and read by the oracles: the read-only checker and the
-    # mtools read-back must agree with its tree, unless a documented
-    # exception excuses their disagreement (Oracles.disagreements), and
-    # fatcat is recorded.
+    # mtools read-back must not disagree with its tree
+    # (Oracles.disagreements), and fatcat is recorded.
     # The manifest records the command, the observations and the image
     # hash.
     module Bases

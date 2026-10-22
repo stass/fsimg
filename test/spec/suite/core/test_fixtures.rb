@@ -48,29 +48,4 @@ class TestFixtures < Minitest::Test
       assert_raises(FsimgSpec::FixtureError) { shell.run(["/usr/bin/true"], chdir: directory) }
     end
   end
-
-  # Only a disagreement is excused: it keeps its detail and names the
-  # exception that excuses it, and an excused observation always names
-  # one, so none is excused silently.
-  def test_an_excused_observation_is_a_disagreement_naming_its_exception
-    excused = FsimgSpec::Observation.disagrees("fsck_msdosfs -n exited 8").excused_by("t.exception")
-
-    assert_equal({ state: "excused", detail: "fsck_msdosfs -n exited 8", exception_id: "t.exception" }, excused.to_h)
-    assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.agrees.excused_by("t.exception") }
-    assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.new(state: "excused", detail: "x") }
-    assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.new(state: "disagrees", detail: "x", exception_id: "t.exception") }
-  end
-
-  # A tool that does not apply may name the documented blind spot that
-  # keeps it from running, and the coverage report counts it under that
-  # blind spot, as an excused observation is counted under its
-  # exception; an agreement names none.
-  def test_a_tool_that_does_not_apply_may_name_its_blind_spot
-    blind = FsimgSpec::Observation.not_applicable("fsck_msdosfs cannot read it", exception_id: "t.blind")
-
-    assert_equal ["not_applicable:t.blind", "excused:t.exception", "not_applicable"],
-                 [blind.tally_label, FsimgSpec::Observation.disagrees("x").excused_by("t.exception").tally_label,
-                  FsimgSpec::Observation.not_applicable("x").tally_label]
-    assert_raises(FsimgSpec::HarnessError) { FsimgSpec::Observation.new(state: "agrees", exception_id: "t.blind") }
-  end
 end

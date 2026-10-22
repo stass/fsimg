@@ -171,10 +171,10 @@
   `Fixture#problems` and `usable?` are the base verdict the bases tests
   assert, but `Cases#populated`, the one production caller, re-derives its
   own from `geometry_problems` and the observations, with a stricter
-  read-back (it must agree, where `Oracles.disagreements` accepts an
-  excused one). Make one funnel: `populated` acts on the fixture's verdict,
-  keeping its read-back rule there, or the tests assert through
-  `Cases#populated` and `problems` goes.
+  read-back (it must agree, where `Oracles.disagreements` also accepts one
+  that does not apply or is unavailable). Make one funnel: `populated`
+  acts on the fixture's verdict, keeping its read-back rule there, or the
+  tests assert through `Cases#populated` and `problems` goes.
 
 * [Medium] **Spec harness read-back skips drawn creations with supplementary names**
   (`test/spec/lib/fsimg_spec/fat/oracles.rb`, `fat/trees.rb`): mtools

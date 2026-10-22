@@ -20,7 +20,7 @@ require "json"
 require_relative "../lib/fsimg_spec/terminal"
 
 LIMIT = 64 << 20
-SCHEMA_VERSION = 5 # FsimgSpec::Report::SCHEMA_VERSION; test_report.rb checks both agree.
+SCHEMA_VERSION = 4 # FsimgSpec::Report::SCHEMA_VERSION; test_report.rb checks both agree.
 
 def escaped(value) = FsimgSpec::Terminal.escaped(value)
 

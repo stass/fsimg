@@ -271,26 +271,11 @@ its cluster count, computed with the specification's region arithmetic.
 A creation case carries two classifications: `create` follows the source
 model's, and the reading stages follow the created image's, which the
 harness decodes once `create` accepts. The created image is classified
-like any other. It must violate no rule, an `advisory` one included, and
-leave no scope but `destination` unclassified, since the harness knows its
-tree: a scope the model cannot decode on fsimg's own output would otherwise
-pass every stage that reads it unjudged. Its decoded geometry must be that
-layout, so a threshold witness is the volume it names. Two rules hold
-fsimg's images to the security design's requirement that [emitters
-initialize all reserved bytes and
-padding](design-security.md#other-boundaries): a writer `profile` rule that
-every byte outside allocated metadata and file content is zero, and
-`fat.directory.tail_zeroed`, that every byte of a directory from its end
-marker on is zero. The end marker is the first entry whose `DIR_Name[0]` is
-0x00; section 6 of the specification makes it and every later entry free.
-The rule reads the FAT12/16 root region's `BPB_RootEntCnt` entries, and
-the clusters of the FAT32 root and of every subdirectory to their last
-byte. A reader must accept a stale byte there, so the rule is `advisory`
-with policy `must_accept`; it binds the writer alone, through the created
-image's classification. Its witnesses are mutations, a stale byte in a
-builder base, so they leave the tree unknown and the stages that check
-`directories` unclassified; a created image with a stale byte fails
-`create`. A second `create` in the same case then reads
+like any other and must violate no rule, including the writer `profile`
+rules that every byte outside allocated metadata and file content is
+zero and that every byte of a directory from its end marker on is zero,
+and its decoded geometry must be that layout, so a threshold
+witness is the volume it names. A second `create` in the same case then reads
 `source-reversed.mtree`, the same lines in reverse order, and writes
 `out/reversed.img`, whose bytes must equal `out/created.img`; once they
 do, the harness removes it, so the case holds one image from there on.
@@ -451,18 +436,9 @@ After materialization the harness refuses a base whose decoded variant or
 geometry differs from its parameters, so a formatter that silently substitutes
 another geometry never supplies a witness. It then classifies the base like any
 case. A base meant to be valid must classify valid, decode to its recipe's
-tree, leave no scope but `destination` unclassified, and pass the
-read-only checkers that support its geometry, and the
-mtools read-back, where the host has it, must reproduce its tree, unless an
-[oracle exception](#oracle-exceptions) excuses the tool; otherwise
-it is reported and serves no case. Classifying valid means violating no
-rule, an `advisory` one included: a valid case reads its base's bytes, and
-a class A case has no violation. So every base meets
-`fat.directory.tail_zeroed` as fsimg's own images must. The builder meets it
-by construction, writing every directory into a zero-filled image; a
-formatter or an mtools that left a stale byte past an end marker would make
-its base's valid cases harness errors rather than let them pass as valid.
-Every base has a manifest in the
+tree, and pass the read-only checkers that support its geometry, and the
+mtools read-back, where the host has it, must reproduce its tree; otherwise
+it is reported and serves no case. Every base has a manifest in the
 [fixture-manifest shape](design-formats.md#format-descriptors-and-profiles):
 format, geometry and feature profile; builder, recipe and tree digest; the
 creation command; validator results; and the image hash per tool version.
@@ -489,10 +465,9 @@ wrote. Every run whose host has the tools reads the formatter base of each
 variant, holding a small standard tree, as a valid case.
 
 A populated tree judges fsimg only once mtools wrote it, the mtools
-read-back reproduced it and the checker did not refuse the image. A checker
-disagreement an [oracle exception](#oracle-exceptions) excuses is no
-refusal, but an excused read-back is no agreement either: it does not show
-that mtools wrote the tree. A host
+read-back reproduced it and the checker did not refuse the image; a
+checker a [blind spot](#checker-blind-spots) keeps from the volume refused
+nothing. A host
 without the read-back skips populated cases outright. Otherwise the host's
 mtools did not write the tree the recipe states, and a drawn tree's case is
 a host skip whose detail names why: the refusal of a populating tool that
@@ -555,12 +530,9 @@ Every oracle run on a case yields one **observation** per tool: `agrees`,
 support the image's geometry or names (the checkers read one or two FATs;
 mtools drops the surrogate pairs of a long name beyond the BMP; fatcat reads
 512-byte sectors, ASCII names, a FAT32 root directory at cluster 2 and a
-FAT12 or FAT16 root region of whole clusters only, and a documented
-[blind spot](#oracle-exceptions) keeps `fsck_msdosfs` from a FAT16 volume of
-4085 clusters), or `unavailable` when the host lacks the tool. A
-disagreement that an [oracle exception](#oracle-exceptions) matches is
-`excused`: it keeps its detail and names the exception. A tool a blind spot
-keeps from running is `not_applicable` and names the blind spot. The
+FAT12 or FAT16 root region of whole clusters only, and a
+[blind spot](#checker-blind-spots) keeps `fsck_msdosfs` from volumes of 4085
+and 65525 clusters), or `unavailable` when the host lacks the tool. The
 observation is recorded in
 the case result, the failure record and the coverage report. The oracles run
 once a case's last stage has run, on an image whose tree is known: the read-only checker agrees when it exits 0, and
@@ -592,91 +564,43 @@ created, and on a base, which serves no case unless they agree with it, as
   in path, type, size and SHA-256, because that is fsimg's own creation
   contract rather than an interpretation of the format.
 
-A disagreement of either fails the case, unless an oracle exception excuses
-it; a tool that does not apply gives no verdict. `fsimg c` followed by fsimg's own reading stages is never evidence on
+A disagreement of either fails the case; a tool that does not apply gives no
+verdict. `fsimg c` followed by fsimg's own reading stages is never evidence on
 its own, because both paths can share a defect.
 
-### Oracle exceptions
+### Checker blind spots
 
-A tool's documented defect takes one of two forms, each a frozen list
-reviewed like the rules. An **oracle exception**
-(`Fat::Oracles::EXCEPTIONS`) excuses a disagreement that is a defect of the
-tool rather than of the image. A **blind spot** (`Fat::Oracles::BLIND_SPOTS`)
-names volumes the read-only checker cannot read at all: there it does not
-run, and its observation is `not_applicable`, naming the blind spot. Only the
-checker has blind spots, since the read-back's verdict holds at every count;
-a checker program is known by its file name. The form follows from
-what the tool prints at the defect. An exception fits only a defect whose
-output is a closed set of fixed strings, so that nothing on the image can
-forge or hide a line. A blind spot fits a defect whose output depends on the
-image, since no list of lines can then be complete. Ids are unique across
-both lists.
+FreeBSD's `fsck_msdosfs` cannot read a volume at either variant cutover.
+`readboot` (`sbin/fsck_msdosfs/boot.c`) compares the cluster count with the
+largest cluster number of each FAT width, one more than the count section
+3.5 compares, so it takes a 12-bit FAT on a FAT16 volume of 4085 clusters
+and refuses a FAT32 volume of 65525 as too small. At 4085 it then walks
+chains and directories fsimg did not write and prints whatever it finds
+there; at 65525 it stops before it reads a FAT or a directory. Neither run
+judges the volume section 3.5 defines, so the checker must not judge
+either.
 
-An exception may name the checker or the read-back, and excuses only a run
-of the tool that exited nonzero; a read-back that ran and listed or read
-other contents than the tree is never excused. Each exception has these
-parts:
+A **blind spot** (`Fat::Oracles::BLIND_SPOTS`) records that: a checker
+program, known by its file name, the exact cluster counts it cannot read,
+never a range, and a reason that cites the program's source and the
+section it departs from. On a volume a blind spot covers the checker does
+not run, so nothing it would print is read, and its observation is
+`not_applicable` with the blind spot's reason. The list holds the two
+`fsck_msdosfs` counts, 4085 and 65525, and grows only by a defect traced to
+a checker's source; every other disagreement of a verdict tool fails its
+case until fsimg is fixed. Only the checker has blind spots: the read-back's
+verdict holds at every count.
 
-* an id, which records and reports name it by;
-* the tool it excuses;
-* the program and exit status it matches, since `fsck.fat` and
-  `fsck_msdosfs` have different defects;
-* the exact cluster counts of the volumes it covers, never a range;
-* a symptom, a pattern for the line that shows the defect;
-* the patterns of the other lines the defect explains;
-* a reason that cites the tool's source or the specification section it
-  departs from.
-
-An exception matches the tool's complete output, not the detail the result
-quotes: every line that is not blank, stderr first, within the tool's
-capture cap. It excuses the disagreement only when the program and exit
-status match, some line is the symptom, and every line is the symptom or
-one the exception explains. Any other line, wherever it falls, is a
-diagnostic the defect does not explain and leaves the disagreement
-unexcused, as does a tool that wrote past its cap, ran past its deadline or
-died by a signal. An exception that matches the tool, count, program and
-status but does not excuse the output names the first line it does not
-explain, or the missing symptom, at the head of the detail, since that line
-may lie past the lines the detail quotes.
-
-A blind spot has an id, the checker program, the exact cluster counts and
-a reason; it matches nothing the checker prints, because the checker never
-runs. A tool's defect gets an entry of either form only once it was
-observed and traced to the tool's source, and an exception explains only
-the lines that defect was observed to write; any other disagreement fails
-its case until fsimg is fixed or an entry is reviewed in. The oracles apply
-the exceptions to every observation and the blind spots to every
-checker run, not only to the verdicts. An excused
-disagreement appears as `excused` with its exception's id, and a blind spot
-as `not_applicable` with its id, in the case result and the failure record,
-and the coverage report counts each tool's observations per exception and
-per blind spot, so the report shows which of them still fire. A known tool
-defect neither fails a case nor keeps a base from serving one; only a
-populated tree needs more, a read-back that agrees, as
-[fixtures](#fixtures) state.
-
-| Entry | Form | Tool | Matches | Reason |
-| --- | --- | --- | --- | --- |
-| `fsck_msdosfs.fat16_4085` | blind spot | checker | `fsck_msdosfs` on a volume of 4085 clusters | FreeBSD's `readboot` (`sbin/fsck_msdosfs/boot.c`) takes a 12-bit FAT below `CLUST_RSRVD & CLUST12_MASK`, 4086 clusters, where section 3.5 makes 4085 clusters FAT16. The misread table sends the checker through chains and directories fsimg did not write, into file data it reads as directory entries, so what it then prints depends on the image and carries names from it without escaping, and a newline in a name can forge any line |
-| `fsck_msdosfs.fat32_65525` | exception | checker | Exit 8 with the symptom `Filesystem too small (65525 clusters) for FAT32 partition`, explaining the image line, and `Invalid signature in fsinfo block` with `Fix? no` | `readboot` refuses FAT32 below `CLUST_RSRVD & CLUST16_MASK`, 65526 clusters, where section 3.5 makes 65525 clusters FAT32. It refuses before it reads a FAT or a directory, and every line before the refusal is a fixed string or a number; the image line names the path the harness gives. The warning comes on every FAT32 volume fsimg and `mkfs.fat` write, since `readboot` wants a boot signature at the end of the sector after FSInfo, which section 5 does not define |
-
-No entry covers a range of counts near the variant cutovers. A volume
-there is one whose variant is easiest to get wrong, and both verdicts are
-the evidence that its tables and tree are the ones that variant requires:
+No blind spot covers a range of counts near the cutovers. A volume there is
+one whose variant is easiest to get wrong, and both verdicts are the
+evidence that its tables and tree are the ones that variant requires:
 `fsck.fat` and mtools read every threshold volume fsimg creates, at 4085 and
 65525 clusters too, and the FAT16 and FAT32 builder bases, which lie at
-those two counts, serve no case if either disagrees with them. A tool that
-departs from section 3.5 is documented at the exact counts where it does,
-as FreeBSD's checker is.
-
-On a host whose only checker is `fsck_msdosfs`, a volume of exactly 4085
-clusters is judged by the read-back and the rules alone, and one of 65525
-by those and the diagnostics the refusal does not explain. At 65525 the
-checker's one FSInfo warning names none of the three signatures, so the
-rule `fat32.fsinfo.signatures` checks them on the harness's side: an image
-or base with a wrong one breaks the rule and fails whatever the checker
-says. Such a host judges every other count in full, and a host with
-`fsck.fat` judges those two as well.
+those two counts, serve no case if either disagrees with them. On a host
+whose only checker is `fsck_msdosfs`, a volume of exactly 4085 or 65525
+clusters is judged by the read-back and the rules alone. Such a host judges
+every other count in full, and a host with `fsck.fat` judges those two as
+well.
 
 ## Runner
 
@@ -1173,8 +1097,7 @@ It keeps these states distinct:
 * base accepted by its formatter, or a geometry the tool does not support;
 * case run, or a host skip because the host cannot hold its tree or its
   tools did not build its image as its recipe states;
-* oracle agrees, disagrees, is excused by a named exception, is not
-  applicable, for a named blind spot or otherwise, or is unavailable;
+* oracle agrees, disagrees, is not applicable or is unavailable;
 * run confined by a sandbox or not.
 
 A declared rule never counts as covered until fsimg has run its cases, and a

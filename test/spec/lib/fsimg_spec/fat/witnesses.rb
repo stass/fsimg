@@ -429,30 +429,6 @@ module FsimgSpec
         end
       }
 
-      # A directory beside the root, so each variant has a root and a
-      # subdirectory with an end marker.
-      TAIL_TREE = [TreeEntry.directory("DIR")].freeze
-
-      # Of each base holding TAIL_TREE, a stale byte past an end marker:
-      # in the entry after the root's marker, in the last byte of the
-      # subdirectory's cluster, and, on FAT12, in the marker entry itself
-      # past its DIR_Name[0]. The FAT12/16 root is the fixed region and the
-      # FAT32 root its chain.
-      DIRECTORY_TAILS = lambda { |layouts|
-        %w[fat12 fat16 fat32].flat_map do |base|
-          layout = layouts.fetch(base)
-          allocation = Builder.plan(parameters: BASES.fetch(base), tree: TAIL_TREE)
-          marker = ->(path) { allocation.directory_offset(path) + allocation.directories.fetch(path).bytesize }
-          stale = { "#{base}_root" => marker.(nil) + Geometry::DIRECTORY_ENTRY_BYTES,
-                    "#{base}_subdirectory" => allocation.directory_offset("DIR") + layout.cluster_bytes - 1 }
-          stale["#{base}_marker"] = marker.(nil) + 11 if base == "fat12"
-          stale.map do |label, offset|
-            Variation.new(label:, base:, tree: TAIL_TREE, violates: true,
-                          mutations: [Mutation::ReplaceBytes.new(offset:, bytes: "A".b)])
-          end
-        end
-      }
-
       BACKUP_BOOT_SECTOR = lambda { |_layouts|
         [32, 0xFFFE].map { mutated(Rules::BACKUP_BOOT.field, _1, base: "fat32", violates: true) }
       }

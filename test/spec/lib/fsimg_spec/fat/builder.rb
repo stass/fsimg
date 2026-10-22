@@ -259,11 +259,6 @@ module FsimgSpec
           @chains.fetch(path, [0]).first
         end
 
-        # Where the bytes of directory path, nil for the root, lie: the
-        # FAT12/16 root region, or the directory's first cluster.
-        def directory_offset(path) =
-          path.nil? && !@layout.fat32? ? @layout.root_offset : @layout.cluster_offset(first_cluster(path))
-
         def used_clusters = @chains.values.sum(&:size)
 
         # The first cluster no chain uses, or nil when every one is used.
@@ -696,7 +691,8 @@ module FsimgSpec
 
         def write_directories
           @allocation.directories.each do |path, bytes|
-            @out.pwrite(bytes, @allocation.directory_offset(path))
+            offset = path.nil? && !@layout.fat32? ? @layout.root_offset : @layout.cluster_offset(@allocation.first_cluster(path))
+            @out.pwrite(bytes, offset)
           end
         end
 
