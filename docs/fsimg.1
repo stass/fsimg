@@ -913,6 +913,13 @@ non-trivial ACL, or onto a filesystem without POSIX permissions, such as FAT
 mounted on macOS; scratch in such a directory fails every command until
 .Fl T
 names another.
+A directory
+.Nm
+creates, the fresh destination included, must also give group and others
+no permission at all, so a filesystem that ignores the mode it asks for,
+such as Linux vfat mounted with
+.Ql umask=022 ,
+is refused too.
 .Nm
 never edits an ACL.
 On Linux a listed

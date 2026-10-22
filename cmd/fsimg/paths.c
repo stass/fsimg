@@ -221,11 +221,12 @@ private_directory(int parent, const char *parent_path,
 
 /*
  * Prove the directory just created as name beneath parent, and opened as
- * *fd, private by the rule an extraction destination passes
- * (specs/design-security.md). Its mode 0700 and its owner do not prove it:
- * inheritable access control entries of parent can admit another user,
- * and a user who can write parent can put another directory in its place
- * before it is opened. Either could then read or replace what fsimg puts
+ * *fd, private by the rule an extraction destination passes, with no
+ * permission for group or others at all (specs/design-security.md). The
+ * mode 0700 it was created with and its owner do not prove it: a
+ * filesystem can ignore the mode, inheritable access control entries of
+ * parent can admit another user, and a user who can write parent can put
+ * another directory in its place before it is opened. Either could then read or replace what fsimg puts
  * there. The cause lies in parent, so the error names it, parent_noun at
  * parent_path.
  *
@@ -246,7 +247,7 @@ fresh_private(int parent, const char *name, int *fd, const char *parent_noun,
 	char message[128];
 	int saved;
 
-	if (fsimg_host_private_directory(*fd, &verdict) == -1) {
+	if (fsimg_host_private_directory(*fd, true, &verdict) == -1) {
 		saved = errno;
 		snprintf(message, sizeof(message),
 		    "cannot inspect a new directory in the %s", parent_noun);
@@ -961,7 +962,7 @@ privacy_error(fsimg_error_t *error, fsimg_host_privacy_t verdict,
 	case FSIMG_HOST_FOREIGN_OWNER:
 		message = "extraction destination is not owned by the effective user";
 		break;
-	case FSIMG_HOST_SHARED_WRITE:
+	case FSIMG_HOST_SHARED_ACCESS:
 		message = "extraction destination is writable by group or others";
 		break;
 	case FSIMG_HOST_EXTENDED_ACL:
@@ -1081,7 +1082,8 @@ prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		if (request->output_fd == -1)
 			return (change_directory_error(error, parent_path, false,
 			    errno));
-		if (fsimg_host_private_directory(request->output_fd, &verdict) == -1)
+		if (fsimg_host_private_directory(request->output_fd, false,
+		    &verdict) == -1)
 			return (path_error(error, "cannot inspect -C directory", parent_path));
 		if (verdict != FSIMG_HOST_PRIVATE)
 			return (privacy_error(error, verdict, parent_path));

@@ -348,9 +348,14 @@ fail it: an inheritable entry of its parent can admit another user, a user
 who can write a parent without the sticky bit can put another directory in
 its place before it is reopened, and a filesystem without POSIX permissions,
 such as FAT mounted on macOS, reports group and other write on everything.
-Any of these could let another principal read the staged bytes or replace
-them before publication, so all of them refuse, and the error names the
-parent. One creation routine makes and checks every such directory, so none
+A directory fsimg creates, the fresh extraction destination included, must
+also give group and others no permission at all, judged on the same
+descriptor: a filesystem that ignores the creation mode, such as Linux VFAT
+mounted with the user's uid and `umask=022`, makes it 0755 without an ACL,
+and every file fsimg then creates beneath it with mode 0600 shows the same
+mount-defined permissions. Any of these could let another principal read
+the staged bytes or replace them before publication, so all of them
+refuse, and the error names the parent. One creation routine makes and checks every such directory, so none
 exists that skipped the check. A refused directory gives up its descriptor
 at once, and with it all cleanup of its contents, which goes through that
 descriptor: whatever the name now reaches may belong to someone else. It is

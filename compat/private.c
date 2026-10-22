@@ -224,7 +224,8 @@ nontrivial_acl(int fd FSIMG_UNUSED, bool *present)
 #endif
 
 int
-fsimg_host_private_directory(int fd, fsimg_host_privacy_t *verdict)
+fsimg_host_private_directory(int fd, bool created,
+    fsimg_host_privacy_t *verdict)
 {
 	struct stat st;
 	bool present, empty;
@@ -235,8 +236,9 @@ fsimg_host_private_directory(int fd, fsimg_host_privacy_t *verdict)
 		*verdict = FSIMG_HOST_NOT_DIRECTORY;
 	else if (st.st_uid != geteuid())
 		*verdict = FSIMG_HOST_FOREIGN_OWNER;
-	else if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
-		*verdict = FSIMG_HOST_SHARED_WRITE;
+	else if ((st.st_mode & (created ? S_IRWXG | S_IRWXO :
+	    S_IWGRP | S_IWOTH)) != 0)
+		*verdict = FSIMG_HOST_SHARED_ACCESS;
 	else {
 		if (nontrivial_acl(fd, &present) == -1)
 			return (-1);
