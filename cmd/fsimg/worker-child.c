@@ -22,16 +22,6 @@
 #include "unicode.h"
 #include "worker.h"
 
-typedef enum worker_capability_slot {
-	CHILD_INPUT_CAP,
-	CHILD_OUTPUT_CAP,
-	CHILD_SCRATCH_CAP,
-	CHILD_RAW_CAP,
-	CHILD_SPOOL_CAP,
-	CHILD_MANIFEST_CAP,
-	CHILD_CAP_COUNT
-} worker_capability_slot_t;
-
 typedef struct worker_child {
 	fsimg_worker_request_t request;
 	fsimg_worker_result_t result;
@@ -59,7 +49,7 @@ typedef struct worker_child {
 	 * a handed-over file itself (release_to_charging_adopter); child_cleanup
 	 * drops the charges of those left here with the context.
 	 */
-	int		 raw_caps[CHILD_CAP_COUNT];
+	int		 raw_caps[FSIMG_CAPABILITY_COUNT];
 	uint32_t	 roots_adopted;
 	int		 output_root;
 	bool		 processing;
@@ -69,6 +59,7 @@ typedef struct worker_child {
 static bool child_cancelled(void *);
 static void child_progress(void *, const fsimg_progress_t *);
 static void child_loss(void *, const char *, uint32_t);
+static bool holds(unsigned, fsimg_capability_t);
 static fsimg_status_t prepare_capabilities(worker_child_t *, unsigned,
     fsimg_sandbox_caps_t *, fsimg_error_t *);
 static fsimg_status_t prepare_context(worker_child_t *, const fsimg_sandbox_caps_t *,
@@ -96,7 +87,7 @@ static fsimg_status_t send_plan(const fsimg_plan_info_t *, fsimg_error_t *);
 static fsimg_status_t send_entry(const fsimg_entry_t *, fsimg_error_t *);
 static fsimg_status_t read_job(worker_child_t *, fsimg_error_t *);
 static int release_to_charging_adopter(worker_child_t *,
-    worker_capability_slot_t);
+    fsimg_capability_t);
 static fsimg_status_t create_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t list_job(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t cat_job(worker_child_t *, fsimg_error_t *);
@@ -166,6 +157,12 @@ child_loss(void *argument, const char *path, uint32_t fields)
 		child->channel_failed = true;
 }
 
+static bool
+holds(unsigned capabilities, fsimg_capability_t c)
+{
+	return ((capabilities & FSIMG_JOB_CAP(c)) != 0);
+}
+
 /* Each job kind has one shape of filesystem authority: reads have an
  * input, creation has roots, and creation and extraction write into their
  * output directory, which is staging for one and the destination for the
@@ -174,49 +171,55 @@ child_loss(void *argument, const char *path, uint32_t fields)
  * a container or a compression, also holds the raw intermediate. Scratch
  * is optional for every kind.
  */
+
 static fsimg_status_t
 prepare_capabilities(worker_child_t *child, unsigned capabilities,
     fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 {
 	fsimg_job_kind_t kind = child->request.kind;
 	unsigned expected, optional;
-	bool output, stream, reading;
+	bool stream, reading;
 
 	reading = !fsimg_job_has_roots(kind);
 	stream = (child->request.flags & FSIMG_JOB_STDOUT) != 0;
-	expected = fsimg_job_has_roots(kind) ? FSIMG_JOB_CAP_ROOTS : FSIMG_JOB_CAP_INPUT;
+	expected = fsimg_job_has_roots(kind) ? FSIMG_JOB_CAP_ROOTS :
+	    FSIMG_JOB_CAP(FSIMG_CAPABILITY_INPUT);
+	if (fsimg_job_needs_staging(&child->request) || kind == FSIMG_JOB_EXTRACT)
+		expected |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_OUTPUT);
+	if (fsimg_job_needs_raw(&child->request))
+		expected |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_RAW);
 	/* Scratch is optional for every job, a spool for a read job and a
 	 * manifest for an extraction.
 	 */
-	optional = FSIMG_JOB_CAP_SCRATCH | (reading ? FSIMG_JOB_CAP_SPOOL : 0) |
-	    (kind == FSIMG_JOB_EXTRACT ? FSIMG_JOB_CAP_MANIFEST : 0);
-	if (fsimg_job_needs_staging(&child->request) || kind == FSIMG_JOB_EXTRACT)
-		expected |= FSIMG_JOB_CAP_OUTPUT;
-	if (fsimg_job_needs_raw(&child->request))
-		expected |= FSIMG_JOB_CAP_RAW;
+	optional = FSIMG_JOB_CAP(FSIMG_CAPABILITY_SCRATCH);
+	if (reading)
+		optional |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_SPOOL);
+	if (kind == FSIMG_JOB_EXTRACT)
+		optional |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_MANIFEST);
 	if ((capabilities & ~optional) != expected)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_CONTEXT, "worker job has excess or missing filesystem authority"));
-	output = (capabilities & FSIMG_JOB_CAP_OUTPUT) != 0;
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
+		    "worker job has excess or missing filesystem authority"));
 	/* Every role starts absent; only those the job holds are named. */
 	fsimg_sandbox_caps_init(caps);
-	if ((capabilities & FSIMG_JOB_CAP_INPUT) != 0)
+	if (holds(capabilities, FSIMG_CAPABILITY_INPUT))
 		caps->input = FSIMG_CHILD_INPUT;
-	if (output && kind == FSIMG_JOB_CREATE)
-		caps->staging = FSIMG_CHILD_OUTPUT;
-	if (output && kind == FSIMG_JOB_EXTRACT)
-		caps->destination = FSIMG_CHILD_OUTPUT;
-	if ((capabilities & FSIMG_JOB_CAP_SCRATCH) != 0)
+	if (holds(capabilities, FSIMG_CAPABILITY_OUTPUT)) {
+		if (kind == FSIMG_JOB_CREATE)
+			caps->staging = FSIMG_CHILD_OUTPUT;
+		if (kind == FSIMG_JOB_EXTRACT)
+			caps->destination = FSIMG_CHILD_OUTPUT;
+	}
+	if (holds(capabilities, FSIMG_CAPABILITY_SCRATCH))
 		caps->scratch = FSIMG_CHILD_SCRATCH;
 	if (child->request.root_count != 0) {
 		caps->roots = FSIMG_CHILD_ROOTS;
 		caps->root_count = child->request.root_count;
 	}
-	if ((capabilities & FSIMG_JOB_CAP_RAW) != 0)
+	if (holds(capabilities, FSIMG_CAPABILITY_RAW))
 		caps->raw = FSIMG_CHILD_RAW;
-	if ((capabilities & FSIMG_JOB_CAP_SPOOL) != 0)
+	if (holds(capabilities, FSIMG_CAPABILITY_SPOOL))
 		caps->spool = FSIMG_CHILD_SPOOL;
-	if ((capabilities & FSIMG_JOB_CAP_MANIFEST) != 0)
+	if (holds(capabilities, FSIMG_CAPABILITY_MANIFEST))
 		caps->manifest = FSIMG_CHILD_MANIFEST;
 	caps->input_pipe = (child->request.flags & FSIMG_JOB_STDIN) != 0;
 	caps->job = FSIMG_CHILD_JOB;
@@ -224,26 +227,19 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 	if (kind == FSIMG_JOB_CAT || stream)
 		caps->data = FSIMG_CHILD_DATA;
 	caps->cancel = FSIMG_CHILD_CANCEL;
-	child->raw_caps[CHILD_INPUT_CAP] = caps->input;
-	child->raw_caps[CHILD_OUTPUT_CAP] = output ? FSIMG_CHILD_OUTPUT : -1;
-	child->raw_caps[CHILD_SCRATCH_CAP] = caps->scratch;
-	child->raw_caps[CHILD_RAW_CAP] = caps->raw;
-	child->raw_caps[CHILD_SPOOL_CAP] = caps->spool;
-	child->raw_caps[CHILD_MANIFEST_CAP] = caps->manifest;
-	{
-		static const int numbers[CHILD_CAP_COUNT] = {
-			[CHILD_INPUT_CAP] = FSIMG_CHILD_INPUT,
-			[CHILD_OUTPUT_CAP] = FSIMG_CHILD_OUTPUT,
-			[CHILD_SCRATCH_CAP] = FSIMG_CHILD_SCRATCH,
-			[CHILD_RAW_CAP] = FSIMG_CHILD_RAW,
-			[CHILD_SPOOL_CAP] = FSIMG_CHILD_SPOOL,
-			[CHILD_MANIFEST_CAP] = FSIMG_CHILD_MANIFEST
-		};
-
-		for (unsigned i = 0; i < CHILD_CAP_COUNT; i++) {
-			if (child->raw_caps[i] == -1)
-				close(numbers[i]);
+	/* Close the slot of every capability the job does not hold. A held
+	 * one must have a sandbox role, or confinement would leave it
+	 * unchecked and unrestricted.
+	 */
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++) {
+		if (!holds(capabilities, c)) {
+			close(FSIMG_CHILD_SLOT(c));
+			continue;
 		}
+		if (!fsimg_sandbox_caps_names(caps, FSIMG_CHILD_SLOT(c)))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "worker capability has no sandbox role"));
+		child->raw_caps[c] = FSIMG_CHILD_SLOT(c);
 	}
 	if (caps->data == -1)
 		close(FSIMG_CHILD_DATA);
@@ -274,31 +270,31 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 	 * directory's, counts them all.
 	 */
 	held = child->request.root_count;
-	for (unsigned i = 0; i < CHILD_CAP_COUNT; i++)
-		held += child->raw_caps[i] != -1 ? 1 : 0;
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++)
+		held += child->raw_caps[c] != -1 ? 1 : 0;
 	for (uint64_t i = 0; i < held; i++) {
 		status = fsimg_fd_reserve(child->ctx, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
 	if (caps->scratch != -1) {
-		fd = child->raw_caps[CHILD_SCRATCH_CAP];
-		child->raw_caps[CHILD_SCRATCH_CAP] = -1;
+		fd = child->raw_caps[FSIMG_CAPABILITY_SCRATCH];
+		child->raw_caps[FSIMG_CAPABILITY_SCRATCH] = -1;
 		status = fsimg_ctx_adopt_scratch(child->ctx, fd, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
 	/* A stream stays a bare descriptor, which the image borrows. */
 	if (caps->input != -1 && !caps->input_pipe) {
-		fd = child->raw_caps[CHILD_INPUT_CAP];
-		child->raw_caps[CHILD_INPUT_CAP] = -1;
+		fd = child->raw_caps[FSIMG_CAPABILITY_INPUT];
+		child->raw_caps[FSIMG_CAPABILITY_INPUT] = -1;
 		status = fsimg_io_adopt_fd(child->ctx, fd, FSIMG_IO_READ, &child->input, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	if (child->raw_caps[CHILD_OUTPUT_CAP] != -1) {
-		child->output_root = child->raw_caps[CHILD_OUTPUT_CAP];
-		child->raw_caps[CHILD_OUTPUT_CAP] = -1;
+	if (child->raw_caps[FSIMG_CAPABILITY_OUTPUT] != -1) {
+		child->output_root = child->raw_caps[FSIMG_CAPABILITY_OUTPUT];
+		child->raw_caps[FSIMG_CAPABILITY_OUTPUT] = -1;
 	}
 	return (FSIMG_OK);
 }
@@ -754,7 +750,7 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 	/* Lent to the library, which writes and flushes it; it stays charged
 	 * in raw_caps until it is closed below.
 	 */
-	options.manifest_fd = child->raw_caps[CHILD_MANIFEST_CAP];
+	options.manifest_fd = child->raw_caps[FSIMG_CAPABILITY_MANIFEST];
 	fd = child->output_root;
 	status = fsimg_extract_into(child->reader, fd, &options, &result, error);
 	child->result.entries = result.entries;
@@ -771,7 +767,7 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 		status = fsimg_error_set(error, FSIMG_EIO, saved,
 		    FSIMG_OP_EXTRACT, "worker extraction root close failed");
 	if (options.manifest_fd != -1) {
-		child->raw_caps[CHILD_MANIFEST_CAP] = -1;
+		child->raw_caps[FSIMG_CAPABILITY_MANIFEST] = -1;
 		closed = close(options.manifest_fd);
 		saved = errno;
 		fsimg_fd_release(child->ctx, -1);
@@ -811,13 +807,13 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 		options.layers.gpt_sector_bytes = 0;
 	}
 	/* The image adopts the spool on every outcome. */
-	options.spool_fd = release_to_charging_adopter(child, CHILD_SPOOL_CAP);
+	options.spool_fd = release_to_charging_adopter(child, FSIMG_CAPABILITY_SPOOL);
 	if (child->input != NULL)
 		status = fsimg_image_open(child->ctx, child->input, &options,
 		    &child->image, error);
 	else
 		status = fsimg_image_open_stream(child->ctx,
-		    child->raw_caps[CHILD_INPUT_CAP], &options, &child->image,
+		    child->raw_caps[FSIMG_CAPABILITY_INPUT], &options, &child->image,
 		    error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1048,11 +1044,11 @@ add_synthesized_parents(worker_child_t *child, const char *path,
  */
 static int
 release_to_charging_adopter(worker_child_t *child,
-    worker_capability_slot_t slot)
+    fsimg_capability_t capability)
 {
-	int fd = child->raw_caps[slot];
+	int fd = child->raw_caps[capability];
 
-	child->raw_caps[slot] = -1;
+	child->raw_caps[capability] = -1;
 	if (fd != -1)
 		fsimg_fd_release(child->ctx, -1);
 	return (fd);
@@ -1128,7 +1124,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 		 */
 		fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
 		sink.stream_fd = FSIMG_CHILD_DATA;
-		sink.raw_fd = release_to_charging_adopter(child, CHILD_RAW_CAP);
+		sink.raw_fd = release_to_charging_adopter(child, FSIMG_CAPABILITY_RAW);
 		return (fsimg_writer_output(child->writer, &sink, error));
 	}
 	status = fsimg_fd_reserve(child->ctx, error);
@@ -1150,7 +1146,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 	 */
 	fsimg_sink_init(&sink, FSIMG_SINK_IO);
 	sink.io = output;
-	sink.raw_fd = release_to_charging_adopter(child, CHILD_RAW_CAP);
+	sink.raw_fd = release_to_charging_adopter(child, FSIMG_CAPABILITY_RAW);
 	status = fsimg_writer_output(child->writer, &sink, error);
 	if (status == FSIMG_OK)
 		status = fsimg_io_get_size(output, &child->result.image_bytes,
@@ -1178,9 +1174,9 @@ child_cleanup(worker_child_t *child)
 	 * holds their charges.
 	 */
 	fsimg_ctx_free(child->ctx);
-	for (unsigned i = 0; i < CHILD_CAP_COUNT; i++) {
-		if (child->raw_caps[i] != -1)
-			close(child->raw_caps[i]);
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++) {
+		if (child->raw_caps[c] != -1)
+			close(child->raw_caps[c]);
 	}
 	for (uint32_t i = child->roots_adopted; i < child->request.root_count; i++)
 		close(FSIMG_CHILD_ROOTS + (int)i);
@@ -1199,8 +1195,8 @@ fsimg_worker_main(void)
 	bzero(&child, sizeof(child));
 	child.result.confinement = FSIMG_CONFINEMENT_UNKNOWN;
 	child.output_root = -1;
-	for (unsigned i = 0; i < CHILD_CAP_COUNT; i++)
-		child.raw_caps[i] = -1;
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++)
+		child.raw_caps[c] = -1;
 	status = child_setup(&child, &caps, &error);
 	if (status == FSIMG_OK)
 		status = child_ready(&child, &caps, &error);

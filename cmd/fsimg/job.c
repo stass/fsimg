@@ -164,6 +164,8 @@ static const unsigned slot_name_offsets[FSIMG_STACK_SLOTS] = {
 
 static void put_field(unsigned char *, job_field_t, uint64_t);
 static uint64_t get_field(const unsigned char *, job_field_t);
+static const int *capability_field(const fsimg_worker_request_t *,
+    fsimg_capability_t);
 static fsimg_status_t invalid_job(fsimg_error_t *);
 static bool string_field_valid(const unsigned char *, size_t);
 static void encode_layers(const fsimg_layer_options_t *, unsigned char *);
@@ -310,8 +312,8 @@ fsimg_worker_request_init(fsimg_worker_request_t *request)
 	fsimg_layer_options_init(&request->layers);
 	request->selection = "/";
 	request->codepage = 437;
-	request->input_fd = request->output_fd = request->raw_fd = -1;
-	request->scratch_fd = request->spool_fd = request->manifest_fd = -1;
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++)
+		*fsimg_job_capability_field(request, c) = -1;
 }
 
 const char *
@@ -353,6 +355,47 @@ fsimg_job_needs_raw(const fsimg_worker_request_t *request)
 	return (request->kind == FSIMG_JOB_CREATE &&
 	    ((request->flags & FSIMG_JOB_STDOUT) != 0 ||
 	    fsimg_job_encoded(request)));
+}
+
+/*
+ * Where each capability's descriptor lives in a request. The switch has no
+ * default, so -Wswitch refuses a capability without its field; COUNT is no
+ * capability and has none.
+ */
+static const int *
+capability_field(const fsimg_worker_request_t *request, fsimg_capability_t c)
+{
+	switch (c) {
+	case FSIMG_CAPABILITY_INPUT:
+		return (&request->input_fd);
+	case FSIMG_CAPABILITY_OUTPUT:
+		return (&request->output_fd);
+	case FSIMG_CAPABILITY_SCRATCH:
+		return (&request->scratch_fd);
+	case FSIMG_CAPABILITY_RAW:
+		return (&request->raw_fd);
+	case FSIMG_CAPABILITY_SPOOL:
+		return (&request->spool_fd);
+	case FSIMG_CAPABILITY_MANIFEST:
+		return (&request->manifest_fd);
+	case FSIMG_CAPABILITY_COUNT:
+		break;
+	}
+	return (NULL);
+}
+
+int
+fsimg_job_capability_fd(const fsimg_worker_request_t *request,
+    fsimg_capability_t c)
+{
+	return (*capability_field(request, c));
+}
+
+int *
+fsimg_job_capability_field(fsimg_worker_request_t *request,
+    fsimg_capability_t c)
+{
+	return ((int *)capability_field(request, c));
 }
 
 uint32_t
@@ -462,15 +505,14 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	put_field(raw, JOB_SERIAL, request->write.volume_serial);
 	put_field(raw, JOB_CODEPAGE, request->codepage);
 	put_field(raw, JOB_SECONDS, request->seconds);
+	capabilities = request->root_count != 0 ? FSIMG_JOB_CAP_ROOTS : 0;
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++) {
+		if (fsimg_job_capability_fd(request, c) != -1)
+			capabilities |= FSIMG_JOB_CAP(c);
+	}
 	/* A read job's image is a file or, for a stream, the input pipe. */
-	capabilities = (request->input_fd != -1 ||
-	    (request->flags & FSIMG_JOB_STDIN) != 0 ? FSIMG_JOB_CAP_INPUT : 0) |
-	    (request->output_fd != -1 ? FSIMG_JOB_CAP_OUTPUT : 0) |
-	    (request->scratch_fd != -1 ? FSIMG_JOB_CAP_SCRATCH : 0) |
-	    (request->root_count != 0 ? FSIMG_JOB_CAP_ROOTS : 0) |
-	    (request->raw_fd != -1 ? FSIMG_JOB_CAP_RAW : 0) |
-	    (request->spool_fd != -1 ? FSIMG_JOB_CAP_SPOOL : 0) |
-	    (request->manifest_fd != -1 ? FSIMG_JOB_CAP_MANIFEST : 0);
+	if ((request->flags & FSIMG_JOB_STDIN) != 0)
+		capabilities |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_INPUT);
 	put_field(raw, JOB_CAPABILITIES, capabilities);
 	put_field(raw, JOB_SELECTION, paths_length);
 	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
@@ -521,9 +563,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_KIND) != FSIMG_JOB_CREATE) ||
 	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDIN) != 0 &&
 	    fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
-	    get_field(raw, JOB_CAPABILITIES) > (FSIMG_JOB_CAP_INPUT |
-	    FSIMG_JOB_CAP_OUTPUT | FSIMG_JOB_CAP_SCRATCH | FSIMG_JOB_CAP_ROOTS |
-	    FSIMG_JOB_CAP_RAW | FSIMG_JOB_CAP_SPOOL | FSIMG_JOB_CAP_MANIFEST) ||
+	    (get_field(raw, JOB_CAPABILITIES) & ~(uint64_t)FSIMG_JOB_CAP_ALL) != 0 ||
 	    !string_field_valid(raw + JOB_FORMAT_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_LABEL_OFFSET, JOB_LABEL_BYTES) ||
 	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||

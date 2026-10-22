@@ -270,7 +270,7 @@ test_job_stream_flags(void)
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
-	CHECK((capabilities & FSIMG_JOB_CAP_INPUT) != 0);
+	CHECK((capabilities & FSIMG_JOB_CAP(FSIMG_CAPABILITY_INPUT)) != 0);
 }
 
 static void
@@ -291,7 +291,7 @@ test_job_label(void)
 	    &capabilities, NULL) == FSIMG_OK);
 	CHECK(decoded.write.label != NULL);
 	CHECK(strcmp(decoded.write.label, "MYLABEL") == 0);
-	CHECK(selection == 2 && capabilities == 8);
+	CHECK(selection == 2 && capabilities == FSIMG_JOB_CAP_ROOTS);
 
 	/* The longest label any format stores, QNX4's 48 bytes, round-trips;
 	 * one byte more does not encode.
@@ -613,7 +613,7 @@ test_job_roots(void)
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
 	CHECK(decoded.root_count == 3 && selection == 2 + 5 + 5);
-	CHECK((capabilities & 8) != 0);
+	CHECK((capabilities & FSIMG_JOB_CAP_ROOTS) != 0);
 
 	/* A count over the descriptor limit, a zero count, a missing roots
 	 * capability, and a sequence too short for the count are refused.
@@ -627,6 +627,14 @@ test_job_roots(void)
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	bcopy(raw, mutated, sizeof(raw));
 	fsimg_wire_put64(mutated + 23 * 8, 0);
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	/* The capabilities field, 23, holds only known bits. */
+	fsimg_wire_put64(mutated + 23 * 8, FSIMG_JOB_CAP_ROOTS);
+	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	fsimg_wire_put64(mutated + 23 * 8,
+	    FSIMG_JOB_CAP_ROOTS | (FSIMG_JOB_CAP_ALL + 1u));
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	bcopy(raw, mutated, sizeof(raw));

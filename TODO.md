@@ -468,14 +468,6 @@
   error says the parent "lets another user into new directories", and the
   final report names the user's directory as fsimg's retained output. Treat
   a populated fresh directory as replaced: clear `*created` and say so.
-* [Low] **Adding a worker capability touches many parallel lists**
-  (`cmd/fsimg/worker.h`, `job.c`, `worker-parent.c`, `worker-child.c`,
-  `sandbox.c`, `paths.c`): the job bit, the decode mask, the expected and
-  optional sets, the child slot, the `raw_caps` table, the parent's
-  descriptor table, the sandbox role, its check and its Capsicum rights,
-  and the cleanup list each name every role. One role table that these
-  sites iterate would make a new role one entry;
-  `fsimg_sandbox_caps_init()` already removes the zero-means-stdin hazard.
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself

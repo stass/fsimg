@@ -88,6 +88,7 @@ static fsimg_status_t prepare_spool(fsimg_worker_request_t *, fsimg_error_t *);
 static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t,
     const char *);
 static bool remove_own_directory(int, const char *, int);
+static void close_held(int *, int *);
 static fsimg_status_t prepare_mtree(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
 static fsimg_status_t recheck_mtree(fsimg_cli_options_t *, fsimg_cli_paths_t *,
@@ -1412,16 +1413,21 @@ clean_scratch(int root)
 	return (saved);
 }
 
+/* Close *fd if held and mark it closed, keeping the first failure. */
+static void
+close_held(int *fd, int *cleanup)
+{
+	if (*fd != -1 && close(*fd) == -1 && *cleanup == 0)
+		*cleanup = errno;
+	*fd = -1;
+}
+
 fsimg_status_t
 fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
     fsimg_status_t status, fsimg_error_t *error)
 {
 	fsimg_worker_request_t *request = &options->request;
 	int cleanup, failure;
-	int *descriptors[] = { &request->input_fd, &request->output_fd,
-	    &request->scratch_fd, &request->raw_fd, &request->spool_fd,
-	    &request->manifest_fd, &paths->destination_parent,
-	    &paths->scratch_parent };
 	fsimg_cli_staged_t *staged[] = { &paths->image, &paths->manifest };
 
 	cleanup = 0;
@@ -1451,11 +1457,10 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	if (status == FSIMG_OK && paths->destination_parent != -1 &&
 	    fsync(paths->destination_parent) == -1 && cleanup == 0)
 		cleanup = errno;
-	for (unsigned i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); i++) {
-		if (*descriptors[i] != -1 && close(*descriptors[i]) == -1 && cleanup == 0)
-			cleanup = errno;
-		*descriptors[i] = -1;
-	}
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++)
+		close_held(fsimg_job_capability_field(request, c), &cleanup);
+	close_held(&paths->destination_parent, &cleanup);
+	close_held(&paths->scratch_parent, &cleanup);
 	for (uint32_t i = 0; paths->root_fds != NULL && i < request->root_count; i++) {
 		if (paths->root_fds[i] != -1 && close(paths->root_fds[i]) == -1 &&
 		    cleanup == 0)

@@ -45,19 +45,37 @@ typedef enum fsimg_confinement {
  */
 #define FSIMG_JOB_STDIN 0x40u
 
-/* The job record's capability bits: which prepared descriptors the worker
- * receives. Scratch is optional for every kind; the others follow the kind.
- * RAW is the raw intermediate fsimg_job_needs_raw names; SPOOL is the
- * spool a read job holds whenever it has scratch.
+/*
+ * The worker's single-descriptor capabilities, the prepared descriptors it
+ * may receive. A capability's bit in the job record is FSIMG_JOB_CAP(c),
+ * its descriptor arrives at FSIMG_CHILD_SLOT(c), and
+ * fsimg_job_capability_field() names its request field; request
+ * initialization, the job encoder, the decoder's mask, the spawn layout,
+ * the worker's slot handling and the coordinator's cleanup iterate them.
+ * Authority stays spelled out per capability, deliberately, so each grant
+ * reads on its own: which kinds hold which (prepare_capabilities), the
+ * sandbox role each becomes, and what that role may do (sandbox.c). The
+ * worker refuses a held capability that no sandbox role names. Scratch is
+ * optional for every kind; the others follow the kind. RAW is the raw
+ * intermediate fsimg_job_needs_raw names; SPOOL is the spool a read job
+ * holds whenever it has scratch; MANIFEST is the staged manifest an
+ * EXTRACT job writes under x --mtree.
+ * The create roots are a run of descriptors, not one, so they are not a
+ * capability here; FSIMG_JOB_CAP_ROOTS marks them.
  */
-#define FSIMG_JOB_CAP_INPUT 0x01u
-#define FSIMG_JOB_CAP_OUTPUT 0x02u
-#define FSIMG_JOB_CAP_SCRATCH 0x04u
-#define FSIMG_JOB_CAP_ROOTS 0x08u
-#define FSIMG_JOB_CAP_RAW 0x10u
-#define FSIMG_JOB_CAP_SPOOL 0x20u
-/* The staged manifest an EXTRACT job writes under x --mtree. */
-#define FSIMG_JOB_CAP_MANIFEST 0x40u
+typedef enum fsimg_capability {
+	FSIMG_CAPABILITY_INPUT,
+	FSIMG_CAPABILITY_OUTPUT,
+	FSIMG_CAPABILITY_SCRATCH,
+	FSIMG_CAPABILITY_RAW,
+	FSIMG_CAPABILITY_SPOOL,
+	FSIMG_CAPABILITY_MANIFEST,
+	FSIMG_CAPABILITY_COUNT
+} fsimg_capability_t;
+
+#define FSIMG_JOB_CAP(c) (1u << (c))
+#define FSIMG_JOB_CAP_ROOTS FSIMG_JOB_CAP(FSIMG_CAPABILITY_COUNT)
+#define FSIMG_JOB_CAP_ALL ((FSIMG_JOB_CAP_ROOTS << 1) - 1u)
 /* Coordinator, at most one parser, at most one output relay and at most
  * one input relay.
  */
@@ -239,6 +257,9 @@ const char *fsimg_job_compression(const fsimg_worker_request_t *);
 bool fsimg_job_encoded(const fsimg_worker_request_t *);
 bool fsimg_job_needs_staging(const fsimg_worker_request_t *);
 bool fsimg_job_needs_raw(const fsimg_worker_request_t *);
+/* Capability c's descriptor in a request, -1 when not held, and its field. */
+int fsimg_job_capability_fd(const fsimg_worker_request_t *, fsimg_capability_t);
+int *fsimg_job_capability_field(fsimg_worker_request_t *, fsimg_capability_t);
 uint32_t fsimg_job_path_count(const fsimg_worker_request_t *);
 const char *fsimg_job_path(const fsimg_worker_request_t *, uint32_t);
 fsimg_status_t fsimg_job_paths_length(const fsimg_worker_request_t *,
@@ -256,13 +277,15 @@ fsimg_status_t fsimg_job_decode(const unsigned char *, uint32_t,
 #define FSIMG_CHILD_JOB 3
 #define FSIMG_CHILD_CONTROL 4
 #define FSIMG_CHILD_DATA 5
-#define FSIMG_CHILD_INPUT 6
-#define FSIMG_CHILD_OUTPUT 7
-#define FSIMG_CHILD_SCRATCH 8
-#define FSIMG_CHILD_CANCEL 9
-#define FSIMG_CHILD_RAW 10
-#define FSIMG_CHILD_SPOOL 11
-#define FSIMG_CHILD_MANIFEST 12
-#define FSIMG_CHILD_ROOTS 13
+#define FSIMG_CHILD_CANCEL 6
+/* Capability c arrives at FSIMG_CHILD_SLOT(c), the roots after them all. */
+#define FSIMG_CHILD_SLOT(c) (FSIMG_CHILD_CANCEL + 1 + (int)(c))
+#define FSIMG_CHILD_INPUT FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_INPUT)
+#define FSIMG_CHILD_OUTPUT FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_OUTPUT)
+#define FSIMG_CHILD_SCRATCH FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_SCRATCH)
+#define FSIMG_CHILD_RAW FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_RAW)
+#define FSIMG_CHILD_SPOOL FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_SPOOL)
+#define FSIMG_CHILD_MANIFEST FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_MANIFEST)
+#define FSIMG_CHILD_ROOTS FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_COUNT)
 
 #endif

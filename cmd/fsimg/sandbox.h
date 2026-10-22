@@ -46,6 +46,10 @@ typedef struct fsimg_sandbox_caps {
  * it grants after this.
  */
 void fsimg_sandbox_caps_init(fsimg_sandbox_caps_t *);
+/* Whether a single-descriptor filesystem role (input, staging,
+ * destination, scratch, raw, spool or manifest) names fd.
+ */
+bool fsimg_sandbox_caps_names(const fsimg_sandbox_caps_t *, int);
 /* All fields are borrowed. Pipe directions and filesystem authority are
  * declared once here so worker setup cannot omit a live role. The trusted
  * coordinator supplies disjoint private output and scratch trees.

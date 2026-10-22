@@ -153,6 +153,19 @@ fsimg_sandbox_caps_init(fsimg_sandbox_caps_t *caps)
 	caps->job = caps->control = caps->data = caps->cancel = -1;
 }
 
+bool
+fsimg_sandbox_caps_names(const fsimg_sandbox_caps_t *caps, int fd)
+{
+	const int roles[] = { caps->input, caps->staging, caps->destination,
+	    caps->scratch, caps->raw, caps->spool, caps->manifest };
+
+	for (unsigned i = 0; i < sizeof(roles) / sizeof(roles[0]); i++) {
+		if (roles[i] == fd)
+			return (true);
+	}
+	return (false);
+}
+
 fsimg_status_t
 fsimg_sandbox_install(int input_fd, int destination_fd, int source_fd,
     fsimg_error_t *error)

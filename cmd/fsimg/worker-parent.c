@@ -879,7 +879,7 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
 	const fsimg_worker_request_t *request = state->request;
 	int *parser, output[5], input[4];
 	unsigned parser_count;
-	int null_fd, code, saved;
+	int null_fd, code, saved, fd;
 
 	null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
 	if (null_fd == -1)
@@ -931,18 +931,11 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
 	parser[FSIMG_CHILD_CONTROL] = state->channels[CHANNEL_CONTROL][1];
 	parser[FSIMG_CHILD_DATA] = state->channels[CHANNEL_RAW][1];
 	parser[FSIMG_CHILD_CANCEL] = state->channels[CHANNEL_CANCEL][0];
-	if (request->input_fd != -1)
-		parser[FSIMG_CHILD_INPUT] = request->input_fd;
-	if (request->output_fd != -1)
-		parser[FSIMG_CHILD_OUTPUT] = request->output_fd;
-	if (request->scratch_fd != -1)
-		parser[FSIMG_CHILD_SCRATCH] = request->scratch_fd;
-	if (request->raw_fd != -1)
-		parser[FSIMG_CHILD_RAW] = request->raw_fd;
-	if (request->spool_fd != -1)
-		parser[FSIMG_CHILD_SPOOL] = request->spool_fd;
-	if (request->manifest_fd != -1)
-		parser[FSIMG_CHILD_MANIFEST] = request->manifest_fd;
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++) {
+		fd = fsimg_job_capability_fd(request, c);
+		if (fd != -1)
+			parser[FSIMG_CHILD_SLOT(c)] = fd;
+	}
 	if (reading_stream(request))
 		parser[FSIMG_CHILD_INPUT] = state->channels[CHANNEL_INPUT][0];
 	for (uint32_t i = 0; i < request->root_count; i++)
