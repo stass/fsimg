@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -25,6 +26,9 @@ typedef struct publication_fault {
 	unsigned	 fail_sync;
 	int		 link_error;
 	bool		 link_before_error;
+	int		 rename_error;
+	bool		 rename_before_error;
+	unsigned	 rename_calls;
 	bool		 fail_unlink;
 	bool		 interrupt_sync;
 	bool		 cancel_after_sync;
@@ -36,6 +40,10 @@ typedef struct publication_fault {
 static int fault_sync(void *, int);
 static int fault_link(void *, int, const char *, int, const char *);
 static int fault_unlink(void *, int, const char *);
+static int fault_rename(void *, int, const char *, int, const char *);
+static void test_rename_fallback(fsimg_ctx_t *, int, int);
+static bool holds_bytes(int, const char *, const char *);
+static bool host_renames_exclusively(int);
 static void create_staged(int);
 static void test_failures(fsimg_ctx_t *, int, int);
 static void test_races(fsimg_ctx_t *, int, int);
@@ -61,6 +69,7 @@ test_cancel_after_flush(int staging, int parent)
 		.sync_fd = fault_sync,
 		.link_at = fault_link,
 		.unlink_at = fault_unlink,
+		.rename_at = fault_rename,
 		.argument = &fault
 	};
 	fsimg_options_t options;
@@ -208,6 +217,28 @@ fault_unlink(void *argument, int parent, const char *name)
 	return (unlinkat(parent, name, 0));
 }
 
+/* Rename without replacing, as the host does, unless rename_error is set:
+ * then fail with it, after renaming when rename_before_error is set.
+ */
+static int
+fault_rename(void *argument, int source_dir, const char *source,
+    int target_dir, const char *target)
+{
+	publication_fault_t *fault = argument;
+
+	fault->rename_calls++;
+	if (fault->rename_error == 0 || fault->rename_before_error) {
+		if (fsimg_host_rename_exclusive(source_dir, source, target_dir,
+		    target) == -1)
+			return (-1);
+	}
+	if (fault->rename_error != 0) {
+		errno = fault->rename_error;
+		return (-1);
+	}
+	return (0);
+}
+
 static void
 create_staged(int staging)
 {
@@ -225,7 +256,8 @@ test_failures(fsimg_ctx_t *ctx, int staging, int parent)
 	fsimg_publish_ops_t hooks = {
 		.sync_fd = fault_sync,
 		.link_at = fault_link,
-		.unlink_at = fault_unlink
+		.unlink_at = fault_unlink,
+		.rename_at = fault_rename
 	};
 	publication_fault_t fault;
 	fsimg_error_t error;
@@ -252,7 +284,7 @@ test_failures(fsimg_ctx_t *ctx, int staging, int parent)
 		if (scenario == 3)
 			fault.fail_unlink = true;
 		if (scenario >= 4 && scenario <= 6)
-			fault.link_error = scenario == 4 ? EOPNOTSUPP : EIO;
+			fault.link_error = scenario == 4 ? EXDEV : EIO;
 		if (scenario == 6)
 			fault.link_before_error = true;
 		if (scenario == 7)
@@ -289,6 +321,186 @@ test_failures(fsimg_ctx_t *ctx, int staging, int parent)
 			CHECK(errno == ENOENT);
 		}
 		if (scenario != 1 && scenario != 2 && scenario != 8)
+			CHECK(unlinkat(staging, "image", 0) == 0);
+	}
+}
+
+/* Whether parent/name is a regular file holding exactly bytes. */
+static bool
+holds_bytes(int parent, const char *name, const char *bytes)
+{
+	char buffer[16];
+	ssize_t count;
+	int fd;
+
+	fd = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd == -1)
+		return (false);
+	count = read(fd, buffer, sizeof(buffer));
+	CHECK(close(fd) == 0);
+	return (count == (ssize_t)strlen(bytes) &&
+	    bcmp(buffer, bytes, (size_t)count) == 0);
+}
+
+/* Whether the host's no-replace rename works in dir; a host or filesystem
+ * without it is reported and the cases that need it are skipped.
+ */
+static bool
+host_renames_exclusively(int dir)
+{
+	int fd, saved;
+
+	fd = openat(dir, "probe", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(fd != -1 && close(fd) == 0);
+	if (fsimg_host_rename_exclusive(dir, "probe", dir, "probed") == 0) {
+		CHECK(unlinkat(dir, "probed", 0) == 0);
+		return (true);
+	}
+	saved = errno;
+	CHECK(saved == ENOSYS || saved == EINVAL || saved == ENOTSUP ||
+	    saved == EOPNOTSUPP);
+	CHECK(unlinkat(dir, "probe", 0) == 0);
+	printf("SKIP: no exclusive rename here (errno %d); host rename cases\n",
+	    saved);
+	return (false);
+}
+
+/*
+ * A filesystem without hard links, such as FAT or exFAT, refuses linkat
+ * with EPERM (Linux) or ENOTSUP (macOS); publication then renames the
+ * staged name without replacing. The rename consumes the staged name, so
+ * no unlink follows. Any other link failure never falls back: EEXIST is an
+ * existing target, EXDEV or EINVAL unsupported, anything else uncertain. A
+ * rename that finds the target (a race after the link attempt) leaves it
+ * and the staged file untouched; an unsupported rename retains the staged
+ * file; an ambiguous one is settled by the staged name. After the rename,
+ * directory sync failures still describe published output.
+ */
+static void
+test_rename_fallback(fsimg_ctx_t *ctx, int staging, int parent)
+{
+	static const struct {
+		const char	*name;
+		int		 link_error;
+		int		 rename_error;	/* Injected; 0 renames for real */
+		bool		 rename_before_error;
+		bool		 existing;	/* "final" exists beforehand */
+		unsigned	 fail_sync;	/* 2 staging, 3 parent directory */
+		fsimg_status_t	 status;
+		fsimg_output_state_t state;
+		int		 os_error;	/* The failed call's errno */
+		bool		 renames;	/* The rename hook runs */
+		bool		 renamed;	/* "final" holds the staged data */
+	} cases[] = {
+		{ .name = "EPERM link renames", .link_error = EPERM,
+		  .status = FSIMG_OK, .renames = true, .renamed = true },
+		{ .name = "ENOTSUP link renames", .link_error = ENOTSUP,
+		  .status = FSIMG_OK, .renames = true, .renamed = true },
+		{ .name = "EOPNOTSUPP link renames", .link_error = EOPNOTSUPP,
+		  .status = FSIMG_OK, .renames = true, .renamed = true },
+		{ .name = "existing target survives the rename",
+		  .os_error = EEXIST,
+		  .link_error = EPERM, .existing = true,
+		  .status = FSIMG_EEXISTS, .state = FSIMG_OUTPUT_ABSENT,
+		  .renames = true },
+		{ .name = "rename finds the target",
+		  .os_error = EEXIST, .link_error = EPERM,
+		  .rename_error = EEXIST, .status = FSIMG_EEXISTS,
+		  .state = FSIMG_OUTPUT_ABSENT, .renames = true },
+		{ .name = "rename flag unsupported",
+		  .os_error = EINVAL, .link_error = EPERM,
+		  .rename_error = EINVAL, .status = FSIMG_EUNSUPPORTED,
+		  .state = FSIMG_OUTPUT_ABSENT, .renames = true },
+		{ .name = "rename unsupported",
+		  .os_error = ENOTSUP, .link_error = EPERM,
+		  .rename_error = ENOTSUP, .status = FSIMG_EUNSUPPORTED,
+		  .state = FSIMG_OUTPUT_ABSENT, .renames = true },
+		{ .name = "no exclusive rename",
+		  .os_error = ENOSYS, .link_error = EPERM,
+		  .rename_error = ENOSYS, .status = FSIMG_EUNSUPPORTED,
+		  .state = FSIMG_OUTPUT_ABSENT, .renames = true },
+		{ .name = "rename fails, staged name stays",
+		  .os_error = EIO, .link_error = EPERM,
+		  .rename_error = EIO, .status = FSIMG_EIO,
+		  .state = FSIMG_OUTPUT_UNCERTAIN, .renames = true },
+		{ .name = "rename fails after taking effect",
+		  .os_error = EIO, .link_error = EPERM,
+		  .rename_error = EIO, .rename_before_error = true,
+		  .status = FSIMG_EDURABILITY, .state = FSIMG_OUTPUT_PUBLISHED,
+		  .renames = true, .renamed = true },
+		{ .name = "staging sync fails after the rename",
+		  .link_error = EPERM, .fail_sync = 2,
+		  .status = FSIMG_EDURABILITY, .state = FSIMG_OUTPUT_PUBLISHED,
+		  .renames = true, .renamed = true },
+		{ .name = "parent sync fails after the rename",
+		  .link_error = EPERM, .fail_sync = 3,
+		  .status = FSIMG_EDURABILITY, .state = FSIMG_OUTPUT_PUBLISHED,
+		  .renames = true, .renamed = true },
+		{ .name = "ambiguous link",
+		  .os_error = EIO, .link_error = EIO,
+		  .status = FSIMG_EIO, .state = FSIMG_OUTPUT_UNCERTAIN },
+		{ .name = "cross-device link",
+		  .os_error = EXDEV, .link_error = EXDEV,
+		  .status = FSIMG_EUNSUPPORTED, .state = FSIMG_OUTPUT_ABSENT },
+		{ .name = "invalid link",
+		  .os_error = EINVAL, .link_error = EINVAL,
+		  .status = FSIMG_EUNSUPPORTED, .state = FSIMG_OUTPUT_ABSENT },
+		{ .name = "link finds the target",
+		  .os_error = EEXIST, .link_error = EEXIST,
+		  .status = FSIMG_EEXISTS, .state = FSIMG_OUTPUT_ABSENT },
+	};
+	fsimg_publish_ops_t hooks = {
+		.sync_fd = fault_sync,
+		.link_at = fault_link,
+		.unlink_at = fault_unlink,
+		.rename_at = fault_rename
+	};
+	publication_fault_t fault;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	bool host_renames;
+	int fd;
+
+	host_renames = host_renames_exclusively(staging);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		/* A real rename runs unless an error is injected first. */
+		if (!host_renames && cases[i].renames &&
+		    (cases[i].rename_error == 0 || cases[i].rename_before_error))
+			continue;
+		printf("rename fallback: %s\n", cases[i].name);
+		bzero(&fault, sizeof(fault));
+		bzero(&error, sizeof(error));
+		fault.link_error = cases[i].link_error;
+		fault.rename_error = cases[i].rename_error;
+		fault.rename_before_error = cases[i].rename_before_error;
+		fault.fail_sync = cases[i].fail_sync;
+		/* A renamed staged name needs no unlink; any unlink fails. */
+		fault.fail_unlink = true;
+		hooks.argument = &fault;
+		create_staged(staging);
+		if (cases[i].existing) {
+			fd = openat(parent, "final", O_WRONLY | O_CREAT | O_EXCL, 0600);
+			CHECK(fd != -1);
+			CHECK(write(fd, "keep", 4) == 4);
+			CHECK(close(fd) == 0);
+		}
+		status = fsimg_publish(ctx, staging, "image", 4, parent, "final",
+		    &hooks, &error);
+		CHECK(status == cases[i].status);
+		if (status != FSIMG_OK)
+			CHECK(error.output_state == cases[i].state);
+		if (cases[i].os_error != 0)
+			CHECK(error.os_error == cases[i].os_error);
+		CHECK(fault.link_calls == 1);
+		CHECK(fault.rename_calls == (cases[i].renames ? 1u : 0u));
+		if (cases[i].existing)
+			CHECK(holds_bytes(parent, "final", "keep"));
+		else
+			CHECK(holds_bytes(parent, "final", "data") == cases[i].renamed);
+		CHECK(holds_bytes(staging, "image", "data") == !cases[i].renamed);
+		if (cases[i].renamed || cases[i].existing)
+			CHECK(unlinkat(parent, "final", 0) == 0);
+		if (!cases[i].renamed)
 			CHECK(unlinkat(staging, "image", 0) == 0);
 	}
 }
@@ -411,6 +623,7 @@ main(int argc, char **argv)
 	} else {
 		CHECK(argc == 1);
 		test_failures(ctx, staging, parent);
+		test_rename_fallback(ctx, staging, parent);
 		test_existing_targets(ctx, staging, parent);
 		test_races(ctx, staging, parent);
 		test_cancel_after_flush(staging, parent);

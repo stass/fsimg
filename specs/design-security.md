@@ -451,14 +451,28 @@ parent directory. After the worker exits successfully, the coordinator verifies
 that the staged result is the expected regular file with the expected size,
 using no-follow operations. It finalizes file data before publishing.
 
-Publication never replaces an existing name. Use a supported atomic no-replace
-rename, or regular-file `linkat()` publication followed by removal of the
-private name. Both names refer to the same inode; no second image copy is
-made. A check-then-ordinary-rename sequence is forbidden. Where neither safe
-primitive is supported, return unsupported and retain/report the staged result;
-do not fall back to overwriting. Platform/filesystem support is tested, not
-assumed from headers. Linux documents filesystem-dependent no-replace support
-in its [rename manual](https://man7.org/linux/man-pages/man2/rename.2.html).
+Publication never replaces an existing name. It links the staged file to the
+final name with `linkat()` and then removes the private name. A filesystem
+without hard links, such as FAT or exFAT, refuses the link outright (`EPERM` on
+Linux, `ENOTSUP` on macOS, `EOPNOTSUPP` on FreeBSD); then, and only then,
+publication renames the staged name with the host's atomic no-replace rename
+(Linux `renameat2` `RENAME_NOREPLACE`, macOS `renameatx_np` `RENAME_EXCL`,
+FreeBSD `renameat2` `AT_RENAME_NOREPLACE`), which consumes the private name. No
+other link failure falls back, since an ambiguous one may have taken effect. A
+rename that fails ambiguously is settled by the names: the private staged name
+gone and the final name on the staged inode, the output is published without
+durability; otherwise the outcome is uncertain. On
+remote filesystems the exclusive rename is only as atomic as the server makes
+it. Either way the final name refers to the staged inode; no second image copy
+is made. A check-then-ordinary-rename sequence is forbidden. Where neither safe
+primitive is supported (macOS exFAT has no exclusive rename, Linux reports a
+filesystem without `RENAME_NOREPLACE` as `EINVAL`), return unsupported and
+retain/report the staged result; do not fall back to overwriting.
+Platform/filesystem support is tested, not assumed from headers. Linux documents
+filesystem-dependent no-replace support in its
+[rename manual](https://man7.org/linux/man-pages/man2/rename.2.html). A
+successful link or rename does not show that directories can be synced, so the
+durability steps below follow either.
 
 Then sync the destination directory where supported to complete the durability
 contract. Outcomes are distinguished:

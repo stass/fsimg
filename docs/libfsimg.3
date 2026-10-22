@@ -363,7 +363,8 @@ host I/O, resource exhaustion, source changes, cancellation, existing targets
 and uncertain durability.
 Per-call error storage is caller-owned; there is no global error buffer.
 Publication outcomes are absent, incomplete, published or uncertain.
-Cancellation after linking but before required directory sync completion
+Cancellation after naming the output but before required directory sync
+completion
 retains a published output with uncertain durability.
 Never retry a published or uncertain outcome blindly.
 .Sh SEE ALSO

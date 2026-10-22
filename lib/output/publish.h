@@ -11,11 +11,13 @@
  * and no worker or other writer may still mutate the staged name or inode.
  * No caller should retry after OUTPUT_UNCERTAIN or OUTPUT_PUBLISHED.
  * NULL hooks use host syscalls; hooks exist for deterministic fault tests.
+ * link_at and rename_at never replace an existing name.
  */
 typedef struct fsimg_publish_ops {
 	int (*sync_fd)(void *, int);
 	int (*link_at)(void *, int, const char *, int, const char *);
 	int (*unlink_at)(void *, int, const char *);
+	int (*rename_at)(void *, int, const char *, int, const char *);
 	void *argument;
 } fsimg_publish_ops_t;
 

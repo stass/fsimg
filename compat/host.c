@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -30,6 +31,11 @@
 
 #if defined(__linux__)
 #include <sys/syscall.h>
+
+/* The kernel's renameat2 flag, for C libraries that do not name it. */
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1u << 0)
+#endif
 #endif
 
 #include "host.h"
@@ -424,4 +430,22 @@ next_record:
 invalid:
 	errno = EIO;
 	return (-1);
+}
+
+int
+fsimg_host_rename_exclusive(int from_dir FSIMG_UNUSED,
+    const char *from FSIMG_UNUSED, int to_dir FSIMG_UNUSED,
+    const char *to FSIMG_UNUSED)
+{
+#if defined(__linux__) && defined(SYS_renameat2)
+	return ((int)syscall(SYS_renameat2, from_dir, from, to_dir, to,
+	    RENAME_NOREPLACE));
+#elif defined(__APPLE__)
+	return (renameatx_np(from_dir, from, to_dir, to, RENAME_EXCL));
+#elif defined(__FreeBSD__) && defined(AT_RENAME_NOREPLACE)
+	return (renameat2(from_dir, from, to_dir, to, AT_RENAME_NOREPLACE));
+#else
+	errno = ENOSYS;
+	return (-1);
+#endif
 }

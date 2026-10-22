@@ -20,6 +20,11 @@ static bool valid_basename(const char *);
 static int host_sync(void *, int);
 static int host_link(void *, int, const char *, int, const char *);
 static int host_unlink(void *, int, const char *);
+static int host_rename(void *, int, const char *, int, const char *);
+static bool links_unsupported(int);
+static fsimg_status_t naming_error(fsimg_error_t *, int);
+static fsimg_status_t settle_rename_failure(const struct stat *, int,
+    const char *, int, const char *, int, fsimg_error_t *);
 static fsimg_status_t publication_error(fsimg_error_t *, fsimg_status_t,
     int, fsimg_output_state_t, const char *);
 static fsimg_status_t sync_output(fsimg_ctx_t *, const fsimg_publish_ops_t *,
@@ -50,6 +55,72 @@ static int
 host_unlink(void *argument FSIMG_UNUSED, int parent, const char *name)
 {
 	return (unlinkat(parent, name, 0));
+}
+
+static int
+host_rename(void *argument FSIMG_UNUSED, int source_dir, const char *source,
+    int target_dir, const char *target)
+{
+	return (fsimg_host_rename_exclusive(source_dir, source, target_dir,
+	    target));
+}
+
+/* The link refusals of a filesystem without hard links, such as FAT and
+ * exFAT: EPERM on Linux, ENOTSUP on macOS, EOPNOTSUPP on FreeBSD. On a
+ * local filesystem each is a definite refusal; nothing was linked.
+ */
+static bool
+links_unsupported(int error)
+{
+	return (error == EPERM || error == ENOTSUP || error == EOPNOTSUPP);
+}
+
+/* Classify a failed link or no-replace rename of the staged name. An
+ * existing target was left alone, and a primitive the host or filesystem
+ * lacks, or an invalid request, did nothing (EINVAL is both: Linux reports
+ * an unsupported rename flag with it); any other failure, such as an
+ * interrupted remote operation, may have taken effect.
+ */
+static fsimg_status_t
+naming_error(fsimg_error_t *error, int saved)
+{
+	if (saved == EEXIST)
+		return (publication_error(error, FSIMG_EEXISTS, saved,
+		    FSIMG_OUTPUT_ABSENT, "destination already exists"));
+	if (saved == EXDEV || saved == ENOTSUP || saved == EOPNOTSUPP ||
+	    saved == ENOSYS || saved == EINVAL)
+		return (publication_error(error, FSIMG_EUNSUPPORTED, saved,
+		    FSIMG_OUTPUT_ABSENT, "no-replace publication unavailable"));
+	return (publication_error(error, FSIMG_EIO, saved,
+	    FSIMG_OUTPUT_UNCERTAIN, "publication outcome uncertain"));
+}
+
+/* A failed rename that may have taken effect, which naming_error reports
+ * as FSIMG_EIO, is settled by the names: the private staged name gone and
+ * the final name on the staged inode mean the rename happened, and the
+ * output is published with nothing synced; anything else stays uncertain,
+ * since a remote rename can still be in flight.
+ */
+static fsimg_status_t
+settle_rename_failure(const struct stat *staged, int staging_fd,
+    const char *staged_name, int parent_fd, const char *final_name, int saved,
+    fsimg_error_t *error)
+{
+	struct stat st;
+	fsimg_status_t status;
+
+	status = naming_error(error, saved);
+	if (status != FSIMG_EIO)
+		return (status);
+	if (fstatat(staging_fd, staged_name, &st, AT_SYMLINK_NOFOLLOW) == -1 &&
+	    errno == ENOENT &&
+	    fstatat(parent_fd, final_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+	    st.st_dev == staged->st_dev && st.st_ino == staged->st_ino)
+		return (publication_error(error, FSIMG_EDURABILITY, saved,
+		    FSIMG_OUTPUT_PUBLISHED,
+		    "publication rename failed after taking effect"));
+	return (publication_error(error, FSIMG_EIO, saved,
+	    FSIMG_OUTPUT_UNCERTAIN, "publication rename outcome uncertain"));
 }
 
 static fsimg_status_t
@@ -93,11 +164,13 @@ fsimg_publish(fsimg_ctx_t *ctx, int staging_fd, const char *staged_name,
 	const fsimg_publish_ops_t host = {
 		.sync_fd = host_sync,
 		.link_at = host_link,
-		.unlink_at = host_unlink
+		.unlink_at = host_unlink,
+		.rename_at = host_rename
 	};
 	struct stat st;
 	fsimg_status_t status;
 	int fd, result, saved;
+	bool by_rename;
 
 	status = fsimg_ctx_ready(ctx, error);
 	if (status != FSIMG_OK)
@@ -108,7 +181,7 @@ fsimg_publish(fsimg_ctx_t *ctx, int staging_fd, const char *staged_name,
 	if (hooks == NULL)
 		hooks = &host;
 	if (hooks->sync_fd == NULL || hooks->link_at == NULL ||
-	    hooks->unlink_at == NULL)
+	    hooks->unlink_at == NULL || hooks->rename_at == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_PUBLISH, "incomplete publication hooks"));
 	status = fsimg_poll(ctx, NULL, error);
@@ -155,30 +228,40 @@ fsimg_publish(fsimg_ctx_t *ctx, int staging_fd, const char *staged_name,
 	if (status != FSIMG_OK)
 		return (status);
 
+	/*
+	 * Give the staged inode its final name without replacing anything: a
+	 * hard link, then removal of the staged name, or, where the filesystem
+	 * has no hard links and refused the link outright, one no-replace
+	 * rename, which consumes the staged name itself. No other link failure
+	 * falls back, since it may have taken effect.
+	 */
 	ctx->in_callback = true;
 	result = hooks->link_at(hooks->argument, staging_fd, staged_name,
 	    parent_fd, final_name);
 	saved = errno;
-	ctx->in_callback = false;
-	if (result == -1) {
-		if (saved == EEXIST)
-			return (publication_error(error, FSIMG_EEXISTS, saved,
-			    FSIMG_OUTPUT_ABSENT, "destination already exists"));
-		if (saved == EXDEV || saved == EOPNOTSUPP || saved == ENOSYS)
-			return (publication_error(error, FSIMG_EUNSUPPORTED,
-			    saved, FSIMG_OUTPUT_ABSENT,
-			    "no-replace publication unavailable"));
-		/* In particular, an interrupted remote link can have taken effect. */
-		return (publication_error(error, FSIMG_EIO, saved,
-		    FSIMG_OUTPUT_UNCERTAIN, "publication outcome uncertain"));
+	by_rename = result == -1 && links_unsupported(saved);
+	if (by_rename) {
+		result = hooks->rename_at(hooks->argument, staging_fd,
+		    staged_name, parent_fd, final_name);
+		saved = errno;
 	}
-	ctx->in_callback = true;
-	result = hooks->unlink_at(hooks->argument, staging_fd, staged_name);
-	saved = errno;
 	ctx->in_callback = false;
+	if (result == -1 && by_rename)
+		return (settle_rename_failure(&st, staging_fd, staged_name,
+		    parent_fd, final_name, saved, error));
 	if (result == -1)
-		return (publication_error(error, FSIMG_EDURABILITY, saved,
-		    FSIMG_OUTPUT_PUBLISHED, "published output staging cleanup failed"));
+		return (naming_error(error, saved));
+	if (!by_rename) {
+		ctx->in_callback = true;
+		result = hooks->unlink_at(hooks->argument, staging_fd, staged_name);
+		saved = errno;
+		ctx->in_callback = false;
+		if (result == -1)
+			return (publication_error(error, FSIMG_EDURABILITY, saved,
+			    FSIMG_OUTPUT_PUBLISHED,
+			    "published output staging cleanup failed"));
+	}
+	/* Neither primitive's success shows that directories can be synced. */
 	status = sync_output(ctx, hooks, staging_fd, error);
 	if (status != FSIMG_OK)
 		return (publication_error(error, FSIMG_EDURABILITY,

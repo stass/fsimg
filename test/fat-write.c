@@ -88,7 +88,7 @@ static void test_slice_emission(void);
 static void test_timestamp_boundaries(void);
 static void test_retained_staging(void);
 static void test_corrupt_payload_plan(void);
-static int unsupported_link(void *, int, const char *, int, const char *);
+static int unsupported_naming(void *, int, const char *, int, const char *);
 static int publication_sync(void *, int);
 static int publication_unlink(void *, int, const char *);
 static void create_external(const char *, const char *, bool);
@@ -869,7 +869,8 @@ static void
 test_retained_staging(void)
 {
 	const fsimg_publish_ops_t hooks = { .sync_fd = publication_sync,
-	    .link_at = unsupported_link, .unlink_at = publication_unlink };
+	    .link_at = unsupported_naming, .unlink_at = publication_unlink,
+	    .rename_at = unsupported_naming };
 	writer_fixture_t fixture;
 	const fsimg_plan_t *plan;
 	fsimg_error_t error;
@@ -908,7 +909,7 @@ test_retained_staging(void)
 }
 
 static int
-unsupported_link(void *argument FSIMG_UNUSED, int source FSIMG_UNUSED,
+unsupported_naming(void *argument FSIMG_UNUSED, int source FSIMG_UNUSED,
     const char *name FSIMG_UNUSED, int parent FSIMG_UNUSED,
     const char *target FSIMG_UNUSED)
 {

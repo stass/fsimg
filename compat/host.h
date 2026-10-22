@@ -59,6 +59,14 @@ int fsimg_host_spawn_input(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_executable(char *, size_t);
 /* Failure is fatal to worker startup; no resource-limit-bounded fallback. */
 int fsimg_host_closefrom(int);
+/* Rename from_dir/from to to_dir/to only if no object has that name, as
+ * one atomic operation: Linux renameat2 RENAME_NOREPLACE, macOS
+ * renameatx_np RENAME_EXCL, FreeBSD renameat2 AT_RENAME_NOREPLACE. EEXIST
+ * means the target exists. A host without the primitive fails with ENOSYS;
+ * a filesystem without it, with the errno its host gives, such as EINVAL
+ * on Linux or ENOTSUP on macOS.
+ */
+int fsimg_host_rename_exclusive(int, const char *, int, const char *);
 bool fsimg_host_unsupported_io(int);
 int fsimg_host_file(int, fsimg_host_file_t *);
 /* Inspect parent/name without following a final symbolic link. */

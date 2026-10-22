@@ -846,6 +846,9 @@ that allows them, when that exclusion is required.
 The image file is created only after planning.
 Payloads are copied once to private staging on the destination filesystem.
 Publication never replaces an existing target.
+It hard-links the staged image to its name or, on a file system without hard
+links such as FAT, renames it without replacement where the host offers that;
+where it does not, as for exFAT on macOS, the staged image is retained.
 Failures distinguish retained staging, published output and uncertain
 durability.
 Do not retry a published or uncertain outcome blindly.
