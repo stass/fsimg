@@ -302,8 +302,9 @@ worker. Every report names the platforms that ran and those that did not.
 * Each implementation stage also receives an external, read-only review run
   with `aireview` (`~/aireview`): Codex `gpt-6.1-sol` at reasoning effort
   `xhigh` first, switching to zai `zai-coding-plan/glm-5.3` with `--variant
-  max`, with a warning, only when Codex is out of quota or rate limited. The
-  review output names the reviewer used. This supplements the required
+  max`, with a warning, only when Codex is out of quota, rate limited, or
+  refused by its content filter. The review output names the reviewer
+  used. This supplements the required
   code-review subagent and covers the same correctness, design,
   security/information-leak, and readability criteria. Re-review substantive
   fixes before committing the stage. Report an unavailable or failed external

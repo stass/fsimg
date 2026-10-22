@@ -789,7 +789,8 @@ from the checkout. `aireview`, installed from `~/aireview` and documented in
 its README, reviews the checkout and `git diff HEAD` read-only, its reads
 confined to the checkout and the system's minimal paths, with Codex `gpt-6.1-sol` at reasoning effort `xhigh`. It
 switches to OpenCode `zai-coding-plan/glm-5.3 --variant max`, with a warning,
-only when Codex is out of quota or rate limited, and the first line of the
+only when Codex is out of quota, rate limited or refused by its content
+filter, and the first line of the
 review names the reviewer used. The diff holds every staged and unstaged
 change to a tracked file, so keep unrelated or sensitive edits out of the
 tree. Review substantive fixes again, and report a failed or unavailable
