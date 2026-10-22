@@ -69,7 +69,16 @@ static fsimg_status_t decode_payload(const fsimg_container_input_t *,
     uint32_t, fsimg_error_t *);
 static fsimg_status_t disk_resolve(void *, uint64_t, void *, size_t, size_t *,
     fsimg_error_t *);
+static fsimg_status_t disk_next_zero(void *, uint64_t, uint64_t *, uint64_t *,
+    fsimg_error_t *);
 static void disk_release(void *);
+
+/* The decoded disk is the sealed spool, which answers for itself. */
+static const fsimg_io_resolver_ops_t disk_ops = {
+	.resolve = disk_resolve,
+	.next_zero = disk_next_zero,
+	.release = disk_release
+};
 static void report_header(const unsigned char *, fsimg_container_t *);
 static fsimg_status_t hbcifs_open(const fsimg_container_input_t *,
     fsimg_container_t *, fsimg_error_t *);
@@ -267,6 +276,13 @@ disk_resolve(void *argument, uint64_t offset, void *buffer, size_t length,
 	    transferred, error));
 }
 
+static fsimg_status_t
+disk_next_zero(void *argument, uint64_t offset, uint64_t *start, uint64_t *end,
+    fsimg_error_t *error)
+{
+	return (fsimg_io_next_zero_range(argument, offset, start, end, error));
+}
+
 static void
 disk_release(void *argument)
 {
@@ -338,7 +354,7 @@ hbcifs_open(const fsimg_container_input_t *input, fsimg_container_t *out,
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_io_resolver(input->ctx, input->file, decoded,
-	    disk_resolve, disk_release, spooled, &out->disk, error);
+	    &disk_ops, spooled, &out->disk, error);
 	if (status != FSIMG_OK)
 		return (status);
 	out->disk_bytes = decoded;

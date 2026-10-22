@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 6996u
+#define FSIMG_JOB_BYTES 7052u
 /* The job record's text settings: the mountpoint, the boot programs and the
  * script, each in a field of FSIMG_JOB_TEXT_BYTES.
  */

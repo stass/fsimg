@@ -43,6 +43,11 @@ fsimg_status_t fsimg_io_read_session(fsimg_io_t *, fsimg_session_t *,
 /* Callback storage has no host identity; its stability is the caller's duty. */
 fsimg_status_t fsimg_io_identity(fsimg_io_t *, fsimg_host_file_t *, bool *,
     fsimg_error_t *);
+/* Whether a host file's identity from fsimg_io_identity still has the
+ * length the object's root was made at, so that the root's bounds cover
+ * the whole file.
+ */
+bool fsimg_io_length_current(const fsimg_io_t *, const fsimg_host_file_t *);
 /* Capability/length validation only: no resize, zeroing, or write occurs. */
 fsimg_status_t fsimg_io_check_output(fsimg_io_t *, uint64_t, bool, bool *,
     fsimg_error_t *);

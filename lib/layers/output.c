@@ -53,7 +53,13 @@ typedef struct assembled_disk {
 } assembled_disk_t;
 
 static fsimg_status_t check_mode(const fsimg_write_options_t *,
-    fsimg_write_options_t *, fsimg_layer_options_t *, fsimg_error_t *);
+    fsimg_write_options_t *, fsimg_layer_options_t *, fsimg_layer_inputs_t *,
+    fsimg_error_t *);
+static fsimg_status_t check_named_input(fsimg_ctx_t *, fsimg_io_t *,
+    uint64_t, const fsimg_stack_t *, char [static 16], fsimg_error_t *);
+static fsimg_status_t check_carried_input(fsimg_ctx_t *, fsimg_io_t *,
+    uint64_t, const fsimg_stack_t *, const fsimg_layer_t *, char [static 16],
+    fsimg_byte_order_t *, fsimg_error_t *);
 static fsimg_status_t disk_new(fsimg_ctx_t *, size_t, bool,
     assembled_disk_t *, fsimg_error_t *);
 static fsimg_status_t disk_append(assembled_disk_t *, region_kind_t,
@@ -67,7 +73,7 @@ static fsimg_status_t build_disk(fsimg_ctx_t *, const fsimg_disk_plan_t *,
     fsimg_io_t *const *, const uint64_t *, bool, assembled_disk_t *,
     fsimg_scheme_tables_t *, fsimg_error_t *);
 static fsimg_status_t reject_aliases(const assembled_disk_t *,
-    const fsimg_sink_t *, fsimg_error_t *);
+    const fsimg_disk_plan_t *, const fsimg_sink_t *, fsimg_error_t *);
 static fsimg_status_t disk_resolve(void *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 static fsimg_status_t disk_next_zero(void *, uint64_t, uint64_t *, uint64_t *,
@@ -140,25 +146,26 @@ fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
 
 /*
  * Without a filesystem writer, write options carry only the mode: the
- * reproducible, durable and loss flags, the epoch, the layer settings and
- * the compression.
+ * reproducible, durable and loss flags, the epoch, the layer settings, the
+ * file settings and the compression.
  * Every other field must hold its default, as a setting a format does not
  * store must, so none is silently ignored: a copy of the options with the
- * four mode fields reset must equal the defaults. selected is the
+ * five mode fields reset must equal the defaults. selected is the
  * defaults with the caller's flags, epoch and compression, which the disk
- * plan resolves, and layers a copy of the caller's layer settings, so
- * selected carries no layers pointer.
+ * plan resolves, and layers and inputs copies of the caller's records, so
+ * selected carries no pointer to either.
  */
 static fsimg_status_t
 check_mode(const fsimg_write_options_t *options,
     fsimg_write_options_t *selected, fsimg_layer_options_t *layers,
-    fsimg_error_t *error)
+    fsimg_layer_inputs_t *inputs, fsimg_error_t *error)
 {
 	fsimg_write_options_t defaults, others;
 
 	fsimg_write_options_init(&defaults);
 	*selected = defaults;
 	fsimg_layer_options_init(layers);
+	bzero(inputs, sizeof(*inputs));
 	if (options == NULL)
 		return (FSIMG_OK);
 	if (options->size != sizeof(*options) ||
@@ -171,6 +178,7 @@ check_mode(const fsimg_write_options_t *options,
 	others.flags = defaults.flags;
 	others.epoch = defaults.epoch;
 	others.layers = defaults.layers;
+	others.inputs = defaults.inputs;
 	bcopy(defaults.compression, others.compression,
 	    sizeof(others.compression));
 	if (bcmp(&others, &defaults, sizeof(defaults)) != 0)
@@ -181,6 +189,8 @@ check_mode(const fsimg_write_options_t *options,
 	selected->epoch = options->epoch;
 	if (options->layers != NULL)
 		*layers = *options->layers;
+	if (options->inputs != NULL)
+		*inputs = *options->inputs;
 	bcopy(options->compression, selected->compression,
 	    sizeof(selected->compression));
 	return (FSIMG_OK);
@@ -302,12 +312,12 @@ build_disk(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
 	return (status);
 }
 
-/* No input may share its storage with the output, through any slice or
- * name, before the output is touched.
+/* No input, a file setting included, may share its storage with the
+ * output, through any slice or name, before the output is touched.
  */
 static fsimg_status_t
-reject_aliases(const assembled_disk_t *disk, const fsimg_sink_t *sink,
-    fsimg_error_t *error)
+reject_aliases(const assembled_disk_t *disk, const fsimg_disk_plan_t *plan,
+    const fsimg_sink_t *sink, fsimg_error_t *error)
 {
 	fsimg_host_file_t output, input;
 	bool output_known, input_known;
@@ -315,6 +325,9 @@ reject_aliases(const assembled_disk_t *disk, const fsimg_sink_t *sink,
 
 	status = fsimg_sink_identity(sink, &output, &output_known, error);
 	if (status != FSIMG_OK || !output_known)
+		return (status);
+	status = fsimg_disk_plan_input_aliases(plan, &output, error);
+	if (status != FSIMG_OK)
 		return (status);
 	for (size_t i = 0; i < disk->count; i++) {
 		if (disk->regions[i].kind != REGION_VOLUME)
@@ -481,7 +494,7 @@ write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 	status = build_disk(ctx, plan, volumes, volume_bytes, durable, &disk,
 	    &tables, error);
 	if (status == FSIMG_OK)
-		status = reject_aliases(&disk, sink, error);
+		status = reject_aliases(&disk, plan, sink, error);
 	if (status == FSIMG_OK)
 		status = fsimg_io_resolver(ctx, NULL, disk.length, &disk_ops,
 		    &disk, &object, error);
@@ -494,11 +507,94 @@ write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 	return (status);
 }
 
+/* The filesystem a wrap's input holds, empty when no single format claims
+ * it; one the stack names must be the one it holds, else FSIMG_EINVAL
+ * naming the filesystem.
+ */
+static fsimg_status_t
+check_named_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
+    const fsimg_stack_t *stack, char filesystem[static 16],
+    fsimg_error_t *error)
+{
+	const fsimg_stack_slot_t *slot = &stack->slots[FSIMG_LAYER_FILESYSTEM];
+	const char *named;
+	fsimg_status_t status;
+
+	named = slot->state == FSIMG_SLOT_NAMED ? slot->name : NULL;
+	status = identify_volume(ctx, input, length, named, filesystem, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (named != NULL && strcmp(filesystem, named) != 0) {
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the volume does not hold the filesystem the stack names");
+		fsimg_error_path(error, named);
+		return (FSIMG_EINVAL);
+	}
+	return (FSIMG_OK);
+}
+
+/*
+ * The input of a container that carries a filesystem, before any output
+ * is produced (specs/design-layers.md#prefix-tables-opaque-sections-and-
+ * carried-volumes): the stack holds nothing but the carried filesystem,
+ * else FSIMG_EINVAL naming the container; the input draws that
+ * filesystem's bounded-probe claim, else FSIMG_EFORMAT; it passes the
+ * filesystem's structural verification, whose failure keeps its class; and
+ * order receives the byte order it is stored in. Each refusal of the input
+ * names it ("input").
+ */
+static fsimg_status_t
+check_carried_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
+    const fsimg_stack_t *stack, const fsimg_layer_t *container,
+    char filesystem[static 16], fsimg_byte_order_t *order,
+    fsimg_error_t *error)
+{
+	const char *carried = container->container->carries;
+	fsimg_read_options_t read_options;
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader;
+	fsimg_session_t session;
+	fsimg_claim_t claim;
+	fsimg_status_t status;
+
+	status = fsimg_stack_carried(stack, container, error);
+	if (status != FSIMG_OK)
+		return (status);
+	/* A corrupt or unsupported claim is a claim; the open reports it. */
+	fsimg_session_init(&session, ctx, "volume identification", 0);
+	status = fsimg_volume_claim(ctx, input, &session, 0, length, carried,
+	    &claim, filesystem, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (claim == FSIMG_CLAIM_NONE) {
+		fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
+		    "the input does not hold the filesystem the container carries");
+		fsimg_error_path(error, "input");
+		return (FSIMG_EFORMAT);
+	}
+	snprintf(filesystem, 16, "%s", carried);
+
+	fsimg_read_options_init(&read_options);
+	read_options.format = carried;
+	reader = NULL;
+	status = fsimg_reader_open(ctx, input, &read_options, &reader, error);
+	if (status == FSIMG_OK)
+		status = fsimg_verify(reader, 0, &report, error);
+	fsimg_reader_free(reader);
+	if (status != FSIMG_OK) {
+		fsimg_error_path(error, "input");
+		return (status);
+	}
+	return (fsimg_volume_byte_order(ctx, input, &session, length, carried,
+	    order, error));
+}
+
 /*
  * Wrap one raw volume. A filesystem the stack names must be the one the
- * volume holds. With a scheme the volume is the one partition, typed by
- * the layer settings or else by its filesystem; without one it is the
- * output.
+ * volume holds, and a container that carries a filesystem requires its
+ * input to hold that one and to verify. With a scheme the volume is the
+ * one partition, typed by the layer settings or else by its filesystem;
+ * without one it is the output.
  */
 fsimg_status_t
 fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
@@ -507,10 +603,13 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 {
 	fsimg_write_options_t selected;
 	fsimg_layer_options_t layers;
+	fsimg_layer_inputs_t inputs;
 	fsimg_partition_request_t request;
+	fsimg_disk_request_t disk_request;
 	fsimg_disk_plan_t plan;
 	fsimg_stack_t stack;
-	const char *named;
+	const fsimg_layer_t *container;
+	fsimg_byte_order_t order;
 	char filesystem[16];
 	uint64_t length;
 	fsimg_error_t local;
@@ -530,25 +629,28 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 		    "wrap needs a stack and an input in its context"));
 	status = fsimg_stack_parse(text, &stack, error);
 	if (status == FSIMG_OK)
-		status = check_mode(options, &selected, &layers, error);
+		status = check_mode(options, &selected, &layers, &inputs, error);
 	if (status == FSIMG_OK)
 		status = fsimg_io_get_size(input, &length, error);
 	if (status != FSIMG_OK)
 		return (status);
-	named = stack.slots[FSIMG_LAYER_FILESYSTEM].state == FSIMG_SLOT_NAMED ?
-	    stack.slots[FSIMG_LAYER_FILESYSTEM].name : NULL;
-	status = identify_volume(ctx, input, length, named, filesystem, error);
+	container = fsimg_stack_layer(&stack, FSIMG_LAYER_CONTAINER);
+	order = FSIMG_BYTE_ORDER_LITTLE;
+	if (container != NULL && container->container->carries != NULL)
+		status = check_carried_input(ctx, input, length, &stack,
+		    container, filesystem, &order, error);
+	else
+		status = check_named_input(ctx, input, length, &stack, filesystem,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (named != NULL && strcmp(filesystem, named) != 0) {
-		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "the volume does not hold the filesystem the stack names");
-		fsimg_error_path(error, named);
-		return (FSIMG_EINVAL);
-	}
-	status = fsimg_disk_plan_init(ctx, &stack, &layers,
-	    selected.compression, 1, selected.epoch, selected.flags, &plan,
-	    error);
+	disk_request = (fsimg_disk_request_t){ .stack = &stack,
+	    .layers = &layers, .inputs = &inputs,
+	    .compression = selected.compression, .epoch = selected.epoch,
+	    .flags = selected.flags, .partitions = 1, .volume_order = order,
+	    .verified_disk = container != NULL &&
+	    container->container->carries != NULL };
+	status = fsimg_disk_plan_init(ctx, &disk_request, &plan, error);
 	if (status == FSIMG_OK && plan.scheme != NULL) {
 		request = (fsimg_partition_request_t){
 			.type = plan.table.kind == FSIMG_SCHEME_GPT ?
@@ -567,7 +669,11 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 	return (status);
 }
 
-/* The bytes a selector names, raw: a partition, a range or the disk. */
+/*
+ * The bytes a selector names, raw: a partition, a range or the disk, or
+ * under the section selector one of the container's sections, the byte
+ * strings it stores beside the disk.
+ */
 fsimg_status_t
 fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
     const fsimg_write_options_t *options, const fsimg_sink_t *sink,
@@ -575,6 +681,8 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 {
 	fsimg_write_options_t selected;
 	fsimg_layer_options_t layers;
+	fsimg_layer_inputs_t inputs;
+	fsimg_disk_request_t request;
 	fsimg_disk_plan_t plan;
 	fsimg_stack_t stack;
 	fsimg_io_t *volume;
@@ -588,22 +696,31 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 		error = &local;
 	volume = NULL;
 	bzero(&stack, sizeof(stack));
+	bzero(&plan, sizeof(plan));
 	status = fsimg_sink_adopt(sink, FSIMG_RAW_NEVER, &raw_fd, error);
 	if (status == FSIMG_OK)
-		status = check_mode(options, &selected, &layers, error);
-	if (status == FSIMG_OK)
+		status = check_mode(options, &selected, &layers, &inputs, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (selector != NULL && selector->kind == FSIMG_SELECT_SECTION)
+		status = fsimg_image_section(image, selector->text, &volume,
+		    error);
+	else
 		status = fsimg_image_select(image, selector, &volume, error);
 	if (status != FSIMG_OK)
 		return (status);
 	ctx = fsimg_io_context(volume);
 	status = fsimg_io_get_size(volume, &length, error);
+	request = (fsimg_disk_request_t){ .stack = &stack, .layers = &layers,
+	    .inputs = &inputs, .compression = selected.compression,
+	    .epoch = selected.epoch, .flags = selected.flags,
+	    .partitions = 1 };
 	if (status == FSIMG_OK)
-		status = fsimg_disk_plan_init(ctx, &stack, &layers,
-		    selected.compression, 1, selected.epoch, selected.flags,
-		    &plan, error);
+		status = fsimg_disk_plan_init(ctx, &request, &plan, error);
 	if (status == FSIMG_OK)
 		status = write_plan(ctx, &plan, &volume, &length,
 		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
+	fsimg_disk_plan_free(&plan);
 	fsimg_io_free(volume);
 	return (status);
 }
@@ -622,7 +739,9 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 {
 	fsimg_write_options_t selected;
 	fsimg_layer_options_t layers;
+	fsimg_layer_inputs_t inputs;
 	fsimg_partition_request_t request;
+	fsimg_disk_request_t disk_request;
 	fsimg_disk_plan_t plan;
 	fsimg_stack_t stack;
 	fsimg_io_t **volumes;
@@ -646,7 +765,7 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 		    "compose needs a stack and its parts"));
 	status = fsimg_stack_parse(text, &stack, error);
 	if (status == FSIMG_OK)
-		status = check_mode(options, &selected, &layers, error);
+		status = check_mode(options, &selected, &layers, &inputs, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (stack.slots[FSIMG_LAYER_FILESYSTEM].state == FSIMG_SLOT_NAMED ||
@@ -656,12 +775,16 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 	status = fsimg_layer_options_disk_only(&layers, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_disk_plan_init(ctx, &stack, &layers,
-	    selected.compression,
-	    count > UINT32_MAX ? UINT32_MAX : (uint32_t)count, selected.epoch,
-	    selected.flags, &plan, error);
-	if (status != FSIMG_OK)
+	disk_request = (fsimg_disk_request_t){ .stack = &stack,
+	    .layers = &layers, .inputs = &inputs,
+	    .compression = selected.compression, .epoch = selected.epoch,
+	    .flags = selected.flags,
+	    .partitions = count > UINT32_MAX ? UINT32_MAX : (uint32_t)count };
+	status = fsimg_disk_plan_init(ctx, &disk_request, &plan, error);
+	if (status != FSIMG_OK) {
+		fsimg_disk_plan_free(&plan);
 		return (status);
+	}
 
 	/* plan_init bounded count by the scheme's slots, so these are small. */
 	lengths = NULL;

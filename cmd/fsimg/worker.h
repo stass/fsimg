@@ -6,6 +6,7 @@
 
 #include <signal.h>
 
+#include "layer.h"
 #include "protocol.h"
 
 typedef enum fsimg_job_kind {
@@ -59,7 +60,8 @@ typedef enum fsimg_confinement {
  * optional for every kind; the others follow the kind. RAW is the raw
  * intermediate fsimg_job_needs_raw names; SPOOL is the spool a read job
  * holds whenever it has scratch; MANIFEST is the staged manifest an
- * EXTRACT job writes under x --mtree.
+ * EXTRACT job writes under x --mtree. SETTING + n is a create or plan
+ * job's file setting n (fsimg_file_setting_t), a read-only regular file.
  * The create roots are a run of descriptors, not one, so they are not a
  * capability here; FSIMG_JOB_CAP_ROOTS marks them.
  */
@@ -70,12 +72,16 @@ typedef enum fsimg_capability {
 	FSIMG_CAPABILITY_RAW,
 	FSIMG_CAPABILITY_SPOOL,
 	FSIMG_CAPABILITY_MANIFEST,
-	FSIMG_CAPABILITY_COUNT
+	FSIMG_CAPABILITY_SETTING,	/* The first of FSIMG_FILE_SETTINGS */
+	FSIMG_CAPABILITY_COUNT = FSIMG_CAPABILITY_SETTING + FSIMG_FILE_SETTINGS
 } fsimg_capability_t;
 
 #define FSIMG_JOB_CAP(c) (1u << (c))
 #define FSIMG_JOB_CAP_ROOTS FSIMG_JOB_CAP(FSIMG_CAPABILITY_COUNT)
 #define FSIMG_JOB_CAP_ALL ((FSIMG_JOB_CAP_ROOTS << 1) - 1u)
+#define FSIMG_JOB_CAP_SETTING(n) FSIMG_JOB_CAP(FSIMG_CAPABILITY_SETTING + (n))
+#define FSIMG_JOB_CAP_SETTINGS \
+	(((1u << FSIMG_FILE_SETTINGS) - 1u) << FSIMG_CAPABILITY_SETTING)
 /* Coordinator, at most one parser, at most one output relay and at most
  * one input relay.
  */
@@ -156,6 +162,11 @@ typedef struct fsimg_worker_request {
 	 * -1.
 	 */
 	int		 manifest_fd;
+	/* A create job's file settings, in fsimg_file_setting_t order: each a
+	 * read-only regular file the coordinator opened from its -o path, or
+	 * -1 when the setting is absent.
+	 */
+	int		 setting_fds[FSIMG_FILE_SETTINGS];
 	/* --partition name= or type= text; a GPT name holds at most 36 UTF-16
 	 * units, so 111 bytes cover every name that can match.
 	 */

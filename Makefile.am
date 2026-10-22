@@ -94,9 +94,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/ifs/records.c lib/formats/ifs/volume.c \
 	lib/formats/ifs/tree.c lib/formats/ifs/names.c \
 	lib/formats/ifs/directory.c lib/formats/ifs/read.c \
-	lib/formats/ifs/verify.c lib/codec/codec.h lib/codec/lzo1x.c \
-	lib/codec/nrv2b.c compat/host.c compat/host.h \
-	lib/formats/ifs/write-ifs.h lib/formats/ifs/write-plan.c \
+	lib/formats/ifs/verify.c lib/formats/ifs/write-ifs.h lib/formats/ifs/write-plan.c \
 	lib/formats/ifs/write-emit.c
 # The system zlib is the core's one third-party library; never vendored.
 libfsimg_core_la_LIBADD = $(ZLIB_LIBS)
@@ -132,7 +130,7 @@ test_programs = test-core test-private test-io test-meta test-meta-sort test-uni
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
 	test-containers test-compression test-gzip-write test-holes header-c \
-	header-cxx test-codec test-hbcifs test-ifsboot
+	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
@@ -177,6 +175,8 @@ test_containers_SOURCES = test/containers.c test/test.h
 test_containers_LDADD = libfsimg-core.la
 test_ifsboot_SOURCES = test/ifsboot.c test/test.h
 test_ifsboot_LDADD = libfsimg-core.la
+test_ifsboot_write_SOURCES = test/ifsboot-write.c test/test.h
+test_ifsboot_write_LDADD = libfsimg-core.la
 test_compression_SOURCES = test/compression.c test/test.h
 test_compression_LDADD = libfsimg-core.la
 test_hbcifs_SOURCES = test/hbcifs.c test/test.h

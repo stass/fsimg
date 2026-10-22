@@ -138,10 +138,14 @@ typedef struct boot_image {
 	unsigned	 chunks;
 } boot_image_t;
 
-/* A context with a scratch directory, and an image opened in it. */
+/* A context with a scratch directory, and an image opened in it; with
+ * spool, the open receives a spool in that directory, so a spooled
+ * container such as hbcifs opens too.
+ */
 typedef struct fixture {
 	char		 directory[256];
 	int		 scratch;
+	bool		 spool;
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*io;
 	fsimg_image_t	*image;
@@ -155,6 +159,7 @@ typedef struct native_result {
 	fsimg_status_t	 verify;
 	uint64_t	 entries;
 	uint64_t	 chunks;
+	uint64_t	 tail_nonzero;	/* Nonzero bytes in the header's tail */
 	char		 codecs[32];
 } native_result_t;
 
@@ -711,6 +716,12 @@ fixture_open(fixture_t *f, memory_file_t *file, const char *stack,
 	fsimg_image_options_init(&options);
 	if (stack != NULL)
 		CHECK(fsimg_stack_parse(stack, &options.stack, NULL) == FSIMG_OK);
+	if (f->spool) {
+		options.spool_fd = openat(f->scratch, "spool", O_RDWR | O_CREAT |
+		    O_EXCL | O_CLOEXEC, 0600);
+		CHECK(options.spool_fd != -1);
+		CHECK(unlinkat(f->scratch, "spool", 0) == 0);
+	}
 	return (fsimg_image_open(f->ctx, f->io, &options, &f->image, error));
 }
 
@@ -917,7 +928,7 @@ test_each_prefix_and_codec(void)
 	memory_file_t file;
 	boot_spec_t spec;
 	fixture_t f;
-	uint64_t smallest, largest;
+	uint64_t smallest, largest, nonzero;
 
 	for (unsigned p = 0; p < 2; p++) {
 		for (unsigned c = 0; c < 3; c++) {
@@ -944,7 +955,19 @@ test_each_prefix_and_codec(void)
 			CHECK(info.disk_bytes == body.length);
 			CHECK(info.file_bytes == file.length);
 			CHECK(info.chunk_count == (c == 0 ? 1 : spec.chunk_count));
-			CHECK(info.detail_count == 19);
+			CHECK(info.detail_count == 21);
+			/* The opaque fields follow preboot_size, as the profile
+			 * orders them; the generator's tail is random bytes.
+			 */
+			CHECK(strcmp(info.details[15].name, "flags2") == 0 &&
+			    strcmp(info.details[16].name, "tail_nonzero") == 0 &&
+			    strcmp(info.details[17].name, "body_bytes") == 0);
+			nonzero = 0;
+			for (unsigned t = H_TAIL; t < HEADER_BYTES; t++)
+				nonzero += file.bytes[prefixes[p] + t] != 0;
+			CHECK(detail(&info, "flags2") ==
+			    file.bytes[prefixes[p] + H_FLAGS2]);
+			CHECK(detail(&info, "tail_nonzero") == nonzero);
 			CHECK(detail(&info, "prefix_bytes") == prefixes[p]);
 			CHECK(detail(&info, "preboot_size") == prefixes[p]);
 			CHECK(detail(&info, "version") == 1);
@@ -1620,21 +1643,25 @@ test_carried_stack(void)
 		free(file.bytes);
 	}
 
-	/* The capability record: read and verify and the codecs, with no zlib
-	 * version since the codecs are the project's own. */
+	/* The capability record: read, write and verify, the codecs, with no
+	 * zlib version since the codecs are the project's own, the carried
+	 * filesystem and the settings, file settings first. */
 	cursor = 0;
 	while (fsimg_layer_next(&cursor, &layer, NULL) == FSIMG_OK &&
 	    strcmp(layer.name, "ifsboot") != 0)
 		;
 	CHECK(strcmp(layer.name, "ifsboot") == 0);
 	CHECK(layer.kind == FSIMG_LAYER_CONTAINER);
-	CHECK(layer.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
+	CHECK(layer.capabilities ==
+	    (FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
 	CHECK(strcmp(layer.codecs, "raw,lzo1x,nrv2b") == 0);
 	CHECK(layer.codec_version[0] == '\0');
-	CHECK(layer.suffix[0] == '\0' && layer.settings[0] == '\0');
+	CHECK(layer.suffix[0] == '\0' && strcmp(layer.carries, "ifs") == 0);
+	CHECK(strncmp(layer.settings, "startup,prefix,machine,", 23) == 0);
 
 	/* Creating names the container: a foreign filesystem inside it is
-	 * invalid, and wrapping an ImageFS in it is unsupported. */
+	 * invalid, and wrapping an ImageFS in it without the required
+	 * settings is refused naming the first. */
 	fsimg_options_init(&options);
 	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
 	fsimg_write_options_init(&write);
@@ -1652,9 +1679,9 @@ test_carried_stack(void)
 	sink.stream_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
 	CHECK(sink.stream_fd != -1);
 	CHECK(fsimg_image_wrap(ctx, input, "ifs/ifsboot", &write, &sink,
-	    &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.path, "ifsboot") == 0);
-	CHECK(strcmp(error.message, "the container is read only") == 0);
+	    &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "ifsboot:machine") == 0);
+	CHECK(strcmp(error.message, "the setting is required") == 0);
 	CHECK(close(sink.stream_fd) == 0);
 	fsimg_io_free(input);
 	fsimg_ctx_free(ctx);
@@ -1892,6 +1919,7 @@ native_read(unsigned char *bytes, size_t length, const unsigned char *decoded,
 
 	bzero(&result, sizeof(result));
 	fixture_init(&f, 64 * MIB, 0);
+	f.spool = true;
 	result.open = fixture_open(&f, &file, NULL, NULL);
 	/* Info fails on a file no container claims that holds no volume. */
 	if (result.open == FSIMG_OK &&
@@ -1899,6 +1927,7 @@ native_read(unsigned char *bytes, size_t length, const unsigned char *decoded,
 		result.claimed = strcmp(info.container, "ifsboot") == 0;
 	if (result.claimed) {
 		result.chunks = info.chunk_count;
+		result.tail_nonzero = detail(&info, "tail_nonzero");
 		snprintf(result.codecs, sizeof(result.codecs), "%s", info.codecs);
 		if (decoded != NULL)
 			expect_disk(&f, decoded, decoded_length);
@@ -1919,8 +1948,9 @@ native_read(unsigned char *bytes, size_t length, const unsigned char *decoded,
  * byte, which fail with their classes. Under FSIMG_IFS_IMAGES with
  * FSIMG_IFS_NATIVE: each boot image the decoded/ directory has a body for
  * (h3-NAME.imagefs or x1-NAME.imagefs) reads, without any decoding step of
- * the caller's, as that body byte for byte, verifies, and lists. Only
- * counts and file names are printed.
+ * the caller's, as that body byte for byte, verifies, and lists, and its
+ * header's tail holds six nonzero bytes in an H3 image and none in an X1
+ * one. Only counts and file names are printed.
  */
 static int
 native(void)
@@ -1945,6 +1975,7 @@ native(void)
 	size_t length, decoded_length;
 	unsigned read_images = 0;
 	DIR *directory;
+	bool h3;
 	int status = 77;
 
 	if (captures == NULL || captures[0] == '\0') {
@@ -2015,11 +2046,13 @@ native(void)
 		if (name_length < 5 || strcmp(name + name_length - 4, ".ifs") != 0)
 			continue;
 		decoded = NULL;
+		h3 = false;
 		for (unsigned family = 0; family < 2 && decoded == NULL; family++) {
 			snprintf(path, sizeof(path), "%s/decoded/%s-%.*s.imagefs",
 			    captures, family == 0 ? "h3" : "x1",
 			    (int)(name_length - 4), name);
 			decoded = read_whole(path, &decoded_length);
+			h3 = family == 0;
 		}
 		if (decoded == NULL)
 			continue;
@@ -2034,6 +2067,7 @@ native(void)
 			continue;
 		}
 		CHECK(result.claimed && result.verify == FSIMG_OK);
+		CHECK(result.tail_nonzero == (h3 ? 6 : 0));
 		printf("%s: %s, %llu chunks, %zu decoded bytes as the oracle's, "
 		    "%llu entries, verified\n", name, result.codecs,
 		    (unsigned long long)result.chunks, decoded_length,

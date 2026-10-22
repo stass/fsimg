@@ -101,7 +101,6 @@ static void copy_close(void *);
 
 /* Without a container the disk is copied unchanged, zeros as zeros. */
 static const fsimg_encoder_ops_t copy_encoder = {
-	.passes = 1,
 	.open = copy_open,
 	.chunk = copy_chunk,
 	.finish = copy_finish,
@@ -370,7 +369,7 @@ transcode_pass(const disk_output_t *output, const fsimg_encoder_ops_t *ops,
 {
 	const fsimg_hole_test_t *test = &output->session->ctx->hole_test;
 	uint64_t disk_bytes = output->plan->disk_bytes;
-	uint64_t zero_start, zero_end;
+	uint64_t zero_start, zero_end, flip;
 	size_t length, transferred;
 	fsimg_status_t status;
 	bool consult, zero;
@@ -390,6 +389,12 @@ transcode_pass(const disk_output_t *output, const fsimg_encoder_ops_t *ops,
 		}
 		zero = consult && zero_start <= offset && offset < zero_end &&
 		    (length <= zero_end - offset || test->partial_chunks);
+		/* The test control's flipped byte is read, never a hole. */
+		flip = output->session->ctx->transcode_flip;
+		if (flip != 0 && (flip - 1 < offset || flip - 1 - offset >= length))
+			flip = 0;
+		if (flip != 0)
+			zero = false;
 		if (!zero || !test->unpolled_zeros)
 			status = fsimg_session_charge(output->session, 0, 0, 1,
 			    error);
@@ -401,6 +406,8 @@ transcode_pass(const disk_output_t *output, const fsimg_encoder_ops_t *ops,
 			    error);
 			if (status != FSIMG_OK)
 				break;
+			if (flip != 0)
+				buffer[flip - 1 - offset] ^= 0x01;
 			zero = all_zero(buffer, length);
 		}
 		status = ops->chunk(state, pass, zero ? NULL : buffer, length,
@@ -409,7 +416,13 @@ transcode_pass(const disk_output_t *output, const fsimg_encoder_ops_t *ops,
 	return (status);
 }
 
-/* Run the plan's encoder, or the copy encoder, over the disk into sink. */
+/*
+ * Run the plan's encoder, or the copy encoder, over the disk into sink, in
+ * the passes the container's settings resolved. Once the last pass ends,
+ * every file setting the encoder copied in is checked against the
+ * identity its host file had when the plan read it, so a file that changed
+ * meanwhile fails the output before it is published.
+ */
 static fsimg_status_t
 transcode(const disk_output_t *output, fsimg_seq_sink_t *sink,
     fsimg_error_t *error)
@@ -426,16 +439,17 @@ transcode(const disk_output_t *output, fsimg_seq_sink_t *sink,
 	    plan->container->container->encoder;
 	encode = (fsimg_encode_t){ .ctx = output->session->ctx,
 	    .session = output->session, .sink = sink,
-	    .settings = &plan->container_settings,
-	    .disk_bytes = plan->disk_bytes };
+	    .settings = &plan->container_settings, .files = plan->files,
+	    .disk_bytes = plan->disk_bytes,
+	    .verified_disk = plan->verified_disk };
 	chunk = plan->container_settings.chunk_bytes;
 	buffer = fsimg_alloc(encode.ctx, chunk, error);
 	if (buffer == NULL)
 		return (error->status);
 	state = NULL;
 	status = ops->open(&encode, &state, error);
-	for (unsigned pass = 0; status == FSIMG_OK && pass < ops->passes;
-	    pass++) {
+	for (unsigned pass = 0; status == FSIMG_OK &&
+	    pass < plan->container_settings.passes; pass++) {
 		status = transcode_pass(output, ops, state, pass, buffer, chunk,
 		    error);
 		if (status == FSIMG_OK)
@@ -444,6 +458,8 @@ transcode(const disk_output_t *output, fsimg_seq_sink_t *sink,
 	if (state != NULL)
 		ops->close(state);
 	fsimg_dealloc(buffer);
+	if (status == FSIMG_OK)
+		status = fsimg_disk_plan_inputs_unchanged(plan, error);
 	return (status);
 }
 

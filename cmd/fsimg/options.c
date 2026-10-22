@@ -739,23 +739,32 @@ typedef enum layer_syntax {
 	LAYER_TEXT,		/* text the library validates */
 	LAYER_GUID,		/* RFC 4122 text, not the nil GUID */
 	LAYER_YES_NO,		/* yes or no, in a bool */
-	LAYER_HEX32,		/* 0x and one to eight hex digits */
-	LAYER_COMPRESSION	/* zlib or none, as fsimg_dmg_compression_t */
+	LAYER_HEX32,		/* 0x and one to eight hex digits, in a uint32_t */
+	LAYER_INTEGER,		/* a decimal integer, zero included, in a uint32_t */
+	LAYER_COMPRESSION,	/* zlib or none, as fsimg_dmg_compression_t */
+	LAYER_BOOT_COMPRESSION	/* lzo or none, as fsimg_ifsboot_compression_t */
 } layer_syntax_t;
 
 /* The command-line syntax of each layer setting and the field it fills.
- * The library owns what each value means and validates it.
+ * A setting whose value may be zero also sets its presence flag, at
+ * offset set (SIZE_MAX for none). The library owns what each value means
+ * and validates it.
  */
 static const struct layer_key {
 	const char	*key;		/* qualified, as "layer:key" */
 	layer_syntax_t	 syntax;
 	size_t		 field;		/* offset in fsimg_layer_options_t */
 	size_t		 bytes;		/* field size: text capacity, GUID 16 */
+	size_t		 set;		/* offset of the presence flag */
 	bool		 reads;		/* also a read-side setting */
 } layer_keys[] = {
 #define LAYER_KEY(key, syntax, field, reads) { key, syntax, \
 	offsetof(fsimg_layer_options_t, field), \
-	sizeof(((fsimg_layer_options_t *)0)->field), reads }
+	sizeof(((fsimg_layer_options_t *)0)->field), SIZE_MAX, reads }
+#define LAYER_PRESENT(key, syntax, field, set) { key, syntax, \
+	offsetof(fsimg_layer_options_t, field), \
+	sizeof(((fsimg_layer_options_t *)0)->field), \
+	offsetof(fsimg_layer_options_t, set), false }
 	LAYER_KEY("gpt:sector", LAYER_SECTOR, gpt_sector_bytes, true),
 	LAYER_KEY("gpt:disk", LAYER_BYTES, gpt_disk_bytes, false),
 	LAYER_KEY("gpt:type", LAYER_TEXT, gpt_type, false),
@@ -765,7 +774,7 @@ static const struct layer_key {
 	LAYER_KEY("mbr:disk", LAYER_BYTES, mbr_disk_bytes, false),
 	LAYER_KEY("mbr:type", LAYER_TEXT, mbr_type, false),
 	LAYER_KEY("mbr:active", LAYER_YES_NO, mbr_active, false),
-	LAYER_KEY("mbr:id", LAYER_HEX32, mbr_id, false),
+	LAYER_PRESENT("mbr:id", LAYER_HEX32, mbr_id, mbr_id_set),
 	LAYER_KEY("dmg:compress", LAYER_COMPRESSION, dmg_compress, false),
 	LAYER_KEY("dmg:level", LAYER_COUNT, dmg_level, false),
 	LAYER_KEY("dmg:chunk", LAYER_BYTES, dmg_chunk_bytes, false),
@@ -774,8 +783,25 @@ static const struct layer_key {
 	LAYER_KEY("vhd:uuid", LAYER_GUID, vhd_uuid, false),
 	LAYER_KEY("simg:block", LAYER_BYTES, simg_block_bytes, false),
 	LAYER_KEY("simg:crc", LAYER_YES_NO, simg_crc, false),
+	LAYER_PRESENT("ifsboot:machine", LAYER_INTEGER, ifsboot_machine,
+	    ifsboot_machine_set),
+	LAYER_PRESENT("ifsboot:virtual", LAYER_YES_NO, ifsboot_virtual,
+	    ifsboot_virtual_set),
+	LAYER_PRESENT("ifsboot:startup_vaddr", LAYER_HEX32,
+	    ifsboot_startup_vaddr, ifsboot_startup_vaddr_set),
+	LAYER_PRESENT("ifsboot:paddr_bias", LAYER_HEX32, ifsboot_paddr_bias,
+	    ifsboot_paddr_bias_set),
+	LAYER_PRESENT("ifsboot:image_paddr", LAYER_HEX32, ifsboot_image_paddr,
+	    ifsboot_image_paddr_set),
+	LAYER_PRESENT("ifsboot:ram_paddr", LAYER_HEX32, ifsboot_ram_paddr,
+	    ifsboot_ram_paddr_set),
+	LAYER_PRESENT("ifsboot:imagefs_paddr", LAYER_HEX32,
+	    ifsboot_imagefs_paddr, ifsboot_imagefs_paddr_set),
+	LAYER_KEY("ifsboot:compress", LAYER_BOOT_COMPRESSION, ifsboot_compress,
+	    false),
 	LAYER_KEY("gzip:level", LAYER_COUNT, gzip_level, false)
 #undef LAYER_KEY
+#undef LAYER_PRESENT
 };
 
 /* "0x" and one to eight hexadecimal digits. */
@@ -801,11 +827,40 @@ parse_hex32(const char *text, uint32_t *out)
 }
 
 /*
+ * A file setting's key ("ifsboot:startup"), which the library's registry
+ * spells, takes a host path, which the coordinator opens before the worker
+ * starts. Creation only: on read the key is refused here, before any open.
+ * Returns false for a key that names no file setting.
+ */
+static bool
+parse_file_setting(cli_parse_t *parse, const char *text, size_t length,
+    const char *value, fsimg_status_t *status)
+{
+	char key[32];
+
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
+		fsimg_file_setting_name(i, key, sizeof(key));
+		if (strlen(key) != length || strncmp(text, key, length) != 0)
+			continue;
+		if ((parse->mode & MODES_CREATE) == 0)
+			*status = syntax_naming(parse,
+			    "setting applies only to creation", text);
+		else {
+			parse->options->setting_paths[i] = value;
+			*status = FSIMG_OK;
+		}
+		return (true);
+	}
+	return (false);
+}
+
+/*
  * A qualified key "layer:key" targets one layer, which the stack must name
  * (or -z/-a select, for gzip). Reading takes the one read-side setting,
  * gpt:sector, which forces the GPT LBA size; creating takes every key of
- * layer_keys. The value's syntax is checked here and stored in its typed
- * field; the library validates the settings as a whole.
+ * layer_keys and the file settings. The value's syntax is checked here and
+ * stored in its typed field, with its presence flag when it has one; the
+ * library validates the settings as a whole.
  */
 static fsimg_status_t
 parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
@@ -816,10 +871,12 @@ parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
 	const struct layer_key *entry;
 	fsimg_layer_info_t layer;
 	fsimg_dmg_compression_t compression;
+	fsimg_ifsboot_compression_t boot_compression;
 	unsigned char *field;
 	uint64_t number;
 	uint32_t id, narrow;
 	size_t length, i;
+	fsimg_status_t status;
 	bool yes;
 
 	if (!find_layer(text, (size_t)(qualifier - text), &layer))
@@ -834,6 +891,8 @@ parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
 	    (layer.capabilities & FSIMG_CAP_WRITE) == 0)
 		return (FSIMG_OK);
 	length = (size_t)(value - 1 - text);
+	if (parse_file_setting(parse, text, length, value, &status))
+		return (status);
 	for (i = 0; i < sizeof(layer_keys) / sizeof(layer_keys[0]); i++) {
 		if (strlen(layer_keys[i].key) == length &&
 		    strncmp(text, layer_keys[i].key, length) == 0)
@@ -845,6 +904,10 @@ parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
 	if ((parse->mode & MODES_CREATE) == 0 && !entry->reads)
 		return (syntax_naming(parse, "setting applies only to creation", text));
 	field = (unsigned char *)layers + entry->field;
+	if (entry->set != SIZE_MAX) {
+		yes = true;
+		bcopy(&yes, (unsigned char *)layers + entry->set, sizeof(yes));
+	}
 	switch (entry->syntax) {
 	case LAYER_SECTOR:
 		if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK ||
@@ -898,12 +961,27 @@ parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
 		    FSIMG_DMG_ZLIB;
 		bcopy(&compression, field, sizeof(compression));
 		return (FSIMG_OK);
+	case LAYER_BOOT_COMPRESSION:
+		if (strcmp(value, "lzo") != 0 && strcmp(value, "none") != 0)
+			return (syntax_naming(parse, "setting must be lzo or none",
+			    text));
+		boot_compression = strcmp(value, "none") == 0 ?
+		    FSIMG_IFSBOOT_NONE : FSIMG_IFSBOOT_LZO;
+		bcopy(&boot_compression, field, sizeof(boot_compression));
+		return (FSIMG_OK);
 	case LAYER_HEX32:
 		if (!parse_hex32(value, &id))
 			return (syntax_naming(parse,
 			    "setting requires 0x and at most eight hex digits", text));
-		layers->mbr_id = id;
-		layers->mbr_id_set = true;
+		bcopy(&id, field, sizeof(id));
+		return (FSIMG_OK);
+	case LAYER_INTEGER:
+		if (fsimg_cli_number(value, false, &number, parse->error) != FSIMG_OK ||
+		    number > UINT32_MAX)
+			return (syntax_naming(parse,
+			    "setting requires a decimal integer", text));
+		narrow = (uint32_t)number;
+		bcopy(&narrow, field, sizeof(narrow));
 		return (FSIMG_OK);
 	}
 	return (syntax_naming(parse, "unknown layer setting", text));

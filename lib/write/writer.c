@@ -164,15 +164,27 @@ plan_layers(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
     fsimg_disk_plan_t *disk, fsimg_error_t *error)
 {
 	fsimg_partition_request_t request;
+	fsimg_disk_request_t disk_request;
+	fsimg_layer_inputs_t inputs;
 	bool gpt;
 	fsimg_status_t status;
 
+	/* The disk plan keeps the file settings' objects, which the caller
+	 * lends until the output is written, and no pointer to either record.
+	 */
 	fsimg_layer_options_init(layers);
 	if (selected->layers != NULL)
 		*layers = *selected->layers;
 	selected->layers = NULL;
-	status = fsimg_disk_plan_init(ctx, stack, layers, selected->compression,
-	    1, selected->epoch, selected->flags, disk, error);
+	bzero(&inputs, sizeof(inputs));
+	if (selected->inputs != NULL)
+		inputs = *selected->inputs;
+	selected->inputs = NULL;
+	disk_request = (fsimg_disk_request_t){ .stack = stack, .layers = layers,
+	    .inputs = &inputs, .compression = selected->compression,
+	    .epoch = selected->epoch, .flags = selected->flags, .partitions = 1,
+	    .volume_order = selected->byte_order };
+	status = fsimg_disk_plan_init(ctx, &disk_request, disk, error);
 	if (status != FSIMG_OK || disk->scheme == NULL)
 		return (status);
 	gpt = disk->table.kind == FSIMG_SCHEME_GPT;
@@ -742,7 +754,9 @@ fsimg_plan_get_info(const fsimg_plan_t *plan, fsimg_plan_info_t *out,
 	return (FSIMG_OK);
 }
 
-/* No collected host source may be the file the output writes. */
+/* No collected host source and no file setting may be the file the output
+ * writes.
+ */
 static fsimg_status_t
 reject_aliases(fsimg_writer_t *writer, const fsimg_host_file_t *output,
     fsimg_error_t *error)
@@ -751,6 +765,9 @@ reject_aliases(fsimg_writer_t *writer, const fsimg_host_file_t *output,
 	fsimg_status_t status;
 	bool aliased;
 
+	status = fsimg_disk_plan_input_aliases(&writer->disk, output, error);
+	if (status != FSIMG_OK)
+		return (status);
 	for (uint64_t id = 1; id <= writer->count; id++) {
 		status = fsimg_catalog_get(writer, id, &catalog, error);
 		if (status != FSIMG_OK)

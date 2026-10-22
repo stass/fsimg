@@ -438,12 +438,16 @@ typedef struct fsimg_stack {
  * empty for none. codecs lists the chunk encodings a container reads
  * ("raw,zero,zlib"), and codec_version names the library a layer's codecs
  * depend on with its version ("zlib 1.3.1"), both empty for none:
- * compressed bytes are reproducible only for one zlib.
+ * compressed bytes are reproducible only for one zlib. carries names the
+ * filesystem a container packages for a loader ("ifs"), empty for a
+ * disk-image format. The settings include the file settings, which unwrap
+ * also takes as section names.
  */
 typedef struct fsimg_layer_info {
 	char		 name[16];
 	char		 suffix[8];
-	char		 settings[64];
+	char		 carries[16];
+	char		 settings[160];
 	char		 codecs[32];
 	char		 codec_version[32];
 	fsimg_layer_kind_t kind;
@@ -476,6 +480,15 @@ typedef struct fsimg_layer_info {
  * simg_crc appends a CRC32 chunk. dmg_uuid (the segment ID) and vhd_uuid
  * are identifiers like the GUIDs above.
  *
+ * The QNX boot image (ifsboot) settings are the startup header's fields
+ * that no derivation gives, each required on write and stored verbatim:
+ * ifsboot_machine, a value of the profile's machine table; ifsboot_virtual,
+ * the virtual-addressing bit; and the five target addresses. Each takes
+ * effect only with its _set flag, and a value without its flag is
+ * FSIMG_EINVAL, as for mbr_id. ifsboot_compress stores the body as LZO1X
+ * chunks or raw. Its startup code and boot prefix are file settings,
+ * supplied in fsimg_layer_inputs_t.
+ *
  * The compression setting: gzip_level is the DEFLATE level of an output
  * the write options compress with gzip, 1 to 9, zero selecting 6.
  */
@@ -483,6 +496,11 @@ typedef enum fsimg_dmg_compression {
 	FSIMG_DMG_ZLIB = 0,
 	FSIMG_DMG_NONE = 1
 } fsimg_dmg_compression_t;
+
+typedef enum fsimg_ifsboot_compression {
+	FSIMG_IFSBOOT_LZO = 0,
+	FSIMG_IFSBOOT_NONE = 1
+} fsimg_ifsboot_compression_t;
 
 struct fsimg_layer_options {
 	uint32_t	 gpt_sector_bytes;
@@ -505,8 +523,38 @@ struct fsimg_layer_options {
 	uint32_t	 simg_block_bytes;
 	bool		 simg_crc;
 	uint32_t	 gzip_level;
+	fsimg_ifsboot_compression_t ifsboot_compress;
+	uint32_t	 ifsboot_machine;
+	uint32_t	 ifsboot_startup_vaddr;
+	uint32_t	 ifsboot_paddr_bias;
+	uint32_t	 ifsboot_image_paddr;
+	uint32_t	 ifsboot_ram_paddr;
+	uint32_t	 ifsboot_imagefs_paddr;
+	bool		 ifsboot_virtual;
+	bool		 ifsboot_machine_set;
+	bool		 ifsboot_virtual_set;
+	bool		 ifsboot_startup_vaddr_set;
+	bool		 ifsboot_paddr_bias_set;
+	bool		 ifsboot_image_paddr_set;
+	bool		 ifsboot_ram_paddr_set;
+	bool		 ifsboot_imagefs_paddr_set;
 	uint64_t	 reserved[4];
 };
+
+/* File settings (specs/design-layers.md#file-settings-and-sections): the
+ * byte strings a container stores beside the disk, each a read-only I/O
+ * object the caller lends, NULL for the setting's absence. A file setting
+ * is creation-only, and one of a layer the stack does not name must be
+ * NULL. ifsboot_startup is the linked startup code that follows the
+ * startup header, and ifsboot_prefix the raw boot prefix before it. Each
+ * object stays valid, read-only and unchanged from writer construction
+ * until fsimg_writer_output() returns, or for the call of a wrap; a host
+ * file is checked for change as a writer's source is.
+ */
+typedef struct fsimg_layer_inputs {
+	fsimg_io_t	*ifsboot_startup;
+	fsimg_io_t	*ifsboot_prefix;
+} fsimg_layer_inputs_t;
 
 /* No image option flags are defined; flags must be zero.
  *
@@ -624,12 +672,16 @@ typedef enum fsimg_selector_kind {
 	FSIMG_SELECT_NAME,
 	FSIMG_SELECT_TYPE,
 	FSIMG_SELECT_RANGE,
-	FSIMG_SELECT_DISK
+	FSIMG_SELECT_DISK,
+	FSIMG_SELECT_SECTION
 } fsimg_selector_kind_t;
 
 /* index for INDEX; text for NAME (UTF-8) and TYPE (a type-table name, GUID
  * text or "0x" and two hex digits), borrowed for the call; offset and
  * length for RANGE, where a zero length extends to the end of the disk.
+ * SECTION names in text one of the container's sections, the byte strings
+ * it stores beside the disk under the unqualified name of the file setting
+ * that supplies them ("prefix", "startup"); only unwrap accepts it.
  */
 typedef struct fsimg_selector {
 	fsimg_selector_kind_t kind;
@@ -708,6 +760,10 @@ typedef struct fsimg_write_options {
 	const char	*script;
 	/* Borrowed for construction and copied; NULL selects every default. */
 	const fsimg_layer_options_t *layers;
+	/* The file settings: the record is copied at construction and its I/O
+	 * objects are borrowed as fsimg_layer_inputs_t states; NULL for none.
+	 */
+	const fsimg_layer_inputs_t *inputs;
 	/* The compression wrapping the whole output, as -z says: a registered
 	 * compression's name, NUL-terminated, such as "gzip", whose layer
 	 * settings then apply; empty for none, the default. A name the

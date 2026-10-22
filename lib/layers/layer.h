@@ -4,6 +4,7 @@
 #ifndef FSIMG_LAYER_H
 #define FSIMG_LAYER_H
 
+#include "host.h"
 #include "internal.h"
 
 /*
@@ -376,6 +377,62 @@ typedef struct fsimg_container {
 } fsimg_container_t;
 
 /*
+ * The file settings of fsimg_layer_inputs_t (specs/design-layers.md#
+ * file-settings-and-sections), in the order lib/layers/stack.c lists them.
+ * name gives a setting's qualified key ("ifsboot:startup"), input its I/O
+ * object in a caller's record (NULL for an absent record or setting).
+ * inputs_check refuses, naming the key, a setting of a layer the stack
+ * does not name.
+ */
+typedef enum fsimg_file_setting {
+	FSIMG_FILE_IFSBOOT_STARTUP = 0,
+	FSIMG_FILE_IFSBOOT_PREFIX = 1
+} fsimg_file_setting_t;
+
+#define FSIMG_FILE_SETTINGS	2u
+
+void fsimg_file_setting_name(fsimg_file_setting_t, char *, size_t);
+fsimg_io_t *fsimg_file_setting_input(const fsimg_layer_inputs_t *,
+    fsimg_file_setting_t);
+/* Store io as the setting's object in inputs, the inverse of _input. */
+void fsimg_file_setting_set(fsimg_layer_inputs_t *, fsimg_file_setting_t,
+    fsimg_io_t *);
+fsimg_status_t fsimg_layer_inputs_check(const fsimg_stack_t *,
+    const fsimg_layer_inputs_t *, fsimg_error_t *);
+
+/*
+ * One file setting as the disk plan holds it: the caller's object,
+ * borrowed, NULL when the setting is absent, and the host identity
+ * recorded before anything read it, when the object has one (known), so
+ * the plan can tell after the copy whether the file changed. length is
+ * the object's length when the plan read it.
+ */
+typedef struct fsimg_planned_file {
+	fsimg_io_t	*io;
+	fsimg_host_file_t identity;
+	uint64_t	 length;
+	bool		 known;
+} fsimg_planned_file_t;
+
+/*
+ * The header fields an ifsboot plan resolves from its settings and file
+ * settings (lib/layers/ifsboot.c): the machine, flags1 (the virtual bit and
+ * the compression value), the five target addresses verbatim, and the
+ * length of the startup code before its padding to a word. The prefix is
+ * the plan's buffered file setting and the code its startup input.
+ */
+typedef struct fsimg_boot_settings {
+	uint64_t	 code_bytes;
+	uint32_t	 startup_vaddr;
+	uint32_t	 paddr_bias;
+	uint32_t	 image_paddr;
+	uint32_t	 ram_paddr;
+	uint32_t	 imagefs_paddr;
+	uint16_t	 machine;
+	uint8_t		 flags1;
+} fsimg_boot_settings_t;
+
+/*
  * A container's write settings, resolved once by the disk plan from the
  * layer options. guid is the DMG segment ID or VHD unique identifier in
  * textual byte order; timestamp the VHD creation time in Unix seconds, the
@@ -383,20 +440,46 @@ typedef struct fsimg_container {
  * granularity is the unit the disk length is rounded up to, and
  * chunk_bytes the transcode's inspection unit: a DMG chunk, or
  * FSIMG_TRANSCODE_CHUNK_BYTES, which a plan without a container also uses.
- * level is the DMG zlib level, zero for raw chunks; block_bytes the simg
- * block size; crc whether simg ends with a CRC32 chunk.
+ * passes is how many passes the transcode makes over the disk, which may
+ * follow the settings: one, or two for an encoder whose leading bytes
+ * depend on what the first pass learns. level is the DMG zlib level, zero
+ * for raw chunks; block_bytes the simg block size; crc whether simg ends
+ * with a CRC32 chunk; boot the ifsboot header settings. buffered holds a
+ * bounded file setting the plan read whole, such as ifsboot's prefix, its
+ * padding included and zeroed, in charged memory the plan owns and
+ * releases with fsimg_disk_plan_free on every outcome.
  */
 #define FSIMG_TRANSCODE_CHUNK_BYTES	(UINT32_C(1) << 20)
 
 typedef struct fsimg_container_settings {
 	unsigned char	 guid[16];
+	unsigned char	*buffered;
+	fsimg_boot_settings_t boot;
 	int64_t		 timestamp;
 	uint64_t	 granularity;
+	size_t		 buffered_bytes;
 	uint32_t	 chunk_bytes;
+	uint32_t	 passes;
 	uint32_t	 block_bytes;
 	uint32_t	 level;
 	bool		 crc;
 } fsimg_container_settings_t;
+
+/*
+ * What a container's plan resolves its settings from: the context that
+ * charges a buffered file setting, the layer options, the file settings
+ * as the disk plan recorded them, the FSIMG_WRITE_* mode and the epoch,
+ * and the byte order of the volume the disk carries: the writer's
+ * resolved setting, or what a wrap found in its verified input.
+ */
+typedef struct fsimg_container_plan_args {
+	fsimg_ctx_t	*ctx;
+	const fsimg_layer_options_t *layers;
+	const fsimg_planned_file_t *files;	/* FSIMG_FILE_SETTINGS of them */
+	int64_t		 epoch;
+	uint32_t	 flags;
+	fsimg_byte_order_t volume_order;
+} fsimg_container_plan_args_t;
 
 /*
  * The sequential sink at the end of a transcode (lib/layers/transcode.c):
@@ -415,31 +498,37 @@ fsimg_status_t fsimg_seq_zero(fsimg_seq_sink_t *, uint64_t, fsimg_error_t *);
 uint64_t fsimg_seq_written(const fsimg_seq_sink_t *);
 
 /* What a container encoder writes: a disk of disk_bytes, encoded with the
- * resolved settings into sink, charging scratch and work to session.
+ * resolved settings into sink, charging scratch and work to session. files
+ * are the file settings as the disk plan recorded them, which the encoder
+ * copies in where its profile places them. verified_disk says the disk is
+ * a wrap's input, verified before the copy, rather than a writer's staged
+ * volume, so a check the disk then fails means it changed.
  */
 typedef struct fsimg_encode {
 	fsimg_ctx_t	*ctx;
 	fsimg_session_t	*session;
 	fsimg_seq_sink_t *sink;
 	const fsimg_container_settings_t *settings;
+	const fsimg_planned_file_t *files;	/* FSIMG_FILE_SETTINGS of them */
 	uint64_t	 disk_bytes;
+	bool		 verified_disk;
 } fsimg_encode_t;
 
 /*
  * A container encoder, driven by the transcode. open makes the encoder's
- * state, which may not keep encode itself. The transcode then makes passes
- * over the disk in order; in each it hands every chunk_bytes unit (the
- * last one shorter) to chunk, bytes NULL for a unit of zeros, and calls
- * finish at the pass's end. Only the last pass writes its chunks; an
- * earlier pass, such as simg's count of its chunks, inspects them, and its
- * finish may write what that inspection completes, such as simg's header,
- * before the next pass begins. close releases the state
- * on every outcome, including whatever a failed open left in it; a state
- * still NULL is never closed. The zero decision depends only on the disk's
- * bytes, so the output does too.
+ * state, which may not keep encode itself, and may write leading bytes
+ * that depend on nothing a pass learns. The transcode then makes the
+ * settings' passes over the disk in order; in each it hands every
+ * chunk_bytes unit (the last one shorter) to chunk, bytes NULL for a unit
+ * of zeros, and calls finish at the pass's end. Only the last pass writes
+ * its chunks; an earlier pass, such as simg's count of its chunks,
+ * inspects them, and its finish may write what that inspection completes,
+ * such as simg's header, before the next pass begins. close releases the
+ * state on every outcome, including whatever a failed open left in it; a
+ * state still NULL is never closed. The zero decision depends only on the
+ * disk's bytes, so the output does too.
  */
 typedef struct fsimg_encoder_ops {
-	unsigned	 passes;
 	fsimg_status_t	(*open)(const fsimg_encode_t *, void **, fsimg_error_t *);
 	fsimg_status_t	(*chunk)(void *, unsigned, const unsigned char *, size_t,
 			    fsimg_error_t *);
@@ -476,12 +565,21 @@ typedef struct fsimg_encoder_ops {
  *
  * The write side. plan validates the container's layer settings and
  * resolves them, its identifier under the identifier rule, given the
- * FSIMG_WRITE_* mode and the epoch; a failure is FSIMG_EINVAL naming the
- * key. bound states the most bytes the encoding of a disk of the given
- * length can take, and refuses with FSIMG_EUNSUPPORTED, naming the field,
- * a disk the format cannot describe. encoder writes the container. The
- * three come together: a read-only container has none, so the disk plan
- * refuses it and its capability lacks FSIMG_CAP_WRITE.
+ * FSIMG_WRITE_* mode and the epoch, and reads and checks the file
+ * settings its profile declares, a bounded one whole into the settings'
+ * buffer; a failure is FSIMG_EINVAL naming the key, or another class the
+ * profile names. Every refusal of an argument is the plan's or the
+ * bound's, before any sink opens. bound states the most bytes the
+ * encoding of a disk of the given length can take, and refuses with
+ * FSIMG_EUNSUPPORTED, naming the field, a disk the format cannot
+ * describe. encoder writes the container. The three come together: a
+ * read-only container has none, so the disk plan refuses it and its
+ * capability lacks FSIMG_CAP_WRITE.
+ *
+ * section locates, in the file, the section a file setting of the
+ * container's names (fsimg_layer_section), for unwrap: an offset and a
+ * length checked against the file. NULL for a container without file
+ * settings.
  */
 #define FSIMG_CONTAINER_TAIL_BYTES	512u
 typedef struct fsimg_container_ops {
@@ -493,11 +591,14 @@ typedef struct fsimg_container_ops {
 			    fsimg_container_t *, fsimg_error_t *);
 	fsimg_status_t	(*verify)(const fsimg_container_input_t *,
 			    const fsimg_container_t *, bool, fsimg_error_t *);
-	fsimg_status_t	(*plan)(const fsimg_layer_options_t *, uint32_t, int64_t,
+	fsimg_status_t	(*plan)(const fsimg_container_plan_args_t *,
 			    fsimg_container_settings_t *, fsimg_error_t *);
 	fsimg_status_t	(*bound)(const fsimg_container_settings_t *, uint64_t,
 			    uint64_t *, fsimg_error_t *);
 	const fsimg_encoder_ops_t *encoder;
+	fsimg_status_t	(*section)(const fsimg_container_input_t *,
+			    fsimg_file_setting_t, uint64_t *, uint64_t *,
+			    fsimg_error_t *);
 	const char	*codecs;
 	const char	*carries;
 	const char	*unverified;
@@ -644,6 +745,11 @@ extern const fsimg_compression_ops_t fsimg_gzip_compression;
 /* The registry, in reporting order; NULL past the end. */
 const fsimg_layer_t *fsimg_layer_at(size_t);
 const fsimg_layer_t *fsimg_layer_find(const char *);
+/* Whether a layer, which may be NULL, declares the section name, the
+ * unqualified key of one of its file settings, and which setting it is.
+ */
+bool fsimg_layer_section(const fsimg_layer_t *, const char *,
+    fsimg_file_setting_t *);
 /* Check a caller's stack value: states in range, names terminated, each
  * named slot holding a layer of its kind or a filesystem name, and a
  * container that carries a filesystem holding nothing else.
@@ -743,9 +849,10 @@ bool fsimg_guid_parse(const char *, unsigned char *);
  * FSIMG_WRITE_REPRODUCIBLE and are otherwise FSIMG_EINVAL naming the key.
  * Without a scheme the plan has no records and the volume starts the
  * disk. init resolves the stack's container and the compression its
- * argument names, a write options' compression field (empty for none),
- * with their settings. It zeroes the plan before anything can fail, so a
- * plan init refuses is still safe to free. place rounds the disk up to
+ * request names, a write options' compression field (empty for none),
+ * with their settings. It records each file setting's identity before the
+ * container's plan reads it. It zeroes the plan before anything can fail,
+ * so a plan init refuses is still safe to free. place rounds the disk up to
  * the container's granularity, puts the scheme's trailing
  * tables at the end of the rounded disk, and states the output's bound:
  * the container's bound of the disk (container_bytes), then the
@@ -759,6 +866,7 @@ typedef struct fsimg_disk_plan {
 	fsimg_scheme_table_t table;
 	fsimg_container_settings_t container_settings;
 	fsimg_compression_settings_t compression_settings;
+	fsimg_planned_file_t files[FSIMG_FILE_SETTINGS];
 	uint64_t	 disk_bytes;	/* A fixed length until placed, else 0 */
 	uint64_t	 padding_bytes;	/* What the container's granularity added */
 	uint64_t	 container_bytes; /* The disk, or its container's bound */
@@ -766,7 +874,28 @@ typedef struct fsimg_disk_plan {
 	int64_t		 epoch;
 	uint32_t	 flags;		/* FSIMG_WRITE_* mode */
 	bool		 fixed;		/* gpt:disk or mbr:disk set the length */
+	bool		 verified_disk;	/* The disk is a verified input */
 } fsimg_disk_plan_t;
+
+/*
+ * What a disk plan is made from: the stack and its layer options, the
+ * file settings (NULL for none), the compression a write options' field
+ * names, the mode and epoch, the number of partitions a scheme holds, the
+ * byte order of the volume a carried-volume container packages, and
+ * whether the disk is an input verified before the copy (a wrap's) rather
+ * than a writer's staged volume.
+ */
+typedef struct fsimg_disk_request {
+	const fsimg_stack_t *stack;
+	const fsimg_layer_options_t *layers;
+	const fsimg_layer_inputs_t *inputs;
+	const char	*compression;
+	int64_t		 epoch;
+	uint32_t	 flags;
+	uint32_t	 partitions;
+	fsimg_byte_order_t volume_order;
+	bool		 verified_disk;
+} fsimg_disk_request_t;
 
 /* Whether the output is an encoding of the disk rather than the disk: a
  * container or a compression is present, so the output is written by the
@@ -790,9 +919,19 @@ typedef struct fsimg_partition_request {
 	bool		 composed;
 } fsimg_partition_request_t;
 
-fsimg_status_t fsimg_disk_plan_init(fsimg_ctx_t *, const fsimg_stack_t *,
-    const fsimg_layer_options_t *, const char *, uint32_t, int64_t,
-    uint32_t, fsimg_disk_plan_t *, fsimg_error_t *);
+fsimg_status_t fsimg_disk_plan_init(fsimg_ctx_t *, const fsimg_disk_request_t *,
+    fsimg_disk_plan_t *, fsimg_error_t *);
+/*
+ * The common checks of the plan's file settings against their host files:
+ * unchanged compares each recorded identity with the file's now, after the
+ * copy, FSIMG_ESOURCE_CHANGED naming the key on a replacement, a size
+ * change or a change-metadata difference; aliases refuses, FSIMG_EINVAL
+ * naming the key, a file setting that is the output's file.
+ */
+fsimg_status_t fsimg_disk_plan_inputs_unchanged(const fsimg_disk_plan_t *,
+    fsimg_error_t *);
+fsimg_status_t fsimg_disk_plan_input_aliases(const fsimg_disk_plan_t *,
+    const fsimg_host_file_t *, fsimg_error_t *);
 fsimg_status_t fsimg_disk_plan_partition(fsimg_disk_plan_t *, uint32_t,
     const fsimg_partition_request_t *, fsimg_error_t *);
 /* Fit a volume to a fixed disk's one partition: a zero *volume_bytes
@@ -860,6 +999,18 @@ void fsimg_disk_plan_codec(const fsimg_disk_plan_t *, char *, size_t);
 fsimg_status_t fsimg_volume_claim(fsimg_ctx_t *, fsimg_io_t *,
     fsimg_session_t *, uint64_t, uint64_t, const char *, fsimg_claim_t *,
     char [static 16], fsimg_error_t *);
+/* A read-only slice of an opened image's file over the container section
+ * of that name (lib/layers/image.c), for unwrap.
+ */
+fsimg_status_t fsimg_image_section(fsimg_image_t *, const char *,
+    fsimg_io_t **, fsimg_error_t *);
+/* The byte order of a volume of length bytes that the named format claims,
+ * from the format's byte-order operation on its probe prefix; little for
+ * a format that has only one.
+ */
+fsimg_status_t fsimg_volume_byte_order(fsimg_ctx_t *, fsimg_io_t *,
+    fsimg_session_t *, uint64_t, const char *, fsimg_byte_order_t *,
+    fsimg_error_t *);
 
 /* FSIMG_EINVAL naming the setting ("vhd:align") or partition it concerns
  * in error.path.

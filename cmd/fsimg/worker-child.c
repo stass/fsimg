@@ -22,6 +22,9 @@
 #include "unicode.h"
 #include "worker.h"
 
+_Static_assert(FSIMG_SANDBOX_SETTINGS == FSIMG_FILE_SETTINGS,
+    "the sandbox admits every file setting");
+
 typedef struct worker_child {
 	fsimg_worker_request_t request;
 	fsimg_worker_result_t result;
@@ -32,6 +35,11 @@ typedef struct worker_child {
 	fsimg_reader_t	*reader;
 	fsimg_selection_t *selector;
 	fsimg_writer_t	*writer;
+	/* A create job's file settings, read-only objects over their
+	 * descriptors that the writer borrows, NULL when absent.
+	 */
+	fsimg_io_t	*settings[FSIMG_FILE_SETTINGS];
+	fsimg_layer_inputs_t inputs;
 	/* The job's NUL-terminated paths, back to back: the member of a read
 	 * job, or one per root descriptor of a create job, the image path of a
 	 * host root, or for a manifest root's descriptors FSIMG_JOB_MANIFEST,
@@ -172,7 +180,8 @@ holds(unsigned capabilities, fsimg_capability_t c)
  * other. A creation to a stream writes the data channel instead of
  * staging. A creation that fsimg_job_needs_raw names, to a stream or with
  * a container or a compression, also holds the raw intermediate. Scratch
- * is optional for every kind.
+ * is optional for every kind, and so is each file setting of a create or
+ * plan job.
  */
 
 static fsimg_status_t
@@ -191,12 +200,15 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 		expected |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_OUTPUT);
 	if (fsimg_job_needs_raw(&child->request))
 		expected |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_RAW);
-	/* Scratch is optional for every job, a spool for a read job and a
-	 * manifest for an extraction.
+	/* Scratch is optional for every job, a spool for a read job, a
+	 * manifest for an extraction and each file setting for a create or
+	 * plan job.
 	 */
 	optional = FSIMG_JOB_CAP(FSIMG_CAPABILITY_SCRATCH);
 	if (reading)
 		optional |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_SPOOL);
+	else
+		optional |= FSIMG_JOB_CAP_SETTINGS;
 	if (kind == FSIMG_JOB_EXTRACT)
 		optional |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_MANIFEST);
 	if ((capabilities & ~optional) != expected)
@@ -224,6 +236,12 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 		caps->spool = FSIMG_CHILD_SPOOL;
 	if (holds(capabilities, FSIMG_CAPABILITY_MANIFEST))
 		caps->manifest = FSIMG_CHILD_MANIFEST;
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
+		fsimg_capability_t c = (fsimg_capability_t)(FSIMG_CAPABILITY_SETTING + i);
+
+		if (holds(capabilities, c))
+			caps->settings[i] = FSIMG_CHILD_SLOT(c);
+	}
 	caps->input_pipe = (child->request.flags & FSIMG_JOB_STDIN) != 0;
 	caps->job = FSIMG_CHILD_JOB;
 	caps->control = FSIMG_CHILD_CONTROL;
@@ -298,6 +316,20 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 	if (child->raw_caps[FSIMG_CAPABILITY_OUTPUT] != -1) {
 		child->output_root = child->raw_caps[FSIMG_CAPABILITY_OUTPUT];
 		child->raw_caps[FSIMG_CAPABILITY_OUTPUT] = -1;
+	}
+	/* Each file setting becomes the read-only object the library reads
+	 * and checks for change, as a source file is.
+	 */
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
+		if (child->raw_caps[FSIMG_CAPABILITY_SETTING + i] == -1)
+			continue;
+		fd = child->raw_caps[FSIMG_CAPABILITY_SETTING + i];
+		child->raw_caps[FSIMG_CAPABILITY_SETTING + i] = -1;
+		status = fsimg_io_adopt_fd(child->ctx, fd, FSIMG_IO_READ,
+		    &child->settings[i], error);
+		if (status != FSIMG_OK)
+			return (status);
+		fsimg_file_setting_set(&child->inputs, i, child->settings[i]);
 	}
 	return (FSIMG_OK);
 }
@@ -1089,6 +1121,7 @@ create_job(worker_child_t *child, fsimg_error_t *error)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
 		    "invalid worker stack"));
 	child->request.write.layers = &child->request.layers;
+	child->request.write.inputs = &child->inputs;
 	bcopy(child->request.compression, child->request.write.compression,
 	    sizeof(child->request.write.compression));
 	status = fsimg_writer_new(child->ctx, stack, &child->request.write,
@@ -1176,6 +1209,9 @@ child_cleanup(worker_child_t *child)
 	fsimg_image_free(child->image);
 	fsimg_io_free(child->input);
 	fsimg_writer_free(child->writer);
+	/* The writer borrowed the file settings until it was freed. */
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++)
+		fsimg_io_free(child->settings[i]);
 	fsimg_dealloc(child->paths);
 	if (child->output_root != -1)
 		fsimg_fd_release(child->ctx, child->output_root);

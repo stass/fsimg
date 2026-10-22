@@ -658,6 +658,30 @@ fsimg_volume_claim(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
 	return (FSIMG_OK);
 }
 
+fsimg_status_t
+fsimg_volume_byte_order(fsimg_ctx_t *ctx, fsimg_io_t *io,
+    fsimg_session_t *session, uint64_t length, const char *name,
+    fsimg_byte_order_t *order, fsimg_error_t *error)
+{
+	const fsimg_format_variant_t *variant;
+	const fsimg_format_t *format;
+	unsigned char *prefix;
+	size_t prefix_length;
+	fsimg_status_t status;
+
+	*order = FSIMG_BYTE_ORDER_LITTLE;
+	format = fsimg_format_find(name, &variant);
+	if (format == NULL || format->byte_order == NULL)
+		return (FSIMG_OK);
+	status = read_prefix(ctx, io, session, 0, length, format->probe_bytes,
+	    &prefix, &prefix_length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = format->byte_order(prefix, prefix_length, order, error);
+	fsimg_dealloc(prefix);
+	return (status);
+}
+
 /* What a container reads; spool is NULL except for a spooled open. */
 static void
 container_input(fsimg_image_t *image, fsimg_spool_t *spool,
@@ -1429,7 +1453,11 @@ fsimg_image_select(fsimg_image_t *image, const fsimg_selector_t *selector,
 		return (select_range(image, selector, volume, error));
 	if (selector->kind == FSIMG_SELECT_DISK)
 		return (select_slice(image, 0, image->disk_bytes, 0, volume, error));
-	if (selector->kind > FSIMG_SELECT_DISK ||
+	/* A section is no volume; only unwrap writes one. */
+	if (selector->kind == FSIMG_SELECT_SECTION)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "a section selector is accepted only by unwrap"));
+	if (selector->kind > FSIMG_SELECT_SECTION ||
 	    ((selector->kind == FSIMG_SELECT_NAME ||
 	    selector->kind == FSIMG_SELECT_TYPE) && selector->text == NULL))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
@@ -1460,6 +1488,42 @@ fsimg_image_select(fsimg_image_t *image, const fsimg_selector_t *selector,
 	if (status != FSIMG_OK)
 		return (status);
 	return (select_record(image, record, volume, error));
+}
+
+/*
+ * A read-only slice of the file over one of the opened container's
+ * sections, which the container locates and checks against the file. A
+ * name its file settings do not declare, including any name for an image
+ * without a container, is FSIMG_EINVAL naming it.
+ */
+fsimg_status_t
+fsimg_image_section(fsimg_image_t *image, const char *name,
+    fsimg_io_t **section, fsimg_error_t *error)
+{
+	fsimg_container_input_t input;
+	fsimg_file_setting_t setting;
+	uint64_t offset, length;
+	fsimg_status_t status;
+
+	*section = NULL;
+	status = image_ready(image, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (name == NULL || !fsimg_layer_section(image->container, name,
+	    &setting) || image->container->container->section == NULL) {
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the container has no section of that name");
+		if (name != NULL)
+			fsimg_error_path(error, name);
+		return (FSIMG_EINVAL);
+	}
+	container_input(image, NULL, &input);
+	status = image->container->container->section(&input, setting, &offset,
+	    &length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	return (fsimg_io_read_slice(image->input, offset, length, section,
+	    error));
 }
 
 /* Opening the container and the table already performed every check

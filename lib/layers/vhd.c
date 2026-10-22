@@ -60,8 +60,8 @@ static fsimg_status_t vhd_open(const fsimg_container_input_t *,
     fsimg_container_t *, fsimg_error_t *);
 static fsimg_status_t vhd_verify(const fsimg_container_input_t *,
     const fsimg_container_t *, bool, fsimg_error_t *);
-static fsimg_status_t vhd_plan(const fsimg_layer_options_t *, uint32_t,
-    int64_t, fsimg_container_settings_t *, fsimg_error_t *);
+static fsimg_status_t vhd_plan(const fsimg_container_plan_args_t *,
+    fsimg_container_settings_t *, fsimg_error_t *);
 static fsimg_status_t vhd_bound(const fsimg_container_settings_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
 static void vhd_geometry(uint64_t, unsigned char *);
@@ -75,7 +75,6 @@ static fsimg_status_t vhd_encode_finish(void *, unsigned, fsimg_error_t *);
 static void vhd_encode_close(void *);
 
 static const fsimg_encoder_ops_t vhd_encoder = {
-	.passes = 1,
 	.open = vhd_encode_open,
 	.chunk = vhd_encode_chunk,
 	.finish = vhd_encode_finish,
@@ -230,9 +229,12 @@ vhd_verify(const fsimg_container_input_t *input,
  * 32 bits, so the default 1980 epoch encodes as zero.
  */
 static fsimg_status_t
-vhd_plan(const fsimg_layer_options_t *layers, uint32_t flags, int64_t epoch,
+vhd_plan(const fsimg_container_plan_args_t *args,
     fsimg_container_settings_t *settings, fsimg_error_t *error)
 {
+	const fsimg_layer_options_t *layers = args->layers;
+	uint32_t flags = args->flags;
+	int64_t epoch = args->epoch;
 	uint32_t align;
 
 	align = layers->vhd_align_bytes == 0 ? 512 : layers->vhd_align_bytes;

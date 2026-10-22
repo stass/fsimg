@@ -8,7 +8,9 @@
 #include <strings.h>
 
 #include "format.h"
+#include "io.h"
 #include "layer.h"
+#include "source.h"
 #include "unicode.h"
 
 /*
@@ -37,8 +39,11 @@ static fsimg_status_t resolve_name(fsimg_partition_record_t *, const char *,
     const char *, fsimg_error_t *);
 static fsimg_status_t check_identities(const fsimg_disk_plan_t *,
     fsimg_error_t *);
-static fsimg_status_t resolve_container(fsimg_disk_plan_t *,
-    const fsimg_stack_t *, const fsimg_layer_options_t *, fsimg_error_t *);
+static fsimg_status_t resolve_container(fsimg_ctx_t *, fsimg_disk_plan_t *,
+    const fsimg_disk_request_t *, fsimg_error_t *);
+static fsimg_status_t record_inputs(fsimg_ctx_t *, fsimg_disk_plan_t *,
+    const fsimg_disk_request_t *, fsimg_error_t *);
+static void name_input(fsimg_error_t *, fsimg_file_setting_t);
 static fsimg_status_t resolve_compression(fsimg_disk_plan_t *,
     const fsimg_layer_options_t *, fsimg_error_t *);
 static fsimg_status_t check_exact_volume(const fsimg_stack_t *,
@@ -134,22 +139,25 @@ request_key(const fsimg_disk_plan_t *plan,
 }
 
 /* The stack's container and its resolved settings; none leaves the disk
- * unencoded, with a granularity of one byte, copied in 1 MiB chunks. A
- * container that carries a filesystem holds nothing else, and one without
- * a writer, such as ifsboot or hbcifs, is refused naming it.
+ * unencoded, with a granularity of one byte, copied in 1 MiB chunks in one
+ * pass. A container that carries a filesystem holds nothing else, and one
+ * without a writer, such as hbcifs, is refused naming it.
  */
 static fsimg_status_t
-resolve_container(fsimg_disk_plan_t *plan, const fsimg_stack_t *stack,
-    const fsimg_layer_options_t *layers, fsimg_error_t *error)
+resolve_container(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
+    const fsimg_disk_request_t *request, fsimg_error_t *error)
 {
+	fsimg_container_plan_args_t args;
 	fsimg_status_t status;
 
 	plan->container_settings.granularity = 1;
 	plan->container_settings.chunk_bytes = FSIMG_TRANSCODE_CHUNK_BYTES;
-	plan->container = fsimg_stack_layer(stack, FSIMG_LAYER_CONTAINER);
+	plan->container_settings.passes = 1;
+	plan->container = fsimg_stack_layer(request->stack,
+	    FSIMG_LAYER_CONTAINER);
 	if (plan->container == NULL)
 		return (FSIMG_OK);
-	status = fsimg_stack_carried(stack, plan->container, error);
+	status = fsimg_stack_carried(request->stack, plan->container, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (plan->container->container->plan == NULL) {
@@ -158,8 +166,112 @@ resolve_container(fsimg_disk_plan_t *plan, const fsimg_stack_t *stack,
 		fsimg_error_path(error, plan->container->name);
 		return (FSIMG_EUNSUPPORTED);
 	}
-	return (plan->container->container->plan(layers, plan->flags,
-	    plan->epoch, &plan->container_settings, error));
+	args = (fsimg_container_plan_args_t){ .ctx = ctx,
+	    .layers = request->layers, .files = plan->files,
+	    .epoch = plan->epoch, .flags = plan->flags,
+	    .volume_order = request->volume_order };
+	return (plan->container->container->plan(&args,
+	    &plan->container_settings, error));
+}
+
+/*
+ * Borrow the request's file settings, each refused naming its key unless
+ * its layer is in the stack and its object is of the plan's context, and
+ * record each host file's identity and the object's length before anything
+ * reads it, so that after the copy fsimg_disk_plan_inputs_unchanged can
+ * tell whether it changed. A file whose length moved since its object was
+ * made is refused as changed here, since the object would read only the
+ * bytes its old length covers.
+ */
+static fsimg_status_t
+record_inputs(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
+    const fsimg_disk_request_t *request, fsimg_error_t *error)
+{
+	fsimg_planned_file_t *input;
+	fsimg_status_t status;
+
+	status = fsimg_layer_inputs_check(request->stack, request->inputs,
+	    error);
+	for (unsigned i = 0; status == FSIMG_OK && i < FSIMG_FILE_SETTINGS;
+	    i++) {
+		input = &plan->files[i];
+		input->io = fsimg_file_setting_input(request->inputs, i);
+		if (input->io == NULL)
+			continue;
+		if (fsimg_io_context(input->io) != ctx)
+			status = fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, "file setting is not in this context");
+		if (status == FSIMG_OK)
+			status = fsimg_io_identity(input->io,
+			    &input->identity, &input->known, error);
+		if (status == FSIMG_OK && input->known &&
+		    !fsimg_io_length_current(input->io, &input->identity))
+			status = fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+			    FSIMG_OP_SOURCE,
+			    "file setting length differs from its object's");
+		if (status == FSIMG_OK)
+			status = fsimg_io_get_size(input->io, &input->length, error);
+		if (status != FSIMG_OK)
+			name_input(error, i);
+	}
+	return (status);
+}
+
+/* Name the file setting a failure concerns in error.path. */
+static void
+name_input(fsimg_error_t *error, fsimg_file_setting_t setting)
+{
+	char key[32];
+
+	fsimg_file_setting_name(setting, key, sizeof(key));
+	fsimg_error_path(error, key);
+}
+
+fsimg_status_t
+fsimg_disk_plan_inputs_unchanged(const fsimg_disk_plan_t *plan,
+    fsimg_error_t *error)
+{
+	const fsimg_planned_file_t *input;
+	fsimg_host_file_t now;
+	bool known;
+	fsimg_status_t status;
+
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
+		input = &plan->files[i];
+		if (input->io == NULL || !input->known)
+			continue;
+		status = fsimg_io_identity(input->io, &now, &known, error);
+		if (status == FSIMG_OK && (!known ||
+		    !fsimg_source_identity_equal(&input->identity, &now)))
+			status = fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+			    FSIMG_OP_SOURCE,
+			    "file setting identity, size, or change metadata differs");
+		if (status != FSIMG_OK) {
+			name_input(error, i);
+			return (status);
+		}
+	}
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_disk_plan_input_aliases(const fsimg_disk_plan_t *plan,
+    const fsimg_host_file_t *output, fsimg_error_t *error)
+{
+	const fsimg_planned_file_t *input;
+
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
+		input = &plan->files[i];
+		if (input->io == NULL || !input->known ||
+		    input->identity.device != output->device ||
+		    input->identity.inode != output->inode)
+			continue;
+		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "output aliases a file setting");
+		name_input(error, i);
+		return (FSIMG_EINVAL);
+	}
+	return (FSIMG_OK);
 }
 
 /* The plan's compression's resolved settings. */
@@ -221,12 +333,15 @@ fsimg_disk_plan_encoded(const fsimg_disk_plan_t *plan)
  * holds count partitions, each made an empty record in slot order.
  */
 fsimg_status_t
-fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
-    const fsimg_layer_options_t *layers, const char *compression,
-    uint32_t count, int64_t epoch, uint32_t flags, fsimg_disk_plan_t *plan,
-    fsimg_error_t *error)
+fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_disk_request_t *request,
+    fsimg_disk_plan_t *plan, fsimg_error_t *error)
 {
+	const fsimg_stack_t *stack = request->stack;
+	const fsimg_layer_options_t *layers = request->layers;
 	fsimg_scheme_table_t *table = &plan->table;
+	uint32_t count = request->partitions;
+	int64_t epoch = request->epoch;
+	uint32_t flags = request->flags;
 	const char *key;
 	char message[64];
 	fsimg_status_t status;
@@ -235,18 +350,21 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	bzero(plan, sizeof(*plan));
 	plan->epoch = epoch;
 	plan->flags = flags;
+	plan->verified_disk = request->verified_disk;
 	/* compression is a write options' field, whose size bounds the name. */
-	status = fsimg_compression_named(compression,
+	status = fsimg_compression_named(request->compression,
 	    sizeof(((fsimg_write_options_t *)NULL)->compression), true,
 	    &plan->compression, error);
 	if (status == FSIMG_OK)
 		status = fsimg_layer_options_check(stack, plan->compression,
 		    layers, true, error);
 	if (status == FSIMG_OK)
+		status = record_inputs(ctx, plan, request, error);
+	if (status == FSIMG_OK)
 		status = check_exact_volume(stack,
 		    fsimg_stack_layer(stack, FSIMG_LAYER_SCHEME), error);
 	if (status == FSIMG_OK)
-		status = resolve_container(plan, stack, layers, error);
+		status = resolve_container(ctx, plan, request, error);
 	if (status == FSIMG_OK && plan->container_settings.granularity > 1)
 		status = check_exact_volume(stack, plan->container, error);
 	if (status == FSIMG_OK)
@@ -658,6 +776,9 @@ fsimg_disk_plan_free(fsimg_disk_plan_t *plan)
 	fsimg_dealloc(plan->table.records);
 	plan->table.records = NULL;
 	plan->table.count = 0;
+	fsimg_dealloc(plan->container_settings.buffered);
+	plan->container_settings.buffered = NULL;
+	plan->container_settings.buffered_bytes = 0;
 }
 
 void

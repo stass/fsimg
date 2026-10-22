@@ -185,6 +185,14 @@ fsimg_io_identity(fsimg_io_t *io, fsimg_host_file_t *identity, bool *known,
 	return (FSIMG_OK);
 }
 
+bool
+fsimg_io_length_current(const fsimg_io_t *io, const fsimg_host_file_t *identity)
+{
+	while (io->root->backing != NULL)
+		io = io->root->backing;
+	return (io->root->length == identity->length);
+}
+
 /*
  * Adopt a fresh file: the descriptor must be an empty file, and its
  * creator's contract makes fsimg its only writer, so every range not

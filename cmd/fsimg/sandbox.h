@@ -19,11 +19,15 @@
  * raw		read, write and resize the unlinked raw intermediate
  * spool	read, write and resize the unlinked spool
  * manifest	write and resize the staged x --mtree manifest
+ * settings	read each read-only regular file a create's file settings
+ *		name, admitted as the image input is
  *
  * The coordinator, not the worker, removes staging and destination
  * objects. -1 marks an absent role. roots is the first of root_count
  * consecutive descriptors.
  */
+#define FSIMG_SANDBOX_SETTINGS 2u
+
 typedef struct fsimg_sandbox_caps {
 	int		 input;
 	int		 staging;
@@ -34,6 +38,7 @@ typedef struct fsimg_sandbox_caps {
 	int		 raw;
 	int		 spool;
 	int		 manifest;
+	int		 settings[FSIMG_SANDBOX_SETTINGS];
 	bool		 input_pipe;
 	int		 job;
 	int		 control;

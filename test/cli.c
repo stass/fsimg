@@ -570,7 +570,30 @@ test_stacks(void)
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-o", "gzip:level=9", "-f",
 		    "out.img", ".", NULL },
 		{ "fsimg", "-cWz", "-T", "-", "-F", "fat32", "-f", "out.img.gz", ".",
-		    NULL }
+		    NULL },
+		{ "fsimg", "-cn", "-F", "ifs/ifsboot", "-o", "ifsboot:compress=ucl",
+		    ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs/ifsboot", "-o", "ifsboot:virtual=1",
+		    ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs/ifsboot", "-o",
+		    "ifsboot:startup_vaddr=4096", ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs/ifsboot", "-o", "ifsboot:machine=x86",
+		    ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs/ifsboot", "-o", "ifsboot:machine=",
+		    ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs/ifsboot", "-o", "ifsboot:prefix=a",
+		    "-o", "ifsboot:prefix=b", ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs", "-o", "ifsboot:startup=s.bin", ".",
+		    NULL },
+		/* A file setting is creation-only, refused before any open. */
+		{ "fsimg", "-t", "-f", "image", "-F", "ifs/ifsboot", "-o",
+		    "ifsboot:startup=s.bin", NULL },
+		{ "fsimg", "-x", "-f", "image", "-F", "ifs/ifsboot", "-o",
+		    "ifsboot:prefix=p.bin", NULL },
+		{ "fsimg", "-i", "-f", "image", "-F", "ifs/ifsboot", "-o",
+		    "ifsboot:startup=s.bin", NULL },
+		{ "fsimg", "-W", "-f", "image", "-F", "ifs/ifsboot", "-o",
+		    "ifsboot:prefix=p.bin", NULL }
 	};
 	char *unsupported[][12] = {
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
@@ -607,6 +630,13 @@ test_stacks(void)
 	    ".", NULL };
 	char *simg_settings[] = { "fsimg", "-cn", "-F", "fat32/simg", "-o",
 	    "simg:block=64K", "-o", "simg:crc=yes", ".", NULL };
+	char *ifsboot_settings[] = { "fsimg", "-cn", "-F", "ifs/ifsboot", "-o",
+	    "ifsboot:startup=startup.bin", "-o", "ifsboot:prefix=bios.boot",
+	    "-o", "ifsboot:machine=0", "-o", "ifsboot:virtual=yes", "-o",
+	    "ifsboot:startup_vaddr=0x1000", "-o", "ifsboot:paddr_bias=0x0", "-o",
+	    "ifsboot:image_paddr=0xFFFFFFFF", "-o", "ifsboot:ram_paddr=0x400000",
+	    "-o", "ifsboot:imagefs_paddr=0x0", "-o", "ifsboot:compress=none", ".",
+	    NULL };
 	char *empty_slots[] = { "fsimg", "-cn", "-F", "fat32/-/-", ".", NULL };
 	char *gpt_settings[] = { "fsimg", "-cn", "-F", "fat32/gpt", "-o",
 	    "gpt:type=esp", "-o", "gpt:name=EFI", "-o", "gpt:disk=64M", "-o",
@@ -649,7 +679,7 @@ test_stacks(void)
 	 */
 	CHECK(every_layer_key_in((char *const *const []){ gpt_settings,
 	    mbr_settings, dmg_settings, vhd_settings, simg_settings,
-	    gzip_settings, NULL }));
+	    gzip_settings, ifsboot_settings, NULL }));
 	CHECK(parse(mbr_settings, &options) == FSIMG_OK);
 	layers = &options.request.layers;
 	CHECK(layers->mbr_id == 0xdeadbeef && layers->mbr_id_set &&
@@ -670,6 +700,28 @@ test_stacks(void)
 	CHECK(parse(simg_settings, &options) == FSIMG_OK);
 	layers = &options.request.layers;
 	CHECK(layers->simg_block_bytes == 64 * 1024 && layers->simg_crc);
+	fsimg_cli_release(&options);
+	/* A zero machine or address is set, not absent; the file settings
+	 * keep their paths for the coordinator to open.
+	 */
+	CHECK(parse(ifsboot_settings, &options) == FSIMG_OK);
+	layers = &options.request.layers;
+	CHECK(layers->ifsboot_machine_set && layers->ifsboot_machine == 0);
+	CHECK(layers->ifsboot_virtual_set && layers->ifsboot_virtual);
+	CHECK(layers->ifsboot_startup_vaddr_set &&
+	    layers->ifsboot_startup_vaddr == 0x1000);
+	CHECK(layers->ifsboot_paddr_bias_set && layers->ifsboot_paddr_bias == 0);
+	CHECK(layers->ifsboot_image_paddr_set &&
+	    layers->ifsboot_image_paddr == UINT32_MAX);
+	CHECK(layers->ifsboot_ram_paddr_set &&
+	    layers->ifsboot_ram_paddr == 0x400000);
+	CHECK(layers->ifsboot_imagefs_paddr_set &&
+	    layers->ifsboot_imagefs_paddr == 0);
+	CHECK(layers->ifsboot_compress == FSIMG_IFSBOOT_NONE);
+	CHECK(strcmp(options.setting_paths[FSIMG_FILE_IFSBOOT_STARTUP],
+	    "startup.bin") == 0 &&
+	    strcmp(options.setting_paths[FSIMG_FILE_IFSBOOT_PREFIX],
+	    "bios.boot") == 0);
 	fsimg_cli_release(&options);
 	/* -z, or -a with a .gz name, selects gzip and its level. */
 	CHECK(parse(gzip_settings, &options) == FSIMG_OK);

@@ -13,6 +13,8 @@ _Static_assert(IFS_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
 
 static fsimg_status_t ifs_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
+static fsimg_status_t ifs_byte_order(const unsigned char *, size_t,
+    fsimg_byte_order_t *, fsimg_error_t *);
 
 /* The one profile, which reads either byte order and writes the one the
  * byte-order setting selects. Addressing is by byte, the largest image is
@@ -49,6 +51,7 @@ const fsimg_format_t fsimg_ifs_format = {
 	.variant_count = sizeof(ifs_variants) / sizeof(ifs_variants[0]),
 	.probe_bytes = IFS_HEADER_BYTES,
 	.probe = ifs_probe,
+	.byte_order = ifs_byte_order,
 	.reader = &fsimg_ifs_reader_ops,
 	.writer = &fsimg_ifs_writer_ops,
 	/* A verified ImageFS ends exactly at image_size. */
@@ -78,4 +81,24 @@ ifs_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
 	if (status != FSIMG_OK)
 		return (status);
 	return (ifs_header_bounds(&header, volume_bytes, error));
+}
+
+/* The byte order the header's flags select, as the probe decodes them. */
+static fsimg_status_t
+ifs_byte_order(const unsigned char *prefix, size_t length,
+    fsimg_byte_order_t *order, fsimg_error_t *error)
+{
+	ifs_header_t header;
+	fsimg_status_t status;
+
+	*order = FSIMG_BYTE_ORDER_LITTLE;
+	if (length < IFS_HEADER_BYTES)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "no ImageFS signature"));
+	status = ifs_header_decode(prefix, &header, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (header.order == IFS_BIG_ENDIAN)
+		*order = FSIMG_BYTE_ORDER_BIG;
+	return (FSIMG_OK);
 }

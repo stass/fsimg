@@ -71,6 +71,8 @@ static unsigned operand_roots(const fsimg_cli_operand_t *);
 static uint64_t worker_descriptors(const fsimg_worker_request_t *, unsigned);
 static fsimg_status_t hold_descriptor(int, int, const char *, const char *, int *,
     fsimg_error_t *);
+static fsimg_status_t open_settings(fsimg_cli_options_t *, fsimg_error_t *);
+static int open_nofollow(int, const char *, bool);
 static fsimg_status_t open_operand(int, const fsimg_cli_operand_t *, int,
     int *, fsimg_error_t *);
 static fsimg_status_t open_roots(fsimg_cli_options_t *, fsimg_cli_paths_t *,
@@ -369,6 +371,45 @@ open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 }
 
 /*
+ * Open a create's file settings (specs/design-layers.md#file-settings-and-
+ * sections) before the worker starts, each -o path resolved against the
+ * working directory like -f and opened as an operand is: no-follow,
+ * nonblocking and without a controlling terminal, read-only, and refused
+ * unless a regular file. The worker receives the descriptor alone, never
+ * the name. Only creation reaches here; reading refuses the keys while
+ * parsing.
+ */
+static fsimg_status_t
+open_settings(fsimg_cli_options_t *options, fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
+	fsimg_host_file_t identity;
+	const char *path;
+	int *fd;
+
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
+		path = options->setting_paths[i];
+		if (path == NULL)
+			continue;
+		fd = &request->setting_fds[i];
+		*fd = open_nofollow(AT_FDCWD, path, false);
+		if (*fd == -1)
+			return (path_error(error, errno == ELOOP ?
+			    "file setting is a symbolic link" :
+			    "cannot open file setting", path));
+		if (fsimg_host_file(*fd, &identity) == -1)
+			return (path_error(error, "file setting identity query failed",
+			    path));
+		if (identity.kind != FSIMG_HOST_FILE) {
+			errno = 0;
+			return (path_error(error, "file setting is not a regular file",
+			    path));
+		}
+	}
+	return (FSIMG_OK);
+}
+
+/*
  * Copy path into trimmed, a PATH_MAX buffer, without its trailing slashes
  * and "." components, setting *removed when there were any, since a
  * trailing slash names a directory. O_NOFOLLOW covers only the final
@@ -573,13 +614,17 @@ operand_roots(const fsimg_cli_operand_t *operand)
 static uint64_t
 worker_descriptors(const fsimg_worker_request_t *request, unsigned roots)
 {
+	unsigned settings;
 	bool scratch, staging, raw;
 
 	scratch = request->scratch_fd != -1;
 	staging = fsimg_job_needs_staging(request);
 	raw = fsimg_job_needs_raw(request);
+	settings = 0;
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++)
+		settings += request->setting_fds[i] != -1 ? 1 : 0;
 	return ((uint64_t)roots + (scratch ? 1 : 0) + (staging ? 1 : 0) +
-	    (raw ? 1 : 0) + 2);
+	    (raw ? 1 : 0) + settings + 2);
 }
 
 /* Move fd to the lowest descriptor at or above first_free, close-on-exec,
@@ -1097,7 +1142,9 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		    isatty(STDOUT_FILENO))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
 			    "refusing to write an image to a terminal"));
-		status = open_roots(options, paths, error);
+		status = open_settings(options, error);
+		if (status == FSIMG_OK)
+			status = open_roots(options, paths, error);
 		if (status == FSIMG_OK)
 			status = generate_identifiers(options, error);
 		if (status == FSIMG_OK && fsimg_job_needs_staging(request))
@@ -1162,6 +1209,9 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	verify->root_paths = NULL;
 	verify->root_count = 0;
 	verify->output_fd = verify->raw_fd = verify->spool_fd = -1;
+	/* The coordinator, not the verification, holds the file settings. */
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++)
+		verify->setting_fds[i] = -1;
 	verify->offset = verify->length = 0;
 	verify->selector = FSIMG_SELECT_AUTOMATIC;
 	/* Reading takes only the GPT sector size of the layer settings. */

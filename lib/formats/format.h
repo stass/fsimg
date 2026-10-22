@@ -35,6 +35,11 @@ struct fsimg_format_variant {
  * ends, because full verification fails a longer one (ImageFS's
  * volume-length rule). The disk plan then refuses any layer that can make
  * the slot longer than the volume (specs/design-layers.md#exact-volumes).
+ *
+ * byte_order is optional: for a format stored in either byte order, a pure
+ * function of the probe prefix of a volume the probe claims, giving the
+ * order it is stored in, so a container that packages the volume can
+ * refuse an order its header cannot describe.
  */
 struct fsimg_format {
 	const fsimg_format_variant_t *variants;
@@ -42,6 +47,8 @@ struct fsimg_format {
 	size_t		 probe_bytes;
 	fsimg_status_t	(*probe)(const unsigned char *, size_t, uint64_t,
 			    const fsimg_format_variant_t **, fsimg_error_t *);
+	fsimg_status_t	(*byte_order)(const unsigned char *, size_t,
+			    fsimg_byte_order_t *, fsimg_error_t *);
 	const fsimg_reader_ops_t *reader;
 	const fsimg_writer_ops_t *writer;
 	bool		 exact_volume;

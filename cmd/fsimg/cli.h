@@ -50,6 +50,10 @@ typedef struct fsimg_cli_options {
 	fsimg_cli_operand_t *operands;	/* Owned create operands in command-line order. */
 	unsigned	 operand_count;
 	char		*member;	/* Owned absolute member path of a read mode, or NULL. */
+	/* c: the -o file settings' host paths, borrowed from argv, in
+	 * fsimg_file_setting_t order; NULL for an absent setting.
+	 */
+	const char	*setting_paths[FSIMG_FILE_SETTINGS];
 	char		 stem[NAME_MAX + 1]; /* x: the fresh destination's name. */
 	unsigned	 verbosity;	/* Number of -v flags, at most two. */
 	bool		 json;

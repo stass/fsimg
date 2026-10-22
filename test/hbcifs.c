@@ -933,8 +933,9 @@ test_carried(void)
 	 */
 	CHECK(fsimg_stack_parse("ifs/hbcifs", &stack, NULL) == FSIMG_OK);
 	fsimg_layer_options_init(&layers);
-	CHECK(fsimg_disk_plan_init(f.ctx, &stack, &layers, "", 1, 0, 0, &plan,
-	    &error) == FSIMG_EUNSUPPORTED);
+	CHECK(fsimg_disk_plan_init(f.ctx, &(fsimg_disk_request_t){
+	    .stack = &stack, .layers = &layers, .compression = "",
+	    .partitions = 1 }, &plan, &error) == FSIMG_EUNSUPPORTED);
 	CHECK(strcmp(error.path, "hbcifs") == 0 &&
 	    strstr(error.message, "read only") != NULL);
 	fsimg_disk_plan_free(&plan);

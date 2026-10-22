@@ -116,8 +116,11 @@ def test_formats(executable, root):
     assert layers["simg"]["settings"] == ["block", "crc"]
     assert layers["gzip"]["settings"] == ["level"]
     assert layers["gpt"]["capabilities"] == 7 and layers["vhd"]["capabilities"] == 7
-    # ifsboot is read and verified but not written, and needs no zlib.
-    assert layers["ifsboot"]["capabilities"] == 5 and layers["ifsboot"]["settings"] == []
+    # ifsboot is read, written and verified, lists its file settings first,
+    # and needs no zlib.
+    assert layers["ifsboot"]["capabilities"] == 7 and layers["ifsboot"]["settings"] == [
+        "startup", "prefix", "machine", "virtual", "startup_vaddr", "paddr_bias",
+        "image_paddr", "ram_paddr", "imagefs_paddr", "compress"]
     assert layers["ifsboot"]["suffix"] is None and layers["ifsboot"]["codec_version"] is None
     assert layers["hbcifs"]["capabilities"] == 5 and layers["hbcifs"]["suffix"] is None
     assert layers["gzip"]["capabilities"] == 7 and layers["zstd"]["suffix"] == ".zst"
@@ -299,7 +302,9 @@ def test_human_help(executable, root):
                               b"compress,level,chunk,uuid\n"
                               b"vhd      container    yes   yes    yes     raw              align,uuid\n"
                               b"simg     container    yes   yes    yes     raw,zero,fill    block,crc\n"
-                              b"ifsboot  container    yes   no     yes     raw,lzo1x,nrv2b  -\n"
+                              b"ifsboot  container    yes   yes    yes     raw,lzo1x,nrv2b  "
+                              b"startup,prefix,machine,virtual,startup_vaddr,paddr_bias,"
+                              b"image_paddr,ram_paddr,imagefs_paddr,compress\n"
                               b"hbcifs   container    yes   no     yes     lzo1x            -\n"
                               b"gzip     compression  yes   yes    yes     -                level\n"
                               b"zstd     compression  no    no     no      -                -\n"
@@ -2232,6 +2237,84 @@ def test_ifs_create(executable, root, payload):
         assert not (root / "refused.img").exists()
 
 
+BOOT_FIELDS = ("signature", "version", "flags1", "flags2", "header_size", "machine",
+               "startup_vaddr", "paddr_bias", "image_paddr", "ram_paddr", "ram_size",
+               "startup_size", "stored_size", "imagefs_paddr", "imagefs_size",
+               "preboot_size")
+
+
+def boot_header(image):
+    """The QNX startup header at offset 0, decoded from the profile's table."""
+    return dict(zip(BOOT_FIELDS, struct.unpack_from("<IHBBHHIIIIIIIIIH", image, 0)))
+
+
+def word_sum(data):
+    return sum(struct.unpack(f"<{len(data) // 4}I", data)) & 0xffffffff
+
+
+def test_ifsboot_create(executable, root):
+    """A boot image through the command: the startup file reaches the worker
+    as a descriptor of its own and follows the header with its padding, the
+    sums are zero, and the image lists, verifies and is reproducible. A file
+    setting that is a symbolic link, a directory or missing, a machine the
+    table does not list as writable, and a prefix without its machine are
+    refused with no output left; a read mode refuses the key."""
+    startup = bytes(random.Random(5).randrange(256) for _ in range(4001))
+    (root / "startup.bin").write_bytes(startup)
+    (root / "prefix.bin").write_bytes(b"\xfa" + bytes(1084))
+    os.symlink("startup.bin", root / "startup-link.bin")
+    settings = ["-o", "ifsboot:machine=0", "-o", "ifsboot:virtual=no",
+                "-o", "ifsboot:startup_vaddr=0x1000", "-o", "ifsboot:paddr_bias=0x0",
+                "-o", "ifsboot:image_paddr=0x2000", "-o", "ifsboot:ram_paddr=0x3000",
+                "-o", "ifsboot:imagefs_paddr=0x0"]
+    plain = ["c", "-R", "-S", "off", "-F", "ifs/ifsboot", *settings]
+    base = [plain[0], "--json", *plain[1:]]
+    operands = ["-C", "source", "."]
+    for mode in ["lzo", "none"]:
+        arguments = [*base, "-o", f"ifsboot:compress={mode}", "-o", "ifsboot:startup=startup.bin"]
+        name = f"boot-{mode}.ifs"
+        completed(invoke(executable, root, [*arguments, "-f", name, *operands]))
+        image = (root / name).read_bytes()
+        header = boot_header(image)
+        assert header["signature"] == 0x00ff7eeb and header["machine"] == 0, header
+        assert header["flags1"] == (0x08 if mode == "lzo" else 0x00), header
+        assert header["startup_size"] == 256 + 4004 + 4 and header["stored_size"] == len(image)
+        assert header["ram_size"] == header["startup_size"] + header["imagefs_size"]
+        assert image[256:256 + 4001] == startup and image[256 + 4001:256 + 4004] == bytes(3)
+        assert word_sum(image[:header["startup_size"]]) == 0 and word_sum(image) == 0
+        assert sorted(listing(executable, root, name)) == [
+            '"/HELLO.TXT"', '"/nested"', '"/nested/caf\u00e9.txt"'], name
+        verified = invoke(executable, root, ["W", "-d", "-f", name]).stdout
+        assert b"ifsboot container," in verified, verified
+        completed(invoke(executable, root, [*arguments, "-f", "again.ifs", *operands]))
+        same_bytes(root / name, root / "again.ifs")
+        (root / "again.ifs").unlink()
+        (root / name).unlink()
+    plan = records(invoke(executable, root, [*base, "-n", "-o", "ifsboot:startup=startup.bin",
+                                             *operands]))
+    assert int(next(record for record in plan if record["type"] == "plan")["output_bytes"]) > 0
+    for extra, detail in [
+        (["-o", "ifsboot:startup=startup-link.bin"], b"file setting is a symbolic link"),
+        (["-o", "ifsboot:startup=source"], b"file setting is not a regular file"),
+        (["-o", "ifsboot:prefix=missing.bin"], b"cannot open file setting"),
+        (["-o", "ifsboot:prefix=prefix.bin"],
+         b"machine 0 is not supported behind this boot prefix"),
+    ]:
+        result = invoke(executable, root, [*plain, *extra, "-f", "refused.ifs", *operands],
+                        expected=1)
+        assert detail in result.stderr, (extra, result.stderr)
+        assert not (root / "refused.ifs").exists()
+    unwritable = [arg.replace("machine=0", "machine=42") for arg in plain]
+    result = invoke(executable, root, [*unwritable, "-f", "refused.ifs", *operands], expected=1)
+    assert b"machine 42 is not writable under compress=lzo" in result.stderr, result.stderr
+    assert not (root / "refused.ifs").exists()
+    result = invoke(executable, root, ["t", "-f", "startup.bin", "-F", "ifs/ifsboot", "-o",
+                                       "ifsboot:startup=startup.bin"], expected=2)
+    assert b"setting applies only to creation" in result.stderr, result.stderr
+    for name in ["startup.bin", "prefix.bin", "startup-link.bin"]:
+        (root / name).unlink()
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -2261,6 +2344,7 @@ def main():
         test_qnx4(executable, root, payload)
         test_ifs(executable, root, payload)
         test_ifs_create(executable, root, payload)
+        test_ifsboot_create(executable, root)
         test_failures(executable, root)
         test_output_failures(executable, root)
         test_examples(executable, root)

@@ -544,6 +544,8 @@ fsimg_alloc(fsimg_ctx_t *ctx, size_t bytes, fsimg_error_t *error)
 		    "allocation failed");
 		return (NULL);
 	}
+	if (ctx->poison_allocations)
+		memset(allocation + 1, 0xa5, bytes);
 	allocation->owner.ctx = ctx;
 	allocation->owner.charged = charged;
 	ctx->stats.memory_bytes = observed;
@@ -581,6 +583,30 @@ fsimg_hole_test_t *
 fsimg_test_holes(fsimg_ctx_t *ctx)
 {
 	return (&ctx->hole_test);
+}
+
+void
+fsimg_test_poison_allocations(fsimg_ctx_t *ctx, bool enabled)
+{
+	ctx->poison_allocations = enabled;
+}
+
+void
+fsimg_test_transcode_flip(fsimg_ctx_t *ctx, uint64_t offset)
+{
+	ctx->transcode_flip = offset == UINT64_MAX ? 0 : offset + 1;
+}
+
+void
+fsimg_test_unproven_writes(fsimg_ctx_t *ctx, bool enabled)
+{
+	ctx->unproven_writes = enabled;
+}
+
+void
+fsimg_test_misplace_boot_header(fsimg_ctx_t *ctx, bool enabled)
+{
+	ctx->misplace_boot_header = enabled;
 }
 
 fsimg_status_t

@@ -563,9 +563,10 @@ test_stack_rejections(void)
 
 /* The registry lists every layer once, with the suffixes the command
  * strips, the capabilities of the schemes and containers, which are read,
- * written and verified but for the read-only ifsboot and hbcifs, and the
- * keys of each layer's settings in table order. The compressions are
- * listed with their suffixes but no codec.
+ * written and verified but for the read-only hbcifs, the filesystem a
+ * loader's package carries, and the keys of each layer's settings, its
+ * file settings first, then its typed settings in table order. The
+ * compressions are listed with their suffixes but no codec.
  */
 static void
 test_registry(void)
@@ -581,24 +582,27 @@ test_registry(void)
 		const char	*codecs;
 		fsimg_layer_kind_t kind;
 		unsigned	 capabilities;
+		const char	*carries;
 	} expected[] = {
 		{ "gpt", "", "sector,disk,type,name,disk-guid,guid", "",
-		    FSIMG_LAYER_SCHEME, scheme },
+		    FSIMG_LAYER_SCHEME, scheme, "" },
 		{ "mbr", "", "disk,type,active,id", "", FSIMG_LAYER_SCHEME,
-		    scheme },
+		    scheme, "" },
 		{ "dmg", ".dmg", "compress,level,chunk,uuid", "raw,zero,zlib",
-		    FSIMG_LAYER_CONTAINER, container },
+		    FSIMG_LAYER_CONTAINER, container, "" },
 		{ "vhd", ".vhd", "align,uuid", "raw", FSIMG_LAYER_CONTAINER,
-		    container },
+		    container, "" },
 		{ "simg", ".simg", "block,crc", "raw,zero,fill",
-		    FSIMG_LAYER_CONTAINER, container },
-		{ "ifsboot", "", "", "raw,lzo1x,nrv2b", FSIMG_LAYER_CONTAINER,
-		    read_only },
+		    FSIMG_LAYER_CONTAINER, container, "" },
+		{ "ifsboot", "", "startup,prefix,machine,virtual,startup_vaddr,"
+		    "paddr_bias,image_paddr,ram_paddr,imagefs_paddr,compress",
+		    "raw,lzo1x,nrv2b", FSIMG_LAYER_CONTAINER, container, "ifs" },
 		{ "hbcifs", "", "", "lzo1x", FSIMG_LAYER_CONTAINER,
-		    read_only },
-		{ "gzip", ".gz", "level", "", FSIMG_LAYER_COMPRESSION, container },
-		{ "zstd", ".zst", "", "", FSIMG_LAYER_COMPRESSION, 0 },
-		{ "xz", ".xz", "", "", FSIMG_LAYER_COMPRESSION, 0 }
+		    read_only, "ifs" },
+		{ "gzip", ".gz", "level", "", FSIMG_LAYER_COMPRESSION, container,
+		    "" },
+		{ "zstd", ".zst", "", "", FSIMG_LAYER_COMPRESSION, 0, "" },
+		{ "xz", ".xz", "", "", FSIMG_LAYER_COMPRESSION, 0, "" }
 	};
 	fsimg_layer_info_t info;
 	size_t cursor = 0;
@@ -611,6 +615,7 @@ test_registry(void)
 		CHECK(info.kind == expected[i].kind);
 		CHECK(info.capabilities == expected[i].capabilities);
 		CHECK(strcmp(info.codecs, expected[i].codecs) == 0);
+		CHECK(strcmp(info.carries, expected[i].carries) == 0);
 		/* Only a layer that inflates names zlib's version: a
 		 * container whose chunks use zlib, and gzip.
 		 */

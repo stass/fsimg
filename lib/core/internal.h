@@ -72,9 +72,16 @@ struct fsimg_ctx {
 	uint32_t	 meta_cache_pages;
 	unsigned	 meta_fault_point;
 	int		 meta_fault_errno;
+	/* Test control: XOR 0x01 into the disk byte at this offset minus one
+	 * as a transcode reads it; zero disables.
+	 */
+	uint64_t	 transcode_flip;
 	bool		 in_callback;
 	bool		 no_hole_discovery;	/* Test control: read every hole */
 	fsimg_hole_test_t hole_test;
+	bool		 poison_allocations;	/* Test control: fill, not zero */
+	bool		 unproven_writes;	/* Test control: see below */
+	bool		 misplace_boot_header;	/* Test control: see below */
 };
 
 /* One session is embedded in each reader/writer; never reset per API call. */
@@ -177,5 +184,25 @@ void fsimg_test_fail_alloc_after(fsimg_ctx_t *, uint64_t);
 void fsimg_test_hole_discovery(fsimg_ctx_t *, bool);
 /* The context's hole-knowledge test controls, which a test sets directly. */
 fsimg_hole_test_t *fsimg_test_holes(fsimg_ctx_t *);
+/* Private test control: fill each new allocation with 0xa5 instead of
+ * zero, so that a byte its owner never writes shows.
+ */
+void fsimg_test_poison_allocations(fsimg_ctx_t *, bool);
+/* Private test control: a transcode flips bit 0 of the disk byte at the
+ * offset as it reads it, as if the disk changed or was staged corrupt;
+ * UINT64_MAX disables.
+ */
+void fsimg_test_transcode_flip(fsimg_ctx_t *, uint64_t);
+/* Private test control: a writer whose profile gates its modes on native
+ * evidence, ifsboot's machine table, accepts every mode its tables can
+ * describe, so a mode's plan and emission, which are the same code for
+ * every machine, are tested on machines no evidence yet qualifies.
+ */
+void fsimg_test_unproven_writes(fsimg_ctx_t *, bool);
+/* Private test control: the ifsboot encoder plants a header that ties at
+ * offset 0 in front of the one it decodes before emission, the defect its
+ * emission check exists to catch.
+ */
+void fsimg_test_misplace_boot_header(fsimg_ctx_t *, bool);
 
 #endif

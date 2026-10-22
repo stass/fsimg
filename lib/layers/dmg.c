@@ -326,8 +326,8 @@ static fsimg_status_t verify_data_fork(const fsimg_container_input_t *,
     const dmg_trailer_t *, unsigned char *, fsimg_error_t *);
 static fsimg_status_t dmg_verify(const fsimg_container_input_t *,
     const fsimg_container_t *, bool, fsimg_error_t *);
-static fsimg_status_t dmg_plan(const fsimg_layer_options_t *, uint32_t,
-    int64_t, fsimg_container_settings_t *, fsimg_error_t *);
+static fsimg_status_t dmg_plan(const fsimg_container_plan_args_t *,
+    fsimg_container_settings_t *, fsimg_error_t *);
 static uint64_t plist_bytes(uint64_t);
 static fsimg_status_t dmg_bound(const fsimg_container_settings_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
@@ -354,7 +354,6 @@ static fsimg_status_t dmg_encode_finish(void *, unsigned, fsimg_error_t *);
 static void dmg_encode_close(void *);
 
 static const fsimg_encoder_ops_t dmg_encoder = {
-	.passes = 1,
 	.open = dmg_encode_open,
 	.chunk = dmg_encode_chunk,
 	.finish = dmg_encode_finish,
@@ -1041,9 +1040,10 @@ dmg_verify(const fsimg_container_input_t *input,
  * table's go into the table header and the trailer.
  */
 static fsimg_status_t
-dmg_plan(const fsimg_layer_options_t *layers, uint32_t flags, int64_t epoch,
+dmg_plan(const fsimg_container_plan_args_t *args,
     fsimg_container_settings_t *settings, fsimg_error_t *error)
 {
+	const fsimg_layer_options_t *layers = args->layers;
 	uint32_t chunk, level;
 
 	level = layers->dmg_level;
@@ -1073,7 +1073,7 @@ dmg_plan(const fsimg_layer_options_t *layers, uint32_t flags, int64_t epoch,
 	settings->chunk_bytes = chunk;
 	settings->level = level;
 	return (fsimg_container_identifier(layers->dmg_uuid, "dmg:uuid",
-	    FSIMG_ROLE_DMG, flags, epoch, settings->guid, error));
+	    FSIMG_ROLE_DMG, args->flags, args->epoch, settings->guid, error));
 }
 
 /* The plist's length around a block table of table_bytes: the template,

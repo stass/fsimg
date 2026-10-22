@@ -115,8 +115,8 @@ static fsimg_status_t verify_chunk(void *, const simg_chunk_t *,
     fsimg_error_t *);
 static fsimg_status_t simg_verify(const fsimg_container_input_t *,
     const fsimg_container_t *, bool, fsimg_error_t *);
-static fsimg_status_t simg_plan(const fsimg_layer_options_t *, uint32_t,
-    int64_t, fsimg_container_settings_t *, fsimg_error_t *);
+static fsimg_status_t simg_plan(const fsimg_container_plan_args_t *,
+    fsimg_container_settings_t *, fsimg_error_t *);
 static fsimg_status_t simg_bound(const fsimg_container_settings_t *,
     uint64_t, uint64_t *, fsimg_error_t *);
 static fsimg_status_t simg_encode_open(const fsimg_encode_t *, void **,
@@ -132,7 +132,6 @@ static fsimg_status_t simg_encode_finish(void *, unsigned, fsimg_error_t *);
 static void simg_encode_close(void *);
 
 static const fsimg_encoder_ops_t simg_encoder = {
-	.passes = 2,
 	.open = simg_encode_open,
 	.chunk = simg_encode_chunk,
 	.finish = simg_encode_finish,
@@ -461,10 +460,10 @@ simg_verify(const fsimg_container_input_t *input,
  * another count means the disk changed between the passes.
  */
 static fsimg_status_t
-simg_plan(const fsimg_layer_options_t *layers, uint32_t flags FSIMG_UNUSED,
-    int64_t epoch FSIMG_UNUSED, fsimg_container_settings_t *settings,
-    fsimg_error_t *error)
+simg_plan(const fsimg_container_plan_args_t *args,
+    fsimg_container_settings_t *settings, fsimg_error_t *error)
 {
+	const fsimg_layer_options_t *layers = args->layers;
 	uint32_t block;
 
 	block = layers->simg_block_bytes == 0 ? 4096 : layers->simg_block_bytes;
@@ -475,6 +474,8 @@ simg_plan(const fsimg_layer_options_t *layers, uint32_t flags FSIMG_UNUSED,
 	settings->granularity = block;
 	settings->block_bytes = block;
 	settings->crc = layers->simg_crc;
+	/* The first pass counts the chunks the header states. */
+	settings->passes = 2;
 	return (FSIMG_OK);
 }
 

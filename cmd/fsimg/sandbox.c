@@ -17,6 +17,7 @@
 #include "internal.h"
 #include "sandbox.h"
 
+static fsimg_status_t check_input(int, bool, fsimg_error_t *);
 static fsimg_status_t check_roles(const fsimg_sandbox_caps_t *, fsimg_error_t *);
 
 #if defined(__linux__)
@@ -152,6 +153,8 @@ fsimg_sandbox_caps_init(fsimg_sandbox_caps_t *caps)
 	caps->input = caps->staging = caps->destination = caps->scratch = -1;
 	caps->roots = caps->raw = caps->spool = caps->manifest = -1;
 	caps->job = caps->control = caps->data = caps->cancel = -1;
+	for (unsigned i = 0; i < FSIMG_SANDBOX_SETTINGS; i++)
+		caps->settings[i] = -1;
 }
 
 bool
@@ -162,6 +165,10 @@ fsimg_sandbox_caps_names(const fsimg_sandbox_caps_t *caps, int fd)
 
 	for (unsigned i = 0; i < sizeof(roles) / sizeof(roles[0]); i++) {
 		if (roles[i] == fd)
+			return (true);
+	}
+	for (unsigned i = 0; i < FSIMG_SANDBOX_SETTINGS; i++) {
+		if (caps->settings[i] == fd)
 			return (true);
 	}
 	return (false);
@@ -214,13 +221,36 @@ readable_pipe(int flags, const struct stat *st)
 #endif
 }
 
+/* A read-only input: a regular file, or the read end of a pipe when pipe
+ * says so.
+ */
+static fsimg_status_t
+check_input(int fd, bool pipe, fsimg_error_t *error)
+{
+	struct stat st;
+	int flags;
+
+	flags = fcntl(fd, F_GETFL);
+	if (flags == -1 || fsimg_host_fstat(fd, &st) == -1)
+		return (fsimg_error_set(error, FSIMG_EIO, errno,
+		    FSIMG_OP_CONTEXT, "sandbox input validation failed"));
+	if (pipe && !readable_pipe(flags, &st))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CONTEXT, "sandbox input requires the read end of a pipe"));
+	if (!pipe && ((flags & O_ACCMODE) != O_RDONLY || !S_ISREG(st.st_mode)))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CONTEXT, "sandbox input requires read-only regular file"));
+	return (FSIMG_OK);
+}
+
 /* Every role must be the object its grant assumes before any backend runs:
  * the input a read-only regular file, or the read end of a pipe exactly when
- * input_pipe says so; the three writable roles directories; each
- * root a read-only directory or regular file; the raw intermediate
- * and the spool read/write regular files no name reaches; and the
- * manifest a write-only regular file with its one staged name. The
- * library checks those three files again when it adopts them.
+ * input_pipe says so, and each file setting a read-only regular file like
+ * it; the three writable roles directories; each root a read-only directory
+ * or regular file; the raw intermediate and the spool read/write regular
+ * files no name reaches; and the manifest a write-only regular file with
+ * its one staged name. The library checks those three files again when it
+ * adopts them.
  */
 static fsimg_status_t
 check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
@@ -229,19 +259,19 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 	const int handed_over[] = { caps->raw, caps->spool };
 	struct stat st;
 	int flags, fd;
+	fsimg_status_t status;
 
 	if (caps->input != -1) {
-		flags = fcntl(caps->input, F_GETFL);
-		if (flags == -1 || fsimg_host_fstat(caps->input, &st) == -1)
-			return (fsimg_error_set(error, FSIMG_EIO, errno,
-			    FSIMG_OP_CONTEXT, "sandbox input validation failed"));
-		if (caps->input_pipe && !readable_pipe(flags, &st))
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CONTEXT, "sandbox input requires the read end of a pipe"));
-		if (!caps->input_pipe &&
-		    ((flags & O_ACCMODE) != O_RDONLY || !S_ISREG(st.st_mode)))
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CONTEXT, "sandbox input requires read-only regular file"));
+		status = check_input(caps->input, caps->input_pipe, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	for (unsigned i = 0; i < FSIMG_SANDBOX_SETTINGS; i++) {
+		if (caps->settings[i] == -1)
+			continue;
+		status = check_input(caps->settings[i], false, error);
+		if (status != FSIMG_OK)
+			return (status);
 	}
 	for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
 		if (directories[i] != -1 &&
@@ -371,13 +401,19 @@ linux_fail:
 			    FSIMG_OP_CONTEXT, "Capsicum unavailable"));
 		goto freebsd_fail;
 	}
-	/* The image input is only read: no read job asks it for zero ranges,
-	 * so it gets no CAP_FSYNC for the sync that would precede the host's
-	 * hole report.
+	/* The image input and each file setting are only read: no job asks
+	 * them for zero ranges, so they get no CAP_FSYNC for the sync that
+	 * would precede the host's hole report. Slot 0 is the input, slot
+	 * i + 1 the setting i.
 	 */
-	if (caps->input != -1) {
-		cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT, CAP_FCNTL);
-		if (restrict_descriptor(caps->input, &rights, CAP_FCNTL_GETFL) == -1)
+	for (unsigned i = 0; i <= FSIMG_SANDBOX_SETTINGS; i++) {
+		int fd = i == 0 ? caps->input : caps->settings[i - 1];
+
+		if (fd == -1)
+			continue;
+		cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT,
+		    CAP_FCNTL);
+		if (restrict_descriptor(fd, &rights, CAP_FCNTL_GETFL) == -1)
 			goto freebsd_fail;
 	}
 	/* The three writable roles share file rights and differ only in what

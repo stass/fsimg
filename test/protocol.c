@@ -676,8 +676,8 @@ test_job_qnx6_settings(void)
 
 /* The text settings, the mountpoint, the four boot programs and the script,
  * travel in fields of 1026 bytes from byte 832, after the spool limit, the
- * gzip level and the compression, with a presence byte at 6988
- * and zero padding to the record's end. NULL and the empty string stay
+ * gzip level and the compression, with a presence byte at 6988 and zero
+ * padding to the ifsboot settings at 6996. NULL and the empty string stay
  * distinct, the longest value that fits round-trips, and every other
  * encoding is refused.
  */
@@ -692,7 +692,7 @@ test_job_text_settings(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == PRESENT + 8);
+	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6);
 	memset(longest, 'm', FIELD - 1);
 	memset(longer, 'm', FIELD);
 	fsimg_worker_request_init(&request);
@@ -724,7 +724,7 @@ test_job_text_settings(void)
 	CHECK(!job_decodes(raw, PRESENT, 0x40));
 	CHECK(!job_decodes(raw, PRESENT, 0x01 | 0x04));
 	CHECK(job_decodes(raw, PRESENT, 0x01 | 0x04 | 0x20));
-	for (unsigned i = PRESENT + 1; i < FSIMG_JOB_BYTES; i++)
+	for (unsigned i = PRESENT + 1; i < PRESENT + 8; i++)
 		CHECK(!job_decodes(raw, i, 1));
 	request.write.script = NULL;
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
@@ -735,6 +735,86 @@ test_job_text_settings(void)
 	/* A value longer than its field does not encode. */
 	request.write.mountpoint = longer;
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+}
+
+/*
+ * The ifsboot settings travel from byte 6996: the machine and the five
+ * addresses as six 64-bit values, a byte of presence bits (bit n for value
+ * n, bit 6 for the virtual setting), a byte of values (0x01 virtual, 0x02
+ * compress=none) and six zero bytes to the record's end. A setting set to
+ * zero stays distinct from one unset; a value without its presence bit, a
+ * value past 32 bits, the virtual value without its presence bit, unknown
+ * bits and nonzero padding are refused. The file settings' capability
+ * bits belong to jobs that create.
+ */
+static void
+test_job_ifsboot_settings(void)
+{
+	enum { CAPABILITIES = 23 * 8, VALUES = 6996, SET = VALUES + 6 * 8,
+	    BITS = SET + 1, PADDING = BITS + 1 };
+	fsimg_worker_request_t request, decoded;
+	fsimg_layer_options_t *layers = &request.layers;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities, granted;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	layers->ifsboot_machine_set = true;
+	layers->ifsboot_virtual_set = true;
+	layers->ifsboot_virtual = true;
+	layers->ifsboot_startup_vaddr = 0x1234;
+	layers->ifsboot_startup_vaddr_set = true;
+	layers->ifsboot_imagefs_paddr = UINT32_MAX;
+	layers->ifsboot_imagefs_paddr_set = true;
+	layers->ifsboot_compress = FSIMG_IFSBOOT_NONE;
+	request.setting_fds[FSIMG_FILE_IFSBOOT_PREFIX] = 3;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(raw[SET] == (0x01 | 0x02 | 0x20 | 0x40) && raw[BITS] == 0x03);
+	CHECK(raw[VALUES + 8] == 0x34 && raw[VALUES + 9] == 0x12);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.layers.ifsboot_machine_set &&
+	    decoded.layers.ifsboot_machine == 0);
+	CHECK(decoded.layers.ifsboot_virtual_set &&
+	    decoded.layers.ifsboot_virtual);
+	CHECK(decoded.layers.ifsboot_startup_vaddr_set &&
+	    decoded.layers.ifsboot_startup_vaddr == 0x1234);
+	CHECK(!decoded.layers.ifsboot_paddr_bias_set &&
+	    !decoded.layers.ifsboot_image_paddr_set &&
+	    !decoded.layers.ifsboot_ram_paddr_set);
+	CHECK(decoded.layers.ifsboot_imagefs_paddr_set &&
+	    decoded.layers.ifsboot_imagefs_paddr == UINT32_MAX);
+	CHECK(decoded.layers.ifsboot_compress == FSIMG_IFSBOOT_NONE);
+	CHECK(capabilities == (FSIMG_JOB_CAP_ROOTS |
+	    FSIMG_JOB_CAP_SETTING(FSIMG_FILE_IFSBOOT_PREFIX)));
+
+	CHECK(!job_decodes(raw, VALUES + 2 * 8, 1));	/* paddr_bias unset */
+	CHECK(!job_decodes(raw, VALUES + 8 + 4, 1));	/* past 32 bits */
+	CHECK(!job_decodes(raw, SET, 0x80));
+	CHECK(!job_decodes(raw, SET, 0x01 | 0x02 | 0x20));
+	CHECK(job_decodes(raw, SET, 0x01 | 0x02 | 0x20 | 0x40 | 0x04));
+	CHECK(!job_decodes(raw, BITS, 0x04));
+	for (unsigned i = PADDING; i < FSIMG_JOB_BYTES; i++)
+		CHECK(!job_decodes(raw, i, 1));
+
+	/* A job that only reads takes no file setting, encoded or decoded. */
+	request.kind = FSIMG_JOB_LIST;
+	request.root_paths = NULL;
+	request.root_count = 0;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+	request.setting_fds[FSIMG_FILE_IFSBOOT_PREFIX] = -1;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &granted, NULL) == FSIMG_OK);
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
+		fsimg_wire_put64(raw + CAPABILITIES,
+		    granted | FSIMG_JOB_CAP_SETTING(i));
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_EINVAL);
+	}
 }
 
 /* Roots travel with create jobs only: their count, the roots capability and
@@ -1093,6 +1173,7 @@ main(int argc, char **argv)
 	CHECK(argc == 1);
 	test_job_qnx6_settings();
 	test_job_text_settings();
+	test_job_ifsboot_settings();
 	test_job_selection();
 	test_job_layers();
 	test_image_records();

@@ -35,7 +35,13 @@
  * reading uses it too. The text settings follow, each in a NUL-terminated
  * field of FSIMG_JOB_TEXT_BYTES zero after its terminator: the mountpoint,
  * the four boot programs and the script, then one byte whose bit n says
- * that the nth is present and seven zero bytes.
+ * that the nth is present and seven zero bytes. The QNX boot image
+ * settings close the record: the machine and the five target addresses
+ * (startup_vaddr, paddr_bias, image_paddr, ram_paddr, imagefs_paddr) as
+ * eight bytes each, one byte whose bits say which of those six and the
+ * virtual setting are set, one byte of values (the virtual bit, raw
+ * storage), and six zero bytes. The file settings travel as descriptors,
+ * one capability bit each, never in the record.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
  *
@@ -98,8 +104,20 @@ typedef enum job_string_field {
 	JOB_TEXT_OFFSET = 832,
 	JOB_TEXT_PRESENT = JOB_TEXT_OFFSET +
 	    FSIMG_JOB_TEXT_SETTINGS * FSIMG_JOB_TEXT_BYTES,
-	JOB_RESERVED_OFFSET = JOB_TEXT_PRESENT + 1
+	JOB_RESERVED_OFFSET = JOB_TEXT_PRESENT + 1,
+	JOB_IFSBOOT_OFFSET = JOB_TEXT_PRESENT + 8,
+	JOB_IFSBOOT_FIELDS = 6,
+	JOB_IFSBOOT_SET = JOB_IFSBOOT_OFFSET + JOB_IFSBOOT_FIELDS * 8,
+	JOB_IFSBOOT_VALUES = JOB_IFSBOOT_SET + 1,
+	JOB_IFSBOOT_RESERVED = JOB_IFSBOOT_VALUES + 1
 } job_string_field_t;
+
+/* Bits of JOB_IFSBOOT_SET: field n of the boot settings is set, and the
+ * virtual setting. Bits of JOB_IFSBOOT_VALUES.
+ */
+#define JOB_IFSBOOT_VIRTUAL_SET	(1u << JOB_IFSBOOT_FIELDS)
+#define JOB_IFSBOOT_VIRTUAL	0x01u
+#define JOB_IFSBOOT_RAW		0x02u
 
 /* The text settings in job order. */
 #define JOB_BOOT_SLOTS \
@@ -150,7 +168,8 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_GZIP_LEVEL_OFFSET + 8 == JOB_COMPRESSION_OFFSET &&
     JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_TEXT_OFFSET,
     "the layer fields do not overlap");
-_Static_assert(JOB_RESERVED_OFFSET + 7 == FSIMG_JOB_BYTES &&
+_Static_assert(JOB_RESERVED_OFFSET + 7 == JOB_IFSBOOT_OFFSET &&
+    JOB_IFSBOOT_RESERVED + 6 == FSIMG_JOB_BYTES &&
     FSIMG_JOB_TEXT_SETTINGS == JOB_TEXT_SCRIPT + 1 &&
     FSIMG_JOB_TEXT_SETTINGS <= 8 &&
     sizeof(((fsimg_worker_request_t *)0)->text_storage[0]) ==
@@ -165,14 +184,33 @@ _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     sizeof(((fsimg_layer_options_t *)0)->vhd_uuid) == 16,
     "the request holds each layer field");
 /* encode_layers and decode_layers carry every member of the layout below,
- * which ends with gzip_level at 288 and reserved at 296. A new layer
- * setting moves reserved or grows the record and stops the build until
- * they carry it and this layout is updated.
+ * which ends with gzip_level at 288, the ifsboot settings from 292 and
+ * reserved at 328. A new layer setting moves reserved or grows the record
+ * and stops the build until they carry it and this layout is updated.
  */
 _Static_assert(offsetof(fsimg_layer_options_t, gzip_level) == 288 &&
-    offsetof(fsimg_layer_options_t, reserved) == 296 &&
-    sizeof(fsimg_layer_options_t) == 328,
+    offsetof(fsimg_layer_options_t, ifsboot_compress) == 292 &&
+    offsetof(fsimg_layer_options_t, ifsboot_imagefs_paddr_set) == 327 &&
+    offsetof(fsimg_layer_options_t, reserved) == 328 &&
+    sizeof(fsimg_layer_options_t) == 360,
     "every layer setting travels in the job record");
+
+/* The ifsboot settings in JOB_IFSBOOT order: each value and its flag. */
+#define JOB_IFSBOOT_FIELD(value, set)	\
+	{ offsetof(fsimg_layer_options_t, value), \
+	  offsetof(fsimg_layer_options_t, set) }
+static const struct ifsboot_field {
+	size_t		 value;
+	size_t		 set;
+} ifsboot_fields[JOB_IFSBOOT_FIELDS] = {
+	JOB_IFSBOOT_FIELD(ifsboot_machine, ifsboot_machine_set),
+	JOB_IFSBOOT_FIELD(ifsboot_startup_vaddr, ifsboot_startup_vaddr_set),
+	JOB_IFSBOOT_FIELD(ifsboot_paddr_bias, ifsboot_paddr_bias_set),
+	JOB_IFSBOOT_FIELD(ifsboot_image_paddr, ifsboot_image_paddr_set),
+	JOB_IFSBOOT_FIELD(ifsboot_ram_paddr, ifsboot_ram_paddr_set),
+	JOB_IFSBOOT_FIELD(ifsboot_imagefs_paddr, ifsboot_imagefs_paddr_set)
+};
+#undef JOB_IFSBOOT_FIELD
 
 /* Where each stack slot's name travels: the filesystem's in the format
  * field, the others in their own.
@@ -276,6 +314,23 @@ encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
 	    FSIMG_DMG_NONE ? JOB_DMG_RAW : 0) | (layers->simg_crc ?
 	    JOB_SIMG_CRC : 0));
 	fsimg_wire_put64(raw + JOB_GZIP_LEVEL_OFFSET, layers->gzip_level);
+	for (unsigned i = 0; i < JOB_IFSBOOT_FIELDS; i++) {
+		const unsigned char *base = (const unsigned char *)layers;
+		uint32_t value;
+		bool set;
+
+		bcopy(base + ifsboot_fields[i].value, &value, sizeof(value));
+		bcopy(base + ifsboot_fields[i].set, &set, sizeof(set));
+		fsimg_wire_put64(raw + JOB_IFSBOOT_OFFSET + i * 8, value);
+		if (set)
+			raw[JOB_IFSBOOT_SET] |= (unsigned char)(1u << i);
+	}
+	if (layers->ifsboot_virtual_set)
+		raw[JOB_IFSBOOT_SET] |= JOB_IFSBOOT_VIRTUAL_SET;
+	raw[JOB_IFSBOOT_VALUES] = (unsigned char)((layers->ifsboot_virtual ?
+	    JOB_IFSBOOT_VIRTUAL : 0) |
+	    (layers->ifsboot_compress == FSIMG_IFSBOOT_NONE ? JOB_IFSBOOT_RAW :
+	    0));
 }
 
 /* One encoding per settings value: known flags, a 32-bit identifier that
@@ -306,6 +361,22 @@ layers_valid(const unsigned char *raw)
 	if (raw[JOB_CONTAINER_FLAGS] > (JOB_DMG_RAW | JOB_SIMG_CRC))
 		return (false);
 	for (unsigned i = JOB_CONTAINER_FLAGS + 1; i < JOB_SPOOL_OFFSET; i++) {
+		if (raw[i] != 0)
+			return (false);
+	}
+	/* An ifsboot value is zero unless its setting is set. */
+	if (raw[JOB_IFSBOOT_SET] >= JOB_IFSBOOT_VIRTUAL_SET << 1 ||
+	    raw[JOB_IFSBOOT_VALUES] > (JOB_IFSBOOT_VIRTUAL | JOB_IFSBOOT_RAW) ||
+	    ((raw[JOB_IFSBOOT_VALUES] & JOB_IFSBOOT_VIRTUAL) != 0 &&
+	    (raw[JOB_IFSBOOT_SET] & JOB_IFSBOOT_VIRTUAL_SET) == 0))
+		return (false);
+	for (unsigned i = 0; i < JOB_IFSBOOT_FIELDS; i++) {
+		id = fsimg_wire_get64(raw + JOB_IFSBOOT_OFFSET + i * 8);
+		if (id > UINT32_MAX ||
+		    (id != 0 && (raw[JOB_IFSBOOT_SET] & (1u << i)) == 0))
+			return (false);
+	}
+	for (unsigned i = JOB_IFSBOOT_RESERVED; i < FSIMG_JOB_BYTES; i++) {
 		if (raw[i] != 0)
 			return (false);
 	}
@@ -341,6 +412,23 @@ decode_layers(const unsigned char *raw, fsimg_layer_options_t *layers)
 	layers->simg_crc = (raw[JOB_CONTAINER_FLAGS] & JOB_SIMG_CRC) != 0;
 	layers->gzip_level =
 	    (uint32_t)fsimg_wire_get64(raw + JOB_GZIP_LEVEL_OFFSET);
+	for (unsigned i = 0; i < JOB_IFSBOOT_FIELDS; i++) {
+		unsigned char *base = (unsigned char *)layers;
+		uint32_t value;
+		bool set;
+
+		value = (uint32_t)fsimg_wire_get64(raw + JOB_IFSBOOT_OFFSET + i * 8);
+		set = (raw[JOB_IFSBOOT_SET] & (1u << i)) != 0;
+		bcopy(&value, base + ifsboot_fields[i].value, sizeof(value));
+		bcopy(&set, base + ifsboot_fields[i].set, sizeof(set));
+	}
+	layers->ifsboot_virtual_set =
+	    (raw[JOB_IFSBOOT_SET] & JOB_IFSBOOT_VIRTUAL_SET) != 0;
+	layers->ifsboot_virtual =
+	    (raw[JOB_IFSBOOT_VALUES] & JOB_IFSBOOT_VIRTUAL) != 0;
+	layers->ifsboot_compress =
+	    (raw[JOB_IFSBOOT_VALUES] & JOB_IFSBOOT_RAW) != 0 ?
+	    FSIMG_IFSBOOT_NONE : FSIMG_IFSBOOT_LZO;
 }
 
 static fsimg_status_t
@@ -425,9 +513,12 @@ capability_field(const fsimg_worker_request_t *request, fsimg_capability_t c)
 		return (&request->spool_fd);
 	case FSIMG_CAPABILITY_MANIFEST:
 		return (&request->manifest_fd);
+	case FSIMG_CAPABILITY_SETTING:
 	case FSIMG_CAPABILITY_COUNT:
 		break;
 	}
+	if (c >= FSIMG_CAPABILITY_SETTING && c < FSIMG_CAPABILITY_COUNT)
+		return (&request->setting_fds[c - FSIMG_CAPABILITY_SETTING]);
 	return (NULL);
 }
 
@@ -566,6 +657,9 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	/* A read job's image is a file or, for a stream, the input pipe. */
 	if ((request->flags & FSIMG_JOB_STDIN) != 0)
 		capabilities |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_INPUT);
+	if ((capabilities & FSIMG_JOB_CAP_SETTINGS) != 0 &&
+	    !fsimg_job_has_roots(request->kind))
+		return (invalid_job(error));
 	put_field(raw, JOB_CAPABILITIES, capabilities);
 	put_field(raw, JOB_SELECTION, paths_length);
 	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
@@ -626,6 +720,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDIN) != 0 &&
 	    fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
 	    (get_field(raw, JOB_CAPABILITIES) & ~(uint64_t)FSIMG_JOB_CAP_ALL) != 0 ||
+	    ((get_field(raw, JOB_CAPABILITIES) & FSIMG_JOB_CAP_SETTINGS) != 0 &&
+	    !fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
 	    !string_field_valid(raw + JOB_FORMAT_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_LABEL_OFFSET, JOB_LABEL_BYTES) ||
 	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||
@@ -653,7 +749,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		    ((raw[JOB_TEXT_PRESENT] & (1u << n)) == 0 && field[0] != 0))
 			return (invalid_job(error));
 	}
-	for (unsigned i = JOB_RESERVED_OFFSET; i < FSIMG_JOB_BYTES; i++) {
+	for (unsigned i = JOB_RESERVED_OFFSET; i < JOB_IFSBOOT_OFFSET; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
