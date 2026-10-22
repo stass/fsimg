@@ -15,15 +15,12 @@ module FsimgSpec
   # and cases filesystems and any oracle confinement, then runs one valid
   # creation, and every reading stage on a sample image no fsimg writer
   # produced, through fsimg with the run's options. It answers the Runner
-  # every case uses: one bound to the sandbox status the preflight saw,
-  # the coordinator's text ceiling and whether RLIMIT_AS applies.
+  # every case uses, which applies RLIMIT_AS only where it works, and the
+  # sandbox status every invocation must report.
   class Preflight
     # The case directory roots the runner walks by path, beyond the results
     # directory, with the longest id a recipe may carry.
     LONGEST_CASE_ROOT = "/cases/#{"x" * 128}/source".length
-    # Before the first summary reports the coordinator's text ceiling, a
-    # capture may hold this much.
-    INITIAL_TEXT_BYTES = 64 << 20
     SENTINEL = "fsimg-spec-sentinel"
     # The confinement statuses an accepted stage can report: fsimg's
     # summaries also name unknown (cmd/fsimg/display.c), but only before a
@@ -88,21 +85,6 @@ module FsimgSpec
     end
 
     private
-
-    # The coordinator's text ceiling that create's summary reports, a
-    # positive integer that fsimg writes as a decimal JSON string when it
-    # may exceed what JSON numbers hold exactly.
-    def text_limit(result)
-      reported = result.outcome.records.last&.fetch("text_limit_bytes", nil)
-      bytes =
-        case reported
-        when Integer then reported
-        when /\A[0-9]{1,20}\z/ then Integer(reported, 10)
-        end
-      raise PreflightError, "create's summary reports no positive text_limit_bytes" unless bytes&.positive?
-
-      bytes
-    end
 
     # A walked path is a tree root, a slash and a relative path up to the
     # path ceiling, and PATH_MAX counts its terminating NUL too.
@@ -171,17 +153,15 @@ module FsimgSpec
     def probe_limits = Invocation::Limits.new(wall_seconds: 30, cpu_seconds: 30, file_bytes: 1 << 20,
                                               address_space_bytes: nil, capture_bytes: 1 << 20)
 
-    # A one-file FAT16 creation, whose summary reports the coordinator's
-    # text ceiling and the sandbox status, then every reading stage on the
-    # sample, so the reading stages do not depend on the writer under
-    # test. Every stage must accept, and every record must repeat the
-    # sandbox status create reported. Answers the run's Runner and that
-    # status.
+    # A one-file FAT16 creation, whose summary reports the sandbox status,
+    # then every reading stage on the sample, so the reading stages do not
+    # depend on the writer under test. Every stage must accept, and every
+    # record must repeat the sandbox status create reported. Answers the
+    # run's Runner and that status.
     def run_valid_cases(directory, address_space:)
-      runner = runner_for(text_bytes: INITIAL_TEXT_BYTES, address_space:)
+      runner = Runner.new(fsimg: @fsimg, profile: @profile, environment: @environment, address_space:)
       create, = run_case(File.join(directory, "create"), CREATION, image: nil, runner:, sandbox: nil)
       sandbox = reported_sandbox(create)
-      runner = runner_for(text_bytes: text_limit(create), address_space:)
       recipe, image = @sample.(directory)
       run_case(File.join(directory, "read"), recipe, image:, runner:, sandbox:)
       [runner, sandbox]
@@ -207,11 +187,6 @@ module FsimgSpec
     # record of the run must repeat it. It reaches the report, so only the
     # statuses fsimg defines are taken.
     def reported_sandbox(result) = Preflight.accepted_sandbox(result.outcome.records.last["sandbox"], stage: result.stage)
-
-
-    def runner_for(text_bytes:, address_space:) =
-      Runner.new(fsimg: @fsimg, profile: @profile, environment: @environment,
-                 text_bytes:, address_space:)
 
     # RLIMIT_AS applies where the host enforces it and fsimg starts under
     # it; a sanitizer build's address reservation keeps it from starting.

@@ -112,8 +112,7 @@ class TestRunnerFsimg < Minitest::Test
                              environment:, sample:).call
 
   def runner_for(observer:) =
-    FsimgSpec::Runner.new(fsimg: @fsimg, profile: PROFILE, environment: ENV.to_h, observer:,
-                          text_bytes: 64 << 20, address_space: false)
+    FsimgSpec::Runner.new(fsimg: @fsimg, profile: PROFILE, environment: ENV.to_h, observer:, address_space: false)
 
   def entry(path, type) = type == "file" ? FsimgSpec::TreeEntry.file(path, size: 10, seed: 1) : FsimgSpec::TreeEntry.directory(path)
 

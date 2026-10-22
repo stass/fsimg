@@ -474,8 +474,7 @@ class TestRunner < Minitest::Test
   end
 
   def runner_for(fsimg, environment: { "PATH" => "/bin:/usr/bin" }) =
-    FsimgSpec::Runner.new(fsimg:, profile: PROFILE, environment:,
-                          text_bytes: 1 << 16, address_space: false)
+    FsimgSpec::Runner.new(fsimg:, profile: PROFILE, environment:, address_space: false)
 
   def recipe = FsimgSpec::Recipe.new(
     id: "t.case", format: "fat16", kind: "valid", stages: STAGES,

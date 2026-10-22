@@ -777,12 +777,11 @@ deadline. The limits are:
 * `RLIMIT_AS` of 1 GiB where the host enforces it (Linux and FreeBSD) and
   `fsimg -V` starts under it, which a sanitizer build's address reservation
   prevents; the result records whether it applied;
-* a capture cap of the coordinator's [text
-  ceiling](architecture.md#bounded-resources) for the limits passed, plus a
-  fixed allowance for text the coordinator does not count, such as a sanitizer
-  report. Reaching it means fsimg exceeded its own output bound. The ceiling
-  grows with the profile's `entries` limit, to about 70 MiB under `quick` and
-  several GiB under `deep`, and the harness holds each capture in memory.
+* a fixed capture cap of 64 MiB for each of stdout and stderr. A listing
+  takes about 550 bytes and the path per entry, so the cap holds a case's
+  text while its tree stays below some 60,000 entries, which every generator
+  and checked-in recipe does; the harness holds each capture in memory, and
+  output beyond the cap is `output_exceeded`.
 
 Each case runs in a fresh directory:
 
@@ -911,7 +910,7 @@ that check it.
 | `faulted(STATUS)` | As `rejected`, but the code is not a verdict status, such as the `FSIMG_EIO` of an I/O, spawn or worker-protocol failure or the `FSIMG_ESTATE` of an internal-state failure. The parser worker's standard streams are `/dev/null`, so its sanitizer reports arrive as `FSIMG_ESTATE`. |
 | `crashed` | The coordinator ended by a signal the runner did not send |
 | `timed_out` | The runner's wall-clock limit expired, or fsimg reported its own deadline as `FSIMG_ECANCELLED` |
-| `output_exceeded` | A capture reached its cap |
+| `output_exceeded` | A capture exceeded its cap |
 | `sanitizer_failure` | The coordinator exited with status 87, or stderr contains `ERROR: AddressSanitizer`, `ERROR: LeakSanitizer`, `WARNING: MemorySanitizer` or `runtime error:` |
 | `harness_error` | Anything else: a launch failure, any other exit 2, exit 0 without a completion summary, exit 1 without exactly one error record, malformed NDJSON, a sandbox status that differs from the preflight's (apart from `unknown` on a `create` rejection or an outcome other than an acceptance or a rejection), or any other exit status |
 

@@ -62,8 +62,11 @@ module FsimgSpec
     # Longer than the coordinator's two two-second diagnostic attempts, so
     # fsimg's own deadline fires first and reports itself.
     GRACE_SECONDS = 10
-    # Text the coordinator does not count, such as a sanitizer report.
-    CAPTURE_ALLOWANCE = 1 << 20
+    # The most bytes kept of each of a stage's stdout and stderr. A listing
+    # takes about 550 bytes and the path per entry, so this holds every
+    # case's text while trees stay below some 60,000 entries; longer output
+    # is reported as output_exceeded.
+    CAPTURE_BYTES = 64 << 20
     ADDRESS_SPACE_BYTES = 1 << 30
     SANITIZER_SUFFIX = "abort_on_error=0:log_path=stderr:exitcode=87"
     SANITIZER_VARIABLES = %w[ASAN_OPTIONS UBSAN_OPTIONS LSAN_OPTIONS MSAN_OPTIONS].freeze
@@ -72,16 +75,14 @@ module FsimgSpec
 
     # fsimg is the binary's absolute path, and environment the harness's
     # own (ENV), from which PATH, the sanitizer options and the sandbox
-    # policy are taken. text_bytes is the coordinator's text ceiling for
-    # the limits passed, and address_space whether RLIMIT_AS applies; the
-    # preflight establishes both. observer sees each stage's group start
-    # and end.
-    def initialize(fsimg:, profile:, environment:, text_bytes:, address_space:, observer: GroupObserver.new)
+    # policy are taken. address_space is whether RLIMIT_AS applies, which
+    # the preflight establishes. observer sees each stage's group start and
+    # end.
+    def initialize(fsimg:, profile:, environment:, address_space:, observer: GroupObserver.new)
       @fsimg = fsimg
       @ceilings = profile.ceilings
       @environment = environment
       @observer = observer
-      @text_bytes = text_bytes
       @address_space = address_space
     end
 
@@ -151,7 +152,7 @@ module FsimgSpec
         wall_seconds: seconds, cpu_seconds: seconds + 5,
         file_bytes: [@ceilings.image, @ceilings.output, @ceilings.scratch].max,
         address_space_bytes: @address_space ? ADDRESS_SPACE_BYTES : nil,
-        capture_bytes: @text_bytes + CAPTURE_ALLOWANCE
+        capture_bytes: CAPTURE_BYTES
       )
     end
 

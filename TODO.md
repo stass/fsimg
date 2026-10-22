@@ -127,21 +127,16 @@
   [design](specs/design-spec-testing.md) owns the decisions and the
   [plan](docs/spec-testing-plan.md) the stages.
 
-* [High] **Spec harness preflight needs the removed `text_limit_bytes`**
-  (`test/spec/lib/fsimg_spec/preflight.rb`): it sizes its text capture from
-  create's summary field `text_limit_bytes`, which the CLI does not
-  report, since formatted text has no ceiling of its own, so `test/spec.sh`
-  fails every case with a `PreflightError`. Size the capture from the
-  harness's own bound, or stream it as the next item proposes.
 * [Medium] **Spec harness captures in memory** (`test/spec/lib/fsimg_spec/process.rb`,
-  `outcome.rb`): each stage's stdout and stderr are held in Ruby strings,
-  which the entry and path limits let reach several GiB under the `deep`
-  profile, and stdout is parsed whole. Stream captures to their
-  case-directory files and parse the NDJSON records line by line. The
-  oracles' read-back of each file (`fat/oracles.rb`, `mtype` and
-  `fatcat -r`) likewise holds a file's bytes whole before hashing them;
-  give `Invocation` a stdout sink that hashes and counts as it reads, and
-  bound each case's oracle runs by a total budget.
+  `outcome.rb`, `fat/oracles.rb`): each stage's stdout and stderr are held
+  in Ruby strings capped at 64 MiB (`Runner::CAPTURE_BYTES`) and stdout is
+  parsed whole, so a case above some 60,000 entries, which the `nightly`
+  and `deep` entry limits allow, would fail as `output_exceeded`. The
+  oracles' read-back of each file (`mtype` and `fatcat -r`) likewise holds a
+  file's bytes whole before hashing them. Stream captures to their
+  case-directory files and parse the NDJSON records line by line, give
+  `Invocation` a stdout sink that hashes and counts as it reads, and bound
+  each case's oracle runs by a total budget.
 
 * [Medium] **Spec harness formatter oracles beyond mkfs.fat**
   (`test/spec/lib/fsimg_spec/fat/bases.rb`): formatter bases are built only
