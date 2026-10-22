@@ -51,6 +51,13 @@ missing tool.
 ## Design
 
 * Code should be simple and clean, never over-complicate things.
+* **Weigh mechanism against what it buys.** Before adding a concept, state,
+  option, limit or rule, name the concrete failure it prevents and how
+  likely it is. If the gain is small, such as a rare tool quirk, a bound
+  that other limits already imply, or a case a later stage covers properly,
+  choose the smallest answer: document the limitation, skip the case or
+  defer it. When fixing review findings keeps adding layers to the same
+  mechanism, stop and ask whether the mechanism should exist at all.
 * **Judge complexity by the model a maintainer must understand.** Compare the
   concepts, entities, independently varying states, ownership rules and
   coordination obligations a change introduces with those it removes across
