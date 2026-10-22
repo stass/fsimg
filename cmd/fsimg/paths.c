@@ -226,8 +226,8 @@ private_directory(int parent, const char *parent_path,
  * mode 0700 it was created with and its owner do not prove it: a
  * filesystem can ignore the mode, inheritable access control entries of
  * parent can admit another user, and a user who can write parent can put
- * another directory in its place before it is opened. Either could then read or replace what fsimg puts
- * there. The cause lies in parent, so the error names it, parent_noun at
+ * another directory in its place before it is opened. Any of them could then
+ * read or replace what fsimg puts there. The cause lies in parent, so the error names it, parent_noun at
  * parent_path.
  *
  * A directory that fails the check, or cannot be checked, gives up its

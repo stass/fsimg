@@ -448,10 +448,10 @@ storage, and planning checks the claims after the driver, the disk layout
 and the output limit have accepted the catalog. The bytes hashed then never
 exceed the planned volume, at one unit of work per 64 KiB piece. A claim
 therefore takes time in proportion to the logical size of the content it
-covers: no writer stores a file sparsely, a
-[writer contract](architecture.md#output-and-determinism), so every byte
-the digest covers occupies the planned volume, and the volume and the output limit
-(`-l output`) bound that size as they bound the image. In an automatically
+covers: no writer stores a file sparsely
+([writer contract](architecture.md#output-and-determinism)), so every
+byte the digest covers occupies the planned volume, and the volume and the
+output limit (`-l output`) bound that size as they bound the image. In an automatically
 sized volume the claimed file sets the volume, so only an explicit
 `-l output` or `-s` lowers the bound. Writing skips a zero run in a fresh
 image and hashing does not, so the work limit, cancellation and the CLI's
@@ -593,7 +593,7 @@ sink mutation, as for scanned sources.
 | Holes | 64 ranges per entry | `FSIMG_EINVAL` |
 | Generated digest checks | One per claiming file, in scratch storage; checked after planning, so the bytes hashed are bounded by the planned volume, each 64 KiB one unit of work | `FSIMG_ELIMIT`, resource `WORK`, naming the line |
 | Manifest length | Not bounded separately: lines are streamed and each physical line, one that only continues included, is one unit of work, which also polls cancellation | `FSIMG_ELIMIT`, resource `WORK` |
-| Written manifest (`x --mtree`) | Not bounded separately: one line per extracted entry, so the entries limit bounds the lines, and each line is at most `4 * path limit + 4 * 1023 + 199` bytes, a path and a link target with every byte escaped and the widest keywords. A `t` listing is bounded the same way. An image of many entries beneath long non-ASCII names therefore writes a manifest many times its own size; the output limit, which charges extracted file lengths, does not count it | `FSIMG_ELIMIT`, resource `ENTRIES` or `PATH`, as extraction reads the image |
+| Written manifest (`x --mtree`) | Not bounded separately: one line per extracted entry, so the entries limit bounds the lines, and each line holds a path of at most the path limit and a link target of at most 1023 bytes, every byte escaped to at most four, beside the keywords. A `t` listing is bounded the same way. An image of many entries beneath long non-ASCII names therefore has a manifest many times larger than itself; the output limit, which charges extracted file lengths, does not count it | `FSIMG_ELIMIT`, resource `ENTRIES` or `PATH`, as extraction reads the image |
 
 All offsets, sizes, hole bounds and block indices use checked arithmetic.
 The parser retains no per-entry heap object. `fuzz/mtree.c` feeds arbitrary

@@ -917,9 +917,11 @@ A directory
 .Nm
 creates, the fresh destination included, must also give group and others
 no permission at all, so a filesystem that ignores the mode it asks for,
-such as Linux vfat mounted with
-.Ql umask=022 ,
-is refused too.
+such as Linux vfat or exfat mounted with
+.Ql umask=022
+as desktop automounts commonly are, is refused too; mounted with
+.Ql dmask=077
+it is usable.
 .Nm
 never edits an ACL.
 On Linux a listed
@@ -999,15 +1001,16 @@ is written as a
 escape of
 .Xr vis 3 ,
 so every line is plain ASCII and reads back exactly.
-An escape takes four bytes, and nothing bounds the manifest's size apart
-from
-.Fl l Ar entries ,
-which bounds its lines, and
-.Fl l Ar path
-and the 1023-byte link-target limit, which cap each line, as they bound a
+An escape takes four bytes.
+No limit of its own bounds the manifest, nor a
 .Cm t
-listing: an image of many entries beneath long non-ASCII names writes a
-manifest many times its own size.
+listing:
+.Fl l Ar entries
+bounds their lines, and
+.Fl l Ar path
+and the 1023-byte link-target limit cap each line, so a manifest or
+listing of an image of many entries beneath long non-ASCII names can be
+many times larger than the image.
 Only standard keywords appear: bsdtar and the
 .Xr mtree 8
 of FreeBSD and NetBSD read it; the macOS
