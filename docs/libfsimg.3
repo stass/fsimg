@@ -354,7 +354,8 @@ name before the reopen, fails the call with FSIMG_EINVAL and a message
 naming what the parent does to new directories.
 A refused directory is removed again while the name still holds the
 directory the library opened, owned by the effective user and empty;
-otherwise, unless the name now holds another object or nothing, the error's
+otherwise, unless the name now holds another object, nothing, or a
+populated directory, which holds nothing the library wrote, the error's
 path names it.
 An extraction whose destination cannot be created or is refused leaves the
 reader untouched.

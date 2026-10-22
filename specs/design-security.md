@@ -363,7 +363,11 @@ three has no known ACL interface, and its check fails rather than
 trusting the mode bits. Refusing rather than reading ACLs is the
 rule by construction: the three platforms' ACL semantics differ, an
 allowlist of harmless entries is a list that grows with each platform, and a
-user who wants an ACL on the destination can extract elsewhere. The rule
+user who wants an ACL on the destination can extract elsewhere. The order
+of the checks keeps each answer true once given: an ACL entry can let
+another user change the directory's mode, owner or ACL, so the ACL is
+examined before the owner and mode are sampled, and once those pass only
+the owner can write the directory, so its emptiness is judged last. The rule
 covers the fresh directory because a parent's inheritable entries attach to
 it at creation; the check runs after `mkdirat`, and a failure removes the
 directory while it is still the empty object just created and names the
@@ -395,13 +399,12 @@ descriptor: whatever the name now reaches may belong to someone else. It is
 removed again only while the name still holds the object it opened, owned
 by the user and empty; otherwise its name is reported as retained, unless
 the name now holds another object or nothing, or the opened directory is
-populated, none of which is fsimg's to report. fsimg made the directory
-empty, and one that passed the rest of the rule is normally writable by its
-owner alone, so a populated directory is the user's own, put under the name
-in place of the new one. A principal who could write the new directory
-through an inheritable ACL entry and also strip that ACL before the check
-can leave a populated directory fsimg made unreported; fsimg never writes
-into it. A writer of
+populated, whatever the check refused it for, none of which is fsimg's to
+report. fsimg made the directory empty, so a populated directory is
+normally the user's own, put under the name in place of the new one.
+Another principal who could write the new directory, through an
+inheritable ACL entry or a filesystem's mode, can populate it and so leave
+a directory fsimg made unreported; fsimg never writes into it. A writer of
 the parent can still put another empty directory under the name between
 that check and the removal, which gains nothing it could not do itself.
 
@@ -594,9 +597,11 @@ allowlist alone does not guarantee a disk-space quota.
   `system.nfs4_acl` is refused; the library's own extraction destination
   and output staging beneath a parent with an inheritable ACL (both refused,
   nothing left behind); a group-writable directory and a populated one of
-  the user's put under a fresh name before its reopen (the first refused and
-  removed, the second refused, kept and not reported as fsimg's), and a
-  symbolic link put there (the reopen fails, nothing reported); `-f -` and an underivable
+  the user's, private, group-writable or other-writable, put under a fresh
+  name before its reopen (the first refused and removed, the second refused,
+  kept and not reported as fsimg's), a symbolic link put there (the reopen fails,
+  nothing reported), and a mode widened to 0777 just before the ACL query
+  (refused); `-f -` and an underivable
   stem without `-E`; and a parent replaced by a symbolic link between the
   user's inspection and the open, which succeeds only into the link's target
   as a fresh directory and never into a populated one.

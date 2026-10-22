@@ -23,8 +23,7 @@
 
 static int directory_empty(int, bool *);
 static int nontrivial_acl(int, bool *);
-static bool discard_refused(int, const char *, int,
-    fsimg_host_privacy_t);
+static bool discard_refused(int, const char *, int);
 
 /* Whether the directory holds no name besides "." and "..", read through
  * a fresh descriptor for the same directory so the caller's descriptor
@@ -202,28 +201,48 @@ nontrivial_acl(int fd FSIMG_UNUSED, bool *present)
 int
 fsimg_host_private_directory(int fd, fsimg_host_privacy_t *verdict)
 {
-	struct stat st;
+	struct stat first, st;
 	bool present, empty;
 
+	/*
+	 * The order is what makes each passing answer stay true; a refusal is
+	 * safe whenever it is found. A file's type never changes. An ACL entry
+	 * can let another user change the directory's mode, owner or ACL, so
+	 * the owner and mode that pass are sampled only once no entry is left;
+	 * from then on only the owner can change them, and once they pass, only
+	 * the owner can write the directory, so its emptiness is judged last.
+	 * The first sample also refuses a foreign owner at once, so an ACL its
+	 * owner keeps unreadable does not hide that cause.
+	 */
+	if (fsimg_host_fstat(fd, &first) == -1)
+		return (-1);
+	if (!S_ISDIR(first.st_mode)) {
+		*verdict = FSIMG_HOST_NOT_DIRECTORY;
+		return (0);
+	}
+	if (first.st_uid != geteuid()) {
+		*verdict = FSIMG_HOST_FOREIGN_OWNER;
+		return (0);
+	}
+	if (nontrivial_acl(fd, &present) == -1)
+		return (-1);
+	if (present) {
+		*verdict = FSIMG_HOST_EXTENDED_ACL;
+		return (0);
+	}
 	if (fsimg_host_fstat(fd, &st) == -1)
 		return (-1);
-	if (!S_ISDIR(st.st_mode))
-		*verdict = FSIMG_HOST_NOT_DIRECTORY;
-	else if (st.st_uid != geteuid())
+	if (st.st_uid != geteuid()) {
 		*verdict = FSIMG_HOST_FOREIGN_OWNER;
-	else if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
-		*verdict = FSIMG_HOST_SHARED_WRITE;
-	else {
-		if (nontrivial_acl(fd, &present) == -1)
-			return (-1);
-		if (present)
-			*verdict = FSIMG_HOST_EXTENDED_ACL;
-		else {
-			if (directory_empty(fd, &empty) == -1)
-				return (-1);
-			*verdict = empty ? FSIMG_HOST_PRIVATE : FSIMG_HOST_NOT_EMPTY;
-		}
+		return (0);
 	}
+	if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+		*verdict = FSIMG_HOST_SHARED_WRITE;
+		return (0);
+	}
+	if (directory_empty(fd, &empty) == -1)
+		return (-1);
+	*verdict = empty ? FSIMG_HOST_PRIVATE : FSIMG_HOST_NOT_EMPTY;
 	return (0);
 }
 
@@ -258,24 +277,22 @@ fsimg_host_remove_directory(int parent, const char *name, int fd)
 
 /*
  * Discard the directory opened as fd under name, which the check refused
- * with verdict or could not judge, and return whether nothing of fsimg's is
- * left there: true once it is removed, or when the name holds another
- * object or nothing. A populated directory is not fsimg's either: fsimg made
- * the directory empty, and a directory that passed the rest of the rule is
- * normally writable by its owner alone, so a populated one is the user's
- * own, put under the name in place of the new one; it is neither removed
- * nor reported. False means fsimg's directory remains, for the caller to
- * report.
+ * or could not judge, and return whether nothing of fsimg's is left there:
+ * true once it is removed, or when the name holds another object or
+ * nothing. A populated directory, which rmdir refuses with ENOTEMPTY, is
+ * not reported either, whatever the check refused it for: fsimg made the
+ * directory empty and wrote nothing into it, so a populated one is normally
+ * the user's own, put under the name in place of the new one, and otherwise
+ * fsimg's own filled by another user the check kept out, whose files fsimg
+ * does not vouch for. False means fsimg's empty directory remains, for the
+ * caller to report.
  */
 static bool
-discard_refused(int parent, const char *name, int fd,
-    fsimg_host_privacy_t verdict)
+discard_refused(int parent, const char *name, int fd)
 {
-	if (verdict == FSIMG_HOST_NOT_EMPTY)
-		return (true);
 	if (fsimg_host_remove_directory(parent, name, fd))
 		return (true);
-	return (errno == EEXIST || errno == ENOENT);
+	return (errno == EEXIST || errno == ENOENT || errno == ENOTEMPTY);
 }
 
 fsimg_host_fresh_t
@@ -306,7 +323,7 @@ fsimg_host_private_mkdir(int parent, const char *name, int *fd,
 	if (judged && *verdict == FSIMG_HOST_PRIVATE)
 		return (FSIMG_HOST_FRESH_CREATED);
 	saved = errno;
-	*created = !discard_refused(parent, name, *fd, *verdict);
+	*created = !discard_refused(parent, name, *fd);
 	close(*fd);
 	*fd = -1;
 	errno = saved;

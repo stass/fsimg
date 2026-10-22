@@ -10,9 +10,9 @@
 typedef enum fsimg_host_privacy {
 	FSIMG_HOST_PRIVATE,
 	FSIMG_HOST_NOT_DIRECTORY,
+	FSIMG_HOST_EXTENDED_ACL,	/* A non-trivial access control list */
 	FSIMG_HOST_FOREIGN_OWNER,	/* Not owned by the effective user */
 	FSIMG_HOST_SHARED_WRITE,	/* Group or others may write */
-	FSIMG_HOST_EXTENDED_ACL,	/* A non-trivial access control list */
 	FSIMG_HOST_NOT_EMPTY
 } fsimg_host_privacy_t;
 
@@ -50,8 +50,9 @@ typedef enum fsimg_host_fresh {
  * says why when it is REFUSED; errno is set when it is TAKEN or FAILED. A
  * directory that is refused, or whose check failed, is removed again as
  * fsimg_host_remove_directory() allows. On every outcome *created says
- * whether a directory fsimg made still stands under name, which the caller
- * then owns and reports.
+ * whether a directory fsimg made still stands under name as fsimg left it,
+ * empty, which the caller then owns and reports; a populated directory there
+ * is never reported, since fsimg wrote nothing into it.
  */
 fsimg_host_fresh_t fsimg_host_private_mkdir(int, const char *, int *,
     fsimg_host_privacy_t *, bool *);
@@ -66,8 +67,8 @@ const char *fsimg_host_fresh_refusal(fsimg_host_privacy_t);
  * as fd, when the name still holds that object, owned by the effective
  * user, and it is empty, which rmdir itself requires; a directory someone
  * else put there is never removed. Returns false otherwise with errno saying
- * why: EEXIST when the name holds another object, which FreeBSD, Linux and
- * macOS never report for a directory that is merely not empty. A writer of
+ * why: EEXIST when the name holds another object, ENOTEMPTY for a populated
+ * directory. A writer of
  * a parent without the sticky bit can still put another empty directory
  * under the name between the check and the removal; it gains nothing it
  * could not do itself.
