@@ -719,25 +719,29 @@ def test_extraction_names(executable, root):
 
 
 def test_extract_here(executable, root):
-    """-E extracts into the -C directory itself, which must be an empty
-    directory, whatever its mode. A directory holding any name, a dot file
-    included, is refused and left alone. A symbolic link is not followed,
-    and it or any other existing object that is not a directory is refused
-    as unsupported."""
+    """-E extracts into the -C directory itself, which must be empty and
+    private: owned by the user and not writable by group or others. A
+    symbolic link is not followed, and it or any other existing object that
+    is not a directory is refused as unsupported."""
     private_directory(root, "into-empty")
     invoke(executable, root, ["xEf", "human.img", "-C", "into-empty"])
     same_bytes(root / "source/nested/caf\u00e9.txt", root / "into-empty/nested/caf\u00e9.txt")
-    private_directory(root, "into-shared", 0o777)
-    invoke(executable, root, ["xEf", "human.img", "-C", "into-shared"])
-    assert (root / "into-shared/HELLO.TXT").read_bytes() == b"hello\n"
+    private_directory(root, "into-readable", 0o755)
+    invoke(executable, root, ["xEf", "human.img", "-C", "into-readable"])
+    assert (root / "into-readable/HELLO.TXT").read_bytes() == b"hello\n"
 
     (private_directory(root, "into-dotted") / ".keep").write_bytes(b"")
-    error = failed(invoke(executable, root, ["xEf", "human.img", "--json", "-C", "into-dotted"],
-                          expected=1))
-    assert error["status"] == "output exists", error
-    assert error["message"] == "extraction destination is not empty", error
-    assert error["path"] == "into-dotted", error
+    private_directory(root, "into-group", 0o770)
+    private_directory(root, "into-other", 0o707)
+    for name, detail in [
+        ("into-dotted", "extraction destination is not empty"),
+        ("into-group", "extraction destination is writable by group or others"),
+        ("into-other", "extraction destination is writable by group or others"),
+    ]:
+        result = invoke(executable, root, ["xEf", "human.img", "-C", name], expected=1)
+        assert f'{detail} "{name}"'.encode() in result.stderr, (name, result.stderr)
     assert os.listdir(root / "into-dotted") == [".keep"]
+    assert not list((root / "into-group").iterdir()) and not list((root / "into-other").iterdir())
     private_directory(root, "into-target")
     (root / "into-link").symlink_to("into-target")
     result = invoke(executable, root, ["xEf", "human.img", "-C", "into-link"], expected=1)
@@ -812,6 +816,54 @@ def test_change_directory_kinds(executable, root):
             assert error["os_error"] == os_error, error
     assert sorted(path.name for path in work.iterdir()) == [
         "dangling", "fifo", "file", "human.img", "loop", "to-file"]
+
+
+def test_extraction_acls(executable, root):
+    """A destination with a non-trivial ACL is refused; a fresh directory
+    that inherits one from its parent is removed again and the error names
+    the parent."""
+    if sys.platform == "darwin":
+        def grant(path, inherit):
+            rights = "list,search" + (",file_inherit,directory_inherit" if inherit else "")
+            return subprocess.run(["chmod", "+a", f"user:nobody allow {rights}", str(path)])
+    elif shutil.which("setfacl"):
+        def grant(path, inherit):
+            return subprocess.run(["setfacl", *(["-d"] if inherit else []), "-m", "u:nobody:rx",
+                                   str(path)], stderr=subprocess.DEVNULL)
+    else:
+        print("SKIP: extraction ACL checks (no chmod +a or setfacl)")
+        return
+    guarded = private_directory(root, "acl-guarded")
+    inheriting = private_directory(root, "acl-parent")
+    if grant(guarded, False).returncode != 0 or grant(inheriting, True).returncode != 0:
+        print("SKIP: extraction ACL checks (the filesystem refuses ACLs)")
+        return
+    result = invoke(executable, root, ["xEf", "human.img", "-C", "acl-guarded"], expected=1)
+    assert b'extraction destination carries a non-trivial access control list "acl-guarded"' \
+        in result.stderr
+    assert not list(guarded.iterdir())
+    result = invoke(executable, root, ["xf", "human.img", "-C", "acl-parent"], expected=1)
+    assert b'-C directory gives new directories a non-trivial access control list "acl-parent"' \
+        in result.stderr
+    assert not list(inheriting.iterdir())
+
+    # Every private directory fsimg creates passes the same check: the
+    # staging of an --mtree file beside a private destination, a created
+    # image's staging, and scratch.
+    destination = private_directory(root, "acl-destination")
+    for arguments, noun in [
+            (["xf", "human.img", "--json", "-C", "acl-destination",
+              "--mtree=acl-parent/human.mtree"], "--mtree directory"),
+            (["cf", "acl-parent/new.img", "-F", "fat12", "--json", "-C", "source", "."],
+             "output directory"),
+            (["xf", "human.img", "--json", "-C", "acl-destination", "-T", "acl-parent"],
+             "scratch directory")]:
+        error = failed(invoke(executable, root, arguments, expected=1))
+        assert error["message"] == \
+            f"{noun} gives new directories a non-trivial access control list", error
+        assert error["path"] == "acl-parent" and error["output_state"] == "absent", error
+        assert not list(inheriting.iterdir()), arguments
+        assert not list(destination.iterdir()), arguments
 
 
 def test_failed_creation_output(executable, root):
@@ -1949,6 +2001,7 @@ def main():
         test_option_syntax(executable, root)
         test_extraction_names(executable, root)
         test_extract_here(executable, root)
+        test_extraction_acls(executable, root)
         test_change_directory_kinds(executable, root)
         test_failed_creation_output(executable, root)
         test_human_loss_bounds(executable, root)

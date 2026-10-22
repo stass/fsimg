@@ -350,7 +350,8 @@ non-directory as an open failure. Extraction creates exactly one
 fresh directory inside it, named after the image stem, and extracts beneath
 that: `fsimg xf boot.img` extracts into `./boot/`, `fsimg xf boot.img -C /tmp`
 into `/tmp/boot/`. This is GNU tar's `--one-top-level`, made the default
-because a directory fsimg created itself is the one it can prove empty.
+because a directory fsimg created itself is the one it can prove empty and
+safe from other writers.
 The coordinator creates it with one `mkdirat` with mode 0700 beneath the
 opened `-C` descriptor and reopens it no-follow; an existing name of any kind
 fails, and there is no merge. The worker receives the fresh directory's
@@ -367,22 +368,26 @@ If nothing was stripped, the input is `-f -`, or the stem is empty, `.`,
 `..` or otherwise not one valid host name, fsimg invents no name: extraction
 then requires `-E`, and the error says so.
 
-`-E` extracts directly into the `-C` directory, which must be empty. The
-coordinator opens it no-follow as a directory and establishes on that
-descriptor alone that it is empty; its owner, mode and access control lists
-are not judged, and the
-[security specification](design-security.md#safe-extraction) states why.
-The worker then receives this descriptor exactly as it would a fresh one,
-and extraction proceeds unchanged: every entry is created exclusively and
-no-follow beneath a verified parent, so an object another process adds
-concurrently is a collision failure, never an escape.
+`-E` extracts directly into the `-C` directory, which must be empty and
+private. The coordinator opens it no-follow and establishes on that
+descriptor alone that it is a directory owned by the effective user, not
+group or other writable, empty, and carrying no non-trivial access control
+list of any type the platform can report; the
+[security specification](design-security.md#safe-extraction) defines the
+checks, states why they keep other writers out while read and search bits
+for others are allowed, applies the same ACL rule to the fresh directory, and states
+why fsimg never edits an ACL. The worker then receives this descriptor
+exactly as it would a fresh one, and extraction proceeds unchanged: every
+entry is created exclusively and no-follow beneath a verified parent, so an
+object another process adds concurrently is a collision failure, never an
+escape.
 A non-empty `-C` with `-E` fails; merging into a populated tree is not
 possible by any option.
 
 | Option | Meaning |
 | --- | --- |
 | `-C dir` | Parent of the fresh destination; default the working directory |
-| `-E` | Extract directly into the empty `-C` directory |
+| `-E` | Extract directly into the empty private `-C` directory |
 | `-k` | Skip entries of unsupported kinds and report their count |
 | `--mtree=FILE` | Also write an mtree(5) manifest of the extraction to the new `FILE` |
 | `-O` | Write one member's logical bytes to stdout instead of extracting |
@@ -618,17 +623,16 @@ no-follow operations on coordinator-created trees after children exit.
 Cleanup failures preserve the primary error and identify retained private
 output, manifest and scratch locations.
 
-Every private directory the coordinator creates, the staging directory of
-an image or of an `x --mtree` manifest, the scratch tree and a fresh stem
-destination, is made exclusively with mode 0700 and used only through its
-opened descriptor
-([security specification](design-security.md#safe-extraction)). A staged
-output is one record in the coordinator: its final
-name and parent, its private directory and staged file, whether it was
+Every private directory the coordinator creates, the staging directory of an
+image or of an `x --mtree` manifest, the scratch tree and a fresh stem
+destination, passes the destination's [rule against other
+writers](design-security.md#safe-extraction) on its opened descriptor before
+anything is put in it. A staged output is one record in the coordinator: its
+final name and parent, its private directory and staged file, whether it was
 published, and what remains of it, which the final report reads for the
 publication state, the published name and the retained path. A staged image
-and a staged manifest differ only in who creates the staged file and how
-its length is known.
+and a staged manifest differ only in who creates the staged file and how its
+length is known.
 
 Output formatting retains one 128 KiB span, one small UTF-8 carry, the
 current entry metadata and fixed result and counter records. Name frames

@@ -462,14 +462,37 @@
   mount crossing beneath a root, such as a per-directory check that a
   child's device and inode do not belong to a mount point, without a
   path-based query.
-* [Medium] **The library's created directories are used without
-  confirming them fresh** (`lib/output/write.c` `create_staging`,
-  `lib/extract/extract.c` `fsimg_extract_at`): each is made with `mkdirat`
-  and reopened by name, so a writer of the parent can put another directory
-  under the name first, and the library then writes into it, and for
-  staging later unlinks `image` there. The CLI confirms each reopened
-  directory empty (`confirm_fresh` in `cmd/fsimg/paths.c`); do the same in
-  the library, or move that routine there.
+* [Medium] **The library's own directories skip the other-writer check**
+  (`lib/output/write.c` `create_staging`, `lib/extract/extract.c`
+  `fsimg_extract_at`): `fsimg_writer_write_at()` and transcoding stage
+  beneath the caller's directory in a `.fsimg-output-PID-N` directory, and
+  `fsimg_extract_at()` creates its fresh destination, each made with mode
+  0700 and reopened by name no-follow but never checked by
+  `fsimg_host_private_directory()` as the CLI's private directories are. A
+  writer of the parent can put another directory under the name between
+  `mkdirat` and the reopen, and a parent's inheritable ACL entries or a
+  filesystem that ignores the creation mode can let other users write the
+  directory; the library then extracts into a tree others can change, or
+  publishes a staged name another writer could replace. The staging name is
+  predictable, so the swap can be prepared before the directory exists.
+  Check them there too, or move the CLI's private directory routine into
+  the library.
+* [Medium] **macOS volumes that ignore ownership pass the private-directory
+  check** (`compat/private.c` `fsimg_host_private_directory`): an external
+  APFS or HFS+ volume mounted with ownership ignored, the default for
+  removable drives, reports every file as owned by the caller and lets every
+  user write as owner, so a 0700 directory there passes while other local
+  users can write it. Refuse when `fstatfs()` on the descriptor reports
+  `MNT_IGNORE_OWNERSHIP`, and test it on an `hdiutil` volume attached with
+  owners off.
+* [Low] **A fresh directory replaced by the user's own populated directory
+  is reported as retained output** (`cmd/fsimg/paths.c` `fresh_private`):
+  a writer of a parent without the sticky bit can rename one of the user's
+  populated directories onto the fresh name before it is reopened; the
+  `NOT_EMPTY` verdict proves the replacement, yet `*created` stays set, the
+  error says the parent "lets another user into new directories", and the
+  final report names the user's directory as fsimg's retained output. Treat
+  a populated fresh directory as replaced: clear `*created` and say so.
 * [Low] **Adding a worker capability touches many parallel lists**
   (`cmd/fsimg/worker.h`, `job.c`, `worker-parent.c`, `worker-child.c`,
   `sandbox.c`, `paths.c`): the job bit, the decode mask, the expected and

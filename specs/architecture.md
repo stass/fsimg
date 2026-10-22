@@ -65,13 +65,12 @@ The [principles](principles.md) govern tradeoffs. In particular:
   when available and warns when it is unavailable. A required mode refuses
   unconfined execution. In-process library calls provide the same validation
   but do not sandbox their host application.
-* Extraction writes beneath one destination that the coordinator has proven
-  empty: a fresh directory it creates exclusively inside the user's `-C`
-  directory, or with `-E` an existing empty directory, verified on its
-  opened descriptor as the
-  [security specification](design-security.md#safe-extraction) describes.
-  Merging into a populated tree, overwriting files, and restoring privileged
-  metadata are outside the extraction contract.
+* Extraction writes beneath one private destination that the coordinator has
+  proven empty: a fresh directory it creates inside the user's `-C`
+  directory, or with `-E` the user's own directory after the checks in the
+  [security specification](design-security.md#safe-extraction). Merging
+  into a populated tree, overwriting files, and restoring privileged metadata
+  are outside the extraction contract.
 * A writer consumes known-length, repeatable sources. It freezes its catalog
   before planning and emits one image. Removing mutation and retry states
   makes failure and source ownership easier to reason about.
@@ -438,8 +437,8 @@ either mode. The parent does not execute requests to open names supplied by
 the worker.
 
 Extraction accepts only regular files and directories in its safe profile,
-writes only beneath a destination proven empty before the worker starts,
-and never follows image-derived symlinks.
+writes only beneath a destination proven empty and private before the worker
+starts, and never follows image-derived symlinks.
 Image paths are validated component by component, and files are created
 exclusively relative to directory descriptors. Details and platform guarantees
 are defined by the [security specification](design-security.md).
