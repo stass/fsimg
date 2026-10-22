@@ -88,7 +88,7 @@ verify_staged(const char *executable, fsimg_cli_options_t *options,
 	fsimg_worker_result_t result = { .confinement = FSIMG_CONFINEMENT_UNKNOWN };
 	fsimg_status_t status;
 
-	status = fsimg_cli_verification_request(options, &verify, error);
+	status = fsimg_cli_verification_request(options, paths, &verify, error);
 	if (status == FSIMG_OK) {
 		display->verifying_staged = true;
 		status = fsimg_worker_run(executable, &verify, fsimg_cli_event, display,
@@ -134,8 +134,7 @@ main(int argc, char **argv)
 	 */
 	if (fsimg_host_executable(executable, sizeof(executable)) == -1 || !install_signals())
 		return (1);
-	bzero(&paths, sizeof(paths));
-	paths.parent = paths.scratch_parent = -1;
+	fsimg_cli_paths_init(&paths);
 	status = fsimg_cli_parse(argc, argv, &options, &error);
 	fsimg_output_budget_init(&budget, &options.request.limits);
 	options.request.output_budget = &budget;

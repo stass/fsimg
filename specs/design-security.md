@@ -340,6 +340,26 @@ process with the same credentials only as far as the threat model states;
 they are a safeguard against mistakes and the ordinary shared-directory
 attacks, not an isolation boundary.
 
+The same rule, by the same function, proves every other directory the CLI
+coordinator creates private before anything is put in it: the staging
+directory of a created image, the staging directory of an `x --mtree`
+manifest and the scratch tree. A directory created with mode 0700 can still
+fail it: an inheritable entry of its parent can admit another user, a user
+who can write a parent without the sticky bit can put another directory in
+its place before it is reopened, and a filesystem without POSIX permissions,
+such as FAT mounted on macOS, reports group and other write on everything.
+Any of these could let another principal read the staged bytes or replace
+them before publication, so all of them refuse, and the error names the
+parent. One creation routine makes and checks every such directory, so none
+exists that skipped the check. A refused directory gives up its descriptor
+at once, and with it all cleanup of its contents, which goes through that
+descriptor: whatever the name now reaches may belong to someone else. It is
+removed again only while the name still holds the object it opened, owned
+by the user and empty; otherwise its name is reported as retained, unless
+it now holds another object, which is not fsimg's to report. A writer of
+the parent can still put another empty directory under the name between
+that check and the removal, which gains nothing it could not do itself.
+
 The selected parent comes from the user; image names never influence how
 that initial authority is obtained. Merging into a populated tree is not
 possible by any option.

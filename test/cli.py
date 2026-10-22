@@ -802,6 +802,24 @@ def test_extraction_acls(executable, root):
         in result.stderr
     assert not list(inheriting.iterdir())
 
+    # Every private directory fsimg creates passes the same check: the
+    # staging of an --mtree file beside a private destination, a created
+    # image's staging, and scratch.
+    destination = private_directory(root, "acl-destination")
+    for arguments, noun in [
+            (["xf", "human.img", "--json", "-C", "acl-destination",
+              "--mtree=acl-parent/human.mtree"], "--mtree directory"),
+            (["cf", "acl-parent/new.img", "-F", "fat12", "--json", "-C", "source", "."],
+             "output directory"),
+            (["xf", "human.img", "--json", "-C", "acl-destination", "-T", "acl-parent"],
+             "scratch directory")]:
+        error = failed(invoke(executable, root, arguments, expected=1))
+        assert error["message"] == \
+            f"{noun} gives new directories a non-trivial access control list", error
+        assert error["path"] == "acl-parent" and error["output_state"] == "absent", error
+        assert not list(inheriting.iterdir()), arguments
+        assert not list(destination.iterdir()), arguments
+
 
 def test_failed_creation_output(executable, root):
     source = root / "oversized-source"
@@ -1877,6 +1895,17 @@ def test_mtree_export(executable, root):
     assert not list(work.glob(".fsimg-*"))
 
 
+def test_mtree_reporting(executable, root):
+    """The summary of x --mtree says the manifest was published."""
+    work = root / "mtree-reporting"
+    work.mkdir()
+    shutil.copyfile(root / "human.img", work / "human.img")
+    summary = completed(invoke(executable, work, ["xf", "human.img", "--json",
+                                                  "--mtree=json.mtree"]))[-1]
+    assert summary["published"] is True, summary
+    assert (work / "json.mtree").exists()
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -1909,6 +1938,7 @@ def main():
         test_manifest_host(executable, root)
         test_manifest_refusals(executable, root)
         test_mtree_export(executable, root)
+        test_mtree_reporting(executable, root)
         test_partitioned(executable, root)
         test_containers(executable, root)
         test_compressed_and_streams(executable, root)

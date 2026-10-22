@@ -879,13 +879,24 @@ empty; a symbolic link or any other existing object that is not a directory
 fails as unsupported.
 A fresh directory that inherits a non-trivial ACL from its parent is removed
 again and the error names the parent.
+The private directories that stage a created image or an
+.Fl -mtree
+file, and the scratch directory, are checked the same way, so an image or
+.Fl -mtree
+file cannot be written into a directory that gives new directories a
+non-trivial ACL, or onto a filesystem without POSIX permissions, such as FAT
+mounted on macOS; scratch in such a directory fails every command until
+.Fl T
+names another.
 .Nm
 never edits an ACL.
 On Linux a listed
 .Ql system.nfs4_acl
-attribute counts as non-trivial whatever it holds, so a destination on an NFS
-server with ACL support cannot be used, and the server-side ACLs of a CIFS
-mount are not visible to the check at all.
+attribute counts as non-trivial whatever it holds, so neither a destination
+nor an image,
+.Fl -mtree
+file or scratch directory can be placed on an NFS server with ACL support,
+and the server-side ACLs of a CIFS mount are not visible to the check at all.
 .Pp
 Selected paths and necessary ancestors are preserved below the image root.
 Output uses private directories and regular files, no links, no merge,
@@ -966,6 +977,9 @@ The manifest is staged in a private directory beside its name and
 published with mode 0600, without replacement, only after the extraction
 completes; a failed extraction leaves no manifest, and an existing name
 fails before anything is extracted.
+A publication that is unsupported or uncertain retains the staged manifest,
+and a cleanup that fails retains its private directory; either is reported
+as the retained manifest.
 A failure reported after publication, such as a durability failure, leaves
 the manifest in place and reports the output published.
 It holds one descriptor against the fds limit.

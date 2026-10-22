@@ -21,13 +21,46 @@
 #include "private.h"
 #include "publish.h"
 
+/* What a private directory is called: the role in its name,
+ * .fsimg-ROLE-RANDOM, and the noun errors use for the directory it is made
+ * in.
+ */
+typedef struct private_kind {
+	const char	*role;
+	const char	*parent_noun;
+} private_kind_t;
+
+/* What a staged output is called: its private directory, its staged file
+ * there, and the noun errors use for its final name.
+ */
+struct fsimg_cli_staged_kind {
+	private_kind_t	 directory;
+	const char	*file;
+	const char	*final_noun;
+};
+typedef struct fsimg_cli_staged_kind staged_kind_t;
+
+static const private_kind_t scratch_kind = {
+	.role = "scratch", .parent_noun = "scratch directory"
+};
+static const staged_kind_t image_kind = {
+	.directory = { .role = "output", .parent_noun = "output directory" },
+	.file = "image", .final_noun = "output"
+};
+static const staged_kind_t manifest_kind = {
+	.directory = { .role = "mtree", .parent_noun = "--mtree directory" },
+	.file = "manifest", .final_noun = "--mtree file"
+};
+
 static fsimg_status_t host_error(fsimg_error_t *, const char *);
 static fsimg_status_t path_error(fsimg_error_t *, const char *, const char *);
 static fsimg_status_t kind_error(fsimg_error_t *, int, const char *,
     const char *);
 static fsimg_status_t split_output(const char *, char *, char *, fsimg_error_t *);
-static fsimg_status_t private_directory(int, const char *, char *, int *, bool *,
-    fsimg_error_t *);
+static fsimg_status_t private_directory(int, const char *,
+    const private_kind_t *, char *, int *, bool *, fsimg_error_t *);
+static fsimg_status_t fresh_private(int, const char *, int *, const char *,
+    const char *, bool *, fsimg_error_t *);
 static fsimg_status_t reject_ancestor(int, int, const char *, fsimg_error_t *);
 static fsimg_status_t prepare_scratch(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
@@ -52,16 +85,21 @@ static fsimg_status_t handed_over_file(int, const char *, int *,
     fsimg_error_t *);
 static fsimg_status_t prepare_raw(fsimg_cli_options_t *, fsimg_error_t *);
 static fsimg_status_t prepare_spool(fsimg_worker_request_t *, fsimg_error_t *);
-static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t, bool,
+static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t,
     const char *);
-static bool remove_fresh_directory(int, const char *, int);
+static bool remove_own_directory(int, const char *, int);
 static fsimg_status_t prepare_mtree(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
 static fsimg_status_t recheck_mtree(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
-static fsimg_status_t publish_staged(const fsimg_cli_options_t *, int,
-    const char *, uint64_t, int, const char *, const volatile sig_atomic_t *,
+static fsimg_status_t stage_output(fsimg_cli_staged_t *,
+    const staged_kind_t *, const char *, fsimg_error_t *);
+static fsimg_status_t final_name_free(const fsimg_cli_staged_t *,
     fsimg_error_t *);
+static fsimg_status_t publish_staged(const fsimg_cli_options_t *,
+    fsimg_cli_staged_t *, uint64_t, const volatile sig_atomic_t *,
+    fsimg_error_t *);
+static int clean_staged(fsimg_cli_staged_t *, bool);
 static fsimg_status_t prepare_destination(fsimg_cli_options_t *,
     fsimg_cli_paths_t *, fsimg_error_t *);
 static int clean_scratch(int);
@@ -149,29 +187,87 @@ split_output(const char *path, char *parent, char *name, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/*
+ * A fresh private directory of kind beneath parent, the directory at
+ * parent_path: created with mode 0700, reopened no-follow, then proven
+ * private on its descriptor.
+ */
 static fsimg_status_t
-private_directory(int parent, const char *role, char *name, int *out,
-    bool *created, fsimg_error_t *error)
+private_directory(int parent, const char *parent_path,
+    const private_kind_t *kind, char *name, int *out, bool *created,
+    fsimg_error_t *error)
 {
 	uint64_t random[2];
 
 	for (unsigned attempt = 0; attempt < 128; attempt++) {
 		if (fsimg_host_random(random, sizeof(random)) == -1)
 			return (host_error(error, "private directory randomness failed"));
-		snprintf(name, 96, ".fsimg-%s-%016llx%016llx", role,
+		snprintf(name, 96, ".fsimg-%s-%016llx%016llx", kind->role,
 		    (unsigned long long)random[0], (unsigned long long)random[1]);
 		if (mkdirat(parent, name, 0700) == 0) {
 			*created = true;
 			*out = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 			if (*out == -1)
 				return (host_error(error, "private directory open failed"));
-			return (FSIMG_OK);
+			return (fresh_private(parent, name, out, kind->parent_noun,
+			    parent_path, created, error));
 		}
 		if (errno != EEXIST)
 			return (host_error(error, "private directory creation failed"));
 	}
 	return (fsimg_error_set(error, FSIMG_EEXISTS, EEXIST,
 	    FSIMG_OP_IO, "private directory name attempts exhausted"));
+}
+
+/*
+ * Prove the directory just created as name beneath parent, and opened as
+ * *fd, private by the rule an extraction destination passes
+ * (specs/design-security.md). Its mode 0700 and its owner do not prove it:
+ * inheritable access control entries of parent can admit another user,
+ * and a user who can write parent can put another directory in its place
+ * before it is opened. Either could then read or replace what fsimg puts
+ * there. The cause lies in parent, so the error names it, parent_noun at
+ * parent_path.
+ *
+ * A directory that fails the check, or cannot be checked, gives up its
+ * descriptor, and with it every cleanup of its contents, since those go
+ * through the descriptor: the object it names may be someone else's. It
+ * is removed again only when the name still holds the object it opened,
+ * owned by this user and empty, which clears *created; a name that now
+ * holds another object clears it too, since that object is not fsimg's to
+ * report. Otherwise the name remains, reported as retained.
+ */
+static fsimg_status_t
+fresh_private(int parent, const char *name, int *fd, const char *parent_noun,
+    const char *parent_path, bool *created, fsimg_error_t *error)
+{
+	fsimg_host_privacy_t verdict;
+	fsimg_status_t status;
+	char message[128];
+	int saved;
+
+	if (fsimg_host_private_directory(*fd, &verdict) == -1) {
+		saved = errno;
+		snprintf(message, sizeof(message),
+		    "cannot inspect a new directory in the %s", parent_noun);
+		errno = saved;
+		status = path_error(error, message, parent_path);
+	} else if (verdict == FSIMG_HOST_PRIVATE) {
+		return (FSIMG_OK);
+	} else {
+		snprintf(message, sizeof(message),
+		    verdict == FSIMG_HOST_EXTENDED_ACL ?
+		    "%s gives new directories a non-trivial access control list" :
+		    "%s lets another user into new directories", parent_noun);
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
+		    message);
+		fsimg_error_path(error, parent_path);
+	}
+	if (remove_own_directory(parent, name, *fd) || errno == EEXIST)
+		*created = false;
+	close(*fd);
+	*fd = -1;
+	return (status);
 }
 
 /* Compare opened identities while walking toward the host root, failing
@@ -244,12 +340,13 @@ prepare_scratch(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		return (FSIMG_OK);
 	if (strlen(options->scratch) + sizeof(paths->scratch_name) + 1 >= PATH_MAX)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-		    FSIMG_OP_IO, "scratch parent leaves no room for a private pathname"));
+		    FSIMG_OP_IO, "scratch directory leaves no room for a private pathname"));
 	paths->scratch_parent = open(options->scratch, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	if (paths->scratch_parent == -1)
 		return (path_error(error, "cannot open scratch directory", options->scratch));
-	status = private_directory(paths->scratch_parent, "scratch", paths->scratch_name,
-	    &request->scratch_fd, &paths->scratch_created, error);
+	status = private_directory(paths->scratch_parent, options->scratch,
+	    &scratch_kind, paths->scratch_name, &request->scratch_fd,
+	    &paths->scratch_created, error);
 	if (paths->scratch_created)
 		snprintf(paths->retained_scratch, sizeof(paths->retained_scratch),
 		    "%s/%s", options->scratch, paths->scratch_name);
@@ -644,48 +741,89 @@ random_uuid(unsigned char uuid[static 16])
 	return (true);
 }
 
-/* A fresh private staging directory beside the final name, which must not
- * exist yet. The worker creates the staged image inside it only after
- * planning; only the coordinator publishes it.
+/*
+ * A staged output's private directory beside its final name path, which
+ * must not exist yet. A failure can leave the record partly filled; it is
+ * still fsimg_cli_cleanup's to clean.
+ */
+static fsimg_status_t
+stage_output(fsimg_cli_staged_t *staged, const staged_kind_t *kind,
+    const char *path, fsimg_error_t *error)
+{
+	char parent_path[PATH_MAX], message[96];
+	fsimg_status_t status;
+	int saved;
+
+	staged->kind = kind;
+	staged->path = path;
+	status = split_output(path, parent_path, staged->name, error);
+	if (status != FSIMG_OK)
+		return (status);
+	/* Room for the retained name parent_path/directory_name/file. */
+	if (strlen(parent_path) + sizeof(staged->directory_name) +
+	    strlen(kind->file) + 2 >= PATH_MAX) {
+		snprintf(message, sizeof(message),
+		    "%s leaves no room for a private pathname",
+		    kind->directory.parent_noun);
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_IO,
+		    message));
+	}
+	staged->parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (staged->parent == -1) {
+		saved = errno;
+		snprintf(message, sizeof(message), "cannot open %s",
+		    kind->directory.parent_noun);
+		errno = saved;
+		return (path_error(error, message, parent_path));
+	}
+	status = final_name_free(staged, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = private_directory(staged->parent, parent_path, &kind->directory,
+	    staged->directory_name, &staged->directory, &staged->created, error);
+	if (staged->created)
+		snprintf(staged->retained, sizeof(staged->retained), "%s/%s",
+		    parent_path, staged->directory_name);
+	return (status);
+}
+
+/* Fail unless the staged output's final name is free, never following a
+ * symbolic link there.
+ */
+static fsimg_status_t
+final_name_free(const fsimg_cli_staged_t *staged, fsimg_error_t *error)
+{
+	struct stat st;
+	char message[96];
+	int saved;
+
+	if (fstatat(staged->parent, staged->name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+		snprintf(message, sizeof(message), "cannot create %s",
+		    staged->kind->final_noun);
+		errno = EEXIST;
+		return (path_error(error, message, staged->path));
+	}
+	if (errno == ENOENT)
+		return (FSIMG_OK);
+	saved = errno;
+	snprintf(message, sizeof(message), "cannot inspect %s",
+	    staged->kind->final_noun);
+	errno = saved;
+	return (path_error(error, message, staged->path));
+}
+
+/* A creation's staged image. The worker creates "image" in the private
+ * directory only after planning; only the coordinator publishes it.
  */
 static fsimg_status_t
 prepare_staging(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
     fsimg_error_t *error)
 {
-	fsimg_worker_request_t *request = &options->request;
-	struct stat st;
-	char parent_path[PATH_MAX];
 	fsimg_status_t status;
-	int count;
 
-	status = split_output(options->image, parent_path, paths->basename, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (strlen(parent_path) + sizeof(paths->staging_name) + 7 >= PATH_MAX)
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-		    FSIMG_OP_IO, "output parent leaves no room for a private pathname"));
-	paths->parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	if (paths->parent == -1)
-		return (path_error(error, "cannot open output directory", parent_path));
-	if (fstatat(paths->parent, paths->basename, &st, AT_SYMLINK_NOFOLLOW) == 0) {
-		errno = EEXIST;
-		return (path_error(error, "cannot create output", options->image));
-	}
-	if (errno != ENOENT)
-		return (path_error(error, "cannot inspect output", options->image));
-	status = private_directory(paths->parent, "output", paths->staging_name,
-	    &request->output_fd, &paths->staging_created, error);
-	if (!paths->staging_created)
-		return (status);
-	/* A post-create open failure still needs a retained staging path. */
-	count = snprintf(paths->retained_output, sizeof(paths->retained_output),
-	    "%s/%s/image", parent_path, paths->staging_name);
-	if (status != FSIMG_OK)
-		return (status);
-	if (count < 0 || (size_t)count >= sizeof(paths->retained_output))
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-		    FSIMG_OP_IO, "private output pathname exceeds host path bound"));
-	return (FSIMG_OK);
+	status = stage_output(&paths->image, &image_kind, options->image, error);
+	options->request.output_fd = paths->image.directory;
+	return (status);
 }
 
 /*
@@ -775,12 +913,9 @@ handed_over_error(fsimg_error_t *error, const char *role, const char *failure)
 	return (host_error(error, message));
 }
 
-/* A destination that fails the privacy rule. A fresh directory carrying an
- * ACL got it from the -C parent's inheritable entries, so that error names
- * the parent; every other verdict names the destination itself.
- */
+/* An existing -E destination that fails the privacy rule. */
 static fsimg_status_t
-privacy_error(fsimg_error_t *error, fsimg_host_privacy_t verdict, bool fresh,
+privacy_error(fsimg_error_t *error, fsimg_host_privacy_t verdict,
     const char *path)
 {
 	const char *message;
@@ -798,9 +933,7 @@ privacy_error(fsimg_error_t *error, fsimg_host_privacy_t verdict, bool fresh,
 		message = "extraction destination is writable by group or others";
 		break;
 	case FSIMG_HOST_EXTENDED_ACL:
-		message = fresh ?
-		    "-C directory gives new directories a non-trivial access control list" :
-		    "extraction destination carries a non-trivial access control list";
+		message = "extraction destination carries a non-trivial access control list";
 		break;
 	case FSIMG_HOST_NOT_EMPTY:
 		message = "extraction destination is not empty";
@@ -819,14 +952,18 @@ privacy_error(fsimg_error_t *error, fsimg_host_privacy_t verdict, bool fresh,
 	return (status);
 }
 
-/* Remove the directory just created under name when it is still that
+/* Remove the directory fsimg created under name when it is still that
  * object, which the opened descriptor identifies, still owned by this user,
  * so a directory someone else substituted for it is never removed, and
- * still empty, which rmdir itself requires. Anything else stays and is
- * reported.
+ * empty, which rmdir itself requires. Anything else stays, with errno
+ * saying why: EEXIST when the name holds another object, which FreeBSD,
+ * Linux and macOS never report for a directory that is merely not empty.
+ * A writer of a parent without the sticky bit can still put another empty
+ * directory under the name between the check and the removal; it gains
+ * nothing it could not do itself.
  */
 static bool
-remove_fresh_directory(int parent, const char *name, int fd)
+remove_own_directory(int parent, const char *name, int fd)
 {
 	struct stat opened, named;
 
@@ -834,52 +971,34 @@ remove_fresh_directory(int parent, const char *name, int fd)
 	    fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == -1)
 		return (false);
 	if (opened.st_dev != named.st_dev || opened.st_ino != named.st_ino ||
-	    opened.st_uid != geteuid())
+	    opened.st_uid != geteuid()) {
+		errno = EEXIST;
 		return (false);
+	}
 	return (unlinkat(parent, name, AT_REMOVEDIR) == 0);
 }
 
 /*
- * The manifest of x --mtree, staged like a created image: its final name,
- * relative to the working directory, must not exist yet, and the file
- * "manifest" is created exclusively with mode 0600 in a fresh private
- * directory beside it. The worker receives only the file's descriptor,
- * write-only; only the coordinator publishes it, after a validated
- * completion, and cleanup removes it on any other outcome. It is prepared
- * before the destination, so a refused name leaves no extraction
+ * The manifest of x --mtree, staged like a created image. The file
+ * "manifest" is created exclusively with mode 0600 in the private
+ * directory, and the worker receives only its descriptor, write-only; only
+ * the coordinator publishes it, after a validated completion. It is
+ * prepared before the destination, so a refused name leaves no extraction
  * directory behind.
  */
 static fsimg_status_t
 prepare_mtree(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
     fsimg_error_t *error)
 {
-	fsimg_worker_request_t *request = &options->request;
-	struct stat st;
-	char parent_path[PATH_MAX];
+	fsimg_cli_staged_t *staged = &paths->manifest;
 	fsimg_status_t status;
 
-	status = split_output(options->mtree, parent_path, paths->mtree_basename,
-	    error);
+	status = stage_output(staged, &manifest_kind, options->mtree, error);
 	if (status != FSIMG_OK)
 		return (status);
-	paths->mtree_parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	if (paths->mtree_parent == -1)
-		return (path_error(error, "cannot open --mtree directory", parent_path));
-	if (fstatat(paths->mtree_parent, paths->mtree_basename, &st,
-	    AT_SYMLINK_NOFOLLOW) == 0) {
-		errno = EEXIST;
-		return (path_error(error, "cannot create --mtree file", options->mtree));
-	}
-	if (errno != ENOENT)
-		return (path_error(error, "cannot inspect --mtree file", options->mtree));
-	status = private_directory(paths->mtree_parent, "mtree",
-	    paths->mtree_staging_name, &paths->mtree_staging,
-	    &paths->mtree_staging_created, error);
-	if (status != FSIMG_OK)
-		return (status);
-	request->manifest_fd = openat(paths->mtree_staging, "manifest",
+	options->request.manifest_fd = openat(staged->directory, staged->kind->file,
 	    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-	if (request->manifest_fd == -1)
+	if (options->request.manifest_fd == -1)
 		return (host_error(error, "staged manifest creation failed"));
 	return (FSIMG_OK);
 }
@@ -894,25 +1013,14 @@ static fsimg_status_t
 recheck_mtree(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
     fsimg_error_t *error)
 {
-	fsimg_worker_request_t *request = &options->request;
-	struct stat st;
 	fsimg_status_t status;
 
-	if (fstatat(paths->mtree_parent, paths->mtree_basename, &st,
-	    AT_SYMLINK_NOFOLLOW) == 0) {
-		errno = EEXIST;
-		status = path_error(error, "cannot create --mtree file",
-		    options->mtree);
-	} else if (errno == ENOENT) {
-		return (FSIMG_OK);
-	} else {
-		status = path_error(error, "cannot inspect --mtree file",
-		    options->mtree);
-	}
-	if (!options->extract_here &&
-	    remove_fresh_directory(paths->parent, options->stem, request->output_fd)) {
+	status = final_name_free(&paths->manifest, error);
+	if (status != FSIMG_OK && !options->extract_here &&
+	    remove_own_directory(paths->destination_parent, options->stem,
+	    options->request.output_fd)) {
 		paths->extraction_prepared = false;
-		paths->retained_output[0] = '\0';
+		paths->retained_destination[0] = '\0';
 	}
 	return (status);
 }
@@ -952,45 +1060,50 @@ prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		if (fsimg_host_private_directory(request->output_fd, &verdict) == -1)
 			return (path_error(error, "cannot inspect -C directory", parent_path));
 		if (verdict != FSIMG_HOST_PRIVATE)
-			return (privacy_error(error, verdict, false, parent_path));
+			return (privacy_error(error, verdict, parent_path));
 		paths->extraction_prepared = true;
-		snprintf(paths->retained_output, sizeof(paths->retained_output), "%s",
-		    parent_path);
+		snprintf(paths->retained_destination,
+		    sizeof(paths->retained_destination), "%s", parent_path);
 		return (FSIMG_OK);
 	}
 
-	paths->parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	if (paths->parent == -1)
+	paths->destination_parent = open(parent_path,
+	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (paths->destination_parent == -1)
 		return (path_error(error, "cannot open -C directory", parent_path));
-	count = snprintf(paths->retained_output, sizeof(paths->retained_output),
-	    "%s/%s", parent_path, options->stem);
-	if (count < 0 || (size_t)count >= sizeof(paths->retained_output))
+	count = snprintf(paths->retained_destination,
+	    sizeof(paths->retained_destination), "%s/%s", parent_path, options->stem);
+	if (count < 0 || (size_t)count >= sizeof(paths->retained_destination))
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 		    FSIMG_OP_IO, "extraction pathname exceeds host path bound"));
-	if (mkdirat(paths->parent, options->stem, 0700) == -1) {
+	if (mkdirat(paths->destination_parent, options->stem, 0700) == -1) {
 		status = path_error(error, "cannot create extraction directory",
-		    paths->retained_output);
-		paths->retained_output[0] = '\0';
+		    paths->retained_destination);
+		paths->retained_destination[0] = '\0';
 		return (status);
 	}
 	paths->extraction_prepared = true;
-	request->output_fd = openat(paths->parent, options->stem,
+	request->output_fd = openat(paths->destination_parent, options->stem,
 	    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 	if (request->output_fd == -1)
 		return (path_error(error, "cannot open extraction directory",
-		    paths->retained_output));
-	if (fsimg_host_private_directory(request->output_fd, &verdict) == -1)
-		return (path_error(error, "cannot inspect extraction directory",
-		    paths->retained_output));
-	if (verdict == FSIMG_HOST_PRIVATE)
-		return (FSIMG_OK);
-	status = privacy_error(error, verdict, true,
-	    verdict == FSIMG_HOST_EXTENDED_ACL ? parent_path : paths->retained_output);
-	if (remove_fresh_directory(paths->parent, options->stem, request->output_fd)) {
-		paths->extraction_prepared = false;
-		paths->retained_output[0] = '\0';
-	}
+		    paths->retained_destination));
+	/* A fresh destination is prepared exactly while it exists. */
+	status = fresh_private(paths->destination_parent, options->stem,
+	    &request->output_fd, "-C directory", parent_path,
+	    &paths->extraction_prepared, error);
+	if (!paths->extraction_prepared)
+		paths->retained_destination[0] = '\0';
 	return (status);
+}
+
+void
+fsimg_cli_paths_init(fsimg_cli_paths_t *paths)
+{
+	bzero(paths, sizeof(*paths));
+	paths->image.parent = paths->image.directory = -1;
+	paths->manifest.parent = paths->manifest.directory = -1;
+	paths->destination_parent = paths->scratch_parent = -1;
 }
 
 fsimg_status_t
@@ -1000,9 +1113,7 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	fsimg_worker_request_t *request = &options->request;
 	fsimg_status_t status;
 
-	bzero(paths, sizeof(*paths));
-	paths->parent = paths->scratch_parent = -1;
-	paths->mtree_parent = paths->mtree_staging = -1;
+	fsimg_cli_paths_init(paths);
 	status = prepare_scratch(options, paths, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1051,9 +1162,9 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		    "scratch and output trees overlap", error);
 	}
 	/* The worker must not see the manifest beside the tree it fills. */
-	if (status == FSIMG_OK && paths->mtree_staging != -1 &&
+	if (status == FSIMG_OK && paths->manifest.directory != -1 &&
 	    request->output_fd != -1)
-		status = reject_ancestor(paths->mtree_staging, request->output_fd,
+		status = reject_ancestor(paths->manifest.directory, request->output_fd,
 		    "--mtree file lies inside the extraction destination", error);
 	return (status);
 }
@@ -1066,7 +1177,8 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
  */
 fsimg_status_t
 fsimg_cli_verification_request(const fsimg_cli_options_t *options,
-    fsimg_worker_request_t *verify, fsimg_error_t *error)
+    const fsimg_cli_paths_t *paths, fsimg_worker_request_t *verify,
+    fsimg_error_t *error)
 {
 	const fsimg_worker_request_t *create = &options->request;
 	fsimg_host_file_t identity;
@@ -1091,7 +1203,8 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 		if (verify->stack.slots[i].state == FSIMG_SLOT_UNSPECIFIED)
 			verify->stack.slots[i].state = FSIMG_SLOT_EMPTY;
 	}
-	verify->input_fd = fsimg_host_source_open(create->output_fd, "image", false);
+	verify->input_fd = fsimg_host_source_open(paths->image.directory,
+	    paths->image.kind->file, false);
 	if (verify->input_fd == -1)
 		return (host_error(error, "cannot open the staged image for verification"));
 	if (fsimg_host_file(verify->input_fd, &identity) == -1)
@@ -1111,13 +1224,16 @@ publication_cancelled(void *argument)
 	    (cancel->deadline != 0 && fsimg_cli_clock() >= cancel->deadline));
 }
 
-/* Publish staged_name of length bytes in staging as name in parent, without
+/* Publish a staged output of length bytes under its final name, without
  * replacement, under the command's limits, its deadline and its interrupt.
+ * An unsupported or uncertain publication retains the staged file for
+ * inspection; any other failure leaves it for cleanup to remove, which is
+ * safe even when linking the final name may have succeeded.
  */
 static fsimg_status_t
-publish_staged(const fsimg_cli_options_t *options, int staging,
-    const char *staged_name, uint64_t length, int parent, const char *name,
-    const volatile sig_atomic_t *interrupted, fsimg_error_t *error)
+publish_staged(const fsimg_cli_options_t *options, fsimg_cli_staged_t *staged,
+    uint64_t length, const volatile sig_atomic_t *interrupted,
+    fsimg_error_t *error)
 {
 	publication_cancel_t cancel = { .interrupted = interrupted,
 	    .deadline = options->request.deadline_milliseconds };
@@ -1131,9 +1247,18 @@ publish_staged(const fsimg_cli_options_t *options, int staging,
 	status = fsimg_ctx_new(&limits, &ctx, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_publish(ctx, staging, staged_name, length, parent, name,
-	    NULL, error);
+	status = fsimg_publish(ctx, staged->directory, staged->kind->file, length,
+	    staged->parent, staged->name, NULL, error);
 	fsimg_ctx_free(ctx);
+	if (status == FSIMG_OK) {
+		staged->published = true;
+		return (FSIMG_OK);
+	}
+	staged->published = error->output_state == FSIMG_OUTPUT_PUBLISHED;
+	staged->keep_staged = status == FSIMG_EUNSUPPORTED ||
+	    error->output_state == FSIMG_OUTPUT_UNCERTAIN;
+	if (error->path[0] == '\0')
+		fsimg_error_path(error, staged->path);
 	return (status);
 }
 
@@ -1142,24 +1267,13 @@ fsimg_cli_publish(const fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
     const fsimg_worker_result_t *result, const volatile sig_atomic_t *interrupted,
     fsimg_error_t *error)
 {
-	fsimg_status_t status;
-
-	status = publish_staged(options, options->request.output_fd, "image",
-	    result->image_bytes, paths->parent, paths->basename, interrupted, error);
-	paths->published = status == FSIMG_OK || error->output_state == FSIMG_OUTPUT_PUBLISHED;
-	paths->retain_staging = status == FSIMG_EUNSUPPORTED ||
-	    error->output_state == FSIMG_OUTPUT_UNCERTAIN;
-	return (status);
+	return (publish_staged(options, &paths->image, result->image_bytes,
+	    interrupted, error));
 }
 
-/* Publish the staged x --mtree manifest under its final name, without
- * replacement, once the worker's completion has been validated. The
- * staged file's length is its own: the coordinator's descriptor names the
- * file the worker wrote, and publication refuses a staged name that no
- * longer holds a file of that length. Unlike a staged image, an
- * unpublished manifest is never retained, whatever the failure: removing
- * the staged name is safe even when linking it may have succeeded, which
- * an uncertain result reports.
+/* The manifest's length is its staged file's own: the coordinator's
+ * descriptor names the file the worker wrote, and publication refuses a
+ * staged name that no longer holds a file of that length.
  */
 fsimg_status_t
 fsimg_cli_publish_mtree(const fsimg_cli_options_t *options,
@@ -1167,24 +1281,58 @@ fsimg_cli_publish_mtree(const fsimg_cli_options_t *options,
     fsimg_error_t *error)
 {
 	struct stat st;
-	fsimg_status_t status;
 
 	if (fstat(options->request.manifest_fd, &st) == -1)
 		return (host_error(error, "staged manifest stat failed"));
-	status = publish_staged(options, paths->mtree_staging, "manifest",
-	    (uint64_t)st.st_size, paths->mtree_parent, paths->mtree_basename,
-	    interrupted, error);
-	paths->mtree_published = status == FSIMG_OK ||
-	    error->output_state == FSIMG_OUTPUT_PUBLISHED;
-	if (status != FSIMG_OK && error->path[0] == '\0')
-		fsimg_error_path(error, options->mtree);
-	return (status);
+	return (publish_staged(options, &paths->manifest, (uint64_t)st.st_size,
+	    interrupted, error));
 }
 
 bool
 fsimg_cli_published(const fsimg_cli_paths_t *paths)
 {
-	return (paths->published || paths->mtree_published);
+	return (paths->image.published || paths->manifest.published);
+}
+
+/*
+ * Remove a staged output's file and private directory unless publication
+ * retained them, make a published name durable on success, and close the
+ * output's descriptors. Returns the first failure's errno, or zero. A
+ * private directory without a descriptor, one that failed its check or
+ * could not be reopened, is left untouched and reported as retained.
+ */
+static int
+clean_staged(fsimg_cli_staged_t *staged, bool success)
+{
+	size_t length;
+	int failure;
+
+	failure = 0;
+	if (staged->created && staged->keep_staged) {
+		/* Publication left the staged file for inspection; name it. */
+		length = strlen(staged->retained);
+		snprintf(staged->retained + length, sizeof(staged->retained) - length,
+		    "/%s", staged->kind->file);
+	} else if (staged->created && staged->directory != -1) {
+		if (unlinkat(staged->directory, staged->kind->file, 0) == -1 &&
+		    errno != ENOENT)
+			failure = errno;
+		if (remove_own_directory(staged->parent, staged->directory_name,
+		    staged->directory))
+			staged->retained[0] = '\0';
+		else if (failure == 0)
+			failure = errno;
+	}
+	if (success && staged->parent != -1 && fsync(staged->parent) == -1 &&
+	    failure == 0)
+		failure = errno;
+	if (staged->directory != -1 && close(staged->directory) == -1 &&
+	    failure == 0)
+		failure = errno;
+	if (staged->parent != -1 && close(staged->parent) == -1 && failure == 0)
+		failure = errno;
+	staged->directory = staged->parent = -1;
+	return (failure);
 }
 
 /* Scratch uses flat files. Never recurse into a directory left by a failed
@@ -1244,58 +1392,39 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
     fsimg_status_t status, fsimg_error_t *error)
 {
 	fsimg_worker_request_t *request = &options->request;
-	char *last_component;
 	int cleanup, failure;
 	int *descriptors[] = { &request->input_fd, &request->output_fd,
 	    &request->scratch_fd, &request->raw_fd, &request->spool_fd,
-	    &request->manifest_fd, &paths->parent, &paths->scratch_parent,
-	    &paths->mtree_staging, &paths->mtree_parent };
+	    &request->manifest_fd, &paths->destination_parent,
+	    &paths->scratch_parent };
+	fsimg_cli_staged_t *staged[] = { &paths->image, &paths->manifest };
 
 	cleanup = 0;
-	if (paths->staging_created && !paths->retain_staging) {
-		/* Cleanup can remove the image yet retain other directory entries.
-		 * Report the private directory, not an image that may no longer exist.
-		 */
-		last_component = strrchr(paths->retained_output, '/');
-		if (last_component != NULL)
-			*last_component = '\0';
-		if (request->output_fd != -1 &&
-		    unlinkat(request->output_fd, "image", 0) == -1 && errno != ENOENT)
-			cleanup = errno;
-		if (unlinkat(paths->parent, paths->staging_name, AT_REMOVEDIR) == -1) {
-			if (cleanup == 0)
-				cleanup = errno;
-		} else
-			paths->retained_output[0] = '\0';
-	}
-	/* The staged manifest's name goes on every outcome: publication
-	 * removed it after linking the final name, or failed to, or the
-	 * manifest is not published and must not remain.
+	/* A staged creation's output descriptor is image.directory, lent,
+	 * which the image's own cleanup closes.
 	 */
-	if (paths->mtree_staging_created) {
-		if (paths->mtree_staging != -1 &&
-		    unlinkat(paths->mtree_staging, "manifest", 0) == -1 &&
-		    errno != ENOENT && cleanup == 0)
-			cleanup = errno;
-		if (unlinkat(paths->mtree_parent, paths->mtree_staging_name,
-		    AT_REMOVEDIR) == -1 && cleanup == 0)
-			cleanup = errno;
-		if (status == FSIMG_OK && fsync(paths->mtree_parent) == -1 &&
-		    cleanup == 0)
-			cleanup = errno;
+	if (request->output_fd != -1 && request->output_fd == paths->image.directory)
+		request->output_fd = -1;
+	for (unsigned i = 0; i < sizeof(staged) / sizeof(staged[0]); i++) {
+		failure = clean_staged(staged[i], status == FSIMG_OK);
+		if (cleanup == 0)
+			cleanup = failure;
 	}
-	if (paths->scratch_created) {
-		failure = request->scratch_fd == -1 ? 0 : clean_scratch(request->scratch_fd);
-		if (failure == 0 &&
-		    unlinkat(paths->scratch_parent, paths->scratch_name, AT_REMOVEDIR) == -1)
+	/* Like a staged output's, a scratch directory without a descriptor is
+	 * left untouched and reported.
+	 */
+	if (paths->scratch_created && request->scratch_fd != -1) {
+		failure = clean_scratch(request->scratch_fd);
+		if (failure == 0 && !remove_own_directory(paths->scratch_parent,
+		    paths->scratch_name, request->scratch_fd))
 			failure = errno;
 		if (failure == 0)
 			paths->retained_scratch[0] = '\0';
 		else if (cleanup == 0)
 			cleanup = failure;
 	}
-	if (status == FSIMG_OK && paths->parent != -1 && fsync(paths->parent) == -1 &&
-	    cleanup == 0)
+	if (status == FSIMG_OK && paths->destination_parent != -1 &&
+	    fsync(paths->destination_parent) == -1 && cleanup == 0)
 		cleanup = errno;
 	for (unsigned i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); i++) {
 		if (*descriptors[i] != -1 && close(*descriptors[i]) == -1 && cleanup == 0)

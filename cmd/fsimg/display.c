@@ -1339,7 +1339,8 @@ summary(fsimg_cli_display_t *display)
 		    (unsigned long long)r->entries, (unsigned long long)r->logical_bytes,
 		    (unsigned long long)r->raw_bytes, (unsigned long long)r->metadata_losses,
 		    (unsigned long long)r->skipped_entries,
-		    confinement_name(r->confinement), display->paths->published ? "true" : "false");
+		    confinement_name(r->confinement),
+		    fsimg_cli_published(display->paths) ? "true" : "false");
 		limits(display);
 		append(display, ",\"progress_records\":\"%llu\",", (unsigned long long)display->progress_records);
 		output_counts(display);
@@ -1348,7 +1349,9 @@ summary(fsimg_cli_display_t *display)
 		append(display, "fsimg: %s: %llu entries, ", scope_name(display),
 		    (unsigned long long)r->entries);
 		byte_size(display, r->logical_bytes);
-		append(display, "%s\n", display->paths->published ? "; image published" : "");
+		append(display, "%s%s\n",
+		    display->paths->image.published ? "; image published" : "",
+		    display->paths->manifest.published ? "; manifest published" : "");
 	}
 }
 
@@ -1367,6 +1370,39 @@ layer_noun(fsimg_layer_kind_t kind)
 		return ("compressed image");
 	}
 	return ("layer");
+}
+
+/* What a failed command left behind outside its final names: a staged
+ * image or its private directory, or an extraction destination. A command
+ * stages an image or extracts, never both.
+ */
+static const char *
+retained_output(const fsimg_cli_display_t *display)
+{
+	const fsimg_cli_paths_t *paths = display->paths;
+
+	return (paths->image.retained[0] != '\0' ? paths->image.retained :
+	    paths->retained_destination);
+}
+
+/* " as NAME" for each staged output that was published, by its final
+ * pathname as given.
+ */
+static void
+published_names(fsimg_cli_display_t *display)
+{
+	const fsimg_cli_staged_t *outputs[] = { &display->paths->image,
+	    &display->paths->manifest };
+	const char *separator;
+
+	separator = " as ";
+	for (unsigned i = 0; i < sizeof(outputs) / sizeof(outputs[0]); i++) {
+		if (!outputs[i]->published || outputs[i]->path == NULL)
+			continue;
+		append(display, "%s", separator);
+		path_excerpt(display, outputs[i]->path);
+		separator = " and ";
+	}
 }
 
 static void
@@ -1400,7 +1436,9 @@ failure(fsimg_cli_display_t *display)
 		if (error->offset_valid) uint_value(display, error->offset);
 		else append(display, "null");
 		append(display, ",\"retained_output\":");
-		string_value(display, display->paths->retained_output);
+		string_value(display, retained_output(display));
+		append(display, ",\"retained_manifest\":");
+		string_value(display, display->paths->manifest.retained);
 		append(display, ",\"retained_scratch\":");
 		string_value(display, display->paths->retained_scratch);
 		append(display, ",\"sandbox\":\"%s\",", confinement_name(display->result->confinement));
@@ -1450,10 +1488,7 @@ failure(fsimg_cli_display_t *display)
 		append(display, "fsimg: output is incomplete\n");
 	else if (error->output_state == FSIMG_OUTPUT_PUBLISHED) {
 		append(display, "fsimg: output was published");
-		if (display->options->image != NULL) {
-			append(display, " as ");
-			path_excerpt(display, display->options->image);
-		}
+		published_names(display);
 		append(display, "; finalization failed; do not retry blindly\n");
 	} else if (error->output_state == FSIMG_OUTPUT_UNCERTAIN)
 		append(display, "fsimg: output publication or durability is uncertain; inspect the destination before retrying\n");
@@ -1470,9 +1505,14 @@ failure(fsimg_cli_display_t *display)
 		prose(display, strerror(error->cleanup_error));
 		append(display, "\n");
 	}
-	if (display->paths->retained_output[0] != '\0') {
+	if (retained_output(display)[0] != '\0') {
 		append(display, "fsimg: retained output: ");
-		string_value(display, display->paths->retained_output);
+		string_value(display, retained_output(display));
+		append(display, "\n");
+	}
+	if (display->paths->manifest.retained[0] != '\0') {
+		append(display, "fsimg: retained manifest: ");
+		string_value(display, display->paths->manifest.retained);
 		append(display, "\n");
 	}
 	if (display->paths->retained_scratch[0] != '\0') {

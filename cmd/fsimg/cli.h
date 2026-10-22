@@ -61,8 +61,43 @@ typedef struct fsimg_cli_options {
 	bool		 random_uuid;	/* paths generates the volume UUID */
 } fsimg_cli_options_t;
 
+/* What a staged output is called; private to paths.c. */
+struct fsimg_cli_staged_kind;
+
+/*
+ * One output the coordinator stages and publishes: a created image, or the
+ * manifest of x --mtree. Its file is created in a fresh private directory
+ * beside its final name, which must not exist yet. Publication links the
+ * file there without replacement; cleanup then removes the staged file and
+ * the private directory, unless a publication that is unsupported or
+ * uncertain retains them for inspection. published means the final name
+ * holds the output, even when a later step fails. retained names the
+ * private directory while it exists; once cleanup has run it names what
+ * remains: nothing, the private directory, or the staged file in it when
+ * publication retained that.
+ */
+typedef struct fsimg_cli_staged {
+	const struct fsimg_cli_staged_kind *kind;	/* NULL when unused. */
+	const char	*path;		/* Final pathname as given. */
+	int		 parent;	/* The final name's directory. */
+	int		 directory;	/* The private directory. */
+	char		 name[NAME_MAX + 1];	/* The final basename. */
+	char		 directory_name[96];
+	char		 retained[PATH_MAX];
+	bool		 created;	/* directory_name was created in parent. */
+	bool		 published;
+	bool		 keep_staged;	/* Publication left the staged file. */
+} fsimg_cli_staged_t;
+
 typedef struct fsimg_cli_paths {
-	int		 parent;
+	/* A staged creation lends image.directory to its worker as
+	 * request.output_fd, which nothing closes but the image's cleanup in
+	 * fsimg_cli_cleanup; the manifest's staged file goes to the worker as
+	 * request.manifest_fd, which the request owns.
+	 */
+	fsimg_cli_staged_t image;
+	fsimg_cli_staged_t manifest;
+	int		 destination_parent;	/* x: the -C directory of a fresh destination. */
 	int		 scratch_parent;
 	/* Owned root descriptors, one per host operand and one or two per
 	 * manifest operand, and an owned array of their borrowed job paths:
@@ -72,26 +107,11 @@ typedef struct fsimg_cli_paths {
 	 */
 	int		*root_fds;
 	const char	**root_paths;
-	char		 basename[NAME_MAX + 1];
-	char		 staging_name[96];
-	/* x --mtree: the manifest is staged as "manifest" in the private
-	 * directory mtree_staging_name, opened as mtree_staging, beside its
-	 * final name mtree_basename in mtree_parent.
-	 */
-	int		 mtree_parent;
-	int		 mtree_staging;
-	char		 mtree_basename[NAME_MAX + 1];
-	char		 mtree_staging_name[96];
 	char		 scratch_name[96];
-	char		 retained_output[PATH_MAX];
+	char		 retained_destination[PATH_MAX];
 	char		 retained_scratch[PATH_MAX];
-	bool		 staging_created;
-	bool		 mtree_staging_created;
-	bool		 mtree_published;
 	bool		 scratch_created;
 	bool		 extraction_prepared;	/* A destination was created or checked. */
-	bool		 published;
-	bool		 retain_staging;
 	bool		 verification_failed;	/* cW rejected the staged image. */
 } fsimg_cli_paths_t;
 
@@ -145,13 +165,21 @@ void fsimg_cli_release(fsimg_cli_options_t *);
  */
 bool fsimg_cli_stem(const char *, char *, size_t);
 uint64_t fsimg_cli_clock(void);
+/* Paths holding nothing, every descriptor -1; fsimg_cli_prepare starts
+ * from this state itself.
+ */
+void fsimg_cli_paths_init(fsimg_cli_paths_t *);
 fsimg_status_t fsimg_cli_prepare(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
 /* Build the cW verification job; its input descriptor belongs to the
  * caller, which closes it after the worker exits.
  */
 fsimg_status_t fsimg_cli_verification_request(const fsimg_cli_options_t *,
-    fsimg_worker_request_t *, fsimg_error_t *);
+    const fsimg_cli_paths_t *, fsimg_worker_request_t *, fsimg_error_t *);
+/* Publish the staged image with its worker's reported length, or the
+ * staged manifest with its file's own, under the command's limits,
+ * deadline and interrupt.
+ */
 fsimg_status_t fsimg_cli_publish(const fsimg_cli_options_t *, fsimg_cli_paths_t *,
     const fsimg_worker_result_t *, const volatile sig_atomic_t *, fsimg_error_t *);
 fsimg_status_t fsimg_cli_publish_mtree(const fsimg_cli_options_t *,

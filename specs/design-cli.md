@@ -610,7 +610,18 @@ It is never an output ancestor or descendant. Cleanup never recursively
 follows worker or image names. Scratch cleanup uses descriptor-relative
 no-follow operations on coordinator-created trees after children exit.
 Cleanup failures preserve the primary error and identify retained private
-output and scratch locations.
+output, manifest and scratch locations.
+
+Every private directory the coordinator creates, the staging directory of
+an image or of an `x --mtree` manifest, the scratch tree and a fresh stem
+destination, passes the destination
+[privacy rule](design-security.md) on its opened descriptor before anything
+is put in it. A staged output is one record in the coordinator: its final
+name and parent, its private directory and staged file, whether it was
+published, and what remains of it, which the final report reads for the
+publication state, the published name and the retained path. A staged image
+and a staged manifest differ only in who creates the staged file and how
+its length is known.
 
 Output formatting retains one 128 KiB span, one small UTF-8 carry, the
 current entry metadata and fixed result and counter records. Name frames

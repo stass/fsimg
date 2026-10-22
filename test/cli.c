@@ -1228,13 +1228,16 @@ test_final_diagnostics(void)
 	for (unsigned state = FSIMG_OUTPUT_INCOMPLETE; state <= FSIMG_OUTPUT_UNCERTAIN; state++) {
 		error.output_state = (fsimg_output_state_t)state;
 		error.cleanup_error = EACCES;
-		strcpy(paths.retained_output, "private\033output");
+		strcpy(paths.image.retained, "private\033output");
+		strcpy(paths.manifest.retained, "private\033manifest");
 		strcpy(paths.retained_scratch, "private\nscratch");
 		fsimg_cli_display_init(&display, &options, &result, &paths);
 		display.failure = &error;
 		CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
 		CHECK(text.diagnostic && strstr(display.buffer, "cleanup failed: Permission denied") != NULL);
 		CHECK(strstr(display.buffer, "retained output:") != NULL);
+		CHECK(strstr(display.buffer, "retained manifest: \"private\\u001bmanifest\"\n") !=
+		    NULL);
 		CHECK(strstr(display.buffer, "retained scratch:") != NULL);
 		CHECK(strstr(display.buffer, "\\u001b") != NULL);
 		CHECK(memchr(text.data, '\033', text.length) == NULL);
@@ -1248,7 +1251,8 @@ test_final_diagnostics(void)
 	/* Mandatory outcome reporting has its own bound, independent of argv. */
 	memset(oversized, '\033', sizeof(oversized) - 1);
 	oversized[sizeof(oversized) - 1] = '\0';
-	options.image = oversized;
+	paths.image.path = oversized;
+	paths.image.published = true;
 	error.output_state = FSIMG_OUTPUT_PUBLISHED;
 	fsimg_cli_display_init(&display, &options, &result, &paths);
 	display.failure = &error;
@@ -1256,9 +1260,36 @@ test_final_diagnostics(void)
 	CHECK(strstr(display.buffer, "output was published") != NULL);
 	CHECK(strstr(display.buffer, "[path truncated]") != NULL);
 	CHECK(strstr(display.buffer, "retained scratch:") != NULL);
+	bzero(&paths.image, sizeof(paths.image));
 
-	options.request.kind = FSIMG_JOB_VERIFY;
+	/* x --mtree publishes the manifest; the image is only read. */
+	options.image = "in.img";
+	paths.manifest.path = "out.mtree";
+	paths.manifest.published = true;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.failure = &error;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "fsimg: output was published as \"out.mtree\"; "
+	    "finalization failed") != NULL);
+	CHECK(strstr(display.buffer, "in.img") == NULL);
+	options.mode = "x";
+	options.json = true;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.phase = FSIMG_CLI_OUTPUT_SUMMARY;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "\"published\":true,") != NULL);
+	options.json = false;
+	options.request.flags |= FSIMG_JOB_VERBOSE;
 	result.metadata_losses = 0;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "; manifest published\n") != NULL);
+	CHECK(strstr(display.buffer, "image published") == NULL);
+	options.request.flags &= ~FSIMG_JOB_VERBOSE;
+	bzero(&paths.manifest, sizeof(paths.manifest));
+
+	options.image = oversized;
+	options.request.kind = FSIMG_JOB_VERIFY;
 	fsimg_cli_display_init(&display, &options, &result, &paths);
 	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
 	CHECK(strstr(display.buffer, "[path truncated]") != NULL);
@@ -1410,13 +1441,72 @@ test_staging_cleanup(void)
 	 * removed. A retained-directory diagnostic must name an existing object.
 	 */
 	CHECK(fsimg_cli_cleanup(&options, &paths, FSIMG_OK, &error) == FSIMG_EIO);
-	snprintf(expected, sizeof(expected), "%s/%s", root, paths.staging_name);
-	CHECK(strcmp(paths.retained_output, expected) == 0);
-	retained = open(paths.retained_output, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	snprintf(expected, sizeof(expected), "%s/%s", root, paths.image.directory_name);
+	CHECK(strcmp(paths.image.retained, expected) == 0);
+	retained = open(paths.image.retained, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 	CHECK(retained != -1);
 	CHECK(unlinkat(retained, "extra", 0) == 0);
 	CHECK(close(retained) == 0);
-	CHECK(unlinkat(parent, paths.staging_name, AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(parent, paths.image.directory_name, AT_REMOVEDIR) == 0);
+	CHECK(close(parent) == 0 && rmdir(root) == 0);
+}
+
+/* The --mtree staging directory left behind by a failed cleanup is
+ * reported by name, as a staged image's is.
+ */
+static void
+test_manifest_staging_cleanup(void)
+{
+	char root[] = "cli-manifest-XXXXXX";
+	char image[PATH_MAX], manifest[PATH_MAX], expected[PATH_MAX];
+	fsimg_cli_options_t options;
+	fsimg_cli_paths_t paths;
+	fsimg_cli_display_t display;
+	fsimg_worker_result_t result = { 0 };
+	fsimg_worker_text_t text;
+	fsimg_error_t error;
+	int parent, fd;
+
+	CHECK(mkdtemp(root) != NULL);
+	parent = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(parent != -1);
+	fd = openat(parent, "in.img", O_CREAT | O_EXCL | O_WRONLY, 0600);
+	CHECK(fd != -1 && close(fd) == 0);
+	snprintf(image, sizeof(image), "%s/in.img", root);
+	snprintf(manifest, sizeof(manifest), "%s/out.mtree", root);
+	bzero(&options, sizeof(options));
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_EXTRACT;
+	options.image = image;
+	options.mtree = manifest;
+	options.directory = root;
+	strcpy(options.stem, "in");
+	options.scratch = "-";
+	CHECK(fsimg_cli_prepare(&options, &paths, &error) == FSIMG_OK);
+	CHECK(options.request.manifest_fd != -1);
+	fd = openat(paths.manifest.directory, "extra", O_CREAT | O_EXCL | O_WRONLY, 0600);
+	CHECK(fd != -1 && close(fd) == 0);
+
+	fsimg_error_set(&error, FSIMG_EIO, 0, FSIMG_OP_IO, "extraction failed");
+	CHECK(fsimg_cli_cleanup(&options, &paths, FSIMG_EIO, &error) == FSIMG_EIO);
+	CHECK(error.cleanup_error == ENOTEMPTY);
+	snprintf(expected, sizeof(expected), "%s/%s", root, paths.manifest.directory_name);
+	CHECK(strcmp(paths.manifest.retained, expected) == 0);
+	CHECK(faccessat(parent, "out.mtree", F_OK, AT_SYMLINK_NOFOLLOW) == -1 &&
+	    errno == ENOENT);
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	display.failure = &error;
+	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+	CHECK(strstr(display.buffer, "fsimg: retained manifest: ") != NULL);
+	CHECK(strstr(display.buffer, paths.manifest.directory_name) != NULL);
+
+	fd = openat(parent, paths.manifest.directory_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(fd != -1);
+	CHECK(faccessat(fd, "manifest", F_OK, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+	CHECK(unlinkat(fd, "extra", 0) == 0 && close(fd) == 0);
+	CHECK(unlinkat(parent, paths.manifest.directory_name, AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(parent, "in", AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(parent, "in.img", 0) == 0);
 	CHECK(close(parent) == 0 && rmdir(root) == 0);
 }
 
@@ -1429,6 +1519,7 @@ main(int argc, char **argv)
 	}
 	if (argc == 2 && strcmp(argv[1], "--staging-cleanup") == 0) {
 		test_staging_cleanup();
+		test_manifest_staging_cleanup();
 		return (0);
 	}
 	CHECK(argc == 1);
@@ -1455,6 +1546,7 @@ main(int argc, char **argv)
 	test_names(true);
 	test_private_cleanup();
 	test_staging_cleanup();
+	test_manifest_staging_cleanup();
 	test_progress();
 	test_staged_verification_failure();
 	return (0);

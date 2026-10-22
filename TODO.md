@@ -490,6 +490,14 @@
   bytes to the output quota (which would refuse a full volume at the
   default quota of the volume's length) and a separate manifest bound, and
   state it in the design's bounds table.
+* [Low] **The library's staging directory skips the privacy check**
+  (`lib/output/write.c` `create_staging`): `fsimg_writer_write_at()` and
+  transcoding stage beneath the caller's directory in a
+  `.fsimg-output-PID-N` directory made with mode 0700 and reopened
+  no-follow, but never checked by `fsimg_host_private_directory()` as the
+  CLI's private directories are, so a parent's inheritable ACL entries
+  reach the staged image. Check it there too, or have the CLI's private
+  directory routine move into the library.
 * [Low] **Adding a worker capability touches many parallel lists**
   (`cmd/fsimg/worker.h`, `job.c`, `worker-parent.c`, `worker-child.c`,
   `sandbox.c`, `paths.c`): the job bit, the decode mask, the expected and
@@ -498,13 +506,6 @@
   and the cleanup list each name every role. One role table that these
   sites iterate would make a new role one entry;
   `fsimg_sandbox_caps_init()` already removes the zero-means-stdin hazard.
-  The image and `--mtree` staged outputs likewise keep parallel fields in
-  `fsimg_cli_paths_t` that one staged-output record could own.
-* [Low] **Staging directory reopen race** (`cmd/fsimg/paths.c`
-  `private_directory`): `mkdirat` then a no-follow `openat` lets a writer of
-  a non-sticky shared parent swap the fresh directory between the two
-  calls; the image and the `--mtree` staging both inherit it. Verify the
-  opened directory's owner and mode, or that it is empty and was just made.
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself
@@ -555,11 +556,13 @@
   written; the refusal of an empty, overlong or NUL-holding link target
   (`record_skipped`), which needs a crafted image since the writers refuse
   such targets; FILE appearing between the early check and publication;
-  the worker's failed close of the manifest; and a failure after
-  publication, such as a broken report channel, reporting the output
-  published. With `-E`, a FILE inside the destination is refused as a
-  non-empty destination, since the manifest's staging directory is made
-  first; the targeted overlap message is unreachable there. An exFAT round
+  the worker's failed close of the manifest; and a staged image or
+  manifest retained by a publication that is unsupported or uncertain,
+  which needs a filesystem refusing hard links or a failing directory sync
+  (`test/cli.c` checks only how a retained path is reported). With `-E`, a
+  FILE inside the destination is refused as a non-empty destination, since
+  the manifest's staging directory is made first; the targeted overlap
+  message is unreachable there. An exFAT round
   trip through `x --mtree` is byte-equal only when the host reports an
   extracted file's unwritten tail as a hole, since exFAT records each
   file's initialized length and host import takes it from the holes the

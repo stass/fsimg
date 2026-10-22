@@ -549,7 +549,10 @@ CLI stages the file as `manifest`, mode 0600, in a private directory beside
 worker, which holds it as one more descriptor against `fds`; the sandbox
 grants it write, resize and flush and nothing else. The coordinator
 publishes it after the worker's validated completion, without replacement,
-and removes it on any failure. An existing `FILE` fails before the worker
+and removes it on any failure. As for a staged image, a publication that is
+unsupported or uncertain retains the staged file, and a cleanup that fails
+retains its private directory; the error record names either in
+`retained_manifest`. An existing `FILE` fails before the worker
 starts and before the destination is created, and a `FILE` whose staging
 would lie inside the destination is refused.
 
