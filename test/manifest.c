@@ -197,7 +197,6 @@ static uint64_t initialized_bytes(fixture_t *);
 static void test_export_exfat_zero_file(void);
 static char *long_source(void);
 static void test_export_long_manifest(void);
-static void test_export_manifest_limit(void);
 static void test_export_lines(void);
 static fsimg_status_t sink_size(void *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t sink_resize(void *, uint64_t, fsimg_error_t *);
@@ -1806,52 +1805,6 @@ long_source(void)
 	return (source);
 }
 
-/* The context's manifest limit refuses the first line that would grow
- * the manifest beyond it, before the file grows: the 64 KiB the first full
- * buffer wrote stay, and the line that crosses the limit is never taken.
- */
-static void
-test_export_manifest_limit(void)
-{
-	fsimg_extract_options_t extract;
-	fsimg_options_t options;
-	fsimg_reader_t *reader;
-	fsimg_io_t *input;
-	fsimg_error_t error;
-	fixture_t fixture;
-	image_t image;
-	struct stat st;
-	char *source;
-	int fd;
-
-	source = long_source();
-	fsimg_options_init(&options);
-	options.max_manifest_bytes = 70000;
-	fixture_open_options(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE, &options);
-	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
-	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
-	fd = openat(fixture.parent, "limited.mtree",
-	    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-	CHECK(fd != -1);
-	memory_io(&fixture, &image, false, &input);
-	CHECK(fsimg_reader_open(fixture.ctx, input, NULL, &reader,
-	    NULL) == FSIMG_OK);
-	fsimg_extract_options_init(&extract);
-	extract.manifest_fd = fd;
-	CHECK(fsimg_extract_at(reader, fixture.parent, "limited", &extract,
-	    &error) == FSIMG_ELIMIT);
-	CHECK(error.resource == FSIMG_RESOURCE_MANIFEST);
-	CHECK(error.limit == 70000 && error.observed > 70000 &&
-	    error.observed < 70000 + 512);
-	CHECK(fstat(fd, &st) == 0 && st.st_size == 65536);
-	fsimg_reader_free(reader);
-	fsimg_io_free(input);
-	CHECK(close(fd) == 0);
-	free(image.bytes);
-	free(source);
-	fixture_close(&fixture);
-}
-
 /* Count a call of kind and say whether it is the one to fail. */
 static bool
 sink_fails(failing_sink_t *sink, sink_call_t kind)
@@ -2352,7 +2305,6 @@ main(void)
 	test_export_changes_detected();
 	test_export_exfat_zero_file();
 	test_export_long_manifest();
-	test_export_manifest_limit();
 	test_export_writer_faults();
 	test_export_allocation_failures();
 	test_export_cancellation();

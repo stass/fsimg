@@ -89,14 +89,14 @@ After `--` every word is an operand, including one spelled `-C`.
 | `-h`, `-V` | Help and version |
 
 `-l` keys are `scratch`, `spool`, `entries`, `depth`, `path`, `fds`,
-`output`, `work`, `seconds` and `manifest`. Scratch, spool, path, output and
-manifest values are byte quantities; entries, depth, fds and work are
-unsigned counts; seconds is an integer deadline measured on the monotonic
-clock, where zero selects the default of no additional deadline. `spool`
-bounds the temporary file that holds a stream or compressed input, defined
-in the [layer design](design-layers.md#budget). `manifest` bounds the file
-`x --mtree` writes, apart from `output`; by default it is the longest
-manifest the `entries` and `path` limits allow
+`output`, `work` and `seconds`. Scratch, spool, path and output values are
+byte quantities; entries, depth, fds and work are unsigned counts; seconds is
+an integer deadline measured on the monotonic clock, where zero selects the
+default of no additional deadline. `spool` bounds the temporary file that
+holds a stream or compressed input, defined in the
+[layer design](design-layers.md#budget). No limit of its own bounds the
+manifest `x --mtree` writes or a `t` listing: `entries` bounds their lines
+and `path`, with the 1023-byte link-target limit, each line's length
 ([manifest design](design-mtree.md#security-and-bounds)). `fds` (default
 128) also caps the number of create operands, since the worker holds one
 open root per operand, two for a manifest operand with a content directory (the manifest and

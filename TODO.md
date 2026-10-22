@@ -423,17 +423,6 @@
 
 ## Security residuals
 
-* [Low] **Listings outgrow their image at the default limits**
-  (`lib/extract/mtree-writer.c`, `cmd/fsimg/display.c`): a manifest line
-  or a `t` listing line holds an entry's full path with every byte
-  escaped, up to four bytes per path byte, so an image of many entries
-  deep beneath long non-ASCII names writes a manifest, or a listing to
-  stdout, around a hundred times its own size. The manifest's default
-  limit derives from the entries and path limits so that no full-volume
-  extraction is refused, which at their defaults is about 2.6 TB;
-  `-l manifest`, `-l entries` and `-l path` lower it, and nothing but the
-  same two limits bounds the listing.
-
 * [High] **Symbolic-link import under the Linux sandbox** (`cmd/fsimg/sandbox.c`,
   `lib/source/source.c`, `specs/design-security.md`): the source scan reads a
   link with `fstatat(AT_SYMLINK_NOFOLLOW)` and `readlinkat()`, which the

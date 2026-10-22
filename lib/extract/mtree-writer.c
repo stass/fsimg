@@ -27,23 +27,19 @@
 #define MTREE_KEYWORDS_BYTES 256u
 _Static_assert(MTREE_KEYWORDS_MAX < MTREE_KEYWORDS_BYTES,
     "the keyword buffer holds the longest keywords and a NUL");
-#define MTREE_HEADER "#mtree v2.0\n. type=dir\n"
 
-/* Bytes [0, used) of buffer follow the written_bytes already in the file,
- * and together they never exceed limit_bytes, which put_bytes() checks
- * before it takes a byte. The file is grown to its new length just before
- * each write, so it never holds a byte that was not written.
+/* Bytes [0, used) of buffer follow the written_bytes already in the file.
+ * The file is grown to its new length just before each write, so it never
+ * holds a byte that was not written.
  */
 struct fsimg_mtree_writer {
 	fsimg_session_t	*session;
 	fsimg_io_t	*output;
 	unsigned char	*buffer;
 	uint64_t	 written_bytes;
-	uint64_t	 limit_bytes;
 	size_t		 used;
 };
 
-static uint64_t default_limit(const fsimg_options_t *);
 static fsimg_status_t write_buffer(fsimg_mtree_writer_t *, fsimg_error_t *);
 static fsimg_status_t put_bytes(fsimg_mtree_writer_t *, const void *, size_t,
     fsimg_error_t *);
@@ -112,8 +108,6 @@ fsimg_mtree_writer_start(fsimg_ctx_t *ctx, fsimg_session_t *session,
 	bzero(writer, sizeof(*writer));
 	writer->session = session;
 	writer->output = output;
-	writer->limit_bytes = ctx->options.max_manifest_bytes != 0 ?
-	    ctx->options.max_manifest_bytes : default_limit(&ctx->options);
 	writer->buffer = fsimg_alloc(ctx, MTREE_WRITER_BUFFER_BYTES, &detail);
 	if (writer->buffer == NULL) {
 		fsimg_mtree_writer_free(writer);
@@ -121,7 +115,7 @@ fsimg_mtree_writer_start(fsimg_ctx_t *ctx, fsimg_session_t *session,
 			*error = detail;
 		return (detail.status);
 	}
-	status = put_text(writer, MTREE_HEADER, error);
+	status = put_text(writer, "#mtree v2.0\n. type=dir\n", error);
 	if (status != FSIMG_OK) {
 		fsimg_mtree_writer_free(writer);
 		return (status);
@@ -189,28 +183,6 @@ fsimg_mtree_writer_free(fsimg_mtree_writer_t *writer)
 	fsimg_dealloc(writer);
 }
 
-/*
- * The longest manifest the context's other limits allow: the header and
- * max_entries lines, each a "." and a path of max_path_bytes bytes, every
- * byte escaped to four, the widest keywords, a link target of the longest
- * length extraction accepts (record_skipped in extract.c) escaped the same
- * way, and LF. An extraction those limits accept never exceeds it, so the
- * default refuses nothing they allow. It saturates rather than wrap.
- */
-static uint64_t
-default_limit(const fsimg_options_t *options)
-{
-	uint64_t line, total;
-
-	line = (sizeof(".") - 1) + 4 * (uint64_t)options->max_path_bytes +
-	    MTREE_KEYWORDS_MAX + (sizeof(" link=") - 1) +
-	    4 * FSIMG_SYMLINK_TARGET_MAX + (sizeof("\n") - 1);
-	if (!fsimg_mul_u64(options->max_entries, line, &total) ||
-	    !fsimg_add_u64(total, sizeof(MTREE_HEADER) - 1, &total))
-		return (UINT64_MAX);
-	return (total);
-}
-
 static fsimg_status_t
 write_buffer(fsimg_mtree_writer_t *writer, fsimg_error_t *error)
 {
@@ -220,8 +192,9 @@ write_buffer(fsimg_mtree_writer_t *writer, fsimg_error_t *error)
 
 	if (writer->used == 0)
 		return (FSIMG_OK);
-	/* Within limit_bytes, so it cannot wrap. */
-	length = writer->written_bytes + writer->used;
+	if (!fsimg_add_u64(writer->written_bytes, writer->used, &length))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_EXTRACT, "manifest length overflows"));
 	status = fsimg_io_resize(writer->output, length, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -239,19 +212,9 @@ put_bytes(fsimg_mtree_writer_t *writer, const void *bytes, size_t length,
     fsimg_error_t *error)
 {
 	const unsigned char *next = bytes;
-	uint64_t total;
 	size_t piece;
 	fsimg_status_t status;
 
-	/* Refused before any of it is taken, so the manifest fails at the
-	 * first line that would outgrow its limit.
-	 */
-	if (!fsimg_add_u64(writer->written_bytes, writer->used, &total) ||
-	    !fsimg_add_u64(total, length, &total))
-		total = UINT64_MAX;
-	if (total > writer->limit_bytes)
-		return (fsimg_limit_error(error, FSIMG_RESOURCE_MANIFEST,
-		    writer->limit_bytes, total));
 	while (length != 0) {
 		if (writer->used == MTREE_WRITER_BUFFER_BYTES) {
 			status = write_buffer(writer, error);

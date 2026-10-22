@@ -1923,22 +1923,6 @@ def test_mtree_export(executable, root):
         assert not list(names.iterdir()), arguments
         assert not (work / "nowhere").exists()
 
-    # The manifest has its own bound, -l manifest; a manifest that would
-    # outgrow it fails the extraction before the file grows, and nothing is
-    # published or left staged.
-    private_directory(work, "limited")
-    private_directory(work, "limited-human")
-    error = failed(invoke(executable, work, [
-        "xkf", "q.img", "--json", "-C", "limited", "-l", "manifest=64",
-        "--mtree=limited.mtree"], expected=1))
-    assert error["resource"] == "manifest" and error["limit"] == "64", error
-    assert error["output_state"] == "incomplete", error
-    assert not (work / "limited.mtree").exists()
-    assert not list(work.glob(".fsimg-*"))
-    result = invoke(executable, work, ["xkf", "q.img", "-C", "limited-human", "-l",
-                                       "manifest=64", "--mtree=limited.mtree"], expected=1)
-    assert b"(manifest limit 64, observed " in result.stderr, result.stderr
-
     def fewest(*arguments):
         for count in range(3, 16):
             target = private_directory(work, f"fds-{count}-{len(arguments)}")

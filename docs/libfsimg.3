@@ -54,10 +54,6 @@ All dynamic library allocations and owned descriptors share one resource
 context.
 Payload copying, metadata, allocation indexes and sorting obey separate memory,
 scratch, spool, work and traversal limits.
-The manifest an extraction writes through manifest_fd obeys
-max_manifest_bytes, failing with FSIMG_ELIMIT and FSIMG_RESOURCE_MANIFEST
-before the file grows beyond it; zero, the default, is the longest manifest
-the entry and path limits allow.
 A handle is used serially; independent contexts may be used concurrently.
 Callbacks cannot re-enter an active context.
 .Sh OWNERSHIP
