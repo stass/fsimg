@@ -65,7 +65,7 @@ module FsimgSpec
           image_length: image.length,
           common:, fat32_extension:, extension:,
           signature: record(Layout::Signature, sector),
-          fsinfo: fsinfo(image, common, fat32_extension, extension, geometry.variant),
+          fsinfo: fsinfo(image, common:, fat32_extension:, extension:, variant: geometry.variant),
           geometry:,
           tree:
         )
@@ -180,8 +180,10 @@ module FsimgSpec
         Layout.decode(layout, sector.byteslice(position, size))
       end
 
-      # The FSInfo record BPB_FSInfo locates (Model's fsinfo).
-      private_class_method def self.fsinfo(image, common, fat32_extension, extension, variant)
+      # The FSInfo record BPB_FSInfo locates in image (Model's fsinfo), from
+      # the decoded common BPB, whether the extension is FAT32's, the
+      # extension itself and the variant the cluster count gives.
+      private_class_method def self.fsinfo(image, common:, fat32_extension:, extension:, variant:)
         FsimgSpec.derive(fat32_extension) do |fat32|
           next nil unless fat32
 
