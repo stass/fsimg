@@ -11,6 +11,8 @@
 
 #include "fsimg.h"
 
+struct stat;
+
 typedef enum fsimg_host_kind {
 	FSIMG_HOST_OTHER,
 	FSIMG_HOST_FILE,
@@ -69,6 +71,14 @@ int fsimg_host_closefrom(int);
 int fsimg_host_rename_exclusive(int, const char *, int, const char *);
 bool fsimg_host_unsupported_io(int);
 int fsimg_host_file(int, fsimg_host_file_t *);
+/*
+ * fstat(2), and the only way fsimg calls it. On Linux x86_64 and aarch64,
+ * where the confined worker's seccomp filter applies, it issues the fstat
+ * system call itself: glibc 2.33 to 2.38 implement fstat() as
+ * newfstatat(fd, "", AT_EMPTY_PATH), which the filter denies, since a
+ * filter cannot tell an empty path from another one.
+ */
+int fsimg_host_fstat(int, struct stat *);
 /* Inspect parent/name without following a final symbolic link. */
 int fsimg_host_link(int, const char *, fsimg_host_file_t *);
 /* Source opens never follow links or acquire a controlling terminal/block on

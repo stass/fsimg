@@ -205,7 +205,7 @@ fsimg_host_private_directory(int fd, fsimg_host_privacy_t *verdict)
 	struct stat st;
 	bool present, empty;
 
-	if (fstat(fd, &st) == -1)
+	if (fsimg_host_fstat(fd, &st) == -1)
 		return (-1);
 	if (!S_ISDIR(st.st_mode))
 		*verdict = FSIMG_HOST_NOT_DIRECTORY;
@@ -245,7 +245,7 @@ fsimg_host_remove_directory(int parent, const char *name, int fd)
 {
 	struct stat opened, named;
 
-	if (fstat(fd, &opened) == -1 ||
+	if (fsimg_host_fstat(fd, &opened) == -1 ||
 	    fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == -1)
 		return (false);
 	if (opened.st_dev != named.st_dev || opened.st_ino != named.st_ino ||

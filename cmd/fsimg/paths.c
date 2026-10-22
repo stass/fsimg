@@ -1254,7 +1254,7 @@ fsimg_cli_publish_mtree(const fsimg_cli_options_t *options,
 {
 	struct stat st;
 
-	if (fstat(options->request.manifest_fd, &st) == -1)
+	if (fsimg_host_fstat(options->request.manifest_fd, &st) == -1)
 		return (host_error(error, "staged manifest stat failed"));
 	return (publish_staged(options, &paths->manifest, (uint64_t)st.st_size,
 	    interrupted, error));

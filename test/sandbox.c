@@ -170,7 +170,9 @@ write_manifest(void)
 	int flags;
 
 	flags = fcntl(7, F_GETFL);
-	if (flags == -1 || (flags & O_ACCMODE) != O_WRONLY || fstat(7, &st) == -1 ||
+	/* This runs confined, where only fsimg_host_fstat is sure to work. */
+	if (flags == -1 || (flags & O_ACCMODE) != O_WRONLY ||
+	    fsimg_host_fstat(7, &st) == -1 ||
 	    !S_ISREG(st.st_mode))
 		return (false);
 	if (fsimg_ctx_new(NULL, &ctx, NULL) != FSIMG_OK)

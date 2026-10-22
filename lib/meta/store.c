@@ -13,6 +13,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "host.h"
 #include "meta.h"
 
 #define STORE_HEADER_SIZE 16u
@@ -539,7 +540,7 @@ scratch_physical(fsimg_store_t *store, fsimg_error_t *error)
 	uint64_t bytes, observed;
 	fsimg_ctx_t *ctx;
 
-	if (fstat(store->fd, &st) == -1)
+	if (fsimg_host_fstat(store->fd, &st) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_METADATA, "scratch allocation stat failed"));
 	if (st.st_blocks < 0 ||

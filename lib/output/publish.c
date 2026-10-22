@@ -198,7 +198,7 @@ fsimg_publish(fsimg_ctx_t *ctx, int staging_fd, const char *staged_name,
 		return (publication_error(error, FSIMG_EIO, saved,
 		    FSIMG_OUTPUT_ABSENT, "staged result open failed"));
 	}
-	if (fstat(fd, &st) == -1) {
+	if (fsimg_host_fstat(fd, &st) == -1) {
 		status = publication_error(error, FSIMG_EIO, errno,
 		    FSIMG_OUTPUT_ABSENT, "staged result stat failed");
 		goto close_file;

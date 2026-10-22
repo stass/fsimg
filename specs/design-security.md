@@ -248,6 +248,16 @@ Use an allowlist of operations the worker actually needs, with architecture
 and alternate-ABI checks, rather than a denylist of dangerous syscall names.
 The kernel documents both limitations in
 [Seccomp BPF](https://docs.kernel.org/userspace-api/seccomp_filter.html).
+Because the filter cannot see a path, it allows `fstat` and denies
+`newfstatat` and `statx` outright, even with an empty path. Some C
+libraries, glibc 2.33 to 2.38 among them, implement `fstat()` as
+`newfstatat(fd, "", AT_EMPTY_PATH)`, so fsimg never calls the library's
+`fstat()`: one compat function issues the `fstat` system call on the Linux
+targets the filter covers, and a build check rejects any other call. Code
+the confined worker runs must likewise not call a C library routine that
+queries a descriptor's metadata itself, such as `fdopendir` or a buffered
+stream; the build check cannot see those, and only a run on an affected C
+library catches one.
 
 Landlock does not mediate every inode-metadata operation. The portable CLI
 profile therefore denies ownership, permission, xattr, and timestamp mutation

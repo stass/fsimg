@@ -401,6 +401,24 @@
   copy authoritative: a build-and-check script that CI, `linux-check.sh` and
   the FreeBSD host all call, and a CI Linux job that runs in the same image.
 
+* [Medium] **No check runs confinement on glibc 2.33 to 2.38**
+  (`build-aux/linux-check.sh`, `.github/workflows/check.yml`): those
+  releases implement `fstat()` as `newfstatat`, which the worker's seccomp
+  filter denies; `check-fstat` catches a direct call but not a C library
+  routine that stats a descriptor internally (`fdopendir`, stdio), and CI's
+  glibc 2.39 cannot fail on either. Ubuntu 22.04 (glibc 2.35) built with a
+  Landlock ABI 3 `linux/landlock.h`, as stock 22.04 headers compile
+  confinement out, failed test-sandbox, test-worker and cli.sh before
+  `fsimg_host_fstat` and passes after. Add that environment as a Linux
+  check, which would also let `check-fstat` go.
+
+* [Low] **GCC 11 fails the -Werror build** (`lib/source/source.c`
+  `open_host_source`, `configure.ac`): Ubuntu 22.04's gcc 11 reports
+  `root` and `path` as maybe-uninitialized after `read_host_record`, a false
+  positive, and the build stops there, so later files are unchecked. CI and
+  the platform checks build with clang. Build with gcc 11 and either
+  initialize what it flags or keep -Wmaybe-uninitialized out of -Werror.
+
 * [Low] **Project-owned build-aux helpers need three per-file lists**
   (`.gitignore`, `Makefile.am` `EXTRA_DIST`, `build-aux/check-ascii.sh`):
   autotools installs its own files into `build-aux/`, so each helper is
@@ -410,14 +428,6 @@
 
 ## Security residuals
 
-* [Medium] **Confined workers may fail `fstat` under glibc 2.33 to 2.38**
-  (`cmd/fsimg/sandbox.c` `install_filter`): those glibc releases implement
-  `fstat` on x86_64 and aarch64 as `newfstatat(fd, "", AT_EMPTY_PATH)`,
-  which the seccomp filter denies, so a confined worker on Debian 12,
-  Ubuntu 22.04 or RHEL 9 may see `EPERM` from every `fstat`. Inferred from
-  glibc's sources, not run; glibc 2.39 (CI) passes. Run the sandbox suite on
-  such a distribution, and if it fails, call the `fstat` syscall directly
-  through `compat/`; seccomp cannot tell an empty path from another one.
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself

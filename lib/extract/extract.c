@@ -324,7 +324,7 @@ extract_directory(extract_state_t *state, const fsimg_entry_t *entry,
 		return (fsimg_error_set(error, FSIMG_EIO, saved,
 		    FSIMG_OP_EXTRACT, "output directory open failed"));
 	}
-	if (fstat(fd, &st) == -1 || !S_ISDIR(st.st_mode)) {
+	if (fsimg_host_fstat(fd, &st) == -1 || !S_ISDIR(st.st_mode)) {
 		saved = errno;
 		fsimg_fd_release(ctx, fd);
 		return (fsimg_error_set(error, FSIMG_EIO, saved,

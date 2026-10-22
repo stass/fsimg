@@ -236,7 +236,7 @@ fsimg_io_adopt_handed_over(fsimg_ctx_t *ctx, int fd, const char *role,
 
 	*out = NULL;
 	flags = fcntl(fd, F_GETFL);
-	if (flags == -1 || fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) ||
+	if (flags == -1 || fsimg_host_fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) ||
 	    st.st_size != 0 || st.st_nlink != 0 ||
 	    (flags & O_ACCMODE) != O_RDWR || (flags & O_APPEND) != 0) {
 		close(fd);
@@ -803,7 +803,7 @@ io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, io_holding_t holding,
 	    fsimg_host_unsupported_io(flags))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_IO, "descriptor flags incompatible with requested access"));
-	if (fstat(fd, &st) == -1)
+	if (fsimg_host_fstat(fd, &st) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_IO, "descriptor stat failed"));
 	if (!S_ISREG(st.st_mode) || st.st_size < 0)
@@ -1224,7 +1224,7 @@ fsimg_io_allocated_bytes(fsimg_io_t *io, uint64_t *bytes,
 	if (io->root->fd == -1)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_IO, "I/O object has no file"));
-	if (fstat(io->root->fd, &st) == -1)
+	if (fsimg_host_fstat(io->root->fd, &st) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno, FSIMG_OP_IO,
 		    "allocation stat failed"));
 	if (st.st_blocks < 0 ||

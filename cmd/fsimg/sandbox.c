@@ -42,7 +42,8 @@ static int allow_directory(int, int, uint64_t);
 /* The common libc surface plus the bounded host operations used by workers.
  * All unlisted calls fail closed. In particular there is no stat-by-path,
  * metadata mutation, exec, socket, clone, ioctl, dup, or io_uring operation.
- * fstatat is deliberately absent: libc must use the descriptor-only fstat.
+ * The filter cannot see a path argument, so newfstatat and statx stay denied
+ * even for an empty path; fsimg_host_fstat issues fstat instead.
  */
 #define ALLOW_CALL(name) \
 	BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_##name, 0, 1), \
@@ -103,7 +104,7 @@ install_filter(void)
 		BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, O_PATH, 1, 0),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-		/* Every other call, statx and fstatat among them, is denied. */
+		/* Every other call, statx and newfstatat among them, is denied. */
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM)
 	};
 	struct sock_fprog program;
@@ -231,7 +232,7 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 
 	if (caps->input != -1) {
 		flags = fcntl(caps->input, F_GETFL);
-		if (flags == -1 || fstat(caps->input, &st) == -1)
+		if (flags == -1 || fsimg_host_fstat(caps->input, &st) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_CONTEXT, "sandbox input validation failed"));
 		if (caps->input_pipe && !readable_pipe(flags, &st))
@@ -244,7 +245,7 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 	}
 	for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
 		if (directories[i] != -1 &&
-		    (fstat(directories[i], &st) == -1 || !S_ISDIR(st.st_mode)))
+		    (fsimg_host_fstat(directories[i], &st) == -1 || !S_ISDIR(st.st_mode)))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox work root requires directory"));
 	}
@@ -255,7 +256,7 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 		fd = caps->roots + (int)i;
 		flags = fcntl(fd, F_GETFL);
 		if (flags == -1 || (flags & O_ACCMODE) != O_RDONLY ||
-		    fstat(fd, &st) == -1 || (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)))
+		    fsimg_host_fstat(fd, &st) == -1 || (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox source requires read-only directory or file"));
 	}
@@ -265,7 +266,7 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 			continue;
 		flags = fcntl(fd, F_GETFL);
 		if (flags == -1 || (flags & O_ACCMODE) != O_RDWR ||
-		    fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) ||
+		    fsimg_host_fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) ||
 		    st.st_nlink != 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox handed-over file requires an unlinked read/write file"));
@@ -273,7 +274,7 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 	if (caps->manifest != -1) {
 		flags = fcntl(caps->manifest, F_GETFL);
 		if (flags == -1 || (flags & O_ACCMODE) != O_WRONLY ||
-		    fstat(caps->manifest, &st) == -1 || !S_ISREG(st.st_mode) ||
+		    fsimg_host_fstat(caps->manifest, &st) == -1 || !S_ISREG(st.st_mode) ||
 		    st.st_nlink != 1)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox manifest requires a write-only file with one name"));
@@ -342,7 +343,7 @@ fsimg_sandbox_install_caps(const fsimg_sandbox_caps_t *caps,
 	 * not mediate, so only directory roots need a rule.
 	 */
 	for (unsigned i = 0; i < caps->root_count; i++) {
-		if (fstat(caps->roots + (int)i, &st) == -1)
+		if (fsimg_host_fstat(caps->roots + (int)i, &st) == -1)
 			goto ruleset_fail;
 		if (S_ISDIR(st.st_mode) && allow_directory(ruleset, caps->roots + (int)i,
 		    LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR) == -1)

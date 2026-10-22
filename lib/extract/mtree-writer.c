@@ -64,7 +64,7 @@ fsimg_mtree_writer_check(int fd, fsimg_error_t *error)
 	if ((flags & O_ACCMODE) == O_RDONLY || (flags & O_APPEND) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_EXTRACT,
 		    "manifest descriptor is not writable without O_APPEND"));
-	if (fstat(fd, &st) == -1)
+	if (fsimg_host_fstat(fd, &st) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_EXTRACT, "manifest descriptor stat failed"));
 	if (!S_ISREG(st.st_mode) || st.st_size != 0)

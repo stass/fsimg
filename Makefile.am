@@ -266,8 +266,9 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/spec/Gemfile test/spec/Gemfile.lock test/spec/run.rb \
 	test/spec/bundle.rb test/spec/bin test/spec/cases test/spec/lib \
 	test/spec/suite
-check-local: check-ascii check-seek-holes
-.PHONY: check-ascii check-seek-holes check-asan check-ubsan check-lsan check-msan check-security
+check-local: check-ascii check-fstat check-seek-holes
+.PHONY: check-ascii check-fstat check-seek-holes check-asan check-ubsan
+.PHONY: check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz check-fuzz-extended check-cli-rss check-extended
 .PHONY: check-integration baseline-record
 .PHONY: check-spec check-spec-extended check-spec-deep
@@ -351,6 +352,17 @@ check-seek-holes:
 	    seek-holes-seed 2>/dev/null; then rm -rf seek-holes-seed; \
 	    echo "check-seek-holes missed a seeded SEEK_DATA" >&2; exit 1; fi; \
 	    rm -rf seek-holes-seed
+# Only fsimg_host_fstat, in compat/host.c, calls fstat(2); compat/host.h
+# says why. A grep failure, such as a glob that matches nothing, fails too.
+check-fstat:
+	@grep -n -E '(^|[^A-Za-z0-9_])fstat(64)?[[:space:]]*\(' \
+	    $(top_srcdir)/lib/*/*.[ch] $(top_srcdir)/lib/formats/*/*.[ch] \
+	    $(top_srcdir)/cmd/fsimg/*.[ch] $(top_srcdir)/compat/*.[ch] \
+	    >check-fstat.out; test $$? -le 1 || { rm -f check-fstat.out; exit 1; }
+	@if grep -v -E '/compat/host\.[ch]:' check-fstat.out; then \
+		echo "call fsimg_host_fstat, not fstat (compat/host.h)" >&2; \
+		rm -f check-fstat.out; exit 1; \
+	fi; rm -f check-fstat.out
 check-asan:
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/sanitize.sh asan

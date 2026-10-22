@@ -230,12 +230,31 @@ host_time(int64_t seconds, long nanoseconds)
 }
 
 int
+fsimg_host_fstat(int fd, struct stat *st)
+{
+#if defined(__linux__) && defined(__LP64__) && \
+    (defined(__x86_64__) || defined(__aarch64__))
+	/* The kernel's struct stat is the C library's on these targets. */
+#if defined(__x86_64__)
+	_Static_assert(sizeof(struct stat) == 144, "x86_64 kernel struct stat");
+#else
+	_Static_assert(sizeof(struct stat) == 128, "aarch64 kernel struct stat");
+#endif
+	/* Raw kernel writes have no sanitizer interceptor. */
+	bzero(st, sizeof(*st));
+	return ((int)syscall(SYS_fstat, fd, st));
+#else
+	return (fstat(fd, st));
+#endif
+}
+
+int
 fsimg_host_file(int fd, fsimg_host_file_t *out)
 {
 	struct stat st;
 
 	bzero(out, sizeof(*out));
-	if (fstat(fd, &st) == -1)
+	if (fsimg_host_fstat(fd, &st) == -1)
 		return (-1);
 	return (host_identity(&st, out));
 }

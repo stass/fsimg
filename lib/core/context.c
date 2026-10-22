@@ -250,7 +250,7 @@ fsimg_ctx_new(const fsimg_options_t *opts, fsimg_ctx_t **out,
 	ctx->stats.memory_bytes = sizeof(*ctx);
 	ctx->stats.memory_peak = sizeof(*ctx);
 	if (options.scratch_directory_fd != -1) {
-		if (fstat(options.scratch_directory_fd, &st) == -1) {
+		if (fsimg_host_fstat(options.scratch_directory_fd, &st) == -1) {
 			status = fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_CONTEXT, "scratch descriptor stat failed");
 			goto fail;
