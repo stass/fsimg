@@ -136,7 +136,7 @@ main(int argc, char **argv)
 		return (1);
 	fsimg_cli_paths_init(&paths);
 	status = fsimg_cli_parse(argc, argv, &options, &error);
-	fsimg_output_budget_init(&budget, &options.request.limits);
+	bzero(&budget, sizeof(budget));
 	options.request.output_budget = &budget;
 	invalid_syntax = status != FSIMG_OK && options.syntax_error;
 	if (status == FSIMG_OK && options.request.seconds != 0) {
@@ -189,7 +189,6 @@ main(int argc, char **argv)
 		 * A subsequent signal can still interrupt this final report.
 		 */
 		interrupted = 0;
-		budget.reporting = true;
 		reporting_deadline = fsimg_cli_clock() + 2000;
 	}
 	output_status = fsimg_output_run(executable, fsimg_cli_final, &display,
@@ -209,7 +208,6 @@ main(int argc, char **argv)
 		display.utf8_used = display.utf8_needed = 0;
 		display.phase = FSIMG_CLI_OUTPUT_RECORDS;
 		interrupted = 0;
-		budget.reporting = true;
 		fsimg_output_run(executable, fsimg_cli_final, &display, -1,
 		    fsimg_cli_clock() + 2000, &interrupted, &budget, &output_error);
 	}

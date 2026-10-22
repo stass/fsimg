@@ -1315,13 +1315,13 @@ output_counts(fsimg_cli_display_t *display)
 	const fsimg_output_budget_t *budget = display->options->request.output_budget;
 
 	if (budget == NULL) {
-		append(display, "\"text_limit_bytes\":null,\"text_bytes_queued\":null,"
+		append(display, "\"text_bytes_queued\":null,"
 		    "\"stdout_bytes_confirmed\":null,\"stderr_bytes_confirmed\":null");
 		return;
 	}
-	append(display, "\"text_limit_bytes\":\"%llu\",\"text_bytes_queued\":\"%llu\","
+	append(display, "\"text_bytes_queued\":\"%llu\","
 	    "\"stdout_bytes_confirmed\":\"%llu\",\"stderr_bytes_confirmed\":\"%llu\"",
-	    (unsigned long long)budget->limit_bytes, (unsigned long long)budget->text_bytes,
+	    (unsigned long long)budget->text_bytes,
 	    (unsigned long long)budget->confirmed[0], (unsigned long long)budget->confirmed[1]);
 }
 

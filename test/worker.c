@@ -66,6 +66,8 @@ typedef enum worker_scenario {
 	SCENARIO_PARTITION_OUTSIDE,
 	SCENARIO_PARTITION_UNSELECTED_LIST,
 	SCENARIO_VHD_WHOLE_FILE,
+	SCENARIO_EXCESS_LOSS,
+	SCENARIO_LIMIT_LOSS,
 } worker_scenario_t;
 
 /* Create jobs in these tests copy one source directory to the image root. */
@@ -139,7 +141,7 @@ static void test_transport(worker_scenario_t);
 static int fake_worker(worker_scenario_t);
 static int fake_output(void);
 static fsimg_status_t produce_output(void *, fsimg_worker_text_t *, fsimg_error_t *);
-static void test_output_ledger(bool);
+static void test_output_ledger(void);
 static uint64_t fill_pipe(int);
 static void drain_after_delay(int, uint64_t);
 
@@ -162,50 +164,32 @@ produce_output(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 }
 
 static void
-test_output_ledger(bool prefix)
+test_output_ledger(void)
 {
 	worker_fixture_t fixture;
-	output_source_t source = { .records = prefix ? 1 : 2 };
+	output_source_t source = { .records = 1 };
 	fsimg_output_budget_t budget;
 	fsimg_error_t error;
 	struct stat st;
-	uint64_t expected_bytes;
 	int fd;
 
 	fixture_open(&fixture);
 	fd = openat(fixture.parent, "output-only", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
 	CHECK(fd != -1);
-	fsimg_output_budget_init(&budget, &fixture.request.limits);
-	CHECK(budget.limit_bytes == UINT64_C(3973121048576));
-	expected_bytes = sizeof(source.buffer);
-	if (prefix) {
-		CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
-		    fd, 0, NULL, &budget, &error) == FSIMG_OK);
-		CHECK(budget.confirmed[0] == sizeof(source.buffer));
-		CHECK(budget.stdout_possible);
-		/* A new reporting phase fails before writing anything itself. The
-		 * already confirmed prefix still makes the complete stream partial.
-		 */
-		source = (output_source_t){ .fail = true };
-		CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
-		    fd, 0, NULL, &budget, &error) == FSIMG_EIO);
-		CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
-	} else {
-		budget.limit_bytes = FSIMG_OUTPUT_ERROR_RESERVE + sizeof(source.buffer);
-		CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
-		    fd, 0, NULL, &budget, &error) == FSIMG_ELIMIT);
-		CHECK(error.resource == FSIMG_RESOURCE_OUTPUT);
-		CHECK(budget.text_bytes == sizeof(source.buffer));
-		CHECK(budget.confirmed[0] == sizeof(source.buffer));
-		/* A failed operation can still deliver a bounded final diagnostic. */
-		budget.reporting = true;
-		source = (output_source_t){ .records = 1 };
-		CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
-		    fd, 0, NULL, &budget, &error) == FSIMG_OK);
-		expected_bytes += sizeof(source.buffer);
-		CHECK(budget.text_bytes == expected_bytes);
-	}
-	CHECK(fstat(fd, &st) == 0 && st.st_size == (off_t)expected_bytes);
+	bzero(&budget, sizeof(budget));
+	CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
+	    fd, 0, NULL, &budget, &error) == FSIMG_OK);
+	CHECK(budget.text_bytes == sizeof(source.buffer));
+	CHECK(budget.confirmed[0] == sizeof(source.buffer));
+	CHECK(budget.stdout_possible);
+	/* A new reporting phase fails before writing anything itself. The
+	 * already confirmed prefix still makes the complete stream partial.
+	 */
+	source = (output_source_t){ .fail = true };
+	CHECK(fsimg_output_run(fixture.executable, produce_output, &source,
+	    fd, 0, NULL, &budget, &error) == FSIMG_EIO);
+	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	CHECK(fstat(fd, &st) == 0 && st.st_size == (off_t)sizeof(source.buffer));
 	CHECK(close(fd) == 0);
 	CHECK(unlinkat(fixture.parent, "output-only", 0) == 0);
 	fixture_close(&fixture);
@@ -1065,9 +1049,10 @@ test_inheritance(void)
 	fixture_close(&fixture);
 }
 
-/* This test-only executable can act as a compromised worker. Executable mode
- * bits on its private fixture select a framing attack without adding test
- * flags or hooks to production worker code. It never parses image bytes.
+/* This test-only executable can act as a compromised worker. An executable
+ * fixture marks the attack and its size selects the scenario, without
+ * adding test flags or hooks to production worker code. It never parses
+ * image bytes.
  */
 static int
 fake_worker(worker_scenario_t mode)
@@ -1143,6 +1128,22 @@ fake_worker(worker_scenario_t mode)
 	if (mode == SCENARIO_NAME_WITHOUT_ENTRY) {
 		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_NAME, "X", 1, NULL);
 		return (0);
+	}
+	/* As many valid metadata loss examples as a worker may send, or one
+	 * more, then an otherwise correct job.
+	 */
+	if (mode == SCENARIO_LIMIT_LOSS || mode == SCENARIO_EXCESS_LOSS) {
+		for (unsigned i = 0; i < FSIMG_WIRE_LOSS_EVENTS +
+		    (mode == SCENARIO_EXCESS_LOSS ? 1 : 0); i++) {
+			bzero(raw, FSIMG_WIRE_LOSS_BYTES + 1);
+			fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_FIELDS,
+			    FSIMG_META_MODIFIED);
+			fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_LENGTH, 1);
+			raw[FSIMG_WIRE_LOSS_PATH] = 'X';
+			if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_LOSS,
+			    raw, FSIMG_WIRE_LOSS_BYTES + 1, NULL) != FSIMG_OK)
+				return (0);
+		}
 	}
 	/* The IMAGE record describes the input, whose size is the scenario. */
 	bzero(raw, FSIMG_WIRE_IMAGE_BYTES);
@@ -1318,7 +1319,7 @@ test_forged(void)
 		SCENARIO_VERIFY_MISSING_PAYLOAD, SCENARIO_RUNTIME_FAILURE,
 		SCENARIO_INFO_WITHOUT_IMAGE, SCENARIO_IMAGE_WRONG_DISK,
 		SCENARIO_PARTITION_OUTSIDE, SCENARIO_PARTITION_UNSELECTED_LIST,
-		SCENARIO_VHD_WHOLE_FILE
+		SCENARIO_VHD_WHOLE_FILE, SCENARIO_EXCESS_LOSS, SCENARIO_LIMIT_LOSS
 #ifdef FSIMG_TEST_ASAN
 		, SCENARIO_ASAN_FAILURE
 #endif
@@ -1345,6 +1346,8 @@ test_forged(void)
 			fixture.request.kind = FSIMG_JOB_LIST;
 			expected = FSIMG_OK;
 		}
+		if (mode == SCENARIO_LIMIT_LOSS)
+			expected = FSIMG_OK;
 		/* Only i may report a disk without a selected volume. */
 		if (mode == SCENARIO_PARTITION_UNSELECTED_LIST)
 			fixture.request.kind = FSIMG_JOB_LIST;
@@ -1366,6 +1369,8 @@ test_forged(void)
 		CHECK(status == expected);
 		if (mode == SCENARIO_LONG_LIST_NAME)
 			CHECK(fixture.name_bytes == 65535);
+		if (mode == SCENARIO_EXCESS_LOSS)
+			CHECK(strstr(error.message, "metadata loss examples") != NULL);
 		CHECK(close(fd) == 0);
 		CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
 		fixture_close(&fixture);
@@ -1598,10 +1603,9 @@ main(int argc, char **argv)
 			return (fake_worker((worker_scenario_t)st.st_size));
 		return (fsimg_worker_main());
 	}
-	if (argc == 2 && (strcmp(argv[1], "--output-prefix") == 0 ||
-	    strcmp(argv[1], "--output-limit") == 0)) {
+	if (argc == 2 && strcmp(argv[1], "--output-prefix") == 0) {
 		signal(SIGPIPE, SIG_IGN);
-		test_output_ledger(strcmp(argv[1], "--output-prefix") == 0);
+		test_output_ledger();
 		return (0);
 	}
 	if (argc == 3 && strcmp(argv[1], "--mount-source") == 0) {
@@ -1634,8 +1638,7 @@ main(int argc, char **argv)
 	test_forged_publication();
 	test_incomplete_extraction();
 	test_skipped_extraction();
-	test_output_ledger(true);
-	test_output_ledger(false);
+	test_output_ledger();
 	{
 		test_transport(SCENARIO_STARTUP_NONREADER);
 		test_transport(SCENARIO_PREMATURE_RAW);

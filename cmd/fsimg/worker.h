@@ -69,20 +69,16 @@ typedef enum fsimg_confinement {
  */
 #define FSIMG_INPUT_UNREADABLE_EXIT 2
 
-#define FSIMG_OUTPUT_ERROR_RESERVE 131072u
-/* One coordinator-owned ledger spans processing and final reporting. Counts
- * describe queued text and confirmed stream bytes, not a sink's durability.
- * stdout_possible also covers the write-to-ack window on failed relays.
+/* One coordinator-owned ledger spans processing and final reporting; it
+ * starts zeroed. Counts describe queued text and confirmed stream bytes, not
+ * a sink's durability. stdout_possible also covers the write-to-ack window
+ * on failed relays.
  */
 typedef struct fsimg_output_budget {
-	uint64_t	 limit_bytes;
 	uint64_t	 text_bytes;
 	uint64_t	 confirmed[2];
 	bool		 stdout_possible;
-	bool		 reporting;
 } fsimg_output_budget_t;
-
-void fsimg_output_budget_init(fsimg_output_budget_t *, const fsimg_options_t *);
 
 /* Parent descriptors and selection are borrowed for run. No native struct or
  * pointer is transmitted: job.c owns the complete wire representation.

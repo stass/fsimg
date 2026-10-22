@@ -203,14 +203,14 @@ the command-specific presentation rules.
 
 The coordinator owns one output ledger for the complete command, borrowed by
 every relay phase. It records queued formatted bytes and confirmed stdout/stderr
-bytes; raw member bytes and a streamed image retain their independent logical-output ceiling. The text
-ceiling derives only from trusted entry/path limits: at most
-`entries * (6 * path_bytes + 4096) + 1 MiB`, capped at `UINT64_MAX` with checked
-arithmetic. The factor six bounds JSON escaping and the per-entry allowance
-covers fixed metadata. Fixed records, logarithmically sampled progress, loss
-examples and final diagnostics fit the fixed allowance; its last 128 KiB is
-reserved for failure reports. This bounds text without changing logical-file
-quota semantics or introducing an arbitrary short timeout on gigantic jobs.
+bytes in checked counters; raw member bytes and a streamed image retain their
+independent logical-output ceiling. Formatted text has no ceiling of its own;
+the coordinator bounds every worker frame that yields text instead: the
+image, plan, verification, error and completion records arrive once each,
+partition records rise strictly within the table's slots, the entry and path
+limits bound the per-entry records, progress is sampled logarithmically, and
+at most 32 metadata-loss examples are accepted from a worker, whatever it
+sends. Every relayed span is bounded too.
 Publication outcomes take precedence over a partial stdout prefix; otherwise
 any confirmed prefix remains incomplete after a later phase fails.
 

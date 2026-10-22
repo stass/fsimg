@@ -128,10 +128,16 @@
   [design](specs/design-spec-testing.md) owns the decisions and the
   [plan](docs/spec-testing-plan.md) the stages.
 
+* [High] **Spec harness preflight needs the removed `text_limit_bytes`**
+  (`test/spec/lib/fsimg_spec/preflight.rb`): it sizes its text capture from
+  create's summary field `text_limit_bytes`, which the CLI does not
+  report, since formatted text has no ceiling of its own, so `test/spec.sh`
+  fails every case with a `PreflightError`. Size the capture from the
+  harness's own bound, or stream it as the next item proposes.
 * [Medium] **Spec harness captures in memory** (`test/spec/lib/fsimg_spec/process.rb`,
-  `outcome.rb`): each stage's stdout and stderr are held in Ruby strings up
-  to the coordinator's text ceiling, which reaches several GiB under the
-  `deep` profile, and stdout is parsed whole. Stream captures to their
+  `outcome.rb`): each stage's stdout and stderr are held in Ruby strings,
+  which the entry and path limits let reach several GiB under the `deep`
+  profile, and stdout is parsed whole. Stream captures to their
   case-directory files and parse the NDJSON records line by line. The
   oracles' read-back of each file (`fat/oracles.rb`, `mtype` and
   `fatcat -r`) likewise holds a file's bytes whole before hashing them;

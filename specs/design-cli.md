@@ -158,8 +158,7 @@ rule.
 | `t` | The long listing on stdout, defined under [listing](#listing) | The same stderr details |
 | `W`, `i`, `--formats` | Capability, geometry and sandbox details on stderr | Nothing further |
 
-Verbose names are streamed, never accumulated, and count against the
-formatted-text ceiling like every diagnostic line.
+Verbose names are streamed, never accumulated.
 
 ## Stack, settings and selection
 
@@ -687,17 +686,17 @@ links the same core objects statically so fresh worker execution needs no
 loader environment. The public shared and static library remains
 independently installed and tested.
 
-The operation deadline, the post-failure diagnostic grace and the formatted
-text ceiling are the [architecture's](architecture.md#bounded-resources).
+The operation deadline and the post-failure diagnostic grace are the
+[architecture's](architecture.md#bounded-resources).
 Scratch cleanup removes at most 4,096 flat entries and never descends into a
 worker-created directory. A retained scratch directory or staging object is
 reported explicitly.
 
 `-l output` limits logical file bytes, including holes, rather than escaped
-listing text. Summaries report the text ceiling, queued text and confirmed
-stream bytes; every reported ledger counter is a snapshot taken before its
-own record is queued, so it excludes that record. Progress emits only when
-an entries, bytes or work counter reaches a new power-of-two milestone, in
-addition to its frequency limit; it therefore needs at most 193 records per
-operation even for gigantic payloads. Suppressing redundant progress never
-stops processing.
+listing text. Summaries report queued text and confirmed stream bytes; every
+reported ledger counter is a snapshot taken before its own record is queued,
+so it excludes that record. Progress emits only when an entries, bytes or
+work counter reaches a new power-of-two milestone, in addition to its
+frequency limit; it therefore needs at most 193 records per operation even
+for gigantic payloads. Suppressing redundant progress never stops
+processing.

@@ -145,6 +145,10 @@ typedef struct worker_supervisor {
 	uint64_t	 name_bytes;
 	uint64_t	 entry_size;
 	uint64_t	 entry_count;
+	/* Metadata loss examples received; a worker sends at most
+	 * FSIMG_WIRE_LOSS_EVENTS, and DONE carries the exact count.
+	 */
+	unsigned	 loss_examples;
 	uint64_t	 output_limit;
 	uint64_t	 volume_limit;
 	/* The read job's input file size, or the create job's planned disk. */
@@ -230,40 +234,23 @@ close_channel(int *fd)
 	*fd = -1;
 }
 
+/* Queue one span for the relay. Formatted text is counted in the ledger;
+ * raw payload is not text, and raw_bound and output_limit bound it instead.
+ */
 static fsimg_status_t
 queue_text(worker_supervisor_t *state, const fsimg_worker_text_t *text,
     bool raw, fsimg_error_t *error)
 {
 	worker_relay_t *relay = &state->relay;
-	uint64_t total, ceiling;
-	bool fits;
 
 	if (text->length == 0)
 		return (FSIMG_OK);
 	if (text->data == NULL || text->length > FSIMG_WORKER_TEXT_BYTES ||
 	    relay->phase != RELAY_IDLE)
 		return (worker_error(error, "invalid or overlapping worker text output"));
-	if (!raw) {
-		ceiling = state->budget->limit_bytes;
-		if (ceiling < FSIMG_OUTPUT_ERROR_RESERVE)
-			return (worker_error(error, "formatted output budget lacks its error reserve"));
-		if (!state->budget->reporting)
-			ceiling -= FSIMG_OUTPUT_ERROR_RESERVE;
-		fits = fsimg_add_u64(state->budget->text_bytes, text->length, &total);
-		if (!fits)
-			total = UINT64_MAX;
-		if (!fits || total > ceiling) {
-			fsimg_error_set(error, FSIMG_ELIMIT, 0, FSIMG_OP_CONTEXT,
-			    "formatted output exceeds its derived text ceiling");
-			if (error != NULL) {
-				error->resource = FSIMG_RESOURCE_OUTPUT;
-				error->limit = ceiling;
-				error->observed = total;
-			}
-			return (FSIMG_ELIMIT);
-		}
-		state->budget->text_bytes = total;
-	}
+	if (!raw && !fsimg_add_u64(state->budget->text_bytes, text->length,
+	    &state->budget->text_bytes))
+		return (worker_error(error, "formatted output count overflows"));
 	relay->text = *text;
 	fsimg_wire_put64(relay->header + FSIMG_RELAY_STREAM, text->diagnostic ? 2 : 1);
 	fsimg_wire_put64(relay->header + FSIMG_RELAY_LENGTH, text->length);
@@ -499,6 +486,15 @@ partition_frame_expected(const worker_supervisor_t *state,
 	    state->last_partition == 0 && index == state->selected_slot);
 }
 
+/*
+ * Validate one worker frame before it is formatted. Formatted text has no
+ * ceiling of its own, so every frame that yields text must be bounded here,
+ * and a new one needs a bound too: READY, IMAGE, INFO, PLAN, VERIFY, ERROR
+ * and DONE arrive once by state; PARTITION records rise strictly within the
+ * table's slots; ENTRY counts against the entries limit and NAME against the
+ * path limit; LOSS stops at FSIMG_WIRE_LOSS_EVENTS; progress text is sampled
+ * at power-of-two milestones; raw bytes stop at raw_bound.
+ */
 static fsimg_status_t
 handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 {
@@ -655,6 +651,10 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS) == 0 ||
 		    (fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS) & ~(uint64_t)FSIMG_META_KNOWN) != 0)
 			return (worker_error(error, "invalid worker metadata loss frame"));
+		if (state->loss_examples == FSIMG_WIRE_LOSS_EVENTS)
+			return (worker_error(error,
+			    "worker sent more metadata loss examples than allowed"));
+		state->loss_examples++;
 		break;
 	case FSIMG_FRAME_DONE:
 		if ((state->output_state != (kind == FSIMG_JOB_VERIFY ?
@@ -1385,10 +1385,9 @@ supervisor_init(worker_supervisor_t *state, const fsimg_worker_request_t *reques
 	state->output_state = request->kind < FSIMG_JOB_CREATE ||
 	    slot_name(request, FSIMG_LAYER_SCHEME)[0] != '\0' ||
 	    fsimg_job_encoded(request) ? WORKER_WAIT_IMAGE : WORKER_WAIT_HEADER;
-	if (request->output_budget == NULL) {
-		fsimg_output_budget_init(&state->local_budget, &request->limits);
+	if (request->output_budget == NULL)
 		state->budget = &state->local_budget;
-	} else
+	else
 		state->budget = request->output_budget;
 	for (unsigned role = 0; role < CHANNEL_COUNT; role++)
 		state->channels[role][0] = state->channels[role][1] = -1;
@@ -1499,22 +1498,3 @@ fsimg_output_run(const char *executable, fsimg_output_producer_fn_t produce,
 	return (finish_operation(&state, status, error));
 }
 
-void
-fsimg_output_budget_init(fsimg_output_budget_t *budget, const fsimg_options_t *options)
-{
-	fsimg_options_t defaults;
-	uint64_t entries, path, per_entry, variable;
-
-	bzero(budget, sizeof(*budget));
-	fsimg_options_init(&defaults);
-	entries = options->max_entries == 0 ? defaults.max_entries : options->max_entries;
-	path = options->max_path_bytes == 0 ? defaults.max_path_bytes : options->max_path_bytes;
-	/* path is a uint32 field, so this per-entry calculation fits uint64. */
-	per_entry = path * 6 + 4096;
-	if (!fsimg_mul_u64(entries, per_entry, &variable)) {
-		budget->limit_bytes = UINT64_MAX;
-		return;
-	}
-	if (!fsimg_add_u64(variable, 1048576, &budget->limit_bytes))
-		budget->limit_bytes = UINT64_MAX;
-}
