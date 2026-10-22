@@ -454,6 +454,15 @@ reused file is not zeroing. The default CLI publishes a
 completed image without replacing an existing pathname. A caller-supplied raw
 I/O sink can contain partial output after failure and must be discarded.
 
+A writer allocates every logical byte of a file in the image it plans and
+emits each one, as written data or as a proven zero range of a fresh sink;
+no writer stores a file sparsely. A file therefore never occupies less of
+the planned volume than its logical size, which the
+[manifest design's digest cost](design-mtree.md#digests) depends on: the
+bytes a generated file's claimed digest covers are bounded by the planned
+volume and the output limit. A writer that stored holes would have to
+bound that hashing another way.
+
 Before any output resize, zeroing, or write, built-in adapters compare output
 backing identity with all collected host sources and reject an inode alias.
 Slices retain backing identity and translated ranges. Opaque callback sources

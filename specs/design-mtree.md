@@ -448,8 +448,9 @@ storage, and planning checks the claims after the driver, the disk layout
 and the output limit have accepted the catalog. The bytes hashed then never
 exceed the planned volume, at one unit of work per 64 KiB piece. A claim
 therefore takes time in proportion to the logical size of the content it
-covers: no writer stores a file sparsely, so every byte the digest covers
-occupies the planned volume, and the volume and the output limit
+covers: no writer stores a file sparsely, a
+[writer contract](architecture.md#output-and-determinism), so every byte
+the digest covers occupies the planned volume, and the volume and the output limit
 (`-l output`) bound that size as they bound the image. In an automatically
 sized volume the claimed file sets the volume, so only an explicit
 `-l output` or `-s` lowers the bound. Writing skips a zero run in a fresh
