@@ -141,10 +141,9 @@ permits an optional leading minus and decimal digits, rejecting a plus sign
 and suffixes; representability in the chosen filesystem is a planning check.
 Singleton and key duplicates are syntax errors even when the values agree.
 
-`-T` should identify disk-backed storage: a tmpfs or RAM disk consumes
-system memory outside fsimg's heap budget, and the coordinator warns when it
-places scratch or a payload-sized temporary file on a filesystem the host
-reports as memory-backed. Diagnostics report memory, scratch and spool
+Scratch, and any payload-sized temporary file placed there, consumes
+system memory outside fsimg's memory budget when `-T` names a tmpfs or RAM
+disk, so `-T` should name disk-backed storage. Diagnostics report memory, scratch and spool
 budgets independently and identify unavailable scratch or host capacity
 errors. What scratch and the two payload-sized temporary files hold, and
 where each lives, is the [storage design's](design-storage.md#resource-model)

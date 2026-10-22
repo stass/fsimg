@@ -27,8 +27,9 @@ the raw intermediate lives beside the staged output for a file destination,
 so that the destination filesystem bounds a file job and a small scratch
 filesystem does not, and in the private scratch tree for a stream, which
 has no destination directory. A payload-sized file on a
-memory-backed filesystem consumes RAM outside the memory budget, which the
-CLI warns about where the host can report the filesystem kind (tmpfs).
+memory-backed filesystem, such as tmpfs, consumes RAM outside the memory
+budget; the caller chooses its directory (in the CLI, `-T` or the
+destination's).
 
 The implementation does not map entire images, allocation tables, catalogs, or
 scratch files. A huge mapping is not an acceptable replacement for a huge

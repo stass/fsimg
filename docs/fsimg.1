@@ -202,9 +202,11 @@ cannot be read; with
 or with
 .Cm cW
 of a compressed image, it is a syntax error.
-Fresh private scratch contains metadata and the two unlinked payload-sized
-files described under
-.Sx READING ,
+Fresh private scratch contains metadata, the unlinked spool described under
+.Sx READING
+and, for an image written to standard output, the unlinked raw file described
+under
+.Sx CREATION ,
 never a copy of a source tree.
 Use disk-backed storage for massive catalogs and spooled images.
 .It Fl v
