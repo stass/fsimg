@@ -525,9 +525,11 @@ test_record_marking(void)
 
 /*
  * A write the host fails, and a short one, leave their whole requested
- * range marked: the file size limit fails a write past it outright and
- * cuts one across it short. The answer then excludes both ranges and
- * zeroing them writes zeros over every requested byte.
+ * range marked: the file size limit fails a write past it outright, and
+ * one across it is cut short or, on FreeBSD, failed outright; the bytes
+ * on disk show which, and the transfer must report what the host did.
+ * The answer then excludes both ranges and zeroing them writes zeros over
+ * every requested byte.
  */
 static void
 test_failed_writes_stay_marked(void)
@@ -538,6 +540,8 @@ test_failed_writes_stay_marked(void)
 	size_t transferred;
 	rlim_t limit;
 	fixture_t f;
+	size_t landed;
+	unsigned char byte;
 
 	fixture_init(&f, 0);
 	root = fresh_file(&f, MIB);
@@ -545,8 +549,11 @@ test_failed_writes_stay_marked(void)
 	CHECK(fsimg_io_write_exact(root, 600 * KIB, ones, GRANULE,
 	    &transferred, NULL) == FSIMG_EIO && transferred == 0);
 	CHECK(fsimg_io_write_exact(root, 512 * KIB - 100, ones, sizeof(ones),
-	    &transferred, NULL) == FSIMG_EIO && transferred == 100);
+	    &transferred, NULL) == FSIMG_EIO);
 	file_size_limit(limit);
+	CHECK(fsimg_io_read_exact(root, 512 * KIB - 100, &byte, 1, &landed,
+	    NULL) == FSIMG_OK);
+	CHECK(transferred == (byte == ones[0] ? 100 : 0));
 	expect_zero_range(root, 0, 0, 512 * KIB - GRANULE);
 	expect_zero_range(root, 512 * KIB - GRANULE, 512 * KIB + 3 * GRANULE,
 	    600 * KIB);
@@ -774,17 +781,18 @@ test_record_growth(void)
  * A resize that cannot complete leaves the record and the file as they
  * were and the object usable: an allocation failure while the folded
  * record is prepared fails before the host is touched, and a host
- * truncation refused by the file size limit after the record was prepared
- * discards the prepared record.
+ * truncation failure injected after the record was prepared discards the
+ * prepared record. The failure is injected because FreeBSD's ftruncate
+ * ignores the file size limit.
  */
 static void
 test_resize_failures(void)
 {
 	fsimg_io_t *root;
 	struct stat st;
+	fsimg_error_t error;
 	unsigned shift;
 	size_t bytes;
-	rlim_t limit;
 	int fd, observer;
 	fixture_t f;
 
@@ -810,9 +818,10 @@ test_resize_failures(void)
 	fsimg_test_io_record(root, &shift, &bytes);
 	CHECK(shift == 12 && bytes == MIB);
 
-	limit = file_size_limit(48 * GIB);
-	CHECK(fsimg_io_resize(root, 64 * GIB, NULL) == FSIMG_EIO);
-	file_size_limit(limit);
+	fsimg_test_holes(f.ctx)->resize_errno = EFBIG;
+	CHECK(fsimg_io_resize(root, 64 * GIB, &error) == FSIMG_EIO &&
+	    error.os_error == EFBIG);
+	fsimg_test_holes(f.ctx)->resize_errno = 0;
 	fsimg_test_io_record(root, &shift, &bytes);
 	CHECK(shift == 12 && bytes == MIB);
 	CHECK(stat_of(&f, STAT_MEMORY) <= f.baseline_memory + 2 * MIB);

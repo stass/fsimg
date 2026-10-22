@@ -1241,8 +1241,14 @@ fsimg_io_resize(fsimg_io_t *io, uint64_t length, fsimg_error_t *error)
 				return (status);
 		}
 		fsimg_stat_add(&io->ctx->stats.io_calls, 1);
-		if (ftruncate(io->fd, host_length) == -1) {
+		/*
+		 * An injected failure skips the host call, which would
+		 * succeed and leave the file out of step with the record.
+		 */
+		saved = io->ctx->hole_test.resize_errno;
+		if (saved == 0 && ftruncate(io->fd, host_length) == -1)
 			saved = errno;
+		if (saved != 0) {
 			record_discard(io, &prepared);
 			return (fsimg_error_set(error, FSIMG_EIO, saved,
 			    FSIMG_OP_IO, "resize failed"));

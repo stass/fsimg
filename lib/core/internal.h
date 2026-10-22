@@ -25,13 +25,15 @@ typedef struct fsimg_meta_cache fsimg_meta_cache_t;
 
 /*
  * Private test controls and observations of hole knowledge. All zero is the
- * library's own behaviour; each switch disables one protection so a test can
- * show that protection is what catches its case.
+ * library's own behaviour; each switch disables one protection, so a test
+ * can show that protection is what catches its case, or injects one host
+ * failure.
  */
 typedef struct fsimg_hole_test {
 	uint64_t	 discovery_syncs;	/* Syncs made before host queries */
 	int		 sync_errno;	/* Nonzero: discovery syncs fail so */
 	int		 flush_errno;	/* Nonzero: descriptor flushes fail so */
+	int		 resize_errno;	/* Nonzero: descriptor resizes fail so */
 	bool		 no_length_check;	/* Answers ignore a shorter file */
 	bool		 no_tail_clip;	/* Answers may cover the last byte */
 	bool		 partial_chunks;	/* A partly covered chunk is zero */

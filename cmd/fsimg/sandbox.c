@@ -194,11 +194,14 @@ fsimg_sandbox_backend(void)
 }
 
 /* Every role must be the object its grant assumes before any backend runs:
- * the input a read-only regular file, or the read end of a pipe exactly
+ * the input a read-only regular file, or a readable pipe end exactly
  * when input_pipe says so; the three writable roles directories; each
  * root a read-only directory or regular file; and the raw intermediate
  * and the spool read/write regular files no name reaches. The library
- * checks those two files again when it adopts them.
+ * checks those two files again when it adopts them. A pipe end need only
+ * be readable, not O_RDONLY: Linux and macOS pipe ends are one-way, but a
+ * FreeBSD pipe is bidirectional, so its read end reports O_RDWR, and there
+ * Capsicum withholds the write right from the input.
  */
 static fsimg_status_t
 check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
@@ -206,6 +209,7 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 	const int directories[] = { caps->staging, caps->destination, caps->scratch };
 	const int handed_over[] = { caps->raw, caps->spool };
 	struct stat st;
+	bool valid;
 	int flags, fd;
 
 	if (caps->input != -1) {
@@ -213,11 +217,16 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 		if (flags == -1 || fstat(caps->input, &st) == -1)
 			return (fsimg_error_set(error, FSIMG_EIO, errno,
 			    FSIMG_OP_CONTEXT, "sandbox input validation failed"));
-		if ((flags & O_ACCMODE) != O_RDONLY || (caps->input_pipe ?
-		    !S_ISFIFO(st.st_mode) : !S_ISREG(st.st_mode)))
+		if (caps->input_pipe)
+			valid = S_ISFIFO(st.st_mode) &&
+			    (flags & O_ACCMODE) != O_WRONLY;
+		else
+			valid = S_ISREG(st.st_mode) &&
+			    (flags & O_ACCMODE) == O_RDONLY;
+		if (!valid)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, caps->input_pipe ?
-			    "sandbox input requires the read end of a pipe" :
+			    "sandbox input requires a readable pipe" :
 			    "sandbox input requires read-only regular file"));
 	}
 	for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
