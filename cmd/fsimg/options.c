@@ -51,6 +51,17 @@
 #define MODES_IMAGE		(MODES_CREATE | MODES_READ)
 #define MODES_ALL		(MODES_IMAGE | MODE_FORMATS)
 
+/*
+ * The default descriptor limit is the depth limit plus this many. A source
+ * scan or an extraction holds one descriptor per directory level along its
+ * path, so a tree as deep as the depth limit needs that many; these cover
+ * everything else a command holds at once: its operand roots, two for a
+ * manifest with a content directory, scratch, the staging directory and
+ * staged file, the raw intermediate, spilled metadata stores and the file
+ * being read or written, with room for about a hundred operands.
+ */
+#define CLI_WORKING_DESCRIPTORS	128u
+
 /* getopt_long values of the long-only options, above every short letter. */
 enum {
 	OPT_FORMATS = 256,
@@ -195,6 +206,7 @@ static fsimg_status_t read_option_words(cli_parse_t *);
 static fsimg_status_t select_mode(cli_parse_t *);
 static fsimg_status_t check_option_modes(cli_parse_t *);
 static fsimg_status_t parse_limit(cli_parse_t *, const char *, unsigned *);
+static uint32_t default_descriptor_limit(uint32_t);
 static fsimg_status_t parse_uuid(cli_parse_t *, const char *, unsigned char *);
 static bool find_layer(const char *, size_t, fsimg_layer_info_t *);
 static bool layer_selected(const cli_parse_t *, const fsimg_layer_info_t *);
@@ -605,8 +617,9 @@ parse_limit(cli_parse_t *parse, const char *text, unsigned *seen)
 	    number > UINT32_MAX)
 		return (syntax_naming(parse, "resource limit exceeds its uint32 range",
 		    text));
-	/* The initialized request already owns the defaults. A zero value
-	 * leaves that value intact rather than maintaining another default list.
+	/* The initialized request already owns the defaults, except the
+	 * descriptor limit's, which is derived once every key is read. A zero
+	 * value leaves the default rather than maintaining another list.
 	 */
 	if (number == 0)
 		return (FSIMG_OK);
@@ -623,6 +636,17 @@ parse_limit(cli_parse_t *parse, const char *text, unsigned *seen)
 	case CLI_LIMIT_COUNT: return (syntax(parse, "invalid resource-limit key"));
 	}
 	return (FSIMG_OK);
+}
+
+/* The descriptor limit a command gets unless it gives one: the depth limit
+ * plus CLI_WORKING_DESCRIPTORS, saturating at the field's range.
+ */
+static uint32_t
+default_descriptor_limit(uint32_t depth)
+{
+	if (depth > UINT32_MAX - CLI_WORKING_DESCRIPTORS)
+		return (UINT32_MAX);
+	return (depth + CLI_WORKING_DESCRIPTORS);
 }
 
 /* RFC 4122 text: 32 hexadecimal digits in groups of 8, 4, 4, 4 and 12,
@@ -1107,12 +1131,19 @@ interpret_common(cli_parse_t *parse)
 		if (request->limits.memory_bytes < UINT64_C(16) * 1024 * 1024)
 			return (syntax(parse, "memory budget must be at least 16M"));
 	}
+	/* Zero marks the descriptor limit unset while the -l keys are read, so
+	 * that its default can follow the depth limit they settle.
+	 */
+	request->limits.max_open_files = 0;
 	limit_keys = 0;
 	for (unsigned i = 0; i < parse->limit_count; i++) {
 		status = parse_limit(parse, parse->limits[i], &limit_keys);
 		if (status != FSIMG_OK)
 			return (status);
 	}
+	if (request->limits.max_open_files == 0)
+		request->limits.max_open_files =
+		    default_descriptor_limit(request->limits.max_depth);
 	if (option_value(parse, 'F') != NULL) {
 		status = parse_stack(parse, option_value(parse, 'F'));
 		if (status != FSIMG_OK)

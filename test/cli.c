@@ -173,6 +173,15 @@ test_options(void)
 	char *dry_run[] = { "fsimg", "-cnR", "-F", "exfat", ".", NULL };
 	char *defaults[] = { "fsimg", "-i", "-f", "image", "-m", "0", "-l", "fds=0",
 	    "-l", "spool=1M", NULL };
+	char *deep[] = { "fsimg", "-i", "-f", "image", "-l", "depth=1000", NULL };
+	char *widest[] = { "fsimg", "-i", "-f", "image", "-l", "depth=4294967295",
+	    NULL };
+	char *zero[] = { "fsimg", "-i", "-f", "image", "-l", "fds=0", "-l",
+	    "depth=1000", NULL };
+	char *edge[] = { "fsimg", "-i", "-f", "image", "-l", "depth=4294967167",
+	    NULL };
+	char *given[] = { "fsimg", "-i", "-f", "image", "-l", "fds=50", "-l",
+	    "depth=1000", NULL };
 	char *listing[] = { "fsimg", "tf", "image", "--json", "--", "/A", NULL };
 	char *flat[] = { "fsimg", "-t", "--no-recursion", "-f", "image", "A", NULL };
 	char *qnx6[] = { "fsimg", "-cn", "-F", "qnx6", "-o", "endian=big",
@@ -197,9 +206,27 @@ test_options(void)
 	fsimg_cli_release(&options);
 	CHECK(parse(defaults, &options) == FSIMG_OK);
 	CHECK(options.request.limits.memory_bytes == UINT64_C(256) * 1024 * 1024);
-	CHECK(options.request.limits.max_open_files == 128);
+	CHECK(options.request.limits.max_open_files == 256 + 128);
 	CHECK(options.request.limits.spool_bytes == UINT64_C(1024) * 1024);
 	CHECK(options.request.kind == FSIMG_JOB_INFO && strcmp(options.mode, "i") == 0);
+	fsimg_cli_release(&options);
+	/* The default descriptor limit follows the depth limit; a given one
+	 * stands.
+	 */
+	CHECK(parse(deep, &options) == FSIMG_OK);
+	CHECK(options.request.limits.max_open_files == 1000 + 128);
+	fsimg_cli_release(&options);
+	CHECK(parse(zero, &options) == FSIMG_OK);
+	CHECK(options.request.limits.max_open_files == 1000 + 128);
+	fsimg_cli_release(&options);
+	CHECK(parse(edge, &options) == FSIMG_OK);
+	CHECK(options.request.limits.max_open_files == UINT32_MAX);
+	fsimg_cli_release(&options);
+	CHECK(parse(widest, &options) == FSIMG_OK);
+	CHECK(options.request.limits.max_open_files == UINT32_MAX);
+	fsimg_cli_release(&options);
+	CHECK(parse(given, &options) == FSIMG_OK);
+	CHECK(options.request.limits.max_open_files == 50);
 	fsimg_cli_release(&options);
 	CHECK(parse(listing, &options) == FSIMG_OK);
 	CHECK(options.json && (options.request.flags & FSIMG_JOB_RECURSIVE) != 0);

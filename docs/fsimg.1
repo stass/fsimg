@@ -248,13 +248,23 @@ Byte quantities use unsigned decimal with optional uppercase K, M, G, T or P
 binary suffixes.
 Signs, whitespace, fractions and overflow fail.
 Defaults are 64 GiB scratch, 10,000,000 entries, depth 256, 64 KiB image paths
-including separators and NUL, and 128 owned descriptors.
+including separators and NUL, and the depth limit plus 128 owned
+descriptors, 384 unless depth is given.
+A source tree holds one descriptor per directory level while it is scanned
+or copied, and an extraction one per level it creates, so the default fits
+a tree as deep as the depth limit, and the 128 cover the rest for about a
+hundred operands.
 The fds limit also caps the number of create operands: the worker holds one
 open root per operand, two for a manifest with a content directory,
 besides its scratch directory, the staging directory of an image written
 to a file, the raw file of a container, compressed image or stream, and
-two scanning descriptors; a source tree holds one more descriptor per
-directory level while it is scanned or copied.
+two scanning descriptors.
+The host's own descriptor limit, as
+.Ic ulimit -n
+shows it, still applies, and
+.Nm
+never raises it; a tree at the default depth limit needs about 272, more
+than the 256 a macOS shell starts with.
 Logical extraction output defaults to the selected volume slice length,
 including holes.
 Work and time have no hidden short default limit.

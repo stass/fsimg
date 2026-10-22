@@ -97,34 +97,41 @@ holds a stream or compressed input, defined in the
 [layer design](design-layers.md#budget). No limit of its own bounds the
 manifest `x --mtree` writes or a `t` listing: `entries` bounds their lines
 and `path`, with the 1023-byte link-target limit, each line's length
-([manifest design](design-mtree.md#security-and-bounds)). `fds` (default
-128) also caps the number of create operands, since the worker holds one
-open root per operand, two for a manifest operand with a content directory (the manifest and
-the directory),
-besides its own scratch directory, the staging directory of an image
-written to a file, the [raw intermediate](design-layers.md#handed-over-files)
-of a container, compressed image or stream, and two scanning descriptors
-(a directory and the entry read from it); a command line
-leaving no room for those fails before the worker starts, naming the
-descriptor limit, and a deep source tree, which holds one more descriptor
-per directory level, can still reach the limit while it is scanned or
-copied. The worker charges every descriptor it holds, each root and
-handed-over file included, from the moment it holds it, so that limit
-counts them all. An internal adopter takes the worker's charge over with
-the descriptor; a public library call that adopts a handed-over file
-charges it itself, so the worker returns its charge as it passes the file
-over. Work counts primitive metadata steps, adapter calls
-and every byte decompressed from a container chunk or a gzip member, not
-just payload bytes, so `work` and `seconds` bound decompression time.
-The deadline is also supervised by the coordinator. Unset work and time
-limits retain algorithmic traversal bounds and cancellation, not a hidden
-short timeout that makes gigantic legitimate jobs impossible.
+([manifest design](design-mtree.md#security-and-bounds)).
+
+`fds` defaults to the depth limit plus 128. A source scan holds one
+descriptor per directory level along its path, and so does an extraction, so
+the default fits a tree as deep as the depth limit, whatever depth the
+command gives; the 128 cover everything else a command holds at once. The
+library keeps its own fixed default for embedders, whose descriptors it
+shares with the host program. `fds` also caps the number of create operands,
+since the worker holds one open root per operand, two for a manifest operand
+with a content directory (the manifest and the directory), besides its own
+scratch directory, the staging directory of an image written to a file, the
+[raw intermediate](design-layers.md#handed-over-files) of a container,
+compressed image or stream, and two scanning descriptors (a directory and
+the entry read from it); a command line leaving no room for those fails
+before the worker starts, naming the descriptor limit. The coordinator opens
+the operands within the same limit before it starts the worker. The host's
+`RLIMIT_NOFILE` still applies to both processes, and fsimg never raises it.
+
+The worker charges every descriptor it holds, each root and handed-over file
+included, from the moment it holds it, so that limit counts them all. An
+internal adopter takes the worker's charge over with the descriptor; a
+public library call that adopts a handed-over file charges it itself, so the
+worker returns its charge as it passes the file over. Work counts primitive
+metadata steps, adapter calls and every byte decompressed from a container
+chunk or a gzip member, not just payload bytes, so `work` and `seconds`
+bound decompression time. The deadline is also supervised by the
+coordinator. Unset work and time limits retain algorithmic traversal bounds
+and cancellation, not a hidden short timeout that makes gigantic legitimate
+jobs impossible.
 
 Zero resource values select their documented defaults; disabling scratch
 uses `-T -`. There is no magic negative or `unlimited` operand. Explicit
 large limits remain bounded by checked `uint64_t` counters and host
 capabilities. The [architecture](architecture.md#bounded-resources) defines
-the defaults.
+the defaults, except the CLI's `fds` default above.
 
 Byte quantities are unsigned decimal with an optional `K`, `M`, `G`, `T` or
 `P` binary multiplier (powers of 1024). Bare values are bytes. Signs,

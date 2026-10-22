@@ -139,7 +139,7 @@ Defaults are product policy, not a measurement claim:
 | Entries | 10,000,000 | Entries admitted or visited in one operation |
 | Directory depth | 256 | Components below the volume root |
 | Image path | 64 KiB | Encoded UTF-8 bytes, including separators and terminating NUL |
-| Open descriptors | 128 | Aggregate descriptors owned by a context, further limited by host availability |
+| Open descriptors | 128 | Aggregate descriptors owned by a context, further limited by host availability; the CLI derives its own default from the depth limit ([CLI](design-cli.md)) |
 | Extracted logical bytes | Selected volume length | Sum of file lengths, including holes and repeated references; caller may explicitly change it |
 | Created output bytes | Planned length | Logical bytes of the staged output plus, while a transcode holds both, the raw intermediate: the plan sums the disk length and the layers' worst-case encoded length, and an explicit lower limit fails before anything is written, naming both parts; a stream holds the raw intermediate too, so it is charged the same way |
 | Diagnostic frame | 64 KiB | Maximum single worker control message |

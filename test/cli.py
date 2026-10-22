@@ -924,6 +924,39 @@ def test_human_loss_bounds(executable, root):
     assert b"fields=0x" not in verbose.stderr
 
 
+def test_tree_at_depth_limit(executable, root):
+    """A tree as deep as the default depth limit is created and extracted at
+    the default descriptor limit, though each holds one descriptor per level.
+    The host's own limit must allow that many too, and so must removing the
+    tree; macOS shells start at 256, so the test raises its own to 512 while
+    it runs when the hard limit allows it."""
+    wanted = 512
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < wanted:
+        print(f"SKIP: depth-limit tree needs RLIMIT_NOFILE {wanted}, hard limit {hard}")
+        return
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+    try:
+        work = root / "depth-limit"
+        # The operand, 254 directories and the file make a 256-component path.
+        levels = ["d"] * 254
+        deepest = work.joinpath("tree", *levels)
+        deepest.mkdir(parents=True)
+        (deepest / "leaf.txt").write_bytes(b"leaf\n")
+        invoke(executable, work, ["cf", "deep.img", "-F", "fat12", "tree"])
+        invoke(executable, work, ["xf", "deep.img"])
+        assert work.joinpath("deep", "tree", *levels, "leaf.txt").read_bytes() == b"leaf\n"
+        (deepest / "d").mkdir()
+        (deepest / "d/leaf.txt").write_bytes(b"leaf\n")
+        result = invoke(executable, work, ["cf", "deeper.img", "-F", "fat12", "tree"],
+                        expected=1)
+        assert b"depth limit 256" in result.stderr, result.stderr
+        shutil.rmtree(work)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
 def test_format(executable, root, profile, payload):
     image = f"{profile}.img"
     decoded = completed(invoke(executable, root, [
@@ -2005,6 +2038,7 @@ def main():
         test_change_directory_kinds(executable, root)
         test_failed_creation_output(executable, root)
         test_human_loss_bounds(executable, root)
+        test_tree_at_depth_limit(executable, root)
         test_formats(executable, root)
         for profile in ["fat12", "fat16", "fat32", "exfat"]:
             test_format(executable, root, profile, payload)
