@@ -951,6 +951,10 @@ typedef struct fsimg_extract_options {
 	uint64_t	 max_output_bytes; /* Zero uses the reader's ceiling. */
 	/* Explicit minutes east of UTC for unknown-zone calendar timestamps. */
 	int32_t		 wall_offset_minutes;
+	/* An empty regular file open for writing, borrowed, or -1 (initialized
+	 * default): receives the mtree(5) manifest of the extracted entries.
+	 */
+	int		 manifest_fd;
 	uint64_t	 reserved[4];
 } fsimg_extract_options_t;
 
@@ -964,6 +968,12 @@ typedef struct fsimg_extract_options {
  * Owners, modes and change times are never restored. A symbolic link, FIFO
  * or other kind fails with EUNSUPPORTED unless SKIP_UNSUPPORTED omits it and
  * counts it in the statistics' skipped_entries.
+ * With manifest_fd, every visited entry, a skipped one included, gets one
+ * mtree(5) line carrying its kind, mode, owner and modification time (a
+ * wall time read at wall_offset_minutes), a file's size and the SHA-256 of
+ * the bytes written, and a link's target. The file is flushed before
+ * success; on failure it holds a partial manifest, which is not to be
+ * published. The descriptor is borrowed, never duplicated or closed.
  */
 void fsimg_extract_options_init(fsimg_extract_options_t *);
 fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,

@@ -28,6 +28,7 @@ typedef enum worker_capability_slot {
 	CHILD_SCRATCH_CAP,
 	CHILD_RAW_CAP,
 	CHILD_SPOOL_CAP,
+	CHILD_MANIFEST_CAP,
 	CHILD_CAP_COUNT
 } worker_capability_slot_t;
 
@@ -184,8 +185,11 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 	reading = !fsimg_job_has_roots(kind);
 	stream = (child->request.flags & FSIMG_JOB_STDOUT) != 0;
 	expected = fsimg_job_has_roots(kind) ? FSIMG_JOB_CAP_ROOTS : FSIMG_JOB_CAP_INPUT;
-	/* Scratch is optional for every job, and a spool for a read job. */
-	optional = FSIMG_JOB_CAP_SCRATCH | (reading ? FSIMG_JOB_CAP_SPOOL : 0);
+	/* Scratch is optional for every job, a spool for a read job and a
+	 * manifest for an extraction.
+	 */
+	optional = FSIMG_JOB_CAP_SCRATCH | (reading ? FSIMG_JOB_CAP_SPOOL : 0) |
+	    (kind == FSIMG_JOB_EXTRACT ? FSIMG_JOB_CAP_MANIFEST : 0);
 	if (fsimg_job_needs_staging(&child->request) || kind == FSIMG_JOB_EXTRACT)
 		expected |= FSIMG_JOB_CAP_OUTPUT;
 	if (fsimg_job_needs_raw(&child->request))
@@ -194,34 +198,46 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "worker job has excess or missing filesystem authority"));
 	output = (capabilities & FSIMG_JOB_CAP_OUTPUT) != 0;
-	*caps = (fsimg_sandbox_caps_t){
-		.input = (capabilities & FSIMG_JOB_CAP_INPUT) != 0 ? FSIMG_CHILD_INPUT : -1,
-		.staging = output && kind == FSIMG_JOB_CREATE ? FSIMG_CHILD_OUTPUT : -1,
-		.destination = output && kind == FSIMG_JOB_EXTRACT ? FSIMG_CHILD_OUTPUT : -1,
-		.scratch = (capabilities & FSIMG_JOB_CAP_SCRATCH) != 0 ?
-		    FSIMG_CHILD_SCRATCH : -1,
-		.roots = child->request.root_count != 0 ? FSIMG_CHILD_ROOTS : -1,
-		.root_count = child->request.root_count,
-		.raw = (capabilities & FSIMG_JOB_CAP_RAW) != 0 ? FSIMG_CHILD_RAW : -1,
-		.spool = (capabilities & FSIMG_JOB_CAP_SPOOL) != 0 ?
-		    FSIMG_CHILD_SPOOL : -1,
-		.input_pipe = (child->request.flags & FSIMG_JOB_STDIN) != 0,
-		.job = FSIMG_CHILD_JOB, .control = FSIMG_CHILD_CONTROL,
-		.data = kind == FSIMG_JOB_CAT || stream ? FSIMG_CHILD_DATA : -1,
-		.cancel = FSIMG_CHILD_CANCEL
-	};
+	/* Every role starts absent; only those the job holds are named. */
+	fsimg_sandbox_caps_init(caps);
+	if ((capabilities & FSIMG_JOB_CAP_INPUT) != 0)
+		caps->input = FSIMG_CHILD_INPUT;
+	if (output && kind == FSIMG_JOB_CREATE)
+		caps->staging = FSIMG_CHILD_OUTPUT;
+	if (output && kind == FSIMG_JOB_EXTRACT)
+		caps->destination = FSIMG_CHILD_OUTPUT;
+	if ((capabilities & FSIMG_JOB_CAP_SCRATCH) != 0)
+		caps->scratch = FSIMG_CHILD_SCRATCH;
+	if (child->request.root_count != 0) {
+		caps->roots = FSIMG_CHILD_ROOTS;
+		caps->root_count = child->request.root_count;
+	}
+	if ((capabilities & FSIMG_JOB_CAP_RAW) != 0)
+		caps->raw = FSIMG_CHILD_RAW;
+	if ((capabilities & FSIMG_JOB_CAP_SPOOL) != 0)
+		caps->spool = FSIMG_CHILD_SPOOL;
+	if ((capabilities & FSIMG_JOB_CAP_MANIFEST) != 0)
+		caps->manifest = FSIMG_CHILD_MANIFEST;
+	caps->input_pipe = (child->request.flags & FSIMG_JOB_STDIN) != 0;
+	caps->job = FSIMG_CHILD_JOB;
+	caps->control = FSIMG_CHILD_CONTROL;
+	if (kind == FSIMG_JOB_CAT || stream)
+		caps->data = FSIMG_CHILD_DATA;
+	caps->cancel = FSIMG_CHILD_CANCEL;
 	child->raw_caps[CHILD_INPUT_CAP] = caps->input;
 	child->raw_caps[CHILD_OUTPUT_CAP] = output ? FSIMG_CHILD_OUTPUT : -1;
 	child->raw_caps[CHILD_SCRATCH_CAP] = caps->scratch;
 	child->raw_caps[CHILD_RAW_CAP] = caps->raw;
 	child->raw_caps[CHILD_SPOOL_CAP] = caps->spool;
+	child->raw_caps[CHILD_MANIFEST_CAP] = caps->manifest;
 	{
 		static const int numbers[CHILD_CAP_COUNT] = {
 			[CHILD_INPUT_CAP] = FSIMG_CHILD_INPUT,
 			[CHILD_OUTPUT_CAP] = FSIMG_CHILD_OUTPUT,
 			[CHILD_SCRATCH_CAP] = FSIMG_CHILD_SCRATCH,
 			[CHILD_RAW_CAP] = FSIMG_CHILD_RAW,
-			[CHILD_SPOOL_CAP] = FSIMG_CHILD_SPOOL
+			[CHILD_SPOOL_CAP] = FSIMG_CHILD_SPOOL,
+			[CHILD_MANIFEST_CAP] = FSIMG_CHILD_MANIFEST
 		};
 
 		for (unsigned i = 0; i < CHILD_CAP_COUNT; i++) {
@@ -735,6 +751,10 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 	options.selection = child->selection;
 	if ((child->request.flags & FSIMG_JOB_SKIP_UNSUPPORTED) != 0)
 		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	/* Lent to the library, which writes and flushes it; it stays charged
+	 * in raw_caps until it is closed below.
+	 */
+	options.manifest_fd = child->raw_caps[CHILD_MANIFEST_CAP];
 	fd = child->output_root;
 	status = fsimg_extract_into(child->reader, fd, &options, &result, error);
 	child->result.entries = result.entries;
@@ -750,6 +770,15 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 	if (status == FSIMG_OK && closed == -1)
 		status = fsimg_error_set(error, FSIMG_EIO, saved,
 		    FSIMG_OP_EXTRACT, "worker extraction root close failed");
+	if (options.manifest_fd != -1) {
+		child->raw_caps[CHILD_MANIFEST_CAP] = -1;
+		closed = close(options.manifest_fd);
+		saved = errno;
+		fsimg_fd_release(child->ctx, -1);
+		if (status == FSIMG_OK && closed == -1)
+			status = fsimg_error_set(error, FSIMG_EIO, saved,
+			    FSIMG_OP_EXTRACT, "worker manifest close failed");
+	}
 	if (status != FSIMG_OK)
 		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
 	return (status);

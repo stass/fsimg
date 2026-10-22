@@ -855,6 +855,15 @@ directory, which must be empty and private.
 .It Fl k
 Skip entries of unsupported kinds; the number skipped is reported in a
 warning and in the JSON summary.
+.It Fl Fl mtree Ns = Ns Ar file
+Also write an
+.Xr mtree 5
+manifest of the extraction to
+.Ar file ,
+a new name relative to the working directory, as
+.Fl f
+names an image; see
+.Sx Manifests of an extraction .
 .It Fl O
 Write one member's logical bytes to stdout instead of extracting.
 .El
@@ -892,7 +901,7 @@ skips it.
 takes exactly one member, a regular file or a symbolic link, whose bytes are
 its target, and writes its raw logical bytes including zero tails.
 It rejects
-.Fl Fl json , C , E
+.Fl Fl json , Fl Fl mtree , C , E
 and
 .Fl k .
 .Pp
@@ -902,6 +911,64 @@ There is no directory-wide atomic publication or resume promise.
 If only final reporting fails, the destination may already contain complete
 content; the command still reports failure and conservatively marks its output
 incomplete.
+.Ss Manifests of an extraction
+With
+.Fl Fl mtree ,
+the manifest records what the extracted tree cannot hold, so that the tree
+and the manifest re-create the image:
+.Ql fsimg xkf rootfs.img --mtree=rootfs.mtree
+followed by
+.Ql fsimg cf copy.img -F qnx6 -C rootfs @../rootfs.mtree .
+It has one line per extracted entry, in the image's order, after the
+.Ql #mtree v2.0
+signature and the root's
+.Ql \&. type=dir
+line: the path in the full form
+.Pa ./dir/name ,
+then
+.Cm type ,
+.Cm mode ,
+.Cm uid
+and
+.Cm gid ,
+and
+.Cm time
+as the image stores them,
+.Cm size
+and
+.Cm sha256digest
+for a file, and
+.Cm link
+for a symbolic link.
+A field the image does not store is left out.
+The digest is computed from the bytes written as they are copied.
+An entry
+.Fl k
+skips, such as a symbolic link or FIFO, is still listed, without a digest;
+the manifest is its only record.
+A FAT or exFAT time without a zone is written as UTC.
+Every byte of a path or link target outside printable ASCII, and every
+.Ql \e
+and
+.Ql # ,
+is written as a
+.Ql \eooo
+escape of
+.Xr vis 3 ,
+so every line is plain ASCII and reads back exactly.
+Only standard keywords appear: bsdtar and the
+.Xr mtree 8
+of FreeBSD and NetBSD read it; the macOS
+.Xr mtree 8
+reads only relative entries and does not.
+.Pp
+The manifest is staged in a private directory beside its name and
+published with mode 0600, without replacement, only after the extraction
+completes; a failed extraction leaves no manifest, and an existing name
+fails before anything is extracted.
+A failure reported after publication, such as a durability failure, leaves
+the manifest in place and reports the output published.
+It holds one descriptor against the fds limit.
 .Sh OUTPUT
 Human names and controls are escaped.
 Diagnostics and bounded progress use stderr; payloads and records use stdout.

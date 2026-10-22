@@ -311,7 +311,7 @@ fsimg_worker_request_init(fsimg_worker_request_t *request)
 	request->selection = "/";
 	request->codepage = 437;
 	request->input_fd = request->output_fd = request->raw_fd = -1;
-	request->scratch_fd = request->spool_fd = -1;
+	request->scratch_fd = request->spool_fd = request->manifest_fd = -1;
 }
 
 const char *
@@ -469,7 +469,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	    (request->scratch_fd != -1 ? FSIMG_JOB_CAP_SCRATCH : 0) |
 	    (request->root_count != 0 ? FSIMG_JOB_CAP_ROOTS : 0) |
 	    (request->raw_fd != -1 ? FSIMG_JOB_CAP_RAW : 0) |
-	    (request->spool_fd != -1 ? FSIMG_JOB_CAP_SPOOL : 0);
+	    (request->spool_fd != -1 ? FSIMG_JOB_CAP_SPOOL : 0) |
+	    (request->manifest_fd != -1 ? FSIMG_JOB_CAP_MANIFEST : 0);
 	put_field(raw, JOB_CAPABILITIES, capabilities);
 	put_field(raw, JOB_SELECTION, paths_length);
 	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
@@ -522,7 +523,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
 	    get_field(raw, JOB_CAPABILITIES) > (FSIMG_JOB_CAP_INPUT |
 	    FSIMG_JOB_CAP_OUTPUT | FSIMG_JOB_CAP_SCRATCH | FSIMG_JOB_CAP_ROOTS |
-	    FSIMG_JOB_CAP_RAW | FSIMG_JOB_CAP_SPOOL) ||
+	    FSIMG_JOB_CAP_RAW | FSIMG_JOB_CAP_SPOOL | FSIMG_JOB_CAP_MANIFEST) ||
 	    !string_field_valid(raw + JOB_FORMAT_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_LABEL_OFFSET, JOB_LABEL_BYTES) ||
 	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||

@@ -591,7 +591,11 @@ borrowed parent descriptor. An existing file, symlink, or directory is
 `FSIMG_EEXISTS`, even if empty. Options control logical-output quota, safe
 timestamp preservation, and declared optional-metadata losses. Preserving a
 wall-clock timestamp requires an explicit caller offset interpretation; the
-library never invents a timezone. They do not
+library never invents a timezone. A `manifest_fd`, an empty regular file the
+caller opened for writing, receives the mtree(5) manifest the
+[manifest design](design-mtree.md#extraction-writing-a-manifest) specifies;
+the library borrows it, writes and flushes it, and leaves its publication
+to the caller. They do not
 enable symlink following, existing-tree merge, privileged metadata, or device
 creation. The [security specification](design-security.md) defines cleanup and
 partial-output behavior. In-process extraction does not establish confinement

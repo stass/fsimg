@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "host.h"
@@ -166,17 +167,26 @@ restrict_descriptor(int fd, cap_rights_t *rights, unsigned fcntls)
 }
 #endif
 
+void
+fsimg_sandbox_caps_init(fsimg_sandbox_caps_t *caps)
+{
+	bzero(caps, sizeof(*caps));
+	caps->input = caps->staging = caps->destination = caps->scratch = -1;
+	caps->roots = caps->raw = caps->spool = caps->manifest = -1;
+	caps->job = caps->control = caps->data = caps->cancel = -1;
+}
+
 fsimg_status_t
 fsimg_sandbox_install(int input_fd, int destination_fd, int source_fd,
     fsimg_error_t *error)
 {
-	const fsimg_sandbox_caps_t caps = {
-		.input = input_fd, .staging = -1, .destination = destination_fd,
-		.scratch = -1, .roots = source_fd, .root_count = source_fd == -1 ? 0 : 1,
-		.raw = -1, .spool = -1, .job = -1, .control = -1, .data = -1,
-		.cancel = -1
-	};
+	fsimg_sandbox_caps_t caps;
 
+	fsimg_sandbox_caps_init(&caps);
+	caps.input = input_fd;
+	caps.destination = destination_fd;
+	caps.roots = source_fd;
+	caps.root_count = source_fd == -1 ? 0 : 1;
 	return (fsimg_sandbox_install_caps(&caps, error));
 }
 
@@ -196,12 +206,13 @@ fsimg_sandbox_backend(void)
 /* Every role must be the object its grant assumes before any backend runs:
  * the input a read-only regular file, or a readable pipe end exactly
  * when input_pipe says so; the three writable roles directories; each
- * root a read-only directory or regular file; and the raw intermediate
- * and the spool read/write regular files no name reaches. The library
- * checks those two files again when it adopts them. A pipe end need only
- * be readable, not O_RDONLY: Linux and macOS pipe ends are one-way, but a
- * FreeBSD pipe is bidirectional, so its read end reports O_RDWR, and there
- * Capsicum withholds the write right from the input.
+ * root a read-only directory or regular file; the raw intermediate
+ * and the spool read/write regular files no name reaches; and the
+ * manifest a write-only regular file with its one staged name. The
+ * library checks those three files again when it adopts them. A pipe end
+ * need only be readable, not O_RDONLY: Linux and macOS pipe ends are
+ * one-way, but a FreeBSD pipe is bidirectional, so its read end reports
+ * O_RDWR, and there Capsicum withholds the write right from the input.
  */
 static fsimg_status_t
 check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
@@ -256,6 +267,14 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 		    st.st_nlink != 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "sandbox handed-over file requires an unlinked read/write file"));
+	}
+	if (caps->manifest != -1) {
+		flags = fcntl(caps->manifest, F_GETFL);
+		if (flags == -1 || (flags & O_ACCMODE) != O_WRONLY ||
+		    fstat(caps->manifest, &st) == -1 || !S_ISREG(st.st_mode) ||
+		    st.st_nlink != 1)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "sandbox manifest requires a write-only file with one name"));
 	}
 	return (FSIMG_OK);
 }
@@ -430,6 +449,16 @@ linux_fail:
 			    CAP_FCNTL_GETFL) == -1)
 				goto freebsd_fail;
 		}
+	}
+	/* The manifest is written, resized and flushed through its
+	 * descriptor, never read.
+	 */
+	if (caps->manifest != -1) {
+		cap_rights_init(&rights, CAP_WRITE, CAP_SEEK, CAP_FSTAT,
+		    CAP_FTRUNCATE, CAP_FSYNC, CAP_FCNTL);
+		if (restrict_descriptor(caps->manifest, &rights,
+		    CAP_FCNTL_GETFL) == -1)
+			goto freebsd_fail;
 	}
 	{
 		const int channels[] = { caps->job, caps->control, caps->data, caps->cancel };

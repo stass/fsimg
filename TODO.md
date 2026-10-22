@@ -480,6 +480,31 @@
   cancellation, which are unlimited by default. Decide between a default
   work budget for create mode and a fixed bound on the size a generated
   digest may cover.
+* [Medium] **`x --mtree` output is bounded only by entries and work**
+  (`lib/extract/mtree-writer.c`, `specs/design-mtree.md` "Security and
+  bounds"): a manifest line holds an entry's full encoded path, up to four
+  bytes per path byte, so an image of many entries deep beneath long
+  non-ASCII names writes a manifest about a hundred times its own size,
+  outside the output quota, which charges file lengths only. The listing of
+  `t` amplifies the same way to stdout. Decide between charging manifest
+  bytes to the output quota (which would refuse a full volume at the
+  default quota of the volume's length) and a separate manifest bound, and
+  state it in the design's bounds table.
+* [Low] **Adding a worker capability touches many parallel lists**
+  (`cmd/fsimg/worker.h`, `job.c`, `worker-parent.c`, `worker-child.c`,
+  `sandbox.c`, `paths.c`): the job bit, the decode mask, the expected and
+  optional sets, the child slot, the `raw_caps` table, the parent's
+  descriptor table, the sandbox role, its check and its Capsicum rights,
+  and the cleanup list each name every role. One role table that these
+  sites iterate would make a new role one entry;
+  `fsimg_sandbox_caps_init()` already removes the zero-means-stdin hazard.
+  The image and `--mtree` staged outputs likewise keep parallel fields in
+  `fsimg_cli_paths_t` that one staged-output record could own.
+* [Low] **Staging directory reopen race** (`cmd/fsimg/paths.c`
+  `private_directory`): `mkdirat` then a no-follow `openat` lets a writer of
+  a non-sticky shared parent swap the fresh directory between the two
+  calls; the image and the `--mtree` staging both inherit it. Verify the
+  opened directory's owner and mode, or that it is empty and was just made.
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself
@@ -522,10 +547,23 @@
   (`fsimg_writer_add_manifest()`, `lib/source/manifest.c`,
   `lib/source/generated.c`, `test/manifest.c`) and the `c` mode's `@file`
   operand (`cmd/fsimg/paths.c`, `cmd/fsimg/worker-child.c`, `test/cli.py`)
-  exist. What remains is the export stage (`x --mtree=FILE` through the
-  output coordinator), the round trips through `x --mtree` for FAT, exFAT,
-  QNX6 and QNX4, and a content-path test across a nested mount where the
-  host allows one.
+  and `x --mtree=FILE` (`lib/extract/mtree-writer.c`) exist. What remains
+  is a content-path test across a nested mount where the host allows one;
+  reading the manifest `x --mtree` writes with `mtree(8)` on FreeBSD and
+  Linux (`test/manifest.c` checks it with bsdtar only); injected write,
+  flush and allocation failures and cancellation while the manifest is
+  written; the refusal of an empty, overlong or NUL-holding link target
+  (`record_skipped`), which needs a crafted image since the writers refuse
+  such targets; FILE appearing between the early check and publication;
+  the worker's failed close of the manifest; and a failure after
+  publication, such as a broken report channel, reporting the output
+  published. With `-E`, a FILE inside the destination is refused as a
+  non-empty destination, since the manifest's staging directory is made
+  first; the targeted overlap message is unreachable there. An exFAT round
+  trip through `x --mtree` is byte-equal only when the host reports an
+  extracted file's unwritten tail as a hole, since exFAT records each
+  file's initialized length and host import takes it from the holes the
+  host reports (`test/manifest.c` avoids such files).
 
 * [Low] **Opt-in metadata restore** (`lib/extract/`): consider an opt-in that
   applies permission bits without setuid, setgid or sticky through opened

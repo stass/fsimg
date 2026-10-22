@@ -155,6 +155,16 @@ static void test_line_order(void);
 static void test_unused_content_directory(void);
 static void test_qnx6_metadata(void);
 static void test_external_writers(void);
+static char *extract_with_manifest(fixture_t *, const image_t *,
+    const char *);
+static void rebuild_from_extraction(fixture_t *, const char *, uint32_t,
+    const char *, image_t *);
+static void test_export_round_trip(const char *, const char *);
+static void test_export_changes_detected(void);
+static void test_export_long_manifest(void);
+static void test_export_lines(void);
+static void test_export_refusals(void);
+static void test_export_read_by_bsdtar(void);
 static void rebuild_from_tool(fixture_t *, const char *const *, int,
     const image_t *);
 
@@ -1436,6 +1446,415 @@ rebuild_from_tool(fixture_t *fixture, const char *const *argv, int tree,
 	free(image.bytes);
 }
 
+/* A manifest x --mtree must carry back into an image: names that need
+ * escapes, every generator and a hole, a deep directory, and on QNX the
+ * owners, modes, links and FIFO the safe extractor cannot create.
+ *
+ * The FAT and exFAT manifest has no file ending in zeros: exFAT records
+ * how much of a file was written, which for a host file depends on
+ * whether its host reports the extracted file's unwritten tail as a hole.
+ */
+static const char export_manifest_fat[] =
+    "/set uid=0 gid=0 mode=0644 time=1500000000\n"
+    "./sp\\040ace type=dir time=1400000000\n"
+    "./sp\\040ace/hash\\0431 type=file fsimg.content=seeded fsimg.seed=4 "
+    "size=70000 fsimg.holes=4096:40000\n"
+    "./caf\\303\\251 type=file fsimg.content=positional fsimg.seed=8 "
+    "size=300\n"
+    "./empty type=file fsimg.content=zero size=0\n"
+    "./a type=dir\n"
+    "./a/b type=dir\n"
+    "./a/b/c type=file fsimg.content=seeded fsimg.seed=1 size=10\n";
+
+static const char export_manifest_qnx[] =
+    "/set uid=0 gid=0 mode=0644 time=1500000000\n"
+    "./sp\\040ace type=dir mode=0750 uid=7 gid=8 time=1400000000\n"
+    "./sp\\040ace/hash\\0431 type=file fsimg.content=seeded fsimg.seed=4 "
+    "size=70000 fsimg.holes=4096:40000\n"
+    "./back\\\\slash type=file mode=04755 "
+    "fsimg.content=positional fsimg.seed=8 size=300\n"
+    "./caf\\303\\251 type=link link=../t\\040a\\\\r\\043get\n"
+    "./log type=fifo mode=0620 uid=3 gid=4\n"
+    "./zero type=file fsimg.content=zero size=5000\n"
+    "./a type=dir\n"
+    "./a/b type=dir\n"
+    "./a/b/c type=file fsimg.content=seeded fsimg.seed=1 size=10\n";
+
+/* Extract image into a new directory name beside a new manifest
+ * name.mtree, skipping the kinds the safe extractor cannot create, and
+ * return the manifest's text, which the caller frees.
+ */
+static char *
+extract_with_manifest(fixture_t *fixture, const image_t *image,
+    const char *name)
+{
+	char path[64];
+	fsimg_extract_options_t options;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	struct stat st;
+	char *text;
+	int fd;
+
+	snprintf(path, sizeof(path), "%s.mtree", name);
+	fd = openat(fixture->parent, path,
+	    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	memory_io(fixture, (image_t *)image, false, &input);
+	CHECK(fsimg_reader_open(fixture->ctx, input, NULL, &reader,
+	    NULL) == FSIMG_OK);
+	fsimg_extract_options_init(&options);
+	CHECK(options.manifest_fd == -1);
+	options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	options.manifest_fd = fd;
+	CHECK(fsimg_extract_at(reader, fixture->parent, name, &options,
+	    NULL) == FSIMG_OK);
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+
+	CHECK(fstat(fd, &st) == 0);
+	text = malloc((size_t)st.st_size + 1);
+	CHECK(text != NULL);
+	CHECK(pread(fd, text, (size_t)st.st_size, 0) == st.st_size);
+	text[st.st_size] = '\0';
+	CHECK(close(fd) == 0);
+	return (text);
+}
+
+/* Build an image from the manifest name.mtree, with the extracted tree
+ * name as its content directory.
+ */
+static void
+rebuild_from_extraction(fixture_t *fixture, const char *format, uint32_t flags,
+    const char *name, image_t *image)
+{
+	char path[64];
+	int manifest, tree;
+
+	fixture_writer(fixture, format, flags);
+	snprintf(path, sizeof(path), "%s.mtree", name);
+	manifest = openat(fixture->parent, path, O_RDONLY | O_CLOEXEC);
+	CHECK(manifest != -1);
+	tree = openat(fixture->parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(tree != -1);
+	CHECK(fsimg_writer_add_manifest(fixture->writer, manifest, tree,
+	    NULL) == FSIMG_OK);
+	CHECK(close(manifest) == 0);
+	CHECK(close(tree) == 0);
+	CHECK(emit_image(fixture, image, NULL) == FSIMG_OK);
+}
+
+/* The round trip x --mtree promises. Under reproducible mode the image
+ * built from an extracted tree and its manifest equals the original byte
+ * for byte, and extracting it again writes the same manifest; without it,
+ * times survive too, so the second extraction's manifest equals the
+ * first. Two extractions of one image write identical manifests.
+ */
+static void
+test_export_round_trip(const char *format, const char *source)
+{
+	fixture_t fixture;
+	image_t original, rebuilt;
+	char *first, *again, *second;
+
+	fixture_open(&fixture, format, FSIMG_WRITE_REPRODUCIBLE);
+	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &original, NULL) == FSIMG_OK);
+	first = extract_with_manifest(&fixture, &original, "first");
+	again = extract_with_manifest(&fixture, &original, "again");
+	CHECK(strcmp(first, again) == 0);
+	rebuild_from_extraction(&fixture, format, FSIMG_WRITE_REPRODUCIBLE,
+	    "first", &rebuilt);
+	CHECK(rebuilt.length == original.length &&
+	    bcmp(rebuilt.bytes, original.bytes, (size_t)original.length) == 0);
+	second = extract_with_manifest(&fixture, &rebuilt, "second");
+	CHECK(strcmp(first, second) == 0);
+	free(first);
+	free(again);
+	free(second);
+	free(original.bytes);
+	free(rebuilt.bytes);
+
+	fixture_writer(&fixture, format, 0);
+	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &original, NULL) == FSIMG_OK);
+	first = extract_with_manifest(&fixture, &original, "timed");
+	CHECK(strstr(first, "./sp\\040ace type=dir") != NULL &&
+	    strstr(first, " time=1400000000.000000000\n") != NULL);
+	rebuild_from_extraction(&fixture, format, 0, "timed", &rebuilt);
+	second = extract_with_manifest(&fixture, &rebuilt, "retimed");
+	CHECK(strcmp(first, second) == 0);
+	free(first);
+	free(second);
+	free(original.bytes);
+	free(rebuilt.bytes);
+	fixture_close(&fixture);
+}
+
+/* The seeded failures of the round trip: a byte changed in the extracted
+ * tree fails its recorded digest during the copy, and a keyword changed in
+ * the written manifest changes the image.
+ */
+static void
+test_export_changes_detected(void)
+{
+	fixture_t fixture;
+	image_t original, rebuilt;
+	char *text, *mode;
+	unsigned char byte;
+	int fd, tree;
+
+	fixture_open(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE);
+	CHECK(add_manifest(&fixture, export_manifest_qnx, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &original, NULL) == FSIMG_OK);
+	text = extract_with_manifest(&fixture, &original, "changed");
+	tree = openat(fixture.parent, "changed",
+	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(tree != -1);
+
+	fd = openat(tree, "a/b/c", O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+	CHECK(fd != -1);
+	CHECK(pread(fd, &byte, 1, 0) == 1);
+	byte ^= 1;
+	CHECK(pwrite(fd, &byte, 1, 0) == 1);
+	fixture_writer(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE);
+	CHECK(add_manifest(&fixture, text, tree, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &rebuilt, NULL) == FSIMG_ESOURCE_CHANGED);
+	free(rebuilt.bytes);
+	byte ^= 1;
+	CHECK(pwrite(fd, &byte, 1, 0) == 1);
+	CHECK(close(fd) == 0);
+
+	mode = strstr(text, "mode=0750");
+	CHECK(mode != NULL);
+	mode[strlen("mode=075")] = '1';
+	fixture_writer(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE);
+	CHECK(add_manifest(&fixture, text, tree, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &rebuilt, NULL) == FSIMG_OK);
+	CHECK(rebuilt.length == original.length &&
+	    bcmp(rebuilt.bytes, original.bytes, (size_t)original.length) != 0);
+	free(rebuilt.bytes);
+
+	/* Restored, the tree and manifest build the original again. */
+	mode[strlen("mode=075")] = '0';
+	fixture_writer(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE);
+	CHECK(add_manifest(&fixture, text, tree, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &rebuilt, NULL) == FSIMG_OK);
+	CHECK(rebuilt.length == original.length &&
+	    bcmp(rebuilt.bytes, original.bytes, (size_t)original.length) == 0);
+
+	CHECK(close(tree) == 0);
+	free(text);
+	free(original.bytes);
+	free(rebuilt.bytes);
+	fixture_close(&fixture);
+}
+
+/* A manifest longer than the writer's 64 KiB buffer is written in several
+ * pieces, each growing the file before it is written, and reads back as
+ * the image it describes: 800 files with 100-byte names make about
+ * 150 KiB of lines.
+ */
+static void
+test_export_long_manifest(void)
+{
+	char line[192];
+	fixture_t fixture;
+	image_t original, rebuilt;
+	char *source, *text;
+	size_t capacity;
+
+	capacity = 800 * sizeof(line) + 64;
+	source = malloc(capacity);
+	CHECK(source != NULL);
+	snprintf(source, capacity, "./d type=dir\n");
+	for (unsigned i = 0; i < 800; i++) {
+		snprintf(line, sizeof(line), "./d/" LONG_NAME_100 "%03u type=file "
+		    "fsimg.content=seeded fsimg.seed=%u size=%u\n", i, i, 1 + i % 7);
+		append_text(source, capacity, line);
+	}
+	fixture_open(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE);
+	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &original, NULL) == FSIMG_OK);
+	text = extract_with_manifest(&fixture, &original, "long");
+	CHECK(strlen(text) > 2 * 65536);
+	rebuild_from_extraction(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE,
+	    "long", &rebuilt);
+	CHECK(rebuilt.length == original.length &&
+	    bcmp(rebuilt.bytes, original.bytes, (size_t)original.length) == 0);
+	free(text);
+	free(source);
+	free(original.bytes);
+	free(rebuilt.bytes);
+	fixture_close(&fixture);
+}
+
+/* The exact lines for a QNX6 image: the signature and root, then each
+ * entry in the reader's order with its escapes, the digest of the bytes
+ * written and a skipped link and FIFO with everything but a digest. The
+ * line of the /.boot directory every QNX6 image holds, timed by its
+ * creation, comes between the root and the entries.
+ */
+static void
+test_export_lines(void)
+{
+	static const char source[] =
+	    "./d\\040\\043x type=dir mode=0700 uid=1 gid=2 time=6\n"
+	    "./d\\040\\043x/f type=file mode=0644 uid=0 gid=0 time=7 "
+	    "fsimg.content=zero size=3\n"
+	    "./d\\040\\043x/l type=link mode=0777 uid=0 gid=0 time=8 "
+	    "link=\\\\\\001\n"
+	    "./d\\040\\043x/p type=fifo mode=0600 uid=0 gid=0 time=9\n";
+	static const char header[] = "#mtree v2.0\n. type=dir\n./.boot type=dir ";
+	static const char expected[] =
+	    "./d\\040\\043x type=dir mode=0700 uid=1 gid=2 "
+	    "time=6.000000000\n"
+	    "./d\\040\\043x/f type=file mode=0644 uid=0 gid=0 "
+	    "time=7.000000000 size=3 sha256digest="
+	    "709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c\n"
+	    "./d\\040\\043x/l type=link mode=0777 uid=0 gid=0 "
+	    "time=8.000000000 link=\\134\\001\n"
+	    "./d\\040\\043x/p type=fifo mode=0600 uid=0 gid=0 "
+	    "time=9.000000000\n";
+	fixture_t fixture;
+	image_t image;
+	char *text;
+
+	fixture_open(&fixture, "qnx6", 0);
+	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
+	text = extract_with_manifest(&fixture, &image, "lines");
+	if (strncmp(text, header, strlen(header)) != 0 ||
+	    strcmp(strchr(text + strlen(header), '\n') + 1, expected) != 0)
+		printf("manifest written:\n%s", text);
+	CHECK(strncmp(text, header, strlen(header)) == 0);
+	CHECK(strcmp(strchr(text + strlen(header), '\n') + 1, expected) == 0);
+	free(text);
+	free(image.bytes);
+	fixture_close(&fixture);
+}
+
+/* A manifest descriptor that is not an empty regular file open for
+ * writing without O_APPEND is refused before the destination exists, and
+ * an extraction that fails leaves the manifest unfinished, for its
+ * caller to discard.
+ */
+static void
+test_export_refusals(void)
+{
+	const struct {
+		const char	*name;
+		int		 flags;
+		const char	*contents;
+	} cases[] = {
+		{ "read-only", O_RDONLY, "" },
+		{ "append", O_WRONLY | O_APPEND, "" },
+		{ "nonempty", O_WRONLY, "x" }
+	};
+	fsimg_extract_options_t options;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	fixture_t fixture;
+	image_t image;
+	struct stat st;
+	int fd;
+
+	fixture_open(&fixture, "qnx6", 0);
+	CHECK(add_manifest(&fixture, export_manifest_qnx, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		put_file(fixture.parent, cases[i].name, cases[i].contents);
+		fd = openat(fixture.parent, cases[i].name,
+		    cases[i].flags | O_CLOEXEC);
+		CHECK(fd != -1);
+		memory_io(&fixture, &image, false, &input);
+		CHECK(fsimg_reader_open(fixture.ctx, input, NULL, &reader,
+		    NULL) == FSIMG_OK);
+		fsimg_extract_options_init(&options);
+		options.manifest_fd = fd;
+		CHECK(fsimg_extract_at(reader, fixture.parent, "refused", &options,
+		    NULL) == FSIMG_EINVAL);
+		CHECK(fstatat(fixture.parent, "refused", &st,
+		    AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+		fsimg_reader_free(reader);
+		fsimg_io_free(input);
+		CHECK(close(fd) == 0);
+	}
+
+	/* Without SKIP_UNSUPPORTED the link fails the extraction. */
+	fd = openat(fixture.parent, "failed.mtree",
+	    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	memory_io(&fixture, &image, false, &input);
+	CHECK(fsimg_reader_open(fixture.ctx, input, NULL, &reader,
+	    NULL) == FSIMG_OK);
+	fsimg_extract_options_init(&options);
+	options.manifest_fd = fd;
+	CHECK(fsimg_extract_at(reader, fixture.parent, "failed", &options,
+	    NULL) == FSIMG_EUNSUPPORTED);
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+	CHECK(close(fd) == 0);
+	free(image.bytes);
+	fixture_close(&fixture);
+}
+
+/* bsdtar reads the manifest x --mtree writes, decoding every escaped name
+ * to the bytes the image holds; it is skipped with a note when it is not
+ * installed.
+ */
+static void
+test_export_read_by_bsdtar(void)
+{
+	static const char expected[] =
+	    ".\n"
+	    "./a\n"
+	    "./a/b\n"
+	    "./a/b/c\n"
+	    "./caf\303\251\n"
+	    "./empty\n"
+	    "./sp ace\n"
+	    "./sp ace/hash#1\n";
+	char manifest_path[128];
+	const char *const argv[] = {
+		"bsdtar", "-tf", manifest_path, NULL
+	};
+	fixture_t fixture;
+	image_t image;
+	struct stat st;
+	char listing[512];
+	char *text;
+	ssize_t length;
+	int fd, result;
+
+	fixture_open(&fixture, "fat16", 0);
+	CHECK(add_manifest(&fixture, export_manifest_fat, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
+	text = extract_with_manifest(&fixture, &image, "listed");
+	snprintf(manifest_path, sizeof(manifest_path), "%s/listed.mtree",
+	    fixture.directory);
+	fd = openat(fixture.parent, "listing",
+	    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	result = run_tool(argv, fd);
+	if (result == -1) {
+		printf("skip: bsdtar is not installed\n");
+	} else {
+		CHECK(result == 0);
+		CHECK(fstat(fd, &st) == 0 && (size_t)st.st_size < sizeof(listing));
+		length = pread(fd, listing, sizeof(listing) - 1, 0);
+		CHECK(length == st.st_size);
+		listing[length] = '\0';
+		if (strcmp(listing, expected) != 0)
+			printf("bsdtar listed:\n%s", listing);
+		CHECK(strcmp(listing, expected) == 0);
+	}
+	CHECK(close(fd) == 0);
+	free(text);
+	free(image.bytes);
+	fixture_close(&fixture);
+}
+
 int
 main(void)
 {
@@ -1454,5 +1873,14 @@ main(void)
 	test_adopted_descriptors();
 	test_qnx6_metadata();
 	test_external_writers();
+	test_export_round_trip("fat16", export_manifest_fat);
+	test_export_round_trip("exfat", export_manifest_fat);
+	test_export_round_trip("qnx6", export_manifest_qnx);
+	test_export_round_trip("qnx4", export_manifest_qnx);
+	test_export_changes_detected();
+	test_export_long_manifest();
+	test_export_lines();
+	test_export_refusals();
+	test_export_read_by_bsdtar();
 	return (0);
 }

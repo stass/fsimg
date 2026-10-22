@@ -41,6 +41,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/io/io.c lib/output/publish.c lib/output/publish.h \
 	lib/output/write.c \
 	lib/extract/extract.c lib/extract/extract.h \
+	lib/extract/mtree-writer.c lib/extract/mtree-writer.h \
 	lib/meta/meta.h lib/meta/store.c lib/meta/records.c lib/meta/sort.c \
 	lib/meta/extent.c \
 	lib/write/writer.h lib/write/writer.c lib/write/catalog.c \

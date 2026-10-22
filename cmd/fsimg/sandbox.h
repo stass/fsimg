@@ -18,6 +18,7 @@
  * roots	read beneath each directory root, or read a file root
  * raw		read, write and resize the unlinked raw intermediate
  * spool	read, write and resize the unlinked spool
+ * manifest	write and resize the staged x --mtree manifest
  *
  * The coordinator, not the worker, removes staging and destination
  * objects. -1 marks an absent role. roots is the first of root_count
@@ -32,6 +33,7 @@ typedef struct fsimg_sandbox_caps {
 	unsigned	 root_count;
 	int		 raw;
 	int		 spool;
+	int		 manifest;
 	bool		 input_pipe;
 	int		 job;
 	int		 control;
@@ -39,6 +41,11 @@ typedef struct fsimg_sandbox_caps {
 	int		 cancel;
 } fsimg_sandbox_caps_t;
 
+/* Mark every role absent (-1) and no roots, the only safe start: a
+ * zero-initialized role would name descriptor 0. A caller sets the roles
+ * it grants after this.
+ */
+void fsimg_sandbox_caps_init(fsimg_sandbox_caps_t *);
 /* All fields are borrowed. Pipe directions and filesystem authority are
  * declared once here so worker setup cannot omit a live role. The trusted
  * coordinator supplies disjoint private output and scratch trees.

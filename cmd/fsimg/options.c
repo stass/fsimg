@@ -58,6 +58,7 @@ enum {
 	OPT_INFO,
 	OPT_JSON,
 	OPT_LENGTH,
+	OPT_MTREE,
 	OPT_NO_RECURSION,
 	OPT_OFFSET,
 	OPT_PARTITION
@@ -109,6 +110,7 @@ static const cli_option_t option_table[] = {
 	{ OPT_INFO, "--info", MODES_ALL, 0 },
 	{ OPT_JSON, "--json", MODES_ALL, 0 },
 	{ OPT_LENGTH, "--length", MODES_READ, 0 },
+	{ OPT_MTREE, "--mtree", MODE_EXTRACT, 0 },
 	{ OPT_NO_RECURSION, "--no-recursion", MODE_LIST, 0 },
 	{ OPT_OFFSET, "--offset", MODES_READ, 0 },
 	{ OPT_PARTITION, "--partition", MODES_READ, 0 }
@@ -121,6 +123,7 @@ static const struct option long_options[] = {
 	{ "info", no_argument, NULL, OPT_INFO },
 	{ "json", no_argument, NULL, OPT_JSON },
 	{ "length", required_argument, NULL, OPT_LENGTH },
+	{ "mtree", required_argument, NULL, OPT_MTREE },
 	{ "no-recursion", no_argument, NULL, OPT_NO_RECURSION },
 	{ "offset", required_argument, NULL, OPT_OFFSET },
 	{ "partition", required_argument, NULL, OPT_PARTITION },
@@ -1307,6 +1310,9 @@ interpret_read(cli_parse_t *parse)
 			request->flags |= FSIMG_JOB_SKIP_UNSUPPORTED;
 		options->extract_here = option_count(parse, 'E') != 0;
 		options->directory = option_value(parse, 'C');
+		options->mtree = option_value(parse, OPT_MTREE);
+		if (options->mtree != NULL && options->mtree[0] == '\0')
+			return (syntax(parse, "--mtree requires a file name"));
 		break;
 	case MODE_LIST:
 		request->kind = FSIMG_JOB_LIST;
@@ -1324,8 +1330,8 @@ interpret_read(cli_parse_t *parse)
 	}
 	if (request->kind == FSIMG_JOB_CAT && (options->json ||
 	    option_count(parse, 'C') != 0 || option_count(parse, 'E') != 0 ||
-	    option_count(parse, 'k') != 0))
-		return (syntax(parse, "-O rejects --json, -C, -E and -k"));
+	    option_count(parse, 'k') != 0 || options->mtree != NULL))
+		return (syntax(parse, "-O rejects --json, --mtree, -C, -E and -k"));
 	if (option_count(parse, OPT_PARTITION) != 0 &&
 	    (option_count(parse, OPT_OFFSET) != 0 || option_count(parse, OPT_LENGTH) != 0))
 		return (syntax(parse, "--partition conflicts with --offset and --length"));

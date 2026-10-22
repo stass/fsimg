@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "extract.h"
+#include "mtree-writer.h"
 #include "selection.h"
 #include "unicode.h"
 
@@ -31,6 +32,7 @@ typedef struct extract_state {
 	fsimg_reader_t	*reader;
 	fsimg_extract_options_t options;
 	fsimg_selection_t *selection;
+	fsimg_mtree_writer_t *manifest; /* NULL without a manifest_fd. */
 	extract_directory_t *directories;
 	unsigned char	*buffer;
 	char		*directory_path;
@@ -44,19 +46,26 @@ static fsimg_status_t extract_options(fsimg_reader_t *,
     const fsimg_extract_options_t *, fsimg_extract_options_t *, fsimg_error_t *);
 static fsimg_status_t metadata_loss(extract_state_t *, const fsimg_entry_t *,
     uint32_t, fsimg_error_t *);
+static bool timestamp_instant(const fsimg_timestamp_t *, int32_t, int64_t *);
 static fsimg_status_t prepare_times(extract_state_t *, const fsimg_entry_t *,
     struct timespec *, bool *, fsimg_error_t *);
 static fsimg_status_t close_directory(extract_state_t *, fsimg_error_t *);
 static fsimg_status_t select_parent(extract_state_t *, const fsimg_entry_t *,
-    const char **, fsimg_error_t *);
+    size_t, const char **, fsimg_error_t *);
 static fsimg_status_t creation_failed(int, const char *, fsimg_error_t *);
 static fsimg_status_t extract_directory(extract_state_t *, const fsimg_entry_t *,
     const char *, fsimg_error_t *);
 static fsimg_status_t extract_file(extract_state_t *, const fsimg_entry_t *,
-    const char *, fsimg_error_t *);
+    const char *, unsigned char *, fsimg_error_t *);
 static fsimg_status_t copy_content(extract_state_t *, fsimg_io_t *,
-    const fsimg_entry_t *, fsimg_error_t *);
+    const fsimg_entry_t *, fsimg_sha256_t *, fsimg_error_t *);
+static fsimg_status_t hash_zeros(extract_state_t *, fsimg_sha256_t *,
+    uint64_t, fsimg_error_t *);
 static fsimg_status_t skip_unsupported(extract_state_t *, const fsimg_entry_t *,
+    fsimg_error_t *);
+static fsimg_status_t record_entry(extract_state_t *, const fsimg_entry_t *,
+    const unsigned char *, const unsigned char *, size_t, fsimg_error_t *);
+static fsimg_status_t record_skipped(extract_state_t *, const fsimg_entry_t *,
     fsimg_error_t *);
 static fsimg_status_t extract_entries(extract_state_t *, fsimg_error_t *);
 
@@ -67,6 +76,7 @@ fsimg_extract_options_init(fsimg_extract_options_t *options)
 	options->size = sizeof(*options);
 	options->version = FSIMG_OPTIONS_VERSION;
 	options->flags = FSIMG_EXTRACT_ALLOW_LOSS;
+	options->manifest_fd = -1;
 }
 
 static fsimg_status_t
@@ -103,6 +113,14 @@ extract_options(fsimg_reader_t *reader, const fsimg_extract_options_t *input,
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_EXTRACT, "nonzero reserved extraction option"));
 	}
+	if (options->manifest_fd != -1) {
+		if (options->manifest_fd < 0)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_EXTRACT, "invalid manifest descriptor"));
+		status = fsimg_mtree_writer_check(options->manifest_fd, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	if (options->selection == NULL)
 		options->selection = "/";
 	return (fsimg_path_validate(reader->ctx, options->selection, true,
@@ -129,7 +147,7 @@ prepare_times(extract_state_t *state, const fsimg_entry_t *entry,
     struct timespec *times, bool *set_times, fsimg_error_t *error)
 {
 	const fsimg_timestamp_t *timestamp;
-	int64_t seconds, offset;
+	int64_t seconds;
 	uint32_t field, lost;
 	bool usable;
 
@@ -143,17 +161,12 @@ prepare_times(extract_state_t *state, const fsimg_entry_t *entry,
 		    (entry->metadata.valid & field) == 0)
 			continue;
 		timestamp = i == 0 ? &entry->metadata.accessed : &entry->metadata.modified;
-		seconds = timestamp->seconds;
-		usable = true;
-		if (timestamp->basis == FSIMG_TIME_WALL) {
-			usable = (state->options.flags & FSIMG_EXTRACT_WALL_OFFSET) != 0;
-			offset = (int64_t)state->options.wall_offset_minutes * 60;
-			if ((offset > 0 && seconds < INT64_MIN + offset) ||
-			    (offset < 0 && seconds > INT64_MAX + offset))
-				usable = false;
-			if (usable)
-				seconds -= offset;
-		}
+		/* A wall time needs the caller's offset to name an instant. */
+		if (timestamp->basis == FSIMG_TIME_WALL &&
+		    (state->options.flags & FSIMG_EXTRACT_WALL_OFFSET) == 0)
+			continue;
+		usable = timestamp_instant(timestamp,
+		    state->options.wall_offset_minutes, &seconds);
 		if (!usable || (int64_t)(time_t)seconds != seconds)
 			continue;
 		times[i].tv_sec = (time_t)seconds;
@@ -162,6 +175,32 @@ prepare_times(extract_state_t *state, const fsimg_entry_t *entry,
 		*set_times = true;
 	}
 	return (metadata_loss(state, entry, lost, error));
+}
+
+/* The UTC instant of a timestamp, reading a wall time as
+ * wall_offset_minutes east of UTC; UTC and OFFSET seconds are instants
+ * already. False when the adjusted seconds leave int64_t. The host times
+ * the extractor sets and the times its manifest records both come from
+ * here. The manifest reads a wall time at the offset even when
+ * FSIMG_EXTRACT_WALL_OFFSET is absent and the offset is therefore zero,
+ * where the host gets no time; a time the manifest cannot express is a
+ * loss prepare_times already counted.
+ */
+static bool
+timestamp_instant(const fsimg_timestamp_t *timestamp,
+    int32_t wall_offset_minutes, int64_t *seconds)
+{
+	int64_t offset;
+
+	*seconds = timestamp->seconds;
+	if (timestamp->basis != FSIMG_TIME_WALL)
+		return (true);
+	offset = (int64_t)wall_offset_minutes * 60;
+	if ((offset > 0 && *seconds < INT64_MIN + offset) ||
+	    (offset < 0 && *seconds > INT64_MAX + offset))
+		return (false);
+	*seconds -= offset;
+	return (true);
 }
 
 /* Each selected directory is opened once, owns one stack frame, and is
@@ -198,17 +237,12 @@ close_directory(extract_state_t *state, fsimg_error_t *error)
 
 static fsimg_status_t
 select_parent(extract_state_t *state, const fsimg_entry_t *entry,
-    const char **name, fsimg_error_t *error)
+    size_t length, const char **name, fsimg_error_t *error)
 {
 	char *separator;
-	size_t parent_length, length;
-	uint32_t depth;
+	size_t parent_length;
 	fsimg_status_t status;
 
-	status = fsimg_path_validate(state->reader->ctx, entry->path, false,
-	    &length, &depth, error);
-	if (status != FSIMG_OK)
-		return (status);
 	bcopy(entry->path, state->entry_path, length + 1);
 	separator = strrchr(state->entry_path, '/');
 	parent_length = (size_t)(separator - state->entry_path);
@@ -302,9 +336,14 @@ extract_directory(extract_state_t *state, const fsimg_entry_t *entry,
 	return (FSIMG_OK);
 }
 
+/* Copy a file's bytes into output, which is already sized: a ZERO range
+ * is left as the hole the resize made. With digest, every logical byte,
+ * zero ranges included, is hashed in order as it is copied, so the digest
+ * describes exactly the file written.
+ */
 static fsimg_status_t
 copy_content(extract_state_t *state, fsimg_io_t *output,
-    const fsimg_entry_t *entry, fsimg_error_t *error)
+    const fsimg_entry_t *entry, fsimg_sha256_t *digest, fsimg_error_t *error)
 {
 	fsimg_range_t range;
 	uint64_t offset, remaining;
@@ -317,6 +356,14 @@ copy_content(extract_state_t *state, fsimg_io_t *output,
 		if (status != FSIMG_OK)
 			return (status);
 		if (range.kind == FSIMG_RANGE_ZERO) {
+			if (range.length > entry->size - offset)
+				range.length = entry->size - offset;
+			if (digest != NULL) {
+				status = hash_zeros(state, digest, range.length,
+				    error);
+				if (status != FSIMG_OK)
+					return (status);
+			}
 			offset += range.length;
 			continue;
 		}
@@ -335,6 +382,8 @@ copy_content(extract_state_t *state, fsimg_io_t *output,
 			    offset, state->buffer, batch, &written, error);
 			if (status != FSIMG_OK)
 				return (status);
+			if (digest != NULL)
+				fsimg_sha256_update(digest, state->buffer, batch);
 			offset += batch;
 			remaining -= batch;
 		}
@@ -342,11 +391,40 @@ copy_content(extract_state_t *state, fsimg_io_t *output,
 	return (FSIMG_OK);
 }
 
+/* Hash length zero bytes, one buffer at a time. Nothing is read or
+ * written, so each buffer is charged one unit of work, which also polls
+ * cancellation: a large hole costs time in proportion to its length.
+ */
+static fsimg_status_t
+hash_zeros(extract_state_t *state, fsimg_sha256_t *digest, uint64_t length,
+    fsimg_error_t *error)
+{
+	size_t batch;
+	fsimg_status_t status;
+
+	bzero(state->buffer, EXTRACT_BUFFER_BYTES);
+	while (length != 0) {
+		status = fsimg_session_charge(&state->reader->session, 0, 0, 1,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+		batch = length > EXTRACT_BUFFER_BYTES ? EXTRACT_BUFFER_BYTES :
+		    (size_t)length;
+		fsimg_sha256_update(digest, state->buffer, batch);
+		length -= batch;
+	}
+	return (FSIMG_OK);
+}
+
+/* Create and fill one file. A non-NULL digest receives the SHA-256 of the
+ * bytes written; NULL hashes nothing.
+ */
 static fsimg_status_t
 extract_file(extract_state_t *state, const fsimg_entry_t *entry,
-    const char *name, fsimg_error_t *error)
+    const char *name, unsigned char *digest, fsimg_error_t *error)
 {
 	fsimg_io_t *output;
+	fsimg_sha256_t hash;
 	struct timespec times[2];
 	fsimg_ctx_t *ctx;
 	fsimg_status_t status;
@@ -374,9 +452,11 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	status = fsimg_io_adopt_empty_output(ctx, fd, &output, error);
 	if (status != FSIMG_OK)
 		return (status);
+	fsimg_sha256_init(&hash);
 	status = fsimg_io_resize(output, entry->size, error);
 	if (status == FSIMG_OK)
-		status = copy_content(state, output, entry, error);
+		status = copy_content(state, output, entry,
+		    digest != NULL ? &hash : NULL, error);
 	/* Content writes change mtime, so restore times only after the final byte. */
 	if (status == FSIMG_OK && set_times)
 		status = fsimg_io_set_times(output, times, error);
@@ -386,6 +466,8 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 		fsimg_io_free(output);
 		return (status);
 	}
+	if (digest != NULL)
+		fsimg_sha256_final(digest, &hash);
 	return (fsimg_io_close_output(output, error));
 }
 
@@ -410,12 +492,75 @@ skip_unsupported(extract_state_t *state, const fsimg_entry_t *entry,
 	return (FSIMG_OK);
 }
 
+/* Write an entry's manifest line, when there is a manifest. digest is a
+ * created file's, link a symbolic link's target, each NULL otherwise.
+ */
+static fsimg_status_t
+record_entry(extract_state_t *state, const fsimg_entry_t *entry,
+    const unsigned char *digest, const unsigned char *link, size_t link_length,
+    fsimg_error_t *error)
+{
+	fsimg_mtree_record_t record;
+
+	if (state->manifest == NULL)
+		return (FSIMG_OK);
+	bzero(&record, sizeof(record));
+	record.entry = entry;
+	record.digest = digest;
+	record.link = link;
+	record.link_length = link_length;
+	if ((entry->metadata.valid & FSIMG_META_MODIFIED) != 0) {
+		record.modified_valid = timestamp_instant(&entry->metadata.modified,
+		    state->options.wall_offset_minutes, &record.modified_seconds);
+		record.modified_nanoseconds = entry->metadata.modified.nanoseconds;
+	}
+	return (fsimg_mtree_writer_add(state->manifest, &record, error));
+}
+
+/* A skipped entry is recorded with everything but a digest, since the
+ * manifest is the only record of it. A symbolic link's line carries its
+ * target, read from the image into the copy buffer, which the line
+ * borrows until it is written. Neither the manifest nor a host link can
+ * hold a target that is empty, longer than 1023 bytes or holds a NUL
+ * byte, so such a target is corrupt.
+ */
+static fsimg_status_t
+record_skipped(extract_state_t *state, const fsimg_entry_t *entry,
+    fsimg_error_t *error)
+{
+	size_t length;
+	fsimg_status_t status;
+
+	if (state->manifest == NULL)
+		return (FSIMG_OK);
+	if (entry->kind != FSIMG_ENTRY_SYMLINK)
+		return (record_entry(state, entry, NULL, NULL, 0, error));
+	if (entry->size == 0 || entry->size > FSIMG_SYMLINK_TARGET_MAX)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_EXTRACT,
+		    "symbolic link target length cannot be recorded"));
+	status = fsimg_reader_read_at(state->reader, 0, state->buffer,
+	    (size_t)entry->size, &length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (length != entry->size)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_EXTRACT,
+		    "symbolic link target ended before its declared length"));
+	if (memchr(state->buffer, '\0', length) != NULL)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_EXTRACT,
+		    "symbolic link target holds a NUL byte"));
+	return (record_entry(state, entry, NULL, state->buffer, length, error));
+}
+
 static fsimg_status_t
 extract_entries(extract_state_t *state, fsimg_error_t *error)
 {
+	unsigned char digest[FSIMG_SHA256_DIGEST_LENGTH];
 	const fsimg_entry_t *entry;
+	unsigned char *file_digest;
 	const char *name;
 	fsimg_selection_relation_t relation;
+	size_t path_length;
+	uint32_t depth;
 	fsimg_status_t status;
 
 	for (;;) {
@@ -424,19 +569,38 @@ extract_entries(extract_state_t *state, fsimg_error_t *error)
 			break;
 		if (status != FSIMG_OK)
 			return (status);
+		/* Every path is validated at the extraction boundary, before
+		 * anything is created, skipped or recorded for it.
+		 */
+		status = fsimg_path_validate(state->reader->ctx, entry->path, false,
+		    &path_length, &depth, error);
+		if (status != FSIMG_OK)
+			return (status);
 		if (entry->kind != FSIMG_ENTRY_FILE && entry->kind != FSIMG_ENTRY_DIRECTORY) {
 			status = skip_unsupported(state, entry, error);
+			if (status == FSIMG_OK)
+				status = record_skipped(state, entry, error);
 			if (status != FSIMG_OK)
 				return (status);
 			continue;
 		}
-		status = select_parent(state, entry, &name, error);
+		status = select_parent(state, entry, path_length, &name, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (entry->kind == FSIMG_ENTRY_DIRECTORY)
+		/* A file is hashed exactly when there is a manifest to record
+		 * its digest; record_entry writes nothing without one.
+		 */
+		file_digest = NULL;
+		if (entry->kind == FSIMG_ENTRY_DIRECTORY) {
 			status = extract_directory(state, entry, name, error);
-		else
-			status = extract_file(state, entry, name, error);
+		} else {
+			file_digest = state->manifest != NULL ? digest : NULL;
+			status = extract_file(state, entry, name, file_digest,
+			    error);
+		}
+		if (status == FSIMG_OK)
+			status = record_entry(state, entry, file_digest, NULL, 0,
+			    error);
 		if (status != FSIMG_OK)
 			return (status);
 		state->completed_entries++;
@@ -514,7 +678,18 @@ fsimg_extract_into(fsimg_reader_t *reader, int root,
 			*error = detail;
 		goto done;
 	}
+	if (state.options.manifest_fd != -1) {
+		status = fsimg_mtree_writer_open(reader->ctx, &reader->session,
+		    state.options.manifest_fd, &state.manifest, error);
+		if (status != FSIMG_OK)
+			goto done;
+	}
 	status = extract_entries(&state, error);
+	/* The manifest is complete only once every entry is extracted. */
+	if (status == FSIMG_OK && state.manifest != NULL) {
+		status = fsimg_mtree_writer_finish(state.manifest, error);
+		state.manifest = NULL;
+	}
 done:
 	if (result != NULL) {
 		result->entries = state.completed_entries;
@@ -525,6 +700,7 @@ done:
 		fsimg_fd_release(reader->ctx, state.directories[state.depth].fd);
 		state.depth--;
 	}
+	fsimg_mtree_writer_free(state.manifest);
 	fsimg_dealloc(state.buffer);
 	fsimg_dealloc(state.directory_path);
 	fsimg_dealloc(state.entry_path);

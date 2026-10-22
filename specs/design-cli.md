@@ -378,6 +378,7 @@ possible by any option.
 | `-C dir` | Parent of the fresh destination; default the working directory |
 | `-E` | Extract directly into the empty private `-C` directory |
 | `-k` | Skip entries of unsupported kinds and report their count |
+| `--mtree=FILE` | Also write an mtree(5) manifest of the extraction to the new `FILE` |
 | `-O` | Write one member's logical bytes to stdout instead of extracting |
 
 Each member keeps its path below the image root, including necessary parent
@@ -389,6 +390,9 @@ Inspection still exposes image metadata. An entry of another kind, such as a
 symbolic link, fails the extraction unless `-k` skips it; skipped entries are
 counted in a warning and in the JSON summary. No force flag, lossy name
 rewriting or sandbox opt-out weakens the path and file-type checks.
+`--mtree=FILE` records what the safe profile cannot restore, skipped entries
+included, in a manifest the coordinator publishes beside the tree, as the
+[manifest design](design-mtree.md#extraction-writing-a-manifest) specifies.
 
 Logical output bytes, including holes, count against the output quota.
 Sparse files are used where possible. Success means all selected content and
@@ -401,7 +405,8 @@ complete, while the command still conservatively reports incomplete output.
 `x -O` takes exactly one member, a regular file or a symbolic link (whose
 bytes are its target), and writes its logical bytes to stdout, including
 explicit zeros for logical zero ranges. The content is raw; terminal
-escaping would corrupt it. `-O` rejects `--json`, `-C`, `-E` and `-k`. A
+escaping would corrupt it. `-O` rejects `--json`, `--mtree`, `-C`, `-E`
+and `-k`. A
 broken output pipe or a content error produces failure rather than a
 truncated success result.
 

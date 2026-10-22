@@ -485,7 +485,8 @@ open_root_file(fsimg_writer_t *writer, const fsimg_source_root_t *root,
 	if (!fsimg_source_identity_equal(&opened, &source->identity))
 		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
 		    FSIMG_OP_SOURCE, "source root file differs from its recorded identity"));
-	status = fsimg_io_borrow_fd(writer->ctx, root->fd, &source->io, error);
+	status = fsimg_io_borrow_fd(writer->ctx, root->fd, FSIMG_IO_READ,
+	    &source->io, error);
 	if (status != FSIMG_OK)
 		return (status);
 	source->fd = root->fd;

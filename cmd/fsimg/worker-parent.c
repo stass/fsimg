@@ -941,6 +941,8 @@ start_processes(worker_supervisor_t *state, const char *executable, int standard
 		parser[FSIMG_CHILD_RAW] = request->raw_fd;
 	if (request->spool_fd != -1)
 		parser[FSIMG_CHILD_SPOOL] = request->spool_fd;
+	if (request->manifest_fd != -1)
+		parser[FSIMG_CHILD_MANIFEST] = request->manifest_fd;
 	if (reading_stream(request))
 		parser[FSIMG_CHILD_INPUT] = state->channels[CHANNEL_INPUT][0];
 	for (uint32_t i = 0; i < request->root_count; i++)

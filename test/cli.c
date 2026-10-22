@@ -663,6 +663,10 @@ test_extract_options(void)
 		{ "fsimg", "xOf", "image", "--json", "/a", NULL },
 		{ "fsimg", "xOEf", "image", "/a", NULL },
 		{ "fsimg", "xOkf", "image", "/a", NULL },
+		{ "fsimg", "xOf", "image", "--mtree=m", "/a", NULL },
+		{ "fsimg", "xf", "image.img", "--mtree=", NULL },
+		{ "fsimg", "tf", "image", "--mtree=m", NULL },
+		{ "fsimg", "cf", "image", "-F", "fat12", "--mtree=m", "dir", NULL },
 		{ "fsimg", "xf", "image.img", "-C", "a", "-C", "b", NULL },
 		{ "fsimg", "tf", "image", "-C", "out", NULL },
 		{ "fsimg", "xf", "image.img", "-W", NULL },
@@ -671,7 +675,8 @@ test_extract_options(void)
 		{ "fsimg", "xOf", "image", "", NULL },
 		{ "fsimg", "xEf", "image", "-C", "", NULL }
 	};
-	char *fresh[] = { "fsimg", "xkf", "dir/Boot.IMG.gz", "-C", "out", NULL };
+	char *fresh[] = { "fsimg", "xkf", "dir/Boot.IMG.gz", "-C", "out",
+	    "--mtree=boot.mtree", NULL };
 	char *here[] = { "fsimg", "xEf", "image", NULL };
 	char *standard_output[] = { "fsimg", "xOf", "image", "EFI//./a.txt", NULL };
 	fsimg_cli_options_t options;
@@ -683,9 +688,11 @@ test_extract_options(void)
 	CHECK(strcmp(options.stem, "Boot") == 0 && !options.extract_here);
 	CHECK(strcmp(options.directory, "out") == 0);
 	CHECK((options.request.flags & FSIMG_JOB_SKIP_UNSUPPORTED) != 0);
+	CHECK(strcmp(options.mtree, "boot.mtree") == 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(here, &options) == FSIMG_OK);
 	CHECK(options.extract_here && options.directory == NULL);
+	CHECK(options.mtree == NULL);
 	fsimg_cli_release(&options);
 	CHECK(parse(standard_output, &options) == FSIMG_OK);
 	CHECK(options.request.kind == FSIMG_JOB_CAT);

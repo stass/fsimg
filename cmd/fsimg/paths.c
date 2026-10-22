@@ -28,7 +28,7 @@ static fsimg_status_t kind_error(fsimg_error_t *, int, const char *,
 static fsimg_status_t split_output(const char *, char *, char *, fsimg_error_t *);
 static fsimg_status_t private_directory(int, const char *, char *, int *, bool *,
     fsimg_error_t *);
-static fsimg_status_t reject_ancestor(int, int, fsimg_error_t *);
+static fsimg_status_t reject_ancestor(int, int, const char *, fsimg_error_t *);
 static fsimg_status_t prepare_scratch(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
 static fsimg_status_t open_input(fsimg_cli_options_t *, fsimg_error_t *);
@@ -55,6 +55,13 @@ static fsimg_status_t prepare_spool(fsimg_worker_request_t *, fsimg_error_t *);
 static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t, bool,
     const char *);
 static bool remove_fresh_directory(int, const char *, int);
+static fsimg_status_t prepare_mtree(fsimg_cli_options_t *, fsimg_cli_paths_t *,
+    fsimg_error_t *);
+static fsimg_status_t recheck_mtree(fsimg_cli_options_t *, fsimg_cli_paths_t *,
+    fsimg_error_t *);
+static fsimg_status_t publish_staged(const fsimg_cli_options_t *, int,
+    const char *, uint64_t, int, const char *, const volatile sig_atomic_t *,
+    fsimg_error_t *);
 static fsimg_status_t prepare_destination(fsimg_cli_options_t *,
     fsimg_cli_paths_t *, fsimg_error_t *);
 static int clean_scratch(int);
@@ -167,12 +174,15 @@ private_directory(int parent, const char *role, char *name, int *out,
 	    FSIMG_OP_IO, "private directory name attempts exhausted"));
 }
 
-/* Compare opened identities while walking toward the host root. No pathname
- * supplied by a worker participates. Both directions are checked because
- * scratch deletion authority must never contain the output tree.
+/* Compare opened identities while walking toward the host root, failing
+ * with message when ancestor is descendant or one of its ancestors. No
+ * pathname supplied by a worker participates. Scratch and output are
+ * checked in both directions because scratch deletion authority must never
+ * contain the output tree.
  */
 static fsimg_status_t
-reject_ancestor(int descendant, int ancestor, fsimg_error_t *error)
+reject_ancestor(int descendant, int ancestor, const char *message,
+    fsimg_error_t *error)
 {
 	fsimg_host_file_t target, current, parent;
 	fsimg_status_t status;
@@ -191,7 +201,7 @@ reject_ancestor(int descendant, int ancestor, fsimg_error_t *error)
 		}
 		if (current.device == target.device && current.inode == target.inode) {
 			status = fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IO, "scratch and output trees overlap");
+			    FSIMG_OP_IO, message);
 			break;
 		}
 		if (depth == PATH_MAX) {
@@ -830,6 +840,84 @@ remove_fresh_directory(int parent, const char *name, int fd)
 }
 
 /*
+ * The manifest of x --mtree, staged like a created image: its final name,
+ * relative to the working directory, must not exist yet, and the file
+ * "manifest" is created exclusively with mode 0600 in a fresh private
+ * directory beside it. The worker receives only the file's descriptor,
+ * write-only; only the coordinator publishes it, after a validated
+ * completion, and cleanup removes it on any other outcome. It is prepared
+ * before the destination, so a refused name leaves no extraction
+ * directory behind.
+ */
+static fsimg_status_t
+prepare_mtree(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
+    fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
+	struct stat st;
+	char parent_path[PATH_MAX];
+	fsimg_status_t status;
+
+	status = split_output(options->mtree, parent_path, paths->mtree_basename,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	paths->mtree_parent = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (paths->mtree_parent == -1)
+		return (path_error(error, "cannot open --mtree directory", parent_path));
+	if (fstatat(paths->mtree_parent, paths->mtree_basename, &st,
+	    AT_SYMLINK_NOFOLLOW) == 0) {
+		errno = EEXIST;
+		return (path_error(error, "cannot create --mtree file", options->mtree));
+	}
+	if (errno != ENOENT)
+		return (path_error(error, "cannot inspect --mtree file", options->mtree));
+	status = private_directory(paths->mtree_parent, "mtree",
+	    paths->mtree_staging_name, &paths->mtree_staging,
+	    &paths->mtree_staging_created, error);
+	if (status != FSIMG_OK)
+		return (status);
+	request->manifest_fd = openat(paths->mtree_staging, "manifest",
+	    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+	if (request->manifest_fd == -1)
+		return (host_error(error, "staged manifest creation failed"));
+	return (FSIMG_OK);
+}
+
+/* The --mtree name is checked again once the destination exists, so a
+ * name the new destination took, such as --mtree=boot beside ./boot, fails
+ * before anything is extracted rather than at publication. The fresh
+ * destination is still empty then and is removed again, as a refused
+ * private one is; an -E destination was never fsimg's to remove.
+ */
+static fsimg_status_t
+recheck_mtree(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
+    fsimg_error_t *error)
+{
+	fsimg_worker_request_t *request = &options->request;
+	struct stat st;
+	fsimg_status_t status;
+
+	if (fstatat(paths->mtree_parent, paths->mtree_basename, &st,
+	    AT_SYMLINK_NOFOLLOW) == 0) {
+		errno = EEXIST;
+		status = path_error(error, "cannot create --mtree file",
+		    options->mtree);
+	} else if (errno == ENOENT) {
+		return (FSIMG_OK);
+	} else {
+		status = path_error(error, "cannot inspect --mtree file",
+		    options->mtree);
+	}
+	if (!options->extract_here &&
+	    remove_fresh_directory(paths->parent, options->stem, request->output_fd)) {
+		paths->extraction_prepared = false;
+		paths->retained_output[0] = '\0';
+	}
+	return (status);
+}
+
+/*
  * The extraction destination, proven private before the worker starts.
  * By default it is a fresh directory named after the image stem: one
  * mkdirat with mode 0700 beneath the opened -C directory, so an existing
@@ -914,6 +1002,7 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 
 	bzero(paths, sizeof(*paths));
 	paths->parent = paths->scratch_parent = -1;
+	paths->mtree_parent = paths->mtree_staging = -1;
 	status = prepare_scratch(options, paths, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -939,8 +1028,12 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		break;
 	case FSIMG_JOB_EXTRACT:
 		status = open_input(options, error);
+		if (status == FSIMG_OK && options->mtree != NULL)
+			status = prepare_mtree(options, paths, error);
 		if (status == FSIMG_OK)
 			status = prepare_destination(options, paths, error);
+		if (status == FSIMG_OK && options->mtree != NULL)
+			status = recheck_mtree(options, paths, error);
 		break;
 	default:
 		status = open_input(options, error);
@@ -950,11 +1043,18 @@ fsimg_cli_prepare(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		return (status);
 
 	if (request->output_fd != -1 && request->scratch_fd != -1) {
-		status = reject_ancestor(request->output_fd, request->scratch_fd, error);
+		status = reject_ancestor(request->output_fd, request->scratch_fd,
+		    "scratch and output trees overlap", error);
 		if (status != FSIMG_OK)
 			return (status);
-		status = reject_ancestor(request->scratch_fd, request->output_fd, error);
+		status = reject_ancestor(request->scratch_fd, request->output_fd,
+		    "scratch and output trees overlap", error);
 	}
+	/* The worker must not see the manifest beside the tree it fills. */
+	if (status == FSIMG_OK && paths->mtree_staging != -1 &&
+	    request->output_fd != -1)
+		status = reject_ancestor(paths->mtree_staging, request->output_fd,
+		    "--mtree file lies inside the extraction destination", error);
 	return (status);
 }
 
@@ -1011,10 +1111,13 @@ publication_cancelled(void *argument)
 	    (cancel->deadline != 0 && fsimg_cli_clock() >= cancel->deadline));
 }
 
-fsimg_status_t
-fsimg_cli_publish(const fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
-    const fsimg_worker_result_t *result, const volatile sig_atomic_t *interrupted,
-    fsimg_error_t *error)
+/* Publish staged_name of length bytes in staging as name in parent, without
+ * replacement, under the command's limits, its deadline and its interrupt.
+ */
+static fsimg_status_t
+publish_staged(const fsimg_cli_options_t *options, int staging,
+    const char *staged_name, uint64_t length, int parent, const char *name,
+    const volatile sig_atomic_t *interrupted, fsimg_error_t *error)
 {
 	publication_cancel_t cancel = { .interrupted = interrupted,
 	    .deadline = options->request.deadline_milliseconds };
@@ -1028,13 +1131,60 @@ fsimg_cli_publish(const fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	status = fsimg_ctx_new(&limits, &ctx, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_publish(ctx, options->request.output_fd, "image", result->image_bytes,
-	    paths->parent, paths->basename, NULL, error);
+	status = fsimg_publish(ctx, staging, staged_name, length, parent, name,
+	    NULL, error);
+	fsimg_ctx_free(ctx);
+	return (status);
+}
+
+fsimg_status_t
+fsimg_cli_publish(const fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
+    const fsimg_worker_result_t *result, const volatile sig_atomic_t *interrupted,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = publish_staged(options, options->request.output_fd, "image",
+	    result->image_bytes, paths->parent, paths->basename, interrupted, error);
 	paths->published = status == FSIMG_OK || error->output_state == FSIMG_OUTPUT_PUBLISHED;
 	paths->retain_staging = status == FSIMG_EUNSUPPORTED ||
 	    error->output_state == FSIMG_OUTPUT_UNCERTAIN;
-	fsimg_ctx_free(ctx);
 	return (status);
+}
+
+/* Publish the staged x --mtree manifest under its final name, without
+ * replacement, once the worker's completion has been validated. The
+ * staged file's length is its own: the coordinator's descriptor names the
+ * file the worker wrote, and publication refuses a staged name that no
+ * longer holds a file of that length. Unlike a staged image, an
+ * unpublished manifest is never retained, whatever the failure: removing
+ * the staged name is safe even when linking it may have succeeded, which
+ * an uncertain result reports.
+ */
+fsimg_status_t
+fsimg_cli_publish_mtree(const fsimg_cli_options_t *options,
+    fsimg_cli_paths_t *paths, const volatile sig_atomic_t *interrupted,
+    fsimg_error_t *error)
+{
+	struct stat st;
+	fsimg_status_t status;
+
+	if (fstat(options->request.manifest_fd, &st) == -1)
+		return (host_error(error, "staged manifest stat failed"));
+	status = publish_staged(options, paths->mtree_staging, "manifest",
+	    (uint64_t)st.st_size, paths->mtree_parent, paths->mtree_basename,
+	    interrupted, error);
+	paths->mtree_published = status == FSIMG_OK ||
+	    error->output_state == FSIMG_OUTPUT_PUBLISHED;
+	if (status != FSIMG_OK && error->path[0] == '\0')
+		fsimg_error_path(error, options->mtree);
+	return (status);
+}
+
+bool
+fsimg_cli_published(const fsimg_cli_paths_t *paths)
+{
+	return (paths->published || paths->mtree_published);
 }
 
 /* Scratch uses flat files. Never recurse into a directory left by a failed
@@ -1098,8 +1248,8 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	int cleanup, failure;
 	int *descriptors[] = { &request->input_fd, &request->output_fd,
 	    &request->scratch_fd, &request->raw_fd, &request->spool_fd,
-	    &paths->parent,
-	    &paths->scratch_parent };
+	    &request->manifest_fd, &paths->parent, &paths->scratch_parent,
+	    &paths->mtree_staging, &paths->mtree_parent };
 
 	cleanup = 0;
 	if (paths->staging_created && !paths->retain_staging) {
@@ -1117,6 +1267,22 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 				cleanup = errno;
 		} else
 			paths->retained_output[0] = '\0';
+	}
+	/* The staged manifest's name goes on every outcome: publication
+	 * removed it after linking the final name, or failed to, or the
+	 * manifest is not published and must not remain.
+	 */
+	if (paths->mtree_staging_created) {
+		if (paths->mtree_staging != -1 &&
+		    unlinkat(paths->mtree_staging, "manifest", 0) == -1 &&
+		    errno != ENOENT && cleanup == 0)
+			cleanup = errno;
+		if (unlinkat(paths->mtree_parent, paths->mtree_staging_name,
+		    AT_REMOVEDIR) == -1 && cleanup == 0)
+			cleanup = errno;
+		if (status == FSIMG_OK && fsync(paths->mtree_parent) == -1 &&
+		    cleanup == 0)
+			cleanup = errno;
 	}
 	if (paths->scratch_created) {
 		failure = request->scratch_fd == -1 ? 0 : clean_scratch(request->scratch_fd);
@@ -1150,15 +1316,19 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	request->root_count = 0;
 	if (cleanup != 0) {
 		if (status == FSIMG_OK)
-			status = fsimg_error_set(error, paths->published ? FSIMG_EDURABILITY : FSIMG_EIO,
+			status = fsimg_error_set(error, fsimg_cli_published(paths) ?
+			    FSIMG_EDURABILITY : FSIMG_EIO,
 			    cleanup, FSIMG_OP_IO, "private capability cleanup incomplete");
 		error->cleanup_error = cleanup;
 	}
-	/* A stream has no publication: once any byte may have reached stdout,
-	 * the consumer holds an incomplete image; before that, none.
+	/* A failure's output state, in order: published when any output was
+	 * (fsimg_cli_published); else an uncertain publication stays
+	 * uncertain; else incomplete for a prepared extraction, or for a
+	 * stream once any byte may have reached stdout; else absent for a
+	 * creation, a stream before its first byte included.
 	 */
 	if (status != FSIMG_OK) {
-		if (paths->published)
+		if (fsimg_cli_published(paths))
 			error->output_state = FSIMG_OUTPUT_PUBLISHED;
 		else if (error->output_state != FSIMG_OUTPUT_UNCERTAIN) {
 			if (paths->extraction_prepared ||

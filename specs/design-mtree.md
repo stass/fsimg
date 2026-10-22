@@ -72,9 +72,14 @@ These tags are protocol, not image paths, so the path limit does not bound
 them; the job record's path budget allows for them. The worker hands
 them, or the manifest and `-1`, to `fsimg_writer_adopt_manifest()`, the
 form of `fsimg_writer_add_manifest()` that consumes its descriptors instead
-of duplicating them. The extractor
-writes no manifest; the [extraction](#extraction-writing-a-manifest)
-section describes the target.
+of duplicating them. In mode `x`, `--mtree=FILE` gives
+`fsimg_extract_into()` the descriptor of a file the coordinator staged
+(`prepare_mtree()` in `cmd/fsimg/paths.c`, the worker's
+`FSIMG_CHILD_MANIFEST`); the extractor's manifest writer
+(`lib/extract/mtree-writer.c`) writes one line per visited entry, hashing
+each file's bytes as `copy_content()` copies them, and the coordinator
+publishes the file after the worker's validated completion
+(`fsimg_cli_publish_mtree()`).
 The SHA-256 implementation is the one [Digests](#digests) describes,
 `lib/core/sha256.c`.
 
@@ -507,7 +512,7 @@ documentation states.
 
 ```text
 #mtree v2.0
-. type=dir mode=0755 uid=0 gid=0 time=946684800.000000000
+. type=dir
 ./bin type=dir mode=0755 uid=0 gid=0 time=946684800.000000000
 ./bin/sh type=file mode=0555 uid=0 gid=0 time=946684800.000000000 size=1183848 sha256digest=...
 ./lib/libc.so type=link mode=0777 uid=0 gid=0 time=946684800.000000000 link=libc.so.7
@@ -521,19 +526,32 @@ targets are encoded with `\ooo` for every byte outside `0x21` through `0x7E`
 and for `\` and `#`, so the line is plain ASCII. `time` is nine fractional
 digits. A wall-clock or offset modification time is written as the instant
 the extractor would set on the host under the same `wall_offset_minutes`
-interpretation, so the manifest and the host tree agree. The digest is
+interpretation, so the manifest and the host tree agree: a wall time is read
+`wall_offset_minutes` east of UTC, which is zero without
+`FSIMG_EXTRACT_WALL_OFFSET`, so the CLI, which restores no host time, writes
+a FAT time's calendar fields as UTC, and creating FAT from the manifest
+stores the same fields again. The digest is
 computed from the bytes the extractor copies, so it describes the host file
 it wrote. Access, change and creation times and attributes are not written
-and are the losses the extraction already counts. The root line carries the
-root's fields when the reader reports any. With `-k`, a skipped entry is
+and are the losses the extraction already counts. The root line is always
+`. type=dir`: no reader reports the root as an entry, so it carries no
+fields, which import drops anyway. With `-k`, a skipped entry is
 written with everything but a digest.
 
 The manifest's lines go to `manifest_fd` through the context's bounded I/O
-in the order above; the extractor flushes and checks the close before it
-reports completion. The CLI stages the file beside the image output's
-staging, publishes it after the worker's validated completion and the
-destination's finalization, without replacement, and removes it on any
-failure. An existing `FILE` fails before the worker starts.
+in the order above; the extractor writes through the borrowed descriptor,
+never duplicating it, since a confined worker cannot, and flushes it before
+it reports completion; the worker then closes it and checks the close. A
+link target the manifest cannot express, empty, longer than
+1023 bytes or holding a NUL byte, is corrupt and fails the extraction. The
+CLI stages the file as `manifest`, mode 0600, in a private directory beside
+`FILE`, the way it stages a created image, and opens it write-only for the
+worker, which holds it as one more descriptor against `fds`; the sandbox
+grants it write, resize and flush and nothing else. The coordinator
+publishes it after the worker's validated completion, without replacement,
+and removes it on any failure. An existing `FILE` fails before the worker
+starts and before the destination is created, and a `FILE` whose staging
+would lie inside the destination is refused.
 
 ## Security and bounds
 

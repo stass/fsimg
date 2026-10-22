@@ -510,8 +510,7 @@ each stage one reviewed commit:
 4. **Command line.** The `@file` operand and the worker's second descriptor,
    with the manual page. Complete: the CLI tests create from manifests of
    generated and of host content, merged with host operands, through the
-   worker, confined wherever the host's sandbox permits the content-path
-   inspection, which the Linux one does not.
+   worker, confined on every host that has a sandbox.
 5. **Export.** `x --mtree=FILE` through the output coordinator. Complete: an
    extracted tree and its manifest re-create an image with equal contents and
    metadata.

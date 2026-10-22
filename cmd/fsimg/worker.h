@@ -56,6 +56,8 @@ typedef enum fsimg_confinement {
 #define FSIMG_JOB_CAP_ROOTS 0x08u
 #define FSIMG_JOB_CAP_RAW 0x10u
 #define FSIMG_JOB_CAP_SPOOL 0x20u
+/* The staged manifest an EXTRACT job writes under x --mtree. */
+#define FSIMG_JOB_CAP_MANIFEST 0x40u
 /* Coordinator, at most one parser, at most one output relay and at most
  * one input relay.
  */
@@ -136,6 +138,10 @@ typedef struct fsimg_worker_request {
 	 * -1 without scratch.
 	 */
 	int		 spool_fd;
+	/* The staged x --mtree manifest, an empty file open for writing, or
+	 * -1.
+	 */
+	int		 manifest_fd;
 	/* --partition name= or type= text; a GPT name holds at most 36 UTF-16
 	 * units, so 111 bytes cover every name that can match.
 	 */
@@ -260,6 +266,7 @@ fsimg_status_t fsimg_job_decode(const unsigned char *, uint32_t,
 #define FSIMG_CHILD_CANCEL 9
 #define FSIMG_CHILD_RAW 10
 #define FSIMG_CHILD_SPOOL 11
-#define FSIMG_CHILD_ROOTS 12
+#define FSIMG_CHILD_MANIFEST 12
+#define FSIMG_CHILD_ROOTS 13
 
 #endif

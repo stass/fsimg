@@ -68,7 +68,7 @@ install_signals(void)
 static void
 output_failure_state(const fsimg_cli_paths_t *paths, fsimg_error_t *error)
 {
-	if (paths->published)
+	if (fsimg_cli_published(paths))
 		error->output_state = FSIMG_OUTPUT_PUBLISHED;
 	else if (paths->extraction_prepared)
 		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
@@ -176,6 +176,9 @@ main(int argc, char **argv)
 		/* A stream has no publication; its bytes are already delivered. */
 		if (status == FSIMG_OK && fsimg_job_needs_staging(&options.request))
 			status = fsimg_cli_publish(&options, &paths, &result, &interrupted, &error);
+		if (status == FSIMG_OK && options.request.manifest_fd != -1)
+			status = fsimg_cli_publish_mtree(&options, &paths, &interrupted,
+			    &error);
 		status = fsimg_cli_cleanup(&options, &paths, status, &error);
 	}
 	if (status != FSIMG_OK)

@@ -408,9 +408,9 @@ def test_option_syntax(executable, root):
         (["-f", "human.img"], b"a mode is required"),
         (["if", "human.img", "extra"], b'unexpected operand "extra"'),
         (["x", "-O", "-C", "source", "-f", "human.img", "/HELLO.TXT"],
-         b"-O rejects --json, -C, -E and -k"),
-        (["x", "-O", "-E", "-f", "human.img", "/HELLO.TXT"], b"-O rejects --json, -C, -E and -k"),
-        (["x", "-O", "-k", "-f", "human.img", "/HELLO.TXT"], b"-O rejects --json, -C, -E and -k"),
+         b"-O rejects --json, --mtree, -C, -E and -k"),
+        (["x", "-O", "-E", "-f", "human.img", "/HELLO.TXT"], b"-O rejects --json, --mtree, -C, -E and -k"),
+        (["x", "-O", "-k", "-f", "human.img", "/HELLO.TXT"], b"-O rejects --json, --mtree, -C, -E and -k"),
         (["x", "-O", "-f", "human.img"], b"-O requires exactly one member"),
         (["x", "-O", "-f", "human.img", "/HELLO.TXT", "/nested"], b"-O requires exactly one member"),
         (["cf", "syntax.img", "-F", "fat12", "source/../source"],
@@ -427,7 +427,7 @@ def test_option_syntax(executable, root):
         assert result.stdout == b""
     assert failed(invoke(executable, root, [
         "x", "-O", "--json", "-f", "human.img", "/HELLO.TXT",
-    ], expected=2))["message"] == "-O rejects --json, -C, -E and -k"
+    ], expected=2))["message"] == "-O rejects --json, --mtree, -C, -E and -k"
     for arguments, detail in [
         # Options precede operands: after the first member, -v is a member.
         (["t", "-f", "human.img", "/nested", "-v"], b"selecting several members is not supported"),
@@ -1785,6 +1785,98 @@ def test_compressed_create(executable, root):
     assert fewest("levels.img", "--json", "-C", "levels", "file", "deep") == plain + 1
 
 
+def test_mtree_export(executable, root):
+    """x --mtree publishes a manifest of the extracted selection only after a
+    complete extraction: a failed one leaves no file, and an existing name is
+    refused before any destination exists. With -k the skipped link and
+    FIFO are recorded with their metadata, and each file with the digest of
+    the bytes written; the tree and its manifest re-create the image byte
+    for byte; two extractions write the same manifest; it is published
+    with mode 0600, rejected with -O, and holds one descriptor, which the
+    worker receives and the extractor writes through."""
+    work = root / "mtree-export"
+    work.mkdir()
+    (work / "source.mtree").write_text(
+        "/set uid=0 gid=0 mode=0644 time=1500000000\n"
+        "./sp\\040ace type=dir mode=0750 uid=7 gid=8\n"
+        "./sp\\040ace/f\\043 type=file fsimg.content=seeded fsimg.seed=3 "
+        "size=70000 fsimg.holes=100:5000\n"
+        "./link type=link link=sp\\040ace\n"
+        "./fifo type=fifo mode=0620\n")
+    invoke(executable, work, ["cf", "q.img", "-F", "qnx6", "-R", "@source.mtree"])
+
+    error = failed(invoke(executable, work, ["xf", "q.img", "--json",
+                                             "--mtree=failed.mtree"], expected=1))
+    assert error["status"] == "unsupported capability", error
+    assert error["output_state"] == "incomplete", error
+    assert not (work / "failed.mtree").exists()
+    shutil.rmtree(work / "q")
+
+    invoke(executable, work, ["xkf", "q.img", "--mtree=q.mtree"])
+    text = (work / "q.mtree").read_text()
+    assert text.startswith("#mtree v2.0\n. type=dir\n"), text
+    assert (work / "q.mtree").stat().st_mode & 0o777 == 0o600
+    written = (work / "q/sp ace/f#").read_bytes()
+    assert len(written) == 70000 and written[100:5100] == bytes(5000)
+    assert (f"./sp\\040ace/f\\043 type=file mode=0644 uid=0 gid=0 time=315532800.000000000 "
+            f"size=70000 sha256digest={hashlib.sha256(written).hexdigest()}\n") in text, text
+    assert "./sp\\040ace type=dir mode=0750 uid=7 gid=8 " in text, text
+    assert "./link type=link mode=0644 uid=0 gid=0 time=315532800.000000000 " \
+        "link=sp\\040ace\n" in text, text
+    assert "./fifo type=fifo mode=0620 uid=0 gid=0 time=315532800.000000000\n" in text, text
+
+    other = private_directory(work, "other")
+    result = invoke(executable, work, ["xkf", "q.img", "-C", "other", "--mtree=q.mtree"],
+                    expected=1)
+    assert b"cannot create --mtree file" in result.stderr, result.stderr
+    assert not list(other.iterdir())
+
+    invoke(executable, work, ["xkf", "q.img", "-C", "other", "--mtree=again.mtree"])
+    assert (work / "again.mtree").read_bytes() == (work / "q.mtree").read_bytes()
+    invoke(executable, work, ["cf", "rebuilt.img", "-F", "qnx6", "-R", "-C", "q",
+                              "@../q.mtree"])
+    same_bytes(work / "q.img", work / "rebuilt.img")
+
+    result = invoke(executable, work, ["xOf", "q.img", "--mtree=o.mtree", "/link"],
+                    expected=2)
+    assert b"-O rejects" in result.stderr, result.stderr
+    result = invoke(executable, work, ["xkf", "q.img", "--mtree="], expected=2)
+    assert b"--mtree requires a file name" in result.stderr, result.stderr
+
+    # Names refused before anything is extracted: a dangling symbolic link
+    # is never followed, the destination's own new name is taken, and a
+    # file inside an -E destination would make it non-empty.
+    (work / "dangling.mtree").symlink_to("nowhere")
+    names = private_directory(work, "names")
+    for arguments, message in [
+            (["-C", "names", "--mtree=dangling.mtree"], "cannot create --mtree file"),
+            (["-C", "names", "--mtree=names/q"], "cannot create --mtree file"),
+            (["-E", "-C", "names", "--mtree=names/inside.mtree"],
+             "extraction destination is not empty")]:
+        error = failed(invoke(executable, work, ["xkf", "q.img", "--json", *arguments],
+                              expected=1))
+        assert error["message"] == message, (arguments, error)
+        assert error["output_state"] != "incomplete", (arguments, error)
+        assert not list(names.iterdir()), arguments
+        assert not (work / "nowhere").exists()
+
+    def fewest(*arguments):
+        for count in range(3, 16):
+            target = private_directory(work, f"fds-{count}-{len(arguments)}")
+            result = invoke(executable, work, ["xkf", "q.img", "--json", "-C", target.name,
+                                               "-l", f"fds={count}", *arguments],
+                            expected=None)
+            if result.returncode == 0:
+                return count
+            assert failed(result)["resource"] == "fds", result
+            assert not (work / "fds.mtree").exists()
+        raise AssertionError(arguments)
+
+    plain = fewest()
+    assert fewest("--mtree=fds.mtree") == plain + 1
+    assert not list(work.glob(".fsimg-*"))
+
+
 def main():
     executable = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="cli-fixture-", dir=Path.cwd()) as temporary:
@@ -1816,6 +1908,7 @@ def main():
         test_manifest_generated(executable, root)
         test_manifest_host(executable, root)
         test_manifest_refusals(executable, root)
+        test_mtree_export(executable, root)
         test_partitioned(executable, root)
         test_containers(executable, root)
         test_compressed_and_streams(executable, root)

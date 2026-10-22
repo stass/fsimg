@@ -867,10 +867,10 @@ fsimg_io_adopt_fd(fsimg_ctx_t *ctx, int fd, unsigned access, fsimg_io_t **out,
 }
 
 fsimg_status_t
-fsimg_io_borrow_fd(fsimg_ctx_t *ctx, int fd, fsimg_io_t **out,
-    fsimg_error_t *error)
+fsimg_io_borrow_fd(fsimg_ctx_t *ctx, int fd, unsigned access,
+    fsimg_io_t **out, fsimg_error_t *error)
 {
-	return (io_from_fd(ctx, fd, FSIMG_IO_READ, IO_BORROW, out, error));
+	return (io_from_fd(ctx, fd, access, IO_BORROW, out, error));
 }
 
 fsimg_status_t

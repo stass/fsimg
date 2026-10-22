@@ -44,6 +44,7 @@ typedef struct fsimg_cli_options {
 	const char	*mode;		/* "c", "cW", "x", "t", "W", "i", "formats"; "" before a mode. */
 	const char	*image;		/* -f argument, or NULL. */
 	const char	*directory;	/* x: -C argument; NULL is the working directory. */
+	const char	*mtree;		/* x: --mtree argument, or NULL. */
 	const char	*scratch;	/* -T, TMPDIR or /tmp; "-" disables scratch. */
 	char		**words;	/* Owned rewrite of a dashless first-argument bundle. */
 	fsimg_cli_operand_t *operands;	/* Owned create operands in command-line order. */
@@ -73,10 +74,20 @@ typedef struct fsimg_cli_paths {
 	const char	**root_paths;
 	char		 basename[NAME_MAX + 1];
 	char		 staging_name[96];
+	/* x --mtree: the manifest is staged as "manifest" in the private
+	 * directory mtree_staging_name, opened as mtree_staging, beside its
+	 * final name mtree_basename in mtree_parent.
+	 */
+	int		 mtree_parent;
+	int		 mtree_staging;
+	char		 mtree_basename[NAME_MAX + 1];
+	char		 mtree_staging_name[96];
 	char		 scratch_name[96];
 	char		 retained_output[PATH_MAX];
 	char		 retained_scratch[PATH_MAX];
 	bool		 staging_created;
+	bool		 mtree_staging_created;
+	bool		 mtree_published;
 	bool		 scratch_created;
 	bool		 extraction_prepared;	/* A destination was created or checked. */
 	bool		 published;
@@ -143,6 +154,13 @@ fsimg_status_t fsimg_cli_verification_request(const fsimg_cli_options_t *,
     fsimg_worker_request_t *, fsimg_error_t *);
 fsimg_status_t fsimg_cli_publish(const fsimg_cli_options_t *, fsimg_cli_paths_t *,
     const fsimg_worker_result_t *, const volatile sig_atomic_t *, fsimg_error_t *);
+fsimg_status_t fsimg_cli_publish_mtree(const fsimg_cli_options_t *,
+    fsimg_cli_paths_t *, const volatile sig_atomic_t *, fsimg_error_t *);
+/* Whether any output, the image or the --mtree manifest, was published:
+ * a later failure then reports the output published, since it exists and
+ * must not be recreated blindly.
+ */
+bool fsimg_cli_published(const fsimg_cli_paths_t *);
 fsimg_status_t fsimg_cli_cleanup(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_status_t, fsimg_error_t *);
 void fsimg_cli_display_init(fsimg_cli_display_t *, const fsimg_cli_options_t *,

@@ -68,8 +68,9 @@ is a read-only regular file or the pipe through which the coordinator pumps
 standard input unread (the [CLI design](design-cli.md#coordinator-and-streaming-representation)
 states that rule and refuses a terminal), source roots, scratch authority,
 fresh output authority where needed, the unlinked
-[handed-over files](design-layers.md#handed-over-files), and bounded
-control/data channels. The sandbox's input check admits a regular file or a
+[handed-over files](design-layers.md#handed-over-files), the staged
+[`x --mtree` manifest](design-mtree.md#extraction-writing-a-manifest), and
+bounded control/data channels. The sandbox's input check admits a regular file or a
 pipe and nothing else. Other descriptors, sockets, terminal handles, and
 executable handles are closed. Core dumps are disabled. Runtime initialization
 needed by libc occurs before confinement; no locale, timezone, or plugin
@@ -79,7 +80,11 @@ The worker's authority over names is this mapping and nothing more. In the
 staging directory it may create the staged output and remove nothing. In
 the scratch tree it may create and unlink its own scratch files. A
 handed-over file (spool, raw intermediate) is a descriptor only, with no
-name to create or remove. Source roots and the image input are read-only.
+name to create or remove. The staged manifest of `x --mtree` is a
+write-only descriptor of one file the coordinator created in its own
+private staging directory: the worker may write, resize and flush it, and
+holds no name or directory through which to rename, replace or read it.
+Source roots and the image input are read-only.
 The platform profiles below install exactly these rights.
 
 The profiles bound each grant to its directory, not to the names within
@@ -91,7 +96,11 @@ staged output is the single file `image`, the only name the coordinator
 publishes or opens for verification; another entry in staging is never
 published and only keeps the private staging directory from being removed.
 Scratch holds only the worker's own files, which the coordinator removes
-whatever their names. Extracted names are the validated, host-representable
+whatever their names. The manifest's content rests on the worker too: a
+compromised worker can write any bytes and any length into it, which the
+coordinator publishes under the user's `--mtree` name with mode 0600, just
+as it publishes any staged image's bytes; it cannot choose the name, the
+directory or the mode. Extracted names are the validated, host-representable
 names the extractor derives from the image. A compromised worker can misuse
 names within its grants but cannot reach beyond them.
 

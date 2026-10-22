@@ -402,17 +402,23 @@ help(fsimg_cli_display_t *display)
 		append(display, "%s", help_read_common);
 		append(display, "    -k              Skip and count symbolic links and other unsupported kinds\n");
 		append(display, "%s%s%s", help_budgets, help_slice, help_memory);
+		append(display, "    --mtree=file    Also write an mtree(5) manifest of the extracted\n"
+		    "                    entries, digests and metadata to the new file\n");
 		append(display, "    -O              Write one member's bytes to stdout\n");
 		append(display, "%s%s", help_settings_read, help_policies);
 		append(display, "    -v              Repeat as -vv for progress and details on stderr\n");
 		append(display, "%s%s", help_gzip_read, help_units);
 		append(display, "Extracts into a new directory named after the image, such as ./boot for\n"
 		    "boot.img, with private modes and without host timestamps. Symbolic links\n"
-		    "and other unsupported kinds fail unless -k skips them.\n\n"
+		    "and other unsupported kinds fail unless -k skips them. A --mtree manifest\n"
+		    "records what the tree cannot hold, skipped entries included, for\n"
+		    "fsimg c to rebuild the image from both, as the last example shows.\n\n"
 		    "examples:\n"
 		    "    fsimg xf boot.img\n"
 		    "    fsimg xf boot.img -C /tmp EFI/BOOT\n"
 		    "    fsimg xEf boot.img -C ./empty-dir\n"
+		    "    fsimg xkf rootfs.img --mtree=rootfs.mtree\n"
+		    "    fsimg cf copy.img -F qnx6 -C rootfs @../rootfs.mtree\n"
 		    "    fsimg xOf boot.img /EFI/BOOT/BOOTX64.EFI > BOOTX64.EFI\n");
 		return;
 	}

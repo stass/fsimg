@@ -310,15 +310,17 @@ static int
 run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile)
 {
 	struct rlimit no_core = { 0, 0 };
-	fsimg_sandbox_caps_t caps = {
-		.input = 3, .staging = 4, .destination = -1, .scratch = 6,
-		.roots = 5, .root_count = 1, .raw = -1, .spool = -1,
-		.job = -1, .control = -1, .data = -1, .cancel = -1
-	};
+	fsimg_sandbox_caps_t caps;
 	fsimg_status_t status;
 	pid_t child;
 	int wait_status, root;
 
+	fsimg_sandbox_caps_init(&caps);
+	caps.input = 3;
+	caps.staging = 4;
+	caps.scratch = 6;
+	caps.roots = 5;
+	caps.root_count = 1;
 	if (profile == PROFILE_EXTRACT) {
 		caps.staging = -1;
 		caps.destination = 4;
