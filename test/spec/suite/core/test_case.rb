@@ -46,6 +46,18 @@ class TestCase < Minitest::Test
     assert_match(/meant valid but violates t.crosslink/, derive(recipe, "t.crosslink" => true).harness_defect)
   end
 
+  # An unmutated base's tree is known, so a valid case of it that leaves a
+  # scope unclassified shows a model that cannot decode it; a mutated
+  # valid case may, since its tree is unknown.
+  def test_unmutated_valid_case_leaving_a_scope_unclassified_is_a_harness_defect
+    classification = classify(REGISTRY, unclassified: ["directories"])
+    mutated = recipe.with(mutations: [FsimgSpec::Mutation::ReplaceBytes.new(offset: 0, bytes: "A".b)])
+
+    assert_match(/meant valid but leaves directories unclassified/,
+                 FsimgSpec::Case.derive(recipe, classification, registry: REGISTRY).harness_defect)
+    assert_nil FsimgSpec::Case.derive(mutated, classification, registry: REGISTRY).harness_defect
+  end
+
   def test_targeted_case_missing_its_rule_is_a_harness_defect
     assert_match(/does not violate its intended rule t.format/, derive(recipe(intended: "t.format")).harness_defect)
   end
@@ -114,6 +126,19 @@ class TestCase < Minitest::Test
     assert_equal({ "create" => "accept", "verify" => "reject:FSIMG_ECORRUPT" }, created.expected.transform_values(&:to_s))
     assert_equal "the image it wrote violates t.crosslink", created.created_image_problem
     assert_equal source.recorded, created.recorded
+  end
+
+  # The harness knows a created image's tree, so a scope the model leaves
+  # unclassified on it fails create, beside any violation; the host's
+  # destination does not.
+  def test_created_image_the_model_cannot_decode_fails_create
+    source = derive_creation(creation_recipe)
+    problem = ->(facts, unclassified) { source.created(classify(REGISTRY, facts, unclassified:)).created_image_problem }
+
+    assert_equal ["the image it wrote leaves directories unclassified",
+                  "the image it wrote violates t.crosslink and leaves directories unclassified", nil],
+                 [problem.({}, ["directories"]), problem.({ "t.crosslink" => true }, ["directories"]),
+                  problem.({}, ["destination"])]
   end
 
   # A creation case records the classification every created image must

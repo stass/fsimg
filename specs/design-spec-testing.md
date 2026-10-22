@@ -271,10 +271,26 @@ its cluster count, computed with the specification's region arithmetic.
 A creation case carries two classifications: `create` follows the source
 model's, and the reading stages follow the created image's, which the
 harness decodes once `create` accepts. The created image is classified
-like any other and must violate no rule, including a writer `profile`
-rule that every byte outside allocated metadata and file content is
-zero, and its decoded geometry must be that layout, so a threshold
-witness is the volume it names. A second `create` in the same case then reads
+like any other. It must violate no rule, an `advisory` one included, and
+leave no scope but `destination` unclassified, since the harness knows its
+tree: a scope the model cannot decode on fsimg's own output would otherwise
+pass every stage that reads it unjudged. Its decoded geometry must be that
+layout, so a threshold witness is the volume it names. Two rules hold
+fsimg's images to the security design's requirement that [emitters
+initialize all reserved bytes and
+padding](design-security.md#other-boundaries): a writer `profile` rule that
+every byte outside allocated metadata and file content is zero, and
+`fat.directory.tail_zeroed`, that every byte of a directory from its end
+marker on is zero. The end marker is the first entry whose `DIR_Name[0]` is
+0x00; section 6 of the specification makes it and every later entry free.
+The rule reads the FAT12/16 root region's `BPB_RootEntCnt` entries, and
+the clusters of the FAT32 root and of every subdirectory to their last
+byte. A reader must accept a stale byte there, so the rule is `advisory`
+with policy `must_accept`; it binds the writer alone, through the created
+image's classification. Its witnesses are mutations, a stale byte in a
+builder base, so they leave the tree unknown and the stages that check
+`directories` unclassified; a created image with a stale byte fails
+`create`. A second `create` in the same case then reads
 `source-reversed.mtree`, the same lines in reverse order, and writes
 `out/reversed.img`, whose bytes must equal `out/created.img`; once they
 do, the harness removes it, so the case holds one image from there on.
@@ -435,10 +451,18 @@ After materialization the harness refuses a base whose decoded variant or
 geometry differs from its parameters, so a formatter that silently substitutes
 another geometry never supplies a witness. It then classifies the base like any
 case. A base meant to be valid must classify valid, decode to its recipe's
-tree, and pass the read-only checkers that support its geometry, and the
+tree, leave no scope but `destination` unclassified, and pass the
+read-only checkers that support its geometry, and the
 mtools read-back, where the host has it, must reproduce its tree, unless an
 [oracle exception](#oracle-exceptions) excuses the tool; otherwise
-it is reported and serves no case. Every base has a manifest in the
+it is reported and serves no case. Classifying valid means violating no
+rule, an `advisory` one included: a valid case reads its base's bytes, and
+a class A case has no violation. So every base meets
+`fat.directory.tail_zeroed` as fsimg's own images must. The builder meets it
+by construction, writing every directory into a zero-filled image; a
+formatter or an mtools that left a stale byte past an end marker would make
+its base's valid cases harness errors rather than let them pass as valid.
+Every base has a manifest in the
 [fixture-manifest shape](design-formats.md#format-descriptors-and-profiles):
 format, geometry and feature profile; builder, recipe and tree digest; the
 creation command; validator results; and the image hash per tool version.

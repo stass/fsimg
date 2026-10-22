@@ -58,12 +58,17 @@ module FsimgSpec
            expected: Case.expectations(recipe, image: image_classification, source: source_classification))
 
     # Why the image create wrote fails create, or nil: an accepting create
-    # must write an image that violates no rule
-    # (specs/design-spec-testing.md#expectation-derivation). Destination
-    # violations depend on the host, not on the image.
+    # must write an image that violates no rule and that the model decodes
+    # completely, as CREATED_IMAGE states
+    # (specs/design-spec-testing.md#expectation-derivation). A scope left
+    # unclassified would otherwise pass every stage that reads it
+    # unjudged. Destination violations and scopes depend on the host, not
+    # on the image.
     def created_image_problem
-      violated = classification.without_destination.rule_ids
-      "the image it wrote violates #{violated.join(", ")}" if violated.any?
+      image = classification.without_destination
+      found = [("violates #{image.rule_ids.join(", ")}" if image.rule_ids.any?),
+               ("leaves #{image.unclassified.join(", ")} unclassified" if image.unclassified.any?)].compact
+      "the image it wrote #{found.join(" and ")}" if found.any?
     end
 
     # Why the host cannot hold the names the case extracts, or nil: its
@@ -93,20 +98,25 @@ module FsimgSpec
 
     # A defect of the generator or builder that made this case, or nil
     # (specs/design-spec-testing.md#cases). A valid case must violate no
-    # rule. It may leave scopes unclassified while the model does not
-    # decode the allocation tables and directories
-    # (docs/spec-testing-plan.md, B2). A targeted case must name a rule
-    # with violations, run a stage that checks it, and violate it. A
-    # violation the case alone cannot show is exempt from that last check:
-    # one of a destination rule depends on the host's name trials, and one
-    # in a scope the model could not decode is never found. A malformed
-    # case may violate anything. The image a creation case's create writes
-    # is fsimg's output, which create's own judgement covers
-    # (#created_image_problem).
+    # rule. An unmutated base's case must also leave no scope but the
+    # destination unclassified, since its tree is known, so a scope the
+    # model cannot decode never passes its stages unjudged; a mutated
+    # valid case may, while the model does not decode the allocation
+    # tables and directory tree (docs/spec-testing-plan.md, B2).
+    #
+    # A targeted case must name a rule with violations, run a stage that
+    # checks it, and violate it. A violation the case alone cannot show is
+    # exempt from that last check: one of a destination rule depends on
+    # the host's name trials, and one in a scope the model could not
+    # decode is never found. A malformed case may violate anything. The
+    # image a creation case's create writes is fsimg's output, which
+    # create's own judgement covers (#created_image_problem).
     def harness_defect
       case recipe.kind
       in "valid" if rule_ids.any?
         "#{recipe.id} is meant valid but violates #{rule_ids.join(", ")}"
+      in "valid" if recipe.reading? && recipe.mutations.empty? && undecoded.any?
+        "#{recipe.id} is meant valid but leaves #{undecoded.join(", ")} unclassified"
       in "targeted" if intended_rule.policy == "equivalent_contents"
         "#{recipe.id} targets #{intended_rule.id}, a freedom of the format with no violations"
       in "targeted" if (intended_rule.stages & recipe.stages).empty?
@@ -138,6 +148,10 @@ module FsimgSpec
     def violations = [*source_classification&.violations, *recorded_image.violations]
 
     def rule_ids = violations.map { _1.rule.id }.uniq.sort
+
+    # The scopes besides the host's destination that the model could not
+    # decode on the case image.
+    def undecoded = recorded_image.unclassified
 
     # Whether the case alone decides a scope of the intended rule: one that
     # is neither the host's destination nor left unclassified.

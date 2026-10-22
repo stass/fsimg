@@ -167,6 +167,46 @@ class TestFatCreationsFsimg < Minitest::Test
     end
   end
 
+  # A created image with a stale byte past its root directory's end
+  # marker, the last byte of the FAT16 root region, violates
+  # fat.directory.tail_zeroed, so create fails it on the harness's own
+  # reading, although every reader stops at the marker.
+  def test_a_created_image_with_a_stale_byte_past_a_directory_end_fails_create
+    stale = lambda do |path|
+      File.open(path, "r+b") do |image|
+        root, entries = fat16_root(image)
+        image.pwrite("A", root + entries.bytesize - 1)
+      end
+    end
+    with_run do |run|
+      _, result = run.call("fat.create.valid.fat16", alter: stale)
+
+      assert_equal ["failed", ["create"]], [result.verdict, result.stages.map(&:stage)]
+      assert_match(/\Acreate: the image it wrote violates fat\.directory\.tail_zeroed/, result.detail)
+    end
+  end
+
+  # A created image whose directories the harness cannot follow fails
+  # create, rather than leaving the stages that read them unclassified:
+  # here the root's end marker becomes a subdirectory "X" whose first
+  # cluster, 1, is no data cluster. The checker and the read-back are off,
+  # so create's own judgement is the only one.
+  def test_a_created_image_whose_directories_cannot_be_followed_fails_create
+    unfollowable = lambda do |path|
+      File.open(path, "r+b") do |image|
+        root, entries = fat16_root(image)
+        marker = entries.scan(/.{32}/mn).index { _1.getbyte(0).zero? }
+        image.pwrite(["X".ljust(11), 0x10, 1].pack("a11Cx14v") + "\0\0\0\0".b, root + (marker * 32))
+      end
+    end
+    with_run(tools: { fsck_fat: nil, fsck_msdosfs: nil, mdir: nil, mtype: nil }) do |run|
+      _, result = run.call("fat.create.valid.fat16", alter: unfollowable)
+
+      assert_equal ["failed", ["create"]], [result.verdict, result.stages.map(&:stage)], result.detail
+      assert_match(/\Acreate: the image it wrote leaves directories unclassified/, result.detail)
+    end
+  end
+
   # The seeded failure of the read-back's verdict at a cutover: an mdir
   # that lists nothing fails the created FAT16 volume of exactly 4085
   # clusters, which no exception excuses, as at any other count. The
@@ -246,5 +286,13 @@ class TestFatCreationsFsimg < Minitest::Test
         [classified.kase, FsimgSpec::CasePhase.result_of(classified, setup:, cases_directory: File.join(results, "cases"))]
       }
     end
+  end
+
+  # The offset of a FAT16 volume's root region, after the reserved
+  # sectors and the FATs, and its BPB_RootEntCnt entries' bytes.
+  def fat16_root(image)
+    bpb = Fat::Layout::CommonBpb.read(image.pread(36, 0))
+    offset = (bpb.bpb_rsvd_sec_cnt + (bpb.bpb_num_fats * bpb.bpb_fat_sz16)) * bpb.bpb_byts_per_sec
+    [offset, image.pread(bpb.bpb_root_ent_cnt * 32, offset)]
   end
 end

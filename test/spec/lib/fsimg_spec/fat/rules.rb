@@ -125,6 +125,16 @@ module FsimgSpec
       # A directory with a name whose key Ruby cannot give leaves the
       # second rule undefined.
       def self.name_rules = [
+        # A reader stops at the end marker, so fsimg must accept a stale
+        # byte past it; fsimg's own images initialize every byte they emit,
+        # so an image it created must have none.
+        Rule.new(
+          id: "fat.directory.tail_zeroed", category: "advisory", policy: "must_accept", scopes: ["directories"],
+          applies_to: ALWAYS, domain: Witnesses::DIRECTORY_TAILS,
+          predicate: ->(model, _) { FsimgSpec.derive(model.directories) { |found| found.all? { _1.stale_at.nil? } } },
+          source: "#{cite("6", "DIR_Name[0] 0x00")}: the entry is free and so is every entry after it; " \
+                  "specs/design-security.md: emitters initialize all reserved bytes and padding"
+        ),
         Rule.new(
           id: "fat.directory.name", category: "profile", policy: "must_reject", status: "FSIMG_ECORRUPT",
           scopes: ["directories"], applies_to: ALWAYS, domain: Witnesses::NAME,

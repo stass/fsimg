@@ -13,6 +13,7 @@ end
 
 require_relative "fat/layout"
 require_relative "fat/geometry"
+require_relative "fat/directories"
 require_relative "fat/model"
 require_relative "fat/builder"
 require_relative "fat/names"

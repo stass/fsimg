@@ -111,10 +111,51 @@ class TestFatModel < Minitest::Test
   end
 
   # The scopes beyond the boot sector follow from the tree: unknown, it
-  # leaves them unclassified.
+  # leaves them unclassified. A boot sector alone holds no directory
+  # either, which leaves the directories scope unclassified too.
   def test_unknown_tree_leaves_its_scopes_unclassified
     assert_equal %w[directories files verification destination], decode(FAT16_SECTOR).unclassified_scopes
-    assert_empty decode(FAT16_SECTOR).with(tree: []).unclassified_scopes
+    assert_equal ["directories"], decode(FAT16_SECTOR).with(tree: []).unclassified_scopes
+    assert_empty decode(FAT16_SECTOR).with(tree: [], directories: []).unclassified_scopes
+  end
+
+  # The walk finds every directory of a builder volume, the root first,
+  # through the FAT12/16 root region or the FAT32 root chain, with no
+  # stale byte past any end marker. A byte past a marker is found where
+  # it lies, in the root or a subdirectory.
+  def test_directories_are_walked_to_their_end_markers
+    tree = [FsimgSpec::TreeEntry.directory("DIR"), FsimgSpec::TreeEntry.directory("DIR/Nested"),
+            FsimgSpec::TreeEntry.file("DIR/a.txt", size: 10, seed: 1)]
+    { fat12: { clusters: 100 }, fat16: { clusters: 4085 }, fat32: { clusters: 65_525 } }.each do |variant, parameters|
+      built(parameters, tree) do |path, layout, allocation|
+        assert_equal [["", nil], ["DIR", nil], ["DIR/NESTED", nil]], walked(path), variant
+        directory = layout.cluster_offset(allocation.first_cluster("DIR"))
+        marker = allocation.directories.fetch("DIR").bytesize
+        File.open(path, "r+b") { _1.pwrite("A", directory + marker + 40) }
+        assert_equal [["", nil], ["DIR", marker + 40], ["DIR/NESTED", nil]], walked(path), variant
+      end
+    end
+  end
+
+  # Directories the walk cannot follow are Undefined, and say why: a
+  # FAT16 chain that ends on a free cluster, one that links to itself,
+  # which claims its cluster twice, and a FAT32 volume whose BPB_ExtFlags
+  # makes FAT 2 of its two FATs the active one.
+  def test_unfollowable_directories_are_undefined
+    dir_link = ->(link) { ->(image, layout, cluster) { image.pwrite([link.(cluster)].pack("v"), layout.fat_offset(0) + (cluster * 2)) } }
+    {
+      /links to 0\z/ => [{ clusters: 5000 }, dir_link.(->(_) { 0 })],
+      /is claimed twice\z/ => [{ clusters: 5000 }, dir_link.(->(cluster) { cluster })],
+      /names FAT 2 of 2\z/ => [{ clusters: 65_525 }, ->(image, _, _) { image.pwrite([0x0082].pack("v"), 40) }]
+    }.each do |reason, (parameters, edit)|
+      built(parameters, [FsimgSpec::TreeEntry.directory("DIR")]) do |path, layout, allocation|
+        File.open(path, "r+b") { edit.(_1, layout, allocation.first_cluster("DIR")) }
+        directories = FsimgSpec::Fat::Model.decode(FsimgSpec::ImageView.open(path)).directories
+
+        assert FsimgSpec.undefined?(directories), "#{reason.source}: #{directories.inspect}"
+        assert_match reason, directories.reason
+      end
+    end
   end
 
   # A FAT32 volume's FSInfo record is read at the sector BPB_FSInfo
@@ -133,7 +174,7 @@ class TestFatModel < Minitest::Test
     assert_equal [0x4161_5252, 0x6141_7272, 0xAA55_0000], [read.fsi_lead_sig, read.fsi_struc_sig, read.fsi_trail_sig]
     assert_equal [0, 0x4161_5252], [decode(pointing.(2) + fsinfo + ("\0" * 512)).fsinfo.fsi_lead_sig,
                                     decode(pointing.(2) + ("\0" * 512) + fsinfo).fsinfo.fsi_lead_sig]
-    short = decode(FAT32_SECTOR + fsinfo.byteslice(0, 511)).with(tree: [])
+    short = decode(FAT32_SECTOR + fsinfo.byteslice(0, 511)).with(tree: [], directories: [])
     assert_equal [true, ["verification"]], [FsimgSpec.undefined?(short.fsinfo), short.unclassified_scopes]
     assert_equal [nil] * 4, [decode(FAT16_SECTOR + fsinfo), decode(pointing.(0xFFFF) + fsinfo),
                              decode(pointing.(32) + fsinfo), decode(pointing.(0) + fsinfo)].map(&:fsinfo)
@@ -219,6 +260,20 @@ class TestFatModel < Minitest::Test
   def accepted(stage, records, tree: []) =
     FsimgSpec::StageResult.new(stage:, outcome: FsimgSpec::Outcome.new(kind: "accepted", records:), execution: nil,
                                problems: [], tree:, footprint: FsimgSpec::Footprint.new(files: 0, bytes: 0))
+
+  # Renders a builder volume of parameters holding tree and yields its
+  # path, layout and allocation.
+  def built(parameters, tree)
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, "image.img")
+      FsimgSpec::Fat::Builder.write(path, parameters:, tree:, max_bytes: FsimgSpec.fetch_profile("quick").ceilings.image)
+      yield path, FsimgSpec::Fat::Builder::Layout.new(parameters), FsimgSpec::Fat::Builder.plan(parameters:, tree:)
+    end
+  end
+
+  # The path and stale byte of every directory the model of the image at
+  # path walks.
+  def walked(path) = FsimgSpec::Fat::Model.decode(FsimgSpec::ImageView.open(path)).directories.map { [_1.path, _1.stale_at] }
 
   def decode(bytes)
     Dir.mktmpdir do |directory|

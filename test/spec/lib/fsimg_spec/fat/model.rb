@@ -27,15 +27,20 @@ module FsimgSpec
     # It is Undefined with the boot sector, with the variant of a volume
     # that has a FAT32 extension, or when the image ends before the record.
     #
-    # The model does not decode the allocation tables or directories. tree
-    # is the known tree the case says its image holds, an Array of
+    # directories lists every directory and where its end marker leaves
+    # bytes that are not zero (Directories), read through the active FAT's
+    # chains; it is Undefined where the walk cannot follow them. The model
+    # decodes the allocation tables no further, and no directory entry
+    # beyond what the walk needs.
+    #
+    # tree is the known tree the case says its image holds, an Array of
     # WalkedEntry that KnownTree builds: an unmutated base its recipe's
     # tree, an image fsimg created the source tree the harness wrote
     # (specs/design-spec-testing.md#cases). A mutated image's tree is
     # Undefined, and every scope that reads it is unclassified, derived from
     # it rather than listed.
-    class Model < Data.define(:image_length, :common, :fat32_extension, :extension, :signature, :fsinfo, :geometry,
-                             :tree)
+    class Model < Data.define(:image_length, :common, :fat32_extension, :extension, :signature, :fsinfo, :directories,
+                             :geometry, :tree)
       # The boot sector records lie in the volume's first 512 bytes,
       # whatever BPB_BytsPerSec says.
       BOOT_SECTOR_BYTES = 512
@@ -46,7 +51,8 @@ module FsimgSpec
       # their name trials, which decide its violations, are the run
       # environment's (specs/design-spec-testing.md#host-names).
       SCOPE_INPUTS = {
-        "open" => [], "directories" => %i[tree], "files" => %i[tree], "verification" => %i[tree fsinfo], "destination" => %i[tree]
+        "open" => [], "directories" => %i[tree directories], "files" => %i[tree], "verification" => %i[tree fsinfo],
+        "destination" => %i[tree]
       }.freeze
       UNKNOWN_TREE = Undefined.new(reason: "the tree of an image no case vouches for, such as a mutated one, is unknown")
       # The entry kinds a known tree holds.
@@ -66,6 +72,7 @@ module FsimgSpec
           common:, fat32_extension:, extension:,
           signature: record(Layout::Signature, sector),
           fsinfo: fsinfo(image, common, fat32_extension, extension, geometry.variant),
+          directories: Directories.decode(image, common:, fat32_extension:, extension:, geometry:),
           geometry:,
           tree:
         )

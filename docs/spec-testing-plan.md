@@ -557,11 +557,15 @@ review and commit gates.
   - `model.rb` gains a bounded FAT-table and directory decoder for small
     images. It replaces the known tree: an unmutated base and a created image
     must decode to the tree B1 assigns them, and a mutated image classifies
-    its directory scopes.
+    its directory scopes. It extends the directory walk of
+    `fat/directories.rb`, which follows each directory to its end marker
+    for `fat.directory.tail_zeroed` and decodes no entry beyond the
+    subdirectories it finds.
   - The writer `profile` rule that every byte outside allocated metadata and
     file content is zero, which needs the decoder's allocation map.
-  - With the decoder, `Case#harness_defect` again refuses a valid case that
-    leaves a scope unclassified, as the cases design requires.
+  - With the decoder, `Case#harness_defect` refuses a mutated valid case
+    that leaves a scope unclassified too, as the cases design requires; it
+    already refuses an unmutated one, and create an image that does.
   - The mutations are the semantic
     [mutations](../specs/design-spec-testing.md#mutations) (`set_fat_entry`,
     `set_directory_entry`, `splice_chain` and `relocate_chain`), plus LFN
@@ -691,6 +695,7 @@ the expectations their rules derive.
 | `fat32.bpb.backup_boot_sector` | `BPB_BkBootSec` is 0, `0xFFFF` or a reserved-area sector after the boot sector | normative | `info`: `ECORRUPT` for 32 of 32 reserved sectors and `0xFFFE` |
 | `fat32.bpb.backup_boot_sector.recommended` | `BPB_BkBootSec` is 0 or 6 | advisory (`must_accept`) | Accepted by `info` at 29 |
 | `fat32.bpb.backup_boot_sector.absent` | `BPB_BkBootSec` is not `0xFFFF` | advisory (`must_accept`) | Accepted by `info` as no backup |
+| `fat.directory.tail_zeroed` | Every byte of a directory from its end marker, the first entry with `DIR_Name[0]` 0x00, to the end of its root region or chain is zero | advisory (`must_accept`) | Not asserted at the reading stages: its witnesses, a stale byte past the root's or a subdirectory's marker in each variant and in the FAT12 marker entry itself, are mutations, which leave `directories` unclassified until B2; a created image that breaks it fails `create`, and a base that breaks it is refused |
 | `fat.directory.name` | No name is empty, `.` or `..`, holds a C0 control, DEL or one of `"*/:<>?\|`, starts with a space, ends with a space or period, or exceeds 255 UTF-16 units | profile | `ls`: `ECORRUPT` for a trailing space or period, a leading space, a colon, U+0001, DEL, and 256 units of ASCII or of 127 supplementary characters and two ASCII letters; 255 units accepted by every stage |
 | `fat.directory.unique_names` | No two names of a directory have one simple-uppercase key | profile | `ls`: `ECORRUPT` for an ASCII and a Deseret case pair; a long name beside the 8.3 name its basis name spells is accepted |
 | `fat.create.sector_bytes` | `-o sector=` is 512, 1024, 2048 or 4096 | normative (scope `input`) | `create`: `EINVAL` for 256, 1000 and 8192; each legal size accepted, read back by mtools and by every reading stage |
