@@ -15,7 +15,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -24,6 +23,8 @@
 
 static int directory_empty(int, bool *);
 static int nontrivial_acl(int, bool *);
+static bool discard_refused(int, const char *, int,
+    fsimg_host_privacy_t);
 
 /* Whether the directory holds no name besides "." and "..", read through
  * a fresh descriptor for the same directory so the caller's descriptor
@@ -162,52 +163,27 @@ nontrivial_acl(int fd, bool *present)
 #elif defined(__linux__)
 /* Linux stores a POSIX ACL as a system.posix_acl_access or
  * system.posix_acl_default attribute only when it is non-trivial. An NFS
- * client lists system.nfs4_acl for every inode of a server with ACL
+ * client reports system.nfs4_acl for every inode of a server with ACL
  * support, which cannot be shown trivial without decoding it, so its
- * presence counts as non-trivial too.
+ * presence counts as non-trivial too. A size query needs no buffer: an
+ * absent attribute is ENODATA, and a file system without attributes or ACLs
+ * reports ENOTSUP for each.
  */
 static int
 nontrivial_acl(int fd, bool *present)
 {
 	static const char *const names[] = { "system.posix_acl_access",
 	    "system.posix_acl_default", "system.nfs4_acl" };
-	char *list;
-	ssize_t size, listed;
-	int saved;
 
 	*present = false;
-	for (unsigned attempt = 0;; attempt++) {
-		size = flistxattr(fd, NULL, 0);
-		if (size == -1)
-			return (errno == ENOTSUP ? 0 : -1);
-		if (size == 0)
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (fgetxattr(fd, names[i], NULL, 0) != -1) {
+			*present = true;
 			return (0);
-		list = malloc((size_t)size);
-		if (list == NULL)
-			return (-1);
-		listed = flistxattr(fd, list, (size_t)size);
-		if (listed != -1)
-			break;
-		saved = errno;
-		free(list);
-		/* The list grew between the two calls; ask again, boundedly. */
-		if (saved != ERANGE || attempt == 8) {
-			errno = saved;
-			return (-1);
 		}
+		if (errno != ENODATA && errno != ENOTSUP)
+			return (-1);
 	}
-	/* The list is NUL-separated names; a final name without its NUL is
-	 * still bounded by the listed length.
-	 */
-	for (size_t offset = 0, length; offset < (size_t)listed; offset += length + 1) {
-		length = strnlen(list + offset, (size_t)listed - offset);
-		for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-			if (length == strlen(names[i]) &&
-			    memcmp(list + offset, names[i], length) == 0)
-				*present = true;
-		}
-	}
-	free(list);
 	return (0);
 }
 #else
@@ -249,4 +225,90 @@ fsimg_host_private_directory(int fd, fsimg_host_privacy_t *verdict)
 		}
 	}
 	return (0);
+}
+
+const char *
+fsimg_host_fresh_refusal(fsimg_host_privacy_t verdict)
+{
+	switch (verdict) {
+	case FSIMG_HOST_SHARED_WRITE:
+		return ("lets another user into new directories");
+	case FSIMG_HOST_EXTENDED_ACL:
+		return ("gives new directories a non-trivial access control list");
+	default:
+		return ("lets another user replace new directories");
+	}
+}
+
+bool
+fsimg_host_remove_directory(int parent, const char *name, int fd)
+{
+	struct stat opened, named;
+
+	if (fstat(fd, &opened) == -1 ||
+	    fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == -1)
+		return (false);
+	if (opened.st_dev != named.st_dev || opened.st_ino != named.st_ino ||
+	    opened.st_uid != geteuid()) {
+		errno = EEXIST;
+		return (false);
+	}
+	return (unlinkat(parent, name, AT_REMOVEDIR) == 0);
+}
+
+/*
+ * Discard the directory opened as fd under name, which the check refused
+ * with verdict or could not judge, and return whether nothing of fsimg's is
+ * left there: true once it is removed, or when the name holds another
+ * object or nothing. A populated directory is not fsimg's either: fsimg made
+ * the directory empty, and a directory that passed the rest of the rule is
+ * normally writable by its owner alone, so a populated one is the user's
+ * own, put under the name in place of the new one; it is neither removed
+ * nor reported. False means fsimg's directory remains, for the caller to
+ * report.
+ */
+static bool
+discard_refused(int parent, const char *name, int fd,
+    fsimg_host_privacy_t verdict)
+{
+	if (verdict == FSIMG_HOST_NOT_EMPTY)
+		return (true);
+	if (fsimg_host_remove_directory(parent, name, fd))
+		return (true);
+	return (errno == EEXIST || errno == ENOENT);
+}
+
+fsimg_host_fresh_t
+fsimg_host_private_mkdir(int parent, const char *name, int *fd,
+    fsimg_host_privacy_t *verdict, bool *created)
+{
+	bool judged;
+	int saved;
+
+	*fd = -1;
+	*verdict = FSIMG_HOST_PRIVATE;
+	*created = false;
+	if (mkdirat(parent, name, 0700) == -1)
+		return (errno == EEXIST ? FSIMG_HOST_FRESH_TAKEN :
+		    FSIMG_HOST_FRESH_FAILED);
+	*fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	if (*fd == -1) {
+		/* A name that no longer reaches a directory, gone or replaced
+		 * by another kind of object (ELOOP, or EMLINK on FreeBSD, for a
+		 * symbolic link), holds nothing of fsimg's.
+		 */
+		*created = errno != ENOENT && errno != ENOTDIR && errno != ELOOP &&
+		    errno != EMLINK;
+		return (FSIMG_HOST_FRESH_FAILED);
+	}
+	*created = true;
+	judged = fsimg_host_private_directory(*fd, verdict) == 0;
+	if (judged && *verdict == FSIMG_HOST_PRIVATE)
+		return (FSIMG_HOST_FRESH_CREATED);
+	saved = errno;
+	*created = !discard_refused(parent, name, *fd, *verdict);
+	close(*fd);
+	*fd = -1;
+	errno = saved;
+	return (judged ? FSIMG_HOST_FRESH_REFUSED : FSIMG_HOST_FRESH_FAILED);
 }

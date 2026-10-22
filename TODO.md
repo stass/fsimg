@@ -418,21 +418,6 @@
   glibc's sources, not run; glibc 2.39 (CI) passes. Run the sandbox suite on
   such a distribution, and if it fails, call the `fstat` syscall directly
   through `compat/`; seccomp cannot tell an empty path from another one.
-* [Medium] **The library's own directories skip the other-writer check**
-  (`lib/output/write.c` `create_staging`, `lib/extract/extract.c`
-  `fsimg_extract_at`): `fsimg_writer_write_at()` and transcoding stage
-  beneath the caller's directory in a `.fsimg-output-PID-N` directory, and
-  `fsimg_extract_at()` creates its fresh destination, each made with mode
-  0700 and reopened by name no-follow but never checked by
-  `fsimg_host_private_directory()` as the CLI's private directories are. A
-  writer of the parent can put another directory under the name between
-  `mkdirat` and the reopen, and a parent's inheritable ACL entries or a
-  filesystem that ignores the creation mode can let other users write the
-  directory; the library then extracts into a tree others can change, or
-  publishes a staged name another writer could replace. The staging name is
-  predictable, so the swap can be prepared before the directory exists.
-  Check them there too, or move the CLI's private directory routine into
-  the library.
 * [Medium] **macOS volumes that ignore ownership pass the private-directory
   check** (`compat/private.c` `fsimg_host_private_directory`): an external
   APFS or HFS+ volume mounted with ownership ignored, the default for
@@ -441,18 +426,12 @@
   users can write it. Refuse when `fstatfs()` on the descriptor reports
   `MNT_IGNORE_OWNERSHIP`, and test it on an `hdiutil` volume attached with
   owners off.
-* [Low] **A fresh directory replaced by the user's own populated directory
-  is reported as retained output** (`cmd/fsimg/paths.c` `fresh_private`):
-  a writer of a parent without the sticky bit can rename one of the user's
-  populated directories onto the fresh name before it is reopened; the
-  `NOT_EMPTY` verdict proves the replacement, yet `*created` stays set, the
-  error says the parent "lets another user into new directories", and the
-  final report names the user's directory as fsimg's retained output. Treat
-  a populated fresh directory as replaced: clear `*created` and say so.
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself
-  can call it outside the public contract. Export only the public header's symbols
+  can call it outside the public contract; the compat host layer, such as
+  `fsimg_host_private_mkdir()` and the directory-removing
+  `fsimg_host_remove_directory()`, is exported too. Export only the public header's symbols
   (a libtool `-export-symbols-regex` or a symbol file, with test programs
   linking the convenience library for internals).
 

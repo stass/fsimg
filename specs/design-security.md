@@ -338,16 +338,16 @@ platform can report on the descriptor is refused, one that grants only
 reading included: on FreeBSD
 `acl_is_trivial_np` for the access and NFSv4 types the filesystem supports,
 and any entry at all in a POSIX.1e default ACL, which has no trivial form; on Linux the presence of a
-`system.posix_acl_access` or `system.posix_acl_default` attribute in
-`flistxattr`, which the kernel keeps only for a non-trivial ACL; on macOS
-any extended ACL entry. On Linux a listed `system.nfs4_acl` attribute is
-refused as well, trivial or not: the NFS client lists it for every inode of
+`system.posix_acl_access` or `system.posix_acl_default` attribute, which
+the kernel keeps only for a non-trivial ACL; on macOS
+any extended ACL entry. On Linux a `system.nfs4_acl` attribute is
+refused as well, trivial or not: the NFS client reports it for every inode of
 a server with ACL support, and fsimg cannot prove it trivial without
 decoding NFSv4 ACLs, which is out of scope. A Linux NFSv4 destination on
 such a server therefore cannot be used, a limitation the user-facing
 documentation states; FreeBSD's NFSv4 case is unaffected, since
 `acl_is_trivial_np` answers there. A Linux CIFS mount exposes no ACL
-through `flistxattr`, so its server-side Windows ACLs are not seen; the
+through these attributes, so its server-side Windows ACLs are not seen; the
 user-facing documentation states this as well. A platform other than these
 three has no known ACL interface, and its check fails rather than
 trusting the mode bits. Refusing rather than reading ACLs is the
@@ -364,10 +364,13 @@ process with the same credentials only as far as the threat model states;
 they are a safeguard against mistakes and the ordinary shared-directory
 attacks, not an isolation boundary.
 
-The same rule, by the same function, proves every other directory the CLI
-coordinator creates before anything is put in it: the staging
-directory of a created image, the staging directory of an `x --mtree`
-manifest and the scratch tree. A directory created with mode 0700 can still
+The same rule, by the same function, proves every other directory fsimg
+creates before anything is put in it: the staging directory of a created
+image, whether the CLI coordinator or a library caller's
+`fsimg_writer_write_at` makes it, the fresh destination of
+`fsimg_extract_at`, the staging directory of an `x --mtree` manifest and
+the scratch tree. The routine and the check are part of libfsimg, so an
+embedding program gets the same protection as the CLI. A directory created with mode 0700 can still
 fail it: an inheritable entry of its parent can admit another user, a user
 who can write a parent without the sticky bit can put another directory in
 its place before it is reopened, and a filesystem without POSIX permissions,
@@ -381,7 +384,14 @@ at once, and with it all cleanup of its contents, which goes through that
 descriptor: whatever the name now reaches may belong to someone else. It is
 removed again only while the name still holds the object it opened, owned
 by the user and empty; otherwise its name is reported as retained, unless
-it now holds another object, which is not fsimg's to report. A writer of
+the name now holds another object or nothing, or the opened directory is
+populated, none of which is fsimg's to report. fsimg made the directory
+empty, and one that passed the rest of the rule is normally writable by its
+owner alone, so a populated directory is the user's own, put under the name
+in place of the new one. A principal who could write the new directory
+through an inheritable ACL entry and also strip that ACL before the check
+can leave a populated directory fsimg made unreported; fsimg never writes
+into it. A writer of
 the parent can still put another empty directory under the name between
 that check and the removal, which gains nothing it could not do itself.
 
@@ -548,8 +558,13 @@ allowlist alone does not guarantee a disk-space quota.
   attributes; macOS extended entries), including an entry that grants
   nothing, where the fresh case must remove its empty directory and name the
   parent; a trivial ACL that passes on FreeBSD and macOS, and on Linux a
-  trivial POSIX ACL that leaves no attribute behind, while a listed
-  `system.nfs4_acl` is refused; `-f -` and an underivable
+  trivial POSIX ACL that leaves no attribute behind, while a present
+  `system.nfs4_acl` is refused; the library's own extraction destination
+  and output staging beneath a parent with an inheritable ACL (both refused,
+  nothing left behind); a group-writable directory and a populated one of
+  the user's put under a fresh name before its reopen (the first refused and
+  removed, the second refused, kept and not reported as fsimg's), and a
+  symbolic link put there (the reopen fails, nothing reported); `-f -` and an underivable
   stem without `-E`; and a parent replaced by a symbolic link between the
   user's inspection and the open, which succeeds only into the link's target
   as a fresh directory and never into a populated one.

@@ -362,7 +362,11 @@ sink remains the caller's responsibility on failure.
 
 `write_at()` takes a trusted parent directory descriptor and one validated
 basename, creates private staging in that directory's filesystem, and publishes
-without replacing an existing name. It owns and closes its output descriptors.
+without replacing an existing name. The staging directory must pass the
+private-directory rule of the
+[security specification](design-security.md#safe-extraction); a parent whose
+new directories fail it, such as one with an inheritable ACL entry, is
+`FSIMG_EINVAL` before anything is written. It owns and closes its output descriptors.
 The caller's descriptor is borrowed for the call. Publication and durability
 outcomes follow the [security/output contract](design-security.md#image-publication).
 The helper does not enter an OS sandbox on behalf of an embedding application.
@@ -589,7 +593,9 @@ not raw string prefix. A missing selection is an error.
 
 Extraction creates `name` exclusively as a private directory beneath the
 borrowed parent descriptor. An existing file, symlink, or directory is
-`FSIMG_EEXISTS`, even if empty. Options control logical-output quota, safe
+`FSIMG_EEXISTS`, even if empty. The new directory must pass the same
+private-directory rule as staging, or extraction fails with
+`FSIMG_EINVAL`. Options control logical-output quota, safe
 timestamp preservation, and declared optional-metadata losses. Preserving a
 wall-clock timestamp requires an explicit caller offset interpretation; the
 library never invents a timezone. A `manifest_fd`, an empty regular file the

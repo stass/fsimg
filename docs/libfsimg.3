@@ -216,6 +216,9 @@ A raw sink may retain partial bytes after failure and must be discarded.
 takes a trusted parent directory descriptor and a single new basename.
 It plans before image creation and publishes without replacement after durable
 finalization.
+Its staging directory beside the basename, like that of every file output,
+is a private directory, as described under
+.Sx EXTRACTION .
 Known source aliases are rejected before output mutation.
 Inspect output_state and cleanup_error before any recovery decision.
 Retained staging paths are relative to the supplied parent.
@@ -336,6 +339,31 @@ parent.
 It creates private directories/files with descriptor-relative no-follow
 operations,
 never merges, overwrites, restores privileged metadata or follows links.
+.Pp
+Every directory the library creates to write into, the destination of
+.Fn fsimg_extract_at
+and the staging directory of a file output such as
+.Fn fsimg_writer_write_at ,
+is created with mode 0700, reopened without following links and checked on
+that descriptor: it must be owned by the effective user, have no group or
+other write permission, carry no non-trivial access control list of any type
+the host reports, and be empty.
+A parent whose new directories fail the check, such as one with an
+inheritable ACL entry, or whose writers put another directory under the new
+name before the reopen, fails the call with FSIMG_EINVAL and a message
+naming what the parent does to new directories.
+A refused directory is removed again while the name still holds the
+directory the library opened, owned by the effective user and empty;
+otherwise, unless the name now holds another object or nothing, the error's
+path names it.
+An extraction whose destination cannot be created or is refused leaves the
+reader untouched.
+In capability mode the parent descriptor needs the rights these queries
+take, such as reading ACLs and removing directories, besides creating
+them.
+The check reads the directory through one transient extra descriptor, which
+counts against max_open_files.
+.Pp
 Logical lengths including holes count against output limits.
 Failure after creation can leave private incomplete output.
 The default restores no host timestamps.

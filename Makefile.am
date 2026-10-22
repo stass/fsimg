@@ -85,7 +85,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx4/directory.c lib/formats/qnx4/read.c \
 	lib/formats/qnx4/verify.c lib/formats/qnx4/write-qnx4.h \
 	lib/formats/qnx4/write-plan.c lib/formats/qnx4/write-emit.c \
-	compat/host.c compat/host.h
+	compat/host.c compat/host.h compat/private.c compat/private.h
 # The system zlib is the core's one third-party library; never vendored.
 libfsimg_core_la_LIBADD = $(ZLIB_LIBS)
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
@@ -94,8 +94,7 @@ fsimg_SOURCES = cmd/fsimg/main.c cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
 	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/worker-parent.c \
 	cmd/fsimg/worker-child.c cmd/fsimg/worker-output.c \
-	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/private.c \
-	compat/private.h compat/spawn.c
+	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/spawn.c
 fsimg_LDADD = libfsimg-core.la
 noinst_PROGRAMS = example-create-tree example-provider example-read-slice example-extract
 noinst_PROGRAMS += fsimg-rss fsimg-rss-guard
@@ -114,7 +113,7 @@ example_read_slice_SOURCES = examples/read-slice.c examples/example.h
 example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
-test_programs = test-core test-io test-meta test-meta-sort test-unicode test-format \
+test_programs = test-core test-private test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-cli \
@@ -134,9 +133,13 @@ test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
-	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h \
-	compat/private.c compat/private.h
+	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h
 test_cli_LDADD = libfsimg-core.la
+# The private-directory routine alone, its mkdirat hooked by the test; its
+# own flags keep its compat objects apart from the library's.
+test_private_SOURCES = test/private.c test/private-seam.c test/test.h \
+	compat/host.c compat/host.h compat/private.h
+test_private_CPPFLAGS = $(AM_CPPFLAGS)
 test_qualify_SOURCES = test/qualify.c test/test.h
 test_qualify_LDADD = libfsimg.la
 test_fragment_SOURCES = test/fragment.c test/test.h

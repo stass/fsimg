@@ -5,9 +5,15 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#if defined(__linux__)
+#include <sys/xattr.h>
+#endif
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +26,8 @@
 #include "test.h"
 
 #define FILE_BYTES 70001u
+
+extern char **environ;
 
 typedef struct extract_fixture {
 	fsimg_ctx_t	*ctx;
@@ -50,6 +58,8 @@ static fsimg_status_t posix_replay(fsimg_reader_t *, const char *,
 static void present_posix_kinds(extract_fixture_t *);
 static void test_unsupported_kinds(void);
 static void test_link_content(void);
+static bool inheritable_acl(int, const char *);
+static void test_inherited_acl(void);
 
 /* The FAT driver's operations, and a copy whose replay reports two of the
  * fixture's files as kinds FAT cannot store, so the extractor's handling of
@@ -581,6 +591,121 @@ test_pivot(void)
 	fixture_close(&fixture);
 }
 
+#if defined(__linux__)
+/* Linux stores a default ACL as a system.posix_acl_default attribute: a
+ * little-endian version 2 header, then entries sorted by tag of a 16-bit
+ * tag, 16-bit permissions and 32-bit id. This one admits user 65534.
+ */
+static bool
+inheritable_acl(int parent, const char *path FSIMG_UNUSED)
+{
+	static const unsigned char acl[] = {
+	    2, 0, 0, 0,
+	    0x01, 0, 7, 0, 0xff, 0xff, 0xff, 0xff,	/* owner rwx */
+	    0x02, 0, 5, 0, 0xfe, 0xff, 0, 0,		/* user 65534 r-x */
+	    0x04, 0, 5, 0, 0xff, 0xff, 0xff, 0xff,	/* group r-x */
+	    0x10, 0, 5, 0, 0xff, 0xff, 0xff, 0xff,	/* mask r-x */
+	    0x20, 0, 0, 0, 0xff, 0xff, 0xff, 0xff	/* other --- */
+	};
+
+	return (fsetxattr(parent, "system.posix_acl_default", acl, sizeof(acl),
+	    0) == 0);
+}
+#else
+/* Whether a host tool gave the directory at path an entry admitting user
+ * nobody that new directories inherit: chmod +a on macOS, setfacl with an
+ * NFSv4 or a POSIX.1e default entry on FreeBSD.
+ */
+static bool
+inheritable_acl(int parent FSIMG_UNUSED, const char *path)
+{
+	const char *const commands[][6] = {
+	    { "chmod", "+a", "user:nobody allow list,search,directory_inherit",
+	      path, NULL },
+	    { "setfacl", "-m", "u:nobody:rx:fd:allow", path, NULL },
+	    { "setfacl", "-d", "-m", "u::rwx,g::rx,o::,m::rx,u:nobody:rx", path,
+	      NULL }
+	};
+	posix_spawn_file_actions_t actions;
+	pid_t pid;
+	int status;
+
+	CHECK(posix_spawn_file_actions_init(&actions) == 0);
+	CHECK(posix_spawn_file_actions_addopen(&actions, 2, "/dev/null",
+	    O_WRONLY, 0) == 0);
+	for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+		if (posix_spawnp(&pid, commands[i][0], &actions, NULL,
+		    (char *const *)commands[i], environ) != 0)
+			continue;
+		CHECK(waitpid(pid, &status, 0) == pid);
+		if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+			CHECK(posix_spawn_file_actions_destroy(&actions) == 0);
+			return (true);
+		}
+	}
+	CHECK(posix_spawn_file_actions_destroy(&actions) == 0);
+	return (false);
+}
+#endif
+
+/* A parent whose inheritable ACL admits another user gives every new
+ * directory that entry, so neither a fresh extraction destination nor the
+ * private staging of a created image may be made in it: each is refused,
+ * nothing is left beneath the parent, and the reader and writer are not
+ * consumed.
+ */
+static void
+test_inherited_acl(void)
+{
+	extract_fixture_t fixture;
+	fsimg_writer_t *writer;
+	fsimg_error_t error;
+	char path[96];
+	struct stat st;
+	DIR *listing;
+	struct dirent *entry;
+	int parent;
+
+	fixture_open(&fixture);
+	CHECK(mkdirat(fixture.parent, "inheriting", 0700) == 0);
+	parent = openat(fixture.parent, "inheriting",
+	    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	CHECK(parent != -1);
+	snprintf(path, sizeof(path), "%s/inheriting", fixture.path);
+	if (!inheritable_acl(parent, path)) {
+		puts("SKIP: inherited ACL refusal (the host or filesystem refuses ACLs)");
+		CHECK(close(parent) == 0);
+		CHECK(unlinkat(fixture.parent, "inheriting", AT_REMOVEDIR) == 0);
+		fixture_close(&fixture);
+		return;
+	}
+	CHECK(fsimg_extract_at(fixture.reader, parent, "output", NULL, &error) ==
+	    FSIMG_EINVAL);
+	CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+	CHECK(strstr(error.message, "access control list") != NULL);
+	CHECK(fstatat(parent, "output", &st, AT_SYMLINK_NOFOLLOW) == -1 &&
+	    errno == ENOENT);
+
+	CHECK(fsimg_writer_new(fixture.ctx, "fat16", NULL, &writer, NULL) == FSIMG_OK);
+	add_entry(writer, "/file", FSIMG_ENTRY_FILE, 3);
+	CHECK(fsimg_writer_write_at(writer, parent, "image", &error) == FSIMG_EINVAL);
+	CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+	CHECK(strstr(error.message, "access control list") != NULL);
+	fsimg_writer_free(writer);
+
+	listing = fdopendir(parent);
+	CHECK(listing != NULL);
+	while ((entry = readdir(listing)) != NULL)
+		CHECK(strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0);
+	CHECK(closedir(listing) == 0);
+	CHECK(unlinkat(fixture.parent, "inheriting", AT_REMOVEDIR) == 0);
+	/* The refused reader is still untouched: extraction elsewhere works. */
+	CHECK(fsimg_extract_at(fixture.reader, fixture.parent, "output", NULL,
+	    NULL) == FSIMG_OK);
+	remove_tree(fixture.parent, "output");
+	fixture_close(&fixture);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -608,5 +733,6 @@ main(int argc, char **argv)
 	test_pivot();
 	test_unsupported_kinds();
 	test_link_content();
+	test_inherited_acl();
 	return (0);
 }

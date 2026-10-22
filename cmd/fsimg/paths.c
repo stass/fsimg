@@ -59,8 +59,8 @@ static fsimg_status_t kind_error(fsimg_error_t *, int, const char *,
 static fsimg_status_t split_output(const char *, char *, char *, fsimg_error_t *);
 static fsimg_status_t private_directory(int, const char *,
     const private_kind_t *, char *, int *, bool *, fsimg_error_t *);
-static fsimg_status_t fresh_private(int, const char *, int *, const char *,
-    const char *, bool *, fsimg_error_t *);
+static fsimg_status_t fresh_refused(fsimg_error_t *, fsimg_host_privacy_t,
+    const char *, const char *);
 static fsimg_status_t reject_ancestor(int, int, const char *, fsimg_error_t *);
 static fsimg_status_t prepare_scratch(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
@@ -87,7 +87,6 @@ static fsimg_status_t prepare_raw(fsimg_cli_options_t *, fsimg_error_t *);
 static fsimg_status_t prepare_spool(fsimg_worker_request_t *, fsimg_error_t *);
 static fsimg_status_t privacy_error(fsimg_error_t *, fsimg_host_privacy_t,
     const char *);
-static bool remove_own_directory(int, const char *, int);
 static void close_held(int *, int *);
 static fsimg_status_t prepare_mtree(fsimg_cli_options_t *, fsimg_cli_paths_t *,
     fsimg_error_t *);
@@ -190,85 +189,61 @@ split_output(const char *path, char *parent, char *name, fsimg_error_t *error)
 
 /*
  * A fresh private directory of kind beneath parent, the directory at
- * parent_path: created with mode 0700, reopened no-follow, then proven
- * private on its descriptor.
+ * parent_path, under an unused random name (fsimg_host_private_mkdir).
  */
 static fsimg_status_t
 private_directory(int parent, const char *parent_path,
     const private_kind_t *kind, char *name, int *out, bool *created,
     fsimg_error_t *error)
 {
+	fsimg_host_privacy_t verdict;
 	uint64_t random[2];
+	char message[128];
+	int saved;
 
 	for (unsigned attempt = 0; attempt < 128; attempt++) {
 		if (fsimg_host_random(random, sizeof(random)) == -1)
 			return (host_error(error, "private directory randomness failed"));
 		snprintf(name, 96, ".fsimg-%s-%016llx%016llx", kind->role,
 		    (unsigned long long)random[0], (unsigned long long)random[1]);
-		if (mkdirat(parent, name, 0700) == 0) {
-			*created = true;
-			*out = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-			if (*out == -1)
-				return (host_error(error, "private directory open failed"));
-			return (fresh_private(parent, name, out, kind->parent_noun,
-			    parent_path, created, error));
+		switch (fsimg_host_private_mkdir(parent, name, out, &verdict,
+		    created)) {
+		case FSIMG_HOST_FRESH_CREATED:
+			return (FSIMG_OK);
+		case FSIMG_HOST_FRESH_TAKEN:
+			continue;
+		case FSIMG_HOST_FRESH_REFUSED:
+			return (fresh_refused(error, verdict, kind->parent_noun,
+			    parent_path));
+		case FSIMG_HOST_FRESH_FAILED:
+			saved = errno;
+			snprintf(message, sizeof(message),
+			    "cannot create a private directory in the %s",
+			    kind->parent_noun);
+			errno = saved;
+			return (path_error(error, message, parent_path));
 		}
-		if (errno != EEXIST)
-			return (host_error(error, "private directory creation failed"));
 	}
 	return (fsimg_error_set(error, FSIMG_EEXISTS, EEXIST,
 	    FSIMG_OP_IO, "private directory name attempts exhausted"));
 }
 
 /*
- * Prove the directory just created as name beneath parent, and opened as
- * *fd, private by the rule an extraction destination passes
- * (specs/design-security.md): no other user can write it. Its mode 0700 and
- * its owner do not prove it: inheritable access control entries of parent
- * can admit another user, a filesystem without POSIX permissions grants
- * write to everyone, and a user who can write parent can put another
- * directory in its place before it is opened. Any of them could then
- * replace what fsimg puts there before it is published. The cause lies in
- * parent, so the error names it, parent_noun at parent_path.
- *
- * A directory that fails the check, or cannot be checked, gives up its
- * descriptor, and with it every cleanup of its contents, since those go
- * through the descriptor: the object it names may be someone else's. It
- * is removed again only when the name still holds the object it opened,
- * owned by this user and empty, which clears *created; a name that now
- * holds another object clears it too, since that object is not fsimg's to
- * report. Otherwise the name remains, reported as retained.
+ * A new directory beneath parent_noun at parent_path that the
+ * private-directory rule refused. The cause lies in that parent, so the
+ * error names it.
  */
 static fsimg_status_t
-fresh_private(int parent, const char *name, int *fd, const char *parent_noun,
-    const char *parent_path, bool *created, fsimg_error_t *error)
+fresh_refused(fsimg_error_t *error, fsimg_host_privacy_t verdict,
+    const char *parent_noun, const char *parent_path)
 {
-	fsimg_host_privacy_t verdict;
 	fsimg_status_t status;
 	char message[128];
-	int saved;
 
-	if (fsimg_host_private_directory(*fd, &verdict) == -1) {
-		saved = errno;
-		snprintf(message, sizeof(message),
-		    "cannot inspect a new directory in the %s", parent_noun);
-		errno = saved;
-		status = path_error(error, message, parent_path);
-	} else if (verdict == FSIMG_HOST_PRIVATE) {
-		return (FSIMG_OK);
-	} else {
-		snprintf(message, sizeof(message),
-		    verdict == FSIMG_HOST_EXTENDED_ACL ?
-		    "%s gives new directories a non-trivial access control list" :
-		    "%s lets another user into new directories", parent_noun);
-		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
-		    message);
-		fsimg_error_path(error, parent_path);
-	}
-	if (remove_own_directory(parent, name, *fd) || errno == EEXIST)
-		*created = false;
-	close(*fd);
-	*fd = -1;
+	snprintf(message, sizeof(message), "%s %s", parent_noun,
+	    fsimg_host_fresh_refusal(verdict));
+	status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO, message);
+	fsimg_error_path(error, parent_path);
 	return (status);
 }
 
@@ -986,32 +961,6 @@ privacy_error(fsimg_error_t *error, fsimg_host_privacy_t verdict,
 	return (status);
 }
 
-/* Remove the directory fsimg created under name when it is still that
- * object, which the opened descriptor identifies, still owned by this user,
- * so a directory someone else substituted for it is never removed, and
- * empty, which rmdir itself requires. Anything else stays, with errno
- * saying why: EEXIST when the name holds another object, which FreeBSD,
- * Linux and macOS never report for a directory that is merely not empty.
- * A writer of a parent without the sticky bit can still put another empty
- * directory under the name between the check and the removal; it gains
- * nothing it could not do itself.
- */
-static bool
-remove_own_directory(int parent, const char *name, int fd)
-{
-	struct stat opened, named;
-
-	if (fstat(fd, &opened) == -1 ||
-	    fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == -1)
-		return (false);
-	if (opened.st_dev != named.st_dev || opened.st_ino != named.st_ino ||
-	    opened.st_uid != geteuid()) {
-		errno = EEXIST;
-		return (false);
-	}
-	return (unlinkat(parent, name, AT_REMOVEDIR) == 0);
-}
-
 /*
  * The manifest of x --mtree, staged like a created image. The file
  * "manifest" is created exclusively with mode 0600 in the private
@@ -1051,7 +1000,7 @@ recheck_mtree(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 
 	status = final_name_free(&paths->manifest, error);
 	if (status != FSIMG_OK && !options->extract_here &&
-	    remove_own_directory(paths->destination_parent, options->stem,
+	    fsimg_host_remove_directory(paths->destination_parent, options->stem,
 	    options->request.output_fd)) {
 		paths->extraction_prepared = false;
 		paths->retained_destination[0] = '\0';
@@ -1061,11 +1010,11 @@ recheck_mtree(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 
 /*
  * The extraction destination, proven private before the worker starts.
- * By default it is a fresh directory named after the image stem: one
- * mkdirat with mode 0700 beneath the opened -C directory, so an existing
- * name of any kind fails, then a no-follow reopen. With -E it is the -C
- * directory itself, opened no-follow. Either way the opened descriptor
- * alone must pass the privacy rule, and the worker receives only it.
+ * By default it is a fresh private directory named after the image stem
+ * beneath the opened -C directory (fsimg_host_private_mkdir), so an
+ * existing name of any kind fails. With -E it is the -C directory itself,
+ * opened no-follow. Either way the opened descriptor alone must pass the
+ * privacy rule, and the worker receives only it.
  */
 static fsimg_status_t
 prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
@@ -1102,22 +1051,19 @@ prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	if (count < 0 || (size_t)count >= sizeof(paths->retained_destination))
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 		    FSIMG_OP_IO, "extraction pathname exceeds host path bound"));
-	if (mkdirat(paths->destination_parent, options->stem, 0700) == -1) {
+	/* A fresh destination is prepared exactly while it exists. */
+	switch (fsimg_host_private_mkdir(paths->destination_parent, options->stem,
+	    &request->output_fd, &verdict, &paths->extraction_prepared)) {
+	case FSIMG_HOST_FRESH_CREATED:
+		return (FSIMG_OK);
+	case FSIMG_HOST_FRESH_REFUSED:
+		status = fresh_refused(error, verdict, "-C directory", parent_path);
+		break;
+	default:
 		status = path_error(error, "cannot create extraction directory",
 		    paths->retained_destination);
-		paths->retained_destination[0] = '\0';
-		return (status);
+		break;
 	}
-	paths->extraction_prepared = true;
-	request->output_fd = openat(paths->destination_parent, options->stem,
-	    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-	if (request->output_fd == -1)
-		return (path_error(error, "cannot open extraction directory",
-		    paths->retained_destination));
-	/* A fresh destination is prepared exactly while it exists. */
-	status = fresh_private(paths->destination_parent, options->stem,
-	    &request->output_fd, "-C directory", parent_path,
-	    &paths->extraction_prepared, error);
 	if (!paths->extraction_prepared)
 		paths->retained_destination[0] = '\0';
 	return (status);
@@ -1343,7 +1289,7 @@ clean_staged(fsimg_cli_staged_t *staged, bool success)
 		if (unlinkat(staged->directory, staged->kind->file, 0) == -1 &&
 		    errno != ENOENT)
 			failure = errno;
-		if (remove_own_directory(staged->parent, staged->directory_name,
+		if (fsimg_host_remove_directory(staged->parent, staged->directory_name,
 		    staged->directory))
 			staged->retained[0] = '\0';
 		else if (failure == 0)
@@ -1446,7 +1392,7 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	 */
 	if (paths->scratch_created && request->scratch_fd != -1) {
 		failure = clean_scratch(request->scratch_fd);
-		if (failure == 0 && !remove_own_directory(paths->scratch_parent,
+		if (failure == 0 && !fsimg_host_remove_directory(paths->scratch_parent,
 		    paths->scratch_name, request->scratch_fd))
 			failure = errno;
 		if (failure == 0)

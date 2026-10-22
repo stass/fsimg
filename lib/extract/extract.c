@@ -68,6 +68,7 @@ static fsimg_status_t record_entry(extract_state_t *, const fsimg_entry_t *,
 static fsimg_status_t record_skipped(extract_state_t *, const fsimg_entry_t *,
     fsimg_error_t *);
 static fsimg_status_t extract_entries(extract_state_t *, fsimg_error_t *);
+static void report_destination(fsimg_error_t *, const char *);
 
 void
 fsimg_extract_options_init(fsimg_extract_options_t *options)
@@ -719,6 +720,7 @@ fsimg_extract_at(fsimg_reader_t *reader, int parent, const char *name,
 	fsimg_ctx_t *ctx;
 	fsimg_status_t status;
 	int root, result, saved;
+	bool created;
 
 	status = extract_options(reader, options, &selected, error);
 	if (status != FSIMG_OK)
@@ -728,22 +730,13 @@ fsimg_extract_at(fsimg_reader_t *reader, int parent, const char *name,
 	    strcmp(name, "..") == 0 || strchr(name, '/') != NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_EXTRACT, "destination requires one basename"));
-	status = fsimg_fd_reserve(ctx, error);
-	if (status != FSIMG_OK)
+	status = fsimg_private_mkdir(ctx, parent, name, FSIMG_OP_EXTRACT, &root,
+	    &created, error);
+	if (status != FSIMG_OK) {
+		/* Extraction has not begun, so the reader stays untouched. */
+		if (created)
+			report_destination(error, name);
 		return (status);
-	if (mkdirat(parent, name, 0700) == -1) {
-		saved = errno;
-		fsimg_fd_release(ctx, -1);
-		return (fsimg_error_set(error, saved == EEXIST ? FSIMG_EEXISTS : FSIMG_EIO,
-		    saved, FSIMG_OP_EXTRACT, "fresh extraction destination creation failed"));
-	}
-	root = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-	if (root == -1) {
-		saved = errno;
-		fsimg_fd_release(ctx, -1);
-		status = fsimg_error_set(error, FSIMG_EIO, saved,
-		    FSIMG_OP_EXTRACT, "fresh extraction destination open failed");
-		goto incomplete;
 	}
 	status = fsimg_extract_into(reader, root, &selected, NULL, error);
 	if (status == FSIMG_OK && fsync(root) == -1)
@@ -757,12 +750,18 @@ fsimg_extract_at(fsimg_reader_t *reader, int parent, const char *name,
 		    FSIMG_OP_EXTRACT, "extraction root close failed");
 	if (status == FSIMG_OK)
 		return (FSIMG_OK);
-incomplete:
 	fsimg_reader_abort(reader, status);
+	report_destination(error, name);
+	return (status);
+}
+
+/* The destination name a failed extraction leaves behind, incomplete. */
+static void
+report_destination(fsimg_error_t *error, const char *name)
+{
 	if (error != NULL) {
 		error->output_state = FSIMG_OUTPUT_INCOMPLETE;
 		snprintf(error->path, sizeof(error->path), "%s", name);
 		error->path_truncated = strlen(name) >= sizeof(error->path);
 	}
-	return (status);
 }

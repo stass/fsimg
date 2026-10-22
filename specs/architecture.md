@@ -71,6 +71,14 @@ The [principles](principles.md) govern tradeoffs. In particular:
   [security specification](design-security.md#safe-extraction). Merging
   into a populated tree, overwriting files, and restoring privileged metadata
   are outside the extraction contract.
+* Every directory fsimg creates to write into, CLI or library alike, comes
+  from one libfsimg routine that creates it with mode 0700, reopens it
+  no-follow and proves it private on that descriptor by the rule the
+  [security specification](design-security.md#safe-extraction) states.
+  Output staging, extraction destinations and CLI scratch therefore share
+  one check, and no library or CLI entry point creates such a directory
+  without it. The extractor's own directories are created beneath a root
+  that passed the check, which their privacy follows from.
 * A writer consumes known-length, repeatable sources. It freezes its catalog
   before planning and emits one image. Removing mutation and retry states
   makes failure and source ownership easier to reason about.

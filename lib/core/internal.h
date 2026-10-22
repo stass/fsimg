@@ -94,6 +94,16 @@ void *fsimg_alloc(fsimg_ctx_t *, size_t, fsimg_error_t *);
 void fsimg_dealloc(void *);
 fsimg_status_t fsimg_fd_reserve(fsimg_ctx_t *, fsimg_error_t *);
 void fsimg_fd_release(fsimg_ctx_t *, int);
+/*
+ * Create name beneath parent as a fresh private directory, opened in *out
+ * and counted against the descriptor limit; compat/private.h states the
+ * rule. A taken name is FSIMG_EEXISTS, a directory the rule refuses is
+ * FSIMG_EINVAL naming what the parent does to new directories, and a failed
+ * host call is FSIMG_EIO. *created says whether a directory the library made
+ * remains under name for the caller to remove or report.
+ */
+fsimg_status_t fsimg_private_mkdir(fsimg_ctx_t *, int, const char *,
+    fsimg_operation_t, int *, bool *, fsimg_error_t *);
 /* Internal files reserve a slot before open. Adoption consumes both the FD
  * and that reservation on every outcome, avoiding duplication in a worker.
  */

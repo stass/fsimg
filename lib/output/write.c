@@ -23,15 +23,15 @@ static fsimg_status_t finish_staging(fsimg_ctx_t *, int, const char *, int,
 static fsimg_status_t emit_writer(void *, fsimg_io_t *, uint64_t *,
     fsimg_error_t *);
 
+/* A fresh private staging directory beside the final name, under the next
+ * unused name of this process's sequence.
+ */
 static fsimg_status_t
 create_staging(fsimg_ctx_t *ctx, int parent, char *name, size_t capacity,
     int *out, bool *created, fsimg_error_t *error)
 {
 	fsimg_status_t status;
-	int fd, saved;
 
-	*out = -1;
-	*created = false;
 	for (unsigned attempt = 0; attempt < 128; attempt++) {
 		status = fsimg_poll(ctx, NULL, error);
 		if (status != FSIMG_OK)
@@ -42,26 +42,13 @@ create_staging(fsimg_ctx_t *ctx, int parent, char *name, size_t capacity,
 		ctx->scratch_sequence++;
 		snprintf(name, capacity, ".fsimg-output-%ld-%llu", (long)getpid(),
 		    (unsigned long long)ctx->scratch_sequence);
-		if (mkdirat(parent, name, 0700) == 0) {
-			*created = true;
-			break;
-		}
-		if (errno != EEXIST || attempt == 127)
-			return (fsimg_error_set(error, FSIMG_EIO, errno,
-			    FSIMG_OP_PUBLISH, "private output directory creation failed"));
+		status = fsimg_private_mkdir(ctx, parent, name, FSIMG_OP_PUBLISH,
+		    out, created, error);
+		if (status != FSIMG_EEXISTS)
+			return (status);
 	}
-	status = fsimg_fd_reserve(ctx, error);
-	if (status != FSIMG_OK)
-		return (status);
-	fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-	if (fd == -1) {
-		saved = errno;
-		fsimg_fd_release(ctx, -1);
-		return (fsimg_error_set(error, FSIMG_EIO, saved,
-		    FSIMG_OP_PUBLISH, "private output directory open failed"));
-	}
-	*out = fd;
-	return (FSIMG_OK);
+	return (fsimg_error_set(error, FSIMG_EIO, EEXIST, FSIMG_OP_PUBLISH,
+	    "private output directory names exhausted"));
 }
 
 /* Preserve the primary publication result. Cleanup can add a retained

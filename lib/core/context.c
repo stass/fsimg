@@ -15,6 +15,7 @@
 
 #include "host.h"
 #include "internal.h"
+#include "private.h"
 
 /* The union preserves malloc alignment; its full size is budgeted. */
 typedef union fsimg_allocation {
@@ -433,6 +434,49 @@ fsimg_fd_release(fsimg_ctx_t *ctx, int fd)
 	if (fd != -1)
 		close(fd);
 	ctx->stats.descriptors--;
+}
+
+fsimg_status_t
+fsimg_private_mkdir(fsimg_ctx_t *ctx, int parent, const char *name,
+    fsimg_operation_t operation, int *out, bool *created, fsimg_error_t *error)
+{
+	fsimg_host_privacy_t verdict;
+	fsimg_host_fresh_t outcome;
+	fsimg_status_t status;
+	char message[96];
+	int saved;
+
+	*out = -1;
+	*created = false;
+	/* The directory, and the transient second descriptor the check reads
+	 * it through.
+	 */
+	status = fsimg_fd_reserve(ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_fd_reserve(ctx, error);
+	if (status != FSIMG_OK) {
+		fsimg_fd_release(ctx, -1);
+		return (status);
+	}
+	outcome = fsimg_host_private_mkdir(parent, name, out, &verdict, created);
+	saved = errno;
+	fsimg_fd_release(ctx, -1);
+	if (outcome == FSIMG_HOST_FRESH_CREATED)
+		return (FSIMG_OK);
+	fsimg_fd_release(ctx, -1);
+	switch (outcome) {
+	case FSIMG_HOST_FRESH_TAKEN:
+		return (fsimg_error_set(error, FSIMG_EEXISTS, saved, operation,
+		    "directory name already exists"));
+	case FSIMG_HOST_FRESH_REFUSED:
+		snprintf(message, sizeof(message), "parent directory %s",
+		    fsimg_host_fresh_refusal(verdict));
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, operation, message));
+	default:
+		return (fsimg_error_set(error, FSIMG_EIO, saved, operation,
+		    "private directory creation failed"));
+	}
 }
 
 fsimg_status_t
