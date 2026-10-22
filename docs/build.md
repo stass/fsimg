@@ -1425,8 +1425,9 @@ truncated, grown or rewritten between plan and output; a staged volume
 or a verified input whose checksum a fault flips; an input that changes
 between the two passes; the emission check's fault; allocation-failure,
 short-transfer and read-failure sweeps; and digests pinned for every host.
-Machine 3 and the x86 prefix run under the private control that lets the
-plan accept every mode its tables describe.
+The machine table lists machine 3 under `none` only, so the x86 prefix
+under `lzo`, the one mode it does not list, runs under the private
+control that lets the plan accept every mode its tables describe.
 
 ```sh
 FSIMG_IFS_NATIVE=/path/to/captures-ifs FSIMG_IFS_IMAGES=/path/to/images \
@@ -1437,11 +1438,27 @@ FSIMG_IFS_NATIVE=/path/to/captures-ifs FSIMG_IFS_IMAGES=/path/to/images \
 sections of each native boot image, checking each against the byte range
 the header names, and rebuilds the image from them and the values `i`
 reports: the E7 images, machine 0, rebuild under `lzo` identical outside
-the body-dependent fields with an identical disk; E12's uncompressed
-`cAu.ifs`, read from slot 0 of `e12-links/e12-au.img.gz` and rebuilt under
-the machine-3 control, byte for byte; and every H3 and X1 image under
-`FSIMG_IFS_IMAGES` is refused naming its machine. It exits 77 without
-`FSIMG_IFS_NATIVE`.
+the body-dependent fields with an identical disk; the uncompressed x86
+images, E12's `cAu.ifs`, read from slot 0 of `e12-links/e12-au.img.gz`,
+and the x86 boot gate's `e14-gate/gu.ifs`, machine 3, byte for byte; the
+gate's `e14-gate/gl.ifs`, `mkifs`'s LZO x86 image, refused under `lzo`
+naming its machine; and every H3 and X1 image under `FSIMG_IFS_IMAGES` is
+refused naming its machine. It exits 77 without `FSIMG_IFS_NATIVE`.
+
+```sh
+./test-ifsboot-write --rebuild IN OUT none|lzo
+```
+
+`--rebuild` is the native boot gates' test hook, not an interface: it
+unwraps the boot image `IN` the same way, wraps its disk again under the
+named mode with its own sections and the header values `i` reports, checks
+every byte of the result with the test's independent checker, and writes
+it to `OUT`, which must not exist, printing whether it is identical to
+`IN`. It runs under the private control that lets a mode the machine table
+does not list be written, so that a boot trial can decide the table; such
+an image qualifies nothing until it boots. The x86 gate
+([research record](ifs-research.md#x86-boot-gate-e14), E14) boots its
+output with `tools/qnx/vm/bootifs.sh`.
 
 `make check-integration` runs `test/ifs-integration.sh`, which skips what
 is absent:

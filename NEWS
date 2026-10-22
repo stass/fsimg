@@ -13,7 +13,9 @@ ImageFS raw (`ifsboot:compress=none`) or in 64 KiB LZO1X chunks
 derived; the encoder checks the ImageFS's own checksum as it copies, and
 the reader's header decode runs on every header before it is written.
 Only the modes a native boot has passed for a machine are written: machine
-0 (nonbootable) under either mode; machines 3 and 42 are refused naming the
+0 (nonbootable) under either mode; machine 3 (x86) under `none`, whose
+images boot in QEMU, but not under `lzo`, since QNX 6.5.0's `startup-bios`
+rejects an LZO1X body; machine 42 (SH-4) under neither. A refusal names the
 machine and the mode. `fsimg_image_unwrap()` takes a container section
 (`FSIMG_SELECT_SECTION`, `prefix` or `startup`), which with the values
 `i` reports, among them the new `flags2` and `tail_nonzero` details, is
@@ -161,7 +163,7 @@ dependency, found by configure and never vendored. A range given with
 `--offset` addresses the container's disk, so the worker, not the
 coordinator, checks it.
 
-Reading accepts QNX boot images. The read-only `ifsboot` container is
+Reading accepts QNX boot images. The `ifsboot` container is
 detected from a startup header at offset 0 or behind the 1088-byte x86
 BIOS loader, tied to its offset by `preboot_size`, and yields the ImageFS
 it carries: a raw body as a slice, an LZO1X or NRV2B (UCL) body through a

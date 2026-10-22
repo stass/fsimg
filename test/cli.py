@@ -2255,10 +2255,11 @@ def word_sum(data):
 def test_ifsboot_create(executable, root):
     """A boot image through the command: the startup file reaches the worker
     as a descriptor of its own and follows the header with its padding, the
-    sums are zero, and the image lists, verifies and is reproducible. A file
-    setting that is a symbolic link, a directory or missing, a machine the
-    table does not list as writable, and a prefix without its machine are
-    refused with no output left; a read mode refuses the key."""
+    sums are zero, and the image lists, verifies and is reproducible; machine
+    3 behind the BIOS loader's prefix is written raw. A file setting that is
+    a symbolic link, a directory or missing, a machine and mode the table
+    does not list as writable, and a prefix without its machine are refused
+    with no output left; a read mode refuses the key."""
     startup = bytes(random.Random(5).randrange(256) for _ in range(4001))
     (root / "startup.bin").write_bytes(startup)
     (root / "prefix.bin").write_bytes(b"\xfa" + bytes(1084))
@@ -2307,6 +2308,25 @@ def test_ifsboot_create(executable, root):
     unwritable = [arg.replace("machine=0", "machine=42") for arg in plain]
     result = invoke(executable, root, [*unwritable, "-f", "refused.ifs", *operands], expected=1)
     assert b"machine 42 is not writable under compress=lzo" in result.stderr, result.stderr
+    assert not (root / "refused.ifs").exists()
+    # Machine 3 behind the BIOS loader is written raw, the one mode an x86
+    # boot has passed, and refused under the default lzo.
+    x86_files = ["-o", "ifsboot:prefix=prefix.bin", "-o", "ifsboot:startup=startup.bin"]
+    json_x86 = [*[arg.replace("machine=0", "machine=3") for arg in base], *x86_files]
+    x86 = [*[arg.replace("machine=0", "machine=3") for arg in plain], *x86_files]
+    completed(invoke(executable, root, [*json_x86, "-o", "ifsboot:compress=none", "-f",
+                                        "x86.ifs", *operands]))
+    image = (root / "x86.ifs").read_bytes()
+    header = boot_header(image[1088:])
+    assert image[:1088] == b"\xfa" + bytes(1087), image[:16]
+    assert header["machine"] == 3 and header["flags1"] == 0x00 and header["preboot_size"] == 1088
+    assert header["ram_size"] == header["stored_size"] == len(image) - 1088, header
+    assert word_sum(image[1088:1088 + header["startup_size"]]) == 0
+    assert word_sum(image[1088:]) == 0
+    assert b"ifsboot container," in invoke(executable, root, ["W", "-d", "-f", "x86.ifs"]).stdout
+    (root / "x86.ifs").unlink()
+    result = invoke(executable, root, [*x86, "-f", "refused.ifs", *operands], expected=1)
+    assert b"machine 3 is not writable under compress=lzo" in result.stderr, result.stderr
     assert not (root / "refused.ifs").exists()
     result = invoke(executable, root, ["t", "-f", "startup.bin", "-F", "ifs/ifsboot", "-o",
                                        "ifsboot:startup=startup.bin"], expected=2)

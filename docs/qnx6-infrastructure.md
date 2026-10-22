@@ -160,6 +160,23 @@ tools/qnx/decode/ifsqual.py compare /tmp/cases \
 
 `pack` prints the index length the guest script takes.
 
+An x86 QNX boot image boots outside the guest VM, through the live CD's
+El Torito floppy (the boot catalog's 2.88 MB image at ISO LBA 31,
+extracted once):
+
+```sh
+tools/qnx/vm/bootifs.sh eltorito.img IMAGE.ifs serial.txt MARKER
+```
+
+writes the image over the floppy's own boot image in a temporary copy,
+boots it in a headless `qemu-system-i386 -accel tcg`, with COM1 to
+`serial.txt`, and prints `BOOT PASS` once the boot script's
+`display_msg MARKER` line appears within 120 seconds, `BOOT FAIL`
+otherwise. `tools/qnx/decode/ifscorrupt.py` writes a boot gate's negative
+controls: a flipped signature byte, a startup checksum word plus one, or a
+flipped body byte. The [IFS research record](ifs-research.md#x86-boot-gate-e14)
+uses both for the x86 boot gate.
+
 Host-side edits between two guest steps, such as the torn-header experiment,
 are recorded byte for byte in the capture's `.txt` file.
 

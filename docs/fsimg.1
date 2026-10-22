@@ -840,8 +840,12 @@ each is padded with zeros to a multiple of 4 bytes, and fsimg derives every
 size and both checksums.
 A machine is written only under the modes a native boot of a written
 image has passed: this version writes machine 0, the nonbootable output of
-QNX's mkifs, under either mode, and refuses machines 3 (x86) and 42 (SH-4)
-naming the machine and the mode.
+QNX's mkifs, under either mode, and machine 3 (x86) under
+.Cm none
+only, since QNX 6.5.0's x86 startup does not decode an LZO1X body; it
+refuses machine 3 under
+.Cm lzo
+and machine 42 (SH-4) under either mode, naming the machine and the mode.
 The settings without a default are required, since a guessed address boots
 nothing; each value is stored verbatim and checked only against its table,
 and a big-endian ImageFS is refused.

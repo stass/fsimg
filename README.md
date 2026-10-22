@@ -172,7 +172,9 @@ settings, startup code and an optional boot prefix copied from files
 (`-o ifsboot:startup=`, `-o ifsboot:prefix=`), and the ImageFS raw or in
 LZO1X chunks. A machine is written only under the modes a native boot of
 a written image has passed, so this version writes machine 0, `mkifs`'s
-nonbootable output, and refuses the x86 and SH-4 machines.
+nonbootable output, under either mode, the x86 machine raw only (QNX
+6.5.0's x86 startup does not decode LZO1X bodies), and refuses the SH-4
+machine.
 The ImageFS writer creates nonbootable images in either byte order
 with a mountpoint setting (default `/`): the root and a record for every
 directory, then files, symbolic links and FIFOs with owner, mode and

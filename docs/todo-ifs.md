@@ -3,29 +3,37 @@
 Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
 [research record](ifs-research.md) owns the evidence and provenance.
 
-* [Medium] **E8 and the remaining E12 boots** (`tools/qnx/guest/popifs.sh`,
+* [Medium] **The rest of E8 and the remaining E12 boots**
+  (`tools/qnx/guest/popifs.sh`, `tools/qnx/vm/bootifs.sh`,
   `docs/ifs-research.md`), each run with the [E12 boot
-  method](ifs-research.md#paths-below-a-link-at-boot-e12): LZO bodies and an
-  image without the BIOS prefix; whether two `mkifs` builds of one startup
+  method](ifs-research.md#paths-below-a-link-at-boot-e12): an image
+  without the BIOS prefix; whether two `mkifs` builds of one startup
   program at two image sizes differ only in the derived header fields and
   the checksum word, as S1 shows for SH-4, so that a rebuild from the
   unwrapped program and settings reproduces an x86 startup section; whether
   processed members' bytes depend on their image offset (if so, the
-  writer's scope returns to the owner); raw members; the native
-  uncompressed layout the `ifsboot` profile assumes for compression `0x00`
-  (`stored_size = startup_size + imagefs_size`, no stored trailer), which
-  E12's `cAu` already shows boots; the inode-flag nibble the writer's boot
-  settings give referenced records, whose closed table is empty until then,
-  so every `boot1=` to `boot4=` and `script=` setting is refused and the
-  boot-image writer's native gates use a native bootable body; and how
-  `procnto` resolves a duplicated path (owner decision 10). They answer
-  owner decision 6 and gate the x86 row's writable modes. If E8
-  shows that `startup-bios` rejects LZO bodies, a compressed x86 image
-  needs an NRV2B encoder: one more codec in the codec design and a write
-  entry in the profile's compression table, the framing unchanged.
+  writer's scope returns to the owner); raw members; the inode-flag nibble
+  the writer's boot settings give referenced records, whose closed table is
+  empty until then, so every `boot1=` to `boot4=` and `script=` setting is
+  refused and the boot-image writer's native gates use a native bootable
+  body; and how `procnto` resolves a duplicated path (owner decision 10).
+  They answer owner decision 6. Once the ImageFS writer has boot settings,
+  the x86 gate's variant that adds a file to the tree and reads it back
+  from the shell runs too ([E14](ifs-research.md#x86-boot-gate-e14)).
   * [Low] Boot a body whose shadowed record carries `boot_ino[0]`'s word,
     to learn whether the startup finds boot programs by path or by
     scanning the table, which `shadowed_references` only counts.
+* [Medium] **An NRV2B encoder for compressed x86 boot images**
+  (`lib/codec/`, `lib/layers/ifsboot.c`; owner decision 3): E14 shows that
+  6.5.0's `startup-bios` decodes UCL NRV2B bodies and rejects LZO ones,
+  `mkifs`'s own included, so machine 3 is writable under `none` only and
+  an x86 image the writer packages is as large as its ImageFS. A
+  compressed x86 image needs an NRV2B encoder: one more codec in the codec
+  design under the plan's clean-room split, a write entry for compression
+  `0x0c` in the profile's compression table with the framing unchanged,
+  and its own boot under the x86 gate before the machine table lists it.
+  Owner decision 3 puts only LZO1X encoding in scope, so the owner decides
+  whether to schedule it.
 * [Medium] **`dumpifs -u` copies of the H3 boot images**
   (`docs/ifs-research.md`): the eight images exceed `load.py`'s 3 MiB
   budget. Write them into `big.img` while the VM is stopped, run

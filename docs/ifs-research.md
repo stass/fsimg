@@ -115,6 +115,7 @@ Captures are in `~/qnx65-vm/captures-ifs/` (`FSIMG_IFS_NATIVE`), made with
 | `ifs-e3-extract` | `dumpifs -x` of the odd-path and duplicate images |
 | `ifs-s2-qnxbase-u`, `-u2` | `dumpifs -u` of X1 `qnxbase.ifs` against the oracle |
 | `e12-links` | E12 boot of records below a symbolic link: buildfiles, scripts, captures and serial transcripts; E13 reads `cAr.ifs` from it |
+| `e14-gate` | E14 x86 boot gate: buildfiles, scripts, the `e14-native-n` capture, the native and rebuilt images, the negative controls and serial transcripts |
 | `ifs-tools`, `ifs-tools-mkxfs` | Tool binaries for the identities above |
 
 ## Observations
@@ -344,6 +345,98 @@ Where the three parts of an x86 boot image come from, read off the guest's
 * **Not reproduced:** where H3's six nonzero tail bytes come from, an SH-4
   `mkifs` or startup difference.
 
+### x86 boot gate (E14)
+
+The [IFS plan](ifs-plan.md)'s x86 gate for the `ifsboot` container writer
+(stage 11): does a boot image the writer packages boot on x86, and under
+which `ifsboot:compress` modes. fsimg's ImageFS writer refuses boot
+programs and scripts, so the bootable ImageFS body is `mkifs`'s; the gate
+qualifies the container, not the ImageFS writer.
+
+**Method.** Everything is in `e14-gate/`, whose scripts name that
+directory and take the fsimg checkout from `FSIMG_TREE`; `RECORD.txt`
+lists the commands.
+
+1. `gen.sh` writes three buildfiles that differ only in the boot attribute
+   and in a variant letter in the boot script and the file `f`: `gu`
+   (`[virtual=x86,bios]`, an uncompressed body), `gc` (`+compress`) and
+   `gl` (`compress=2`, LZO). Each has E12's `[linker=...]` attribute,
+   `startup-bios -D8250.3f8.115200 -v`, `procnto -v`, `[data=copy]`
+   members copied from the guest (a shell, the C library and the two tools
+   the script runs) and the 19-byte file `f`, and a boot script whose
+   `display_msg` lines bracket a `cat` of `f`, an `ls -la /proc/boot` and
+   a `ksh -c "cat /proc/boot/f && echo E14-KSH-OK"`, ending with the
+   marker `E14-DONE`.
+2. `build.sh` runs the guest's `mkifs -n` on each (`-n`, so that no build
+   time enters the images), `capn.sh` captures them
+   (`captures/e14-native-n`, with `dumpifs -v` of each) and `cut.py` cuts
+   them out on the host, where each POSIX `cksum` matched the guest's.
+3. `test-ifsboot-write --rebuild gu.ifs OUT MODE` ([build guide](build.md))
+   makes fsimg's images: the library unwraps `gu.ifs`'s `prefix`,
+   `startup` and disk sections, takes the header settings from `i`'s
+   details, and wraps the disk again under `ifsboot:compress=none`
+   (`fu.ifs`) and `lzo` (`fl.ifs`), under the private test control that
+   lets a mode the machine table does not list be written for a trial. The
+   test's own checker verifies every byte of each result, and the
+   out-of-tree oracle decodes `fl.ifs`'s body to `gu.ifs`'s disk byte for
+   byte.
+4. `bootfd.sh` boots each image by the E12 floppy method and passes only
+   when `E14-DONE` is a line of its own in the serial file within 120
+   seconds. `corrupt.py` makes the negative controls: the signature's
+   first byte flipped, the startup checksum word plus one, or the third
+   byte of the stored body flipped. The tree's `tools/qnx/vm/bootifs.sh`
+   and `tools/qnx/decode/ifscorrupt.py` do the same, and `bootifs.sh`
+   repeated the `fu` and `fl` boots with the same results.
+
+The gate has three runs: run 1 boots the native images as they are, run 2
+fsimg's rebuild under `none` and run 3 its rebuild under `lzo`.
+
+**Images.** Every image carries the same 1088-byte prefix, the same
+startup code and the same header values apart from `flags1`,
+`stored_size` and the startup checksum word: machine 3, `startup_size`
+75056, `startup_vaddr` `0x404d38`, `image_paddr` and `ram_paddr`
+`0x400440`, `ram_size` `0x13fe34`, `imagefs_size` 1235204, `flags2` and
+the tail zero. The oracle decodes `gc`'s body with
+UCL NRV2B (the 8-bit variant) and `gl`'s with LZO1X, 19 chunks each, to
+`gu`'s ImageFS apart from the two variant letters and the ImageFS checksum
+word, so 6.5.0's x86 `+compress` is UCL NRV2B.
+
+| Run | Image | `flags1` | Bytes | SHA-256 | Serial | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `gu`, native, raw body | `0x01` | 1311348 | `adfe2d6101457ae4fa8f075c509d7def67cbf1532ed58c316653e33478e767d0` | `Loading IFS...done`, `E14-SCRIPT-START-gu`, `E14 member f of gu`, the listing, `E14-KSH-OK`, `E14-DONE` | Boots |
+| 1 | `gc`, native, `+compress` | `0x0d` | 682696 | `dbbde3a881ad3cf55bfde9b92e7f29ff43558cec2fd24ea44cba4c831e2105f6` | `Loading IFS...decompressing...done`, then as `gu` with `gc` | Boots |
+| 1 | `gl`, native, `compress=2` | `0x09` | 719540 | `455c7bb9d00264858b0c4d2d3736f47d4b7b388313502a84e4d8e0bd4ec21667` | `Loading IFS...decompressing...unsupported compression type`, nothing after | Does not boot |
+| 2 | `fu`, fsimg, `none` | `0x01` | 1311348 | `adfe2d6101457ae4fa8f075c509d7def67cbf1532ed58c316653e33478e767d0` | As `gu` | Boots; byte-identical to `gu` |
+| 3 | `fl`, fsimg, `lzo` | `0x09` | 835844 | `b2fb699e60e26f856838622c3d149ef5096bc0caa6f22a861059bf7b07f76899` | `Loading IFS...decompressing...unsupported compression type`, nothing after | Does not boot |
+
+| Negative control | Serial | Result |
+| --- | --- | --- |
+| `gu`, `fu`, `gc` and `fl` with the signature byte flipped | Empty: the loader prints nothing | None reaches the marker |
+| `gu` with the startup checksum word plus one | As `gu` | Boots: nothing on the boot path checks the startup checksum |
+| `gu` with the third byte of its body flipped, inside the ImageFS header | `Loading IFS...done`, then a `procnto` fault report (`Shutdown[0,0] S/C/F=11/1/11`) | Does not reach the marker |
+
+**Results.**
+
+* An uncompressed boot image the writer packages boots on x86: the
+  rebuild of `gu` under `none` is byte-identical to the native image, as
+  E12's `cAu` rebuild is, and boots to the marker, its shell reading the
+  member back. Machine 3 is therefore writable under `none`.
+* The x86 startup does not decode LZO, whoever wrote the body: `mkifs`'s
+  own `compress=2` image and fsimg's `lzo` rebuild both stop at
+  `unsupported compression type`. The message is `startup-bios`'s, not the
+  prefix's: the 1088-byte loader holds no such string, and `startup-bios`
+  (the binary in the tool identities above) holds it beside `decompressing...` and links
+  `ucl_nrv2b_decompress_8`, `_le16` and `_le32` and no LZO symbol. So E8's
+  LZO question is answered for x86: rejected, and machine 3 is not
+  writable under `lzo`. A compressed x86 image needs an NRV2B encoder.
+* `startup-bios` does not verify the startup checksum; flipping the
+  signature byte stops the boot before any output.
+
+**Not run.** The plan's variant with a file added to the tree: the body is
+`mkifs`'s, and fsimg has no ImageFS writer for bootable bodies to add a
+file with. `qnxbase.ifs`'s own startup and prefix were not used; `gu`'s
+come from the same `startup-bios` and `bios.boot`.
+
 ### S1: H3 boot images
 
 All eight have the startup header at offset 0: version 1, `flags1` `0x09`
@@ -520,14 +613,18 @@ images alike:
 | Whether `dumpifs` checks checksums | No | E10 |
 | Native mount of a nonbootable image | None | E11 |
 | `hbcifs` header fields and checksum | Identity, decoded length and payload length identified; four fields open | S1 |
-| Whether the x86 startup accepts uncompressed and LZO bodies; startup fields that change on growth; offset-dependent processed members; raw members | Uncompressed and UCL bodies boot. The rest is open: E8 is not run. It feeds only the boot-image writer (stage 11) and owner decision 6 | E12 |
-| How to boot an x86 image in QEMU | The image replaces the boot image inside a copy of the live CD's El Torito floppy, a headless QEMU boots it, and `display_msg` markers in the COM1 serial file detect the boot | E12 |
+| Whether the x86 startup accepts uncompressed and LZO bodies | Uncompressed and UCL NRV2B bodies boot; `startup-bios` rejects an LZO body, `mkifs`'s and fsimg's alike, with `unsupported compression type` | E12, E14 |
+| Whether a boot image the `ifsboot` writer packages boots on x86, and under which modes | Yes under `none`, byte-identical to the native raw image; not under `lzo` | E14 |
+| Startup fields that change on growth; offset-dependent processed members; raw members | Open: the rest of E8 is not run. It feeds the ImageFS writer's boot settings (owner decision 6) | E8, not run |
+| How to boot an x86 image in QEMU | The image replaces the boot image inside a copy of the live CD's El Torito floppy, a headless QEMU boots it, and `display_msg` markers in the COM1 serial file detect the boot; a flipped signature byte is a negative control, a corrupted startup checksum is not | E12, E14 |
 | How `procnto` resolves a path below a symbolic-link record | Through the link; the records stored below it are unreachable in every table order tested | E12 |
 
 ## Open evidence
 
-* E8, and E12's remaining boots (each E8 image, a raw member, a
-  duplicated path), before the boot-image writer stage.
+* The rest of E8 (startup fields that change on growth, offset-dependent
+  processed members, raw members, an image without the BIOS prefix) and
+  E12's remaining boots (a raw member, a duplicated path), before the
+  ImageFS writer gains boot settings.
 * `dumpifs -u` copies of the eight H3 boot images, through the `big.img`
   route, before the decoder stage's gate.
 * The four unidentified `hbcifs` header fields, before `hbcifs`

@@ -36,12 +36,15 @@
  * provider of deterministic bytes, so a create and a wrap of the same
  * volume can be compared. Refusals are each checked against a sink that
  * records every write and resize, so "before any sink opens" is observed,
- * not assumed. The machine table makes only machine 0 writable; tests of
- * the prefix and of machine 3 run under the private test control that lets
- * the plan accept every mode its tables can describe.
+ * not assumed. The machine table makes machine 0 writable under both modes
+ * and machine 3 under none only; tests of a mode it does not list run
+ * under the private test control that lets the plan accept every mode its
+ * tables can describe.
  *
  * --native compares rebuilds with the native evidence the environment
  * names (FSIMG_IFS_NATIVE, FSIMG_IFS_IMAGES), printing counts only.
+ * --rebuild IN OUT none|lzo writes one rebuild of a native boot image for
+ * a boot trial; it is a test hook, not an interface.
  */
 
 #define KIB		UINT64_C(1024)
@@ -135,6 +138,24 @@ typedef enum change {
 	CHANGE_GROW,
 	CHANGE_REWRITE
 } change_t;
+
+/*
+ * A native boot image taken apart: the prefix, startup and disk sections
+ * unwrap returns and the typed settings info reports, from which a wrap
+ * rebuilds it, and three facts read off the native header: the prefix
+ * length B, startup_size, and whether its body is raw. raw_body records
+ * the native image, while layers.ifsboot_compress is the mode to write,
+ * which a caller may change.
+ */
+typedef struct unwrapped {
+	fsimg_layer_options_t layers;
+	memory_t	 prefix;
+	memory_t	 code;
+	memory_t	 disk;
+	size_t		 prefix_bytes;
+	size_t		 startup_size;
+	bool		 raw_body;
+} unwrapped_t;
 
 /* What the checker found in a framed body. */
 typedef struct boot_check {
@@ -239,7 +260,16 @@ static void test_reproducible(void);
 static void test_altered_address(void);
 static unsigned char *read_whole(const char *, size_t *);
 static unsigned char *read_gzip_image(const char *, size_t *);
-static void rebuild_native(const char *, unsigned char *, size_t, bool);
+static bool table_writes(uint32_t, fsimg_ifsboot_compression_t);
+static bool bare_header(const unsigned char *, size_t, size_t *);
+static bool unwrap_native(fixture_t *, const unsigned char *, size_t,
+    unwrapped_t *);
+static fsimg_status_t wrap_unwrapped(fixture_t *, unwrapped_t *, memory_t *,
+    fsimg_error_t *);
+static void unwrapped_free(unwrapped_t *);
+static void rebuild_native(const char *, const unsigned char *, size_t);
+static bool write_new_file(const char *, const unsigned char *, size_t);
+static int rebuild_file(const char *, const char *, const char *);
 static int native(void);
 
 static uint16_t
@@ -1216,11 +1246,11 @@ test_startup_lengths(void)
 }
 
 /*
- * The x86 prefix, under the test control that lets machine 3 be written:
- * E13's 1085-byte loader becomes the 1088-byte prefix with three zero
- * bytes, a 1088-byte one is taken as it is, the header ties to it, and the
- * prefix section unwraps padded. Without the control, machine 3 is not
- * writable at all.
+ * The x86 prefix, under both modes: E13's 1085-byte loader becomes the
+ * 1088-byte prefix with three zero bytes, a 1088-byte one is taken as it
+ * is, the header ties to it, and the prefix section unwraps padded. The
+ * table lists only none for machine 3, so lzo runs under the test control
+ * that lets every mode be written, and without it lzo is refused.
  */
 static void
 test_prefix(void)
@@ -1247,7 +1277,8 @@ test_prefix(void)
 			size_t length = p == 0 ? LOADER_BYTES : BIOS_PREFIX;
 
 			fixture_init(&f, 64 * MIB);
-			fsimg_test_unproven_writes(f.ctx, true);
+			fsimg_test_unproven_writes(f.ctx,
+			    modes[m] == FSIMG_IFSBOOT_LZO);
 			build_volume(&f, &spec, &volume);
 			boot_layers(&layers, 3, modes[m]);
 			prefix = memory_of(loader, length);
@@ -1281,15 +1312,31 @@ test_prefix(void)
 			memory_free(&section);
 			memory_free(&out);
 
-			/* The table, not the control, decides by default. */
-			fsimg_test_unproven_writes(f.ctx, false);
-			bzero(&out, sizeof(out));
-			expect_error(wrap_memory(&f, &volume, &layers, &inputs, &out,
-			    &error), FSIMG_EUNSUPPORTED, &error, "ifsboot:machine",
-			    m == 0 ? "machine 3 is not writable under compress=lzo" :
-			    "machine 3 is not writable under compress=none");
-			expect_untouched(&out);
-			memory_free(&out);
+			/*
+			 * The table, not the control, decides: a wrap of the same
+			 * volume is written under none and refused under lzo.
+			 */
+			if (modes[m] == FSIMG_IFSBOOT_NONE) {
+				CHECK(wrap_memory(&f, &volume, &layers, &inputs, &out,
+				    NULL) == FSIMG_OK);
+				check_boot(out.bytes, (size_t)out.length,
+				    &(boot_expect_t){ .layers = &layers,
+				    .prefix = loader, .prefix_bytes = length,
+				    .code = code, .code_bytes = sizeof(code),
+				    .disk = volume.bytes,
+				    .disk_bytes = (size_t)volume.length });
+				memory_free(&out);
+			}
+			if (modes[m] == FSIMG_IFSBOOT_LZO) {
+				fsimg_test_unproven_writes(f.ctx, false);
+				bzero(&out, sizeof(out));
+				expect_error(wrap_memory(&f, &volume, &layers, &inputs,
+				    &out, &error), FSIMG_EUNSUPPORTED, &error,
+				    "ifsboot:machine",
+				    "machine 3 is not writable under compress=lzo");
+				expect_untouched(&out);
+				memory_free(&out);
+			}
 			fsimg_io_free(prefix_io);
 			fsimg_io_free(startup_io);
 			memory_free(&prefix);
@@ -1511,12 +1558,12 @@ expect_wrap_refused(fixture_t *f, memory_t *volume,
 
 /*
  * The table refusals, each the plan's, before any sink opens: a machine
- * and mode the writable-modes column does not list, by default for
- * machines 42 and 3; a machine or compression outside its table; and,
- * where the test control lets machine 3 be written, a machine without
- * the prefix it was observed behind or a prefix without its machine, a
- * prefix whose padded length is not 0 or 1088 or that begins with the
- * startup signature, and startup code too long for startup_size.
+ * and mode the writable-modes column does not list: machine 42 under
+ * either mode and machine 3 under lzo; a machine or compression outside
+ * its table; a machine without the prefix it was observed behind or a
+ * prefix without its machine; a prefix whose padded length is not 0 or
+ * 1088 or that begins with the startup signature; and startup code too
+ * long for startup_size. None of them needs the test control.
  */
 static void
 test_refusals(void)
@@ -1528,8 +1575,7 @@ test_refusals(void)
 	} unwritable[] = {
 		{ 42, FSIMG_IFSBOOT_NONE, "machine 42 is not writable under compress=none" },
 		{ 42, FSIMG_IFSBOOT_LZO, "machine 42 is not writable under compress=lzo" },
-		{ 3, FSIMG_IFSBOOT_LZO, "machine 3 is not writable under compress=lzo" },
-		{ 3, FSIMG_IFSBOOT_NONE, "machine 3 is not writable under compress=none" }
+		{ 3, FSIMG_IFSBOOT_LZO, "machine 3 is not writable under compress=lzo" }
 	};
 	static const size_t bad_prefix[] = { 4, 1084, 1089 };
 	volume_spec_t spec = { .random_bytes = 100, .seed = 6 };
@@ -1556,10 +1602,9 @@ test_refusals(void)
 	expect_wrap_refused(&f, &volume, &layers, NULL, FSIMG_EINVAL,
 	    "ifsboot:compress", "lzo or none");
 
-	fsimg_test_unproven_writes(f.ctx, true);
 	fill_random(loader, sizeof(loader), 14);
 	loader[0] = 0xfa;
-	boot_layers(&layers, 3, FSIMG_IFSBOOT_LZO);
+	boot_layers(&layers, 3, FSIMG_IFSBOOT_NONE);
 	expect_wrap_refused(&f, &volume, &layers, NULL, FSIMG_EINVAL,
 	    "ifsboot:machine", "machine 3 is not supported behind this boot prefix");
 	prefix = memory_of(loader, LOADER_BYTES);
@@ -1600,7 +1645,6 @@ test_refusals(void)
 	memory_free(&startup);
 
 	/* An empty prefix file is no prefix. */
-	fsimg_test_unproven_writes(f.ctx, false);
 	prefix = memory_of(loader, 0);
 	inputs = (fsimg_layer_inputs_t){ .ifsboot_prefix = memory_io(&f, &prefix) };
 	boot_layers(&layers, 0, FSIMG_IFSBOOT_NONE);
@@ -2415,132 +2459,339 @@ read_gzip_image(const char *path, size_t *length)
 }
 
 /*
- * Unwrap a native boot image's sections and rebuild it from them and the
- * values info reports. Each section is the byte range the profile names,
- * found here from the header alone. A machine and mode the table does not
- * list (unless unproven) is refused naming the machine. A raw body with a
- * zero flags2 and tail rebuilds byte for byte; otherwise the rebuild
- * matches in the prefix, the code and every header field but stored_size,
- * the compression bits and a nonzero flags2 or tail, and its disk reads
- * back identical.
+ * Whether the machine table lists mode as writable for machine: the
+ * profile's writable-modes column, which a native boot of a written image
+ * decides. Machine 0 needs no boot; machine 3 booted under none only, since
+ * the x86 startup rejects an LZO body; no SH-4 boot is recorded.
+ */
+static bool
+table_writes(uint32_t machine, fsimg_ifsboot_compression_t mode)
+{
+	if (machine == 0)
+		return (true);
+	return (machine == 3 && mode == FSIMG_IFSBOOT_NONE);
+}
+
+/*
+ * Whether bytes are a bare boot image by their own header: the first
+ * signature at 0 or at 1088 decides, as a prefix never begins with the
+ * signature, and B + stored_size must equal their length. *prefix_bytes
+ * is B.
+ */
+static bool
+bare_header(const unsigned char *bytes, size_t length, size_t *prefix_bytes)
+{
+	static const size_t offsets[] = { 0, BIOS_PREFIX };
+
+	for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+		if (length < offsets[i] + HEADER_BYTES)
+			continue;
+		if (get_le32(bytes + offsets[i]) != SIGNATURE)
+			continue;
+		*prefix_bytes = offsets[i];
+		return (length - offsets[i] ==
+		    get_le32(bytes + offsets[i] + H_STORED_SIZE));
+	}
+	return (false);
+}
+
+/*
+ * Take a native boot image apart: open it, and when it is an ifsboot
+ * image unwrap its prefix, startup and disk sections into parts, checking
+ * each against the byte range the profile names, found here from the
+ * header alone, and take the typed settings from the values info reports.
+ * The mode is none for a raw body and lzo for any framed one, UCL
+ * included, since lzo is the writer's only framed mode. Returns false,
+ * with nothing to free, unless the bytes themselves are an ifsboot image:
+ * another container, or one inside an outer layer such as gzip.
+ *
+ * The header reads below trust the library's claim once the bytes are
+ * tied to it: the header lies at 0 or 1088 within the bytes and its
+ * B + stored_size is their length, so the claimed container is these
+ * bytes, startup_size is at least 260 and the body lies within them.
+ */
+static bool
+unwrap_native(fixture_t *f, const unsigned char *bytes, size_t length,
+    unwrapped_t *parts)
+{
+	fsimg_image_info_t info;
+	fsimg_image_t *image;
+	fsimg_io_t *io;
+	memory_t file;
+	const unsigned char *h;
+	bool ifsboot, opaque_zero;
+
+	bzero(parts, sizeof(*parts));
+	file = memory_of(bytes, length);
+	image = open_image(f, &file, &io);
+	CHECK(fsimg_image_get_info(image, &info, NULL) == FSIMG_OK);
+	ifsboot = strcmp(info.container, "ifsboot") == 0 &&
+	    bare_header(bytes, length, &parts->prefix_bytes);
+	if (ifsboot) {
+		h = bytes + parts->prefix_bytes;
+		CHECK(detail(&info, "prefix_bytes") == parts->prefix_bytes);
+		parts->startup_size = get_le32(h + H_STARTUP_SIZE);
+		parts->raw_body = (h[H_FLAGS1] & 0x1c) == 0;
+		/* Info's tail count must agree with the header's bytes. */
+		opaque_zero = h[H_FLAGS2] == 0 &&
+		    all_zero(h + H_TAIL, HEADER_BYTES - H_TAIL);
+		CHECK(detail(&info, "tail_nonzero") == 0 || !opaque_zero);
+
+		unwrap(f, image, FSIMG_SELECT_SECTION, "prefix", FSIMG_OK,
+		    &parts->prefix);
+		CHECK(parts->prefix.length == parts->prefix_bytes &&
+		    bcmp(parts->prefix.bytes, bytes, parts->prefix_bytes) == 0);
+		unwrap(f, image, FSIMG_SELECT_SECTION, "startup", FSIMG_OK,
+		    &parts->code);
+		CHECK(parts->code.length == parts->startup_size - 260 &&
+		    bcmp(parts->code.bytes, h + HEADER_BYTES,
+		    parts->startup_size - 260) == 0);
+		unwrap(f, image, FSIMG_SELECT_DISK, NULL, FSIMG_OK, &parts->disk);
+		CHECK(parts->disk.length == get_le32(h + H_IMAGEFS_SIZE));
+		CHECK(!parts->raw_body || bcmp(parts->disk.bytes,
+		    h + parts->startup_size, (size_t)parts->disk.length) == 0);
+
+		boot_layers(&parts->layers, (uint32_t)detail(&info, "machine"),
+		    parts->raw_body ? FSIMG_IFSBOOT_NONE : FSIMG_IFSBOOT_LZO);
+		parts->layers.ifsboot_virtual = detail(&info, "virtual") != 0;
+		parts->layers.ifsboot_startup_vaddr =
+		    (uint32_t)detail(&info, "startup_vaddr");
+		parts->layers.ifsboot_paddr_bias =
+		    (uint32_t)detail(&info, "paddr_bias");
+		parts->layers.ifsboot_image_paddr =
+		    (uint32_t)detail(&info, "image_paddr");
+		parts->layers.ifsboot_ram_paddr =
+		    (uint32_t)detail(&info, "ram_paddr");
+		parts->layers.ifsboot_imagefs_paddr =
+		    (uint32_t)detail(&info, "imagefs_paddr");
+	}
+	fsimg_image_free(image);
+	fsimg_io_free(io);
+	memory_free(&file);
+	return (ifsboot);
+}
+
+/* Wrap the unwrapped disk again with its sections and settings into out. */
+static fsimg_status_t
+wrap_unwrapped(fixture_t *f, unwrapped_t *parts, memory_t *out,
+    fsimg_error_t *error)
+{
+	fsimg_layer_inputs_t inputs;
+	fsimg_status_t status;
+
+	inputs = (fsimg_layer_inputs_t){
+		.ifsboot_prefix = memory_io(f, &parts->prefix),
+		.ifsboot_startup = memory_io(f, &parts->code) };
+	bzero(out, sizeof(*out));
+	status = wrap_memory(f, &parts->disk, &parts->layers, &inputs, out,
+	    error);
+	fsimg_io_free(inputs.ifsboot_prefix);
+	fsimg_io_free(inputs.ifsboot_startup);
+	return (status);
+}
+
+static void
+unwrapped_free(unwrapped_t *parts)
+{
+	memory_free(&parts->disk);
+	memory_free(&parts->code);
+	memory_free(&parts->prefix);
+}
+
+/*
+ * Unwrap a native boot image and rebuild it under the mode unwrap_native()
+ * chooses: none for a raw body, lzo for a framed one, so a UCL image is
+ * rebuilt under lzo. The machine table decides, without the test control:
+ * a machine and mode it does not list is refused naming the machine. A raw
+ * body with a zero flags2 and tail rebuilds byte for byte; otherwise the
+ * rebuild matches in the prefix, the code and every header field but
+ * stored_size, the compression bits and a nonzero flags2 or tail, and its
+ * disk reads back identical.
  */
 static void
-rebuild_native(const char *name, unsigned char *bytes, size_t length,
-    bool unproven)
+rebuild_native(const char *name, const unsigned char *bytes, size_t length)
 {
 	static const unsigned fields[] = { H_VERSION, H_HEADER_SIZE, H_MACHINE,
 	    H_STARTUP_VADDR, H_PADDR_BIAS, H_IMAGE_PADDR, H_RAM_PADDR,
 	    H_STARTUP_SIZE, H_IMAGEFS_PADDR, H_IMAGEFS_SIZE, H_PREBOOT_SIZE };
-	fsimg_layer_options_t layers;
-	fsimg_layer_inputs_t inputs;
-	fsimg_image_info_t info;
+	unwrapped_t parts;
 	fsimg_error_t error;
-	fsimg_image_t *image;
-	fsimg_io_t *io;
-	memory_t file, prefix, code, disk, again;
+	memory_t again;
 	const unsigned char *h, *g;
-	size_t b, startup;
-	bool raw, opaque_zero;
+	bool opaque_zero;
 	fsimg_status_t status;
 	fixture_t f;
 
 	fixture_init(&f, 512 * MIB);
-	fsimg_test_unproven_writes(f.ctx, unproven);
-	file = memory_of(bytes, length);
-	image = open_image(&f, &file, &io);
-	CHECK(fsimg_image_get_info(image, &info, NULL) == FSIMG_OK);
-	if (strcmp(info.container, "ifsboot") != 0) {
-		fsimg_image_free(image);
-		fsimg_io_free(io);
-		memory_free(&file);
+	if (!unwrap_native(&f, bytes, length, &parts)) {
 		fixture_free(&f);
 		return;
 	}
-	b = get_le32(bytes) == SIGNATURE ? 0 : BIOS_PREFIX;
-	h = bytes + b;
-	CHECK(get_le32(h) == SIGNATURE && detail(&info, "prefix_bytes") == b);
-	startup = get_le32(h + H_STARTUP_SIZE);
-	raw = (h[H_FLAGS1] & 0x1c) == 0;
+	h = bytes + parts.prefix_bytes;
 	opaque_zero = h[H_FLAGS2] == 0 &&
 	    all_zero(h + H_TAIL, HEADER_BYTES - H_TAIL);
-	CHECK(detail(&info, "tail_nonzero") == 0 || !opaque_zero);
 
-	unwrap(&f, image, FSIMG_SELECT_SECTION, "prefix", FSIMG_OK, &prefix);
-	CHECK(prefix.length == b && bcmp(prefix.bytes, bytes, b) == 0);
-	unwrap(&f, image, FSIMG_SELECT_SECTION, "startup", FSIMG_OK, &code);
-	CHECK(code.length == startup - 260 &&
-	    bcmp(code.bytes, h + HEADER_BYTES, startup - 260) == 0);
-	unwrap(&f, image, FSIMG_SELECT_DISK, NULL, FSIMG_OK, &disk);
-	CHECK(disk.length == get_le32(h + H_IMAGEFS_SIZE));
-	CHECK(!raw || bcmp(disk.bytes, h + startup, (size_t)disk.length) == 0);
-	fsimg_image_free(image);
-	fsimg_io_free(io);
-
-	boot_layers(&layers, (uint32_t)detail(&info, "machine"),
-	    raw ? FSIMG_IFSBOOT_NONE : FSIMG_IFSBOOT_LZO);
-	layers.ifsboot_virtual = detail(&info, "virtual") != 0;
-	layers.ifsboot_startup_vaddr = (uint32_t)detail(&info, "startup_vaddr");
-	layers.ifsboot_paddr_bias = (uint32_t)detail(&info, "paddr_bias");
-	layers.ifsboot_image_paddr = (uint32_t)detail(&info, "image_paddr");
-	layers.ifsboot_ram_paddr = (uint32_t)detail(&info, "ram_paddr");
-	layers.ifsboot_imagefs_paddr = (uint32_t)detail(&info, "imagefs_paddr");
-	inputs = (fsimg_layer_inputs_t){
-		.ifsboot_prefix = memory_io(&f, &prefix),
-		.ifsboot_startup = memory_io(&f, &code) };
-	bzero(&again, sizeof(again));
-	status = wrap_memory(&f, &disk, &layers, &inputs, &again, &error);
-	if (layers.ifsboot_machine != 0 && !unproven) {
+	status = wrap_unwrapped(&f, &parts, &again, &error);
+	if (!table_writes(parts.layers.ifsboot_machine,
+	    parts.layers.ifsboot_compress)) {
 		expect_error(status, FSIMG_EUNSUPPORTED, &error, "ifsboot:machine",
 		    "not writable");
 		printf("%s: machine %u, sections unwrapped, rebuild refused naming "
-		    "the machine\n", name, (unsigned)layers.ifsboot_machine);
+		    "the machine\n", name, (unsigned)parts.layers.ifsboot_machine);
+	} else if (parts.raw_body && opaque_zero) {
+		CHECK(status == FSIMG_OK);
+		CHECK(again.length == length &&
+		    bcmp(again.bytes, bytes, length) == 0);
+		printf("%s: rebuilt byte for byte\n", name);
 	} else {
 		CHECK(status == FSIMG_OK);
-		g = again.bytes + b;
-		if (raw && opaque_zero) {
-			CHECK(again.length == length &&
-			    bcmp(again.bytes, bytes, length) == 0);
-			printf("%s: rebuilt byte for byte\n", name);
-		} else {
-			CHECK(bcmp(again.bytes, bytes, b) == 0);
-			for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
-				CHECK(bcmp(g + fields[i], h + fields[i],
-				    fields[i] == H_VERSION || fields[i] ==
-				    H_HEADER_SIZE || fields[i] == H_MACHINE ||
-				    fields[i] == H_PREBOOT_SIZE ? 2 : 4) == 0);
-			CHECK(get_le32(g + H_RAM_SIZE) == get_le32(h + H_RAM_SIZE));
-			CHECK((g[H_FLAGS1] & ~0x1c) == (h[H_FLAGS1] & ~0x1c));
-			CHECK(!opaque_zero || (g[H_FLAGS2] == h[H_FLAGS2] &&
-			    bcmp(g + H_TAIL, h + H_TAIL, HEADER_BYTES - H_TAIL) == 0));
-			CHECK(bcmp(g + HEADER_BYTES, h + HEADER_BYTES,
-			    startup - 260) == 0);
-			expect_disk(&f, &again, &disk);
-			printf("%s: rebuilt, identical outside the body-dependent "
-			    "fields, disk identical\n", name);
-		}
+		g = again.bytes + parts.prefix_bytes;
+		CHECK(bcmp(again.bytes, bytes, parts.prefix_bytes) == 0);
+		for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+			CHECK(bcmp(g + fields[i], h + fields[i],
+			    fields[i] == H_VERSION || fields[i] == H_HEADER_SIZE ||
+			    fields[i] == H_MACHINE || fields[i] == H_PREBOOT_SIZE ?
+			    2 : 4) == 0);
+		CHECK(get_le32(g + H_RAM_SIZE) == get_le32(h + H_RAM_SIZE));
+		CHECK((g[H_FLAGS1] & ~0x1c) == (h[H_FLAGS1] & ~0x1c));
+		CHECK(!opaque_zero || (g[H_FLAGS2] == h[H_FLAGS2] &&
+		    bcmp(g + H_TAIL, h + H_TAIL, HEADER_BYTES - H_TAIL) == 0));
+		CHECK(bcmp(g + HEADER_BYTES, h + HEADER_BYTES,
+		    parts.startup_size - 260) == 0);
+		expect_disk(&f, &again, &parts.disk);
+		printf("%s: rebuilt, identical outside the body-dependent "
+		    "fields, disk identical\n", name);
 	}
-	fsimg_io_free(inputs.ifsboot_prefix);
-	fsimg_io_free(inputs.ifsboot_startup);
 	memory_free(&again);
-	memory_free(&disk);
-	memory_free(&code);
-	memory_free(&prefix);
-	memory_free(&file);
+	unwrapped_free(&parts);
 	fixture_free(&f);
 }
 
 /*
+ * Write length bytes to path, a new file. On failure, report it, remove
+ * the partial file and return false, so a failed rebuild leaves nothing
+ * behind and the same command can run again.
+ */
+static bool
+write_new_file(const char *path, const unsigned char *bytes, size_t length)
+{
+	size_t written;
+	ssize_t n;
+	int fd;
+
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+	if (fd == -1) {
+		fprintf(stderr, "%s: %s\n", path, strerror(errno));
+		return (false);
+	}
+	written = 0;
+	while (written < length) {
+		n = write(fd, bytes + written, length - written);
+		if (n == -1 && errno == EINTR)
+			continue;
+		if (n <= 0) {
+			fprintf(stderr, "%s: %s\n", path,
+			    n == 0 ? "short write" : strerror(errno));
+			close(fd);
+			unlink(path);
+			return (false);
+		}
+		written += (size_t)n;
+	}
+	if (close(fd) != 0) {
+		fprintf(stderr, "%s: %s\n", path, strerror(errno));
+		unlink(path);
+		return (false);
+	}
+	return (true);
+}
+
+/*
+ * --rebuild IN OUT none|lzo, the native boot gate's hook: take the boot
+ * image IN apart and wrap its disk again under the named mode with its own
+ * sections and header values, check every byte of the result with
+ * check_boot(), and write it to OUT, a new file. It runs under the test
+ * control, so that a mode the machine table does not list can be
+ * written for a boot trial; such an image qualifies nothing until it boots.
+ */
+static int
+rebuild_file(const char *in, const char *out, const char *mode_name)
+{
+	unwrapped_t parts;
+	fsimg_error_t error;
+	unsigned char *bytes;
+	memory_t again;
+	size_t length;
+	bool identical;
+	int result;
+	fixture_t f;
+
+	if (strcmp(mode_name, "none") != 0 && strcmp(mode_name, "lzo") != 0) {
+		fprintf(stderr, "usage: test-ifsboot-write --rebuild IN OUT "
+		    "none|lzo\n");
+		return (2);
+	}
+	bytes = read_whole(in, &length);
+	if (bytes == NULL) {
+		fprintf(stderr, "%s: %s\n", in, strerror(errno));
+		return (1);
+	}
+	fixture_init(&f, 512 * MIB);
+	fsimg_test_unproven_writes(f.ctx, true);
+	if (!unwrap_native(&f, bytes, length, &parts)) {
+		fprintf(stderr, "%s: not a bare ifsboot image\n", in);
+		free(bytes);
+		fixture_free(&f);
+		return (1);
+	}
+	parts.layers.ifsboot_compress = strcmp(mode_name, "lzo") == 0 ?
+	    FSIMG_IFSBOOT_LZO : FSIMG_IFSBOOT_NONE;
+
+	result = 1;
+	if (wrap_unwrapped(&f, &parts, &again, &error) != FSIMG_OK) {
+		fprintf(stderr, "%s: rebuild failed: %s: %s\n", in, error.path,
+		    error.message);
+	} else {
+		check_boot(again.bytes, (size_t)again.length, &(boot_expect_t){
+		    .layers = &parts.layers, .prefix = parts.prefix.bytes,
+		    .prefix_bytes = (size_t)parts.prefix.length,
+		    .code = parts.code.bytes,
+		    .code_bytes = (size_t)parts.code.length,
+		    .disk = parts.disk.bytes,
+		    .disk_bytes = (size_t)parts.disk.length });
+		identical = again.length == length &&
+		    bcmp(again.bytes, bytes, length) == 0;
+		if (write_new_file(out, again.bytes, (size_t)again.length)) {
+			printf("%s: machine %u, compress=%s, %zu bytes, %s the "
+			    "input\n", out, (unsigned)parts.layers.ifsboot_machine,
+			    mode_name, (size_t)again.length,
+			    identical ? "identical to" : "differs from");
+			result = 0;
+		}
+	}
+
+	memory_free(&again);
+	unwrapped_free(&parts);
+	free(bytes);
+	fixture_free(&f);
+	return (result);
+}
+
+/*
  * The native evidence. Under FSIMG_IFS_NATIVE: the E7 nonbootable images,
- * machine 0, rebuilt under lzo; E12's uncompressed cAu.ifs, machine 3,
- * rebuilt byte for byte under the test control that lets machine 3 be
- * written. Under FSIMG_IFS_IMAGES as well: every native boot image there
- * unwrapped, and its rebuild refused naming its machine.
+ * machine 0, rebuilt under lzo; the uncompressed x86 images, E12's cAu.ifs
+ * and the x86 boot gate's gu.ifs, machine 3, rebuilt byte for byte; and
+ * the gate's gl.ifs, mkifs's LZO x86 image, which the x86 startup refuses
+ * to boot, unwrapped and its rebuild under lzo refused naming the machine.
+ * Under FSIMG_IFS_IMAGES as well: every native boot image there unwrapped,
+ * and its rebuild refused naming its machine.
  */
 static int
 native(void)
 {
 	static const char *const e7[] = { "e7-compress-2.ifs",
 	    "e7-compress-3.ifs", "e7-compress-plus.ifs" };
+	static const char *const gate[] = { "gu.ifs", "gl.ifs" };
 	const char *captures = getenv("FSIMG_IFS_NATIVE");
 	const char *images = getenv("FSIMG_IFS_IMAGES");
 	struct dirent *dirent;
@@ -2558,14 +2809,21 @@ native(void)
 		    e7[i]);
 		bytes = read_whole(path, &length);
 		CHECK(bytes != NULL);
-		rebuild_native(e7[i], bytes, length, false);
+		rebuild_native(e7[i], bytes, length);
 		free(bytes);
 	}
 	snprintf(path, sizeof(path), "%s/e12-links/e12-au.img.gz", captures);
 	bytes = read_gzip_image(path, &length);
 	CHECK(bytes != NULL);
-	rebuild_native("cAu.ifs", bytes, length, true);
+	rebuild_native("cAu.ifs", bytes, length);
 	free(bytes);
+	for (size_t i = 0; i < sizeof(gate) / sizeof(gate[0]); i++) {
+		snprintf(path, sizeof(path), "%s/e14-gate/%s", captures, gate[i]);
+		bytes = read_whole(path, &length);
+		CHECK(bytes != NULL);
+		rebuild_native(gate[i], bytes, length);
+		free(bytes);
+	}
 
 	if (images == NULL || images[0] == '\0') {
 		printf("SKIP: FSIMG_IFS_IMAGES is not set\n");
@@ -2582,7 +2840,7 @@ native(void)
 		snprintf(path, sizeof(path), "%s/%s", images, dirent->d_name);
 		bytes = read_whole(path, &length);
 		CHECK(bytes != NULL);
-		rebuild_native(dirent->d_name, bytes, length, false);
+		rebuild_native(dirent->d_name, bytes, length);
 		free(bytes);
 	}
 	CHECK(closedir(directory) == 0);
@@ -2594,6 +2852,8 @@ main(int argc, char **argv)
 {
 	if (argc == 2 && strcmp(argv[1], "--native") == 0)
 		return (native());
+	if (argc == 5 && strcmp(argv[1], "--rebuild") == 0)
+		return (rebuild_file(argv[2], argv[3], argv[4]));
 	CHECK(argc == 1);
 	test_round_trips();
 	test_startup_lengths();

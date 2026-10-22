@@ -127,7 +127,8 @@ static const uint32_t boot_prefixes[] = { 0, BIOS_PREFIX_BYTES };
  * written image has passed. A ram_sum machine's ram_size is checked on
  * read and written as the sum. Machine 0 is nonbootable mkifs output:
  * mkifs writes ram_size 0 there (E7), which the reader reports without a
- * check, and no boot gates its modes.
+ * check, and no boot gates its modes. Machine 3 is writable under none
+ * only: its x86 startup decodes UCL bodies and rejects LZO ones (E14).
  */
 static const struct boot_machine {
 	uint16_t	 machine;
@@ -136,7 +137,7 @@ static const struct boot_machine {
 	unsigned	 writes;
 } boot_machines[] = {
 	{ 42, 0, true, 0 },			/* SH-4 (S1) */
-	{ 3, BIOS_PREFIX_BYTES, true, 0 },	/* x86 (S2) */
+	{ 3, BIOS_PREFIX_BYTES, true, WRITES_NONE }, /* x86 (S2, E14) */
 	{ 0, 0, false, WRITES_NONE | WRITES_LZO } /* nonbootable (E7) */
 };
 

@@ -457,7 +457,7 @@ Experiments E1 to E12 and the surveys S1 and S2 are defined in stage 1.
 | Duplicate content, shared-range counts and hard links (draft question 7) | E6, S1 | Range rule; the default extraction ceiling on deduplicated images |
 | Extended-attribute use (draft question 6) | E1 to E8, S1 | Acceptance tables |
 | Compression values 6.5.0 accepts; chunk sizing and the smallest non-final chunk; padding after the terminator (draft question 4) | E7, S1, S2 | Decision 8, encoder |
-| Whether the x86 startup accepts uncompressed and LZO bodies | E8, E12 | The writer's compression values per machine |
+| Whether the x86 startup accepts uncompressed and LZO bodies | E8, E12, E14 | The writer's compression values per machine |
 | Startup and stored checksum domains (draft question 1) | S1, S2, E8 | `ifsboot` verification, the writer |
 | Whether a startup section built by `mkifs` is the program's bytes plus the derived and set header fields alone, so that a rebuild from the unwrapped program and settings reproduces it | E8 (two builds of one startup at two sizes), S1 | Decision 10; the round-trip test |
 | Whether processed members' bytes depend on their image offset (draft question 9) | E8 | Decision 10, owner decision 6, writer layout |
@@ -886,8 +886,9 @@ Depends on stages 7 and 10 and on E8's answers for owner decision 6.
   emission, the unwrap sections, and the refusals.
   The container's plan, bound and encoder are registered with
   `FSIMG_CAP_WRITE` and the machine table's writable modes: machine 0,
-  which no boot gates, under `none` and `lzo`, and no mode for machines 3
-  and 42 until the gates below; a test-only control lets the plan accept
+  which no boot gates, under `none` and `lzo`, machine 3 under the modes
+  the x86 gate below booted, and no mode for machine 42 until the SH-4
+  gate; a test-only control lets the plan accept
   every mode its tables describe, so the emission is tested for every
   machine before any gate.
 * The ImageFS writer gains the boot-specific settings that owner decision 6
@@ -904,16 +905,23 @@ Depends on stages 7 and 10 and on E8's answers for owner decision 6.
   while H3 rebuilds are refused naming the machine; the independent checker
   (`tools/qnx/decode/ifsdump.py`) and the guest's `dumpifs` list every
   written image.
-* **x86 gate (E12):** `qnxbase.ifs`'s startup code and prefix unwrapped
-  and its header values taken from `i`, its tree rebuilt by the writer and
-  packaged with them, boots to a shell in QEMU through the floppy method,
-  and so does the same image with an added file, which the shell reads
-  back. `qnxbase` is `ucl`, which the writer lacks: the gate runs with
-  LZO if E8 shows that `startup-bios` accepts it, and uncompressed with an
-  E12-sized tree, since a full `qnxbase` tree exceeds the floppy's slot
-  uncompressed. The machine table's writable modes for x86 are then
-  exactly the modes this gate booted, `none` and, if E8 and the boot
-  allow it, `lzo`.
+* **x86 gate (E12, E14):** a native `mkifs` x86 image of an E12-sized
+  tree with an uncompressed body is taken apart by unwrap (`prefix`,
+  `startup` and the disk), and the writer wraps its disk again with those
+  sections and the header values `i` reports, once under each mode. A
+  mode passes when its rebuild boots in QEMU through the floppy method to
+  its boot script's final marker, after a shell has read a member back,
+  and the same image with its signature byte flipped does not. fsimg's ImageFS writer refuses
+  boot programs, so the body is `mkifs`'s and the gate qualifies the
+  container; a variant that adds a file to the tree waits for an ImageFS
+  writer of bootable bodies (owner decision 6). The machine table's
+  writable modes for x86 are exactly the modes this gate booted.
+  [E14](ifs-research.md#x86-boot-gate-e14) ran it: the rebuild
+  under `none` is byte-identical to the native image and boots; the
+  rebuild under `lzo` does not, nor does `mkifs`'s own LZO image, since
+  `startup-bios` decodes only UCL NRV2B bodies. Machine 3 is writable
+  under `none` only; a compressed x86 image needs an NRV2B encoder, an
+  owner decision ([TODO](todo-ifs.md)).
 * **SH-4 gate:** a trimmed `PCM3_Emergency.ifs` tree, packaged with the
   native image's unwrapped startup program and settings, boots on the PCM
   QEMU board. Until that board exists, the SH-4 row lists no writable
@@ -924,7 +932,8 @@ Depends on stages 7 and 10 and on E8's answers for owner decision 6.
 
 Unscheduled, each behind its own evidence:
 * zlib bodies;
-* a UCL encoder;
+* a UCL NRV2B encoder, the one compressed body the x86 startup boots
+  (E14);
 * big-endian bodies, if E9 finds no producer;
 * device nodes and the other special kinds;
 * chained images;
