@@ -122,16 +122,17 @@ static const uint32_t boot_prefixes[] = { 0, BIOS_PREFIX_BYTES };
 #define WRITES_LZO		0x02u
 
 /* The closed machine table: each machine, the prefix it was observed
- * behind, whether ram_size is checked against startup_size +
- * imagefs_size, and the modes the writer accepts for it, exactly those a
- * native boot of a written image has passed. Machine 0 is nonbootable
- * mkifs output, whose ram_size no boot image constrains and whose modes
- * no boot gates.
+ * behind, whether its ram_size is startup_size + imagefs_size, and the
+ * modes the writer accepts for it, exactly those a native boot of a
+ * written image has passed. A ram_sum machine's ram_size is checked on
+ * read and written as the sum. Machine 0 is nonbootable mkifs output:
+ * mkifs writes ram_size 0 there (E7), which the reader reports without a
+ * check, and no boot gates its modes.
  */
 static const struct boot_machine {
 	uint16_t	 machine;
 	uint32_t	 prefix;
-	bool		 ram_checked;
+	bool		 ram_sum;
 	unsigned	 writes;
 } boot_machines[] = {
 	{ 42, 0, true, 0 },			/* SH-4 (S1) */
@@ -163,7 +164,7 @@ typedef struct boot_header {
 	uint8_t		 compression;
 	uint32_t	 tail_nonzero;
 	uint32_t	 codec;
-	bool		 ram_checked;
+	bool		 ram_sum;
 } boot_header_t;
 
 /* What the learning pass found, for info: the chunks, the decoded and
@@ -416,7 +417,7 @@ check_tables(boot_header_t *header, fsimg_error_t *error)
 		    (unsigned)header->machine);
 		return (boot_unsupported(error, what));
 	}
-	header->ram_checked = row->ram_checked;
+	header->ram_sum = row->ram_sum;
 	return (FSIMG_OK);
 }
 
@@ -911,7 +912,7 @@ ifsboot_verify(const fsimg_container_input_t *input,
 	if (stored_sum != 0)
 		return (boot_corrupt(error,
 		    "stored checksum: the stored image does not sum to zero"));
-	if (header.ram_checked &&
+	if (header.ram_sum &&
 	    (uint64_t)header.ram_size !=
 	    (uint64_t)header.startup_size + header.imagefs_size)
 		return (boot_corrupt(error,
@@ -1138,7 +1139,8 @@ ifsboot_plan(const fsimg_container_plan_args_t *args,
 	    .image_paddr = layers->ifsboot_image_paddr,
 	    .ram_paddr = layers->ifsboot_ram_paddr,
 	    .imagefs_paddr = layers->ifsboot_imagefs_paddr,
-	    .machine = row->machine, .flags1 = header.flags1 };
+	    .machine = row->machine, .flags1 = header.flags1,
+	    .ram_sum = row->ram_sum };
 	settings->granularity = 1;
 	settings->chunk_bytes = (uint32_t)FSIMG_FRAMED_MAX_DECODED;
 	settings->passes = lzo ? 2 : 1;
@@ -1214,7 +1216,8 @@ put_header(unsigned char *raw, const fsimg_container_settings_t *settings,
 	fsimg_layer_put_le32(raw + HEADER_PADDR_BIAS, boot->paddr_bias);
 	fsimg_layer_put_le32(raw + HEADER_IMAGE_PADDR, boot->image_paddr);
 	fsimg_layer_put_le32(raw + HEADER_RAM_PADDR, boot->ram_paddr);
-	fsimg_layer_put_le32(raw + HEADER_RAM_SIZE, startup_size + imagefs_size);
+	fsimg_layer_put_le32(raw + HEADER_RAM_SIZE,
+	    boot->ram_sum ? startup_size + imagefs_size : 0);
 	fsimg_layer_put_le32(raw + HEADER_STARTUP_SIZE, startup_size);
 	fsimg_layer_put_le32(raw + HEADER_STORED_SIZE, stored_size);
 	fsimg_layer_put_le32(raw + HEADER_IMAGEFS_PADDR, boot->imagefs_paddr);

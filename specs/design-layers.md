@@ -1533,7 +1533,7 @@ table, so the accepted `flags1` values are the products of the tables:
 | --- | --- | --- | --- | --- | --- |
 | 42 | SH-4 | None | Checked | None: no boot of a written SH-4 image is recorded | S1: `flags1` 0x09, `startup_size` 53512 |
 | 3 | x86 | BIOS loader | Checked | None: no boot of a written x86 image is recorded | S2: `flags1` 0x0d, `startup_size` 75056 |
-| 0 | None: nonbootable `mkifs` output | None | Reported, not checked | `none`, `lzo`: no boot applies | E7: `flags1` 0x08 or 0x0c, `startup_size` 260 |
+| 0 | None: nonbootable `mkifs` output | None | 0, as `mkifs` writes it; reported, not checked | `none`, `lzo`: no boot applies | E7: `flags1` 0x08 or 0x0c, `startup_size` 260 |
 
 Reading and writing have independent acceptance: every row is read, and
 the writable-modes column lists, per machine, the `ifsboot:compress`
@@ -1699,7 +1699,7 @@ parse.
 | `startup_vaddr` | The setting, verbatim | The linked startup's entry point, an address inside the code |
 | `paddr_bias`, `image_paddr`, `ram_paddr` | The settings, verbatim | The buildfile's address attributes; `image_paddr` is the image address plus the prefix length |
 | `imagefs_paddr` | The setting, verbatim | Zero in E12; its rule is not identified |
-| `ram_size` | `startup_size + imagefs_size` | The same sum, in every boot image |
+| `ram_size` | `startup_size + imagefs_size` where the machine table checks it, 0 for machine 0 | The same sum in every boot image, 0 in nonbootable output (E7) |
 | `startup_size` | 256 plus the padded code plus the 4-byte checksum word | Computed |
 | `stored_size` | `startup_size` plus the body's length: the framed length the first pass learns under `lzo`, `imagefs_size` under `none` | Computed |
 | `imagefs_size` | The disk length, the ImageFS's `image_size` by the carried-volume rule | Computed |

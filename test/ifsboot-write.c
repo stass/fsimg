@@ -531,7 +531,10 @@ check_boot(const unsigned char *file, size_t length, const boot_expect_t *expect
 	CHECK(get_le32(h + H_PADDR_BIAS) == layers->ifsboot_paddr_bias);
 	CHECK(get_le32(h + H_IMAGE_PADDR) == layers->ifsboot_image_paddr);
 	CHECK(get_le32(h + H_RAM_PADDR) == layers->ifsboot_ram_paddr);
-	CHECK(get_le32(h + H_RAM_SIZE) == startup + expect->disk_bytes);
+	/* mkifs writes ram_size 0 for machine 0 (E7), the sum for a boot
+	 * machine. */
+	CHECK(get_le32(h + H_RAM_SIZE) == (layers->ifsboot_machine == 0 ? 0 :
+	    startup + expect->disk_bytes));
 	CHECK(get_le32(h + H_STARTUP_SIZE) == startup);
 	CHECK(get_le32(h + H_STORED_SIZE) == length - b);
 	CHECK(get_le32(h + H_IMAGEFS_PADDR) == layers->ifsboot_imagefs_paddr);
@@ -2272,7 +2275,7 @@ static void
 test_reproducible(void)
 {
 	static const uint64_t pinned[] = {
-		UINT64_C(0xe1a4b0d9dccb5bdc), UINT64_C(0x7d0a1fd4d61b7243)
+		UINT64_C(0xc43979807086c829), UINT64_C(0xa26d16af707350a5)
 	};
 	volume_spec_t spec = { .random_bytes = 3000, .seed = 1 };
 	unsigned char code[CODE_BYTES];
@@ -2419,8 +2422,7 @@ read_gzip_image(const char *path, size_t *length)
  * zero flags2 and tail rebuilds byte for byte; otherwise the rebuild
  * matches in the prefix, the code and every header field but stored_size,
  * the compression bits and a nonzero flags2 or tail, and its disk reads
- * back identical. Machine 0's ram_size is not compared: mkifs writes 0
- * there, the writer the sum (see docs/todo-ifs.md).
+ * back identical.
  */
 static void
 rebuild_native(const char *name, unsigned char *bytes, size_t length,
@@ -2506,8 +2508,7 @@ rebuild_native(const char *name, unsigned char *bytes, size_t length,
 				    fields[i] == H_VERSION || fields[i] ==
 				    H_HEADER_SIZE || fields[i] == H_MACHINE ||
 				    fields[i] == H_PREBOOT_SIZE ? 2 : 4) == 0);
-			CHECK(layers.ifsboot_machine == 0 ||
-			    get_le32(g + H_RAM_SIZE) == get_le32(h + H_RAM_SIZE));
+			CHECK(get_le32(g + H_RAM_SIZE) == get_le32(h + H_RAM_SIZE));
 			CHECK((g[H_FLAGS1] & ~0x1c) == (h[H_FLAGS1] & ~0x1c));
 			CHECK(!opaque_zero || (g[H_FLAGS2] == h[H_FLAGS2] &&
 			    bcmp(g + H_TAIL, h + H_TAIL, HEADER_BYTES - H_TAIL) == 0));

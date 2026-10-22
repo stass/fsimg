@@ -417,8 +417,10 @@ typedef struct fsimg_planned_file {
 /*
  * The header fields an ifsboot plan resolves from its settings and file
  * settings (lib/layers/ifsboot.c): the machine, flags1 (the virtual bit and
- * the compression value), the five target addresses verbatim, and the
- * length of the startup code before its padding to a word. The prefix is
+ * the compression value), the five target addresses verbatim, the
+ * length of the startup code before its padding to a word, and whether
+ * ram_size is written as startup_size + imagefs_size (a boot machine) or
+ * as 0 (machine 0, as mkifs writes it). The prefix is
  * the plan's buffered file setting and the code its startup input.
  */
 typedef struct fsimg_boot_settings {
@@ -430,6 +432,7 @@ typedef struct fsimg_boot_settings {
 	uint32_t	 imagefs_paddr;
 	uint16_t	 machine;
 	uint8_t		 flags1;
+	bool		 ram_sum;
 } fsimg_boot_settings_t;
 
 /*

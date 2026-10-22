@@ -2279,7 +2279,7 @@ def test_ifsboot_create(executable, root):
         assert header["signature"] == 0x00ff7eeb and header["machine"] == 0, header
         assert header["flags1"] == (0x08 if mode == "lzo" else 0x00), header
         assert header["startup_size"] == 256 + 4004 + 4 and header["stored_size"] == len(image)
-        assert header["ram_size"] == header["startup_size"] + header["imagefs_size"]
+        assert header["ram_size"] == 0, header  # mkifs writes 0 for machine 0
         assert image[256:256 + 4001] == startup and image[256 + 4001:256 + 4004] == bytes(3)
         assert word_sum(image[:header["startup_size"]]) == 0 and word_sum(image) == 0
         assert sorted(listing(executable, root, name)) == [

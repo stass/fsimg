@@ -81,17 +81,6 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
 * [Low] **Detail type naming** (`include/fsimg.h`): `fsimg_volume_detail_t`
   also carries container details; a neutral type name would say so before
   the API is released.
-* [Medium] **Machine 0's `ram_size` in a rebuild** (`specs/design-layers.md`,
-  `lib/layers/ifsboot.c`): `mkifs` writes `ram_size` 0 in its nonbootable
-  machine-0 output (all three E7 images), but the profile's header table
-  derives `startup_size + imagefs_size` for every machine, so an E7
-  rebuild differs from the native image in `ram_size` too, which the
-  profile's rebuild claim ("every header field but `stored_size`, the
-  compression bits, the checksum words and a nonzero tail") does not
-  allow. The owner chooses: write 0 for machine 0, whose rule the machine
-  table marks as reported and not checked, or add `ram_size` to the
-  claim's exceptions for machine 0. `test-ifsboot-write --native` does not
-  compare the field for machine 0 until then.
 * [Medium] **Required `ifsboot` keys in four tables** (`lib/layers/ifsboot.c`,
   `lib/layers/stack.c`, `cmd/fsimg/options.c`, `cmd/fsimg/job.c`): the seven
   keys without a default are named in `ifsboot_plan`'s required list, and
