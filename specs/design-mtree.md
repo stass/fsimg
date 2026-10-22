@@ -587,6 +587,7 @@ sink mutation, as for scanned sources.
 | Holes | 64 ranges per entry | `FSIMG_EINVAL` |
 | Generated digest checks | One per claiming file, in scratch storage; checked after planning, so the bytes hashed are bounded by the planned volume, each 64 KiB one unit of work | `FSIMG_ELIMIT`, resource `WORK`, naming the line |
 | Manifest length | Not bounded separately: lines are streamed and each physical line, one that only continues included, is one unit of work, which also polls cancellation | `FSIMG_ELIMIT`, resource `WORK` |
+| Written manifest (`x --mtree`) | The context's `max_manifest_bytes` (`-l manifest`), checked before each write grows the file. Zero, the default, derives the longest manifest the other limits allow: the 23-byte header and `max_entries` lines of `4 * max_path_bytes + 4 * 1023 + 199` bytes (a path and a link target, every byte escaped, and the widest keywords), saturating; an extraction those limits accept never exceeds it. It is separate from the output limit, which charges extracted file lengths, so a full volume still extracts at the default output limit of its length | `FSIMG_ELIMIT`, resource `MANIFEST`, the file no longer than the limit |
 
 All offsets, sizes, hole bounds and block indices use checked arithmetic.
 The parser retains no per-entry heap object. `fuzz/mtree.c` feeds arbitrary

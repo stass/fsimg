@@ -3,6 +3,7 @@
 """Exercise the installed command contract through independent JSON decoding."""
 
 import base64
+import errno
 import gzip
 import hashlib
 import json
@@ -11,6 +12,7 @@ import pty
 import random
 from pathlib import Path
 import re
+import resource
 import shutil
 import signal
 import socket
@@ -1878,6 +1880,22 @@ def test_mtree_export(executable, root):
         assert not list(names.iterdir()), arguments
         assert not (work / "nowhere").exists()
 
+    # The manifest has its own bound, -l manifest; a manifest that would
+    # outgrow it fails the extraction before the file grows, and nothing is
+    # published or left staged.
+    private_directory(work, "limited")
+    private_directory(work, "limited-human")
+    error = failed(invoke(executable, work, [
+        "xkf", "q.img", "--json", "-C", "limited", "-l", "manifest=64",
+        "--mtree=limited.mtree"], expected=1))
+    assert error["resource"] == "manifest" and error["limit"] == "64", error
+    assert error["output_state"] == "incomplete", error
+    assert not (work / "limited.mtree").exists()
+    assert not list(work.glob(".fsimg-*"))
+    result = invoke(executable, work, ["xkf", "q.img", "-C", "limited-human", "-l",
+                                       "manifest=64", "--mtree=limited.mtree"], expected=1)
+    assert b"(manifest limit 64, observed " in result.stderr, result.stderr
+
     def fewest(*arguments):
         for count in range(3, 16):
             target = private_directory(work, f"fds-{count}-{len(arguments)}")
@@ -1892,6 +1910,42 @@ def test_mtree_export(executable, root):
 
     plain = fewest()
     assert fewest("--mtree=fds.mtree") == plain + 1
+    assert not list(work.glob(".fsimg-*"))
+
+
+def test_mtree_failures(executable, root):
+    """However x --mtree fails, the failure is reported, no manifest is
+    published and its staging is gone: a host write of the manifest refused
+    by the file size limit, which the extracted files fit and the manifest
+    outgrows, and a work limit reached while the image is still being
+    read, before anything is written."""
+    work = root / "mtree-failures"
+    work.mkdir()
+    name = "n" * 120
+    (work / "many.mtree").write_text("".join(
+        f"./{name}{index:03} type=file fsimg.content=seeded fsimg.seed={index} size=1\n"
+        for index in range(400)))
+    invoke(executable, work, ["cf", "many.img", "-F", "qnx6", "-R", "@many.mtree"])
+
+    def limit_file_size():
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (32768, 32768))
+
+    private_directory(work, "sized")
+    error = failed(invoke(executable, work, [
+        "xf", "many.img", "--json", "-C", "sized", "--mtree=sized.mtree"],
+        expected=1, preexec_fn=limit_file_size))
+    assert error["os_error"] == errno.EFBIG, error
+    assert error["output_state"] == "incomplete", error
+    assert error["retained_manifest"] == "", error
+
+    private_directory(work, "worked")
+    error = failed(invoke(executable, work, [
+        "xf", "many.img", "--json", "-C", "worked", "-l", "work=100",
+        "--mtree=worked.mtree"], expected=1))
+    assert error["resource"] == "work", error
+    assert error["retained_manifest"] == "", error
+    assert not (work / "sized.mtree").exists() and not (work / "worked.mtree").exists()
     assert not list(work.glob(".fsimg-*"))
 
 
@@ -1939,6 +1993,7 @@ def main():
         test_manifest_refusals(executable, root)
         test_mtree_export(executable, root)
         test_mtree_reporting(executable, root)
+        test_mtree_failures(executable, root)
         test_partitioned(executable, root)
         test_containers(executable, root)
         test_compressed_and_streams(executable, root)

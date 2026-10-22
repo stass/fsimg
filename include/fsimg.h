@@ -70,7 +70,8 @@ typedef enum fsimg_resource {
 	FSIMG_RESOURCE_WORK,
 	FSIMG_RESOURCE_DEPTH,
 	FSIMG_RESOURCE_PATH,
-	FSIMG_RESOURCE_SPOOL
+	FSIMG_RESOURCE_SPOOL,
+	FSIMG_RESOURCE_MANIFEST
 } fsimg_resource_t;
 
 typedef enum fsimg_output_state {
@@ -133,7 +134,13 @@ typedef struct fsimg_options {
 	void		*cancel_argument;
 	fsimg_loss_fn_t	 loss;
 	void		*loss_argument;
-	uint64_t	 reserved[4];
+	/* The bytes of the mtree manifest an extraction writes
+	 * (fsimg_extract_options_t.manifest_fd). Zero means the longest
+	 * manifest max_entries entries can need with paths of max_path_bytes,
+	 * so by default only those limits bound it.
+	 */
+	uint64_t	 max_manifest_bytes;
+	uint64_t	 reserved[3];
 } fsimg_options_t;
 
 typedef struct fsimg_stats {

@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 832u
+#define FSIMG_JOB_BYTES 840u
 #define FSIMG_WIRE_ERROR_BYTES 592u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These

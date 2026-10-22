@@ -175,9 +175,14 @@ Write streaming newline-delimited JSON, schema version 1.
 rejects it.
 .It Fl l Ar key=value
 Set a resource limit; repeatable, each key at most once.
-Keys are scratch, spool, entries, depth, path, fds, output, work and seconds.
-Scratch, spool, path and output use bytes; the others are unsigned decimal
-counts.
+Keys are scratch, spool, entries, depth, path, fds, output, work, seconds
+and manifest.
+Scratch, spool, path, output and manifest use bytes; the others are unsigned
+decimal counts.
+Manifest bounds the file
+.Cm x Fl -mtree
+writes; by default it is the longest manifest the entries and path limits
+allow, so only they bound it.
 Zero selects the documented default.
 Seconds sets an operation deadline; zero adds no deadline.
 .It Fl m Ar bytes

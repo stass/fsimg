@@ -36,7 +36,8 @@
  * extraction destination, and a create job writing a staged image from one
  * directory root or one regular-file root. Every profile places the input at
  * 3, the writable work directory at 4, a root (when present) at 5 and the
- * scratch directory at 6.
+ * scratch directory at 6; the read job also holds the write-only staged
+ * manifest of x --mtree at 7.
  */
 typedef enum sandbox_profile {
 	PROFILE_EXTRACT,
@@ -71,18 +72,26 @@ typedef enum sandbox_attempt {
 	ATTEMPT_FD_REOPEN,
 	ATTEMPT_INHERITED_FD,
 	ATTEMPT_ALTERNATE_ABI,
+	ATTEMPT_MANIFEST_WRITE,
+	ATTEMPT_MANIFEST_REOPEN,
+	ATTEMPT_MANIFEST_METADATA,
+	ATTEMPT_MANIFEST_NAMESPACE,
 	ATTEMPT_COUNT
 } sandbox_attempt_t;
 
 static void close_unlisted(void);
 static bool read_source(sandbox_profile_t);
+static bool write_manifest(void);
+static bool manifest_attempt(sandbox_attempt_t);
 static bool attempt_operation(sandbox_attempt_t, sandbox_profile_t);
-static int run_child(const int *, sandbox_attempt_t, sandbox_profile_t);
+static int run_child(const int *, sandbox_attempt_t, sandbox_profile_t, bool);
+static bool manifest_denial(sandbox_attempt_t);
+static int refuse_readable_manifest(const int *, int);
 
 static void
 close_unlisted(void)
 {
-	if (fsimg_host_closefrom(7) == -1)
+	if (fsimg_host_closefrom(8) == -1)
 		_exit(1);
 	close(0);
 	close(1);
@@ -137,6 +146,68 @@ read_source(sandbox_profile_t profile)
 	fsimg_writer_free(writer);
 	fsimg_ctx_free(ctx);
 	return (transferred == 1 && byte == 'S');
+}
+
+/* Write the staged manifest as the extractor does: query its access mode
+ * and identity, then write through a borrowed descriptor with a resize, a
+ * write and a durable flush.
+ */
+static bool
+write_manifest(void)
+{
+	struct stat st;
+	fsimg_ctx_t *ctx;
+	fsimg_io_t *io;
+	size_t transferred;
+	int flags;
+
+	flags = fcntl(7, F_GETFL);
+	if (flags == -1 || (flags & O_ACCMODE) != O_WRONLY || fstat(7, &st) == -1 ||
+	    !S_ISREG(st.st_mode))
+		return (false);
+	if (fsimg_ctx_new(NULL, &ctx, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_io_borrow_fd(ctx, 7, FSIMG_IO_WRITE, &io, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_io_resize(io, 1, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_io_write_exact(io, 0, "M", 1, &transferred, NULL) != FSIMG_OK)
+		return (false);
+	if (fsimg_io_flush(io, true, NULL) != FSIMG_OK)
+		return (false);
+	fsimg_io_free(io);
+	fsimg_ctx_free(ctx);
+	return (transferred == 1);
+}
+
+/* The staged manifest grants write, resize and flush and nothing else: it
+ * cannot be reopened with other access or flags, its mode, owner and times
+ * cannot change, and it cannot gain a name. That it cannot be read follows
+ * from its write-only access mode, which the sandbox requires
+ * (refuse_readable_manifest). Each denial returns true.
+ */
+static bool
+manifest_attempt(sandbox_attempt_t attempt)
+{
+	switch (attempt) {
+	case ATTEMPT_MANIFEST_WRITE:
+		return (write_manifest());
+	case ATTEMPT_MANIFEST_REOPEN:
+		return (open("/proc/self/fd/7", O_RDWR) == -1 &&
+		    open("/dev/fd/7", O_RDONLY) == -1 &&
+		    fcntl(7, F_SETFL, O_APPEND) == -1);
+	case ATTEMPT_MANIFEST_METADATA:
+		return (fchmod(7, 0644) == -1 && fchown(7, getuid(), getgid()) == -1 &&
+		    futimens(7, NULL) == -1);
+	case ATTEMPT_MANIFEST_NAMESPACE:
+#ifdef AT_EMPTY_PATH
+		return (linkat(7, "", 4, "manifest-link", AT_EMPTY_PATH) == -1);
+#else
+		return (true);
+#endif
+	default:
+		return (false);
+	}
 }
 
 /* Each attempt runs in its own child: an accidental successful exec, mutation,
@@ -297,17 +368,63 @@ attempt_operation(sandbox_attempt_t attempt, sandbox_profile_t profile)
 #else
 		return (true);
 #endif
+	case ATTEMPT_MANIFEST_WRITE:
+	case ATTEMPT_MANIFEST_REOPEN:
+	case ATTEMPT_MANIFEST_METADATA:
+	case ATTEMPT_MANIFEST_NAMESPACE:
+		return (manifest_attempt(attempt));
 	case ATTEMPT_COUNT:
 		break;
 	}
 	return (false);
 }
 
-/* fds holds the input, work directory, directory root, file root and scratch
- * directory; the child installs them at the profile's numbers and enforces.
+/* The attempts denied only by the sandbox, each first run unconfined as a
+ * control that must succeed, so the denial is shown to be the sandbox's.
+ */
+static bool
+manifest_denial(sandbox_attempt_t attempt)
+{
+	return (attempt == ATTEMPT_MANIFEST_REOPEN ||
+	    attempt == ATTEMPT_MANIFEST_METADATA ||
+	    attempt == ATTEMPT_MANIFEST_NAMESPACE);
+}
+
+/* The sandbox refuses a manifest descriptor that could read: fd, opened
+ * for reading and writing, takes the manifest's place among fds. It
+ * fails before anything is installed, so a confining host is not needed.
  */
 static int
-run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile)
+refuse_readable_manifest(const int *fds, int fd)
+{
+	fsimg_sandbox_caps_t caps;
+	pid_t child;
+	int wait_status;
+
+	fsimg_sandbox_caps_init(&caps);
+	caps.input = 3;
+	caps.destination = 4;
+	caps.scratch = 6;
+	caps.manifest = 7;
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		if (dup2(fds[0], 3) == -1 || dup2(fds[1], 4) == -1 ||
+		    dup2(fds[4], 6) == -1 || dup2(fd, 7) == -1)
+			_exit(1);
+		_exit(fsimg_sandbox_install_caps(&caps, NULL) == FSIMG_EINVAL ? 0 : 1);
+	}
+	CHECK(waitpid(child, &wait_status, 0) == child);
+	return (WIFEXITED(wait_status) ? WEXITSTATUS(wait_status) : 1);
+}
+
+/* fds holds the input, work directory, directory root, file root, scratch
+ * directory and staged manifest; the child installs them at the profile's
+ * numbers and, when confine is set, enforces.
+ */
+static int
+run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile,
+    bool confine)
 {
 	struct rlimit no_core = { 0, 0 };
 	fsimg_sandbox_caps_t caps;
@@ -326,6 +443,7 @@ run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile)
 		caps.destination = 4;
 		caps.roots = -1;
 		caps.root_count = 0;
+		caps.manifest = 7;
 	}
 	root = profile == PROFILE_FILE_ROOT ? fds[3] : fds[2];
 	child = fork();
@@ -341,7 +459,13 @@ run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile)
 			_exit(1);
 		if (dup2(fds[4], 6) == -1)
 			_exit(1);
+		if (profile == PROFILE_EXTRACT && dup2(fds[5], 7) == -1)
+			_exit(1);
+		if (profile != PROFILE_EXTRACT)
+			close(7);
 		close_unlisted();
+		if (!confine)
+			_exit(attempt_operation(attempt, profile) ? 0 : 1);
 		status = fsimg_sandbox_install_caps(&caps, NULL);
 		if (status == FSIMG_EUNSUPPORTED)
 			_exit(77);
@@ -427,7 +551,8 @@ main(void)
 	struct stat before, after;
 	char sentinel;
 	unsigned unsupported_profiles;
-	int parent, work, source, source_file, scratch, input, fd, result;
+	int parent, work, source, source_file, scratch, input, manifest, readable;
+	int fd, result;
 	bool enforce, unsupported;
 
 	CHECK(mkdtemp(path) != NULL);
@@ -470,6 +595,24 @@ main(void)
 	source_file = fcntl(fd, F_DUPFD_CLOEXEC, 10);
 	CHECK(source_file != -1);
 	CHECK(close(fd) == 0);
+	fd = openat(parent, "manifest", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	manifest = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+	CHECK(manifest != -1);
+	CHECK(close(fd) == 0);
+	fd = openat(parent, "manifest", O_RDWR | O_CLOEXEC);
+	CHECK(fd != -1);
+	readable = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+	CHECK(readable != -1);
+	CHECK(close(fd) == 0);
+	{
+		const int fds[] = { input, work, source, source_file, scratch };
+
+		CHECK(refuse_readable_manifest(fds, readable) == 0);
+		/* The control: the write-only manifest passes the same check. */
+		CHECK(refuse_readable_manifest(fds, manifest) == 1);
+	}
+	CHECK(close(readable) == 0);
 
 	/* A profile the kernel cannot confine, such as a root profile on a
 	 * Linux kernel without descriptor-only mount queries, skips each of
@@ -488,12 +631,34 @@ main(void)
 	    profile++) {
 		unsupported = false;
 		for (sandbox_attempt_t attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
-			const int fds[] = { input, work, source, source_file, scratch };
+			const int fds[] = { input, work, source, source_file, scratch,
+			    manifest };
 
 			if (profile == PROFILE_EXTRACT && (attempt == ATTEMPT_SOURCE_READ ||
 			    attempt == ATTEMPT_SOURCE_MOUNT || attempt == ATTEMPT_SOURCE_WRITE))
 				continue;
-			result = run_child(fds, attempt, profile);
+			if (profile != PROFILE_EXTRACT && attempt >= ATTEMPT_MANIFEST_WRITE)
+				continue;
+			/* The control: unconfined, the operation is not denied.
+			 * An unprivileged linkat of a descriptor is refused by
+			 * some kernels anyway, where that attempt shows nothing.
+			 */
+			if (manifest_denial(attempt) &&
+			    run_child(fds, attempt, profile, false) == 0) {
+				CHECK(attempt == ATTEMPT_MANIFEST_NAMESPACE);
+				printf("note: linkat of a descriptor is refused unconfined "
+				    "here; the namespace attempt shows nothing\n");
+			}
+			/* Undo what a control changed: the shared flags, the
+			 * mode and a new name.
+			 */
+			if (manifest_denial(attempt)) {
+				CHECK(fcntl(manifest, F_SETFL, 0) == 0);
+				CHECK(fchmod(manifest, 0600) == 0);
+				if (unlinkat(work, "manifest-link", 0) == -1)
+					CHECK(errno == ENOENT);
+			}
+			result = run_child(fds, attempt, profile, true);
 			if (result == 77) {
 				unsupported = true;
 				continue;
@@ -508,6 +673,10 @@ main(void)
 				CHECK(unlinkat(work, "delete-file", 0) == 0);
 			if (attempt == ATTEMPT_WORK_MKDIR && profile == PROFILE_EXTRACT)
 				CHECK(unlinkat(work, "work-directory", AT_REMOVEDIR) == 0);
+			if (attempt == ATTEMPT_MANIFEST_WRITE) {
+				CHECK(fstat(manifest, &after) == 0 && after.st_size == 1);
+				CHECK(ftruncate(manifest, 0) == 0);
+			}
 		}
 		if (unsupported)
 			unsupported_profiles++;
@@ -525,6 +694,11 @@ main(void)
 	CHECK(unlinkat(source, "source", 0) == 0);
 	CHECK(close(source) == 0);
 	CHECK(close(scratch) == 0);
+	CHECK(fstat(manifest, &after) == 0 && after.st_size == 0 && after.st_nlink == 1);
+	CHECK((after.st_mode & 07777) == 0600);
+	CHECK(close(manifest) == 0);
+	CHECK(faccessat(work, "manifest-link", F_OK, AT_SYMLINK_NOFOLLOW) == -1);
+	CHECK(unlinkat(parent, "manifest", 0) == 0);
 	CHECK(close(work) == 0);
 	CHECK(close(input) == 0);
 	CHECK(unlinkat(parent, "input", 0) == 0);

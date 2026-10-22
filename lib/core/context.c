@@ -204,7 +204,8 @@ fsimg_ctx_new(const fsimg_options_t *opts, fsimg_ctx_t **out,
 		if (opts->version != FSIMG_OPTIONS_VERSION || opts->flags != 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CONTEXT, "unsupported options version or flags"));
-		for (size_t i = 0; i < 4; i++) {
+		for (size_t i = 0; i < sizeof(opts->reserved) /
+		    sizeof(opts->reserved[0]); i++) {
 			if (opts->reserved[i] != 0)
 				return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 				    FSIMG_OP_CONTEXT, "nonzero reserved option"));

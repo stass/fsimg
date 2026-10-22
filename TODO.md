@@ -431,6 +431,17 @@
 
 ## Security residuals
 
+* [Low] **Listings outgrow their image at the default limits**
+  (`lib/extract/mtree-writer.c`, `cmd/fsimg/display.c`): a manifest line
+  or a `t` listing line holds an entry's full path with every byte
+  escaped, up to four bytes per path byte, so an image of many entries
+  deep beneath long non-ASCII names writes a manifest, or a listing to
+  stdout, around a hundred times its own size. The manifest's default
+  limit derives from the entries and path limits so that no full-volume
+  extraction is refused, which at their defaults is about 2.6 TB;
+  `-l manifest`, `-l entries` and `-l path` lower it, and nothing but the
+  same two limits bounds the listing.
+
 * [High] **Symbolic-link import under the Linux sandbox** (`cmd/fsimg/sandbox.c`,
   `lib/source/source.c`, `specs/design-security.md`): the source scan reads a
   link with `fstatat(AT_SYMLINK_NOFOLLOW)` and `readlinkat()`, which the
@@ -480,16 +491,6 @@
   cancellation, which are unlimited by default. Decide between a default
   work budget for create mode and a fixed bound on the size a generated
   digest may cover.
-* [Medium] **`x --mtree` output is bounded only by entries and work**
-  (`lib/extract/mtree-writer.c`, `specs/design-mtree.md` "Security and
-  bounds"): a manifest line holds an entry's full encoded path, up to four
-  bytes per path byte, so an image of many entries deep beneath long
-  non-ASCII names writes a manifest about a hundred times its own size,
-  outside the output quota, which charges file lengths only. The listing of
-  `t` amplifies the same way to stdout. Decide between charging manifest
-  bytes to the output quota (which would refuse a full volume at the
-  default quota of the volume's length) and a separate manifest bound, and
-  state it in the design's bounds table.
 * [Low] **The library's staging directory skips the privacy check**
   (`lib/output/write.c` `create_staging`): `fsimg_writer_write_at()` and
   transcoding stage beneath the caller's directory in a
@@ -551,22 +552,25 @@
   and `x --mtree=FILE` (`lib/extract/mtree-writer.c`) exist. What remains
   is a content-path test across a nested mount where the host allows one;
   reading the manifest `x --mtree` writes with `mtree(8)` on FreeBSD and
-  Linux (`test/manifest.c` checks it with bsdtar only); injected write,
-  flush and allocation failures and cancellation while the manifest is
-  written; the refusal of an empty, overlong or NUL-holding link target
-  (`record_skipped`), which needs a crafted image since the writers refuse
-  such targets; FILE appearing between the early check and publication;
-  the worker's failed close of the manifest; and a staged image or
+  Linux (`test/manifest.c` checks it with bsdtar only); the refusal of an
+  empty, overlong or NUL-holding link target (`record_skipped`), which
+  needs a crafted image since the writers refuse such targets; FILE
+  appearing between the early check and publication; the worker's failed
+  close of the manifest, which no mechanism here can make fail on a regular
+  file; and a staged image or
   manifest retained by a publication that is unsupported or uncertain,
   which needs a filesystem refusing hard links or a failing directory sync
   (`test/cli.c` checks only how a retained path is reported). With `-E`, a
   FILE inside the destination is refused as a non-empty destination, since
   the manifest's staging directory is made first; the targeted overlap
   message is unreachable there. An exFAT round
-  trip through `x --mtree` is byte-equal only when the host reports an
-  extracted file's unwritten tail as a hole, since exFAT records each
-  file's initialized length and host import takes it from the holes the
-  host reports (`test/manifest.c` avoids such files).
+  trip through `x --mtree` is not byte-equal for a nonempty file of
+  generated zero content: planning (`lib/formats/exfat/write-plan.c`) gives
+  it an initialized length of zero but gives a host file, which its
+  extracted copy is, its full length whatever holes the host reports, so
+  the rebuilt image initializes it (`test_export_exfat_zero_file` in
+  `test/manifest.c`). Planning a host file that is one hole as zero storage
+  would close it.
 
 * [Low] **Opt-in metadata restore** (`lib/extract/`): consider an opt-in that
   applies permission bits without setuid, setgid or sticky through opened

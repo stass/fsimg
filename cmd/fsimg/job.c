@@ -92,7 +92,8 @@ typedef enum job_string_field {
 	JOB_GZIP_LEVEL_OFFSET = 808,
 	JOB_COMPRESSION_OFFSET = 816,
 	JOB_COMPRESSION_BYTES = 16,
-	JOB_RESERVED_OFFSET = 832
+	JOB_MANIFEST_OFFSET = 832,
+	JOB_RESERVED_OFFSET = 840
 } job_string_field_t;
 
 /* MBR flag bits at JOB_MBR_FLAGS. */
@@ -132,7 +133,8 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_CONTAINER_FLAGS + 8 == JOB_SPOOL_OFFSET &&
     JOB_SPOOL_OFFSET + 8 == JOB_GZIP_LEVEL_OFFSET &&
     JOB_GZIP_LEVEL_OFFSET + 8 == JOB_COMPRESSION_OFFSET &&
-    JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_RESERVED_OFFSET &&
+    JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_MANIFEST_OFFSET &&
+    JOB_MANIFEST_OFFSET + 8 == JOB_RESERVED_OFFSET &&
     JOB_RESERVED_OFFSET <= FSIMG_JOB_BYTES, "the layer fields do not overlap");
 _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     JOB_GPT_TYPE_BYTES &&
@@ -444,6 +446,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	put_field(raw, JOB_MEMORY, request->limits.memory_bytes);
 	put_field(raw, JOB_SCRATCH, request->limits.scratch_bytes);
 	fsimg_wire_put64(raw + JOB_SPOOL_OFFSET, request->limits.spool_bytes);
+	fsimg_wire_put64(raw + JOB_MANIFEST_OFFSET,
+	    request->limits.max_manifest_bytes);
 	put_field(raw, JOB_ENTRIES, request->limits.max_entries);
 	put_field(raw, JOB_OUTPUT, request->limits.max_output_bytes);
 	put_field(raw, JOB_WORK, request->limits.max_work);
@@ -601,6 +605,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	request->limits.max_path_bytes = (uint32_t)get_field(raw, JOB_PATH);
 	request->limits.max_open_files = (uint32_t)get_field(raw, JOB_FDS);
 	request->limits.spool_bytes = fsimg_wire_get64(raw + JOB_SPOOL_OFFSET);
+	request->limits.max_manifest_bytes =
+	    fsimg_wire_get64(raw + JOB_MANIFEST_OFFSET);
 	request->offset = get_field(raw, JOB_OFFSET);
 	request->length = get_field(raw, JOB_LENGTH);
 	request->seconds = get_field(raw, JOB_SECONDS);

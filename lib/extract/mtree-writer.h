@@ -58,6 +58,14 @@ fsimg_status_t fsimg_mtree_writer_check(int, fsimg_error_t *);
 fsimg_status_t fsimg_mtree_writer_open(fsimg_ctx_t *, fsimg_session_t *, int,
     fsimg_mtree_writer_t **, fsimg_error_t *);
 
+/* Start a manifest on output, which the writer owns from this call on,
+ * whatever it returns. fsimg_mtree_writer_open() starts one on its
+ * descriptor's borrowed I/O object; tests start one on an I/O object that
+ * fails on demand.
+ */
+fsimg_status_t fsimg_mtree_writer_start(fsimg_ctx_t *, fsimg_session_t *,
+    fsimg_io_t *, fsimg_mtree_writer_t **, fsimg_error_t *);
+
 /* Append the line for one entry. A failure leaves the manifest incomplete;
  * the caller frees the writer and publishes nothing.
  */

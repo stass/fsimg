@@ -89,14 +89,17 @@ After `--` every word is an operand, including one spelled `-C`.
 | `-h`, `-V` | Help and version |
 
 `-l` keys are `scratch`, `spool`, `entries`, `depth`, `path`, `fds`,
-`output`, `work` and `seconds`. Scratch, spool, path and output values are
-byte quantities; entries, depth, fds and work are unsigned counts; seconds is
-an integer deadline measured on the monotonic clock, where zero selects the
-default of no additional deadline. `spool` bounds the temporary file that
-holds a stream or compressed input, defined in the
-[layer design](design-layers.md#budget). `fds` (default 128) also caps the
-number of create operands, since the worker holds one open root per operand,
-two for a manifest operand with a content directory (the manifest and
+`output`, `work`, `seconds` and `manifest`. Scratch, spool, path, output and
+manifest values are byte quantities; entries, depth, fds and work are
+unsigned counts; seconds is an integer deadline measured on the monotonic
+clock, where zero selects the default of no additional deadline. `spool`
+bounds the temporary file that holds a stream or compressed input, defined
+in the [layer design](design-layers.md#budget). `manifest` bounds the file
+`x --mtree` writes, apart from `output`; by default it is the longest
+manifest the `entries` and `path` limits allow
+([manifest design](design-mtree.md#security-and-bounds)). `fds` (default
+128) also caps the number of create operands, since the worker holds one
+open root per operand, two for a manifest operand with a content directory (the manifest and
 the directory),
 besides its own scratch directory, the staging directory of an image
 written to a file, the [raw intermediate](design-layers.md#handed-over-files)

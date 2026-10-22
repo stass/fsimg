@@ -106,7 +106,7 @@ their output's descriptors travel in the sink.
 
 | `fsimg_options_t` field group | Contract |
 | --- | --- |
-| Limits | Memory, scratch, spool, entries, depth, path bytes, open files, optional work/deadline ceilings; defaults in the architecture |
+| Limits | Memory, scratch, spool, entries, depth, path bytes, open files, written manifest bytes, optional work/deadline ceilings; defaults in the architecture |
 | Scratch directory descriptor | Authorized parent for private metadata scratch; `-1` disables spill |
 | Progress callback and argument | Receives bounded counters and phase, never an accumulated event list |
 | Cancellation callback and argument | Polled at each batch and external-sort pass; true requests cancellation |
@@ -672,9 +672,12 @@ accounting includes the context and alignment-preserving allocation headers.
 The statistics query is `fsimg_ctx_get_stats(ctx, out, error)`; status labels are
 available through `fsimg_status_string(status)` without allocation.
 
-`fsimg_options_t` uses `uint64_t` byte/count limits, including `spool_bytes`,
-`uint32_t` depth/path/FD limits, separate callback arguments, and zeroed
-reserved words. Its `flags` field accepts zero. `FSIMG_RESOURCE_SPOOL`
+`fsimg_options_t` uses `uint64_t` byte/count limits, including `spool_bytes`
+and `max_manifest_bytes`, `uint32_t` depth/path/FD limits, separate callback
+arguments, and zeroed reserved words. Its `flags` field accepts zero.
+`FSIMG_RESOURCE_MANIFEST` identifies the limit on the manifest an
+extraction writes through `manifest_fd`, whose zero default derives from
+the entry and path limits. `FSIMG_RESOURCE_SPOOL`
 identifies the spool limit in errors, and the statistics report the live
 spool length, its peak and the storage the spool file allocated (its
 `st_blocks`, sampled when the spool is sealed), and `FSIMG_OP_IMAGE` identifies a

@@ -306,7 +306,7 @@ usage(fsimg_cli_display_t *display, bool overview)
 /* Option descriptions shared by the image modes, in option order. */
 static const char help_budgets[] =
     "    -l key=value    Limit scratch, spool, entries, depth, path, fds, output,\n"
-    "                    work or seconds\n";
+    "                    work, seconds or manifest\n";
 static const char help_memory[] =
     "    -m bytes        Memory budget (default 256M, minimum 16M)\n";
 static const char help_read_common[] =
@@ -1300,12 +1300,14 @@ limits(fsimg_cli_display_t *display)
 	append(display, "\"limits\":{\"memory_bytes\":\"%llu\",\"scratch_bytes\":\"%llu\","
 	    "\"spool_bytes\":\"%llu\","
 	    "\"entries\":\"%llu\",\"depth\":\"%u\",\"path_bytes\":\"%u\",\"fds\":\"%u\","
-	    "\"output_bytes\":\"%llu\",\"work\":\"%llu\",\"seconds\":\"%llu\",\"scratch_enabled\":%s}",
+	    "\"output_bytes\":\"%llu\",\"work\":\"%llu\",\"seconds\":\"%llu\","
+	    "\"manifest_bytes\":\"%llu\",\"scratch_enabled\":%s}",
 	    (unsigned long long)r->limits.memory_bytes, (unsigned long long)r->limits.scratch_bytes,
 	    (unsigned long long)r->limits.spool_bytes,
 	    (unsigned long long)r->limits.max_entries, r->limits.max_depth, r->limits.max_path_bytes,
 	    r->limits.max_open_files, (unsigned long long)r->limits.max_output_bytes,
 	    (unsigned long long)r->limits.max_work, (unsigned long long)r->seconds,
+	    (unsigned long long)r->limits.max_manifest_bytes,
 	    strcmp(display->options->scratch, "-") == 0 ? "false" : "true");
 }
 
@@ -1409,7 +1411,9 @@ static void
 failure(fsimg_cli_display_t *display)
 {
 	static const char *const resources[] = { "none", "memory", "scratch", "fds",
-	    "entries", "output", "work", "depth", "path", "spool" };
+	    "entries", "output", "work", "depth", "path", "spool", "manifest" };
+	_Static_assert(sizeof(resources) / sizeof(resources[0]) ==
+	    FSIMG_RESOURCE_MANIFEST + 1, "every resource has a name");
 	static const char *const states[] = { "absent", "incomplete", "published", "uncertain" };
 	const fsimg_error_t *error = display->failure;
 	const fsimg_layer_t *layer;

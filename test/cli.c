@@ -172,7 +172,7 @@ test_options(void)
 	};
 	char *dry_run[] = { "fsimg", "-cnR", "-F", "exfat", ".", NULL };
 	char *defaults[] = { "fsimg", "-i", "-f", "image", "-m", "0", "-l", "fds=0",
-	    "-l", "spool=1M", NULL };
+	    "-l", "spool=1M", "-l", "manifest=2K", NULL };
 	char *listing[] = { "fsimg", "tf", "image", "--json", "--", "/A", NULL };
 	char *flat[] = { "fsimg", "-t", "--no-recursion", "-f", "image", "A", NULL };
 	char *qnx6[] = { "fsimg", "-cn", "-F", "qnx6", "-o", "endian=big",
@@ -199,6 +199,7 @@ test_options(void)
 	CHECK(options.request.limits.memory_bytes == UINT64_C(256) * 1024 * 1024);
 	CHECK(options.request.limits.max_open_files == 128);
 	CHECK(options.request.limits.spool_bytes == UINT64_C(1024) * 1024);
+	CHECK(options.request.limits.max_manifest_bytes == 2048);
 	CHECK(options.request.kind == FSIMG_JOB_INFO && strcmp(options.mode, "i") == 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(listing, &options) == FSIMG_OK);

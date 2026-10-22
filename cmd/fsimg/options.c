@@ -151,7 +151,7 @@ static const char *const generic_suffixes[] = { ".bin", ".dd", ".img", ".raw" };
 typedef enum cli_limit_key {
 	CLI_LIMIT_SCRATCH, CLI_LIMIT_SPOOL, CLI_LIMIT_ENTRIES, CLI_LIMIT_DEPTH,
 	CLI_LIMIT_PATH, CLI_LIMIT_FDS, CLI_LIMIT_OUTPUT, CLI_LIMIT_WORK,
-	CLI_LIMIT_SECONDS, CLI_LIMIT_COUNT
+	CLI_LIMIT_SECONDS, CLI_LIMIT_MANIFEST, CLI_LIMIT_COUNT
 } cli_limit_key_t;
 
 typedef enum cli_setting_key {
@@ -572,7 +572,7 @@ parse_limit(cli_parse_t *parse, const char *text, unsigned *seen)
 		[CLI_LIMIT_ENTRIES] = "entries", [CLI_LIMIT_DEPTH] = "depth",
 		[CLI_LIMIT_PATH] = "path", [CLI_LIMIT_FDS] = "fds",
 		[CLI_LIMIT_OUTPUT] = "output", [CLI_LIMIT_WORK] = "work",
-		[CLI_LIMIT_SECONDS] = "seconds"
+		[CLI_LIMIT_SECONDS] = "seconds", [CLI_LIMIT_MANIFEST] = "manifest"
 	};
 	fsimg_worker_request_t *request = &parse->options->request;
 	const char *value;
@@ -596,7 +596,8 @@ parse_limit(cli_parse_t *parse, const char *text, unsigned *seen)
 		    text));
 	*seen |= 1u << key;
 	bytes = key == CLI_LIMIT_SCRATCH || key == CLI_LIMIT_SPOOL ||
-	    key == CLI_LIMIT_PATH || key == CLI_LIMIT_OUTPUT;
+	    key == CLI_LIMIT_PATH || key == CLI_LIMIT_OUTPUT ||
+	    key == CLI_LIMIT_MANIFEST;
 	if (fsimg_cli_number(value + 1, bytes, &number, parse->error) != FSIMG_OK)
 		return (syntax_naming(parse, bytes ?
 		    "resource limit requires an unsigned byte quantity" :
@@ -620,6 +621,7 @@ parse_limit(cli_parse_t *parse, const char *text, unsigned *seen)
 	case CLI_LIMIT_OUTPUT: request->limits.max_output_bytes = number; break;
 	case CLI_LIMIT_WORK: request->limits.max_work = number; break;
 	case CLI_LIMIT_SECONDS: request->seconds = number; break;
+	case CLI_LIMIT_MANIFEST: request->limits.max_manifest_bytes = number; break;
 	case CLI_LIMIT_COUNT: return (syntax(parse, "invalid resource-limit key"));
 	}
 	return (FSIMG_OK);

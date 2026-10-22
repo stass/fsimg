@@ -254,7 +254,7 @@ fsimg_wire_error_decode(const unsigned char *raw, uint32_t length,
 	if (code < (uint64_t)(int64_t)FSIMG_EDURABILITY ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OS_ERROR) > INT32_MAX ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OPERATION) > FSIMG_OP_IMAGE ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_RESOURCE) > FSIMG_RESOURCE_SPOOL ||
+	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_RESOURCE) > FSIMG_RESOURCE_MANIFEST ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OUTPUT) > FSIMG_OUTPUT_UNCERTAIN ||
 	    flags > 7 ||
 	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_CLEANUP) > INT32_MAX ||

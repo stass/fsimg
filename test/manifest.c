@@ -4,11 +4,14 @@
 #include "config.h"
 
 #include <sys/types.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +21,7 @@
 
 #include "digest.h"
 #include "internal.h"
+#include "mtree-writer.h"
 #include "socket.h"
 #include "source.h"
 #include "test.h"
@@ -68,6 +72,34 @@ typedef struct refusal {
 	const char	*path;
 } refusal_t;
 
+/* The calls a manifest output receives, by kind. */
+typedef enum sink_call {
+	SINK_RESIZE,
+	SINK_WRITE,
+	SINK_FLUSH,
+	SINK_CALL_KINDS
+} sink_call_t;
+
+/*
+ * A manifest output for the writer that counts each kind of call it
+ * receives and fails the one numbered fail_at, counted from one, of the
+ * kind fail_kind; fail_at zero fails nothing. It keeps only the length.
+ */
+typedef struct failing_sink {
+	uint64_t	 length;
+	unsigned	 calls[SINK_CALL_KINDS];
+	sink_call_t	 fail_kind;
+	unsigned	 fail_at;
+} failing_sink_t;
+
+/* A cancellation callback cancelling the poll numbered cancel_at, counted
+ * from one, and every poll after it; cancel_at zero cancels nothing.
+ */
+typedef struct poll_counter {
+	unsigned	 polls;
+	unsigned	 cancel_at;
+} poll_counter_t;
+
 /* SHA-256 values computed by the harness's definition in Ruby
  * (FileContent.bytes, Digest::SHA256), independent of this C code.
  */
@@ -107,8 +139,8 @@ static const char generated_manifest[] =
     "./dir/empty fsimg.content=zero size=0\n";
 
 static void fixture_open(fixture_t *, const char *, uint32_t);
-static void fixture_open_limited(fixture_t *, const char *, uint32_t,
-    uint64_t);
+static void fixture_open_options(fixture_t *, const char *, uint32_t,
+    const fsimg_options_t *);
 static void fixture_writer(fixture_t *, const char *, uint32_t);
 static void fixture_close(fixture_t *);
 static void append_text(char *, size_t, const char *);
@@ -161,8 +193,26 @@ static void rebuild_from_extraction(fixture_t *, const char *, uint32_t,
     const char *, image_t *);
 static void test_export_round_trip(const char *, const char *);
 static void test_export_changes_detected(void);
+static uint64_t initialized_bytes(fixture_t *);
+static void test_export_exfat_zero_file(void);
+static char *long_source(void);
 static void test_export_long_manifest(void);
+static void test_export_manifest_limit(void);
 static void test_export_lines(void);
+static fsimg_status_t sink_size(void *, uint64_t *, fsimg_error_t *);
+static fsimg_status_t sink_resize(void *, uint64_t, fsimg_error_t *);
+static fsimg_status_t sink_write(void *, uint64_t, const void *, size_t,
+    size_t *, fsimg_error_t *);
+static fsimg_status_t sink_flush(void *, fsimg_error_t *);
+static bool sink_fails(failing_sink_t *, sink_call_t);
+static bool poll_cancelled(void *);
+static fsimg_status_t write_lines(fixture_t *, failing_sink_t *);
+static void test_export_writer_faults(void);
+static fsimg_status_t extract_faulted(fixture_t *, const image_t *,
+    const char *, uint64_t, fsimg_error_t *);
+static void test_export_allocation_failures(void);
+static void test_export_cancellation(void);
+static void test_export_file_size_limit(void);
 static void test_export_refusals(void);
 static void test_export_read_by_bsdtar(void);
 static void rebuild_from_tool(fixture_t *, const char *const *, int,
@@ -171,15 +221,16 @@ static void rebuild_from_tool(fixture_t *, const char *const *, int,
 static void
 fixture_open(fixture_t *fixture, const char *format, uint32_t flags)
 {
-	fixture_open_limited(fixture, format, flags, 0);
+	fixture_open_options(fixture, format, flags, NULL);
 }
 
-/* A fixture whose context refuses output beyond max_output_bytes, zero
- * for no limit.
+/* A fixture whose context takes its limits and callbacks from base, or the
+ * defaults when base is NULL; the fixture sets the memory budget, the
+ * descriptor limit and scratch itself.
  */
 static void
-fixture_open_limited(fixture_t *fixture, const char *format, uint32_t flags,
-    uint64_t max_output_bytes)
+fixture_open_options(fixture_t *fixture, const char *format, uint32_t flags,
+    const fsimg_options_t *base)
 {
 	fsimg_options_t options;
 
@@ -190,11 +241,13 @@ fixture_open_limited(fixture_t *fixture, const char *format, uint32_t flags,
 	fixture->parent = open(fixture->directory,
 	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	CHECK(fixture->parent != -1);
-	fsimg_options_init(&options);
+	if (base != NULL)
+		options = *base;
+	else
+		fsimg_options_init(&options);
 	options.memory_bytes = UINT64_C(64) * 1024 * 1024;
 	options.scratch_directory_fd = fixture->parent;
 	options.max_open_files = 16;
-	options.max_output_bytes = max_output_bytes;
 	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline,
 	    NULL) == FSIMG_OK);
@@ -674,12 +727,15 @@ refused_plan_work(const char *format, uint64_t volume_bytes,
     uint64_t max_output_bytes, const char *manifest, fsimg_status_t status)
 {
 	fsimg_write_options_t write_options;
+	fsimg_options_t options;
 	fixture_t fixture;
 	fsimg_error_t error;
 	const fsimg_plan_t *plan;
 	uint64_t work;
 
-	fixture_open_limited(&fixture, format, 0, max_output_bytes);
+	fsimg_options_init(&options);
+	options.max_output_bytes = max_output_bytes;
+	fixture_open_options(&fixture, format, 0, &options);
 	fsimg_writer_free(fixture.writer);
 	fsimg_write_options_init(&write_options);
 	write_options.volume_bytes = volume_bytes;
@@ -1450,9 +1506,8 @@ rebuild_from_tool(fixture_t *fixture, const char *const *argv, int tree,
  * escapes, every generator and a hole, a deep directory, and on QNX the
  * owners, modes, links and FIFO the safe extractor cannot create.
  *
- * The FAT and exFAT manifest has no file ending in zeros: exFAT records
- * how much of a file was written, which for a host file depends on
- * whether its host reports the extracted file's unwritten tail as a hole.
+ * The FAT and exFAT manifest has no nonempty zero-content file, which
+ * exFAT cannot carry back byte for byte (test_export_exfat_zero_file).
  */
 static const char export_manifest_fat[] =
     "/set uid=0 gid=0 mode=0644 time=1500000000\n"
@@ -1542,6 +1597,56 @@ rebuild_from_extraction(fixture_t *fixture, const char *format, uint32_t flags,
 	CHECK(close(manifest) == 0);
 	CHECK(close(tree) == 0);
 	CHECK(emit_image(fixture, image, NULL) == FSIMG_OK);
+}
+
+/* The initialized payload bytes the fixture's writer plans. */
+static uint64_t
+initialized_bytes(fixture_t *fixture)
+{
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+
+	CHECK(fsimg_writer_plan(fixture->writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	return (info.initialized_bytes);
+}
+
+/*
+ * What exFAT cannot carry back. Its planning gives a generated zero file
+ * an initialized length of zero but a host file its full length, holes or
+ * not, since host contents are copied rather than known to be zero. The
+ * extracted copy of a nonempty zero file is a host file, so the image
+ * rebuilt from it initializes the file, and the images differ, while the
+ * manifests, which carry no initialized length, still agree.
+ */
+static void
+test_export_exfat_zero_file(void)
+{
+	static const char source[] =
+	    "/set uid=0 gid=0 mode=0644 time=1500000000\n"
+	    "./zero type=file fsimg.content=zero size=5000\n";
+	fixture_t fixture;
+	image_t original, rebuilt;
+	char *first, *second;
+
+	fixture_open(&fixture, "exfat", FSIMG_WRITE_REPRODUCIBLE);
+	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
+	CHECK(initialized_bytes(&fixture) == 0);
+	CHECK(emit_image(&fixture, &original, NULL) == FSIMG_OK);
+	first = extract_with_manifest(&fixture, &original, "zero");
+
+	rebuild_from_extraction(&fixture, "exfat", FSIMG_WRITE_REPRODUCIBLE,
+	    "zero", &rebuilt);
+	CHECK(initialized_bytes(&fixture) == 5000);
+	CHECK(rebuilt.length == original.length &&
+	    bcmp(rebuilt.bytes, original.bytes, (size_t)original.length) != 0);
+	second = extract_with_manifest(&fixture, &rebuilt, "again");
+	CHECK(strcmp(first, second) == 0);
+	free(first);
+	free(second);
+	free(original.bytes);
+	free(rebuilt.bytes);
+	fixture_close(&fixture);
 }
 
 /* The round trip x --mtree promises. Under reproducible mode the image
@@ -1658,21 +1763,11 @@ test_export_changes_detected(void)
 static void
 test_export_long_manifest(void)
 {
-	char line[192];
 	fixture_t fixture;
 	image_t original, rebuilt;
 	char *source, *text;
-	size_t capacity;
 
-	capacity = 800 * sizeof(line) + 64;
-	source = malloc(capacity);
-	CHECK(source != NULL);
-	snprintf(source, capacity, "./d type=dir\n");
-	for (unsigned i = 0; i < 800; i++) {
-		snprintf(line, sizeof(line), "./d/" LONG_NAME_100 "%03u type=file "
-		    "fsimg.content=seeded fsimg.seed=%u size=%u\n", i, i, 1 + i % 7);
-		append_text(source, capacity, line);
-	}
+	source = long_source();
 	fixture_open(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE);
 	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
 	CHECK(emit_image(&fixture, &original, NULL) == FSIMG_OK);
@@ -1686,6 +1781,383 @@ test_export_long_manifest(void)
 	free(source);
 	free(original.bytes);
 	free(rebuilt.bytes);
+	fixture_close(&fixture);
+}
+
+/* A source manifest of 800 files with 103-byte names, whose exported
+ * manifest outgrows two of the writer's 64 KiB buffers.
+ */
+static char *
+long_source(void)
+{
+	char line[192];
+	char *source;
+	size_t capacity;
+
+	capacity = 800 * sizeof(line) + 64;
+	source = malloc(capacity);
+	CHECK(source != NULL);
+	snprintf(source, capacity, "./d type=dir\n");
+	for (unsigned i = 0; i < 800; i++) {
+		snprintf(line, sizeof(line), "./d/" LONG_NAME_100 "%03u type=file "
+		    "fsimg.content=seeded fsimg.seed=%u size=%u\n", i, i, 1 + i % 7);
+		append_text(source, capacity, line);
+	}
+	return (source);
+}
+
+/* The context's manifest limit refuses the first line that would grow
+ * the manifest beyond it, before the file grows: the 64 KiB the first full
+ * buffer wrote stay, and the line that crosses the limit is never taken.
+ */
+static void
+test_export_manifest_limit(void)
+{
+	fsimg_extract_options_t extract;
+	fsimg_options_t options;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	fsimg_error_t error;
+	fixture_t fixture;
+	image_t image;
+	struct stat st;
+	char *source;
+	int fd;
+
+	source = long_source();
+	fsimg_options_init(&options);
+	options.max_manifest_bytes = 70000;
+	fixture_open_options(&fixture, "qnx6", FSIMG_WRITE_REPRODUCIBLE, &options);
+	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
+	fd = openat(fixture.parent, "limited.mtree",
+	    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	memory_io(&fixture, &image, false, &input);
+	CHECK(fsimg_reader_open(fixture.ctx, input, NULL, &reader,
+	    NULL) == FSIMG_OK);
+	fsimg_extract_options_init(&extract);
+	extract.manifest_fd = fd;
+	CHECK(fsimg_extract_at(reader, fixture.parent, "limited", &extract,
+	    &error) == FSIMG_ELIMIT);
+	CHECK(error.resource == FSIMG_RESOURCE_MANIFEST);
+	CHECK(error.limit == 70000 && error.observed > 70000 &&
+	    error.observed < 70000 + 512);
+	CHECK(fstat(fd, &st) == 0 && st.st_size == 65536);
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+	CHECK(close(fd) == 0);
+	free(image.bytes);
+	free(source);
+	fixture_close(&fixture);
+}
+
+/* Count a call of kind and say whether it is the one to fail. */
+static bool
+sink_fails(failing_sink_t *sink, sink_call_t kind)
+{
+	return (++sink->calls[kind] == sink->fail_at && kind == sink->fail_kind);
+}
+
+static fsimg_status_t
+sink_size(void *argument, uint64_t *length, fsimg_error_t *error FSIMG_UNUSED)
+{
+	*length = ((failing_sink_t *)argument)->length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+sink_resize(void *argument, uint64_t length, fsimg_error_t *error)
+{
+	failing_sink_t *sink = argument;
+
+	if (sink_fails(sink, SINK_RESIZE))
+		return (fsimg_error_set(error, FSIMG_EIO, ENOSPC, FSIMG_OP_IO,
+		    "injected resize failure"));
+	sink->length = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+sink_write(void *argument, uint64_t offset, const void *buffer FSIMG_UNUSED,
+    size_t length, size_t *transferred, fsimg_error_t *error)
+{
+	failing_sink_t *sink = argument;
+
+	*transferred = 0;
+	if (sink_fails(sink, SINK_WRITE))
+		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
+		    "injected write failure"));
+	CHECK(offset + length <= sink->length);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+sink_flush(void *argument, fsimg_error_t *error)
+{
+	failing_sink_t *sink = argument;
+
+	if (sink_fails(sink, SINK_FLUSH))
+		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
+		    "injected flush failure"));
+	return (FSIMG_OK);
+}
+
+static bool
+poll_cancelled(void *argument)
+{
+	poll_counter_t *counter = argument;
+
+	return (counter->cancel_at != 0 && ++counter->polls >= counter->cancel_at);
+}
+
+/* Write a manifest of 2000 directory lines with 200-byte paths, more than
+ * six of the writer's 64 KiB buffers, to sink; the writer is freed
+ * whatever happens, so the fixture's accounting shows any leak.
+ */
+static fsimg_status_t
+write_lines(fixture_t *fixture, failing_sink_t *sink)
+{
+	char path[256];
+	fsimg_mtree_writer_t *writer;
+	fsimg_mtree_record_t record;
+	fsimg_session_t session;
+	fsimg_entry_t entry;
+	fsimg_io_ops_t ops;
+	fsimg_io_t *output;
+	fsimg_status_t status;
+
+	fsimg_io_ops_init(&ops);
+	ops.flags = FSIMG_IO_DURABLE;
+	ops.get_size = sink_size;
+	ops.resize = sink_resize;
+	ops.write_at = sink_write;
+	ops.flush = sink_flush;
+	status = fsimg_io_from_callbacks(fixture->ctx, &ops, sink, &output, NULL);
+	if (status != FSIMG_OK)
+		return (status);
+	fsimg_session_init(&session, fixture->ctx, "manifest", 0);
+	status = fsimg_mtree_writer_start(fixture->ctx, &session, output, &writer,
+	    NULL);
+	if (status != FSIMG_OK)
+		return (status);
+	bzero(&entry, sizeof(entry));
+	entry.kind = FSIMG_ENTRY_DIRECTORY;
+	entry.path = path;
+	bzero(&record, sizeof(record));
+	record.entry = &entry;
+	for (unsigned i = 0; i < 2000; i++) {
+		snprintf(path, sizeof(path), "/%04u" LONG_NAME_100 LONG_NAME_10
+		    LONG_NAME_10 LONG_NAME_10 LONG_NAME_10 LONG_NAME_10
+		    LONG_NAME_10 LONG_NAME_10 LONG_NAME_10 LONG_NAME_10, i);
+		status = fsimg_mtree_writer_add(writer, &record, NULL);
+		if (status != FSIMG_OK) {
+			fsimg_mtree_writer_free(writer);
+			return (status);
+		}
+	}
+	return (fsimg_mtree_writer_finish(writer, NULL));
+}
+
+/*
+ * Every way the manifest's output can fail reaches the caller as that
+ * failure, at once, and leaves nothing allocated: each resize, each write
+ * and each flush a clean run makes failing in turn, the context cancelled
+ * at each poll, and each allocation the writer makes failing.
+ */
+static void
+test_export_writer_faults(void)
+{
+	failing_sink_t clean, sink;
+	poll_counter_t counter;
+	fsimg_options_t options;
+	fixture_t fixture;
+	fsimg_status_t status;
+	unsigned polls;
+
+	bzero(&counter, sizeof(counter));
+	fsimg_options_init(&options);
+	options.cancelled = poll_cancelled;
+	options.cancel_argument = &counter;
+	fixture_open_options(&fixture, "qnx6", 0, &options);
+	bzero(&clean, sizeof(clean));
+	CHECK(write_lines(&fixture, &clean) == FSIMG_OK);
+	CHECK(clean.length > 6 * 65536);
+	CHECK(clean.calls[SINK_RESIZE] > 6 && clean.calls[SINK_FLUSH] == 1);
+	for (sink_call_t kind = 0; kind < SINK_CALL_KINDS; kind++) {
+		for (unsigned at = 1; at <= clean.calls[kind]; at++) {
+			bzero(&sink, sizeof(sink));
+			sink.fail_kind = kind;
+			sink.fail_at = at;
+			CHECK(write_lines(&fixture, &sink) == FSIMG_EIO);
+		}
+	}
+
+	/* Writing polls cancellation; each poll can be the one cancelled. */
+	counter.cancel_at = UINT_MAX;
+	bzero(&sink, sizeof(sink));
+	CHECK(write_lines(&fixture, &sink) == FSIMG_OK);
+	polls = counter.polls;
+	CHECK(polls > clean.calls[SINK_WRITE]);
+	for (unsigned at = 1; at <= polls; at++) {
+		counter.polls = 0;
+		counter.cancel_at = at;
+		bzero(&sink, sizeof(sink));
+		CHECK(write_lines(&fixture, &sink) == FSIMG_ECANCELLED);
+	}
+	counter.cancel_at = 0;
+
+	for (uint64_t attempt = 1;; attempt++) {
+		bzero(&sink, sizeof(sink));
+		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
+		status = write_lines(&fixture, &sink);
+		fsimg_test_fail_alloc_after(fixture.ctx, 0);
+		if (status == FSIMG_OK) {
+			CHECK(attempt > 3);
+			break;
+		}
+		CHECK(status == FSIMG_ENOMEM);
+	}
+	fixture_close(&fixture);
+}
+
+/* Extract image into name with a manifest written to name.mtree, under
+ * whatever faults the fixture's context injects, with allocation
+ * fail_after of the extraction failing when it is not zero; the manifest
+ * file is removed again.
+ */
+static fsimg_status_t
+extract_faulted(fixture_t *fixture, const image_t *image, const char *name,
+    uint64_t fail_after, fsimg_error_t *error)
+{
+	char path[64];
+	fsimg_extract_options_t options;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	fsimg_status_t status;
+	int fd;
+
+	snprintf(path, sizeof(path), "%s.mtree", name);
+	fd = openat(fixture->parent, path,
+	    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	memory_io(fixture, (image_t *)image, false, &input);
+	fsimg_test_fail_alloc_after(fixture->ctx, fail_after);
+	status = fsimg_reader_open(fixture->ctx, input, NULL, &reader, error);
+	if (status == FSIMG_OK) {
+		fsimg_extract_options_init(&options);
+		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+		options.manifest_fd = fd;
+		status = fsimg_extract_at(reader, fixture->parent, name, &options,
+		    error);
+		fsimg_reader_free(reader);
+	}
+	fsimg_test_fail_alloc_after(fixture->ctx, 0);
+	fsimg_io_free(input);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture->parent, path, 0) == 0);
+	return (status);
+}
+
+/* An extraction with a manifest fails cleanly at each of its allocations,
+ * the manifest writer's among them.
+ */
+static void
+test_export_allocation_failures(void)
+{
+	fixture_t fixture;
+	image_t image;
+	char name[32];
+	fsimg_status_t status;
+
+	fixture_open(&fixture, "qnx6", 0);
+	CHECK(add_manifest(&fixture, export_manifest_qnx, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
+	for (uint64_t attempt = 1;; attempt++) {
+		snprintf(name, sizeof(name), "allocation-%llu",
+		    (unsigned long long)attempt);
+		status = extract_faulted(&fixture, &image, name, attempt, NULL);
+		if (status == FSIMG_OK)
+			break;
+		CHECK(status == FSIMG_ENOMEM);
+		CHECK(attempt < 512);
+	}
+	free(image.bytes);
+	fixture_close(&fixture);
+}
+
+/* An extraction with a manifest stops at whichever poll is cancelled,
+ * including those of the manifest's writes and its flush.
+ */
+static void
+test_export_cancellation(void)
+{
+	poll_counter_t cancel;
+	fsimg_options_t options;
+	fixture_t fixture;
+	image_t image;
+	char name[32];
+	fsimg_status_t status;
+
+	bzero(&cancel, sizeof(cancel));
+	fsimg_options_init(&options);
+	options.cancelled = poll_cancelled;
+	options.cancel_argument = &cancel;
+	fixture_open_options(&fixture, "qnx6", 0, &options);
+	CHECK(add_manifest(&fixture, export_manifest_qnx, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
+	for (unsigned at = 1;; at++) {
+		snprintf(name, sizeof(name), "cancelled-%u", at);
+		cancel.polls = 0;
+		cancel.cancel_at = at;
+		status = extract_faulted(&fixture, &image, name, 0, NULL);
+		cancel.cancel_at = 0;
+		if (status == FSIMG_OK)
+			break;
+		CHECK(status == FSIMG_ECANCELLED);
+		CHECK(at < 100000);
+	}
+	free(image.bytes);
+	fixture_close(&fixture);
+}
+
+/*
+ * A host write that fails reaches the extraction's caller: under a file
+ * size limit that the extracted files fit and the manifest outgrows, the
+ * manifest's growth fails with EFBIG rather than the process being
+ * signalled. It runs in a child, since the limit is the process's.
+ */
+static void
+test_export_file_size_limit(void)
+{
+	struct rlimit limit = { 32768, 32768 };
+	fsimg_error_t error;
+	fixture_t fixture;
+	image_t image;
+	char *source;
+	pid_t child;
+	int status;
+
+	source = long_source();
+	fixture_open(&fixture, "qnx6", 0);
+	CHECK(add_manifest(&fixture, source, -1, NULL) == FSIMG_OK);
+	CHECK(emit_image(&fixture, &image, NULL) == FSIMG_OK);
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR ||
+		    setrlimit(RLIMIT_FSIZE, &limit) == -1)
+			_exit(2);
+		if (extract_faulted(&fixture, &image, "file-size", 0, &error) !=
+		    FSIMG_EIO || error.os_error != EFBIG)
+			_exit(1);
+		_exit(0);
+	}
+	CHECK(waitpid(child, &status, 0) == child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	free(image.bytes);
+	free(source);
 	fixture_close(&fixture);
 }
 
@@ -1878,7 +2350,13 @@ main(void)
 	test_export_round_trip("qnx6", export_manifest_qnx);
 	test_export_round_trip("qnx4", export_manifest_qnx);
 	test_export_changes_detected();
+	test_export_exfat_zero_file();
 	test_export_long_manifest();
+	test_export_manifest_limit();
+	test_export_writer_faults();
+	test_export_allocation_failures();
+	test_export_cancellation();
+	test_export_file_size_limit();
 	test_export_lines();
 	test_export_refusals();
 	test_export_read_by_bsdtar();
