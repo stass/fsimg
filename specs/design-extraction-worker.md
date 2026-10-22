@@ -10,10 +10,10 @@ coordinator; it never receives the final parent authority. The coordinator
 obtains that root in one of two ways defined by the
 [security specification](design-security.md#safe-extraction): it creates
 the directory exclusively inside the `-C` parent, named after the image
-stem, or with `-E` it proves the user's own `-C` directory empty and private
-on its opened descriptor. The worker cannot tell the two apart, and does not
-need to: a verified empty private directory is the state exclusive creation
-produces, and everything beneath it is created exclusively and no-follow.
+stem, or with `-E` it proves an existing `-C` directory empty on its opened
+descriptor. The worker cannot tell the two apart, and does not need to: a
+verified empty directory is the state exclusive creation produces, and
+everything beneath it is created exclusively and no-follow.
 
 The common reader selector resolves requested components through each format's
 validated name/alias namespace and prunes unrelated directory branches. Its

@@ -283,8 +283,8 @@ default), W (verify), i (information) and --formats, with -f naming the image,
 several directory or file operands with -C changing directory among them;
 each operand keeps its own path in the image and equal directories merge.
 Extraction creates one fresh private directory named after the image, or with
--E fills an empty private directory; both refuse destinations carrying a
-non-trivial ACL. The long listing shows mode, size and UTC modification time.
+-E fills an existing empty directory. The long listing shows mode, size and
+UTC modification time.
 Compression, minimization, standard input or output images, writing
 containers and several members are recognized and reported as not supported. Strict option parsing, streaming NDJSON, bounded progress and command-wide output accounting share
 the supervised worker/relay path. Manuals, public-API examples, pkg-config

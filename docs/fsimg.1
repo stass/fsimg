@@ -876,7 +876,7 @@ is required.
 .It Fl E
 Extract directly into the
 .Fl C
-directory, which must be empty and private.
+directory, which must be empty.
 .It Fl k
 Skip entries of unsupported kinds; the number skipped is reported in a
 warning and in the JSON summary.
@@ -893,44 +893,20 @@ names an image; see
 Write one member's logical bytes to stdout instead of extracting.
 .El
 .Pp
-Both destinations must be private, judged on the opened directory alone: a
-directory owned by the effective user, not writable by group or others, and
-carrying no non-trivial access control list of any type the platform reports.
-Read and search permission for others is allowed.
 With
 .Fl E
-the directory is opened without following a symbolic link and must also be
-empty; a symbolic link or any other existing object that is not a directory
-fails as unsupported.
-A fresh directory that inherits a non-trivial ACL from its parent is removed
-again and the error names the parent.
-The private directories that stage a created image or an
-.Fl -mtree
-file, and the scratch directory, are checked the same way, so an image or
-.Fl -mtree
-file cannot be written into a directory that gives new directories a
-non-trivial ACL, or onto a filesystem without POSIX permissions, such as FAT
-mounted on macOS; scratch in such a directory fails every command until
-.Fl T
-names another.
-A directory
+the directory is opened without following a symbolic link and must be
+empty, judged on the opened directory; a symbolic link or any other existing
+object that is not a directory fails as unsupported, and a directory holding
+any name, a dot file included, fails as existing output.
+Neither destination's owner, mode or access control list is judged: who
+may read the extracted tree is the policy of the directory chosen, as it is
+for any file published there.
+Every directory
 .Nm
-creates, the fresh destination included, must also give group and others
-no permission at all, so a filesystem that ignores the mode it asks for,
-such as Linux vfat or exfat mounted with
-.Ql umask=022
-as desktop automounts commonly are, is refused too; mounted with
-.Ql dmask=077
-it is usable.
-.Nm
-never edits an ACL.
-On Linux a listed
-.Ql system.nfs4_acl
-attribute counts as non-trivial whatever it holds, so neither a destination
-nor an image,
-.Fl -mtree
-file or scratch directory can be placed on an NFS server with ACL support,
-and the server-side ACLs of a CIFS mount are not visible to the check at all.
+creates has mode 0700 and every file 0600, so on a filesystem that honours
+modes nothing beneath the destination is readable by others; one that
+ignores them, such as vfat, shows its mount's permissions instead.
 .Pp
 Selected paths and necessary ancestors are preserved below the image root.
 Output uses private directories and regular files, no links, no merge,

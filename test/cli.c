@@ -14,7 +14,6 @@
 
 #include "cli.h"
 #include "internal.h"
-#include "private.h"
 #include "test.h"
 
 static void test_numbers(void);
@@ -33,7 +32,6 @@ static void test_stems(void);
 static void test_long_listing(void);
 static void test_staged_verification_failure(void);
 static void test_names(bool);
-static void test_private_modes(void);
 static void test_private_cleanup(void);
 static void test_staging_cleanup(void);
 static void test_progress(void);
@@ -828,44 +826,6 @@ test_names(bool json)
 	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_DONE);
 }
 
-/*
- * A directory fsimg created gives group and others no permission at all,
- * whatever mode the filesystem gave it: a FAT mount's umask=022 makes the
- * 0700 fsimg asks for 0755. One the user supplies may let them read and
- * search, never write.
- */
-static void
-test_private_modes(void)
-{
-	static const struct {
-		mode_t			 mode;
-		bool			 created;
-		fsimg_host_privacy_t	 verdict;
-	} cases[] = {
-		{ 0700, true, FSIMG_HOST_PRIVATE },
-		{ 0755, true, FSIMG_HOST_SHARED_ACCESS },
-		{ 0740, true, FSIMG_HOST_SHARED_ACCESS },
-		{ 0701, true, FSIMG_HOST_SHARED_ACCESS },
-		{ 0755, false, FSIMG_HOST_PRIVATE },
-		{ 0720, false, FSIMG_HOST_SHARED_ACCESS },
-		{ 0702, false, FSIMG_HOST_SHARED_ACCESS },
-	};
-	char root[] = "cli-modes-XXXXXX";
-	fsimg_host_privacy_t verdict;
-	int fd;
-
-	CHECK(mkdtemp(root) != NULL);
-	fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
-	CHECK(fd != -1);
-	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		CHECK(fchmod(fd, cases[i].mode) == 0);
-		CHECK(fsimg_host_private_directory(fd, cases[i].created,
-		    &verdict) == 0);
-		CHECK(verdict == cases[i].verdict);
-	}
-	CHECK(close(fd) == 0 && rmdir(root) == 0);
-}
-
 static void
 test_private_cleanup(void)
 {
@@ -1584,7 +1544,6 @@ main(int argc, char **argv)
 	test_verification_completion();
 	test_names(false);
 	test_names(true);
-	test_private_modes();
 	test_private_cleanup();
 	test_staging_cleanup();
 	test_manifest_staging_cleanup();

@@ -278,92 +278,62 @@ application's sandbox is not automatically advertised as the fsimg profile.
 
 ## Safe extraction
 
-The destination is one directory that the coordinator has proven private
-before the worker starts, and the worker receives only its opened descriptor,
-never the parent. There are two ways to obtain it, and the
-[CLI contract](design-cli.md#extraction) defines their syntax:
+The destination is one empty directory, and the worker receives only its
+opened descriptor, never the parent. There are two ways to obtain it, and
+the [CLI contract](design-cli.md#extraction) defines their syntax:
 
 * By default the coordinator creates a fresh directory, named after the
   image stem, inside the existing `-C` directory: one `mkdirat` with mode
-  0700 beneath the opened parent, then a no-follow reopen of the result. An
-  existing object of that name, including an empty directory or a symbolic
-  link, fails. A name fsimg cannot derive is not invented; the user then
-  chooses the second way.
+  0700 beneath the opened parent, then a no-follow reopen of the result,
+  confirmed empty on its descriptor. An existing object of that name,
+  including an empty directory or a symbolic link, fails. A name fsimg
+  cannot derive is not invented; the user then chooses the second way.
 * With `-E` the user designates the destination itself. The coordinator opens
   it with `O_DIRECTORY | O_NOFOLLOW`, so a symbolic link fails, and with it
   any other existing object that is not a directory, both as
-  `FSIMG_EUNSUPPORTED`; it uses only that descriptor afterwards: `fstat`
-  must show a directory owned by the effective user without group or
-  other write permission; a read of the directory through the descriptor
-  must find it empty; and the access
-  control list must be trivial, as defined next. This accepts exactly the
-  state a fresh directory is in, so the worker's behaviour is the same for
-  both: every entry is created exclusively and no-follow beneath a verified
+  `FSIMG_EUNSUPPORTED`; it uses only that descriptor afterwards, and a read
+  of the directory through it must find it empty, or extraction fails as
+  `FSIMG_EEXISTS` before the worker starts. This accepts exactly the state
+  a fresh directory is in, so the worker's behaviour is the same for both:
+  every entry is created exclusively and no-follow beneath a verified
   parent, and an object another process adds concurrently is a collision
   failure, never an escape.
 
-Both destinations satisfy one privacy rule, checked on the opened descriptor
-by a compat-layer function. The mode bits are fully inspectable, so they are
-judged: the owner is the effective user, and group and others have no write
-bit. Read and search bits for others are allowed, deliberately: they expose
-only the names at the top level, because every extracted directory is
-created with mode 0700 and every file with 0600, so nothing beneath is
-readable through them; a write bit, by contrast, would let another
-principal plant an object the extraction then collides with or
-races. An access control list is not interpreted; any non-trivial ACL of any
-type the platform can report on the descriptor is refused: on FreeBSD
-`acl_is_trivial_np` for the access and NFSv4 types the filesystem supports,
-and any entry at all in a POSIX.1e default ACL, which has no trivial form; on Linux the presence of a
-`system.posix_acl_access` or `system.posix_acl_default` attribute in
-`flistxattr`, which the kernel keeps only for a non-trivial ACL; on macOS
-any extended ACL entry. On Linux a listed `system.nfs4_acl` attribute is
-refused as well, trivial or not: the NFS client lists it for every inode of
-a server with ACL support, and fsimg cannot prove it trivial without
-decoding NFSv4 ACLs, which is out of scope. A Linux NFSv4 destination on
-such a server therefore cannot be used, a limitation the user-facing
-documentation states; FreeBSD's NFSv4 case is unaffected, since
-`acl_is_trivial_np` answers there. A Linux CIFS mount exposes no ACL
-through `flistxattr`, so its server-side Windows ACLs are not seen; the
-user-facing documentation states this as well. A platform other than these
-three has no known ACL interface, and its privacy check fails rather than
-trusting the mode bits. Refusing rather than reading ACLs is the
-rule by construction: the three platforms' ACL semantics differ, an
-allowlist of harmless entries is a list that grows with each platform, and a
-user who wants an ACL on the destination can extract elsewhere. The rule
-covers the fresh directory because a parent's inheritable entries attach to
-it at creation; the check runs after `mkdirat`, and a failure removes the
-directory while it is still the empty object just created and names the
-parent. fsimg never strips or edits an ACL: that would add host-metadata
-mutation to the extraction path for the sake of a parent the user can
-replace. The checks run as the invoking user and hold against another
-process with the same credentials only as far as the threat model states;
-they are a safeguard against mistakes and the ordinary shared-directory
-attacks, not an isolation boundary.
+The destination's owner, mode bits and access control lists are not
+judged. Escape safety comes from creating every entry exclusively, no-follow
+and relative to the opened destination, not from who else may use it, and
+refusing to merge into a populated tree is what removes tar's overwrite and
+planted-object attacks. Who may read the extracted tree is the policy of the
+place the user chose: a principal who could read or replace bytes there
+could read or replace a published result in the same place moments later,
+so a permission check would protect nothing that lasts, and it would refuse
+common destinations such as a USB stick whose filesystem ignores modes.
+fsimg still creates every directory with mode 0700 and every file with
+0600, so on a filesystem that honours modes nothing beneath the destination
+is readable by others, whatever the destination's own mode. One residual
+follows from accepting a destination, or a parent of any directory fsimg
+creates, that others can write: they can supply an empty directory of
+their own or a writable one, and while the command runs move files into it
+that the worker's descriptor can then read, so a worker compromised
+through a parser defect can read, and copy out beside them, files it could
+not otherwise reach.
 
-The same rule, by the same function, proves every other directory the CLI
-coordinator creates private before anything is put in it: the staging
-directory of a created image, the staging directory of an `x --mtree`
-manifest and the scratch tree. A directory created with mode 0700 can still
-fail it: an inheritable entry of its parent can admit another user, a user
-who can write a parent without the sticky bit can put another directory in
-its place before it is reopened, and a filesystem without POSIX permissions,
-such as FAT mounted on macOS, reports group and other write on everything.
-A directory the CLI creates, the fresh extraction destination included,
-must also give group and others no permission at all, judged on the same
-descriptor: a filesystem that ignores the creation mode, such as Linux VFAT
-mounted with the user's uid and `umask=022`, makes it 0755 without an ACL,
-and every file fsimg then creates beneath it with mode 0600 shows the same
-mount-defined permissions. Any of these could let another principal read
-the staged bytes or replace them before publication, so all of them
-refuse, and the error names the parent. One routine checks every such
-directory as soon as it is made, so none exists that skipped the check. A refused directory gives up its descriptor
-at once, and with it all cleanup of its contents, which goes through that
-descriptor: whatever the name now reaches may belong to someone else. It is
-removed again only while the name still holds the object it opened, owned
-by the user and empty; otherwise its name is reported as retained, unless
-it now holds another object, which is not fsimg's to report. A writer of
-the parent can still put another empty directory under the name between
-that check and the removal, which gains nothing it could not do itself.
+Every other directory the CLI coordinator creates follows the same rule:
+the staging directory of a created image, the staging directory of an
+`x --mtree` manifest and the scratch tree. Each is made exclusively with
+mode 0700 under a random name beneath its opened parent, reopened no-follow
+and used only through that descriptor. A writer of the parent can put
+another directory under the name before the reopen, so the reopened
+directory, like a fresh destination, must still be empty, or the command
+fails and leaves it alone: fsimg never extracts into, cleans or removes an
+existing tree as its own, and everything it later finds in the directory
+was put there after it was opened. A directory fsimg made is removed again
+only while its name still holds the object it opened, and only when empty,
+which `rmdir` itself requires; otherwise its name is reported as retained,
+unless it now holds another object, which is not fsimg's to report. A
+writer of the parent can still put another empty directory under the name
+between that check and the removal, which gains nothing it could not do
+itself.
 
 The selected parent comes from the user; image names never influence how
 that initial authority is obtained. Merging into a populated tree is not
@@ -506,17 +476,9 @@ allowlist alone does not guarantee a disk-space quota.
   outside directory (fails, the target untouched); `-E` on a symbolic link to
   an empty directory (fails on the no-follow open); `-E` on a directory with
   one entry, a dotfile, or an entry added between the emptiness check and
-  the first creation (fails as a collision, the entry untouched); `-E` on a
-  group-writable, other-writable or differently owned directory (fails) and
-  an other-readable one (succeeds); a parent carrying a non-trivial
-  inheritable ACL, or an `-E` directory carrying a non-trivial ACL, of each type the platform reports (FreeBSD POSIX.1e
-  access, POSIX.1e default and NFSv4; Linux access, default and NFSv4
-  attributes; macOS extended entries), including an entry that grants
-  nothing, where the fresh case must remove its empty directory and name the
-  parent; a trivial ACL that passes on FreeBSD and macOS, and on Linux a
-  trivial POSIX ACL that leaves no attribute behind, while a listed
-  `system.nfs4_acl` is refused; `-f -` and an underivable
-  stem without `-E`; and a parent replaced by a symbolic link between the
+  the first creation (fails as a collision, the entry untouched); `-E` on an
+  empty directory of any mode (succeeds); `-f -` and an underivable stem
+  without `-E`; and a parent replaced by a symbolic link between the
   user's inspection and the open, which succeeds only into the link's target
   as a fresh directory and never into a populated one.
 * A dedicated adversarial worker harness attempts forbidden syscalls after

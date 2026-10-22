@@ -462,17 +462,14 @@
   mount crossing beneath a root, such as a per-directory check that a
   child's device and inode do not belong to a mount point, without a
   path-based query.
-* [Medium] **The library's own directories skip the privacy check**
-  (`lib/output/write.c` `create_staging`, `lib/extract/extract.c`
-  `fsimg_extract_at`): `fsimg_writer_write_at()` and transcoding stage
-  beneath the caller's directory in a `.fsimg-output-PID-N` directory, and
-  `fsimg_extract_at()` creates its fresh destination, each made with mode
-  0700 and reopened no-follow but never checked by
-  `fsimg_host_private_directory()` as the CLI's private directories are.
-  A parent's inheritable ACL entries, or a filesystem that ignores the
-  creation mode such as Linux vfat with `umask=022`, then expose the
-  staged image or the extracted tree to other users. Check them there too,
-  or have the CLI's private directory routine move into the library.
+* [Medium] **The library's created directories are used without
+  confirming them fresh** (`lib/output/write.c` `create_staging`,
+  `lib/extract/extract.c` `fsimg_extract_at`): each is made with `mkdirat`
+  and reopened by name, so a writer of the parent can put another directory
+  under the name first, and the library then writes into it, and for
+  staging later unlinks `image` there. The CLI confirms each reopened
+  directory empty (`confirm_fresh` in `cmd/fsimg/paths.c`); do the same in
+  the library, or move that routine there.
 * [Low] **Adding a worker capability touches many parallel lists**
   (`cmd/fsimg/worker.h`, `job.c`, `worker-parent.c`, `worker-child.c`,
   `sandbox.c`, `paths.c`): the job bit, the decode mask, the expected and
