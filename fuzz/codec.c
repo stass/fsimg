@@ -10,11 +10,13 @@
 #include "fsimg.h"
 
 /*
- * The LZO1X and NRV2B decoders on arbitrary streams. The input's first
- * four bytes choose the decode and the rest is the stream:
+ * The LZO1X and NRV2B decoders on arbitrary streams, and the LZO1X
+ * encoder on arbitrary blocks. The input's first four bytes choose the
+ * operation and the rest is the stream or the block:
  *
- *   byte 0     bit 0 the codec (0 LZO1X, 1 NRV2B); bit 1 adds one to the
- *              NRV2B capacity, so 65536 is reachable
+ *   byte 0     bit 2 selects the encoder, which reads no other header
+ *              bits; otherwise bit 0 the codec (0 LZO1X, 1 NRV2B), and
+ *              bit 1 adds one to the NRV2B capacity, so 65536 is reachable
  *   bytes 1-2  little-endian v: the LZO1X limit is 16v, the NRV2B
  *              capacity v
  *   byte 3     the LZO1X call plan: the low nibble n sets the input piece
@@ -34,6 +36,12 @@
  * AddressSanitizer every buffer is exactly its size, so no byte outside it
  * is touched. An NRV2B stream accepted under its capacity must decode to
  * the same bytes under the largest capacity.
+ *
+ * A block is encoded by one encoder kept across inputs, whose table the
+ * earlier inputs filled, and by a fresh one: the streams must be the same
+ * bytes, fit a buffer of exactly the bound, n + n / 255 + 6, leave the
+ * rest of it untouched, and decode in one call to the block. One byte
+ * less than the bound is refused before anything is written.
  */
 #define FUZZ_HEADER_BYTES	4
 #define POISON			0xa5u
@@ -41,6 +49,7 @@
 #define LZO1X_LIMIT_SCALE	16u
 #define NRV2B_MAX_INPUT		65535u
 #define NRV2B_MAX_CAPACITY	65536u
+#define FUZZ_ENCODE		4u	/* byte 0: encode the block */
 
 /* The outcome of one decode, summed over its calls. */
 typedef struct fuzz_result {
@@ -56,6 +65,9 @@ static void lzo_in_pieces(const uint8_t *, size_t, uint64_t, uint8_t,
     fuzz_result_t *);
 static void exercise_lzo(const uint8_t *, size_t, uint64_t, uint8_t);
 static void exercise_nrv2b(const uint8_t *, size_t, size_t);
+static uint8_t *encode_into_bound(fsimg_lzo1x_encoder_t *, const uint8_t *,
+    size_t, size_t *);
+static void exercise_encoder(const uint8_t *, size_t);
 int LLVMFuzzerTestOneInput(const uint8_t *, size_t);
 
 static bool
@@ -229,6 +241,88 @@ exercise_nrv2b(const uint8_t *in, size_t length, size_t capacity)
 	free(out);
 }
 
+/* The encoder kept across inputs, and the context that charges it. */
+static fsimg_ctx_t *encoder_ctx;
+static fsimg_lzo1x_encoder_t *kept_encoder;
+
+static uint8_t *
+encode_into_bound(fsimg_lzo1x_encoder_t *encoder, const uint8_t *block,
+    size_t length, size_t *code_length)
+{
+	fsimg_error_t error;
+	uint8_t *code;
+	size_t bound;
+
+	bound = length + length / 255 + 6;
+	if (fsimg_lzo1x_encode_bound(length) != bound)
+		abort();
+	code = fuzz_alloc(bound);
+	memset(code, POISON, bound);
+	if (fsimg_lzo1x_encode(encoder, block, length, code, bound,
+	    code_length, &error) != FSIMG_OK)
+		abort();
+	if (*code_length > bound ||
+	    !poison_intact(code + *code_length, bound - *code_length))
+		abort();
+	return (code);
+}
+
+static void
+exercise_encoder(const uint8_t *block, size_t length)
+{
+	fsimg_lzo1x_decoder_t decoder;
+	fsimg_lzo1x_encoder_t *fresh;
+	fsimg_codec_step_t step;
+	fsimg_options_t options;
+	fsimg_error_t error;
+	uint8_t *code, *fresh_code, *output, *refused;
+	size_t code_length, fresh_length, refused_capacity, refused_length;
+
+	if (encoder_ctx == NULL) {
+		fsimg_options_init(&options);
+		if (fsimg_ctx_new(&options, &encoder_ctx, &error) != FSIMG_OK)
+			abort();
+		if (fsimg_lzo1x_encoder_new(encoder_ctx, &kept_encoder,
+		    &error) != FSIMG_OK)
+			abort();
+	}
+	if (fsimg_lzo1x_encoder_new(encoder_ctx, &fresh, &error) != FSIMG_OK)
+		abort();
+
+	/* The kept and the fresh table give the same stream. */
+	code = encode_into_bound(kept_encoder, block, length, &code_length);
+	fresh_code = encode_into_bound(fresh, block, length, &fresh_length);
+	if (fresh_length != code_length ||
+	    memcmp(code, fresh_code, code_length) != 0)
+		abort();
+
+	/* The stream decodes in one call to exactly the block. */
+	output = fuzz_alloc(length);
+	fsimg_lzo1x_decoder_init(&decoder, length);
+	if (fsimg_lzo1x_decode(&decoder, code, code_length, true, output, 0,
+	    length, &step, &error) != FSIMG_OK)
+		abort();
+	if (!step.done || step.consumed != code_length ||
+	    step.produced != length || memcmp(output, block, length) != 0)
+		abort();
+
+	/* A capacity of one byte less is refused with nothing written. */
+	refused_capacity = length + length / 255 + 5;
+	refused = fuzz_alloc(refused_capacity);
+	memset(refused, POISON, refused_capacity);
+	if (fsimg_lzo1x_encode(fresh, block, length, refused, refused_capacity,
+	    &refused_length, &error) != FSIMG_EINVAL || refused_length != 0)
+		abort();
+	if (!poison_intact(refused, refused_capacity))
+		abort();
+
+	free(refused);
+	free(output);
+	free(fresh_code);
+	free(code);
+	fsimg_lzo1x_encoder_free(fresh);
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -236,6 +330,11 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 	if (size < FUZZ_HEADER_BYTES)
 		return (0);
+	if ((data[0] & FUZZ_ENCODE) != 0) {
+		exercise_encoder(data + FUZZ_HEADER_BYTES,
+		    size - FUZZ_HEADER_BYTES);
+		return (0);
+	}
 	bound = (uint32_t)data[1] | (uint32_t)data[2] << 8;
 	if ((data[0] & 1) == 0)
 		exercise_lzo(data + FUZZ_HEADER_BYTES, size - FUZZ_HEADER_BYTES,

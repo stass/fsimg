@@ -375,7 +375,13 @@ same bytes; every call must progress or stop at an edge and leave its
 unreported output poisoned. Its seeds, from `test-codec --seed`, are every
 stream the unit tests check, valid and refused, and, when
 `FSIMG_CODEC_FUZZ_CHUNKS` names the directory `test/codec-integration.sh`
-filled, native boot-image chunks; the input ceiling is 65540 bytes. The same target builds `fuzz/protocol.c` and runs 1000 mutations
+filled, native boot-image chunks; the input ceiling is 65540 bytes. An
+input whose first byte has bit 2 set is instead a block for the LZO1X
+encoder: it is encoded by an encoder kept across inputs and by a fresh
+one, which must give the same bytes within a buffer of exactly the bound,
+the stream must decode to the block, and a capacity one byte below the
+bound must be refused with nothing written; `test-codec --seed` writes
+such seeds as `lzoenc-*.seed`. The same target builds `fuzz/protocol.c` and runs 1000 mutations
 with a 64 KiB input ceiling and five-second timeout. It exercises production
 framing, job codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker
 lifecycle ordering is covered by `test-worker`, not inferred from pure wire
@@ -1568,7 +1574,26 @@ commands and [the research record](ifs-research.md#fsimg-writer-output) the
 result.
 
 `test-codec`, in `make check`, tests the LZO1X and NRV2B decoders on
-streams written by hand from [the codec design](../specs/design-codecs.md).
+streams written by hand from [the codec design](../specs/design-codecs.md),
+and the LZO1X encoder: its stream for each block the tests build must
+equal the stream written by hand from the design's matching and
+instruction rules, fit a buffer of exactly the bound `n + n / 255 + 6`,
+and decode to the block; incompressible blocks must be one first run;
+planted table entries must not change a stream; and a fixed corpus's
+streams must have a pinned digest in this process and in a forked one.
+`test-codec --native` encodes every 64 KiB chunk of each decoded body in
+`$FSIMG_IFS_NATIVE/decoded`, framed as the `ifsboot` writer frames it
+(a stream over 65535 bytes splits the chunk in two halves), decodes each
+stream again and prints the framed sizes; it exits 77 without the
+variable. Its figures are the same on every host: the 12 bodies,
+206,596,160 bytes, frame to 3,219 chunks (59 of the 65536-byte chunks
+split in two) and 115,721,550 bytes. The H3 bodies frame to 1.13 to 1.15 times their native bodies, which `mkifs`
+wrote at the ratio of `liblzo2`'s LZO1X-999, and 0.95 to 0.96 times the
+oracle's LZO1X-1 on the same chunks (`PCM3_IFS1`: 10,519,087 bytes
+against 9,252,420 native and 11,105,256 under LZO1X-1).
+`test-codec --encode IN OUT` writes one file's stream for the oracle, and
+`test-codec --encode-framed IN OUT` the file in those framed chunks behind
+a minimal startup header that the oracle's `boot` mode reads.
 `test/codec-integration.sh`, run by `make check-integration` and not by
 `make check`, compares them with black-box oracles that never enter the
 tree: `tools/qnx/oracle/build.sh` builds a wrapper around Homebrew's
@@ -1600,15 +1625,23 @@ have the `imagefs_size` length and a zero additive checksum (on a
 little-endian host), and `qnxbase`'s body to have the `dumpifs -u` copy's
 POSIX `cksum` 2731401004 over 3296204 bytes; decodes `PCM3_IFS2.ifs`'s
 stream through 64 KiB windows to the header's length and the oracle's
-bytes; and compares 20 mutations of three chunks of each image. With
+bytes; compares 20 mutations of three chunks of each image; and, with
+`FSIMG_IFS_NATIVE`, runs `test-codec --native` and has the oracle decode
+each decoded body framed in chunks, split halves included, and encoded
+whole as one block, both to the body's bytes. The
+hand-built streams include every stream the encoder tests write. With
 `FSIMG_CODEC_FUZZ_CHUNKS` naming a directory, those sample chunks are
 also copied there for `build-aux/fuzz.sh` to seed the codec corpus. The
 chunks are licensed bytes: that directory, and a build directory whose
-`codec-fuzz-corpus/` holds them, must stay outside the repository. On macOS every check passes: 180 hand-built streams; 129
-random and mutated streams accepted and 1011 rejected by both; 1,966 LZO1X
-chunks of the eight H3 images and 153 NRV2B chunks of the three X1 images;
-`PCM3_IFS2.ifs`'s 33,575,140 stream bytes to 68,849,668, consumed exactly;
-and 286 mutated corpus chunks accepted and 374 rejected by both. The H3
+`codec-fuzz-corpus/` holds them, must stay outside the repository. On macOS every check passes: 309 hand-built streams, 129 of
+them the encoder's; 193 random and mutated streams accepted and 1334
+rejected by both; 1,966 LZO1X chunks of the eight H3 images and 153 NRV2B
+chunks of the three X1 images; `PCM3_IFS2.ifs`'s 33,575,140 stream bytes
+to 68,849,668, consumed exactly; 286 mutated corpus chunks accepted and
+374 rejected by both; and the 12 decoded bodies, the largest 68,849,668
+bytes, each framed in chunks and encoded as one block and decoded by the
+oracle to its bytes.
+The H3
 chunks are compared with the oracle's decodes, not with native `dumpifs
 -u` copies, which the serial transport cannot carry
 ([TODO](todo-ifs.md)). The run takes about 400 seconds of wall time on a

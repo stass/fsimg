@@ -11,9 +11,10 @@
 #include "fsimg.h"
 
 /*
- * Stream decoders for LZO1X and NRV2B (the 8-bit control-buffer variant).
- * A decoder sees one compressed stream and one output; it knows nothing of
- * the chunk, header or image that framed the stream. Both decoders read
+ * Stream decoders for LZO1X and NRV2B (the 8-bit control-buffer variant),
+ * and an LZO1X encoder, declared at the end. A codec sees one compressed
+ * stream and one output; it knows nothing of the chunk, header or image
+ * that framed the stream. Both decoders read
  * one input byte at a time with its bound checked first and write one
  * output byte at a time with its bound checked first, so no call reads
  * past its input or writes past its output, and a call's running time is
@@ -124,5 +125,49 @@ fsimg_status_t fsimg_lzo1x_decode(fsimg_lzo1x_decoder_t *,
  */
 fsimg_status_t fsimg_nrv2b_decode(const uint8_t *in, size_t in_len,
     uint8_t *out, size_t capacity, fsimg_codec_step_t *, fsimg_error_t *);
+
+/*
+ * The LZO1X encoder: one block in, one complete stream out, end marker
+ * included, in one call. Its only state is a 64 KiB table of input
+ * positions, allocated once through the context and reused for every
+ * block; the stream depends on the block's bytes alone, never on the
+ * table's earlier contents, the host or the output capacity. The object
+ * belongs to one caller at a time.
+ */
+typedef struct fsimg_lzo1x_encoder fsimg_lzo1x_encoder_t;
+
+/*
+ * Allocate an encoder through ctx, charged to its memory budget. On
+ * failure *out is NULL and the status is the allocation's. error must not
+ * be NULL.
+ */
+fsimg_status_t fsimg_lzo1x_encoder_new(fsimg_ctx_t *,
+    fsimg_lzo1x_encoder_t **, fsimg_error_t *);
+
+/* Free an encoder; NULL is ignored. */
+void fsimg_lzo1x_encoder_free(fsimg_lzo1x_encoder_t *);
+
+/*
+ * The longest stream fsimg_lzo1x_encode writes for in_len bytes:
+ * in_len + in_len / 255 + 6. For an in_len the encoder refuses, above
+ * 2^32 - 1, or one whose bound does not fit a size_t, it is SIZE_MAX.
+ */
+size_t fsimg_lzo1x_encode_bound(size_t in_len);
+
+/*
+ * Encode in[0..in_len) into out[0..capacity), which must not overlap it,
+ * and set *out_len to the stream's length. A capacity below the bound,
+ * an in_len above 2^32 - 1 or a NULL buffer with a nonzero length is
+ * FSIMG_EINVAL before anything is read or written. Every write is still
+ * checked against the capacity; a stream that would pass it is
+ * FSIMG_ESTATE, a defect in the encoder, with the buffer's contents
+ * unspecified. The call's running time is
+ * proportional to in_len plus *out_len, which the caller charges to its
+ * session's work counter. *out_len is 0 on failure; encoder and out_len
+ * must not be NULL.
+ */
+fsimg_status_t fsimg_lzo1x_encode(fsimg_lzo1x_encoder_t *,
+    const uint8_t *in, size_t in_len, uint8_t *out, size_t capacity,
+    size_t *out_len, fsimg_error_t *);
 
 #endif

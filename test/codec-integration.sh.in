@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026, fsimg contributors
 #
-# The LZO1X and NRV2B decoders against black-box oracles, out of the tree
-# and never redistributed:
+# The LZO1X and NRV2B decoders, and the LZO1X encoder, against black-box
+# oracles, out of the tree and never redistributed:
 #   FSIMG_CODEC_ORACLE  the oracle, a wrapper around liblzo2 2.10 and
 #                       libucl 1.03 built outside the tree (default
 #                       ~/.local/share/fsimg-oracles/ifs-codecs/oracle)
@@ -12,7 +12,8 @@
 #                       images, PCM3_IFS2.ifs and the QNX 6.5.0 live CD's
 #                       qnxbase.ifs, qnxbasedma.ifs and qnxbasesmp.ifs
 #   FSIMG_IFS_NATIVE    the native captures, whose decoded/ directory holds
-#                       the oracle's decoded ImageFS bodies
+#                       the oracle's decoded ImageFS bodies; the encoder
+#                       round-trips them too
 #   FSIMG_CODEC_SEED    the random sequence (default 1)
 #   FSIMG_CODEC_COUNT   random streams per codec (default 300)
 #   FSIMG_CODEC_FUZZ_CHUNKS  a directory to receive sample native chunks
@@ -377,6 +378,50 @@ else
         echo "PASS: mutated corpus chunks: $accepted accepted and" \
             "$rejected rejected alike"
     fi
+fi
+
+# The encoder on the decoded native bodies: test-codec --native encodes
+# every 64 KiB chunk as the ifsboot writer frames it and decodes it with
+# fsimg. Here the oracle decodes each body twice: framed in those chunks,
+# split halves included, behind a minimal startup header for its boot
+# mode, and encoded whole as one block, which reaches every distance the
+# encoder writes. Both must give the body's bytes. The hand-built streams
+# above already include the unit tests' encoder streams.
+if test -z "$native"; then
+    echo 'SKIP: FSIMG_IFS_NATIVE is not set (encoder on native bodies)'
+elif ! ls "$native"/decoded/*.imagefs >/dev/null 2>&1; then
+    echo "SKIP: no decoded bodies in $native/decoded"
+else
+    FSIMG_IFS_NATIVE=$native ./test-codec --native ||
+        fail 'test-codec --native failed'
+    encoded_bodies=0
+    for body in "$native"/decoded/*.imagefs; do
+        body_name=$(basename "$body")
+        body_bytes=$(wc -c < "$body" | tr -d ' ')
+        if ! ./test-codec --encode-framed "$body" "$fixture/body.ifs"; then
+            fail "$body_name: the encoder refuses a chunk"
+        elif ! "$oracle" boot "$fixture/body.ifs" 0 "$fixture/body.out" \
+            >/dev/null 2>&1; then
+            fail "$body_name: the oracle rejects the framed chunks"
+        elif ! cmp -s "$body" "$fixture/body.out"; then
+            fail "$body_name: the oracle decodes the chunks to other bytes"
+        fi
+        rm -f "$fixture/body.ifs" "$fixture/body.out"
+        if ! ./test-codec --encode "$body" "$fixture/body.lzo"; then
+            fail "$body_name: the encoder refuses the body"
+            continue
+        fi
+        if ! oracle_decodes lzo "$fixture/body.lzo" "$fixture/body.out" \
+            "$body_bytes"; then
+            fail "$body_name: the oracle rejects the encoder's stream"
+        elif ! cmp -s "$body" "$fixture/body.out"; then
+            fail "$body_name: the oracle decodes the stream to other bytes"
+        fi
+        encoded_bodies=$((encoded_bodies + 1))
+        rm -f "$fixture/body.lzo" "$fixture/body.out"
+    done
+    echo "PASS: $encoded_bodies native bodies, framed in chunks and" \
+        "encoded whole, decode under the oracle to their bytes"
 fi
 
 if test "$failures" != 0; then
