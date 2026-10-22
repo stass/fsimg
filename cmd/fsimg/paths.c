@@ -435,22 +435,59 @@ trim_final(const char *path, char *trimmed, bool *removed)
 }
 
 /*
+ * Whether a directory open of path beneath base, failing with errno, met
+ * an existing object that is not a directory: the object itself, or with
+ * follow what a symbolic link there reaches. A failure with ENOTDIR or
+ * ENXIO met either such an object or, for ENOTDIR, a non-directory earlier
+ * in the path, which names nothing; this tells the two apart, trimming
+ * path itself by trim_final. Any other failure met no such object. It
+ * only classifies the failure, and errno is preserved.
+ */
+static bool
+other_kind_at(int base, const char *path, bool follow)
+{
+	char trimmed[PATH_MAX];
+	struct stat st;
+	int saved;
+	bool removed, other;
+
+	saved = errno;
+	if (saved != ENOTDIR && saved != ENXIO)
+		return (false);
+	other = trim_final(path, trimmed, &removed) &&
+	    fstatat(base, trimmed, &st, follow ? 0 : AT_SYMLINK_NOFOLLOW) == 0 &&
+	    !S_ISDIR(st.st_mode);
+	errno = saved;
+	return (other);
+}
+
+/*
+ * The failure of opening a -C directory, which follows symbolic links as
+ * tar's -C does: an existing object of another kind, judged on the object
+ * followed, is unsupported, as it is for -E; any other failure, a
+ * non-directory earlier in the path included, is an open failure.
+ */
+static fsimg_status_t
+change_directory_error(fsimg_error_t *error, const char *path)
+{
+	if (other_kind_at(AT_FDCWD, path, true))
+		return (kind_error(error, errno,
+		    "-C directory is not a directory", path));
+	return (path_error(error, "cannot open -C directory", path));
+}
+
+/*
  * The no-follow scanned-object open of a command-line path, trimmed by
  * trim_final; a trailing slash stays a requirement for a directory. A
  * refused link fails with ELOOP on every host (fsimg_host_source_open).
- *
- * A directory open failing with ENOTDIR or ENXIO met either an existing
- * object of another kind or, for ENOTDIR, a non-directory earlier in the
- * path, which names nothing. When other_kind is not NULL, an lstat of the
- * trimmed name tells the two apart and sets it for the first; it only
- * classifies the failure, and errno is preserved.
+ * When other_kind is not NULL, a directory open that fails sets it when
+ * the name is an existing object of another kind (other_kind_at).
  */
 static int
 open_nofollow(int base, const char *path, bool directory, bool *other_kind)
 {
 	char trimmed[PATH_MAX];
-	struct stat st;
-	int fd, saved;
+	int fd;
 	bool removed;
 
 	if (other_kind != NULL)
@@ -460,13 +497,8 @@ open_nofollow(int base, const char *path, bool directory, bool *other_kind)
 	if (removed)
 		directory = true;
 	fd = fsimg_host_source_open(base, trimmed, directory);
-	if (fd == -1 && directory && other_kind != NULL &&
-	    (errno == ENOTDIR || errno == ENXIO)) {
-		saved = errno;
-		*other_kind = fstatat(base, trimmed, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
-		    !S_ISDIR(st.st_mode);
-		errno = saved;
-	}
+	if (fd == -1 && directory && other_kind != NULL)
+		*other_kind = other_kind_at(base, trimmed, false);
 	return (fd);
 }
 
@@ -659,7 +691,7 @@ open_roots(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 			directory = open(operand->directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 			directory_name = operand->directory;
 			if (directory == -1) {
-				status = path_error(error, "cannot open -C directory",
+				status = change_directory_error(error,
 				    operand->directory);
 				break;
 			}
@@ -1070,7 +1102,7 @@ prepare_destination(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	paths->destination_parent = open(parent_path,
 	    O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	if (paths->destination_parent == -1)
-		return (path_error(error, "cannot open -C directory", parent_path));
+		return (change_directory_error(error, parent_path));
 	count = snprintf(paths->retained_destination,
 	    sizeof(paths->retained_destination), "%s/%s", parent_path, options->stem);
 	if (count < 0 || (size_t)count >= sizeof(paths->retained_destination))

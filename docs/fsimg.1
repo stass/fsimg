@@ -413,8 +413,11 @@ or
 applies to the operands after it.
 Each
 .Fl C
-directory is resolved against the working directory, must exist and must
-apply to at least one operand.
+directory is resolved against the working directory, following symbolic
+links as
+.Xr tar 1
+does, must exist and must apply to at least one operand; one that names an
+existing object of another kind fails as unsupported.
 An operand is a directory or a regular file; it is opened without following
 a final symbolic link, so a symbolic link operand fails.
 An operand beginning with @ is a manifest, as
@@ -821,7 +824,11 @@ durability.
 Do not retry a published or uncertain outcome blindly.
 .Sh EXTRACTION
 .Fl C Ar dir
-names an existing directory, by default the working directory.
+names an existing directory, by default the working directory; an existing
+object of another kind fails as unsupported.
+Without
+.Fl E
+a symbolic link to a directory is followed.
 .Cm x
 creates exactly one fresh directory inside it, named after the image, with
 mode 0700, and extracts beneath that:

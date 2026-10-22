@@ -775,6 +775,34 @@ def test_extract_here(executable, root):
     assert b'extraction destination is not empty "."' in result.stderr
 
 
+def test_change_directory_kinds(executable, root):
+    """A -C naming an existing object that is not a directory is refused as
+    unsupported, as with -E, for x and c alike. The -C directory is followed
+    through a symbolic link, as tar's -C is, so a link to a file is that
+    file; a path through a non-directory names nothing and fails to open."""
+    work = root / "change-kinds"
+    work.mkdir()
+    (work / "file").write_bytes(b"x")
+    (work / "to-file").symlink_to("file")
+    shutil.copyfile(root / "human.img", work / "human.img")
+
+    def refusals(directory):
+        return [["xf", "human.img", "--json", "-C", directory],
+                ["cf", "out.img", "-F", "fat12", "--json", "-C", directory, "."]]
+
+    for directory in ["file", "to-file", "file/"]:
+        for arguments in refusals(directory):
+            error = failed(invoke(executable, work, arguments, expected=1))
+            assert error["status"] == "unsupported capability", (arguments, error)
+            assert error["message"] == "-C directory is not a directory", error
+            assert error["path"] == directory, error
+    for arguments in refusals("file/inner"):
+        error = failed(invoke(executable, work, arguments, expected=1))
+        assert error["message"] == "cannot open -C directory", (arguments, error)
+        assert error["os_error"] == errno.ENOTDIR, error
+    assert sorted(path.name for path in work.iterdir()) == ["file", "human.img", "to-file"]
+
+
 def test_extraction_acls(executable, root):
     """A destination with a non-trivial ACL is refused; a fresh directory
     that inherits one from its parent is removed again and the error names
@@ -1975,6 +2003,7 @@ def main():
         test_extraction_names(executable, root)
         test_extract_here(executable, root)
         test_extraction_acls(executable, root)
+        test_change_directory_kinds(executable, root)
         test_failed_creation_output(executable, root)
         test_human_loss_bounds(executable, root)
         test_formats(executable, root)

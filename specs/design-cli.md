@@ -339,7 +339,10 @@ cannot certify future source stability or disk space.
 
 ## Extraction
 
-`-C dir` is always an existing directory. Extraction creates exactly one
+`-C dir` is always an existing directory, opened following symbolic links
+as tar's `-C` is unless `-E` is given; an existing object of another kind,
+judged on the object followed, fails as unsupported, and a path through a
+non-directory as an open failure. Extraction creates exactly one
 fresh directory inside it, named after the image stem, and extracts beneath
 that: `fsimg xf boot.img` extracts into `./boot/`, `fsimg xf boot.img -C /tmp`
 into `/tmp/boot/`. This is GNU tar's `--one-top-level`, made the default
