@@ -943,8 +943,9 @@ With
 the directory is opened without following a symbolic link and must also be
 empty; a symbolic link or any other existing object that is not a directory
 fails as unsupported.
-A fresh directory that inherits a non-trivial ACL from its parent is removed
-again and the error names the parent.
+A fresh directory that inherits a non-trivial ACL from its parent is refused
+and the error names the parent; fsimg removes it again, and reports it as
+possibly retained when the removal is denied.
 The private directories that stage a created image or an
 .Fl -mtree
 file, and the scratch directory, are checked the same way, so an image or

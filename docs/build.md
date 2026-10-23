@@ -806,14 +806,15 @@ Sanitizer execution evidence:
 
 | Host | Command | Result |
 | --- | --- | --- |
-| macOS | `make check-asan` | 29 pass, 4 tool/platform skips; the specification suite passes all 140 FAT cases |
-| macOS | `make check-ubsan` | 29 pass, 4 tool/platform skips; the specification suite passes all 140 FAT cases |
-| macOS | `make check-fuzz` | 29 pass, 4 tool/platform skips; FAT, exFAT, QNX6 and protocol fuzzers complete 1000 mutations each |
+| macOS | `make check-asan` | 42 pass, 5 tool/platform skips; the specification suite passes |
+| macOS | `make check-ubsan` | 42 pass, 5 tool/platform skips; the specification suite passes |
+| macOS | `make check-fuzz` | 42 pass, 5 tool/platform skips; the FAT, exFAT, QNX6, QNX4, protocol, image, container, plist, gzip and mtree fuzzers complete 1000 runs each |
 | macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
-| Linux | `make check-asan` | 26 pass |
-| Linux | `make check-lsan` | 26 pass |
-| Linux | `make check-msan` | 26 pass |
-| FreeBSD 16/ZFS | `make check-asan` | 24 pass, 2 tool/platform skips |
+| Linux (container) | `make check` and `make check-asan` | 45 pass, 2 QNX integration skips each |
+| Linux (container) | `make check-lsan` | 45 pass, 2 QNX integration skips |
+| Linux (container) | `make check-msan` | 42 pass, 2 skips, 3 fail on the uninstrumented system zlib's output (TODO.md); not passing coverage |
+| FreeBSD 16/ZFS | `make check` | 40 pass, 7 tool/platform skips; the specification suite passes |
+| FreeBSD 16/ZFS | `make check-asan` | 39 pass, 7 skips; test-format's fixture fault is fixed and passes in the same build |
 
 From a macOS development host, `build-aux/linux-check.sh [-r REV] [COMMAND]`
 checks a committed revision, `HEAD` by default, on Linux. It builds an Ubuntu
@@ -850,7 +851,9 @@ tools. Linux runs dosfstools/mtools and exfatprogs interoperability in its
 ordinary and sanitizer suites. macOS and the provided FreeBSD host include
 passing independent FAT interoperability. FreeBSD uses its native
 formatter/checker plus mtools and fatcat. The real
-child ASan fault is intentional; no unintended sanitizer report remains.
+child ASan fault is intentional. MSan reports the uninstrumented system
+zlib's output in the compression tests, so its qualification is incomplete
+until the msan profile links an instrumented zlib (TODO.md).
 
 Native directory batches are initialized by the compatibility adapter, including
 padding written through raw kernel interfaces without sanitizer interception.

@@ -381,11 +381,12 @@ FreeBSD holds the vnode lock across its POSIX.1e and NFSv4 ACL operations
 and mode updates, so neither has this race; on a network filesystem the
 server decides. The rule
 covers the fresh directory because a parent's inheritable entries attach to
-it at creation; the check runs after `mkdirat`, and a failure removes the
-directory while it is still the empty object just created and names the
-parent. fsimg never strips or edits an ACL: that would add host-metadata
-mutation to the extraction path for the sake of a parent the user can
-replace. The checks run as the invoking user and hold against another
+it at creation; the check runs after `mkdirat`, and a failure names the
+parent and removes the directory while it is still the empty object just
+created, reporting it as possibly retained when the removal is denied, as by
+an ACL that forbids deletion. fsimg never strips or edits an ACL: that
+would add host-metadata mutation to the extraction path for the sake of a
+parent the user can replace. The checks run as the invoking user and hold against another
 process with the same credentials only as far as the threat model states;
 they are a safeguard against mistakes and the ordinary shared-directory
 attacks, not an isolation boundary.
