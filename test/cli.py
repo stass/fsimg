@@ -2312,15 +2312,24 @@ def test_ifsboot_create(executable, root):
         assert detail in result.stderr, (extra, result.stderr)
         assert not (root / "refused.ifs").exists()
     # A file setting of a kind no setting reads is unsupported, as such an
-    # image or operand is, not an I/O failure.
+    # image or operand is, not an I/O failure, and a trailing "/" or "/."
+    # never makes the open follow a link.
     os.mkfifo(root / "setting-fifo")
-    for setting in ["startup-link.bin", "source", "setting-fifo"]:
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(os.path.relpath(root / "setting-socket"))
+    (root / "setting-directory-link").symlink_to("source")
+    for setting in ["startup-link.bin", "startup-link.bin/", "startup-link.bin/.",
+                    "setting-directory-link/.", "source", "setting-fifo",
+                    "setting-socket"]:
         error = failed(invoke(executable, root, [*base, "-o", f"ifsboot:startup={setting}",
                                                  "-f", "refused.ifs", *operands], expected=1))
         assert error["status"] == "unsupported capability", error
         assert error["path"] == setting, error
         assert not (root / "refused.ifs").exists()
     (root / "setting-fifo").unlink()
+    listener.close()
+    (root / "setting-socket").unlink()
+    (root / "setting-directory-link").unlink()
     unwritable =[arg.replace("machine=0", "machine=42") for arg in plain]
     result = invoke(executable, root, [*unwritable, "-f", "refused.ifs", *operands], expected=1)
     assert b"machine 42 is not writable under compress=lzo" in result.stderr, result.stderr

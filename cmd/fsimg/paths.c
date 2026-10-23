@@ -72,6 +72,7 @@ static uint64_t worker_descriptors(const fsimg_worker_request_t *, unsigned);
 static fsimg_status_t hold_descriptor(int, int, const char *, const char *, int *,
     fsimg_error_t *);
 static fsimg_status_t open_settings(fsimg_cli_options_t *, fsimg_error_t *);
+static int open_nofollow(int, const char *, bool);
 static fsimg_status_t open_operand(int, const fsimg_cli_operand_t *, int,
     int *, fsimg_error_t *);
 static fsimg_status_t open_roots(fsimg_cli_options_t *, fsimg_cli_paths_t *,
@@ -372,11 +373,12 @@ open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 /*
  * Open a create's file settings (specs/design-layers.md#file-settings-and-
  * sections) before the worker starts, each -o path resolved against the
- * working directory and opened as the image input is: no-follow,
- * nonblocking and without a controlling terminal, read-only, and refused as
- * unsupported unless a regular file. The worker receives the descriptor
- * alone, never the name. Only creation and its plan reach here; reading refuses the
- * keys while parsing.
+ * working directory and opened as a command-line operand is (open_nofollow):
+ * no-follow even before a trailing "/" or "/.", nonblocking and without a
+ * controlling terminal, read-only, and refused as unsupported unless a
+ * regular file. The worker receives the descriptor alone, never the name.
+ * Only creation and its plan reach here; reading refuses the keys while
+ * parsing.
  */
 static fsimg_status_t
 open_settings(fsimg_cli_options_t *options, fsimg_error_t *error)
@@ -391,7 +393,7 @@ open_settings(fsimg_cli_options_t *options, fsimg_error_t *error)
 		if (path == NULL)
 			continue;
 		fd = &request->setting_fds[i];
-		*fd = fsimg_host_source_open(AT_FDCWD, path, false);
+		*fd = open_nofollow(AT_FDCWD, path, false);
 		if (*fd == -1 && errno == ELOOP)
 			return (kind_error(error, ELOOP,
 			    "file setting is a symbolic link", path));

@@ -402,6 +402,15 @@
   source cursor report status only and leave failing the writer to the writer
   lifecycle, so writer state after a failed copy no longer depends on which
   layer failed.
+* [Low] **One classifier for command-line open failures**
+  (`cmd/fsimg/paths.c`): `open_input`, `open_operand`, `open_settings` and
+  `change_directory_error` each map `ELOOP`, `ENOTDIR` and `ENXIO` to an
+  unsupported kind or an I/O failure by hand, and disagree on a regular file
+  named with a trailing `/` (unsupported for `-C`, an I/O failure
+  elsewhere). The image open also skips `trim_final`, so `image-link/.`
+  follows a link to a directory before the kind check refuses it. Route
+  every command-line open through `open_nofollow` and one failure
+  classifier whose only per-site variation is the noun.
 * [Low] **Monotonic-clock failures** (`cmd/fsimg/paths.c`,
   `cmd/fsimg/worker-parent.c`, `cmd/fsimg/main.c`): make later supervision,
   publication and reporting clock queries distinguish failure from zero.
