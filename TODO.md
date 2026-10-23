@@ -479,15 +479,18 @@
   CI, and point the sanitizer build at it; do not vendor zlib into the
   project.
 
-* [Medium] **macOS script-launch stalls prevent specification qualification**
-  (`test/spec/suite/core/test_runner.rb`, `test/spec/lib/fsimg_spec/process.rb`):
+* [Medium] **macOS sanitizer qualification encounters timeouts**
+  (`test/spec/suite/core/test_runner.rb`, `test/spec/lib/fsimg_spec/process.rb`,
+  `test/cli.py`, `examples/`):
   direct execution of a temporary `#!/bin/sh` script from Ruby or Python
   exceeds a two-second probe deadline with and without resource limits;
   invoking the same script through `/bin/sh` finishes in 11-15 ms. The
   runner's 20-second self-tests time out, with missing output files causing
-  further failures. Investigate the direct-launch stall and restore macOS
-  sanitizer qualification; preserve the runner's execution and containment
-  checks.
+  further failures. UBSan CLI integration also reaches its 30-second limit
+  in the native creation and provider examples; their relation to the
+  script-launch stall is unknown. Investigate these timeouts and restore
+  macOS sanitizer qualification; preserve the runner's execution and
+  containment checks.
 
 * [Medium] **No check runs confinement on glibc 2.33 to 2.38**
   (`build-aux/linux-check.sh`, `.github/workflows/check.yml`): those
