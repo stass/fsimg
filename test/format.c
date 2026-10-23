@@ -112,10 +112,15 @@ static void
 test_probe_contract(void)
 {
 	static const fsimg_writer_ops_t writer;
+	/* Every format names at least one variant, as the registry's do. */
+	static const fsimg_format_variant_t variant = { .info.name = "fake" };
 	const fsimg_format_t fakes[FAKE_COUNT] = {
-		{ .probe_bytes = 4, .probe = fake_probe_0, .reader = &fake_reader },
-		{ .probe_bytes = 64, .probe = fake_probe_1, .reader = &fake_reader },
-		{ .probe_bytes = 8, .probe = fake_probe_2, .writer = &writer }
+		{ .variants = &variant, .variant_count = 1, .probe_bytes = 4,
+		    .probe = fake_probe_0, .reader = &fake_reader },
+		{ .variants = &variant, .variant_count = 1, .probe_bytes = 64,
+		    .probe = fake_probe_1, .reader = &fake_reader },
+		{ .variants = &variant, .variant_count = 1, .probe_bytes = 8,
+		    .probe = fake_probe_2, .writer = &writer }
 	};
 	const fsimg_format_t *const registry[FAKE_COUNT] = {
 		&fakes[0], &fakes[1], &fakes[2]
