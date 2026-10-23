@@ -393,6 +393,17 @@
   copy authoritative: a build-and-check script that CI, `linux-check.sh` and
   the FreeBSD host all call, and a CI Linux job that runs in the same image.
 
+* [High] **MemorySanitizer fails on the system zlib's output**
+  (`build-aux/sanitize.sh`, `test/compression.c`, `test/containers.c`,
+  `test/gzip-write.c`): `make check-msan` fails test-compression,
+  test-containers and test-gzip-write with use-of-uninitialized-value in
+  bytes zlib's deflate and inflate wrote, because the system zlib is not
+  instrumented and MSan cannot see its stores. fsimg's own code is not
+  implicated, but MSan then covers no compressed layer. Build an
+  MSan-instrumented zlib for the msan profile in the Linux check image and
+  CI, and point the sanitizer build at it; do not vendor zlib into the
+  project.
+
 * [Medium] **No check runs confinement on glibc 2.33 to 2.38**
   (`build-aux/linux-check.sh`, `.github/workflows/check.yml`): those
   releases implement `fstat()` as `newfstatat`, which the worker's seccomp

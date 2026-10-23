@@ -837,7 +837,13 @@ rebuild the image from current packages.
 It needs Docker, for example through colima. For the Linux sandbox
 profiles to run rather than skip, the Docker VM's kernel must provide
 Landlock ABI 3 (Linux 6.2 or later), as Ubuntu 24.04's stock 6.8 kernel
-does.
+does. For `make check-msan`, the VM's `vm.mmap_rnd_bits` must be at most 28,
+as on GitHub's runners: with more address randomization, clang 18's MSan
+runtime re-executes itself through `personality(ADDR_NO_RANDOMIZE)`, which
+Docker's default seccomp profile denies, and configure fails with "cannot
+run C compiled programs". Set it with
+`colima ssh -- sudo sysctl -w vm.mmap_rnd_bits=28`; it lasts until the VM
+restarts.
 
 Configure searches the standard system sbin directories for formatter/checker
 tools. Linux runs dosfstools/mtools and exfatprogs interoperability in its
