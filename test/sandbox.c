@@ -567,13 +567,12 @@ test_sync_rights(int parent, int input)
 	child = fork();
 	CHECK(child != -1);
 	if (child == 0) {
-		fsimg_sandbox_caps_t caps = {
-			.input = 5, .staging = -1, .destination = -1,
-			.scratch = -1, .roots = -1, .root_count = 0, .raw = 3,
-			.spool = 4, .job = -1, .control = -1, .data = -1,
-			.cancel = -1
-		};
+		fsimg_sandbox_caps_t caps;
 
+		fsimg_sandbox_caps_init(&caps);
+		caps.input = 5;
+		caps.raw = 3;
+		caps.spool = 4;
 		if (setrlimit(RLIMIT_CORE, &no_core) == -1 ||
 		    dup2(raw, 3) == -1 || dup2(spool, 4) == -1 ||
 		    dup2(input, 5) == -1)
