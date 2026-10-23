@@ -24,6 +24,10 @@ typedef enum fsimg_host_privacy {
  * writers out, so read and search bits for others are allowed. An ACL is
  * never interpreted, only detected. The rule trusts what the descriptor
  * reports, so a filesystem that ignores ownership or permissions defeats it.
+ * The ACL is examined before the owner and mode, which closes the ordinary
+ * races, but not one on macOS, where a change to the mode or ACL that an
+ * ACL entry authorized can land after the entry is gone and the check has
+ * passed.
  * The emptiness check reads through one transient second descriptor.
  * Returns 0 with the verdict, or -1 with errno when a query fails, which
  * the caller must treat as a failure rather than as privacy.
@@ -32,7 +36,7 @@ int fsimg_host_private_directory(int, fsimg_host_privacy_t *);
 
 /* What an attempt to create a fresh private directory came to. */
 typedef enum fsimg_host_fresh {
-	FSIMG_HOST_FRESH_CREATED,	/* Created, opened and proven private */
+	FSIMG_HOST_FRESH_CREATED,	/* Created, opened and checked private */
 	FSIMG_HOST_FRESH_TAKEN,		/* The name exists; nothing was created */
 	FSIMG_HOST_FRESH_REFUSED,	/* The directory there is not private */
 	FSIMG_HOST_FRESH_FAILED		/* A host call failed, as errno says */
@@ -50,9 +54,12 @@ typedef enum fsimg_host_fresh {
  * says why when it is REFUSED; errno is set when it is TAKEN or FAILED. A
  * directory that is refused, or whose check failed, is removed again as
  * fsimg_host_remove_directory() allows. On every outcome *created says
- * whether a directory fsimg made still stands under name as fsimg left it,
- * empty, which the caller then owns and reports; a populated directory there
- * is never reported, since fsimg wrote nothing into it.
+ * whether a directory fsimg made may still stand under name, which the
+ * caller then owns and reports. A directory whose removal finds it
+ * populated is not reported, since fsimg wrote nothing into it; one whose
+ * removal fails otherwise, such as with EACCES or EPERM, is reported as
+ * possibly retained, populated or not, since fsimg cannot inspect its
+ * contents.
  */
 fsimg_host_fresh_t fsimg_host_private_mkdir(int, const char *, int *,
     fsimg_host_privacy_t *, bool *);

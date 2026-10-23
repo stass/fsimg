@@ -66,15 +66,16 @@ The [principles](principles.md) govern tradeoffs. In particular:
   unconfined execution. In-process library calls provide the same validation
   but do not sandbox their host application.
 * Extraction writes beneath one private destination that the coordinator has
-  proven empty: a fresh directory it creates inside the user's `-C`
+  checked empty: a fresh directory it creates inside the user's `-C`
   directory, or with `-E` the user's own directory after the checks in the
   [security specification](design-security.md#safe-extraction). Merging
   into a populated tree, overwriting files, and restoring privileged metadata
   are outside the extraction contract.
 * Every directory fsimg creates to write into, CLI or library alike, comes
   from one libfsimg routine that creates it with mode 0700, reopens it
-  no-follow and proves it private on that descriptor by the rule the
-  [security specification](design-security.md#safe-extraction) states.
+  no-follow and checks that it is private on that descriptor by the rule the
+  [security specification](design-security.md#safe-extraction) states,
+  subject to the residuals it names.
   Output staging, extraction destinations and CLI scratch therefore share
   one check, and no library or CLI entry point creates such a directory
   without it. The extractor's own directories are created beneath a root
@@ -445,7 +446,7 @@ either mode. The parent does not execute requests to open names supplied by
 the worker.
 
 Extraction accepts only regular files and directories in its safe profile,
-writes only beneath a destination proven empty and private before the worker
+writes only beneath a destination checked empty and private before the worker
 starts, and never follows image-derived symlinks.
 Image paths are validated component by component, and files are created
 exclusively relative to directory descriptors. Details and platform guarantees

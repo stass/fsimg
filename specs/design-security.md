@@ -364,10 +364,22 @@ trusting the mode bits. Refusing rather than reading ACLs is the
 rule by construction: the three platforms' ACL semantics differ, an
 allowlist of harmless entries is a list that grows with each platform, and a
 user who wants an ACL on the destination can extract elsewhere. The order
-of the checks keeps each answer true once given: an ACL entry can let
+of the checks closes the ordinary interleavings: an ACL entry can let
 another user change the directory's mode, owner or ACL, so the ACL is
-examined before the owner and mode are sampled, and once those pass only
-the owner can write the directory, so its emptiness is judged last. The rule
+examined before the owner and mode are sampled, and emptiness, which
+depends on who can write, is judged last. No order closes one macOS race.
+Darwin authorizes a change to a directory's mode or ACL before it applies
+it, so another user whom an ACL entry grants `writesecurity` over the
+directory can start, for example, a chmod to 0777, remove the entry from
+another thread, and have the chmod land after fsimg has seen no ACL and
+mode 0700. fsimg documents this rather than refusing: on macOS, do not
+create fsimg's directories beneath a parent whose inheritable ACL delegates
+security rights over new children to another user, and do not give `-E` a
+directory that carries, or was created with, such an entry. On local
+filesystems Linux POSIX ACLs cannot delegate ACL administration, and
+FreeBSD holds the vnode lock across its POSIX.1e and NFSv4 ACL operations
+and mode updates, so neither has this race; on a network filesystem the
+server decides. The rule
 covers the fresh directory because a parent's inheritable entries attach to
 it at creation; the check runs after `mkdirat`, and a failure removes the
 directory while it is still the empty object just created and names the
@@ -378,7 +390,7 @@ process with the same credentials only as far as the threat model states;
 they are a safeguard against mistakes and the ordinary shared-directory
 attacks, not an isolation boundary.
 
-The same rule, by the same function, proves every other directory fsimg
+The same rule, by the same function, checks every other directory fsimg
 creates before anything is put in it: the staging directory of a created
 image, whether the CLI coordinator or a library caller's
 `fsimg_writer_write_at` makes it, the fresh destination of
@@ -398,10 +410,13 @@ at once, and with it all cleanup of its contents, which goes through that
 descriptor: whatever the name now reaches may belong to someone else. It is
 removed again only while the name still holds the object it opened, owned
 by the user and empty; otherwise its name is reported as retained, unless
-the name now holds another object or nothing, or the opened directory is
-populated, whatever the check refused it for, none of which is fsimg's to
-report. fsimg made the directory empty, so a populated directory is
-normally the user's own, put under the name in place of the new one.
+the name now holds another object or nothing, or the removal finds the
+directory populated, whatever the check refused it for, none of which is
+fsimg's to report. fsimg made the directory empty, so a populated directory
+is normally the user's own, put under the name in place of the new one. A
+removal that fails for another reason, such as EACCES from an ACL that
+denies deletion, or EPERM, leaves the directory's contents uninspected, so the name is
+reported as possibly retained, populated or not.
 Another principal who could write the new directory, through an
 inheritable ACL entry or a filesystem's mode, can populate it and so leave
 a directory fsimg made unreported; fsimg never writes into it. A writer of

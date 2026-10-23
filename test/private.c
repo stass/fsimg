@@ -46,10 +46,14 @@ static void test_mode_raced_with_acl(void);
 /* The parent every case works in, and the directory the hook renames onto
  * the name fsimg just made, as a writer of a parent without the sticky bit
  * can; NULL plants nothing. A nonzero widened mode is what the ACL hooks
- * give the directory, as a user an inherited ACL entry lets change its
- * security can until that entry is gone; widenings counts the hook calls.
+ * give the directory. It stands in for another user whom an inherited ACL
+ * entry lets change the directory's security, which that user can do until
+ * the entry is gone; widenings counts the hook calls.
  * The mode is widened from the first ACL-interface call on, so the test
  * pins that owner and mode are read after that call, not after the last.
+ * A change completed before a query is all it models; a macOS chmod
+ * authorized before the ACL is removed and applied after the check is a
+ * documented residual no order closes.
  */
 static int parent = -1;
 static const char *planted;
@@ -57,8 +61,8 @@ static bool plant_link;
 static mode_t widened;
 static unsigned widenings;
 
-/* The other user's chance before an ACL query: once the query finds no
- * entry, nobody but the owner can change the directory's mode.
+/* The other user's chance before an ACL query, modelled as a mode change
+ * that completes before the query runs.
  */
 static void
 before_acl_query(int fd)
@@ -246,9 +250,9 @@ test_link_replacement(void)
 
 /* A mode widened before the ACL query, as another user granted the right
  * to change the directory's security through an inherited entry can do
- * before removing that entry, is seen: the mode is sampled only once no ACL
- * lets anyone but the owner change it. The new directory is refused and,
- * being fsimg's and empty, removed.
+ * before removing that entry, is seen, because the mode that passes is
+ * sampled after the ACL query. The new directory is refused and, being
+ * fsimg's and empty, removed.
  */
 static void
 test_mode_raced_with_acl(void)

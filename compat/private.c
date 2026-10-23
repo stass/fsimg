@@ -205,14 +205,17 @@ fsimg_host_private_directory(int fd, fsimg_host_privacy_t *verdict)
 	bool present, empty;
 
 	/*
-	 * The order is what makes each passing answer stay true; a refusal is
-	 * safe whenever it is found. A file's type never changes. An ACL entry
-	 * can let another user change the directory's mode, owner or ACL, so
-	 * the owner and mode that pass are sampled only once no entry is left;
-	 * from then on only the owner can change them, and once they pass, only
-	 * the owner can write the directory, so its emptiness is judged last.
-	 * The first sample also refuses a foreign owner at once, so an ACL its
-	 * owner keeps unreadable does not hide that cause.
+	 * The order closes the ordinary interleavings; a refusal is safe
+	 * whenever it is found. A file's type never changes. An ACL entry can
+	 * let another user change the directory's mode, owner or ACL, so the
+	 * owner and mode that pass are sampled only after the ACL query finds
+	 * no entry, and emptiness, which depends on who can write, is judged
+	 * last. The first sample also refuses a foreign owner at once, so an
+	 * ACL its owner keeps unreadable does not hide that cause. No order
+	 * closes one macOS race: a change to the mode or ACL is authorized
+	 * there before it is applied, so one an ACL entry authorized can land
+	 * after the entry is removed and the check has passed
+	 * (specs/design-security.md#safe-extraction).
 	 */
 	if (fsimg_host_fstat(fd, &first) == -1)
 		return (-1);
@@ -284,8 +287,10 @@ fsimg_host_remove_directory(int parent, const char *name, int fd)
  * directory empty and wrote nothing into it, so a populated one is normally
  * the user's own, put under the name in place of the new one, and otherwise
  * fsimg's own filled by another user the check kept out, whose files fsimg
- * does not vouch for. False means fsimg's empty directory remains, for the
- * caller to report.
+ * does not vouch for. False means a directory fsimg made may remain, for
+ * the caller to report: removal failed for another reason, such as EACCES
+ * from an ACL that denies deletion, or EPERM, which leaves the
+ * directory's contents uninspected, populated or not.
  */
 static bool
 discard_refused(int parent, const char *name, int fd)

@@ -960,6 +960,19 @@ every command fails until
 names another.
 .Nm
 never edits an ACL.
+On macOS, an ACL entry that gives another user the right to change a
+directory's permissions or ACL leaves a race the check does not close:
+that user can start such a change, remove the entry before the check, and
+have the change land after it, leaving the directory writable by them.
+So on macOS, give the extraction
+.Fl C ,
+.Fl f ,
+.Fl -mtree
+or
+.Fl T
+no parent whose inheritable ACL grants that right, and give
+.Fl E
+no directory that carries, or was created with, such an entry.
 On Linux a
 .Ql system.nfs4_acl
 attribute counts as non-trivial whatever it holds, so neither a destination

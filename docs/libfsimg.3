@@ -352,11 +352,17 @@ A parent whose new directories fail the check, such as one with an
 inheritable ACL entry, or whose writers put another directory under the new
 name before the reopen, fails the call with FSIMG_EINVAL and a message
 naming what the parent does to new directories.
+On macOS, a parent whose inheritable ACL gives another user the right to
+change new directories' permissions or ACL leaves a race the check does
+not close; do not create the library's directories beneath one.
 A refused directory is removed again while the name still holds the
 directory the library opened, owned by the effective user and empty;
-otherwise, unless the name now holds another object, nothing, or a
-populated directory, which holds nothing the library wrote, the error's
-path names it.
+otherwise, unless the name now holds another object or nothing, or the
+removal finds the directory populated, which holds nothing the library
+wrote, the error's path names it as possibly retained.
+A removal that fails for another reason, such as EACCES from an ACL that
+denies deletion, or EPERM, leaves the directory's contents uninspected, so it is
+reported even if it is populated.
 An extraction whose destination cannot be created or is refused leaves the
 reader untouched.
 In capability mode the parent descriptor needs the rights these queries
