@@ -18,6 +18,7 @@
 #
 # Each run starts from scratch and writes nothing outside sanitizer-MODE/.
 set -eu
+unset CDPATH
 mode=${1:-}
 make=${MAKE:-make}
 if test ! -f config.status; then
@@ -45,7 +46,19 @@ lsan|msan)
     fi
     case "$mode" in
     lsan) flags='-fsanitize=leak' ;;
-    msan) flags='-fsanitize=memory -fsanitize-memory-track-origins=2 -fPIE' ;;
+    msan)
+        flags='-fsanitize=memory -fsanitize-memory-track-origins=2 -fPIE'
+        if test -z "${MSAN_ZLIB:-}" ||
+            test ! -f "$MSAN_ZLIB/include/zlib.h" ||
+            test ! -f "$MSAN_ZLIB/lib/libz.a"; then
+            echo 'sanitize.sh: MSan requires MSAN_ZLIB pointing to an instrumented zlib prefix (docs/build.md)' >&2
+            exit 2
+        fi
+        msan_zlib=$(cd "$MSAN_ZLIB" && pwd)
+        zlib_cflags="-I$msan_zlib/include"
+        # The named archive stays a dependency of libtool's convenience
+        # library; an absolute archive would become a nested member.
+        zlib_libs="-L$msan_zlib/lib -l:libz.a" ;;
     esac ;;
 *)
     echo 'usage: MAKE=make sh sanitize.sh asan|ubsan|lsan|msan|fuzz' >&2
@@ -69,6 +82,9 @@ find "$work_dir/src" -type f -exec chmod a-w {} +
 # Arguments given after them take precedence, so the copy is the source and
 # no cache file is shared whatever the outer build was configured with.
 eval "set -- $(./config.status --config)"
+if test "$mode" = msan; then
+    set -- "$@" "ZLIB_CFLAGS=$zlib_cflags" "ZLIB_LIBS=$zlib_libs"
+fi
 cd "$work_dir/build"
 ../src/configure "$@" --srcdir=../src --cache-file=/dev/null \
     CC="$sanitizer_cc" CXX="$sanitizer_cxx" CFLAGS="$sanitizer_cflags" \
@@ -77,5 +93,9 @@ cd "$work_dir/build"
 # Repeat the compiler and flags: assignments on the outer make command line
 # (make check-asan CFLAGS=-O0) reach this make through MAKEFLAGS and would
 # override the configured ones, silently building without instrumentation.
-"$make" check CC="$sanitizer_cc" CXX="$sanitizer_cxx" \
+set --
+if test "$mode" = msan; then
+    set -- "ZLIB_CFLAGS=$zlib_cflags" "ZLIB_LIBS=$zlib_libs"
+fi
+"$make" check "$@" CC="$sanitizer_cc" CXX="$sanitizer_cxx" \
     CFLAGS="$sanitizer_cflags" CXXFLAGS="$sanitizer_cflags" LDFLAGS="$link_flags"

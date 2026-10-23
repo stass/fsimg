@@ -21,7 +21,7 @@ AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
 # and their rules start with + to pass the jobserver. A + line runs even
 # under make -n, so automake's am__make_dryrun keeps a dry run from
 # replacing the previous sanitizer build.
-SANITIZE_ENV = MAKE="$(MAKE)"
+SANITIZE_ENV = MAKE="$(MAKE)" MSAN_ZLIB="$(MSAN_ZLIB)"
 include_HEADERS = include/fsimg.h
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libfsimg.pc
@@ -261,6 +261,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/check-install.sh build-aux/check-installed.py \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
+	build-aux/build-msan-zlib.sh \
 	build-aux/linux-check.sh build-aux/linux-check/Dockerfile \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
 	docs/references.md docs/qualification.md .github/workflows/check.yml \

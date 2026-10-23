@@ -98,6 +98,7 @@ trap 'exit 143' TERM
 # ID, not a shared tag, names it: another checkout may rebuild meanwhile.
 mkdir "$rundir/image"
 cp "$top/build-aux/linux-check/Dockerfile" "$rundir/image/"
+cp "$top/build-aux/build-msan-zlib.sh" "$rundir/image/"
 git -C "$top" show "$commit:test/spec/Gemfile" >"$rundir/image/Gemfile"
 git -C "$top" show "$commit:test/spec/Gemfile.lock" \
     >"$rundir/image/Gemfile.lock"

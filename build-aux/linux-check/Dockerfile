@@ -9,11 +9,19 @@
 FROM ubuntu:24.04
 LABEL fsimg-linux-check=1
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
-RUN apt-get update && apt-get install -y \
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' \
+	    /etc/apt/sources.list.d/ubuntu.sources && \
+	apt-get update && apt-get install -y \
 	autoconf automake libtool make pkg-config clang llvm gcc g++ \
 	zlib1g-dev mtools dosfstools exfatprogs fdisk gdisk zstd pigz python3 \
-	ruby ruby-dev ruby-bundler git ca-certificates xz-utils file && \
-	rm -rf /var/lib/apt/lists/*
+	ruby ruby-dev ruby-bundler git ca-certificates xz-utils file dpkg-dev
+COPY build-msan-zlib.sh /usr/local/libexec/fsimg/build-msan-zlib.sh
+RUN source_parent=$(mktemp -d) && cd "$source_parent" && \
+	apt-get source zlib && \
+	sh /usr/local/libexec/fsimg/build-msan-zlib.sh \
+	    "$source_parent"/zlib-*/ /opt/fsimg-msan-zlib && \
+	cd / && rm -rf "$source_parent" /var/lib/apt/lists/*
+ENV MSAN_ZLIB=/opt/fsimg-msan-zlib
 RUN useradd -m fsimg
 USER fsimg
 WORKDIR /home/fsimg

@@ -348,16 +348,6 @@
   FreeBSD only. Adopt settings as an object that never consults the host's
   hole report.
 
-* [Medium] **test-containers' vast-zeros case fails on Linux**
-  (`test/containers.c` `test_vast_declared_zeros`, `lib/layers/output.c`):
-  composing the declared 1 PiB DMG disk resizes the output file to its full
-  length before any chunk is charged, and ext4 in the Linux check container
-  refuses that length, so the compose fails `FSIMG_EIO` "resize failed"
-  instead of `FSIMG_ELIMIT` at the work limit; APFS accepts the sparse file,
-  so macOS passes. Either charge the work bound before sizing the output, or
-  size it as the encoder reaches each chunk, so the limit decides on every
-  host.
-
 * [Low] **test-worker's relay scenario fails setpgid intermittently**
   (`test/worker.c:1103`): under a loaded `make -j32 check` on macOS the
   forked consumer's `setpgid(0, 0)` failed once, while the parent's
@@ -467,30 +457,15 @@
   copy authoritative: a build-and-check script that CI, `linux-check.sh` and
   the FreeBSD host all call, and a CI Linux job that runs in the same image.
 
-* [High] **MemorySanitizer fails on the system zlib's output**
-  (`build-aux/sanitize.sh`, `test/compression.c`, `test/containers.c`,
-  `test/gzip-write.c`, `test/hbcifs.c`): `make check-msan` fails
-  test-compression, test-containers, test-gzip-write and test-hbcifs with
-  use-of-uninitialized-value in bytes zlib's deflate and inflate wrote,
-  because the system zlib is not
-  instrumented and MSan cannot see its stores. fsimg's own code is not
-  implicated, but MSan then covers no compressed layer. Build an
-  MSan-instrumented zlib for the msan profile in the Linux check image and
-  CI, and point the sanitizer build at it; do not vendor zlib into the
-  project.
-
-* [Medium] **macOS sanitizer qualification encounters timeouts**
-  (`test/spec/suite/core/test_runner.rb`, `test/spec/lib/fsimg_spec/process.rb`,
-  `test/cli.py`, `examples/`):
-  direct execution of a temporary `#!/bin/sh` script from Ruby or Python
-  exceeds a two-second probe deadline with and without resource limits;
-  invoking the same script through `/bin/sh` finishes in 11-15 ms. The
-  runner's 20-second self-tests time out, with missing output files causing
-  further failures. UBSan CLI integration also reaches its 30-second limit
-  in the native creation and provider examples; their relation to the
-  script-launch stall is unknown. Investigate these timeouts and restore
-  macOS sanitizer qualification; preserve the runner's execution and
-  containment checks.
+* [Medium] **macOS sanitizer qualification is blocked by execution policy**
+  (`test/spec/suite/core/test_runner.rb`, `test/cli.py`): AppleSystemPolicy
+  denies execution of generated script stubs and native creation/provider
+  examples before their program bodies run, causing the runner's 20-second
+  and CLI's 30-second deadlines to expire. A script passed to `/bin/sh`
+  runs immediately, and sampled denied processes remain at `_dyld_start`.
+  The hosting application has Developer Tools enabled; determine the
+  authorization identity of the persistent launcher and qualify the macOS
+  sanitizer suites without weakening execution or containment checks.
 
 * [Medium] **No check runs confinement on glibc 2.33 to 2.38**
   (`build-aux/linux-check.sh`, `.github/workflows/check.yml`): those

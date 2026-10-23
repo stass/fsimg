@@ -218,6 +218,8 @@ static void test_fault_sweeps(void);
 static memory_file_t three_run_dmg(uint32_t, unsigned char **);
 static fsimg_status_t compose_disk(fixture_t *, const char *,
     unsigned char **, uint64_t *, fsimg_error_t *);
+static fsimg_status_t compose_to_sink(fixture_t *, const fsimg_sink_t *,
+    fsimg_error_t *);
 static void progress_work(void *, const fsimg_progress_t *);
 static void test_container_zero_runs(void);
 static void test_container_index_faults(void);
@@ -1881,27 +1883,16 @@ three_run_dmg(uint32_t middle, unsigned char **disk)
 	return (dmg_encode(&spec));
 }
 
-/*
- * Compose the open image's whole disk as the one partition of a GPT disk,
- * published as a file in the scratch directory under name. On success
- * *out receives the composed disk and *length its length, and the file is
- * removed; on failure nothing may have been published.
- */
+/* Compose the open image's whole disk as one partition of a GPT disk. */
 static fsimg_status_t
-compose_disk(fixture_t *f, const char *name, unsigned char **out,
-    uint64_t *length, fsimg_error_t *error)
+compose_to_sink(fixture_t *f, const fsimg_sink_t *sink, fsimg_error_t *error)
 {
 	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
 	fsimg_write_options_t options;
 	fsimg_part_t part;
-	fsimg_sink_t sink;
 	fsimg_io_t *disk;
-	struct stat st;
 	fsimg_status_t status;
-	int fd;
 
-	*out = NULL;
-	*length = 0;
 	CHECK(fsimg_image_select(f->image, &selector, &disk, NULL) == FSIMG_OK);
 	part = (fsimg_part_t){ .volume = disk, .type = "linux" };
 	fsimg_write_options_init(&options);
@@ -1910,12 +1901,32 @@ compose_disk(fixture_t *f, const char *name, unsigned char **out,
 		    f->compression);
 	options.flags = FSIMG_WRITE_REPRODUCIBLE;
 	options.epoch = INT64_C(1700000000);
+	status = fsimg_image_compose(f->ctx, "gpt", &part, 1, &options, sink,
+	    error);
+	fsimg_io_free(disk);
+	return (status);
+}
+
+/*
+ * Publish the composed disk as a file under name in the scratch directory.
+ * On success *out receives its bytes and *length its length, and the file
+ * is removed; on failure nothing may have been published.
+ */
+static fsimg_status_t
+compose_disk(fixture_t *f, const char *name, unsigned char **out,
+    uint64_t *length, fsimg_error_t *error)
+{
+	fsimg_sink_t sink;
+	struct stat st;
+	fsimg_status_t status;
+	int fd;
+
+	*out = NULL;
+	*length = 0;
 	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
 	sink.parent_fd = f->scratch;
 	sink.name = name;
-	status = fsimg_image_compose(f->ctx, "gpt", &part, 1, &options, &sink,
-	    error);
-	fsimg_io_free(disk);
+	status = compose_to_sink(f, &sink, error);
 	fd = openat(f->scratch, name, O_RDONLY | O_CLOEXEC);
 	if (status != FSIMG_OK) {
 		CHECK(fd == -1 && errno == ENOENT);
@@ -2043,8 +2054,9 @@ test_container_index_faults(void)
  * A DMG declaring a 1 PiB disk of free space in one record opens and
  * answers that whole disk zero in record reads, never in bytes. Composing
  * it still owes its encoder every chunk, which the work limit bounds: the
- * compose fails with FSIMG_RESOURCE_WORK at the limit, plain and under
- * gzip, having read only the table chunks of the assembled disk, where
+ * compose to a stream fails with FSIMG_RESOURCE_WORK at the limit, plain
+ * and under gzip, without requiring a host file that can hold 1 PiB. It
+ * reads only the table chunks of the assembled disk, where
  * the same compose with hole knowledge ignored reads every chunk it
  * reaches. A 64 MiB disk of the same kind composes within the limit.
  */
@@ -2057,10 +2069,12 @@ test_vast_declared_zeros(void)
 	unsigned char *composed;
 	memory_file_t file, small;
 	fsimg_error_t error;
+	fsimg_sink_t sink;
 	fsimg_stats_t stats;
 	fsimg_io_t *disk;
 	uint64_t start, end, length, before, read[2];
 	fixture_t f;
+	int fd;
 
 	spec.table[0] = (dmg_table_t){ 0, sectors, 1, {
 		{ RUN_IGNORE, 0, sectors, 0 } } };
@@ -2072,13 +2086,17 @@ test_vast_declared_zeros(void)
 	CHECK(fsimg_io_next_zero_range(disk, 0, &start, &end, NULL) == FSIMG_OK);
 	CHECK(start == 0 && end == sectors * SECTOR && file.read_bytes == 0);
 	fsimg_io_free(disk);
+	fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+	CHECK(fd != -1);
+	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
+	sink.stream_fd = fd;
 	for (unsigned gzip = 0; gzip < 2; gzip++) {
 		f.compression = gzip ? "gzip" : NULL;
 		for (unsigned consult = 0; consult < 2; consult++) {
 			fsimg_test_hole_discovery(f.ctx, consult == 1);
 			CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 			before = stats.read_bytes;
-			CHECK(compose_disk(&f, "vast", &composed, &length, &error) ==
+			CHECK(compose_to_sink(&f, &sink, &error) ==
 			    FSIMG_ELIMIT);
 			CHECK(error.resource == FSIMG_RESOURCE_WORK);
 			CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
@@ -2086,6 +2104,7 @@ test_vast_declared_zeros(void)
 		}
 		CHECK(read[1] < 4 * MIB && read[0] >= 64 * MIB);
 	}
+	CHECK(close(fd) == 0);
 	f.compression = NULL;
 
 	spec.sectors = 64 * MIB / SECTOR;

@@ -55,6 +55,7 @@ FSIMG_DEV_TOOL([IMG2SIMG], [img2simg], [Android sparse image producer])
 dnl Not GZIP: gzip(1) reads options from an environment variable of that name.
 FSIMG_DEV_TOOL([GZIP_PROGRAM], [gzip], [gzip compressor])
 FSIMG_DEV_TOOL([PIGZ], [pigz], [parallel gzip compressor])
+AC_ARG_VAR([MSAN_ZLIB], [external instrumented zlib prefix for MSan checks only])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
 # The system zlib is the one third-party library the core links: DMG zlib
 # chunks and gzip need it, and inflate parses untrusted images, so the

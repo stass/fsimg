@@ -19,10 +19,19 @@ jobs:
             # Homebrew's Ruby is keg-only; the system Ruby is older than 3.2.
             echo "$(brew --prefix ruby)/bin" >> "$GITHUB_PATH"
           else
+            sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config python3 ruby ruby-dev ruby-bundler
+            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config python3 ruby ruby-dev ruby-bundler dpkg-dev
           fi
           echo "BUNDLE_PATH=$RUNNER_TEMP/spec-gems" >> "$GITHUB_ENV"
+      - name: Instrumented zlib for MemorySanitizer
+        if: runner.os == 'Linux'
+        run: |
+          source_parent=$(mktemp -d)
+          (cd "$source_parent" && apt-get source zlib)
+          sh build-aux/build-msan-zlib.sh "$source_parent"/zlib-*/ "$RUNNER_TEMP/zlib-msan"
+          rm -rf "$source_parent"
+          echo "MSAN_ZLIB=$RUNNER_TEMP/zlib-msan" >> "$GITHUB_ENV"
       - name: Ruby version
         id: ruby
         run: echo "version=$(ruby -e 'print RUBY_VERSION')" >> "$GITHUB_OUTPUT"

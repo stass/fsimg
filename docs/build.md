@@ -220,6 +220,25 @@ Linux MSan requires Clang and an appropriate runtime; an unsupported compiler
 or runtime fails configuration rather than being reported as a pass. TSan is
 not applicable to the serial library and process-only test harnesses.
 
+MSan uses a separately instrumented zlib so it can track the bytes deflate
+and inflate produce. `MSAN_ZLIB` names its installation prefix; set it at
+configure time or as `make check-msan MSAN_ZLIB=/path/to/zlib-msan`.
+The MSan target refuses a missing prefix. Ordinary builds and the other
+sanitizers continue to use the system zlib. The Linux check image and CI
+build their MSan dependency from Ubuntu's source package, outside this
+checkout, with the same Clang toolchain as the test build. For a local
+Linux setup, unpack the host's zlib source package and run:
+
+```sh
+sh build-aux/build-msan-zlib.sh /path/to/zlib-source /path/to/zlib-msan
+```
+
+The helper copies the source into a disposable build directory, compiles
+the static library with MSan and origin tracking, and installs it under the
+given prefix. It needs Clang and make; Ubuntu source-package extraction
+also needs `dpkg-dev` and enabled `deb-src` repositories. No zlib source or
+binary is vendored into fsimg.
+
 Fresh worker and output-relay processes use fixed sanitizer settings, including
 `abort_on_error=0`, `exitcode=86`, and `symbolize=0`. The supervisor classifies
 that reserved status as a runtime failure after reaping both children, so a
@@ -911,9 +930,9 @@ Sanitizer execution evidence:
 | macOS | `make check-ubsan` | 42 pass, 5 tool/platform skips; the specification suite passes |
 | macOS | `make check-fuzz` | 42 pass, 5 tool/platform skips; the FAT, exFAT, QNX6, QNX4, protocol, image, container, plist, gzip and mtree fuzzers complete 1000 runs each |
 | macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
-| Linux (container) | `make check` and `make check-asan` | 45 pass, 2 QNX integration skips each |
-| Linux (container) | `make check-lsan` | 45 pass, 2 QNX integration skips |
-| Linux (container) | `make check-msan` | 42 pass, 2 skips, 3 fail on the uninstrumented system zlib's output (TODO.md); not passing coverage |
+| Linux (container) | `make check` and `make check-asan` | 53 pass, 2 QNX integration skips each |
+| Linux (container) | `make check-lsan` | 53 pass, 2 QNX integration skips |
+| Linux (container) | `make check-msan` | 53 pass, 2 QNX integration skips, with the external instrumented zlib |
 | FreeBSD 16/ZFS | `make check` | 40 pass, 7 tool/platform skips; the specification suite passes |
 | FreeBSD 16/ZFS | `make check-asan` | 39 pass, 7 skips; test-format's fixture fault is fixed and passes in the same build |
 
