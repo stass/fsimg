@@ -1585,7 +1585,7 @@ test_carried_stack(void)
 	fsimg_write_options_t write;
 	fsimg_options_t options;
 	fsimg_writer_t *writer;
-	memory_file_t bare;
+	memory_file_t bare = { .bytes = body.bytes, .length = body.length };
 	fsimg_io_ops_t ops;
 	fsimg_io_t *input;
 	fsimg_sink_t sink;
@@ -1671,8 +1671,6 @@ test_carried_stack(void)
 	fsimg_io_ops_init(&ops);
 	ops.read_at = file_read;
 	ops.get_size = file_size;
-	bare.bytes = body.bytes;
-	bare.length = body.length;
 	CHECK(fsimg_io_from_callbacks(ctx, &ops, &bare, &input, NULL) ==
 	    FSIMG_OK);
 	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);

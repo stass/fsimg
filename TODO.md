@@ -469,8 +469,9 @@
 
 * [High] **MemorySanitizer fails on the system zlib's output**
   (`build-aux/sanitize.sh`, `test/compression.c`, `test/containers.c`,
-  `test/gzip-write.c`): `make check-msan` fails test-compression,
-  test-containers and test-gzip-write with use-of-uninitialized-value in
+  `test/gzip-write.c`, `test/hbcifs.c`): `make check-msan` fails
+  test-compression, test-containers, test-gzip-write and test-hbcifs with
+  use-of-uninitialized-value in
   bytes zlib's deflate and inflate wrote, because the system zlib is not
   instrumented and MSan cannot see its stores. fsimg's own code is not
   implicated, but MSan then covers no compressed layer. Build an
