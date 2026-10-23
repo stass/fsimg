@@ -609,7 +609,7 @@ main(void)
 	unsigned unsupported_profiles;
 	int parent, work, source, source_file, scratch, input, manifest, readable;
 	int fd, result;
-	bool enforce, unsupported;
+	bool enforce, unsupported, sync_untested;
 
 	CHECK(mkdtemp(path) != NULL);
 	parent = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -676,6 +676,7 @@ main(void)
 	 * the others still run.
 	 */
 	unsupported_profiles = 0;
+	sync_untested = false;
 	enforce = false;
 #if defined(__linux__) || defined(__FreeBSD__)
 	enforce = true;
@@ -740,7 +741,7 @@ main(void)
 	}
 #ifdef __FreeBSD__
 	if (test_sync_rights(parent, input) == 77)
-		skipped++;
+		sync_untested = true;
 #endif
 	CHECK(fstat(input, &after) == 0);
 	CHECK(before.st_size == after.st_size && before.st_mode == after.st_mode);
@@ -764,11 +765,13 @@ main(void)
 	CHECK(unlinkat(parent, "source-root", AT_REMOVEDIR) == 0);
 	CHECK(close(parent) == 0);
 	CHECK(rmdir(path) == 0);
-	if (unsupported_profiles != 0) {
+	if (sync_untested)
+		printf("SKIP: Capsicum unavailable; the sync rights are untested\n");
+	if (unsupported_profiles != 0)
 		printf("SKIP: %u of %u sandbox profiles unsupported on this host; "
 		    "their actual-kernel enforcement is untested\n",
 		    unsupported_profiles, (unsigned)PROFILE_COUNT);
+	if (sync_untested || unsupported_profiles != 0)
 		return (77);
-	}
 	return (0);
 }
