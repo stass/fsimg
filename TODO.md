@@ -471,13 +471,23 @@
   (`build-aux/sanitize.sh`, `test/compression.c`, `test/containers.c`,
   `test/gzip-write.c`, `test/hbcifs.c`): `make check-msan` fails
   test-compression, test-containers, test-gzip-write and test-hbcifs with
-  use-of-uninitialized-value in
-  bytes zlib's deflate and inflate wrote, because the system zlib is not
+  use-of-uninitialized-value in bytes zlib's deflate and inflate wrote,
+  because the system zlib is not
   instrumented and MSan cannot see its stores. fsimg's own code is not
   implicated, but MSan then covers no compressed layer. Build an
   MSan-instrumented zlib for the msan profile in the Linux check image and
   CI, and point the sanitizer build at it; do not vendor zlib into the
   project.
+
+* [Medium] **macOS script-launch stalls prevent specification qualification**
+  (`test/spec/suite/core/test_runner.rb`, `test/spec/lib/fsimg_spec/process.rb`):
+  direct execution of a temporary `#!/bin/sh` script from Ruby or Python
+  exceeds a two-second probe deadline with and without resource limits;
+  invoking the same script through `/bin/sh` finishes in 11-15 ms. The
+  runner's 20-second self-tests time out, with missing output files causing
+  further failures. Investigate the direct-launch stall and restore macOS
+  sanitizer qualification; preserve the runner's execution and containment
+  checks.
 
 * [Medium] **No check runs confinement on glibc 2.33 to 2.38**
   (`build-aux/linux-check.sh`, `.github/workflows/check.yml`): those
