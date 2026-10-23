@@ -2311,7 +2311,17 @@ def test_ifsboot_create(executable, root):
                         expected=1)
         assert detail in result.stderr, (extra, result.stderr)
         assert not (root / "refused.ifs").exists()
-    unwritable = [arg.replace("machine=0", "machine=42") for arg in plain]
+    # A file setting of a kind no setting reads is unsupported, as such an
+    # image or operand is, not an I/O failure.
+    os.mkfifo(root / "setting-fifo")
+    for setting in ["startup-link.bin", "source", "setting-fifo"]:
+        error = failed(invoke(executable, root, [*base, "-o", f"ifsboot:startup={setting}",
+                                                 "-f", "refused.ifs", *operands], expected=1))
+        assert error["status"] == "unsupported capability", error
+        assert error["path"] == setting, error
+        assert not (root / "refused.ifs").exists()
+    (root / "setting-fifo").unlink()
+    unwritable =[arg.replace("machine=0", "machine=42") for arg in plain]
     result = invoke(executable, root, [*unwritable, "-f", "refused.ifs", *operands], expected=1)
     assert b"machine 42 is not writable under compress=lzo" in result.stderr, result.stderr
     assert not (root / "refused.ifs").exists()
