@@ -1,482 +1,537 @@
-# Architecture simplification opportunities
+# Architecture simplification and Relic opportunities
 
-fsimg's internal architecture should let a maintainer understand the core once
-and learn filesystem rules from each additional driver. The strongest
-opportunities are prepared directories, logical content, and common emission:
-substantial components that own complete operations and remove obligations
-from their callers.
+fsimg should let a maintainer learn its common contracts once and concentrate
+on format rules when adding a filesystem or container. The strongest remaining
+opportunities are one description of settings, container-owned plans, common
+metadata-loss policy, reusable verification operations, and common driver
+contract tests. Relic offers a complementary route: describe relational rules
+once and generate tables, predicates, or bounded verification operations in C.
 
-The FAT and exFAT implementations provide concrete evidence for these
-proposals. The [QNX6 design](../specs/design-qnx6.md) tests whether their
-boundaries accommodate a different allocation and ownership model; it is design
-evidence, not an implemented compatibility result. The authoritative contracts
-remain in [specs/architecture.md](../specs/architecture.md). Adoption requires
-the relevant specification changes before implementation.
+This analysis covers FAT12/16/32, exFAT, QNX4, QNX6, ImageFS, partition schemes,
+containers, and compression. It distinguishes existing foundations from proposed
+changes. The [architecture](../specs/architecture.md) and
+[specification index](../specs/README.md) remain authoritative. Adopted design
+changes belong in those specifications, sequencing in the
+[implementation plan](implementation-plan.md), and actionable defects in
+[TODO.md](../TODO.md).
 
-## Foundation and central model
+## Existing shared foundations
 
-The existing foundation is strong: bounded resources, independent readers and
-writers, immutable planning, and explicit ownership of extraction and
-publication. Architectural beauty comes from a small vocabulary, visible data
-flow, and contracts that make responsibilities predictable.
+Several substantial simplifications already give additional drivers a common
+execution model. Preserve these boundaries when evaluating further changes.
+
+| Foundation | Common owner | Driver responsibility |
+| --- | --- | --- |
+| Format descriptors and probing | [Format registry](../lib/formats/format.c) | Identity, bounded probe, capabilities, independently optional reader and writer operations |
+| Directory preparation and traversal | [Directory engine](../lib/read/directory.c) and [selector](../lib/read/selection.c) | Decode children, validate format metadata, supply namespace keys and private locators |
+| Logical content delivery | [Reader](../lib/read/reader.c) | Resolve initialized content to validated physical extents |
+| Optional extent storage | [Extent index](../lib/meta/extent.c) | Discover allocation and choose whether an index is useful |
+| Collection and payload copying | [Catalog](../lib/write/catalog.c) and [emission](../lib/write/emit.c) | Plan placement and encode metadata |
+| Layer composition | [Image reader](../lib/layers/image.c), [disk plan](../lib/layers/plan.c), and [transcode](../lib/layers/transcode.c) | Decode or encode a particular scheme, container, or compression |
+| Resources and host authority | Context, bounded I/O, extractor, and publisher | Operate through their contracts |
 
 ```mermaid
 flowchart LR
-    Image[Bounded image] --> Decode[Format decoding]
+    Input[Bounded image] --> Layers[Layer decoding]
+    Layers --> Volume[Bounded volume]
+    Volume --> Decode[Filesystem decoding]
     Decode --> Directory[Prepared directories]
     Decode --> Content[Logical content]
-    Directory --> Walker[Common traversal and selection]
-    Content --> Reads[Common content reads]
-    Walker --> Operations[List / verify / extract]
-    Reads --> Operations
-
-    Sources --> Catalog[Sealed catalog]
-    Catalog --> Plan[Immutable format plan]
-    Plan --> Emit[Common emission operations]
-    Emit --> Publish[Publication]
+    Directory --> Walk[Common traversal and selection]
+    Content --> Delivery[Common content delivery]
+    Sources[Repeatable sources] --> Catalog[Sealed catalog]
+    Catalog --> Plan[Private filesystem plan]
+    Plan --> Emit[Common emission]
+    Emit --> Encode[Layer encoding]
+    Encode --> Publish[Publication]
 ```
 
-Readers and writers retain independent representations and lifetimes.
-Prepared directories and logical content are reader interfaces; the catalog
-and layout plan serve writing. Sharing infrastructure does not require a
-mutable filesystem model or a common reader/writer object graph.
+Readers and writers have independent representations and lifetimes. Stable
+catalog IDs and parent links avoid a resident object graph. Metadata streams,
+paged arrays, bitsets, and external sorting provide a small vocabulary for
+large inputs. None of these components needs a mutable filesystem model.
 
-## Prepared directories and namespace validation
+Namespace identity and allocation identity remain distinct. Several spellings,
+such as a FAT long name and its short alias, may identify one directory-entry
+occurrence; one comparison key cannot identify two occurrences. Several
+occurrences may nevertheless name the same inode. Common namespace validation
+must not mistake legal inode sharing for permission to duplicate a name.
 
-`fsimg_fat_next()` in
-[`lib/formats/fat/directory.c`](../lib/formats/fat/directory.c) and
-`exfat_next()` in
-[`lib/formats/exfat/directory.c`](../lib/formats/exfat/directory.c) both manage
-a directory stack, deferred descent, stream exhaustion, path prefixes,
-current-entry replacement, and cleanup.
+Logical content also remains distinct from allocation. For an exFAT file with
+10 KiB of logical content and 6 KiB initialized, delivery synthesizes the final
+4 KiB without reading its backing storage. Allocation slack is outside the
+file. A shared index or verifier must preserve that boundary, confirmed progress
+on partial failure, source consistency, and cumulative resource charging.
 
-A driver could instead supply a prepared directory with this contract:
+## Priorities
 
-> Its children have valid framing and metadata, its lookup namespace is
-> unambiguous, and its entries can be replayed in original order.
+The priority reflects the obligations a change removes from the next driver
+author. Confidence describes the proposed boundary; it is not a performance
+measurement or a claim that implementation is complete.
 
-The common reader would own descent, pruning, path assembly, depth enforcement,
-and directory-stream lifetime. The driver would own decoding, allocation and
-parent-reference validation, and its private directory/content locators.
-Both existing prepasses already retain entries in original order and validate
-a separately sorted set of name keys.
+| Opportunity | Priority | Confidence | Main obligation removed |
+| --- | --- | --- | --- |
+| Shared settings description | First | High | Repeating option identity, representation, and applicability across subsystems |
+| Common metadata-loss policy | First | High | Reimplementing required-field, loss-counting, and reporting policy |
+| Private container plans | Next | High on ownership; prototype the interface | Extending shared state and cleanup for each container |
+| Common driver contract tests | Alongside each change | High | Reconstructing common acceptance coverage for each driver |
+| Verification helpers and ownership runs | Incremental | High for payload reads; narrower for ownership | Repeating bounded read, sort, cursor, and cleanup mechanics |
+| Scalar codecs and zlib allocation | Small independent changes | High | Repeating primitive byte conversion and allocation adapters |
+| Scheme-owned planning details | With another scheme | Conditional | Teaching common planning every scheme's settings and identity rules |
+| Relic table and predicate generation | Focused experiment | High feasibility; benefit to establish | Repeating derived compatibility and validation logic |
+| Relic generation of whole-image verification | After the predicate experiment | Promising; backend work required | Handwriting relational reconciliation algorithms |
 
-The common preparation boundary would charge entries and enforce path/depth
-limits before admitting children. Replay must not charge the same admitted
-entries again. Validation of a parent namespace remains necessary even when
-selecting one child, while unselected subdirectories remain unopened.
+## Simplifications in C
 
-### A namespace maps keys to directory entries
+### One authoritative settings description
 
-A useful shared invariant is:
+The library's `layer_settings` in [stack.c](../lib/layers/stack.c) describes
+keys, storage, presence, and applicability. The CLI's `layer_keys` in
+[options.c](../cmd/fsimg/options.c) repeats keys, field offsets, presence flags,
+and read applicability while adding syntax. [job.c](../cmd/fsimg/job.c)
+separately encodes and decodes the settings for the worker. Filesystem settings
+have another applicability check in `settings_supported()` in
+[writer.c](../lib/write/writer.c).
 
-> Multiple spellings may identify one directory entry. One comparison key
-> cannot identify two different directory entries.
+Introduce one private typed catalogue for option identity, value representation,
+presence, applicability, and enum choices. Common code can use it for capability
+enumeration, default/presence checks, and CLI conversion. Descriptors can refer
+to the settings they support. A finite set of syntax classes is sufficient;
+format relationships remain ordinary validation functions.
 
-For example, a FAT directory can contain these mappings:
+Start with the duplicated library and CLI metadata. Keep the public typed
+options structures and their compatibility rules. The worker protocol remains
+an explicit byte representation with validated widths, flags, and lengths;
+sharing option metadata does not justify copying native structs across it.
+Wire-field generation is useful only if it removes another maintained mapping
+without obscuring that boundary. It must preserve existing wire semantics and
+must not run image-dependent driver logic in the coordinator.
 
-```text
-key("Readme.txt")   -> entry 17
-key("README~1.TXT") -> entry 17
-```
+A new option then has one description of its identity and applicability, one
+format-specific interpretation, and an explicit transport representation. Test
+absent versus explicitly zero values, enum choices, read/write restrictions,
+wrong-layer settings, malformed wire values, and CLI/library agreement.
 
-The driver produces comparison keys. FAT supplies its long-name and alias
-keys; exFAT uses the volume's validated upcase table; the QNX6 design uses
-case-sensitive UTF-8 byte keys. Shared code can store bounded key/entry records,
-sort them externally, and reject equal keys belonging to different entries.
-The key representation is opaque to that code.
+**Complexity balance:** one catalogue and a few typed consumers replace
+parallel descriptions. Avoid a general configuration framework, a public
+key/value plugin ABI, or callbacks for assignments that a small table expresses.
 
-Entry identity here means a directory-entry occurrence, such as its ordinal
-within the prepared directory. It must not mean inode identity: different
-directory entries can legitimately reference the same inode, and that does
-not permit duplicate names in one directory. Writer-side validation can use
-catalog IDs and parent scope. FAT alias generation and reservation remain
-format-specific even if final ambiguity checks share this mechanism.
+### Container-owned immutable plans
 
-The existing `validate_keys()` in the FAT directory implementation and
-`exfat_keys_unique()` in
-[`lib/formats/exfat/names.c`](../lib/formats/exfat/names.c) demonstrate the
-common operation. Driver-specific error classification and useful diagnostics
-must survive the extraction.
+Filesystem writers embed a small common plan in a driver-owned extension;
+[writer.h](../lib/write/writer.h) gives destruction one owner. Containers use
+one `fsimg_container_settings_t` in [layer.h](../lib/layers/layer.h) that combines
+VHD timestamps, DMG levels, simg blocks and CRC settings, a boot-header settings
+structure, and a buffered prefix.
 
-### Preparation and lifetime
+Common code consequently knows container details. `fsimg_disk_plan_codec()` in
+[transcode.c](../lib/layers/transcode.c) interprets a nonzero container level as
+zlib use. `fsimg_disk_plan_free()` in [plan.c](../lib/layers/plan.c) frees a
+container's buffered setting directly.
 
-An incomplete directory is private to its preparation operation. The walker
-receives it only after preparation succeeds, and owns its lifetime thereafter.
-This makes namespace validation a prerequisite of traversal rather than a
-protocol each traversal caller must remember.
+Apply the filesystem plan pattern to containers: a common summary plus private
+resolved state owned and destroyed by the selected container. The summary
+exposes the facts composition needs: granularity, transfer unit, pass count,
+encoded-size bound, and reporting information. The encoder borrows the plan;
+it does not acquire a second owner for its buffers.
 
-Preparation does not make scratch bytes permanently trustworthy. Replay still
-checks record framing, lengths, locators, and decoded fields. Current-entry
-names and driver locators need explicit borrowing rules: advancing the reader
-invalidates the current snapshot, and a retained directory cursor cannot
-borrow a buffer that the next entry overwrites.
+Keep file-setting identity checks, output-alias rejection, output budgets, and
+publication common. A plan constructor must leave partial construction safe to
+destroy, and every outcome must release the complete extension once. The
+change should not introduce another public handle or an independently varying
+lifecycle.
 
-This ownership split has strong support in both implementations. The exact
-cursor interface needs a prototype that removes both traversal engines without
-replacing them with a larger callback protocol. Host source scanning and
-extraction keep their separate authority and lifetime rules.
+**Complexity balance:** one private-plan construction/destruction contract
+replaces the shared accumulation of unrelated fields and cleanup knowledge.
+Prototype it across fixed VHD, chunked DMG/simg, and boot-image settings before
+settling the interface. Preserve deterministic multi-pass encoding and all
+pre-output refusals.
 
-## Logical content and optional extent storage
+### Common metadata-loss policy and narrow timestamp helpers
 
-Allocation and content answer different questions. Allocation identifies
-storage owned by an object. Content identifies the bytes a caller may read
-and their meaning.
+The writers repeat the same policy: a required field or a caller forbidding
+losses causes failure; an allowed loss increments the total and invokes the
+loss callback. Examples are `encode_field()` in
+[FAT metadata](../lib/formats/fat/write-meta.c), `encode_time()` in
+[exFAT codecs](../lib/formats/exfat/codec.c), `optional_loss()` in
+[QNX4 planning](../lib/formats/qnx4/write-plan.c), and the time encoders in
+[QNX6](../lib/formats/qnx6/write-plan.c) and
+[ImageFS](../lib/formats/ifs/write-plan.c).
 
-For an exFAT file with 16 KiB allocated, a 10 KiB logical length, and 6 KiB
-initialized, the distinction is:
+A common writer operation should own refusal, counting, callback delivery, and
+path attribution. The driver supplies the affected field and an explanation
+when its encoding cannot preserve the requested value. Common capability
+omissions and format-specific rounding must remain distinguishable and must
+not count one field twice.
 
-| Logical range | Content behavior | Allocation relevance |
+Two narrower conversions also merit sharing:
+
+* QNX4, QNX6, and ImageFS select unsigned whole seconds with explicit upper
+  bounds, fallback times, and reproducible substitution. Share that operation
+  where its semantics agree, passing the differences as values.
+* FAT's calendar walk repeats the DOS-time encoding already provided by
+  [calendar.c](../lib/core/calendar.c). Reuse the calendar conversion while
+  retaining FAT's field placement and precision rules.
+
+FAT wall-clock values, exFAT offsets, and QNX UTC seconds retain their own
+encoding fidelity rules. Defaults and required metadata remain explicit.
+Exercise missing values, range endpoints, fractional seconds, time bases,
+reproducible replacement, fixed permissions, and the exact loss count.
+
+**Complexity balance:** a shared policy operation and a few concrete conversions
+replace repeated decisions. A universal metadata normalization language is
+unnecessary for this extraction.
+
+### Verification operations with explicit ownership domains
+
+The payload loops in [exFAT](../lib/formats/exfat/verify.c),
+[QNX4](../lib/formats/qnx4/verify.c), [QNX6](../lib/formats/qnx6/verify.c), and
+[ImageFS](../lib/formats/ifs/verify.c) read initialized content in bounded
+pieces through common delivery. One operation can own this loop and confirmed
+byte accounting. Drivers decide whether an object needs reading, including
+whether a later name refers to content already checked.
+
+FAT's `verify_file()` fuses allocation-chain validation, ownership recording,
+and payload reading. Preserve that useful fusion unless a replacement proves
+it avoids a second chain walk or mandatory index.
+
+FAT and exFAT also duplicate ownership-run encoding, sorting, cursor advancement,
+bounds checking, and overlap detection. A small bounded utility can own those
+mechanics. QNX6's related records include an owner identity, which its system
+reservation checks need. Sharing with QNX6 is conditional on preserving those
+semantics without forcing extra records or passes on every driver.
+
+The reusable invariant is exclusivity within a driver-defined domain. The
+driver identifies distinct objects, supplies every required claim, handles
+repeated references, and defines legal sharing. The utility cannot infer
+completeness or decide that every physical overlap is corruption. Allocation
+bitmap/FAT reconciliation, reserved structures, inode counts, and checksums
+remain format-specific.
+
+**Complexity balance:** one run representation and cursor can replace duplicate
+mechanics. Do not introduce a general interval database or a universal verifier.
+The existing scoped-interval item in [TODO.md](../TODO.md) tracks the smallest
+extraction. Relic-generated reconciliation is a larger alternative discussed
+below; it should reuse these operations rather than create a competing store.
+
+### Common driver contract tests
+
+[test/emit.c](../test/emit.c) runs shared emission scenarios against FAT12 and
+exFAT. Newer drivers have their own fault fixtures, and
+[test/posix.c](../test/posix.c) uses explicit format lists for particular
+metadata behaviors. This distribution does not establish absent coverage; it
+makes common coverage an obligation each driver author reconstructs.
+
+Introduce a small test profile per applicable driver: a minimal valid fixture,
+valid options, expected metadata behavior, and necessary setup. Run common
+lifecycle, source failure, poisoned-output, cancellation, limits, and
+reproducibility scenarios through those profiles. Compare profiles with the
+registry so a newly advertised capability cannot silently miss the common
+contract suite. Reader-only formats and specialized container modes need
+explicit applicability rather than assumed writer support.
+
+Keep raw-format mutations, corrupt-plan tests, and interoperability oracles
+local. Production capabilities may select which tests run, but must not supply
+all their expected answers. The rule-based Ruby harness under
+[test/spec/](../test/spec/) is another useful declarative surface; additional
+format models can reuse its runner without copying FAT's encoding assumptions.
+
+**Complexity balance:** shared scenarios and small fixture adapters replace
+copied setup and remembered coverage. A test framework that needs a large
+callback interface for every format would fail this test.
+
+### Scheme-owned planning details
+
+Partition schemes have operation tables, but `fsimg_disk_plan_init()` in
+[plan.c](../lib/layers/plan.c) selects GPT-specific handling by name and otherwise
+uses MBR handling. Writer setup in [writer.c](../lib/write/writer.c) also chooses
+between their option fields.
+
+When adding another scheme, move option resolution, identity construction, and
+partition metadata conversion behind scheme operations. Common code should
+continue to own placement, alignment, volume bounds, output accounting, and
+publication. A scheme's table footprint remains a declared fact.
+
+**Complexity balance:** this removes scheme identity from common planning, but
+with two schemes the explicit branches are understandable. A third scheme
+should demonstrate the benefit before a broader abstraction is introduced.
+
+### Smaller shared operations and lifetime improvements
+
+| Opportunity | Evidence | Smallest useful change |
 | --- | --- | --- |
-| `[0, 6 KiB)` | Read mapped image bytes. | Owned storage. |
-| `[6, 10 KiB)` | Synthesize zeros without reading backing payload bytes. | Owned storage. |
-| Beyond 10 KiB | Outside the file's content. | Allocation slack or preallocation can still belong to the file. |
+| Endian primitives | [Layer helpers](../lib/layers/layer.h), [QNX4 codecs](../lib/formats/qnx4/codec.c), [QNX6 codecs](../lib/formats/qnx6/codec.c), [ImageFS records](../lib/formats/ifs/records.c), and scratch codecs | Share explicit scalar loads/stores while retaining format record layouts and validation. |
+| zlib allocation | [chunks.c](../lib/layers/chunks.c), [dmg.c](../lib/layers/dmg.c), [gzip.c](../lib/layers/gzip.c) | One context-backed adapter preserving checked allocation sizes and the reason allocation failed. |
+| Internal header scope | [writer.h](../lib/write/writer.h) includes the broad [layer.h](../lib/layers/layer.h) | Separate stable composition contracts from chunk, plist, codec, and private profile declarations; organize by ownership. |
+| Scratch-row validation | `qnx4_row_get()`, `qnx6_row_get()`, and `ifs_row_get()` in their planning modules | Validate decoded rows at their owning read boundary; the QNX4/QNX6 gap is already in TODO.md. Field-code generation must not replace semantic checks. |
+| Source failure ownership | [source.c](../lib/source/source.c) and [writer.c](../lib/write/writer.c) | Have source operations report status and let the writer lifecycle own terminal failure, so cleanup timing does not depend on whether source or sink failed. |
+| Raw intermediate decision | `fsimg_job_needs_raw()` in [job.c](../cmd/fsimg/job.c) and library output planning | Share the predicate over the stack, write mode, and sink kind instead of maintaining CLI and library versions. |
+| Descriptor adoption | `fsimg_writer_output()` in [writer.c](../lib/write/writer.c) | One helper returns an adopted I/O object or has closed the consumed descriptor on failure. |
+| Layer error attribution | `layer_failed()` calls in [image.c](../lib/layers/image.c) and chunk failures | Put attribution at narrow dispatch boundaries so new operation callers do not need a separate reporting step. |
 
-The common reader in
-[`lib/read/reader.c`](../lib/read/reader.c) already owns content bounds,
-source-stability checks, cancellation, and terminal failure. One common
-content operation performs bounded reads and zero synthesis while drivers
-resolve initialized bytes to validated physical ranges.
+These are independent extractions, not reasons to create a catch-all utility
+module. Preserve argument order when consolidating `bcopy(src, dst, n)` calls.
+Changes to failures, ownership, or scratch validation need regression evidence,
+even when their interfaces are small.
 
-Both `read_at()` and `next_range()` use the same logical-content rules.
-A range query describes data or zeros; it does not consume content or force an
-otherwise unnecessary complete mapping. Physical fragmentation does not divide
-a logical data range into smaller public ranges.
+## Declarative rules and Relic
 
-The common operation must preserve confirmed byte counts on partial failure,
-including a request crossing a physical extent or initialized-data boundary.
-Cached mappings and synthesized zeros remain subject to source consistency,
-cancellation, and cumulative work limits. Complete-record metadata reads and
-partial-progress content reads retain their distinct contracts.
+Relic is the intended Datalog tool for this work. Use its language and semantic
+analysis as the foundation for experiments. A separate fsimg rule language would
+add another parser and another definition of negation, aggregation, and errors.
 
-### Shared extents without a mandatory index
+### Where rules help
 
-Both formats describe physical runs using the same three values:
+| Subject | Useful generated result | Boundary to preserve |
+| --- | --- | --- |
+| Profile and feature compatibility | C tables or predicates for supported combinations | Native qualification determines which combinations are facts. |
+| Settings and metadata policy | Applicability and loss predicates | Typed public options, CLI syntax, diagnostics, and transport remain explicit. |
+| Record-local validation | Functions over decoded records and profile values | Checked decoding and bounds precede access; undefined input is distinct from false. |
+| Inode references and link counts | Grouped references merged with inode records | Occurrence identity, implicit references, verification scope, and owner identity |
+| Allocation ownership | Ordered range checks and allocation reconciliation | Compact extents, permitted sharing, reserved regions, and complete inventories |
+| Geometry legality | Predicates over a bounded set of candidates | Checked arithmetic and the sizing design's search and tie-break policy |
+| Field layouts | Explicit record codecs, if repetition justifies generation | A field schema is more direct than Datalog for offsets and widths. |
 
-```c
-typedef struct fsimg_extent {
-	uint64_t	logical_offset;
-	uint64_t	image_offset;
-	uint64_t	length;
-} fsimg_extent_t;
-```
+Relations are especially useful when several independently stated facts combine
+to determine a result. A small C table remains sufficient when it already
+expresses the complete relationship, as the boot-machine table does. Datalog
+becomes valuable when it removes repeated implications, joins, and reconciliation
+logic across profiles or formats.
 
-One shared extent-index implementation in
-[`lib/meta/extent.c`](../lib/meta/extent.c) owns encoded records, bounded
-growth, ordering and coverage checks, checked offset arithmetic, sequential
-lookup, binary search, and cleanup under the existing session. Drivers retain
-allocation discovery, geometry-specific checks, and chain/bitmap validation.
+Payload copying, bounded I/O, source reopening, cleanup, extraction, and
+publication remain operational code. Their ordering, authority, and failure
+contracts should stay visible in C.
 
-The index is an optional tool. FAT can retain its sequential cursor and build
-an index on a seek. exFAT can prepare mappings when metadata validation requires
-them. A block-tree driver can resolve offsets directly without building a
-second index just to satisfy the interface. The QNX6 tree design makes this
-distinction particularly useful.
+### Relic capabilities and the generation boundary
 
-Shared extent storage is a high-confidence extraction. Consolidating logical
-content delivery needs a prototype covering mixed range/read access, validation
-timing, and partial failures. Extent lookup alone never authorizes exposing
-allocation slack or uninitialized backing bytes.
+The inspected Relic checkout is `~/relic`. The supporting files are listed
+relative to that checkout so these references do not depend on one developer's
+absolute home path:
 
-## Common output initialization and payload copying
-
-Both emitters initialize output and implement source-copy loops in
-[`lib/formats/fat/write-emit.c`](../lib/formats/fat/write-emit.c) and
-[`lib/formats/exfat/write-emit.c`](../lib/formats/exfat/write-emit.c).
-Those loops carry source opening, declared-length checks, zero handling,
-bounded transfers, consistency checks, final validation, and cleanup.
-
-A common emission object could bind the writer, bounded destination, session,
-and transfer buffer. It would be available to format emission only after
-alias rejection, capability and size checks, and destination initialization
-succeed. It borrows the writer's lifetime and session; it does not introduce
-another resource context or source owner.
-
-Format code would express two operations: write these encoded metadata bytes
-at this location, and copy this catalog entry into this planned region.
-The common source-copy operation accepts a stable catalog ID, a bounded
-destination region, and the planned initialized length. It owns the complete
-open/copy/finish lifecycle and checks its lengths against the catalog and
-destination capacity.
-
-The operation must validate empty and zero-only sources, preserve confirmed
-I/O progress, propagate cancellation, and release the current source on every
-failure path. Skipping a zero range is valid only because destination zero
-contents have been established. Initialization preserves the distinction
-between fresh private outputs and reused raw sinks.
-
-The lifecycle in [`lib/write/writer.c`](../lib/write/writer.c) is the natural
-coordinator. Its single current source and catalog-ID lookup remain intact.
-A narrow emission interface would keep the raw destination out of driver
-helpers that only need bounded writes or source copying.
-
-Format code still owns placement and encoding correctness. A range fitting
-the volume does not establish that it belongs at the chosen directory or
-metadata offset. The initial extraction should serve the concrete FAT/exFAT
-layouts; a general emission instruction language would add another plan
-representation and requires separate justification.
-
-This is a high-confidence first implementation: it removes each driver's
-copying lifecycle and its obligation to establish when zeros may be skipped.
-
-## Ownership intervals with an explicit domain
-
-The verifiers contain nearly identical ownership-record comparators and
-cursors in [`lib/formats/fat/verify.c`](../lib/formats/fat/verify.c) and
-[`lib/formats/exfat/verify.c`](../lib/formats/exfat/verify.c). Their interval
-encoding, bounds checks, external sorting, and sequential cursor mechanics
-can be shared.
-
-Exclusivity needs a narrower contract:
-
-> Within a driver-defined exclusive ownership domain, bounded claims from
-> distinct owners cannot overlap.
-
-The [QNX6 ownership design](../specs/design-qnx6.md#allocation-bitmap-and-snapshots)
-distinguishes snapshots, objects, logical ranges, and roles. Separate directory
-references to one supported inode do not create separate allocation owners;
-cross-snapshot sharing is not itself an error. A universal rule rejecting all
-overlapping physical intervals would reject that design.
-
-The driver must define the domain, identify owners, account for repeated
-references, and supply all required claims. A shared exclusivity check is
-appropriate only after those semantics are established. It cannot infer
-complete ownership from a list of extents.
-
-FAT retains reconciliation with allocation-table values. exFAT retains
-bitmap reconciliation and the relevant FAT semantics. Reserved structures,
-legal sharing, and completeness remain format-specific. No general interval
-tree or database is needed for the FAT/exFAT extraction.
-
-This is a useful small utility, but broader verification abstraction should
-be evaluated against a distinct format. Opening, selected traversal, structural
-verification, and payload read-through retain their different scopes.
-
-## Format descriptors own format knowledge
-
-The registry separates reader and writer operations, but
-`fsimg_format_next()` in
-[`lib/formats/format.c`](../lib/formats/format.c) interprets `variant == 0`
-as exFAT and supplies format-specific capabilities centrally.
-The common [reader structure](../lib/read/reader.h) also names both concrete
-driver-state types.
-
-A descriptor could own capabilities and independently optional reader/writer
-operations. One private driver-state pointer would keep concrete reader types
-out of the common structure. The common plan base and driver extension in
-[`lib/write/writer.h`](../lib/write/writer.h) already show how common lifecycle
-ownership can coexist with a private format representation.
-
-Detection needs an explicit bounded-probe contract before additional formats
-participate: probe authority and work limits, competing matches, forced-format
-behavior, and recognized unsupported features. Recognition does not establish
-supported reading, writing, or complete validation. A failed or unsupported
-candidate must not silently become permission to try an unrelated decoder
-without the detection contract deciding that outcome.
-
-The acceptance test is whether adding a driver requires teaching common
-lifecycle or capability-reporting code its filesystem identity. Static
-registration remains sufficient; this does not require a public plugin ABI.
-
-## Data structures and boundaries to preserve
-
-| Choice | Architectural value |
+| Relic evidence | Relevant contract |
 | --- | --- |
-| Stable catalog IDs and parent links | Large trees remain understandable without a resident object graph. |
-| Streams, paged arrays, bitsets, and external sorting | A small storage vocabulary supports bounded metadata workloads. |
-| Driver-owned immutable plans | Geometry and layout remain explicit. |
-| One current source and current-entry snapshot | Ownership and invalidation stay local and bounded. |
-| Separate extractor and publisher | Image interpretation stays separate from host authority and publication. |
+| `README.md`, `specs/architecture.md` | C11 engine and library, BSD-2-Clause, direct evaluation, stratified negation and aggregates |
+| `lib/plan.h`, `specs/design-planning.md` | Explicit scan, lookup, membership, filter, assignment, aggregate, and emit operations |
+| `lib/exec.h` | Executor yields batches and leaves insertion to its caller; bounded execution quanta let evaluation observe interruption |
+| `lib/arith.c`, `specs/language.md` | Checked signed 64-bit arithmetic and defined evaluation errors |
+| `lib/relation.h`, `specs/design-storage.md` | Resident tuple arrays and indexes |
+| `include/relic.h`, `specs/design-memory.md`, `specs/design-api.md` | Memory accounting, its exclusions, context lifetimes, and interruption |
 
-Each concrete record representation should have one owner for encoding,
-decoding, and validation. Callers operate on named values through interfaces
-such as `layout_get()` or extent lookup. Existing FAT/exFAT layout accessors
-provide a useful pattern. Explicit wire codecs remain necessary; native C
-structure padding is not a scratch representation.
+The engine executes plans over its own relations. C source generation is an
+additional backend; the inspected checkout provides no such emitter. Its
+memory limit does not cover all allocations or peak growth, and there is no
+configured general step/time limit. Those are different contracts from fsimg's
+aggregate context budget and cumulative work limits.
 
-Preparation should produce an object usable only in its completed state.
-Directories and plans can achieve this within existing reader/writer lifetimes,
-without independently managed public handles. A generic schema framework,
-mutable VFS, or universal geometry model would add concepts that these
-operations do not require.
+There are three distinct uses:
 
-Format geometry, allocation discovery, directory encoding, name comparison,
-and metadata fidelity stay explicit. CLI confinement, output supervision,
-host extraction, and publication enforce different authorities and failure
-contracts; their size alone is not a reason to combine their owners.
+1. **Evaluate static rules during generation.** Run Relic over profile facts and
+   render the resulting relations as C tables. The evaluator already provides
+   the logical computation; a small deterministic renderer supplies the output.
+2. **Specialize dynamic predicates.** Generate ordinary C functions taking
+   decoded record fields, options, and profile values. A restricted backend can
+   compile supported rule shapes without a runtime relation database.
+3. **Generate whole-image verification.** Lower relational rules to fsimg's
+   bounded streams, external sorts, grouping, and merge operations. This needs
+   a storage-aware backend as well as C emission.
 
-## Complexity comparison
+```mermaid
+flowchart TD
+    Rules[Relic rules and binding schema] --> Front[Parsing and semantic checks]
+    Front --> Normalize[Normalized rules and stratification]
+    Normalize --> Static[Evaluate static relations]
+    Static --> Tables[Generate C tables]
+    Normalize --> Local[Specialize local predicates]
+    Local --> Functions[Generate C functions]
+    Normalize --> Relational[Plan bounded relational operations]
+    Relational --> Verify[Generate C using fsimg metadata storage]
+```
 
-Each extraction must remove state or maintenance obligations across the whole
-system, including its new interface and cleanup rules.
+Relic's execution plan is a useful model for a backend, but its operations
+already contain pointers to runtime relations and physical index information.
+Establish a symbolic generation boundary around normalized rules and relation
+identities before committing to those objects. A C emitter that retains the
+same resident relation engine also retains its storage and dependency costs.
 
-| Proposal | Adds | Removes |
-| --- | --- | --- |
-| Common emission | One scoped emission interface and complete source-copy operation | Per-driver initialization and payload-copy lifecycles. |
-| Descriptor-owned knowledge | Capability descriptions and private state construction | Concrete format knowledge in common reader/reporting code. |
-| Shared extent storage | One optional index representation and lookup owner | Duplicate encoding, growth, search, and index cleanup. |
-| Prepared directories and namespaces | One preparation contract, key/entry validation, and traversal owner | Per-driver stacks, deferred descent, path assembly, pruning, and duplicate ambiguity checks. |
-| Common logical content | One delivery operation over driver-resolved ranges | Separate bounded read loops and independently implemented zero/content rules. |
-| Scoped ownership intervals | One bounded interval-stream utility | Duplicate interval sorting and cursor checks within compatible ownership domains. |
+Relic is a development dependency in this proposal. Generated code belongs to
+the normal fsimg build, whose runtime dependency policy remains libc, host APIs,
+and system zlib. Shipping generated C should not silently embed the entire
+Relic engine. Review the provenance and license of any generated support code
+as well as the generator itself.
 
-The acceptance question is: which state, cleanup rule, or caller obligation
-disappears? Moving code behind an interface is insufficient. Count additional
-passes, retained records, callbacks, and borrowing rules as costs even when
-the implementation becomes shorter.
+### Example of inode reconciliation
 
-## Proposed execution plan
+`verify_inodes()` in [QNX6 verification](../lib/formats/qnx6/verify.c) manually
+merges sorted references with a sequential inode scan. Its checks include a
+referenced inode being allocated, an allocated inode having references, link
+counts agreeing, and the free-inode count matching the header.
 
-The stages below describe how to evaluate and implement these proposals.
-They are not commitments or a record of completed work. When a proposal is
-adopted, record its sequencing in
-[the implementation plan](implementation-plan.md) and update the owning
-specifications before implementing it. Keep the public API stable while
-proving these internal boundaries.
+A fragment in Relic syntax expresses the first two relations:
 
-### Stage 1: Specify boundaries and establish comparison fixtures
+```prolog
+referenced(S, I) :- reference(S, _, I).
 
-Record the chosen ownership contracts in the architecture and relevant reader,
-writer, storage, and source designs. Give each major new component a design
-document and link it from the specification index and architecture. Specify
-borrowing, partial construction, terminal failure, validation timing, and
-resource charging before defining callbacks.
+named_free_inode(S, I) :-
+    inventory_complete(S), referenced(S, I), not allocated_inode(S, I).
 
-Select existing FAT12/16/32 and exFAT fixtures covering fragmented content,
-wide and deep directories, aliases/collisions, zero tails, source changes,
-raw sinks, and callback failures. Record reproducible image bytes and traversal
-results plus I/O calls, metadata work, peak memory, and peak scratch on named
-fixtures. Use the same inputs and budgets for comparisons.
+unreferenced_inode(S, I) :-
+    inventory_complete(S), allocated_inode(S, I), not referenced(S, I).
+```
 
-Completion: each proposed boundary has one named owner and explicit invariants;
-comparison fixtures can detect semantic and resource regressions. Resolve
-interface questions before dependent implementation.
+`S` is the verification domain, such as the selected snapshot. Each
+`reference(S, Occurrence, I)` fact has a distinct occurrence identity, which a
+link-count aggregate retains even though the `referenced` projection drops it.
+The driver supplies the appropriate root, dot, and other implicit references.
+The fragment assumes the format requires every allocated inode in that domain
+to have a reference; another format can define a narrower inventory.
 
-### Stage 2: Centralize emission
+A backend can implement the rules with an external sort of references by inode,
+grouped counting, and a merge against inode records. It need not retain all
+facts in memory or materialize every intermediate relation. Producing that
+plan is a substantive compiler feature, not an automatic consequence of writing
+the rules or emitting C.
 
-Move destination initialization into the common writer after all pre-mutation
-checks. Introduce the scoped emission interface and one complete source-copy
-operation. Convert both drivers and remove their duplicate payload loops.
-Retain format metadata encoding, layout iteration, and placement.
+### Allocation rules and compact representations
 
-Exercise empty files, zero-only sources, mixed data/zero ranges, changed sources,
-short reads, partial writes, cancellation, flush failures, and allocation
-failures. Verify source/output aliases fail before resize, zeroing, or writes,
-and reused sinks contain no stale bytes.
+Ownership rules can state that claimed storage is allocated, allocations
+without owners need a permitted explanation, overlaps need a permitted sharing
+relationship, and reserved regions admit only particular roles.
 
-Completion: both drivers use the common copying lifecycle; source cleanup has
-one owner; reproducible images and independent-tool acceptance are unchanged.
-Commit the coherent conversion after the required reviews and checks.
+Keep claims as intervals with domain and owner identity. Expanding a large
+sparse image to one fact per block merely to satisfy a rule engine defeats the
+storage design. A driver may still scan a bitmap when verification requires it;
+that does not require retaining each scanned bit as a fact.
 
-### Stage 3: Make descriptors self-contained
+An all-pairs overlap rule can have quadratic output. If the required result is
+one deterministic corruption witness, a backend can choose an ordered scan when
+the rule semantics permit it. Arbitrary sharing policies may need more state;
+only support them when their execution strategy and bounds are explicit.
+Returning the same logical answer alone does not establish acceptable resource
+behavior.
 
-Move capability descriptions to driver descriptors and replace the concrete
-reader-state union with private driver state. Establish bounded probing,
-ambiguity, forced-format, and unsupported-feature semantics before changing
-automatic dispatch. Preserve independently optional reader/writer support.
+### Requirements for generated validators
 
-Check capability enumeration, forced-format mismatches, malformed and truncated
-probes, partial-open cleanup, and competing probe results. Tests for the probe
-contract need not advertise an unimplemented filesystem.
+The production subset should begin with nonrecursive rules, stratified
+negation, and a small set of aggregates whose execution plans are understood.
+Reject unsupported shapes during generation. Supporting every Relic program is
+not a prerequisite for useful generated validators.
 
-Completion: common lifecycle and capability reporting contain no format-identity
-branches; the registry is the intentional list of supported drivers. This stage
-depends on Stage 1 and can proceed independently of emission.
+* **Typed bindings and numeric ranges.** Relic deliberately has untyped columns
+  and signed 64-bit integers; fsimg has unsigned 64-bit offsets and lengths.
+  Define each input column's C representation and validate conversions. A pilot
+  can use values proven at most `INT64_MAX`; broader arithmetic needs a defined
+  unsigned mapping or a Relic extension. A binding schema need not change the
+  general language's type system.
+* **Safe fact extraction.** Decode framing and bounds before producing a fact
+  that depends on them. Missing, malformed, and unexamined fields must not all
+  become an absent tuple. An evaluation error remains an error, including an
+  overflow; dropping a failed binding can make a negated rule accept bad data.
+* **Complete domains for negation.** Stratification completes derived relations
+  over the supplied facts; it cannot prove that a lazy scanner supplied every
+  image fact. Establish inventory completeness before absence checks. Selected
+  traversal cannot infer whole-volume unreferenced objects.
+* **Set semantics and occurrences.** Preserve identities for distinct directory
+  slots, names, and allocation claims. Set deduplication must not erase the
+  multiplicity needed to detect duplicate claims or check link counts.
+* **Resource ownership.** Every generated dynamic operation uses the existing
+  fsimg session, context, cancellation, and scratch contracts. Plans must make
+  intermediate storage and passes inspectable. No hidden resident fallback,
+  duplicate full catalog, or uncharged auxiliary cache is acceptable.
+* **Deterministic diagnostics.** Specify status, scope, attribution, and
+  precedence when several violations apply. Rule scheduling, join ordering,
+  and thread count must not choose a different public failure by accident.
+  Diagnostic witnesses and provenance storage remain bounded.
+* **Readable artifacts.** Emit named operations, rule identifiers, and source
+  locations. Keep generated output deterministic and check regeneration in CI.
+  Generated C remains ASCII-only and reviewable under the project style guide.
+* **Independent evidence.** Comparing Relic evaluation with generated C tests
+  the lowering. Independently authored fixtures, malformed inputs, and external
+  implementations test the rules and decoders. Neither comparison replaces the
+  other.
 
-### Stage 4: Extract optional extent storage
+These requirements make the generation backend an explicit part of the
+security boundary. A rule that needs an unsupported storage strategy should
+fail generation rather than quietly select a resource-intensive algorithm.
 
-Implement one bounded extent index with checked record access, growth, lookup,
-and cleanup. Convert FAT and exFAT to it while retaining their allocation
-validation and discovery strategies. Keep the abstraction usable without
-requiring every content provider to create an index.
+### Relic experiments and acceptance criteria
 
-Exercise sequential and random access, mixed range/read calls, fragmentation,
-corrupted cached records, scratch failures, and partial I/O. Compare metadata
-work and scratch use to detect a new eager index or repeated chain walk.
+Use Relic's existing evaluator as a reference while developing the backend.
+Keep fixture facts small enough for that evaluator and exercise production
+scale separately through generated C.
 
-Completion: duplicate index machinery is removed, FAT sequential reads retain
-their inexpensive path, and exFAT metadata/allocation validation retains its
-coverage. This stage prepares shared storage for Stage 6.
+1. Derive static compatibility tables to establish deterministic generation,
+   traceability, and ordinary builds that need no generator.
+2. Select a record-local validation family with meaningful QNX4/QNX6 overlap.
+   Generate C predicates and compare them with Relic on valid, invalid, and
+   undefined-input cases. Use a second format to test the boundary, not merely
+   a second spelling of the first predicate.
+3. Express QNX6 inode reconciliation and generate its sort/group/merge path.
+   Compare outcomes with the existing verifier, including damaged references,
+   repeated names, omitted entries, link counts, and resource failures.
+4. Express the corresponding QNX4 checks. Accept broader adoption only if the
+   same small backend accommodates their different identities and implicit
+   references without scattering format-specific exceptions through it.
+5. Consider ownership intervals and bounded geometry constraints only after
+   the earlier experiments demonstrate a maintenance benefit.
 
-### Stage 5: Unify directory preparation and traversal
+Count the rules, bindings, generator, support operations, generated artifacts,
+and tests when judging complexity. The success criterion is that a new driver
+states fewer rules and owns fewer mechanisms while preserving output and
+resource contracts. If annotations restate the original C control flow, a shared
+C operation is the simpler outcome. If C helpers and generation address the
+same operation, generated code should call the helper; avoid two owners.
 
-Prototype the prepared-directory interface against both drivers, including
-FAT parent-cluster checks, alias matching, exFAT private stream locators, and
-current-entry invalidation. Specify entry occurrence identity separately from
-allocation-owner identity.
+## Boundaries to preserve
 
-Extract bounded namespace validation, then move the traversal state machine
-into the common reader. Convert both drivers and delete their old traversal
-engines. Keep any transitional adapter within this stage; reject the design
-if it merely adds another layer around two retained walkers.
+Keep geometry construction, allocation discovery, directory interpretation,
+name comparison, and native qualification explicit. FAT chains, QNX6 block
+trees, QNX4 extents, and ImageFS path records are concrete evidence that one
+universal filesystem model would need many exceptions.
 
-Exercise on-disk ordering, ambiguous long-name/alias combinations, case mapping,
-selection by alias, depth/path/entry limits, directory cycles, scratch-record
-corruption, preparation failure, and pruning of unselected subtrees. Re-run
-extraction and worker selection coverage because they consume these semantics.
+The [sizing design](../specs/design-sizing.md) already specifies finite candidate
+sets, catalog totals, and deterministic choices. Rules may check candidate
+legality; replacing the search with general logical inference has no demonstrated
+benefit. Similarly, a field schema can remove repetitive codec assignments,
+but checksums, cross-field relations, and safe I/O scheduling need their own
+clear owners.
 
-Completion: one walker owns traversal and one preparation boundary admits
-children; namespaces are validated before exposure; limits are charged at
-admission without replay double-counting. Demonstrate bounded wide-directory
-and deep-tree behavior. This stage depends on Stage 1, not on extent storage.
+Preserve the fixed layer slots and explicit spool/raw-intermediate budgets.
+The supported containers do not justify an arbitrary recursive layer graph.
+Keep extraction, publication, and CLI supervision separate: their distinct
+host authorities and failure semantics explain much of their complexity.
+Static registration remains sufficient; no dynamic plugin ABI is required.
 
-### Stage 6: Consolidate logical content delivery
+## Recommended order and validation
 
-Define the content-resolution contract using logical length, initialized
-content, and physical mappings with explicit units. Reuse Stage 4's index when
-appropriate and retain direct resolution for drivers that do not need it.
-Route FAT and exFAT delivery through the common operation.
+Consolidate settings and metadata-loss policy first, with common contract-test
+profiles accompanying the conversions. Next prototype private container plans
+and extract the narrow verification and scalar helpers. Keep the smaller
+lifetime corrections independently reviewable. Revisit scheme planning with a
+new scheme that can prove the abstraction useful.
 
-Exercise reads crossing extent and initialized-data boundaries, poisoned zero
-tails, EOF, empty files, interleaved range/read access, changed input, cached
-lookups, cancellation, and partial failures. Check confirmed byte counts and
-ensure zero-tail payload storage is never read.
+Evaluate Relic generation as a separate experiment using the sequence above.
+Its outcome can guide how much relational verification remains handwritten.
+Before implementing an adopted architectural change, update its owning design
+and the cross-subsystem contracts; major new components need the design and
+index links required by the working agreement.
 
-Completion: content APIs agree about logical bytes and zeros, allocation slack
-remains inaccessible, and metadata work stays within the recorded bounds.
-Adopt this after the mapping and current-entry lifetime contracts are settled
-in Stages 4 and 5.
+For each implementation, compare the concepts and obligations added and removed,
+not only line counts. Preserve image bytes, traversal and selection behavior,
+metadata losses, verification scope, error classes, confirmed I/O progress, and
+cleanup outcomes. Measure metadata passes, I/O calls, charged work, memory,
+and peak scratch on the same fixtures and budgets. Test wide directories,
+fragmentation, aliases, zero tails, changed sources, reused sinks, and fault
+paths relevant to the operation.
 
-### Optional scoped interval extraction
+Use the commands and review requirements in [build.md](build.md) and
+[AGENTS.md](../AGENTS.md): the ordinary suite, affected independent-tool checks,
+required sanitizer/fuzz runs, the code-review subagent before pre-commit tests,
+and the specified external reviewer. Review correctness, design, security and
+information leaks, and readability with concrete functions as evidence.
+Nontrivial bug fixes require a failing regression before the fix. Platform
+behavior changes require Linux and FreeBSD evidence in addition to macOS;
+unavailable or skipped checks are reported explicitly.
 
-Extract the FAT/exFAT ownership cursor and sorting mechanics as a separate
-small change when their exclusive-domain contract is explicit. Test overlap,
-adjacency, empty claims, out-of-domain bounds, and arithmetic limits.
-
-Completion: both verifiers retain their format-specific reconciliation and
-scope. Evaluate snapshot/object/role semantics against the QNX6 design before
-proposing broader sharing; do not make completion of QNX6 a prerequisite for
-the other stages.
-
-### Review and validation gates
-
-Before each implementation stage's pre-commit test run, launch the required
-code-review subagent. Request correctness, design, security/information-leak,
-and readability review with concrete functions as evidence. Require a
-before/after account of concepts, states, ownership, and caller obligations.
-Address readability findings and every Critical/High finding; fix Medium
-findings or record actionable residuals in `TODO.md` or the commit message.
-
-Each implementation stage also receives the required external, read-only
-review run with `aireview`, as [build.md](build.md) describes. Re-review
-substantive fixes. Report an unavailable or failed review explicitly.
-
-Use the actual commands and platform requirements in [build.md](build.md):
-`make check` for the full ordinary suite, `make check-integration` for
-independent interoperability, and the affected security/fault checks.
-For allocation, parsing, I/O, extraction, or lifetime changes, run the full
-suite with `make check-asan`, which combines ASan and UBSan; use the documented
-standalone sanitizer targets as required, including LSan/MSan on supported
-platforms. Run TSan if concurrency or state shared between workers changes.
-Skipped or unavailable checks are reported as such.
-
-For any non-trivial bug exposed by the work, add a regression first and confirm
-failure on the unfixed tree before applying the fix. Each coherent stage is
-committed after its reviews and relevant checks. Required fixes receive their
-affected checks again before that commit.
-
-Finish the series with the documented scale, combined CLI RSS, extended
-qualification, and fuzz targets. Compare image bytes, traversal/selection
-results, confirmed failure outputs, I/O calls, metadata passes/work, memory,
-and scratch against Stage 1. Record measurements and actual commands alongside
-the build and qualification documentation. A simplification is accepted only
-when its ownership improvement survives those semantic and resource checks.
+Adopt a simplification only when it removes an operation, state, cleanup rule,
+or repeated decision from callers across the system. Hiding the same obligations
+behind another interface is insufficient.
