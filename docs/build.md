@@ -926,14 +926,14 @@ Sanitizer execution evidence:
 
 | Host | Command | Result |
 | --- | --- | --- |
-| macOS | `make check-asan` | 42 pass, 5 tool/platform skips; the specification suite passes |
-| macOS | `make check-ubsan` | 42 pass, 5 tool/platform skips; the specification suite passes |
+| macOS | `make check-asan` | 49 pass, 6 tool/platform skips; the specification suite passes |
+| macOS | `make check-ubsan` | 49 pass, 6 tool/platform skips; the specification suite passes |
 | macOS | `make check-fuzz` | 42 pass, 5 tool/platform skips; the FAT, exFAT, QNX6, QNX4, protocol, image, container, plist, gzip and mtree fuzzers complete 1000 runs each |
 | macOS | `make check-lsan check-msan` | Unsupported-host SKIP for each, not passing coverage |
 | Linux (container) | `make check` and `make check-asan` | 53 pass, 2 QNX integration skips each |
 | Linux (container) | `make check-lsan` | 53 pass, 2 QNX integration skips |
 | Linux (container) | `make check-msan` | 53 pass, 2 QNX integration skips, with the external instrumented zlib |
-| FreeBSD 16/ZFS | `make check` | 40 pass, 7 tool/platform skips; the specification suite passes |
+| FreeBSD 16/ZFS | `make check` | 49 pass, 6 tool/platform skips; the specification suite passes |
 | FreeBSD 16/ZFS | `make check-asan` | 39 pass, 7 skips; test-format's fixture fault is fixed and passes in the same build |
 
 From a macOS development host, `build-aux/linux-check.sh [-r REV] [COMMAND]`

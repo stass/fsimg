@@ -457,16 +457,6 @@
   copy authoritative: a build-and-check script that CI, `linux-check.sh` and
   the FreeBSD host all call, and a CI Linux job that runs in the same image.
 
-* [Medium] **macOS sanitizer qualification is blocked by execution policy**
-  (`test/spec/suite/core/test_runner.rb`, `test/cli.py`): AppleSystemPolicy
-  denies execution of generated script stubs and native creation/provider
-  examples before their program bodies run, causing the runner's 20-second
-  and CLI's 30-second deadlines to expire. A script passed to `/bin/sh`
-  runs immediately, and sampled denied processes remain at `_dyld_start`.
-  The hosting application has Developer Tools enabled; determine the
-  authorization identity of the persistent launcher and qualify the macOS
-  sanitizer suites without weakening execution or containment checks.
-
 * [Medium] **No check runs confinement on glibc 2.33 to 2.38**
   (`build-aux/linux-check.sh`, `.github/workflows/check.yml`): those
   releases implement `fstat()` as `newfstatat`, which the worker's seccomp
