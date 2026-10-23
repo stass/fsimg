@@ -1026,7 +1026,7 @@ parse_value(mtree_parser_t *parser, mtree_values_t *values,
 			return (status);
 		if (decoded_length > FSIMG_SYMLINK_TARGET_MAX)
 			return (refuse(error, FSIMG_EINVAL,
-			    "link target exceeds 1023 bytes"));
+			    "link target exceeds 1024 bytes"));
 		values->link[decoded_length] = '\0';
 		values->link_length = decoded_length;
 		return (FSIMG_OK);

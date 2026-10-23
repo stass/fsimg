@@ -1092,7 +1092,7 @@ test_content_keywords(void)
 
 /* Each bound at its limit and one past it, under small context limits:
  * a path limit of 64 bytes and a depth of 4 make the logical line limit
- * 8 * 64 + 4 * 1023 + 4096 = 8700 bytes.
+ * 8 * 64 + 4 * 1024 + 4096 = 8704 bytes.
  */
 static void
 test_bounds(void)
@@ -1106,8 +1106,8 @@ test_bounds(void)
 	setup_defaults(&setup);
 	setup.options.max_path_bytes = 64;
 	setup.options.max_depth = 4;
-	limit = 8 * 64 + 4 * 1023 + 4096;
-	CHECK(limit == 8700);
+	limit = 8 * 64 + 4 * 1024 + 4096;
+	CHECK(limit == 8704);
 	manifest = malloc(2 * limit + 64);
 	CHECK(manifest != NULL);
 
@@ -1220,15 +1220,15 @@ test_bounds(void)
 	    FSIMG_ELIMIT, 6);
 	CHECK(result->error.resource == FSIMG_RESOURCE_DEPTH);
 
-	/* A link target of 1023 bytes is accepted, 1024 is not. */
+	/* A link target of 1024 bytes is accepted, 1025 is not. */
 	length = (size_t)snprintf(manifest, limit, "l type=link link=");
-	memset(manifest + length, 't', 1024);
-	memcpy(manifest + length + 1023, "\n", 1);
-	result = parse_manifest(manifest, length + 1024, &setup);
+	memset(manifest + length, 't', 1025);
+	memcpy(manifest + length + 1024, "\n", 1);
+	result = parse_manifest(manifest, length + 1025, &setup);
 	CHECK(result->status == FSIMG_OK);
-	CHECK(result->entries[0].link_length == 1023);
-	memcpy(manifest + length + 1023, "t\n", 2);
-	check_refusal(manifest, length + 1025, &setup, FSIMG_EINVAL, 1);
+	CHECK(result->entries[0].link_length == 1024);
+	memcpy(manifest + length + 1024, "t\n", 2);
+	check_refusal(manifest, length + 1026, &setup, FSIMG_EINVAL, 1);
 
 	/* Each physical line, blank, comment and continued lines included,
 	 * is one unit of work: three lines fit a budget of three and a fourth

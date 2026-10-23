@@ -94,7 +94,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/ifs/records.c lib/formats/ifs/volume.c \
 	lib/formats/ifs/tree.c lib/formats/ifs/names.c \
 	lib/formats/ifs/directory.c lib/formats/ifs/read.c \
-	lib/formats/ifs/verify.c lib/formats/ifs/write-ifs.h lib/formats/ifs/write-plan.c \
+	lib/formats/ifs/verify.c lib/formats/ifs/write-ifs.h \
+	lib/formats/ifs/write-plan.c \
 	lib/formats/ifs/write-emit.c
 # The system zlib is the core's one third-party library; never vendored.
 libfsimg_core_la_LIBADD = $(ZLIB_LIBS)
@@ -126,7 +127,8 @@ example_extract_LDADD = libfsimg.la
 test_programs = test-core test-private test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
-	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-ifs \
+	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
+	test-ifs \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
 	test-containers test-compression test-gzip-write test-holes header-c \
@@ -134,13 +136,17 @@ test_programs = test-core test-private test-io test-meta test-meta-sort test-uni
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
-	test/qnx6-integration.sh test/qnx4-integration.sh test/ifs-integration.sh \
+	test/qnx6-integration.sh test/qnx4-integration.sh \
+	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
-	test/compression-integration.sh test/cli.sh test/baseline.sh test/spec.sh
+	test/compression-integration.sh test/cli.sh test/baseline.sh \
+	test/spec.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
-	test/qnx6-integration.sh test/qnx4-integration.sh test/ifs-integration.sh \
+	test/qnx6-integration.sh test/qnx4-integration.sh \
+	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
-	test/compression-integration.sh test/cli.sh test/baseline.sh test/spec.sh \
+	test/compression-integration.sh test/cli.sh test/baseline.sh \
+	test/spec.sh \
 	test/codec-integration.sh
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
@@ -280,7 +286,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/decode/ifschunks.py tools/qnx/decode/ifsflip.py \
 	tools/qnx/decode/ifsqual.py tools/qnx/guest/qualifyifs.sh \
 	tools/qnx/decode/ifscorrupt.py tools/qnx/vm/bootifs.sh \
-	tools/qnx/oracle/oracle.c tools/qnx/oracle/build.sh tools/qnx/vm/load.py \
+	tools/qnx/oracle/oracle.c tools/qnx/oracle/build.sh \
+	tools/qnx/vm/load.py \
 	tools/qnx/decode/q4dump.py tools/qnx/pcm/pcmq4.py tools/qnx/pcm/pcmq6.py tools/qnx/pcm/shdis.py \
 	tools/qnx/pcm/shrange.py tools/qnx/vm/boot.sh \
 	tools/qnx/vm/capture.sh tools/qnx/vm/click.py tools/qnx/vm/env.sh \

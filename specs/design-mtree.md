@@ -344,7 +344,7 @@ Values of the carried keywords:
 | `mode` | Octal digits with or without a leading `0`, at most `07777`; bsdtar writes `644`, `mtree -c` writes `0644` | `FSIMG_META_MODE`, valid and optional |
 | `time` | `seconds[.fraction]`: seconds a signed decimal within `int64_t`; the fraction one to nine digits, right-padded to nanoseconds | `FSIMG_META_MODIFIED`, UTC, precision 1 ns, valid and optional |
 | `size` | Decimal, at most `18446744073709551615` | A file's logical length or a link's target length; checked against the bytes as [Content](#content) states; required for generated content, which has no host file to supply a length; a `/set` default applies to files, while a link checks only a size its own line gives, as `mtree -c` writes one |
-| `link` | vis-encoded target, 1 through 1023 bytes, no NUL | Required with `type=link`, refused with any other type |
+| `link` | vis-encoded target, 1 through 1024 bytes, no NUL | Required with `type=link`, refused with any other type |
 | `contents` | vis-encoded host path | A file's bytes; refused with any other type and with generated content |
 | `sha256digest`, `sha256` | 64 hexadecimal digits, either case | The SHA-256 of the file's logical bytes; refused with any other type |
 | `fsimg.content` | `host`, `zero`, `seeded`, `positional`; default `host` | How a file's bytes are obtained; refused with any other type |
@@ -549,7 +549,7 @@ in the order above; the extractor writes through the borrowed descriptor,
 never duplicating it, since a confined worker cannot, and flushes it before
 it reports completion; the worker then closes it and checks the close. A
 link target the manifest cannot express, empty, longer than
-1023 bytes or holding a NUL byte, is corrupt and fails the extraction. The
+1024 bytes or holding a NUL byte, is corrupt and fails the extraction. The
 CLI stages the file as `manifest`, mode 0600, in a private directory beside
 `FILE`, the way it stages a created image, and opens it write-only for the
 worker, which holds it as one more descriptor against `fds`; the sandbox
@@ -585,7 +585,7 @@ sink mutation, as for scanned sources.
 
 | Bound | Value | Failure |
 | --- | --- | --- |
-| Logical line | `8 * path limit + 4 * 1023 + 4096` bytes, charged to the memory budget: two encoded paths (the name and a `contents=` path), an encoded link and the other keywords | `FSIMG_ELIMIT`, resource `PATH` |
+| Logical line | `8 * path limit + 4 * 1024 + 4096` bytes, charged to the memory budget: two encoded paths (the name and a `contents=` path), an encoded link and the other keywords | `FSIMG_ELIMIT`, resource `PATH` |
 | Words per line | 64 | `FSIMG_EINVAL` |
 | Keyword name | 32 bytes | `FSIMG_EINVAL` |
 | Numeric value | 20 decimal or 22 octal digits, checked accumulation | `FSIMG_ERANGE` |
@@ -593,7 +593,7 @@ sink mutation, as for scanned sources.
 | Holes | 64 ranges per entry | `FSIMG_EINVAL` |
 | Generated digest checks | One per claiming file, in scratch storage; checked after planning, so the bytes hashed are bounded by the planned volume, each 64 KiB one unit of work | `FSIMG_ELIMIT`, resource `WORK`, naming the line |
 | Manifest length | Not bounded separately: lines are streamed and each physical line, one that only continues included, is one unit of work, which also polls cancellation | `FSIMG_ELIMIT`, resource `WORK` |
-| Written manifest (`x --mtree`) | Not bounded separately: one line per extracted entry, so the entries limit bounds the lines, and each line holds a path of at most the path limit and a link target of at most 1023 bytes, every byte escaped to at most four, beside the keywords. A `t` listing is bounded the same way. An image of many entries beneath long non-ASCII names therefore has a manifest many times larger than itself; the output limit, which charges extracted file lengths, does not count it | `FSIMG_ELIMIT`, resource `ENTRIES` or `PATH`, as extraction reads the image |
+| Written manifest (`x --mtree`) | Not bounded separately: one line per extracted entry, so the entries limit bounds the lines, and each line holds a path of at most the path limit and a link target of at most 1024 bytes, every byte escaped to at most four, beside the keywords. A `t` listing is bounded the same way. An image of many entries beneath long non-ASCII names therefore has a manifest many times larger than itself; the output limit, which charges extracted file lengths, does not count it | `FSIMG_ELIMIT`, resource `ENTRIES` or `PATH`, as extraction reads the image |
 
 All offsets, sizes, hole bounds and block indices use checked arithmetic.
 The parser retains no per-entry heap object. `fuzz/mtree.c` feeds arbitrary

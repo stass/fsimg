@@ -521,9 +521,9 @@ record_entry(extract_state_t *state, const fsimg_entry_t *entry,
 /* A skipped entry is recorded with everything but a digest, since the
  * manifest is the only record of it. A symbolic link's line carries its
  * target, read from the image into the copy buffer, which the line
- * borrows until it is written. Neither the manifest nor a host link can
- * hold a target that is empty, longer than 1023 bytes or holds a NUL
- * byte, so such a target is corrupt.
+ * borrows until it is written. The manifest cannot hold a target that is
+ * empty, longer than FSIMG_SYMLINK_TARGET_MAX bytes or holds a NUL byte,
+ * so such a target is corrupt.
  */
 static fsimg_status_t
 record_skipped(extract_state_t *state, const fsimg_entry_t *entry,
