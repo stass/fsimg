@@ -406,6 +406,9 @@ test_path_render(void)
 	check_render("/a\\b", NULL, 64, "/a\\\\b", false);
 	check_render("/caf\xc3\xa9/\x01", NULL, 64, "/caf\xc3\xa9/\x01", false);
 	check_render("relative/name", NULL, 64, "relative/name", false);
+	/* A four-byte UTF-8 sequence is copied whole, not escaped. */
+	check_render("/\xf0\x9f\x98\x80", NULL, 64, "/\xf0\x9f\x98\x80", false);
+	check_render("/\xf0\x9f\x98\x81", NULL, 64, "/\xf0\x9f\x98\x81", false);
 
 	/* Omitted components escape everything outside printable ASCII,
 	 * DEL included; printable bytes and later components stay as they

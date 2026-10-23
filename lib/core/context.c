@@ -35,10 +35,20 @@ typedef struct render_cursor {
 	size_t		 separators;
 } render_cursor_t;
 
-/* One rendered unit: the input bytes it consumes and the bytes they
- * render to.
+/* How a rendered unit is written: its bytes copied, a backslash doubled,
+ * or one byte escaped as \xNN.
+ */
+typedef enum render_kind {
+	RENDER_COPY,
+	RENDER_BACKSLASH,
+	RENDER_ESCAPE
+} render_kind_t;
+
+/* One rendered unit: how it is written, the input bytes it consumes and
+ * the bytes they render to.
  */
 typedef struct render_unit {
+	render_kind_t	 kind;
 	size_t		 input;
 	size_t		 output;
 } render_unit_t;
@@ -130,13 +140,16 @@ static render_unit_t
 render_measure(const render_cursor_t *cursor)
 {
 	const unsigned char *at = cursor->at;
-	render_unit_t unit = { .input = 1, .output = 1 };
+	render_unit_t unit = { .kind = RENDER_COPY, .input = 1, .output = 1 };
 
 	if (at[0] == '\\') {
+		unit.kind = RENDER_BACKSLASH;
 		unit.output = 2;
 	} else if (at[0] != '/' && render_in_omitted(cursor)) {
-		if (at[0] < 0x20 || at[0] > 0x7e)
+		if (at[0] < 0x20 || at[0] > 0x7e) {
+			unit.kind = RENDER_ESCAPE;
 			unit.output = 4;
+		}
 	} else if (at[0] >= 0x80) {
 		while (unit.input < 4 && (at[unit.input] & 0xc0) == 0x80)
 			unit.input++;
@@ -161,16 +174,21 @@ render_write(const render_cursor_t *cursor, const render_unit_t *unit,
 	static const char hex[] = "0123456789abcdef";
 	unsigned byte = cursor->at[0];
 
-	if (byte == '\\') {
+	switch (unit->kind) {
+	case RENDER_BACKSLASH:
 		out[0] = '\\';
 		out[1] = '\\';
-	} else if (unit->output == 4) {
+		break;
+	case RENDER_ESCAPE:
 		out[0] = '\\';
 		out[1] = 'x';
 		out[2] = hex[byte >> 4];
 		out[3] = hex[byte & 0xf];
-	} else
+		break;
+	case RENDER_COPY:
 		bcopy(cursor->at, out, unit->input);
+		break;
+	}
 	return (unit->output);
 }
 
