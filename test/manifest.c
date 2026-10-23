@@ -1392,8 +1392,14 @@ static void
 test_external_writers(void)
 {
 	char tree_path[128];
+	/*
+	 * mtree(8)'s default keywords less flags, plus sha256digest: FreeBSD's
+	 * tool can write flags=uarch, a value the parser refuses.
+	 */
 	const char *const mtree_argv[] = {
-		"mtree", "-c", "-K", "sha256digest", "-p", tree_path, NULL
+		"mtree", "-c", "-k",
+		"type,mode,uid,gid,nlink,size,link,time,sha256digest",
+		"-p", tree_path, NULL
 	};
 	const char *const bsdtar_argv[] = {
 		"bsdtar", "--format=mtree", "--options=mtree:sha256", "-cf", "-",

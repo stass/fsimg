@@ -302,14 +302,6 @@
 
 ## Bugs by subsystem
 
-* [Low] **The mtree -c round trip fails on FreeBSD** (`test/manifest.c`
-  rebuild_from_tool): FreeBSD's `mtree -c` writes `flags=uarch` in its
-  `/set` line, which the parser refuses as an unsupported `flags` value
-  (specs/design-mtree.md), so test-manifest fails at the
-  `fsimg_writer_add_manifest` of the tool's manifest. Run the tool with an
-  explicit keyword list (`-k`) without `flags`, or skip that tool with the
-  reason where it emits flags.
-
 * [Low] **test-worker's relay scenario fails setpgid intermittently**
   (`test/worker.c:1103`): under a loaded `make -j32 check` on macOS the
   forked consumer's `setpgid(0, 0)` failed once, while the parent's
