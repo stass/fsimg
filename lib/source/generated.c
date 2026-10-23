@@ -43,7 +43,7 @@ fsimg_generated_encode(const fsimg_generated_t *generated,
 
 /* The record is read back from scratch storage, so every field is checked
  * against what the encoder can write: a LINK has no seed or holes and a
- * target of 1 through 1023 bytes without a NUL; ZERO has neither seed nor
+ * target of 1 through FSIMG_SYMLINK_TARGET_MAX bytes without a NUL; ZERO has neither seed nor
  * holes; seeded and positional content has at most FSIMG_MTREE_HOLES_MAX
  * valid holes; the length covers exactly the fields.
  */

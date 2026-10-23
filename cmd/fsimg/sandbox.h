@@ -26,6 +26,7 @@
  * objects. -1 marks an absent role. roots is the first of root_count
  * consecutive descriptors.
  */
+/* One per file setting; worker-child.c asserts it equals FSIMG_FILE_SETTINGS. */
 #define FSIMG_SANDBOX_SETTINGS 2u
 
 typedef struct fsimg_sandbox_caps {

@@ -787,7 +787,8 @@ information leaks, and the style guide's readability review, mark new files
 with `git add -N`, and run `aireview "${TMPDIR:-/tmp}/review.md" prompt.txt`
 from the checkout. `aireview`, installed from `~/aireview` and documented in
 its README, reviews the checkout and `git diff HEAD` read-only, its reads
-confined to the checkout and the system's minimal paths, with Codex `gpt-6.1-sol` at reasoning effort `xhigh`. It
+confined to the checkout and the system's minimal paths, with Codex
+`gpt-6.1-sol` at reasoning effort `xhigh`. It
 switches to OpenCode `zai-coding-plan/glm-5.3 --variant max`, with a warning,
 only when Codex is out of quota, rate limited or refused by its content
 filter, and the first line of the

@@ -17,6 +17,9 @@
 #include "internal.h"
 #include "sandbox.h"
 
+_Static_assert(FSIMG_SANDBOX_SETTINGS == 2,
+    "the Capsicum read-only roles list both file settings");
+
 static fsimg_status_t check_input(int, bool, fsimg_error_t *);
 static fsimg_status_t check_roles(const fsimg_sandbox_caps_t *, fsimg_error_t *);
 
@@ -403,18 +406,22 @@ linux_fail:
 	}
 	/* The image input and each file setting are only read: no job asks
 	 * them for zero ranges, so they get no CAP_FSYNC for the sync that
-	 * would precede the host's hole report. Slot 0 is the input, slot
-	 * i + 1 the setting i.
+	 * would precede the host's hole report.
 	 */
-	for (unsigned i = 0; i <= FSIMG_SANDBOX_SETTINGS; i++) {
-		int fd = i == 0 ? caps->input : caps->settings[i - 1];
+	{
+		const int read_only[] = { caps->input, caps->settings[0],
+		    caps->settings[1] };
 
-		if (fd == -1)
-			continue;
-		cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT,
-		    CAP_FCNTL);
-		if (restrict_descriptor(fd, &rights, CAP_FCNTL_GETFL) == -1)
-			goto freebsd_fail;
+		for (unsigned i = 0; i < sizeof(read_only) / sizeof(read_only[0]);
+		    i++) {
+			if (read_only[i] == -1)
+				continue;
+			cap_rights_init(&rights, CAP_READ, CAP_SEEK, CAP_FSTAT,
+			    CAP_FCNTL);
+			if (restrict_descriptor(read_only[i], &rights,
+			    CAP_FCNTL_GETFL) == -1)
+				goto freebsd_fail;
+		}
 	}
 	/* The three writable roles share file rights and differ only in what
 	 * they may do to names: destination makes directories, scratch

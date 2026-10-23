@@ -7,9 +7,10 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   (`tools/qnx/vm/bootifs.sh`, `docs/ifs-research.md`), the one boot of
   E8's plan row not run, to learn whether the `ifsboot` writer's machine 3
   entry can write a prefixless image that boots.
-  * [Low] Boot a body whose shadowed record carries `boot_ino[0]`'s word,
-    to learn whether the startup finds boot programs by path or by
-    scanning the table, which `shadowed_references` only counts.
+* [Low] **Boot a body whose shadowed record carries `boot_ino[0]`'s word**
+  (`tools/qnx/vm/bootifs.sh`, `lib/formats/ifs/verify.c`), to learn whether
+  the startup finds boot programs by path or by scanning the table, which
+  `shadowed_references` only counts.
 * [Medium] **An NRV2B encoder for compressed x86 boot images**
   (`lib/codec/`, `lib/layers/ifsboot.c`; owner decision 3): E14 shows that
   6.5.0's `startup-bios` decodes UCL NRV2B bodies and rejects LZO ones,

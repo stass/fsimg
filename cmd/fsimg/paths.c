@@ -376,8 +376,8 @@ open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
  * working directory like -f and opened as an operand is: no-follow,
  * nonblocking and without a controlling terminal, read-only, and refused
  * unless a regular file. The worker receives the descriptor alone, never
- * the name. Only creation reaches here; reading refuses the keys while
- * parsing.
+ * the name. Only creation and its plan reach here; reading refuses the
+ * keys while parsing.
  */
 static fsimg_status_t
 open_settings(fsimg_cli_options_t *options, fsimg_error_t *error)

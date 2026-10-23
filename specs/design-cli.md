@@ -96,7 +96,7 @@ default of no additional deadline. `spool` bounds the temporary file that
 holds a stream or compressed input, defined in the
 [layer design](design-layers.md#budget). No limit of its own bounds the
 manifest `x --mtree` writes or a `t` listing: `entries` bounds their lines
-and `path`, with the 1023-byte link-target limit, each line's length
+and `path`, with the 1024-byte link-target limit, each line's length
 ([manifest design](design-mtree.md#security-and-bounds)).
 
 `fds` defaults to the depth limit plus 128. A source scan holds one

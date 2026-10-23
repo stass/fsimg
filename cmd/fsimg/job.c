@@ -458,7 +458,9 @@ fsimg_job_needs_raw(const fsimg_worker_request_t *request)
 
 /*
  * Where each capability's descriptor lives in a request. The switch has no
- * default, so -Wswitch refuses a capability without its field; COUNT is no
+ * default, so -Wswitch refuses a named capability without its field. The
+ * file settings are a run from SETTING, so settings past the first, which
+ * have no name of their own, are found by their offset; COUNT is no
  * capability and has none.
  */
 static const int *
@@ -478,6 +480,7 @@ capability_field(const fsimg_worker_request_t *request, fsimg_capability_t c)
 	case FSIMG_CAPABILITY_MANIFEST:
 		return (&request->manifest_fd);
 	case FSIMG_CAPABILITY_SETTING:
+		return (&request->setting_fds[0]);
 	case FSIMG_CAPABILITY_COUNT:
 		break;
 	}

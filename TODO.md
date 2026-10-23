@@ -326,6 +326,38 @@
 
 ## Bugs by subsystem
 
+* [Low] **A failed extraction keeps any error path, not only an entry's**
+  (`lib/extract/extract.c` `report_destination`, `include/fsimg.h`): the
+  contract keeps a path that names an image entry and otherwise names the
+  destination, but the code keeps whatever path is set. It holds because
+  nothing on the extraction path sets another; mark an entry path
+  explicitly, or record the destination in its own field, so it holds by
+  construction.
+
+* [Low] **The job record moves ifsboot settings type-blind**
+  (`cmd/fsimg/job.c` `ifsboot_fields`): the table copies `uint32_t` and
+  `bool` members with `bcopy` at `offsetof` positions, so a widened member
+  would truncate silently past the offset asserts. Encode the six fields
+  explicitly.
+
+* [Low] **File settings' Capsicum rights assume no zero-range query**
+  (`cmd/fsimg/sandbox.c`, `lib/layers/ifsboot.c`): the input and file
+  settings get no `CAP_FSYNC` because nothing asks them for zero ranges, and
+  `fsimg_io_next_zero_range` on a host descriptor syncs first. A future
+  copy that consults holes on a setting fails `ENOTCAPABLE` on confined
+  FreeBSD only. Adopt settings as an object that never consults the host's
+  hole report.
+
+* [Medium] **test-containers' vast-zeros case fails on Linux**
+  (`test/containers.c` `test_vast_declared_zeros`, `lib/layers/output.c`):
+  composing the declared 1 PiB DMG disk resizes the output file to its full
+  length before any chunk is charged, and ext4 in the Linux check container
+  refuses that length, so the compose fails `FSIMG_EIO` "resize failed"
+  instead of `FSIMG_ELIMIT` at the work limit; APFS accepts the sparse file,
+  so macOS passes. Either charge the work bound before sizing the output, or
+  size it as the encoder reaches each chunk, so the limit decides on every
+  host.
+
 * [Low] **test-worker's relay scenario fails setpgid intermittently**
   (`test/worker.c:1103`): under a loaded `make -j32 check` on macOS the
   forked consumer's `setpgid(0, 0)` failed once, while the parent's

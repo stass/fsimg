@@ -432,7 +432,8 @@ help(fsimg_cli_display_t *display)
 		    "                    (default the working directory)\n"
 		    "    -E              Extract into the empty private -C directory itself\n");
 		append(display, "%s", help_read_common);
-		append(display, "    -k              Skip and count symbolic links and other unsupported kinds\n");
+		append(display, "    -k              Skip and count symbolic links and other unsupported\n"
+		    "                    kinds, and omit names outside the profile\n");
 		append(display, "%s%s%s", help_budgets, help_slice, help_memory);
 		append(display, "    --mtree=file    Also write an mtree(5) manifest of the extracted\n"
 		    "                    entries, digests and metadata to the new file\n");
@@ -444,7 +445,8 @@ help(fsimg_cli_display_t *display)
 		    "boot.img, with private modes and without host timestamps. Symbolic links\n"
 		    "and other unsupported kinds fail unless -k skips them. A --mtree manifest\n"
 		    "records what the tree cannot hold, skipped entries included, for\n"
-		    "fsimg c to rebuild the image from both, as the last example shows.\n\n"
+		    "fsimg c to rebuild the image from both, as the last example shows; an\n"
+		    "omitted name has no line, so the rebuilt image lacks it.\n\n"
 		    "examples:\n"
 		    "    fsimg xf boot.img\n"
 		    "    fsimg xf boot.img -C /tmp EFI/BOOT\n"

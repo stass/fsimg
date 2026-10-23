@@ -1218,6 +1218,10 @@ An entry
 .Fl k
 skips, such as a symbolic link or FIFO, is still listed, without a digest;
 the manifest is its only record.
+An entry
+.Fl k
+omits for a name outside the profile is never visited and has no line, so
+the re-created image lacks it.
 A FAT or exFAT time without a zone is written as UTC.
 Every byte of a path or link target outside printable ASCII, and every
 .Ql \e
