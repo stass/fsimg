@@ -116,6 +116,7 @@ Captures are in `~/qnx65-vm/captures-ifs/` (`FSIMG_IFS_NATIVE`), made with
 | `ifs-s2-qnxbase-u`, `-u2` | `dumpifs -u` of X1 `qnxbase.ifs` against the oracle |
 | `e12-links` | E12 boot of records below a symbolic link: buildfiles, scripts, captures and serial transcripts; E13 reads `cAr.ifs` from it |
 | `e14-gate` | E14 x86 boot gate: buildfiles, scripts, the `e14-native-n` capture, the native and rebuilt images, the negative controls and serial transcripts |
+| `e8-boot` | E8 x86 boot bodies: buildfiles, scripts, the `e8-native-n2` to `n6` captures, the images, member comparisons and serial transcripts; `RECORD.txt` lists the commands |
 | `ifs-tools`, `ifs-tools-mkxfs` | Tool binaries for the identities above |
 
 ## Observations
@@ -433,9 +434,82 @@ word, so 6.5.0's x86 `+compress` is UCL NRV2B.
   signature byte stops the boot before any output.
 
 **Not run.** The plan's variant with a file added to the tree: the body is
-`mkifs`'s, and fsimg has no ImageFS writer for bootable bodies to add a
-file with. `qnxbase.ifs`'s own startup and prefix were not used; `gu`'s
-come from the same `startup-bios` and `bios.boot`.
+`mkifs`'s, and fsimg writes no bootable bodies (owner decision 6, from
+[E8](#x86-boot-bodies-e8)). `qnxbase.ifs`'s own startup and prefix were not
+used; `gu`'s come from the same `startup-bios` and `bios.boot`.
+
+### x86 boot bodies (E8)
+
+What makes an x86 ImageFS body bootable, and which of its bytes depend on
+the layout: the evidence for owner decision 6.
+
+**Method.** Everything is in `e8-boot/`, whose scripts reuse E14's
+(`build.sh`, `capn.sh`, `cut.py`, `mkfd.py`, `bootfd.sh` with the marker
+`E8-DONE`); `RECORD.txt` lists the commands. `gen.sh` writes variants of
+E14's uncompressed `gu` buildfile, each built with the guest's `mkifs -n`,
+captured and cut out with every POSIX `cksum` matching the guest's, and
+rebuilt byte-identically in a second capture. `members.py` compares each
+member's bytes between two cases from the `dumpifs -v` offsets and reports
+whether each differing word differs by the member's offset delta. Every
+case boots by the E12 floppy method, and the transcript is read line by
+line, since the script goes on after a command fails.
+
+| Case | Change from the control | Boot |
+| --- | --- | --- |
+| `b0` | None: E14's `gu` with its own markers | Every command runs |
+| `bA` | A 66000-byte file `pad` after the executables | Every command runs |
+| `bB` | `pad` before the executables; `mkifs` still places it last | Every command runs |
+| `bO` | The executables in reverse order | Every command runs |
+| `bS` | 80 one-byte files, which grow the directory and move `procnto` from `0x13000` to `0x14000` | Not booted |
+| `bR1` | `cat` marked `[+raw]` | Every command runs |
+| `bR` | `ksh`, `ls`, `cat` and `libc.so.3` marked `[+raw]` | Every command runs |
+| `bP` | `procnto` marked `[+raw]` | `Unable to load boot process '/proc/boot/procnto'` |
+| `bC`, `bCB`, `bCO` | `[code=copy data=copy]`; with `pad` first; in reverse order | Every program fails with `Unable to start "cat" (84)` and the like |
+| `bD` | The path `/proc/boot/f` stored twice with different contents | Every command runs |
+
+**Results.**
+
+* **A processed executable is its source ELF with a physical address.**
+  `mkifs` strips the section headers (29 to 4 for `cat`), sets the text
+  segment's `p_paddr` to `0x400000` plus the member's image offset and the
+  other segments' `p_paddr` to 0, and leaves the code alone; the shared
+  object `libc.so.3` also gets its data segment's image address. Members
+  are page-aligned. Between `b0` and `bO`, each moved executable differs in
+  one word and `libc.so.3` in two, each by exactly the offset delta.
+* **`procnto` is relinked at its image address.** It is linked at
+  `0xf0000000` plus its offset (`bios.boot`'s `vboot`) with `p_paddr`
+  `0x400000` plus its offset, so moving it one page changes 5892 words
+  (`b0` against `bS`). A raw `procnto` keeps the boot flag and does not
+  load (`bP`).
+* **Raw members run.** A `[+raw]` member is its source file byte for byte
+  (`cksum` matches the guest's `/bin/cat`, `/bin/ls`, `/bin/ksh` and
+  `/lib/libc.so.3`), stored unaligned with the flag nibble `0x0`, and `ksh`,
+  `ls`, `cat` and the shared `libc.so.3` all run from `/proc/boot` (`bR`).
+  `mkifs` adds no `libc.so` link for a raw shared object.
+* **The flag nibble.** `0x8` marks a processed executable, `0x4` adds a
+  shared object (`libc.so.3` and the `libc.so` link `mkifs` adds for it), and
+  `0x2` the boot program `boot_ino[0]` names: processed `procnto` is `0xe`,
+  raw `procnto` `0x2` with mode `0644`. The script record carries none.
+* **The boot script is compiled.** `.script` holds one binary record per
+  command, a header with the record's size followed by the command's
+  strings (`cat`, `cat`, `/proc/boot/f`); it is not the buildfile's text.
+* **The startup section does not depend on the body.** Between `b0`, `bA`
+  and `bS` the startup code is identical apart from its checksum word;
+  only the header's derived sizes change. A rebuild from the unwrapped
+  program and settings reproduces an x86 startup section, as S1 shows for
+  SH-4.
+* **A duplicated path resolves to the later record.** `mkifs` stores both
+  records (`bD`), and at boot `cat` and `ls` see the later one, the one
+  `dumpifs -x` leaves.
+* `code=copy` executables do not start on this x86 configuration; error 84
+  was not decoded, as the live CD has no headers.
+
+So a bootable body needs `procnto` as `mkifs` links it for its place in
+that image, and a compiled boot script. The owner decided that fsimg's
+ImageFS writer does not produce bootable bodies (owner decision 6).
+
+**Not run.** An image without the BIOS prefix, and the codec variants of
+E8's plan row, which E14 covers for x86.
 
 ### S1: H3 boot images
 
@@ -576,9 +650,8 @@ images alike:
 
 * **Duplicate paths.** The last record with a path is the entry, as
   `dumpifs -x` leaves it; earlier records with that path are shadowed:
-  counted by info, reported by verification, never delivered. `procnto`'s
-  own rule is unknown: E12's boot method can test it, and a different
-  result reopens this.
+  counted by info, reported by verification, never delivered. `procnto`
+  resolves a duplicated path the same way (E8).
 * **Odd paths.** A stored path with a `.` or `..` component, an empty
   component or a leading slash makes the image `FSIMG_EUNSUPPORTED`:
   `mkifs` writes such paths but fsimg does not represent them.
@@ -588,6 +661,11 @@ images alike:
   the non-directory is delivered. E12 shows `procnto` doing so for
   symbolic links; files and FIFOs were not boot-tested, and the owner
   chose the same rule for them.
+* **Bootable bodies.** fsimg's ImageFS writer writes nonbootable bodies
+  only. A bootable body needs `procnto` linked by `mkifs` at its image
+  address and a compiled boot script (E8), and fsimg does not produce or
+  modify member files. A bootable body comes from `mkifs` or an existing
+  boot image, and the `ifsboot` writer packages it unchanged (E14).
 
 ## Evidence questions
 
@@ -615,16 +693,15 @@ images alike:
 | `hbcifs` header fields and checksum | Identity, decoded length and payload length identified; four fields open | S1 |
 | Whether the x86 startup accepts uncompressed and LZO bodies | Uncompressed and UCL NRV2B bodies boot; `startup-bios` rejects an LZO body, `mkifs`'s and fsimg's alike, with `unsupported compression type` | E12, E14 |
 | Whether a boot image the `ifsboot` writer packages boots on x86, and under which modes | Yes under `none`, byte-identical to the native raw image; not under `lzo` | E14 |
-| Startup fields that change on growth; offset-dependent processed members; raw members | Open: the rest of E8 is not run. It feeds the ImageFS writer's boot settings (owner decision 6) | E8, not run |
+| Startup fields that change on growth; offset-dependent processed members; raw members | Only the header's derived sizes and the startup checksum word change. Processed executables differ by offset in their `p_paddr` words alone; `procnto` is relinked at its image address. Raw members are their source files and run, except `procnto` | E8 |
+| Flag nibble meaning | `0x8` processed executable, `0x4` shared object, `0x2` boot program | E8 |
+| How `procnto` resolves a duplicated path | The later record | E8 |
 | How to boot an x86 image in QEMU | The image replaces the boot image inside a copy of the live CD's El Torito floppy, a headless QEMU boots it, and `display_msg` markers in the COM1 serial file detect the boot; a flipped signature byte is a negative control, a corrupted startup checksum is not | E12, E14 |
 | How `procnto` resolves a path below a symbolic-link record | Through the link; the records stored below it are unreachable in every table order tested | E12 |
 
 ## Open evidence
 
-* The rest of E8 (startup fields that change on growth, offset-dependent
-  processed members, raw members, an image without the BIOS prefix) and
-  E12's remaining boots (a raw member, a duplicated path), before the
-  ImageFS writer gains boot settings.
+* An x86 image without the BIOS prefix, which E8 did not boot.
 * `dumpifs -u` copies of the eight H3 boot images, through the `big.img`
   route, before the decoder stage's gate.
 * The four unidentified `hbcifs` header fields, before `hbcifs`

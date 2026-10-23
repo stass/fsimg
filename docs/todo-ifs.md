@@ -3,23 +3,10 @@
 Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
 [research record](ifs-research.md) owns the evidence and provenance.
 
-* [Medium] **The rest of E8 and the remaining E12 boots**
-  (`tools/qnx/guest/popifs.sh`, `tools/qnx/vm/bootifs.sh`,
-  `docs/ifs-research.md`), each run with the [E12 boot
-  method](ifs-research.md#paths-below-a-link-at-boot-e12): an image
-  without the BIOS prefix; whether two `mkifs` builds of one startup
-  program at two image sizes differ only in the derived header fields and
-  the checksum word, as S1 shows for SH-4, so that a rebuild from the
-  unwrapped program and settings reproduces an x86 startup section; whether
-  processed members' bytes depend on their image offset (if so, the
-  writer's scope returns to the owner); raw members; the inode-flag nibble
-  the writer's boot settings give referenced records, whose closed table is
-  empty until then, so every `boot1=` to `boot4=` and `script=` setting is
-  refused and the boot-image writer's native gates use a native bootable
-  body; and how `procnto` resolves a duplicated path (owner decision 10).
-  They answer owner decision 6. Once the ImageFS writer has boot settings,
-  the x86 gate's variant that adds a file to the tree and reads it back
-  from the shell runs too ([E14](ifs-research.md#x86-boot-gate-e14)).
+* [Low] **Boot an x86 image without the BIOS prefix**
+  (`tools/qnx/vm/bootifs.sh`, `docs/ifs-research.md`), the one boot of
+  E8's plan row not run, to learn whether the `ifsboot` writer's machine 3
+  entry can write a prefixless image that boots.
   * [Low] Boot a body whose shadowed record carries `boot_ino[0]`'s word,
     to learn whether the startup finds boot programs by path or by
     scanning the table, which `shadowed_references` only counts.

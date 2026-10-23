@@ -381,9 +381,8 @@ remove a class of special cases rather than handling each case.
     rules.
 
     The body is stored uncompressed or as LZO chunks of at most 65536
-    decoded bytes. If E8 shows that processed members depend on their
-    image offset, a rebuilt image may not move them, and this decision
-    reopens with owner decision 6.
+    decoded bytes. The container never alters the body, so a rebuilt image
+    keeps every member where `mkifs` placed it.
 
 ## Codecs and dependencies
 
@@ -877,7 +876,7 @@ Depends on stages 4 and 6 and on layer stages 2 to 4.
 
 ### 11. Boot-image writer
 
-Depends on stages 7 and 10 and on E8's answers for owner decision 6.
+Depends on stages 7 and 10.
 
 * The LZO1X encoder, with determinism tests and the differential checker.
 * The `ifsboot` writer (decision 10): the file settings and their
@@ -891,8 +890,6 @@ Depends on stages 7 and 10 and on E8's answers for owner decision 6.
   gate; a test-only control lets the plan accept
   every mode its tables describe, so the emission is tested for every
   machine before any gate.
-* The ImageFS writer gains the boot-specific settings that owner decision 6
-  chooses.
 * Tests: the `ifsboot write` row of the
   [layer design's tests](../specs/design-layers.md#tests-and-evidence):
   a create and a wrap of a standalone writer image, peeled again, yield
@@ -911,10 +908,9 @@ Depends on stages 7 and 10 and on E8's answers for owner decision 6.
   sections and the header values `i` reports, once under each mode. A
   mode passes when its rebuild boots in QEMU through the floppy method to
   its boot script's final marker, after a shell has read a member back,
-  and the same image with its signature byte flipped does not. fsimg's ImageFS writer refuses
-  boot programs, so the body is `mkifs`'s and the gate qualifies the
-  container; a variant that adds a file to the tree waits for an ImageFS
-  writer of bootable bodies (owner decision 6). The machine table's
+  and the same image with its signature byte flipped does not. fsimg's
+  ImageFS writer writes nonbootable bodies only (owner decision 6), so the
+  body is `mkifs`'s and the gate qualifies the container. The machine table's
   writable modes for x86 are exactly the modes this gate booted.
   [E14](ifs-research.md#x86-boot-gate-e14) ran it: the rebuild
   under `none` is byte-identical to the native image and boots; the
@@ -1033,15 +1029,13 @@ The owner has settled all eleven.
    clean-room split, with `liblzo2` and `libucl` used only as out-of-tree
    black-box oracles. No GPL library is linked, even optionally
    ([codecs](#codecs-and-dependencies)).
-6. **Boot attributes in a written boot image.** The writer takes typed settings:
-   up to four boot programs and one script, named by path, plus an
-   inode-flag rule that E8 must justify. The writer never reads an image,
-   and the `ifsboot` container takes only the startup program, the prefix
-   and header settings. Inheriting flags by path from an existing boot
-   image was rejected because it makes the writer plan against a reader's
-   catalog. If E8 finds members whose bytes depend on their image offset,
-   a rebuilt image must keep them at their native offsets, and the
-   writer's scope returns to the owner.
+6. **No bootable bodies.** The ImageFS writer writes nonbootable bodies
+   only: it takes no boot programs, script or inode flags. E8 shows that a
+   bootable x86 body needs `procnto` linked by `mkifs` at its image address
+   and a compiled boot script, and fsimg does not produce or modify member
+   files. A bootable body comes from `mkifs` or an existing boot image, and
+   the `ifsboot` container, which takes only the startup program, the
+   prefix and header settings, packages it unchanged.
 7. **Writer registration bar.** `dumpifs` acceptance in the stage 10 cycle,
    plus the E11 mount if one exists. QNX 6.5.0 has no `mount_ifs`, so
    without an E11 mount the bar is `dumpifs` acceptance alone.
@@ -1057,8 +1051,8 @@ The owner has settled all eleven.
     boot image has a link record and a file record for one to three paths).
     The last record with a path is the entry, as `dumpifs -x` leaves it;
     earlier records with that path are shadowed: counted by info, reported
-    by verification, never delivered. A boot test showing that `procnto`
-    resolves differently reopens this.
+    by verification, never delivered. E8 shows `procnto` resolving a
+    duplicated path to the later record too.
 11. **Paths `mkifs` writes but fsimg does not represent.** A stored path
     with a `.` or `..` component, an empty component or a leading slash
     makes the image `FSIMG_EUNSUPPORTED`, not corrupt: `mkifs` writes such
@@ -1083,10 +1077,6 @@ The owner has settled all eleven.
   SH-4 toolchain that is not available. `mkifs` 6.5.0 output qualifies the
   writer's ImageFS. Only the PCM QEMU board, or a bench unit, qualifies an
   SH-4 boot image, and that board is a separate plan whose own risks apply.
-* **Offset-dependent members.** If processed members encode their image
-  offset, a free layout cannot repackage them, and the writer narrows to
-  keeping those members in place (owner decision 6). E8 tests this before
-  any writer code exists.
 * **Undocumented startup coupling.** The loader may depend on physical
   placement, `ram_size` or `imagefs_paddr` in ways the header does not
   show, or the startup code may carry bytes `mkifs` derives from the image
