@@ -211,9 +211,8 @@ and `reserve=` a percentage up to 100, which every other format rejects
 unless at their defaults; QNX4 shares `inodes=` as its `.inodes` slot count,
 and ImageFS shares `endian=` and adds `mountpoint=`, its stored mount path
 of at most 1024 bytes, default `/`, with `mountpoint=` alone storing an
-empty one, and the boot settings `boot1=` to `boot4=` and `script=`, each
-an image path, which the
-[ImageFS design](design-ifs.md#boot-settings) governs. ImageFS has no free
+empty one; its writer takes no boot setting, since it writes
+[nonbootable bodies](design-ifs.md#bootable-bodies) only. ImageFS has no free
 space, so `-s` and `--free-space` fail with it as settings the format
 cannot honor, and `-e` is its only time setting.
 A qualified key targets one layer: `-o gpt:type=esp`,

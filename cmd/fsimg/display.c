@@ -399,10 +399,9 @@ help(fsimg_cli_display_t *display)
 		append(display, "%s%s", help_budgets, help_memory);
 		append(display, "    -n              Without W, report a plan without creating an image\n"
 		    "    -o key=value    Setting: sector, cluster, endian, uuid, inodes,\n"
-		    "                    reserve, mountpoint, boot1 to boot4 or script, or\n"
-		    "                    layer:key for a layer the stack or the compression\n"
-		    "                    selects, such as gpt:type=esp, dmg:compress=none\n"
-		    "                    or gzip:level=9\n"
+		    "                    reserve or mountpoint, or layer:key for a layer the\n"
+		    "                    stack or the compression selects, such as\n"
+		    "                    gpt:type=esp, dmg:compress=none or gzip:level=9\n"
 		    "    -p              Import owner, group and permission bits\n"
 		    "    -R              Create reproducible image bytes\n");
 		append(display, "%s", help_policies);

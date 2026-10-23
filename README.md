@@ -179,8 +179,10 @@ The ImageFS writer creates nonbootable images in either byte order
 with a mountpoint setting (default `/`): the root and a record for every
 directory, then files, symbolic links and FIFOs with owner, mode and
 modification time, each file's data on a 4-byte boundary. The image's size
-follows from its contents, and boot programs and scripts are refused until
-a boot flag rule is observed. A partition scheme or a container that pads
+follows from its contents. A bootable image's body must come from `mkifs`
+or be unwrapped from an existing boot image with `fsimg_image_unwrap()`;
+`fsimg_image_wrap()` can then package it in an `ifsboot` container, its
+ImageFS bytes unmodified. A partition scheme or a container that pads
 the volume (DMG, VHD, simg) cannot hold an ImageFS, which must end exactly
 at its image size; gzip can compress it. QNX 6.5.0 `dumpifs` lists and
 extracts its images as it does the `mkifs` images of the same trees.

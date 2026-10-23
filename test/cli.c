@@ -175,8 +175,10 @@ test_options(void)
 		{ "fsimg", "-i", "-f", "image", "-o", "mountpoint=/", NULL },
 		{ "fsimg", "-cn", "-F", "qnx6", "-o", "mountpoint=/", "-o",
 		    "mountpoint=/x", ".", NULL },
-		{ "fsimg", "-cn", "-F", "qnx6", "-o", "boot5=/x", ".", NULL },
-		{ "fsimg", "-cn", "-F", "qnx6", "-o", "script", ".", NULL },
+		/* ImageFS has no boot settings: it writes nonbootable bodies. */
+		{ "fsimg", "-cn", "-F", "ifs", "-o", "boot1=/a", ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs", "-o", "script=/s", ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs", "-o", "mountpoint", ".", NULL },
 		{ "fsimg", "-cn", "-F", "fat32", "-M", "-s", "64M", ".", NULL },
 		{ "fsimg", "--formats", "-m", "16M", NULL }
 	};
@@ -202,10 +204,12 @@ test_options(void)
 	    ".", NULL };
 	char *window[] = { "fsimg", "-i", "-f", "image", "--offset=512",
 	    "--length", "1M", NULL };
-	char *text[] = { "fsimg", "-cn", "-F", "qnx6", "-o", "mountpoint=",
-	    "-o", "boot1=/a", "-o", "boot4=/d", "-o", "script=/s", ".", NULL };
-	/* The text fields of the job record hold 1025 bytes and a NUL. */
-	char longest[11 + 1025 + 1], longer[6 + 1026 + 1];
+	char *text[] = { "fsimg", "-cn", "-F", "qnx6", "-o", "mountpoint=", ".",
+	    NULL };
+	/* The job record's mountpoint field holds 1025 bytes and a NUL: one
+	 * more than any format stores, which the writer refuses.
+	 */
+	char longest[11 + 1025 + 1], longer[11 + 1026 + 1];
 	char *text_longest[] = { "fsimg", "-cn", "-F", "qnx6", "-o", longest,
 	    ".", NULL };
 	char *text_longer[] = { "fsimg", "-cn", "-F", "qnx6", "-o", longer,
@@ -279,11 +283,6 @@ test_options(void)
 	CHECK(parse(text, &options) == FSIMG_OK);
 	CHECK(options.request.write.mountpoint != NULL &&
 	    options.request.write.mountpoint[0] == '\0');
-	CHECK(strcmp(options.request.write.boot_programs[0], "/a") == 0);
-	CHECK(options.request.write.boot_programs[1] == NULL &&
-	    options.request.write.boot_programs[2] == NULL);
-	CHECK(strcmp(options.request.write.boot_programs[3], "/d") == 0);
-	CHECK(strcmp(options.request.write.script, "/s") == 0);
 	fsimg_cli_release(&options);
 	memcpy(longest, "mountpoint=", 11);
 	memset(longest + 11, 'm', 1025);
@@ -291,8 +290,8 @@ test_options(void)
 	CHECK(parse(text_longest, &options) == FSIMG_OK);
 	CHECK(strlen(options.request.write.mountpoint) == 1025);
 	fsimg_cli_release(&options);
-	memcpy(longer, "boot2=", 6);
-	memset(longer + 6, 'b', 1026);
+	memcpy(longer, "mountpoint=", 11);
+	memset(longer + 11, 'm', 1026);
 	longer[sizeof(longer) - 1] = '\0';
 	check_syntax(text_longer);
 }

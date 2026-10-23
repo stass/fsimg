@@ -469,8 +469,9 @@ The matching write settings are typed fields of `fsimg_write_options_t`
 behind `FSIMG_SETTING_*` bits, as the
 [metadata design](design-metadata.md#capability-records) states:
 `mountpoint`, a copied string with NULL selecting the format default under
-`FSIMG_SETTING_MOUNTPOINT`, and `boot_programs[4]` and `script`, copied
-image paths under `FSIMG_SETTING_BOOT`.
+`FSIMG_SETTING_MOUNTPOINT`. No write setting names a boot program or a
+startup script: the ImageFS writer writes
+[nonbootable bodies](design-ifs.md#bootable-bodies) only.
 
 `next()` validates a directory's effective lookup namespace through the bounded
 preparation specified in [prepared directories](design-directories.md) before

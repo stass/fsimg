@@ -360,6 +360,13 @@ writes a nonbootable ImageFS in one layout: the root and an explicit record
 for every directory, files, symbolic links and FIFOs with owner, mode and
 modification time, each file's data on a 4-byte boundary, and the trailer
 checksum.
+fsimg does not make an ImageFS bootable: a bootable body, with procnto
+linked at its image address and a compiled boot script, must come from
+QNX's
+.Ql mkifs
+or be unwrapped from an existing boot image, and the library's
+.Fn fsimg_image_wrap
+can then package it in an ifsboot container, its ImageFS bytes unmodified.
 Its size follows from its contents, so
 .Fl s
 and
@@ -581,10 +588,6 @@ alone stores an empty one.
 ImageFS stores one of at most 1024 bytes of UTF-8 text without control
 bytes; default
 .Pa / .
-.It Fl o Ar boot1=path No ... Fl o Ar boot4=path , Fl o Ar script=path
-The image paths of a bootable image's boot programs and startup script.
-ImageFS refuses every one as unsupported until a boot slot has an observed
-inode-flag rule, so it writes only nonbootable images.
 .It Fl p
 Import each source object's owner, group and permission bits as optional
 metadata.
@@ -835,6 +838,9 @@ An ifsboot container packages the ImageFS of
 .Ql ifs/ifsboot
 as a QNX boot image: an optional boot prefix, a startup header fsimg
 writes, the startup code and the body, raw or in LZO1X chunks of 64 KiB.
+The body is the nonbootable ImageFS
+.Cm c
+writes, whatever the machine.
 The startup code and the prefix are copied from files and never parsed;
 each is padded with zeros to a multiple of 4 bytes, and fsimg derives every
 size and both checksums.

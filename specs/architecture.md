@@ -396,7 +396,12 @@ holding the table in RAM, delivers one extent per file through the shared
 extent index, and plans one deterministic layout whose size is exact, so
 the format has no free space to size. The boot machinery around an ImageFS
 is the `ifsboot` container's, so the driver reads the bare body and the
-same native `dumpifs` qualification gates its writer.
+same native `dumpifs` qualification gates its writer. The writer writes
+nonbootable bodies only: a bootable body needs `procnto` linked by `mkifs`
+at its image address and a compiled boot script, and fsimg neither
+produces nor modifies member files, so such a body comes from `mkifs` or
+is unwrapped from an existing boot image, and the `ifsboot` writer
+packages its ImageFS bytes unmodified.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication

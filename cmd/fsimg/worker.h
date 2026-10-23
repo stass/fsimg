@@ -182,11 +182,10 @@ typedef struct fsimg_worker_request {
 	 * information's, and its NUL.
 	 */
 	char		 label_storage[sizeof(((fsimg_volume_info_t *)0)->label)];
-	/* Decoder-owned backing of the text settings, in job order: the
-	 * mountpoint, the four boot programs and the script (job.c). Each
-	 * holds an ImageFS image path, a slash and 1024 bytes, and its NUL.
+	/* Decoder-owned backing only; write.mountpoint is the authoritative
+	 * value.
 	 */
-	char		 text_storage[FSIMG_JOB_TEXT_SETTINGS][FSIMG_JOB_TEXT_BYTES];
+	char		 mountpoint_storage[FSIMG_JOB_MOUNTPOINT_BYTES];
 } fsimg_worker_request_t;
 
 typedef struct fsimg_worker_result {

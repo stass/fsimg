@@ -40,7 +40,7 @@ static const fsimg_format_variant_t ifs_variants[] = {
 			.max_label_bytes = 0,
 			.max_link_target_bytes = IFS_LINK_TARGET_MAX,
 			.write_settings = FSIMG_SETTING_BYTE_ORDER |
-			    FSIMG_SETTING_MOUNTPOINT | FSIMG_SETTING_BOOT
+			    FSIMG_SETTING_MOUNTPOINT
 		},
 		.id = 0
 	}

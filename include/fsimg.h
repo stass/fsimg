@@ -753,11 +753,6 @@ typedef struct fsimg_write_options {
 	 * the format's default, and "" stores an empty one.
 	 */
 	const char	*mountpoint;
-	/* FSIMG_SETTING_BOOT: the image paths of up to four boot programs, in
-	 * header slot order, and of the startup script; NULL when unused.
-	 */
-	const char	*boot_programs[4];
-	const char	*script;
 	/* Borrowed for construction and copied; NULL selects every default. */
 	const fsimg_layer_options_t *layers;
 	/* The file settings: the record is copied at construction and its I/O
@@ -988,7 +983,6 @@ typedef struct fsimg_volume_info {
 #define FSIMG_SETTING_INODE_CAPACITY 0x04u
 #define FSIMG_SETTING_RESERVE 0x08u
 #define FSIMG_SETTING_MOUNTPOINT 0x10u
-#define FSIMG_SETTING_BOOT 0x20u
 
 typedef struct fsimg_format_info {
 	char		 name[16];

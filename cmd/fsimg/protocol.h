@@ -8,12 +8,12 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 7052u
-/* The job record's text settings: the mountpoint, the boot programs and the
- * script, each in a field of FSIMG_JOB_TEXT_BYTES.
+#define FSIMG_JOB_BYTES 1922u
+/* The job record's mountpoint field: one byte more than the longest
+ * mountpoint any format stores, 1024 bytes, and its NUL, so the writer,
+ * not the record, refuses a longer one.
  */
-#define FSIMG_JOB_TEXT_SETTINGS 6u
-#define FSIMG_JOB_TEXT_BYTES 1026u
+#define FSIMG_JOB_MOUNTPOINT_BYTES 1026u
 #define FSIMG_WIRE_ERROR_BYTES 592u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These

@@ -1570,7 +1570,7 @@ its oracle decode)".
 
 `test-ifs-write` creates ImageFS images with the writer, constructed by
 name through the registry, which must list it as writable with its byte
-order, mountpoint and boot settings. Every image is read back through
+order and mountpoint settings. Every image is read back through
 fsimg's reader and payload verification, and checked by the test's own
 checker, written from [the format design](../specs/design-ifs.md) with
 separate offsets and sharing no code with `lib/formats/ifs/`. The checker decodes the header, the mountpoint,
@@ -1587,7 +1587,7 @@ image and the 176-byte one-file image `mkifs` also writes; mountpoints of
 0, 1 and 1024 bytes and refusals of 1025 bytes and of bytes outside the
 profile; both byte orders; 1024-byte paths, components and link targets
 and the 2080-byte record they make; owner and mode limits and time losses;
-every refused setting, boot settings included; mutations the checker must
+every refused setting; mutations the checker must
 see; sink, source, allocation, metadata-storage and cancellation faults;
 and images one word below and at `2^32 - 4` bytes on a sink that keeps only
 their first and last 64 KiB, with one word more out of range.

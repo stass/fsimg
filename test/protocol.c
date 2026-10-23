@@ -15,7 +15,7 @@ static void test_frame_splits(uint32_t);
 static void test_malformed_frames(void);
 static void test_error_codec(void);
 static void test_job_label(void);
-static void test_job_text_settings(void);
+static void test_job_mountpoint(void);
 static void test_selection_budget(void);
 static void test_error_padding(void);
 static void test_entry_records(void);
@@ -674,18 +674,16 @@ test_job_qnx6_settings(void)
 	}
 }
 
-/* The text settings, the mountpoint, the four boot programs and the script,
- * travel in fields of 1026 bytes from byte 832, after the spool limit, the
- * gzip level and the compression, with a presence byte at 6988 and zero
- * padding to the ifsboot settings at 6996. NULL and the empty string stay
- * distinct, the longest value that fits round-trips, and every other
- * encoding is refused.
+/* The mountpoint travels in a field of 1026 bytes from byte 832, after the
+ * spool limit, the gzip level and the compression, with a presence byte at
+ * 1858 and zero padding to the ifsboot settings at 1866. NULL and the
+ * empty string stay distinct, the longest value that fits round-trips,
+ * and every other encoding is refused.
  */
 static void
-test_job_text_settings(void)
+test_job_mountpoint(void)
 {
-	enum { FIELD = 1026, MOUNTPOINT = 832, SCRIPT = 832 + 5 * 1026,
-	    PRESENT = 832 + 6 * 1026 };
+	enum { FIELD = 1026, MOUNTPOINT = 832, PRESENT = 832 + 1026 };
 	static char longest[FIELD], longer[FIELD + 1];
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES];
@@ -700,37 +698,39 @@ test_job_text_settings(void)
 	request.root_paths = image_root;
 	request.root_count = 1;
 	request.write.mountpoint = "";
-	request.write.boot_programs[1] = "/boot/two";
-	request.write.script = longest;
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(raw[PRESENT] == 1);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
 	CHECK(decoded.write.mountpoint != NULL &&
 	    decoded.write.mountpoint[0] == '\0');
-	CHECK(decoded.write.boot_programs[0] == NULL &&
-	    decoded.write.boot_programs[2] == NULL &&
-	    decoded.write.boot_programs[3] == NULL);
-	CHECK(decoded.write.boot_programs[1] != NULL &&
-	    strcmp(decoded.write.boot_programs[1], "/boot/two") == 0);
-	CHECK(decoded.write.script != NULL &&
-	    strcmp(decoded.write.script, longest) == 0);
-	CHECK(raw[PRESENT] == (0x01 | 0x04 | 0x20));
+	request.write.mountpoint = longest;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.write.mountpoint != NULL &&
+	    strcmp(decoded.write.mountpoint, longest) == 0);
 
-	/* A missing terminator, a byte after one, an unknown presence bit, a
-	 * value marked absent and nonzero padding are all refused.
+	/* A missing terminator, a byte after one, an unknown presence value
+	 * and nonzero padding are all refused.
 	 */
-	CHECK(!job_decodes(raw, SCRIPT + FIELD - 1, 'm'));
-	CHECK(!job_decodes(raw, MOUNTPOINT + 1, 'x'));
-	CHECK(!job_decodes(raw, PRESENT, 0x40));
-	CHECK(!job_decodes(raw, PRESENT, 0x01 | 0x04));
-	CHECK(job_decodes(raw, PRESENT, 0x01 | 0x04 | 0x20));
+	CHECK(!job_decodes(raw, MOUNTPOINT + FIELD - 1, 'm'));
+	CHECK(!job_decodes(raw, PRESENT, 2));
 	for (unsigned i = PRESENT + 1; i < PRESENT + 8; i++)
 		CHECK(!job_decodes(raw, i, 1));
-	request.write.script = NULL;
+	request.write.mountpoint = "";
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
-	CHECK(!job_decodes(raw, SCRIPT, 'x'));
+	CHECK(!job_decodes(raw, MOUNTPOINT + 1, 'x'));
+
+	/* An absent mountpoint decodes as NULL, and a value marked absent is
+	 * refused.
+	 */
+	request.write.mountpoint = NULL;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(raw[PRESENT] == 0);
+	CHECK(!job_decodes(raw, MOUNTPOINT, 'x'));
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
-	    &capabilities, NULL) == FSIMG_OK && decoded.write.script == NULL);
+	    &capabilities, NULL) == FSIMG_OK && decoded.write.mountpoint == NULL);
 
 	/* A value longer than its field does not encode. */
 	request.write.mountpoint = longer;
@@ -738,7 +738,7 @@ test_job_text_settings(void)
 }
 
 /*
- * The ifsboot settings travel from byte 6996: the machine and the five
+ * The ifsboot settings travel from byte 1866: the machine and the five
  * addresses as six 64-bit values, a byte of presence bits (bit n for value
  * n, bit 6 for the virtual setting), a byte of values (0x01 virtual, 0x02
  * compress=none) and six zero bytes to the record's end. A setting set to
@@ -750,7 +750,7 @@ test_job_text_settings(void)
 static void
 test_job_ifsboot_settings(void)
 {
-	enum { CAPABILITIES = 23 * 8, VALUES = 6996, SET = VALUES + 6 * 8,
+	enum { CAPABILITIES = 23 * 8, VALUES = 1866, SET = VALUES + 6 * 8,
 	    BITS = SET + 1, PADDING = BITS + 1 };
 	fsimg_worker_request_t request, decoded;
 	fsimg_layer_options_t *layers = &request.layers;
@@ -1172,7 +1172,7 @@ main(int argc, char **argv)
 	}
 	CHECK(argc == 1);
 	test_job_qnx6_settings();
-	test_job_text_settings();
+	test_job_mountpoint();
 	test_job_ifsboot_settings();
 	test_job_selection();
 	test_job_layers();

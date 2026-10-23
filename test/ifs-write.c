@@ -1460,11 +1460,10 @@ check_refused(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
 }
 
 /* Settings: byte addressing only, no FAT root, no size or free space, no
- * label, a 32-bit reproducible epoch, a known byte order, no UUID, inode
- * capacity or reserve, and every boot setting refused, since the closed
- * flag table is empty. The registry lists the writer with its settings, a
- * variant of another format is refused, and a format that stores no
- * mountpoint or boot program refuses them.
+ * label, a 32-bit reproducible epoch, a known byte order, and no UUID,
+ * inode capacity or reserve. The registry lists the writer with its
+ * settings, a variant of another format is refused, and a format that
+ * stores no mountpoint refuses one.
  */
 static void
 test_validation(void)
@@ -1488,7 +1487,7 @@ test_validation(void)
 	CHECK(ifs_writer(ctx, &o, &writer, NULL) == FSIMG_OK);
 	fsimg_writer_free(writer);
 	CHECK(listed_writer_settings("ifs") == (FSIMG_SETTING_BYTE_ORDER |
-	    FSIMG_SETTING_MOUNTPOINT | FSIMG_SETTING_BOOT));
+	    FSIMG_SETTING_MOUNTPOINT));
 	CHECK(fsimg_writer_new_variant(ctx, &fsimg_ifs_format,
 	    &fsimg_qnx6_format.variants[0], &options, &writer, NULL) ==
 	    FSIMG_EINVAL);
@@ -1528,21 +1527,10 @@ test_validation(void)
 	o = options;
 	o.label = "LABEL";
 	check_refused(ctx, &o, FSIMG_EUNSUPPORTED);
-	for (unsigned slot = 0; slot < 5; slot++) {
-		o = options;
-		if (slot < 4)
-			o.boot_programs[slot] = "/a";
-		else
-			o.script = "/a";
-		check_refused(ctx, &o, FSIMG_EUNSUPPORTED);
-	}
 
 	o = options;
 	o.mountpoint = "/";
 	CHECK(fsimg_writer_new(ctx, "fat32", &o, &writer, NULL) == FSIMG_EINVAL);
-	o = options;
-	o.script = "/a";
-	CHECK(fsimg_writer_new(ctx, "qnx6", &o, &writer, NULL) == FSIMG_EINVAL);
 	fsimg_ctx_free(ctx);
 }
 

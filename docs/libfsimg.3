@@ -255,16 +255,19 @@ QNX4 names inode_capacity alone, the
 slot count, where zero selects 128 slots raised to the slots the names
 need.
 QNX6 and QNX4 store no volume_serial and ignore it.
-The settings mountpoint, a copied string under FSIMG_SETTING_MOUNTPOINT,
-and boot_programs and script, image paths under FSIMG_SETTING_BOOT,
-follow the same rule.
-ImageFS names FSIMG_SETTING_BYTE_ORDER, FSIMG_SETTING_MOUNTPOINT and
-FSIMG_SETTING_BOOT:
+The setting mountpoint, a copied string under FSIMG_SETTING_MOUNTPOINT,
+follows the same rule.
+ImageFS names FSIMG_SETTING_BYTE_ORDER and FSIMG_SETTING_MOUNTPOINT:
 a NULL mountpoint stores
 .Pa / ,
 an empty one stores an empty mountpoint, and one longer than 1024 bytes,
-not UTF-8 or holding a control byte fails with FSIMG_EINVAL; every boot program and script fails with
-FSIMG_EUNSUPPORTED, since no boot slot has an observed inode-flag rule.
+not UTF-8 or holding a control byte fails with FSIMG_EINVAL.
+The ImageFS writer makes nonbootable images: a bootable body must come
+from QNX's mkifs or be unwrapped from an existing boot image with
+.Fn fsimg_image_unwrap ,
+and
+.Fn fsimg_image_wrap
+can package it in an ifsboot container, its ImageFS bytes unmodified.
 An ImageFS has no free space and its size follows from its contents, so
 a nonzero volume_bytes or min_free_bytes fails with FSIMG_EINVAL; its
 sector and allocation unit are 1 byte, and it stores no volume_serial.

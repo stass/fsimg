@@ -143,10 +143,9 @@ such as QNX6, is created without `-L` and fails explicitly when `-L` is given.
 The same rule covers format-specific write options: `write_settings` is the
 mask of `FSIMG_SETTING_*` fields of `fsimg_write_options_t` the format stores
 (byte order, volume UUID, inode capacity and reserve percentage, all QNX6's;
-QNX4 stores the inode capacity alone; ImageFS stores the byte order, the
-mountpoint under `FSIMG_SETTING_MOUNTPOINT` and the boot programs and
-script under `FSIMG_SETTING_BOOT`, each a copied string field, as the
-[ImageFS driver design](design-ifs-driver.md#writer-settings) states),
+QNX4 stores the inode capacity alone; ImageFS stores the byte order and
+the mountpoint under `FSIMG_SETTING_MOUNTPOINT`, a copied string field, as
+the [ImageFS driver design](design-ifs-driver.md#writer-settings) states),
 and writer construction rejects a non-default value of any other one with
 `FSIMG_EINVAL` before the driver's `validate` runs, so no driver has to
 remember another format's settings. The CLI generates a random UUID, like

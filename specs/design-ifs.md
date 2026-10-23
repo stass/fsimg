@@ -65,7 +65,7 @@ publication. The common contracts cover ImageFS without exceptions:
 [emission](design-emission.md), [sizing](design-sizing.md) and
 [POSIX metadata](design-metadata.md). The entry model carries owner, mode,
 the modification time, symbolic links and FIFOs, so common code gains only
-the descriptor registration, the writer's mountpoint and boot settings, the
+the descriptor registration, the writer's mountpoint setting, the
 volume information's mountpoint field and detail table, and the emission
 copy's observer, each specified in the [C API](design-api.md),
 [metadata](design-metadata.md#capability-records) and
@@ -528,9 +528,8 @@ rule. [X1]
 The inode number of a record is its catalog ID plus 1, which fits the 28
 bits by construction: every record is at least 28 bytes and the image at
 most `2^32 - 4`, so there are fewer than `2^28` records. Its flag nibble
-and the header's references come from the [boot settings](#boot-settings);
-without them every nibble and reference is zero and the image is
-nonbootable. The extended-attribute offset is zero. Owner, mode and times follow
+and the header's references are zero, so the image is
+[nonbootable](#bootable-bodies). The extended-attribute offset is zero. Owner, mode and times follow
 the [metadata policy](design-metadata.md#writer-policy): uid and gid 0,
 mode `0755` for directories, `0644` for files and `0777` for links and
 FIFOs when absent, the timestamp fallback for an absent time, and the epoch
@@ -558,23 +557,19 @@ never truncated. Hard links are not written: the catalog has no
 representation for them. The format has no label, so `max_label_bytes` is
 0 and a label setting is refused by the common capability check. [X1]
 
-### Boot settings
+### Bootable bodies
 
-A bootable ImageFS names its boot programs and startup script in the
-header and flags the records the loader processes. The writer takes these
-as typed settings: up to four boot programs and one script, each the image
-path of a regular file in the catalog, in the order of `boot_ino[]`. For
-each named path the writer resolves the entry and writes that record's full
-inode word, flag nibble included, into the header slot; a path that names
-no catalog entry or an entry of another kind is `FSIMG_EINVAL`. The flag
-nibble a referenced record receives comes from a closed writer table of
-`(slot, nibble)` pairs, which the native evidence fills: a slot the table
-lacks is `FSIMG_EUNSUPPORTED`. The table is empty, so every boot setting is
-refused and every writer image is nonbootable; the
-[research record](../docs/ifs-research.md#evidence-questions) names the
-experiment that fills it. The writer never reads an image: packaging the
-result behind a startup program, and the program and header settings the
-caller supplies for that, are the `ifsboot` container's. [S1], [S2]
+The writer writes nonbootable bodies only: it has no setting that names a
+boot program or a startup script, and every `boot_ino[]` slot, `script_ino`
+and record flag nibble it writes is zero. A bootable body needs `procnto`
+linked by `mkifs` at the address the image loads to, and a boot script
+`mkifs` compiles into `.script`; fsimg neither produces nor modifies member
+files, so a bootable body comes from `mkifs` or from an existing boot
+image. fsimg reads, verifies and extracts such a body, its references
+included, unwraps it from a boot image, and the `ifsboot` container writer
+packages it, its ImageFS bytes unmodified, behind a startup program, from
+the program and header settings the caller supplies; the ImageFS writer
+never reads an image. [S1], [S2]
 
 ### Settings and sizing
 
@@ -585,10 +580,9 @@ requested `volume_bytes` or `min_free_bytes` is refused with `FSIMG_EINVAL`,
 the derived size. The settings are the mountpoint, default `/`, the value
 every boot image carries; the byte order, default little, big allowed
 because `mkifs +bigendian` produces big-endian bodies natively; and the epoch, within 0 to 4294967295, the
-range the time field stores. The mountpoint, byte order and boot settings
-are filesystem settings, so their keys are bare: `mountpoint=`, `endian=`,
-the latter shared with QNX6, `boot1=` to `boot4=` and `script=`; the epoch
-is the common `-e`. An ImageFS is
+range the time field stores. The mountpoint and byte order
+are filesystem settings, so their keys are bare: `mountpoint=` and
+`endian=`, the latter shared with QNX6; the epoch is the common `-e`. An ImageFS is
 placed in no partition scheme in any observed product, and the
 [volume-length rule](#volume-layout) fails one in a slot longer than
 `image_size`, so the format declares an
@@ -680,7 +674,7 @@ code ran. The minimum matrix:
 | Metadata | uid and gid 0, 65535 and 4294967295 read as stored; modes `0000`, `0644`, `0755`, `4755` and `7777`; times 0 and 4294967295; FIFO words nonzero |
 | References | `boot_ino[0]` and `script_ino` naming one file; naming no record; naming two records; naming only a shadowed record, an earlier duplicate or a record below a link; naming a file whose inode word one or two shadowed records also carry, verified and counted once in `shadowed_references`, and two references to such a word, counted twice; naming a directory and a link; a nonzero `boot_ino[3]`; all zero |
 | Checksum | a correct trailer; one flipped byte in the header, the mountpoint, a record, file data, padding and the trailer; a byte-swapped trailer; a big-endian image summed in its order |
-| Writer | an empty catalog, which is the root record alone; one file; the name limits; each kind; owner 4294967295 and mode `7777`; a time of 4294967296 as a counted loss and as a refusal when losses are forbidden; a 1024-byte target, and a 1025-byte one refused by collection; mountpoints of 0, 1, 1024 and 1025 bytes; both byte orders; `volume_bytes`, `min_free_bytes`, a label and each boot setting refused; a 1025-byte path refused; an image one word below and at `2^32 - 4` bytes on a sparse sink; byte identity across source order, cache size, scratch path and time zone; a poison scan of every padding byte |
+| Writer | an empty catalog, which is the root record alone; one file; the name limits; each kind; owner 4294967295 and mode `7777`; a time of 4294967296 as a counted loss and as a refusal when losses are forbidden; a 1024-byte target, and a 1025-byte one refused by collection; mountpoints of 0, 1, 1024 and 1025 bytes; both byte orders; `volume_bytes`, `min_free_bytes` and a label refused; zero references and flag nibbles; a 1025-byte path refused; an image one word below and at `2^32 - 4` bytes on a sparse sink; byte identity across source order, cache size, scratch path and time zone; a poison scan of every padding byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |
 
 Independent acceptance is bidirectional: fsimg reads every native capture,

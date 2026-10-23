@@ -211,12 +211,13 @@ Harman-Becker header to the `hbcifs` container, both
 [layer profiles](design-layers.md#layer-profiles).
 
 The writer builds a standalone ImageFS in one deterministic layout whose
-size is exact, so the format has no free space and no geometry to size;
-its boot settings are honored only for the slots its closed flag table
-names. Native `dumpifs` list, check and extract testing gates the writer
-capability, as native mounting does for QNX6 and QNX4; wrapping a new
-ImageFS in an existing boot image is the `ifsboot` container's, gated by a
-native boot.
+size is exact, so the format has no free space and no geometry to size,
+and it is [nonbootable](design-ifs.md#bootable-bodies): a bootable body
+comes from `mkifs` or an existing boot image. Native `dumpifs` list,
+check and extract testing gates the writer capability, as native mounting
+does for QNX6 and QNX4; wrapping a bootable body, built by `mkifs` or
+unwrapped from an existing boot image, is the `ifsboot` container's, gated
+by a native boot.
 
 ## Verification and compatibility claims
 

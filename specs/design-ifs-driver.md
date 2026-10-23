@@ -370,15 +370,15 @@ NULL, which the common capability check already enforces with
 zero, any other value `FSIMG_EINVAL`, because the image has no free space
 and its size is derived; `volume_serial` ignored, as the profile stores
 none. The capability record's `write_settings` names the byte order, which
-QNX6 also stores, the mountpoint and the boot settings, typed fields of
+QNX6 also stores, and the mountpoint, typed fields of
 `fsimg_write_options_t` that every other format requires at their
-defaults:
+defaults. The writer has no boot setting: it writes
+[nonbootable bodies](design-ifs.md#bootable-bodies) only.
 
 | Field | CLI setting | Meaning |
 | --- | --- | --- |
 | `byte_order` | `endian=little` or `big` | Default little; selects the flags byte and the byte order of every field |
 | `mountpoint` | `mountpoint=<path>` | `FSIMG_SETTING_MOUNTPOINT`; copied; NULL selects `/`; the empty string is stored as an empty mountpoint; at most 1024 bytes under the profile's byte rules with slashes allowed, else `FSIMG_EINVAL` |
-| `boot_programs[4]`, `script` | `boot1=` to `boot4=`, `script=` | `FSIMG_SETTING_BOOT`; copied image paths; governed by the [boot settings rule](design-ifs.md#boot-settings): a path naming no catalog file, or an entry of another kind, is `FSIMG_EINVAL`, and a slot the closed flag table lacks is `FSIMG_EUNSUPPORTED`, refused by `validate` before any collection; the empty table makes that every slot |
 
 The keys are bare, as the [layer design](design-layers.md#layer-settings)
 spells every filesystem setting; the epoch is the common `-e`. The
@@ -418,9 +418,7 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    directory record: one rule covers every kind, the record has the field,
    `dumpifs` lists whatever is stored, and `-R` makes fsimg and `mkifs`
    agree where agreement matters. Sibling collisions are exact byte
-   collisions, which catalog preparation has already rejected. Boot
-   settings never reach planning: `validate` refuses every slot the closed
-   flag table lacks, which is every slot.
+   collisions, which catalog preparation has already rejected.
 2. **Records.** `dir_offset` is `0x58 + mountpoint length + 1` rounded up
    to a multiple of 4. The root record is `0x18 + 1` bytes rounded up; each
    entry's record length is its kind's minimum with the stored path, the
@@ -502,8 +500,8 @@ Writer:
 
 | Condition | Status |
 | --- | --- |
-| A setting outside its type; a nonzero `volume_bytes` or `min_free_bytes`; a mountpoint over 1024 bytes or outside the byte rules; a boot setting naming no catalog file or an entry of another kind; a component outside the profile | `FSIMG_EINVAL` |
-| A scheme or a padding container below `ifs`, under the [exact-volume rule](design-layers.md#exact-volumes); a label, from the common capability check; a boot setting for a slot the flag table lacks; a path over 1024 bytes; a file above `2^32 - 1` bytes; a kind the profile lacks; a time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
+| A setting outside its type; a nonzero `volume_bytes` or `min_free_bytes`; a mountpoint over 1024 bytes or outside the byte rules; a component outside the profile | `FSIMG_EINVAL` |
+| A scheme or a padding container below `ifs`, under the [exact-volume rule](design-layers.md#exact-volumes); a label, from the common capability check; a path over 1024 bytes; a file above `2^32 - 1` bytes; a kind the profile lacks; a time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
 | An image above `2^32 - 4` bytes; a non-reproducible fallback time outside `[0, 4294967295]` | `FSIMG_ERANGE` |
 | A plan row read back from metadata storage outside the profile's limits, or disagreeing with its catalog entry | `FSIMG_ECORRUPT` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |

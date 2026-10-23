@@ -66,12 +66,6 @@ invalid(fsimg_error_t *error, const char *message)
  * bytes under the name profile's byte rules, slashes allowed. The common
  * capability check has refused a label and the settings ImageFS lacks, and
  * the volume serial is a common identity the profile does not store.
- *
- * A boot setting needs the flag nibble its slot gives the record it names,
- * from a closed table of (slot, nibble) pairs that native evidence fills
- * (specs/design-ifs.md, Boot settings). No evidence fills a pair, so the
- * table is empty and every boot setting is refused here, before
- * collection; planning never resolves one.
  */
 static fsimg_status_t
 validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
@@ -105,15 +99,6 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 			return (invalid(error, "ImageFS mountpoint is not UTF-8 "
 			    "text without control bytes"));
 	}
-	for (unsigned i = 0; i < IFS_BOOT_SLOTS; i++)
-		if (options->boot_programs[i] != NULL)
-			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-			    FSIMG_OP_WRITER,
-			    "no ImageFS boot slot has an observed flag rule"));
-	if (options->script != NULL)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_WRITER,
-		    "the ImageFS script slot has no observed flag rule"));
 	options->sector_bytes = 1;
 	options->allocation_unit_bytes = 1;
 	return (FSIMG_OK);

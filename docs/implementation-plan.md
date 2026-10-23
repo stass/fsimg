@@ -523,8 +523,9 @@ QNX IFS follows its own [plan](ifs-plan.md): native evidence from QNX
 driver, layer-profile and codec designs, a reader and verifier for bare
 ImageFS, project-owned codecs, the `ifsboot` and `hbcifs` containers
 after the layer stages they need, a standalone writer
-registered after native qualification, and boot-gated wraps of a new
-ImageFS in an existing boot image's startup section.
+registered after native qualification, which writes nonbootable bodies,
+and boot-gated wraps of a bootable body, built by `mkifs` or unwrapped
+from an existing boot image, behind its startup section.
 
 Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional

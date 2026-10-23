@@ -153,7 +153,7 @@ def test_posix_metadata(executable, root):
     losses that leave image bytes unchanged, and a link fails planning. The
     QNX6 and QNX4 formats store every kind and the POSIX fields; ImageFS
     stores every kind with modification time, owner and mode, and takes the
-    byte order, mountpoint and boot settings."""
+    byte order and mountpoint settings."""
     decoded = completed(invoke(executable, root, ["--formats", "--json"]))
     formats = filesystems(decoded)
     qnx6 = formats.pop("qnx6")
@@ -166,7 +166,7 @@ def test_posix_metadata(executable, root):
     assert qnx4["max_link_target_bytes"] == 1023
     ifs = formats.pop("ifs")
     assert ifs["entry_kinds"] == 15 and ifs["metadata_fields"] == 0x62
-    assert ifs["max_label_bytes"] == 0 and ifs["write_settings"] == 0x31
+    assert ifs["max_label_bytes"] == 0 and ifs["write_settings"] == 0x11
     assert ifs["max_link_target_bytes"] == 1024
     assert all(record["write_settings"] == 0 for record in formats.values())
     assert all(record["entry_kinds"] == 3 for record in formats.values())
@@ -2182,7 +2182,8 @@ def test_ifs_create(executable, root, payload):
     settings cross the worker job record into the image, which stores
     files, directories and links with owner, mode and time, reads back,
     verifies and is reproducible. A 1-byte cluster needs no sector size; a
-    size, a boot setting and a label are refused."""
+    size and a label are refused, and a boot setting is an unknown key,
+    since the writer makes nonbootable images."""
     source = root / "ifs-source"
     (source / "nested").mkdir(parents=True)
     (source / "nested/caf\u00e9.txt").write_bytes(payload)
@@ -2212,12 +2213,17 @@ def test_ifs_create(executable, root, payload):
     same_bytes(root / "made.ifs", root / "second.ifs")
     for extra, detail in [
         (["-s", "1M"], b"an ImageFS image has no free space"),
-        (["-o", "boot1=/nested/caf\u00e9.txt"], b"no ImageFS boot slot has an observed flag rule"),
         (["-L", "LABEL"], b"the image format has no volume label"),
     ]:
         result = invoke(executable, root, ["c", "-S", "off", "-F", "ifs", *extra,
                                            "-f", "refused.ifs", *operands], expected=1)
         assert detail in result.stderr, (extra, result.stderr)
+        assert not (root / "refused.ifs").exists()
+    for key in ["boot1", "script"]:
+        result = invoke(executable, root, ["c", "-S", "off", "-F", "ifs", "-o",
+                                           key + "=/nested/caf\u00e9.txt", "-f",
+                                           "refused.ifs", *operands], expected=2)
+        assert b"unknown setting key" in result.stderr, (key, result.stderr)
         assert not (root / "refused.ifs").exists()
     # gzip encodes the image byte for byte, so it verifies; a scheme or a
     # container that pads the volume is refused before any output, even
