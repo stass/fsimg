@@ -1791,7 +1791,8 @@ test_fault_sweep(void)
 static void
 test_changed_source(void)
 {
-	buffer_t body = imagefs_build(20000);
+	/* Large enough for at least two chunks under either codec's plan. */
+	buffer_t body = imagefs_build(100000);
 	fsimg_error_t error;
 	boot_spec_t spec;
 	boot_image_t image;
@@ -1803,6 +1804,8 @@ test_changed_source(void)
 	for (uint8_t value = COMPRESS_LZO; value <= COMPRESS_UCL; value += 4) {
 		spec = sample_spec(body.bytes, body.length, 0, value);
 		image = boot_build(&spec);
+		/* The second chunk's stream is the one changed. */
+		CHECK(image.chunks >= 2);
 		stream = image.chunk_offsets[1] + 2;
 		length = length_word(&image, image.chunk_offsets[1]);
 		file = boot_file(&image);
