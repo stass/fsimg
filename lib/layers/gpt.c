@@ -11,6 +11,7 @@
 #include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
+#include "unicode.h"
 
 /*
  * GUID Partition Table. With S the sector size (512 or 4096) and L the
@@ -120,6 +121,16 @@ static fsimg_status_t gpt_open(const fsimg_scheme_input_t *,
     fsimg_scheme_table_t *, fsimg_error_t *);
 static fsimg_status_t gpt_verify(const fsimg_scheme_input_t *,
     const fsimg_scheme_table_t *, fsimg_error_t *);
+static fsimg_status_t gpt_plan_disk(const fsimg_scheme_plan_args_t *,
+    fsimg_scheme_table_t *, fsimg_scheme_plan_facts_t *, fsimg_error_t *);
+static fsimg_status_t plan_name(fsimg_partition_record_t *, const char *,
+    fsimg_error_t *);
+static fsimg_status_t gpt_plan_partition(const fsimg_scheme_partition_args_t *,
+    fsimg_partition_record_t *, fsimg_error_t *);
+static fsimg_status_t gpt_validate_plan(const fsimg_scheme_table_t *,
+    uint64_t, fsimg_error_t *);
+static void gpt_report_plan(const fsimg_scheme_table_t *, uint32_t,
+    fsimg_image_info_t *, fsimg_partition_info_t *);
 static void gpt_footprint(uint32_t, uint64_t *, uint64_t *);
 static void encode_protective_mbr(unsigned char *, uint64_t);
 static void encode_entries(unsigned char *, const fsimg_scheme_table_t *);
@@ -135,6 +146,10 @@ const fsimg_scheme_ops_t fsimg_gpt_scheme = {
 	.verify = gpt_verify,
 	.slots = GPT_WRITE_ENTRIES,
 	.max_disk_sectors = UINT64_MAX,
+	.plan_disk = gpt_plan_disk,
+	.plan_partition = gpt_plan_partition,
+	.validate_plan = gpt_validate_plan,
+	.report_plan = gpt_report_plan,
 	.footprint = gpt_footprint,
 	.encode = gpt_encode
 };
@@ -613,6 +628,157 @@ gpt_verify(const fsimg_scheme_input_t *input,
 	}
 	return (gpt_corrupt(error, "",
 	    "protective MBR has no 0xEE entry starting at LBA 1"));
+}
+
+/*
+ * The write side's disk settings: gpt:sector, 512 or 4096 bytes with zero
+ * for 512; gpt:disk, a fixed length or zero; and gpt:disk-guid, taken as
+ * given, derived from the epoch in reproducible mode, or refused.
+ */
+static fsimg_status_t
+gpt_plan_disk(const fsimg_scheme_plan_args_t *args,
+    fsimg_scheme_table_t *table, fsimg_scheme_plan_facts_t *facts,
+    fsimg_error_t *error)
+{
+	const fsimg_layer_options_t *layers = args->layers;
+
+	table->kind = FSIMG_SCHEME_GPT;
+	table->sector_bytes = layers->gpt_sector_bytes == 0 ? 512 :
+	    layers->gpt_sector_bytes;
+	if (table->sector_bytes != 512 && table->sector_bytes != 4096)
+		return (fsimg_setting_error(error, "gpt:sector",
+		    "gpt:sector must be 512 or 4096"));
+	facts->requested_disk_bytes = layers->gpt_disk_bytes;
+	facts->disk_key = "gpt:disk";
+	if (!fsimg_guid_unset(layers->gpt_disk_guid))
+		bcopy(layers->gpt_disk_guid, table->disk_guid, 16);
+	else if ((args->flags & FSIMG_WRITE_REPRODUCIBLE) != 0)
+		fsimg_identifier_derive(args->epoch, FSIMG_ROLE_DISK, 0,
+		    table->disk_guid);
+	else
+		return (fsimg_setting_error(error, "gpt:disk-guid",
+		    "the disk GUID must be set outside reproducible mode"));
+	return (FSIMG_OK);
+}
+
+/* A GPT name: validated UTF-8 of at most 36 UTF-16 units, stored as units
+ * with zero padding. Every failure is FSIMG_EINVAL.
+ */
+static fsimg_status_t
+plan_name(fsimg_partition_record_t *record, const char *name,
+    fsimg_error_t *error)
+{
+	size_t units;
+	fsimg_status_t status;
+
+	status = fsimg_utf8_to_utf16(name, strlen(name), NULL, 0, &units, error);
+	if (status == FSIMG_OK && units > FSIMG_GPT_NAME_UNITS)
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the GPT name exceeds 36 UTF-16 units");
+	if (status == FSIMG_OK)
+		status = fsimg_utf8_to_utf16(name, strlen(name), record->name,
+		    FSIMG_GPT_NAME_UNITS, &units, error);
+	if (status != FSIMG_OK) {
+		if (error != NULL)
+			error->status = FSIMG_EINVAL;
+		return (FSIMG_EINVAL);
+	}
+	return (FSIMG_OK);
+}
+
+/*
+ * One partition: gpt:type, gpt:name and gpt:guid from the layer options,
+ * or a compose part's type, name and GUID. The type is the given one or
+ * the filesystem's; a nonempty name replaces the type's conventional one;
+ * the unique GUID is taken as given, derived from the epoch and the slot
+ * number in reproducible mode, or refused. GPT has no active flag, and
+ * neither source can supply one.
+ */
+static fsimg_status_t
+gpt_plan_partition(const fsimg_scheme_partition_args_t *args,
+    fsimg_partition_record_t *record, fsimg_error_t *error)
+{
+	fsimg_type_selector_t selector;
+	const char *type, *name, *default_name;
+	const unsigned char *guid;
+	fsimg_status_t status;
+
+	if (args->layers != NULL) {
+		type = args->layers->gpt_type;
+		name = args->layers->gpt_name;
+		guid = args->layers->gpt_guid;
+	} else {
+		type = args->part->type;
+		name = args->part->name;
+		guid = args->part->guid;
+	}
+	status = fsimg_partition_type_select(type, args->filesystem, &selector,
+	    error);
+	if (status == FSIMG_OK)
+		status = fsimg_partition_type_gpt(&selector, record, &default_name,
+		    error);
+	if (status != FSIMG_OK)
+		return (fsimg_partition_error(args, "gpt:type", status, error));
+	status = plan_name(record, name != NULL && name[0] != '\0' ? name :
+	    default_name, error);
+	if (status != FSIMG_OK)
+		return (fsimg_partition_error(args, "gpt:name", status, error));
+	/* The slot is at most GPT_WRITE_ENTRIES, which a byte holds. */
+	if (guid != NULL && !fsimg_guid_unset(guid))
+		bcopy(guid, record->guid, 16);
+	else if ((args->flags & FSIMG_WRITE_REPRODUCIBLE) != 0)
+		fsimg_identifier_derive(args->epoch, FSIMG_ROLE_PARTITION,
+		    (uint8_t)args->index, record->guid);
+	else
+		return (fsimg_partition_setting_error(args, "gpt:guid",
+		    "the partition GUID must be set outside reproducible mode",
+		    error));
+	record->used = true;
+	return (FSIMG_OK);
+}
+
+/* Unique GUIDs differ from each other and from the disk GUID, so no two
+ * GPT objects of one disk share an identity. 128 entries need no more
+ * than the pairwise comparison.
+ */
+static fsimg_status_t
+gpt_validate_plan(const fsimg_scheme_table_t *table,
+    uint64_t disk_bytes FSIMG_UNUSED, fsimg_error_t *error)
+{
+	const fsimg_partition_record_t *records = table->records;
+	char message[80];
+
+	for (uint32_t i = 0; i < table->count; i++) {
+		if (bcmp(records[i].guid, table->disk_guid, 16) == 0) {
+			snprintf(message, sizeof(message),
+			    "partition %u has the disk GUID", (unsigned)i + 1);
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, message));
+		}
+		for (uint32_t j = 0; j < i; j++) {
+			if (bcmp(records[i].guid, records[j].guid, 16) != 0)
+				continue;
+			snprintf(message, sizeof(message),
+			    "partitions %u and %u have the same GUID",
+			    (unsigned)j + 1, (unsigned)i + 1);
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, message));
+		}
+	}
+	return (FSIMG_OK);
+}
+
+/* A planned disk reports its 128 written slots and its disk GUID. */
+static void
+gpt_report_plan(const fsimg_scheme_table_t *table, uint32_t slot,
+    fsimg_image_info_t *image, fsimg_partition_info_t *partition)
+{
+	image->sector_bytes = table->sector_bytes;
+	image->partition_count = GPT_WRITE_ENTRIES;
+	image->selected = slot;
+	bcopy(table->disk_guid, image->disk_guid, sizeof(image->disk_guid));
+	fsimg_partition_report(FSIMG_SCHEME_GPT, &table->records[slot - 1],
+	    partition);
 }
 
 /* A written table occupies the protective MBR, the primary header and its

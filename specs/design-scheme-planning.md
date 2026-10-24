@@ -425,8 +425,9 @@ when present. Payload length never determines resident scheme metadata size.
 
 ## Diagnostics, reports, and selection
 
-The common diagnostic helper can form `scheme-name:setting` for a layer-option
-partition request, or `partition N` for compose. Formatting a selected name is
+The common diagnostic helper names the scheme's own setting key, such as
+`gpt:type`, for a layer-option partition request, or `partition N` for
+compose. Formatting a selected name is
 not dispatch on that name. The scheme chooses which setting failed and the
 specific explanation; `disk_key` provides fixed-disk attribution. Errors retain
 `FSIMG_OP_IMAGE`, structured limit/observed fields for excess count, and existing

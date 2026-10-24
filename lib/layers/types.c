@@ -182,54 +182,74 @@ fsimg_partition_type_find(const char *name)
 	return (NULL);
 }
 
+fsimg_status_t
+fsimg_partition_type_select(const char *text, const char *filesystem,
+    fsimg_type_selector_t *selector, fsimg_error_t *error)
+{
+	bzero(selector, sizeof(*selector));
+	if (text != NULL && text[0] != '\0')
+		return (fsimg_partition_type_parse(text, selector, error));
+	if (filesystem != NULL)
+		selector->type = fsimg_partition_type_find(filesystem);
+	if (selector->type == NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "no filesystem gives the partition a type; set one"));
+	return (FSIMG_OK);
+}
+
 /*
  * A GPT record takes the selected type's GUID: a table type needs one, and
  * a literal GUID is taken as given, with the conventional name of the
- * first table type carrying it. An MBR record takes the type's written
- * byte (its first) or the literal byte; an extended partition would need
- * logical partitions inside it and 0xEE claims the disk for GPT, so
- * neither can type a written partition.
+ * first table type carrying it.
  */
 fsimg_status_t
-fsimg_partition_type_assign(const fsimg_type_selector_t *selector,
-    fsimg_scheme_kind_t scheme, fsimg_partition_record_t *record,
-    const char **name, fsimg_error_t *error)
+fsimg_partition_type_gpt(const fsimg_type_selector_t *selector,
+    fsimg_partition_record_t *record, const char **name, fsimg_error_t *error)
 {
 	static const unsigned char nil_guid[16];
 	const fsimg_partition_type_t *type;
-	uint8_t byte;
 
 	*name = "";
-	if (scheme == FSIMG_SCHEME_GPT) {
-		if (selector->literal_byte)
+	if (selector->literal_byte)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "an MBR type byte cannot type a GPT partition"));
+	if (selector->literal_guid) {
+		/* A nil type marks an entry unused, so readers would not see
+		 * the partition.
+		 */
+		if (bcmp(selector->guid, nil_guid, sizeof(nil_guid)) == 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IMAGE, "an MBR type byte cannot type a GPT partition"));
-		if (selector->literal_guid) {
-			/* A nil type marks an entry unused, so readers
-			 * would not see the partition.
-			 */
-			if (bcmp(selector->guid, nil_guid, sizeof(nil_guid)) == 0)
-				return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-				    FSIMG_OP_IMAGE,
-				    "the nil GUID marks an unused GPT entry"));
-			bcopy(selector->guid, record->type_guid, 16);
-			for (size_t i = 0; i < TYPE_COUNT; i++) {
-				type = &partition_types[i];
-				if (type_carries_guid(type, selector->guid)) {
-					*name = type->gpt_name;
-					break;
-				}
+			    FSIMG_OP_IMAGE, "the nil GUID marks an unused GPT entry"));
+		bcopy(selector->guid, record->type_guid, 16);
+		for (size_t i = 0; i < TYPE_COUNT; i++) {
+			type = &partition_types[i];
+			if (type_carries_guid(type, selector->guid)) {
+				*name = type->gpt_name;
+				break;
 			}
-			return (FSIMG_OK);
 		}
-		type = selector->type;
-		if (type->gpt_guid == NULL || !fsimg_guid_parse(type->gpt_guid,
-		    record->type_guid))
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IMAGE, "the partition type has no GPT GUID"));
-		*name = type->gpt_name;
 		return (FSIMG_OK);
 	}
+	type = selector->type;
+	if (type->gpt_guid == NULL || !fsimg_guid_parse(type->gpt_guid,
+	    record->type_guid))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the partition type has no GPT GUID"));
+	*name = type->gpt_name;
+	return (FSIMG_OK);
+}
+
+/*
+ * An MBR record takes the type's written byte (its first) or the literal
+ * byte; an extended partition would need logical partitions inside it and
+ * 0xEE claims the disk for GPT, so neither can type a written partition.
+ */
+fsimg_status_t
+fsimg_partition_type_mbr(const fsimg_type_selector_t *selector,
+    fsimg_partition_record_t *record, fsimg_error_t *error)
+{
+	uint8_t byte;
+
 	if (selector->literal_guid)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "a GPT type GUID cannot type an MBR partition"));

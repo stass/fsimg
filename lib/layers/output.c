@@ -621,7 +621,6 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 	fsimg_write_options_t selected;
 	fsimg_layer_options_t layers;
 	fsimg_layer_inputs_t inputs;
-	fsimg_partition_request_t request;
 	fsimg_disk_request_t disk_request;
 	fsimg_disk_plan_t plan;
 	fsimg_session_t session;
@@ -672,17 +671,9 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 	    .verified_disk = container != NULL &&
 	    container->container->carries != NULL };
 	status = fsimg_disk_plan_init(ctx, &disk_request, &plan, error);
-	if (status == FSIMG_OK && plan.scheme != NULL) {
-		request = (fsimg_partition_request_t){
-			.type = plan.table.kind == FSIMG_SCHEME_GPT ?
-			    layers.gpt_type : layers.mbr_type,
-			.name = layers.gpt_name,
-			.guid = layers.gpt_guid,
-			.filesystem = filesystem[0] != '\0' ? filesystem : NULL,
-			.active = layers.mbr_active
-		};
-		status = fsimg_disk_plan_partition(&plan, 0, &request, error);
-	}
+	if (status == FSIMG_OK && plan.scheme != NULL)
+		status = fsimg_disk_plan_partition(&plan, 1, &layers, NULL,
+		    filesystem[0] != '\0' ? filesystem : NULL, error);
 	if (status == FSIMG_OK)
 		status = write_plan(&session, &plan, &input, &length,
 		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
@@ -843,12 +834,10 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 		request = (fsimg_partition_request_t){
 			.type = typed ? parts[i].type : NULL,
 			.name = parts[i].name,
-			.guid = parts[i].guid,
-			.filesystem = filesystem[0] != '\0' ? filesystem : NULL,
-			.composed = true
+			.guid = parts[i].guid
 		};
-		status = fsimg_disk_plan_partition(&plan, (uint32_t)i, &request,
-		    error);
+		status = fsimg_disk_plan_partition(&plan, (uint32_t)i + 1, NULL,
+		    &request, filesystem[0] != '\0' ? filesystem : NULL, error);
 	}
 	if (status == FSIMG_OK)
 		status = write_plan(&session, &plan, volumes, lengths,
