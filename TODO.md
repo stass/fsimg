@@ -2,13 +2,6 @@
 
 ## Major initiatives
 
-* [Medium] **Container-plan consolidation** (`lib/layers/`): implement the
-  [private container plans](specs/design-container-plans.md) under the
-  [consolidation sequence](docs/implementation-plan.md#settings-and-plan-consolidation).
-  Give container resources one private owner and preserve public options,
-  wire bytes, image output, validation timing, and resource bounds with common
-  contract coverage.
-
 * [High] **QNX6 read/write and automotive qualification**
   (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): the classic reader,
   verifier and writer of the [Power-Safe design](specs/design-qnx6.md) are
@@ -333,14 +326,14 @@
 
 ## Bugs by subsystem
 
-* [Medium] **Container construction reads lack the operation work account**
-  (`lib/layers/ifsboot.c` `read_setting`, `lib/write/writer.c`,
-  `lib/layers/output.c`): prefix reads use `fsimg_io_read_at()` before the
-  writer/output session exists; caller I/O without a bound session therefore
-  charges no operation work. Establish the session before construction and
-  use session-aware reads as the [container-plan design](specs/design-container-plans.md)
-  specifies. Add a failing regression for cumulative prefix and output work,
-  including short callback transfers, before the implementation change.
+* [Medium] **Container-plan contract coverage gaps** (`test/ifsboot-write.c`,
+  `test/layers-write.c`): the [container-plan design](specs/design-container-plans.md)
+  validation list is only partly covered. Add create-path evidence that
+  ifsboot prefix reads charge the writer's session, encoder-open, emission
+  and cancellation failures each followed by exactly one plan destruction,
+  a retained writer plan freed after output failure and after the borrowed
+  file settings are gone, and callback sinks proving a bound refusal opens
+  and resizes nothing for VHD, DMG and simg.
 
 * [Low] **Two integration oracles depend on the Linux host's setup**
   (`test/fat-integration.sh.in`, `test/containers-integration.sh.in`): under

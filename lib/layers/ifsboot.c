@@ -211,6 +211,35 @@ typedef struct word_sum {
 } word_sum_t;
 
 /*
+ * The private plan: the header fields resolved from the settings and file
+ * settings, which are the machine, flags1 (the virtual bit and the
+ * compression value), the five target addresses verbatim, the length of
+ * the startup code before its padding to a word, and whether ram_size is
+ * written as startup_size + imagefs_size (a boot machine) or as 0
+ * (machine 0, as mkifs writes it).
+ *
+ * prefix is the boot prefix, read whole into charged memory the plan
+ * owns, prefix_bytes long with its padding zeroed, NULL for none. In a
+ * partial plan, which is only freed, it may hold fewer bytes read. The
+ * startup code is never buffered: the encoder copies it from its file
+ * setting.
+ */
+typedef struct boot_plan {
+	fsimg_container_plan_t base;
+	unsigned char	*prefix;
+	size_t		 prefix_bytes;
+	uint64_t	 code_bytes;
+	uint32_t	 startup_vaddr;
+	uint32_t	 paddr_bias;
+	uint32_t	 image_paddr;
+	uint32_t	 ram_paddr;
+	uint32_t	 imagefs_paddr;
+	uint16_t	 machine;
+	uint8_t		 flags1;
+	bool		 ram_sum;
+} boot_plan_t;
+
+/*
  * The encoder's state. Under lzo, framed[pass] counts each pass's chunks,
  * length words included, the one number the first pass hands the second;
  * zeros is a zero unit to encode in place of a NULL chunk and stored one
@@ -221,7 +250,7 @@ typedef struct word_sum {
 typedef struct boot_encoder {
 	fsimg_session_t	*session;
 	fsimg_seq_sink_t *sink;
-	const fsimg_container_settings_t *settings;
+	const boot_plan_t *plan;
 	fsimg_io_t	*startup;
 	fsimg_lzo1x_encoder_t *lzo;
 	unsigned char	*zeros;
@@ -273,20 +302,20 @@ static fsimg_status_t ifsboot_section(const fsimg_container_input_t *,
     fsimg_file_setting_t, uint64_t *, uint64_t *, fsimg_error_t *);
 static uint64_t word_padded(uint64_t);
 static uint64_t startup_bytes(uint64_t);
-static fsimg_status_t read_setting(fsimg_io_t *, uint64_t, unsigned char *,
-    size_t, size_t *, fsimg_error_t *);
+static fsimg_status_t read_setting(fsimg_io_t *, fsimg_session_t *,
+    uint64_t, unsigned char *, size_t, size_t *, fsimg_error_t *);
 static fsimg_status_t setting_short(fsimg_error_t *, const char *);
 static fsimg_status_t buffer_prefix(const fsimg_container_plan_args_t *,
-    const fsimg_planned_file_t *, uint64_t, fsimg_container_settings_t *,
-    fsimg_error_t *);
+    const fsimg_planned_file_t *, uint64_t, boot_plan_t *, fsimg_error_t *);
 static fsimg_status_t ifsboot_plan(const fsimg_container_plan_args_t *,
-    fsimg_container_settings_t *, fsimg_error_t *);
+    fsimg_container_plan_t **, fsimg_error_t *);
+static void ifsboot_plan_free(fsimg_container_plan_t *);
 static fsimg_status_t field_overflow(fsimg_error_t *, const char *,
     const char *);
-static fsimg_status_t ifsboot_bound(const fsimg_container_settings_t *,
+static fsimg_status_t ifsboot_bound(const fsimg_container_plan_t *,
     uint64_t, uint64_t *, fsimg_error_t *);
 static void sum_bytes(word_sum_t *, const unsigned char *, size_t);
-static void put_header(unsigned char *, const fsimg_container_settings_t *,
+static void put_header(unsigned char *, const boot_plan_t *,
     uint32_t, uint32_t, uint32_t);
 static void plant_misplaced_header(unsigned char *, const unsigned char *,
     size_t);
@@ -316,14 +345,19 @@ static const fsimg_encoder_ops_t boot_encoder = {
 	.close = boot_encode_close
 };
 
+static const fsimg_container_writer_t boot_writer = {
+	.plan = ifsboot_plan,
+	.plan_free = ifsboot_plan_free,
+	.bound = ifsboot_bound,
+	.encoder = &boot_encoder
+};
+
 const fsimg_container_ops_t fsimg_ifsboot_container = {
 	.probe_bytes = PROBE_BYTES,
 	.probe = ifsboot_probe,
 	.open = ifsboot_open,
 	.verify = ifsboot_verify,
-	.plan = ifsboot_plan,
-	.bound = ifsboot_bound,
-	.encoder = &boot_encoder,
+	.writer = &boot_writer,
 	.section = ifsboot_section,
 	.codecs = "raw,lzo1x,nrv2b",
 	.carries = "ifs",
@@ -970,25 +1004,26 @@ startup_bytes(uint64_t code_bytes)
 
 /*
  * Read length bytes of a file setting from offset into buffer, across as
- * many transfers as the object needs; *got falls short of length only at
- * the object's end.
+ * many transfers as the object needs, each charged to session, and then
+ * charge the bytes read as work; *got falls short of length only at the
+ * object's end.
  */
 static fsimg_status_t
-read_setting(fsimg_io_t *io, uint64_t offset, unsigned char *buffer,
-    size_t length, size_t *got, fsimg_error_t *error)
+read_setting(fsimg_io_t *io, fsimg_session_t *session, uint64_t offset,
+    unsigned char *buffer, size_t length, size_t *got, fsimg_error_t *error)
 {
 	size_t transferred;
 	fsimg_status_t status;
 
 	for (*got = 0; *got < length; *got += transferred) {
-		status = fsimg_io_read_at(io, offset + *got, buffer + *got,
-		    length - *got, &transferred, error);
+		status = fsimg_io_read_at_session(io, session, offset + *got,
+		    buffer + *got, length - *got, &transferred, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (transferred == 0)
 			break;
 	}
-	return (FSIMG_OK);
+	return (fsimg_session_charge(session, 0, 0, *got, error));
 }
 
 /* A file setting that ended before the length the plan recorded. */
@@ -1002,42 +1037,37 @@ setting_short(fsimg_error_t *error, const char *key)
 }
 
 /*
- * Read the boot prefix whole into the settings' buffer: B bytes, the
- * file's bytes followed by its padding, which is zeroed here rather than
- * left to the allocator. The bytes must not begin with the startup
- * signature, so that the reader, which takes the first tie in prefix-table
- * order, can claim the written header only at B. On failure nothing is
- * left allocated.
+ * Read the boot prefix whole into the plan's buffer: B bytes, the file's
+ * bytes followed by its padding, which is zeroed here rather than left to
+ * the allocator. The bytes must not begin with the startup signature, so
+ * that the reader, which takes the first tie in prefix-table order, can
+ * claim the written header only at B. The buffer belongs to the plan as
+ * soon as it is allocated, so a failure leaves it for ifsboot_plan_free.
  */
 static fsimg_status_t
 buffer_prefix(const fsimg_container_plan_args_t *args,
-    const fsimg_planned_file_t *prefix, uint64_t padded,
-    fsimg_container_settings_t *settings, fsimg_error_t *error)
+    const fsimg_planned_file_t *prefix, uint64_t padded, boot_plan_t *plan,
+    fsimg_error_t *error)
 {
-	unsigned char *buffer;
 	size_t length, got;
 	fsimg_status_t status;
 
 	length = (size_t)prefix->length;
-	buffer = fsimg_alloc(args->ctx, (size_t)padded, error);
-	if (buffer == NULL)
+	plan->prefix = fsimg_alloc(args->ctx, (size_t)padded, error);
+	if (plan->prefix == NULL)
 		return (error->status);
-	status = read_setting(prefix->io, 0, buffer, length, &got, error);
+	plan->prefix_bytes = (size_t)padded;
+	bzero(plan->prefix + length, (size_t)padded - length);
+	status = read_setting(prefix->io, args->session, 0, plan->prefix,
+	    length, &got, error);
 	if (status != FSIMG_OK)
 		fsimg_error_path(error, "ifsboot:prefix");
 	else if (got != length)
 		status = setting_short(error, "ifsboot:prefix");
-	else if (fsimg_layer_le32(buffer) == STARTUP_SIGNATURE)
+	else if (fsimg_layer_le32(plan->prefix) == STARTUP_SIGNATURE)
 		status = fsimg_setting_error(error, "ifsboot:prefix",
 		    "the boot prefix begins with the QNX startup signature");
-	if (status != FSIMG_OK) {
-		fsimg_dealloc(buffer);
-		return (status);
-	}
-	bzero(buffer + length, (size_t)padded - length);
-	settings->buffered = buffer;
-	settings->buffered_bytes = (size_t)padded;
-	return (FSIMG_OK);
+	return (status);
 }
 
 /*
@@ -1052,7 +1082,7 @@ buffer_prefix(const fsimg_container_plan_args_t *args,
  */
 static fsimg_status_t
 ifsboot_plan(const fsimg_container_plan_args_t *args,
-    fsimg_container_settings_t *settings, fsimg_error_t *error)
+    fsimg_container_plan_t **out, fsimg_error_t *error)
 {
 	const fsimg_layer_options_t *layers = args->layers;
 	const fsimg_planned_file_t *startup, *prefix;
@@ -1070,6 +1100,7 @@ ifsboot_plan(const fsimg_container_plan_args_t *args,
 		{ "ifsboot:imagefs_paddr", layers->ifsboot_imagefs_paddr_set }
 	};
 	boot_header_t header;
+	boot_plan_t *plan;
 	char what[sizeof(error->message)];
 	uint64_t code, padded;
 	unsigned mode;
@@ -1134,20 +1165,43 @@ ifsboot_plan(const fsimg_container_plan_args_t *args,
 		return (fsimg_setting_error(error, "ifsboot:machine", what));
 	}
 
-	settings->boot = (fsimg_boot_settings_t){ .code_bytes = code,
-	    .startup_vaddr = layers->ifsboot_startup_vaddr,
-	    .paddr_bias = layers->ifsboot_paddr_bias,
-	    .image_paddr = layers->ifsboot_image_paddr,
-	    .ram_paddr = layers->ifsboot_ram_paddr,
-	    .imagefs_paddr = layers->ifsboot_imagefs_paddr,
-	    .machine = row->machine, .flags1 = header.flags1,
-	    .ram_sum = row->ram_sum };
-	settings->granularity = 1;
-	settings->chunk_bytes = (uint32_t)FSIMG_FRAMED_MAX_DECODED;
-	settings->passes = lzo ? 2 : 1;
+	plan = fsimg_container_plan_alloc(args->ctx, sizeof(*plan), out, error);
+	if (plan == NULL)
+		return (error->status);
+	plan->base.chunk_bytes = (uint32_t)FSIMG_FRAMED_MAX_DECODED;
+	plan->base.passes = lzo ? 2 : 1;
+	plan->code_bytes = code;
+	plan->startup_vaddr = layers->ifsboot_startup_vaddr;
+	plan->paddr_bias = layers->ifsboot_paddr_bias;
+	plan->image_paddr = layers->ifsboot_image_paddr;
+	plan->ram_paddr = layers->ifsboot_ram_paddr;
+	plan->imagefs_paddr = layers->ifsboot_imagefs_paddr;
+	plan->machine = row->machine;
+	plan->flags1 = header.flags1;
+	plan->ram_sum = row->ram_sum;
 	if (padded == 0)
 		return (FSIMG_OK);
-	return (buffer_prefix(args, prefix, padded, settings, error));
+	return (buffer_prefix(args, prefix, padded, plan, error));
+}
+
+/* A partial or complete plan: the prefix buffer, if any, then the plan. */
+static void
+ifsboot_plan_free(fsimg_container_plan_t *base)
+{
+	boot_plan_t *plan = (boot_plan_t *)base;
+
+	fsimg_dealloc(plan->prefix);
+	fsimg_dealloc(plan);
+}
+
+void
+fsimg_test_ifsboot_prefix(const fsimg_container_plan_t *base,
+    const unsigned char **prefix, size_t *length)
+{
+	const boot_plan_t *plan = (const boot_plan_t *)base;
+
+	*prefix = plan->prefix;
+	*length = plan->prefix_bytes;
 }
 
 /* A disk or a derived size the header's 32-bit fields cannot describe. */
@@ -1169,18 +1223,19 @@ field_overflow(fsimg_error_t *error, const char *field, const char *what)
  * at the bound must fit 32 bits.
  */
 static fsimg_status_t
-ifsboot_bound(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
+ifsboot_bound(const fsimg_container_plan_t *base, uint64_t disk_bytes,
     uint64_t *out, fsimg_error_t *error)
 {
+	const boot_plan_t *plan = (const boot_plan_t *)base;
 	uint64_t startup, body;
 	bool lzo;
 
-	lzo = (settings->boot.flags1 & FLAGS1_COMPRESSION) == COMPRESSION_LZO;
+	lzo = (plan->flags1 & FLAGS1_COMPRESSION) == COMPRESSION_LZO;
 	if (disk_bytes > UINT32_MAX - 3 || (!lzo && disk_bytes % 4 != 0))
 		return (field_overflow(error, "imagefs_size",
 		    "body must be at most 2^32 - 4 bytes, a multiple of 4 when "
 		    "stored raw"));
-	startup = startup_bytes(settings->boot.code_bytes);
+	startup = startup_bytes(plan->code_bytes);
 	if (startup + disk_bytes > UINT32_MAX)
 		return (field_overflow(error, "ram_size",
 		    "ram_size would pass 32 bits"));
@@ -1189,7 +1244,7 @@ ifsboot_bound(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
 	if (startup + body > UINT32_MAX)
 		return (field_overflow(error, "stored_size",
 		    "stored_size would pass 32 bits"));
-	*out = settings->buffered_bytes + startup + body;
+	*out = plan->prefix_bytes + startup + body;
 	return (FSIMG_OK);
 }
 
@@ -1200,13 +1255,11 @@ sum_bytes(word_sum_t *sum, const unsigned char *bytes, size_t length)
 		sum->sum += (uint32_t)bytes[i] << (8 * (sum->position & 3));
 }
 
-/* The whole header, from the settings and the derived sizes. */
+/* The whole header, from the plan and the derived sizes. */
 static void
-put_header(unsigned char *raw, const fsimg_container_settings_t *settings,
+put_header(unsigned char *raw, const boot_plan_t *boot,
     uint32_t startup_size, uint32_t stored_size, uint32_t imagefs_size)
 {
-	const fsimg_boot_settings_t *boot = &settings->boot;
-
 	bzero(raw, HEADER_BYTES);
 	fsimg_layer_put_le32(raw + HEADER_SIGNATURE, STARTUP_SIGNATURE);
 	fsimg_layer_put_le16(raw + HEADER_VERSION, 1);
@@ -1224,7 +1277,7 @@ put_header(unsigned char *raw, const fsimg_container_settings_t *settings,
 	fsimg_layer_put_le32(raw + HEADER_IMAGEFS_PADDR, boot->imagefs_paddr);
 	fsimg_layer_put_le32(raw + HEADER_IMAGEFS_SIZE, imagefs_size);
 	fsimg_layer_put_le16(raw + HEADER_PREBOOT_SIZE,
-	    (uint16_t)settings->buffered_bytes);
+	    (uint16_t)boot->prefix_bytes);
 }
 
 /*
@@ -1255,7 +1308,7 @@ check_emission(const boot_encoder_t *encoder, const unsigned char *lead,
     size_t length, uint64_t output_bytes, fsimg_error_t *error)
 {
 	unsigned char decoded[PROBE_BYTES];
-	size_t prefix = encoder->settings->buffered_bytes;
+	size_t prefix = encoder->plan->prefix_bytes;
 	boot_header_t header;
 	fsimg_status_t status;
 
@@ -1278,26 +1331,23 @@ check_emission(const boot_encoder_t *encoder, const unsigned char *lead,
 static fsimg_status_t
 copy_code(boot_encoder_t *encoder, word_sum_t *section, fsimg_error_t *error)
 {
-	uint64_t code = encoder->settings->boot.code_bytes;
+	uint64_t code = encoder->plan->code_bytes;
 	size_t piece, got;
 	fsimg_status_t status;
 
 	for (uint64_t offset = 0; offset < code; offset += piece) {
 		piece = code - offset < COPY_PIECE_BYTES ?
 		    (size_t)(code - offset) : COPY_PIECE_BYTES;
-		status = read_setting(encoder->startup, offset, encoder->copy,
-		    piece, &got, error);
+		status = read_setting(encoder->startup, encoder->session,
+		    offset, encoder->copy, piece, &got, error);
 		if (status != FSIMG_OK) {
 			fsimg_error_path(error, "ifsboot:startup");
 			return (status);
 		}
 		if (got != piece)
 			return (setting_short(error, "ifsboot:startup"));
-		status = fsimg_session_charge(encoder->session, 0, 0, piece,
+		status = fsimg_seq_write(encoder->sink, encoder->copy, piece,
 		    error);
-		if (status == FSIMG_OK)
-			status = fsimg_seq_write(encoder->sink, encoder->copy, piece,
-			    error);
 		if (status != FSIMG_OK)
 			return (status);
 		sum_bytes(section, encoder->copy, piece);
@@ -1315,22 +1365,22 @@ static fsimg_status_t
 emit_leading(boot_encoder_t *encoder, uint64_t body_bytes,
     fsimg_error_t *error)
 {
-	const fsimg_container_settings_t *settings = encoder->settings;
+	const boot_plan_t *plan = encoder->plan;
 	unsigned char lead[PROBE_BYTES], checksum[4];
-	size_t prefix = settings->buffered_bytes;
+	size_t prefix = plan->prefix_bytes;
 	uint64_t startup, stored;
 	word_sum_t section;
 	fsimg_status_t status;
 
-	startup = startup_bytes(settings->boot.code_bytes);
+	startup = startup_bytes(plan->code_bytes);
 	stored = startup + body_bytes;
 	/* The bound kept every size within 32 bits at the worst case. */
 	if (stored > UINT32_MAX)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
 		    "QNX boot image body exceeds its planned bound"));
 	if (prefix != 0)
-		bcopy(settings->buffered, lead, prefix);
-	put_header(lead + prefix, settings, (uint32_t)startup, (uint32_t)stored,
+		bcopy(plan->prefix, lead, prefix);
+	put_header(lead + prefix, plan, (uint32_t)startup, (uint32_t)stored,
 	    (uint32_t)encoder->disk_bytes);
 	status = check_emission(encoder, lead, prefix + HEADER_BYTES,
 	    prefix + stored, error);
@@ -1425,6 +1475,7 @@ static fsimg_status_t
 boot_encode_open(const fsimg_encode_t *encode, void **state,
     fsimg_error_t *error)
 {
+	const boot_plan_t *plan = (const boot_plan_t *)encode->plan;
 	boot_encoder_t *encoder;
 	fsimg_status_t status;
 
@@ -1432,15 +1483,15 @@ boot_encode_open(const fsimg_encode_t *encode, void **state,
 	if (encoder == NULL)
 		return (error->status);
 	*encoder = (boot_encoder_t){ .session = encode->session,
-	    .sink = encode->sink, .settings = encode->settings,
+	    .sink = encode->sink, .plan = plan,
 	    .startup = encode->files[FSIMG_FILE_IFSBOOT_STARTUP].io,
 	    .disk_bytes = encode->disk_bytes,
-	    .compressed = (encode->settings->boot.flags1 &
-	    FLAGS1_COMPRESSION) == COMPRESSION_LZO,
+	    .compressed = (plan->flags1 & FLAGS1_COMPRESSION) ==
+	    COMPRESSION_LZO,
 	    .verified_disk = encode->verified_disk,
 	    .misplace = encode->ctx->misplace_boot_header };
 	*state = encoder;
-	if (encoder->settings->boot.code_bytes != 0) {
+	if (encoder->plan->code_bytes != 0) {
 		encoder->copy = fsimg_alloc(encode->ctx, COPY_PIECE_BYTES, error);
 		if (encoder->copy == NULL)
 			return (error->status);

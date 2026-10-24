@@ -422,7 +422,7 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 		    FSIMG_CAP_VERIFY;
 	if (layer->container != NULL) {
 		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY |
-		    (layer->container->plan != NULL ? FSIMG_CAP_WRITE : 0);
+		    (layer->container->writer != NULL ? FSIMG_CAP_WRITE : 0);
 		snprintf(out->codecs, sizeof(out->codecs), "%s",
 		    layer->container->codecs);
 		if (layer->container->zlib)

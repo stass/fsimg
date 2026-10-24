@@ -898,6 +898,7 @@ test_carried(void)
 	fsimg_write_options_t write_options;
 	fsimg_layer_options_t layers;
 	fsimg_disk_plan_t plan;
+	fsimg_session_t session;
 	fsimg_writer_t *writer;
 	fsimg_stack_t stack;
 	fsimg_stats_t stats;
@@ -933,8 +934,10 @@ test_carried(void)
 	 */
 	CHECK(fsimg_stack_parse("ifs/hbcifs", &stack, NULL) == FSIMG_OK);
 	fsimg_layer_options_init(&layers);
+	fsimg_session_init(&session, f.ctx, "test", 0);
 	CHECK(fsimg_disk_plan_init(f.ctx, &(fsimg_disk_request_t){
-	    .stack = &stack, .layers = &layers, .compression = "",
+	    .session = &session, .stack = &stack, .layers = &layers,
+	    .compression = "",
 	    .partitions = 1 }, &plan, &error) == FSIMG_EUNSUPPORTED);
 	CHECK(strcmp(error.path, "hbcifs") == 0 &&
 	    strstr(error.message, "read only") != NULL);
@@ -1150,8 +1153,10 @@ test_profile_facts(void)
 		if (layer->container == NULL)
 			continue;
 		ops = layer->container;
-		CHECK((ops->plan != NULL) == (ops->bound != NULL) &&
-		    (ops->plan != NULL) == (ops->encoder != NULL));
+		CHECK(ops->writer == NULL || (ops->writer->plan != NULL &&
+		    ops->writer->plan_free != NULL &&
+		    ops->writer->bound != NULL &&
+		    ops->writer->encoder != NULL));
 		CHECK(ops->unverified == NULL ||
 		    strlen(ops->unverified) < sizeof(report.unverified));
 		if (ops->carries != NULL) {

@@ -223,6 +223,14 @@ typedef struct dmg_verify {
 	bool		 payload;
 } dmg_verify_t;
 
+/* The private plan: the zlib level, zero for raw chunks. The base holds
+ * the chunk, which is dmg:chunk, and the segment ID.
+ */
+typedef struct dmg_plan {
+	fsimg_container_plan_t base;
+	uint32_t	 level;
+} dmg_plan_t;
+
 /*
  * The encoder's state. The next run starts at sector, after the pending
  * zero run of zero_sectors that ends the disk described so far; runs holds
@@ -234,7 +242,7 @@ typedef struct dmg_verify {
 typedef struct dmg_encoder {
 	fsimg_ctx_t	*ctx;
 	fsimg_seq_sink_t *sink;
-	const fsimg_container_settings_t *settings;
+	const dmg_plan_t *plan;
 	uint64_t	 disk_bytes;
 	fsimg_store_t	*runs;
 	uint64_t	 run_count;
@@ -327,9 +335,9 @@ static fsimg_status_t verify_data_fork(const fsimg_container_input_t *,
 static fsimg_status_t dmg_verify(const fsimg_container_input_t *,
     const fsimg_container_t *, bool, fsimg_error_t *);
 static fsimg_status_t dmg_plan(const fsimg_container_plan_args_t *,
-    fsimg_container_settings_t *, fsimg_error_t *);
+    fsimg_container_plan_t **, fsimg_error_t *);
 static uint64_t plist_bytes(uint64_t);
-static fsimg_status_t dmg_bound(const fsimg_container_settings_t *, uint64_t,
+static fsimg_status_t dmg_bound(const fsimg_container_plan_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
 static voidpf dmg_zlib_alloc(voidpf, uInt, uInt);
 static void dmg_zlib_free(voidpf, voidpf);
@@ -360,14 +368,19 @@ static const fsimg_encoder_ops_t dmg_encoder = {
 	.close = dmg_encode_close
 };
 
+static const fsimg_container_writer_t dmg_writer = {
+	.plan = dmg_plan,
+	.plan_free = fsimg_container_plan_release,
+	.bound = dmg_bound,
+	.encoder = &dmg_encoder
+};
+
 const fsimg_container_ops_t fsimg_dmg_container = {
 	.probe_bytes = 0,
 	.probe = dmg_probe,
 	.open = dmg_open,
 	.verify = dmg_verify,
-	.plan = dmg_plan,
-	.bound = dmg_bound,
-	.encoder = &dmg_encoder,
+	.writer = &dmg_writer,
 	.codecs = "raw,zero,zlib",
 	.payload_checks = true,
 	.zlib = true
@@ -1040,11 +1053,12 @@ dmg_verify(const fsimg_container_input_t *input,
  * table's go into the table header and the trailer.
  */
 static fsimg_status_t
-dmg_plan(const fsimg_container_plan_args_t *args,
-    fsimg_container_settings_t *settings, fsimg_error_t *error)
+dmg_plan(const fsimg_container_plan_args_t *args, fsimg_container_plan_t **out,
+    fsimg_error_t *error)
 {
 	const fsimg_layer_options_t *layers = args->layers;
 	uint32_t chunk, level;
+	dmg_plan_t *plan;
 
 	level = layers->dmg_level;
 	switch (layers->dmg_compress) {
@@ -1069,11 +1083,16 @@ dmg_plan(const fsimg_container_plan_args_t *args,
 	if (chunk % DMG_SECTOR_BYTES != 0 || chunk > FSIMG_CHUNK_MAX_DECODED)
 		return (fsimg_setting_error(error, "dmg:chunk",
 		    "the chunk must be a multiple of 512 bytes up to 16 MiB"));
-	settings->granularity = DMG_SECTOR_BYTES;
-	settings->chunk_bytes = chunk;
-	settings->level = level;
+	plan = fsimg_container_plan_alloc(args->ctx, sizeof(*plan), out, error);
+	if (plan == NULL)
+		return (error->status);
+	plan->base.granularity = DMG_SECTOR_BYTES;
+	plan->base.chunk_bytes = chunk;
+	plan->base.zlib = level != 0;
+	plan->level = level;
 	return (fsimg_container_identifier(layers->dmg_uuid, "dmg:uuid",
-	    FSIMG_ROLE_DMG, args->flags, args->epoch, settings->guid, error));
+	    FSIMG_ROLE_DMG, args->flags, args->epoch, plan->base.identifier,
+	    error));
 }
 
 /* The plist's length around a block table of table_bytes: the template,
@@ -1099,12 +1118,12 @@ plist_bytes(uint64_t table_bytes)
  * refused, naming dmg:chunk, which sets the run count.
  */
 static fsimg_status_t
-dmg_bound(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
+dmg_bound(const fsimg_container_plan_t *plan, uint64_t disk_bytes,
     uint64_t *out, fsimg_error_t *error)
 {
 	uint64_t runs;
 
-	runs = disk_bytes / settings->chunk_bytes + 2;
+	runs = disk_bytes / plan->chunk_bytes + 2;
 	if (runs > UINT32_MAX) {
 		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
 		    "the disk needs more runs than a DMG block table holds");
@@ -1152,22 +1171,22 @@ dmg_encode_open(const fsimg_encode_t *encode, void **state,
 	bzero(encoder, sizeof(*encoder));
 	encoder->ctx = encode->ctx;
 	encoder->sink = encode->sink;
-	encoder->settings = encode->settings;
+	encoder->plan = (const dmg_plan_t *)encode->plan;
 	encoder->disk_bytes = encode->disk_bytes;
 	encoder->table_crc = crc32(0, Z_NULL, 0);
 	encoder->fork_crc = crc32(0, Z_NULL, 0);
 	*state = encoder;
 	status = fsimg_store_new(encode->session, &encoder->runs, error);
-	if (status != FSIMG_OK || encoder->settings->level == 0)
+	if (status != FSIMG_OK || encoder->plan->level == 0)
 		return (status);
-	encoder->packed = fsimg_alloc(encode->ctx, encoder->settings->chunk_bytes,
-	    error);
+	encoder->packed = fsimg_alloc(encode->ctx,
+	    encoder->plan->base.chunk_bytes, error);
 	if (encoder->packed == NULL)
 		return (error->status);
 	encoder->stream.zalloc = dmg_zlib_alloc;
 	encoder->stream.zfree = dmg_zlib_free;
 	encoder->stream.opaque = encoder;
-	if (deflateInit(&encoder->stream, (int)encoder->settings->level) !=
+	if (deflateInit(&encoder->stream, (int)encoder->plan->level) !=
 	    Z_OK) {
 		*error = encoder->zlib_error;
 		if (error->status == FSIMG_OK)
@@ -1280,7 +1299,7 @@ dmg_encode_chunk(void *state, unsigned pass FSIMG_UNUSED,
 		return (status);
 	encoder->table_crc = crc32(encoder->table_crc, bytes, (uInt)length);
 	packed_length = 0;
-	if (encoder->settings->level != 0) {
+	if (encoder->plan->level != 0) {
 		status = deflate_chunk(encoder, bytes, length, &packed_length,
 		    error);
 		if (status != FSIMG_OK)
@@ -1392,7 +1411,7 @@ write_table(dmg_encoder_t *encoder, uint64_t fork_bytes, fsimg_error_t *error)
 	fsimg_layer_put_be32(header + MISH_VERSION_FIELD, MISH_VERSION);
 	fsimg_layer_put_be64(header + MISH_SECTOR_COUNT, sectors);
 	fsimg_layer_put_be32(header + MISH_BUFFERS,
-	    encoder->settings->chunk_bytes / DMG_SECTOR_BYTES + 8);
+	    encoder->plan->base.chunk_bytes / DMG_SECTOR_BYTES + 8);
 	fsimg_layer_put_be32(header + MISH_DESCRIPTOR, DMG_WHOLE_DISK);
 	fsimg_layer_put_be32(header + MISH_CHECKSUM, CHECKSUM_CRC32);
 	fsimg_layer_put_be32(header + MISH_CHECKSUM + 4, 32);
@@ -1455,7 +1474,7 @@ write_trailer(dmg_encoder_t *encoder, uint64_t fork_bytes, uint64_t xml_bytes,
 	fsimg_layer_put_be64(koly + KOLY_DATA_LENGTH, fork_bytes);
 	fsimg_layer_put_be32(koly + KOLY_SEGMENT_NUMBER, 1);
 	fsimg_layer_put_be32(koly + KOLY_SEGMENT_COUNT, 1);
-	bcopy(encoder->settings->guid, koly + KOLY_SEGMENT_ID, 16);
+	bcopy(encoder->plan->base.identifier, koly + KOLY_SEGMENT_ID, 16);
 	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM, CHECKSUM_CRC32);
 	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM + 4, 32);
 	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM + 8,

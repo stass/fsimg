@@ -81,13 +81,22 @@ typedef struct simg_verify {
 	bool		 payload;
 } simg_verify_t;
 
+/* The private plan: the block size, which is also the base's granularity,
+ * and whether the image ends with a CRC32 chunk.
+ */
+typedef struct simg_plan {
+	fsimg_container_plan_t base;
+	uint32_t	 block_bytes;
+	bool		 crc;
+} simg_plan_t;
+
 /* The encoder's state: the chunks the first pass counted and the header
  * declares, the chunks the second pass emitted, the zero run not yet
  * emitted, and the CRC32 of the expanded image so far.
  */
 typedef struct simg_encoder {
 	fsimg_seq_sink_t *sink;
-	const fsimg_container_settings_t *settings;
+	const simg_plan_t *plan;
 	uint64_t	 disk_bytes;
 	uint64_t	 chunks;
 	uint64_t	 emitted;
@@ -116,8 +125,8 @@ static fsimg_status_t verify_chunk(void *, const simg_chunk_t *,
 static fsimg_status_t simg_verify(const fsimg_container_input_t *,
     const fsimg_container_t *, bool, fsimg_error_t *);
 static fsimg_status_t simg_plan(const fsimg_container_plan_args_t *,
-    fsimg_container_settings_t *, fsimg_error_t *);
-static fsimg_status_t simg_bound(const fsimg_container_settings_t *,
+    fsimg_container_plan_t **, fsimg_error_t *);
+static fsimg_status_t simg_bound(const fsimg_container_plan_t *,
     uint64_t, uint64_t *, fsimg_error_t *);
 static fsimg_status_t simg_encode_open(const fsimg_encode_t *, void **,
     fsimg_error_t *);
@@ -138,14 +147,19 @@ static const fsimg_encoder_ops_t simg_encoder = {
 	.close = simg_encode_close
 };
 
+static const fsimg_container_writer_t simg_writer = {
+	.plan = simg_plan,
+	.plan_free = fsimg_container_plan_release,
+	.bound = simg_bound,
+	.encoder = &simg_encoder
+};
+
 const fsimg_container_ops_t fsimg_simg_container = {
 	.probe_bytes = SIMG_HEADER_BYTES,
 	.probe = simg_probe,
 	.open = simg_open,
 	.verify = simg_verify,
-	.plan = simg_plan,
-	.bound = simg_bound,
-	.encoder = &simg_encoder,
+	.writer = &simg_writer,
 	.codecs = "raw,zero,fill",
 	.payload_checks = true,
 	.zlib = false
@@ -461,9 +475,10 @@ simg_verify(const fsimg_container_input_t *input,
  */
 static fsimg_status_t
 simg_plan(const fsimg_container_plan_args_t *args,
-    fsimg_container_settings_t *settings, fsimg_error_t *error)
+    fsimg_container_plan_t **out, fsimg_error_t *error)
 {
 	const fsimg_layer_options_t *layers = args->layers;
+	simg_plan_t *plan;
 	uint32_t block;
 
 	block = layers->simg_block_bytes == 0 ? 4096 : layers->simg_block_bytes;
@@ -471,11 +486,14 @@ simg_plan(const fsimg_container_plan_args_t *args,
 	    block > FSIMG_TRANSCODE_CHUNK_BYTES)
 		return (fsimg_setting_error(error, "simg:block",
 		    "the block size must be a power of two from 1 KiB to 1 MiB"));
-	settings->granularity = block;
-	settings->block_bytes = block;
-	settings->crc = layers->simg_crc;
+	plan = fsimg_container_plan_alloc(args->ctx, sizeof(*plan), out, error);
+	if (plan == NULL)
+		return (error->status);
+	plan->base.granularity = block;
 	/* The first pass counts the chunks the header states. */
-	settings->passes = 2;
+	plan->base.passes = 2;
+	plan->block_bytes = block;
+	plan->crc = layers->simg_crc;
 	return (FSIMG_OK);
 }
 
@@ -485,12 +503,13 @@ simg_plan(const fsimg_container_plan_args_t *args,
  * 32-bit block count bounds the disk.
  */
 static fsimg_status_t
-simg_bound(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
+simg_bound(const fsimg_container_plan_t *base, uint64_t disk_bytes,
     uint64_t *out, fsimg_error_t *error)
 {
+	const simg_plan_t *plan = (const simg_plan_t *)base;
 	uint64_t units;
 
-	if (disk_bytes / settings->block_bytes > UINT32_MAX) {
+	if (disk_bytes / plan->block_bytes > UINT32_MAX) {
 		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
 		    "the disk has more blocks than a sparse image's 32-bit "
 		    "total blocks field holds");
@@ -504,7 +523,7 @@ simg_bound(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
 		    FSIMG_OP_IMAGE, "the disk may need more chunks than a "
 		    "sparse image's 32-bit total chunks field holds"));
 	*out = SIMG_HEADER_BYTES + units * SIMG_CHUNK_HEADER_BYTES +
-	    disk_bytes + (settings->crc ?
+	    disk_bytes + (plan->crc ?
 	    SIMG_CHUNK_HEADER_BYTES + SIMG_VALUE_BYTES : 0);
 	return (FSIMG_OK);
 }
@@ -519,7 +538,8 @@ simg_encode_open(const fsimg_encode_t *encode, void **state,
 	if (encoder == NULL)
 		return (error->status);
 	*encoder = (simg_encoder_t){ .sink = encode->sink,
-	    .settings = encode->settings, .disk_bytes = encode->disk_bytes,
+	    .plan = (const simg_plan_t *)encode->plan,
+	    .disk_bytes = encode->disk_bytes,
 	    .crc = crc32(0, Z_NULL, 0) };
 	*state = encoder;
 	return (FSIMG_OK);
@@ -555,7 +575,7 @@ static fsimg_status_t
 simg_header(simg_encoder_t *encoder, fsimg_error_t *error)
 {
 	unsigned char header[SIMG_HEADER_BYTES];
-	uint32_t block = encoder->settings->block_bytes;
+	uint32_t block = encoder->plan->block_bytes;
 
 	bzero(header, sizeof(header));
 	fsimg_layer_put_le32(header + HEADER_MAGIC, SIMG_MAGIC);
@@ -586,7 +606,7 @@ simg_zero_run(simg_encoder_t *encoder, bool counting, fsimg_error_t *error)
 	if (!counting)
 		encoder->crc = fsimg_crc32_zeros(encoder->crc, length);
 	return (simg_chunk(encoder, counting, CHUNK_DONT_CARE,
-	    length / encoder->settings->block_bytes, 0, error));
+	    length / encoder->plan->block_bytes, 0, error));
 }
 
 static fsimg_status_t
@@ -604,7 +624,7 @@ simg_encode_chunk(void *state, unsigned pass, const unsigned char *bytes,
 	status = simg_zero_run(encoder, counting, error);
 	if (status == FSIMG_OK)
 		status = simg_chunk(encoder, counting, CHUNK_RAW,
-		    length / encoder->settings->block_bytes, (uint32_t)length,
+		    length / encoder->plan->block_bytes, (uint32_t)length,
 		    error);
 	if (status != FSIMG_OK || counting)
 		return (status);
@@ -626,7 +646,7 @@ simg_encode_finish(void *state, unsigned pass, fsimg_error_t *error)
 	bool counting = pass == SIMG_COUNT_PASS;
 
 	status = simg_zero_run(encoder, counting, error);
-	if (status == FSIMG_OK && encoder->settings->crc) {
+	if (status == FSIMG_OK && encoder->plan->crc) {
 		status = simg_chunk(encoder, counting, CHUNK_CRC32, 0,
 		    sizeof(value), error);
 		if (status == FSIMG_OK && !counting) {

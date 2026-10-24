@@ -49,6 +49,14 @@ enum {
 	FOOTER_SAVED_STATE = 84
 };
 
+/* The private plan: the footer's creation time in Unix seconds, the epoch
+ * under FSIMG_WRITE_REPRODUCIBLE and the host clock otherwise.
+ */
+typedef struct vhd_plan {
+	fsimg_container_plan_t base;
+	int64_t		 timestamp;
+} vhd_plan_t;
+
 static fsimg_status_t vhd_corrupt(fsimg_error_t *, const char *);
 static fsimg_status_t vhd_probe(const unsigned char *, size_t,
     const unsigned char *, size_t, uint64_t, fsimg_error_t *);
@@ -61,11 +69,11 @@ static fsimg_status_t vhd_open(const fsimg_container_input_t *,
 static fsimg_status_t vhd_verify(const fsimg_container_input_t *,
     const fsimg_container_t *, bool, fsimg_error_t *);
 static fsimg_status_t vhd_plan(const fsimg_container_plan_args_t *,
-    fsimg_container_settings_t *, fsimg_error_t *);
-static fsimg_status_t vhd_bound(const fsimg_container_settings_t *, uint64_t,
+    fsimg_container_plan_t **, fsimg_error_t *);
+static fsimg_status_t vhd_bound(const fsimg_container_plan_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
 static void vhd_geometry(uint64_t, unsigned char *);
-static void vhd_footer(const fsimg_container_settings_t *, uint64_t,
+static void vhd_footer(const vhd_plan_t *, uint64_t,
     unsigned char [static VHD_FOOTER_BYTES]);
 static fsimg_status_t vhd_encode_open(const fsimg_encode_t *, void **,
     fsimg_error_t *);
@@ -81,14 +89,19 @@ static const fsimg_encoder_ops_t vhd_encoder = {
 	.close = vhd_encode_close
 };
 
+static const fsimg_container_writer_t vhd_writer = {
+	.plan = vhd_plan,
+	.plan_free = fsimg_container_plan_release,
+	.bound = vhd_bound,
+	.encoder = &vhd_encoder
+};
+
 const fsimg_container_ops_t fsimg_vhd_container = {
 	.probe_bytes = VHD_FOOTER_BYTES,
 	.probe = vhd_probe,
 	.open = vhd_open,
 	.verify = vhd_verify,
-	.plan = vhd_plan,
-	.bound = vhd_bound,
-	.encoder = &vhd_encoder,
+	.writer = &vhd_writer,
 	.codecs = "raw",
 	.payload_checks = false,
 	.zlib = false
@@ -224,32 +237,36 @@ vhd_verify(const fsimg_container_input_t *input,
 
 /*
  * The write side: the disk unchanged, then the footer. The plan resolves
- * vhd:align, the disk-length granularity, and the unique identifier; the
- * footer's timestamp counts seconds since 2000-01-01 UTC, clamped to its
- * 32 bits, so the default 1980 epoch encodes as zero.
+ * vhd:align, the disk-length granularity, the unique identifier and the
+ * creation time; the footer's timestamp counts seconds since 2000-01-01
+ * UTC, clamped to its 32 bits, so the default 1980 epoch encodes as zero.
  */
 static fsimg_status_t
-vhd_plan(const fsimg_container_plan_args_t *args,
-    fsimg_container_settings_t *settings, fsimg_error_t *error)
+vhd_plan(const fsimg_container_plan_args_t *args, fsimg_container_plan_t **out,
+    fsimg_error_t *error)
 {
 	const fsimg_layer_options_t *layers = args->layers;
 	uint32_t flags = args->flags;
 	int64_t epoch = args->epoch;
+	vhd_plan_t *plan;
 	uint32_t align;
 
 	align = layers->vhd_align_bytes == 0 ? 512 : layers->vhd_align_bytes;
 	if ((align & (align - 1)) != 0 || align < 512 || align > VHD_MAX_ALIGN)
 		return (fsimg_setting_error(error, "vhd:align",
 		    "the alignment must be a power of two from 512 bytes to 1 GiB"));
-	settings->granularity = align;
-	settings->timestamp = (flags & FSIMG_WRITE_REPRODUCIBLE) != 0 ? epoch :
+	plan = fsimg_container_plan_alloc(args->ctx, sizeof(*plan), out, error);
+	if (plan == NULL)
+		return (error->status);
+	plan->base.granularity = align;
+	plan->timestamp = (flags & FSIMG_WRITE_REPRODUCIBLE) != 0 ? epoch :
 	    (int64_t)time(NULL);
 	return (fsimg_container_identifier(layers->vhd_uuid, "vhd:uuid",
-	    FSIMG_ROLE_VHD, flags, epoch, settings->guid, error));
+	    FSIMG_ROLE_VHD, flags, epoch, plan->base.identifier, error));
 }
 
 static fsimg_status_t
-vhd_bound(const fsimg_container_settings_t *settings FSIMG_UNUSED,
+vhd_bound(const fsimg_container_plan_t *plan FSIMG_UNUSED,
     uint64_t disk_bytes, uint64_t *out, fsimg_error_t *error)
 {
 	if (!fsimg_add_u64(disk_bytes, VHD_FOOTER_BYTES, out))
@@ -301,7 +318,7 @@ vhd_geometry(uint64_t sectors, unsigned char *out)
  * original size equal to the current one, and the checksum over the rest.
  */
 static void
-vhd_footer(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
+vhd_footer(const vhd_plan_t *plan, uint64_t disk_bytes,
     unsigned char footer[static VHD_FOOTER_BYTES])
 {
 	unsigned major, minor;
@@ -310,8 +327,8 @@ vhd_footer(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
 
 	major = minor = 0;
 	sscanf(PACKAGE_VERSION, "%u.%u", &major, &minor);
-	seconds = settings->timestamp < VHD_EPOCH ? 0 :
-	    settings->timestamp - VHD_EPOCH;
+	seconds = plan->timestamp < VHD_EPOCH ? 0 :
+	    plan->timestamp - VHD_EPOCH;
 	bzero(footer, VHD_FOOTER_BYTES);
 	bcopy("conectix", footer + FOOTER_COOKIE, 8);
 	fsimg_layer_put_be32(footer + FOOTER_FEATURES, VHD_FEATURES_RESERVED);
@@ -327,7 +344,7 @@ vhd_footer(const fsimg_container_settings_t *settings, uint64_t disk_bytes,
 	fsimg_layer_put_be64(footer + FOOTER_CURRENT_SIZE, disk_bytes);
 	vhd_geometry(disk_bytes / 512, footer + FOOTER_GEOMETRY);
 	fsimg_layer_put_be32(footer + FOOTER_DISK_TYPE, VHD_FIXED);
-	bcopy(settings->guid, footer + FOOTER_UNIQUE_ID, 16);
+	bcopy(plan->base.identifier, footer + FOOTER_UNIQUE_ID, 16);
 	sum = 0;
 	for (unsigned i = 0; i < VHD_FOOTER_BYTES; i++)
 		sum += footer[i];
@@ -368,7 +385,8 @@ vhd_encode_finish(void *state, unsigned pass FSIMG_UNUSED,
 	const fsimg_encode_t *encode = state;
 	unsigned char footer[VHD_FOOTER_BYTES];
 
-	vhd_footer(encode->settings, encode->disk_bytes, footer);
+	vhd_footer((const vhd_plan_t *)encode->plan, encode->disk_bytes,
+	    footer);
 	return (fsimg_seq_write(encode->sink, footer, sizeof(footer), error));
 }
 
