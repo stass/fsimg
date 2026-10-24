@@ -991,6 +991,7 @@ test_timestamp_fidelity(void)
 	const fsimg_entry_t *entry;
 	const fsimg_plan_t *plan;
 	fsimg_plan_info_t info;
+	fsimg_error_t error;
 
 	fixture_new(&f);
 	source = (fsimg_entry_t){ .path = "/times", .kind = FSIMG_ENTRY_FILE };
@@ -1023,7 +1024,8 @@ test_timestamp_fidelity(void)
 	source.metadata.created.offset_minutes = 1;
 	CHECK(fsimg_writer_new(f.ctx, "exfat", NULL, &writer, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_add(writer, &source, &zero, NULL) == FSIMG_OK);
-	CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_EUNSUPPORTED);
+	CHECK(fsimg_writer_plan(writer, &plan, &error) == FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "/times") == 0);
 	fsimg_writer_free(writer);
 
 	/* Optional loss is reported once by planning, not again during emission. */

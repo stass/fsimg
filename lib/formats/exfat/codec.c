@@ -284,13 +284,8 @@ encode_time(fsimg_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
 		    original->nanoseconds == 0 && original->basis == FSIMG_TIME_UTC;
 	if (exact)
 		return (FSIMG_OK);
-	if ((entry->metadata.required & field) != 0 ||
-	    (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_WRITER, "exFAT cannot preserve the requested timestamp"));
-	plan->info.metadata_losses++;
-	fsimg_report_loss(writer->ctx, entry->path, field);
-	return (FSIMG_OK);
+	return (fsimg_writer_loss(writer, entry, field,
+	    "exFAT cannot preserve the requested timestamp", error));
 }
 
 fsimg_status_t

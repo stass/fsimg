@@ -291,6 +291,17 @@ zero-write work accounting, sparse publication, and retained-staging errors.
 The integration script also validates fsimg-created images with `fsck.fat` and
 extracts ordinary, nested, and Unicode content with mtools for byte comparison.
 
+`test-metadata-loss` covers the writer's one metadata-loss operation: an
+accepted mask counted once per field in the plan and the context with one
+callback under the rendered path, refusals of required fields and of any field
+without `FSIMG_WRITE_ALLOW_LOSS` that count and report nothing, absent or
+unknown fields rejected as internal state errors, omissions and FAT encoding
+losses sharing one total, a late driver refusal keeping earlier observations,
+a capability-summary refusal reporting nothing, the QNX4 owner pair as one
+loss, FAT's date-only access time, the shared whole-second selector's
+endpoints, fractions, time bases and reproducible epochs, and DOS calendar
+boundaries and leap days, each against values written out by hand.
+
 `test-emit` exercises the common emission lifecycle through both the FAT12 and
 exFAT drivers. Empty, zero-only, and mixed data/zero provider sources must give
 identical images on clean sinks, stale sinks with and without a zero-range

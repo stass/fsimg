@@ -38,8 +38,6 @@ static fsimg_status_t validate_options(fsimg_write_options_t *, unsigned,
 static fsimg_status_t make_plan(fsimg_writer_t *, fsimg_error_t *);
 static void free_plan(fsimg_plan_t *);
 static qnx4_root_name_t classify_root_name(const char *);
-static fsimg_status_t optional_loss(qnx4_plan_t *, const fsimg_entry_t *,
-    uint32_t, const char *, fsimg_error_t *);
 static fsimg_status_t encode_time(qnx4_plan_t *, const fsimg_entry_t *,
     uint32_t, const fsimg_timestamp_t *, uint32_t *, fsimg_error_t *);
 static fsimg_status_t encode_metadata(qnx4_plan_t *, const fsimg_entry_t *,
@@ -184,54 +182,25 @@ classify_root_name(const char *name)
 	return (QNX4_ROOT_ORDINARY);
 }
 
-/* A present field the profile cannot hold exactly: a failure when the
- * field is required or the caller forbids losses, otherwise one counted
- * and reported loss.
- */
-static fsimg_status_t
-optional_loss(qnx4_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
-    const char *message, fsimg_error_t *error)
-{
-	fsimg_writer_t *writer = plan->common.writer;
-
-	if ((entry->metadata.required & field) != 0 ||
-	    (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0) {
-		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_WRITER,
-		    message);
-		fsimg_error_path(error, entry->path);
-		return (FSIMG_EUNSUPPORTED);
-	}
-	plan->common.info.metadata_losses++;
-	fsimg_report_loss(writer->ctx, entry->path, field);
-	return (FSIMG_OK);
-}
-
-/* Encode one timestamp field as unsigned UTC seconds. An absent field, or
- * one outside 0 through 2147483647, takes the format time; reproducible
- * mode replaces every time with the epoch, which validation keeps in that
- * range. A present field is exact when it is a UTC instant with whole
- * seconds in range (and, when reproducible, equal to the epoch); otherwise
- * it is an optional loss.
+/* Encode one timestamp field as unsigned UTC seconds through the shared
+ * selector: an absent field, or one outside 0 through 2147483647, takes
+ * the format time, which reproducible mode makes the epoch for every
+ * field. A present field the stored value does not preserve is a loss.
  */
 static fsimg_status_t
 encode_time(qnx4_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
     const fsimg_timestamp_t *time, uint32_t *out, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
-	bool exact, representable, reproducible;
+	bool exact, present, reproducible;
 
+	present = (entry->metadata.valid & field) != 0;
 	reproducible = (writer->options.flags & FSIMG_WRITE_REPRODUCIBLE) != 0;
-	representable = time->seconds >= 0 && time->seconds <= QNX4_TIME_MAX;
-	*out = plan->format_time;
-	if ((entry->metadata.valid & field) == 0)
-		return (FSIMG_OK);
-	if (representable && !reproducible)
-		*out = (uint32_t)time->seconds;
-	exact = representable && time->basis == FSIMG_TIME_UTC &&
-	    time->nanoseconds == 0 && time->seconds == (int64_t)*out;
+	exact = fsimg_time_select_u32(present, time, QNX4_TIME_MAX,
+	    plan->format_time, reproducible, out);
 	if (exact)
 		return (FSIMG_OK);
-	return (optional_loss(plan, entry, field,
+	return (fsimg_writer_loss(writer, entry, field,
 	    "QNX4 cannot preserve the requested timestamp", error));
 }
 
@@ -276,7 +245,8 @@ encode_metadata(qnx4_plan_t *plan, const fsimg_entry_t *entry,
 		if (m->gid <= QNX4_OWNER_MAX)
 			row->gid = (uint16_t)m->gid;
 		if (m->uid > QNX4_OWNER_MAX || m->gid > QNX4_OWNER_MAX) {
-			status = optional_loss(plan, entry, FSIMG_META_OWNER,
+			status = fsimg_writer_loss(plan->common.writer, entry,
+			    FSIMG_META_OWNER,
 			    "QNX4 cannot store an owner or group above 65534",
 			    error);
 			if (status != FSIMG_OK)

@@ -59,9 +59,9 @@ format-owned records without catalog metadata produce no losses.
 The callback is synchronous and observational: it has no refusal result and
 cannot re-enter the context. Its rendered path is borrowed until the callback
 returns and is never truncated; errors use the API's bounded rendered path
-and truncation flag. Control characters and backslashes receive the common
-path rendering, so metadata reporting cannot inject raw terminal controls.
-The writer does not print diagnostics or copy paths into an event list.
+and truncation flag. The path receives the common path rendering, as error
+paths do; a host escapes control characters before terminal output under the
+[security contract](design-security.md#coordinator-and-worker). The writer does not print diagnostics or copy paths into an event list.
 
 A mask can report several fields in one callback. Common omissions retain one
 callback per entry containing its entire omission mask; individual driver

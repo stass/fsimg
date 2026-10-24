@@ -5,6 +5,7 @@
 
 #include <strings.h>
 
+#include "unicode.h"
 #include "write.h"
 
 static bool encode_timestamp(const fsimg_timestamp_t *, uint32_t,
@@ -12,65 +13,49 @@ static bool encode_timestamp(const fsimg_timestamp_t *, uint32_t,
 static fsimg_status_t encode_field(fat_plan_t *, const fsimg_entry_t *,
     uint32_t, const fsimg_timestamp_t *, unsigned char *, fsimg_error_t *);
 
-/* Count complete Gregorian years/months from the Unix epoch. The supported
- * interval has only 128 years, so this bounded calendar walk is transparent
- * and avoids host timezones, time_t ranges, and signed division conventions.
+/* Place a time's seconds, read as calendar seconds, as a DOS date and time
+ * in field's slots of raw: creation keeps 10 ms increments including the
+ * odd second, modification two-second steps, and access only the date.
+ * Return whether the stored fields keep the whole time, which needs
+ * wall-clock basis; leave raw untouched and return false outside the DOS
+ * calendar.
  */
 static bool
 encode_timestamp(const fsimg_timestamp_t *time, uint32_t field,
     unsigned char *raw)
 {
-	static const unsigned month_days[] = {
-		31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
-	};
-	uint64_t days, seconds;
-	unsigned year, month, span, day_seconds;
+	uint32_t packed;
 	uint16_t date, clock;
-	bool leap, exact;
+	unsigned char odd;
+	bool exact;
 
-	if (time->seconds < 315532800 || time->seconds > 4354819199LL)
+	if (!fsimg_dos_time_encode(time->seconds, &packed, &odd))
 		return (false);
-	seconds = (uint64_t)time->seconds;
-	days = seconds / 86400;
-	day_seconds = (unsigned)(seconds % 86400);
-	year = 1970;
-	for (;;) {
-		leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-		span = leap ? 366 : 365;
-		if (days < span)
-			break;
-		days -= span;
-		year++;
-	}
-	month = 0;
-	for (;;) {
-		span = month_days[month] + (month == 1 && leap ? 1 : 0);
-		if (days < span)
-			break;
-		days -= span;
-		month++;
-	}
-	date = (uint16_t)((year - 1980) << 9 | (month + 1) << 5 | (days + 1));
-	clock = (uint16_t)((day_seconds / 3600) << 11 |
-	    (day_seconds / 60 % 60) << 5 | (day_seconds % 60 / 2));
+	date = (uint16_t)(packed >> 16);
+	clock = (uint16_t)packed;
 	exact = time->basis == FSIMG_TIME_WALL;
 	if (field == FSIMG_META_CREATED) {
-		raw[13] = (unsigned char)((seconds % 2) * 100 +
-		    time->nanoseconds / 10000000);
+		raw[13] = (unsigned char)(odd * 100 + time->nanoseconds / 10000000);
 		fsimg_fat_put16(raw + 14, clock);
 		fsimg_fat_put16(raw + 16, date);
 		exact = exact && time->nanoseconds % 10000000 == 0;
 	} else if (field == FSIMG_META_MODIFIED) {
 		fsimg_fat_put16(raw + 22, clock);
 		fsimg_fat_put16(raw + 24, date);
-		exact = exact && seconds % 2 == 0 && time->nanoseconds == 0;
+		exact = exact && odd == 0 && time->nanoseconds == 0;
 	} else {
 		fsimg_fat_put16(raw + 18, date);
-		exact = exact && day_seconds == 0 && time->nanoseconds == 0;
+		exact = exact && clock == 0 && odd == 0 && time->nanoseconds == 0;
 	}
 	return (exact);
 }
 
+/* Encode one timestamp field over the initialized fallback: the caller's
+ * time, or in reproducible mode the epoch read as wall-clock seconds. A
+ * present field is preserved when the encoding is exact and, when
+ * reproducible, the epoch is the original wall-clock whole second; any
+ * other present field is a loss.
+ */
 static fsimg_status_t
 encode_field(fat_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
     const fsimg_timestamp_t *original, unsigned char *raw, fsimg_error_t *error)
@@ -98,13 +83,8 @@ encode_field(fat_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
 		    original->nanoseconds == 0 && original->basis == FSIMG_TIME_WALL;
 	if (exact)
 		return (FSIMG_OK);
-	if ((entry->metadata.required & field) != 0 ||
-	    (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_WRITER, "FAT cannot preserve the requested timestamp"));
-	plan->common.info.metadata_losses++;
-	fsimg_report_loss(writer->ctx, entry->path, field);
-	return (FSIMG_OK);
+	return (fsimg_writer_loss(writer, entry, field,
+	    "FAT cannot preserve the requested timestamp", error));
 }
 
 fsimg_status_t

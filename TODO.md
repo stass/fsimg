@@ -2,10 +2,9 @@
 
 ## Major initiatives
 
-* [Medium] **Settings, metadata losses and container-plan consolidation**
+* [Medium] **Settings and container-plan consolidation**
   (`lib/layers/`, `lib/write/`, `lib/formats/`, `cmd/fsimg/`): implement the
-  [settings catalogue](specs/design-settings.md),
-  [writer loss policy](specs/design-metadata-loss.md), and
+  [settings catalogue](specs/design-settings.md) and
   [private container plans](specs/design-container-plans.md) under the
   [consolidation sequence](docs/implementation-plan.md#settings-and-plan-consolidation).
   Replace duplicate descriptions and policy decisions, give container resources

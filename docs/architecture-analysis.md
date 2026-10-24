@@ -2,9 +2,8 @@
 
 fsimg should let a maintainer learn its common contracts once and concentrate
 on format rules when adding a filesystem or container. The strongest remaining
-opportunities are one description of settings, container-owned plans, common
-metadata-loss policy, reusable verification operations, and common driver
-contract tests. Relic offers a complementary route: describe relational rules
+opportunities are one description of settings, container-owned plans,
+reusable verification operations, and common driver contract tests. Relic offers a complementary route: describe relational rules
 once and generate tables, predicates, or bounded verification operations in C.
 
 This analysis covers FAT12/16/32, exFAT, QNX4, QNX6, ImageFS, partition schemes,
@@ -27,6 +26,7 @@ execution model. Preserve these boundaries when evaluating further changes.
 | Logical content delivery | [Reader](../lib/read/reader.c) | Resolve initialized content to validated physical extents |
 | Optional extent storage | [Extent index](../lib/meta/extent.c) | Discover allocation and choose whether an index is useful |
 | Collection and payload copying | [Catalog](../lib/write/catalog.c) and [emission](../lib/write/emit.c) | Plan placement and encode metadata |
+| [Metadata-loss policy](../specs/design-metadata-loss.md) | `fsimg_writer_loss()` in the [writer](../lib/write/writer.c), with the [calendar](../lib/core/calendar.c) whole-second and DOS conversions | Encode each supported field once and state whether it is preserved |
 | Layer composition | [Image reader](../lib/layers/image.c), [disk plan](../lib/layers/plan.c), and [transcode](../lib/layers/transcode.c) | Decode or encode a particular scheme, container, or compression |
 | Resources and host authority | Context, bounded I/O, extractor, and publisher | Operate through their contracts |
 
@@ -72,7 +72,6 @@ measurement or a claim that implementation is complete.
 | Opportunity | Priority | Confidence | Main obligation removed |
 | --- | --- | --- | --- |
 | [Shared settings description](../specs/design-settings.md) | First | High | Repeating option identity, representation, and applicability across subsystems |
-| [Common metadata-loss policy](../specs/design-metadata-loss.md) | First | High | Reimplementing required-field, loss-counting, and reporting policy |
 | [Private container plans](../specs/design-container-plans.md) | Next | High on ownership; prototype the interface | Extending shared state and cleanup for each container |
 | Common driver contract tests | Alongside each change | High | Reconstructing common acceptance coverage for each driver |
 | Verification helpers and ownership runs | Incremental | High for payload reads; narrower for ownership | Repeating bounded read, sort, cursor, and cleanup mechanics |
@@ -152,44 +151,6 @@ replaces the shared accumulation of unrelated fields and cleanup knowledge.
 Prototype it across fixed VHD, chunked DMG/simg, and boot-image settings before
 settling the interface. Preserve deterministic multi-pass encoding and all
 pre-output refusals.
-
-### Common metadata-loss policy and narrow timestamp helpers
-
-The [metadata-loss design](../specs/design-metadata-loss.md) specifies the
-writer policy, counting and callback semantics, and timestamp helpers.
-
-The writers repeat the same policy: a required field or a caller forbidding
-losses causes failure; an allowed loss increments the total and invokes the
-loss callback. Examples are `encode_field()` in
-[FAT metadata](../lib/formats/fat/write-meta.c), `encode_time()` in
-[exFAT codecs](../lib/formats/exfat/codec.c), `optional_loss()` in
-[QNX4 planning](../lib/formats/qnx4/write-plan.c), and the time encoders in
-[QNX6](../lib/formats/qnx6/write-plan.c) and
-[ImageFS](../lib/formats/ifs/write-plan.c).
-
-A common writer operation should own refusal, counting, callback delivery, and
-path attribution. The driver supplies the affected field and an explanation
-when its encoding cannot preserve the requested value. Common capability
-omissions and format-specific rounding must remain distinguishable and must
-not count one field twice.
-
-Two narrower conversions also merit sharing:
-
-* QNX4, QNX6, and ImageFS select unsigned whole seconds with explicit upper
-  bounds, fallback times, and reproducible substitution. Share that operation
-  where its semantics agree, passing the differences as values.
-* FAT's calendar walk repeats the DOS-time encoding already provided by
-  [calendar.c](../lib/core/calendar.c). Reuse the calendar conversion while
-  retaining FAT's field placement and precision rules.
-
-FAT wall-clock values, exFAT offsets, and QNX UTC seconds retain their own
-encoding fidelity rules. Defaults and required metadata remain explicit.
-Exercise missing values, range endpoints, fractional seconds, time bases,
-reproducible replacement, fixed permissions, and the exact loss count.
-
-**Complexity balance:** a shared policy operation and a few concrete conversions
-replace repeated decisions. A universal metadata normalization language is
-unnecessary for this extraction.
 
 ### Verification operations with explicit ownership domains
 
@@ -512,8 +473,8 @@ Static registration remains sufficient; no dynamic plugin ABI is required.
 
 ## Recommended order and validation
 
-Consolidate settings and metadata-loss policy first, with common contract-test
-profiles accompanying the conversions. Next prototype private container plans
+Consolidate settings first, with common contract-test profiles accompanying
+the conversion. Next prototype private container plans
 and extract the narrow verification and scalar helpers. Keep the smaller
 lifetime corrections independently reviewable. Revisit scheme planning with a
 new scheme that can prove the abstraction useful.

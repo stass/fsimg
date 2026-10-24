@@ -188,41 +188,26 @@ name_order(const char *name, size_t length, const char *other)
 	return (length < other_length ? -1 : length > other_length);
 }
 
-/* Encode one timestamp field as unsigned UTC seconds. An absent field, or
- * one outside the 32-bit range, takes the format time; reproducible mode
- * replaces every time with the epoch, which validation keeps in range.
- * Other times keep their whole seconds. A present field is exact when it is
- * a UTC instant with whole seconds in range (and, when reproducible, equal
- * to the epoch); otherwise it is an optional loss or a failure.
+/* Encode one timestamp field as unsigned UTC seconds through the shared
+ * selector: an absent field, or one outside the 32-bit range, takes the
+ * format time, which reproducible mode makes the epoch for every field. A
+ * present field the stored value does not preserve is a loss.
  */
 static fsimg_status_t
 encode_time(qnx6_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
     const fsimg_timestamp_t *time, uint32_t *out, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
-	bool exact, representable, reproducible;
+	bool exact, present, reproducible;
 
+	present = (entry->metadata.valid & field) != 0;
 	reproducible = (writer->options.flags & FSIMG_WRITE_REPRODUCIBLE) != 0;
-	representable = time->seconds >= 0 && time->seconds <= UINT32_MAX;
-	*out = plan->format_time;
-	if ((entry->metadata.valid & field) == 0)
-		return (FSIMG_OK);
-	if (representable && !reproducible)
-		*out = (uint32_t)time->seconds;
-	exact = representable && time->basis == FSIMG_TIME_UTC &&
-	    time->nanoseconds == 0 && time->seconds == (int64_t)*out;
+	exact = fsimg_time_select_u32(present, time, UINT32_MAX,
+	    plan->format_time, reproducible, out);
 	if (exact)
 		return (FSIMG_OK);
-	if ((entry->metadata.required & field) != 0 ||
-	    (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0) {
-		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_WRITER,
-		    "QNX6 cannot preserve the requested timestamp");
-		fsimg_error_path(error, entry->path);
-		return (FSIMG_EUNSUPPORTED);
-	}
-	plan->common.info.metadata_losses++;
-	fsimg_report_loss(writer->ctx, entry->path, field);
-	return (FSIMG_OK);
+	return (fsimg_writer_loss(writer, entry, field,
+	    "QNX6 cannot preserve the requested timestamp", error));
 }
 
 /* Encode an entry's owner, mode and times into its row. profile_mode is the
@@ -233,7 +218,6 @@ static fsimg_status_t
 encode_metadata(qnx6_plan_t *plan, const fsimg_entry_t *entry,
     uint16_t profile_mode, qnx6_row_t *row, fsimg_error_t *error)
 {
-	fsimg_writer_t *writer = plan->common.writer;
 	const fsimg_metadata_t *m = &entry->metadata;
 	uint16_t type, permissions;
 	fsimg_status_t status;
@@ -263,15 +247,11 @@ encode_metadata(qnx6_plan_t *plan, const fsimg_entry_t *entry,
 		permissions = (uint16_t)(m->mode & FSIMG_MODE_BITS);
 	if (profile_mode != 0 && (m->valid & FSIMG_META_MODE) != 0 &&
 	    permissions != profile_mode) {
-		if ((m->required & FSIMG_META_MODE) != 0 ||
-		    (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0) {
-			fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_WRITER,
-			    "QNX6 fixes the permissions of this directory");
-			fsimg_error_path(error, entry->path);
-			return (FSIMG_EUNSUPPORTED);
-		}
-		plan->common.info.metadata_losses++;
-		fsimg_report_loss(writer->ctx, entry->path, FSIMG_META_MODE);
+		status = fsimg_writer_loss(plan->common.writer, entry,
+		    FSIMG_META_MODE, "QNX6 fixes the permissions of this directory",
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
 	}
 	if (profile_mode != 0)
 		permissions = profile_mode;

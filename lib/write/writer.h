@@ -217,10 +217,12 @@ struct fsimg_writer {
 	 */
 	uint64_t	 count;
 	uint64_t	 payload_bytes;
-	/* Fields omitted because the format does not store them, counted
-	 * before the driver plans and added to its plan's loss total.
+	/* The planning attempt's metadata losses: every field
+	 * fsimg_writer_loss() accepted, the common omissions and the driver's
+	 * encoding losses alike. Zero before planning; a successful plan
+	 * publishes it as its metadata_losses.
 	 */
-	uint64_t	 omitted_fields;
+	uint64_t	 metadata_losses;
 	/* Private fault injection: interrupt the nth subsequent directory read. */
 	uint64_t	 interrupt_directory_read_after;
 	/* Catalog records (record, the entry streams) and source records
@@ -292,6 +294,19 @@ fsimg_status_t fsimg_writer_collect(fsimg_writer_t *, const fsimg_entry_t *,
 void fsimg_catalog_discard(fsimg_writer_t *);
 fsimg_status_t fsimg_catalog_prepare(fsimg_writer_t *,
     const fsimg_sort_options_t *, fsimg_error_t *);
+/* The writer's one metadata-loss policy, for the fields of entry in mask
+ * that planning cannot preserve: the common capability check's omissions
+ * and a driver's inexact encodings alike. Each field is a valid one of the
+ * entry's, submitted once per planning attempt. A required field, or any
+ * field when the caller clears FSIMG_WRITE_ALLOW_LOSS, refuses with
+ * EUNSUPPORTED, message and the entry's path, counting and reporting
+ * nothing. Otherwise every field is counted in metadata_losses and the
+ * mask goes to the context's loss report once. A zero mask does nothing;
+ * a field the entry lacks is an internal ESTATE. entry and message are
+ * borrowed for the call.
+ */
+fsimg_status_t fsimg_writer_loss(fsimg_writer_t *, const fsimg_entry_t *,
+    uint32_t, const char *, fsimg_error_t *);
 /* Source lookup uses its own record buffer and preserves current snapshot. */
 fsimg_status_t fsimg_catalog_read_source(fsimg_writer_t *, uint64_t,
     fsimg_catalog_entry_t *, fsimg_error_t *);

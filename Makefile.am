@@ -126,6 +126,7 @@ example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
 test_programs = test-core test-private test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
+	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
 	test-ifs \
@@ -233,6 +234,8 @@ test_fat_write_SOURCES = test/fat-write.c test/test.h \
 test_fat_write_LDADD = libfsimg.la
 test_emit_SOURCES = test/emit.c test/test.h
 test_emit_LDADD = libfsimg.la
+test_metadata_loss_SOURCES = test/metadata-loss.c test/test.h
+test_metadata_loss_LDADD = libfsimg.la
 test_extract_SOURCES = test/extract.c test/test.h
 test_extract_LDADD = libfsimg.la
 test_protocol_SOURCES = test/protocol.c test/test.h \

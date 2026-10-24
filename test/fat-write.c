@@ -532,6 +532,7 @@ test_metadata(void)
 	fsimg_write_options_t options;
 	const fsimg_plan_t *plan;
 	fsimg_plan_info_t info;
+	fsimg_error_t error;
 	fat_layout_t row;
 
 	entry.metadata.valid = FSIMG_META_MODIFIED;
@@ -545,7 +546,9 @@ test_metadata(void)
 		fixture_open(&fixture, "fat12", &options, 1);
 		CHECK(fsimg_writer_add(fixture.writer, &entry, &source, NULL) == FSIMG_OK);
 		if (pass != 0) {
-			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_EUNSUPPORTED);
+			/* The refusal names the entry whose time it cannot keep. */
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, &error) == FSIMG_EUNSUPPORTED);
+			CHECK(strcmp(error.path, "/TIME") == 0 && fixture.losses == 0);
 		} else {
 			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
 			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);

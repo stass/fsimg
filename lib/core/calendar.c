@@ -103,3 +103,26 @@ fsimg_dos_time_encode(int64_t seconds, uint32_t *packed, unsigned char *odd)
 	*odd = (unsigned char)(seconds % 2);
 	return (true);
 }
+
+/* A present time keeps its whole seconds when they lie in 0 through
+ * maximum, dropping any fraction, and otherwise takes the fallback rather
+ * than an endpoint; reproducible mode stores the fallback, the epoch, for
+ * every time. No offset is applied: the stored value is a UTC instant, so
+ * a wall-clock or known-offset time, a fraction, or a stored value other
+ * than the time's own seconds is not preserved.
+ */
+bool
+fsimg_time_select_u32(bool present, const fsimg_timestamp_t *time,
+    uint32_t maximum, uint32_t fallback, bool reproducible, uint32_t *out)
+{
+	bool in_range;
+
+	*out = fallback;
+	if (!present)
+		return (true);
+	in_range = time->seconds >= 0 && time->seconds <= (int64_t)maximum;
+	if (in_range && !reproducible)
+		*out = (uint32_t)time->seconds;
+	return (in_range && time->basis == FSIMG_TIME_UTC &&
+	    time->nanoseconds == 0 && time->seconds == (int64_t)*out);
+}

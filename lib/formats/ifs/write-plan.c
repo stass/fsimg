@@ -168,47 +168,26 @@ ifs_row_set(ifs_plan_t *plan, uint64_t id, const ifs_row_t *row,
 	return (fsimg_array_set(plan->rows, id, raw, error));
 }
 
-/* Encode an entry's modification time as unsigned UTC seconds:
- *   absent			the fallback, exactly
- *   reproducible mode		the epoch (the fallback), exact only when the
- *				time is that instant
- *   outside 0 to 2^32 - 1	the fallback, a loss
- *   otherwise			its whole seconds, exact only for a UTC
- *				instant without nanoseconds
- * The stored value is computed first; the time is exact when it is a UTC
- * instant without nanoseconds equal to the stored value. A time that is
- * not exact is an optional loss, or a failure when it is required or the
- * caller forbids losses.
+/* Encode an entry's modification time as unsigned UTC seconds through the
+ * shared selector: an absent time, or one outside 0 to 2^32 - 1, takes the
+ * fallback, which reproducible mode makes the epoch for every entry. A
+ * present time the stored value does not preserve is a loss.
  */
 static fsimg_status_t
 encode_time(ifs_plan_t *plan, const fsimg_entry_t *entry, uint32_t *out,
     fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
-	const fsimg_timestamp_t *time = &entry->metadata.modified;
-	bool exact, representable, reproducible;
+	bool exact, present, reproducible;
 
+	present = (entry->metadata.valid & FSIMG_META_MODIFIED) != 0;
 	reproducible = (writer->options.flags & FSIMG_WRITE_REPRODUCIBLE) != 0;
-	representable = time->seconds >= 0 && time->seconds <= UINT32_MAX;
-	*out = plan->fallback_time;
-	if ((entry->metadata.valid & FSIMG_META_MODIFIED) == 0)
-		return (FSIMG_OK);
-	if (representable && !reproducible)
-		*out = (uint32_t)time->seconds;
-	exact = representable && time->basis == FSIMG_TIME_UTC &&
-	    time->nanoseconds == 0 && time->seconds == (int64_t)*out;
+	exact = fsimg_time_select_u32(present, &entry->metadata.modified,
+	    UINT32_MAX, plan->fallback_time, reproducible, out);
 	if (exact)
 		return (FSIMG_OK);
-	if ((entry->metadata.required & FSIMG_META_MODIFIED) != 0 ||
-	    (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0) {
-		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_WRITER,
-		    "ImageFS cannot preserve the requested modification time");
-		fsimg_error_path(error, entry->path);
-		return (FSIMG_EUNSUPPORTED);
-	}
-	plan->common.info.metadata_losses++;
-	fsimg_report_loss(writer->ctx, entry->path, FSIMG_META_MODIFIED);
-	return (FSIMG_OK);
+	return (fsimg_writer_loss(writer, entry, FSIMG_META_MODIFIED,
+	    "ImageFS cannot preserve the requested modification time", error));
 }
 
 /* Check one catalog entry against the profile and fill its row: its name

@@ -21,6 +21,7 @@ static fsimg_status_t reject_aliases(fsimg_writer_t *,
 static fsimg_status_t check_capabilities(fsimg_writer_t *, fsimg_error_t *);
 static fsimg_status_t check_entry_capabilities(fsimg_writer_t *,
     const fsimg_entry_t *, bool, fsimg_error_t *);
+static bool loss_refused(const fsimg_writer_t *, uint32_t, uint32_t);
 static bool variant_of(const fsimg_format_t *, const fsimg_format_variant_t *);
 static fsimg_status_t plan_layers(fsimg_ctx_t *, const fsimg_stack_t *,
     fsimg_write_options_t *, fsimg_layer_options_t *, fsimg_disk_plan_t *,
@@ -574,6 +575,7 @@ fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
 	if (status != FSIMG_OK)
 		return (status);
 	writer->session.progress.phase = "image planning";
+	writer->metadata_losses = 0;
 	status = check_capabilities(writer, error);
 	if (status != FSIMG_OK)
 		return (fsimg_writer_fail(writer, status));
@@ -594,7 +596,7 @@ fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
 		writer->plan = NULL;
 		return (fsimg_writer_fail(writer, status));
 	}
-	fsimg_stat_add(&writer->plan->info.metadata_losses, writer->omitted_fields);
+	writer->plan->info.metadata_losses = writer->metadata_losses;
 	*out = writer->plan;
 	return (FSIMG_OK);
 }
@@ -636,17 +638,17 @@ plan_disk(fsimg_writer_t *writer, fsimg_error_t *error)
  * capability record, so no driver ever receives an entry kind it lacks and
  * the policy for a field a format does not store is the same for every
  * format. An entry kind the format lacks or a symbolic-link target longer
- * than its limit always fails; neither is a metadata loss. An omitted field
- * follows the optional loss policy: a required one fails, an optional one
- * is counted once and reported under ALLOW_LOSS and fails without it.
+ * than its limit always fails; neither is a metadata loss. A field the
+ * format omits goes to fsimg_writer_loss(), one mask per entry; drivers see
+ * only the fields the format stores, so no field is submitted twice.
  *
  * The catalog's unions of kinds, valid fields and required fields, and its
  * longest link target, decide the outcome before any entry is read again,
  * because each failure condition holds for the catalog exactly when it
  * holds for some entry.
- * The pass over the catalog then either names the first failing entry or,
- * when nothing fails, reports each omission; a failed plan reports no loss.
- * When nothing is omitted the catalog is not read at all.
+ * The pass over the catalog then either names the first failing entry,
+ * reporting no omission on the way, or, when nothing fails, reports each
+ * omission. When nothing is omitted the catalog is not read at all.
  */
 static fsimg_status_t
 check_capabilities(fsimg_writer_t *writer, fsimg_error_t *error)
@@ -655,14 +657,12 @@ check_capabilities(fsimg_writer_t *writer, fsimg_error_t *error)
 	const fsimg_catalog_entry_t *catalog;
 	fsimg_status_t status;
 	uint32_t omitted;
-	bool fails, refused;
+	bool fails;
 
-	writer->omitted_fields = 0;
 	omitted = writer->catalog_fields & ~capabilities->metadata_fields;
-	refused = (writer->catalog_kinds & ~capabilities->entry_kinds) != 0 ||
-	    writer->catalog_link_target_max > capabilities->max_link_target_bytes;
-	fails = refused || (writer->catalog_required & omitted) != 0 ||
-	    (omitted != 0 && (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0);
+	fails = (writer->catalog_kinds & ~capabilities->entry_kinds) != 0 ||
+	    writer->catalog_link_target_max > capabilities->max_link_target_bytes ||
+	    loss_refused(writer, writer->catalog_required, omitted);
 	if (!fails && omitted == 0)
 		return (FSIMG_OK);
 	for (uint64_t id = 1; id <= writer->count; id++) {
@@ -680,8 +680,10 @@ check_capabilities(fsimg_writer_t *writer, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* Fail for an entry the format cannot store; otherwise, when report is set,
- * count and report the fields the format omits.
+/* Fail for an entry the format cannot store. Then submit the fields the
+ * format omits to the loss policy: always when report is set, and
+ * otherwise only when the policy refuses them, so a failing pass reports
+ * no loss.
  */
 static fsimg_status_t
 check_entry_capabilities(fsimg_writer_t *writer, const fsimg_entry_t *entry,
@@ -691,27 +693,54 @@ check_entry_capabilities(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 	fsimg_status_t status;
 	uint32_t omitted;
 
-	status = FSIMG_OK;
-	omitted = entry->metadata.valid & ~capabilities->metadata_fields;
-	if ((entry->kind & ~capabilities->entry_kinds) != 0)
+	if ((entry->kind & ~capabilities->entry_kinds) != 0) {
 		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "the image format cannot store this entry kind");
-	else if (entry->kind == FSIMG_ENTRY_SYMLINK &&
-	    entry->size > capabilities->max_link_target_bytes)
-		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_WRITER,
-		    "the image format cannot store a symbolic-link target this long");
-	else if ((entry->metadata.required & omitted) != 0 ||
-	    (omitted != 0 && (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0))
-		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_WRITER, "the image format cannot store requested metadata");
-	if (status != FSIMG_OK) {
 		fsimg_error_path(error, entry->path);
 		return (status);
 	}
-	if (report)
-		fsimg_stat_add(&writer->omitted_fields,
-		    fsimg_report_loss(writer->ctx, entry->path, omitted));
+	if (entry->kind == FSIMG_ENTRY_SYMLINK &&
+	    entry->size > capabilities->max_link_target_bytes) {
+		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_WRITER,
+		    "the image format cannot store a symbolic-link target this long");
+		fsimg_error_path(error, entry->path);
+		return (status);
+	}
+	omitted = entry->metadata.valid & ~capabilities->metadata_fields;
+	if (!report && !loss_refused(writer, entry->metadata.required, omitted))
+		return (FSIMG_OK);
+	return (fsimg_writer_loss(writer, entry, omitted,
+	    "the image format cannot store requested metadata", error));
+}
+
+/* Whether the loss policy refuses losing fields, given the entry's
+ * required mask: when any of them is required, or without ALLOW_LOSS.
+ */
+static bool
+loss_refused(const fsimg_writer_t *writer, uint32_t required, uint32_t fields)
+{
+	return (fields != 0 && ((required & fields) != 0 ||
+	    (writer->options.flags & FSIMG_WRITE_ALLOW_LOSS) == 0));
+}
+
+fsimg_status_t
+fsimg_writer_loss(fsimg_writer_t *writer, const fsimg_entry_t *entry,
+    uint32_t fields, const char *message, fsimg_error_t *error)
+{
+	if (fields == 0)
+		return (FSIMG_OK);
+	if ((fields & ~(entry->metadata.valid & FSIMG_META_KNOWN)) != 0)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "a metadata loss names a field the entry lacks"));
+	if (loss_refused(writer, entry->metadata.required, fields)) {
+		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_WRITER,
+		    message);
+		fsimg_error_path(error, entry->path);
+		return (FSIMG_EUNSUPPORTED);
+	}
+	fsimg_stat_add(&writer->metadata_losses,
+	    fsimg_report_loss(writer->ctx, entry->path, fields));
 	return (FSIMG_OK);
 }
 

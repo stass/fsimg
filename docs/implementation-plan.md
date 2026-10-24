@@ -411,7 +411,7 @@ on the separate Relic experiments in that analysis.
 | Stage | Design and work | Completion evidence |
 | --- | --- | --- |
 | Shared settings | [Settings catalogue](../specs/design-settings.md): replace duplicate key, type, default and applicability descriptions in library and CLI; keep the explicit wire codec | Independent CLI/library cases agree; presence/default distinctions, capability ordering and wire vectors are unchanged; adding a setting needs no parallel consumer key list |
-| Writer loss policy | [Metadata losses](../specs/design-metadata-loss.md): one writer count/refusal/report operation, disjoint omissions and encoding losses, narrow seconds helper and DOS conversion reuse | Exact field counts and callback ordering, required refusals and partial-failure observations, format time semantics and reproducible bytes match the contract |
+| Writer loss policy | [Metadata losses](../specs/design-metadata-loss.md): one writer count/refusal/report operation, disjoint omissions and encoding losses, narrow seconds helper and DOS conversion reuse | Complete: exact field counts and callback ordering, required refusals and partial-failure observations, format time semantics and reproducible bytes match the contract |
 | Container plans | [Private plans](../specs/design-container-plans.md): convert VHD, DMG, simg and ifsboot to descriptor-owned extensions and explicit common summary facts | Create, wrap and compose retain bytes and bounds; allocation/open/bound/emission failures release partial and complete state once; codec reporting and file-setting borrowing agree |
 
 The first two stages are independent. Container plans consume the same typed
