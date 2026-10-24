@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "qnx4.h"
 #include "unicode.h"
 
@@ -165,8 +166,8 @@ admit(qnx4_prepare_t *prepare, const char *name, const qnx4_inode_t *object,
 	status = count_name(prepare, object, place, table_slot, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fsimg_meta_put_u64(payload, position);
-	fsimg_meta_put_u64(payload + 8, prepare->self);
+	fsimg_store_le64(payload, position);
+	fsimg_store_le64(payload + 8, prepare->self);
 	return (fsimg_directory_admit(prepare->build, name, payload,
 	    sizeof(payload), error));
 }
@@ -388,8 +389,8 @@ qnx4_replay(fsimg_reader_t *reader, const char *name,
 	qnx4->later_name = false;
 	if (length != QNX4_PAYLOAD_BYTES)
 		return (qnx4_corrupt(error, "invalid prepared QNX4 entry payload"));
-	position = fsimg_meta_get_u64(payload);
-	parent = fsimg_meta_get_u64(payload + 8);
+	position = fsimg_load_le64(payload);
+	parent = fsimg_load_le64(payload + 8);
 	if (parent / QNX4_SLOTS_PER_BLOCK > qnx4->geometry.blocks ||
 	    position / QNX4_SLOTS_PER_BLOCK > qnx4->geometry.blocks)
 		return (qnx4_corrupt(error, "invalid prepared QNX4 entry payload"));

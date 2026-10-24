@@ -11,6 +11,7 @@
 
 #include <zlib.h>
 
+#include "fsimg-endian.h"
 #include "host.h"
 #include "layer.h"
 #include "zlib-memory.h"
@@ -109,8 +110,8 @@ static fsimg_status_t encoder_finish(void *, fsimg_error_t *);
 static void encoder_close(void *);
 static fsimg_status_t deflate_out(gzip_encoder_t *, int, fsimg_error_t *);
 static unsigned char header_xfl(uint32_t);
-static fsimg_status_t zlib_started(const fsimg_zlib_memory_t *, int, const char *,
-    fsimg_error_t *);
+static fsimg_status_t zlib_failed(const fsimg_zlib_memory_t *, int,
+    const char *, fsimg_error_t *);
 static fsimg_status_t gzip_corrupt(fsimg_error_t *, const char *);
 static fsimg_status_t refill(gzip_decoder_t *, fsimg_error_t *);
 static fsimg_status_t next_byte(gzip_decoder_t *, unsigned char *, uLong *,
@@ -153,25 +154,25 @@ gzip_probe(const unsigned char *prefix, size_t length, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* The outcome of zlib's init: a memory failure as the context charged it,
- * or any other refusal as an internal error naming what was started.
+/*
+ * A zlib result that says nothing about the gzip data: an allocation
+ * failure as the adapter recorded it, or a fault of fsimg or of the zlib
+ * library in the named call.
  */
 static fsimg_status_t
-zlib_started(const fsimg_zlib_memory_t *memory, int code, const char *what,
+zlib_failed(const fsimg_zlib_memory_t *memory, int code, const char *call,
     fsimg_error_t *error)
 {
 	char message[64];
 
-	if (code == Z_OK)
-		return (FSIMG_OK);
 	if (code == Z_MEM_ERROR)
 		return (fsimg_zlib_memory_error(memory, error));
 	if (code == Z_VERSION_ERROR)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
 		    "the zlib library does not match its header"));
-	snprintf(message, sizeof(message), "zlib refused to start a %s (%d)",
-	    what, code);
-	return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE, message));
+	snprintf(message, sizeof(message), "zlib %s returned %d", call, code);
+	return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+	    message));
 }
 
 static fsimg_status_t
@@ -325,9 +326,9 @@ inflate_member(gzip_decoder_t *decoder, uLong *crc, uint64_t *length,
 	fsimg_status_t status;
 	int code;
 
-	if (inflateReset(stream) != Z_OK)
-		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
-		    "zlib refused to reset the gzip decoder"));
+	code = inflateReset(stream);
+	if (code != Z_OK)
+		return (zlib_failed(&decoder->memory, code, "inflateReset", error));
 	*crc = crc32(0, Z_NULL, 0);
 	*length = 0;
 	do {
@@ -339,18 +340,18 @@ inflate_member(gzip_decoder_t *decoder, uLong *crc, uint64_t *length,
 		stream->next_out = decoder->output;
 		stream->avail_out = GZIP_OUTPUT_BYTES;
 		code = inflate(stream, Z_NO_FLUSH);
-		if (code == Z_MEM_ERROR)
-			return (fsimg_zlib_memory_error(&decoder->memory, error));
-		if (code == Z_STREAM_ERROR)
-			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-			    FSIMG_OP_IMAGE, "zlib gzip decoder state is invalid"));
 		/* With input and a whole output buffer available, inflate either
 		 * makes progress or fails; Z_BUF_ERROR, no progress possible, is
 		 * malformed data too, so every pass consumes or produces bytes.
+		 * Raw DEFLATE has no dictionary, so a request for one is too.
 		 */
-		if (code != Z_OK && code != Z_STREAM_END)
+		if (code == Z_DATA_ERROR || code == Z_BUF_ERROR ||
+		    code == Z_NEED_DICT)
 			return (gzip_corrupt(error,
 			    "gzip member's DEFLATE data is invalid"));
+		if (code != Z_OK && code != Z_STREAM_END)
+			return (zlib_failed(&decoder->memory, code, "inflate",
+			    error));
 		produced = GZIP_OUTPUT_BYTES - stream->avail_out;
 		/* The bytes produced are work, as the compressed bytes were
 		 * when refill took them, so a decode costs what a container's
@@ -384,8 +385,8 @@ read_trailer(gzip_decoder_t *decoder, uLong crc, uint64_t length,
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	stored_crc = fsimg_layer_le32(trailer);
-	stored_length = fsimg_layer_le32(trailer + 4);
+	stored_crc = fsimg_load_le32(trailer);
+	stored_length = fsimg_load_le32(trailer + 4);
 	if (stored_crc != (uint32_t)crc)
 		return (gzip_corrupt(error, "gzip member CRC32 mismatch"));
 	if (stored_length != (uint32_t)length)
@@ -401,7 +402,6 @@ read_trailer(gzip_decoder_t *decoder, uLong crc, uint64_t length,
 static fsimg_status_t
 decoder_start(gzip_decoder_t *decoder, fsimg_error_t *error)
 {
-	fsimg_status_t status;
 	int code;
 
 	decoder->input = fsimg_alloc(decoder->source->ctx, GZIP_INPUT_BYTES,
@@ -415,9 +415,10 @@ decoder_start(gzip_decoder_t *decoder, fsimg_error_t *error)
 	fsimg_zlib_memory_bind(&decoder->memory, decoder->source->ctx,
 	    &decoder->stream);
 	code = inflateInit2(&decoder->stream, -MAX_WBITS);
-	status = zlib_started(&decoder->memory, code, "gzip decoder", error);
-	decoder->inflating = status == FSIMG_OK;
-	return (status);
+	if (code != Z_OK)
+		return (zlib_failed(&decoder->memory, code, "inflateInit2", error));
+	decoder->inflating = true;
+	return (FSIMG_OK);
 }
 
 static void
@@ -433,8 +434,8 @@ decoder_end(gzip_decoder_t *decoder)
 static fsimg_status_t
 decode_members(gzip_decoder_t *decoder, fsimg_error_t *error)
 {
-	uint64_t length;
-	uLong crc;
+	uint64_t length = 0;
+	uLong crc = 0;
 	fsimg_status_t status;
 
 	for (;;) {
@@ -528,7 +529,6 @@ encoder_open(fsimg_ctx_t *ctx, const fsimg_compression_settings_t *settings,
 {
 	unsigned char header[GZIP_HEADER_BYTES];
 	gzip_encoder_t *encoder;
-	fsimg_status_t status;
 	uint32_t mtime;
 	int code;
 
@@ -548,9 +548,8 @@ encoder_open(fsimg_ctx_t *ctx, const fsimg_compression_settings_t *settings,
 	fsimg_zlib_memory_bind(&encoder->memory, ctx, &encoder->stream);
 	code = deflateInit2(&encoder->stream, (int)settings->level, Z_DEFLATED,
 	    -MAX_WBITS, GZIP_MEMORY_LEVEL, Z_DEFAULT_STRATEGY);
-	status = zlib_started(&encoder->memory, code, "gzip encoder", error);
-	if (status != FSIMG_OK)
-		return (status);
+	if (code != Z_OK)
+		return (zlib_failed(&encoder->memory, code, "deflateInit2", error));
 	encoder->deflating = true;
 	encoder->crc = crc32(0, Z_NULL, 0);
 
@@ -560,7 +559,7 @@ encoder_open(fsimg_ctx_t *ctx, const fsimg_compression_settings_t *settings,
 	header[1] = 0x8b;
 	header[2] = GZIP_METHOD_DEFLATE;
 	header[3] = 0;
-	fsimg_layer_put_le32(header + 4, mtime);
+	fsimg_store_le32(header + 4, mtime);
 	header[8] = header_xfl(settings->level);
 	header[9] = GZIP_OS_UNIX;
 	return (fsimg_seq_write(sink, header, sizeof(header), error));
@@ -595,8 +594,8 @@ deflate_out(gzip_encoder_t *encoder, int flush, fsimg_error_t *error)
 		stream->avail_out = GZIP_PIECE_BYTES;
 		code = deflate(stream, flush);
 		if (code != Z_OK && code != Z_STREAM_END && code != Z_BUF_ERROR)
-			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-			    FSIMG_OP_IMAGE, "zlib failed to deflate"));
+			return (zlib_failed(&encoder->memory, code, "deflate",
+			    error));
 		status = fsimg_seq_write(encoder->sink, encoder->output,
 		    GZIP_PIECE_BYTES - stream->avail_out, error);
 		if (status != FSIMG_OK)
@@ -655,8 +654,8 @@ encoder_finish(void *state, fsimg_error_t *error)
 	status = deflate_out(encoder, Z_FINISH, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fsimg_layer_put_le32(trailer, (uint32_t)encoder->crc);
-	fsimg_layer_put_le32(trailer + 4, (uint32_t)encoder->length);
+	fsimg_store_le32(trailer, (uint32_t)encoder->crc);
+	fsimg_store_le32(trailer + 4, (uint32_t)encoder->length);
 	return (fsimg_seq_write(encoder->sink, trailer, sizeof(trailer), error));
 }
 

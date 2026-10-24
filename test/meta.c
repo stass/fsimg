@@ -16,6 +16,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "host.h"
 #include "meta.h"
 #include "test.h"
@@ -284,12 +285,12 @@ test_streams(void)
 	CHECK(fsimg_stream_next(stream, &cursor, NULL, 0, &length, NULL) == FSIMG_DONE);
 
 	/* A valid frame cannot direct a copy beyond the declared record bound. */
-	fsimg_meta_put_u64(header, ((uint64_t)UINT32_MAX << 32) | 1);
+	fsimg_store_le64(header, ((uint64_t)UINT32_MAX << 32) | 1);
 	CHECK(fsimg_store_write(stream->store, 8, header, sizeof(header), NULL) == FSIMG_OK);
 	cursor = 8;
 	CHECK(fsimg_stream_next(stream, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_ECORRUPT);
 	CHECK(cursor == 8 && length == 0);
-	fsimg_meta_put_u64(header, ((uint64_t)sizeof(data) << 32) | 2);
+	fsimg_store_le64(header, ((uint64_t)sizeof(data) << 32) | 2);
 	CHECK(fsimg_store_write(stream->store, 8, header, sizeof(header), NULL) == FSIMG_OK);
 	CHECK(fsimg_stream_next(stream, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_ECORRUPT);
 	cursor = fsimg_store_size(stream->store) - 3;
@@ -417,13 +418,13 @@ test_spilled_growth_host_calls(void)
 	fixture_open(&fixture, 1, 1024 * 1024, 3);
 	CHECK(fsimg_stream_new(&fixture.session, sizeof(record), &stream, NULL) == FSIMG_OK);
 	for (uint32_t i = 0; i < 1024; i++) {
-		fsimg_meta_put_u64(record, i);
+		fsimg_store_le64(record, i);
 		CHECK(fsimg_stream_append(stream, record, sizeof(record), NULL, NULL) == FSIMG_OK);
 	}
 	CHECK(fsimg_ctx_get_stats(fixture.ctx, &before, NULL) == FSIMG_OK);
 	CHECK(before.scratch_bytes != 0);
 	for (uint32_t i = 1024; i < 10240; i++) {
-		fsimg_meta_put_u64(record, i);
+		fsimg_store_le64(record, i);
 		CHECK(fsimg_stream_append(stream, record, sizeof(record), &reference, NULL) == FSIMG_OK);
 	}
 	CHECK(fsimg_ctx_get_stats(fixture.ctx, &after, NULL) == FSIMG_OK);
@@ -434,7 +435,7 @@ test_spilled_growth_host_calls(void)
 	cursor = 0;
 	for (uint32_t i = 0; i < 10240; i++) {
 		CHECK(fsimg_stream_next(stream, &cursor, buffer, sizeof(buffer), &length, NULL) == FSIMG_OK);
-		CHECK(length == sizeof(buffer) && fsimg_meta_get_u64(buffer) == i);
+		CHECK(length == sizeof(buffer) && fsimg_load_le64(buffer) == i);
 	}
 	CHECK(fsimg_stream_next(stream, &cursor, NULL, 0, &length, NULL) == FSIMG_DONE);
 	fsimg_stream_free(stream);
@@ -943,7 +944,7 @@ test_extent_scratch(void)
 	CHECK(fsimg_store_read(fsimg_test_extent_records(index), 500 * 24, saved,
 	    sizeof(saved), NULL) == FSIMG_OK);
 	bcopy(saved, damaged, sizeof(damaged));
-	fsimg_meta_put_u64(damaged + 8, 0);
+	fsimg_store_le64(damaged + 8, 0);
 	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 500 * 24,
 	    damaged, sizeof(damaged), NULL) == FSIMG_OK);
 	CHECK(fsimg_extent_index_lookup(index, 500 * 512, &extent, NULL) ==
@@ -953,7 +954,7 @@ test_extent_scratch(void)
 	    FSIMG_ECORRUPT);
 	/* A valid-looking record at the wrong logical offset breaks tiling. */
 	bcopy(saved, damaged, sizeof(damaged));
-	fsimg_meta_put_u64(damaged, 499 * 512);
+	fsimg_store_le64(damaged, 499 * 512);
 	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 500 * 24,
 	    damaged, sizeof(damaged), NULL) == FSIMG_OK);
 	CHECK(fsimg_extent_index_walk(index, count_extent, &bytes, NULL) ==
@@ -972,7 +973,7 @@ test_extent_scratch(void)
 	CHECK(fsimg_store_read(fsimg_test_extent_records(index), 11 * 24, saved,
 	    sizeof(saved), NULL) == FSIMG_OK);
 	bcopy(saved, damaged, sizeof(damaged));
-	fsimg_meta_put_u64(damaged, 20 * 512);
+	fsimg_store_le64(damaged, 20 * 512);
 	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 11 * 24,
 	    damaged, sizeof(damaged), NULL) == FSIMG_OK);
 	CHECK(fsimg_extent_index_lookup(index, 11 * 512, &extent, NULL) ==
@@ -982,7 +983,7 @@ test_extent_scratch(void)
 	CHECK(fsimg_store_read(fsimg_test_extent_records(index), 700 * 24, saved,
 	    sizeof(saved), NULL) == FSIMG_OK);
 	bcopy(saved, damaged, sizeof(damaged));
-	fsimg_meta_put_u64(damaged, 699 * 512);
+	fsimg_store_le64(damaged, 699 * 512);
 	CHECK(fsimg_store_write(fsimg_test_extent_records(index), 700 * 24,
 	    damaged, sizeof(damaged), NULL) == FSIMG_OK);
 	CHECK(fsimg_extent_index_lookup(index, 700 * 512 + 3, &extent, NULL) ==

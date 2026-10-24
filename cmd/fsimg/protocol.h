@@ -282,8 +282,6 @@ typedef struct fsimg_frame_decoder {
 	bool		 complete;
 } fsimg_frame_decoder_t;
 
-void fsimg_wire_put64(unsigned char *, uint64_t);
-uint64_t fsimg_wire_get64(const unsigned char *);
 int64_t fsimg_wire_get_signed64(const unsigned char *);
 fsimg_status_t fsimg_frame_header(unsigned char *, fsimg_frame_type_t,
     uint32_t, fsimg_error_t *);

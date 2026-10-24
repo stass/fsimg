@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "worker.h"
 
 /* This process owns potentially blocking stdout/stderr writes. Its fixed input
@@ -40,10 +41,10 @@ report(const uint64_t confirmed[2], int failure, unsigned marker)
 	size_t offset;
 	ssize_t written;
 
-	fsimg_wire_put64(raw + FSIMG_RELAY_STDOUT, confirmed[0]);
-	fsimg_wire_put64(raw + FSIMG_RELAY_STDERR, confirmed[1]);
-	fsimg_wire_put64(raw + FSIMG_RELAY_ERRNO, (uint64_t)failure);
-	fsimg_wire_put64(raw + FSIMG_RELAY_MARKER, marker);
+	fsimg_store_le64(raw + FSIMG_RELAY_STDOUT, confirmed[0]);
+	fsimg_store_le64(raw + FSIMG_RELAY_STDERR, confirmed[1]);
+	fsimg_store_le64(raw + FSIMG_RELAY_ERRNO, (uint64_t)failure);
+	fsimg_store_le64(raw + FSIMG_RELAY_MARKER, marker);
 	offset = 0;
 	while (offset < sizeof(raw)) {
 		written = write(4, raw + offset, sizeof(raw) - offset);
@@ -145,8 +146,8 @@ fsimg_output_main(void)
 			code = report(confirmed, failure, 2);
 			return (code == 0 && failure == 0 ? 0 : 1);
 		}
-		stream = fsimg_wire_get64(header + FSIMG_RELAY_STREAM);
-		remaining = fsimg_wire_get64(header + FSIMG_RELAY_LENGTH);
+		stream = fsimg_load_le64(header + FSIMG_RELAY_STREAM);
+		remaining = fsimg_load_le64(header + FSIMG_RELAY_LENGTH);
 		if (stream < 1 || stream > 2 || remaining == 0 ||
 		    remaining > FSIMG_WORKER_TEXT_BYTES) {
 			report(confirmed, EINVAL, 2);

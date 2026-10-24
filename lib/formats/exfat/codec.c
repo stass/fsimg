@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "exfat.h"
+#include "fsimg-endian.h"
 #include "unicode.h"
 
 static fsimg_status_t decode_time(const unsigned char *, unsigned,
@@ -15,34 +16,6 @@ static bool encode_timestamp(const fsimg_timestamp_t *, unsigned, unsigned char 
 static fsimg_status_t encode_time(fsimg_plan_t *, const fsimg_entry_t *,
     uint32_t, const fsimg_timestamp_t *, unsigned, unsigned char *,
     fsimg_error_t *);
-
-uint16_t
-exfat_u16(const unsigned char *p)
-{
-	return ((uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8));
-}
-
-uint32_t
-exfat_u32(const unsigned char *p)
-{
-	return ((uint32_t)p[0] | (uint32_t)p[1] << 8 |
-	    (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
-}
-
-void
-exfat_put16(unsigned char *p, uint16_t value)
-{
-	p[0] = (unsigned char)value;
-	p[1] = (unsigned char)(value >> 8);
-}
-
-void
-exfat_put32(unsigned char *p, uint32_t value)
-{
-	exfat_put16(p, (uint16_t)value);
-	exfat_put16(p + 2, (uint16_t)(value >> 16));
-}
-
 uint32_t
 exfat_checksum32(uint32_t sum, unsigned char byte)
 {
@@ -160,7 +133,7 @@ decode_time(const unsigned char *raw, unsigned index, fsimg_timestamp_t *out,
 	unsigned increment, offset_byte;
 	int offset;
 
-	packed = exfat_u32(raw + 8 + index * 4);
+	packed = fsimg_load_le32(raw + 8 + index * 4);
 	increment = index < 2 ? raw[20 + index] : 0;
 	if (!fsimg_dos_time_decode((uint16_t)(packed >> 16), (uint16_t)packed,
 	    increment, index < 2 ? 10000000 : 2000000000, out))
@@ -191,12 +164,12 @@ exfat_entry_decode(const unsigned char *raw, fsimg_entry_t *entry,
 	bzero(stream, sizeof(*stream));
 	if (raw[0] != 0x85 || raw[32] != 0xc0 || (raw[33] & 1) == 0)
 		return (exfat_corrupt(error, "invalid exFAT file or stream entry"));
-	attributes = exfat_u16(raw + 4);
+	attributes = fsimg_load_le16(raw + 4);
 	entry->kind = (attributes & 16) != 0 ?
 	    FSIMG_ENTRY_DIRECTORY : FSIMG_ENTRY_FILE;
-	stream->length = fsimg_meta_get_u64(raw + 56);
-	stream->valid_length = fsimg_meta_get_u64(raw + 40);
-	stream->first = exfat_u32(raw + 52);
+	stream->length = fsimg_load_le64(raw + 56);
+	stream->valid_length = fsimg_load_le64(raw + 40);
+	stream->first = fsimg_load_le32(raw + 52);
 	stream->contiguous = (raw[33] & 2) != 0;
 	entry->size = entry->kind == FSIMG_ENTRY_FILE ? stream->length : 0;
 	entry->metadata.attributes = (attributes & 7) |
@@ -242,7 +215,7 @@ encode_timestamp(const fsimg_timestamp_t *selected, unsigned index,
 		return (false);
 	offset = selected->basis == FSIMG_TIME_WALL ? 0 :
 	    (unsigned char)(0x80 | ((selected->offset_minutes / 15) & 0x7f));
-	exfat_put32(raw + 8 + index * 4, packed);
+	fsimg_store_le32(raw + 8 + index * 4, packed);
 	raw[22 + index] = offset;
 	if (index < 2) {
 		raw[20 + index] = (unsigned char)(odd * 100 +
@@ -300,7 +273,7 @@ exfat_metadata_encode(fsimg_plan_t *plan, const fsimg_entry_t *entry,
 	raw[0] = 0x85;
 	attributes = (entry->metadata.valid & FSIMG_META_ATTRIBUTES) != 0 ?
 	    entry->metadata.attributes : 0;
-	exfat_put16(raw + 4, (uint16_t)((attributes & 7) |
+	fsimg_store_le16(raw + 4, (uint16_t)((attributes & 7) |
 	    ((attributes & FSIMG_ATTR_ARCHIVE) != 0 ? 32 : 0) |
 	    (entry->kind == FSIMG_ENTRY_DIRECTORY ? 16 : 0)));
 	times[0] = &entry->metadata.created;

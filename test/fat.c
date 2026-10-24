@@ -18,6 +18,7 @@
 
 #include "baseline.h"
 #include "fat.h"
+#include "fsimg-endian.h"
 #include "test.h"
 
 /* This fixture builder encodes disk fields directly, independently of the
@@ -1883,7 +1884,7 @@ test_cached_index(void)
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1024, &byte, 1, &count, NULL) == FSIMG_OK);
 	CHECK(fsimg_test_extent_count(fsimg_fat_state(f.reader)->index) == 3);
-	fsimg_meta_put_u64(record, 1);
+	fsimg_store_le64(record, 1);
 	CHECK(fsimg_store_write(fsimg_test_extent_records(fsimg_fat_state(f.reader)->index),
 	    0, record, sizeof(record), NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 1, &byte, 1, &count, NULL) == FSIMG_ECORRUPT);
@@ -2013,8 +2014,8 @@ test_external(const char *path, const char *format)
 				    fsimg_fat_state(reader)->current_cluster) + 32;
 				CHECK(fsimg_io_read_exact(io, address, dotdot, sizeof(dotdot), &count, NULL) == FSIMG_OK);
 				CHECK(bcmp(dotdot, "..         ", 11) == 0);
-				parent_cluster = fsimg_fat_u16(dotdot + 26) |
-				    (uint32_t)fsimg_fat_u16(dotdot + 20) << 16;
+				parent_cluster = fsimg_load_le16(dotdot + 26) |
+				    (uint32_t)fsimg_load_le16(dotdot + 20) << 16;
 				printf("FAT32 external root-parent dotdot cluster=%u\n", parent_cluster);
 				CHECK(parent_cluster == 0);
 			}

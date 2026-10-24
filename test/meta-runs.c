@@ -14,11 +14,12 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "host.h"
 #include "meta.h"
 #include "test.h"
 
-/* Exclusive ownership runs (specs/design-verification-helpers.md). The
+/* Exclusive ownership runs. The
  * expected answers are written here from the design: record layout, claim
  * rules, order and overlap verdicts. No driver is involved.
  */
@@ -493,7 +494,7 @@ test_scratch_corruption(void)
 	    FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 2, 2, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
-	fsimg_meta_put_u64(frame, (uint64_t)(RECORD_BYTES + 1) << 32 | 1);
+	fsimg_store_le64(frame, (uint64_t)(RECORD_BYTES + 1) << 32 | 1);
 	CHECK(fsimg_store_write(fsimg_test_owner_runs_stream(runs)->store, 0,
 	    frame, sizeof(frame), NULL) == FSIMG_OK);
 	expect_corrupt_next(runs, 0, "frame");

@@ -8,6 +8,7 @@
 #include <strings.h>
 
 #include "codec.h"
+#include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 
@@ -124,14 +125,14 @@ hbcifs_probe(const unsigned char *prefix, size_t length,
 	if (length < HBCIFS_HEADER_BYTES || file_bytes < HBCIFS_HEADER_BYTES)
 		return (hbcifs_failure(error, FSIMG_ECORRUPT,
 		    "hbcifs header is truncated"));
-	if (fsimg_layer_le32(prefix + HEADER_PAYLOAD) !=
+	if (fsimg_load_le32(prefix + HEADER_PAYLOAD) !=
 	    file_bytes - HBCIFS_HEADER_BYTES)
 		return (hbcifs_failure(error, FSIMG_ECORRUPT,
 		    "hbcifs payload length is not the file length minus 64"));
-	if (fsimg_layer_le32(prefix + HEADER_DECODED) == 0)
+	if (fsimg_load_le32(prefix + HEADER_DECODED) == 0)
 		return (hbcifs_failure(error, FSIMG_ECORRUPT,
 		    "hbcifs decoded length is zero"));
-	if (fsimg_layer_le32(prefix + HEADER_FIELD_10) != HBCIFS_FIELD_10)
+	if (fsimg_load_le32(prefix + HEADER_FIELD_10) != HBCIFS_FIELD_10)
 		return (hbcifs_failure(error, FSIMG_EUNSUPPORTED,
 		    "hbcifs header field 0x10 holds an unobserved value"));
 	if (bcmp(prefix + HEADER_FIELD_18, hbcifs_field_18,
@@ -310,7 +311,7 @@ report_header(const unsigned char *header, fsimg_container_t *out)
 	for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
 		snprintf(out->details[i].name, sizeof(out->details[i].name),
 		    "%s", fields[i].name);
-		out->details[i].value = fsimg_layer_le32(header +
+		out->details[i].value = fsimg_load_le32(header +
 		    fields[i].offset);
 	}
 	out->detail_count = sizeof(fields) / sizeof(fields[0]);
@@ -347,7 +348,7 @@ hbcifs_open(const fsimg_container_input_t *input, fsimg_container_t *out,
 		return (status);
 	if (input->spool == NULL)
 		return (fsimg_limit_error(error, FSIMG_RESOURCE_SPOOL, 0, 0));
-	decoded = fsimg_layer_le32(header + HEADER_DECODED);
+	decoded = fsimg_load_le32(header + HEADER_DECODED);
 	status = decode_payload(input, decoded, error);
 	if (status == FSIMG_OK)
 		status = fsimg_spool_seal(input->spool, &spooled, error);

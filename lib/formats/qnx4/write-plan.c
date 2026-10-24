@@ -7,6 +7,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "fsimg-endian.h"
 #include "unicode.h"
 #include "write-qnx4.h"
 
@@ -119,22 +120,22 @@ qnx4_row_get(qnx4_plan_t *plan, uint64_t id, qnx4_row_t *row,
 	status = fsimg_array_get(plan->rows, id, raw, error);
 	if (status != FSIMG_OK)
 		return (status);
-	row->size = fsimg_meta_get_u32(raw);
-	row->first = fsimg_meta_get_u32(raw + 4);
-	row->blocks = fsimg_meta_get_u32(raw + 8);
-	row->record_block = fsimg_meta_get_u32(raw + 12);
-	row->slot = fsimg_meta_get_u32(raw + 16);
-	row->next_slot = fsimg_meta_get_u32(raw + 20);
-	row->inode_slot = fsimg_meta_get_u32(raw + 24);
-	row->long_name = fsimg_meta_get_u32(raw + 28);
-	row->created = fsimg_meta_get_u32(raw + 32);
-	row->modified = fsimg_meta_get_u32(raw + 36);
-	row->accessed = fsimg_meta_get_u32(raw + 40);
-	row->changed = fsimg_meta_get_u32(raw + 44);
-	row->uid = qnx4_u16(raw + 48);
-	row->gid = qnx4_u16(raw + 50);
-	row->mode = qnx4_u16(raw + 52);
-	row->links = qnx4_u16(raw + 54);
+	row->size = fsimg_load_le32(raw);
+	row->first = fsimg_load_le32(raw + 4);
+	row->blocks = fsimg_load_le32(raw + 8);
+	row->record_block = fsimg_load_le32(raw + 12);
+	row->slot = fsimg_load_le32(raw + 16);
+	row->next_slot = fsimg_load_le32(raw + 20);
+	row->inode_slot = fsimg_load_le32(raw + 24);
+	row->long_name = fsimg_load_le32(raw + 28);
+	row->created = fsimg_load_le32(raw + 32);
+	row->modified = fsimg_load_le32(raw + 36);
+	row->accessed = fsimg_load_le32(raw + 40);
+	row->changed = fsimg_load_le32(raw + 44);
+	row->uid = fsimg_load_le16(raw + 48);
+	row->gid = fsimg_load_le16(raw + 50);
+	row->mode = fsimg_load_le16(raw + 52);
+	row->links = fsimg_load_le16(raw + 54);
 	row->record_slot = raw[56];
 	row->status = raw[57];
 	return (FSIMG_OK);
@@ -147,22 +148,22 @@ qnx4_row_set(qnx4_plan_t *plan, uint64_t id, const qnx4_row_t *row,
 	unsigned char raw[QNX4_ROW_BYTES];
 
 	bzero(raw, sizeof(raw));
-	fsimg_meta_put_u32(raw, row->size);
-	fsimg_meta_put_u32(raw + 4, row->first);
-	fsimg_meta_put_u32(raw + 8, row->blocks);
-	fsimg_meta_put_u32(raw + 12, row->record_block);
-	fsimg_meta_put_u32(raw + 16, row->slot);
-	fsimg_meta_put_u32(raw + 20, row->next_slot);
-	fsimg_meta_put_u32(raw + 24, row->inode_slot);
-	fsimg_meta_put_u32(raw + 28, row->long_name);
-	fsimg_meta_put_u32(raw + 32, row->created);
-	fsimg_meta_put_u32(raw + 36, row->modified);
-	fsimg_meta_put_u32(raw + 40, row->accessed);
-	fsimg_meta_put_u32(raw + 44, row->changed);
-	qnx4_put16(raw + 48, row->uid);
-	qnx4_put16(raw + 50, row->gid);
-	qnx4_put16(raw + 52, row->mode);
-	qnx4_put16(raw + 54, row->links);
+	fsimg_store_le32(raw, row->size);
+	fsimg_store_le32(raw + 4, row->first);
+	fsimg_store_le32(raw + 8, row->blocks);
+	fsimg_store_le32(raw + 12, row->record_block);
+	fsimg_store_le32(raw + 16, row->slot);
+	fsimg_store_le32(raw + 20, row->next_slot);
+	fsimg_store_le32(raw + 24, row->inode_slot);
+	fsimg_store_le32(raw + 28, row->long_name);
+	fsimg_store_le32(raw + 32, row->created);
+	fsimg_store_le32(raw + 36, row->modified);
+	fsimg_store_le32(raw + 40, row->accessed);
+	fsimg_store_le32(raw + 44, row->changed);
+	fsimg_store_le16(raw + 48, row->uid);
+	fsimg_store_le16(raw + 50, row->gid);
+	fsimg_store_le16(raw + 52, row->mode);
+	fsimg_store_le16(raw + 54, row->links);
 	raw[56] = row->record_slot;
 	raw[57] = row->status;
 	return (fsimg_array_set(plan->rows, id, raw, error));

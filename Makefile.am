@@ -37,9 +37,11 @@ noinst_LTLIBRARIES = libfsimg-core.la
 libfsimg_la_SOURCES =
 libfsimg_la_LIBADD = libfsimg-core.la
 libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
+	lib/core/fsimg-endian.h \
 	lib/core/unicode.c lib/core/unicode.h lib/core/case-tables.h \
 	lib/core/calendar.c lib/core/sha256.c lib/core/sha256.h \
 	lib/core/settings.c lib/core/settings.h \
+	lib/core/zlib-memory.c lib/core/zlib-memory.h \
 	lib/formats/format.c lib/formats/format.h \
 	lib/io/io.c lib/output/publish.c lib/output/publish.h \
 	lib/output/write.c \
@@ -61,7 +63,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/layers/chunks.c lib/layers/plist.c lib/layers/dmg.c \
 	lib/layers/vhd.c lib/layers/simg.c lib/layers/transcode.c \
 	lib/layers/spool.c lib/layers/gzip.c lib/layers/ifsboot.c \
-	lib/layers/hbcifs.c lib/layers/zlib-memory.c lib/layers/zlib-memory.h \
+	lib/layers/hbcifs.c \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
@@ -125,7 +127,8 @@ example_read_slice_SOURCES = examples/read-slice.c examples/example.h
 example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
-test_programs = test-core test-private test-io test-meta test-meta-sort test-meta-runs test-unicode test-format \
+test_programs = test-core test-endian test-endian-unsigned-char \
+	test-private test-io test-meta test-meta-sort test-meta-runs test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-driver-contracts test-layer-contracts test-zlib-memory \
 	test-metadata-loss \
@@ -152,6 +155,13 @@ nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
 	test/spec.sh \
 	test/codec-integration.sh
+# The scalar codecs, built once with each signedness of plain char.
+test_endian_SOURCES = test/endian.c test/test.h lib/core/fsimg-endian.h
+test_endian_CFLAGS = $(AM_CFLAGS) -fsigned-char
+test_endian_unsigned_char_SOURCES = $(test_endian_SOURCES)
+test_endian_unsigned_char_CFLAGS = $(AM_CFLAGS) -funsigned-char
+test_zlib_memory_SOURCES = test/zlib-memory.c test/test.h
+test_zlib_memory_LDADD = libfsimg-core.la $(ZLIB_LIBS)
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
@@ -245,8 +255,6 @@ test_driver_contracts_LDADD = libfsimg.la
 test_layer_contracts_SOURCES = test/layer-contracts.c test/contract.c \
 	test/contract.h
 test_layer_contracts_LDADD = libfsimg.la
-test_zlib_memory_SOURCES = test/zlib-memory.c test/test.h
-test_zlib_memory_LDADD = libfsimg-core.la
 test_emit_SOURCES = test/emit.c test/test.h
 test_emit_LDADD = libfsimg.la
 test_metadata_loss_SOURCES = test/metadata-loss.c test/test.h

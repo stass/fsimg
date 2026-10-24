@@ -185,10 +185,6 @@ fsimg_status_t fsimg_stream_sort(fsimg_stream_t *, fsimg_compare_fn_t,
     void *, const fsimg_sort_options_t *, fsimg_stream_t **, fsimg_error_t *);
 
 /* Shared frame codec also bounds records inside a sort run. */
-void fsimg_meta_put_u32(unsigned char *, uint32_t);
-uint32_t fsimg_meta_get_u32(const unsigned char *);
-void fsimg_meta_put_u64(unsigned char *, uint64_t);
-uint64_t fsimg_meta_get_u64(const unsigned char *);
 fsimg_status_t fsimg_record_length(fsimg_store_t *, uint64_t, uint64_t,
     uint32_t, uint32_t *, fsimg_error_t *);
 fsimg_status_t fsimg_record_append(fsimg_store_t *, const void *, uint32_t,

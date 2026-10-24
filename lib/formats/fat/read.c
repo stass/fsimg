@@ -28,6 +28,7 @@
 
 #include "fat.h"
 #include "format.h"
+#include "fsimg-endian.h"
 
 static fsimg_status_t table_byte(fsimg_reader_t *, unsigned, uint64_t,
     unsigned char *, fsimg_error_t *);
@@ -95,11 +96,11 @@ table_value(fsimg_reader_t *reader, unsigned table, uint32_t cluster,
 			return (status);
 	}
 	if (g->variant == 12)
-		*out = (cluster & 1) != 0 ? fsimg_fat_u16(bytes) >> 4 : fsimg_fat_u16(bytes) & 0xfff;
+		*out = (cluster & 1) != 0 ? fsimg_load_le16(bytes) >> 4 : fsimg_load_le16(bytes) & 0xfff;
 	else if (g->variant == 16)
-		*out = fsimg_fat_u16(bytes);
+		*out = fsimg_load_le16(bytes);
 	else
-		*out = fsimg_fat_u32(bytes) & 0x0fffffff;
+		*out = fsimg_load_le32(bytes) & 0x0fffffff;
 	return (FSIMG_OK);
 }
 

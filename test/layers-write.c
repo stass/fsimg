@@ -633,7 +633,8 @@ test_settings(void)
 	for (int i = 0; i < 18; i++)
 		bcopy(face, name + 4 * i, 4);
 	name[72] = '\0';
-	snprintf(layers.gpt_name, sizeof(layers.gpt_name), "%s", name);
+	CHECK(strlen(name) < sizeof(layers.gpt_name));
+	bcopy(name, layers.gpt_name, strlen(name) + 1);
 	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, &layers);
 	options.volume_bytes = MIB;
 	CHECK(plan_only(&f, "fat12/gpt", &options, &info, NULL) == FSIMG_OK);
@@ -2163,6 +2164,7 @@ test_cancellation(void)
 static void
 test_allocation_failures(void)
 {
+	fsimg_layer_options_t layers;
 	fsimg_write_options_t options;
 	fsimg_writer_t *writer;
 	fsimg_image_info_t info;
@@ -2170,7 +2172,8 @@ test_allocation_failures(void)
 	fsimg_part_t part;
 	fsimg_sink_t sink;
 	fsimg_stats_t before, after;
-	fsimg_io_t *input, *io;
+	fsimg_error_t error;
+	fsimg_io_t *input, *io, *output;
 	fsimg_status_t status;
 	memory_t volume, disk;
 	unsigned failures;
@@ -2222,6 +2225,39 @@ test_allocation_failures(void)
 		failures++;
 	}
 	CHECK(failures >= 3);
+
+	/* A zlib DMG wrap failing at each allocation reports the injected
+	 * failure, including those inside zlib's initialization of the
+	 * deflate stream, which later allocations there must not replace.
+	 */
+	fsimg_layer_options_init(&layers);
+	layers.dmg_compress = FSIMG_DMG_ZLIB;
+	options.layers = &layers;
+	options.volume_bytes = 0;
+	failures = 0;
+	for (uint64_t attempt = 1;; attempt++) {
+		bzero(&disk, sizeof(disk));
+		output = memory_io(&f, &disk);
+		fsimg_sink_init(&sink, FSIMG_SINK_IO);
+		sink.io = output;
+		bzero(&error, sizeof(error));
+		fsimg_test_fail_alloc_after(f.ctx, attempt);
+		status = fsimg_image_wrap(f.ctx, input, "dmg", &options, &sink,
+		    &error);
+		fsimg_test_fail_alloc_after(f.ctx, 0);
+		fsimg_io_free(output);
+		memory_free(&disk);
+		if (status == FSIMG_OK)
+			break;
+		CHECK(status == FSIMG_ENOMEM);
+		CHECK(error.operation == FSIMG_OP_ALLOCATE);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
+		CHECK(after.memory_bytes == before.memory_bytes);
+		failures++;
+	}
+	CHECK(failures >= 3);
+	options.layers = NULL;
+	options.volume_bytes = MIB;
 
 	/* The read side: the image open, the GPT's charged tables and the
 	 * overlap check each fail cleanly.

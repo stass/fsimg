@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "fat.h"
+#include "fsimg-endian.h"
 
 /* The payload buffer: the largest physical read of one batch. */
 #define PAYLOAD_BYTES 65536u
@@ -164,11 +165,11 @@ verify_reserved(fsimg_reader_t *reader, const fsimg_verify_report_t *report,
 		    &transferred, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (fsimg_fat_u32(info) != 0x41615252 || fsimg_fat_u32(info + 484) != 0x61417272 ||
-		    fsimg_fat_u32(info + 508) != 0xaa550000)
+		if (fsimg_load_le32(info) != 0x41615252 || fsimg_load_le32(info + 484) != 0x61417272 ||
+		    fsimg_load_le32(info + 508) != 0xaa550000)
 			return (fsimg_fat_corrupt(error, "invalid FAT32 FSInfo signatures"));
-		free_count = fsimg_fat_u32(info + 488);
-		next_free = fsimg_fat_u32(info + 492);
+		free_count = fsimg_load_le32(info + 488);
+		next_free = fsimg_load_le32(info + 492);
 		if ((free_count != UINT32_MAX && free_count != report->free_clusters) ||
 		    (next_free != UINT32_MAX && !fsimg_fat_cluster_valid(g, next_free)))
 			return (fsimg_fat_corrupt(error, "inconsistent FAT32 FSInfo hints"));

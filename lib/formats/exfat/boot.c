@@ -6,6 +6,7 @@
 #include <strings.h>
 
 #include "exfat.h"
+#include "fsimg-endian.h"
 
 static fsimg_status_t boot_region(fsimg_reader_t *, uint64_t,
     exfat_geometry_t *, fsimg_error_t *);
@@ -48,13 +49,13 @@ boot_region(fsimg_reader_t *reader, uint64_t base, exfat_geometry_t *g,
 			return (status);
 		if (i == 11) {
 			for (unsigned j = 0; j < g->sector_bytes; j += 4) {
-				if (exfat_u32(sector + j) != sum)
+				if (fsimg_load_le32(sector + j) != sum)
 					return (exfat_corrupt(error, "invalid exFAT boot checksum"));
 			}
 			break;
 		}
 		if (i >= 1 && i <= 8 &&
-		    exfat_u32(sector + g->sector_bytes - 4) != UINT32_C(0xaa550000))
+		    fsimg_load_le32(sector + g->sector_bytes - 4) != UINT32_C(0xaa550000))
 			return (exfat_corrupt(error, "invalid exFAT extended boot signature"));
 		for (unsigned j = 0; j < g->sector_bytes; j++) {
 			if (i == 0 && (j == 106 || j == 107 || j == 112))
@@ -67,24 +68,24 @@ boot_region(fsimg_reader_t *reader, uint64_t base, exfat_geometry_t *g,
 			return (exfat_corrupt(error, "nonzero exFAT MustBeZero bytes"));
 	}
 	if (boot[110] < 1 || boot[110] > 2 ||
-	    (exfat_u16(boot + 104) >> 8) == 0 ||
-	    (exfat_u16(boot + 104) >> 8) > 99 ||
-	    (exfat_u16(boot + 104) & 255) > 99)
+	    (fsimg_load_le16(boot + 104) >> 8) == 0 ||
+	    (fsimg_load_le16(boot + 104) >> 8) > 99 ||
+	    (fsimg_load_le16(boot + 104) & 255) > 99)
 		return (exfat_corrupt(error, "invalid exFAT revision or FAT count"));
-	if (boot[110] == 2 || (exfat_u16(boot + 104) >> 8) != 1)
+	if (boot[110] == 2 || (fsimg_load_le16(boot + 104) >> 8) != 1)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_READER, "unsupported exFAT revision or TexFAT allocation"));
-	if (boot[110] != 1 || (exfat_u16(boot + 104) & 255) > 99 ||
-	    (exfat_u16(boot + 106) & 1) != 0 ||
+	if (boot[110] != 1 || (fsimg_load_le16(boot + 104) & 255) > 99 ||
+	    (fsimg_load_le16(boot + 106) & 1) != 0 ||
 	    (boot[112] > 100 && boot[112] != 255))
 		return (exfat_corrupt(error, "invalid exFAT boot flags or revision"));
-	volume_sectors = fsimg_meta_get_u64(boot + 72);
-	fat_sector = exfat_u32(boot + 80);
-	fat_sectors = exfat_u32(boot + 84);
-	heap_sector = exfat_u32(boot + 88);
-	g->clusters = exfat_u32(boot + 92);
-	g->root_cluster = exfat_u32(boot + 96);
-	g->flags = exfat_u16(boot + 106);
+	volume_sectors = fsimg_load_le64(boot + 72);
+	fat_sector = fsimg_load_le32(boot + 80);
+	fat_sectors = fsimg_load_le32(boot + 84);
+	heap_sector = fsimg_load_le32(boot + 88);
+	g->clusters = fsimg_load_le32(boot + 92);
+	g->root_cluster = fsimg_load_le32(boot + 96);
+	g->flags = fsimg_load_le16(boot + 106);
 	if (!fsimg_mul_u64(volume_sectors, g->sector_bytes, &g->volume_bytes) ||
 	    g->volume_bytes > input_length || g->volume_bytes > INT64_MAX ||
 	    g->volume_bytes < EXFAT_VOLUME_MIN || fat_sector < 24 || fat_sectors == 0 ||

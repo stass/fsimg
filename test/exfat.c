@@ -14,6 +14,7 @@
 
 #include "baseline.h"
 #include "exfat.h"
+#include "fsimg-endian.h"
 #include "selection.h"
 #include "test.h"
 #include "write-exfat.h"
@@ -950,7 +951,7 @@ test_writer(void)
 		/* Compact identity runs keep the complete mapping interoperable with
 		 * independent checkers that accept a 16-bit encoded byte count.
 		 */
-		CHECK(fsimg_meta_get_u64(root + 56) < 65536);
+		CHECK(fsimg_load_le64(root + 56) < 65536);
 	}
 	fsimg_writer_free(writer);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);

@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include "exfat.h"
+#include "fsimg-endian.h"
 
 typedef struct cluster_visit {
 	fsimg_reader_t	*reader;
@@ -48,7 +49,7 @@ exfat_table_get(fsimg_reader_t *reader, uint32_t cluster, uint32_t *value,
 		exfat->table_window_offset = window;
 		exfat->table_window_length = length;
 	}
-	*value = exfat_u32(exfat->table_window + (size_t)(offset - window));
+	*value = fsimg_load_le32(exfat->table_window + (size_t)(offset - window));
 	return (FSIMG_OK);
 }
 

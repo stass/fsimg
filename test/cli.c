@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "cli.h"
+#include "fsimg-endian.h"
 #include "internal.h"
 #include "settings.h"
 #include "test.h"
@@ -988,8 +989,8 @@ test_names(bool json)
 	options.scratch = "-";
 	options.json = json;
 	fsimg_cli_display_init(&display, &options, &result, &paths);
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_ENTRY_LENGTH, UINT64_C(9007199254740993));
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_ENTRY_LENGTH, UINT64_C(9007199254740993));
 	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
 	bcopy(text.data, output, text.length);
 	used = text.length;
@@ -1036,7 +1037,7 @@ test_names(bool json)
 	frame.type = FSIMG_FRAME_ENTRY;
 	frame.length = FSIMG_WIRE_ENTRY_BYTES;
 	bzero(frame.payload, frame.length);
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
 	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
 	frame.type = FSIMG_FRAME_NAME;
 	frame.length = 1;
@@ -1422,7 +1423,7 @@ test_rendered_paths(bool json)
 	options.scratch = "-";
 	options.json = json;
 	fsimg_cli_display_init(&display, &options, &result, &paths);
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
 	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
 	bcopy(text.data, output, text.length);
 	used = text.length;
@@ -1441,8 +1442,8 @@ test_rendered_paths(bool json)
 	frame.type = FSIMG_FRAME_LOSS;
 	frame.length = FSIMG_WIRE_LOSS_BYTES + 5;
 	bzero(frame.payload, frame.length);
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_LOSS_FIELDS, FSIMG_META_OWNER);
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_LOSS_LENGTH, 5);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_FIELDS, FSIMG_META_OWNER);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_LENGTH, 5);
 	bcopy("/c\\\\d", frame.payload + FSIMG_WIRE_LOSS_PATH, 5);
 	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
 	bcopy(text.data, output + used, text.length);
@@ -1536,7 +1537,7 @@ test_verification_completion(void)
 	options.request.kind = FSIMG_JOB_VERIFY;
 	options.image = "image";
 	options.scratch = "-";
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_VERIFY_SCOPE, FSIMG_VALIDATION_STRUCTURAL);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_VERIFY_SCOPE, FSIMG_VALIDATION_STRUCTURAL);
 	fsimg_cli_display_init(&display, &options, &result, &paths);
 	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
 	CHECK(text.length == 0);
@@ -1734,7 +1735,7 @@ test_progress(void)
 	CHECK(text.length != 0);
 	for (unsigned counter = 0; counter < 3; counter++) {
 		for (unsigned bit = 0; bit < 64; bit++) {
-			fsimg_wire_put64(frame.payload + counter * 8, UINT64_C(1) << bit);
+			fsimg_store_le64(frame.payload + counter * 8, UINT64_C(1) << bit);
 			CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
 			CHECK(text.length != 0);
 		}
@@ -1748,7 +1749,7 @@ test_progress(void)
 		CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
 		CHECK(text.length == 0);
 		for (unsigned counter = 0; counter < 3; counter++)
-			fsimg_wire_put64(frame.payload + counter * 8, UINT64_MAX);
+			fsimg_store_le64(frame.payload + counter * 8, UINT64_MAX);
 		CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
 		CHECK(text.length == 0);
 	}

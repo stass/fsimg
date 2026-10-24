@@ -242,10 +242,6 @@ fsimg_status_t qnx4_unsupported(fsimg_error_t *, const char *);
 uint64_t qnx4_block_offset(uint32_t);
 
 /* codec.c: pure decoders and encoders over byte buffers. */
-uint16_t qnx4_u16(const unsigned char *);
-uint32_t qnx4_u32(const unsigned char *);
-void qnx4_put16(unsigned char *, uint16_t);
-void qnx4_put32(unsigned char *, uint32_t);
 bool qnx4_slot_free(const unsigned char *);
 bool qnx4_slot_link(const unsigned char *);
 void qnx4_inode_decode(const unsigned char *, qnx4_inode_t *);

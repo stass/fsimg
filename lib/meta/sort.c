@@ -5,6 +5,7 @@
 
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "meta.h"
 
 typedef struct sort_reference {
@@ -193,8 +194,8 @@ finish_run(fsimg_store_t *store, uint64_t start, uint64_t count,
 {
 	unsigned char header[16];
 
-	fsimg_meta_put_u64(header, fsimg_store_size(store) - start - 16);
-	fsimg_meta_put_u64(header + 8, count);
+	fsimg_store_le64(header, fsimg_store_size(store) - start - 16);
+	fsimg_store_le64(header + 8, count);
 	return (fsimg_store_write(store, start, header, sizeof(header), error));
 }
 
@@ -303,9 +304,9 @@ open_run(fsimg_store_t *store, uint64_t *next, merge_cursor_t *cursor,
 	status = fsimg_store_read(store, *next, header, sizeof(header), error);
 	if (status != FSIMG_OK)
 		return (status);
-	bytes = fsimg_meta_get_u64(header);
+	bytes = fsimg_load_le64(header);
 	cursor->offset = *next + sizeof(header);
-	cursor->remaining = fsimg_meta_get_u64(header + 8);
+	cursor->remaining = fsimg_load_le64(header + 8);
 	if (cursor->remaining == 0 ||
 	    !fsimg_range_fits(cursor->offset, bytes, fsimg_store_size(store)) ||
 	    cursor->remaining > bytes / 8)

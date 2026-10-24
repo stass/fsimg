@@ -3295,7 +3295,7 @@ test_table_growth(void)
 	fsimg_verify_report_t report;
 	fsimg_error_t error;
 	uint64_t entries;
-	char name[16];
+	char name[32];
 
 	gen_init(&g, 6000);
 	g.force_table = true;
@@ -3470,7 +3470,7 @@ test_metadata(void)
 	fixture_t f;
 	const fsimg_entry_t *entry;
 	uint32_t ids[sizeof(modes) / sizeof(modes[0])];
-	char name[16];
+	char name[32];
 	size_t i;
 
 	gen_init(&g, GEN_DEFAULT_N);
@@ -4655,7 +4655,7 @@ static bool
 scale_width(gen_t *g, uint64_t files, bool sparse)
 {
 	uint32_t blocks, dir;
-	char name[16];
+	char name[32];
 
 	blocks = (uint32_t)(((files + 2) * 64 + GEN_BLOCK - 1) / GEN_BLOCK);
 	if (!gen_init_as(g, 4096 + blocks + (uint32_t)(files / 64), sparse))

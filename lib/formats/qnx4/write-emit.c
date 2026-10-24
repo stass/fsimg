@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "write-qnx4.h"
 
 /*
@@ -217,7 +218,7 @@ emit_dots(fsimg_emit_t *emit, qnx4_extent_t directory, uint64_t self,
 	link.status = QNX4_STATUS_LINK;
 	qnx4_link_encode(&link, raw);
 	bcopy(signature, raw + 2, sizeof(signature));
-	qnx4_put32(raw + 8, directory.blocks);
+	fsimg_store_le32(raw + 8, directory.blocks);
 
 	link.name_length = 2;
 	link.name[1] = '.';
@@ -577,7 +578,7 @@ emit_table_headers(qnx4_plan_t *plan, fsimg_emit_t *emit,
 
 	bzero(raw, sizeof(raw));
 	bcopy(inodes_signature, raw, sizeof(inodes_signature));
-	qnx4_put32(raw + 16, QNX4_INODES_SIGNATURE_VALUE);
+	fsimg_store_le32(raw + 16, QNX4_INODES_SIGNATURE_VALUE);
 	status = fsimg_emit_write(emit, slot_offset(plan->inodes_first, 0), raw,
 	    sizeof(raw), error);
 	if (status != FSIMG_OK)

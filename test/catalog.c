@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "source.h"
 #include "test.h"
 
@@ -491,7 +492,7 @@ test_corrupt_metadata(void)
 	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
 	/* An out-of-range encoded nanosecond value is rejected, not narrowed. */
-	fsimg_meta_put_u64(bytes, 1000000005);
+	fsimg_store_le64(bytes, 1000000005);
 	CHECK(fsimg_store_write(fixture.writer->ordered->store,
 	    8 + FSIMG_CATALOG_MODIFIED + 16, bytes, 4, NULL) == FSIMG_OK);
 	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_ECORRUPT);
@@ -502,7 +503,7 @@ test_corrupt_metadata(void)
 	fixture_open(&fixture, 2);
 	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
-	fsimg_meta_put_u64(bytes, FSIMG_ENTRY_FILE | FSIMG_ENTRY_SYMLINK);
+	fsimg_store_le64(bytes, FSIMG_ENTRY_FILE | FSIMG_ENTRY_SYMLINK);
 	CHECK(fsimg_store_write(fixture.writer->ordered->store,
 	    8 + FSIMG_CATALOG_KIND, bytes, 4, NULL) == FSIMG_OK);
 	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_ECORRUPT);
@@ -514,7 +515,7 @@ test_corrupt_metadata(void)
 	entry.metadata.mode = 0644;
 	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
-	fsimg_meta_put_u64(bytes, 0100644);
+	fsimg_store_le64(bytes, 0100644);
 	CHECK(fsimg_store_write(fixture.writer->ordered->store,
 	    8 + FSIMG_CATALOG_MODE, bytes, 4, NULL) == FSIMG_OK);
 	CHECK(fsimg_catalog_get(fixture.writer, 1, &current, NULL) == FSIMG_ECORRUPT);
@@ -596,19 +597,19 @@ test_child_order(void)
 		    5, &fixture.writer->index, NULL) == FSIMG_OK);
 		CHECK(fsimg_stream_new(&fixture.writer->session, 512,
 		    &fixture.writer->children, NULL) == FSIMG_OK);
-		fsimg_meta_put_u64(payload, scenario == 0 ? 0 : 2);
-		fsimg_meta_put_u64(payload + 8, scenario == 0 ? 2 : 3);
+		fsimg_store_le64(payload, scenario == 0 ? 0 : 2);
+		fsimg_store_le64(payload + 8, scenario == 0 ? 2 : 3);
 		payload[16] = scenario == 0 ? 'b' : 'a';
 		CHECK(fsimg_stream_append(fixture.writer->children, payload,
 		    sizeof(payload), NULL, NULL) == FSIMG_OK);
-		fsimg_meta_put_u64(payload, 0);
-		fsimg_meta_put_u64(payload + 8, 1);
+		fsimg_store_le64(payload, 0);
+		fsimg_store_le64(payload + 8, 1);
 		payload[16] = 'a';
 		CHECK(fsimg_stream_append(fixture.writer->children, payload,
 		    sizeof(payload), NULL, NULL) == FSIMG_OK);
 		for (uint64_t i = 0; i < 2; i++) {
-			fsimg_meta_put_u64(payload, scenario == 0 ? 0 : (i == 0 ? 0 : 2));
-			fsimg_meta_put_u64(payload + 8, scenario == 0 ? 3 + i : (i == 0 ? 2 : 4));
+			fsimg_store_le64(payload, scenario == 0 ? 0 : (i == 0 ? 0 : 2));
+			fsimg_store_le64(payload + 8, scenario == 0 ? 3 + i : (i == 0 ? 2 : 4));
 			payload[16] = scenario == 0 ? (unsigned char)('c' + i) : 'b';
 			CHECK(fsimg_stream_append(fixture.writer->children, payload,
 			    sizeof(payload), NULL, NULL) == FSIMG_OK);
@@ -630,7 +631,7 @@ test_index_reference(void)
 	add_entry(fixture.writer, "/file", FSIMG_ENTRY_FILE);
 	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
 	CHECK(fsimg_array_get(fixture.writer->index, 1, index, NULL) == FSIMG_OK);
-	fsimg_meta_put_u64(index + 8, 1);
+	fsimg_store_le64(index + 8, 1);
 	CHECK(fsimg_array_set(fixture.writer->index, 1, index, NULL) == FSIMG_OK);
 	CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_ECORRUPT);
 	CHECK(entry == NULL);
@@ -812,7 +813,7 @@ test_corrupt_rank(void)
 		fixture.writer->root_count = corruptions[i].roots;
 		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) == FSIMG_OK);
 		/* The first record's header starts eight bytes into its stream. */
-		fsimg_meta_put_u32(bytes, corruptions[i].value);
+		fsimg_store_le32(bytes, corruptions[i].value);
 		CHECK(fsimg_store_write(fixture.writer->ordered->store,
 		    8 + corruptions[i].offset, bytes, sizeof(bytes), NULL) == FSIMG_OK);
 		CHECK(fsimg_catalog_get(fixture.writer, 1, &entry, NULL) ==

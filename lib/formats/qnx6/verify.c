@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "qnx6.h"
 
 /* Full verification of the selected snapshot. One traversal records an
@@ -52,9 +53,9 @@ qnx6_own(fsimg_reader_t *reader, uint32_t first, uint32_t count,
 {
 	unsigned char record[OWNER_RECORD_BYTES];
 
-	fsimg_meta_put_u32(record, first);
-	fsimg_meta_put_u32(record + 4, count);
-	fsimg_meta_put_u64(record + 8, owner);
+	fsimg_store_le32(record, first);
+	fsimg_store_le32(record + 4, count);
+	fsimg_store_le64(record + 8, owner);
 	return (fsimg_stream_append(qnx6_state(reader)->owners, record,
 	    sizeof(record), NULL, error));
 }
@@ -74,7 +75,7 @@ owner_compare(const void *a, size_t alen, const void *b, size_t blen,
 {
 	if (alen != OWNER_RECORD_BYTES || blen != OWNER_RECORD_BYTES)
 		return ((alen > blen) - (alen < blen));
-	return (compare_u64(fsimg_meta_get_u32(a), fsimg_meta_get_u32(b)));
+	return (compare_u64(fsimg_load_le32(a), fsimg_load_le32(b)));
 }
 
 static int
@@ -83,7 +84,7 @@ reference_compare(const void *a, size_t alen, const void *b, size_t blen,
 {
 	if (alen != 4 || blen != 4)
 		return ((alen > blen) - (alen < blen));
-	return (compare_u64(fsimg_meta_get_u32(a), fsimg_meta_get_u32(b)));
+	return (compare_u64(fsimg_load_le32(a), fsimg_load_le32(b)));
 }
 
 /* The system trees were indexed at open, before the ownership stream
@@ -140,8 +141,8 @@ owner_next(fsimg_reader_t *reader, qnx6_owner_cursor_t *owners,
 	}
 	if (status != FSIMG_OK)
 		return (status);
-	first = fsimg_meta_get_u32(record);
-	count = fsimg_meta_get_u32(record + 4);
+	first = fsimg_load_le32(record);
+	count = fsimg_load_le32(record + 4);
 	if (length != sizeof(record) || first >= blocks || count == 0 ||
 	    count > blocks - first)
 		return (qnx6_corrupt(error, "invalid QNX6 ownership record"));
@@ -149,7 +150,7 @@ owner_next(fsimg_reader_t *reader, qnx6_owner_cursor_t *owners,
 		return (qnx6_corrupt(error, "QNX6 block has several owners"));
 	owners->first = first;
 	owners->end = first + count;
-	owners->owner = fsimg_meta_get_u64(record + 8);
+	owners->owner = fsimg_load_le64(record + 8);
 	return (FSIMG_OK);
 }
 
@@ -241,7 +242,7 @@ reference_next(fsimg_stream_t *sorted, uint64_t *cursor, uint32_t *next,
 		return (FSIMG_OK);
 	if (status != FSIMG_OK)
 		return (status);
-	*next = fsimg_meta_get_u32(record);
+	*next = fsimg_load_le32(record);
 	if (length != sizeof(record) || *next == 0)
 		return (qnx6_corrupt(error, "invalid QNX6 reference record"));
 	return (FSIMG_OK);

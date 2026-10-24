@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "exfat.h"
+#include "fsimg-endian.h"
 #include "host.h"
 #include "unicode.h"
 
@@ -76,23 +77,23 @@ discover_metadata(fsimg_reader_t *reader, fsimg_error_t *error)
 				status = exfat_corrupt(error, "duplicate or inactive exFAT bitmap");
 				goto done;
 			}
-			bitmap.first = exfat_u32(raw + 20);
-			bitmap.length = fsimg_meta_get_u64(raw + 24);
+			bitmap.first = fsimg_load_le32(raw + 20);
+			bitmap.length = fsimg_load_le64(raw + 24);
 		} else if (raw[0] == 0x82) {
 			if (++upcase_count != 1) {
 				status = exfat_corrupt(error, "duplicate exFAT upcase table");
 				goto done;
 			}
-			upcase.first = exfat_u32(raw + 20);
-			upcase.length = fsimg_meta_get_u64(raw + 24);
-			exfat->upcase_checksum = exfat_u32(raw + 4);
+			upcase.first = fsimg_load_le32(raw + 20);
+			upcase.length = fsimg_load_le64(raw + 24);
+			exfat->upcase_checksum = fsimg_load_le32(raw + 4);
 		} else if (raw[0] == 0x83) {
 			if (++label_count != 1 || raw[1] > 11) {
 				status = exfat_corrupt(error, "invalid or duplicate exFAT volume label");
 				goto done;
 			}
 			for (unsigned j = 0; j < raw[1]; j++) {
-				label[j] = exfat_u16(raw + 2 + j * 2);
+				label[j] = fsimg_load_le16(raw + 2 + j * 2);
 				if (!exfat_character_valid(label[j])) {
 					status = exfat_corrupt(error, "forbidden character in exFAT label");
 					goto done;
@@ -185,7 +186,7 @@ load_upcase(fsimg_reader_t *reader, fsimg_error_t *error)
 		for (size_t i = 0; i < batch; i += 2) {
 			checksum = exfat_checksum32(checksum, buffer[i]);
 			checksum = exfat_checksum32(checksum, buffer[i + 1]);
-			word = exfat_u16(buffer + i);
+			word = fsimg_load_le16(buffer + i);
 			if (run) {
 				if (word > 65536 - decoded) {
 					status = exfat_corrupt(error, "invalid exFAT upcase identity run");

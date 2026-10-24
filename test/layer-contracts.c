@@ -18,8 +18,7 @@
 #include "internal.h"
 
 /*
- * Common image-layer contracts (specs/design-driver-contract-tests.md,
- * "Layer profiles and composition").
+ * Common image-layer contracts.
  *
  * Each registered scheme, container and compression has one coverage
  * profile: its registry name, kind, carried filesystem, capabilities and

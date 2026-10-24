@@ -8,6 +8,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 
@@ -129,13 +130,13 @@ vhd_probe(const unsigned char *prefix, size_t prefix_length,
 	    bcmp(tail + FOOTER_COOKIE, "conectix", 8) != 0)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no VHD footer"));
-	type = fsimg_layer_be32(tail + FOOTER_DISK_TYPE);
+	type = fsimg_load_be32(tail + FOOTER_DISK_TYPE);
 	if (type == VHD_FIXED &&
-	    fsimg_layer_be64(tail + FOOTER_CURRENT_SIZE) ==
+	    fsimg_load_be64(tail + FOOTER_CURRENT_SIZE) ==
 	    file_bytes - VHD_FOOTER_BYTES)
 		return (FSIMG_OK);
 	if (type == VHD_DYNAMIC || type == VHD_DIFFERENCING) {
-		data_offset = fsimg_layer_be64(tail + FOOTER_DATA_OFFSET);
+		data_offset = fsimg_load_be64(tail + FOOTER_DATA_OFFSET);
 		if (prefix_length >= VHD_FOOTER_BYTES &&
 		    bcmp(prefix, tail, VHD_FOOTER_BYTES) == 0 &&
 		    data_offset < file_bytes)
@@ -168,11 +169,11 @@ footer_check(const unsigned char *footer, uint64_t file_bytes,
 		if (i < FOOTER_CHECKSUM || i >= FOOTER_CHECKSUM + 4)
 			sum += footer[i];
 	}
-	if (~sum != fsimg_layer_be32(footer + FOOTER_CHECKSUM))
+	if (~sum != fsimg_load_be32(footer + FOOTER_CHECKSUM))
 		return (vhd_corrupt(error, "checksum does not match"));
-	if (fsimg_layer_be32(footer + FOOTER_VERSION) != VHD_VERSION)
+	if (fsimg_load_be32(footer + FOOTER_VERSION) != VHD_VERSION)
 		return (vhd_corrupt(error, "format version is not 1.0"));
-	if (fsimg_layer_be64(footer + FOOTER_DATA_OFFSET) != UINT64_MAX)
+	if (fsimg_load_be64(footer + FOOTER_DATA_OFFSET) != UINT64_MAX)
 		return (vhd_corrupt(error, "data offset is set on a fixed disk"));
 	if (footer[FOOTER_SAVED_STATE] != 0)
 		return (vhd_corrupt(error, "records a saved state"));
@@ -331,24 +332,24 @@ vhd_footer(const vhd_plan_t *plan, uint64_t disk_bytes,
 	    plan->timestamp - VHD_EPOCH;
 	bzero(footer, VHD_FOOTER_BYTES);
 	bcopy("conectix", footer + FOOTER_COOKIE, 8);
-	fsimg_layer_put_be32(footer + FOOTER_FEATURES, VHD_FEATURES_RESERVED);
-	fsimg_layer_put_be32(footer + FOOTER_VERSION, VHD_VERSION);
-	fsimg_layer_put_be64(footer + FOOTER_DATA_OFFSET, UINT64_MAX);
-	fsimg_layer_put_be32(footer + FOOTER_TIMESTAMP,
+	fsimg_store_be32(footer + FOOTER_FEATURES, VHD_FEATURES_RESERVED);
+	fsimg_store_be32(footer + FOOTER_VERSION, VHD_VERSION);
+	fsimg_store_be64(footer + FOOTER_DATA_OFFSET, UINT64_MAX);
+	fsimg_store_be32(footer + FOOTER_TIMESTAMP,
 	    seconds > UINT32_MAX ? UINT32_MAX : (uint32_t)seconds);
 	bcopy("fsim", footer + FOOTER_CREATOR, 4);
-	fsimg_layer_put_be32(footer + FOOTER_CREATOR_VERSION,
+	fsimg_store_be32(footer + FOOTER_CREATOR_VERSION,
 	    (uint32_t)(major & 0xffff) << 16 | (minor & 0xffff));
 	bcopy("Wi2k", footer + FOOTER_CREATOR_HOST, 4);
-	fsimg_layer_put_be64(footer + FOOTER_ORIGINAL_SIZE, disk_bytes);
-	fsimg_layer_put_be64(footer + FOOTER_CURRENT_SIZE, disk_bytes);
+	fsimg_store_be64(footer + FOOTER_ORIGINAL_SIZE, disk_bytes);
+	fsimg_store_be64(footer + FOOTER_CURRENT_SIZE, disk_bytes);
 	vhd_geometry(disk_bytes / 512, footer + FOOTER_GEOMETRY);
-	fsimg_layer_put_be32(footer + FOOTER_DISK_TYPE, VHD_FIXED);
+	fsimg_store_be32(footer + FOOTER_DISK_TYPE, VHD_FIXED);
 	bcopy(plan->base.identifier, footer + FOOTER_UNIQUE_ID, 16);
 	sum = 0;
 	for (unsigned i = 0; i < VHD_FOOTER_BYTES; i++)
 		sum += footer[i];
-	fsimg_layer_put_be32(footer + FOOTER_CHECKSUM, ~sum);
+	fsimg_store_be32(footer + FOOTER_CHECKSUM, ~sum);
 }
 
 /* The encoder's state is a copy of what it encodes. */

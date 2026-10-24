@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "exfat.h"
+#include "fsimg-endian.h"
 #include "host.h"
 
 static fsimg_status_t next_owner(fsimg_owner_runs_t *, fsimg_owner_run_t *,

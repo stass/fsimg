@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "qnx4.h"
 
 /* Pure decoders of the four QNX4 records and encoders of the three the
@@ -23,36 +24,6 @@
 
 static uint8_t name_length(const unsigned char *, size_t, bool *);
 static size_t bounded(size_t, size_t);
-
-uint16_t
-qnx4_u16(const unsigned char *p)
-{
-	return ((uint16_t)(p[0] | (unsigned)p[1] << 8));
-}
-
-uint32_t
-qnx4_u32(const unsigned char *p)
-{
-	return ((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
-	    (uint32_t)p[3] << 24);
-}
-
-void
-qnx4_put16(unsigned char *p, uint16_t value)
-{
-	p[0] = (unsigned char)(value & 0xff);
-	p[1] = (unsigned char)(value >> 8);
-}
-
-void
-qnx4_put32(unsigned char *p, uint32_t value)
-{
-	p[0] = (unsigned char)(value & 0xff);
-	p[1] = (unsigned char)(value >> 8 & 0xff);
-	p[2] = (unsigned char)(value >> 16 & 0xff);
-	p[3] = (unsigned char)(value >> 24);
-}
-
 bool
 qnx4_bytes_zero(const unsigned char *p, size_t length)
 {
@@ -107,19 +78,19 @@ qnx4_inode_decode(const unsigned char *raw, qnx4_inode_t *inode)
 	bcopy(raw, inode->name, QNX4_DIRECT_NAME_MAX);
 	inode->name_length = name_length(raw, QNX4_DIRECT_NAME_MAX,
 	    &inode->name_padding_zero);
-	inode->size = qnx4_u32(raw + 0x10);
-	inode->first_extent.first = qnx4_u32(raw + 0x14);
-	inode->first_extent.blocks = qnx4_u32(raw + 0x18);
-	inode->chain = qnx4_u32(raw + 0x1c);
-	inode->created = qnx4_u32(raw + 0x20);
-	inode->modified = qnx4_u32(raw + 0x24);
-	inode->accessed = qnx4_u32(raw + 0x28);
-	inode->changed = qnx4_u32(raw + 0x2c);
-	inode->extents = qnx4_u16(raw + 0x30);
-	inode->mode = qnx4_u16(raw + 0x32);
-	inode->uid = qnx4_u16(raw + 0x34);
-	inode->gid = qnx4_u16(raw + 0x36);
-	inode->links = qnx4_u16(raw + 0x38);
+	inode->size = fsimg_load_le32(raw + 0x10);
+	inode->first_extent.first = fsimg_load_le32(raw + 0x14);
+	inode->first_extent.blocks = fsimg_load_le32(raw + 0x18);
+	inode->chain = fsimg_load_le32(raw + 0x1c);
+	inode->created = fsimg_load_le32(raw + 0x20);
+	inode->modified = fsimg_load_le32(raw + 0x24);
+	inode->accessed = fsimg_load_le32(raw + 0x28);
+	inode->changed = fsimg_load_le32(raw + 0x2c);
+	inode->extents = fsimg_load_le16(raw + 0x30);
+	inode->mode = fsimg_load_le16(raw + 0x32);
+	inode->uid = fsimg_load_le16(raw + 0x34);
+	inode->gid = fsimg_load_le16(raw + 0x36);
+	inode->links = fsimg_load_le16(raw + 0x38);
 	inode->reserved_zero = qnx4_bytes_zero(raw + 0x3a, 4);
 	inode->type = raw[0x3e];
 	inode->status = raw[0x3f];
@@ -132,9 +103,9 @@ qnx4_link_decode(const unsigned char *raw, qnx4_link_t *link)
 	bcopy(raw, link->name, QNX4_LINK_NAME_MAX);
 	link->name_length = name_length(raw, QNX4_LINK_NAME_MAX,
 	    &link->name_padding_zero);
-	link->target_block = qnx4_u32(raw + 0x30);
+	link->target_block = fsimg_load_le32(raw + 0x30);
 	link->target_slot = raw[0x34];
-	link->long_block = qnx4_u32(raw + 0x35);
+	link->long_block = fsimg_load_le32(raw + 0x35);
 	link->spare_zero = qnx4_bytes_zero(raw + 0x39, 6);
 	link->status = raw[0x3f];
 }
@@ -145,19 +116,19 @@ qnx4_xblock_decode(const unsigned char *raw, qnx4_xblock_t *xblock)
 	static const unsigned char signature[8] = "IamXblk";
 
 	bzero(xblock, sizeof(*xblock));
-	xblock->next = qnx4_u32(raw);
-	xblock->previous = qnx4_u32(raw + 4);
+	xblock->next = fsimg_load_le32(raw);
+	xblock->previous = fsimg_load_le32(raw + 4);
 	xblock->used = raw[8];
 	xblock->spare_zero = qnx4_bytes_zero(raw + 9, 3);
-	xblock->covered = qnx4_u32(raw + 12);
+	xblock->covered = fsimg_load_le32(raw + 12);
 	for (unsigned i = 0; i < QNX4_XBLOCK_EXTENTS; i++) {
-		xblock->extent[i].first = qnx4_u32(raw + 16 + i * 8);
-		xblock->extent[i].blocks = qnx4_u32(raw + 20 + i * 8);
+		xblock->extent[i].first = fsimg_load_le32(raw + 16 + i * 8);
+		xblock->extent[i].blocks = fsimg_load_le32(raw + 20 + i * 8);
 	}
 	xblock->signature_ok = bcmp(raw + 0x1f0, signature,
 	    sizeof(signature)) == 0;
-	xblock->first_copy.first = qnx4_u32(raw + 0x1f8);
-	xblock->first_copy.blocks = qnx4_u32(raw + 0x1fc);
+	xblock->first_copy.first = fsimg_load_le32(raw + 0x1f8);
+	xblock->first_copy.blocks = fsimg_load_le32(raw + 0x1fc);
 }
 
 void
@@ -166,7 +137,7 @@ qnx4_longname_decode(const unsigned char *raw, qnx4_longname_t *record)
 	const unsigned char *nul;
 
 	bzero(record, sizeof(*record));
-	record->block = qnx4_u32(raw);
+	record->block = fsimg_load_le32(raw);
 	record->slot = raw[4];
 	record->state = raw[5];
 	bcopy(raw + 6, record->name, QNX4_NAME_MAX);
@@ -185,19 +156,19 @@ qnx4_inode_encode(const qnx4_inode_t *inode, unsigned char *raw)
 	bzero(raw, QNX4_RECORD_BYTES);
 	bcopy(inode->name, raw, bounded(inode->name_length,
 	    QNX4_DIRECT_NAME_MAX));
-	qnx4_put32(raw + 0x10, inode->size);
-	qnx4_put32(raw + 0x14, inode->first_extent.first);
-	qnx4_put32(raw + 0x18, inode->first_extent.blocks);
-	qnx4_put32(raw + 0x1c, inode->chain);
-	qnx4_put32(raw + 0x20, inode->created);
-	qnx4_put32(raw + 0x24, inode->modified);
-	qnx4_put32(raw + 0x28, inode->accessed);
-	qnx4_put32(raw + 0x2c, inode->changed);
-	qnx4_put16(raw + 0x30, inode->extents);
-	qnx4_put16(raw + 0x32, inode->mode);
-	qnx4_put16(raw + 0x34, inode->uid);
-	qnx4_put16(raw + 0x36, inode->gid);
-	qnx4_put16(raw + 0x38, inode->links);
+	fsimg_store_le32(raw + 0x10, inode->size);
+	fsimg_store_le32(raw + 0x14, inode->first_extent.first);
+	fsimg_store_le32(raw + 0x18, inode->first_extent.blocks);
+	fsimg_store_le32(raw + 0x1c, inode->chain);
+	fsimg_store_le32(raw + 0x20, inode->created);
+	fsimg_store_le32(raw + 0x24, inode->modified);
+	fsimg_store_le32(raw + 0x28, inode->accessed);
+	fsimg_store_le32(raw + 0x2c, inode->changed);
+	fsimg_store_le16(raw + 0x30, inode->extents);
+	fsimg_store_le16(raw + 0x32, inode->mode);
+	fsimg_store_le16(raw + 0x34, inode->uid);
+	fsimg_store_le16(raw + 0x36, inode->gid);
+	fsimg_store_le16(raw + 0x38, inode->links);
 	raw[0x3e] = inode->type;
 	raw[0x3f] = inode->status;
 }
@@ -207,9 +178,9 @@ qnx4_link_encode(const qnx4_link_t *link, unsigned char *raw)
 {
 	bzero(raw, QNX4_RECORD_BYTES);
 	bcopy(link->name, raw, bounded(link->name_length, QNX4_LINK_NAME_MAX));
-	qnx4_put32(raw + 0x30, link->target_block);
+	fsimg_store_le32(raw + 0x30, link->target_block);
 	raw[0x34] = link->target_slot;
-	qnx4_put32(raw + 0x35, link->long_block);
+	fsimg_store_le32(raw + 0x35, link->long_block);
 	raw[0x3f] = link->status;
 }
 
@@ -217,7 +188,7 @@ void
 qnx4_longname_encode(const qnx4_longname_t *record, unsigned char *raw)
 {
 	bzero(raw, QNX4_BLOCK_BYTES);
-	qnx4_put32(raw, record->block);
+	fsimg_store_le32(raw, record->block);
 	raw[4] = record->slot;
 	raw[5] = record->state;
 	bcopy(record->name, raw + 6, bounded(record->name_length,

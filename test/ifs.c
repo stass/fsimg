@@ -4922,7 +4922,7 @@ native_directory(const char *directory, bool mutations,
 	if (dir == NULL)
 		return;
 	while ((entry = readdir(dir)) != NULL) {
-		char path[1024];
+		char path[4096];
 		unsigned char *image;
 		size_t length;
 		listing_t l;

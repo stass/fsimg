@@ -9,6 +9,7 @@
 
 #include <zlib.h>
 
+#include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 
@@ -181,7 +182,7 @@ simg_probe(const unsigned char *prefix, size_t prefix_length,
     const unsigned char *tail FSIMG_UNUSED, size_t tail_length FSIMG_UNUSED,
     uint64_t file_bytes FSIMG_UNUSED, fsimg_error_t *error)
 {
-	if (prefix_length < 4 || fsimg_layer_le32(prefix + HEADER_MAGIC) != SIMG_MAGIC)
+	if (prefix_length < 4 || fsimg_load_le32(prefix + HEADER_MAGIC) != SIMG_MAGIC)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no sparse image magic"));
 	return (FSIMG_OK);
@@ -215,18 +216,18 @@ read_header(const fsimg_container_input_t *input, simg_header_t *header,
 	status = simg_probe(raw, sizeof(raw), NULL, 0, input->file_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (fsimg_layer_le16(raw + HEADER_MAJOR) != 1)
+	if (fsimg_load_le16(raw + HEADER_MAJOR) != 1)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_IMAGE, "sparse image major version is not supported"));
-	if (fsimg_layer_le16(raw + HEADER_MINOR) != 0)
+	if (fsimg_load_le16(raw + HEADER_MINOR) != 0)
 		return (simg_corrupt(error, "minor version is not 0"));
-	if (fsimg_layer_le16(raw + HEADER_SIZE) != SIMG_HEADER_BYTES ||
-	    fsimg_layer_le16(raw + HEADER_CHUNK_HEADER_SIZE) !=
+	if (fsimg_load_le16(raw + HEADER_SIZE) != SIMG_HEADER_BYTES ||
+	    fsimg_load_le16(raw + HEADER_CHUNK_HEADER_SIZE) !=
 	    SIMG_CHUNK_HEADER_BYTES)
 		return (simg_corrupt(error, "header sizes are not 28 and 12"));
-	header->block_bytes = fsimg_layer_le32(raw + HEADER_BLOCK_SIZE);
-	header->total_blocks = fsimg_layer_le32(raw + HEADER_TOTAL_BLOCKS);
-	header->total_chunks = fsimg_layer_le32(raw + HEADER_TOTAL_CHUNKS);
+	header->block_bytes = fsimg_load_le32(raw + HEADER_BLOCK_SIZE);
+	header->total_blocks = fsimg_load_le32(raw + HEADER_TOTAL_BLOCKS);
+	header->total_chunks = fsimg_load_le32(raw + HEADER_TOTAL_CHUNKS);
 	if (header->block_bytes == 0 || header->block_bytes % 4 != 0)
 		return (simg_corrupt(error, "block size is not a multiple of 4"));
 	/* Two 32-bit factors cannot overflow 64 bits. */
@@ -252,9 +253,9 @@ decode_chunk(const fsimg_container_input_t *input, const simg_header_t *header,
 	status = read_bytes(input, offset, raw, SIMG_CHUNK_HEADER_BYTES, error);
 	if (status != FSIMG_OK)
 		return (status);
-	chunk->type = fsimg_layer_le16(raw + CHUNK_TYPE);
-	blocks = fsimg_layer_le32(raw + CHUNK_BLOCKS);
-	total = fsimg_layer_le32(raw + CHUNK_TOTAL_SIZE);
+	chunk->type = fsimg_load_le16(raw + CHUNK_TYPE);
+	blocks = fsimg_load_le32(raw + CHUNK_BLOCKS);
+	total = fsimg_load_le32(raw + CHUNK_TOTAL_SIZE);
 	chunk->length = blocks * header->block_bytes;
 	chunk->payload_offset = offset + SIMG_CHUNK_HEADER_BYTES;
 	chunk->value = 0;
@@ -285,7 +286,7 @@ decode_chunk(const fsimg_container_input_t *input, const simg_header_t *header,
 		    raw + SIMG_CHUNK_HEADER_BYTES, SIMG_VALUE_BYTES, error);
 		if (status != FSIMG_OK)
 			return (status);
-		chunk->value = fsimg_layer_le32(raw + SIMG_CHUNK_HEADER_BYTES);
+		chunk->value = fsimg_load_le32(raw + SIMG_CHUNK_HEADER_BYTES);
 	}
 	*next = offset + total;
 	return (FSIMG_OK);
@@ -563,9 +564,9 @@ simg_chunk(simg_encoder_t *encoder, bool counting, uint16_t type,
 	}
 	encoder->emitted++;
 	bzero(header, sizeof(header));
-	fsimg_layer_put_le16(header + CHUNK_TYPE, type);
-	fsimg_layer_put_le32(header + CHUNK_BLOCKS, (uint32_t)blocks);
-	fsimg_layer_put_le32(header + CHUNK_TOTAL_SIZE,
+	fsimg_store_le16(header + CHUNK_TYPE, type);
+	fsimg_store_le32(header + CHUNK_BLOCKS, (uint32_t)blocks);
+	fsimg_store_le32(header + CHUNK_TOTAL_SIZE,
 	    SIMG_CHUNK_HEADER_BYTES + payload);
 	return (fsimg_seq_write(encoder->sink, header, sizeof(header), error));
 }
@@ -578,16 +579,16 @@ simg_header(simg_encoder_t *encoder, fsimg_error_t *error)
 	uint32_t block = encoder->plan->block_bytes;
 
 	bzero(header, sizeof(header));
-	fsimg_layer_put_le32(header + HEADER_MAGIC, SIMG_MAGIC);
-	fsimg_layer_put_le16(header + HEADER_MAJOR, 1);
-	fsimg_layer_put_le16(header + HEADER_MINOR, 0);
-	fsimg_layer_put_le16(header + HEADER_SIZE, SIMG_HEADER_BYTES);
-	fsimg_layer_put_le16(header + HEADER_CHUNK_HEADER_SIZE,
+	fsimg_store_le32(header + HEADER_MAGIC, SIMG_MAGIC);
+	fsimg_store_le16(header + HEADER_MAJOR, 1);
+	fsimg_store_le16(header + HEADER_MINOR, 0);
+	fsimg_store_le16(header + HEADER_SIZE, SIMG_HEADER_BYTES);
+	fsimg_store_le16(header + HEADER_CHUNK_HEADER_SIZE,
 	    SIMG_CHUNK_HEADER_BYTES);
-	fsimg_layer_put_le32(header + HEADER_BLOCK_SIZE, block);
-	fsimg_layer_put_le32(header + HEADER_TOTAL_BLOCKS,
+	fsimg_store_le32(header + HEADER_BLOCK_SIZE, block);
+	fsimg_store_le32(header + HEADER_TOTAL_BLOCKS,
 	    (uint32_t)(encoder->disk_bytes / block));
-	fsimg_layer_put_le32(header + HEADER_TOTAL_CHUNKS,
+	fsimg_store_le32(header + HEADER_TOTAL_CHUNKS,
 	    (uint32_t)encoder->chunks);
 	return (fsimg_seq_write(encoder->sink, header, sizeof(header), error));
 }
@@ -650,7 +651,7 @@ simg_encode_finish(void *state, unsigned pass, fsimg_error_t *error)
 		status = simg_chunk(encoder, counting, CHUNK_CRC32, 0,
 		    sizeof(value), error);
 		if (status == FSIMG_OK && !counting) {
-			fsimg_layer_put_le32(value, (uint32_t)encoder->crc);
+			fsimg_store_le32(value, (uint32_t)encoder->crc);
 			status = fsimg_seq_write(encoder->sink, value,
 			    sizeof(value), error);
 		}

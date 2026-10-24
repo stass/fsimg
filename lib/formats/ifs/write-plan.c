@@ -7,6 +7,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "fsimg-endian.h"
 #include "unicode.h"
 #include "write-ifs.h"
 
@@ -124,19 +125,19 @@ ifs_row_get(ifs_plan_t *plan, uint64_t id, ifs_row_t *row,
 	status = fsimg_array_get(plan->rows, id, raw, error);
 	if (status != FSIMG_OK)
 		return (status);
-	kind = fsimg_meta_get_u32(raw);
+	kind = fsimg_load_le32(raw);
 	if (kind < IFS_KIND_DIRECTORY || kind > IFS_KIND_FIFO)
 		return (corrupt_row(error));
 	row->kind = (ifs_kind_t)kind;
-	row->path_length = fsimg_meta_get_u32(raw + 4);
-	row->length = fsimg_meta_get_u32(raw + 8);
-	row->table_offset = fsimg_meta_get_u32(raw + 12);
-	row->record_length = fsimg_meta_get_u32(raw + 16);
-	row->data_offset = fsimg_meta_get_u32(raw + 20);
-	row->uid = fsimg_meta_get_u32(raw + 24);
-	row->gid = fsimg_meta_get_u32(raw + 28);
-	row->permissions = fsimg_meta_get_u32(raw + 32);
-	row->mtime = fsimg_meta_get_u32(raw + 36);
+	row->path_length = fsimg_load_le32(raw + 4);
+	row->length = fsimg_load_le32(raw + 8);
+	row->table_offset = fsimg_load_le32(raw + 12);
+	row->record_length = fsimg_load_le32(raw + 16);
+	row->data_offset = fsimg_load_le32(raw + 20);
+	row->uid = fsimg_load_le32(raw + 24);
+	row->gid = fsimg_load_le32(raw + 28);
+	row->permissions = fsimg_load_le32(raw + 32);
+	row->mtime = fsimg_load_le32(raw + 36);
 	if (row->path_length > IFS_PATH_MAX)
 		return (corrupt_row(error));
 	if (row->kind == IFS_KIND_SYMLINK && row->length > IFS_LINK_TARGET_MAX)
@@ -155,16 +156,16 @@ ifs_row_set(ifs_plan_t *plan, uint64_t id, const ifs_row_t *row,
 {
 	unsigned char raw[IFS_ROW_BYTES];
 
-	fsimg_meta_put_u32(raw, (uint32_t)row->kind);
-	fsimg_meta_put_u32(raw + 4, row->path_length);
-	fsimg_meta_put_u32(raw + 8, row->length);
-	fsimg_meta_put_u32(raw + 12, row->table_offset);
-	fsimg_meta_put_u32(raw + 16, row->record_length);
-	fsimg_meta_put_u32(raw + 20, row->data_offset);
-	fsimg_meta_put_u32(raw + 24, row->uid);
-	fsimg_meta_put_u32(raw + 28, row->gid);
-	fsimg_meta_put_u32(raw + 32, row->permissions);
-	fsimg_meta_put_u32(raw + 36, row->mtime);
+	fsimg_store_le32(raw, (uint32_t)row->kind);
+	fsimg_store_le32(raw + 4, row->path_length);
+	fsimg_store_le32(raw + 8, row->length);
+	fsimg_store_le32(raw + 12, row->table_offset);
+	fsimg_store_le32(raw + 16, row->record_length);
+	fsimg_store_le32(raw + 20, row->data_offset);
+	fsimg_store_le32(raw + 24, row->uid);
+	fsimg_store_le32(raw + 28, row->gid);
+	fsimg_store_le32(raw + 32, row->permissions);
+	fsimg_store_le32(raw + 36, row->mtime);
 	return (fsimg_array_set(plan->rows, id, raw, error));
 }
 

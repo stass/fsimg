@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include "fsimg-endian.h"
 #include "meta.h"
 
 #define EXTENT_RECORD_BYTES 24u
@@ -77,9 +78,9 @@ record_write(fsimg_extent_index_t *index, uint64_t record,
 {
 	unsigned char bytes[EXTENT_RECORD_BYTES];
 
-	fsimg_meta_put_u64(bytes, extent->logical_offset);
-	fsimg_meta_put_u64(bytes + 8, extent->image_offset);
-	fsimg_meta_put_u64(bytes + 16, extent->length);
+	fsimg_store_le64(bytes, extent->logical_offset);
+	fsimg_store_le64(bytes + 8, extent->image_offset);
+	fsimg_store_le64(bytes + 16, extent->length);
 	return (fsimg_store_write(index->records, record * EXTENT_RECORD_BYTES,
 	    bytes, sizeof(bytes), error));
 }
@@ -101,9 +102,9 @@ record_read(fsimg_extent_index_t *index, uint64_t record, fsimg_extent_t *out,
 	    bytes, sizeof(bytes), error);
 	if (status != FSIMG_OK)
 		return (status);
-	out->logical_offset = fsimg_meta_get_u64(bytes);
-	out->image_offset = fsimg_meta_get_u64(bytes + 8);
-	out->length = fsimg_meta_get_u64(bytes + 16);
+	out->logical_offset = fsimg_load_le64(bytes);
+	out->image_offset = fsimg_load_le64(bytes + 8);
+	out->length = fsimg_load_le64(bytes + 16);
 	if (!extent_valid(&index->domain, index->length, out))
 		return (extent_corrupt(error,
 		    "extent index record is outside its allocation or domain"));

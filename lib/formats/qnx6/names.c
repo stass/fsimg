@@ -72,7 +72,7 @@ qnx6_slot_name(fsimg_reader_t *reader, const qnx6_slot_t *slot, char *out,
     fsimg_error_t *error)
 {
 	unsigned char name[QNX6_NAME_MAX];
-	size_t length;
+	size_t length = 0;
 	fsimg_status_t status;
 
 	if (slot->long_name) {

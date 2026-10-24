@@ -29,6 +29,7 @@
 #include <strings.h>
 
 #include "emit.h"
+#include "fsimg-endian.h"
 #include "unicode.h"
 #include "write.h"
 
@@ -78,29 +79,29 @@ emit_boot(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	boot[1] = plan->variant == 32 ? 0x58 : 0x3c;
 	boot[2] = 0x90;
 	bcopy("FSIMG   ", boot + 3, 8);
-	fsimg_fat_put16(boot + 11, (uint16_t)sector);
+	fsimg_store_le16(boot + 11, (uint16_t)sector);
 	boot[13] = (unsigned char)(plan->common.info.allocation_unit_bytes / sector);
-	fsimg_fat_put16(boot + 14, (uint16_t)plan->reserved_sectors);
+	fsimg_store_le16(boot + 14, (uint16_t)plan->reserved_sectors);
 	boot[16] = 2;
-	fsimg_fat_put16(boot + 17, (uint16_t)plan->root_entries);
+	fsimg_store_le16(boot + 17, (uint16_t)plan->root_entries);
 	if (plan->variant != 32 && total <= UINT16_MAX)
-		fsimg_fat_put16(boot + 19, (uint16_t)total);
+		fsimg_store_le16(boot + 19, (uint16_t)total);
 	else
-		fsimg_fat_put32(boot + 32, total);
+		fsimg_store_le32(boot + 32, total);
 	boot[21] = 0xf8;
-	fsimg_fat_put16(boot + 24, 63);
-	fsimg_fat_put16(boot + 26, 255);
+	fsimg_store_le16(boot + 24, 63);
+	fsimg_store_le16(boot + 26, 255);
 	extension = plan->variant == 32 ? 64 : 36;
 	if (plan->variant == 32) {
-		fsimg_fat_put32(boot + 36, fat_sectors);
-		fsimg_fat_put32(boot + 44, 2);
-		fsimg_fat_put16(boot + 48, 1);
-		fsimg_fat_put16(boot + 50, 6);
+		fsimg_store_le32(boot + 36, fat_sectors);
+		fsimg_store_le32(boot + 44, 2);
+		fsimg_store_le16(boot + 48, 1);
+		fsimg_store_le16(boot + 50, 6);
 	} else
-		fsimg_fat_put16(boot + 22, (uint16_t)fat_sectors);
+		fsimg_store_le16(boot + 22, (uint16_t)fat_sectors);
 	boot[extension] = 0x80;
 	boot[extension + 2] = 0x29;
-	fsimg_fat_put32(boot + extension + 3, plan->common.writer->options.volume_serial);
+	fsimg_store_le32(boot + extension + 3, plan->common.writer->options.volume_serial);
 	memset(boot + extension + 7, ' ', 11);
 	bcopy(plan->common.writer->label, boot + extension + 7, strlen(plan->common.writer->label));
 	bcopy(plan->variant == 12 ? "FAT12   " :
@@ -121,12 +122,12 @@ emit_boot(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 		return (status);
 
 	bzero(info, sizeof(info));
-	fsimg_fat_put32(info, 0x41615252);
-	fsimg_fat_put32(info + 484, 0x61417272);
-	fsimg_fat_put32(info + 488, plan->clusters - plan->allocated);
-	fsimg_fat_put32(info + 492, plan->allocated < plan->clusters ?
+	fsimg_store_le32(info, 0x41615252);
+	fsimg_store_le32(info + 484, 0x61417272);
+	fsimg_store_le32(info + 488, plan->clusters - plan->allocated);
+	fsimg_store_le32(info + 492, plan->allocated < plan->clusters ?
 	    plan->allocated + 2 : UINT32_MAX);
-	fsimg_fat_put32(info + 508, 0xaa550000);
+	fsimg_store_le32(info + 508, 0xaa550000);
 	status = fsimg_emit_write(emit, sector, info, sizeof(info), error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -224,8 +225,8 @@ emit_directory_header(fat_plan_t *plan, fsimg_emit_t *emit, uint64_t id,
 	 */
 	if (parent->first == 2 && plan->variant == 32)
 		parent_cluster = 0;
-	fsimg_fat_put16(raw + 32 + 26, (uint16_t)parent_cluster);
-	fsimg_fat_put16(raw + 32 + 20, (uint16_t)(parent_cluster >> 16));
+	fsimg_store_le16(raw + 32 + 26, (uint16_t)parent_cluster);
+	fsimg_store_le16(raw + 32 + 20, (uint16_t)(parent_cluster >> 16));
 	return (fsimg_emit_write(emit, layout_offset(plan, row), raw,
 	    sizeof(raw), error));
 }
@@ -261,7 +262,7 @@ emit_child(fat_plan_t *plan, fsimg_emit_t *emit, const char *name,
 				index = (ordinal - 1) * 13 + i;
 				value = index < count ? units[index] :
 				    index == count ? 0 : 0xffff;
-				fsimg_fat_put16(slot + positions[i], value);
+				fsimg_store_le16(slot + positions[i], value);
 			}
 		}
 	}

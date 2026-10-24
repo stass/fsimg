@@ -19,6 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "host.h"
 #include "io.h"
 #include "socket.h"
@@ -387,7 +388,7 @@ event(void *argument, const fsimg_frame_t *frame,
 			fixture->partitions++;
 		if (frame->type == FSIMG_FRAME_PLAN) {
 			fixture->plans++;
-			fixture->plan_losses = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PLAN_LOSSES);
+			fixture->plan_losses = fsimg_load_le64(frame->payload + FSIMG_WIRE_PLAN_LOSSES);
 		}
 		if (frame->type == FSIMG_FRAME_NAME)
 			fixture->name_bytes += frame->length;
@@ -1109,7 +1110,7 @@ fake_worker(worker_scenario_t mode)
 		CHECK(write(FSIMG_CHILD_CONTROL, header, 3) == 3);
 		return (0);
 	}
-	fsimg_wire_put64(raw, 2);
+	fsimg_store_le64(raw, 2);
 	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_READY, raw, 8, NULL) == FSIMG_OK);
 	if (mode == SCENARIO_ACK_ERROR) {
 		CHECK(close(FSIMG_CHILD_JOB) == 0);
@@ -1138,9 +1139,9 @@ fake_worker(worker_scenario_t mode)
 		for (unsigned i = 0; i < FSIMG_WIRE_LOSS_EVENTS +
 		    (mode == SCENARIO_EXCESS_LOSS ? 1 : 0); i++) {
 			bzero(raw, FSIMG_WIRE_LOSS_BYTES + 1);
-			fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_FIELDS,
+			fsimg_store_le64(raw + FSIMG_WIRE_LOSS_FIELDS,
 			    FSIMG_META_MODIFIED);
-			fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_LENGTH, 1);
+			fsimg_store_le64(raw + FSIMG_WIRE_LOSS_LENGTH, 1);
 			raw[FSIMG_WIRE_LOSS_PATH] = 'X';
 			if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_LOSS,
 			    raw, FSIMG_WIRE_LOSS_BYTES + 1, NULL) != FSIMG_OK)
@@ -1149,19 +1150,19 @@ fake_worker(worker_scenario_t mode)
 	}
 	/* The IMAGE record describes the input, whose size is the scenario. */
 	bzero(raw, FSIMG_WIRE_IMAGE_BYTES);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, mode == SCENARIO_IMAGE_WRONG_DISK ?
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, mode == SCENARIO_IMAGE_WRONG_DISK ?
 	    (uint64_t)mode + 1 : (uint64_t)mode);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, (uint64_t)mode);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, (uint64_t)mode);
 	if (mode == SCENARIO_PARTITION_OUTSIDE || mode == SCENARIO_PARTITION_UNSELECTED_LIST) {
 		strcpy((char *)raw + FSIMG_WIRE_IMAGE_SCHEME, "mbr");
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
 	}
 	/* A fixed VHD's disk is the file less its footer, never the file. */
 	if (mode == SCENARIO_VHD_WHOLE_FILE)
 		strcpy((char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "vhd");
 	if (mode == SCENARIO_PARTITION_UNSELECTED_LIST) {
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_UNSELECTED);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_UNSELECTED);
 		strcpy((char *)raw + FSIMG_WIRE_IMAGE_REASON, "no single filesystem");
 	}
 	if (mode != SCENARIO_INFO_WITHOUT_IMAGE)
@@ -1169,15 +1170,15 @@ fake_worker(worker_scenario_t mode)
 		    FSIMG_WIRE_IMAGE_BYTES, NULL) == FSIMG_OK);
 	if (mode == SCENARIO_PARTITION_OUTSIDE) {
 		bzero(raw, FSIMG_WIRE_PARTITION_BYTES);
-		fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_INDEX, 1);
-		fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_OFFSET, 1);
-		fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_LENGTH, (uint64_t)mode);
+		fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_INDEX, 1);
+		fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_OFFSET, 1);
+		fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_LENGTH, (uint64_t)mode);
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PARTITION, raw,
 		    FSIMG_WIRE_PARTITION_BYTES, NULL) == FSIMG_OK);
 	}
 	bzero(raw, FSIMG_WIRE_INFO_BYTES);
-	fsimg_wire_put64(raw + 56, mode == SCENARIO_INVALID_TIME_BASIS ? UINT64_MAX : FSIMG_TIME_WALL);
-	fsimg_wire_put64(raw + 64, FSIMG_VALIDATION_HEADER);
+	fsimg_store_le64(raw + 56, mode == SCENARIO_INVALID_TIME_BASIS ? UINT64_MAX : FSIMG_TIME_WALL);
+	fsimg_store_le64(raw + 64, FSIMG_VALIDATION_HEADER);
 	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO, raw, FSIMG_WIRE_INFO_BYTES, NULL) == FSIMG_OK);
 	if (mode == SCENARIO_PARTIAL_EXTRACTION) {
 		output = openat(FSIMG_CHILD_OUTPUT, "partial", O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -1188,10 +1189,10 @@ fake_worker(worker_scenario_t mode)
 	}
 	if (mode >= SCENARIO_VERIFY_INVALID_SCOPE && mode <= SCENARIO_VERIFY_MISSING_PAYLOAD) {
 		bzero(raw, 72);
-		fsimg_wire_put64(raw, mode == SCENARIO_VERIFY_INVALID_SCOPE ? UINT64_MAX : mode == SCENARIO_VERIFY_HEADER_SCOPE ?
+		fsimg_store_le64(raw, mode == SCENARIO_VERIFY_INVALID_SCOPE ? UINT64_MAX : mode == SCENARIO_VERIFY_HEADER_SCOPE ?
 		    FSIMG_VALIDATION_HEADER : mode == SCENARIO_VERIFY_UNREQUESTED_PAYLOAD ? FSIMG_VALIDATION_PAYLOAD :
 		    FSIMG_VALIDATION_STRUCTURAL);
-		fsimg_wire_put64(raw + 8, 1);
+		fsimg_store_le64(raw + 8, 1);
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_VERIFY,
 		    raw, 72, NULL) == FSIMG_OK);
 	}
@@ -1204,8 +1205,8 @@ fake_worker(worker_scenario_t mode)
 	}
 	if (mode == SCENARIO_LONG_LIST_NAME) {
 		bzero(raw, FSIMG_WIRE_ENTRY_BYTES);
-		fsimg_wire_put64(raw, FSIMG_ENTRY_FILE);
-		fsimg_wire_put64(raw + 16, 65535);
+		fsimg_store_le64(raw, FSIMG_ENTRY_FILE);
+		fsimg_store_le64(raw + 16, 65535);
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY, raw, FSIMG_WIRE_ENTRY_BYTES, NULL) == FSIMG_OK);
 		memset(raw, 'N', sizeof(raw));
 		raw[0] = '/';
@@ -1219,11 +1220,11 @@ fake_worker(worker_scenario_t mode)
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY_END, NULL, 0, NULL) == FSIMG_OK);
 	}
 	bzero(raw, FSIMG_WIRE_DONE_BYTES);
-	fsimg_wire_put64(raw, mode == SCENARIO_LONG_LIST_NAME ? 1 : 0);
+	fsimg_store_le64(raw, mode == SCENARIO_LONG_LIST_NAME ? 1 : 0);
 	if (mode == SCENARIO_SKIPPED_EXTRACTION)
-		fsimg_wire_put64(raw + FSIMG_WIRE_DONE_SKIPPED, 1);
+		fsimg_store_le64(raw + FSIMG_WIRE_DONE_SKIPPED, 1);
 	if (mode == SCENARIO_OMITTED_EXTRACTION)
-		fsimg_wire_put64(raw + FSIMG_WIRE_DONE_OMITTED, 1);
+		fsimg_store_le64(raw + FSIMG_WIRE_DONE_OMITTED, 1);
 	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL) == FSIMG_OK);
 	if (mode == SCENARIO_DUPLICATE_DONE)
 		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
@@ -1593,8 +1594,8 @@ fake_output(void)
 			}
 			offset += (size_t)count;
 		}
-		stream = fsimg_wire_get64(header);
-		remaining = fsimg_wire_get64(header + 8);
+		stream = fsimg_load_le64(header);
+		remaining = fsimg_load_le64(header + 8);
 		CHECK(stream == 1 || stream == 2);
 		while (remaining != 0) {
 			batch = remaining > sizeof(buffer) ? sizeof(buffer) : (size_t)remaining;
@@ -1604,16 +1605,16 @@ fake_output(void)
 			remaining -= (uint64_t)count;
 		}
 		bzero(report, sizeof(report));
-		fsimg_wire_put64(report, confirmed[0]);
-		fsimg_wire_put64(report + 8, confirmed[1]);
-		fsimg_wire_put64(report + 24, 1);
+		fsimg_store_le64(report, confirmed[0]);
+		fsimg_store_le64(report + 8, confirmed[1]);
+		fsimg_store_le64(report + 24, 1);
 		CHECK(write(4, report, sizeof(report)) == sizeof(report));
 	}
 complete:
 	bzero(report, sizeof(report));
-	fsimg_wire_put64(report, confirmed[0]);
-	fsimg_wire_put64(report + 8, confirmed[1]);
-	fsimg_wire_put64(report + 24, 2);
+	fsimg_store_le64(report, confirmed[0]);
+	fsimg_store_le64(report + 8, confirmed[1]);
+	fsimg_store_le64(report + 24, 2);
 	CHECK(write(4, report, sizeof(report)) == sizeof(report));
 	CHECK(close(4) == 0);
 	signal(SIGTERM, SIG_IGN);

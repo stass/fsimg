@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "host.h"
 #include "source.h"
 #include "unicode.h"
@@ -63,11 +64,11 @@ decode_signed32(uint32_t value)
 static void
 encode_time(unsigned char *bytes, const fsimg_timestamp_t *time)
 {
-	fsimg_meta_put_u64(bytes, (uint64_t)time->seconds);
-	fsimg_meta_put_u64(bytes + 8, time->precision_ns);
-	fsimg_meta_put_u32(bytes + 16, time->nanoseconds);
-	fsimg_meta_put_u32(bytes + 20, (uint32_t)time->basis);
-	fsimg_meta_put_u32(bytes + 24, (uint32_t)time->offset_minutes);
+	fsimg_store_le64(bytes, (uint64_t)time->seconds);
+	fsimg_store_le64(bytes + 8, time->precision_ns);
+	fsimg_store_le32(bytes + 16, time->nanoseconds);
+	fsimg_store_le32(bytes + 20, (uint32_t)time->basis);
+	fsimg_store_le32(bytes + 24, (uint32_t)time->offset_minutes);
 }
 
 /* Range checks precede every narrowing; the trailing padding must be zero. */
@@ -77,15 +78,15 @@ decode_time(const unsigned char *bytes, fsimg_timestamp_t *time)
 	uint32_t nanoseconds, basis;
 	int32_t offset;
 
-	nanoseconds = fsimg_meta_get_u32(bytes + 16);
-	basis = fsimg_meta_get_u32(bytes + 20);
-	offset = decode_signed32(fsimg_meta_get_u32(bytes + 24));
+	nanoseconds = fsimg_load_le32(bytes + 16);
+	basis = fsimg_load_le32(bytes + 20);
+	offset = decode_signed32(fsimg_load_le32(bytes + 24));
 	if (nanoseconds >= 1000000000 || basis < FSIMG_TIME_UTC ||
 	    basis > FSIMG_TIME_WALL || offset <= -1440 || offset >= 1440 ||
-	    fsimg_meta_get_u32(bytes + 28) != 0)
+	    fsimg_load_le32(bytes + 28) != 0)
 		return (false);
-	time->seconds = decode_signed(fsimg_meta_get_u64(bytes));
-	time->precision_ns = fsimg_meta_get_u64(bytes + 8);
+	time->seconds = decode_signed(fsimg_load_le64(bytes));
+	time->precision_ns = fsimg_load_le64(bytes + 8);
 	time->nanoseconds = nanoseconds;
 	time->basis = (fsimg_time_basis_t)basis;
 	time->offset_minutes = offset;
@@ -127,17 +128,17 @@ entry_shape_valid(uint32_t kind, uint64_t size, uint32_t storage,
 static void
 encode_metadata(unsigned char *record, const fsimg_metadata_t *metadata)
 {
-	fsimg_meta_put_u32(record + FSIMG_CATALOG_VALID, metadata->valid);
-	fsimg_meta_put_u32(record + FSIMG_CATALOG_REQUIRED, metadata->required);
+	fsimg_store_le32(record + FSIMG_CATALOG_VALID, metadata->valid);
+	fsimg_store_le32(record + FSIMG_CATALOG_REQUIRED, metadata->required);
 	if ((metadata->valid & FSIMG_META_ATTRIBUTES) != 0)
-		fsimg_meta_put_u32(record + FSIMG_CATALOG_ATTRIBUTES,
+		fsimg_store_le32(record + FSIMG_CATALOG_ATTRIBUTES,
 		    metadata->attributes);
 	if ((metadata->valid & FSIMG_META_OWNER) != 0) {
-		fsimg_meta_put_u32(record + FSIMG_CATALOG_UID, metadata->uid);
-		fsimg_meta_put_u32(record + FSIMG_CATALOG_GID, metadata->gid);
+		fsimg_store_le32(record + FSIMG_CATALOG_UID, metadata->uid);
+		fsimg_store_le32(record + FSIMG_CATALOG_GID, metadata->gid);
 	}
 	if ((metadata->valid & FSIMG_META_MODE) != 0)
-		fsimg_meta_put_u32(record + FSIMG_CATALOG_MODE, metadata->mode);
+		fsimg_store_le32(record + FSIMG_CATALOG_MODE, metadata->mode);
 	if ((metadata->valid & FSIMG_META_CREATED) != 0)
 		encode_time(record + FSIMG_CATALOG_CREATED, &metadata->created);
 	if ((metadata->valid & FSIMG_META_MODIFIED) != 0)
@@ -171,21 +172,21 @@ decode_metadata(const unsigned char *record, fsimg_metadata_t *out)
 		{ FSIMG_META_CHANGED, FSIMG_CATALOG_CHANGED, FSIMG_CATALOG_TIME_BYTES }
 	};
 
-	out->valid = fsimg_meta_get_u32(record + FSIMG_CATALOG_VALID);
-	out->required = fsimg_meta_get_u32(record + FSIMG_CATALOG_REQUIRED);
+	out->valid = fsimg_load_le32(record + FSIMG_CATALOG_VALID);
+	out->required = fsimg_load_le32(record + FSIMG_CATALOG_REQUIRED);
 	for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
 		if ((out->valid & slots[i].field) == 0 &&
 		    bcmp(record + slots[i].offset, zero, slots[i].length) != 0)
 			return (false);
 	}
 	if ((out->valid & FSIMG_META_ATTRIBUTES) != 0)
-		out->attributes = fsimg_meta_get_u32(record + FSIMG_CATALOG_ATTRIBUTES);
+		out->attributes = fsimg_load_le32(record + FSIMG_CATALOG_ATTRIBUTES);
 	if ((out->valid & FSIMG_META_OWNER) != 0) {
-		out->uid = fsimg_meta_get_u32(record + FSIMG_CATALOG_UID);
-		out->gid = fsimg_meta_get_u32(record + FSIMG_CATALOG_GID);
+		out->uid = fsimg_load_le32(record + FSIMG_CATALOG_UID);
+		out->gid = fsimg_load_le32(record + FSIMG_CATALOG_GID);
 	}
 	if ((out->valid & FSIMG_META_MODE) != 0)
-		out->mode = fsimg_meta_get_u32(record + FSIMG_CATALOG_MODE);
+		out->mode = fsimg_load_le32(record + FSIMG_CATALOG_MODE);
 	if ((out->valid & FSIMG_META_CREATED) != 0 &&
 	    !decode_time(record + FSIMG_CATALOG_CREATED, &out->created))
 		return (false);
@@ -232,17 +233,17 @@ fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 
 	/* Every absent field and all representation bytes have defined contents. */
 	bzero(writer->record, FSIMG_CATALOG_HEADER);
-	fsimg_meta_put_u64(writer->record + FSIMG_CATALOG_SIZE, entry->size);
-	fsimg_meta_put_u64(writer->record + FSIMG_CATALOG_SOURCE_ID, source_id);
-	fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_STORAGE, storage);
-	fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_KIND, entry->kind);
+	fsimg_store_le64(writer->record + FSIMG_CATALOG_SIZE, entry->size);
+	fsimg_store_le64(writer->record + FSIMG_CATALOG_SOURCE_ID, source_id);
+	fsimg_store_le32(writer->record + FSIMG_CATALOG_STORAGE, storage);
+	fsimg_store_le32(writer->record + FSIMG_CATALOG_KIND, entry->kind);
 	encode_metadata(writer->record, &entry->metadata);
 	if (root != NULL) {
-		fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_ORIGIN,
+		fsimg_store_le32(writer->record + FSIMG_CATALOG_ORIGIN,
 		    FSIMG_ORIGIN_SCANNED);
-		fsimg_meta_put_u64(writer->record + FSIMG_CATALOG_ORDER, root->id);
+		fsimg_store_le64(writer->record + FSIMG_CATALOG_ORDER, root->id);
 	} else {
-		fsimg_meta_put_u32(writer->record + FSIMG_CATALOG_ORIGIN,
+		fsimg_store_le32(writer->record + FSIMG_CATALOG_ORIGIN,
 		    FSIMG_ORIGIN_PROGRAMMATIC);
 	}
 	bcopy(entry->path, writer->record + FSIMG_CATALOG_HEADER, path_length + 1);
@@ -288,10 +289,10 @@ rank_valid(const fsimg_writer_t *writer, const unsigned char *record,
 {
 	uint64_t order;
 
-	if (fsimg_meta_get_u32(record + FSIMG_CATALOG_ORIGIN + 4) != 0)
+	if (fsimg_load_le32(record + FSIMG_CATALOG_ORIGIN + 4) != 0)
 		return (false);
-	order = fsimg_meta_get_u64(record + FSIMG_CATALOG_ORDER);
-	switch (fsimg_meta_get_u32(record + FSIMG_CATALOG_ORIGIN)) {
+	order = fsimg_load_le64(record + FSIMG_CATALOG_ORDER);
+	switch (fsimg_load_le32(record + FSIMG_CATALOG_ORIGIN)) {
 	case FSIMG_ORIGIN_SCANNED:
 		return (order < writer->root_count &&
 		    storage_matches_origin(storage, FSIMG_ORIGIN_SCANNED));
@@ -318,11 +319,11 @@ decode_entry(fsimg_writer_t *writer, const unsigned char *bytes, size_t length,
 	    length - FSIMG_CATALOG_HEADER) != length - FSIMG_CATALOG_HEADER - 1)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_CATALOG, "invalid catalog record path framing"));
-	kind = fsimg_meta_get_u32(bytes + FSIMG_CATALOG_KIND);
-	storage = fsimg_meta_get_u32(bytes + FSIMG_CATALOG_STORAGE);
+	kind = fsimg_load_le32(bytes + FSIMG_CATALOG_KIND);
+	storage = fsimg_load_le32(bytes + FSIMG_CATALOG_STORAGE);
 	out->entry.path = (const char *)bytes + FSIMG_CATALOG_HEADER;
-	out->entry.size = fsimg_meta_get_u64(bytes + FSIMG_CATALOG_SIZE);
-	out->source_id = fsimg_meta_get_u64(bytes + FSIMG_CATALOG_SOURCE_ID);
+	out->entry.size = fsimg_load_le64(bytes + FSIMG_CATALOG_SIZE);
+	out->source_id = fsimg_load_le64(bytes + FSIMG_CATALOG_SOURCE_ID);
 	if (!entry_shape_valid(kind, out->entry.size, storage, out->source_id) ||
 	    !rank_valid(writer, bytes, storage) ||
 	    (storage == FSIMG_STORAGE_PROVIDER && !writer->provider_set))
@@ -376,12 +377,12 @@ rank_compare(const unsigned char *a, const unsigned char *b)
 	uint64_t a_order, b_order;
 	uint32_t a_origin, b_origin;
 
-	a_origin = fsimg_meta_get_u32(a + FSIMG_CATALOG_ORIGIN);
-	b_origin = fsimg_meta_get_u32(b + FSIMG_CATALOG_ORIGIN);
+	a_origin = fsimg_load_le32(a + FSIMG_CATALOG_ORIGIN);
+	b_origin = fsimg_load_le32(b + FSIMG_CATALOG_ORIGIN);
 	if (a_origin != b_origin)
 		return ((a_origin > b_origin) - (a_origin < b_origin));
-	a_order = fsimg_meta_get_u64(a + FSIMG_CATALOG_ORDER);
-	b_order = fsimg_meta_get_u64(b + FSIMG_CATALOG_ORDER);
+	a_order = fsimg_load_le64(a + FSIMG_CATALOG_ORDER);
+	b_order = fsimg_load_le64(b + FSIMG_CATALOG_ORDER);
 	return ((a_order > b_order) - (a_order < b_order));
 }
 
@@ -419,8 +420,8 @@ child_compare(const void *a, size_t a_length, const void *b, size_t b_length,
 
 	if (a_length <= 16 || b_length <= 16)
 		return ((a_length > b_length) - (a_length < b_length));
-	a_parent = fsimg_meta_get_u64(left);
-	b_parent = fsimg_meta_get_u64(right);
+	a_parent = fsimg_load_le64(left);
+	b_parent = fsimg_load_le64(right);
 	if (a_parent != b_parent)
 		return ((a_parent > b_parent) - (a_parent < b_parent));
 	common = a_length < b_length ? a_length - 16 : b_length - 16;
@@ -536,9 +537,9 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 	kept_path[1] = '\0';
 	ancestors[0].id = 0;
 	ancestors[0].path_length = 1;
-	fsimg_meta_put_u64(index, UINT64_MAX);
-	fsimg_meta_put_u64(index + 8, 0);
-	fsimg_meta_put_u64(index + 16, 0);
+	fsimg_store_le64(index, UINT64_MAX);
+	fsimg_store_le64(index + 8, 0);
+	fsimg_store_le64(index + 16, 0);
 	status = fsimg_array_set(writer->index, 0, index, error);
 	if (status != FSIMG_OK)
 		goto done;
@@ -586,9 +587,9 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 			fsimg_error_path(error, entry.entry.path);
 			goto done;
 		}
-		fsimg_meta_put_u64(index, reference);
-		fsimg_meta_put_u64(index + 8, ancestors[top].id);
-		fsimg_meta_put_u64(index + 16, 0);
+		fsimg_store_le64(index, reference);
+		fsimg_store_le64(index + 8, ancestors[top].id);
+		fsimg_store_le64(index + 16, 0);
 		status = fsimg_array_set(writer->index, id, index, error);
 		if (status != FSIMG_OK)
 			goto done;
@@ -610,8 +611,8 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		name_length = strlen(name) + 1;
 		/* Copy the name before reusing the record buffer for its key. */
 		bcopy(name, writer->record + 16, name_length);
-		fsimg_meta_put_u64(writer->record, ancestors[top].id);
-		fsimg_meta_put_u64(writer->record + 8, id);
+		fsimg_store_le64(writer->record, ancestors[top].id);
+		fsimg_store_le64(writer->record + 8, id);
 		status = fsimg_stream_append(children, writer->record,
 		    16 + name_length, NULL, error);
 		if (status != FSIMG_OK)
@@ -646,7 +647,7 @@ set_child_count(fsimg_writer_t *writer, uint64_t parent, uint64_t count,
 	status = fsimg_array_get(writer->index, parent, index, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fsimg_meta_put_u64(index + 16, count);
+	fsimg_store_le64(index + 16, count);
 	return (fsimg_array_set(writer->index, parent, index, error));
 }
 
@@ -660,8 +661,8 @@ fsimg_catalog_decode_child(fsimg_writer_t *writer, size_t length,
 	bzero(child, sizeof(*child));
 	if (length < 18 || length - 16 > writer->ctx->options.max_path_bytes)
 		goto invalid;
-	child->parent_id = fsimg_meta_get_u64(writer->record);
-	child->id = fsimg_meta_get_u64(writer->record + 8);
+	child->parent_id = fsimg_load_le64(writer->record);
+	child->id = fsimg_load_le64(writer->record + 8);
 	child->name = (const char *)writer->record + 16;
 	child->name_length = strnlen(child->name, length - 16);
 	if (child->id == 0 || child->id > writer->count ||
@@ -814,7 +815,7 @@ read_entry(fsimg_writer_t *writer, uint64_t id, unsigned char *record,
 		return (fsimg_writer_fail(writer, status));
 	bzero(out, sizeof(*out));
 	if (id != 0) {
-		cursor = fsimg_meta_get_u64(index);
+		cursor = fsimg_load_le64(index);
 		status = fsimg_stream_next(writer->ordered, &cursor, record,
 		    writer->record_capacity, &length, error);
 		if (status == FSIMG_DONE)
@@ -830,10 +831,10 @@ read_entry(fsimg_writer_t *writer, uint64_t id, unsigned char *record,
 		out->entry.kind = FSIMG_ENTRY_DIRECTORY;
 	}
 	out->id = id;
-	out->parent_id = fsimg_meta_get_u64(index + 8);
-	out->children = fsimg_meta_get_u64(index + 16);
+	out->parent_id = fsimg_load_le64(index + 8);
+	out->children = fsimg_load_le64(index + 16);
 	if ((id == 0 && (out->parent_id != 0 ||
-	    fsimg_meta_get_u64(index) != UINT64_MAX)) ||
+	    fsimg_load_le64(index) != UINT64_MAX)) ||
 	    (id != 0 && out->parent_id >= id) ||
 	    out->children > writer->count ||
 	    (out->entry.kind != FSIMG_ENTRY_DIRECTORY && out->children != 0)) {

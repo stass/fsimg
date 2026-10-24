@@ -31,8 +31,10 @@
  *   weak references are removed;
  * - the public functions and the context take the names in sha256.h;
  * - the big-endian memcpy shortcut is removed, so the byte-wise vector
- *   helpers serve every host, and they use the local be32dec, be32enc and
- *   be64enc below in place of <sys/endian.h>;
+ *   helpers serve every host, and they and SHA256_Pad use fsimg's
+ *   fsimg_load_be32, fsimg_store_be32 and fsimg_store_be64 from
+ *   fsimg-endian.h in place of be32dec, be32enc and be64enc from
+ *   <sys/endian.h>;
  * - SHA256_Update widens the byte count to 64 bits before converting it to
  *   bits, which the original does in size_t and so truncates on a host
  *   with a 32-bit size_t for an update of 512 MiB or more;
@@ -50,31 +52,8 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "sha256.h"
-
-/* Big-endian load and stores, as <sys/endian.h> defines them on FreeBSD. */
-static uint32_t
-be32dec(const unsigned char *p)
-{
-	return ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
-	    (uint32_t)p[2] << 8 | (uint32_t)p[3]);
-}
-
-static void
-be32enc(unsigned char *p, uint32_t u)
-{
-	p[0] = (unsigned char)(u >> 24);
-	p[1] = (unsigned char)(u >> 16);
-	p[2] = (unsigned char)(u >> 8);
-	p[3] = (unsigned char)u;
-}
-
-static void
-be64enc(unsigned char *p, uint64_t u)
-{
-	be32enc(p, (uint32_t)(u >> 32));
-	be32enc(p + 4, (uint32_t)u);
-}
 
 /*
  * Encode a length len/4 vector of (uint32_t) into a length len vector of
@@ -86,7 +65,7 @@ be32enc_vect(unsigned char *dst, const uint32_t *src, size_t len)
 	size_t i;
 
 	for (i = 0; i < len / 4; i++)
-		be32enc(dst + i * 4, src[i]);
+		fsimg_store_be32(dst + i * 4, src[i]);
 }
 
 /*
@@ -99,7 +78,7 @@ be32dec_vect(uint32_t *dst, const unsigned char *src, size_t len)
 	size_t i;
 
 	for (i = 0; i < len / 4; i++)
-		dst[i] = be32dec(src + i * 4);
+		dst[i] = fsimg_load_be32(src + i * 4);
 }
 
 /* SHA256 round constants. */
@@ -241,7 +220,7 @@ SHA256_Pad(fsimg_sha256_t * ctx)
 	}
 
 	/* Add the terminating bit-count. */
-	be64enc(&ctx->buf[56], ctx->count);
+	fsimg_store_be64(&ctx->buf[56], ctx->count);
 
 	/* Mix in the final block. */
 	SHA256_Transform(ctx->state, ctx->buf);

@@ -168,7 +168,7 @@ qnx6_headers_read(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_qnx6_reader_t *qnx6 = qnx6_state(reader);
 	qnx6_geometry_t *g = &qnx6->geometry;
-	qnx6_candidate_t *candidates, *selected;
+	qnx6_candidate_t *candidates, *selected = NULL;
 	uint64_t volume_bytes, second_header, system_bytes;
 	fsimg_error_t detail;
 	fsimg_status_t status;

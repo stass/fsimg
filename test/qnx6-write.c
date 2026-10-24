@@ -362,7 +362,8 @@ chk_child(chk_t *c, const uint32_t *table, uint32_t number, uint32_t parent,
 	}
 	e = &c->entries[c->count++];
 	bzero(e, sizeof(*e));
-	snprintf(e->path, sizeof(e->path), "%s", path);
+	CHECK(strlen(path) < sizeof(e->path));
+	bcopy(path, e->path, strlen(path) + 1);
 	e->inode = number;
 	e->size = get64(c, ino);
 	e->uid = get32(c, ino + 8);
@@ -1735,7 +1736,7 @@ test_sizing(void)
 	chk_expect_t expect;
 	const fsimg_plan_t *plan;
 	chk_t c;
-	uint32_t plain;
+	uint32_t plain = 0;
 
 	fsimg_write_options_init(&options);
 	options.inode_capacity = TREE_COUNT;

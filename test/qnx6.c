@@ -1595,7 +1595,7 @@ test_hard_links(void)
 	size_t count;
 	fsimg_status_t status;
 	unsigned char last[1];
-	char name[16];
+	char name[32];
 
 	gen_init(&g, 1024, false, 1048576, GEN_INODES, 0x100);
 	bytes = pattern(17 * 1024, 5);
@@ -2054,7 +2054,7 @@ test_inodes(void)
 	/* The last inode of the table. */
 	gen_init(&g, 1024, false, 1048576, GEN_INODES, 0x100);
 	for (uint32_t i = 3; i <= GEN_INODES; i++) {
-		char name[16];
+		char name[32];
 
 		snprintf(name, sizeof(name), "f%u", i);
 		CHECK(gen_fifo(&g, 1, name) == i);
@@ -2443,7 +2443,7 @@ test_system_trees(void)
 	unsigned char byte[1];
 	uint64_t span;
 	uint32_t next, first, block_size;
-	char name[16];
+	char name[32];
 
 	for (unsigned big = 0; big < 2; big++) {
 		shape = sparse_shape(512, big != 0, gen_length(512,
@@ -2521,7 +2521,7 @@ check_full(uint32_t block_size, bool big)
 	unsigned char *bytes;
 	uint64_t remaining, leaves;
 	uint32_t live;
-	char name[16];
+	char name[32];
 
 	gen_init(&g, block_size, big, 1048576, GEN_INODES, 0x100);
 	/* Every inode but the root is named in the root, after its two dot
@@ -3356,7 +3356,7 @@ test_extract(void)
 	fsimg_stats_t stats;
 	const fsimg_entry_t *entry;
 	fsimg_error_t error;
-	char path[128], bytes[8], long_name[512];
+	char path[2048], bytes[8], long_name[512];
 	bool matches;
 	ssize_t got;
 	int fd;
@@ -3650,7 +3650,7 @@ scale_width(qnx6_gen_t *g, uint64_t files)
 	gen_shape_t shape;
 	uint64_t root;
 	uint32_t inodes;
-	char name[16];
+	char name[32];
 
 	inodes = (uint32_t)((files + 2 + 7) / 8 * 8);
 	root = gen_tree_blocks(((files + 3) * 32 + 1023) / 1024, 256);

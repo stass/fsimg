@@ -82,10 +82,6 @@ struct fsimg_fat_reader {
 	bool		 root_label_seen;
 };
 
-uint16_t fsimg_fat_u16(const unsigned char *);
-uint32_t fsimg_fat_u32(const unsigned char *);
-void fsimg_fat_put16(unsigned char *, uint16_t);
-void fsimg_fat_put32(unsigned char *, uint32_t);
 fsimg_status_t fsimg_fat_corrupt(fsimg_error_t *, const char *);
 bool fsimg_fat_cluster_valid(const fat_geometry_t *, uint32_t);
 uint64_t fsimg_fat_cluster_offset(const fat_geometry_t *, uint32_t);

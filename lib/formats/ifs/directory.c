@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "ifs.h"
 #include "unicode.h"
 
@@ -62,8 +63,8 @@ admit_child(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	name[child->name_length] = '\0';
 
 	payload[IFS_PAYLOAD_KIND] = (unsigned char)child->kind;
-	fsimg_meta_put_u64(payload + IFS_PAYLOAD_NODE, child->node);
-	fsimg_meta_put_u32(payload + IFS_PAYLOAD_TABLE_OFFSET,
+	fsimg_store_le64(payload + IFS_PAYLOAD_NODE, child->node);
+	fsimg_store_le32(payload + IFS_PAYLOAD_TABLE_OFFSET,
 	    child->table_offset);
 	payload[IFS_PAYLOAD_PATH_LENGTH] =
 	    (unsigned char)(child->path_length & 0xff);
@@ -238,8 +239,8 @@ ifs_replay(fsimg_reader_t *reader, const char *name,
 	    payload[IFS_PAYLOAD_KIND] > IFS_KIND_FIFO)
 		return (ifs_corrupt(error, "invalid prepared ImageFS entry payload"));
 	current->kind = (ifs_kind_t)payload[IFS_PAYLOAD_KIND];
-	current->node = fsimg_meta_get_u64(payload + IFS_PAYLOAD_NODE);
-	current->table_offset = fsimg_meta_get_u32(payload +
+	current->node = fsimg_load_le64(payload + IFS_PAYLOAD_NODE);
+	current->table_offset = fsimg_load_le32(payload +
 	    IFS_PAYLOAD_TABLE_OFFSET);
 	path_length = (uint32_t)payload[IFS_PAYLOAD_PATH_LENGTH] |
 	    (uint32_t)payload[IFS_PAYLOAD_PATH_LENGTH + 1] << 8;

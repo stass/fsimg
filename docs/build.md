@@ -357,7 +357,7 @@ integration evidence. Independent format evidence remains with the
 format-local tests, the specification harness and the integration scripts.
 
 `test-zlib-memory` covers the shared zlib allocator in
-`lib/layers/zlib-memory.c`. It checks charged deltas and zero-byte requests,
+`lib/core/zlib-memory.c`. It checks charged deltas and zero-byte requests,
 a budget refusal keeping its exact limit diagnostic, a sticky first error
 across later attempts and frees, the `FSIMG_ENOMEM` fallback, every
 allocation ordinal of deflate and inflate initialization returning to the

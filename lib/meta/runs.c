@@ -7,10 +7,11 @@
 #include <stdio.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "host.h"
 #include "meta.h"
 
-/* Exclusive ownership runs (specs/design-verification-helpers.md). A record
+/* Exclusive ownership runs. A record
  * is a claim on the allocation units [first, first + count): the first unit
  * and the positive count, each a little-endian u64, in one stream frame.
  * Units are allocation-unit numbers, never byte offsets.
@@ -96,8 +97,8 @@ run_compare(const void *a, size_t alen, const void *b, size_t blen,
 
 	if (alen != RUN_RECORD_BYTES || blen != RUN_RECORD_BYTES)
 		return ((alen > blen) - (alen < blen));
-	first = fsimg_meta_get_u64(a);
-	second = fsimg_meta_get_u64(b);
+	first = fsimg_load_le64(a);
+	second = fsimg_load_le64(b);
 	return ((first > second) - (first < second));
 }
 
@@ -171,8 +172,8 @@ fsimg_owner_runs_append(fsimg_owner_runs_t *runs, uint64_t first,
 	status = claim_check(runs, first, count, error);
 	if (status != FSIMG_OK)
 		return (runs_fail(runs, status));
-	fsimg_meta_put_u64(record, first);
-	fsimg_meta_put_u64(record + 8, count);
+	fsimg_store_le64(record, first);
+	fsimg_store_le64(record + 8, count);
 	status = fsimg_stream_append(runs->stream, record, sizeof(record), NULL,
 	    error);
 	if (status != FSIMG_OK)
@@ -254,8 +255,8 @@ fsimg_owner_runs_next(fsimg_owner_runs_t *runs, fsimg_owner_run_t *out,
 	/* Append admitted only valid claims, so an invalid one here is
 	 * damaged scratch. An overlap may come from the image or scratch.
 	 */
-	first = fsimg_meta_get_u64(record);
-	count = fsimg_meta_get_u64(record + 8);
+	first = fsimg_load_le64(record);
+	count = fsimg_load_le64(record + 8);
 	if (claim_check(runs, first, count, NULL) != FSIMG_OK)
 		return (runs_fail(runs, fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_METADATA, "invalid ownership scratch record")));

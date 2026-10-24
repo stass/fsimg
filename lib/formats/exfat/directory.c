@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "exfat.h"
+#include "fsimg-endian.h"
 #include "unicode.h"
 
 /* exFAT's part of directory preparation (specs/design-directories.md):
@@ -109,7 +110,7 @@ exfat_directory_set_next(exfat_directory_cursor_t *cursor, fsimg_error_t *error)
 				return (status);
 			}
 		}
-		if (exfat_set_checksum(cursor->set, set_length) != exfat_u16(cursor->set + 2)) {
+		if (exfat_set_checksum(cursor->set, set_length) != fsimg_load_le16(cursor->set + 2)) {
 			status = exfat_corrupt(error, "invalid exFAT directory entry-set checksum");
 			return (status);
 		}
@@ -130,14 +131,14 @@ benign_allocation(fsimg_reader_t *reader, const unsigned char *raw,
 	/* Generic primary flags follow SecondaryCount and SetChecksum; generic
 	 * secondary flags occupy byte 1, including Vendor Allocation entries.
 	 */
-	flags = primary ? exfat_u16(raw + 4) : raw[1];
+	flags = primary ? fsimg_load_le16(raw + 4) : raw[1];
 	if ((flags & 1) == 0) {
 		if ((flags & 2) != 0)
 			return (exfat_corrupt(error, "exFAT NoFatChain without allocation authority"));
 		return (FSIMG_OK);
 	}
-	stream = (exfat_stream_t){ .first = exfat_u32(raw + 20),
-	    .length = fsimg_meta_get_u64(raw + 24), .contiguous = (flags & 2) != 0 };
+	stream = (exfat_stream_t){ .first = fsimg_load_le32(raw + 20),
+	    .length = fsimg_load_le64(raw + 24), .contiguous = (flags & 2) != 0 };
 	stream.valid_length = stream.length;
 	/* Building the index validates and claims the allocation. */
 	status = exfat_index_build(reader, &stream, EXFAT_LENGTH_COVER_DATA,
@@ -182,7 +183,7 @@ decode_set(exfat_pass_t *pass, size_t set_length, fsimg_error_t *error)
 		if (raw[64 + i * 32] != 0xc1 || (raw[65 + i * 32] & 3) != 0)
 			return (exfat_corrupt(error, "invalid exFAT filename entry order or flags"));
 		for (size_t j = 0; j < 15 && i * 15 + j < count; j++)
-			units[i * 15 + j] = exfat_u16(raw + 66 + i * 32 + j * 2);
+			units[i * 15 + j] = fsimg_load_le16(raw + 66 + i * 32 + j * 2);
 	}
 	for (size_t i = 64 + names * 32; i < set_length; i += 32) {
 		if ((raw[i] & 0x20) == 0)
@@ -193,7 +194,7 @@ decode_set(exfat_pass_t *pass, size_t set_length, fsimg_error_t *error)
 			return (status);
 	}
 	if (exfat_name_hash(units, count, exfat_state(reader)->upcase) !=
-	    exfat_u16(raw + 36))
+	    fsimg_load_le16(raw + 36))
 		return (exfat_corrupt(error, "invalid exFAT filename hash"));
 	status = fsimg_utf16_to_utf8(units, count, name, EXFAT_NAME_BYTES - 1,
 	    &written, error);

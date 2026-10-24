@@ -75,6 +75,7 @@ typedef struct memory_file {
 	uint64_t	 read_bytes;
 	uint64_t	 reads;
 	uint64_t	 fail_at;	/* The read that fails with EIO; 0 never */
+	size_t		 fail_bytes;	/* Bytes confirmed by the failing read */
 	uint64_t	 cut;		/* Nonzero: reads end here, as after a
 					   truncation behind an open image */
 } memory_file_t;
@@ -205,6 +206,7 @@ static void test_stray_trailer(void);
 static void test_vhd(void);
 static simg_spec_t simg_sample(unsigned char *);
 static void test_simg(void);
+static void test_raw_chunk_partial_error(void);
 static void test_simg_seeded_failures(void);
 static memory_file_t five_chunk_dmg(uint64_t, unsigned char **);
 static void test_cache_sequential(void);
@@ -390,9 +392,15 @@ file_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	memory_file_t *file = argument;
 
 	CHECK(offset <= file->length && length <= file->length - offset);
-	if (++file->reads == file->fail_at)
+	if (++file->reads == file->fail_at) {
+		if (file->fail_bytes < length)
+			length = file->fail_bytes;
+		bcopy(file->bytes + offset, buffer, length);
+		file->read_bytes += length;
+		*transferred = length;
 		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
 		    "injected read failure"));
+	}
 	if (file->cut != 0 && offset + length > file->cut)
 		length = offset < file->cut ? (size_t)(file->cut - offset) : 0;
 	bcopy(file->bytes + offset, buffer, length);
@@ -1414,6 +1422,52 @@ test_simg(void)
 	free(disk);
 }
 
+/* A raw chunk preserves the bytes a failing backing read confirms,
+ * including bytes produced by an earlier zero chunk in the same request.
+ */
+static void
+test_raw_chunk_partial_error(void)
+{
+	static const size_t prefixes[] = { 0, 31 };
+	unsigned char bytes[8192], output[96];
+	simg_spec_t spec = { .disk = bytes, .block_bytes = 4096, .chunks = 2 };
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	memory_file_t file;
+	fsimg_error_t error;
+	fsimg_io_t *disk;
+	size_t prefix, transferred;
+	fixture_t f;
+
+	bzero(bytes, sizeof(bytes));
+	disk_pattern(bytes + 4096, 4096, 9);
+	spec.chunk[0] = (simg_chunk_t){ .type = SIMG_DONT_CARE, .blocks = 1 };
+	spec.chunk[1] = (simg_chunk_t){ .type = SIMG_RAW, .blocks = 1 };
+	file = simg_encode(&spec);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_select(f.image, &selector, &disk, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+		prefix = prefixes[i];
+		memset(output, 0xa5, sizeof(output));
+		file.fail_at = file.reads + 1;
+		file.fail_bytes = 7;
+		CHECK(fsimg_io_read_exact(disk, 4096 - prefix, output,
+		    prefix + 64, &transferred, &error) == FSIMG_EIO);
+		CHECK(error.os_error == EIO && file.reads == file.fail_at);
+		CHECK(transferred == prefix + 7);
+		CHECK(bcmp(output, bytes + 4096 - prefix, transferred) == 0);
+		for (size_t j = transferred; j < sizeof(output); j++)
+			CHECK(output[j] == 0xa5);
+		file.fail_at = 0;
+		CHECK(fsimg_io_read_exact(disk, 4096, output, 64,
+		    &transferred, NULL) == FSIMG_OK);
+		CHECK(transferred == 64 && bcmp(output, bytes + 4096, 64) == 0);
+	}
+	fsimg_io_free(disk);
+	fixture_free(&f);
+	free(file.bytes);
+}
+
 static void
 test_simg_seeded_failures(void)
 {
@@ -2298,6 +2352,7 @@ main(int argc, char **argv)
 	test_stray_trailer();
 	test_vhd();
 	test_simg();
+	test_raw_chunk_partial_error();
 	test_simg_seeded_failures();
 	test_cache_sequential();
 	test_cache_alternation();

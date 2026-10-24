@@ -18,6 +18,7 @@
 
 #include "baseline.h"
 #include "fat.h"
+#include "fsimg-endian.h"
 #include "io.h"
 #include "publish.h"
 #include "source.h"
@@ -554,7 +555,7 @@ test_metadata(void)
 			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
 			CHECK(info.metadata_losses == 1 && fixture.losses == 1);
 			CHECK(fsimg_fat_layout_get((fat_plan_t *)fixture.writer->plan, 1, &row, NULL) == FSIMG_OK);
-			CHECK(fsimg_fat_u16(row.entry + 24) == 0x576e); /* 2023-11-14 */
+			CHECK(fsimg_load_le16(row.entry + 24) == 0x576e); /* 2023-11-14 */
 		}
 		fixture_close(&fixture);
 	}
@@ -1046,10 +1047,10 @@ test_timestamp_boundaries(void)
 		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
 		CHECK(fsimg_fat_layout_get((fat_plan_t *)fixture.writer->plan, 1, &row, NULL) == FSIMG_OK);
 		if (scenario == 1) {
-			CHECK(fsimg_fat_u16(row.entry + 16) == 0xff9f);
+			CHECK(fsimg_load_le16(row.entry + 16) == 0xff9f);
 			CHECK(row.entry[13] == 199);
 		} else {
-			CHECK(fsimg_fat_u16(row.entry + 16) == 0x21);
+			CHECK(fsimg_load_le16(row.entry + 16) == 0x21);
 			CHECK(row.entry[13] == (scenario == 0 ? 99 : 0));
 		}
 		CHECK(info.metadata_losses == (scenario >= 2 ? 1 : 0));

@@ -1444,7 +1444,7 @@ fsimg_status_t
 fsimg_image_select(fsimg_image_t *image, const fsimg_selector_t *selector,
     fsimg_io_t **volume, fsimg_error_t *error)
 {
-	const fsimg_partition_record_t *record;
+	const fsimg_partition_record_t *record = NULL;
 	fsimg_error_t local;
 	fsimg_status_t status;
 

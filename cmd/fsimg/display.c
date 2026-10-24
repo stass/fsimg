@@ -9,6 +9,7 @@
 #include <strings.h>
 
 #include "cli.h"
+#include "fsimg-endian.h"
 #include "layer.h"
 #include "sandbox.h"
 #include "unicode.h"
@@ -565,13 +566,13 @@ owner_fields(fsimg_cli_display_t *display, const unsigned char *raw,
 {
 	if ((valid & FSIMG_META_OWNER) != 0)
 		append(display, ",\"uid\":%llu,\"gid\":%llu",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_UID),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_GID));
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_UID),
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_GID));
 	else
 		append(display, ",\"uid\":null,\"gid\":null");
 	if ((valid & FSIMG_META_MODE) != 0)
 		append(display, ",\"mode\":%llu",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE));
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE));
 	else
 		append(display, ",\"mode\":null");
 }
@@ -637,10 +638,10 @@ timestamp(fsimg_cli_display_t *display, const unsigned char *raw, bool valid)
 	}
 	append(display, "{\"seconds\":\"%lld\",\"nanoseconds\":%llu,\"precision_ns\":",
 	    (long long)fsimg_wire_get_signed64(raw + FSIMG_WIRE_TIME_SECONDS),
-	    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_TIME_NANOSECONDS));
-	uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_TIME_PRECISION));
+	    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_TIME_NANOSECONDS));
+	uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_TIME_PRECISION));
 	append(display, ",\"basis\":\"%s\",\"offset_minutes\":%lld}",
-	    basis_name(fsimg_wire_get64(raw + FSIMG_WIRE_TIME_BASIS)),
+	    basis_name(fsimg_load_le64(raw + FSIMG_WIRE_TIME_BASIS)),
 	    (long long)fsimg_wire_get_signed64(raw + FSIMG_WIRE_TIME_OFFSET));
 }
 
@@ -666,12 +667,12 @@ static void
 details_report(fsimg_cli_display_t *display, const unsigned char *raw,
     size_t count_offset, size_t table_offset, bool hex)
 {
-	uint64_t count = fsimg_wire_get64(raw + count_offset);
+	uint64_t count = fsimg_load_le64(raw + count_offset);
 
 	for (uint64_t i = 0; i < count; i++) {
 		const unsigned char *detail = raw + table_offset +
 		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
-		uint64_t value = fsimg_wire_get64(detail +
+		uint64_t value = fsimg_load_le64(detail +
 		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES);
 
 		if (display->options->json) {
@@ -698,7 +699,7 @@ container_report(fsimg_cli_display_t *display, const unsigned char *raw)
 {
 	static const unsigned char nil[16];
 	const char *container = (const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER;
-	uint64_t chunks = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHUNKS);
+	uint64_t chunks = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_CHUNKS);
 
 	if (display->options->json) {
 		append(display, ",\"container\":");
@@ -723,7 +724,7 @@ container_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "Container:    ");
 	prose(display, container);
 	append(display, ", ");
-	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK));
+	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK));
 	append(display, " disk in %llu chunk%s (", (unsigned long long)chunks,
 	    chunks == 1 ? "" : "s");
 	prose(display, (const char *)raw + FSIMG_WIRE_IMAGE_CODECS);
@@ -750,8 +751,8 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	const char *scheme = (const char *)raw + FSIMG_WIRE_IMAGE_SCHEME;
 	const char *compression = (const char *)raw +
 	    FSIMG_WIRE_IMAGE_COMPRESSION;
-	uint64_t flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
-	uint64_t selected = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
+	uint64_t flags = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FLAGS);
+	uint64_t selected = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SELECTED);
 	bool gpt = strcmp(scheme, "gpt") == 0;
 	bool container = raw[FSIMG_WIRE_IMAGE_CONTAINER] != '\0';
 
@@ -775,11 +776,11 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 		else
 			append(display, "null");
 		append(display, ",\"disk_bytes\":");
-		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK));
+		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK));
 		append(display, ",\"sector_bytes\":");
 		if (scheme[0] != '\0')
 			append(display, "%llu", (unsigned long long)
-			    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SECTOR));
+			    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SECTOR));
 		else
 			append(display, "null");
 		append(display, ",\"disk_guid\":");
@@ -792,7 +793,7 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 		append(display, ",\"mbr_disk_id\":");
 		if (scheme[0] != '\0' && !gpt)
 			append(display, "%llu", (unsigned long long)
-			    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID));
+			    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID));
 		else
 			append(display, "null");
 		append(display, ",\"selected_partition\":");
@@ -819,14 +820,14 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 		return;
 	append(display, "Scheme:       %s, %llu-byte sectors\nDisk size:    ",
 	    gpt ? "GPT" : "MBR",
-	    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SECTOR));
-	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK));
+	    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SECTOR));
+	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK));
 	if (gpt) {
 		append(display, "\nDisk GUID:    ");
 		uuid_value(display, raw + FSIMG_WIRE_IMAGE_DISK_GUID);
 	} else
 		append(display, "\nDisk ID:      0x%08llx", (unsigned long long)
-		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID));
+		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID));
 	append(display, "\n");
 }
 
@@ -839,12 +840,12 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	const char *type = (const char *)raw + FSIMG_WIRE_PARTITION_TYPE;
 	const char *format_name = (const char *)raw + FSIMG_WIRE_PARTITION_FORMAT;
 	const char *name = (const char *)raw + FSIMG_WIRE_PARTITION_NAME;
-	uint64_t index = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX);
-	uint64_t claim = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_CLAIM);
+	uint64_t index = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_INDEX);
+	uint64_t claim = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_CLAIM);
 	bool gpt = strcmp((const char *)display->image + FSIMG_WIRE_IMAGE_SCHEME, "gpt") == 0;
-	bool active = (fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_FLAGS) &
+	bool active = (fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_FLAGS) &
 	    FSIMG_WIRE_PARTITION_ACTIVE) != 0;
-	bool selected = index == fsimg_wire_get64(display->image + FSIMG_WIRE_IMAGE_SELECTED);
+	bool selected = index == fsimg_load_le64(display->image + FSIMG_WIRE_IMAGE_SELECTED);
 	char label[24];
 
 	if (display->options->json) {
@@ -866,12 +867,12 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, ",\"mbr_type\":null,\"active\":null");
 		} else
 			append(display, "null,\"guid\":null,\"name\":null,\"mbr_type\":%llu,"
-			    "\"active\":%s", (unsigned long long)fsimg_wire_get64(raw +
+			    "\"active\":%s", (unsigned long long)fsimg_load_le64(raw +
 			    FSIMG_WIRE_PARTITION_MBR_TYPE), active ? "true" : "false");
 		append(display, ",\"offset_bytes\":");
-		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_OFFSET));
+		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_OFFSET));
 		append(display, ",\"length_bytes\":");
-		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_LENGTH));
+		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_LENGTH));
 		append(display, ",\"filesystem_claim\":\"%s\",\"format\":", claim_name(claim));
 		if (format_name[0] != '\0')
 			string_value(display, format_name);
@@ -888,11 +889,11 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 		uuid_value(display, raw + FSIMG_WIRE_PARTITION_TYPE_GUID);
 	else
 		append(display, "type 0x%02llx", (unsigned long long)
-		    fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE));
+		    fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE));
 	append(display, ", ");
-	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_LENGTH));
+	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_LENGTH));
 	append(display, " at ");
-	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_OFFSET));
+	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_OFFSET));
 	append(display, ", ");
 	prose(display, claim == FSIMG_CLAIM_FORMAT ? format_name : claims[claim]);
 	if (name[0] != '\0') {
@@ -917,7 +918,7 @@ volume_details(fsimg_cli_display_t *display, const unsigned char *raw)
 static void
 volume(fsimg_cli_display_t *display, const unsigned char *raw)
 {
-	uint64_t valid = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VALID);
+	uint64_t valid = fsimg_load_le64(raw + FSIMG_WIRE_INFO_VALID);
 	char format_name[16];
 	bool json = display->options->json;
 
@@ -954,24 +955,24 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 		} else
 			append(display, "null");
 		append(display, ",\"volume_bytes\":");
-		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME));
+		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_VOLUME));
 		append(display, ",\"allocation_units\":");
-		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_UNITS));
+		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_UNITS));
 		append(display, ",\"free_bytes\":");
 		if ((valid & FSIMG_VOLUME_FREE) != 0)
-			uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_FREE));
+			uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_FREE));
 		else
 			append(display, "null");
 		append(display, ",\"sector_bytes\":%llu,\"cluster_bytes\":%llu,"
 		    "\"capabilities\":%llu,\"time_basis\":\"%s\",\"validation_scope\":\"header\","
 		    "\"entry_count\":null,\"clean_flag\":%s,\"io_error_flag\":%s,"
 		    "\"details\":{",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SECTOR),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLUSTER),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES),
-		    basis_name(fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS)),
-		    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLEAN) ? "true" : "false",
-		    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_IO_ERROR) ? "true" : "false");
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_INFO_SECTOR),
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_INFO_CLUSTER),
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_INFO_CAPABILITIES),
+		    basis_name(fsimg_load_le64(raw + FSIMG_WIRE_INFO_TIME_BASIS)),
+		    fsimg_load_le64(raw + FSIMG_WIRE_INFO_CLEAN) ? "true" : "false",
+		    fsimg_load_le64(raw + FSIMG_WIRE_INFO_IO_ERROR) ? "true" : "false");
 		volume_details(display, raw);
 		append(display, "}}\n");
 		return;
@@ -998,22 +999,22 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 		uuid_value(display, raw + FSIMG_WIRE_INFO_UUID);
 	}
 	append(display, "\nVolume size:  ");
-	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME));
+	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_VOLUME));
 	append(display, "\nSector size:  ");
-	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SECTOR));
+	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_SECTOR));
 	append(display, "\nCluster size: ");
-	byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLUSTER));
+	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_CLUSTER));
 	append(display, "\nFree space:   ");
 	if ((valid & FSIMG_VOLUME_FREE) != 0)
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_INFO_FREE));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_FREE));
 	else
 		append(display, "unknown (not scanned)");
 	append(display, "\nValidation:   header only\nTime basis:   %s\nProfile:      ",
-	    basis_name(fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS)));
+	    basis_name(fsimg_load_le64(raw + FSIMG_WIRE_INFO_TIME_BASIS)));
 	prose(display, (const char *)raw + FSIMG_WIRE_INFO_PROFILE);
 	append(display, "\nCapabilities: read%s%s\n",
-	    (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_WRITE) != 0 ? ", write" : "",
-	    (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_VERIFY) != 0 ? ", verify" : "");
+	    (fsimg_load_le64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_WRITE) != 0 ? ", write" : "",
+	    (fsimg_load_le64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_VERIFY) != 0 ? ", verify" : "");
 	volume_details(display, raw);
 }
 
@@ -1034,14 +1035,14 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 	    "allocated_bytes", "metadata_bytes", "free_bytes", "entries", "metadata_losses",
 	    "scratch_observed_bytes", "output_bytes", "padding_bytes" };
 	const char *codec = (const char *)raw + FSIMG_WIRE_PLAN_CODEC;
-	uint64_t padding = fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_PADDING);
+	uint64_t padding = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_PADDING);
 
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"plan\",\"format\":");
 		string_value(display, (const char *)raw + FSIMG_WIRE_PLAN_FORMAT);
 		for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
 			append(display, ",\"%s\":", keys[i]);
-			uint_value(display, fsimg_wire_get64(raw + offsets[i]));
+			uint_value(display, fsimg_load_le64(raw + offsets[i]));
 		}
 		append(display, ",\"codec\":");
 		if (codec[0] != '\0')
@@ -1050,29 +1051,29 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, "null");
 		append(display, ",\"sector_bytes\":%llu,\"cluster_bytes\":%llu,"
 		    "\"future_resource_estimates\":null,\"source_device_open_exclusion\":false}\n",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SECTOR),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_CLUSTER));
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_PLAN_SECTOR),
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_PLAN_CLUSTER));
 	} else {
 		append(display, "Format:       ");
 		prose(display, (const char *)raw + FSIMG_WIRE_PLAN_FORMAT);
 		append(display, "\nVolume size:  ");
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_VOLUME));
 		append(display, "\nFile data:    ");
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_PAYLOAD));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_PAYLOAD));
 		append(display, "\nMetadata:     ");
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_METADATA));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_METADATA));
 		append(display, "\nFree space:   ");
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_FREE));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_FREE));
 		append(display, "\nSector size:  ");
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SECTOR));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_SECTOR));
 		append(display, "\nCluster size: ");
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_CLUSTER));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_CLUSTER));
 		append(display, "\nEntries:      %llu\nScratch used: ",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_ENTRIES));
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SCRATCH));
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ENTRIES));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_SCRATCH));
 		append(display, "\nImage size:   %s",
 		    display->image[FSIMG_WIRE_IMAGE_CONTAINER] != '\0' ? "at most " : "");
-		byte_size(display, fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_OUTPUT));
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_OUTPUT));
 		if (padding != 0) {
 			append(display, "\nPadding:      ");
 			byte_size(display, padding);
@@ -1132,9 +1133,9 @@ long_listing_columns(fsimg_cli_display_t *display, const unsigned char *raw)
 {
 	static const char kinds[] = "-dlp";
 	static const char permissions[] = "rwxrwxrwx";
-	uint64_t valid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_VALID);
-	uint64_t kind = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND);
-	uint64_t mode = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE);
+	uint64_t valid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_VALID);
+	uint64_t kind = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_KIND);
+	uint64_t mode = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE);
 	char column[40];	/* the widest time: a 12-digit signed year */
 
 	switch (kind) {
@@ -1154,7 +1155,7 @@ long_listing_columns(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "%s ", column);
 	if (kind == FSIMG_ENTRY_FILE || kind == FSIMG_ENTRY_SYMLINK)
 		append(display, "%12llu ",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH));
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_LENGTH));
 	else
 		append(display, "%12s ", "-");
 	if ((valid & FSIMG_META_MODIFIED) != 0) {
@@ -1168,8 +1169,8 @@ long_listing_columns(fsimg_cli_display_t *display, const unsigned char *raw)
 static void
 entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 {
-	uint64_t valid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_VALID);
-	uint64_t kind = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND);
+	uint64_t valid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_VALID);
+	uint64_t kind = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_KIND);
 
 	/* Human listings mark a link with @ and a FIFO with |, as ls -F does. */
 	display->entry_marker = kind == FSIMG_ENTRY_SYMLINK ? "@" :
@@ -1177,10 +1178,10 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"entry\",\"kind\":\"%s\",\"size_bytes\":",
 		    kind_name(kind));
-		uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH));
+		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_LENGTH));
 		append(display, ",\"metadata_valid\":%llu,\"attributes\":%llu,\"created\":",
 		    (unsigned long long)valid,
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES));
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES));
 		timestamp(display, raw + FSIMG_WIRE_ENTRY_CREATED, (valid & FSIMG_META_CREATED) != 0);
 		append(display, ",\"modified\":");
 		timestamp(display, raw + FSIMG_WIRE_ENTRY_MODIFIED, (valid & FSIMG_META_MODIFIED) != 0);
@@ -1204,7 +1205,7 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 static uint64_t
 volume_detail(const fsimg_cli_display_t *display, const char *name)
 {
-	uint64_t count = fsimg_wire_get64(display->volume +
+	uint64_t count = fsimg_load_le64(display->volume +
 	    FSIMG_WIRE_INFO_DETAIL_COUNT);
 
 	for (uint64_t i = 0; i < count; i++) {
@@ -1212,7 +1213,7 @@ volume_detail(const fsimg_cli_display_t *display, const char *name)
 		    FSIMG_WIRE_INFO_DETAILS + i * FSIMG_WIRE_INFO_DETAIL_BYTES;
 
 		if (strcmp((const char *)detail, name) == 0)
-			return (fsimg_wire_get64(detail +
+			return (fsimg_load_le64(detail +
 			    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES));
 	}
 	return (0);
@@ -1258,12 +1259,12 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 	const char *scheme = (const char *)image + FSIMG_WIRE_IMAGE_SCHEME;
 	const char *container_name = (const char *)image + FSIMG_WIRE_IMAGE_CONTAINER;
 	const char *unverified = (const char *)image + FSIMG_WIRE_IMAGE_UNVERIFIED;
-	uint64_t checked = fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_CHECKED);
-	uint64_t selected = fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_SELECTED);
+	uint64_t checked = fsimg_load_le64(image + FSIMG_WIRE_IMAGE_CHECKED);
+	uint64_t selected = fsimg_load_le64(image + FSIMG_WIRE_IMAGE_SELECTED);
 	bool layers, table, container;
 
 	/* A partition table is verified only when the selection read it. */
-	layers = (fsimg_wire_get64(image + FSIMG_WIRE_IMAGE_FLAGS) &
+	layers = (fsimg_load_le64(image + FSIMG_WIRE_IMAGE_FLAGS) &
 	    FSIMG_WIRE_IMAGE_VERIFIED) != 0;
 	table = layers && scheme[0] != '\0';
 	container = layers && container_name[0] != '\0';
@@ -1273,7 +1274,7 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 		    verified_scope_name(display->scope));
 		for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
 			append(display, ",\"%s\":", keys[i]);
-			uint_value(display, fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES + i * 8));
+			uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_VERIFY_FILES + i * 8));
 		}
 		append(display, ",\"container\":");
 		if (container)
@@ -1326,8 +1327,8 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 			    (unsigned long long)selected);
 		append(display, " filesystem structure%s verified (%llu files, %llu directories",
 		    display->scope == FSIMG_VALIDATION_PAYLOAD ? " and initialized file data" : "",
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_FILES),
-		    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_DIRECTORIES));
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_VERIFY_FILES),
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_VERIFY_DIRECTORIES));
 		ifs_counts(display);
 		append(display, ")\n");
 	}
@@ -1819,7 +1820,7 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		}
 		break;
 	case FSIMG_FRAME_VERIFY:
-		display->scope = (fsimg_validation_scope_t)fsimg_wire_get64(raw + FSIMG_WIRE_VERIFY_SCOPE);
+		display->scope = (fsimg_validation_scope_t)fsimg_load_le64(raw + FSIMG_WIRE_VERIFY_SCOPE);
 		if (options->json)
 			verification(display, raw);
 		else
@@ -1832,9 +1833,9 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		append(display, options->json ?
 		    "{\"schema\":1,\"type\":\"progress\",\"entries\":\"%llu\",\"bytes\":\"%llu\",\"work\":\"%llu\"}\n" :
 		    "fsimg: processed %llu entries, %llu bytes (%llu work units)\n",
-		    (unsigned long long)fsimg_wire_get64(raw),
-		    (unsigned long long)fsimg_wire_get64(raw + 8),
-		    (unsigned long long)fsimg_wire_get64(raw + 16));
+		    (unsigned long long)fsimg_load_le64(raw),
+		    (unsigned long long)fsimg_load_le64(raw + 8),
+		    (unsigned long long)fsimg_load_le64(raw + 16));
 		break;
 	case FSIMG_FRAME_LOSS:
 		if (!options->json && (options->request.flags & FSIMG_JOB_VERBOSE) == 0)
@@ -1842,20 +1843,20 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		diagnostic = true;
 		if (options->json)
 			append(display, "{\"schema\":1,\"type\":\"loss\",\"fields\":%llu,\"path_truncated\":%s,\"path_excerpt\":\"",
-			    (unsigned long long)fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS),
-			    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_TRUNCATED) ? "true" : "false");
+			    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS),
+			    fsimg_load_le64(raw + FSIMG_WIRE_LOSS_TRUNCATED) ? "true" : "false");
 		else {
 			append(display, "fsimg: metadata example: ");
-			metadata_fields(display, fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS));
+			metadata_fields(display, fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS));
 			append(display, " could not be preserved exactly for \"");
 		}
 		escape_span(display, raw + FSIMG_WIRE_LOSS_PATH,
-		    (size_t)fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_LENGTH),
+		    (size_t)fsimg_load_le64(raw + FSIMG_WIRE_LOSS_LENGTH),
 		    options->json ? ESCAPE_JSON : ESCAPE_RENDERED, false, true, NULL);
 		if (options->json)
 			append(display, "\"}\n");
 		else
-			append(display, "\"%s\n", fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_TRUNCATED) != 0 ?
+			append(display, "\"%s\n", fsimg_load_le64(raw + FSIMG_WIRE_LOSS_TRUNCATED) != 0 ?
 			    " [path truncated]" : "");
 		break;
 	default: break;
@@ -1877,7 +1878,7 @@ progress_milestone(fsimg_cli_display_t *display, const unsigned char *raw)
 	changed = !display->progress_started;
 	display->progress_started = true;
 	for (unsigned i = 0; i < 3; i++) {
-		value = fsimg_wire_get64(raw + i * 8);
+		value = fsimg_load_le64(raw + i * 8);
 		level = 0;
 		while (value != 0) {
 			level++;
@@ -1998,7 +1999,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 		else if (options->request.kind == FSIMG_JOB_VERIFY)
 			verification(display, display->verification);
 		else if (options->request.kind == FSIMG_JOB_INFO &&
-		    (fsimg_wire_get64(display->image + FSIMG_WIRE_IMAGE_FLAGS) &
+		    (fsimg_load_le64(display->image + FSIMG_WIRE_IMAGE_FLAGS) &
 		    FSIMG_WIRE_IMAGE_UNSELECTED) != 0) {
 			/* i's volume section, after the table it could not choose from. */
 			append(display, "Volume:       none selected: ");

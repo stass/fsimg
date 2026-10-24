@@ -21,7 +21,7 @@
 #include "meta.h"
 
 /*
- * Common filesystem driver contracts (specs/design-driver-contract-tests.md).
+ * Common filesystem driver contracts.
  *
  * Each registered filesystem variant has one coverage profile: test facts
  * written here, independently of the production registry. The registry

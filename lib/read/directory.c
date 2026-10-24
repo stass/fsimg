@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "reader.h"
 #include "unicode.h"
 
@@ -272,7 +273,7 @@ fsimg_directory_admit(fsimg_directory_build_t *build, const char *name,
 	    RECORD_NAME + length + 1 + payload_length, &offset, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fsimg_meta_put_u64(key, offset);
+	fsimg_store_le64(key, offset);
 	for (unsigned i = 0; i < keys.count; i++) {
 		bcopy(keys.key[i], key + 8, keys.length[i]);
 		status = fsimg_stream_append(build->keys, key, 8 + keys.length[i],
@@ -300,8 +301,8 @@ key_compare(const void *a, size_t alen, const void *b, size_t blen,
 	comparison = memcmp(left + 8, right + 8, length);
 	if (comparison != 0 || alen != blen)
 		return (comparison != 0 ? comparison : (alen > blen) - (alen < blen));
-	return ((fsimg_meta_get_u64(left) > fsimg_meta_get_u64(right)) -
-	    (fsimg_meta_get_u64(left) < fsimg_meta_get_u64(right)));
+	return ((fsimg_load_le64(left) > fsimg_load_le64(right)) -
+	    (fsimg_load_le64(left) < fsimg_load_le64(right)));
 }
 
 /* Name the walker path in reader->path in the error: rendered with the
@@ -415,9 +416,9 @@ validate_namespace(fsimg_directory_build_t *build, fsimg_error_t *error)
 		}
 		if (previous_length == length &&
 		    bcmp(previous + 8, current + 8, length - 8) == 0 &&
-		    fsimg_meta_get_u64(previous) != fsimg_meta_get_u64(current)) {
-			status = ambiguity_error(build, fsimg_meta_get_u64(previous),
-			    fsimg_meta_get_u64(current), error);
+		    fsimg_load_le64(previous) != fsimg_load_le64(current)) {
+			status = ambiguity_error(build, fsimg_load_le64(previous),
+			    fsimg_load_le64(current), error);
 			break;
 		}
 		bcopy(current, previous, length);

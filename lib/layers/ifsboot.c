@@ -8,6 +8,7 @@
 #include <strings.h>
 
 #include "codec.h"
+#include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 
@@ -380,7 +381,8 @@ boot_unsupported(fsimg_error_t *error, const char *what)
 {
 	char message[sizeof(error->message)];
 
-	snprintf(message, sizeof(message), "QNX boot image %s", what);
+	snprintf(message, sizeof(message), "QNX boot image %.*s",
+	    (int)(sizeof(message) - sizeof("QNX boot image ")), what);
 	return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
 	    message));
 }
@@ -396,9 +398,9 @@ header_at(const unsigned char *bytes, size_t length, uint32_t prefix)
 	if (length < (size_t)prefix + HEADER_BYTES)
 		return (false);
 	header = bytes + prefix;
-	return (fsimg_layer_le32(header + HEADER_SIGNATURE) == STARTUP_SIGNATURE &&
-	    fsimg_layer_le16(header + HEADER_HEADER_SIZE) == HEADER_BYTES &&
-	    fsimg_layer_le16(header + HEADER_PREBOOT_SIZE) == prefix);
+	return (fsimg_load_le32(header + HEADER_SIGNATURE) == STARTUP_SIGNATURE &&
+	    fsimg_load_le16(header + HEADER_HEADER_SIZE) == HEADER_BYTES &&
+	    fsimg_load_le16(header + HEADER_PREBOOT_SIZE) == prefix);
 }
 
 /*
@@ -523,19 +525,19 @@ decode_header(const unsigned char *prefix, size_t length, uint64_t file_bytes,
 		    "no QNX startup header at a boot-prefix offset"));
 	header->prefix = boot_prefixes[i];
 	raw = prefix + boot_prefixes[i];
-	header->version = fsimg_layer_le16(raw + HEADER_VERSION);
+	header->version = fsimg_load_le16(raw + HEADER_VERSION);
 	header->flags1 = raw[HEADER_FLAGS1];
-	header->machine = fsimg_layer_le16(raw + HEADER_MACHINE);
-	header->startup_vaddr = fsimg_layer_le32(raw + HEADER_STARTUP_VADDR);
-	header->paddr_bias = fsimg_layer_le32(raw + HEADER_PADDR_BIAS);
-	header->image_paddr = fsimg_layer_le32(raw + HEADER_IMAGE_PADDR);
-	header->ram_paddr = fsimg_layer_le32(raw + HEADER_RAM_PADDR);
-	header->ram_size = fsimg_layer_le32(raw + HEADER_RAM_SIZE);
-	header->startup_size = fsimg_layer_le32(raw + HEADER_STARTUP_SIZE);
-	header->stored_size = fsimg_layer_le32(raw + HEADER_STORED_SIZE);
-	header->imagefs_paddr = fsimg_layer_le32(raw + HEADER_IMAGEFS_PADDR);
-	header->imagefs_size = fsimg_layer_le32(raw + HEADER_IMAGEFS_SIZE);
-	header->preboot_size = fsimg_layer_le16(raw + HEADER_PREBOOT_SIZE);
+	header->machine = fsimg_load_le16(raw + HEADER_MACHINE);
+	header->startup_vaddr = fsimg_load_le32(raw + HEADER_STARTUP_VADDR);
+	header->paddr_bias = fsimg_load_le32(raw + HEADER_PADDR_BIAS);
+	header->image_paddr = fsimg_load_le32(raw + HEADER_IMAGE_PADDR);
+	header->ram_paddr = fsimg_load_le32(raw + HEADER_RAM_PADDR);
+	header->ram_size = fsimg_load_le32(raw + HEADER_RAM_SIZE);
+	header->startup_size = fsimg_load_le32(raw + HEADER_STARTUP_SIZE);
+	header->stored_size = fsimg_load_le32(raw + HEADER_STORED_SIZE);
+	header->imagefs_paddr = fsimg_load_le32(raw + HEADER_IMAGEFS_PADDR);
+	header->imagefs_size = fsimg_load_le32(raw + HEADER_IMAGEFS_SIZE);
+	header->preboot_size = fsimg_load_le16(raw + HEADER_PREBOOT_SIZE);
 	header->flags2 = raw[HEADER_FLAGS2];
 	for (i = HEADER_TAIL; i < HEADER_BYTES; i++)
 		header->tail_nonzero += raw[i] != 0;
@@ -932,7 +934,7 @@ ifsboot_verify(const fsimg_container_input_t *input,
 		if (status != FSIMG_OK)
 			break;
 		for (size_t i = 0; i < length; i += 4) {
-			word = fsimg_layer_le32(piece + i);
+			word = fsimg_load_le32(piece + i);
 			stored_sum += word;
 			if (offset + i < startup_end)
 				startup_sum += word;
@@ -1064,7 +1066,7 @@ buffer_prefix(const fsimg_container_plan_args_t *args,
 		fsimg_error_path(error, "ifsboot:prefix");
 	else if (got != length)
 		status = setting_short(error, "ifsboot:prefix");
-	else if (fsimg_layer_le32(plan->prefix) == STARTUP_SIGNATURE)
+	else if (fsimg_load_le32(plan->prefix) == STARTUP_SIGNATURE)
 		status = fsimg_setting_error(error, "ifsboot:prefix",
 		    "the boot prefix begins with the QNX startup signature");
 	return (status);
@@ -1261,22 +1263,22 @@ put_header(unsigned char *raw, const boot_plan_t *boot,
     uint32_t startup_size, uint32_t stored_size, uint32_t imagefs_size)
 {
 	bzero(raw, HEADER_BYTES);
-	fsimg_layer_put_le32(raw + HEADER_SIGNATURE, STARTUP_SIGNATURE);
-	fsimg_layer_put_le16(raw + HEADER_VERSION, 1);
+	fsimg_store_le32(raw + HEADER_SIGNATURE, STARTUP_SIGNATURE);
+	fsimg_store_le16(raw + HEADER_VERSION, 1);
 	raw[HEADER_FLAGS1] = boot->flags1;
-	fsimg_layer_put_le16(raw + HEADER_HEADER_SIZE, HEADER_BYTES);
-	fsimg_layer_put_le16(raw + HEADER_MACHINE, boot->machine);
-	fsimg_layer_put_le32(raw + HEADER_STARTUP_VADDR, boot->startup_vaddr);
-	fsimg_layer_put_le32(raw + HEADER_PADDR_BIAS, boot->paddr_bias);
-	fsimg_layer_put_le32(raw + HEADER_IMAGE_PADDR, boot->image_paddr);
-	fsimg_layer_put_le32(raw + HEADER_RAM_PADDR, boot->ram_paddr);
-	fsimg_layer_put_le32(raw + HEADER_RAM_SIZE,
+	fsimg_store_le16(raw + HEADER_HEADER_SIZE, HEADER_BYTES);
+	fsimg_store_le16(raw + HEADER_MACHINE, boot->machine);
+	fsimg_store_le32(raw + HEADER_STARTUP_VADDR, boot->startup_vaddr);
+	fsimg_store_le32(raw + HEADER_PADDR_BIAS, boot->paddr_bias);
+	fsimg_store_le32(raw + HEADER_IMAGE_PADDR, boot->image_paddr);
+	fsimg_store_le32(raw + HEADER_RAM_PADDR, boot->ram_paddr);
+	fsimg_store_le32(raw + HEADER_RAM_SIZE,
 	    boot->ram_sum ? startup_size + imagefs_size : 0);
-	fsimg_layer_put_le32(raw + HEADER_STARTUP_SIZE, startup_size);
-	fsimg_layer_put_le32(raw + HEADER_STORED_SIZE, stored_size);
-	fsimg_layer_put_le32(raw + HEADER_IMAGEFS_PADDR, boot->imagefs_paddr);
-	fsimg_layer_put_le32(raw + HEADER_IMAGEFS_SIZE, imagefs_size);
-	fsimg_layer_put_le16(raw + HEADER_PREBOOT_SIZE,
+	fsimg_store_le32(raw + HEADER_STARTUP_SIZE, startup_size);
+	fsimg_store_le32(raw + HEADER_STORED_SIZE, stored_size);
+	fsimg_store_le32(raw + HEADER_IMAGEFS_PADDR, boot->imagefs_paddr);
+	fsimg_store_le32(raw + HEADER_IMAGEFS_SIZE, imagefs_size);
+	fsimg_store_le16(raw + HEADER_PREBOOT_SIZE,
 	    (uint16_t)boot->prefix_bytes);
 }
 
@@ -1291,9 +1293,9 @@ plant_misplaced_header(unsigned char *decoded, const unsigned char *lead,
     size_t prefix)
 {
 	bcopy(lead + prefix, decoded, HEADER_BYTES);
-	fsimg_layer_put_le16(decoded + HEADER_PREBOOT_SIZE, 0);
-	fsimg_layer_put_le32(decoded + HEADER_STORED_SIZE,
-	    fsimg_layer_le32(lead + prefix + HEADER_STORED_SIZE) +
+	fsimg_store_le16(decoded + HEADER_PREBOOT_SIZE, 0);
+	fsimg_store_le32(decoded + HEADER_STORED_SIZE,
+	    fsimg_load_le32(lead + prefix + HEADER_STORED_SIZE) +
 	    (uint32_t)prefix);
 }
 
@@ -1394,7 +1396,7 @@ emit_leading(boot_encoder_t *encoder, uint64_t body_bytes,
 	status = copy_code(encoder, &section, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fsimg_layer_put_le32(checksum, 0u - section.sum);
+	fsimg_store_le32(checksum, 0u - section.sum);
 	return (fsimg_seq_write(encoder->sink, checksum, sizeof(checksum),
 	    error));
 }
@@ -1583,7 +1585,7 @@ boot_encode_finish(void *state, unsigned pass, fsimg_error_t *error)
 	status = fsimg_seq_zero(encoder->sink, zeros, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fsimg_layer_put_le32(trailer, 0u - encoder->body.sum);
+	fsimg_store_le32(trailer, 0u - encoder->body.sum);
 	return (fsimg_seq_write(encoder->sink, trailer, sizeof(trailer), error));
 }
 

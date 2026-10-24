@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "unicode.h"
 #include "write-exfat.h"
 
@@ -84,11 +85,11 @@ exfat_layout_get(exfat_plan_t *plan, uint64_t id, exfat_layout_t *row,
 	status = fsimg_array_get(plan->layout, id, raw, error);
 	if (status != FSIMG_OK)
 		return (status);
-	row->length = fsimg_meta_get_u64(raw);
-	row->valid_length = fsimg_meta_get_u64(raw + 8);
-	row->parent_slot = fsimg_meta_get_u64(raw + 16);
-	row->first = exfat_u32(raw + 24);
-	row->clusters = exfat_u32(raw + 28);
+	row->length = fsimg_load_le64(raw);
+	row->valid_length = fsimg_load_le64(raw + 8);
+	row->parent_slot = fsimg_load_le64(raw + 16);
+	row->first = fsimg_load_le32(raw + 24);
+	row->clusters = fsimg_load_le32(raw + 28);
 	bcopy(raw + 32, row->entry, 32);
 	return (FSIMG_OK);
 }
@@ -99,11 +100,11 @@ exfat_layout_set(exfat_plan_t *plan, uint64_t id, const exfat_layout_t *row,
 {
 	unsigned char raw[64];
 
-	fsimg_meta_put_u64(raw, row->length);
-	fsimg_meta_put_u64(raw + 8, row->valid_length);
-	fsimg_meta_put_u64(raw + 16, row->parent_slot);
-	exfat_put32(raw + 24, row->first);
-	exfat_put32(raw + 28, row->clusters);
+	fsimg_store_le64(raw, row->length);
+	fsimg_store_le64(raw + 8, row->valid_length);
+	fsimg_store_le64(raw + 16, row->parent_slot);
+	fsimg_store_le32(raw + 24, row->first);
+	fsimg_store_le32(raw + 28, row->clusters);
 	bcopy(row->entry, raw + 32, 32);
 	return (fsimg_array_set(plan->layout, id, raw, error));
 }
@@ -199,7 +200,7 @@ prepare_upcase(exfat_plan_t *plan, fsimg_error_t *error)
 	}
 	for (code = 0; code < 65536; code++) {
 		mapped = (uint16_t)fsimg_unicode_upper(code);
-		exfat_put16(plan->upcase + code * 2, mapped);
+		fsimg_store_le16(plan->upcase + code * 2, mapped);
 	}
 
 	/* Compress in place: replacing at least three identity words by two
@@ -209,20 +210,20 @@ prepare_upcase(exfat_plan_t *plan, fsimg_error_t *error)
 	output = 0;
 	for (code = 0; code < 65536; code = end) {
 		end = code + 1;
-		mapped = exfat_u16(plan->upcase + code * 2);
+		mapped = fsimg_load_le16(plan->upcase + code * 2);
 		if (mapped == code) {
 			while (end < 65536 && end - code < 65535 &&
-			    exfat_u16(plan->upcase + end * 2) == end)
+			    fsimg_load_le16(plan->upcase + end * 2) == end)
 				end++;
 		}
 		if (end - code >= 3) {
-			exfat_put16(plan->upcase + output, 0xffff);
-			exfat_put16(plan->upcase + output + 2, (uint16_t)(end - code));
+			fsimg_store_le16(plan->upcase + output, 0xffff);
+			fsimg_store_le16(plan->upcase + output + 2, (uint16_t)(end - code));
 			output += 4;
 		} else {
 			for (uint32_t i = code; i < end; i++) {
-				exfat_put16(plan->upcase + output,
-				    exfat_u16(plan->upcase + i * 2));
+				fsimg_store_le16(plan->upcase + output,
+				    fsimg_load_le16(plan->upcase + i * 2));
 				output += 2;
 			}
 		}
@@ -406,7 +407,7 @@ allocate_layout(exfat_plan_t *plan, fsimg_error_t *error)
 			    FSIMG_OP_WRITER, "exFAT layout exceeds planned allocation"));
 		row.first = count == 0 ? 0 : (uint32_t)next;
 		row.clusters = (uint32_t)count;
-		directory = id == 0 || (exfat_u16(row.entry + 4) & 16) != 0;
+		directory = id == 0 || (fsimg_load_le16(row.entry + 4) & 16) != 0;
 		if (directory) {
 			row.length = count * g->cluster_bytes;
 			row.valid_length = row.length;
