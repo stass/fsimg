@@ -13,6 +13,12 @@ single unframed stream behind the 64-byte Harman-Becker header is the
 `hbcifs` container's, in the same design. Both containers call the decoders
 specified here, and the `ifsboot` writer calls the encoder.
 
+Complete contiguous integer fields may use the shared
+[scalar byte codecs](design-binary-primitives.md) after their input spans are
+proved. Incremental operands and bit streams retain their local parsing state.
+That design also owns system-zlib allocation support, which is separate from
+the project-owned compression algorithms specified here.
+
 The codecs are project-owned rather than linked from `liblzo2` and `libucl`,
 and the [IFS plan](../docs/ifs-plan.md#codecs-and-dependencies) records why:
 both libraries are GPL-2.0-or-later, which a BSD-2-Clause library cannot

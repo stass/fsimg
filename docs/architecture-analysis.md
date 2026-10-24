@@ -73,9 +73,9 @@ measurement or a claim that implementation is complete.
 | --- | --- | --- | --- |
 | [Shared settings description](../specs/design-settings.md) | First | High | Repeating option identity, representation, and applicability across subsystems |
 | [Private container plans](../specs/design-container-plans.md) | Next | High on ownership; prototype the interface | Extending shared state and cleanup for each container |
-| Common driver contract tests | Alongside each change | High | Reconstructing common acceptance coverage for each driver |
-| Verification helpers and ownership runs | Incremental | High for payload reads; narrower for ownership | Repeating bounded read, sort, cursor, and cleanup mechanics |
-| Scalar codecs and zlib allocation | Small independent changes | High | Repeating primitive byte conversion and allocation adapters |
+| [Common driver contract tests](../specs/design-driver-contract-tests.md) | Alongside each change | High | Reconstructing common acceptance coverage for each driver |
+| [Verification helpers and ownership runs](../specs/design-verification-helpers.md) | Incremental | High for payload reads; narrower for ownership | Repeating bounded read, sort, cursor, and cleanup mechanics |
+| [Scalar codecs and zlib allocation](../specs/design-binary-primitives.md) | Small independent changes | High | Repeating primitive byte conversion and allocation adapters |
 | Scheme-owned planning details | With another scheme | Conditional | Teaching common planning every scheme's settings and identity rules |
 | Relic table and predicate generation | Focused experiment | High feasibility; benefit to establish | Repeating derived compatibility and validation logic |
 | Relic generation of whole-image verification | After the predicate experiment | Promising; backend work required | Handwriting relational reconciliation algorithms |
@@ -148,6 +148,10 @@ pre-output refusals.
 
 ### Verification operations with explicit ownership domains
 
+The [verification-helper design](../specs/design-verification-helpers.md)
+defines the concrete payload and ownership-run interfaces, failure behavior,
+resource costs, and format-specific boundaries.
+
 The payload loops in [exFAT](../lib/formats/exfat/verify.c),
 [QNX4](../lib/formats/qnx4/verify.c), [QNX6](../lib/formats/qnx6/verify.c), and
 [ImageFS](../lib/formats/ifs/verify.c) read initialized content in bounded
@@ -179,6 +183,10 @@ extraction. Relic-generated reconciliation is a larger alternative discussed
 below; it should reuse these operations rather than create a competing store.
 
 ### Common driver contract tests
+
+The [contract-test design](../specs/design-driver-contract-tests.md) defines
+fixture profiles, capability coverage, common scenarios, fault controls,
+and independently specified expectations.
 
 [test/emit.c](../test/emit.c) runs shared emission scenarios against FAT12 and
 exFAT. Newer drivers have their own fault fixtures, and
@@ -221,6 +229,10 @@ with two schemes the explicit branches are understandable. A third scheme
 should demonstrate the benefit before a broader abstraction is introduced.
 
 ### Smaller shared operations and lifetime improvements
+
+The [binary-primitives design](../specs/design-binary-primitives.md) specifies
+scalar endian access and the zlib allocation adapter, including their exact
+caller preconditions, ownership, and error semantics.
 
 | Opportunity | Evidence | Smallest useful change |
 | --- | --- | --- |

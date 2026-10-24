@@ -221,6 +221,15 @@ by a native boot.
 
 ## Verification and compatibility claims
 
+Every registered capability has a corresponding
+[driver contract-test profile](design-driver-contract-tests.md). Those tests
+exercise common API, lifecycle, resource and fault behavior with independently
+specified expectations. They supplement each format's malformed-image cases
+and native qualification; a shared round trip does not establish compatibility.
+The [verification helpers](design-verification-helpers.md) consolidate payload
+and ownership-run mechanics while leaving format-specific verification here
+and in each driver design.
+
 Info (`i`) describes recognized geometry and implemented capabilities.
 Verification (`W`) performs complete structural checks for the supported
 profile and optionally reads payloads. Neither performs filesystem repair or

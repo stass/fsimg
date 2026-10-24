@@ -19,6 +19,13 @@ format-independent; each format adds its own layouts, model, rules, builder and
 tool adapters. The [plan](../docs/spec-testing-plan.md) orders the
 construction.
 
+The [driver contract suites](design-driver-contract-tests.md) organize the C
+library's shared lifecycle and fault scenarios using test-owned profiles. They
+have explicit expected outcomes and remain separate from this harness's
+rule-derived image classifications. Production descriptors select coverage,
+not the expected answer in either suite; neither suite replaces independent
+format implementations.
+
 The harness's rules cover what the `test/fat.c` cases check about images:
 the BPB, geometry, table count and variant thresholds, FAT chains,
 directory entries, names and long names, FSInfo contents, the backup boot

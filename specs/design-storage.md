@@ -492,10 +492,13 @@ references, and supplies every required claim; a list of extents alone does not
 establish complete ownership. FAT and exFAT use one domain, the cluster heap,
 with one owner per directory or file allocation. The QNX6 design distinguishes
 snapshots, objects, logical ranges, and roles, and permits cross-snapshot
-sharing. A common interval utility can own record encoding, bounds checks,
-external sorting, and the sequential overlap cursor. Reconciliation against
-allocation tables or bitmaps, reserved structures, and legal sharing stay with
-the driver.
+sharing. The [exclusive run utility](design-verification-helpers.md) owns the
+FAT/exFAT record encoding, bounds checks, external sort, and sequential overlap
+cursor. It rejects all overlap, including repeated identical claims; its
+callers supply one claim per owned run. QNX6 retains its compact owner-bearing
+records, QNX4 its bitset, and ImageFS its separate reference checks. Reconciliation
+against allocation tables or bitmaps, reserved structures, and legal sharing
+stay with the driver.
 
 Cross-linked regular files cannot amplify default extraction beyond the
 logical-output budget. Detection of a cross-link during full verification is

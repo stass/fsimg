@@ -2,6 +2,15 @@
 
 ## Major initiatives
 
+* [Medium] **Common driver contract coverage and binary primitives**
+  (`test/`, `lib/core/`, `lib/layers/`, format/protocol scalar codecs):
+  implement the [driver contract suites](specs/design-driver-contract-tests.md)
+  and [scalar/zlib support](specs/design-binary-primitives.md) under the
+  [shared-primitives sequence](docs/implementation-plan.md#driver-contracts-and-shared-verification-primitives).
+  Give every registered capability independent common witnesses, retain
+  format-local oracles, and consolidate byte access and allocation diagnostics
+  without introducing another runtime dependency or budget.
+
 * [High] **QNX6 read/write and automotive qualification**
   (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): the classic reader,
   verifier and writer of the [Power-Safe design](specs/design-qnx6.md) are
@@ -307,11 +316,12 @@
     one image per case, and the design's "when it is sparse" condition is
     not checked. Add a per-run budget for recorded images.
 
-* [Low] **Scoped ownership intervals** (`lib/formats/fat/verify.c`,
-  `lib/formats/exfat/verify.c`): extract the duplicate ownership-interval
-  sorting and cursor checks into one bounded utility, the last item of the
-  [consolidation plan](docs/implementation-plan.md#architecture-consolidation).
-  Both verifiers keep their format-specific reconciliation.
+* [Low] **Verification payload and scoped ownership helpers**
+  (`lib/read/`, `lib/meta/`, `lib/formats/*/verify.c`): implement the
+  [verification-helper design](specs/design-verification-helpers.md): one
+  initialized-payload loop and a strict FAT/exFAT ownership-run utility.
+  Preserve FAT's fused walk, QNX6's owner-bearing records, QNX4's bitset,
+  ImageFS's checksum/reference scope, and each driver's reconciliation.
 
 * [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/codec/`,
   `lib/layers/`): write QNX boot images through the `ifsboot` container,
@@ -325,6 +335,25 @@
   [qualification work](docs/todo-ifs.md) lists the open items.
 
 ## Bugs by subsystem
+
+* [Medium] **QNX6 verification decodes short scratch records before checking length**
+  (`lib/formats/qnx6/verify.c` `owner_next`, `reference_next`): the stream can
+  return a payload shorter than the local record buffer, but both cursors load
+  scalar fields before rejecting the length. Check length before any decode or
+  output assignment. Add malformed short-record regressions before the fix;
+  no external information leak is established, but the reads consume
+  uninitialized bytes and violate the scalar span contract.
+
+* [Medium] **zlib allocation failures lose their original diagnostic**
+  (`lib/layers/dmg.c`, `gzip.c`, `chunks.c`): callbacks pass their retained
+  error directly to `fsimg_alloc`, so a later successful allocation in the
+  same initialization call clears an earlier budget failure. zlib's deflate
+  initialization makes several allocation calls before testing for failure.
+  Capture the first error as the [shared adapter](specs/design-binary-primitives.md)
+  specifies, with a failing allocation/budget regression before the fix.
+  Preserve known limit details, use `FSIMG_ENOMEM` for unexplained
+  `Z_MEM_ERROR` (the chunk decoder currently fabricates `FSIMG_ELIMIT`),
+  and keep stream-state/version failures distinct from corrupt input.
 
 * [Medium] **Container-plan contract coverage gaps** (`test/ifsboot-write.c`,
   `test/layers-write.c`): the [container-plan design](specs/design-container-plans.md)

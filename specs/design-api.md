@@ -668,6 +668,17 @@ against a memory-corruption exploit in its host application.
 Verification returns bounded counters and a named scope: structural or
 structural-plus-payload-read. It reports corruption and unsupported features,
 performs no repair, and never claims success for an incomplete traversal.
+The report's `payload_bytes_read` counts confirmed initialized payload bytes,
+including those transferred before a later failure and those read while
+checking omitted entries. Metadata and whole-image checksum reads do not enter
+that count. It uses the cumulative-I/O convention: exact while representable,
+then saturated at `UINT64_MAX`. Saturation neither makes an incomplete report
+complete nor causes a new failure. Traversal, logical-byte totals, allocation
+bounds, and live-resource reservations retain their checked exact arithmetic;
+no cursor or quota is derived from this observation counter. The
+[verification-helper design](design-verification-helpers.md) defines delivery
+and accounting for both common payload reads and FAT's fused path.
+
 A format without full verification advertises no verify capability, and
 `fsimg_verify` on it fails with `FSIMG_EUNSUPPORTED` before any work, leaving
 the reader untouched.

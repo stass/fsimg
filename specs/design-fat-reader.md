@@ -107,6 +107,11 @@ chain restart.
 
 ## Structural verification and lifecycle
 
+The [verification-helper design](design-verification-helpers.md) owns the
+exclusive-run stream and cursor shared with exFAT. FAT retains its single
+fused chain walk for file validation, ownership claims, and optional physical
+payload reads; sharing does not add a second walk or a mandatory extent index.
+
 Verification consumes a reader before ordinary iteration starts. Directory and
 file chain walks emit bounded cluster-run ownership records. One external sort
 orders physical ranges; overlapping runs are corruption. A single streamed FAT

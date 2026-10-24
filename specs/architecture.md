@@ -131,6 +131,11 @@ buffers share its budget. A driver cannot allocate a second budget privately.
 Allocation is charged before use; failure preserves accounting and produces
 `FSIMG_ELIMIT` or `FSIMG_ENOMEM`, as appropriate.
 
+The [zlib allocation adapter](design-binary-primitives.md) applies that same
+context budget to each stream's allocations. Its small per-stream state records
+allocation failures without owning another allocator or budget; codec callers
+retain framing, integrity checks, and stream initialization and destruction.
+
 Let `V` be logical volume bytes, `N` entries, `C` allocation units, `F` fragments,
 `D` directory depth, `P` actual payload bytes transferred, and `M` the memory
 budget. Library-controlled resident allocations are at most `M`, independent
@@ -232,6 +237,12 @@ translation to the backing object; nested slice construction checks its own
 range. Drivers never receive an unrestricted backing descriptor. Disk values
 are decoded explicitly, without casting bytes to native C structs.
 
+The [scalar byte codecs](design-binary-primitives.md) share unsigned endian
+loads and stores across image, scratch, and protocol codecs. They operate on
+spans their callers have already bounded; they do not grant permission to read
+a field or validate a record. Format codecs retain field offsets, signed-value
+interpretation, reserved-bit checks, and relationships among decoded values.
+
 Slices translate directly to a backing object and a checked base offset, so
 slice nesting does not introduce recursive I/O or an unbounded traversal stack.
 Public FD adapters duplicate borrowed descriptors. Private constructors consume
@@ -305,6 +316,15 @@ traversal, delivery, or copy lifecycle:
 
 These boundaries share infrastructure without a common reader/writer object
 graph or mutable filesystem model.
+
+The [verification helpers](design-verification-helpers.md) own initialized
+payload read-through and the mechanics of exclusive ownership runs. Drivers
+retain traversal scope, repeated-object handling, allocation discovery, and
+reconciliation against format metadata. FAT keeps its fused chain verification
+and payload read. The strict FAT/exFAT run utility rejects every overlapping
+claim in its declared domain; it neither infers complete ownership nor defines
+sharing policy for other formats. QNX6's owner-bearing records, QNX4's claimed
+bitset, and ImageFS's reference and checksum checks keep their own representations.
 
 The [settings catalogue](design-settings.md) is the shared description of
 setting names, C representations, presence and defaults, syntax, and operation
@@ -734,6 +754,14 @@ fuzz/               bounded parser and protocol targets
 ```
 
 ## Acceptance contract
+
+The [driver contract suites](design-driver-contract-tests.md) reconcile
+filesystem and layer test profiles with registered capabilities. Registry
+membership selects required coverage; independently specified fixtures and
+expected outcomes determine correctness. Common lifecycle and fault scenarios
+have one test owner, while format mutations and independent-tool qualification
+retain their own evidence. These profiles are development interfaces and do
+not extend the library's driver ABI.
 
 A release meets functional, security, and resource requirements together:
 

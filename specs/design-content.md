@@ -119,6 +119,13 @@ fallback to restarting the chain for each request.
 
 ## Validation timing
 
+Payload verification uses the initialized-content operation in the
+[verification-helper design](design-verification-helpers.md). It reads through
+common delivery and accounts confirmed progress, including before failure,
+without visiting an uninitialized tail or allocation slack. Drivers choose
+which distinct objects to read; FAT may retain its fused chain-validation and
+physical-read path to avoid a second allocation walk.
+
 Each driver design states when allocation is validated: when the entry is
 exposed, when content is first resolved, or during full verification. Listing
 always validates entry metadata. Walking a file's allocation at exposure is a

@@ -420,6 +420,27 @@ catalogue representation. Common contract-test profiles accompany each
 conversion. Record remaining implementation work in `TODO.md`; design documents
 state the target contract rather than implementation status.
 
+## Driver contracts and shared verification primitives
+
+The next three [analysis priorities](architecture-analysis.md#priorities)
+have separate designs. Their common test scenarios retain independent expected
+answers; their runtime helpers keep format interpretation and resource owners
+explicit. None depends on Relic generation.
+
+| Stage | Design and work | Completion evidence |
+| --- | --- | --- |
+| Driver contract suites | [Test profiles](../specs/design-driver-contract-tests.md): filesystem and layer inventories, bidirectional registry reconciliation, shared lifecycle/fault scenarios and bounded fixtures | Every advertised operation executes its mandatory coverage; faults prove reachability; documented bounded fallbacks are distinguished from required failures; local malformed-input and independent-tool checks remain intact |
+| Verification helpers | [Payload and exclusive runs](../specs/design-verification-helpers.md): common initialized-content loop and FAT/exFAT interval storage, sorting and cursor | Confirmed progress, omitted-entry scope and failure semantics agree; byte counters never wrap; FAT chains are walked once; record size, sort passes and scratch remain bounded; QNX/IFS ownership models stay independent |
+| Scalar and zlib support | [Binary primitives](../specs/design-binary-primitives.md): shared explicit-endian functions and one context-backed zlib allocation adapter | Literal byte vectors and full records remain identical, including signed wire cases; zlib failures retain the first allocation cause and release state once; poison, short buffers at checked boundaries and independent gzip/DMG checks pass |
+
+Establish representative contract profiles before migrating the runtime helpers
+so the same witnesses compare behavior and resource costs. The scalar and zlib
+facilities are independently reviewable changes within their design; neither
+requires a shared codec lifecycle. Verification can use the existing scalar
+functions until their callers are converted mechanically. Implementation uses
+the review, regression-first, sanitizer and platform gates above, with actual
+checks recorded alongside the build commands.
+
 ## Extension sequence
 
 QNX6 follows the [format design](../specs/design-qnx6.md), the

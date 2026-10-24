@@ -1103,6 +1103,13 @@ exactly that length, and the `ifs` driver's verification compares its
 
 ## Dependencies and capabilities
 
+zlib stream allocations use the common
+[allocation adapter](design-binary-primitives.md). It preserves the context's
+allocation failure reason and budget accounting; layer code owns compression
+framing, checksums, output-length checks, and each stream's lifetime. Shared
+[layer contract tests](design-driver-contract-tests.md) cover those public
+operation boundaries separately from filesystem test profiles.
+
 zlib is a required dependency, linked from the system as the
 [architecture](architecture.md#dependencies-and-implementation-organization)
 permits: gzip and DMG zlib chunks (UDZO) are always available, and configure
