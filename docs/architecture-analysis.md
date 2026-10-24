@@ -125,21 +125,19 @@ The [container-plan design](../specs/design-container-plans.md) specifies the
 common summary, private extension, ownership, and encoder lifetime.
 
 Filesystem writers embed a small common plan in a driver-owned extension;
-[writer.h](../lib/write/writer.h) gives destruction one owner. Containers use
-one `fsimg_container_settings_t` in [layer.h](../lib/layers/layer.h) that combines
-VHD timestamps, DMG levels, simg blocks and CRC settings, a boot-header settings
-structure, and a buffered prefix.
+[writer.h](../lib/write/writer.h) gives destruction one owner. Containers follow
+the same pattern: each writable container embeds `fsimg_container_plan_t` from
+[layer.h](../lib/layers/layer.h) first in its private plan, and its
+`fsimg_container_writer_t` supplies the constructor, bound, encoder and
+destructor together. VHD timestamps, DMG levels, simg blocks and CRC settings,
+boot-header fields and the buffered `ifsboot` prefix stay in their drivers.
 
-Common code consequently knows container details. `fsimg_disk_plan_codec()` in
-[transcode.c](../lib/layers/transcode.c) interprets a nonzero container level as
-zlib use. `fsimg_disk_plan_free()` in [plan.c](../lib/layers/plan.c) frees a
-container's buffered setting directly.
-
-Apply the filesystem plan pattern to containers: a common summary plus private
-resolved state owned and destroyed by the selected container. The summary
-exposes the facts composition needs: granularity, transfer unit, pass count,
-encoded-size bound, and reporting information. The encoder borrows the plan;
-it does not acquire a second owner for its buffers.
+Common code reads only the summary: granularity, transfer unit, pass count,
+identifier and codec dependency. `fsimg_disk_plan_codec()` in
+[transcode.c](../lib/layers/transcode.c) reports zlib from that declared
+dependency, and `fsimg_disk_plan_free()` in [plan.c](../lib/layers/plan.c)
+dispatches destruction to the container that constructed the plan. The
+encoder borrows the plan; it does not acquire a second owner for its buffers.
 
 Keep file-setting identity checks, output-alias rejection, output budgets, and
 publication common. A plan constructor must leave partial construction safe to

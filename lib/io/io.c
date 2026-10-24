@@ -1214,6 +1214,15 @@ fsimg_io_read_session(fsimg_io_t *io, fsimg_session_t *session,
 }
 
 fsimg_status_t
+fsimg_io_read_at_session(fsimg_io_t *io, fsimg_session_t *session,
+    uint64_t offset, void *buffer, size_t length, size_t *transferred,
+    fsimg_error_t *error)
+{
+	return (io_transfer(io, offset, buffer, length, transferred, false,
+	    false, session, error));
+}
+
+fsimg_status_t
 fsimg_io_write_session(fsimg_io_t *io, fsimg_session_t *session,
     uint64_t offset, const void *buffer, size_t length, size_t *transferred,
     fsimg_error_t *error)

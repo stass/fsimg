@@ -418,7 +418,7 @@ transcode_pass(const disk_output_t *output, const fsimg_encoder_ops_t *ops,
 
 /*
  * Run the plan's encoder, or the copy encoder, over the disk into sink, in
- * the passes the container's settings resolved. Once the last pass ends,
+ * the passes the container's plan resolved. Once the last pass ends,
  * every file setting the encoder copied in is checked against the
  * identity its host file had when the plan read it, so a file that changed
  * meanwhile fails the output before it is published.
@@ -428,6 +428,7 @@ transcode(const disk_output_t *output, fsimg_seq_sink_t *sink,
     fsimg_error_t *error)
 {
 	const fsimg_disk_plan_t *plan = output->plan;
+	const fsimg_container_plan_t *facts = fsimg_disk_plan_container(plan);
 	const fsimg_encoder_ops_t *ops;
 	fsimg_encode_t encode;
 	unsigned char *buffer;
@@ -436,20 +437,20 @@ transcode(const disk_output_t *output, fsimg_seq_sink_t *sink,
 	fsimg_status_t status;
 
 	ops = plan->container == NULL ? &copy_encoder :
-	    plan->container->container->encoder;
+	    plan->container->container->writer->encoder;
 	encode = (fsimg_encode_t){ .ctx = output->session->ctx,
 	    .session = output->session, .sink = sink,
-	    .settings = &plan->container_settings, .files = plan->files,
+	    .plan = plan->container_plan, .files = plan->files,
 	    .disk_bytes = plan->disk_bytes,
 	    .verified_disk = plan->verified_disk };
-	chunk = plan->container_settings.chunk_bytes;
+	chunk = facts->chunk_bytes;
 	buffer = fsimg_alloc(encode.ctx, chunk, error);
 	if (buffer == NULL)
 		return (error->status);
 	state = NULL;
 	status = ops->open(&encode, &state, error);
-	for (unsigned pass = 0; status == FSIMG_OK &&
-	    pass < plan->container_settings.passes; pass++) {
+	for (unsigned pass = 0; status == FSIMG_OK && pass < facts->passes;
+	    pass++) {
 		status = transcode_pass(output, ops, state, pass, buffer, chunk,
 		    error);
 		if (status == FSIMG_OK)
@@ -573,14 +574,15 @@ copy_close(void *state FSIMG_UNUSED)
 {
 }
 
-/* The codec a plan's output depends on: zlib for the DMG chunks it
- * deflates and for a zlib compression.
+/* The codec a plan's output depends on: zlib when the container's
+ * resolved encoding declares it, as DMG's zlib chunks do, and for a zlib
+ * compression.
  */
 void
 fsimg_disk_plan_codec(const fsimg_disk_plan_t *plan, char *out,
     size_t capacity)
 {
-	if ((plan->container != NULL && plan->container_settings.level != 0) ||
+	if (fsimg_disk_plan_container(plan)->zlib ||
 	    (plan->compression != NULL && plan->compression->compression->zlib))
 		snprintf(out, capacity, "zlib %s", zlibVersion());
 	else if (capacity != 0)

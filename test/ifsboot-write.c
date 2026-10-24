@@ -231,8 +231,12 @@ static void expect_error(fsimg_status_t, fsimg_status_t, const fsimg_error_t *,
 static void expect_untouched(const memory_t *);
 static uint64_t memory_now(fixture_t *);
 static void expect_disk(fixture_t *, memory_t *, const memory_t *);
+static fsimg_status_t construct_plan(fixture_t *, uint32_t,
+    fsimg_ifsboot_compression_t, memory_t *, memory_t *, fsimg_session_t *,
+    fsimg_container_plan_t **, fsimg_error_t *);
+static void free_plan(fsimg_container_plan_t *);
 static fsimg_status_t plan_prefix(fixture_t *, memory_t *, bool, uint64_t,
-    fsimg_container_settings_t *, fsimg_error_t *);
+    fsimg_session_t *, fsimg_container_plan_t **, fsimg_error_t *);
 static void expect_wrap_refused(fixture_t *, memory_t *,
     const fsimg_layer_options_t *, const fsimg_layer_inputs_t *,
     fsimg_status_t, const char *, const char *);
@@ -243,6 +247,7 @@ static void test_round_trips(void);
 static void test_startup_lengths(void);
 static void test_prefix(void);
 static void test_prefix_buffer(void);
+static void test_plan_session(void);
 static void test_splits(void);
 static void test_required_settings(void);
 static void test_refusals(void);
@@ -1348,17 +1353,66 @@ test_prefix(void)
 }
 
 /*
- * A direct call of the container's plan for machine 3 with prefix, its
- * allocations poisoned or the fail_alloc-th of them failed (0 none); the
- * input object is made before either applies.
+ * A direct construction of the container's plan for machine under mode,
+ * with the prefix and startup code (NULL for none) recorded as the disk
+ * plan records them, at the length their objects report, and charged to
+ * session. *plan receives what the constructor attached, NULL or a plan,
+ * partial on failure, for free_plan.
  */
 static fsimg_status_t
-plan_prefix(fixture_t *f, memory_t *prefix, bool poison, uint64_t fail_alloc,
-    fsimg_container_settings_t *settings, fsimg_error_t *error)
+construct_plan(fixture_t *f, uint32_t machine,
+    fsimg_ifsboot_compression_t mode, memory_t *prefix, memory_t *startup,
+    fsimg_session_t *session, fsimg_container_plan_t **plan,
+    fsimg_error_t *error)
 {
 	fsimg_planned_file_t inputs[FSIMG_FILE_SETTINGS];
 	fsimg_container_plan_args_t input;
 	fsimg_layer_options_t layers;
+	fsimg_status_t status;
+
+	boot_layers(&layers, machine, mode);
+	bzero(inputs, sizeof(inputs));
+	if (prefix != NULL)
+		inputs[FSIMG_FILE_IFSBOOT_PREFIX].io = memory_io(f, prefix);
+	if (startup != NULL)
+		inputs[FSIMG_FILE_IFSBOOT_STARTUP].io = memory_io(f, startup);
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
+		if (inputs[i].io != NULL)
+			CHECK(fsimg_io_get_size(inputs[i].io, &inputs[i].length,
+			    NULL) == FSIMG_OK);
+	}
+	input = (fsimg_container_plan_args_t){ .ctx = f->ctx,
+	    .session = session, .layers = &layers, .files = inputs,
+	    .epoch = EPOCH, .flags = FSIMG_WRITE_REPRODUCIBLE,
+	    .volume_order = FSIMG_BYTE_ORDER_LITTLE };
+	*plan = NULL;
+	status = fsimg_ifsboot_container.writer->plan(&input, plan, error);
+	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++)
+		fsimg_io_free(inputs[i].io);
+	return (status);
+}
+
+/* Release a constructed plan as the disk plan does: NULL is no plan. */
+static void
+free_plan(fsimg_container_plan_t *plan)
+{
+	if (plan != NULL)
+		fsimg_ifsboot_container.writer->plan_free(plan);
+}
+
+/*
+ * The plan for machine 3 with prefix, its allocations poisoned or the
+ * fail_alloc-th of them failed (0 none); the input object is made before
+ * either applies.
+ */
+static fsimg_status_t
+plan_prefix(fixture_t *f, memory_t *prefix, bool poison, uint64_t fail_alloc,
+    fsimg_session_t *session, fsimg_container_plan_t **plan,
+    fsimg_error_t *error)
+{
+	fsimg_layer_options_t layers;
+	fsimg_planned_file_t inputs[FSIMG_FILE_SETTINGS];
+	fsimg_container_plan_args_t input;
 	fsimg_status_t status;
 
 	boot_layers(&layers, 3, FSIMG_IFSBOOT_LZO);
@@ -1366,13 +1420,13 @@ plan_prefix(fixture_t *f, memory_t *prefix, bool poison, uint64_t fail_alloc,
 	inputs[FSIMG_FILE_IFSBOOT_PREFIX].io = memory_io(f, prefix);
 	inputs[FSIMG_FILE_IFSBOOT_PREFIX].length = LOADER_BYTES;
 	input = (fsimg_container_plan_args_t){ .ctx = f->ctx,
-	    .layers = &layers, .files = inputs, .epoch = EPOCH,
-	    .flags = FSIMG_WRITE_REPRODUCIBLE,
+	    .session = session, .layers = &layers, .files = inputs,
+	    .epoch = EPOCH, .flags = FSIMG_WRITE_REPRODUCIBLE,
 	    .volume_order = FSIMG_BYTE_ORDER_LITTLE };
-	bzero(settings, sizeof(*settings));
+	*plan = NULL;
 	fsimg_test_poison_allocations(f->ctx, poison);
 	fsimg_test_fail_alloc_after(f->ctx, fail_alloc);
-	status = fsimg_ifsboot_container.plan(&input, settings, error);
+	status = fsimg_ifsboot_container.writer->plan(&input, plan, error);
 	fsimg_test_fail_alloc_after(f->ctx, 0);
 	fsimg_test_poison_allocations(f->ctx, false);
 	fsimg_io_free(inputs[FSIMG_FILE_IFSBOOT_PREFIX].io);
@@ -1382,61 +1436,189 @@ plan_prefix(fixture_t *f, memory_t *prefix, bool poison, uint64_t fail_alloc,
 /*
  * The plan's prefix buffer: copied through an allocation the test control
  * fills with 0xa5, the 1085-byte loader still gains three zero bytes, so
- * the padding is written, not inherited; and every failure after the
- * buffer is allocated (the signature check, a short read, a read failure)
- * or of the allocation itself releases it.
+ * the padding is written, not inherited. Every failure leaves what the
+ * constructor attached, nothing when the plan's own allocation fails and a
+ * partial plan once it is made (the prefix buffer's allocation, the
+ * signature check, a short read, a read failure), and the one release
+ * returns every charge.
  */
 static void
 test_prefix_buffer(void)
 {
 	unsigned char loader[LOADER_BYTES];
-	fsimg_container_settings_t settings;
+	const unsigned char *bytes;
+	fsimg_container_plan_t *plan;
+	fsimg_session_t session;
 	fsimg_error_t error;
 	memory_t prefix;
 	uint64_t baseline;
+	size_t length;
 	fixture_t f;
 
 	fill_random(loader, sizeof(loader), 13);
 	loader[0] = 0xfa;
 	fixture_init(&f, 64 * MIB);
 	fsimg_test_unproven_writes(f.ctx, true);
+	fsimg_session_init(&session, f.ctx, "test", 0);
 	baseline = memory_now(&f);
 	prefix = memory_of(loader, sizeof(loader));
-	CHECK(plan_prefix(&f, &prefix, true, 0, &settings, NULL) == FSIMG_OK);
-	CHECK(settings.buffered_bytes == BIOS_PREFIX);
-	CHECK(bcmp(settings.buffered, loader, sizeof(loader)) == 0);
-	CHECK(all_zero(settings.buffered + LOADER_BYTES, 3));
-	CHECK(settings.passes == 2 && settings.chunk_bytes == UNIT &&
-	    settings.granularity == 1);
-	fsimg_dealloc(settings.buffered);
+	CHECK(plan_prefix(&f, &prefix, true, 0, &session, &plan, NULL) ==
+	    FSIMG_OK);
+	fsimg_test_ifsboot_prefix(plan, &bytes, &length);
+	CHECK(length == BIOS_PREFIX);
+	CHECK(bcmp(bytes, loader, sizeof(loader)) == 0);
+	CHECK(all_zero(bytes + LOADER_BYTES, 3));
+	CHECK(plan->passes == 2 && plan->chunk_bytes == UNIT &&
+	    plan->granularity == 1 && !plan->zlib &&
+	    all_zero(plan->identifier, sizeof(plan->identifier)));
+	free_plan(plan);
 	CHECK(memory_now(&f) == baseline);
 
 	put_le32(prefix.bytes, SIGNATURE);
-	expect_error(plan_prefix(&f, &prefix, false, 0, &settings, &error), FSIMG_EINVAL,
-	    &error, "ifsboot:prefix", "startup signature");
-	CHECK(settings.buffered == NULL && memory_now(&f) == baseline);
+	expect_error(plan_prefix(&f, &prefix, false, 0, &session, &plan,
+	    &error), FSIMG_EINVAL, &error, "ifsboot:prefix",
+	    "startup signature");
+	CHECK(plan != NULL);
+	free_plan(plan);
+	CHECK(memory_now(&f) == baseline);
 	prefix.bytes[0] = 0xfa;
 
 	prefix.length = 1000;
 	prefix.size_claim = LOADER_BYTES;
-	expect_error(plan_prefix(&f, &prefix, false, 0, &settings, &error),
-	    FSIMG_ESOURCE_CHANGED, &error, "ifsboot:prefix", "planned length");
-	CHECK(settings.buffered == NULL && memory_now(&f) == baseline);
+	expect_error(plan_prefix(&f, &prefix, false, 0, &session, &plan,
+	    &error), FSIMG_ESOURCE_CHANGED, &error, "ifsboot:prefix",
+	    "planned length");
+	CHECK(plan != NULL);
+	free_plan(plan);
+	CHECK(memory_now(&f) == baseline);
 	prefix.length = LOADER_BYTES;
 	prefix.size_claim = 0;
 
 	prefix.fail_read = prefix.reads + 1;
-	expect_error(plan_prefix(&f, &prefix, false, 0, &settings, &error), FSIMG_EIO,
-	    &error, "ifsboot:prefix", NULL);
-	CHECK(settings.buffered == NULL && memory_now(&f) == baseline);
+	expect_error(plan_prefix(&f, &prefix, false, 0, &session, &plan,
+	    &error), FSIMG_EIO, &error, "ifsboot:prefix", NULL);
+	CHECK(plan != NULL);
+	free_plan(plan);
+	CHECK(memory_now(&f) == baseline);
 	prefix.fail_read = 0;
 
-	/* The buffer is the plan's one allocation. */
-	CHECK(plan_prefix(&f, &prefix, false, 1, &settings, &error) ==
+	/* The plan, then its prefix buffer, are its two allocations. */
+	CHECK(plan_prefix(&f, &prefix, false, 1, &session, &plan, &error) ==
 	    FSIMG_ENOMEM);
-	CHECK(settings.buffered == NULL && memory_now(&f) == baseline);
+	CHECK(plan == NULL && memory_now(&f) == baseline);
+	CHECK(plan_prefix(&f, &prefix, false, 2, &session, &plan, &error) ==
+	    FSIMG_ENOMEM);
+	CHECK(plan != NULL);
+	fsimg_test_ifsboot_prefix(plan, &bytes, &length);
+	CHECK(bytes == NULL);
+	free_plan(plan);
+	CHECK(plan_prefix(&f, &prefix, false, 3, &session, &plan, &error) ==
+	    FSIMG_OK);
+	free_plan(plan);
+	CHECK(memory_now(&f) == baseline);
 	memory_free(&prefix);
 	fixture_free(&f);
+}
+
+/* The largest work an "image output" session reported. */
+static void
+record_output_work(void *argument, const fsimg_progress_t *progress)
+{
+	uint64_t *work = argument;
+
+	if (progress->phase != NULL &&
+	    strcmp(progress->phase, "image output") == 0 &&
+	    progress->work > *work)
+		*work = progress->work;
+}
+
+/*
+ * The plan reads its prefix through the operation's session, whatever
+ * session the caller's object has (a callback object has none): each
+ * transfer, short ones included, and each byte is charged to it, so a work
+ * limit the reads cross fails the plan naming the prefix, and a wrap's
+ * output continues the counter the plan began. A prefix read one byte per
+ * transfer costs a wrap exactly 1084 more units of work than one read in
+ * a single transfer, for the same output.
+ */
+static void
+test_plan_session(void)
+{
+	volume_spec_t spec = { .random_bytes = 100, .seed = 19 };
+	unsigned char loader[LOADER_BYTES];
+	fsimg_layer_options_t layers;
+	fsimg_layer_inputs_t inputs;
+	fsimg_container_plan_t *plan;
+	fsimg_session_t session;
+	fsimg_options_t options;
+	fsimg_error_t error;
+	memory_t prefix, volume, out[2];
+	uint64_t work[2], reads;
+	fsimg_io_t *io;
+	fixture_t f;
+
+	fill_random(loader, sizeof(loader), 20);
+	loader[0] = 0xfa;
+	fixture_init(&f, 64 * MIB);
+	prefix = memory_of(loader, sizeof(loader));
+	prefix.cap = 100;
+	fsimg_session_init(&session, f.ctx, "test", 0);
+	reads = prefix.reads;
+	CHECK(construct_plan(&f, 3, FSIMG_IFSBOOT_NONE, &prefix, NULL,
+	    &session, &plan, NULL) == FSIMG_OK);
+	CHECK(prefix.reads - reads == 11);
+	CHECK(session.progress.work == 11 + LOADER_BYTES);
+	free_plan(plan);
+	fixture_free(&f);
+
+	/* A limit between the transfers and their bytes stops the plan. */
+	fixture_init(&f, 64 * MIB);
+	fsimg_ctx_free(f.ctx);
+	fsimg_options_init(&options);
+	options.memory_bytes = 64 * MIB;
+	options.scratch_directory_fd = f.directory_fd;
+	options.max_open_files = 64;
+	options.max_work = 500;
+	CHECK(fsimg_ctx_new(&options, &f.ctx, NULL) == FSIMG_OK);
+	f.baseline_memory = memory_now(&f);
+	fsimg_session_init(&session, f.ctx, "test", 0);
+	expect_error(construct_plan(&f, 3, FSIMG_IFSBOOT_NONE, &prefix, NULL,
+	    &session, &plan, &error), FSIMG_ELIMIT, &error, "ifsboot:prefix",
+	    NULL);
+	free_plan(plan);
+	fixture_free(&f);
+
+	for (unsigned i = 0; i < 2; i++) {
+		fixture_init(&f, 64 * MIB);
+		fsimg_ctx_free(f.ctx);
+		fsimg_options_init(&options);
+		options.memory_bytes = 64 * MIB;
+		options.scratch_directory_fd = f.directory_fd;
+		options.max_open_files = 64;
+		options.progress = record_output_work;
+		options.progress_argument = &work[i];
+		CHECK(fsimg_ctx_new(&options, &f.ctx, NULL) == FSIMG_OK);
+		f.baseline_memory = memory_now(&f);
+		work[i] = 0;
+		build_volume(&f, &spec, &volume);
+		boot_layers(&layers, 3, FSIMG_IFSBOOT_NONE);
+		/* One transfer of the whole prefix, then one per byte. */
+		prefix.cap = i == 0 ? 0 : 1;
+		io = memory_io(&f, &prefix);
+		inputs = (fsimg_layer_inputs_t){ .ifsboot_prefix = io };
+		bzero(&out[i], sizeof(out[i]));
+		CHECK(wrap_memory(&f, &volume, &layers, &inputs, &out[i],
+		    NULL) == FSIMG_OK);
+		fsimg_io_free(io);
+		memory_free(&volume);
+		fixture_free(&f);
+	}
+	CHECK(out[0].length == out[1].length &&
+	    bcmp(out[0].bytes, out[1].bytes, (size_t)out[0].length) == 0);
+	CHECK(work[0] != 0 && work[1] == work[0] + LOADER_BYTES - 1);
+	memory_free(&out[0]);
+	memory_free(&out[1]);
+	memory_free(&prefix);
 }
 
 /*
@@ -1724,43 +1906,64 @@ test_byte_order_and_inputs(void)
 }
 
 /*
- * The bound, called directly: a disk past 2^32 - 4 bytes, or not a whole
- * number of words when stored raw, names imagefs_size; ram_size and
- * stored_size past 32 bits name themselves; and the bound is the prefix,
- * the startup section and the body's worst case.
+ * The bound, called directly on constructed plans: a disk past 2^32 - 4
+ * bytes, or not a whole number of words when stored raw, names
+ * imagefs_size; ram_size and stored_size past 32 bits name themselves; and
+ * the bound is the prefix, the startup section and the body's worst case,
+ * the same however often it is asked.
  */
 static void
 test_bounds(void)
 {
-	fsimg_container_settings_t settings;
+	unsigned char loader[LOADER_BYTES], code[CODE_BYTES];
+	const fsimg_container_writer_t *writer =
+	    fsimg_ifsboot_container.writer;
+	fsimg_container_plan_t *plan;
+	fsimg_session_t session;
 	fsimg_error_t error;
-	uint64_t out;
+	memory_t prefix, startup;
+	uint64_t out, again;
+	fixture_t f;
 
-	bzero(&settings, sizeof(settings));
-	settings.boot.flags1 = 0x08;
-	expect_error(fsimg_ifsboot_container.bound(&settings,
-	    (UINT64_C(1) << 32) - 3, &out, &error), FSIMG_EUNSUPPORTED, &error,
-	    "imagefs_size", NULL);
-	expect_error(fsimg_ifsboot_container.bound(&settings,
-	    (UINT64_C(1) << 32) - 4, &out, &error), FSIMG_EUNSUPPORTED, &error,
-	    "ram_size", NULL);
-	expect_error(fsimg_ifsboot_container.bound(&settings,
-	    UINT64_C(4280000000), &out, &error), FSIMG_EUNSUPPORTED, &error,
-	    "stored_size", NULL);
-	CHECK(fsimg_ifsboot_container.bound(&settings, 100000, &out, NULL) ==
-	    FSIMG_OK);
+	fill_random(loader, sizeof(loader), 21);
+	loader[0] = 0xfa;
+	fill_random(code, sizeof(code), 22);
+	fixture_init(&f, 64 * MIB);
+	fsimg_test_unproven_writes(f.ctx, true);
+	fsimg_session_init(&session, f.ctx, "test", 0);
+	CHECK(construct_plan(&f, 0, FSIMG_IFSBOOT_LZO, NULL, NULL, &session,
+	    &plan, NULL) == FSIMG_OK);
+	expect_error(writer->bound(plan, (UINT64_C(1) << 32) - 3, &out,
+	    &error), FSIMG_EUNSUPPORTED, &error, "imagefs_size", NULL);
+	expect_error(writer->bound(plan, (UINT64_C(1) << 32) - 4, &out,
+	    &error), FSIMG_EUNSUPPORTED, &error, "ram_size", NULL);
+	expect_error(writer->bound(plan, UINT64_C(4280000000), &out, &error),
+	    FSIMG_EUNSUPPORTED, &error, "stored_size", NULL);
+	CHECK(writer->bound(plan, 100000, &out, NULL) == FSIMG_OK);
 	CHECK(out == 260 + 100000 + 100000 / 255 + 20 * 2 + 12);
-	settings.buffered_bytes = BIOS_PREFIX;
-	settings.boot.code_bytes = CODE_BYTES;
-	CHECK(fsimg_ifsboot_container.bound(&settings, 100000, &out, NULL) ==
-	    FSIMG_OK);
+	CHECK(writer->bound(plan, 100000, &again, NULL) == FSIMG_OK &&
+	    again == out);
+	free_plan(plan);
+
+	prefix = memory_of(loader, sizeof(loader));
+	startup = memory_of(code, sizeof(code));
+	CHECK(construct_plan(&f, 3, FSIMG_IFSBOOT_LZO, &prefix, &startup,
+	    &session, &plan, NULL) == FSIMG_OK);
+	CHECK(writer->bound(plan, 100000, &out, NULL) == FSIMG_OK);
 	CHECK(out == BIOS_PREFIX + 260 + 4004 + 100000 + 100000 / 255 + 20 * 2 +
 	    12);
-	settings.boot.flags1 = 0x00;
-	expect_error(fsimg_ifsboot_container.bound(&settings, 4097, &out,
-	    &error), FSIMG_EUNSUPPORTED, &error, "imagefs_size", NULL);
-	CHECK(fsimg_ifsboot_container.bound(&settings, 4096, &out, NULL) ==
-	    FSIMG_OK && out == BIOS_PREFIX + 260 + 4004 + 4096);
+	free_plan(plan);
+	CHECK(construct_plan(&f, 3, FSIMG_IFSBOOT_NONE, &prefix, &startup,
+	    &session, &plan, NULL) == FSIMG_OK);
+	expect_error(writer->bound(plan, 4097, &out, &error),
+	    FSIMG_EUNSUPPORTED, &error, "imagefs_size", NULL);
+	CHECK(writer->bound(plan, 4096, &out, NULL) == FSIMG_OK &&
+	    out == BIOS_PREFIX + 260 + 4004 + 4096);
+	CHECK(plan->passes == 1);
+	free_plan(plan);
+	memory_free(&startup);
+	memory_free(&prefix);
+	fixture_free(&f);
 }
 
 /*
@@ -2859,6 +3062,7 @@ main(int argc, char **argv)
 	test_startup_lengths();
 	test_prefix();
 	test_prefix_buffer();
+	test_plan_session();
 	test_splits();
 	test_required_settings();
 	test_refusals();

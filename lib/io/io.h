@@ -37,8 +37,15 @@ fsimg_status_t fsimg_io_resolver(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
  */
 fsimg_status_t fsimg_io_read_slice(fsimg_io_t *, uint64_t, uint64_t,
     fsimg_io_t **, fsimg_error_t *);
-/* A per-call session never attaches borrowed input to a reader's lifetime. */
+/* A per-call session never attaches borrowed input to a reader's lifetime.
+ * read_session transfers exactly the length or fails; read_at_session, as
+ * fsimg_io_read_at, may transfer less, and transfers zero only at the end.
+ * Both charge every transfer to the session, whatever session the object
+ * has bound.
+ */
 fsimg_status_t fsimg_io_read_session(fsimg_io_t *, fsimg_session_t *,
+    uint64_t, void *, size_t, size_t *, fsimg_error_t *);
+fsimg_status_t fsimg_io_read_at_session(fsimg_io_t *, fsimg_session_t *,
     uint64_t, void *, size_t, size_t *, fsimg_error_t *);
 /* Callback storage has no host identity; its stability is the caller's duty. */
 fsimg_status_t fsimg_io_identity(fsimg_io_t *, fsimg_host_file_t *, bool *,

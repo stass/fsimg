@@ -40,8 +40,9 @@ typedef struct disk_region {
 } disk_region_t;
 
 /* Regions in disk order, contiguous from offset zero to length. session
- * charges the transcode of wrap, unwrap and compose; a writer's in-place
- * emission charges the writer's session and leaves it idle.
+ * is borrowed from the operation: the same session that charged the disk
+ * plan's construction charges the volume reads of wrap, unwrap and
+ * compose. A writer's in-place emission reads no volume through it.
  */
 typedef struct assembled_disk {
 	disk_region_t	*regions;
@@ -49,7 +50,7 @@ typedef struct assembled_disk {
 	size_t		 capacity;
 	uint64_t	 length;
 	bool		 durable;
-	fsimg_session_t	 session;
+	fsimg_session_t	*session;
 } assembled_disk_t;
 
 static fsimg_status_t check_mode(const fsimg_write_options_t *,
@@ -60,7 +61,7 @@ static fsimg_status_t check_named_input(fsimg_ctx_t *, fsimg_io_t *,
 static fsimg_status_t check_carried_input(fsimg_ctx_t *, fsimg_io_t *,
     uint64_t, const fsimg_stack_t *, const fsimg_layer_t *, char [static 16],
     fsimg_byte_order_t *, fsimg_error_t *);
-static fsimg_status_t disk_new(fsimg_ctx_t *, size_t, bool,
+static fsimg_status_t disk_new(fsimg_session_t *, size_t, bool,
     assembled_disk_t *, fsimg_error_t *);
 static fsimg_status_t disk_append(assembled_disk_t *, region_kind_t,
     uint64_t, uint64_t, const unsigned char *, fsimg_io_t *, fsimg_error_t *);
@@ -69,7 +70,7 @@ static fsimg_status_t disk_finish(assembled_disk_t *, uint64_t,
 static fsimg_status_t assemble_plan(assembled_disk_t *,
     const fsimg_disk_plan_t *, const fsimg_scheme_tables_t *,
     fsimg_io_t *const *, const uint64_t *, fsimg_error_t *);
-static fsimg_status_t build_disk(fsimg_ctx_t *, const fsimg_disk_plan_t *,
+static fsimg_status_t build_disk(fsimg_session_t *, const fsimg_disk_plan_t *,
     fsimg_io_t *const *, const uint64_t *, bool, assembled_disk_t *,
     fsimg_scheme_tables_t *, fsimg_error_t *);
 static fsimg_status_t reject_aliases(const assembled_disk_t *,
@@ -81,7 +82,7 @@ static fsimg_status_t disk_next_zero(void *, uint64_t, uint64_t *, uint64_t *,
 static void disk_keep(void *);
 static fsimg_status_t identify_volume(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
     const char *, char [static 16], fsimg_error_t *);
-static fsimg_status_t write_plan(fsimg_ctx_t *, fsimg_disk_plan_t *,
+static fsimg_status_t write_plan(fsimg_session_t *, fsimg_disk_plan_t *,
     fsimg_io_t *const *, const uint64_t *, bool, const fsimg_sink_t *,
     fsimg_error_t *);
 
@@ -113,7 +114,7 @@ fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
 	size_t transferred;
 	fsimg_status_t status;
 
-	status = build_disk(session->ctx, plan, no_input, &volume_bytes, false,
+	status = build_disk(session, plan, no_input, &volume_bytes, false,
 	    &disk, &tables, error);
 	for (size_t i = 0; status == FSIMG_OK && i < disk.count; i++) {
 		region = &disk.regions[i];
@@ -196,18 +197,18 @@ check_mode(const fsimg_write_options_t *options,
 	return (FSIMG_OK);
 }
 
-/* An empty disk with room for capacity regions, charging its copy to a
- * session of its own.
+/* An empty disk with room for capacity regions, charging its copy to the
+ * operation's session.
  */
 static fsimg_status_t
-disk_new(fsimg_ctx_t *ctx, size_t capacity, bool durable,
+disk_new(fsimg_session_t *session, size_t capacity, bool durable,
     assembled_disk_t *disk, fsimg_error_t *error)
 {
 	bzero(disk, sizeof(*disk));
 	disk->durable = durable;
-	fsimg_session_init(&disk->session, ctx, "image output", 0);
-	disk->regions = fsimg_alloc(ctx, capacity * sizeof(*disk->regions),
-	    error);
+	disk->session = session;
+	disk->regions = fsimg_alloc(session->ctx,
+	    capacity * sizeof(*disk->regions), error);
 	if (disk->regions == NULL)
 		return (error->status);
 	disk->capacity = capacity;
@@ -280,11 +281,12 @@ assemble_plan(assembled_disk_t *disk, const fsimg_disk_plan_t *plan,
  * caller frees tables and disk->regions on every outcome.
  */
 static fsimg_status_t
-build_disk(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
+build_disk(fsimg_session_t *session, const fsimg_disk_plan_t *plan,
     fsimg_io_t *const *volumes, const uint64_t *volume_bytes, bool durable,
     assembled_disk_t *disk, fsimg_scheme_tables_t *tables,
     fsimg_error_t *error)
 {
+	fsimg_ctx_t *ctx = session->ctx;
 	size_t count;
 	fsimg_status_t status;
 
@@ -293,8 +295,8 @@ build_disk(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
 	/* Each volume and table may follow a run of zeros, and so may the
 	 * disk's end.
 	 */
-	status = disk_new(ctx, 2 * (count + FSIMG_TABLE_REGIONS) + 1, durable,
-	    disk, error);
+	status = disk_new(session, 2 * (count + FSIMG_TABLE_REGIONS) + 1,
+	    durable, disk, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (plan->scheme == NULL) {
@@ -379,7 +381,7 @@ disk_resolve(void *argument, uint64_t offset, void *buffer, size_t length,
 			break;
 		case REGION_VOLUME:
 			status = fsimg_io_read_session(region->volume,
-			    &disk->session, within, out + *done, step,
+			    disk->session, within, out + *done, step,
 			    &transferred, error);
 			break;
 		}
@@ -472,13 +474,14 @@ identify_volume(fsimg_ctx_t *ctx, fsimg_io_t *volume, uint64_t length,
  * Place a resolved plan's volumes, encode its tables, check the output
  * limit and the sink against every input, and transcode the assembled
  * disk to the sink through the plan's container and compression, or copy
- * it without either.
+ * it without either, all charged to the session that made the plan.
  */
 static fsimg_status_t
-write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
+write_plan(fsimg_session_t *session, fsimg_disk_plan_t *plan,
     fsimg_io_t *const *volumes, const uint64_t *volume_bytes, bool durable,
     const fsimg_sink_t *sink, fsimg_error_t *error)
 {
+	fsimg_ctx_t *ctx = session->ctx;
 	assembled_disk_t disk;
 	fsimg_scheme_tables_t tables;
 	fsimg_io_t *object;
@@ -491,16 +494,16 @@ write_plan(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 		status = fsimg_disk_plan_budget(ctx, plan, false, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = build_disk(ctx, plan, volumes, volume_bytes, durable, &disk,
-	    &tables, error);
+	status = build_disk(session, plan, volumes, volume_bytes, durable,
+	    &disk, &tables, error);
 	if (status == FSIMG_OK)
 		status = reject_aliases(&disk, plan, sink, error);
 	if (status == FSIMG_OK)
 		status = fsimg_io_resolver(ctx, NULL, disk.length, &disk_ops,
 		    &disk, &object, error);
 	if (status == FSIMG_OK)
-		status = fsimg_disk_output(&disk.session, object, plan, sink,
-		    durable, &written, error);
+		status = fsimg_disk_output(session, object, plan, sink, durable,
+		    &written, error);
 	fsimg_io_free(object);
 	fsimg_scheme_tables_free(&tables);
 	fsimg_dealloc(disk.regions);
@@ -607,6 +610,7 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 	fsimg_partition_request_t request;
 	fsimg_disk_request_t disk_request;
 	fsimg_disk_plan_t plan;
+	fsimg_session_t session;
 	fsimg_stack_t stack;
 	const fsimg_layer_t *container;
 	fsimg_byte_order_t order;
@@ -644,8 +648,10 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 		    error);
 	if (status != FSIMG_OK)
 		return (status);
-	disk_request = (fsimg_disk_request_t){ .stack = &stack,
-	    .layers = &layers, .inputs = &inputs,
+	/* One session charges the container's plan and the output. */
+	fsimg_session_init(&session, ctx, "image output", 0);
+	disk_request = (fsimg_disk_request_t){ .session = &session,
+	    .stack = &stack, .layers = &layers, .inputs = &inputs,
 	    .compression = selected.compression, .epoch = selected.epoch,
 	    .flags = selected.flags, .partitions = 1, .volume_order = order,
 	    .verified_disk = container != NULL &&
@@ -663,7 +669,7 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 		status = fsimg_disk_plan_partition(&plan, 0, &request, error);
 	}
 	if (status == FSIMG_OK)
-		status = write_plan(ctx, &plan, &input, &length,
+		status = write_plan(&session, &plan, &input, &length,
 		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
 	fsimg_disk_plan_free(&plan);
 	return (status);
@@ -684,6 +690,7 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	fsimg_layer_inputs_t inputs;
 	fsimg_disk_request_t request;
 	fsimg_disk_plan_t plan;
+	fsimg_session_t session;
 	fsimg_stack_t stack;
 	fsimg_io_t *volume;
 	fsimg_ctx_t *ctx;
@@ -710,15 +717,17 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	if (status != FSIMG_OK)
 		return (status);
 	ctx = fsimg_io_context(volume);
+	fsimg_session_init(&session, ctx, "image output", 0);
 	status = fsimg_io_get_size(volume, &length, error);
-	request = (fsimg_disk_request_t){ .stack = &stack, .layers = &layers,
-	    .inputs = &inputs, .compression = selected.compression,
+	request = (fsimg_disk_request_t){ .session = &session, .stack = &stack,
+	    .layers = &layers, .inputs = &inputs,
+	    .compression = selected.compression,
 	    .epoch = selected.epoch, .flags = selected.flags,
 	    .partitions = 1 };
 	if (status == FSIMG_OK)
 		status = fsimg_disk_plan_init(ctx, &request, &plan, error);
 	if (status == FSIMG_OK)
-		status = write_plan(ctx, &plan, &volume, &length,
+		status = write_plan(&session, &plan, &volume, &length,
 		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
 	fsimg_disk_plan_free(&plan);
 	fsimg_io_free(volume);
@@ -743,6 +752,7 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 	fsimg_partition_request_t request;
 	fsimg_disk_request_t disk_request;
 	fsimg_disk_plan_t plan;
+	fsimg_session_t session;
 	fsimg_stack_t stack;
 	fsimg_io_t **volumes;
 	uint64_t *lengths;
@@ -775,8 +785,10 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 	status = fsimg_layer_options_disk_only(&layers, error);
 	if (status != FSIMG_OK)
 		return (status);
-	disk_request = (fsimg_disk_request_t){ .stack = &stack,
-	    .layers = &layers, .inputs = &inputs,
+	/* One session charges the container's plan and the output. */
+	fsimg_session_init(&session, ctx, "image output", 0);
+	disk_request = (fsimg_disk_request_t){ .session = &session,
+	    .stack = &stack, .layers = &layers, .inputs = &inputs,
 	    .compression = selected.compression, .epoch = selected.epoch,
 	    .flags = selected.flags,
 	    .partitions = count > UINT32_MAX ? UINT32_MAX : (uint32_t)count };
@@ -822,7 +834,7 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 		    error);
 	}
 	if (status == FSIMG_OK)
-		status = write_plan(ctx, &plan, volumes, lengths,
+		status = write_plan(&session, &plan, volumes, lengths,
 		    (selected.flags & FSIMG_WRITE_DURABLE) != 0, sink, error);
 	fsimg_dealloc(lengths);
 	fsimg_dealloc(volumes);

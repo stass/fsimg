@@ -22,7 +22,7 @@ static fsimg_status_t check_capabilities(fsimg_writer_t *, fsimg_error_t *);
 static fsimg_status_t check_entry_capabilities(fsimg_writer_t *,
     const fsimg_entry_t *, bool, fsimg_error_t *);
 static bool variant_of(const fsimg_format_t *, const fsimg_format_variant_t *);
-static fsimg_status_t plan_layers(fsimg_ctx_t *, const fsimg_stack_t *,
+static fsimg_status_t plan_layers(fsimg_session_t *, const fsimg_stack_t *,
     fsimg_write_options_t *, fsimg_layer_options_t *, fsimg_disk_plan_t *,
     fsimg_error_t *);
 static fsimg_status_t fit_volume(const fsimg_format_t *,
@@ -142,12 +142,14 @@ fsimg_writer_new_variant(fsimg_ctx_t *ctx, const fsimg_format_t *driver,
  * Resolve the disk around the volume before the format validates its
  * options: the compression, the scheme's settings and the partition's
  * type, name and identity are all checked here, before any source is
- * read. A derived disk is sized from the planned volume, so its MBR limit
- * is checked when the plan is placed; a fixed disk's room for the volume
- * is checked by fit_volume once the format has resolved its sector.
+ * read, and the container's plan reads its file settings through the
+ * writer's session. A derived disk is sized from the planned volume, so
+ * its MBR limit is checked when the plan is placed; a fixed disk's room
+ * for the volume is checked by fit_volume once the format has resolved
+ * its sector.
  */
 static fsimg_status_t
-plan_layers(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
+plan_layers(fsimg_session_t *session, const fsimg_stack_t *stack,
     fsimg_write_options_t *selected, fsimg_layer_options_t *layers,
     fsimg_disk_plan_t *disk, fsimg_error_t *error)
 {
@@ -168,11 +170,12 @@ plan_layers(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	if (selected->inputs != NULL)
 		inputs = *selected->inputs;
 	selected->inputs = NULL;
-	disk_request = (fsimg_disk_request_t){ .stack = stack, .layers = layers,
-	    .inputs = &inputs, .compression = selected->compression,
-	    .epoch = selected->epoch, .flags = selected->flags, .partitions = 1,
+	disk_request = (fsimg_disk_request_t){ .session = session,
+	    .stack = stack, .layers = layers, .inputs = &inputs,
+	    .compression = selected->compression, .epoch = selected->epoch,
+	    .flags = selected->flags, .partitions = 1,
 	    .volume_order = selected->byte_order };
-	status = fsimg_disk_plan_init(ctx, &disk_request, disk, error);
+	status = fsimg_disk_plan_init(session->ctx, &disk_request, disk, error);
 	if (status != FSIMG_OK || disk->scheme == NULL)
 		return (status);
 	gpt = disk->table.kind == FSIMG_SCHEME_GPT;
@@ -220,8 +223,6 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
     fsimg_error_t *error)
 {
 	fsimg_write_options_t selected;
-	fsimg_layer_options_t layers;
-	fsimg_disk_plan_t disk;
 	fsimg_writer_t *writer;
 	fsimg_error_t local;
 	size_t length;
@@ -270,11 +271,22 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	if (!settings_supported(&selected, variant->info.write_settings))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "write setting does not apply to the image format"));
-	status = plan_layers(ctx, stack, &selected, &layers, &disk, error);
+	/* The writer and its session exist before the layers are planned, so
+	 * the container's plan charges the session that collection, planning
+	 * and emission continue, and the disk plan has its one owner from the
+	 * start; any failure frees the unpublished writer and its plan.
+	 */
+	status = fsimg_writer_collect_new(ctx, &writer, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = plan_layers(&writer->session, stack, &selected,
+	    &writer->layers, &writer->disk, error);
 	if (status == FSIMG_OK)
 		status = driver->writer->validate(&selected, variant->id, error);
-	if (status == FSIMG_OK && disk.scheme != NULL && disk.fixed)
-		status = fit_volume(driver, variant, &disk, &selected, error);
+	if (status == FSIMG_OK && writer->disk.scheme != NULL &&
+	    writer->disk.fixed)
+		status = fit_volume(driver, variant, &writer->disk, &selected,
+		    error);
 	if (status == FSIMG_OK && selected.mountpoint != NULL &&
 	    strnlen(selected.mountpoint, sizeof(writer->mountpoint)) ==
 	    sizeof(writer->mountpoint))
@@ -290,10 +302,8 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 			status = fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_WRITER, "volume label exceeds common backing capacity");
 	}
-	if (status == FSIMG_OK)
-		status = fsimg_writer_collect_new(ctx, &writer, error);
 	if (status != FSIMG_OK) {
-		fsimg_disk_plan_free(&disk);
+		fsimg_writer_free(writer);
 		return (status);
 	}
 	writer->format = driver;
@@ -301,9 +311,7 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	writer->variant = variant->id;
 	writer->options = selected;
 	writer->stack = *stack;
-	writer->layers = layers;
 	writer->options.layers = &writer->layers;
-	writer->disk = disk;
 	if (selected.label != NULL) {
 		bcopy(selected.label, writer->label, length + 1);
 		writer->options.label = writer->label;

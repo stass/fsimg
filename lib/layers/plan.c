@@ -138,10 +138,46 @@ request_key(const fsimg_disk_plan_t *plan,
 		snprintf(key, capacity, "%s:%s", plan->scheme->name, setting);
 }
 
-/* The stack's container and its resolved settings; none leaves the disk
- * unencoded, with a granularity of one byte, copied in 1 MiB chunks in one
- * pass. A container that carries a filesystem holds nothing else, and one
- * without a writer, such as hbcifs, is refused naming it.
+/* The facts of a disk without a container, and a new plan's defaults. */
+static const fsimg_container_plan_t no_container = {
+	.granularity = 1,
+	.chunk_bytes = FSIMG_TRANSCODE_CHUNK_BYTES,
+	.passes = 1
+};
+
+void *
+fsimg_container_plan_alloc(fsimg_ctx_t *ctx, size_t size,
+    fsimg_container_plan_t **out, fsimg_error_t *error)
+{
+	fsimg_container_plan_t *base;
+
+	base = fsimg_alloc(ctx, size, error);
+	if (base == NULL)
+		return (NULL);
+	bzero(base, size);
+	*base = no_container;
+	*out = base;
+	return (base);
+}
+
+void
+fsimg_container_plan_release(fsimg_container_plan_t *plan)
+{
+	fsimg_dealloc(plan);
+}
+
+const fsimg_container_plan_t *
+fsimg_disk_plan_container(const fsimg_disk_plan_t *plan)
+{
+	return (plan->container_plan != NULL ? plan->container_plan :
+	    &no_container);
+}
+
+/* The stack's container and its private plan; none leaves the disk
+ * unencoded with the defaults. A container that carries a filesystem holds
+ * nothing else, and one without a writer, such as hbcifs, is refused
+ * naming it. A failed constructor may leave a partial plan, which only
+ * fsimg_disk_plan_free reaches.
  */
 static fsimg_status_t
 resolve_container(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
@@ -150,9 +186,6 @@ resolve_container(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 	fsimg_container_plan_args_t args;
 	fsimg_status_t status;
 
-	plan->container_settings.granularity = 1;
-	plan->container_settings.chunk_bytes = FSIMG_TRANSCODE_CHUNK_BYTES;
-	plan->container_settings.passes = 1;
 	plan->container = fsimg_stack_layer(request->stack,
 	    FSIMG_LAYER_CONTAINER);
 	if (plan->container == NULL)
@@ -160,18 +193,18 @@ resolve_container(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 	status = fsimg_stack_carried(request->stack, plan->container, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (plan->container->container->plan == NULL) {
+	if (plan->container->container->writer == NULL) {
 		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
 		    "the container is read only");
 		fsimg_error_path(error, plan->container->name);
 		return (FSIMG_EUNSUPPORTED);
 	}
 	args = (fsimg_container_plan_args_t){ .ctx = ctx,
-	    .layers = request->layers, .files = plan->files,
-	    .epoch = plan->epoch, .flags = plan->flags,
+	    .session = request->session, .layers = request->layers,
+	    .files = plan->files, .epoch = plan->epoch, .flags = plan->flags,
 	    .volume_order = request->volume_order };
-	return (plan->container->container->plan(&args,
-	    &plan->container_settings, error));
+	return (plan->container->container->writer->plan(&args,
+	    &plan->container_plan, error));
 }
 
 /*
@@ -344,10 +377,14 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_disk_request_t *request,
 	uint32_t flags = request->flags;
 	const char *key;
 	char message[64];
+	uint64_t granularity;
 	fsimg_status_t status;
 	bool reproducible;
 
 	bzero(plan, sizeof(*plan));
+	if (request->session == NULL || request->session->ctx != ctx)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "a disk plan needs its operation's session"));
 	plan->epoch = epoch;
 	plan->flags = flags;
 	plan->verified_disk = request->verified_disk;
@@ -365,7 +402,8 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_disk_request_t *request,
 		    fsimg_stack_layer(stack, FSIMG_LAYER_SCHEME), error);
 	if (status == FSIMG_OK)
 		status = resolve_container(ctx, plan, request, error);
-	if (status == FSIMG_OK && plan->container_settings.granularity > 1)
+	if (status == FSIMG_OK &&
+	    fsimg_disk_plan_container(plan)->granularity > 1)
 		status = check_exact_volume(stack, plan->container, error);
 	if (status == FSIMG_OK)
 		status = resolve_compression(plan, layers, error);
@@ -421,7 +459,8 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_disk_request_t *request,
 	if (plan->disk_bytes % table->sector_bytes != 0)
 		return (fsimg_setting_error(error, key,
 		    "the disk length is not a multiple of the sector size"));
-	if (plan->disk_bytes % plan->container_settings.granularity != 0)
+	granularity = fsimg_disk_plan_container(plan)->granularity;
+	if (plan->disk_bytes % granularity != 0)
 		return (fsimg_setting_error(error, key, "the disk length is not a "
 		    "multiple of the container's granularity"));
 	plan->fixed = plan->disk_bytes != 0;
@@ -590,21 +629,20 @@ fsimg_disk_plan_fit(const fsimg_disk_plan_t *plan, uint32_t granule,
 static fsimg_status_t
 size_disk(fsimg_disk_plan_t *plan, uint64_t used, fsimg_error_t *error)
 {
-	const fsimg_container_ops_t *container;
+	const fsimg_container_plan_t *facts = fsimg_disk_plan_container(plan);
 	fsimg_status_t status;
 
 	if (!plan->fixed) {
-		if (!round_up(used, plan->container_settings.granularity,
-		    &plan->disk_bytes))
+		if (!round_up(used, facts->granularity, &plan->disk_bytes))
 			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 			    FSIMG_OP_IMAGE, "the disk exceeds the disk range"));
 		plan->padding_bytes = plan->disk_bytes - used;
 	}
 	plan->container_bytes = plan->disk_bytes;
 	if (plan->container != NULL) {
-		container = plan->container->container;
-		status = container->bound(&plan->container_settings,
-		    plan->disk_bytes, &plan->container_bytes, error);
+		status = plan->container->container->writer->bound(
+		    plan->container_plan, plan->disk_bytes,
+		    &plan->container_bytes, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
@@ -717,8 +755,8 @@ fsimg_disk_plan_report(const fsimg_disk_plan_t *plan, uint32_t slot,
 	if (plan->container != NULL) {
 		snprintf(image->container, sizeof(image->container), "%s",
 		    plan->container->name);
-		bcopy(plan->container_settings.guid, image->container_guid,
-		    sizeof(image->container_guid));
+		bcopy(fsimg_disk_plan_container(plan)->identifier,
+		    image->container_guid, sizeof(image->container_guid));
 	}
 	if (plan->scheme == NULL || slot == 0 || slot > table->count)
 		return;
@@ -776,9 +814,10 @@ fsimg_disk_plan_free(fsimg_disk_plan_t *plan)
 	fsimg_dealloc(plan->table.records);
 	plan->table.records = NULL;
 	plan->table.count = 0;
-	fsimg_dealloc(plan->container_settings.buffered);
-	plan->container_settings.buffered = NULL;
-	plan->container_settings.buffered_bytes = 0;
+	if (plan->container_plan != NULL)
+		plan->container->container->writer->plan_free(
+		    plan->container_plan);
+	plan->container_plan = NULL;
 }
 
 void

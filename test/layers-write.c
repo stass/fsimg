@@ -13,6 +13,7 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "fsimg.h"
 #include "host.h"
@@ -114,6 +115,8 @@ static fsimg_status_t open_disk(fixture_t *, memory_t *, uint32_t,
 static unsigned leftover_staging(const fixture_t *);
 static void test_settings(void);
 static void test_derived_defaults(void);
+static void test_container_plan_facts(void);
+static void test_construction_failures(void);
 static void test_gpt_layout(void);
 static void test_gpt_4kn(void);
 static void test_mbr_layout(void);
@@ -839,6 +842,131 @@ test_derived_defaults(void)
 		CHECK(bcmp(info.partition.type_guid, guid, 16) == 0);
 		CHECK(strcmp(info.partition.name, cases[i].gpt_name) == 0);
 		CHECK(info.image.disk_bytes == MIB + cases[i].volume_bytes + 33 * 512);
+	}
+	fixture_free(&f);
+}
+
+/*
+ * The facts a disk plan takes from its container's private plan, and their
+ * defaults without one. A disk plan without a container has no container
+ * plan and reports the defaults: one-byte granularity, 1 MiB chunks, one
+ * pass, no identifier and no zlib. The codec version follows the resolved
+ * encoding, not the layers a reader supports: a DMG of raw chunks depends
+ * on no codec and a zlib DMG on zlib, and gzip around a raw DMG names zlib
+ * once. Planning the same stack twice reports the same container.
+ */
+static void
+test_container_plan_facts(void)
+{
+	static const struct {
+		const char	*stack;
+		fsimg_dmg_compression_t compress;
+		const char	*compression;
+		bool		 zlib;
+	} cases[] = {
+		{ "fat12", FSIMG_DMG_ZLIB, "", false },
+		{ "fat12/vhd", FSIMG_DMG_ZLIB, "", false },
+		{ "fat12/simg", FSIMG_DMG_ZLIB, "", false },
+		{ "fat12/dmg", FSIMG_DMG_NONE, "", false },
+		{ "fat12/dmg", FSIMG_DMG_ZLIB, "", true },
+		{ "fat12/dmg", FSIMG_DMG_NONE, "gzip", true },
+		{ "fat12/dmg", FSIMG_DMG_ZLIB, "gzip", true }
+	};
+	const fsimg_container_plan_t *facts;
+	fsimg_write_options_t options;
+	fsimg_layer_options_t layers;
+	fsimg_plan_info_t info, again;
+	fsimg_disk_request_t request;
+	fsimg_disk_plan_t plan;
+	fsimg_session_t session;
+	fsimg_stack_t stack;
+	char expected[32];
+	fixture_t f;
+
+	fixture_init(&f);
+	snprintf(expected, sizeof(expected), "zlib %s", zlibVersion());
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_layer_options_init(&layers);
+		if (strcmp(cases[i].stack, "fat12/dmg") == 0)
+			layers.dmg_compress = cases[i].compress;
+		write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH,
+		    &layers);
+		options.volume_bytes = MIB;
+		snprintf(options.compression, sizeof(options.compression), "%s",
+		    cases[i].compression);
+		CHECK(plan_only(&f, cases[i].stack, &options, &info, NULL) ==
+		    FSIMG_OK);
+		CHECK(strcmp(info.codec_version,
+		    cases[i].zlib ? expected : "") == 0);
+		CHECK(plan_only(&f, cases[i].stack, &options, &again, NULL) ==
+		    FSIMG_OK);
+		CHECK(bcmp(info.image.container_guid,
+		    again.image.container_guid, 16) == 0 &&
+		    info.output_bytes == again.output_bytes &&
+		    strcmp(info.codec_version, again.codec_version) == 0);
+	}
+
+	CHECK(fsimg_stack_parse("fat12", &stack, NULL) == FSIMG_OK);
+	fsimg_layer_options_init(&layers);
+	fsimg_session_init(&session, f.ctx, "test", 0);
+	request = (fsimg_disk_request_t){ .session = &session,
+	    .stack = &stack, .layers = &layers, .compression = "",
+	    .partitions = 1 };
+	CHECK(fsimg_disk_plan_init(f.ctx, &request, &plan, NULL) == FSIMG_OK);
+	CHECK(plan.container == NULL && plan.container_plan == NULL);
+	facts = fsimg_disk_plan_container(&plan);
+	CHECK(facts->granularity == 1 &&
+	    facts->chunk_bytes == FSIMG_TRANSCODE_CHUNK_BYTES &&
+	    facts->passes == 1 && !facts->zlib &&
+	    all_zero(facts->identifier, sizeof(facts->identifier)));
+	fsimg_disk_plan_free(&plan);
+	fsimg_disk_plan_free(&plan);
+
+	/* A request without its operation's session is refused. */
+	request.session = NULL;
+	CHECK(fsimg_disk_plan_init(f.ctx, &request, &plan, NULL) ==
+	    FSIMG_ESTATE);
+	fsimg_disk_plan_free(&plan);
+	fixture_free(&f);
+}
+
+/*
+ * Writer construction failing each allocation in turn until it succeeds,
+ * around each writable container and none: the writer itself, its buffers
+ * and streams, and the container's plan. Every failure is ENOMEM, and
+ * every outcome returns every charge once the writer, or nothing, is
+ * freed.
+ */
+static void
+test_construction_failures(void)
+{
+	static const char *const stacks[] = { "fat12", "fat12/vhd",
+	    "fat12/dmg", "fat12/simg", "fat12/gpt/dmg" };
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_stats_t stats;
+	fsimg_status_t status;
+	uint64_t attempt;
+	fixture_t f;
+
+	fixture_init(&f);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = MIB;
+	for (size_t i = 0; i < sizeof(stacks) / sizeof(stacks[0]); i++) {
+		status = FSIMG_ENOMEM;
+		for (attempt = 1; status == FSIMG_ENOMEM; attempt++) {
+			CHECK(attempt < 1000);
+			fsimg_test_fail_alloc_after(f.ctx, attempt);
+			writer = NULL;
+			status = fsimg_writer_new(f.ctx, stacks[i], &options,
+			    &writer, NULL);
+			fsimg_test_fail_alloc_after(f.ctx, 0);
+			CHECK((status == FSIMG_OK) == (writer != NULL));
+			fsimg_writer_free(writer);
+			CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+			CHECK(stats.memory_bytes == f.baseline_memory);
+		}
+		CHECK(status == FSIMG_OK && attempt > 2);
 	}
 	fixture_free(&f);
 }
@@ -2091,6 +2219,8 @@ main(void)
 {
 	test_settings();
 	test_derived_defaults();
+	test_container_plan_facts();
+	test_construction_failures();
 	test_gpt_layout();
 	test_gpt_4kn();
 	test_mbr_layout();
