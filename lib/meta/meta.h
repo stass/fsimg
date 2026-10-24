@@ -140,6 +140,37 @@ fsimg_status_t fsimg_extent_index_walk(fsimg_extent_index_t *,
 uint64_t fsimg_test_extent_count(const fsimg_extent_index_t *);
 fsimg_store_t *fsimg_test_extent_records(const fsimg_extent_index_t *);
 
+/* Exclusive ownership runs (specs/design-verification-helpers.md): one
+ * allocation domain of units [first_unit, end_unit), in which no two claims
+ * may overlap, not even identical ones. The domain is the scope: claims in
+ * separate objects are never compared. A driver appends one claim per owned
+ * run, in any order, seals once, which sorts the claims externally, then
+ * reads them in order of first unit with next, which rejects every overlap
+ * and returns FSIMG_DONE after the last. The object borrows the session
+ * until free, owns its stream and cursor, and after any operational failure
+ * accepts only free; calls in the wrong state fail with FSIMG_ESTATE and
+ * change nothing. Sealing closes the stream; only the driver knows whether
+ * its claims are complete.
+ */
+typedef struct fsimg_owner_runs fsimg_owner_runs_t;
+
+/* A published claim: allocation units [first, end), first < end. */
+typedef struct fsimg_owner_run {
+	uint64_t	 first;
+	uint64_t	 end;
+} fsimg_owner_run_t;
+
+fsimg_status_t fsimg_owner_runs_new(fsimg_session_t *, uint64_t, uint64_t,
+    fsimg_owner_runs_t **, fsimg_error_t *);
+fsimg_status_t fsimg_owner_runs_append(fsimg_owner_runs_t *, uint64_t,
+    uint64_t, fsimg_error_t *);
+fsimg_status_t fsimg_owner_runs_seal(fsimg_owner_runs_t *, fsimg_error_t *);
+fsimg_status_t fsimg_owner_runs_next(fsimg_owner_runs_t *, fsimg_owner_run_t *,
+    fsimg_error_t *);
+void fsimg_owner_runs_free(fsimg_owner_runs_t *);
+/* Validation control: the claims' current stream, unsorted until sealed. */
+fsimg_stream_t *fsimg_test_owner_runs_stream(const fsimg_owner_runs_t *);
+
 typedef int (*fsimg_compare_fn_t)(const void *, size_t, const void *, size_t,
     void *);
 

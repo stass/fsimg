@@ -316,13 +316,6 @@
     one image per case, and the design's "when it is sparse" condition is
     not checked. Add a per-run budget for recorded images.
 
-* [Low] **Verification payload and scoped ownership helpers**
-  (`lib/read/`, `lib/meta/`, `lib/formats/*/verify.c`): implement the
-  [verification-helper design](specs/design-verification-helpers.md): one
-  initialized-payload loop and a strict FAT/exFAT ownership-run utility.
-  Preserve FAT's fused walk, QNX6's owner-bearing records, QNX4's bitset,
-  ImageFS's checksum/reference scope, and each driver's reconciliation.
-
 * [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/codec/`,
   `lib/layers/`): write QNX boot images through the `ifsboot` container,
   from a caller's startup program, optional boot prefix and header
@@ -335,6 +328,15 @@
   [qualification work](docs/todo-ifs.md) lists the open items.
 
 ## Bugs by subsystem
+
+* [Low] **Ubuntu gcc 13.3 `-Werror` build failure** (`lib/source/source.c`,
+  `lib/layers/{image,chunks,gzip,dmg,ifsboot}.c`, `lib/formats/qnx6/{header,names}.c`):
+  the default `-O2 -Werror` build fails with Ubuntu 24.04's gcc 13.3.0 on
+  `-Wmaybe-uninitialized` for out-parameters set only on success, and on
+  `-Wformat-truncation` for messages that `snprintf` deliberately truncates.
+  The CI gcc 13 and 16 containers pass. Initialize those out-parameters
+  and give the bounded message buffers sizes gcc can prove, then add the
+  distribution compiler to the Linux check.
 
 * [Medium] **QNX6 verification decodes short scratch records before checking length**
   (`lib/formats/qnx6/verify.c` `owner_next`, `reference_next`): the stream can

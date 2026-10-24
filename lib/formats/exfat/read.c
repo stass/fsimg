@@ -289,7 +289,7 @@ exfat_close(fsimg_reader_t *reader)
 	fsimg_extent_index_free(exfat->upcase_index);
 	fsimg_extent_index_free(exfat->file);
 	fsimg_bitset_free(exfat->directory_clusters);
-	fsimg_stream_free(exfat->owners);
+	fsimg_owner_runs_free(exfat->owners);
 	fsimg_dealloc(exfat->upcase);
 	fsimg_dealloc(exfat);
 	reader->driver = NULL;

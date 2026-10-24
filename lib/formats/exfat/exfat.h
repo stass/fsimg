@@ -82,7 +82,7 @@ struct fsimg_exfat_reader {
 	fsimg_extent_index_t *file;
 	exfat_stream_t	 current;
 	fsimg_bitset_t	*directory_clusters;
-	fsimg_stream_t	*owners;
+	fsimg_owner_runs_t *owners;
 	uint16_t	*upcase;
 	uint64_t	 bitmap_length;
 	uint64_t	 upcase_length;

@@ -90,6 +90,8 @@ static void test_volume_labels(void);
 static void test_cached_name(void);
 static void test_cached_index(void);
 static void test_range_reads(void);
+static void test_trailing_duplicate_claim(void);
+static void test_fragmented_verify(void);
 static void make_fragmented_file(fixture_t *, uint32_t);
 static void baseline_fragmented(void);
 static bool cancelled(void *);
@@ -2093,6 +2095,79 @@ test_range_reads(void)
 	fixture_close(&f);
 }
 
+/* Two files share the heap's last cluster. The allocation scan reaches it
+ * inside the first sorted claim and never advances past it, so only the
+ * final drain reads the second claim and rejects the overlap.
+ */
+static void
+test_trailing_duplicate_claim(void)
+{
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	unsigned char raw[64];
+	uint32_t last;
+
+	fixture_init(&f, 16);
+	last = f.clusters + 1;
+	set_cluster(&f, last, f.eoc);
+	short_entry(raw, "LASTA   BIN", false, last, 1);
+	short_entry(raw + 32, "LASTB   BIN", false, last, 1);
+	write_bytes(&f, f.root_offset + 64, raw, sizeof(raw));
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	if (strstr(error.message, "overlapping ownership claims") == NULL)
+		fprintf(stderr, "trailing duplicate: %s\n", error.message);
+	CHECK(strstr(error.message, "overlapping ownership claims") != NULL);
+	CHECK(!report.complete);
+	fixture_close(&f);
+}
+
+/* Verification walks each chain once, fused with its ownership claims and
+ * payload reads, and builds no extent index. Structural and payload modes
+ * make the same metadata reads; payload mode adds one read per one-cluster
+ * fragment, never touching the slack after the file's last byte.
+ */
+static void
+test_fragmented_verify(void)
+{
+	fixture_t f;
+	fsimg_verify_report_t report;
+	unsigned char raw[32];
+	uint64_t metadata_calls[2];
+	const uint32_t fragments = 200;
+	const uint32_t size = fragments * 512 - 100;
+
+	for (unsigned payload = 0; payload < 2; payload++) {
+		fixture_init(&f, 16);
+		make_fragmented_file(&f, fragments);
+		short_entry(raw, "INDEX   BIN", false, 20, size);
+		write_bytes(&f, f.root_offset, raw, sizeof(raw));
+		/* Free the replaced HELLO.TXT's chain. */
+		set_cluster(&f, 3, 0);
+		set_cluster(&f, 5, 0);
+		set_cluster(&f, 9, 0);
+		fixture_open(&f);
+		/* A one-page cache makes the run collection spill to scratch. */
+		CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+		f.calls = f.payload_calls = 0;
+		CHECK(fsimg_verify(f.reader, payload != 0 ? FSIMG_VERIFY_PAYLOAD : 0,
+		    &report, NULL) == FSIMG_OK);
+		CHECK(report.complete && fsimg_fat_state(f.reader)->index == NULL);
+		metadata_calls[payload] = f.calls - f.payload_calls;
+		if (payload != 0) {
+			CHECK(f.payload_calls == fragments);
+			CHECK(report.payload_bytes_read == size);
+		} else {
+			CHECK(f.payload_calls == 0 && report.payload_bytes_read == 0);
+		}
+		fixture_close(&f);
+	}
+	CHECK(metadata_calls[0] == metadata_calls[1]);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2209,6 +2284,8 @@ main(int argc, char **argv)
 	test_cached_name();
 	test_cached_index();
 	test_range_reads();
+	test_trailing_duplicate_claim();
+	test_fragmented_verify();
 	test_report_outputs();
 	test_capability_bounds();
 	return (0);

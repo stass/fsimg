@@ -447,6 +447,43 @@ fsimg_verify_account(fsimg_reader_t *reader, fsimg_verify_report_t *report,
 	return (FSIMG_OK);
 }
 
+/* The batch loop of payload verification. Each batch is a bounded delivery
+ * request, which resolves and checks extents and polls and charges each I/O
+ * call; the loop adds no charge of its own. Delivery completes a batch below
+ * entry.size or fails, so a short success is a broken contract, not a retry.
+ * The report counter saturates; progress uses the batch's own count.
+ */
+fsimg_status_t
+fsimg_verify_payload(fsimg_reader_t *reader, unsigned char *buffer,
+    size_t capacity, fsimg_verify_report_t *report, fsimg_error_t *error)
+{
+	uint64_t offset, remaining;
+	size_t batch, count;
+	fsimg_status_t status;
+
+	if (reader == NULL || buffer == NULL || capacity == 0 || report == NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_VERIFY,
+		    "invalid payload verification argument"));
+	if (reader->initialized > reader->entry.size)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_VERIFY,
+		    "initialized length exceeds the entry size"));
+
+	for (offset = 0; offset < reader->initialized; offset += count) {
+		remaining = reader->initialized - offset;
+		batch = remaining > capacity ? capacity : (size_t)remaining;
+		count = 0;
+		status = fsimg_reader_content(reader, offset, buffer, batch,
+		    &count, error);
+		fsimg_stat_add(&report->payload_bytes_read, count);
+		if (status != FSIMG_OK)
+			return (status);
+		if (count != batch)
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_VERIFY, "content delivery ended a batch early"));
+	}
+	return (FSIMG_OK);
+}
+
 fsimg_status_t
 fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
     fsimg_error_t *error)

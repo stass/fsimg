@@ -65,8 +65,6 @@ static fsimg_status_t verify_long_names(fsimg_reader_t *, fsimg_error_t *);
 static unsigned bits_in(unsigned);
 static fsimg_status_t verify_allocation(fsimg_reader_t *,
     fsimg_verify_report_t *, fsimg_error_t *);
-static fsimg_status_t read_payload(fsimg_reader_t *, unsigned char *,
-    fsimg_verify_report_t *, fsimg_error_t *);
 static fsimg_status_t traverse(fsimg_reader_t *, unsigned char *,
     fsimg_verify_report_t *, fsimg_error_t *);
 
@@ -381,27 +379,6 @@ verify_allocation(fsimg_reader_t *reader, fsimg_verify_report_t *report,
 	return (FSIMG_OK);
 }
 
-/* Read the current object's initialized bytes through common delivery. */
-static fsimg_status_t
-read_payload(fsimg_reader_t *reader, unsigned char *buffer,
-    fsimg_verify_report_t *report, fsimg_error_t *error)
-{
-	uint64_t offset;
-	size_t batch, count;
-	fsimg_status_t status;
-
-	for (offset = 0; offset < reader->initialized; offset += batch) {
-		batch = reader->initialized - offset > PAYLOAD_BYTES ?
-		    PAYLOAD_BYTES : (size_t)(reader->initialized - offset);
-		status = fsimg_reader_content(reader, offset, buffer, batch,
-		    &count, error);
-		report->payload_bytes_read += count;
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	return (FSIMG_OK);
-}
-
 /* Walk every entry once, omitted ones included; preparing each directory
  * accounts its names. The payload of every entry is read, except a later
  * name of an .inodes object, which has its first name's bytes, read
@@ -426,7 +403,8 @@ traverse(fsimg_reader_t *reader, unsigned char *payload,
 		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
 			continue;
 		if (payload != NULL && !qnx4_state(reader)->later_name) {
-			status = read_payload(reader, payload, report, error);
+			status = fsimg_verify_payload(reader, payload,
+			    PAYLOAD_BYTES, report, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}

@@ -222,7 +222,7 @@ fsimg_fat_close(fsimg_reader_t *reader)
 	if (fat == NULL)
 		return;
 	fsimg_bitset_free(fat->directory_clusters);
-	fsimg_stream_free(fat->owners);
+	fsimg_owner_runs_free(fat->owners);
 	fsimg_extent_index_free(fat->index);
 	fsimg_dealloc(fat);
 	reader->driver = NULL;
@@ -316,16 +316,25 @@ fsimg_status_t
 fsimg_fat_owner_append(fsimg_reader_t *reader, const fsimg_extent_t *run,
     fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
-	unsigned char record[16];
+	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
+	const fat_geometry_t *g = &fat->geometry;
+	uint64_t heap_offset;
 
-	if (fsimg_fat_state(reader)->owners == NULL)
+	if (fat->owners == NULL)
 		return (FSIMG_OK);
-	fsimg_meta_put_u64(record, (run->image_offset - g->data_offset) /
-	    g->cluster_bytes + 2);
-	fsimg_meta_put_u64(record + 8, run->length / g->cluster_bytes);
-	return (fsimg_stream_append(fsimg_fat_state(reader)->owners, record, sizeof(record),
-	    NULL, error));
+	/* A validated chain run is whole clusters of the data region; its
+	 * claim is their cluster numbers. The run utility bounds them by the
+	 * heap.
+	 */
+	if (run->image_offset < g->data_offset ||
+	    (run->image_offset - g->data_offset) % g->cluster_bytes != 0 ||
+	    run->length % g->cluster_bytes != 0)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_VERIFY,
+		    "FAT run is not whole data-region clusters"));
+	heap_offset = run->image_offset - g->data_offset;
+	return (fsimg_owner_runs_append(fat->owners,
+	    heap_offset / g->cluster_bytes + 2, run->length / g->cluster_bytes,
+	    error));
 }
 
 /* One forward pass over the current file's chain records every run in the

@@ -131,6 +131,15 @@ fsimg_status_t fsimg_verify_account(fsimg_reader_t *,
  */
 fsimg_status_t fsimg_reader_content(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
+/* Payload verification of the current object: read its initialized bytes
+ * [0, reader->initialized) in order through common content delivery, in
+ * batches of at most capacity bytes into the borrowed buffer, adding every
+ * confirmed byte to report->payload_bytes_read, before a failure too. The
+ * zero tail and allocation slack are never read. The driver decides which
+ * objects to read; the walker does not move. capacity must be nonzero.
+ */
+fsimg_status_t fsimg_verify_payload(fsimg_reader_t *, unsigned char *, size_t,
+    fsimg_verify_report_t *, fsimg_error_t *);
 fsimg_status_t fsimg_reader_abort(fsimg_reader_t *, fsimg_status_t);
 fsimg_status_t fsimg_reader_end_scope(fsimg_reader_t *);
 fsimg_status_t fsimg_reader_match_name(fsimg_reader_t *, const char *, bool *,

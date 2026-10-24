@@ -42,8 +42,6 @@ static fsimg_status_t reference_next(fsimg_stream_t *, uint64_t *,
     uint32_t *, fsimg_error_t *);
 static fsimg_status_t verify_inodes(fsimg_reader_t *, fsimg_stream_t *,
     fsimg_error_t *);
-static fsimg_status_t read_payload(fsimg_reader_t *, unsigned char *,
-    fsimg_verify_report_t *, fsimg_error_t *);
 
 /* Record one run of blocks owned by one object. Tree walks call this while
  * verification has created the ownership stream.
@@ -318,26 +316,6 @@ verify_inodes(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 	return (FSIMG_OK);
 }
 
-static fsimg_status_t
-read_payload(fsimg_reader_t *reader, unsigned char *buffer,
-    fsimg_verify_report_t *report, fsimg_error_t *error)
-{
-	uint64_t offset;
-	size_t batch, count;
-	fsimg_status_t status;
-
-	for (offset = 0; offset < reader->initialized; offset += batch) {
-		batch = reader->initialized - offset > QNX6_BUFFER_BYTES ?
-		    QNX6_BUFFER_BYTES : (size_t)(reader->initialized - offset);
-		status = fsimg_reader_content(reader, offset, buffer, batch,
-		    &count, error);
-		report->payload_bytes_read += count;
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	return (FSIMG_OK);
-}
-
 fsimg_status_t
 qnx6_verify(fsimg_reader_t *reader, unsigned flags,
     fsimg_verify_report_t *report, fsimg_error_t *error)
@@ -389,7 +367,8 @@ qnx6_verify(fsimg_reader_t *reader, unsigned flags,
 		 * name, which was read already.
 		 */
 		if (buffer != NULL && !qnx6->later_name) {
-			status = read_payload(reader, buffer, report, error);
+			status = fsimg_verify_payload(reader, buffer,
+			    QNX6_BUFFER_BYTES, report, error);
 			if (status != FSIMG_OK)
 				goto done;
 		}
