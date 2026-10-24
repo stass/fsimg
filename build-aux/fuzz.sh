@@ -51,11 +51,17 @@ fuzz_library=$build_dir/.libs/libfsimg.a
 # The library links the system zlib, which the instrumented build's
 # configure found; its Makefile names the link flags.
 zlib_libs=$(sed -n 's/^ZLIB_LIBS = //p' "$build_dir/Makefile")
+
+# Use the same configured host API declarations as the instrumented library.
+# Every harness enters here, including those using only public fsimg APIs.
+compile_fuzzer() {
+    "$fuzz_cc" -include "$build_dir/config.h" "$@"
+}
 if ! nm "$fuzz_library" | grep -q __sanitizer_cov_; then
     echo 'FAIL: fuzz library lacks sanitizer coverage instrumentation' >&2
     exit 1
 fi
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     "$source_dir/fuzz/fat.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-fat"
@@ -97,7 +103,7 @@ run_fuzzer "$work_dir/fuzz-fat" "$exfat_corpus" 3145728 10
 # QNX6 locates its second header from the slice length, so its harness
 # reads exactly the input and forces the decoder. It reseals header CRCs
 # with the driver's own codec, so it sees the driver's private header.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/meta" -I"$source_dir/lib/io" \
@@ -114,7 +120,7 @@ run_fuzzer "$work_dir/fuzz-qnx6" "$qnx6_corpus" 1048576 10
 # QNX4 derives its block count from the slice length, so its harness also
 # reads exactly the input and forces the decoder. The seeds are generated
 # volumes of the reader's acceptance fixtures.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     "$source_dir/fuzz/qnx4.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-qnx4"
@@ -131,7 +137,7 @@ run_fuzzer "$work_dir/fuzz-qnx4" "$qnx4_corpus" 1048576 10
 # ImageFS reads the exact slice with the decoder forced; the seed is a
 # generated image with every record kind, implicit parents and names
 # outside the profile.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     "$source_dir/fuzz/ifs.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-ifs"
@@ -145,7 +151,7 @@ run_fuzzer "$work_dir/fuzz-ifs" "$ifs_corpus" 1048576 10
 # The stream decoders parse every compressed byte of an untrusted boot
 # image. The harness decodes each LZO1X stream whole and in pieces and
 # requires the same result; the seeds are the unit tests' worked streams.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/codec" \
@@ -172,7 +178,7 @@ for chunk in "${FSIMG_CODEC_FUZZ_CHUNKS:-/nonexistent}"/*.in; do
 done
 run_fuzzer "$work_dir/fuzz-codec" "$codec_corpus" 65540 10
 
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/layers" -I"$source_dir/cmd/fsimg" \
@@ -189,7 +195,7 @@ run_fuzzer "$work_dir/fuzz-protocol" "$protocol_corpus" 65536 5
 # step, partition enumeration, selection and layer verification under
 # several forced stacks. The seeds are the GPT and MBR disks of the layer
 # tests.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     "$source_dir/fuzz/image.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-image"
@@ -210,7 +216,7 @@ run_fuzzer "$work_dir/fuzz-image" "$image_corpus" 1048576 10
 # cache, and the hbcifs header and its LZO1X stream. The seeds are the
 # container tests' images, a QNX boot image of each compression value and
 # the hbcifs tests' image.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     "$source_dir/fuzz/container.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-container"
@@ -234,7 +240,7 @@ run_fuzzer "$work_dir/fuzz-container" "$container_corpus" 1048576 10
 # The plist harness drives the bounded XML parser directly with a visitor
 # that checks element pairing, nesting and text bounds. The seed is the
 # plist of the container tests' DMG.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/layers" \
@@ -250,7 +256,7 @@ run_fuzzer "$work_dir/fuzz-plist" "$plist_corpus" 65536 5
 # spool under a small limit, driving the member header parser (FEXTRA,
 # FNAME, FCOMMENT, the header CRC16), inflate, the trailer checks and the
 # trailing-byte rule. The seed is the compression tests' two-member file.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     "$source_dir/fuzz/gzip.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-gzip"
@@ -266,7 +272,7 @@ run_fuzzer "$work_dir/fuzz-gzip" "$gzip_corpus" 262144 10
 # imports it through fsimg_writer_add_manifest() and serves its generated
 # sources. The seeds are mtree -c and bsdtar manifests of one tree and a
 # generated-content manifest, from the parser's unit test.
-"$fuzz_cc" -std=c11 -O1 -g -fno-omit-frame-pointer \
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/source" \
