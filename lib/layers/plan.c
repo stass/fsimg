@@ -177,11 +177,11 @@ resolve_container(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 /*
  * Borrow the request's file settings, whose layers the options check has
  * already found in the stack, each refused naming its key unless its
- * object is of the plan's context, and record each host file's identity and the object's length before anything
- * reads it, so that after the copy fsimg_disk_plan_inputs_unchanged can
- * tell whether it changed. A file whose length moved since its object was
- * made is refused as changed here, since the object would read only the
- * bytes its old length covers.
+ * object is of the plan's context, and record each host file's identity
+ * and the object's length before anything reads it, so that after the
+ * copy fsimg_disk_plan_inputs_unchanged can tell whether it changed. A
+ * file whose length moved since its object was made is refused as changed
+ * here, since the object would read only the bytes its old length covers.
  */
 static fsimg_status_t
 record_inputs(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,

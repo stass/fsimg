@@ -150,7 +150,9 @@ fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
  * file settings and the compression.
  * Every other field must hold its default, as a setting a format does not
  * store must, so none is silently ignored: the catalogue's filesystem
- * settings, and each ordinary volume field compared by value. selected is
+ * settings, and each ordinary volume field compared by value. Every
+ * member of the record is one of these or a mode field; test/settings.c
+ * keeps that list complete. selected is
  * the defaults with the caller's flags, epoch and compression, which the
  * disk plan resolves, and layers and inputs copies of the caller's
  * records, so selected carries no pointer to either.

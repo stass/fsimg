@@ -825,8 +825,13 @@ test_setting_values(void)
 	char *read_only[] = { "fsimg", "-cn", "-F", "ifs/hbcifs", "-o",
 	    "hbcifs:anything=garbage", ".", NULL };
 	char *oem[] = { "fsimg", "-i", "-f", "image", "-o", "oem=cp437", NULL };
-	char *virtual_no[] = { "fsimg", "-cn", "-F", "ifs/ifsboot", "-o",
-	    "ifsboot:virtual=no", "-o", "mbr:id=0x0", ".", NULL };
+	/* Explicit keys need their layer and mode even at the API default. */
+	char *absent_default[] = { "fsimg", "-cn", "-F", "fat32", "-o",
+	    "simg:crc=no", ".", NULL };
+	char *read_default[] = { "fsimg", "-i", "-f", "image", "-o",
+	    "reserve=3", NULL };
+	char *forced_default[] = { "fsimg", "-cn", "-F", "fat32/dmg", "-o",
+	    "dmg:compress=zlib", "-o", "gpt:type=", ".", NULL };
 	char *virtual_only[] = { "fsimg", "-cn", "-F", "ifs/ifsboot", "-o",
 	    "ifsboot:virtual=no", ".", NULL };
 	const fsimg_setting_t *mountpoint;
@@ -860,7 +865,9 @@ test_setting_values(void)
 	CHECK(options.request.layers.ifsboot_virtual_set &&
 	    !options.request.layers.ifsboot_virtual);
 	fsimg_cli_release(&options);
-	check_syntax(virtual_no);
+	check_syntax(absent_default);
+	check_syntax(read_default);
+	check_syntax(forced_default);
 	/* The command's mountpoint capacity is the job record's field. */
 	mountpoint = fsimg_setting_find(&fsimg_filesystem_settings,
 	    "mountpoint", strlen("mountpoint"));

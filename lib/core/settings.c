@@ -11,17 +11,32 @@
 #include "settings.h"
 
 /*
- * Row construction. Each binding macro names a record type and a member
- * once and yields the row's record, kind, offset and size. The size term
- * also compiles a comparison between a pointer of the kind's C type and
+ * Row construction. Each binding macro names a record and a member once
+ * and yields the row's record, kind, offset and size, so a row's kind is
+ * chosen by the macro and cannot disagree with its C type. The size term
+ * also compiles a comparison between a pointer to the kind's C type and
  * the member's address, which is a constraint violation, so a build error,
- * when the member has another type; sizeof keeps it unevaluated.
+ * when the member has another type; sizeof keeps it unevaluated. A text
+ * member is compared as a char array of its own size, which refuses a
+ * pointer member.
+ *
+ * RECORD_WRITE and its siblings expand to two macro arguments, the record
+ * type and its fsimg_setting_record_t value; BIND() and TEXT() take
+ * __VA_ARGS__ so that expansion happens before BIND_() and TEXT_() split
+ * their arguments.
  */
 #define MEMBER(type, member)	(((type *)NULL)->member)
 #define TYPED_SIZE(type, member, ctype)	(sizeof(MEMBER(type, member)) +	\
 	0 * sizeof((ctype *)NULL == &MEMBER(type, member)))
 #define TEXT_SIZE(type, member)	(sizeof(MEMBER(type, member)) +	\
-	0 * sizeof((char *)NULL == MEMBER(type, member)))
+	0 * sizeof((char (*)[sizeof(MEMBER(type, member))])NULL ==	\
+	&MEMBER(type, member)))
+
+/*
+ * Bool members are read as their one byte, so a caller's byte other than
+ * 0 or 1, which is not a bool, is seen and refused rather than loaded.
+ */
+_Static_assert(sizeof(bool) == 1, "a bool member is one byte");
 
 /* The C type of a 16-byte identifier member, for its binding's check. */
 typedef unsigned char id16_t[16];
@@ -47,8 +62,13 @@ typedef unsigned char id16_t[16];
 	FSIMG_NO_PRESENCE)
 #define TEXT_POINTER(rec, member)	BIND(rec, member,		\
 	FSIMG_KIND_TEXT_POINTER, const char *, FSIMG_NO_PRESENCE)
-#define ENUM(rec, member, kind_id, ctype)	BIND(rec, member, kind_id,	\
-	ctype, FSIMG_NO_PRESENCE)
+#define BYTE_ORDER(rec, member)	BIND(rec, member, FSIMG_KIND_BYTE_ORDER,	\
+	fsimg_byte_order_t, FSIMG_NO_PRESENCE)
+#define DMG_COMPRESSION(rec, member)	BIND(rec, member,		\
+	FSIMG_KIND_DMG_COMPRESSION, fsimg_dmg_compression_t, FSIMG_NO_PRESENCE)
+#define IFSBOOT_COMPRESSION(rec, member)	BIND(rec, member,	\
+	FSIMG_KIND_IFSBOOT_COMPRESSION, fsimg_ifsboot_compression_t,	\
+	FSIMG_NO_PRESENCE)
 #define TEXT_(type, record_id, member)	.record = (record_id),		\
 	.kind = FSIMG_KIND_TEXT, .offset = offsetof(type, member),	\
 	.size = TEXT_SIZE(type, member), .presence = FSIMG_NO_PRESENCE
@@ -103,8 +123,7 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .scope = FSIMG_SCOPE_WRITE },
 	{ .key = "oem", NO_STORAGE, .syntax = FSIMG_SYNTAX_CHOICE,
 	    .choices = oem_choices, .scope = FSIMG_SCOPE_READ },
-	{ .key = "endian", ENUM(RECORD_WRITE, byte_order, FSIMG_KIND_BYTE_ORDER,
-	    fsimg_byte_order_t), .syntax = FSIMG_SYNTAX_CHOICE,
+	{ .key = "endian", BYTE_ORDER(RECORD_WRITE, byte_order), .syntax = FSIMG_SYNTAX_CHOICE,
 	    .choices = endian_choices,
 	    .initial = { .byte_order = FSIMG_BYTE_ORDER_LITTLE },
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_BYTE_ORDER },
@@ -168,8 +187,8 @@ static const fsimg_setting_t mbr_rows[] = {
 };
 
 static const fsimg_setting_t dmg_rows[] = {
-	{ .owner = "dmg", .key = "compress", ENUM(RECORD_LAYERS, dmg_compress,
-	    FSIMG_KIND_DMG_COMPRESSION, fsimg_dmg_compression_t),
+	{ .owner = "dmg", .key = "compress", DMG_COMPRESSION(RECORD_LAYERS,
+	    dmg_compress),
 	    .syntax = FSIMG_SYNTAX_CHOICE, .choices = dmg_choices,
 	    .initial = { .dmg_compression = FSIMG_DMG_ZLIB },
 	    .scope = FSIMG_SCOPE_WRITE },
@@ -235,9 +254,8 @@ static const fsimg_setting_t ifsboot_rows[] = {
 	{ .owner = "ifsboot", .key = "imagefs_paddr",
 	    U32_SET(ifsboot_imagefs_paddr, ifsboot_imagefs_paddr_set),
 	    .syntax = FSIMG_SYNTAX_HEX32, .scope = FSIMG_SCOPE_WRITE },
-	{ .owner = "ifsboot", .key = "compress", ENUM(RECORD_LAYERS,
-	    ifsboot_compress, FSIMG_KIND_IFSBOOT_COMPRESSION,
-	    fsimg_ifsboot_compression_t),
+	{ .owner = "ifsboot", .key = "compress", IFSBOOT_COMPRESSION(
+	    RECORD_LAYERS, ifsboot_compress),
 	    .syntax = FSIMG_SYNTAX_CHOICE, .choices = ifsboot_choices,
 	    .initial = { .ifsboot_compression = FSIMG_IFSBOOT_LZO },
 	    .scope = FSIMG_SCOPE_WRITE }
@@ -269,6 +287,7 @@ static void store_member(const fsimg_setting_t *, unsigned char *,
 static bool values_equal(const fsimg_setting_t *,
     const fsimg_setting_value_t *, const fsimg_setting_value_t *);
 static bool presence_flag(const fsimg_setting_t *, const unsigned char *);
+static bool bool_byte(const unsigned char *);
 static fsimg_status_t row_error(const fsimg_setting_t *, fsimg_operation_t,
     fsimg_error_t *, const char *);
 static fsimg_status_t check_row(const fsimg_setting_t *,
@@ -390,7 +409,7 @@ load_member(const fsimg_setting_t *row, const unsigned char *member,
 		bcopy(member, &value->u64, sizeof(value->u64));
 		break;
 	case FSIMG_KIND_BOOL:
-		bcopy(member, &value->flag, sizeof(value->flag));
+		value->flag = bool_byte(member);
 		break;
 	case FSIMG_KIND_BYTE_ORDER:
 		bcopy(member, &value->byte_order, sizeof(value->byte_order));
@@ -507,13 +526,17 @@ values_equal(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 	return (false);
 }
 
+/* A bool byte as a truth value: any nonzero byte is true. */
+static bool
+bool_byte(const unsigned char *member)
+{
+	return (member[0] != 0);
+}
+
 static bool
 presence_flag(const fsimg_setting_t *row, const unsigned char *record)
 {
-	bool present;
-
-	bcopy(record + row->presence, &present, sizeof(present));
-	return (present);
+	return (bool_byte(record + row->presence));
 }
 
 void
@@ -598,6 +621,10 @@ check_row(const fsimg_setting_t *row, const fsimg_setting_records_t *records,
 	    memchr(record + row->offset, '\0', row->size) == NULL)
 		return (row_error(row, operation, error,
 		    "setting text is not terminated"));
+	if ((row->kind == FSIMG_KIND_BOOL && record[row->offset] > 1) ||
+	    (row->presence != FSIMG_NO_PRESENCE && record[row->presence] > 1))
+		return (row_error(row, operation, error,
+		    "setting flag is neither false nor true"));
 	load_member(row, record + row->offset, &value);
 	/* An enum holds one of its named values. */
 	if (row->syntax == FSIMG_SYNTAX_CHOICE && row->kind != FSIMG_KIND_NONE &&
@@ -628,6 +655,8 @@ fsimg_settings_init(const fsimg_setting_slice_t *slice,
 		if (row->record != record)
 			continue;
 		base = target_of(row, targets);
+		if (base == NULL)
+			continue;
 		store_member(row, base + row->offset, &row->initial);
 		if (row->presence != FSIMG_NO_PRESENCE) {
 			absent = false;
