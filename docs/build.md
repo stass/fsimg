@@ -319,6 +319,43 @@ DATA ranges, an initialized length ending inside DATA, a planned length below
 the catalog's, a region outside the volume, and sink and source failures in
 mid-copy, checked against an independently mapped expected image.
 
+`test-driver-contracts` and `test-layer-contracts` are the
+[common contract suites](../specs/design-driver-contract-tests.md). Each first
+reconciles its test profiles with the registry in both directions: every
+advertised filesystem variant or layer has exactly one coverage profile whose
+declared capabilities, kind and carried filesystem equal the advertised ones,
+and every profile names a registered entry. The registry then schedules the
+scenario families each profile owes, and the profiles' handwritten facts
+supply the expected answers. Filesystem profiles (FAT12, FAT16, FAT32, exFAT,
+QNX6 in both byte orders, QNX4, ImageFS) cover writer lifecycle, source
+consistency, defined output on clean, poisoned, zero-range-less and
+short-transfer sinks, reproducibility across contexts, cache budgets and the
+published-file sink, sink failures and preflight refusals, cancellation,
+entry/work/output/scratch limits and aggregate memory accounting, and
+per-format metadata cases. Readers get lifecycle, a canaried bounded volume,
+content delivery, transport faults, cancellation, limits, verification counts
+and extraction. Allocation and scratch-operation faults are swept over every
+position each phase reaches. A sweep proves its fault fired, and its first
+unreached position is the final successful run. Layer profiles cover each mode's
+wrap reproducibility, decoded bytes, family report, transport faults, sink
+failures and allocation sweeps, and spooled layers (gzip, hbcifs) a spool
+budget refusal. Seams cover a scheme inside a container, gzip
+around a container, exact-volume refusals, a final transcode failure and the
+carried-filesystem rule. Both programs print their case counts, and conditional
+cases they skip are counted as not applicable (`CONTRACT_VERBOSE=1` lists
+them). A failure names its profile, scenario, phase and fault position, and a
+replay selector:
+
+```sh
+./test-driver-contracts exfat/writer-scratch
+./test-driver-contracts 'qnx6-be/*'
+./test-layer-contracts dmg-zlib/write
+```
+
+Reader fixtures are written by the common writer, so they are round-trip
+integration evidence. Independent format evidence remains with the
+format-local tests, the specification harness and the integration scripts.
+
 `test-zlib-memory` covers the shared zlib allocator in
 `lib/layers/zlib-memory.c`. It checks charged deltas and zero-byte requests,
 a budget refusal keeping its exact limit diagnostic, a sticky first error
