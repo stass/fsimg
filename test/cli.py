@@ -2026,10 +2026,12 @@ def test_mtree_failures(executable, root):
     read, before anything is written."""
     work = root / "mtree-failures"
     work.mkdir()
-    name = "n" * 120
+    # Long names exceed the manifest's 64 KiB output buffer with fewer
+    # files to create and sync under sanitizers.
+    name = "n" * 240
     (work / "many.mtree").write_text("".join(
         f"./{name}{index:03} type=file fsimg.content=seeded fsimg.seed={index} size=1\n"
-        for index in range(400)))
+        for index in range(193)))
     invoke(executable, work, ["cf", "many.img", "-F", "qnx6", "-R", "@many.mtree"])
 
     def limit_file_size():

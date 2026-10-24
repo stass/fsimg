@@ -294,8 +294,8 @@ fsimg_status_t fsimg_writer_collect(fsimg_writer_t *, const fsimg_entry_t *,
 void fsimg_catalog_discard(fsimg_writer_t *);
 fsimg_status_t fsimg_catalog_prepare(fsimg_writer_t *,
     const fsimg_sort_options_t *, fsimg_error_t *);
-/* The writer's one metadata-loss policy, for the fields of entry in mask
- * that planning cannot preserve: the common capability check's omissions
+/* The writer's one metadata-loss policy, for entry's metadata fields named
+ * by fields that planning cannot preserve: the common check's omissions
  * and a driver's inexact encodings alike. Each field is a valid one of the
  * entry's, submitted once per planning attempt. A required field, or any
  * field when the caller clears FSIMG_WRITE_ALLOW_LOSS, refuses with

@@ -639,8 +639,9 @@ plan_disk(fsimg_writer_t *writer, fsimg_error_t *error)
  * the policy for a field a format does not store is the same for every
  * format. An entry kind the format lacks or a symbolic-link target longer
  * than its limit always fails; neither is a metadata loss. A field the
- * format omits goes to fsimg_writer_loss(), one mask per entry; drivers see
- * only the fields the format stores, so no field is submitted twice.
+ * format omits goes to fsimg_writer_loss(), one mask per entry; drivers
+ * encode and report losses only for fields the format stores, so no field
+ * is submitted twice. The catalog retains the original metadata.
  *
  * The catalog's unions of kinds, valid fields and required fields, and its
  * longest link target, decide the outcome before any entry is read again,
@@ -728,6 +729,8 @@ fsimg_status_t
 fsimg_writer_loss(fsimg_writer_t *writer, const fsimg_entry_t *entry,
     uint32_t fields, const char *message, fsimg_error_t *error)
 {
+	uint64_t count;
+
 	if (fields == 0)
 		return (FSIMG_OK);
 	if ((fields & ~(entry->metadata.valid & FSIMG_META_KNOWN)) != 0)
@@ -739,8 +742,8 @@ fsimg_writer_loss(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 		fsimg_error_path(error, entry->path);
 		return (FSIMG_EUNSUPPORTED);
 	}
-	fsimg_stat_add(&writer->metadata_losses,
-	    fsimg_report_loss(writer->ctx, entry->path, fields));
+	count = fsimg_report_loss(writer->ctx, entry->path, fields);
+	fsimg_stat_add(&writer->metadata_losses, count);
 	return (FSIMG_OK);
 }
 
