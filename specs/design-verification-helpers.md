@@ -521,15 +521,14 @@ ASCII source, explicit `_t` types, and `bcopy(src, dst, n)` argument order.
 
 ## Generated verification
 
-The [generated-verification design](design-generated-verification.md) specifies
-the Relic backend, complete input domains, concrete inode-reference lowering,
-and the shared [generation artifacts](design-relic-generation.md). The helpers
-here remain the owners of their bounded runtime mechanisms.
+The [verification-policy design](design-generated-verification.md) derives
+static policy rows through ordinary Relic queries and renders local C
+predicates under the shared [result-generation contract](design-relic-generation.md).
+It does not generate traversal, content reading, ownership collection or
+reference-reconciliation algorithms. Native verifiers retain their existing
+helper calls, reader session, metadata stores, accounting and cleanup.
 
-A generated verifier uses these same operations when its rules lower to initialized
-content reading or strict exclusive runs. It borrows the existing reader session
-and uses the same metadata stores, resource accounting and failure lifecycle.
-Generation does not introduce a parallel ownership database or a resident tuple
-fallback. Rules needing owner-aware sharing remain outside this utility; their
-execution strategy must preserve the format's scope and bounds. This contract
-provides no Relic runtime, generator, rule language, or new dependency.
+These helpers require no generator or Relic runtime. A generated policy receives
+native values at an existing check site and cannot add a relation database,
+resident fallback or sharing model. Its adoption must reduce repeated policy
+maintenance without moving the same runtime obligations into renderer templates.

@@ -3,8 +3,9 @@
 fsimg should let a maintainer learn its common contracts once and concentrate
 on format rules when adding a filesystem or container. The strongest remaining
 opportunities are one description of settings, container-owned plans,
-reusable verification operations, and common driver contract tests. Relic offers a complementary route: describe relational rules
-once and generate tables, predicates, or bounded verification operations in C.
+reusable verification operations, and common driver contract tests. Relic offers
+a complementary route: derive static generation records through ordinary
+queries and render tables or local predicates with small AWK templates.
 
 This analysis covers FAT12/16/32, exFAT, QNX4, QNX6, ImageFS, partition schemes,
 containers, and compression. It distinguishes existing foundations from proposed
@@ -77,8 +78,8 @@ measurement or a claim that implementation is complete.
 | [Verification helpers and ownership runs](../specs/design-verification-helpers.md) | Incremental | High for payload reads; narrower for ownership | Repeating bounded read, sort, cursor, and cleanup mechanics |
 | [Scalar codecs and zlib allocation](../specs/design-binary-primitives.md) | Small independent changes | High | Repeating primitive byte conversion and allocation adapters |
 | [Scheme-owned planning details](../specs/design-scheme-planning.md) | With another scheme | Conditional | Teaching common planning every scheme's settings and identity rules |
-| [Relic table and predicate generation](../specs/design-relic-generation.md) | Focused experiment | High feasibility; benefit to establish | Repeating derived compatibility and validation logic |
-| [Relic generation of whole-image verification](../specs/design-generated-verification.md) | After the predicate experiment | Promising; backend work required | Handwriting relational reconciliation algorithms |
+| [Relic table and template generation](../specs/design-relic-generation.md) | Focused experiment | Existing CLI suffices; benefit to establish | Repeating derived compatibility and local policy definitions |
+| [Verification policy generation](../specs/design-generated-verification.md) | Conditional on broader policy reuse | Feasible for predicates, not whole algorithms | Repeating static policy choices; native reconciliation remains |
 
 ## Simplifications in C
 
@@ -179,8 +180,8 @@ remain format-specific.
 **Complexity balance:** one run representation and cursor can replace duplicate
 mechanics. Do not introduce a general interval database or a universal verifier.
 The existing scoped-interval item in [TODO.md](../TODO.md) tracks the smallest
-extraction. Relic-generated reconciliation is a larger alternative discussed
-below; it should reuse these operations rather than create a competing store.
+extraction. Result-derived verification policies can be consumed by the same
+native verifiers; they do not replace reconciliation or create another store.
 
 ### Common driver contract tests
 
@@ -255,224 +256,144 @@ even when their interfaces are small.
 
 ## Declarative rules and Relic
 
-The [generation design](../specs/design-relic-generation.md) defines static
-tables and local predicates, the typed binding boundary, and release artifacts.
-The [generated-verification design](../specs/design-generated-verification.md)
-uses that same contract for bounded relational execution and inode reconciliation.
+The [generation design](../specs/design-relic-generation.md) uses Relic's
+ordinary query results as input to small AWK renderers. The
+[verification-policy design](../specs/design-generated-verification.md) applies
+the same pattern to a second family of local checks. Both use the existing
+engine; neither requires a new Relic compiler backend.
 
-Relic is the intended Datalog tool for this work. Use its language and semantic
-analysis as the foundation for experiments. A separate fsimg rule language would
-add another parser and another definition of negation, aggregation, and errors.
+### Generate descriptions rather than compile rule programs
 
-### Where rules help
-
-| Subject | Useful generated result | Boundary to preserve |
-| --- | --- | --- |
-| Profile and feature compatibility | C tables or predicates for supported combinations | Native qualification determines which combinations are facts. |
-| Settings and metadata policy | Applicability and loss predicates | Typed public options, CLI syntax, diagnostics, and transport remain explicit. |
-| Record-local validation | Functions over decoded records and profile values | Checked decoding and bounds precede access; undefined input is distinct from false. |
-| Inode references and link counts | Grouped references merged with inode records | Occurrence identity, implicit references, verification scope, and owner identity |
-| Allocation ownership | Ordered range checks and allocation reconciliation | Compact extents, permitted sharing, reserved regions, and complete inventories |
-| Geometry legality | Predicates over a bounded set of candidates | Checked arithmetic and the sizing design's search and tie-break policy |
-| Field layouts | Explicit record codecs, if repetition justifies generation | A field schema is more direct than Datalog for offsets and widths. |
-
-Relations are especially useful when several independently stated facts combine
-to determine a result. A small C table remains sufficient when it already
-expresses the complete relationship, as the boot-machine table does. Datalog
-becomes valuable when it removes repeated implications, joins, and reconciliation
-logic across profiles or formats.
-
-Payload copying, bounded I/O, source reopening, cleanup, extraction, and
-publication remain operational code. Their ordering, authority, and failure
-contracts should stay visible in C.
-
-### Relic capabilities and the generation boundary
-
-The inspected Relic checkout is `~/relic`. The supporting files are listed
-relative to that checkout so these references do not depend on one developer's
-absolute home path:
-
-| Relic evidence | Relevant contract |
-| --- | --- |
-| `README.md`, `specs/architecture.md` | C11 engine and library, BSD-2-Clause, direct evaluation, stratified negation and aggregates |
-| `lib/plan.h`, `specs/design-planning.md` | Explicit scan, lookup, membership, filter, assignment, aggregate, and emit operations |
-| `lib/exec.h` | Executor yields batches and leaves insertion to its caller; bounded execution quanta let evaluation observe interruption |
-| `lib/arith.c`, `specs/language.md` | Checked signed 64-bit arithmetic and defined evaluation errors |
-| `lib/relation.h`, `specs/design-storage.md` | Resident tuple arrays and indexes |
-| `include/relic.h`, `specs/design-memory.md`, `specs/design-api.md` | Memory accounting, its exclusions, context lifetimes, and interruption |
-
-The engine executes plans over its own relations. C source generation is an
-additional backend; the inspected checkout provides no such emitter. Its
-memory limit does not cover all allocations or peak growth, and there is no
-configured general step/time limit. Those are different contracts from fsimg's
-aggregate context budget and cumulative work limits.
-
-There are three distinct uses:
-
-1. **Evaluate static rules during generation.** Run Relic over profile facts and
-   render the resulting relations as C tables. The evaluator already provides
-   the logical computation; a small deterministic renderer supplies the output.
-2. **Specialize dynamic predicates.** Generate ordinary C functions taking
-   decoded record fields, options, and profile values. A restricted backend can
-   compile supported rule shapes without a runtime relation database.
-3. **Generate whole-image verification.** Lower relational rules to fsimg's
-   bounded streams, external sorts, grouping, and merge operations. This needs
-   a storage-aware backend as well as C emission.
+Relic evaluates trusted metadata during development. The query answers describe
+what a known C template should contain: a table entry, a numeric profile, or a
+local policy predicate. They do not contain the answer to checking a particular
+image. A renderer instantiates a finite family of templates from those records.
 
 ```mermaid
-flowchart TD
-    Rules[Relic rules and binding schema] --> Front[Parsing and semantic checks]
-    Front --> Normalize[Normalized rules and stratification]
-    Normalize --> Static[Evaluate static relations]
-    Static --> Tables[Generate C tables]
-    Normalize --> Local[Specialize local predicates]
-    Local --> Functions[Generate C functions]
-    Normalize --> Relational[Plan bounded relational operations]
-    Relational --> Verify[Generate C using fsimg metadata storage]
+flowchart LR
+    Facts[Profile metadata and rules] --> Relic[Ordinary Relic query]
+    Relic --> Rows[Validated result rows]
+    Rows --> AWK[Small family AWK renderer]
+    AWK --> C[Checked-in C tables and predicates]
+    C --> Native[Native fsimg operations]
 ```
 
-Relic's execution plan is a useful model for a backend, but its operations
-already contain pointers to runtime relations and physical index information.
-Establish a symbolic generation boundary around normalized rules and relation
-identities before committing to those objects. A C emitter that retains the
-same resident relation engine also retains its storage and dependency costs.
-
-Relic is a development dependency in this proposal. Generated code belongs to
-the normal fsimg build, whose runtime dependency policy remains libc, host APIs,
-and system zlib. Shipping generated C should not silently embed the entire
-Relic engine. Review the provenance and license of any generated support code
-as well as the generator itself.
-
-### Example of inode reconciliation
-
-`verify_inodes()` in [QNX6 verification](../lib/formats/qnx6/verify.c) manually
-merges sorted references with a sequential inode scan. Its checks include a
-referenced inode being allocated, an allocated inode having references, link
-counts agreeing, and the free-inode count matching the header.
-
-A fragment in Relic syntax expresses the first two relations:
+For example, profiles name their timestamp encodings, and encodings name their
+bounds. A join derives each profile's table row:
 
 ```prolog
-referenced(S, I) :- reference(S, _, I).
+profile_time(qnx4, seconds31, utc).
+profile_time(qnx6, seconds32, utc).
+encoding_bounds(seconds31, zero, i32_max).
+encoding_bounds(seconds32, zero, u32_max).
 
-named_free_inode(S, I) :-
-    inode(S, I), referenced(S, I), not allocated_inode(S, I).
-
-unreferenced_inode(S, I) :-
-    inode(S, I), allocated_inode(S, I), not referenced(S, I).
+timestamp_output(table, P, unsigned_seconds, Lo, Hi, B) :-
+    profile_time(P, E, B), encoding_bounds(E, Lo, Hi).
 ```
 
-`S` is the verification domain, such as the selected snapshot. Each
-`reference(S, Occurrence, I)` fact has a distinct occurrence identity, which a
-link-count aggregate retains even though the `referenced` projection drops it.
-The driver supplies the appropriate root, dot, and other implicit references.
-The fragment assumes the format requires every allocated inode in that domain
-to have a reference; another format can define a narrower inventory.
-`inode` enumerates the table's validated key domain. Completeness is a producer
-contract, not a rule fact a caller can set: references are sealed after their
-complete walk, and a successful ordered inode decode closes that key's
-allocation facts. Later rows cannot change those facts. An unread or failed
-row never becomes an absent allocation.
+An ordinary sorted TSV query returns rows such as
+`table qnx4 unsigned_seconds zero i32_max utc` (spaces shown for tabs). The
+renderer maps `i32_max` to a literal C constant; it does not convert it through
+AWK's floating-point arithmetic. A related row selects a known whole-second
+fidelity template. The emitted function accepts runtime C timestamps, including
+full-width signed values, and the existing writer still selects fallback bytes
+and applies loss policy.
 
-A backend can implement the rules with an external sort of references by inode,
-grouped counting, and a merge against inode records. It need not retain all
-facts in memory or materialize every intermediate relation. For the QNX6
-binding, grouping and inode checks are interleaved per key, retaining the native
-lookahead and failure order. Producing that
-plan is a substantive compiler feature, not an automatic consequence of writing
-the rules or emitting C.
+A concrete schema belongs to its family. Timestamp and verification rows need
+not be forced into a generic instruction format with anonymous parameters.
+Known keys map to fixed C names; known template arguments map to fixed code.
+Unknown tokens, duplicate/conflicting definitions, missing required rows and
+failed queries stop generation. There is no arbitrary expression parser,
+interpreter, optimizer or host command in the renderer.
 
-### Allocation rules and compact representations
+### What works for each design
 
-Ownership rules can state that claimed storage is allocated, allocations
-without owners need a permitted explanation, overlaps need a permitted sharing
-relationship, and reserved regions admit only particular roles.
+| Subject | Result-driven generation can do | Responsibility retained in C |
+| --- | --- | --- |
+| Static compatibility tables | Derive entries from shared facts and relations | Consume the typed table and enforce application semantics |
+| Local validation | Select and parameterize a known predicate template | Decode inputs, own types and bounds, choose existing errors and loss behavior |
+| Verification policy | Derive which finite check applies to each object class | Collect occurrences, sort, group, merge, preserve failure order and manage resources |
+| General whole-image verification | No arbitrary algorithm synthesis through this mechanism | Explicit bounded algorithms remain native; a broader compiler needs a separate justification |
 
-Keep claims as intervals with domain and owner identity. Expanding a large
-sparse image to one fact per block merely to satisfy a rule engine defeats the
-storage design. A driver may still scan a bitmap when verification requires it;
-that does not require retaining each scanned bit as a fact.
+The first design is practical for small generated tables and template-based
+predicates with the existing Relic CLI. The second works for policy selection,
+but it does not remove the native reference-reconciliation algorithm. Its
+potential benefit is smaller than a whole-verifier generator's and its cost
+must be assessed accordingly.
 
-An all-pairs overlap rule can have quadratic output. If the required result is
-one deterministic corruption witness, a backend can choose an ordered scan when
-the rule semantics permit it. Arbitrary sharing policies may need more state;
-only support them when their execution strategy and bounds are explicit.
-Returning the same logical answer alone does not establish acceptable resource
-behavior.
+### Verification example and its actual boundary
 
-### Requirements for generated validators
+QNX6 compares a referenced allocated inode's name count with its stored link
+count. QNX4's table records use that comparison for non-directories; directory
+link counts follow `2 + subdirectories`, checked during directory preparation.
+Static metadata can derive `all_used` versus `nondirectory` as the equality
+scope. The renderer uses that scope to select one condition in a fixed C
+predicate. Its key identifies a C function, not a second hardcoded policy map.
+Independent expectations catch a syntactically valid but incorrect scope.
 
-The production subset should begin with nonrecursive rules, stratified
-negation, and a small set of aggregates whose execution plans are understood.
-Reject unsupported shapes during generation. Supporting every Relic program is
-not a prerequisite for useful generated validators.
+The native driver calls that predicate only after its existing record decode
+and reference count succeed. It retains these operations:
 
-* **Typed bindings and numeric ranges.** Relic deliberately has untyped columns
-  and signed 64-bit integers; fsimg has unsigned 64-bit offsets and lengths.
-  Define each input column's C representation and validate conversions. A pilot
-  can use values proven at most `INT64_MAX`; broader arithmetic needs a defined
-  unsigned mapping or a Relic extension. A binding schema need not change the
-  general language's type system.
-* **Safe fact extraction.** Decode framing and bounds before producing a fact
-  that depends on them. Missing, malformed, and unexamined fields must not all
-  become an absent tuple. An evaluation error remains an error, including an
-  overflow; dropping a failed binding can make a negated rule accept bad data.
-* **Complete domains for negation.** Stratification completes derived relations
-  over the supplied facts; it cannot prove that a lazy scanner supplied every
-  image fact. A sealed complete stream or a proved per-key closure in an ordered
-  unique native source authorizes the corresponding absence check; an unkeyed
-  negative needs its complete dependency. Selected traversal cannot infer
-  whole-volume unreferenced objects.
-* **Set semantics and occurrences.** Preserve identities for distinct directory
-  slots, names, and allocation claims. Set deduplication must not erase the
-  multiplicity needed to detect duplicate claims or check link counts.
-* **Resource ownership.** Every generated dynamic operation uses the existing
-  fsimg session, context, cancellation, and scratch contracts. Plans must make
-  intermediate storage and passes inspectable. No hidden resident fallback,
-  duplicate full catalog, or uncharged auxiliary cache is acceptable.
-* **Deterministic diagnostics.** Specify status, scope, attribution, and
-  precedence when several violations apply. Rule scheduling, join ordering,
-  and thread count must not choose a different public failure by accident.
-  Diagnostic witnesses and provenance storage remain bounded.
-* **Readable artifacts.** Emit named operations, rule identifiers, and source
-  locations. Keep generated output deterministic and check regeneration in CI.
-  Generated C remains ASCII-only and reviewable under the project style guide.
-* **Independent evidence.** Comparing Relic evaluation with generated C tests
-  the lowering. Independently authored fixtures, malformed inputs, and external
-  implementations test the rules and decoders. Neither comparison replaces the
-  other.
+* Reference occurrences retain multiplicity, including the appropriate dot
+  references and omitted entries. No set of target IDs replaces them.
+* QNX6 consumes a reference group and its lookahead before reading a new inode
+  window. QNX4 reads the table window before consuming that slot's group.
+* Successful source traversal seals the reference stream; the merge determines
+  each count and handles empty groups, free records and trailing references.
+* Allocation ownership, checksums, source stability, error mapping and final
+  verification completion remain at their established owners.
 
-These requirements make the generation backend an explicit part of the
-security boundary. A rule that needs an unsupported storage strategy should
-fail generation rather than quietly select a resource-intensive algorithm.
+The rule engine never sees runtime image facts, offsets or counters. Native
+`uint64_t` arithmetic and bounded storage therefore retain their existing
+contracts without teaching AWK large-number arithmetic or asking Relic to
+execute an external-memory query plan.
 
-### Relic experiments and acceptance criteria
+These short QNX predicates alone are not a sufficient reason to add rules,
+renderers and generated artifacts. Keep them handwritten unless several
+consumers or a larger policy family make derived metadata worth maintaining.
+The design is a viable limited pattern, not a requirement to generate every
+format check.
 
-Use Relic's existing evaluator as a reference while developing the backend.
-Keep fixture facts small enough for that evaluator and exercise production
-scale separately through generated C.
+### Tool and output contracts
 
-1. Derive static compatibility tables to establish deterministic generation,
-   traceability, and ordinary builds that need no generator.
-2. Select a record-local validation family with meaningful QNX4/QNX6 overlap.
-   Generate C predicates and compare them with Relic on valid, invalid, and
-   undefined-input cases. Use a second format to test the boundary, not merely
-   a second spelling of the first predicate.
-3. Express QNX6 inode reconciliation and generate its sort/group/merge path.
-   Compare outcomes with the existing verifier, including damaged references,
-   repeated names, omitted entries, link counts, and resource failures.
-4. Express the corresponding QNX4 checks. Accept broader adoption only if the
-   same small backend accommodates their different identities and implicit
-   references without scattering format-specific exceptions through it.
-5. Consider ownership intervals and bounded geometry constraints only after
-   the earlier experiments demonstrate a maintenance benefit.
+The pipeline uses Relic's documented CLI rather than private AST or plan data.
+One family query produces a fixed-column TSV schema with closed token domains.
+The script checks the query process status before running AWK; a shell pipeline
+must not hide producer failure behind the renderer's exit status. Rendering
+validates the complete result set before installing artifacts. Ordinary builds
+consume checked-in C and do not invoke the generator or link Relic.
 
-Count the rules, bindings, generator, support operations, generated artifacts,
-and tests when judging complexity. The success criterion is that a new driver
-states fewer rules and owns fewer mechanisms while preserving output and
-resource contracts. If annotations restate the original C control flow, a shared
-C operation is the simpler outcome. If C helpers and generation address the
-same operation, generated code should call the helper; avoid two owners.
+The sources, renderer, query, tool identity and generated outputs have
+reproducible provenance. No host path or clock value enters generated bytes.
+Known C constants are emitted as text; runtime values remain C values. The
+renderer cannot infer semantic truth from a row being well formed, so tests
+separate transport/template correctness from format correctness.
+
+Relic can be extended when a concrete generic need warrants it. A change belongs
+in Relic only if it is useful beyond fsimg, consistent with that project's
+small relational model, and supported by its own design and tests. Format names,
+private record layouts, C validation templates and fsimg storage contracts stay
+outside the engine. The current result-rendering workflow needs no extension;
+that is a baseline capability statement, not a prohibition on future evolution.
+
+### Evidence and adoption gate
+
+A useful proof runs the whole development pipeline: evaluate the actual rules,
+check the query rows, run the AWK renderer, compile the emitted C, and exercise
+independently specified runtime values. It also checks missing/conflicting rows,
+unknown tokens, a producer that prints a prefix and fails, and a schema-valid
+policy mutation that must fail the semantic oracle.
+
+A successful proof establishes a finite template family's feasibility. Native
+image integration additionally requires the existing contract suites, malformed
+images, resource/failure checks and independent implementations. Neither the
+query's own output nor the generated function is the expected-answer oracle.
+
+Count the rule facts, schemas, renderer cases, generated code, integration and
+tests together. Adopt a family only when it removes repeated policy ownership
+or derivation across the system. A direct table or shared C helper remains the
+better implementation when the generation workflow merely relocates a small,
+clear operation.
 
 ## Boundaries to preserve
 
@@ -503,7 +424,8 @@ lifetime corrections independently reviewable. Revisit scheme planning with a
 new scheme that can prove the abstraction useful.
 
 Evaluate Relic generation as a separate experiment using the sequence above.
-Its outcome can guide how much relational verification remains handwritten.
+Its outcome decides which derived tables and local policies justify generation;
+runtime verification algorithms remain handwritten in this design.
 Before implementing an adopted architectural change, update its owning design
 and the cross-subsystem contracts; major new components need the design and
 index links required by the working agreement.

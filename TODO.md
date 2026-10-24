@@ -2,15 +2,16 @@
 
 ## Major initiatives
 
-* [Medium] **Relic generation and bounded reference reconciliation**
-  (`tools/relic/`, format rule bindings, `lib/formats/`): implement and qualify
-  the [shared generation contract](specs/design-relic-generation.md) and
-  [whole-image target](specs/design-generated-verification.md) under the
-  [generation sequence](docs/implementation-plan.md#scheme-planning-and-relic-generation).
-  Relic needs a compatible restricted C backend; fsimg needs typed bindings,
-  deterministic checked-in artifacts and independent evidence. Prove the
-  maintenance benefit with static/local families and QNX6/QNX4 reference
-  checks before replacing native operations; no runtime Relic dependency.
+* [Medium] **Rule-derived tables and local policy templates**
+  (`tools/relic/`, profile metadata, `lib/formats/`): evaluate adoption of the
+  [ordinary-query generation pipeline](specs/design-relic-generation.md) and
+  [verification-policy family](specs/design-generated-verification.md) under
+  the [generation sequence](docs/implementation-plan.md#scheme-planning-and-relic-generation).
+  Use closed result schemas and small AWK renderers with the existing Relic
+  CLI. Demonstrate a maintenance benefit across consumers before replacing
+  clear native predicates; traversal, grouping, resource ownership and failure
+  order stay in C. A generic Relic extension is eligible only on its own merits,
+  not a prerequisite of this workflow; no runtime Relic dependency.
 
 * [Low] **Scheme-owned planning** (`lib/layers/`, `lib/write/writer.c`):
   implement the [scheme-planning design](specs/design-scheme-planning.md)

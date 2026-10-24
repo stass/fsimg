@@ -474,11 +474,13 @@ validators. Sharing stable public format names and fixture descriptions is
 useful, but sharing an expectation algorithm would remove independence.
 Harness rule coverage and common API-contract coverage are reported separately.
 
-The same independence rule applies to [Relic-generated code](design-relic-generation.md)
-and [generated verification](design-generated-verification.md). Evaluating its
-production rules through Relic tests translation, not format correctness.
-Common profile expectations and the independent format models do not derive
-their answers from those production rules or generated functions.
+The same independence rule applies to [result-driven C generation](design-relic-generation.md)
+and [verification policies](design-generated-verification.md). Query/renderer
+checks establish the metadata pipeline; independently specified runtime values
+and format fixtures establish semantic correctness. Relic does not evaluate
+image facts in this workflow. Common profile expectations and independent
+format models do not derive their answers from production rules or generated
+functions.
 
 ## Build integration and regression discipline
 

@@ -444,25 +444,28 @@ checks recorded alongside the build commands.
 ## Scheme planning and Relic generation
 
 The [analysis](architecture-analysis.md#priorities) separates scheme ownership
-from two generation targets. Scheme planning is independent of Relic. Generated
-verification depends on the common generation contract and the bounded metadata
-operations, and is adopted only after its complete maintenance and resource
-cost has been compared with native C.
+from result-driven C generation. Scheme planning is independent of Relic. The
+generation designs use ordinary query output and small AWK templates; no
+compiler backend or engine-private binding API is a prerequisite.
 
 | Stage | Design and work | Completion evidence |
 | --- | --- | --- |
 | Scheme planning | [Scheme operations](../specs/design-scheme-planning.md): move option, identity, partition metadata and report interpretation behind descriptors while keeping common placement | GPT/MBR bytes, error timing, fixed fit and reports match; a synthetic third writer exercises dispatch and constraints without a new common name branch or claim of a new read format |
-| Generation boundary | [Relic generation](../specs/design-relic-generation.md): implement the compatible restricted backend in Relic and the fsimg-owned typed bindings and development tool | Unsupported modules fail generation; source/artifact provenance and deterministic regeneration are checked; normal builds need no Relic runtime or generator |
-| Static and local families | Derive a finite compatibility table and a bounded record predicate through that same pipeline | Independent fixtures and evaluator comparisons establish different claims; a second format reuses the mechanism; rule/binding/backend costs justify replacing the native operation |
-| Whole-image reference checks | [Generated verification](../specs/design-generated-verification.md): lower QNX6 reference reconciliation, then QNX4's distinct rules, to bounded collection/sort/group/merge operations | Set and occurrence semantics, per-key closure, early failure order, scratch bytes, passes and resource accounting match the design; native ownership/checksum phases remain intact |
+| Result pipeline | [Relic results and C templates](../specs/design-relic-generation.md): define concrete metadata/query schemas, ordinary CLI invocation, family AWK renderers, staging and reproducible artifacts | Successful query rows render deterministic compilable C; failed queries and malformed, conflicting or incomplete rows leave artifacts uninstalled; normal builds need no generator |
+| Static and local families | Derive a shared profile table and select finite runtime predicate templates | Independent row, byte and semantic expectations pass; full-width runtime inputs remain native; the combined source/renderer/test maintenance cost justifies adoption |
+| Verification policy | [Static verification policies](../specs/design-generated-verification.md): evaluate QNX6/QNX4 record checks as a second family | Schema-valid wrong policy fails independent tests; driver grouping, window/lookahead order, counters, scratch bytes and cleanup remain native and unchanged; keep direct predicates if the family adds more mechanism than it removes |
 
-Relic's frontend and evaluator are available in `~/relic`; its C generation
-backend and the fsimg artifact workflow require implementation. The target
-designs do not assert that an existing evaluator plan can already produce
-standalone bounded C. Coordinate backend changes in the Relic repository under
-its own review requirements; keep fsimg's rule sources, bindings, generated
-outputs and provenance in one reviewed fsimg change. Do not expose an image
-feature or remove its native check on the strength of generation alone.
+Relic's existing CLI can evaluate the metadata programs. fsimg still needs the
+production result schemas, renderers and artifact workflow for any adopted
+family. A disposable pipeline demonstration establishes feasibility, not native
+image integration or an architectural payoff. Whole-image algorithm generation
+is outside this result-rendering design and is not scheduled by these stages.
+
+A proposed Relic extension names a concrete general need and is evaluated under
+Relic's own principles and review process. It is not an fsimg-specific compiler
+or an automatic prerequisite of generation. Keep rules, renderers and generated
+outputs together in reviewed fsimg changes, and preserve independent format
+qualification before replacing an existing check.
 
 ## Extension sequence
 
