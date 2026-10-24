@@ -390,8 +390,8 @@ partition type.
 ## Planning
 
 The plan object embeds `fsimg_plan_t`, the byte order, the mountpoint and
-`dir_offset`, `hdr_dir_size`, `image_size`, the fallback time, the loss
-count, and one paged array of rows keyed by catalog ID with row 0 for the
+`dir_offset`, `hdr_dir_size`, `image_size`, the fallback time, and one paged
+array of rows keyed by catalog ID with row 0 for the
 root. A row holds the kind, the stored path's length, the record's table
 offset and length, the data offset and length for a file, the target
 length for a link, and the fields already encoded under the metadata
@@ -433,7 +433,9 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    `FSIMG_ERANGE`.
 4. **Summary.** Fill `fsimg_plan_info_t`: `volume_bytes = image_size`,
    `metadata_bytes = hdr_dir_size + 4`, allocated bytes the image, free
-   bytes zero, `initialized_bytes`, a 1-byte sector, and the loss count.
+   bytes zero, `initialized_bytes`, and a 1-byte sector. The common
+   [writer loss policy](design-metadata-loss.md) installs the loss count after
+   every planning step succeeds.
 
 Every value in the plan derives from the catalog, the options and these
 rules, so byte-identical output does not depend on source order, budgets,

@@ -132,7 +132,8 @@ semantics. A known zero offset has canonical UTC basis on reading. Volume
 information reports PER_TIMESTAMP: each timestamp
 carries its own basis, including when fields within an entry differ.
 Unrepresentable required fields fail; optional loss is counted and
-reported through the common policy. Reproducible mode selects its fixed epoch.
+reported through the common [writer policy](design-metadata-loss.md).
+Reproducible mode selects its fixed epoch.
 Absent or unrepresentable optional timestamps use 1980-01-01 00:00:00 UTC.
 Fallback replaces the complete timestamp, including its fractional part.
 

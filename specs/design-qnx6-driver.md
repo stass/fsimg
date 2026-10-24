@@ -439,7 +439,9 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    payload is one emission region. The sum must equal `A`, and `A` plus the
    reserve must not exceed `N`.
 4. **Summary.** Fill `fsimg_plan_info_t`: volume, metadata, allocated, free and
-   initialized bytes, the sector and block sizes, and the loss count.
+   initialized bytes and the sector and block sizes. The common
+   [writer loss policy](design-metadata-loss.md) installs the loss count after
+   every planning step succeeds.
 
 Every value in the plan derives from the catalog, the options and these
 rules, so byte-identical output does not depend on source order, budgets,

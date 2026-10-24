@@ -306,6 +306,17 @@ traversal, delivery, or copy lifecycle:
 These boundaries share infrastructure without a common reader/writer object
 graph or mutable filesystem model.
 
+The [settings catalogue](design-settings.md) is the shared description of
+setting names, C representations, presence and defaults, syntax, and operation
+scope. Library applicability checks, capability reporting, and CLI conversion
+consume it so these facts cannot disagree between independent lists. Format
+capability masks and layer descriptors determine which settings apply; driver
+validation owns relationships among values. The public options remain typed
+records and the worker protocol remains an explicit checked byte encoding.
+Catalogue operations perform no image I/O and confer no host authority; the
+coordinator opens file settings and passes descriptors under the existing
+security contract.
+
 The [layer design](design-layers.md) wraps a finished volume in a partition
 scheme, a container and compression, and unwraps them on reading. Layers are
 applied around the common writer and reader, never inside a driver: the
@@ -314,6 +325,22 @@ produces the final file or stream; the reader decodes a stream or
 compressed input into a spool file first, then peels each layer down to a
 bounded I/O slice, which the filesystem driver opens as it opens a raw
 image. The design also owns `--partition` selection and the spool budget.
+
+Each writable container owns an immutable private
+[plan](design-container-plans.md), held by the common disk plan and borrowed
+by its encoder. Common composition reads only its granularity, transfer and
+pass requirements, identity, and resolved codec dependency; the container
+computes its encoded bound for the final disk length. The selected descriptor
+destroys its complete extension, including partial construction, so adding a
+container does not extend common structures with private header fields or
+cleanup rules. File-setting identity and alias checks, sessions, resource
+budgets, sequential sinks, and publication remain common. This ownership is
+shared by create, wrap, and compose without a new public handle.
+The common operation establishes its session before container construction and
+lends it to constructor reads and subsequent output. Writer construction keeps
+that session at its final address; wrap and compose lend their output session
+to the assembled disk. A private plan neither retains a construction-session
+pointer nor starts a fresh quota for each phase.
 
 The QNX boot image (`ifsboot`) and the Harman-Becker flash image (`hbcifs`)
 are containers in that design, each packaging one ImageFS for one loader
@@ -477,7 +504,16 @@ Metadata has explicit validity bits. Entry kinds, supported attributes,
 timestamp resolution, and naming limits are capabilities, not assumed POSIX
 semantics. A required attribute that cannot be represented is an error.
 Optional omission requires an explicit policy and a bounded, structured loss
-report. The ordinary host-tree import selects content, hierarchy, and
+report. The [writer loss policy](design-metadata-loss.md) has one common owner
+for required-field refusal, per-writer totals, and reporting through the
+context. Common capability checks report fields a format omits; drivers report
+representability losses only for fields it supports, once per entry and field.
+Drivers decide encoding fidelity and defaults, while common code decides
+whether a loss is permitted. This separates format knowledge from user policy
+without a per-entry loss ledger. Callbacks and context statistics record losses
+as planning encounters them; a later failure does not retract them, and only a
+successful plan publishes its final total.
+The ordinary host-tree import selects content, hierarchy, and
 representable timestamps; it does not promise to preserve every `stat` field.
 UTC and known-offset timestamp seconds denote UTC instants relative to the Unix
 epoch; the latter retains its original offset separately. Unknown-offset wall

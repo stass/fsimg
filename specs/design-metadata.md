@@ -53,6 +53,11 @@ formats whose identity is a 16-byte UUID; the bytes are in textual order.
 
 ## Writer policy
 
+The [writer metadata-loss design](design-metadata-loss.md) owns the common
+refusal, accounting, callback, and timestamp-helper contracts. Drivers decide
+whether an encoding preserves a field; common writer code applies the caller's
+loss policy and counts each affected field once.
+
 Planning checks each valid field against the selected driver's capability
 record. A field the format stores is encoded exactly or, where the format's
 range or precision is narrower, under the common optional-loss policy: a
@@ -71,11 +76,13 @@ before any entry is read again: a plan this check fails reports no loss, and a t
 nothing the format lacks is not read again.
 
 When a format stores a field the entry does not carry, the driver applies its
-documented default, independent of the process umask, host identity, time zone
-or clock: QNX6 uses uid and gid zero, mode `0755` for directories, `0644` for
-regular files and `0777` for symbolic links and FIFOs, and derives absent
-times from its timestamp fallback. Reproducible mode replaces every stored
-time with the epoch, as it already does for the shared timestamps.
+documented default. Owner and mode defaults are independent of the process
+umask and host identity: QNX6 uses uid and gid zero, mode `0755` for directories,
+`0644` for regular files and `0777` for symbolic links and FIFOs. Time defaults
+follow the format's explicit fallback policy, independent of the host time
+zone; QNX4, QNX6 and ImageFS use the planning clock outside reproducible mode.
+Reproducible mode replaces every stored time with the epoch. An absent field's
+default is not a loss.
 
 ## Host import
 
@@ -150,6 +157,9 @@ and writer construction rejects a non-default value of any other one with
 `FSIMG_EINVAL` before the driver's `validate` runs, so no driver has to
 remember another format's settings. The CLI generates a random UUID, like
 the serial, without `-R` when the mask names the UUID and none is given.
+The [settings catalogue](design-settings.md) associates these mask bits with
+their fields and defaults; capability checks and CLI conversion share that
+description while format validation retains the value relationships.
 
 `max_link_target_bytes` is the longest symbolic-link target the format
 stores: 1024 for ImageFS, 1023 for QNX4 and QNX6, and zero for FAT and

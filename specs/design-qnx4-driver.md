@@ -405,7 +405,9 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    in catalog ID order, each one extent. The last block used is `A`, which
    fits by construction.
 4. **Summary.** Fill `fsimg_plan_info_t`: volume, metadata, allocated, free
-   and initialized bytes, the 512-byte sector and block, and the loss count.
+   and initialized bytes, and the 512-byte sector and block. The common
+   [writer loss policy](design-metadata-loss.md) installs the loss count after
+   every planning step succeeds.
 
 Every value in the plan derives from the catalog, the options and these
 rules, so byte-identical output does not depend on source order, budgets,

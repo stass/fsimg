@@ -401,6 +401,25 @@ for this. Every stage follows the review and
 validation gates above, including the external review, and ends with
 one coherent commit.
 
+## Settings and plan consolidation
+
+The [architecture analysis](architecture-analysis.md) identifies three
+consolidations with target designs. Their implementations preserve public
+options and image bytes and follow the review gates above. They do not depend
+on the separate Relic experiments in that analysis.
+
+| Stage | Design and work | Completion evidence |
+| --- | --- | --- |
+| Shared settings | [Settings catalogue](../specs/design-settings.md): replace duplicate key, type, default and applicability descriptions in library and CLI; keep the explicit wire codec | Independent CLI/library cases agree; presence/default distinctions, capability ordering and wire vectors are unchanged; adding a setting needs no parallel consumer key list |
+| Writer loss policy | [Metadata losses](../specs/design-metadata-loss.md): one writer count/refusal/report operation, disjoint omissions and encoding losses, narrow seconds helper and DOS conversion reuse | Exact field counts and callback ordering, required refusals and partial-failure observations, format time semantics and reproducible bytes match the contract |
+| Container plans | [Private plans](../specs/design-container-plans.md): convert VHD, DMG, simg and ifsboot to descriptor-owned extensions and explicit common summary facts | Create, wrap and compose retain bytes and bounds; allocation/open/bound/emission failures release partial and complete state once; codec reporting and file-setting borrowing agree |
+
+The first two stages are independent. Container plans consume the same typed
+options, so their private ownership work can be evaluated independently of the
+catalogue representation. Common contract-test profiles accompany each
+conversion. Record remaining implementation work in `TODO.md`; design documents
+state the target contract rather than implementation status.
+
 ## Extension sequence
 
 QNX6 follows the [format design](../specs/design-qnx6.md), the

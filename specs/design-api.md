@@ -357,6 +357,14 @@ would, the compression the write options name included; the output
 bound is the disk's encoding by the container and then the compression. It does not return an O(entries) list. No progress callback can mutate a
 sealed plan.
 
+The plan's `metadata_losses` counts affected entry/field pairs, with owner and
+group together forming one owner field. The common
+[writer loss policy](design-metadata-loss.md) reports losses synchronously
+during planning. A later planning failure leaves earlier callbacks and context
+statistics intact but publishes no successful plan; repeated queries of a
+successful plan do not report its losses again. A capability-summary refusal
+precedes any loss report from that planning attempt.
+
 `emit()` borrows output only for the call and requires a compatible writable
 sink. Before resizing, zeroing, or writing, it compares known backing identities
 against all collected host sources and rejects a shared inode with `FSIMG_EINVAL`,

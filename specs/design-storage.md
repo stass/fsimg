@@ -391,8 +391,9 @@ check has a named scope and does not replace independent validation.
 With a scheme in the stack the sink the driver emits into is a checked slice
 of a staged raw disk, and the scheme writes its tables into the same disk
 through the bounded metadata write. With a container or compression present
-the staged disk is an intermediate: one transcode pass reads it sequentially
-and writes the final output through a chain of **sequential sinks**, each an
+the staged disk is an intermediate: one transcode operation reads it in the
+ordered passes its [container plan](design-container-plans.md) declares and
+writes the final output through a chain of **sequential sinks**, each an
 append-only object offering write and finish. The container encoder and the
 gzip encoder are sequential sinks wrapping the next; the innermost writes a
 positional object at increasing offsets or a stream descriptor. Nothing in

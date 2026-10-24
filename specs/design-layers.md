@@ -41,6 +41,7 @@ layers add to it.
 | Image (`lib/layers/image.c`) | Read-side peeling order, detection and forcing, partition enumeration and selection, the spool and the spool-backed peel, the layer verification report |
 | Container adapter and chunk index (`lib/layers/chunks.c`, `lib/meta/`) | Disk-offset to chunk resolution, the decompressed-chunk cache, chunk validation |
 | Disk plan (`lib/layers/plan.c`) | The exact-volume stack rule, disk sizing around a volume, partition placement, partition types and names, identifiers, the plan's disk and partition report |
+| Container plan | Immutable resolved settings and private resources, with a common summary and descriptor-owned destruction under the [container-plan contract](design-container-plans.md) |
 | Layered output (`lib/layers/output.c`) | The scheme tables written into the staged raw disk, the assembled disk, the transcode pass, the sequential sink, raw-intermediate lifetime |
 | Output coordinator (`lib/output/`) | Staging directory, publication, durability, unchanged |
 | Filesystem drivers | The volume only; they never see a layer |
@@ -129,6 +130,12 @@ a volume longer than the image as the filesystem's design says.
 
 ### Layer settings
 
+The [settings catalogue](design-settings.md) owns each key's representation,
+presence/default rule, syntax, and applicability. Library checks, capability
+reporting, and CLI conversion consume this one description. Profiles retain
+semantic validation, and file settings retain the coordinator/library authority
+split below.
+
 A setting without a layer qualifier targets the filesystem: `oem`,
 `sector`, `cluster`, the QNX6 `endian`, `uuid`, `inodes`, `reserve`, the
 QNX4 `inodes`, and the IFS `endian` (shared with QNX6) and `mountpoint`.
@@ -159,11 +166,18 @@ format descriptors are. Its operations form a closed set per kind:
 | --- | --- | --- | --- |
 | Probe | Claims a disk from its prefix | Claims a file from its prefix, at offset 0 or at an offset of its closed [prefix table](#prefix-tables-opaque-sections-and-carried-volumes), and from its last 512 bytes | Claims a file from its prefix |
 | Peel (read) | Enumerates partitions as checked slices of the disk | Yields a read-only positional I/O object over the disk, backed by the chunk index or, for one unframed stream, by the [spool](#spool-backed-peel) | Decodes a sequential stream into the spool |
-| Plan (write) | Derives the disk length and the volume offset from the volume length and the container granularity | Declares its disk-length granularity | None |
+| Plan (write) | Derives the disk length and the volume offset from the volume length and the container granularity | Constructs a private immutable plan with common composition facts; computes the encoded bound for the final disk length | Resolves encoding settings and computes an encoded bound |
 | Encode (write) | Writes its tables at fixed disk offsets through bounded metadata writes | Transcodes a disk sequentially into the sink, copying in the [file settings](#file-settings-and-sections) its profile declares | Wraps a sequential sink |
 | Verify | Table checksums, consistency, partition bounds and overlap | Container checksums, chunk tiling and bounds; a profile may name fields it cannot verify, which make its [scope incomplete](#verification-scope) | Member checksums and length, at spool time |
 | Capability | Settings, read/write flags, sector sizes | Settings, codecs, codec version, the filesystem it carries when it carries a volume | Codec version |
 | Suffixes | None | The file suffixes that name it: `.dmg`, `.vhd`, `.simg`; `ifsboot` and `hbcifs` declare none, because `.ifs` names the filesystem they carry | `.gz` |
+
+The [container-plan design](design-container-plans.md) defines construction,
+borrowing, bound calculation, and destruction. The common disk plan owns the
+container plan; encoder state borrows it and owns only state accumulated during
+encoding. A read-only container has no write operations. The contract exposes
+resolved composition and reporting facts without exposing private profile
+fields to the transcode or common cleanup.
 
 Probes follow the [bounded probe contract](design-formats.md#format-descriptors-and-profiles):
 pure functions of fixed bytes and the input length, no I/O, no allocation,
@@ -499,8 +513,8 @@ writer emits its volume, through the unchanged [emission](design-emission.md)
 contract, into a staged raw file: the whole file when no scheme is present,
 or a checked output slice of a staged raw **disk** when one is. The scheme
 encodes its tables into the same staged disk through bounded metadata
-writes. When a container or compression is present, one **transcode** pass
-reads the staged disk sequentially and writes the final staged output
+writes. When a container or compression is present, one **transcode** operation
+reads the staged disk in its declared ordered passes and writes the final staged output
 sequentially. No driver streams, and no layer seeks in its output.
 
 ```text
@@ -510,6 +524,13 @@ volume plan -> scheme plan -> staged raw disk (emit volume, encode tables)
 ```
 
 ### Sizing
+
+The disk plan resolves container settings into the immutable
+[container plan](design-container-plans.md) before volume placement. Its
+granularity constrains placement; its bound operation then accepts the final
+disk length and returns the worst-case encoded length. The common disk plan
+owns those derived lengths and their budget checks, so sizing does not mutate
+the container's resolved state.
 
 The filesystem sizes itself first, under the [sizing design](design-sizing.md):
 `-s` and `volume_bytes` are the volume size. The scheme then derives the
@@ -570,10 +591,11 @@ record](design-holes.md#the-written-range-record) proves zero.
 
 ### Transcode
 
-The transcode is one sequential pass over a disk object into a sequential
+The transcode reads a disk object in the ordered passes its
+[container plan](design-container-plans.md) declares, writing to a sequential
 sink. The container encoder and the gzip encoder are each a sequential sink
 wrapping the next; the innermost sink is the staged output file (positional,
-written at increasing offsets) or a stream descriptor. The pass reads the disk
+written at increasing offsets) or a stream descriptor. Each pass reads the disk
 in chunks of the container's chunk size (or 1 MiB with no container) and, for
 each chunk, decides by inspecting its bytes whether it is all zero.
 
@@ -732,9 +754,13 @@ setting of an absent layer does.
 When one is read. The profile declares each file setting as bounded or
 streamed. A bounded one has a fixed small maximum (`ifsboot`'s prefix,
 at most the largest prefix-table length); the plan reads it whole, once,
-into charged memory the plan owns, checks its bytes there before any sink
-opens, and the encoder emits exactly those bytes; the buffer is released
-with the plan, on every outcome. A streamed one (the startup code) has
+into charged memory the private container plan owns, checks its bytes there
+before any sink opens, and the encoder emits exactly those bytes; the
+container's destructor releases the buffer on every outcome. Common disk
+planning retains input identity, alias and change checks. Constructor reads
+use the common operation session established before planning and continued
+through output, under the [container-plan contract](design-container-plans.md).
+A streamed one (the startup code) has
 only the plan reading its length; the encoder reads it once,
 sequentially, in bounded pieces, when the output reaches its place, and
 never holds it whole. Padding a profile adds is written as a count of

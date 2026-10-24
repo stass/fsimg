@@ -203,6 +203,11 @@ job record as its registered name, which the worker hands to the library's
 write or image options, so a codec the registry gains reaches `-a`
 through the suffix it declares with no change to the command line.
 
+The [settings catalogue](design-settings.md) supplies setting identity,
+representation, syntax, and applicability to the CLI and library. The CLI owns
+argument handling, explicit-key repetition checks, syntax diagnostics, and
+host path preparation; the catalogue performs no image or host-path I/O.
+
 `-o key=value` is the repeatable typed setting, each key at most once. An
 unqualified key always targets the filesystem: `oem=cp437` on read; on
 create `sector` and `cluster` in bytes, and the QNX6 settings

@@ -71,9 +71,9 @@ measurement or a claim that implementation is complete.
 
 | Opportunity | Priority | Confidence | Main obligation removed |
 | --- | --- | --- | --- |
-| Shared settings description | First | High | Repeating option identity, representation, and applicability across subsystems |
-| Common metadata-loss policy | First | High | Reimplementing required-field, loss-counting, and reporting policy |
-| Private container plans | Next | High on ownership; prototype the interface | Extending shared state and cleanup for each container |
+| [Shared settings description](../specs/design-settings.md) | First | High | Repeating option identity, representation, and applicability across subsystems |
+| [Common metadata-loss policy](../specs/design-metadata-loss.md) | First | High | Reimplementing required-field, loss-counting, and reporting policy |
+| [Private container plans](../specs/design-container-plans.md) | Next | High on ownership; prototype the interface | Extending shared state and cleanup for each container |
 | Common driver contract tests | Alongside each change | High | Reconstructing common acceptance coverage for each driver |
 | Verification helpers and ownership runs | Incremental | High for payload reads; narrower for ownership | Repeating bounded read, sort, cursor, and cleanup mechanics |
 | Scalar codecs and zlib allocation | Small independent changes | High | Repeating primitive byte conversion and allocation adapters |
@@ -84,6 +84,9 @@ measurement or a claim that implementation is complete.
 ## Simplifications in C
 
 ### One authoritative settings description
+
+The [settings design](../specs/design-settings.md) specifies the target
+catalogue, consumers, compatibility rules, and validation criteria.
 
 The library's `layer_settings` in [stack.c](../lib/layers/stack.c) describes
 keys, storage, presence, and applicability. The CLI's `layer_keys` in
@@ -118,6 +121,9 @@ key/value plugin ABI, or callbacks for assignments that a small table expresses.
 
 ### Container-owned immutable plans
 
+The [container-plan design](../specs/design-container-plans.md) specifies the
+common summary, private extension, ownership, and encoder lifetime.
+
 Filesystem writers embed a small common plan in a driver-owned extension;
 [writer.h](../lib/write/writer.h) gives destruction one owner. Containers use
 one `fsimg_container_settings_t` in [layer.h](../lib/layers/layer.h) that combines
@@ -148,6 +154,9 @@ settling the interface. Preserve deterministic multi-pass encoding and all
 pre-output refusals.
 
 ### Common metadata-loss policy and narrow timestamp helpers
+
+The [metadata-loss design](../specs/design-metadata-loss.md) specifies the
+writer policy, counting and callback semantics, and timestamp helpers.
 
 The writers repeat the same policy: a required field or a caller forbidding
 losses causes failure; an allowed loss increments the total and invokes the

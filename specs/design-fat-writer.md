@@ -74,8 +74,10 @@ calendar fields. Creation precision is 10 ms, modification 2 seconds, and access
 one day. Values outside 1980 through 2107 are omitted in favor of the default.
 Rounding, time-basis/offset loss, and reproducible epoch substitution are losses.
 Required losses fail. Optional losses require `FSIMG_WRITE_ALLOW_LOSS`; the
-initializer selects this explicit policy. The plan counts affected metadata
-fields and the context's optional synchronous loss callback reports them.
+initializer selects this explicit policy. The common
+[writer loss operation](design-metadata-loss.md) counts affected metadata
+fields and reports them through the context's optional synchronous callback.
+The driver supplies fidelity results; successful planning publishes the total.
 Reproducible mode uses its selected epoch for all emitted times. The volume
 serial is explicit and defaults to zero. The default label is `NO NAME`;
 explicit labels are uppercase ASCII FAT labels of at most eleven bytes.

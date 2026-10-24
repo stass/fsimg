@@ -2,6 +2,16 @@
 
 ## Major initiatives
 
+* [Medium] **Settings, metadata losses and container-plan consolidation**
+  (`lib/layers/`, `lib/write/`, `lib/formats/`, `cmd/fsimg/`): implement the
+  [settings catalogue](specs/design-settings.md),
+  [writer loss policy](specs/design-metadata-loss.md), and
+  [private container plans](specs/design-container-plans.md) under the
+  [consolidation sequence](docs/implementation-plan.md#settings-and-plan-consolidation).
+  Replace duplicate descriptions and policy decisions, give container resources
+  one private owner, and preserve public options, wire bytes, image output,
+  validation timing, and resource bounds with common contract coverage.
+
 * [High] **QNX6 read/write and automotive qualification**
   (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): the classic reader,
   verifier and writer of the [Power-Safe design](specs/design-qnx6.md) are
@@ -325,6 +335,15 @@
   [qualification work](docs/todo-ifs.md) lists the open items.
 
 ## Bugs by subsystem
+
+* [Medium] **Container construction reads lack the operation work account**
+  (`lib/layers/ifsboot.c` `read_setting`, `lib/write/writer.c`,
+  `lib/layers/output.c`): prefix reads use `fsimg_io_read_at()` before the
+  writer/output session exists; caller I/O without a bound session therefore
+  charges no operation work. Establish the session before construction and
+  use session-aware reads as the [container-plan design](specs/design-container-plans.md)
+  specifies. Add a failing regression for cumulative prefix and output work,
+  including short callback transfers, before the implementation change.
 
 * [Low] **A failed extraction keeps any error path, not only an entry's**
   (`lib/extract/extract.c` `report_destination`, `include/fsimg.h`): the
