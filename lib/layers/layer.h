@@ -6,6 +6,7 @@
 
 #include "host.h"
 #include "internal.h"
+#include "settings.h"
 
 /*
  * Every layer function takes a non-NULL error record, which receives the
@@ -377,28 +378,17 @@ typedef struct fsimg_container {
 } fsimg_container_t;
 
 /*
- * The file settings of fsimg_layer_inputs_t (specs/design-layers.md#
- * file-settings-and-sections), in the order lib/layers/stack.c lists them.
- * name gives a setting's qualified key ("ifsboot:startup"), input its I/O
- * object in a caller's record (NULL for an absent record or setting).
- * inputs_check refuses, naming the key, a setting of a layer the stack
- * does not name.
+ * The file settings of fsimg_layer_inputs_t (fsimg_file_setting_t), each
+ * the catalogue row of that identity in its layer's slice. name gives a
+ * setting's qualified key ("ifsboot:startup"), input its I/O object in a
+ * caller's record (NULL for an absent record or setting).
  */
-typedef enum fsimg_file_setting {
-	FSIMG_FILE_IFSBOOT_STARTUP = 0,
-	FSIMG_FILE_IFSBOOT_PREFIX = 1
-} fsimg_file_setting_t;
-
-#define FSIMG_FILE_SETTINGS	2u
-
 void fsimg_file_setting_name(fsimg_file_setting_t, char *, size_t);
 fsimg_io_t *fsimg_file_setting_input(const fsimg_layer_inputs_t *,
     fsimg_file_setting_t);
 /* Store io as the setting's object in inputs, the inverse of _input. */
 void fsimg_file_setting_set(fsimg_layer_inputs_t *, fsimg_file_setting_t,
     fsimg_io_t *);
-fsimg_status_t fsimg_layer_inputs_check(const fsimg_stack_t *,
-    const fsimg_layer_inputs_t *, fsimg_error_t *);
 
 /*
  * One file setting as the disk plan holds it: the caller's object,
@@ -725,7 +715,8 @@ typedef struct fsimg_compression_ops {
  * the filesystem slot is one record; a scheme has scheme operations, a
  * container container operations and a compression compression
  * operations, all NULL for a layer this build recognizes but does not
- * implement.
+ * implement. settings is the layer's slice of the settings catalogue, the
+ * one statement of the keys it advertises and accepts, NULL for none.
  */
 typedef struct fsimg_layer {
 	const char	*name;
@@ -734,6 +725,7 @@ typedef struct fsimg_layer {
 	const fsimg_scheme_ops_t *scheme;
 	const fsimg_container_ops_t *container;
 	const fsimg_compression_ops_t *compression;
+	const fsimg_setting_slice_t *settings;
 } fsimg_layer_t;
 
 extern const fsimg_scheme_ops_t fsimg_gpt_scheme;
@@ -779,18 +771,19 @@ const fsimg_layer_t *fsimg_stack_layer(const fsimg_stack_t *,
 fsimg_status_t fsimg_compression_named(const char *, size_t, bool,
     const fsimg_layer_t **, fsimg_error_t *);
 /*
- * Check layer options against a stack and the compression the operation
- * names (NULL for none): reserved words zero, text fields terminated,
- * every setting of a layer neither names at its default, and on read
- * (writing false) every setting but gpt:sector at its default. A failure
- * is FSIMG_EINVAL naming the key in error.path.
+ * Check layer options and file settings (inputs, NULL for none) against a
+ * stack and the compression the operation names (NULL for none), visiting
+ * every registered layer's catalogue slice in order: the options'
+ * reserved words zero, each setting structurally valid, every setting of
+ * a layer neither names at its default, and on read (writing false) every
+ * setting outside FSIMG_SCOPE_READ at its default. A failure is
+ * FSIMG_EINVAL naming the key in error.path.
  */
 fsimg_status_t fsimg_layer_options_check(const fsimg_stack_t *,
-    const fsimg_layer_t *, const fsimg_layer_options_t *, bool,
-    fsimg_error_t *);
-/* Every partition setting (gpt:type, gpt:name, gpt:guid, mbr:type,
- * mbr:active) at its default, as compose requires; a failure is
- * FSIMG_EINVAL naming the key.
+    const fsimg_layer_t *, const fsimg_layer_options_t *,
+    const fsimg_layer_inputs_t *, bool, fsimg_error_t *);
+/* Every FSIMG_SCOPE_PARTITION setting at its default, as compose requires;
+ * a failure is FSIMG_EINVAL naming the key.
  */
 fsimg_status_t fsimg_layer_options_disk_only(const fsimg_layer_options_t *,
     fsimg_error_t *);

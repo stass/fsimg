@@ -88,22 +88,18 @@ measurement or a claim that implementation is complete.
 The [settings design](../specs/design-settings.md) specifies the target
 catalogue, consumers, compatibility rules, and validation criteria.
 
-The library's `layer_settings` in [stack.c](../lib/layers/stack.c) describes
-keys, storage, presence, and applicability. The CLI's `layer_keys` in
-[options.c](../cmd/fsimg/options.c) repeats keys, field offsets, presence flags,
-and read applicability while adding syntax. [job.c](../cmd/fsimg/job.c)
-separately encodes and decodes the settings for the worker. Filesystem settings
-have another applicability check in `settings_supported()` in
-[writer.c](../lib/write/writer.c).
+The private catalogue in [settings.c](../lib/core/settings.c) holds option
+identity, value representation, defaults, presence, syntax, applicability, and
+enum choices. Each layer's registry record in [stack.c](../lib/layers/stack.c)
+references its slice of rows. The library's option checks, layer capability
+records, option initializers, the writer's and wrap's filesystem-setting checks,
+and the CLI's `-o` conversion in [options.c](../cmd/fsimg/options.c) read those
+rows. A finite set of syntax classes suffices; format relationships remain
+ordinary validation functions. [job.c](../cmd/fsimg/job.c) encodes and decodes
+the settings for the worker explicitly; a coverage test names rows only by
+catalogue identity.
 
-Introduce one private typed catalogue for option identity, value representation,
-presence, applicability, and enum choices. Common code can use it for capability
-enumeration, default/presence checks, and CLI conversion. Descriptors can refer
-to the settings they support. A finite set of syntax classes is sufficient;
-format relationships remain ordinary validation functions.
-
-Start with the duplicated library and CLI metadata. Keep the public typed
-options structures and their compatibility rules. The worker protocol remains
+The public typed options structures keep their compatibility rules. The worker protocol remains
 an explicit byte representation with validated widths, flags, and lengths;
 sharing option metadata does not justify copying native structs across it.
 Wire-field generation is useful only if it removes another maintained mapping

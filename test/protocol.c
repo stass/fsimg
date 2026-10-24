@@ -8,6 +8,8 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "layer.h"
+#include "settings.h"
 #include "test.h"
 #include "worker.h"
 
@@ -27,6 +29,11 @@ static void test_job_posix_flags(void);
 static void test_job_roots(void);
 static void test_job_selection(void);
 static void test_job_layers(void);
+static void test_job_catalogue(void);
+static void other_value(const fsimg_setting_t *, fsimg_setting_value_t *);
+static bool same_value(const fsimg_setting_t *, const fsimg_setting_value_t *,
+    const fsimg_setting_value_t *);
+static void check_transported(const fsimg_setting_t *);
 static void test_image_records(void);
 
 /* Create jobs in these tests populate the image root from one root. */
@@ -1011,6 +1018,134 @@ test_job_layers(void)
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
 }
 
+/* A value of a row's kind other than its default. */
+static void
+other_value(const fsimg_setting_t *row, fsimg_setting_value_t *value)
+{
+	const fsimg_setting_choice_t *choice;
+
+	*value = row->initial;
+	for (choice = row->choices; choice != NULL && choice->spelling != NULL;
+	    choice++) {
+		if (!same_value(row, &choice->value, &row->initial)) {
+			*value = choice->value;
+			return;
+		}
+	}
+	switch (row->kind) {
+	case FSIMG_KIND_U32:
+		value->u32 = row->initial.u32 + 1;
+		break;
+	case FSIMG_KIND_U64:
+		value->u64 = UINT64_C(1) << 40;
+		break;
+	case FSIMG_KIND_BOOL:
+		value->flag = true;
+		break;
+	case FSIMG_KIND_TEXT:
+		value->text = "x";
+		break;
+	case FSIMG_KIND_ID16:
+		memset(value->id, 0x5a, sizeof(value->id));
+		break;
+	case FSIMG_KIND_TEXT_POINTER:
+		value->text = "m";
+		break;
+	default:
+		CHECK(!"a transported kind");
+	}
+}
+
+static bool
+same_value(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
+    const fsimg_setting_value_t *b)
+{
+	switch (row->kind) {
+	case FSIMG_KIND_U32:
+		return (a->u32 == b->u32);
+	case FSIMG_KIND_U64:
+		return (a->u64 == b->u64);
+	case FSIMG_KIND_BOOL:
+		return (a->flag == b->flag);
+	case FSIMG_KIND_BYTE_ORDER:
+		return (a->byte_order == b->byte_order);
+	case FSIMG_KIND_DMG_COMPRESSION:
+		return (a->dmg_compression == b->dmg_compression);
+	case FSIMG_KIND_IFSBOOT_COMPRESSION:
+		return (a->ifsboot_compression == b->ifsboot_compression);
+	case FSIMG_KIND_TEXT:
+	case FSIMG_KIND_TEXT_POINTER:
+		return ((a->text == NULL) == (b->text == NULL) &&
+		    (a->text == NULL || strcmp(a->text, b->text) == 0));
+	case FSIMG_KIND_ID16:
+		return (bcmp(a->id, b->id, sizeof(a->id)) == 0);
+	default:
+		return (false);
+	}
+}
+
+/* One row's non-default value, with its presence flag, survives a create
+ * job's encoding and decoding.
+ */
+static void
+check_transported(const fsimg_setting_t *row)
+{
+	fsimg_worker_request_t request, decoded;
+	fsimg_setting_value_t value, received;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	fsimg_setting_records_t records;
+	uint64_t selection;
+	unsigned capabilities;
+	char key[32];
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	other_value(row, &value);
+	fsimg_setting_store(row, &(fsimg_setting_targets_t){
+	    .write = &request.write, .layers = &request.layers }, &value);
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	records = (fsimg_setting_records_t){ .write = &decoded.write,
+	    .layers = &decoded.layers };
+	fsimg_setting_load(row, &records, &received);
+	fsimg_setting_key(row, key, sizeof(key));
+	if (!same_value(row, &value, &received) ||
+	    fsimg_setting_is_default(row, &records))
+		fprintf(stderr, "%s does not travel in the job record\n", key);
+	CHECK(same_value(row, &value, &received));
+	CHECK(!fsimg_setting_is_default(row, &records));
+}
+
+/*
+ * Every stored setting of the catalogue travels in the job record: the
+ * codec keeps its explicit layout, and this coverage, which names rows
+ * only by catalogue identity, fails for a row added without a transport
+ * decision. File settings travel as descriptors and oem stores nothing.
+ */
+static void
+test_job_catalogue(void)
+{
+	const fsimg_setting_t *row;
+	const fsimg_layer_t *layer;
+
+	for (size_t i = 0; i < fsimg_filesystem_settings.count; i++) {
+		row = &fsimg_filesystem_settings.rows[i];
+		if (row->record == FSIMG_RECORD_WRITE)
+			check_transported(row);
+	}
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		for (size_t j = 0; layer->settings != NULL &&
+		    j < layer->settings->count; j++) {
+			row = &layer->settings->rows[j];
+			if (row->record == FSIMG_RECORD_LAYERS)
+				check_transported(row);
+		}
+	}
+}
+
 /* An image record's disk is its file without a container, its compression
  * is one the build reads, it has a table only under a scheme, and a
  * partition record lies within the disk and the table.
@@ -1176,6 +1311,7 @@ main(int argc, char **argv)
 	test_job_ifsboot_settings();
 	test_job_selection();
 	test_job_layers();
+	test_job_catalogue();
 	test_image_records();
 	test_frame_splits(0);
 	test_frame_splits(127);

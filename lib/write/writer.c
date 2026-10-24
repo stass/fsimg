@@ -12,6 +12,7 @@
 #include "emit.h"
 #include "io.h"
 #include "publish.h"
+#include "settings.h"
 #include "source.h"
 #include "format.h"
 #include "writer.h"
@@ -43,35 +44,21 @@ static fsimg_status_t emission_end(fsimg_writer_t *, fsimg_status_t, bool,
 static fsimg_status_t output_through_raw(fsimg_writer_t *,
     const fsimg_sink_t *, fsimg_io_t *, fsimg_error_t *);
 
+/* The filesystem settings' defaults come from their catalogue rows, the
+ * same values the settings check compares with.
+ */
 void
 fsimg_write_options_init(fsimg_write_options_t *options)
 {
+	const fsimg_setting_targets_t targets = { .write = options };
+
 	bzero(options, sizeof(*options));
 	options->size = sizeof(*options);
 	options->version = FSIMG_OPTIONS_VERSION;
 	options->flags = FSIMG_WRITE_ALLOW_LOSS;
 	options->epoch = 315532800;
-	options->reserve_percent = 3;
-}
-
-/* Whether every format-specific setting outside the format's mask holds its
- * default, so no setting is ever silently ignored.
- */
-static bool
-settings_supported(const fsimg_write_options_t *options, uint32_t settings)
-{
-	static const unsigned char zero[sizeof(options->volume_uuid)];
-
-	return (((settings & FSIMG_SETTING_BYTE_ORDER) != 0 ||
-	    options->byte_order == FSIMG_BYTE_ORDER_LITTLE) &&
-	    ((settings & FSIMG_SETTING_VOLUME_UUID) != 0 ||
-	    bcmp(options->volume_uuid, zero, sizeof(zero)) == 0) &&
-	    ((settings & FSIMG_SETTING_INODE_CAPACITY) != 0 ||
-	    options->inode_capacity == 0) &&
-	    ((settings & FSIMG_SETTING_RESERVE) != 0 ||
-	    options->reserve_percent == 3) &&
-	    ((settings & FSIMG_SETTING_MOUNTPOINT) != 0 ||
-	    options->mountpoint == NULL));
+	fsimg_settings_init(&fsimg_filesystem_settings, &targets,
+	    FSIMG_RECORD_WRITE);
 }
 
 /* Whether variant is one of the descriptor's own capability records. */
@@ -267,9 +254,12 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	if (variant->info.max_label_bytes == 0 && selected.label != NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_WRITER, "the image format has no volume label"));
-	if (!settings_supported(&selected, variant->info.write_settings))
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
-		    "write setting does not apply to the image format"));
+	/* A setting the format does not store must hold its default, so none
+	 * is silently ignored.
+	 */
+	status = fsimg_write_settings_check(&selected, &variant->info, error);
+	if (status != FSIMG_OK)
+		return (status);
 	status = plan_layers(ctx, stack, &selected, &layers, &disk, error);
 	if (status == FSIMG_OK)
 		status = driver->writer->validate(&selected, variant->id, error);

@@ -17,6 +17,7 @@
 #include "host.h"
 #include "internal.h"
 #include "layer.h"
+#include "settings.h"
 
 /*
  * Command parsing turns argv into a validated fsimg_cli_options_t in five
@@ -165,15 +166,11 @@ typedef enum cli_limit_key {
 	CLI_LIMIT_SECONDS, CLI_LIMIT_COUNT
 } cli_limit_key_t;
 
-typedef enum cli_setting_key {
-	CLI_SETTING_SECTOR, CLI_SETTING_CLUSTER, CLI_SETTING_OEM,
-	CLI_SETTING_ENDIAN, CLI_SETTING_UUID, CLI_SETTING_INODES,
-	CLI_SETTING_RESERVE, CLI_SETTING_MOUNTPOINT, CLI_SETTING_COUNT
-} cli_setting_key_t;
-
 /* Parsing state. Option arguments are borrowed from the command words;
  * the repeatable -l and -o arguments are kept in order until the mode,
- * which decides their meaning, is known.
+ * which decides their meaning, is known. setting_rows holds, for each -o
+ * argument parsed so far, its catalogue row, or NULL for a key left
+ * uninterpreted, so a repeated key is found by identity.
  */
 typedef struct cli_parse {
 	fsimg_cli_options_t *options;
@@ -186,6 +183,7 @@ typedef struct cli_parse {
 	const char	**limits;
 	unsigned	 limit_count;
 	const char	**settings;
+	const fsimg_setting_t **setting_rows;
 	unsigned	 setting_count;
 	unsigned	 mode;		/* One MODE_* bit after selection */
 	bool		 reserved;	/* The -F filesystem has no driver */
@@ -207,13 +205,18 @@ static fsimg_status_t select_mode(cli_parse_t *);
 static fsimg_status_t check_option_modes(cli_parse_t *);
 static fsimg_status_t parse_limit(cli_parse_t *, const char *, unsigned *);
 static uint32_t default_descriptor_limit(uint32_t);
-static fsimg_status_t parse_uuid(cli_parse_t *, const char *, unsigned char *);
+static bool parse_uuid(const char *, unsigned char *);
+static bool parse_hex32(const char *, uint32_t *);
 static bool find_layer(const char *, size_t, fsimg_layer_info_t *);
 static bool layer_selected(const cli_parse_t *, const fsimg_layer_info_t *);
-static bool setting_repeats(const cli_parse_t *, unsigned);
-static fsimg_status_t parse_layer_setting(cli_parse_t *, const char *,
-    const char *, const char *);
-static fsimg_status_t parse_setting(cli_parse_t *, const char *, unsigned *);
+static bool setting_given(const cli_parse_t *, const fsimg_setting_t *,
+    unsigned);
+static fsimg_status_t defer_setting(cli_parse_t *, unsigned, size_t);
+static fsimg_status_t convert_number(cli_parse_t *, const fsimg_setting_t *,
+    const char *, const char *, fsimg_setting_value_t *);
+static fsimg_status_t convert_setting(cli_parse_t *, const fsimg_setting_t *,
+    const char *, const char *, fsimg_setting_value_t *);
+static fsimg_status_t parse_setting(cli_parse_t *, unsigned);
 static fsimg_status_t parse_stack(cli_parse_t *, const char *);
 static fsimg_status_t parse_partition(cli_parse_t *);
 static fsimg_status_t parse_byte_option(cli_parse_t *, int, bool, uint64_t *);
@@ -400,7 +403,10 @@ read_option_words(cli_parse_t *parse)
 
 	parse->limits = calloc((size_t)parse->argc, sizeof(*parse->limits));
 	parse->settings = calloc((size_t)parse->argc, sizeof(*parse->settings));
-	if (parse->limits == NULL || parse->settings == NULL)
+	parse->setting_rows = calloc((size_t)parse->argc,
+	    sizeof(*parse->setting_rows));
+	if (parse->limits == NULL || parse->settings == NULL ||
+	    parse->setting_rows == NULL)
 		return (fsimg_error_set(parse->error, FSIMG_ENOMEM, 0,
 		    FSIMG_OP_CONTEXT, "command word allocation failed"));
 	fsimg_host_getopt_reset();
@@ -648,8 +654,8 @@ default_descriptor_limit(uint32_t depth)
 /* RFC 4122 text: 32 hexadecimal digits in groups of 8, 4, 4, 4 and 12,
  * stored in textual byte order.
  */
-static fsimg_status_t
-parse_uuid(cli_parse_t *parse, const char *text, unsigned char *uuid)
+static bool
+parse_uuid(const char *text, unsigned char *uuid)
 {
 	static const char digits[] = "0123456789abcdef";
 	const char *digit;
@@ -672,9 +678,7 @@ parse_uuid(cli_parse_t *parse, const char *text, unsigned char *uuid)
 			uuid[nibble / 2] |= (unsigned char)(digit - digits);
 		nibble++;
 	}
-	if (nibble != 32 || i != 36 || text[i] != '\0')
-		return (syntax(parse, "uuid setting must be RFC 4122 text"));
-	return (FSIMG_OK);
+	return (nibble == 32 && i == 36 && text[i] == '\0');
 }
 
 /* The registry record of a layer name that need not be terminated. */
@@ -708,99 +712,42 @@ layer_selected(const cli_parse_t *parse, const fsimg_layer_info_t *layer)
 	return (slot->state == FSIMG_SLOT_NAMED && strcmp(slot->name, layer->name) == 0);
 }
 
-/* Whether the qualified key of setting index repeats an earlier setting's.
- * Unqualified keys are tracked by parse_setting's bit set.
- */
+/* Whether an -o argument before index named the row. */
 static bool
-setting_repeats(const cli_parse_t *parse, unsigned index)
+setting_given(const cli_parse_t *parse, const fsimg_setting_t *row,
+    unsigned index)
 {
-	const char *key, *other;
-	size_t length;
-
-	key = parse->settings[index];
-	length = strcspn(key, "=");
-	if (memchr(key, ':', length) == NULL)
-		return (false);
 	for (unsigned i = 0; i < index; i++) {
-		other = parse->settings[i];
-		if (strcspn(other, "=") == length && strncmp(key, other, length) == 0)
+		if (parse->setting_rows[i] == row)
 			return (true);
 	}
 	return (false);
 }
 
-/* How a layer setting's value is written on the command line. */
-typedef enum layer_syntax {
-	LAYER_SECTOR,		/* 512 or 4096 */
-	LAYER_BYTES,		/* a nonzero byte quantity, in its field's width */
-	LAYER_COUNT,		/* a nonzero decimal count, in a uint32_t */
-	LAYER_TEXT,		/* text the library validates */
-	LAYER_GUID,		/* RFC 4122 text, not the nil GUID */
-	LAYER_YES_NO,		/* yes or no, in a bool */
-	LAYER_HEX32,		/* 0x and one to eight hex digits, in a uint32_t */
-	LAYER_INTEGER,		/* a decimal integer, zero included, in a uint32_t */
-	LAYER_COMPRESSION,	/* zlib or none, as fsimg_dmg_compression_t */
-	LAYER_BOOT_COMPRESSION	/* lzo or none, as fsimg_ifsboot_compression_t */
-} layer_syntax_t;
-
-/* The command-line syntax of each layer setting and the field it fills.
- * A setting whose value may be zero also sets its presence flag, at
- * offset set (SIZE_MAX for none). The library owns what each value means
- * and validates it.
+/*
+ * A qualified key of a selected layer this build cannot write: the
+ * command is refused as unsupported once the rest of it is valid, so its
+ * key is not looked up and its value not read. Only its raw key, the
+ * key_length bytes before "=", is compared with the earlier uninterpreted
+ * keys, so a repetition is still a syntax error.
  */
-static const struct layer_key {
-	const char	*key;		/* qualified, as "layer:key" */
-	layer_syntax_t	 syntax;
-	size_t		 field;		/* offset in fsimg_layer_options_t */
-	size_t		 bytes;		/* field size: text capacity, GUID 16 */
-	size_t		 set;		/* offset of the presence flag */
-	bool		 reads;		/* also a read-side setting */
-} layer_keys[] = {
-#define LAYER_KEY(key, syntax, field, reads) { key, syntax, \
-	offsetof(fsimg_layer_options_t, field), \
-	sizeof(((fsimg_layer_options_t *)0)->field), SIZE_MAX, reads }
-#define LAYER_PRESENT(key, syntax, field, set) { key, syntax, \
-	offsetof(fsimg_layer_options_t, field), \
-	sizeof(((fsimg_layer_options_t *)0)->field), \
-	offsetof(fsimg_layer_options_t, set), false }
-	LAYER_KEY("gpt:sector", LAYER_SECTOR, gpt_sector_bytes, true),
-	LAYER_KEY("gpt:disk", LAYER_BYTES, gpt_disk_bytes, false),
-	LAYER_KEY("gpt:type", LAYER_TEXT, gpt_type, false),
-	LAYER_KEY("gpt:name", LAYER_TEXT, gpt_name, false),
-	LAYER_KEY("gpt:disk-guid", LAYER_GUID, gpt_disk_guid, false),
-	LAYER_KEY("gpt:guid", LAYER_GUID, gpt_guid, false),
-	LAYER_KEY("mbr:disk", LAYER_BYTES, mbr_disk_bytes, false),
-	LAYER_KEY("mbr:type", LAYER_TEXT, mbr_type, false),
-	LAYER_KEY("mbr:active", LAYER_YES_NO, mbr_active, false),
-	LAYER_PRESENT("mbr:id", LAYER_HEX32, mbr_id, mbr_id_set),
-	LAYER_KEY("dmg:compress", LAYER_COMPRESSION, dmg_compress, false),
-	LAYER_KEY("dmg:level", LAYER_COUNT, dmg_level, false),
-	LAYER_KEY("dmg:chunk", LAYER_BYTES, dmg_chunk_bytes, false),
-	LAYER_KEY("dmg:uuid", LAYER_GUID, dmg_uuid, false),
-	LAYER_KEY("vhd:align", LAYER_BYTES, vhd_align_bytes, false),
-	LAYER_KEY("vhd:uuid", LAYER_GUID, vhd_uuid, false),
-	LAYER_KEY("simg:block", LAYER_BYTES, simg_block_bytes, false),
-	LAYER_KEY("simg:crc", LAYER_YES_NO, simg_crc, false),
-	LAYER_PRESENT("ifsboot:machine", LAYER_INTEGER, ifsboot_machine,
-	    ifsboot_machine_set),
-	LAYER_PRESENT("ifsboot:virtual", LAYER_YES_NO, ifsboot_virtual,
-	    ifsboot_virtual_set),
-	LAYER_PRESENT("ifsboot:startup_vaddr", LAYER_HEX32,
-	    ifsboot_startup_vaddr, ifsboot_startup_vaddr_set),
-	LAYER_PRESENT("ifsboot:paddr_bias", LAYER_HEX32, ifsboot_paddr_bias,
-	    ifsboot_paddr_bias_set),
-	LAYER_PRESENT("ifsboot:image_paddr", LAYER_HEX32, ifsboot_image_paddr,
-	    ifsboot_image_paddr_set),
-	LAYER_PRESENT("ifsboot:ram_paddr", LAYER_HEX32, ifsboot_ram_paddr,
-	    ifsboot_ram_paddr_set),
-	LAYER_PRESENT("ifsboot:imagefs_paddr", LAYER_HEX32,
-	    ifsboot_imagefs_paddr, ifsboot_imagefs_paddr_set),
-	LAYER_KEY("ifsboot:compress", LAYER_BOOT_COMPRESSION, ifsboot_compress,
-	    false),
-	LAYER_KEY("gzip:level", LAYER_COUNT, gzip_level, false)
-#undef LAYER_KEY
-#undef LAYER_PRESENT
-};
+static fsimg_status_t
+defer_setting(cli_parse_t *parse, unsigned index, size_t key_length)
+{
+	const char *text, *other;
+
+	text = parse->settings[index];
+	for (unsigned i = 0; i < index; i++) {
+		other = parse->settings[i];
+		if (parse->setting_rows[i] == NULL &&
+		    strcspn(other, "=") == key_length &&
+		    strncmp(text, other, key_length) == 0)
+			return (syntax_naming(parse,
+			    "setting key is given more than once", text));
+	}
+	parse->setting_rows[index] = NULL;
+	return (FSIMG_OK);
+}
 
 /* "0x" and one to eight hexadecimal digits. */
 static bool
@@ -825,264 +772,182 @@ parse_hex32(const char *text, uint32_t *out)
 }
 
 /*
- * A file setting's key ("ifsboot:startup"), which the library's registry
- * spells, takes a host path, which the coordinator opens before the worker
- * starts. Creation only: on read the key is refused here, before any open.
- * Returns false for a key that names no file setting.
+ * A byte quantity or decimal count: unsigned, without a sign, a unit only
+ * for a byte quantity, within the row's maximum and, for a row that
+ * refuses zero, positive; then held in the row's integer kind. A row with
+ * choices accepts only their numbers.
  */
-static bool
-parse_file_setting(cli_parse_t *parse, const char *text, size_t length,
-    const char *value, fsimg_status_t *status)
+static fsimg_status_t
+convert_number(cli_parse_t *parse, const fsimg_setting_t *row,
+    const char *value, const char *word, fsimg_setting_value_t *out)
 {
-	char key[32];
+	char choices[64], message[96];
+	uint64_t number;
+	bool bytes;
 
-	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
-		fsimg_file_setting_name(i, key, sizeof(key));
-		if (strlen(key) != length || strncmp(text, key, length) != 0)
-			continue;
-		if ((parse->mode & MODES_CREATE) == 0)
-			*status = syntax_naming(parse,
-			    "setting applies only to creation", text);
-		else {
-			parse->options->setting_paths[i] = value;
-			*status = FSIMG_OK;
-		}
-		return (true);
+	bytes = row->syntax == FSIMG_SYNTAX_BYTES;
+	if (fsimg_cli_number(value, bytes, &number, parse->error) != FSIMG_OK ||
+	    number > row->max || (row->nonzero && number == 0)) {
+		if (bytes)
+			return (syntax_naming(parse, row->nonzero ?
+			    "setting requires a nonzero byte quantity in range" :
+			    "setting requires a byte quantity in range", word));
+		return (syntax_naming(parse, row->nonzero ?
+		    "setting requires a positive decimal count in range" :
+		    "setting requires a decimal count in range", word));
 	}
-	return (false);
+	if (row->kind == FSIMG_KIND_U32)
+		out->u32 = (uint32_t)number;
+	else
+		out->u64 = number;
+	if (row->choices != NULL && fsimg_setting_choice_of(row, out) == NULL) {
+		fsimg_setting_choices_text(row, choices, sizeof(choices));
+		snprintf(message, sizeof(message), "setting must be %s", choices);
+		return (syntax_naming(parse, message, word));
+	}
+	return (FSIMG_OK);
 }
 
 /*
- * A qualified key "layer:key" targets one layer, which the stack must name
- * (or -z/-a select, for gzip). Reading takes the one read-side setting,
- * gpt:sector, which forces the GPT LBA size; creating takes every key of
- * layer_keys and the file settings. The value's syntax is checked here and
- * stored in its typed field, with its presence flag when it has one; the
- * library validates the settings as a whole.
+ * Convert a value by its row's lexical class into a typed temporary. word
+ * is the whole argument, which a diagnostic names. A text keeps pointing
+ * into the command words, which outlive the parsed command; a path is
+ * kept as given, for the coordinator to open.
  */
 static fsimg_status_t
-parse_layer_setting(cli_parse_t *parse, const char *text, const char *qualifier,
-    const char *value)
+convert_setting(cli_parse_t *parse, const fsimg_setting_t *row,
+    const char *value, const char *word, fsimg_setting_value_t *out)
 {
 	static const unsigned char nil[16];
-	fsimg_layer_options_t *layers = &parse->options->request.layers;
-	const struct layer_key *entry;
-	fsimg_layer_info_t layer;
-	fsimg_dmg_compression_t compression;
-	fsimg_ifsboot_compression_t boot_compression;
-	unsigned char *field;
-	uint64_t number;
-	uint32_t id, narrow;
-	size_t length, i;
-	fsimg_status_t status;
-	bool yes;
+	const fsimg_setting_choice_t *choice;
+	char choices[64], message[96];
+	size_t capacity;
 
-	if (!find_layer(text, (size_t)(qualifier - text), &layer))
-		return (syntax_naming(parse, "unknown setting layer", text));
-	if (!layer_selected(parse, &layer))
-		return (syntax_naming(parse,
-		    "setting names a layer the stack does not contain", text));
-	/* A layer this build cannot write is refused as unsupported once the
-	 * command line is otherwise valid, so its keys are accepted unread.
-	 */
-	if ((parse->mode & MODES_CREATE) != 0 &&
-	    (layer.capabilities & FSIMG_CAP_WRITE) == 0)
-		return (FSIMG_OK);
-	length = (size_t)(value - 1 - text);
-	if (parse_file_setting(parse, text, length, value, &status))
-		return (status);
-	for (i = 0; i < sizeof(layer_keys) / sizeof(layer_keys[0]); i++) {
-		if (strlen(layer_keys[i].key) == length &&
-		    strncmp(text, layer_keys[i].key, length) == 0)
-			break;
-	}
-	if (i == sizeof(layer_keys) / sizeof(layer_keys[0]))
-		return (syntax_naming(parse, "unknown layer setting", text));
-	entry = &layer_keys[i];
-	if ((parse->mode & MODES_CREATE) == 0 && !entry->reads)
-		return (syntax_naming(parse, "setting applies only to creation", text));
-	field = (unsigned char *)layers + entry->field;
-	if (entry->set != SIZE_MAX) {
-		yes = true;
-		bcopy(&yes, (unsigned char *)layers + entry->set, sizeof(yes));
-	}
-	switch (entry->syntax) {
-	case LAYER_SECTOR:
-		if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK ||
-		    (number != 512 && number != 4096))
-			return (syntax_naming(parse, "gpt:sector must be 512 or 4096",
-			    text));
-		layers->gpt_sector_bytes = (uint32_t)number;
-		return (FSIMG_OK);
-	case LAYER_BYTES:
-		if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK ||
-		    number == 0 ||
-		    (entry->bytes == sizeof(narrow) && number > UINT32_MAX))
+	bzero(out, sizeof(*out));
+	switch (row->syntax) {
+	case FSIMG_SYNTAX_BYTES:
+	case FSIMG_SYNTAX_COUNT:
+		return (convert_number(parse, row, value, word, out));
+	case FSIMG_SYNTAX_HEX32:
+		if (!parse_hex32(value, &out->u32))
 			return (syntax_naming(parse,
-			    "setting requires a nonzero byte quantity in range", text));
-		if (entry->bytes == sizeof(narrow)) {
-			narrow = (uint32_t)number;
-			bcopy(&narrow, field, sizeof(narrow));
-		} else
-			bcopy(&number, field, sizeof(number));
+			    "setting requires 0x and at most eight hex digits",
+			    word));
 		return (FSIMG_OK);
-	case LAYER_COUNT:
-		if (fsimg_cli_number(value, false, &number, parse->error) != FSIMG_OK ||
-		    number == 0 || number > UINT32_MAX)
-			return (syntax_naming(parse,
-			    "setting requires a positive decimal count", text));
-		narrow = (uint32_t)number;
-		bcopy(&narrow, field, sizeof(narrow));
-		return (FSIMG_OK);
-	case LAYER_TEXT:
-		if (strlen(value) >= entry->bytes)
-			return (syntax_naming(parse, "setting value is too long", text));
-		bcopy(value, field, strlen(value) + 1);
-		return (FSIMG_OK);
-	case LAYER_GUID:
-		if (parse_uuid(parse, value, field) != FSIMG_OK ||
-		    bcmp(field, nil, sizeof(nil)) == 0)
-			return (syntax_naming(parse,
-			    "GUID setting must be RFC 4122 text other than nil", text));
-		return (FSIMG_OK);
-	case LAYER_YES_NO:
+	case FSIMG_SYNTAX_BOOL:
 		if (strcmp(value, "yes") != 0 && strcmp(value, "no") != 0)
-			return (syntax_naming(parse, "setting must be yes or no", text));
-		yes = strcmp(value, "yes") == 0;
-		bcopy(&yes, field, sizeof(yes));
+			return (syntax_naming(parse, "setting must be yes or no",
+			    word));
+		out->flag = strcmp(value, "yes") == 0;
 		return (FSIMG_OK);
-	case LAYER_COMPRESSION:
-		if (strcmp(value, "zlib") != 0 && strcmp(value, "none") != 0)
-			return (syntax_naming(parse, "setting must be zlib or none",
-			    text));
-		compression = strcmp(value, "none") == 0 ? FSIMG_DMG_NONE :
-		    FSIMG_DMG_ZLIB;
-		bcopy(&compression, field, sizeof(compression));
+	case FSIMG_SYNTAX_CHOICE:
+		for (choice = row->choices; choice->spelling != NULL; choice++) {
+			if (strcmp(value, choice->spelling) == 0) {
+				*out = choice->value;
+				return (FSIMG_OK);
+			}
+		}
+		fsimg_setting_choices_text(row, choices, sizeof(choices));
+		snprintf(message, sizeof(message), "setting must be %s", choices);
+		return (syntax_naming(parse, message, word));
+	case FSIMG_SYNTAX_UUID:
+		if (!parse_uuid(value, out->id) ||
+		    (row->nonzero && bcmp(out->id, nil, sizeof(nil)) == 0))
+			return (syntax_naming(parse, row->nonzero ?
+			    "GUID setting must be RFC 4122 text other than nil" :
+			    "setting must be RFC 4122 text", word));
 		return (FSIMG_OK);
-	case LAYER_BOOT_COMPRESSION:
-		if (strcmp(value, "lzo") != 0 && strcmp(value, "none") != 0)
-			return (syntax_naming(parse, "setting must be lzo or none",
-			    text));
-		boot_compression = strcmp(value, "none") == 0 ?
-		    FSIMG_IFSBOOT_NONE : FSIMG_IFSBOOT_LZO;
-		bcopy(&boot_compression, field, sizeof(boot_compression));
-		return (FSIMG_OK);
-	case LAYER_HEX32:
-		if (!parse_hex32(value, &id))
+	case FSIMG_SYNTAX_TEXT:
+		capacity = row->text_bytes != 0 ? row->text_bytes : row->size;
+		if (strnlen(value, capacity) == capacity)
 			return (syntax_naming(parse,
-			    "setting requires 0x and at most eight hex digits", text));
-		bcopy(&id, field, sizeof(id));
+			    "setting value exceeds its text capacity", word));
+		out->text = value;
 		return (FSIMG_OK);
-	case LAYER_INTEGER:
-		if (fsimg_cli_number(value, false, &number, parse->error) != FSIMG_OK ||
-		    number > UINT32_MAX)
-			return (syntax_naming(parse,
-			    "setting requires a decimal integer", text));
-		narrow = (uint32_t)number;
-		bcopy(&narrow, field, sizeof(narrow));
+	case FSIMG_SYNTAX_PATH:
 		return (FSIMG_OK);
 	}
-	return (syntax_naming(parse, "unknown layer setting", text));
+	return (syntax_naming(parse, "unknown setting syntax", word));
 }
 
 /*
- * Typed settings. An unqualified key targets the filesystem: read-side
- * oem, and the creation-side byte quantities (sector, cluster), the byte
- * order, the volume UUID, the inode capacity, the reserve percentage and
- * the mountpoint, which the writer validates for its format. The
- * mountpoint is taken as given, empty included, within the job record's
- * mountpoint field. A qualified key "layer:key" targets one layer
- * (parse_layer_setting).
+ * One -o argument, key=value, against the settings catalogue. An
+ * unqualified key always names a filesystem setting. A qualified key
+ * "layer:key" names a setting of a layer the command selects: its -F
+ * stack's scheme or container, or the compression -z or -a selects; on
+ * creation a selected layer this build cannot write takes defer_setting
+ * instead. The key's row then decides repetition, the modes it applies to
+ * and its value's syntax. A converted value is committed, with its
+ * presence flag when the row has one, only after it converted; a file
+ * setting's value is a host path the coordinator opens once the command
+ * line is known to be valid. The library validates the settings as a
+ * whole.
  */
 static fsimg_status_t
-parse_setting(cli_parse_t *parse, const char *text, unsigned *seen)
+parse_setting(cli_parse_t *parse, unsigned index)
 {
-	static const char *const keys[CLI_SETTING_COUNT] = {
-		[CLI_SETTING_SECTOR] = "sector", [CLI_SETTING_CLUSTER] = "cluster",
-		[CLI_SETTING_OEM] = "oem", [CLI_SETTING_ENDIAN] = "endian",
-		[CLI_SETTING_UUID] = "uuid", [CLI_SETTING_INODES] = "inodes",
-		[CLI_SETTING_RESERVE] = "reserve",
-		[CLI_SETTING_MOUNTPOINT] = "mountpoint"
-	};
-	fsimg_write_options_t *write = &parse->options->request.write;
-	const char *value, *qualifier;
-	uint64_t number;
-	size_t length;
-	cli_setting_key_t key;
+	fsimg_worker_request_t *request = &parse->options->request;
+	const fsimg_setting_targets_t targets = { .write = &request->write,
+	    .layers = &request->layers };
+	const fsimg_setting_slice_t *slice;
+	const fsimg_setting_t *row;
+	fsimg_setting_value_t converted;
+	fsimg_layer_info_t layer;
+	const char *text, *value, *qualifier, *key;
+	size_t length, key_length;
+	fsimg_status_t status;
 	bool creating;
 
 	creating = (parse->mode & MODES_CREATE) != 0;
+	text = parse->settings[index];
 	value = strchr(text, '=');
 	if (value == NULL)
 		return (syntax_naming(parse, "settings require key=value", text));
 	length = (size_t)(value - text);
 	value++;
+
+	/* Find the key's row: the filesystem's, or the selected layer's. */
+	slice = &fsimg_filesystem_settings;
+	key = text;
+	key_length = length;
 	qualifier = memchr(text, ':', length);
-	if (qualifier != NULL)
-		return (parse_layer_setting(parse, text, qualifier, value));
-	for (key = 0; key < CLI_SETTING_COUNT; key++) {
-		if (strlen(keys[key]) == length && strncmp(text, keys[key], length) == 0)
-			break;
-	}
-	if (key == CLI_SETTING_COUNT)
-		return (syntax_naming(parse, "unknown setting key", text));
-	if ((*seen & (1u << key)) != 0)
-		return (syntax_naming(parse, "setting key is given more than once", text));
-	*seen |= 1u << key;
-	if (key == CLI_SETTING_OEM) {
-		if (creating)
-			return (syntax_naming(parse, "the oem setting applies only to reading",
-			    text));
-		if (strcmp(value, "cp437") != 0)
-			return (syntax(parse, "read-side oem setting supports only cp437"));
-		return (FSIMG_OK);
-	}
-	if (!creating)
-		return (syntax_naming(parse, "setting applies only to creation", text));
-	switch (key) {
-	case CLI_SETTING_MOUNTPOINT:
-		if (strnlen(value, FSIMG_JOB_MOUNTPOINT_BYTES) ==
-		    FSIMG_JOB_MOUNTPOINT_BYTES)
-			return (syntax(parse, "mountpoint exceeds the command's text representation"));
-		write->mountpoint = value;
-		return (FSIMG_OK);
-	case CLI_SETTING_ENDIAN:
-		if (strcmp(value, "little") == 0)
-			write->byte_order = FSIMG_BYTE_ORDER_LITTLE;
-		else if (strcmp(value, "big") == 0)
-			write->byte_order = FSIMG_BYTE_ORDER_BIG;
-		else
-			return (syntax(parse, "endian setting must be little or big"));
-		return (FSIMG_OK);
-	case CLI_SETTING_UUID:
-		parse->options->uuid_given = true;
-		return (parse_uuid(parse, value, write->volume_uuid));
-	case CLI_SETTING_INODES:
-	case CLI_SETTING_RESERVE:
-		if (fsimg_cli_number(value, false, &number, parse->error) != FSIMG_OK)
+	if (qualifier != NULL) {
+		if (!find_layer(text, (size_t)(qualifier - text), &layer))
+			return (syntax_naming(parse, "unknown setting layer", text));
+		if (!layer_selected(parse, &layer))
 			return (syntax_naming(parse,
-			    "setting requires an unsigned decimal count", text));
-		if (key == CLI_SETTING_RESERVE) {
-			if (number > 100)
-				return (syntax(parse, "reserve setting is a percentage up to 100"));
-			write->reserve_percent = (uint32_t)number;
-		} else {
-			if (number == 0 || number > UINT32_MAX)
-				return (syntax(parse, "inodes setting must be a positive uint32 count"));
-			write->inode_capacity = (uint32_t)number;
-		}
-		return (FSIMG_OK);
-	default:
-		break;
+			    "setting names a layer the stack does not contain",
+			    text));
+		if (creating && (layer.capabilities & FSIMG_CAP_WRITE) == 0)
+			return (defer_setting(parse, index, length));
+		slice = fsimg_layer_find(layer.name)->settings;
+		key = qualifier + 1;
+		key_length = length - (size_t)(key - text);
 	}
-	if (fsimg_cli_number(value, true, &number, parse->error) != FSIMG_OK)
-		return (syntax_naming(parse, "setting requires a byte quantity", text));
-	if (number == 0 || number > UINT32_MAX)
-		return (syntax(parse, "geometry setting must be a positive uint32 byte quantity"));
-	if (key == CLI_SETTING_SECTOR)
-		write->sector_bytes = (uint32_t)number;
+	row = slice == NULL ? NULL : fsimg_setting_find(slice, key, key_length);
+	if (row == NULL)
+		return (syntax_naming(parse, qualifier != NULL ?
+		    "unknown layer setting" : "unknown setting key", text));
+
+	/* The row's repetition and mode, whatever its value would be. */
+	if (setting_given(parse, row, index))
+		return (syntax_naming(parse, "setting key is given more than once",
+		    text));
+	parse->setting_rows[index] = row;
+	if (creating && (row->scope & FSIMG_SCOPE_WRITE) == 0)
+		return (syntax_naming(parse, "setting applies only to reading",
+		    text));
+	if (!creating && (row->scope & FSIMG_SCOPE_READ) == 0)
+		return (syntax_naming(parse, "setting applies only to creation",
+		    text));
+
+	status = convert_setting(parse, row, value, text, &converted);
+	if (status != FSIMG_OK)
+		return (status);
+	if (row->syntax == FSIMG_SYNTAX_PATH)
+		parse->options->setting_paths[row->file] = value;
 	else
-		write->allocation_unit_bytes = (uint32_t)number;
+		fsimg_setting_store(row, &targets, &converted);
 	return (FSIMG_OK);
 }
 
@@ -1186,7 +1051,7 @@ interpret_common(cli_parse_t *parse)
 	fsimg_layer_info_t layer;
 	const char *value;
 	uint64_t number;
-	unsigned limit_keys, setting_keys;
+	unsigned limit_keys;
 	fsimg_status_t status;
 
 	options->image = option_value(parse, 'f');
@@ -1232,12 +1097,8 @@ interpret_common(cli_parse_t *parse)
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	setting_keys = 0;
 	for (unsigned i = 0; i < parse->setting_count; i++) {
-		if (setting_repeats(parse, i))
-			return (syntax_naming(parse, "setting key is given more than once",
-			    parse->settings[i]));
-		status = parse_setting(parse, parse->settings[i], &setting_keys);
+		status = parse_setting(parse, i);
 		if (status != FSIMG_OK)
 			return (status);
 	}
@@ -1690,11 +1551,12 @@ validate_creation(cli_parse_t *parse)
 	if (option_count(parse, 'L') == 0)
 		request->write.label = info.max_label_bytes != 0 ? "FSIMG" : NULL;
 	/* Like the serial, a format's UUID is random unless reproducible or
-	 * given.
+	 * given; a given nil UUID is kept.
 	 */
 	options->random_uuid = (info.write_settings & FSIMG_SETTING_VOLUME_UUID) != 0 &&
 	    (request->write.flags & FSIMG_WRITE_REPRODUCIBLE) == 0 &&
-	    !options->uuid_given;
+	    !setting_given(parse, fsimg_setting_find(&fsimg_filesystem_settings,
+	    "uuid", strlen("uuid")), parse->setting_count);
 	if (request->write.label != NULL &&
 	    strnlen(request->write.label, sizeof(request->label_storage)) ==
 	    sizeof(request->label_storage))
@@ -1883,6 +1745,7 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 		    FSIMG_OP_CONTEXT, parse.unsupported);
 	free(parse.limits);
 	free(parse.settings);
+	free(parse.setting_rows);
 	return (status);
 }
 

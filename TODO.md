@@ -2,15 +2,16 @@
 
 ## Major initiatives
 
-* [Medium] **Settings, metadata losses and container-plan consolidation**
-  (`lib/layers/`, `lib/write/`, `lib/formats/`, `cmd/fsimg/`): implement the
-  [settings catalogue](specs/design-settings.md),
-  [writer loss policy](specs/design-metadata-loss.md), and
+* [Medium] **Metadata losses and container-plan consolidation**
+  (`lib/layers/`, `lib/write/`, `lib/formats/`): implement the
+  [writer loss policy](specs/design-metadata-loss.md) and
   [private container plans](specs/design-container-plans.md) under the
   [consolidation sequence](docs/implementation-plan.md#settings-and-plan-consolidation).
-  Replace duplicate descriptions and policy decisions, give container resources
-  one private owner, and preserve public options, wire bytes, image output,
-  validation timing, and resource bounds with common contract coverage.
+  Replace duplicate policy decisions, give container resources one private
+  owner, and preserve public options, wire bytes, image output, validation
+  timing, and resource bounds with common contract coverage. Container plans
+  consume the typed options the [settings catalogue](specs/design-settings.md)
+  describes.
 
 * [High] **QNX6 read/write and automotive qualification**
   (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): the classic reader,
@@ -344,6 +345,15 @@
   use session-aware reads as the [container-plan design](specs/design-container-plans.md)
   specifies. Add a failing regression for cumulative prefix and output work,
   including short callback transfers, before the implementation change.
+
+* [Low] **Two integration oracles depend on the Linux host's setup**
+  (`test/fat-integration.sh.in`, `test/containers-integration.sh.in`): under
+  the POSIX locale the mtools-populated fixture fails `test/fat.c`'s Unicode
+  long-name read-back (`saw_unicode`); it passes under `C.UTF-8`. qemu-img 8.2 reports a fixed VHD's virtual size from the
+  footer's CHS geometry, so the `qemu-img info size` check fails on Ubuntu
+  24.04 while `qemu-img convert` still expands the VHD to the same bytes.
+  Pin the scripts' locale, and accept the geometry-derived size or check the
+  converted length instead.
 
 * [Low] **A failed extraction keeps any error path, not only an entry's**
   (`lib/extract/extract.c` `report_destination`, `include/fsimg.h`): the

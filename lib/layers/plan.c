@@ -175,9 +175,9 @@ resolve_container(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 }
 
 /*
- * Borrow the request's file settings, each refused naming its key unless
- * its layer is in the stack and its object is of the plan's context, and
- * record each host file's identity and the object's length before anything
+ * Borrow the request's file settings, whose layers the options check has
+ * already found in the stack, each refused naming its key unless its
+ * object is of the plan's context, and record each host file's identity and the object's length before anything
  * reads it, so that after the copy fsimg_disk_plan_inputs_unchanged can
  * tell whether it changed. A file whose length moved since its object was
  * made is refused as changed here, since the object would read only the
@@ -190,8 +190,7 @@ record_inputs(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 	fsimg_planned_file_t *input;
 	fsimg_status_t status;
 
-	status = fsimg_layer_inputs_check(request->stack, request->inputs,
-	    error);
+	status = FSIMG_OK;
 	for (unsigned i = 0; status == FSIMG_OK && i < FSIMG_FILE_SETTINGS;
 	    i++) {
 		input = &plan->files[i];
@@ -357,7 +356,7 @@ fsimg_disk_plan_init(fsimg_ctx_t *ctx, const fsimg_disk_request_t *request,
 	    &plan->compression, error);
 	if (status == FSIMG_OK)
 		status = fsimg_layer_options_check(stack, plan->compression,
-		    layers, true, error);
+		    layers, request->inputs, true, error);
 	if (status == FSIMG_OK)
 		status = record_inputs(ctx, plan, request, error);
 	if (status == FSIMG_OK)
