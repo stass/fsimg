@@ -468,13 +468,14 @@ store_member(const fsimg_setting_t *row, unsigned char *member,
 		break;
 	case FSIMG_KIND_TEXT:
 		/* The whole member is defined: the text, then zeros. A NULL
-		 * text is the empty default.
+		 * text is the empty default. Copy before clearing the tail,
+		 * since a loaded text can point into this same member.
 		 */
-		bzero(member, row->size);
-		if (value->text == NULL)
-			break;
-		length = strnlen(value->text, row->size - 1);
-		bcopy(value->text, member, length);
+		length = value->text == NULL ? 0 :
+		    strnlen(value->text, row->size - 1);
+		if (length != 0)
+			bcopy(value->text, member, length);
+		bzero(member + length, row->size - length);
 		break;
 	case FSIMG_KIND_ID16:
 		bcopy(value->id, member, sizeof(value->id));

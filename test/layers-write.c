@@ -115,6 +115,7 @@ static fsimg_status_t open_disk(fixture_t *, memory_t *, uint32_t,
 static unsigned leftover_staging(const fixture_t *);
 static void test_settings(void);
 static void test_wrap_settings(void);
+static void test_wrap_checks_settings_before_reading(void);
 static void test_derived_defaults(void);
 static void test_container_plan_facts(void);
 static void test_construction_failures(void);
@@ -1430,6 +1431,53 @@ test_wrap_settings(void)
 	fixture_free(&f);
 }
 
+/* Invalid layer settings are rejected before either ordinary volume probes
+ * or a carried filesystem's verification reads any input or touches a sink.
+ */
+static void
+test_wrap_checks_settings_before_reading(void)
+{
+	static const char *const stacks[] = { "fat12", "ifs/ifsboot" };
+	fsimg_layer_options_t layers;
+	fsimg_write_options_t options;
+	fsimg_io_t *input, *output;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	memory_t volume, disk;
+	fixture_t f;
+
+	fixture_init(&f);
+	make_volume(&f, "fat12", MIB, &volume);
+	input = memory_io(&f, &volume);
+	bzero(&disk, sizeof(disk));
+	output = memory_io(&f, &disk);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+	fsimg_layer_options_init(&layers);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, &layers);
+	for (size_t i = 0; i < sizeof(stacks) / sizeof(stacks[0]); i++) {
+		fsimg_layer_options_init(&layers);
+		layers.simg_crc = true;
+		volume.reads = 0;
+		CHECK(fsimg_image_wrap(f.ctx, input, stacks[i], &options, &sink,
+		    &error) == FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "simg:crc") == 0);
+		CHECK(volume.reads == 0 && disk.length == 0 && disk.writes == 0);
+
+		fsimg_layer_options_init(&layers);
+		memset(&layers.mbr_active, 2, sizeof(layers.mbr_active));
+		CHECK(fsimg_image_wrap(f.ctx, input, stacks[i], &options, &sink,
+		    &error) == FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "mbr:active") == 0);
+		CHECK(volume.reads == 0 && disk.length == 0 && disk.writes == 0);
+	}
+	fsimg_io_free(output);
+	fsimg_io_free(input);
+	memory_free(&disk);
+	memory_free(&volume);
+	fixture_free(&f);
+}
+
 /*
  * Wrap puts a volume into a scheme, typed from its filesystem, and unwrap
  * returns it byte for byte. A stack naming the filesystem must match the
@@ -2326,6 +2374,7 @@ main(void)
 	test_epochs_change_only_identifiers();
 	test_wrap_unwrap();
 	test_wrap_settings();
+	test_wrap_checks_settings_before_reading();
 	test_sinks();
 	test_stream_budget();
 	test_simg_changed_input();

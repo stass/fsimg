@@ -591,6 +591,7 @@ static void
 test_store(void)
 {
 	const fsimg_setting_t *id, *type, *mountpoint;
+	fsimg_setting_records_t records;
 	fsimg_setting_targets_t targets;
 	fsimg_setting_value_t value;
 	fsimg_write_options_t write;
@@ -604,6 +605,7 @@ test_store(void)
 	fsimg_write_options_init(&write);
 	targets = (fsimg_setting_targets_t){ .write = &write,
 	    .layers = &layers };
+	records = (fsimg_setting_records_t){ .layers = &layers };
 
 	value = (fsimg_setting_value_t){ .u32 = 0 };
 	fsimg_setting_store(id, &targets, &value);
@@ -614,6 +616,18 @@ test_store(void)
 	fsimg_setting_store(type, &targets, &value);
 	CHECK(strcmp(layers.gpt_type, "esp") == 0);
 	for (size_t i = 3; i < sizeof(layers.gpt_type); i++)
+		CHECK(layers.gpt_type[i] == '\0');
+
+	/* A loaded text borrows the field: storing it back, including an
+	 * overlapping suffix, preserves the text and initializes the tail.
+	 */
+	fsimg_setting_load(type, &records, &value);
+	fsimg_setting_store(type, &targets, &value);
+	CHECK(strcmp(layers.gpt_type, "esp") == 0);
+	value.text++;
+	fsimg_setting_store(type, &targets, &value);
+	CHECK(strcmp(layers.gpt_type, "sp") == 0);
+	for (size_t i = 2; i < sizeof(layers.gpt_type); i++)
 		CHECK(layers.gpt_type[i] == '\0');
 
 	value = (fsimg_setting_value_t){ .text = "" };

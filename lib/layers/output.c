@@ -53,9 +53,9 @@ typedef struct assembled_disk {
 	fsimg_session_t	*session;
 } assembled_disk_t;
 
-static fsimg_status_t check_mode(const fsimg_write_options_t *,
-    fsimg_write_options_t *, fsimg_layer_options_t *, fsimg_layer_inputs_t *,
-    fsimg_error_t *);
+static fsimg_status_t check_mode(const fsimg_stack_t *,
+    const fsimg_write_options_t *, fsimg_write_options_t *,
+    fsimg_layer_options_t *, fsimg_layer_inputs_t *, fsimg_error_t *);
 static fsimg_status_t check_named_input(fsimg_ctx_t *, fsimg_io_t *,
     uint64_t, const fsimg_stack_t *, char [static 16], fsimg_error_t *);
 static fsimg_status_t check_carried_input(fsimg_ctx_t *, fsimg_io_t *,
@@ -156,14 +156,16 @@ fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
  * keeps that list complete. selected is
  * the defaults with the caller's flags, epoch and compression, which the
  * disk plan resolves, and layers and inputs copies of the caller's
- * records, so selected carries no pointer to either.
+ * records, so selected carries no pointer to either. Shared layer checks
+ * precede input selection, probing and verification for every output mode.
  */
 static fsimg_status_t
-check_mode(const fsimg_write_options_t *options,
+check_mode(const fsimg_stack_t *stack, const fsimg_write_options_t *options,
     fsimg_write_options_t *selected, fsimg_layer_options_t *layers,
     fsimg_layer_inputs_t *inputs, fsimg_error_t *error)
 {
 	fsimg_write_options_t defaults;
+	const fsimg_layer_t *compression;
 	fsimg_status_t status;
 	bool volume_defaults;
 
@@ -201,7 +203,12 @@ check_mode(const fsimg_write_options_t *options,
 		*inputs = *options->inputs;
 	bcopy(options->compression, selected->compression,
 	    sizeof(selected->compression));
-	return (FSIMG_OK);
+	status = fsimg_compression_named(selected->compression,
+	    sizeof(selected->compression), true, &compression, error);
+	if (status != FSIMG_OK)
+		return (status);
+	return (fsimg_layer_options_check(stack, compression, layers, inputs,
+	    true, error));
 }
 
 /* An empty disk with room for capacity regions, charging its copy to the
@@ -640,7 +647,8 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 		    "wrap needs a stack and an input in its context"));
 	status = fsimg_stack_parse(text, &stack, error);
 	if (status == FSIMG_OK)
-		status = check_mode(options, &selected, &layers, &inputs, error);
+		status = check_mode(&stack, options, &selected, &layers, &inputs,
+		    error);
 	if (status == FSIMG_OK)
 		status = fsimg_io_get_size(input, &length, error);
 	if (status != FSIMG_OK)
@@ -713,7 +721,8 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	bzero(&plan, sizeof(plan));
 	status = fsimg_sink_adopt(sink, FSIMG_RAW_NEVER, &raw_fd, error);
 	if (status == FSIMG_OK)
-		status = check_mode(options, &selected, &layers, &inputs, error);
+		status = check_mode(&stack, options, &selected, &layers, &inputs,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (selector != NULL && selector->kind == FSIMG_SELECT_SECTION)
@@ -782,7 +791,8 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 		    "compose needs a stack and its parts"));
 	status = fsimg_stack_parse(text, &stack, error);
 	if (status == FSIMG_OK)
-		status = check_mode(options, &selected, &layers, &inputs, error);
+		status = check_mode(&stack, options, &selected, &layers, &inputs,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (stack.slots[FSIMG_LAYER_FILESYSTEM].state == FSIMG_SLOT_NAMED ||
