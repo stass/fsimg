@@ -346,6 +346,15 @@ compressed input into a spool file first, then peels each layer down to a
 bounded I/O slice, which the filesystem driver opens as it opens a raw
 image. The design also owns `--partition` selection and the spool budget.
 
+The [scheme-planning contract](design-scheme-planning.md) gives each scheme
+its option resolution, identities, partition metadata, and scheme-specific
+constraints. Common disk planning owns bounded record allocation, alignment,
+placement, fixed-disk fit, container rounding, and output accounting. Create,
+wrap, and compose reach the same scheme operations, so adding a writer policy
+does not require another scheme-name branch in their common setup. GPT and MBR
+retain their bounded table representations and explicit read-side codecs; this
+boundary does not promise that arbitrary partition formats share one layout.
+
 Each writable container owns an immutable private
 [plan](design-container-plans.md), held by the common disk plan and borrowed
 by its encoder. Common composition reads only its granularity, transfer and
@@ -658,6 +667,40 @@ unsupported required capabilities fail explicitly. Private driver interfaces
 are not a plugin ABI. There is no dynamic driver loading in the product
 contract. A format feature is advertised only after its acceptance tests pass.
 
+### Generated rules and verification
+
+[Relic generation](design-relic-generation.md) is a development operation over
+project-owned rules and typed C bindings. It produces ordinary C11 tables and
+functions with no runtime Relic engine. The binding contract defines input
+types and ranges, absence, outputs, and diagnostic identities; generation
+rejects a module it cannot lower within that contract. Rule facts do not grant
+permission to read image bytes: existing bounded decoders establish their
+input spans and preserve their error classes before exposing values.
+
+The [whole-image backend](design-generated-verification.md) shares that rule,
+binding, and artifact contract and lowers supported relations to existing
+bounded metadata operations. A driver establishes the verification domain and
+input completeness needed for negation and aggregation, including the identity
+of distinct reference occurrences. Generated code borrows the same operation
+session and uses the same scratch storage, checked arithmetic, cancellation,
+and terminal failure owner as handwritten verification. It does not retain a
+resident fact database, expand intervals into per-block facts, or restart
+quotas at a generated phase.
+
+Logical rule order does not define runtime validation order. Each generated
+module has an explicit bounded execution contract preserving the driver's
+scope and deterministic error precedence. Signed Relic arithmetic is used
+only over proved representable domains; bindings do not truncate unsigned
+image values or reject a legal image to accommodate the generator. Unsupported
+lowering is a generation error, with the operation remaining in ordinary C.
+
+Rules, bindings, generated artifacts, and generation provenance are reviewed
+together. Normal builds use distributed generated C; explicit regeneration
+and CI checks establish reproducibility. Differential evaluation against Relic
+tests the backend, while independent fixtures and native implementations test
+the rule's truth. These are separate obligations: a shared rule cannot serve
+as its own format oracle.
+
 ### Specification-driven testing
 
 The [specification-driven test harness](design-spec-testing.md) classifies
@@ -711,6 +754,14 @@ on libseccomp or a container runtime. Optional archive integration cannot
 become necessary for raw-image operations. Imported code and generated
 tables receive file-level provenance and license review; test tools do not
 imply permission to copy them.
+
+Relic and the fsimg generation tool are development dependencies under the
+[generation contract](design-relic-generation.md). Regeneration records the
+generator identity and input digests without absolute host paths or timestamps.
+Release archives include the generated C and its source artifacts; compiling
+or running the library and CLI requires neither Relic nor a rule interpreter.
+Generated support code is subject to the same provenance and licensing checks
+as handwritten project code.
 
 The compression codecs that QNX boot images need, the LZO1X and NRV2B
 decoders and the LZO1X encoder, are project-owned C under the

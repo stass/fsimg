@@ -286,6 +286,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-container-plans.md \
 	specs/design-driver-contract-tests.md specs/design-verification-helpers.md \
 	specs/design-binary-primitives.md \
+	specs/design-scheme-planning.md specs/design-relic-generation.md \
+	specs/design-generated-verification.md \
 	specs/design-layers.md specs/design-content.md \
 	specs/design-directories.md specs/design-emission.md \
 	specs/design-holes.md specs/design-ifs.md specs/design-ifs-driver.md \

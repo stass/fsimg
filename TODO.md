@@ -2,6 +2,23 @@
 
 ## Major initiatives
 
+* [Medium] **Relic generation and bounded reference reconciliation**
+  (`tools/relic/`, format rule bindings, `lib/formats/`): implement and qualify
+  the [shared generation contract](specs/design-relic-generation.md) and
+  [whole-image target](specs/design-generated-verification.md) under the
+  [generation sequence](docs/implementation-plan.md#scheme-planning-and-relic-generation).
+  Relic needs a compatible restricted C backend; fsimg needs typed bindings,
+  deterministic checked-in artifacts and independent evidence. Prove the
+  maintenance benefit with static/local families and QNX6/QNX4 reference
+  checks before replacing native operations; no runtime Relic dependency.
+
+* [Low] **Scheme-owned planning** (`lib/layers/`, `lib/write/writer.c`):
+  implement the [scheme-planning design](specs/design-scheme-planning.md)
+  with GPT/MBR compatibility checks and a synthetic writer descriptor.
+  Keep common placement and bounded records, and demonstrate that the
+  operations remove repeated interpretation without adding another plan
+  allocation or extending the read model without a concrete format design.
+
 * [Medium] **Common driver contract coverage and binary primitives**
   (`test/`, `lib/core/`, `lib/layers/`, format/protocol scalar codecs):
   implement the [driver contract suites](specs/design-driver-contract-tests.md)

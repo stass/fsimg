@@ -40,7 +40,8 @@ layers add to it.
 | Layer descriptor, one per layer | Probe with its prefix table, read-side open (peel), write-side plan/encode/transcode with the file settings its profile declares, verification, settings and capability record |
 | Image (`lib/layers/image.c`) | Read-side peeling order, detection and forcing, partition enumeration and selection, the spool and the spool-backed peel, the layer verification report |
 | Container adapter and chunk index (`lib/layers/chunks.c`, `lib/meta/`) | Disk-offset to chunk resolution, the decompressed-chunk cache, chunk validation |
-| Disk plan (`lib/layers/plan.c`) | The exact-volume stack rule, disk sizing around a volume, partition placement, partition types and names, identifiers, the plan's disk and partition report |
+| Scheme write operations | Option resolution, scheme identities and partition metadata, scheme-specific constraints and report projection under the [scheme-planning contract](design-scheme-planning.md) |
+| Disk plan (`lib/layers/plan.c`) | The exact-volume stack rule, bounded partition records, disk sizing around volumes, alignment and placement, output bounds, and coordination of scheme reports |
 | Container plan | Immutable resolved settings and private resources, with a common summary and descriptor-owned destruction under the [container-plan contract](design-container-plans.md) |
 | Layered output (`lib/layers/output.c`) | The scheme tables written into the staged raw disk, the assembled disk, the transcode pass, the sequential sink, raw-intermediate lifetime |
 | Output coordinator (`lib/output/`) | Staging directory, publication, durability, unchanged |
@@ -166,7 +167,7 @@ format descriptors are. Its operations form a closed set per kind:
 | --- | --- | --- | --- |
 | Probe | Claims a disk from its prefix | Claims a file from its prefix, at offset 0 or at an offset of its closed [prefix table](#prefix-tables-opaque-sections-and-carried-volumes), and from its last 512 bytes | Claims a file from its prefix |
 | Peel (read) | Enumerates partitions as checked slices of the disk | Yields a read-only positional I/O object over the disk, backed by the chunk index or, for one unframed stream, by the [spool](#spool-backed-peel) | Decodes a sequential stream into the spool |
-| Plan (write) | Derives the disk length and the volume offset from the volume length and the container granularity | Constructs a private immutable plan with common composition facts; computes the encoded bound for the final disk length | Resolves encoding settings and computes an encoded bound |
+| Plan (write) | Resolves options, identities and partition metadata; declares footprint and constraints for common disk placement | Constructs a private immutable plan with common composition facts; computes the encoded bound for the final disk length | Resolves encoding settings and computes an encoded bound |
 | Encode (write) | Writes its tables at fixed disk offsets through bounded metadata writes | Transcodes a disk sequentially into the sink, copying in the [file settings](#file-settings-and-sections) its profile declares | Wraps a sequential sink |
 | Verify | Table checksums, consistency, partition bounds and overlap | Container checksums, chunk tiling and bounds; a profile may name fields it cannot verify, which make its [scope incomplete](#verification-scope) | Member checksums and length, at spool time |
 | Capability | Settings, read/write flags, sector sizes | Settings, codecs, codec version, the filesystem it carries when it carries a volume | Codec version |
@@ -524,6 +525,12 @@ volume plan -> scheme plan -> staged raw disk (emit volume, encode tables)
 ```
 
 ### Sizing
+
+The [scheme-planning design](design-scheme-planning.md) separates scheme
+resolution from common placement. It gives create, wrap, and compose one path
+for resolving disk and partition metadata. Common placement uses the resolved
+sector size, table footprint, limits, and container granularity; scheme
+operations do not acquire output or source authority.
 
 The disk plan resolves container settings into the immutable
 [container plan](design-container-plans.md) before volume placement. Its

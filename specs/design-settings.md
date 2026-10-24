@@ -274,6 +274,13 @@ adding a catalogue row cannot silently change the record layout.
 
 ## Compatibility and verification
 
+Scheme-specific relationships and identity resolution use the
+[scheme-planning boundary](design-scheme-planning.md). A profile table or local
+predicate generated under the [Relic contract](design-relic-generation.md)
+uses the same typed setting values; it does not create a second catalogue or
+infer a different worker encoding. The catalogue remains ordinary C data and
+requires no runtime rule engine.
+
 The catalogue preserves public option layouts, initializer defaults, key
 spellings, accepted syntax, capability membership and ordering, error classes,
 wire bytes, and output image bytes. It does not broaden a format's support

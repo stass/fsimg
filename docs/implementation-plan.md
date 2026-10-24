@@ -441,6 +441,29 @@ functions until their callers are converted mechanically. Implementation uses
 the review, regression-first, sanitizer and platform gates above, with actual
 checks recorded alongside the build commands.
 
+## Scheme planning and Relic generation
+
+The [analysis](architecture-analysis.md#priorities) separates scheme ownership
+from two generation targets. Scheme planning is independent of Relic. Generated
+verification depends on the common generation contract and the bounded metadata
+operations, and is adopted only after its complete maintenance and resource
+cost has been compared with native C.
+
+| Stage | Design and work | Completion evidence |
+| --- | --- | --- |
+| Scheme planning | [Scheme operations](../specs/design-scheme-planning.md): move option, identity, partition metadata and report interpretation behind descriptors while keeping common placement | GPT/MBR bytes, error timing, fixed fit and reports match; a synthetic third writer exercises dispatch and constraints without a new common name branch or claim of a new read format |
+| Generation boundary | [Relic generation](../specs/design-relic-generation.md): implement the compatible restricted backend in Relic and the fsimg-owned typed bindings and development tool | Unsupported modules fail generation; source/artifact provenance and deterministic regeneration are checked; normal builds need no Relic runtime or generator |
+| Static and local families | Derive a finite compatibility table and a bounded record predicate through that same pipeline | Independent fixtures and evaluator comparisons establish different claims; a second format reuses the mechanism; rule/binding/backend costs justify replacing the native operation |
+| Whole-image reference checks | [Generated verification](../specs/design-generated-verification.md): lower QNX6 reference reconciliation, then QNX4's distinct rules, to bounded collection/sort/group/merge operations | Set and occurrence semantics, per-key closure, early failure order, scratch bytes, passes and resource accounting match the design; native ownership/checksum phases remain intact |
+
+Relic's frontend and evaluator are available in `~/relic`; its C generation
+backend and the fsimg artifact workflow require implementation. The target
+designs do not assert that an existing evaluator plan can already produce
+standalone bounded C. Coordinate backend changes in the Relic repository under
+its own review requirements; keep fsimg's rule sources, bindings, generated
+outputs and provenance in one reviewed fsimg change. Do not expose an image
+feature or remove its native check on the strength of generation alone.
+
 ## Extension sequence
 
 QNX6 follows the [format design](../specs/design-qnx6.md), the

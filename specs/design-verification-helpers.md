@@ -521,6 +521,11 @@ ASCII source, explicit `_t` types, and `bcopy(src, dst, n)` argument order.
 
 ## Generated verification
 
+The [generated-verification design](design-generated-verification.md) specifies
+the Relic backend, complete input domains, concrete inode-reference lowering,
+and the shared [generation artifacts](design-relic-generation.md). The helpers
+here remain the owners of their bounded runtime mechanisms.
+
 A generated verifier uses these same operations when its rules lower to initialized
 content reading or strict exclusive runs. It borrows the existing reader session
 and uses the same metadata stores, resource accounting and failure lifecycle.

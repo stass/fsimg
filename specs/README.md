@@ -21,6 +21,9 @@ Implementation status and sequencing belong in the implementation plan and
 | [Driver contract tests](design-driver-contract-tests.md) | Declarative test profiles, registry coverage, shared scenarios, fault injection, and independent expectations |
 | [Verification helpers](design-verification-helpers.md) | Initialized-content read-through and bounded exclusive ownership runs with driver-owned reconciliation |
 | [Binary primitives](design-binary-primitives.md) | Explicit scalar endian codecs and context-backed zlib allocation with precise failure attribution |
+| [Scheme planning](design-scheme-planning.md) | Scheme-owned option and identity resolution, partition metadata, and the common placement boundary |
+| [Relic generation](design-relic-generation.md) | Static tables, record-local predicates, typed bindings, generated C artifacts, and reproducible regeneration |
+| [Generated verification](design-generated-verification.md) | Bounded relational lowering, complete input domains, inode-reference reconciliation, and generated verifier evidence |
 | [Hole knowledge](design-holes.md) | The written-range record of a fresh file, the zero-range operation every I/O object answers, and the reads a transcode may spare |
 | [Automatic sizing](design-sizing.md) | The default first-fit sizing policy and the minimization option, per format |
 | [Security](design-security.md) | Threat model, extraction, sandboxing, publication, and adversarial tests |

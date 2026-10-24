@@ -76,9 +76,9 @@ measurement or a claim that implementation is complete.
 | [Common driver contract tests](../specs/design-driver-contract-tests.md) | Alongside each change | High | Reconstructing common acceptance coverage for each driver |
 | [Verification helpers and ownership runs](../specs/design-verification-helpers.md) | Incremental | High for payload reads; narrower for ownership | Repeating bounded read, sort, cursor, and cleanup mechanics |
 | [Scalar codecs and zlib allocation](../specs/design-binary-primitives.md) | Small independent changes | High | Repeating primitive byte conversion and allocation adapters |
-| Scheme-owned planning details | With another scheme | Conditional | Teaching common planning every scheme's settings and identity rules |
-| Relic table and predicate generation | Focused experiment | High feasibility; benefit to establish | Repeating derived compatibility and validation logic |
-| Relic generation of whole-image verification | After the predicate experiment | Promising; backend work required | Handwriting relational reconciliation algorithms |
+| [Scheme-owned planning details](../specs/design-scheme-planning.md) | With another scheme | Conditional | Teaching common planning every scheme's settings and identity rules |
+| [Relic table and predicate generation](../specs/design-relic-generation.md) | Focused experiment | High feasibility; benefit to establish | Repeating derived compatibility and validation logic |
+| [Relic generation of whole-image verification](../specs/design-generated-verification.md) | After the predicate experiment | Promising; backend work required | Handwriting relational reconciliation algorithms |
 
 ## Simplifications in C
 
@@ -214,6 +214,9 @@ callback interface for every format would fail this test.
 
 ### Scheme-owned planning details
 
+The [scheme-planning design](../specs/design-scheme-planning.md) defines the
+operations, ownership, normalization, placement constraints, and extension tests.
+
 Partition schemes have operation tables, but `fsimg_disk_plan_init()` in
 [plan.c](../lib/layers/plan.c) selects GPT-specific handling by name and otherwise
 uses MBR handling. Writer setup in [writer.c](../lib/write/writer.c) also chooses
@@ -251,6 +254,11 @@ Changes to failures, ownership, or scratch validation need regression evidence,
 even when their interfaces are small.
 
 ## Declarative rules and Relic
+
+The [generation design](../specs/design-relic-generation.md) defines static
+tables and local predicates, the typed binding boundary, and release artifacts.
+The [generated-verification design](../specs/design-generated-verification.md)
+uses that same contract for bounded relational execution and inode reconciliation.
 
 Relic is the intended Datalog tool for this work. Use its language and semantic
 analysis as the foundation for experiments. A separate fsimg rule language would
@@ -348,10 +356,10 @@ A fragment in Relic syntax expresses the first two relations:
 referenced(S, I) :- reference(S, _, I).
 
 named_free_inode(S, I) :-
-    inventory_complete(S), referenced(S, I), not allocated_inode(S, I).
+    inode(S, I), referenced(S, I), not allocated_inode(S, I).
 
 unreferenced_inode(S, I) :-
-    inventory_complete(S), allocated_inode(S, I), not referenced(S, I).
+    inode(S, I), allocated_inode(S, I), not referenced(S, I).
 ```
 
 `S` is the verification domain, such as the selected snapshot. Each
@@ -360,10 +368,17 @@ link-count aggregate retains even though the `referenced` projection drops it.
 The driver supplies the appropriate root, dot, and other implicit references.
 The fragment assumes the format requires every allocated inode in that domain
 to have a reference; another format can define a narrower inventory.
+`inode` enumerates the table's validated key domain. Completeness is a producer
+contract, not a rule fact a caller can set: references are sealed after their
+complete walk, and a successful ordered inode decode closes that key's
+allocation facts. Later rows cannot change those facts. An unread or failed
+row never becomes an absent allocation.
 
 A backend can implement the rules with an external sort of references by inode,
 grouped counting, and a merge against inode records. It need not retain all
-facts in memory or materialize every intermediate relation. Producing that
+facts in memory or materialize every intermediate relation. For the QNX6
+binding, grouping and inode checks are interleaved per key, retaining the native
+lookahead and failure order. Producing that
 plan is a substantive compiler feature, not an automatic consequence of writing
 the rules or emitting C.
 
@@ -404,8 +419,10 @@ not a prerequisite for useful generated validators.
   overflow; dropping a failed binding can make a negated rule accept bad data.
 * **Complete domains for negation.** Stratification completes derived relations
   over the supplied facts; it cannot prove that a lazy scanner supplied every
-  image fact. Establish inventory completeness before absence checks. Selected
-  traversal cannot infer whole-volume unreferenced objects.
+  image fact. A sealed complete stream or a proved per-key closure in an ordered
+  unique native source authorizes the corresponding absence check; an unkeyed
+  negative needs its complete dependency. Selected traversal cannot infer
+  whole-volume unreferenced objects.
 * **Set semantics and occurrences.** Preserve identities for distinct directory
   slots, names, and allocation claims. Set deduplication must not erase the
   multiplicity needed to detect duplicate claims or check link counts.

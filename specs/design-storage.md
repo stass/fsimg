@@ -500,6 +500,14 @@ records, QNX4 its bitset, and ImageFS its separate reference checks. Reconciliat
 against allocation tables or bitmaps, reserved structures, and legal sharing
 stay with the driver.
 
+The [generated-verification backend](design-generated-verification.md) uses
+these same streams and sorts for admitted reference grouping and merge checks.
+It records intermediate cardinality and byte bounds, uses per-key closure only
+where an ordered unique source proves it, and preserves the driver's scan and
+failure order. A native table is not copied into scratch merely to turn it into
+a logical relation. Generated operations borrow the existing session and never
+fall back to resident engine relations when a storage limit is reached.
+
 Cross-linked regular files cannot amplify default extraction beyond the
 logical-output budget. Detection of a cross-link during full verification is
 corruption; normal selected-file reads do not claim global cross-link absence.
