@@ -220,14 +220,17 @@ bool fsimg_setting_is_default(const fsimg_setting_t *,
     const fsimg_setting_records_t *);
 /*
  * The structural check of one row: a TEXT member terminated within its
- * size, an enum value one of the row's choices, and a value whose presence
- * flag is clear holding its default. A failure is FSIMG_EINVAL naming the
+ * size, a bool member and presence flag each 0 or 1, an enum value one of
+ * the row's choices, and a value whose presence flag is clear holding its
+ * default. A failure is FSIMG_EINVAL naming the
  * canonical key in error.path.
  */
 fsimg_status_t fsimg_setting_check(const fsimg_setting_t *,
     const fsimg_setting_records_t *, fsimg_error_t *);
 
-/* Store every default of a slice's rows of one record. */
+/* Store every default of a slice's rows of one record, which targets
+ * must hold.
+ */
 void fsimg_settings_init(const fsimg_setting_slice_t *,
     const fsimg_setting_targets_t *, fsimg_setting_record_t);
 /*

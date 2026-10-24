@@ -23,19 +23,23 @@
  * checks the entry points run.
  */
 
-/* One public member the catalogue must bind, by offset and size. */
+/* One public member the catalogue must bind, by offset and size; align
+ * is its declared type's alignment where a list uses it, else 1.
+ */
 typedef struct member {
 	const char	*name;
 	size_t		 offset;
 	size_t		 size;
+	size_t		 align;
 } member_t;
 
 #define LAYER_MEMBER(m)	{ #m, offsetof(fsimg_layer_options_t, m),	\
-	sizeof(((fsimg_layer_options_t *)NULL)->m) }
-#define WRITE_MEMBER(m)	{ #m, offsetof(fsimg_write_options_t, m),	\
-	sizeof(((fsimg_write_options_t *)NULL)->m) }
+	sizeof(((fsimg_layer_options_t *)NULL)->m), 1 }
+/* A write options member and its type as fsimg.h declares it. */
+#define WRITE_MEMBER(m, type)	{ #m, offsetof(fsimg_write_options_t, m),	\
+	sizeof(((fsimg_write_options_t *)NULL)->m), _Alignof(type) }
 #define INPUT_MEMBER(m)	{ #m, offsetof(fsimg_layer_inputs_t, m),	\
-	sizeof(((fsimg_layer_inputs_t *)NULL)->m) }
+	sizeof(((fsimg_layer_inputs_t *)NULL)->m), 1 }
 
 /* Every member of fsimg_layer_options_t but its reserved words. */
 static const member_t layer_members[] = {
@@ -63,10 +67,13 @@ static const member_t layer_members[] = {
 
 /* The filesystem settings of fsimg_write_options_t. */
 static const member_t write_members[] = {
-	WRITE_MEMBER(sector_bytes), WRITE_MEMBER(allocation_unit_bytes),
-	WRITE_MEMBER(byte_order), WRITE_MEMBER(volume_uuid),
-	WRITE_MEMBER(inode_capacity), WRITE_MEMBER(reserve_percent),
-	WRITE_MEMBER(mountpoint)
+	WRITE_MEMBER(sector_bytes, uint32_t),
+	WRITE_MEMBER(allocation_unit_bytes, uint32_t),
+	WRITE_MEMBER(byte_order, fsimg_byte_order_t),
+	WRITE_MEMBER(volume_uuid, unsigned char),
+	WRITE_MEMBER(inode_capacity, uint32_t),
+	WRITE_MEMBER(reserve_percent, uint32_t),
+	WRITE_MEMBER(mountpoint, const char *)
 };
 
 static const member_t input_members[] = {
@@ -111,6 +118,8 @@ static fsimg_status_t check_layers(const char *, const char *,
     const fsimg_layer_options_t *, const fsimg_layer_inputs_t *, bool,
     fsimg_error_t *);
 static void test_file_settings(void);
+static void test_bool_bytes(void);
+static void test_write_member_coverage(void);
 
 /* Every slice belongs to the one layer naming it, keys are unique, and a
  * layer's file settings come first.
@@ -125,8 +134,11 @@ test_slices(void)
 
 	slice = &fsimg_filesystem_settings;
 	for (size_t i = 0; i < slice->count; i++) {
-		CHECK(slice->rows[i].owner == NULL);
-		CHECK(slice->rows[i].record != FSIMG_RECORD_INPUTS);
+		row = &slice->rows[i];
+		CHECK(row->owner == NULL);
+		CHECK(row->record != FSIMG_RECORD_INPUTS);
+		CHECK(fsimg_setting_find(slice, row->key, strlen(row->key)) ==
+		    row);
 	}
 	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
 		slice = layer->settings;
@@ -272,6 +284,9 @@ test_masks_and_files(void)
 	};
 	const fsimg_setting_slice_t *slice = &fsimg_filesystem_settings;
 	const fsimg_setting_t *row;
+	fsimg_format_info_t info;
+	size_t cursor;
+	uint32_t covered;
 	unsigned found;
 	char key[32];
 
@@ -289,6 +304,13 @@ test_masks_and_files(void)
 		row = &slice->rows[i];
 		CHECK(row->support == 0 || (row->support & (row->support - 1)) == 0);
 	}
+	/* Every bit a registered format declares has its row. */
+	covered = 0;
+	for (size_t i = 0; i < slice->count; i++)
+		covered |= slice->rows[i].support;
+	cursor = 0;
+	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK)
+		CHECK((info.write_settings & ~covered) == 0);
 	for (unsigned f = 0; f < FSIMG_FILE_SETTINGS; f++) {
 		fsimg_file_setting_name(f, key, sizeof(key));
 		CHECK(strcmp(key, file_keys[f]) == 0);
@@ -322,6 +344,13 @@ test_rows(void)
 			row = &slices[i]->rows[j];
 			CHECK((row->scope & (FSIMG_SCOPE_READ |
 			    FSIMG_SCOPE_WRITE)) != 0);
+			/* Error paths render keys into 32-byte buffers. */
+			CHECK((row->owner == NULL ? 0 : strlen(row->owner) + 1) +
+			    strlen(row->key) < 32);
+			/* Texts compare by emptiness, so their default is empty. */
+			CHECK(row->kind != FSIMG_KIND_TEXT ||
+			    row->initial.text == NULL ||
+			    row->initial.text[0] == '\0');
 			switch (row->syntax) {
 			case FSIMG_SYNTAX_BYTES:
 			case FSIMG_SYNTAX_COUNT:
@@ -758,6 +787,101 @@ test_file_settings(void)
 	CHECK(!fsimg_layer_section(NULL, "prefix", &setting));
 }
 
+/*
+ * Every member of fsimg_write_options_t is one of: a catalogue row (above),
+ * a mode field an operation without a filesystem writer passes through,
+ * or an ordinary volume field that check_mode in lib/layers/output.c
+ * requires at its default. Listed members are disjoint, and an unlisted
+ * run of bytes is accepted only as the exact padding that aligns the
+ * member after it (or the record's end), so a member added to the public
+ * record without being placed in one of these lists, and so in wrap's
+ * check, fails here.
+ */
+static void
+test_write_member_coverage(void)
+{
+	static const member_t passed[] = {
+		WRITE_MEMBER(size, size_t), WRITE_MEMBER(version, uint32_t),
+		WRITE_MEMBER(flags, uint32_t), WRITE_MEMBER(epoch, int64_t),
+		WRITE_MEMBER(layers, const fsimg_layer_options_t *),
+		WRITE_MEMBER(inputs, const fsimg_layer_inputs_t *),
+		WRITE_MEMBER(compression, char)
+	};
+	static const member_t checked[] = {
+		WRITE_MEMBER(volume_bytes, uint64_t),
+		WRITE_MEMBER(min_free_bytes, uint64_t),
+		WRITE_MEMBER(label, const char *),
+		WRITE_MEMBER(fat_root_entries, uint32_t),
+		WRITE_MEMBER(volume_serial, uint32_t),
+		WRITE_MEMBER(reserved, uint64_t)
+	};
+	const member_t *lists[] = { write_members, passed, checked };
+	const size_t counts[] = {
+		sizeof(write_members) / sizeof(write_members[0]),
+		sizeof(passed) / sizeof(passed[0]),
+		sizeof(checked) / sizeof(checked[0])
+	};
+	unsigned char coverage[sizeof(fsimg_write_options_t)];
+	size_t start, end, align;
+
+	bzero(coverage, sizeof(coverage));
+	for (size_t l = 0; l < sizeof(lists) / sizeof(lists[0]); l++) {
+		for (size_t i = 0; i < counts[l]; i++)
+			mark_member(coverage, sizeof(coverage), lists[l][i].offset,
+			    lists[l][i].size);
+	}
+	for (start = 0; start < sizeof(coverage); start = end) {
+		end = start + 1;
+		if (coverage[start] != 0)
+			continue;
+		while (end < sizeof(coverage) && coverage[end] == 0)
+			end++;
+		/* The alignment of what follows the run. */
+		align = _Alignof(fsimg_write_options_t);
+		for (size_t l = 0; l < sizeof(lists) / sizeof(lists[0]); l++) {
+			for (size_t i = 0; i < counts[l]; i++) {
+				if (lists[l][i].offset == end)
+					align = lists[l][i].align;
+			}
+		}
+		if ((start + align - 1) / align * align != end)
+			fprintf(stderr, "write options bytes %zu-%zu are unlisted\n",
+			    start, end - 1);
+		CHECK((start + align - 1) / align * align == end);
+	}
+}
+
+/*
+ * A bool member or presence flag holding a byte other than 0 or 1 is not
+ * a bool: it is refused naming its key, never read as false, so a stray
+ * setting of an absent layer cannot pass as absent.
+ */
+static void
+test_bool_bytes(void)
+{
+	static const unsigned char garbage[] = { 2, 0x80, 0xff };
+	fsimg_layer_options_t layers;
+	fsimg_error_t error;
+
+	for (size_t i = 0; i < sizeof(garbage) / sizeof(garbage[0]); i++) {
+		fsimg_layer_options_init(&layers);
+		bcopy(&garbage[i], &layers.mbr_id_set, 1);
+		CHECK(check_layers("fat32", NULL, &layers, NULL, true, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "mbr:id") == 0);
+		fsimg_layer_options_init(&layers);
+		bcopy(&garbage[i], &layers.ifsboot_virtual_set, 1);
+		CHECK(check_layers("ifs/ifsboot", NULL, &layers, NULL, true,
+		    &error) == FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "ifsboot:virtual") == 0);
+		fsimg_layer_options_init(&layers);
+		bcopy(&garbage[i], &layers.simg_crc, 1);
+		CHECK(check_layers("fat32/simg", NULL, &layers, NULL, true,
+		    &error) == FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "simg:crc") == 0);
+	}
+}
+
 int
 main(void)
 {
@@ -774,6 +898,8 @@ main(void)
 	test_write_applicability();
 	test_layer_applicability();
 	test_file_settings();
+	test_bool_bytes();
+	test_write_member_coverage();
 	printf("settings tests passed\n");
 	return (0);
 }
