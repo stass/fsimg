@@ -14,6 +14,7 @@
 
 #include "cli.h"
 #include "internal.h"
+#include "settings.h"
 #include "test.h"
 
 static void test_numbers(void);
@@ -27,6 +28,7 @@ static void test_create_operands(void);
 static bool argument_starts(char *const *, const char *);
 static bool every_layer_key_in(char *const *const *);
 static void test_stacks(void);
+static void test_setting_values(void);
 static void test_extract_options(void);
 static void test_stems(void);
 static void test_long_listing(void);
@@ -592,14 +594,44 @@ test_stacks(void)
 		{ "fsimg", "-i", "-f", "image", "-F", "ifs/ifsboot", "-o",
 		    "ifsboot:startup=s.bin", NULL },
 		{ "fsimg", "-W", "-f", "image", "-F", "ifs/ifsboot", "-o",
-		    "ifsboot:prefix=p.bin", NULL }
+		    "ifsboot:prefix=p.bin", NULL },
+		/* An unwritable layer's keys are uninterpreted, not unchecked
+		 * for repetition.
+		 */
+		{ "fsimg", "-cn", "-F", "ifs/hbcifs", "-o", "hbcifs:a=1", "-o",
+		    "hbcifs:a=2", ".", NULL },
+		/* An unqualified key is a filesystem key, never a layer's. */
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "level=9", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/gpt", "-o", "GPT:sector=512", ".",
+		    NULL },
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "dmg:compress=ZLIB", ".",
+		    NULL },
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "dmg:level=+1", ".",
+		    NULL },
+		{ "fsimg", "-cn", "-F", "fat32/dmg", "-o", "dmg:level=-1", ".",
+		    NULL },
+		{ "fsimg", "-cn", "-F", "fat32/vhd", "-o", "vhd:align=1Mx", ".",
+		    NULL },
+		{ "fsimg", "-cn", "-F", "fat32/gpt", "-o",
+		    "gpt:disk=18446744073709551616", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32/gpt", "-o", "gpt:sector=2K", ".",
+		    NULL },
+		{ "fsimg", "-cn", "-F", "fat32/mbr", "-o",
+		    "mbr:type=0123456789abcdef", ".", NULL },
+		{ "fsimg", "-cn", "-F", "ifs/ifsboot", "-o",
+		    "ifsboot:machine=4294967296", ".", NULL },
+		{ "fsimg", "-cn", "-F", "fat32", "-o", "sector=0", ".", NULL },
+		{ "fsimg", "-cn", "-F", "qnx6", "-o", "endian=little", "-o",
+		    "endian=little", ".", NULL }
 	};
 	char *unsupported[][12] = {
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
 		{ "fsimg", "-cM", "-F", "fat32", "-f", "out.img", ".", NULL },
 		{ "fsimg", "-t", "-f", "image", "/a", "/b", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.zst", ".", NULL },
-		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.XZ", ".", NULL }
+		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.XZ", ".", NULL },
+		{ "fsimg", "-c", "-a", "-F", "fat32", "-o", "zstd:level=1", "-f",
+		    "out.img.zst", ".", NULL }
 	};
 	/* Containers, gzip and streams are written; with -a a container
 	 * suffix must name the stack's container and selects nothing more.
@@ -770,6 +802,70 @@ test_stacks(void)
 	CHECK(strcmp(options.request.stack.slots[FSIMG_LAYER_CONTAINER].name,
 	    "dmg") == 0);
 	fsimg_cli_release(&options);
+}
+
+/*
+ * Values the catalogue's syntax classes accept: units on byte quantities,
+ * a key repeated only across distinct rows, the default reserve given
+ * explicitly, an explicit nil UUID that suppresses the random one, and a
+ * read-only layer's key left for the library to refuse with its layer.
+ */
+static void
+test_setting_values(void)
+{
+	char *sector_unit[] = { "fsimg", "-cn", "-F", "fat32/gpt", "-o",
+	    "gpt:sector=4K", ".", NULL };
+	char *type_capacity[] = { "fsimg", "-cn", "-F", "fat32/mbr", "-o",
+	    "mbr:type=0123456789abcde", ".", NULL };
+	char *reserve_default[] = { "fsimg", "-cn", "-F", "fat32", "-o",
+	    "reserve=3", ".", NULL };
+	char *nil_uuid[] = { "fsimg", "-cn", "-F", "qnx6", "-o",
+	    "uuid=00000000-0000-0000-0000-000000000000", ".", NULL };
+	char *random_uuid[] = { "fsimg", "-cn", "-F", "qnx6", ".", NULL };
+	char *read_only[] = { "fsimg", "-cn", "-F", "ifs/hbcifs", "-o",
+	    "hbcifs:anything=garbage", ".", NULL };
+	char *oem[] = { "fsimg", "-i", "-f", "image", "-o", "oem=cp437", NULL };
+	char *virtual_no[] = { "fsimg", "-cn", "-F", "ifs/ifsboot", "-o",
+	    "ifsboot:virtual=no", "-o", "mbr:id=0x0", ".", NULL };
+	char *virtual_only[] = { "fsimg", "-cn", "-F", "ifs/ifsboot", "-o",
+	    "ifsboot:virtual=no", ".", NULL };
+	const fsimg_setting_t *mountpoint;
+	fsimg_read_options_t read_defaults;
+	fsimg_cli_options_t options;
+
+	CHECK(parse(sector_unit, &options) == FSIMG_OK);
+	CHECK(options.request.layers.gpt_sector_bytes == 4096);
+	fsimg_cli_release(&options);
+	CHECK(parse(type_capacity, &options) == FSIMG_OK);
+	CHECK(strlen(options.request.layers.mbr_type) == 15);
+	fsimg_cli_release(&options);
+	CHECK(parse(reserve_default, &options) == FSIMG_OK);
+	CHECK(options.request.write.reserve_percent == 3);
+	fsimg_cli_release(&options);
+	CHECK(parse(nil_uuid, &options) == FSIMG_OK);
+	CHECK(!options.random_uuid);
+	fsimg_cli_release(&options);
+	CHECK(parse(random_uuid, &options) == FSIMG_OK);
+	CHECK(options.random_uuid);
+	fsimg_cli_release(&options);
+	CHECK(parse(read_only, &options) == FSIMG_OK);
+	fsimg_cli_release(&options);
+	/* oem=cp437 acknowledges the default and stores nothing. */
+	fsimg_read_options_init(&read_defaults);
+	CHECK(parse(oem, &options) == FSIMG_OK);
+	CHECK(options.request.codepage == read_defaults.fat_codepage);
+	fsimg_cli_release(&options);
+	/* An explicit false is supplied, unlike an omitted bit. */
+	CHECK(parse(virtual_only, &options) == FSIMG_OK);
+	CHECK(options.request.layers.ifsboot_virtual_set &&
+	    !options.request.layers.ifsboot_virtual);
+	fsimg_cli_release(&options);
+	check_syntax(virtual_no);
+	/* The command's mountpoint capacity is the job record's field. */
+	mountpoint = fsimg_setting_find(&fsimg_filesystem_settings,
+	    "mountpoint", strlen("mountpoint"));
+	CHECK(mountpoint != NULL &&
+	    mountpoint->text_bytes == FSIMG_JOB_MOUNTPOINT_BYTES);
 }
 
 /* x creates a fresh directory named after the image unless -E or -O. */
@@ -1772,6 +1868,7 @@ main(int argc, char **argv)
 	test_modes();
 	test_create_operands();
 	test_stacks();
+	test_setting_values();
 	test_extract_options();
 	test_stems();
 	test_long_listing();

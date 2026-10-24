@@ -21,120 +21,29 @@
  * for later profiles, recognized by name and suffix with no operations.
  */
 static const fsimg_layer_t layers[] = {
-	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme },
-	{ .name = "mbr", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_mbr_scheme },
+	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme,
+	    .settings = &fsimg_gpt_settings },
+	{ .name = "mbr", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_mbr_scheme,
+	    .settings = &fsimg_mbr_settings },
 	{ .name = "dmg", .suffix = ".dmg", .kind = FSIMG_LAYER_CONTAINER,
-	    .container = &fsimg_dmg_container },
+	    .container = &fsimg_dmg_container, .settings = &fsimg_dmg_settings },
 	{ .name = "vhd", .suffix = ".vhd", .kind = FSIMG_LAYER_CONTAINER,
-	    .container = &fsimg_vhd_container },
+	    .container = &fsimg_vhd_container, .settings = &fsimg_vhd_settings },
 	{ .name = "simg", .suffix = ".simg", .kind = FSIMG_LAYER_CONTAINER,
-	    .container = &fsimg_simg_container },
+	    .container = &fsimg_simg_container, .settings = &fsimg_simg_settings },
 	{ .name = "ifsboot", .kind = FSIMG_LAYER_CONTAINER,
-	    .container = &fsimg_ifsboot_container },
+	    .container = &fsimg_ifsboot_container,
+	    .settings = &fsimg_ifsboot_settings },
 	{ .name = "hbcifs", .kind = FSIMG_LAYER_CONTAINER,
 	    .container = &fsimg_hbcifs_container },
 	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION,
-	    .compression = &fsimg_gzip_compression },
+	    .compression = &fsimg_gzip_compression,
+	    .settings = &fsimg_gzip_settings },
 	{ .name = "zstd", .suffix = ".zst", .kind = FSIMG_LAYER_COMPRESSION },
 	{ .name = "xz", .suffix = ".xz", .kind = FSIMG_LAYER_COMPRESSION }
 };
 
 #define LAYER_COUNT	(sizeof(layers) / sizeof(layers[0]))
-
-/*
- * Every setting fsimg_layer_options_t holds: the layer and key naming it,
- * its field, whether reading uses it, and whether it describes the one
- * partition a writer or wrap creates rather than the disk. A field holds
- * its default when all its bytes are zero, or for text when it is empty.
- * A setting whose value can be zero has a presence flag: the row's field
- * is the flag, and value names the value's field, which must stay zero
- * while the flag is clear (SIZE_MAX for a setting without one).
- * This table is the one list of layer settings: checking options, compose's
- * refusal of partition settings and the capability record all read it, so
- * a setting added here is covered by each.
- */
-typedef struct layer_setting {
-	const char	*layer;
-	const char	*key;
-	size_t		 offset;
-	size_t		 size;
-	size_t		 value;
-	size_t		 value_size;
-	bool		 text;
-	bool		 read;
-	bool		 partition;
-} layer_setting_t;
-
-#define SETTING_FIELD(member)	offsetof(fsimg_layer_options_t, member), \
-	sizeof(((fsimg_layer_options_t *)NULL)->member), SIZE_MAX, 0
-#define PRESENT_FIELD(flag, member)	offsetof(fsimg_layer_options_t, flag), \
-	sizeof(((fsimg_layer_options_t *)NULL)->flag), \
-	offsetof(fsimg_layer_options_t, member), \
-	sizeof(((fsimg_layer_options_t *)NULL)->member)
-
-static const layer_setting_t layer_settings[] = {
-	{ "gpt", "sector", SETTING_FIELD(gpt_sector_bytes), false, true, false },
-	{ "gpt", "disk", SETTING_FIELD(gpt_disk_bytes), false, false, false },
-	{ "gpt", "type", SETTING_FIELD(gpt_type), true, false, true },
-	{ "gpt", "name", SETTING_FIELD(gpt_name), true, false, true },
-	{ "gpt", "disk-guid", SETTING_FIELD(gpt_disk_guid), false, false, false },
-	{ "gpt", "guid", SETTING_FIELD(gpt_guid), false, false, true },
-	{ "mbr", "disk", SETTING_FIELD(mbr_disk_bytes), false, false, false },
-	{ "mbr", "type", SETTING_FIELD(mbr_type), true, false, true },
-	{ "mbr", "active", SETTING_FIELD(mbr_active), false, false, true },
-	{ "mbr", "id", PRESENT_FIELD(mbr_id_set, mbr_id), false, false, false },
-	{ "dmg", "compress", SETTING_FIELD(dmg_compress), false, false, false },
-	{ "dmg", "level", SETTING_FIELD(dmg_level), false, false, false },
-	{ "dmg", "chunk", SETTING_FIELD(dmg_chunk_bytes), false, false, false },
-	{ "dmg", "uuid", SETTING_FIELD(dmg_uuid), false, false, false },
-	{ "vhd", "align", SETTING_FIELD(vhd_align_bytes), false, false, false },
-	{ "vhd", "uuid", SETTING_FIELD(vhd_uuid), false, false, false },
-	{ "simg", "block", SETTING_FIELD(simg_block_bytes), false, false, false },
-	{ "simg", "crc", SETTING_FIELD(simg_crc), false, false, false },
-	{ "ifsboot", "machine",
-	    PRESENT_FIELD(ifsboot_machine_set, ifsboot_machine),
-	    false, false, false },
-	{ "ifsboot", "virtual",
-	    PRESENT_FIELD(ifsboot_virtual_set, ifsboot_virtual),
-	    false, false, false },
-	{ "ifsboot", "startup_vaddr",
-	    PRESENT_FIELD(ifsboot_startup_vaddr_set, ifsboot_startup_vaddr),
-	    false, false, false },
-	{ "ifsboot", "paddr_bias",
-	    PRESENT_FIELD(ifsboot_paddr_bias_set, ifsboot_paddr_bias),
-	    false, false, false },
-	{ "ifsboot", "image_paddr",
-	    PRESENT_FIELD(ifsboot_image_paddr_set, ifsboot_image_paddr),
-	    false, false, false },
-	{ "ifsboot", "ram_paddr",
-	    PRESENT_FIELD(ifsboot_ram_paddr_set, ifsboot_ram_paddr),
-	    false, false, false },
-	{ "ifsboot", "imagefs_paddr",
-	    PRESENT_FIELD(ifsboot_imagefs_paddr_set, ifsboot_imagefs_paddr),
-	    false, false, false },
-	{ "ifsboot", "compress", SETTING_FIELD(ifsboot_compress),
-	    false, false, false },
-	{ "gzip", "level", SETTING_FIELD(gzip_level), false, false, false }
-};
-
-#define SETTING_COUNT	(sizeof(layer_settings) / sizeof(layer_settings[0]))
-
-/*
- * Every file setting fsimg_layer_inputs_t holds, in fsimg_file_setting_t
- * order: a layer's byte-string settings, each a borrowed I/O object and
- * creation-only. The key is also the name of the section unwrap writes
- * back, so a container's sections are its disk and its rows here.
- */
-static const struct file_setting {
-	const char	*layer;
-	const char	*key;
-	size_t		 offset;
-} file_settings[FSIMG_FILE_SETTINGS] = {
-	[FSIMG_FILE_IFSBOOT_STARTUP] = { "ifsboot", "startup",
-	    offsetof(fsimg_layer_inputs_t, ifsboot_startup) },
-	[FSIMG_FILE_IFSBOOT_PREFIX] = { "ifsboot", "prefix",
-	    offsetof(fsimg_layer_inputs_t, ifsboot_prefix) }
-};
 
 /* Filesystem names the grammar reserves without a driver. */
 static const char *const reserved_filesystems[] = { "apfs", "hfs" };
@@ -143,11 +52,9 @@ static const char *const reserved_filesystems[] = { "apfs", "hfs" };
 
 static void put_text(char *, size_t, size_t *, char);
 static void put_key(fsimg_layer_info_t *, size_t *, const char *);
-static bool bytes_zero(const unsigned char *, size_t);
-static bool setting_is_default(const fsimg_layer_options_t *,
-    const layer_setting_t *);
-static fsimg_status_t setting_error(fsimg_error_t *, const layer_setting_t *,
-    const char *);
+static bool layer_selected(const fsimg_stack_t *, const fsimg_layer_t *,
+    const fsimg_layer_t *);
+static const fsimg_setting_t *file_row(fsimg_file_setting_t);
 static bool slot_of_name(const char *, fsimg_layer_kind_t *);
 static fsimg_status_t stack_syntax(fsimg_error_t *, const char *, const char *,
     size_t);
@@ -409,80 +316,60 @@ fsimg_compression_named(const char *name, size_t size, bool writing,
 	return (FSIMG_OK);
 }
 
+/* Whether an operation selects a layer: the scheme or container its stack
+ * names, or the compression it names, which fills no slot. Layers are
+ * compared as registry records.
+ */
 static bool
-setting_is_default(const fsimg_layer_options_t *options,
-    const layer_setting_t *setting)
+layer_selected(const fsimg_stack_t *stack, const fsimg_layer_t *compression,
+    const fsimg_layer_t *layer)
 {
-	const unsigned char *field;
-
-	field = (const unsigned char *)options + setting->offset;
-	if (setting->text)
-		return (field[0] == '\0');
-	return (bytes_zero(field, setting->size));
+	if (layer->kind == FSIMG_LAYER_COMPRESSION)
+		return (layer == compression);
+	return (layer == fsimg_stack_layer(stack, layer->kind));
 }
 
-static bool
-bytes_zero(const unsigned char *bytes, size_t length)
-{
-	for (size_t i = 0; i < length; i++) {
-		if (bytes[i] != 0)
-			return (false);
-	}
-	return (true);
-}
-
-static fsimg_status_t
-setting_error(fsimg_error_t *error, const layer_setting_t *setting,
-    const char *message)
-{
-	char key[32];
-
-	fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE, message);
-	snprintf(key, sizeof(key), "%s:%s", setting->layer, setting->key);
-	fsimg_error_path(error, key);
-	return (FSIMG_EINVAL);
-}
-
+/*
+ * The applicability of every layer setting. The visit covers every
+ * registered layer, the ones the stack lacks included, since a setting
+ * of an absent layer that holds anything but its default must be refused,
+ * never ignored; rows are checked in catalogue order, so the first
+ * failing row is the one reported.
+ */
 fsimg_status_t
 fsimg_layer_options_check(const fsimg_stack_t *stack,
     const fsimg_layer_t *compression, const fsimg_layer_options_t *options,
-    bool writing, fsimg_error_t *error)
+    const fsimg_layer_inputs_t *inputs, bool writing, fsimg_error_t *error)
 {
-	const layer_setting_t *setting;
+	const fsimg_setting_records_t records = { .layers = options,
+	    .inputs = inputs };
+	const fsimg_setting_t *row;
 	const fsimg_layer_t *layer;
-	fsimg_layer_kind_t kind;
-	const char *field;
+	char key[32];
+	fsimg_status_t status;
 
 	for (unsigned i = 0; i < 4; i++) {
 		if (options->reserved[i] != 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_IMAGE, "nonzero reserved layer option"));
 	}
-	for (size_t i = 0; i < SETTING_COUNT; i++) {
-		setting = &layer_settings[i];
-		field = (const char *)options + setting->offset;
-		if (setting->text && memchr(field, '\0', setting->size) == NULL)
-			return (setting_error(error, setting,
-			    "layer setting text is not terminated"));
-		if (setting_is_default(options, setting)) {
-			/* A value means something only once its flag is set. */
-			if (setting->value != SIZE_MAX &&
-			    !bytes_zero((const unsigned char *)options +
-			    setting->value, setting->value_size))
-				return (setting_error(error, setting,
-				    "layer setting has a value but is not set"));
-			continue;
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		for (size_t j = 0; layer->settings != NULL &&
+		    j < layer->settings->count; j++) {
+			row = &layer->settings->rows[j];
+			status = fsimg_setting_check(row, &records, error);
+			if (status != FSIMG_OK)
+				return (status);
+			if (fsimg_setting_is_default(row, &records))
+				continue;
+			fsimg_setting_key(row, key, sizeof(key));
+			if (!layer_selected(stack, compression, layer))
+				return (fsimg_setting_error(error, key,
+				    "setting names a layer the stack does not contain"));
+			if (!writing && (row->scope & FSIMG_SCOPE_READ) == 0)
+				return (fsimg_setting_error(error, key,
+				    "layer setting applies only to creation"));
 		}
-		/* A compression fills no slot; the operation names it. */
-		kind = fsimg_layer_find(setting->layer)->kind;
-		layer = kind == FSIMG_LAYER_COMPRESSION ? compression :
-		    fsimg_stack_layer(stack, kind);
-		if (layer == NULL || strcmp(layer->name, setting->layer) != 0)
-			return (setting_error(error, setting,
-			    "setting names a layer the stack does not contain"));
-		if (!writing && !setting->read)
-			return (setting_error(error, setting,
-			    "layer setting applies only to creation"));
 	}
 	return (FSIMG_OK);
 }
@@ -491,11 +378,22 @@ fsimg_status_t
 fsimg_layer_options_disk_only(const fsimg_layer_options_t *options,
     fsimg_error_t *error)
 {
-	for (size_t i = 0; i < SETTING_COUNT; i++) {
-		if (layer_settings[i].partition &&
-		    !setting_is_default(options, &layer_settings[i]))
-			return (setting_error(error, &layer_settings[i],
+	const fsimg_setting_records_t records = { .layers = options };
+	const fsimg_setting_t *row;
+	const fsimg_layer_t *layer;
+	char key[32];
+
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		for (size_t j = 0; layer->settings != NULL &&
+		    j < layer->settings->count; j++) {
+			row = &layer->settings->rows[j];
+			if ((row->scope & FSIMG_SCOPE_PARTITION) == 0 ||
+			    fsimg_setting_is_default(row, &records))
+				continue;
+			fsimg_setting_key(row, key, sizeof(key));
+			return (fsimg_setting_error(error, key,
 			    "compose takes partition settings from its parts"));
+		}
 	}
 	return (FSIMG_OK);
 }
@@ -544,18 +442,13 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 			snprintf(out->codec_version, sizeof(out->codec_version),
 			    "zlib %s", zlibVersion());
 	}
-	/* The layer's keys, its file settings first, each table in order; the
+	/* The layer's keys in its slice's order, file settings first; the
 	 * longest list fits.
 	 */
 	used = 0;
-	for (size_t i = 0; i < FSIMG_FILE_SETTINGS; i++) {
-		if (strcmp(file_settings[i].layer, layer->name) == 0)
-			put_key(out, &used, file_settings[i].key);
-	}
-	for (size_t i = 0; i < SETTING_COUNT; i++) {
-		if (strcmp(layer_settings[i].layer, layer->name) == 0)
-			put_key(out, &used, layer_settings[i].key);
-	}
+	for (size_t i = 0; layer->settings != NULL &&
+	    i < layer->settings->count; i++)
+		put_key(out, &used, layer->settings->rows[i].key);
 	(*cursor)++;
 	return (FSIMG_OK);
 }
@@ -570,69 +463,64 @@ put_key(fsimg_layer_info_t *out, size_t *used, const char *key)
 		put_text(out->settings, sizeof(out->settings), used, *c);
 }
 
+/* The catalogue row of a file setting, found in its layer's slice. */
+static const fsimg_setting_t *
+file_row(fsimg_file_setting_t setting)
+{
+	const fsimg_setting_t *row;
+	const fsimg_layer_t *layer;
+
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		for (size_t j = 0; layer->settings != NULL &&
+		    j < layer->settings->count; j++) {
+			row = &layer->settings->rows[j];
+			if (row->record == FSIMG_RECORD_INPUTS &&
+			    row->file == setting)
+				return (row);
+		}
+	}
+	return (NULL);
+}
+
 void
 fsimg_file_setting_name(fsimg_file_setting_t setting, char *buffer,
     size_t capacity)
 {
-	snprintf(buffer, capacity, "%s:%s", file_settings[setting].layer,
-	    file_settings[setting].key);
+	fsimg_setting_key(file_row(setting), buffer, capacity);
 }
 
 fsimg_io_t *
 fsimg_file_setting_input(const fsimg_layer_inputs_t *inputs,
     fsimg_file_setting_t setting)
 {
-	fsimg_io_t *const *field;
+	const fsimg_setting_records_t records = { .inputs = inputs };
+	fsimg_setting_value_t value;
 
-	if (inputs == NULL)
-		return (NULL);
-	field = (fsimg_io_t *const *)(const void *)((const char *)inputs +
-	    file_settings[setting].offset);
-	return (*field);
+	fsimg_setting_load(file_row(setting), &records, &value);
+	return (value.io);
 }
 
 void
 fsimg_file_setting_set(fsimg_layer_inputs_t *inputs,
     fsimg_file_setting_t setting, fsimg_io_t *io)
 {
-	fsimg_io_t **field;
+	const fsimg_setting_targets_t targets = { .inputs = inputs };
+	const fsimg_setting_value_t value = { .io = io };
 
-	field = (fsimg_io_t **)(void *)((char *)inputs +
-	    file_settings[setting].offset);
-	*field = io;
-}
-
-fsimg_status_t
-fsimg_layer_inputs_check(const fsimg_stack_t *stack,
-    const fsimg_layer_inputs_t *inputs, fsimg_error_t *error)
-{
-	const fsimg_layer_t *container;
-	char key[32];
-
-	container = fsimg_stack_layer(stack, FSIMG_LAYER_CONTAINER);
-	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
-		if (fsimg_file_setting_input(inputs, i) == NULL)
-			continue;
-		if (container != NULL &&
-		    strcmp(container->name, file_settings[i].layer) == 0)
-			continue;
-		fsimg_file_setting_name(i, key, sizeof(key));
-		return (fsimg_setting_error(error, key,
-		    "setting names a layer the stack does not contain"));
-	}
-	return (FSIMG_OK);
+	fsimg_setting_store(file_row(setting), &targets, &value);
 }
 
 bool
 fsimg_layer_section(const fsimg_layer_t *layer, const char *name,
     fsimg_file_setting_t *out)
 {
-	for (unsigned i = 0; layer != NULL && i < FSIMG_FILE_SETTINGS; i++) {
-		if (strcmp(file_settings[i].layer, layer->name) == 0 &&
-		    strcmp(file_settings[i].key, name) == 0) {
-			*out = i;
-			return (true);
-		}
-	}
-	return (false);
+	const fsimg_setting_t *row;
+
+	if (layer == NULL || layer->settings == NULL)
+		return (false);
+	row = fsimg_setting_find(layer->settings, name, strlen(name));
+	if (row == NULL || row->record != FSIMG_RECORD_INPUTS)
+		return (false);
+	*out = row->file;
+	return (true);
 }

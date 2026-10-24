@@ -149,18 +149,20 @@ fsimg_disk_plan_emit(const fsimg_disk_plan_t *plan, uint64_t volume_bytes,
  * reproducible, durable and loss flags, the epoch, the layer settings, the
  * file settings and the compression.
  * Every other field must hold its default, as a setting a format does not
- * store must, so none is silently ignored: a copy of the options with the
- * five mode fields reset must equal the defaults. selected is the
- * defaults with the caller's flags, epoch and compression, which the disk
- * plan resolves, and layers and inputs copies of the caller's records, so
- * selected carries no pointer to either.
+ * store must, so none is silently ignored: the catalogue's filesystem
+ * settings, and each ordinary volume field compared by value. selected is
+ * the defaults with the caller's flags, epoch and compression, which the
+ * disk plan resolves, and layers and inputs copies of the caller's
+ * records, so selected carries no pointer to either.
  */
 static fsimg_status_t
 check_mode(const fsimg_write_options_t *options,
     fsimg_write_options_t *selected, fsimg_layer_options_t *layers,
     fsimg_layer_inputs_t *inputs, fsimg_error_t *error)
 {
-	fsimg_write_options_t defaults, others;
+	fsimg_write_options_t defaults;
+	fsimg_status_t status;
+	bool volume_defaults;
 
 	fsimg_write_options_init(&defaults);
 	*selected = defaults;
@@ -174,14 +176,17 @@ check_mode(const fsimg_write_options_t *options,
 	    FSIMG_WRITE_DURABLE)) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "unsupported write options size, version or flags"));
-	others = *options;
-	others.flags = defaults.flags;
-	others.epoch = defaults.epoch;
-	others.layers = defaults.layers;
-	others.inputs = defaults.inputs;
-	bcopy(defaults.compression, others.compression,
-	    sizeof(others.compression));
-	if (bcmp(&others, &defaults, sizeof(defaults)) != 0)
+	status = fsimg_write_settings_check(options, NULL, error);
+	if (status != FSIMG_OK)
+		return (status);
+	volume_defaults = options->volume_bytes == defaults.volume_bytes &&
+	    options->min_free_bytes == defaults.min_free_bytes &&
+	    options->label == defaults.label &&
+	    options->fat_root_entries == defaults.fat_root_entries &&
+	    options->volume_serial == defaults.volume_serial;
+	for (unsigned i = 0; i < 4; i++)
+		volume_defaults = volume_defaults && options->reserved[i] == 0;
+	if (!volume_defaults)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "filesystem settings must hold their defaults without a "
 		    "filesystem writer"));

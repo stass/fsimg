@@ -221,7 +221,7 @@ validate_forced_stack(const fsimg_image_options_t *options,
 	}
 
 	status = fsimg_layer_options_check(&options->stack, compression,
-	    &options->layers, false, error);
+	    &options->layers, NULL, false, error);
 	if (status != FSIMG_OK)
 		return (status);
 	sector = options->layers.gpt_sector_bytes;
@@ -234,10 +234,19 @@ validate_forced_stack(const fsimg_image_options_t *options,
 	return (FSIMG_OK);
 }
 
+/* Every layer default comes from its catalogue row. */
 void
 fsimg_layer_options_init(fsimg_layer_options_t *options)
 {
+	const fsimg_setting_targets_t targets = { .layers = options };
+	const fsimg_layer_t *layer;
+
 	bzero(options, sizeof(*options));
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		if (layer->settings != NULL)
+			fsimg_settings_init(layer->settings, &targets,
+			    FSIMG_RECORD_LAYERS);
+	}
 }
 
 void

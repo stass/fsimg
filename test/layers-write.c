@@ -113,6 +113,7 @@ static fsimg_status_t open_disk(fixture_t *, memory_t *, uint32_t,
     fsimg_io_t **, fsimg_image_t **, fsimg_error_t *);
 static unsigned leftover_staging(const fixture_t *);
 static void test_settings(void);
+static void test_wrap_settings(void);
 static void test_derived_defaults(void);
 static void test_gpt_layout(void);
 static void test_gpt_4kn(void);
@@ -1206,6 +1207,102 @@ test_epochs_change_only_identifiers(void)
 }
 
 /*
+ * Without a filesystem writer, write options carry only the mode. A caller
+ * that fills every field by assignment, leaving whatever bytes the
+ * structure's padding held, is accepted: the check compares values, never
+ * representations. Each filesystem setting away from its default is
+ * refused naming its key, and so is each ordinary volume field.
+ */
+static void
+test_wrap_settings(void)
+{
+	static const char *const keys[] = { "sector", "cluster", "endian",
+	    "uuid", "inodes", "reserve", "mountpoint" };
+	fsimg_write_options_t defaults, options;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_io_t *input, *output;
+	memory_t volume, disk;
+	fixture_t f;
+
+	fixture_init(&f);
+	make_volume(&f, "fat12", MIB, &volume);
+	input = memory_io(&f, &volume);
+	bzero(&disk, sizeof(disk));
+	output = memory_io(&f, &disk);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+
+	fsimg_write_options_init(&defaults);
+	memset(&options, 0xa5, sizeof(options));
+	options.size = defaults.size;
+	options.version = defaults.version;
+	options.flags = defaults.flags;
+	options.volume_bytes = defaults.volume_bytes;
+	options.min_free_bytes = defaults.min_free_bytes;
+	options.epoch = defaults.epoch;
+	options.label = defaults.label;
+	options.sector_bytes = defaults.sector_bytes;
+	options.allocation_unit_bytes = defaults.allocation_unit_bytes;
+	options.fat_root_entries = defaults.fat_root_entries;
+	options.volume_serial = defaults.volume_serial;
+	options.byte_order = defaults.byte_order;
+	options.inode_capacity = defaults.inode_capacity;
+	options.reserve_percent = defaults.reserve_percent;
+	bcopy(defaults.volume_uuid, options.volume_uuid,
+	    sizeof(options.volume_uuid));
+	options.mountpoint = defaults.mountpoint;
+	options.layers = defaults.layers;
+	options.inputs = defaults.inputs;
+	bcopy(defaults.compression, options.compression,
+	    sizeof(options.compression));
+	bcopy(defaults.reserved, options.reserved, sizeof(options.reserved));
+	CHECK(fsimg_image_wrap(f.ctx, input, "fat12", &options, &sink,
+	    NULL) == FSIMG_OK);
+	CHECK(disk.length == MIB && bcmp(disk.bytes, volume.bytes, MIB) == 0);
+
+	/* Each catalogue setting, in catalogue order, names its key. */
+	for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+		fsimg_write_options_init(&options);
+		switch (i) {
+		case 0: options.sector_bytes = 512; break;
+		case 1: options.allocation_unit_bytes = 4096; break;
+		case 2: options.byte_order = FSIMG_BYTE_ORDER_BIG; break;
+		case 3: options.volume_uuid[15] = 1; break;
+		case 4: options.inode_capacity = 64; break;
+		case 5: options.reserve_percent = 0; break;
+		default: options.mountpoint = ""; break;
+		}
+		bzero(&error, sizeof(error));
+		CHECK(fsimg_image_wrap(f.ctx, input, "fat12", &options, &sink,
+		    &error) == FSIMG_EINVAL);
+		if (strcmp(error.path, keys[i]) != 0)
+			fprintf(stderr, "wrap setting %s: path \"%s\"\n", keys[i],
+			    error.path);
+		CHECK(strcmp(error.path, keys[i]) == 0);
+	}
+	fsimg_write_options_init(&options);
+	options.byte_order = (fsimg_byte_order_t)2;
+	CHECK(fsimg_image_wrap(f.ctx, input, "fat12", &options, &sink,
+	    &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "endian") == 0);
+	fsimg_write_options_init(&options);
+	options.volume_serial = 1;
+	CHECK(fsimg_image_wrap(f.ctx, input, "fat12", &options, &sink,
+	    NULL) == FSIMG_EINVAL);
+	fsimg_write_options_init(&options);
+	options.min_free_bytes = 1;
+	CHECK(fsimg_image_wrap(f.ctx, input, "fat12", &options, &sink,
+	    NULL) == FSIMG_EINVAL);
+
+	fsimg_io_free(output);
+	fsimg_io_free(input);
+	memory_free(&disk);
+	memory_free(&volume);
+	fixture_free(&f);
+}
+
+/*
  * Wrap puts a volume into a scheme, typed from its filesystem, and unwrap
  * returns it byte for byte. A stack naming the filesystem must match the
  * volume; an unrecognised volume needs a type; a bare stack copies the
@@ -2098,6 +2195,7 @@ main(void)
 	test_identifiers();
 	test_epochs_change_only_identifiers();
 	test_wrap_unwrap();
+	test_wrap_settings();
 	test_sinks();
 	test_stream_budget();
 	test_simg_changed_input();

@@ -39,6 +39,7 @@ libfsimg_la_LIBADD = libfsimg-core.la
 libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/core/unicode.c lib/core/unicode.h lib/core/case-tables.h \
 	lib/core/calendar.c lib/core/sha256.c lib/core/sha256.h \
+	lib/core/settings.c lib/core/settings.h \
 	lib/formats/format.c lib/formats/format.h \
 	lib/io/io.c lib/output/publish.c lib/output/publish.h \
 	lib/output/write.c \
@@ -132,7 +133,8 @@ test_programs = test-core test-private test-io test-meta test-meta-sort test-uni
 	test-ifs \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write \
-	test-containers test-compression test-gzip-write test-holes header-c \
+	test-containers test-compression test-gzip-write test-holes test-settings \
+	header-c \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose
@@ -176,6 +178,8 @@ test_format_SOURCES = test/format.c test/test.h
 test_format_LDADD = libfsimg.la
 test_layers_SOURCES = test/layers.c test/test.h
 test_layers_LDADD = libfsimg-core.la
+test_settings_SOURCES = test/settings.c test/test.h
+test_settings_LDADD = libfsimg-core.la
 test_layers_write_SOURCES = test/layers-write.c test/test.h
 test_layers_write_LDADD = libfsimg-core.la
 test_containers_SOURCES = test/containers.c test/test.h

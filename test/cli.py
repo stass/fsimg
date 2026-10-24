@@ -1821,6 +1821,13 @@ def test_container_create(executable, root):
                                               "-C", "source", "."]))
     planned = next(record for record in plan if record["type"] == "plan")
     assert planned["codec"].startswith("zlib ") and int(planned["output_bytes"]) > 0
+    # A read-only container is refused as unsupported before its keys are
+    # read: neither an unknown key nor a malformed value is diagnosed.
+    result = invoke(executable, root, ["cf", "refused.ifs", "-F", "ifs/hbcifs", "-o",
+                                       "hbcifs:anything=garbage", "-C", "source", "."],
+                    expected=1)
+    assert b'the container is read only "hbcifs"' in result.stderr, result.stderr
+    assert not (root / "refused.ifs").exists()
     invoke(executable, root, ["cWf", "checked.dmg", "-F", "fat12/gpt/dmg", "-C", "source", "."])
     invoke(executable, root, ["cf", "random.dmg", "-F", "fat12/dmg", "-C", "source", "."])
     first = (root / "checked.dmg").read_bytes()[-512 + 64:-512 + 80]

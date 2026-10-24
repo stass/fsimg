@@ -61,7 +61,6 @@ typedef struct fsimg_cli_options {
 	bool		 overview;	/* A syntax error shows the overview, not a mode synopsis. */
 	bool		 verify_staged;	/* cW: verify the staged image before publication. */
 	bool		 extract_here;	/* -E: extract into the -C directory itself. */
-	bool		 uuid_given;	/* -o uuid= was given */
 	bool		 random_uuid;	/* paths generates the volume UUID */
 } fsimg_cli_options_t;
 
