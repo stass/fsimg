@@ -127,7 +127,7 @@ example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
 test_programs = test-core test-private test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
-	test-zlib-memory \
+	test-driver-contracts test-layer-contracts test-zlib-memory \
 	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
@@ -237,6 +237,12 @@ test_fat_LDADD = libfsimg.la
 test_fat_write_SOURCES = test/fat-write.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_write_LDADD = libfsimg.la
+test_driver_contracts_SOURCES = test/driver-contracts.c test/contract.c \
+	test/contract.h
+test_driver_contracts_LDADD = libfsimg.la
+test_layer_contracts_SOURCES = test/layer-contracts.c test/contract.c \
+	test/contract.h
+test_layer_contracts_LDADD = libfsimg.la
 test_zlib_memory_SOURCES = test/zlib-memory.c test/test.h
 test_zlib_memory_LDADD = libfsimg-core.la
 test_emit_SOURCES = test/emit.c test/test.h

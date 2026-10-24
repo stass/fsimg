@@ -20,13 +20,30 @@
   allocation or extending the read model without a concrete format design.
 
 * [Medium] **Common driver contract coverage and binary primitives**
-  (`test/`, `lib/core/`, `lib/layers/`, format/protocol scalar codecs):
-  implement the [driver contract suites](specs/design-driver-contract-tests.md)
-  and [scalar/zlib support](specs/design-binary-primitives.md) under the
-  [shared-primitives sequence](docs/implementation-plan.md#driver-contracts-and-shared-verification-primitives).
-  Give every registered capability independent common witnesses, retain
-  format-local oracles, and consolidate byte access and allocation diagnostics
-  without introducing another runtime dependency or budget.
+  (`test/driver-contracts.c`, `test/layer-contracts.c`, `lib/core/`,
+  format/protocol scalar codecs): the
+  [driver contract suites](specs/design-driver-contract-tests.md) and the
+  shared zlib allocator of the [binary-primitives design](specs/design-binary-primitives.md)
+  are in place. Remaining under the
+  [shared-primitives sequence](docs/implementation-plan.md#driver-contracts-and-shared-verification-primitives):
+  the unsigned scalar codecs; and these contract-suite witnesses. On the layer
+  side: `compose`, `unwrap` and `open_stream`; layer cancellation, scratch
+  limits and scratch-fault sweeps; poisoned layer sinks; encoded-output
+  bounds; the output budget with a live raw intermediate; bounded expansion;
+  STREAM sinks; and raw-intermediate and spool adoption on refusal. On the
+  reader side: memory and scratch limits; the current entry's content
+  lifetime; extraction of link and FIFO kinds outside the safe profile
+  (refusal and `FSIMG_EXTRACT_SKIP_UNSUPPORTED`); extracted safe metadata;
+  two live readers sharing one budget; and an exact per-profile
+  `payload_bytes_read`, which today is only bounded by the logical bytes.
+  A named case for the documented optional-allocation fallback (a refused
+  metadata-cache chunk replaced by page replacement): every sweep now
+  refuses a success after a fired fault, and none of these fixtures reaches
+  that fallback.
+  The zlib owners' translation of `Z_STREAM_ERROR`, `Z_VERSION_ERROR` and
+  `Z_NEED_DICT` also needs deterministic tests. Then retire the common
+  scenarios that `test/emit.c` duplicates, keeping its direct-copy and
+  corrupt-plan cases.
 
 * [High] **QNX6 read/write and automotive qualification**
   (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): the classic reader,
@@ -352,6 +369,28 @@
   [qualification work](docs/todo-ifs.md) lists the open items.
 
 ## Bugs by subsystem
+
+* [Medium] **Two integration oracles fail in an Ubuntu 24.04 container**
+  (`test/fat-integration.sh`, `test/containers-integration.sh`): running as
+  root with no locale set, with mtools 4.0.43, dosfstools 4.2 and qemu-img
+  8.2.2, the base tree fails `test/fat.c:2046` on the mtools-populated FAT12
+  fixture (the Unicode long name is not seen) and `w-fat16.vhd: qemu-img info
+  size`. Determine whether the cause is the locale given to mtools and
+  qemu-img's VHD geometry sizing, or a reader or writer defect, and fix the
+  defect or pin the oracle's environment.
+
+* [High] **GCC 13 `-Werror` build fails** (`.github/workflows/check.yml` gcc
+  job): Ubuntu GCC 13.3 at `-O2` reports `-Wmaybe-uninitialized` false
+  positives at `lib/source/source.c` `open_host_source` (`root`, `path`),
+  `lib/layers/image.c` `fsimg_image_select` (`record`), `lib/layers/chunks.c`
+  `disk_resolve` (`decoded`), `lib/layers/gzip.c` `decode_members` (`crc`,
+  `length`), `lib/formats/qnx6/header.c` `qnx6_headers_read` (`selected`) and
+  `lib/formats/qnx6/names.c` `qnx6_slot_name` (`length`). It also reports
+  `-Wformat-truncation` in `dmg_corrupt` and `boot_unsupported`, and in the
+  tests `qnx6-write.c`, `qnx6.c`, `qnx4.c`, `ifs.c`, `layers-write.c` and the
+  `plain` warning reached through `test.h`. Each output is assigned on every
+  `FSIMG_OK` path. Initialize the outputs and bound the diagnostic
+  precision, then run the GCC 13 and 16 jobs.
 
 * [Medium] **QNX6 verification decodes short scratch records before checking length**
   (`lib/formats/qnx6/verify.c` `owner_next`, `reference_next`): the stream can
