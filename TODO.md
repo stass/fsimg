@@ -344,17 +344,6 @@
   no external information leak is established, but the reads consume
   uninitialized bytes and violate the scalar span contract.
 
-* [Medium] **zlib allocation failures lose their original diagnostic**
-  (`lib/layers/dmg.c`, `gzip.c`, `chunks.c`): callbacks pass their retained
-  error directly to `fsimg_alloc`, so a later successful allocation in the
-  same initialization call clears an earlier budget failure. zlib's deflate
-  initialization makes several allocation calls before testing for failure.
-  Capture the first error as the [shared adapter](specs/design-binary-primitives.md)
-  specifies, with a failing allocation/budget regression before the fix.
-  Preserve known limit details, use `FSIMG_ENOMEM` for unexplained
-  `Z_MEM_ERROR` (the chunk decoder currently fabricates `FSIMG_ELIMIT`),
-  and keep stream-state/version failures distinct from corrupt input.
-
 * [Medium] **Container-plan contract coverage gaps** (`test/ifsboot-write.c`,
   `test/layers-write.c`): the [container-plan design](specs/design-container-plans.md)
   validation list is only partly covered. Add create-path evidence that

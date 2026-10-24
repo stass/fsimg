@@ -13,6 +13,7 @@
 #include "io.h"
 #include "layer.h"
 #include "meta.h"
+#include "zlib-memory.h"
 
 /*
  * A container's disk as a chunk index, and the read-only adapter that
@@ -111,7 +112,11 @@ typedef struct chunk_disk {
 	cache_slot_t	 slots[CHUNK_CACHE_SLOTS];
 	uint64_t	 slot_bytes;	/* Each slot's size, fixed at open */
 	z_stream	 stream;
-	fsimg_error_t	 zlib_error;	/* Why zlib's last allocation failed */
+	/* The stream's charged allocations. Its first allocation failure is
+	 * kept for the stream's life, so a disk whose inflate could not
+	 * allocate fails every later decode with that same cause.
+	 */
+	fsimg_zlib_memory_t memory;
 	uint64_t	 decoded_bytes;
 	uint64_t	 decode_bound;
 	uint64_t	 use_clock;
@@ -131,8 +136,6 @@ static fsimg_status_t record_search(fsimg_chunk_index_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
 static fsimg_status_t tile_records(fsimg_chunk_index_t *, fsimg_stream_t *,
     fsimg_error_t *);
-static voidpf zlib_alloc(voidpf, uInt, uInt);
-static void zlib_free(voidpf, voidpf);
 static void disk_release(void *);
 static fsimg_status_t charge_decode(chunk_disk_t *, const fsimg_chunk_t *,
     fsimg_error_t *);
@@ -554,23 +557,6 @@ fsimg_chunk_kinds_text(unsigned kinds, unsigned codecs, char *text,
 	}
 }
 
-/* zlib's state is charged to the context like every other allocation. */
-static voidpf
-zlib_alloc(voidpf opaque, uInt items, uInt size)
-{
-	chunk_disk_t *disk = opaque;
-
-	if (size != 0 && items > SIZE_MAX / size)
-		return (Z_NULL);
-	return (fsimg_alloc(disk->ctx, (size_t)items * size, &disk->zlib_error));
-}
-
-static void
-zlib_free(voidpf opaque FSIMG_UNUSED, voidpf address)
-{
-	fsimg_dealloc(address);
-}
-
 static void
 disk_release(void *argument)
 {
@@ -597,8 +583,10 @@ fsimg_chunk_disk_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
     fsimg_error_t *error)
 {
 	chunk_disk_t *disk;
+	char message[64];
 	uint64_t bound;
 	fsimg_status_t status;
+	int result;
 
 	*out = NULL;
 	disk = fsimg_alloc(ctx, sizeof(*disk), error);
@@ -638,15 +626,21 @@ fsimg_chunk_disk_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
 		}
 	}
 	if ((index->codecs & (1u << FSIMG_CODEC_ZLIB)) != 0) {
-		disk->stream.zalloc = zlib_alloc;
-		disk->stream.zfree = zlib_free;
-		disk->stream.opaque = disk;
-		if (inflateInit(&disk->stream) != Z_OK) {
-			*error = disk->zlib_error;
-			if (error->status == FSIMG_OK)
-				fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-				    "zlib initialization failed");
-			status = error->status;
+		fsimg_zlib_memory_bind(&disk->memory, ctx, &disk->stream);
+		result = inflateInit(&disk->stream);
+		if (result == Z_MEM_ERROR) {
+			status = fsimg_zlib_memory_error(&disk->memory, error);
+			goto fail;
+		}
+		if (result != Z_OK) {
+			if (result == Z_VERSION_ERROR)
+				snprintf(message, sizeof(message), "the zlib "
+				    "library does not match its header");
+			else
+				snprintf(message, sizeof(message), "zlib refused "
+				    "to start the chunk decoder (%d)", result);
+			status = fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_IMAGE, message);
 			goto fail;
 		}
 		disk->stream_ready = true;
@@ -707,8 +701,8 @@ inflate_chunk(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 	int result;
 
 	if (inflateReset(stream) != Z_OK)
-		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-		    "zlib reset failed"));
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "zlib refused to reset the chunk decoder"));
 	stream->next_out = out;
 	stream->avail_out = (uInt)chunk->length;
 	stream->next_in = disk->input;
@@ -732,7 +726,6 @@ inflate_chunk(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 			stream->next_out = &spare;
 			stream->avail_out = 1;
 		}
-		fsimg_error_clear(&disk->zlib_error);
 		result = inflate(stream, Z_NO_FLUSH);
 		if (stream->next_out == &spare + 1)
 			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
@@ -740,13 +733,11 @@ inflate_chunk(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 			    "compressed chunk decodes to more bytes than declared"));
 		if (result == Z_STREAM_END)
 			break;
-		if (result == Z_MEM_ERROR) {
-			*error = disk->zlib_error;
-			if (error->status == FSIMG_OK)
-				fsimg_error_set(error, FSIMG_ELIMIT, 0,
-				    FSIMG_OP_IMAGE, "zlib could not allocate its state");
-			return (error->status);
-		}
+		if (result == Z_MEM_ERROR)
+			return (fsimg_zlib_memory_error(&disk->memory, error));
+		if (result == Z_STREAM_ERROR)
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_IMAGE, "zlib chunk decoder state is invalid"));
 		if (result == Z_BUF_ERROR)
 			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_IMAGE,

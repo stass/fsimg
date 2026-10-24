@@ -319,6 +319,16 @@ DATA ranges, an initialized length ending inside DATA, a planned length below
 the catalog's, a region outside the volume, and sink and source failures in
 mid-copy, checked against an independently mapped expected image.
 
+`test-zlib-memory` covers the shared zlib allocator in
+`lib/layers/zlib-memory.c`. It checks charged deltas and zero-byte requests,
+a budget refusal keeping its exact limit diagnostic, a sticky first error
+across later attempts and frees, the `FSIMG_ENOMEM` fallback, every
+allocation ordinal of deflate and inflate initialization returning to the
+baseline, inflate's delayed window allocation, two streams sharing one
+budget, poisoned allocation contents, reset and reuse, allocation sweeps
+through the DMG and gzip encoders, and those encoders under a stepped-down
+memory budget.
+
 Targeted initialization and staging regressions are:
 
 ```sh

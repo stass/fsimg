@@ -61,7 +61,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/layers/chunks.c lib/layers/plist.c lib/layers/dmg.c \
 	lib/layers/vhd.c lib/layers/simg.c lib/layers/transcode.c \
 	lib/layers/spool.c lib/layers/gzip.c lib/layers/ifsboot.c \
-	lib/layers/hbcifs.c \
+	lib/layers/hbcifs.c lib/layers/zlib-memory.c lib/layers/zlib-memory.h \
 	lib/formats/fat/fat.h lib/formats/fat/descriptor.c lib/formats/fat/codec.c \
 	lib/formats/fat/name-tables.h lib/formats/fat/read.c \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
@@ -127,6 +127,7 @@ example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
 test_programs = test-core test-private test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
+	test-zlib-memory \
 	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
@@ -236,6 +237,8 @@ test_fat_LDADD = libfsimg.la
 test_fat_write_SOURCES = test/fat-write.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_write_LDADD = libfsimg.la
+test_zlib_memory_SOURCES = test/zlib-memory.c test/test.h
+test_zlib_memory_LDADD = libfsimg-core.la
 test_emit_SOURCES = test/emit.c test/test.h
 test_emit_LDADD = libfsimg.la
 test_metadata_loss_SOURCES = test/metadata-loss.c test/test.h
