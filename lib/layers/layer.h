@@ -88,6 +88,56 @@ typedef struct fsimg_scheme_tables {
 void fsimg_scheme_tables_free(fsimg_scheme_tables_t *);
 
 /*
+ * The planning side of a scheme (specs/design-scheme-planning.md). Every
+ * argument is borrowed for the call alone, and no operation allocates.
+ *
+ * plan_disk reads the scheme's own disk settings from checked layer
+ * options: it fills the table's kind, sector size and disk identity, which
+ * it takes as given, derives from the epoch under FSIMG_WRITE_REPRODUCIBLE
+ * or refuses, and states the requested fixed disk length (zero to size the
+ * disk from its contents) and the static key ("gpt:disk") that names it.
+ */
+typedef struct fsimg_scheme_plan_args {
+	const fsimg_layer_options_t *layers;
+	int64_t		 epoch;
+	uint32_t	 flags;		/* FSIMG_WRITE_* mode */
+} fsimg_scheme_plan_args_t;
+
+typedef struct fsimg_scheme_plan_facts {
+	uint64_t	 requested_disk_bytes;
+	const char	*disk_key;
+} fsimg_scheme_plan_facts_t;
+
+/* One compose part's metadata: type and name text as gpt:type, mbr:type
+ * and gpt:name spell them, NULL or empty for the defaults, and a unique
+ * GUID, NULL or all zero for unset.
+ */
+typedef struct fsimg_partition_request {
+	const char	*type;
+	const char	*name;
+	const unsigned char *guid;
+} fsimg_partition_request_t;
+
+/*
+ * plan_partition resolves the metadata of the partition in slot index
+ * (from 1) into a zeroed record whose index is set, from exactly one of
+ * two sources: the layer options of a create or wrap, of which the scheme
+ * reads only its own partition settings, or a compose part. filesystem
+ * names the volume's filesystem, whose type-table entry gives the default
+ * type, or is NULL when none is known. A failure names the setting
+ * ("gpt:type") or the part ("partition 2") through fsimg_partition_key;
+ * the record is marked used only once every field has resolved.
+ */
+typedef struct fsimg_scheme_partition_args {
+	const fsimg_layer_options_t *layers;
+	const fsimg_partition_request_t *part;
+	const char	*filesystem;
+	int64_t		 epoch;
+	uint32_t	 flags;		/* FSIMG_WRITE_* mode */
+	uint32_t	 index;
+} fsimg_scheme_partition_args_t;
+
+/*
  * A partition scheme.
  *
  * probe follows the filesystem probe contract: a pure function of at most
@@ -102,13 +152,21 @@ void fsimg_scheme_tables_free(fsimg_scheme_tables_t *);
  * verify performs the checks that are not needed to read the table, such
  * as GPT's protective MBR, on a table open accepted.
  *
- * The write side describes the tables' footprint and encodes them. A
- * written table has slots entries; at sector size S its leading tables
+ * The write set is plan_disk, plan_partition, validate_plan, report_plan,
+ * footprint and encode, with nonzero slots and max_disk_sectors: a
+ * scheme has all of them or none (fsimg_scheme_write_set_valid), and
+ * writes exactly when it has plan_disk. A written table has slots
+ * entries; at sector size S, one plan_disk accepted, its leading tables
  * fill the first leading sectors of the disk and its trailing tables the
- * last trailing sectors, and the disk holds at most max_disk_sectors.
- * encode turns a placed table, whose records are the used slots in order
- * and lie between those tables, into its regions for a disk of the given
- * length; every byte of a region is defined.
+ * last trailing sectors. max_disk_sectors states the profile's disk
+ * bound, which the scheme's own plan_disk and validate_plan enforce with
+ * their diagnostics; common planning does not check it.
+ * validate_plan checks a placed table against the final disk length:
+ * identities that must differ and fields the profile cannot represent,
+ * FSIMG_EINVAL with the scheme's own diagnostic. report_plan fills the
+ * scheme's fields of an image report and the report of slot (from 1) of
+ * a validated table. encode turns a validated table into its regions for
+ * a disk of the given length; every byte of a region is defined.
  */
 typedef struct fsimg_scheme_ops {
 	size_t		 probe_bytes;
@@ -120,10 +178,37 @@ typedef struct fsimg_scheme_ops {
 			    const fsimg_scheme_table_t *, fsimg_error_t *);
 	uint32_t	 slots;
 	uint64_t	 max_disk_sectors;
+	fsimg_status_t	(*plan_disk)(const fsimg_scheme_plan_args_t *,
+			    fsimg_scheme_table_t *, fsimg_scheme_plan_facts_t *,
+			    fsimg_error_t *);
+	fsimg_status_t	(*plan_partition)(const fsimg_scheme_partition_args_t *,
+			    fsimg_partition_record_t *, fsimg_error_t *);
+	fsimg_status_t	(*validate_plan)(const fsimg_scheme_table_t *, uint64_t,
+			    fsimg_error_t *);
+	void		(*report_plan)(const fsimg_scheme_table_t *, uint32_t,
+			    fsimg_image_info_t *, fsimg_partition_info_t *);
 	void		(*footprint)(uint32_t, uint64_t *, uint64_t *);
 	fsimg_status_t	(*encode)(fsimg_ctx_t *, const fsimg_scheme_table_t *,
 			    uint64_t, fsimg_scheme_tables_t *, fsimg_error_t *);
 } fsimg_scheme_ops_t;
+
+/* Whether a scheme writes: it has the write set. */
+bool fsimg_scheme_writable(const fsimg_scheme_ops_t *);
+/* Whether a scheme's write set is complete or absent, as every registered
+ * scheme's must be.
+ */
+bool fsimg_scheme_write_set_valid(const fsimg_scheme_ops_t *);
+/* The key a partition planner's failure names is the setting when the
+ * layer options supplied the partition, else "partition N".
+ * fsimg_partition_error names that key in error.path and returns the
+ * failure's status; fsimg_partition_setting_error fails FSIMG_EINVAL with
+ * the message.
+ */
+fsimg_status_t fsimg_partition_error(const fsimg_scheme_partition_args_t *,
+    const char *, fsimg_status_t, fsimg_error_t *);
+fsimg_status_t fsimg_partition_setting_error(
+    const fsimg_scheme_partition_args_t *, const char *, const char *,
+    fsimg_error_t *);
 
 /*
  * A container's disk as a chunk index (lib/layers/chunks.c): records that
@@ -687,6 +772,8 @@ extern const fsimg_compression_ops_t fsimg_gzip_compression;
 
 /* The registry, in reporting order; NULL past the end. */
 const fsimg_layer_t *fsimg_layer_at(size_t);
+/* The FSIMG_CAP_* bits a layer's operations support. */
+uint32_t fsimg_layer_capabilities(const fsimg_layer_t *);
 const fsimg_layer_t *fsimg_layer_find(const char *);
 /* Whether a layer, which may be NULL, declares the section name, the
  * unqualified key of one of its file settings, and which setting it is.
@@ -761,14 +848,24 @@ fsimg_status_t fsimg_partition_type_parse(const char *,
     fsimg_type_selector_t *, fsimg_error_t *);
 /* The type-table entry of that name, or NULL. */
 const fsimg_partition_type_t *fsimg_partition_type_find(const char *);
-/* Give a record to be written the selected type: its GPT type GUID, or its
- * MBR byte, which must not be an extended or GPT protective type. A
- * selector the scheme cannot express fails with FSIMG_EINVAL. name
- * receives the type's conventional GPT name, empty for none.
+/* The selector of a partition to be written: the type text when nonempty,
+ * else the type-table entry of the filesystem, which may be NULL; with
+ * neither, FSIMG_EINVAL.
  */
-fsimg_status_t fsimg_partition_type_assign(const fsimg_type_selector_t *,
-    fsimg_scheme_kind_t, fsimg_partition_record_t *, const char **,
-    fsimg_error_t *);
+fsimg_status_t fsimg_partition_type_select(const char *, const char *,
+    fsimg_type_selector_t *, fsimg_error_t *);
+/* Give a GPT record to be written the selected type's GUID; name receives
+ * the type's conventional GPT name, empty for none. A selector GPT cannot
+ * express fails with FSIMG_EINVAL.
+ */
+fsimg_status_t fsimg_partition_type_gpt(const fsimg_type_selector_t *,
+    fsimg_partition_record_t *, const char **, fsimg_error_t *);
+/* Give an MBR record to be written the selected type's written byte,
+ * which must not be an extended or GPT protective type; a selector MBR
+ * cannot express fails with FSIMG_EINVAL.
+ */
+fsimg_status_t fsimg_partition_type_mbr(const fsimg_type_selector_t *,
+    fsimg_partition_record_t *, fsimg_error_t *);
 /* Fill a public partition record from a decoded or planned one. */
 void fsimg_partition_report(fsimg_scheme_kind_t,
     const fsimg_partition_record_t *, fsimg_partition_info_t *);
@@ -782,29 +879,32 @@ fsimg_status_t fsimg_partition_type_match(const fsimg_type_selector_t *,
 const char *fsimg_partition_type_name(fsimg_scheme_kind_t,
     const fsimg_partition_record_t *);
 bool fsimg_guid_parse(const char *, unsigned char *);
+/* Whether a 16-byte identifier is all zero, the unset value. */
+bool fsimg_guid_unset(const unsigned char *);
 
 /*
- * A disk to write, built in three steps. init resolves the stack's scheme
- * and its disk-level settings (sector size, disk length, disk identifier)
- * and makes count empty records; partition resolves each record's type,
- * name, unique GUID and status; place lays the records out in slot order,
- * each at the first 1 MiB boundary after the previous one, and sets the
- * disk length. Identifiers left unset are derived from the epoch under
- * FSIMG_WRITE_REPRODUCIBLE and are otherwise FSIMG_EINVAL naming the key.
- * Without a scheme the plan has no records and the volume starts the
- * disk. init resolves the stack's container, constructing its private
- * plan, and the compression its request names, a write options'
- * compression field (empty for none), with its settings. It records each
- * file setting's identity before the container's plan reads it. It zeroes
- * the plan before anything can fail, so a plan init refuses, which may
- * hold a partial container plan, is still safe to free. place rounds the
- * disk up to the container's granularity, puts the scheme's trailing
- * tables at the end of the rounded disk, and states the output's bound:
- * the container's bound of the disk (container_bytes), then the
- * compression's bound of that. Records and the container plan are charged
- * to the context; free releases them, the container plan through the
- * container's plan_free, and leaves the plan owning nothing. A plan has
- * one owner and is planned in place, never copied.
+ * A disk to write, built in three steps (specs/design-scheme-planning.md).
+ * init resolves the stack's container, constructing its private plan, and
+ * the compression its request names, a write options' compression field
+ * (empty for none), with its settings; it records each file setting's
+ * identity before the container's plan reads it. It then selects the
+ * stack's scheme, whose plan_disk resolves the disk-level settings, and
+ * makes count empty records. partition has the scheme resolve each
+ * record's metadata; place lays the records out in slot order, each at
+ * the first 1 MiB boundary after the previous one, sets the disk length
+ * and has the scheme validate the result. Without a scheme the plan has
+ * no records and the volume starts the disk. init zeroes the plan before
+ * anything can fail, so a plan init refuses, which may hold a partial
+ * container plan, is still safe to free. place rounds the disk up to the
+ * container's granularity, puts the scheme's trailing tables at the end
+ * of the rounded disk, and states the output's bound: the container's
+ * bound of the disk (container_bytes), then the compression's bound of
+ * that. Records and the container plan are charged to the context; free
+ * releases them, the container plan through the container's plan_free,
+ * and leaves the plan owning nothing. A plan has one owner and is planned
+ * in place, never copied. Common planning reads no scheme's settings and
+ * compares no scheme's name: only the scheme's operations set its
+ * metadata.
  */
 typedef struct fsimg_disk_plan {
 	const fsimg_layer_t *scheme;
@@ -820,7 +920,8 @@ typedef struct fsimg_disk_plan {
 	uint64_t	 output_bytes;	/* container_bytes, or its compressed bound */
 	int64_t		 epoch;
 	uint32_t	 flags;		/* FSIMG_WRITE_* mode */
-	bool		 fixed;		/* gpt:disk or mbr:disk set the length */
+	const char	*disk_key;	/* The scheme's disk-length key, static */
+	bool		 fixed;		/* The scheme's disk setting set the length */
 	bool		 verified_disk;	/* The disk is a verified input */
 } fsimg_disk_plan_t;
 
@@ -858,24 +959,21 @@ bool fsimg_disk_plan_encoded(const fsimg_disk_plan_t *);
 const fsimg_container_plan_t *fsimg_disk_plan_container(
     const fsimg_disk_plan_t *);
 
-/* What one partition asks for: type and name text as gpt_type, mbr_type
- * and gpt_name spell them, NULL or empty for the defaults; a unique GUID
- * (NULL or all zero unset); the MBR status; and the filesystem whose
- * type-table entry supplies the default type. A failure names the setting
- * ("gpt:type") for a partition the layer options describe, and the
- * partition ("partition 2") for one of a compose.
- */
-typedef struct fsimg_partition_request {
-	const char	*type;
-	const char	*name;
-	const unsigned char *guid;
-	const char	*filesystem;
-	bool		 active;
-	bool		 composed;
-} fsimg_partition_request_t;
-
 fsimg_status_t fsimg_disk_plan_init(fsimg_ctx_t *, const fsimg_disk_request_t *,
     fsimg_disk_plan_t *, fsimg_error_t *);
+/*
+ * The scheme stage of init: give a plan that has no scheme yet the scheme
+ * (NULL leaves it unpartitioned) with count partitions, its disk settings
+ * resolved from layers by the scheme's plan_disk. A read-only scheme is
+ * FSIMG_EUNSUPPORTED naming it before any of its operations runs, and a
+ * count outside 1 to its slots FSIMG_EINVAL with the limit. init calls it
+ * with the stack's scheme; a test plans an unregistered descriptor by
+ * calling it on the plan of a stack without one; such a plan has not
+ * passed the exact-volume rule, which init applies to the stack's scheme.
+ */
+fsimg_status_t fsimg_disk_plan_scheme(fsimg_ctx_t *, fsimg_disk_plan_t *,
+    const fsimg_layer_t *, const fsimg_layer_options_t *, uint32_t,
+    fsimg_error_t *);
 /*
  * The common checks of the plan's file settings against their host files:
  * unchanged compares each recorded identity with the file's now, after the
@@ -887,8 +985,15 @@ fsimg_status_t fsimg_disk_plan_inputs_unchanged(const fsimg_disk_plan_t *,
     fsimg_error_t *);
 fsimg_status_t fsimg_disk_plan_input_aliases(const fsimg_disk_plan_t *,
     const fsimg_host_file_t *, fsimg_error_t *);
+/*
+ * Resolve the partition in slot (from 1) through the scheme's
+ * plan_partition, from exactly one of the layer options of a create or
+ * wrap and a compose part, with the filesystem that types it by default,
+ * NULL for none. Both or neither source is FSIMG_ESTATE.
+ */
 fsimg_status_t fsimg_disk_plan_partition(fsimg_disk_plan_t *, uint32_t,
-    const fsimg_partition_request_t *, fsimg_error_t *);
+    const fsimg_layer_options_t *, const fsimg_partition_request_t *,
+    const char *, fsimg_error_t *);
 /* Fit a volume to a fixed disk's one partition: a zero *volume_bytes
  * becomes the longest multiple of granule bytes the partition holds, and a
  * requested length longer than that is FSIMG_EINVAL naming the disk key.
@@ -896,8 +1001,8 @@ fsimg_status_t fsimg_disk_plan_partition(fsimg_disk_plan_t *, uint32_t,
 fsimg_status_t fsimg_disk_plan_fit(const fsimg_disk_plan_t *, uint32_t,
     uint64_t *, fsimg_error_t *);
 /* Place records whose volumes have the given lengths; with a fixed disk
- * they must fit within it. Every unique GUID must differ from the others
- * and from the disk GUID.
+ * they must fit within it. The final disk, once its container's bounds
+ * are known, must pass the scheme's validate_plan.
  */
 fsimg_status_t fsimg_disk_plan_place(fsimg_disk_plan_t *, const uint64_t *,
     fsimg_error_t *);

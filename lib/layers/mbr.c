@@ -47,6 +47,14 @@ static fsimg_status_t mbr_open(const fsimg_scheme_input_t *,
     fsimg_scheme_table_t *, fsimg_error_t *);
 static fsimg_status_t mbr_verify(const fsimg_scheme_input_t *,
     const fsimg_scheme_table_t *, fsimg_error_t *);
+static fsimg_status_t mbr_plan_disk(const fsimg_scheme_plan_args_t *,
+    fsimg_scheme_table_t *, fsimg_scheme_plan_facts_t *, fsimg_error_t *);
+static fsimg_status_t mbr_plan_partition(const fsimg_scheme_partition_args_t *,
+    fsimg_partition_record_t *, fsimg_error_t *);
+static fsimg_status_t mbr_validate_plan(const fsimg_scheme_table_t *,
+    uint64_t, fsimg_error_t *);
+static void mbr_report_plan(const fsimg_scheme_table_t *, uint32_t,
+    fsimg_image_info_t *, fsimg_partition_info_t *);
 static void mbr_footprint(uint32_t, uint64_t *, uint64_t *);
 static void encode_chs(uint64_t, unsigned char *);
 static fsimg_status_t mbr_encode(fsimg_ctx_t *, const fsimg_scheme_table_t *,
@@ -59,6 +67,10 @@ const fsimg_scheme_ops_t fsimg_mbr_scheme = {
 	.verify = mbr_verify,
 	.slots = MBR_SLOTS,
 	.max_disk_sectors = MBR_ADDRESSABLE_SECTORS,
+	.plan_disk = mbr_plan_disk,
+	.plan_partition = mbr_plan_partition,
+	.validate_plan = mbr_validate_plan,
+	.report_plan = mbr_report_plan,
 	.footprint = mbr_footprint,
 	.encode = mbr_encode
 };
@@ -222,6 +234,118 @@ mbr_verify(const fsimg_scheme_input_t *input FSIMG_UNUSED,
     fsimg_error_t *error FSIMG_UNUSED)
 {
 	return (FSIMG_OK);
+}
+
+/*
+ * The write side's disk settings: 512-byte sectors; mbr:disk, a fixed
+ * length or zero, of at most the 2^32 sectors an entry addresses; and
+ * mbr:id, taken as given when set, zero included, the epoch's low 32 bits
+ * in reproducible mode, or refused.
+ */
+static fsimg_status_t
+mbr_plan_disk(const fsimg_scheme_plan_args_t *args,
+    fsimg_scheme_table_t *table, fsimg_scheme_plan_facts_t *facts,
+    fsimg_error_t *error)
+{
+	const fsimg_layer_options_t *layers = args->layers;
+
+	table->kind = FSIMG_SCHEME_MBR;
+	table->sector_bytes = MBR_SECTOR_BYTES;
+	facts->requested_disk_bytes = layers->mbr_disk_bytes;
+	facts->disk_key = "mbr:disk";
+	if (layers->mbr_disk_bytes / MBR_SECTOR_BYTES > MBR_ADDRESSABLE_SECTORS)
+		return (fsimg_setting_error(error, "mbr:disk",
+		    "an MBR disk holds at most 2^32 sectors"));
+	if (layers->mbr_id_set)
+		table->mbr_disk_id = layers->mbr_id;
+	else if ((args->flags & FSIMG_WRITE_REPRODUCIBLE) != 0)
+		table->mbr_disk_id = (uint32_t)(uint64_t)args->epoch;
+	else
+		return (fsimg_setting_error(error, "mbr:id",
+		    "the disk identifier must be set outside reproducible mode"));
+	return (FSIMG_OK);
+}
+
+/*
+ * One partition: mbr:type and mbr:active from the layer options, or a
+ * compose part's type, inactive, whose name and GUID must be absent since
+ * an entry stores neither. The type is the given one or the filesystem's.
+ */
+static fsimg_status_t
+mbr_plan_partition(const fsimg_scheme_partition_args_t *args,
+    fsimg_partition_record_t *record, fsimg_error_t *error)
+{
+	fsimg_type_selector_t selector;
+	const char *type, *name;
+	const unsigned char *guid;
+	bool active;
+	fsimg_status_t status;
+
+	if (args->layers != NULL) {
+		type = args->layers->mbr_type;
+		name = NULL;
+		guid = NULL;
+		active = args->layers->mbr_active;
+	} else {
+		type = args->part->type;
+		name = args->part->name;
+		guid = args->part->guid;
+		active = false;
+	}
+	status = fsimg_partition_type_select(type, args->filesystem, &selector,
+	    error);
+	if (status == FSIMG_OK)
+		status = fsimg_partition_type_mbr(&selector, record, error);
+	if (status != FSIMG_OK)
+		return (fsimg_partition_error(args, "mbr:type", status, error));
+	if ((name != NULL && name[0] != '\0') ||
+	    (guid != NULL && !fsimg_guid_unset(guid)))
+		return (fsimg_partition_setting_error(args, "mbr:name",
+		    "MBR partitions have no name or GUID", error));
+	record->active = active;
+	record->used = true;
+	return (FSIMG_OK);
+}
+
+/*
+ * The final disk within the 2^32 sectors an entry addresses, and so every
+ * placed entry's first LBA and count, which start after the MBR sector and
+ * end within the disk, within their 32-bit fields. The per-entry check
+ * follows from the disk's and is kept as the stated guard before the
+ * encoder narrows each field.
+ */
+static fsimg_status_t
+mbr_validate_plan(const fsimg_scheme_table_t *table, uint64_t disk_bytes,
+    fsimg_error_t *error)
+{
+	const fsimg_partition_record_t *record;
+
+	if (disk_bytes / MBR_SECTOR_BYTES > MBR_ADDRESSABLE_SECTORS)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "the disk exceeds the 2^32 sectors an MBR addresses"));
+	for (uint32_t i = 0; i < table->count; i++) {
+		record = &table->records[i];
+		if (record->used &&
+		    (record->offset / MBR_SECTOR_BYTES > UINT32_MAX ||
+		    record->length / MBR_SECTOR_BYTES > UINT32_MAX))
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_IMAGE, "an MBR entry cannot address the "
+			    "partition"));
+	}
+	return (FSIMG_OK);
+}
+
+/* A planned disk reports its four slots and its disk identifier. */
+static void
+mbr_report_plan(const fsimg_scheme_table_t *table, uint32_t slot,
+    fsimg_image_info_t *image, fsimg_partition_info_t *partition)
+{
+	image->sector_bytes = table->sector_bytes;
+	image->partition_count = MBR_SLOTS;
+	image->selected = slot;
+	image->mbr_disk_id = table->mbr_disk_id;
+	fsimg_partition_report(FSIMG_SCHEME_MBR, &table->records[slot - 1],
+	    partition);
 }
 
 /* The table is the first sector; nothing trails the partitions. */

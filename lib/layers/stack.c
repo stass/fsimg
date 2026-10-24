@@ -398,6 +398,33 @@ fsimg_layer_options_disk_only(const fsimg_layer_options_t *options,
 	return (FSIMG_OK);
 }
 
+/*
+ * A layer's capabilities from its operations: a scheme reads and verifies
+ * with its decoder and writes with its write set; a container reads and
+ * verifies, and writes with its writer; a compression's are the
+ * operations fsimg_compression_named accepts.
+ */
+uint32_t
+fsimg_layer_capabilities(const fsimg_layer_t *layer)
+{
+	const fsimg_scheme_ops_t *scheme = layer->scheme;
+	const fsimg_compression_ops_t *compression = layer->compression;
+	bool reads = false, writes = false;
+
+	if (scheme != NULL) {
+		reads = scheme->open != NULL && scheme->verify != NULL;
+		writes = fsimg_scheme_writable(scheme);
+	} else if (layer->container != NULL) {
+		reads = true;
+		writes = layer->container->writer != NULL;
+	} else if (compression != NULL) {
+		reads = compression->decode != NULL;
+		writes = compression->encoder != NULL;
+	}
+	return ((reads ? FSIMG_CAP_READ | FSIMG_CAP_VERIFY : 0) |
+	    (writes ? FSIMG_CAP_WRITE : 0));
+}
+
 fsimg_status_t
 fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 {
@@ -417,12 +444,8 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 	if (layer->suffix != NULL)
 		snprintf(out->suffix, sizeof(out->suffix), "%s", layer->suffix);
 	out->kind = layer->kind;
-	if (layer->scheme != NULL)
-		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_WRITE |
-		    FSIMG_CAP_VERIFY;
+	out->capabilities = fsimg_layer_capabilities(layer);
 	if (layer->container != NULL) {
-		out->capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY |
-		    (layer->container->writer != NULL ? FSIMG_CAP_WRITE : 0);
 		snprintf(out->codecs, sizeof(out->codecs), "%s",
 		    layer->container->codecs);
 		if (layer->container->zlib)
@@ -432,12 +455,7 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 			snprintf(out->carries, sizeof(out->carries), "%s",
 			    layer->container->carries);
 	}
-	/* The operations fsimg_compression_named accepts, read and write. */
 	if (layer->compression != NULL) {
-		out->capabilities =
-		    (layer->compression->decode != NULL ? FSIMG_CAP_READ |
-		    FSIMG_CAP_VERIFY : 0) |
-		    (layer->compression->encoder != NULL ? FSIMG_CAP_WRITE : 0);
 		if (layer->compression->zlib)
 			snprintf(out->codec_version, sizeof(out->codec_version),
 			    "zlib %s", zlibVersion());

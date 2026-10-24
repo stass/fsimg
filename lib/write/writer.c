@@ -129,22 +129,20 @@ fsimg_writer_new_variant(fsimg_ctx_t *ctx, const fsimg_format_t *driver,
 /*
  * Resolve the disk around the volume before the format validates its
  * options: the compression, the scheme's settings and the partition's
- * type, name and identity are all checked here, before any source is
- * read, and the container's plan reads its file settings through the
- * writer's session. A derived disk is sized from the planned volume, so
- * its MBR limit is checked when the plan is placed; a fixed disk's room
- * for the volume is checked by fit_volume once the format has resolved
- * its sector.
+ * metadata, which the scheme reads from the layer options, are all
+ * checked here, before any source is read, and the container's plan reads
+ * its file settings through the writer's session. A derived disk is sized
+ * from the planned volume, so the scheme's final limits are checked when
+ * the plan is placed; a fixed disk's room for the volume is checked by
+ * fit_volume once the format has resolved its sector.
  */
 static fsimg_status_t
 plan_layers(fsimg_session_t *session, const fsimg_stack_t *stack,
     fsimg_write_options_t *selected, fsimg_layer_options_t *layers,
     fsimg_disk_plan_t *disk, fsimg_error_t *error)
 {
-	fsimg_partition_request_t request;
 	fsimg_disk_request_t disk_request;
 	fsimg_layer_inputs_t inputs;
-	bool gpt;
 	fsimg_status_t status;
 
 	/* The disk plan keeps the file settings' objects, which the caller
@@ -166,15 +164,8 @@ plan_layers(fsimg_session_t *session, const fsimg_stack_t *stack,
 	status = fsimg_disk_plan_init(session->ctx, &disk_request, disk, error);
 	if (status != FSIMG_OK || disk->scheme == NULL)
 		return (status);
-	gpt = disk->table.kind == FSIMG_SCHEME_GPT;
-	request = (fsimg_partition_request_t){
-		.type = gpt ? layers->gpt_type : layers->mbr_type,
-		.name = layers->gpt_name,
-		.guid = layers->gpt_guid,
-		.filesystem = stack->slots[FSIMG_LAYER_FILESYSTEM].name,
-		.active = layers->mbr_active
-	};
-	return (fsimg_disk_plan_partition(disk, 0, &request, error));
+	return (fsimg_disk_plan_partition(disk, 1, layers, NULL,
+	    stack->slots[FSIMG_LAYER_FILESYSTEM].name, error));
 }
 
 /*

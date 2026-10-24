@@ -13,13 +13,6 @@
   order stay in C. A generic Relic extension is eligible only on its own merits,
   not a prerequisite of this workflow; no runtime Relic dependency.
 
-* [Low] **Scheme-owned planning** (`lib/layers/`, `lib/write/writer.c`):
-  implement the [scheme-planning design](specs/design-scheme-planning.md)
-  with GPT/MBR compatibility checks and a synthetic writer descriptor.
-  Keep common placement and bounded records, and demonstrate that the
-  operations remove repeated interpretation without adding another plan
-  allocation or extending the read model without a concrete format design.
-
 * [Medium] **Common driver contract coverage**
   (`test/driver-contracts.c`, `test/layer-contracts.c`, `lib/core/`,
   format/protocol scalar codecs): complete the remaining witnesses under the

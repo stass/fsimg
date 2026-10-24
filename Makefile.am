@@ -136,7 +136,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
 	test-ifs \
 	test-ifs-write test-cli \
-	test-qualify test-fragment test-posix test-layers test-layers-write \
+	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
 	test-containers test-compression test-gzip-write test-holes test-settings \
 	header-c \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
@@ -195,6 +195,8 @@ test_settings_SOURCES = test/settings.c test/test.h
 test_settings_LDADD = libfsimg-core.la
 test_layers_write_SOURCES = test/layers-write.c test/test.h
 test_layers_write_LDADD = libfsimg-core.la
+test_scheme_planning_SOURCES = test/scheme-planning.c test/test.h
+test_scheme_planning_LDADD = libfsimg-core.la
 test_containers_SOURCES = test/containers.c test/test.h
 test_containers_LDADD = libfsimg-core.la
 test_ifsboot_SOURCES = test/ifsboot.c test/test.h
