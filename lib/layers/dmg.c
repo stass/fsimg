@@ -12,6 +12,7 @@
 #include "io.h"
 #include "layer.h"
 #include "meta.h"
+#include "zlib-memory.h"
 
 /*
  * Apple UDIF disk images (DMG). The file is a data fork of chunks, an XML
@@ -236,7 +237,7 @@ typedef struct dmg_plan {
  * zero run of zero_sectors that ends the disk described so far; runs holds
  * the run_count recorded runs, encoded. table_crc covers the disk's bytes
  * and fork_crc the data fork's. Under zlib, stream deflates one chunk at a
- * time into packed, and allocates through zlib_error. carry and line hold
+ * time into packed, and allocates through memory. carry and line hold
  * the base64 text of the table not yet written.
  */
 typedef struct dmg_encoder {
@@ -253,7 +254,7 @@ typedef struct dmg_encoder {
 	z_stream	 stream;
 	bool		 stream_ready;
 	unsigned char	*packed;
-	fsimg_error_t	 zlib_error;
+	fsimg_zlib_memory_t memory;
 	unsigned char	 carry[3];
 	unsigned	 carried;
 	char		 line[DMG_BASE64_LINE];
@@ -339,8 +340,6 @@ static fsimg_status_t dmg_plan(const fsimg_container_plan_args_t *,
 static uint64_t plist_bytes(uint64_t);
 static fsimg_status_t dmg_bound(const fsimg_container_plan_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
-static voidpf dmg_zlib_alloc(voidpf, uInt, uInt);
-static void dmg_zlib_free(voidpf, voidpf);
 static fsimg_status_t dmg_encode_open(const fsimg_encode_t *, void **,
     fsimg_error_t *);
 static fsimg_status_t record_run(dmg_encoder_t *, uint32_t, uint64_t,
@@ -1137,23 +1136,6 @@ dmg_bound(const fsimg_container_plan_t *plan, uint64_t disk_bytes,
 	return (FSIMG_OK);
 }
 
-static voidpf
-dmg_zlib_alloc(voidpf opaque, uInt items, uInt size)
-{
-	dmg_encoder_t *encoder = opaque;
-
-	if (size != 0 && items > SIZE_MAX / size)
-		return (Z_NULL);
-	return (fsimg_alloc(encoder->ctx, (size_t)items * size,
-	    &encoder->zlib_error));
-}
-
-static void
-dmg_zlib_free(voidpf opaque FSIMG_UNUSED, voidpf address)
-{
-	fsimg_dealloc(address);
-}
-
 /* The encoder: its run store, and under zlib the deflate state and an
  * output buffer of one chunk, all charged to the context.
  */
@@ -1162,7 +1144,9 @@ dmg_encode_open(const fsimg_encode_t *encode, void **state,
     fsimg_error_t *error)
 {
 	dmg_encoder_t *encoder;
+	char message[64];
 	fsimg_status_t status;
+	int result;
 
 	*state = NULL;
 	encoder = fsimg_alloc(encode->ctx, sizeof(*encoder), error);
@@ -1183,16 +1167,18 @@ dmg_encode_open(const fsimg_encode_t *encode, void **state,
 	    encoder->plan->base.chunk_bytes, error);
 	if (encoder->packed == NULL)
 		return (error->status);
-	encoder->stream.zalloc = dmg_zlib_alloc;
-	encoder->stream.zfree = dmg_zlib_free;
-	encoder->stream.opaque = encoder;
-	if (deflateInit(&encoder->stream, (int)encoder->plan->level) !=
-	    Z_OK) {
-		*error = encoder->zlib_error;
-		if (error->status == FSIMG_OK)
-			fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-			    "zlib initialization failed");
-		return (error->status);
+	fsimg_zlib_memory_bind(&encoder->memory, encode->ctx, &encoder->stream);
+	result = deflateInit(&encoder->stream, (int)encoder->plan->level);
+	if (result == Z_MEM_ERROR)
+		return (fsimg_zlib_memory_error(&encoder->memory, error));
+	if (result == Z_VERSION_ERROR)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "the zlib library does not match its header"));
+	if (result != Z_OK) {
+		snprintf(message, sizeof(message),
+		    "zlib refused to start the DMG encoder (%d)", result);
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    message));
 	}
 	encoder->stream_ready = true;
 	return (FSIMG_OK);
@@ -1263,8 +1249,8 @@ deflate_chunk(dmg_encoder_t *encoder, const unsigned char *bytes,
 
 	*packed_length = 0;
 	if (deflateReset(stream) != Z_OK)
-		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-		    "zlib reset failed"));
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "zlib refused to reset the DMG encoder"));
 	stream->next_in = (Bytef *)(uintptr_t)bytes;
 	stream->avail_in = (uInt)length;
 	stream->next_out = encoder->packed;
@@ -1274,8 +1260,8 @@ deflate_chunk(dmg_encoder_t *encoder, const unsigned char *bytes,
 		*packed_length = (size_t)stream->total_out;
 	else if (result != Z_OK && result != Z_STREAM_END &&
 	    result != Z_BUF_ERROR)
-		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-		    "zlib compression failed"));
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "zlib failed to deflate a DMG chunk"));
 	return (FSIMG_OK);
 }
 

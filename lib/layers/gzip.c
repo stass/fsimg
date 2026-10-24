@@ -13,6 +13,7 @@
 
 #include "host.h"
 #include "layer.h"
+#include "zlib-memory.h"
 
 /*
  * gzip, read side (RFC 1952; specs/design-layers.md#gzip). A file is one
@@ -59,12 +60,6 @@
 /* The encoder's unit: its deflate output buffer and its input pieces. */
 #define GZIP_PIECE_BYTES	(64u * 1024)
 
-/* What zlib's allocator charges, and why its last allocation failed. */
-typedef struct gzip_memory {
-	fsimg_ctx_t	*ctx;
-	fsimg_error_t	 error;
-} gzip_memory_t;
-
 /*
  * One decode. Input bytes wait in stream.next_in and stream.avail_in,
  * where inflate leaves whatever follows a member's DEFLATE data, so the
@@ -73,7 +68,7 @@ typedef struct gzip_memory {
  */
 typedef struct gzip_decoder {
 	z_stream	 stream;
-	gzip_memory_t	 memory;
+	fsimg_zlib_memory_t memory;
 	fsimg_spool_input_t	*source;
 	fsimg_spool_t	*spool;
 	unsigned char	*input;
@@ -89,7 +84,7 @@ typedef struct gzip_decoder {
  */
 typedef struct gzip_encoder {
 	z_stream	 stream;
-	gzip_memory_t	 memory;
+	fsimg_zlib_memory_t memory;
 	fsimg_seq_sink_t *sink;
 	unsigned char	*output;
 	unsigned char	*zeros;
@@ -114,9 +109,7 @@ static fsimg_status_t encoder_finish(void *, fsimg_error_t *);
 static void encoder_close(void *);
 static fsimg_status_t deflate_out(gzip_encoder_t *, int, fsimg_error_t *);
 static unsigned char header_xfl(uint32_t);
-static voidpf zlib_alloc(voidpf, uInt, uInt);
-static void zlib_free(voidpf, voidpf);
-static fsimg_status_t zlib_started(const gzip_memory_t *, int, const char *,
+static fsimg_status_t zlib_started(const fsimg_zlib_memory_t *, int, const char *,
     fsimg_error_t *);
 static fsimg_status_t gzip_corrupt(fsimg_error_t *, const char *);
 static fsimg_status_t refill(gzip_decoder_t *, fsimg_error_t *);
@@ -160,43 +153,24 @@ gzip_probe(const unsigned char *prefix, size_t length, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-static voidpf
-zlib_alloc(voidpf opaque, uInt items, uInt size)
-{
-	gzip_memory_t *memory = opaque;
-
-	if (size != 0 && items > SIZE_MAX / size)
-		return (Z_NULL);
-	return (fsimg_alloc(memory->ctx, (size_t)items * size, &memory->error));
-}
-
-static void
-zlib_free(voidpf opaque FSIMG_UNUSED, voidpf address)
-{
-	fsimg_dealloc(address);
-}
-
 /* The outcome of zlib's init: a memory failure as the context charged it,
  * or any other refusal as an internal error naming what was started.
  */
 static fsimg_status_t
-zlib_started(const gzip_memory_t *memory, int code, const char *what,
+zlib_started(const fsimg_zlib_memory_t *memory, int code, const char *what,
     fsimg_error_t *error)
 {
 	char message[64];
 
 	if (code == Z_OK)
 		return (FSIMG_OK);
-	if (code == Z_MEM_ERROR && memory->error.status != FSIMG_OK) {
-		*error = memory->error;
-		return (error->status);
-	}
-	if (code == Z_MEM_ERROR) {
-		snprintf(message, sizeof(message), "%s allocation failed", what);
-		return (fsimg_error_set(error, FSIMG_ENOMEM, 0, FSIMG_OP_IMAGE,
-		    message));
-	}
-	snprintf(message, sizeof(message), "zlib refused to start a %s", what);
+	if (code == Z_MEM_ERROR)
+		return (fsimg_zlib_memory_error(memory, error));
+	if (code == Z_VERSION_ERROR)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "the zlib library does not match its header"));
+	snprintf(message, sizeof(message), "zlib refused to start a %s (%d)",
+	    what, code);
 	return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE, message));
 }
 
@@ -364,14 +338,12 @@ inflate_member(gzip_decoder_t *decoder, uLong *crc, uint64_t *length,
 			return (gzip_corrupt(error, "gzip member is truncated"));
 		stream->next_out = decoder->output;
 		stream->avail_out = GZIP_OUTPUT_BYTES;
-		fsimg_error_clear(&decoder->memory.error);
 		code = inflate(stream, Z_NO_FLUSH);
-		if (code == Z_MEM_ERROR) {
-			*error = decoder->memory.error;
-			return (error->status != FSIMG_OK ? error->status :
-			    fsimg_error_set(error, FSIMG_ENOMEM, 0,
-			    FSIMG_OP_IMAGE, "gzip decoder allocation failed"));
-		}
+		if (code == Z_MEM_ERROR)
+			return (fsimg_zlib_memory_error(&decoder->memory, error));
+		if (code == Z_STREAM_ERROR)
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_IMAGE, "zlib gzip decoder state is invalid"));
 		/* With input and a whole output buffer available, inflate either
 		 * makes progress or fails; Z_BUF_ERROR, no progress possible, is
 		 * malformed data too, so every pass consumes or produces bytes.
@@ -432,17 +404,16 @@ decoder_start(gzip_decoder_t *decoder, fsimg_error_t *error)
 	fsimg_status_t status;
 	int code;
 
-	decoder->input = fsimg_alloc(decoder->memory.ctx, GZIP_INPUT_BYTES,
+	decoder->input = fsimg_alloc(decoder->source->ctx, GZIP_INPUT_BYTES,
 	    error);
 	if (decoder->input == NULL)
 		return (error->status);
-	decoder->output = fsimg_alloc(decoder->memory.ctx, GZIP_OUTPUT_BYTES,
+	decoder->output = fsimg_alloc(decoder->source->ctx, GZIP_OUTPUT_BYTES,
 	    error);
 	if (decoder->output == NULL)
 		return (error->status);
-	decoder->stream.zalloc = zlib_alloc;
-	decoder->stream.zfree = zlib_free;
-	decoder->stream.opaque = &decoder->memory;
+	fsimg_zlib_memory_bind(&decoder->memory, decoder->source->ctx,
+	    &decoder->stream);
 	code = inflateInit2(&decoder->stream, -MAX_WBITS);
 	status = zlib_started(&decoder->memory, code, "gzip decoder", error);
 	decoder->inflating = status == FSIMG_OK;
@@ -493,7 +464,6 @@ gzip_decode(fsimg_spool_input_t *source, fsimg_spool_t *spool,
 	fsimg_status_t status;
 
 	bzero(&decoder, sizeof(decoder));
-	decoder.memory.ctx = source->ctx;
 	decoder.source = source;
 	decoder.spool = spool;
 	status = decoder_start(&decoder, error);
@@ -567,7 +537,6 @@ encoder_open(fsimg_ctx_t *ctx, const fsimg_compression_settings_t *settings,
 		return (error->status);
 	bzero(encoder, sizeof(*encoder));
 	*state = encoder;
-	encoder->memory.ctx = ctx;
 	encoder->sink = sink;
 	encoder->output = fsimg_alloc(ctx, GZIP_PIECE_BYTES, error);
 	if (encoder->output == NULL)
@@ -576,9 +545,7 @@ encoder_open(fsimg_ctx_t *ctx, const fsimg_compression_settings_t *settings,
 	if (encoder->zeros == NULL)
 		return (error->status);
 	bzero(encoder->zeros, GZIP_PIECE_BYTES);
-	encoder->stream.zalloc = zlib_alloc;
-	encoder->stream.zfree = zlib_free;
-	encoder->stream.opaque = &encoder->memory;
+	fsimg_zlib_memory_bind(&encoder->memory, ctx, &encoder->stream);
 	code = deflateInit2(&encoder->stream, (int)settings->level, Z_DEFLATED,
 	    -MAX_WBITS, GZIP_MEMORY_LEVEL, Z_DEFAULT_STRATEGY);
 	status = zlib_started(&encoder->memory, code, "gzip encoder", error);
