@@ -27,6 +27,7 @@
 #include <strings.h>
 
 #include "fat.h"
+#include "fsimg-endian.h"
 #include "unicode.h"
 
 /* The BPB fields, packed FAT interpretation and long-name checksum follow the
@@ -37,34 +38,6 @@
 
 static fsimg_status_t entry_timestamp(fsimg_metadata_t *, uint32_t,
     uint16_t, uint16_t, unsigned, fsimg_error_t *);
-
-uint16_t
-fsimg_fat_u16(const unsigned char *p)
-{
-	return ((uint16_t)(p[0] | (uint16_t)p[1] << 8));
-}
-
-uint32_t
-fsimg_fat_u32(const unsigned char *p)
-{
-	return ((uint32_t)p[0] | (uint32_t)p[1] << 8 |
-	    (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
-}
-
-void
-fsimg_fat_put16(unsigned char *p, uint16_t value)
-{
-	p[0] = (unsigned char)value;
-	p[1] = (unsigned char)(value >> 8);
-}
-
-void
-fsimg_fat_put32(unsigned char *p, uint32_t value)
-{
-	fsimg_fat_put16(p, (uint16_t)value);
-	fsimg_fat_put16(p + 2, (uint16_t)(value >> 16));
-}
-
 fsimg_status_t
 fsimg_fat_corrupt(fsimg_error_t *error, const char *message)
 {
@@ -110,11 +83,11 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	    bcmp(boot + 11, exfat_reserved, sizeof(exfat_reserved)) == 0)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "exFAT boot record is not a FAT12/16/32 volume"));
-	g->sector_bytes = fsimg_fat_u16(boot + 11);
+	g->sector_bytes = fsimg_load_le16(boot + 11);
 	sectors_per_cluster = boot[13];
-	g->reserved_sectors = fsimg_fat_u16(boot + 14);
+	g->reserved_sectors = fsimg_load_le16(boot + 14);
 	g->tables = boot[16];
-	g->root_entries = fsimg_fat_u16(boot + 17);
+	g->root_entries = fsimg_load_le16(boot + 17);
 	g->media = boot[21];
 	if ((g->sector_bytes != 512 && g->sector_bytes != 1024 &&
 	    g->sector_bytes != 2048 && g->sector_bytes != 4096) ||
@@ -124,14 +97,14 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	    (g->media != 0xf0 && g->media < 0xf8))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "boot record has no legal FAT BPB"));
-	if (fsimg_fat_u16(boot + 19) != 0 && fsimg_fat_u32(boot + 32) != 0)
+	if (fsimg_load_le16(boot + 19) != 0 && fsimg_load_le32(boot + 32) != 0)
 		return (fsimg_fat_corrupt(error, "conflicting FAT sector counts"));
-	total_sectors = fsimg_fat_u16(boot + 19);
+	total_sectors = fsimg_load_le16(boot + 19);
 	if (total_sectors == 0)
-		total_sectors = fsimg_fat_u32(boot + 32);
-	fat_sectors = fsimg_fat_u16(boot + 22);
+		total_sectors = fsimg_load_le32(boot + 32);
+	fat_sectors = fsimg_load_le16(boot + 22);
 	if (fat_sectors == 0)
-		fat_sectors = fsimg_fat_u32(boot + 36);
+		fat_sectors = fsimg_load_le32(boot + 36);
 	g->volume_bytes = total_sectors * g->sector_bytes;
 	g->fat_bytes = fat_sectors * g->sector_bytes;
 	g->cluster_bytes = sectors_per_cluster * g->sector_bytes;
@@ -174,17 +147,17 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	g->data_offset = data_sector * g->sector_bytes;
 	g->mirrored = true;
 	if (g->variant != 32) {
-		if (g->root_entries == 0 || fsimg_fat_u16(boot + 22) == 0)
+		if (g->root_entries == 0 || fsimg_load_le16(boot + 22) == 0)
 			return (fsimg_fat_corrupt(error, "FAT12/16 requires a fixed root and FAT"));
 		return (FSIMG_OK);
 	}
-	if (g->root_entries != 0 || fsimg_fat_u16(boot + 22) != 0 ||
-	    fsimg_fat_u16(boot + 19) != 0)
+	if (g->root_entries != 0 || fsimg_load_le16(boot + 22) != 0 ||
+	    fsimg_load_le16(boot + 19) != 0)
 		return (fsimg_fat_corrupt(error, "inconsistent FAT32 BPB fields"));
-	if (fsimg_fat_u16(boot + 42) != 0)
+	if (fsimg_load_le16(boot + 42) != 0)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_READER, "unsupported FAT32 revision"));
-	flags = fsimg_fat_u16(boot + 40);
+	flags = fsimg_load_le16(boot + 40);
 	/* FAT32 can explicitly disable mirroring and select a single active FAT.
 	 * Inactive tables are then neither allocation authority nor copy oracles.
 	 */
@@ -192,9 +165,9 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 		return (fsimg_fat_corrupt(error, "invalid FAT32 table flags"));
 	g->mirrored = (flags & 0x80) == 0;
 	g->active_table = g->mirrored ? 0 : flags & 0x0f;
-	g->root_cluster = fsimg_fat_u32(boot + 44);
-	g->fsinfo_sector = fsimg_fat_u16(boot + 48);
-	g->backup_sector = fsimg_fat_u16(boot + 50);
+	g->root_cluster = fsimg_load_le32(boot + 44);
+	g->fsinfo_sector = fsimg_load_le16(boot + 48);
+	g->backup_sector = fsimg_load_le16(boot + 50);
 	if (g->active_table >= g->tables || !fsimg_fat_cluster_valid(g, g->root_cluster) ||
 	    (g->fsinfo_sector != 0xffff &&
 	    (g->fsinfo_sector == 0 || g->fsinfo_sector >= g->reserved_sectors)) ||
@@ -286,7 +259,7 @@ fsimg_fat_lfn_slot(fat_lfn_t *lfn, const unsigned char *raw, fsimg_error_t *erro
 
 	ordinal = raw[0] & 0x1f;
 	if ((raw[0] & ~0x5fu) != 0 || ordinal == 0 || ordinal > 20 ||
-	    raw[12] != 0 || fsimg_fat_u16(raw + 26) != 0)
+	    raw[12] != 0 || fsimg_load_le16(raw + 26) != 0)
 		return (fsimg_fat_corrupt(error, "invalid FAT long-name slot"));
 	if ((raw[0] & 0x40) != 0) {
 		if (lfn->active)
@@ -299,7 +272,7 @@ fsimg_fat_lfn_slot(fat_lfn_t *lfn, const unsigned char *raw, fsimg_error_t *erro
 	if (!lfn->active || ordinal != lfn->remaining || raw[13] != lfn->checksum)
 		return (fsimg_fat_corrupt(error, "disordered FAT long-name sequence"));
 	for (unsigned i = 0; i < 13; i++)
-		lfn->units[(ordinal - 1) * 13 + i] = fsimg_fat_u16(raw + offsets[i]);
+		lfn->units[(ordinal - 1) * 13 + i] = fsimg_load_le16(raw + offsets[i]);
 	lfn->remaining--;
 	return (FSIMG_OK);
 }
@@ -389,18 +362,18 @@ fsimg_fat_entry_decode(const fat_geometry_t *g, const unsigned char *raw,
 		    FSIMG_OP_READER, "unsupported FAT entry attributes"));
 	if ((raw[11] & 0x08) != 0)
 		return (fsimg_fat_corrupt(error, "volume label used as an ordinary entry"));
-	*cluster = fsimg_fat_u16(raw + 26);
+	*cluster = fsimg_load_le16(raw + 26);
 	if (g->variant == 32) {
-		if ((fsimg_fat_u16(raw + 20) & 0xf000) != 0)
+		if ((fsimg_load_le16(raw + 20) & 0xf000) != 0)
 			return (fsimg_fat_corrupt(error, "reserved FAT32 first-cluster bits"));
-		*cluster |= (uint32_t)fsimg_fat_u16(raw + 20) << 16;
-	} else if (fsimg_fat_u16(raw + 20) != 0) {
+		*cluster |= (uint32_t)fsimg_load_le16(raw + 20) << 16;
+	} else if (fsimg_load_le16(raw + 20) != 0) {
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_READER, "FAT extended attributes are unsupported"));
 	}
 	entry->kind = (raw[11] & 0x10) != 0 ?
 	    FSIMG_ENTRY_DIRECTORY : FSIMG_ENTRY_FILE;
-	entry->size = fsimg_fat_u32(raw + 28);
+	entry->size = fsimg_load_le32(raw + 28);
 	if ((entry->kind == FSIMG_ENTRY_DIRECTORY && entry->size != 0) ||
 	    ((entry->kind == FSIMG_ENTRY_DIRECTORY || entry->size != 0) &&
 	    !fsimg_fat_cluster_valid(g, *cluster)) ||
@@ -411,15 +384,15 @@ fsimg_fat_entry_decode(const fat_geometry_t *g, const unsigned char *raw,
 	metadata->valid = FSIMG_META_ATTRIBUTES;
 	metadata->attributes = (raw[11] & 7) | ((raw[11] & 0x20) != 0 ? 8 : 0);
 
-	status = entry_timestamp(metadata, FSIMG_META_CREATED, fsimg_fat_u16(raw + 16),
-	    fsimg_fat_u16(raw + 14), raw[13], error);
+	status = entry_timestamp(metadata, FSIMG_META_CREATED, fsimg_load_le16(raw + 16),
+	    fsimg_load_le16(raw + 14), raw[13], error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = entry_timestamp(metadata, FSIMG_META_MODIFIED, fsimg_fat_u16(raw + 24),
-	    fsimg_fat_u16(raw + 22), 0, error);
+	status = entry_timestamp(metadata, FSIMG_META_MODIFIED, fsimg_load_le16(raw + 24),
+	    fsimg_load_le16(raw + 22), 0, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (entry_timestamp(metadata, FSIMG_META_ACCESSED, fsimg_fat_u16(raw + 18),
+	return (entry_timestamp(metadata, FSIMG_META_ACCESSED, fsimg_load_le16(raw + 18),
 	    0, 0, error));
 }
 

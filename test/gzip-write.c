@@ -853,17 +853,23 @@ test_faults(void)
 		writer = NULL;
 		sink.raw_fd = raw_file(&f);
 		fsimg_test_fail_alloc_after(f.ctx, attempt);
+		bzero(&error, sizeof(error));
 		status = fsimg_writer_new(f.ctx, "fat12", &options, &writer,
-		    NULL);
+		    &error);
 		if (status == FSIMG_OK)
-			status = fsimg_writer_output(writer, &sink, NULL);
+			status = fsimg_writer_output(writer, &sink, &error);
 		else
 			CHECK(close(sink.raw_fd) == 0);
 		fsimg_writer_free(writer);
 		fsimg_test_fail_alloc_after(f.ctx, 0);
 		if (status == FSIMG_OK)
 			break;
+		/* Every failure is the injected one, including those inside
+		 * zlib's initialization, which later allocations there must not
+		 * replace.
+		 */
 		CHECK(status == FSIMG_ENOMEM);
+		CHECK(error.operation == FSIMG_OP_ALLOCATE);
 		CHECK(faccessat(f.directory_fd, "image.gz", F_OK, 0) == -1);
 		outcomes++;
 	}

@@ -10,9 +10,11 @@
 #include <zlib.h>
 
 #include "codec.h"
+#include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 #include "meta.h"
+#include "zlib-memory.h"
 
 /*
  * A container's disk as a chunk index, and the read-only adapter that
@@ -111,7 +113,7 @@ typedef struct chunk_disk {
 	cache_slot_t	 slots[CHUNK_CACHE_SLOTS];
 	uint64_t	 slot_bytes;	/* Each slot's size, fixed at open */
 	z_stream	 stream;
-	fsimg_error_t	 zlib_error;	/* Why zlib's last allocation failed */
+	fsimg_zlib_memory_t zlib_memory;	/* Charges stream's allocations */
 	uint64_t	 decoded_bytes;
 	uint64_t	 decode_bound;
 	uint64_t	 use_clock;
@@ -131,8 +133,8 @@ static fsimg_status_t record_search(fsimg_chunk_index_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
 static fsimg_status_t tile_records(fsimg_chunk_index_t *, fsimg_stream_t *,
     fsimg_error_t *);
-static voidpf zlib_alloc(voidpf, uInt, uInt);
-static void zlib_free(voidpf, voidpf);
+static fsimg_status_t zlib_failed(const fsimg_zlib_memory_t *, int,
+    const char *, fsimg_error_t *);
 static void disk_release(void *);
 static fsimg_status_t charge_decode(chunk_disk_t *, const fsimg_chunk_t *,
     fsimg_error_t *);
@@ -219,23 +221,23 @@ chunk_valid(const fsimg_chunk_index_t *index, const fsimg_chunk_t *chunk)
 static void
 record_encode(const fsimg_chunk_t *chunk, unsigned char *raw)
 {
-	fsimg_layer_put_le64(raw + RECORD_DISK_OFFSET, chunk->disk_offset);
-	fsimg_layer_put_le64(raw + RECORD_LENGTH, chunk->length);
-	fsimg_layer_put_le64(raw + RECORD_FILE_OFFSET, chunk->file_offset);
-	fsimg_layer_put_le64(raw + RECORD_ENCODED, chunk->encoded_length);
-	fsimg_layer_put_le32(raw + RECORD_KIND, (uint32_t)chunk->kind);
-	fsimg_layer_put_le32(raw + RECORD_ARGUMENT, chunk->argument);
+	fsimg_store_le64(raw + RECORD_DISK_OFFSET, chunk->disk_offset);
+	fsimg_store_le64(raw + RECORD_LENGTH, chunk->length);
+	fsimg_store_le64(raw + RECORD_FILE_OFFSET, chunk->file_offset);
+	fsimg_store_le64(raw + RECORD_ENCODED, chunk->encoded_length);
+	fsimg_store_le32(raw + RECORD_KIND, (uint32_t)chunk->kind);
+	fsimg_store_le32(raw + RECORD_ARGUMENT, chunk->argument);
 }
 
 static void
 record_decode(const unsigned char *raw, fsimg_chunk_t *chunk)
 {
-	chunk->disk_offset = fsimg_layer_le64(raw + RECORD_DISK_OFFSET);
-	chunk->length = fsimg_layer_le64(raw + RECORD_LENGTH);
-	chunk->file_offset = fsimg_layer_le64(raw + RECORD_FILE_OFFSET);
-	chunk->encoded_length = fsimg_layer_le64(raw + RECORD_ENCODED);
-	chunk->kind = (fsimg_chunk_kind_t)fsimg_layer_le32(raw + RECORD_KIND);
-	chunk->argument = fsimg_layer_le32(raw + RECORD_ARGUMENT);
+	chunk->disk_offset = fsimg_load_le64(raw + RECORD_DISK_OFFSET);
+	chunk->length = fsimg_load_le64(raw + RECORD_LENGTH);
+	chunk->file_offset = fsimg_load_le64(raw + RECORD_FILE_OFFSET);
+	chunk->encoded_length = fsimg_load_le64(raw + RECORD_ENCODED);
+	chunk->kind = (fsimg_chunk_kind_t)fsimg_load_le32(raw + RECORD_KIND);
+	chunk->argument = fsimg_load_le32(raw + RECORD_ARGUMENT);
 }
 
 /* Records order by disk offset; equal offsets are overlap the tiling
@@ -250,8 +252,8 @@ record_compare(const void *left, size_t left_length, const void *right,
 	if (left_length != CHUNK_RECORD_BYTES || right_length != CHUNK_RECORD_BYTES)
 		return (left_length < right_length ? -1 :
 		    left_length > right_length);
-	a = fsimg_layer_le64((const unsigned char *)left + RECORD_DISK_OFFSET);
-	b = fsimg_layer_le64((const unsigned char *)right + RECORD_DISK_OFFSET);
+	a = fsimg_load_le64((const unsigned char *)left + RECORD_DISK_OFFSET);
+	b = fsimg_load_le64((const unsigned char *)right + RECORD_DISK_OFFSET);
 	return (a < b ? -1 : a > b);
 }
 
@@ -554,21 +556,25 @@ fsimg_chunk_kinds_text(unsigned kinds, unsigned codecs, char *text,
 	}
 }
 
-/* zlib's state is charged to the context like every other allocation. */
-static voidpf
-zlib_alloc(voidpf opaque, uInt items, uInt size)
+/*
+ * A zlib result that says nothing about the chunk's bytes: an allocation
+ * failure as the adapter recorded it, or a fault of fsimg or of the zlib
+ * library in the named call.
+ */
+static fsimg_status_t
+zlib_failed(const fsimg_zlib_memory_t *memory, int result, const char *call,
+    fsimg_error_t *error)
 {
-	chunk_disk_t *disk = opaque;
+	char message[64];
 
-	if (size != 0 && items > SIZE_MAX / size)
-		return (Z_NULL);
-	return (fsimg_alloc(disk->ctx, (size_t)items * size, &disk->zlib_error));
-}
-
-static void
-zlib_free(voidpf opaque FSIMG_UNUSED, voidpf address)
-{
-	fsimg_dealloc(address);
+	if (result == Z_MEM_ERROR)
+		return (fsimg_zlib_memory_error(memory, error));
+	if (result == Z_VERSION_ERROR)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "the zlib library does not match its header"));
+	snprintf(message, sizeof(message), "zlib %s returned %d", call, result);
+	return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+	    message));
 }
 
 static void
@@ -599,6 +605,7 @@ fsimg_chunk_disk_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
 	chunk_disk_t *disk;
 	uint64_t bound;
 	fsimg_status_t status;
+	int result;
 
 	*out = NULL;
 	disk = fsimg_alloc(ctx, sizeof(*disk), error);
@@ -638,15 +645,11 @@ fsimg_chunk_disk_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
 		}
 	}
 	if ((index->codecs & (1u << FSIMG_CODEC_ZLIB)) != 0) {
-		disk->stream.zalloc = zlib_alloc;
-		disk->stream.zfree = zlib_free;
-		disk->stream.opaque = disk;
-		if (inflateInit(&disk->stream) != Z_OK) {
-			*error = disk->zlib_error;
-			if (error->status == FSIMG_OK)
-				fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-				    "zlib initialization failed");
-			status = error->status;
+		fsimg_zlib_memory_bind(&disk->zlib_memory, ctx, &disk->stream);
+		result = inflateInit(&disk->stream);
+		if (result != Z_OK) {
+			status = zlib_failed(&disk->zlib_memory, result,
+			    "inflateInit", error);
 			goto fail;
 		}
 		disk->stream_ready = true;
@@ -706,9 +709,10 @@ inflate_chunk(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 	fsimg_status_t status;
 	int result;
 
-	if (inflateReset(stream) != Z_OK)
-		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-		    "zlib reset failed"));
+	result = inflateReset(stream);
+	if (result != Z_OK)
+		return (zlib_failed(&disk->zlib_memory, result, "inflateReset",
+		    error));
 	stream->next_out = out;
 	stream->avail_out = (uInt)chunk->length;
 	stream->next_in = disk->input;
@@ -732,7 +736,6 @@ inflate_chunk(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 			stream->next_out = &spare;
 			stream->avail_out = 1;
 		}
-		fsimg_error_clear(&disk->zlib_error);
 		result = inflate(stream, Z_NO_FLUSH);
 		if (stream->next_out == &spare + 1)
 			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
@@ -740,20 +743,17 @@ inflate_chunk(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 			    "compressed chunk decodes to more bytes than declared"));
 		if (result == Z_STREAM_END)
 			break;
-		if (result == Z_MEM_ERROR) {
-			*error = disk->zlib_error;
-			if (error->status == FSIMG_OK)
-				fsimg_error_set(error, FSIMG_ELIMIT, 0,
-				    FSIMG_OP_IMAGE, "zlib could not allocate its state");
-			return (error->status);
-		}
 		if (result == Z_BUF_ERROR)
 			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_IMAGE,
 			    "compressed chunk ends before its stream does"));
-		if (result != Z_OK)
+		/* A dictionary is never part of a DMG chunk. */
+		if (result == Z_DATA_ERROR || result == Z_NEED_DICT)
 			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_IMAGE, "compressed chunk is not a valid zlib stream"));
+		if (result != Z_OK)
+			return (zlib_failed(&disk->zlib_memory, result, "inflate",
+			    error));
 	}
 	/* The stream may end in the very call that fills out, before the
 	 * spare byte is offered, so the count of bytes produced decides. */
@@ -891,7 +891,7 @@ fill_pattern(unsigned char *out, size_t length, uint32_t value, uint64_t delta)
 {
 	unsigned char pattern[4];
 
-	fsimg_layer_put_le32(pattern, value);
+	fsimg_store_le32(pattern, value);
 	for (size_t i = 0; i < length; i++)
 		out[i] = pattern[(delta + i) % 4];
 }

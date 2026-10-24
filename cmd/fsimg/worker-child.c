@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "extract.h"
+#include "fsimg-endian.h"
 #include "host.h"
 #include "sandbox.h"
 #include "source.h"
@@ -135,9 +136,9 @@ child_progress(void *argument, const fsimg_progress_t *progress)
 	if (milliseconds - child->last_progress < 250)
 		return;
 	child->last_progress = milliseconds;
-	fsimg_wire_put64(raw, progress->entries);
-	fsimg_wire_put64(raw + 8, progress->bytes);
-	fsimg_wire_put64(raw + 16, progress->work);
+	fsimg_store_le64(raw, progress->entries);
+	fsimg_store_le64(raw + 8, progress->bytes);
+	fsimg_store_le64(raw + 16, progress->work);
 	if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PROGRESS,
 	    raw, sizeof(raw), NULL) != FSIMG_OK)
 		child->channel_failed = true;
@@ -159,9 +160,9 @@ child_loss(void *argument, const char *path, uint32_t fields)
 	start = fsimg_rendered_tail(path, length, FSIMG_WIRE_LOSS_PATH_BYTES);
 	length -= start;
 	bzero(raw, sizeof(raw));
-	fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_FIELDS, fields);
-	fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_TRUNCATED, start != 0 ? 1 : 0);
-	fsimg_wire_put64(raw + FSIMG_WIRE_LOSS_LENGTH, length);
+	fsimg_store_le64(raw + FSIMG_WIRE_LOSS_FIELDS, fields);
+	fsimg_store_le64(raw + FSIMG_WIRE_LOSS_TRUNCATED, start != 0 ? 1 : 0);
+	fsimg_store_le64(raw + FSIMG_WIRE_LOSS_LENGTH, length);
 	bcopy(path + start, raw + FSIMG_WIRE_LOSS_PATH, length);
 	if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_LOSS, raw,
 	    (uint32_t)(FSIMG_WIRE_LOSS_BYTES + length), NULL) != FSIMG_OK)
@@ -478,7 +479,7 @@ child_ready(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 		else
 			child->result.confinement = FSIMG_CONFINEMENT_ACTIVE;
 	}
-	fsimg_wire_put64(ready, child->result.confinement);
+	fsimg_store_le64(ready, child->result.confinement);
 	status = fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_READY,
 	    ready, sizeof(ready), error);
 	if (status != FSIMG_OK)
@@ -530,8 +531,8 @@ send_image(const fsimg_image_info_t *info, const fsimg_layer_report_t *report,
 	    strnlen(info->codecs, FSIMG_WIRE_IMAGE_CODECS_BYTES - 1));
 	bcopy(info->container_guid, raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID,
 	    sizeof(info->container_guid));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHUNKS, info->chunk_count);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, info->file_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_CHUNKS, info->chunk_count);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, info->file_bytes);
 	bcopy(info->compression, raw + FSIMG_WIRE_IMAGE_COMPRESSION,
 	    strnlen(info->compression, sizeof(info->compression) - 1));
 	fsimg_wire_details_encode(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
@@ -550,16 +551,16 @@ send_image(const fsimg_image_info_t *info, const fsimg_layer_report_t *report,
 	}
 	if (report != NULL) {
 		flags |= FSIMG_WIRE_IMAGE_VERIFIED;
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHECKED, report->partitions);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_CHECKED, report->partitions);
 		bcopy(report->unverified, raw + FSIMG_WIRE_IMAGE_UNVERIFIED,
 		    strnlen(report->unverified, sizeof(report->unverified) - 1));
 	}
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, flags);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, info->disk_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, info->sector_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SLOTS, info->partition_count);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, info->selected);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK_ID, info->mbr_disk_id);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, flags);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, info->disk_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SECTOR, info->sector_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SLOTS, info->partition_count);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SELECTED, info->selected);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID, info->mbr_disk_id);
 	bcopy(info->disk_guid, raw + FSIMG_WIRE_IMAGE_DISK_GUID,
 	    sizeof(info->disk_guid));
 	bcopy(info->scheme, raw + FSIMG_WIRE_IMAGE_SCHEME,
@@ -595,21 +596,21 @@ send_plan(const fsimg_plan_info_t *info, fsimg_error_t *error)
 	unsigned char raw[FSIMG_WIRE_PLAN_BYTES];
 
 	bzero(raw, sizeof(raw));
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_VOLUME, info->volume_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_PAYLOAD, info->payload_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_INITIALIZED, info->initialized_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_ALLOCATED, info->allocated_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_METADATA, info->metadata_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_FREE, info->free_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_ENTRIES, info->entries);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_LOSSES, info->metadata_losses);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_SCRATCH, info->scratch_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_SECTOR, info->sector_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_CLUSTER, info->allocation_unit_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_IO_FLAGS, info->required_io_flags);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_VOLUME, info->volume_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_PAYLOAD, info->payload_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_INITIALIZED, info->initialized_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_ALLOCATED, info->allocated_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_METADATA, info->metadata_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_FREE, info->free_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_ENTRIES, info->entries);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_LOSSES, info->metadata_losses);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_SCRATCH, info->scratch_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_SECTOR, info->sector_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_CLUSTER, info->allocation_unit_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_IO_FLAGS, info->required_io_flags);
 	bcopy(info->format, raw + FSIMG_WIRE_PLAN_FORMAT, strlen(info->format));
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_OUTPUT, info->output_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_PADDING, info->padding_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_OUTPUT, info->output_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_PADDING, info->padding_bytes);
 	bcopy(info->codec_version, raw + FSIMG_WIRE_PLAN_CODEC,
 	    strnlen(info->codec_version, FSIMG_WIRE_PLAN_CODEC_BYTES - 1));
 	return (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PLAN, raw,
@@ -760,15 +761,15 @@ verify_job(worker_child_t *child, fsimg_error_t *error)
 	    &report, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_SCOPE, report.scope);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_COMPLETE, report.complete ? 1 : 0);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_FILES, report.files);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_DIRECTORIES, report.directories);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_LOGICAL, report.logical_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_PAYLOAD, report.payload_bytes_read);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_ALLOCATED, report.allocated_clusters);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_FREE, report.free_clusters);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_BAD_CLUSTERS, report.bad_clusters);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_SCOPE, report.scope);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_COMPLETE, report.complete ? 1 : 0);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_FILES, report.files);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_DIRECTORIES, report.directories);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_LOGICAL, report.logical_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_PAYLOAD, report.payload_bytes_read);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_ALLOCATED, report.allocated_clusters);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_FREE, report.free_clusters);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_BAD_CLUSTERS, report.bad_clusters);
 	child->result.entries = report.files + report.directories;
 	child->result.logical_bytes = report.logical_bytes;
 	return (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_VERIFY,
@@ -1264,13 +1265,13 @@ fsimg_worker_main(void)
 		    FSIMG_WIRE_ERROR_BYTES, NULL);
 		return (1);
 	}
-	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_ENTRIES, child.result.entries);
-	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_LOGICAL, child.result.logical_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_LOSSES, child.result.metadata_losses);
-	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_RAW, child.result.raw_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_IMAGE, child.result.image_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_SKIPPED, child.result.skipped_entries);
-	fsimg_wire_put64(raw + FSIMG_WIRE_DONE_OMITTED, child.result.omitted_entries);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_ENTRIES, child.result.entries);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_LOGICAL, child.result.logical_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_LOSSES, child.result.metadata_losses);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_RAW, child.result.raw_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_IMAGE, child.result.image_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_SKIPPED, child.result.skipped_entries);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_OMITTED, child.result.omitted_entries);
 	status = fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
 	return (status == FSIMG_OK ? 0 : 1);
 }

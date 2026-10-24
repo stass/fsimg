@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "digest.h"
+#include "fsimg-endian.h"
 #include "internal.h"
 #include "mtree-writer.h"
 #include "socket.h"
@@ -880,8 +881,8 @@ test_generated_ranges(void)
 	CHECK(fsimg_source_open(writer, 3, NULL) == FSIMG_OK);
 	CHECK(fsimg_source_read(writer, 48, bytes, 16, &transferred,
 	    NULL) == FSIMG_OK);
-	CHECK(fsimg_meta_get_u64(bytes) == 77 &&
-	    fsimg_meta_get_u64(bytes + 8) == 48);
+	CHECK(fsimg_load_le64(bytes) == 77 &&
+	    fsimg_load_le64(bytes + 8) == 48);
 	CHECK(fsimg_source_finish(writer, NULL) == FSIMG_OK);
 
 	fsimg_writer_free(writer);

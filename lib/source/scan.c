@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "source.h"
 #include "unicode.h"
 
@@ -133,18 +134,18 @@ fsimg_source_append_host(fsimg_writer_t *writer, const fsimg_source_root_t *root
 		    writer->ctx->options.max_path_bytes, path_length));
 	bcopy(relative_path, record + FSIMG_SOURCE_HEADER, path_length);
 	bzero(record, FSIMG_SOURCE_HEADER);
-	fsimg_meta_put_u64(record, root->id);
-	fsimg_meta_put_u64(record + 8, identity->device);
-	fsimg_meta_put_u64(record + 16, identity->inode);
-	fsimg_meta_put_u64(record + 24, identity->length);
-	fsimg_meta_put_u64(record + 32, (uint64_t)identity->modified.seconds);
-	fsimg_meta_put_u64(record + 40, identity->modified.nanoseconds);
-	fsimg_meta_put_u64(record + 48, (uint64_t)identity->changed.seconds);
-	fsimg_meta_put_u64(record + 56, identity->changed.nanoseconds);
-	fsimg_meta_put_u64(record + 64, identity->kind);
-	fsimg_meta_put_u64(record + 72, 1);
+	fsimg_store_le64(record, root->id);
+	fsimg_store_le64(record + 8, identity->device);
+	fsimg_store_le64(record + 16, identity->inode);
+	fsimg_store_le64(record + 24, identity->length);
+	fsimg_store_le64(record + 32, (uint64_t)identity->modified.seconds);
+	fsimg_store_le64(record + 40, identity->modified.nanoseconds);
+	fsimg_store_le64(record + 48, (uint64_t)identity->changed.seconds);
+	fsimg_store_le64(record + 56, identity->changed.nanoseconds);
+	fsimg_store_le64(record + 64, identity->kind);
+	fsimg_store_le64(record + 72, 1);
 	if (digest != NULL) {
-		fsimg_meta_put_u64(record + 80, 1);
+		fsimg_store_le64(record + 80, 1);
 		bcopy(digest, record + FSIMG_SOURCE_DIGEST,
 		    FSIMG_SHA256_DIGEST_LENGTH);
 	}

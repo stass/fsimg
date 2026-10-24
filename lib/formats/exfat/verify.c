@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "exfat.h"
+#include "fsimg-endian.h"
 #include "host.h"
 
 typedef struct exfat_owner_cursor {
@@ -33,8 +34,8 @@ owner_compare(const void *a, size_t alen, const void *b, size_t blen,
 
 	if (alen != 16 || blen != 16)
 		return ((alen > blen) - (alen < blen));
-	first = fsimg_meta_get_u64(a);
-	second = fsimg_meta_get_u64(b);
+	first = fsimg_load_le64(a);
+	second = fsimg_load_le64(b);
 	return ((first > second) - (first < second));
 }
 
@@ -57,8 +58,8 @@ owner_next(fsimg_reader_t *reader, exfat_owner_cursor_t *owners,
 		return (status);
 	if (length != sizeof(record))
 		return (exfat_corrupt(error, "invalid exFAT ownership record length"));
-	first = fsimg_meta_get_u64(record);
-	count = fsimg_meta_get_u64(record + 8);
+	first = fsimg_load_le64(record);
+	count = fsimg_load_le64(record + 8);
 	capacity = (uint64_t)exfat_state(reader)->geometry.clusters + 2;
 	if (first < 2 || first >= capacity || count == 0 ||
 	    count > capacity - first)

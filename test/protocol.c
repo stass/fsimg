@@ -8,6 +8,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "layer.h"
 #include "settings.h"
 #include "test.h"
@@ -26,6 +27,7 @@ static void test_info_uuid(void);
 static void test_info_label(void);
 static void test_info_mountpoint(void);
 static void test_job_posix_flags(void);
+static void test_signed_wire_values(void);
 static void test_job_roots(void);
 static void test_job_selection(void);
 static void test_job_layers(void);
@@ -59,22 +61,22 @@ write_seed(const char *path)
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_SELECTION, "/", 1, NULL) == FSIMG_OK);
 
 	bzero(raw, sizeof(raw));
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VOLUME, 4096);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_TIME_BASIS, FSIMG_TIME_WALL);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_SCOPE, FSIMG_VALIDATION_HEADER);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_VOLUME, 4096);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_TIME_BASIS, FSIMG_TIME_WALL);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_SCOPE, FSIMG_VALIDATION_HEADER);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_INFO, raw, FSIMG_WIRE_INFO_BYTES, NULL) == FSIMG_OK);
 	bzero(raw, sizeof(raw));
-	fsimg_wire_put64(raw + FSIMG_WIRE_PLAN_VOLUME, 4096);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_VOLUME, 4096);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_PLAN, raw, FSIMG_WIRE_PLAN_BYTES, NULL) == FSIMG_OK);
 	bzero(raw, sizeof(raw));
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, 2);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, 2);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_ENTRY, raw, FSIMG_WIRE_ENTRY_BYTES, NULL) == FSIMG_OK);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_NAME, "/x", 2, NULL) == FSIMG_OK);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_ENTRY_END, NULL, 0, NULL) == FSIMG_OK);
 	bzero(raw, sizeof(raw));
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_SCOPE, FSIMG_VALIDATION_STRUCTURAL);
-	fsimg_wire_put64(raw + FSIMG_WIRE_VERIFY_COMPLETE, 1);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_SCOPE, FSIMG_VALIDATION_STRUCTURAL);
+	fsimg_store_le64(raw + FSIMG_WIRE_VERIFY_COMPLETE, 1);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_VERIFY, raw, FSIMG_WIRE_VERIFY_BYTES, NULL) == FSIMG_OK);
 	fsimg_wire_error_encode(raw, &error);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_ERROR, raw, FSIMG_WIRE_ERROR_BYTES, NULL) == FSIMG_OK);
@@ -126,8 +128,8 @@ test_malformed_frames(void)
 		case 1: header[4] = 2; break;
 		case 2: header[5] = 0; break;
 		case 3: header[6] = 1; break;
-		case 4: fsimg_wire_put64(header + 8, FSIMG_FRAME_BYTES + 1); break;
-		case 5: fsimg_wire_put64(header + 8, UINT64_MAX); break;
+		case 4: fsimg_store_le64(header + 8, FSIMG_FRAME_BYTES + 1); break;
+		case 5: fsimg_store_le64(header + 8, UINT64_MAX); break;
 		}
 		bzero(&decoder, sizeof(decoder));
 		CHECK(fsimg_frame_feed(&decoder, header, sizeof(header), &consumed,
@@ -149,9 +151,9 @@ test_error_codec(void)
 	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_ECORRUPT);
 	CHECK(strcmp(error.path, decoded.path) == 0);
 	CHECK(decoded.output_state == FSIMG_OUTPUT_INCOMPLETE);
-	fsimg_wire_put64(raw, 0);
+	fsimg_store_le64(raw, 0);
 	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EIO);
-	fsimg_wire_put64(raw, (uint64_t)(int64_t)FSIMG_EDURABILITY);
+	fsimg_store_le64(raw, (uint64_t)(int64_t)FSIMG_EDURABILITY);
 	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EDURABILITY);
 	memset(raw + 336, 'X', 256);
 	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EIO);
@@ -379,12 +381,12 @@ test_entry_records(void)
 	fsimg_wire_entry_encode(frame.payload, &entry, 5);
 	CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	CHECK(fsimg_wire_entry_frame_valid(&frame, true, 4096));
-	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND) == FSIMG_ENTRY_SYMLINK);
-	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH) == 9);
-	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH) == 5);
-	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_UID) == 1000);
-	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_GID) == 20);
-	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE) == 07777);
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_KIND) == FSIMG_ENTRY_SYMLINK);
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_LENGTH) == 9);
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH) == 5);
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_UID) == 1000);
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_GID) == 20);
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE) == 07777);
 	CHECK(fsimg_wire_get_signed64(raw + FSIMG_WIRE_ENTRY_CHANGED +
 	    FSIMG_WIRE_TIME_SECONDS) == -2);
 	CHECK(fsimg_wire_get_signed64(raw + FSIMG_WIRE_ENTRY_CHANGED +
@@ -396,8 +398,8 @@ test_entry_records(void)
 	fsimg_wire_entry_encode(frame.payload, &entry, 5);
 	CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, true, 4096));
-	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_UID) == 0);
-	CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE) == 0);
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_UID) == 0);
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE) == 0);
 
 	entry = (fsimg_entry_t){ .path = "/dir", .kind = FSIMG_ENTRY_DIRECTORY };
 	CHECK(entry_frame_valid(&entry, false) && !entry_frame_valid(&entry, true));
@@ -434,24 +436,24 @@ test_invalid_entry_records(void)
 	entry.metadata.valid = FSIMG_META_MODE;
 	fsimg_wire_entry_encode(raw, &entry, 2);
 	CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_MODE, 010000);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_MODE, 010000);
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	fsimg_wire_entry_encode(raw, &entry, 2);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_UID, UINT64_C(1) << 32);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_UID, UINT64_C(1) << 32);
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	fsimg_wire_entry_encode(raw, &entry, 2);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_VALID, 0x80);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_VALID, 0x80);
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	for (uint64_t kind = 0; kind <= 16; kind++) {
 		fsimg_wire_entry_encode(raw, &entry, 2);
-		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_KIND, kind);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, kind);
 		CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096) ==
 		    (kind == FSIMG_ENTRY_FILE || kind == FSIMG_ENTRY_DIRECTORY ||
 		    kind == FSIMG_ENTRY_FIFO));
 	}
 	/* Absent attributes and timestamps must arrive as zero bytes. */
 	fsimg_wire_entry_encode(raw, &entry, 2);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES, 1);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES, 1);
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	fsimg_wire_entry_encode(raw, &entry, 2);
 	raw[FSIMG_WIRE_ENTRY_CHANGED + FSIMG_WIRE_TIME_BYTES - 1] = 1;
@@ -479,10 +481,10 @@ test_info_uuid(void)
 	strcpy(info.format, "qnx6");
 	fsimg_wire_info_encode(frame.payload, &info);
 	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
-	CHECK(fsimg_wire_get64(frame.payload + FSIMG_WIRE_INFO_VALID) ==
+	CHECK(fsimg_load_le64(frame.payload + FSIMG_WIRE_INFO_VALID) ==
 	    (FSIMG_VOLUME_UUID | FSIMG_VOLUME_LABEL));
 	CHECK(bcmp(frame.payload + FSIMG_WIRE_INFO_UUID, uuid, sizeof(uuid)) == 0);
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_INFO_VALID, 0x10);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_INFO_VALID, 0x10);
 	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
 
 	/* An absent UUID travels as zero bytes. */
@@ -561,12 +563,12 @@ test_info_mountpoint(void)
 	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
 	CHECK(strlen((const char *)mountpoint) == 1024);
 	CHECK(bcmp(mountpoint, info.mountpoint, 1024) == 0);
-	CHECK(fsimg_wire_get64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT) ==
+	CHECK(fsimg_load_le64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT) ==
 	    FSIMG_VOLUME_DETAILS_MAX);
 	last = frame.payload + FSIMG_WIRE_INFO_DETAILS +
 	    (FSIMG_VOLUME_DETAILS_MAX - 1) * FSIMG_WIRE_INFO_DETAIL_BYTES;
 	CHECK(bcmp(last, info.details[15].name, 24) == 0);
-	CHECK(fsimg_wire_get64(last + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES) ==
+	CHECK(fsimg_load_le64(last + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES) ==
 	    UINT64_MAX - 15);
 
 	mountpoint[1024] = 'm';
@@ -589,9 +591,9 @@ test_info_mountpoint(void)
 	/* An encoder caps the count; a frame above sixteen is refused. */
 	info.detail_count = FSIMG_VOLUME_DETAILS_MAX + 1;
 	fsimg_wire_info_encode(frame.payload, &info);
-	CHECK(fsimg_wire_get64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT) ==
+	CHECK(fsimg_load_le64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT) ==
 	    FSIMG_VOLUME_DETAILS_MAX);
-	fsimg_wire_put64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT,
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT,
 	    FSIMG_VOLUME_DETAILS_MAX + 1);
 	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
 
@@ -642,6 +644,64 @@ test_job_posix_flags(void)
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
 	CHECK((decoded.write.flags & FSIMG_WRITE_IMPORT_POSIX) != 0);
+}
+
+/*
+ * A signed wire field is a little-endian two's-complement pattern. The
+ * patterns here are written out by hand, so they do not depend on the
+ * encoder. Each value is encoded as a time record's seconds and compared
+ * with its pattern byte for byte, beside a fixed -90 minute offset, and
+ * crosses the job's epoch field, whose decoding uses the same signed
+ * operation.
+ */
+static void
+test_signed_wire_values(void)
+{
+	static const struct {
+		unsigned char	 bytes[8];
+		int64_t		 value;
+	} cases[] = {
+		{ { 0, 0, 0, 0, 0, 0, 0, 0 }, 0 },
+		{ { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f }, INT64_MAX },
+		{ { 0, 0, 0, 0, 0, 0, 0, 0x80 }, INT64_MIN },
+		{ { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, -1 },
+		{ { 0xa6, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, -90 }
+	};
+	static const unsigned char minus_ninety[8] = {
+		0xa6, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+	};
+	fsimg_worker_request_t request, decoded;
+	fsimg_entry_t entry = { .path = "/t", .kind = FSIMG_ENTRY_FILE };
+	unsigned char job[FSIMG_JOB_BYTES], raw[FSIMG_WIRE_ENTRY_BYTES];
+	unsigned char *time = raw + FSIMG_WIRE_ENTRY_CHANGED;
+	uint64_t selection;
+	unsigned capabilities;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		CHECK(fsimg_wire_get_signed64(cases[i].bytes) == cases[i].value);
+
+		fsimg_worker_request_init(&request);
+		request.kind = FSIMG_JOB_CREATE;
+		request.root_paths = image_root;
+		request.root_count = 1;
+		request.write.epoch = cases[i].value;
+		CHECK(fsimg_job_encode(&request, job, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(job, sizeof(job), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.write.epoch == cases[i].value);
+
+		entry.metadata.valid = FSIMG_META_CHANGED;
+		entry.metadata.changed = (fsimg_timestamp_t){
+		    .seconds = cases[i].value, .precision_ns = 1,
+		    .basis = FSIMG_TIME_OFFSET, .offset_minutes = -90 };
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		CHECK(memcmp(time + FSIMG_WIRE_TIME_SECONDS, cases[i].bytes,
+		    8) == 0);
+		CHECK(memcmp(time + FSIMG_WIRE_TIME_OFFSET, minus_ninety,
+		    8) == 0);
+		CHECK(fsimg_wire_get_signed64(time + FSIMG_WIRE_TIME_SECONDS) ==
+		    cases[i].value);
+	}
 }
 
 /* The QNX6 settings cross the job wire unchanged; a byte order, inode
@@ -817,7 +877,7 @@ test_job_ifsboot_settings(void)
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &granted, NULL) == FSIMG_OK);
 	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++) {
-		fsimg_wire_put64(raw + CAPABILITIES,
+		fsimg_store_le64(raw + CAPABILITIES,
 		    granted | FSIMG_JOB_CAP_SETTING(i));
 		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 		    &capabilities, NULL) == FSIMG_EINVAL);
@@ -859,26 +919,26 @@ test_job_roots(void)
 	 * capability, and a sequence too short for the count are refused.
 	 */
 	bcopy(raw, mutated, sizeof(raw));
-	fsimg_wire_put64(mutated + 312, 129);
+	fsimg_store_le64(mutated + 312, 129);
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
-	fsimg_wire_put64(mutated + 312, 0);
+	fsimg_store_le64(mutated + 312, 0);
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	bcopy(raw, mutated, sizeof(raw));
-	fsimg_wire_put64(mutated + 23 * 8, 0);
+	fsimg_store_le64(mutated + 23 * 8, 0);
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	/* The capabilities field, 23, holds only known bits. */
-	fsimg_wire_put64(mutated + 23 * 8, FSIMG_JOB_CAP_ROOTS);
+	fsimg_store_le64(mutated + 23 * 8, FSIMG_JOB_CAP_ROOTS);
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
-	fsimg_wire_put64(mutated + 23 * 8,
+	fsimg_store_le64(mutated + 23 * 8,
 	    FSIMG_JOB_CAP_ROOTS | (FSIMG_JOB_CAP_ALL + 1u));
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	bcopy(raw, mutated, sizeof(raw));
-	fsimg_wire_put64(mutated + 24 * 8, 5);
+	fsimg_store_le64(mutated + 24 * 8, 5);
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 
@@ -932,7 +992,7 @@ test_job_selection(void)
 
 	for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
 		bcopy(raw, mutated, sizeof(raw));
-		fsimg_wire_put64(mutated + bad[i].offset, bad[i].value);
+		fsimg_store_le64(mutated + bad[i].offset, bad[i].value);
 		CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded,
 		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
 	}
@@ -997,7 +1057,7 @@ test_job_layers(void)
 
 	for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
 		bcopy(raw, mutated, sizeof(raw));
-		fsimg_wire_put64(mutated + bad[i].offset, bad[i].value);
+		fsimg_store_le64(mutated + bad[i].offset, bad[i].value);
 		CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded,
 		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
 	}
@@ -1160,13 +1220,13 @@ test_image_records(void)
 	bzero(&frame, sizeof(frame));
 	frame.type = FSIMG_FRAME_IMAGE;
 	frame.length = FSIMG_WIRE_IMAGE_BYTES;
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 8388608);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, 8388608);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "fat32");
 	CHECK(fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 8388607);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 8388607);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "gzip");
 	CHECK(fsimg_wire_image_frame_valid(&frame));
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "zstd");
@@ -1174,20 +1234,20 @@ test_image_records(void)
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "dmg");
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	bzero(raw + FSIMG_WIRE_IMAGE_COMPRESSION, 16);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_SCHEME, "mbr");
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
 	CHECK(fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 5);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SELECTED, 5);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 1);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SELECTED, 1);
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_REASON, "stale");
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_UNSELECTED);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_UNSELECTED);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_SELECTED, 0);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SELECTED, 0);
 	CHECK(fsimg_wire_image_frame_valid(&frame));
 	raw[FSIMG_WIRE_IMAGE_REASON] = '\0';
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
@@ -1201,30 +1261,30 @@ test_image_records(void)
 	bzero(&frame, sizeof(frame));
 	frame.type = FSIMG_FRAME_IMAGE;
 	frame.length = FSIMG_WIRE_IMAGE_BYTES;
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 8388608);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 4194368);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, 8388608);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 4194368);
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "ifs/hbcifs");
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "hbcifs");
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_CODECS, "lzo1x");
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHUNKS, 1);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 1);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_CHUNKS, 1);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 1);
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_DETAILS, "field_0x14");
 	CHECK(fsimg_wire_image_frame_valid(&frame));
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_UNVERIFIED, "0x14,0x1c");
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_VERIFIED);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_VERIFIED);
 	CHECK(fsimg_wire_image_frame_valid(&frame));
 	raw[FSIMG_WIRE_IMAGE_UNVERIFIED + 4] = ' ';
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	raw[FSIMG_WIRE_IMAGE_UNVERIFIED + 4] = ',';
 	bzero(raw + FSIMG_WIRE_IMAGE_CONTAINER, 16);
 	bzero(raw + FSIMG_WIRE_IMAGE_CODECS, FSIMG_WIRE_IMAGE_CODECS_BYTES);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_CHUNKS, 0);
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_CHUNKS, 0);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	bzero(raw + FSIMG_WIRE_IMAGE_UNVERIFIED, FSIMG_WIRE_IMAGE_UNVERIFIED_BYTES);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
-	fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 0);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 0);
 	bzero(raw + FSIMG_WIRE_IMAGE_DETAILS, FSIMG_WIRE_INFO_DETAIL_BYTES);
 	CHECK(fsimg_wire_image_frame_valid(&frame));
 	/* Only a container has header fields, a full table of them at most,
@@ -1241,20 +1301,20 @@ test_image_records(void)
 		bzero(&frame, sizeof(frame));
 		frame.type = FSIMG_FRAME_IMAGE;
 		frame.length = FSIMG_WIRE_IMAGE_BYTES;
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 65536);
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_FILE, 49184);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, 65536);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 49184);
 		strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "ifs/ifsboot");
 		strcpy((char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "ifsboot");
 		fsimg_wire_details_encode(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
 		    FSIMG_WIRE_IMAGE_DETAILS, FSIMG_IMAGE_DETAILS_MAX, details,
 		    FSIMG_IMAGE_DETAILS_MAX + 1);
-		CHECK(fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT) ==
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT) ==
 		    FSIMG_IMAGE_DETAILS_MAX);
 		CHECK(fsimg_wire_image_frame_valid(&frame));
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT,
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT,
 		    FSIMG_IMAGE_DETAILS_MAX + 1);
 		CHECK(!fsimg_wire_image_frame_valid(&frame));
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 2);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 2);
 		CHECK(!fsimg_wire_image_frame_valid(&frame));
 		bzero(raw + FSIMG_WIRE_IMAGE_DETAILS + 2 *
 		    FSIMG_WIRE_INFO_DETAIL_BYTES, (FSIMG_IMAGE_DETAILS_MAX - 2) *
@@ -1268,7 +1328,7 @@ test_image_records(void)
 		raw[FSIMG_WIRE_IMAGE_DETAILS] = 'f';
 		CHECK(fsimg_wire_image_frame_valid(&frame));
 		bzero(raw + FSIMG_WIRE_IMAGE_CONTAINER, 16);
-		fsimg_wire_put64(raw + FSIMG_WIRE_IMAGE_DISK, 49184);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, 49184);
 		CHECK(!fsimg_wire_image_frame_valid(&frame));
 		bzero(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT, 8 + 2 *
 		    FSIMG_WIRE_INFO_DETAIL_BYTES);
@@ -1329,5 +1389,6 @@ main(int argc, char **argv)
 	test_info_mountpoint();
 	test_job_posix_flags();
 	test_job_roots();
+	test_signed_wire_values();
 	return (0);
 }

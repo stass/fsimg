@@ -2,14 +2,15 @@
 
 ## Major initiatives
 
-* [Medium] **Common driver contract coverage and binary primitives**
-  (`test/`, `lib/core/`, `lib/layers/`, format/protocol scalar codecs):
-  implement the [driver contract suites](specs/design-driver-contract-tests.md)
-  and [scalar/zlib support](specs/design-binary-primitives.md) under the
+* [Medium] **Common driver contract coverage** (`test/`): implement the
+  [driver contract suites](specs/design-driver-contract-tests.md) under the
   [shared-primitives sequence](docs/implementation-plan.md#driver-contracts-and-shared-verification-primitives).
-  Give every registered capability independent common witnesses, retain
-  format-local oracles, and consolidate byte access and allocation diagnostics
-  without introducing another runtime dependency or budget.
+  Give every registered capability independent common witnesses and retain
+  format-local oracles. The suites also carry the
+  [scalar codecs'](specs/design-binary-primitives.md) per-family boundary
+  evidence: truncation at each fixed prefix and field boundary of every
+  converted record and probe family, rejected by its checked owner, and
+  golden whole-record comparisons including QNX6 and ImageFS in both orders.
 
 * [High] **QNX6 read/write and automotive qualification**
   (`lib/formats/qnx6/`, `lib/read/`, `lib/write/`): the classic reader,
@@ -344,16 +345,19 @@
   no external information leak is established, but the reads consume
   uninitialized bytes and violate the scalar span contract.
 
-* [Medium] **zlib allocation failures lose their original diagnostic**
-  (`lib/layers/dmg.c`, `gzip.c`, `chunks.c`): callbacks pass their retained
-  error directly to `fsimg_alloc`, so a later successful allocation in the
-  same initialization call clears an earlier budget failure. zlib's deflate
-  initialization makes several allocation calls before testing for failure.
-  Capture the first error as the [shared adapter](specs/design-binary-primitives.md)
-  specifies, with a failing allocation/budget regression before the fix.
-  Preserve known limit details, use `FSIMG_ENOMEM` for unexplained
-  `Z_MEM_ERROR` (the chunk decoder currently fabricates `FSIMG_ELIMIT`),
-  and keep stream-state/version failures distinct from corrupt input.
+* [Low] **zlib state and version results have no deterministic test**
+  (`lib/layers/chunks.c`, `dmg.c`, `gzip.c` `zlib_failed`): each owner maps
+  `Z_VERSION_ERROR` and `Z_STREAM_ERROR` to `FSIMG_ESTATE`, but no test
+  drives either result, as the translations are private and validated
+  options never reach them. Cover them through a result fixture or an
+  invalid initialization parameter at the owner boundary.
+
+* [Low] **Ubuntu GCC 13.3 rejects the tree at -O2** (`lib/source/source.c`,
+  `lib/layers/chunks.c`, `image.c`, `gzip.c`, `dmg.c`, `ifsboot.c`):
+  `-Wmaybe-uninitialized` and `-Wformat-truncation` fire under `-Werror`
+  with Ubuntu 24.04's gcc 13.3.0, which the CI `gcc:13` image does not
+  reproduce. Initialize the flagged locals and size the flagged buffers, or
+  record which GCC 13 builds are supported.
 
 * [Medium] **Container-plan contract coverage gaps** (`test/ifsboot-write.c`,
   `test/layers-write.c`): the [container-plan design](specs/design-container-plans.md)

@@ -28,6 +28,7 @@
 
 #include "fat.h"
 #include "format.h"
+#include "fsimg-endian.h"
 
 static fsimg_status_t table_byte(fsimg_reader_t *, unsigned, uint64_t,
     unsigned char *, fsimg_error_t *);
@@ -95,11 +96,11 @@ table_value(fsimg_reader_t *reader, unsigned table, uint32_t cluster,
 			return (status);
 	}
 	if (g->variant == 12)
-		*out = (cluster & 1) != 0 ? fsimg_fat_u16(bytes) >> 4 : fsimg_fat_u16(bytes) & 0xfff;
+		*out = (cluster & 1) != 0 ? fsimg_load_le16(bytes) >> 4 : fsimg_load_le16(bytes) & 0xfff;
 	else if (g->variant == 16)
-		*out = fsimg_fat_u16(bytes);
+		*out = fsimg_load_le16(bytes);
 	else
-		*out = fsimg_fat_u32(bytes) & 0x0fffffff;
+		*out = fsimg_load_le32(bytes) & 0x0fffffff;
 	return (FSIMG_OK);
 }
 
@@ -321,9 +322,9 @@ fsimg_fat_owner_append(fsimg_reader_t *reader, const fsimg_extent_t *run,
 
 	if (fsimg_fat_state(reader)->owners == NULL)
 		return (FSIMG_OK);
-	fsimg_meta_put_u64(record, (run->image_offset - g->data_offset) /
+	fsimg_store_le64(record, (run->image_offset - g->data_offset) /
 	    g->cluster_bytes + 2);
-	fsimg_meta_put_u64(record + 8, run->length / g->cluster_bytes);
+	fsimg_store_le64(record + 8, run->length / g->cluster_bytes);
 	return (fsimg_stream_append(fsimg_fat_state(reader)->owners, record, sizeof(record),
 	    NULL, error));
 }

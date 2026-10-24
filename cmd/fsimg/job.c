@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "internal.h"
 #include "layer.h"
 #include "worker.h"
@@ -213,6 +214,7 @@ static const unsigned slot_name_offsets[FSIMG_STACK_SLOTS] = {
 
 static void put_field(unsigned char *, job_field_t, uint64_t);
 static uint64_t get_field(const unsigned char *, job_field_t);
+static int64_t get_signed_field(const unsigned char *, job_field_t);
 static const int *capability_field(const fsimg_worker_request_t *,
     fsimg_capability_t);
 static fsimg_status_t invalid_job(fsimg_error_t *);
@@ -224,13 +226,19 @@ static void decode_layers(const unsigned char *, fsimg_layer_options_t *);
 static void
 put_field(unsigned char *raw, job_field_t field, uint64_t value)
 {
-	fsimg_wire_put64(raw + (unsigned)field * 8, value);
+	fsimg_store_le64(raw + (unsigned)field * 8, value);
 }
 
 static uint64_t
 get_field(const unsigned char *raw, job_field_t field)
 {
-	return (fsimg_wire_get64(raw + (unsigned)field * 8));
+	return (fsimg_load_le64(raw + (unsigned)field * 8));
+}
+
+static int64_t
+get_signed_field(const unsigned char *raw, job_field_t field)
+{
+	return (fsimg_wire_get_signed64(raw + (unsigned)field * 8));
 }
 
 /* A string field holds a terminator, and only zero bytes follow it, so a
@@ -255,9 +263,9 @@ string_field_valid(const unsigned char *field, size_t bytes)
 static void
 encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
 {
-	fsimg_wire_put64(raw + JOB_GPT_DISK_OFFSET, layers->gpt_disk_bytes);
-	fsimg_wire_put64(raw + JOB_MBR_DISK_OFFSET, layers->mbr_disk_bytes);
-	fsimg_wire_put64(raw + JOB_MBR_ID_OFFSET, layers->mbr_id);
+	fsimg_store_le64(raw + JOB_GPT_DISK_OFFSET, layers->gpt_disk_bytes);
+	fsimg_store_le64(raw + JOB_MBR_DISK_OFFSET, layers->mbr_disk_bytes);
+	fsimg_store_le64(raw + JOB_MBR_ID_OFFSET, layers->mbr_id);
 	raw[JOB_MBR_FLAGS] = (unsigned char)((layers->mbr_id_set ?
 	    JOB_MBR_ID_SET : 0) | (layers->mbr_active ? JOB_MBR_ACTIVE : 0));
 	bcopy(layers->gpt_disk_guid, raw + JOB_DISK_GUID_OFFSET, 16);
@@ -270,14 +278,14 @@ encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
 	    strlen(layers->mbr_type));
 	bcopy(layers->dmg_uuid, raw + JOB_DMG_UUID_OFFSET, 16);
 	bcopy(layers->vhd_uuid, raw + JOB_VHD_UUID_OFFSET, 16);
-	fsimg_wire_put64(raw + JOB_DMG_CHUNK_OFFSET, layers->dmg_chunk_bytes);
-	fsimg_wire_put64(raw + JOB_VHD_ALIGN_OFFSET, layers->vhd_align_bytes);
-	fsimg_wire_put64(raw + JOB_SIMG_BLOCK_OFFSET, layers->simg_block_bytes);
-	fsimg_wire_put64(raw + JOB_DMG_LEVEL_OFFSET, layers->dmg_level);
+	fsimg_store_le64(raw + JOB_DMG_CHUNK_OFFSET, layers->dmg_chunk_bytes);
+	fsimg_store_le64(raw + JOB_VHD_ALIGN_OFFSET, layers->vhd_align_bytes);
+	fsimg_store_le64(raw + JOB_SIMG_BLOCK_OFFSET, layers->simg_block_bytes);
+	fsimg_store_le64(raw + JOB_DMG_LEVEL_OFFSET, layers->dmg_level);
 	raw[JOB_CONTAINER_FLAGS] = (unsigned char)((layers->dmg_compress ==
 	    FSIMG_DMG_NONE ? JOB_DMG_RAW : 0) | (layers->simg_crc ?
 	    JOB_SIMG_CRC : 0));
-	fsimg_wire_put64(raw + JOB_GZIP_LEVEL_OFFSET, layers->gzip_level);
+	fsimg_store_le64(raw + JOB_GZIP_LEVEL_OFFSET, layers->gzip_level);
 	for (unsigned i = 0; i < JOB_IFSBOOT_FIELDS; i++) {
 		const unsigned char *base = (const unsigned char *)layers;
 		uint32_t value;
@@ -285,7 +293,7 @@ encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
 
 		bcopy(base + ifsboot_fields[i].value, &value, sizeof(value));
 		bcopy(base + ifsboot_fields[i].set, &set, sizeof(set));
-		fsimg_wire_put64(raw + JOB_IFSBOOT_OFFSET + i * 8, value);
+		fsimg_store_le64(raw + JOB_IFSBOOT_OFFSET + i * 8, value);
 		if (set)
 			raw[JOB_IFSBOOT_SET] |= (unsigned char)(1u << i);
 	}
@@ -309,7 +317,7 @@ layers_valid(const unsigned char *raw)
 	    JOB_GZIP_LEVEL_OFFSET };
 	uint64_t id;
 
-	id = fsimg_wire_get64(raw + JOB_MBR_ID_OFFSET);
+	id = fsimg_load_le64(raw + JOB_MBR_ID_OFFSET);
 	if (raw[JOB_MBR_FLAGS] > (JOB_MBR_ID_SET | JOB_MBR_ACTIVE) ||
 	    id > UINT32_MAX ||
 	    (id != 0 && (raw[JOB_MBR_FLAGS] & JOB_MBR_ID_SET) == 0))
@@ -319,7 +327,7 @@ layers_valid(const unsigned char *raw)
 			return (false);
 	}
 	for (unsigned i = 0; i < sizeof(quantities) / sizeof(quantities[0]); i++) {
-		if (fsimg_wire_get64(raw + quantities[i]) > UINT32_MAX)
+		if (fsimg_load_le64(raw + quantities[i]) > UINT32_MAX)
 			return (false);
 	}
 	if (raw[JOB_CONTAINER_FLAGS] > (JOB_DMG_RAW | JOB_SIMG_CRC))
@@ -335,7 +343,7 @@ layers_valid(const unsigned char *raw)
 	    (raw[JOB_IFSBOOT_SET] & JOB_IFSBOOT_VIRTUAL_SET) == 0))
 		return (false);
 	for (unsigned i = 0; i < JOB_IFSBOOT_FIELDS; i++) {
-		id = fsimg_wire_get64(raw + JOB_IFSBOOT_OFFSET + i * 8);
+		id = fsimg_load_le64(raw + JOB_IFSBOOT_OFFSET + i * 8);
 		if (id > UINT32_MAX ||
 		    (id != 0 && (raw[JOB_IFSBOOT_SET] & (1u << i)) == 0))
 			return (false);
@@ -352,9 +360,9 @@ layers_valid(const unsigned char *raw)
 static void
 decode_layers(const unsigned char *raw, fsimg_layer_options_t *layers)
 {
-	layers->gpt_disk_bytes = fsimg_wire_get64(raw + JOB_GPT_DISK_OFFSET);
-	layers->mbr_disk_bytes = fsimg_wire_get64(raw + JOB_MBR_DISK_OFFSET);
-	layers->mbr_id = (uint32_t)fsimg_wire_get64(raw + JOB_MBR_ID_OFFSET);
+	layers->gpt_disk_bytes = fsimg_load_le64(raw + JOB_GPT_DISK_OFFSET);
+	layers->mbr_disk_bytes = fsimg_load_le64(raw + JOB_MBR_DISK_OFFSET);
+	layers->mbr_id = (uint32_t)fsimg_load_le64(raw + JOB_MBR_ID_OFFSET);
 	layers->mbr_id_set = (raw[JOB_MBR_FLAGS] & JOB_MBR_ID_SET) != 0;
 	layers->mbr_active = (raw[JOB_MBR_FLAGS] & JOB_MBR_ACTIVE) != 0;
 	bcopy(raw + JOB_DISK_GUID_OFFSET, layers->gpt_disk_guid, 16);
@@ -365,23 +373,23 @@ decode_layers(const unsigned char *raw, fsimg_layer_options_t *layers)
 	bcopy(raw + JOB_DMG_UUID_OFFSET, layers->dmg_uuid, 16);
 	bcopy(raw + JOB_VHD_UUID_OFFSET, layers->vhd_uuid, 16);
 	layers->dmg_chunk_bytes =
-	    (uint32_t)fsimg_wire_get64(raw + JOB_DMG_CHUNK_OFFSET);
+	    (uint32_t)fsimg_load_le64(raw + JOB_DMG_CHUNK_OFFSET);
 	layers->vhd_align_bytes =
-	    (uint32_t)fsimg_wire_get64(raw + JOB_VHD_ALIGN_OFFSET);
+	    (uint32_t)fsimg_load_le64(raw + JOB_VHD_ALIGN_OFFSET);
 	layers->simg_block_bytes =
-	    (uint32_t)fsimg_wire_get64(raw + JOB_SIMG_BLOCK_OFFSET);
-	layers->dmg_level = (uint32_t)fsimg_wire_get64(raw + JOB_DMG_LEVEL_OFFSET);
+	    (uint32_t)fsimg_load_le64(raw + JOB_SIMG_BLOCK_OFFSET);
+	layers->dmg_level = (uint32_t)fsimg_load_le64(raw + JOB_DMG_LEVEL_OFFSET);
 	layers->dmg_compress = (raw[JOB_CONTAINER_FLAGS] & JOB_DMG_RAW) != 0 ?
 	    FSIMG_DMG_NONE : FSIMG_DMG_ZLIB;
 	layers->simg_crc = (raw[JOB_CONTAINER_FLAGS] & JOB_SIMG_CRC) != 0;
 	layers->gzip_level =
-	    (uint32_t)fsimg_wire_get64(raw + JOB_GZIP_LEVEL_OFFSET);
+	    (uint32_t)fsimg_load_le64(raw + JOB_GZIP_LEVEL_OFFSET);
 	for (unsigned i = 0; i < JOB_IFSBOOT_FIELDS; i++) {
 		unsigned char *base = (unsigned char *)layers;
 		uint32_t value;
 		bool set;
 
-		value = (uint32_t)fsimg_wire_get64(raw + JOB_IFSBOOT_OFFSET + i * 8);
+		value = (uint32_t)fsimg_load_le64(raw + JOB_IFSBOOT_OFFSET + i * 8);
 		set = (raw[JOB_IFSBOOT_SET] & (1u << i)) != 0;
 		bcopy(&value, base + ifsboot_fields[i].value, sizeof(value));
 		bcopy(&set, base + ifsboot_fields[i].set, sizeof(set));
@@ -595,7 +603,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	put_field(raw, JOB_FLAGS, request->flags);
 	put_field(raw, JOB_MEMORY, request->limits.memory_bytes);
 	put_field(raw, JOB_SCRATCH, request->limits.scratch_bytes);
-	fsimg_wire_put64(raw + JOB_SPOOL_OFFSET, request->limits.spool_bytes);
+	fsimg_store_le64(raw + JOB_SPOOL_OFFSET, request->limits.spool_bytes);
 	put_field(raw, JOB_ENTRIES, request->limits.max_entries);
 	put_field(raw, JOB_OUTPUT, request->limits.max_output_bytes);
 	put_field(raw, JOB_WORK, request->limits.max_work);
@@ -633,9 +641,9 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 		bcopy(request->stack.slots[slot].name, raw + slot_name_offsets[slot],
 		    strlen(request->stack.slots[slot].name));
 	}
-	fsimg_wire_put64(raw + JOB_SELECTOR_OFFSET, request->selector);
-	fsimg_wire_put64(raw + JOB_PARTITION_INDEX_OFFSET, request->partition_index);
-	fsimg_wire_put64(raw + JOB_GPT_SECTOR_OFFSET,
+	fsimg_store_le64(raw + JOB_SELECTOR_OFFSET, request->selector);
+	fsimg_store_le64(raw + JOB_PARTITION_INDEX_OFFSET, request->partition_index);
+	fsimg_store_le64(raw + JOB_GPT_SECTOR_OFFSET,
 	    request->layers.gpt_sector_bytes);
 	encode_layers(&request->layers, raw);
 	bcopy(request->partition_text, raw + JOB_PARTITION_TEXT_OFFSET,
@@ -647,9 +655,9 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	bcopy(request->write.volume_uuid, raw + JOB_UUID_OFFSET,
 	    sizeof(request->write.volume_uuid));
 	raw[JOB_BYTE_ORDER] = (unsigned char)request->write.byte_order;
-	fsimg_wire_put64(raw + JOB_INODES_OFFSET, request->write.inode_capacity);
-	fsimg_wire_put64(raw + JOB_RESERVE_OFFSET, request->write.reserve_percent);
-	fsimg_wire_put64(raw + JOB_ROOTS_OFFSET, request->root_count);
+	fsimg_store_le64(raw + JOB_INODES_OFFSET, request->write.inode_capacity);
+	fsimg_store_le64(raw + JOB_RESERVE_OFFSET, request->write.reserve_percent);
+	fsimg_store_le64(raw + JOB_ROOTS_OFFSET, request->root_count);
 	if (mountpoint != NULL) {
 		bcopy(mountpoint, raw + JOB_MOUNTPOINT_OFFSET, strlen(mountpoint));
 		raw[JOB_MOUNTPOINT_PRESENT] = 1;
@@ -663,7 +671,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
     unsigned *capabilities, fsimg_error_t *error)
 {
 	const fsimg_layer_t *compression;
-	uint64_t epoch, roots, count;
+	uint64_t roots, count;
 	uint32_t per_path_bytes;
 
 	fsimg_worker_request_init(request);
@@ -719,9 +727,9 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    JOB_PARTITION_TEXT_BYTES) ||
 	    !string_field_valid(raw + JOB_COMPRESSION_OFFSET,
 	    JOB_COMPRESSION_BYTES) ||
-	    fsimg_wire_get64(raw + JOB_SELECTOR_OFFSET) > FSIMG_SELECT_DISK ||
-	    fsimg_wire_get64(raw + JOB_PARTITION_INDEX_OFFSET) > UINT32_MAX ||
-	    fsimg_wire_get64(raw + JOB_GPT_SECTOR_OFFSET) > UINT32_MAX)
+	    fsimg_load_le64(raw + JOB_SELECTOR_OFFSET) > FSIMG_SELECT_DISK ||
+	    fsimg_load_le64(raw + JOB_PARTITION_INDEX_OFFSET) > UINT32_MAX ||
+	    fsimg_load_le64(raw + JOB_GPT_SECTOR_OFFSET) > UINT32_MAX)
 		return (invalid_job(error));
 	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
 		if (raw[JOB_SLOT_STATES_OFFSET + slot] > FSIMG_SLOT_NAMED)
@@ -742,13 +750,13 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 			return (invalid_job(error));
 	}
 	if (get_field(raw, JOB_WRITE_FLAGS) > UINT32_MAX ||
-	    fsimg_wire_get64(raw + JOB_INODES_OFFSET) > UINT32_MAX ||
-	    fsimg_wire_get64(raw + JOB_RESERVE_OFFSET) > UINT32_MAX)
+	    fsimg_load_le64(raw + JOB_INODES_OFFSET) > UINT32_MAX ||
+	    fsimg_load_le64(raw + JOB_RESERVE_OFFSET) > UINT32_MAX)
 		return (invalid_job(error));
 	/* Root descriptors exist exactly for create jobs, at most one per
 	 * permitted descriptor, and arrive with the roots capability.
 	 */
-	roots = fsimg_wire_get64(raw + JOB_ROOTS_OFFSET);
+	roots = fsimg_load_le64(raw + JOB_ROOTS_OFFSET);
 	if (fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND)) !=
 	    (roots != 0) || roots > get_field(raw, JOB_FDS) ||
 	    ((get_field(raw, JOB_CAPABILITIES) & FSIMG_JOB_CAP_ROOTS) != 0) !=
@@ -765,27 +773,25 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	request->limits.max_depth = (uint32_t)get_field(raw, JOB_DEPTH);
 	request->limits.max_path_bytes = (uint32_t)get_field(raw, JOB_PATH);
 	request->limits.max_open_files = (uint32_t)get_field(raw, JOB_FDS);
-	request->limits.spool_bytes = fsimg_wire_get64(raw + JOB_SPOOL_OFFSET);
+	request->limits.spool_bytes = fsimg_load_le64(raw + JOB_SPOOL_OFFSET);
 	request->offset = get_field(raw, JOB_OFFSET);
 	request->length = get_field(raw, JOB_LENGTH);
 	request->seconds = get_field(raw, JOB_SECONDS);
 	request->write.flags = (uint32_t)get_field(raw, JOB_WRITE_FLAGS);
 	request->write.volume_bytes = get_field(raw, JOB_VOLUME);
 	request->write.min_free_bytes = get_field(raw, JOB_FREE);
-	epoch = get_field(raw, JOB_EPOCH);
-	request->write.epoch = epoch <= INT64_MAX ? (int64_t)epoch :
-	    -1 - (int64_t)(UINT64_MAX - epoch);
+	request->write.epoch = get_signed_field(raw, JOB_EPOCH);
 	request->write.sector_bytes = (uint32_t)get_field(raw, JOB_SECTOR);
 	request->write.allocation_unit_bytes = (uint32_t)get_field(raw, JOB_CLUSTER);
 	request->write.fat_root_entries = (uint32_t)get_field(raw, JOB_ROOT);
 	request->write.volume_serial = (uint32_t)get_field(raw, JOB_SERIAL);
 	request->codepage = (uint32_t)get_field(raw, JOB_CODEPAGE);
-	request->selector = (fsimg_selector_kind_t)fsimg_wire_get64(raw +
+	request->selector = (fsimg_selector_kind_t)fsimg_load_le64(raw +
 	    JOB_SELECTOR_OFFSET);
-	request->partition_index = (uint32_t)fsimg_wire_get64(raw +
+	request->partition_index = (uint32_t)fsimg_load_le64(raw +
 	    JOB_PARTITION_INDEX_OFFSET);
 	request->layers.gpt_sector_bytes =
-	    (uint32_t)fsimg_wire_get64(raw + JOB_GPT_SECTOR_OFFSET);
+	    (uint32_t)fsimg_load_le64(raw + JOB_GPT_SECTOR_OFFSET);
 	decode_layers(raw, &request->layers);
 	bcopy(raw + JOB_PARTITION_TEXT_OFFSET, request->partition_text,
 	    JOB_PARTITION_TEXT_BYTES);
@@ -803,9 +809,9 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    sizeof(request->write.volume_uuid));
 	request->write.byte_order = (fsimg_byte_order_t)raw[JOB_BYTE_ORDER];
 	request->write.inode_capacity =
-	    (uint32_t)fsimg_wire_get64(raw + JOB_INODES_OFFSET);
+	    (uint32_t)fsimg_load_le64(raw + JOB_INODES_OFFSET);
 	request->write.reserve_percent =
-	    (uint32_t)fsimg_wire_get64(raw + JOB_RESERVE_OFFSET);
+	    (uint32_t)fsimg_load_le64(raw + JOB_RESERVE_OFFSET);
 	if (raw[JOB_MOUNTPOINT_PRESENT] != 0) {
 		bcopy(raw + JOB_MOUNTPOINT_OFFSET, request->mountpoint_storage,
 		    FSIMG_JOB_MOUNTPOINT_BYTES);

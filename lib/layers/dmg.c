@@ -9,9 +9,11 @@
 
 #include <zlib.h>
 
+#include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 #include "meta.h"
+#include "zlib-memory.h"
 
 /*
  * Apple UDIF disk images (DMG). The file is a data fork of chunks, an XML
@@ -236,7 +238,7 @@ typedef struct dmg_plan {
  * zero run of zero_sectors that ends the disk described so far; runs holds
  * the run_count recorded runs, encoded. table_crc covers the disk's bytes
  * and fork_crc the data fork's. Under zlib, stream deflates one chunk at a
- * time into packed, and allocates through zlib_error. carry and line hold
+ * time into packed, and allocates through zlib_memory. carry and line hold
  * the base64 text of the table not yet written.
  */
 typedef struct dmg_encoder {
@@ -251,9 +253,9 @@ typedef struct dmg_encoder {
 	uLong		 table_crc;
 	uLong		 fork_crc;
 	z_stream	 stream;
+	fsimg_zlib_memory_t zlib_memory;
 	bool		 stream_ready;
 	unsigned char	*packed;
-	fsimg_error_t	 zlib_error;
 	unsigned char	 carry[3];
 	unsigned	 carried;
 	char		 line[DMG_BASE64_LINE];
@@ -339,8 +341,8 @@ static fsimg_status_t dmg_plan(const fsimg_container_plan_args_t *,
 static uint64_t plist_bytes(uint64_t);
 static fsimg_status_t dmg_bound(const fsimg_container_plan_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
-static voidpf dmg_zlib_alloc(voidpf, uInt, uInt);
-static void dmg_zlib_free(voidpf, voidpf);
+static fsimg_status_t dmg_zlib_failed(const fsimg_zlib_memory_t *, int,
+    const char *, fsimg_error_t *);
 static fsimg_status_t dmg_encode_open(const fsimg_encode_t *, void **,
     fsimg_error_t *);
 static fsimg_status_t record_run(dmg_encoder_t *, uint32_t, uint64_t,
@@ -389,9 +391,9 @@ const fsimg_container_ops_t fsimg_dmg_container = {
 static void
 checksum_decode(const unsigned char *raw, dmg_checksum_t *checksum)
 {
-	checksum->type = fsimg_layer_be32(raw);
-	checksum->bits = fsimg_layer_be32(raw + 4);
-	checksum->value = fsimg_layer_be32(raw + 8);
+	checksum->type = fsimg_load_be32(raw);
+	checksum->bits = fsimg_load_be32(raw + 4);
+	checksum->value = fsimg_load_be32(raw + 8);
 }
 
 static fsimg_status_t
@@ -419,10 +421,10 @@ dmg_probe(const unsigned char *prefix FSIMG_UNUSED, size_t prefix_length
 
 	if (tail_length < KOLY_HEADER_BYTES || file_bytes < KOLY_HEADER_BYTES ||
 	    bcmp(tail + KOLY_SIGNATURE, "koly", 4) != 0 ||
-	    fsimg_layer_be32(tail + KOLY_VERSION_FIELD) != KOLY_VERSION ||
-	    fsimg_layer_be32(tail + KOLY_HEADER_SIZE) != KOLY_HEADER_BYTES ||
-	    !fsimg_add_u64(fsimg_layer_be64(tail + KOLY_XML_OFFSET),
-	    fsimg_layer_be64(tail + KOLY_XML_LENGTH), &xml_end) ||
+	    fsimg_load_be32(tail + KOLY_VERSION_FIELD) != KOLY_VERSION ||
+	    fsimg_load_be32(tail + KOLY_HEADER_SIZE) != KOLY_HEADER_BYTES ||
+	    !fsimg_add_u64(fsimg_load_be64(tail + KOLY_XML_OFFSET),
+	    fsimg_load_be64(tail + KOLY_XML_LENGTH), &xml_end) ||
 	    xml_end != file_bytes - KOLY_HEADER_BYTES)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no DMG trailer"));
@@ -447,17 +449,17 @@ trailer_decode(const unsigned char *raw, uint64_t file_bytes,
 	if (status != FSIMG_OK)
 		return (status);
 	bzero(trailer, sizeof(*trailer));
-	trailer->data_offset = fsimg_layer_be64(raw + KOLY_DATA_OFFSET);
-	trailer->data_bytes = fsimg_layer_be64(raw + KOLY_DATA_LENGTH);
-	trailer->xml_offset = fsimg_layer_be64(raw + KOLY_XML_OFFSET);
-	trailer->xml_bytes = fsimg_layer_be64(raw + KOLY_XML_LENGTH);
-	trailer->segment_number = fsimg_layer_be32(raw + KOLY_SEGMENT_NUMBER);
-	trailer->segment_count = fsimg_layer_be32(raw + KOLY_SEGMENT_COUNT);
+	trailer->data_offset = fsimg_load_be64(raw + KOLY_DATA_OFFSET);
+	trailer->data_bytes = fsimg_load_be64(raw + KOLY_DATA_LENGTH);
+	trailer->xml_offset = fsimg_load_be64(raw + KOLY_XML_OFFSET);
+	trailer->xml_bytes = fsimg_load_be64(raw + KOLY_XML_LENGTH);
+	trailer->segment_number = fsimg_load_be32(raw + KOLY_SEGMENT_NUMBER);
+	trailer->segment_count = fsimg_load_be32(raw + KOLY_SEGMENT_COUNT);
 	bcopy(raw + KOLY_SEGMENT_ID, trailer->segment_id,
 	    sizeof(trailer->segment_id));
 	checksum_decode(raw + KOLY_DATA_CHECKSUM, &trailer->data_checksum);
 	checksum_decode(raw + KOLY_MASTER_CHECKSUM, &trailer->master_checksum);
-	sectors = fsimg_layer_be64(raw + KOLY_SECTOR_COUNT);
+	sectors = fsimg_load_be64(raw + KOLY_SECTOR_COUNT);
 
 	if (!fsimg_add_u64(trailer->data_offset, trailer->data_bytes, &data_end) ||
 	    data_end > trailer->xml_offset)
@@ -511,12 +513,12 @@ table_header(dmg_walk_t *walk, fsimg_error_t *error)
 	uint64_t end;
 
 	if (bcmp(walk->header + MISH_SIGNATURE, "mish", 4) != 0 ||
-	    fsimg_layer_be32(walk->header + MISH_VERSION_FIELD) != MISH_VERSION)
+	    fsimg_load_be32(walk->header + MISH_VERSION_FIELD) != MISH_VERSION)
 		return (dmg_corrupt(error, "block table has no mish version 1 header"));
-	table->first_sector = fsimg_layer_be64(walk->header + MISH_FIRST_SECTOR);
-	table->sector_count = fsimg_layer_be64(walk->header + MISH_SECTOR_COUNT);
-	table->data_offset = fsimg_layer_be64(walk->header + MISH_DATA_OFFSET);
-	table->run_count = fsimg_layer_be32(walk->header + MISH_RUN_COUNT);
+	table->first_sector = fsimg_load_be64(walk->header + MISH_FIRST_SECTOR);
+	table->sector_count = fsimg_load_be64(walk->header + MISH_SECTOR_COUNT);
+	table->data_offset = fsimg_load_be64(walk->header + MISH_DATA_OFFSET);
+	table->run_count = fsimg_load_be32(walk->header + MISH_RUN_COUNT);
 	checksum_decode(walk->header + MISH_CHECKSUM, &table->checksum);
 	if (!fsimg_add_u64(table->first_sector, table->sector_count, &end) ||
 	    end > walk->trailer->disk_bytes / DMG_SECTOR_BYTES)
@@ -539,11 +541,11 @@ table_run(dmg_walk_t *walk, fsimg_error_t *error)
 	dmg_run_t run;
 	uint64_t end;
 
-	run.type = fsimg_layer_be32(walk->run + RUN_TYPE);
-	run.sector = fsimg_layer_be64(walk->run + RUN_SECTOR);
-	run.sectors = fsimg_layer_be64(walk->run + RUN_SECTORS);
-	run.compressed_offset = fsimg_layer_be64(walk->run + RUN_COMPRESSED_OFFSET);
-	run.compressed_length = fsimg_layer_be64(walk->run + RUN_COMPRESSED_LENGTH);
+	run.type = fsimg_load_be32(walk->run + RUN_TYPE);
+	run.sector = fsimg_load_be64(walk->run + RUN_SECTOR);
+	run.sectors = fsimg_load_be64(walk->run + RUN_SECTORS);
+	run.compressed_offset = fsimg_load_be64(walk->run + RUN_COMPRESSED_OFFSET);
+	run.compressed_length = fsimg_load_be64(walk->run + RUN_COMPRESSED_LENGTH);
 	if (walk->runs_seen == walk->table.run_count)
 		return (dmg_corrupt(error, "block table has more runs than it declares"));
 	if (walk->terminated)
@@ -1137,21 +1139,25 @@ dmg_bound(const fsimg_container_plan_t *plan, uint64_t disk_bytes,
 	return (FSIMG_OK);
 }
 
-static voidpf
-dmg_zlib_alloc(voidpf opaque, uInt items, uInt size)
+/*
+ * A zlib result other than compression progress: an allocation failure as
+ * the adapter recorded it, or a fault of fsimg or of the zlib library in
+ * the named call.
+ */
+static fsimg_status_t
+dmg_zlib_failed(const fsimg_zlib_memory_t *memory, int result,
+    const char *call, fsimg_error_t *error)
 {
-	dmg_encoder_t *encoder = opaque;
+	char message[64];
 
-	if (size != 0 && items > SIZE_MAX / size)
-		return (Z_NULL);
-	return (fsimg_alloc(encoder->ctx, (size_t)items * size,
-	    &encoder->zlib_error));
-}
-
-static void
-dmg_zlib_free(voidpf opaque FSIMG_UNUSED, voidpf address)
-{
-	fsimg_dealloc(address);
+	if (result == Z_MEM_ERROR)
+		return (fsimg_zlib_memory_error(memory, error));
+	if (result == Z_VERSION_ERROR)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+		    "the zlib library does not match its header"));
+	snprintf(message, sizeof(message), "zlib %s returned %d", call, result);
+	return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
+	    message));
 }
 
 /* The encoder: its run store, and under zlib the deflate state and an
@@ -1163,6 +1169,7 @@ dmg_encode_open(const fsimg_encode_t *encode, void **state,
 {
 	dmg_encoder_t *encoder;
 	fsimg_status_t status;
+	int result;
 
 	*state = NULL;
 	encoder = fsimg_alloc(encode->ctx, sizeof(*encoder), error);
@@ -1183,17 +1190,12 @@ dmg_encode_open(const fsimg_encode_t *encode, void **state,
 	    encoder->plan->base.chunk_bytes, error);
 	if (encoder->packed == NULL)
 		return (error->status);
-	encoder->stream.zalloc = dmg_zlib_alloc;
-	encoder->stream.zfree = dmg_zlib_free;
-	encoder->stream.opaque = encoder;
-	if (deflateInit(&encoder->stream, (int)encoder->plan->level) !=
-	    Z_OK) {
-		*error = encoder->zlib_error;
-		if (error->status == FSIMG_OK)
-			fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-			    "zlib initialization failed");
-		return (error->status);
-	}
+	fsimg_zlib_memory_bind(&encoder->zlib_memory, encode->ctx,
+	    &encoder->stream);
+	result = deflateInit(&encoder->stream, (int)encoder->plan->level);
+	if (result != Z_OK)
+		return (dmg_zlib_failed(&encoder->zlib_memory, result,
+		    "deflateInit", error));
 	encoder->stream_ready = true;
 	return (FSIMG_OK);
 }
@@ -1216,11 +1218,11 @@ record_run(dmg_encoder_t *encoder, uint32_t type, uint64_t sectors,
 			return (status);
 	}
 	bzero(run, sizeof(run));
-	fsimg_layer_put_be32(run + RUN_TYPE, type);
-	fsimg_layer_put_be64(run + RUN_SECTOR, encoder->sector);
-	fsimg_layer_put_be64(run + RUN_SECTORS, sectors);
-	fsimg_layer_put_be64(run + RUN_COMPRESSED_OFFSET, offset);
-	fsimg_layer_put_be64(run + RUN_COMPRESSED_LENGTH, length);
+	fsimg_store_be32(run + RUN_TYPE, type);
+	fsimg_store_be64(run + RUN_SECTOR, encoder->sector);
+	fsimg_store_be64(run + RUN_SECTORS, sectors);
+	fsimg_store_be64(run + RUN_COMPRESSED_OFFSET, offset);
+	fsimg_store_be64(run + RUN_COMPRESSED_LENGTH, length);
 	status = fsimg_store_write(encoder->runs, slot, run, sizeof(run),
 	    error);
 	if (status != FSIMG_OK)
@@ -1252,7 +1254,9 @@ record_zero_run(dmg_encoder_t *encoder, fsimg_error_t *error)
 /*
  * Deflate one chunk into the packed buffer, which holds no more than the
  * chunk itself: *packed_length is the zlib stream's length when it is
- * shorter than the chunk, and zero when the chunk does not shrink.
+ * shorter than the chunk, and zero when the chunk does not shrink. Only a
+ * complete stream that fits, or output space running out, is a choice
+ * between the two; any other zlib result fails the encode.
  */
 static fsimg_status_t
 deflate_chunk(dmg_encoder_t *encoder, const unsigned char *bytes,
@@ -1262,9 +1266,10 @@ deflate_chunk(dmg_encoder_t *encoder, const unsigned char *bytes,
 	int result;
 
 	*packed_length = 0;
-	if (deflateReset(stream) != Z_OK)
-		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-		    "zlib reset failed"));
+	result = deflateReset(stream);
+	if (result != Z_OK)
+		return (dmg_zlib_failed(&encoder->zlib_memory, result,
+		    "deflateReset", error));
 	stream->next_in = (Bytef *)(uintptr_t)bytes;
 	stream->avail_in = (uInt)length;
 	stream->next_out = encoder->packed;
@@ -1274,8 +1279,8 @@ deflate_chunk(dmg_encoder_t *encoder, const unsigned char *bytes,
 		*packed_length = (size_t)stream->total_out;
 	else if (result != Z_OK && result != Z_STREAM_END &&
 	    result != Z_BUF_ERROR)
-		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IMAGE,
-		    "zlib compression failed"));
+		return (dmg_zlib_failed(&encoder->zlib_memory, result,
+		    "deflate", error));
 	return (FSIMG_OK);
 }
 
@@ -1408,16 +1413,16 @@ write_table(dmg_encoder_t *encoder, uint64_t fork_bytes, fsimg_error_t *error)
 	sectors = encoder->disk_bytes / DMG_SECTOR_BYTES;
 	bzero(header, sizeof(header));
 	bcopy("mish", header + MISH_SIGNATURE, 4);
-	fsimg_layer_put_be32(header + MISH_VERSION_FIELD, MISH_VERSION);
-	fsimg_layer_put_be64(header + MISH_SECTOR_COUNT, sectors);
-	fsimg_layer_put_be32(header + MISH_BUFFERS,
+	fsimg_store_be32(header + MISH_VERSION_FIELD, MISH_VERSION);
+	fsimg_store_be64(header + MISH_SECTOR_COUNT, sectors);
+	fsimg_store_be32(header + MISH_BUFFERS,
 	    encoder->plan->base.chunk_bytes / DMG_SECTOR_BYTES + 8);
-	fsimg_layer_put_be32(header + MISH_DESCRIPTOR, DMG_WHOLE_DISK);
-	fsimg_layer_put_be32(header + MISH_CHECKSUM, CHECKSUM_CRC32);
-	fsimg_layer_put_be32(header + MISH_CHECKSUM + 4, 32);
-	fsimg_layer_put_be32(header + MISH_CHECKSUM + 8,
+	fsimg_store_be32(header + MISH_DESCRIPTOR, DMG_WHOLE_DISK);
+	fsimg_store_be32(header + MISH_CHECKSUM, CHECKSUM_CRC32);
+	fsimg_store_be32(header + MISH_CHECKSUM + 4, 32);
+	fsimg_store_be32(header + MISH_CHECKSUM + 8,
 	    (uint32_t)encoder->table_crc);
-	fsimg_layer_put_be32(header + MISH_RUN_COUNT,
+	fsimg_store_be32(header + MISH_RUN_COUNT,
 	    (uint32_t)(encoder->run_count + 1));
 	status = base64_put(encoder, header, sizeof(header), error);
 	if (status != FSIMG_OK)
@@ -1440,9 +1445,9 @@ write_table(dmg_encoder_t *encoder, uint64_t fork_bytes, fsimg_error_t *error)
 		return (status);
 
 	bzero(run, sizeof(run));
-	fsimg_layer_put_be32(run + RUN_TYPE, RUN_TERMINATOR);
-	fsimg_layer_put_be64(run + RUN_SECTOR, sectors);
-	fsimg_layer_put_be64(run + RUN_COMPRESSED_OFFSET, fork_bytes);
+	fsimg_store_be32(run + RUN_TYPE, RUN_TERMINATOR);
+	fsimg_store_be64(run + RUN_SECTOR, sectors);
+	fsimg_store_be64(run + RUN_COMPRESSED_OFFSET, fork_bytes);
 	status = base64_put(encoder, run, sizeof(run), error);
 	if (status == FSIMG_OK)
 		status = base64_end(encoder, error);
@@ -1464,28 +1469,28 @@ write_trailer(dmg_encoder_t *encoder, uint64_t fork_bytes, uint64_t xml_bytes,
 	unsigned char koly[KOLY_HEADER_BYTES], value[4];
 	uLong master;
 
-	fsimg_layer_put_be32(value, (uint32_t)encoder->table_crc);
+	fsimg_store_be32(value, (uint32_t)encoder->table_crc);
 	master = crc32(crc32(0, Z_NULL, 0), value, sizeof(value));
 	bzero(koly, sizeof(koly));
 	bcopy("koly", koly + KOLY_SIGNATURE, 4);
-	fsimg_layer_put_be32(koly + KOLY_VERSION_FIELD, KOLY_VERSION);
-	fsimg_layer_put_be32(koly + KOLY_HEADER_SIZE, KOLY_HEADER_BYTES);
-	fsimg_layer_put_be32(koly + KOLY_FLAGS, DMG_FLATTENED);
-	fsimg_layer_put_be64(koly + KOLY_DATA_LENGTH, fork_bytes);
-	fsimg_layer_put_be32(koly + KOLY_SEGMENT_NUMBER, 1);
-	fsimg_layer_put_be32(koly + KOLY_SEGMENT_COUNT, 1);
+	fsimg_store_be32(koly + KOLY_VERSION_FIELD, KOLY_VERSION);
+	fsimg_store_be32(koly + KOLY_HEADER_SIZE, KOLY_HEADER_BYTES);
+	fsimg_store_be32(koly + KOLY_FLAGS, DMG_FLATTENED);
+	fsimg_store_be64(koly + KOLY_DATA_LENGTH, fork_bytes);
+	fsimg_store_be32(koly + KOLY_SEGMENT_NUMBER, 1);
+	fsimg_store_be32(koly + KOLY_SEGMENT_COUNT, 1);
 	bcopy(encoder->plan->base.identifier, koly + KOLY_SEGMENT_ID, 16);
-	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM, CHECKSUM_CRC32);
-	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM + 4, 32);
-	fsimg_layer_put_be32(koly + KOLY_DATA_CHECKSUM + 8,
+	fsimg_store_be32(koly + KOLY_DATA_CHECKSUM, CHECKSUM_CRC32);
+	fsimg_store_be32(koly + KOLY_DATA_CHECKSUM + 4, 32);
+	fsimg_store_be32(koly + KOLY_DATA_CHECKSUM + 8,
 	    (uint32_t)encoder->fork_crc);
-	fsimg_layer_put_be64(koly + KOLY_XML_OFFSET, fork_bytes);
-	fsimg_layer_put_be64(koly + KOLY_XML_LENGTH, xml_bytes);
-	fsimg_layer_put_be32(koly + KOLY_MASTER_CHECKSUM, CHECKSUM_CRC32);
-	fsimg_layer_put_be32(koly + KOLY_MASTER_CHECKSUM + 4, 32);
-	fsimg_layer_put_be32(koly + KOLY_MASTER_CHECKSUM + 8, (uint32_t)master);
-	fsimg_layer_put_be32(koly + KOLY_VARIANT, DMG_VARIANT);
-	fsimg_layer_put_be64(koly + KOLY_SECTOR_COUNT,
+	fsimg_store_be64(koly + KOLY_XML_OFFSET, fork_bytes);
+	fsimg_store_be64(koly + KOLY_XML_LENGTH, xml_bytes);
+	fsimg_store_be32(koly + KOLY_MASTER_CHECKSUM, CHECKSUM_CRC32);
+	fsimg_store_be32(koly + KOLY_MASTER_CHECKSUM + 4, 32);
+	fsimg_store_be32(koly + KOLY_MASTER_CHECKSUM + 8, (uint32_t)master);
+	fsimg_store_be32(koly + KOLY_VARIANT, DMG_VARIANT);
+	fsimg_store_be64(koly + KOLY_SECTOR_COUNT,
 	    encoder->disk_bytes / DMG_SECTOR_BYTES);
 	return (fsimg_seq_write(encoder->sink, koly, sizeof(koly), error));
 }

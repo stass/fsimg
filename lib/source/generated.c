@@ -6,8 +6,8 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "generated.h"
-#include "meta.h"
 #include "sha256.h"
 
 #define SEEDED_BLOCK_BYTES	32u
@@ -24,14 +24,14 @@ fsimg_generated_encode(const fsimg_generated_t *generated,
 {
 	unsigned char *cursor;
 
-	fsimg_meta_put_u64(record, generated->generator);
-	fsimg_meta_put_u64(record + 8, generated->seed);
-	fsimg_meta_put_u64(record + 16, generated->length);
-	fsimg_meta_put_u64(record + 24, generated->hole_count);
+	fsimg_store_le64(record, generated->generator);
+	fsimg_store_le64(record + 8, generated->seed);
+	fsimg_store_le64(record + 16, generated->length);
+	fsimg_store_le64(record + 24, generated->hole_count);
 	cursor = record + FSIMG_GENERATED_HEADER;
 	for (size_t i = 0; i < generated->hole_count; i++) {
-		fsimg_meta_put_u64(cursor, generated->holes[i].offset);
-		fsimg_meta_put_u64(cursor + 8, generated->holes[i].length);
+		fsimg_store_le64(cursor, generated->holes[i].offset);
+		fsimg_store_le64(cursor + 8, generated->holes[i].length);
 		cursor += 16;
 	}
 	if (generated->generator == FSIMG_GENERATOR_LINK) {
@@ -57,10 +57,10 @@ fsimg_generated_decode(const unsigned char *record, size_t length,
 	bzero(out, sizeof(*out));
 	if (length < FSIMG_GENERATED_HEADER)
 		return (false);
-	generator = fsimg_meta_get_u64(record);
-	out->seed = fsimg_meta_get_u64(record + 8);
-	out->length = fsimg_meta_get_u64(record + 16);
-	hole_count = fsimg_meta_get_u64(record + 24);
+	generator = fsimg_load_le64(record);
+	out->seed = fsimg_load_le64(record + 8);
+	out->length = fsimg_load_le64(record + 16);
+	hole_count = fsimg_load_le64(record + 24);
 	cursor = record + FSIMG_GENERATED_HEADER;
 	switch (generator) {
 	case FSIMG_GENERATOR_LINK:
@@ -83,8 +83,8 @@ fsimg_generated_decode(const unsigned char *record, size_t length,
 			return (false);
 		out->hole_count = (size_t)hole_count;
 		for (size_t i = 0; i < out->hole_count; i++) {
-			out->holes[i].offset = fsimg_meta_get_u64(cursor);
-			out->holes[i].length = fsimg_meta_get_u64(cursor + 8);
+			out->holes[i].offset = fsimg_load_le64(cursor);
+			out->holes[i].length = fsimg_load_le64(cursor + 8);
 			cursor += 16;
 		}
 		if (!holes_valid(out))
@@ -124,13 +124,13 @@ make_block(const fsimg_generated_t *generated, uint64_t index,
 	fsimg_sha256_t hash;
 	unsigned char message[16];
 
-	fsimg_meta_put_u64(message, generated->seed);
+	fsimg_store_le64(message, generated->seed);
 	if (generated->generator == FSIMG_GENERATOR_POSITIONAL) {
 		bcopy(message, block, 8);
-		fsimg_meta_put_u64(block + 8, index * POSITIONAL_BLOCK_BYTES);
+		fsimg_store_le64(block + 8, index * POSITIONAL_BLOCK_BYTES);
 		return;
 	}
-	fsimg_meta_put_u64(message + 8, index);
+	fsimg_store_le64(message + 8, index);
 	fsimg_sha256_init(&hash);
 	fsimg_sha256_update(&hash, message, sizeof(message));
 	fsimg_sha256_final(block, &hash);

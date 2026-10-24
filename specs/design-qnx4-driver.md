@@ -44,9 +44,10 @@ extent.
 
 ## Codecs
 
-`qnx4_u16()`, `qnx4_u32()` and their `put` counterparts decode and encode
-little-endian integers from byte buffers. Decoded records are C structures
-with `_t` typedefs holding only validated values:
+The shared little-endian [scalar codecs](design-binary-primitives.md)
+decode and encode integers in byte buffers; the QNX4 record codecs check
+each record's span before any field is read. Decoded records are C structures with `_t` typedefs holding
+only validated values:
 
 | Type | Fields |
 | --- | --- |

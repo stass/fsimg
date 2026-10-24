@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "ifs.h"
 
 /* Pure codecs of the header and of every record kind. They read and write
@@ -23,42 +24,41 @@ static fsimg_status_t record_prefix(const unsigned char *, ifs_byte_order_t,
 static fsimg_status_t record_link(const unsigned char *, uint32_t,
     ifs_byte_order_t, ifs_record_t *, fsimg_error_t *);
 
+/* The volume's byte order, which the startup or image header establishes,
+ * selects the fixed-order codec; nothing here depends on the host's order.
+ */
 uint16_t
 ifs_u16(const unsigned char *bytes, ifs_byte_order_t order)
 {
 	if (order == IFS_BIG_ENDIAN)
-		return ((uint16_t)(bytes[0] << 8 | bytes[1]));
-	return ((uint16_t)(bytes[0] | bytes[1] << 8));
+		return (fsimg_load_be16(bytes));
+	return (fsimg_load_le16(bytes));
 }
 
 uint32_t
 ifs_u32(const unsigned char *bytes, ifs_byte_order_t order)
 {
 	if (order == IFS_BIG_ENDIAN)
-		return ((uint32_t)bytes[0] << 24 | (uint32_t)bytes[1] << 16 |
-		    (uint32_t)bytes[2] << 8 | bytes[3]);
-	return ((uint32_t)bytes[0] | (uint32_t)bytes[1] << 8 |
-	    (uint32_t)bytes[2] << 16 | (uint32_t)bytes[3] << 24);
+		return (fsimg_load_be32(bytes));
+	return (fsimg_load_le32(bytes));
 }
 
 void
 ifs_put16(unsigned char *bytes, uint16_t value, ifs_byte_order_t order)
 {
-	if (order == IFS_BIG_ENDIAN) {
-		bytes[0] = (unsigned char)(value >> 8);
-		bytes[1] = (unsigned char)value;
-	} else {
-		bytes[0] = (unsigned char)value;
-		bytes[1] = (unsigned char)(value >> 8);
-	}
+	if (order == IFS_BIG_ENDIAN)
+		fsimg_store_be16(bytes, value);
+	else
+		fsimg_store_le16(bytes, value);
 }
 
 void
 ifs_put32(unsigned char *bytes, uint32_t value, ifs_byte_order_t order)
 {
-	for (unsigned i = 0; i < 4; i++)
-		bytes[order == IFS_BIG_ENDIAN ? 3 - i : i] =
-		    (unsigned char)(value >> (8 * i));
+	if (order == IFS_BIG_ENDIAN)
+		fsimg_store_be32(bytes, value);
+	else
+		fsimg_store_le32(bytes, value);
 }
 
 /* Where a record of each kind stores its path. */

@@ -37,9 +37,11 @@ noinst_LTLIBRARIES = libfsimg-core.la
 libfsimg_la_SOURCES =
 libfsimg_la_LIBADD = libfsimg-core.la
 libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
+	lib/core/fsimg-endian.h \
 	lib/core/unicode.c lib/core/unicode.h lib/core/case-tables.h \
 	lib/core/calendar.c lib/core/sha256.c lib/core/sha256.h \
 	lib/core/settings.c lib/core/settings.h \
+	lib/core/zlib-memory.c lib/core/zlib-memory.h \
 	lib/formats/format.c lib/formats/format.h \
 	lib/io/io.c lib/output/publish.c lib/output/publish.h \
 	lib/output/write.c \
@@ -125,7 +127,8 @@ example_read_slice_SOURCES = examples/read-slice.c examples/example.h
 example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
-test_programs = test-core test-private test-io test-meta test-meta-sort test-unicode test-format \
+test_programs = test-core test-endian test-endian-unsigned-char \
+	test-zlib-memory test-private test-io test-meta test-meta-sort test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
@@ -151,6 +154,13 @@ nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
 	test/spec.sh \
 	test/codec-integration.sh
+# The scalar codecs, built once with each signedness of plain char.
+test_endian_SOURCES = test/endian.c test/test.h lib/core/fsimg-endian.h
+test_endian_CFLAGS = $(AM_CFLAGS) -fsigned-char
+test_endian_unsigned_char_SOURCES = $(test_endian_SOURCES)
+test_endian_unsigned_char_CFLAGS = $(AM_CFLAGS) -funsigned-char
+test_zlib_memory_SOURCES = test/zlib-memory.c test/test.h
+test_zlib_memory_LDADD = libfsimg-core.la $(ZLIB_LIBS)
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \

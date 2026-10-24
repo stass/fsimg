@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "qnx6.h"
 #include "unicode.h"
 
@@ -46,7 +47,7 @@ reference(fsimg_reader_t *reader, uint32_t inode, fsimg_error_t *error)
 
 	if (qnx6->references == NULL)
 		return (FSIMG_OK);
-	fsimg_meta_put_u32(record, inode);
+	fsimg_store_le32(record, inode);
 	return (fsimg_stream_append(qnx6->references, record, sizeof(record),
 	    NULL, error));
 }
@@ -86,8 +87,8 @@ admit_slot(qnx6_scan_t *scan, const qnx6_slot_t *slot, fsimg_error_t *error)
 	status = reference(scan->reader, slot->inode, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fsimg_meta_put_u32(payload, slot->inode);
-	fsimg_meta_put_u32(payload + 4, scan->self);
+	fsimg_store_le32(payload, slot->inode);
+	fsimg_store_le32(payload + 4, scan->self);
 	return (fsimg_directory_admit(scan->build, scan->name, payload,
 	    sizeof(payload), error));
 }
@@ -246,8 +247,8 @@ qnx6_replay(fsimg_reader_t *reader, const char *name,
 	qnx6->later_name = false;
 	if (length != QNX6_PAYLOAD_BYTES)
 		return (qnx6_corrupt(error, "invalid prepared QNX6 entry payload"));
-	inode = fsimg_meta_get_u32(payload);
-	parent = fsimg_meta_get_u32(payload + 4);
+	inode = fsimg_load_le32(payload);
+	parent = fsimg_load_le32(payload + 4);
 	if (parent == 0 || parent > qnx6->geometry.inode_count)
 		return (qnx6_corrupt(error, "invalid prepared QNX6 entry payload"));
 	if (qnx6_name_native((const unsigned char *)name, strlen(name),

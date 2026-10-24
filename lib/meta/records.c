@@ -5,6 +5,7 @@
 
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "meta.h"
 
 struct fsimg_array {
@@ -22,43 +23,6 @@ static fsimg_status_t record_write(fsimg_store_t *, uint64_t, const void *,
     uint32_t, fsimg_error_t *);
 static fsimg_status_t array_offset(fsimg_array_t *, uint64_t, uint64_t *,
     fsimg_error_t *);
-
-void
-fsimg_meta_put_u64(unsigned char *bytes, uint64_t value)
-{
-	for (unsigned i = 0; i < 8; i++)
-		bytes[i] = (unsigned char)(value >> (8 * i));
-}
-
-void
-fsimg_meta_put_u32(unsigned char *bytes, uint32_t value)
-{
-	for (unsigned i = 0; i < 4; i++)
-		bytes[i] = (unsigned char)(value >> (8 * i));
-}
-
-uint32_t
-fsimg_meta_get_u32(const unsigned char *bytes)
-{
-	uint32_t value;
-
-	value = 0;
-	for (unsigned i = 0; i < 4; i++)
-		value |= (uint32_t)bytes[i] << (8 * i);
-	return (value);
-}
-
-uint64_t
-fsimg_meta_get_u64(const unsigned char *bytes)
-{
-	uint64_t value;
-
-	value = 0;
-	for (unsigned i = 0; i < 8; i++)
-		value |= (uint64_t)bytes[i] << (8 * i);
-	return (value);
-}
-
 fsimg_status_t
 fsimg_record_length(fsimg_store_t *store, uint64_t offset, uint64_t end,
     uint32_t maximum, uint32_t *out, fsimg_error_t *error)
@@ -75,7 +39,7 @@ fsimg_record_length(fsimg_store_t *store, uint64_t offset, uint64_t end,
 	status = fsimg_store_read(store, offset, header, sizeof(header), error);
 	if (status != FSIMG_OK)
 		return (status);
-	frame = fsimg_meta_get_u64(header);
+	frame = fsimg_load_le64(header);
 	if ((uint32_t)frame != 1 || (frame >> 32) > maximum ||
 	    !fsimg_range_fits(offset + sizeof(header), frame >> 32, end))
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
@@ -96,7 +60,7 @@ record_write(fsimg_store_t *store, uint64_t offset, const void *data,
 	if (!fsimg_add_u64(offset, sizeof(header) + (uint64_t)length, &end))
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 		    FSIMG_OP_METADATA, "metadata stream length overflow"));
-	fsimg_meta_put_u64(header, ((uint64_t)length << 32) | 1);
+	fsimg_store_le64(header, ((uint64_t)length << 32) | 1);
 	if (end > fsimg_store_size(store)) {
 		status = fsimg_store_grow(store, end, error);
 		if (status != FSIMG_OK)

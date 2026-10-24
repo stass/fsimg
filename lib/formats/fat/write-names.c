@@ -8,6 +8,7 @@
 #include <strings.h>
 
 #include "fat.h"
+#include "fsimg-endian.h"
 #include "unicode.h"
 #include "write.h"
 
@@ -71,8 +72,8 @@ key_compare(const void *a, size_t an, const void *b, size_t bn,
 	size_t common;
 	int order;
 
-	ap = fsimg_meta_get_u64(a);
-	bp = fsimg_meta_get_u64(b);
+	ap = fsimg_load_le64(a);
+	bp = fsimg_load_le64(b);
 	if (ap != bp)
 		return (ap < bp ? -1 : 1);
 	common = an < bn ? an : bn;
@@ -90,8 +91,8 @@ reservation_compare(const void *a, size_t an FSIMG_UNUSED, const void *b,
 	uint64_t av, bv;
 
 	for (unsigned offset = 0; offset < 16; offset += 8) {
-		av = fsimg_meta_get_u64((const unsigned char *)a + offset);
-		bv = fsimg_meta_get_u64((const unsigned char *)b + offset);
+		av = fsimg_load_le64((const unsigned char *)a + offset);
+		bv = fsimg_load_le64((const unsigned char *)b + offset);
 		if (av != bv)
 			return (av < bv ? -1 : 1);
 	}
@@ -168,7 +169,7 @@ collect_names(fat_plan_t *plan, fsimg_stream_t *names,
 		if (status != FSIMG_OK)
 			return (status);
 
-		fsimg_meta_put_u64(key, catalog->parent_id);
+		fsimg_store_le64(key, catalog->parent_id);
 		status = fsimg_fat_name_key(name, key + 8, &length, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -176,8 +177,8 @@ collect_names(fat_plan_t *plan, fsimg_stream_t *names,
 		if (status != FSIMG_OK)
 			return (status);
 		if (alias_reservation(key + 8, length, &number)) {
-			fsimg_meta_put_u64(reservation, catalog->parent_id);
-			fsimg_meta_put_u64(reservation + 8, number);
+			fsimg_store_le64(reservation, catalog->parent_id);
+			fsimg_store_le64(reservation + 8, number);
 			status = fsimg_stream_append(reservations, reservation,
 			    sizeof(reservation), NULL, error);
 			if (status != FSIMG_OK)
@@ -226,11 +227,11 @@ next_reservation(fat_alias_cursor_t *cursor, fsimg_error_t *error)
 		return (FSIMG_OK);
 	if (status != FSIMG_OK)
 		return (status);
-	if (length != sizeof(raw) || fsimg_meta_get_u64(raw + 8) > 0x0fffffff)
+	if (length != sizeof(raw) || fsimg_load_le64(raw + 8) > 0x0fffffff)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_WRITER, "invalid FAT alias reservation"));
-	cursor->parent_id = fsimg_meta_get_u64(raw);
-	cursor->number = fsimg_meta_get_u64(raw + 8);
+	cursor->parent_id = fsimg_load_le64(raw);
+	cursor->number = fsimg_load_le64(raw + 8);
 	return (FSIMG_OK);
 }
 

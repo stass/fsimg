@@ -5,6 +5,7 @@
 
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "qnx6.h"
 
 /* A tree has sixteen root slots and depth L. At depth zero they reference
@@ -228,7 +229,7 @@ visit_block(qnx6_walk_t *walk, uint32_t block, qnx6_role_t role,
 		/* The bitmap does not exist yet: record the block for the
 		 * allocation check that follows the walk.
 		 */
-		fsimg_meta_put_u32(record, block);
+		fsimg_store_le32(record, block);
 		status = fsimg_stream_append(qnx6->record, record,
 		    sizeof(record), NULL, error);
 		break;

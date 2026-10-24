@@ -15,48 +15,6 @@
  * when their caller passes none.
  */
 
-/* Table fields are little-endian at fixed offsets of untrusted bytes. */
-static inline uint16_t
-fsimg_layer_le16(const unsigned char *p)
-{
-	return ((uint16_t)(p[0] | p[1] << 8));
-}
-
-static inline uint32_t
-fsimg_layer_le32(const unsigned char *p)
-{
-	return ((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
-	    (uint32_t)p[3] << 24);
-}
-
-static inline uint64_t
-fsimg_layer_le64(const unsigned char *p)
-{
-	return ((uint64_t)fsimg_layer_le32(p) |
-	    (uint64_t)fsimg_layer_le32(p + 4) << 32);
-}
-
-static inline void
-fsimg_layer_put_le16(unsigned char *p, uint16_t value)
-{
-	p[0] = (unsigned char)value;
-	p[1] = (unsigned char)(value >> 8);
-}
-
-static inline void
-fsimg_layer_put_le32(unsigned char *p, uint32_t value)
-{
-	fsimg_layer_put_le16(p, (uint16_t)value);
-	fsimg_layer_put_le16(p + 2, (uint16_t)(value >> 16));
-}
-
-static inline void
-fsimg_layer_put_le64(unsigned char *p, uint64_t value)
-{
-	fsimg_layer_put_le32(p, (uint32_t)value);
-	fsimg_layer_put_le32(p + 4, (uint32_t)(value >> 32));
-}
-
 /* GPT reads at most this many entries of 128 bytes per table copy. */
 #define FSIMG_GPT_MAX_ENTRIES	1024u
 #define FSIMG_GPT_NAME_UNITS	36u
@@ -313,36 +271,6 @@ typedef struct fsimg_plist_visitor {
 fsimg_status_t fsimg_plist_parse(fsimg_ctx_t *, fsimg_io_t *,
     fsimg_session_t *, uint64_t, uint64_t, const fsimg_plist_visitor_t *,
     fsimg_error_t *);
-
-/* Container tables are big-endian in DMG and VHD. */
-static inline uint32_t
-fsimg_layer_be32(const unsigned char *p)
-{
-	return ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
-	    (uint32_t)p[2] << 8 | (uint32_t)p[3]);
-}
-
-static inline uint64_t
-fsimg_layer_be64(const unsigned char *p)
-{
-	return ((uint64_t)fsimg_layer_be32(p) << 32 | fsimg_layer_be32(p + 4));
-}
-
-static inline void
-fsimg_layer_put_be32(unsigned char *p, uint32_t value)
-{
-	p[0] = (unsigned char)(value >> 24);
-	p[1] = (unsigned char)(value >> 16);
-	p[2] = (unsigned char)(value >> 8);
-	p[3] = (unsigned char)value;
-}
-
-static inline void
-fsimg_layer_put_be64(unsigned char *p, uint64_t value)
-{
-	fsimg_layer_put_be32(p, (uint32_t)(value >> 32));
-	fsimg_layer_put_be32(p + 4, (uint32_t)value);
-}
 
 typedef struct fsimg_spool fsimg_spool_t;
 

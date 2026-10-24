@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 
@@ -75,8 +76,8 @@ decode_entry(const unsigned char *raw, mbr_entry_t *entry)
 		return (true);
 	entry->status = raw[0];
 	entry->type = raw[4];
-	entry->first_lba = fsimg_layer_le32(raw + 8);
-	entry->sectors = fsimg_layer_le32(raw + 12);
+	entry->first_lba = fsimg_load_le32(raw + 8);
+	entry->sectors = fsimg_load_le32(raw + 12);
 	entry->used = true;
 	return ((entry->status == 0x00 || entry->status == 0x80) &&
 	    entry->type != 0 && entry->sectors != 0);
@@ -195,7 +196,7 @@ mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 		return (error->status);
 	table->count = MBR_SLOTS;
 	table->sector_bytes = MBR_SECTOR_BYTES;
-	table->mbr_disk_id = fsimg_layer_le32(sector + MBR_DISK_ID);
+	table->mbr_disk_id = fsimg_load_le32(sector + MBR_DISK_ID);
 	table->kind = FSIMG_SCHEME_MBR;
 	for (unsigned i = 0; i < MBR_SLOTS; i++) {
 		record = &table->records[i];
@@ -292,7 +293,7 @@ mbr_encode(fsimg_ctx_t *ctx, const fsimg_scheme_table_t *table,
 	sector = fsimg_alloc(ctx, MBR_SECTOR_BYTES, error);
 	if (sector == NULL)
 		return (error->status);
-	fsimg_layer_put_le32(sector + MBR_DISK_ID, table->mbr_disk_id);
+	fsimg_store_le32(sector + MBR_DISK_ID, table->mbr_disk_id);
 	for (uint32_t i = 0; i < table->count; i++) {
 		record = &table->records[i];
 		if (!record->used)
@@ -304,8 +305,8 @@ mbr_encode(fsimg_ctx_t *ctx, const fsimg_scheme_table_t *table,
 		encode_chs(first, raw + 1);
 		raw[4] = record->mbr_type;
 		encode_chs(first + count - 1, raw + 5);
-		fsimg_layer_put_le32(raw + 8, (uint32_t)first);
-		fsimg_layer_put_le32(raw + 12, (uint32_t)count);
+		fsimg_store_le32(raw + 8, (uint32_t)first);
+		fsimg_store_le32(raw + 12, (uint32_t)count);
 	}
 	sector[MBR_SIGNATURE] = 0x55;
 	sector[MBR_SIGNATURE + 1] = 0xaa;

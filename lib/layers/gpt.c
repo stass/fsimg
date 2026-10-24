@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 
@@ -303,24 +304,24 @@ read_header(const fsimg_scheme_input_t *input, const gpt_geometry_t *geometry,
 		return (status);
 	if (bcmp(raw, GPT_SIGNATURE, GPT_SIGNATURE_BYTES) != 0)
 		return (gpt_corrupt(error, copy, "header signature is missing"));
-	header_bytes = fsimg_layer_le32(raw + HEADER_SIZE);
+	header_bytes = fsimg_load_le32(raw + HEADER_SIZE);
 	if (header_bytes < GPT_HEADER_MIN_BYTES ||
 	    header_bytes > geometry->sector_bytes)
 		return (gpt_corrupt(error, copy, "header size is out of range"));
-	recorded_crc = fsimg_layer_le32(raw + HEADER_CRC);
+	recorded_crc = fsimg_load_le32(raw + HEADER_CRC);
 	bzero(raw + HEADER_CRC, 4);
 	if (gpt_crc32(raw, header_bytes) != recorded_crc)
 		return (gpt_corrupt(error, copy, "header CRC32 mismatch"));
 
 	guid_swap(raw + HEADER_DISK_GUID, header->disk_guid);
-	header->my_lba = fsimg_layer_le64(raw + HEADER_MY_LBA);
-	header->alternate_lba = fsimg_layer_le64(raw + HEADER_ALTERNATE_LBA);
-	header->first_usable = fsimg_layer_le64(raw + HEADER_FIRST_USABLE);
-	header->last_usable = fsimg_layer_le64(raw + HEADER_LAST_USABLE);
-	header->entries_lba = fsimg_layer_le64(raw + HEADER_ENTRIES_LBA);
-	header->entry_count = fsimg_layer_le32(raw + HEADER_ENTRY_COUNT);
-	header->entry_size = fsimg_layer_le32(raw + HEADER_ENTRY_SIZE);
-	header->entries_crc = fsimg_layer_le32(raw + HEADER_ENTRIES_CRC);
+	header->my_lba = fsimg_load_le64(raw + HEADER_MY_LBA);
+	header->alternate_lba = fsimg_load_le64(raw + HEADER_ALTERNATE_LBA);
+	header->first_usable = fsimg_load_le64(raw + HEADER_FIRST_USABLE);
+	header->last_usable = fsimg_load_le64(raw + HEADER_LAST_USABLE);
+	header->entries_lba = fsimg_load_le64(raw + HEADER_ENTRIES_LBA);
+	header->entry_count = fsimg_load_le32(raw + HEADER_ENTRY_COUNT);
+	header->entry_size = fsimg_load_le32(raw + HEADER_ENTRY_SIZE);
+	header->entries_crc = fsimg_load_le32(raw + HEADER_ENTRIES_CRC);
 	return (FSIMG_OK);
 }
 
@@ -442,8 +443,8 @@ decode_entries(const unsigned char *array, const gpt_header_t *header,
 		record->index = i + 1;
 		if (bcmp(raw + ENTRY_TYPE_GUID, unused, sizeof(unused)) == 0)
 			continue;
-		first = fsimg_layer_le64(raw + ENTRY_FIRST_LBA);
-		last = fsimg_layer_le64(raw + ENTRY_LAST_LBA);
+		first = fsimg_load_le64(raw + ENTRY_FIRST_LBA);
+		last = fsimg_load_le64(raw + ENTRY_LAST_LBA);
 		if (first > last || first < header->first_usable ||
 		    last > header->last_usable) {
 			snprintf(check, sizeof(check),
@@ -455,7 +456,7 @@ decode_entries(const unsigned char *array, const gpt_header_t *header,
 		guid_swap(raw + ENTRY_TYPE_GUID, record->type_guid);
 		guid_swap(raw + ENTRY_GUID, record->guid);
 		for (unsigned unit = 0; unit < FSIMG_GPT_NAME_UNITS; unit++)
-			record->name[unit] = fsimg_layer_le16(raw + ENTRY_NAME +
+			record->name[unit] = fsimg_load_le16(raw + ENTRY_NAME +
 			    unit * 2);
 		record->offset = first * geometry->sector_bytes;
 		record->length = (last - first + 1) * geometry->sector_bytes;
@@ -606,7 +607,7 @@ gpt_verify(const fsimg_scheme_input_t *input,
 		for (unsigned i = 0; i < 4; i++) {
 			entry = sector + MBR_ENTRIES_OFFSET + i * 16;
 			if (entry[4] == MBR_PROTECTIVE_TYPE &&
-			    fsimg_layer_le32(entry + 8) == 1)
+			    fsimg_load_le32(entry + 8) == 1)
 				return (FSIMG_OK);
 		}
 	}
@@ -640,8 +641,8 @@ encode_protective_mbr(unsigned char *sector, uint64_t last_lba)
 	entry[2] = 0x02;
 	entry[4] = MBR_PROTECTIVE_TYPE;
 	entry[5] = entry[6] = entry[7] = 0xff;
-	fsimg_layer_put_le32(entry + 8, 1);
-	fsimg_layer_put_le32(entry + 12, last_lba > UINT32_MAX ? UINT32_MAX :
+	fsimg_store_le32(entry + 8, 1);
+	fsimg_store_le32(entry + 12, last_lba > UINT32_MAX ? UINT32_MAX :
 	    (uint32_t)last_lba);
 	sector[MBR_SIGNATURE_OFFSET] = 0x55;
 	sector[MBR_SIGNATURE_OFFSET + 1] = 0xaa;
@@ -666,11 +667,11 @@ encode_entries(unsigned char *array, const fsimg_scheme_table_t *table)
 		first = record->offset / table->sector_bytes;
 		guid_swap(record->type_guid, raw + ENTRY_TYPE_GUID);
 		guid_swap(record->guid, raw + ENTRY_GUID);
-		fsimg_layer_put_le64(raw + ENTRY_FIRST_LBA, first);
-		fsimg_layer_put_le64(raw + ENTRY_LAST_LBA, first - 1 +
+		fsimg_store_le64(raw + ENTRY_FIRST_LBA, first);
+		fsimg_store_le64(raw + ENTRY_LAST_LBA, first - 1 +
 		    record->length / table->sector_bytes);
 		for (unsigned unit = 0; unit < FSIMG_GPT_NAME_UNITS; unit++)
-			fsimg_layer_put_le16(raw + ENTRY_NAME + unit * 2,
+			fsimg_store_le16(raw + ENTRY_NAME + unit * 2,
 			    record->name[unit]);
 	}
 }
@@ -683,18 +684,18 @@ encode_header(unsigned char *raw, const unsigned char *disk_guid,
     const gpt_header_t *header)
 {
 	bcopy(GPT_SIGNATURE, raw, GPT_SIGNATURE_BYTES);
-	fsimg_layer_put_le32(raw + HEADER_REVISION, GPT_REVISION);
-	fsimg_layer_put_le32(raw + HEADER_SIZE, GPT_HEADER_MIN_BYTES);
-	fsimg_layer_put_le64(raw + HEADER_MY_LBA, header->my_lba);
-	fsimg_layer_put_le64(raw + HEADER_ALTERNATE_LBA, header->alternate_lba);
-	fsimg_layer_put_le64(raw + HEADER_FIRST_USABLE, header->first_usable);
-	fsimg_layer_put_le64(raw + HEADER_LAST_USABLE, header->last_usable);
+	fsimg_store_le32(raw + HEADER_REVISION, GPT_REVISION);
+	fsimg_store_le32(raw + HEADER_SIZE, GPT_HEADER_MIN_BYTES);
+	fsimg_store_le64(raw + HEADER_MY_LBA, header->my_lba);
+	fsimg_store_le64(raw + HEADER_ALTERNATE_LBA, header->alternate_lba);
+	fsimg_store_le64(raw + HEADER_FIRST_USABLE, header->first_usable);
+	fsimg_store_le64(raw + HEADER_LAST_USABLE, header->last_usable);
 	guid_swap(disk_guid, raw + HEADER_DISK_GUID);
-	fsimg_layer_put_le64(raw + HEADER_ENTRIES_LBA, header->entries_lba);
-	fsimg_layer_put_le32(raw + HEADER_ENTRY_COUNT, header->entry_count);
-	fsimg_layer_put_le32(raw + HEADER_ENTRY_SIZE, header->entry_size);
-	fsimg_layer_put_le32(raw + HEADER_ENTRIES_CRC, header->entries_crc);
-	fsimg_layer_put_le32(raw + HEADER_CRC,
+	fsimg_store_le64(raw + HEADER_ENTRIES_LBA, header->entries_lba);
+	fsimg_store_le32(raw + HEADER_ENTRY_COUNT, header->entry_count);
+	fsimg_store_le32(raw + HEADER_ENTRY_SIZE, header->entry_size);
+	fsimg_store_le32(raw + HEADER_ENTRIES_CRC, header->entries_crc);
+	fsimg_store_le32(raw + HEADER_CRC,
 	    gpt_crc32(raw, GPT_HEADER_MIN_BYTES));
 }
 

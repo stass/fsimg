@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "ifs.h"
 #include "unicode.h"
 
@@ -140,8 +141,8 @@ parent_compare(const void *a, size_t a_length, const void *b, size_t b_length,
 
 	if (a_length < IFS_CHILD_FIXED || b_length < IFS_CHILD_FIXED)
 		return ((a_length > b_length) - (a_length < b_length));
-	left = fsimg_meta_get_u64(a);
-	right = fsimg_meta_get_u64(b);
+	left = fsimg_load_le64(a);
+	right = fsimg_load_le64(b);
 	return ((left > right) - (left < right));
 }
 
@@ -153,9 +154,9 @@ path_entry_decode(const unsigned char *bytes, size_t length,
 	    bytes[IFS_PATH_ENTRY_KIND] < IFS_KIND_DIRECTORY ||
 	    bytes[IFS_PATH_ENTRY_KIND] > IFS_KIND_FIFO)
 		return (ifs_corrupt(error, "invalid ImageFS path record"));
-	entry->table_offset = fsimg_meta_get_u32(bytes +
+	entry->table_offset = fsimg_load_le32(bytes +
 	    IFS_PATH_ENTRY_TABLE_OFFSET);
-	entry->inode = fsimg_meta_get_u32(bytes + IFS_PATH_ENTRY_INODE);
+	entry->inode = fsimg_load_le32(bytes + IFS_PATH_ENTRY_INODE);
 	entry->kind = (ifs_kind_t)bytes[IFS_PATH_ENTRY_KIND];
 	entry->path = bytes + IFS_PATH_ENTRY_FIXED;
 	entry->path_length = length - IFS_PATH_ENTRY_FIXED;
@@ -232,10 +233,10 @@ emit_node(tree_pass_t *pass, const unsigned char *name, size_t length,
 	kind = entry == NULL ? IFS_KIND_DIRECTORY : entry->kind;
 	table_offset = entry == NULL ? 0 : entry->table_offset;
 	path_length = entry == NULL ? 0 : (uint32_t)entry->path_length;
-	fsimg_meta_put_u64(pass->child + IFS_CHILD_PARENT, parent->node);
-	fsimg_meta_put_u64(pass->child + IFS_CHILD_NODE, pass->next_node);
+	fsimg_store_le64(pass->child + IFS_CHILD_PARENT, parent->node);
+	fsimg_store_le64(pass->child + IFS_CHILD_NODE, pass->next_node);
 	pass->child[IFS_CHILD_KIND] = (unsigned char)kind;
-	fsimg_meta_put_u32(pass->child + IFS_CHILD_TABLE_OFFSET, table_offset);
+	fsimg_store_le32(pass->child + IFS_CHILD_TABLE_OFFSET, table_offset);
 	pass->child[IFS_CHILD_PATH_LENGTH] = (unsigned char)(path_length & 0xff);
 	pass->child[IFS_CHILD_PATH_LENGTH + 1] =
 	    (unsigned char)(path_length >> 8);
@@ -443,8 +444,8 @@ group_table(fsimg_reader_t *reader, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			return (status);
 		if (run_count != 0 && child.parent != run_parent) {
-			fsimg_meta_put_u64(group, run_offset);
-			fsimg_meta_put_u64(group + 8, run_count);
+			fsimg_store_le64(group, run_offset);
+			fsimg_store_le64(group + 8, run_count);
 			status = fsimg_array_set(ifs->groups, run_parent, group,
 			    error);
 			if (status != FSIMG_OK)
@@ -459,8 +460,8 @@ group_table(fsimg_reader_t *reader, fsimg_error_t *error)
 	}
 	if (run_count == 0)
 		return (FSIMG_OK);
-	fsimg_meta_put_u64(group, run_offset);
-	fsimg_meta_put_u64(group + 8, run_count);
+	fsimg_store_le64(group, run_offset);
+	fsimg_store_le64(group + 8, run_count);
 	return (fsimg_array_set(ifs->groups, run_parent, group, error));
 }
 
@@ -527,10 +528,10 @@ ifs_child_decode(const unsigned char *bytes, size_t length, ifs_child_t *child,
 	    bytes[IFS_CHILD_KIND] < IFS_KIND_DIRECTORY ||
 	    bytes[IFS_CHILD_KIND] > IFS_KIND_FIFO)
 		return (ifs_corrupt(error, "invalid ImageFS child record"));
-	child->parent = fsimg_meta_get_u64(bytes + IFS_CHILD_PARENT);
-	child->node = fsimg_meta_get_u64(bytes + IFS_CHILD_NODE);
+	child->parent = fsimg_load_le64(bytes + IFS_CHILD_PARENT);
+	child->node = fsimg_load_le64(bytes + IFS_CHILD_NODE);
 	child->kind = (ifs_kind_t)bytes[IFS_CHILD_KIND];
-	child->table_offset = fsimg_meta_get_u32(bytes +
+	child->table_offset = fsimg_load_le32(bytes +
 	    IFS_CHILD_TABLE_OFFSET);
 	child->path_length = (uint32_t)bytes[IFS_CHILD_PATH_LENGTH] |
 	    (uint32_t)bytes[IFS_CHILD_PATH_LENGTH + 1] << 8;
@@ -571,8 +572,8 @@ ifs_group(fsimg_reader_t *reader, uint64_t node, uint64_t *offset,
 	status = fsimg_array_get(ifs->groups, node, group, error);
 	if (status != FSIMG_OK)
 		return (status);
-	*offset = fsimg_meta_get_u64(group);
-	*count = fsimg_meta_get_u64(group + 8);
+	*offset = fsimg_load_le64(group);
+	*count = fsimg_load_le64(group + 8);
 	if (*offset > ifs->children->end || *count >= ifs->node_count)
 		return (ifs_corrupt(error, "invalid ImageFS child group"));
 	return (FSIMG_OK);

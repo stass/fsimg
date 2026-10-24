@@ -16,6 +16,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "socket.h"
 #include "source.h"
 #include "test.h"
@@ -1290,8 +1291,8 @@ test_corrupt_source(void)
 	cursor = entry->source_id;
 	CHECK(fsimg_stream_next(fixture.writer->host_sources, &cursor,
 	    fixture.writer->record, fixture.writer->record_capacity, &length, NULL) == FSIMG_OK);
-	value = fsimg_meta_get_u64(fixture.writer->record + 40);
-	fsimg_meta_put_u64(bytes, (UINT64_C(1) << 32) | value);
+	value = fsimg_load_le64(fixture.writer->record + 40);
+	fsimg_store_le64(bytes, (UINT64_C(1) << 32) | value);
 	CHECK(fsimg_store_write(fixture.writer->host_sources->store, 8 + 40,
 	    bytes, sizeof(bytes), NULL) == FSIMG_OK);
 	entry = find_entry(fixture.writer, "/file");
@@ -1507,7 +1508,7 @@ test_source_reference_eof(void)
 	write_file(fixture.root, "file", "content");
 	CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
-	fsimg_meta_put_u64(bytes, fsimg_store_size(fixture.writer->host_sources->store));
+	fsimg_store_le64(bytes, fsimg_store_size(fixture.writer->host_sources->store));
 	/* The only entry is the first frame; its source reference is at byte 16. */
 	CHECK(fsimg_store_write(fixture.writer->ordered->store, 8 + 16,
 	    bytes, sizeof(bytes), NULL) == FSIMG_OK);
@@ -1541,7 +1542,7 @@ test_unregistered_provider(void)
 	fixture_open(&fixture);
 	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
-	fsimg_meta_put_u64(bytes, FSIMG_STORAGE_PROVIDER);
+	fsimg_store_le64(bytes, FSIMG_STORAGE_PROVIDER);
 	/* Corrupt a ZERO record into an unregistered provider reference. */
 	CHECK(fsimg_store_write(fixture.writer->ordered->store, 8 + 8,
 	    bytes, sizeof(bytes), NULL) == FSIMG_OK);

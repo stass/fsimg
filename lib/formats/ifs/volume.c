@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "ifs.h"
 
 /*
@@ -248,8 +249,8 @@ table_record(fsimg_reader_t *reader, table_window_t *window, uint32_t offset,
 		return (status);
 
 	ifs->counts.records_by_flag[ifs_flag_index(record.inode)]++;
-	fsimg_meta_put_u32(entry + IFS_PATH_ENTRY_TABLE_OFFSET, offset);
-	fsimg_meta_put_u32(entry + IFS_PATH_ENTRY_INODE, record.inode);
+	fsimg_store_le32(entry + IFS_PATH_ENTRY_TABLE_OFFSET, offset);
+	fsimg_store_le32(entry + IFS_PATH_ENTRY_INODE, record.inode);
 	entry[IFS_PATH_ENTRY_KIND] = (unsigned char)record.kind;
 	bcopy(bytes + record.path_offset, entry + IFS_PATH_ENTRY_FIXED,
 	    record.path_length);

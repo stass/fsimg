@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "fat.h"
+#include "fsimg-endian.h"
 
 /* FAT's part of directory preparation (specs/design-directories.md): decode
  * one directory's slots, validate its dot records and admit each child.
@@ -47,12 +48,12 @@ validate_dot(directory_pass_t *pass, const unsigned char *raw,
 
 	expected = pass->slots == 0 ? pass->self_cluster : pass->parent_cluster;
 	if (bcmp(raw, pass->slots == 0 ? ".          " : "..         ", 11) != 0 ||
-	    raw[11] != 0x10 || raw[12] != 0 || fsimg_fat_u32(raw + 28) != 0)
+	    raw[11] != 0x10 || raw[12] != 0 || fsimg_load_le32(raw + 28) != 0)
 		return (fsimg_fat_corrupt(error, "missing or invalid FAT dot directory record"));
-	cluster = fsimg_fat_u16(raw + 26);
+	cluster = fsimg_load_le16(raw + 26);
 	if (g->variant == 32)
-		cluster |= (uint32_t)fsimg_fat_u16(raw + 20) << 16;
-	else if (fsimg_fat_u16(raw + 20) != 0)
+		cluster |= (uint32_t)fsimg_load_le16(raw + 20) << 16;
+	else if (fsimg_load_le16(raw + 20) != 0)
 		return (fsimg_fat_corrupt(error, "extended attributes in FAT dot record"));
 	if (cluster != expected)
 		return (fsimg_fat_corrupt(error, "FAT dot record has wrong directory cluster"));
@@ -106,8 +107,8 @@ decode_slot(directory_pass_t *pass, const unsigned char *raw,
 		 * It still has no data allocation and never becomes a child entry.
 		 */
 		if (pass->level != 0 || (raw[11] & ~0x20u) != 0x08 || pass->lfn.active ||
-		    fat->root_label_seen || fsimg_fat_u16(raw + 20) != 0 ||
-		    fsimg_fat_u16(raw + 26) != 0 || fsimg_fat_u32(raw + 28) != 0)
+		    fat->root_label_seen || fsimg_load_le16(raw + 20) != 0 ||
+		    fsimg_load_le16(raw + 26) != 0 || fsimg_load_le32(raw + 28) != 0)
 			return (fsimg_fat_corrupt(error, "invalid or duplicate FAT volume-label entry"));
 		status = fsimg_fat_label(raw, fat->root_label, error);
 		if (status != FSIMG_OK)
@@ -129,7 +130,7 @@ decode_slot(directory_pass_t *pass, const unsigned char *raw,
 		return (status);
 	/* A child's ".." names this directory, or cluster zero for the root. */
 	bcopy(raw, payload, 32);
-	fsimg_fat_put32(payload + 32, pass->level == 0 ? 0 : pass->self_cluster);
+	fsimg_store_le32(payload + 32, pass->level == 0 ? 0 : pass->self_cluster);
 	return (fsimg_directory_admit(pass->build, name, payload, sizeof(payload),
 	    error));
 }
@@ -274,7 +275,7 @@ fsimg_fat_replay(fsimg_reader_t *reader, const char *name,
 	    &fat->current_cluster, error);
 	if (status != FSIMG_OK)
 		return (status);
-	fat->current_parent = fsimg_fat_u32(payload + 32);
+	fat->current_parent = fsimg_load_le32(payload + 32);
 	reader->initialized = reader->entry.size;
 	return (FSIMG_OK);
 }

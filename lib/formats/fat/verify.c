@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "fat.h"
+#include "fsimg-endian.h"
 
 typedef struct owner_cursor {
 	fsimg_stream_t	*stream;
@@ -34,8 +35,8 @@ owner_compare(const void *a, size_t alen, const void *b, size_t blen,
 
 	if (alen != 16 || blen != 16)
 		return ((alen > blen) - (alen < blen));
-	first = fsimg_meta_get_u64(a);
-	second = fsimg_meta_get_u64(b);
+	first = fsimg_load_le64(a);
+	second = fsimg_load_le64(b);
 	return ((first > second) - (first < second));
 }
 
@@ -57,8 +58,8 @@ owner_next(fsimg_reader_t *reader, owner_cursor_t *owners, fsimg_error_t *error)
 		return (status);
 	if (length != sizeof(record))
 		return (fsimg_fat_corrupt(error, "invalid FAT ownership record length"));
-	first = fsimg_meta_get_u64(record);
-	count = fsimg_meta_get_u64(record + 8);
+	first = fsimg_load_le64(record);
+	count = fsimg_load_le64(record + 8);
 	if (first < 2 || count == 0 ||
 	    first >= (uint64_t)fsimg_fat_state(reader)->geometry.clusters + 2 ||
 	    count > (uint64_t)fsimg_fat_state(reader)->geometry.clusters + 2 - first)
@@ -195,11 +196,11 @@ verify_reserved(fsimg_reader_t *reader, const fsimg_verify_report_t *report,
 		    &transferred, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (fsimg_fat_u32(info) != 0x41615252 || fsimg_fat_u32(info + 484) != 0x61417272 ||
-		    fsimg_fat_u32(info + 508) != 0xaa550000)
+		if (fsimg_load_le32(info) != 0x41615252 || fsimg_load_le32(info + 484) != 0x61417272 ||
+		    fsimg_load_le32(info + 508) != 0xaa550000)
 			return (fsimg_fat_corrupt(error, "invalid FAT32 FSInfo signatures"));
-		free_count = fsimg_fat_u32(info + 488);
-		next_free = fsimg_fat_u32(info + 492);
+		free_count = fsimg_load_le32(info + 488);
+		next_free = fsimg_load_le32(info + 492);
 		if ((free_count != UINT32_MAX && free_count != report->free_clusters) ||
 		    (next_free != UINT32_MAX && !fsimg_fat_cluster_valid(g, next_free)))
 			return (fsimg_fat_corrupt(error, "inconsistent FAT32 FSInfo hints"));

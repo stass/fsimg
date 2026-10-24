@@ -5,6 +5,7 @@
 
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "qnx4.h"
 
 /*
@@ -319,11 +320,11 @@ locator_visit(void *argument, const fsimg_extent_t *extent,
 	locator_fill_t *fill = argument;
 	unsigned char record[LOCATOR_RECORD_BYTES];
 
-	fsimg_meta_put_u32(record,
+	fsimg_store_le32(record,
 	    (uint32_t)(extent->image_offset / QNX4_BLOCK_BYTES + 1));
-	fsimg_meta_put_u32(record + 4,
+	fsimg_store_le32(record + 4,
 	    (uint32_t)(extent->length / QNX4_BLOCK_BYTES));
-	fsimg_meta_put_u32(record + 8,
+	fsimg_store_le32(record + 8,
 	    (uint32_t)(extent->logical_offset / QNX4_BLOCK_BYTES));
 	fill->count++;
 	return (fsimg_stream_append(fill->stream, record, sizeof(record), NULL,
@@ -338,8 +339,8 @@ locator_compare(const void *a, size_t alen, const void *b, size_t blen,
 
 	if (alen != LOCATOR_RECORD_BYTES || blen != LOCATOR_RECORD_BYTES)
 		return ((alen > blen) - (alen < blen));
-	left = fsimg_meta_get_u32(a);
-	right = fsimg_meta_get_u32(b);
+	left = fsimg_load_le32(a);
+	right = fsimg_load_le32(b);
 	return ((left > right) - (left < right));
 }
 
@@ -421,7 +422,7 @@ qnx4_locator_find(const qnx4_locator_t *locator, uint32_t block, bool *found,
 		status = fsimg_array_get(locator->runs, middle, record, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (fsimg_meta_get_u32(record) <= block)
+		if (fsimg_load_le32(record) <= block)
 			low = middle + 1;
 		else
 			high = middle;
@@ -431,11 +432,11 @@ qnx4_locator_find(const qnx4_locator_t *locator, uint32_t block, bool *found,
 	status = fsimg_array_get(locator->runs, low - 1, record, error);
 	if (status != FSIMG_OK)
 		return (status);
-	first = fsimg_meta_get_u32(record);
-	blocks = fsimg_meta_get_u32(record + 4);
+	first = fsimg_load_le32(record);
+	blocks = fsimg_load_le32(record + 4);
 	if (block - first >= blocks)
 		return (FSIMG_OK);
 	*found = true;
-	*logical = fsimg_meta_get_u32(record + 8) + (uint64_t)(block - first);
+	*logical = fsimg_load_le32(record + 8) + (uint64_t)(block - first);
 	return (FSIMG_OK);
 }

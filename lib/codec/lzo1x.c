@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "codec.h"
+#include "fsimg-endian.h"
 #include "internal.h"
 
 /*
@@ -871,8 +872,7 @@ lzo1x_hash(const uint8_t *in)
 {
 	uint32_t group, product;
 
-	group = (uint32_t)in[0] | (uint32_t)in[1] << 8 |
-	    (uint32_t)in[2] << 16 | (uint32_t)in[3] << 24;
+	group = fsimg_load_le32(in);
 	product = (uint32_t)((group * LZO1X_HASH_MULTIPLIER) & UINT32_MAX);
 	return (product >> (32 - LZO1X_HASH_BITS));
 }

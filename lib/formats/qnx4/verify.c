@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include "fsimg-endian.h"
 #include "qnx4.h"
 
 /*
@@ -84,7 +85,7 @@ qnx4_verify_name(fsimg_reader_t *reader, const qnx4_inode_t *object,
 		return (FSIMG_OK);
 	if (place == QNX4_PLACE_TABLE) {
 		/* open bounded the table to 2^31 bytes, 2^25 slots. */
-		fsimg_meta_put_u32(record, (uint32_t)table_slot);
+		fsimg_store_le32(record, (uint32_t)table_slot);
 		return (fsimg_stream_append(qnx4->references, record,
 		    sizeof(record), NULL, error));
 	}
@@ -158,8 +159,8 @@ reference_compare(const void *a, size_t alen, const void *b, size_t blen,
 
 	if (alen != REFERENCE_BYTES || blen != REFERENCE_BYTES)
 		return ((alen > blen) - (alen < blen));
-	left = fsimg_meta_get_u32(a);
-	right = fsimg_meta_get_u32(b);
+	left = fsimg_load_le32(a);
+	right = fsimg_load_le32(b);
 	return ((left > right) - (left < right));
 }
 
@@ -181,9 +182,9 @@ reference_next(fsimg_stream_t *sorted, uint64_t *cursor, uint64_t *next,
 		return (FSIMG_OK);
 	if (status != FSIMG_OK)
 		return (status);
-	if (length != sizeof(record) || fsimg_meta_get_u32(record) == 0)
+	if (length != sizeof(record) || fsimg_load_le32(record) == 0)
 		return (qnx4_corrupt(error, "invalid QNX4 reference record"));
-	*next = fsimg_meta_get_u32(record);
+	*next = fsimg_load_le32(record);
 	return (FSIMG_OK);
 }
 

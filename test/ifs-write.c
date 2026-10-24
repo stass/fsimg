@@ -18,6 +18,7 @@
 
 #include "fsimg.h"
 #include "format.h"
+#include "fsimg-endian.h"
 #include "internal.h"
 #include "meta.h"
 #include "test.h"
@@ -2029,7 +2030,7 @@ test_tampered_rows(void)
 		if (tamper == KIND) {
 			CHECK(fsimg_array_get(ifs_plan->rows, 1, raw, NULL) ==
 			    FSIMG_OK);
-			fsimg_meta_put_u32(raw, 7);
+			fsimg_store_le32(raw, 7);
 			CHECK(fsimg_array_set(ifs_plan->rows, 1, raw, NULL) ==
 			    FSIMG_OK);
 		}

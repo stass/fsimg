@@ -5,6 +5,7 @@
 
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "qnx6.h"
 
 /* Every disk integer is decoded in the volume's byte order, which the header
@@ -14,26 +15,24 @@ uint16_t
 qnx6_u16(const unsigned char *p, bool big)
 {
 	if (big)
-		return ((uint16_t)((unsigned)p[0] << 8 | p[1]));
-	return ((uint16_t)((unsigned)p[1] << 8 | p[0]));
+		return (fsimg_load_be16(p));
+	return (fsimg_load_le16(p));
 }
 
 uint32_t
 qnx6_u32(const unsigned char *p, bool big)
 {
 	if (big)
-		return ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
-		    (uint32_t)p[2] << 8 | p[3]);
-	return ((uint32_t)p[3] << 24 | (uint32_t)p[2] << 16 |
-	    (uint32_t)p[1] << 8 | p[0]);
+		return (fsimg_load_be32(p));
+	return (fsimg_load_le32(p));
 }
 
 uint64_t
 qnx6_u64(const unsigned char *p, bool big)
 {
 	if (big)
-		return ((uint64_t)qnx6_u32(p, true) << 32 | qnx6_u32(p + 4, true));
-	return ((uint64_t)qnx6_u32(p + 4, false) << 32 | qnx6_u32(p, false));
+		return (fsimg_load_be64(p));
+	return (fsimg_load_le64(p));
 }
 
 /* The header CRC: MSB first, polynomial 0x04c11db7, a zero initial register,
@@ -189,27 +188,28 @@ qnx6_slot_decode(const unsigned char *p, bool big, qnx6_slot_t *slot)
 void
 qnx6_put16(unsigned char *p, uint16_t value, bool big)
 {
-	if (big) {
-		p[0] = (unsigned char)(value >> 8);
-		p[1] = (unsigned char)value;
-	} else {
-		p[0] = (unsigned char)value;
-		p[1] = (unsigned char)(value >> 8);
-	}
+	if (big)
+		fsimg_store_be16(p, value);
+	else
+		fsimg_store_le16(p, value);
 }
 
 void
 qnx6_put32(unsigned char *p, uint32_t value, bool big)
 {
-	for (unsigned i = 0; i < 4; i++)
-		p[big ? 3 - i : i] = (unsigned char)(value >> (8 * i));
+	if (big)
+		fsimg_store_be32(p, value);
+	else
+		fsimg_store_le32(p, value);
 }
 
 void
 qnx6_put64(unsigned char *p, uint64_t value, bool big)
 {
-	qnx6_put32(p + (big ? 4 : 0), (uint32_t)value, big);
-	qnx6_put32(p + (big ? 0 : 4), (uint32_t)(value >> 32), big);
+	if (big)
+		fsimg_store_be64(p, value);
+	else
+		fsimg_store_le64(p, value);
 }
 
 /* An 80-byte header descriptor with the classic mode byte 1. */

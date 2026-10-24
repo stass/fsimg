@@ -8,6 +8,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "internal.h"
 #include "layer.h"
 #include "protocol.h"
@@ -21,30 +22,16 @@ static fsimg_status_t transfer_frame_bytes(int, void *, size_t, bool,
     fsimg_error_t *);
 static fsimg_status_t decode_header(fsimg_frame_decoder_t *, fsimg_error_t *);
 
-void
-fsimg_wire_put64(unsigned char *bytes, uint64_t value)
-{
-	for (unsigned i = 0; i < 8; i++)
-		bytes[i] = (unsigned char)(value >> (i * 8));
-}
-
-uint64_t
-fsimg_wire_get64(const unsigned char *bytes)
-{
-	uint64_t value;
-
-	value = 0;
-	for (unsigned i = 0; i < 8; i++)
-		value |= (uint64_t)bytes[i] << (i * 8);
-	return (value);
-}
-
+/* A signed wire field is the two's-complement bit pattern of its value,
+ * little-endian. Each cast's operand is representable, so no host's
+ * conversion of an out-of-range value takes part, INT64_MIN included.
+ */
 int64_t
 fsimg_wire_get_signed64(const unsigned char *bytes)
 {
 	uint64_t value;
 
-	value = fsimg_wire_get64(bytes);
+	value = fsimg_load_le64(bytes);
 	if (value <= INT64_MAX)
 		return ((int64_t)value);
 	return (-1 - (int64_t)(UINT64_MAX - value));
@@ -67,7 +54,7 @@ fsimg_frame_header(unsigned char *header, fsimg_frame_type_t type,
 	bcopy("FSIP", header, 4);
 	header[4] = 1;
 	header[5] = (unsigned char)type;
-	fsimg_wire_put64(header + 8, length);
+	fsimg_store_le64(header + 8, length);
 	return (FSIMG_OK);
 }
 
@@ -76,7 +63,7 @@ decode_header(fsimg_frame_decoder_t *decoder, fsimg_error_t *error)
 {
 	uint64_t length;
 
-	length = fsimg_wire_get64(decoder->header + 8);
+	length = fsimg_load_le64(decoder->header + 8);
 	if (bcmp(decoder->header, "FSIP", 4) != 0 || decoder->header[4] != 1 ||
 	    decoder->header[6] != 0 || decoder->header[7] != 0 ||
 	    decoder->header[5] < FSIMG_FRAME_JOB || decoder->header[5] > FSIMG_FRAME_LAST ||
@@ -222,17 +209,17 @@ fsimg_wire_error_encode(unsigned char *raw, const fsimg_error_t *error)
 		flags |= 4;
 	}
 	bzero(raw, FSIMG_WIRE_ERROR_BYTES);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_STATUS,
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_STATUS,
 	    (uint64_t)(int64_t)error->status);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_OS_ERROR, (unsigned)error->os_error);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_OPERATION, error->operation);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_RESOURCE, error->resource);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_OUTPUT, error->output_state);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_OFFSET, error->offset);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_LIMIT, error->limit);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_OBSERVED, error->observed);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_FLAGS, flags);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ERROR_CLEANUP, (unsigned)error->cleanup_error);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_OS_ERROR, (unsigned)error->os_error);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_OPERATION, error->operation);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_RESOURCE, error->resource);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_OUTPUT, error->output_state);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_OFFSET, error->offset);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_LIMIT, error->limit);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_OBSERVED, error->observed);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_FLAGS, flags);
+	fsimg_store_le64(raw + FSIMG_WIRE_ERROR_CLEANUP, (unsigned)error->cleanup_error);
 	/* Only string contents cross the boundary; unused diagnostic storage may
 	 * contain bytes from an earlier error even when its current string is short.
 	 */
@@ -249,34 +236,35 @@ fsimg_wire_error_decode(const unsigned char *raw, uint32_t length,
 
 	if (length != FSIMG_WIRE_ERROR_BYTES)
 		return (protocol_error(error, "invalid worker error frame length"));
-	code = fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_STATUS);
-	flags = fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_FLAGS);
+	code = fsimg_load_le64(raw + FSIMG_WIRE_ERROR_STATUS);
+	flags = fsimg_load_le64(raw + FSIMG_WIRE_ERROR_FLAGS);
 	if (code < (uint64_t)(int64_t)FSIMG_EDURABILITY ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OS_ERROR) > INT32_MAX ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OPERATION) > FSIMG_OP_IMAGE ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_RESOURCE) > FSIMG_RESOURCE_SPOOL ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OUTPUT) > FSIMG_OUTPUT_UNCERTAIN ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OS_ERROR) > INT32_MAX ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OPERATION) > FSIMG_OP_IMAGE ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_RESOURCE) > FSIMG_RESOURCE_SPOOL ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OUTPUT) > FSIMG_OUTPUT_UNCERTAIN ||
 	    flags > 7 ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_CLEANUP) > INT32_MAX ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_CLEANUP) > INT32_MAX ||
 	    memchr(raw + FSIMG_WIRE_ERROR_PATH, '\0', 256) == NULL ||
 	    memchr(raw + FSIMG_WIRE_ERROR_MESSAGE, '\0', 256) == NULL)
 		return (protocol_error(error, "invalid worker error fields"));
 	bzero(&decoded, sizeof(decoded));
-	decoded.status = (fsimg_status_t)(-1 - (int64_t)(UINT64_MAX - code));
-	decoded.os_error = (int)fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OS_ERROR);
+	decoded.status = (fsimg_status_t)
+	    fsimg_wire_get_signed64(raw + FSIMG_WIRE_ERROR_STATUS);
+	decoded.os_error = (int)fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OS_ERROR);
 	decoded.operation = (fsimg_operation_t)
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OPERATION);
+	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OPERATION);
 	decoded.resource = (fsimg_resource_t)
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_RESOURCE);
+	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_RESOURCE);
 	decoded.output_state = (fsimg_output_state_t)
-	    fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OUTPUT);
-	decoded.offset = fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OFFSET);
-	decoded.limit = fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_LIMIT);
-	decoded.observed = fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_OBSERVED);
+	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OUTPUT);
+	decoded.offset = fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OFFSET);
+	decoded.limit = fsimg_load_le64(raw + FSIMG_WIRE_ERROR_LIMIT);
+	decoded.observed = fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OBSERVED);
 	decoded.offset_valid = (flags & 1) != 0;
 	decoded.path_truncated = (flags & 2) != 0;
 	decoded.message_truncated = (flags & 4) != 0;
-	decoded.cleanup_error = (int)fsimg_wire_get64(raw + FSIMG_WIRE_ERROR_CLEANUP);
+	decoded.cleanup_error = (int)fsimg_load_le64(raw + FSIMG_WIRE_ERROR_CLEANUP);
 	bcopy(raw + FSIMG_WIRE_ERROR_PATH, decoded.path, 256);
 	bcopy(raw + FSIMG_WIRE_ERROR_MESSAGE, decoded.message, 256);
 	if (error != NULL)
@@ -290,11 +278,11 @@ encode_time(unsigned char *raw, const fsimg_timestamp_t *time, bool valid)
 	bzero(raw, FSIMG_WIRE_TIME_BYTES);
 	if (!valid)
 		return;
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_SECONDS, (uint64_t)time->seconds);
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_PRECISION, time->precision_ns);
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_NANOSECONDS, time->nanoseconds);
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_BASIS, time->basis);
-	fsimg_wire_put64(raw + FSIMG_WIRE_TIME_OFFSET,
+	fsimg_store_le64(raw + FSIMG_WIRE_TIME_SECONDS, (uint64_t)time->seconds);
+	fsimg_store_le64(raw + FSIMG_WIRE_TIME_PRECISION, time->precision_ns);
+	fsimg_store_le64(raw + FSIMG_WIRE_TIME_NANOSECONDS, time->nanoseconds);
+	fsimg_store_le64(raw + FSIMG_WIRE_TIME_BASIS, time->basis);
+	fsimg_store_le64(raw + FSIMG_WIRE_TIME_OFFSET,
 	    (uint64_t)(int64_t)time->offset_minutes);
 }
 
@@ -305,13 +293,13 @@ fsimg_wire_entry_encode(unsigned char *raw, const fsimg_entry_t *entry,
 	const fsimg_metadata_t *metadata = &entry->metadata;
 
 	bzero(raw, FSIMG_WIRE_ENTRY_BYTES);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_KIND, entry->kind);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_LENGTH, entry->size);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, path_length);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_VALID, metadata->valid);
-	fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_REQUIRED, metadata->required);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, entry->kind);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_LENGTH, entry->size);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, path_length);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_VALID, metadata->valid);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_REQUIRED, metadata->required);
 	if ((metadata->valid & FSIMG_META_ATTRIBUTES) != 0)
-		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES,
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES,
 		    metadata->attributes);
 	encode_time(raw + FSIMG_WIRE_ENTRY_CREATED, &metadata->created,
 	    (metadata->valid & FSIMG_META_CREATED) != 0);
@@ -322,11 +310,11 @@ fsimg_wire_entry_encode(unsigned char *raw, const fsimg_entry_t *entry,
 	encode_time(raw + FSIMG_WIRE_ENTRY_CHANGED, &metadata->changed,
 	    (metadata->valid & FSIMG_META_CHANGED) != 0);
 	if ((metadata->valid & FSIMG_META_OWNER) != 0) {
-		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_UID, metadata->uid);
-		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_GID, metadata->gid);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_UID, metadata->uid);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_GID, metadata->gid);
 	}
 	if ((metadata->valid & FSIMG_META_MODE) != 0)
-		fsimg_wire_put64(raw + FSIMG_WIRE_ENTRY_MODE, metadata->mode);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_MODE, metadata->mode);
 }
 
 _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->label) ==
@@ -353,14 +341,14 @@ fsimg_wire_details_encode(unsigned char *raw, size_t count_offset,
 {
 	if (count > capacity)
 		count = capacity;
-	fsimg_wire_put64(raw + count_offset, count);
+	fsimg_store_le64(raw + count_offset, count);
 	for (uint32_t i = 0; i < count; i++) {
 		unsigned char *detail = raw + table_offset +
 		    i * FSIMG_WIRE_INFO_DETAIL_BYTES;
 
 		bcopy(details[i].name, detail, strnlen(details[i].name,
 		    sizeof(details[i].name) - 1));
-		fsimg_wire_put64(detail + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
+		fsimg_store_le64(detail + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
 		    details[i].value);
 	}
 }
@@ -372,17 +360,17 @@ void
 fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 {
 	bzero(raw, FSIMG_WIRE_INFO_BYTES);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VALID, info->valid);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CAPABILITIES, info->capabilities);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_VOLUME, info->volume_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_UNITS, info->allocation_units);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_FREE, info->free_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_SECTOR, info->sector_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CLUSTER, info->allocation_unit_bytes);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_TIME_BASIS, info->time_basis);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_SCOPE, info->scope);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_CLEAN, info->clean ? 1 : 0);
-	fsimg_wire_put64(raw + FSIMG_WIRE_INFO_IO_ERROR, info->io_error ? 1 : 0);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_VALID, info->valid);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_CAPABILITIES, info->capabilities);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_VOLUME, info->volume_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_UNITS, info->allocation_units);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_FREE, info->free_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_SECTOR, info->sector_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_CLUSTER, info->allocation_unit_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_TIME_BASIS, info->time_basis);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_SCOPE, info->scope);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_CLEAN, info->clean ? 1 : 0);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_IO_ERROR, info->io_error ? 1 : 0);
 	bcopy(info->format, raw + FSIMG_WIRE_INFO_FORMAT,
 	    strnlen(info->format, sizeof(info->format) - 1));
 	bcopy(info->profile, raw + FSIMG_WIRE_INFO_PROFILE,
@@ -404,13 +392,13 @@ void
 fsimg_wire_partition_encode(unsigned char *raw, const fsimg_partition_info_t *info)
 {
 	bzero(raw, FSIMG_WIRE_PARTITION_BYTES);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_INDEX, info->index);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_FLAGS,
+	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_INDEX, info->index);
+	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_FLAGS,
 	    info->active ? FSIMG_WIRE_PARTITION_ACTIVE : 0);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_OFFSET, info->offset);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_LENGTH, info->length);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE, info->mbr_type);
-	fsimg_wire_put64(raw + FSIMG_WIRE_PARTITION_CLAIM, info->claim);
+	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_OFFSET, info->offset);
+	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_LENGTH, info->length);
+	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE, info->mbr_type);
+	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_CLAIM, info->claim);
 	bcopy(info->type, raw + FSIMG_WIRE_PARTITION_TYPE,
 	    strnlen(info->type, sizeof(info->type) - 1));
 	bcopy(info->format, raw + FSIMG_WIRE_PARTITION_FORMAT,
@@ -428,9 +416,9 @@ time_field_valid(const unsigned char *raw)
 	uint64_t basis, precision, nanoseconds;
 	int64_t offset;
 
-	basis = fsimg_wire_get64(raw + FSIMG_WIRE_TIME_BASIS);
-	precision = fsimg_wire_get64(raw + FSIMG_WIRE_TIME_PRECISION);
-	nanoseconds = fsimg_wire_get64(raw + FSIMG_WIRE_TIME_NANOSECONDS);
+	basis = fsimg_load_le64(raw + FSIMG_WIRE_TIME_BASIS);
+	precision = fsimg_load_le64(raw + FSIMG_WIRE_TIME_PRECISION);
+	nanoseconds = fsimg_load_le64(raw + FSIMG_WIRE_TIME_NANOSECONDS);
 	offset = fsimg_wire_get_signed64(raw + FSIMG_WIRE_TIME_OFFSET);
 	if (basis < FSIMG_TIME_UTC || basis > FSIMG_TIME_WALL)
 		return (false);
@@ -468,12 +456,12 @@ entry_metadata_valid(const unsigned char *raw)
 	};
 	uint64_t valid, required, attributes, uid, gid, mode;
 
-	valid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_VALID);
-	required = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_REQUIRED);
-	attributes = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES);
-	uid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_UID);
-	gid = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_GID);
-	mode = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_MODE);
+	valid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_VALID);
+	required = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_REQUIRED);
+	attributes = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_ATTRIBUTES);
+	uid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_UID);
+	gid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_GID);
+	mode = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE);
 	if ((valid & ~(uint64_t)FSIMG_META_KNOWN) != 0 || (required & ~valid) != 0 ||
 	    attributes > 15 || uid > UINT32_MAX || gid > UINT32_MAX ||
 	    mode > FSIMG_MODE_BITS)
@@ -525,7 +513,7 @@ static bool
 details_valid(const unsigned char *raw, size_t count_offset,
     size_t table_offset, uint32_t capacity)
 {
-	uint64_t count = fsimg_wire_get64(raw + count_offset);
+	uint64_t count = fsimg_load_le64(raw + count_offset);
 
 	if (count > capacity)
 		return (false);
@@ -553,10 +541,10 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 
 	if (frame->length != FSIMG_WIRE_INFO_BYTES)
 		return (false);
-	valid = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VALID);
-	capabilities = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CAPABILITIES);
-	basis = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_TIME_BASIS);
-	scope = fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SCOPE);
+	valid = fsimg_load_le64(raw + FSIMG_WIRE_INFO_VALID);
+	capabilities = fsimg_load_le64(raw + FSIMG_WIRE_INFO_CAPABILITIES);
+	basis = fsimg_load_le64(raw + FSIMG_WIRE_INFO_TIME_BASIS);
+	scope = fsimg_load_le64(raw + FSIMG_WIRE_INFO_SCOPE);
 	if (valid > (FSIMG_VOLUME_GEOMETRY | FSIMG_VOLUME_LABEL | FSIMG_VOLUME_FREE |
 	    FSIMG_VOLUME_UUID | FSIMG_VOLUME_MOUNTPOINT) || capabilities > 7 ||
 	    basis < FSIMG_TIME_UTC || basis > FSIMG_TIME_PER_TIMESTAMP)
@@ -578,13 +566,13 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	    FSIMG_WIRE_INFO_DETAILS, FSIMG_VOLUME_DETAILS_MAX))
 		return (false);
 
-	if (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_VOLUME) > volume_limit)
+	if (fsimg_load_le64(raw + FSIMG_WIRE_INFO_VOLUME) > volume_limit)
 		return (false);
-	if (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_SECTOR) > UINT32_MAX ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLUSTER) > UINT32_MAX)
+	if (fsimg_load_le64(raw + FSIMG_WIRE_INFO_SECTOR) > UINT32_MAX ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_INFO_CLUSTER) > UINT32_MAX)
 		return (false);
-	if (fsimg_wire_get64(raw + FSIMG_WIRE_INFO_CLEAN) > 1 ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_INFO_IO_ERROR) > 1)
+	if (fsimg_load_le64(raw + FSIMG_WIRE_INFO_CLEAN) > 1 ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_INFO_IO_ERROR) > 1)
 		return (false);
 	if (!bytes_zero(raw + FSIMG_WIRE_INFO_LABEL + FSIMG_WIRE_INFO_LABEL_BYTES,
 	    FSIMG_WIRE_INFO_UUID - FSIMG_WIRE_INFO_LABEL -
@@ -616,11 +604,11 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 
 	if (frame->length != FSIMG_WIRE_IMAGE_BYTES)
 		return (false);
-	flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
-	sector = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SECTOR);
-	slots = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SLOTS);
-	selected = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
-	checked = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHECKED);
+	flags = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FLAGS);
+	sector = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SECTOR);
+	slots = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SLOTS);
+	selected = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SELECTED);
+	checked = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_CHECKED);
 	if (memchr(raw + FSIMG_WIRE_IMAGE_STACK, '\0', FSIMG_WIRE_IMAGE_STACK_BYTES) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_SCHEME, '\0', 16) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_CONTAINER, '\0', 16) == NULL ||
@@ -643,15 +631,15 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	}
 	if ((flags & ~(uint64_t)(FSIMG_WIRE_IMAGE_UNSELECTED |
 	    FSIMG_WIRE_IMAGE_VERIFIED)) != 0 ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID) > UINT32_MAX)
+	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID) > UINT32_MAX)
 		return (false);
 	if (raw[FSIMG_WIRE_IMAGE_CONTAINER] == '\0') {
-		if (fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) !=
-		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FILE) ||
+		if (fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK) !=
+		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FILE) ||
 		    raw[FSIMG_WIRE_IMAGE_CODECS] != '\0' ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_CHUNKS) != 0 ||
+		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_CHUNKS) != 0 ||
 		    !bytes_zero(raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID, 16) ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT) != 0 ||
+		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT) != 0 ||
 		    raw[FSIMG_WIRE_IMAGE_UNVERIFIED] != '\0')
 			return (false);
 	} else {
@@ -670,7 +658,7 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	if (!scheme)
 		return (sector == 0 && slots == 0 && selected == 0 && checked == 0 &&
 		    (flags & FSIMG_WIRE_IMAGE_UNSELECTED) == 0 &&
-		    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK_ID) == 0 &&
+		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID) == 0 &&
 		    bytes_zero(raw + FSIMG_WIRE_IMAGE_DISK_GUID, 16));
 	layer = fsimg_layer_find((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME);
 	/* MBR sectors are 512 bytes; GPT's are 512 or 4096. */
@@ -690,16 +678,16 @@ fsimg_wire_partition_frame_valid(const fsimg_frame_t *frame, uint64_t slots,
 
 	if (frame->length != FSIMG_WIRE_PARTITION_BYTES)
 		return (false);
-	index = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX);
-	offset = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_OFFSET);
-	length = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_LENGTH);
-	claim = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_CLAIM);
+	index = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_INDEX);
+	offset = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_OFFSET);
+	length = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_LENGTH);
+	claim = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_CLAIM);
 	if (index == 0 || index > slots || length == 0 || offset > disk_bytes ||
 	    length > disk_bytes - offset)
 		return (false);
-	if (fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_FLAGS) >
+	if (fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_FLAGS) >
 	    FSIMG_WIRE_PARTITION_ACTIVE ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE) > UINT8_MAX ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE) > UINT8_MAX ||
 	    claim > FSIMG_CLAIM_AMBIGUOUS)
 		return (false);
 	if (memchr(raw + FSIMG_WIRE_PARTITION_TYPE, '\0', 16) == NULL ||
@@ -718,14 +706,14 @@ fsimg_wire_plan_frame_valid(const fsimg_frame_t *frame)
 
 	if (frame->length != FSIMG_WIRE_PLAN_BYTES)
 		return (false);
-	if (fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME) == 0)
+	if (fsimg_load_le64(raw + FSIMG_WIRE_PLAN_VOLUME) == 0)
 		return (false);
-	if (fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_SECTOR) > UINT32_MAX ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_CLUSTER) > UINT32_MAX)
+	if (fsimg_load_le64(raw + FSIMG_WIRE_PLAN_SECTOR) > UINT32_MAX ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_CLUSTER) > UINT32_MAX)
 		return (false);
-	if (fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_IO_FLAGS) > 7 ||
-	    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_OUTPUT) <
-	    fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_VOLUME))
+	if (fsimg_load_le64(raw + FSIMG_WIRE_PLAN_IO_FLAGS) > 7 ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_OUTPUT) <
+	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_VOLUME))
 		return (false);
 	return (memchr(raw + FSIMG_WIRE_PLAN_FORMAT, '\0', 16) != NULL &&
 	    memchr(raw + FSIMG_WIRE_PLAN_CODEC, '\0',
@@ -740,8 +728,8 @@ fsimg_wire_verify_frame_valid(const fsimg_frame_t *frame, bool payload)
 	if (frame->length != FSIMG_WIRE_VERIFY_BYTES)
 		return (false);
 	expected_scope = payload ? FSIMG_VALIDATION_PAYLOAD : FSIMG_VALIDATION_STRUCTURAL;
-	return (fsimg_wire_get64(frame->payload + FSIMG_WIRE_VERIFY_SCOPE) == expected_scope &&
-	    fsimg_wire_get64(frame->payload + FSIMG_WIRE_VERIFY_COMPLETE) == 1);
+	return (fsimg_load_le64(frame->payload + FSIMG_WIRE_VERIFY_SCOPE) == expected_scope &&
+	    fsimg_load_le64(frame->payload + FSIMG_WIRE_VERIFY_COMPLETE) == 1);
 }
 
 /* The kind is one of the closed set, with the size that kind allows:
@@ -758,9 +746,9 @@ fsimg_wire_entry_frame_valid(const fsimg_frame_t *frame, bool content_only,
 
 	if (frame->length != FSIMG_WIRE_ENTRY_BYTES)
 		return (false);
-	entry_kind = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_KIND);
-	name_length = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH);
-	length = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH);
+	entry_kind = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_KIND);
+	name_length = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH);
+	length = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_LENGTH);
 	if (name_length == 0 || name_length >= path_limit)
 		return (false);
 	switch (entry_kind) {

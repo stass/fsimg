@@ -9,6 +9,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "source.h"
 #include "unicode.h"
 
@@ -519,13 +520,13 @@ read_host_record(fsimg_writer_t *writer, uint64_t reference,
 	    length - FSIMG_SOURCE_HEADER > writer->ctx->options.max_path_bytes ||
 	    strnlen((const char *)record + FSIMG_SOURCE_HEADER,
 	    length - FSIMG_SOURCE_HEADER) != length - FSIMG_SOURCE_HEADER - 1 ||
-	    fsimg_meta_get_u64(record + 40) >= 1000000000 ||
-	    fsimg_meta_get_u64(record + 56) >= 1000000000 ||
-	    fsimg_meta_get_u64(record + 64) != kind ||
-	    fsimg_meta_get_u64(record + 72) != 1)
+	    fsimg_load_le64(record + 40) >= 1000000000 ||
+	    fsimg_load_le64(record + 56) >= 1000000000 ||
+	    fsimg_load_le64(record + 64) != kind ||
+	    fsimg_load_le64(record + 72) != 1)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_SOURCE, "invalid source record fields or path framing"));
-	root_id = fsimg_meta_get_u64(record);
+	root_id = fsimg_load_le64(record);
 	for (root = writer->roots; root != NULL; root = root->next) {
 		if (root->id == root_id)
 			break;
@@ -533,18 +534,18 @@ read_host_record(fsimg_writer_t *writer, uint64_t reference,
 	if (root == NULL)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_SOURCE, "source root is not retained"));
-	source->identity.device = fsimg_meta_get_u64(record + 8);
-	source->identity.inode = fsimg_meta_get_u64(record + 16);
-	source->identity.length = fsimg_meta_get_u64(record + 24);
-	source->identity.modified.seconds = source_signed(fsimg_meta_get_u64(record + 32));
-	source->identity.modified.nanoseconds = (uint32_t)fsimg_meta_get_u64(record + 40);
-	source->identity.changed.seconds = source_signed(fsimg_meta_get_u64(record + 48));
-	source->identity.changed.nanoseconds = (uint32_t)fsimg_meta_get_u64(record + 56);
+	source->identity.device = fsimg_load_le64(record + 8);
+	source->identity.inode = fsimg_load_le64(record + 16);
+	source->identity.length = fsimg_load_le64(record + 24);
+	source->identity.modified.seconds = source_signed(fsimg_load_le64(record + 32));
+	source->identity.modified.nanoseconds = (uint32_t)fsimg_load_le64(record + 40);
+	source->identity.changed.seconds = source_signed(fsimg_load_le64(record + 48));
+	source->identity.changed.nanoseconds = (uint32_t)fsimg_load_le64(record + 56);
 	source->identity.kind = kind;
 	if (source->identity.length != source->length)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_SOURCE, "source and catalog lengths disagree"));
-	digest_flag = fsimg_meta_get_u64(record + 80);
+	digest_flag = fsimg_load_le64(record + 80);
 	if (digest_flag > 1 || (digest_flag == 1 && kind != FSIMG_HOST_FILE) ||
 	    (digest_flag == 0 && bcmp(record + FSIMG_SOURCE_DIGEST, no_digest,
 	    sizeof(no_digest)) != 0))

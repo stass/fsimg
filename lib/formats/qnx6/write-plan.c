@@ -7,6 +7,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "fsimg-endian.h"
 #include "unicode.h"
 #include "write-qnx6.h"
 
@@ -121,20 +122,20 @@ qnx6_row_get(qnx6_plan_t *plan, uint64_t id, qnx6_row_t *row,
 	status = fsimg_array_get(plan->rows, id, raw, error);
 	if (status != FSIMG_OK)
 		return (status);
-	row->length = fsimg_meta_get_u64(raw);
-	row->first = fsimg_meta_get_u32(raw + 8);
-	row->inode = fsimg_meta_get_u32(raw + 12);
-	row->slot = fsimg_meta_get_u32(raw + 16);
-	row->next_slot = fsimg_meta_get_u32(raw + 20);
-	row->long_name = fsimg_meta_get_u32(raw + 24);
-	row->uid = fsimg_meta_get_u32(raw + 28);
-	row->gid = fsimg_meta_get_u32(raw + 32);
-	row->created = fsimg_meta_get_u32(raw + 36);
-	row->modified = fsimg_meta_get_u32(raw + 40);
-	row->accessed = fsimg_meta_get_u32(raw + 44);
-	row->changed = fsimg_meta_get_u32(raw + 48);
-	row->mode = (uint16_t)fsimg_meta_get_u32(raw + 52);
-	row->links = (uint16_t)fsimg_meta_get_u32(raw + 56);
+	row->length = fsimg_load_le64(raw);
+	row->first = fsimg_load_le32(raw + 8);
+	row->inode = fsimg_load_le32(raw + 12);
+	row->slot = fsimg_load_le32(raw + 16);
+	row->next_slot = fsimg_load_le32(raw + 20);
+	row->long_name = fsimg_load_le32(raw + 24);
+	row->uid = fsimg_load_le32(raw + 28);
+	row->gid = fsimg_load_le32(raw + 32);
+	row->created = fsimg_load_le32(raw + 36);
+	row->modified = fsimg_load_le32(raw + 40);
+	row->accessed = fsimg_load_le32(raw + 44);
+	row->changed = fsimg_load_le32(raw + 48);
+	row->mode = (uint16_t)fsimg_load_le32(raw + 52);
+	row->links = (uint16_t)fsimg_load_le32(raw + 56);
 	row->status = raw[60];
 	return (FSIMG_OK);
 }
@@ -146,20 +147,20 @@ qnx6_row_set(qnx6_plan_t *plan, uint64_t id, const qnx6_row_t *row,
 	unsigned char raw[QNX6_ROW_BYTES];
 
 	bzero(raw, sizeof(raw));
-	fsimg_meta_put_u64(raw, row->length);
-	fsimg_meta_put_u32(raw + 8, row->first);
-	fsimg_meta_put_u32(raw + 12, row->inode);
-	fsimg_meta_put_u32(raw + 16, row->slot);
-	fsimg_meta_put_u32(raw + 20, row->next_slot);
-	fsimg_meta_put_u32(raw + 24, row->long_name);
-	fsimg_meta_put_u32(raw + 28, row->uid);
-	fsimg_meta_put_u32(raw + 32, row->gid);
-	fsimg_meta_put_u32(raw + 36, row->created);
-	fsimg_meta_put_u32(raw + 40, row->modified);
-	fsimg_meta_put_u32(raw + 44, row->accessed);
-	fsimg_meta_put_u32(raw + 48, row->changed);
-	fsimg_meta_put_u32(raw + 52, row->mode);
-	fsimg_meta_put_u32(raw + 56, row->links);
+	fsimg_store_le64(raw, row->length);
+	fsimg_store_le32(raw + 8, row->first);
+	fsimg_store_le32(raw + 12, row->inode);
+	fsimg_store_le32(raw + 16, row->slot);
+	fsimg_store_le32(raw + 20, row->next_slot);
+	fsimg_store_le32(raw + 24, row->long_name);
+	fsimg_store_le32(raw + 28, row->uid);
+	fsimg_store_le32(raw + 32, row->gid);
+	fsimg_store_le32(raw + 36, row->created);
+	fsimg_store_le32(raw + 40, row->modified);
+	fsimg_store_le32(raw + 44, row->accessed);
+	fsimg_store_le32(raw + 48, row->changed);
+	fsimg_store_le32(raw + 52, row->mode);
+	fsimg_store_le32(raw + 56, row->links);
 	raw[60] = row->status;
 	return (fsimg_array_set(plan->rows, id, raw, error));
 }

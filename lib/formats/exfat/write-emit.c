@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "emit.h"
+#include "fsimg-endian.h"
 #include "unicode.h"
 #include "write-exfat.h"
 
@@ -53,14 +54,14 @@ emit_boot(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	length = (size_t)12 * g->sector_bytes;
 	bzero(buffer, length);
 	bcopy("\xeb\x76\x90" "EXFAT   ", buffer, 11);
-	fsimg_meta_put_u64(buffer + 72, g->volume_bytes / g->sector_bytes);
-	exfat_put32(buffer + 80, (uint32_t)(g->fat_offset / g->sector_bytes));
-	exfat_put32(buffer + 84, (uint32_t)(g->fat_bytes / g->sector_bytes));
-	exfat_put32(buffer + 88, (uint32_t)(g->heap_offset / g->sector_bytes));
-	exfat_put32(buffer + 92, g->clusters);
-	exfat_put32(buffer + 96, plan->root_cluster);
-	exfat_put32(buffer + 100, plan->common.writer->options.volume_serial);
-	exfat_put16(buffer + 104, 0x0100);
+	fsimg_store_le64(buffer + 72, g->volume_bytes / g->sector_bytes);
+	fsimg_store_le32(buffer + 80, (uint32_t)(g->fat_offset / g->sector_bytes));
+	fsimg_store_le32(buffer + 84, (uint32_t)(g->fat_bytes / g->sector_bytes));
+	fsimg_store_le32(buffer + 88, (uint32_t)(g->heap_offset / g->sector_bytes));
+	fsimg_store_le32(buffer + 92, g->clusters);
+	fsimg_store_le32(buffer + 96, plan->root_cluster);
+	fsimg_store_le32(buffer + 100, plan->common.writer->options.volume_serial);
+	fsimg_store_le16(buffer + 104, 0x0100);
 	buffer[108] = (unsigned char)size_shift(g->sector_bytes);
 	buffer[109] = (unsigned char)size_shift(g->cluster_bytes / g->sector_bytes);
 	buffer[110] = 1;
@@ -70,7 +71,7 @@ emit_boot(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	buffer[510] = 0x55;
 	buffer[511] = 0xaa;
 	for (unsigned i = 1; i <= 8; i++)
-		exfat_put32(buffer + (size_t)(i + 1) * g->sector_bytes - 4,
+		fsimg_store_le32(buffer + (size_t)(i + 1) * g->sector_bytes - 4,
 		    UINT32_C(0xaa550000));
 	checksum = 0;
 	for (size_t i = 0; i < (size_t)11 * g->sector_bytes; i++) {
@@ -78,7 +79,7 @@ emit_boot(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 			checksum = exfat_checksum32(checksum, buffer[i]);
 	}
 	for (size_t i = (size_t)11 * g->sector_bytes; i < length; i += 4)
-		exfat_put32(buffer + i, checksum);
+		fsimg_store_le32(buffer + i, checksum);
 	status = fsimg_emit_write(emit, 0, buffer, length, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -103,7 +104,7 @@ emit_chain(exfat_plan_t *plan, fsimg_emit_t *emit, uint32_t first,
 			batch = FSIMG_EMIT_BUFFER_BYTES / 4;
 		for (uint32_t i = 0; i < batch; i++) {
 			cluster = first + emitted + i;
-			exfat_put32(buffer + i * 4, emitted + i + 1 == count ?
+			fsimg_store_le32(buffer + i * 4, emitted + i + 1 == count ?
 			    UINT32_MAX : cluster + 1);
 		}
 		status = fsimg_emit_write(emit,
@@ -133,8 +134,8 @@ emit_metadata(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	upcase_first = 2 + plan->bitmap_clusters;
-	exfat_put32(buffer, UINT32_C(0xfffffff8));
-	exfat_put32(buffer + 4, UINT32_MAX);
+	fsimg_store_le32(buffer, UINT32_C(0xfffffff8));
+	fsimg_store_le32(buffer + 4, UINT32_MAX);
 	status = fsimg_emit_write(emit, g->fat_offset, buffer, 8, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -176,12 +177,12 @@ emit_metadata(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	}
 	bzero(header, sizeof(header));
 	header[0] = 0x81;
-	exfat_put32(header + 20, 2);
-	fsimg_meta_put_u64(header + 24, plan->bitmap_length);
+	fsimg_store_le32(header + 20, 2);
+	fsimg_store_le64(header + 24, plan->bitmap_length);
 	header[32] = 0x82;
-	exfat_put32(header + 36, plan->upcase_checksum);
-	exfat_put32(header + 52, upcase_first);
-	fsimg_meta_put_u64(header + 56, plan->upcase_length);
+	fsimg_store_le32(header + 36, plan->upcase_checksum);
+	fsimg_store_le32(header + 52, upcase_first);
+	fsimg_store_le64(header + 56, plan->upcase_length);
 	header[64] = 0x83;
 	status = fsimg_utf8_to_utf16(plan->common.writer->label,
 	    strlen(plan->common.writer->label), label, 11, &label_count, error);
@@ -189,7 +190,7 @@ emit_metadata(exfat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 		return (status);
 	header[65] = (unsigned char)label_count;
 	for (size_t i = 0; i < label_count; i++)
-		exfat_put16(header + 66 + i * 2, label[i]);
+		fsimg_store_le16(header + 66 + i * 2, label[i]);
 	return (fsimg_emit_write(emit, exfat_cluster_offset(g, root.first),
 	    header, sizeof(header), error));
 }
@@ -242,16 +243,16 @@ emit_child(exfat_plan_t *plan, fsimg_emit_t *emit, const char *name,
 	set[32] = 0xc0;
 	set[33] = row->clusters == 0 ? 1 : 3;
 	set[35] = (unsigned char)count;
-	exfat_put16(set + 36, exfat_name_hash(units, count, NULL));
-	fsimg_meta_put_u64(set + 40, row->valid_length);
-	exfat_put32(set + 52, row->first);
-	fsimg_meta_put_u64(set + 56, row->length);
+	fsimg_store_le16(set + 36, exfat_name_hash(units, count, NULL));
+	fsimg_store_le64(set + 40, row->valid_length);
+	fsimg_store_le32(set + 52, row->first);
+	fsimg_store_le64(set + 56, row->length);
 	for (size_t i = 0; i < names; i++) {
 		set[64 + i * 32] = 0xc1;
 		for (size_t j = 0; j < 15 && i * 15 + j < count; j++)
-			exfat_put16(set + 66 + i * 32 + j * 2, units[i * 15 + j]);
+			fsimg_store_le16(set + 66 + i * 32 + j * 2, units[i * 15 + j]);
 	}
-	exfat_put16(set + 2, exfat_set_checksum(set, length));
+	fsimg_store_le16(set + 2, exfat_set_checksum(set, length));
 	return (fsimg_emit_write(emit,
 	    exfat_cluster_offset(&plan->geometry, parent->first) + row->parent_slot * 32,
 	    set, length, error));

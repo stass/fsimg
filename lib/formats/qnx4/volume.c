@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "qnx4.h"
 
 /*
@@ -252,7 +253,7 @@ open_inodes(fsimg_reader_t *reader, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	if (bcmp(slot0, signature, sizeof(signature)) != 0 ||
-	    qnx4_u32(slot0 + 16) != UINT32_C(0x00100000) ||
+	    fsimg_load_le32(slot0 + 16) != UINT32_C(0x00100000) ||
 	    !qnx4_bytes_zero(slot0 + 20, sizeof(slot0) - 20))
 		return (qnx4_corrupt(error, "QNX4 .inodes signature is missing"));
 	status = qnx4_locator_build(reader, qnx4->inodes, &qnx4->inodes_locator,
@@ -285,7 +286,7 @@ root_slot(void *argument, uint64_t slot, uint64_t position FSIMG_UNUSED,
 	if (qnx4_slot_free(raw))
 		return (FSIMG_OK);
 	direct = !qnx4_slot_link(raw);
-	if (!direct && qnx4_u32(raw + 0x35) != 0)
+	if (!direct && fsimg_load_le32(raw + 0x35) != 0)
 		return (FSIMG_OK);
 	length = strnlen((const char *)raw, direct ? QNX4_DIRECT_NAME_MAX :
 	    QNX4_LINK_NAME_MAX);

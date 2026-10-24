@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "generated.h"
 #include "io.h"
 #include "mtree.h"
@@ -509,12 +510,12 @@ append_claim(manifest_import_t *import, const fsimg_mtree_entry_t *entry,
 	if (path_length > writer->ctx->options.max_path_bytes)
 		return (fsimg_limit_error(error, FSIMG_RESOURCE_PATH,
 		    writer->ctx->options.max_path_bytes, path_length));
-	fsimg_meta_put_u64(claim + CLAIM_LINE, entry->line);
-	fsimg_meta_put_u64(claim + CLAIM_LINE_OFFSET, entry->line_offset);
+	fsimg_store_le64(claim + CLAIM_LINE, entry->line);
+	fsimg_store_le64(claim + CLAIM_LINE_OFFSET, entry->line_offset);
 	bcopy(entry->digest, claim + CLAIM_DIGEST, FSIMG_SHA256_DIGEST_LENGTH);
 	generated_length = fsimg_generated_encode(generated,
 	    claim + CLAIM_HEADER);
-	fsimg_meta_put_u64(claim + CLAIM_GENERATED_LENGTH, generated_length);
+	fsimg_store_le64(claim + CLAIM_GENERATED_LENGTH, generated_length);
 	bcopy(entry->entry.path, claim + CLAIM_HEADER + generated_length,
 	    path_length);
 	return (fsimg_stream_append(writer->generated_digests, claim,
@@ -533,10 +534,10 @@ decode_claim(const unsigned char *record, size_t length, digest_claim_t *out)
 
 	if (length < CLAIM_HEADER)
 		return (false);
-	out->line = fsimg_meta_get_u64(record + CLAIM_LINE);
-	out->line_offset = fsimg_meta_get_u64(record + CLAIM_LINE_OFFSET);
+	out->line = fsimg_load_le64(record + CLAIM_LINE);
+	out->line_offset = fsimg_load_le64(record + CLAIM_LINE_OFFSET);
 	bcopy(record + CLAIM_DIGEST, out->digest, sizeof(out->digest));
-	generated_length = fsimg_meta_get_u64(record + CLAIM_GENERATED_LENGTH);
+	generated_length = fsimg_load_le64(record + CLAIM_GENERATED_LENGTH);
 	if (generated_length >= length - CLAIM_HEADER ||
 	    !fsimg_generated_decode(record + CLAIM_HEADER,
 	    (size_t)generated_length, &out->generated) ||

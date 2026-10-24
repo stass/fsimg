@@ -98,10 +98,6 @@ extern const fsimg_writer_ops_t fsimg_exfat_writer_ops;
 
 fsimg_exfat_reader_t *exfat_state(const fsimg_reader_t *);
 
-uint16_t exfat_u16(const unsigned char *);
-uint32_t exfat_u32(const unsigned char *);
-void exfat_put16(unsigned char *, uint16_t);
-void exfat_put32(unsigned char *, uint32_t);
 uint32_t exfat_checksum32(uint32_t, unsigned char);
 uint16_t exfat_checksum16(uint16_t, unsigned char);
 uint16_t exfat_set_checksum(const unsigned char *, size_t);

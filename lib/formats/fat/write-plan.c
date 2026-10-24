@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "write.h"
 
 /* A candidate explains its own rejection. Only agreement across every
@@ -49,11 +50,11 @@ fsimg_fat_layout_get(fat_plan_t *plan, uint64_t id, fat_layout_t *row,
 	status = fsimg_array_get(plan->layout, id, raw, error);
 	if (status != FSIMG_OK)
 		return (status);
-	row->length = fsimg_meta_get_u64(raw);
-	row->slots = fsimg_meta_get_u64(raw + 8);
-	row->parent_slot = fsimg_meta_get_u64(raw + 16);
-	row->first = (uint32_t)fsimg_meta_get_u64(raw + 24);
-	row->clusters = (uint32_t)(fsimg_meta_get_u64(raw + 24) >> 32);
+	row->length = fsimg_load_le64(raw);
+	row->slots = fsimg_load_le64(raw + 8);
+	row->parent_slot = fsimg_load_le64(raw + 16);
+	row->first = (uint32_t)fsimg_load_le64(raw + 24);
+	row->clusters = (uint32_t)(fsimg_load_le64(raw + 24) >> 32);
 	bcopy(raw + 32, row->entry, 32);
 	return (FSIMG_OK);
 }
@@ -64,10 +65,10 @@ fsimg_fat_layout_set(fat_plan_t *plan, uint64_t id, const fat_layout_t *row,
 {
 	unsigned char raw[FAT_LAYOUT_BYTES];
 
-	fsimg_meta_put_u64(raw, row->length);
-	fsimg_meta_put_u64(raw + 8, row->slots);
-	fsimg_meta_put_u64(raw + 16, row->parent_slot);
-	fsimg_meta_put_u64(raw + 24, row->first | (uint64_t)row->clusters << 32);
+	fsimg_store_le64(raw, row->length);
+	fsimg_store_le64(raw + 8, row->slots);
+	fsimg_store_le64(raw + 16, row->parent_slot);
+	fsimg_store_le64(raw + 24, row->first | (uint64_t)row->clusters << 32);
 	bcopy(row->entry, raw + 32, 32);
 	return (fsimg_array_set(plan->layout, id, raw, error));
 }
@@ -306,9 +307,9 @@ allocate_layout(fat_plan_t *plan, fsimg_error_t *error)
 			if (row.slots != 0)
 				directory_bytes += (uint64_t)row.clusters * cluster_bytes;
 		}
-		fsimg_fat_put16(row.entry + 26, (uint16_t)row.first);
+		fsimg_store_le16(row.entry + 26, (uint16_t)row.first);
 		if (plan->variant == 32)
-			fsimg_fat_put16(row.entry + 20, (uint16_t)(row.first >> 16));
+			fsimg_store_le16(row.entry + 20, (uint16_t)(row.first >> 16));
 		status = fsimg_fat_layout_set(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);

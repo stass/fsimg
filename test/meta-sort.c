@@ -16,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "host.h"
 #include "meta.h"
 #include "test.h"
@@ -397,8 +398,8 @@ scale_compare(const void *a, size_t a_length, const void *b, size_t b_length,
 	uint64_t left, right;
 
 	CHECK(a_length == 2048 && b_length == 2048);
-	left = fsimg_meta_get_u64(a);
-	right = fsimg_meta_get_u64(b);
+	left = fsimg_load_le64(a);
+	right = fsimg_load_le64(b);
 	return ((left > right) - (left < right));
 }
 
@@ -422,7 +423,7 @@ test_scale(void)
 	count = 12 * 1024;
 	for (uint64_t i = count; i != 0; i--) {
 		memset(data, (unsigned char)(i - 1), sizeof(data));
-		fsimg_meta_put_u64(data, i - 1);
+		fsimg_store_le64(data, i - 1);
 		CHECK(fsimg_stream_append(fixture.input, data, sizeof(data), NULL, NULL) == FSIMG_OK);
 	}
 	CHECK(fsimg_stream_seal(fixture.input, NULL) == FSIMG_OK);
@@ -431,7 +432,7 @@ test_scale(void)
 	cursor = 0;
 	for (uint64_t i = 0; i < count; i++) {
 		CHECK(fsimg_stream_next(output, &cursor, data, sizeof(data), &length, NULL) == FSIMG_OK);
-		CHECK(length == sizeof(data) && fsimg_meta_get_u64(data) == i);
+		CHECK(length == sizeof(data) && fsimg_load_le64(data) == i);
 		for (size_t j = 8; j < sizeof(data); j++)
 			CHECK(data[j] == (unsigned char)i);
 	}
@@ -444,13 +445,13 @@ test_scale(void)
 	count = 3 * 1024 * 1024;
 	CHECK(fsimg_array_new(&fixture.session, sizeof(value), count, &array, NULL) == FSIMG_OK);
 	for (uint64_t i = 0; i < count; i++) {
-		fsimg_meta_put_u64(value, i * 37 + 1);
+		fsimg_store_le64(value, i * 37 + 1);
 		CHECK(fsimg_array_set(array, i, value, NULL) == FSIMG_OK);
 	}
 	for (uint64_t i = 0; i < 10000; i++) {
 		index = i * UINT64_C(104729) % count;
 		CHECK(fsimg_array_get(array, index, value, NULL) == FSIMG_OK);
-		CHECK(fsimg_meta_get_u64(value) == index * 37 + 1);
+		CHECK(fsimg_load_le64(value) == index * 37 + 1);
 	}
 	fsimg_array_free(array);
 	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);

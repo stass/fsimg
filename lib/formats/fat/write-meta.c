@@ -5,6 +5,7 @@
 
 #include <strings.h>
 
+#include "fsimg-endian.h"
 #include "unicode.h"
 #include "write.h"
 
@@ -36,15 +37,15 @@ encode_timestamp(const fsimg_timestamp_t *time, uint32_t field,
 	exact = time->basis == FSIMG_TIME_WALL;
 	if (field == FSIMG_META_CREATED) {
 		raw[13] = (unsigned char)(odd * 100 + time->nanoseconds / 10000000);
-		fsimg_fat_put16(raw + 14, clock);
-		fsimg_fat_put16(raw + 16, date);
+		fsimg_store_le16(raw + 14, clock);
+		fsimg_store_le16(raw + 16, date);
 		exact = exact && time->nanoseconds % 10000000 == 0;
 	} else if (field == FSIMG_META_MODIFIED) {
-		fsimg_fat_put16(raw + 22, clock);
-		fsimg_fat_put16(raw + 24, date);
+		fsimg_store_le16(raw + 22, clock);
+		fsimg_store_le16(raw + 24, date);
 		exact = exact && odd == 0 && time->nanoseconds == 0;
 	} else {
-		fsimg_fat_put16(raw + 18, date);
+		fsimg_store_le16(raw + 18, date);
 		exact = exact && clock == 0 && odd == 0 && time->nanoseconds == 0;
 	}
 	return (exact);
@@ -106,7 +107,7 @@ fsimg_fat_write_metadata(fat_plan_t *plan, const fsimg_entry_t *entry,
 	if (entry->kind == FSIMG_ENTRY_DIRECTORY)
 		raw[11] |= 16;
 	else
-		fsimg_fat_put32(raw + 28, (uint32_t)entry->size);
+		fsimg_store_le32(raw + 28, (uint32_t)entry->size);
 
 	/* Defaults remain in place when an optional out-of-range field is lost. */
 	encode_timestamp(&fallback, FSIMG_META_CREATED, raw);

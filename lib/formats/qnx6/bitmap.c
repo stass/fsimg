@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include "fsimg-endian.h"
 #include "qnx6.h"
 
 /* The allocation bitmap: bit p, least significant first within byte
@@ -39,7 +40,7 @@ check_recorded(fsimg_reader_t *reader, fsimg_error_t *error)
 			return (FSIMG_OK);
 		if (status != FSIMG_OK)
 			return (status);
-		block = fsimg_meta_get_u32(record);
+		block = fsimg_load_le32(record);
 		if (length != sizeof(record) || block >= qnx6->geometry.blocks)
 			return (qnx6_corrupt(error, "invalid QNX6 bitmap record"));
 		status = qnx6_block_allocated(reader, block, &allocated, error);

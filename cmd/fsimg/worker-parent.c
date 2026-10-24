@@ -17,6 +17,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "host.h"
 #include "internal.h"
 #include "worker.h"
@@ -252,8 +253,8 @@ queue_text(worker_supervisor_t *state, const fsimg_worker_text_t *text,
 	    &state->budget->text_bytes))
 		return (worker_error(error, "formatted output count overflows"));
 	relay->text = *text;
-	fsimg_wire_put64(relay->header + FSIMG_RELAY_STREAM, text->diagnostic ? 2 : 1);
-	fsimg_wire_put64(relay->header + FSIMG_RELAY_LENGTH, text->length);
+	fsimg_store_le64(relay->header + FSIMG_RELAY_STREAM, text->diagnostic ? 2 : 1);
+	fsimg_store_le64(relay->header + FSIMG_RELAY_LENGTH, text->length);
 	relay->offset = 0;
 	relay->phase = RELAY_HEADER;
 	return (FSIMG_OK);
@@ -346,7 +347,7 @@ read_disk_expected(const worker_supervisor_t *state, const unsigned char *raw)
 	uint64_t file;
 	bool spooled;
 
-	file = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FILE);
+	file = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FILE);
 	spooled = reading_stream(state->request) ||
 	    raw[FSIMG_WIRE_IMAGE_COMPRESSION] != '\0';
 	if (spooled ? file > state->request->limits.spool_bytes :
@@ -355,7 +356,7 @@ read_disk_expected(const worker_supervisor_t *state, const unsigned char *raw)
 	if (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "vhd") != 0)
 		return (true);
 	return (file >= 512 &&
-	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) == file - 512);
+	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK) == file - 512);
 }
 
 /*
@@ -379,7 +380,7 @@ image_frame_expected(const worker_supervisor_t *state,
 	    frame->length != FSIMG_WIRE_IMAGE_BYTES ||
 	    !fsimg_wire_image_frame_valid(frame))
 		return (false);
-	flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
+	flags = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FLAGS);
 	if (((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 && kind != FSIMG_JOB_INFO) ||
 	    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && kind != FSIMG_JOB_VERIFY))
 		return (false);
@@ -390,14 +391,14 @@ image_frame_expected(const worker_supervisor_t *state,
 	 */
 	return (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION,
 	    fsimg_job_compression(state->request)) == 0 &&
-	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FILE) ==
-	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK) &&
+	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FILE) ==
+	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK) &&
 	    strcmp((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME,
 	    slot_name(state->request, FSIMG_LAYER_SCHEME)) == 0 &&
 	    strcmp((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER,
 	    slot_name(state->request,
 	    FSIMG_LAYER_CONTAINER)) == 0 &&
-	    fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED) ==
+	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SELECTED) ==
 	    (raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0' ? 1 : 0));
 }
 
@@ -421,8 +422,8 @@ plan_frame_expected(const worker_supervisor_t *state,
 	    state->output_state != WORKER_WAIT_HEADER ||
 	    !fsimg_wire_plan_frame_valid(frame))
 		return (false);
-	volume = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PLAN_VOLUME);
-	output = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PLAN_OUTPUT);
+	volume = fsimg_load_le64(frame->payload + FSIMG_WIRE_PLAN_VOLUME);
+	output = fsimg_load_le64(frame->payload + FSIMG_WIRE_PLAN_OUTPUT);
 	scheme = slot_name(request, FSIMG_LAYER_SCHEME)[0] != '\0';
 	encoded = fsimg_job_encoded(request);
 	if (scheme && state->last_partition == 0)
@@ -476,7 +477,7 @@ partition_frame_expected(const worker_supervisor_t *state,
 	if (!fsimg_wire_partition_frame_valid(frame, state->table_slots,
 	    state->disk_bytes))
 		return (false);
-	index = fsimg_wire_get64(frame->payload + FSIMG_WIRE_PARTITION_INDEX);
+	index = fsimg_load_le64(frame->payload + FSIMG_WIRE_PARTITION_INDEX);
 	if (kind == FSIMG_JOB_INFO)
 		return ((state->output_state == WORKER_WAIT_HEADER ||
 		    state->output_state == WORKER_UNSELECTED) &&
@@ -525,9 +526,9 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		return (worker_error(error, "worker responded before its request was sent"));
 	if (state->phase == WORKER_STARTING) {
 		if (frame->type != FSIMG_FRAME_READY || frame->length != 8 ||
-		    fsimg_wire_get64(raw) > 2)
+		    fsimg_load_le64(raw) > 2)
 			return (worker_error(error, "worker did not send valid readiness"));
-		state->result->confinement = (fsimg_confinement_t)fsimg_wire_get64(raw);
+		state->result->confinement = (fsimg_confinement_t)fsimg_load_le64(raw);
 		if ((state->request->sandbox == FSIMG_SANDBOX_OFF) !=
 		    (state->result->confinement == FSIMG_CONFINEMENT_DISABLED))
 			return (worker_error(error, "worker confinement policy is inconsistent"));
@@ -557,11 +558,11 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 	case FSIMG_FRAME_IMAGE:
 		if (!image_frame_expected(state, frame))
 			return (worker_error(error, "invalid worker image information"));
-		flags = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_FLAGS);
-		state->table_slots = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SLOTS);
-		state->selected_slot = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_SELECTED);
+		flags = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FLAGS);
+		state->table_slots = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SLOTS);
+		state->selected_slot = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SELECTED);
 		/* The disk, planned or peeled, bounds what follows it. */
-		state->disk_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_IMAGE_DISK);
+		state->disk_bytes = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK);
 		if (kind < FSIMG_JOB_CREATE && !bound_volume(state))
 			return (worker_error(error, "worker image cannot hold the selected range"));
 		state->output_state = (flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 ?
@@ -570,7 +571,7 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 	case FSIMG_FRAME_PARTITION:
 		if (!partition_frame_expected(state, frame))
 			return (worker_error(error, "invalid worker partition record"));
-		state->last_partition = fsimg_wire_get64(raw + FSIMG_WIRE_PARTITION_INDEX);
+		state->last_partition = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_INDEX);
 		break;
 	case FSIMG_FRAME_INFO:
 		if (kind >= FSIMG_JOB_CREATE || state->output_state != WORKER_WAIT_HEADER ||
@@ -582,7 +583,7 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		if (!plan_frame_expected(state, frame))
 			return (worker_error(error, "invalid worker image plan"));
 		state->output_state = WORKER_OUTPUT_READY;
-		state->planned_output = fsimg_wire_get64(raw + FSIMG_WIRE_PLAN_OUTPUT);
+		state->planned_output = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_OUTPUT);
 		if (streaming(state->request)) {
 			/* A stream's only bound is the plan, unless -l output
 			 * sets a lower one.
@@ -610,8 +611,8 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 			    state->request->limits.max_entries == 0 ? 10000000 :
 			    state->request->limits.max_entries, count));
 		}
-		state->name_length = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH);
-		state->entry_size = fsimg_wire_get64(raw + FSIMG_WIRE_ENTRY_LENGTH);
+		state->name_length = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH);
+		state->entry_size = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_LENGTH);
 		state->name_bytes = 0;
 		state->output_state = WORKER_IN_ENTRY;
 		break;
@@ -646,10 +647,10 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		break;
 	case FSIMG_FRAME_LOSS:
 		if (frame->length < FSIMG_WIRE_LOSS_BYTES || frame->length > FSIMG_WIRE_LOSS_BYTES + FSIMG_WIRE_LOSS_PATH_BYTES ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_LENGTH) != frame->length - FSIMG_WIRE_LOSS_BYTES ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_TRUNCATED) > 1 ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS) == 0 ||
-		    (fsimg_wire_get64(raw + FSIMG_WIRE_LOSS_FIELDS) & ~(uint64_t)FSIMG_META_KNOWN) != 0)
+		    fsimg_load_le64(raw + FSIMG_WIRE_LOSS_LENGTH) != frame->length - FSIMG_WIRE_LOSS_BYTES ||
+		    fsimg_load_le64(raw + FSIMG_WIRE_LOSS_TRUNCATED) > 1 ||
+		    fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS) == 0 ||
+		    (fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS) & ~(uint64_t)FSIMG_META_KNOWN) != 0)
 			return (worker_error(error, "invalid worker metadata loss frame"));
 		if (state->loss_examples == FSIMG_WIRE_LOSS_EVENTS)
 			return (worker_error(error,
@@ -663,14 +664,14 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		    frame->length != FSIMG_WIRE_DONE_BYTES ||
 		    (kind == FSIMG_JOB_CAT && state->entry_count != 1))
 			return (worker_error(error, "worker completion arrived before its result"));
-		count = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_ENTRIES);
+		count = fsimg_load_le64(raw + FSIMG_WIRE_DONE_ENTRIES);
 		if ((kind == FSIMG_JOB_LIST || kind == FSIMG_JOB_CAT) &&
 		    count != state->entry_count)
 			return (worker_error(error, "worker entry completion count differs"));
 		state->result->entries = count;
-		state->result->logical_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_LOGICAL);
-		state->result->metadata_losses = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_LOSSES);
-		state->result->skipped_entries = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_SKIPPED);
+		state->result->logical_bytes = fsimg_load_le64(raw + FSIMG_WIRE_DONE_LOGICAL);
+		state->result->metadata_losses = fsimg_load_le64(raw + FSIMG_WIRE_DONE_LOSSES);
+		state->result->skipped_entries = fsimg_load_le64(raw + FSIMG_WIRE_DONE_SKIPPED);
 		if ((kind != FSIMG_JOB_EXTRACT ||
 		    (state->request->flags & FSIMG_JOB_SKIP_UNSUPPORTED) == 0) &&
 		    state->result->skipped_entries != 0)
@@ -678,18 +679,18 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		/* Only a listing, a verification and an extraction asked to skip
 		 * pass an omitted entry and succeed.
 		 */
-		state->result->omitted_entries = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_OMITTED);
+		state->result->omitted_entries = fsimg_load_le64(raw + FSIMG_WIRE_DONE_OMITTED);
 		if (kind != FSIMG_JOB_LIST && kind != FSIMG_JOB_VERIFY &&
 		    (kind != FSIMG_JOB_EXTRACT ||
 		    (state->request->flags & FSIMG_JOB_SKIP_UNSUPPORTED) == 0) &&
 		    state->result->omitted_entries != 0)
 			return (worker_error(error, "worker omitted entries it could not omit"));
 		if (!image_length_expected(state,
-		    fsimg_wire_get64(raw + FSIMG_WIRE_DONE_IMAGE)) ||
-		    fsimg_wire_get64(raw + FSIMG_WIRE_DONE_RAW) != (kind == FSIMG_JOB_CAT ?
+		    fsimg_load_le64(raw + FSIMG_WIRE_DONE_IMAGE)) ||
+		    fsimg_load_le64(raw + FSIMG_WIRE_DONE_RAW) != (kind == FSIMG_JOB_CAT ?
 		    state->entry_size : 0))
 			return (worker_error(error, "worker raw completion length differs"));
-		state->result->image_bytes = fsimg_wire_get64(raw + FSIMG_WIRE_DONE_IMAGE);
+		state->result->image_bytes = fsimg_load_le64(raw + FSIMG_WIRE_DONE_IMAGE);
 		state->phase = WORKER_COMPLETE;
 		/* Completion is delivered only after successful process exit. */
 		return (FSIMG_OK);
@@ -1075,10 +1076,10 @@ read_relay(worker_supervisor_t *state, fsimg_error_t *error)
 	relay->report_bytes += (size_t)count;
 	if (relay->report_bytes != sizeof(relay->report))
 		return (FSIMG_OK);
-	confirmed[0] = fsimg_wire_get64(relay->report + FSIMG_RELAY_STDOUT);
-	confirmed[1] = fsimg_wire_get64(relay->report + FSIMG_RELAY_STDERR);
-	failure = fsimg_wire_get64(relay->report + FSIMG_RELAY_ERRNO);
-	marker = fsimg_wire_get64(relay->report + FSIMG_RELAY_MARKER);
+	confirmed[0] = fsimg_load_le64(relay->report + FSIMG_RELAY_STDOUT);
+	confirmed[1] = fsimg_load_le64(relay->report + FSIMG_RELAY_STDERR);
+	failure = fsimg_load_le64(relay->report + FSIMG_RELAY_ERRNO);
+	marker = fsimg_load_le64(relay->report + FSIMG_RELAY_MARKER);
 	if (failure > INT_MAX || marker > 2 || (failure != 0 && marker != 2))
 		return (worker_error(error, "invalid output relay status"));
 	for (unsigned stream = 0; stream < 2; stream++) {
