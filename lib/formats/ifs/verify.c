@@ -42,8 +42,6 @@ _Static_assert(VERIFY_BUFFER_BYTES % 4 == 0,
 static fsimg_status_t verify_checksum(fsimg_reader_t *, unsigned char *,
     fsimg_error_t *);
 static fsimg_status_t verify_references(fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t read_payload(fsimg_reader_t *, unsigned char *,
-    fsimg_verify_report_t *, fsimg_error_t *);
 static fsimg_status_t traverse(fsimg_reader_t *, unsigned char *,
     fsimg_verify_report_t *, fsimg_error_t *);
 
@@ -113,27 +111,6 @@ verify_references(fsimg_reader_t *reader, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* Read the current file's or link's bytes through common delivery. */
-static fsimg_status_t
-read_payload(fsimg_reader_t *reader, unsigned char *buffer,
-    fsimg_verify_report_t *report, fsimg_error_t *error)
-{
-	uint64_t offset;
-	size_t batch, count;
-	fsimg_status_t status;
-
-	for (offset = 0; offset < reader->initialized; offset += batch) {
-		batch = reader->initialized - offset > VERIFY_BUFFER_BYTES ?
-		    VERIFY_BUFFER_BYTES : (size_t)(reader->initialized - offset);
-		status = fsimg_reader_content(reader, offset, buffer, batch,
-		    &count, error);
-		report->payload_bytes_read += count;
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	return (FSIMG_OK);
-}
-
 /* Walk every node once, omitted ones included, accounting the delivered
  * ones; the walker never yields the root, so it is counted first. payload,
  * when not NULL, receives the initialized bytes of every entry but a
@@ -157,7 +134,8 @@ traverse(fsimg_reader_t *reader, unsigned char *payload,
 		if (payload == NULL ||
 		    reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
 			continue;
-		status = read_payload(reader, payload, report, error);
+		status = fsimg_verify_payload(reader, payload,
+		    VERIFY_BUFFER_BYTES, report, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}

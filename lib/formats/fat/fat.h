@@ -67,7 +67,7 @@ typedef struct fsimg_fat_reader fsimg_fat_reader_t;
 struct fsimg_fat_reader {
 	fat_geometry_t	 geometry;
 	fsimg_bitset_t	*directory_clusters;
-	fsimg_stream_t	*owners;
+	fsimg_owner_runs_t *owners;
 	fsimg_extent_index_t *index;
 	fat_chain_t	 file_chain;
 	fsimg_extent_t	 extent;

@@ -350,13 +350,6 @@
     one image per case, and the design's "when it is sparse" condition is
     not checked. Add a per-run budget for recorded images.
 
-* [Low] **Verification payload and scoped ownership helpers**
-  (`lib/read/`, `lib/meta/`, `lib/formats/*/verify.c`): implement the
-  [verification-helper design](specs/design-verification-helpers.md): one
-  initialized-payload loop and a strict FAT/exFAT ownership-run utility.
-  Preserve FAT's fused walk, QNX6's owner-bearing records, QNX4's bitset,
-  ImageFS's checksum/reference scope, and each driver's reconciliation.
-
 * [Medium] **QNX IFS image support** (`lib/formats/ifs/`, `lib/codec/`,
   `lib/layers/`): write QNX boot images through the `ifsboot` container,
   from a caller's startup program, optional boot prefix and header

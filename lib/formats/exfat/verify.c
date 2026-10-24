@@ -9,84 +9,44 @@
 #include "exfat.h"
 #include "host.h"
 
-typedef struct exfat_owner_cursor {
-	fsimg_stream_t	*stream;
-	uint64_t	 cursor;
-	uint64_t	 first;
-	uint64_t	 end;
-	bool		 exhausted;
-} exfat_owner_cursor_t;
-
-static int owner_compare(const void *, size_t, const void *, size_t, void *);
-static fsimg_status_t owner_next(fsimg_reader_t *, exfat_owner_cursor_t *,
-    fsimg_error_t *);
-static fsimg_status_t verify_allocations(fsimg_reader_t *, fsimg_stream_t *,
-    fsimg_verify_report_t *, fsimg_error_t *);
-static fsimg_status_t read_payload(fsimg_reader_t *, unsigned char *,
+static fsimg_status_t next_owner(fsimg_owner_runs_t *, fsimg_owner_run_t *,
+    bool *, fsimg_error_t *);
+static fsimg_status_t verify_allocations(fsimg_reader_t *,
     fsimg_verify_report_t *, fsimg_error_t *);
 
-static int
-owner_compare(const void *a, size_t alen, const void *b, size_t blen,
-    void *argument FSIMG_UNUSED)
-{
-	uint64_t first, second;
-
-	if (alen != 16 || blen != 16)
-		return ((alen > blen) - (alen < blen));
-	first = fsimg_meta_get_u64(a);
-	second = fsimg_meta_get_u64(b);
-	return ((first > second) - (first < second));
-}
-
+/* Advance to the next sorted ownership run; *have_run is false after the
+ * last. The run utility rejects overlapping and damaged runs as it returns
+ * them.
+ */
 static fsimg_status_t
-owner_next(fsimg_reader_t *reader, exfat_owner_cursor_t *owners,
+next_owner(fsimg_owner_runs_t *owners, fsimg_owner_run_t *run, bool *have_run,
     fsimg_error_t *error)
 {
-	unsigned char record[16];
-	uint64_t first, count, capacity;
-	size_t length;
 	fsimg_status_t status;
 
-	status = fsimg_stream_next(owners->stream, &owners->cursor, record,
-	    sizeof(record), &length, error);
-	if (status == FSIMG_DONE) {
-		owners->exhausted = true;
+	status = fsimg_owner_runs_next(owners, run, error);
+	*have_run = status == FSIMG_OK;
+	if (status == FSIMG_DONE)
 		return (FSIMG_OK);
-	}
-	if (status != FSIMG_OK)
-		return (status);
-	if (length != sizeof(record))
-		return (exfat_corrupt(error, "invalid exFAT ownership record length"));
-	first = fsimg_meta_get_u64(record);
-	count = fsimg_meta_get_u64(record + 8);
-	capacity = (uint64_t)exfat_state(reader)->geometry.clusters + 2;
-	if (first < 2 || first >= capacity || count == 0 ||
-	    count > capacity - first)
-		return (exfat_corrupt(error, "invalid exFAT ownership interval"));
-	if (first < owners->end)
-		return (exfat_corrupt(error, "cross-linked exFAT allocation ownership"));
-	owners->first = first;
-	owners->end = first + count;
-	return (FSIMG_OK);
+	return (status);
 }
 
 static fsimg_status_t
-verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
-    fsimg_verify_report_t *report, fsimg_error_t *error)
+verify_allocations(fsimg_reader_t *reader, fsimg_verify_report_t *report,
+    fsimg_error_t *error)
 {
 	const exfat_geometry_t *g = &exfat_state(reader)->geometry;
-	exfat_owner_cursor_t owners;
+	fsimg_owner_runs_t *owners = exfat_state(reader)->owners;
+	fsimg_owner_run_t run;
 	unsigned char bitmap[4096];
 	uint64_t bitmap_offset, window;
 	uint32_t value;
 	size_t batch;
-	bool claimed, allocated;
+	bool have_run, claimed, allocated;
 	fsimg_status_t status;
 
-	bzero(&owners, sizeof(owners));
-	owners.stream = sorted;
 	bitmap_offset = UINT64_MAX;
-	status = owner_next(reader, &owners, error);
+	status = next_owner(owners, &run, &have_run, error);
 	if (status != FSIMG_OK)
 		return (status);
 
@@ -107,12 +67,12 @@ verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 				return (status);
 			bitmap_offset = window;
 		}
-		while (!owners.exhausted && cluster >= owners.end) {
-			status = owner_next(reader, &owners, error);
+		while (have_run && cluster >= run.end) {
+			status = next_owner(owners, &run, &have_run, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}
-		claimed = !owners.exhausted && cluster >= owners.first;
+		claimed = have_run && cluster >= run.first;
 		allocated = (bitmap[(cluster - 2) / 8 - bitmap_offset] &
 		    (1u << ((cluster - 2) % 8))) != 0;
 		if (!allocated) {
@@ -133,38 +93,16 @@ verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	if (!owners.exhausted) {
-		status = owner_next(reader, &owners, error);
-		if (status != FSIMG_OK)
-			return (status);
-		if (!owners.exhausted)
-			return (exfat_corrupt(error, "exFAT ownership exceeds heap"));
-	}
-	return (FSIMG_OK);
-}
 
-static fsimg_status_t
-read_payload(fsimg_reader_t *reader, unsigned char *buffer,
-    fsimg_verify_report_t *report, fsimg_error_t *error)
-{
-	uint64_t offset;
-	size_t batch, count;
-	fsimg_status_t status;
-
-	/* Read-through uses common content delivery and visits only the
-	 * initialized bytes: the zero tail is not payload, and delivery never
-	 * reads its physical storage.
+	/* Drain the runs: a run ending at the last cluster is never advanced
+	 * past by the scan, and a duplicate or damaged record after it must
+	 * still be read and rejected. The utility fails any later run, so the
+	 * check after it is only defensive.
 	 */
-	for (offset = 0; offset < reader->initialized; offset += batch) {
-		batch = reader->initialized - offset > EXFAT_BUFFER_BYTES ?
-		    EXFAT_BUFFER_BYTES : (size_t)(reader->initialized - offset);
-		status = fsimg_reader_content(reader, offset, buffer, batch,
-		    &count, error);
-		report->payload_bytes_read += count;
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	return (FSIMG_OK);
+	status = next_owner(owners, &run, &have_run, error);
+	if (status == FSIMG_OK && have_run)
+		status = exfat_corrupt(error, "exFAT ownership exceeds heap");
+	return (status);
 }
 
 fsimg_status_t
@@ -172,18 +110,18 @@ exfat_verify(fsimg_reader_t *reader, unsigned flags,
     fsimg_verify_report_t *report, fsimg_error_t *error)
 {
 	fsimg_exfat_reader_t *exfat = exfat_state(reader);
-	fsimg_stream_t *sorted;
 	unsigned char *buffer;
 	fsimg_error_t detail;
 	fsimg_status_t status;
 
-	sorted = NULL;
 	buffer = NULL;
 	reader->session.progress.phase = "exFAT verification";
-	status = fsimg_stream_new(&reader->session, 16, &exfat->owners, error);
+	/* One exclusive domain: the heap's cluster numbers. */
+	status = fsimg_owner_runs_new(&reader->session, 2,
+	    (uint64_t)exfat->geometry.clusters + 2, &exfat->owners, error);
 	if (status != FSIMG_OK)
 		goto done;
-	/* Indexes built while opening predate the owner stream; every index
+	/* Indexes built while opening predate the owner runs; every index
 	 * built during the traversal below claims its own runs.
 	 */
 	status = exfat_index_claim(reader, exfat->bitmap, error);
@@ -217,18 +155,16 @@ exfat_verify(fsimg_reader_t *reader, unsigned flags,
 		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
 			continue;
 		if (buffer != NULL) {
-			status = read_payload(reader, buffer, report, error);
+			status = fsimg_verify_payload(reader, buffer,
+			    EXFAT_BUFFER_BYTES, report, error);
 			if (status != FSIMG_OK)
 				goto done;
 		}
 	}
-	status = fsimg_stream_seal(exfat->owners, error);
+	status = fsimg_owner_runs_seal(exfat->owners, error);
 	if (status != FSIMG_OK)
 		goto done;
-	status = fsimg_stream_sort(exfat->owners, owner_compare, NULL, NULL, &sorted, error);
-	if (status != FSIMG_OK)
-		goto done;
-	status = verify_allocations(reader, sorted, report, error);
+	status = verify_allocations(reader, report, error);
 	if (status != FSIMG_OK)
 		goto done;
 	if (!reader->info.clean || reader->info.io_error) {
@@ -241,8 +177,7 @@ exfat_verify(fsimg_reader_t *reader, unsigned flags,
 	reader->info.free_bytes = report->free_clusters * exfat->geometry.cluster_bytes;
 	reader->info.valid |= FSIMG_VOLUME_FREE;
 done:
-	fsimg_stream_free(sorted);
-	fsimg_stream_free(exfat->owners);
+	fsimg_owner_runs_free(exfat->owners);
 	exfat->owners = NULL;
 	fsimg_dealloc(buffer);
 	return (status);

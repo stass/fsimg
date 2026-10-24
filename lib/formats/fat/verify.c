@@ -8,66 +8,33 @@
 
 #include "fat.h"
 
-typedef struct owner_cursor {
-	fsimg_stream_t	*stream;
-	uint64_t	 cursor;
-	uint64_t	 first;
-	uint64_t	 end;
-	bool		 exhausted;
-} owner_cursor_t;
+/* The payload buffer: the largest physical read of one batch. */
+#define PAYLOAD_BYTES 65536u
 
-static int owner_compare(const void *, size_t, const void *, size_t, void *);
-static fsimg_status_t owner_next(fsimg_reader_t *, owner_cursor_t *,
-    fsimg_error_t *);
+static fsimg_status_t next_owner(fsimg_owner_runs_t *, fsimg_owner_run_t *,
+    bool *, fsimg_error_t *);
 static fsimg_status_t verify_file(fsimg_reader_t *, unsigned char *,
     fsimg_verify_report_t *, fsimg_error_t *);
-static fsimg_status_t verify_allocations(fsimg_reader_t *, fsimg_stream_t *,
+static fsimg_status_t verify_allocations(fsimg_reader_t *,
     fsimg_verify_report_t *, fsimg_error_t *);
 static fsimg_status_t verify_reserved(fsimg_reader_t *,
     const fsimg_verify_report_t *, fsimg_error_t *);
 
-static int
-owner_compare(const void *a, size_t alen, const void *b, size_t blen,
-    void *argument FSIMG_UNUSED)
-{
-	uint64_t first, second;
-
-	if (alen != 16 || blen != 16)
-		return ((alen > blen) - (alen < blen));
-	first = fsimg_meta_get_u64(a);
-	second = fsimg_meta_get_u64(b);
-	return ((first > second) - (first < second));
-}
-
+/* Advance to the next sorted ownership run; *have_run is false after the
+ * last. The run utility rejects overlapping and damaged runs as it returns
+ * them.
+ */
 static fsimg_status_t
-owner_next(fsimg_reader_t *reader, owner_cursor_t *owners, fsimg_error_t *error)
+next_owner(fsimg_owner_runs_t *owners, fsimg_owner_run_t *run, bool *have_run,
+    fsimg_error_t *error)
 {
-	unsigned char record[16];
-	uint64_t first, count;
-	size_t length;
 	fsimg_status_t status;
 
-	status = fsimg_stream_next(owners->stream, &owners->cursor, record,
-	    sizeof(record), &length, error);
-	if (status == FSIMG_DONE) {
-		owners->exhausted = true;
+	status = fsimg_owner_runs_next(owners, run, error);
+	*have_run = status == FSIMG_OK;
+	if (status == FSIMG_DONE)
 		return (FSIMG_OK);
-	}
-	if (status != FSIMG_OK)
-		return (status);
-	if (length != sizeof(record))
-		return (fsimg_fat_corrupt(error, "invalid FAT ownership record length"));
-	first = fsimg_meta_get_u64(record);
-	count = fsimg_meta_get_u64(record + 8);
-	if (first < 2 || count == 0 ||
-	    first >= (uint64_t)fsimg_fat_state(reader)->geometry.clusters + 2 ||
-	    count > (uint64_t)fsimg_fat_state(reader)->geometry.clusters + 2 - first)
-		return (fsimg_fat_corrupt(error, "invalid FAT ownership run"));
-	if (first < owners->end)
-		return (fsimg_fat_corrupt(error, "cross-linked FAT allocation ownership"));
-	owners->first = first;
-	owners->end = first + count;
-	return (FSIMG_OK);
+	return (status);
 }
 
 static fsimg_status_t
@@ -98,50 +65,50 @@ verify_file(fsimg_reader_t *reader, unsigned char *buffer,
 		 */
 		if (buffer == NULL)
 			continue;
+		if (run.logical_offset >= reader->entry.size)
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_VERIFY, "FAT chain run starts past the file"));
 		length = run.length;
 		if (length > reader->entry.size - run.logical_offset)
 			length = reader->entry.size - run.logical_offset;
-		position = 0;
-		while (position < length) {
-			batch = length - position > 65536 ? 65536 :
+		for (position = 0; position < length; position += batch) {
+			batch = length - position > PAYLOAD_BYTES ? PAYLOAD_BYTES :
 			    (size_t)(length - position);
 			status = fsimg_reader_bytes(reader, run.image_offset + position,
 			    buffer, batch, &transferred, error);
-			report->payload_bytes_read += transferred;
+			fsimg_stat_add(&report->payload_bytes_read, transferred);
 			if (status != FSIMG_OK)
 				return (status);
-			position += batch;
 		}
 	}
 }
 
 static fsimg_status_t
-verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
-    fsimg_verify_report_t *report, fsimg_error_t *error)
+verify_allocations(fsimg_reader_t *reader, fsimg_verify_report_t *report,
+    fsimg_error_t *error)
 {
 	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
-	owner_cursor_t owners;
+	fsimg_owner_runs_t *owners = fsimg_fat_state(reader)->owners;
+	fsimg_owner_run_t run;
 	uint32_t value;
 	fsimg_status_t status;
-	bool claimed;
+	bool have_run, claimed;
 
-	bzero(&owners, sizeof(owners));
-	owners.stream = sorted;
-	status = owner_next(reader, &owners, error);
+	status = next_owner(owners, &run, &have_run, error);
 	if (status != FSIMG_OK)
 		return (status);
 
-	/* Merge the sorted ownership intervals with a single sequential FAT scan.
-	 * Every allocated cluster has exactly one owner. Gaps must be free or bad;
-	 * overlaps fail as soon as the next interval is admitted by owner_next.
+	/* Merge the sorted ownership runs with a single sequential FAT scan.
+	 * Every allocated cluster has exactly one owner; gaps must be free or
+	 * bad. The run utility rejects overlapping runs as it returns them.
 	 */
 	for (uint32_t cluster = 2; cluster - 2 < g->clusters; cluster++) {
-		while (!owners.exhausted && cluster >= owners.end) {
-			status = owner_next(reader, &owners, error);
+		while (have_run && cluster >= run.end) {
+			status = next_owner(owners, &run, &have_run, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}
-		claimed = !owners.exhausted && cluster >= owners.first;
+		claimed = have_run && cluster >= run.first;
 		status = fsimg_fat_table_get(reader, cluster, &value, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -161,14 +128,16 @@ verify_allocations(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 			report->allocated_clusters++;
 		}
 	}
-	if (!owners.exhausted) {
-		status = owner_next(reader, &owners, error);
-		if (status != FSIMG_OK)
-			return (status);
-		if (!owners.exhausted)
-			return (fsimg_fat_corrupt(error, "FAT ownership exceeds allocation table"));
-	}
-	return (FSIMG_OK);
+
+	/* Drain the runs: a run ending at the last cluster is never advanced
+	 * past by the scan, and a duplicate or damaged record after it must
+	 * still be read and rejected. The utility fails any later run, so the
+	 * check after it is only defensive.
+	 */
+	status = next_owner(owners, &run, &have_run, error);
+	if (status == FSIMG_OK && have_run)
+		status = fsimg_fat_corrupt(error, "FAT ownership exceeds allocation table");
+	return (status);
 }
 
 static fsimg_status_t
@@ -226,19 +195,19 @@ fsimg_fat_verify(fsimg_reader_t *reader, unsigned flags,
     fsimg_verify_report_t *report, fsimg_error_t *error)
 {
 	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
-	fsimg_stream_t *sorted;
 	fsimg_error_t detail;
 	unsigned char *buffer;
 	fsimg_status_t status;
 
-	sorted = NULL;
 	buffer = NULL;
 	reader->session.progress.phase = "FAT verification";
-	status = fsimg_stream_new(&reader->session, 16, &fat->owners, error);
+	/* One exclusive domain: the heap's cluster numbers. */
+	status = fsimg_owner_runs_new(&reader->session, 2,
+	    (uint64_t)fat->geometry.clusters + 2, &fat->owners, error);
 	if (status != FSIMG_OK)
 		goto done;
 	if ((flags & FSIMG_VERIFY_PAYLOAD) != 0) {
-		buffer = fsimg_alloc(reader->ctx, 65536, &detail);
+		buffer = fsimg_alloc(reader->ctx, PAYLOAD_BYTES, &detail);
 		if (buffer == NULL) {
 			status = detail.status;
 			if (error != NULL)
@@ -267,14 +236,10 @@ fsimg_fat_verify(fsimg_reader_t *reader, unsigned flags,
 			goto done;
 	}
 
-	status = fsimg_stream_seal(fat->owners, error);
+	status = fsimg_owner_runs_seal(fat->owners, error);
 	if (status != FSIMG_OK)
 		goto done;
-	status = fsimg_stream_sort(fat->owners, owner_compare, NULL, NULL,
-	    &sorted, error);
-	if (status != FSIMG_OK)
-		goto done;
-	status = verify_allocations(reader, sorted, report, error);
+	status = verify_allocations(reader, report, error);
 	if (status != FSIMG_OK)
 		goto done;
 	status = verify_reserved(reader, report, error);
@@ -287,8 +252,7 @@ fsimg_fat_verify(fsimg_reader_t *reader, unsigned flags,
 	reader->info.valid |= FSIMG_VOLUME_FREE;
 done:
 	fsimg_dealloc(buffer);
-	fsimg_stream_free(sorted);
-	fsimg_stream_free(fat->owners);
+	fsimg_owner_runs_free(fat->owners);
 	fat->owners = NULL;
 	return (status);
 }

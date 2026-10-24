@@ -76,6 +76,12 @@ static void test_reproducible(void);
 static void test_stream_limits(void);
 static void test_sequential_fragments(void);
 static void test_extract_zero_tail(void);
+static fsimg_status_t payload_resolve(fsimg_reader_t *, uint64_t,
+    fsimg_extent_t *, fsimg_error_t *);
+static void payload_hooks(exfat_fixture_t *);
+static void test_verify_payload(void);
+static void test_verify_payload_failures(void);
+static void test_trailing_duplicate_claim(void);
 static uint32_t fragment_cluster(unsigned, unsigned);
 static void make_fragmented_file(exfat_fixture_t *, unsigned);
 static void baseline_zero_tail(void);
@@ -1283,6 +1289,226 @@ test_extract_zero_tail(void)
 	fixture_free(&f);
 }
 
+/* Payload-verification hooks: the exFAT resolver, counted, with actions a
+ * test arms at a given call: cancel the operation, change the image file,
+ * or shrink the entry below its initialized length, the one way to make
+ * content delivery end a batch early.
+ */
+static exfat_fixture_t *payload_fixture;
+static const fsimg_reader_ops_t *payload_driver;
+static fsimg_reader_ops_t payload_ops;
+static unsigned payload_resolves;
+static unsigned payload_cancel_at;
+static unsigned payload_shrink_at;
+static unsigned payload_change_at;
+static int payload_change_fd;
+
+static fsimg_status_t
+payload_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *extent,
+    fsimg_error_t *error)
+{
+	payload_resolves++;
+	if (payload_resolves == payload_cancel_at)
+		payload_fixture->cancelled = true;
+	if (payload_resolves == payload_shrink_at)
+		reader->entry.size = offset + 512;
+	if (payload_resolves == payload_change_at)
+		CHECK(ftruncate(payload_change_fd, IMAGE_BYTES + 1) == 0);
+	return (payload_driver->resolve(reader, offset, extent, error));
+}
+
+static void
+payload_hooks(exfat_fixture_t *f)
+{
+	payload_fixture = f;
+	payload_driver = f->reader->ops;
+	payload_ops = *payload_driver;
+	payload_ops.resolve = payload_resolve;
+	f->reader->ops = &payload_ops;
+	payload_resolves = payload_cancel_at = payload_shrink_at = 0;
+	payload_change_at = 0;
+	payload_change_fd = -1;
+}
+
+/* The common payload helper reads exactly [0, initialized) in batches of
+ * at most the buffer capacity, through delivery, counting what it read.
+ * Data.bin has eight one-cluster fragments, so each touched cluster is one
+ * resolution and one image read, and a 1 KiB buffer spans two clusters.
+ */
+static void
+test_verify_payload(void)
+{
+	static const uint64_t lengths[] = { 0, 1, 1023, 1024, 1025, 4096 };
+	const size_t capacity = 1024;
+	exfat_fixture_t f;
+	fsimg_verify_report_t report;
+	unsigned char buffer[1024];
+	uint64_t calls, clusters, last;
+
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		fixture_new(&f);
+		make_fragmented_file(&f, 8);
+		open_file(&f);
+		payload_hooks(&f);
+		CHECK(f.reader->entry.size == 4096);
+		f.reader->initialized = lengths[i];
+		bzero(&report, sizeof(report));
+		calls = f.calls;
+		CHECK(fsimg_verify_payload(f.reader, buffer, capacity, &report,
+		    NULL) == FSIMG_OK);
+		clusters = (lengths[i] + 511) / 512;
+		CHECK(report.payload_bytes_read == lengths[i]);
+		CHECK(f.calls - calls == clusters && payload_resolves == clusters);
+		/* The buffer holds the last batch, which starts a cluster. */
+		if (lengths[i] >= 4) {
+			last = (lengths[i] - 1) / capacity * capacity / 512;
+			for (unsigned j = 0; j < 4; j++)
+				CHECK(buffer[j] == (unsigned char)(last >> (j * 8)));
+		}
+		fixture_free(&f);
+	}
+
+	/* The zero tail and slack are never read: Data.bin has 513
+	 * initialized bytes of 1024, and its second cluster is poisoned
+	 * after the first byte.
+	 */
+	fixture_new(&f);
+	open_file(&f);
+	f.forbid_from = cluster_offset(FILE_CLUSTER + 2) + 1;
+	bzero(&report, sizeof(report));
+	CHECK(fsimg_verify_payload(f.reader, buffer, capacity, &report, NULL) ==
+	    FSIMG_OK);
+	CHECK(report.payload_bytes_read == 513 && buffer[512] == 0x7b);
+
+	/* The counter saturates; progress does not depend on it. */
+	report.payload_bytes_read = UINT64_MAX - 100;
+	CHECK(fsimg_verify_payload(f.reader, buffer, capacity, &report, NULL) ==
+	    FSIMG_OK);
+	CHECK(report.payload_bytes_read == UINT64_MAX);
+	fixture_free(&f);
+}
+
+/* Failures end the helper at once with what it confirmed counted, and no
+ * byte is read twice; argument and contract errors precede any I/O.
+ */
+static void
+test_verify_payload_failures(void)
+{
+	exfat_fixture_t f;
+	fsimg_verify_report_t report;
+	const fsimg_entry_t *entry;
+	unsigned char buffer[1024];
+	fsimg_error_t error;
+	uint64_t calls;
+	int fd, read_fd;
+
+	/* An image read fails after seven bytes of the fourth cluster. */
+	fixture_new(&f);
+	make_fragmented_file(&f, 8);
+	open_file(&f);
+	f.fail_from = cluster_offset(fragment_cluster(3, 8));
+	bzero(&report, sizeof(report));
+	calls = f.calls;
+	CHECK(fsimg_verify_payload(f.reader, buffer, sizeof(buffer), &report,
+	    &error) == FSIMG_EIO);
+	CHECK(report.payload_bytes_read == 3 * 512 + 7 && f.calls - calls == 4);
+
+	/* Invalid arguments and a broken length invariant read nothing. */
+	f.fail_from = 0;
+	calls = f.calls;
+	CHECK(fsimg_verify_payload(f.reader, NULL, sizeof(buffer), &report,
+	    NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_verify_payload(f.reader, buffer, 0, &report, NULL) ==
+	    FSIMG_EINVAL);
+	CHECK(fsimg_verify_payload(f.reader, buffer, sizeof(buffer), NULL,
+	    NULL) == FSIMG_EINVAL);
+	f.reader->initialized = f.reader->entry.size + 1;
+	CHECK(fsimg_verify_payload(f.reader, buffer, sizeof(buffer), &report,
+	    NULL) == FSIMG_ESTATE);
+	CHECK(f.calls == calls);
+	f.reader->initialized = f.reader->entry.size;
+
+	/* Delivery ending a batch early is a broken contract, not a retry. */
+	payload_hooks(&f);
+	payload_shrink_at = 1;
+	bzero(&report, sizeof(report));
+	CHECK(fsimg_verify_payload(f.reader, buffer, 512, &report, &error) ==
+	    FSIMG_ESTATE);
+	CHECK(report.payload_bytes_read == 512 && payload_resolves == 1);
+	CHECK(strstr(error.message, "early") != NULL);
+	fixture_free(&f);
+
+	/* A source change before a later batch keeps the earlier count. */
+	fixture_new(&f);
+	make_fragmented_file(&f, 8);
+	fd = openat(f.scratch, "image", O_CREAT | O_EXCL | O_RDWR, 0600);
+	CHECK(fd != -1 && write(fd, f.image, IMAGE_BYTES) == IMAGE_BYTES);
+	read_fd = openat(f.scratch, "image", O_RDONLY | O_CLOEXEC);
+	CHECK(read_fd != -1);
+	fsimg_io_free(f.io);
+	CHECK(fsimg_io_from_fd(f.ctx, read_fd, FSIMG_IO_READ, &f.io, NULL) ==
+	    FSIMG_OK);
+	CHECK(close(read_fd) == 0);
+	open_file(&f);
+	payload_hooks(&f);
+	payload_change_fd = fd;
+	payload_change_at = 3;
+	bzero(&report, sizeof(report));
+	CHECK(fsimg_verify_payload(f.reader, buffer, sizeof(buffer), &report,
+	    NULL) == FSIMG_ESOURCE_CHANGED);
+	CHECK(report.payload_bytes_read == 1024);
+	CHECK(close(fd) == 0 && unlinkat(f.scratch, "image", 0) == 0);
+	fixture_free(&f);
+
+	/* Through full verification: cancellation in the second batch leaves
+	 * the first batch counted, an incomplete report and a failed reader.
+	 */
+	fixture_new(&f);
+	make_fragmented_file(&f, 8);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	payload_hooks(&f);
+	payload_cancel_at = 3;
+	CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) ==
+	    FSIMG_ECANCELLED);
+	CHECK(!report.complete && report.payload_bytes_read == 1024);
+	f.cancelled = false;
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ESTATE);
+	fixture_free(&f);
+}
+
+/* The root directory and Data.bin both end in the heap's last cluster. The
+ * allocation scan reaches that cluster inside the first of the two sorted
+ * claims and never advances past it, so only the final drain reads the
+ * second and rejects the overlap.
+ */
+static void
+test_trailing_duplicate_claim(void)
+{
+	const uint32_t last = HEAP_CLUSTERS + 1;
+	exfat_fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	unsigned char *fat, *bitmap;
+
+	fixture_new(&f);
+	fat = f.image + 24 * 512;
+	bitmap = f.image + cluster_offset(2);
+	put32(fat + ROOT_CLUSTER * 4, last);
+	put32(fat + FILE_CLUSTER * 4, last);
+	put32(fat + (FILE_CLUSTER + 2) * 4, 0);
+	put32(fat + last * 4, UINT32_MAX);
+	bitmap[(FILE_CLUSTER + 2 - 2) / 8] &=
+	    (unsigned char)~(1u << ((FILE_CLUSTER + 2 - 2) % 8));
+	bitmap[(last - 2) / 8] |= (unsigned char)(1u << ((last - 2) % 8));
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	if (strstr(error.message, "overlapping ownership claims") == NULL)
+		fprintf(stderr, "trailing duplicate: %s\n", error.message);
+	CHECK(strstr(error.message, "overlapping ownership claims") != NULL);
+	CHECK(!report.complete);
+	fixture_free(&f);
+}
+
 /* Comparison-baseline record (see baseline.h) for the default image, whose
  * Data.bin has 513 initialized bytes of 1024 and a poisoned tail cluster.
  * The content digest shows that the tail reads as zeros.
@@ -1481,6 +1707,9 @@ main(int argc, char **argv)
 	test_stream_limits();
 	test_sequential_fragments();
 	test_extract_zero_tail();
+	test_verify_payload();
+	test_verify_payload_failures();
+	test_trailing_duplicate_claim();
 	test_content_guard("changed");
 	test_content_guard("changed-range");
 	test_content_guard("cancel");

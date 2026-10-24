@@ -305,16 +305,12 @@ static fsimg_status_t
 own_run(fsimg_reader_t *reader, uint32_t first, uint32_t count,
     fsimg_error_t *error)
 {
-	unsigned char owner[16];
-
-	fsimg_meta_put_u64(owner, first);
-	fsimg_meta_put_u64(owner + 8, count);
-	return (fsimg_stream_append(exfat_state(reader)->owners, owner,
-	    sizeof(owner), NULL, error));
+	return (fsimg_owner_runs_append(exfat_state(reader)->owners, first, count,
+	    error));
 }
 
 /* Claim an index built while opening, before full verification created the
- * owner stream; the caller must have created it. Every later index claims its
+ * owner runs; the caller must have created them. Every later index claims its
  * runs as it is built.
  */
 fsimg_status_t

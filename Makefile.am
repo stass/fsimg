@@ -46,7 +46,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/extract/extract.c lib/extract/extract.h \
 	lib/extract/mtree-writer.c lib/extract/mtree-writer.h \
 	lib/meta/meta.h lib/meta/store.c lib/meta/records.c lib/meta/sort.c \
-	lib/meta/extent.c \
+	lib/meta/extent.c lib/meta/runs.c \
 	lib/write/writer.h lib/write/writer.c lib/write/catalog.c \
 	lib/write/emit.h lib/write/emit.c \
 	lib/source/source.h lib/source/source.c lib/source/scan.c \
@@ -125,7 +125,7 @@ example_read_slice_SOURCES = examples/read-slice.c examples/example.h
 example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
-test_programs = test-core test-private test-io test-meta test-meta-sort test-unicode test-format \
+test_programs = test-core test-private test-io test-meta test-meta-sort test-meta-runs test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-driver-contracts test-layer-contracts test-zlib-memory \
 	test-metadata-loss \
@@ -173,6 +173,8 @@ test_meta_SOURCES = test/meta.c test/test.h
 test_meta_LDADD = libfsimg.la
 test_meta_sort_SOURCES = test/meta-sort.c test/test.h
 test_meta_sort_LDADD = libfsimg.la
+test_meta_runs_SOURCES = test/meta-runs.c test/test.h
+test_meta_runs_LDADD = libfsimg.la
 test_unicode_SOURCES = test/unicode.c test/test.h
 test_unicode_LDADD = libfsimg.la
 test_format_SOURCES = test/format.c test/test.h
