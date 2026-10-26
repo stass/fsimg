@@ -64,6 +64,16 @@ is returned as an I/O error retaining EINTR. Cancellation is polled between
 retries, including flush retries, so interruption cannot create an endless
 uncancellable loop.
 
+A [device root](design-device-input.md#arbitrary-byte-reads-over-device-sectors)
+is read-only and has a discovered fixed capacity. One charged buffer
+translates byte requests into enclosing whole-sector reads within that
+capacity, returning only requested, confirmed bytes. Each adapter attempt
+makes at most one host read, retaining the common loop's work, interruption
+and cancellation accounting. Slices share the buffer and descriptor; an
+enclosing sector may extend outside a slice but its extra bytes never reach
+the slice's caller. Device roots answer no zero ranges and never use file
+hole discovery or writable-file initialization.
+
 Capabilities distinguish positional access, resize, flush and zeroing. Every
 object also answers the next range at or after an offset that it knows reads
 as zero, under the [hole design](design-holes.md): a file fsimg created

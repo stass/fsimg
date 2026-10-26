@@ -227,6 +227,7 @@ test_mount_source(const char *path)
 	CHECK(close(alias) == 0);
 	CHECK(close(lower) == 0);
 	fixture.request.input_fd = -1;
+	fixture.request.input = (fsimg_input_t){ 0 };
 	fixture.request.root_fds = &source;
 	fixture.request.root_paths = image_root;
 	fixture.request.root_count = 1;
@@ -340,6 +341,8 @@ fixture_open_format(worker_fixture_t *fixture, const char *format)
 	CHECK(fsimg_host_executable(fixture->executable, sizeof(fixture->executable)) == 0);
 	fsimg_worker_request_init(&fixture->request);
 	fixture->request.input_fd = fixture->input;
+	CHECK(fsimg_input_prepare(fixture->request.input_fd, NULL, NULL,
+	    &fixture->request.input, NULL) == FSIMG_OK);
 	fixture->request.scratch_fd = fixture->scratch;
 	fixture->request.limits.memory_bytes = UINT64_C(16) * 1024 * 1024;
 	fixture->request.kind = FSIMG_JOB_INFO;
@@ -489,6 +492,7 @@ test_operations(const char *format)
 	fixture.request.kind = FSIMG_JOB_CREATE;
 	fixture.request.selection = "/";
 	fixture.request.input_fd = -1;
+	fixture.request.input = (fsimg_input_t){ 0 };
 	fixture.request.root_fds = &fixture.source;
 	fixture.request.root_paths = image_root;
 	fixture.request.root_count = 1;
@@ -546,6 +550,7 @@ test_partitioned_create(void)
 	fixture.request.kind = FSIMG_JOB_CREATE;
 	fixture.request.selection = "/";
 	fixture.request.input_fd = -1;
+	fixture.request.input = (fsimg_input_t){ 0 };
 	fixture.request.root_fds = &fixture.source;
 	fixture.request.root_paths = image_root;
 	fixture.request.root_count = 1;
@@ -596,6 +601,7 @@ create_request(worker_fixture_t *fixture, const char *stack)
 	fixture->request.flags = 0;
 	fixture->request.selection = "/";
 	fixture->request.input_fd = -1;
+	fixture->request.input = (fsimg_input_t){ 0 };
 	fixture->request.root_fds = &fixture->source;
 	fixture->request.root_paths = image_root;
 	fixture->request.root_count = 1;
@@ -677,12 +683,15 @@ test_container_create(void)
 	fixture.request.root_count = 0;
 	fixture.request.output_fd = -1;
 	fixture.request.input_fd = openat(fixture.output, "image", O_RDONLY);
+	CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+	    &fixture.request.input, NULL) == FSIMG_OK);
 	CHECK(fixture.request.input_fd != -1);
 	bzero(&error, sizeof(error));
 	CHECK(run(&fixture, &error) == FSIMG_ECORRUPT);
 	CHECK(error.operation == FSIMG_OP_IMAGE && strcmp(error.path, "dmg") == 0);
 	CHECK(close(fixture.request.input_fd) == 0);
 	fixture.request.input_fd = -1;
+	fixture.request.input = (fsimg_input_t){ 0 };
 	CHECK(unlinkat(fixture.output, "image", 0) == 0);
 	fixture_close(&fixture);
 }
@@ -733,6 +742,8 @@ test_compressed_create(void)
 	fixture.request.output_fd = fixture.request.raw_fd = -1;
 	fixture.request.spool_fd = raw_intermediate(&fixture);
 	fixture.request.input_fd = openat(fixture.output, "image", O_RDONLY);
+	CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+	    &fixture.request.input, NULL) == FSIMG_OK);
 	CHECK(fixture.request.input_fd != -1);
 	bzero(&error, sizeof(error));
 	CHECK(run(&fixture, &error) == FSIMG_ECORRUPT);
@@ -740,6 +751,7 @@ test_compressed_create(void)
 	CHECK(close(fixture.request.input_fd) == 0 &&
 	    close(fixture.request.spool_fd) == 0);
 	fixture.request.input_fd = fixture.request.spool_fd = -1;
+	fixture.request.input = (fsimg_input_t){ 0 };
 	CHECK(unlinkat(fixture.output, "image", 0) == 0);
 	fixture_close(&fixture);
 }
@@ -1245,7 +1257,12 @@ test_incomplete_extraction(void)
 	CHECK(fd != -1);
 	CHECK(ftruncate(fd, SCENARIO_PARTIAL_EXTRACTION) == 0);
 	CHECK(fchmod(fd, 0700) == 0);
+	CHECK(close(fd) == 0);
+	fd = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+	CHECK(fd != -1);
 	fixture.request.input_fd = fd;
+	CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+	    &fixture.request.input, NULL) == FSIMG_OK);
 	fixture.request.output_fd = fixture.output;
 	fixture.request.kind = FSIMG_JOB_EXTRACT;
 	fixture.request.sandbox = FSIMG_SANDBOX_OFF;
@@ -1273,7 +1290,12 @@ test_skipped_extraction(void)
 	CHECK(fd != -1);
 	CHECK(ftruncate(fd, SCENARIO_SKIPPED_EXTRACTION) == 0);
 	CHECK(fchmod(fd, 0700) == 0);
+	CHECK(close(fd) == 0);
+	fd = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+	CHECK(fd != -1);
 	fixture.request.input_fd = fd;
+	CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+	    &fixture.request.input, NULL) == FSIMG_OK);
 	fixture.request.output_fd = fixture.output;
 	fixture.request.kind = FSIMG_JOB_EXTRACT;
 	fixture.request.sandbox = FSIMG_SANDBOX_OFF;
@@ -1304,7 +1326,12 @@ test_omitted_extraction(void)
 	CHECK(fd != -1);
 	CHECK(ftruncate(fd, SCENARIO_OMITTED_EXTRACTION) == 0);
 	CHECK(fchmod(fd, 0700) == 0);
+	CHECK(close(fd) == 0);
+	fd = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+	CHECK(fd != -1);
 	fixture.request.input_fd = fd;
+	CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+	    &fixture.request.input, NULL) == FSIMG_OK);
 	fixture.request.output_fd = fixture.output;
 	fixture.request.kind = FSIMG_JOB_EXTRACT;
 	fixture.request.sandbox = FSIMG_SANDBOX_OFF;
@@ -1333,7 +1360,12 @@ test_forged_publication(void)
 		CHECK(fd != -1);
 		CHECK(ftruncate(fd, mode) == 0);
 		CHECK(fchmod(fd, 0700) == 0);
+		CHECK(close(fd) == 0);
+		fd = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+		CHECK(fd != -1);
 		fixture.request.input_fd = fd;
+		CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+		    &fixture.request.input, NULL) == FSIMG_OK);
 		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
 		CHECK(run(&fixture, &error) == (mode == SCENARIO_ACK_ERROR ? FSIMG_ECORRUPT : FSIMG_EIO));
 		CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
@@ -1374,7 +1406,12 @@ test_forged(void)
 		CHECK(fd != -1);
 		CHECK(ftruncate(fd, mode) == 0);
 		CHECK(fchmod(fd, 0700) == 0);
+		CHECK(close(fd) == 0);
+		fd = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+		CHECK(fd != -1);
 		fixture.request.input_fd = fd;
+		CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+		    &fixture.request.input, NULL) == FSIMG_OK);
 		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
 		fixture.request.kind = FSIMG_JOB_INFO;
 		fixture.request.seconds = 5;
@@ -1442,7 +1479,12 @@ test_transport(worker_scenario_t mode)
 	if (mode == SCENARIO_STARTUP_NONREADER || mode == SCENARIO_PREMATURE_RAW || mode == SCENARIO_STARTUP_ERROR) {
 		fd = openat(fixture.parent, "fake", O_CREAT | O_EXCL | O_RDWR, 0700);
 		CHECK(fd != -1 && ftruncate(fd, mode) == 0 && fchmod(fd, 0700) == 0);
+		CHECK(close(fd) == 0);
+		fd = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+		CHECK(fd != -1);
 		fixture.request.input_fd = fd;
+		CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+		    &fixture.request.input, NULL) == FSIMG_OK);
 		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
 	}
 	if (mode == SCENARIO_STARTUP_NONREADER || mode == SCENARIO_STARTUP_ERROR) {
@@ -1472,6 +1514,8 @@ test_transport(worker_scenario_t mode)
 		fd = openat(fixture.parent, "large", O_RDONLY);
 		CHECK(fd != -1);
 		fixture.request.input_fd = fd;
+		CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
+		    &fixture.request.input, NULL) == FSIMG_OK);
 		fixture.request.selection = "/BIG";
 		CHECK(pipe(channels) == 0);
 		output = channels[1];

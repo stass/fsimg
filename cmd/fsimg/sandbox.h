@@ -5,13 +5,13 @@
 #define FSIMG_SANDBOX_H
 
 #include "fsimg.h"
+#include "input.h"
 
 /*
  * The worker's complete filesystem authority, one field per role. The
  * profile grants each role exactly what the worker does with it:
  *
- * input	read a read-only regular image file, or under input_pipe
- *		the read end of the coordinator's input pipe
+ * input	read the prepared regular file, finite disk device, or relay pipe
  * staging	create the staged image inside it; remove nothing
  * destination	create directories and files beneath it; remove nothing
  * scratch	create, use and unlink its own files; no directories
@@ -19,8 +19,7 @@
  * raw		read, write and resize the unlinked raw intermediate
  * spool	read, write and resize the unlinked spool
  * manifest	write and resize the staged x --mtree manifest
- * settings	read each read-only regular file a create's file settings
- *		name, admitted as the image input is
+ * settings	read each read-only regular file a create's file settings name
  *
  * The coordinator, not the worker, removes staging and destination
  * objects. -1 marks an absent role. roots is the first of root_count
@@ -40,7 +39,8 @@ typedef struct fsimg_sandbox_caps {
 	int		 spool;
 	int		 manifest;
 	int		 settings[FSIMG_SANDBOX_SETTINGS];
-	bool		 input_pipe;
+	/* Borrowed immutable image description; NULL for an absent input. */
+	const fsimg_input_t *image_input;
 	int		 job;
 	int		 control;
 	int		 data;

@@ -345,7 +345,7 @@ static const char help_memory[] =
 static const char help_read_common[] =
     "    -F stack        Force layers, such as fat32, fat32/gpt or fat32/-/-,\n"
     "                    retaining validation\n"
-    "    -f image        Read a seekable regular image file\n"
+    "    -f image        Read a regular image file or disk device\n"
     "    -h              Show mode help\n"
     "    --json          Write newline-delimited JSON\n";
 static const char help_slice[] =

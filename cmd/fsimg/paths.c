@@ -328,7 +328,7 @@ prepare_scratch(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	return (status);
 }
 
-/* The image of a read mode: a regular file, or standard input under -f -,
+/* The image of a read mode: a finite file/device, or standard input under -f -,
  * which the coordinator relays to the worker unread and which must not be
  * a terminal. A volume range given by --offset and --length addresses the
  * disk, which a container or compression can make longer than the file,
@@ -338,36 +338,50 @@ prepare_scratch(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
  * since only the worker learns whether the input needs one.
  */
 static fsimg_status_t
+input_ready(void *argument, fsimg_error_t *error)
+{
+	fsimg_cli_options_t *options = argument;
+
+	if ((options->interrupted != NULL && *options->interrupted != 0) ||
+	    (options->request.deadline_milliseconds != 0 &&
+	    fsimg_cli_clock() >= options->request.deadline_milliseconds))
+		return (fsimg_error_set(error, FSIMG_ECANCELLED, 0,
+		    FSIMG_OP_IO, "input preparation cancelled or deadline exceeded"));
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
 open_input(fsimg_cli_options_t *options, fsimg_error_t *error)
 {
 	fsimg_worker_request_t *request = &options->request;
-	fsimg_host_file_t identity;
 	fsimg_status_t status;
 
 	status = prepare_spool(request, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if ((request->flags & FSIMG_JOB_STDIN) != 0) {
+	if (request->input.kind == FSIMG_INPUT_STREAM) {
 		if (isatty(STDIN_FILENO))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
 			    "refusing to read an image from a terminal"));
 		return (FSIMG_OK);
 	}
+	status = input_ready(options, error);
+	if (status != FSIMG_OK)
+		return (status);
 	request->input_fd = fsimg_host_source_open(AT_FDCWD, options->image, false);
 	if (request->input_fd == -1 && errno == ELOOP)
 		return (kind_error(error, ELOOP, "image is a symbolic link",
 		    options->image));
 	if (request->input_fd == -1 && errno == ENXIO)
-		return (kind_error(error, ENXIO, "image is not a regular file",
+		return (kind_error(error, ENXIO, "image is not a readable disk or file",
 		    options->image));
 	if (request->input_fd == -1)
 		return (path_error(error, "cannot open image", options->image));
-	if (fsimg_host_file(request->input_fd, &identity) == -1)
-		return (host_error(error, "image identity query failed"));
-	if (identity.kind != FSIMG_HOST_FILE)
-		return (kind_error(error, 0, "image is not a regular file",
-		    options->image));
-	return (FSIMG_OK);
+	status = fsimg_input_prepare(request->input_fd, input_ready, options,
+	    &request->input, error);
+	if (status != FSIMG_OK)
+		fsimg_error_path(error, options->image);
+	return (status);
 }
 
 /*
@@ -1233,6 +1247,8 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	if (identity.kind != FSIMG_HOST_FILE)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_IO, "staged image is not a regular file"));
+	verify->input = (fsimg_input_t){ .kind = FSIMG_INPUT_FILE,
+	    .length = identity.length, .quantum = 1 };
 	return (prepare_spool(verify, error));
 }
 

@@ -131,7 +131,8 @@ The image: input for
 .Cm x , t , W
 and
 .Cm i ,
-a regular file opened without following a final symbolic link, or
+a regular file or finite read-only disk device opened without following a
+final symbolic link, or
 standard input for
 .Ar - ;
 output for
@@ -140,6 +141,26 @@ a pathname that must not exist, or standard output for
 .Ar - .
 Required except with
 .Cm c Fl n .
+.Pp
+Disk inputs include macOS block and raw disk nodes, Linux block devices,
+and FreeBSD disk providers. They are read directly without a payload copy;
+compressed contents retain their spool requirements.
+The invoking user needs permission to read the device.
+Named FIFOs, terminals, sockets and non-disk special files are refused.
+Standard input retains stream semantics even if redirected from a disk.
+.Pp
+Keep the input medium stable and writable output and scratch storage on
+separate backing storage. Device-node metadata cannot prove that a mounted
+filesystem or another writer has left the bytes unchanged.
+fsimg does not create snapshots, enumerate mounts or change device state.
+A whole-disk descriptor grants the worker access to the entire disk;
+partition selection narrows parser operations, not descriptor authority.
+The MBR profile requires a device with 512-byte logical sectors; GPT sector
+size must match the raw device. Byte-range selection bypasses the table.
+Creation uses fresh regular files or standard output.
+Device names without an image suffix require
+.Cm x Fl E Fl C Ar empty-directory
+for directory extraction, under the ordinary destination checks.
 .It Fl F Ar stack
 The image's layers, inner to outer, separated by
 .Ql / ;

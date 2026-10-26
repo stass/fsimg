@@ -148,14 +148,24 @@ fsimg_status_t fsimg_io_slice(fsimg_io_t *parent, uint64_t offset,
 void fsimg_io_free(fsimg_io_t *io);
 ```
 
-The FD constructor duplicates a regular-file descriptor and checks its access
-mode. A requested read-only OS capability requires an `O_RDONLY` descriptor;
+The FD constructor duplicates a regular-file descriptor or, with read-only
+access, a finite disk-device descriptor admitted by the
+[device-input contract](design-device-input.md#library-entry-points-and-ownership).
+It checks the duplicate's type, access and geometry before returning an
+object. A requested read-only OS capability requires an `O_RDONLY` descriptor;
 an access bit does not downgrade an existing `O_RDWR` descriptor. Writable
 adapters reject `O_APPEND` and unsupported direct-I/O modes. The constructor
 does not clear shared status flags, change the caller's file position, or take
 ownership of the original descriptor. The caller must keep shared file-status
-flags stable for the adapter's lifetime. Raw devices are not accepted.
-The object is an external file. Read-only, it answers zero ranges from the
+flags stable for the adapter's lifetime.
+A device object has fixed size, supports arbitrary byte reads through its
+bounded sector-transfer buffer, and offers no mutation or durable-flush
+capability. Construction queries host geometry; applications without those
+rights prepare it before confinement or supply positional callbacks. Device
+inputs have no regular-file change token or hole knowledge, and the caller
+guarantees stable, physically disjoint input/output storage as that contract
+states. No public capacity override or writable-device constructor exists.
+A regular-file object is an external file. Read-only, it answers zero ranges from the
 host's hole report after syncing the file once, bounded by the length the
 query observes and never covering the chunk that holds its last byte, fails
 with `FSIMG_ESOURCE_CHANGED` when the file is observed shorter than its
@@ -170,6 +180,10 @@ consults a hole report, and a sink without a fresh file's record is zeroed
 in full.
 A slice borrows its parent, retains backing identity/ranges for alias checks,
 and has a fixed length; it never resizes its parent. The parent must outlive it.
+A slice also preserves its immediate parent's immutable logical sector
+provenance under the [device-input contract](design-device-input.md#raw-device-sectors-and-partition-tables).
+This representation fact is independent of its backing device's physical
+transfer alignment and cannot be restored from backing identity.
 A reader/writer borrows its I/O object for the documented operation lifetime.
 Objects from different contexts cannot be combined.
 
@@ -588,8 +602,16 @@ for it, the automatic one yielding the whole disk as the volume.
 disk) under the [selection rules](design-layers.md#partition-selection) and
 returns a checked read-only slice of the disk. The slice borrows the image,
 which must outlive it, and is released with `fsimg_io_free()`; it is the
-input to `fsimg_reader_open()`, which stays unaware of layers. `verify()`
-checks every layer with the [layer verification scope](design-layers.md#verification-scope);
+input to `fsimg_reader_open()`, which stays unaware of layers. A selected
+disk can also be passed to `fsimg_image_open()`: its logical sector
+provenance follows the selected view, never its storage root. In
+particular, a fixed VHD's decoded disk selected with `FSIMG_SELECT_DISK`
+and reopened keeps unknown logical sector size even when the VHD resides
+on a device; ordinary nested slices preserve that same fact. The original
+image must outlive its selection and the reopened image that borrows it.
+
+`verify()` checks every layer with the
+[layer verification scope](design-layers.md#verification-scope);
 `FSIMG_VERIFY_PAYLOAD` adds the read-through checks. Its report names the
 container and the scheme it checked and the partitions whose bounds it
 checked, with payload scope when read-through decoded the container's

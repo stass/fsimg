@@ -1352,7 +1352,7 @@ interpret_read(cli_parse_t *parse)
 	if (strcmp(options->image, "-") == 0) {
 		if (strcmp(options->scratch, "-") == 0)
 			return (syntax(parse, "-T - conflicts with an image on standard input"));
-		request->flags |= FSIMG_JOB_STDIN;
+		request->input.kind = FSIMG_INPUT_STREAM;
 	}
 	if (fsimg_job_format(request)[0] == '\0' || parse->reserved)
 		return (FSIMG_OK);

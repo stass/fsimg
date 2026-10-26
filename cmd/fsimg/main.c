@@ -136,6 +136,7 @@ main(int argc, char **argv)
 		return (1);
 	fsimg_cli_paths_init(&paths);
 	status = fsimg_cli_parse(argc, argv, &options, &error);
+	options.interrupted = &interrupted;
 	bzero(&budget, sizeof(budget));
 	options.request.output_budget = &budget;
 	invalid_syntax = status != FSIMG_OK && options.syntax_error;

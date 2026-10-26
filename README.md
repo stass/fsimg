@@ -43,6 +43,17 @@ selects one; `--offset=`/`--length=` bypass the table. `fsimg i` lists the
 table and marks the selected partition, and `fsimg W` checks the table with
 the volume.
 
+Named input also accepts finite read-only disk devices, for example
+`fsimg i -f /dev/disk10` on macOS, without copying the disk into a spool.
+macOS block/raw nodes, Linux block devices and FreeBSD disk providers use
+bounded positional reads. Device permissions still apply. Keep media stable
+and writable output/scratch on separate backing storage: a mounted filesystem
+or another writer can change the input, and device timestamps cannot prove
+otherwise. fsimg does not mount, unmount or snapshot the device. Standard
+input keeps its existing stream/spool behavior.
+For directory extraction use `fsimg x -E -f /dev/disk10 -C empty-dir` with
+an existing empty private directory.
+
 DMG, fixed VHD and Android sparse image containers are read the same way:
 `fsimg xf installer.dmg` unwraps the DMG, the GPT inside it and the volume
 inside that. DMG chunks may be stored, zero or zlib-compressed, as `hdiutil`

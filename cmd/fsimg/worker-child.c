@@ -243,7 +243,7 @@ prepare_capabilities(worker_child_t *child, unsigned capabilities,
 		if (holds(capabilities, c))
 			caps->settings[i] = FSIMG_CHILD_SLOT(c);
 	}
-	caps->input_pipe = (child->request.flags & FSIMG_JOB_STDIN) != 0;
+	caps->image_input = &child->request.input;
 	caps->job = FSIMG_CHILD_JOB;
 	caps->control = FSIMG_CHILD_CONTROL;
 	if (kind == FSIMG_JOB_CAT || stream)
@@ -307,10 +307,11 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 			return (status);
 	}
 	/* A stream stays a bare descriptor, which the image borrows. */
-	if (caps->input != -1 && !caps->input_pipe) {
+	if (caps->input != -1 && child->request.input.kind != FSIMG_INPUT_STREAM) {
 		fd = child->raw_caps[FSIMG_CAPABILITY_INPUT];
 		child->raw_caps[FSIMG_CAPABILITY_INPUT] = -1;
-		status = fsimg_io_adopt_fd(child->ctx, fd, FSIMG_IO_READ, &child->input, error);
+		status = fsimg_io_adopt_input(child->ctx, fd, &child->request.input,
+		    &child->input, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}

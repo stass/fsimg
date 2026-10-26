@@ -228,13 +228,17 @@ typedef struct fsimg_io_ops {
  * after advancing. Other errors are terminal. Zero-length requests do no I/O.
  * At most 1024 consecutive interruptions without progress are retried;
  * cancellation is checked between retries, including flush retries.
- * FD adapters duplicate regular-file FDs and preserve shared flags/position.
+ * FD adapters duplicate regular-file FDs and read-only finite disk device
+ * FDs, preserving shared flags/position. Devices discover geometry at
+ * construction, translate byte reads through a charged sector buffer, and
+ * offer no writes, resize, flush or hole knowledge. The caller keeps media
+ * stable and output/scratch physically disjoint, including mounted aliases.
  * Read-only authority requires O_RDONLY. Keep shared flags and storage stable.
  * A slice borrows its parent, has fixed length, and cannot resize its parent.
  * Raw writes can leave partial output. No-flush sinks give logical completion;
  * durable completion requires FSIMG_IO_DURABLE plus a flush callback.
  * next_zero_range is optional, requires read_at and spares reads only; a
- * read-only descriptor object instead answers from the host's hole report
+ * read-only regular-file object instead answers from the host's hole report
  * after syncing the file once, never for the chunk holding its last byte,
  * and reads in full when the sync fails. Its queries seek the file offset
  * the descriptor shares with the caller's and restore it before

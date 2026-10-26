@@ -273,6 +273,7 @@ answers is about the number of zero runs, not of chunks.
 | Callback object | Its `next_zero_range` callback when present, validated against the contract; otherwise nothing |
 | External file, read-only | The host's hole report for the file, `SEEK_HOLE` then `SEEK_DATA`, clipped to the length `fstat` then observes and to end before the object's last byte, once the file has been synced; `FSIMG_ESOURCE_CHANGED` when the observed length is below the declared one; nothing once the sync has failed or the host lacks the interface |
 | External file, writable | Nothing: a sink is never asked for reads |
+| Read-only disk device | Nothing; device capacity and allocation state provide no zero-content proof, and neither sync nor host hole queries run |
 | Scratch object | Nothing; it is never asked |
 
 A container's answer costs record reads through the index's cached-record

@@ -320,7 +320,7 @@ streaming(const fsimg_worker_request_t *request)
 static bool
 reading_stream(const fsimg_worker_request_t *request)
 {
-	return ((request->flags & FSIMG_JOB_STDIN) != 0);
+	return (request->input.kind == FSIMG_INPUT_STREAM);
 }
 
 /* The name a create request gives a layer slot, "" when it names none. */
@@ -741,7 +741,6 @@ prepare_request(worker_supervisor_t *state, fsimg_error_t *error)
 {
 	const fsimg_worker_request_t *request = state->request;
 	worker_request_cursor_t *outbound = &state->outbound;
-	fsimg_host_file_t identity;
 	uint64_t started;
 	fsimg_status_t status;
 
@@ -756,16 +755,13 @@ prepare_request(worker_supervisor_t *state, fsimg_error_t *error)
 		state->deadline = started + request->seconds * 1000;
 	state->output_limit = request->limits.max_output_bytes;
 	if (request->input_fd != -1) {
-		if (fsimg_host_file(request->input_fd, &identity) == -1)
-			return (fsimg_error_set(error, FSIMG_EIO, errno,
-			    FSIMG_OP_CONTEXT, "worker input identity query failed"));
-		if (identity.kind != FSIMG_HOST_FILE)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CONTEXT, "worker input must be a bounded regular file"));
+		status = fsimg_input_check(request->input_fd, &request->input, error);
+		if (status != FSIMG_OK)
+			return (status);
 		/* The disk is the file until the IMAGE record says a container
 		 * yields another; the volume's bound follows from it there.
 		 */
-		state->disk_bytes = identity.length;
+		state->disk_bytes = request->input.length;
 	}
 	status = fsimg_job_encode(request, outbound->wire + FSIMG_FRAME_HEADER, error);
 	if (status != FSIMG_OK)

@@ -58,9 +58,16 @@ scratch, spool, work and traversal limits.
 A handle is used serially; independent contexts may be used concurrently.
 Callbacks cannot re-enter an active context.
 .Sh OWNERSHIP
-FD adapters duplicate borrowed regular-file descriptors, preserving position
-and shared flags.
+FD adapters duplicate borrowed regular-file descriptors or finite disk-device
+descriptors requested with FSIMG_IO_READ, preserving position and shared flags.
 Read authority requires an O_RDONLY descriptor.
+Device geometry discovery runs during construction, before any application
+confinement that denies its queries. Device reads use a bounded charged
+sector buffer and expose arbitrary byte ranges; device objects cannot write,
+resize, flush, or report zero ranges.
+The caller keeps media stable and writable output/scratch physically disjoint
+from it, including aliases through mounted filesystems.
+Device metadata supplies no snapshot or regular-file change guarantee.
 Slices borrow their parent, have checked fixed bounds and cannot resize it.
 Callback tables are copied; callback state, buffers and backing storage remain
 caller-owned and stable for the documented lifetime.
@@ -71,7 +78,7 @@ FSIMG_EIO and otherwise encodes the reported range as zeros without reading
 it, so a callback that reports data as zero puts zeros in the output.
 Zeroing never consults it: an object the library did not create empty is
 zeroed with zero_range or written zeros in full.
-A read-only descriptor object answers from the host's hole report instead,
+A read-only regular-file object answers from the host's hole report instead,
 after syncing its file once, and never for the chunk holding its last byte,
 which is read so that a file truncated after the lookup fails the read; a
 lookup that finds the file shorter than the object fails with

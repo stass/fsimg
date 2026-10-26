@@ -46,6 +46,9 @@ void fsimg_host_getopt_reset(void);
 int fsimg_host_random(void *, size_t);
 
 bool fsimg_host_offset(uint64_t, off_t *);
+bool fsimg_host_disk_mode(mode_t);
+int fsimg_host_disk_sector(int, uint64_t *);
+int fsimg_host_disk_size(int, uint64_t, uint64_t *);
 int fsimg_host_dup(int);
 /* The host's first hole at or after an offset: its start and the data
  * after it, UINT64_MAX where the host answers ENXIO, and the file length

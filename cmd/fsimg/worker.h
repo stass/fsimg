@@ -7,6 +7,7 @@
 #include <signal.h>
 
 #include "layer.h"
+#include "input.h"
 #include "protocol.h"
 
 typedef enum fsimg_job_kind {
@@ -41,10 +42,6 @@ typedef enum fsimg_confinement {
  * channel, not to staging.
  */
 #define FSIMG_JOB_STDOUT 0x10u
-/* Reading only: the image is standard input, arriving on the input pipe
- * the input relay fills.
- */
-#define FSIMG_JOB_STDIN 0x40u
 
 /*
  * The worker's single-descriptor capabilities, the prepared descriptors it
@@ -145,7 +142,9 @@ typedef struct fsimg_worker_request {
 	uint32_t	 root_count;
 	unsigned	 flags;
 	uint32_t	 codepage;
-	/* A read job's image file, or -1 when the image is standard input. */
+	/* The prepared image description; its kind selects positional/relay I/O. */
+	fsimg_input_t	 input;
+	/* A positional image descriptor, or -1 for a relay/absent input. */
 	int		 input_fd;
 	/* The staging directory of CREATE, or the destination of EXTRACT. */
 	int		 output_fd;

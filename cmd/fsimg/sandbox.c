@@ -182,9 +182,20 @@ fsimg_sandbox_install(int input_fd, int destination_fd, int source_fd,
     fsimg_error_t *error)
 {
 	fsimg_sandbox_caps_t caps;
+	fsimg_input_t input = { 0 };
+	fsimg_status_t status;
 
 	fsimg_sandbox_caps_init(&caps);
 	caps.input = input_fd;
+	if (input_fd != -1) {
+		status = check_input(input_fd, false, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = fsimg_input_prepare(input_fd, NULL, NULL, &input, error);
+		if (status != FSIMG_OK)
+			return (status);
+		caps.image_input = &input;
+	}
 	caps.destination = destination_fd;
 	caps.roots = source_fd;
 	caps.root_count = source_fd == -1 ? 0 : 1;
@@ -247,9 +258,9 @@ check_input(int fd, bool pipe, fsimg_error_t *error)
 }
 
 /* Every role must be the object its grant assumes before any backend runs:
- * the input a read-only regular file, or the read end of a pipe exactly when
- * input_pipe says so, and each file setting a read-only regular file like
- * it; the three writable roles directories; each root a read-only directory
+ * the prepared image input a read-only file/device or relay pipe, and each
+ * file setting a read-only regular file; the three writable roles
+ * directories; each root a read-only directory
  * or regular file; the raw intermediate and the spool read/write regular
  * files no name reaches; and the manifest a write-only regular file with
  * its one staged name. The library checks those three files again when it
@@ -265,9 +276,22 @@ check_roles(const fsimg_sandbox_caps_t *caps, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	if (caps->input != -1) {
-		status = check_input(caps->input, caps->input_pipe, error);
+		if (caps->image_input == NULL)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "sandbox image description is missing"));
+		status = fsimg_input_validate(caps->image_input, error);
 		if (status != FSIMG_OK)
 			return (status);
+		if (caps->image_input->kind == FSIMG_INPUT_STREAM)
+			status = check_input(caps->input, true, error);
+		else
+			status = fsimg_input_check(caps->input, caps->image_input, error);
+		if (status != FSIMG_OK)
+			return (status);
+	} else if (caps->image_input != NULL &&
+	    caps->image_input->kind != FSIMG_INPUT_ABSENT) {
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CONTEXT, "sandbox image descriptor is missing"));
 	}
 	for (unsigned i = 0; i < FSIMG_SANDBOX_SETTINGS; i++) {
 		if (caps->settings[i] == -1)

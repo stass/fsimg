@@ -1,5 +1,14 @@
 fsimg 0.1.0 (unreleased)
 
+Reading accepts finite read-only disk devices through `-f`, including macOS
+block/raw nodes, Linux block devices and FreeBSD disk providers. The library's
+FD constructor supports the same read-only inputs. Sector-aligned host reads
+serve arbitrary bounded byte requests without copying an uncompressed disk
+into a spool. Geometry discovery precedes confinement; workers receive no
+device ioctl authority. Device contents must remain stable, with writable
+output and scratch disjoint from the input. Directory extraction from device
+names without an image suffix uses `x -E -C empty-directory`.
+
 Writing creates QNX boot images. `-F ifs/ifsboot`, and
 `fsimg_image_wrap()` of an existing ImageFS, write the startup header from
 the `ifsboot:machine`, `virtual` and five address settings, which have no

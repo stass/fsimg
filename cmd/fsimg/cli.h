@@ -62,6 +62,7 @@ typedef struct fsimg_cli_options {
 	bool		 verify_staged;	/* cW: verify the staged image before publication. */
 	bool		 extract_here;	/* -E: extract into the -C directory itself. */
 	bool		 random_uuid;	/* paths generates the volume UUID */
+	const volatile sig_atomic_t *interrupted; /* Borrowed coordinator signal */
 } fsimg_cli_options_t;
 
 /* What a staged output is called; private to paths.c. */

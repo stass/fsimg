@@ -56,6 +56,7 @@ write_seed(const char *path)
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_INFO;
 	request.input_fd = 0;
+	request.input = (fsimg_input_t){ .kind = FSIMG_INPUT_FILE, .quantum = 1 };
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_JOB, raw, FSIMG_JOB_BYTES, NULL) == FSIMG_OK);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_SELECTION, "/", 1, NULL) == FSIMG_OK);
@@ -216,13 +217,14 @@ test_job_stream_flags(void)
 	static const struct {
 		fsimg_job_kind_t kind;
 		unsigned	 flags;
+		fsimg_input_kind_t input;
 		bool		 valid;
 	} cases[] = {
-		{ FSIMG_JOB_LIST, FSIMG_JOB_STDIN, true },
-		{ FSIMG_JOB_LIST, FSIMG_JOB_STDOUT, false },
-		{ FSIMG_JOB_CREATE, FSIMG_JOB_STDOUT, true },
-		{ FSIMG_JOB_CREATE, FSIMG_JOB_STDIN, false },
-		{ FSIMG_JOB_PLAN, FSIMG_JOB_STDOUT, false },
+		{ FSIMG_JOB_LIST, 0, FSIMG_INPUT_STREAM, true },
+		{ FSIMG_JOB_LIST, FSIMG_JOB_STDOUT, FSIMG_INPUT_ABSENT, false },
+		{ FSIMG_JOB_CREATE, FSIMG_JOB_STDOUT, FSIMG_INPUT_ABSENT, true },
+		{ FSIMG_JOB_CREATE, 0, FSIMG_INPUT_STREAM, false },
+		{ FSIMG_JOB_PLAN, FSIMG_JOB_STDOUT, FSIMG_INPUT_ABSENT, false },
 	};
 	/* The compression a job carries must be one its side can apply: a
 	 * create writes it and a read decodes it.
@@ -248,6 +250,7 @@ test_job_stream_flags(void)
 		fsimg_worker_request_init(&request);
 		request.kind = cases[i].kind;
 		request.flags = cases[i].flags;
+		request.input.kind = cases[i].input;
 		if (fsimg_job_has_roots(request.kind)) {
 			request.root_paths = image_root;
 			request.root_count = 1;
@@ -277,7 +280,7 @@ test_job_stream_flags(void)
 	/* A read job's standard input is its input capability. */
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_LIST;
-	request.flags = FSIMG_JOB_STDIN;
+	request.input.kind = FSIMG_INPUT_STREAM;
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
@@ -757,7 +760,7 @@ test_job_mountpoint(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6);
+	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24);
 	memset(longest, 'm', FIELD - 1);
 	memset(longer, 'm', FIELD);
 	fsimg_worker_request_init(&request);
@@ -1358,6 +1361,77 @@ test_image_records(void)
 	CHECK(!fsimg_wire_partition_frame_valid(&frame, 4, UINT64_MAX));
 }
 
+/* Mutate independent wire fields of an otherwise valid device job. Neither
+ * descriptor metadata nor a native struct can supply missing wire bounds.
+ */
+static void
+test_job_device_input(void)
+{
+	enum { KIND = FSIMG_JOB_BYTES - 24, LENGTH = KIND + 8,
+	    QUANTUM = LENGTH + 8, CAPABILITIES = 23 * 8 };
+	static const struct {
+		unsigned offset;
+		uint64_t value;
+	} invalid[] = {
+		{ KIND, FSIMG_INPUT_STREAM + 1 },
+		{ LENGTH, 0 },
+		{ LENGTH, 65535 },
+		{ LENGTH, UINT64_C(1) << 63 },
+		{ QUANTUM, 0 },
+		{ QUANTUM, 1536 },
+		{ KIND, FSIMG_INPUT_FILE },
+		{ KIND, FSIMG_INPUT_ABSENT },
+		{ KIND, FSIMG_INPUT_STREAM },
+		{ CAPABILITIES, 0 }
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES], mutated[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.input_fd = 0;
+	request.input = (fsimg_input_t){ .kind = FSIMG_INPUT_DEVICE,
+	    .length = 65536, .quantum = 4096 };
+	request.kind = FSIMG_JOB_INFO;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.input.kind == FSIMG_INPUT_DEVICE &&
+	    decoded.input.length == 65536 && decoded.input.quantum == 4096);
+	for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		bcopy(raw, mutated, sizeof(raw));
+		fsimg_store_le64(mutated + invalid[i].offset, invalid[i].value);
+		CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded,
+		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
+	}
+	/* Absent and relay descriptions have no geometry. A device cannot
+	 * enter through a create job's image role.
+	 */
+	for (fsimg_input_kind_t kind = FSIMG_INPUT_ABSENT;
+	    kind <= FSIMG_INPUT_STREAM; kind++) {
+		if (kind != FSIMG_INPUT_ABSENT && kind != FSIMG_INPUT_STREAM)
+			continue;
+		request.input_fd = -1;
+		request.input = (fsimg_input_t){ .kind = kind };
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		fsimg_store_le64(raw + QUANTUM, 1);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_EINVAL);
+	}
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	request.input_fd = 0;
+	request.input = (fsimg_input_t){ .kind = FSIMG_INPUT_DEVICE,
+	    .length = 65536, .quantum = 512 };
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1380,6 +1454,7 @@ main(int argc, char **argv)
 	test_error_codec();
 	test_job_label();
 	test_job_stream_flags();
+	test_job_device_input();
 	test_selection_budget();
 	test_error_padding();
 	test_entry_records();

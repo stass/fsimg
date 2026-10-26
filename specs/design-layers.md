@@ -249,6 +249,13 @@ layer boundary.
 
 ## Reading
 
+The positional input can be a regular file or a read-only
+[disk device](design-device-input.md). Its length comes from the prepared
+I/O object, not a layer's host query. Devices follow the same peel and spool
+rules as files; ordinary raw device input is read in place. References to a
+file in the read path describe this finite byte object, except where a
+regular spool file or a regular-file identity check is explicitly required.
+
 ### Peeling order
 
 Opening an image peels from the outside in, and each step produces the input
@@ -364,6 +371,22 @@ The range selector is relative to the bytes the container yields: for a DMG
 it addresses decoded disk offsets, never offsets in the DMG file. Offsets and
 lengths must lie within the disk; an explicitly supplied length is positive.
 
+Before exposing partitions, common scheme opening checks its chosen LBA
+size against the disk view's immutable optional logical sector size,
+as the [device-input contract](design-device-input.md#raw-device-sectors-and-partition-tables)
+defines. A mismatch is unsupported: GPT's selected 512/4096-byte geometry
+must agree, and the 512-byte MBR profile refuses a raw endpoint with another
+logical sector size. One common image-disk view constructor initializes
+this fact after peeling: a decoded compression/container result uses
+unknown; an undecoded result inherits its input view's value. The image
+owns this ordinary flattened read-only view and releases it before its
+borrowed storage. Physical transfer alignment remains with the storage
+root and is independent of this fact. Selected slices inherit their
+immediate parent's value, so a fixed VHD's decoded disk stays independent
+of device geometry when selected, sliced and reopened as an image. No codec
+clears a flag, and no scheme recovers logical geometry from backing identity.
+Byte-range selection skips scheme opening and retains its byte semantics.
+
 ### What the volume sees
 
 The selected slice has a fixed length, retains backing identity for alias
@@ -372,7 +395,8 @@ checked base offset when the backing is a file. When the backing is a
 container adapter, the slice translates to a disk offset and the adapter
 resolves it to a chunk. There is still no recursion: adapters stack at most
 two deep, the [assembled disk](#wrap-unwrap-and-compose) of compose above a
-container adapter, and a container adapter sits only above a file. Drivers
+container adapter, and a container adapter sits only above a positional
+file/device root. Drivers
 remain unaware of layers: the reader, the walker, content delivery,
 extraction and verification are unchanged.
 

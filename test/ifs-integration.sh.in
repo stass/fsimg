@@ -191,7 +191,7 @@ entry_records() {
 # Each generated boot image reads as its bare body: the same entry records
 # and extracted tree (the link, which safe extraction does not create, is
 # skipped), verified with read-through under the ifsboot stack.
-mkdir "$fixture/boot" "$fixture/boot-body"
+mkdir -m 0700 "$fixture/boot" "$fixture/boot-body"
 ./test-ifsboot --emit "$fixture/boot"
 entry_records "$fixture/boot/body.imagefs" "$fixture/boot-body.entries" ||
     fail "fsimg t failed on the generated body"
@@ -221,7 +221,7 @@ for image in "$fixture/boot"/*.ifs; do
     cmp -s "$fixture/boot.entries" "$fixture/boot-body.entries" ||
         fail "$name lists differently from its body"
     rm -rf "$fixture/boot-tree"
-    mkdir "$fixture/boot-tree"
+    mkdir -m 0700 "$fixture/boot-tree"
     ./fsimg x -E -k -C "$fixture/boot-tree" -f "$image" > /dev/null 2>&1 ||
         fail "fsimg x failed on $name"
     diff -r "$fixture/boot-tree" "$fixture/boot-body" > /dev/null ||

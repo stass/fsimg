@@ -657,17 +657,25 @@ detection, stack and setting validation and operand normalization. Numeric
 parsing uses checked decimal accumulation and explicit binary byte suffixes.
 Only known modes, options, stacks and settings reach descriptor preparation.
 
-Read operations share the existing worker selector. The worker's image input
-is one of exactly two things: the read-only regular file `-f` names, or a
-pipe from the coordinator. For `-f -` the coordinator refuses a standard
-input that is a terminal and otherwise pumps standard input into that pipe
+Read operations share the existing worker selector. A named `-f` input is
+a read-only regular file or a finite disk device admitted by the
+[device-input contract](design-device-input.md). The coordinator opens it
+and prepares its fixed length and transfer quantum before worker startup;
+the worker adopts that description without geometry queries. Named FIFOs,
+sockets, terminals and other special files are refused. File settings keep
+their regular-file requirement. For `-f -` the coordinator refuses a standard
+input that is a terminal and otherwise pumps standard input into a relay pipe
 byte for byte, through the input relay the
 [architecture](architecture.md#bounded-resources) defines beside the output
 relay, which interprets nothing it carries; the worker decodes the stream
 and fills the spool as the [layer design](design-layers.md#filling) states.
-The worker therefore never sees a socket, a terminal or an unknown
-descriptor kind, and the sandbox's input check admits exactly those two
-kinds.
+This stream path applies even when standard input is seekable. The worker
+never sees a socket, a terminal or an unknown descriptor kind; its sandbox
+input check consumes the same regular/device/relay description. Device
+inputs use existing partition and byte-range selection, require permission
+to read the endpoint, and carry the stable-media, physical-disjointness and
+blocking-call limits in the device-input contract. They add no device output
+mode or payload spool requirement for an uncompressed positional image.
 
 Create dry runs supply the source roots and optional scratch, never output
 authority. Normal creation prepares a fresh private staging directory on the

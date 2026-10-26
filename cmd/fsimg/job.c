@@ -36,12 +36,13 @@
  * reading uses it too. The mountpoint follows in a NUL-terminated field of
  * FSIMG_JOB_MOUNTPOINT_BYTES zero after its terminator, then one byte
  * saying whether it is present and seven zero bytes. The QNX boot image
- * settings close the record: the machine and the five target addresses
+ * settings follow: the machine and the five target addresses
  * (startup_vaddr, paddr_bias, image_paddr, ram_paddr, imagefs_paddr) as
  * eight bytes each, one byte whose bits say which of those six and the
  * virtual setting are set, one byte of values (the virtual bit, raw
  * storage), and six zero bytes. The file settings travel as descriptors,
- * one capability bit each, never in the record.
+ * one capability bit each, never in the record. Three eight-byte fields
+ * close the record: image input kind, byte length and transfer quantum.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
  *
@@ -109,7 +110,10 @@ typedef enum job_string_field {
 	JOB_IFSBOOT_FIELDS = 6,
 	JOB_IFSBOOT_SET = JOB_IFSBOOT_OFFSET + JOB_IFSBOOT_FIELDS * 8,
 	JOB_IFSBOOT_VALUES = JOB_IFSBOOT_SET + 1,
-	JOB_IFSBOOT_RESERVED = JOB_IFSBOOT_VALUES + 1
+	JOB_IFSBOOT_RESERVED = JOB_IFSBOOT_VALUES + 1,
+	JOB_INPUT_KIND = JOB_IFSBOOT_RESERVED + 6,
+	JOB_INPUT_LENGTH = JOB_INPUT_KIND + 8,
+	JOB_INPUT_QUANTUM = JOB_INPUT_LENGTH + 8
 } job_string_field_t;
 
 /* Bits of JOB_IFSBOOT_SET: field n of the ifsboot settings is set, and the
@@ -159,8 +163,8 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_MOUNTPOINT_OFFSET,
     "the layer fields do not overlap");
 _Static_assert(JOB_RESERVED_OFFSET + 7 == JOB_IFSBOOT_OFFSET &&
-    JOB_IFSBOOT_RESERVED + 6 == FSIMG_JOB_BYTES,
-    "the ifsboot settings close the record");
+    JOB_INPUT_QUANTUM + 8 == FSIMG_JOB_BYTES,
+    "the prepared image description closes the record");
 _Static_assert(sizeof(((fsimg_worker_request_t *)0)->mountpoint_storage) ==
     FSIMG_JOB_MOUNTPOINT_BYTES && FSIMG_JOB_MOUNTPOINT_BYTES >
     sizeof(((fsimg_volume_info_t *)0)->mountpoint),
@@ -348,7 +352,7 @@ layers_valid(const unsigned char *raw)
 		    (id != 0 && (raw[JOB_IFSBOOT_SET] & (1u << i)) == 0))
 			return (false);
 	}
-	for (unsigned i = JOB_IFSBOOT_RESERVED; i < FSIMG_JOB_BYTES; i++) {
+	for (unsigned i = JOB_IFSBOOT_RESERVED; i < JOB_INPUT_KIND; i++) {
 		if (raw[i] != 0)
 			return (false);
 	}
@@ -579,6 +583,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	fsimg_status_t status;
 
 	if (fsimg_stack_validate(&request->stack, error) != FSIMG_OK ||
+	    fsimg_input_validate(&request->input, error) != FSIMG_OK ||
 	    memchr(request->partition_text, '\0', JOB_PARTITION_TEXT_BYTES) == NULL ||
 	    memchr(request->compression, '\0', JOB_COMPRESSION_BYTES) == NULL ||
 	    memchr(request->layers.gpt_type, '\0', JOB_GPT_TYPE_BYTES) == NULL ||
@@ -628,7 +633,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 			capabilities |= FSIMG_JOB_CAP(c);
 	}
 	/* A read job's image is a file or, for a stream, the input pipe. */
-	if ((request->flags & FSIMG_JOB_STDIN) != 0)
+	if (request->input.kind == FSIMG_INPUT_STREAM)
 		capabilities |= FSIMG_JOB_CAP(FSIMG_CAPABILITY_INPUT);
 	if ((capabilities & FSIMG_JOB_CAP_SETTINGS) != 0 &&
 	    !fsimg_job_has_roots(request->kind))
@@ -662,6 +667,9 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 		bcopy(mountpoint, raw + JOB_MOUNTPOINT_OFFSET, strlen(mountpoint));
 		raw[JOB_MOUNTPOINT_PRESENT] = 1;
 	}
+	fsimg_store_le64(raw + JOB_INPUT_KIND, request->input.kind);
+	fsimg_store_le64(raw + JOB_INPUT_LENGTH, request->input.length);
+	fsimg_store_le64(raw + JOB_INPUT_QUANTUM, request->input.quantum);
 	return (FSIMG_OK);
 }
 
@@ -681,12 +689,9 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_KIND) > FSIMG_JOB_PLAN ||
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
-	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STDOUT |
-	    FSIMG_JOB_STDIN)) != 0 ||
+	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STDOUT)) != 0 ||
 	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDOUT) != 0 &&
 	    get_field(raw, JOB_KIND) != FSIMG_JOB_CREATE) ||
-	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDIN) != 0 &&
-	    fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
 	    (get_field(raw, JOB_CAPABILITIES) & ~(uint64_t)FSIMG_JOB_CAP_ALL) != 0 ||
 	    ((get_field(raw, JOB_CAPABILITIES) & FSIMG_JOB_CAP_SETTINGS) != 0 &&
 	    !fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
@@ -709,6 +714,18 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 			return (invalid_job(error));
 	}
 	if (!layers_valid(raw))
+		return (invalid_job(error));
+	if (fsimg_load_le64(raw + JOB_INPUT_KIND) > FSIMG_INPUT_STREAM)
+		return (invalid_job(error));
+	request->input.kind = (fsimg_input_kind_t)fsimg_load_le64(raw + JOB_INPUT_KIND);
+	request->input.length = fsimg_load_le64(raw + JOB_INPUT_LENGTH);
+	request->input.quantum = fsimg_load_le64(raw + JOB_INPUT_QUANTUM);
+	if (fsimg_input_validate(&request->input, NULL) != FSIMG_OK ||
+	    ((get_field(raw, JOB_CAPABILITIES) &
+	    FSIMG_JOB_CAP(FSIMG_CAPABILITY_INPUT)) != 0) !=
+	    (request->input.kind != FSIMG_INPUT_ABSENT) ||
+	    (request->input.kind != FSIMG_INPUT_ABSENT &&
+	    fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))))
 		return (invalid_job(error));
 	/* An absent mountpoint is an all-zero field. */
 	if (raw[JOB_MOUNTPOINT_PRESENT] > 1 ||

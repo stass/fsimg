@@ -467,6 +467,30 @@ or an automatic prerequisite of generation. Keep rules, renderers and generated
 outputs together in reviewed fsimg changes, and preserve independent format
 qualification before replacing an existing check.
 
+## Read-only disk device inputs
+
+Implement the [device-input design](../specs/design-device-input.md) after
+the positional-I/O, worker and layer contracts. Keep image input separate
+from regular-file source, setting and output roles:
+
+1. Add host geometry discovery and the complete read-only device root, shared
+   by public FD construction and private prepared-image adoption. Exercise
+   geometry, sector translation, short-I/O and ownership faults through the
+   production adapter with an unprivileged host seam.
+2. Carry one prepared input description through CLI setup, protocol and
+   sandbox validation; consume raw sector provenance at scheme opening.
+   Keep ioctl denied after confinement and retain stream spooling semantics.
+3. Update CLI/API user documentation and qualify disposable device fixtures
+   on macOS, Linux and FreeBSD, including required confinement where supported,
+   the sector-size mismatch refusals and no-spool metadata reads. Record
+   sanitizer results and every unavailable platform/device check explicitly.
+
+Each stage follows the review and validation gates above. No stage enables
+writable device sinks or claims snapshot consistency for live media.
+The implementation and its regression suites are present;
+[build.md](build.md) records the exercised platforms, native fixtures,
+sanitizer coverage and explicit skips.
+
 ## Extension sequence
 
 QNX6 follows the [format design](../specs/design-qnx6.md), the

@@ -64,7 +64,8 @@ memory and unneeded environment variables from the worker. No shell or PATH
 lookup selects an executable.
 
 Only designated descriptors survive worker startup: the image input, which
-is a read-only regular file or the pipe through which the coordinator pumps
+is a read-only regular file, a prepared finite disk device under the
+[device-input contract](design-device-input.md), or the pipe through which the coordinator pumps
 standard input unread (the [CLI design](design-cli.md#coordinator-and-streaming-representation)
 states that rule and refuses a terminal), source roots, scratch authority,
 fresh output authority where needed, the unlinked
@@ -74,9 +75,11 @@ read-only regular files a create's
 [file settings](design-layers.md#file-settings-and-sections) name (a boot
 image's startup program and boot prefix, opened by the coordinator from
 `-o` paths, copied into the output by length and never interpreted), and
-bounded control/data channels. The sandbox's input check admits a regular
-file or a pipe and nothing else, and a file setting passes the same check
-as a regular file. Other descriptors, sockets, terminal handles, and
+bounded control/data channels. The sandbox's image-input check consumes the
+prepared regular/device/relay description and verifies descriptor type and
+read-only access; geometry is validated before confinement and grants no
+worker ioctl authority. A file setting is checked separately as a regular
+file. Other descriptors, sockets, terminal handles, and
 executable handles are closed. Core dumps are disabled. Runtime initialization
 needed by libc occurs before confinement; no locale, timezone, or plugin
 loading may cause ambient file opens while processing an image.
@@ -91,6 +94,16 @@ private staging directory: the worker may write, resize and flush it, and
 holds no name or directory through which to rename, replace or read it.
 Source roots, the image input and the file settings are read-only.
 The platform profiles below install exactly these rights.
+
+A device descriptor authorizes reads across its complete endpoint; software
+partition or byte-range selection does not confine a compromised worker to
+that range. Device nodes carry no reliable medium change token. Stable
+media and output/scratch storage physically disjoint from the input remain
+the caller's responsibility, including aliases through mounted filesystems.
+The coordinator does not infer these properties from mount enumeration or
+node identity. Device open and geometry queries are synchronous preparation
+calls; the [blocking-call contract](design-device-input.md#confinement-and-blocking-calls)
+states their cancellation/deadline limitation.
 
 The profiles bound each grant to its directory, not to the names within
 it: the worker may create any regular file in staging, create and unlink

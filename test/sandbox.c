@@ -385,11 +385,14 @@ static int
 refuse_readable_manifest(const int *fds, int fd)
 {
 	fsimg_sandbox_caps_t caps;
+	fsimg_input_t input;
 	pid_t child;
 	int wait_status;
 
 	fsimg_sandbox_caps_init(&caps);
 	caps.input = 3;
+	CHECK(fsimg_input_prepare(fds[0], NULL, NULL, &input, NULL) == FSIMG_OK);
+	caps.image_input = &input;
 	caps.destination = 4;
 	caps.scratch = 6;
 	caps.manifest = 7;
@@ -413,13 +416,19 @@ static input_outcome_t
 take_input(int fd, bool as_pipe)
 {
 	fsimg_sandbox_caps_t caps;
+	fsimg_input_t input = { .kind = FSIMG_INPUT_FILE, .quantum = 1 };
+	struct stat st;
 	fsimg_status_t status;
 	pid_t child;
 	int wait_status;
 
 	fsimg_sandbox_caps_init(&caps);
 	caps.input = 3;
-	caps.input_pipe = as_pipe;
+	if (as_pipe)
+		input = (fsimg_input_t){ .kind = FSIMG_INPUT_STREAM };
+	else if (fsimg_host_fstat(fd, &st) == 0 && st.st_size >= 0)
+		input.length = (uint64_t)st.st_size;
+	caps.image_input = &input;
 	child = fork();
 	CHECK(child != -1);
 	if (child == 0) {
@@ -484,12 +493,15 @@ run_child(const int *fds, sandbox_attempt_t attempt, sandbox_profile_t profile,
 {
 	struct rlimit no_core = { 0, 0 };
 	fsimg_sandbox_caps_t caps;
+	fsimg_input_t input;
 	fsimg_status_t status;
 	pid_t child;
 	int wait_status, root;
 
 	fsimg_sandbox_caps_init(&caps);
 	caps.input = 3;
+	CHECK(fsimg_input_prepare(fds[0], NULL, NULL, &input, NULL) == FSIMG_OK);
+	caps.image_input = &input;
 	caps.staging = 4;
 	caps.scratch = 6;
 	caps.roots = 5;
@@ -558,6 +570,9 @@ test_sync_rights(int parent, int input)
 	fsimg_status_t status;
 	pid_t child;
 	int raw, spool, wait_status;
+	fsimg_input_t description;
+
+	CHECK(fsimg_input_prepare(input, NULL, NULL, &description, NULL) == FSIMG_OK);
 
 	raw = openat(parent, "raw", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 	spool = openat(parent, "spool", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC,
@@ -571,6 +586,7 @@ test_sync_rights(int parent, int input)
 
 		fsimg_sandbox_caps_init(&caps);
 		caps.input = 5;
+		caps.image_input = &description;
 		caps.raw = 3;
 		caps.spool = 4;
 		if (setrlimit(RLIMIT_CORE, &no_core) == -1 ||

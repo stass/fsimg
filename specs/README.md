@@ -11,6 +11,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Architecture](architecture.md) | Product scope, subsystem boundaries, shared contracts, resource budgets, and acceptance criteria |
 | [C API](design-api.md) | Types, operations, ownership, state transitions, and errors |
 | [Storage and algorithms](design-storage.md) | Bounded I/O, metadata scratch storage, planning, and complexity bounds for reading, verification, and emission |
+| [Disk device inputs](design-device-input.md) | Finite read-only device inputs, host geometry, aligned byte reads, worker authority, and stability limits |
 | [Sources and catalogs](design-sources.md) | Source identity, scanning/reopening, metadata encoding, deterministic catalog preparation |
 | [Prepared directories](design-directories.md) | Directory preparation, namespace keys, common traversal and selection |
 | [Logical content](design-content.md) | Logical, initialized and mapped content; common delivery; optional extent index |

@@ -5,6 +5,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -20,6 +21,7 @@
 #endif
 #if defined(__APPLE__)
 #include <sys/attr.h>
+#include <sys/disk.h>
 #include <sys/random.h>
 
 /* Bulk records contain a u32 length, five returned attribute words, and a
@@ -30,12 +32,17 @@
 #endif
 
 #if defined(__linux__)
+#include <linux/fs.h>
 #include <sys/syscall.h>
 
 /* The kernel's renameat2 flag, for C libraries that do not name it. */
 #ifndef RENAME_NOREPLACE
 #define RENAME_NOREPLACE (1u << 0)
 #endif
+#endif
+
+#if defined(__FreeBSD__)
+#include <sys/disk.h>
 #endif
 
 #include "host.h"
@@ -71,6 +78,77 @@ fsimg_host_offset(uint64_t offset, off_t *out)
 		return (false);
 	*out = (off_t)offset;
 	return (true);
+}
+
+bool
+fsimg_host_disk_mode(mode_t mode)
+{
+#if defined(__APPLE__)
+	return (S_ISBLK(mode) || S_ISCHR(mode));
+#elif defined(__FreeBSD__)
+	return (S_ISCHR(mode));
+#else
+	return (S_ISBLK(mode));
+#endif
+}
+
+int
+fsimg_host_disk_sector(int fd, uint64_t *out)
+{
+#if defined(__APPLE__) || defined(__FreeBSD__)
+	unsigned sector;
+	int result;
+
+#if defined(__APPLE__)
+	result = ioctl(fd, DKIOCGETBLOCKSIZE, &sector);
+#else
+	result = ioctl(fd, DIOCGSECTORSIZE, &sector);
+#endif
+	if (result == -1)
+		return (-1);
+	*out = sector;
+#else
+	int sector;
+
+	if (ioctl(fd, BLKSSZGET, &sector) == -1)
+		return (-1);
+	if (sector < 0) {
+		errno = EOVERFLOW;
+		return (-1);
+	}
+	*out = (uint64_t)sector;
+#endif
+	return (0);
+}
+
+int
+fsimg_host_disk_size(int fd, uint64_t quantum FSIMG_UNUSED, uint64_t *out)
+{
+#if defined(__APPLE__)
+	uint64_t count;
+
+	if (ioctl(fd, DKIOCGETBLOCKCOUNT, &count) == -1)
+		return (-1);
+	if (quantum == 0 || count > UINT64_MAX / quantum) {
+		errno = EOVERFLOW;
+		return (-1);
+	}
+	*out = count * quantum;
+#elif defined(__FreeBSD__)
+	off_t length;
+
+	if (ioctl(fd, DIOCGMEDIASIZE, &length) == -1)
+		return (-1);
+	if (length < 0) {
+		errno = EOVERFLOW;
+		return (-1);
+	}
+	*out = (uint64_t)length;
+#else
+	if (ioctl(fd, BLKGETSIZE64, out) == -1)
+		return (-1);
+#endif
+	return (0);
 }
 
 int

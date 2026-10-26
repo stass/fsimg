@@ -10,10 +10,13 @@ have `_t` typedefs, including opaque handles. The creation object is a
 **writer**.
 
 fsimg creates, inspects, lists, verifies, and extracts filesystem volumes
-without mounting them. It accepts regular image files, explicitly bounded
-regions of those files, memory supplied by an embedding application, and
-positional I/O callbacks. The default CLI handles regular files, not devices.
-It requires no privileges, kernel filesystem driver, or external formatter.
+without mounting them. It accepts regular image files, finite read-only disk
+devices, explicitly bounded regions of those objects, memory supplied by an
+embedding application, and positional I/O callbacks. The CLI's named image
+inputs accept regular files and the endpoints in the
+[device-input design](design-device-input.md); standard input remains a
+stream. Ordinary file use requires no privileges, kernel filesystem driver,
+or external formatter. Device use requires permission to read that endpoint.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
 Power-Safe profiles, QNX4 and the QNX image filesystem (ImageFS) with
@@ -207,6 +210,12 @@ streaming representation. Cleanup of private scratch is descriptor-relative,
 does not follow links or recurse into worker-created directories, and has a
 finite entry bound; incomplete cleanup reports the retained location.
 
+Cancellation and deadline checks surround synchronous host calls but cannot
+guarantee their interruption. In particular, device open and geometry queries
+run during coordinator preparation; a blocked driver can delay those checks.
+Worker supervision likewise cannot force an uninterruptible kernel read to
+finish. The deadline bounds fsimg's decisions, not hardware completion.
+
 Human presentation and structured records share the bounded formatter and relay.
 Human commands use their exit status for completion; JSON retains its explicit
 final completion record. The formatter retains one fixed verification result so
@@ -254,6 +263,32 @@ object, such as a regular-file source root held by the root registry; freeing
 the object leaves the descriptor open. Every path shares flag, type, and range
 validation, and every descriptor counts once in the context's descriptor
 accounting, against its owner.
+
+Read-only disk inputs use one prepared descriptor description, shared by
+CLI setup, the worker protocol, sandbox validation and I/O adoption. The
+compatibility layer discovers finite capacity and transfer quantum before
+parser confinement; the I/O constructor validates them and owns the charged
+buffer that translates arbitrary byte requests into sector-aligned reads.
+The worker gains no ioctl authority. Device roots have no write, resize,
+zeroing, hole-query or durable-flush capability. Regular-file source,
+setting, output and scratch roles keep their own type requirements. This
+separation prevents a new input capability from granting device mutation.
+The [device-input design](design-device-input.md) owns discovery, ownership,
+transfer failures and platform qualification.
+
+An I/O view's immutable optional logical sector size is distinct from its
+storage root's transfer quantum. Device roots initialize it from host
+geometry; other roots use unknown, and ordinary slices inherit their
+immediate parent's value. One common image-disk view constructor uses the
+resolved layer result to initialize decoded views to unknown, including
+zero-copy container payloads; undecoded views retain the input's fact.
+Scheme opening checks this view value against the selected scheme's LBA
+size before exposing partitions and never recovers it from backing storage.
+Selections and reopened images therefore preserve decoded-byte semantics
+without mutable flags, per-codec resets or another resolver layer.
+Consequently a device's transfer geometry cannot silently change a decoded
+container's partition units, and a 512-byte MBR profile cannot misinterpret
+a native 4096-byte-sector device.
 
 Knowledge of zero contents is an operation of every I/O object, not a
 property of holding a descriptor: each object reports the next range at or
@@ -506,6 +541,15 @@ provide immutable files, a filesystem snapshot, or an equivalently stable
 source provider. Hashing alone does not create a snapshot. No security promise
 depends on mtime being impossible to restore.
 
+Device-node metadata supplies no medium change token. Device-backed inputs
+therefore have no regular-file identity/change guarantee; the caller keeps
+the medium stable and writable output/scratch disjoint from it. Mounted
+filesystems and other aliases can modify the input without a write through
+its descriptor. fsimg does not infer physical disjointness or snapshot
+consistency from device-node identity; the
+[device-input contract](design-device-input.md#stability-aliases-and-failures)
+states the resulting limits.
+
 ### Names and metadata
 
 Volume time-basis reporting describes a format-level interpretation. A volume
@@ -595,8 +639,11 @@ planning.
 All parsers treat input as hostile, including probes and listing commands.
 The CLI worker receives only prepared capabilities and establishes available
 confinement before reading image bytes. A confined image-reading worker has no
-network, shell, external formatter, device access, or arbitrary host path
-service. Creation has a distinct source-root profile: it restricts filesystem
+network, shell, external formatter, arbitrary device opens or host path
+service. Its only device authority is reading an explicitly prepared image
+endpoint, with no ioctl or mutation right; selecting a partition in software
+does not narrow that descriptor's authority. Creation has a distinct
+source-root profile: it restricts filesystem
 authority but cannot universally prevent opening special nodes already beneath
 an authorized source root. Its additional checks and deployment limits are
 explicit in the security specification.
@@ -635,8 +682,9 @@ bound that hashing another way.
 
 Before any output resize, zeroing, or write, built-in adapters compare output
 backing identity with all collected host sources and reject an inode alias.
-Slices retain backing identity and translated ranges. Opaque callback sources
-and sinks require the caller to guarantee disjoint storage; that trusted-code
+Slices retain backing identity and translated ranges. Device-backed inputs
+and opaque callback sources and sinks require the caller to guarantee
+disjoint storage; that caller
 obligation is explicit and cannot be inferred from distinct object pointers.
 
 Extraction's fresh output directory can remain partially populated on failure.

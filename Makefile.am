@@ -54,7 +54,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/source/source.h lib/source/source.c lib/source/scan.c \
 	lib/source/mtree.h lib/source/mtree.c lib/source/manifest.c \
 	lib/source/generated.h lib/source/generated.c \
-	lib/io/io.h lib/read/directory.c lib/read/directory.h \
+	lib/io/io.h lib/io/input.h lib/io/input.c \
+	lib/read/directory.c lib/read/directory.h \
 	lib/read/reader.h lib/read/reader.c \
 	lib/read/selection.c lib/read/selection.h \
 	lib/layers/layer.h lib/layers/stack.c lib/layers/types.c \
@@ -128,7 +129,7 @@ example_read_slice_LDADD = libfsimg.la
 example_extract_SOURCES = examples/extract.c examples/example.h
 example_extract_LDADD = libfsimg.la
 test_programs = test-core test-endian test-endian-unsigned-char \
-	test-private test-io test-meta test-meta-sort test-meta-runs test-unicode test-format \
+	test-private test-io test-device test-meta test-meta-sort test-meta-runs test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-driver-contracts test-layer-contracts test-zlib-memory \
 	test-metadata-loss \
@@ -179,6 +180,9 @@ test_fragment_SOURCES = test/fragment.c test/test.h
 test_fragment_LDADD = libfsimg.la
 test_io_SOURCES = test/io.c test/test.h
 test_io_LDADD = libfsimg.la
+test_device_SOURCES = test/device.c test/device-seam.c test/test.h \
+	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h
+test_device_LDADD = libfsimg-core.la
 test_meta_SOURCES = test/meta.c test/test.h
 test_meta_LDADD = libfsimg.la
 test_meta_sort_SOURCES = test/meta-sort.c test/test.h
@@ -284,6 +288,7 @@ header_c_LDADD = libfsimg.la
 header_cxx_SOURCES = test/header_cpp.cc
 header_cxx_LDADD = libfsimg.la
 EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
+	build-aux/device-check.sh \
 	libfsimg.pc.in docs/examples.md \
 	build-aux/check-ascii.sh build-aux/check-seek-holes.sh build-aux/sanitize.sh \
 	build-aux/check-install.sh build-aux/check-installed.py \
@@ -299,6 +304,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/ifs-research.md docs/todo-ifs.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
+	specs/design-device-input.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
 	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
 	specs/design-qnx6-driver.md specs/design-qnx4.md specs/design-qnx4-driver.md \

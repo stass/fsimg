@@ -994,6 +994,53 @@ Sanitizer execution evidence:
 | FreeBSD 16/ZFS | `make check` | 49 pass, 6 tool/platform skips; the specification suite passes |
 | FreeBSD 16/ZFS | `make check-asan` | 39 pass, 7 skips; test-format's fixture fault is fixed and passes in the same build |
 
+Native disk-input checks provision a disposable read-only GPT disk, compare
+extracted payload bytes, and exercise info/list/verify/extract without a
+payload spool. They never select an existing device. Build `fsimg` and
+`test-device` first, then run from the build directory:
+
+```sh
+sh /path/to/fsimg-source/build-aux/device-check.sh "$PWD/fsimg" 512
+sh /path/to/fsimg-source/build-aux/device-check.sh "$PWD/fsimg" 4096
+```
+
+macOS uses `hdiutil` without mounting, tests block/raw and partition endpoints,
+and explicitly skips the 4096-byte fixture and confinement check. Linux uses
+read-only loop devices and a private read-only node; FreeBSD uses read-only
+md/GEOM providers and tests partition endpoints. Linux/FreeBSD provisioning
+needs noninteractive sudo or root; parsing runs as the invoking user with
+required confinement. The native child verifies that prepared geometry can be
+adopted and read after ioctl and ambient-open authority are removed. A Linux
+container must receive the test loop-device facility explicitly; the ordinary
+Linux check container supplies none. Unit tests substitute the host boundary
+of the production device adapter, including non-power-of-two sectors, and do
+not require a device or privileges.
+
+Device-input qualification records the following full-suite results. Every
+configuration below has zero failures; skips remain excluded from passing
+coverage.
+
+| Host | Configuration | Full-suite result | Native device fixture |
+| --- | --- | --- | --- |
+| macOS | Ordinary; ASan/UBSan | 60 pass, 5 skips each | 512-byte block, raw and partition endpoints; confinement and the 4096-byte fixture are unavailable |
+| Linux in Docker | Ordinary; ASan/UBSan; standalone LSan; MSan with instrumented zlib | 63 pass, 2 skips each | Read-only 512/4096-byte loop endpoints with required confinement |
+| FreeBSD 16 on p620 | Ordinary; ASan/UBSan | 59 pass, 6 skips each | Read-only 512/4096-byte md and partition providers with required confinement |
+
+The native fixtures compare payload bytes, extract beneath a checked empty
+directory and verify ioctl denial on confined hosts. The private-directory
+fixtures and the FreeBSD sanitizer suite also pass with umask `002`.
+The device adapter's deterministic tests cover confirmed read prefixes followed
+by error, EOF or cancellation, including logical error offsets, untouched
+buffer tails and work/I/O accounting. Repeated fixed-VHD selection, slicing
+and reopening preserve partition byte ranges and decoded sector provenance.
+The finite sanitizer fuzz smoke suite passes with Homebrew LLVM and the
+default 1000-run allowance per harness:
+
+```sh
+FUZZ_CC=/usr/local/opt/llvm/bin/clang \
+    FUZZ_CXX=/usr/local/opt/llvm/bin/clang++ make -j32 check-fuzz
+```
+
 From a macOS development host, `build-aux/linux-check.sh [-r REV] [COMMAND]`
 checks a committed revision, `HEAD` by default, on Linux. It builds an Ubuntu
 24.04 image from `build-aux/linux-check/Dockerfile` (the CI Linux job's

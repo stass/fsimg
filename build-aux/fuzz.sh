@@ -182,6 +182,7 @@ compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \
     -I"$source_dir/lib/core" -I"$source_dir/lib/layers" -I"$source_dir/cmd/fsimg" \
+    -I"$source_dir/lib/io" \
     "$source_dir/fuzz/protocol.c" "$source_dir/cmd/fsimg/protocol.c" \
     "$source_dir/cmd/fsimg/job.c" "$fuzz_library" $zlib_libs -o "$work_dir/fuzz-protocol"
 protocol_corpus=protocol-fuzz-corpus

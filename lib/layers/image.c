@@ -49,6 +49,7 @@ struct fsimg_image {
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*input;		/* The file: borrowed, or the spool's view */
 	fsimg_io_t	*disk;		/* The file, or the container's disk */
+	fsimg_io_t	*disk_view;	/* Owned final view, freed before backing */
 	fsimg_session_t	 session;
 	fsimg_stack_t	 forced;
 	fsimg_layer_options_t layers;
@@ -372,6 +373,19 @@ open_image(fsimg_ctx_t *ctx, fsimg_io_t *file, int stream_fd,
 	status = peel_compression(image, stream_fd, error);
 	if (status == FSIMG_OK)
 		status = peel_container(image, error);
+	if (status == FSIMG_OK) {
+		/* Publish one view of the interpreted disk. Decoding changes its
+		 * coordinate system even when a container returns a zero-copy slice.
+		 */
+		if (image->compression != NULL || image->container != NULL)
+			status = fsimg_io_decoded_view(image->disk,
+			    &image->disk_view, error);
+		else
+			status = fsimg_io_read_slice(image->disk, 0,
+			    image->disk_bytes, &image->disk_view, error);
+		if (status == FSIMG_OK)
+			image->disk = image->disk_view;
+	}
 	if (status != FSIMG_OK) {
 		fsimg_image_free(image);
 		return (status);
@@ -385,6 +399,7 @@ fsimg_image_free(fsimg_image_t *image)
 {
 	if (image == NULL || image->ctx->in_callback)
 		return;
+	fsimg_io_free(image->disk_view);
 	fsimg_io_free(image->opened.disk);
 	fsimg_io_free(image->spooled);
 	fsimg_spool_free(image->spool);
@@ -1101,6 +1116,8 @@ detect_scheme(fsimg_image_t *image, fsimg_error_t *error)
 	const fsimg_layer_t *forced, *scheme;
 	fsimg_scheme_input_t input;
 	fsimg_status_t status;
+	uint64_t logical_sector;
+	char message[128];
 
 	if (image->detected)
 		return (FSIMG_OK);
@@ -1119,6 +1136,19 @@ detect_scheme(fsimg_image_t *image, fsimg_error_t *error)
 		status = scheme->scheme->open(&input, &image->table, error);
 		if (status != FSIMG_OK)
 			return (layer_failed(scheme, status, error));
+		logical_sector = fsimg_io_logical_sector(image->disk);
+		if (logical_sector != 0 &&
+		    logical_sector != image->table.sector_bytes) {
+			snprintf(message, sizeof(message), "partition sector size %u "
+			    "differs from device logical sector size %llu",
+			    image->table.sector_bytes,
+			    (unsigned long long)logical_sector);
+			fsimg_dealloc(image->table.records);
+			bzero(&image->table, sizeof(image->table));
+			status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			    FSIMG_OP_IMAGE, message);
+			return (layer_failed(scheme, status, error));
+		}
 	}
 	image->scheme = scheme;
 	image->detected = true;

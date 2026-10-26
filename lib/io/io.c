@@ -22,6 +22,7 @@
  */
 typedef enum root_kind {
 	ROOT_EXTERNAL,	/* A file fsimg did not write: the host's report */
+	ROOT_DEVICE,	/* Fixed read-only disk, no hole knowledge */
 	ROOT_FRESH,	/* Adopted empty, fsimg its only writer: its record */
 	ROOT_SCRATCH,	/* Unsized private scratch, never asked */
 	ROOT_CALLBACK,	/* A caller's object: its next_zero_range callback */
@@ -66,6 +67,7 @@ struct fsimg_io {
 	fsimg_io_t	*root;
 	uint64_t	 base;
 	uint64_t	 length;
+	uint64_t	 logical_sector; /* View's units; zero for unknown/decoded */
 	unsigned	 access;
 	/* A host-backed root's descriptor, -1 otherwise. The object owns it,
 	 * with its reservation, unless borrowed: then the caller that lent it
@@ -83,6 +85,10 @@ struct fsimg_io {
 	fsimg_io_t	*backing;
 	written_record_t record;	/* ROOT_FRESH only */
 	host_answers_t	 host;		/* ROOT_EXTERNAL only */
+	/* ROOT_DEVICE only: one physical transfer quantum and charged buffer. */
+	uint64_t	 device_quantum;
+	unsigned char	*device_buffer;
+	size_t		 device_buffer_bytes;
 };
 
 static fsimg_status_t io_range(fsimg_io_t *, uint64_t, uint64_t,
@@ -103,6 +109,11 @@ typedef enum io_holding {
 } io_holding_t;
 
 static fsimg_status_t io_from_fd(fsimg_ctx_t *, int, unsigned, io_holding_t,
+    const fsimg_input_t *, fsimg_io_t **, fsimg_error_t *);
+static fsimg_status_t device_read(fsimg_io_t *, uint64_t, void *, size_t,
+    size_t *, fsimg_error_t *);
+static fsimg_status_t input_checkpoint(void *, fsimg_error_t *);
+static fsimg_status_t io_slice(fsimg_io_t *, uint64_t, uint64_t, uint64_t,
     fsimg_io_t **, fsimg_error_t *);
 static fsimg_status_t adopt_fresh(fsimg_ctx_t *, int, unsigned,
     fsimg_io_t **, fsimg_error_t *);
@@ -176,7 +187,7 @@ fsimg_io_identity(fsimg_io_t *io, fsimg_host_file_t *identity, bool *known,
 		return (status);
 	if (io->root->backing != NULL)
 		return (fsimg_io_identity(io->root->backing, identity, known, error));
-	if (io->root->fd == -1)
+	if (io->root->fd == -1 || io->root->kind == ROOT_DEVICE)
 		return (FSIMG_OK);
 	if (fsimg_host_file(io->root->fd, identity) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
@@ -432,6 +443,7 @@ fsimg_io_next_zero_range(fsimg_io_t *io, uint64_t offset, uint64_t *start,
 		status = external_answer(root, from, limit, &low, &high, error);
 		break;
 	case ROOT_SCRATCH:
+	case ROOT_DEVICE:
 		break;
 	case ROOT_FRESH:
 		record_next(root, from, limit, GRANULE_CLEAR, &low, &high);
@@ -649,6 +661,7 @@ root_release(fsimg_io_t *root)
 	if (root->kind == ROOT_RESOLVER)
 		root->resolver->release(root->argument);
 	fsimg_dealloc(root->record.bits);
+	fsimg_dealloc(root->device_buffer);
 }
 
 void
@@ -782,7 +795,7 @@ fsimg_io_resolver(fsimg_ctx_t *ctx, fsimg_io_t *backing, uint64_t length,
 
 static fsimg_status_t
 io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, io_holding_t holding,
-    fsimg_io_t **out, fsimg_error_t *error)
+    const fsimg_input_t *input, fsimg_io_t **out, fsimg_error_t *error)
 {
 	fsimg_error_t detail;
 	fsimg_io_t *io;
@@ -814,7 +827,11 @@ io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, io_holding_t holding,
 	if (fsimg_host_fstat(fd, &st) == -1)
 		return (fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_IO, "descriptor stat failed"));
-	if (!S_ISREG(st.st_mode) || st.st_size < 0)
+	if (input != NULL) {
+		status = fsimg_input_check(fd, input, error);
+		if (status != FSIMG_OK)
+			return (status);
+	} else if (!S_ISREG(st.st_mode) || st.st_size < 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_IO, "descriptor is not a regular file"));
 	io = fsimg_alloc(ctx, sizeof(*io), &detail);
@@ -851,6 +868,28 @@ io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, io_holding_t holding,
 	io->length = (uint64_t)st.st_size;
 	io->ops.max_transfer = 64 * 1024;
 	io->ops.flags = FSIMG_IO_DURABLE;
+	if (input != NULL) {
+		io->length = input->length;
+		if (input->kind == FSIMG_INPUT_DEVICE) {
+			io->kind = ROOT_DEVICE;
+			io->device_quantum = input->quantum;
+			io->logical_sector = input->quantum;
+			io->ops.flags = 0;
+			io->device_buffer_bytes = input->quantum > 64 * 1024 ?
+			    (size_t)input->quantum :
+			    (64 * 1024 / (size_t)input->quantum) *
+			    (size_t)input->quantum;
+			io->device_buffer = fsimg_alloc(ctx,
+			    io->device_buffer_bytes, &detail);
+			if (io->device_buffer == NULL) {
+				/* Adoption's caller releases fd on failure. */
+				fsimg_dealloc(io);
+				if (error != NULL)
+					*error = detail;
+				return (detail.status);
+			}
+		}
+	}
 	*out = io;
 	return (FSIMG_OK);
 }
@@ -859,7 +898,55 @@ fsimg_status_t
 fsimg_io_from_fd(fsimg_ctx_t *ctx, int fd, unsigned access, fsimg_io_t **out,
     fsimg_error_t *error)
 {
-	return (io_from_fd(ctx, fd, access, IO_DUPLICATE, out, error));
+	fsimg_input_t input;
+	fsimg_status_t status;
+	int held, saved;
+
+	if (access != FSIMG_IO_READ)
+		return (io_from_fd(ctx, fd, access, IO_DUPLICATE, NULL,
+		    out, error));
+	if (out != NULL)
+		*out = NULL;
+	status = fsimg_ctx_ready(ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (out == NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IO,
+		    "missing descriptor output"));
+	status = fsimg_fd_reserve(ctx, error);
+	if (status != FSIMG_OK)
+		return (status);
+	held = fsimg_host_dup(fd);
+	if (held == -1) {
+		saved = errno;
+		fsimg_fd_release(ctx, -1);
+		return (fsimg_error_set(error, FSIMG_EIO, saved, FSIMG_OP_IO,
+		    "descriptor duplication failed"));
+	}
+	status = fsimg_input_prepare(held, input_checkpoint, ctx, &input, error);
+	if (status != FSIMG_OK) {
+		fsimg_fd_release(ctx, held);
+		return (status);
+	}
+	return (fsimg_io_adopt_input(ctx, held, &input, out, error));
+}
+
+static fsimg_status_t
+input_checkpoint(void *argument, fsimg_error_t *error)
+{
+	return (fsimg_poll(argument, NULL, error));
+}
+
+fsimg_status_t
+fsimg_io_adopt_input(fsimg_ctx_t *ctx, int fd, const fsimg_input_t *input,
+    fsimg_io_t **out, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = io_from_fd(ctx, fd, FSIMG_IO_READ, IO_ADOPT, input, out, error);
+	if (status != FSIMG_OK)
+		fsimg_fd_release(ctx, fd);
+	return (status);
 }
 
 fsimg_status_t
@@ -868,7 +955,7 @@ fsimg_io_adopt_fd(fsimg_ctx_t *ctx, int fd, unsigned access, fsimg_io_t **out,
 {
 	fsimg_status_t status;
 
-	status = io_from_fd(ctx, fd, access, IO_ADOPT, out, error);
+	status = io_from_fd(ctx, fd, access, IO_ADOPT, NULL, out, error);
 	if (status != FSIMG_OK)
 		fsimg_fd_release(ctx, fd);
 	return (status);
@@ -878,7 +965,7 @@ fsimg_status_t
 fsimg_io_borrow_fd(fsimg_ctx_t *ctx, int fd, unsigned access,
     fsimg_io_t **out, fsimg_error_t *error)
 {
-	return (io_from_fd(ctx, fd, access, IO_BORROW, out, error));
+	return (io_from_fd(ctx, fd, access, IO_BORROW, NULL, out, error));
 }
 
 fsimg_status_t
@@ -912,9 +999,9 @@ io_range(fsimg_io_t *io, uint64_t offset, uint64_t length,
 	return (FSIMG_OK);
 }
 
-fsimg_status_t
-fsimg_io_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
-    fsimg_io_t **out, fsimg_error_t *error)
+static fsimg_status_t
+io_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
+    uint64_t logical_sector, fsimg_io_t **out, fsimg_error_t *error)
 {
 	fsimg_error_t detail;
 	fsimg_io_t *slice;
@@ -942,10 +1029,31 @@ fsimg_io_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
 	slice->root = parent->root;
 	slice->base = parent->base + offset;
 	slice->length = length;
+	slice->logical_sector = logical_sector;
 	slice->access = parent->access;
 	slice->fd = -1;
 	*out = slice;
 	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_io_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
+    fsimg_io_t **out, fsimg_error_t *error)
+{
+	return (io_slice(parent, offset, length,
+	    parent == NULL ? 0 : parent->logical_sector, out, error));
+}
+
+uint64_t
+fsimg_io_logical_sector(const fsimg_io_t *io)
+{
+	return (io->logical_sector);
+}
+
+fsimg_status_t
+fsimg_io_decoded_view(fsimg_io_t *parent, fsimg_io_t **out, fsimg_error_t *error)
+{
+	return (io_slice(parent, 0, parent->length, 0, out, error));
 }
 
 fsimg_status_t
@@ -1033,6 +1141,47 @@ fsimg_io_get_size(fsimg_io_t *io, uint64_t *out, fsimg_error_t *error)
 }
 
 static fsimg_status_t
+device_read(fsimg_io_t *root, uint64_t offset, void *buffer, size_t length,
+    size_t *transferred, fsimg_error_t *error)
+{
+	uint64_t aligned;
+	size_t displacement, wanted, covering, quantum;
+	off_t host_offset;
+	ssize_t count;
+
+	quantum = (size_t)root->device_quantum;
+	aligned = offset - offset % quantum;
+	displacement = (size_t)(offset - aligned);
+	wanted = root->device_buffer_bytes - displacement;
+	if (wanted > length)
+		wanted = length;
+	covering = displacement + wanted;
+	if (covering % quantum != 0)
+		covering += quantum - covering % quantum;
+	if (!fsimg_host_offset(aligned, &host_offset) ||
+	    covering > root->length - aligned)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_IO,
+		    "aligned device read exceeds capacity"));
+	count = pread(root->fd, root->device_buffer, covering, host_offset);
+	if (count == -1)
+		return (fsimg_error_set(error, FSIMG_EIO, errno, FSIMG_OP_IO,
+		    "device positional read failed"));
+	if ((size_t)count > covering)
+		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IO,
+		    "device read exceeded request"));
+	if ((size_t)count > displacement) {
+		*transferred = (size_t)count - displacement;
+		if (*transferred > wanted)
+			*transferred = wanted;
+		bcopy(root->device_buffer + displacement, buffer, *transferred);
+	}
+	if (count == 0 || (size_t)count % quantum != 0)
+		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IO,
+		    "premature end or incomplete device sector"));
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
 adapter_transfer(fsimg_io_t *root, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, bool writing, fsimg_error_t *error)
 {
@@ -1042,6 +1191,8 @@ adapter_transfer(fsimg_io_t *root, uint64_t offset, void *buffer,
 
 	*transferred = 0;
 	fsimg_error_clear(error);
+	if (root->kind == ROOT_DEVICE)
+		return (device_read(root, offset, buffer, length, transferred, error));
 	if (root->kind == ROOT_RESOLVER)
 		return (root->resolver->resolve(root->argument, offset, buffer,
 		    length, transferred, error));
@@ -1456,6 +1607,9 @@ fsimg_io_flush(fsimg_io_t *io, bool durable, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	root = io->root;
+	if (root->kind == ROOT_DEVICE)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IO,
+		    "disk device does not support flushing"));
 	if (durable && (root->ops.flags & FSIMG_IO_DURABLE) == 0)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_IO, "durable flush not supported"));

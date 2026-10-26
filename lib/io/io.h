@@ -7,9 +7,19 @@
 #include <time.h>
 
 #include "host.h"
+#include "input.h"
 #include "internal.h"
 
 fsimg_ctx_t *fsimg_io_context(const fsimg_io_t *);
+/* Consumes an already reserved image descriptor on every outcome. */
+fsimg_status_t fsimg_io_adopt_input(fsimg_ctx_t *, int, const fsimg_input_t *,
+    fsimg_io_t **, fsimg_error_t *);
+/* Logical-sector provenance belongs to the view, never its backing root.
+ * A decoded view starts with unknown provenance and borrows its parent.
+ */
+uint64_t fsimg_io_logical_sector(const fsimg_io_t *);
+fsimg_status_t fsimg_io_decoded_view(fsimg_io_t *, fsimg_io_t **,
+    fsimg_error_t *);
 /*
  * A read-only object of a fixed length whose bytes an internal owner
  * computes, such as a container's disk. resolve fills exactly the length
