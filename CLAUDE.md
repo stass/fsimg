@@ -281,6 +281,9 @@ worker. Every report names the platforms that ran and those that did not.
 ## Committing
 
 * Each solid progress should be committed in the git repository.
+* History is linear: no merge commits. Land a branch by rebasing it onto
+  the target and fast-forwarding (`git rebase`, then `git merge --ff-only`);
+  `git pull` rebases. Resolve conflicts during the rebase, commit by commit.
 * Before committing code, test that what you produced is high quality and that
   it works:
   - Launch a code-review subagent **FIRST**, before running tests. Ask it to
