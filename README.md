@@ -26,9 +26,12 @@ fsimg cf data.img -F exfat -C files .      # Create an image from ./files/
 - **Plan and reproduce builds.** Inspect sizing and metadata losses before
   writing; produce reproducible images with `-R`; verify staged images before
   publishing them with `cW`.
+- **Security and sandboxing.** Process untrusted images in an OS sandbox
+  where supported, with explicit warnings when confinement is unavailable.
+  Use `-S required` to refuse unconfined operation, and set memory, scratch,
+  output, and work limits.
 - **Extract into a fresh tree.** Extraction never merges with existing files
-  or overwrites them. Set memory, scratch, output, and work limits, and require
-  OS sandboxing on hosts that support it.
+  or overwrites them.
 - **Use it from scripts or C.** Send a file's bytes to stdout, consume streaming
   JSON records, or embed the same readers and writers through `libfsimg`.
 
