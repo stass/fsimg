@@ -296,7 +296,8 @@ header_cxx_LDADD = libfsimg.la
 EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/device-check.sh \
 	libfsimg.pc.in docs/examples.md \
-	build-aux/check-ascii.sh build-aux/check-seek-holes.sh build-aux/sanitize.sh \
+	build-aux/check-ascii.sh build-aux/check-dist.sh \
+	build-aux/check-seek-holes.sh build-aux/sanitize.sh \
 	build-aux/check-install.sh build-aux/check-installed.rb \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
@@ -400,6 +401,10 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/spec/Gemfile test/spec/Gemfile.lock test/spec/run.rb \
 	test/spec/bundle.rb test/spec/bin test/spec/cases test/spec/lib \
 	test/spec/suite
+# Every git-tracked file reaches the distribution; see check-dist.sh.
+dist-hook:
+	$(SHELL) $(top_srcdir)/build-aux/check-dist.sh $(top_srcdir) $(distdir)
+
 check-local: check-ascii check-fstat check-seek-holes
 .PHONY: check-ascii check-fstat check-seek-holes check-asan check-ubsan
 .PHONY: check-lsan check-msan check-security

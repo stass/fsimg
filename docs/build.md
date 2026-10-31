@@ -216,7 +216,11 @@ copy with the current build's configure arguments (`config.status --config`),
 followed by the sanitizer compiler, flags and `--disable-shared`. Nothing outside
 `sanitizer-<mode>/` is written, development oracles given to configure such as
 `FATCAT` carry over, and a file missing from the distribution fails the run as it
-would fail `make distcheck`. Compiler and sanitizer diagnostics name files in the
+would fail `make distcheck`. `make distdir` runs `build-aux/check-dist.sh`, which
+fails when a git-tracked file other than a `.gitignore` or an `fsspecs/` draft is
+missing from the distribution, so a test file left out of `EXTRA_DIST` cannot
+silently drop out of a sanitizer run; stage a new file before the run so the
+check sees it. A release archive has no git metadata, and there the check passes. Compiler and sanitizer diagnostics name files in the
 copy; edit the originals. `CC` and `CXX` in the environment select the sanitizer
 compiler (default `clang`); `make -n` does not run the targets. `make clean`
 removes the sanitizer builds and the fuzz harnesses. `check-asan` combines ASan

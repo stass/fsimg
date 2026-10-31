@@ -7,6 +7,9 @@
 /Makefile.in
 /build-aux/*
 !/build-aux/check-ascii.sh
+!/build-aux/check-dist.sh
+!/build-aux/device-check.sh
+!/build-aux/build-msan-zlib.sh
 !/build-aux/check-seek-holes.sh
 !/build-aux/sanitize.sh
 !/build-aux/fuzz.sh
