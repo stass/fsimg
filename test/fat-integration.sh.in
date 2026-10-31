@@ -90,6 +90,21 @@ trap 'rm -rf "$fixture_dir"' 0
 trap 'exit 1' 1 2 15
 printf 'Independent FAT fixture.\n' > "$fixture_dir/payload"
 unicode_name=$(printf 'R\303\251sum\303\251 collection.txt')
+# mtools uses the locale charset to convert host names to UCS-2.
+if ! available_locales=$(locale -a); then
+    echo 'ERROR: locale -a failed' >&2
+    exit 1
+fi
+utf8_locale=$(printf '%s\n' "$available_locales" | awk '
+    /^C\.(UTF-8|utf8)$/ { preferred = $0 }
+    /\.(UTF-8|utf8)(@[^@]+)?$/ { if (fallback == "") fallback = $0 }
+    END { print (preferred != "" ? preferred : fallback) }
+')
+external_mode=--external
+if test -z "$utf8_locale"; then
+    echo 'SKIP: Unicode-name populate/extract checks require a UTF-8 locale (locale -a found none)'
+    external_mode=--external-ascii
+fi
 
 # Each log is the fixture manifest: formatter/validator versions, geometry,
 # population commands and the independent validator's outcome. No imported
@@ -98,7 +113,8 @@ echo "formatter: $formatter; checker: $checker; host: $(uname -sr)"
 if test "$(uname -s)" != FreeBSD; then
     "$formatter" --help 2>&1 | sed -n '1p'
 fi
-"$MCOPY" -V
+echo "mtools locale: ${utf8_locale:-C (Unicode checks skipped)}"
+LC_ALL=${utf8_locale:-C} "$MCOPY" -V
 if test "$host" != Linux; then
     "$FATCAT" -h 2>&1 | sed -n '1p'
 fi
@@ -114,22 +130,25 @@ for profile in fat12 fat16 fat32 fat16-wide; do
     image="$fixture_dir/$profile.img"
     echo "fixture: FAT$variant; $kib KiB; $sector-byte sectors; $spc sectors/cluster"
     format_image
-    echo 'populate: mcopy Hello.txt, Unicode long name; mmd Nested; mcopy Nested/Deep.txt'
-    "$MCOPY" -i "$image" "$fixture_dir/payload" ::Hello.txt
-    "$MCOPY" -i "$image" "$fixture_dir/payload" "::$unicode_name"
-    "$MMD" -i "$image" ::Nested
-    "$MCOPY" -i "$image" "$fixture_dir/payload" ::Nested/Deep.txt
+    echo 'populate: mcopy Hello.txt; mmd Nested; mcopy Nested/Deep.txt'
+    LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" "$fixture_dir/payload" ::Hello.txt
+    if test -n "$utf8_locale"; then
+        echo 'populate: mcopy Unicode long name'
+        LC_ALL=$utf8_locale "$MCOPY" -i "$image" "$fixture_dir/payload" "::$unicode_name"
+    fi
+    LC_ALL=${utf8_locale:-C} "$MMD" -i "$image" ::Nested
+    LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" "$fixture_dir/payload" ::Nested/Deep.txt
     if test "$profile" = fat12; then
         # Leave a 400 KiB hole and a tail shorter than 600 KiB. The new file
         # must span both, independently forcing a fragmented allocation chain.
         ./test-fat --make-payload "$fixture_dir/filler" 409600
         ./test-fat --make-payload "$fixture_dir/fragment" 614400
         for name in A B C; do
-            "$MCOPY" -i "$image" "$fixture_dir/filler" "::$name.BIN"
+            LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" "$fixture_dir/filler" "::$name.BIN"
         done
-        "$MDEL" -i "$image" ::B.BIN
-        "$MCOPY" -i "$image" "$fixture_dir/fragment" ::FRAG.BIN
-        "$MDEL" -i "$image" ::A.BIN ::C.BIN
+        LC_ALL=${utf8_locale:-C} "$MDEL" -i "$image" ::B.BIN
+        LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" "$fixture_dir/fragment" ::FRAG.BIN
+        LC_ALL=${utf8_locale:-C} "$MDEL" -i "$image" ::A.BIN ::C.BIN
         echo 'fragment: three 400 KiB fillers, delete middle, copy 600 KiB, delete remaining fillers'
     fi
     "$checker" -n "$image"
@@ -140,7 +159,7 @@ for profile in fat12 fat16 fat32 fat16-wide; do
         check_fatcat "$image" "$sector" /Hello.txt "$fixture_dir/payload" \
             /Nested/Deep.txt "$fixture_dir/payload"
     fi
-    ./test-fat --external "$image" "fat$variant"
+    ./test-fat "$external_mode" "$image" "fat$variant"
     echo 'result: independent checker and fsimg enumeration/content/full verification passed'
 done
 
@@ -155,16 +174,19 @@ for profile in fat12 fat16 fat32; do
     "$checker" -n "$image"
     check_fatcat "$image" 512 /HELLO.TXT "$fixture_dir/writer-payload" \
         '/Nested/long name.txt' "$fixture_dir/writer-payload"
-    "$MCOPY" -i "$image" ::HELLO.TXT "$fixture_dir/extracted"
+    LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" ::HELLO.TXT "$fixture_dir/extracted"
     cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
     rm "$fixture_dir/extracted"
-    "$MCOPY" -i "$image" '::Nested/long name.txt' "$fixture_dir/extracted"
+    LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" '::Nested/long name.txt' "$fixture_dir/extracted"
     cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
     rm "$fixture_dir/extracted"
-    "$MCOPY" -i "$image" "::$unicode_name" "$fixture_dir/extracted"
-    cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
-    rm "$fixture_dir/extracted"
-    echo 'result: checker and mtools Unicode/long-name extraction passed'
+    if test -n "$utf8_locale"; then
+        LC_ALL=$utf8_locale "$MCOPY" -i "$image" "::$unicode_name" "$fixture_dir/extracted"
+        cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
+        rm "$fixture_dir/extracted"
+        echo 'result: mtools Unicode-name extraction passed'
+    fi
+    echo 'result: checker and mtools long-name extraction passed'
     rm "$image"
     ./test-fat-write --create-empty "$fixture_dir/write-$profile" "$profile"
     "$checker" -n "$image"

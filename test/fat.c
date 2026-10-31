@@ -100,7 +100,7 @@ static size_t long_records(unsigned char *, const uint16_t *, size_t,
     const unsigned char *);
 static void test_report_outputs(void);
 static void test_capability_bounds(void);
-static void test_external(const char *, const char *);
+static void test_external(const char *, const char *, bool);
 static void make_payload(const char *, size_t);
 static void write_seed(const char *, unsigned);
 
@@ -1971,7 +1971,7 @@ write_seed(const char *path, unsigned variant)
 }
 
 static void
-test_external(const char *path, const char *format)
+test_external(const char *path, const char *format, bool expect_unicode)
 {
 	static const char payload[] = "Independent FAT fixture.\n";
 	fsimg_ctx_t *ctx;
@@ -2046,7 +2046,9 @@ test_external(const char *path, const char *format)
 	}
 	if (status != FSIMG_DONE)
 		fprintf(stderr, "external read: %s (%s)\n", fsimg_status_string(status), error.message);
-	CHECK(status == FSIMG_DONE && files >= 3 && directories == 1 && saw_unicode);
+	CHECK(status == FSIMG_DONE && files >= (expect_unicode ? 3u : 2u) && directories == 1);
+	if (expect_unicode)
+		CHECK(saw_unicode);
 	fsimg_reader_free(reader);
 	CHECK(fsimg_reader_open(ctx, io, NULL, &reader, NULL) == FSIMG_OK);
 	status = fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, &error);
@@ -2242,8 +2244,9 @@ main(int argc, char **argv)
 		test_corruption();
 		return (0);
 	}
-	if (argc == 4 && strcmp(argv[1], "--external") == 0) {
-		test_external(argv[2], argv[3]);
+	if (argc == 4 && (strcmp(argv[1], "--external") == 0 ||
+	    strcmp(argv[1], "--external-ascii") == 0)) {
+		test_external(argv[2], argv[3], strcmp(argv[1], "--external") == 0);
 		return (0);
 	}
 	if (argc == 4 && strcmp(argv[1], "--make-payload") == 0) {

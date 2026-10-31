@@ -361,14 +361,11 @@
   backing file, proving the post-read stability failure keeps those bytes
   in an incomplete verification report.
 
-* [Medium] **Two integration oracles fail in an Ubuntu 24.04 container**
-  (`test/fat-integration.sh`, `test/containers-integration.sh`): running as
-  root with no locale set, with mtools 4.0.43, dosfstools 4.2 and qemu-img
-  8.2.2, the base tree fails `test/fat.c:2046` on the mtools-populated FAT12
-  fixture (the Unicode long name is not seen) and `w-fat16.vhd: qemu-img info
-  size`. Determine whether the cause is the locale given to mtools and
-  qemu-img's VHD geometry sizing, or a reader or writer defect, and fix the
-  defect or pin the oracle's environment.
+* [Medium] **qemu-img VHD size check fails in an Ubuntu 24.04 container**
+  (`test/containers-integration.sh.in`): qemu-img 8.2.2 reports a fixed VHD's
+  virtual size from its footer's CHS geometry, failing `w-fat16.vhd: qemu-img
+  info size`, while conversion to raw preserves the disk bytes. Accept the
+  geometry-derived size or check the converted length instead.
 
 * [Medium] **QNX6 verification decodes short scratch records before checking length**
   (`lib/formats/qnx6/verify.c` `owner_next`, `reference_next`): the stream can
@@ -386,15 +383,6 @@
   a retained writer plan freed after output failure and after the borrowed
   file settings are gone, and callback sinks proving a bound refusal opens
   and resizes nothing for VHD, DMG and simg.
-
-* [Low] **Two integration oracles depend on the Linux host's setup**
-  (`test/fat-integration.sh.in`, `test/containers-integration.sh.in`): under
-  the POSIX locale the mtools-populated fixture fails `test/fat.c`'s Unicode
-  long-name read-back (`saw_unicode`); it passes under `C.UTF-8`. qemu-img 8.2 reports a fixed VHD's virtual size from the
-  footer's CHS geometry, so the `qemu-img info size` check fails on Ubuntu
-  24.04 while `qemu-img convert` still expands the VHD to the same bytes.
-  Pin the scripts' locale, and accept the geometry-derived size or check the
-  converted length instead.
 
 * [Low] **A failed extraction keeps any error path, not only an entry's**
   (`lib/extract/extract.c` `report_destination`, `include/fsimg.h`): the
