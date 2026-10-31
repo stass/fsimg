@@ -149,7 +149,6 @@ class CliTest < Minitest::Test
         .fetch("message")
     )
     [
-      [["t", "-f", "human.img", "/nested", "-v"], "selecting several members is not supported".b],
       [["t", "-F", "fat32/-/vhd", "-f", "human.img"], "no VHD footer".b],
       [
         [
@@ -195,7 +194,13 @@ class CliTest < Minitest::Test
       assert_equal("".b, result.stdout, [arguments, result.stderr])
     end
 
-    assert_empty(root.children.select { |path| path.basename.to_s.start_with?("syntax.") }, "root children select path path basename to s")
+    result = invoke(arguments: ["t", "-f", "human.img", "/nested", "-v"], expected: 1)
+    assert_equal("\"/nested\"\n\"/nested/caf\u00e9.txt\"\n".b, result.stdout)
+    assert_includes(result.stderr.lines, "fsimg: selected image path was not found \"/-v\"\n".b)
+    assert_includes(result.stderr.lines, "fsimg: output is incomplete\n".b)
+
+    syntax_outputs = root.children.select { |path| path.basename.to_s.start_with?("syntax.") }
+    assert_empty(syntax_outputs, "Rejected creation options must leave no syntax.* outputs; found #{syntax_outputs.inspect}")
     refute((root / "-").exist?, "standard output creation leaves no file named dash")
     (root / "dotdot-parent").mkdir
     result = invoke(arguments: ["xf", "human.img", "-C", "dotdot-parent", "../x"], expected: 2)

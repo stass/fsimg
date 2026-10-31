@@ -380,6 +380,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/manifest_generated_test.rb \
 	test/cli/manifest_host_test.rb \
 	test/cli/manifest_refusals_test.rb \
+	test/cli/members_test.rb \
 	test/cli/merged_operands_test.rb \
 	test/cli/mtree_export_test.rb \
 	test/cli/mtree_failures_test.rb \

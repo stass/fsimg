@@ -906,7 +906,8 @@ test_path_sequences(void)
 		fixture_open(&fixture);
 		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
 		fixture.request.scratch_fd = -1;
-		fixture.request.selection = cases[i].declared_selection;
+		fixture.request.members = &cases[i].declared_selection;
+		fixture.request.member_count = 1;
 		if (cases[i].two_root_plan) {
 			roots[0] = roots[1] = fixture.source;
 			fixture.request.kind = FSIMG_JOB_PLAN;

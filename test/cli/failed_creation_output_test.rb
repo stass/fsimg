@@ -23,7 +23,8 @@ class CliTest < Minitest::Test
     assert(rejected.stderr.end_with?(message), "rejected stderr end with message")
     lines = rejected.stderr.lines
     assert_equal(message, lines[-1])
-    assert(lines[0...-1].all? { |line| line.start_with?("fsimg: warning: OS sandbox".b) }, "lines 0 1")
+    assert(lines[0...-1].all? { |line| line.start_with?("fsimg: warning: OS sandbox".b) },
+      "Only sandbox warnings may precede the geometry error; got #{lines[0...-1].inspect}")
     refute_includes(rejected.stderr, "metadata".b, "rejected stderr")
     refute_includes(rejected.stderr, "0 bytes".b, "rejected stderr")
     refute((root / "oversized.img").exist?, "a failed size check leaves no output image")

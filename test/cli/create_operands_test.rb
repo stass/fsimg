@@ -142,7 +142,5 @@ class CliTest < Minitest::Test
     same_bytes(first: (root / "exfat.img"), second: (root / "verified-data.img"))
   end
 
-  def test_create_operands_verification_failure
-    skip("cW verification failure: no cheap way to stage an image that fails verification")
-  end
+  # Staged cW verification failure is covered by test/staged-verify.c.
 end
