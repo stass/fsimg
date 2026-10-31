@@ -1,264 +1,242 @@
 # fsimg
 
-fsimg is a BSD-2-Clause filesystem image tool and embeddable C11 library for
-64-bit FreeBSD, Linux, and macOS. It supports FAT, exFAT, classic QNX6
-Power-Safe, QNX4 and QNX ImageFS (IFS) image creation, reading,
-verification, and safe extraction without mounts or root.
+Create, inspect, verify, and extract filesystem images without mounting them.
 
-The library provides resource contexts, bounded positional I/O, and private
-bounded metadata storage with record streams, paged arrays/bitsets, and stable
-external sorting. Private writer infrastructure scans host trees, reads zero
-and provider-backed sources, and prepares deterministic catalogs without a
-resident object or descriptor per entry. Source scanning records symbolic
-links by target without following them, crosses mount points as tar does,
-rejects special files, and passes over its own scratch and staging
-directories inside a tree it imports; identity checks
-detect changes visible in host metadata; coarse timestamps and metadata-preserving
-mutation require immutable sources or a snapshot for consistency. Public
-FAT12/FAT16/FAT32/exFAT readers enumerate entries,
-read current-file content, report volume information, and verify complete
-allocation ownership with optional payload read-through. Native and sanitizer
-suites run on macOS, Linux, and FreeBSD, with platform/tool skips documented
-in the evidence. Public FAT12/FAT16/FAT32/exFAT writers
-plan deterministic layouts, stream payloads directly from stable sources, and
-emit to bounded sinks or publish a new image without replacing an existing
-name. Plans expose geometry, space use, and metadata-loss counts. Safe extraction
-creates a fresh private tree with logical quotas, case/alias selection, and
-optional timestamp restoration. The tar-like `fsimg` command creates (`c`), lists (`t`),
-extracts (`x`, or `x -O` to stdout), verifies (`W`) and describes (`i`)
-images and reports `--formats`, with streaming NDJSON output
-and bounded progress. It supervises confined workers and bounded stdout/stderr
-output; Linux/FreeBSD profiles have actual kernel tests. The
-[implementation plan](docs/implementation-plan.md) and [open work](TODO.md)
-record qualification gates and remaining work.
-
-Reading a disk peels its layers: `-F` names them inner to outer
-(`fat32/gpt`), and an unnamed slot is detected. GPT and MBR partition tables
-are read and checked completely before any partition is used: both GPT
-copies must be intact and agree, entries must lie within the usable range
-without overlapping, and a damaged table fails rather than falling back to
-the disk as a bare volume. The volume is the one partition holding a
-recognized filesystem unless `--partition=N`, `name=TEXT` or `type=NAME`
-selects one; `--offset=`/`--length=` bypass the table. `fsimg i` lists the
-table and marks the selected partition, and `fsimg W` checks the table with
-the volume.
-
-Named input also accepts finite read-only disk devices, for example
-`fsimg i -f /dev/disk10` on macOS, without copying the disk into a spool.
-macOS block/raw nodes, Linux block devices and FreeBSD disk providers use
-bounded positional reads. Device permissions still apply. Keep media stable
-and writable output/scratch on separate backing storage: a mounted filesystem
-or another writer can change the input, and device timestamps cannot prove
-otherwise. fsimg does not mount, unmount or snapshot the device. Standard
-input keeps its existing stream/spool behavior.
-For directory extraction use `fsimg x -E -f /dev/disk10 -C empty-dir` with
-an existing empty private directory.
-
-DMG, fixed VHD and Android sparse image containers are read the same way:
-`fsimg xf installer.dmg` unwraps the DMG, the GPT inside it and the volume
-inside that. DMG chunks may be stored, zero or zlib-compressed, as `hdiutil`
-writes UDRO and UDZO images; the koly trailer, the property list and every
-block table are validated before any chunk is used, and decoded chunks are
-cached four at a time within the memory limit, the decoding counted as
-work. `fsimg W` checks the container's checksums, and `W -d` decodes every
-chunk. Other DMG compressions, multi-segment DMGs and dynamic VHDs are
-refused as unsupported.
-
-A gzip-compressed image is read too, as a file or on standard input:
-`fsimg tf sd.img.gz`, or `curl -s URL | fsimg xf - -C out`. The decoder
-checks every member's CRC32 and length and refuses trailing bytes; it
-writes the image into the spool, an unlinked file in scratch whose logical
-size `-l spool=` bounds (64 GiB by default) before each step, so a
-decompression bomb stops at the limit, and the decoding counts as work,
-which `-l work=` bounds. An uncompressed image on standard
-input is copied there unchanged. When gzip's signature and another format
-both claim the first bytes, `-z` or `-F` says which reading is meant.
-
-Creating with a scheme in the stack writes a disk: `fsimg cf disk.img -F
-fat32/gpt -C esp .` puts the volume at 1 MiB as the disk's one partition,
-typed and named after its filesystem unless `-o gpt:type=`, `gpt:name=`,
-`mbr:type=` or `mbr:active=` say otherwise, with the disk length derived or
-fixed by `gpt:disk=`/`mbr:disk=` and 4096-byte GPT sectors on request.
-Identifiers are random, or under `-R` derived from the epoch. The library
-also wraps a raw volume in a scheme, unwraps a partition back to its raw
-bytes, and composes several volumes into one disk.
-
-A container in the stack is written too: `fsimg cf disk.dmg -F fat32/gpt/dmg
--C esp .` writes a UDZO DMG that `hdiutil` verifies and attaches, and
-`fat32/vhd` and `fat32/gpt/simg` write a fixed VHD and an Android sparse
-image. The disk is emitted to a private raw file and encoded in one
-sequential pass, all-zero chunks becoming zero runs; `-o dmg:compress=`,
-`dmg:level=`, `dmg:chunk=`, `vhd:align=`, `simg:block=` and `simg:crc=` tune
-it. `fsimg cf - ...` streams the image to standard output instead, refusing
-a terminal. `-z`, or `-a` with a `.gz` name such as `disk.dmg.gz`,
-compresses whatever the stack writes into one gzip member that `gzip -t`
-accepts, at `-o gzip:level=` 1 to 9; under `-R` its bytes are reproducible
-for one zlib version.
-
-[System qualification](docs/qualification.md) includes ten-million-file format
-planning, a million-fragment content round trip, sustained fuzzing and combined
-CLI memory checks. The extended targets run separately from ordinary tests.
-
-Full FAT verification rejects dirty/error flags and inconsistent known FSInfo
-free-count hints, as well as structural corruption; it performs no repair.
-Supply a private scratch directory for large directory, ownership, and fragment
-indexes. Without scratch, operations that exceed resident metadata storage
-return a resource-limit error.
-
-Writers support 512 through 4096-byte sectors. FAT allocation units reach
-32 KiB and exFAT units reach 32 MiB, while transfer buffers remain bounded
-independently. Actual sparse 128 TiB exFAT volumes are qualified at a 64 MiB
-library budget on APFS and ZFS. exFAT validates bitmap allocation, embedded
-case mappings, and directory entry sets; initialized-data tails always read
-as zero. Its timestamps retain per-field UTC, known-offset or wall-clock bases.
-Automatic FAT sizing follows Microsoft's 16-cluster margin around
-variant cutovers; exact sizing retains the legal boundary counts. Required
-metadata loss fails; optional timestamp rounding, range and
-timezone-basis losses follow the initialized options' explicit allow-loss
-policy and optional callback. Reproducible mode selects a fixed UTC epoch.
-The entry model also carries symbolic links, FIFOs, owner, mode and change
-time. FAT and exFAT store none of them: a symbolic link or FIFO fails
-planning, and owner and mode imported with `fsimg c -p` are counted optional
-losses that leave the image bytes unchanged. Extraction never creates links
-or FIFOs; `fsimg x -k` skips and counts such entries instead of failing.
-
-The QNX6 reader accepts the classic QNX 6.5.0 layout in either byte order at
-512 through 4096-byte blocks, selects the newer of the two snapshot headers,
-and reports files, directories, symbolic links and FIFOs with owner, mode and
-all four timestamps. It finds the second header from the slice length, so a
-partition is read through its partition table or with `--offset=` and
-`--length=` set to its exact offset and length. Hard links appear as separate entries with the same content, and names are
-compared byte for byte. QNX6 names reach 510 bytes; extracting one longer
-than the host filesystem allows, 255 bytes on most, fails as unsupported.
-Bootless and Audi MMI layouts and later Power-Safe extensions are recognized
-and refused as unsupported. The QNX6 writer creates
-the same layout with `-o endian=`, `uuid=`, `inodes=` and `reserve=`
-settings and stores every entry kind and the POSIX fields; QNX 6.5.0 checks,
-mounts, modifies and remounts its volumes cleanly at every block size and in
-both byte orders.
-
-The QNX4 reader accepts the volumes QNX 6.5.0 `dinit` makes, with or without
-`.longfilenames`, and reports files, directories, symbolic links and FIFOs
-with owner, mode and all four timestamps, and the label of up to 48 bytes.
-It derives the block count from the slice length, so a partition is read
-through its partition table or with `--offset=` and `--length=` set to its
-exact offset and length. Names
-reach 505 bytes
-on a volume with `.longfilenames` and 48 bytes without; they compare byte for
-byte, and hard links appear as separate entries with the same content. The
-format's own `.bitmap`, `.inodes`, `.longfilenames` and `lost+found` are not
-listed; `.boot` and `.altboot` are. `fsimg W` checks that every allocated
-block has exactly one owner, that every link count matches the names, and
-that every used `.inodes` slot and long-name record is named; it reports a
-volume whose label is invalid or
-whose `lost+found` holds an entry as unsupported, since neither has an
-observed form. A volume whose `lost+found` `..` names the root record does
-not open, for the same reason. The QNX4 writer creates the layout QNX
-6.5.0 `dinit` makes, with `.longfilenames`, names of up to 505 bytes, a
-label of up to 48 bytes and an `-o inodes=` setting for the `.inodes`
-capacity. Every object is one extent, and the loader block is zero, so the
-volume is not bootable. It stores every entry kind and the POSIX fields.
-QNX 6.5.0 checks, mounts and remounts its volumes cleanly at every size
-from the 43-block minimum to a 52.6 GB volume, and modifies every one with
-free space cleanly.
-
-The ImageFS reader accepts the image filesystems QNX 6.5.0 `mkifs` makes,
-in either byte order, read from offset 0 of the selected slice, and reports
-files, directories, symbolic links and FIFOs with owner, mode and
-modification time. `fsimg i` reports the mountpoint and the header's boot
-references and mount flags. A parent without a record is listed as a
-directory with mode 0755, owner 0 and time 0; of records with the same path
-only the last is listed. When that last record is a file, symbolic link or
-FIFO, no record below its path is listed (`procnto` hides the records
-below a link at boot the same way); `fsimg i` counts both kinds as
-shadowed. A path with `.`, `..` or empty components is unsupported.
-`fsimg W` checks the image's additive checksum, its length against the
-image size, and that each boot and script reference names exactly one
-file. A QNX boot image (`ifsboot`), raw or with an LZO1X or NRV2B body,
-at offset 0 or behind the x86 BIOS loader, is read as the ImageFS it
-carries, and `fsimg W` checks its startup and stored checksums; its
-startup code is never interpreted. `-F ifs/ifsboot` writes one: the
-startup header with the machine and addresses given as `-o ifsboot:`
-settings, startup code and an optional boot prefix copied from files
-(`-o ifsboot:startup=`, `-o ifsboot:prefix=`), and the ImageFS raw or in
-LZO1X chunks. A machine is written only under the modes a native boot of
-a written image has passed, so this version writes machine 0, `mkifs`'s
-nonbootable output, under either mode, the x86 machine raw only (QNX
-6.5.0's x86 startup does not decode LZO1X bodies), and refuses the SH-4
-machine.
-The ImageFS writer creates nonbootable images in either byte order
-with a mountpoint setting (default `/`): the root and a record for every
-directory, then files, symbolic links and FIFOs with owner, mode and
-modification time, each file's data on a 4-byte boundary. The image's size
-follows from its contents. A bootable image's body must come from `mkifs`
-or be unwrapped from an existing boot image with `fsimg_image_unwrap()`;
-`fsimg_image_wrap()` can then package it in an `ifsboot` container, its
-ImageFS bytes unmodified. A partition scheme or a container that pads
-the volume (DMG, VHD, simg) cannot hold an ImageFS, which must end exactly
-at its image size; gzip can compress it. QNX 6.5.0 `dumpifs` lists and
-extracts its images as it does the `mkifs` images of the same trees.
-
-An ImageFS inside a Harman-Becker `hbcifs` container, such as `PCM3_IFS2.ifs`
-on the PCM 3.1 update disc, is read through the container: its header is
-checked and its LZO1X payload decoded into the spool, so it needs scratch
-(not `-T -`) and a spool limit above the decoded length, and it is refused
-gzip-compressed or on standard input. `fsimg i` prints the stack as
-`ifs/hbcifs` with the header's fields; `fsimg W` names the two fields no
-known rule checks, 0x14 and 0x1c, and reports the verification as
-incomplete.
-
-FAT stores calendar fields without a timezone, and readers report wall times.
-Raw sinks may be incomplete on failure. Callback source and sink storage must
-be disjoint. File publication can report an existing target, uncertain outcome,
-or durability failure; inspect the structured error before retrying. Unsupported
-publication retains the private completed image and reports its location.
-Failed extraction retains an explicitly incomplete private tree. FreeBSD/UFS
-immediate publication-to-reader handoff can fail conservative identity checks;
-its ctime behavior remains under investigation.
-
-Build with Autoconf, Automake, Libtool, a C11 compiler, and a C++ compiler:
+fsimg brings a tar-style interface to disk images: list a volume, read a file
+to stdout, extract a directory, or build a new image from a source tree.
+It runs on 64-bit Linux, FreeBSD, and macOS, with no root privileges, kernel
+filesystem driver, or external filesystem utilities required for image files.
 
 ```sh
+fsimg tf disk.img                         # List files
+fsimg xOf disk.img /etc/motd               # Read one file to stdout
+fsimg xf disk.img                         # Extract into ./disk/
+fsimg cf data.img -F exfat -C files .      # Create an image from ./files/
+```
+
+## Features
+
+- **One interface across formats.** Work with FAT, exFAT, and QNX filesystems
+  using the same commands.
+- **Read through the layers.** Detect supported filesystems inside GPT or MBR
+  disks, DMGs, fixed VHDs, Android sparse images, and gzip streams.
+- **Build images from files or manifests.** Choose the filesystem, size,
+  label, partition scheme, and container. Use mtree manifests to set image
+  ownership and permissions without changing host files.
+- **Plan and reproduce builds.** Inspect sizing and metadata losses before
+  writing; produce reproducible images with `-R`; verify staged images before
+  publishing them with `cW`.
+- **Extract into a fresh tree.** Extraction never merges with existing files
+  or overwrites them. Set memory, scratch, output, and work limits, and require
+  OS sandboxing on hosts that support it.
+- **Use it from scripts or C.** Send a file's bytes to stdout, consume streaming
+  JSON records, or embed the same readers and writers through `libfsimg`.
+
+## Quick start
+
+[Build and install fsimg](#build), then try a complete round trip with a tiny
+image. No download or existing disk image is needed:
+
+```sh
+demo=$(mktemp -d)
+cd "$demo"
+mkdir source
+printf 'hello from fsimg\n' > source/hello.txt
+
+# Create an exFAT image, sized automatically to fit.
+fsimg cf hello.img -F exfat -C source .
+
+# Browse it and read a file without extracting it.
+fsimg tf hello.img
+fsimg xOf hello.img /hello.txt
+
+# Check its structure and read all file payloads.
+fsimg Wdf hello.img
+
+# Extract into a new ./hello/ directory and compare the result.
+fsimg xf hello.img
+cmp source/hello.txt hello/hello.txt
+```
+
+The read command prints `hello from fsimg`; `cmp` succeeds silently.
+The files remain in the temporary directory for you to explore.
+
+The command letters follow tar: `c` creates, `t` lists, `x` extracts,
+`i` reports image information, and `W` verifies. `-f` names the image.
+Use `fsimg -h` for an overview or `fsimg c -h` for help with a command.
+
+## Everyday use
+
+### Inspect a disk or compressed image
+
+```sh
+fsimg if disk.img                         # Layers, partitions, volume details
+fsimg tvf disk.img                        # Long listing
+fsimg tf disk.img --partition=2           # Select a partition explicitly
+fsimg tf disk.img --partition=name=EFI /EFI
+fsimg tf disk.img.gz                      # Gzip is detected automatically
+fsimg tf disk.dmg                         # Container and volume are detected
+```
+
+Without an explicit selection, fsimg uses the one partition containing a
+recognized filesystem. `fsimg i` shows the partition table even when you need
+to choose a partition. Readable disk devices work too, subject to device
+permissions: for example, `fsimg if /dev/disk10` on macOS. Keep the medium
+stable while reading it.
+
+### Extract just what you need
+
+```sh
+fsimg xf disk.img /documents              # Creates ./disk/documents/
+fsimg xOf disk.img /documents/readme.txt > readme.txt
+```
+
+By default, extraction creates a private directory named after the image:
+`disk.img`, `disk.img.gz`, and `disk.dmg` all extract into `./disk/`.
+That directory must not already exist. To use an existing empty private
+directory, pass `-E -C directory`.
+
+Extraction creates regular files and directories. For a QNX image containing
+symbolic links or FIFOs, use `-k` to skip those entries; add `--mtree` to record
+them and their metadata for a later rebuild:
+
+```sh
+fsimg xkf rootfs.img --mtree=rootfs.mtree
+fsimg cf rebuilt.img -F qnx6 -C rootfs @../rootfs.mtree
+```
+
+The manifest carries ownership, modes, link targets, and file digests that the
+extracted tree alone cannot preserve. This rebuilds the tree and supported
+metadata; it does not reproduce the original disk layout or bootability.
+
+### Create a volume, disk, or container
+
+With a source directory `files/`, choose the image you need:
+
+```sh
+# A FAT32 volume with a label and an exact size.
+fsimg cf data.img -F fat32 -s 64M -L DATA -C files .
+
+# A reproducible exFAT image, verified before publication.
+fsimg cWRf data-exfat.img -F exfat -C files .
+
+# A FAT32 volume inside a GPT disk, then inside a compressed DMG.
+fsimg cf data.dmg -F fat32/gpt/dmg -C files .
+
+# A gzip-compressed image.
+fsimg czf data.img.gz -F exfat -C files .
+
+# Inspect a plan without creating an image or reading file payloads.
+fsimg cn -F exfat --free-space=32M -C files .
+```
+
+`-F` names layers from the inside out: `fat32/gpt/dmg` means a FAT32
+filesystem in a GPT partition inside a DMG. Creation writes one partition;
+the C API can compose several volumes into a disk. Images are sized
+automatically unless you request an exact size with `-s`.
+
+Creation publishes a new file and refuses to replace an existing name.
+Keep source files stable during the operation. `-R` fixes ordering,
+timestamps, identifiers, and padding; compressed bytes also depend on the
+zlib version.
+
+### Use pipelines and structured output
+
+```sh
+# Read a compressed image from a pipe.
+cat disk.img.gz | fsimg tf -
+
+# Write a gzip-compressed image to stdout.
+fsimg cRzf - -F exfat -C files . > streamed.img.gz
+
+# Stream a machine-readable listing.
+fsimg tf disk.img --json
+```
+
+JSON output is newline-delimited, with explicit completion records. Diagnostics
+and progress go to stderr; file payloads and listing records go to stdout.
+Standard input and gzip decoding use a temporary spool, bounded by
+`-l spool=` (64 GiB by default). Use `-T` to choose scratch storage and
+`-m` to set the library memory budget.
+
+## Supported formats
+
+| Filesystem | Read, create, verify, extract | Scope |
+| --- | --- | --- |
+| FAT12, FAT16, FAT32 | Yes | Long names and FAT short aliases |
+| exFAT | Yes | Ordinary one-FAT volumes |
+| QNX6 Power-Safe | Yes | Classic QNX 6.5.0 layout, either byte order |
+| QNX4 | Yes | QNX 6.5.0 `dinit` layout, including long names |
+| QNX ImageFS (IFS) | Yes | Either byte order; newly created bodies are nonbootable |
+
+| Disk layer | Read | Create |
+| --- | --- | --- |
+| GPT, MBR | Yes | One partition through the CLI; multiple through the C API |
+| DMG (UDIF) | Stored, zero, and zlib chunks | UDRO or UDZO |
+| VHD | Fixed disks | Fixed disks |
+| Android sparse (`simg`) | Yes | Yes |
+| gzip | Files and stdin, including concatenated members | Files and stdout |
+| QNX boot image (`ifsboot`) | Raw, LZO1X, or NRV2B body | Qualified machine/compression combinations |
+| Harman-Becker `hbcifs` | LZO1X ImageFS container | No |
+
+Run `fsimg --formats` for the capabilities in your build. Container support
+does not add support for the filesystem inside it: an HFS+ or APFS DMG, for
+example, cannot be listed or extracted.
+
+fsimg creates new images and reads existing ones; it does not edit or repair
+them in place. QNX support targets the layouts above, rather than every
+Power-Safe or firmware variant. ImageFS boot-image creation has additional
+restrictions, and `hbcifs` verification reports incomplete coverage.
+See the [command manual](docs/fsimg.1) for exact profiles and limits.
+
+## Build
+
+Building from a checkout requires Autoconf, Automake, Libtool, make, a C11
+compiler, a C++ compiler, and the system zlib development headers and library.
+
+```sh
+git clone https://github.com/stass/fsimg.git
+cd fsimg
 autoreconf -fi
 mkdir build
 cd build
-../configure
+../configure --prefix="$HOME/.local"
 make
-make check
-make check-install
+make install
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-For a release archive, start with `./configure`; generated build support is
-included. `make install` installs the command, static/shared library, public
-header, pkg-config metadata, manuals and checked [C examples](docs/examples.md).
-The command is shaped like tar: a mode letter (`c` create, `x` extract, `t`
-list, `W` verify, `i` information) followed by option letters, with `-f`
-naming the image. See `fsimg -h`, `fsimg c -h`, and `man fsimg` for the
-command contract. Creation and extraction are quiet on success. Use `-n` to
-inspect a creation plan, `-vv` for progress and sampled metadata-loss details,
-or `--json` for structured records with explicit completion. Human errors report relevant paths and OS
-messages; metadata-loss notices count affected fields rather than files.
-Sandbox-unavailable warnings remain visible. Standalone macOS has no built-in
-OS confinement backend; `-S required` refuses operation there.
+From a release archive, start with `./configure`; generated build support is
+included. Python 3 and pkg-config are needed for the CLI integration and
+installation checks. See [build and validation](docs/build.md) for platform
+setup and test commands.
 
-```sh
-fsimg --formats
-fsimg cRf new.img -F exfat -C source-directory .
-fsimg Wdf new.img
-fsimg tf new.img --json
-fsimg xf new.img
-```
+Installation includes the command, shared and static `libfsimg`, the public C
+header, pkg-config metadata, manuals, and checked
+[C examples](docs/examples.md). The runtime uses libc, host OS APIs, and system
+zlib.
 
-See [build and validation](docs/build.md),
-[platform evidence](docs/platform-evidence.md), and the
-[specifications](specs/README.md). The ordinary library requires only libc,
-host OS APIs and the system zlib, which DMG chunks need and which is never
-vendored. Development tests run unprivileged in disposable fixtures.
+## Further reading
 
-Project-owned files carry SPDX BSD-2-Clause notices and contributor copyright;
-[LICENSE](LICENSE) contains the terms. Autotools generates its own build support
-with upstream notices intact. FAT codec examples adapted from the author's
-libarchive reader and writer retain their BSD-2-Clause notices, as does the
-SHA-256 implementation adapted from FreeBSD. Pinned Unicode/CP437 data
-uses the Unicode-3.0 license. The [reference manifest](docs/references.md) records
-provenance; installed documentation includes the required notices.
+After installation, read the manuals with `man fsimg` and `man libfsimg`.
+
+- [Command manual](docs/fsimg.1): options, extraction rules, format profiles,
+  resource limits, and failure behavior.
+- [Library manual](docs/libfsimg.3) and [C examples](docs/examples.md): reading,
+  creating, extracting, and supplying callback-backed file content.
+- [Validation and qualification](docs/qualification.md) and
+  [platform evidence](docs/platform-evidence.md): interoperability, scale,
+  fuzzing, and platform checks.
+- [Specifications](specs/README.md) and [open work](TODO.md): design and
+  remaining work.
+
+The CLI uses OS confinement where available; `-S required` refuses to run
+without it. Standalone macOS has no built-in confinement backend.
+Verification checks supported structures and checksums; it is not a repair
+operation. Failed extraction can leave an explicitly incomplete private tree.
+See the command manual for recovery and publication outcomes.
+
+## License
+
+[BSD-2-Clause](LICENSE). Third-party code and data retain their own notices;
+see the [reference manifest](docs/references.md).
