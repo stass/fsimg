@@ -191,6 +191,13 @@
   report fatcat as not applicable to a name stored with case bits rather
   than as a disagreement.
 
+* [Low] **Spec harness SIGTERM test reads a pid file that may not exist**
+  (`test/spec/suite/core/test_invocation.rb` `wait_for_pid`, lines
+  182-186): it waits 10 s for the pid file and then reads it anyway, so a
+  slow host fails `test_sigterm_to_the_harness_leaves_no_group` with
+  ENOENT instead of a timeout message. Seen once on macOS under heavy load.
+  Fail with a named timeout, and size the wait to the harness's own bounds.
+
 * [Medium] **FAT integration script into the spec harness**
   (`test/fat-integration.sh.in`, `test/fat.c` `--external` and
   `--make-payload`, `test/fat-write.c` `--create` and `--create-empty`):
