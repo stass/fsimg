@@ -128,9 +128,7 @@
   * [Low] A layer's failure is attributed by `layer_failed` at each of its
     call sites in `lib/layers/image.c` and by the chunk index in
     `lib/layers/chunks.c`; a new layer entry point must remember to call
-    it. The DMG encoder, the chunk index and gzip each carry their own
-    zlib allocator over the context (`lib/layers/dmg.c`,
-    `lib/layers/chunks.c`, `lib/layers/gzip.c`).
+    it.
   * [Low] `fsimg_writer_output` holds the bare raw descriptor between the
     sink's adoption and its handover to `fsimg_io_adopt_handed_over`, so
     an early return added between them must close it; one helper that
