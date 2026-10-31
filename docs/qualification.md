@@ -131,7 +131,7 @@ or complete multi-terabyte payload transfer. Detailed counts are in
 `check-cli-rss` builds a non-installed executable from exactly the production
 CLI source list plus a test wrapper. Only `main` and supervisor `waitpid` calls
 are redirected. It uses the production library, supervisor, workers, output
-relay and confinement. Its Python driver creates 100,000 empty host files in
+relay and confinement. Its Ruby driver creates 100,000 empty host files in
 100 directories plus a 257-byte marker, then runs modes `c`, `i`, recursive
 NDJSON `t`, raw `x -O`, payload `W -d` and `x`. The library budget is
 16,777,216 bytes; the combined allowance is 83,886,080 bytes. Output goes to

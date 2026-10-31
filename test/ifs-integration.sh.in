@@ -25,7 +25,7 @@
 # their bare body does. The captures are compared with test-ifs's model by
 # test-ifs --native, the boot images and E7 and E10 captures with their
 # decoded bodies by test-ifsboot --native, and, through the command, with
-# the research decoder ifsdump.py by test/ifs-native.py, which first checks
+# the research decoder ifsdump.py by test/ifs-native.rb, which first checks
 # itself on two generated images.
 # dumpifs and qnxprobe, when given, must accept every bare image fsimg
 # verifies. The hbcifs container must decode to the oracle's bytes, list and
@@ -36,8 +36,14 @@
 # name, are discarded. Each unavailable check is reported as a skip.
 set -eu
 ran=0
-python='@PYTHON3@'
-native_tool='@abs_top_srcdir@/test/ifs-native.py'
+ruby='@RUBY@'
+if test -z "$ruby" ||
+    ! "$ruby" -e 'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.2"))'; then
+    echo 'SKIP: ImageFS manifest and body helpers require Ruby 3.2 or later'
+    ruby=''
+fi
+python=$(command -v python3 || :)
+native_tool='@abs_top_srcdir@/test/ifs-native.rb'
 ifsdump='@abs_top_srcdir@/tools/qnx/decode/ifsdump.py'
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-ifs-oracle-XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
@@ -121,6 +127,15 @@ expect_line() {
 dumpifs=${DUMPIFS:-}
 probe=${QNXPROBE:-}
 
+# These helper edge cases need no external images or Python decoder.
+if test -n "$ruby"; then
+    if "$ruby" -e 'require "minitest"' 2> /dev/null; then
+        "$ruby" "$native_tool" self-test || fail "ImageFS helper self-tests"
+    else
+        echo 'SKIP: ImageFS helper self-tests require Minitest'
+    fi
+fi
+
 # Two generated images, verified through the command and, as a test of the
 # comparison itself, compared with ifsdump.py: the fuzzing seed, whose
 # names outside the profile are omitted with their subtrees, a link, a
@@ -148,9 +163,9 @@ grep -q '"stack":"ifs/hbcifs".*"container_codecs":"lzo1x".*"container_details":{
 grep -q '"type":"verify","complete":false,.*"container":"hbcifs","unverified":"0x14,0x1c"' \
     "$fixture/verify" ||
     fail "the generated container's verification does not name its unverified fields"
-if test -n "$python"; then
+if test -n "$python" && test -n "$ruby"; then
     result=0
-    "$python" -I "$native_tool" compare ./fsimg ./test-ifs "$ifsdump" \
+    "$ruby" "$native_tool" compare ./fsimg ./test-ifs "$ifsdump" \
         "$fixture/omitted.ifs" "$fixture/shadowed.ifs" > "$fixture/compare" ||
         result=$?
     cat "$fixture/compare"
@@ -164,18 +179,18 @@ if test -n "$python"; then
     # The container comparison on the generated hbcifs container and the
     # ImageFS it decodes to, and, as a seeded failure, against another
     # image's decode.
-    "$python" -I "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
+    "$ruby" "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
         "$fixture/seed.hbcifs" "$fixture/seed.imagefs" > "$fixture/compare" ||
         fail "fsimg differs from ifsdump.py on the generated container"
     cat "$fixture/compare"
     expect_line '^seed.hbcifs: 2 entries, 1 files. bytes, 1 link targets, .*; extracted 1 files and 0 directories$'
-    if "$python" -I "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
+    if "$ruby" "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
         "$fixture/seed.hbcifs" "$fixture/omitted.ifs" > /dev/null; then
         fail "the container comparison accepts another image's decode"
     fi
     ran=1
 else
-    echo 'SKIP: the ifsdump.py comparison requires the Python 3 development tool'
+    echo 'SKIP: the ifsdump.py comparison requires Ruby 3.2 and optional python3'
 fi
 if test -n "$dumpifs" || test -n "$probe"; then
     oracle_compare "$fixture/omitted.ifs" "$fixture/shadowed.ifs"
@@ -246,8 +261,8 @@ if test -n "$native"; then
         done
     done
     test "$#" != 0 || fail "$native holds no captures"
-    if test -n "$python"; then
-        "$python" -I "$native_tool" compare ./fsimg ./test-ifs "$ifsdump" \
+    if test -n "$python" && test -n "$ruby"; then
+        "$ruby" "$native_tool" compare ./fsimg ./test-ifs "$ifsdump" \
             "$@" || fail "fsimg differs from ifsdump.py on the native captures"
     fi
     if test -n "$dumpifs" || test -n "$probe"; then
@@ -267,8 +282,6 @@ hbcifs_decoded=${FSIMG_HBCIFS_DECODED:-}
 if test -z "$hbcifs" || test -z "$hbcifs_decoded"; then
     echo 'SKIP: FSIMG_HBCIFS_IMAGE and FSIMG_HBCIFS_DECODED are not set' \
         '(PCM3_IFS2.ifs and its oracle decode)'
-elif test -z "$python"; then
-    echo 'SKIP: the hbcifs comparison requires the Python 3 development tool'
 else
     name=$(basename "$hbcifs")
     ./fsimg i --json -f "$hbcifs" > "$fixture/info" 2> /dev/null ||
@@ -280,9 +293,13 @@ else
     oracle=$(cksum < "$hbcifs_decoded" | awk '{ print $1, $2 }')
     test "$disk" = "$oracle" ||
         fail "the disk decoded from $name differs from the oracle's decode"
-    "$python" -I "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
-        "$hbcifs" "$hbcifs_decoded" ||
-        fail "fsimg differs from ifsdump.py on $name"
+    if test -n "$ruby" && test -n "$python"; then
+        "$ruby" "$native_tool" container ./fsimg ./test-ifs "$ifsdump" \
+            "$hbcifs" "$hbcifs_decoded" ||
+            fail "fsimg differs from ifsdump.py on $name"
+    else
+        echo 'SKIP: the hbcifs manifest comparison requires Ruby 3.2 and optional python3'
+    fi
     ./fsimg W --json -d -f "$hbcifs" > "$fixture/verify" 2> /dev/null ||
         fail "$name does not verify"
     grep -q '"type":"verify","complete":false,' "$fixture/verify" &&
@@ -312,8 +329,8 @@ fi
 # images' file names are printed. A compressed boot image is read whole,
 # its body decoded through the ifsboot container.
 images=${FSIMG_IFS_IMAGES:-}
-if test -n "$images" && test -z "$python"; then
-    echo 'SKIP: FSIMG_IFS_IMAGES requires the Python 3 development tool'
+if test -n "$images" && test -z "$ruby"; then
+    echo 'SKIP: locating FSIMG_IFS_IMAGES bodies requires Ruby 3.2 or later'
 elif test -n "$images"; then
     read_bodies=0
     read_boot=0
@@ -321,7 +338,7 @@ elif test -n "$images"; then
     for image in "$images"/*; do
         test -f "$image" || continue
         name=$(basename "$image")
-        bounds=$("$python" -I "$native_tool" body "$image") ||
+        bounds=$("$ruby" "$native_tool" body "$image") ||
             fail "cannot read $name"
         case $bounds in
         compressed\ *)

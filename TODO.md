@@ -538,7 +538,7 @@
   it back; a positive result raises `max_link_target_bytes` to 1024 in the
   format designs and descriptors.
 
-* [Medium] **End-to-end CLI tests of omitted names** (`test/cli.py`,
+* [Medium] **End-to-end CLI tests of omitted names** (`test/cli/run.rb`,
   `test/spec/`): the omission contract is tested in the library
   (`test_omitted_names` in `test/qnx4.c` and `test/qnx6.c`) and in the CLI
   display and worker parent with fabricated results, but no test runs the
@@ -575,7 +575,7 @@
   [manifest design](specs/design-mtree.md). The parser, the source root
   (`fsimg_writer_add_manifest()`, `lib/source/manifest.c`,
   `lib/source/generated.c`, `test/manifest.c`) and the `c` mode's `@file`
-  operand (`cmd/fsimg/paths.c`, `cmd/fsimg/worker-child.c`, `test/cli.py`)
+  operand (`cmd/fsimg/paths.c`, `cmd/fsimg/worker-child.c`, `test/cli/run.rb`)
   and `x --mtree=FILE` (`lib/extract/mtree-writer.c`) exist. What remains
   is reading the manifest `x --mtree` writes with `mtree(8)` on FreeBSD and
   Linux (`test/manifest.c` checks it with bsdtar only); the refusal of an

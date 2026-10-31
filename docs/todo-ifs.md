@@ -41,7 +41,7 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   also keep freed pages resident, and record the figures or set the
   allocator's return policy there too.
 * [Low] **Decoder manifest framing** (`tools/qnx/decode/ifsdump.py`,
-  `test/ifs-native.py`): `--manifest` writes names and link targets raw in
+  `test/ifs-native.rb`): `--manifest` writes names and link targets raw in
   tab- and newline-separated lines, so a capture whose name or target holds
   either byte fails the comparison as a decoder-manifest mismatch although
   fsimg may be right. Escape both fields (hex, as `test-ifs --manifest`

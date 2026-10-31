@@ -47,7 +47,7 @@ installed with the library documentation. Its inputs are:
 Regenerate from the unmodified downloaded inputs with:
 
 ```sh
-python3 tools/gen-fat-tables.py UnicodeData.txt CP437.TXT \
+ruby tools/gen-fat-tables.rb UnicodeData.txt CP437.TXT \
     lib/formats/fat/name-tables.h lib/core/case-tables.h
 ```
 

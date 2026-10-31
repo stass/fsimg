@@ -2,9 +2,12 @@
 
 Development requires Autoconf, Automake, Libtool, make, a C11 compiler, and a
 C++ compiler. On macOS install missing tools with `brew install autoconf
-automake libtool pkgconf python`. CLI integration and installation qualification
-use Python 3 and pkg-config as development tools. On FreeBSD these are
-`lang/python3` and `devel/pkgconf` ports.
+automake libtool pkgconf ruby`. CLI integration and installation qualification
+use Ruby 3.2 or later and pkg-config as development tools. On FreeBSD install
+Ruby, `devel/rubygem-minitest` and `devel/pkgconf`. Python is optional, used
+only to invoke the exempt research ImageFS decoder under `tools/qnx/`. The
+FreeBSD CI job installs `lang/python3`, and the Linux check container installs
+`python3`, to keep this optional comparison exercised.
 Independent FAT tests additionally use `brew install mtools
 dosfstools cmake`. Linux exFAT interoperability uses `exfatprogs`.
 Partition-table oracles use `sgdisk` (`brew install gptfdisk`) and `sfdisk`
@@ -100,8 +103,10 @@ examples, CLI integration with an independent JSON decoder, and an ASCII
 source/build check. Test logs are in `test-suite.log` and individual `.log`
 files. Fixtures are relative to the disposable build directory and cleaned on
 success. CLI presentation regressions can also be run with `make test-cli fsimg`,
-`./test-cli`, and `python3 ../test/cli.py ./fsimg` from a separate build directory
-(use `test/cli.py` for an in-tree build). They cover contextual help, exact stream
+`./test-cli`, and `ruby ../test/cli/run.rb ./fsimg` from a separate build directory
+(use `ruby test/cli/run.rb ./fsimg` for an in-tree build). The CLI suite uses
+Minitest (`devel/rubygem-minitest` on FreeBSD) with normal Ruby invocation and needs no Bundler or specification-harness
+helpers. It covers contextual help, exact stream
 destinations, quiet success, bounded loss examples, layout rejection reasons,
 terminal controls and final verification timing, alongside JSON and output
 failure checks. Failed-creation regressions use a sparse 256 MiB source to
@@ -183,7 +188,10 @@ The preflight runs inside the results directory, so a build directory deep
 enough that a case's longest path would pass the host's `PATH_MAX` fails the
 case phase, as does any other preflight refusal, and the report names the
 check that refused. CI installs the gems on macOS, Ubuntu and FreeBSD and fails
-when the suite skips there. The GCC container jobs install no Ruby and skip it.
+when the suite skips there. The GCC 13 container builds Ruby 3.2.11 to exercise
+the 3.2 floor; the other GCC container installs the distribution's Ruby. Both
+run the CLI suite and skip the specification tests when their locked gems
+are absent.
 
 The tests' base images are cached in `test/spec-cache/` under the build
 directory, keyed by the base recipe and the versions of the tools that build
@@ -1604,7 +1612,7 @@ FSIMG_HBCIFS_DECODED=/path/to/captures-ifs/decoded/h3-PCM3_IFS2.imagefs \
     ./test/ifs-integration.sh
 ```
 
-`test/ifs-native.py compare` derives the tree fsimg must list from the
+`test/ifs-native.rb compare` derives the tree fsimg must list from the
 manifest the research decoder `tools/qnx/decode/ifsdump.py --manifest`
 writes from the record table, by the format design's rules, and compares
 it with the command's view both ways. The last record of a path places
@@ -1668,10 +1676,13 @@ the variables the three are skips: "FSIMG_IFS_IMAGES is not set (S1 and S2
 images, counts only)", "DUMPIFS is not set (lclevy/dumpifs comparison)"
 and "QNXPROBE is not set (qnxprobe comparison)"; the decoded S1 and S2
 bodies in the captures' `decoded/` are compared above
-([TODO](todo-ifs.md)). The generated boot images need neither Python 3
-nor a variable, so the script always runs them.
+([TODO](todo-ifs.md)). The generated boot images need neither Ruby nor Python 3
+nor a variable, so the script always runs them. The decoder comparison requires
+Ruby 3.2 or later and optional `python3`; without either, the script reports
+the comparison as SKIP while continuing the independent checks. The script
+exits 77 only when no check ran.
 
-`test/ifs-native.py container` compares an ImageFS inside a container with
+`test/ifs-native.rb container` compares an ImageFS inside a container with
 the decoder's manifest of an oracle's decode of the container's payload:
 the comparison above, with `fsimg t --json` and `test-ifs --manifest`
 reading the container through its layers, and then an extraction, `fsimg x

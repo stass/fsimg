@@ -210,9 +210,9 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 From a release archive, start with `./configure`; generated build support is
-included. Python 3 and pkg-config are needed for the CLI integration and
-installation checks. See [build and validation](docs/build.md) for platform
-setup and test commands.
+included. Ruby 3.2 or later, Minitest and pkg-config are needed for the CLI
+integration and installation checks. See [build and validation](docs/build.md)
+for platform setup and test commands.
 
 Installation includes the command, shared and static `libfsimg`, the public C
 header, pkg-config metadata, manuals, and checked

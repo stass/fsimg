@@ -69,7 +69,7 @@ The harness adds to the current suites. It does not replace them.
 | External-oracle integration | `test/fat-integration.sh.in` | Builds a fixed matrix with mkfs.fat or newfs_msdos and mtools, then checks with fsck and fatcat. Its oracle detection and skip behaviour are the model for the Ruby adapters. |
 | Comparison baseline | `test/baseline.sh.in`, `test/baseline.txt` | Out of scope. The harness never changes the baseline fixtures. |
 | libFuzzer targets | `fuzz/fat.c`, `build-aux/fuzz.sh` | Seeds are generated at run time into `fuzz-corpus/` with a 3 MiB maximum length. No corpus is committed. |
-| Interpreter precedent | `test/cli.sh.in` with `test/cli.py` | Python is an optional development tool. Its wrapper exits 77 when the interpreter is absent. The Ruby wrapper follows this pattern. |
+| Interpreter precedent | `test/cli.sh.in` with `test/cli/run.rb` | Ruby is the development interpreter. The CLI suite needs only Minitest; the specification wrapper also checks its locked gems. Both wrappers exit 77 when their prerequisites are absent. |
 | CLI stages | `i`, `t`, `x -O`, `x -E`, `W [-d]`, `c` (`specs/design-cli.md`) | The runner drives these. With `--json`, they emit NDJSON `summary` and `error` records. Each error record carries the integer status `code` (an `fsimg_status_t` value) and a prose `status` string. |
 
 ## Design
@@ -133,8 +133,9 @@ demonstrate.
     GitHub-hosted jobs cache it by host, Ruby version and lock; the FreeBSD
     VM installs afresh.
   - The GitHub-hosted jobs upload only each profile's `coverage.json`, text
-    summary and `failures/` with the logs. The GCC container jobs install no
-    Ruby and skip the suite.
+    summary and `failures/` with the logs. The GCC container jobs install
+    Ruby and Minitest for the CLI checks and skip the specification suite
+    when its locked gems are absent.
 * **docs/build.md** gains the setup, the profiles, the environment variables,
   the replay command and the report location. It also states the explicit
   skips per host, as it already does for the other oracles.
@@ -790,7 +791,7 @@ The rule set reads the specification as follows where it is not decisive:
 | The runner hangs or leaks processes | Process-group termination, wall, CPU, memory and output limits, isolated directories, and stub tests in S4 |
 | Upgrades break reproducibility | Pinned gems, recorded tool versions, explicit recipes and promoted regression cases |
 | The framework grows ahead of need | Only abstractions FAT exercises; generality is proved by the exFAT port |
-| A second scripting language | All Ruby stays under `test/spec/` behind one wrapper with the existing skip convention |
+| Missing test dependencies | Ruby tests run behind shell wrappers that report unavailable dependencies through the existing skip convention |
 | Budget creep in `make check` | S6 measures the quick profile, with the smoke-subset split as the fallback |
 | Image generation dominates run time | Random draws mutate shared cached bases and are classified in memory; only a sampled subset is written and run through fsimg. S5 measures materialization and copy costs. |
 | The harness becomes harder to understand than the code it tests | Review each stage for whether a filesystem implementer can read a rule, its witnesses and a failure record without learning harness internals |

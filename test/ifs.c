@@ -5124,7 +5124,7 @@ manifest_link(fsimg_reader_t *reader, const fsimg_entry_t *entry)
 /*
  * Print the content of every file and symbolic link of the ImageFS in the
  * image file at path, bare or in a container, which the image layers peel
- * with a spool in the scratch directory, for test/ifs-native.py to compare
+ * with a spool in the scratch directory, for test/ifs-native.rb to compare
  * with a decoder's manifest: "F\tPATH\tCKSUM\tSIZE" for a file, with its
  * POSIX cksum, and "L\tPATH\tTARGET" for a link, the target in
  * hexadecimal, since it may hold any byte. A delivered path is inside the

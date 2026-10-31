@@ -1327,7 +1327,7 @@ write_file(const char *path, const unsigned char *bytes, size_t length)
 
 /*
  * --seed-hbcifs PATH [DECODED]: the test container, which seeds the
- * container fuzzer and checks test/ifs-native.py's container command, and
+ * container fuzzer and checks test/ifs-native.rb's container command, and
  * the ImageFS it decodes to.
  */
 static int

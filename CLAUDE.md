@@ -143,10 +143,13 @@ missing tool.
 
 ## Ruby
 
-Ruby is a development tool, confined to the specification-driven test harness
-under `test/spec/` ([design](specs/design-spec-testing.md)). Write Ruby that
-reads like the problem: functional, idiomatic and small. The syntax floor is
-Ruby 3.2, so use `_1` rather than `it`; CI runs the floor version so the
+Project-owned scripts, tests and development tools use Ruby, POSIX shell or
+AWK. Research code under `tools/qnx/` and scripts imported from elsewhere keep
+the language they came in, with their original notices. The
+specification-driven test harness lives under `test/spec/`
+([design](specs/design-spec-testing.md)) and the CLI tests under `test/cli/`.
+Write Ruby that reads like the problem: functional, idiomatic and small. The
+syntax floor is Ruby 3.2, so use `_1` rather than `it`; CI runs the floor version so the
 floor is enforced, not assumed. Every file starts with the SPDX
 BSD-2-Clause header and `# frozen_string_literal: true`, uses two-space
 indentation, and is ASCII-only like other source files.

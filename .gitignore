@@ -13,7 +13,7 @@
 !/build-aux/build-fatcat.sh
 !/build-aux/fatcat-freebsd.patch
 !/build-aux/check-install.sh
-!/build-aux/check-installed.py
+!/build-aux/check-installed.rb
 !/build-aux/linux-check.sh
 !/build-aux/linux-check/
 *~

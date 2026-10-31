@@ -4,7 +4,7 @@
 set -eu
 
 if test "$#" != 10; then
-    echo 'usage: check-install.sh build make cc cxx cppflags cflags cxxflags ldflags pkg-config python3' >&2
+    echo 'usage: check-install.sh build make cc cxx cppflags cflags cxxflags ldflags pkg-config ruby' >&2
     exit 2
 fi
 qualification_origin_build=$1
@@ -17,10 +17,11 @@ qualification_cxxflags=$7
 qualification_ldflags=$8
 qualification_pkg_config=$9
 shift 9
-qualification_python=$1
+qualification_ruby=$1
 
-if test -z "$qualification_pkg_config" || test -z "$qualification_python"; then
-    echo 'SKIP: installation qualification requires pkg-config and Python 3 development tools'
+if test -z "$qualification_pkg_config" || test -z "$qualification_ruby" ||
+    ! "$qualification_ruby" -e 'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.2"))'; then
+    echo 'SKIP: installation qualification requires pkg-config and Ruby 3.2 or later'
     exit 77
 fi
 qualification_root=$(mktemp -d "${TMPDIR:-/tmp}/fsimg-install.XXXXXXXX")
@@ -39,7 +40,7 @@ run_clean() {
         CONFIG_SITE=/dev/null CC="$qualification_cc" CXX="$qualification_cxx" \
         CPPFLAGS="$qualification_cppflags" CFLAGS="$qualification_cflags" \
         CXXFLAGS="$qualification_cxxflags" LDFLAGS="$qualification_ldflags" \
-        PKG_CONFIG="$qualification_pkg_config" PYTHON3="$qualification_python" "$@"
+        PKG_CONFIG="$qualification_pkg_config" RUBY="$qualification_ruby" "$@"
 }
 # Distribution owns the source manifest and includes generated build support.
 # Its clean copy has no config.status even when the caller builds in-tree.
@@ -66,9 +67,9 @@ run_clean "$qualification_make" install > "$qualification_root/install.log" 2>&1
 
 # Metadata is parsed with argument boundaries and checked against this prefix;
 # an inherited PKG_CONFIG_PATH cannot substitute another package's records.
-run_clean "$qualification_python" "$qualification_source/build-aux/check-installed.py" \
+run_clean "$qualification_ruby" "$qualification_source/build-aux/check-installed.rb" \
     "$qualification_pkg_config" "$qualification_prefix"
-run_clean "$qualification_python" "$qualification_source/build-aux/check-installed.py" \
+run_clean "$qualification_ruby" "$qualification_source/build-aux/check-installed.rb" \
     --self-test "$qualification_pkg_config"
 run_clean "$qualification_make" check-installed-consumers \
     > "$qualification_root/consumers.log" 2>&1

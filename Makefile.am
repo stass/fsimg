@@ -293,7 +293,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/device-check.sh \
 	libfsimg.pc.in docs/examples.md \
 	build-aux/check-ascii.sh build-aux/check-seek-holes.sh build-aux/sanitize.sh \
-	build-aux/check-install.sh build-aux/check-installed.py \
+	build-aux/check-install.sh build-aux/check-installed.rb \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
 	build-aux/build-msan-zlib.sh \
@@ -338,15 +338,58 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/vm/ppm2png.py tools/qnx/vm/put.sh \
 	tools/qnx/vm/qsh.py tools/qnx/vm/shot.sh tools/qnx/vm/type.py \
 	tools/qnx/vm/vmstart.sh \
-	tools/gen-fat-tables.py third-party/Unicode-LICENSE.txt \
+	tools/gen-fat-tables.rb third-party/Unicode-LICENSE.txt \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
 	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c \
 	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/gzip.c \
 	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c test/ifs-integration.sh.in \
-	test/ifs-native.py \
-	test/cli.sh.in test/cli.py test/qualify-cli.py \
+	test/ifs-native.rb \
+	test/cli.sh.in test/qualify-cli.rb \
+	test/cli/bundled_modes_test.rb \
+	test/cli/change_directory_kinds_test.rb \
+	test/cli/compressed_and_streams_test.rb \
+	test/cli/compressed_create_test.rb \
+	test/cli/container_create_test.rb \
+	test/cli/containers_test.rb \
+	test/cli/create_operands_test.rb \
+	test/cli/examples_test.rb \
+	test/cli/extract_here_test.rb \
+	test/cli/extraction_acls_test.rb \
+	test/cli/extraction_names_test.rb \
+	test/cli/failed_creation_output_test.rb \
+	test/cli/failures_test.rb \
+	test/cli/fixtures.rb \
+	test/cli/images.rb \
+	test/cli/records.rb \
+	test/cli/format_test.rb \
+	test/cli/formats_test.rb \
+	test/cli/helpers_test.rb \
+	test/cli/human_commands_test.rb \
+	test/cli/human_help_test.rb \
+	test/cli/human_loss_bounds_test.rb \
+	test/cli/ifs_create_test.rb \
+	test/cli/ifs_test.rb \
+	test/cli/ifsboot_create_test.rb \
+	test/cli/manifest_generated_test.rb \
+	test/cli/manifest_host_test.rb \
+	test/cli/manifest_refusals_test.rb \
+	test/cli/merged_operands_test.rb \
+	test/cli/mtree_export_test.rb \
+	test/cli/mtree_failures_test.rb \
+	test/cli/mtree_reporting_test.rb \
+	test/cli/option_syntax_test.rb \
+	test/cli/output_failures_test.rb \
+	test/cli/output_inside_source_test.rb \
+	test/cli/partitioned_create_test.rb \
+	test/cli/partitioned_test.rb \
+	test/cli/posix_metadata_test.rb \
+	test/cli/process.rb \
+	test/cli/qnx4_test.rb \
+	test/cli/qnx6_test.rb \
+	test/cli/run.rb \
+	test/cli/tree_at_depth_limit_test.rb \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
 	specs/design-spec-testing.md test/spec.sh.in \
@@ -363,7 +406,7 @@ check-local: check-ascii check-fstat check-seek-holes
 check-install: all
 	+$(SHELL) $(top_srcdir)/build-aux/check-install.sh "$(abs_top_builddir)" \
 	    "$(MAKE)" "$(CC)" "$(CXX)" "$(CPPFLAGS)" "$(CFLAGS)" "$(CXXFLAGS)" \
-	    "$(LDFLAGS)" "$(PKG_CONFIG)" "$(PYTHON3)"
+	    "$(LDFLAGS)" "$(PKG_CONFIG)" "$(RUBY)"
 .PHONY: check-installed-consumers
 CLEANFILES = provider-static provider-shared header-installed-cxx
 check-installed-consumers:
@@ -422,7 +465,7 @@ check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-ifs \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-cli-rss: fsimg-rss fsimg-rss-guard
 	./fsimg-rss-guard; result=$$?; test $$result = 0 -o $$result = 77
-	$(PYTHON3) $(top_srcdir)/test/qualify-cli.py ./fsimg-rss 100000
+	$(RUBY) $(top_srcdir)/test/qualify-cli.rb ./fsimg-rss 100000
 check-extended: test-qualify test-fragment test-exfat-scale check-cli-rss \
 	    check-spec-extended
 	./test-qualify --catalog 10000000

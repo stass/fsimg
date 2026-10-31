@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 set -eu
-if test -z '@PYTHON3@'; then
-    echo 'SKIP: CLI integration requires the Python 3 development tool'
+if test -z '@RUBY@' || ! '@RUBY@' -rdigest -rfileutils -rjson -rminitest/autorun -rpathname -rpty \
+    -rset -rsocket -rstringio -rtmpdir -rzlib -rio/nonblock -rtimeout -e \
+    'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.2"))' >/dev/null 2>&1; then
+    echo 'SKIP: CLI integration requires Ruby 3.2 or later and its suite libraries (including Minitest)'
     exit 77
 fi
-exec '@PYTHON3@' '@abs_top_srcdir@/test/cli.py' ./fsimg
+exec '@RUBY@' '@abs_top_srcdir@/test/cli/run.rb' ./fsimg

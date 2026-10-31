@@ -15,13 +15,13 @@ jobs:
       - name: Development tools
         run: |
           if [ "$(uname -s)" = Darwin ]; then
-            brew install autoconf automake libtool cmake mtools dosfstools pkgconf python ruby
+            brew install autoconf automake libtool cmake mtools dosfstools pkgconf ruby
             # Homebrew's Ruby is keg-only; the system Ruby is older than 3.2.
             echo "$(brew --prefix ruby)/bin" >> "$GITHUB_PATH"
           else
             sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config python3 ruby ruby-dev ruby-bundler dpkg-dev
+            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config ruby ruby-dev ruby-bundler dpkg-dev
           fi
           echo "BUNDLE_PATH=$RUNNER_TEMP/spec-gems" >> "$GITHUB_ENV"
       - name: Instrumented zlib for MemorySanitizer
@@ -53,6 +53,7 @@ jobs:
           ../configure CC=clang CXX=clang++
           make -j2
           make check
+          grep -q '^:test-result: PASS' test/cli.sh.trs
           # The specification tests must run here, not skip.
           grep -q '^:test-result: PASS' test/spec.sh.trs
           make check-install
@@ -87,19 +88,33 @@ jobs:
       - name: Development tools
         run: |
           apt-get update
-          apt-get install -y autoconf automake libtool make mtools dosfstools exfatprogs pkg-config python3
+          apt-get install -y autoconf automake libtool make mtools dosfstools exfatprogs pkg-config ruby ruby-minitest libssl-dev libyaml-dev libreadline-dev zlib1g-dev
           useradd -m builder
           chown -R builder .
+      - name: Ruby 3.2 floor
+        if: matrix.gcc == '13'
+        run: |
+          cd /tmp
+          curl -fsSLO https://cache.ruby-lang.org/pub/ruby/3.2/ruby-3.2.11.tar.xz
+          echo 'c13aec0c206725d5d356acbae6e5fd8bffd92dc325aec14fd5dd7795d4b763d2  ruby-3.2.11.tar.xz' | sha256sum -c -
+          tar -xf ruby-3.2.11.tar.xz -C /tmp
+          cd /tmp/ruby-3.2.11
+          ./configure --prefix=/opt/ruby-3.2 --disable-install-doc
+          make -j2
+          make install
+          echo '/opt/ruby-3.2/bin' >> "$GITHUB_PATH"
       - name: Build and check
         # Container steps run as root; the suite expects an unprivileged user.
         run: |
+          export FSIMG_CI_RUBY="$(command -v ruby)"
           su builder -c 'set -e
           autoreconf -fi
           mkdir build
           cd build
-          ../configure CC=gcc CXX=g++
+          ../configure CC=gcc CXX=g++ RUBY="$FSIMG_CI_RUBY"
           make -j2
-          make check'
+          make check
+          grep -q "^:test-result: PASS" test/cli.sh.trs'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -130,8 +145,11 @@ jobs:
             install_port devel/git git
             install_port filesystems/mtools mcopy
             install_port devel/pkgconf pkg-config
-            install_port lang/python3 python3
             install_port devel/rubygem-bundler bundle
+            # Minitest has no executable; probe the library.
+            ruby -rminitest -e 1 2>/dev/null ||
+                make -C /usr/ports/devel/rubygem-minitest BATCH=yes install clean
+            install_port lang/python3 python3
             pw useradd fsimgtest -m -s /bin/sh
           run: |
             chown -R fsimgtest .
@@ -152,6 +170,7 @@ jobs:
               ../configure CC=clang CXX=clang++ RUBY="$ruby"
               make -j2
               make check
+              grep -q "^:test-result: PASS" test/cli.sh.trs
               grep -q "^:test-result: PASS" test/spec.sh.trs
               make check-install
               ./test-sandbox

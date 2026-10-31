@@ -13,8 +13,8 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' \
 	    /etc/apt/sources.list.d/ubuntu.sources && \
 	apt-get update && apt-get install -y \
 	autoconf automake libtool make pkg-config clang llvm gcc g++ \
-	zlib1g-dev mtools dosfstools exfatprogs fdisk gdisk zstd pigz python3 \
-	ruby ruby-dev ruby-bundler git ca-certificates xz-utils file dpkg-dev
+	zlib1g-dev mtools dosfstools exfatprogs fdisk gdisk zstd pigz \
+	ruby ruby-dev ruby-bundler python3 git ca-certificates xz-utils file dpkg-dev
 COPY build-msan-zlib.sh /usr/local/libexec/fsimg/build-msan-zlib.sh
 RUN source_parent=$(mktemp -d) && cd "$source_parent" && \
 	apt-get source zlib && \
