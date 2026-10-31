@@ -25,8 +25,10 @@ its target, as the [CLI design](design-cli.md#extraction) defines the mode.
 All host paths use displayed names.
 
 Every image path is independently validated at the extraction boundary. A
-component-aware selection includes the selected entry/subtree and its ancestor
-directories, preserving paths below the image root. A missing selection fails.
+component-aware selection of one or more members includes each selected
+entry or subtree and its ancestor directories, preserving paths below the
+image root; an entry that several members select is extracted once. A member
+that matches nothing fails.
 The reader visits directories before their children, depth first. The extractor
 uses that order to keep a bounded stack of opened output directories and their
 exact image path prefixes. Every selected directory is created exactly once;

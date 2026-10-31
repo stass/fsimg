@@ -100,6 +100,21 @@ Resolved paths retain displayed names. Off-branch subdirectories are pruned
 after their parent is prepared, without being opened. Selecting one child still
 requires the parent's complete namespace validation.
 
+Several members resolve together in one walk. A member keeps only how many of
+its components have resolved. The walk is depth first, so while it stays
+below a member's resolved prefix every entry it returns begins with that
+prefix, and the first entry at the prefix's depth or above ends the member:
+it can resolve no further and select nothing more. An entry's relation is
+the strongest any member gives it: inside a resolved member's subtree, then
+a member's target, then an ancestor of an unresolved member. A directory is
+pruned unless some member needs its children, and its omitted children are
+counted only when some member selects them. The walk returns each entry
+once, so an entry that several members select, through nesting, repetition
+or aliases, is processed once without any record of what was returned, and
+no member costs more than its spelling and a few counters. The walk ends
+once no member can select anything more, and fails naming a member that did
+not resolve.
+
 ## Traversal
 
 The walker performs iterative depth-first traversal. Its ancestor stack is
@@ -208,7 +223,8 @@ to callers filters on that mark:
   an entry of an unsupported kind. A partial output is never success, so
   the omission is an explicit choice.
 * The walker counts each omitted subtree root it passes within the
-  traversal scope, an omitted entry whose ancestors are all delivered, in
+  traversal scope, an omitted entry whose ancestors are all delivered,
+  listed by a directory whose children the operation selects, in
   the operation's result (`fsimg_extract_result_t` for extraction,
   `fsimg_verify_report_t` for verification) as `omitted_entries` and in the
   context

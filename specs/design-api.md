@@ -703,10 +703,13 @@ fsimg_status_t fsimg_verify(fsimg_reader_t *reader, unsigned flags,
 ```
 
 Both operations require a reader before its first `next()` call and consume
-its traversal. A selection path in extraction options chooses one entry or
-subtree; the default is `/`. Selection preserves the hierarchy below the image
-root and includes required ancestors. Matching is by validated components,
-not raw string prefix. A missing selection is an error.
+its traversal. The selection paths in extraction options choose the entries
+or subtrees to extract; none means `/`. Several select the union of their
+subtrees in one traversal, so an entry that more than one of them selects,
+through nesting, repetition or an alias such as a FAT short name, is
+extracted once. Selection preserves the hierarchy below the image root and
+includes required ancestors. Matching is by validated components, not raw
+string prefix. A selection path that matches nothing is an error naming it.
 
 Extraction creates `name` exclusively as a private directory beneath the
 borrowed parent descriptor. An existing file, symlink, or directory is
