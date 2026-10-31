@@ -682,8 +682,10 @@ list_job(worker_child_t *child, fsimg_error_t *error)
 			return (FSIMG_OK);
 		if (status != FSIMG_OK)
 			return (status);
-		if (relation == FSIMG_SELECTION_ANCESTOR ||
-		    (relation == FSIMG_SELECTION_TARGET && entry->kind == FSIMG_ENTRY_DIRECTORY))
+		/* A member's own entry is listed, a directory as well as a
+		 * file; the ancestors leading to it are not.
+		 */
+		if (relation == FSIMG_SELECTION_ANCESTOR)
 			continue;
 		status = send_entry(entry, error);
 		if (status != FSIMG_OK)

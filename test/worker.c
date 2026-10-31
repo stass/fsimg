@@ -569,6 +569,15 @@ typedef struct coordinator_event_context {
 	int		 drain_start;
 } coordinator_event_context_t;
 
+typedef struct listed_paths {
+	worker_fixture_t *fixture;
+	const char *const *expected;
+	size_t count;
+	size_t seen;
+	size_t used;
+	char path[128];
+} listed_paths_t;
+
 typedef struct output_source {
 	unsigned	 emitted;
 	unsigned	 records;
@@ -602,7 +611,14 @@ typedef struct path_sequence_case {
 
 static void fixture_open(worker_fixture_t *);
 static void fixture_open_format(worker_fixture_t *, const char *);
+static void fixture_open_with_entries(worker_fixture_t *, const char *,
+    const fsimg_entry_t *, size_t);
+static void fixture_open_directories(worker_fixture_t *);
 static void fixture_close(worker_fixture_t *);
+static fsimg_status_t check_listed_path(void *, const fsimg_frame_t *,
+    fsimg_worker_text_t *, fsimg_error_t *);
+static void check_directory_listing(worker_fixture_t *, const char *const *,
+    size_t);
 static fsimg_status_t event(void *, const fsimg_frame_t *, fsimg_worker_text_t *,
     fsimg_error_t *);
 static fsimg_status_t run(worker_fixture_t *, fsimg_error_t *);
@@ -618,6 +634,15 @@ static void test_forged_publication(void);
 static void test_text_output(void);
 static void test_list_case_alias_members_once(void);
 static void test_list_missing_member_names_error(void);
+static void test_list_directory_member_precedes_subtree(void);
+static void test_list_nested_directory_members_once(void);
+static void test_list_directory_case_alias_members_once(void);
+static void test_list_nested_directory_members_without_recursion_once(void);
+static void test_list_reversed_nested_directory_members_keep_order(void);
+static void test_list_directory_without_recursion_includes_target_and_children(void);
+static void test_list_deep_directory_omits_ancestor(void);
+static void test_list_root_and_no_members_have_no_root_entry(void);
+static void test_list_and_extract_directory_counts_and_manifest_match(void);
 static void test_incomplete_extraction(void);
 static void test_skipped_extraction(void);
 static void test_omitted_extraction(void);
@@ -1120,12 +1145,20 @@ drain_after_delay(int fd, uint64_t padding)
 static void
 fixture_open(worker_fixture_t *fixture)
 {
-	fixture_open_format(fixture, "fat16");
+	fixture_open_with_entries(fixture, "fat16", NULL, 0);
 }
 
 static void
 fixture_open_format(worker_fixture_t *fixture, const char *format)
 {
+	fixture_open_with_entries(fixture, format, NULL, 0);
+}
+
+static void
+fixture_open_with_entries(worker_fixture_t *fixture, const char *format,
+    const fsimg_entry_t *entries, size_t count)
+{
+	const fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
 	fsimg_options_t options;
 	fsimg_writer_t *writer;
 	fsimg_io_t *output;
@@ -1157,6 +1190,9 @@ fixture_open_format(worker_fixture_t *fixture, const char *format)
 	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_new(fixture->ctx, format, NULL, &writer, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_add_tree(writer, fixture->source, "/", NULL) == FSIMG_OK);
+	for (size_t i = 0; i < count; i++)
+		CHECK(fsimg_writer_add(writer, &entries[i],
+		    entries[i].kind == FSIMG_ENTRY_FILE ? &zero : NULL, NULL) == FSIMG_OK);
 	fd = openat(fixture->parent, "image", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
 	CHECK(fd != -1);
 	CHECK(fsimg_io_from_fd(fixture->ctx, fd, FSIMG_IO_WRITE, &output, NULL) == FSIMG_OK);
@@ -1303,6 +1339,271 @@ test_list_missing_member_names_error(void)
 	CHECK(strcmp(error.path, members[0]) == 0);
 	CHECK(fixture.result.entries == 0);
 	CHECK(fixture.name_bytes == 0);
+	fixture_close(&fixture);
+}
+
+/* Extra entries keep directory selection cases out of the shared fixture. */
+static void
+fixture_open_directories(worker_fixture_t *fixture)
+{
+	const fsimg_entry_t entries[] = {
+		{ .path = "/DIR", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = "/DIR/A.TXT", .kind = FSIMG_ENTRY_FILE, .size = 1 },
+		{ .path = "/DIR/SUB", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = "/DIR/SUB/B.TXT", .kind = FSIMG_ENTRY_FILE, .size = 1 }
+	};
+
+	fixture_open_with_entries(fixture, "fat16", entries,
+	    sizeof(entries) / sizeof(entries[0]));
+}
+
+/* Compare complete NAME records, including their order and multiplicity. */
+static fsimg_status_t
+check_listed_path(void *argument, const fsimg_frame_t *frame,
+    fsimg_worker_text_t *text, fsimg_error_t *error)
+{
+	listed_paths_t *paths = argument;
+	fsimg_status_t status;
+
+	status = event(paths->fixture, frame, text, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (frame->type == FSIMG_FRAME_NAME) {
+		CHECK(frame->length < sizeof(paths->path) - paths->used);
+		bcopy(frame->payload, paths->path + paths->used, frame->length);
+		paths->used += frame->length;
+	}
+	if (frame->type == FSIMG_FRAME_ENTRY_END) {
+		paths->path[paths->used] = '\0';
+		CHECK(paths->seen < paths->count);
+		if (strcmp(paths->path, paths->expected[paths->seen]) != 0)
+			fprintf(stderr, "listed path %zu: expected %s, received %s\n",
+			    paths->seen, paths->expected[paths->seen], paths->path);
+		CHECK(strcmp(paths->path, paths->expected[paths->seen]) == 0);
+		paths->seen++;
+		paths->used = 0;
+	}
+	return (FSIMG_OK);
+}
+
+static void
+check_directory_listing(worker_fixture_t *fixture,
+    const char *const *expected, size_t count)
+{
+	listed_paths_t paths = { .fixture = fixture, .expected = expected,
+	    .count = count };
+	fsimg_error_t error;
+
+	fixture->request.kind = FSIMG_JOB_LIST;
+	fixture->ready = false;
+	CHECK(fsimg_worker_run(fixture->executable, &fixture->request,
+	    check_listed_path, &paths, -1, NULL, &fixture->result, &error) == FSIMG_OK);
+	CHECK(paths.seen == count && paths.used == 0);
+	CHECK(fixture->result.entries == count);
+}
+
+static void
+test_list_directory_member_precedes_subtree(void)
+{
+	const char *const members[] = { "/DIR" };
+	const char *const expected[] = {
+		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT"
+	};
+	worker_fixture_t fixture;
+
+	fixture_open_directories(&fixture);
+	fixture.request.members = members;
+	fixture.request.member_count = 1;
+	fixture.request.flags = FSIMG_JOB_RECURSIVE;
+	check_directory_listing(&fixture, expected, 4);
+	fixture_close(&fixture);
+}
+
+static void
+test_list_nested_directory_members_once(void)
+{
+	const char *const members[] = { "/DIR", "/DIR/SUB" };
+	const char *const expected[] = {
+		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT"
+	};
+	worker_fixture_t fixture;
+
+	fixture_open_directories(&fixture);
+	fixture.request.members = members;
+	fixture.request.member_count = 2;
+	fixture.request.flags = FSIMG_JOB_RECURSIVE;
+	check_directory_listing(&fixture, expected, 4);
+	fixture_close(&fixture);
+}
+
+static void
+test_list_directory_case_alias_members_once(void)
+{
+	const char *const members[] = { "/DIR", "/dir" };
+	const char *const expected[] = {
+		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT"
+	};
+	worker_fixture_t fixture;
+
+	fixture_open_directories(&fixture);
+	fixture.request.members = members;
+	fixture.request.member_count = sizeof(members) / sizeof(members[0]);
+	fixture.request.flags = FSIMG_JOB_RECURSIVE;
+	check_directory_listing(&fixture, expected,
+	    sizeof(expected) / sizeof(expected[0]));
+	fixture_close(&fixture);
+}
+
+static void
+test_list_nested_directory_members_without_recursion_once(void)
+{
+	const char *const members[] = { "/DIR", "/DIR/SUB" };
+	const char *const expected[] = {
+		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT"
+	};
+	worker_fixture_t fixture;
+
+	fixture_open_directories(&fixture);
+	fixture.request.members = members;
+	fixture.request.member_count = sizeof(members) / sizeof(members[0]);
+	fixture.request.flags = 0;
+	check_directory_listing(&fixture, expected,
+	    sizeof(expected) / sizeof(expected[0]));
+	fixture_close(&fixture);
+}
+
+static void
+test_list_reversed_nested_directory_members_keep_order(void)
+{
+	const char *const forward[] = { "/DIR", "/DIR/SUB" };
+	const char *const reversed[] = { "/DIR/SUB", "/DIR" };
+	const char *const expected[] = {
+		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT"
+	};
+	worker_fixture_t fixture;
+
+	fixture_open_directories(&fixture);
+	fixture.request.members = forward;
+	fixture.request.member_count = sizeof(forward) / sizeof(forward[0]);
+	fixture.request.flags = FSIMG_JOB_RECURSIVE;
+	check_directory_listing(&fixture, expected,
+	    sizeof(expected) / sizeof(expected[0]));
+	fixture.request.members = reversed;
+	fixture.request.member_count = sizeof(reversed) / sizeof(reversed[0]);
+	check_directory_listing(&fixture, expected,
+	    sizeof(expected) / sizeof(expected[0]));
+	fixture_close(&fixture);
+}
+
+static void
+test_list_directory_without_recursion_includes_target_and_children(void)
+{
+	const char *const members[] = { "/DIR" };
+	const char *const expected[] = { "/DIR", "/DIR/A.TXT", "/DIR/SUB" };
+	worker_fixture_t fixture;
+
+	fixture_open_directories(&fixture);
+	fixture.request.members = members;
+	fixture.request.member_count = 1;
+	fixture.request.flags = 0;
+	check_directory_listing(&fixture, expected, 3);
+	fixture_close(&fixture);
+}
+
+static void
+test_list_deep_directory_omits_ancestor(void)
+{
+	const char *const members[] = { "/DIR/SUB" };
+	const char *const expected[] = { "/DIR/SUB", "/DIR/SUB/B.TXT" };
+	worker_fixture_t fixture;
+
+	fixture_open_directories(&fixture);
+	fixture.request.members = members;
+	fixture.request.member_count = 1;
+	fixture.request.flags = FSIMG_JOB_RECURSIVE;
+	check_directory_listing(&fixture, expected, 2);
+	fixture_close(&fixture);
+}
+
+static void
+test_list_root_and_no_members_have_no_root_entry(void)
+{
+	const char *const members[] = { "/" };
+	const char *const expected[] = {
+		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT", "/HELLO.TXT"
+	};
+	worker_fixture_t fixture;
+
+	fixture_open_directories(&fixture);
+	fixture.request.flags = FSIMG_JOB_RECURSIVE;
+	check_directory_listing(&fixture, expected, 5);
+	fixture.request.members = members;
+	fixture.request.member_count = 1;
+	check_directory_listing(&fixture, expected, 5);
+	fixture_close(&fixture);
+}
+
+static void
+test_list_and_extract_directory_counts_and_manifest_match(void)
+{
+	const char *const members[] = { "/DIR" };
+	const char *const expected[] = {
+		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT"
+	};
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	uint64_t listed;
+	fsimg_status_t status;
+	char manifest[4096], *line, *next, *keyword;
+	size_t seen;
+	ssize_t bytes;
+	int fd;
+
+	fixture_open_directories(&fixture);
+	fixture.request.members = members;
+	fixture.request.member_count = 1;
+	fixture.request.flags = FSIMG_JOB_RECURSIVE;
+	/* The listing, extraction count and manifest agree. */
+	check_directory_listing(&fixture, expected,
+	    sizeof(expected) / sizeof(expected[0]));
+	listed = fixture.result.entries;
+	fd = openat(fixture.parent, "extracted.mtree",
+	    O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+	CHECK(fd != -1);
+	fixture.request.kind = FSIMG_JOB_EXTRACT;
+	fixture.request.output_fd = fixture.output;
+	fixture.request.manifest_fd = fd;
+	status = run(&fixture, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "directory extraction: %d: %s\n", status, error.message);
+	CHECK(status == FSIMG_OK);
+	CHECK(fixture.result.entries == listed);
+	CHECK(close(fd) == 0);
+	fixture.request.manifest_fd = -1;
+	fd = openat(fixture.parent, "extracted.mtree", O_RDONLY | O_NOFOLLOW);
+	CHECK(fd != -1);
+	bytes = pread(fd, manifest, sizeof(manifest) - 1, 0);
+	CHECK(bytes > 0 && (size_t)bytes < sizeof(manifest) - 1);
+	manifest[bytes] = '\0';
+	seen = 0;
+	for (line = strtok_r(manifest, "\n", &next); line != NULL;
+	    line = strtok_r(NULL, "\n", &next)) {
+		if (line[0] == '#' || strcmp(line, ". type=dir") == 0)
+			continue;
+		keyword = strchr(line, ' ');
+		CHECK(keyword != NULL);
+		*keyword = '\0';
+		CHECK(line[0] == '.' && seen < sizeof(expected) / sizeof(expected[0]));
+		CHECK(strcmp(line + 1, expected[seen]) == 0);
+		seen++;
+	}
+	CHECK(seen == listed);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture.parent, "extracted.mtree", 0) == 0);
+	CHECK(unlinkat(fixture.output, "DIR/SUB/B.TXT", 0) == 0);
+	CHECK(unlinkat(fixture.output, "DIR/SUB", AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(fixture.output, "DIR/A.TXT", 0) == 0);
+	CHECK(unlinkat(fixture.output, "DIR", AT_REMOVEDIR) == 0);
 	fixture_close(&fixture);
 }
 
@@ -2581,6 +2882,15 @@ main(int argc, char **argv)
 	test_operations("exfat");
 	test_list_case_alias_members_once();
 	test_list_missing_member_names_error();
+	test_list_directory_member_precedes_subtree();
+	test_list_nested_directory_members_once();
+	test_list_directory_case_alias_members_once();
+	test_list_nested_directory_members_without_recursion_once();
+	test_list_reversed_nested_directory_members_keep_order();
+	test_list_directory_without_recursion_includes_target_and_children();
+	test_list_deep_directory_omits_ancestor();
+	test_list_root_and_no_members_have_no_root_entry();
+	test_list_and_extract_directory_counts_and_manifest_match();
 	test_partitioned_create();
 	test_container_create();
 	test_compressed_create();

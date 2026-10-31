@@ -6,6 +6,8 @@ aliased members select, such as a FAT name given in another case or by its
 short alias, is listed or extracted once, and a member matching nothing
 fails naming it. The library's `fsimg_extract_options_t` carries
 `selections` and `selection_count` in place of the one `selection` path.
+`t` lists a directory member's own entry before its subtree, as `x`
+extracts it, and counts it in the summary.
 
 Reading accepts finite read-only disk devices through `-f`, including macOS
 block/raw nodes, Linux block devices and FreeBSD disk providers. The library's

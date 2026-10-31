@@ -487,10 +487,14 @@ mode fails.
 Unknown counts remain unknown.
 .Pp
 .Cm t
-lists the selected members and their whole subtrees;
+lists each selected member, a directory as well as a file, and its whole
+subtree;
 .Fl Fl no-recursion
-lists one level, the immediate children of a selected directory or the
-selected file itself.
+lists the member and, for a directory, its immediate children.
+No member, or
+.Pa / ,
+lists the volume's contents, and the directories leading to a member are
+not listed.
 .Pp
 .Cm W
 checks the container, the partition table and the complete supported
