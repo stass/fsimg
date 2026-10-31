@@ -928,15 +928,20 @@ collection, immutable planning, raw emission, and durable no-replace publication
 Source access and common catalog/storage remain private. Public extraction exposes safe private-tree creation and optional times.
 Image staging and publication share a library coordinator. Executable modules
 implement worker supervision and output relay; `test-worker` provides a
-same-executable frontend for fault checks. [libfsimg(3)](libfsimg.3) and the
+same-executable frontend for fault checks. `test-staged-verify` is a test-only
+copy of the command, built with its `main` renamed, whose creation worker
+corrupts the staged image after it completes, so a whole `cW` meets a failed
+verification without a fault hook in the shipped `fsimg`. [libfsimg(3)](libfsimg.3) and the
 [checked examples](examples.md) explain embedding and failure handling.
 
 Extraction and worker qualification:
 
 ```sh
-make test-extract test-worker test-protocol test-sandbox test-sandbox-setup
+make test-extract test-worker test-staged-verify test-protocol test-sandbox \
+    test-sandbox-setup
 ./test-extract
 ./test-worker
+./test-staged-verify
 ./test-protocol
 ./test-publish --identity
 ```

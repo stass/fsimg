@@ -113,6 +113,30 @@ typedef struct output_source {
 	unsigned char	 buffer[4097];
 } output_source_t;
 
+typedef struct path_sequence_result {
+	fsimg_frame_t	 frames[4];
+	size_t		 count;
+	fsimg_status_t	 status;
+	int		 outcome;
+	bool		 exited;
+	bool		 eof;
+} path_sequence_result_t;
+
+typedef struct path_sequence_case {
+	const char	*name;
+	const char	*declared_selection;
+	const char	*message;
+	const char	*sent;
+	const char	*following_selection;
+	uint32_t	 sent_length;
+	uint32_t	 following_length;
+	uint32_t	 ack_length;
+	fsimg_frame_type_t sent_type;
+	fsimg_status_t	 expected_status;
+	bool		 two_root_plan;
+	bool		 expects_ready;
+} path_sequence_case_t;
+
 static void fixture_open(worker_fixture_t *);
 static void fixture_open_format(worker_fixture_t *, const char *);
 static void fixture_close(worker_fixture_t *);
@@ -124,6 +148,9 @@ static void test_prompt_completion(void);
 static void test_startup(void);
 static void test_inheritance(void);
 static void test_forged(void);
+static void test_path_sequences(void);
+static void run_path_sequence(const worker_fixture_t *, const unsigned char *,
+    size_t, path_sequence_result_t *);
 static void test_forged_publication(void);
 static void test_text_output(void);
 static void test_incomplete_extraction(void);
@@ -147,6 +174,320 @@ static fsimg_status_t produce_output(void *, fsimg_worker_text_t *, fsimg_error_
 static void test_output_ledger(void);
 static uint64_t fill_pipe(int);
 static void drain_after_delay(int, uint64_t);
+
+/* Run the real worker with a preloaded job pipe, bypassing the coordinator's
+ * path framing. The cancellation writer stays open until the child is reaped.
+ */
+static void
+run_path_sequence(const worker_fixture_t *fixture, const unsigned char *bytes,
+    size_t length, path_sequence_result_t *result)
+{
+	fsimg_frame_decoder_t decoder = { 0 };
+	struct pollfd channel;
+	unsigned char buffer[4096];
+	size_t consumed, offset;
+	ssize_t count;
+	pid_t child, waited;
+	int descriptors[FSIMG_CHILD_ROOTS + 2];
+	int job[2], control[2], cancel[2], null_fd;
+
+	bzero(result, sizeof(*result));
+	CHECK(pipe(job) == 0);
+	CHECK(pipe(control) == 0);
+	CHECK(pipe(cancel) == 0);
+	/* A nonblocking preload cannot hang even if the worker never reads. */
+	CHECK(fcntl(job[1], F_SETFL, O_NONBLOCK) == 0);
+	CHECK(write(job[1], bytes, length) == (ssize_t)length);
+	CHECK(close(job[1]) == 0);
+	CHECK(fcntl(control[0], F_SETFL, O_NONBLOCK) == 0);
+	CHECK(fcntl(cancel[0], F_SETFL, O_NONBLOCK) == 0);
+	null_fd = open("/dev/null", O_RDWR);
+	CHECK(null_fd != -1);
+	for (size_t i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); i++)
+		descriptors[i] = null_fd;
+	descriptors[FSIMG_CHILD_JOB] = job[0];
+	descriptors[FSIMG_CHILD_CONTROL] = control[1];
+	descriptors[FSIMG_CHILD_CANCEL] = cancel[0];
+	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++) {
+		int fd;
+
+		fd = fsimg_job_capability_fd(&fixture->request, c);
+		if (fd != -1)
+			descriptors[FSIMG_CHILD_SLOT(c)] = fd;
+	}
+	CHECK(fixture->request.root_count <= 2);
+	for (uint32_t i = 0; i < fixture->request.root_count; i++)
+		descriptors[FSIMG_CHILD_ROOTS + i] = fixture->request.root_fds[i];
+	CHECK(fsimg_host_spawn_worker(fixture->executable, descriptors,
+	    FSIMG_CHILD_ROOTS + fixture->request.root_count, &child) == 0);
+	CHECK(close(null_fd) == 0);
+	CHECK(close(job[0]) == 0);
+	CHECK(close(control[1]) == 0);
+	CHECK(close(cancel[0]) == 0);
+
+	channel = (struct pollfd){ .fd = control[0], .events = POLLIN };
+	/* Both partial frames and a child that closes control but stays alive
+	 * consume the same finite polling budget (eight seconds).
+	 */
+	for (unsigned attempt = 0; attempt < 400; attempt++) {
+		if (!result->exited) {
+			waited = waitpid(child, &result->outcome, WNOHANG);
+			if (waited == child)
+				result->exited = true;
+			else if (waited == -1 && errno != EINTR) {
+				result->status = FSIMG_EIO;
+				break;
+			}
+		}
+		if (result->eof && result->exited)
+			break;
+		if (poll(&channel, 1, 20) == -1) {
+			if (errno == EINTR)
+				continue;
+			result->status = FSIMG_EIO;
+			break;
+		}
+		if (channel.revents == 0)
+			continue;
+		count = read(control[0], buffer, sizeof(buffer));
+		if (count == -1) {
+			if (errno == EAGAIN || errno == EINTR)
+				continue;
+			result->status = FSIMG_EIO;
+			break;
+		}
+		if (count == 0) {
+			result->eof = true;
+			result->status = fsimg_frame_finish(&decoder, NULL);
+			channel.fd = -1;
+			continue;
+		}
+		offset = 0;
+		while (offset < (size_t)count) {
+			result->status = fsimg_frame_feed(&decoder, buffer + offset,
+			    (size_t)count - offset, &consumed, NULL);
+			if (result->status != FSIMG_OK)
+				break;
+			offset += consumed;
+			if (!decoder.complete)
+				continue;
+			if (result->count == sizeof(result->frames) /
+			    sizeof(result->frames[0])) {
+				result->status = FSIMG_EIO;
+				break;
+			}
+			result->frames[result->count++] = decoder.frame;
+			fsimg_frame_advance(&decoder);
+		}
+		if (result->status != FSIMG_OK)
+			break;
+	}
+	if (!result->exited) {
+		CHECK(kill(child, SIGKILL) == 0);
+		do {
+			waited = waitpid(child, &result->outcome, 0);
+		} while (waited == -1 && errno == EINTR);
+		CHECK(waited == child);
+	}
+	CHECK(close(control[0]) == 0);
+	CHECK(close(cancel[1]) == 0);
+}
+
+/* The worker accepts only exactly the declared byte length in nonempty
+ * SELECTION frames containing exactly the job's path count of terminated paths,
+ * followed by the acknowledgement. A framing fault during setup fails before
+ * READY; a content fault fails after the acknowledgement and before any parsing.
+ */
+static void
+test_path_sequences(void)
+{
+	static const path_sequence_case_t cases[] = {
+		/* A declared two-byte path followed by ACK completes an INFO job. */
+		{ .name = "valid selection", .declared_selection = "/",
+		    .sent = "/\0", .sent_length = sizeof("/\0") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .expected_status = FSIMG_OK, .expects_ready = true },
+		/* The path and its terminator may arrive in separate frames. */
+		{ .name = "fragmented valid selection", .declared_selection = "/",
+		    .sent = "/", .sent_length = sizeof("/") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .following_selection = "\0",
+		    .following_length = sizeof("\0") - 1,
+		    .expected_status = FSIMG_OK, .expects_ready = true },
+		{ .name = "acknowledgement payload", .declared_selection = "/",
+		    .sent = "/\0", .sent_length = sizeof("/\0") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION, .ack_length = 1,
+		    .message = "worker did not receive parsing acknowledgement",
+		    .expected_status = FSIMG_EIO, .expects_ready = true },
+		/* Reject the excess path before validating its relative name. */
+		{ .name = "too many paths", .declared_selection = "/aaa",
+		    .sent = "/a\0b\0", .sent_length = sizeof("/a\0b\0") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .message = "invalid worker selection framing",
+		    .expected_status = FSIMG_EINVAL, .expects_ready = true },
+		/* Five declared bytes pass the decoder's minimum for two roots. */
+		{ .name = "too few paths", .sent = "/abc\0",
+		    .sent_length = sizeof("/abc\0") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .message = "invalid worker selection framing",
+		    .expected_status = FSIMG_EINVAL,
+		    .two_root_plan = true, .expects_ready = true },
+		/* Both declared bytes arrive, but neither terminates the path. */
+		{ .name = "missing terminator", .declared_selection = "/",
+		    .sent = "/a", .sent_length = sizeof("/a") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .message = "invalid worker selection framing",
+		    .expected_status = FSIMG_EINVAL, .expects_ready = true },
+		/* After three declared bytes, an empty path frame occupies ACK's
+		 * position; being empty, only its type tells it from an ACK.
+		 */
+		{ .name = "extra selection frame", .declared_selection = "/a",
+		    .sent = "/a\0", .sent_length = sizeof("/a\0") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .following_selection = "",
+		    .following_length = sizeof("") - 1,
+		    .message = "worker did not receive parsing acknowledgement",
+		    .expected_status = FSIMG_EIO, .expects_ready = true },
+		/* The empty frame precedes all three valid declared bytes. */
+		{ .name = "empty selection frame", .declared_selection = "/a",
+		    .sent = "", .sent_length = sizeof("") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .following_selection = "/a\0",
+		    .following_length = sizeof("/a\0") - 1,
+		    .message = "invalid worker selection framing",
+		    .expected_status = FSIMG_EINVAL },
+		/* Three sent bytes exceed the declared two-byte path. */
+		{ .name = "selection exceeds remaining bytes",
+		    .declared_selection = "/", .sent = "/a\0",
+		    .sent_length = sizeof("/a\0") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .message = "invalid worker selection framing",
+		    .expected_status = FSIMG_EINVAL },
+		/* Four bytes fit the five-byte total, but only three remain. */
+		{ .name = "second selection exceeds remaining bytes",
+		    .declared_selection = "/abc", .sent = "/a",
+		    .sent_length = sizeof("/a") - 1,
+		    .sent_type = FSIMG_FRAME_SELECTION,
+		    .following_selection = "bc\0x",
+		    .following_length = sizeof("bc\0x") - 1,
+		    .message = "invalid worker selection framing",
+		    .expected_status = FSIMG_EINVAL },
+		/* A wrong-type frame carries all three valid declared bytes. */
+		{ .name = "non-selection frame", .declared_selection = "/a",
+		    .sent = "/a\0", .sent_length = sizeof("/a\0") - 1,
+		    .sent_type = FSIMG_FRAME_NAME,
+		    .message = "invalid worker selection framing",
+		    .expected_status = FSIMG_EINVAL }
+	};
+	static const char *const root_paths[] = { "/", "/a" };
+	worker_fixture_t fixture;
+	path_sequence_result_t result;
+	fsimg_error_t error;
+	const fsimg_frame_t *frame;
+	unsigned char bytes[FSIMG_JOB_BYTES + 4 * FSIMG_FRAME_HEADER + 16];
+	size_t length;
+	fsimg_status_t status;
+	int roots[2];
+	bool passed;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_open(&fixture);
+		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
+		fixture.request.scratch_fd = -1;
+		fixture.request.selection = cases[i].declared_selection;
+		if (cases[i].two_root_plan) {
+			roots[0] = roots[1] = fixture.source;
+			fixture.request.kind = FSIMG_JOB_PLAN;
+			fixture.request.input_fd = -1;
+			fixture.request.input = (fsimg_input_t){ 0 };
+			fixture.request.root_fds = roots;
+			fixture.request.root_paths = root_paths;
+			fixture.request.root_count = 2;
+		}
+		/* Valid placeholder paths declare the desired byte length; the
+		 * independently framed bytes below replace them on the wire.
+		 * This keeps private job-record offsets out of the test.
+		 */
+		CHECK(fsimg_job_encode(&fixture.request, bytes + FSIMG_FRAME_HEADER,
+		    NULL) == FSIMG_OK);
+		CHECK(fsimg_frame_header(bytes, FSIMG_FRAME_JOB, FSIMG_JOB_BYTES,
+		    NULL) == FSIMG_OK);
+		length = FSIMG_FRAME_HEADER + FSIMG_JOB_BYTES;
+		CHECK(FSIMG_FRAME_HEADER <= sizeof(bytes) - length);
+		CHECK(fsimg_frame_header(bytes + length, cases[i].sent_type,
+		    cases[i].sent_length, NULL) == FSIMG_OK);
+		length += FSIMG_FRAME_HEADER;
+		CHECK(cases[i].sent_length <= sizeof(bytes) - length);
+		bcopy(cases[i].sent, bytes + length, cases[i].sent_length);
+		length += cases[i].sent_length;
+		if (cases[i].following_selection != NULL) {
+			CHECK(FSIMG_FRAME_HEADER <= sizeof(bytes) - length);
+			CHECK(fsimg_frame_header(bytes + length, FSIMG_FRAME_SELECTION,
+			    cases[i].following_length, NULL) == FSIMG_OK);
+			length += FSIMG_FRAME_HEADER;
+			CHECK(cases[i].following_length <= sizeof(bytes) - length);
+			bcopy(cases[i].following_selection, bytes + length,
+			    cases[i].following_length);
+			length += cases[i].following_length;
+		}
+		CHECK(FSIMG_FRAME_HEADER <= sizeof(bytes) - length);
+		CHECK(fsimg_frame_header(bytes + length, FSIMG_FRAME_ACK,
+		    cases[i].ack_length, NULL) == FSIMG_OK);
+		length += FSIMG_FRAME_HEADER;
+		CHECK(cases[i].ack_length <= sizeof(bytes) - length);
+		bzero(bytes + length, cases[i].ack_length);
+		length += cases[i].ack_length;
+
+		run_path_sequence(&fixture, bytes, length, &result);
+		fixture_close(&fixture);
+
+		fsimg_error_clear(&error);
+		frame = result.count == 0 ? NULL : &result.frames[result.count - 1];
+		passed = result.status == FSIMG_OK && result.eof && result.exited &&
+		    WIFEXITED(result.outcome) && WEXITSTATUS(result.outcome) ==
+		    (cases[i].expected_status == FSIMG_OK ? 0 : 1);
+		if (cases[i].expects_ready) {
+			passed = passed && result.count != 0 &&
+			    result.frames[0].type == FSIMG_FRAME_READY &&
+			    result.frames[0].length == 8 &&
+			    fsimg_load_le64(result.frames[0].payload) ==
+			    FSIMG_CONFINEMENT_DISABLED;
+		}
+		if (cases[i].expected_status == FSIMG_OK) {
+			/* The raw INFO job emits IMAGE and INFO between READY and DONE. */
+			passed = passed && result.count == 4 &&
+			    result.frames[1].type == FSIMG_FRAME_IMAGE &&
+			    result.frames[2].type == FSIMG_FRAME_INFO &&
+			    frame->type == FSIMG_FRAME_DONE &&
+			    frame->length == FSIMG_WIRE_DONE_BYTES;
+		} else {
+			/* Exact frame order through EOF excludes all job output. */
+			passed = passed &&
+			    result.count == (cases[i].expects_ready ? 2u : 1u) &&
+			    frame != NULL && frame->type == FSIMG_FRAME_ERROR &&
+			    frame->length == FSIMG_WIRE_ERROR_BYTES;
+			if (frame != NULL && frame->type == FSIMG_FRAME_ERROR &&
+			    frame->length == FSIMG_WIRE_ERROR_BYTES) {
+				status = fsimg_wire_error_decode(frame->payload,
+				    frame->length, &error);
+				passed = passed && status == cases[i].expected_status &&
+				    error.status == cases[i].expected_status &&
+				    strcmp(error.message, cases[i].message) == 0;
+			}
+		}
+		if (!passed) {
+			fprintf(stderr, "%s: frames=", cases[i].name);
+			for (size_t j = 0; j < result.count; j++)
+				fprintf(stderr, "%s%u", j == 0 ? "" : ",",
+				    (unsigned)result.frames[j].type);
+			fprintf(stderr, "; decoder status=%d, eof=%d, exited=%d, "
+			    "outcome=%d; worker status=%d, message=%s\n",
+			    result.status, result.eof, result.exited, result.outcome,
+			    error.status, error.message);
+		}
+		CHECK(passed);
+	}
+}
 
 static fsimg_status_t
 produce_output(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
@@ -1716,6 +2057,7 @@ main(int argc, char **argv)
 	test_startup();
 	test_inheritance();
 	test_forged();
+	test_path_sequences();
 	test_forged_publication();
 	test_incomplete_extraction();
 	test_skipped_extraction();

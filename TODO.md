@@ -69,14 +69,6 @@
   * `c -v` and `x -v` do not yet print one line per entry: the writer and
     extractor have no per-entry callback for the worker to relay
     (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
-  * Tests do not yet feed the worker a malformed path sequence (a count
-    differing from the record, a missing terminator, an extra or empty
-    SELECTION frame), and no test drives a whole `cW` whose staged image
-    fails verification: `test/worker.c` runs the verification job on a
-    container corrupted after creation and checks the layer it names, and
-    the display's attribution is tested with that error, but the command
-    has no fault hook to corrupt its own staged file between the two
-    workers (`cmd/fsimg/worker-child.c`, `test/worker.c`, `test/cli.py`).
   * [Low] The forged-worker tests cover no creation job, so the
     coordinator's checks of an encoded output's PLAN, of a created IMAGE
     record's compression against the job's, of DONE's staged length and of

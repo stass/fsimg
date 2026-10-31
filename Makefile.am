@@ -132,7 +132,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-driver-contracts test-layer-contracts test-zlib-memory \
 	test-metadata-loss \
-	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-exfat \
+	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
 	test-ifs \
 	test-ifs-write test-cli \
@@ -274,6 +274,9 @@ test_worker_SOURCES = test/worker.c test/test.h test/socket.c test/socket.h \
 	cmd/fsimg/worker-parent.c cmd/fsimg/worker-child.c cmd/fsimg/worker-output.c \
 	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/spawn.c
 test_worker_LDADD = libfsimg-core.la
+test_staged_verify_SOURCES = $(fsimg_SOURCES) test/staged-verify.c test/test.h
+test_staged_verify_CPPFLAGS = $(AM_CPPFLAGS) -Dmain=fsimg_test_command_main
+test_staged_verify_LDADD = libfsimg-core.la
 test_publish_SOURCES = test/publish.c test/test.h
 test_publish_LDADD = libfsimg.la
 test_sandbox_SOURCES = test/sandbox.c cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h
