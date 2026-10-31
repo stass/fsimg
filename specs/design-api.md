@@ -111,6 +111,7 @@ their output's descriptors travel in the sink.
 | Progress callback and argument | Receives bounded counters and phase, never an accumulated event list |
 | Cancellation callback and argument | Polled at each batch and external-sort pass; true requests cancellation |
 | Loss-report callback and argument | Receives explicit optional-metadata losses with a rendered, never truncated path; counts remain available when detailed reporting is capped |
+| Entry callback and argument | Receives each entry the writer admits to its plan or the extractor finishes, borrowed for the call; never an accumulated list |
 
 ```c
 void fsimg_options_init(fsimg_options_t *opts);
@@ -125,6 +126,25 @@ callback arguments alive until context destruction. Callbacks execute
 synchronously on the calling thread and cannot re-enter their active context.
 The library does not read environment variables to choose limits or scratch
 locations. The CLI translates environment/operands into explicit options.
+
+The entry callback is the library's one per-entry observation. Like the
+loss callback it is synchronous and observational: it has no result,
+cannot fail or cancel the operation, and cannot re-enter the context;
+cancellation stays with the cancellation callback. It receives a borrowed
+`fsimg_entry_t`, the record `add()` accepts and `next()` returns, whose
+path is the entry's own image path, the one unrendered path the library
+emits; the record is valid until the callback returns, and the path is
+complete, since every path the library accepts fits the path limit. It is
+not a sample: the progress callback reports bounded counters at batch
+boundaries and a host may thin it by time, whereas every entry call is
+delivered, so the two stay separate callbacks. The writer and the extractor
+each call it from one place, defined in their sections, so a host counting
+the calls checks the count against the operation's result. Omitted entries,
+which have no deliverable name, and the implicit root are never reported,
+and neither is an entry whose processing fails: the error names it. The
+reader's own iteration does not use the callback, since `next()` already
+hands the caller every entry. The library prints nothing; the CLI relays
+each call as a listing's entry records.
 
 Memory, scratch, and descriptor quotas aggregate across all live handles in the
 context. Entry/output/work quotas and deadlines span a complete writer lifetime
@@ -370,6 +390,17 @@ such. Its image record reports the planned disk as an opened image of it
 would, the compression the write options name included; the output
 bound is the disk's encoding by the container and then the compression. It does not return an O(entries) list. No progress callback can mutate a
 sealed plan.
+
+Planning reports each entry of the plan through the entry callback as it
+admits the entry to the sorted catalog, in image order, before any
+capability check or loss report of that planning attempt, so the calls equal
+the plan's `entries` and a repeated path contributes the one record the
+catalog keeps. A later planning failure does not retract the calls, just as
+it does not retract loss reports: a reported entry is in the catalog, not
+yet in an image. Collection does not report, since the caller or the scan
+supplied the entry and duplicates are not yet resolved, and emission does
+not, since each driver places directory records its own way and only
+payload copying has a common path.
 
 The plan's `metadata_losses` counts affected entry/field pairs, with owner and
 group together forming one owner field. The common
@@ -686,6 +717,14 @@ enable symlink following, existing-tree merge, privileged metadata, or device
 creation. The [security specification](design-security.md) defines cleanup and
 partial-output behavior. In-process extraction does not establish confinement
 against a memory-corruption exploit in its host application.
+
+Extraction reports an entry through the entry callback once it is complete:
+a directory created, a file copied, or an entry of another kind skipped
+under the skip option, each after its manifest line is written when there
+is a manifest. The order is the traversal's, so a directory precedes its
+children; an entry's loss reports precede its own report; a directory's
+timestamps, set when it closes after its children, are not part of its
+report. The calls equal the result's `entries` plus `skipped_entries`.
 
 Verification returns bounded counters and a named scope: structural or
 structural-plus-payload-read. It reports corruption and unsupported features,

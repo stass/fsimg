@@ -183,7 +183,8 @@ I/O boundaries. An in-flight kernel operation can complete or remain blocked
 according to host behavior. The output relay holds only one bounded record;
 after coordinator death its next status write fails, preventing another record.
 
-Large listing names use bounded entry-start/name-chunk/entry-end records.
+Listing names, and the names a verbose creation or extraction reports, use
+bounded entry-start/name-chunk/entry-end records.
 The coordinator enforces the total path limit and legal message order while
 escaping text incrementally. A 64 KiB path need not fit, with framing or JSON
 escaping, in one 64 KiB message. Diagnostic paths may be explicitly truncated;

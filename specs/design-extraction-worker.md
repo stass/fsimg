@@ -71,7 +71,23 @@ A bounded versioned protocol carries readiness, acknowledgement, operation
 records, errors and completion. Its header states magic, version, type and
 payload length in explicit byte order. Lengths and message order are checked
 before payload allocation or interpretation. Entry names use start/chunk/end
-frames with a checked total path limit. Raw `x -O` bytes use a separate data pipe,
+frames with a checked total path limit. The same entry records carry a
+listing's entries, the one selected entry of a raw member output and the
+names a verbose creation or extraction reports from the library's
+[entry callback](design-api.md#options-context-and-callbacks); the worker
+sends each as the callback fires, and a failed send puts the channel in the
+failed state that cancels the job at its next poll, as a progress or loss
+frame's does. The coordinator admits entry records by job and state: a
+listing or member output in its output-ready state, a verbose creation
+before its planned-disk and plan records, a verbose extraction after its
+volume record, and none in any other job or state, a creation or extraction
+not asked for names included. A sequence completes before any other frame,
+each name counts against the entries limit and each path against the path
+limit, and the counts must agree: a listing's completion count equals its
+entries, a creation's plan count equals the names before it, and an
+extraction's completion counts equal the names by kind, regular files and
+directories against completed entries and every other kind against skipped
+entries. Raw `x -O` bytes use a separate data pipe,
 and a streamed image input arrives through its mirror, the input pipe the
 coordinator fills from standard input without reading it, as the
 [CLI design](design-cli.md#coordinator-and-streaming-representation) states.

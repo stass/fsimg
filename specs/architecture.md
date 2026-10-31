@@ -221,7 +221,11 @@ Human commands use their exit status for completion; JSON retains its explicit
 final completion record. The formatter retains one fixed verification result so
 human success is emitted only after worker exit and required finalization.
 Optional metadata-loss samples are bounded examples, while the worker's final
-aggregate counts affected fields. Quiet presentation never suppresses required
+aggregate counts affected fields. Per-entry names, in a listing or under
+verbose creation and extraction, stream one entry at a time from the
+library's entry callback through the same entry records, and the final
+counts must agree with the names; nothing in the library, worker or
+coordinator accumulates them. Quiet presentation never suppresses required
 sandbox warnings or uncertain/retained-output diagnostics. The CLI design owns
 the command-specific presentation rules.
 

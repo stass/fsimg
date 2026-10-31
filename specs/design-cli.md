@@ -161,7 +161,29 @@ rule.
 | `t` | The long listing on stdout, defined under [listing](#listing) | The same stderr details |
 | `W`, `i`, `--formats` | Capability, geometry and sandbox details on stderr | Nothing further |
 
-Verbose names are streamed, never accumulated.
+A `c -v` or `x -v` name line is the default `t` line on stderr: the quoted,
+escaped image path, a symbolic link marked `@` and a FIFO `|`, never a host
+path. The names are the library's
+[entry callback](design-api.md#options-context-and-callbacks), relayed
+through the listing's entry records, so one escaping, one path limit and one
+entries limit serve every mode. Creation names each entry as planning admits
+it to the catalog, in image order: the lines are the `t` listing of the
+image to come, and `c -n -v` names them too, before the plan. Extraction
+names each entry once it is created or copied, and recorded in the manifest
+when there is one, in traversal order; under `-k` a skipped entry is named
+as well, and since the safe profile creates only regular files and
+directories, a marked line under `x` is a skipped entry. An entry the
+reader omits has no name to print and appears only in its count. A failed
+entry is not named; the error names it. Under `--json` stdout's records are
+unchanged and the names take the `entry` record form on stderr, as progress
+and loss examples do.
+
+Verbose names are streamed, never accumulated: the worker holds the
+library's borrowed entry, the coordinator one formatted span and the relay
+one record, so a terminal slower than the job slows the job rather than
+losing names, exactly as it slows `t`, and the deadline still applies. A
+mode that dropped names under pressure would need a drop count, a frame
+and a notice for a condition the user created by asking for names.
 
 ## Stack, settings and selection
 
@@ -726,6 +748,12 @@ Output formatting retains one 128 KiB span, one small UTF-8 carry, the
 current entry metadata and fixed result and counter records. Name frames
 stream within JSON strings; no pathname or listing tree proportional to
 entries is retained, and valid UTF-8 crosses name-frame boundaries intact.
+An entry record yields a line by job: a listing's on stdout, a verbose
+creation's or extraction's on stderr, a member output's none. Its
+admission and the count it must agree with are the
+[protocol's](design-extraction-worker.md#process-boundary-and-protocol)
+rules; a creation or extraction not asked for names that sends one fails
+as a forged worker does.
 Human names escape controls, backslashes and bidi formatting unambiguously.
 JSON uses valid UTF-8, escapes JSON controls and quotes, and encodes
 untrusted invalid diagnostic bytes visibly.
