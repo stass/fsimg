@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -52,6 +53,9 @@
 typedef struct memory {
 	unsigned char	*bytes;
 	uint64_t	 length;
+	uint64_t	*resize_lengths;
+	size_t		 resizes;
+	size_t		 fail_resize;	/* Fail this resize call; zero never */
 	uint64_t	 reads;
 	uint64_t	 flip_offset;
 	unsigned	 flip_reads;
@@ -74,6 +78,7 @@ typedef struct fixture {
 	int		 directory_fd;
 	unsigned	 polls;		/* Cancellation polls observed */
 	unsigned	 cancel_after;	/* Cancel at this poll; zero never */
+	bool		 fail_staged_resize;
 } fixture_t;
 
 static uint32_t crc32_oracle(const unsigned char *, size_t);
@@ -87,6 +92,10 @@ static fsimg_status_t memory_read(void *, uint64_t, void *, size_t, size_t *,
     fsimg_error_t *);
 static fsimg_status_t memory_write(void *, uint64_t, const void *, size_t,
     size_t *, fsimg_error_t *);
+static fsimg_status_t provider_validate(void *, uint64_t, fsimg_error_t *);
+static fsimg_status_t provider_read(void *, uint64_t, uint64_t, void *, size_t,
+    size_t *, fsimg_error_t *);
+static fsimg_status_t memory_flush(void *, fsimg_error_t *);
 static fsimg_status_t memory_size(void *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t memory_resize(void *, uint64_t, fsimg_error_t *);
 static fsimg_status_t memory_next_zero(void *, uint64_t, uint64_t,
@@ -126,7 +135,25 @@ static void test_mbr_chs_and_limits(void);
 static void test_identifiers(void);
 static void test_epochs_change_only_identifiers(void);
 static void test_wrap_unwrap(void);
+static void expect_file_bytes(fixture_t *, const char *, const memory_t *);
+static void test_unwrap_partition_selectors_publish_volume(void);
+static void test_unwrap_stream_receives_volume(void);
+static void test_container_section_publishes_startup_and_names_failed_reread(void);
 static void test_sinks(void);
+static int raw_file(fixture_t *);
+static void test_refused_raw_intermediates_are_closed(void);
+static void test_sink_raw_requirement_matches_writer(void);
+static void test_encoded_output_to_unsuitable_sink_fails_before_emission(
+    const char *, const char *);
+static void test_encoded_output_grows_only_to_final_length(const char *,
+    const char *);
+static void test_exact_wrap_resizes_once(void);
+static void expect_failed_writer(fixture_t *, fsimg_writer_t *, fsimg_sink_t *);
+static void test_encoded_output_later_resize_failure(const char *, const char *);
+static void test_encoded_output_zero_run_resize_failure(void);
+static void test_encoded_output_final_trim_failure(const char *, const char *);
+static void test_encoded_file_resize_failure_leaves_no_staging(const char *,
+    const char *);
 static void test_compose(void);
 static void test_compose_refusals(void);
 static void test_aliases(void);
@@ -295,11 +322,18 @@ memory_size(void *argument, uint64_t *size, fsimg_error_t *error FSIMG_UNUSED)
 
 /* Growth reads as 0xa5, so only bytes the library writes read as zero. */
 static fsimg_status_t
-memory_resize(void *argument, uint64_t length, fsimg_error_t *error FSIMG_UNUSED)
+memory_resize(void *argument, uint64_t length, fsimg_error_t *error)
 {
 	memory_t *memory = argument;
 	unsigned char *bytes;
 
+	memory->resize_lengths = realloc(memory->resize_lengths,
+	    (memory->resizes + 1) * sizeof(*memory->resize_lengths));
+	CHECK(memory->resize_lengths != NULL);
+	memory->resize_lengths[memory->resizes++] = length;
+	if (memory->resizes == memory->fail_resize)
+		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
+		    "injected callback resize failure"));
 	bytes = realloc(memory->bytes, length == 0 ? 1 : (size_t)length);
 	CHECK(bytes != NULL);
 	if (length > memory->length)
@@ -329,6 +363,7 @@ memory_io(fixture_t *f, memory_t *memory)
 static void
 memory_free(memory_t *memory)
 {
+	free(memory->resize_lengths);
 	free(memory->bytes);
 	bzero(memory, sizeof(*memory));
 }
@@ -339,6 +374,8 @@ cancel_at(void *argument)
 	fixture_t *f = argument;
 
 	f->polls++;
+	if (f->fail_staged_resize && leftover_staging(f) != 0)
+		fsimg_test_holes(f->ctx)->resize_errno = EIO;
 	return (f->cancel_after != 0 && f->polls >= f->cancel_after);
 }
 
@@ -1518,7 +1555,7 @@ test_wrap_unwrap(void)
 	CHECK(fsimg_image_unwrap(image, &(fsimg_selector_t){ .kind =
 	    FSIMG_SELECT_AUTOMATIC }, NULL, &sink, NULL) == FSIMG_OK);
 	CHECK(copy.length == MIB && bcmp(copy.bytes, volume.bytes, MIB) == 0);
-	memory_free(&copy);
+	/* The same sink again: it ends at the new output's length. */
 	CHECK(fsimg_image_unwrap(image, &(fsimg_selector_t){ .kind =
 	    FSIMG_SELECT_RANGE, .offset = MIB, .length = 512 }, NULL, &sink,
 	    NULL) == FSIMG_OK);
@@ -1579,6 +1616,237 @@ test_wrap_unwrap(void)
 	fsimg_io_free(input);
 	memory_free(&disk);
 	memory_free(&blank);
+	memory_free(&volume);
+	fixture_free(&f);
+}
+
+/* Check exact length as well as contents, using a bounded read buffer. */
+static void
+expect_file_bytes(fixture_t *f, const char *name, const memory_t *expected)
+{
+	unsigned char bytes[4096];
+	struct stat status;
+	size_t length;
+	int fd;
+
+	fd = openat(f->directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	CHECK(fd != -1);
+	CHECK(fstat(fd, &status) == 0);
+	CHECK((uint64_t)status.st_size == expected->length);
+	for (uint64_t offset = 0; offset < expected->length; offset += length) {
+		length = expected->length - offset < sizeof(bytes) ?
+		    (size_t)(expected->length - offset) : sizeof(bytes);
+		CHECK(pread(fd, bytes, length, (off_t)offset) == (ssize_t)length);
+		CHECK(bcmp(bytes, expected->bytes + offset, length) == 0);
+	}
+	CHECK(close(fd) == 0);
+}
+
+/* A distinct first partition catches a selector that always takes slot 1. */
+static void
+test_unwrap_partition_selectors_publish_volume(void)
+{
+	static const fsimg_selector_t matches[] = {
+		{ .kind = FSIMG_SELECT_INDEX, .index = 2 },
+		{ .kind = FSIMG_SELECT_NAME, .text = "payload" },
+		{ .kind = FSIMG_SELECT_TYPE, .text = "basic" }
+	};
+	static const fsimg_selector_t missing[] = {
+		{ .kind = FSIMG_SELECT_INDEX, .index = 3 },
+		{ .kind = FSIMG_SELECT_NAME, .text = "missing" },
+		{ .kind = FSIMG_SELECT_TYPE, .text = "esp" }
+	};
+	fsimg_write_options_t options;
+	fsimg_image_t *image;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_io_t *input, *output, *io, *other;
+	fsimg_part_t parts[2];
+	memory_t volume, disk = {0}, decoy = {0}, copy = {0};
+	struct stat status;
+	fixture_t f;
+
+	fixture_init(&f);
+	make_volume(&f, "fat12", MIB, &volume);
+	decoy.length = 512;
+	decoy.bytes = malloc(512);
+	CHECK(decoy.bytes != NULL);
+	memset(decoy.bytes, 0x5a, 512);
+	input = memory_io(&f, &volume);
+	other = memory_io(&f, &decoy);
+	parts[0] = (fsimg_part_t){ .volume = other, .type = "linux",
+	    .name = "decoy" };
+	parts[1] = (fsimg_part_t){ .volume = input, .type = "basic",
+	    .name = "payload" };
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	output = memory_io(&f, &disk);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+	CHECK(fsimg_image_compose(f.ctx, "gpt", parts, 2, &options, &sink,
+	    NULL) == FSIMG_OK);
+	fsimg_io_free(output);
+	CHECK(open_disk(&f, &disk, 0, &io, &image, NULL) == FSIMG_OK);
+
+	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
+	sink.parent_fd = f.directory_fd;
+	sink.name = "selected.img";
+	for (size_t i = 0; i < sizeof(matches) / sizeof(matches[0]); i++) {
+		CHECK(fsimg_image_unwrap(image, &matches[i], NULL, &sink,
+		    NULL) == FSIMG_OK);
+		expect_file_bytes(&f, sink.name, &volume);
+		CHECK(unlinkat(f.directory_fd, sink.name, 0) == 0);
+	}
+	for (size_t i = 0; i < sizeof(missing) / sizeof(missing[0]); i++) {
+		bzero(&error, sizeof(error));
+		CHECK(fsimg_image_unwrap(image, &missing[i], NULL, &sink,
+		    &error) == FSIMG_EINVAL);
+		CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+		CHECK(fstatat(f.directory_fd, sink.name, &status,
+		    AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+		CHECK(leftover_staging(&f) == 0);
+	}
+
+	/* Disk selection returns the table and both partitions, not a volume. */
+	output = memory_io(&f, &copy);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+	CHECK(fsimg_image_unwrap(image, &(fsimg_selector_t){ .kind =
+	    FSIMG_SELECT_DISK }, NULL, &sink, NULL) == FSIMG_OK);
+	CHECK(copy.length == disk.length &&
+	    bcmp(copy.bytes, disk.bytes, (size_t)disk.length) == 0);
+	fsimg_io_free(output);
+	memory_free(&copy);
+	fsimg_image_free(image);
+	fsimg_io_free(io);
+	fsimg_io_free(other);
+	fsimg_io_free(input);
+	memory_free(&decoy);
+	memory_free(&disk);
+	memory_free(&volume);
+	fixture_free(&f);
+}
+
+/* A write-only endpoint exercises sequential output without read access. */
+static void
+test_unwrap_stream_receives_volume(void)
+{
+	fsimg_write_options_t options;
+	fsimg_image_t *image;
+	fsimg_sink_t sink;
+	fsimg_io_t *input, *output, *io;
+	memory_t volume, disk = {0};
+	int fd;
+	fixture_t f;
+
+	fixture_init(&f);
+	make_volume(&f, "fat12", MIB, &volume);
+	input = memory_io(&f, &volume);
+	output = memory_io(&f, &disk);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+	CHECK(fsimg_image_wrap(f.ctx, input, "gpt", &options, &sink,
+	    NULL) == FSIMG_OK);
+	fsimg_io_free(output);
+	CHECK(open_disk(&f, &disk, 0, &io, &image, NULL) == FSIMG_OK);
+	fd = openat(f.directory_fd, "stream.img", O_WRONLY | O_CREAT | O_EXCL |
+	    O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
+	sink.stream_fd = fd;
+	CHECK(fsimg_image_unwrap(image, &(fsimg_selector_t){ .kind =
+	    FSIMG_SELECT_AUTOMATIC }, NULL, &sink, NULL) == FSIMG_OK);
+	CHECK(close(fd) == 0);
+	expect_file_bytes(&f, "stream.img", &volume);
+	CHECK(unlinkat(f.directory_fd, "stream.img", 0) == 0);
+	fsimg_image_free(image);
+	fsimg_io_free(io);
+	fsimg_io_free(input);
+	memory_free(&disk);
+	memory_free(&volume);
+	fixture_free(&f);
+}
+
+/* A boot container exposes its opaque startup code separately from its disk. */
+static void
+test_container_section_publishes_startup_and_names_failed_reread(void)
+{
+	unsigned char code[] = { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 };
+	memory_t startup = { .bytes = code, .length = sizeof(code) };
+	fsimg_layer_options_t layers;
+	fsimg_layer_inputs_t inputs;
+	fsimg_write_options_t options;
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_SECTION,
+	    .text = "startup" };
+	fsimg_image_t *image;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_io_t *input, *output, *io, *startup_io, *section;
+	memory_t volume, boot = {0};
+	struct stat status;
+	fixture_t f;
+
+	fixture_init(&f);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	CHECK(create(&f, "ifs", &options, &volume, NULL) == FSIMG_OK);
+	input = memory_io(&f, &volume);
+	startup_io = memory_io(&f, &startup);
+	bzero(&inputs, sizeof(inputs));
+	inputs.ifsboot_startup = startup_io;
+	fsimg_layer_options_init(&layers);
+	/* Machine 0 accepts an uncompressed body without a BIOS prefix. */
+	layers.ifsboot_machine = 0;
+	layers.ifsboot_machine_set = true;
+	layers.ifsboot_virtual = true;
+	layers.ifsboot_virtual_set = true;
+	layers.ifsboot_startup_vaddr = 0x00401234;
+	layers.ifsboot_startup_vaddr_set = true;
+	layers.ifsboot_paddr_bias = 0;
+	layers.ifsboot_paddr_bias_set = true;
+	layers.ifsboot_image_paddr = 0x00400440;
+	layers.ifsboot_image_paddr_set = true;
+	layers.ifsboot_ram_paddr = 0x00400000;
+	layers.ifsboot_ram_paddr_set = true;
+	layers.ifsboot_imagefs_paddr = 0xfffffffc;
+	layers.ifsboot_imagefs_paddr_set = true;
+	layers.ifsboot_compress = FSIMG_IFSBOOT_NONE;
+	options.layers = &layers;
+	options.inputs = &inputs;
+	output = memory_io(&f, &boot);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = output;
+	CHECK(fsimg_image_wrap(f.ctx, input, "ifsboot", &options, &sink,
+	    NULL) == FSIMG_OK);
+	fsimg_io_free(output);
+	CHECK(open_disk(&f, &boot, 0, &io, &image, NULL) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
+	sink.parent_fd = f.directory_fd;
+	sink.name = "startup.bin";
+	CHECK(fsimg_image_unwrap(image, &selector, NULL, &sink, NULL) == FSIMG_OK);
+	expect_file_bytes(&f, sink.name, &startup);
+	CHECK(unlinkat(f.directory_fd, sink.name, 0) == 0);
+	selector.text = "missing";
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_image_unwrap(image, &selector, NULL, &sink, &error) == FSIMG_EINVAL);
+	CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+	CHECK(strcmp(error.path, "missing") == 0);
+	CHECK(fstatat(f.directory_fd, sink.name, &status,
+	    AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+	CHECK(leftover_staging(&f) == 0);
+
+	/* Opening succeeded; corrupt only the header the section re-reads. */
+	bzero(boot.bytes, 256);
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_image_section(image, "startup", &section, &error) ==
+	    FSIMG_EFORMAT);
+	CHECK(section == NULL);
+	CHECK(error.operation == FSIMG_OP_IMAGE);
+	CHECK(strcmp(error.path, "ifsboot") == 0);
+	fsimg_image_free(image);
+	fsimg_io_free(io);
+	fsimg_io_free(startup_io);
+	fsimg_io_free(input);
+	memory_free(&boot);
 	memory_free(&volume);
 	fixture_free(&f);
 }
@@ -2331,7 +2599,7 @@ test_stream_budget(void)
 	bzero(&error, sizeof(error));
 	CHECK(fsimg_writer_output(writer, &sink, &error) == FSIMG_ELIMIT);
 	CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
-	CHECK(fcntl(raw, F_GETFD) == -1);
+	CHECK(fcntl(raw, F_GETFD) == -1 && errno == EBADF);
 	CHECK(fstat(stream, &status) == 0 && status.st_size == 0);
 	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
 	sink.parent_fd = f.directory_fd;
@@ -2348,7 +2616,7 @@ test_stream_budget(void)
 	sink.stream_fd = stream;
 	sink.raw_fd = raw;
 	CHECK(fsimg_writer_output(NULL, &sink, NULL) != FSIMG_OK);
-	CHECK(fcntl(raw, F_GETFD) == -1);
+	CHECK(fcntl(raw, F_GETFD) == -1 && errno == EBADF);
 	CHECK(close(stream) == 0);
 	CHECK(unlinkat(f.directory_fd, "stream.img", 0) == 0);
 	CHECK(unlinkat(f.directory_fd, "file.img", 0) == 0);
@@ -2395,9 +2663,659 @@ test_simg_changed_input(void)
 	fixture_free(&f);
 }
 
+/* An empty, unlinked raw intermediate whose ownership passes to output. */
+static int
+raw_file(fixture_t *f)
+{
+	int fd;
+
+	fd = openat(f->directory_fd, "raw", O_RDWR | O_CREAT | O_EXCL |
+	    O_CLOEXEC, 0600);
+	CHECK(fd != -1);
+	CHECK(unlinkat(f->directory_fd, "raw", 0) == 0);
+	return (fd);
+}
+
+/* Refused ownership transfers close both valid and invalid raw files. */
+static void
+test_refused_raw_intermediates_are_closed(void)
+{
+	enum { LINKED_RAW, NONEMPTY_RAW, UNNEEDED_RAW, INVALID_SINK };
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fixture_t f;
+	int fd, stream;
+
+	fixture_init(&f);
+	stream = open("/dev/null", O_WRONLY | O_CLOEXEC);
+	CHECK(stream != -1);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = MIB;
+	for (unsigned scenario = LINKED_RAW; scenario <= INVALID_SINK; scenario++) {
+		CHECK(fsimg_writer_new(f.ctx, "fat12", &options, &writer, NULL) == FSIMG_OK);
+		if (scenario == LINKED_RAW) {
+			fd = openat(f.directory_fd, "linked", O_RDWR | O_CREAT |
+			    O_EXCL | O_CLOEXEC, 0600);
+			CHECK(fd != -1);
+		} else
+			fd = raw_file(&f);
+		if (scenario == NONEMPTY_RAW)
+			CHECK(write(fd, "x", 1) == 1);
+		fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
+		sink.stream_fd = stream;
+		sink.raw_fd = fd;
+		if (scenario == UNNEEDED_RAW) {
+			fsimg_sink_init(&sink, FSIMG_SINK_FILE);
+			sink.parent_fd = f.directory_fd;
+			sink.name = "unused.img";
+			sink.raw_fd = fd;
+		} else if (scenario == INVALID_SINK)
+			sink.stream_fd = -1;
+
+		bzero(&error, sizeof(error));
+		CHECK(fsimg_writer_output(writer, &sink, &error) == FSIMG_EINVAL);
+		CHECK(fcntl(fd, F_GETFD) == -1 && errno == EBADF);
+		CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+		CHECK(faccessat(f.directory_fd, "unused.img", F_OK, 0) == -1 &&
+		    errno == ENOENT);
+		if (scenario == LINKED_RAW)
+			CHECK(unlinkat(f.directory_fd, "linked", 0) == 0);
+		fsimg_writer_free(writer);
+	}
+	CHECK(close(stream) == 0);
+	fixture_free(&f);
+}
+
+static fsimg_status_t
+provider_validate(void *argument FSIMG_UNUSED, uint64_t id,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	CHECK(id == 1);
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+provider_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
+    size_t length, size_t *transferred, fsimg_error_t *error)
+{
+	CHECK(id == 1);
+	return (memory_read(argument, offset, buffer, length, transferred, error));
+}
+
+/* Memory writes are complete on return; flush has no pending work. */
+static fsimg_status_t
+memory_flush(void *argument FSIMG_UNUSED, fsimg_error_t *error FSIMG_UNUSED)
+{
+	return (FSIMG_OK);
+}
+
+/* Refusal leaves the raw file empty and the writer ready for a suitable sink. */
+static void
+test_encoded_output_to_unsuitable_sink_fails_before_emission(const char *stack,
+    const char *compression)
+{
+	enum { FIXED_SINK, READ_ONLY_SINK, NONDURABLE_SINK };
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_io_ops_t ops;
+	fsimg_source_ops_t sources;
+	fsimg_entry_t entry = { .path = "/payload", .kind = FSIMG_ENTRY_FILE,
+	    .size = 16 };
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 1 };
+	unsigned char payload[16] = "source content";
+	memory_t provider = { .bytes = payload, .length = sizeof(payload) };
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_status_t result;
+	memory_t output = {0};
+	struct stat status;
+	fixture_t f;
+	int observer;
+
+	fixture_init(&f);
+	for (unsigned capability = FIXED_SINK; capability <= NONDURABLE_SINK;
+	    capability++) {
+		write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+		options.volume_bytes = MIB;
+		snprintf(options.compression, sizeof(options.compression), "%s",
+		    compression);
+		if (capability == NONDURABLE_SINK)
+			options.flags |= FSIMG_WRITE_DURABLE;
+		CHECK(fsimg_writer_new(f.ctx, stack, &options, &writer, NULL) == FSIMG_OK);
+		provider.reads = 0;
+		fsimg_source_ops_init(&sources);
+		sources.validate = provider_validate;
+		sources.read_at = provider_read;
+		CHECK(fsimg_writer_set_sources(writer, &sources, &provider, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_add(writer, &entry, &source, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		/* The fixed sink has exactly the bound. The other cases lack
+		 * write access or durability, regardless of their length.
+		 */
+		CHECK(memory_resize(&output, info.output_bytes, NULL) == FSIMG_OK);
+		output.resizes = 0;
+		fsimg_io_ops_init(&ops);
+		ops.read_at = memory_read;
+		ops.get_size = memory_size;
+		if (capability != READ_ONLY_SINK)
+			ops.write_at = memory_write;
+		if (capability == NONDURABLE_SINK)
+			ops.resize = memory_resize;
+		fsimg_sink_init(&sink, FSIMG_SINK_IO);
+		CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &output, &sink.io,
+		    NULL) == FSIMG_OK);
+		sink.raw_fd = raw_file(&f);
+		observer = dup(sink.raw_fd);
+		CHECK(observer != -1);
+
+		bzero(&error, sizeof(error));
+		result = fsimg_writer_output(writer, &sink, &error);
+		if (result != FSIMG_EUNSUPPORTED)
+			fprintf(stderr, "%s compression=%s capability=%u: expected refusal, got %d (%s)\n",
+			    stack, compression, capability, result, error.message);
+		CHECK(result == FSIMG_EUNSUPPORTED);
+		CHECK(fstat(observer, &status) == 0);
+		if (status.st_size != 0)
+			fprintf(stderr, "%s compression=%s capability=%u: raw received %llu bytes\n",
+			    stack, compression, capability,
+			    (unsigned long long)status.st_size);
+		/* The duplicate remains open after output consumes its raw descriptor.
+		 * Its empty length proves that refusal did not emit the raw disk.
+		 */
+		CHECK(status.st_size == 0);
+		CHECK(provider.reads == 0);
+		CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+		CHECK(output.writes == 0 && output.resizes == 0);
+		for (uint64_t i = 0; i < output.length; i++)
+			CHECK(output.bytes[i] == 0xa5);
+		CHECK(close(observer) == 0);
+		fsimg_io_free(sink.io);
+		memory_free(&output);
+
+		/* Retry the same writer with every required sink capability. */
+		fsimg_io_ops_init(&ops);
+		ops.flags = FSIMG_IO_DURABLE;
+		ops.read_at = memory_read;
+		ops.write_at = memory_write;
+		ops.get_size = memory_size;
+		ops.resize = memory_resize;
+		ops.flush = memory_flush;
+		fsimg_sink_init(&sink, FSIMG_SINK_IO);
+		CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &output, &sink.io,
+		    NULL) == FSIMG_OK);
+		sink.raw_fd = raw_file(&f);
+		bzero(&error, sizeof(error));
+		result = fsimg_writer_output(writer, &sink, &error);
+		if (result != FSIMG_OK)
+			fprintf(stderr, "%s compression=%s capability=%u: expected retry success, got %d (%s)\n",
+			    stack, compression, capability, result, error.message);
+		CHECK(result == FSIMG_OK);
+		CHECK(provider.reads != 0);
+		fsimg_io_free(sink.io);
+		fsimg_writer_free(writer);
+
+		/* A separately created FILE output supplies the expected bytes. */
+		CHECK(fsimg_writer_new(f.ctx, stack, &options, &writer, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_set_sources(writer, &sources, &provider, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_add(writer, &entry, &source, NULL) == FSIMG_OK);
+		fsimg_sink_init(&sink, FSIMG_SINK_FILE);
+		sink.parent_fd = f.directory_fd;
+		sink.name = "expected.img";
+		sink.raw_fd = raw_file(&f);
+		CHECK(fsimg_writer_output(writer, &sink, NULL) == FSIMG_OK);
+		expect_file_bytes(&f, sink.name, &output);
+		CHECK(unlinkat(f.directory_fd, sink.name, 0) == 0);
+		fsimg_writer_free(writer);
+		memory_free(&output);
+	}
+	fixture_free(&f);
+}
+
+/* FILE output supplies the byte oracle; callback growth is poisoned with
+ * 0xa5, so matching also checks that container zero runs are written.
+ */
+static void
+test_encoded_output_grows_only_to_final_length(const char *stack,
+    const char *compression)
+{
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_sink_t sink;
+	memory_t output = {0};
+	uint64_t final_length;
+	struct stat status;
+	fixture_t f;
+
+	fixture_init(&f);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = MIB;
+	snprintf(options.compression, sizeof(options.compression), "%s", compression);
+	CHECK(fsimg_writer_new(f.ctx, stack, &options, &writer, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
+	sink.parent_fd = f.directory_fd;
+	sink.name = "encoded.img";
+	sink.raw_fd = raw_file(&f);
+	CHECK(fsimg_writer_output(writer, &sink, NULL) == FSIMG_OK);
+	fsimg_writer_free(writer);
+	CHECK(fstatat(f.directory_fd, sink.name, &status, 0) == 0);
+	final_length = (uint64_t)status.st_size;
+	/* Fixed VHD copies the disk and adds a footer; gzip and DMG
+	 * instead report a worst-case bound larger than this output.
+	 */
+	if (strcmp(stack, "fat12/vhd") == 0)
+		CHECK(info.output_bytes == final_length);
+	else
+		CHECK(info.output_bytes > final_length);
+
+	for (unsigned longer = 0; longer < 2; longer++) {
+		if (longer != 0)
+			CHECK(memory_resize(&output, final_length + 4096, NULL) == FSIMG_OK);
+		output.resizes = 0;
+		CHECK(fsimg_writer_new(f.ctx, stack, &options, &writer, NULL) == FSIMG_OK);
+		fsimg_sink_init(&sink, FSIMG_SINK_IO);
+		sink.io = memory_io(&f, &output);
+		sink.raw_fd = raw_file(&f);
+		CHECK(fsimg_writer_output(writer, &sink, NULL) == FSIMG_OK);
+		CHECK(output.length == final_length);
+		CHECK(output.resizes != 0);
+		if (longer == 0 && strcmp(stack, "fat12/vhd") == 0)
+			CHECK(output.resize_lengths[0] < final_length);
+		for (size_t i = 0; i < output.resizes; i++) {
+			if (output.resize_lengths[i] > final_length)
+				fprintf(stderr, "%s compression=%s: resize %llu exceeds final %llu\n",
+				    stack, compression,
+				    (unsigned long long)output.resize_lengths[i],
+				    (unsigned long long)final_length);
+			CHECK(output.resize_lengths[i] <= final_length);
+		}
+		expect_file_bytes(&f, "encoded.img", &output);
+		fsimg_io_free(sink.io);
+		fsimg_writer_free(writer);
+		memory_free(&output);
+	}
+	CHECK(unlinkat(f.directory_fd, "encoded.img", 0) == 0);
+	fixture_free(&f);
+}
+
+/* A bare wrap copies more than one transcode buffer without encoding. */
+static void
+test_exact_wrap_resizes_once(void)
+{
+	fsimg_write_options_t options;
+	fsimg_sink_t sink;
+	fsimg_io_t *input;
+	memory_t volume, output = {0};
+	fixture_t f;
+
+	fixture_init(&f);
+	make_volume(&f, "fat12", 3 * MIB, &volume);
+	input = memory_io(&f, &volume);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = memory_io(&f, &output);
+	CHECK(fsimg_image_wrap(f.ctx, input, "fat12", &options, &sink,
+	    NULL) == FSIMG_OK);
+	CHECK(output.resizes == 1);
+	CHECK(output.resize_lengths[0] == volume.length);
+	CHECK(output.length == volume.length);
+	CHECK(bcmp(output.bytes, volume.bytes, (size_t)volume.length) == 0);
+	fsimg_io_free(sink.io);
+	fsimg_io_free(input);
+	memory_free(&output);
+	memory_free(&volume);
+	fixture_free(&f);
+}
+
+/* Retrying a failed writer transfers and closes a fresh raw file too. */
+static void
+expect_failed_writer(fixture_t *f, fsimg_writer_t *writer, fsimg_sink_t *sink)
+{
+	fsimg_error_t error;
+	int raw;
+
+	raw = raw_file(f);
+	sink->raw_fd = raw;
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_writer_output(writer, sink, &error) == FSIMG_ESTATE);
+	CHECK(strstr(error.message, "single-use") != NULL);
+	CHECK(fcntl(raw, F_GETFD) == -1 && errno == EBADF);
+}
+
+/* The large empty FAT16 disk makes even gzip emit multiple buffers. */
+static void
+test_encoded_output_later_resize_failure(const char *stack,
+    const char *compression)
+{
+	fsimg_layer_options_t layers;
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_status_t result;
+	memory_t output = { .fail_resize = 2 };
+	fixture_t f;
+	int raw;
+
+	fixture_init(&f);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = 128 * MIB;
+	fsimg_layer_options_init(&layers);
+	if (strcmp(stack, "fat16/dmg") == 0) {
+		layers.dmg_compress = FSIMG_DMG_NONE;
+		options.layers = &layers;
+	}
+	snprintf(options.compression, sizeof(options.compression), "%s", compression);
+	CHECK(fsimg_writer_new(f.ctx, stack, &options, &writer, NULL) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = memory_io(&f, &output);
+	raw = raw_file(&f);
+	sink.raw_fd = raw;
+	bzero(&error, sizeof(error));
+	result = fsimg_writer_output(writer, &sink, &error);
+	if (result != FSIMG_EIO)
+		fprintf(stderr, "%s compression=%s: expected resize EIO, got %d (%s), resizes=%zu\n",
+		    stack, compression, result, error.message, output.resizes);
+	CHECK(result == FSIMG_EIO);
+	CHECK(error.os_error == EIO);
+	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	CHECK(output.resizes == output.fail_resize);
+	CHECK(output.writes != 0);
+	CHECK(output.length == output.resize_lengths[0]);
+	CHECK(output.resize_lengths[1] > output.length);
+	CHECK(fcntl(raw, F_GETFD) == -1 && errno == EBADF);
+	expect_failed_writer(&f, writer, &sink);
+	fsimg_io_free(sink.io);
+	fsimg_writer_free(writer);
+	memory_free(&output);
+	fixture_free(&f);
+}
+
+/* VHD passes zero chunks to fsimg_seq_zero. The middle MiB of this disk
+ * is zero; its one-MiB extension distinguishes it from buffered data
+ * writes. Locate that call in a successful trace before injecting failure.
+ */
+static void
+test_encoded_output_zero_run_resize_failure(void)
+{
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	memory_t output = {0};
+	size_t zero_resize = 0;
+	fixture_t f;
+	int raw;
+
+	fixture_init(&f);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = 3 * MIB;
+	CHECK(fsimg_writer_new(f.ctx, "fat12/vhd", &options, &writer, NULL) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = memory_io(&f, &output);
+	sink.raw_fd = raw_file(&f);
+	CHECK(fsimg_writer_output(writer, &sink, NULL) == FSIMG_OK);
+	CHECK(all_zero(output.bytes + MIB, MIB));
+	for (size_t i = 1; i < output.resizes; i++) {
+		if (output.resize_lengths[i] == 2 * MIB &&
+		    output.resize_lengths[i - 1] == MIB)
+			zero_resize = i + 1;
+	}
+	CHECK(zero_resize != 0);
+	fsimg_io_free(sink.io);
+	fsimg_writer_free(writer);
+	memory_free(&output);
+
+	output.fail_resize = zero_resize;
+	CHECK(fsimg_writer_new(f.ctx, "fat12/vhd", &options, &writer, NULL) == FSIMG_OK);
+	sink.io = memory_io(&f, &output);
+	raw = raw_file(&f);
+	sink.raw_fd = raw;
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_writer_output(writer, &sink, &error) == FSIMG_EIO);
+	CHECK(error.os_error == EIO);
+	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	CHECK(output.resizes == zero_resize);
+	CHECK(output.resize_lengths[zero_resize - 1] == 2 * MIB);
+	CHECK(output.length == MIB && output.writes != 0);
+	CHECK(fcntl(raw, F_GETFD) == -1 && errno == EBADF);
+	expect_failed_writer(&f, writer, &sink);
+	fsimg_io_free(sink.io);
+	fsimg_writer_free(writer);
+	memory_free(&output);
+	fixture_free(&f);
+}
+
+/* A successful run supplies the final length. With excess capacity, the
+ * only resize is the final trim, after every encoded byte was written.
+ */
+static void
+test_encoded_output_final_trim_failure(const char *stack,
+    const char *compression)
+{
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	memory_t output = {0};
+	uint64_t final_length;
+	unsigned char *expected;
+	fixture_t f;
+	int raw;
+
+	fixture_init(&f);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = MIB;
+	snprintf(options.compression, sizeof(options.compression), "%s", compression);
+	CHECK(fsimg_writer_new(f.ctx, stack, &options, &writer, NULL) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = memory_io(&f, &output);
+	sink.raw_fd = raw_file(&f);
+	CHECK(fsimg_writer_output(writer, &sink, NULL) == FSIMG_OK);
+	final_length = output.length;
+	expected = malloc((size_t)final_length);
+	CHECK(expected != NULL);
+	bcopy(output.bytes, expected, (size_t)final_length);
+	fsimg_io_free(sink.io);
+	fsimg_writer_free(writer);
+	CHECK(memory_resize(&output, final_length + 4096, NULL) == FSIMG_OK);
+	memset(output.bytes, 0xa5, (size_t)output.length);
+	output.resizes = 0;
+	output.writes = 0;
+	output.fail_resize = 1;
+
+	CHECK(fsimg_writer_new(f.ctx, stack, &options, &writer, NULL) == FSIMG_OK);
+	sink.io = memory_io(&f, &output);
+	raw = raw_file(&f);
+	sink.raw_fd = raw;
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_writer_output(writer, &sink, &error) == FSIMG_EIO);
+	CHECK(error.os_error == EIO);
+	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	CHECK(output.resizes == 1 && output.writes != 0);
+	CHECK(output.resize_lengths[0] == final_length);
+	CHECK(output.length == final_length + 4096);
+	CHECK(bcmp(output.bytes, expected, (size_t)final_length) == 0);
+	CHECK(fcntl(raw, F_GETFD) == -1 && errno == EBADF);
+	expect_failed_writer(&f, writer, &sink);
+	fsimg_io_free(sink.io);
+	fsimg_writer_free(writer);
+	free(expected);
+	memory_free(&output);
+	fixture_free(&f);
+}
+
+/* Arm the host resize hook only once the output stage exists, so the raw
+ * intermediate has already been emitted and its resize cannot fail.
+ */
+static void
+test_encoded_file_resize_failure_leaves_no_staging(const char *stack,
+    const char *compression)
+{
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fixture_t f;
+	int raw;
+
+	fixture_init(&f);
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+	options.volume_bytes = MIB;
+	snprintf(options.compression, sizeof(options.compression), "%s", compression);
+	CHECK(fsimg_writer_new(f.ctx, stack, &options, &writer, NULL) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
+	sink.parent_fd = f.directory_fd;
+	sink.name = "failed.img";
+	raw = raw_file(&f);
+	sink.raw_fd = raw;
+	f.fail_staged_resize = true;
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_writer_output(writer, &sink, &error) == FSIMG_EIO);
+	CHECK(fsimg_test_holes(f.ctx)->resize_errno == EIO);
+	f.fail_staged_resize = false;
+	fsimg_test_holes(f.ctx)->resize_errno = 0;
+	CHECK(error.os_error == EIO);
+	CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+	CHECK(fcntl(raw, F_GETFD) == -1 && errno == EBADF);
+	CHECK(faccessat(f.directory_fd, sink.name, F_OK, 0) == -1 && errno == ENOENT);
+	CHECK(leftover_staging(&f) == 0);
+	expect_failed_writer(&f, writer, &sink);
+	fsimg_writer_free(writer);
+	fixture_free(&f);
+}
+
+/* Expected requirements are explicit so parsing, the public predicate and
+ * writer refusal are checked against the same independently stated cases.
+ */
+static void
+test_sink_raw_requirement_matches_writer(void)
+{
+	static const struct {
+		const char *stack;
+		const char *compression;
+		fsimg_sink_kind_t kind;
+		bool expected;
+	} cases[] = {
+		{ "fat12", "", FSIMG_SINK_FILE, false },
+		{ "fat12", "", FSIMG_SINK_IO, false },
+		{ "fat12", "", FSIMG_SINK_STREAM, true },
+		{ "fat12", "gzip", FSIMG_SINK_FILE, true },
+		{ "fat12", "gzip", FSIMG_SINK_IO, true },
+		{ "fat12", "gzip", FSIMG_SINK_STREAM, true },
+		{ "fat12/gpt", "", FSIMG_SINK_FILE, false },
+		{ "fat12/gpt", "", FSIMG_SINK_IO, false },
+		{ "fat12/gpt", "", FSIMG_SINK_STREAM, true },
+		{ "fat12/gpt", "gzip", FSIMG_SINK_FILE, true },
+		{ "fat12/gpt", "gzip", FSIMG_SINK_IO, true },
+		{ "fat12/gpt", "gzip", FSIMG_SINK_STREAM, true },
+		{ "fat12/gpt/dmg", "", FSIMG_SINK_FILE, true },
+		{ "fat12/gpt/dmg", "", FSIMG_SINK_IO, true },
+		{ "fat12/gpt/dmg", "", FSIMG_SINK_STREAM, true },
+		{ "fat12/gpt/dmg", "gzip", FSIMG_SINK_FILE, true },
+		{ "fat12/gpt/dmg", "gzip", FSIMG_SINK_IO, true },
+		{ "fat12/gpt/dmg", "gzip", FSIMG_SINK_STREAM, true },
+		{ "fat12/-/vhd", "", FSIMG_SINK_FILE, true },
+		{ "fat12/-/vhd", "", FSIMG_SINK_IO, true },
+		{ "fat12/-/vhd", "", FSIMG_SINK_STREAM, true },
+		{ "fat12/-/vhd", "gzip", FSIMG_SINK_FILE, true },
+		{ "fat12/-/vhd", "gzip", FSIMG_SINK_IO, true },
+		{ "fat12/-/vhd", "gzip", FSIMG_SINK_STREAM, true }
+	};
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_stack_t stack;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	fsimg_status_t result;
+	fsimg_io_t *io;
+	memory_t output = {0};
+	fixture_t f;
+	bool needed;
+	int stream, raw;
+
+	fixture_init(&f);
+	io = memory_io(&f, &output);
+	stream = open("/dev/null", O_WRONLY | O_CLOEXEC);
+	CHECK(stream != -1);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		CHECK(fsimg_stack_parse(cases[i].stack, &stack, NULL) == FSIMG_OK);
+		write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);
+		options.volume_bytes = MIB;
+		snprintf(options.compression, sizeof(options.compression),
+		    "%s", cases[i].compression);
+		needed = fsimg_sink_needs_raw(cases[i].kind, &stack, cases[i].compression);
+		if (needed != cases[i].expected)
+			fprintf(stderr, "%s compression=%s kind=%u: expected needs_raw=%u\n",
+			    cases[i].stack, cases[i].compression,
+			    (unsigned)cases[i].kind, (unsigned)cases[i].expected);
+		CHECK(needed == cases[i].expected);
+		CHECK(fsimg_writer_new(f.ctx, cases[i].stack, &options,
+		    &writer, NULL) == FSIMG_OK);
+		fsimg_sink_init(&sink, cases[i].kind);
+		/* Each sink is otherwise valid; only raw ownership disagrees. */
+		switch (cases[i].kind) {
+		case FSIMG_SINK_FILE:
+			sink.parent_fd = f.directory_fd;
+			sink.name = "refused.img";
+			break;
+		case FSIMG_SINK_IO:
+			sink.io = io;
+			break;
+		case FSIMG_SINK_STREAM:
+			sink.stream_fd = stream;
+			break;
+		}
+		raw = cases[i].expected ? -1 : raw_file(&f);
+		sink.raw_fd = raw;
+		bzero(&error, sizeof(error));
+		result = fsimg_writer_output(writer, &sink, &error);
+		if (result != FSIMG_EINVAL)
+			fprintf(stderr, "%s compression=%s kind=%u: expected EINVAL, got %d\n",
+			    cases[i].stack, cases[i].compression,
+			    (unsigned)cases[i].kind, result);
+		CHECK(result == FSIMG_EINVAL);
+		CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+		if (raw != -1)
+			CHECK(fcntl(raw, F_GETFD) == -1 && errno == EBADF);
+		CHECK(output.length == 0);
+		CHECK(faccessat(f.directory_fd, "refused.img", F_OK, 0) == -1 &&
+		    errno == ENOENT);
+		fsimg_writer_free(writer);
+	}
+	CHECK(close(stream) == 0);
+	fsimg_io_free(io);
+	memory_free(&output);
+	fixture_free(&f);
+}
+
 int
 main(void)
 {
+	test_exact_wrap_resizes_once();
+	test_encoded_output_zero_run_resize_failure();
+	test_encoded_output_later_resize_failure("fat16", "gzip");
+	test_encoded_output_later_resize_failure("fat16/dmg", "");
+	test_encoded_output_final_trim_failure("fat12", "gzip");
+	test_encoded_output_final_trim_failure("fat12/dmg", "");
+	test_encoded_file_resize_failure_leaves_no_staging("fat12", "gzip");
+	test_encoded_file_resize_failure_leaves_no_staging("fat12/dmg", "");
+	test_sink_raw_requirement_matches_writer();
+	test_refused_raw_intermediates_are_closed();
+	test_encoded_output_to_unsuitable_sink_fails_before_emission("fat12", "gzip");
+	test_encoded_output_to_unsuitable_sink_fails_before_emission("fat12/dmg", "");
+	test_encoded_output_grows_only_to_final_length("fat12", "gzip");
+	test_encoded_output_grows_only_to_final_length("fat12/dmg", "");
+	test_encoded_output_grows_only_to_final_length("fat12/vhd", "");
+
 	test_settings();
 	test_derived_defaults();
 	test_container_plan_facts();
@@ -2409,6 +3327,9 @@ main(void)
 	test_identifiers();
 	test_epochs_change_only_identifiers();
 	test_wrap_unwrap();
+	test_unwrap_partition_selectors_publish_volume();
+	test_unwrap_stream_receives_volume();
+	test_container_section_publishes_startup_and_names_failed_reread();
 	test_wrap_settings();
 	test_wrap_checks_settings_before_reading();
 	test_sinks();

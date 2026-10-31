@@ -23,6 +23,7 @@
 #include "host.h"
 #include "internal.h"
 #include "io.h"
+#include "layer.h"
 #include "test.h"
 
 /*
@@ -157,6 +158,7 @@ static void test_resize_failures(void);
 static void test_record_bounds(void);
 static void test_transcode_of_fresh_files(void);
 static void test_determinism(void);
+static void test_encoded_container_io_growth_stays_sparse(void);
 
 #define STAT_WRITTEN	offsetof(fsimg_stats_t, written_bytes)
 #define STAT_READ	offsetof(fsimg_stats_t, read_bytes)
@@ -881,6 +883,7 @@ write_disk(fixture_t *f, const char *stack, const char *compression,
 	fsimg_layer_options_t layers;
 	fsimg_writer_t *writer;
 	fsimg_sink_t sink;
+	fsimg_stack_t parsed;
 	uint64_t before;
 
 	fsimg_layer_options_init(&layers);
@@ -896,9 +899,8 @@ write_disk(fixture_t *f, const char *stack, const char *compression,
 	fsimg_sink_init(&sink, FSIMG_SINK_FILE);
 	sink.parent_fd = f->directory_fd;
 	sink.name = name;
-	/* An encoded output is staged raw first; a plain disk is not. */
-	if (compression[0] != '\0' || strstr(stack, "dmg") != NULL ||
-	    strstr(stack, "vhd") != NULL || strstr(stack, "simg") != NULL)
+	CHECK(fsimg_stack_parse(stack, &parsed, NULL) == FSIMG_OK);
+	if (fsimg_sink_needs_raw(sink.kind, &parsed, compression))
 		sink.raw_fd = private_file(f, true);
 	before = stat_of(f, STAT_READ);
 	CHECK(fsimg_writer_output(writer, &sink, NULL) == FSIMG_OK);
@@ -1744,6 +1746,52 @@ test_own_files_never_ask(void)
 	fixture_free(&f);
 }
 
+/* A fixed VHD grows around a mostly zero disk. A fresh host-file IO sink
+ * must preserve the zero runs as holes while extending its length.
+ */
+static void
+test_encoded_container_io_growth_stays_sparse(void)
+{
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_sink_t sink;
+	struct stat status, probe;
+	fixture_t f;
+	int fd, observer, probe_fd;
+
+	fixture_init(&f, 0);
+	/* Probe allocation on the same filesystem without relying on SEEK_HOLE. */
+	probe_fd = private_file(&f, true);
+	CHECK(ftruncate(probe_fd, 32 * MIB) == 0);
+	CHECK(fstat(probe_fd, &probe) == 0);
+	CHECK(close(probe_fd) == 0);
+
+	fsimg_write_options_init(&options);
+	options.flags = FSIMG_WRITE_REPRODUCIBLE;
+	options.epoch = EPOCH;
+	options.volume_bytes = 32 * MIB;
+	CHECK(fsimg_writer_new(f.ctx, "fat16/vhd", &options, &writer, NULL) == FSIMG_OK);
+	fd = private_file(&f, true);
+	observer = dup(fd);
+	CHECK(observer != -1);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	CHECK(fsimg_io_adopt_handed_over(f.ctx, fd, "encoded VHD", &sink.io,
+	    NULL) == FSIMG_OK);
+	sink.raw_fd = private_file(&f, true);
+	CHECK(fsimg_writer_output(writer, &sink, NULL) == FSIMG_OK);
+	CHECK(fsimg_io_flush(sink.io, true, NULL) == FSIMG_OK);
+	CHECK(fstat(observer, &status) == 0);
+	CHECK(status.st_size == (off_t)(32 * MIB + 512));
+	if ((uint64_t)probe.st_blocks * 512 < (uint64_t)probe.st_size / 4)
+		CHECK((uint64_t)status.st_blocks * 512 < (uint64_t)status.st_size / 4);
+	else
+		puts("SKIP: host filesystem does not preserve holes; encoded IO allocation assertion untested");
+	CHECK(close(observer) == 0);
+	fsimg_io_free(sink.io);
+	fsimg_writer_free(writer);
+	fixture_free(&f);
+}
+
 /*
  * Whether the filesystem under TMPDIR reports a synced file's holes, which
  * the tests of the host's report need: a filesystem without holes, or
@@ -1785,6 +1833,7 @@ main(void)
 	test_record_bounds();
 	test_transcode_of_fresh_files();
 	test_determinism();
+	test_encoded_container_io_growth_stays_sparse();
 	if (host_reports_holes()) {
 		test_external_host_report();
 		test_shrink_seen_at_lookup();

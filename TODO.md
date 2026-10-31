@@ -100,12 +100,6 @@
     input on a filesystem without holes or exercises extraction against
     the discovery-sync counter (`test/sandbox.c`, `test/holes.c`,
     specs/design-holes.md Tests and evidence).
-  * [Low] Whether a creation needs a raw intermediate is decided twice:
-    the command line's `fsimg_job_needs_raw` (`cmd/fsimg/job.c`, which the
-    coordinator and the worker share) and the library's
-    `fsimg_disk_plan_encoded` with the sink's kind (`lib/layers/plan.c`,
-    `lib/write/writer.c`). A public predicate over the stack, the write
-    flags and the sink kind would let the command line ask the library.
   * [Low] The coordinator takes an encoded output's largest length (a
     container's or gzip's) from the worker's PLAN, checked only to exceed
     the disk, and a stream without `-l output` is bounded by it; a ceiling
@@ -114,13 +108,6 @@
     (`cmd/fsimg/worker-parent.c` `plan_frame_expected`). Likewise a fixed
     VHD's 512-byte footer is known to the coordinator by name
     (`read_disk_expected`) rather than from the layer registry.
-  * [Low] An encoded output's sink is checked and sized to the largest
-    encoding only after the whole raw disk is emitted, so a sink that
-    cannot take a container or gzip fails late, and a host without sparse
-    files allocates the bound until the sink is trimmed at close. gzip
-    never leaves holes, so its sink could grow as it is written instead
-    (`lib/write/writer.c` `output_through_raw`, `lib/layers/transcode.c`
-    `sink_open`).
   * [Low] `cW` of a compressed image decodes it into the spool, so a disk
     larger than the spool limit fails verification only after the whole
     creation; the coordinator knows the planned disk from the IMAGE record
@@ -129,16 +116,6 @@
     call sites in `lib/layers/image.c` and by the chunk index in
     `lib/layers/chunks.c`; a new layer entry point must remember to call
     it.
-  * [Low] `fsimg_writer_output` holds the bare raw descriptor between the
-    sink's adoption and its handover to `fsimg_io_adopt_handed_over`, so
-    an early return added between them must close it; one helper that
-    either returns the adopted object or has closed the descriptor would
-    hold it by construction (`lib/write/writer.c`).
-  * [Low] No oracle checks the MBR CHS fields fsimg writes (`sfdisk` and
-    `fdisk` compare start, size and type), mtools never reads a FAT volume
-    through a GPT disk, and unwrap is tested only to I/O sinks with the
-    automatic and range selections (`test/layers-integration.sh.in`,
-    `test/layers-write.c`).
   * [Low] When the worker dies without an error frame while the input relay
     is still blocked reading a slow standard input, the relay's channel
     closes by force and the command reports that child exit and channel

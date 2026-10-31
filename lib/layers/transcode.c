@@ -44,7 +44,9 @@
  * positional object io, or when io is NULL the stream fd. A zero run
  * appended to io goes through the zeroing operation, which writes nothing
  * on a fresh file's unwritten ranges and zeros everywhere else; a stream
- * receives every byte. The sink keeps no knowledge of its own about io.
+ * receives every byte. Of io the sink knows only whether it grows and, if
+ * so, its length, which only sink_extend and sink_close change; every
+ * write and zero run of io goes through sink_extend first.
  */
 struct fsimg_seq_sink {
 	fsimg_session_t	*session;
@@ -58,7 +60,8 @@ struct fsimg_seq_sink {
 	int		 fd;		/* The stream when io is NULL */
 	unsigned char	*buffer;	/* SINK_BUFFER_BYTES */
 	size_t		 used;		/* Buffered bytes not yet written */
-	bool		 resized;	/* io was sized to bound; trim at close */
+	uint64_t	 length;	/* A growing io's length */
+	bool		 grows;		/* io resizes: it grows as written */
 	bool		 touched;	/* The output may differ from before */
 };
 
@@ -71,8 +74,12 @@ typedef struct disk_output {
 	uint64_t	 written;
 } disk_output_t;
 
+static fsimg_status_t sink_accepts(fsimg_ctx_t *, fsimg_io_t *, uint64_t, bool,
+    bool, bool *, fsimg_error_t *);
 static fsimg_status_t sink_open(fsimg_seq_sink_t *, fsimg_session_t *,
     fsimg_io_t *, int, uint64_t, bool, bool, fsimg_error_t *);
+static fsimg_status_t sink_extend(fsimg_seq_sink_t *, uint64_t,
+    fsimg_error_t *);
 static fsimg_status_t sink_flush(fsimg_seq_sink_t *, fsimg_error_t *);
 static fsimg_status_t sink_close(fsimg_seq_sink_t *, bool, fsimg_error_t *);
 static fsimg_status_t stream_write(fsimg_seq_sink_t *, const unsigned char *,
@@ -108,21 +115,57 @@ static const fsimg_encoder_ops_t copy_encoder = {
 };
 
 /*
+ * Whether the positional object io, of context ctx, can take an output of
+ * at most bound bytes; exact says the output is exactly bound bytes long,
+ * as a copy is. It must be writable, durable when asked, and either
+ * resizable, which *grows reports, or, for an exact output, already bound
+ * bytes long. Nothing is changed.
+ */
+static fsimg_status_t
+sink_accepts(fsimg_ctx_t *ctx, fsimg_io_t *io, uint64_t bound, bool exact,
+    bool durable, bool *grows, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	*grows = false;
+	if (fsimg_io_context(io) != ctx)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "inputs and output require the same context"));
+	status = fsimg_io_check_output(io, bound, durable, grows, error);
+	if (status == FSIMG_OK && !*grows && !exact)
+		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IO,
+		    "an encoded output needs a resizable sink");
+	return (status);
+}
+
+fsimg_status_t
+fsimg_disk_output_check(fsimg_ctx_t *ctx, const fsimg_disk_plan_t *plan,
+    const fsimg_sink_t *sink, bool durable, fsimg_error_t *error)
+{
+	bool grows;
+
+	if (sink->kind != FSIMG_SINK_IO)
+		return (FSIMG_OK);
+	return (sink_accepts(ctx, sink->io, plan->output_bytes,
+	    !fsimg_disk_plan_encoded(plan), durable, &grows, error));
+}
+
+/*
  * Open a sink over a positional object io, or the stream fd when io is
  * NULL, for an output of at most bound bytes; exact says the output is
- * exactly bound bytes long, as a copy is. A positional object must be
- * writable, durable when asked, and either resizable or, for an exact
- * output, already bound bytes long. A resizable one is sized to bound
- * first, since an object accepts no write past its length, and to the
- * output's length when the sink closes. Nothing is written here but the
- * resize.
+ * exactly bound bytes long. The object must pass sink_accepts. A
+ * resizable one grows, since an object accepts no write past its length:
+ * an exact output's at once to the bound, its final length, and an
+ * encoded output's to the end of each write as it is written, so that the
+ * bound, its largest encoding, is never claimed up front. Growth only
+ * extends; an object longer than the output keeps its excess until the
+ * sink closes successfully and sets it to the output's length.
  */
 static fsimg_status_t
 sink_open(fsimg_seq_sink_t *sink, fsimg_session_t *session, fsimg_io_t *io,
     int fd, uint64_t bound, bool exact, bool durable, fsimg_error_t *error)
 {
 	fsimg_status_t status;
-	bool resize;
 
 	*sink = (fsimg_seq_sink_t){ .session = session, .io = io, .fd = fd,
 	    .bound = bound };
@@ -131,19 +174,36 @@ sink_open(fsimg_seq_sink_t *sink, fsimg_session_t *session, fsimg_io_t *io,
 		return (error->status);
 	if (io == NULL)
 		return (FSIMG_OK);
-	if (fsimg_io_context(io) != session->ctx)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "inputs and output require the same context"));
-	status = fsimg_io_check_output(io, bound, durable, &resize, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (!resize && !exact)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IO,
-		    "an encoded output needs a resizable sink"));
-	if (!resize)
+	status = sink_accepts(session->ctx, io, bound, exact, durable,
+	    &sink->grows, error);
+	if (status == FSIMG_OK && sink->grows)
+		status = fsimg_io_get_size(io, &sink->length, error);
+	if (status == FSIMG_OK && sink->grows && exact)
+		status = sink_extend(sink, bound, error);
+	return (status);
+}
+
+/*
+ * Before length more bytes reach a growing object at the sink's offset,
+ * extend it to their end; within the bound, which sink_room or the exact
+ * open checked, the end cannot overflow. The extension's bytes are
+ * whatever the object gives them: a zero run is still written through the
+ * zeroing operation, which on a fresh file's extension writes nothing, so
+ * it stays a hole, and elsewhere writes the zeros.
+ */
+static fsimg_status_t
+sink_extend(fsimg_seq_sink_t *sink, uint64_t length, fsimg_error_t *error)
+{
+	uint64_t end = sink->offset + length;
+	fsimg_status_t status;
+
+	if (!sink->grows || end <= sink->length)
 		return (FSIMG_OK);
-	sink->touched = sink->resized = true;
-	return (fsimg_io_resize(io, bound, error));
+	sink->touched = true;
+	status = fsimg_io_resize(sink->io, end, error);
+	if (status == FSIMG_OK)
+		sink->length = end;
+	return (status);
 }
 
 /*
@@ -180,10 +240,13 @@ sink_flush(fsimg_seq_sink_t *sink, fsimg_error_t *error)
 	if (sink->used == 0)
 		return (FSIMG_OK);
 	sink->touched = true;
-	if (sink->io != NULL)
-		status = fsimg_io_write_session(sink->io, sink->session,
-		    sink->offset, sink->buffer, sink->used, &transferred, error);
-	else
+	if (sink->io != NULL) {
+		status = sink_extend(sink, sink->used, error);
+		if (status == FSIMG_OK)
+			status = fsimg_io_write_session(sink->io, sink->session,
+			    sink->offset, sink->buffer, sink->used, &transferred,
+			    error);
+	} else
 		status = stream_write(sink, sink->buffer, sink->used, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -193,8 +256,9 @@ sink_flush(fsimg_seq_sink_t *sink, fsimg_error_t *error)
 }
 
 /*
- * Finish the output: write what is buffered, set a resized object's length
- * to the output's, and flush it, durably when asked. An exact output on an
+ * Finish the output: write what is buffered, set a growing object's length
+ * to the output's, cutting off any bytes it held beyond them before the
+ * output began, and flush it, durably when asked. An exact output on an
  * object that could not resize already has its length. A stream needs only
  * its bytes.
  */
@@ -206,11 +270,13 @@ sink_close(fsimg_seq_sink_t *sink, bool durable, fsimg_error_t *error)
 	status = sink_flush(sink, error);
 	if (status != FSIMG_OK || sink->io == NULL)
 		return (status);
-	if (sink->resized)
+	if (sink->grows && sink->length != sink->offset) {
+		sink->touched = true;
 		status = fsimg_io_resize(sink->io, sink->offset, error);
-	else if (sink->offset != sink->bound)
+	} else if (!sink->grows && sink->offset != sink->bound) {
 		status = fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
 		    "a copied disk did not fill its sink");
+	}
 	if (status == FSIMG_OK)
 		status = fsimg_io_flush(sink->io, durable, error);
 	return (status);
@@ -323,10 +389,12 @@ fsimg_seq_zero(fsimg_seq_sink_t *sink, uint64_t length, fsimg_error_t *error)
 	if (status != FSIMG_OK || length == 0)
 		return (status);
 	sink->touched = true;
-	if (sink->io != NULL)
-		status = fsimg_io_zero_session(sink->io, sink->session,
-		    sink->offset, length, error);
-	else {
+	if (sink->io != NULL) {
+		status = sink_extend(sink, length, error);
+		if (status == FSIMG_OK)
+			status = fsimg_io_zero_session(sink->io, sink->session,
+			    sink->offset, length, error);
+	} else {
 		bzero(sink->buffer, SINK_BUFFER_BYTES);
 		for (uint64_t done = 0; status == FSIMG_OK && done < length;
 		    done += step) {

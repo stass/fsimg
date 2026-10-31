@@ -615,7 +615,12 @@ staged output, never against scratch, whichever directory holds it: while a
 transcode runs, the image costs (disk length + encoded output length) of
 output budget, and the [architecture](architecture.md#bounded-resources)
 states how the default output limit covers both. A sink that needs a raw
-intermediate and has none is an argument error before any mutation. The
+intermediate and has none is an argument error before any mutation. A
+caller-supplied positional sink that cannot take the output, being read
+only, lacking the durable flush a durable write asks for, or unable to
+resize for an encoded output, is refused before the raw disk is emitted
+rather than after, and since nothing has been written the writer stays
+usable with another sink. The
 transcode reads the file in chunk-sized buffers and spares only the reads of
 the ranges the file's own [written-range
 record](design-holes.md#the-written-range-record) proves zero.
@@ -650,6 +655,16 @@ writing the header, the second emits the chunks and fails as a changed
 source if it emits another count, as an input read twice by wrap or compose
 can. Both passes spare only the reads of reported zero ranges. This keeps
 positional and stream sinks identical and the bytes deterministic.
+
+A positional sink that can resize grows only as far as the output needs:
+an unencoded copy's at once to its exact length, and an encoded output's
+to the end of each write or zero run as it is written, so the largest
+encoding, the bound the plan charges, is never allocated up front, which
+on a host without sparse files would claim that space until the end. A
+zero run past the old end is a hole on a fresh file. Growth only extends:
+a sink longer than the output keeps its excess until the output completes
+and is then set to the output's length. A sink that cannot resize must
+already be the length of an unencoded copy.
 
 A container whose leading bytes depend on its encoded length runs the pass
 twice in the same way. The `ifsboot` startup header carries `stored_size`,

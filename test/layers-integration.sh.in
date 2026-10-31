@@ -8,7 +8,7 @@
 # fsimg writes: sgdisk verifies the GPT around every filesystem and lists
 # a composed disk, sfdisk verifies 4096-byte-sector tables, which sgdisk
 # cannot address in a file, sfdisk and fdisk list MBR disks, mtools reads
-# the FAT volume inside one, and hdiutil attaches a GPT disk on macOS.
+# FAT volumes through MBR and GPT, and hdiutil attaches a GPT disk on macOS.
 # Each missing tool is reported; the test skips only when no oracle is
 # available.
 set -eu
@@ -131,6 +131,18 @@ for fs in fat12 fat16 fat32 exfat qnx6 qnx4; do
     fi
 done
 
+if test -n "$mformat"; then
+    for fs in fat12 fat16 fat32; do
+        "$(dirname "$mformat")/mdir" -i "$fs-gpt.img@@1M" -b :: > listing.txt
+        grep -Eq '(^|/)HELLO[.]TXT$' listing.txt || fail "$fs-gpt.img: mdir"
+        "$(dirname "$mformat")/mtype" -i "$fs-gpt.img@@1M" ::HELLO.TXT > payload.txt
+        cmp -s payload.txt hello.txt || fail "$fs-gpt.img: mtype payload"
+    done
+    ran=$((ran + 1))
+else
+    echo 'SKIP: mtools is required to read FAT volumes through GPT disks'
+fi
+
 if test -n "$sgdisk"; then
     for fs in fat12 fat16 fat32 exfat qnx6 qnx4; do
         "$sgdisk" -v "$fs-gpt.img" > verify.txt
@@ -192,6 +204,37 @@ if test -n "$sfdisk"; then
     grep -q '^label-id: 0x0badcafe$' table.txt || fail "mbr.img: disk identifier"
     grep -Eq 'start= *2048, size= *[0-9]+, type=6, bootable$' table.txt ||
         fail "mbr.img: partition 1"
+    if "$sfdisk" -l -o Device,Start,End,Start-C/H/S,End-C/H/S mbr.img > chs.txt 2>/dev/null; then
+        # Compare the stored CHS with division of the last LBA by the
+        # conventional track and cylinder lengths, independently of fsimg.
+        awk '$1 == "mbr.img1" {
+            end = $3
+            cylinder = int(end / (255 * 63))
+            head = int(end / 63) % 255
+            sector = end % 63 + 1
+            expected = cylinder "/" head "/" sector
+            if ($2 == 2048 && $4 == "0/32/33" && $5 == expected) found = 1
+        } END { exit !found }' chs.txt || fail "mbr.img: stored CHS"
+
+        # Only the stored start head changes: LBA-based recomputation
+        # would still print 0/32/33 and fail this oracle sensitivity check.
+        cp mbr.img changed-chs.img
+        printf '\007' | dd of=changed-chs.img bs=1 seek=447 conv=notrunc 2>/dev/null
+        "$sfdisk" -l -o Device,Start,End,Start-C/H/S,End-C/H/S changed-chs.img > changed-chs.txt
+        awk '$1 == "changed-chs.img1" && $2 == 2048 && $4 == "0/7/33" { found = 1 }
+            END { exit !found }' changed-chs.txt || fail "sfdisk: CHS byte sensitivity"
+
+        # FAT32 initializes metadata only; unused clusters stay sparse.
+        # An 8 GiB partition ends beyond the last representable cylinder.
+        "$fsimg" c -R -F fat32/mbr -s 8G -f saturated.img -C source . \
+            2>/dev/null || fail "saturated.img: creation"
+        "$sfdisk" -l -o Device,Start,End,Start-C/H/S,End-C/H/S saturated.img > chs.txt
+        awk '$1 == "saturated.img1" && $2 == 2048 && $3 >= 1024 * 255 * 63 &&
+            $4 == "0/32/33" && $5 == "1023/254/63" { found = 1 }
+            END { exit !found }' chs.txt || fail "saturated.img: saturated CHS"
+    else
+        echo 'SKIP: stored MBR CHS checks (sfdisk lacks CHS columns)'
+    fi
     if test -x "$fdisk"; then
         "$fdisk" -l mbr.img | grep -Eq '^mbr.img1 +\* +2048 .* 6 FAT16$' ||
             fail "mbr.img: fdisk -l"

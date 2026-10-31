@@ -337,6 +337,12 @@ caller keeps no other descriptor or mapping, the writer
 emits the raw disk into before one sequential transcode writes the
 container, then gzip around it, or copies the disk, to the sink; it is
 adopted and closed on every outcome.
+.Fn fsimg_sink_needs_raw
+answers whether a sink of a kind needs it for a stack and a compression
+name, by the rule the writer applies, so a caller that creates the file
+before the writer exists asks the library.
+A positional sink that cannot take the output is refused before the raw
+disk is emitted, and a resizable one grows as the output is written.
 The write options' compression names one registered compression, such as
 .Ql gzip ,
 or is empty for none; a name the registry lacks is FSIMG_EINVAL and one

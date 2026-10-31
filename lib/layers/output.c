@@ -630,13 +630,12 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 	char filesystem[16];
 	uint64_t length;
 	fsimg_error_t local;
-	int raw_fd;
 	fsimg_status_t status;
 
 	if (error == NULL)
 		error = &local;
 	bzero(&plan, sizeof(plan));
-	status = fsimg_sink_adopt(sink, FSIMG_RAW_NEVER, &raw_fd, error);
+	status = fsimg_sink_adopt(NULL, sink, FSIMG_RAW_NEVER, NULL, error);
 	if (status == FSIMG_OK)
 		status = fsimg_ctx_ready(ctx, error);
 	if (status != FSIMG_OK)
@@ -702,7 +701,6 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	fsimg_ctx_t *ctx;
 	uint64_t length;
 	fsimg_error_t local;
-	int raw_fd;
 	fsimg_status_t status;
 
 	if (error == NULL)
@@ -710,7 +708,7 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	volume = NULL;
 	bzero(&stack, sizeof(stack));
 	bzero(&plan, sizeof(plan));
-	status = fsimg_sink_adopt(sink, FSIMG_RAW_NEVER, &raw_fd, error);
+	status = fsimg_sink_adopt(NULL, sink, FSIMG_RAW_NEVER, NULL, error);
 	if (status == FSIMG_OK)
 		status = check_mode(&stack, options, &selected, &layers, &inputs,
 		    error);
@@ -766,13 +764,12 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 	bool typed;
 	char filesystem[16], key[32];
 	fsimg_error_t local;
-	int raw_fd;
 	fsimg_status_t status;
 
 	if (error == NULL)
 		error = &local;
 	bzero(&plan, sizeof(plan));
-	status = fsimg_sink_adopt(sink, FSIMG_RAW_NEVER, &raw_fd, error);
+	status = fsimg_sink_adopt(NULL, sink, FSIMG_RAW_NEVER, NULL, error);
 	if (status == FSIMG_OK)
 		status = fsimg_ctx_ready(ctx, error);
 	if (status != FSIMG_OK)

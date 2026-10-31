@@ -851,6 +851,16 @@ typedef struct fsimg_sink {
 } fsimg_sink_t;
 
 void fsimg_sink_init(fsimg_sink_t *, fsimg_sink_kind_t);
+/* Whether a writer's output to a sink of kind needs the sink's raw_fd: when
+ * the stack names a container, compression names a compression (the write
+ * options' compression, NUL-terminated, empty for none), or the sink is a
+ * STREAM. Both pointers are required. fsimg_writer_output decides by this
+ * predicate over the stack and compression the writer was constructed
+ * with, so a caller that creates the raw intermediate before the writer
+ * asks it the same question.
+ */
+bool fsimg_sink_needs_raw(fsimg_sink_kind_t, const fsimg_stack_t *,
+    const char *);
 
 /* Writers copy options/labels and own their borrowed plan until destruction.
  * plan seals collection; subsequent plan queries return the same object.

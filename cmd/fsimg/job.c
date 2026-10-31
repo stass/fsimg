@@ -448,9 +448,12 @@ fsimg_job_compression(const fsimg_worker_request_t *request)
 bool
 fsimg_job_encoded(const fsimg_worker_request_t *request)
 {
+	/* The worker writes a staged file through an IO sink, which needs the
+	 * raw intermediate exactly when the output is an encoding of the disk.
+	 */
 	return (fsimg_job_has_roots(request->kind) &&
-	    (request->stack.slots[FSIMG_LAYER_CONTAINER].state ==
-	    FSIMG_SLOT_NAMED || fsimg_job_compression(request)[0] != '\0'));
+	    fsimg_sink_needs_raw(FSIMG_SINK_IO, &request->stack,
+	    request->compression));
 }
 
 bool
@@ -464,8 +467,9 @@ bool
 fsimg_job_needs_raw(const fsimg_worker_request_t *request)
 {
 	return (request->kind == FSIMG_JOB_CREATE &&
-	    ((request->flags & FSIMG_JOB_STDOUT) != 0 ||
-	    fsimg_job_encoded(request)));
+	    fsimg_sink_needs_raw((request->flags & FSIMG_JOB_STDOUT) != 0 ?
+	    FSIMG_SINK_STREAM : FSIMG_SINK_IO, &request->stack,
+	    request->compression));
 }
 
 /*

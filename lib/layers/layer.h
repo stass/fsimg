@@ -1034,19 +1034,27 @@ fsimg_status_t fsimg_disk_plan_budget(fsimg_ctx_t *, const fsimg_disk_plan_t *,
  * Write a placed plan's disk, held in the positional object disk, to a sink
  * in one sequential pass (lib/layers/transcode.c): through the plan's
  * container encoder, or unchanged without one, and then through its
- * compression encoder when it has one. A FILE sink stages the
- * output and publishes it through the output coordinator, an IO sink is
- * written from offset zero and ends at the output's length, and a STREAM
- * sink receives the bytes in order. The pass reads the disk in chunks,
- * may skip reading the chunks the disk reports zero, and polls cancellation
- * at every chunk. Failure after the first mutation marks the output
- * incomplete, except that a staged file is removed and so is absent.
- * written receives the output's length. The caller has checked aliases
- * and the output budget, and adopted the sink.
+ * compression encoder when it has one. A FILE sink stages the output and
+ * publishes it through the output coordinator; an IO sink is written from
+ * offset zero, grows as it is written when it can resize, and ends at the
+ * output's length; a STREAM sink receives the bytes in order. The pass
+ * reads the disk in chunks, may skip reading the chunks the disk reports
+ * zero, and polls cancellation at every chunk. Failure after the first
+ * mutation marks the output incomplete, except that a staged file is
+ * removed and so is absent. written receives the output's length. The
+ * caller has checked aliases and the output budget, and adopted the sink.
  */
 fsimg_status_t fsimg_disk_output(fsimg_session_t *, fsimg_io_t *,
     const fsimg_disk_plan_t *, const fsimg_sink_t *, bool, uint64_t *,
     fsimg_error_t *);
+/* The check fsimg_disk_output makes of an adopted IO sink before its first
+ * byte, made alone and changing nothing, so a writer refuses a sink that
+ * cannot take its output before emitting the raw disk it is encoded from.
+ * Other sinks always pass: a FILE sink stages a fresh file and a STREAM
+ * sink takes any length.
+ */
+fsimg_status_t fsimg_disk_output_check(fsimg_ctx_t *, const fsimg_disk_plan_t *,
+    const fsimg_sink_t *, bool, fsimg_error_t *);
 /* The compression library a plan's output depends on, as "zlib 1.3.1",
  * or empty when its bytes depend on none: DMG's zlib chunks or gzip.
  */

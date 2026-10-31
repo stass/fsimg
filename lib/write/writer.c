@@ -34,6 +34,7 @@ static fsimg_status_t writer_new_stack(fsimg_ctx_t *, const fsimg_stack_t *,
     const fsimg_format_t *, const fsimg_format_variant_t *,
     const fsimg_write_options_t *, fsimg_writer_t **, fsimg_error_t *);
 static fsimg_status_t plan_disk(fsimg_writer_t *, fsimg_error_t *);
+static bool writer_encoded(const fsimg_writer_t *);
 static fsimg_status_t emit_volume(void *, fsimg_io_t *, fsimg_error_t *);
 static fsimg_status_t emit_disk(fsimg_writer_t *, fsimg_io_t *,
     fsimg_error_t *);
@@ -590,6 +591,17 @@ fsimg_writer_plan(fsimg_writer_t *writer, const fsimg_plan_t **out,
 	return (FSIMG_OK);
 }
 
+/* Whether the writer's output is an encoding of its disk, which is written
+ * only through a raw intermediate: the rule fsimg_sink_needs_raw states,
+ * over the stack and compression the writer was constructed with.
+ */
+static bool
+writer_encoded(const fsimg_writer_t *writer)
+{
+	return (fsimg_writer_raw_need(&writer->stack,
+	    writer->options.compression) == FSIMG_RAW_ALWAYS);
+}
+
 /* Place the planned volume in its disk, check the output limit, and
  * report the disk as an opened image would: the stack, the scheme and
  * container and their identifiers, and the volume's partition holding the
@@ -605,7 +617,7 @@ plan_disk(fsimg_writer_t *writer, fsimg_error_t *error)
 	status = fsimg_disk_plan_place(&writer->disk, &info->volume_bytes, error);
 	if (status == FSIMG_OK)
 		status = fsimg_disk_plan_budget(writer->ctx, &writer->disk,
-		    fsimg_disk_plan_encoded(&writer->disk), error);
+		    writer_encoded(writer), error);
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_disk_plan_report(&writer->disk, 1, &info->image, &info->partition);
@@ -838,7 +850,7 @@ emission_start(fsimg_writer_t *writer, bool through_intermediate,
 	    writer->state != FSIMG_WRITER_SEALED)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_WRITER, "writer emission is single-use"));
-	if (!through_intermediate && fsimg_disk_plan_encoded(&writer->disk))
+	if (!through_intermediate && writer_encoded(writer))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "a container or compressed output is written only through an "
 		    "output sink with a raw intermediate"));
@@ -946,8 +958,10 @@ fsimg_writer_write_at(fsimg_writer_t *writer, int parent, const char *name,
  * transcode encodes it through the container and compression, or copies
  * it, to the sink.
  * The sink may be neither a collected source nor the raw intermediate
- * itself. A failure while the raw disk is emitted leaves the sink
- * untouched; the transcode reports its own output state.
+ * itself, and must be able to take the output, which is checked before the
+ * raw disk is emitted so a sink that cannot fails early. A failure while
+ * the raw disk is emitted leaves the sink untouched; the transcode reports
+ * its own output state.
  */
 static fsimg_status_t
 output_through_raw(fsimg_writer_t *writer, const fsimg_sink_t *sink,
@@ -956,17 +970,22 @@ output_through_raw(fsimg_writer_t *writer, const fsimg_sink_t *sink,
 	fsimg_host_file_t output, intermediate;
 	uint64_t written;
 	fsimg_status_t status;
-	bool known, raw_known, mutated;
+	bool durable, known, raw_known, mutated;
 
 	status = emission_start(writer, true, error);
 	if (status != FSIMG_OK)
 		return (status);
 	/* Planning charged the raw disk only for an encoded output; a
-	 * stream of the bare disk holds it too. Nothing is written yet, so a refusal
-	 * leaves the writer usable for a smaller output.
+	 * stream of the bare disk holds it too. Then the sink must be able
+	 * to take the output. Nothing is written yet, so either refusal
+	 * leaves the writer usable for a smaller output or another sink.
 	 */
+	durable = (writer->options.flags & FSIMG_WRITE_DURABLE) != 0;
 	status = fsimg_disk_plan_budget(writer->ctx, &writer->disk, true,
 	    error);
+	if (status == FSIMG_OK)
+		status = fsimg_disk_output_check(writer->ctx, &writer->disk, sink,
+		    durable, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_sink_identity(sink, &output, &known, error);
@@ -988,7 +1007,7 @@ output_through_raw(fsimg_writer_t *writer, const fsimg_sink_t *sink,
 	}
 	writer->session.progress.phase = "image transcode";
 	status = fsimg_disk_output(&writer->session, raw, &writer->disk, sink,
-	    (writer->options.flags & FSIMG_WRITE_DURABLE) != 0, &written, error);
+	    durable, &written, error);
 	return (emission_end(writer, status, false, error));
 }
 
@@ -996,7 +1015,10 @@ output_through_raw(fsimg_writer_t *writer, const fsimg_sink_t *sink,
  * The sink cases. Without a container or compression, a FILE sink stages
  * the raw disk as write_at does and an IO sink receives it as emit does;
  * an encoded output or a STREAM sink goes through the raw intermediate,
- * which the sink hands over and this call adopts on every outcome.
+ * which the sink hands over and adoption takes on every outcome. The
+ * writer needs one by fsimg_sink_needs_raw over the stack and compression
+ * it was constructed with; a writer-less call needs one only for a stream,
+ * which then fails on the missing context.
  */
 fsimg_status_t
 fsimg_writer_output(fsimg_writer_t *writer, const fsimg_sink_t *sink,
@@ -1006,30 +1028,20 @@ fsimg_writer_output(fsimg_writer_t *writer, const fsimg_sink_t *sink,
 	fsimg_io_t *raw;
 	fsimg_raw_need_t need;
 	fsimg_status_t status;
-	int raw_fd;
 
 	if (error == NULL)
 		error = &local;
-	need = writer != NULL && fsimg_disk_plan_encoded(&writer->disk) ?
-	    FSIMG_RAW_ALWAYS : FSIMG_RAW_FOR_STREAM;
-	status = fsimg_sink_adopt(sink, need, &raw_fd, error);
+	need = writer == NULL ? FSIMG_RAW_FOR_STREAM :
+	    fsimg_writer_raw_need(&writer->stack, writer->options.compression);
+	status = fsimg_sink_adopt(writer == NULL ? NULL : writer->ctx, sink,
+	    need, &raw, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_ctx_ready(writer == NULL ? NULL : writer->ctx, error);
-	if (status != FSIMG_OK) {
-		if (raw_fd != -1)
-			close(raw_fd);
-		return (status);
-	}
-	if (raw_fd == -1 && sink->kind == FSIMG_SINK_FILE)
+	if (raw == NULL && sink->kind == FSIMG_SINK_FILE)
 		return (fsimg_writer_write_at(writer, sink->parent_fd, sink->name,
 		    error));
-	if (raw_fd == -1)
+	if (raw == NULL)
 		return (fsimg_writer_emit(writer, sink->io, error));
-	status = fsimg_io_adopt_handed_over(writer->ctx, raw_fd,
-	    "raw intermediate", &raw, error);
-	if (status != FSIMG_OK)
-		return (status);
 	status = output_through_raw(writer, sink, raw, error);
 	fsimg_io_free(raw);
 	return (status);

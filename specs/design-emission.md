@@ -35,7 +35,8 @@ begins:
    The same inode is rejected even when two slices look disjoint, because
    finalization can change the whole file's length.
 3. Check sink capabilities: write, resize or exact fixed size, and durability
-   when requested.
+   when requested. An output encoded from a raw intermediate checks its own
+   sink here as well, before the raw disk is emitted into the intermediate.
 4. Resize a resizable whole-object sink to the planned length.
 5. Zero every byte of the planned volume through the zeroing operation,
    which writes only where zeros are not already proven. On a fresh file,

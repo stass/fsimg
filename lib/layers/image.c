@@ -896,7 +896,7 @@ static fsimg_status_t
 layer_failed(const fsimg_layer_t *layer, fsimg_status_t status,
     fsimg_error_t *error)
 {
-	if (status != FSIMG_OK && layer != NULL &&
+	if (status != FSIMG_OK && layer != NULL && error != NULL &&
 	    error->operation == FSIMG_OP_IMAGE && error->path[0] == '\0')
 		snprintf(error->path, sizeof(error->path), "%s", layer->name);
 	return (status);
@@ -1560,7 +1560,7 @@ fsimg_image_section(fsimg_image_t *image, const char *name,
 	status = image->container->container->section(&input, setting, &offset,
 	    &length, error);
 	if (status != FSIMG_OK)
-		return (status);
+		return (layer_failed(image->container, status, error));
 	return (fsimg_io_read_slice(image->input, offset, length, section,
 	    error));
 }

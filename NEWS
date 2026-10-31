@@ -148,7 +148,9 @@ before the volume and names the layer that failed. The library adds
 assemble a disk from table bytes, borrowed inputs and zero runs and copy it
 once through the output coordinator, refusing an output that aliases an
 input, and `fsimg_writer_output`, which takes a file or I/O sink that
-`fsimg_sink_init` starts empty.
+`fsimg_sink_init` starts empty; `fsimg_sink_needs_raw` says whether a sink
+needs a raw intermediate for a stack and compression, the rule the writer
+applies.
 `--formats` lists the schemes, containers and compressions with their kind,
 support and settings.
 

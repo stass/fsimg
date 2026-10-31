@@ -108,22 +108,53 @@ fsimg_sink_init(fsimg_sink_t *sink, fsimg_sink_kind_t kind)
 	    .parent_fd = -1, .stream_fd = -1, .raw_fd = -1 };
 }
 
+/* Whether an output of need takes a raw intermediate into a sink of kind. */
+static bool
+raw_needed(fsimg_raw_need_t need, fsimg_sink_kind_t kind)
+{
+	return (need == FSIMG_RAW_ALWAYS ||
+	    (need == FSIMG_RAW_FOR_STREAM && kind == FSIMG_SINK_STREAM));
+}
+
+/* A writer encodes its output, and so always needs the raw intermediate,
+ * when its stack names a container or its options a compression.
+ */
+fsimg_raw_need_t
+fsimg_writer_raw_need(const fsimg_stack_t *stack, const char *compression)
+{
+	return ((stack->slots[FSIMG_LAYER_CONTAINER].state == FSIMG_SLOT_NAMED ||
+	    compression[0] != '\0') ? FSIMG_RAW_ALWAYS : FSIMG_RAW_FOR_STREAM);
+}
+
+bool
+fsimg_sink_needs_raw(fsimg_sink_kind_t kind, const fsimg_stack_t *stack,
+    const char *compression)
+{
+	return (raw_needed(fsimg_writer_raw_need(stack, compression), kind));
+}
+
 /*
- * Take a sink. The raw intermediate descriptor is adopted on every outcome:
- * returned in *raw_fd when the output needs one, for the caller to adopt in
- * turn, and closed here when it needs none or the sink is refused. A FILE
- * sink must name its basename, an IO sink its object and a STREAM sink its
- * descriptor; an output that needs a raw intermediate and has none, or has
- * one it does not need, is refused before anything is written.
+ * Take a sink. Once the sink's size shows fsimg_sink_init made it, its raw
+ * intermediate descriptor never outlives the call bare: when the output
+ * needs it, it is adopted into *raw as a handed-over file of ctx, which
+ * must then be ready; on every other outcome, a refused sink or an output
+ * that needs none, it is closed here. A sink of the wrong size is refused
+ * untouched, since its descriptor fields cannot be trusted. An output that
+ * never needs one may pass a NULL ctx and raw. A FILE sink must name its
+ * basename, an IO sink its object and a STREAM sink its descriptor; an
+ * output that needs a raw intermediate and has none, or has one it does
+ * not need, is refused before anything is written.
  */
 fsimg_status_t
-fsimg_sink_adopt(const fsimg_sink_t *sink, fsimg_raw_need_t need, int *raw_fd,
-    fsimg_error_t *error)
+fsimg_sink_adopt(fsimg_ctx_t *ctx, const fsimg_sink_t *sink,
+    fsimg_raw_need_t need, fsimg_io_t **raw, fsimg_error_t *error)
 {
 	const char *invalid;
+	fsimg_status_t status;
 	bool needed;
 
-	*raw_fd = -1;
+	if (raw != NULL)
+		*raw = NULL;
 	if (sink == NULL || sink->size != sizeof(*sink))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
 		    "missing or uninitialized output sink"));
@@ -145,20 +176,26 @@ fsimg_sink_adopt(const fsimg_sink_t *sink, fsimg_raw_need_t need, int *raw_fd,
 		invalid = "invalid output sink";
 		break;
 	}
-	needed = need == FSIMG_RAW_ALWAYS ||
-	    (need == FSIMG_RAW_FOR_STREAM && sink->kind == FSIMG_SINK_STREAM);
+	needed = raw_needed(need, sink->kind);
 	if (invalid == NULL && needed && sink->raw_fd < 0)
 		invalid = "this output needs a raw intermediate";
 	if (invalid == NULL && !needed && sink->raw_fd != -1)
 		invalid = "this output needs no raw intermediate";
-	if (invalid != NULL) {
+	if (invalid != NULL)
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
+		    invalid);
+	else if (!needed)
+		return (FSIMG_OK);
+	else
+		status = fsimg_ctx_ready(ctx, error);
+	if (status != FSIMG_OK) {
 		if (sink->raw_fd >= 0)
 			close(sink->raw_fd);
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_PUBLISH,
-		    invalid));
+		return (status);
 	}
-	*raw_fd = sink->raw_fd;
-	return (FSIMG_OK);
+	/* Adopted, and closed on failure, by the handed-over check. */
+	return (fsimg_io_adopt_handed_over(ctx, sink->raw_fd, "raw intermediate",
+	    raw, error));
 }
 
 /*

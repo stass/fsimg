@@ -34,7 +34,9 @@ typedef fsimg_status_t (*fsimg_output_fill_t)(void *, fsimg_io_t *,
 
 /* When an output needs the sink's raw intermediate: never (wrap, unwrap
  * and compose, which stage no raw disk), only for a STREAM sink (a writer
- * without a container), or always (a writer with one).
+ * without a container or compression), or always (a writer with one).
+ * fsimg_writer_raw_need gives a writer's from its stack and compression;
+ * fsimg_sink_needs_raw applies it to a sink's kind.
  */
 typedef enum fsimg_raw_need {
 	FSIMG_RAW_NEVER,
@@ -42,8 +44,9 @@ typedef enum fsimg_raw_need {
 	FSIMG_RAW_ALWAYS
 } fsimg_raw_need_t;
 
-fsimg_status_t fsimg_sink_adopt(const fsimg_sink_t *, fsimg_raw_need_t, int *,
-    fsimg_error_t *);
+fsimg_raw_need_t fsimg_writer_raw_need(const fsimg_stack_t *, const char *);
+fsimg_status_t fsimg_sink_adopt(fsimg_ctx_t *, const fsimg_sink_t *,
+    fsimg_raw_need_t, fsimg_io_t **, fsimg_error_t *);
 fsimg_status_t fsimg_sink_identity(const fsimg_sink_t *, fsimg_host_file_t *,
     bool *, fsimg_error_t *);
 fsimg_status_t fsimg_output_stage(fsimg_ctx_t *, int, const char *,

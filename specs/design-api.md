@@ -445,6 +445,8 @@ written.
 
 ```c
 void fsimg_sink_init(fsimg_sink_t *sink, fsimg_sink_kind_t kind);
+bool fsimg_sink_needs_raw(fsimg_sink_kind_t kind, const fsimg_stack_t *stack,
+    const char *compression);
 fsimg_status_t fsimg_writer_output(fsimg_writer_t *writer,
     const fsimg_sink_t *sink, fsimg_error_t *error);
 ```
@@ -462,7 +464,12 @@ set and every descriptor `-1`, under the
 creates that file by name, and checks the one it adopts: a sink that needs
 one and has none, or whose descriptor is not a regular file of size zero
 with link count zero open for reading and writing, is `FSIMG_EINVAL` before
-any mutation. `emit()` and `write_at()` are the
+any mutation. `fsimg_sink_needs_raw()` is the one statement of when a sink
+needs `raw_fd`, over the stack, the write options' compression and the sink's
+kind; the writer decides by it, so a caller that must create the raw
+intermediate before the writer exists, as the command line's coordinator
+does before its worker constructs one, asks the library rather than
+restating the rule. `emit()` and `write_at()` are the
 positional and file cases for stacks that need no raw intermediate. With one
 the writer stages the raw disk there and transcodes it as the
 [layer design](design-layers.md#writing) states. A stream sink has no

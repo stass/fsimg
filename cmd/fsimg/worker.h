@@ -265,8 +265,9 @@ const char *fsimg_job_format(const fsimg_worker_request_t *);
  * encoding of the disk, under a container or a compression, rather than
  * the disk; whether a create job needs a staging directory, as an image
  * written to a file and published does; and whether it needs a raw
- * intermediate, for an encoded output or a stream. The coordinator and the
- * worker decide each from these alone.
+ * intermediate, which the library's fsimg_sink_needs_raw answers for the
+ * job's stack, compression and sink. The coordinator and the worker decide
+ * each from these alone.
  */
 const char *fsimg_job_compression(const fsimg_worker_request_t *);
 bool fsimg_job_encoded(const fsimg_worker_request_t *);
