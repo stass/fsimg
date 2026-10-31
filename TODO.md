@@ -2,7 +2,8 @@
 
 ## Major initiatives
 
-* [Medium] **Rule-derived tables and local policy templates**
+* [Low] **Rule-derived tables and local policy templates** (deferred; the
+  approach needs more design thought before it is scheduled)
   (`tools/relic/`, profile metadata, `lib/formats/`): evaluate adoption of the
   [ordinary-query generation pipeline](specs/design-relic-generation.md) and
   [verification-policy family](specs/design-generated-verification.md) under

@@ -455,6 +455,9 @@ compiler backend or engine-private binding API is a prerequisite.
 | Static and local families | Derive a shared profile table and select finite runtime predicate templates | Independent row, byte and semantic expectations pass; full-width runtime inputs remain native; the combined source/renderer/test maintenance cost justifies adoption |
 | Verification policy | [Static verification policies](../specs/design-generated-verification.md): evaluate QNX6/QNX4 record checks as a second family | Schema-valid wrong policy fails independent tests; driver grouping, window/lookahead order, counters, scratch bytes and cleanup remain native and unchanged; keep direct predicates if the family adds more mechanism than it removes |
 
+The three generation stages are deferred. The approach needs further design
+thought before any of them is scheduled, and no other work waits on them.
+
 Relic's existing CLI can evaluate the metadata programs. fsimg still needs the
 production result schemas, renderers and artifact workflow for any adopted
 family. A disposable pipeline demonstration establishes feasibility, not native
