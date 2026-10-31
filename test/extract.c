@@ -39,11 +39,6 @@ typedef struct extract_fixture {
 	bool		 cancel;
 } extract_fixture_t;
 
-typedef struct selected_entry {
-	const char	*path;
-	fsimg_selection_relation_t relation;
-} selected_entry_t;
-
 static void fixture_open(extract_fixture_t *);
 static void fixture_open_with_entries(extract_fixture_t *,
     const fsimg_entry_t *, size_t);
@@ -64,7 +59,7 @@ static void test_alias(void);
 static void test_selection_failure(void);
 static void test_selection_scope(void);
 static void expect_selected_entries(extract_fixture_t *, const char *const *,
-    size_t, fsimg_selection_policy_t, const selected_entry_t *, size_t);
+    size_t, fsimg_selection_policy_t, const char *const *, size_t);
 static void test_nested_members_return_subtree_once(void);
 static void test_duplicate_members_return_subtree_once(void);
 static void test_case_alias_members_return_subtree_once(void);
@@ -289,17 +284,16 @@ test_selection_failure(void)
 {
 	extract_fixture_t fixture;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 
 	fixture_open(&fixture);
 	CHECK(fsimg_selection_new(fixture.reader, (const char *const[]){ "/A/short/child" },
 	    1, FSIMG_SELECTION_FILE,
 	    &selection, NULL) == FSIMG_OK);
-	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_EINVAL);
 	CHECK(entry == NULL);
 	CHECK(fsimg_reader_next(fixture.reader, &entry, NULL) == FSIMG_ESTATE);
-	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_ESTATE);
+	CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_ESTATE);
 	fsimg_selection_free(selection);
 	fixture_close(&fixture);
 }
@@ -418,37 +412,35 @@ fixture_open_union(extract_fixture_t *fixture)
 	fixture_open_with_entries(fixture, extra, sizeof(extra) / sizeof(extra[0]));
 }
 
-/* An exact sequence checks walk order, membership, relations and duplicates. */
+/* An exact sequence checks walk order, membership and duplicates. */
 static void
 expect_selected_entries(extract_fixture_t *fixture, const char *const *members,
     size_t count, fsimg_selection_policy_t policy,
-    const selected_entry_t *expected, size_t expected_count)
+    const char *const *expected, size_t expected_count)
 {
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 
 	CHECK(fsimg_selection_new(fixture->reader, members, count, policy,
 	    &selection, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < expected_count; i++) {
-		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) ==
+		CHECK(fsimg_selection_next(selection, &entry, NULL) ==
 		    FSIMG_OK);
-		if (strcmp(entry->path, expected[i].path) != 0)
+		if (strcmp(entry->path, expected[i]) != 0)
 			fprintf(stderr, "entry %zu: expected %s, got %s\n", i,
-			    expected[i].path, entry->path);
-		CHECK(strcmp(entry->path, expected[i].path) == 0);
-		CHECK(relation == expected[i].relation);
+			    expected[i], entry->path);
+		CHECK(strcmp(entry->path, expected[i]) == 0);
 	}
-	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_DONE);
+	CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_DONE);
 	CHECK(entry == NULL);
 	fsimg_selection_free(selection);
 }
 
-static const selected_entry_t a_subtree[] = {
-	{ .path = "/A", .relation = FSIMG_SELECTION_TARGET },
-	{ .path = "/A/nested", .relation = FSIMG_SELECTION_DESCENDANT },
-	{ .path = "/A/nested/file", .relation = FSIMG_SELECTION_DESCENDANT },
-	{ .path = "/A/short", .relation = FSIMG_SELECTION_DESCENDANT }
+static const char *const a_subtree[] = {
+	"/A",
+	"/A/nested",
+	"/A/nested/file",
+	"/A/short"
 };
 
 static void
@@ -491,8 +483,8 @@ static void
 test_short_alias_overlap_preserves_display_name(void)
 {
 	const char *const members[] = { "/Long root name.txt", "/f0000000" };
-	const selected_entry_t expected[] = {
-		{ .path = "/Long root name.txt", .relation = FSIMG_SELECTION_TARGET }
+	const char *const expected[] = {
+		"/Long root name.txt"
 	};
 	extract_fixture_t fixture;
 
@@ -506,15 +498,15 @@ static void
 test_disjoint_members_return_only_subtrees_and_ancestors(void)
 {
 	const char *const members[] = { "/C/sub", "/A/nested" };
-	const selected_entry_t expected[] = {
-		{ .path = "/A", .relation = FSIMG_SELECTION_ANCESTOR },
-		{ .path = "/A/nested", .relation = FSIMG_SELECTION_TARGET },
-		{ .path = "/A/nested/deeper", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested/deeper/leaf", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested/file", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/C", .relation = FSIMG_SELECTION_ANCESTOR },
-		{ .path = "/C/sub", .relation = FSIMG_SELECTION_TARGET },
-		{ .path = "/C/sub/file", .relation = FSIMG_SELECTION_DESCENDANT }
+	const char *const expected[] = {
+		"/A",
+		"/A/nested",
+		"/A/nested/deeper",
+		"/A/nested/deeper/leaf",
+		"/A/nested/file",
+		"/C",
+		"/C/sub",
+		"/C/sub/file"
 	};
 	extract_fixture_t fixture;
 
@@ -530,7 +522,6 @@ test_missing_member_fails_reader(void)
 	const char *const members[] = { "/A", "/a/Absent" };
 	extract_fixture_t fixture;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 	fsimg_error_t error;
 
@@ -538,15 +529,15 @@ test_missing_member_fails_reader(void)
 	CHECK(fsimg_selection_new(fixture.reader, members, 2,
 	    FSIMG_SELECTION_TREE, &selection, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < sizeof(a_subtree) / sizeof(a_subtree[0]); i++) {
-		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
-		CHECK(strcmp(entry->path, a_subtree[i].path) == 0);
+		CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, a_subtree[i]) == 0);
 	}
-	CHECK(fsimg_selection_next(selection, &entry, &relation, &error) == FSIMG_EINVAL);
+	CHECK(fsimg_selection_next(selection, &entry, &error) == FSIMG_EINVAL);
 	CHECK(entry == NULL);
 	CHECK(strcmp(error.path, "/a/Absent") == 0);
 	CHECK(strcmp(error.message, "selected image path was not found") == 0);
 	CHECK(fsimg_reader_next(fixture.reader, &entry, NULL) == FSIMG_ESTATE);
-	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_ESTATE);
+	CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_ESTATE);
 	fsimg_selection_free(selection);
 	fixture_close(&fixture);
 }
@@ -557,7 +548,6 @@ test_missing_nested_member_fails_before_later_selection(void)
 	const char *const members[] = { "/A/Absent", "/C" };
 	extract_fixture_t fixture;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 	fsimg_error_t error;
 
@@ -565,10 +555,9 @@ test_missing_nested_member_fails_before_later_selection(void)
 	CHECK(fsimg_selection_new(fixture.reader, members, 2,
 	    FSIMG_SELECTION_TREE, &selection, NULL) == FSIMG_OK);
 	/* Only /A is selected as an ancestor; its children cannot match Absent. */
-	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
+	CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_OK);
 	CHECK(strcmp(entry->path, "/A") == 0);
-	CHECK(relation == FSIMG_SELECTION_ANCESTOR);
-	CHECK(fsimg_selection_next(selection, &entry, &relation, &error) == FSIMG_EINVAL);
+	CHECK(fsimg_selection_next(selection, &entry, &error) == FSIMG_EINVAL);
 	CHECK(entry == NULL);
 	CHECK(strcmp(error.path, "/A/Absent") == 0);
 	CHECK(strcmp(error.message, "selected image path was not found") == 0);
@@ -592,17 +581,16 @@ static void
 test_missing_root_member_fails_after_selected_subtree(void)
 {
 	const char *const members[] = { "/A", "/Zzz" };
-	const selected_entry_t expected[] = {
-		{ .path = "/A", .relation = FSIMG_SELECTION_TARGET },
-		{ .path = "/A/nested", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested/deeper", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested/deeper/leaf", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested/file", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/short", .relation = FSIMG_SELECTION_DESCENDANT }
+	const char *const expected[] = {
+		"/A",
+		"/A/nested",
+		"/A/nested/deeper",
+		"/A/nested/deeper/leaf",
+		"/A/nested/file",
+		"/A/short"
 	};
 	extract_fixture_t fixture;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 	fsimg_reader_ops_t observed_ops;
 	fsimg_error_t error;
@@ -616,12 +604,11 @@ test_missing_root_member_fails_after_selected_subtree(void)
 	CHECK(fsimg_selection_new(fixture.reader, members, 2,
 	    FSIMG_SELECTION_TREE, &selection, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
-		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
-		CHECK(strcmp(entry->path, expected[i].path) == 0);
-		CHECK(relation == expected[i].relation);
+		CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, expected[i]) == 0);
 	}
 	CHECK(!last_root_entry_seen);
-	CHECK(fsimg_selection_next(selection, &entry, &relation, &error) == FSIMG_EINVAL);
+	CHECK(fsimg_selection_next(selection, &entry, &error) == FSIMG_EINVAL);
 	CHECK(last_root_entry_seen);
 	CHECK(entry == NULL);
 	CHECK(strcmp(error.path, "/Zzz") == 0);
@@ -636,7 +623,6 @@ test_non_directory_component_names_member(void)
 	const char *const members[] = { "/A", "/a/short/child" };
 	extract_fixture_t fixture;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 	fsimg_error_t error;
 
@@ -644,10 +630,10 @@ test_non_directory_component_names_member(void)
 	CHECK(fsimg_selection_new(fixture.reader, members, 2,
 	    FSIMG_SELECTION_TREE, &selection, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < 3; i++) {
-		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
-		CHECK(strcmp(entry->path, a_subtree[i].path) == 0);
+		CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, a_subtree[i]) == 0);
 	}
-	CHECK(fsimg_selection_next(selection, &entry, &relation, &error) == FSIMG_EINVAL);
+	CHECK(fsimg_selection_next(selection, &entry, &error) == FSIMG_EINVAL);
 	CHECK(strcmp(error.path, "/a/short/child") == 0);
 	CHECK(strstr(error.message, "wrong entry kind") != NULL);
 	fsimg_selection_free(selection);
@@ -658,12 +644,12 @@ static void
 test_children_members_stop_below_immediate_children(void)
 {
 	const char *const members[] = { "/A", "/A/nested" };
-	const selected_entry_t expected[] = {
-		{ .path = "/A", .relation = FSIMG_SELECTION_TARGET },
-		{ .path = "/A/nested", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested/deeper", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested/file", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/short", .relation = FSIMG_SELECTION_DESCENDANT }
+	const char *const expected[] = {
+		"/A",
+		"/A/nested",
+		"/A/nested/deeper",
+		"/A/nested/file",
+		"/A/short"
 	};
 	extract_fixture_t fixture;
 
@@ -690,14 +676,14 @@ test_file_policy_refuses_several_members(void)
 static void
 test_no_members_selects_root(void)
 {
-	const selected_entry_t expected[] = {
-		{ .path = "/A", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/nested/file", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A/short", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/A-", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/Long root name.txt", .relation = FSIMG_SELECTION_DESCENDANT },
-		{ .path = "/ZERO", .relation = FSIMG_SELECTION_DESCENDANT }
+	const char *const expected[] = {
+		"/A",
+		"/A/nested",
+		"/A/nested/file",
+		"/A/short",
+		"/A-",
+		"/Long root name.txt",
+		"/ZERO"
 	};
 	extract_fixture_t fixture;
 
@@ -1023,9 +1009,10 @@ test_repeated_root_members_exhaust_work_limit(void)
 {
 	const char *members[4096];
 	const size_t counts[] = { 1, sizeof(members) / sizeof(members[0]) };
+	const char *const expected[] = { "/A", "/A/nested", "/A/nested/file",
+	    "/A/short", "/A-", "/Long root name.txt", "/ZERO" };
 	extract_fixture_t fixture;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 	fsimg_status_t status;
 	fsimg_error_t error;
@@ -1044,8 +1031,9 @@ test_repeated_root_members_exhaust_work_limit(void)
 		    FSIMG_SELECTION_TREE, &selection, NULL) == FSIMG_OK);
 		returned = 0;
 		while ((status = fsimg_selection_next(selection, &entry,
-		    &relation, &error)) == FSIMG_OK) {
-			CHECK(relation == FSIMG_SELECTION_DESCENDANT);
+		    &error)) == FSIMG_OK) {
+			CHECK(returned < sizeof(expected) / sizeof(expected[0]));
+			CHECK(strcmp(entry->path, expected[returned]) == 0);
 			returned++;
 		}
 		if (counts[i] == 1) {

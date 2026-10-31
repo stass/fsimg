@@ -494,12 +494,21 @@ truncated success result.
 ## Listing
 
 `t` lists, in the reader's order, each selected member's own entry, a
-directory as well as a file, and by default the member's whole subtree;
-`--no-recursion`, GNU tar's spelling, lists one level: the member's entry
-and, for a directory, its immediate children (`-n` keeps its one meaning,
-the create plan). The root has no entry of its own, so no member, or `/`,
-lists the volume's contents. The directories leading to a member are not
-listed. Every listed entry counts in the summary. The default listing has one
+directory as well as a file, and by default the member's whole subtree.
+The directories leading to a member are listed too, before it, because `x`
+of the same members creates them: `t` lists exactly the entries `x` visits,
+each once, and `x --mtree` records every one. `x` creates each entry it
+visits, or, for a kind it cannot create, refuses it or under `-k` skips it
+and counts it in `skipped_entries`, not in the processed entries. The root
+has no entry of its own, so no member, or `/`, lists the volume's contents.
+Every listed entry counts in the summary.
+
+`--no-recursion`, a `t` option, lists one level: each member's entry and,
+for a directory member, its direct children only, after the directories
+leading to the member; with no member it lists the root's direct children.
+It differs from GNU tar's `--no-recursion`, which selects only each named
+member itself, and every entry when no member is named. `-n` keeps its one
+meaning, the create plan. The default listing has one
 quoted, escaped image path per line, a symbolic link marked with `@` and a
 FIFO with `|` after the name, and no completion trailer.
 

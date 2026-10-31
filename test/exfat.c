@@ -1656,7 +1656,6 @@ test_case_overlap_selects_subtree_once(void)
 	fsimg_write_options_t options;
 	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 
 	fixture_new(&f);
@@ -1673,12 +1672,10 @@ test_case_overlap_selects_subtree_once(void)
 	CHECK(fsimg_selection_new(f.reader, members, 2, FSIMG_SELECTION_TREE,
 	    &selection, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
-		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
+		CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->path, expected[i]) == 0);
-		CHECK(relation == (i == 0 ? FSIMG_SELECTION_TARGET :
-		    FSIMG_SELECTION_DESCENDANT));
 	}
-	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_DONE);
+	CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_DONE);
 	fsimg_selection_free(selection);
 	fixture_free(&f);
 }

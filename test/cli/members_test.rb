@@ -23,19 +23,58 @@ class CliTest < Minitest::Test
     assert_equal(quoted_member_listing(paths), result.stdout)
   end
 
+  def test_list_nonrecursive_directory_includes_member_and_direct_children
+    members_image
+    result = invoke(arguments: %w[t --no-recursion -f fat.img EFI])
+    paths = %w[/EFI /EFI/BOOT /EFI/README.TXT]
+    assert_equal(quoted_member_listing(paths), result.stdout)
+  end
+
+  def test_list_nonrecursive_deep_directory_includes_ancestors_and_direct_children
+    members_image
+    result = invoke(arguments: %w[t --no-recursion -f fat.img EFI/BOOT])
+    paths = ["/EFI", "/EFI/BOOT", "/EFI/BOOT/BOOTX64.EFI",
+      "/EFI/BOOT/DEEP", "/EFI/BOOT/Long File Name.txt"]
+    assert_equal(quoted_member_listing(paths), result.stdout)
+  end
+
+  def test_list_nonrecursive_without_members_includes_only_root_children
+    members_image
+    result = invoke(arguments: %w[t --no-recursion -f fat.img])
+    assert_equal(quoted_member_listing(%w[/EFI /docs]), result.stdout)
+  end
+
   def test_list_short_alias_and_long_name_once
     members_image
     result = invoke(arguments: ["t", "-f", "fat.img",
       "/EFI/BOOT/F0000000", "EFI/BOOT/Long File Name.txt"])
-    assert_equal(quoted_member_listing(["/EFI/BOOT/Long File Name.txt"]), result.stdout)
+    paths = ["/EFI", "/EFI/BOOT", "/EFI/BOOT/Long File Name.txt"]
+    assert_equal(quoted_member_listing(paths), result.stdout)
   end
 
   def test_list_members_in_walk_order
     members_image
     result = invoke(arguments: %w[t -f fat.img docs/sub EFI/BOOT])
-    paths = ["/EFI/BOOT", "/EFI/BOOT/BOOTX64.EFI",
+    paths = ["/EFI", "/EFI/BOOT", "/EFI/BOOT/BOOTX64.EFI",
       "/EFI/BOOT/DEEP", "/EFI/BOOT/DEEP/c.txt",
-      "/EFI/BOOT/Long File Name.txt", "/docs/sub", "/docs/sub/b.txt"]
+      "/EFI/BOOT/Long File Name.txt", "/docs", "/docs/sub", "/docs/sub/b.txt"]
+    assert_equal(quoted_member_listing(paths), result.stdout)
+  end
+
+  def test_list_nonrecursive_disjoint_deep_members_in_walk_order
+    members_image
+    result = invoke(arguments: %w[t --no-recursion -f fat.img docs/sub EFI/BOOT])
+    paths = ["/EFI", "/EFI/BOOT", "/EFI/BOOT/BOOTX64.EFI",
+      "/EFI/BOOT/DEEP", "/EFI/BOOT/Long File Name.txt",
+      "/docs", "/docs/sub", "/docs/sub/b.txt"]
+    assert_equal(quoted_member_listing(paths), result.stdout)
+  end
+
+  def test_list_deep_member_includes_ancestors
+    members_image
+    result = invoke(arguments: %w[t -f fat.img EFI/BOOT])
+    paths = ["/EFI", "/EFI/BOOT", "/EFI/BOOT/BOOTX64.EFI",
+      "/EFI/BOOT/DEEP", "/EFI/BOOT/DEEP/c.txt", "/EFI/BOOT/Long File Name.txt"]
     assert_equal(quoted_member_listing(paths), result.stdout)
   end
 
@@ -118,6 +157,43 @@ class CliTest < Minitest::Test
     extracted = completed(invoke(arguments: %w[x -f fat.img --json -E -C out4 EFI efi/boot]))
     assert_equal("7", extracted.last.fetch("entries_processed"))
     assert_equal(listed.last.fetch("entries_processed"), extracted.last.fetch("entries_processed"))
+  end
+
+  def test_json_listing_and_extraction_count_deep_member_ancestors
+    members_image
+    listed = completed(invoke(arguments: %w[t -f fat.img --json EFI/BOOT]))
+    private_directory(root: @root, name: "out5")
+    extracted = completed(invoke(arguments: %w[x -f fat.img --json -E -C out5 EFI/BOOT]))
+
+    assert_equal("6", listed.last.fetch("entries_processed"))
+    assert_equal(listed.last.fetch("entries_processed"), extracted.last.fetch("entries_processed"))
+  end
+
+  def test_listing_counts_unsupported_link_and_extraction_skips_but_records_it
+    directory = @root / "linked-tree/dir"
+    FileUtils.mkdir_p(directory)
+    (directory / "file").binwrite("data".b)
+    File.symlink("file", directory / "link")
+    invoke(arguments: %w[c -f linked.img -F qnx4 -C linked-tree .])
+
+    listed = completed(invoke(arguments: %w[t --json -f linked.img dir]))
+    entries = listed.select { _1.fetch("type") == "entry" }
+    assert_equal(%w[/dir /dir/file /dir/link], entries.map { _1.fetch("path") })
+    assert_equal("symlink", entries.last.fetch("kind"))
+    assert_equal("3", listed.last.fetch("entries_processed"))
+
+    destination = private_directory(root: @root, name: "linked-out")
+    extracted = completed(invoke(arguments:
+      %w[x -k --json -f linked.img -E -C linked-out --mtree=linked.mtree dir]))
+    assert_equal("2", extracted.last.fetch("entries_processed"))
+    assert_equal("1", extracted.last.fetch("skipped_entries"))
+    assert_equal("data".b, (destination / "dir/file").binread)
+    refute((destination / "dir/link").symlink?, "Skipped link must not be created")
+    refute((destination / "dir/link").exist?, "Skipped link must leave no host entry")
+
+    paths = (@root / "linked.mtree").read.lines(chomp: true)
+      .reject { _1.start_with?("#") }.map { _1.split.first }
+    assert_equal(%w[. ./dir ./dir/file ./dir/link], paths)
   end
 
   private

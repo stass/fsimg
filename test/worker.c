@@ -640,7 +640,7 @@ static void test_list_directory_case_alias_members_once(void);
 static void test_list_nested_directory_members_without_recursion_once(void);
 static void test_list_reversed_nested_directory_members_keep_order(void);
 static void test_list_directory_without_recursion_includes_target_and_children(void);
-static void test_list_deep_directory_omits_ancestor(void);
+static void test_list_deep_directory_includes_ancestor(void);
 static void test_list_root_and_no_members_have_no_root_entry(void);
 static void test_list_and_extract_directory_counts_and_manifest_match(void);
 static void test_incomplete_extraction(void);
@@ -1512,17 +1512,19 @@ test_list_directory_without_recursion_includes_target_and_children(void)
 }
 
 static void
-test_list_deep_directory_omits_ancestor(void)
+test_list_deep_directory_includes_ancestor(void)
 {
 	const char *const members[] = { "/DIR/SUB" };
-	const char *const expected[] = { "/DIR/SUB", "/DIR/SUB/B.TXT" };
+	const char *const expected[] = { "/DIR", "/DIR/SUB", "/DIR/SUB/B.TXT" };
 	worker_fixture_t fixture;
 
 	fixture_open_directories(&fixture);
 	fixture.request.members = members;
 	fixture.request.member_count = 1;
 	fixture.request.flags = FSIMG_JOB_RECURSIVE;
-	check_directory_listing(&fixture, expected, 2);
+	check_directory_listing(&fixture, expected, 3);
+	fixture.request.flags = 0;
+	check_directory_listing(&fixture, expected, 3);
 	fixture_close(&fixture);
 }
 
@@ -1530,6 +1532,7 @@ static void
 test_list_root_and_no_members_have_no_root_entry(void)
 {
 	const char *const members[] = { "/" };
+	const char *const direct_children[] = { "/DIR", "/HELLO.TXT" };
 	const char *const expected[] = {
 		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT", "/HELLO.TXT"
 	};
@@ -1538,18 +1541,23 @@ test_list_root_and_no_members_have_no_root_entry(void)
 	fixture_open_directories(&fixture);
 	fixture.request.flags = FSIMG_JOB_RECURSIVE;
 	check_directory_listing(&fixture, expected, 5);
+	fixture.request.flags = 0;
+	check_directory_listing(&fixture, direct_children, 2);
 	fixture.request.members = members;
 	fixture.request.member_count = 1;
+	fixture.request.flags = FSIMG_JOB_RECURSIVE;
 	check_directory_listing(&fixture, expected, 5);
+	fixture.request.flags = 0;
+	check_directory_listing(&fixture, direct_children, 2);
 	fixture_close(&fixture);
 }
 
 static void
 test_list_and_extract_directory_counts_and_manifest_match(void)
 {
-	const char *const members[] = { "/DIR" };
+	const char *const members[] = { "/DIR/SUB" };
 	const char *const expected[] = {
-		"/DIR", "/DIR/A.TXT", "/DIR/SUB", "/DIR/SUB/B.TXT"
+		"/DIR", "/DIR/SUB", "/DIR/SUB/B.TXT"
 	};
 	worker_fixture_t fixture;
 	fsimg_error_t error;
@@ -1603,7 +1611,6 @@ test_list_and_extract_directory_counts_and_manifest_match(void)
 	CHECK(unlinkat(fixture.parent, "extracted.mtree", 0) == 0);
 	CHECK(unlinkat(fixture.output, "DIR/SUB/B.TXT", 0) == 0);
 	CHECK(unlinkat(fixture.output, "DIR/SUB", AT_REMOVEDIR) == 0);
-	CHECK(unlinkat(fixture.output, "DIR/A.TXT", 0) == 0);
 	CHECK(unlinkat(fixture.output, "DIR", AT_REMOVEDIR) == 0);
 	fixture_close(&fixture);
 }
@@ -2889,7 +2896,7 @@ main(int argc, char **argv)
 	test_list_nested_directory_members_without_recursion_once();
 	test_list_reversed_nested_directory_members_keep_order();
 	test_list_directory_without_recursion_includes_target_and_children();
-	test_list_deep_directory_omits_ancestor();
+	test_list_deep_directory_includes_ancestor();
 	test_list_root_and_no_members_have_no_root_entry();
 	test_list_and_extract_directory_counts_and_manifest_match();
 	test_partitioned_create();

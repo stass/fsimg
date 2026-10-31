@@ -9,6 +9,18 @@
 #include "selection.h"
 #include "unicode.h"
 
+/* How an entry relates to a member, ordered by precedence: its relation to
+ * several members is the greatest any of them gives it. Only an entry
+ * outside every member is passed over, and under FILE one that only leads
+ * to the member.
+ */
+typedef enum selection_relation {
+	SELECTION_OUTSIDE,
+	SELECTION_ANCESTOR,
+	SELECTION_TARGET,
+	SELECTION_DESCENDANT
+} selection_relation_t;
+
 /*
  * One member's progress through the walk. path, length bytes long, is its
  * spelling in the selection's buffer; next is the offset of its first
@@ -36,7 +48,7 @@ typedef struct selection_member {
  * member also does to resolve its next component there.
  */
 typedef struct selection_verdict {
-	fsimg_selection_relation_t relation;
+	selection_relation_t relation;
 	bool		 selects_children;
 	bool		 needs_children;
 } selection_verdict_t;
@@ -61,7 +73,7 @@ static fsimg_status_t relate_entry(fsimg_selection_t *, selection_verdict_t *,
     fsimg_error_t *);
 static fsimg_status_t finish_selection(fsimg_selection_t *, fsimg_error_t *);
 static fsimg_status_t advance_selection(fsimg_selection_t *, const fsimg_entry_t **,
-    fsimg_selection_relation_t *, fsimg_error_t *);
+    fsimg_error_t *);
 
 static bool
 member_resolved(const selection_member_t *member)
@@ -232,11 +244,11 @@ resolve_component(fsimg_selection_t *selection, selection_member_t *member,
 	    (size_t)(separator - member->path) + 1;
 	if (!member_resolved(member)) {
 		*verdict = (selection_verdict_t){
-		    .relation = FSIMG_SELECTION_ANCESTOR,
+		    .relation = SELECTION_ANCESTOR,
 		    .needs_children = true };
 		return (FSIMG_OK);
 	}
-	*verdict = (selection_verdict_t){ .relation = FSIMG_SELECTION_TARGET,
+	*verdict = (selection_verdict_t){ .relation = SELECTION_TARGET,
 	    .selects_children = true, .needs_children = true };
 	if (entry->kind != FSIMG_ENTRY_DIRECTORY)
 		member->live = false;
@@ -253,7 +265,7 @@ static fsimg_status_t
 relate_member(fsimg_selection_t *selection, selection_member_t *member,
     uint32_t depth, selection_verdict_t *verdict, fsimg_error_t *error)
 {
-	*verdict = (selection_verdict_t){ .relation = FSIMG_SELECTION_OUTSIDE };
+	*verdict = (selection_verdict_t){ .relation = SELECTION_OUTSIDE };
 	if (!member->live)
 		return (FSIMG_OK);
 	/* The walk has left the member's resolved prefix for good. */
@@ -265,10 +277,10 @@ relate_member(fsimg_selection_t *selection, selection_member_t *member,
 	if (member_resolved(member)) {
 		if (selection->policy != FSIMG_SELECTION_CHILDREN)
 			*verdict = (selection_verdict_t){
-			    .relation = FSIMG_SELECTION_DESCENDANT,
+			    .relation = SELECTION_DESCENDANT,
 			    .selects_children = true, .needs_children = true };
 		else if (depth == member->depth + 1)
-			verdict->relation = FSIMG_SELECTION_DESCENDANT;
+			verdict->relation = SELECTION_DESCENDANT;
 		return (FSIMG_OK);
 	}
 	if (depth != member->depth + 1)
@@ -289,7 +301,7 @@ relate_entry(fsimg_selection_t *selection, selection_verdict_t *verdict,
 	uint32_t depth;
 	fsimg_status_t status;
 
-	*verdict = (selection_verdict_t){ .relation = FSIMG_SELECTION_OUTSIDE };
+	*verdict = (selection_verdict_t){ .relation = SELECTION_OUTSIDE };
 	if (entry->path == NULL || entry->path[0] != '/')
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_READER, "reader supplied a non-absolute image path"));
@@ -327,7 +339,7 @@ finish_selection(fsimg_selection_t *selection, fsimg_error_t *error)
 
 static fsimg_status_t
 advance_selection(fsimg_selection_t *selection, const fsimg_entry_t **out,
-    fsimg_selection_relation_t *relation, fsimg_error_t *error)
+    fsimg_error_t *error)
 {
 	fsimg_reader_t *reader = selection->reader;
 	const fsimg_entry_t *entry;
@@ -336,7 +348,6 @@ advance_selection(fsimg_selection_t *selection, const fsimg_entry_t **out,
 	fsimg_status_t status;
 
 	*out = NULL;
-	*relation = FSIMG_SELECTION_OUTSIDE;
 	/* Omitted entries count only where a member selects them: in the root
 	 * only for a member "/". The root's scope is set as the walk starts,
 	 * so a selection never used leaves the reader as it was.
@@ -382,24 +393,22 @@ advance_selection(fsimg_selection_t *selection, const fsimg_entry_t **out,
 				    verdict.selects_children);
 			}
 		}
-		if (verdict.relation == FSIMG_SELECTION_OUTSIDE ||
-		    (verdict.relation == FSIMG_SELECTION_ANCESTOR &&
+		if (verdict.relation == SELECTION_OUTSIDE ||
+		    (verdict.relation == SELECTION_ANCESTOR &&
 		    selection->policy == FSIMG_SELECTION_FILE))
 			continue;
 		*out = entry;
-		*relation = verdict.relation;
 		return (FSIMG_OK);
 	}
 }
 
 fsimg_status_t
 fsimg_selection_next(fsimg_selection_t *selection, const fsimg_entry_t **out,
-    fsimg_selection_relation_t *relation, fsimg_error_t *error)
+    fsimg_error_t *error)
 {
 	fsimg_status_t status;
 
 	*out = NULL;
-	*relation = FSIMG_SELECTION_OUTSIDE;
 	status = fsimg_ctx_ready(selection->reader->ctx, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -407,13 +416,12 @@ fsimg_selection_next(fsimg_selection_t *selection, const fsimg_entry_t **out,
 	if (selection->reader->state == FSIMG_READER_FAILED)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_READER, "reader has failed"));
-	status = advance_selection(selection, out, relation, error);
+	status = advance_selection(selection, out, error);
 	/* The traversal owner closes the failed reader at one boundary; callers
 	 * cannot accidentally keep a current entry after a failed selection.
 	 */
 	if (status != FSIMG_OK && status != FSIMG_DONE) {
 		*out = NULL;
-		*relation = FSIMG_SELECTION_OUTSIDE;
 		return (fsimg_reader_abort(selection->reader, status));
 	}
 	return (status);

@@ -489,12 +489,24 @@ Unknown counts remain unknown.
 .Cm t
 lists each selected member, a directory as well as a file, and its whole
 subtree;
-.Fl Fl no-recursion
-lists the member and, for a directory, its immediate children.
+the directories leading to a member are listed before it, because
+.Cm x
+creates them, so
+.Cm t
+lists exactly the entries
+.Cm x
+visits.
 No member, or
 .Pa / ,
-lists the volume's contents, and the directories leading to a member are
-not listed.
+lists the volume's contents.
+.Fl Fl no-recursion
+lists each member and, for a directory member, its direct children only,
+after the directories leading to the member; with no member, the root's
+direct children.
+GNU tar's
+.Fl Fl no-recursion
+differs: it selects only each named member itself, and every entry when no
+member is named.
 .Pp
 .Cm W
 checks the container, the partition table and the complete supported

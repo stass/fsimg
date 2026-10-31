@@ -569,13 +569,12 @@ extract_entries(extract_state_t *state, fsimg_error_t *error)
 	const fsimg_entry_t *entry;
 	unsigned char *file_digest;
 	const char *name;
-	fsimg_selection_relation_t relation;
 	size_t path_length;
 	uint32_t depth;
 	fsimg_status_t status;
 
 	for (;;) {
-		status = fsimg_selection_next(state->selection, &entry, &relation, error);
+		status = fsimg_selection_next(state->selection, &entry, error);
 		if (status == FSIMG_DONE)
 			break;
 		if (status != FSIMG_OK)

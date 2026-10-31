@@ -667,7 +667,6 @@ list_job(worker_child_t *child, fsimg_error_t *error)
 {
 	const fsimg_entry_t *entry;
 	fsimg_selection_policy_t policy;
-	fsimg_selection_relation_t relation;
 	fsimg_status_t status;
 
 	policy = (child->request.flags & FSIMG_JOB_RECURSIVE) != 0 ?
@@ -677,16 +676,16 @@ list_job(worker_child_t *child, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	for (;;) {
-		status = fsimg_selection_next(child->selector, &entry, &relation, error);
+		status = fsimg_selection_next(child->selector, &entry, error);
 		if (status == FSIMG_DONE)
 			return (FSIMG_OK);
 		if (status != FSIMG_OK)
 			return (status);
-		/* A member's own entry is listed, a directory as well as a
-		 * file; the ancestors leading to it are not.
+		/* Every entry the selection returns is listed, the
+		 * directories leading to a member as well, so the listing
+		 * names exactly the entries extraction of the same members
+		 * visits.
 		 */
-		if (relation == FSIMG_SELECTION_ANCESTOR)
-			continue;
 		status = send_entry(entry, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -703,7 +702,6 @@ static fsimg_status_t
 cat_job(worker_child_t *child, fsimg_error_t *error)
 {
 	const fsimg_entry_t *entry;
-	fsimg_selection_relation_t relation;
 	unsigned char *buffer;
 	uint64_t offset;
 	size_t batch, transferred, done;
@@ -716,7 +714,7 @@ cat_job(worker_child_t *child, fsimg_error_t *error)
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_selection_next(child->selector, &entry, &relation, error);
+	status = fsimg_selection_next(child->selector, &entry, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_session_charge(&child->reader->session, 0, entry->size, 1, error);

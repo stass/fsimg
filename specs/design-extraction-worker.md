@@ -19,10 +19,12 @@ The common reader selector resolves every member's components through each
 format's validated name/alias namespace in one depth-first walk and prunes
 directory branches no member needs. Its copies of the member spellings, and
 the few counters of each member's progress, are charged to the resource
-context, and each member's work to the operation. It returns ancestors,
-selected entries, and selected descendants as distinct relations. Listing can limit descendants to immediate children; `x -O` requires
-the selected entry to be a regular file or a symbolic link, whose bytes are
-its target, as the [CLI design](design-cli.md#extraction) defines the mode.
+context, and each member's work to the operation. It returns each entry
+once: the directories leading to a member, the member, and what it selects
+below, which listing and extraction both consume whole. Listing can limit a
+directory member to its immediate children; `x -O` requires the selected
+entry to be a regular file or a symbolic link, whose bytes are its target,
+as the [CLI design](design-cli.md#extraction) defines the mode.
 All host paths use displayed names.
 
 Every image path is independently validated at the extraction boundary. A

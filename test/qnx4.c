@@ -4316,7 +4316,6 @@ test_nested_members_select_once(void)
 	memory_sink_t image;
 	fixture_t f;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 
 	make_member_volume(&image);
@@ -4325,12 +4324,10 @@ test_nested_members_select_once(void)
 	CHECK(fsimg_selection_new(f.reader, members, 2, FSIMG_SELECTION_TREE,
 	    &selection, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
-		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
+		CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->path, expected[i]) == 0);
-		CHECK(relation == (i == 0 ? FSIMG_SELECTION_TARGET :
-		    FSIMG_SELECTION_DESCENDANT));
 	}
-	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_DONE);
+	CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_DONE);
 	fsimg_selection_free(selection);
 	fixture_free(&f);
 	free(image.bytes);
@@ -4340,10 +4337,10 @@ static void
 test_members_remain_case_sensitive(void)
 {
 	const char *const members[] = { "/Dir", "/dir/sub" };
+	const char *const expected[] = { "/Dir", "/Dir/sub", "/Dir/sub/file" };
 	memory_sink_t image;
 	fixture_t f;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 	fsimg_error_t error;
 
@@ -4352,9 +4349,11 @@ test_members_remain_case_sensitive(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_selection_new(f.reader, members, 2, FSIMG_SELECTION_TREE,
 	    &selection, NULL) == FSIMG_OK);
-	for (size_t i = 0; i < 3; i++)
-		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
-	CHECK(fsimg_selection_next(selection, &entry, &relation, &error) == FSIMG_EINVAL);
+	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+		CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, expected[i]) == 0);
+	}
+	CHECK(fsimg_selection_next(selection, &entry, &error) == FSIMG_EINVAL);
 	CHECK(strcmp(error.path, "/dir/sub") == 0);
 	CHECK(strcmp(error.message, "selected image path was not found") == 0);
 	fsimg_selection_free(selection);
@@ -4506,7 +4505,6 @@ test_children_omit_only_selected_directory_children(void)
 	gen_t g;
 	fixture_t f;
 	fsimg_selection_t *selection;
-	fsimg_selection_relation_t relation;
 	const fsimg_entry_t *entry;
 
 	make_member_omission_image(&g);
@@ -4515,10 +4513,10 @@ test_children_omit_only_selected_directory_children(void)
 	CHECK(fsimg_selection_new(f.reader, members, 2, FSIMG_SELECTION_CHILDREN,
 	    &selection, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
-		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
+		CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_OK);
 		CHECK(strcmp(entry->path, expected[i]) == 0);
 	}
-	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_DONE);
+	CHECK(fsimg_selection_next(selection, &entry, NULL) == FSIMG_DONE);
 	check_omission_counts(&f, 1);
 	fsimg_selection_free(selection);
 	fixture_free(&f);
