@@ -104,6 +104,7 @@ const fsimg_container_ops_t fsimg_vhd_container = {
 	.verify = vhd_verify,
 	.writer = &vhd_writer,
 	.codecs = "raw",
+	.trailer_bytes = VHD_FOOTER_BYTES,
 	.payload_checks = false,
 	.zlib = false
 };

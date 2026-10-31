@@ -58,6 +58,25 @@ int fsimg_host_dup(int);
  */
 int fsimg_host_next_hole(int, uint64_t, void (*)(void *), void *, uint64_t *,
     uint64_t *, uint64_t *);
+/*
+ * The command line's monotonic clock, in milliseconds (compat/clock.c),
+ * which fails closed: a failed query ends every bounded wait rather than
+ * extending it.
+ *
+ * A deadline is an absolute reading, or zero for none. fsimg_host_deadline
+ * gives the deadline milliseconds from now, saturating, and when the clock
+ * fails FSIMG_HOST_DEADLINE_PASSED, which every reading has reached.
+ * fsimg_host_expired says whether a deadline has passed, and a failed
+ * query has passed every one. Compare deadlines only through
+ * fsimg_host_expired. fsimg_host_clock is the reading itself, or
+ * FSIMG_HOST_CLOCK_FAILED, which no real reading reaches; check for it
+ * before computing with a reading.
+ */
+#define FSIMG_HOST_CLOCK_FAILED		UINT64_MAX
+#define FSIMG_HOST_DEADLINE_PASSED	UINT64_C(1)
+uint64_t fsimg_host_clock(void);
+uint64_t fsimg_host_deadline(uint64_t);
+bool fsimg_host_expired(uint64_t);
 int fsimg_host_spawn_worker(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_spawn_output(const char *, const int *, unsigned, pid_t *);
 int fsimg_host_spawn_input(const char *, const int *, unsigned, pid_t *);

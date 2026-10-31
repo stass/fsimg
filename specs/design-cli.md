@@ -381,7 +381,14 @@ The capability record and the summary's `sandbox` field describe the
 creation worker; each worker still warns separately when it runs
 unconfined.
 `cW` with `-f -` is a syntax error: a stream leaves no complete artefact for
-the second worker to open.
+the second worker to open. The verification reads a compressed image
+through the spool, and a compression of a bare disk decodes to exactly
+that disk, so `cW` refuses such a planned disk larger than `-l spool`
+as soon as the creation worker reports it, without waiting for the
+creation to finish. Under a
+container the spool holds the container's file, which can be shorter than
+the disk, so planning refuses nothing and the verification's own spool
+reservation is the check.
 
 `-f -` streams the final bytes to stdout, and is refused when stdout is a
 terminal, as `gzip(1)` refuses to write compressed data to one. The layer

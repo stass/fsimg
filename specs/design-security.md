@@ -183,6 +183,39 @@ I/O boundaries. An in-flight kernel operation can complete or remain blocked
 according to host behavior. The output relay holds only one bounded record;
 after coordinator death its next status write fails, preventing another record.
 
+The lengths a worker reports are checked for consistency with what the
+coordinator knows, and each then bounds the records after it: the
+partitions and the volume lie within the disk, `x -O` without `-l output`
+writes no more than the volume, and a stream creation sends no more than
+its plan. A read job's IMAGE record names the layers the stack forces: an
+emptied scheme or container slot reports none, a named one that layer, and
+a forced compression that compression. Its file is the input's exact
+length, or, decoded or streamed into the spool, at most the spool limit.
+The layer registry says what bounds a container's disk: a disk that is
+its file less a fixed trailer, such as a fixed VHD's footer, is checked
+exactly, and a spooled container's disk, decoded into the spool, is at
+most the spool limit. Every other reported length is the worker's: a disk
+a container's own tables declare, a detected compression, and a
+creation's planned disk and the largest length of its encoding. No
+ceiling the coordinator could derive from the input file would take that
+trust out. Where the stack leaves the container to detection, the image's
+author can make the input a DMG or Android sparse image whose zero runs
+declare any disk length from a file of any size, so an honest worker
+reports what a compromised one could, and a ceiling from the file length
+would refuse valid images without bounding an attack. A false
+compression claim widens the file's bound from the input's length to the
+spool limit, a configured ceiling; a hostile gzip of a small input
+reaches only its own expansion, about a thousand times its length, and a
+stream reaches the spool limit honestly. A creation's disk follows from
+source trees and options only the worker reads. What holds whatever
+a worker reports are the configured limits: `-l output` on the raw member
+or image bytes relayed to standard output and `-l seconds` on the whole
+command. A
+worker's own writes into staging, scratch and its handed-over files, the
+spool among them, are bounded by its grants and the storage beneath them,
+not by any length it reports or by `-l spool`, which an honest worker
+enforces on itself.
+
 Listing names, and the names a verbose creation or extraction reports, use
 bounded entry-start/name-chunk/entry-end records.
 The coordinator enforces the total path limit and legal message order while

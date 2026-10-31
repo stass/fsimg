@@ -72,6 +72,462 @@ typedef enum worker_scenario {
 	SCENARIO_LIMIT_LOSS,
 } worker_scenario_t;
 
+typedef enum coordinator_scenario {
+	COORDINATOR_EXIT_BLOCKED_INPUT = 1000,
+	COORDINATOR_CLOCK_FIRST_FAILURE,
+	COORDINATOR_CLOCK_LATER_FAILURE,
+	COORDINATOR_CLOCK_STOP_FAILURE,
+	COORDINATOR_SPOOLED_DISK_OVER_LIMIT,
+	COORDINATOR_SPOOLED_DISK_AT_LIMIT,
+	COORDINATOR_ENCODED_PLAN_BELOW_DISK,
+	COORDINATOR_ENCODED_PLAN_AT_DISK,
+	COORDINATOR_ENCODED_PLAN_ABOVE_DISK,
+	COORDINATOR_COMPRESSION_MISMATCH,
+	COORDINATOR_STAGED_RAW_SHORT,
+	COORDINATOR_STAGED_RAW_LONG,
+	COORDINATOR_STAGED_RAW_EXACT,
+	COORDINATOR_STAGED_ENCODED_OVER_PLAN,
+	COORDINATOR_STAGED_ENCODED_ZERO,
+	COORDINATOR_STAGED_ENCODED_AT_PLAN,
+	COORDINATOR_STAGED_ENCODED_BELOW_PLAN,
+	COORDINATOR_STREAM_OVER_PLAN,
+	COORDINATOR_STREAM_SHORT,
+	COORDINATOR_STREAM_EXACT,
+	COORDINATOR_READ_FORBIDDEN_CONTAINER,
+	COORDINATOR_READ_FORBIDDEN_SCHEME,
+	COORDINATOR_READ_MISSING_CONTAINER,
+	COORDINATOR_READ_MISSING_COMPRESSION,
+	COORDINATOR_READ_BARE_STACK,
+	COORDINATOR_READ_VHD_STACK,
+	COORDINATOR_SUCCESS_BLOCKED_INPUT
+} coordinator_scenario_t;
+
+typedef enum coordinator_job {
+	COORDINATOR_READ_FILE,
+	COORDINATOR_READ_STREAM,
+	COORDINATOR_CREATE_STAGING,
+	COORDINATOR_CREATE_STREAM
+} coordinator_job_t;
+
+typedef enum coordinator_clock_fault {
+	COORDINATOR_CLOCK_NONE,
+	COORDINATOR_CLOCK_FROM_FIRST,
+	COORDINATOR_CLOCK_FROM_SECOND,
+	COORDINATOR_CLOCK_AT_READY
+} coordinator_clock_fault_t;
+
+/* Scenario names identify tests; only a table index crosses the exec boundary. */
+typedef struct coordinator_case {
+	coordinator_scenario_t scenario;
+	const char	*name;
+	coordinator_job_t job;
+	bool		 stall_ignoring_sigterm;
+	bool		 exit_before_done;
+	coordinator_clock_fault_t clock_fault;
+	uint64_t	 spool_limit;
+	const char	*requested_stack;
+	const char	*requested_compression;
+	bool		 send_image;
+	uint64_t	 image_disk_bytes;
+	uint64_t	 image_file_bytes;
+	const char	*image_scheme;
+	const char	*image_container;
+	const char	*image_compression;
+	uint64_t	 plan_volume_bytes;
+	uint64_t	 plan_output_bytes;
+	uint64_t	 done_image_bytes;
+	uint64_t	 raw_bytes;
+	fsimg_status_t	 status;
+	const char	*message;
+	bool		 message_contains;
+	uint64_t	 minimum_ms;
+	uint64_t	 maximum_ms;
+	uint64_t	 deadline_ms;
+} coordinator_case_t;
+
+/* Parent setup and the re-executed worker share each complete case. */
+static const coordinator_case_t coordinator_cases[] = {
+	{
+		.scenario = COORDINATOR_EXIT_BLOCKED_INPUT,
+		.name = "worker exit with blocked input and output",
+		.job = COORDINATOR_READ_STREAM,
+		.exit_before_done = true,
+		.minimum_ms = 2000,
+		.status = FSIMG_EIO,
+		.message = "worker ended before completion",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_CLOCK_FIRST_FAILURE,
+		.name = "monotonic clock fails from first query",
+		.job = COORDINATOR_READ_FILE,
+		.stall_ignoring_sigterm = true,
+		.clock_fault = COORDINATOR_CLOCK_FROM_FIRST,
+		.message_contains = true,
+		.maximum_ms = 2500,
+		.deadline_ms = 8000,
+		.status = FSIMG_EIO,
+		.message = "monotonic clock",
+	},
+	{
+		.scenario = COORDINATOR_CLOCK_LATER_FAILURE,
+		.name = "monotonic clock fails after first query",
+		.job = COORDINATOR_READ_FILE,
+		.stall_ignoring_sigterm = true,
+		.clock_fault = COORDINATOR_CLOCK_FROM_SECOND,
+		.maximum_ms = 1000,
+		.deadline_ms = 8000,
+		.status = FSIMG_ECANCELLED,
+		.message = "worker cancelled or deadline exceeded",
+	},
+	{
+		.scenario = COORDINATOR_CLOCK_STOP_FAILURE,
+		.name = "monotonic clock fails with SIGTERM-resistant worker",
+		.job = COORDINATOR_READ_FILE,
+		.stall_ignoring_sigterm = true,
+		.clock_fault = COORDINATOR_CLOCK_AT_READY,
+		.maximum_ms = 1000,
+		.status = FSIMG_ECANCELLED,
+		.message = "worker cancelled or deadline exceeded",
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_SPOOLED_DISK_OVER_LIMIT,
+		.name = "hbcifs disk exceeds spool limit",
+		.job = COORDINATOR_READ_FILE,
+		.spool_limit = 4096,
+		.send_image = true,
+		.image_disk_bytes = 4097,
+		.image_file_bytes = 1024,
+		.image_container = "hbcifs",
+		.status = FSIMG_EIO,
+		.message = "invalid worker image information",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_SPOOLED_DISK_AT_LIMIT,
+		.name = "hbcifs disk equals spool limit",
+		.job = COORDINATOR_READ_FILE,
+		.spool_limit = 4096,
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 1024,
+		.image_container = "hbcifs",
+		.status = FSIMG_OK,
+		.message = "",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_ENCODED_PLAN_BELOW_DISK,
+		.name = "encoded plan below disk",
+		.job = COORDINATOR_CREATE_STAGING,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 4096,
+		.image_compression = "gzip",
+		.plan_volume_bytes = 512,
+		.plan_output_bytes = 4095,
+		.done_image_bytes = 4096,
+		.status = FSIMG_EIO,
+		.message = "invalid worker image plan",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_ENCODED_PLAN_AT_DISK,
+		.name = "encoded plan equals disk",
+		.job = COORDINATOR_CREATE_STAGING,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 4096,
+		.image_compression = "gzip",
+		.plan_volume_bytes = 512,
+		.plan_output_bytes = 4096,
+		.done_image_bytes = 4096,
+		.status = FSIMG_EIO,
+		.message = "invalid worker image plan",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_ENCODED_PLAN_ABOVE_DISK,
+		.name = "encoded plan exceeds disk by one",
+		.job = COORDINATOR_CREATE_STAGING,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 4096,
+		.image_compression = "gzip",
+		.plan_volume_bytes = 512,
+		.plan_output_bytes = 4097,
+		.done_image_bytes = 4096,
+		.status = FSIMG_OK,
+		.message = "",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_COMPRESSION_MISMATCH,
+		.name = "created image omits requested gzip",
+		.job = COORDINATOR_CREATE_STAGING,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 4096,
+		.image_compression = "",
+		.plan_volume_bytes = 512,
+		.plan_output_bytes = 4097,
+		.done_image_bytes = 4096,
+		.status = FSIMG_EIO,
+		.message = "invalid worker image information",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STAGED_RAW_SHORT,
+		.name = "staged raw length below plan",
+		.job = COORDINATOR_CREATE_STAGING,
+		.plan_volume_bytes = 4096,
+		.plan_output_bytes = 4096,
+		.done_image_bytes = 4095,
+		.status = FSIMG_EIO,
+		.message = "worker raw completion length differs",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STAGED_RAW_LONG,
+		.name = "staged raw length above plan",
+		.job = COORDINATOR_CREATE_STAGING,
+		.plan_volume_bytes = 4096,
+		.plan_output_bytes = 4096,
+		.done_image_bytes = 4097,
+		.status = FSIMG_EIO,
+		.message = "worker raw completion length differs",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STAGED_RAW_EXACT,
+		.name = "staged raw length equals plan",
+		.job = COORDINATOR_CREATE_STAGING,
+		.plan_volume_bytes = 4096,
+		.plan_output_bytes = 4096,
+		.done_image_bytes = 4096,
+		.status = FSIMG_OK,
+		.message = "",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STAGED_ENCODED_OVER_PLAN,
+		.name = "staged encoded length above plan",
+		.job = COORDINATOR_CREATE_STAGING,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 4096,
+		.image_compression = "gzip",
+		.plan_volume_bytes = 512,
+		.plan_output_bytes = 4097,
+		.done_image_bytes = 4098,
+		.status = FSIMG_EIO,
+		.message = "worker raw completion length differs",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STAGED_ENCODED_ZERO,
+		.name = "staged encoded length is zero",
+		.job = COORDINATOR_CREATE_STAGING,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 4096,
+		.image_compression = "gzip",
+		.plan_volume_bytes = 512,
+		.plan_output_bytes = 4097,
+		.done_image_bytes = 0,
+		.status = FSIMG_EIO,
+		.message = "worker raw completion length differs",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STAGED_ENCODED_AT_PLAN,
+		.name = "staged encoded length equals plan",
+		.job = COORDINATOR_CREATE_STAGING,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 4096,
+		.image_compression = "gzip",
+		.plan_volume_bytes = 512,
+		.plan_output_bytes = 4097,
+		.done_image_bytes = 4097,
+		.status = FSIMG_OK,
+		.message = "",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STAGED_ENCODED_BELOW_PLAN,
+		.name = "staged encoded length below plan",
+		.job = COORDINATOR_CREATE_STAGING,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 4096,
+		.image_file_bytes = 4096,
+		.image_compression = "gzip",
+		.plan_volume_bytes = 512,
+		.plan_output_bytes = 4097,
+		.done_image_bytes = 4096,
+		.status = FSIMG_OK,
+		.message = "",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STREAM_OVER_PLAN,
+		.name = "created stream exceeds plan",
+		.job = COORDINATOR_CREATE_STREAM,
+		.plan_volume_bytes = 4096,
+		.plan_output_bytes = 4096,
+		.raw_bytes = 4097,
+		.status = FSIMG_EIO,
+		.message = "worker image stream exceeds its plan",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STREAM_SHORT,
+		.name = "created raw stream falls short of plan",
+		.job = COORDINATOR_CREATE_STREAM,
+		.plan_volume_bytes = 4096,
+		.plan_output_bytes = 4096,
+		.raw_bytes = 4095,
+		.status = FSIMG_EIO,
+		.message = "worker or raw output was incomplete",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_STREAM_EXACT,
+		.name = "created raw stream equals plan",
+		.job = COORDINATOR_CREATE_STREAM,
+		.plan_volume_bytes = 4096,
+		.plan_output_bytes = 4096,
+		.raw_bytes = 4096,
+		.status = FSIMG_OK,
+		.message = "",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_READ_FORBIDDEN_CONTAINER,
+		.name = "read image names a forced-empty container",
+		.job = COORDINATOR_READ_FILE,
+		.requested_stack = "fat12/-/-",
+		.send_image = true,
+		.image_disk_bytes = 1048576,
+		.image_file_bytes = 1024,
+		.image_container = "dmg",
+		.status = FSIMG_EIO,
+		.message = "invalid worker image information",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_READ_FORBIDDEN_SCHEME,
+		.name = "read image names a forced-empty scheme",
+		.job = COORDINATOR_READ_FILE,
+		.requested_stack = "fat12/-/-",
+		.send_image = true,
+		.image_disk_bytes = 1024,
+		.image_file_bytes = 1024,
+		.image_scheme = "mbr",
+		.status = FSIMG_EIO,
+		.message = "invalid worker image information",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_READ_MISSING_CONTAINER,
+		.name = "read image omits forced vhd container",
+		.job = COORDINATOR_READ_FILE,
+		.requested_stack = "fat12/-/vhd",
+		.send_image = true,
+		.image_disk_bytes = 1024,
+		.image_file_bytes = 1024,
+		.status = FSIMG_EIO,
+		.message = "invalid worker image information",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_READ_MISSING_COMPRESSION,
+		.name = "read image omits requested gzip",
+		.job = COORDINATOR_READ_FILE,
+		.requested_compression = "gzip",
+		.send_image = true,
+		.image_disk_bytes = 1024,
+		.image_file_bytes = 1024,
+		.status = FSIMG_EIO,
+		.message = "invalid worker image information",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_READ_BARE_STACK,
+		.name = "read image honours forced-empty scheme and container",
+		.job = COORDINATOR_READ_FILE,
+		.requested_stack = "fat12/-/-",
+		.send_image = true,
+		.image_disk_bytes = 1024,
+		.image_file_bytes = 1024,
+		.status = FSIMG_OK,
+		.message = "",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_READ_VHD_STACK,
+		.name = "read image honours forced vhd container and footer",
+		.job = COORDINATOR_READ_FILE,
+		.requested_stack = "fat12/-/vhd",
+		.send_image = true,
+		.image_disk_bytes = 512,
+		.image_file_bytes = 1024,
+		.image_container = "vhd",
+		.status = FSIMG_OK,
+		.message = "",
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	},
+	{
+		.scenario = COORDINATOR_SUCCESS_BLOCKED_INPUT,
+		.name = "worker success with blocked input relay",
+		.job = COORDINATOR_READ_STREAM,
+		.send_image = true,
+		.image_disk_bytes = 1024,
+		.image_file_bytes = 1024,
+		.status = FSIMG_EIO,
+		.message = "standard input could not be relayed",
+		.minimum_ms = 2000,
+		.maximum_ms = 8000,
+		.deadline_ms = 8000,
+	}
+};
+
+static unsigned coordinator_clock_calls;
+static unsigned coordinator_clock_fail_from;
+static uint64_t coordinator_clock_fault_started;
+
 /* Create jobs in these tests copy one source directory to the image root. */
 static const char *const image_root[] = { "/" };
 
@@ -105,6 +561,13 @@ typedef struct worker_fixture {
 	int		 scratch;
 	int		 input;
 } worker_fixture_t;
+
+/* The event borrows the fixture and the pipe that releases its consumer. */
+typedef struct coordinator_event_context {
+	worker_fixture_t *fixture;
+	uint64_t	 ready_started;
+	int		 drain_start;
+} coordinator_event_context_t;
 
 typedef struct output_source {
 	unsigned	 emitted;
@@ -174,6 +637,28 @@ static fsimg_status_t produce_output(void *, fsimg_worker_text_t *, fsimg_error_
 static void test_output_ledger(void);
 static uint64_t fill_pipe(int);
 static void drain_after_delay(int, uint64_t);
+static bool coordinator_worker_selected(struct stat *);
+static int fake_coordinator_worker(size_t);
+static int coordinator_marker(worker_fixture_t *, size_t, int);
+static fsimg_status_t coordinator_event(void *, const fsimg_frame_t *,
+    fsimg_worker_text_t *, fsimg_error_t *);
+static fsimg_status_t coordinator_clock_event(void *, const fsimg_frame_t *,
+    fsimg_worker_text_t *, fsimg_error_t *);
+static uint64_t coordinator_real_milliseconds(void);
+static void coordinator_drain(int, unsigned);
+static void coordinator_run_case(worker_fixture_t *, const coordinator_case_t *,
+    int, int[2]);
+static unsigned coordinator_test_case(const coordinator_case_t *);
+static unsigned coordinator_test_scenario(coordinator_scenario_t);
+static unsigned coordinator_test_read_stack(void);
+static unsigned test_worker_exit_with_blocked_input(void);
+static unsigned test_monotonic_clock_failures(void);
+static unsigned test_spooled_container_disk_limit(void);
+static unsigned test_forged_creation_plan(void);
+static unsigned test_forged_creation_compression(void);
+static unsigned test_forged_creation_staged_length(void);
+static unsigned test_forged_creation_stream_length(void);
+static void test_coordinator_regressions(void);
 
 /* Run the real worker with a preloaded job pipe, bypassing the coordinator's
  * path framing. The cancellation writer stays open until the child is reaped.
@@ -2021,10 +2506,14 @@ main(int argc, char **argv)
 	if (argc == 2 && strcmp(argv[1], "--internal-worker") == 0) {
 		CHECK(setrlimit(RLIMIT_CORE, &no_core) == 0);
 		CHECK(fcntl(200, F_GETFD) == -1 && errno == EBADF);
+		if (coordinator_worker_selected(&st))
+			return (fake_coordinator_worker((size_t)st.st_size));
 		if (fstat(FSIMG_CHILD_INPUT, &st) == 0 && (st.st_mode & 0100) != 0)
 			return (fake_worker((worker_scenario_t)st.st_size));
 		return (fsimg_worker_main());
 	}
+	if (argc == 2 && strcmp(argv[1], "--internal-input") == 0)
+		return (fsimg_input_main());
 	if (argc == 2 && strcmp(argv[1], "--output-prefix") == 0) {
 		signal(SIGPIPE, SIG_IGN);
 		test_output_ledger();
@@ -2073,5 +2562,576 @@ main(int argc, char **argv)
 		test_transport(SCENARIO_BLOCKED_WARNING);
 		test_transport(SCENARIO_SLOW_CONSUMER);
 	}
+	test_coordinator_regressions();
 	return (0);
+}
+
+/* Mode 0710 distinguishes these table indices from other worker markers. */
+static bool
+coordinator_worker_selected(struct stat *st)
+{
+	const int descriptors[] = { FSIMG_CHILD_INPUT, FSIMG_CHILD_SPOOL,
+	    FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_SETTING) };
+
+	for (size_t i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); i++) {
+		if (fstat(descriptors[i], st) == 0 && S_ISREG(st->st_mode) &&
+		    (st->st_mode & 0777) == 0710 &&
+		    st->st_size >= 0 && (uint64_t)st->st_size <
+		    sizeof(coordinator_cases) / sizeof(coordinator_cases[0]))
+			return (true);
+	}
+	return (false);
+}
+
+/* Valid envelopes isolate the coordinator's job-specific validation. */
+static int
+fake_coordinator_worker(size_t case_index)
+{
+	const coordinator_case_t *test;
+	fsimg_frame_t frame;
+	unsigned char raw[FSIMG_FRAME_BYTES];
+
+	CHECK(case_index < sizeof(coordinator_cases) / sizeof(coordinator_cases[0]));
+	test = &coordinator_cases[case_index];
+	CHECK(fsimg_frame_read(FSIMG_CHILD_JOB, &frame, NULL) == FSIMG_OK);
+	CHECK(frame.type == FSIMG_FRAME_JOB);
+	CHECK(fsimg_frame_read(FSIMG_CHILD_JOB, &frame, NULL) == FSIMG_OK);
+	CHECK(frame.type == FSIMG_FRAME_SELECTION);
+	if (test->stall_ignoring_sigterm)
+		CHECK(signal(SIGTERM, SIG_IGN) != SIG_ERR);
+	bzero(raw, sizeof(raw));
+	fsimg_store_le64(raw, FSIMG_CONFINEMENT_DISABLED);
+	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_READY, raw,
+	    8, NULL) == FSIMG_OK);
+	CHECK(fsimg_frame_read(FSIMG_CHILD_JOB, &frame, NULL) == FSIMG_OK);
+	CHECK(frame.type == FSIMG_FRAME_ACK);
+
+	if (test->stall_ignoring_sigterm) {
+		for (;;)
+			pause();
+	}
+	if (test->exit_before_done) {
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PROGRESS,
+		    raw, 24, NULL) == FSIMG_OK);
+		return (1);
+	}
+	if (test->send_image) {
+		bzero(raw, FSIMG_WIRE_IMAGE_BYTES);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, test->image_disk_bytes);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, test->image_file_bytes);
+		if (test->image_scheme != NULL) {
+			strcpy((char *)raw + FSIMG_WIRE_IMAGE_SCHEME, test->image_scheme);
+			fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
+			fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SLOTS, 4);
+			fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SELECTED, 1);
+		}
+		if (test->image_container != NULL)
+			strcpy((char *)raw + FSIMG_WIRE_IMAGE_CONTAINER,
+			    test->image_container);
+		if (test->image_compression != NULL)
+			strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION,
+			    test->image_compression);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_IMAGE,
+		    raw, FSIMG_WIRE_IMAGE_BYTES, NULL) == FSIMG_OK);
+	}
+	switch (test->job) {
+	case COORDINATOR_READ_FILE:
+	case COORDINATOR_READ_STREAM:
+		bzero(raw, FSIMG_WIRE_INFO_BYTES);
+		fsimg_store_le64(raw + 56, FSIMG_TIME_WALL);
+		fsimg_store_le64(raw + 64, FSIMG_VALIDATION_HEADER);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO,
+		    raw, FSIMG_WIRE_INFO_BYTES, NULL) == FSIMG_OK);
+		break;
+	case COORDINATOR_CREATE_STAGING:
+	case COORDINATOR_CREATE_STREAM:
+		bzero(raw, FSIMG_WIRE_PLAN_BYTES);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_VOLUME, test->plan_volume_bytes);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_OUTPUT, test->plan_output_bytes);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_SECTOR, 512);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_CLUSTER, 512);
+		strcpy((char *)raw + FSIMG_WIRE_PLAN_FORMAT, "fat12");
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PLAN,
+		    raw, FSIMG_WIRE_PLAN_BYTES, NULL) == FSIMG_OK);
+		break;
+	}
+	if (test->raw_bytes != 0) {
+		CHECK(test->raw_bytes <= sizeof(raw));
+		bzero(raw, (size_t)test->raw_bytes);
+		CHECK(write(FSIMG_CHILD_DATA, raw, (size_t)test->raw_bytes) ==
+		    (ssize_t)test->raw_bytes);
+	}
+	bzero(raw, FSIMG_WIRE_DONE_BYTES);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_IMAGE, test->done_image_bytes);
+	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE,
+	    raw, FSIMG_WIRE_DONE_BYTES, NULL) == FSIMG_OK);
+	return (0);
+}
+
+/* Unlink markers immediately so a killed case cannot leave a forged input. */
+static int
+coordinator_marker(worker_fixture_t *fixture, size_t case_index,
+    int flags)
+{
+	int fd;
+
+	fd = openat(fixture->parent, "coordinator", O_CREAT | O_EXCL | O_RDWR,
+	    0710);
+	CHECK(fd != -1);
+	CHECK(ftruncate(fd, (off_t)case_index) == 0);
+	CHECK(fchmod(fd, 0710) == 0);
+	CHECK(close(fd) == 0);
+	fd = openat(fixture->parent, "coordinator", flags | O_CLOEXEC);
+	CHECK(fd != -1);
+	CHECK(unlinkat(fixture->parent, "coordinator", 0) == 0);
+	return (fd);
+}
+
+static fsimg_status_t
+coordinator_event(void *argument, const fsimg_frame_t *frame,
+    fsimg_worker_text_t *text, fsimg_error_t *error)
+{
+	coordinator_event_context_t *context = argument;
+	fsimg_status_t status;
+
+	status = event(context->fixture, frame, text, error);
+	if (status == FSIMG_OK && frame->type == FSIMG_FRAME_READY)
+		context->ready_started = coordinator_real_milliseconds();
+	if (status == FSIMG_OK && frame->type == FSIMG_FRAME_PROGRESS) {
+		/* Startup must not consume the blocked-output interval. */
+		if (context->drain_start != -1)
+			CHECK(write(context->drain_start, "P", 1) == 1);
+		*text = (fsimg_worker_text_t){ .data = "payload", .length = 7 };
+	}
+	return (status);
+}
+
+/* READY proves the parser has installed SIG_IGN before cleanup is tested. */
+static fsimg_status_t
+coordinator_clock_event(void *argument, const fsimg_frame_t *frame,
+    fsimg_worker_text_t *text, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = coordinator_event(argument, frame, text, error);
+	if (status == FSIMG_OK && frame->type == FSIMG_FRAME_READY) {
+		coordinator_clock_calls = 0;
+		coordinator_clock_fail_from = 1;
+	}
+	return (status);
+}
+
+/* Drain until EOF; a rejected stream is allowed to forward no bytes. */
+static void
+coordinator_drain(int fd, unsigned delay)
+{
+	unsigned char buffer[4096];
+	ssize_t count;
+
+	CHECK(poll(NULL, 0, (int)delay) == 0);
+	for (;;) {
+		count = read(fd, buffer, sizeof(buffer));
+		if (count == -1 && errno == EINTR)
+			continue;
+		CHECK(count >= 0);
+		if (count == 0)
+			return;
+	}
+}
+
+/* The case process owns stdin replacement, fault arming and its consumer. */
+static void
+coordinator_run_case(worker_fixture_t *fixture, const coordinator_case_t *test,
+    int input, int output[2])
+{
+	coordinator_event_context_t context = { .fixture = fixture,
+	    .drain_start = -1 };
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	uint64_t started, elapsed;
+	pid_t consumer, remaining;
+	int saved_input, outcome, child_errno, drain_start[2] = { -1, -1 };
+	char marker;
+	bool valid, message_matches;
+
+	saved_input = -1;
+	consumer = -1;
+	if (input != -1) {
+		saved_input = dup(STDIN_FILENO);
+		CHECK(saved_input != -1);
+		CHECK(dup2(input, STDIN_FILENO) == STDIN_FILENO);
+		if (output[1] != -1)
+			CHECK(pipe(drain_start) == 0);
+	}
+	if (output[1] != -1) {
+		consumer = fork();
+		CHECK(consumer != -1);
+		if (consumer == 0) {
+			CHECK(close(output[1]) == 0);
+			if (input != -1) {
+				CHECK(close(drain_start[1]) == 0);
+				CHECK(read(drain_start[0], &marker, 1) == 1);
+				CHECK(close(drain_start[0]) == 0);
+			}
+			coordinator_drain(output[0], input != -1 ? 3000 : 0);
+			_exit(0);
+		}
+		CHECK(close(output[0]) == 0);
+	}
+	if (drain_start[0] != -1) {
+		CHECK(close(drain_start[0]) == 0);
+		context.drain_start = drain_start[1];
+	}
+
+	started = coordinator_real_milliseconds();
+	coordinator_clock_calls = 0;
+	coordinator_clock_fault_started = 0;
+	switch (test->clock_fault) {
+	case COORDINATOR_CLOCK_NONE:
+	case COORDINATOR_CLOCK_AT_READY:
+		break;
+	case COORDINATOR_CLOCK_FROM_FIRST:
+		coordinator_clock_fail_from = 1;
+		break;
+	case COORDINATOR_CLOCK_FROM_SECOND:
+		coordinator_clock_fail_from = 2;
+		break;
+	}
+	status = fsimg_worker_run(fixture->executable, &fixture->request,
+	    test->clock_fault == COORDINATOR_CLOCK_AT_READY ?
+	    coordinator_clock_event : coordinator_event, &context, output[1],
+	    NULL, &fixture->result, &error);
+	if (test->clock_fault == COORDINATOR_CLOCK_AT_READY ||
+	    test->scenario == COORDINATOR_SUCCESS_BLOCKED_INPUT)
+		started = context.ready_started;
+	else if (test->clock_fault == COORDINATOR_CLOCK_FROM_SECOND)
+		started = coordinator_clock_fault_started;
+	elapsed = coordinator_real_milliseconds() - started;
+	coordinator_clock_fail_from = 0;
+
+	if (context.drain_start != -1)
+		CHECK(close(context.drain_start) == 0);
+	if (saved_input != -1) {
+		CHECK(dup2(saved_input, STDIN_FILENO) == STDIN_FILENO);
+		CHECK(close(saved_input) == 0);
+	}
+	if (consumer != -1) {
+		CHECK(close(output[1]) == 0);
+		CHECK(waitpid(consumer, &outcome, 0) == consumer);
+		CHECK(WIFEXITED(outcome) && WEXITSTATUS(outcome) == 0);
+	}
+	/* No parser, input relay or output relay may remain unreaped. */
+	remaining = waitpid(-1, &outcome, WNOHANG);
+	child_errno = errno;
+	message_matches = test->message_contains ?
+	    strstr(error.message, test->message) != NULL :
+	    strcmp(error.message, test->message) == 0;
+	valid = status == test->status && error.status == test->status &&
+	    message_matches && elapsed >= test->minimum_ms &&
+	    elapsed < test->maximum_ms && remaining == -1 && child_errno == ECHILD;
+	if (test->clock_fault == COORDINATOR_CLOCK_AT_READY)
+		valid = valid && fixture->ready;
+	if (test->clock_fault == COORDINATOR_CLOCK_FROM_SECOND)
+		valid = valid && coordinator_clock_fault_started != 0;
+	if (test->scenario == COORDINATOR_SUCCESS_BLOCKED_INPUT)
+		valid = valid && fixture->ready && fixture->images == 1 &&
+		    fixture->info == 1;
+	if (status == FSIMG_OK) {
+		valid = valid && fixture->ready &&
+		    fixture->images == (test->send_image ? 1u : 0u);
+		switch (test->job) {
+		case COORDINATOR_READ_FILE:
+		case COORDINATOR_READ_STREAM:
+			valid = valid && fixture->info == 1;
+			break;
+		case COORDINATOR_CREATE_STAGING:
+		case COORDINATOR_CREATE_STREAM:
+			valid = valid && fixture->plans == 1 &&
+			    fixture->result.image_bytes == test->done_image_bytes &&
+			    fixture->result.raw_bytes == test->raw_bytes;
+			break;
+		}
+	}
+	if (!valid)
+		fprintf(stderr, "%s: status %d, message \"%s\", elapsed %llu ms; "
+		    "expected status %d, message \"%s\", %llu <= elapsed < %llu ms; "
+		    "remaining child %ld, errno %d\n", test->name, status,
+		    error.message, (unsigned long long)elapsed, test->status,
+		    test->message, (unsigned long long)test->minimum_ms,
+		    (unsigned long long)test->maximum_ms, (long)remaining, child_errno);
+	CHECK(valid);
+}
+
+/* Every case has a process-group deadline, including failed cleanup paths.
+ * The parent owns the fixture and removes it after killing any descendants.
+ */
+static unsigned
+coordinator_test_case(const coordinator_case_t *test)
+{
+	worker_fixture_t fixture;
+	uint64_t started, deadline;
+	size_t case_index;
+	pid_t child, waited;
+	int marker, fd, input[2] = { -1, -1 }, output[2] = { -1, -1 }, outcome;
+	bool finished;
+
+	case_index = (size_t)(test - coordinator_cases);
+	CHECK(case_index < sizeof(coordinator_cases) / sizeof(coordinator_cases[0]));
+	fixture_open(&fixture);
+	fixture.request.sandbox = FSIMG_SANDBOX_OFF;
+	fixture.request.seconds = 5;
+	if (test->spool_limit != 0)
+		fixture.request.limits.spool_bytes = test->spool_limit;
+	marker = coordinator_marker(&fixture, case_index, O_RDWR);
+	switch (test->job) {
+	case COORDINATOR_READ_STREAM:
+		fixture.request.input_fd = -1;
+		fixture.request.input = (fsimg_input_t){ .kind = FSIMG_INPUT_STREAM };
+		fixture.request.spool_fd = marker;
+		fixture.request.seconds = 0;
+		CHECK(pipe(input) == 0);
+		if (test->exit_before_done) {
+			CHECK(pipe(output) == 0);
+			CHECK(fill_pipe(output[1]) != 0);
+		}
+		break;
+	case COORDINATOR_READ_FILE:
+		fixture.request.spool_fd = marker;
+		if (test->send_image) {
+			/* Keep the input length independent of the marker index. */
+			fd = openat(fixture.parent, "image", O_WRONLY);
+			CHECK(fd != -1);
+			CHECK(ftruncate(fd, (off_t)test->image_file_bytes) == 0);
+			CHECK(close(fd) == 0);
+			CHECK(fsimg_input_prepare(fixture.input, NULL, NULL,
+			    &fixture.request.input, NULL) == FSIMG_OK);
+		}
+		break;
+	case COORDINATOR_CREATE_STAGING:
+	case COORDINATOR_CREATE_STREAM:
+		create_request(&fixture, "fat12");
+		fixture.request.setting_fds[0] = marker;
+		if (test->requested_compression != NULL ||
+		    test->job == COORDINATOR_CREATE_STREAM)
+			fixture.request.raw_fd = raw_intermediate(&fixture);
+		if (test->job == COORDINATOR_CREATE_STREAM) {
+			fixture.request.flags |= FSIMG_JOB_STDOUT;
+			fixture.request.output_fd = -1;
+			/* Let the plan, rather than the output limit, reject excess. */
+			fixture.request.limits.max_output_bytes = 8192;
+			CHECK(pipe(output) == 0);
+		}
+		break;
+	}
+	if (test->requested_stack != NULL)
+		CHECK(fsimg_stack_parse(test->requested_stack, &fixture.request.stack,
+		    NULL) == FSIMG_OK);
+	if (test->requested_compression != NULL)
+		strcpy(fixture.request.compression, test->requested_compression);
+
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		CHECK(setpgid(0, 0) == 0);
+		coordinator_run_case(&fixture, test, input[0], output);
+		_exit(0);
+	}
+	CHECK(setpgid(child, child) == 0 || errno == EACCES);
+	if (output[1] != -1) {
+		CHECK(close(output[1]) == 0);
+		output[1] = -1;
+	}
+	started = coordinator_real_milliseconds();
+	deadline = started + test->deadline_ms;
+	finished = false;
+	while (coordinator_real_milliseconds() < deadline) {
+		waited = waitpid(child, &outcome, WNOHANG);
+		CHECK(waited != -1);
+		if (waited == child) {
+			finished = true;
+			break;
+		}
+		poll(NULL, 0, 20);
+	}
+	CHECK(kill(-child, SIGKILL) == 0 || errno == ESRCH);
+	if (!finished)
+		CHECK(waitpid(child, &outcome, 0) == child);
+
+	CHECK(close(marker) == 0);
+	if (fixture.request.spool_fd != -1 && fixture.request.spool_fd != marker)
+		CHECK(close(fixture.request.spool_fd) == 0);
+	if (fixture.request.raw_fd != -1)
+		CHECK(close(fixture.request.raw_fd) == 0);
+	for (unsigned i = 0; i < 2; i++) {
+		if (input[i] != -1)
+			CHECK(close(input[i]) == 0);
+		if (output[i] != -1)
+			CHECK(close(output[i]) == 0);
+	}
+	fixture_close(&fixture);
+	if (!finished || !WIFEXITED(outcome) || WEXITSTATUS(outcome) != 0)
+		fprintf(stderr, "%s: case process status %d, message \"%s\", "
+		    "elapsed %llu ms\n", test->name, outcome,
+		    finished ? "case assertion failed" : "process-group deadline exceeded",
+		    (unsigned long long)(coordinator_real_milliseconds() - started));
+	return (!finished || !WIFEXITED(outcome) || WEXITSTATUS(outcome) != 0);
+}
+
+/* Exact scenario names select tests without assigning meaning to enum order. */
+static unsigned
+coordinator_test_scenario(coordinator_scenario_t scenario)
+{
+	for (size_t i = 0; i < sizeof(coordinator_cases) / sizeof(coordinator_cases[0]); i++) {
+		if (coordinator_cases[i].scenario == scenario)
+			return (coordinator_test_case(&coordinator_cases[i]));
+	}
+	CHECK(false);
+	return (1);
+}
+
+/* Forced read slots and compression constrain the worker's IMAGE record. */
+static unsigned
+coordinator_test_read_stack(void)
+{
+	unsigned failures = 0;
+
+	failures += coordinator_test_scenario(COORDINATOR_READ_FORBIDDEN_CONTAINER);
+	failures += coordinator_test_scenario(COORDINATOR_READ_FORBIDDEN_SCHEME);
+	failures += coordinator_test_scenario(COORDINATOR_READ_MISSING_CONTAINER);
+	failures += coordinator_test_scenario(COORDINATOR_READ_MISSING_COMPRESSION);
+	failures += coordinator_test_scenario(COORDINATOR_READ_BARE_STACK);
+	failures += coordinator_test_scenario(COORDINATOR_READ_VHD_STACK);
+	return (failures);
+}
+
+/* Parser failure must survive backpressure while stdin remains open. */
+static unsigned
+test_worker_exit_with_blocked_input(void)
+{
+	return (coordinator_test_scenario(COORDINATOR_EXIT_BLOCKED_INPUT));
+}
+
+/* Failed clock readings cannot create an unbounded wait or cleanup grace. */
+static unsigned
+test_monotonic_clock_failures(void)
+{
+	unsigned failures = 0;
+
+	failures += coordinator_test_scenario(COORDINATOR_CLOCK_FIRST_FAILURE);
+	failures += coordinator_test_scenario(COORDINATOR_CLOCK_LATER_FAILURE);
+	failures += coordinator_test_scenario(COORDINATOR_CLOCK_STOP_FAILURE);
+	return (failures);
+}
+
+/* A container decoded into scratch fits the spool at its exact boundary. */
+static unsigned
+test_spooled_container_disk_limit(void)
+{
+	unsigned failures = 0;
+
+	failures += coordinator_test_scenario(COORDINATOR_SPOOLED_DISK_AT_LIMIT);
+	failures += coordinator_test_scenario(COORDINATOR_SPOOLED_DISK_OVER_LIMIT);
+	return (failures);
+}
+
+/* An encoding's plan allows strictly more bytes than its underlying disk. */
+static unsigned
+test_forged_creation_plan(void)
+{
+	unsigned failures = 0;
+
+	failures += coordinator_test_scenario(COORDINATOR_ENCODED_PLAN_BELOW_DISK);
+	failures += coordinator_test_scenario(COORDINATOR_ENCODED_PLAN_AT_DISK);
+	failures += coordinator_test_scenario(COORDINATOR_ENCODED_PLAN_ABOVE_DISK);
+	return (failures);
+}
+
+/* A creation's IMAGE compression must match its job's requested encoding. */
+static unsigned
+test_forged_creation_compression(void)
+{
+	unsigned failures = 0;
+
+	failures += coordinator_test_scenario(COORDINATOR_COMPRESSION_MISMATCH);
+	failures += coordinator_test_scenario(COORDINATOR_STAGED_ENCODED_BELOW_PLAN);
+	return (failures);
+}
+
+/* Staged raw lengths are exact; encoded lengths are positive and bounded. */
+static unsigned
+test_forged_creation_staged_length(void)
+{
+	unsigned failures = 0;
+
+	failures += coordinator_test_scenario(COORDINATOR_STAGED_RAW_SHORT);
+	failures += coordinator_test_scenario(COORDINATOR_STAGED_RAW_LONG);
+	failures += coordinator_test_scenario(COORDINATOR_STAGED_RAW_EXACT);
+	failures += coordinator_test_scenario(COORDINATOR_STAGED_ENCODED_OVER_PLAN);
+	failures += coordinator_test_scenario(COORDINATOR_STAGED_ENCODED_ZERO);
+	failures += coordinator_test_scenario(COORDINATOR_STAGED_ENCODED_AT_PLAN);
+	failures += coordinator_test_scenario(COORDINATOR_STAGED_ENCODED_BELOW_PLAN);
+	return (failures);
+}
+
+/* The coordinator counts streamed raw bytes independently of DONE. */
+static unsigned
+test_forged_creation_stream_length(void)
+{
+	unsigned failures = 0;
+
+	failures += coordinator_test_scenario(COORDINATOR_STREAM_OVER_PLAN);
+	failures += coordinator_test_scenario(COORDINATOR_STREAM_SHORT);
+	failures += coordinator_test_scenario(COORDINATOR_STREAM_EXACT);
+	return (failures);
+}
+
+/* Collect independent failures so one regression cannot hide another. */
+static void
+test_coordinator_regressions(void)
+{
+	unsigned failures = 0;
+
+	failures += coordinator_test_read_stack();
+	failures += coordinator_test_scenario(COORDINATOR_SUCCESS_BLOCKED_INPUT);
+	failures += test_forged_creation_plan();
+	failures += test_forged_creation_compression();
+	failures += test_forged_creation_staged_length();
+	failures += test_forged_creation_stream_length();
+	failures += test_worker_exit_with_blocked_input();
+	failures += test_monotonic_clock_failures();
+	failures += test_spooled_container_disk_limit();
+	CHECK(failures == 0);
+}
+
+/* Everything after this point must stay in the real-clock section: only
+ * the clock hook and its real-clock helper belong here. The command-line
+ * macro also renamed the system header's declaration, so redeclare the
+ * real clock_gettime after undefining it to bypass faults for supervision.
+ */
+#undef clock_gettime
+
+int clock_gettime(clockid_t, struct timespec *);
+
+static uint64_t
+coordinator_real_milliseconds(void)
+{
+	struct timespec time;
+
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &time) == 0);
+	return ((uint64_t)time.tv_sec * 1000 + (uint64_t)time.tv_nsec / 1000000);
+}
+
+/* Fault arming belongs to the case process; re-executed children start clear. */
+int
+fsimg_test_clock_gettime(clockid_t clock, struct timespec *time)
+{
+	if (clock == CLOCK_MONOTONIC && coordinator_clock_fail_from != 0 &&
+	    ++coordinator_clock_calls >= coordinator_clock_fail_from) {
+		/* Measure cleanup from fault activation rather than test setup. */
+		if (coordinator_clock_fault_started == 0)
+			coordinator_clock_fault_started = coordinator_real_milliseconds();
+		errno = EINVAL;
+		return (-1);
+	}
+	return (clock_gettime(clock, time));
 }

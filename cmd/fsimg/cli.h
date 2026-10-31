@@ -172,7 +172,6 @@ void fsimg_cli_release(fsimg_cli_options_t *);
  * when nothing was stripped or the rest is not one valid host name.
  */
 bool fsimg_cli_stem(const char *, char *, size_t);
-uint64_t fsimg_cli_clock(void);
 /* Paths holding nothing, every descriptor -1; fsimg_cli_prepare starts
  * from this state itself.
  */

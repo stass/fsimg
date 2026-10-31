@@ -14,7 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "fsimg-endian.h"
@@ -169,7 +168,6 @@ typedef struct worker_supervisor {
 	bool		 producer_done;
 } worker_supervisor_t;
 
-static uint64_t monotonic_milliseconds(void);
 static fsimg_status_t worker_error(fsimg_error_t *, const char *);
 static fsimg_status_t queue_text(worker_supervisor_t *, const fsimg_worker_text_t *,
     bool, fsimg_error_t *);
@@ -178,6 +176,8 @@ static bool bound_volume(worker_supervisor_t *);
 static bool streaming(const fsimg_worker_request_t *);
 static bool reading_stream(const fsimg_worker_request_t *);
 static const char *slot_name(const fsimg_worker_request_t *, fsimg_layer_kind_t);
+static bool layers_expected(const fsimg_worker_request_t *,
+    const unsigned char *);
 static bool read_disk_expected(const worker_supervisor_t *,
     const unsigned char *);
 static bool output_length_expected(const worker_supervisor_t *, uint64_t);
@@ -201,7 +201,8 @@ static fsimg_status_t read_raw(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t write_relay(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t read_relay(worker_supervisor_t *, fsimg_error_t *);
 static fsimg_status_t advance_ready(worker_supervisor_t *, fsimg_error_t *);
-static fsimg_status_t observe_process(worker_process_t *, fsimg_error_t *);
+static fsimg_status_t observe_process(worker_process_t *, bool,
+    fsimg_error_t *);
 static fsimg_status_t supervise_operation(worker_supervisor_t *, fsimg_error_t *);
 static void supervisor_init(worker_supervisor_t *, const fsimg_worker_request_t *,
     fsimg_worker_result_t *, void *, int, const volatile sig_atomic_t *);
@@ -210,16 +211,6 @@ static fsimg_status_t finish_operation(worker_supervisor_t *, fsimg_status_t,
 static void stop_process(worker_process_t *);
 static void close_channel(int *);
 static void cleanup_operation(worker_supervisor_t *);
-
-static uint64_t
-monotonic_milliseconds(void)
-{
-	struct timespec time;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &time) == -1)
-		return (0);
-	return ((uint64_t)time.tv_sec * 1000 + (uint64_t)time.tv_nsec / 1000000);
-}
 
 static fsimg_status_t
 worker_error(fsimg_error_t *error, const char *message)
@@ -333,39 +324,83 @@ slot_name(const fsimg_worker_request_t *request, fsimg_layer_kind_t kind)
 }
 
 /*
+ * Whether an IMAGE record names the layers its request forces. A named
+ * scheme or container slot reports that layer and an emptied one none; a
+ * create job writes an unspecified slot empty, while a read job detects
+ * it, and then any layer is its answer. The compression is likewise the
+ * one the request names, which a read job leaves empty for detection.
+ */
+static bool
+layers_expected(const fsimg_worker_request_t *request,
+    const unsigned char *raw)
+{
+	const fsimg_layer_kind_t slots[] = { FSIMG_LAYER_SCHEME,
+	    FSIMG_LAYER_CONTAINER };
+	const size_t fields[] = { FSIMG_WIRE_IMAGE_SCHEME,
+	    FSIMG_WIRE_IMAGE_CONTAINER };
+	bool reading;
+
+	reading = !fsimg_job_has_roots(request->kind);
+	for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
+		if (reading && request->stack.slots[slots[i]].state ==
+		    FSIMG_SLOT_UNSPECIFIED)
+			continue;
+		if (strcmp((const char *)raw + fields[i],
+		    slot_name(request, slots[i])) != 0)
+			return (false);
+	}
+	if (reading && request->compression[0] == '\0')
+		return (true);
+	return (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION,
+	    request->compression) == 0);
+}
+
+/*
  * Whether the file and disk a read job's IMAGE record reports fit its
  * input. The file is the input file the coordinator opened, of a length
  * it knows; a stream or a compressed input is peeled from the spool,
- * whose length only the worker sees and the spool limit bounds. A fixed
- * VHD is its disk and a 512-byte footer, so the file fixes the disk's
- * length; any other container's disk is accepted here, as its own tables
- * declare it.
+ * whose length only the worker sees and the spool limit bounds. Without a
+ * container the disk is the file (fsimg_wire_image_frame_valid). The
+ * container's registry entry says what bounds its disk: a disk that is
+ * its file less a fixed trailer is checked exactly, and a spooled
+ * container's disk, decoded into the spool, is held to the spool limit.
+ * Any other container's disk is accepted at the length its own tables
+ * declare; specs/design-security.md (Coordinator and worker) says why no
+ * ceiling from the file would hold.
  */
 static bool
 read_disk_expected(const worker_supervisor_t *state, const unsigned char *raw)
 {
-	uint64_t file;
-	bool spooled;
+	const fsimg_container_ops_t *container;
+	uint64_t file, disk, spool;
+	bool file_in_spool;
 
 	file = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FILE);
-	spooled = reading_stream(state->request) ||
+	disk = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK);
+	spool = state->request->limits.spool_bytes;
+	file_in_spool = reading_stream(state->request) ||
 	    raw[FSIMG_WIRE_IMAGE_COMPRESSION] != '\0';
-	if (spooled ? file > state->request->limits.spool_bytes :
-	    file != state->disk_bytes)
+	if (file_in_spool ? file > spool : file != state->disk_bytes)
 		return (false);
-	if (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER, "vhd") != 0)
+	if (raw[FSIMG_WIRE_IMAGE_CONTAINER] == '\0')
 		return (true);
-	return (file >= 512 &&
-	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK) == file - 512);
+	/* fsimg_wire_image_frame_valid found the named container. */
+	container = fsimg_layer_find((const char *)raw +
+	    FSIMG_WIRE_IMAGE_CONTAINER)->container;
+	if (container->trailer_bytes != 0)
+		return (file >= container->trailer_bytes &&
+		    disk == file - container->trailer_bytes);
+	return (!container->spooled || disk <= spool);
 }
 
 /*
- * A read job's IMAGE record describes the input it opened: its disk is the
- * input file's size, or the length a container's tables declare (see
- * read_disk_expected). A create job's describes the disk it plans: it
- * names the request's scheme and container, and selects the one
- * partition when a scheme is named. Either way the handler then takes the
- * disk length as the bound of the partitions, the volume and the image.
+ * An IMAGE record names the layers the request forces (layers_expected).
+ * A read job's describes the input it opened: its disk is the input
+ * file's size, or the length a container's tables declare (see
+ * read_disk_expected). A create job's describes the disk it plans, its
+ * own file, and selects the one partition when a scheme is named. Either
+ * way the handler then takes the disk length as the bound of the
+ * partitions, the volume and the image.
  * Only i reports a disk without a volume; only W verifies layers.
  */
 static bool
@@ -384,20 +419,12 @@ image_frame_expected(const worker_supervisor_t *state,
 	if (((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 && kind != FSIMG_JOB_INFO) ||
 	    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && kind != FSIMG_JOB_VERIFY))
 		return (false);
+	if (!layers_expected(state->request, raw))
+		return (false);
 	if (kind < FSIMG_JOB_CREATE)
 		return (read_disk_expected(state, raw));
-	/* A planned disk is its own file, with the compression the job
-	 * selects around it.
-	 */
-	return (strcmp((const char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION,
-	    fsimg_job_compression(state->request)) == 0 &&
-	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FILE) ==
+	return (fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FILE) ==
 	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK) &&
-	    strcmp((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME,
-	    slot_name(state->request, FSIMG_LAYER_SCHEME)) == 0 &&
-	    strcmp((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER,
-	    slot_name(state->request,
-	    FSIMG_LAYER_CONTAINER)) == 0 &&
 	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SELECTED) ==
 	    (raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0' ? 1 : 0));
 }
@@ -408,7 +435,10 @@ image_frame_expected(const worker_supervisor_t *state,
  * or compression the image is that disk, or the bare volume, exactly; an
  * encoding's largest length strictly exceeds the disk it holds, since
  * each layer adds its own metadata (the output_bytes contract of
- * fsimg_plan_info_t).
+ * fsimg_plan_info_t). The disk and that largest length are the worker's
+ * own, checked here only against each other: the disk follows from
+ * sources only the worker reads, so a ceiling derived from it would bound
+ * nothing (specs/design-security.md, Coordinator and worker).
  */
 static bool
 plan_frame_expected(const worker_supervisor_t *state,
@@ -744,15 +774,18 @@ prepare_request(worker_supervisor_t *state, fsimg_error_t *error)
 	uint64_t started;
 	fsimg_status_t status;
 
-	started = monotonic_milliseconds();
-	if (request->deadline_milliseconds == 0 &&
-	    request->seconds > (UINT64_MAX - started) / 1000)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_CONTEXT,
-		    "worker deadline exceeds clock range"));
 	if (request->deadline_milliseconds != 0)
 		state->deadline = request->deadline_milliseconds;
-	else if (request->seconds != 0)
+	else if (request->seconds != 0) {
+		started = fsimg_host_clock();
+		if (started == FSIMG_HOST_CLOCK_FAILED)
+			return (fsimg_error_set(error, FSIMG_EIO, errno,
+			    FSIMG_OP_CONTEXT, "monotonic clock query failed"));
+		if (request->seconds > (UINT64_MAX - started) / 1000)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_CONTEXT, "worker deadline exceeds clock range"));
 		state->deadline = started + request->seconds * 1000;
+	}
 	state->output_limit = request->limits.max_output_bytes;
 	if (request->input_fd != -1) {
 		status = fsimg_input_check(request->input_fd, &request->input, error);
@@ -790,7 +823,7 @@ advance_request(worker_supervisor_t *state)
 			fsimg_frame_advance(&state->decoder);
 		state->phase = WORKER_REQUEST_FAILED;
 		state->processes[PROCESS_PARSER].finish_deadline =
-		    monotonic_milliseconds() + 2000;
+		    fsimg_host_deadline(2000);
 		return;
 	}
 	outbound->used += (size_t)count;
@@ -1130,15 +1163,17 @@ advance_ready(worker_supervisor_t *state, fsimg_error_t *error)
 }
 
 /* Channel EOF and process exit may arrive in either order. EOF starts the same
- * bounded exit grace for both roles. Pending output can delay channel drainage
+ * bounded exit grace for every role. Pending output can delay channel drainage
  * after process exit, so exit alone does not start that grace.
  * Queued control errors are drained before final exit status is interpreted.
+ * A child that has not both exited and closed its channel when its grace
+ * ends is an error, unless the caller marks it stoppable: then it is
+ * stopped, and supervision goes on.
  */
 static fsimg_status_t
-observe_process(worker_process_t *process, fsimg_error_t *error)
+observe_process(worker_process_t *process, bool stoppable, fsimg_error_t *error)
 {
 	pid_t waited;
-	uint64_t now;
 
 	if (!process->exited) {
 		waited = waitpid(process->pid, &process->status, WNOHANG);
@@ -1149,11 +1184,13 @@ observe_process(worker_process_t *process, fsimg_error_t *error)
 	}
 	if (process->exited && process->channel_eof)
 		return (FSIMG_OK);
-	now = monotonic_milliseconds();
 	if (process->channel_eof && process->finish_deadline == 0)
-		process->finish_deadline = now + 2000;
-	if (process->finish_deadline != 0 && now >= process->finish_deadline)
+		process->finish_deadline = fsimg_host_deadline(2000);
+	if (!fsimg_host_expired(process->finish_deadline))
+		return (FSIMG_OK);
+	if (!stoppable)
 		return (worker_error(error, "child exit and channel closure did not complete"));
+	stop_process(process);
 	return (FSIMG_OK);
 }
 
@@ -1183,12 +1220,10 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 	fsimg_worker_text_t text;
 	fsimg_status_t status;
 	bool finished, control_allowed;
-	uint64_t now;
 
 	for (;;) {
-		now = monotonic_milliseconds();
 		if ((state->interrupted != NULL && *state->interrupted != 0) ||
-		    (state->deadline != 0 && now >= state->deadline))
+		    fsimg_host_expired(state->deadline))
 			return (fsimg_error_set(error, FSIMG_ECANCELLED, 0,
 			    FSIMG_OP_CONTEXT, "worker cancelled or deadline exceeded"));
 		if (!state->producer_done && relay->phase == RELAY_IDLE) {
@@ -1215,14 +1250,20 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 			fsimg_frame_advance(&state->decoder);
 
 		/* The input relay's only channel is the worker's input pipe,
-		 * spent once the worker exits; a relay still running then gets
-		 * the same exit grace as any child whose channel closed.
+		 * spent once the worker exits. A relay still running then, blocked
+		 * on a slow standard input, can deliver nothing more: after the
+		 * exit grace any child gets, it is stopped rather than reported
+		 * as a stuck child. A worker that failed is then reported by its
+		 * own frames; a worker that claimed success still fails below,
+		 * as a stream read succeeds only after the relay exited
+		 * successfully.
 		 */
 		if (state->processes[PROCESS_PARSER].exited)
 			state->processes[PROCESS_INPUT].channel_eof = true;
 		finished = state->raw_eof;
 		for (unsigned role = 0; role < PROCESS_COUNT; role++) {
-			status = observe_process(&state->processes[role], error);
+			status = observe_process(&state->processes[role],
+			    role == PROCESS_INPUT, error);
 			if (status != FSIMG_OK)
 				return (status);
 			finished = finished && state->processes[role].channel_eof &&
@@ -1296,8 +1337,9 @@ supervise_operation(worker_supervisor_t *state, fsimg_error_t *error)
 		}
 	}
 	/* A relay that failed may have ended the stream early, whatever the
-	 * worker made of the bytes it had. A relay that never ran is recorded
-	 * as exited with status zero.
+	 * worker made of the bytes it had, and one stopped after the worker
+	 * exited never finished. A relay that never ran is recorded as
+	 * exited with status zero.
 	 */
 	if (!WIFEXITED(state->processes[PROCESS_INPUT].status) ||
 	    WEXITSTATUS(state->processes[PROCESS_INPUT].status) != 0)
@@ -1332,7 +1374,7 @@ stop_process(worker_process_t *process)
 	if (process->pid == -1 || process->exited)
 		return;
 	kill(process->pid, SIGTERM);
-	stopping = monotonic_milliseconds() + 2000;
+	stopping = fsimg_host_deadline(2000);
 	for (;;) {
 		waited = waitpid(process->pid, &process->status, WNOHANG);
 		if (waited == process->pid) {
@@ -1341,7 +1383,7 @@ stop_process(worker_process_t *process)
 		}
 		if (waited == -1 && errno != EINTR)
 			return;
-		if (monotonic_milliseconds() >= stopping) {
+		if (fsimg_host_expired(stopping)) {
 			kill(process->pid, SIGKILL);
 			while (waitpid(process->pid, &process->status, 0) == -1 && errno == EINTR)
 				;

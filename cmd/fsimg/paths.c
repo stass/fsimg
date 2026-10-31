@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "cli.h"
@@ -111,16 +110,6 @@ typedef struct publication_cancel {
 	const volatile sig_atomic_t *interrupted;
 	uint64_t	 deadline;
 } publication_cancel_t;
-
-uint64_t
-fsimg_cli_clock(void)
-{
-	struct timespec time;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &time) == -1)
-		return (0);
-	return ((uint64_t)time.tv_sec * 1000 + (uint64_t)time.tv_nsec / 1000000);
-}
 
 static fsimg_status_t
 host_error(fsimg_error_t *error, const char *message)
@@ -343,8 +332,7 @@ input_ready(void *argument, fsimg_error_t *error)
 	fsimg_cli_options_t *options = argument;
 
 	if ((options->interrupted != NULL && *options->interrupted != 0) ||
-	    (options->request.deadline_milliseconds != 0 &&
-	    fsimg_cli_clock() >= options->request.deadline_milliseconds))
+	    fsimg_host_expired(options->request.deadline_milliseconds))
 		return (fsimg_error_set(error, FSIMG_ECANCELLED, 0,
 		    FSIMG_OP_IO, "input preparation cancelled or deadline exceeded"));
 	return (FSIMG_OK);
@@ -1258,7 +1246,7 @@ publication_cancelled(void *argument)
 	publication_cancel_t *cancel = argument;
 
 	return (*cancel->interrupted != 0 ||
-	    (cancel->deadline != 0 && fsimg_cli_clock() >= cancel->deadline));
+	    fsimg_host_expired(cancel->deadline));
 }
 
 /* Publish a staged output of length bytes under its final name, without

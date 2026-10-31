@@ -108,7 +108,7 @@ fsimg_SOURCES = cmd/fsimg/main.c cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
 	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/worker-parent.c \
 	cmd/fsimg/worker-child.c cmd/fsimg/worker-output.c \
-	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/spawn.c
+	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/clock.c compat/spawn.c
 fsimg_LDADD = libfsimg-core.la
 noinst_PROGRAMS = example-create-tree example-provider example-read-slice example-extract
 noinst_PROGRAMS += fsimg-rss fsimg-rss-guard
@@ -166,7 +166,8 @@ test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \
 	cmd/fsimg/display.c cmd/fsimg/paths.c cmd/fsimg/job.c cmd/fsimg/worker.h \
-	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h
+	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h \
+	compat/clock.c
 test_cli_LDADD = libfsimg-core.la
 # The private-directory routine alone, its mkdirat hooked by the test; its
 # own flags keep its compat objects apart from the library's.
@@ -272,7 +273,10 @@ test_protocol_LDADD = libfsimg-core.la
 test_worker_SOURCES = test/worker.c test/test.h test/socket.c test/socket.h \
 	cmd/fsimg/worker.h cmd/fsimg/job.c cmd/fsimg/protocol.c cmd/fsimg/protocol.h \
 	cmd/fsimg/worker-parent.c cmd/fsimg/worker-child.c cmd/fsimg/worker-output.c \
-	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/spawn.c
+	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/clock.c compat/spawn.c
+# The clock routed through test/worker.c's hook, which can make the
+# coordinator's monotonic clock fail.
+test_worker_CPPFLAGS = $(AM_CPPFLAGS) -Dclock_gettime=fsimg_test_clock_gettime
 test_worker_LDADD = libfsimg-core.la
 test_staged_verify_SOURCES = $(fsimg_SOURCES) test/staged-verify.c test/test.h
 test_staged_verify_CPPFLAGS = $(AM_CPPFLAGS) -Dmain=fsimg_test_command_main

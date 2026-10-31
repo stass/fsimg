@@ -135,10 +135,11 @@ class TestRunnerFsimg < Minitest::Test
   CREATED_VALID = ->(_image) { [NoRecords.new, FsimgSpec::Case::CREATED_IMAGE] }
 
   # An observer that, for the third invocation (ls, after create and the
-  # second create from the reversed manifest), kills every member of its
-  # group but the coordinator once one appears, and stops looking once
-  # that invocation ends. A group with members keeps its ID, so pgrep -g
-  # names only that invocation's processes.
+  # second create from the reversed manifest), kills only the image worker
+  # once it appears, and stops looking once that invocation ends. The input
+  # and output relays must survive so the coordinator can report the fault
+  # without truncating an output record. A group with members keeps its ID,
+  # so pgrep -g names only that invocation's processes.
   class WorkerKiller < FsimgSpec::GroupObserver
     def initialize
       super
@@ -172,7 +173,7 @@ class TestRunnerFsimg < Minitest::Test
 
     def kill_workers(group)
       until @ended
-        workers = IO.popen(["pgrep", "-g", group.to_s], &:read).split.map { Integer(_1) } - [group]
+        workers = IO.popen(["pgrep", "-g", group.to_s, "-f", "--", "--internal-worker"], &:read).split.map { Integer(_1) } - [group]
         if workers.any?
           @killed = true
           return workers.each { Process.kill(:KILL, _1) }

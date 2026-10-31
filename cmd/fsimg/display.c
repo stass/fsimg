@@ -1770,6 +1770,22 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		}
 		break;
 	case FSIMG_FRAME_IMAGE:
+		/* cW reads a compressed image back through its verification's
+		 * spool, and a compressed bare disk decodes to exactly that
+		 * disk, so a planned disk the spool limit cannot hold is
+		 * refused as soon as the creation reports it, rather than by
+		 * the verification after the whole creation. Under a container
+		 * the spool holds the container's file, which can be shorter
+		 * than the disk.
+		 */
+		if (options->verify_staged && !display->verifying_staged &&
+		    raw[FSIMG_WIRE_IMAGE_COMPRESSION] != '\0' &&
+		    raw[FSIMG_WIRE_IMAGE_CONTAINER] == '\0' &&
+		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK) >
+		    options->request.limits.spool_bytes)
+			return (fsimg_limit_error(error, FSIMG_RESOURCE_SPOOL,
+			    options->request.limits.spool_bytes,
+			    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK)));
 		bcopy(raw, display->image, sizeof(display->image));
 		if (planning || (!display->verifying_staged &&
 		    options->request.kind < FSIMG_JOB_CREATE &&

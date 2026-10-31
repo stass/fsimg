@@ -205,7 +205,15 @@ preparation, worker processing, publication and successful output; phase changes
 cannot restart its time allowance. After failure, diagnostic delivery receives
 at most two seconds, with one further two-second stderr-only attempt if stdout
 cannot carry the report. These attempts perform no parsing or publication.
-Child termination retains its bounded shutdown grace. The [CLI design](design-cli.md) owns parsing and
+Child termination retains its bounded shutdown grace. The monotonic clock
+fails closed: a failed query has passed every deadline and grace, so it
+ends each wait rather than extending it. Its failure at deadline setup is
+reported as such. A failure after setup ends supervision as a passed
+deadline when one is set, and ends the grace periods at once, so without
+one the next grace ends supervision; while the clock keeps
+failing, the diagnostic attempts, which have no other bound, end before
+they deliver anything, so the exit status alone reports the failure.
+The [CLI design](design-cli.md) owns parsing and
 streaming representation. Cleanup of private scratch is descriptor-relative,
 does not follow links or recurse into worker-created directories, and has a
 finite entry bound; incomplete cleanup reports the retained location.

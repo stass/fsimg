@@ -141,8 +141,8 @@ main(int argc, char **argv)
 	options.request.output_budget = &budget;
 	invalid_syntax = status != FSIMG_OK && options.syntax_error;
 	if (status == FSIMG_OK && options.request.seconds != 0) {
-		now = fsimg_cli_clock();
-		if (now == 0)
+		now = fsimg_host_clock();
+		if (now == FSIMG_HOST_CLOCK_FAILED)
 			status = fsimg_error_set(&error, FSIMG_EIO, errno,
 			    FSIMG_OP_CONTEXT, "monotonic clock query failed");
 		else if (options.request.seconds > (UINT64_MAX - now) / 1000) {
@@ -190,7 +190,7 @@ main(int argc, char **argv)
 		 * A subsequent signal can still interrupt this final report.
 		 */
 		interrupted = 0;
-		reporting_deadline = fsimg_cli_clock() + 2000;
+		reporting_deadline = fsimg_host_deadline(2000);
 	}
 	output_status = fsimg_output_run(executable, fsimg_cli_final, &display,
 	    STDOUT_FILENO, reporting_deadline, &interrupted, &budget, &output_error);
@@ -210,7 +210,7 @@ main(int argc, char **argv)
 		display.phase = FSIMG_CLI_OUTPUT_RECORDS;
 		interrupted = 0;
 		fsimg_output_run(executable, fsimg_cli_final, &display, -1,
-		    fsimg_cli_clock() + 2000, &interrupted, &budget, &output_error);
+		    fsimg_host_deadline(2000), &interrupted, &budget, &output_error);
 	}
 	fsimg_cli_release(&options);
 	return (status == FSIMG_OK ? 0 : invalid_syntax ? 2 : 1);

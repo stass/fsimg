@@ -34,6 +34,7 @@ static void test_extract_options(void);
 static void test_stems(void);
 static void test_long_listing(void);
 static void test_staged_verification_failure(void);
+static void test_compressed_verification_spool_limit(void);
 static void test_names(bool);
 static void test_private_cleanup(void);
 static void test_staging_cleanup(void);
@@ -1901,5 +1902,101 @@ main(int argc, char **argv)
 	test_manifest_staging_cleanup();
 	test_progress();
 	test_staged_verification_failure();
+	test_compressed_verification_spool_limit();
 	return (0);
+}
+
+/* cW refuses a compressed bare disk as soon as the creation reports it.
+ * A container's decoded file size is not determined by its disk size.
+ */
+static void
+test_compressed_verification_spool_limit(void)
+{
+	typedef struct verification_spool_case {
+		const char	*name;
+		const char	*stack;
+		const char	*container;
+		const char	*compression;
+		uint64_t	 disk_bytes;
+		bool		 verify;
+		fsimg_status_t	 status;
+	} verification_spool_case_t;
+	const uint64_t limit = UINT64_C(1024) * 1024;
+	const verification_spool_case_t cases[] = {
+		{ .name = "compressed bare disk equals spool limit",
+		  .stack = "fat32", .container = "", .compression = "gzip",
+		  .disk_bytes = limit, .verify = true, .status = FSIMG_OK },
+		{ .name = "compressed creation without staged verification",
+		  .stack = "fat32", .container = "", .compression = "gzip",
+		  .disk_bytes = limit + 512, .verify = false, .status = FSIMG_OK },
+		{ .name = "uncompressed staged verification",
+		  .stack = "fat32", .container = "", .compression = "",
+		  .disk_bytes = limit + 512, .verify = true, .status = FSIMG_OK },
+		{ .name = "compressed container defers spool check",
+		  .stack = "fat32/-/dmg", .container = "dmg", .compression = "gzip",
+		  .disk_bytes = limit + 512, .verify = true, .status = FSIMG_OK },
+		{ .name = "compressed bare disk exceeds spool limit",
+		  .stack = "fat32", .container = "", .compression = "gzip",
+		  .disk_bytes = limit + 512, .verify = true, .status = FSIMG_ELIMIT }
+	};
+	fsimg_cli_options_t options;
+	fsimg_cli_paths_t paths;
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_worker_text_t text;
+	fsimg_frame_t frame;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t started, elapsed;
+	bool valid;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		bzero(&options, sizeof(options));
+		fsimg_worker_request_init(&options.request);
+		options.request.kind = FSIMG_JOB_CREATE;
+		CHECK(fsimg_stack_parse(cases[i].stack, &options.request.stack,
+		    NULL) == FSIMG_OK);
+		options.mode = cases[i].verify ? "cW" : "c";
+		options.image = "out.img";
+		options.scratch = "-";
+		options.verify_staged = cases[i].verify;
+		options.request.limits.spool_bytes = limit;
+		strcpy(options.request.compression, cases[i].compression);
+		fsimg_cli_paths_init(&paths);
+		fsimg_cli_display_init(&display, &options, &result, &paths);
+
+		bzero(&frame, sizeof(frame));
+		frame.type = FSIMG_FRAME_IMAGE;
+		frame.length = FSIMG_WIRE_IMAGE_BYTES;
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_DISK,
+		    cases[i].disk_bytes);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_FILE,
+		    cases[i].disk_bytes);
+		strcpy((char *)frame.payload + FSIMG_WIRE_IMAGE_COMPRESSION,
+		    cases[i].compression);
+		strcpy((char *)frame.payload + FSIMG_WIRE_IMAGE_CONTAINER,
+		    cases[i].container);
+		bzero(&error, sizeof(error));
+		bzero(&text, sizeof(text));
+		started = fsimg_host_clock();
+		CHECK(started != FSIMG_HOST_CLOCK_FAILED);
+		status = fsimg_cli_event(&display, &frame, &text, &error);
+		elapsed = fsimg_host_clock();
+		CHECK(elapsed != FSIMG_HOST_CLOCK_FAILED);
+		elapsed -= started;
+
+		valid = status == cases[i].status;
+		if (status == FSIMG_ELIMIT) {
+			valid = valid && error.status == FSIMG_ELIMIT &&
+			    error.resource == FSIMG_RESOURCE_SPOOL &&
+			    error.limit == limit && error.observed == limit + 512;
+		}
+		if (!valid)
+			fprintf(stderr, "%s: status %d, message \"%s\", elapsed %llu ms; "
+			    "expected status %d, resource %d, limit %llu, observed %llu\n",
+			    cases[i].name, status, error.message, (unsigned long long)elapsed,
+			    cases[i].status, error.resource, (unsigned long long)error.limit,
+			    (unsigned long long)error.observed);
+		CHECK(valid);
+	}
 }

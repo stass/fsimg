@@ -968,7 +968,8 @@ select compressions this version cannot write.
 .Cm cW
 reads a compressed image back through the spool, so it needs scratch and
 .Fl l Ar spool
-room for the uncompressed image.
+room for the uncompressed image; a compressed disk without a container
+that the limit cannot hold is refused once the creation plans it.
 .Bl -tag -width Ds
 .It Fl o Ar gzip:level=1..9
 The DEFLATE level; default 6.

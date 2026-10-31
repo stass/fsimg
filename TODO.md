@@ -69,21 +69,10 @@
   * `c -v` and `x -v` do not yet print one line per entry: the writer and
     extractor have no per-entry callback for the worker to relay
     (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
-  * [Low] The forged-worker tests cover no creation job, so the
-    coordinator's checks of an encoded output's PLAN, of a created IMAGE
-    record's compression against the job's, of DONE's staged length and of
-    a stream's raw bytes against its plan run only against the real worker
-    (`cmd/fsimg/worker-parent.c`, `test/worker.c`).
   * `x` and `t` accept one member; several members, the union of their
     subtrees resolved by each format's lookup rules, are refused with exit 1
     (`cmd/fsimg/options.c`, `lib/read/`).
   The layer read side leaves these open:
-  * [Medium] The coordinator bounds default output by the disk length the
-    worker reports for a DMG or sparse image, which it cannot check against
-    the file; a compromised worker could raise it. A fixed VHD's disk is
-    checked to be the file less its footer; a default ceiling for the
-    other containers derived from the file length would take the rest of
-    the trust out (`cmd/fsimg/worker-parent.c` `bound_volume`).
   The layer write side leaves these open:
   * [Medium] Hole knowledge tests lack the design's Sandbox and capability
     cases: no test spools and transcodes under the worker's installed
@@ -92,27 +81,10 @@
     input on a filesystem without holes or exercises extraction against
     the discovery-sync counter (`test/sandbox.c`, `test/holes.c`,
     specs/design-holes.md Tests and evidence).
-  * [Low] The coordinator takes an encoded output's largest length (a
-    container's or gzip's) from the worker's PLAN, checked only to exceed
-    the disk, and a stream without `-l output` is bounded by it; a ceiling
-    the coordinator derives from the request's layers and disk would
-    remove that trust
-    (`cmd/fsimg/worker-parent.c` `plan_frame_expected`). Likewise a fixed
-    VHD's 512-byte footer is known to the coordinator by name
-    (`read_disk_expected`) rather than from the layer registry.
-  * [Low] `cW` of a compressed image decodes it into the spool, so a disk
-    larger than the spool limit fails verification only after the whole
-    creation; the coordinator knows the planned disk from the IMAGE record
-    and could refuse at planning (`cmd/fsimg/worker-parent.c`).
   * [Low] A layer's failure is attributed by `layer_failed` at each of its
     call sites in `lib/layers/image.c` and by the chunk index in
     `lib/layers/chunks.c`; a new layer entry point must remember to call
     it.
-  * [Low] When the worker dies without an error frame while the input relay
-    is still blocked reading a slow standard input, the relay's channel
-    closes by force and the command reports that child exit and channel
-    closure did not complete, not that the worker failed
-    (`cmd/fsimg/worker-parent.c` `supervise_operation`).
 
 * [Medium] **QNX4 interoperability** (`lib/formats/qnx4/`): the
   [format design](specs/design-qnx4.md) and [driver design](specs/design-qnx4-driver.md)
@@ -269,14 +241,26 @@
   base, and `bin/replay` skips one. Replay them where the case phase's tool
   set has the formatter, with its recorded version.
 
-* [Medium] **Killed worker once gave malformed NDJSON** (`cmd/fsimg/worker-parent.c`,
-  `test/spec/suite/fat/test_runner_fsimg.rb`): in one full quick run on macOS,
-  `test_killed_worker_is_a_fault` saw `ls` end as `harness_error` ("malformed
-  NDJSON on stdout") instead of a fault record after its worker was killed.
-  It did not recur in 40 runs of the test under CPU load or in 450 direct
-  worker kills during `fsimg ls -j`. Either the relay can emit a partial
-  record when a worker dies, which is an fsimg defect, or the test's killer
-  raced; the assertion now quotes the end of stdout to tell them apart.
+* [Low] **One clock, enforced** (`cmd/fsimg/worker-child.c`, `Makefile.am`):
+  the worker's progress sampling still calls `clock_gettime` itself (a
+  failure only drops a progress record), and no check target confines
+  `clock_gettime` to `compat/clock.c` as `check-fstat` confines `fstat`.
+  Route it through `fsimg_host_clock` and add the check. The conversion of
+  `-l seconds` to a deadline, with its clock-failure and overflow checks,
+  is also written twice (`cmd/fsimg/main.c`, `worker-parent.c`
+  `prepare_request`); one helper in `compat/clock.c` would hold it.
+
+* [Medium] **A supervision error can cut a record** (`cmd/fsimg/worker-parent.c`
+  `supervise_operation`, `cmd/fsimg/main.c`): cancellation, a deadline, or a
+  failure of the output relay or of polling ends supervision while the relay
+  may be part-way through writing one record, and the relay is then
+  stopped, so standard output can end inside that record and the final
+  report follows on the same line, leaving `--json` output malformed. A
+  worker's failure cannot do this, since control and raw data are read only
+  while the relay is idle. Letting the relay finish its one bounded record
+  within the exit grace, or starting the final report on a fresh line when
+  forwarded bytes went unconfirmed, would keep every earlier record and the
+  error record parseable.
 
 * [Medium] **Spec harness stage harness errors** (`test/spec/lib/fsimg_spec/outcome.rb`,
   `case_run.rb`): a stage's `harness_error` outcome covers both host faults
@@ -427,13 +411,6 @@
   follows a link to a directory before the kind check refuses it. Route
   every command-line open through `open_nofollow` and one failure
   classifier whose only per-site variation is the noun.
-* [Low] **Monotonic-clock failures** (`cmd/fsimg/paths.c`,
-  `cmd/fsimg/worker-parent.c`, `cmd/fsimg/main.c`): make later supervision,
-  publication and reporting clock queries distinguish failure from zero.
-  Initial deadline setup already returns `FSIMG_EIO`; later helpers can derive
-  a reporting deadline or defer timeout detection after a failed query.
-  Centralize the clock result and exercise failures without weakening bounded
-  shutdown or adding a blocking diagnostic path.
 
 * [Medium] **UFS publication handoff** (`lib/output/publish.c`,
   `test/publish.c --identity`, `test/extract.c`): investigate deferred ctime
@@ -518,15 +495,6 @@
   `fsimg_host_remove_directory()`, is exported too. Export only the public header's symbols
   (a libtool `-export-symbols-regex` or a symbol file, with test programs
   linking the convenience library for internals).
-
-* [Low] **Coordinator trusts the reported compression** (`cmd/fsimg/worker-parent.c`
-  `read_disk_expected`): a worker's IMAGE record naming a compression moves
-  the coordinator's bound on the file from the input's exact length to the
-  spool limit, so a compromised worker claiming gzip for a raw file widens
-  the volume and output bounds the coordinator derives, up to the spool
-  limit. The coordinator cannot check the claim without reading image
-  bytes; the bound still holds the worker to the spool limit, as container
-  disk lengths are already trusted.
 
 ## Planned features
 

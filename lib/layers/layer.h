@@ -602,6 +602,10 @@ typedef struct fsimg_container_writer {
  * the step after it probes for that filesystem alone. unverified names,
  * comma-separated, the fields no evidence gives a rule to check, NULL for
  * none; verification reports them and is then incomplete.
+ * trailer_bytes is, for a container whose disk is its file less a fixed
+ * trailer, that trailer's length, and zero when the container's tables
+ * declare the disk; the command line's coordinator checks a worker's
+ * reported disk with it.
  *
  * writer is the write side, NULL for a read-only container, which the
  * disk plan refuses and whose capability lacks FSIMG_CAP_WRITE.
@@ -628,6 +632,7 @@ typedef struct fsimg_container_ops {
 	const char	*codecs;
 	const char	*carries;
 	const char	*unverified;
+	size_t		 trailer_bytes;
 	bool		 payload_checks;
 	bool		 zlib;
 	bool		 spooled;
