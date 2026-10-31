@@ -442,14 +442,6 @@
   copy length or offset, and validate in the one row reader, as
   `ifs_row_get` does for ImageFS.
 
-* [Low] **Source failures fail the writer from inside the source layer**
-  (`lib/source/source.c`, `specs/design-sources.md`): an operational source
-  failure calls `fsimg_writer_fail()` and releases collection storage while a
-  driver's emit call is still on the stack, whereas a sink failure during the
-  same copy fails the writer only when `fsimg_writer_emit()` returns. Make the
-  source cursor report status only and leave failing the writer to the writer
-  lifecycle, so writer state after a failed copy no longer depends on which
-  layer failed.
 * [Low] **One classifier for command-line open failures**
   (`cmd/fsimg/paths.c`): `open_input`, `open_operand`, `open_settings` and
   `change_directory_error` each map `ELOOP`, `ENOTDIR` and `ENXIO` to an

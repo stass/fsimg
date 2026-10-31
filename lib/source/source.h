@@ -38,7 +38,11 @@ struct fsimg_source_root {
 /* Source state is embedded in the writer; callers retain no cursor handle.
  * Open and finish validate the source, reads do not, so the bytes read are
  * trusted only once finish succeeds; finish closes it on every outcome.
- * Writer failure/destruction also closes it. Source records have a separate
+ * An operational failure of open, read or range closes it too and
+ * reports the status without failing the writer, which fails when the
+ * emission that asked returns; every caller lies inside an emission or
+ * its pre-emission alias check, both of which fail the writer. Writer
+ * failure/destruction also closes it. Source records have a separate
  * buffer, so source operations preserve the catalog's current snapshot.
  * Reads within the declared length are exact or fail; a request crossing it
  * is clipped there and reports the confirmed bytes. Past-EOF offsets fail.

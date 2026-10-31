@@ -829,11 +829,17 @@ fsimg_source_open(fsimg_writer_t *writer, uint64_t entry_id,
 	return (FSIMG_OK);
 }
 
+/*
+ * An operational failure closes the current source and reports status, and
+ * no more: the writer fails as the failure returns through the emission
+ * that opened the source, as it does for a sink's failure, so its state
+ * never changes beneath a driver that is still on the stack.
+ */
 static fsimg_status_t
 source_abort(fsimg_source_cursor_t *source, fsimg_status_t status)
 {
 	fsimg_source_close(source->writer);
-	return (fsimg_writer_fail(source->writer, status));
+	return (status);
 }
 
 fsimg_status_t
@@ -971,9 +977,7 @@ fsimg_source_finish(fsimg_writer_t *writer, fsimg_error_t *error)
 	if (status == FSIMG_OK)
 		status = check_digest(source, error);
 	fsimg_source_close(writer);
-	if (status != FSIMG_OK)
-		return (fsimg_writer_fail(source->writer, status));
-	return (FSIMG_OK);
+	return (status);
 }
 
 /* Whether the cursor computes its bytes from source->generated: generated

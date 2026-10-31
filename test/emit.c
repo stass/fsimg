@@ -746,7 +746,7 @@ static struct {
 	fsimg_emit_payload_t payload;
 	uint64_t	 writes;
 	bool		 source_active;
-	bool		 writer_failed;
+	fsimg_writer_state_t writer_state;
 } copy_run;
 
 /* Lay out regions in descending logical order at ascending image offsets,
@@ -783,7 +783,7 @@ copy_case_emit(fsimg_writer_t *writer, fsimg_emit_t *emit, fsimg_error_t *error)
 	 */
 	copy_run.writes = copy_run.sink->writes - writes_before;
 	copy_run.source_active = writer->source.active;
-	copy_run.writer_failed = writer->state == FSIMG_WRITER_FAILED;
+	copy_run.writer_state = writer->state;
 	return (status);
 }
 
@@ -956,12 +956,11 @@ test_direct_copies(void)
 		CHECK(observed.bytes != NULL && observed.seen != NULL);
 
 		status = emit_to(&fixture, &sink, &error);
-		/* The copy closes its source on every outcome. Only an operational
-		 * source failure fails the writer at once (design-sources.md); any
-		 * other failure does so when fsimg_writer_emit() returns.
+		/* The copy closes its source on every outcome. Emission owns the
+		 * writer's state transition after the driver returns its status.
 		 */
 		CHECK(!copy_run.source_active);
-		CHECK(copy_run.writer_failed == (test->short_read_id != 0));
+		CHECK(copy_run.writer_state == FSIMG_WRITER_EMITTING);
 		if (test->expected == FSIMG_OK) {
 			if (status != FSIMG_OK)
 				fprintf(stderr, "%s: %d %s\n", test->name, status,

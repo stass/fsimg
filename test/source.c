@@ -71,6 +71,9 @@ static void test_free_active(void);
 static void test_failed_writer(void);
 static void test_reentry(void);
 static void test_provider(void);
+static void add_recovery_source(source_fixture_t *);
+static void expect_cursor_failure_preserves_writer(source_fixture_t *);
+static void test_emission_source_failure_fails_writer(void);
 static void test_host_tree(void);
 static void test_mutation(void);
 static void test_rejection(void);
@@ -371,6 +374,73 @@ test_reentry(void)
 	fixture_close(&fixture);
 }
 
+/* A distinct zero source remains usable after another cursor fails. */
+static void
+add_recovery_source(source_fixture_t *fixture)
+{
+	fsimg_entry_t entry = { .path = "/recovery", .kind = FSIMG_ENTRY_FILE,
+	    .size = 1 };
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_ZERO };
+
+	CHECK(fsimg_writer_add(fixture->writer, &entry, &source, NULL) == FSIMG_OK);
+}
+
+static void
+expect_cursor_failure_preserves_writer(source_fixture_t *fixture)
+{
+	const fsimg_catalog_entry_t *entry;
+
+	CHECK(fixture->writer->state == FSIMG_WRITER_SEALED);
+	CHECK(!fixture->writer->source.active && fixture->writer->source.io == NULL);
+	CHECK(fixture->writer->catalog_ready);
+	entry = find_entry(fixture->writer, "/recovery");
+	CHECK(fsimg_source_open(fixture->writer, entry->id, NULL) == FSIMG_OK);
+	CHECK(fsimg_source_finish(fixture->writer, NULL) == FSIMG_OK);
+}
+
+/* A cursor failure propagates through emission and then fails the writer. */
+static void
+test_emission_source_failure_fails_writer(void)
+{
+	source_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_source_ops_t ops;
+	fsimg_entry_t entry = { .path = "/provider", .kind = FSIMG_ENTRY_FILE,
+	    .size = 16 };
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 7 };
+	fsimg_error_t error;
+	fsimg_io_t *io;
+	int fd;
+
+	fixture_open(&fixture);
+	fsimg_writer_free(fixture.writer);
+	fsimg_write_options_init(&options);
+	options.volume_bytes = 1024 * 1024;
+	CHECK(fsimg_writer_new(fixture.ctx, "fat12", &options, &fixture.writer,
+	    NULL) == FSIMG_OK);
+	fsimg_source_ops_init(&ops);
+	ops.validate = provider_validate;
+	ops.read_at = provider_read;
+	CHECK(fsimg_writer_set_sources(fixture.writer, &ops, &fixture,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_add(fixture.writer, &entry, &source, NULL) == FSIMG_OK);
+	fixture.script = PROVIDER_PREMATURE_EOF;
+	fd = openat(fixture.parent, "image", O_RDWR | O_CREAT | O_EXCL, 0600);
+	CHECK(fd != -1);
+	CHECK(fsimg_io_from_fd(fixture.ctx, fd, FSIMG_IO_READ | FSIMG_IO_WRITE,
+	    &io, NULL) == FSIMG_OK);
+	CHECK(close(fd) == 0);
+
+	bzero(&error, sizeof(error));
+	CHECK(fsimg_writer_emit(fixture.writer, io, &error) == FSIMG_EIO);
+	CHECK(fixture.calls != 0);
+	CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+	CHECK(!fixture.writer->source.active && fixture.writer->source.io == NULL);
+	CHECK(error.status == FSIMG_EIO);
+	fsimg_io_free(io);
+	fixture_close(&fixture);
+}
+
 static void
 test_provider(void)
 {
@@ -383,12 +453,14 @@ test_provider(void)
 
 	for (unsigned script = PROVIDER_SHORT_READS; script <= PROVIDER_EMPTY_RANGE; script++) {
 		fixture_open(&fixture);
+		add_recovery_source(&fixture);
 		configure_provider(&fixture, sizeof(bytes));
 		fixture.script = (provider_script_t)script;
 		CHECK(fsimg_source_open(fixture.writer, fixture.provider_entry.id, NULL) == FSIMG_OK);
 		if (script == PROVIDER_EMPTY_RANGE) {
 			CHECK(fsimg_source_range(fixture.writer, 0, &range, NULL) == FSIMG_EIO);
 			CHECK(range.length == 0);
+			expect_cursor_failure_preserves_writer(&fixture);
 			fixture_close(&fixture);
 			continue;
 		}
@@ -409,13 +481,14 @@ test_provider(void)
 			CHECK(fsimg_source_finish(fixture.writer, NULL) ==
 			    (script == PROVIDER_CHANGED ? FSIMG_ESOURCE_CHANGED : FSIMG_OK));
 			CHECK(fixture.validations == 2);
+			if (script == PROVIDER_CHANGED)
+				expect_cursor_failure_preserves_writer(&fixture);
 		} else {
 			CHECK(status == FSIMG_EIO);
 			CHECK(count == (script == PROVIDER_PARTIAL_ERROR ? 2u : 0u));
 			/* Open, and once more to classify the failed read. */
 			CHECK(fixture.validations == 2);
-			CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
-			CHECK(fixture.writer->catalog_ready);
+			expect_cursor_failure_preserves_writer(&fixture);
 		}
 		fixture_close(&fixture);
 	}
@@ -530,6 +603,7 @@ test_mutation(void)
 
 	for (unsigned scenario = 0; scenario < 3; scenario++) {
 		fixture_open(&fixture);
+		add_recovery_source(&fixture);
 		write_file(fixture.root, "file", "original");
 		CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
 		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
@@ -556,7 +630,8 @@ test_mutation(void)
 				CHECK(fsimg_source_finish(fixture.writer, NULL) == FSIMG_ESOURCE_CHANGED);
 			}
 		}
-		CHECK(fixture.writer->roots == NULL && fixture.writer->catalog_ready);
+		CHECK(fixture.writer->roots != NULL);
+		expect_cursor_failure_preserves_writer(&fixture);
 		fixture_close(&fixture);
 	}
 	fixture_open(&fixture);
@@ -979,6 +1054,7 @@ test_file_root_changes(void)
 
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		fixture_open(&fixture);
+		add_recovery_source(&fixture);
 		write_file(fixture.parent, "single", "original");
 		set_modified(fixture.parent, "single", 1000);
 		file = openat(fixture.parent, "single", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
@@ -1012,8 +1088,8 @@ test_file_root_changes(void)
 		} else
 			CHECK(fsimg_source_open(fixture.writer, entry->id, NULL) ==
 			    FSIMG_ESOURCE_CHANGED);
-		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
-		CHECK(fixture.writer->roots == NULL);
+		expect_cursor_failure_preserves_writer(&fixture);
+		CHECK(fixture.writer->roots != NULL);
 		fixture_close(&fixture);
 	}
 }
@@ -1165,6 +1241,7 @@ test_symlink_changes(void)
 
 	for (unsigned scenario = 0; scenario < 4; scenario++) {
 		fixture_open(&fixture);
+		add_recovery_source(&fixture);
 		CHECK(symlinkat("first-target", fixture.root, "link") == 0);
 		CHECK(fsimg_writer_add_tree(fixture.writer, fixture.root, "/", NULL) == FSIMG_OK);
 		CHECK(fsimg_writer_prepare(fixture.writer, NULL, NULL) == FSIMG_OK);
@@ -1188,7 +1265,7 @@ test_symlink_changes(void)
 			CHECK(renameat(fixture.root, "replacement", fixture.root, "link") == 0);
 		CHECK(fsimg_source_open(fixture.writer, entry->id, NULL) ==
 		    FSIMG_ESOURCE_CHANGED);
-		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+		expect_cursor_failure_preserves_writer(&fixture);
 		fixture_close(&fixture);
 	}
 }
@@ -1366,6 +1443,7 @@ test_provider_work_limit(void)
 	size_t count;
 
 	fixture_open(&fixture);
+	add_recovery_source(&fixture);
 	configure_provider(&fixture, sizeof(bytes));
 	CHECK(fsimg_source_open(fixture.writer, fixture.provider_entry.id, NULL) == FSIMG_OK);
 	/* One short callback exhausts the cumulative allowance; reads are not
@@ -1375,9 +1453,10 @@ test_provider_work_limit(void)
 	CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes), &count, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_WORK && count == 2 && fixture.calls == 1);
 	fixture.ctx->options.max_work = 0;
-	CHECK(fixture.writer->roots == NULL && !fixture.writer->source.active);
+	expect_cursor_failure_preserves_writer(&fixture);
 	fixture_close(&fixture);
 	fixture_open(&fixture);
+	add_recovery_source(&fixture);
 	configure_provider(&fixture, sizeof(bytes));
 	CHECK(fsimg_source_open(fixture.writer, fixture.provider_entry.id, NULL) == FSIMG_OK);
 	fixture.script = PROVIDER_REPEATED_INTERRUPTION;
@@ -1385,13 +1464,16 @@ test_provider_work_limit(void)
 	CHECK(fsimg_source_read(fixture.writer, 0, bytes, sizeof(bytes), &count, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_WORK && count == 0 && fixture.calls == 3);
 	fixture.ctx->options.max_work = 0;
+	expect_cursor_failure_preserves_writer(&fixture);
 	fixture_close(&fixture);
 	fixture_open(&fixture);
+	add_recovery_source(&fixture);
 	configure_provider(&fixture, 0);
 	CHECK(fsimg_source_open(fixture.writer, fixture.provider_entry.id, NULL) == FSIMG_OK);
 	fixture.changed = true;
 	CHECK(fsimg_source_finish(fixture.writer, NULL) == FSIMG_ESOURCE_CHANGED);
 	CHECK(fixture.calls == 0 && fixture.validations == 2);
+	expect_cursor_failure_preserves_writer(&fixture);
 	fixture_close(&fixture);
 }
 
@@ -1553,29 +1635,8 @@ test_unregistered_provider(void)
 int
 main(int argc, char **argv)
 {
-	if (argc == 2) {
-		if (strcmp(argv[1], "--active-reopen") == 0)
-			test_active_reopen();
-		else if (strcmp(argv[1], "--free-active") == 0)
-			test_free_active();
-		else if (strcmp(argv[1], "--failed-writer") == 0)
-			test_failed_writer();
-		else if (strcmp(argv[1], "--reentry") == 0)
-			test_reentry();
-		else if (strcmp(argv[1], "--corrupt-source") == 0)
-			test_corrupt_source();
-		else if (strcmp(argv[1], "--snapshot-lifetime") == 0)
-			test_snapshot_lifetime();
-		else if (strcmp(argv[1], "--reference-eof") == 0)
-			test_source_reference_eof();
-		else if (strcmp(argv[1], "--directory-interruption") == 0)
-			test_directory_interruption();
-		else if (strcmp(argv[1], "--unregistered-provider") == 0)
-			test_unregistered_provider();
-		else if (strcmp(argv[1], "--directory-records") == 0)
-			test_directory_records();
-		else
-			CHECK(false);
+	if (argc == 2 && strcmp(argv[1], "--active-reopen") == 0) {
+		test_active_reopen();
 		return (0);
 	}
 	CHECK(argc == 1);
@@ -1584,6 +1645,7 @@ main(int argc, char **argv)
 	test_failed_writer();
 	test_reentry();
 	test_provider();
+	test_emission_source_failure_fails_writer();
 	test_host_tree();
 	test_mutation();
 	test_rejection();
