@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # qualifyifs.sh INDEX-BYTES: the native qualification cycle for ImageFS
 # images fsimg wrote, run in the QNX 6.5.0 guest on the disk that
 # tools/qnx/decode/ifsqual.py pack built and capture.sh -i loaded onto

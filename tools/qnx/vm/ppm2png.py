@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """Convert QEMU's binary PPM (P6, maxval 255) screendump to PNG.
 
 Usage: ppm2png.py IN.ppm OUT.png

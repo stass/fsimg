@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Decode a QNX4 capture (gzip, zstd or raw): the loader block, the four
 # root-block records and the rest of block 2, every directory slot of every
 # directory reachable from the root, the .inodes slots, extent-block chains,

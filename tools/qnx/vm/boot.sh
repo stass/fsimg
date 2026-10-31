@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Drive the live CD's graphical boot through the QEMU monitor: answer the boot
 # prompts, log in as root and open a terminal. The delays and pointer offsets
 # are fixed values measured on the development host; the last step saves a

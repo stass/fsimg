@@ -6,10 +6,11 @@ as sample code:
 * `~/libarchive/libarchive/archive_read_support_format_msdosfs.c`
 * `~/libarchive/libarchive/archive_write_set_format_msdosfs.c`
 
-Both files carry Stanislav Sedov's BSD-2-Clause notices. Code reused from them
-retains their copyright, conditions, and disclaimer. Their libarchive
-registration and callback interfaces are adapted to fsimg's independent reader
-and writer contracts; libarchive is not a core runtime dependency.
+The FAT code is Stanislav Sedov's own work and needs no separate notice. The
+reader and writer adapt format logic from these implementations; their
+libarchive registration and callback interfaces are adapted to fsimg's
+independent reader and writer contracts. libarchive is not a core runtime
+dependency.
 
 The reader's BPB parsing, FAT12 packed-entry decoding, chain handling, long-name
 checksum, and timestamp decoding provide format examples. The writer's geometry
@@ -26,15 +27,12 @@ replaced by fsimg's specified algorithms when adapting the format logic.
 
 `lib/formats/fat/codec.c` and `lib/formats/fat/read.c` adapt BPB field
 interpretation, packed FAT examples, and the long-name checksum from the reader
-above. Its BSD-2-Clause notice is retained in both files and in
-`third-party/libarchive-msdosfs-LICENSE.txt` for
-binary distributions. Resource storage, traversal, collision handling, calendar
-conversion, indexing, and verification are project-owned implementations.
+above. Resource storage, traversal, collision handling, calendar conversion, indexing,
+and verification are project-owned implementations.
 
 `lib/formats/fat/write-emit.c` adapts boot/FSInfo fields and long-name slot
-encoding from the writer above and retains its complete BSD-2-Clause notice.
-Geometry search, alias reservation, paged plans, calendar conversion, and
-direct source emission are project-owned implementations.
+encoding from the writer above. Geometry search, alias reservation, paged plans,
+calendar conversion, and direct source emission are project-owned implementations.
 
 The generated `lib/formats/fat/name-tables.h` and `lib/core/case-tables.h`
 use Unicode-3.0 data, with the

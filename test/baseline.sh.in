@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 #
 # Compare the comparison-baseline fixtures with the checked-in baseline.
 # Each test program's --baseline mode prints one record per fixture:

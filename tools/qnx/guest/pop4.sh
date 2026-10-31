@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Guest-side QNX4 population recipes for the native evidence corpus
 # (docs/qnx4-research.md). Each case formats /dev/hd0 with dinit, mounts it on
 # /q4, populates it with native utilities and unmounts. Upload and capture:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """ifscorrupt.py IN OUT KIND: write a copy of the little-endian QNX boot
 image IN with one defect, a boot gate's negative control. The startup
 header is found at offset 0 or behind the 1088-byte x86 BIOS loader.

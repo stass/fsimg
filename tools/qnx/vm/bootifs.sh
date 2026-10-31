@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # bootifs.sh FLOPPY IFS SERIAL MARKER [SECONDS]
 #
 # Boot one x86 QNX boot image (an IFS behind the 1088-byte BIOS loader) in a

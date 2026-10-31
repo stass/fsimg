@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 #
 # fsimg reads the containers independent tools write: hdiutil's read-only
 # (UDRO) and zlib (UDZO) DMGs with and without a partition map, populated

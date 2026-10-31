@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-2-Clause
- * Copyright (c) 2026, fsimg contributors
+ * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
 #ifndef FSIMG_WORKER_H
 #define FSIMG_WORKER_H

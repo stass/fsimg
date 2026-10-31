@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 ACLOCAL_AMFLAGS = -I m4
 AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/compat -I$(top_srcdir)/cmd/fsimg \
@@ -27,7 +27,6 @@ pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libfsimg.pc
 dist_man_MANS = docs/fsimg.1 docs/libfsimg.3
 dist_doc_DATA = LICENSE README.md docs/examples.md docs/references.md third-party/Unicode-LICENSE.txt \
-	third-party/libarchive-msdosfs-LICENSE.txt \
 	third-party/FreeBSD-sha256-LICENSE.txt
 examplesdir = $(datadir)/fsimg/examples
 dist_examples_DATA = examples/example.h examples/create-tree.c examples/provider.c \

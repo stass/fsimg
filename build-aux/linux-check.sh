@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 #
 # Runs a command over a committed revision in an Ubuntu 24.04 container that
 # mirrors the CI Linux job, from a macOS (or any Docker) host:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 AC_INIT([fsimg], [0.1.0])
 AC_CONFIG_SRCDIR([lib/core/context.c])
 AC_CONFIG_AUX_DIR([build-aux])

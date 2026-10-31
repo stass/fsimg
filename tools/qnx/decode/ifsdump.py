@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """Dump the structure of an uncompressed QNX boot image or bare ImageFS.
 
 Research aid, written independently of lib/; it trusts its input and decodes

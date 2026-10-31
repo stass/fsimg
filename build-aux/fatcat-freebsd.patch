@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Select the existing native interfaces on 64-bit FreeBSD as well as macOS.
 --- a/src/fatcat.cpp
 +++ b/src/fatcat.cpp

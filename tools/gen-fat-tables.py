@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """Generate pinned FAT name tables from UnicodeData 17.0.0 and CP437 2.00."""
 import hashlib
 import pathlib

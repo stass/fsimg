@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Move the guest pointer by (dx, dy) in small steps and left-click.
 import os, socket, sys, time
 # Only a harness script holding the lock (see env.sh) may drive the guest.

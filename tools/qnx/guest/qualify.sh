@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Guest-side native qualification of a volume fsimg wrote, the fixture tree
 # that test-qnx6-write --create builds: check it, mount it, read every file,
 # then create, grow, link, rename and delete natively, sync, unmount, check,

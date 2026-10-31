@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Disassemble an SH-4 LE function from an ELF with cstool, annotating PC-relative literals
 # and call targets with symbol names.  Usage: shdis.py elf funcname
 # Needs Capstone's cstool and radare2's rabin2 (symbol table) on PATH. Input

@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Guest-side population recipe for the first populated capture (B=1024 LE).
 # Every step is native QNX 6.5.0. Upload it and capture with, for example:
 #   put.sh ../guest/pop.sh /tmp/pop.sh

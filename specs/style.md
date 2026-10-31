@@ -280,6 +280,9 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
 * Keep required copyright and SPDX notices at the top in a comment starting
   in column one, followed by a blank line. Preserve attribution in imported
   code; do not add revision-history annotations to fsimg code.
+  Project-owned files use `SPDX-License-Identifier: BSD-2-Clause` and
+  `Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>`, preserving any
+  existing project copyright year range.
 * Group includes in this order, with a blank line between groups:
   1. System headers (`<sys/...>`). Put `<sys/types.h>` or `<sys/param.h>`
      first when needed; do not include both. Sort the rest alphabetically.

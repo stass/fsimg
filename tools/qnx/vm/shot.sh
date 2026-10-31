@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # shot.sh [OUT.png]: save a screenshot of the guest console (default
 # $VM/screen.png). Fails if QEMU produces no complete dump within 10 s.
 set -eu

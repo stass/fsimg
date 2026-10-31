@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # popifs.sh GROUP: build the IFS experiment images of one group in the QNX
 # 6.5.0 guest and write each to /dev/hd0 at a 512 KiB slot.
 #

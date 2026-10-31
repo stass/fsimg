@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """Copy a host image onto a guest disk through the serial shell.
 
 Usage: load.py SOCKET IMAGE DEVICE

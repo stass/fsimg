@@ -1,6 +1,6 @@
 /*
  * SPDX-License-Identifier: BSD-2-Clause
- * Copyright (c) 2026, fsimg contributors
+ * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  *
  * Black-box codec oracle for fsimg's IFS work. It calls the public APIs of
  * GPL liblzo2 and libucl, so its binary is built out of the tree by

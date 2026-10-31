@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-2-Clause
- * Copyright (c) 2026, fsimg contributors
+ * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
 /*
  * compat/private.c with two of its host calls routed through

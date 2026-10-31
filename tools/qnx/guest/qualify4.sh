@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Guest-side native qualification of a QNX4 volume fsimg wrote: check it
 # without repair, mount it and list and checksum every path, then create,
 # append until a file fragments, rename, mkdir, rmdir, unlink and create long

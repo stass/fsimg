@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 #
 # The LZO1X and NRV2B decoders, and the LZO1X encoder, against black-box
 # oracles, out of the tree and never redistributed:

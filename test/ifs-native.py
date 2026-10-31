@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """Native ImageFS evidence for test/ifs-integration.sh, in three commands.
 
 ifs-native.py compare FSIMG TEST_IFS IFSDUMP IMAGE...

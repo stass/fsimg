@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Boot the QNX 6.5.0 live CD headless with $VM/test0.img as /dev/hd0 and
 # $VM/big.img (or FSIMG_QNX_HD1) as /dev/hd1, log in through the graphical console and start a
 # shell on the serial port ($VM/ser.sock). Refuses to start while qemu.pid

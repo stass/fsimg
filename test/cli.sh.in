@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 set -eu
 if test -z '@PYTHON3@'; then
     echo 'SKIP: CLI integration requires the Python 3 development tool'

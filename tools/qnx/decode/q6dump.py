@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Decode a classic QNX6 capture (gzip or raw): superblocks, trees, inodes,
 # root directory, bitmap summary, and which byte ranges the formatter wrote
 # (the medium was pre-filled with 0xAA). Usage: q6dump.py IMAGE[.gz].

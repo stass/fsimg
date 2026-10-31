@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Print the native manifest of the QNX4 volume on /dev/hd0, mounted read-only:
 # one line per path in sorted order with ls -ld output, and a cksum line for
 # each regular file. Upload with put.sh and run through capture.sh -i with a

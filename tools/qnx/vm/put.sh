@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # put.sh LOCAL GUEST-PATH
 # Copy a small text file, such as a script from ../guest/, into the guest over
 # the serial shell, one line per command, then compare POSIX cksum output on

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """Report the chunk framing of a compressed QNX boot image, without decoding.
 
 Research aid; trusts its input. Usage: ifschunks.py [-o OFFSET] FILE

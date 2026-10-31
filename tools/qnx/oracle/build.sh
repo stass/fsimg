@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # build.sh [OUTDIR]: build the codec oracle against Homebrew's liblzo2 and
 # libucl (brew install lzo ucl) into OUTDIR, by default
 # ~/.local/share/fsimg-oracles/ifs-codecs. The binary combines GPL

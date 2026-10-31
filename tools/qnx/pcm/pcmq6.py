@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Analyze one classic QNX6 volume inside a disk image at a byte offset, read
 # only. Prints structure and statistics, never file contents. Names are
 # printed only with --names. Usage: pcmq6.py IMAGE OFFSET LENGTH [--names].

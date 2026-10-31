@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 #
 # Opt-in native reads of a disposable GPT disk, never an existing device.
 # The caller needs hdiutil on macOS or noninteractive sudo for provisioning

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-2-Clause
- * Copyright (c) 2026, fsimg contributors
+ * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
 /* Compile the production constructors and adapter against a disposable fake
  * host endpoint. The installed library has no device-test hooks or switches.

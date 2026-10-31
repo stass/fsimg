@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # capture.sh [-d hd0|hd1] [-i IMAGE] NAME 'GUEST-COMMANDS'
 #
 # Run one native experiment and keep its evidence: run the guest commands

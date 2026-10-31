@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Type text into the guest through QEMU monitor sendkey. Usage: type.py SOCKET
 # TEXT, where TEXT takes Python backslash escapes, so '\n' presses Return.
 import os, socket, sys, time

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """Run one shell command in the guest over the serial shell.
 
 Usage: qsh.py [-s STATUS-FILE] SOCKET COMMAND [TIMEOUT-SECONDS]

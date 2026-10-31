@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 """Build the E10 oracle-sensitivity disk: mutated copies of native images.
 
 Research aid. Usage: ifsflip.py NONBOOT.ifs COMPRESSED.ifs OUT.img

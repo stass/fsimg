@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # guest.sh 'COMMAND' [TIMEOUT-SECONDS]
 # Run one single-line command in the guest's serial shell under the harness
 # lock, print its output and exit with its status; see qsh.py for the

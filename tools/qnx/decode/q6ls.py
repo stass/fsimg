@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # List paths in a classic little-endian QNX6 volume at a byte offset of an image.
 # Usage: q6ls.py image offset length [extract-path outfile] (slice in bytes)
 # Uses the valid header (magic and CRC) with the larger serial. Names are

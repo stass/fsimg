@@ -31,6 +31,9 @@ the work. Implementation follows the [style guide](specs/style.md).
   license terms per file before importing code; preserve required copyright,
   attribution, and license notices. A reference implementation or test oracle
   is not automatically suitable for inclusion in the project.
+* Project-owned files use `SPDX-License-Identifier: BSD-2-Clause` and
+  `Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>` in their existing
+  comment syntax. Preserve an existing project copyright year range.
 * Keep the core library and default CLI free of third-party runtime
   dependencies beyond libc, host OS APIs and the system zlib. zlib is the one
   permitted library, required and never vendored: compressed DMG and gzip

@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Guest-side population recipe for the second populated captures (pop2-*):
 # long names of 28 bytes in two-byte UTF-8 and of 30 bytes in three-byte
 # CJK UTF-8; a file written, appended to and chmodded three seconds apart to

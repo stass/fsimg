@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Survey one QNX4 volume inside a disk image at a byte offset, read only.
 # Prints structure counts and histograms, never names, file contents,
 # identities or timestamps (only whether timestamps are equal across a

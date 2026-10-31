@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Disassemble an SH-4 LE address range of an ELF (via PT_LOAD), annotating
 # PC-relative literal loads with values and C strings.  Usage: shrange.py elf start end
 # (hex addresses). Needs Capstone's cstool on PATH; nop lines are omitted.

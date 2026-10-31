@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Shared settings for the QNX 6.5.0 VM harness, sourced (not run) by the other
 # scripts in this directory. FSIMG_QNX_VM is the VM working directory (disks,
 # sockets, pid file), FSIMG_QNX_ISO the QNX 6.5.0 x86 live CD and

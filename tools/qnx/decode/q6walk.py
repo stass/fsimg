@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-# Copyright (c) 2026, fsimg contributors
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 # Walk the newest snapshot of a classic QNX6 capture and print every inode,
 # directory slot, long-name record and checksum, and content summary.
 # Usage: q6walk.py IMAGE[.gz], the whole image being the volume's slice. The snapshot is the valid header (magic and
