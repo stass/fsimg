@@ -130,8 +130,11 @@ typedef struct fsimg_worker_request {
 	uint64_t	 deadline_milliseconds;
 	/* Borrowed coordinator-only ledger; NULL uses a single-run local ledger. */
 	fsimg_output_budget_t *output_budget;
-	/* The selected member of a read job; create jobs use the roots. */
-	const char	*selection;
+	/* Read jobs: member_count absolute image paths whose subtrees the job
+	 * selects, at least one; init selects "/". Create jobs use the roots.
+	 */
+	const char *const *members;
+	uint32_t	 member_count;
 	/* Create jobs: root_count opened root descriptors in command-line
 	 * order, a directory or a regular file each, and one path for each:
 	 * the image path a host root populates, or FSIMG_JOB_MANIFEST and
@@ -253,8 +256,8 @@ _Static_assert(sizeof(FSIMG_JOB_MANIFEST) <= FSIMG_JOB_TAG_BYTES,
     "FSIMG_JOB_TAG_BYTES bounds every manifest tag");
 
 /* A create or plan job reads source roots and carries one path per root
- * descriptor; every other kind reads an image and carries its one
- * selection. These are the job's paths in wire order.
+ * descriptor; every other kind reads an image and carries its members.
+ * These are the job's paths in wire order.
  */
 bool fsimg_job_has_roots(fsimg_job_kind_t);
 /* The filesystem the stack names, or "" when its slot is not named. */
@@ -277,6 +280,8 @@ bool fsimg_job_needs_raw(const fsimg_worker_request_t *);
 int fsimg_job_capability_fd(const fsimg_worker_request_t *, fsimg_capability_t);
 int *fsimg_job_capability_field(fsimg_worker_request_t *, fsimg_capability_t);
 uint32_t fsimg_job_path_count(const fsimg_worker_request_t *);
+/* Select the whole volume: one member, "/", as init does. */
+void fsimg_job_select_volume(fsimg_worker_request_t *);
 const char *fsimg_job_path(const fsimg_worker_request_t *, uint32_t);
 fsimg_status_t fsimg_job_paths_length(const fsimg_worker_request_t *,
     uint64_t *, fsimg_error_t *);

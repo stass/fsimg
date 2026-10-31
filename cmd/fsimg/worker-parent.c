@@ -846,7 +846,7 @@ advance_request(worker_supervisor_t *state)
 	return;
 }
 
-/* Copy the next bytes of the job's path sequence, the member of a read job
+/* Copy the next bytes of the job's path sequence, the members of a read job
  * or each root's image path of a create job, every path with its NUL.
  * Encoding has already checked each path against the path limit.
  */

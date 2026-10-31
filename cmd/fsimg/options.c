@@ -1481,7 +1481,8 @@ normalize_path(cli_parse_t *parse, const char *word, bool member, char **out)
 
 /* Members are image paths, relative or absolute; both name the same entry.
  * The worker validates encoding and resolves components with the format's
- * rules.
+ * rules, so members that name one entry, by repetition, nesting or a
+ * format's aliases, are left for it to select once.
  */
 static fsimg_status_t
 read_members(cli_parse_t *parse)
@@ -1501,13 +1502,24 @@ read_members(cli_parse_t *parse)
 		return (syntax(parse, "-O requires exactly one member"));
 	if (count == 0)
 		return (FSIMG_OK);
-	if (count > 1)
-		note_unsupported(parse, "selecting several members is not supported");
-	status = normalize_path(parse, parse->argv[parse->first_operand], true,
-	    &options->member);
-	if (status == FSIMG_OK)
-		options->request.selection = options->member;
-	return (status);
+	/* One slot more, as for operands: a failed normalization leaves its
+	 * allocation in the slot after the last member.
+	 */
+	options->members = calloc((size_t)count + 1, sizeof(*options->members));
+	if (options->members == NULL)
+		return (fsimg_error_set(parse->error, FSIMG_ENOMEM, 0,
+		    FSIMG_OP_CONTEXT, "member allocation failed"));
+	for (int i = 0; i < count; i++) {
+		status = normalize_path(parse,
+		    parse->argv[parse->first_operand + i], true,
+		    &options->members[i]);
+		if (status != FSIMG_OK)
+			return (status);
+		options->member_count++;
+	}
+	options->request.members = (const char *const *)options->members;
+	options->request.member_count = options->member_count;
+	return (FSIMG_OK);
 }
 
 static fsimg_status_t
@@ -1758,10 +1770,15 @@ fsimg_cli_release(fsimg_cli_options_t *options)
 	if (options->operands != NULL)
 		free(options->operands[options->operand_count].image_path);
 	free(options->operands);
-	free(options->member);
+	for (uint32_t i = 0; i < options->member_count; i++)
+		free(options->members[i]);
+	if (options->members != NULL)
+		free(options->members[options->member_count]);
+	free(options->members);
 	free(options->words);
 	options->operands = NULL;
 	options->operand_count = 0;
-	options->member = NULL;
+	options->members = NULL;
+	options->member_count = 0;
 	options->words = NULL;
 }

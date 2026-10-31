@@ -77,6 +77,7 @@ static void test_reproducible(void);
 static void test_stream_limits(void);
 static void test_sequential_fragments(void);
 static void test_extract_zero_tail(void);
+static void test_case_overlap_selects_subtree_once(void);
 static fsimg_status_t payload_resolve(fsimg_reader_t *, uint64_t,
     fsimg_extent_t *, fsimg_error_t *);
 static void payload_hooks(exfat_fixture_t *);
@@ -1639,6 +1640,49 @@ emit_external(const char *path)
 	fixture_free(&f);
 }
 
+static void
+test_case_overlap_selects_subtree_once(void)
+{
+	const char *const members[] = { "/Dir", "/DIR/file" };
+	const fsimg_entry_t entries[] = {
+		{ .path = "/Dir", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = "/Dir/file", .kind = FSIMG_ENTRY_FILE, .size = 4 },
+		{ .path = "/Dir/other", .kind = FSIMG_ENTRY_FILE, .size = 1 },
+		{ .path = "/Outside", .kind = FSIMG_ENTRY_FILE, .size = 1 }
+	};
+	const char *const expected[] = { "/Dir", "/Dir/file", "/Dir/other" };
+	exfat_fixture_t f;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fsimg_selection_t *selection;
+	fsimg_selection_relation_t relation;
+	const fsimg_entry_t *entry;
+
+	fixture_new(&f);
+	fsimg_write_options_init(&options);
+	options.volume_bytes = IMAGE_BYTES;
+	CHECK(fsimg_writer_new(f.ctx, "exfat", &options, &writer, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++)
+		CHECK(fsimg_writer_add(writer, &entries[i],
+		    entries[i].kind == FSIMG_ENTRY_DIRECTORY ? NULL : &zero,
+		    NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_emit(writer, f.io, NULL) == FSIMG_OK);
+	fsimg_writer_free(writer);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_selection_new(f.reader, members, 2, FSIMG_SELECTION_TREE,
+	    &selection, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, expected[i]) == 0);
+		CHECK(relation == (i == 0 ? FSIMG_SELECTION_TARGET :
+		    FSIMG_SELECTION_DESCENDANT));
+	}
+	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_DONE);
+	fsimg_selection_free(selection);
+	fixture_free(&f);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1708,6 +1752,7 @@ main(int argc, char **argv)
 	test_stream_limits();
 	test_sequential_fragments();
 	test_extract_zero_tail();
+	test_case_overlap_selects_subtree_once();
 	test_verify_payload();
 	test_verify_payload_failures();
 	test_trailing_duplicate_claim();

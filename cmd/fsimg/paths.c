@@ -1209,7 +1209,7 @@ fsimg_cli_verification_request(const fsimg_cli_options_t *options,
 	/* Every slot is forced below, and so is the created compression,
 	 * which the copied request names.
 	 */
-	verify->selection = "/";
+	fsimg_job_select_volume(verify);
 	verify->root_fds = NULL;
 	verify->root_paths = NULL;
 	verify->root_count = 0;

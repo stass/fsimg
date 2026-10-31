@@ -39,13 +39,15 @@ typedef struct record_view {
 /* One retained directory: a run of records at the top of the shared stack
  * stream, the replay cursor inside it, and its path length in reader->path.
  * hidden is set when the directory or an ancestor is omitted, so none of
- * its entries is delivered.
+ * its entries is delivered. in_scope is set when the operation selects the
+ * directory's children, so its omitted children are counted.
  */
 typedef struct walk_level {
 	fsimg_stream_mark_t base;
 	uint64_t	 cursor;
 	size_t		 path_length;
 	bool		 hidden;
+	bool		 in_scope;
 } walk_level_t;
 
 /* Every retained ancestor lives in one stack stream, so traversal holds one
@@ -60,8 +62,11 @@ typedef struct walk_level {
  * ancestors: the rendering of a walker path reads it. An advance ends the
  * current entry first, so admission and collision reporting may then use
  * record as scratch. pending marks a returned directory whose descent the
- * next advance performs. finished is set once the root is exhausted, and
- * failed once an advance fails; either way the stack is released.
+ * next advance performs, and pending_in_scope becomes its level's in_scope:
+ * its parent's, unless the operation scopes it with
+ * fsimg_walk_scope_children first. finished is set once the root is
+ * exhausted, and failed once an advance fails; either way the stack is
+ * released.
  */
 struct fsimg_walk {
 	fsimg_stream_t	*records;
@@ -71,6 +76,7 @@ struct fsimg_walk {
 	size_t		 path_length;
 	size_t		 record_length;
 	bool		 pending;
+	bool		 pending_in_scope;
 	bool		 finished;
 	bool		 failed;
 	unsigned char	 record[FSIMG_DIRECTORY_RECORD_BYTES];
@@ -101,7 +107,7 @@ static fsimg_status_t ambiguity_error(fsimg_directory_build_t *, uint64_t,
 static fsimg_status_t validate_namespace(fsimg_directory_build_t *,
     fsimg_error_t *);
 static fsimg_status_t prepare_level(fsimg_reader_t *, uint32_t, size_t, bool,
-    fsimg_error_t *);
+    bool, fsimg_error_t *);
 static fsimg_status_t walk_start(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t advance(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t pass_omitted_root(fsimg_reader_t *, fsimg_error_t *);
@@ -429,14 +435,15 @@ validate_namespace(fsimg_directory_build_t *build, fsimg_error_t *error)
 }
 
 /* Prepare the directory at level: the root, or the current entry's
- * directory, which is hidden when it or an ancestor is omitted. Its records
+ * directory, which is hidden when it or an ancestor is omitted, and in
+ * scope when its omitted children are counted. Its records
  * are stacked on the walker stream and its keys go to a stream of their
  * own, released once the namespace is validated. The level becomes visible
  * only after validation succeeds.
  */
 static fsimg_status_t
 prepare_level(fsimg_reader_t *reader, uint32_t level, size_t path_length,
-    bool hidden, fsimg_error_t *error)
+    bool hidden, bool in_scope, fsimg_error_t *error)
 {
 	fsimg_walk_t *walk = reader->walk;
 	fsimg_directory_build_t build;
@@ -463,7 +470,7 @@ prepare_level(fsimg_reader_t *reader, uint32_t level, size_t path_length,
 	}
 	walk->levels[level] = (walk_level_t){ .base = base,
 	    .cursor = base.offset, .path_length = path_length,
-	    .hidden = hidden };
+	    .hidden = hidden, .in_scope = in_scope };
 	walk->depth = level;
 	return (FSIMG_OK);
 }
@@ -500,7 +507,8 @@ walk_start(fsimg_reader_t *reader, fsimg_error_t *error)
 		goto released;
 	/* Only a complete walker is published; preparing the root needs it. */
 	reader->walk = walk;
-	return (prepare_level(reader, 0, 0, false, error));
+	return (prepare_level(reader, 0, 0, false,
+	    !reader->omission.root_excluded, error));
 failed:
 	status = detail.status;
 	if (error != NULL)
@@ -514,14 +522,14 @@ released:
 	return (status);
 }
 
-/* The current entry is an omitted subtree root. Within the omission scope
- * it is counted, in the operation's count and the context statistics, and
- * an extraction that cannot leave it out fails naming it.
+/* The current entry is an omitted subtree root. Listed by a directory in
+ * scope, it is counted, in the operation's count and the context
+ * statistics, and an extraction that cannot leave it out fails naming it.
  */
 static fsimg_status_t
 pass_omitted_root(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	if (reader->walk->depth < reader->omission.scope)
+	if (!reader->walk->levels[reader->walk->depth].in_scope)
 		return (FSIMG_OK);
 	fsimg_stat_add(&reader->omission.count, 1);
 	fsimg_stat_add(&reader->ctx->stats.omitted_entries, 1);
@@ -570,6 +578,7 @@ make_current(fsimg_reader_t *reader, walk_level_t *level, size_t length,
 	delivered = !level->hidden && view.class == NAME_DELIVERED;
 	walk->pending = reader->entry.kind == FSIMG_ENTRY_DIRECTORY &&
 	    (delivered || reader->omission.descend);
+	walk->pending_in_scope = level->in_scope;
 	if (!level->hidden && view.class == NAME_OMITTED)
 		return (pass_omitted_root(reader, error));
 	return (FSIMG_OK);
@@ -633,7 +642,7 @@ advance(fsimg_reader_t *reader, fsimg_error_t *error)
 			    reader->ctx->options.max_depth, (uint64_t)walk->depth + 1));
 		status = prepare_level(reader, walk->depth + 1, walk->path_length,
 		    walk->levels[walk->depth].hidden || walk->omitted[walk->depth],
-		    error);
+		    walk->pending_in_scope, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
@@ -715,17 +724,14 @@ fsimg_walk_delivered(const fsimg_reader_t *reader)
 	    !walk->levels[walk->depth].hidden && !walk->omitted[walk->depth]);
 }
 
+/* Before the walk starts, the next directory to list is the root. */
 void
-fsimg_walk_scope_nothing(fsimg_reader_t *reader)
+fsimg_walk_scope_children(fsimg_reader_t *reader, bool in_scope)
 {
-	reader->omission.scope = UINT32_MAX;
-}
-
-/* The current entry's children are listed one level deeper. */
-void
-fsimg_walk_scope_below_current(fsimg_reader_t *reader)
-{
-	reader->omission.scope = reader->walk->depth + 1;
+	if (reader->walk == NULL)
+		reader->omission.root_excluded = !in_scope;
+	else
+		reader->walk->pending_in_scope = in_scope;
 }
 
 fsimg_status_t

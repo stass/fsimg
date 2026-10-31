@@ -1,5 +1,12 @@
 fsimg 0.1.0 (unreleased)
 
+`x` and `t` accept several members and select the union of their
+subtrees in one walk of the image; an entry that nested, repeated or
+aliased members select, such as a FAT name given in another case or by its
+short alias, is listed or extracted once, and a member matching nothing
+fails naming it. The library's `fsimg_extract_options_t` carries
+`selections` and `selection_count` in place of the one `selection` path.
+
 Reading accepts finite read-only disk devices through `-f`, including macOS
 block/raw nodes, Linux block devices and FreeBSD disk providers. The library's
 FD constructor supports the same read-only inputs. Sector-aligned host reads

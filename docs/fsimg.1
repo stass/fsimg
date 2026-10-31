@@ -103,7 +103,9 @@ or absolute
 both naming the same entry.
 Selection follows filesystem case rules and FAT short aliases.
 Displayed paths retain their image spelling.
-No member selects the whole image.
+Several members select the union of their subtrees, and an entry selected
+twice, by nested, repeated or aliased members, is processed once.
+No member selects the whole image; a member matching nothing fails.
 .Pp
 All image parsing occurs in a fresh worker.
 The coordinator prepares capabilities, supervises output and publishes
@@ -1409,11 +1411,7 @@ writing zstd or xz
 .Pq Fl a No with Cm c ,
 minimization
 .Pq Fl M No with Cm c ,
-the reserved filesystem names apfs and hfs,
-and more than one member for
-.Cm x
-or
-.Cm t .
+and the reserved filesystem names apfs and hfs.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .

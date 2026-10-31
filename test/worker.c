@@ -616,6 +616,8 @@ static void run_path_sequence(const worker_fixture_t *, const unsigned char *,
     size_t, path_sequence_result_t *);
 static void test_forged_publication(void);
 static void test_text_output(void);
+static void test_list_case_alias_members_once(void);
+static void test_list_missing_member_names_error(void);
 static void test_incomplete_extraction(void);
 static void test_skipped_extraction(void);
 static void test_omitted_extraction(void);
@@ -1251,7 +1253,8 @@ test_text_output(void)
 	CHECK(run(&fixture, &error) == FSIMG_EINVAL);
 	CHECK(error.status == FSIMG_EINVAL);
 	fixture.request.kind = FSIMG_JOB_CAT;
-	fixture.request.selection = "/hello.txt";
+	fixture.request.members = (const char *const[]){ "/hello.txt" };
+	fixture.request.member_count = 1;
 	CHECK(fsimg_worker_run(fixture.executable, &fixture.request, event, &fixture,
 	    fd, NULL, &fixture.result, &error) == FSIMG_EIO);
 	CHECK(close(fd) == 0);
@@ -1265,6 +1268,42 @@ run(worker_fixture_t *fixture, fsimg_error_t *error)
 	fixture->ready = false;
 	return (fsimg_worker_run(fixture->executable, &fixture->request, event,
 	    fixture, -1, NULL, &fixture->result, error));
+}
+
+static void
+test_list_case_alias_members_once(void)
+{
+	const char *const members[] = { "/hello.txt", "/HELLO.TXT" };
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+
+	fixture_open(&fixture);
+	fixture.request.kind = FSIMG_JOB_LIST;
+	fixture.request.members = members;
+	fixture.request.member_count = 2;
+	CHECK(run(&fixture, &error) == FSIMG_OK);
+	CHECK(fixture.result.entries == 1);
+	CHECK(fixture.name_bytes == strlen("/HELLO.TXT"));
+	fixture_close(&fixture);
+}
+
+static void
+test_list_missing_member_names_error(void)
+{
+	const char *const members[] = { "/nothing-here" };
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+
+	fixture_open(&fixture);
+	fixture.request.kind = FSIMG_JOB_LIST;
+	fixture.request.members = members;
+	fixture.request.member_count = 1;
+	CHECK(run(&fixture, &error) == FSIMG_EINVAL);
+	CHECK(error.status == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, members[0]) == 0);
+	CHECK(fixture.result.entries == 0);
+	CHECK(fixture.name_bytes == 0);
+	fixture_close(&fixture);
 }
 
 static void
@@ -1303,7 +1342,8 @@ test_operations(const char *format)
 
 	fixture.request.kind = FSIMG_JOB_CAT;
 	fixture.request.output_fd = -1;
-	fixture.request.selection = "/hello.txt";
+	fixture.request.members = (const char *const[]){ "/hello.txt" };
+	fixture.request.member_count = 1;
 	fd = openat(fixture.parent, "raw", O_CREAT | O_EXCL | O_RDWR, 0600);
 	CHECK(fd != -1);
 	fixture.ready = false;
@@ -1316,7 +1356,6 @@ test_operations(const char *format)
 	CHECK(unlinkat(fixture.parent, "raw", 0) == 0);
 
 	fixture.request.kind = FSIMG_JOB_CREATE;
-	fixture.request.selection = "/";
 	fixture.request.input_fd = -1;
 	fixture.request.input = (fsimg_input_t){ 0 };
 	fixture.request.root_fds = &fixture.source;
@@ -1374,7 +1413,6 @@ test_partitioned_create(void)
 
 	fixture_open(&fixture);
 	fixture.request.kind = FSIMG_JOB_CREATE;
-	fixture.request.selection = "/";
 	fixture.request.input_fd = -1;
 	fixture.request.input = (fsimg_input_t){ 0 };
 	fixture.request.root_fds = &fixture.source;
@@ -1425,7 +1463,6 @@ create_request(worker_fixture_t *fixture, const char *stack)
 {
 	fixture->request.kind = FSIMG_JOB_CREATE;
 	fixture->request.flags = 0;
-	fixture->request.selection = "/";
 	fixture->request.input_fd = -1;
 	fixture->request.input = (fsimg_input_t){ 0 };
 	fixture->request.root_fds = &fixture->source;
@@ -2292,6 +2329,7 @@ test_transport(worker_scenario_t mode)
 	fsimg_status_t status;
 	struct stat st;
 	char *selection;
+	const char *selected_member[1];
 	pid_t child, waited, consumer;
 	uint64_t padding;
 	int fd, output, channels[2], outcome;
@@ -2301,6 +2339,9 @@ test_transport(worker_scenario_t mode)
 	fd = -1;
 	channels[0] = channels[1] = -1;
 	selection = NULL;
+	selected_member[0] = "/";
+	fixture.request.members = selected_member;
+	fixture.request.member_count = 1;
 	padding = 0;
 	if (mode == SCENARIO_STARTUP_NONREADER || mode == SCENARIO_PREMATURE_RAW || mode == SCENARIO_STARTUP_ERROR) {
 		fd = openat(fixture.parent, "fake", O_CREAT | O_EXCL | O_RDWR, 0700);
@@ -2319,7 +2360,7 @@ test_transport(worker_scenario_t mode)
 		memset(selection, 'N', 65535);
 		selection[0] = '/';
 		selection[65535] = '\0';
-		fixture.request.selection = selection;
+		selected_member[0] = selection;
 	}
 	if (mode == SCENARIO_BLOCKED_RAW) {
 		CHECK(fsimg_writer_new(fixture.ctx, "fat16", NULL, &writer, NULL) == FSIMG_OK);
@@ -2342,7 +2383,7 @@ test_transport(worker_scenario_t mode)
 		fixture.request.input_fd = fd;
 		CHECK(fsimg_input_prepare(fixture.request.input_fd, NULL, NULL,
 		    &fixture.request.input, NULL) == FSIMG_OK);
-		fixture.request.selection = "/BIG";
+		selected_member[0] = "/BIG";
 		CHECK(pipe(channels) == 0);
 		output = channels[1];
 	} else if (mode == SCENARIO_BROKEN_CONSUMER) {
@@ -2350,19 +2391,19 @@ test_transport(worker_scenario_t mode)
 		CHECK(close(channels[0]) == 0);
 		channels[0] = -1;
 		output = channels[1];
-		fixture.request.selection = "/HELLO.TXT";
+		selected_member[0] = "/HELLO.TXT";
 	} else if (mode == SCENARIO_BLOCKED_WARNING || mode == SCENARIO_SLOW_CONSUMER) {
 		CHECK(pipe(channels) == 0);
 		output = channels[1];
 		padding = fill_pipe(output);
-		fixture.request.selection = mode == SCENARIO_BLOCKED_WARNING ? "/" : "/HELLO.TXT";
+		selected_member[0] = mode == SCENARIO_BLOCKED_WARNING ? "/" : "/HELLO.TXT";
 		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
 	} else {
 		output = openat(fixture.parent, "raw", O_CREAT | O_EXCL | O_RDWR, 0600);
 		CHECK(output != -1);
 		if (mode == SCENARIO_STALLED_RELAY) {
 			CHECK(fchmod(output, 0700) == 0);
-			fixture.request.selection = "/HELLO.TXT";
+			selected_member[0] = "/HELLO.TXT";
 		}
 	}
 	fixture.request.kind = mode == SCENARIO_STARTUP_NONREADER || mode == SCENARIO_STARTUP_ERROR || mode == SCENARIO_BLOCKED_WARNING ?
@@ -2538,6 +2579,8 @@ main(int argc, char **argv)
 	}
 	test_operations("fat16");
 	test_operations("exfat");
+	test_list_case_alias_members_once();
+	test_list_missing_member_names_error();
 	test_partitioned_create();
 	test_container_create();
 	test_compressed_create();

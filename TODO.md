@@ -69,9 +69,6 @@
   * `c -v` and `x -v` do not yet print one line per entry: the writer and
     extractor have no per-entry callback for the worker to relay
     (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
-  * `x` and `t` accept one member; several members, the union of their
-    subtrees resolved by each format's lookup rules, are refused with exit 1
-    (`cmd/fsimg/options.c`, `lib/read/`).
   The layer read side leaves these open:
   The layer write side leaves these open:
   * [Medium] Hole knowledge tests lack the design's Sandbox and capability

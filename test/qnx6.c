@@ -2984,7 +2984,8 @@ extract_omitted(fixture_t *f, const char *selection, bool skip,
 	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) ==
 	    FSIMG_OK);
 	fsimg_extract_options_init(&options);
-	options.selection = selection;
+	options.selections = &selection;
+	options.selection_count = selection == NULL ? 0 : 1;
 	if (skip)
 		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
 	CHECK(mkdirat(f->scratch, "out", 0700) == 0);
@@ -3134,7 +3135,8 @@ test_omitted_names(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
 	    FSIMG_OK);
 	fsimg_extract_options_init(&options);
-	options.selection = "/mixed";
+	options.selections = (const char *const[]){ "/mixed" };
+	options.selection_count = 1;
 	bzero(&error, sizeof(error));
 	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, &error) ==
 	    FSIMG_EUNSUPPORTED);
@@ -3365,7 +3367,8 @@ test_extract(void)
 	fixture_gen(&f, &g, 0);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	fsimg_extract_options_init(&options);
-	options.selection = "/d1";
+	options.selections = (const char *const[]){ "/d1" };
+	options.selection_count = 1;
 	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, NULL) ==
 	    FSIMG_OK);
 	snprintf(path, sizeof(path), "%s/out/d1/d2/f", f.directory);
@@ -3388,7 +3391,8 @@ test_extract(void)
 	 * with it they are counted.
 	 */
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-	options.selection = "/fifo";
+	options.selections = (const char *const[]){ "/fifo" };
+	options.selection_count = 1;
 	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, NULL) ==
 	    FSIMG_EUNSUPPORTED);
 	CHECK(rmdir(path) == 0);
@@ -3409,7 +3413,8 @@ test_extract(void)
 	long_name[0] = '/';
 	memset(long_name + 1, 'c', 510);
 	long_name[511] = '\0';
-	options.selection = long_name;
+	options.selections = (const char *const[]){ long_name };
+	options.selection_count = 1;
 	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, &error) ==
 	    FSIMG_EUNSUPPORTED);
 	CHECK(error.os_error == ENAMETOOLONG);

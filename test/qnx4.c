@@ -26,7 +26,16 @@
 #include "fsimg.h"
 #include "qnx4.h"
 #include "reader.h"
+#include "selection.h"
 #include "test.h"
+
+static void test_nested_members_select_once(void);
+static void test_members_remain_case_sensitive(void);
+static void test_overlapping_members_count_omission_once(void);
+static void test_root_and_deeper_member_count_all_omissions_once(void);
+static void test_omissions_outside_member_union_do_not_fail(void);
+static void test_omission_inside_member_union_fails(void);
+static void test_children_omit_only_selected_directory_children(void);
 
 /*
  * A synthetic QNX4 volume generator written from the format design
@@ -4054,7 +4063,8 @@ extract_omitted(fixture_t *f, const char *selection, bool skip,
 	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) ==
 	    FSIMG_OK);
 	fsimg_extract_options_init(&options);
-	options.selection = selection;
+	options.selections = &selection;
+	options.selection_count = selection == NULL ? 0 : 1;
 	if (skip)
 		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
 	CHECK(mkdirat(f->scratch, "out", 0700) == 0);
@@ -4184,7 +4194,8 @@ test_omitted_names(void)
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
 	    FSIMG_OK);
 	fsimg_extract_options_init(&options);
-	options.selection = "/mixed";
+	options.selections = (const char *const[]){ "/mixed" };
+	options.selection_count = 1;
 	bzero(&error, sizeof(error));
 	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, &error) ==
 	    FSIMG_EUNSUPPORTED);
@@ -4251,6 +4262,269 @@ test_omitted_names(void)
 	gen_free(&plain);
 }
 
+/* A writer-built tree for QNX4's case-sensitive union lookup. */
+static void make_member_volume(memory_sink_t *);
+static void make_member_omission_image(gen_t *);
+static fsimg_status_t extract_members(fixture_t *, const char *const *, size_t,
+    bool, fsimg_extract_result_t *, fsimg_error_t *);
+
+static void
+make_member_volume(memory_sink_t *sink)
+{
+	const fsimg_entry_t entries[] = {
+		{ .path = "/Dir", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = "/Dir/sub", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = "/Dir/sub/file", .kind = FSIMG_ENTRY_FILE, .size = 1 },
+		{ .path = "/Else", .kind = FSIMG_ENTRY_FILE, .size = 1 }
+	};
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_io_ops_t ops;
+	fsimg_io_t *io;
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_new(ctx, "qnx4", NULL, &writer, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++)
+		CHECK(fsimg_writer_add(writer, &entries[i],
+		    entries[i].kind == FSIMG_ENTRY_DIRECTORY ? NULL : &zero,
+		    NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	sink->length = info.volume_bytes;
+	sink->bytes = calloc(1, (size_t)sink->length);
+	CHECK(sink->bytes != NULL);
+	fsimg_io_ops_init(&ops);
+	ops.get_size = sink_size;
+	ops.read_at = sink_read;
+	ops.write_at = sink_write;
+	ops.flush = sink_flush;
+	CHECK(fsimg_io_from_callbacks(ctx, &ops, sink, &io, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_emit(writer, io, NULL) == FSIMG_OK);
+	fsimg_io_free(io);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_nested_members_select_once(void)
+{
+	const char *const members[] = { "/Dir", "/Dir/sub" };
+	const char *const expected[] = { "/Dir", "/Dir/sub", "/Dir/sub/file" };
+	memory_sink_t image;
+	fixture_t f;
+	fsimg_selection_t *selection;
+	fsimg_selection_relation_t relation;
+	const fsimg_entry_t *entry;
+
+	make_member_volume(&image);
+	fixture_new(&f, image.bytes, image.length);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_selection_new(f.reader, members, 2, FSIMG_SELECTION_TREE,
+	    &selection, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, expected[i]) == 0);
+		CHECK(relation == (i == 0 ? FSIMG_SELECTION_TARGET :
+		    FSIMG_SELECTION_DESCENDANT));
+	}
+	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_DONE);
+	fsimg_selection_free(selection);
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+static void
+test_members_remain_case_sensitive(void)
+{
+	const char *const members[] = { "/Dir", "/dir/sub" };
+	memory_sink_t image;
+	fixture_t f;
+	fsimg_selection_t *selection;
+	fsimg_selection_relation_t relation;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+
+	make_member_volume(&image);
+	fixture_new(&f, image.bytes, image.length);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_selection_new(f.reader, members, 2, FSIMG_SELECTION_TREE,
+	    &selection, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < 3; i++)
+		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
+	CHECK(fsimg_selection_next(selection, &entry, &relation, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "/dir/sub") == 0);
+	CHECK(strcmp(error.message, "selected image path was not found") == 0);
+	fsimg_selection_free(selection);
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+/* The generator can spell names the writer correctly refuses. Each bad
+ * file is an omitted immediate child of a different delivered directory.
+ */
+static void
+make_member_omission_image(gen_t *g)
+{
+	uint32_t d, sub, inner, sibling;
+
+	gen_init(g, GEN_DEFAULT_N);
+	d = gen_dir(g, OBJ_ROOT, "d");
+	gen_file(g, d, "bad\x01", (const unsigned char *)"d", 1);
+	sub = gen_dir(g, d, "sub");
+	gen_file(g, sub, "bad\x02", (const unsigned char *)"s", 1);
+	inner = gen_dir(g, sub, "inner");
+	gen_file(g, inner, "file", (const unsigned char *)"i", 1);
+	sibling = gen_dir(g, OBJ_ROOT, "sibling");
+	gen_file(g, sibling, "bad\x03", (const unsigned char *)"x", 1);
+	gen_finish(g);
+}
+
+static fsimg_status_t
+extract_members(fixture_t *f, const char *const *members, size_t count,
+    bool skip, fsimg_extract_result_t *result, fsimg_error_t *error)
+{
+	fsimg_extract_options_t options;
+	fsimg_status_t status;
+	int root;
+
+	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) == FSIMG_OK);
+	fsimg_extract_options_init(&options);
+	options.selections = members;
+	options.selection_count = count;
+	if (skip)
+		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	CHECK(mkdirat(f->scratch, "out", 0700) == 0);
+	root = openat(f->scratch, "out", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(root != -1);
+	status = fsimg_extract_into(f->reader, root, &options, result, error);
+	CHECK(close(root) == 0);
+	return (status);
+}
+
+static void
+test_overlapping_members_count_omission_once(void)
+{
+	const char *const members[] = { "/d", "/d/sub" };
+	gen_t g;
+	fixture_t f;
+	fsimg_extract_result_t result;
+	struct stat st;
+
+	make_member_omission_image(&g);
+	fixture_new(&f, g.image, g.length);
+	CHECK(extract_members(&f, members, 2, true, &result, NULL) == FSIMG_OK);
+	/* d's bad child belongs to one member, sub's to both: two omissions. */
+	CHECK(result.omitted_entries == 2 && result.skipped_entries == 0);
+	check_omission_counts(&f, 2);
+	check_file(&f, "out/d/sub/inner/file", "i", 1);
+	CHECK(directory_names(&f, "out") == 1);
+	CHECK(directory_names(&f, "out/d/sub") == 1);
+	CHECK(fstatat(f.scratch, "out/sibling", &st, AT_SYMLINK_NOFOLLOW) == -1 &&
+	    errno == ENOENT);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_root_and_deeper_member_count_all_omissions_once(void)
+{
+	const char *const members[] = { "/", "/d/sub" };
+	gen_t g;
+	fixture_t f;
+	fsimg_extract_result_t root_result, union_result;
+
+	make_member_omission_image(&g);
+	fixture_new(&f, g.image, g.length);
+	CHECK(extract_members(&f, members, 1, true, &root_result, NULL) == FSIMG_OK);
+	/* The bad children of d, sub and sibling are all in the root's scope. */
+	CHECK(root_result.omitted_entries == 3);
+	check_omission_counts(&f, 3);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+
+	fixture_new(&f, g.image, g.length);
+	CHECK(extract_members(&f, members, 2, true, &union_result, NULL) == FSIMG_OK);
+	CHECK(union_result.omitted_entries == root_result.omitted_entries);
+	check_omission_counts(&f, 3);
+	check_file(&f, "out/d/sub/inner/file", "i", 1);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_omissions_outside_member_union_do_not_fail(void)
+{
+	const char *const members[] = { "/d/sub/inner", "/d/sub/inner/file" };
+	gen_t g;
+	fixture_t f;
+	fsimg_extract_result_t result;
+
+	make_member_omission_image(&g);
+	fixture_new(&f, g.image, g.length);
+	CHECK(extract_members(&f, members, 2, false, &result, NULL) == FSIMG_OK);
+	CHECK(result.omitted_entries == 0);
+	check_omission_counts(&f, 0);
+	check_file(&f, "out/d/sub/inner/file", "i", 1);
+	CHECK(directory_names(&f, "out") == 1);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_omission_inside_member_union_fails(void)
+{
+	const char *const members[] = { "/d/sub", "/d/sub/inner" };
+	gen_t g;
+	fixture_t f;
+	fsimg_extract_result_t result;
+	fsimg_error_t error;
+
+	make_member_omission_image(&g);
+	fixture_new(&f, g.image, g.length);
+	CHECK(extract_members(&f, members, 2, false, &result, &error) ==
+	    FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "/d/sub/bad\\x02") == 0);
+	CHECK(result.omitted_entries == 1);
+	check_omission_counts(&f, 1);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_children_omit_only_selected_directory_children(void)
+{
+	const char *const members[] = { "/d", "/d/sub/inner" };
+	const char *const expected[] = { "/d", "/d/sub", "/d/sub/inner",
+	    "/d/sub/inner/file" };
+	gen_t g;
+	fixture_t f;
+	fsimg_selection_t *selection;
+	fsimg_selection_relation_t relation;
+	const fsimg_entry_t *entry;
+
+	make_member_omission_image(&g);
+	fixture_new(&f, g.image, g.length);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_selection_new(f.reader, members, 2, FSIMG_SELECTION_CHILDREN,
+	    &selection, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+		CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, expected[i]) == 0);
+	}
+	CHECK(fsimg_selection_next(selection, &entry, &relation, NULL) == FSIMG_DONE);
+	check_omission_counts(&f, 1);
+	fsimg_selection_free(selection);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
 static void
 test_extract(void)
 {
@@ -4267,7 +4541,8 @@ test_extract(void)
 	fixture_new(&f, g.image, g.length);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	fsimg_extract_options_init(&options);
-	options.selection = "/d1";
+	options.selections = (const char *const[]){ "/d1" };
+	options.selection_count = 1;
 	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, NULL) ==
 	    FSIMG_OK);
 	check_file(&f, "out/d1/d2-with-a-long-name/f", "sub", 3);
@@ -4277,14 +4552,16 @@ test_extract(void)
 
 	/* A symbolic link or FIFO fails extraction unless skipped. */
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-	options.selection = "/fifo";
+	options.selections = (const char *const[]){ "/fifo" };
+	options.selection_count = 1;
 	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, NULL) ==
 	    FSIMG_EUNSUPPORTED);
 	remove_tree(f.scratch, "out");
 	fsimg_reader_free(f.reader);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
-	options.selection = NULL;
+	options.selections = NULL;
+	options.selection_count = 0;
 	/* The whole volume: the 505-byte name exceeds every supported host's
 	 * component limit, after the other entries were written or skipped.
 	 */
@@ -4294,7 +4571,8 @@ test_extract(void)
 	remove_tree(f.scratch, "out");
 	fsimg_reader_free(f.reader);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
-	options.selection = "/symlink";
+	options.selections = (const char *const[]){ "/symlink" };
+	options.selection_count = 1;
 	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, NULL) ==
 	    FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
@@ -5081,6 +5359,13 @@ main(int argc, char **argv)
 	test_source_change();
 	test_extract();
 	test_omitted_names();
+	test_nested_members_select_once();
+	test_members_remain_case_sensitive();
+	test_overlapping_members_count_omission_once();
+	test_root_and_deeper_member_count_all_omissions_once();
+	test_omissions_outside_member_union_do_not_fail();
+	test_omission_inside_member_union_fails();
+	test_children_omit_only_selected_directory_children();
 	test_scale(false);
 	test_depth_limit();
 	if (skipped != 0)

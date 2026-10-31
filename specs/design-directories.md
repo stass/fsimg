@@ -111,9 +111,9 @@ pruned unless some member needs its children, and its omitted children are
 counted only when some member selects them. The walk returns each entry
 once, so an entry that several members select, through nesting, repetition
 or aliases, is processed once without any record of what was returned, and
-no member costs more than its spelling and a few counters. The walk ends
-once no member can select anything more, and fails naming a member that did
-not resolve.
+no member costs more than its spelling and a few counters. A member that
+ends unresolved matched nothing, and the walk fails naming it; otherwise the
+walk ends once no member can select anything more.
 
 ## Traversal
 

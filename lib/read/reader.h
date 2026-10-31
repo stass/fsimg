@@ -65,18 +65,19 @@ typedef struct fsimg_reader_ops {
 
 /* What the walker does with entries omitted for their names. An omitted
  * subtree root, an omitted entry whose ancestors are all delivered, is
- * counted in count when walk->depth >= scope, the depth of the directory
- * listing it. scope is zero, the whole volume, unless a selection narrows
- * it: to nothing until its target resolves, then to the target's depth
- * plus one, its children. descend, set by full verification, walks omitted
- * directories, which delivery never does; refuse, set by extraction without
- * the skip option, fails at a counted root. The operation that starts the
- * walk sets descend, refuse and the initial scope before its first advance;
- * the walker in directory.c is the only writer of count.
+ * counted in count when the directory listing it is in scope. Without a
+ * selection every directory is in scope, the whole volume. A selection
+ * narrows the scope with fsimg_walk_scope_children: root_excluded takes the
+ * root out of scope, and a descended directory inherits its parent's scope
+ * unless the selection sets it. descend, set by full verification, walks
+ * omitted directories, which delivery never does; refuse, set by
+ * extraction without the skip option, fails at a counted root. The operation that starts the walk sets
+ * descend, refuse and the root's scope before its first advance; the walker
+ * in directory.c is the only writer of count.
  */
 typedef struct fsimg_omission {
 	uint64_t	 count;
-	uint32_t	 scope;
+	bool		 root_excluded;
 	bool		 descend;
 	bool		 refuse;
 } fsimg_omission_t;
@@ -151,15 +152,14 @@ fsimg_status_t fsimg_reader_skip_directory(fsimg_reader_t *, fsimg_error_t *);
  * selection and structural verification. Every admitted child becomes the
  * current entry, omitted ones included; delivered tells whether the current
  * entry and all its ancestors are delivered, which iteration filters on.
- * scope_nothing and scope_below_current narrow the omission scope to
- * nothing, before a selection's target resolves, and to the descendants of
- * the current entry, its resolved target. free releases every prepared
+ * scope_children sets whether the omitted children of the next directory to
+ * list are in scope: the current directory, which descends on the next
+ * advance, or the root before the walk starts. free releases every prepared
  * directory and accepts a reader that never started.
  */
 fsimg_status_t fsimg_walk_next(fsimg_reader_t *, fsimg_error_t *);
 bool fsimg_walk_delivered(const fsimg_reader_t *);
-void fsimg_walk_scope_nothing(fsimg_reader_t *);
-void fsimg_walk_scope_below_current(fsimg_reader_t *);
+void fsimg_walk_scope_children(fsimg_reader_t *, bool);
 fsimg_status_t fsimg_walk_match(fsimg_reader_t *, const char *, bool *,
     fsimg_error_t *);
 fsimg_status_t fsimg_walk_skip(fsimg_reader_t *, fsimg_error_t *);

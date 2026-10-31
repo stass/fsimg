@@ -17,8 +17,9 @@
  * NUL-terminated and zero after the terminator, then one byte saying
  * whether a label is present. Then come the write settings: the 16-byte
  * UUID, the byte order as one byte, and the inode capacity and reserve
- * percentage as eight little-endian bytes each, and the number of create
- * root descriptors as eight bytes. The read-side selection follows: the
+ * percentage as eight little-endian bytes each, and the number of the
+ * job's paths as eight bytes: a create job's root descriptors, or a read
+ * job's members. The read-side selection follows: the
  * selector kind, partition index and GPT sector size as eight bytes each,
  * the three stack slot states as one byte each, the scheme and container
  * names in 16 bytes each (the format name is the filesystem slot's), and
@@ -48,7 +49,7 @@
  *
  * The job's image paths follow the record in SELECTION frames, as one
  * sequence of NUL-terminated paths whose total length the record states:
- * a read job sends its one member, a create job one path per root
+ * a read job sends its members, a create job one path per root
  * descriptor: for a manifest root's descriptors FSIMG_JOB_MANIFEST, then
  * FSIMG_JOB_CONTENTS when it has a content directory.
  */
@@ -70,7 +71,7 @@ typedef enum job_string_field {
 	JOB_BYTE_ORDER = 288,
 	JOB_INODES_OFFSET = 296,
 	JOB_RESERVE_OFFSET = 304,
-	JOB_ROOTS_OFFSET = 312,
+	JOB_PATHS_OFFSET = 312,
 	JOB_SELECTOR_OFFSET = 320,
 	JOB_PARTITION_INDEX_OFFSET = 328,
 	JOB_GPT_SECTOR_OFFSET = 336,
@@ -415,13 +416,22 @@ invalid_job(fsimg_error_t *error)
 }
 
 void
+fsimg_job_select_volume(fsimg_worker_request_t *request)
+{
+	static const char *const whole_volume[] = { "/" };
+
+	request->members = whole_volume;
+	request->member_count = 1;
+}
+
+void
 fsimg_worker_request_init(fsimg_worker_request_t *request)
 {
 	bzero(request, sizeof(*request));
 	fsimg_options_init(&request->limits);
 	fsimg_write_options_init(&request->write);
 	fsimg_layer_options_init(&request->layers);
-	request->selection = "/";
+	fsimg_job_select_volume(request);
 	request->codepage = 437;
 	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++)
 		*fsimg_job_capability_field(request, c) = -1;
@@ -522,14 +532,17 @@ fsimg_job_capability_field(fsimg_worker_request_t *request,
 uint32_t
 fsimg_job_path_count(const fsimg_worker_request_t *request)
 {
-	return (fsimg_job_has_roots(request->kind) ? request->root_count : 1);
+	return (fsimg_job_has_roots(request->kind) ? request->root_count :
+	    request->member_count);
 }
 
 const char *
 fsimg_job_path(const fsimg_worker_request_t *request, uint32_t index)
 {
-	return (fsimg_job_has_roots(request->kind) ? request->root_paths[index] :
-	    request->selection);
+	if (fsimg_job_has_roots(request->kind))
+		return (request->root_paths[index]);
+	/* A decoded read job has no members until its paths arrive. */
+	return (request->members == NULL ? NULL : request->members[index]);
 }
 
 /* Whether path is a create job's manifest tag: protocol naming a root
@@ -593,7 +606,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	    memchr(request->layers.gpt_type, '\0', JOB_GPT_TYPE_BYTES) == NULL ||
 	    memchr(request->layers.gpt_name, '\0', JOB_GPT_NAME_BYTES) == NULL ||
 	    memchr(request->layers.mbr_type, '\0', JOB_MBR_TYPE_BYTES) == NULL ||
-	    fsimg_job_has_roots(request->kind) != (request->root_count != 0))
+	    fsimg_job_has_roots(request->kind) != (request->root_count != 0) ||
+	    fsimg_job_path_count(request) == 0)
 		return (invalid_job(error));
 	label = request->write.label == NULL ? "" : request->write.label;
 	label_length = strnlen(label, JOB_LABEL_BYTES);
@@ -666,7 +680,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	raw[JOB_BYTE_ORDER] = (unsigned char)request->write.byte_order;
 	fsimg_store_le64(raw + JOB_INODES_OFFSET, request->write.inode_capacity);
 	fsimg_store_le64(raw + JOB_RESERVE_OFFSET, request->write.reserve_percent);
-	fsimg_store_le64(raw + JOB_ROOTS_OFFSET, request->root_count);
+	fsimg_store_le64(raw + JOB_PATHS_OFFSET, fsimg_job_path_count(request));
 	if (mountpoint != NULL) {
 		bcopy(mountpoint, raw + JOB_MOUNTPOINT_OFFSET, strlen(mountpoint));
 		raw[JOB_MOUNTPOINT_PRESENT] = 1;
@@ -774,12 +788,15 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    fsimg_load_le64(raw + JOB_INODES_OFFSET) > UINT32_MAX ||
 	    fsimg_load_le64(raw + JOB_RESERVE_OFFSET) > UINT32_MAX)
 		return (invalid_job(error));
-	/* Root descriptors exist exactly for create jobs, at most one per
-	 * permitted descriptor, and arrive with the roots capability.
+	/* Every job has a path. Root descriptors exist exactly for create
+	 * jobs, one per path and at most one per permitted descriptor, and
+	 * arrive with the roots capability; a read job's paths are members.
 	 */
-	roots = fsimg_load_le64(raw + JOB_ROOTS_OFFSET);
-	if (fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND)) !=
-	    (roots != 0) || roots > get_field(raw, JOB_FDS) ||
+	count = fsimg_load_le64(raw + JOB_PATHS_OFFSET);
+	roots = fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND)) ?
+	    count : 0;
+	if (count == 0 || count > UINT32_MAX ||
+	    roots > get_field(raw, JOB_FDS) ||
 	    ((get_field(raw, JOB_CAPABILITIES) & FSIMG_JOB_CAP_ROOTS) != 0) !=
 	    (roots != 0))
 		return (invalid_job(error));
@@ -848,11 +865,18 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    request->limits.max_path_bytes;
 	if (roots != 0 && per_path_bytes < FSIMG_JOB_TAG_BYTES)
 		per_path_bytes = FSIMG_JOB_TAG_BYTES;
-	count = roots == 0 ? 1 : roots;
 	if (*selection_length < 2 * count ||
 	    *selection_length > count * per_path_bytes)
 		return (invalid_job(error));
-	/* Last, so a refused record leaves no roots for cleanup to close. */
-	request->root_count = (uint32_t)roots;
+	/* A read job's members arrive in the path sequence, and the receiver
+	 * points members at them. Last, so a refused record leaves no roots
+	 * for cleanup to close.
+	 */
+	if (roots == 0) {
+		request->members = NULL;
+		request->member_count = (uint32_t)count;
+	} else {
+		request->root_count = (uint32_t)roots;
+	}
 	return (FSIMG_OK);
 }

@@ -30,6 +30,9 @@ static void test_job_posix_flags(void);
 static void test_signed_wire_values(void);
 static void test_job_roots(void);
 static void test_job_selection(void);
+static void test_read_job_members_roundtrip(void);
+static void test_select_volume_replaces_read_job_members(void);
+static void test_read_job_zero_members_is_invalid(void);
 static void test_job_layers(void);
 static void test_job_catalogue(void);
 static void other_value(const fsimg_setting_t *, fsimg_setting_value_t *);
@@ -186,7 +189,8 @@ test_selection_budget(void)
 
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_LIST;
-	request.selection = "/abc";
+	request.members = (const char *const[]){ "/abc" };
+	request.member_count = 1;
 	request.limits.max_path_bytes = 4;
 	CHECK(fsimg_job_encode(&request, raw, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_PATH);
@@ -959,6 +963,83 @@ test_job_roots(void)
 	    sizeof(FSIMG_JOB_CONTENTS) + 3);
 }
 
+static void
+test_read_job_members_roundtrip(void)
+{
+	const char *const members[] = { "/A", "/B/file", "/A/nested" };
+	const fsimg_job_kind_t kinds[] = { FSIMG_JOB_LIST, FSIMG_JOB_EXTRACT };
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection_length, paths_length;
+	fsimg_error_t error;
+	unsigned capabilities;
+
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		fsimg_worker_request_init(&request);
+		request.kind = kinds[i];
+		request.members = members;
+		request.member_count = 3;
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded,
+		    &selection_length, &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.kind == kinds[i]);
+		CHECK(decoded.member_count == 3 && decoded.members == NULL);
+		CHECK(fsimg_job_path(&decoded, 0) == NULL);
+		CHECK(fsimg_job_paths_length(&decoded, &paths_length, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(error.status == FSIMG_EINVAL);
+		CHECK(decoded.root_count == 0);
+		CHECK(selection_length == strlen(members[0]) + 1 +
+		    strlen(members[1]) + 1 + strlen(members[2]) + 1);
+		CHECK((capabilities & FSIMG_JOB_CAP_ROOTS) == 0);
+	}
+}
+
+static void
+test_select_volume_replaces_read_job_members(void)
+{
+	const char *const members[] = { "/A", "/B/file" };
+	const fsimg_job_kind_t kinds[] = { FSIMG_JOB_LIST, FSIMG_JOB_EXTRACT };
+	fsimg_worker_request_t request;
+	uint64_t paths_length;
+
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		fsimg_worker_request_init(&request);
+		request.kind = kinds[i];
+		request.members = members;
+		request.member_count = 2;
+		fsimg_job_select_volume(&request);
+		CHECK(request.member_count == 1);
+		CHECK(fsimg_job_path_count(&request) == 1);
+		CHECK(strcmp(request.members[0], "/") == 0);
+		CHECK(fsimg_job_paths_length(&request, &paths_length, NULL) == FSIMG_OK);
+		CHECK(paths_length == 2);
+	}
+}
+
+static void
+test_read_job_zero_members_is_invalid(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection_length;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	/* cmd/fsimg/job.c JOB_PATHS_OFFSET holds the eight-byte path count.
+	 * Check the valid record before corrupting it so layout drift fails.
+	 */
+	CHECK(fsimg_load_le64(raw + 312) == request.member_count);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection_length,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.member_count == request.member_count);
+	fsimg_store_le64(raw + 312, 0);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection_length,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+}
+
 /* The stack and selector cross the job wire unchanged. A slot state or
  * selector outside its enum, an unterminated name or selector text, and a
  * stack the grammar refuses (a scheme name in the container slot) fail.
@@ -980,7 +1061,8 @@ test_job_selection(void)
 
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_LIST;
-	request.selection = "/";
+	request.members = (const char *const[]){ "/" };
+	request.member_count = 1;
 	CHECK(fsimg_stack_parse("fat32/gpt", &request.stack, NULL) == FSIMG_OK);
 	request.selector = FSIMG_SELECT_NAME;
 	strcpy(request.partition_text, "EFI system");
@@ -1444,6 +1526,9 @@ main(int argc, char **argv)
 	test_job_mountpoint();
 	test_job_ifsboot_settings();
 	test_job_selection();
+	test_read_job_members_roundtrip();
+	test_select_volume_replaces_read_job_members();
+	test_read_job_zero_members_is_invalid();
 	test_job_layers();
 	test_job_catalogue();
 	test_image_records();

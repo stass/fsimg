@@ -2784,7 +2784,8 @@ extract_image(fixture_t *f, const char *selection, bool skip,
 	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) ==
 	    FSIMG_OK);
 	fsimg_extract_options_init(&options);
-	options.selection = selection;
+	options.selections = &selection;
+	options.selection_count = selection == NULL ? 0 : 1;
 	if (skip)
 		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
 	CHECK(mkdirat(f->scratch, "out", 0700) == 0);

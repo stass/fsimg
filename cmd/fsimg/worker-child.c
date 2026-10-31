@@ -41,14 +41,15 @@ typedef struct worker_child {
 	 */
 	fsimg_io_t	*settings[FSIMG_FILE_SETTINGS];
 	fsimg_layer_inputs_t inputs;
-	/* The job's NUL-terminated paths, back to back: the member of a read
+	/* The job's NUL-terminated paths, back to back: the members of a read
 	 * job, or one per root descriptor of a create job, the image path of a
 	 * host root, or for a manifest root's descriptors FSIMG_JOB_MANIFEST,
-	 * then FSIMG_JOB_CONTENTS when it has a content directory.
+	 * then FSIMG_JOB_CONTENTS when it has a content directory. members
+	 * points at each of a read job's, and the request borrows it.
 	 */
 	char		*paths;
 	uint64_t	 paths_length;
-	char		*selection;
+	const char	**members;
 	uint64_t	 last_progress;
 	unsigned	 losses_sent;
 	/* Raw filesystem capabilities remain here until an owner adopts them.
@@ -367,23 +368,23 @@ read_paths(worker_child_t *child, uint64_t paths_length, fsimg_error_t *error)
 		received += frame.length;
 	}
 	child->paths_length = paths_length;
-	child->selection = child->paths;
-	child->request.selection = child->selection;
 	return (FSIMG_OK);
 }
 
-/* The sequence holds exactly the job's paths, one for a read job and one
- * per root descriptor for a create job, each terminated. Each is a valid
- * absolute image path within the context's limits, except a create job's
- * manifest root: FSIMG_JOB_MANIFEST for the manifest, then
+/* The sequence holds exactly the job's paths, the members of a read job
+ * and one per root descriptor for a create job, each terminated. Each is a
+ * valid absolute image path within the context's limits, except a create
+ * job's manifest root: FSIMG_JOB_MANIFEST for the manifest, then
  * FSIMG_JOB_CONTENTS for its content directory when it has one.
- * FSIMG_JOB_CONTENTS anywhere else is a malformed manifest root.
+ * FSIMG_JOB_CONTENTS anywhere else is a malformed manifest root. A read
+ * job's request then borrows its members from the sequence.
  */
 static fsimg_status_t
 validate_paths(worker_child_t *child, fsimg_error_t *error)
 {
 	const char *path, *end;
-	size_t length, validated;
+	uint64_t bytes;
+	size_t length, validated, allocation;
 	uint32_t depth, count, expected;
 	fsimg_status_t status;
 	bool roots, contents_allowed;
@@ -394,6 +395,16 @@ validate_paths(worker_child_t *child, fsimg_error_t *error)
 	if (child->paths_length == 0 || end[-1] != '\0')
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
+	if (!roots) {
+		if (!fsimg_mul_u64(expected, sizeof(*child->members), &bytes) ||
+		    !fsimg_to_size(bytes, &allocation))
+			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_CONTEXT,
+			    "worker member table exceeds host range"));
+		child->members = fsimg_alloc(child->ctx, allocation, error);
+		if (child->members == NULL)
+			return (error->status);
+	}
 	count = 0;
 	contents_allowed = false;
 	for (path = child->paths; path < end; path += length + 1) {
@@ -418,10 +429,14 @@ validate_paths(worker_child_t *child, fsimg_error_t *error)
 		    &depth, error);
 		if (status != FSIMG_OK)
 			return (status);
+		if (!roots)
+			child->members[count - 1] = path;
 	}
 	if (count != expected)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CONTEXT, "invalid worker selection framing"));
+	if (!roots)
+		child->request.members = child->members;
 	return (FSIMG_OK);
 }
 
@@ -657,8 +672,8 @@ list_job(worker_child_t *child, fsimg_error_t *error)
 
 	policy = (child->request.flags & FSIMG_JOB_RECURSIVE) != 0 ?
 	    FSIMG_SELECTION_TREE : FSIMG_SELECTION_CHILDREN;
-	status = fsimg_selection_new(child->reader, child->selection, policy,
-	    &child->selector, error);
+	status = fsimg_selection_new(child->reader, child->request.members,
+	    child->request.member_count, policy, &child->selector, error);
 	if (status != FSIMG_OK)
 		return (status);
 	for (;;) {
@@ -694,8 +709,9 @@ cat_job(worker_child_t *child, fsimg_error_t *error)
 	unsigned interruptions;
 	fsimg_status_t status;
 
-	status = fsimg_selection_new(child->reader, child->selection,
-	    FSIMG_SELECTION_FILE, &child->selector, error);
+	status = fsimg_selection_new(child->reader, child->request.members,
+	    child->request.member_count, FSIMG_SELECTION_FILE, &child->selector,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_selection_next(child->selector, &entry, &relation, error);
@@ -786,7 +802,8 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 	int fd, closed, saved;
 
 	fsimg_extract_options_init(&options);
-	options.selection = child->selection;
+	options.selections = child->request.members;
+	options.selection_count = child->request.member_count;
 	if ((child->request.flags & FSIMG_JOB_SKIP_UNSUPPORTED) != 0)
 		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
 	/* Lent to the library, which writes and flushes it; it stays charged
@@ -1214,6 +1231,7 @@ child_cleanup(worker_child_t *child)
 	/* The writer borrowed the file settings until it was freed. */
 	for (unsigned i = 0; i < FSIMG_FILE_SETTINGS; i++)
 		fsimg_io_free(child->settings[i]);
+	fsimg_dealloc(child->members);
 	fsimg_dealloc(child->paths);
 	if (child->output_root != -1)
 		fsimg_fd_release(child->ctx, child->output_root);

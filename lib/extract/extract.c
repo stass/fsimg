@@ -122,10 +122,20 @@ extract_options(fsimg_reader_t *reader, const fsimg_extract_options_t *input,
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	if (options->selection == NULL)
-		options->selection = "/";
-	return (fsimg_path_validate(reader->ctx, options->selection, true,
-	    &length, &depth, error));
+	/* Every member is checked before the destination exists. */
+	if (options->selections == NULL && options->selection_count != 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_EXTRACT, "missing extraction selections"));
+	for (size_t i = 0; i < options->selection_count; i++) {
+		if (options->selections[i] == NULL)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_EXTRACT, "missing extraction selection"));
+		status = fsimg_path_validate(reader->ctx, options->selections[i],
+		    true, &length, &depth, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (FSIMG_OK);
 }
 
 
@@ -631,8 +641,9 @@ fsimg_extract_into(fsimg_reader_t *reader, int root,
 	if (status != FSIMG_OK)
 		return (status);
 	state.reader = reader;
-	status = fsimg_selection_new(reader, state.options.selection,
-	    FSIMG_SELECTION_TREE, &state.selection, error);
+	status = fsimg_selection_new(reader, state.options.selections,
+	    state.options.selection_count, FSIMG_SELECTION_TREE,
+	    &state.selection, error);
 	if (status != FSIMG_OK)
 		goto done;
 	/* The walker fails at an omitted entry in scope unless asked to skip:

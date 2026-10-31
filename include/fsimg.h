@@ -1080,8 +1080,12 @@ typedef struct fsimg_extract_options {
 	size_t		 size;
 	uint32_t	 version;
 	uint32_t	 flags;
-	/* Absolute UTF-8 lookup path; format case/alias rules apply. NULL means /. */
-	const char	*selection;
+	/* selection_count absolute UTF-8 lookup paths, borrowed for the call;
+	 * format case/alias rules apply. The union of their subtrees is
+	 * extracted, each entry once; none (the initialized default) means /.
+	 */
+	const char *const *selections;
+	size_t		 selection_count;
 	uint64_t	 max_output_bytes; /* Zero uses the reader's ceiling. */
 	/* Explicit minutes east of UTC for unknown-zone calendar timestamps. */
 	int32_t		 wall_offset_minutes;

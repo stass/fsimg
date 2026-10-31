@@ -31,6 +31,10 @@ static bool every_layer_key_in(char *const *const *);
 static void test_stacks(void);
 static void test_setting_values(void);
 static void test_extract_options(void);
+static void test_list_members_are_normalized(void);
+static void test_extract_accepts_several_members(void);
+static void test_stdout_extraction_refuses_several_members(void);
+static void test_parent_member_is_refused(void);
 static void test_stems(void);
 static void test_long_listing(void);
 static void test_staged_verification_failure(void);
@@ -259,12 +263,14 @@ test_options(void)
 	fsimg_cli_release(&options);
 	CHECK(parse(listing, &options) == FSIMG_OK);
 	CHECK(options.json && (options.request.flags & FSIMG_JOB_RECURSIVE) != 0);
-	CHECK(strcmp(options.request.selection, "/A") == 0);
+	CHECK(options.request.member_count == 1);
+	CHECK(strcmp(options.request.members[0], "/A") == 0);
 	CHECK(strcmp(options.image, "image") == 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(flat, &options) == FSIMG_OK);
 	CHECK((options.request.flags & FSIMG_JOB_RECURSIVE) == 0);
-	CHECK(strcmp(options.request.selection, "/A") == 0);
+	CHECK(options.request.member_count == 1);
+	CHECK(strcmp(options.request.members[0], "/A") == 0);
 	fsimg_cli_release(&options);
 	CHECK(parse(qnx6, &options) == FSIMG_OK);
 	CHECK(options.request.write.byte_order == FSIMG_BYTE_ORDER_BIG);
@@ -336,7 +342,6 @@ test_modes(void)
 	char *info[] = { "fsimg", "--info", "-v", "-f", "image", NULL };
 	char *verify[] = { "fsimg", "Wdf", "image", NULL };
 	fsimg_cli_options_t options;
-	bool syntax_error;
 
 	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
 		check_syntax(invalid[i]);
@@ -371,11 +376,15 @@ test_modes(void)
 	fsimg_cli_release(&options);
 	/* Only the first argument is a bundle; later dashless words are operands. */
 	CHECK(parse(second_word, &options) == FSIMG_OK);
-	CHECK(strcmp(options.member, "/xf") == 0);
+	CHECK(options.member_count == 1);
+	CHECK(strcmp(options.members[0], "/xf") == 0);
 	fsimg_cli_release(&options);
 	/* Options end at the first operand, so a later option word is a member. */
-	CHECK(parse_status(late_option, &syntax_error) == FSIMG_EUNSUPPORTED);
-	CHECK(!syntax_error);
+	CHECK(parse(late_option, &options) == FSIMG_OK);
+	CHECK(options.member_count == 2);
+	CHECK(strcmp(options.members[1], "/--json") == 0);
+	CHECK(!options.json);
+	fsimg_cli_release(&options);
 	CHECK(parse(info, &options) == FSIMG_OK);
 	CHECK(options.request.kind == FSIMG_JOB_INFO && strcmp(options.mode, "i") == 0);
 	CHECK((options.request.flags & FSIMG_JOB_VERBOSE) != 0);
@@ -629,7 +638,6 @@ test_stacks(void)
 	char *unsupported[][12] = {
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
 		{ "fsimg", "-cM", "-F", "fat32", "-f", "out.img", ".", NULL },
-		{ "fsimg", "-t", "-f", "image", "/a", "/b", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.zst", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.XZ", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-o", "zstd:level=1", "-f",
@@ -639,6 +647,7 @@ test_stacks(void)
 	 * suffix must name the stack's container and selects nothing more.
 	 */
 	char *accepted[][12] = {
+		{ "fsimg", "-t", "-f", "image", "/a", "/b", NULL },
 		{ "fsimg", "-cn", "-F", "fat32/-/vhd", ".", NULL },
 		{ "fsimg", "-cn", "-F", "fat32/gpt/dmg", ".", NULL },
 		{ "fsimg", "-cn", "-F", "fat32/-/simg", ".", NULL },
@@ -923,9 +932,59 @@ test_extract_options(void)
 	fsimg_cli_release(&options);
 	CHECK(parse(standard_output, &options) == FSIMG_OK);
 	CHECK(options.request.kind == FSIMG_JOB_CAT);
-	CHECK(strcmp(options.member, "/EFI/a.txt") == 0);
-	CHECK(strcmp(options.request.selection, "/EFI/a.txt") == 0);
+	CHECK(options.member_count == 1);
+	CHECK(strcmp(options.members[0], "/EFI/a.txt") == 0);
+	CHECK(options.request.member_count == 1);
+	CHECK(strcmp(options.request.members[0], "/EFI/a.txt") == 0);
 	fsimg_cli_release(&options);
+}
+
+static void
+test_list_members_are_normalized(void)
+{
+	char *arguments[] = { "fsimg", "t", "-f", "img", "A", "/B",
+	    "./A//c", NULL };
+	const char *const expected[] = { "/A", "/B", "/A/c" };
+	fsimg_cli_options_t options;
+
+	CHECK(parse(arguments, &options) == FSIMG_OK);
+	CHECK(options.request.kind == FSIMG_JOB_LIST);
+	CHECK(options.member_count == 3 && options.request.member_count == 3);
+	for (size_t i = 0; i < 3; i++) {
+		CHECK(strcmp(options.members[i], expected[i]) == 0);
+		CHECK(strcmp(options.request.members[i], expected[i]) == 0);
+	}
+	fsimg_cli_release(&options);
+}
+
+static void
+test_extract_accepts_several_members(void)
+{
+	char *arguments[] = { "fsimg", "x", "-f", "img.img", "A", "B", NULL };
+	fsimg_cli_options_t options;
+
+	CHECK(parse(arguments, &options) == FSIMG_OK);
+	CHECK(options.request.kind == FSIMG_JOB_EXTRACT);
+	CHECK(options.member_count == 2 && options.request.member_count == 2);
+	CHECK(strcmp(options.request.members[0], "/A") == 0);
+	CHECK(strcmp(options.request.members[1], "/B") == 0);
+	fsimg_cli_release(&options);
+}
+
+static void
+test_stdout_extraction_refuses_several_members(void)
+{
+	char *arguments[] = { "fsimg", "x", "-O", "-f", "img", "A", "B", NULL };
+
+	check_syntax(arguments);
+}
+
+static void
+test_parent_member_is_refused(void)
+{
+	char *arguments[] = { "fsimg", "t", "-f", "img", "A", "..", NULL };
+
+	check_syntax(arguments);
 }
 
 /* The extraction stem strips one compression, one container and one generic
@@ -1879,6 +1938,10 @@ main(int argc, char **argv)
 	test_stacks();
 	test_setting_values();
 	test_extract_options();
+	test_list_members_are_normalized();
+	test_extract_accepts_several_members();
+	test_stdout_extraction_refuses_several_members();
+	test_parent_member_is_refused();
 	test_stems();
 	test_long_listing();
 	test_volume_controls();

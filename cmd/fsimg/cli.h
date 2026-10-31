@@ -49,7 +49,9 @@ typedef struct fsimg_cli_options {
 	char		**words;	/* Owned rewrite of a dashless first-argument bundle. */
 	fsimg_cli_operand_t *operands;	/* Owned create operands in command-line order. */
 	unsigned	 operand_count;
-	char		*member;	/* Owned absolute member path of a read mode, or NULL. */
+	/* Owned absolute member paths of a read mode, member_count of them. */
+	char		**members;
+	uint32_t	 member_count;
 	/* c: the -o file settings' host paths, borrowed from argv, in
 	 * fsimg_file_setting_t order; NULL for an absent setting.
 	 */
