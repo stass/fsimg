@@ -7,10 +7,14 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
 ## Scheduled
 
 * [High] **Oracles and corpus** (`test/iso9660-corpus.sh`, `docs/build.md`):
-  stage 0. Install the producers and consumers of the plan's input table,
-  record their versions, generate the corpus, survey the H3 disc for counts,
-  and answer the [evidence questions](iso9660-plan.md#evidence-questions).
-  None of the oracles is installed in the cloud development container.
+  stage 0. Remaining evidence: Linux/FreeBSD kernel mounts; executable
+  OVMF/SeaBIOS boots; genisoimage and makefs producer/consumer measurements;
+  pycdlib integration and measurements; writer-image questions (36-byte PX,
+  extent-zero empty files, Rock Ridge on only the first multi-extent section,
+  oversized EFI sector counts, relocation and `.rr_moved` visibility, Joliet
+  `;1` identifiers and kernel/Windows consumers, ISO selection in hybrids,
+  and version-order ties); and the 65,535-directory fixture with producer,
+  consumer and writer measurements.
 * [High] **Common mechanisms** (`lib/read/`, `lib/write/`,
   `lib/core/settings.c`, `cmd/fsimg/job.c`, `include/fsimg.h`): stage 2.
   Decoded link targets, the portable name profile rename

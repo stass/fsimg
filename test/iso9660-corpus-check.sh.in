@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+set -eu
+if test -z '@RUBY@' || ! '@RUBY@' -rminitest -e \
+    'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.2"))' >/dev/null 2>&1; then
+    echo 'SKIP: ISO corpus unit tests require Ruby 3.2 or later and Minitest'
+    exit 77
+fi
+exec '@RUBY@' '@abs_top_srcdir@/test/iso9660-corpus-test.rb'

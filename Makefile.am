@@ -159,13 +159,14 @@ TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
-	test/spec.sh
+	test/spec.sh test/iso9660-corpus-check.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
 	test/spec.sh \
+	test/iso9660-corpus-check.sh \
 	test/codec-integration.sh
 # The scalar codecs, built once with each signedness of plain char.
 test_endian_SOURCES = test/endian.c test/test.h lib/core/fsimg-endian.h
@@ -366,6 +367,9 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/vm/qsh.py tools/qnx/vm/shot.sh tools/qnx/vm/type.py \
 	tools/qnx/vm/vmstart.sh \
 	tools/gen-fat-tables.rb third-party/Unicode-LICENSE.txt \
+	test/iso9660-corpus.sh test/iso9660-corpus.rb \
+	test/iso9660-corpus-test.rb test/iso9660-corpus-check.sh.in \
+	test/iso9660-evidence.rb \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \

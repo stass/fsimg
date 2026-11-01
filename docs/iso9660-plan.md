@@ -237,7 +237,7 @@ in [the ISO TODO](todo-iso9660.md).
 | Consumers accept an empty file's record naming block 0 | The same consumers; what `xorriso`, `genisoimage`, `makefs` and libarchive write | Writer stage 10 |
 | Consumers read a multi-extent file's Rock Ridge entries from its first section alone, and producers' later sections carry nothing the reader needs | Producers at `-iso-level 3`; Linux, FreeBSD and libarchive reading writer images | Reader rule, writer |
 | OVMF boots an EFI entry whose sector count is the image's 512-byte sectors, or 0 above 16 bits | `xorriso -e` output; OVMF booting writer images of both sizes | El Torito writer |
-| Producers' directories and path tables are sorted as ECMA-119 orders them, ties included | Corpus `W` runs | Verification's order check, owner decision 8 |
+| Producers' primary directories and path tables are sorted as ECMA-119 orders them, ties included | Corpus `W` runs | Verification's order check, owner decision 8 |
 | Real images carry no records with volume sequence number 0, no nonzero `SP` skip with Rock Ridge, no continuation area crossing a block, no invalid dates and no nonzero Joliet volume flags | Corpus survey, the H3 disc | Reader profile tables |
 | Producers write relocation placeholders with a directory `PX` and a clear flag, as the reader expects | `xorriso`, `genisoimage`, `makefs` deep trees | Relocation reading |
 | Consumers show the logical tree of a relocated writer image, and show or hide `.rr_moved` without depending on it | Linux, FreeBSD, libarchive | Relocation stage |
@@ -570,9 +570,11 @@ the rest at the stage 1 gate:
 7. **Hybrid images.** An isohybrid image is ambiguous under the detection
    rule, and `-F iso9660/-` resolves it. No rule ranks a filesystem claim
    above a scheme claim.
-8. **Strict order.** Full verification fails an unsorted directory or
-   path table. If the corpus shows a qualified producer writing unsorted
-   records, this returns to the owner before stage 7 lands.
+8. **Strict primary order.** Full verification fails an unsorted
+   directory or path table of the primary hierarchy. Joliet order is not
+   checked, because the H3 disc's Joliet hierarchy is unsorted while its
+   primary hierarchy is sorted; Joliet path tables must still match the
+   Joliet directories.
 9. **One Joliet descriptor.** Two are unsupported rather than resolved by
    a precedence rule.
 10. **Joliet path length.** Annex C's 240-byte accounting is not enforced

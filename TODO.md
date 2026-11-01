@@ -407,13 +407,12 @@
   FreeBSD only. Adopt settings as an object that never consults the host's
   hole report.
 
-* [Low] **test-worker's relay scenario fails setpgid intermittently**
-  (`test/worker.c:1103`): under a loaded `make -j32 check` on macOS the
-  forked consumer's `setpgid(0, 0)` failed once, while the parent's
-  `setpgid(child, child)` at line 1144 races it; five standalone reruns
-  passed. Find which errno the child sees and let the child tolerate the
-  same race the parent already tolerates (`EACCES`), or move group
-  creation to one side.
+* [Low] **test-worker's process-group setup races**
+  (`test/worker.c`, relay and `coordinator_case_survives_failure` scenarios):
+  under a loaded `make -j32 check` on macOS, child `setpgid(0, 0)` and parent
+  `setpgid(child, child)` checks can fail. Record errno and distinguish
+  concurrent group creation from a child that has already exited; establish
+  group ownership without depending on which process runs first.
 
 * [Medium] **Worker sanitizer exit after an error frame is lost**
   (`cmd/fsimg/worker-parent.c`): after the parser worker sends its final

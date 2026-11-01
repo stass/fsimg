@@ -423,10 +423,10 @@ checked by full verification:
 
 * both tables decode to the same records in the same order;
 * an optional copy, when its address is nonzero, equals its table;
-* every record but the root has a parent number below its own number,
-  and parent numbers never decrease from one record to the next;
-* within one parent, identifiers ascend under the hierarchy's
-  [order](#ordering);
+* every record but the root has a parent number below its own number;
+* in the primary hierarchy, parent numbers never decrease from one record
+  to the next, and within one parent identifiers ascend under the
+  [order](#ordering), which Joliet's tables need not follow;
 * the records are exactly the hierarchy's directories, each with its
   extent, its physical parent's extent through the parent number, and its
   identifier, as the directory records give them.
@@ -518,8 +518,12 @@ parent, are sorted. For the primary hierarchy, identifiers compare:
 4. sections of one file stay in section order.
 
 Joliet compares the same way over 16-bit code units, padding with
-`U+0020`. Full verification checks that records never descend under these
-rules; listing does not depend on them. ECMA-119 leaves identifiers these
+`U+0020`. Full verification checks that the primary hierarchy's records
+never descend under these rules; listing does not depend on them. Joliet's
+order is not checked: the H3 disc's producer writes an unsorted Joliet
+hierarchy beside a sorted primary one, path-table readers use the primary
+tables, and the Joliet path tables are still proved equal to the Joliet
+directories. ECMA-119 leaves identifiers these
 rules find equal, such as a directory `FOO` and a file `FOO.;1`, in either
 order, so the reader accepts both orders. The writer, which needs one
 order for reproducible bytes, breaks such ties by the identifier's bytes,
@@ -648,7 +652,9 @@ resolves a target.
 ### Relocation
 
 The primary hierarchy is at most eight levels deep, the root being level
-1. A deeper Rock Ridge tree relocates directories: the directory is stored
+1. Real discs exceed it, so the reader does not enforce it; only the
+walker's depth limit bounds a hierarchy. A conforming producer keeps a
+deeper Rock Ridge tree within it by relocating directories: the directory is stored
 under a relocation directory, usually named `rr_moved`, and its record
 there carries `RE`; its intended parent holds a placeholder record, with
 the directory flag clear, carrying `CL` with the relocated directory's
@@ -1028,7 +1034,7 @@ Failure classes:
 | Class | Examples |
 | --- | --- |
 | `FSIMG_EFORMAT` | No `CD001` descriptor at block 16; a volume shorter than 17 blocks |
-| `FSIMG_ECORRUPT` | Disagreeing copies of a `both` field; a referenced extent outside the volume or the slice; a record crossing a block; nonzero block tail padding; a dot-record rule; a broken section run; identifiers equal after `;1`; malformed SUSP or Rock Ridge entries; a continuation overlap; a relocation mismatch; inconsistent path tables; unsorted records; an ownership conflict; a bad El Torito checksum |
+| `FSIMG_ECORRUPT` | Disagreeing copies of a `both` field; a referenced extent outside the volume or the slice; a record crossing a block; nonzero block tail padding; a dot-record rule; a broken section run; identifiers equal after `;1`; malformed SUSP or Rock Ridge entries; a continuation overlap; a relocation mismatch; inconsistent path tables; unsorted primary records; an ownership conflict; a bad El Torito checksum |
 | `FSIMG_EUNSUPPORTED` | A profile value outside its table; a forced view the image lacks; a device, associated or interleaved file; zisofs or sparse files |
 | `FSIMG_EINVAL` | A selection component the view cannot represent; a writer setting outside its rules |
 | `FSIMG_ERANGE` | A requested volume smaller than the image; an image beyond `2^32 - 1` blocks |
@@ -1048,9 +1054,9 @@ shown, when reading unless the row says at verification.
 | Dot records and tree | Root and nested directories | Wrong self or parent extent (ECORRUPT); a child naming the root (ECORRUPT); two records opening one directory (ECORRUPT); a misplaced dot identifier (ECORRUPT) |
 | Sections | Single section; two and many sections; final section of 0 and of `2^32 - 1` bytes; a >4 GiB sparse fixture | Missing last section, changed identifier, flag on a directory, unaligned middle section (ECORRUPT); descending or overlapping sections, 65536 sections (EUNSUPPORTED) |
 | Extended attributes | One- and two-block records before data | Record past the extent (ECORRUPT); on a directory (EUNSUPPORTED) |
-| Path tables | Both tables and copies for each hierarchy; 65535 directories | L and M disagree, wrong parent, unsorted, missing or phantom directory, size disagreement (ECORRUPT at verification) |
+| Path tables | Both tables and copies for each hierarchy; 65535 directories | L and M disagree, wrong parent, unsorted primary table, missing or phantom directory, size disagreement (ECORRUPT at verification) |
 | Names | `A.TXT;1`, `A.TXT;2`, `README.;1` beside directory `README`, relaxed lowercase identifiers, long Joliet names, non-BMP Joliet names, Rock Ridge UTF-8 names | `A.TXT` beside `A.TXT;1` (ECORRUPT); version 0 or 32768 (ECORRUPT); odd Joliet length (ECORRUPT); unpaired surrogate (omitted); Latin-1 Rock Ridge name (omitted) |
-| Order | Sorted directories and path tables, versions descending, `FOO` and `FOO.;1` in either order | Swapped unequal neighbours (ECORRUPT at verification) |
+| Order | Sorted primary directories and path tables, versions descending, `FOO` and `FOO.;1` in either order; an unsorted Joliet hierarchy | Swapped unequal primary neighbours (ECORRUPT at verification) |
 | SUSP | `SP` alone; `ER` in a continuation; 16 continuation areas; unknown entries | Bad check bytes at root (opaque, view absent); length below 4 or past the area (ECORRUPT); 17 areas, an area crossing a block (EUNSUPPORTED); self-referencing or overlapping continuation (ECORRUPT); nonzero skip (EUNSUPPORTED for the view) |
 | Rock Ridge | Every kind; 36- and 44-byte `PX`; 1024-byte name and target; `NM` and `SL` across continuations; short and long `TF` | Type disagreeing with the flag, duplicate `PX`, `TF` length mismatch, dangling `SL` continuation, `NM` with a slash (ECORRUPT); device (EUNSUPPORTED); `ZF`, `SF` (EUNSUPPORTED) |
 | Relocation | Depths 9 to 20 through one and several relocations; placeholders with a directory `PX` | `CL` to a non-directory, missing `PL`, `PL` on an ordinary directory, `RE` without `CL`, a loop (ECORRUPT) |

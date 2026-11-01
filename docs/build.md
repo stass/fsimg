@@ -1925,3 +1925,159 @@ Immediate allocated-block samples are 25,321,472 bytes on APFS and 512 bytes
 on ZFS; compression and delayed allocation make these samples distinct from
 settled device writes. This measures sparse logical capacity and bounded
 metadata/content access, not full multi-terabyte payload transfer.
+
+## ISO 9660 oracles
+
+ISO producers and consumers are development tools, never dependencies of
+libfsimg. On macOS install the external families with:
+
+```sh
+brew install xorriso cdrtools sevenzip qemu
+# Optional process oracle in a virtual environment.
+python3 -m venv "$HOME/.cache/fsimg-iso/pycdlib-venv"
+"$HOME/.cache/fsimg-iso/pycdlib-venv/bin/pip" install pycdlib
+```
+
+`/usr/bin/bsdtar` and `hdiutil` are supplied by macOS. Reference measurements
+use xorriso 1.5.8.pl02 (libisofs 1.5.8), cdrtools `mkisofs`, `isoinfo`
+and `isovfy` 3.02a09, `/usr/bin/bsdtar` 3.5.3 with libarchive 3.7.4,
+7zz 26.03, and QEMU 11.1.2. SeaBIOS is
+`/usr/local/share/qemu/bios.bin`; OVMF is
+`/usr/local/share/qemu/edk2-x86_64-code.fd` with Homebrew's `/usr/local`
+prefix. These tools run as external programs; no implementation code or
+producer image enters the repository.
+
+On Linux, `apt-get install genisoimage xorriso libarchive-tools` supplies
+additional oracles. FreeBSD supplies `makefs` and `mount_cd9660` in base;
+`pkg install xorriso cdrtools libarchive 7-zip qemu` supplies the other
+families. Linux can use the cd9660 backend of kusumi/makefs, built outside
+the repository from its upstream checkout. Pycdlib is optional; the generator
+records it as an unimplemented producer independently of its installation.
+
+Generate the corpus in a new directory whose parent already exists:
+
+```sh
+mkdir -p "$HOME/.cache/fsimg-iso"
+sh test/iso9660-corpus.sh "$HOME/.cache/fsimg-iso/corpus"
+```
+
+The script uses Ruby 3.2 or later (`RUBY` selects the interpreter). It
+refuses existing destinations and destinations inside the repository,
+including symlink aliases. All sources are synthetic and live under the
+private output directory. The CLI sets its working directory and `TMPDIR`
+beneath that root and disables core dumps before running tools. Producers
+receive that directory as `HOME`, with `MKISOFSRC` and `GENISOIMAGERC` unset
+and `SOURCE_DATE_EPOCH=946684800`. Readable empty `.mkisofsrc` and
+`.genisoimagerc` files in the private working directory stop executable-directory
+rc fallback. Xorriso receives `-no_rc` before its
+mkisofs emulation options. Executable paths are resolved through symlinks
+and deduplicated, and version output selects the mkisofs option dialect.
+Each external tool has a ten-minute timeout. `images.jsonl` records the
+image name, producer,
+version, shell-quoted command, output path and SHA256. Producers stream to
+a sparse sink; each 4,294,971,396-byte source and its ISO occupy only a
+small fraction of their logical size. Source file hashes are cached across
+producers and views. The commands are an invocation
+manifest in `test/iso9660-corpus.rb`; the shell entry point and helper are
+in `EXTRA_DIST`, and corpus generation is not part of `make check`.
+
+Each image has a source JSONL manifest and, for the views it offers,
+`primary`, `rockridge` and `joliet` JSONL manifests recording path, type,
+size, link target and content SHA256. For files, section counts come from repeated
+paths in `isoinfo -f`; `-l` combines their sizes. The large fixture's expected
+digest always comes from its uniquely corresponding source file; the
+observed isoinfo SHA256 and byte count remain separate fields. Other files
+require an exact extracted byte count. Raw `isoinfo -l` and `-f` listings,
+separate stderr logs, descriptor reports, producer logs and default-view bsdtar mtree manifests
+remain beside the image. The latter include SHA256 and link targets
+without extracting special files. View status files identify oracle
+limitations; `.mtree.status` distinguishes a complete libarchive manifest
+from a partial one. `.iso.status` records typed consumer failures per image;
+`skips.txt` records missing tools, failures and skipped cases.
+Directory sizes in view manifests are the on-disc sizes, whereas source
+manifests use zero for directories and special files other than symlinks.
+Both representations give a symlink its target's byte length. Names and hashes in
+these files concern synthetic data only.
+
+The xorriso, mkisofs and genisoimage invocations cover empty and minimal images,
+interchange levels 1 to 3, Rock Ridge files/directories/symlinks/FIFOs,
+238-byte names using SUSP continuation, a 20-directory deep tree,
+Joliet, multi-extent files, BIOS/EFI/both catalog entries, and visible and
+hidden catalogs. Character and block device fixtures are omitted to avoid
+creating host driver endpoints, including when run as root. Bsdtar supplies
+another producer
+family for the small source trees; its multi-extent production is skipped
+because libarchive stages payload in a temporary file, defeating the
+small-disk requirement. Native producers emit Joliet level 3 (`%/E`);
+levels 1 and 2 have no selector and are explicitly skipped. Normal and
+long Joliet cases exercise truncation at 64 and 103 UTF-16 units;
+xorriso `-joliet-utf16` supplies a non-BMP surrogate pair. Xorriso supplies
+an MBR/GPT partition-table hybrid with `-part_like_isohybrid` and
+`-isohybrid-gpt-basdat`; it has no Syslinux MBR boot program. Mkisofs and
+genisoimage isohybrid variants require an external Syslinux MBR and are
+skipped. The all-zero BIOS and EFI payloads are structural catalog
+fixtures, not bootable applications or a FAT EFI system partition. A
+separate 606-byte symlink-target probe makes mkisofs 3.02a09 emit malformed
+split SL data: isoinfo diagnoses a bad entry version and bsdtar reads a
+truncated target. This optional long-link probe stays outside the corpus;
+the required long-name NM continuation fixtures are retained.
+
+The owner's H3 image is opened read-only at
+`~/PCM-3.1-v4.76-disc-image.iso`. It is never copied, extracted, or included
+in the corpus. A counts-only survey uses `isoinfo -d`, plain `-f`,
+`-R -f`, `-J -f`, xorriso `-report_el_torito plain`, and the raw-byte
+evidence reader below. No member names are retained.
+The descriptor types, in order, are **1, 2, 255** (primary, Joliet,
+terminator). There is Joliet level 3, no SUSP/Rock Ridge and no El Torito
+catalog. Both hierarchies contain **7,763 files and 2,204 directories
+including the root** (2,203 below it); each `-f` listing has 9,966 entries.
+The maximum directory depth is **10 below the root** (11 including it),
+and the maximum file path has 11 components. There are **zero
+multi-extent files**. Descriptor and record sequence numbers are 1,
+Joliet volume flags are 0, and recording and descriptor dates are valid
+or absent.
+
+The evidence questions in [the ISO plan](iso9660-plan.md#evidence-questions)
+have the following answers. Producer measurements use the versions above;
+consumer claims do not imply qualification of the fsimg writer.
+
+| Question | Evidence |
+| --- | --- |
+| RRIP_1991A with 36-byte PX | Xorriso 1.5.8.pl02 writes this pair. Mkisofs 3.02a09 and libarchive 3.7.4 write `RRIP_1991A` with 44-byte PX, including explicit mkisofs `-rrip112`. |
+| Empty file extent 0 | Xorriso writes block 32 in the small fixtures; mkisofs and libarchive write `0xfffffff0` for the ordinary empty file. H3 writes 0. Zero-length records therefore need no extent range check. |
+| Multi-extent Rock Ridge entries | Xorriso and mkisofs level 3 split the 4 GiB source into two sections. Xorriso repeats `PX`, `TF`, `NM` on both; mkisofs repeats `RR`, `NM`, `PX`, `TF` on both. Bsdtar reads the complete content. |
+| EFI sector count and OVMF | Xorriso's EFI entry for the 1,474,560-byte fixture has load count 2,880, its size in 512-byte sectors. |
+| Directory and path-table order, including ties | The synthetic images have zero order inversions under a raw decoder using padded name/extension comparison, descending file versions and equal-order ties. The `FOO` directory and `FOO.;1` file exercise a tie. H3 primary has no inversions, but Joliet has 274 adjacent directory-record inversions and 56 path-table inversions in each L/M copy. Owner decision 8 requires strict primary order; Joliet order is not checked. |
+| Sequence numbers, SP skip, continuation boundaries, dates, Joliet flags | Xorriso, mkisofs, libarchive and H3 use sequence 1; the Rock Ridge producers use SP skip 0; their observed continuation areas stay within one 2048-byte block. Joliet flags are 0. Descriptor and recording dates are valid or absent; absent descriptor dates use ASCII zero digits. This is a finite corpus observation, not evidence that all external images obey these bounds. |
+| Relocation placeholder shape | Xorriso and mkisofs CL placeholders have flag 0, directory PX mode `040755` and zero data length. Xorriso uses extent 43; mkisofs uses sentinels `0xffffffee`, `0xfffffff0`, `0xffffffef`. The placeholder's extent does not locate its directory: CL does. Libarchive's deep-tree producer crashes with signal 11; the failed file is excluded from the image manifest. |
+| Relocated logical tree and relocation-directory visibility | Isoinfo follows the xorriso tree; `-R -l` includes placeholder directory rows which `-R -f` omits. Libarchive 3.7.4 fails to connect the xorriso CL/RE pointers and leaves a partial mtree with nonzero status. |
+| Joliet 62-unit files and 64-unit directories | The producers emit these lengths. Xorriso and mkisofs omit `;1` from Joliet file identifiers. Isoinfo is lossy for non-BMP UTF-16 names even with `-j utf-8`; bsdtar reads the surrogate pair as Unicode. |
+| Isohybrid ambiguity and explicit ISO selection | Xorriso's synthetic hybrid has an ISO hierarchy plus MBR and GPT structures, reported by `-report_system_area plain`. |
+
+Owner decision 8 requires strict primary order; Joliet order is not checked
+because of H3's Joliet inversions. The remaining oracle work is tracked in
+[ISO 9660 work](todo-iso9660.md).
+
+The small raw-byte reader reproduces directory and L/M path-table inversion
+counts, PX lengths, SP skip values and relocation placeholder extents:
+
+```sh
+ruby test/iso9660-evidence.rb "$HOME/.cache/fsimg-iso/corpus"
+ruby test/iso9660-evidence.rb "$HOME/PCM-3.1-v4.76-disc-image.iso"
+```
+
+It emits only counts and numeric metadata, reads no file payloads, and is
+distributed in `EXTRA_DIST`; its CLI is not a `make check` test. It handles the
+corpus's 2048-byte blocks and SP-skip-zero records; it is an evidence reader,
+not a general verifier. Other raw-byte measurements above, including dates,
+sequence numbers and continuation boundaries, come from manual inspection.
+
+The focused generator checks run with `ruby test/iso9660-corpus-test.rb`
+and through the configured `test/iso9660-corpus-check.sh` in `make check`.
+They cover sparse output, producer diagnostics and failure, extraction byte
+counts, listing normalization and source-manifest semantics. The corpus
+generator and documentation do not change the library or CLI.
+
+Validation uses `autoreconf -fi`, an out-of-tree configure and
+`make -j32 check`, followed by `make distdir` to check inclusion of the
+corpus source files and the evidence reader.
