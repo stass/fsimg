@@ -174,7 +174,8 @@ class CliTest < Minitest::Test
     FileUtils.mkdir_p(directory)
     (directory / "file").binwrite("data".b)
     File.symlink("file", directory / "link")
-    invoke(arguments: %w[c -f linked.img -F qnx4 -C linked-tree .])
+    # Confined Linux creation cannot inspect source links (design-security.md).
+    invoke(arguments: %w[c -S off -f linked.img -F qnx4 -C linked-tree .])
 
     listed = completed(invoke(arguments: %w[t --json -f linked.img dir]))
     entries = listed.select { _1.fetch("type") == "entry" }
