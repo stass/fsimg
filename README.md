@@ -25,9 +25,13 @@ fsimg cf data.img -F exfat -C files .      # Create an image from ./files/
   label, partition scheme, and container. Use mtree manifests to set image
   ownership and permissions without changing host files.
 - **Plan and reproduce builds.** Inspect sizing and metadata losses before
-  writing; produce reproducible images with `-R`; shrink an image to the
-  smallest geometry its files fit in with `-M`; verify staged images before
-  publishing them with `cW`.
+  writing, produce reproducible images with `-R`, and verify staged images
+  before publishing them with `cW`.
+- **Smallest possible images.** With `-M`, fsimg tries every cluster or
+  block size the format allows, with a QNX6 inode table that just holds the
+  files, and keeps the smallest volume. For 2,000 small configuration files,
+  a QNX6 image shrinks from 2.6 MiB to 1.6 MiB. The result is as
+  reproducible as any other build, which suits firmware and embedded images.
 - **Huge images, small memory.** Memory use follows a budget you set
   (256 MiB by default, 16 MiB at least), not the image's size or file
   count. Large metadata spills to scratch files, and empty space is never
