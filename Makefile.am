@@ -326,7 +326,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-layers.md specs/design-content.md \
 	specs/design-directories.md specs/design-emission.md \
 	specs/design-holes.md specs/design-ifs.md specs/design-ifs-driver.md \
-	specs/design-codecs.md \
+	specs/design-codecs.md specs/design-compression-libs.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
 	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh tools/qnx/guest/manifest4.sh \
