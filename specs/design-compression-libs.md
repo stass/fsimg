@@ -66,7 +66,9 @@ keys.
   documents as not covered by its ABI stability promise; the stable API
   offers `ZSTD_d_windowLogMax` to cap the window and `ZSTD_sizeof_DStream`
   and `ZSTD_sizeof_CStream` to read a context's current memory use. The
-  [open decision](#open-decisions) on zstd accounting follows from this.
+  zstd binding uses the custom allocator, behind a configure link test
+  that refuses a library without it; the stable-API alternative is under
+  [alternatives considered](#alternatives-considered).
 * **Sandbox.** The decoders run inside the confined worker. The Linux
   profile allows `read`, `write`, `pread64`, `pwrite64`, `close`, `fstat`,
   `lseek`, `fsync`, `ftruncate`, `mkdirat`, `unlinkat`, `getdents64`,
@@ -157,8 +159,7 @@ without a list of cases:
   `fsimg_codec_memory_free(address)`, and each library's shims live in the
   file that includes that library's header: `fsimg_zlib_memory_bind()` in
   the core (zlib is always present), `lzma_bind()` in `xz.c` filling an
-  `lzma_allocator`, and, under the [recommended option](#open-decisions),
-  `zstd_bind()` in `zstd.c` filling a `ZSTD_customMem`. The rules of the
+  `lzma_allocator`, and `zstd_bind()` in `zstd.c` filling a `ZSTD_customMem`. The rules of the
   [binary primitives](design-binary-primitives.md#context-backed-zlib-allocation)
   apply to every binding unchanged: first error kept, zero-byte requests
   charged, no second budget.
@@ -567,6 +568,18 @@ commit proves both the integration and the core's independence from it.
   loader, and the worker forbids plugin loading. The conditional source
   file keeps the registry static and the public header constant, which is
   the property that matters.
+* **zstd accounting through the stable API only.** Would avoid the
+  `ZSTD_STATIC_LINKING_ONLY` section: set `ZSTD_d_windowLogMax`, decode the
+  frame header's one-byte window descriptor (RFC 8878 section 3.1.1.1.2)
+  to pre-charge the window plus a fixed context allowance through a new
+  context memory-reservation primitive, and reconcile with
+  `ZSTD_sizeof_DStream()` after each call. It removes one ABI dependency at
+  the cost of a new primitive, a second header parser and after-the-fact
+  reconciliation, where the custom allocator charges every allocation
+  before use with the construction zlib and liblzma already share. The
+  allocator symbols have not changed since zstd 1.0, the shared libraries
+  fsimg builds against export them, and configure's link test refuses a
+  library without them.
 * **A read-side window-limit setting.** Would let a user raise the 128 MiB
   zstd limit for `--long=31` files. Such files are rare, the limit matches
   the `zstd` tool's own default, and the memory budget already decides
@@ -574,43 +587,3 @@ commit proves both the integration and the core's independence from it.
   that fills no slot. The refusal names the limit and the user decompresses
   with `zstd --long=31` first.
 
-## Open decisions
-
-* **zstd memory accounting.** The adapter route uses `ZSTD_customMem`
-  and `ZSTD_create*Stream_advanced`, declared under
-  `ZSTD_STATIC_LINKING_ONLY`, which `zstd.h` documents as outside its ABI
-  stability promise; the symbols are exported by the shared libraries
-  fsimg builds against (verified for Homebrew's libzstd 1.5.7; FreeBSD
-  base and the Linux distributions build the library with default
-  visibility), have not changed since zstd 1.0, and configure's link test
-  refuses a library without them. The stable-API route sets
-  `ZSTD_d_windowLogMax`, has fsimg decode the frame header's window
-  descriptor (one byte, RFC 8878 section 3.1.1.1.2) to pre-charge the
-  window plus a fixed context allowance through a new context memory
-  reservation primitive, and reconciles with `ZSTD_sizeof_DStream()` after
-  each call. Recommendation: the adapter route. It makes zstd's accounting
-  the same construction as zlib's and liblzma's, every allocation charged
-  before use, with no new primitive, no second header parser and no
-  after-the-fact reconciliation; the ABI risk is named in the design and
-  bounded by the link test. The stable-API route is the fallback if the
-  owner prefers never to depend on a vendor's unstable section.
-* **Default for `--with-zstd` and `--with-xz`.** `auto` is the Autoconf
-  convention and gives developers and CI the feature wherever the library
-  exists, with the choice reported in configure's output and in
-  `--formats`; `no` makes every build the core unless asked, which
-  packagers sometimes prefer for predictable dependencies. Recommendation:
-  `auto`, because the libraries are present on every CI host and the
-  explicit `yes`/`no` remain for packagers; CI builds both ways.
-* **Selecting zstd or xz for a stream.** `-a` chooses by the output
-  name, so `cf -` cannot write a zstd or xz stream and a read cannot force
-  either by name from the command line. A `--compress=NAME` long option,
-  with `-z` its gzip shorthand, would map onto the job record's existing
-  compression name for creation and reading alike. Recommendation: add
-  it in the CLI design when the profiles land; it is one option over an
-  existing field, and without it the two compressions are file-only.
-* **Ultra levels.** `zstd:level` stops at 19. Levels 20 to 22 write a
-  128 MiB window that every reader must hold and need encoder memory the
-  default budget does not hold, which is why `zstd(1)` requires `--ultra`
-  to use them.
-  Recommendation: keep 19 as the maximum; a user who needs ultra output
-  runs `zstd --ultra` on a raw image.

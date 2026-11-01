@@ -206,7 +206,9 @@ every slot is detected unambiguously or the command fails. Forcing retains
 every safety check.
 
 Compression is not a slot: it wraps the whole image on its way to or from
-the file. On create, `-z` selects gzip and `-a` chooses the compression from
+the file. On create, `--compress=NAME` selects the compression the registry
+registers as NAME (`gzip`, `zstd`, `xz`), `-z` is its shorthand for
+`--compress=gzip`, and `-a` chooses the compression from
 the output suffix as tar does, using the suffixes the layer registry
 declares: `.gz` selects gzip, `.zst` and `.xz` select the
 [optional zstd and xz](design-compression-libs.md), which fail as
@@ -214,18 +216,25 @@ unsupported in a build without their libraries,
 and a container suffix (`.dmg`, `.vhd`, `.simg`) selects nothing but must
 match the stack's container, so `-a -f disk.dmg -F fat32/gpt` is a syntax
 error. A double suffix is matched outermost first: `disk.dmg.gz` selects
-gzip and requires a `dmg` container. Without either flag the output is
-uncompressed, whatever its name says. `-z` and `-a` together are accepted only when the suffix is `.gz`;
-`-a` with `-f -` is a syntax error, since a stream has no name. On reading,
+gzip and requires a `dmg` container. Without any of the three the output
+is uncompressed, whatever its name says. A NAME the registry does not hold
+is a syntax error; a registered compression whose library the build lacks
+fails as unsupported. `--compress` or `-z` together with
+`-a` is accepted only when the suffix names the same compression, and
+`--compress` and `-z` naming different ones are a syntax error. `-a` with
+`-f -` is a syntax error, since a stream has no name; `--compress` is how a
+stream is compressed. On reading,
 compression is decided by the layer design's
-[step-1 rule](design-layers.md#peeling-order): `-z` forces it, and when a
-file passes for both compressed and raw, `-z` resolves it as compressed and
+[step-1 rule](design-layers.md#peeling-order): `--compress=NAME` or `-z`
+forces it, and when a file passes for both compressed and raw, a forced
+compression resolves it as compressed and
 an explicit `-F` as raw. Compressed and stream inputs are decoded into the
 budgeted spool inside the worker. The command line names no codec itself
-beyond `-z`'s: the compression `-z` or `-a` selects travels in the worker's
+beyond `-z`'s: the compression `--compress`, `-z` or `-a` selects travels in the worker's
 job record as its registered name, which the worker hands to the library's
 write or image options, so a codec the registry gains reaches `-a`
-through the suffix it declares with no change to the command line.
+through the suffix it declares, and `--compress` through its name, with no
+change to the command line.
 
 The [settings catalogue](design-settings.md) supplies setting identity,
 representation, syntax, and applicability to the CLI and library. The CLI owns
@@ -349,7 +358,7 @@ is reported with creation capabilities.
 | `-p` | Import host owner, group and permission bits as optional metadata |
 | `-s bytes` | Positive exact logical volume size; omission selects automatic sizing |
 | `--free-space=bytes` | Minimum free space after metadata and allocation rounding, in bytes; distinct from the QNX6 `-o reserve=` percentage, which is why the option is not called reserve |
-| `-z`, `-a`, `-o key=value` | Compression and typed settings, as above |
+| `--compress=NAME`, `-z`, `-a`, `-o key=value` | Compression and typed settings, as above |
 | `-W` | Verify the staged result before publication; `-d` adds payload reads; a syntax error with `-f -` |
 
 Reproducible mode normalizes timestamps to the selected epoch, uses defined
