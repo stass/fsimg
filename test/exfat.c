@@ -25,6 +25,14 @@
 #define ROOT_CLUSTER 259u
 #define FILE_CLUSTER 260u
 
+typedef enum upcase_scenario {
+	UPCASE_VALID,
+	UPCASE_LEADING_EMPTY_RUN,
+	UPCASE_EXCESS_RUN,
+	UPCASE_TRUNCATED_RUN_MARKER,
+	UPCASE_BROKEN_MANDATORY_A
+} upcase_scenario_t;
+
 typedef struct exfat_fixture {
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*io;
@@ -48,7 +56,7 @@ static unsigned char *file_set(exfat_fixture_t *);
 static void fix_boot(exfat_fixture_t *);
 static void fix_set(exfat_fixture_t *);
 static void make_image(exfat_fixture_t *);
-static void compressed_upcase(exfat_fixture_t *, unsigned);
+static void compressed_upcase(exfat_fixture_t *, upcase_scenario_t);
 static bool cancelled(void *);
 static fsimg_status_t image_read(void *, uint64_t, void *, size_t, size_t *,
     fsimg_error_t *);
@@ -63,6 +71,7 @@ static void test_independent(void);
 static void test_corruptions(void);
 static void test_allocation_profiles(void);
 static void test_upcase_profiles(void);
+static void test_upcase_load_memory(void);
 static void test_allocation_failures(void);
 static void test_content_guard(const char *);
 static void test_metadata_boundary(const char *);
@@ -682,9 +691,9 @@ test_upcase_work_limit(void)
 	for (unsigned compact = 0; compact < 2; compact++) {
 		fixture_new(&f);
 		if (compact != 0)
-			compressed_upcase(&f, 0);
+			compressed_upcase(&f, UPCASE_VALID);
 		/* Raw words exceed this budget directly. The compact table's words
-		 * fit, but expanding its 65,408 identity mappings must not fit.
+		 * fit, but expanding its 65,510 identity mappings must not fit.
 		 */
 		f.ctx->options.max_work = 5000;
 		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
@@ -825,7 +834,7 @@ test_allocation_profiles(void)
 }
 
 static void
-compressed_upcase(exfat_fixture_t *f, unsigned scenario)
+compressed_upcase(exfat_fixture_t *f, upcase_scenario_t scenario)
 {
 	unsigned char *table, *root, *bitmap, *fat;
 	size_t offset;
@@ -835,22 +844,27 @@ compressed_upcase(exfat_fixture_t *f, unsigned scenario)
 	bitmap = f->image + cluster_offset(2);
 	fat = f->image + 24 * 512;
 	offset = 0;
-	if (scenario == 1) {
+	if (scenario == UPCASE_LEADING_EMPTY_RUN) {
 		put16(table, 0xffff);
 		put16(table + 2, 0);
 		offset = 4;
 	}
-	for (unsigned i = 0; i < 128; i++)
-		put16(table + offset + i * 2,
-		    (uint16_t)(i >= 'a' && i <= 'z' ? i - 32 : i));
-	offset += 256;
+	/* Two identity runs and 26 ASCII mappings need only 60 bytes. */
 	put16(table + offset, 0xffff);
-	put16(table + offset + 2, scenario == 2 ? 65535 : 65408);
+	put16(table + offset + 2, 'a');
 	offset += 4;
-	if (scenario == 3)
+	for (unsigned i = 'a'; i <= 'z'; i++) {
+		put16(table + offset, (uint16_t)(i - 32));
+		offset += 2;
+	}
+	put16(table + offset, 0xffff);
+	put16(table + offset + 2,
+	    scenario == UPCASE_EXCESS_RUN ? 65535 : 65536 - 'z' - 1);
+	offset += 4;
+	if (scenario == UPCASE_TRUNCATED_RUN_MARKER)
 		offset -= 2;
-	if (scenario == 4)
-		put16(table + 'a' * 2, 'a');
+	if (scenario == UPCASE_BROKEN_MANDATORY_A)
+		put16(table + 4, 'a');
 	put32(root + 36, rotate_sum(table, offset, 32));
 	put64(root + 56, offset);
 	put32(fat + 3 * 4, UINT32_MAX);
@@ -862,23 +876,88 @@ compressed_upcase(exfat_fixture_t *f, unsigned scenario)
 static void
 test_upcase_profiles(void)
 {
+	/* NULL identifies a valid profile; corrupt profiles name their error. */
+	const char *const messages[] = {
+		[UPCASE_VALID] = NULL,
+		[UPCASE_LEADING_EMPTY_RUN] = NULL,
+		[UPCASE_EXCESS_RUN] = "invalid exFAT upcase identity run",
+		[UPCASE_TRUNCATED_RUN_MARKER] =
+		    "incomplete exFAT upcase table or checksum mismatch",
+		[UPCASE_BROKEN_MANDATORY_A] =
+		    "invalid mandatory exFAT upcase mapping"
+	};
 	exfat_fixture_t f;
+	fsimg_error_t error;
 	fsimg_verify_report_t report;
 	fsimg_status_t status;
 
-	for (unsigned scenario = 0; scenario < 5; scenario++) {
+	for (unsigned scenario = 0;
+	    scenario < sizeof(messages) / sizeof(messages[0]); scenario++) {
 		fixture_new(&f);
 		compressed_upcase(&f, scenario);
-		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
-		if (scenario < 2) {
+		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+		if (messages[scenario] == NULL) {
 			CHECK(status == FSIMG_OK);
 			CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
 			CHECK(report.allocated_clusters == 5);
 		} else {
 			CHECK(status == FSIMG_ECORRUPT);
+			if (strcmp(error.message, messages[scenario]) != 0)
+				fprintf(stderr, "upcase scenario %u: %s; want %s\n",
+				    scenario, error.message, messages[scenario]);
+			CHECK(strcmp(error.message, messages[scenario]) == 0);
 		}
 		fixture_free(&f);
 	}
+}
+
+static void
+test_upcase_load_memory(void)
+{
+	exfat_fixture_t f;
+	fsimg_stats_t stats;
+	unsigned char *table, *root, *bitmap, *fat;
+	uint64_t transient;
+	const fsimg_entry_t *entry;
+
+	fixture_new(&f);
+	table = f.image + cluster_offset(3);
+	root = f.image + cluster_offset(ROOT_CLUSTER);
+	bitmap = f.image + cluster_offset(2);
+	fat = f.image + 24 * 512;
+	/* A literal prefix and an identity tail give the standard table's
+	 * 5836-byte encoded size while preserving the fixture's ASCII fold.
+	 */
+	put16(table + 5832, 0xffff);
+	put16(table + 5834, 65536 - 2916);
+	put32(root + 36, rotate_sum(table, 5836, 32));
+	put64(root + 56, 5836);
+	put32(fat + 14 * 4, UINT32_MAX);
+	for (unsigned cluster = 15; cluster < ROOT_CLUSTER; cluster++)
+		bitmap[(cluster - 2) / 8] &=
+		    (unsigned char)~(1u << ((cluster - 2) % 8));
+
+	/* Open allocates the path after freeing the load buffer. A 1 KiB path
+	 * keeps that retained allocation from hiding a 64 KiB transient.
+	 */
+	f.ctx->options.max_path_bytes = 1024;
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+	    FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	transient = stats.memory_peak - stats.memory_bytes;
+	/* Metadata discovery precedes the retained 128 KiB mapping. The
+	 * 16 KiB bound allows the small table and accounting overhead, but
+	 * excludes a 64 KiB load buffer above the same retained state.
+	 */
+	if (transient >= 16384)
+		fprintf(stderr, "compressed upcase: peak=%" PRIu64
+		    " retained=%" PRIu64 " transient=%" PRIu64
+		    "; want <16384\n",
+		    stats.memory_peak, stats.memory_bytes, transient);
+	CHECK(transient < 16384);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/Data.bin") == 0);
+	fixture_free(&f);
 }
 
 static void
@@ -2091,6 +2170,7 @@ main(int argc, char **argv)
 	test_corruptions();
 	test_allocation_profiles();
 	test_upcase_profiles();
+	test_upcase_load_memory();
 	test_allocation_failures();
 	test_writer();
 	test_writer_names();

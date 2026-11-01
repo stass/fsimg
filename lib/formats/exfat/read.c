@@ -151,18 +151,27 @@ load_upcase(fsimg_reader_t *reader, fsimg_error_t *error)
 	uint64_t offset;
 	uint32_t decoded, checksum;
 	uint16_t word;
-	size_t batch;
+	size_t batch, capacity;
 	bool run;
 	fsimg_error_t detail;
 	fsimg_status_t status;
 
+	/* The decoded table keeps all 65,536 entries whatever the encoded
+	 * length: names are folded by indexing it with any UTF-16 unit, and
+	 * decoding fills the identity mapping a compressed table leaves out.
+	 */
 	exfat->upcase = fsimg_alloc(reader->ctx, EXFAT_UPCASE_BYTES, &detail);
 	if (exfat->upcase == NULL) {
 		if (error != NULL)
 			*error = detail;
 		return (detail.status);
 	}
-	buffer = fsimg_alloc(reader->ctx, EXFAT_BUFFER_BYTES, &detail);
+	/* The encoded table is read in pieces of at most EXFAT_BUFFER_BYTES;
+	 * a compressed table, typically under 6 KiB, needs only its length.
+	 */
+	capacity = exfat->upcase_length < EXFAT_BUFFER_BYTES ?
+	    (size_t)exfat->upcase_length : EXFAT_BUFFER_BYTES;
+	buffer = fsimg_alloc(reader->ctx, capacity, &detail);
 	if (buffer == NULL) {
 		if (error != NULL)
 			*error = detail;
@@ -171,8 +180,8 @@ load_upcase(fsimg_reader_t *reader, fsimg_error_t *error)
 	decoded = checksum = 0;
 	run = false;
 	for (offset = 0; offset < exfat->upcase_length; offset += batch) {
-		batch = exfat->upcase_length - offset > EXFAT_BUFFER_BYTES ?
-		    EXFAT_BUFFER_BYTES : (size_t)(exfat->upcase_length - offset);
+		batch = exfat->upcase_length - offset > capacity ? capacity :
+		    (size_t)(exfat->upcase_length - offset);
 		status = exfat_index_read(reader, exfat->upcase_index, offset,
 		    buffer, batch, error);
 		if (status != FSIMG_OK)
