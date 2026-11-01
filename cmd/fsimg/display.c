@@ -352,8 +352,9 @@ static const char help_read_common[] =
 static const char help_slice[] =
     "    --length=bytes  Volume slice length (default the rest of the image)\n";
 static const char help_settings_read[] =
-    "    -o key=value    Setting: oem=cp437 for FAT short names; gpt:sector=512\n"
-    "                    or 4096 with -F naming gpt\n"
+    "    -o key=value    Setting: oem=cp437 for FAT short names; view=auto,\n"
+    "                    rockridge, joliet or primary for ISO 9660;\n"
+    "                    gpt:sector=512 or 4096 with -F naming gpt\n"
     "    --offset=bytes  Volume slice offset (default 0)\n"
     "    --partition=N|name=TEXT|type=NAME\n"
     "                    The partition holding the volume (default the one\n"
@@ -1456,7 +1457,7 @@ format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 		sizes(display, info->write_allocation_unit_size_mask);
 		append(display, "}\n");
 	} else {
-		append(display, "%-6s  %-4s  %-5s  %s\n", info->name,
+		append(display, "%-7s  %-4s  %-5s  %s\n", info->name,
 		    (info->capabilities & FSIMG_CAP_READ) != 0 ? "yes" : "no",
 		    (info->capabilities & FSIMG_CAP_WRITE) != 0 ? "yes" : "no",
 		    (info->capabilities & FSIMG_CAP_VERIFY) != 0 ? "yes" : "no");
@@ -2033,7 +2034,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 			status = fsimg_format_next(&display->format_cursor, &info, error);
 			if (status == FSIMG_OK) {
 				if (first && !options->json)
-					append(display, "Format  Read  Write  Verify\n");
+					append(display, "Format   Read  Write  Verify\n");
 				format(display, &info);
 				return (finish_span(display, false, text, error));
 			}

@@ -16,7 +16,8 @@ class CliTest < Minitest::Test
         "exfat",
         "qnx6",
         "qnx4",
-        "ifs"
+        "ifs",
+        "iso9660"
       ].to_set,
       formats.keys.to_set
     )
@@ -89,7 +90,7 @@ class CliTest < Minitest::Test
     assert_nil(layers.fetch("vhd").fetch("codec_version"), "layers vhd codec version nil")
     assert_equal(".vhd", layers.fetch("vhd").fetch("suffix"), "layers vhd suffix")
     assert_nil(layers.fetch("gpt").fetch("suffix"), "layers gpt suffix nil")
-    assert(formats.values.all? { |record| record.fetch("capabilities") == 7 }, "all filesystems support read, write and verify: #{formats.transform_values { _1.fetch("capabilities") }.inspect}")
+    assert(formats.all? { |name, record| record.fetch("capabilities") == (name == "iso9660" ? 1 : 7) }, "filesystem capabilities match their supported operations: #{formats.transform_values { _1.fetch("capabilities") }.inspect}")
     assert_equal(((32 * 1024) * 1024), formats.fetch("exfat").fetch("write_cluster_bytes")[-1])
     assert(formats.fetch("exfat").fetch("max_file_bytes").is_a?(String), "formats exfat max file bytes is a String")
     capabilities = decoded.find { |record| record.fetch("type") == "capabilities" }

@@ -31,6 +31,11 @@ class CliTest < Minitest::Test
     assert_equal(0, ifs.fetch("max_label_bytes"), "ifs max label bytes")
     assert_equal(0x11, ifs.fetch("write_settings"), "ifs write settings")
     assert_equal(1024, ifs.fetch("max_link_target_bytes"))
+    iso = formats.delete("iso9660")
+    assert_equal(1, iso.fetch("capabilities"))
+    assert_equal(3, iso.fetch("entry_kinds"))
+    assert_equal(10, iso.fetch("metadata_fields"))
+    assert_equal(0, iso.fetch("write_settings"))
     formats.each do |name, record|
       assert_equal(%w[fat12 fat16].include?(name) ? 32 : 0, record.fetch("write_settings"), "#{name} write settings")
       assert_equal(3, record.fetch("entry_kinds"), "#{name} supports only files and directories")

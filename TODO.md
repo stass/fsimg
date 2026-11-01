@@ -351,8 +351,8 @@
   relocation and El Torito boot entries. The [plan](docs/iso9660-plan.md)
   orders the work; the [format](specs/design-iso9660.md) and
   [driver](specs/design-iso9660-driver.md) designs are the contract; the
-  [ISO work list](docs/todo-iso9660.md) holds the open items, starting with
-  the oracles and the common mechanisms.
+  [ISO work list](docs/todo-iso9660.md) holds the open items. The
+  registered reader presents the primary view.
 
 ## Bugs by subsystem
 

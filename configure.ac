@@ -161,10 +161,11 @@ AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integra
     test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh
     test/containers-integration.sh test/compression-integration.sh
     test/cli.sh test/baseline.sh test/spec.sh test/codec-integration.sh
-    test/iso9660-corpus-check.sh
+    test/iso9660-corpus-check.sh test/iso9660-integration.sh
     test/ifs-integration.sh],
     [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
      test ! -f test/iso9660-corpus-check.sh || chmod +x test/iso9660-corpus-check.sh
+     test ! -f test/iso9660-integration.sh || chmod +x test/iso9660-integration.sh
      test ! -f test/codec-integration.sh || chmod +x test/codec-integration.sh
      test ! -f test/ifs-integration.sh || chmod +x test/ifs-integration.sh
      test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh

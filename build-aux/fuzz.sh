@@ -135,6 +135,18 @@ if test ! -f "$qnx4_corpus/chain.seed"; then
 fi
 run_fuzzer "$work_dir/fuzz-qnx4" "$qnx4_corpus" 1048576 10
 
+# ISO exercises detection and each forced view with bounded traversal/content.
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    "$source_dir/fuzz/iso9660.c" "$fuzz_library" $codec_libs -o "$work_dir/fuzz-iso9660"
+iso_corpus=iso9660-fuzz-corpus
+mkdir -p "$iso_corpus"
+if test ! -f "$iso_corpus/primary.seed"; then
+    ./test-iso9660 --seed "$iso_corpus/primary.seed"
+fi
+run_fuzzer "$work_dir/fuzz-iso9660" "$iso_corpus" 1048576 10
+
 # ImageFS reads the exact slice with the decoder forced; the seed is a
 # generated image with every record kind, implicit parents and names
 # outside the profile.

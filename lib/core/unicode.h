@@ -7,6 +7,10 @@
 #include "internal.h"
 
 uint32_t fsimg_unicode_upper(uint32_t);
+/* Days from 1970-01-01 to a valid proleptic Gregorian date of year 0 to
+ * 9999, negative before 1970; false for an invalid date.
+ */
+bool fsimg_civil_days(unsigned, unsigned, unsigned, int64_t *);
 bool fsimg_dos_time_decode(uint16_t, uint16_t, unsigned, uint64_t,
     fsimg_timestamp_t *);
 /* Pack seconds, 315532800 through 4354819199 read as calendar seconds, as

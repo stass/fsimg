@@ -3575,6 +3575,7 @@ scale_measure(qnx6_gen_t *g, bool verify, uint64_t scratch_bytes,
 {
 	fixture_t f;
 	fsimg_verify_report_t report;
+	fsimg_read_options_t options;
 	fsimg_stats_t stats;
 	fsimg_error_t error;
 	struct timespec start, end;
@@ -3585,7 +3586,10 @@ scale_measure(qnx6_gen_t *g, bool verify, uint64_t scratch_bytes,
 	fixture_account(&f, g);
 	bzero(&error, sizeof(error));
 	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
-	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+	/* Measure the driver's access pattern independently of other probes. */
+	fsimg_read_options_init(&options);
+	options.format = "qnx6";
+	status = fsimg_reader_open(f.ctx, f.io, &options, &f.reader, &error);
 	if (status == FSIMG_OK && verify)
 		status = fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report,
 		    &error);

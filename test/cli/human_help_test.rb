@@ -82,14 +82,15 @@ class CliTest < Minitest::Test
     end
     xz_capabilities = xz_supported? ? "yes   yes    yes" : "no    no     no "
     expected_formats = <<~FORMATS
-      Format  Read  Write  Verify
-      fat12   yes   yes    yes
-      fat16   yes   yes    yes
-      fat32   yes   yes    yes
-      exfat   yes   yes    yes
-      qnx6    yes   yes    yes
-      qnx4    yes   yes    yes
-      ifs     yes   yes    yes
+      Format   Read  Write  Verify
+      fat12    yes   yes    yes
+      fat16    yes   yes    yes
+      fat32    yes   yes    yes
+      exfat    yes   yes    yes
+      qnx6     yes   yes    yes
+      qnx4     yes   yes    yes
+      ifs      yes   yes    yes
+      iso9660  yes   no     no
 
       Layer    Kind         Read  Write  Verify  Codecs           Settings
       gpt      scheme       yes   yes    yes     -                sector,disk,type,name,disk-guid,guid

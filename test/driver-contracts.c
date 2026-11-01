@@ -30,9 +30,9 @@
  * answer. Each scenario is a plain function reading as setup, operation,
  * assertion and cleanup; nothing here knows a format beyond its profile.
  *
- * Every registered format both reads and writes, so reader fixtures are
- * produced by the common writer from the profile's source tree. They are
- * round-trip integration evidence, not independent format evidence: the
+ * Writable formats use reader fixtures produced by the common writer;
+ * read-only formats supply independent materializers of the same tree.
+ * Writer-produced fixtures are round-trip integration evidence: the
  * format-local tests, the Ruby models and the integration scripts with
  * other implementations keep that role.
  */
@@ -141,6 +141,7 @@ typedef struct contract_fs_profile {
 	const contract_metadata_case_t *metadata_cases;
 	size_t		 metadata_case_count;
 	uint64_t	 max_fixture_bytes;
+	fsimg_status_t	(*materialize)(contract_volume_t *, fsimg_error_t *);
 } contract_fs_profile_t;
 
 #define ALL_CAPABILITIES	(FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY)
@@ -324,7 +325,12 @@ static const contract_entry_t qnx4_owned[] = {
  * descriptor serves them; QNX6's big-endian byte order is an additional
  * profile beside its little-endian coverage profile.
  */
+static fsimg_status_t materialize_iso(contract_volume_t *, fsimg_error_t *);
+
 static const contract_fs_profile_t fs_profiles[] = {
+	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
+	    .expected_capabilities = FSIMG_CAP_READ,
+	    .materialize = materialize_iso, .max_fixture_bytes = MIB },
 	{ .id = "fat12", .format = "fat12", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
 	    .write = { .flags = WRITE_FLAGS },
@@ -454,6 +460,142 @@ expected_byte(const contract_entry_t *entry, uint64_t identity,
 	if (entry->payload == PAYLOAD_ZERO_SOURCE || zero_at(entry, offset))
 		return (0);
 	return (contract_pattern(identity, offset));
+}
+
+/* An independent primary hierarchy for the common source tree. The
+ * materializer owns no live library objects: the runner owns its bytes.
+ * Blocks 16/17 are descriptors, 18/19 path tables, 20 the root; child
+ * directories and file data follow. File bytes use the common oracle.
+ */
+static void
+iso_contract_both(unsigned char *p, uint32_t value, unsigned width)
+{
+	for (unsigned i = 0; i < width; i++) {
+		p[i] = value >> (8 * i);
+		p[2 * width - 1 - i] = value >> (8 * i);
+	}
+}
+
+static size_t
+iso_contract_record(unsigned char *p, const void *name, size_t name_bytes,
+    uint32_t block, uint32_t bytes, unsigned flags)
+{
+	size_t length = 33 + name_bytes + (name_bytes % 2 == 0);
+
+	CONTRACT_CHECK(length <= 254);
+	p[0] = length;
+	iso_contract_both(p + 2, block, 4);
+	iso_contract_both(p + 10, bytes, 4);
+	p[25] = flags;
+	iso_contract_both(p + 28, 1, 2);
+	p[32] = name_bytes;
+	bcopy(name, p + 33, name_bytes);
+	return (length);
+}
+
+static fsimg_status_t
+materialize_iso(contract_volume_t *volume, fsimg_error_t *error FSIMG_UNUSED)
+{
+	uint32_t blocks[SOURCE_COUNT], parents[SOURCE_COUNT];
+	uint32_t next = 24, next_directory = 21;
+	unsigned char *bytes, *p;
+	size_t used[4] = { 68, 68, 68, 68 };
+	unsigned char dot = 0, up = 1;
+
+	/* Directory identity and parents are facts of the common tree. */
+	for (size_t i = 0; i < SOURCE_COUNT; i++) {
+		const contract_entry_t *entry = &source_tree[i];
+		const char *slash = strrchr(entry->path, '/');
+
+		parents[i] = 20;
+		if (slash != entry->path) {
+			for (size_t j = 0; j < i; j++) {
+				if (strlen(source_tree[j].path) ==
+				    (size_t)(slash - entry->path) &&
+				    strncmp(source_tree[j].path, entry->path,
+				    slash - entry->path) == 0)
+					parents[i] = blocks[j];
+			}
+		}
+		if (entry->kind == FSIMG_ENTRY_DIRECTORY) {
+			blocks[i] = next_directory++;
+		} else {
+			blocks[i] = next;
+			next += (entry->size + 2047) / 2048;
+		}
+	}
+	CONTRACT_CHECK((uint64_t)next * 2048 <= MIB);
+	contract_volume_init(volume, (uint64_t)next * 2048, 0);
+	bytes = contract_volume_bytes(volume);
+	p = bytes + 16 * 2048;
+	p[0] = 1;
+	bcopy("CD001", p + 1, 5);
+	p[6] = 1;
+	memset(p + 40, ' ', 32);
+	iso_contract_both(p + 80, next, 4);
+	iso_contract_both(p + 120, 1, 2);
+	iso_contract_both(p + 124, 1, 2);
+	iso_contract_both(p + 128, 2048, 2);
+	iso_contract_both(p + 132, 46, 4);
+	p[140] = 18;
+	p[151] = 19;
+	iso_contract_record(p + 156, &dot, 1, 20, 2048, 2);
+	p[881] = 1;
+	p = bytes + 17 * 2048;
+	p[0] = 255;
+	bcopy("CD001", p + 1, 5);
+	p[6] = 1;
+	p = bytes + 20 * 2048;
+	iso_contract_record(p, &dot, 1, 20, 2048, 2);
+	iso_contract_record(p + 34, &up, 1, 20, 2048, 2);
+	for (size_t i = 0; i < SOURCE_COUNT; i++) {
+		const contract_entry_t *entry = &source_tree[i];
+		const char *name = strrchr(entry->path, '/') + 1;
+		unsigned dir = parents[i] - 20;
+		bool directory = entry->kind == FSIMG_ENTRY_DIRECTORY;
+
+		p = bytes + parents[i] * 2048 + used[dir];
+		used[dir] += iso_contract_record(p, name, strlen(name), blocks[i],
+		    directory ? 2048 : entry->size, directory ? 2 : 0);
+		CONTRACT_CHECK(used[dir] <= 2048);
+		if (directory) {
+			p = bytes + blocks[i] * 2048;
+			iso_contract_record(p, &dot, 1, blocks[i], 2048, 2);
+			iso_contract_record(p + 34, &up, 1, parents[i], 2048, 2);
+		} else {
+			for (uint64_t offset = 0; offset < entry->size; offset++)
+				bytes[(uint64_t)blocks[i] * 2048 + offset] =
+				    expected_byte(entry, i + 1, offset);
+		}
+	}
+	/* The root and three directory path records in each byte order. */
+	for (unsigned order = 0; order < 2; order++) {
+		size_t offset = 0;
+
+		for (size_t i = 0; i <= SOURCE_COUNT; i++) {
+			const contract_entry_t *entry = i == 0 ? NULL : &source_tree[i - 1];
+			const char *name;
+			uint32_t block, parent;
+			size_t length;
+
+			if (entry != NULL && entry->kind != FSIMG_ENTRY_DIRECTORY)
+				continue;
+			name = entry == NULL ? "" : strrchr(entry->path, '/') + 1;
+			length = entry == NULL ? 1 : strlen(name);
+			block = entry == NULL ? 20 : blocks[i - 1];
+			parent = entry == NULL ? 1 : parents[i - 1] - 19;
+			p = bytes + (18 + order) * 2048 + offset;
+			p[0] = length;
+			p[order == 0 ? 2 : 5] = block;
+			p[order == 0 ? 6 : 7] = parent;
+			if (entry != NULL)
+				bcopy(name, p + 8, length);
+			offset += 8 + length + length % 2;
+		}
+		CONTRACT_CHECK(offset == 46);
+	}
+	contract_volume_reset(volume);
+	return (FSIMG_OK);
 }
 
 static fsimg_status_t
@@ -868,6 +1010,12 @@ materialize(const contract_fs_profile_t *profile, contract_volume_t *volume)
 	fsimg_error_t error;
 
 	contract_phase("materialize", 0);
+	if (profile->materialize != NULL) {
+		CONTRACT_STATUS(profile->materialize(volume, &error), FSIMG_OK,
+		    &error);
+		CONTRACT_CHECK(volume->length <= profile->max_fixture_bytes);
+		return;
+	}
 	fixture_open(&fixture, profile, NULL);
 	writer_ready(&fixture);
 	plan_volume(&fixture, volume, 0);
@@ -2261,6 +2409,12 @@ reader_faults(const contract_fs_profile_t *profile)
 	materialize(profile, &volume);
 	bzero(reached, sizeof(reached));
 	for (reader_operation_t op = READ_TRAVERSE; op <= READ_EXTRACT; op++) {
+		if (op == READ_VERIFY &&
+		    (profile->expected_capabilities & FSIMG_CAP_VERIFY) == 0) {
+			contract_not_applicable(profile->id, "verify-fault",
+			    "format does not advertise verify");
+			continue;
+		}
 		CONTRACT_CHECK(reader_sweep(profile, &volume, op,
 		    FAULT_ALLOCATION, FSIMG_ENOMEM, NULL) != 0);
 		for (size_t k = 0; k < COUNT(meta_kinds); k++)
@@ -2291,6 +2445,12 @@ reader_cancellation(const contract_fs_profile_t *profile)
 		return;
 	materialize(profile, &volume);
 	for (reader_operation_t op = READ_TRAVERSE; op <= READ_EXTRACT; op++) {
+		if (op == READ_VERIFY &&
+		    (profile->expected_capabilities & FSIMG_CAP_VERIFY) == 0) {
+			contract_not_applicable(profile->id, "verify-fault",
+			    "format does not advertise verify");
+			continue;
+		}
 		contract_phase(reader_operation_names[op], 0);
 		fixture_open(&fixture, profile, NULL);
 		slice = contract_volume_open(fixture.ctx, &volume, false,
@@ -2695,12 +2855,9 @@ check_registry(void)
 		CONTRACT_CHECK(profile->max_fixture_bytes != 0);
 		if ((profile->expected_capabilities & FSIMG_CAP_WRITE) != 0)
 			CONTRACT_CHECK(profile->metadata_case_count != 0);
-		/* Readers without a writer need an independent materializer,
-		 * which no registered format needs yet.
-		 */
 		if ((profile->expected_capabilities & FSIMG_CAP_READ) != 0)
 			CONTRACT_CHECK((profile->expected_capabilities &
-			    FSIMG_CAP_WRITE) != 0);
+			    FSIMG_CAP_WRITE) != 0 || profile->materialize != NULL);
 		for (size_t c = 0; c < profile->metadata_case_count; c++) {
 			const contract_metadata_case_t *test =
 			    &profile->metadata_cases[c];
@@ -2850,6 +3007,12 @@ contract_memory_peak_is_independent_of_budget(
 		return (true);
 	materialize(profile, &volume);
 	for (memory_operation_t op = MEMORY_OPEN; op <= MEMORY_EXTRACT; op++) {
+		if (op == MEMORY_VERIFY_PAYLOAD &&
+		    (profile->expected_capabilities & FSIMG_CAP_VERIFY) == 0) {
+			contract_not_applicable(profile->id, "verify-memory",
+			    "format does not advertise verify");
+			continue;
+		}
 		contract_phase(operations[op], 0);
 		small_peak = small_operation_memory_peak(profile, &volume, op,
 		    16 * MIB);

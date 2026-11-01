@@ -24,38 +24,53 @@
 
 #include "unicode.h"
 
+/* Days from 1970-01-01 to a proleptic Gregorian date, counted in 400-year
+ * eras of 146097 days from 0000-03-01 so no loop runs over the years and
+ * dates before 1970 count negative. The date must be valid: month 1 to 12
+ * and day within the month, else false and *days untouched. Years 0
+ * through 9999 cover every caller's range.
+ */
+bool
+fsimg_civil_days(unsigned year, unsigned month, unsigned day, int64_t *days)
+{
+	static const unsigned month_days[] = { 31, 28, 31, 30, 31, 30,
+	    31, 31, 30, 31, 30, 31 };
+	unsigned last, shifted_year, era, year_of_era, day_of_year;
+	bool leap;
+
+	if (year > 9999 || month == 0 || month > 12)
+		return (false);
+	leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+	last = month_days[month - 1] + (month == 2 && leap ? 1 : 0);
+	if (day == 0 || day > last)
+		return (false);
+	/* The shifted year starts in March, so February's leap day ends it. */
+	shifted_year = month <= 2 ? year + 399 : year + 400;
+	era = shifted_year / 400;
+	year_of_era = shifted_year % 400;
+	day_of_year = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 +
+	    day - 1;
+	*days = (int64_t)era * 146097 + (int64_t)year_of_era * 365 +
+	    year_of_era / 4 - year_of_era / 100 + day_of_year -
+	    146097 - 719468;
+	return (true);
+}
+
 bool
 fsimg_dos_time_decode(uint16_t date, uint16_t time, unsigned increments_10ms,
     uint64_t precision, fsimg_timestamp_t *out)
 {
-	static const unsigned month_days[] = { 31, 28, 31, 30, 31, 30,
-	    31, 31, 30, 31, 30, 31 };
-	unsigned year, month, day, days_in_month, hour, minute, second;
+	unsigned hour, minute, second;
 	int64_t days;
 
-	year = 1980 + (date >> 9);
-	month = (date >> 5) & 15;
-	day = date & 31;
 	hour = time >> 11;
 	minute = (time >> 5) & 63;
 	second = (time & 31) * 2;
-	if (month == 0 || month > 12 || hour > 23 || minute > 59 ||
-	    second > 58 || increments_10ms > 199)
+	if (hour > 23 || minute > 59 || second > 58 || increments_10ms > 199 ||
+	    !fsimg_civil_days(1980 + (date >> 9), (date >> 5) & 15, date & 31,
+	    &days))
 		return (false);
-	days_in_month = month_days[month - 1];
-	if (month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))
-		days_in_month++;
-	if (day == 0 || day > days_in_month)
-		return (false);
-	days = 0;
-	for (unsigned y = 1970; y < year; y++)
-		days += 365 + (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
-	for (unsigned m = 1; m < month; m++) {
-		days += month_days[m - 1];
-		if (m == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))
-			days++;
-	}
-	out->seconds = (days + day - 1) * 86400 + hour * 3600 + minute * 60 +
+	out->seconds = days * 86400 + hour * 3600 + minute * 60 +
 	    second + increments_10ms / 100;
 	out->nanoseconds = (increments_10ms % 100) * 10000000u;
 	out->precision_ns = precision;

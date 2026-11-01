@@ -16,10 +16,28 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   and version-order ties); and the 65,535-directory fixture with producer,
   consumer and writer measurements.
 * [High] **Reader** (`lib/formats/iso9660/`, `test/iso9660.c`,
-  `fuzz/iso9660.c`, `fuzz/iso9660-susp.c`): stages 3 to 8, the primary,
-  Rock Ridge and Joliet views, El Torito inspection, the verifier, and
-  interoperability, scale and fault evidence. The read-mode `-o` help
-  (`cmd/fsimg/display.c`) gains `view=` when the reader registers.
+  `fuzz/iso9660.c`, `fuzz/iso9660-susp.c`): stages 4 to 8, the Rock Ridge
+  and Joliet views, El Torito inspection, the verifier, and
+  interoperability, scale and fault evidence. The registered reader
+  presents the primary view only:
+  * `view=auto` selects `primary` without the handshake, and forced
+    `rockridge` and `joliet` fail open as unsupported, until stages 4 and
+    5 implement the [selection rule](../specs/design-iso9660.md#view-selection);
+  * the format record's profile (`primary`), entry kinds, metadata fields
+    and name bound grow with those views, and the man page's ISO paragraph
+    and the README row change with them;
+  * the `rockridge` detail is 3 (unknown) until the handshake runs at
+    open, and the `boot_catalog_block`, `boot_entries`, `boot_x86` and
+    `boot_efi` details are added with El Torito in stage 6;
+  * the format has no verifier, so `W` refuses it as unsupported, until
+    stage 7.
+* [Low] **Naming the refused entry** (`lib/formats/iso9660/directory.c`,
+  `lib/read/directory.c`): the driver design asks that an associated,
+  interleaved or other refused record fail preparation naming the entry.
+  A preparation error carries no path for any driver, and the driver
+  cannot name the directory's path, so the message names the condition
+  only. A common way for `prepare` to name a child would serve every
+  driver.
 * [High] **Writer** (`lib/formats/iso9660/write-*.c`,
   `test/iso9660-write.c`): stages 9 and 10. The writer lands unregistered
   and is registered after every stage 10 consumer agrees in every view.

@@ -372,7 +372,7 @@ test_variants(void)
 {
 	static const unsigned variants[] = { 16, 12, 32 };
 	static const char *const names[] = {
-		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs"
+		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs", "iso9660"
 	};
 	fixture_t f;
 	fsimg_read_options_t options;
@@ -385,15 +385,14 @@ test_variants(void)
 	size_t count, cursor;
 	fsimg_range_t range;
 
-	/* The registry lists every format in this order. Every one reads,
-	 * writes and verifies.
-	 */
+	/* The registry lists every format and its advertised operations. */
 	cursor = 0;
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK(strcmp(format.name, names[i]) == 0);
-		CHECK(format.capabilities == (FSIMG_CAP_READ |
-		    FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
+		CHECK(format.capabilities == (strcmp(format.name, "iso9660") == 0 ?
+		    FSIMG_CAP_READ : FSIMG_CAP_READ | FSIMG_CAP_WRITE |
+		    FSIMG_CAP_VERIFY));
 	}
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);

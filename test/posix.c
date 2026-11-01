@@ -260,6 +260,12 @@ test_capability_records(void)
 			CHECK(info.max_link_target_bytes == 1023);
 			continue;
 		}
+		if (strcmp(info.name, "iso9660") == 0) {
+			CHECK(info.capabilities == FSIMG_CAP_READ);
+			CHECK(info.metadata_fields == (FSIMG_META_MODIFIED |
+			    FSIMG_META_ATTRIBUTES));
+			continue;
+		}
 		CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY));
 		CHECK(info.metadata_fields == (FSIMG_META_CREATED |
 		    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED | FSIMG_META_ATTRIBUTES));
@@ -268,7 +274,7 @@ test_capability_records(void)
 		else
 			CHECK(info.max_label_bytes == 11);
 	}
-	CHECK(count == 7);
+	CHECK(count == 8);
 }
 
 /* Optional owner, mode and change time are counted once per field and

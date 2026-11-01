@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "fsimg.h"
+#include "format.h"
 #include "internal.h"
 #include "test.h"
 
@@ -1480,7 +1481,8 @@ test_index_bound(void)
 	fixture_init(&f, 16 * MIB, 0);
 	CHECK(fixture_open(&f, &file, NULL, &error) == FSIMG_ECORRUPT);
 	expect_message(&error, "QNX boot image chunks continue past imagefs_size");
-	CHECK(file.read_bytes < 2 * 4096 + 4 * (4096 + 64));
+	CHECK(file.read_bytes < fsimg_format_probe_bytes(NULL) +
+	    2 * 4096 + 4 * (4096 + 64));
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 	CHECK(stats.scratch_peak < 64 * KIB);
 	fixture_free(&f);

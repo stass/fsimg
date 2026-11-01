@@ -11,6 +11,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/layers \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
 	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4 \
+	-I$(top_srcdir)/lib/formats/iso9660 \
 	$(ZLIB_CFLAGS) $(ZSTD_CFLAGS) $(LZMA_CFLAGS) \
 	-I$(top_srcdir)/lib/formats/ifs \
 	-I$(top_srcdir)/lib/codec
@@ -94,6 +95,10 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx4/directory.c lib/formats/qnx4/read.c \
 	lib/formats/qnx4/verify.c lib/formats/qnx4/write-qnx4.h \
 	lib/formats/qnx4/write-plan.c lib/formats/qnx4/write-emit.c \
+	lib/formats/iso9660/iso9660.h lib/formats/iso9660/descriptor.c \
+	lib/formats/iso9660/codec.c lib/formats/iso9660/volume.c \
+	lib/formats/iso9660/names.c lib/formats/iso9660/directory.c \
+	lib/formats/iso9660/read.c \
 	compat/host.c compat/host.h compat/private.c compat/private.h \
 	lib/codec/codec.h lib/codec/lzo1x.c lib/codec/nrv2b.c \
 	lib/formats/ifs/ifs.h lib/formats/ifs/descriptor.c \
@@ -146,7 +151,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-ifs \
+	test-ifs test-iso9660 \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
 	test-containers test-compression test-gzip-write test-holes test-settings \
@@ -159,14 +164,14 @@ TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
-	test/spec.sh test/iso9660-corpus-check.sh
+	test/spec.sh test/iso9660-corpus-check.sh test/iso9660-integration.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
 	test/spec.sh \
-	test/iso9660-corpus-check.sh \
+	test/iso9660-corpus-check.sh test/iso9660-integration.sh \
 	test/codec-integration.sh
 # The scalar codecs, built once with each signedness of plain char.
 test_endian_SOURCES = test/endian.c test/test.h lib/core/fsimg-endian.h
@@ -248,6 +253,8 @@ test_qnx4_SOURCES = test/qnx4.c test/test.h test/scale.h
 test_qnx4_LDADD = libfsimg.la
 test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h test/scale.h
 test_qnx4_write_LDADD = libfsimg.la
+test_iso9660_SOURCES = test/iso9660.c test/test.h
+test_iso9660_LDADD = libfsimg.la
 test_ifs_SOURCES = test/ifs.c test/test.h test/scale.h
 test_ifs_LDADD = libfsimg.la
 test_ifs_write_SOURCES = test/ifs-write.c test/test.h
@@ -372,13 +379,15 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/gen-fat-tables.rb third-party/Unicode-LICENSE.txt \
 	test/iso9660-corpus.sh test/iso9660-corpus.rb \
 	test/iso9660-corpus-test.rb test/iso9660-corpus-check.sh.in \
-	test/iso9660-evidence.rb \
+	test/iso9660-evidence.rb test/iso9660-integration.sh.in \
+	test/iso9660-integration.rb \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
 	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c \
 	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/compression.c \
-	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c test/ifs-integration.sh.in \
+	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c fuzz/iso9660.c \
+	test/ifs-integration.sh.in \
 	test/ifs-native.rb \
 	test/cli.sh.in test/qualify-cli.rb \
 	test/cli/bundled_modes_test.rb \
@@ -509,12 +518,14 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx4 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
 	MallocSpaceEfficient=1 ./test-ifs --scale
-check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-ifs test-codec \
+check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-ifs test-iso9660 \
+	    test-codec \
 	    test-protocol test-layers test-containers test-compression \
 	    test-hbcifs test-mtree test-ifsboot test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-ifs \
+	    test-iso9660 \
 	    test-codec test-protocol test-layers test-containers \
 	    test-compression test-hbcifs test-mtree test-ifsboot test/spec.sh
 	+@$(am__make_dryrun) || \
@@ -578,7 +589,7 @@ distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
 	    protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
 	    plist-fuzz-corpus gzip-fuzz-corpus zstd-fuzz-corpus xz-fuzz-corpus mtree-fuzz-corpus \
-	    codec-fuzz-corpus ifs-fuzz-corpus
+	    codec-fuzz-corpus ifs-fuzz-corpus iso9660-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77

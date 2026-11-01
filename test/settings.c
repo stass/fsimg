@@ -1088,6 +1088,8 @@ test_registered_writers_refuse_iso_settings(void)
 			CHECK(status == FSIMG_EINVAL);
 			CHECK(strcmp(error.path, "view") == 0);
 		}
+		if ((info.capabilities & FSIMG_CAP_WRITE) == 0)
+			continue;
 		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 			if ((info.write_settings & cases[i].bit) != 0)
 				continue;

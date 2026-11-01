@@ -303,16 +303,19 @@ offers.
 
 ### Framing rule
 
-A directory is the extent `[extent, extent + data_length)`. Its data length
-is a nonzero multiple of 2048, else `FSIMG_ECORRUPT`, and the extent lies
-within the volume. Within it, at each position `p`:
+A directory is the `data_length` bytes at its extent, which occupy
+`ceil(data_length / 2048)` blocks. Its data length is nonzero, else
+`FSIMG_ECORRUPT`, and its blocks lie within the volume. Producers usually
+write a multiple of 2048; the H3 disc's producer writes the exact byte
+count of each directory's records, as ECMA-119 permits, and the kernel
+readers accept it. Within the directory, at each position `p`:
 
-* a zero byte at `p` ends the records of the block containing `p`: every
-  remaining byte of that block must be zero, and the walk continues at the
-  next block;
+* a zero byte at `p`, or `p` reaching the data length, ends the records of
+  the block containing `p`: every remaining byte of that block must be
+  zero, and the walk continues at the next block;
 * otherwise `LEN_DR` must be even, at least `34`, at least
-  `33 + LEN_FI + pad`, and must end within the block containing `p`; a
-  record never crosses a block boundary;
+  `33 + LEN_FI + pad`, and must end within the block containing `p` and
+  within the data length; a record never crosses a block boundary;
 * the record's volume sequence number is 1, else `FSIMG_EUNSUPPORTED`;
 * `LEN_FI` is at least 1.
 
@@ -444,7 +447,9 @@ parent numbers are 16 bits.
 A primary identifier is `LEN_FI` bytes. The reader's native checks: no
 byte is `0x00` or `0x2f` (`/`), and when a file identifier holds a `;`,
 the last one is followed by a decimal version 1 through 32767 without
-leading zeros. A violation is `FSIMG_ECORRUPT`. The reader does not
+leading zeros; and the [displayed name](#displayed-names-and-keys) is not
+empty, `.` or `..`, which name no entry. A violation is `FSIMG_ECORRUPT`.
+The reader does not
 enforce the d-character set or the interchange level's length limits: the
 level is not recorded on the volume, and producers write relaxed names
 that every reader accepts. A byte the [portable name profile](#displayed-names-and-keys)
@@ -490,8 +495,11 @@ differ once a final `;1` is removed, else `FSIMG_ECORRUPT`. In a
 conforming primary hierarchy this always holds, since every file
 identifier carries a `.` and a version and no directory identifier
 carries either; in Joliet, where a version is not part of a name for any
-reader, two such identifiers are the same name. In the `rockridge` view
-the displayed name is the Rock Ridge name.
+reader, two such identifiers are the same name. An identifier whose
+displayed name still ends in `;1`, such as `A.TXT;1;1`, is
+`FSIMG_ECORRUPT`: a query loses its final `;1` too, so that name could
+never be selected and its spelling would select another entry. In the
+`rockridge` view the displayed name is the Rock Ridge name.
 
 Each entry has one name key, its displayed name's exact bytes. In the
 `primary` and `joliet` views `key` removes a final `;1` from a query the
@@ -1050,7 +1058,7 @@ shown, when reading unless the row says at verification.
 | Probe | PVD at block 16; boot record at 16 and PVD at 17; the smallest volume each producer writes | No `CD001` (EFORMAT); 16 blocks (EFORMAT); block size 512 (EUNSUPPORTED); disagreeing halves (ECORRUPT) |
 | Descriptor set | PVD, SVD, boot record, partition, enhanced, terminator in any legal order; trailing UDF recognition sequence | No terminator within 64 (EUNSUPPORTED); missing PVD (ECORRUPT); nonzero terminator byte (ECORRUPT); two Joliet SVDs (EUNSUPPORTED); differing second PVD (EUNSUPPORTED) |
 | Geometry | Slice longer than the volume; slice missing unreferenced tail blocks | An extent past the volume by one block, and with a length near `2^32` blocks (ECORRUPT); a referenced block past a short slice (ECORRUPT) |
-| Records | Records filling a block exactly; empty-tail blocks; 2048-byte boundaries | Odd length, length 33, crossing a block, nonzero tail padding, `LEN_FI` past the record (ECORRUPT); reserved flags (ECORRUPT); interleave (EUNSUPPORTED) |
+| Records | Records filling a block exactly; empty-tail blocks; 2048-byte boundaries; a directory length of its exact record bytes | Odd length, length 33, crossing a block, a record past the directory length, nonzero tail padding, a zero directory length, `LEN_FI` past the record (ECORRUPT); reserved flags (ECORRUPT); interleave (EUNSUPPORTED) |
 | Dot records and tree | Root and nested directories | Wrong self or parent extent (ECORRUPT); a child naming the root (ECORRUPT); two records opening one directory (ECORRUPT); a misplaced dot identifier (ECORRUPT) |
 | Sections | Single section; two and many sections; final section of 0 and of `2^32 - 1` bytes; a >4 GiB sparse fixture | Missing last section, changed identifier, flag on a directory, unaligned middle section (ECORRUPT); descending or overlapping sections, 65536 sections (EUNSUPPORTED) |
 | Extended attributes | One- and two-block records before data | Record past the extent (ECORRUPT); on a directory (EUNSUPPORTED) |

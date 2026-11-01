@@ -29,12 +29,12 @@ the structural templates; they share no code with this one.
 | `iso9660.h` | Private types, constants, profile bounds and prototypes shared by the files below |
 | `descriptor.c` | `fsimg_iso9660_format`: the `iso9660` name, its capability record, the probe, the reader and writer operations |
 | `codec.c` | Both-byte-order fields, recording and descriptor dates, and decode/encode of descriptors, directory records and path-table records; pure functions without I/O |
-| `volume.c` | The descriptor scan, Joliet identification, the system-area check, view selection, open and close, volume information |
+| `volume.c` | The descriptor scan, Joliet identification, the system-area check, view selection, the content domain, the block window |
 | `susp.c` | The SUSP cursor: entry framing, continuation areas, the visited-area set, the `SP` and `ER` handshake |
 | `rockridge.c` | `PX`, `PN`, `NM`, `SL`, `TF`, `CL`, `PL`, `RE` and the refused entries into one decoded record; link-target assembly |
 | `names.c` | Primary and Joliet identifier checks, UTF-16BE decoding, displayed names, keys, and the two identifier orders |
-| `directory.c` | `prepare`, `replay`, `keys` and `key` for the three views: framing, dot records, section runs, relocation |
-| `read.c` | `fsimg_iso9660_reader_ops`: resolve and the content index |
+| `directory.c` | `prepare` and `replay` for the three views: framing, dot records, section runs, relocation, the payload and the content index |
+| `read.c` | `fsimg_iso9660_reader_ops`: open and close, volume information, resolve |
 | `eltorito.c` | The boot record and boot catalog: decode and validation for reading, encode for writing |
 | `verify.c` | The walk plan, ownership claims and their sweep, path tables, order, relocation matching |
 | `write-iso9660.h` | Plan rows and the plan object |
@@ -103,8 +103,9 @@ next reads:
 2. **Geometry.** Check the primary descriptor's fields, the Joliet
    descriptor's agreement with them, the root records, and the path-table
    blocks and sizes against the volume. The readable end is the smaller of
-   the volume and the slice, and its shortfall is recorded for info. The
-   content domain is `[(terminator + 1) * 2048, readable end)`.
+   the volume and the slice's whole blocks, and its shortfall is recorded
+   for info. The content domain is `[(terminator + 1) * 2048, readable
+   end)`.
 3. **System area.** One 32768-byte read records whether any byte is
    nonzero, for info. Nothing is validated.
 4. **El Torito.** When a boot record exists, decode and validate the boot
@@ -194,7 +195,7 @@ The admitted payload, little-endian with explicit widths, holds: the
 directory's extent and data length; the block and in-block offset of the
 run's first record; the section count; the kind; a reached-through-`CL`
 flag; and for a directory the extent and data length of the directory it
-opens, which for a placeholder is the `CL` target's. Thirty-two bytes, so
+opens, which for a placeholder is the `CL` target's. Twenty-six bytes, so
 the record fits `FSIMG_DIRECTORY_PAYLOAD_BYTES`. Preparation's cost is the
 directory's records and their continuation areas, never its subtree.
 
@@ -266,7 +267,8 @@ shared image as it bounds any other.
 name: `rockridge`, `joliet` or `primary`; the geometry as `volume_bytes =
 volume_space_size * 2048` with 2048-byte sectors and allocation units and
 `allocation_units = volume_space_size`; the label of the view's
-descriptor, the primary volume identifier without trailing spaces for
+descriptor, the primary volume identifier without trailing spaces or NUL
+bytes for
 `rockridge` and `primary` and the decoded Joliet identifier for `joliet`,
 reported under `FSIMG_VOLUME_LABEL` only when it is valid printable UTF-8;
 the time basis `FSIMG_TIME_OFFSET`; and never `FSIMG_VOLUME_FREE` or

@@ -1,0 +1,18 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+set -eu
+ulimit -c 0
+if test -z "${FSIMG_ISO_CORPUS:-}" || test -z "${FSIMG_ISO_H3:-}"; then
+    echo 'SKIP: FSIMG_ISO_CORPUS and FSIMG_ISO_H3 are required'
+    exit 77
+fi
+if test ! -d "$FSIMG_ISO_CORPUS" || test ! -f "$FSIMG_ISO_H3"; then
+    echo 'SKIP: ISO corpus or H3 input is absent'
+    exit 77
+fi
+if test -z '@RUBY@' || ! command -v isoinfo >/dev/null 2>&1; then
+    echo 'SKIP: Ruby and isoinfo are required'
+    exit 77
+fi
+exec '@RUBY@' '@abs_top_srcdir@/test/iso9660-integration.rb' ./fsimg

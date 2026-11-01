@@ -2035,7 +2035,12 @@ The maximum directory depth is **10 below the root** (11 including it),
 and the maximum file path has 11 components. There are **zero
 multi-extent files**. Descriptor and record sequence numbers are 1,
 Joliet volume flags are 0, and recording and descriptor dates are valid
-or absent.
+or absent. Its directory records, dot records included, give each
+directory's data length as the exact byte count of its records rather
+than a multiple of 2048 (`isoinfo -l` lists 6,611 directory records, none
+a multiple of 2048), and the bytes after the last record of each block are
+zero; the [framing rule](../specs/design-iso9660.md#framing-rule) accepts
+both.
 
 The evidence questions in [the ISO plan](iso9660-plan.md#evidence-questions)
 have the following answers. Producer measurements use the versions above;
@@ -2081,3 +2086,51 @@ generator and documentation do not change the library or CLI.
 Validation uses `autoreconf -fi`, an out-of-tree configure and
 `make -j32 check`, followed by `make distdir` to check inclusion of the
 corpus source files and the evidence reader.
+
+### ISO 9660 reader checks
+
+`test-iso9660` builds every acceptance fixture in memory with its own
+encoder, which shares no code with the driver, and runs in the plain
+suite. `test/iso9660-integration.sh` compares the primary view with a
+corpus and the owner's disc; it skips with status 77 unless given them:
+
+```sh
+FSIMG_ISO_CORPUS="$HOME/.cache/fsimg-iso/corpus" \
+FSIMG_ISO_H3="$HOME/PCM-3.1-v4.76-disc-image.iso" \
+sh test/iso9660-integration.sh
+```
+
+For every corpus image, `fsimg t` and `fsimg x` in the primary view agree
+with the `*.primary.jsonl` manifest: paths with the final `;1` removed,
+kinds, sizes and the SHA-256 of every file. The isohybrid image is read
+with `-F iso9660/-`. Against the stage 0 corpus all 36 images agree. The
+H3 pipeline prints counts only and compares them with `isoinfo -f`:
+7,763 files and 2,204 directories including the root, in the primary
+view, with its 11-level hierarchy and exact directory lengths.
+
+`fuzz/iso9660.c` runs under `check-fuzz` with a seed that
+`test-iso9660 --seed` writes at run time.
+
+The ISO probe's 34,816-byte prefix raises the registry's detection
+prefix from 8,704 bytes (QNX6) to 34,816 bytes; a volume shorter than the
+prefix is read whole. The measurement ran `fsimg i -f IMAGE` without a
+forced format, fifteen times per image, under `/usr/bin/time -l`, with the
+build of the preceding revision and with the ISO reader, on a MacPro7,1
+(Xeon W-3245, macOS 26.6.2). Each fixture is a small image `fsimg c`
+created; the FAT12 (18,432 bytes), QNX4 (22,528 bytes) and ImageFS (176
+bytes) fixtures are shorter than the new prefix. Wall times include
+process start and the worker:
+
+| Format | Median wall before (ms) | After (ms) | Peak RSS before (bytes) | After (bytes) |
+| --- | ---: | ---: | ---: | ---: |
+| FAT12 | 40.7 | 27.9 | 1,392,640 | 1,363,968 |
+| FAT32 | 23.2 | 24.2 | 1,331,200 | 1,478,656 |
+| exFAT | 22.6 | 24.8 | 2,568,192 | 2,674,688 |
+| QNX6 | 22.3 | 24.5 | 2,433,024 | 2,523,136 |
+| QNX4 | 22.4 | 24.5 | 2,408,448 | 2,437,120 |
+| ImageFS | 22.4 | 24.5 | 2,420,736 | 2,445,312 |
+
+Detection costs about 2 ms and at most about 150 KB of peak RSS more per
+open on these fixtures, within process-start noise. The comparison
+baseline records the larger prefix as extra bytes read by the small exFAT
+fixtures.

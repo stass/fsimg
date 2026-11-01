@@ -3520,10 +3520,14 @@ static fsimg_status_t
 run_operation(fixture_t *f, operation_t operation, fsimg_error_t *error)
 {
 	fsimg_verify_report_t report;
+	fsimg_read_options_t options;
 	uint64_t entries;
 	fsimg_status_t status;
 
-	status = fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, error);
+	/* Fault injection targets QNX4 reads, after its own probe prefix. */
+	fsimg_read_options_init(&options);
+	options.format = "qnx4";
+	status = fsimg_reader_open(f->ctx, f->io, &options, &f->reader, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (operation == OPERATION_LIST)
@@ -3642,8 +3646,12 @@ test_failures(void)
 	gen_t g;
 	sample_t s;
 	fixture_t f;
+	fsimg_read_options_t read_options;
 	fsimg_status_t status;
 	uint64_t entries;
+
+	fsimg_read_options_init(&read_options);
+	read_options.format = "qnx4";
 
 	sample(&g, &s);
 	check_faults(&g, OPERATION_LIST);
@@ -3655,18 +3663,21 @@ test_failures(void)
 	fixture_new(&f, g.image, g.length);
 	f.fail_first = 2 * 512;
 	f.fail_end = 3 * 512;
-	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_EIO);
+	CHECK(fsimg_reader_open(f.ctx, f.io, &read_options, &f.reader,
+	    NULL) == FSIMG_EIO);
 	fixture_free(&f);
 	fixture_new(&f, g.image, g.length);
 	f.fail_first = (uint64_t)(g.objects[s.chained].chain[0] - 1) * 512;
 	f.fail_end = f.fail_first + 512;
-	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, &read_options, &f.reader,
+	    NULL) == FSIMG_OK);
 	CHECK(walk_all(&f, &entries, NULL) == FSIMG_EIO);
 	fixture_free(&f);
 	fixture_new(&f, g.image, g.length);
 	f.fail_first = (uint64_t)(g.objects[s.one].extents[0].first - 1) * 512;
 	f.fail_end = f.fail_first + 512;
-	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, &read_options, &f.reader,
+	    NULL) == FSIMG_OK);
 	{
 		const fsimg_entry_t *entry;
 		unsigned char buffer[4];

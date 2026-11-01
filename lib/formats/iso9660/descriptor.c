@@ -1,0 +1,79 @@
+/* SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+ */
+#include "config.h"
+
+#include "format.h"
+#include "iso9660.h"
+
+static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t,
+    const fsimg_format_variant_t **, fsimg_error_t *);
+
+/* One public name for every view and level; the view is a read setting.
+ * The reader presents the primary hierarchy: files and directories with
+ * their recording dates and hidden attribute, identifiers of at most 222
+ * bytes, and multi-section files up to the volume's size.
+ */
+static const fsimg_format_variant_t iso_variants[] = {
+	{
+		.info = {
+			.name = "iso9660",
+			.profile = "primary",
+			.entry_kinds = FSIMG_ENTRY_FILE |
+			    FSIMG_ENTRY_DIRECTORY,
+			.metadata_fields = FSIMG_META_MODIFIED |
+			    FSIMG_META_ATTRIBUTES,
+			.sector_size_mask = ISO_BLOCK_BYTES,
+			.allocation_unit_size_mask = ISO_BLOCK_BYTES,
+			.max_file_bytes = ISO_VOLUME_BLOCKS_MAX *
+			    ISO_BLOCK_BYTES,
+			.max_volume_bytes = ISO_VOLUME_BLOCKS_MAX *
+			    ISO_BLOCK_BYTES,
+			.max_name_utf16_units = ISO_IDENTIFIER_MAX,
+			.max_label_bytes = ISO_LABEL_BYTES,
+			.read_settings = FSIMG_SETTING_ISO_VIEW
+		},
+		.id = 0
+	}
+};
+
+_Static_assert(ISO_BLOCK_BYTES == 1u << 11,
+    "the size masks name 2048-byte sectors and allocation units");
+
+const fsimg_format_t fsimg_iso9660_format = {
+	.variants = iso_variants,
+	.variant_count = sizeof(iso_variants) / sizeof(iso_variants[0]),
+	.probe_bytes = ISO_PROBE_BYTES,
+	.probe = iso_probe,
+	.reader = &fsimg_iso9660_reader_ops
+};
+
+/* The identity signature is a volume descriptor at block 16: CD001 after a
+ * type the profile lists (specs/design-iso9660-driver.md#probe-and-open).
+ * No other probe's structures hold it there, and no probe scans for it
+ * elsewhere, so CD001 inside another format's data draws a second claim
+ * only at block 16. With the identity the probe claims the image. A
+ * primary descriptor at block 16 is checked further for its block size
+ * and volume size; any other first descriptor is left to open, which
+ * finds the primary descriptor.
+ */
+static fsimg_status_t
+iso_probe(const unsigned char *prefix, size_t length,
+    uint64_t volume_bytes FSIMG_UNUSED, const fsimg_format_variant_t **variant,
+    fsimg_error_t *error)
+{
+	const unsigned char *descriptor;
+	uint32_t space_size;
+
+	*variant = &iso_variants[0];
+	if (length < ISO_PROBE_BYTES)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "no ISO 9660 volume descriptor"));
+	descriptor = prefix + ISO_SYSTEM_BLOCKS * ISO_BLOCK_BYTES;
+	if (!iso_identity(descriptor))
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "no ISO 9660 volume descriptor"));
+	if (descriptor[0] != ISO_VD_PRIMARY)
+		return (FSIMG_OK);
+	return (iso_geometry_decode(descriptor, &space_size, error));
+}
