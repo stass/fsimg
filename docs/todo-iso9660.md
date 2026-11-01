@@ -6,11 +6,6 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
 
 ## Scheduled
 
-* [High] **Owner acceptance of the designs** (`specs/design-iso9660.md`,
-  `specs/design-iso9660-driver.md`, `docs/iso9660-plan.md`): the stage 1
-  gate. The owner accepts the designs and confirms or changes
-  [owner decisions](iso9660-plan.md#owner-decisions) 5 to 14, which carry a
-  recommendation but are not yet settled.
 * [High] **Oracles and corpus** (`test/iso9660-corpus.sh`, `docs/build.md`):
   stage 0. Install the producers and consumers of the plan's input table,
   record their versions, generate the corpus, survey the H3 disc for counts,

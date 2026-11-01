@@ -542,7 +542,8 @@ only the producers must exist before stage 3.
 
 ## Owner decisions
 
-The owner settled the first four in the planning session:
+The owner settled the first four in the planning session and accepted
+the rest at the stage 1 gate:
 
 1. **Scope.** A reader and writer, with El Torito read and written, in
    the stages above. Enhanced descriptors, XAR interpretation,
@@ -555,9 +556,6 @@ The owner settled the first four in the planning session:
 4. **Deep trees.** Rock Ridge relocation as its own writer stage; until
    it lands, a tree that needs relocation is refused naming the first
    directory to relocate.
-
-These carry a recommendation and need the owner's confirmation at the
-stage 1 gate:
 
 5. **Provenance.** Write the driver from the references and black-box
    oracle behaviour; consult libarchive and FreeBSD only for behaviour, as
