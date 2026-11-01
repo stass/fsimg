@@ -2762,11 +2762,124 @@ run_profile(const contract_fs_profile_t *profile)
 		    "format does not advertise verify");
 }
 
+typedef enum memory_operation {
+	MEMORY_OPEN,
+	MEMORY_ENUMERATE,
+	MEMORY_READ_CONTENT,
+	MEMORY_VERIFY_PAYLOAD,
+	MEMORY_EXTRACT
+} memory_operation_t;
+
+/* Each measurement owns a fresh context: peaks are cumulative within it. */
+static uint64_t
+small_operation_memory_peak(const contract_fs_profile_t *profile,
+    contract_volume_t *volume, memory_operation_t operation, uint64_t budget)
+{
+	ctx_setup_t setup = { .memory_bytes = budget };
+	fixture_t fixture;
+	fsimg_stats_t stats;
+	fsimg_verify_report_t report;
+	fsimg_io_t *backing, *slice;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	size_t entries = 0;
+
+	contract_volume_reset(volume);
+	fixture_open(&fixture, profile, &setup);
+	slice = contract_volume_open(fixture.ctx, volume, false, &backing);
+	CONTRACT_STATUS(reader_open(&fixture, slice, &reader, &error), FSIMG_OK,
+	    &error);
+	switch (operation) {
+	case MEMORY_OPEN:
+		break;
+	case MEMORY_ENUMERATE:
+		while ((status = fsimg_reader_next(reader, &entry, &error)) ==
+		    FSIMG_OK)
+			entries++;
+		CONTRACT_STATUS(status, FSIMG_DONE, &error);
+		CONTRACT_CHECK(entry == NULL);
+		CONTRACT_CHECK(entries == SOURCE_COUNT + profile->owned_count);
+		break;
+	case MEMORY_READ_CONTENT:
+		check_tree(reader, profile);
+		break;
+	case MEMORY_VERIFY_PAYLOAD:
+		CONTRACT_STATUS(fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD,
+		    &report, &error), FSIMG_OK, &error);
+		check_report(profile, FSIMG_VERIFY_PAYLOAD, &report);
+		break;
+	case MEMORY_EXTRACT: {
+		fsimg_extract_options_t options;
+
+		fsimg_extract_options_init(&options);
+		CONTRACT_STATUS(fsimg_extract_at(reader, fixture.dir.fd, "out",
+		    &options, &error), FSIMG_OK, &error);
+		break;
+	}
+	}
+	CONTRACT_STATUS(fsimg_ctx_get_stats(fixture.ctx, &stats, &error),
+	    FSIMG_OK, &error);
+
+	fsimg_reader_free(reader);
+	contract_volume_close(slice, backing);
+	if (operation == MEMORY_EXTRACT)
+		remove_extracted(&fixture, "out", true);
+	fixture_close(&fixture);
+	return (stats.memory_peak);
+}
+
+/*
+ * Small operations charge the same peak memory under either budget: the
+ * budget caps buffers, while the work sizes them. Sizing a buffer from the
+ * budget instead inflates every small operation, as the directory sort did.
+ * Collect every mismatch before asserting, so all profiles remain visible.
+ */
+static bool
+contract_memory_peak_is_independent_of_budget(
+    const contract_fs_profile_t *profile)
+{
+	static const char *const operations[] = { "open", "enumerate",
+	    "read-content", "verify-payload", "extract" };
+	contract_volume_t volume;
+	uint64_t small_peak, default_peak;
+	bool equal = true;
+
+	if (!contract_begin(profile->id, "memory-peak-is-independent-of-budget"))
+		return (true);
+	materialize(profile, &volume);
+	for (memory_operation_t op = MEMORY_OPEN; op <= MEMORY_EXTRACT; op++) {
+		contract_phase(operations[op], 0);
+		small_peak = small_operation_memory_peak(profile, &volume, op,
+		    16 * MIB);
+		default_peak = small_operation_memory_peak(profile, &volume, op,
+		    256 * MIB);
+		if (small_peak != default_peak) {
+			fprintf(stderr, "%s %s: memory_peak 16 MiB=%llu, "
+			    "256 MiB=%llu bytes\n", profile->id, operations[op],
+			    (unsigned long long)small_peak,
+			    (unsigned long long)default_peak);
+			equal = false;
+		}
+	}
+	contract_volume_free(&volume);
+	contract_end();
+	return (equal);
+}
+
 int
 main(int argc, char **argv)
 {
+	bool memory_peaks_equal = true;
+
 	contract_init(argc, argv);
 	check_registry();
+	for (size_t i = 0; i < COUNT(fs_profiles); i++) {
+		if (!contract_memory_peak_is_independent_of_budget(&fs_profiles[i]))
+			memory_peaks_equal = false;
+	}
+	CONTRACT_CHECK(memory_peaks_equal);
 	for (size_t i = 0; i < COUNT(fs_profiles); i++)
 		run_profile(&fs_profiles[i]);
 	return (contract_finish("driver contracts"));
