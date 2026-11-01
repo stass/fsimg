@@ -793,7 +793,8 @@ extern const fsimg_container_ops_t fsimg_simg_container;
 extern const fsimg_container_ops_t fsimg_hbcifs_container;
 extern const fsimg_container_ops_t fsimg_ifsboot_container;
 extern const fsimg_compression_ops_t fsimg_gzip_compression;
-/* Defined only in a build with the library (FSIMG_XZ). */
+/* Each defined only in a build with its library (FSIMG_ZSTD, FSIMG_XZ). */
+extern const fsimg_compression_ops_t fsimg_zstd_compression;
 extern const fsimg_compression_ops_t fsimg_xz_compression;
 
 /* The registry, in reporting order; NULL past the end. */

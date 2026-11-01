@@ -42,9 +42,9 @@
  * eight bytes each, one byte whose bits say which of those six and the
  * virtual setting are set, one byte of values (the virtual bit, raw
  * storage), and six zero bytes. The compression settings follow, eight
- * bytes each: the xz preset and the xz check (fsimg_xz_check_t). The file
- * settings travel as descriptors,
- * one capability bit each, never in the record. Three eight-byte fields
+ * bytes each: the xz preset, the xz check (fsimg_xz_check_t) and the zstd
+ * level. The file settings travel as descriptors, one capability bit
+ * each, never in the record. Three eight-byte fields
  * close the record: image input kind, byte length and transfer quantum.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
@@ -116,7 +116,8 @@ typedef enum job_string_field {
 	JOB_IFSBOOT_RESERVED = JOB_IFSBOOT_VALUES + 1,
 	JOB_XZ_LEVEL_OFFSET = JOB_IFSBOOT_RESERVED + 6,
 	JOB_XZ_CHECK_OFFSET = JOB_XZ_LEVEL_OFFSET + 8,
-	JOB_INPUT_KIND = JOB_XZ_CHECK_OFFSET + 8,
+	JOB_ZSTD_LEVEL_OFFSET = JOB_XZ_CHECK_OFFSET + 8,
+	JOB_INPUT_KIND = JOB_ZSTD_LEVEL_OFFSET + 8,
 	JOB_INPUT_LENGTH = JOB_INPUT_KIND + 8,
 	JOB_INPUT_QUANTUM = JOB_INPUT_LENGTH + 8
 } job_string_field_t;
@@ -185,16 +186,18 @@ _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     "the request holds each layer field");
 /* encode_layers and decode_layers carry every member of the layout below,
  * which ends with gzip_level at 288, the ifsboot settings from 292, the
- * xz settings from 328 and reserved at 336. A new layer setting moves
- * reserved or grows the record and stops the build until they carry it
- * and this layout is updated.
+ * xz settings from 328, zstd_level at 336 and reserved at 340, with no
+ * padding before reserved. A new layer setting moves reserved or grows
+ * the record and stops the build until they carry it and this layout is
+ * updated.
  */
 _Static_assert(offsetof(fsimg_layer_options_t, gzip_level) == 288 &&
     offsetof(fsimg_layer_options_t, ifsboot_compress) == 292 &&
     offsetof(fsimg_layer_options_t, ifsboot_imagefs_paddr_set) == 327 &&
     offsetof(fsimg_layer_options_t, xz_level) == 328 &&
     offsetof(fsimg_layer_options_t, xz_check) == 332 &&
-    offsetof(fsimg_layer_options_t, reserved) == 336 &&
+    offsetof(fsimg_layer_options_t, zstd_level) == 336 &&
+    offsetof(fsimg_layer_options_t, reserved) == 340 &&
     sizeof(fsimg_layer_options_t) == 360,
     "every layer setting travels in the job record");
 
@@ -317,6 +320,7 @@ encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
 	    0));
 	fsimg_store_le64(raw + JOB_XZ_LEVEL_OFFSET, layers->xz_level);
 	fsimg_store_le64(raw + JOB_XZ_CHECK_OFFSET, (uint64_t)layers->xz_check);
+	fsimg_store_le64(raw + JOB_ZSTD_LEVEL_OFFSET, layers->zstd_level);
 }
 
 /* One encoding per settings value: known flags, a 32-bit identifier that
@@ -328,7 +332,7 @@ layers_valid(const unsigned char *raw)
 {
 	static const unsigned quantities[] = { JOB_DMG_CHUNK_OFFSET,
 	    JOB_VHD_ALIGN_OFFSET, JOB_SIMG_BLOCK_OFFSET, JOB_DMG_LEVEL_OFFSET,
-	    JOB_GZIP_LEVEL_OFFSET, JOB_XZ_LEVEL_OFFSET };
+	    JOB_GZIP_LEVEL_OFFSET, JOB_XZ_LEVEL_OFFSET, JOB_ZSTD_LEVEL_OFFSET };
 	uint64_t id;
 
 	id = fsimg_load_le64(raw + JOB_MBR_ID_OFFSET);
@@ -420,6 +424,8 @@ decode_layers(const unsigned char *raw, fsimg_layer_options_t *layers)
 	layers->xz_level = (uint32_t)fsimg_load_le64(raw + JOB_XZ_LEVEL_OFFSET);
 	layers->xz_check =
 	    (fsimg_xz_check_t)fsimg_load_le64(raw + JOB_XZ_CHECK_OFFSET);
+	layers->zstd_level =
+	    (uint32_t)fsimg_load_le64(raw + JOB_ZSTD_LEVEL_OFFSET);
 }
 
 static fsimg_status_t

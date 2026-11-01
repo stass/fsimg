@@ -5,6 +5,22 @@
 module CliFixtures
   private
 
+  def compression_format(name:)
+    @compression_formats ||= {}
+    @compression_formats[name] ||= begin
+      record = completed(invoke(arguments: ["--formats", "--json"]))
+        .find { _1["type"] == "format" && _1["name"] == name }
+      refute_nil(record, "#{name} must have a format catalogue row")
+      record
+    end
+  end
+
+  def xz_format = compression_format(name: "xz")
+  def zstd_format = compression_format(name: "zstd")
+  def compression_supported?(name:) = compression_format(name: name).fetch("capabilities") != 0
+  def xz_supported? = compression_supported?(name: "xz")
+  def zstd_supported? = compression_supported?(name: "zstd")
+
   def same_bytes(first:, second:)
     assert(FileUtils.compare_file(first, second), "bytes differ: #{first} and #{second}")
   end

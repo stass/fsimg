@@ -44,6 +44,7 @@ class CliTest < Minitest::Test
     assert_equal(["compress", "level", "chunk", "uuid"], layers.fetch("dmg").fetch("settings"))
     assert_equal(["block", "crc"], layers.fetch("simg").fetch("settings"))
     assert_equal(["level"], layers.fetch("gzip").fetch("settings"))
+    assert_equal(["level"], layers.fetch("zstd").fetch("settings"))
     assert_equal(7, layers.fetch("gpt").fetch("capabilities"), "layers gpt capabilities")
     assert_equal(7, layers.fetch("vhd").fetch("capabilities"), "layers vhd capabilities")
     # ifsboot is read, written and verified, lists its file settings first,

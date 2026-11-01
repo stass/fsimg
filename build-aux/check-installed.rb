@@ -85,6 +85,7 @@ module InstalledPackage
         "@includedir@" => "${prefix}/include",
         "@PACKAGE_VERSION@" => "1.2.3",
         "@ZLIB_LIBS@" => "-lz",
+        "@ZSTD_LIBS@" => "",
         "@LZMA_LIBS@" => ""
       }
       good = replacements.reduce(good) { |text, (key, value)| text.gsub(key, value) }

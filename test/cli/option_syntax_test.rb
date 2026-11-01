@@ -157,19 +157,6 @@ class CliTest < Minitest::Test
       [
         [
           "cf",
-          "syntax.img.zst",
-          "-a",
-          "-F",
-          "fat32",
-          "-C",
-          "source",
-          "."
-        ],
-        "writing this compression is not supported".b
-      ],
-      [
-        [
-          "cf",
           "syntax.img",
           "-F",
           "apfs",
@@ -183,6 +170,15 @@ class CliTest < Minitest::Test
       result = invoke(arguments: arguments, expected: 1)
       assert_includes(result.stderr, detail, [arguments, result.stderr])
       assert_equal("".b, result.stdout, [arguments, result.stderr])
+    end
+
+    result = invoke(arguments: ["cf", "suffix.img.zst", "-a", "-F", "fat32", "-C", "source", "."],
+      expected: zstd_supported? ? 0 : 1)
+    if zstd_supported?
+      invoke(arguments: ["W", "-f", "suffix.img.zst"])
+    else
+      assert_includes(result.stderr, 'writing this compression is not supported "zstd"'.b)
+      refute_path_exists(@root / "suffix.img.zst")
     end
 
     result = invoke(arguments: ["t", "-f", "human.img", "/nested", "-v"], expected: 1)

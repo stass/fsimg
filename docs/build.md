@@ -62,23 +62,31 @@ the base system; on Linux install the distribution's zlib development
 package (`zlib1g-dev`, `zlib-devel`). `libfsimg.pc` lists it in
 `Libs.private` for static linking.
 
-The xz compression is an optional integration over the system liblzma
-(0BSD). `--with-xz=auto`, the default, uses it when it links and otherwise
-says `xz compression disabled` in configure's output; `--with-xz=yes`
-fails configure without it; `--without-xz` never looks. Detection is
-zlib's: pkg-config (`liblzma`), else `lzma.h` and `-llzma`, with the
-precious `LZMA_CFLAGS` and `LZMA_LIBS` overriding both, and a link test of
-the functions the profile calls. liblzma is part of the FreeBSD base
-system; on Linux install `liblzma-dev` or `xz-devel`, and on macOS
-Homebrew's `xz`, whose `xz` tool is also the oracle the compression
-tests use (`XZ_PROGRAM`). In a build without liblzma `fsimg --formats`
-lists xz with no support, a `.xz` name under
-`-a` is refused as unsupported with exit status 1, and an xz file is not
-recognized. The found library joins zlib in `libfsimg.pc`'s
-`Libs.private`, and `check-installed-consumers` links a static consumer
-with `pkg-config --static --libs libfsimg`, so the check follows the
-metadata. CI builds with the library on every platform and without it
-in the GCC job.
+The zstd and xz compressions are optional integrations over the system
+libzstd (BSD-3-Clause or GPL-2.0, used under BSD-3-Clause) and liblzma
+(0BSD). `--with-zstd` and `--with-xz` each take `auto`, the default,
+which uses the library when it links and otherwise says `zstd compression
+disabled` or `xz compression disabled` in configure's output; `yes`,
+which fails configure without it; and `no` (`--without-zstd`,
+`--without-xz`), which never looks. Detection is zlib's: pkg-config
+(`libzstd`, `liblzma`), else the header and `-lzstd` or `-llzma`, with the
+precious `ZSTD_CFLAGS`, `ZSTD_LIBS`, `LZMA_CFLAGS` and `LZMA_LIBS`
+overriding both, and a link test of the functions each profile calls;
+for libzstd these include the custom-allocator and frame-header functions
+of `zstd.h`'s `ZSTD_STATIC_LINKING_ONLY` section, so a libzstd built
+without them counts as absent. liblzma is part of the FreeBSD base
+system, whose own libzstd is private, so FreeBSD needs the
+`archivers/zstd` port; on Linux install `libzstd-dev` and `liblzma-dev`
+(`libzstd-devel`, `xz-devel`), and on macOS Homebrew's `zstd` and `xz`,
+whose `zstd` and `xz` tools are also the oracles the compression tests use
+(`ZSTD_PROGRAM`, `XZ_PROGRAM`). In a build without a library `fsimg
+--formats` lists its compression with no support, a `.zst` or `.xz` name
+under `-a` and `--compress` naming it are refused as unsupported with exit
+status 1, and its files are not recognized. The found libraries join zlib
+in `libfsimg.pc`'s `Libs.private`, and `check-installed-consumers` links
+a static consumer with `pkg-config --static --libs libfsimg`, so the check
+follows the metadata. CI builds with both libraries on every platform, GCC
+16 included, and without them in the GCC 13 job.
 
 The CLI requires native spawn-time closure of all unspecified descriptors:
 `POSIX_SPAWN_CLOEXEC_DEFAULT` or `posix_spawn_file_actions_addclosefrom_np`.
@@ -504,7 +512,8 @@ with a 64 KiB input ceiling and five-second timeout. It exercises production
 framing, job codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker
 lifecycle ordering is covered by `test-worker`, not inferred from pure wire
 fuzzing. `fuzz/compression.c`, built once per compression the build
-implements (`fuzz-gzip`, and `fuzz-xz` with liblzma), forces that
+implements (`fuzz-gzip`, `fuzz-zstd` with libzstd and `fuzz-xz` with
+liblzma), forces that
 compression on each input and opens it as a file and, up to 16 KiB, as a
 pipe stream, each into a fresh unlinked spool under a 4 MiB limit and a
 32 MiB memory budget, so the profile's parsing (gzip's member headers and
@@ -512,8 +521,10 @@ trailers), the library's decoder through the codec memory adapter, the
 trailing-byte rule and the spool reservation see every mutation, with a
 256 KiB input ceiling. `test-compression --seed-NAME DIRECTORY` writes
 each corpus's seeds: for gzip a two-member file with FEXTRA, FNAME,
-FCOMMENT and FHCRC, for xz streams at several presets and checks,
-concatenated, padded, multi-block and unchecked.
+FCOMMENT and FHCRC, for zstd frames at several levels, with and without
+a checksum and a content size, concatenated and behind a skippable frame,
+and for xz streams at several presets and checks, concatenated, padded,
+multi-block and unchecked.
 `fuzz/mtree.c` feeds each input to the mtree(5) manifest parser
 twice, whole and in 13-byte reads, under a 256-byte path limit, depth eight
 and a 100,000-line work limit; both parses must reach the same status after
@@ -561,7 +572,7 @@ harnesses into `sanitizer-fuzz/` from the same read-only source copy.
 The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `qnx6-fuzz-corpus/`,
 `qnx4-fuzz-corpus/`, `ifs-fuzz-corpus/`, `codec-fuzz-corpus/`,
 `protocol-fuzz-corpus/`, `image-fuzz-corpus/`, `container-fuzz-corpus/`,
-`plist-fuzz-corpus/`, `gzip-fuzz-corpus/`, `xz-fuzz-corpus/`, `mtree-fuzz-corpus/` and libFuzzer
+`plist-fuzz-corpus/`, `gzip-fuzz-corpus/`, `zstd-fuzz-corpus/`, `xz-fuzz-corpus/`, `mtree-fuzz-corpus/` and libFuzzer
 crash artifacts are disposable build outputs. Existing corpus seeds and
 mutations are reused; `make clean` keeps the
 corpora, `make distclean` removes them, and neither removes crash artifacts.

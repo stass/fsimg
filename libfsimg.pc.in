@@ -9,5 +9,5 @@ Name: libfsimg
 Description: Bounded filesystem image readers, writers and extraction
 Version: @PACKAGE_VERSION@
 Libs: -L"${libdir}" -lfsimg
-Libs.private: @ZLIB_LIBS@ @LZMA_LIBS@
+Libs.private: @ZLIB_LIBS@ @ZSTD_LIBS@ @LZMA_LIBS@
 Cflags: -I"${includedir}"

@@ -33,16 +33,20 @@ class CliTest < Minitest::Test
     # which is recognized only to be reported as unsupported.
     ["c", "cW", "x", "t", "W", "i"].each do |mode|
       mode_help = invoke(arguments: [mode, "-h"]).stdout.dup.force_encoding(Encoding::UTF_8)
+      assert_includes(mode_help, "--compress=NAME")
+      assert_includes(mode_help, "Same as --compress=gzip")
       accepted_letters(mode: mode).each do |letter|
         assert_includes(mode_help, "\n    -#{letter} ", [mode, letter])
       end
     end
 
     create_help = invoke(arguments: ["c", "-h"]).stdout.dup.force_encoding(Encoding::UTF_8)
-    ["--free-space=", "--json"].each do |option|
+    ["--free-space=", "--compress=NAME", "--json"].each do |option|
       assert_includes(create_help, "\n    #{option}", option)
     end
 
+    assert_includes(create_help, "(.gz, .zst")
+    assert_includes(create_help, "or .xz)")
     assert(Regexp.new("-F stack .*gpt", Regexp::MULTILINE).match(create_help), create_help)
     missing = invoke(arguments: ["i"], expected: 2)
     assert_equal("fsimg: -f image is required\nusage: fsimg i -f image [options]\n".b, missing.stderr)
@@ -96,9 +100,11 @@ class CliTest < Minitest::Test
       ifsboot  container    yes   yes    yes     raw,lzo1x,nrv2b  startup,prefix,machine,virtual,startup_vaddr,paddr_bias,image_paddr,ram_paddr,imagefs_paddr,compress
       hbcifs   container    yes   no     yes     lzo1x            -
       gzip     compression  yes   yes    yes     -                level
-      zstd     compression  no    no     no      -                -
+      zstd     compression  #{zstd_supported? ? "yes   yes    yes" : "no    no     no "}     -                level
       xz       compression  #{xz_capabilities}     -                level,check
     FORMATS
+    zstd_version = zstd_supported? ? "                      #{zstd_format.fetch("codec_version")}\n" : ""
+    expected_formats.sub!("xz       compression", "#{zstd_version}xz       compression")
     expected_formats += xz_version
     assert_equal(expected_formats.b, formats.stdout.gsub(zlib_version[0], "\n".b))
     assert_equal("".b, formats.stderr)

@@ -128,6 +128,22 @@ option, a repeated setting or limit key (even with an equal value), an unknown
 stack or setting name and an unexpected operand are syntax errors, reported
 before any image or source is opened.
 .Bl -tag -width Ds
+.It Fl Fl compress Ns = Ns Ar gzip|zstd|xz , Fl z
+The compression wrapping the image file:
+.Cm c
+compresses the image with it, as
+.Sx Containers, compression and streams
+describes, and the reading modes decode the input as it, failing when the
+input is not that compression.
+.Fl z
+is
+.Fl Fl compress Ns = Ns Ar gzip .
+A name that is not a compression, or
+.Fl z
+beside a
+.Fl Fl compress
+naming another, is a syntax error; zstd or xz in a build without its
+library is refused as unsupported, with status 1.
 .It Fl f Ar image
 The image: input for
 .Cm x , t , W
@@ -446,15 +462,16 @@ Decoding counts as work, the compressed bytes read and the bytes decoded,
 for a file and standard input alike, so
 .Fl l Ar work
 bounds it.
-When the first bytes pass for both gzip and an uncompressed image, the
-input is ambiguous:
+When the first bytes pass for both a compression and an uncompressed
+image, the input is ambiguous:
+.Fl Fl compress
+or
 .Fl z
 reads it as compressed, and
 .Fl F ,
 or a range or disk selection, which takes the bytes as they are, as not
 compressed.
-.Fl z
-on an input that is not gzip fails.
+A forced compression on an input that is not that compression fails.
 .Pp
 An xz-compressed image is detected and decoded into the spool the same
 way, under the same limits, when the build has liblzma
@@ -475,7 +492,31 @@ or with a check this liblzma cannot compute, still decodes;
 then names
 .Ql xz:check
 unverified and reports the verification incomplete, with exit status 0.
-A build without liblzma does not recognize an xz file.
+.Pp
+A zstd-compressed image is decoded the same way when the build has
+libzstd: frames in sequence, and skippable frames, which produce nothing,
+as
+.Xr zstd 1
+reads them.
+Each frame's content checksum, when it carries one, and its declared
+content size are verified, and any other trailing byte, a damaged block or
+a truncated frame fails the command.
+The decoder's window is charged to
+.Fl l Ar memory ;
+a frame whose window exceeds 128 MiB, as
+.Ql zstd --long=28
+and above writes for a large input, or that needs a dictionary, is refused
+as unsupported.
+A frame written with
+.Ql zstd --no-check
+still decodes;
+.Cm W
+then names
+.Ql zstd:checksum
+unverified and reports the verification incomplete, with exit status 0.
+.Pp
+A build without liblzma does not recognize an xz file, and one without
+libzstd a zstd file.
 Standard input is relayed to the worker unread by a separate process and
 must not be a terminal.
 .Pp
@@ -1024,7 +1065,8 @@ it.
 The VHD timestamp is the creation time, or the epoch under
 .Fl R .
 Reproducible zlib output, DMG chunks and gzip alike, depends on the zlib
-version, and xz output on the liblzma version, which the plan and
+version, zstd output on the libzstd version and its CPU family, and xz
+output on the liblzma version, which the plan and
 .Fl -formats
 name.
 .Pp
@@ -1043,15 +1085,16 @@ are syntax errors with it.
 A stream has no publication: a failure after any byte was written reports
 the output incomplete, and the receiver must discard what it got.
 .Pp
+.Fl Fl compress ,
 .Fl z ,
 or
 .Fl a
-with an image name ending in
-.Pa .gz ,
-compresses whatever the stack writes, bare volume, disk or container, into
-one gzip member, through the same raw file; the raw file and the
-compressed image are both charged to
+with an image name ending in a compression's suffix, compresses whatever
+the stack writes, bare volume, disk or container, through the same raw
+file; the raw file and the compressed image are both charged to
 .Fl l Ar output .
+.Pa .gz
+selects gzip, written as one gzip member.
 The member has no name, comment or header CRC; its time is the creation
 time, or the epoch under
 .Fl R ,
@@ -1066,14 +1109,26 @@ or
 .Pa .simg
 suffix, under any compression suffix, must name the stack's container,
 and with
+.Fl Fl compress
+or
 .Fl z
-the name must end in
-.Pa .gz ;
-.Pa .xz
-selects xz, one stream of one block written by liblzma, when the build
-has it, and is refused as unsupported, writing nothing, when it does not;
+the name must end in that compression's suffix, so
+.Ql -z -a -f disk.img.zst
+is a syntax error.
 .Pa .zst
-selects a compression this version cannot write.
+selects zstd, one frame written by libzstd with a content checksum, and
+around a bare volume or disk the content size, whose length the layout
+fixes.
+.Pa .xz
+selects xz, one stream of one block written by liblzma.
+In a build without the library, zstd or xz is refused as unsupported,
+writing nothing.
+.Fl a
+with
+.Fl f Ar -
+is a syntax error, since a stream has no name;
+.Fl Fl compress
+compresses a stream.
 .Cm cW
 reads a compressed image back through the spool, so it needs scratch and
 .Fl l Ar spool
@@ -1082,12 +1137,17 @@ that the limit cannot hold is refused once the creation plans it.
 .Bl -tag -width Ds
 .It Fl o Ar gzip:level=1..9
 The DEFLATE level; default 6.
-Only with
-.Fl z
-or a
-.Pa .gz
-name under
-.Fl a .
+Only when gzip is selected.
+.It Fl o Ar zstd:level=1..19
+The zstd level; default 3, as
+.Xr zstd 1
+uses.
+The ultra levels 20 to 22 are not written.
+The encoder's memory is the level's, charged to
+.Fl l Ar memory :
+about 90 MiB at level 19 around a container, less around a small bare
+disk, whose length bounds the window.
+Only when zstd is selected.
 .It Fl o Ar xz:level=0..9
 The
 .Xr xz 1
@@ -1098,10 +1158,7 @@ The encoder's memory is the preset's, which
 as
 .Xr xz 1
 lists; a preset the budget cannot hold fails before anything is written.
-Only with a
-.Pa .xz
-name under
-.Fl a .
+Only when xz is selected.
 .It Fl o Ar xz:check=crc32|crc64|sha256
 Each block's integrity check; default crc64.
 .Ql crc32
@@ -1485,7 +1542,7 @@ The summary's command field names the mode:
 or
 .Ql formats .
 A stack record precedes the information record: it carries the stack, the
-compression (gzip, xz or null), the container with its chunk count, chunk
+compression (gzip, zstd, xz or null), the container with its chunk count, chunk
 encodings, identifier, null without one, and container_details, an object
 of each named header field's decimal string value, empty for a container
 without header fields, all null without a container, the scheme, the disk
@@ -1537,9 +1594,8 @@ A sandbox-unavailable warning under automatic mode alone is not failure.
 .Nm
 recognizes the following and reports each as not supported, with status 1,
 after the rest of the command line is checked:
-writing zstd or xz
-.Pq Fl a No with Cm c ,
-and the reserved filesystem names apfs and hfs.
+reading or writing zstd or xz in a build without its library, and the
+reserved filesystem names apfs and hfs.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .

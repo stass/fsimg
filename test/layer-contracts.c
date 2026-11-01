@@ -167,8 +167,15 @@ static const contract_layer_profile_t layer_profiles[] = {
 	    .modes = gzip_modes, .mode_count = COUNT(gzip_modes),
 	    .spooled = true },
 	{ .name = "zstd", .kind = FSIMG_LAYER_COMPRESSION,
+#ifdef FSIMG_ZSTD
+	    .expected_capabilities = RW_VERIFY, .carries = "",
+	    .payload = PAYLOAD_FAT12, .stack = "fat12",
+	    .modes = gzip_modes, .mode_count = COUNT(gzip_modes),
+	    .spooled = true },
+#else
 	    .expected_capabilities = 0, .carries = "",
 	    .payload = PAYLOAD_FAT12, .stack = "fat12" },
+#endif
 	{ .name = "xz", .kind = FSIMG_LAYER_COMPRESSION,
 #ifdef FSIMG_XZ
 	    .expected_capabilities = RW_VERIFY, .carries = "",

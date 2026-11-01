@@ -19,7 +19,8 @@ fsimg cf data.img -F exfat -C files .      # Create an image from ./files/
 - **One interface across formats.** Work with FAT, exFAT, and QNX filesystems
   using the same commands.
 - **Read through the layers.** Detect supported filesystems inside GPT or MBR
-  disks, DMGs, fixed VHDs, Android sparse images, and gzip or xz streams.
+  disks, DMGs, fixed VHDs, Android sparse images, and gzip, zstd or xz
+  streams.
 - **Build images from files or manifests.** Choose the filesystem, size,
   label, partition scheme, and container. Use mtree manifests to set image
   ownership and permissions without changing host files.
@@ -201,6 +202,7 @@ Standard input and decompression use a temporary spool, bounded by
 | VHD | Fixed disks | Fixed disks |
 | Android sparse (`simg`) | Yes | Yes |
 | gzip | Files and stdin, including concatenated members | Files and stdout |
+| zstd (with libzstd) | Files and stdin, including concatenated and skippable frames | Files and stdout |
 | xz (with liblzma) | Files and stdin, including concatenated streams | Files and stdout |
 | QNX boot image (`ifsboot`) | Raw, LZO1X, or NRV2B body | Qualified machine/compression combinations |
 | Harman-Becker `hbcifs` | LZO1X ImageFS container | No |
@@ -219,9 +221,11 @@ See the [command manual](docs/fsimg.1) for exact profiles and limits.
 
 Building from a checkout requires Autoconf, Automake, Libtool, make, a C11
 compiler, a C++ compiler, and the system zlib development headers and library.
-The xz compression uses liblzma when configure finds it (`liblzma-dev`,
-`xz-devel`, Homebrew's `xz`; FreeBSD's base system); without it the
-build is otherwise the same and refuses to write `.xz` images.
+The zstd and xz compressions use libzstd and liblzma when configure finds
+them (`libzstd-dev` and `liblzma-dev`, `libzstd-devel` and `xz-devel`,
+Homebrew's `zstd` and `xz`; on FreeBSD the `archivers/zstd` port and the
+base system's liblzma); without one the build is otherwise the same and
+refuses to read or write that compression.
 
 ```sh
 git clone https://github.com/stass/fsimg.git

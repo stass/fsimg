@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -651,6 +652,11 @@ test_settings(void)
 	fixture_t f;
 	char name[128];
 
+	_Static_assert(offsetof(fsimg_layer_options_t, reserved) == 340,
+	    "reserved words immediately follow zstd_level");
+	_Static_assert(sizeof(layers.reserved) == 5 * sizeof(uint32_t),
+	    "five reserved words occupy the end of the layer options");
+
 	fixture_init(&f);
 	fsimg_layer_options_init(&layers);
 	snprintf(layers.gpt_type, sizeof(layers.gpt_type), "esp");
@@ -662,10 +668,12 @@ test_settings(void)
 	layers.mbr_active = true;
 	expect_refused(&f, "fat12/gpt", MIB, &layers, FSIMG_WRITE_REPRODUCIBLE,
 	    FSIMG_EINVAL, "mbr:active");
-	fsimg_layer_options_init(&layers);
-	layers.reserved[2] = 1;
-	expect_refused(&f, "fat12/gpt", MIB, &layers, FSIMG_WRITE_REPRODUCIBLE,
-	    FSIMG_EINVAL, NULL);
+	for (size_t i = 0; i < 5; i++) {
+		fsimg_layer_options_init(&layers);
+		layers.reserved[i] = 1;
+		expect_refused(&f, "fat12/gpt", MIB, &layers,
+		    FSIMG_WRITE_REPRODUCIBLE, FSIMG_EINVAL, NULL);
+	}
 	fsimg_layer_options_init(&layers);
 	layers.mbr_id = 7;
 	expect_refused(&f, "fat12/mbr", MIB, &layers, FSIMG_WRITE_REPRODUCIBLE,

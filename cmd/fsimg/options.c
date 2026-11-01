@@ -65,7 +65,8 @@
 
 /* getopt_long values of the long-only options, above every short letter. */
 enum {
-	OPT_FORMATS = 256,
+	OPT_COMPRESS = 256,
+	OPT_FORMATS,
 	OPT_FREE_SPACE,
 	OPT_INFO,
 	OPT_JSON,
@@ -117,6 +118,7 @@ static const cli_option_t option_table[] = {
 	{ 'W', "-W", MODES_ALL, 0 },
 	{ 'x', "-x", MODES_ALL, 0 },
 	{ 'z', "-z", MODES_IMAGE, 0 },
+	{ OPT_COMPRESS, "--compress", MODES_IMAGE, 0 },
 	{ OPT_FORMATS, "--formats", MODES_ALL, 0 },
 	{ OPT_FREE_SPACE, "--free-space", MODES_CREATE, 0 },
 	{ OPT_INFO, "--info", MODES_ALL, 0 },
@@ -130,6 +132,7 @@ static const cli_option_t option_table[] = {
 #define OPTION_COUNT (sizeof(option_table) / sizeof(option_table[0]))
 
 static const struct option long_options[] = {
+	{ "compress", required_argument, NULL, OPT_COMPRESS },
 	{ "formats", no_argument, NULL, OPT_FORMATS },
 	{ "free-space", required_argument, NULL, OPT_FREE_SPACE },
 	{ "info", no_argument, NULL, OPT_INFO },
@@ -188,6 +191,8 @@ typedef struct cli_parse {
 	unsigned	 mode;		/* One MODE_* bit after selection */
 	bool		 reserved;	/* The -F filesystem has no driver */
 	const char	*unsupported;	/* First recognized, unimplemented feature */
+	/* The layer the unsupported feature names, or "" */
+	char		 unsupported_name[sizeof(((fsimg_layer_info_t *)0)->name)];
 	bool		 options_ended;	/* "--" ended option parsing */
 } cli_parse_t;
 
@@ -230,13 +235,16 @@ static fsimg_status_t find_format(cli_parse_t *, const char *,
     fsimg_format_info_t *);
 static fsimg_status_t validate_creation(cli_parse_t *);
 static fsimg_status_t check_image_name(cli_parse_t *);
-static void note_unsupported(cli_parse_t *, const char *);
+static void note_unsupported(cli_parse_t *, const char *, const char *);
 static bool strip_suffix(char *, const char *);
 static size_t suffix_layer(const char *, fsimg_layer_kind_t,
     fsimg_layer_info_t *);
 static size_t layer_suffix_length(const char *, fsimg_layer_kind_t);
 static size_t compression_suffix(const char *, char *, size_t,
     fsimg_layer_info_t *);
+static const char *named_compression(const cli_parse_t *);
+static fsimg_status_t check_named_compression(cli_parse_t *);
+static fsimg_status_t check_auto_suffix(cli_parse_t *);
 static bool compression_selected(const cli_parse_t *, fsimg_layer_info_t *);
 static fsimg_status_t apply_compression(cli_parse_t *);
 
@@ -697,7 +705,7 @@ find_layer(const char *name, size_t length, fsimg_layer_info_t *info)
 }
 
 /* Whether the command selects a layer: the scheme or container its -F
- * stack names, or the compression -z or -a selects.
+ * stack names, or the compression --compress, -z or -a selects.
  */
 static bool
 layer_selected(const cli_parse_t *parse, const fsimg_layer_info_t *layer)
@@ -1030,14 +1038,18 @@ parse_byte_option(cli_parse_t *parse, int key, bool positive, uint64_t *out)
 	return (FSIMG_OK);
 }
 
-/* Remember the first recognized feature this build does not implement. It
- * is reported only after every syntax check passes.
+/* Remember the first recognized feature this build does not implement,
+ * and the layer it names, NULL for none. It is reported only after every
+ * syntax check passes.
  */
 static void
-note_unsupported(cli_parse_t *parse, const char *message)
+note_unsupported(cli_parse_t *parse, const char *message, const char *name)
 {
-	if (parse->unsupported == NULL)
-		parse->unsupported = message;
+	if (parse->unsupported != NULL)
+		return;
+	parse->unsupported = message;
+	snprintf(parse->unsupported_name, sizeof(parse->unsupported_name),
+	    "%s", name != NULL ? name : "");
 }
 
 /* Options every image mode shares: image, sandbox, scratch, budgets, stack
@@ -1097,6 +1109,12 @@ interpret_common(cli_parse_t *parse)
 		if (status != FSIMG_OK)
 			return (status);
 	}
+	/* The compression a setting key may name is settled first. */
+	status = check_named_compression(parse);
+	if (status == FSIMG_OK)
+		status = check_auto_suffix(parse);
+	if (status != FSIMG_OK)
+		return (status);
 	for (unsigned i = 0; i < parse->setting_count; i++) {
 		status = parse_setting(parse, i);
 		if (status != FSIMG_OK)
@@ -1104,11 +1122,21 @@ interpret_common(cli_parse_t *parse)
 	}
 
 	if (parse->reserved)
-		note_unsupported(parse, "the named filesystem is reserved and not supported");
+		note_unsupported(parse,
+		    "the named filesystem is reserved and not supported", NULL);
+	/* A read forces the compression named; one this build cannot decode
+	 * is refused as creation refuses one it cannot write.
+	 */
 	if ((parse->mode & MODES_CREATE) == 0 && compression_selected(parse,
-	    &layer))
-		snprintf(request->compression, sizeof(request->compression),
-		    "%s", layer.name);
+	    &layer)) {
+		if ((layer.capabilities & FSIMG_CAP_READ) == 0)
+			note_unsupported(parse,
+			    "reading this compression is not supported",
+			    layer.name);
+		else
+			snprintf(request->compression,
+			    sizeof(request->compression), "%s", layer.name);
+	}
 	return (FSIMG_OK);
 }
 
@@ -1135,29 +1163,87 @@ compression_suffix(const char *image, char *name, size_t capacity,
 /* The compression -z selects, as tar's -z does. */
 #define CLI_Z_COMPRESSION	"gzip"
 
+/* The compression the command names: --compress's, else -z's, else NULL. */
+static const char *
+named_compression(const cli_parse_t *parse)
+{
+	if (option_value(parse, OPT_COMPRESS) != NULL)
+		return (option_value(parse, OPT_COMPRESS));
+	return (option_count(parse, 'z') != 0 ? CLI_Z_COMPRESSION : NULL);
+}
+
 /*
- * Whether a command selects a compression, and which one in layer: -z's,
- * and on creation under -a whatever the image name's outermost suffix
- * declares in the layer registry, which includes the reserved
- * compressions.
+ * --compress must name a compression the registry holds, whether or not
+ * this build implements it, and -z beside it must name the same one.
+ */
+static fsimg_status_t
+check_named_compression(cli_parse_t *parse)
+{
+	const char *given = option_value(parse, OPT_COMPRESS);
+	fsimg_layer_info_t layer;
+
+	if (given == NULL)
+		return (FSIMG_OK);
+	if (given[0] == '\0')
+		return (syntax(parse, "--compress needs a compression name"));
+	if (!find_layer(given, strlen(given), &layer) ||
+	    layer.kind != FSIMG_LAYER_COMPRESSION)
+		return (syntax_naming(parse,
+		    "--compress names no registered compression", given));
+	if (option_count(parse, 'z') != 0 &&
+	    strcmp(given, CLI_Z_COMPRESSION) != 0)
+		return (syntax(parse,
+		    "-z and --compress name different compressions"));
+	return (FSIMG_OK);
+}
+
+/*
+ * With -a and a named compression, the image name must end in that
+ * compression's suffix. A stream, which has no name, and an empty name
+ * are left to the checks of the image name itself.
+ */
+static fsimg_status_t
+check_auto_suffix(cli_parse_t *parse)
+{
+	const char *image = parse->options->image;
+	const char *selected = named_compression(parse);
+	fsimg_layer_info_t suffix;
+	char stem[NAME_MAX + 1];
+
+	if (option_count(parse, 'a') == 0 || selected == NULL ||
+	    image == NULL || image[0] == '\0' || strcmp(image, "-") == 0)
+		return (FSIMG_OK);
+	if (compression_suffix(image, stem, sizeof(stem), &suffix) == 0 ||
+	    strcmp(suffix.name, selected) != 0)
+		return (syntax_naming(parse,
+		    "-a: the image name does not end in the named compression's suffix",
+		    image));
+	return (FSIMG_OK);
+}
+
+/*
+ * Whether a command selects a compression, and which one in layer: the
+ * one --compress or -z names, and otherwise, on creation under -a,
+ * whatever the image name's outermost suffix declares in the layer
+ * registry. Both include the compressions this build does not implement.
  */
 static bool
 compression_selected(const cli_parse_t *parse, fsimg_layer_info_t *layer)
 {
 	const char *image = parse->options->image;
+	const char *named = named_compression(parse);
 	char name[NAME_MAX + 1];
 
-	if (option_count(parse, 'z') != 0)
-		return (find_layer(CLI_Z_COMPRESSION, strlen(CLI_Z_COMPRESSION),
-		    layer));
+	if (named != NULL)
+		return (find_layer(named, strlen(named), layer) &&
+		    layer->kind == FSIMG_LAYER_COMPRESSION);
 	return ((parse->mode & MODES_CREATE) != 0 && option_count(parse, 'a') != 0 &&
 	    image != NULL &&
 	    compression_suffix(image, name, sizeof(name), layer) != 0);
 }
 
 /*
- * Apply the compression a creation selects. With -z and -a the image name
- * must end in the suffix of -z's compression. Under -a a container suffix
+ * Apply the compression a creation selects. Under -a a container suffix
  * beneath the compression's selects nothing but must name the stack's
  * container, so the name cannot promise a container the image lacks. The
  * job carries the compression's name; one this build cannot write is
@@ -1174,12 +1260,11 @@ apply_compression(cli_parse_t *parse)
 	size_t length;
 
 	if (option_count(parse, 'a') != 0 && options->image != NULL) {
-		length = compression_suffix(options->image, name, sizeof(name),
-		    &suffix);
-		if (option_count(parse, 'z') != 0 &&
-		    (length == 0 || strcmp(suffix.name, CLI_Z_COMPRESSION) != 0))
-			return (syntax(parse,
-			    "-z with -a requires the image name to end in its suffix"));
+		/* Only the stem matters here: the compression suffix either
+		 * matched the named compression in check_auto_suffix or is
+		 * the selection itself.
+		 */
+		compression_suffix(options->image, name, sizeof(name), &suffix);
 		length = suffix_layer(name, FSIMG_LAYER_CONTAINER, &layer);
 		container = &options->request.stack.slots[FSIMG_LAYER_CONTAINER];
 		if (length != 0 && (container->state != FSIMG_SLOT_NAMED ||
@@ -1191,7 +1276,8 @@ apply_compression(cli_parse_t *parse)
 	if (!compression_selected(parse, &layer))
 		return (FSIMG_OK);
 	if ((layer.capabilities & FSIMG_CAP_WRITE) == 0) {
-		note_unsupported(parse, "writing this compression is not supported");
+		note_unsupported(parse, "writing this compression is not supported",
+		    layer.name);
 		return (FSIMG_OK);
 	}
 	snprintf(options->request.compression,
@@ -1756,9 +1842,12 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 	if (options->verbosity != 0 &&
 	    fsimg_job_names_entries(options->request.kind))
 		options->request.flags |= FSIMG_JOB_NAMES;
-	if (status == FSIMG_OK && parse.unsupported != NULL)
+	if (status == FSIMG_OK && parse.unsupported != NULL) {
 		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_CONTEXT, parse.unsupported);
+		if (parse.unsupported_name[0] != '\0')
+			fsimg_error_path(error, parse.unsupported_name);
+	}
 	free(parse.limits);
 	free(parse.settings);
 	free(parse.setting_rows);

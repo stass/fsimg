@@ -11,7 +11,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/layers \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
 	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4 \
-	$(ZLIB_CFLAGS) $(LZMA_CFLAGS) \
+	$(ZLIB_CFLAGS) $(ZSTD_CFLAGS) $(LZMA_CFLAGS) \
 	-I$(top_srcdir)/lib/formats/ifs \
 	-I$(top_srcdir)/lib/codec
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
@@ -107,7 +107,10 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 # vendored. The optional compression libraries join it when configure
 # found them (specs/design-compression-libs.md): each profile's source is
 # compiled only under its conditional, and distributed in every build.
-libfsimg_core_la_LIBADD = $(ZLIB_LIBS) $(LZMA_LIBS)
+libfsimg_core_la_LIBADD = $(ZLIB_LIBS) $(ZSTD_LIBS) $(LZMA_LIBS)
+if FSIMG_ZSTD
+libfsimg_core_la_SOURCES += lib/layers/zstd.c
+endif
 if FSIMG_XZ
 libfsimg_core_la_SOURCES += lib/layers/xz.c
 endif
@@ -413,6 +416,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/run.rb \
 	test/cli/tree_at_depth_limit_test.rb \
 	test/cli/verbose_names_test.rb test/cli/xz_test.rb \
+	test/cli/zstd_test.rb test/cli/compress_option_test.rb \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
 	specs/design-spec-testing.md test/spec.sh.in \
@@ -559,7 +563,7 @@ clean-local:
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
 	    protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
-	    plist-fuzz-corpus gzip-fuzz-corpus xz-fuzz-corpus mtree-fuzz-corpus \
+	    plist-fuzz-corpus gzip-fuzz-corpus zstd-fuzz-corpus xz-fuzz-corpus mtree-fuzz-corpus \
 	    codec-fuzz-corpus ifs-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish

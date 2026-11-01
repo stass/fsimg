@@ -21,6 +21,11 @@
  * and settings with no operations, which every capability, refusal and
  * survey derives from. This is the one place a build's libraries differ.
  */
+#ifdef FSIMG_ZSTD
+#define ZSTD_COMPRESSION	(&fsimg_zstd_compression)
+#else
+#define ZSTD_COMPRESSION	NULL
+#endif
 #ifdef FSIMG_XZ
 #define XZ_COMPRESSION	(&fsimg_xz_compression)
 #else
@@ -46,7 +51,8 @@ static const fsimg_layer_t layers[] = {
 	{ .name = "gzip", .suffix = ".gz", .kind = FSIMG_LAYER_COMPRESSION,
 	    .compression = &fsimg_gzip_compression,
 	    .settings = &fsimg_gzip_settings },
-	{ .name = "zstd", .suffix = ".zst", .kind = FSIMG_LAYER_COMPRESSION },
+	{ .name = "zstd", .suffix = ".zst", .kind = FSIMG_LAYER_COMPRESSION,
+	    .compression = ZSTD_COMPRESSION, .settings = &fsimg_zstd_settings },
 	{ .name = "xz", .suffix = ".xz", .kind = FSIMG_LAYER_COMPRESSION,
 	    .compression = XZ_COMPRESSION, .settings = &fsimg_xz_settings }
 };

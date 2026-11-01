@@ -361,8 +361,11 @@ static const char help_settings_read[] =
 static const char help_policies[] =
     "    -S policy       Sandbox: auto (default), required or off\n"
     "    -T directory    Scratch parent; - disables scratch\n";
+static const char help_compress_read[] =
+    "    --compress=NAME Decompress the image as gzip, zstd or xz; fail if it\n"
+    "                    is not that compression\n";
 static const char help_gzip_read[] =
-    "    -z              Decompress the image as gzip; fail if it is not gzip\n";
+    "    -z              Same as --compress=gzip\n";
 static const char help_units[] =
     "\nOptions precede operands. K, M, G, T and P are powers of 1024.\n";
 
@@ -383,9 +386,12 @@ help(fsimg_cli_display_t *display)
 		return;
 	}
 	if (mode[0] == 'c') {
-		append(display, "    -a              Compress as the image name's suffix says (.gz); a\n"
-		    "                    container suffix must name the stack's container\n"
+		append(display, "    -a              Compress as the image name's suffix says (.gz, .zst\n"
+		    "                    or .xz); a container suffix must name the stack's\n"
+		    "                    container\n"
 		    "    -C dir          Open the operands after it relative to dir\n"
+		    "    --compress=NAME Compress the image with gzip, zstd or xz; with -a\n"
+		    "                    the name must end in its suffix\n"
 		    "    -d              With W, also read initialized file data\n"
 		    "    -e epoch        Reproducible Unix timestamp; requires -R\n"
 		    "    -F stack        Required: the filesystem (fat12, fat16, fat32, exfat,\n"
@@ -411,8 +417,7 @@ help(fsimg_cli_display_t *display)
 		    "    -v              Name each entry on stderr; -vv adds the plan,\n"
 		    "                    progress, details and sampled metadata losses\n"
 		    "    -W              Verify the staged image before publication\n"
-		    "    -z              Compress the image with gzip; with -a its name must\n"
-		    "                    end in .gz\n");
+		    "    -z              Same as --compress=gzip\n");
 		append(display, "%s", help_units);
 		append(display, "Only -C dir may appear among the operands, for the operands after it.\n"
 		    "Each operand is stored under its own path; -C dir . stores the contents\n"
@@ -431,8 +436,9 @@ help(fsimg_cli_display_t *display)
 	}
 	if (strcmp(mode, "x") == 0) {
 		append(display, "    -C dir          Existing parent of the new extraction directory\n"
-		    "                    (default the working directory)\n"
-		    "    -E              Extract into the empty private -C directory itself\n");
+		    "                    (default the working directory)\n");
+		append(display, "%s", help_compress_read);
+		append(display, "    -E              Extract into the empty private -C directory itself\n");
 		append(display, "%s", help_read_common);
 		append(display, "    -k              Skip and count symbolic links and other unsupported\n"
 		    "                    kinds, and omit names outside the profile\n");
@@ -459,6 +465,7 @@ help(fsimg_cli_display_t *display)
 		    "    fsimg xOf boot.img /EFI/BOOT/BOOTX64.EFI > BOOTX64.EFI\n");
 		return;
 	}
+	append(display, "%s", help_compress_read);
 	if (strcmp(mode, "W") == 0)
 		append(display, "    -d              Also read initialized file data\n");
 	append(display, "%s%s%s%s", help_read_common, help_budgets, help_slice, help_memory);

@@ -282,10 +282,18 @@ static const fsimg_setting_t gzip_rows[] = {
 /*
  * The optional compressions' rows, present in every build so their keys
  * are recognized whether or not the build has the library, which the
- * creation then refuses as unsupported. Preset 0 is a real xz
- * preset, so the initializer stores the default 6 instead of zero
- * selecting it; the profile refuses a preset above 9.
+ * creation then refuses as unsupported. zstd's level follows gzip's
+ * rule, zero selecting the default 3, and its profile refuses a level
+ * above 19. Preset 0 is a real xz preset, so the initializer stores the
+ * default 6 instead of zero selecting it; the profile refuses a preset
+ * above 9.
  */
+static const fsimg_setting_t zstd_rows[] = {
+	{ .owner = "zstd", .key = "level", U32(RECORD_LAYERS, zstd_level),
+	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT32_MAX, .nonzero = true,
+	    .scope = FSIMG_SCOPE_WRITE }
+};
+
 static const fsimg_setting_t xz_rows[] = {
 	{ .owner = "xz", .key = "level", U32(RECORD_LAYERS, xz_level),
 	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT32_MAX,
@@ -304,6 +312,7 @@ const fsimg_setting_slice_t fsimg_vhd_settings = SLICE(vhd_rows);
 const fsimg_setting_slice_t fsimg_simg_settings = SLICE(simg_rows);
 const fsimg_setting_slice_t fsimg_ifsboot_settings = SLICE(ifsboot_rows);
 const fsimg_setting_slice_t fsimg_gzip_settings = SLICE(gzip_rows);
+const fsimg_setting_slice_t fsimg_zstd_settings = SLICE(zstd_rows);
 const fsimg_setting_slice_t fsimg_xz_settings = SLICE(xz_rows);
 
 static const void *record_of(const fsimg_setting_t *,

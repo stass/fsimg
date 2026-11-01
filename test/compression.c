@@ -24,6 +24,10 @@
 #include <lzma.h>
 #endif
 #include <zlib.h>
+#ifdef FSIMG_ZSTD
+#define ZSTD_STATIC_LINKING_ONLY
+#include <zstd.h>
+#endif
 
 #include "fsimg.h"
 #include "host.h"
@@ -32,7 +36,7 @@
 #include "test.h"
 
 /*
- * The gzip and xz profiles and the spool (specs/design-layers.md#gzip and
+ * The gzip, xz and zstd profiles and the spool (specs/design-layers.md#gzip and
  * #stream-input-and-the-spool). This file builds its own gzip members, so
  * every header field can be set or damaged, and opens them as files
  * through callbacks and as streams through pipes. Each passing case has
@@ -86,6 +90,7 @@ typedef struct fixture {
 	fsimg_image_t	*image;
 	uint64_t	 baseline_memory;
 	uint64_t	 fail_allocation;	/* Injected into the open; 0 none */
+	bool		 overstate_compression_length;
 	char		 directory[PATH_MAX];
 	int		 directory_fd;
 } fixture_t;
@@ -110,6 +115,7 @@ static pid_t feed(const unsigned char *, size_t, int *);
 static void reap(pid_t);
 static void expect_disk(fixture_t *, const unsigned char *, size_t);
 static void expect_corrupt(const buffer_t *, const char *);
+static void test_zstd_registry_reports_build_support(void);
 static void test_xz_registry_reports_build_support(void);
 static void write_seed_buffer(const char *, const char *, const buffer_t *);
 static void test_members(void);
@@ -605,10 +611,15 @@ test_detection(void)
 	    &error) == FSIMG_EFORMAT);
 	CHECK(strcmp(error.path, "gzip") == 0);
 	fixture_free(&f);
-	/* A forced name the registry cannot decode, or lacks, is refused. */
+	/* A registered compression refuses either its signature or its capability. */
 	fixture_init(&f, 0);
+#ifdef FSIMG_ZSTD
+	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f),
+	    &error) == FSIMG_EFORMAT);
+#else
 	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f),
 	    &error) == FSIMG_EUNSUPPORTED);
+#endif
 	CHECK(strcmp(error.path, "zstd") == 0);
 	fixture_free(&f);
 	fixture_init(&f, 0);
@@ -1120,8 +1131,111 @@ test_xz_registry_reports_build_support(void)
 	fixture_free(&f);
 }
 
+#if defined(FSIMG_XZ) || defined(FSIMG_ZSTD)
+static void codec_context(fixture_t *, uint64_t, uint64_t);
+static fsimg_status_t compressed_output(fixture_t *, memory_file_t *,
+    unsigned, fsimg_xz_check_t, const char *, bool, int, fsimg_error_t *);
+static buffer_t compressed_written(const unsigned char *, size_t, unsigned,
+    fsimg_xz_check_t, uint64_t, const char *, bool);
+
+/* Replace the fixture's idle context so every case states its own budget. */
+static void
+codec_context(fixture_t *f, uint64_t memory, uint64_t work)
+{
+	fsimg_options_t options;
+	fsimg_stats_t stats;
+
+	fsimg_ctx_free(f->ctx);
+	fsimg_options_init(&options);
+	options.memory_bytes = memory;
+	options.max_work = work;
+	CHECK(fsimg_ctx_new(&options, &f->ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(f->ctx, &stats, NULL) == FSIMG_OK);
+	f->baseline_memory = stats.memory_bytes;
+}
+
+/* Transcode arbitrary disk bytes through the planned compression into a
+ * stream. No filesystem fixture or raw intermediate is needed.
+ */
+static fsimg_status_t
+compressed_output(fixture_t *f, memory_file_t *file, unsigned level,
+    fsimg_xz_check_t check, const char *name, bool container, int fd,
+    fsimg_error_t *error)
+{
+	fsimg_layer_options_t layers;
+	fsimg_disk_request_t request;
+	fsimg_disk_plan_t plan;
+	fsimg_session_t session;
+	fsimg_stack_t stack;
+	fsimg_io_ops_t ops;
+	fsimg_sink_t sink;
+	fsimg_status_t status;
+	uint64_t disk_bytes = file->length, written;
+
+	fsimg_io_ops_init(&ops);
+	ops.read_at = file_read;
+	ops.get_size = file_size;
+	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, file, &f->io, NULL) == FSIMG_OK);
+	fsimg_layer_options_init(&layers);
+	if (strcmp(name, "zstd") == 0)
+		layers.zstd_level = level;
+	else {
+		layers.xz_level = level;
+		layers.xz_check = check;
+	}
+	CHECK(fsimg_stack_parse(container ? "fat12/dmg" : "fat12/-/-", &stack, NULL) == FSIMG_OK);
+	fsimg_session_init(&session, f->ctx, "compressed test output", 0);
+	request = (fsimg_disk_request_t){ .session = &session,
+	    .stack = &stack, .layers = &layers, .compression = name,
+	    .flags = FSIMG_WRITE_REPRODUCIBLE, .partitions = 1 };
+	CHECK(fsimg_disk_plan_init(f->ctx, &request, &plan, error) == FSIMG_OK);
+	CHECK(fsimg_disk_plan_place(&plan, &disk_bytes, error) == FSIMG_OK);
+	/* Fault injection: transcode still delivers the actual disk length. */
+	if (f->overstate_compression_length)
+		plan.compression_settings.length++;
+	CHECK(fsimg_disk_plan_budget(f->ctx, &plan, false, error) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
+	sink.stream_fd = fd;
+	fsimg_test_fail_alloc_after(f->ctx, f->fail_allocation);
+	status = fsimg_disk_output(&session, f->io, &plan, &sink, false,
+	    &written, error);
+	fsimg_test_fail_alloc_after(f->ctx, 0);
+	fsimg_disk_plan_free(&plan);
+	return (status);
+}
+
+static buffer_t
+compressed_written(const unsigned char *data, size_t length, unsigned level,
+    fsimg_xz_check_t check, uint64_t budget, const char *name, bool container)
+{
+	memory_file_t file = { .bytes = data, .length = length };
+	fsimg_error_t error;
+	struct stat st;
+	buffer_t out = { 0 };
+	fixture_t f;
+	int fd;
+
+	fixture_init(&f, 0);
+	codec_context(&f, budget, 0);
+	fd = spool_new(&f);
+	if (compressed_output(&f, &file, level, check, name, container, fd,
+	    &error) != FSIMG_OK) {
+		fprintf(stderr, "%s level %u length %zu: %s\n",
+		    name, level, length, error.message);
+		CHECK(false);
+	}
+	CHECK(fstat(fd, &st) == 0 && st.st_size > 0);
+	out.length = out.capacity = (size_t)st.st_size;
+	out.bytes = malloc(out.length);
+	CHECK(out.bytes != NULL);
+	CHECK(pread(fd, out.bytes, out.length, 0) == (ssize_t)out.length);
+	CHECK(close(fd) == 0);
+	fixture_free(&f);
+	return (out);
+}
+#endif
+
 #ifdef FSIMG_XZ
-static void xz_context(fixture_t *, uint64_t, uint64_t);
 static buffer_t xz_of(const unsigned char *, size_t, lzma_check, bool);
 static buffer_t xz_written(const unsigned char *, size_t, unsigned,
     fsimg_xz_check_t, uint64_t);
@@ -1147,20 +1261,11 @@ static void test_xz_reproducible_bytes_ignore_memory_budget(void);
 static void test_xz_plan_names_compression_and_container_libraries(void);
 static void seed_xz(const char *);
 
-/* Replace the fixture's idle context so every case states its own budget. */
-static void
-xz_context(fixture_t *f, uint64_t memory, uint64_t work)
+static buffer_t
+xz_written(const unsigned char *data, size_t length, unsigned level,
+    fsimg_xz_check_t check, uint64_t budget)
 {
-	fsimg_options_t options;
-	fsimg_stats_t stats;
-
-	fsimg_ctx_free(f->ctx);
-	fsimg_options_init(&options);
-	options.memory_bytes = memory;
-	options.max_work = work;
-	CHECK(fsimg_ctx_new(&options, &f->ctx, NULL) == FSIMG_OK);
-	CHECK(fsimg_ctx_get_stats(f->ctx, &stats, NULL) == FSIMG_OK);
-	f->baseline_memory = stats.memory_bytes;
+	return (compressed_written(data, length, level, check, budget, "xz", false));
 }
 
 /* Independent liblzma fixtures include unchecked and multi-block streams.
@@ -1192,65 +1297,6 @@ xz_of(const unsigned char *data, size_t length, lzma_check check, bool blocks)
 	return (out);
 }
 
-/* Transcode arbitrary disk bytes through the planned compression into a
- * stream. No filesystem fixture or raw intermediate is needed.
- */
-static buffer_t
-xz_written(const unsigned char *data, size_t length, unsigned level,
-    fsimg_xz_check_t check, uint64_t budget)
-{
-	memory_file_t file = { .bytes = data, .length = length };
-	fsimg_layer_options_t layers;
-	fsimg_disk_request_t request;
-	fsimg_disk_plan_t plan;
-	fsimg_session_t session;
-	fsimg_stack_t stack;
-	fsimg_io_ops_t ops;
-	fsimg_sink_t sink;
-	fsimg_error_t error;
-	struct stat st;
-	buffer_t out = { 0 };
-	uint64_t disk_bytes = length, written;
-	fixture_t f;
-	int fd;
-
-	fixture_init(&f, 0);
-	xz_context(&f, budget, 0);
-	fsimg_io_ops_init(&ops);
-	ops.read_at = file_read;
-	ops.get_size = file_size;
-	CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &file, &f.io, NULL) == FSIMG_OK);
-	fsimg_layer_options_init(&layers);
-	layers.xz_level = level;
-	layers.xz_check = check;
-	CHECK(fsimg_stack_parse("fat12/-/-", &stack, NULL) == FSIMG_OK);
-	fsimg_session_init(&session, f.ctx, "xz test output", 0);
-	request = (fsimg_disk_request_t){ .session = &session,
-	    .stack = &stack, .layers = &layers, .compression = "xz",
-	    .flags = FSIMG_WRITE_REPRODUCIBLE, .partitions = 1 };
-	CHECK(fsimg_disk_plan_init(f.ctx, &request, &plan, &error) == FSIMG_OK);
-	CHECK(fsimg_disk_plan_place(&plan, &disk_bytes, &error) == FSIMG_OK);
-	CHECK(fsimg_disk_plan_budget(f.ctx, &plan, false, &error) == FSIMG_OK);
-	fd = spool_new(&f);
-	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
-	sink.stream_fd = fd;
-	if (fsimg_disk_output(&session, f.io, &plan, &sink, false,
-	    &written, &error) != FSIMG_OK) {
-		fprintf(stderr, "xz preset %u check %d length %zu: %s\n",
-		    level, check, length, error.message);
-		CHECK(false);
-	}
-	fsimg_disk_plan_free(&plan);
-	CHECK(fstat(fd, &st) == 0 && st.st_size > 0);
-	out.length = out.capacity = (size_t)st.st_size;
-	out.bytes = malloc(out.length);
-	CHECK(out.bytes != NULL);
-	CHECK(pread(fd, out.bytes, out.length, 0) == (ssize_t)out.length);
-	CHECK(close(fd) == 0);
-	fixture_free(&f);
-	return (out);
-}
-
 static void
 xz_expect_bytes(const buffer_t *xz, const unsigned char *data, size_t length)
 {
@@ -1258,7 +1304,7 @@ xz_expect_bytes(const buffer_t *xz, const unsigned char *data, size_t length)
 	fixture_t f;
 
 	fixture_init(&f, 0);
-	xz_context(&f, 128 * MIB, 0);
+	codec_context(&f, 128 * MIB, 0);
 	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) == FSIMG_OK);
 	expect_disk(&f, data, length);
 	fixture_free(&f);
@@ -1272,7 +1318,7 @@ xz_expect_corrupt(const buffer_t *xz)
 	fixture_t f;
 
 	fixture_init(&f, 0);
-	xz_context(&f, 128 * MIB, 0);
+	codec_context(&f, 128 * MIB, 0);
 	CHECK(open_file(&f, &file, "xz", NULL, spool_new(&f), &error) ==
 	    FSIMG_ECORRUPT);
 	CHECK(strcmp(error.path, "xz") == 0);
@@ -1514,7 +1560,7 @@ test_xz_large_dictionary_fails_before_spooling(void)
 			xz.bytes[12 + header_bytes - 4 + i] = (unsigned char)(crc >> (i * 8));
 		file = (memory_file_t){ .bytes = xz.bytes, .length = xz.length };
 		fixture_init(&f, 0);
-		xz_context(&f, 32 * MIB, 0);
+		codec_context(&f, 32 * MIB, 0);
 		spool = spool_new(&f);
 		watch = dup(spool);
 		CHECK(watch != -1);
@@ -1598,7 +1644,7 @@ test_xz_decode_charges_compressed_and_decoded_bytes(void)
 
 	for (unsigned limited = 0; limited < 2; limited++) {
 		fixture_init(&f, 0);
-		xz_context(&f, 32 * MIB, limited != 0 ? MIB / 2 : 0);
+		codec_context(&f, 32 * MIB, limited != 0 ? MIB / 2 : 0);
 		fsimg_session_init(&session, f.ctx, "xz", 0);
 		input = (fsimg_spool_input_t){ .ctx = f.ctx, .session = &session,
 		    .prefix = xz.bytes, .prefix_length = xz.length, .fd = -1 };
@@ -1635,7 +1681,7 @@ test_xz_preset_nine_exceeds_default_memory(void)
 	void *encoder = NULL;
 
 	fixture_init(&f, 0);
-	xz_context(&f, 256 * MIB, 0);
+	codec_context(&f, 256 * MIB, 0);
 	/* open never uses its sink: both outcomes happen before output. */
 	CHECK(fsimg_xz_compression.encoder->open(f.ctx, &settings, NULL,
 	    &encoder, &error) == FSIMG_OK);
@@ -1689,11 +1735,13 @@ test_xz_bound_covers_liblzma_bound_and_rejects_overflow(void)
 	for (unsigned power = 0; power <= 40; power++) {
 		length = UINT64_C(1) << power;
 		for (unsigned delta = 0; delta < 3; delta++) {
-			CHECK(fsimg_xz_compression.bound(length + delta, &bound,
-			    &error) == FSIMG_OK);
-			if (length + delta <= SIZE_MAX)
-				CHECK(bound >= lzma_stream_buffer_bound(
-				    (size_t)(length + delta)));
+			if (fsimg_xz_compression.bound(length + delta, &bound,
+			    &error) != FSIMG_OK || (length + delta <= SIZE_MAX &&
+			    bound < lzma_stream_buffer_bound((size_t)(length + delta)))) {
+				fprintf(stderr, "xz bound length %llu\n",
+				    (unsigned long long)(length + delta));
+				CHECK(false);
+			}
 		}
 	}
 	CHECK(fsimg_xz_compression.bound(UINT64_MAX, &bound, &error) ==
@@ -1862,6 +1910,875 @@ seed_xz(const char *directory)
 }
 #endif
 
+static void
+test_zstd_registry_reports_build_support(void)
+{
+	fsimg_layer_info_t info;
+	fsimg_error_t error;
+	unsigned char raw[64] = { 0 };
+	memory_file_t file = { .bytes = raw, .length = sizeof(raw) };
+	fixture_t f;
+	size_t cursor = 0;
+	bool found = false;
+
+	while (fsimg_layer_next(&cursor, &info, NULL) == FSIMG_OK) {
+		if (strcmp(info.name, "zstd") != 0)
+			continue;
+		found = true;
+		CHECK(strcmp(info.settings, "level") == 0);
+#ifdef FSIMG_ZSTD
+		char version[64];
+
+		CHECK(info.capabilities ==
+		    (FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
+		snprintf(version, sizeof(version), "zstd %s", ZSTD_versionString());
+		CHECK(strcmp(info.codec_version, version) == 0);
+#else
+		CHECK(info.capabilities == 0 && info.codec_version[0] == '\0');
+#endif
+	}
+	CHECK(found);
+	fixture_init(&f, 0);
+#ifdef FSIMG_ZSTD
+	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f), &error) ==
+	    FSIMG_EFORMAT);
+#else
+	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f), &error) ==
+	    FSIMG_EUNSUPPORTED);
+	CHECK(strstr(error.message,
+	    "reading this compression is not supported") != NULL);
+#endif
+	CHECK(strcmp(error.path, "zstd") == 0);
+	fixture_free(&f);
+}
+
+#ifdef FSIMG_ZSTD
+/* Keep failures in parameter sweeps tied to the input being exercised. */
+#define CHECK_ZSTD_CASE(condition, value) do { \
+	if (!(condition)) { \
+		fprintf(stderr, "%s = %llu: %s\n", #value, \
+		    (unsigned long long)(value), #condition); \
+		CHECK(false); \
+	} \
+} while (0)
+
+static buffer_t zstd_raw_frame(void);
+static buffer_t zstd_of(const unsigned char *, size_t, unsigned, bool, bool);
+static void zstd_expect_bytes(const buffer_t *, const unsigned char *, size_t);
+static uint64_t zstd_expect_failure(const buffer_t *, fsimg_status_t,
+    const char *);
+static void zstd_skip(buffer_t *);
+static void test_zstd_levels_roundtrip_with_checksum_and_content_size(void);
+static void test_zstd_concatenation_and_skippable_frames(void);
+static void test_zstd_checksum_and_content_size_are_optional(void);
+static void test_zstd_raw_frames_validate_sizes_headers_and_termination(void);
+static void test_zstd_window_limits_precede_spooling(void);
+static void test_zstd_header_refusals_at_each_frame_start(void);
+static void test_zstd_legacy_frames_are_never_decoded(void);
+static void test_zstd_bomb_stops_before_crossing_spool_limit(void);
+static void test_zstd_detection_forces_signature_and_peels_once(void);
+static void test_zstd_allocation_failures_release_codec_state(void);
+static void test_zstd_decode_charges_compressed_and_decoded_bytes(void);
+static void test_zstd_decode_stops_at_work_limit(void);
+static void test_zstd_encoder_unknown_length_dmg_refuses_large_workspace_before_output(void);
+static void test_zstd_encoder_known_size_fits_16_mib(void);
+static void test_zstd_short_transcode_fails_at_encoder_end(void);
+static void test_zstd_exact_transcode_finishes(void);
+static void test_zstd_level_defaults_validation_and_reproducibility(void);
+static void test_zstd_bound_covers_library_and_incompressible_output(void);
+static void test_zstd_plan_names_compression_and_container_libraries(void);
+static void seed_zstd(const char *);
+
+/* Independent one-shot frames vary flags that fsimg always enables. */
+static buffer_t
+zstd_of(const unsigned char *data, size_t length, unsigned level,
+    bool checksum, bool content_size)
+{
+	ZSTD_CCtx *ctx = ZSTD_createCCtx();
+	buffer_t out = { 0 };
+	size_t result;
+
+	CHECK(ctx != NULL);
+	CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(ctx,
+	    ZSTD_c_compressionLevel, (int)level)));
+	CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(ctx,
+	    ZSTD_c_checksumFlag, checksum)));
+	CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(ctx,
+	    ZSTD_c_contentSizeFlag, content_size)));
+	out.capacity = ZSTD_compressBound(length);
+	out.bytes = malloc(out.capacity);
+	CHECK(out.bytes != NULL);
+	result = ZSTD_compress2(ctx, out.bytes, out.capacity, data, length);
+	CHECK(!ZSTD_isError(result));
+	out.length = result;
+	CHECK(ZSTD_freeCCtx(ctx) == 0);
+	return (out);
+}
+
+static void
+zstd_expect_bytes(const buffer_t *encoded, const unsigned char *data,
+    size_t length)
+{
+	memory_file_t file = { .bytes = encoded->bytes, .length = encoded->length };
+	fixture_t f;
+
+	fixture_init(&f, 0);
+	codec_context(&f, 256 * MIB, 0);
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) == FSIMG_OK);
+	expect_disk(&f, data, length);
+	fixture_free(&f);
+}
+
+/* Direct decode also exercises prefixes shorter than the magic, which
+ * the public forced-image probe correctly classifies as EFORMAT. Return
+ * the spooled byte count so frame refusals can check that no payload leaked.
+ */
+static uint64_t
+zstd_expect_failure(const buffer_t *encoded, fsimg_status_t expected,
+    const char *detail)
+{
+	fsimg_spool_input_t input;
+	fsimg_session_t session;
+	fsimg_spool_t *spool;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	struct stat st;
+	fixture_t f;
+	int fd, watch;
+	bool unchecked;
+
+	fixture_init(&f, 0);
+	fsimg_session_init(&session, f.ctx, "zstd", 0);
+	input = (fsimg_spool_input_t){ .ctx = f.ctx, .session = &session,
+	    .prefix = encoded->bytes, .prefix_length = encoded->length };
+	input.fd = open("/dev/null", O_RDONLY);
+	CHECK(input.fd != -1);
+	fd = spool_new(&f);
+	watch = dup(fd);
+	CHECK(watch != -1);
+	CHECK(fsimg_spool_adopt(f.ctx, fd, &spool, NULL) == FSIMG_OK);
+	status = fsimg_zstd_compression.decode(&input, spool, &unchecked, &error);
+	if (status != expected || strstr(error.message, detail) == NULL) {
+		fprintf(stderr, "zstd length %zu: expected %d containing '%s', got %d: %s\n",
+		    encoded->length, expected, detail, status, error.message);
+		CHECK(false);
+	}
+	CHECK(close(input.fd) == 0);
+	CHECK(fstat(watch, &st) == 0);
+	CHECK(close(watch) == 0);
+	fsimg_spool_free(spool);
+	fixture_free(&f);
+	return ((uint64_t)st.st_size);
+}
+
+static void
+zstd_skip(buffer_t *out)
+{
+	append_le32(out, UINT32_C(0x184d2a5f));
+	append_le32(out, 3);
+	append(out, "tag", 3);
+}
+
+static void
+test_zstd_levels_roundtrip_with_checksum_and_content_size(void)
+{
+	static const unsigned levels[] = { 1, 3, 19 };
+	unsigned char *data = pattern(512 * KIB, 20);
+	ZSTD_frameHeader header;
+	buffer_t encoded;
+
+	for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+		encoded = compressed_written(data, 512 * KIB, levels[i],
+		    FSIMG_XZ_CRC64, 256 * MIB, "zstd", false);
+		CHECK_ZSTD_CASE(ZSTD_getFrameHeader(&header, encoded.bytes,
+		    encoded.length) == 0, levels[i]);
+		CHECK_ZSTD_CASE(header.frameContentSize == 512 * KIB &&
+		    header.checksumFlag == 1, levels[i]);
+		CHECK_ZSTD_CASE(ZSTD_findFrameCompressedSize(encoded.bytes,
+		    encoded.length) == encoded.length, levels[i]);
+		zstd_expect_bytes(&encoded, data, 512 * KIB);
+		encoded.bytes[encoded.length - 1] ^= 1;
+		zstd_expect_failure(&encoded, FSIMG_ECORRUPT, "checksum does not match at compressed byte");
+		free(encoded.bytes);
+	}
+	encoded = compressed_written(data, 512 * KIB, 3, FSIMG_XZ_CRC64,
+	    256 * MIB, "zstd", true);
+	CHECK(ZSTD_getFrameHeader(&header, encoded.bytes, encoded.length) == 0);
+	CHECK(header.frameContentSize == ZSTD_CONTENTSIZE_UNKNOWN);
+	CHECK(header.checksumFlag == 1);
+	zstd_expect_bytes(&encoded, data, 512 * KIB);
+	encoded.bytes[encoded.length - 1] ^= 1;
+	zstd_expect_failure(&encoded, FSIMG_ECORRUPT, "compressed byte");
+	free(encoded.bytes);
+	free(data);
+}
+
+static void
+test_zstd_concatenation_and_skippable_frames(void)
+{
+	unsigned char *data = pattern(128 * KIB, 21);
+	buffer_t first = zstd_of(data, 64 * KIB, 1, true, true);
+	buffer_t second = zstd_of(data + 64 * KIB, 64 * KIB, 3, true, false);
+	buffer_t joined;
+	char offset[64];
+
+	for (unsigned mode = 0; mode < 3; mode++) {
+		joined = (buffer_t){ 0 };
+		if (mode == 1)
+			zstd_skip(&joined);
+		append(&joined, first.bytes, first.length);
+		if (mode == 2)
+			zstd_skip(&joined);
+		append(&joined, second.bytes, second.length);
+		zstd_expect_bytes(&joined, data, 128 * KIB);
+		snprintf(offset, sizeof(offset), "at compressed byte %zu", joined.length);
+		append(&joined, "garbage", 7);
+		zstd_expect_failure(&joined, FSIMG_ECORRUPT, offset);
+		joined.length -= 7;
+		append(&joined, "\0\0\0\0", 4);
+		zstd_expect_failure(&joined, FSIMG_ECORRUPT, "compressed byte");
+		free(joined.bytes);
+	}
+	free(first.bytes);
+	free(second.bytes);
+	free(data);
+}
+
+static void
+test_zstd_checksum_and_content_size_are_optional(void)
+{
+	unsigned char data[64 * KIB] = { 0 };
+	fsimg_layer_report_t report;
+	memory_file_t file;
+	ZSTD_frameHeader header;
+	buffer_t encoded;
+	fixture_t f;
+
+	for (unsigned flags = 0; flags < 4; flags++) {
+		encoded = zstd_of(data, sizeof(data), 3, (flags & 1) != 0,
+		    (flags & 2) != 0);
+		CHECK_ZSTD_CASE(ZSTD_getFrameHeader(&header, encoded.bytes,
+		    encoded.length) == 0, flags);
+		CHECK_ZSTD_CASE(header.checksumFlag == (flags & 1), flags);
+		CHECK_ZSTD_CASE(header.frameContentSize == ((flags & 2) != 0 ?
+		    sizeof(data) : ZSTD_CONTENTSIZE_UNKNOWN), flags);
+		fixture_init(&f, 0);
+		file = (memory_file_t){ .bytes = encoded.bytes, .length = encoded.length };
+		CHECK_ZSTD_CASE(open_file(&f, &file, "", "fat12/-/-",
+		    spool_new(&f), NULL) == FSIMG_OK, flags);
+		expect_disk(&f, data, sizeof(data));
+		CHECK_ZSTD_CASE(fsimg_image_verify(f.image, 0, &report,
+		    NULL) == FSIMG_OK, flags);
+		CHECK_ZSTD_CASE(report.complete == ((flags & 1) != 0), flags);
+		CHECK_ZSTD_CASE(strcmp(report.unverified, (flags & 1) != 0 ?
+		    "" : "zstd:checksum") == 0, flags);
+		fixture_free(&f);
+		encoded.length--;
+		zstd_expect_failure(&encoded, FSIMG_ECORRUPT, "compressed byte");
+		free(encoded.bytes);
+	}
+}
+
+static buffer_t
+zstd_raw_frame(void)
+{
+	static const unsigned char raw[] = {
+	    0x28, 0xb5, 0x2f, 0xfd, 0x20, 3,
+	    0x19, 0, 0, 'a', 'b', 'c'
+	};
+	buffer_t frame = { 0 };
+
+	append(&frame, raw, sizeof(raw));
+	return (frame);
+}
+
+/* RFC 8878: single segment, one-byte FCS, then a final raw block.
+ * The block header is (size << 3) | last; it carries exactly three bytes.
+ * No checksum masks the independent declared-size failures.
+ */
+static void
+test_zstd_raw_frames_validate_sizes_headers_and_termination(void)
+{
+	buffer_t frame = zstd_raw_frame(), cut;
+
+	zstd_expect_bytes(&frame, (const unsigned char *)"abc", 3);
+	for (unsigned size = 2; size <= 4; size += 2) {
+		frame.bytes[5] = (unsigned char)size;
+		zstd_expect_failure(&frame, FSIMG_ECORRUPT, "compressed byte");
+	}
+	frame.bytes[5] = 3;
+	for (size_t keep = 1; keep <= 9; keep++) {
+		cut = frame;
+		cut.length = keep;
+		zstd_expect_failure(&cut, FSIMG_ECORRUPT, "compressed byte");
+	}
+	free(frame.bytes);
+}
+
+static void
+test_zstd_window_limits_precede_spooling(void)
+{
+	/* Non-single-segment header, followed by a final raw block. */
+	unsigned char raw[] = { 0x28, 0xb5, 0x2f, 0xfd, 0, 0x80,
+	    0x19, 0, 0, 'a', 'b', 'c' };
+	unsigned char dictionary[] = { 0x28, 0xb5, 0x2f, 0xfd,
+	    0x21, 1, 3, 0x19, 0, 0, 'a', 'b', 'c' };
+	buffer_t frame = { 0 };
+	buffer_t dict = { .bytes = dictionary, .length = sizeof(dictionary) };
+	memory_file_t file;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	struct stat st;
+	fixture_t f;
+	int spool, watch;
+	static const unsigned char allowed_windows[] = { 0x80, 0x88 };
+	static const unsigned char refused_windows[] = { 0x89, 0x90 };
+
+	append(&frame, raw, sizeof(raw));
+	zstd_expect_bytes(&frame, (const unsigned char *)"abc", 3);
+	/* 64 MiB and exactly 128 MiB are allowed, but exceed this budget. */
+	for (size_t i = 0; i < sizeof(allowed_windows); i++) {
+		error = (fsimg_error_t){ 0 };
+		frame.bytes[5] = allowed_windows[i];
+		file = (memory_file_t){ .bytes = frame.bytes, .length = frame.length };
+		fixture_init(&f, 0);
+		codec_context(&f, 32 * MIB, 0);
+		spool = spool_new(&f);
+		watch = dup(spool);
+		CHECK_ZSTD_CASE(watch != -1, allowed_windows[i]);
+		status = open_file(&f, &file, "", NULL, spool, &error);
+		if (status != FSIMG_ELIMIT || error.resource != FSIMG_RESOURCE_MEMORY) {
+			fprintf(stderr, "window descriptor 0x%02x: status %d, resource %d\n",
+			    allowed_windows[i], status, error.resource);
+			CHECK_ZSTD_CASE(false, allowed_windows[i]);
+		}
+		CHECK_ZSTD_CASE(strcmp(error.path, "zstd") == 0, allowed_windows[i]);
+		CHECK_ZSTD_CASE(fstat(watch, &st) == 0 && st.st_size == 0, allowed_windows[i]);
+		CHECK_ZSTD_CASE(close(watch) == 0, allowed_windows[i]);
+		fixture_free(&f);
+	}
+	/* 144 MiB and 256 MiB exceed the format profile's 128 MiB cap. */
+	for (size_t i = 0; i < sizeof(refused_windows); i++) {
+		frame.bytes[5] = refused_windows[i];
+		zstd_expect_failure(&frame, FSIMG_EUNSUPPORTED, "window exceeds 128 MiB");
+	}
+	zstd_expect_failure(&dict, FSIMG_EUNSUPPORTED, "needs a dictionary");
+	free(frame.bytes);
+}
+
+static void
+test_zstd_header_refusals_at_each_frame_start(void)
+{
+	typedef struct header_case {
+		const char *name;
+		unsigned char descriptor;
+		unsigned char size_or_window;
+		const char *detail;
+	} header_case_t;
+	static const header_case_t cases[] = {
+		{ "windowLog 33", 0, 0xb8, "window exceeds 128 MiB" },
+		{ "reserved FHD bit", 0x28, 3,
+		    "parameter this libzstd does not decode" }
+	};
+	buffer_t valid = zstd_raw_frame();
+	buffer_t refused = { 0 }, joined = { 0 };
+	uint64_t spooled;
+
+	zstd_expect_bytes(&valid, (const unsigned char *)"abc", 3);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		refused.length = 0;
+		append(&refused, valid.bytes, valid.length);
+		refused.bytes[4] = cases[i].descriptor;
+		refused.bytes[5] = cases[i].size_or_window;
+		spooled = zstd_expect_failure(&refused, FSIMG_EUNSUPPORTED,
+		    cases[i].detail);
+		if (spooled != 0) {
+			fprintf(stderr, "%s at first frame: spooled %llu\n",
+			    cases[i].name, (unsigned long long)spooled);
+			CHECK_ZSTD_CASE(false, i);
+		}
+		joined.length = 0;
+		append(&joined, valid.bytes, valid.length);
+		append(&joined, refused.bytes, refused.length);
+		spooled = zstd_expect_failure(&joined, FSIMG_EUNSUPPORTED,
+		    cases[i].detail);
+		if (spooled != 3) {
+			fprintf(stderr, "%s at second frame: spooled %llu\n",
+			    cases[i].name, (unsigned long long)spooled);
+			CHECK_ZSTD_CASE(false, i);
+		}
+	}
+	free(joined.bytes);
+	free(refused.bytes);
+	free(valid.bytes);
+}
+
+static void
+test_zstd_legacy_frames_are_never_decoded(void)
+{
+	/* Hand-built v0.7: single-segment FHD, content size 3, a raw block
+	 * (type 1 in the top two bits, big-endian size), then an end block.
+	 * Its payload differs from the current-format frame's payload.
+	 */
+	unsigned char raw[] = { 0x27, 0xb5, 0x2f, 0xfd, 0x20, 3,
+	    0x40, 0, 3, 'x', 'y', 'z', 0xc0, 0, 0 };
+	buffer_t legacy = { .bytes = raw, .length = sizeof(raw) };
+	buffer_t valid = zstd_raw_frame(), joined = { 0 };
+	memory_file_t file = { .bytes = raw, .length = sizeof(raw) };
+	fsimg_error_t error;
+	fixture_t f;
+
+	zstd_expect_bytes(&valid, (const unsigned char *)"abc", 3);
+	append(&joined, valid.bytes, valid.length);
+	append(&joined, legacy.bytes, legacy.length);
+	CHECK(zstd_expect_failure(&joined, FSIMG_ECORRUPT,
+	    "trailing bytes that are not a frame at compressed byte 12") == 3);
+	CHECK(fsimg_zstd_compression.probe(raw, sizeof(raw), &error) ==
+	    FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "no zstd signature") == 0);
+	fixture_init(&f, 0);
+	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f), &error) ==
+	    FSIMG_EFORMAT);
+	CHECK(strcmp(error.path, "zstd") == 0);
+	CHECK(strcmp(error.message, "no zstd signature") == 0);
+	fixture_free(&f);
+	fixture_init(&f, 0);
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) == FSIMG_OK);
+	expect_disk(&f, raw, sizeof(raw));
+	fixture_free(&f);
+	free(joined.bytes);
+	free(valid.bytes);
+}
+
+static void
+test_zstd_bomb_stops_before_crossing_spool_limit(void)
+{
+	unsigned char *zeros = calloc(1, MIB + 1);
+	fsimg_error_t error;
+	memory_file_t file;
+	struct stat st;
+	buffer_t encoded;
+	fixture_t f;
+	int spool, watch;
+
+	CHECK(zeros != NULL);
+	encoded = zstd_of(zeros, MIB + 1, 3, true, true);
+	zstd_expect_bytes(&encoded, zeros, MIB + 1);
+	fixture_init(&f, MIB);
+	file = (memory_file_t){ .bytes = encoded.bytes, .length = encoded.length };
+	spool = spool_new(&f);
+	watch = dup(spool);
+	CHECK(watch != -1);
+	CHECK(open_file(&f, &file, "", NULL, spool, &error) == FSIMG_ELIMIT);
+	CHECK(error.resource == FSIMG_RESOURCE_SPOOL && error.limit == MIB);
+	CHECK(fstat(watch, &st) == 0 && st.st_size > 0 && st.st_size <= MIB);
+	CHECK(close(watch) == 0);
+	fixture_free(&f);
+	free(encoded.bytes);
+	free(zeros);
+}
+
+static void
+test_zstd_detection_forces_signature_and_peels_once(void)
+{
+	unsigned char *data = pattern(64 * KIB, 22);
+	buffer_t gzip = gzip_of(data, 64 * KIB);
+	buffer_t inner = zstd_of(data, 64 * KIB, 3, true, true);
+	buffer_t outer = zstd_of(inner.bytes, inner.length, 3, true, true);
+	memory_file_t file = { .bytes = gzip.bytes, .length = gzip.length };
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fixture_t f;
+
+	fixture_init(&f, 0);
+	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f), &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.path, "zstd") == 0);
+	fixture_free(&f);
+	fixture_init(&f, 0);
+	file = (memory_file_t){ .bytes = outer.bytes, .length = outer.length };
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) == FSIMG_OK);
+	expect_disk(&f, inner.bytes, inner.length);
+	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+	fixture_free(&f);
+	free(gzip.bytes);
+	free(inner.bytes);
+	free(outer.bytes);
+	free(data);
+}
+
+static void
+test_zstd_allocation_failures_release_codec_state(void)
+{
+	unsigned char *data = pattern(64 * KIB, 23);
+	buffer_t encoded = zstd_of(data, 64 * KIB, 3, true, true);
+	fsimg_status_t status;
+	fsimg_error_t error;
+	memory_file_t file;
+	fixture_t f;
+	int fd;
+
+	for (uint64_t attempt = 1;; attempt++) {
+		CHECK_ZSTD_CASE(attempt < 256, attempt);
+		fixture_init(&f, 0);
+		f.fail_allocation = attempt;
+		file = (memory_file_t){ .bytes = encoded.bytes, .length = encoded.length };
+		status = open_file(&f, &file, "", NULL, spool_new(&f), &error);
+		if (status == FSIMG_OK)
+			expect_disk(&f, data, 64 * KIB);
+		else
+			CHECK_ZSTD_CASE(status == FSIMG_ENOMEM, attempt);
+		fixture_free(&f);
+		if (status == FSIMG_OK) {
+			CHECK_ZSTD_CASE(attempt > 1, attempt);
+			break;
+		}
+	}
+	file = (memory_file_t){ .bytes = data, .length = 64 * KIB };
+	for (uint64_t attempt = 1;; attempt++) {
+		CHECK_ZSTD_CASE(attempt < 256, attempt);
+		fixture_init(&f, 0);
+		f.fail_allocation = attempt;
+		fd = spool_new(&f);
+		status = compressed_output(&f, &file, 3, FSIMG_XZ_CRC64,
+		    "zstd", false, fd, &error);
+		CHECK_ZSTD_CASE(close(fd) == 0, attempt);
+		fixture_free(&f);
+		if (status == FSIMG_OK) {
+			CHECK_ZSTD_CASE(attempt > 1, attempt);
+			break;
+		}
+		CHECK_ZSTD_CASE(status == FSIMG_ENOMEM, attempt);
+	}
+	free(encoded.bytes);
+	free(data);
+}
+
+static void
+test_zstd_decode_charges_compressed_and_decoded_bytes(void)
+{
+	unsigned char *data = pattern(MIB, 24);
+	buffer_t encoded = zstd_of(data, MIB, 3, true, true);
+	fsimg_spool_input_t input;
+	fsimg_session_t session;
+	fsimg_spool_t *spool;
+	fsimg_error_t error;
+	fixture_t f;
+	bool unchecked;
+
+	fixture_init(&f, 0);
+	codec_context(&f, 32 * MIB, 0);
+	fsimg_session_init(&session, f.ctx, "zstd", 0);
+	input = (fsimg_spool_input_t){ .ctx = f.ctx, .session = &session,
+	    .prefix = encoded.bytes, .prefix_length = encoded.length };
+	input.fd = open("/dev/null", O_RDONLY);
+	CHECK(input.fd != -1);
+	CHECK(fsimg_spool_adopt(f.ctx, spool_new(&f), &spool, NULL) == FSIMG_OK);
+	CHECK(fsimg_zstd_compression.decode(&input, spool, &unchecked,
+	    &error) == FSIMG_OK);
+	CHECK(!unchecked);
+	CHECK(session.progress.work == encoded.length + MIB);
+	CHECK(close(input.fd) == 0);
+	fsimg_spool_free(spool);
+	fixture_free(&f);
+	free(encoded.bytes);
+	free(data);
+}
+
+static void
+test_zstd_decode_stops_at_work_limit(void)
+{
+	unsigned char *data = pattern(MIB, 24);
+	buffer_t encoded = zstd_of(data, MIB, 3, true, true);
+	fsimg_spool_input_t input;
+	fsimg_session_t session;
+	fsimg_spool_t *spool;
+	fsimg_error_t error;
+	fixture_t f;
+	bool unchecked;
+
+	fixture_init(&f, 0);
+	codec_context(&f, 32 * MIB, MIB / 2);
+	fsimg_session_init(&session, f.ctx, "zstd", 0);
+	input = (fsimg_spool_input_t){ .ctx = f.ctx, .session = &session,
+	    .prefix = encoded.bytes, .prefix_length = encoded.length };
+	input.fd = open("/dev/null", O_RDONLY);
+	CHECK(input.fd != -1);
+	CHECK(fsimg_spool_adopt(f.ctx, spool_new(&f), &spool, NULL) == FSIMG_OK);
+	CHECK(fsimg_zstd_compression.decode(&input, spool, &unchecked,
+	    &error) == FSIMG_ELIMIT);
+	CHECK(error.resource == FSIMG_RESOURCE_WORK);
+	CHECK(close(input.fd) == 0);
+	fsimg_spool_free(spool);
+	fixture_free(&f);
+	free(encoded.bytes);
+	free(data);
+}
+
+static void
+test_zstd_encoder_known_size_fits_16_mib(void)
+{
+	unsigned char data[64 * KIB] = { 0 };
+	memory_file_t file = { .bytes = data, .length = sizeof(data) };
+	fsimg_error_t error;
+	struct stat st;
+	fixture_t f;
+	int fd;
+
+	fixture_init(&f, 0);
+	codec_context(&f, 16 * MIB, 0);
+	fd = spool_new(&f);
+	CHECK(compressed_output(&f, &file, 19, FSIMG_XZ_CRC64,
+	    "zstd", false, fd, &error) == FSIMG_OK);
+	CHECK(fstat(fd, &st) == 0 && st.st_size > 0);
+	CHECK(close(fd) == 0);
+	fixture_free(&f);
+}
+
+static void
+test_zstd_encoder_unknown_length_dmg_refuses_large_workspace_before_output(void)
+{
+	unsigned char data[64 * KIB] = { 0 };
+	memory_file_t file = { .bytes = data, .length = sizeof(data) };
+	fsimg_error_t error;
+	struct stat st;
+	fixture_t f;
+	int fd;
+
+	fixture_init(&f, 0);
+	codec_context(&f, 16 * MIB, 0);
+	fd = spool_new(&f);
+	CHECK(compressed_output(&f, &file, 19, FSIMG_XZ_CRC64,
+	    "zstd", true, fd, &error) == FSIMG_ELIMIT);
+	CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
+	CHECK(strcmp(error.path, "zstd") == 0);
+	CHECK(fstat(fd, &st) == 0 && st.st_size == 0);
+	CHECK(close(fd) == 0);
+	fixture_free(&f);
+}
+
+static void
+test_zstd_exact_transcode_finishes(void)
+{
+	unsigned char data[64 * KIB] = { 0 };
+	memory_file_t file = { .bytes = data, .length = sizeof(data) };
+	fsimg_error_t error;
+	fixture_t f;
+	int fd;
+
+	fixture_init(&f, 0);
+	f.overstate_compression_length = false;
+	fd = spool_new(&f);
+	CHECK(compressed_output(&f, &file, 3, FSIMG_XZ_CRC64,
+	    "zstd", false, fd, &error) == FSIMG_OK);
+	CHECK(close(fd) == 0);
+	fixture_free(&f);
+}
+
+static void
+test_zstd_short_transcode_fails_at_encoder_end(void)
+{
+	unsigned char data[64 * KIB] = { 0 };
+	memory_file_t file = { .bytes = data, .length = sizeof(data) };
+	fsimg_error_t error;
+	fixture_t f;
+	int fd;
+
+	fixture_init(&f, 0);
+	f.overstate_compression_length = true;
+	fd = spool_new(&f);
+	CHECK(compressed_output(&f, &file, 3, FSIMG_XZ_CRC64,
+	    "zstd", false, fd, &error) == FSIMG_ESTATE);
+	CHECK(strstr(error.message, "ZSTD_compressStream2") != NULL);
+	CHECK(close(fd) == 0);
+	fixture_free(&f);
+}
+
+static void
+test_zstd_level_defaults_validation_and_reproducibility(void)
+{
+	unsigned char *data = pattern(MIB, 25);
+	buffer_t first = compressed_written(data, MIB, 0, FSIMG_XZ_CRC64,
+	    32 * MIB, "zstd", false);
+	buffer_t second = compressed_written(data, MIB, 3, FSIMG_XZ_CRC64,
+	    64 * MIB, "zstd", false);
+	fsimg_compression_settings_t settings;
+	fsimg_layer_options_t layers;
+	fsimg_error_t error;
+
+	CHECK(first.length == second.length);
+	CHECK(bcmp(first.bytes, second.bytes, first.length) == 0);
+	zstd_expect_bytes(&first, data, MIB);
+	second.bytes[second.length - 1] ^= 1;
+	zstd_expect_failure(&second, FSIMG_ECORRUPT, "compressed byte");
+	fsimg_layer_options_init(&layers);
+	layers.zstd_level = 0;
+	CHECK(fsimg_zstd_compression.plan(&layers, 0, 0, &settings, &error) == FSIMG_OK);
+	CHECK(settings.level == 3);
+	layers.zstd_level = 20;
+	CHECK(fsimg_zstd_compression.plan(&layers, 0, 0, &settings, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "zstd:level") == 0);
+	free(first.bytes);
+	free(second.bytes);
+	free(data);
+}
+
+static void
+test_zstd_bound_covers_library_and_incompressible_output(void)
+{
+	unsigned char *data = malloc(3 * MIB), *decoded = malloc(3 * MIB);
+	uint64_t bound, length;
+	uint32_t state = 0x12345678;
+	buffer_t encoded;
+
+	CHECK(data != NULL && decoded != NULL);
+	CHECK(fsimg_zstd_compression.bound(0, &bound, NULL) == FSIMG_OK);
+	CHECK(bound == 534 && bound >= ZSTD_compressBound(0));
+	for (unsigned power = 0; power <= 40; power++) {
+		length = UINT64_C(1) << power;
+		for (unsigned delta = 0; delta < 3; delta++) {
+			CHECK_ZSTD_CASE(fsimg_zstd_compression.bound(length + delta,
+			    &bound, NULL) == FSIMG_OK, length + delta);
+			CHECK_ZSTD_CASE(bound == length + delta +
+			    (length + delta) / 256 + 534, length + delta);
+			if (length + delta <= SIZE_MAX)
+				CHECK_ZSTD_CASE(bound >= ZSTD_compressBound(
+				    (size_t)(length + delta)), length + delta);
+		}
+	}
+	CHECK(fsimg_zstd_compression.bound(UINT64_MAX, &bound, NULL) == FSIMG_EUNSUPPORTED);
+	for (size_t i = 0; i < 3 * MIB; i++) {
+		state ^= state << 13;
+		state ^= state >> 17;
+		state ^= state << 5;
+		data[i] = (unsigned char)state;
+	}
+	CHECK(fsimg_zstd_compression.bound(3 * MIB, &bound, NULL) == FSIMG_OK);
+	for (unsigned level = 1; level <= 19; level += 18) {
+		encoded = compressed_written(data, 3 * MIB, level, FSIMG_XZ_CRC64,
+		    256 * MIB, "zstd", false);
+		CHECK_ZSTD_CASE(encoded.length <= bound, level);
+		CHECK_ZSTD_CASE(ZSTD_decompress(decoded, 3 * MIB, encoded.bytes,
+		    encoded.length) == 3 * MIB, level);
+		CHECK_ZSTD_CASE(bcmp(decoded, data, 3 * MIB) == 0, level);
+		encoded.bytes[encoded.length - 1] ^= 1;
+		zstd_expect_failure(&encoded, FSIMG_ECORRUPT, "compressed byte");
+		free(encoded.bytes);
+	}
+	free(decoded);
+	free(data);
+}
+
+static void
+test_zstd_plan_names_compression_and_container_libraries(void)
+{
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	char version[128];
+	fixture_t f;
+
+	fixture_init(&f, 0);
+	fsimg_write_options_init(&options);
+	options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+	options.volume_bytes = MIB;
+	strcpy(options.compression, "zstd");
+	for (unsigned container = 0; container < 2; container++) {
+		CHECK_ZSTD_CASE(fsimg_writer_new(f.ctx,
+		    container != 0 ? "fat12/dmg" :
+		    "fat12", &options, &writer, NULL) == FSIMG_OK, container);
+		CHECK_ZSTD_CASE(fsimg_writer_plan(writer, &plan, NULL) ==
+		    FSIMG_OK, container);
+		CHECK_ZSTD_CASE(fsimg_plan_get_info(plan, &info, NULL) ==
+		    FSIMG_OK, container);
+		if (container != 0)
+			snprintf(version, sizeof(version), "zlib %s, zstd %s",
+			    zlibVersion(), ZSTD_versionString());
+		else
+			snprintf(version, sizeof(version), "zstd %s", ZSTD_versionString());
+		CHECK_ZSTD_CASE(strcmp(info.codec_version, version) == 0, container);
+		fsimg_writer_free(writer);
+	}
+	fixture_free(&f);
+}
+
+static void
+seed_zstd(const char *directory)
+{
+	static const unsigned levels[] = { 1, 3, 19 };
+	unsigned char *data = pattern(32 * KIB, 26);
+	buffer_t frame, first, second, joined = { 0 };
+	char name[64];
+
+	for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+		for (unsigned flags = 0; flags < 4; flags++) {
+			frame = zstd_of(data, 32 * KIB, levels[i],
+			    (flags & 1) != 0, (flags & 2) != 0);
+			snprintf(name, sizeof(name), "level-%u-flags-%u.seed", levels[i], flags);
+			write_seed_buffer(directory, name, &frame);
+			free(frame.bytes);
+		}
+	}
+	first = zstd_of(data, 16 * KIB, 1, true, true);
+	second = zstd_of(data + 16 * KIB, 16 * KIB, 3, true, false);
+	append(&joined, first.bytes, first.length);
+	append(&joined, second.bytes, second.length);
+	write_seed_buffer(directory, "concatenated.seed", &joined);
+	free(joined.bytes);
+	joined = (buffer_t){ 0 };
+	zstd_skip(&joined);
+	append(&joined, first.bytes, first.length);
+	zstd_skip(&joined);
+	append(&joined, second.bytes, second.length);
+	write_seed_buffer(directory, "skippable.seed", &joined);
+	free(joined.bytes);
+	frame = zstd_raw_frame();
+	joined = (buffer_t){ 0 };
+	append(&joined, frame.bytes, frame.length);
+	/* v0.7: single segment, three-byte raw block, then an end block. */
+	append(&joined, "\x27\xb5\x2f\xfd\x20\x03\x40\0\x03xyz\xc0\0\0", 15);
+	write_seed_buffer(directory, "current-then-legacy-v07.seed", &joined);
+	free(joined.bytes);
+	for (unsigned size = 2; size <= 4; size++) {
+		frame.bytes[5] = (unsigned char)size;
+		snprintf(name, sizeof(name), "raw-size-%u.seed", size);
+		write_seed_buffer(directory, name, &frame);
+	}
+	frame.bytes[5] = 3;
+	for (size_t keep = 1; keep <= 9; keep++) {
+		frame.length = keep;
+		snprintf(name, sizeof(name), "truncated-%zu.seed", keep);
+		write_seed_buffer(directory, name, &frame);
+	}
+	frame.length = 12;
+	frame.bytes[4] |= 0x08;
+	write_seed_buffer(directory, "reserved-header-bit.seed", &frame);
+	frame.bytes[4] = 0; /* Non-single-segment: byte 5 is a window descriptor. */
+	frame.bytes[5] = 0x80;
+	write_seed_buffer(directory, "window-64m.seed", &frame);
+	frame.bytes[5] = 0x88;
+	write_seed_buffer(directory, "window-128m.seed", &frame);
+	frame.bytes[5] = 0x89;
+	write_seed_buffer(directory, "window-144m.seed", &frame);
+	frame.bytes[5] = 0x90;
+	write_seed_buffer(directory, "window-256m.seed", &frame);
+	frame.bytes[5] = 0xb8;
+	write_seed_buffer(directory, "window-log-33.seed", &frame);
+	free(frame.bytes);
+	frame = zstd_of(second.bytes, second.length, 3, true, true);
+	write_seed_buffer(directory, "nested.seed", &frame);
+	free(frame.bytes);
+	first.bytes[first.length - 1] ^= 1;
+	write_seed_buffer(directory, "bad-checksum.seed", &first);
+	first.bytes[first.length - 1] ^= 1;
+	append(&first, "garbage", 7);
+	write_seed_buffer(directory, "trailing-garbage.seed", &first);
+	free(first.bytes);
+	free(second.bytes);
+	free(data);
+}
+#endif
+
 /* Corpus destinations are existing directories; never replace a seed. */
 static void
 write_seed_buffer(const char *directory, const char *name, const buffer_t *buffer)
@@ -1910,8 +2827,41 @@ main(int argc, char **argv)
 		return (77);
 #endif
 	}
+	if (argc == 3 && strcmp(argv[1], "--seed-zstd") == 0) {
+#ifdef FSIMG_ZSTD
+		seed_zstd(argv[2]);
+		return (0);
+#else
+		printf("SKIP: zstd seeds require libzstd (FSIMG_ZSTD)\n");
+		return (77);
+#endif
+	}
 	CHECK(argc == 1);
 	CHECK(signal(SIGPIPE, SIG_IGN) != SIG_ERR);
+	test_zstd_registry_reports_build_support();
+#ifdef FSIMG_ZSTD
+	test_zstd_levels_roundtrip_with_checksum_and_content_size();
+	test_zstd_concatenation_and_skippable_frames();
+	test_zstd_checksum_and_content_size_are_optional();
+	test_zstd_raw_frames_validate_sizes_headers_and_termination();
+	test_zstd_window_limits_precede_spooling();
+	test_zstd_header_refusals_at_each_frame_start();
+	test_zstd_legacy_frames_are_never_decoded();
+	test_zstd_bomb_stops_before_crossing_spool_limit();
+	test_zstd_detection_forces_signature_and_peels_once();
+	test_zstd_allocation_failures_release_codec_state();
+	test_zstd_decode_charges_compressed_and_decoded_bytes();
+	test_zstd_decode_stops_at_work_limit();
+	test_zstd_encoder_unknown_length_dmg_refuses_large_workspace_before_output();
+	test_zstd_encoder_known_size_fits_16_mib();
+	test_zstd_short_transcode_fails_at_encoder_end();
+	test_zstd_exact_transcode_finishes();
+	test_zstd_level_defaults_validation_and_reproducibility();
+	test_zstd_bound_covers_library_and_incompressible_output();
+	test_zstd_plan_names_compression_and_container_libraries();
+#else
+	printf("SKIP: zstd profile tests require libzstd (FSIMG_ZSTD)\n");
+#endif
 	test_xz_registry_reports_build_support();
 #ifdef FSIMG_XZ
 	test_xz_presets_and_checks_roundtrip_and_reject_damage();

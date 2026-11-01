@@ -8,12 +8,15 @@
 # as zcat expands it. The gzip files fsimg writes pass gzip -t and expand
 # under zcat to the image fsimg writes without gzip, and a gzipped DMG
 # expands to a DMG hdiutil verifies. Each missing tool is reported; the
-# xz profiles are checked with xz(1) in the same way. Each xz fixture
-# carries seeded damage that fsimg must reject.
+# xz and zstd profiles are checked with xz(1) and zstd(1) in the same way.
+# zstd -lv checks frame size and checksum flags; concatenated and skippable
+# frames also pass through fsimg. Seeded damage must be rejected by fsimg
+# and the corresponding compressor's integrity check.
 # The test skips only when no oracle is available.
 set -eu
 gzip=${GZIP_PROGRAM:-'@GZIP_PROGRAM@'}
 xz=${XZ_PROGRAM:-'@XZ_PROGRAM@'}
+zstd=${ZSTD_PROGRAM:-'@ZSTD_PROGRAM@'}
 pigz=${PIGZ:-'@PIGZ@'}
 hdiutil=${HDIUTIL:-'@HDIUTIL@'}
 fsimg="$(pwd)/fsimg"
@@ -202,6 +205,110 @@ else
     printf '\000\000\000\000\000' >> bad-padding.xz
     cat second.xz >> bad-padding.xz
     reject_xz bad-padding.xz
+    ran=$((ran + 1))
+fi
+
+# fsimg lists zstd images from files and standard input, and verifies files.
+check_zstd() {
+    "$fsimg" tf "$1" > listed.txt 2>/dev/null || fail "$1: zstd listing"
+    cmp -s listed.txt zstd-raw.txt || fail "$1: zstd listing differs"
+    "$fsimg" tf - < "$1" > listed.txt 2>/dev/null || fail "$1: zstd stdin"
+    cmp -s listed.txt zstd-raw.txt || fail "$1: zstd stdin differs"
+    "$fsimg" Wf "$1" >/dev/null 2>&1 || fail "$1: zstd verification"
+}
+
+reject_zstd() {
+    if "$fsimg" Wf "$1" >/dev/null 2>&1; then
+        fail "fsimg accepts $1"
+    fi
+    if "$zstd" -qt "$1" 2>/dev/null; then
+        fail "zstd -t accepts $1"
+    fi
+}
+
+damage_zstd_checksum() {
+    size=$(wc -c < "$1")
+    flip_byte "$1" $((size - 1))
+    reject_zstd "$1"
+}
+
+if test -z "$zstd" || ! test -x "$zstd"; then
+    echo 'SKIP: zstd is required for the zstd oracle'
+elif ! "$fsimg" --formats | awk '
+    $1 == "zstd" && $2 == "compression" && $3 == "yes" { found = 1 }
+    END { exit !found }'; then
+    echo 'SKIP: zstd oracle requires a build with libzstd'
+else
+    "$fsimg" cf zstd-raw.img -R -F fat12 -s 1M -C source HELLO.TXT 2>/dev/null
+    "$fsimg" tf zstd-raw.img > zstd-raw.txt 2>/dev/null
+    for level in 1 3 19; do
+        "$fsimg" cf written.zst --compress=zstd -R -F fat12 -s 1M \
+            -o "zstd:level=$level" -C source HELLO.TXT 2>/dev/null ||
+            fail "zstd write $level"
+        "$zstd" -qt written.zst || fail "zstd -t level $level"
+        "$zstd" -qdc written.zst | cmp -s - zstd-raw.img ||
+            fail "zstd decoded bytes level $level"
+        "$zstd" -lv written.zst > frame.txt 2>&1
+        grep -Eq 'Decompressed Size:.*1048576' frame.txt ||
+            fail "zstd output must declare disk length"
+        grep -q 'Check: XXH64' frame.txt || fail 'zstd output must have checksum'
+        check_zstd written.zst
+        cp written.zst damaged-data.zst
+        # Byte 20 lies beyond the maximum frame header in this image.
+        flip_byte damaged-data.zst 20
+        reject_zstd damaged-data.zst
+        damage_zstd_checksum written.zst
+        rm written.zst
+        "$zstd" -q -c -"$level" zstd-raw.img > oracle.zst
+        check_zstd oracle.zst
+        damage_zstd_checksum oracle.zst
+    done
+    "$fsimg" cf wrapped.dmg.zst --compress=zstd -R -F fat12/dmg -s 1M \
+        -C source HELLO.TXT 2>/dev/null || fail 'zstd DMG output'
+    "$zstd" -qt wrapped.dmg.zst || fail 'zstd DMG checksum'
+    "$zstd" -lv wrapped.dmg.zst > frame.txt 2>&1
+    grep -q 'Check: XXH64' frame.txt || fail 'zstd DMG must have checksum'
+    if grep -q 'Decompressed Size:' frame.txt; then
+        fail 'zstd DMG must omit content size'
+    fi
+    check_zstd wrapped.dmg.zst
+    damage_zstd_checksum wrapped.dmg.zst
+
+    "$zstd" -q -c --ultra -22 zstd-raw.img > ultra.zst
+    check_zstd ultra.zst
+    damage_zstd_checksum ultra.zst
+    "$zstd" -q -c --no-check zstd-raw.img > unchecked.zst
+    check_zstd unchecked.zst
+    # No checksum exists to flip; a truncated raw/compressed block still fails.
+    size=$(wc -c < unchecked.zst)
+    head -c $((size - 1)) unchecked.zst > truncated.zst
+    reject_zstd truncated.zst
+    cat zstd-raw.img | "$zstd" -q -c > pipe.zst
+    "$zstd" -lv pipe.zst > frame.txt 2>&1
+    if grep -q 'Decompressed Size:' frame.txt; then
+        fail 'zstd pipe fixture must omit content size'
+    fi
+    check_zstd pipe.zst
+    damage_zstd_checksum pipe.zst
+
+    head -c 524288 zstd-raw.img | "$zstd" -q -c > first.zst
+    tail -c +524289 zstd-raw.img | "$zstd" -q -c > second.zst
+    cat first.zst second.zst > joined.zst
+    check_zstd joined.zst
+    damage_zstd_checksum joined.zst
+    # RFC 8878 skippable frame: magic, little-endian length, three bytes.
+    printf '\120\052\115\030\003\000\000\000tag' > skipped.zst
+    cat first.zst second.zst >> skipped.zst
+    check_zstd skipped.zst
+    damage_zstd_checksum skipped.zst
+
+    "$fsimg" cf - --compress=zstd -R -F fat12 -s 1M -C source HELLO.TXT \
+        2>/dev/null > streamed.zst || fail 'zstd stdout creation'
+    "$zstd" -qdc streamed.zst | cmp -s - zstd-raw.img ||
+        fail 'zstd stdout differs from raw image'
+    check_zstd streamed.zst
+    damage_zstd_checksum streamed.zst
+    echo 'COVERAGE: crafted C headers cover window limits; zstd --long=28 needs over 128 MiB'
     ran=$((ran + 1))
 fi
 

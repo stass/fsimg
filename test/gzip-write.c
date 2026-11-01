@@ -302,7 +302,9 @@ test_compression_names(void)
 	} cases[] = {
 		{ "nosuch", FSIMG_EINVAL },
 		{ "dmg", FSIMG_EINVAL },
+#ifndef FSIMG_ZSTD
 		{ "zstd", FSIMG_EUNSUPPORTED },
+#endif
 		{ NULL, FSIMG_EINVAL },
 	};
 	fsimg_write_options_t options;

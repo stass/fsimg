@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 1962u
+#define FSIMG_JOB_BYTES 1970u
 /* The job record's mountpoint field: one byte more than the longest
  * mountpoint any format stores, 1024 bytes, and its NUL, so the writer,
  * not the record, refuses a longer one.

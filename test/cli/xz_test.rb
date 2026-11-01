@@ -14,7 +14,7 @@ class CliTest < Minitest::Test
       assert_xz_corrupt(image: "damaged.xz")
     else
       result = invoke(arguments: arguments, expected: 1)
-      assert_includes(result.stderr, "writing this compression is not supported".b)
+      assert_includes(result.stderr, 'writing this compression is not supported "xz"'.b)
       refute_path_exists(@root / "out.img.XZ")
     end
   end
@@ -68,7 +68,7 @@ class CliTest < Minitest::Test
         image = input == "file" ? "x.img.xz" : "-"
         options = input == "file" ? {} : {stdin: stream}
         listed = invoke(arguments: ["t", "-S", "required", "-f", image], **options)
-        assert_equal(expected_names, listed.stdout.force_encoding(Encoding::UTF_8).lines(chomp: true), input)
+        assert_equal(expected_names, listed.stdout.dup.force_encoding(Encoding::UTF_8).lines(chomp: true), input)
         stream.rewind
         verified = invoke(arguments: ["W", "-S", "required", "-f", image], **options)
         assert_includes(verified.stdout, "filesystem structure verified (2 files, 2 directories)".b, input)
@@ -100,7 +100,7 @@ class CliTest < Minitest::Test
     if xz_supported?
       assert_includes(result.stdout, "liblzma".b)
     else
-      assert_includes(result.stderr, "writing this compression is not supported".b)
+      assert_includes(result.stderr, 'writing this compression is not supported "xz"'.b)
     end
     refute_path_exists(@root / "planned.xz")
   end
@@ -111,7 +111,7 @@ class CliTest < Minitest::Test
       result = invoke(arguments: ["c", "-a", "-f", "bad.xz", "-F", "fat12",
         "-o", entry.fetch(:setting), "source"], expected: supported ? entry.fetch(:status) : 1)
 
-      detail = supported ? entry.fetch(:setting).split("=").first : "writing this compression is not supported"
+      detail = supported ? entry.fetch(:setting).split("=").first : 'writing this compression is not supported "xz"'
       assert_includes(result.stderr, detail.b)
       refute_path_exists(@root / "bad.xz")
     end
@@ -160,15 +160,6 @@ class CliTest < Minitest::Test
   end
 
   private
-
-  def xz_format
-    @xz_format ||= completed(invoke(arguments: ["--formats", "--json"]))
-      .find { _1["type"] == "format" && _1["name"] == "xz" }
-    refute_nil(@xz_format, "xz must have a format catalogue row")
-    @xz_format
-  end
-
-  def xz_supported? = xz_format.fetch("capabilities") != 0
 
   def require_xz_support
     skip_xz("xz profile requires liblzma") unless xz_supported?

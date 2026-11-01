@@ -192,6 +192,7 @@ extern const fsimg_setting_slice_t fsimg_vhd_settings;
 extern const fsimg_setting_slice_t fsimg_simg_settings;
 extern const fsimg_setting_slice_t fsimg_ifsboot_settings;
 extern const fsimg_setting_slice_t fsimg_gzip_settings;
+extern const fsimg_setting_slice_t fsimg_zstd_settings;
 extern const fsimg_setting_slice_t fsimg_xz_settings;
 
 /* The row of a slice whose key is the length bytes at key, which need not

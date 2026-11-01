@@ -1,5 +1,20 @@
 fsimg 0.1.0 (unreleased)
 
+zstd-compressed images are read and written over the system libzstd, an
+optional integration that `configure --with-zstd` controls (default auto)
+behind a link test of its custom-allocator interface. Reading decodes
+frames in sequence, skippable frames included, verifies each content
+checksum and declared content size, limits the window to 128 MiB and
+charges it to the memory budget; a frame needing a dictionary is refused
+as unsupported, and one without a checksum decodes, with `W` reporting
+`zstd:checksum` unverified. Creating writes one frame with a content
+checksum, and with the content size around a bare disk, at
+`-o zstd:level=1..19` (default 3). `--compress=NAME` names the compression
+on creation and reading, `-z` being `--compress=gzip`, and with `-a` the
+image name must end in its suffix. A build without libzstd or liblzma
+refuses writing that compression, or reading it by name, with exit 1, and
+does not recognize its files. The layer options gain `zstd_level`.
+
 xz-compressed images are read and written over the system liblzma, an
 optional integration that `configure --with-xz` controls (default auto).
 Reading decodes concatenated streams and their padding into the spool,

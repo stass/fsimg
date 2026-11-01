@@ -53,9 +53,8 @@
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
   the [layer design](specs/design-layers.md) in the four stages of the
   [plan](docs/implementation-plan.md#extension-sequence). Containers and
-  gzip are read and written, and `-f -` reads and writes streams; the
-  command line recognizes and refuses with exit 1 the reserved zstd and xz
-  compressions, which no stage schedules yet. The
+  gzip are read and written, zstd and xz in a build with their libraries,
+  and `-f -` reads and writes streams. The
   `hdiutil attach` gate of the container writer settles the layer design's
   DMG-table-split question.
   Stage 1 leaves these open:
@@ -514,14 +513,6 @@
   linking the convenience library for internals).
 
 ## Planned features
-
-* [Medium] **Optional zstd and xz compression** (`lib/layers/`,
-  `lib/core/`, `configure.ac`, `cmd/fsimg/options.c`): implement the
-  [compression-library design](specs/design-compression-libs.md) in the
-  [plan's three stages](docs/implementation-plan.md#optional-zstd-and-xz-compression):
-  libzstd and liblzma as optional integrations, `--compress=NAME`, and CI
-  builds with and without them. Confirm that FreeBSD base ships `libzstd.pc`
-  and `liblzma.pc` when the CI job is wired.
 
 * [Low] **Native evidence for 1024-byte link targets on QNX4 and QNX6**
   (`tools/qnx/`, `docs/qnx4-research.md`, `docs/qnx6-research.md`): the

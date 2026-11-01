@@ -509,12 +509,13 @@ typedef struct fsimg_layer_info {
  *
  * The compression settings, each used only by the compression the write
  * options name. gzip_level is the DEFLATE level, 1 to 9, zero selecting 6.
- * xz_level is the xz(1) preset, 0 to 9, which fsimg_layer_options_init()
- * sets to 6, since zero is a preset, so a zero-filled structure is not
- * the defaults: the options check refuses its xz_level of 0 as a setting
- * of a layer the stack does not contain; xz_check the integrity check of each
- * block, CRC64 by default. The xz encoder's memory is the preset's, up to
- * 674 MiB at preset 9, charged to the context's memory budget.
+ * zstd_level is the zstd level, 1 to 19, zero selecting 3. xz_level is
+ * the xz(1) preset, 0 to 9, which fsimg_layer_options_init() sets to 6,
+ * since zero is a preset, so a zero-filled structure is not the defaults:
+ * the options check refuses its xz_level of 0 as a setting of a layer the
+ * stack does not contain; xz_check the integrity check of each block,
+ * CRC64 by default. An encoder's memory is its level's, up to
+ * 674 MiB at xz preset 9, charged to the context's memory budget.
  */
 typedef enum fsimg_dmg_compression {
 	FSIMG_DMG_ZLIB = 0,
@@ -570,7 +571,8 @@ struct fsimg_layer_options {
 	bool		 ifsboot_imagefs_paddr_set;
 	uint32_t	 xz_level;
 	fsimg_xz_check_t xz_check;
-	uint64_t	 reserved[3];
+	uint32_t	 zstd_level;
+	uint32_t	 reserved[5];
 };
 
 /* File settings (specs/design-layers.md#file-settings-and-sections): the

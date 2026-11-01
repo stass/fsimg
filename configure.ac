@@ -54,6 +54,7 @@ FSIMG_DEV_TOOL([IMG2SIMG], [img2simg], [Android sparse image producer])
 dnl Not GZIP: gzip(1) reads options from an environment variable of that name.
 FSIMG_DEV_TOOL([GZIP_PROGRAM], [gzip], [gzip compressor])
 FSIMG_DEV_TOOL([PIGZ], [pigz], [parallel gzip compressor])
+FSIMG_DEV_TOOL([ZSTD_PROGRAM], [zstd], [zstd compressor, the zstd oracle])
 FSIMG_DEV_TOOL([XZ_PROGRAM], [xz], [xz compressor, the xz oracle])
 AC_ARG_VAR([MSAN_ZLIB], [external instrumented zlib prefix for MSan checks only])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
@@ -130,6 +131,25 @@ AS_IF([test "$fsimg_have_$1" = yes],
      $2_LIBS=])
 AM_CONDITIONAL([$7], [test "$fsimg_have_$1" = yes])
 ])
+FSIMG_CODEC_LIBRARY([zstd], [ZSTD], [libzstd], [zstd],
+    [#define ZSTD_STATIC_LINKING_ONLY
+#include <zstd.h>
+#include <zstd_errors.h>],
+    [ZSTD_customMem m = { 0 };
+      ZSTD_DStream *d = ZSTD_createDStream_advanced(m);
+      ZSTD_CStream *c = ZSTD_createCStream_advanced(m);
+      ZSTD_frameHeader h;
+      ZSTD_outBuffer o = { 0 };
+      ZSTD_inBuffer i = { 0 };
+      return (d == NULL || c == NULL ||
+          ZSTD_isError(ZSTD_DCtx_setParameter(d, ZSTD_d_windowLogMax, 27)) ||
+          ZSTD_isError(ZSTD_CCtx_setParameter(c, ZSTD_c_checksumFlag, 1)) ||
+          ZSTD_isError(ZSTD_CCtx_setPledgedSrcSize(c, 0)) ||
+          ZSTD_isError(ZSTD_compressStream2(c, &o, &i, ZSTD_e_end)) ||
+          ZSTD_isError(ZSTD_decompressStream(d, &o, &i)) ||
+          ZSTD_getErrorCode(ZSTD_getFrameHeader(&h, "", 0)) != ZSTD_error_no_error ||
+          ZSTD_versionString()[0] == '\0');],
+    [FSIMG_ZSTD], [libzstd for the zstd compression])
 FSIMG_CODEC_LIBRARY([xz], [LZMA], [liblzma], [lzma], [#include <lzma.h>],
     [lzma_stream s = LZMA_STREAM_INIT;
       lzma_stream e = LZMA_STREAM_INIT;

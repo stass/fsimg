@@ -51,7 +51,7 @@ fuzz_library=$build_dir/.libs/libfsimg.a
 # The library links the system zlib and the optional compression
 # libraries the instrumented build's configure found; its Makefile names
 # the link flags, empty for a library it did not find.
-codec_libs="$(sed -n 's/^ZLIB_LIBS = //p' "$build_dir/Makefile") $(sed -n 's/^LZMA_LIBS = //p' "$build_dir/Makefile")"
+codec_libs="$(sed -n 's/^ZLIB_LIBS = //p' "$build_dir/Makefile") $(sed -n 's/^ZSTD_LIBS = //p' "$build_dir/Makefile") $(sed -n 's/^LZMA_LIBS = //p' "$build_dir/Makefile")"
 
 # Use the same configured host API declarations as the instrumented library.
 # Every harness enters here, including those using only public fsimg APIs.
@@ -258,12 +258,13 @@ run_fuzzer "$work_dir/fuzz-plist" "$plist_corpus" 65536 5
 # implements, opens each input forced as that compression, as a file and
 # as a stream into a spool under a small limit: for gzip the member header
 # parser (FEXTRA, FNAME, FCOMMENT, the header CRC16), inflate and the
-# trailer checks; for xz liblzma's stream decoder through the codec memory
-# adapter; for each the trailing-byte rule. The seeds come from the
+# trailer checks; for zstd the frame header checks and libzstd's stream
+# decoder, and for xz liblzma's, each through the codec memory adapter;
+# for each the trailing-byte rule. The seeds come from the
 # compression tests (test-compression --seed-NAME DIRECTORY).
 # gzip is always present; an optional compression joins when config.h
 # defines its FSIMG_NAME macro.
-for compression in gzip xz; do
+for compression in gzip zstd xz; do
     macro=FSIMG_$(echo "$compression" | tr '[:lower:]' '[:upper:]')
     if test "$compression" != gzip &&
         ! grep -q "^#define $macro 1" "$build_dir/config.h"; then

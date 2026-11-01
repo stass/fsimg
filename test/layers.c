@@ -601,7 +601,12 @@ test_registry(void)
 		    read_only, "ifs" },
 		{ "gzip", ".gz", "level", "", FSIMG_LAYER_COMPRESSION, container,
 		    "" },
-		{ "zstd", ".zst", "", "", FSIMG_LAYER_COMPRESSION, 0, "" },
+		{ "zstd", ".zst", "level", "", FSIMG_LAYER_COMPRESSION,
+#ifdef FSIMG_ZSTD
+		    container, "" },
+#else
+		    0, "" },
+#endif
 		{ "xz", ".xz", "level,check", "", FSIMG_LAYER_COMPRESSION,
 #ifdef FSIMG_XZ
 		    container, "" }

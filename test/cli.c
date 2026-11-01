@@ -29,6 +29,8 @@ static void test_create_operands(void);
 static bool argument_starts(char *const *, const char *);
 static bool every_layer_key_in(char *const *const *);
 static void test_stacks(void);
+static void test_zstd_suffix_and_settings_follow_build_support(void);
+static void test_compression_refusals_name_the_layer(void);
 static void test_xz_suffix_and_settings_follow_build_support(void);
 static void test_setting_values(void);
 static void test_extract_options(void);
@@ -47,6 +49,7 @@ static void test_staging_cleanup(void);
 static void test_progress(void);
 static void test_final_diagnostics(void);
 static void test_verification_completion(void);
+static void test_zstd_verification_attributes_unchecked_checksum(void);
 static void test_volume_controls(void);
 static void test_posix_options(void);
 static void test_posix_listing(bool);
@@ -61,6 +64,87 @@ static size_t list_entry(fsimg_cli_display_t *, const fsimg_entry_t *, char *,
 /* Shared with the catalogue check, which requires a command for every key. */
 static char *const xz_settings[] = { "fsimg", "-cn", "-a", "-F", "fat12",
     "-f", "out.xz", "-o", "xz:level=9", "-o", "xz:check=crc32", ".", NULL };
+
+static char *const zstd_settings[] = { "fsimg", "-cn", "-a", "-F", "fat12",
+    "-f", "out.zst", "-o", "zstd:level=19", ".", NULL };
+
+static void
+test_compression_refusals_name_the_layer(void)
+{
+	static const struct {
+		const char *name;
+		const char *image;
+	} cases[] = {
+		{ "zstd", "x.img.zst" },
+		{ "xz", "x.img.xz" },
+	};
+	fsimg_cli_options_t options;
+	fsimg_layer_info_t layer;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	char selection[32];
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		size_t cursor = 0;
+		bool found = false;
+
+		while (fsimg_layer_next(&cursor, &layer, NULL) == FSIMG_OK) {
+			if (strcmp(layer.name, cases[i].name) == 0) {
+				found = true;
+				break;
+			}
+		}
+		CHECK(found);
+		snprintf(selection, sizeof(selection), "--compress=%s", cases[i].name);
+		for (unsigned mode = 0; mode < 3; mode++) {
+			char *arguments[] = { "fsimg", mode == 2 ? "-t" : "-c",
+			    mode == 0 ? "-a" : selection, "-f",
+			    mode == 0 ? (char *)cases[i].image : "x.img",
+			    mode == 2 ? NULL : "-F", "fat12", "source", NULL };
+			int count = mode == 2 ? 5 : 8;
+
+			status = fsimg_cli_parse(count, arguments, &options, &error);
+			if (status != (layer.capabilities != 0 ? FSIMG_OK : FSIMG_EUNSUPPORTED))
+				fprintf(stderr, "%s mode %u: %d %s\n", cases[i].name,
+				    mode, status, error.message);
+			if (layer.capabilities != 0) {
+				CHECK(status == FSIMG_OK);
+				CHECK(strcmp(options.request.compression, cases[i].name) == 0);
+			} else {
+				CHECK(status == FSIMG_EUNSUPPORTED && !options.syntax_error);
+				CHECK(strcmp(error.path, cases[i].name) == 0);
+				CHECK(strcmp(error.message, mode == 2 ?
+				    "reading this compression is not supported" :
+				    "writing this compression is not supported") == 0);
+			}
+			fsimg_cli_release(&options);
+		}
+	}
+}
+
+static void
+test_zstd_suffix_and_settings_follow_build_support(void)
+{
+	char *suffix[] = { "fsimg", "-c", "-a", "-F", "fat12", "-f",
+	    "out.img.ZST", ".", NULL };
+	char *unselected[] = { "fsimg", "-cn", "-F", "fat12", "-o",
+	    "zstd:level=19", ".", NULL };
+#ifdef FSIMG_ZSTD
+	fsimg_cli_options_t options;
+
+	CHECK(parse(zstd_settings, &options) == FSIMG_OK);
+	CHECK(options.request.layers.zstd_level == 19);
+	CHECK(strcmp(options.request.compression, "zstd") == 0);
+	fsimg_cli_release(&options);
+	CHECK(parse(suffix, &options) == FSIMG_OK);
+	CHECK(strcmp(options.request.compression, "zstd") == 0);
+	fsimg_cli_release(&options);
+#else
+	check_unsupported(zstd_settings);
+	check_unsupported(suffix);
+#endif
+	check_syntax(unselected);
+}
 
 static void
 test_xz_suffix_and_settings_follow_build_support(void)
@@ -672,9 +756,11 @@ test_stacks(void)
 	};
 	char *unsupported[][12] = {
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
+#ifndef FSIMG_ZSTD
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.zst", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-o", "zstd:level=1", "-f",
 		    "out.img.zst", ".", NULL }
+#endif
 	};
 	/* Containers, gzip and streams are written; with -a a container
 	 * suffix must name the stack's container and selects nothing more.
@@ -754,7 +840,7 @@ test_stacks(void)
 	 */
 	CHECK(every_layer_key_in((char *const *const []){ gpt_settings,
 	    mbr_settings, dmg_settings, vhd_settings, simg_settings,
-	    gzip_settings, xz_settings, ifsboot_settings, NULL }));
+	    gzip_settings, xz_settings, zstd_settings, ifsboot_settings, NULL }));
 	CHECK(parse(mbr_settings, &options) == FSIMG_OK);
 	layers = &options.request.layers;
 	CHECK(layers->mbr_id == 0xdeadbeef && layers->mbr_id_set &&
@@ -1616,6 +1702,49 @@ test_format_masks(bool json)
 }
 
 static void
+test_zstd_verification_attributes_unchecked_checksum(void)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_worker_text_t text;
+	fsimg_frame_t image = { .type = FSIMG_FRAME_IMAGE,
+	    .length = FSIMG_WIRE_IMAGE_BYTES };
+	fsimg_frame_t verify = { .type = FSIMG_FRAME_VERIFY,
+	    .length = FSIMG_WIRE_VERIFY_BYTES };
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_VERIFY;
+	options.image = "IMAGE";
+	options.scratch = "-";
+	strcpy((char *)image.payload + FSIMG_WIRE_IMAGE_STACK, "fat12");
+	strcpy((char *)image.payload + FSIMG_WIRE_IMAGE_COMPRESSION, "zstd");
+	fsimg_store_le64(image.payload + FSIMG_WIRE_IMAGE_DISK, 1048576);
+	fsimg_store_le64(image.payload + FSIMG_WIRE_IMAGE_FILE, 1048576);
+	fsimg_store_le64(image.payload + FSIMG_WIRE_IMAGE_FLAGS,
+	    FSIMG_WIRE_IMAGE_VERIFIED);
+	fsimg_store_le64(verify.payload + FSIMG_WIRE_VERIFY_SCOPE,
+	    FSIMG_VALIDATION_STRUCTURAL);
+	for (unsigned unchecked = 0; unchecked < 2; unchecked++) {
+		strcpy((char *)image.payload + FSIMG_WIRE_IMAGE_UNVERIFIED,
+		    unchecked != 0 ? "zstd:checksum" : "");
+		fsimg_cli_display_init(&display, &options, &result, &paths);
+		CHECK(fsimg_cli_event(&display, &image, &text, NULL) == FSIMG_OK);
+		CHECK(fsimg_cli_event(&display, &verify, &text, NULL) == FSIMG_OK);
+		CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+		if (unchecked != 0) {
+			CHECK(strstr(display.buffer, "\"IMAGE\": zstd compression "
+			    "(incomplete: zstd:checksum unverified), filesystem "
+			    "structure verified (") != NULL);
+		} else {
+			CHECK(strstr(display.buffer, "incomplete") == NULL);
+			CHECK(strstr(display.buffer, "filesystem structure verified") != NULL);
+		}
+	}
+}
+
+static void
 test_verification_completion(void)
 {
 	fsimg_cli_options_t options = { 0 };
@@ -2068,6 +2197,8 @@ main(int argc, char **argv)
 	test_modes();
 	test_create_operands();
 	test_stacks();
+	test_zstd_suffix_and_settings_follow_build_support();
+	test_compression_refusals_name_the_layer();
 	test_xz_suffix_and_settings_follow_build_support();
 	test_setting_values();
 	test_extract_options();
@@ -2090,6 +2221,7 @@ main(int argc, char **argv)
 	test_format_masks(false);
 	test_format_masks(true);
 	test_final_diagnostics();
+	test_zstd_verification_attributes_unchecked_checksum();
 	test_verification_completion();
 	test_interrupted_verbose_entry_closes_on_stderr(false);
 	test_interrupted_verbose_entry_closes_on_stderr(true);

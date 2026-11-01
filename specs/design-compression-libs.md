@@ -43,8 +43,10 @@ keys.
   loaders and kernels decode xz only with CRC32 or no check, which is why
   `xz --check=crc32` exists.
 * **Libraries.** `libzstd` is BSD-3-Clause or GPL-2.0 at the user's choice;
-  `liblzma` is 0BSD. Both are the system library on FreeBSD (base system),
-  standard packages on Linux (`libzstd-dev`, `liblzma-dev`; `libzstd-devel`,
+  `liblzma` is 0BSD. FreeBSD's base system ships `liblzma` with its
+  pkg-config file; its `libzstd` is private to the base system
+  (`libprivatezstd`, no public header), so FreeBSD takes `libzstd` from the
+  `archivers/zstd` port. Both are standard packages on Linux (`libzstd-dev`, `liblzma-dev`; `libzstd-devel`,
   `xz-devel`) and Homebrew formulas on macOS (`zstd`, `xz`), each with a
   pkg-config file (`libzstd`, `liblzma`). On the development host:
   libzstd 1.5.7, liblzma 5.8.4, zlib 1.2.12. Neither ships headers in the
@@ -61,13 +63,14 @@ keys.
   budget does not hold.
 * **API facts that shape the design.** `liblzma` takes a custom allocator
   through the stable `lzma_allocator` record. `libzstd` exposes its custom
-  allocator (`ZSTD_customMem`, `ZSTD_create*Stream_advanced`) only in the
+  allocator (`ZSTD_customMem`, `ZSTD_create*Stream_advanced`) and its
+  frame header parser (`ZSTD_getFrameHeader`) only in the
   `ZSTD_STATIC_LINKING_ONLY` section of `zstd.h`, which the library
   documents as not covered by its ABI stability promise; the stable API
   offers `ZSTD_d_windowLogMax` to cap the window and `ZSTD_sizeof_DStream`
   and `ZSTD_sizeof_CStream` to read a context's current memory use. The
-  zstd binding uses the custom allocator, behind a configure link test
-  that refuses a library without it; the stable-API alternative is under
+  zstd binding uses both, behind a configure link test that refuses a
+  library without them; the stable-API alternative is under
   [alternatives considered](#alternatives-considered).
 * **Sandbox.** The decoders run inside the confined worker. The Linux
   profile allows `read`, `write`, `pread64`, `pwrite64`, `close`, `fstat`,
@@ -176,8 +179,10 @@ flags when it describes the library, else the header and `-lzstd` or
 `-llzma` are tried on the default paths; `ZSTD_CFLAGS`, `ZSTD_LIBS`,
 `LZMA_CFLAGS` and `LZMA_LIBS` override both and are precious, so
 `sanitize.sh` replays them. The link test compiles a program that calls the
-exact functions the profile uses (`ZSTD_createDStream_advanced` and
-`ZSTD_versionString`; `lzma_stream_decoder` and `lzma_version_string`), so
+exact functions the profile uses (`ZSTD_createDStream_advanced`,
+`ZSTD_createCStream_advanced`, `ZSTD_getFrameHeader`, the parameter
+setters, the streaming calls and `ZSTD_versionString`;
+`lzma_stream_decoder`, `lzma_easy_encoder` and `lzma_version_string`), so
 a library too old or built without the needed interface counts as absent.
 `yes` fails configure naming the library when the test fails; `auto`
 disables the compression and says so in configure's output; `no` never
@@ -281,27 +286,46 @@ length than it planned fails there as `FSIMG_ESTATE`, the same class as a
 sink receiving a byte past its bound. The output's bound is
 `n + n/256 + 534` for `n` input bytes, with each division rounding down:
 the frame header (at most 18 bytes), the checksum (4), and `n + n/256 +
-512`, which exceeds `ZSTD_compressBound()` for every `n` and the format's
-own worst case of a 3-byte header per block of at most 128 KiB plus a raw
-block for incompressible data; it does not depend on the library version.
+512`, which exceeds `ZSTD_compressBound()` for every `n`. The format
+itself bounds nothing, since a frame may hold any number of empty blocks;
+the bound rests on libzstd's encoder policy with no intermediate flush,
+which stores incompressible input as raw blocks of 128 KiB, each behind a
+3-byte header. A library that broke it fails as `FSIMG_ESTATE` when the
+sink refuses the byte past the bound, never as a short output.
 
 Reading: a `ZSTD_DStream` with `ZSTD_d_windowLogMax` set explicitly to 27
 (128 MiB, the library's own default made fsimg's), decoding frames in
 sequence as `zstd -d` does; the library consumes skippable frames and
-produces nothing from them. At each frame boundary fsimg reads the frame's
-declared content size with `ZSTD_getFrameContentSize()` from its input
-buffer, which it tops up to at least the 18-byte maximum header or the rest
-of the input before asking, and at the frame's end requires the decoded
-length to equal a declared size; the library checks the content checksum when the frame
-carries one. A frame without a content checksum decodes, and the decoder
+produces nothing from them. At each frame boundary fsimg parses the frame's
+header with `ZSTD_getFrameHeader()` from its input buffer, which it tops up
+to at least the 18-byte maximum header or the rest of the input before
+asking: the header's dictionary ID and window size are refused, as below,
+before the library allocates a window; its checksum flag says whether the
+frame is checked; and at the frame's end the decoded length must equal a
+declared content size. The library checks the content checksum when the
+frame carries one. A frame without a content checksum decodes, and the decoder
 records `zstd:checksum` in the layer report's `unverified` list, so the
 [verification scope](#verification-scope) is honest about what was
 checked. A frame whose window exceeds the limit is
 `FSIMG_EUNSUPPORTED` naming the limit; a frame that names a dictionary is
 `FSIMG_EUNSUPPORTED`, since fsimg has none; bytes after the last frame
 that are not a frame are `FSIMG_ECORRUPT` as trailing bytes; input that
-ends inside a frame is `FSIMG_ECORRUPT` as truncated. Every corrupt result
-names the compressed offset at which the library stopped.
+ends inside a frame is `FSIMG_ECORRUPT` as truncated. A header the parser
+refuses for another reason, such as a window beyond the format's or a
+reserved bit, maps through the error table below as the decoder's own
+result does. Every corrupt result names the compressed offset where the
+failing call's input began, which is at or before the point where the
+library detected the failure: a failed call does not report how far it
+read, and a damaged checksum or content size is detected only at the
+frame's end.
+
+The header parse is also what keeps a zstd decode inside the memory
+budget. libzstd's stream decoder also decodes legacy frames (formats
+v0.5 to v0.7), whose decoders allocate with `malloc` outside the custom
+allocator. `ZSTD_getFrameHeader()` accepts only current and skippable
+frames, and the stream decoder stops at the end of every frame, so every
+frame start passes the parse before the library sees it: a legacy frame,
+first or after another, is trailing bytes, never decoded.
 
 Seekable zstd (the skippable seek table of the `zstd` contrib format)
 decodes through the spool like any other zstd file, because the seek table
@@ -400,7 +424,9 @@ of the [layer security section](design-layers.md#security) hold, and three
 facts bound each decode independently of the input:
 
 * **Memory.** Every library allocation goes through the adapter and is
-  charged to the context before use, so the window or dictionary a frame
+  charged to the context before use (for zstd, given the per-frame header
+  parse above, which keeps legacy frames from the library), so the window
+  or dictionary a frame
   declares is bounded by the memory budget: a frame the budget cannot hold
   fails as `FSIMG_ELIMIT` with `FSIMG_RESOURCE_MEMORY`, naming the
   compression, and leaves accounting at its pre-open value. zstd's
@@ -489,7 +515,10 @@ the settings and the library version: both encoders run single-threaded
 with every parameter fsimg sets fixed, neither format carries a timestamp
 or host identity, and the zstd frame header's content size, when it has
 one, is the disk length. Compressed bytes are reproducible only for one
-library version, as for zlib; the capability output and the plan report
+library version, as for zlib, and for zstd one build of it: libzstd picks
+the match finder of its middle levels by the vector instructions it was
+compiled with, so one version built for different CPU families can
+encode a small input differently. The capability output and the plan report
 name the version (`zstd 1.5.7`, `liblzma 5.8.4`) so a claim can state it.
 `i` names the compression it detected but no version: the running
 library did not necessarily produce the bytes it reads. The
@@ -561,9 +590,10 @@ library skips the profile's rows explicitly and runs the refusal rows.
 | Fuzzing | `fuzz/compression.c`, the gzip harness generalized and built once per compression the build implements (`fuzz-gzip`, `fuzz-xz`, `fuzz-zstd`): the input is a whole file opened forced, as a file and as a stream, into a fresh spool under a 4 MiB limit and a 32 MiB memory budget, under sanitizers | Corpus seeded from every fixture above and from each oracle's output at each level and check |
 
 CI builds with the libraries on macOS (Homebrew), Ubuntu (`libzstd-dev`,
-`liblzma-dev`) and FreeBSD (base), and without them in one job per platform
-class (the GCC job configures `--without-zstd --without-xz`), so every
-commit proves both the integration and the core's independence from it.
+`liblzma-dev`) and FreeBSD (liblzma from the base system, libzstd from the
+`archivers/zstd` port), and the GCC 16 job compiles them with GCC. The
+GCC 13 job configures `--without-zstd --without-xz`, so every commit
+proves both the integration and the core's independence from it.
 
 ### Alternatives considered
 
