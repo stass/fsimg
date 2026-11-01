@@ -43,9 +43,15 @@
  * virtual setting are set, one byte of values (the virtual bit, raw
  * storage), and six zero bytes. The compression settings follow, eight
  * bytes each: the xz preset, the xz check (fsimg_xz_check_t) and the zstd
- * level. The file settings travel as descriptors, one capability bit
- * each, never in the record. Three eight-byte fields
- * close the record: image input kind, byte length and transfer quantum.
+ * level. The ISO 9660 settings follow: the read view
+ * (fsimg_iso_view_t), the interchange level and the BIOS boot load
+ * sectors as eight bytes each, the BIOS and EFI boot image paths in
+ * FSIMG_JOB_BOOT_PATH_BYTES each, NUL-terminated and zero after the
+ * terminator, then one byte whose bits say which of the two paths is
+ * present, since an empty path is a value, and five zero bytes. The file
+ * settings travel as descriptors, one capability bit each, never in the
+ * record. Three eight-byte fields close the record: image input kind,
+ * byte length and transfer quantum.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
  *
@@ -117,7 +123,14 @@ typedef enum job_string_field {
 	JOB_XZ_LEVEL_OFFSET = JOB_IFSBOOT_RESERVED + 6,
 	JOB_XZ_CHECK_OFFSET = JOB_XZ_LEVEL_OFFSET + 8,
 	JOB_ZSTD_LEVEL_OFFSET = JOB_XZ_CHECK_OFFSET + 8,
-	JOB_INPUT_KIND = JOB_ZSTD_LEVEL_OFFSET + 8,
+	JOB_ISO_VIEW_OFFSET = JOB_ZSTD_LEVEL_OFFSET + 8,
+	JOB_ISO_LEVEL_OFFSET = JOB_ISO_VIEW_OFFSET + 8,
+	JOB_BOOT_LOAD_OFFSET = JOB_ISO_LEVEL_OFFSET + 8,
+	JOB_BOOT_BIOS_OFFSET = JOB_BOOT_LOAD_OFFSET + 8,
+	JOB_BOOT_EFI_OFFSET = JOB_BOOT_BIOS_OFFSET + FSIMG_JOB_BOOT_PATH_BYTES,
+	JOB_BOOT_PRESENT = JOB_BOOT_EFI_OFFSET + FSIMG_JOB_BOOT_PATH_BYTES,
+	JOB_BOOT_RESERVED = JOB_BOOT_PRESENT + 1,
+	JOB_INPUT_KIND = JOB_BOOT_RESERVED + 5,
 	JOB_INPUT_LENGTH = JOB_INPUT_KIND + 8,
 	JOB_INPUT_QUANTUM = JOB_INPUT_LENGTH + 8
 } job_string_field_t;
@@ -129,6 +142,9 @@ typedef enum job_string_field {
 #define JOB_IFSBOOT_VIRTUAL	0x01u
 #define JOB_IFSBOOT_RAW		0x02u
 
+/* Bits of JOB_BOOT_PRESENT. */
+#define JOB_BOOT_BIOS	0x01u
+#define JOB_BOOT_EFI	0x02u
 /* MBR flag bits at JOB_MBR_FLAGS. */
 #define JOB_MBR_ID_SET	0x01u
 #define JOB_MBR_ACTIVE	0x02u
@@ -171,6 +187,12 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
 _Static_assert(JOB_RESERVED_OFFSET + 7 == JOB_IFSBOOT_OFFSET &&
     JOB_INPUT_QUANTUM + 8 == FSIMG_JOB_BYTES,
     "the prepared image description closes the record");
+_Static_assert(FSIMG_JOB_BOOT_PATH_BYTES == FSIMG_BOOT_PATH_TEXT_BYTES &&
+    sizeof(((fsimg_worker_request_t *)0)->boot_bios_storage) ==
+    FSIMG_JOB_BOOT_PATH_BYTES &&
+    sizeof(((fsimg_worker_request_t *)0)->boot_efi_storage) ==
+    FSIMG_JOB_BOOT_PATH_BYTES,
+    "the record and the request hold every boot path the command accepts");
 _Static_assert(sizeof(((fsimg_worker_request_t *)0)->mountpoint_storage) ==
     FSIMG_JOB_MOUNTPOINT_BYTES && FSIMG_JOB_MOUNTPOINT_BYTES >
     sizeof(((fsimg_volume_info_t *)0)->mountpoint),
@@ -234,6 +256,9 @@ static const int *capability_field(const fsimg_worker_request_t *,
     fsimg_capability_t);
 static fsimg_status_t invalid_job(fsimg_error_t *);
 static bool string_field_valid(const unsigned char *, size_t);
+static bool boot_path_fits(const char *);
+static void decode_boot_path(const unsigned char *, unsigned, unsigned,
+    char *, const char **);
 static void encode_layers(const fsimg_layer_options_t *, unsigned char *);
 static bool layers_valid(const unsigned char *);
 static void decode_layers(const unsigned char *, fsimg_layer_options_t *);
@@ -272,6 +297,27 @@ string_field_valid(const unsigned char *field, size_t bytes)
 			return (false);
 	}
 	return (true);
+}
+
+/* Whether an optional boot image path fits its field with its terminator. */
+static bool
+boot_path_fits(const char *path)
+{
+	return (path == NULL || strnlen(path, FSIMG_JOB_BOOT_PATH_BYTES) <
+	    FSIMG_JOB_BOOT_PATH_BYTES);
+}
+
+/* Point *path at the boot image path in the field at offset, copied into
+ * storage, when its present bit is set; it stays NULL otherwise.
+ */
+static void
+decode_boot_path(const unsigned char *raw, unsigned offset, unsigned bit,
+    char *storage, const char **path)
+{
+	if ((raw[JOB_BOOT_PRESENT] & bit) == 0)
+		return;
+	bcopy(raw + offset, storage, FSIMG_JOB_BOOT_PATH_BYTES);
+	*path = storage;
 }
 
 /* The layer settings after gpt:sector, which travels with the selection. */
@@ -450,6 +496,7 @@ fsimg_worker_request_init(fsimg_worker_request_t *request)
 	bzero(request, sizeof(*request));
 	fsimg_options_init(&request->limits);
 	fsimg_write_options_init(&request->write);
+	fsimg_read_options_init(&request->read);
 	fsimg_layer_options_init(&request->layers);
 	fsimg_job_select_volume(request);
 	request->codepage = 437;
@@ -640,8 +687,10 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	if (label_length == JOB_LABEL_BYTES)
 		return (invalid_job(error));
 	mountpoint = request->write.mountpoint;
-	if (mountpoint != NULL && strnlen(mountpoint,
-	    FSIMG_JOB_MOUNTPOINT_BYTES) == FSIMG_JOB_MOUNTPOINT_BYTES)
+	if ((mountpoint != NULL && strnlen(mountpoint,
+	    FSIMG_JOB_MOUNTPOINT_BYTES) == FSIMG_JOB_MOUNTPOINT_BYTES) ||
+	    !boot_path_fits(request->write.boot_bios) ||
+	    !boot_path_fits(request->write.boot_efi))
 		return (invalid_job(error));
 	status = fsimg_job_paths_length(request, &paths_length, error);
 	if (status != FSIMG_OK)
@@ -710,6 +759,21 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	if (mountpoint != NULL) {
 		bcopy(mountpoint, raw + JOB_MOUNTPOINT_OFFSET, strlen(mountpoint));
 		raw[JOB_MOUNTPOINT_PRESENT] = 1;
+	}
+	fsimg_store_le64(raw + JOB_ISO_VIEW_OFFSET, request->read.iso_view);
+	fsimg_store_le64(raw + JOB_ISO_LEVEL_OFFSET, request->write.iso_level);
+	fsimg_store_le64(raw + JOB_BOOT_LOAD_OFFSET,
+	    request->write.boot_load_sectors);
+	if (request->write.boot_bios != NULL) {
+		bcopy(request->write.boot_bios, raw + JOB_BOOT_BIOS_OFFSET,
+		    strlen(request->write.boot_bios));
+		raw[JOB_BOOT_PRESENT] = JOB_BOOT_BIOS;
+	}
+	if (request->write.boot_efi != NULL) {
+		bcopy(request->write.boot_efi, raw + JOB_BOOT_EFI_OFFSET,
+		    strlen(request->write.boot_efi));
+		raw[JOB_BOOT_PRESENT] = (unsigned char)(raw[JOB_BOOT_PRESENT] |
+		    JOB_BOOT_EFI);
 	}
 	fsimg_store_le64(raw + JOB_INPUT_KIND, request->input.kind);
 	fsimg_store_le64(raw + JOB_INPUT_LENGTH, request->input.length);
@@ -782,6 +846,24 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    raw[JOB_MOUNTPOINT_OFFSET] != 0))
 		return (invalid_job(error));
 	for (unsigned i = JOB_RESERVED_OFFSET; i < JOB_IFSBOOT_OFFSET; i++) {
+		if (raw[i] != 0)
+			return (invalid_job(error));
+	}
+	/* An absent boot path is an all-zero field. */
+	if (fsimg_load_le64(raw + JOB_ISO_VIEW_OFFSET) > FSIMG_ISO_VIEW_PRIMARY ||
+	    fsimg_load_le64(raw + JOB_ISO_LEVEL_OFFSET) > UINT32_MAX ||
+	    fsimg_load_le64(raw + JOB_BOOT_LOAD_OFFSET) > UINT32_MAX ||
+	    (raw[JOB_BOOT_PRESENT] & ~(JOB_BOOT_BIOS | JOB_BOOT_EFI)) != 0 ||
+	    !string_field_valid(raw + JOB_BOOT_BIOS_OFFSET,
+	    FSIMG_JOB_BOOT_PATH_BYTES) ||
+	    !string_field_valid(raw + JOB_BOOT_EFI_OFFSET,
+	    FSIMG_JOB_BOOT_PATH_BYTES) ||
+	    ((raw[JOB_BOOT_PRESENT] & JOB_BOOT_BIOS) == 0 &&
+	    raw[JOB_BOOT_BIOS_OFFSET] != 0) ||
+	    ((raw[JOB_BOOT_PRESENT] & JOB_BOOT_EFI) == 0 &&
+	    raw[JOB_BOOT_EFI_OFFSET] != 0))
+		return (invalid_job(error));
+	for (unsigned i = JOB_BOOT_RESERVED; i < JOB_INPUT_KIND; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
@@ -884,6 +966,16 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		    FSIMG_JOB_MOUNTPOINT_BYTES);
 		request->write.mountpoint = request->mountpoint_storage;
 	}
+	request->read.iso_view =
+	    (fsimg_iso_view_t)fsimg_load_le64(raw + JOB_ISO_VIEW_OFFSET);
+	request->write.iso_level =
+	    (uint32_t)fsimg_load_le64(raw + JOB_ISO_LEVEL_OFFSET);
+	request->write.boot_load_sectors =
+	    (uint32_t)fsimg_load_le64(raw + JOB_BOOT_LOAD_OFFSET);
+	decode_boot_path(raw, JOB_BOOT_BIOS_OFFSET, JOB_BOOT_BIOS,
+	    request->boot_bios_storage, &request->write.boot_bios);
+	decode_boot_path(raw, JOB_BOOT_EFI_OFFSET, JOB_BOOT_EFI,
+	    request->boot_efi_storage, &request->write.boot_efi);
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);
 	/* Each path is at least "/" and its terminator. An image path is

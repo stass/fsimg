@@ -25,7 +25,7 @@ const fsimg_reader_ops_t fsimg_ifs_reader_ops = {
 	.keys = ifs_keys,
 	.key = ifs_key,
 	.ambiguous = "duplicate ImageFS path",
-	.name_profile = FSIMG_NAME_PROFILE_QNX,
+	.name_profile = FSIMG_NAME_PROFILE_PORTABLE,
 	.resolve = ifs_resolve,
 	.verify = ifs_verify
 };

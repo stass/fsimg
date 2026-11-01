@@ -1440,10 +1440,11 @@ format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 		string_value(display, info->profile);
 		append(display, ",\"capabilities\":%u,\"entry_kinds\":%u,\"metadata_fields\":%u,"
 		    "\"max_label_bytes\":%u,\"max_link_target_bytes\":%u,"
-		    "\"write_settings\":%u,\"max_file_bytes\":",
+		    "\"write_settings\":%u,\"read_settings\":%u,"
+		    "\"max_file_bytes\":",
 		    info->capabilities, info->entry_kinds, info->metadata_fields,
 		    info->max_label_bytes, info->max_link_target_bytes,
-		    info->write_settings);
+		    info->write_settings, info->read_settings);
 		uint_value(display, info->max_file_bytes);
 		append(display, ",\"max_volume_bytes\":");
 		uint_value(display, info->max_volume_bytes);

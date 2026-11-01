@@ -15,15 +15,15 @@
 
 /* How preparation classes the children of a format, as its descriptor
  * declares. Without a profile the driver derives validated UTF-8 names by
- * its own rules and every child is delivered. Under the QNX-family profile
- * a child whose natively legal name lies outside fsimg_name_in_qnx_profile()
- * is omitted: validated, charged and keyed like any other, but never
- * delivered to a caller. Common code branches on this property, never on a
- * format name, and no driver chooses a class.
+ * its own rules and every child is delivered. Under the portable profile a
+ * child whose natively legal name lies outside
+ * fsimg_name_in_portable_profile() is omitted: validated, charged and keyed
+ * like any other, but never delivered to a caller. Common code branches on
+ * this property, never on a format name, and no driver chooses a class.
  */
 typedef enum fsimg_name_profile {
 	FSIMG_NAME_PROFILE_NONE = 0,
-	FSIMG_NAME_PROFILE_QNX
+	FSIMG_NAME_PROFILE_PORTABLE
 } fsimg_name_profile_t;
 
 /* A component and its NUL: room for any component of at most 1024 bytes,

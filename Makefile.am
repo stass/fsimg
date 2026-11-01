@@ -142,7 +142,7 @@ example_extract_LDADD = libfsimg.la
 test_programs = test-core test-endian test-endian-unsigned-char \
 	test-private test-io test-device test-meta test-meta-sort test-meta-runs test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
-	test-driver-contracts test-layer-contracts test-codec-memory \
+	test-common test-driver-contracts test-layer-contracts test-codec-memory \
 	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
@@ -275,6 +275,9 @@ test_driver_contracts_LDADD = libfsimg.la
 test_layer_contracts_SOURCES = test/layer-contracts.c test/contract.c \
 	test/contract.h
 test_layer_contracts_LDADD = libfsimg.la
+test_common_SOURCES = test/common.c test/test.h
+test_common_LDADD = libfsimg.la
+
 test_emit_SOURCES = test/emit.c test/test.h
 test_emit_LDADD = libfsimg.la
 test_metadata_loss_SOURCES = test/metadata-loss.c test/test.h
@@ -410,6 +413,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/members_test.rb \
 	test/cli/merged_operands_test.rb \
 	test/cli/minimize_test.rb \
+	test/cli/iso_settings_test.rb \
 	test/cli/fat_root_test.rb \
 	test/cli/mtree_export_test.rb \
 	test/cli/mtree_failures_test.rb \

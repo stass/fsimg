@@ -114,6 +114,12 @@ typedef struct fsimg_output_budget {
 typedef struct fsimg_worker_request {
 	fsimg_options_t	 limits;
 	fsimg_write_options_t write;
+	/* The -o read settings of a read job. The worker opens its reader with
+	 * them, adding the forced format and codepage. The job carries each
+	 * catalogue row of the read record (iso_view) in a field of its own;
+	 * a new read row needs one, or the worker would ignore it.
+	 */
+	fsimg_read_options_t read;
 	fsimg_job_kind_t	 kind;
 	fsimg_sandbox_policy_t sandbox;
 	/* The -F stack: on create its filesystem slot names the format; on
@@ -192,6 +198,11 @@ typedef struct fsimg_worker_request {
 	 * value.
 	 */
 	char		 mountpoint_storage[FSIMG_JOB_MOUNTPOINT_BYTES];
+	/* Decoder-owned backing only; write.boot_bios and write.boot_efi are
+	 * the authoritative values.
+	 */
+	char		 boot_bios_storage[FSIMG_JOB_BOOT_PATH_BYTES];
+	char		 boot_efi_storage[FSIMG_JOB_BOOT_PATH_BYTES];
 } fsimg_worker_request_t;
 
 typedef struct fsimg_worker_result {

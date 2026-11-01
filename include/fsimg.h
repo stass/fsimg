@@ -799,6 +799,18 @@ typedef struct fsimg_write_options {
 	 * the format's default, and "" stores an empty one.
 	 */
 	const char	*mountpoint;
+	/* FSIMG_SETTING_ISO_LEVEL: the ISO 9660 interchange level, 1, 2 or 3;
+	 * zero selects 3.
+	 */
+	uint32_t	 iso_level;
+	/* FSIMG_SETTING_ELTORITO: the El Torito boot images, each an absolute
+	 * path of a file in the image being written, never a host path,
+	 * copied; NULL for none. boot_load_sectors is the BIOS entry's count
+	 * of 512-byte load sectors, at most 65535; zero selects 4.
+	 */
+	uint32_t	 boot_load_sectors;
+	const char	*boot_bios;
+	const char	*boot_efi;
 	/* Borrowed for construction and copied; NULL selects every default. */
 	const fsimg_layer_options_t *layers;
 	/* The file settings: the record is copied at construction and its I/O
@@ -1004,6 +1016,16 @@ void fsimg_writer_free(fsimg_writer_t *);
 #define FSIMG_VOLUME_DETAILS_MAX 16u
 #define FSIMG_VERIFY_PAYLOAD 0x01u
 
+/* The ISO 9660 view a reader presents: AUTO selects Rock Ridge, then
+ * Joliet, then the primary hierarchy, as the volume offers them.
+ */
+typedef enum fsimg_iso_view {
+	FSIMG_ISO_VIEW_AUTO = 0,
+	FSIMG_ISO_VIEW_ROCKRIDGE = 1,
+	FSIMG_ISO_VIEW_JOLIET = 2,
+	FSIMG_ISO_VIEW_PRIMARY = 3
+} fsimg_iso_view_t;
+
 typedef struct fsimg_read_options {
 	size_t		 size;
 	uint32_t	 version;
@@ -1011,6 +1033,8 @@ typedef struct fsimg_read_options {
 	const char	*format;
 	/* Zero or 437 selects CP437; other codepages are unsupported. */
 	uint32_t	 fat_codepage;
+	/* FSIMG_SETTING_ISO_VIEW: the ISO 9660 view to read. */
+	fsimg_iso_view_t iso_view;
 	uint64_t	 reserved[4];
 } fsimg_read_options_t;
 
@@ -1047,13 +1071,21 @@ typedef struct fsimg_volume_info {
 	fsimg_volume_detail_t details[FSIMG_VOLUME_DETAILS_MAX];
 } fsimg_volume_info_t;
 
-/* Format-specific fields of fsimg_write_options_t. */
+/* Format-specific fields of fsimg_write_options_t and fsimg_read_options_t,
+ * one namespace: a bit names one field wherever it appears.
+ */
 #define FSIMG_SETTING_BYTE_ORDER 0x01u
 #define FSIMG_SETTING_VOLUME_UUID 0x02u
 #define FSIMG_SETTING_INODE_CAPACITY 0x04u
 #define FSIMG_SETTING_RESERVE 0x08u
 #define FSIMG_SETTING_MOUNTPOINT 0x10u
 #define FSIMG_SETTING_ROOT_ENTRIES 0x20u
+/* iso_level; boot_bios, boot_efi and boot_load_sectors; and the read
+ * option iso_view.
+ */
+#define FSIMG_SETTING_ISO_LEVEL 0x40u
+#define FSIMG_SETTING_ELTORITO 0x80u
+#define FSIMG_SETTING_ISO_VIEW 0x100u
 
 typedef struct fsimg_format_info {
 	char		 name[16];
@@ -1077,8 +1109,11 @@ typedef struct fsimg_format_info {
 	 * lacks FSIMG_ENTRY_SYMLINK. Planning refuses a longer target.
 	 */
 	uint32_t	 max_link_target_bytes;
-	/* FSIMG_SETTING_* write options the format stores. */
+	/* FSIMG_SETTING_* write options the format stores, and read options
+	 * its reader accepts at a non-default value.
+	 */
 	uint32_t	 write_settings;
+	uint32_t	 read_settings;
 } fsimg_format_info_t;
 
 typedef struct fsimg_verify_report {

@@ -246,7 +246,7 @@ emit_node(tree_pass_t *pass, const unsigned char *name, size_t length,
 	if (status != FSIMG_OK)
 		return (status);
 
-	outside = !fsimg_name_in_qnx_profile((const char *)name, length);
+	outside = !fsimg_name_in_portable_profile((const char *)name, length);
 	if (outside && !parent->hidden)
 		ifs->counts.omitted++;
 	if (separator != 0)

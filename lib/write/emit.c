@@ -123,6 +123,57 @@ fail:
 	return (status);
 }
 
+/* The whole target of link id, read through the one source lifecycle the
+ * copy uses: open by stable ID, which reads and checks the target and, for
+ * a host link, its recorded identity; one exact read of the declared
+ * length, charged to the session; and finish, which validates again. The
+ * source is closed on every outcome, so nothing is held between planning
+ * and emission, and a host link changed in between fails as a changed
+ * source when it is opened again.
+ */
+fsimg_status_t
+fsimg_writer_link_target(fsimg_writer_t *writer, uint64_t id,
+    unsigned char *target, size_t *length, fsimg_error_t *error)
+{
+	size_t declared, transferred;
+	fsimg_status_t status;
+
+	*length = 0;
+	status = fsimg_source_open(writer, id, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	/* Only a link's source holds its target. */
+	if (!writer->source.link) {
+		status = fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "link-target read requires a symbolic link");
+		goto fail;
+	}
+	if (writer->source.length > FSIMG_SYMLINK_TARGET_MAX) {
+		status = fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "link target exceeds its buffer");
+		goto fail;
+	}
+	declared = (size_t)writer->source.length;
+	status = fsimg_source_read(writer, 0, target, declared, &transferred,
+	    error);
+	if (status == FSIMG_OK && transferred != declared)
+		status = fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "link target read ended early");
+	if (status != FSIMG_OK)
+		goto fail;
+	status = fsimg_source_finish(writer, error);
+	if (status != FSIMG_OK) {
+		name_source(writer, id, error);
+		return (status);
+	}
+	*length = declared;
+	return (FSIMG_OK);
+fail:
+	fsimg_source_close(writer);
+	name_source(writer, id, error);
+	return (status);
+}
+
 /* Name the entry whose source failed, so that a changed or mismatching
  * file is reported by its image path. Only source failures are named: an
  * output write failing during the copy concerns the image, not the file.

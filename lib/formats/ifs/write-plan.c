@@ -191,7 +191,7 @@ encode_time(ifs_plan_t *plan, const fsimg_entry_t *entry, uint32_t *out,
 }
 
 /* Check one catalog entry against the profile and fill its row: its name
- * under the QNX name profile, its stored path within 1024 bytes, a file
+ * under the portable name profile, its stored path within 1024 bytes, a file
  * within 32 bits, and its owner, mode and time. A catalog entry's parent
  * has a lower ID, so checking every entry's own name checks every
  * component of every path.
@@ -208,7 +208,7 @@ plan_entry(ifs_plan_t *plan, const fsimg_catalog_entry_t *catalog,
 	fsimg_status_t status;
 
 	name = strrchr(entry->path, '/') + 1;
-	if (!fsimg_name_in_qnx_profile(name, strlen(name))) {
+	if (!fsimg_name_in_portable_profile(name, strlen(name))) {
 		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "name is outside the ImageFS name profile");
 		fsimg_error_path(error, entry->path);

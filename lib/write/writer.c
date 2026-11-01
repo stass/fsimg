@@ -14,6 +14,7 @@
 #include "publish.h"
 #include "settings.h"
 #include "source.h"
+#include "unicode.h"
 #include "format.h"
 #include "writer.h"
 
@@ -33,6 +34,8 @@ static fsimg_status_t fit_volume(const fsimg_format_t *,
 static fsimg_status_t writer_new_stack(fsimg_ctx_t *, const fsimg_stack_t *,
     const fsimg_format_t *, const fsimg_format_variant_t *,
     const fsimg_write_options_t *, fsimg_writer_t **, fsimg_error_t *);
+static fsimg_status_t copy_boot_path(fsimg_writer_t *, const char *,
+    const char **, char **, fsimg_error_t *);
 static fsimg_status_t plan_disk(fsimg_writer_t *, fsimg_error_t *);
 static bool writer_encoded(const fsimg_writer_t *);
 static fsimg_status_t emit_volume(void *, fsimg_io_t *, fsimg_error_t *);
@@ -275,6 +278,15 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	    writer->disk.scheme != NULL && writer->disk.fixed)
 		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "minimization conflicts with a fixed disk size");
+	/* The driver validates the writer's own boot path copies, already
+	 * known to be absolute image paths within the path limit.
+	 */
+	if (status == FSIMG_OK)
+		status = copy_boot_path(writer, "boot", &selected.boot_bios,
+		    &writer->boot_bios, error);
+	if (status == FSIMG_OK)
+		status = copy_boot_path(writer, "efiboot", &selected.boot_efi,
+		    &writer->boot_efi, error);
 	if (status == FSIMG_OK)
 		status = driver->writer->validate(&selected, variant->id, error);
 	if (status == FSIMG_OK && writer->disk.scheme != NULL &&
@@ -316,6 +328,42 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 		writer->options.mountpoint = writer->mountpoint;
 	}
 	*out = writer;
+	return (FSIMG_OK);
+}
+
+/* Copy the borrowed boot image path at *path, when there is one, into
+ * *copy, which the writer owns and frees, and point *path at the copy. The
+ * path names an entry of the image being written, so it is an absolute
+ * image path within the path limit; whether the catalog holds a suitable
+ * file there is planning's question. A failure names the setting's key.
+ */
+static fsimg_status_t
+copy_boot_path(fsimg_writer_t *writer, const char *key, const char **path,
+    char **copy, fsimg_error_t *error)
+{
+	fsimg_error_t detail;
+	uint32_t depth;
+	size_t length;
+	fsimg_status_t status;
+
+	if (*path == NULL)
+		return (FSIMG_OK);
+	status = fsimg_path_validate(writer->ctx, *path, false, &length,
+	    &depth, error);
+	if (status != FSIMG_OK) {
+		if (error != NULL)
+			error->operation = FSIMG_OP_WRITER;
+		fsimg_error_path(error, key);
+		return (status);
+	}
+	*copy = fsimg_alloc(writer->ctx, length + 1, &detail);
+	if (*copy == NULL) {
+		if (error != NULL)
+			*error = detail;
+		return (detail.status);
+	}
+	bcopy(*path, *copy, length + 1);
+	*path = *copy;
 	return (FSIMG_OK);
 }
 
@@ -434,6 +482,8 @@ fsimg_writer_free(fsimg_writer_t *writer)
 	fsimg_dealloc(writer->record);
 	fsimg_dealloc(writer->source_record);
 	fsimg_disk_plan_free(&writer->disk);
+	fsimg_dealloc(writer->boot_bios);
+	fsimg_dealloc(writer->boot_efi);
 	fsimg_dealloc(writer);
 }
 

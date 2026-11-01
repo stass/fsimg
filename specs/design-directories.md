@@ -288,11 +288,14 @@ as for the first. The session's work and entry counters keep
 running across walks, so a second walk costs its share of the same
 budget.
 
-One walk is the operation's counted walk, the one whose entries the driver
-accounts in the verification report. For every other walk the driver takes
-the root out of the omission scope before it starts, so the walker still
-descends and checks omitted subtrees but counts none of them; the report's
-`omitted_entries` are the counted walk's. Only full verification starts a
+The first walk is the operation's counted walk, so a driver walks the
+tree it delivers first. Every later walk is uncounted: its root is out of
+the omission scope, and the common accounting counts none of its
+entries. The walker still descends into and checks its omitted subtrees.
+The report's `omitted_entries`, files, directories and logical bytes are
+therefore the counted walk's, even for a driver that accounts every
+entry of every walk; payload read-through counts its stored bytes in
+every walk. Only full verification starts a
 second walk: iteration, selection and extraction walk exactly one tree,
 the view the reader opened.
 

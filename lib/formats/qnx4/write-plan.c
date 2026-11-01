@@ -395,7 +395,8 @@ plan_entry(qnx4_plan_t *plan, const fsimg_catalog_entry_t *catalog,
 		return (status);
 	name = strrchr(entry->path, '/') + 1;
 	length = strlen(name);
-	if (length > QNX4_NAME_MAX || !fsimg_name_in_qnx_profile(name, length)) {
+	if (length > QNX4_NAME_MAX ||
+	    !fsimg_name_in_portable_profile(name, length)) {
 		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "name is outside the QNX4 name profile");
 		fsimg_error_path(error, entry->path);

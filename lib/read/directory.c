@@ -124,7 +124,7 @@ corrupt(fsimg_error_t *error, const char *message)
 /* Class a component of length bytes, which the record's name buffer
  * bounds; format rules beyond that, such as a name length limit, belong to
  * the driver. Every component is nonempty, without a separator, and
- * neither "." nor "..". Under the QNX-family profile one outside the
+ * neither "." nor "..". Under the portable profile one outside the
  * profile is omitted; a format without a profile must name every child in
  * valid UTF-8 and delivers it.
  */
@@ -139,8 +139,8 @@ classify(const fsimg_reader_t *reader, const char *name, size_t length,
 	    (length == 2 && name[0] == '.' && name[1] == '.'))
 		return (corrupt(error, "invalid directory entry name"));
 	switch (reader->ops->name_profile) {
-	case FSIMG_NAME_PROFILE_QNX:
-		*class = fsimg_name_in_qnx_profile(name, length) ?
+	case FSIMG_NAME_PROFILE_PORTABLE:
+		*class = fsimg_name_in_portable_profile(name, length) ?
 		    NAME_DELIVERED : NAME_OMITTED;
 		return (FSIMG_OK);
 	case FSIMG_NAME_PROFILE_NONE:
@@ -508,7 +508,8 @@ walk_start(fsimg_reader_t *reader, fsimg_error_t *error)
 	/* Only a complete walker is published; preparing the root needs it. */
 	reader->walk = walk;
 	return (prepare_level(reader, 0, 0, false,
-	    !reader->omission.root_excluded, error));
+	    !reader->omission.root_excluded && !reader->omission.uncounted,
+	    error));
 failed:
 	status = detail.status;
 	if (error != NULL)
@@ -565,10 +566,20 @@ make_current(fsimg_reader_t *reader, walk_level_t *level, size_t length,
 		return (status);
 	bzero(&reader->entry, sizeof(reader->entry));
 	reader->initialized = 0;
+	reader->link_length = 0;
 	status = reader->ops->replay(reader, view.name, view.payload,
 	    view.payload_length, error);
 	if (status != FSIMG_OK)
 		return (status);
+	/* A decoded target is the whole of a symbolic link's content, so every
+	 * consumer, listing, ranges and accounting alike, sees its length.
+	 */
+	if (reader->link_length != 0 &&
+	    (reader->entry.kind != FSIMG_ENTRY_SYMLINK ||
+	    reader->entry.size != reader->link_length ||
+	    reader->initialized != reader->link_length))
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "decoded link target does not match the replayed entry"));
 	/* No content exists past the logical length, whatever the driver set. */
 	if (reader->initialized > reader->entry.size)
 		reader->initialized = reader->entry.size;
@@ -732,6 +743,25 @@ fsimg_walk_scope_children(fsimg_reader_t *reader, bool in_scope)
 		reader->omission.root_excluded = !in_scope;
 	else
 		reader->walk->pending_in_scope = in_scope;
+}
+
+/* The finished walk releases everything it held; the next advance starts a
+ * walk of its own, from whatever root the driver's prepare then decodes at
+ * level 0, with fresh limits on depth and paths and the session's budget
+ * still running. Only full verification walks a second tree, and only a
+ * walk that has finished can end, so no directory of one tree is ever left
+ * half prepared beneath another.
+ */
+fsimg_status_t
+fsimg_walk_restart(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	if (!reader->omission.descend || reader->walk == NULL ||
+	    !reader->walk->finished)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_VERIFY,
+		    "only full verification restarts a finished walk"));
+	fsimg_walk_free(reader);
+	reader->omission.uncounted = true;
+	return (FSIMG_OK);
 }
 
 fsimg_status_t

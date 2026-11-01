@@ -22,7 +22,7 @@ const fsimg_reader_ops_t fsimg_qnx4_reader_ops = {
 	.keys = qnx4_keys,
 	.key = qnx4_key,
 	.ambiguous = "duplicate QNX4 directory name",
-	.name_profile = FSIMG_NAME_PROFILE_QNX,
+	.name_profile = FSIMG_NAME_PROFILE_PORTABLE,
 	.resolve = qnx4_resolve,
 	.verify = qnx4_verify
 };

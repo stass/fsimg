@@ -75,7 +75,16 @@ static const member_t write_members[] = {
 	WRITE_MEMBER(inode_capacity, uint32_t),
 	WRITE_MEMBER(reserve_percent, uint32_t),
 	WRITE_MEMBER(mountpoint, const char *),
-	WRITE_MEMBER(fat_root_entries, uint32_t)
+	WRITE_MEMBER(fat_root_entries, uint32_t),
+	WRITE_MEMBER(iso_level, uint32_t),
+	WRITE_MEMBER(boot_load_sectors, uint32_t),
+	WRITE_MEMBER(boot_bios, const char *),
+	WRITE_MEMBER(boot_efi, const char *)
+};
+
+static const member_t read_members[] = {
+	{ "iso_view", offsetof(fsimg_read_options_t, iso_view),
+	    sizeof(fsimg_iso_view_t), _Alignof(fsimg_iso_view_t) }
 };
 
 static const member_t input_members[] = {
@@ -197,6 +206,7 @@ test_member_bindings(void)
 	unsigned char layers[sizeof(fsimg_layer_options_t)];
 	unsigned char write[sizeof(fsimg_write_options_t)];
 	unsigned char inputs[sizeof(fsimg_layer_inputs_t)];
+	unsigned char read[sizeof(fsimg_read_options_t)];
 	const fsimg_setting_slice_t *slices[16];
 	const fsimg_setting_t *row;
 	const fsimg_layer_t *layer;
@@ -206,6 +216,7 @@ test_member_bindings(void)
 	bzero(layers, sizeof(layers));
 	bzero(write, sizeof(write));
 	bzero(inputs, sizeof(inputs));
+	bzero(read, sizeof(read));
 	count = 0;
 	slices[count++] = &fsimg_filesystem_settings;
 	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
@@ -223,6 +234,10 @@ test_member_bindings(void)
 			case FSIMG_RECORD_WRITE:
 				coverage = write;
 				capacity = sizeof(write);
+				break;
+			case FSIMG_RECORD_READ:
+				coverage = read;
+				capacity = sizeof(read);
 				break;
 			case FSIMG_RECORD_INPUTS:
 				coverage = inputs;
@@ -245,6 +260,8 @@ test_member_bindings(void)
 	    sizeof(layer_members) / sizeof(layer_members[0]), "layer");
 	check_members(write, sizeof(write), write_members,
 	    sizeof(write_members) / sizeof(write_members[0]), "write");
+	check_members(read, sizeof(read), read_members,
+	    sizeof(read_members) / sizeof(read_members[0]), "read");
 	check_members(inputs, sizeof(inputs), input_members,
 	    sizeof(input_members) / sizeof(input_members[0]), "inputs");
 }
@@ -269,7 +286,7 @@ check_members(const unsigned char *coverage, size_t capacity,
 	}
 }
 
-/* Each public FSIMG_SETTING_* bit names exactly one filesystem row, and
+/* Each single-setting support bit names exactly one filesystem row, and
  * each file setting identity exactly one row of the expected key.
  */
 static void
@@ -277,9 +294,10 @@ test_masks_and_files(void)
 {
 	static const uint32_t bits[] = { FSIMG_SETTING_BYTE_ORDER,
 	    FSIMG_SETTING_VOLUME_UUID, FSIMG_SETTING_INODE_CAPACITY,
-	    FSIMG_SETTING_RESERVE, FSIMG_SETTING_MOUNTPOINT, FSIMG_SETTING_ROOT_ENTRIES };
+	    FSIMG_SETTING_RESERVE, FSIMG_SETTING_MOUNTPOINT, FSIMG_SETTING_ROOT_ENTRIES,
+	    FSIMG_SETTING_ISO_LEVEL, FSIMG_SETTING_ISO_VIEW };
 	static const char *const bit_keys[] = { "endian", "uuid", "inodes",
-	    "reserve", "mountpoint", "root" };
+	    "reserve", "mountpoint", "root", "level", "view" };
 	static const char *const file_keys[FSIMG_FILE_SETTINGS] = {
 		[FSIMG_FILE_IFSBOOT_STARTUP] = "ifsboot:startup",
 		[FSIMG_FILE_IFSBOOT_PREFIX] = "ifsboot:prefix"
@@ -306,6 +324,16 @@ test_masks_and_files(void)
 		row = &slice->rows[i];
 		CHECK(row->support == 0 || (row->support & (row->support - 1)) == 0);
 	}
+	found = 0;
+	for (size_t i = 0; i < slice->count; i++) {
+		if (slice->rows[i].support != FSIMG_SETTING_ELTORITO)
+			continue;
+		CHECK(strcmp(slice->rows[i].key, "boot") == 0 ||
+		    strcmp(slice->rows[i].key, "efiboot") == 0 ||
+		    strcmp(slice->rows[i].key, "bootload") == 0);
+		found++;
+	}
+	CHECK(found == 3);
 	/* Every bit a registered format declares has its row. */
 	covered = 0;
 	for (size_t i = 0; i < slice->count; i++)
@@ -935,9 +963,158 @@ test_bool_bytes(void)
 	}
 }
 
+/* The ISO rows have independent public storage and lexical contracts. */
+static void
+test_iso_catalogue_and_defaults(void)
+{
+	static const struct {
+		const char *key;
+		fsimg_setting_record_t record;
+		fsimg_setting_kind_t kind;
+		fsimg_setting_syntax_t syntax;
+		unsigned scope;
+		uint32_t support;
+	} expected[] = {
+		{ "view", FSIMG_RECORD_READ, FSIMG_KIND_ISO_VIEW,
+		    FSIMG_SYNTAX_CHOICE, FSIMG_SCOPE_READ, FSIMG_SETTING_ISO_VIEW },
+		{ "level", FSIMG_RECORD_WRITE, FSIMG_KIND_U32,
+		    FSIMG_SYNTAX_COUNT, FSIMG_SCOPE_WRITE, FSIMG_SETTING_ISO_LEVEL },
+		{ "boot", FSIMG_RECORD_WRITE, FSIMG_KIND_TEXT_POINTER,
+		    FSIMG_SYNTAX_TEXT, FSIMG_SCOPE_WRITE, FSIMG_SETTING_ELTORITO },
+		{ "efiboot", FSIMG_RECORD_WRITE, FSIMG_KIND_TEXT_POINTER,
+		    FSIMG_SYNTAX_TEXT, FSIMG_SCOPE_WRITE, FSIMG_SETTING_ELTORITO },
+		{ "bootload", FSIMG_RECORD_WRITE, FSIMG_KIND_U32,
+		    FSIMG_SYNTAX_COUNT, FSIMG_SCOPE_WRITE, FSIMG_SETTING_ELTORITO }
+	};
+	static const char *const views[] = { "auto", "rockridge", "joliet", "primary" };
+	static const fsimg_iso_view_t values[] = { FSIMG_ISO_VIEW_AUTO,
+	    FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ISO_VIEW_JOLIET, FSIMG_ISO_VIEW_PRIMARY };
+	fsimg_read_options_t read;
+	fsimg_write_options_t write;
+	fsimg_setting_records_t records;
+	const fsimg_setting_t *row;
+
+	memset(&read, 0xa5, sizeof(read));
+	memset(&write, 0xa5, sizeof(write));
+	fsimg_read_options_init(&read);
+	fsimg_write_options_init(&write);
+	CHECK(read.iso_view == FSIMG_ISO_VIEW_AUTO);
+	CHECK(write.iso_level == 0 && write.boot_load_sectors == 0);
+	CHECK(write.boot_bios == NULL && write.boot_efi == NULL);
+	records = (fsimg_setting_records_t){ .read = &read, .write = &write };
+	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+		row = fsimg_setting_find(&fsimg_filesystem_settings,
+		    expected[i].key, strlen(expected[i].key));
+		CHECK(row != NULL);
+		CHECK(row->record == expected[i].record && row->kind == expected[i].kind);
+		CHECK(row->syntax == expected[i].syntax && row->scope == expected[i].scope);
+		CHECK(row->support == expected[i].support);
+		CHECK(fsimg_setting_is_default(row, &records));
+		if (row->kind == FSIMG_KIND_TEXT_POINTER) {
+			CHECK(row->initial.text == NULL && row->text_bytes == 1025);
+		} else if (row->kind == FSIMG_KIND_U32) {
+			CHECK(row->initial.u32 == 0 && row->nonzero);
+			if (strcmp(row->key, "bootload") == 0)
+				CHECK(row->max == 65535);
+			else {
+				for (unsigned k = 0; k < 3; k++)
+					CHECK(row->choices[k].value.u32 == k + 1);
+				CHECK(row->choices[3].spelling == NULL);
+			}
+		}
+	}
+	row = fsimg_setting_find(&fsimg_filesystem_settings, "view", 4);
+	CHECK(row->initial.iso_view == FSIMG_ISO_VIEW_AUTO);
+	for (size_t i = 0; i < 4; i++) {
+		CHECK(strcmp(row->choices[i].spelling, views[i]) == 0);
+		CHECK(row->choices[i].value.iso_view == values[i]);
+	}
+	CHECK(row->choices[4].spelling == NULL);
+}
+
+static void
+test_iso_read_settings_require_capability(void)
+{
+	fsimg_read_options_t options;
+	fsimg_format_info_t info = { 0 };
+	fsimg_error_t error;
+
+	fsimg_read_options_init(&options);
+	options.iso_view = (fsimg_iso_view_t)7;
+	CHECK(fsimg_read_settings_check(&options, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "view") == 0);
+	options.iso_view = FSIMG_ISO_VIEW_JOLIET;
+	CHECK(fsimg_read_settings_check(&options, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_read_settings_check(&options, &info, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "view") == 0);
+	info.read_settings = FSIMG_SETTING_ISO_VIEW;
+	CHECK(fsimg_read_settings_check(&options, &info, NULL) == FSIMG_OK);
+	options.iso_view = FSIMG_ISO_VIEW_AUTO;
+	info.read_settings = 0;
+	CHECK(fsimg_read_settings_check(&options, &info, NULL) == FSIMG_OK);
+}
+
+static void
+test_registered_writers_refuse_iso_settings(void)
+{
+	static const struct {
+		const char *key;
+		uint64_t bit;
+		fsimg_write_options_t options;
+	} cases[] = {
+		{ "level", FSIMG_SETTING_ISO_LEVEL, { .iso_level = 3 } },
+		{ "bootload", FSIMG_SETTING_ELTORITO, { .boot_load_sectors = 4 } },
+		{ "boot", FSIMG_SETTING_ELTORITO, { .boot_bios = "/x" } },
+		{ "efiboot", FSIMG_SETTING_ELTORITO, { .boot_efi = "/x" } }
+	};
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	fsimg_read_options_t read;
+	fsimg_write_options_t options;
+	fsimg_format_info_t info;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	size_t cursor = 0;
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
+		if ((info.read_settings & FSIMG_SETTING_ISO_VIEW) == 0) {
+			fsimg_read_options_init(&read);
+			read.iso_view = FSIMG_ISO_VIEW_JOLIET;
+			status = fsimg_read_settings_check(&read, &info, &error);
+			if (status != FSIMG_EINVAL || strcmp(error.path, "view") != 0)
+				fprintf(stderr, "%s: view refusal: status %d, key %s\n",
+				    info.name, status, error.path);
+			CHECK(status == FSIMG_EINVAL);
+			CHECK(strcmp(error.path, "view") == 0);
+		}
+		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			if ((info.write_settings & cases[i].bit) != 0)
+				continue;
+			fsimg_write_options_init(&options);
+			options.iso_level = cases[i].options.iso_level;
+			options.boot_load_sectors = cases[i].options.boot_load_sectors;
+			options.boot_bios = cases[i].options.boot_bios;
+			options.boot_efi = cases[i].options.boot_efi;
+			status = fsimg_writer_new(ctx, info.name, &options,
+			    &writer, &error);
+			if (status != FSIMG_EINVAL ||
+			    strcmp(error.path, cases[i].key) != 0)
+				fprintf(stderr, "%s: %s refusal: status %d, key %s\n",
+				    info.name, cases[i].key, status, error.path);
+			CHECK(status == FSIMG_EINVAL);
+			CHECK(strcmp(error.path, cases[i].key) == 0);
+		}
+	}
+	fsimg_ctx_free(ctx);
+}
+
 int
 main(void)
 {
+	test_iso_catalogue_and_defaults();
+	test_iso_read_settings_require_capability();
+	test_registered_writers_refuse_iso_settings();
 	test_slices();
 	test_member_bindings();
 	test_masks_and_files();

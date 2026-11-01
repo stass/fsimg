@@ -157,7 +157,7 @@ fsimg_utf16_to_utf8(const uint16_t *input, size_t length, char *output,
 }
 
 bool
-fsimg_name_in_qnx_profile(const char *name, size_t length)
+fsimg_name_in_portable_profile(const char *name, size_t length)
 {
 	const unsigned char *bytes = (const unsigned char *)name;
 	size_t units;

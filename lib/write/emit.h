@@ -44,8 +44,8 @@ typedef struct fsimg_emit_payload {
 } fsimg_emit_payload_t;
 
 /* Emission is the only way a format driver writes image bytes. The emission
- * object is opaque: drivers cannot reach the sink, and the copy operation is
- * their only path to source content.
+ * object is opaque: drivers cannot reach the sink, and the copy operation,
+ * with the link-target read below, is their only path to source content.
  *
  * fsimg_emit_image() runs after the writer's pre-mutation checks and resize.
  * It zeroes every byte of the planned volume, then constructs the emission
@@ -77,5 +77,20 @@ fsimg_status_t fsimg_emit_write(fsimg_emit_t *, uint64_t, const void *,
  */
 fsimg_status_t fsimg_emit_copy(fsimg_emit_t *, uint64_t,
     const fsimg_emit_payload_t *, fsimg_error_t *);
+
+/* The link-target read (specs/design-emission.md#encoded-link-targets):
+ * copy the whole target of symbolic-link entry id into target, which holds
+ * FSIMG_SYMLINK_TARGET_MAX bytes, and store its length, for a driver that
+ * encodes the target into metadata rather than copying it as payload. It
+ * works while the driver plans and while it emits, owning the source
+ * lifecycle as the copy does: it opens the source by stable ID, reads
+ * exactly the catalog's declared length, validates, and closes it on every
+ * outcome; a non-link entry is FSIMG_ESTATE. A target changed since
+ * collection fails as a changed source when validation detects it; one
+ * whose bytes changed under the same recorded metadata is the driver's to
+ * catch, by comparing what it encodes with what it planned.
+ */
+fsimg_status_t fsimg_writer_link_target(fsimg_writer_t *, uint64_t,
+    unsigned char *, size_t *, fsimg_error_t *);
 
 #endif

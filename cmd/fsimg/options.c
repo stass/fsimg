@@ -896,7 +896,7 @@ parse_setting(cli_parse_t *parse, unsigned index)
 {
 	fsimg_worker_request_t *request = &parse->options->request;
 	const fsimg_setting_targets_t targets = { .write = &request->write,
-	    .layers = &request->layers };
+	    .read = &request->read, .layers = &request->layers };
 	const fsimg_setting_slice_t *slice;
 	const fsimg_setting_t *row;
 	fsimg_setting_value_t converted;

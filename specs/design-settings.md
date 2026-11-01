@@ -164,7 +164,7 @@ The finite syntax classes cover the existing grammar:
 | Boolean | Exactly `yes` or `no` |
 | Named choice | `endian=little|big`, `case=insensitive|sensitive`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437`, `view=auto|rockridge|joliet|primary` |
 | UUID | RFC 4122 text converted to textual byte order; nil permitted for the filesystem UUID, refused for layer identifiers; the filesystem's own validation may still refuse nil, as APFS does outside reproducible mode |
-| Text | GPT type/name, MBR type, mountpoint, snapshot name, ISO `boot` and `efiboot` image paths; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes |
+| Text | GPT type/name, MBR type, mountpoint, snapshot name, ISO `boot` and `efiboot` image paths; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes; a boot image path holds at most 1024 bytes on the command line and travels in a 1025-byte job field with its own presence bit, since an empty path is a value the library refuses |
 | File path | A host operand retained by the CLI for descriptor preparation |
 
 Choice entries pair spellings with values of the row's declared type. Lexical

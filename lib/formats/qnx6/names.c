@@ -11,7 +11,7 @@
 /* Check a name against QNX6's own rules: 1 to 510 bytes without NUL or
  * slash, and neither "." nor "..". A name breaking them is corruption.
  * Any other byte is native; preparation classes a name outside the
- * QNX-family profile as omitted.
+ * portable name profile as omitted.
  */
 fsimg_status_t
 qnx6_name_native(const unsigned char *name, size_t length,

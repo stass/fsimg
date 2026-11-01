@@ -83,9 +83,11 @@ struct fsimg_plan {
  * replaces zero with its default. It accepts volume_bytes zero (automatic
  * sizing), and validating its own result again changes nothing, since a
  * fixed disk's fit (writer.c fit_volume) rounds the volume to that sector
- * and validates once more. emit places the plan's bytes through the
- * emission object (emit.h); the driver runs only after the writer has
- * checked and resized the sink and fsimg_emit_image() has zeroed it.
+ * and validates once more. The boot image paths it receives are the
+ * writer's validated copies, which it reads but never replaces. emit
+ * places the plan's bytes through the emission object (emit.h); the
+ * driver runs only after the writer has checked and resized the sink and
+ * fsimg_emit_image() has zeroed it.
  */
 typedef struct fsimg_writer_ops {
 	fsimg_status_t (*validate)(fsimg_write_options_t *, unsigned,
@@ -251,6 +253,12 @@ struct fsimg_writer {
 	 * terminator.
 	 */
 	char		 mountpoint[sizeof(((fsimg_volume_info_t *)0)->mountpoint)];
+	/* The El Torito boot image paths, copied from the options at
+	 * construction (options.boot_bios and boot_efi point here); NULL for
+	 * none.
+	 */
+	char		*boot_bios;
+	char		*boot_efi;
 };
 
 /* Common collection is private; public construction selects a format driver.

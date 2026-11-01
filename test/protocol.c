@@ -828,7 +828,7 @@ test_job_mountpoint(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24 + 24);
+	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24 + 2080 + 24);
 	memset(longest, 'm', FIELD - 1);
 	memset(longer, 'm', FIELD);
 	fsimg_worker_request_init(&request);
@@ -1279,6 +1279,8 @@ same_value(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->u64 == b->u64);
 	case FSIMG_KIND_BOOL:
 		return (a->flag == b->flag);
+	case FSIMG_KIND_ISO_VIEW:
+		return (a->iso_view == b->iso_view);
 	case FSIMG_KIND_BYTE_ORDER:
 		return (a->byte_order == b->byte_order);
 	case FSIMG_KIND_DMG_COMPRESSION:
@@ -1298,8 +1300,8 @@ same_value(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 	}
 }
 
-/* One row's non-default value, with its presence flag, survives a create
- * job's encoding and decoding.
+/* One row's non-default value, with its presence flag, survives its read
+ * or create job's encoding and decoding.
  */
 static void
 check_transported(const fsimg_setting_t *row)
@@ -1313,16 +1315,22 @@ check_transported(const fsimg_setting_t *row)
 	char key[32];
 
 	fsimg_worker_request_init(&request);
-	request.kind = FSIMG_JOB_CREATE;
-	request.root_paths = image_root;
-	request.root_count = 1;
+	request.kind = row->record == FSIMG_RECORD_READ ?
+	    FSIMG_JOB_LIST : FSIMG_JOB_CREATE;
+	if (request.kind == FSIMG_JOB_CREATE) {
+		request.root_paths = image_root;
+		request.root_count = 1;
+	}
 	other_value(row, &value);
+	CHECK(!same_value(row, &value, &row->initial));
 	fsimg_setting_store(row, &(fsimg_setting_targets_t){
-	    .write = &request.write, .layers = &request.layers }, &value);
+	    .write = &request.write, .read = &request.read,
+	    .layers = &request.layers }, &value);
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
 	records = (fsimg_setting_records_t){ .write = &decoded.write,
+	    .read = &decoded.read,
 	    .layers = &decoded.layers };
 	fsimg_setting_load(row, &records, &received);
 	fsimg_setting_key(row, key, sizeof(key));
@@ -1347,7 +1355,7 @@ test_job_catalogue(void)
 
 	for (size_t i = 0; i < fsimg_filesystem_settings.count; i++) {
 		row = &fsimg_filesystem_settings.rows[i];
-		if (row->record == FSIMG_RECORD_WRITE)
+		if (row->record == FSIMG_RECORD_WRITE || row->record == FSIMG_RECORD_READ)
 			check_transported(row);
 	}
 	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
@@ -1702,7 +1710,7 @@ test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == 1970);
+	CHECK(FSIMG_JOB_BYTES == 4050);
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
 	request.root_paths = image_root;
@@ -1816,6 +1824,151 @@ test_zstd_unverified_record_requires_verified_zstd(void)
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 }
 
+/* Literal offsets relative to ISO_WIRE_BASE are the wire oracle,
+ * independent of job.c: view 0, level 8, bootload 16, BIOS path 24,
+ * EFI path 1049, presence 2074, reserved 2075..2079, input kind 2080,
+ * input length 2088, and transfer quantum 2096.
+ */
+enum { ISO_WIRE_BASE = 1946, ISO_WIRE_TAIL_BYTES = 2104 };
+
+static void
+iso_wire_place_string(unsigned char *expected, size_t offset, const char *text)
+{
+	CHECK(offset < ISO_WIRE_TAIL_BYTES);
+	CHECK(strlen(text) < ISO_WIRE_TAIL_BYTES - offset);
+	bcopy(text, expected + offset, strlen(text) + 1);
+}
+
+static void
+test_iso_jobs_have_canonical_wire_bytes(void)
+{
+	unsigned char create_tail[ISO_WIRE_TAIL_BYTES] = {
+		[8] = 2, [16] = 8, [2074] = 3
+	};
+	unsigned char efi_tail[ISO_WIRE_TAIL_BYTES] = {
+		[8] = 2, [16] = 0x34, [17] = 0x12, [2074] = 2
+	};
+	static const unsigned char read_tail[ISO_WIRE_TAIL_BYTES] = { [0] = 2 };
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	iso_wire_place_string(create_tail, 24, "/b/bios.img");
+	iso_wire_place_string(efi_tail, 1049, "/efi/boot.img");
+	CHECK(FSIMG_JOB_BYTES == 4050);
+	fsimg_worker_request_init(&request);
+	CHECK(request.read.iso_view == FSIMG_ISO_VIEW_AUTO);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	request.write.iso_level = 2;
+	request.write.boot_load_sectors = 8;
+	request.write.boot_bios = "/b/bios.img";
+	request.write.boot_efi = "";
+	memset(raw, 0xa5, sizeof(raw));
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(bcmp(raw + ISO_WIRE_BASE, create_tail, sizeof(create_tail)) == 0);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.write.iso_level == 2 && decoded.write.boot_load_sectors == 8);
+	CHECK(strcmp(decoded.write.boot_bios, "/b/bios.img") == 0);
+	CHECK(decoded.write.boot_bios == decoded.boot_bios_storage);
+	CHECK(decoded.write.boot_efi != NULL && decoded.write.boot_efi[0] == '\0');
+	CHECK(decoded.write.boot_efi == decoded.boot_efi_storage);
+	request.write.boot_load_sectors = 0x1234;
+	request.write.boot_bios = NULL;
+	request.write.boot_efi = "/efi/boot.img";
+	memset(raw, 0xa5, sizeof(raw));
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(bcmp(raw + ISO_WIRE_BASE, efi_tail, sizeof(efi_tail)) == 0);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.write.boot_load_sectors == 0x1234);
+	CHECK(decoded.write.boot_bios == NULL);
+	CHECK(strcmp(decoded.write.boot_efi, "/efi/boot.img") == 0);
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.read.iso_view = FSIMG_ISO_VIEW_JOLIET;
+	memset(raw, 0xa5, sizeof(raw));
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(bcmp(raw + ISO_WIRE_BASE, read_tail, sizeof(read_tail)) == 0);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.read.iso_view == FSIMG_ISO_VIEW_JOLIET);
+	CHECK(decoded.write.boot_bios == NULL && decoded.write.boot_efi == NULL);
+}
+
+static void
+test_iso_jobs_reject_malformed_fields(void)
+{
+	static const struct {
+		const char *name;
+		unsigned offset;
+		unsigned char value;
+	} invalid[] = {
+		{ "view beyond enum", 0, 4 },
+		{ "view high byte", 7, 1 },
+		{ "level beyond uint32", 12, 1 },
+		{ "bootload beyond uint32", 20, 1 },
+		{ "unknown presence", 2074, 4 },
+		{ "BIOS without presence", 24, '/' },
+		{ "EFI without presence", 1049, '/' },
+		{ "reserved byte 1", 2075, 1 },
+		{ "reserved byte 2", 2076, 1 },
+		{ "reserved byte 3", 2077, 1 },
+		{ "reserved byte 4", 2078, 1 },
+		{ "reserved byte 5", 2079, 1 }
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES], bad[FSIMG_JOB_BYTES];
+	char path[1026];
+	uint64_t selection;
+	unsigned capabilities;
+	fsimg_status_t status;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		bcopy(raw, bad, sizeof(raw));
+		bad[ISO_WIRE_BASE + invalid[i].offset] = invalid[i].value;
+		status = fsimg_job_decode(bad, sizeof(bad), &decoded,
+		    &selection, &capabilities, NULL);
+		if (status != FSIMG_EINVAL)
+			fprintf(stderr, "%s accepted\n", invalid[i].name);
+		CHECK(status == FSIMG_EINVAL);
+	}
+	for (unsigned field = 0; field < 2; field++) {
+		size_t path_offset = ISO_WIRE_BASE + (field == 0 ? 24 : 1049);
+
+		bcopy(raw, bad, sizeof(raw));
+		bad[ISO_WIRE_BASE + 2074] = (unsigned char)(1u << field);
+		/* A present empty string is valid; bytes after its NUL are not. */
+		CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		bad[path_offset + 1] = 'x';
+		CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_EINVAL);
+		memset(bad + path_offset, 'x', 1025);
+		CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_EINVAL);
+		memset(path, 'x', 1024);
+		path[1024] = '\0';
+		request.write.boot_bios = field == 0 ? path : NULL;
+		request.write.boot_efi = field == 1 ? path : NULL;
+		CHECK(fsimg_job_encode(&request, bad, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(strlen(field == 0 ? decoded.write.boot_bios :
+		    decoded.write.boot_efi) == 1024);
+		path[1024] = 'x';
+		path[1025] = '\0';
+		CHECK(fsimg_job_encode(&request, bad, NULL) == FSIMG_EINVAL);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1824,6 +1977,8 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_iso_jobs_have_canonical_wire_bytes();
+	test_iso_jobs_reject_malformed_fields();
 	test_job_zstd_levels_roundtrip_and_reject_wide_wire_value();
 	test_zstd_unverified_record_requires_verified_zstd();
 	test_plan_geometry_record();

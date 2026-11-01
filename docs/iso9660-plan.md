@@ -290,7 +290,7 @@ Every stage leaves `make -j32 check` passing and follows the gates below.
   ISO driver:
   * decoded link targets, through a test driver that declares one,
     covering `read_at`, `next_range`, payload verification, `x -O` of a
-    link, terminal failure and the buffer's release on advance;
+    link, terminal failure and the decoded length cleared on advance;
   * the profile rename, with the QNX omitted-name tests unchanged;
   * several walks, through a test driver with two roots, covering
     namespace validation in both, omission scope and accounting;

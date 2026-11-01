@@ -295,7 +295,7 @@ ifs_key(fsimg_reader_t *reader FSIMG_UNUSED, const char *component,
 
 	*length = 0;
 	if (bytes > IFS_PATH_MAX ||
-	    !fsimg_name_in_qnx_profile(component, bytes))
+	    !fsimg_name_in_portable_profile(component, bytes))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_READER,
 		    "selection component is not representable in ImageFS"));
 	bcopy(component, key, bytes);

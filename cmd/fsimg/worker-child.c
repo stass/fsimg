@@ -992,7 +992,7 @@ read_job(worker_child_t *child, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	format = fsimg_job_format(&child->request);
-	fsimg_read_options_init(&options);
+	options = child->request.read;
 	options.format = format[0] == '\0' ? NULL : format;
 	options.fat_codepage = child->request.codepage;
 	status = fsimg_reader_open(child->ctx, child->volume, &options, &child->reader, error);

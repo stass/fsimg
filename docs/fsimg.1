@@ -220,7 +220,10 @@ Aggregate library memory budget; default 256 MiB, minimum 16 MiB.
 A typed filesystem setting; repeatable, each key at most once.
 On reading, only
 .Ar oem=cp437 ,
-the FAT short-name codepage, and
+the FAT short-name codepage,
+.Ar view=auto|rockridge|joliet|primary ,
+the ISO 9660 view, which a format that does not read ISO 9660 refuses
+unless it is auto, and
 .Ar gpt:sector=512|4096 ,
 which forces the GPT sector size and requires gpt in
 .Fl F ,
@@ -1567,8 +1570,8 @@ Information records also give the mountpoint, null when absent, and details,
 an object of each named format detail's decimal string value.
 Format records name their kind: filesystem, scheme, container or
 compression.
-A filesystem's record gives entry_kinds, metadata_fields and write_settings
-as bit masks, max_label_bytes, zero for a format without a label, and
+A filesystem's record gives entry_kinds, metadata_fields, write_settings
+and read_settings as bit masks, max_label_bytes, zero for a format without a label, and
 max_link_target_bytes, zero for a format without symbolic links; a layer's
 gives its suffix, its capabilities, the keys of its settings, the chunk
 encodings it reads as codecs and, for a layer using a compression library,

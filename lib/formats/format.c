@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "format.h"
+#include "settings.h"
 
 /* The registry is the intentional list of supported drivers, in reporting
  * order. Nothing else in common code names a format.
@@ -148,16 +149,19 @@ fsimg_format_survey(const fsimg_format_t *const *registry, size_t count,
  * other decoder is tried. Otherwise every probe runs and exactly one claim
  * decides: a match selects its descriptor and an unsupported or corrupt claim
  * is the result. No claim or several claims cannot be resolved here. A
- * successful claim always names a descriptor with a reader.
+ * successful claim always names a descriptor with a reader, and the variant
+ * its probe identified.
  */
-fsimg_status_t
-fsimg_format_claim(const fsimg_format_t *const *registry, size_t count,
+static fsimg_status_t
+format_claim(const fsimg_format_t *const *registry, size_t count,
     const fsimg_format_t *forced, const unsigned char *prefix, size_t length,
-    uint64_t volume_bytes, const fsimg_format_t **claimed, fsimg_error_t *error)
+    uint64_t volume_bytes, const fsimg_format_t **claimed,
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	fsimg_survey_t survey;
 
 	*claimed = NULL;
+	*variant = NULL;
 	fsimg_format_survey(registry, count, forced, prefix, length,
 	    volume_bytes, &survey);
 	if (survey.format == NULL)
@@ -175,8 +179,20 @@ fsimg_format_claim(const fsimg_format_t *const *registry, size_t count,
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_READER, "recognized format has no reader"));
 	*claimed = survey.format;
+	*variant = survey.variant;
 	fsimg_error_clear(error);
 	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_format_claim(const fsimg_format_t *const *registry, size_t count,
+    const fsimg_format_t *forced, const unsigned char *prefix, size_t length,
+    uint64_t volume_bytes, const fsimg_format_t **claimed, fsimg_error_t *error)
+{
+	const fsimg_format_variant_t *variant;
+
+	return (format_claim(registry, count, forced, prefix, length,
+	    volume_bytes, claimed, &variant, error));
 }
 
 /* The prefix the forced reader format's probe reads, or the largest any
@@ -260,7 +276,7 @@ fsimg_format_open(fsimg_reader_t *reader, const char *forced_name,
     fsimg_error_t *error)
 {
 	const fsimg_format_t *forced, *claimed;
-	const fsimg_format_variant_t *variant;
+	const fsimg_format_variant_t *variant, *identified;
 	unsigned char *prefix;
 	uint64_t volume_bytes;
 	size_t length;
@@ -284,9 +300,16 @@ fsimg_format_open(fsimg_reader_t *reader, const char *forced_name,
 	status = format_read_prefix(reader, length, &prefix, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_format_claim(formats, FORMAT_COUNT, forced, prefix,
-	    length, volume_bytes, &claimed, error);
+	status = format_claim(formats, FORMAT_COUNT, forced, prefix, length,
+	    volume_bytes, &claimed, &identified, error);
 	fsimg_dealloc(prefix);
+	if (status != FSIMG_OK)
+		return (status);
+	/* The format is chosen: a non-default read setting must be one its
+	 * record accepts, before its driver opens.
+	 */
+	status = fsimg_read_settings_check(&reader->options,
+	    variant != NULL ? &variant->info : &identified->info, error);
 	if (status != FSIMG_OK)
 		return (status);
 

@@ -24,7 +24,9 @@ typedef struct fsimg_format_variant fsimg_format_variant_t;
  * replay	re-validate a replayed record's name and payload and make it
  *		the current entry: fill reader->entry except its path, set
  *		the driver's current locator and content state, and for a
- *		regular file set reader->initialized.
+ *		regular file set reader->initialized; for a symbolic link
+ *		whose target the format encodes, declare the decoded target
+ *		with fsimg_reader_set_link_target() instead.
  * keys		derive the namespace keys of a record's name and payload;
  *		the name is the stored component, raw bytes for an omitted
  *		child.
@@ -40,7 +42,10 @@ typedef struct fsimg_format_variant fsimg_format_variant_t;
  * resolve	return one validated extent of the current file containing
  *		logical offset o, where o < reader->initialized. Delivery
  *		checks that it contains o and reads only the part of it
- *		inside reader->content_domain.
+ *		inside reader->content_domain. It is never called for a
+ *		decoded link target.
+ *
+ * open reads its decoding options, such as a view, from reader->options.
  */
 typedef struct fsimg_reader_ops {
 	fsimg_status_t (*open)(fsimg_reader_t *, const fsimg_format_variant_t *,
@@ -71,15 +76,19 @@ typedef struct fsimg_reader_ops {
  * root out of scope, and a descended directory inherits its parent's scope
  * unless the selection sets it. descend, set by full verification, walks
  * omitted directories, which delivery never does; refuse, set by
- * extraction without the skip option, fails at a counted root. The operation that starts the walk sets
- * descend, refuse and the root's scope before its first advance; the walker
- * in directory.c is the only writer of count.
+ * extraction without the skip option, fails at a counted root. The
+ * operation that starts the walk sets descend, refuse and the root's scope
+ * before its first advance; the walker in directory.c is the only writer
+ * of count. uncounted, set by fsimg_walk_restart for every walk of full
+ * verification after the first, takes the whole walk out of scope and
+ * makes fsimg_verify_account count nothing.
  */
 typedef struct fsimg_omission {
 	uint64_t	 count;
 	bool		 root_excluded;
 	bool		 descend;
 	bool		 refuse;
+	bool		 uncounted;
 } fsimg_omission_t;
 
 typedef enum fsimg_reader_state {
@@ -96,6 +105,14 @@ struct fsimg_reader {
 	const fsimg_reader_ops_t *ops;
 	void		*driver;
 	fsimg_host_file_t identity;
+	/* The caller's decoding options, copied at open for the driver's
+	 * open to read, such as the view a format with several presents.
+	 * Common code has checked each setting's form and that a non-default
+	 * one applies to the format. Every borrowed pointer is cleared after
+	 * the copy, format among them: the name is borrowed for detection
+	 * only.
+	 */
+	fsimg_read_options_t options;
 	fsimg_volume_info_t info;
 	fsimg_entry_t	 entry;
 	/* The current file's initialized length: bytes below it come from
@@ -104,6 +121,16 @@ struct fsimg_reader {
 	 * never backing storage, and bounds it by entry.size after.
 	 */
 	uint64_t	 initialized;
+	/* A symbolic link's target the driver decoded at replay, declared
+	 * with fsimg_reader_set_link_target(): link_length bytes in
+	 * link_target, one buffer of FSIMG_SYMLINK_TARGET_MAX bytes allocated
+	 * on the first declaration and kept until the reader is freed or
+	 * fails. The walker clears link_length before each replay, as it
+	 * clears initialized; while it is nonzero, delivery serves the
+	 * current entry from the buffer instead of resolving extents.
+	 */
+	unsigned char	*link_target;
+	size_t		 link_length;
 	/* The image range file storage can occupy, such as the FAT data
 	 * region or the exFAT cluster heap, set by the driver's open. Content
 	 * is never read outside it; until a driver sets it, it is empty. It
@@ -119,23 +146,40 @@ struct fsimg_reader {
 
 fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
+/* Declare the current entry's content a symbolic-link target the driver
+ * decoded at replay from an encoding, such as a sequence of path
+ * components, rather than stored verbatim (specs/design-content.md
+ * #decoded-link-targets). replay calls it after setting entry.kind to
+ * FSIMG_ENTRY_SYMLINK, with a length from 1 through
+ * FSIMG_SYMLINK_TARGET_MAX, otherwise FSIMG_ESTATE. It copies the bytes
+ * into the reader's target buffer and sets entry.size and initialized to
+ * length; delivery then serves them under the same bounds, stability
+ * check and work charging as stored content, and never calls resolve for
+ * the entry. A driver that stores targets verbatim never calls it.
+ */
+fsimg_status_t fsimg_reader_set_link_target(fsimg_reader_t *,
+    const void *, size_t, fsimg_error_t *);
 fsimg_status_t fsimg_reader_stable(fsimg_reader_t *, fsimg_error_t *);
 /* Account the walker's current entry in a verification report, the one
  * place a verifier counts entries: a delivered directory, or a delivered
  * file or other entry with its logical bytes. An entry that is not
- * delivered is walked and checked but not counted here.
+ * delivered, or any entry of an uncounted walk, is walked and checked but
+ * not counted here.
  */
 fsimg_status_t fsimg_verify_account(fsimg_reader_t *,
     fsimg_verify_report_t *, fsimg_error_t *);
 /* Common content delivery for the current file, without the public entry
- * checks or terminal failure: payload verification reads through it.
+ * checks or terminal failure: payload verification reads through it. It
+ * reports the bytes transferred and, among them, the bytes stored: read
+ * from the image rather than synthesized or decoded.
  */
 fsimg_status_t fsimg_reader_content(fsimg_reader_t *, uint64_t, void *, size_t,
-    size_t *, fsimg_error_t *);
+    size_t *, size_t *, fsimg_error_t *);
 /* Payload verification of the current object: read its initialized bytes
  * [0, reader->initialized) in order through common content delivery, in
  * batches of at most capacity bytes into the borrowed buffer, adding every
- * confirmed byte to report->payload_bytes_read, before a failure too. The
+ * confirmed stored byte to report->payload_bytes_read, before a failure
+ * too; a decoded link target's bytes are checked but not stored. The
  * zero tail and allocation slack are never read. The driver decides which
  * objects to read; the walker does not move. capacity must be nonzero.
  */
@@ -163,6 +207,18 @@ void fsimg_walk_scope_children(fsimg_reader_t *, bool);
 fsimg_status_t fsimg_walk_match(fsimg_reader_t *, const char *, bool *,
     fsimg_error_t *);
 fsimg_status_t fsimg_walk_skip(fsimg_reader_t *, fsimg_error_t *);
+/* Several walks (specs/design-directories.md#several-walks): once an
+ * advance of full verification has returned FSIMG_DONE, release the
+ * finished walker so the next advance walks another tree of the volume.
+ * The driver selects that tree's root in its own state first, which its
+ * prepare decodes at level 0; every directory is then prepared, checked
+ * and validated again under the same limits and the same session budget.
+ * The first walk is the counted one, whose entries the report counts;
+ * every restarted walk is uncounted: it still descends into and checks
+ * omitted subtrees, but counts none of them and accounts no entry.
+ * FSIMG_ESTATE outside full verification or before the walk has finished.
+ */
+fsimg_status_t fsimg_walk_restart(fsimg_reader_t *, fsimg_error_t *);
 void fsimg_walk_free(fsimg_reader_t *);
 /* Test hook: the scratch store and frame offset of the record the next
  * advance replays. Both are zero before traversal starts.

@@ -267,9 +267,9 @@ the format. ImageFS has no free
 space, so `-s` and `--free-space` fail with it as settings the format
 cannot honor, and `-e` is its only time setting.
 ISO 9660 takes `level=1|2|3`, the primary hierarchy's interchange level,
-default 3; `boot=PATH` and `efiboot=PATH`, image paths of files in the
-tree being created that become El Torito BIOS and EFI boot images, never
-host paths; and `bootload=N`, the BIOS entry's 512-byte load sectors,
+default 3; `boot=PATH` and `efiboot=PATH`, image paths of at most 1024
+bytes naming files in the tree being created that become El Torito BIOS
+and EFI boot images, never host paths; and `bootload=N`, the BIOS entry's 512-byte load sectors,
 default 4, only with `boot=`. Its `-s` pads the volume with zero blocks,
 and `--free-space` fails, since the format has no free space. On read,
 `view=auto|rockridge|joliet|primary` chooses the

@@ -8,6 +8,7 @@
 
 #include "format.h"
 #include "reader.h"
+#include "settings.h"
 
 static fsimg_status_t reader_ready(const fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t current_file(fsimg_reader_t *, uint64_t, fsimg_error_t *);
@@ -15,10 +16,14 @@ static fsimg_status_t current_file(fsimg_reader_t *, uint64_t, fsimg_error_t *);
 void
 fsimg_read_options_init(fsimg_read_options_t *options)
 {
+	const fsimg_setting_targets_t targets = { .read = options };
+
 	bzero(options, sizeof(*options));
 	options->size = sizeof(*options);
 	options->version = FSIMG_OPTIONS_VERSION;
 	options->fat_codepage = 437;
+	fsimg_settings_init(&fsimg_filesystem_settings, &targets,
+	    FSIMG_RECORD_READ);
 }
 
 static fsimg_status_t
@@ -42,6 +47,9 @@ fsimg_reader_abort(fsimg_reader_t *reader, fsimg_status_t status)
 	bzero(&reader->entry, sizeof(reader->entry));
 	fsimg_walk_free(reader);
 	reader->ops->close(reader);
+	fsimg_dealloc(reader->link_target);
+	reader->link_target = NULL;
+	reader->link_length = 0;
 	return (status);
 }
 
@@ -115,6 +123,32 @@ fsimg_reader_stable(fsimg_reader_t *reader, fsimg_error_t *error)
 }
 
 fsimg_status_t
+fsimg_reader_set_link_target(fsimg_reader_t *reader, const void *bytes,
+    size_t length, fsimg_error_t *error)
+{
+	fsimg_error_t detail;
+
+	if (reader->entry.kind != FSIMG_ENTRY_SYMLINK || bytes == NULL ||
+	    length == 0 || length > FSIMG_SYMLINK_TARGET_MAX)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "a decoded target needs a symbolic link of 1 to 1024 bytes"));
+	if (reader->link_target == NULL) {
+		reader->link_target = fsimg_alloc(reader->ctx,
+		    FSIMG_SYMLINK_TARGET_MAX, &detail);
+		if (reader->link_target == NULL) {
+			if (error != NULL)
+				*error = detail;
+			return (detail.status);
+		}
+	}
+	bcopy(bytes, reader->link_target, length);
+	reader->link_length = length;
+	reader->entry.size = length;
+	reader->initialized = length;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
 fsimg_reader_bytes(fsimg_reader_t *reader, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
@@ -165,6 +199,12 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	if (options->fat_codepage != 0 && options->fat_codepage != 437)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_READER, "FAT short names require CP437"));
+	/* Each setting is well formed now; whether a non-default one applies
+	 * waits for the format detection chooses.
+	 */
+	status = fsimg_read_settings_check(options, NULL, error);
+	if (status != FSIMG_OK)
+		return (status);
 	reader = fsimg_alloc(ctx, sizeof(*reader), &detail);
 	if (reader == NULL) {
 		if (error != NULL)
@@ -173,6 +213,8 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	}
 	reader->ctx = ctx;
 	reader->input = input;
+	reader->options = *options;
+	reader->options.format = NULL;
 	fsimg_session_init(&reader->session, ctx, "image reading", 0);
 	status = fsimg_io_identity(input, &reader->identity,
 	    &reader->host_identity, error);
@@ -205,6 +247,7 @@ fsimg_reader_free(fsimg_reader_t *reader)
 	fsimg_walk_free(reader);
 	if (reader->ops != NULL)
 		reader->ops->close(reader);
+	fsimg_dealloc(reader->link_target);
 	fsimg_dealloc(reader->path);
 	fsimg_dealloc(reader);
 }
@@ -284,12 +327,16 @@ current_file(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
  * file length; an offset at or past it delivers nothing. Bytes below the
  * initialized length are read from the extents the driver resolves, one
  * exact physical read per piece; the rest are synthesized zeros and never
- * touch storage. transferred counts only confirmed bytes, so a failure in a
- * later extent still reports the pieces before it.
+ * touch storage. A decoded link target is served as [0, size) of the
+ * reader's target buffer instead, after the stability check and one unit
+ * of work that a stored read would cost. transferred counts only confirmed
+ * bytes, so a failure in a later extent still reports the pieces before
+ * it; stored counts those among them read from the image, which excludes
+ * synthesized zeros and decoded targets.
  */
 fsimg_status_t
 fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
-    size_t length, size_t *transferred, fsimg_error_t *error)
+    size_t length, size_t *transferred, size_t *stored, fsimg_error_t *error)
 {
 	const fsimg_extent_domain_t *domain = &reader->content_domain;
 	unsigned char *buffer = out;
@@ -300,10 +347,32 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 
 	initialized = reader->initialized;
 	*transferred = 0;
+	*stored = 0;
+	/* Decoded content belongs to a symbolic link whose size the driver
+	 * left at the decoded length; anything else is a driver defect.
+	 */
+	if (reader->link_length != 0 &&
+	    (reader->entry.kind != FSIMG_ENTRY_SYMLINK ||
+	    reader->entry.size != reader->link_length ||
+	    initialized != reader->link_length))
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "decoded link target does not match the current entry"));
 	if (offset >= reader->entry.size)
 		return (FSIMG_OK);
 	if (length > reader->entry.size - offset)
 		length = (size_t)(reader->entry.size - offset);
+	if (reader->link_length != 0) {
+		status = fsimg_reader_stable(reader, error);
+		if (status == FSIMG_OK)
+			status = fsimg_session_charge(&reader->session, 0, 0, 1,
+			    error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (length != 0)
+			bcopy(reader->link_target + offset, buffer, length);
+		*transferred = length;
+		return (FSIMG_OK);
+	}
 	while (*transferred < length) {
 		piece = length - *transferred;
 		if (offset >= initialized) {
@@ -339,6 +408,7 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 		status = fsimg_reader_bytes(reader, image,
 		    buffer + *transferred, piece, &count, error);
 		*transferred += count;
+		*stored += count;
 		offset += count;
 		if (status != FSIMG_OK)
 			return (status);
@@ -350,7 +420,7 @@ fsimg_status_t
 fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
-	size_t batch, count;
+	size_t batch, count, stored;
 	fsimg_status_t status;
 
 	if (transferred != NULL)
@@ -379,7 +449,8 @@ fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
 			return (fsimg_reader_abort(reader, status));
 		count = 0;
 		status = fsimg_reader_content(reader, offset, buffer == NULL ? NULL :
-		    (unsigned char *)buffer + *transferred, batch, &count, error);
+		    (unsigned char *)buffer + *transferred, batch, &count, &stored,
+		    error);
 		*transferred += count;
 		offset += count;
 		if (status != FSIMG_OK)
@@ -433,7 +504,7 @@ fsimg_status_t
 fsimg_verify_account(fsimg_reader_t *reader, fsimg_verify_report_t *report,
     fsimg_error_t *error)
 {
-	if (!fsimg_walk_delivered(reader))
+	if (reader->omission.uncounted || !fsimg_walk_delivered(reader))
 		return (FSIMG_OK);
 	if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY) {
 		report->directories++;
@@ -451,14 +522,16 @@ fsimg_verify_account(fsimg_reader_t *reader, fsimg_verify_report_t *report,
  * request, which resolves and checks extents and polls and charges each I/O
  * call; the loop adds no charge of its own. Delivery completes a batch below
  * entry.size or fails, so a short success is a broken contract, not a retry.
- * The report counter saturates; progress uses the batch's own count.
+ * The report counter saturates and counts the bytes delivery read from
+ * the image; progress uses the batch's transferred count, which includes
+ * a decoded link target's bytes.
  */
 fsimg_status_t
 fsimg_verify_payload(fsimg_reader_t *reader, unsigned char *buffer,
     size_t capacity, fsimg_verify_report_t *report, fsimg_error_t *error)
 {
 	uint64_t offset, remaining;
-	size_t batch, count;
+	size_t batch, count, stored;
 	fsimg_status_t status;
 
 	if (reader == NULL || buffer == NULL || capacity == 0 || report == NULL)
@@ -473,8 +546,8 @@ fsimg_verify_payload(fsimg_reader_t *reader, unsigned char *buffer,
 		batch = remaining > capacity ? capacity : (size_t)remaining;
 		count = 0;
 		status = fsimg_reader_content(reader, offset, buffer, batch,
-		    &count, error);
-		fsimg_stat_add(&report->payload_bytes_read, count);
+		    &count, &stored, error);
+		fsimg_stat_add(&report->payload_bytes_read, stored);
 		if (status != FSIMG_OK)
 			return (status);
 		if (count != batch)

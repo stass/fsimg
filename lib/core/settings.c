@@ -42,6 +42,7 @@ _Static_assert(sizeof(bool) == 1, "a bool member is one byte");
 typedef unsigned char id16_t[16];
 
 #define RECORD_WRITE	fsimg_write_options_t, FSIMG_RECORD_WRITE
+#define RECORD_READ	fsimg_read_options_t, FSIMG_RECORD_READ
 #define RECORD_LAYERS	fsimg_layer_options_t, FSIMG_RECORD_LAYERS
 #define RECORD_INPUTS	fsimg_layer_inputs_t, FSIMG_RECORD_INPUTS
 
@@ -71,6 +72,8 @@ typedef unsigned char id16_t[16];
 	FSIMG_NO_PRESENCE)
 #define XZ_CHECK(rec, member)	BIND(rec, member, FSIMG_KIND_XZ_CHECK,	\
 	fsimg_xz_check_t, FSIMG_NO_PRESENCE)
+#define ISO_VIEW(rec, member)	BIND(rec, member, FSIMG_KIND_ISO_VIEW,	\
+	fsimg_iso_view_t, FSIMG_NO_PRESENCE)
 #define TEXT_(type, record_id, member)	.record = (record_id),		\
 	.kind = FSIMG_KIND_TEXT, .offset = offsetof(type, member),	\
 	.size = TEXT_SIZE(type, member), .presence = FSIMG_NO_PRESENCE
@@ -92,6 +95,16 @@ static const fsimg_setting_choice_t sector_choices[] = {
 };
 static const fsimg_setting_choice_t oem_choices[] = {
 	{ "cp437", { 0 } }, { NULL, { 0 } }
+};
+static const fsimg_setting_choice_t view_choices[] = {
+	{ "auto", { .iso_view = FSIMG_ISO_VIEW_AUTO } },
+	{ "rockridge", { .iso_view = FSIMG_ISO_VIEW_ROCKRIDGE } },
+	{ "joliet", { .iso_view = FSIMG_ISO_VIEW_JOLIET } },
+	{ "primary", { .iso_view = FSIMG_ISO_VIEW_PRIMARY } }, { NULL, { 0 } }
+};
+static const fsimg_setting_choice_t iso_level_choices[] = {
+	{ "1", { .u32 = 1 } }, { "2", { .u32 = 2 } }, { "3", { .u32 = 3 } },
+	{ NULL, { 0 } }
 };
 static const fsimg_setting_choice_t endian_choices[] = {
 	{ "little", { .byte_order = FSIMG_BYTE_ORDER_LITTLE } },
@@ -115,13 +128,18 @@ static const fsimg_setting_choice_t xz_check_choices[] = {
 /*
  * The filesystem's settings: geometry, which every writer accepts and
  * validates against its own profile; oem, the read side's acknowledgement
- * of the CP437 short names every FAT read already uses; and the
- * format-specific fields, each tied to its FSIMG_SETTING_* bit. The
- * mountpoint is a borrowed pointer, NULL for the format's default and ""
- * for an explicit empty path; the command bounds it by the 1025 bytes and
- * terminator of the worker record's mountpoint field. root, the FAT12/16
- * fixed root's entry count, is bounded by its 16-bit on-disk field; the
- * writer rounds it up to whole sectors.
+ * of the CP437 short names every FAT read already uses; view, the read
+ * side's ISO 9660 view; and the format-specific write fields, each tied
+ * to its FSIMG_SETTING_* bit. The mountpoint is a borrowed pointer, NULL
+ * for the format's default and "" for an explicit empty path; the command
+ * bounds it by the 1025 bytes and terminator of the worker record's
+ * mountpoint field. root, the FAT12/16 fixed root's entry count, is
+ * bounded by its 16-bit on-disk field; the writer rounds it up to whole
+ * sectors. The El Torito boot paths are image paths, borrowed like the
+ * mountpoint; the command bounds each by FSIMG_BOOT_PATH_TEXT_BYTES, the
+ * worker record's field, and the writer by the context's path limit.
+ * bootload, the BIOS entry's load sectors, is bounded by its 16-bit
+ * on-disk field.
  */
 static const fsimg_setting_t filesystem_rows[] = {
 	{ .key = "sector", U32(RECORD_WRITE, sector_bytes),
@@ -132,6 +150,10 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .scope = FSIMG_SCOPE_WRITE },
 	{ .key = "oem", NO_STORAGE, .syntax = FSIMG_SYNTAX_CHOICE,
 	    .choices = oem_choices, .scope = FSIMG_SCOPE_READ },
+	{ .key = "view", ISO_VIEW(RECORD_READ, iso_view),
+	    .syntax = FSIMG_SYNTAX_CHOICE, .choices = view_choices,
+	    .initial = { .iso_view = FSIMG_ISO_VIEW_AUTO },
+	    .scope = FSIMG_SCOPE_READ, .support = FSIMG_SETTING_ISO_VIEW },
 	{ .key = "endian", BYTE_ORDER(RECORD_WRITE, byte_order), .syntax = FSIMG_SYNTAX_CHOICE,
 	    .choices = endian_choices,
 	    .initial = { .byte_order = FSIMG_BYTE_ORDER_LITTLE },
@@ -150,7 +172,20 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_MOUNTPOINT },
 	{ .key = "root", U32(RECORD_WRITE, fat_root_entries),
 	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT16_MAX, .nonzero = true,
-	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ROOT_ENTRIES }
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ROOT_ENTRIES },
+	{ .key = "level", U32(RECORD_WRITE, iso_level),
+	    .syntax = FSIMG_SYNTAX_COUNT, .choices = iso_level_choices,
+	    .max = UINT32_MAX, .nonzero = true,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_LEVEL },
+	{ .key = "boot", TEXT_POINTER(RECORD_WRITE, boot_bios),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_BOOT_PATH_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ELTORITO },
+	{ .key = "efiboot", TEXT_POINTER(RECORD_WRITE, boot_efi),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_BOOT_PATH_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ELTORITO },
+	{ .key = "bootload", U32(RECORD_WRITE, boot_load_sectors),
+	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT16_MAX, .nonzero = true,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ELTORITO }
 };
 
 /*
@@ -402,6 +437,8 @@ record_of(const fsimg_setting_t *row, const fsimg_setting_records_t *records)
 	switch (row->record) {
 	case FSIMG_RECORD_WRITE:
 		return (records->write);
+	case FSIMG_RECORD_READ:
+		return (records->read);
 	case FSIMG_RECORD_LAYERS:
 		return (records->layers);
 	case FSIMG_RECORD_INPUTS:
@@ -418,6 +455,8 @@ target_of(const fsimg_setting_t *row, const fsimg_setting_targets_t *targets)
 	switch (row->record) {
 	case FSIMG_RECORD_WRITE:
 		return (targets->write);
+	case FSIMG_RECORD_READ:
+		return (targets->read);
 	case FSIMG_RECORD_LAYERS:
 		return (targets->layers);
 	case FSIMG_RECORD_INPUTS:
@@ -463,6 +502,9 @@ load_member(const fsimg_setting_t *row, const unsigned char *member,
 		break;
 	case FSIMG_KIND_XZ_CHECK:
 		bcopy(member, &value->xz_check, sizeof(value->xz_check));
+		break;
+	case FSIMG_KIND_ISO_VIEW:
+		bcopy(member, &value->iso_view, sizeof(value->iso_view));
 		break;
 	case FSIMG_KIND_TEXT:
 		value->text = (const char *)member;
@@ -510,6 +552,9 @@ store_member(const fsimg_setting_t *row, unsigned char *member,
 		break;
 	case FSIMG_KIND_XZ_CHECK:
 		bcopy(&value->xz_check, member, sizeof(value->xz_check));
+		break;
+	case FSIMG_KIND_ISO_VIEW:
+		bcopy(&value->iso_view, member, sizeof(value->iso_view));
 		break;
 	case FSIMG_KIND_TEXT:
 		/* The whole member is defined: the text, then zeros. A NULL
@@ -561,6 +606,8 @@ values_equal(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->ifsboot_compression == b->ifsboot_compression);
 	case FSIMG_KIND_XZ_CHECK:
 		return (a->xz_check == b->xz_check);
+	case FSIMG_KIND_ISO_VIEW:
+		return (a->iso_view == b->iso_view);
 	case FSIMG_KIND_TEXT:
 		return ((a->text == NULL || a->text[0] == '\0') ==
 		    (b->text == NULL || b->text[0] == '\0'));
@@ -738,6 +785,28 @@ fsimg_write_settings_check(const fsimg_write_options_t *options,
 			    "filesystem settings must hold their defaults "
 			    "without a filesystem writer" :
 			    "write setting does not apply to the image format"));
+	}
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_read_settings_check(const fsimg_read_options_t *options,
+    const fsimg_format_info_t *reader, fsimg_error_t *error)
+{
+	const fsimg_setting_records_t records = { .read = options };
+	const fsimg_setting_t *row;
+	fsimg_status_t status;
+
+	for (size_t i = 0; i < fsimg_filesystem_settings.count; i++) {
+		row = &fsimg_filesystem_settings.rows[i];
+		status = check_row(row, &records, FSIMG_OP_READER, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (reader == NULL || fsimg_setting_is_default(row, &records))
+			continue;
+		if (row->support != 0 && (reader->read_settings & row->support) == 0)
+			return (row_error(row, FSIMG_OP_READER, error,
+			    "read setting does not apply to the image format"));
 	}
 	return (FSIMG_OK);
 }

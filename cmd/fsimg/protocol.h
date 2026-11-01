@@ -8,12 +8,16 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 1970u
+#define FSIMG_JOB_BYTES 4050u
 /* The job record's mountpoint field: one byte more than the longest
  * mountpoint any format stores, 1024 bytes, and its NUL, so the writer,
  * not the record, refuses a longer one.
  */
 #define FSIMG_JOB_MOUNTPOINT_BYTES 1026u
+/* Each El Torito boot image path's field: a path of at most 1024 bytes and
+ * its NUL, the command's capacity for the setting.
+ */
+#define FSIMG_JOB_BOOT_PATH_BYTES 1025u
 #define FSIMG_WIRE_ERROR_BYTES 592u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These

@@ -1433,6 +1433,10 @@ test_wrap_settings(void)
 	bcopy(defaults.volume_uuid, options.volume_uuid,
 	    sizeof(options.volume_uuid));
 	options.mountpoint = defaults.mountpoint;
+	options.iso_level = defaults.iso_level;
+	options.boot_load_sectors = defaults.boot_load_sectors;
+	options.boot_bios = defaults.boot_bios;
+	options.boot_efi = defaults.boot_efi;
 	options.layers = defaults.layers;
 	options.inputs = defaults.inputs;
 	bcopy(defaults.compression, options.compression,

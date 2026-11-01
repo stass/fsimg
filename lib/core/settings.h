@@ -50,6 +50,7 @@ typedef enum fsimg_file_setting {
 typedef enum fsimg_setting_record {
 	FSIMG_RECORD_NONE,	/* No storage: a command-line acknowledgement */
 	FSIMG_RECORD_WRITE,	/* fsimg_write_options_t */
+	FSIMG_RECORD_READ,	/* fsimg_read_options_t */
 	FSIMG_RECORD_LAYERS,	/* fsimg_layer_options_t */
 	FSIMG_RECORD_INPUTS	/* fsimg_layer_inputs_t */
 } fsimg_setting_record_t;
@@ -64,6 +65,7 @@ typedef enum fsimg_setting_kind {
 	FSIMG_KIND_DMG_COMPRESSION,	/* fsimg_dmg_compression_t */
 	FSIMG_KIND_IFSBOOT_COMPRESSION,	/* fsimg_ifsboot_compression_t */
 	FSIMG_KIND_XZ_CHECK,		/* fsimg_xz_check_t */
+	FSIMG_KIND_ISO_VIEW,		/* fsimg_iso_view_t */
 	FSIMG_KIND_TEXT,		/* char[size], NUL-terminated */
 	FSIMG_KIND_ID16,		/* unsigned char[16] */
 	FSIMG_KIND_TEXT_POINTER,	/* const char *, borrowed; NULL absent */
@@ -83,6 +85,7 @@ typedef union fsimg_setting_value {
 	fsimg_dmg_compression_t dmg_compression;
 	fsimg_ifsboot_compression_t ifsboot_compression;
 	fsimg_xz_check_t xz_check;
+	fsimg_iso_view_t iso_view;
 	unsigned char	 id[16];
 	const char	*text;
 	fsimg_io_t	*io;
@@ -107,6 +110,11 @@ typedef enum fsimg_setting_syntax {
  * such settings from each part instead.
  */
 #define FSIMG_SCOPE_PARTITION	0x04u
+
+/* The command's capacity for an El Torito boot image path, the worker
+ * record's field: a path of at most 1024 bytes and its terminator.
+ */
+#define FSIMG_BOOT_PATH_TEXT_BYTES	1025u
 
 /* A row without a presence flag. */
 #define FSIMG_NO_PRESENCE	SIZE_MAX
@@ -173,6 +181,7 @@ typedef struct fsimg_setting_slice {
 /* The records a check or load reads; a NULL record holds every default. */
 typedef struct fsimg_setting_records {
 	const fsimg_write_options_t *write;
+	const fsimg_read_options_t *read;
 	const fsimg_layer_options_t *layers;
 	const fsimg_layer_inputs_t *inputs;
 } fsimg_setting_records_t;
@@ -180,6 +189,7 @@ typedef struct fsimg_setting_records {
 /* The records a store writes; a row's record must be present. */
 typedef struct fsimg_setting_targets {
 	fsimg_write_options_t *write;
+	fsimg_read_options_t *read;
 	fsimg_layer_options_t *layers;
 	fsimg_layer_inputs_t *inputs;
 } fsimg_setting_targets_t;
@@ -246,6 +256,17 @@ void fsimg_settings_init(const fsimg_setting_slice_t *,
  * A failure is FSIMG_EINVAL naming the key, in catalogue order.
  */
 fsimg_status_t fsimg_write_settings_check(const fsimg_write_options_t *,
+    const fsimg_format_info_t *, fsimg_error_t *);
+/*
+ * The filesystem settings of read options, in two steps, since the format
+ * is known only after detection. Without a record (NULL, before detection)
+ * each row is checked structurally: an enum one of its named values. With
+ * the capability record of the detected or forced format, each one not at
+ * its default must also apply: a row without a support bit always, another
+ * when the record's read_settings carries its bit. A failure is
+ * FSIMG_EINVAL naming the key, in catalogue order.
+ */
+fsimg_status_t fsimg_read_settings_check(const fsimg_read_options_t *,
     const fsimg_format_info_t *, fsimg_error_t *);
 
 #endif
