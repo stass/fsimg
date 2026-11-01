@@ -442,7 +442,18 @@ test_descriptors(void)
 	next[7] = 0;
 	put32(next + VD_SPACE, BLOCKS - 1);
 	expect(&image, FSIMG_ECORRUPT, "Joliet geometry");
+	put32(next + VD_SPACE, 0);
+	expect(&image, FSIMG_ECORRUPT, "Joliet zero volume space size");
 	put32(next + VD_SPACE, BLOCKS);
+	put16(next + VD_BLOCK, 512);
+	expect(&image, FSIMG_ECORRUPT, "Joliet block size 512");
+	put16(next + VD_BLOCK, BLOCK);
+	put16(next + VD_SET, 2);
+	expect(&image, FSIMG_ECORRUPT, "Joliet volume set size 2");
+	put16(next + VD_SET, 1);
+	put16(next + VD_SEQUENCE, 2);
+	expect(&image, FSIMG_ECORRUPT, "Joliet volume sequence number 2");
+	put16(next + VD_SEQUENCE, 1);
 	bcopy(next, next + BLOCK, BLOCK);
 	descriptor(next + 2 * BLOCK, 255, 1);
 	expect(&image, FSIMG_EUNSUPPORTED, "two Joliet descriptors");
@@ -532,6 +543,25 @@ test_records(void)
 		{ DR_EXTENT + 7, 1, FSIMG_ECORRUPT, "extent copies disagree" },
 		{ DR_SIZE + 7, 1, FSIMG_ECORRUPT, "length copies disagree" }
 	};
+
+	image = image_new();
+	file = image.bytes + ROOT * BLOCK + 68;
+	record(file, "AB.TXT;1", 8, DATA, 5, 0);
+	expect(&image, FSIMG_OK, "even file identifier with zero pad");
+	check_file(&image, 5, 0, "hello", 5);
+	file[DR_NAME + 8] = 1;
+	expect(&image, FSIMG_ECORRUPT, "nonzero file identifier pad");
+	free(image.bytes);
+
+	image = image_new();
+	file = image.bytes + ROOT * BLOCK + 68;
+	bzero(file, BLOCK - 68);
+	record(file, "AB", 2, ROOT + 1, BLOCK, 2);
+	directory(image.bytes + (ROOT + 1) * BLOCK, ROOT + 1, ROOT, BLOCK);
+	expect(&image, FSIMG_OK, "even directory identifier with zero pad");
+	file[DR_NAME + 2] = 1;
+	expect(&image, FSIMG_ECORRUPT, "nonzero directory identifier pad");
+	free(image.bytes);
 
 	for (size_t i = 0; i < sizeof(mutations) / sizeof(mutations[0]); i++) {
 		image = image_new();

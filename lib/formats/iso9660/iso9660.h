@@ -70,9 +70,13 @@ typedef struct iso_record {
 	bool		 date_present;
 } iso_record_t;
 
-/* A decoded volume descriptor. The fields after version are meaningful
- * for the primary descriptor and a Joliet supplementary descriptor
- * (joliet_level 1 to 3) only; any other descriptor is framed and ignored.
+/* A decoded volume descriptor. block, type, version and joliet_level are
+ * set for every descriptor; the other fields only for the primary
+ * descriptor and a Joliet supplementary descriptor (joliet_level 1 to 3),
+ * any other descriptor being framed and ignored. A primary descriptor's
+ * geometry (volume_space_size, block_size, set_size, sequence) has passed
+ * the reader profile when decoding succeeds; a Joliet descriptor's is only
+ * decoded, and is trusted once volume.c finds it equal to the primary's.
  */
 typedef struct iso_descriptor {
 	iso_record_t	 root;
@@ -83,6 +87,9 @@ typedef struct iso_descriptor {
 	uint32_t	 path_table_l_copy;	/* zero for none */
 	uint32_t	 path_table_m;
 	uint32_t	 path_table_m_copy;	/* zero for none */
+	uint16_t	 block_size;		/* logical block size */
+	uint16_t	 set_size;		/* volume set size */
+	uint16_t	 sequence;		/* volume sequence number */
 	uint8_t		 type;
 	uint8_t		 version;
 	uint8_t		 joliet_level;		/* zero unless Joliet */

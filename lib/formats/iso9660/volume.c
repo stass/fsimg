@@ -164,9 +164,10 @@ hierarchy_check(const fsimg_iso9660_reader_t *iso,
 
 /* The volume is the primary descriptor's block count; the readable volume
  * also ends at the slice's last whole block, and info reports the blocks
- * that leaves out. The descriptor set lies within the volume, and a Joliet
- * descriptor repeats the primary geometry; its set size, sequence number
- * and block size were held to their single accepted values by decoding.
+ * that leaves out. The descriptor set lies within the volume. A Joliet
+ * descriptor repeats the primary descriptor's geometry, which decoding
+ * already held to the profile, so a Joliet value that differs contradicts
+ * the primary descriptor.
  */
 static fsimg_status_t
 geometry_check(fsimg_iso9660_reader_t *iso, fsimg_error_t *error)
@@ -182,9 +183,12 @@ geometry_check(fsimg_iso9660_reader_t *iso, fsimg_error_t *error)
 	status = hierarchy_check(iso, &iso->primary, error);
 	if (status != FSIMG_OK || iso->joliet_level == 0)
 		return (status);
-	if (iso->joliet.volume_space_size != blocks)
-		return (iso_corrupt(error,
-		    "ISO 9660 Joliet descriptor disagrees with the volume size"));
+	if (iso->joliet.volume_space_size != blocks ||
+	    iso->joliet.block_size != iso->primary.block_size ||
+	    iso->joliet.set_size != iso->primary.set_size ||
+	    iso->joliet.sequence != iso->primary.sequence)
+		return (iso_corrupt(error, "ISO 9660 Joliet descriptor "
+		    "disagrees with the primary geometry"));
 	return (hierarchy_check(iso, &iso->joliet, error));
 }
 

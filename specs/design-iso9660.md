@@ -316,6 +316,7 @@ readers accept it. Within the directory, at each position `p`:
 * otherwise `LEN_DR` must be even, at least `34`, at least
   `33 + LEN_FI + pad`, and must end within the block containing `p` and
   within the data length; a record never crosses a block boundary;
+* the pad byte after an even `LEN_FI` is zero;
 * the record's volume sequence number is 1, else `FSIMG_EUNSUPPORTED`;
 * `LEN_FI` is at least 1.
 

@@ -191,9 +191,21 @@ iso_identity(const unsigned char *descriptor)
 	    (type <= ISO_VD_PARTITION || type == ISO_VD_TERMINATOR));
 }
 
+/* The reader profile's geometry: a nonzero volume of 2048-byte blocks. */
+static fsimg_status_t
+geometry_profile_check(uint32_t space_size, uint16_t block_size,
+    fsimg_error_t *error)
+{
+	if (space_size == 0)
+		return (iso_corrupt(error, "ISO 9660 volume space size is zero"));
+	if (block_size != ISO_BLOCK_BYTES)
+		return (iso_unsupported(error,
+		    "ISO 9660 logical block size is not 2048 bytes"));
+	return (FSIMG_OK);
+}
+
 /* The probe's check of a primary descriptor: both copies of the logical
- * block size and the volume space size, a nonzero size, and the one block
- * size the profile accepts.
+ * block size and the volume space size, and the profile's geometry.
  */
 fsimg_status_t
 iso_geometry_decode(const unsigned char *descriptor, uint32_t *space_size,
@@ -208,39 +220,68 @@ iso_geometry_decode(const unsigned char *descriptor, uint32_t *space_size,
 		    error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (*space_size == 0)
-		return (iso_corrupt(error, "ISO 9660 volume space size is zero"));
-	if (block_size != ISO_BLOCK_BYTES)
+	return (geometry_profile_check(*space_size, block_size, error));
+}
+
+/* The geometry fields a primary and a Joliet descriptor share, both copies
+ * of each agreeing; whether the values are acceptable is judged by the
+ * caller.
+ */
+static fsimg_status_t
+geometry_decode(const unsigned char *raw, iso_descriptor_t *out,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = iso_u32both(raw + VD_SPACE_SIZE, &out->volume_space_size,
+	    error);
+	if (status == FSIMG_OK)
+		status = iso_u16both(raw + VD_BLOCK_SIZE, &out->block_size,
+		    error);
+	if (status == FSIMG_OK)
+		status = iso_u16both(raw + VD_SET_SIZE, &out->set_size, error);
+	if (status == FSIMG_OK)
+		status = iso_u16both(raw + VD_SEQUENCE, &out->sequence, error);
+	return (status);
+}
+
+/* The primary descriptor's geometry against the reader profile, before
+ * anything else of the descriptor is decoded: the profile's geometry and a
+ * volume set of one. A Joliet descriptor is held to agreement with these
+ * values instead (volume.c), so its departure is a contradiction rather
+ * than an unsupported profile.
+ */
+static fsimg_status_t
+primary_geometry_check(const iso_descriptor_t *primary, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = geometry_profile_check(primary->volume_space_size,
+	    primary->block_size, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (primary->set_size != 1 || primary->sequence != 1)
 		return (iso_unsupported(error,
-		    "ISO 9660 logical block size is not 2048 bytes"));
+		    "ISO 9660 volume belongs to a multi-volume set"));
 	return (FSIMG_OK);
 }
 
-/* The fields a primary descriptor and a Joliet descriptor share: geometry,
- * path tables, the root record, the label and the four dates.
+/* The rest of a primary or Joliet descriptor after its geometry: path
+ * tables, the file structure version, the label, the four dates and the
+ * root record.
  */
 static fsimg_status_t
 volume_decode(const unsigned char *raw, iso_descriptor_t *out,
     fsimg_error_t *error)
 {
 	fsimg_timestamp_t date;
-	uint16_t set_size, sequence;
 	bool present;
 	fsimg_status_t status;
 
-	status = iso_geometry_decode(raw, &out->volume_space_size, error);
-	if (status == FSIMG_OK)
-		status = iso_u16both(raw + VD_SET_SIZE, &set_size, error);
-	if (status == FSIMG_OK)
-		status = iso_u16both(raw + VD_SEQUENCE, &sequence, error);
-	if (status == FSIMG_OK)
-		status = iso_u32both(raw + VD_PATH_TABLE_SIZE,
-		    &out->path_table_bytes, error);
+	status = iso_u32both(raw + VD_PATH_TABLE_SIZE, &out->path_table_bytes,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (set_size != 1 || sequence != 1)
-		return (iso_unsupported(error,
-		    "ISO 9660 volume belongs to a multi-volume set"));
 	if (raw[VD_STRUCTURE_VERSION] != 1)
 		return (iso_unsupported(error,
 		    "unsupported ISO 9660 file structure version"));
@@ -299,6 +340,8 @@ fsimg_status_t
 iso_descriptor_decode(const unsigned char *raw, uint32_t block,
     iso_descriptor_t *out, fsimg_error_t *error)
 {
+	fsimg_status_t status;
+
 	bzero(out, sizeof(*out));
 	out->block = block;
 	out->type = raw[VD_TYPE];
@@ -314,6 +357,11 @@ iso_descriptor_decode(const unsigned char *raw, uint32_t block,
 		    "unsupported ISO 9660 volume descriptor type or version"));
 	switch (out->type) {
 	case ISO_VD_PRIMARY:
+		status = geometry_decode(raw, out, error);
+		if (status == FSIMG_OK)
+			status = primary_geometry_check(out, error);
+		if (status != FSIMG_OK)
+			return (status);
 		return (volume_decode(raw, out, error));
 	case ISO_VD_SUPPLEMENTARY:
 		out->joliet_level = joliet_level(raw + VD_ESCAPES);
@@ -322,6 +370,9 @@ iso_descriptor_decode(const unsigned char *raw, uint32_t block,
 		if (raw[VD_FLAGS] != 0)
 			return (iso_corrupt(error,
 			    "ISO 9660 Joliet descriptor has volume flags"));
+		status = geometry_decode(raw, out, error);
+		if (status != FSIMG_OK)
+			return (status);
 		return (volume_decode(raw, out, error));
 	case ISO_VD_TERMINATOR:
 		if (!iso_bytes_zero(raw + VD_FLAGS, ISO_BLOCK_BYTES - VD_FLAGS))
@@ -336,9 +387,9 @@ iso_descriptor_decode(const unsigned char *raw, uint32_t block,
 /* Decode the directory record at offset of a 2048-byte block, whose first
  * byte the caller found nonzero. The framing rule: LEN_DR even, at least
  * 34 and 33 + LEN_FI + pad, ending within the block; LEN_FI at least 1;
- * volume sequence number 1. Then both copies of the extent and data
- * length, the recording date, and the flag table, which refuses associated
- * files, record formats and interleaving and rejects reserved bits, a
+ * the pad byte after an even LEN_FI is zero; volume sequence number 1.
+ * Then both copies of the extent and data length, the recording date, and
+ * the flag table, which refuses associated files, record formats and interleaving and rejects reserved bits, a
  * multi-extent directory and an extended attribute record on a directory.
  */
 fsimg_status_t
@@ -364,6 +415,9 @@ iso_record_decode(const unsigned char *block, size_t offset,
 	if (identifier == 0 || used > length)
 		return (iso_corrupt(error,
 		    "ISO 9660 record identifier does not fit its record"));
+	if (identifier % 2 == 0 && raw[DR_IDENTIFIER + identifier] != 0)
+		return (iso_corrupt(error,
+		    "ISO 9660 record identifier pad byte is not zero"));
 	status = iso_u16both(raw + DR_SEQUENCE, &sequence, error);
 	if (status == FSIMG_OK)
 		status = iso_u32both(raw + DR_EXTENT, &out->extent, error);
