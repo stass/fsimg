@@ -916,6 +916,17 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "%s%s\n", active ? ", active" : "", selected ? ", selected" : "");
 }
 
+/* The allocation unit's name in human output: QNX filesystems allocate in
+ * blocks, the other formats in clusters. JSON keeps one field name. The
+ * frame decoder checks that a wire format name is terminated. A new
+ * block-based format joins this list.
+ */
+static bool
+format_counts_blocks(const char *format)
+{
+	return (strcmp(format, "qnx4") == 0 || strcmp(format, "qnx6") == 0);
+}
+
 /* The volume's named details in the driver's order, values in decimal. */
 static void
 volume_details(fsimg_cli_display_t *display, const unsigned char *raw)
@@ -1011,7 +1022,8 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_VOLUME));
 	append(display, "\nSector size:  ");
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_SECTOR));
-	append(display, "\nCluster size: ");
+	append(display, format_counts_blocks((const char *)raw +
+	    FSIMG_WIRE_INFO_FORMAT) ? "\nBlock size:   " : "\nCluster size: ");
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_CLUSTER));
 	append(display, "\nFree space:   ");
 	if ((valid & FSIMG_VOLUME_FREE) != 0)
@@ -1052,6 +1064,7 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 	uint64_t padding = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_PADDING);
 	uint64_t inodes = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_INODES);
 	uint64_t root = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ROOT);
+	bool blocks;
 
 	_Static_assert(sizeof(offsets) / sizeof(offsets[0]) ==
 	    sizeof(keys) / sizeof(keys[0]), "each plan field has one JSON key");
@@ -1085,9 +1098,11 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_FREE));
 		append(display, "\nSector size:  ");
 		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_SECTOR));
-		append(display, "\nCluster size: ");
+		blocks = format_counts_blocks((const char *)raw +
+		    FSIMG_WIRE_PLAN_FORMAT);
+		append(display, blocks ? "\nBlock size:   " : "\nCluster size: ");
 		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_CLUSTER));
-		append(display, "\nClusters:     %llu",
+		append(display, blocks ? "\nBlocks:       %llu" : "\nClusters:     %llu",
 		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_PLAN_UNITS));
 		if (inodes != 0)
 			append(display, "\nInodes:       %llu (%llu free)",
@@ -1507,6 +1522,8 @@ layer(fsimg_cli_display_t *display, const fsimg_layer_info_t *info)
 static void
 format_details(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 {
+	const char *unit;
+
 	append(display, "%s:\n  Profile: ", info->name);
 	prose(display, info->profile);
 	append(display, "\n  Maximum file size: ");
@@ -1515,9 +1532,10 @@ format_details(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 	byte_size(display, info->max_volume_bytes);
 	append(display, "\n  Maximum name: %u UTF-16 units\n  Sector sizes (bytes): ", info->max_name_utf16_units);
 	sizes(display, info->sector_size_mask);
-	append(display, "\n  Read cluster sizes (bytes): ");
+	unit = format_counts_blocks(info->name) ? "block" : "cluster";
+	append(display, "\n  Read %s sizes (bytes): ", unit);
 	sizes(display, info->allocation_unit_size_mask);
-	append(display, "\n  Write cluster sizes (bytes): ");
+	append(display, "\n  Write %s sizes (bytes): ", unit);
 	sizes(display, info->write_allocation_unit_size_mask);
 	append(display, "\n  Entry kinds: ");
 	entry_kinds(display, info->entry_kinds);

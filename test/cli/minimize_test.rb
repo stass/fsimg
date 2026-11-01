@@ -62,10 +62,12 @@ class CliTest < Minitest::Test
       end
 
       human = invoke(arguments: ["c", "-n", "-M", *common, *operands]).stdout
-      assert_includes(human, "Clusters:     #{expected.fetch(:allocation_units)}\n".b, format)
       if format == "qnx6"
+        assert_includes(human, "Blocks:       #{expected.fetch(:allocation_units)}\n".b, format)
+        refute_includes(human, "Cluster".b, format)
         assert_includes(human, "Inodes:       16 (12 free)\n".b)
       else
+        assert_includes(human, "Clusters:     #{expected.fetch(:allocation_units)}\n".b, format)
         refute_includes(human, "Inodes:".b, format)
       end
 

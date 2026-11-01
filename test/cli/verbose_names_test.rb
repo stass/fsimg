@@ -21,21 +21,50 @@ class CliTest < Minitest::Test
     assert_empty(result.stdout)
     assert_equal(expected, verbose_catalog_listing(image: "names.img"))
     assert_equal(expected, verbose_name_lines(result.stderr))
-    %w[Volume\ size: Cluster\ size: Clusters: Inodes:].each do |label|
+    %w[Volume\ size: Block\ size: Blocks: Cluster\ size: Clusters: Inodes:].each do |label|
       refute_includes(result.stderr, label, "one -v prints names without a plan")
     end
     refute_includes(result.stderr, "\u202e".encode(Encoding::UTF_8).b)
   end
 
-  def test_double_verbose_creation_prints_plan_geometry
-    %w[fat16 qnx6].each do |format|
+  def test_fat_and_exfat_plans_and_volume_info_print_cluster_geometry
+    %w[fat16 exfat].each do |format|
       result = invoke(arguments: ["c", "-vv", "-R", "-F", format, "-f", "#{format}.img", "-C", "source", "."])
       assert_empty(result.stdout)
-      assert_includes(result.stderr, "Cluster size:")
-      assert_includes(result.stderr, "Clusters:")
-      assert_includes(result.stderr, "Inodes:") if format == "qnx6"
+      assert_match(/^Cluster size: \d/, result.stderr, format)
+      assert_match(/^Clusters:     \d/, result.stderr, format)
+      refute_includes(result.stderr, "Block", format)
+      plan = invoke(arguments: ["c", "-n", "-R", "-F", format, "-C", "source", "."]).stdout
+      assert_match(/^Cluster size: \d/, plan, format)
+      assert_match(/^Clusters:     \d/, plan, format)
+      refute_includes(plan, "Block", format)
+      info = invoke(arguments: ["i", "-f", "#{format}.img"]).stdout
+      assert_match(/^Cluster size: \d/, info, format)
+      refute_includes(info, "Block size:", format)
       expected = listing(image: "#{format}.img").reject { _1 == '"/.boot"' }
       assert_equal(expected, verbose_name_lines(result.stderr))
+    end
+  end
+
+  def test_qnx_plans_and_volume_info_print_block_geometry
+    %w[qnx6 qnx4].each do |format|
+      result = invoke(arguments: ["c", "-vv", "-R", "-F", format, "-f", "#{format}.img", "-C", "source", "."])
+      plan = invoke(arguments: ["c", "-n", "-R", "-F", format, "-C", "source", "."])
+
+      assert_empty(result.stdout)
+      [result.stderr, plan.stdout].each do |output|
+        assert_match(/^Block size:   \d/, output, format)
+        assert_match(/^Blocks:       \d/, output, format)
+        refute_includes(output, "Cluster", format)
+        assert_includes(output, "Inodes:", format) if format == "qnx6"
+      end
+      # Generated boot files are not source catalog entries.
+      expected = listing(image: "#{format}.img").reject { ['"/.boot"', '"/.altboot"'].include?(_1) }
+      assert_equal(expected, verbose_name_lines(result.stderr), format)
+
+      info = invoke(arguments: ["i", "-f", "#{format}.img"]).stdout
+      assert_match(/^Block size:   \d/, info, format)
+      refute_includes(info, "Cluster", format)
     end
   end
 
@@ -45,8 +74,9 @@ class CliTest < Minitest::Test
     result = invoke(arguments: ["c", "-n", "-v", "-R", "-F", "qnx6", "@names.mtree"])
 
     assert_includes(result.stdout, "Volume size:")
-    assert_includes(result.stdout, "Cluster size:")
-    assert_includes(result.stdout, "Clusters:")
+    assert_match(/^Block size:   \d/, result.stdout)
+    assert_match(/^Blocks:       \d/, result.stdout)
+    refute_includes(result.stdout, "Cluster")
     assert_empty(verbose_name_lines(result.stdout))
     assert_equal(verbose_catalog_listing(image: "names.img"), verbose_name_lines(result.stderr))
     refute_includes(result.stderr, "Volume size:")

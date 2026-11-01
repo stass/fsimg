@@ -2143,7 +2143,9 @@ test_minimize_plan_display(bool json)
 		CHECK(strstr(display.buffer, "\"free_inodes\":\"12\"") != NULL);
 		CHECK(strstr(display.buffer, "\"root_entries\":\"0\"") != NULL);
 	} else {
-		CHECK(strstr(display.buffer, "\nClusters:     4238\n") != NULL);
+		CHECK(strstr(display.buffer, "\nBlock size:   2 KiB\n") != NULL);
+		CHECK(strstr(display.buffer, "\nBlocks:       4238\n") != NULL);
+		CHECK(strstr(display.buffer, "Cluster") == NULL);
 		CHECK(strstr(display.buffer, "\nInodes:       16 (12 free)\n") != NULL);
 	}
 	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_INODES, 0);
