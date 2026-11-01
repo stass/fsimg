@@ -503,6 +503,14 @@
 
 ## Planned features
 
+* [Medium] **Optional zstd and xz compression** (`lib/layers/`,
+  `lib/core/`, `configure.ac`, `cmd/fsimg/options.c`): implement the
+  [compression-library design](specs/design-compression-libs.md) in the
+  [plan's three stages](docs/implementation-plan.md#optional-zstd-and-xz-compression):
+  libzstd and liblzma as optional integrations, `--compress=NAME`, and CI
+  builds with and without them. Confirm that FreeBSD base ships `libzstd.pc`
+  and `liblzma.pc` when the CI job is wired.
+
 * [Low] **Native evidence for 1024-byte link targets on QNX4 and QNX6**
   (`tools/qnx/`, `docs/qnx4-research.md`, `docs/qnx6-research.md`): the
   QNX4 and QNX6 limits of 1023 bytes are the bound fsimg holds evidence

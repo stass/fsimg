@@ -494,6 +494,26 @@ The implementation and its regression suites are present;
 [build.md](build.md) records the exercised platforms, native fixtures,
 sanitizer coverage and explicit skips.
 
+## Optional zstd and xz compression
+
+Implement the [compression-library design](../specs/design-compression-libs.md)
+in three reviewed commits. Each keeps a build without the libraries
+behaving exactly as before, and runs both configurations in CI:
+
+1. **Shared codec support.** Generalize the zlib allocation adapter to the
+   library-neutral codec memory adapter and replace the codec flags with a
+   `version` operation, with zlib's behaviour and reporting unchanged.
+2. **xz.** `--with-xz`, the read and write profiles, settings, error
+   mapping, the fuzz target, and the `xz -t`/`xz -d` oracles with seeded
+   failures; bombs, truncation, concatenation and memory-limit tests.
+3. **zstd and `--compress`.** `--with-zstd` with the allocator link test,
+   the profiles and settings, the fuzz target and the `zstd` oracles, and
+   the `--compress=NAME` option for creation and reading.
+
+Complete: both libraries read and write under `-S required` on Linux and
+FreeBSD, a build without them refuses exactly as before, and the sanitizer
+suites run in the configurations their toolchains support.
+
 ## Extension sequence
 
 QNX6 follows the [format design](../specs/design-qnx6.md), the
