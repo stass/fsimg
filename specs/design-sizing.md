@@ -45,6 +45,7 @@ to a whole sector, it is the same capacity under either policy.
 | QNX6 | Block size over the classic sizes; inode capacity, the catalog's inodes rounded to a whole table block; the block count at the alignment step instead of the 64-block search step | Byte order, the reserve percentage, the system-run recipe |
 | QNX4 | Nothing: the block is 512 bytes and the block count is already the smallest that fits | The native default layout, the 128-slot `.inodes` minimum, the 4096-byte directory rounding |
 | ImageFS | Nothing: the image is exactly its header, mountpoint, records, data and trailer | The 4-byte record and data alignment |
+| APFS | Nothing: the block is 4096 bytes and the block count is already the smallest that fits | The native formatter's fixed regions for the block count, its minimum container and its sizing granularity |
 
 The FAT type minimum is what makes the image the requested variant and is
 not a dimension. The exFAT recommended cluster count is a guidance value, so
@@ -92,6 +93,13 @@ For QNX4 the default block count is the smallest one that holds the fixed
 layout, the objects and the bitmap, found by the short iteration the
 [driver design](design-qnx4-driver.md#planning) states, so minimization
 returns the default volume.
+
+For APFS the default block count is the smallest one, in steps of the
+native formatter's granularity, whose fixed regions (checkpoint areas,
+internal pool and chunk structures, all functions of the block count),
+metadata trees, file data and requested free space fit, found by the
+binary search the [driver design](design-apfs-driver.md#planning) states,
+so minimization returns the default container.
 
 An ImageFS has no free space and no geometry: its size is derived exactly
 from the catalog and the settings by the

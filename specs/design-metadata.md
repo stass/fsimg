@@ -78,9 +78,12 @@ nothing the format lacks is not read again.
 When a format stores a field the entry does not carry, the driver applies its
 documented default. Owner and mode defaults are independent of the process
 umask and host identity: QNX6 uses uid and gid zero, mode `0755` for directories,
-`0644` for regular files and `0777` for symbolic links and FIFOs. Time defaults
+`0644` for regular files and `0777` for symbolic links and FIFOs; APFS uses
+uid and gid zero, `0755` for directories and symbolic links, as macOS
+creates links, and `0644` for regular files and FIFOs. Time defaults
 follow the format's explicit fallback policy, independent of the host time
-zone; QNX4, QNX6 and ImageFS use the planning clock outside reproducible mode.
+zone; QNX4, QNX6, ImageFS and APFS use the planning clock outside
+reproducible mode.
 Reproducible mode replaces every stored time with the epoch. An absent field's
 default is not a loss.
 
@@ -143,7 +146,8 @@ lists the additional kinds and fields a format advertises.
 `fsimg_format_info_t.entry_kinds` and `metadata_fields` use the masks above.
 The record also gains `max_label_bytes`, the format's encoded on-disk label
 capacity in bytes (11 for FAT, 22 for exFAT's eleven UTF-16 units, 48 for
-QNX4), zero for a format without a volume label. Writer construction rejects a non-NULL label
+QNX4, 255 for an APFS volume name), zero for a format without a volume
+label. Writer construction rejects a non-NULL label
 for such a format; the CLI applies its default label only when the value is
 nonzero and passes a NULL label otherwise, so a format that refuses labels,
 such as QNX6, is created without `-L` and fails explicitly when `-L` is given.
@@ -154,7 +158,8 @@ QNX4 stores the inode capacity alone; ImageFS stores the byte order and
 the mountpoint under `FSIMG_SETTING_MOUNTPOINT`, a copied string field, as
 the [ImageFS driver design](design-ifs-driver.md#writer-settings) states;
 FAT12 and FAT16 store the fixed root capacity under
-`FSIMG_SETTING_ROOT_ENTRIES`),
+`FSIMG_SETTING_ROOT_ENTRIES`; APFS stores the volume UUID and the case
+sensitivity under `FSIMG_SETTING_CASE_SENSITIVE`),
 and writer construction rejects a non-default value of any other one with
 `FSIMG_EINVAL` before the driver's `validate` runs, so no driver has to
 remember another format's settings. The CLI generates a random UUID, like
@@ -164,8 +169,8 @@ their fields and defaults; capability checks and CLI conversion share that
 description while format validation retains the value relationships.
 
 `max_link_target_bytes` is the longest symbolic-link target the format
-stores: 1024 for ImageFS, 1023 for QNX4 and QNX6, and zero for FAT and
-exFAT, whose `entry_kinds` lack links. The entry model's ceiling,
+stores: 1024 for ImageFS, 1023 for QNX4, QNX6 and APFS, and zero for FAT
+and exFAT, whose `entry_kinds` lack links. The entry model's ceiling,
 `FSIMG_SYMLINK_TARGET_MAX`, is the largest of these, 1024, and bounds the
 buffers and the host scan; the
 [architecture](architecture.md#names-and-metadata) records the split.

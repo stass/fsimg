@@ -30,8 +30,8 @@ Shared helpers handle bounded I/O, endian conversion, UTF validation,
 resources, and [emission](design-emission.md); a driver does not acquire host
 descriptors or allocate outside its context.
 
-The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4` and
-`ifs`. FAT12,
+The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`,
+`ifs` and `apfs`. FAT12,
 FAT16, and FAT32 share one descriptor and driver; opening selects the variant
 from the validated cluster count. Detection follows one bounded probe contract:
 
@@ -218,6 +218,28 @@ check and extract testing gates the writer capability, as native mounting
 does for QNX6 and QNX4; wrapping a bootable body, built by `mkifs` or
 unwrapped from an existing boot image, is the `ifsboot` container's, gated
 by a native boot.
+
+## APFS
+
+The [APFS design](design-apfs.md) defines the Apple File System as an APFS
+container holding volumes: the container superblock and its checkpoint
+rings, ephemeral, physical and virtual objects with Fletcher-64 checksums,
+object maps keyed by object and transaction, one B-tree format, volume
+superblocks with closed feature tables, filesystem records, hashed directory
+names compared under Unicode normalization and case folding, sparse and
+cloned data streams, transparent compression, snapshots and sealed volumes.
+The probe's identity signature is the `NXSB` magic with the superblock's
+object kind and identifier; `open` selects the newest complete checkpoint
+and one volume, chosen by the `volume=` read setting when the container
+holds several, and a snapshot by `snapshot=`. Encryption and Fusion are
+recognized and unsupported. The [driver design](design-apfs-driver.md)
+defines the code.
+
+The writer builds a new container with one unencrypted volume, reproducing
+the native formatter's empty layout and adding the catalog in one
+transaction. Native `fsck_apfs`, mount and write-after-create testing on
+macOS gates the writer capability, as native testing does for the QNX
+writers; the Linux checkers are a second opinion, never a substitute.
 
 ## Verification and compatibility claims
 

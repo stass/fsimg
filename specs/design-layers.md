@@ -59,7 +59,7 @@ An image is a stack with three slots in fixed order, each at most once:
 
 | Slot | Kind | Names |
 | --- | --- | --- |
-| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`; reserved: `apfs`, `hfs` |
+| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`, `apfs`; reserved: `hfs` |
 | 2 | Scheme | `gpt`, `mbr` |
 | 3 | Container | `dmg`, `vhd`, `simg`, `ifsboot`, `hbcifs` |
 
@@ -1071,7 +1071,9 @@ at most the 128 entries a written table holds; a violation is
 Under reproducible mode an unset identifier is derived from the epoch and a
 role, as a 128-bit GUID value: its 16 bytes in RFC 4122 text order are the
 epoch as a little-endian 64-bit value, one role byte (1 disk, 2 partition,
-3 VHD, 4 DMG segment), one byte holding the partition's 1-based slot
+3 VHD, 4 DMG segment, 5 APFS volume, which the
+[APFS writer](design-apfs.md#settings-and-identities) borrows for its
+volume UUID), one byte holding the partition's 1-based slot
 (zero for every other role) and six zero bytes; then
 the version nibble replaces the high nibble of byte 6 with 4 and the
 variant bits replace the top two bits of byte 8 with `10`, so tools accept

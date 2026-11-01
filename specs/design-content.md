@@ -21,11 +21,14 @@ A regular file's content has three explicit quantities, all in bytes:
 | --- | --- |
 | Logical length | The file size. No content exists at or beyond it. |
 | Initialized length | `0 <= initialized <= logical`. Bytes below it come from storage. |
-| Physical mapping | Validated image ranges that back the initialized bytes. |
+| Physical mapping | Validated image ranges, holes and driver-decoded ranges that together cover the initialized bytes. |
 
 Bytes in `[initialized, logical)` are zero and are synthesized without reading
 backing storage. FAT and QNX6 files have `initialized == logical`. An exFAT file
-uses its valid-data length.
+uses its valid-data length. Below the initialized length a driver may also
+report holes, ranges with no backing storage that read as zero, and decoded
+ranges whose bytes the driver produces from validated storage, such as an
+APFS sparse file's holes and a compressed file's chunks.
 
 For an exFAT file with 16 KiB allocated, a 10 KiB logical length, and 6 KiB
 initialized:
@@ -44,21 +47,38 @@ content interface. Extent lookup alone never authorizes exposing them.
 | Owner | Owns |
 | --- | --- |
 | Common delivery (`lib/read/`) | Bounds against the logical length, the initialized/zero split, transfer batching, source-stability checks, cancellation, work charging, confirmed byte counts, content-domain enforcement, terminal failure |
-| Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated physical extent containing that offset |
+| Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated extent containing that offset: mapped, zero or held |
 | Extent index (optional, `lib/meta/`) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
 
 Delivery calls one driver operation: resolve offset `o < initialized` to an
-extent `(logical_offset, image_offset, length)` with
-`logical_offset <= o < logical_offset + length`. The driver chooses how to
-answer: a sequential chain cursor, a direct block-tree lookup, or the extent
-index. Delivery checks containment, clips the extent to the request and to the
-initialized length, and reads through bounded I/O only inside the reader's
-content domain: the image range file storage can occupy, which the driver
-declares when it opens the volume and which also bounds its extent indexes. A
-driver defect therefore cannot deliver bytes outside that domain, such as
-allocation tables or the boot area, as content. Metadata stored inside the
-domain is not excluded; as with index records, ownership verification detects
-a file extent that names another object's units.
+extent `(kind, logical_offset, length)` with
+`logical_offset <= o < logical_offset + length`. The kind is one of a closed
+set:
+
+| Kind | Further field | Delivery |
+| --- | --- | --- |
+| Mapped | `image_offset` | Reads the image range through bounded I/O |
+| Zero | none | Synthesizes zeros without reading, as for the uninitialized tail |
+| Held | `bytes`, borrowed | Copies from a charged buffer the driver owns and filled by decoding validated storage; the bytes stay valid until the driver's next `resolve` or the walker's next advance |
+
+The driver chooses how to answer: a sequential chain cursor, a direct
+block-tree lookup, or the extent index. Delivery checks containment, clips
+the extent to the request and to the initialized length, and reads mapped
+extents through bounded I/O only inside the reader's content domain: the
+image range file storage can occupy, which the driver declares when it opens
+the volume and which also bounds its extent indexes. A driver defect
+therefore cannot deliver bytes outside that domain, such as allocation
+tables or the boot area, as content. Metadata stored inside the domain is
+not excluded; as with index records, ownership verification detects a file
+extent that names another object's units.
+
+A held extent's bytes come from decoding storage the driver read through the
+same bounded I/O and validated, such as one decompressed chunk or a short
+target the driver decoded from a record; its length is at most the driver's
+held buffer, so delivery copies it without further allocation. Holes and
+held bytes are the format's content, not an optimization: a driver reports
+a zero extent only where its format defines a hole, and never to cover a
+range it failed to resolve.
 
 Payload verification reads through the same delivery. A driver whose
 ownership walk already yields each physical run, such as FAT, can instead read
@@ -72,7 +92,9 @@ allocation once.
 * A range query reports DATA for the whole initialized region and ZERO for
   the uninitialized tail. It answers from these lengths alone: it consumes
   nothing and resolves no storage, so a range query followed by reads of that
-  range costs no additional allocation walk.
+  range costs no additional allocation walk. Holes inside the initialized
+  region are therefore delivered as zero bytes within DATA, which the
+  [API](design-api.md#reader) permits.
 * `next_range()` can return a DATA range spanning several physical extents.
   Callers cannot infer fragmentation from range boundaries; range shapes are
   a delivery decision, not a driver one.
@@ -92,8 +114,8 @@ The extent index is a tool, not a requirement. A driver can keep a sequential
 cursor and build an index only on a seek, prepare one when its metadata
 validation already needs it, or resolve directly and never build one.
 
-Records are three little-endian `uint64_t` values: logical offset, image
-offset, and length. They sit in a paged scratch store charged to the reader's
+The index holds mapped extents only. Records are three little-endian
+`uint64_t` values: logical offset, image offset, and length. They sit in a paged scratch store charged to the reader's
 session. The driver creates an index with its permitted physical domain: the
 image range and allocation-unit alignment that file storage can occupy, such as
 the FAT data region or the exFAT cluster heap. The index owns:

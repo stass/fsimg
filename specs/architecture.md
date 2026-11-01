@@ -19,7 +19,7 @@ stream. Ordinary file use requires no privileges, kernel filesystem driver,
 or external formatter. Device use requires permission to read that endpoint.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
-Power-Safe profiles, QNX4 and the QNX image filesystem (ImageFS) with
+Power-Safe profiles, QNX4, the QNX image filesystem (ImageFS) and APFS with
 independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
@@ -367,8 +367,10 @@ traversal, delivery, or copy lifecycle:
   validates the namespace before any child is exposed, and one walker owns
   traversal, paths, limits, and selection.
 * The [logical content design](design-content.md) has drivers resolve offsets
-  to validated extents. One common operation delivers bytes and zeros and
-  preserves confirmed progress. A shared extent index is optional.
+  to validated extents: mapped image ranges, holes that read as zero, or
+  bytes the driver decoded and holds, such as a decompressed chunk. One
+  common operation delivers bytes and zeros and preserves confirmed
+  progress. A shared extent index is optional.
 * The [emission design](design-emission.md) has the common writer perform
   pre-mutation checks, sink initialization, and complete source copies. Drivers
   write encoded metadata and request copies into planned regions.
@@ -395,6 +397,18 @@ records and the worker protocol remains an explicit checked byte encoding.
 Catalogue operations perform no image I/O and confer no host authority; the
 coordinator opens file settings and passes descriptors under the existing
 security contract.
+
+Filesystem read settings follow the write side's rule. A format's
+capability record lists the read settings it accepts in `read_settings`, as
+it lists write settings in `write_settings`; the format is known only after
+detection, so the common reader refuses a non-default read setting outside
+the selected format's mask with `FSIMG_EINVAL` before the driver opens, and
+no driver silently ignores another format's setting. APFS holds the two
+such settings, `volume=` and `snapshot=`, because an APFS container holds
+several volumes and each volume several snapshots that share blocks: none
+of them is a byte range a layer could select, so the selection belongs to
+the filesystem's reader. FAT's codepage setting stays outside the mask: its
+only accepted values mean the one supported codepage for every format.
 
 The [layer design](design-layers.md) wraps a finished volume in a partition
 scheme, a container and compression, and unwraps them on reading. Layers are
@@ -517,6 +531,23 @@ at its image address and a compiled boot script, and fsimg neither
 produces nor modifies member files, so such a body comes from `mkifs` or
 is unwrapped from an existing boot image, and the `ifsboot` writer
 packages its ImageFS bytes unmodified.
+The [APFS design](design-apfs.md) defines the APFS container: one block
+space whose space manager serves several volumes, copy-on-write objects
+committed in checkpoints, object maps that resolve virtual objects at a
+transaction, one B-tree format for every index, and a filesystem tree per
+volume whose directory names are hashed and compared under Unicode
+normalization and, on case-insensitive volumes, case folding. The reader
+selects one committed checkpoint and one volume, refuses encryption and
+Fusion, and verifies allocation container-wide because volumes share it;
+the [APFS driver design](design-apfs-driver.md) routes every object
+reference through one object reader and every node through one cursor,
+prevents directory cycles by the parent each directory inode records, and
+delivers holes and decompressed chunks through common delivery. The writer
+reproduces the native formatter's empty container and adds the catalog in
+one transaction, and native `fsck_apfs`, mount and write-after-create
+testing gates it, as native testing does for the QNX writers. A DMG or GPT
+partition around an APFS container is peeled by the layers, so the driver
+reads a bare container.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
@@ -637,8 +668,8 @@ The QNX4, QNX6 and ImageFS readers omit an entry whose name is natively
 legal but outside the QNX-family fsimg name profile, instead of failing the
 image, through the
 [prepared-directory contract](design-directories.md#omitted-names); FAT and
-exFAT keep their strict UTF-16 name rules, under which a name is either
-valid or corrupt. The profile is fsimg's, not the format's: one foreign
+exFAT keep their strict UTF-16 name rules and APFS its strict UTF-8 rules,
+under which a name is either valid or corrupt. The profile is fsimg's, not the format's: one foreign
 name, such as a Latin-1 byte in an otherwise ordinary QNX volume, must not
 make the rest of an image unreadable. Omission is a filter on delivery
 only. The entry is validated like any other, enters no listing or
@@ -877,6 +908,22 @@ from factual stream descriptions under a clean-room split, and the GPL
 libraries serve only as out-of-tree black-box oracles that never enter the
 repository or the link.
 
+The LZFSE and LZVN decoders that APFS transparent compression needs are
+imported from Apple's BSD-3-Clause `lzfse` reference implementation, under
+the [codec design](design-codecs.md#imported-lzfse-and-lzvn-decoders), by
+the owner's decision. Importing differs from the LZO choice because the
+license and the cost do: BSD-3-Clause code can be carried in a BSD-2-Clause
+library with its notice and its non-endorsement clause, and the reference
+code is the formats' authoritative definition, so a clean-room decoder
+would cost a describer's pass over it and a second implementation to
+maintain. The import is source in `lib/codec/`, not a linked library, so
+the runtime dependency rule above is unchanged; unlike a system library,
+it does not receive the host's security fixes, so the import record tracks
+upstream changes and advisories, and every update is audited again. The
+imported files are audited per file before import, adapted to
+caller-owned buffers and checked bounds, fuzzed like project code, and
+their notice ships with every distribution, as the Unicode notice does.
+
 The build uses Autoconf, Automake, and Libtool as development tools. Release
 archives contain generated build machinery; users need a C compiler, make,
 and standard host utilities. Public headers are C11 and C++ includable, do not
@@ -898,6 +945,8 @@ lib/formats/exfat/   exFAT codecs, reader, writer
 lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
 lib/formats/qnx4/    QNX4 codecs, reader, writer, verification
 lib/formats/ifs/     ImageFS codecs, reader, writer, verification
+lib/formats/apfs/    APFS codecs, checkpoints, B-trees, reader, writer, verification
+lib/codec/           project-owned and imported compression codecs
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests
