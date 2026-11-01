@@ -29,6 +29,7 @@ static void test_create_operands(void);
 static bool argument_starts(char *const *, const char *);
 static bool every_layer_key_in(char *const *const *);
 static void test_stacks(void);
+static void test_xz_suffix_and_settings_follow_build_support(void);
 static void test_setting_values(void);
 static void test_extract_options(void);
 static void test_list_members_are_normalized(void);
@@ -56,6 +57,39 @@ static void test_rendered_paths(bool);
 static void test_format_masks(bool);
 static size_t list_entry(fsimg_cli_display_t *, const fsimg_entry_t *, char *,
     size_t);
+
+/* Shared with the catalogue check, which requires a command for every key. */
+static char *const xz_settings[] = { "fsimg", "-cn", "-a", "-F", "fat12",
+    "-f", "out.xz", "-o", "xz:level=9", "-o", "xz:check=crc32", ".", NULL };
+
+static void
+test_xz_suffix_and_settings_follow_build_support(void)
+{
+	char *suffix[] = { "fsimg", "-c", "-a", "-F", "fat12", "-f",
+	    "out.img.XZ", ".", NULL };
+	char *unselected[] = { "fsimg", "-cn", "-F", "fat12", "-o",
+	    "xz:level=9", ".", NULL };
+	char *unchecked[] = { "fsimg", "-ca", "-F", "fat12", "-f",
+	    "out.xz", "-o", "xz:check=none", ".", NULL };
+#ifdef FSIMG_XZ
+	fsimg_cli_options_t options;
+
+	CHECK(parse(xz_settings, &options) == FSIMG_OK);
+	CHECK(options.request.layers.xz_level == 9);
+	CHECK(options.request.layers.xz_check == FSIMG_XZ_CRC32);
+	CHECK(strcmp(options.request.compression, "xz") == 0);
+	fsimg_cli_release(&options);
+	CHECK(parse(suffix, &options) == FSIMG_OK);
+	CHECK(strcmp(options.request.compression, "xz") == 0);
+	fsimg_cli_release(&options);
+	check_syntax(unchecked);
+#else
+	check_unsupported(xz_settings);
+	check_unsupported(suffix);
+	check_unsupported(unchecked);
+#endif
+	check_syntax(unselected);
+}
 
 static void
 test_numbers(void)
@@ -639,7 +673,6 @@ test_stacks(void)
 	char *unsupported[][12] = {
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.zst", ".", NULL },
-		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.XZ", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-o", "zstd:level=1", "-f",
 		    "out.img.zst", ".", NULL }
 	};
@@ -721,7 +754,7 @@ test_stacks(void)
 	 */
 	CHECK(every_layer_key_in((char *const *const []){ gpt_settings,
 	    mbr_settings, dmg_settings, vhd_settings, simg_settings,
-	    gzip_settings, ifsboot_settings, NULL }));
+	    gzip_settings, xz_settings, ifsboot_settings, NULL }));
 	CHECK(parse(mbr_settings, &options) == FSIMG_OK);
 	layers = &options.request.layers;
 	CHECK(layers->mbr_id == 0xdeadbeef && layers->mbr_id_set &&
@@ -2035,6 +2068,7 @@ main(int argc, char **argv)
 	test_modes();
 	test_create_operands();
 	test_stacks();
+	test_xz_suffix_and_settings_follow_build_support();
 	test_setting_values();
 	test_extract_options();
 	test_list_members_are_normalized();

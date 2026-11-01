@@ -11,7 +11,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/layers \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
 	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4 \
-	$(ZLIB_CFLAGS) \
+	$(ZLIB_CFLAGS) $(LZMA_CFLAGS) \
 	-I$(top_srcdir)/lib/formats/ifs \
 	-I$(top_srcdir)/lib/codec
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
@@ -103,8 +103,14 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/ifs/verify.c lib/formats/ifs/write-ifs.h \
 	lib/formats/ifs/write-plan.c \
 	lib/formats/ifs/write-emit.c
-# The system zlib is the core's one third-party library; never vendored.
-libfsimg_core_la_LIBADD = $(ZLIB_LIBS)
+# The system zlib is the core's one required third-party library; never
+# vendored. The optional compression libraries join it when configure
+# found them (specs/design-compression-libs.md): each profile's source is
+# compiled only under its conditional, and distributed in every build.
+libfsimg_core_la_LIBADD = $(ZLIB_LIBS) $(LZMA_LIBS)
+if FSIMG_XZ
+libfsimg_core_la_SOURCES += lib/layers/xz.c
+endif
 libfsimg_la_LDFLAGS = -version-info 0:0:0 -no-undefined
 bin_PROGRAMS = fsimg
 fsimg_SOURCES = cmd/fsimg/main.c cmd/fsimg/cli.h cmd/fsimg/options.c \
@@ -355,7 +361,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
 	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c \
-	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/gzip.c \
+	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/compression.c \
 	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c test/ifs-integration.sh.in \
 	test/ifs-native.rb \
 	test/cli.sh.in test/qualify-cli.rb \
@@ -406,7 +412,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/qnx6_test.rb \
 	test/cli/run.rb \
 	test/cli/tree_at_depth_limit_test.rb \
-	test/cli/verbose_names_test.rb \
+	test/cli/verbose_names_test.rb test/cli/xz_test.rb \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
 	specs/design-spec-testing.md test/spec.sh.in \
@@ -430,13 +436,24 @@ check-install: all
 	    "$(LDFLAGS)" "$(PKG_CONFIG)" "$(RUBY)"
 .PHONY: check-installed-consumers
 CLEANFILES = provider-static provider-shared header-installed-cxx
+# A static consumer links the installed archive with the private libraries
+# the installed metadata names, so the check follows libfsimg.pc rather
+# than a list of its own. pkg-config quotes each flag for the shell, so the
+# flags become the positional parameters through eval, less -lfsimg, which
+# the archive replaces.
+installed_private_libs = flags=`PKG_CONFIG_PATH= \
+	PKG_CONFIG_LIBDIR="$(pkgconfigdir)" "$(PKG_CONFIG)" --static --libs \
+	libfsimg` || exit 1; eval "set -- $$flags"; for flag do shift; \
+	test "$$flag" = -lfsimg || set -- "$$@" "$$flag"; done
 check-installed-consumers:
+	$(installed_private_libs); \
 	$(CC) "-I$(includedir)" $(CPPFLAGS) $(CFLAGS) -std=c11 $(LDFLAGS) \
-	    "$(examplesdir)/provider.c" "$(libdir)/libfsimg.a" $(ZLIB_LIBS) -o provider-static
+	    "$(examplesdir)/provider.c" "$(libdir)/libfsimg.a" "$$@" -o provider-static
 	$(CC) "-I$(includedir)" "-L$(libdir)" $(CPPFLAGS) $(CFLAGS) -std=c11 $(LDFLAGS) \
 	    "$(examplesdir)/provider.c" -lfsimg -o provider-shared
+	$(installed_private_libs); \
 	$(CXX) "-I$(includedir)" $(CPPFLAGS) $(CXXFLAGS) -std=c++11 $(LDFLAGS) \
-	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" $(ZLIB_LIBS) -o header-installed-cxx
+	    "$(srcdir)/test/header_cpp.cc" "$(libdir)/libfsimg.a" "$$@" -o header-installed-cxx
 	./header-installed-cxx
 # The scripts call test programs and helpers, so every check program is a
 # prerequisite rather than a list kept in step with the scripts.
@@ -542,7 +559,7 @@ clean-local:
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
 	    protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
-	    plist-fuzz-corpus gzip-fuzz-corpus mtree-fuzz-corpus \
+	    plist-fuzz-corpus gzip-fuzz-corpus xz-fuzz-corpus mtree-fuzz-corpus \
 	    codec-fuzz-corpus ifs-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish

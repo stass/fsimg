@@ -589,8 +589,11 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
  * container the disk is the file the layers were peeled from, so the two
  * lengths match exactly, and every container field is zero; a container
  * is a registered one, and its disk is the length its tables declare,
- * which bounds what follows. Only a container has details, and only a
- * verified one unverified fields. Without a scheme every table field is zero;
+ * which bounds what follows. Only a container has details. Only a
+ * verified image names unverified entries: the compression's own entry
+ * first when it has one, then a container's fields, so without a
+ * container the list is empty or exactly the compression's entry. Without
+ * a scheme every table field is zero;
  * with one, the sector size is GPT's or MBR's and the selection lies in
  * the table. The caller checks the file against the input it knows.
  */
@@ -599,6 +602,8 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 {
 	const unsigned char *raw = frame->payload;
 	const fsimg_layer_t *layer;
+	const char *unverified = (const char *)raw + FSIMG_WIRE_IMAGE_UNVERIFIED;
+	const char *own = "";
 	uint64_t flags, sector, slots, selected, checked;
 	bool scheme;
 
@@ -628,10 +633,13 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 		    FSIMG_WIRE_IMAGE_COMPRESSION);
 		if (layer == NULL || layer->compression == NULL)
 			return (false);
+		if (layer->compression->unverified != NULL)
+			own = layer->compression->unverified;
 	}
 	if ((flags & ~(uint64_t)(FSIMG_WIRE_IMAGE_UNSELECTED |
 	    FSIMG_WIRE_IMAGE_VERIFIED)) != 0 ||
-	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID) > UINT32_MAX)
+	    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID) > UINT32_MAX ||
+	    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) == 0 && unverified[0] != '\0'))
 		return (false);
 	if (raw[FSIMG_WIRE_IMAGE_CONTAINER] == '\0') {
 		if (fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK) !=
@@ -640,13 +648,11 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_CHUNKS) != 0 ||
 		    !bytes_zero(raw + FSIMG_WIRE_IMAGE_CONTAINER_GUID, 16) ||
 		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DETAIL_COUNT) != 0 ||
-		    raw[FSIMG_WIRE_IMAGE_UNVERIFIED] != '\0')
+		    (unverified[0] != '\0' && strcmp(unverified, own) != 0))
 			return (false);
 	} else {
 		layer = fsimg_layer_find((const char *)raw + FSIMG_WIRE_IMAGE_CONTAINER);
-		if (layer == NULL || layer->container == NULL ||
-		    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) == 0 &&
-		    raw[FSIMG_WIRE_IMAGE_UNVERIFIED] != '\0'))
+		if (layer == NULL || layer->container == NULL)
 			return (false);
 	}
 	/* A reason exactly when no volume was selected, and then no slot. */

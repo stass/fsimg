@@ -488,6 +488,20 @@
   from one list goes unnoticed. Move the helpers to a directory autotools never
   writes, so one rule in each place covers every file there.
 
+* [Low] **Static consumers miss the optional libraries' own dependencies**
+  (`configure.ac`, `libfsimg.pc.in`): `LZMA_LIBS` (and `ZSTD_LIBS`) come
+  from `pkg-config --libs`, not `--static`, and enter `Libs.private`, so a
+  fully static consumer of a static liblzma that needs `-pthread` or
+  `-lmd` does not get them. Record `Requires.private: liblzma` (and
+  `libzstd`) when pkg-config found the library, keeping `Libs.private` for
+  a library found on the default paths.
+
+* [Low] **`check-install` does not replay feature options**
+  (`build-aux/check-install.sh`): the qualification reconfigures without
+  the outer build's `--with-xz`/`--without-xz` or `LZMA_*` (nor `ZLIB_*`),
+  so a `--without-xz` tree qualifies an install that found liblzma. Replay
+  `config.status --config` as `sanitize.sh` does.
+
 ## Security residuals
 
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg

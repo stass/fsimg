@@ -496,11 +496,17 @@ expect_refused(fixture_t *f, const char *stack, uint64_t volume_bytes,
 	fsimg_write_options_t options;
 	fsimg_plan_info_t info;
 	fsimg_error_t error;
+	fsimg_status_t actual;
 
 	write_options(&options, flags, EPOCH, layers);
 	options.volume_bytes = volume_bytes;
 	bzero(&error, sizeof(error));
-	CHECK(plan_only(f, stack, &options, &info, &error) == status);
+	actual = plan_only(f, stack, &options, &info, &error);
+	if (actual != status)
+		fprintf(stderr, "%s: expected status %d, got %d, path \"%s\", "
+		    "message \"%s\"\n", stack, status, actual, error.path,
+		    error.message);
+	CHECK(actual == status);
 	if (path != NULL && strcmp(error.path, path) != 0) {
 		fprintf(stderr, "%s: path \"%s\", message \"%s\"\n", stack, error.path,
 		    error.message);
@@ -657,7 +663,7 @@ test_settings(void)
 	expect_refused(&f, "fat12/gpt", MIB, &layers, FSIMG_WRITE_REPRODUCIBLE,
 	    FSIMG_EINVAL, "mbr:active");
 	fsimg_layer_options_init(&layers);
-	layers.reserved[3] = 1;
+	layers.reserved[2] = 1;
 	expect_refused(&f, "fat12/gpt", MIB, &layers, FSIMG_WRITE_REPRODUCIBLE,
 	    FSIMG_EINVAL, NULL);
 	fsimg_layer_options_init(&layers);

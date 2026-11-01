@@ -15,9 +15,17 @@
  * The layer registry is the one list of layer names and file suffixes.
  * Schemes, containers and gzip are read and written, except hbcifs, which
  * is read only, and ifsboot, which writes only the machines and modes its
- * machine table lists as writable; zstd and xz are compression names reserved
- * for later profiles, recognized by name and suffix with no operations.
+ * machine table lists as writable. zstd and xz are optional integrations
+ * over system libraries: a build with the library names the
+ * profile's operations here, and one without it keeps the name, suffix
+ * and settings with no operations, which every capability, refusal and
+ * survey derives from. This is the one place a build's libraries differ.
  */
+#ifdef FSIMG_XZ
+#define XZ_COMPRESSION	(&fsimg_xz_compression)
+#else
+#define XZ_COMPRESSION	NULL
+#endif
 
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme,
@@ -39,7 +47,8 @@ static const fsimg_layer_t layers[] = {
 	    .compression = &fsimg_gzip_compression,
 	    .settings = &fsimg_gzip_settings },
 	{ .name = "zstd", .suffix = ".zst", .kind = FSIMG_LAYER_COMPRESSION },
-	{ .name = "xz", .suffix = ".xz", .kind = FSIMG_LAYER_COMPRESSION }
+	{ .name = "xz", .suffix = ".xz", .kind = FSIMG_LAYER_COMPRESSION,
+	    .compression = XZ_COMPRESSION, .settings = &fsimg_xz_settings }
 };
 
 #define LAYER_COUNT	(sizeof(layers) / sizeof(layers[0]))
@@ -347,7 +356,8 @@ fsimg_layer_options_check(const fsimg_stack_t *stack,
 	char key[32];
 	fsimg_status_t status;
 
-	for (unsigned i = 0; i < 4; i++) {
+	for (size_t i = 0; i < sizeof(options->reserved) /
+	    sizeof(options->reserved[0]); i++) {
 		if (options->reserved[i] != 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_IMAGE, "nonzero reserved layer option"));

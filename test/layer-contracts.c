@@ -122,9 +122,13 @@ static const layer_mode_t hbcifs_modes[] = {
 static const layer_mode_t gzip_modes[] = {
 	{ .id = "default-level", .capabilities = RW_VERIFY },
 };
+#ifdef FSIMG_XZ
+static const layer_mode_t xz_modes[] = {
+	{ .id = "default-level", .capabilities = RW_VERIFY },
+};
+#endif
 
-/* zstd and xz are registered names this build neither reads nor writes;
- * they have no modes, and their scenario is the specified refusal.
+/* Unsupported layers have no modes; their scenario is the specified refusal.
  */
 static const contract_layer_profile_t layer_profiles[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME,
@@ -166,8 +170,15 @@ static const contract_layer_profile_t layer_profiles[] = {
 	    .expected_capabilities = 0, .carries = "",
 	    .payload = PAYLOAD_FAT12, .stack = "fat12" },
 	{ .name = "xz", .kind = FSIMG_LAYER_COMPRESSION,
+#ifdef FSIMG_XZ
+	    .expected_capabilities = RW_VERIFY, .carries = "",
+	    .payload = PAYLOAD_FAT12, .stack = "fat12",
+	    .modes = xz_modes, .mode_count = COUNT(xz_modes),
+	    .spooled = true },
+#else
 	    .expected_capabilities = 0, .carries = "",
 	    .payload = PAYLOAD_FAT12, .stack = "fat12" },
+#endif
 };
 
 /*
@@ -285,7 +296,8 @@ fixture_open(fixture_t *fixture, uint64_t spool_bytes)
 	bzero(fixture, sizeof(*fixture));
 	contract_dir_open(&fixture->dir);
 	fsimg_options_init(&options);
-	options.memory_bytes = 64 * MIB;
+	/* The default xz encoder needs more than 64 MiB. */
+	options.memory_bytes = 128 * MIB;
 	options.scratch_directory_fd = fixture->dir.fd;
 	if (spool_bytes != 0)
 		options.spool_bytes = spool_bytes;
@@ -515,7 +527,7 @@ startup_read(void *argument FSIMG_UNUSED, uint64_t offset, void *buffer,
 
 /*
  * Wrap the payload volume into the profile's stack in one mode, writing
- * the sink sequentially. Gzip compresses the bare volume. An allocation
+ * the sink sequentially. Compression wraps the bare volume. An allocation
  * failure is armed at fail_alloc for the wrap alone. Returns the wrap's
  * status; out holds what the sink received.
  */

@@ -82,8 +82,12 @@ find "$work_dir/src" -type f -exec chmod a-w {} +
 # Arguments given after them take precedence, so the copy is the source and
 # no cache file is shared whatever the outer build was configured with.
 eval "set -- $(./config.status --config)"
+# MemorySanitizer cannot run uninstrumented libraries, and only zlib has an
+# instrumented copy, so its build leaves the optional compressions out.
 if test "$mode" = msan; then
-    set -- "$@" "ZLIB_CFLAGS=$zlib_cflags" "ZLIB_LIBS=$zlib_libs"
+    set -- "$@" "ZLIB_CFLAGS=$zlib_cflags" "ZLIB_LIBS=$zlib_libs" \
+        --without-xz --without-zstd
+    echo 'sanitize.sh: msan builds --without-xz --without-zstd; the xz and zstd profiles are not covered by MemorySanitizer'
 fi
 cd "$work_dir/build"
 ../src/configure "$@" --srcdir=../src --cache-file=/dev/null \

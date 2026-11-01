@@ -20,15 +20,19 @@
 #include <strings.h>
 #include <unistd.h>
 
+#ifdef FSIMG_XZ
+#include <lzma.h>
+#endif
 #include <zlib.h>
 
 #include "fsimg.h"
 #include "host.h"
 #include "internal.h"
+#include "layer.h"
 #include "test.h"
 
 /*
- * The gzip read side and the spool (specs/design-layers.md#gzip and
+ * The gzip and xz profiles and the spool (specs/design-layers.md#gzip and
  * #stream-input-and-the-spool). This file builds its own gzip members, so
  * every header field can be set or damaged, and opens them as files
  * through callbacks and as streams through pipes. Each passing case has
@@ -106,6 +110,8 @@ static pid_t feed(const unsigned char *, size_t, int *);
 static void reap(pid_t);
 static void expect_disk(fixture_t *, const unsigned char *, size_t);
 static void expect_corrupt(const buffer_t *, const char *);
+static void test_xz_registry_reports_build_support(void);
+static void write_seed_buffer(const char *, const char *, const buffer_t *);
 static void test_members(void);
 static void test_member_failures(void);
 static void test_detection(void);
@@ -1047,13 +1053,839 @@ test_spool_write_failure(void)
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
+/* The reserved xz row and its defaults exist even without liblzma. */
+static void
+test_xz_registry_reports_build_support(void)
+{
+	fsimg_layer_options_t layers;
+	fsimg_layer_info_t info;
+#ifndef FSIMG_XZ
+	fsimg_image_info_t image_info;
+#endif
+	fsimg_error_t error;
+	unsigned char raw[64 * KIB] = { 0 };
+	memory_file_t file = { .bytes = raw, .length = sizeof(raw) };
+	fsimg_status_t status;
+	fixture_t f;
+	size_t cursor = 0;
+	bool found = false;
+
+	fsimg_layer_options_init(&layers);
+	CHECK(layers.xz_level == 6 && layers.xz_check == FSIMG_XZ_CRC64);
+	while (fsimg_layer_next(&cursor, &info, NULL) == FSIMG_OK) {
+		if (strcmp(info.name, "xz") != 0)
+			continue;
+		found = true;
+#ifdef FSIMG_XZ
+		char version[64];
+
+		CHECK(info.capabilities ==
+		    (FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
+		snprintf(version, sizeof(version), "liblzma %s", lzma_version_string());
+		CHECK(strcmp(info.codec_version, version) == 0);
+#else
+		CHECK(info.capabilities == 0 && info.codec_version[0] == '\0');
+#endif
+	}
+	CHECK(found);
+	fixture_init(&f, 0);
+#ifdef FSIMG_XZ
+	CHECK(open_file(&f, &file, "xz", NULL, spool_new(&f), &error) ==
+	    FSIMG_EFORMAT);
+#else
+	CHECK(open_file(&f, &file, "xz", NULL, spool_new(&f), &error) ==
+	    FSIMG_EUNSUPPORTED);
+	CHECK(strstr(error.message,
+	    "reading this compression is not supported") != NULL);
+#endif
+	CHECK(strcmp(error.path, "xz") == 0);
+	fixture_free(&f);
+
+	raw[0] = 0xfd;
+	bcopy("7zXZ", raw + 1, 4);
+	file.reads = 0;
+	fixture_init(&f, 0);
+	status = open_file(&f, &file, "", NULL, spool_new(&f), &error);
+#ifdef FSIMG_XZ
+	CHECK(status == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.path, "xz") == 0);
+#else
+	/* Without operations the row is not surveyed. Open retains the
+	 * raw bytes; asking for image information must reject them.
+	 */
+	CHECK(status == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &image_info, &error) ==
+	    FSIMG_EFORMAT);
+#endif
+	fixture_free(&f);
+}
+
+#ifdef FSIMG_XZ
+static void xz_context(fixture_t *, uint64_t, uint64_t);
+static buffer_t xz_of(const unsigned char *, size_t, lzma_check, bool);
+static buffer_t xz_written(const unsigned char *, size_t, unsigned,
+    fsimg_xz_check_t, uint64_t);
+static void xz_expect_bytes(const buffer_t *, const unsigned char *, size_t);
+static void xz_expect_corrupt(const buffer_t *);
+static void test_xz_presets_and_checks_roundtrip_and_reject_damage(void);
+static void test_xz_joined_streams_require_four_byte_padding(void);
+static void test_xz_unchecked_blocks_report_incomplete_verification(void);
+static void test_xz_headers_indexes_and_checks_reject_damage(void);
+static void test_xz_detection_excludes_alone_and_peels_once(void);
+static void test_xz_bomb_stops_before_crossing_spool_limit(void);
+static void test_xz_large_dictionary_fails_before_spooling(void);
+static void test_xz_allocation_failures_release_codec_state(void);
+static void test_xz_decode_charges_compressed_and_decoded_bytes(void);
+static void test_xz_preset_nine_exceeds_default_memory(void);
+static void test_xz_plan_rejects_invalid_level_and_check(void);
+static void test_xz_bound_covers_liblzma_bound_and_rejects_overflow(void);
+static void xz_expect_stream_within_bound(const unsigned char *, size_t,
+    unsigned, const char *);
+static void
+    test_xz_bound_covers_incompressible_and_barely_compressible_data(void);
+static void test_xz_reproducible_bytes_ignore_memory_budget(void);
+static void test_xz_plan_names_compression_and_container_libraries(void);
+static void seed_xz(const char *);
+
+/* Replace the fixture's idle context so every case states its own budget. */
+static void
+xz_context(fixture_t *f, uint64_t memory, uint64_t work)
+{
+	fsimg_options_t options;
+	fsimg_stats_t stats;
+
+	fsimg_ctx_free(f->ctx);
+	fsimg_options_init(&options);
+	options.memory_bytes = memory;
+	options.max_work = work;
+	CHECK(fsimg_ctx_new(&options, &f->ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(f->ctx, &stats, NULL) == FSIMG_OK);
+	f->baseline_memory = stats.memory_bytes;
+}
+
+/* Independent liblzma fixtures include unchecked and multi-block streams.
+ * FULL_FLUSH ends a block without ending the stream; the second half then
+ * starts another block with its own check and index entry.
+ */
+static buffer_t
+xz_of(const unsigned char *data, size_t length, lzma_check check, bool blocks)
+{
+	lzma_stream stream = LZMA_STREAM_INIT;
+	unsigned char piece[64 * KIB];
+	buffer_t out = { 0 };
+	lzma_ret code;
+	size_t half = blocks ? length / 2 : 0;
+
+	CHECK(lzma_easy_encoder(&stream, 0, check) == LZMA_OK);
+	for (unsigned phase = 0; phase < 2; phase++) {
+		stream.next_in = phase == 0 ? data : data + half;
+		stream.avail_in = phase == 0 ? half : length - half;
+		do {
+			stream.next_out = piece;
+			stream.avail_out = sizeof(piece);
+			code = lzma_code(&stream, phase == 0 ? LZMA_FULL_FLUSH : LZMA_FINISH);
+			CHECK(code == LZMA_OK || code == LZMA_STREAM_END);
+			append(&out, piece, sizeof(piece) - stream.avail_out);
+		} while (code != LZMA_STREAM_END);
+	}
+	lzma_end(&stream);
+	return (out);
+}
+
+/* Transcode arbitrary disk bytes through the planned compression into a
+ * stream. No filesystem fixture or raw intermediate is needed.
+ */
+static buffer_t
+xz_written(const unsigned char *data, size_t length, unsigned level,
+    fsimg_xz_check_t check, uint64_t budget)
+{
+	memory_file_t file = { .bytes = data, .length = length };
+	fsimg_layer_options_t layers;
+	fsimg_disk_request_t request;
+	fsimg_disk_plan_t plan;
+	fsimg_session_t session;
+	fsimg_stack_t stack;
+	fsimg_io_ops_t ops;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	struct stat st;
+	buffer_t out = { 0 };
+	uint64_t disk_bytes = length, written;
+	fixture_t f;
+	int fd;
+
+	fixture_init(&f, 0);
+	xz_context(&f, budget, 0);
+	fsimg_io_ops_init(&ops);
+	ops.read_at = file_read;
+	ops.get_size = file_size;
+	CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &file, &f.io, NULL) == FSIMG_OK);
+	fsimg_layer_options_init(&layers);
+	layers.xz_level = level;
+	layers.xz_check = check;
+	CHECK(fsimg_stack_parse("fat12/-/-", &stack, NULL) == FSIMG_OK);
+	fsimg_session_init(&session, f.ctx, "xz test output", 0);
+	request = (fsimg_disk_request_t){ .session = &session,
+	    .stack = &stack, .layers = &layers, .compression = "xz",
+	    .flags = FSIMG_WRITE_REPRODUCIBLE, .partitions = 1 };
+	CHECK(fsimg_disk_plan_init(f.ctx, &request, &plan, &error) == FSIMG_OK);
+	CHECK(fsimg_disk_plan_place(&plan, &disk_bytes, &error) == FSIMG_OK);
+	CHECK(fsimg_disk_plan_budget(f.ctx, &plan, false, &error) == FSIMG_OK);
+	fd = spool_new(&f);
+	fsimg_sink_init(&sink, FSIMG_SINK_STREAM);
+	sink.stream_fd = fd;
+	if (fsimg_disk_output(&session, f.io, &plan, &sink, false,
+	    &written, &error) != FSIMG_OK) {
+		fprintf(stderr, "xz preset %u check %d length %zu: %s\n",
+		    level, check, length, error.message);
+		CHECK(false);
+	}
+	fsimg_disk_plan_free(&plan);
+	CHECK(fstat(fd, &st) == 0 && st.st_size > 0);
+	out.length = out.capacity = (size_t)st.st_size;
+	out.bytes = malloc(out.length);
+	CHECK(out.bytes != NULL);
+	CHECK(pread(fd, out.bytes, out.length, 0) == (ssize_t)out.length);
+	CHECK(close(fd) == 0);
+	fixture_free(&f);
+	return (out);
+}
+
+static void
+xz_expect_bytes(const buffer_t *xz, const unsigned char *data, size_t length)
+{
+	memory_file_t file = { .bytes = xz->bytes, .length = xz->length };
+	fixture_t f;
+
+	fixture_init(&f, 0);
+	xz_context(&f, 128 * MIB, 0);
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) == FSIMG_OK);
+	expect_disk(&f, data, length);
+	fixture_free(&f);
+}
+
+static void
+xz_expect_corrupt(const buffer_t *xz)
+{
+	memory_file_t file = { .bytes = xz->bytes, .length = xz->length };
+	fsimg_error_t error;
+	fixture_t f;
+
+	fixture_init(&f, 0);
+	xz_context(&f, 128 * MIB, 0);
+	CHECK(open_file(&f, &file, "xz", NULL, spool_new(&f), &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.path, "xz") == 0);
+	CHECK(strstr(error.message, "compressed byte ") != NULL);
+	fixture_free(&f);
+}
+
+static void
+test_xz_presets_and_checks_roundtrip_and_reject_damage(void)
+{
+	static const unsigned levels[] = { 0, 6, 9 };
+	unsigned char *data = pattern(512 * KIB, 11);
+	buffer_t xz;
+
+	for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+		for (unsigned check = FSIMG_XZ_CRC64; check <= FSIMG_XZ_SHA256; check++) {
+			xz = xz_written(data, 512 * KIB, levels[i],
+			    (fsimg_xz_check_t)check, 1024 * (uint64_t)MIB);
+			xz_expect_bytes(&xz, data, 512 * KIB);
+			/* Damage the block payload, retaining the signature. */
+			xz.bytes[12 + ((size_t)xz.bytes[12] + 1) * 4 + 5] ^= 0x80;
+			xz_expect_corrupt(&xz);
+			free(xz.bytes);
+		}
+	}
+	free(data);
+}
+
+static void
+test_xz_joined_streams_require_four_byte_padding(void)
+{
+	unsigned char *data = pattern(128 * KIB, 12);
+	buffer_t first = xz_of(data, 64 * KIB, LZMA_CHECK_CRC64, false);
+	buffer_t second = xz_of(data + 64 * KIB, 64 * KIB, LZMA_CHECK_CRC32, false);
+	buffer_t joined;
+
+	for (unsigned padding = 0; padding <= 8; padding += 4) {
+		joined = (buffer_t){ 0 };
+		append(&joined, first.bytes, first.length);
+		for (unsigned i = 0; i < padding; i++)
+			append_byte(&joined, 0);
+		append(&joined, second.bytes, second.length);
+		xz_expect_bytes(&joined, data, 128 * KIB);
+		append_byte(&joined, 0); /* A partial trailing padding group. */
+		xz_expect_corrupt(&joined);
+		free(joined.bytes);
+	}
+	joined = (buffer_t){ 0 };
+	append(&joined, first.bytes, first.length);
+	append(&joined, "\0\0\0\0\0", 5);
+	append(&joined, second.bytes, second.length);
+	xz_expect_corrupt(&joined);
+	free(joined.bytes);
+	free(first.bytes);
+	free(second.bytes);
+	free(data);
+}
+
+static void
+test_xz_unchecked_blocks_report_incomplete_verification(void)
+{
+	unsigned char *data = calloc(1, 64 * KIB);
+	fsimg_layer_report_t report;
+	memory_file_t file;
+	buffer_t xz;
+	fixture_t f;
+
+	CHECK(data != NULL);
+	for (unsigned check = 0; check < 2; check++) {
+		xz = xz_of(data, 64 * KIB, check == 0 ? LZMA_CHECK_NONE :
+		    LZMA_CHECK_CRC64, true);
+		file = (memory_file_t){ .bytes = xz.bytes, .length = xz.length };
+		fixture_init(&f, 0);
+		CHECK(open_file(&f, &file, "", "fat12/-/-", spool_new(&f),
+		    NULL) == FSIMG_OK);
+		expect_disk(&f, data, 64 * KIB);
+		CHECK(fsimg_image_verify(f.image, 0, &report, NULL) == FSIMG_OK);
+		CHECK(report.complete == (check != 0));
+		CHECK(strcmp(report.unverified, check == 0 ? "xz:check" : "") == 0);
+		fixture_free(&f);
+		xz.bytes[xz.length - 16] ^= 1; /* Index CRC32, even with check none. */
+		xz_expect_corrupt(&xz);
+		free(xz.bytes);
+	}
+	free(data);
+}
+
+static void
+test_xz_headers_indexes_and_checks_reject_damage(void)
+{
+	unsigned char *data = pattern(64 * KIB, 13);
+	buffer_t xz = xz_of(data, 64 * KIB, LZMA_CHECK_CRC64, false), cut;
+	size_t index_size, index_start, header_end;
+	size_t truncated_at[4];
+
+	xz_expect_bytes(&xz, data, 64 * KIB);
+	/* Footer backward size locates the index without assuming its length. */
+	index_size = ((size_t)xz.bytes[xz.length - 8] |
+	    (size_t)xz.bytes[xz.length - 7] << 8 |
+	    (size_t)xz.bytes[xz.length - 6] << 16 |
+	    (size_t)xz.bytes[xz.length - 5] << 24) + 1;
+	index_start = xz.length - 12 - index_size * 4;
+	xz.bytes[index_start - 1] ^= 1;
+	xz_expect_corrupt(&xz);
+	xz.bytes[index_start - 1] ^= 1;
+	xz.bytes[xz.length - 16] ^= 1;
+	xz_expect_corrupt(&xz);
+	xz.bytes[xz.length - 16] ^= 1;
+	xz.bytes[7] ^= 1;
+	xz_expect_corrupt(&xz);
+	xz.bytes[7] ^= 1;
+	header_end = 12 + ((size_t)xz.bytes[12] + 1) * 4;
+	for (size_t keep = 1; keep <= header_end; keep++) {
+		cut = xz;
+		cut.length = keep;
+		/* Forcing xz requires its complete six-byte signature. */
+		if (keep < 6) {
+			CHECK(fsimg_xz_compression.probe(xz.bytes, keep, NULL) ==
+			    FSIMG_EFORMAT);
+			continue;
+		}
+		xz_expect_corrupt(&cut);
+	}
+	truncated_at[0] = header_end + 1;
+	truncated_at[1] = index_start - 1;
+	truncated_at[2] = index_start + 1;
+	truncated_at[3] = xz.length - 1;
+
+	for (size_t i = 0; i < sizeof(truncated_at) / sizeof(truncated_at[0]); i++) {
+		cut = xz;
+		cut.length = truncated_at[i];
+		xz_expect_corrupt(&cut);
+	}
+	append(&xz, "garbage", 7);
+	xz_expect_corrupt(&xz);
+	free(xz.bytes);
+	free(data);
+}
+
+static void
+test_xz_detection_excludes_alone_and_peels_once(void)
+{
+	unsigned char *data = pattern(64 * KIB, 14);
+	unsigned char alone[128 * KIB];
+	lzma_stream stream = LZMA_STREAM_INIT;
+	lzma_options_lzma settings;
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	memory_file_t file;
+	buffer_t gzip = gzip_of(data, 64 * KIB), inner, outer;
+	fixture_t f;
+
+	CHECK(!lzma_lzma_preset(&settings, 0));
+	CHECK(lzma_alone_encoder(&stream, &settings) == LZMA_OK);
+	stream.next_in = data;
+	stream.avail_in = 64 * KIB;
+	stream.next_out = alone;
+	stream.avail_out = sizeof(alone);
+	CHECK(lzma_code(&stream, LZMA_FINISH) == LZMA_STREAM_END);
+	file = (memory_file_t){ .bytes = alone, .length = (size_t)stream.total_out };
+	lzma_end(&stream);
+	fixture_init(&f, 0);
+	CHECK(open_file(&f, &file, "", "fat12/-/-", spool_new(&f), NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(info.compression[0] == '\0');
+	fixture_free(&f);
+	fixture_init(&f, 0);
+	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
+	CHECK(open_file(&f, &file, "xz", NULL, spool_new(&f), &error) ==
+	    FSIMG_EFORMAT);
+	CHECK(strcmp(error.path, "xz") == 0);
+	fixture_free(&f);
+	inner = xz_of(data, 64 * KIB, LZMA_CHECK_CRC64, false);
+	outer = xz_of(inner.bytes, inner.length, LZMA_CHECK_CRC64, false);
+	file = (memory_file_t){ .bytes = outer.bytes, .length = outer.length };
+	fixture_init(&f, 0);
+	CHECK(open_file(&f, &file, "", NULL, spool_new(&f), NULL) == FSIMG_OK);
+	expect_disk(&f, inner.bytes, inner.length);
+	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+	fixture_free(&f);
+	free(outer.bytes);
+	free(inner.bytes);
+	free(gzip.bytes);
+	free(data);
+}
+
+static void
+test_xz_bomb_stops_before_crossing_spool_limit(void)
+{
+	unsigned char *zeros = calloc(1, MIB + 1);
+	fsimg_error_t error;
+	memory_file_t file;
+	struct stat st;
+	buffer_t xz;
+	fixture_t f;
+	int spool, watch;
+
+	CHECK(zeros != NULL);
+	xz = xz_of(zeros, MIB + 1, LZMA_CHECK_CRC64, false);
+	CHECK(xz.length < 16 * KIB);
+	xz_expect_bytes(&xz, zeros, MIB + 1);
+	file = (memory_file_t){ .bytes = xz.bytes, .length = xz.length };
+	fixture_init(&f, MIB);
+	spool = spool_new(&f);
+	watch = dup(spool);
+	CHECK(watch != -1);
+	CHECK(open_file(&f, &file, "", NULL, spool, &error) == FSIMG_ELIMIT);
+	CHECK(error.resource == FSIMG_RESOURCE_SPOOL && error.limit == MIB);
+	CHECK(fstat(watch, &st) == 0 && st.st_size > 0 && st.st_size <= MIB);
+	CHECK(close(watch) == 0);
+	fixture_free(&f);
+	free(xz.bytes);
+	free(zeros);
+}
+
+/* LZMA2 property 40 declares UINT32_MAX; 37 declares 1.5 GiB.
+ * Change only that property and reseal the block header CRC32, so the
+ * decoder must reach dictionary allocation rather than reject the header.
+ */
+static void
+test_xz_large_dictionary_fails_before_spooling(void)
+{
+	unsigned char *data = pattern(64 * KIB, 15);
+	buffer_t xz = xz_of(data, 64 * KIB, LZMA_CHECK_CRC64, false);
+	fsimg_error_t error;
+	memory_file_t file;
+	struct stat st;
+	fixture_t f;
+	size_t header_bytes = ((size_t)xz.bytes[12] + 1) * 4;
+	uint32_t crc;
+	int spool, watch;
+
+	xz_expect_bytes(&xz, data, 64 * KIB);
+	CHECK(xz.bytes[13] == 0 && xz.bytes[14] == 0x21 && xz.bytes[15] == 1);
+	for (unsigned property = 37; property <= 40; property += 3) {
+		xz.bytes[16] = (unsigned char)property;
+		crc = lzma_crc32(xz.bytes + 12, header_bytes - 4, 0);
+		for (unsigned i = 0; i < 4; i++)
+			xz.bytes[12 + header_bytes - 4 + i] = (unsigned char)(crc >> (i * 8));
+		file = (memory_file_t){ .bytes = xz.bytes, .length = xz.length };
+		fixture_init(&f, 0);
+		xz_context(&f, 32 * MIB, 0);
+		spool = spool_new(&f);
+		watch = dup(spool);
+		CHECK(watch != -1);
+		CHECK(open_file(&f, &file, "", NULL, spool, &error) == FSIMG_ELIMIT);
+		CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
+		CHECK(strcmp(error.path, "xz") == 0);
+		CHECK(fstat(watch, &st) == 0 && st.st_size == 0);
+		CHECK(close(watch) == 0);
+		fixture_free(&f);
+	}
+	free(xz.bytes);
+	free(data);
+}
+
+static void
+test_xz_allocation_failures_release_codec_state(void)
+{
+	unsigned char *data = pattern(64 * KIB, 16);
+	buffer_t xz = xz_of(data, 64 * KIB, LZMA_CHECK_CRC64, true);
+	fsimg_compression_settings_t settings = {
+		.level = 0, .check = LZMA_CHECK_CRC64
+	};
+	fsimg_error_t error;
+	fsimg_stats_t stats;
+	fsimg_status_t status;
+	memory_file_t file;
+	fixture_t f;
+	void *encoder;
+
+	for (uint64_t attempt = 1;; attempt++) {
+		CHECK(attempt < 256);
+		fixture_init(&f, 0);
+		f.fail_allocation = attempt;
+		file = (memory_file_t){ .bytes = xz.bytes, .length = xz.length };
+		status = open_file(&f, &file, "", NULL, spool_new(&f), &error);
+		if (status == FSIMG_OK)
+			expect_disk(&f, data, 64 * KIB);
+		else
+			CHECK(status == FSIMG_ENOMEM);
+		fixture_free(&f);
+		if (status == FSIMG_OK) {
+			CHECK(attempt > 1);
+			break;
+		}
+	}
+	fixture_init(&f, 0);
+	for (uint64_t attempt = 1;; attempt++) {
+		CHECK(attempt < 256);
+		encoder = NULL;
+		fsimg_test_fail_alloc_after(f.ctx, attempt);
+		status = fsimg_xz_compression.encoder->open(f.ctx, &settings,
+		    NULL, &encoder, &error);
+		fsimg_test_fail_alloc_after(f.ctx, 0);
+		if (encoder != NULL)
+			fsimg_xz_compression.encoder->close(encoder);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+		CHECK(stats.memory_bytes == f.baseline_memory);
+		if (status == FSIMG_OK) {
+			CHECK(attempt > 1);
+			break;
+		}
+		CHECK(status == FSIMG_ENOMEM);
+	}
+	fixture_free(&f);
+	free(xz.bytes);
+	free(data);
+}
+
+/* Invoke decode directly to separate codec work from image probing. */
+static void
+test_xz_decode_charges_compressed_and_decoded_bytes(void)
+{
+	unsigned char *data = pattern(MIB, 17);
+	buffer_t xz = xz_of(data, MIB, LZMA_CHECK_CRC64, false);
+	fsimg_spool_input_t input;
+	fsimg_session_t session;
+	fsimg_spool_t *spool;
+	fsimg_error_t error;
+	fixture_t f;
+	bool unchecked;
+
+	for (unsigned limited = 0; limited < 2; limited++) {
+		fixture_init(&f, 0);
+		xz_context(&f, 32 * MIB, limited != 0 ? MIB / 2 : 0);
+		fsimg_session_init(&session, f.ctx, "xz", 0);
+		input = (fsimg_spool_input_t){ .ctx = f.ctx, .session = &session,
+		    .prefix = xz.bytes, .prefix_length = xz.length, .fd = -1 };
+		/* Once prefix is consumed, use an empty file for end-of-input. */
+		input.fd = open("/dev/null", O_RDONLY);
+		CHECK(input.fd != -1);
+		CHECK(fsimg_spool_adopt(f.ctx, spool_new(&f), &spool, NULL) == FSIMG_OK);
+		if (limited == 0) {
+			CHECK(fsimg_xz_compression.decode(&input, spool, &unchecked,
+			    &error) == FSIMG_OK);
+			CHECK(!unchecked);
+			CHECK(session.progress.work == xz.length + MIB);
+		} else {
+			CHECK(fsimg_xz_compression.decode(&input, spool, &unchecked,
+			    &error) == FSIMG_ELIMIT);
+			CHECK(error.resource == FSIMG_RESOURCE_WORK);
+		}
+		CHECK(close(input.fd) == 0);
+		fsimg_spool_free(spool);
+		fixture_free(&f);
+	}
+	free(xz.bytes);
+	free(data);
+}
+
+static void
+test_xz_preset_nine_exceeds_default_memory(void)
+{
+	fsimg_compression_settings_t settings = {
+		.level = 0, .check = LZMA_CHECK_CRC64
+	};
+	fsimg_error_t error;
+	fixture_t f;
+	void *encoder = NULL;
+
+	fixture_init(&f, 0);
+	xz_context(&f, 256 * MIB, 0);
+	/* open never uses its sink: both outcomes happen before output. */
+	CHECK(fsimg_xz_compression.encoder->open(f.ctx, &settings, NULL,
+	    &encoder, &error) == FSIMG_OK);
+	fsimg_xz_compression.encoder->close(encoder);
+	encoder = NULL;
+
+	settings.level = 9;
+	CHECK(fsimg_xz_compression.encoder->open(f.ctx, &settings, NULL,
+	    &encoder, &error) == FSIMG_ELIMIT);
+	CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
+	CHECK(strcmp(error.path, "xz") == 0);
+	if (encoder != NULL)
+		fsimg_xz_compression.encoder->close(encoder);
+	fixture_free(&f);
+}
+
+static void
+test_xz_plan_rejects_invalid_level_and_check(void)
+{
+	fsimg_layer_options_t layers;
+	fsimg_compression_settings_t settings;
+	fsimg_error_t error;
+
+	fsimg_layer_options_init(&layers);
+	CHECK(fsimg_xz_compression.plan(&layers, FSIMG_WRITE_REPRODUCIBLE,
+	    0, &settings, &error) == FSIMG_OK);
+	CHECK(settings.level == 6 && settings.check == LZMA_CHECK_CRC64);
+	layers.xz_level = 10;
+	CHECK(fsimg_xz_compression.plan(&layers, 0, 0, &settings, &error) ==
+	    FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "xz:level") == 0);
+	layers.xz_level = 6;
+	for (unsigned check = FSIMG_XZ_SHA256 + 1;
+	    check <= FSIMG_XZ_SHA256 + 2; check++) {
+		layers.xz_check = (fsimg_xz_check_t)check;
+		CHECK(fsimg_xz_compression.plan(&layers, 0, 0, &settings,
+		    &error) == FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "xz:check") == 0);
+	}
+}
+
+/* liblzma's independent bound must fit without copying fsimg's formula. */
+static void
+test_xz_bound_covers_liblzma_bound_and_rejects_overflow(void)
+{
+	fsimg_error_t error;
+	uint64_t bound, length;
+
+	CHECK(fsimg_xz_compression.bound(0, &bound, &error) == FSIMG_OK);
+	CHECK(bound >= lzma_stream_buffer_bound(0));
+	for (unsigned power = 0; power <= 40; power++) {
+		length = UINT64_C(1) << power;
+		for (unsigned delta = 0; delta < 3; delta++) {
+			CHECK(fsimg_xz_compression.bound(length + delta, &bound,
+			    &error) == FSIMG_OK);
+			if (length + delta <= SIZE_MAX)
+				CHECK(bound >= lzma_stream_buffer_bound(
+				    (size_t)(length + delta)));
+		}
+	}
+	CHECK(fsimg_xz_compression.bound(UINT64_MAX, &bound, &error) ==
+	    FSIMG_EUNSUPPORTED);
+}
+
+/* Measure the production streaming encoder, then decode independently with
+ * liblzma so an omitted input piece cannot make the bound appear to hold.
+ * The 1 GiB context budget holds preset 9's 674 MiB encoder.
+ */
+static void
+xz_expect_stream_within_bound(const unsigned char *data, size_t length,
+    unsigned level, const char *kind)
+{
+	unsigned char *decoded = malloc(length + 1);
+	fsimg_error_t error;
+	buffer_t xz;
+	uint64_t bound, memory_limit = UINT64_MAX;
+	size_t input_position = 0, output_position = 0;
+	lzma_ret code;
+
+	CHECK(decoded != NULL);
+	xz = xz_written(data, length, level, FSIMG_XZ_SHA256,
+	    UINT64_C(1024) * MIB);
+	CHECK(fsimg_xz_compression.bound(length, &bound, &error) == FSIMG_OK);
+	if (xz.length > bound) {
+		fprintf(stderr, "xz %s preset %u length %zu: output %zu "
+		    "exceeds bound %llu\n", kind, level, length, xz.length,
+		    (unsigned long long)bound);
+		CHECK(xz.length <= bound);
+	}
+	code = lzma_stream_buffer_decode(&memory_limit, 0, NULL, xz.bytes,
+	    &input_position, xz.length, decoded, &output_position, length + 1);
+	if (code != LZMA_OK || input_position != xz.length ||
+	    output_position != length || bcmp(decoded, data, length) != 0) {
+		fprintf(stderr, "xz %s preset %u length %zu: independent "
+		    "decode must consume the stream and reproduce every byte\n",
+		    kind, level, length);
+		CHECK(false);
+	}
+	xz.bytes[xz.length - 16] ^= 1;
+	xz_expect_corrupt(&xz);
+	free(xz.bytes);
+	free(decoded);
+}
+
+static void
+test_xz_bound_covers_incompressible_and_barely_compressible_data(void)
+{
+	static const unsigned levels[] = { 0, 6, 9 };
+	static const size_t lengths[] = { 0, 1, 100, 65535, 65536, 65537,
+	    3 * MIB };
+	static const char *const kinds[] = { "random", "barely compressible" };
+	unsigned char *data = malloc(3 * MIB);
+	uint32_t state = 0x12345678;
+
+	CHECK(data != NULL);
+	for (unsigned kind = 0; kind < 2; kind++) {
+		/* Xorshift bytes resist compression; repeating the previous
+		 * byte every 16 bytes makes the second input barely compressible.
+		 */
+		for (size_t i = 0; i < 3 * MIB; i++) {
+			state ^= state << 13;
+			state ^= state >> 17;
+			state ^= state << 5;
+			data[i] = kind != 0 && i % 16 == 15 ? data[i - 1] :
+			    (unsigned char)state;
+		}
+		for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+			for (size_t j = 0; j < sizeof(lengths) / sizeof(lengths[0]); j++)
+				xz_expect_stream_within_bound(data, lengths[j],
+				    levels[i], kinds[kind]);
+		}
+	}
+	free(data);
+}
+
+static void
+test_xz_reproducible_bytes_ignore_memory_budget(void)
+{
+	unsigned char *data = pattern(MIB, 18);
+	buffer_t first = xz_written(data, MIB, 6, FSIMG_XZ_CRC64, 128 * MIB);
+	buffer_t second = xz_written(data, MIB, 6, FSIMG_XZ_CRC64, 256 * MIB);
+
+	CHECK(first.length == second.length);
+	CHECK(bcmp(first.bytes, second.bytes, first.length) == 0);
+	second.bytes[second.length - 16] ^= 1;
+	xz_expect_corrupt(&second);
+	free(first.bytes);
+	free(second.bytes);
+	free(data);
+}
+
+static void
+test_xz_plan_names_compression_and_container_libraries(void)
+{
+	fsimg_layer_options_t layers;
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_error_t error;
+	char version[128];
+	fixture_t f;
+
+	fixture_init(&f, 0);
+	fsimg_layer_options_init(&layers);
+	fsimg_write_options_init(&options);
+	options.layers = &layers;
+	options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+	options.volume_bytes = MIB;
+	strcpy(options.compression, "xz");
+	for (unsigned container = 0; container < 2; container++) {
+		CHECK(fsimg_writer_new(f.ctx, container != 0 ? "fat12/dmg" :
+		    "fat12", &options, &writer, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		if (container != 0)
+			snprintf(version, sizeof(version), "zlib %s, liblzma %s",
+			    zlibVersion(), lzma_version_string());
+		else
+			snprintf(version, sizeof(version), "liblzma %s",
+			    lzma_version_string());
+		CHECK(strcmp(info.codec_version, version) == 0);
+		fsimg_writer_free(writer);
+
+		layers.xz_check = (fsimg_xz_check_t)(FSIMG_XZ_SHA256 + 1);
+		CHECK(fsimg_writer_new(f.ctx, container != 0 ? "fat12/dmg" :
+		    "fat12", &options, &writer, &error) == FSIMG_EINVAL);
+		CHECK(writer == NULL && strcmp(error.path, "xz:check") == 0);
+		layers.xz_check = FSIMG_XZ_CRC64;
+	}
+	fixture_free(&f);
+}
+
+static void
+seed_xz(const char *directory)
+{
+	unsigned char *data = pattern(32 * KIB, 19);
+	buffer_t xz, second;
+	char name[64];
+
+	for (unsigned level = 0; level <= 6; level += 6) {
+		for (unsigned check = FSIMG_XZ_CRC64; check <= FSIMG_XZ_SHA256; check++) {
+			xz = xz_written(data, 32 * KIB, level,
+		    (fsimg_xz_check_t)check, 128 * MIB);
+			snprintf(name, sizeof(name), "preset-%u-check-%u.seed", level, check);
+			write_seed_buffer(directory, name, &xz);
+			free(xz.bytes);
+		}
+	}
+	xz = xz_of(data, 16 * KIB, LZMA_CHECK_CRC64, false);
+	second = xz_of(data + 16 * KIB, 16 * KIB, LZMA_CHECK_CRC32, false);
+	append(&xz, "\0\0\0\0", 4);
+	append(&xz, second.bytes, second.length);
+	write_seed_buffer(directory, "padded-streams.seed", &xz);
+	free(xz.bytes);
+	free(second.bytes);
+	xz = xz_of(data, 32 * KIB, LZMA_CHECK_NONE, false);
+	write_seed_buffer(directory, "check-none.seed", &xz);
+	free(xz.bytes);
+	xz = xz_of(data, 32 * KIB, LZMA_CHECK_CRC64, true);
+	write_seed_buffer(directory, "multi-block.seed", &xz);
+	free(xz.bytes);
+	free(data);
+}
+#endif
+
+/* Corpus destinations are existing directories; never replace a seed. */
+static void
+write_seed_buffer(const char *directory, const char *name, const buffer_t *buffer)
+{
+	int directory_fd, fd;
+	FILE *out;
+
+	directory_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(directory_fd != -1);
+	fd = openat(directory_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+	CHECK(fd != -1);
+	out = fdopen(fd, "wb");
+	CHECK(out != NULL);
+	CHECK(fwrite(buffer->bytes, 1, buffer->length, out) == buffer->length);
+	CHECK(fclose(out) == 0);
+	CHECK(close(directory_fd) == 0);
+}
+
 int
 main(int argc, char **argv)
 {
 	unsigned char *data;
 	member_t members[2];
 	buffer_t gzip = { 0 };
-	FILE *out;
 
 	/* A small two-member file seeds the gzip fuzzer's corpus. */
 	if (argc == 3 && strcmp(argv[1], "--seed-gzip") == 0) {
@@ -1064,15 +1896,43 @@ main(int argc, char **argv)
 		members[1] = (member_t){ .data = data, .length = 4 * KIB };
 		member_append(&gzip, &members[0]);
 		member_append(&gzip, &members[1]);
-		out = fopen(argv[2], "wb");
-		CHECK(out != NULL);
-		CHECK(fwrite(gzip.bytes, 1, gzip.length, out) == gzip.length);
-		CHECK(fclose(out) == 0);
+		write_seed_buffer(argv[2], "members.seed", &gzip);
 		free(gzip.bytes);
 		free(data);
 		return (0);
 	}
+	if (argc == 3 && strcmp(argv[1], "--seed-xz") == 0) {
+#ifdef FSIMG_XZ
+		seed_xz(argv[2]);
+		return (0);
+#else
+		printf("SKIP: xz seeds require liblzma (FSIMG_XZ)\n");
+		return (77);
+#endif
+	}
+	CHECK(argc == 1);
 	CHECK(signal(SIGPIPE, SIG_IGN) != SIG_ERR);
+	test_xz_registry_reports_build_support();
+#ifdef FSIMG_XZ
+	test_xz_presets_and_checks_roundtrip_and_reject_damage();
+	test_xz_joined_streams_require_four_byte_padding();
+	test_xz_unchecked_blocks_report_incomplete_verification();
+	test_xz_headers_indexes_and_checks_reject_damage();
+	test_xz_detection_excludes_alone_and_peels_once();
+	test_xz_bomb_stops_before_crossing_spool_limit();
+	test_xz_large_dictionary_fails_before_spooling();
+	test_xz_allocation_failures_release_codec_state();
+	test_xz_decode_charges_compressed_and_decoded_bytes();
+	test_xz_preset_nine_exceeds_default_memory();
+	test_xz_plan_rejects_invalid_level_and_check();
+	test_xz_bound_covers_liblzma_bound_and_rejects_overflow();
+	test_xz_bound_covers_incompressible_and_barely_compressible_data();
+	test_xz_reproducible_bytes_ignore_memory_budget();
+	test_xz_plan_names_compression_and_container_libraries();
+#else
+	printf("SKIP: xz profile tests require liblzma (FSIMG_XZ)\n");
+#endif
+
 	test_members();
 	test_member_failures();
 	test_detection();

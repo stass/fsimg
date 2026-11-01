@@ -61,6 +61,10 @@ struct fsimg_image {
 	fsimg_spool_t	*spool;
 	fsimg_io_t	*spooled;
 	const fsimg_layer_t *compression;	/* NULL for none */
+	/* The compression decoded a member without the check its
+	 * unverified entry names.
+	 */
+	bool		 compression_unchecked;
 	uint64_t	 file_bytes;
 	uint64_t	 disk_bytes;
 	/* The container the disk was peeled from, NULL for none; opened owns
@@ -135,6 +139,7 @@ static void container_input(fsimg_image_t *, fsimg_spool_t *,
     fsimg_container_input_t *);
 static fsimg_status_t layer_failed(const fsimg_layer_t *, fsimg_status_t,
     fsimg_error_t *);
+static void append_unverified(fsimg_layer_report_t *, const char *);
 static fsimg_status_t identify_container(fsimg_image_t *,
     const fsimg_layer_t *, const fsimg_layer_t **, fsimg_error_t *);
 static fsimg_status_t second_spool(const fsimg_image_t *,
@@ -598,7 +603,7 @@ fill_spool(fsimg_image_t *image, int stream_fd, const unsigned char *block,
 	if (compression != NULL)
 		status = layer_failed(compression,
 		    compression->compression->decode(&source, image->spool,
-		    error), error);
+		    &image->compression_unchecked, error), error);
 	else
 		status = fsimg_spool_fill(image->spool, &source, error);
 	if (status == FSIMG_OK)
@@ -1565,11 +1570,24 @@ fsimg_image_section(fsimg_image_t *image, const char *name,
 	    error));
 }
 
+/* Add a layer's unverified entries to the report's comma-separated list.
+ * The registry's entries are short constants; the longest pair fits.
+ */
+static void
+append_unverified(fsimg_layer_report_t *out, const char *entries)
+{
+	size_t used = strlen(out->unverified);
+
+	snprintf(out->unverified + used, sizeof(out->unverified) - used, "%s%s",
+	    used == 0 ? "" : ",", entries);
+}
+
 /* Opening the container and the table already performed every check
  * reading needs; verify adds the passes that read beyond the tables, the
- * container's first, and reports the scope reached. A container's fields
- * that no evidence gives a rule are named, and the report is then
- * incomplete although every check passed.
+ * container's first, and reports the scope reached. What a decode or a
+ * container leaves unchecked is named, a compression's check qualified
+ * by its name and a container's fields by their own, and the report is
+ * then incomplete although every check passed.
  */
 fsimg_status_t
 fsimg_image_verify(fsimg_image_t *image, unsigned flags,
@@ -1591,10 +1609,17 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		    "missing layer report or unknown verification flags"));
 	bzero(out, sizeof(*out));
 	payload = (flags & FSIMG_VERIFY_PAYLOAD) != 0;
-	/* Every member was checked as the spool filled. */
-	if (image->compression != NULL)
+	/* Every member was checked as the spool filled, except for the check
+	 * a member without one could not have.
+	 */
+	if (image->compression != NULL) {
 		snprintf(out->compression, sizeof(out->compression), "%s",
 		    image->compression->name);
+		if (image->compression_unchecked &&
+		    image->compression->compression->unverified != NULL)
+			append_unverified(out,
+			    image->compression->compression->unverified);
+	}
 	if (image->container != NULL) {
 		container_input(image, NULL, &container);
 		status = image->container->container->verify(&container,
@@ -1604,7 +1629,7 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		snprintf(out->container, sizeof(out->container), "%s",
 		    image->container->name);
 		if (image->container->container->unverified != NULL)
-			snprintf(out->unverified, sizeof(out->unverified), "%s",
+			append_unverified(out,
 			    image->container->container->unverified);
 	}
 	status = detect_scheme(image, error);

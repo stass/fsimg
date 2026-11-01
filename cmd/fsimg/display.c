@@ -60,6 +60,7 @@ static void long_listing_columns(fsimg_cli_display_t *, const unsigned char *);
 static void entry_start(fsimg_cli_display_t *, const unsigned char *);
 static uint64_t volume_detail(const fsimg_cli_display_t *, const char *);
 static void ifs_counts(fsimg_cli_display_t *);
+static size_t unverified_compression(const char *, const char *);
 static void verification(fsimg_cli_display_t *, const unsigned char *);
 static void format(fsimg_cli_display_t *, const fsimg_format_info_t *);
 static void limits(fsimg_cli_display_t *);
@@ -1273,6 +1274,21 @@ ifs_counts(fsimg_cli_display_t *display)
 		    "references matching shadowed records");
 }
 
+/*
+ * The length of the unverified list's leading entry when it is the
+ * compression's, qualified by its name ("xz:check"), else zero.
+ */
+static size_t
+unverified_compression(const char *unverified, const char *compression)
+{
+	size_t name = strlen(compression);
+
+	if (name == 0 || strncmp(unverified, compression, name) != 0 ||
+	    unverified[name] != ':')
+		return (0);
+	return (strcspn(unverified, ","));
+}
+
 static void
 verification(fsimg_cli_display_t *display, const unsigned char *raw)
 {
@@ -1282,6 +1298,10 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 	const char *scheme = (const char *)image + FSIMG_WIRE_IMAGE_SCHEME;
 	const char *container_name = (const char *)image + FSIMG_WIRE_IMAGE_CONTAINER;
 	const char *unverified = (const char *)image + FSIMG_WIRE_IMAGE_UNVERIFIED;
+	const char *compression = (const char *)image +
+	    FSIMG_WIRE_IMAGE_COMPRESSION;
+	const char *fields;
+	size_t qualified;
 	uint64_t checked = fsimg_load_le64(image + FSIMG_WIRE_IMAGE_CHECKED);
 	uint64_t selected = fsimg_load_le64(image + FSIMG_WIRE_IMAGE_SELECTED);
 	bool layers, table, container;
@@ -1327,18 +1347,33 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 		append(display, "}\n");
 	} else {
 		path_excerpt(display, display->options->image);
-		/* "image": [dmg container,] [GPT partition table (2 partitions)
-		 * and partition 1] filesystem structure verified (...); a
-		 * container with fields no rule checks says so.
+		/* "image": [xz compression (incomplete: ...),] [dmg container,]
+		 * [GPT partition table (2 partitions) and partition 1]
+		 * filesystem structure verified (...). The unverified list
+		 * starts with the compression's entry, qualified by its name,
+		 * when its members lacked their check; the container's own
+		 * fields follow.
 		 */
 		append(display, ":");
+		qualified = unverified_compression(unverified, compression);
+		fields = unverified + qualified;
+		if (fields[0] == ',')
+			fields++;
+		if (qualified != 0) {
+			append(display, " ");
+			prose(display, compression);
+			append(display, " compression (incomplete: ");
+			escape_span(display, unverified, qualified,
+			    ESCAPE_HUMAN, false, true, NULL);
+			append(display, " unverified),");
+		}
 		if (container) {
 			append(display, " ");
 			prose(display, container_name);
 			append(display, " container");
-			if (unverified[0] != '\0') {
+			if (fields[0] != '\0') {
 				append(display, " (incomplete: fields ");
-				prose(display, unverified);
+				prose(display, fields);
 				append(display, " unverified)");
 			}
 			append(display, ",");

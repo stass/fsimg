@@ -41,7 +41,9 @@
  * (startup_vaddr, paddr_bias, image_paddr, ram_paddr, imagefs_paddr) as
  * eight bytes each, one byte whose bits say which of those six and the
  * virtual setting are set, one byte of values (the virtual bit, raw
- * storage), and six zero bytes. The file settings travel as descriptors,
+ * storage), and six zero bytes. The compression settings follow, eight
+ * bytes each: the xz preset and the xz check (fsimg_xz_check_t). The file
+ * settings travel as descriptors,
  * one capability bit each, never in the record. Three eight-byte fields
  * close the record: image input kind, byte length and transfer quantum.
  * These enums name wire positions and sizes only and are independent of
@@ -112,7 +114,9 @@ typedef enum job_string_field {
 	JOB_IFSBOOT_SET = JOB_IFSBOOT_OFFSET + JOB_IFSBOOT_FIELDS * 8,
 	JOB_IFSBOOT_VALUES = JOB_IFSBOOT_SET + 1,
 	JOB_IFSBOOT_RESERVED = JOB_IFSBOOT_VALUES + 1,
-	JOB_INPUT_KIND = JOB_IFSBOOT_RESERVED + 6,
+	JOB_XZ_LEVEL_OFFSET = JOB_IFSBOOT_RESERVED + 6,
+	JOB_XZ_CHECK_OFFSET = JOB_XZ_LEVEL_OFFSET + 8,
+	JOB_INPUT_KIND = JOB_XZ_CHECK_OFFSET + 8,
 	JOB_INPUT_LENGTH = JOB_INPUT_KIND + 8,
 	JOB_INPUT_QUANTUM = JOB_INPUT_LENGTH + 8
 } job_string_field_t;
@@ -180,14 +184,17 @@ _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     sizeof(((fsimg_layer_options_t *)0)->vhd_uuid) == 16,
     "the request holds each layer field");
 /* encode_layers and decode_layers carry every member of the layout below,
- * which ends with gzip_level at 288, the ifsboot settings from 292 and
- * reserved at 328. A new layer setting moves reserved or grows the record
- * and stops the build until they carry it and this layout is updated.
+ * which ends with gzip_level at 288, the ifsboot settings from 292, the
+ * xz settings from 328 and reserved at 336. A new layer setting moves
+ * reserved or grows the record and stops the build until they carry it
+ * and this layout is updated.
  */
 _Static_assert(offsetof(fsimg_layer_options_t, gzip_level) == 288 &&
     offsetof(fsimg_layer_options_t, ifsboot_compress) == 292 &&
     offsetof(fsimg_layer_options_t, ifsboot_imagefs_paddr_set) == 327 &&
-    offsetof(fsimg_layer_options_t, reserved) == 328 &&
+    offsetof(fsimg_layer_options_t, xz_level) == 328 &&
+    offsetof(fsimg_layer_options_t, xz_check) == 332 &&
+    offsetof(fsimg_layer_options_t, reserved) == 336 &&
     sizeof(fsimg_layer_options_t) == 360,
     "every layer setting travels in the job record");
 
@@ -308,6 +315,8 @@ encode_layers(const fsimg_layer_options_t *layers, unsigned char *raw)
 	    JOB_IFSBOOT_VIRTUAL : 0) |
 	    (layers->ifsboot_compress == FSIMG_IFSBOOT_NONE ? JOB_IFSBOOT_RAW :
 	    0));
+	fsimg_store_le64(raw + JOB_XZ_LEVEL_OFFSET, layers->xz_level);
+	fsimg_store_le64(raw + JOB_XZ_CHECK_OFFSET, (uint64_t)layers->xz_check);
 }
 
 /* One encoding per settings value: known flags, a 32-bit identifier that
@@ -319,7 +328,7 @@ layers_valid(const unsigned char *raw)
 {
 	static const unsigned quantities[] = { JOB_DMG_CHUNK_OFFSET,
 	    JOB_VHD_ALIGN_OFFSET, JOB_SIMG_BLOCK_OFFSET, JOB_DMG_LEVEL_OFFSET,
-	    JOB_GZIP_LEVEL_OFFSET };
+	    JOB_GZIP_LEVEL_OFFSET, JOB_XZ_LEVEL_OFFSET };
 	uint64_t id;
 
 	id = fsimg_load_le64(raw + JOB_MBR_ID_OFFSET);
@@ -353,10 +362,12 @@ layers_valid(const unsigned char *raw)
 		    (id != 0 && (raw[JOB_IFSBOOT_SET] & (1u << i)) == 0))
 			return (false);
 	}
-	for (unsigned i = JOB_IFSBOOT_RESERVED; i < JOB_INPUT_KIND; i++) {
+	for (unsigned i = JOB_IFSBOOT_RESERVED; i < JOB_XZ_LEVEL_OFFSET; i++) {
 		if (raw[i] != 0)
 			return (false);
 	}
+	if (fsimg_load_le64(raw + JOB_XZ_CHECK_OFFSET) > FSIMG_XZ_SHA256)
+		return (false);
 	return (string_field_valid(raw + JOB_GPT_TYPE_OFFSET, JOB_GPT_TYPE_BYTES) &&
 	    string_field_valid(raw + JOB_GPT_NAME_OFFSET, JOB_GPT_NAME_BYTES) &&
 	    string_field_valid(raw + JOB_MBR_TYPE_OFFSET, JOB_MBR_TYPE_BYTES));
@@ -406,6 +417,9 @@ decode_layers(const unsigned char *raw, fsimg_layer_options_t *layers)
 	layers->ifsboot_compress =
 	    (raw[JOB_IFSBOOT_VALUES] & JOB_IFSBOOT_RAW) != 0 ?
 	    FSIMG_IFSBOOT_NONE : FSIMG_IFSBOOT_LZO;
+	layers->xz_level = (uint32_t)fsimg_load_le64(raw + JOB_XZ_LEVEL_OFFSET);
+	layers->xz_check =
+	    (fsimg_xz_check_t)fsimg_load_le64(raw + JOB_XZ_CHECK_OFFSET);
 }
 
 static fsimg_status_t

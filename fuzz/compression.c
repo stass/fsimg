@@ -15,14 +15,21 @@
 #include "host.h"
 
 /*
- * The input is a whole gzip file. Each run opens it with gzip forced, as
- * a file and as a stream through a pipe, each into a fresh unlinked spool
- * under a 4 MiB limit: the member header parser (FEXTRA, FNAME, FCOMMENT,
- * the header CRC16), inflate, the trailer checks, the trailing-byte rule
- * and the spool's reservation all see the mutated bytes. Every outcome
- * must release what it charged.
+ * The input is a whole compressed file of the compression FUZZ_COMPRESSION
+ * names ("gzip", "xz" or "zstd"; build-aux/fuzz.sh builds one harness per
+ * compression the build implements). Each run opens it with that
+ * compression forced, as a file and as a stream through a pipe, each into
+ * a fresh unlinked spool under a 4 MiB limit and a 32 MiB memory budget:
+ * the profile's own parsing (for gzip the member headers and trailers),
+ * the library's decoder through the codec memory adapter, the
+ * trailing-byte rule and the spool's reservation all see the mutated
+ * bytes. Every outcome must release what it charged.
  */
+#ifndef FUZZ_COMPRESSION
+#error "FUZZ_COMPRESSION must name the compression under test"
+#endif
 #define SPOOL_LIMIT	(4u * 1024 * 1024)
+#define MEMORY_BUDGET	(32u * 1024 * 1024)
 
 typedef struct fuzz_input {
 	const uint8_t	*data;
@@ -81,7 +88,8 @@ open_once(fsimg_ctx_t *ctx, fsimg_io_t *io, int stream_fd)
 	fsimg_io_t *disk;
 
 	fsimg_image_options_init(&options);
-	snprintf(options.compression, sizeof(options.compression), "gzip");
+	snprintf(options.compression, sizeof(options.compression), "%s",
+	    FUZZ_COMPRESSION);
 	options.spool_fd = spool_new();
 	if ((io != NULL ? fsimg_image_open(ctx, io, &options, &image, NULL) :
 	    fsimg_image_open_stream(ctx, stream_fd, &options, &image, NULL)) !=
@@ -106,7 +114,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 	signal(SIGPIPE, SIG_IGN);
 	fsimg_options_init(&options);
-	options.memory_bytes = 16 * 1024 * 1024;
+	options.memory_bytes = MEMORY_BUDGET;
 	options.spool_bytes = SPOOL_LIMIT;
 	if (fsimg_ctx_new(&options, &ctx, NULL) != FSIMG_OK)
 		return (0);

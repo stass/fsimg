@@ -455,6 +455,27 @@ or a range or disk selection, which takes the bytes as they are, as not
 compressed.
 .Fl z
 on an input that is not gzip fails.
+.Pp
+An xz-compressed image is detected and decoded into the spool the same
+way, under the same limits, when the build has liblzma
+.Pq Fl -formats No lists xz as readable :
+concatenated streams and the stream padding between them are read as
+.Xr xz 1
+reads them, and every header, index and footer CRC32 and each block's
+check are verified; any other trailing byte, a damaged block or a
+truncated stream fails the command.
+The decoder's dictionary is charged to
+.Fl l Ar memory ,
+so a stream or block declaring one the budget cannot hold fails as a
+memory limit when it is reached.
+A stream written with
+.Ql xz --check=none ,
+or with a check this liblzma cannot compute, still decodes;
+.Cm W
+then names
+.Ql xz:check
+unverified and reports the verification incomplete, with exit status 0.
+A build without liblzma does not recognize an xz file.
 Standard input is relayed to the worker unread by a separate process and
 must not be a terminal.
 .Pp
@@ -1003,7 +1024,7 @@ it.
 The VHD timestamp is the creation time, or the epoch under
 .Fl R .
 Reproducible zlib output, DMG chunks and gzip alike, depends on the zlib
-version, which the plan and
+version, and xz output on the liblzma version, which the plan and
 .Fl -formats
 name.
 .Pp
@@ -1048,10 +1069,11 @@ and with
 .Fl z
 the name must end in
 .Pa .gz ;
-.Pa .zst
-and
 .Pa .xz
-select compressions this version cannot write.
+selects xz, one stream of one block written by liblzma, when the build
+has it, and is refused as unsupported, writing nothing, when it does not;
+.Pa .zst
+selects a compression this version cannot write.
 .Cm cW
 reads a compressed image back through the spool, so it needs scratch and
 .Fl l Ar spool
@@ -1066,6 +1088,25 @@ or a
 .Pa .gz
 name under
 .Fl a .
+.It Fl o Ar xz:level=0..9
+The
+.Xr xz 1
+preset; default 6.
+The encoder's memory is the preset's, which
+.Fl l Ar memory
+(default 256 MiB) must hold: about 94 MiB at preset 6 and 674 MiB at 9,
+as
+.Xr xz 1
+lists; a preset the budget cannot hold fails before anything is written.
+Only with a
+.Pa .xz
+name under
+.Fl a .
+.It Fl o Ar xz:check=crc32|crc64|sha256
+Each block's integrity check; default crc64.
+.Ql crc32
+suits readers that decode no other, such as boot loaders and kernels.
+An unchecked stream is read but never written.
 .El
 .Pp
 Import accepts regular files, directories and symbolic links, hierarchy,
@@ -1140,7 +1181,7 @@ The name is the basename of the
 .Fl f
 path with suffixes removed from the outside in, each at most once and
 ASCII case-insensitively: one compression suffix
-.Pq Pa .gz ,
+.Pq Pa .gz , .xz , .zst ,
 then one container suffix
 .Pq Pa .dmg , .vhd , .simg ,
 then one image suffix
@@ -1444,7 +1485,7 @@ The summary's command field names the mode:
 or
 .Ql formats .
 A stack record precedes the information record: it carries the stack, the
-compression (gzip or null), the container with its chunk count, chunk
+compression (gzip, xz or null), the container with its chunk count, chunk
 encodings, identifier, null without one, and container_details, an object
 of each named header field's decimal string value, empty for a container
 without header fields, all null without a container, the scheme, the disk
@@ -1473,8 +1514,12 @@ A filesystem's record gives entry_kinds, metadata_fields and write_settings
 as bit masks, max_label_bytes, zero for a format without a label, and
 max_link_target_bytes, zero for a format without symbolic links; a layer's
 gives its suffix, its capabilities, the keys of its settings, the chunk
-encodings it reads as codecs and, for a layer using zlib, the zlib version as
-codec_version.
+encodings it reads as codecs and, for a layer using a compression library,
+its name and version, such as
+.Ql zlib 1.3.1
+or
+.Ql liblzma 5.8.4 ,
+as codec_version.
 .Pp
 The operation deadline spans processing and successful output.
 Failure reporting has a two-second grace and one further two-second stderr-only

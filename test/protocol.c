@@ -33,6 +33,8 @@ static void test_job_selection(void);
 static void test_read_job_members_roundtrip(void);
 static void test_select_volume_replaces_read_job_members(void);
 static void test_read_job_zero_members_is_invalid(void);
+static void test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void);
+static void test_xz_unverified_record_requires_verified_xz(void);
 static void test_job_layers(void);
 static void test_job_catalogue(void);
 static void other_value(const fsimg_setting_t *, fsimg_setting_value_t *);
@@ -814,7 +816,7 @@ test_job_mountpoint(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24);
+	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 16 + 24);
 	memset(longest, 'm', FIELD - 1);
 	memset(longer, 'm', FIELD);
 	fsimg_worker_request_init(&request);
@@ -921,7 +923,7 @@ test_job_ifsboot_settings(void)
 	CHECK(!job_decodes(raw, SET, 0x01 | 0x02 | 0x20));
 	CHECK(job_decodes(raw, SET, 0x01 | 0x02 | 0x20 | 0x40 | 0x04));
 	CHECK(!job_decodes(raw, BITS, 0x04));
-	for (unsigned i = PADDING; i < FSIMG_JOB_BYTES; i++)
+	for (unsigned i = PADDING; i < PADDING + 6; i++)
 		CHECK(!job_decodes(raw, i, 1));
 
 	/* A job that only reads takes no file setting, encoded or decoded. */
@@ -1228,6 +1230,9 @@ other_value(const fsimg_setting_t *row, fsimg_setting_value_t *value)
 		}
 	}
 	switch (row->kind) {
+	case FSIMG_KIND_XZ_CHECK:
+		value->xz_check = FSIMG_XZ_SHA256;
+		break;
 	case FSIMG_KIND_U32:
 		value->u32 = row->initial.u32 + 1;
 		break;
@@ -1266,6 +1271,8 @@ same_value(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->byte_order == b->byte_order);
 	case FSIMG_KIND_DMG_COMPRESSION:
 		return (a->dmg_compression == b->dmg_compression);
+	case FSIMG_KIND_XZ_CHECK:
+		return (a->xz_check == b->xz_check);
 	case FSIMG_KIND_IFSBOOT_COMPRESSION:
 		return (a->ifsboot_compression == b->ifsboot_compression);
 	case FSIMG_KIND_TEXT:
@@ -1578,8 +1585,9 @@ test_plan_geometry_record(void)
 
 	bzero(&frame, sizeof(frame));
 	frame.type = FSIMG_FRAME_PLAN;
-	frame.length = 192;
-	CHECK(FSIMG_WIRE_PLAN_BYTES == 192);
+	frame.length = 224;
+	CHECK(FSIMG_WIRE_PLAN_BYTES == 224);
+	CHECK(FSIMG_WIRE_PLAN_CODEC_BYTES == 64);
 	CHECK(FSIMG_WIRE_PLAN_UNITS == 128);
 	CHECK(FSIMG_WIRE_PLAN_INODES == 136);
 	CHECK(FSIMG_WIRE_PLAN_FREE_INODES == 144);
@@ -1594,7 +1602,7 @@ test_plan_geometry_record(void)
 	fsimg_store_le64(raw + 144, 12);
 	strcpy((char *)raw + FSIMG_WIRE_PLAN_FORMAT, "qnx6");
 	fsimg_store_le64(raw + 152, 65535);
-	strcpy((char *)raw + 160, "zlib fixture");
+	strcpy((char *)raw + 160, "zlib fixture-version, liblzma fixture-version");
 	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ROOT) == 65535);
 	CHECK(fsimg_wire_plan_frame_valid(&frame));
 	CHECK(fsimg_frame_header(encoded, FSIMG_FRAME_PLAN,
@@ -1615,7 +1623,8 @@ test_plan_geometry_record(void)
 		CHECK(fsimg_load_le64(decoder.frame.payload +
 		    FSIMG_WIRE_PLAN_ROOT) == 65535);
 		CHECK(strcmp((char *)decoder.frame.payload +
-		    FSIMG_WIRE_PLAN_CODEC, "zlib fixture") == 0);
+		    FSIMG_WIRE_PLAN_CODEC,
+		    "zlib fixture-version, liblzma fixture-version") == 0);
 	}
 	fsimg_store_le64(raw + 152, 65536);
 	CHECK(!fsimg_wire_plan_frame_valid(&frame));
@@ -1623,13 +1632,13 @@ test_plan_geometry_record(void)
 	CHECK(fsimg_wire_plan_frame_valid(&frame));
 	frame.length = 160;
 	CHECK(!fsimg_wire_plan_frame_valid(&frame));
-	frame.length = 184;
-	CHECK(!fsimg_wire_plan_frame_valid(&frame));
-	frame.length = 191;
-	CHECK(!fsimg_wire_plan_frame_valid(&frame));
-	frame.length = 193;
-	CHECK(!fsimg_wire_plan_frame_valid(&frame));
 	frame.length = 192;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 223;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 225;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 224;
 	fsimg_store_le64(raw + 144, 16);
 	CHECK(fsimg_wire_plan_frame_valid(&frame));
 	fsimg_store_le64(raw + 144, 17);
@@ -1664,6 +1673,75 @@ test_job_minimize_flag(void)
 	CHECK((decoded.write.flags & FSIMG_WRITE_MINIMIZE) != 0);
 }
 
+/* The compression block follows the six ifsboot values and eight flags
+ * bytes. Wire integers stay 64-bit even though public levels are 32-bit.
+ */
+static void
+test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void)
+{
+	enum { XZ_LEVEL = 1922, XZ_CHECK = 1930 };
+	static const uint32_t levels[] = { 0, 6, 9 };
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	CHECK(FSIMG_JOB_BYTES == 1962);
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+		for (unsigned check = FSIMG_XZ_CRC64; check <= FSIMG_XZ_SHA256; check++) {
+			request.layers.xz_level = levels[i];
+			request.layers.xz_check = (fsimg_xz_check_t)check;
+			CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+			CHECK(fsimg_load_le64(raw + XZ_LEVEL) == levels[i]);
+			CHECK(fsimg_load_le64(raw + XZ_CHECK) == check);
+			CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded,
+			    &selection, &capabilities, NULL) == FSIMG_OK);
+			CHECK(decoded.layers.xz_level == levels[i]);
+			CHECK(decoded.layers.xz_check == (fsimg_xz_check_t)check);
+			fsimg_store_le64(raw + XZ_CHECK, FSIMG_XZ_SHA256 + 1);
+			CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded,
+			    &selection, &capabilities, NULL) == FSIMG_EINVAL);
+			fsimg_store_le64(raw + XZ_CHECK, check);
+			fsimg_store_le64(raw + XZ_LEVEL, (uint64_t)UINT32_MAX + 1);
+			CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded,
+			    &selection, &capabilities, NULL) == FSIMG_EINVAL);
+		}
+	}
+}
+
+static void
+test_xz_unverified_record_requires_verified_xz(void)
+{
+	fsimg_frame_t frame;
+	unsigned char *raw = frame.payload;
+
+	bzero(&frame, sizeof(frame));
+	frame.type = FSIMG_FRAME_IMAGE;
+	frame.length = FSIMG_WIRE_IMAGE_BYTES;
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, 1048576);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 1048576);
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "fat12");
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "xz");
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_UNVERIFIED, "xz:check");
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_VERIFIED);
+#ifdef FSIMG_XZ
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+#else
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+#endif
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "gzip");
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "xz");
+	strcpy((char *)raw + FSIMG_WIRE_IMAGE_UNVERIFIED, "xz:other");
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1673,6 +1751,8 @@ main(int argc, char **argv)
 	}
 	CHECK(argc == 1);
 	test_plan_geometry_record();
+	test_job_xz_settings_roundtrip_and_reject_invalid_wire_values();
+	test_xz_unverified_record_requires_verified_xz();
 	test_job_minimize_flag();
 	test_job_qnx6_settings();
 	test_job_mountpoint();

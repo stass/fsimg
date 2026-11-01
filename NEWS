@@ -1,5 +1,19 @@
 fsimg 0.1.0 (unreleased)
 
+xz-compressed images are read and written over the system liblzma, an
+optional integration that `configure --with-xz` controls (default auto).
+Reading decodes concatenated streams and their padding into the spool,
+verifies every check and charges the decoder's dictionary to the memory
+budget; a stream without a check decodes, and `W` reports `xz:check`
+unverified. Creating with `-a` and a `.xz` name writes one stream of one
+block, with `-o xz:level=0..9` (default 6) and `-o xz:check=crc32|crc64|sha256`
+(default crc64). A build without liblzma refuses `.xz` creation as before.
+The plan reports every library the output depends on (`zlib 1.3.1,
+liblzma 5.8.4` for a `.dmg.xz`), in a 64-byte `codec_version`. The layer
+options gain `xz_level` and `xz_check` in their reserved area, and a
+compression's decode reports an unchecked member through the layer
+report's unverified list.
+
 `c -v` and `x -v` name each entry on stderr in the default `t` form, the
 quoted, escaped image path with `@` for a symbolic link and `|` for a FIFO:
 creation as planning admits each entry, in image order and under `-n` too,

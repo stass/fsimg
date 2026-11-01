@@ -88,12 +88,18 @@ cp "$qualification_prefix/bin/fsimg" "$qualification_root/relocated/fsimg"
 "$qualification_root/relocated/fsimg" W --json -d \
     -f "$qualification_root/output/static.img" > "$qualification_root/relocated.log"
 
+# The command links libc, the system zlib and, when configure found them,
+# the optional compression libraries (liblzma, libzstd); nothing else.
 case "$(uname -s)" in
     Darwin)
         otool -L "$qualification_prefix/bin/fsimg" > "$qualification_root/dependencies.log"
         awk '
-            NR > 1 && $1 != "/usr/lib/libSystem.B.dylib" &&
-                $1 != "/usr/lib/libz.1.dylib" { bad=1 }
+            NR == 1 { next }
+            $1 == "/usr/lib/libSystem.B.dylib" { next }
+            $1 == "/usr/lib/libz.1.dylib" { next }
+            $1 ~ /\/liblzma\.[0-9]+\.dylib$/ { next }
+            $1 ~ /\/libzstd\.[0-9]+\.dylib$/ { next }
+            { bad=1 }
             END { exit bad }
         ' "$qualification_root/dependencies.log"
         ;;
@@ -104,6 +110,11 @@ case "$(uname -s)" in
             $1 ~ /^libc\.so\.[0-9]+$/ { next }
             $1 ~ /^libsys\.so\.[0-9]+$/ { next }
             $1 ~ /^libz\.so\.[0-9]+$/ { next }
+            $1 ~ /^liblzma\.so\.[0-9]+$/ { next }
+            $1 ~ /^libzstd\.so\.[0-9]+$/ { next }
+            # The dependencies of the base system liblzma.
+            $1 ~ /^libmd\.so\.[0-9]+$/ { next }
+            $1 ~ /^libthr\.so\.[0-9]+$/ { next }
             $1 == "[vdso]" { next }
             { bad=1 }
             END { exit bad }
@@ -115,6 +126,8 @@ case "$(uname -s)" in
             $1 ~ /^linux-vdso\.so\./ { next }
             $1 == "libc.so.6" { next }
             $1 == "libz.so.1" { next }
+            $1 == "liblzma.so.5" { next }
+            $1 == "libzstd.so.1" { next }
             $1 ~ /^\/.*\/ld-linux[^/]*\.so\.[0-9]+$/ { next }
             { bad=1 }
             END { exit bad }

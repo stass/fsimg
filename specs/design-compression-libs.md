@@ -335,8 +335,10 @@ padding (at most 3), the check (at most 64), and the one-record index with
 its padding and CRC32 (fewer than 64) fit the constant.
 `lzma_stream_buffer_bound()` and the encoder's real output on
 incompressible and barely compressible input are the oracles the tests
-compare it against, never the value the plan uses, so the bound does not
-depend on the library version. The encoder's memory
+compare it against, never the value the plan uses, so the bound rests on
+LZMA2's chunking rather than on a library version; a liblzma that broke it
+would fail the write as `FSIMG_ESTATE` when the sink refused the byte past
+the bound, never write past it. The encoder's memory
 is the preset's, up to 674 MiB at preset 9; an encoder the memory budget
 cannot hold fails at `encoder_open` with the adapter's `FSIMG_RESOURCE_MEMORY`
 before any byte is written, and the man page states the per-preset need
@@ -355,8 +357,9 @@ type is none, or one this `liblzma` cannot compute, decodes with
 is `FSIMG_ECORRUPT` naming the compressed offset, which covers a damaged
 block, a failed check, a failed header or index CRC32 and any trailing
 byte that is not stream padding; `LZMA_BUF_ERROR` after the input has
-ended is `FSIMG_ECORRUPT` as truncated; `LZMA_OPTIONS_ERROR` is
-`FSIMG_EUNSUPPORTED` naming the compression, for a filter or option this
+ended is `FSIMG_ECORRUPT`, a stream truncated or followed by fewer
+trailing bytes than a stream header, which liblzma cannot tell apart;
+`LZMA_OPTIONS_ERROR` is `FSIMG_EUNSUPPORTED` naming the compression, for a filter or option this
 `liblzma` does not decode; `LZMA_FORMAT_ERROR` after the claim is
 `FSIMG_ECORRUPT`.
 
@@ -436,7 +439,7 @@ library, in the file that owns the library:
 | `LZMA_FORMAT_ERROR` after the claim | `FSIMG_ECORRUPT`: stream header or flags invalid |
 | `LZMA_OPTIONS_ERROR` while decoding | `FSIMG_EUNSUPPORTED` naming the compression: a filter or option this liblzma does not decode |
 | `LZMA_DATA_ERROR` | `FSIMG_ECORRUPT` at the compressed offset |
-| `LZMA_BUF_ERROR` with the input ended | `FSIMG_ECORRUPT`: truncated |
+| `LZMA_BUF_ERROR` with the input ended | `FSIMG_ECORRUPT`: truncated, or trailing bytes shorter than a stream header |
 | `LZMA_NO_CHECK`, `LZMA_UNSUPPORTED_CHECK` | Not errors: `xz:check` recorded as unverified; decoding continues |
 | `LZMA_GET_CHECK`, `LZMA_PROG_ERROR`, `LZMA_OPTIONS_ERROR` while encoding, any other code | `FSIMG_ESTATE` with the call and code |
 | `LZMA_STREAM_END` with no input left | Success |
@@ -551,7 +554,7 @@ library skips the profile's rows explicitly and runs the refusal rows.
 | zstd write | `zstd -t` accepts output at levels 1, 3 and 19; `zstd -d` yields the raw image; `zstd -l` shows the disk length as content size and a checksum for a bare disk, and a checksum with no content size around a container; the bound is at least `ZSTD_compressBound(n)` for sampled `n` up to 2^40; byte-identical output across hosts and budgets under one libzstd version; `cW` verifies a `.zst` through the spool | `zstd:level=0` and `20` refused naming the key; a flipped frame byte fails `zstd -t` and fsimg's own verification; a transcode fault on a bare disk that delivers one byte less than pledged fails at `ZSTD_e_end` as `FSIMG_ESTATE`; allocation failure injected at each adapter call fails the open or the write and leaves accounting at its baseline |
 | zstd read | `zstd` output at levels 1, 3, 19 and `--ultra -22` spools and lists as the raw image, from a file and from a pipe; concatenated frames; a leading and a middle skippable frame; a `--no-check` file verifies with `zstd:checksum` unverified, `"complete":false` and a passing status; a file piped to `zstd` (no content size) verifies complete; `i` prints `Compression: zstd` | Trailing garbage (`FSIMG_ECORRUPT` at its offset); a flipped checksum; a content size one more and one less than the data; a frame truncated at each of its byte offsets up to the first block; a `--long=28` window (`FSIMG_EUNSUPPORTED`); a frame with a dictionary ID (`FSIMG_EUNSUPPORTED`); a bomb failing at the spool step that crosses the limit before the file grows past it; a 32 MiB budget failing a 64 MiB-window frame (`zstd --long=26`) as a memory limit naming zstd, with nothing decoded; forced `zstd` on a gzip file (`FSIMG_EFORMAT`); a zstd file whose content is itself zstd is unrecognized |
 | xz write | `xz -t` accepts output at presets 0, 6 and 9 with each check; `xz -d` yields the raw image; `xz -l` shows one stream, one block and the chosen check; the bound is at least `lzma_stream_buffer_bound(n)` for sampled `n` up to 2^40; byte-identical output across hosts under one liblzma version; `cW` verifies a `.xz` | `xz:level=10` and `xz:check=none` refused naming the key; preset 9 under a 256 MiB budget fails at encoder open as `FSIMG_RESOURCE_MEMORY` naming xz before any byte is written; a flipped block byte fails `xz -t` and fsimg's verification; allocation failure injected at each adapter call |
-| xz read | `xz` output at presets 0, 6 and 9 and with each check spools and lists; `-T0` multi-block streams; concatenated streams with and without stream padding; `--check=none` verifies with `xz:check` unverified and a passing status; `i` prints `Compression: xz` | Trailing garbage, a padding run of 5 zero bytes (`FSIMG_ECORRUPT` at its offset); a flipped check; a flipped index CRC32; a header flags byte changed; a stream truncated at each offset through its first block header; a 4 GiB dictionary size (`FSIMG_RESOURCE_MEMORY` at the allocation, nothing decoded); a bomb at the spool step; a `.lzma` (legacy) file is unrecognized, not an xz claim |
+| xz read | `xz` output at presets 0, 6 and 9 and with each check spools and lists; `-T0` multi-block streams; concatenated streams with and without stream padding; `--check=none` verifies with `xz:check` unverified and a passing status; `i` prints `Compression: xz` | Trailing garbage, a padding run of 5 zero bytes (`FSIMG_ECORRUPT` at the offset where the decoder stopped, which liblzma places after the bytes it read as the next stream's header); a flipped check; a flipped index CRC32; a header flags byte changed; a stream truncated at each offset through its first block header; a 4 GiB dictionary size (`FSIMG_RESOURCE_MEMORY` at the allocation, nothing decoded); a bomb at the spool step; a `.lzma` (legacy) file is unrecognized, not an xz claim |
 | Spool and streams | Stdin of a `.zst` and a `.xz` image through the coordinator's pipe; `cf -` writing a zstd and an xz stream the oracles decode | Short write, flush failure and cancellation at each piece: staged files removed, nothing published, stream reports incomplete output after the first byte |
 | Sandbox | Decode and create under `-S required` on Linux x86-64 and FreeBSD, and on Linux arm64 where available | A test build that sets `ZSTD_c_nbWorkers` to 1 fails under `-S required`, proving the gate sees a thread attempt |
 | Adapter | Charged deltas and release for each binding; zero-byte requests; the first error kept across several allocations in one library call; poison mode | A binding that installs only one callback fails the contract test |

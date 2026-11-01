@@ -8,9 +8,12 @@
 # as zcat expands it. The gzip files fsimg writes pass gzip -t and expand
 # under zcat to the image fsimg writes without gzip, and a gzipped DMG
 # expands to a DMG hdiutil verifies. Each missing tool is reported; the
-# test skips only when no oracle is available.
+# xz profiles are checked with xz(1) in the same way. Each xz fixture
+# carries seeded damage that fsimg must reject.
+# The test skips only when no oracle is available.
 set -eu
 gzip=${GZIP_PROGRAM:-'@GZIP_PROGRAM@'}
+xz=${XZ_PROGRAM:-'@XZ_PROGRAM@'}
 pigz=${PIGZ:-'@PIGZ@'}
 hdiutil=${HDIUTIL:-'@HDIUTIL@'}
 fsimg="$(pwd)/fsimg"
@@ -106,6 +109,100 @@ if test -n "$pigz"; then
     ran=$((ran + 1))
 else
     echo 'SKIP: pigz is required for the pigz oracle'
+fi
+
+# The xz oracle uses a small, reproducible FAT image. Its purpose is to
+# check the compression envelope, not FAT capacity or large-file copying.
+check_xz() {
+    "$fsimg" tf "$1" > listed.txt 2>/dev/null || fail "$1: xz listing"
+    cmp -s listed.txt xz-raw.txt || fail "$1: xz listing differs"
+    "$fsimg" tf - < "$1" > listed.txt 2>/dev/null || fail "$1: xz stdin"
+    cmp -s listed.txt xz-raw.txt || fail "$1: xz stdin differs"
+    "$fsimg" Wf "$1" > /dev/null 2>&1 || fail "$1: xz verification"
+}
+
+flip_byte() {
+    byte=$(od -An -tu1 -j "$2" -N1 "$1" | tr -d ' ')
+    printf "$(printf '\\%03o' $((byte ^ 1)))" |
+        dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null
+}
+
+reject_xz() {
+    if "$fsimg" Wf "$1" >/dev/null 2>&1; then
+        fail "fsimg accepts $1"
+    fi
+    if "$xz" -t "$1" 2>/dev/null; then
+        fail "xz -t accepts $1"
+    fi
+}
+
+damage_xz_index() {
+    size=$(wc -c < "$1")
+    flip_byte "$1" $((size - 16))
+    reject_xz "$1"
+}
+
+if test -z "$xz" || ! test -x "$xz"; then
+    echo 'SKIP: xz is required for the xz oracle'
+elif ! "$fsimg" --formats | awk '
+    $1 == "xz" && $2 == "compression" && $3 == "yes" { found = 1 }
+    END { exit !found }'; then
+    echo 'SKIP: xz oracle requires a build with liblzma'
+else
+    "$fsimg" cf xz-raw.img -R -F fat12 -s 1M -C source HELLO.TXT 2>/dev/null
+    "$fsimg" tf xz-raw.img > xz-raw.txt 2>/dev/null
+    for level in 0 6 9; do
+        for check in crc32 crc64 sha256; do
+            "$fsimg" cf written.img.xz -a -R -F fat12 -s 1M \
+                -m 1G -o "xz:level=$level" -o "xz:check=$check" \
+                -C source HELLO.TXT 2>/dev/null || fail "xz write $level $check"
+            "$xz" -t written.img.xz || fail "xz -t $level $check"
+            "$xz" -dc written.img.xz | cmp -s - xz-raw.img ||
+                fail "xz decoded bytes $level $check"
+            # xz's file row states streams, blocks and check independently
+            # of fsimg's decoder. Its check names are uppercase.
+            "$xz" -l --robot written.img.xz | awk -F '\t' -v check="$check" '
+                $1 == "file" {
+                    actual = tolower($7)
+                    gsub(/-/, "", actual)
+                    if ($2 == 1 && $3 == 1 && actual == check) found = 1
+                }
+                END { exit !found }' || fail "xz stream/block/check $level $check"
+            check_xz written.img.xz
+            header=$(od -An -tu1 -j 12 -N1 written.img.xz | tr -d ' ')
+            flip_byte written.img.xz $((12 + (header + 1) * 4 + 5))
+            reject_xz written.img.xz
+            rm written.img.xz
+        done
+        for check in none crc32 crc64 sha256; do
+            "$xz" -c -"$level" --check="$check" xz-raw.img > oracle.xz
+            check_xz oracle.xz
+            # Index CRC32 remains mandatory even with no block check.
+            damage_xz_index oracle.xz
+        done
+    done
+    "$xz" -c -0 -T0 --block-size=64KiB xz-raw.img > multiblock.xz
+    "$xz" -l --robot multiblock.xz | awk -F '\t' '
+        $1 == "file" && $2 == 1 && $3 > 1 { found = 1 }
+        END { exit !found }' || fail 'xz fixture must contain multiple blocks'
+    check_xz multiblock.xz
+    damage_xz_index multiblock.xz
+
+    head -c 524288 xz-raw.img | "$xz" -c -0 > first.xz
+    tail -c +524289 xz-raw.img | "$xz" -c -0 > second.xz
+    for padding in 0 4 8; do
+        cat first.xz > joined.xz
+        dd if=/dev/zero bs=1 count="$padding" 2>/dev/null >> joined.xz
+        cat second.xz >> joined.xz
+        check_xz joined.xz
+        printf '\000' >> joined.xz
+        reject_xz joined.xz
+    done
+    cat first.xz > bad-padding.xz
+    printf '\000\000\000\000\000' >> bad-padding.xz
+    cat second.xz >> bad-padding.xz
+    reject_xz bad-padding.xz
+    ran=$((ran + 1))
 fi
 
 if test "$ran" -eq 0; then

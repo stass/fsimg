@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 1946u
+#define FSIMG_JOB_BYTES 1962u
 /* The job record's mountpoint field: one byte more than the longest
  * mountpoint any format stores, 1024 bytes, and its NUL, so the writer,
  * not the record, refuses a longer one.
@@ -73,8 +73,9 @@ _Static_assert(FSIMG_WIRE_INFO_DETAILS + FSIMG_VOLUME_DETAILS_MAX *
  * container the disk was peeled from or empty, with its chunk count, its
  * chunk encodings (CODECS), its identifier and its header fields (DETAILS,
  * laid out as the info record's), and REASON why no volume was selected
- * when UNSELECTED is set. UNVERIFIED names the container's fields that W
- * reports unverified, which makes its verification incomplete. DISK is the
+ * when UNSELECTED is set. UNVERIFIED names what W reports unverified, the
+ * compression's qualified entry first and then the container's fields,
+ * which makes its verification incomplete. DISK is the
  * disk the container yields, or the input file's length without one.
  */
 #define FSIMG_WIRE_IMAGE_BYTES 1184u
@@ -142,14 +143,14 @@ _Static_assert(FSIMG_WIRE_PARTITION_NAME + FSIMG_WIRE_PARTITION_NAME_BYTES ==
 /* OUTPUT is the most bytes the image can take: the volume or disk, or the
  * largest encoding of the disk by its container and compression. PADDING
  * is the zero padding the container's disk granularity added, and CODEC
- * the compression library the output depends on, empty for none. UNITS is
- * the volume's clusters or blocks; INODES and FREE_INODES the inode
+ * the compression libraries the output depends on, empty for none. UNITS
+ * is the volume's clusters or blocks; INODES and FREE_INODES the inode
  * capacity and the inodes left free, both zero for a format whose inode
  * table does not bound its files; ROOT the entries of a fixed FAT12/16
  * root directory, at most 65535, zero for every other format.
  */
-#define FSIMG_WIRE_PLAN_BYTES 192u
-#define FSIMG_WIRE_PLAN_CODEC_BYTES 32u
+#define FSIMG_WIRE_PLAN_BYTES 224u
+#define FSIMG_WIRE_PLAN_CODEC_BYTES 64u
 typedef enum fsimg_wire_plan_field {
 	FSIMG_WIRE_PLAN_VOLUME = 0,
 	FSIMG_WIRE_PLAN_PAYLOAD = 8,

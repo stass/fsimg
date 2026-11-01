@@ -62,7 +62,8 @@ static const member_t layer_members[] = {
 	LAYER_MEMBER(ifsboot_paddr_bias_set),
 	LAYER_MEMBER(ifsboot_image_paddr_set),
 	LAYER_MEMBER(ifsboot_ram_paddr_set),
-	LAYER_MEMBER(ifsboot_imagefs_paddr_set)
+	LAYER_MEMBER(ifsboot_imagefs_paddr_set),
+	LAYER_MEMBER(xz_level), LAYER_MEMBER(xz_check)
 };
 
 /* The filesystem settings of fsimg_write_options_t. */
@@ -96,7 +97,7 @@ static const struct {
 	{ "hbcifs", "" },
 	{ "gzip", "level" },
 	{ "zstd", "" },
-	{ "xz", "" }
+	{ "xz", "level,check" }
 };
 
 static void test_slices(void);

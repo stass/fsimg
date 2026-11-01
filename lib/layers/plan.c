@@ -583,7 +583,7 @@ fsimg_disk_plan_fit(const fsimg_disk_plan_t *plan, uint32_t granule,
  * zeros that become unallocated space. Then the output's bound: the disk
  * itself, or the most its container encoding can take, which also refuses
  * a disk the container cannot describe, and then the most the compression
- * of that can take.
+ * of that can take, with the length its encoder will receive.
  */
 static fsimg_status_t
 size_disk(fsimg_disk_plan_t *plan, uint64_t used, fsimg_error_t *error)
@@ -608,6 +608,11 @@ size_disk(fsimg_disk_plan_t *plan, uint64_t used, fsimg_error_t *error)
 	plan->output_bytes = plan->container_bytes;
 	if (plan->compression == NULL)
 		return (FSIMG_OK);
+	/* The compression's input is the disk exactly, or a container's
+	 * encoding, whose length only its bound states.
+	 */
+	plan->compression_settings.length = plan->container == NULL ?
+	    plan->disk_bytes : FSIMG_COMPRESSION_LENGTH_UNKNOWN;
 	return (plan->compression->compression->bound(plan->container_bytes,
 	    &plan->output_bytes, error));
 }

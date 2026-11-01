@@ -602,7 +602,12 @@ test_registry(void)
 		{ "gzip", ".gz", "level", "", FSIMG_LAYER_COMPRESSION, container,
 		    "" },
 		{ "zstd", ".zst", "", "", FSIMG_LAYER_COMPRESSION, 0, "" },
-		{ "xz", ".xz", "", "", FSIMG_LAYER_COMPRESSION, 0, "" }
+		{ "xz", ".xz", "level,check", "", FSIMG_LAYER_COMPRESSION,
+#ifdef FSIMG_XZ
+		    container, "" }
+#else
+		    0, "" }
+#endif
 	};
 	fsimg_layer_info_t info;
 	size_t cursor = 0;

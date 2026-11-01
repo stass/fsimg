@@ -97,7 +97,7 @@ typedef struct gzip_encoder {
 static fsimg_status_t gzip_probe(const unsigned char *, size_t,
     fsimg_error_t *);
 static fsimg_status_t gzip_decode(fsimg_spool_input_t *, fsimg_spool_t *,
-    fsimg_error_t *);
+    bool *, fsimg_error_t *);
 static fsimg_status_t gzip_plan(const fsimg_layer_options_t *, uint32_t,
     int64_t, fsimg_compression_settings_t *, fsimg_error_t *);
 static fsimg_status_t gzip_bound(uint64_t, uint64_t *, fsimg_error_t *);
@@ -459,7 +459,7 @@ decode_members(gzip_decoder_t *decoder, fsimg_error_t *error)
 
 static fsimg_status_t
 gzip_decode(fsimg_spool_input_t *source, fsimg_spool_t *spool,
-    fsimg_error_t *error)
+    bool *unchecked, fsimg_error_t *error)
 {
 	gzip_decoder_t decoder;
 	fsimg_status_t status;
@@ -471,6 +471,7 @@ gzip_decode(fsimg_spool_input_t *source, fsimg_spool_t *spool,
 	if (status == FSIMG_OK)
 		status = decode_members(&decoder, error);
 	decoder_end(&decoder);
+	*unchecked = false;	/* Every member carries its CRC32 */
 	return (status);
 }
 

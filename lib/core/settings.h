@@ -63,6 +63,7 @@ typedef enum fsimg_setting_kind {
 	FSIMG_KIND_BYTE_ORDER,		/* fsimg_byte_order_t */
 	FSIMG_KIND_DMG_COMPRESSION,	/* fsimg_dmg_compression_t */
 	FSIMG_KIND_IFSBOOT_COMPRESSION,	/* fsimg_ifsboot_compression_t */
+	FSIMG_KIND_XZ_CHECK,		/* fsimg_xz_check_t */
 	FSIMG_KIND_TEXT,		/* char[size], NUL-terminated */
 	FSIMG_KIND_ID16,		/* unsigned char[16] */
 	FSIMG_KIND_TEXT_POINTER,	/* const char *, borrowed; NULL absent */
@@ -81,6 +82,7 @@ typedef union fsimg_setting_value {
 	fsimg_byte_order_t byte_order;
 	fsimg_dmg_compression_t dmg_compression;
 	fsimg_ifsboot_compression_t ifsboot_compression;
+	fsimg_xz_check_t xz_check;
 	unsigned char	 id[16];
 	const char	*text;
 	fsimg_io_t	*io;
@@ -190,6 +192,7 @@ extern const fsimg_setting_slice_t fsimg_vhd_settings;
 extern const fsimg_setting_slice_t fsimg_simg_settings;
 extern const fsimg_setting_slice_t fsimg_ifsboot_settings;
 extern const fsimg_setting_slice_t fsimg_gzip_settings;
+extern const fsimg_setting_slice_t fsimg_xz_settings;
 
 /* The row of a slice whose key is the length bytes at key, which need not
  * be terminated; NULL when the slice has none. Case-sensitive.

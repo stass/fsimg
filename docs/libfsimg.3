@@ -10,8 +10,8 @@
 Filesystem image library
 .Pq Fl l Ns fsimg ;
 a static link also needs the system zlib
-.Pq Fl l Ns z ,
-which
+.Pq Fl l Ns z
+and the optional compression libraries the build found, which
 .Pa libfsimg.pc
 lists
 .Sh SYNOPSIS
@@ -43,7 +43,8 @@ A format without full verification has no verify capability, and
 fails on it with
 .Dv FSIMG_EUNSUPPORTED
 before doing any work.
-It requires only libc, host OS APIs and the system zlib, and is includable
+It requires only libc, host OS APIs and the system zlib, with liblzma as
+an optional integration, and is includable
 from C++.
 It neither prints diagnostics, exits, changes process-global policy nor
 sandboxes its embedding application.
@@ -397,11 +398,17 @@ gzip writes one member with a fixed header: no name,
 comment or header CRC, OS 3, extra flags by level, and as its time the
 epoch under FSIMG_WRITE_REPRODUCIBLE or the host clock otherwise, zero when
 outside the field's 32 bits.
+xz, in a build with liblzma, writes one stream of one block at the preset
+and check xz_level and xz_check name; its encoder's memory, up to 674 MiB
+at preset 9, is charged to the memory budget at open, before any byte is
+written.
 The layer options add the DMG compression, level, chunk size and segment
 ID, the VHD alignment and unique ID, the sparse image block size and CRC32
-chunk, and the gzip level, 1 to 9; the plan adds the compression, the
-output bound, the container padding and the zlib version the output
-depends on, and the output limit must hold the raw disk and that bound
+chunk, the gzip level, 1 to 9, and the xz preset, 0 to 9, which
+.Fn fsimg_layer_options_init
+sets to 6, and check, CRC64 by default; the plan adds the compression, the
+output bound, the container padding and the versions of the libraries the
+output depends on, and the output limit must hold the raw disk and that bound
 together.
 A stream has no publication: a failure after its first byte reports
 FSIMG_OUTPUT_INCOMPLETE.
@@ -449,7 +456,18 @@ carries one filesystem, ifsboot or hbcifs, or forces one around such a
 container when it is detected, fails with FSIMG_EINVAL naming the
 container.
 .Fn fsimg_layer_next
-reports each container's chunk encodings and the zlib version it uses.
+reports each container's chunk encodings and the version of the library
+each container and compression uses.
+xz is optional: a build without liblzma lists it with no capabilities and
+no version, refuses to write it with FSIMG_EUNSUPPORTED and does not
+recognize its files; the public header and its structures are the same in
+every build.
+zstd is recognized by name and suffix and is not implemented.
+An xz stream without a check this liblzma computes decodes, and
+.Fn fsimg_image_verify
+then names
+.Ql xz:check
+in the report's unverified list.
 .Pp
 Before the container, the open decides whether the input is compressed:
 alone, a compression's signature makes it compressed; when an

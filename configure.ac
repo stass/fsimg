@@ -54,6 +54,7 @@ FSIMG_DEV_TOOL([IMG2SIMG], [img2simg], [Android sparse image producer])
 dnl Not GZIP: gzip(1) reads options from an environment variable of that name.
 FSIMG_DEV_TOOL([GZIP_PROGRAM], [gzip], [gzip compressor])
 FSIMG_DEV_TOOL([PIGZ], [pigz], [parallel gzip compressor])
+FSIMG_DEV_TOOL([XZ_PROGRAM], [xz], [xz compressor, the xz oracle])
 AC_ARG_VAR([MSAN_ZLIB], [external instrumented zlib prefix for MSan checks only])
 AS_IF([test "$ac_cv_func_pread$ac_cv_func_pwrite$ac_cv_func_ftruncate$ac_cv_func_fsync$ac_cv_func_linkat" != yesyesyesyesyes], [AC_MSG_ERROR([required POSIX I/O unavailable])])
 # The system zlib is the one third-party library the core links: DMG zlib
@@ -83,6 +84,59 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <zlib.h>]],
      AC_MSG_ERROR([fsimg requires the system zlib: linking with $ZLIB_LIBS failed (install the zlib development package, or set ZLIB_LIBS)])])
 CPPFLAGS=$fsimg_saved_CPPFLAGS
 LIBS=$fsimg_saved_LIBS
+# FSIMG_CODEC_LIBRARY(NAME, VAR, PKG, LIB, PROLOGUE, BODY, MACRO, WHAT)
+# An optional compression library (specs/design-compression-libs.md):
+# --with-NAME=auto|yes|no, default auto. It is found as zlib is:
+# pkg-config PKG supplies VAR_CFLAGS and VAR_LIBS where it describes the
+# library, else -lLIB on the default paths, and the precious VAR_CFLAGS
+# and VAR_LIBS override both. A link test runs BODY after PROLOGUE, calling
+# the functions the profile uses, so a library too old or built without
+# them counts as absent. yes fails naming the library when the test fails,
+# auto disables the compression and says so, and no never looks. Found,
+# the library defines MACRO in config.h and the Automake conditional of
+# the same name; otherwise both flags are emptied, so neither the build
+# nor libfsimg.pc names it.
+m4_define([FSIMG_CODEC_LIBRARY], [
+AC_ARG_WITH([$1], [AS_HELP_STRING([--with-$1@<:@=auto|yes|no@:>@],
+    [$8 (default auto)])], [], [with_$1=auto])
+AC_ARG_VAR([$2_CFLAGS], [C compiler flags for $3])
+AC_ARG_VAR([$2_LIBS], [linker flags for $3])
+AS_CASE([$with_$1], [auto|yes|no], [],
+    [AC_MSG_ERROR([--with-$1 takes auto, yes or no, not $with_$1])])
+fsimg_have_$1=no
+AS_IF([test "$with_$1" != no], [
+    AS_IF([test -z "$$2_CFLAGS$$2_LIBS" && test -n "$PKG_CONFIG" &&
+        "$PKG_CONFIG" --exists $3],
+        [$2_CFLAGS=`"$PKG_CONFIG" --cflags $3`
+         $2_LIBS=`"$PKG_CONFIG" --libs $3`])
+    AS_IF([test -z "$$2_LIBS"], [$2_LIBS=-l$4])
+    fsimg_saved_CPPFLAGS=$CPPFLAGS
+    fsimg_saved_LIBS=$LIBS
+    CPPFLAGS="$CPPFLAGS $$2_CFLAGS"
+    LIBS="$$2_LIBS $LIBS"
+    AC_MSG_CHECKING([whether $3 links with the interface fsimg uses])
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([[$5]], [[$6]])], [fsimg_have_$1=yes])
+    AC_MSG_RESULT([$fsimg_have_$1])
+    CPPFLAGS=$fsimg_saved_CPPFLAGS
+    LIBS=$fsimg_saved_LIBS
+    AS_IF([test "$fsimg_have_$1" = no && test "$with_$1" = yes],
+        [AC_MSG_ERROR([--with-$1=yes: $3 does not link with $$2_LIBS (install its development package, or set $2_CFLAGS and $2_LIBS)])])
+    AS_IF([test "$fsimg_have_$1" = no],
+        [AC_MSG_NOTICE([$1 compression disabled: $3 not found or without the interface fsimg uses])])
+])
+AS_IF([test "$fsimg_have_$1" = yes],
+    [AC_DEFINE([$7], [1], [Define to 1 when $3 provides the $1 compression.])],
+    [$2_CFLAGS=
+     $2_LIBS=])
+AM_CONDITIONAL([$7], [test "$fsimg_have_$1" = yes])
+])
+FSIMG_CODEC_LIBRARY([xz], [LZMA], [liblzma], [lzma], [#include <lzma.h>],
+    [lzma_stream s = LZMA_STREAM_INIT;
+      lzma_stream e = LZMA_STREAM_INIT;
+      return (lzma_stream_decoder(&s, UINT64_MAX, LZMA_CONCATENATED) != LZMA_OK ||
+          lzma_easy_encoder(&e, 0, LZMA_CHECK_CRC64) != LZMA_OK ||
+          lzma_version_string()[0] == '\0');],
+    [FSIMG_XZ], [liblzma for the xz compression])
 AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integration.sh
     test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh
     test/containers-integration.sh test/compression-integration.sh

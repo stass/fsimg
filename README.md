@@ -19,7 +19,7 @@ fsimg cf data.img -F exfat -C files .      # Create an image from ./files/
 - **One interface across formats.** Work with FAT, exFAT, and QNX filesystems
   using the same commands.
 - **Read through the layers.** Detect supported filesystems inside GPT or MBR
-  disks, DMGs, fixed VHDs, Android sparse images, and gzip streams.
+  disks, DMGs, fixed VHDs, Android sparse images, and gzip or xz streams.
 - **Build images from files or manifests.** Choose the filesystem, size,
   label, partition scheme, and container. Use mtree manifests to set image
   ownership and permissions without changing host files.
@@ -180,7 +180,7 @@ fsimg tf disk.img --json
 
 JSON output is newline-delimited, with explicit completion records. Diagnostics
 and progress go to stderr; file payloads and listing records go to stdout.
-Standard input and gzip decoding use a temporary spool, bounded by
+Standard input and decompression use a temporary spool, bounded by
 `-l spool=` (64 GiB by default). Use `-T` to choose scratch storage and
 `-m` to set the library memory budget.
 
@@ -201,6 +201,7 @@ Standard input and gzip decoding use a temporary spool, bounded by
 | VHD | Fixed disks | Fixed disks |
 | Android sparse (`simg`) | Yes | Yes |
 | gzip | Files and stdin, including concatenated members | Files and stdout |
+| xz (with liblzma) | Files and stdin, including concatenated streams | Files and stdout |
 | QNX boot image (`ifsboot`) | Raw, LZO1X, or NRV2B body | Qualified machine/compression combinations |
 | Harman-Becker `hbcifs` | LZO1X ImageFS container | No |
 
@@ -218,6 +219,9 @@ See the [command manual](docs/fsimg.1) for exact profiles and limits.
 
 Building from a checkout requires Autoconf, Automake, Libtool, make, a C11
 compiler, a C++ compiler, and the system zlib development headers and library.
+The xz compression uses liblzma when configure finds it (`liblzma-dev`,
+`xz-devel`, Homebrew's `xz`; FreeBSD's base system); without it the
+build is otherwise the same and refuses to write `.xz` images.
 
 ```sh
 git clone https://github.com/stass/fsimg.git
@@ -238,8 +242,8 @@ for platform setup and test commands.
 
 Installation includes the command, shared and static `libfsimg`, the public C
 header, pkg-config metadata, manuals, and checked
-[C examples](docs/examples.md). The runtime uses libc, host OS APIs, and system
-zlib.
+[C examples](docs/examples.md). The runtime uses libc, host OS APIs, system
+zlib and, when the build found it, the system liblzma.
 
 ## Further reading
 

@@ -507,13 +507,25 @@ typedef struct fsimg_layer_info {
  * chunks or raw. Its startup code and boot prefix are file settings,
  * supplied in fsimg_layer_inputs_t.
  *
- * The compression setting: gzip_level is the DEFLATE level of an output
- * the write options compress with gzip, 1 to 9, zero selecting 6.
+ * The compression settings, each used only by the compression the write
+ * options name. gzip_level is the DEFLATE level, 1 to 9, zero selecting 6.
+ * xz_level is the xz(1) preset, 0 to 9, which fsimg_layer_options_init()
+ * sets to 6, since zero is a preset, so a zero-filled structure is not
+ * the defaults: the options check refuses its xz_level of 0 as a setting
+ * of a layer the stack does not contain; xz_check the integrity check of each
+ * block, CRC64 by default. The xz encoder's memory is the preset's, up to
+ * 674 MiB at preset 9, charged to the context's memory budget.
  */
 typedef enum fsimg_dmg_compression {
 	FSIMG_DMG_ZLIB = 0,
 	FSIMG_DMG_NONE = 1
 } fsimg_dmg_compression_t;
+
+typedef enum fsimg_xz_check {
+	FSIMG_XZ_CRC64 = 0,
+	FSIMG_XZ_CRC32 = 1,
+	FSIMG_XZ_SHA256 = 2
+} fsimg_xz_check_t;
 
 typedef enum fsimg_ifsboot_compression {
 	FSIMG_IFSBOOT_LZO = 0,
@@ -556,7 +568,9 @@ struct fsimg_layer_options {
 	bool		 ifsboot_image_paddr_set;
 	bool		 ifsboot_ram_paddr_set;
 	bool		 ifsboot_imagefs_paddr_set;
-	uint64_t	 reserved[4];
+	uint32_t	 xz_level;
+	fsimg_xz_check_t xz_check;
+	uint64_t	 reserved[3];
 };
 
 /* File settings (specs/design-layers.md#file-settings-and-sections): the
@@ -714,10 +728,12 @@ typedef struct fsimg_selector {
  * were checked. The scope is FSIMG_VALIDATION_PAYLOAD when a container's
  * chunks were decoded and checked under FSIMG_VERIFY_PAYLOAD. The
  * filesystem of a selected partition is verified separately, and no other
- * partition's contents. unverified names, comma-separated, the container's
- * fields that no evidence gives a rule to check, such as "0x14,0x1c" for
- * hbcifs; complete is false exactly when it is not empty, every other
- * check having run and passed.
+ * partition's contents. unverified names, comma-separated, what was not
+ * checked: the check a compression's members lacked, qualified by its
+ * name, such as "xz:check" for an xz stream written without one, and the
+ * container's fields that no evidence gives a rule to check, such as
+ * "0x14,0x1c" for hbcifs; complete is false exactly when it is not empty,
+ * every other check having run and passed.
  */
 typedef struct fsimg_layer_report {
 	char		 compression[16];	/* Members checked at spool time */
@@ -843,11 +859,13 @@ typedef struct fsimg_plan_info {
 	 * names the compression the write options name, empty for none.
 	 * padding_bytes is the zero padding the container's disk-length
 	 * granularity added to the disk. codec_version names the compression
-	 * library the output depends on ("zlib 1.3.1"), empty for none.
+	 * libraries the output depends on, the container's and then the
+	 * compression's, each once ("zlib 1.3.1, liblzma 5.8.4"), empty for
+	 * none.
 	 */
 	uint64_t	 output_bytes;
 	uint64_t	 padding_bytes;
-	char		 codec_version[32];
+	char		 codec_version[64];
 } fsimg_plan_info_t;
 
 /* Where an output operation writes. FILE stages a new file beneath the

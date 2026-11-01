@@ -69,6 +69,8 @@ typedef unsigned char id16_t[16];
 #define IFSBOOT_COMPRESSION(rec, member)	BIND(rec, member,	\
 	FSIMG_KIND_IFSBOOT_COMPRESSION, fsimg_ifsboot_compression_t,	\
 	FSIMG_NO_PRESENCE)
+#define XZ_CHECK(rec, member)	BIND(rec, member, FSIMG_KIND_XZ_CHECK,	\
+	fsimg_xz_check_t, FSIMG_NO_PRESENCE)
 #define TEXT_(type, record_id, member)	.record = (record_id),		\
 	.kind = FSIMG_KIND_TEXT, .offset = offsetof(type, member),	\
 	.size = TEXT_SIZE(type, member), .presence = FSIMG_NO_PRESENCE
@@ -103,6 +105,11 @@ static const fsimg_setting_choice_t ifsboot_choices[] = {
 	{ "lzo", { .ifsboot_compression = FSIMG_IFSBOOT_LZO } },
 	{ "none", { .ifsboot_compression = FSIMG_IFSBOOT_NONE } },
 	{ NULL, { 0 } }
+};
+static const fsimg_setting_choice_t xz_check_choices[] = {
+	{ "crc32", { .xz_check = FSIMG_XZ_CRC32 } },
+	{ "crc64", { .xz_check = FSIMG_XZ_CRC64 } },
+	{ "sha256", { .xz_check = FSIMG_XZ_SHA256 } }, { NULL, { 0 } }
 };
 
 /*
@@ -272,6 +279,23 @@ static const fsimg_setting_t gzip_rows[] = {
 	    .scope = FSIMG_SCOPE_WRITE }
 };
 
+/*
+ * The optional compressions' rows, present in every build so their keys
+ * are recognized whether or not the build has the library, which the
+ * creation then refuses as unsupported. Preset 0 is a real xz
+ * preset, so the initializer stores the default 6 instead of zero
+ * selecting it; the profile refuses a preset above 9.
+ */
+static const fsimg_setting_t xz_rows[] = {
+	{ .owner = "xz", .key = "level", U32(RECORD_LAYERS, xz_level),
+	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT32_MAX,
+	    .initial = { .u32 = 6 }, .scope = FSIMG_SCOPE_WRITE },
+	{ .owner = "xz", .key = "check", XZ_CHECK(RECORD_LAYERS, xz_check),
+	    .syntax = FSIMG_SYNTAX_CHOICE, .choices = xz_check_choices,
+	    .initial = { .xz_check = FSIMG_XZ_CRC64 },
+	    .scope = FSIMG_SCOPE_WRITE }
+};
+
 const fsimg_setting_slice_t fsimg_filesystem_settings = SLICE(filesystem_rows);
 const fsimg_setting_slice_t fsimg_gpt_settings = SLICE(gpt_rows);
 const fsimg_setting_slice_t fsimg_mbr_settings = SLICE(mbr_rows);
@@ -280,6 +304,7 @@ const fsimg_setting_slice_t fsimg_vhd_settings = SLICE(vhd_rows);
 const fsimg_setting_slice_t fsimg_simg_settings = SLICE(simg_rows);
 const fsimg_setting_slice_t fsimg_ifsboot_settings = SLICE(ifsboot_rows);
 const fsimg_setting_slice_t fsimg_gzip_settings = SLICE(gzip_rows);
+const fsimg_setting_slice_t fsimg_xz_settings = SLICE(xz_rows);
 
 static const void *record_of(const fsimg_setting_t *,
     const fsimg_setting_records_t *);
@@ -427,6 +452,9 @@ load_member(const fsimg_setting_t *row, const unsigned char *member,
 		bcopy(member, &value->ifsboot_compression,
 		    sizeof(value->ifsboot_compression));
 		break;
+	case FSIMG_KIND_XZ_CHECK:
+		bcopy(member, &value->xz_check, sizeof(value->xz_check));
+		break;
 	case FSIMG_KIND_TEXT:
 		value->text = (const char *)member;
 		break;
@@ -470,6 +498,9 @@ store_member(const fsimg_setting_t *row, unsigned char *member,
 	case FSIMG_KIND_IFSBOOT_COMPRESSION:
 		bcopy(&value->ifsboot_compression, member,
 		    sizeof(value->ifsboot_compression));
+		break;
+	case FSIMG_KIND_XZ_CHECK:
+		bcopy(&value->xz_check, member, sizeof(value->xz_check));
 		break;
 	case FSIMG_KIND_TEXT:
 		/* The whole member is defined: the text, then zeros. A NULL
@@ -519,6 +550,8 @@ values_equal(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->dmg_compression == b->dmg_compression);
 	case FSIMG_KIND_IFSBOOT_COMPRESSION:
 		return (a->ifsboot_compression == b->ifsboot_compression);
+	case FSIMG_KIND_XZ_CHECK:
+		return (a->xz_check == b->xz_check);
 	case FSIMG_KIND_TEXT:
 		return ((a->text == NULL || a->text[0] == '\0') ==
 		    (b->text == NULL || b->text[0] == '\0'));

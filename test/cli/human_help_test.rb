@@ -65,10 +65,19 @@ class CliTest < Minitest::Test
     formats = invoke(arguments: ["--formats"])
     # The DMG and gzip rows are each followed by the zlib version fsimg runs
     # against.
-    version = Regexp.new("\\n {22}(zlib [0-9][0-9A-Za-z.-]*)\\n".b).match(formats.stdout)
-    refute_nil(version, formats.stdout)
-    assert_equal(2, formats.stdout.scan(version[0]).size, formats.stdout)
-    expected_formats = <<~'FORMATS'
+    zlib_version = Regexp.new("\\n {22}(zlib [0-9][0-9A-Za-z.-]*)\\n".b).match(formats.stdout)
+    refute_nil(zlib_version, formats.stdout)
+    assert_equal(2, formats.stdout.scan(zlib_version[0]).size, formats.stdout)
+    xz_version = if xz_supported?
+      version = xz_format.fetch("codec_version")
+      assert_match(/\Aliblzma [0-9][0-9A-Za-z.-]*\z/, version)
+      "                      #{version}\n"
+    else
+      assert_nil(xz_format.fetch("codec_version"))
+      ""
+    end
+    xz_capabilities = xz_supported? ? "yes   yes    yes" : "no    no     no "
+    expected_formats = <<~FORMATS
       Format  Read  Write  Verify
       fat12   yes   yes    yes
       fat16   yes   yes    yes
@@ -88,9 +97,10 @@ class CliTest < Minitest::Test
       hbcifs   container    yes   no     yes     lzo1x            -
       gzip     compression  yes   yes    yes     -                level
       zstd     compression  no    no     no      -                -
-      xz       compression  no    no     no      -                -
+      xz       compression  #{xz_capabilities}     -                level,check
     FORMATS
-    assert_equal(expected_formats.b, formats.stdout.gsub(version[0], "\n".b))
+    expected_formats += xz_version
+    assert_equal(expected_formats.b, formats.stdout.gsub(zlib_version[0], "\n".b))
     assert_equal("".b, formats.stderr)
     verbose = invoke(arguments: ["--formats", "-v"])
     assert_equal(formats.stdout, verbose.stdout, "verbose stdout")

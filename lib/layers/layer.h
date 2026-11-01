@@ -433,7 +433,8 @@ typedef struct fsimg_planned_file {
  * depends on the library the container's version operation names, as
  * DMG's zlib chunks do and its raw chunks do not, for the plan's codec
  * report; a container with a version operation sets it. Once
- * constructed the plan never changes: what an encoder learns stays in the encoder's own state.
+ * constructed the plan never changes: what an encoder learns stays in the
+ * encoder's own state.
  *
  * Without a container there is no plan, and fsimg_disk_plan_container
  * supplies the defaults fsimg_container_plan_alloc gives a new base: a
@@ -693,14 +694,23 @@ fsimg_status_t fsimg_spool_fill(fsimg_spool_t *, fsimg_spool_input_t *,
 
 /*
  * A compression's write settings, resolved once by the disk plan: level
- * is the codec's level, and timestamp the modification time in Unix
- * seconds, the epoch under FSIMG_WRITE_REPRODUCIBLE and the host clock
- * otherwise. An encoder writes a time its format cannot hold as the
- * format's "no time" value, which for gzip is zero.
+ * is the codec's level; check the integrity check a format with a choice
+ * of them writes, in the library's own numbering (xz's lzma_check), zero
+ * for one without; and timestamp the modification time in Unix seconds,
+ * the epoch under FSIMG_WRITE_REPRODUCIBLE and the host clock otherwise.
+ * An encoder writes a time its format cannot hold as the format's "no
+ * time" value, which for gzip is zero. length is the exact number of
+ * bytes the encoder receives when the layout fixes it, as it does for a
+ * bare disk, and FSIMG_COMPRESSION_LENGTH_UNKNOWN around a container,
+ * whose encoding the plan only bounds; the plan sets it after the layout,
+ * which the compression's own plan operation precedes.
  */
+#define FSIMG_COMPRESSION_LENGTH_UNKNOWN	UINT64_MAX
 typedef struct fsimg_compression_settings {
 	int64_t		 timestamp;
+	uint64_t	 length;
 	uint32_t	 level;
+	uint32_t	 check;
 } fsimg_compression_settings_t;
 
 /*
@@ -730,7 +740,11 @@ typedef struct fsimg_compressor_ops {
  * charging every compressed byte it reads, headers and trailers included,
  * and every byte it produces to the source's session as work; a
  * corrupt input is FSIMG_ECORRUPT with FSIMG_OP_IMAGE, and any failure is
- * final.
+ * final. unverified names the one check a member may lack, qualified by
+ * the compression's name ("xz:check"), NULL for a format whose members
+ * always carry theirs; decode sets its bool when it decoded a member
+ * without that check, which only a compression with an entry does, and
+ * verification then reports the entry.
  *
  * The write side. plan validates the compression's layer settings and
  * resolves them, given the FSIMG_WRITE_* mode and the epoch; a failure is
@@ -745,7 +759,8 @@ typedef struct fsimg_compression_ops {
 	size_t		 probe_bytes;
 	fsimg_status_t	(*probe)(const unsigned char *, size_t, fsimg_error_t *);
 	fsimg_status_t	(*decode)(fsimg_spool_input_t *, fsimg_spool_t *,
-			    fsimg_error_t *);
+			    bool *, fsimg_error_t *);
+	const char	*unverified;
 	fsimg_status_t	(*plan)(const fsimg_layer_options_t *, uint32_t, int64_t,
 			    fsimg_compression_settings_t *, fsimg_error_t *);
 	fsimg_status_t	(*bound)(uint64_t, uint64_t *, fsimg_error_t *);
@@ -778,6 +793,8 @@ extern const fsimg_container_ops_t fsimg_simg_container;
 extern const fsimg_container_ops_t fsimg_hbcifs_container;
 extern const fsimg_container_ops_t fsimg_ifsboot_container;
 extern const fsimg_compression_ops_t fsimg_gzip_compression;
+/* Defined only in a build with the library (FSIMG_XZ). */
+extern const fsimg_compression_ops_t fsimg_xz_compression;
 
 /* The registry, in reporting order; NULL past the end. */
 const fsimg_layer_t *fsimg_layer_at(size_t);
