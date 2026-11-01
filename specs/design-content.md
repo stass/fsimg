@@ -44,7 +44,7 @@ content interface. Extent lookup alone never authorizes exposing them.
 | Owner | Owns |
 | --- | --- |
 | Common delivery (`lib/read/`) | Bounds against the logical length, the initialized/zero split, transfer batching, source-stability checks, cancellation, work charging, confirmed byte counts, content-domain enforcement, terminal failure |
-| Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated physical extent containing that offset |
+| Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated physical extent containing that offset, or a symbolic link's [decoded target](#decoded-link-targets) |
 | Extent index (optional, `lib/meta/`) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
 
 Delivery calls one driver operation: resolve offset `o < initialized` to an
@@ -85,6 +85,34 @@ allocation once.
 
 Metadata reads of complete records keep their own contract: they succeed only
 with the complete record. Partial progress is a content-read concept.
+
+## Decoded link targets
+
+A symbolic link's target is usually a range of image bytes, which the
+driver resolves like a file's. Some formats store it as structured
+records that a reader must assemble: Rock Ridge stores components, with
+flags for `.`, `..` and the root, across `SL` entries and continuation
+areas, so no image range holds the target's bytes. For such a link the
+driver decodes the target at replay and declares it with
+`fsimg_reader_set_link_target(reader, bytes, length, error)`. The common
+reader owns the buffer, `FSIMG_SYMLINK_TARGET_MAX` bytes allocated on the
+first declaration and charged to its session; the call copies the target
+into it and sets the entry's size and initialized length to its length.
+The driver calls it during replay, after setting the entry's kind, and it
+fails with `FSIMG_ESTATE` unless that kind is a symbolic link and the
+length is 1 through `FSIMG_SYMLINK_TARGET_MAX`, so only a link can declare
+one: a file's content always comes from resolved extents within
+the content domain.
+
+Delivery then copies from the buffer instead of calling `resolve`. Every
+other rule holds: a range query reports one DATA range, reads clip to the
+length and report confirmed bytes, and each batch runs the
+source-stability check, cancellation and work charging, so a decoded
+target cannot bypass them. The walker clears the declaration where it
+clears the initialized length, before each replay, and releasing the
+walker clears it too, so a stale target is never delivered. Payload
+verification reads a decoded target through the same delivery, so its
+bytes count as read.
 
 ## Extent index
 

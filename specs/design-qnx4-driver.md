@@ -242,7 +242,7 @@ or, with a nonzero long-name pointer, the long-name record found through the
 long-name locator, whose back-reference, state, length and mangled prefix
 with its zero byte must agree. An empty name, a NUL before the length, a
 slash, or `.` or `..` in a slot beyond the first two is `FSIMG_ECORRUPT`.
-The decoded name is handed to preparation, which applies the QNX-family
+The decoded name is handed to preparation, which applies the byte-name
 profile the descriptor declares and assigns the child's class under the
 [omitted-names contract](design-directories.md#omitted-names); the driver
 chooses no class. Every slot is validated before any child is admitted.

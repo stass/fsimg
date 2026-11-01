@@ -15,7 +15,7 @@ Driver designs ([FAT](design-fat-writer.md), [exFAT](design-exfat.md),
 
 | Owner | Owns |
 | --- | --- |
-| Writer lifecycle (`lib/write/`) | State transitions, pre-mutation checks, sink initialization, flush, failure marking of the output |
+| Writer lifecycle (`lib/write/`) | State transitions, pre-mutation checks, sink initialization, flush, failure marking of the output, the [link-target read](#link-targets) |
 | Emission object | Bounded metadata writes, the source copy operation, the transfer buffer, progress |
 | Driver | Layout iteration, metadata encoding, placement: which bytes belong at which offset |
 
@@ -113,6 +113,28 @@ a different entry's source or leave a source open.
 * Confirmed I/O progress is preserved in errors. Cancellation propagates.
 * The current source is released on every outcome, including errors in the
   middle of a batch.
+
+## Link targets
+
+Most formats store a symbolic link's target as bytes the payload copy
+writes into a planned region. Rock Ridge encodes it inside directory
+metadata as `SL` components, whose sizes depend on the target's bytes:
+the number of components and which of them are `.`, `..` or the root. Such
+a driver needs the target while it plans and again while it encodes the
+records. The writer offers it one operation for both: read entry `id`'s
+target into a caller buffer of `FSIMG_SYMLINK_TARGET_MAX` bytes.
+
+The operation owns the source lifecycle exactly as the copy does: it opens
+the source by stable catalog ID, requires a symbolic-link entry, reads
+exactly the catalog's declared length, which collection bounded, validates
+the source and closes it on every outcome. It works during planning and
+during emission, never holds a source between calls, and charges the read
+to the session. A target whose bytes change between the planning read and
+the emission read is a changed source when validation detects it; when
+the change keeps the recorded metadata, the driver compares the record
+sizes it encodes with the plan's and fails with `FSIMG_ESOURCE_CHANGED`
+on a difference, so a plan never describes records of another size. A
+driver that stores the target as payload never needs this operation.
 
 ## Failure
 

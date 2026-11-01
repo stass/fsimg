@@ -11,8 +11,8 @@ The [architecture](architecture.md#writer-and-reader-independence) assigns the
 owners. [Storage](design-storage.md#reading-and-traversal) states the bounds.
 Driver designs ([FAT](design-fat-reader.md), [exFAT](design-exfat.md),
 [QNX6](design-qnx6.md), [QNX4](design-qnx4.md),
-[ImageFS](design-ifs-driver.md)) define only their decoding, keys, and
-locators.
+[ImageFS](design-ifs-driver.md), [ISO 9660](design-iso9660-driver.md))
+define only their decoding, keys, and locators.
 Host source scanning and safe extraction have separate authority and lifetime
 rules and do not use this walker.
 
@@ -153,9 +153,9 @@ whole-volume tree is materialized.
 A driver admits a child once its name has passed the driver's native checks,
 the ones whose failure is corruption, such as an embedded NUL or an empty
 name. Preparation then assigns the child one of two classes. A format whose
-reader operations, which its descriptor names, declare the QNX-family name
-profile (QNX4, QNX6 and ImageFS) has every child's component checked by the
-one common profile function:
+reader operations, which its descriptor names, declare the byte-name
+profile (QNX4, QNX6, ImageFS and ISO 9660) has every child's component
+checked by the one common profile function:
 strict UTF-8, no NUL, slash, control byte or `0x7f`, neither `.` nor `..`.
 A component under the profile makes the child *delivered*; a natively legal
 component outside it makes the child *omitted*, under the
@@ -163,9 +163,13 @@ component outside it makes the child *omitted*, under the
 that declares no profile, FAT and exFAT, admits every child as delivered,
 since its driver derives validated names by its own rules. Common code
 branches on the declared property, never on a format name, and no driver
-chooses a class. The same function validates a query component in every
-QNX driver's `key`, and the ImageFS child pass calls it to count omitted
-nodes at open, so there is one rule for what the profile accepts.
+chooses a class. The same function validates a query component in the
+`key` of every driver that declares the profile, and the ImageFS child pass
+calls it to count omitted nodes at open, so there is one rule for what the
+profile accepts. The profile is named for what it checks, not for a
+format: a format whose names are bytes, such as a Rock Ridge name written
+under a legacy 8-bit host encoding, declares it so that one foreign name
+omits one entry instead of making the image unreadable.
 
 The class is the only difference between the two kinds of child. An
 omitted child is decoded, validated and charged like a delivered one, its
@@ -250,6 +254,28 @@ to callers filters on that mark:
   `omitted_entries`; and the report is complete, since every omitted
   object was checked. Corruption below an omitted name is corruption,
   found by the same checks as anywhere else.
+
+## Several walks
+
+A volume can hold several trees over shared data, as ISO 9660 holds a
+primary and a Joliet hierarchy. Full verification must check each, and it
+does so with the one walker, one tree at a time. When an advance returns
+`FSIMG_DONE`, the driver's verification may release the finished walker
+and select its next root in its own state; the next advance starts a new
+walk, which prepares that root at level 0. Each walk is a complete
+traversal: every directory is prepared, its driver checks run and its
+namespace is validated again, and the depth, path and entry limits apply
+as for the first. The session's work and entry counters keep
+running across walks, so a second walk costs its share of the same
+budget.
+
+One walk is the operation's counted walk, the one whose entries the driver
+accounts in the verification report. For every other walk the driver takes
+the root out of the omission scope before it starts, so the walker still
+descends and checks omitted subtrees but counts none of them; the report's
+`omitted_entries` are the counted walk's. Only full verification starts a
+second walk: iteration, selection and extraction walk exactly one tree,
+the view the reader opened.
 
 ## Snapshots and borrowing
 

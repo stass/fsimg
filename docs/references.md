@@ -121,3 +121,22 @@ ReFirmLabs, and Porsche PCM-Explorer references, vendor documentation, license
 boundaries, and independently checked fixture observations. These sources
 inform the [QNX6 design](../specs/design-qnx6.md); no third-party code or
 binary fixture is imported. Read-only parsers are not formatter oracles.
+
+## ISO 9660 references
+
+[ECMA-119](https://ecma-international.org/publications-and-standards/standards/ecma-119/),
+sixth edition, with its Annex C for Joliet, is the normative volume and
+file structure reference. The IEEE P1281 (SUSP) and P1282 (RRIP) drafts at
+version 1.12 and the El Torito 1.0 specification define the system-use
+protocol, Rock Ridge and boot catalogs. These documents are copyrighted:
+the [format design](../specs/design-iso9660.md) restates their layouts in
+project prose and copies no text, and the research draft
+[fsimg_iso9660_spec.md](../fsspecs/fsimg_iso9660_spec.md) records the links.
+
+libarchive's ISO reader and writer (BSD-2-Clause) and FreeBSD's `cd9660`
+and `makefs` (BSD) are behavioural references and oracles; no code from
+them is imported. `xorriso` and libisofs, `genisoimage`, `isoinfo` and
+`isovfy`, and `pycdlib` (GPL and LGPL families) are external programs used
+only as producers and consumers of test images, at the versions
+[build.md](build.md) records, and never enter the repository or the link.
+Test images are generated from manifests; none is committed.

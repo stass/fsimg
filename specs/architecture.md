@@ -19,8 +19,8 @@ stream. Ordinary file use requires no privileges, kernel filesystem driver,
 or external formatter. Device use requires permission to read that endpoint.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
-Power-Safe profiles, QNX4 and the QNX image filesystem (ImageFS) with
-independent read and write support. The CLI is
+Power-Safe profiles, QNX4, the QNX image filesystem (ImageFS) and ISO 9660
+with independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
 `--formats` for capabilities, with `-f` naming the image. Each format
@@ -517,6 +517,25 @@ at its image address and a compiled boot script, and fsimg neither
 produces nor modifies member files, so such a body comes from `mkifs` or
 is unwrapped from an existing boot image, and the `ifsboot` writer
 packages its ImageFS bytes unmodified.
+The [ISO 9660 design](design-iso9660.md) defines a volume that carries up
+to three name trees over shared file data: the primary hierarchy, its Rock
+Ridge interpretation and a Joliet hierarchy. A reader session exposes
+exactly one of them, the view chosen at open, and never resolves a name or
+borrows metadata across trees, so a tree's corruption cannot be masked by
+another; the [driver design](design-iso9660-driver.md) maps them onto one
+directory decoder for all three views. Three common additions serve it,
+each owned by the design that owns the mechanism and available to any
+format: full verification walks each tree with the one walker
+([several walks](design-directories.md#several-walks)), so every tree is
+checked without a second traversal engine; a reader may deliver a
+symbolic link's target from bytes it decoded rather than an image range
+([decoded link targets](design-content.md#decoded-link-targets)), because
+Rock Ridge assembles targets from components; and a writer may read a
+link's target while planning ([link targets](design-emission.md#link-targets)),
+because Rock Ridge record sizes depend on its bytes. Each keeps its
+owner's bounds and source lifecycle, so no driver gains a private path to
+sources or content. Its El Torito boot entries name files of the tree,
+whose bytes the writer copies unmodified.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
@@ -633,9 +652,9 @@ and QNX6 hold evidence to 1023. One ceiling with per-format limits keeps the
 buffers and the scan format-neutral while no format advertises more than it
 has been shown to store.
 
-The QNX4, QNX6 and ImageFS readers omit an entry whose name is natively
-legal but outside the QNX-family fsimg name profile, instead of failing the
-image, through the
+The QNX4, QNX6, ImageFS and ISO 9660 readers omit an entry whose name is
+natively legal but outside fsimg's byte-name profile, instead of failing
+the image, through the
 [prepared-directory contract](design-directories.md#omitted-names); FAT and
 exFAT keep their strict UTF-16 name rules, under which a name is either
 valid or corrupt. The profile is fsimg's, not the format's: one foreign
@@ -898,6 +917,7 @@ lib/formats/exfat/   exFAT codecs, reader, writer
 lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
 lib/formats/qnx4/    QNX4 codecs, reader, writer, verification
 lib/formats/ifs/     ImageFS codecs, reader, writer, verification
+lib/formats/iso9660/ ISO 9660 codecs, views, reader, writer, verification
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests

@@ -498,7 +498,18 @@ void fsimg_reader_free(fsimg_reader_t *reader);
 ```
 
 Read options contain an optional format override and typed decoding options,
-including the FAT short-name codepage policy. Input region selection is done
+including the FAT short-name codepage policy and `iso_view`, the ISO 9660
+[view](design-iso9660.md#view-selection): `FSIMG_ISO_VIEW_AUTO`, zero, or
+`FSIMG_ISO_VIEW_ROCKRIDGE`, `FSIMG_ISO_VIEW_JOLIET` or
+`FSIMG_ISO_VIEW_PRIMARY`. A decoding option that one format interprets,
+such as `iso_view`, has a support bit in the format record's
+`read_settings` mask, and opening refuses a non-default one the claimed
+format lacks with `FSIMG_EINVAL`, as the
+[settings catalogue](design-settings.md) states, so such an option never
+reaches a format it does not belong to; `fat_codepage` accepts only its
+default interpretation for every format and keeps its own check. The reader keeps a copy of the
+typed decoding options for its driver's `open`; common code never
+interprets them. Input region selection is done
 by constructing a slice, not by independently applying offsets in the driver.
 The input object and its source remain stable and alive until reader destruction.
 Host adapters check identity/size changes; concurrent hostile modification has
@@ -535,6 +546,17 @@ behind `FSIMG_SETTING_*` bits, as the
 `FSIMG_SETTING_MOUNTPOINT`. No write setting names a boot program or a
 startup script: the ImageFS writer writes
 [nonbootable bodies](design-ifs.md#bootable-bodies) only.
+
+ISO 9660 has four typed fields in `fsimg_write_options_t`, whose layout,
+like the rest of the interface, freezes at the first declared stable
+release: `iso_level`, zero selecting 3, under
+`FSIMG_SETTING_ISO_LEVEL`; and under `FSIMG_SETTING_ELTORITO`
+`boot_bios` and `boot_efi`, copied absolute image paths of files in the
+writer's own catalog with NULL for none, and `boot_load_sectors`, zero
+selecting 4. A boot path names an entry of the image being written, never
+a host file, so the fields carry no descriptor and grant no authority; the
+[ISO driver design](design-iso9660-driver.md#writer-settings) states their
+rules.
 
 `next()` validates a directory's effective lookup namespace through the bounded
 preparation specified in [prepared directories](design-directories.md) before

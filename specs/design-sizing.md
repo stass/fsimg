@@ -45,6 +45,7 @@ to a whole sector, it is the same capacity under either policy.
 | QNX6 | Block size over the classic sizes; inode capacity, the catalog's inodes rounded to a whole table block; the block count at the alignment step instead of the 64-block search step | Byte order, the reserve percentage, the system-run recipe |
 | QNX4 | Nothing: the block is 512 bytes and the block count is already the smallest that fits | The native default layout, the 128-slot `.inodes` minimum, the 4096-byte directory rounding |
 | ImageFS | Nothing: the image is exactly its header, mountpoint, records, data and trailer | The 4-byte record and data alignment |
+| ISO 9660 | Nothing: the image is exactly its descriptors, path tables, directories, continuation region and data | The 2048-byte block and the writer's one layout |
 
 The FAT type minimum is what makes the image the requested variant and is
 not a dimension. The exFAT recommended cluster count is a guidance value, so
@@ -100,6 +101,13 @@ plan reports it. Neither policy searches anything, so minimization returns
 the same image, and a requested `volume_bytes` or `min_free_bytes` is
 refused with `FSIMG_EINVAL`, which the CLI reports for `-s` and
 `--free-space` as settings the format cannot honor.
+
+An ISO 9660 volume has no free space either: its exact size follows from
+the [driver design's](design-iso9660-driver.md#planning) layout pass, and
+minimization returns the same image. Unlike ImageFS it accepts a
+`volume_bytes` at least that size and a multiple of 2048, padding with
+zero blocks the volume counts, since a padded volume is legal and some
+media want it; `min_free_bytes` is refused with `FSIMG_EINVAL`.
 
 Planning work grows by the number of candidates evaluated, never by a
 second traversal of the catalog: each candidate geometry evaluated charges

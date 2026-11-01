@@ -56,8 +56,18 @@ Filesystem rows refer to existing `FSIMG_SETTING_*` bits. A format variant's
 `write_settings` mask is its one declaration of support; there is no second
 per-format list of setting names. `sector` and `cluster` use the existing
 geometry capability fields and driver geometry checks, rather than acquiring
-new support bits. `oem` is the read-side filesystem setting. A layer row's owner
-is a registry identity, not a repeated test against a string in each consumer.
+new support bits. `oem` and `view` are the read-side filesystem settings.
+`view`, the ISO 9660 `iso_view` read option, has a support bit as write
+settings do: a format variant's `read_settings` mask names the
+`FSIMG_READ_SETTING_*` fields it interprets, and its one row refers to
+`FSIMG_READ_SETTING_ISO_VIEW`. A read command does not know the format
+until detection runs inside the worker, so the check runs after the claim
+and before the driver opens the volume: a non-default field whose bit the
+claimed format's record lacks is `FSIMG_EINVAL` naming the key, before any
+directory is read. A forced format whose record lacks the bit lets the CLI
+refuse the key before the worker starts. No consumer tests a format name.
+A layer row's owner is a registry identity, not a repeated test against a
+string in each consumer.
 
 The catalogue includes all fields subject to shared setting applicability,
 even if a particular field has no CLI spelling. Ordinary mode flags, resource
@@ -104,6 +114,9 @@ Public option initialization and catalogue default tests agree on these values:
 | Filesystem UUID, inode capacity and FAT root capacity | Zero bytes, zero and zero respectively |
 | Filesystem reserve percentage | 3 |
 | Filesystem mountpoint | `NULL`; a pointer to `""` is an explicit empty mountpoint |
+| ISO level, boot load sectors | Zero, requesting levels 3 and 4 sectors |
+| ISO boot images | `NULL` |
+| ISO view (read) | `FSIMG_ISO_VIEW_AUTO`, zero |
 | File input | `NULL` |
 
 Default tests compare typed values. They never compare entire native structures
@@ -145,12 +158,12 @@ The finite syntax classes cover the existing grammar:
 | Class | Examples and conversion |
 | --- | --- |
 | Byte quantity | `sector`, `cluster`, `gpt:disk`, chunk and alignment sizes; checked CLI unit syntax, then destination range |
-| Decimal count | `inodes`, `root`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
+| Decimal count | `inodes`, `root`, `level`, `bootload`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
 | Hexadecimal 32-bit value | `mbr:id` and boot addresses; `0x` or `0X` and one through eight hexadecimal digits |
 | Boolean | Exactly `yes` or `no` |
-| Named choice | `endian=little|big`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437` |
+| Named choice | `endian=little|big`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437`, `view=auto|rockridge|joliet|primary` |
 | UUID | RFC 4122 text converted to textual byte order; nil permitted for the filesystem UUID, refused for layer identifiers |
-| Text | GPT type/name, MBR type, mountpoint; checked destination capacity, with format meaning checked by its owner |
+| Text | GPT type/name, MBR type, mountpoint, ISO `boot` and `efiboot` image paths; checked destination capacity, with format meaning checked by its owner |
 | File path | A host operand retained by the CLI for descriptor preparation |
 
 Choice entries pair spellings with values of the row's declared type. Lexical

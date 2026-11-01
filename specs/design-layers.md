@@ -59,7 +59,7 @@ An image is a stack with three slots in fixed order, each at most once:
 
 | Slot | Kind | Names |
 | --- | --- | --- |
-| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`; reserved: `apfs`, `hfs` |
+| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`, `iso9660`; reserved: `apfs`, `hfs` |
 | 2 | Scheme | `gpt`, `mbr` |
 | 3 | Container | `dmg`, `vhd`, `simg`, `ifsboot`, `hbcifs` |
 
@@ -139,8 +139,9 @@ split below.
 
 A setting without a layer qualifier targets the filesystem: `oem`,
 `sector`, `cluster`, the QNX6 `endian`, `uuid`, `inodes`, `reserve`, the
-QNX4 `inodes`, the FAT12/16 `root`, and the IFS `endian` (shared with QNX6)
-and `mountpoint`.
+QNX4 `inodes`, the FAT12/16 `root`, the IFS `endian` (shared with QNX6)
+and `mountpoint`, and the ISO 9660 `level`, `boot`, `efiboot` and
+`bootload`, with `view` on read.
 A layer setting is qualified by its layer name: `gpt:type=esp`,
 `dmg:compress=none`, `gzip:level=9`. A qualified key for a layer absent from
 the stack fails; fsimg never guesses the target of a bare key. On read the
@@ -320,7 +321,10 @@ with a damaged header CRC is reported as a damaged GPT, not read as a bare
 volume, and a dynamic VHD is reported as unsupported, not as a raw disk with
 an odd tail. Running scheme and filesystem probes together at step 3 is what
 makes a FAT boot sector whose code region happens to resemble a partition
-table an explicit ambiguity rather than a silent misread.
+table an explicit ambiguity rather than a silent misread. An isohybrid ISO
+9660 image is the same case by design: its system area holds an MBR or GPT
+so that the file is also a partitioned disk, both claims are genuine, and
+`-F iso9660/-` or `--partition` chooses the reading.
 
 A read-side stack forces the slots it names, forces empty the slots it marks
 `-`, and leaves the rest to detection. `fat32` forces the filesystem decoder
