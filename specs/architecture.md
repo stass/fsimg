@@ -19,8 +19,8 @@ stream. Ordinary file use requires no privileges, kernel filesystem driver,
 or external formatter. Device use requires permission to read that endpoint.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
-Power-Safe profiles, QNX4, the QNX image filesystem (ImageFS), and HFS Plus
-and HFSX with independent read and write support. The CLI is
+Power-Safe profiles, QNX4, the QNX image filesystem (ImageFS), HFS Plus,
+HFSX and APFS with independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
 `--formats` for capabilities, with `-f` naming the image. Each format
@@ -367,9 +367,10 @@ traversal, delivery, or copy lifecycle:
   validates the namespace before any child is exposed, and one walker owns
   traversal, paths, limits, and selection.
 * The [logical content design](design-content.md) has drivers resolve offsets
-  to validated extents, or for encoded content to spans the driver decoded
-  into one bounded window. One common operation delivers bytes and zeros
-  and preserves confirmed progress. A shared extent index is optional.
+  to validated extents: mapped image ranges, holes that read as zero, or
+  bytes the driver decoded and holds, such as a decompressed chunk. One
+  common operation delivers bytes and zeros and preserves confirmed
+  progress. A shared extent index is optional.
 * The [emission design](design-emission.md) has the common writer perform
   pre-mutation checks, sink initialization, and complete source copies. Drivers
   write encoded metadata and request copies into planned regions.
@@ -396,6 +397,18 @@ records and the worker protocol remains an explicit checked byte encoding.
 Catalogue operations perform no image I/O and confer no host authority; the
 coordinator opens file settings and passes descriptors under the existing
 security contract.
+
+Filesystem read settings follow the write side's rule. A format's
+capability record lists the read settings it accepts in `read_settings`, as
+it lists write settings in `write_settings`; the format is known only after
+detection, so the common reader refuses a non-default read setting outside
+the selected format's mask with `FSIMG_EINVAL` before the driver opens, and
+no driver silently ignores another format's setting. APFS holds the two
+such settings, `volume=` and `snapshot=`, because an APFS container holds
+several volumes and each volume several snapshots that share blocks: none
+of them is a byte range a layer could select, so the selection belongs to
+the filesystem's reader. FAT's codepage setting stays outside the mask: its
+only accepted values mean the one supported codepage for every format.
 
 The [layer design](design-layers.md) wraps a finished volume in a partition
 scheme, a container and compression, and unwraps them on reading. Layers are
@@ -534,6 +547,24 @@ as decoded spans. A journal is never replayed: one holding transactions is
 refused. The writer bulk-builds every B-tree from sorted records and gives
 every fork one extent, so it never splits a node or writes an overflow
 record, and native `fsck_hfs`, mount, modify and remount testing gates it.
+
+The [APFS design](design-apfs.md) defines the APFS container: one block
+space whose space manager serves several volumes, copy-on-write objects
+committed in checkpoints, object maps that resolve virtual objects at a
+transaction, one B-tree format for every index, and a filesystem tree per
+volume whose directory names are hashed and compared under Unicode
+normalization and, on case-insensitive volumes, case folding. The reader
+selects one committed checkpoint and one volume, refuses encryption and
+Fusion, and verifies allocation container-wide because volumes share it;
+the [APFS driver design](design-apfs-driver.md) routes every object
+reference through one object reader and every node through one cursor,
+prevents directory cycles by the parent each directory inode records, and
+delivers holes and decompressed chunks through common delivery. The writer
+reproduces the native formatter's empty container and adds the catalog in
+one transaction, and native `fsck_apfs`, mount and write-after-create
+testing gates it, as native testing does for the QNX writers. A DMG or GPT
+partition around an APFS container is peeled by the layers, so the driver
+reads a bare container.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
@@ -654,7 +685,7 @@ The QNX4, QNX6 and ImageFS readers omit an entry whose name is natively
 legal but outside the QNX-family fsimg name profile, instead of failing the
 image, through the
 [prepared-directory contract](design-directories.md#omitted-names); FAT,
-exFAT and HFS Plus keep their strict UTF-16 name rules, under which a name
+exFAT and HFS Plus keep their strict UTF-16 name rules, and APFS its strict UTF-8 rules. A name
 is valid, corrupt, or for HFS Plus a natively legal spelling that no image
 path can express, which is unsupported. The profile is fsimg's, not the format's: one foreign
 name, such as a Latin-1 byte in an otherwise ordinary QNX volume, must not
@@ -910,7 +941,7 @@ from factual stream descriptions under a clean-room split, and the GPL
 libraries serve only as out-of-tree black-box oracles that never enter the
 repository or the link.
 
-The LZFSE and LZVN decoders that HFS Plus's transparent compression needs
+The LZFSE and LZVN decoders that HFS Plus and APFS transparent compression need
 are Apple's BSD-3-Clause reference decoders, imported into `lib/codec/lzfse/`
 under their notice, as FreeBSD's SHA-256 was, rather than linked. Neither
 codec is a system library on Linux or FreeBSD, and macOS's own compression
@@ -923,7 +954,7 @@ compiles.
 Imported source is not a runtime dependency: fsimg compiles it, owns its
 fixes, fuzzes it under the sanitizers and bounds every call through a
 project-owned wrapper charged to the context. The
-[codec design](design-codecs.md#imported-decoders) owns the import rules.
+[codec design](design-codecs.md#imported-lzfse-and-lzvn-decoders) owns the import rules.
 
 The build uses Autoconf, Automake, and Libtool as development tools. Release
 archives contain generated build machinery; users need a C compiler, make,
@@ -948,6 +979,7 @@ lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
 lib/formats/qnx4/    QNX4 codecs, reader, writer, verification
 lib/formats/ifs/     ImageFS codecs, reader, writer, verification
 lib/formats/hfsplus/ HFS Plus codecs, Unicode tables, reader, writer, verification
+lib/formats/apfs/    APFS codecs, checkpoints, B-trees, reader, writer, verification
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests

@@ -33,7 +33,7 @@ xnu sources are read for facts only; the Linux, hfsprogs, hfsfuse, Sleuth Kit an
 implementations are black-box comparison oracles, never code donors.
 NetBSD's BSD-2-Clause `libhfs` is a cross-check for the comparison rules,
 not a source of tables. Apple's BSD-3-Clause LZFSE and LZVN decoders are the
-one imported code, under the [codec design](design-codecs.md#imported-decoders).
+one imported code, under the [codec design](design-codecs.md#imported-lzfse-and-lzvn-decoders).
 
 Evidence has three meanings here:
 
@@ -72,7 +72,7 @@ to those contracts, each specified by the contract's owner:
 | Decoded content spans | [Logical content](design-content.md#decoded-spans) | A compressed file's bytes are not an image range; the driver decodes one chunk into a window and delivery copies from it |
 | A 765-byte label | [C API](design-api.md) volume information and the worker job record | A volume name is up to 255 UTF-16 units, at most 765 UTF-8 bytes |
 | An origin for the unsigned-seconds helper | [Writer loss policy](design-metadata-loss.md#unsigned-whole-second-selection) | Stored times count seconds from 1904, so a valid Unix time can be negative |
-| The imported LZFSE and LZVN decoders | [Codecs](design-codecs.md#imported-decoders) | macOS compresses files with them |
+| The imported LZFSE and LZVN decoders | [Codecs](design-codecs.md#imported-lzfse-and-lzvn-decoders) | macOS compresses files with them |
 
 Common code gains no other HFS-specific branch. The other format-specific
 facts, comparators, Unicode tables and B-tree mechanics stay in the driver.
@@ -812,7 +812,7 @@ only content length; the data fork's `logicalSize` is zero on every type
 Any other type, including the dataless types of newer systems, is
 `FSIMG_EUNSUPPORTED`, found at directory preparation and naming the entry.
 zlib is the system library; LZVN and LZFSE are the
-[imported decoders](design-codecs.md#imported-decoders). [DC]
+[imported decoders](design-codecs.md#imported-lzfse-and-lzvn-decoders). [DC]
 
 ### Inline payloads
 

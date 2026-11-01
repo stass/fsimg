@@ -649,6 +649,16 @@ zlib and the imported LZVN and LZFSE decoders; a full verifier; a writer
 registered after the native macOS `fsck_hfs`, mount, modify and remount
 cycle; and reading of volumes in a classic HFS wrapper.
 
+APFS follows its own [plan](apfs-plan.md), the
+[format design](../specs/design-apfs.md) and the
+[driver design](../specs/design-apfs-driver.md): native evidence from
+macOS's `newfs_apfs`, `fsck_apfs` and `hdiutil`, the common changes it needs
+(the wider label, filesystem read settings, zero and held content extents,
+normalization tables), a reader and container-wide verifier, imported LZFSE
+and LZVN decoders for compressed files, and a writer registered only after
+macOS checks, mounts and modifies its output, followed by snapshot and
+sealed-volume reading.
+
 Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order

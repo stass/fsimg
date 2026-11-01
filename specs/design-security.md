@@ -548,7 +548,13 @@ cannot mutate read-only input or escape through a descriptor alias.
 
 Count logical extracted bytes, including zero ranges, before creating or
 extending files. Default total output is at most the selected volume length
-for the supported uncompressed formats. A container's disk can be far longer
+for every format. An APFS volume can legitimately exceed it, since holes,
+clones, compressed files and the separate entries of hard links all deliver
+more logical bytes than the container stores; extracting such a volume
+fails with the output limit named, and the caller raises it with
+`-l output` after deciding the volume is trusted to expand that far. The
+default stays the volume length because it is the bound that makes a
+decompression or clone bomb fail without a caller's decision. A container's disk can be far longer
 than its file (zero runs cost nothing), so the coordinator takes the disk
 length from the worker's image record and cannot check it against the file:
 for a container image the default bound rests on that worker-reported

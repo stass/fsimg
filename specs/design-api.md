@@ -497,9 +497,24 @@ fsimg_status_t fsimg_reader_next_range(fsimg_reader_t *reader, uint64_t offset,
 void fsimg_reader_free(fsimg_reader_t *reader);
 ```
 
-Read options contain an optional format override and typed decoding options,
-including the FAT short-name codepage policy. Input region selection is done
-by constructing a slice, not by independently applying offsets in the driver.
+Read options contain an optional format override and typed decoding options.
+The FAT short-name codepage policy, `fat_codepage`, accepts zero or 437 for
+every format, both meaning the one supported codepage. The filesystem read
+settings select an APFS volume and snapshot, as the
+[APFS design](design-apfs.md#volume-selection) states:
+
+* `volume_index`, a slot index, takes effect only with its presence flag
+  `volume_index_set`, so index 0 is distinguishable from absence; a
+  nonzero index without the flag is `FSIMG_EINVAL`.
+* `snapshot` is a NUL-terminated string borrowed for the duration of
+  `open()`, NULL for the live view. A non-NULL name is valid UTF-8 of 1 to
+  255 bytes, and anything else is `FSIMG_EINVAL`.
+
+A read setting at a non-default value is accepted only by a format whose
+capability record names it in `read_settings`; once detection or the forced
+format has chosen the driver, any other is `FSIMG_EINVAL` naming the
+setting, before the driver opens. Input region selection is done by constructing a slice, not
+by independently applying offsets in the driver.
 The input object and its source remain stable and alive until reader destruction.
 Host adapters check identity/size changes; concurrent hostile modification has
 the same snapshot limitation as writer sources.
@@ -537,7 +552,11 @@ The matching write settings are typed fields of `fsimg_write_options_t`
 behind `FSIMG_SETTING_*` bits, as the
 [metadata design](design-metadata.md#capability-records) states:
 `mountpoint`, a copied string with NULL selecting the format default under
-`FSIMG_SETTING_MOUNTPOINT`. No write setting names a boot program or a
+`FSIMG_SETTING_MOUNTPOINT`, and `case_sensitive`, APFS's volume personality,
+under `FSIMG_SETTING_CASE_SENSITIVE`. The `FSIMG_SETTING_*` bits form one
+namespace shared by the write and read options, so a bit names one field
+wherever it appears: `FSIMG_SETTING_VOLUME_INDEX` and
+`FSIMG_SETTING_SNAPSHOT` name the read fields above. No write setting names a boot program or a
 startup script: the ImageFS writer writes
 [nonbootable bodies](design-ifs.md#bootable-bodies) only.
 
@@ -783,10 +802,12 @@ entry and metadata capabilities, legal sector/allocation-unit masks and limits,
 and documented profile constraints. The limits include
 `max_name_utf16_units`, `max_label_bytes` (zero for a format without a
 label) and `max_link_target_bytes`, the longest symbolic-link target the
-format stores (1024 for ImageFS, 1023 for QNX4 and QNX6, zero for FAT and
-exFAT, which store no links); the
+format stores (1024 for ImageFS, 1023 for QNX4, QNX6 and APFS, zero for FAT
+and exFAT, which store no links); the
 [metadata design](design-metadata.md#capability-records) states how writer
-construction and planning enforce each. Enumeration uses the immutable compiled
+construction and planning enforce each. `write_settings` and
+`read_settings` are the masks of the `FSIMG_SETTING_*` fields of the write
+and read options the format accepts. Enumeration uses the immutable compiled
 registry and allocates no per-format catalog. It does not promise that a host
 can represent every theoretical format size. Runtime OS sandbox reporting is
 owned by the CLI and is separate from filesystem capabilities.

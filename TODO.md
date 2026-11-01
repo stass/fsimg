@@ -49,6 +49,21 @@
   The [work breakdown](docs/todo-qnx6.md) owns experiments and implementation;
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
+* [Medium] **APFS reader, verifier and writer** (`lib/formats/apfs/`,
+  `lib/read/`, `lib/core/`, `lib/codec/`, `cmd/fsimg/`, `tools/apfs/`):
+  implement the [format design](specs/design-apfs.md) and
+  [driver design](specs/design-apfs-driver.md) in the stages of the
+  [APFS plan](docs/apfs-plan.md). Native macOS evidence comes first and
+  confirms the reference's tables, the name-hash conventions and the native
+  empty-container layout; then the common changes (256-byte label,
+  `volume=` and `snapshot=` read settings with `read_settings`, zero and
+  held content extents, the 4096-byte key bound, CRC-32C and normalization
+  tables, the `case=` write setting); the reader, verifier, compression
+  through the imported `lzfse` decoders, and a writer registered only after
+  `fsck_apfs -n`, mount and write-after-create pass. Whether socket and
+  device entries on native Data volumes need common entry kinds waits for
+  the plan's evidence (owner decision 5).
+
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
   the [layer design](specs/design-layers.md) in the four stages of the
@@ -593,6 +608,17 @@
   the rebuilt image initializes it (`test_export_exfat_zero_file` in
   `test/manifest.c`). Planning a host file that is one hole as zero storage
   would close it.
+
+* [Medium] **Extended attributes in the common entry model** (`include/`,
+  `lib/source/`, `lib/read/`, `lib/extract/`, `lib/formats/apfs/`): APFS
+  stores Finder information, resource forks, quarantine flags and other
+  metadata as extended attributes, which the entry model cannot carry, so
+  the APFS reader exposes none and its writer writes none, as the
+  [APFS design](specs/design-apfs.md#extended-attributes) states. Design a
+  bounded common representation (names, sizes, content delivery, loss
+  policy, safe-extraction stance) before any format advertises it; the
+  hardlink-topology item in [the QNX6 TODO](docs/todo-qnx6.md) is the
+  analogous gap for links.
 
 * [Low] **Opt-in metadata restore** (`lib/extract/`): consider an opt-in that
   applies permission bits without setuid, setgid or sticky through opened

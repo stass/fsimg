@@ -4,8 +4,8 @@
 
 fsimg owns three stream codecs: an LZO1X decoder, an NRV2B decoder for the
 8-bit control-buffer variant, and an LZO1X encoder. It also compiles two
-[imported decoders](#imported-decoders), Apple's LZFSE and LZVN, which HFS
-Plus's transparent compression needs. They live in
+[imported decoders](#imported-lzfse-and-lzvn-decoders), Apple's LZFSE and LZVN, which HFS
+Plus and APFS transparent compression need. They live in
 `lib/codec/`, are private to libfsimg, and know nothing about the images
 they serve. A codec sees one compressed stream and one output; it never sees
 a chunk length, a header or a checksum. The framing of QNX boot images, a
@@ -20,6 +20,12 @@ Complete contiguous integer fields may use the shared
 proved. Incremental operands and bit streams retain their local parsing state.
 That design also owns system-zlib allocation support, which is separate from
 the project-owned compression algorithms specified here.
+
+`lib/codec/` also carries two decoders it does not own: the LZFSE and LZVN
+decoders of Apple's BSD-3-Clause `lzfse` reference implementation, imported
+for HFS Plus and APFS transparent compression under the
+[import rules](#imported-lzfse-and-lzvn-decoders) below. Everything else in
+this document concerns the project-owned codecs.
 
 The codecs are project-owned rather than linked from `liblzo2` and `libucl`,
 and the [IFS plan](../docs/ifs-plan.md#codecs-and-dependencies) records why:
@@ -635,7 +641,7 @@ and a call is bounded by the window sizes the container chose.
 
 `lib/codec/` depends on `lib/core/` for statuses, errors and allocation and
 on nothing else; nothing in it names a chunk, a header, an image or an I/O
-object. `lib/layers/` and the HFS Plus driver are its only callers. The directory is always built:
+object. `lib/layers/` and the HFS Plus and APFS drivers are its only callers. The directory is always built:
 reading the PCM images needs it in the default build. The name means
 stream codecs; the `codec.c` files under `lib/formats/` are the formats'
 record and integer codecs and stay where they are. Names follow the
@@ -643,50 +649,81 @@ style guide: `fsimg_lzo1x_` and `fsimg_nrv2b_` prefixes, `_t` typedefs,
 constants in upper case named for their meaning (`LZO1X_MAX_DISTANCE`,
 `NRV2B_OFFSET_BONUS_THRESHOLD`), no magic numbers in the machines.
 
-## Imported decoders
+## Imported LZFSE and LZVN decoders
 
-HFS Plus files that macOS compresses use LZVN and LZFSE as well as zlib.
-Neither is a system library on Linux or FreeBSD, and Apple's reference
-implementation, the `lzfse` project, is BSD-3-Clause, so fsimg imports its
-decoders instead of writing them again; the
-[architecture](architecture.md#dependencies-and-implementation-organization)
-records why. The rules of the import:
+HFS Plus and APFS store transparently compressed files as LZVN or LZFSE chunks of at
+most 64 KiB, as the [APFS design](design-apfs.md#transparent-compression)
+states. Apple's reference implementation is the formats' authoritative
+definition, and its license, BSD-3-Clause, permits carrying it in a
+BSD-2-Clause library with its notice and its non-endorsement clause. A
+clean-room decoder would cost a describer's pass over that code and a
+second implementation to maintain, so fsimg imports the decoder half of the
+reference implementation instead of writing one, and owns the adapter
+around it. The decision is the owner's, recorded in the
+[APFS plan](../docs/apfs-plan.md#owner-decisions).
 
-* **Scope.** Only the decoder files are imported, from one pinned commit:
-  the LZFSE decoder and its finite-state-entropy tables, the LZVN decoder,
-  and the headers they need. No encoder, command-line tool or build file
-  enters the tree.
-* **Notice.** Every imported file keeps its copyright and license text;
-  `third-party/lzfse-LICENSE.txt` repeats the notice for binary
-  distributions and is installed with the documentation, as the FreeBSD
-  SHA-256 notice is.
-* **Adaptations.** The files are changed only as `docs/references.md`
-  lists: external symbols take an `fsimg_apple_` prefix, so that a program
-  that also links the upstream library cannot collide with them and the
-  wrapper's own `fsimg_lzfse_` and `fsimg_lzvn_` names stay distinct, the
-  unused encoder entry points are removed, and compiler extensions the supported compilers lack
-  are replaced by their portable forms. Upstream style is kept, so a diff
-  against the pinned commit shows exactly the adaptations.
-* **Wrapper.** Callers never reach the imported code directly. The
-  project-owned `lib/codec/lzfse.c` takes the encoded span, the expected
-  decoded length and a caller's output buffer; it allocates the LZFSE
-  scratch through the context, requires the decoder to consume exactly the
-  span and produce exactly the expected length, and maps every other
-  outcome to `FSIMG_ECORRUPT`. Output never grows past the caller's buffer.
-* **Assurance.** `fuzz/lzfse.c` feeds the wrapper under ASan and UBSan with
-  finite budgets; unit tests decode small vectors encoded once with the
-  upstream tool and kept as byte arrays; the native HFS Plus captures are
-  the end-to-end oracle. fsimg owns any fix to the imported files and
-  compares the pinned commit with upstream changes at each release.
+The adapter has the NRV2B decoder's one-call shape, because a chunk's input
+and output both fit a buffer:
 
-The [clean-room procedure](#clean-room-procedure) below governs the
-LZO1X and NRV2B files, not the imported decoders.
+```c
+size_t fsimg_lzfse_scratch_bytes(void);
+fsimg_status_t fsimg_lzfse_decode(const uint8_t *in, size_t in_len,
+    uint8_t *out, size_t capacity, void *scratch,
+    fsimg_codec_step_t *, fsimg_error_t *);
+fsimg_status_t fsimg_lzvn_decode(const uint8_t *in, size_t in_len,
+    uint8_t *out, size_t capacity, fsimg_codec_step_t *, fsimg_error_t *);
+```
+
+* `capacity` is at most 65536 and `in_len` at most the codec's worst-case
+  encoding of that, which the adapter states as a constant; a larger value
+  is `FSIMG_EINVAL`. The caller supplies the scratch buffer the LZFSE
+  decoder's state needs, charged to its context, so the imported code never
+  allocates.
+* `done` means the stream ended exactly at its end marker with input
+  consumed. Output beyond `capacity`, input left after the end, an
+  unterminated stream or any decoder error is `FSIMG_ECORRUPT`; the adapter
+  detects overflow itself rather than relying on a short return, since the
+  reference's buffer interface reports a full output the same way as a
+  complete one.
+* LZVN chunks in APFS are raw LZVN streams without the reference's block
+  headers, so `fsimg_lzvn_decode()` drives the reference's LZVN state
+  machine directly; LZFSE chunks carry their block headers and go through
+  its LZFSE decoder.
+
+The import follows these rules:
+
+* **Selection.** Only the decoder files and the headers they include are
+  imported, at one pinned upstream commit recorded with each file's SHA-256
+  in [references](../docs/references.md); encoder files and the command-line
+  tool are not. Each file's license header is checked individually before
+  import, and the license text is kept in `third-party/`.
+* **Changes.** Imported files keep their notices and their style. External symbols take an `fsimg_apple_` prefix so an embedding application can also link upstream without symbol collisions. They are
+  changed only to build under the project's compilers and warnings, to
+  remove allocation and I/O paths the adapter does not use, and to fix
+  defects found by review, sanitizers or fuzzing; each change is listed in
+  the commit message and in the reference record, and offered upstream when
+  it fixes a defect. Every imported file must be ASCII, like project source.
+* **Notices and updates.** The BSD-3-Clause text ships with every
+  distribution beside the other third-party notices, and no fsimg material
+  uses Apple's name to endorse the project. Unlike a system library, the
+  imported files do not receive the host's security fixes, so the reference
+  record names the upstream repository and advisories to watch; an
+  upstream fix is imported deliberately, as a new pinned commit audited
+  again file by file.
+* **Assurance.** The imported code parses untrusted image bytes, so it gets
+  the project codecs' treatment: the bounds tests above adapted to its
+  streams, `fuzz/codec.c` cases under ASan and UBSan, and execution inside
+  the confined worker under the same syscall profile. The adapter's tests
+  compare its output with the reference command-line tool's on streams
+  produced by that tool and by macOS (APFS evidence E7), built outside the
+  tree.
 
 ## Clean-room procedure
 
 The LZO1X and NRV2B codecs are written without reading any codec
 implementation, so that none of their files is a derivative of GPL or
-other third-party code. The procedure and its inputs:
+other third-party code.
+The procedure and its inputs:
 
 * **LZO1X.** The factual source is the Linux kernel's
   `Documentation/staging/lzo.rst`, documentation prose by Willy Tarreau

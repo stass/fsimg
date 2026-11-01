@@ -11,8 +11,8 @@ The [architecture](architecture.md#writer-and-reader-independence) assigns the
 owners. [Storage](design-storage.md#reading-and-traversal) states the bounds.
 Driver designs ([FAT](design-fat-reader.md), [exFAT](design-exfat.md),
 [QNX6](design-qnx6.md), [QNX4](design-qnx4.md),
-[ImageFS](design-ifs-driver.md), [HFS Plus](design-hfsplus-driver.md))
-define only their decoding, keys, and locators.
+[ImageFS](design-ifs-driver.md), [HFS Plus](design-hfsplus-driver.md),
+[APFS](design-apfs-driver.md)) define only their decoding, keys, and locators.
 Host source scanning and safe extraction have separate authority and lifetime
 rules and do not use this walker.
 
@@ -68,7 +68,11 @@ While decoding, the driver emits one or more comparison keys for each admitted
 entry. FAT emits its long-name key and alias key; exFAT emits the name mapped
 through the volume's validated upcase table; QNX6 emits the case-sensitive UTF-8
 bytes; HFS Plus emits the stored name decomposed and, on a case-insensitive
-volume, folded through its pinned table. Keys are opaque, bounded byte strings to common code. Preparation stores
+volume, folded through its pinned table. APFS emits the name's comparison form under the volume's
+normalization and case rules. Keys are opaque, bounded byte strings to
+common code. Every key buffer holds 4096 bytes: an APFS name of up to 1022
+bytes can expand to three times its length when decomposed and case
+folded, and a smaller bound would refuse names the format stores. Preparation stores
 key records `(entry position, key)` in a second stream, sorts them externally,
 and rejects equal keys with different entry positions. Duplicate keys for the
 same entry are permitted. The key stream is released when validation completes.
@@ -137,7 +141,9 @@ The driver opens a child directory from the current entry's locator, and claims
 its storage there. For FAT and exFAT that claim uses a paged exact bitset, so
 re-entering claimed storage is corruption whether it comes from a cycle or a
 shared chain. A driver with different object identity supplies an equally
-bounded exact scheme.
+bounded exact scheme: APFS requires each directory inode's recorded parent
+to be the directory that holds the record naming it, which rules out every
+cycle without a claimed set.
 
 ## Charging and limits
 

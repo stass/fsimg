@@ -14,7 +14,7 @@ format design lists, each owned by its common specification: the
 [extra-data bit](design-metadata.md#metadata-fields),
 [decoded content spans](design-content.md#decoded-spans), the 765-byte
 label, the [seconds helper's origin](design-metadata-loss.md#unsigned-whole-second-selection)
-and the [imported decoders](design-codecs.md#imported-decoders). Common code
+and the [imported decoders](design-codecs.md#imported-lzfse-and-lzvn-decoders). Common code
 gains no HFS-specific branch. The QNX4 driver is the structural template for
 the module split, the tests and the gates; the drivers share no code.
 

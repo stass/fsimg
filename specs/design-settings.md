@@ -53,10 +53,14 @@ layer API. Lookup is a bounded linear scan of the compiled rows. No hash table,
 registration phase, or mutable cache is needed for this small fixed set.
 
 Filesystem rows refer to existing `FSIMG_SETTING_*` bits. A format variant's
-`write_settings` mask is its one declaration of support; there is no second
-per-format list of setting names. `sector` and `cluster` use the existing
-geometry capability fields and driver geometry checks, rather than acquiring
-new support bits. `oem` is the read-side filesystem setting. A layer row's owner
+`write_settings` and `read_settings` masks are its one declaration of
+support; there is no second per-format list of setting names. `sector` and
+`cluster` use the existing geometry capability fields and driver geometry
+checks, rather than acquiring new support bits. `oem` is FAT's read-side
+filesystem setting, outside the read mask because its accepted values mean
+the one supported codepage for every format; `volume` and `snapshot` are
+read-side filesystem settings under the read mask, held by APFS. The
+`FSIMG_SETTING_*` bits form one namespace across write and read fields. A layer row's owner
 is a registry identity, not a repeated test against a string in each consumer.
 
 The catalogue includes all fields subject to shared setting applicability,
@@ -104,6 +108,9 @@ Public option initialization and catalogue default tests agree on these values:
 | Filesystem UUID, inode capacity and FAT root capacity | Zero bytes, zero and zero respectively |
 | Filesystem reserve percentage | 3 |
 | Filesystem mountpoint | `NULL`; a pointer to `""` is an explicit empty mountpoint |
+| Filesystem case sensitivity | `false`, case-insensitive |
+| Filesystem volume index (read) | Absent: `volume_index_set` false and `volume_index` zero |
+| Filesystem snapshot (read) | `NULL`, the live view |
 | File input | `NULL` |
 
 Default tests compare typed values. They never compare entire native structures
@@ -145,12 +152,12 @@ The finite syntax classes cover the existing grammar:
 | Class | Examples and conversion |
 | --- | --- |
 | Byte quantity | `sector`, `cluster`, `gpt:disk`, chunk and alignment sizes; checked CLI unit syntax, then destination range |
-| Decimal count | `inodes`, `root`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
+| Decimal count | `inodes`, `root`, `volume`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
 | Hexadecimal 32-bit value | `mbr:id` and boot addresses; `0x` or `0X` and one through eight hexadecimal digits |
 | Boolean | Exactly `yes` or `no` |
-| Named choice | `endian=little|big`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437` |
-| UUID | RFC 4122 text converted to textual byte order; nil permitted for the filesystem UUID, refused for layer identifiers |
-| Text | GPT type/name, MBR type, mountpoint; checked destination capacity, with format meaning checked by its owner |
+| Named choice | `endian=little|big`, `case=insensitive|sensitive`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437` |
+| UUID | RFC 4122 text converted to textual byte order; nil permitted for the filesystem UUID, refused for layer identifiers; the filesystem's own validation may still refuse nil, as APFS does outside reproducible mode |
+| Text | GPT type/name, MBR type, mountpoint, snapshot name; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes |
 | File path | A host operand retained by the CLI for descriptor preparation |
 
 Choice entries pair spellings with values of the row's declared type. Lexical
@@ -297,6 +304,9 @@ from the catalogue under test:
 * Library cases cover initialized defaults and non-default unsupported fields,
   reserve 3 versus 0, empty versus NULL mountpoint, nil UUID distinctions,
   invalid enum values, and terminated versus unterminated fixed strings.
+* Read-mask cases cover `volume=` and `snapshot=` with a format whose
+  `read_settings` lacks them, refused once the driver is chosen, including
+  `volume=0`, which is explicit and therefore not the default.
 * Presence cases cover each flag with zero and nonzero values, unset flags with
   nonzero values, false versus absent boot virtual, required absent boot
   fields, and file absence versus a zero-length file.

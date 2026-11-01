@@ -256,7 +256,13 @@ FAT12 and FAT16 take `root=` a positive root directory entry count,
 and ImageFS shares `endian=` and adds `mountpoint=`, its stored mount path
 of at most 1024 bytes, default `/`, with `mountpoint=` alone storing an
 empty one; its writer takes no boot setting, since it writes
-[nonbootable bodies](design-ifs.md#bootable-bodies) only. ImageFS has no free
+[nonbootable bodies](design-ifs.md#bootable-bodies) only. APFS shares
+`uuid=` for its volume UUID and adds `case=insensitive|sensitive` on create.
+On read, APFS takes `volume=`, a slot index selecting one volume of a
+container that holds several, and `snapshot=`, a snapshot name, as the
+[APFS design](design-apfs.md#volume-selection) states. Every other format
+refuses these settings; a read setting is refused once detection has chosen
+the format. ImageFS has no free
 space, so `-s` and `--free-space` fail with it as settings the format
 cannot honor, and `-e` is its only time setting.
 A qualified key targets one layer: `-o gpt:type=esp`,

@@ -71,7 +71,7 @@ Non-goals:
 | Apple `hfs_format.h`, `hfs_catalog.c`, `hfs_link.c` and xnu `decmpfs.h` | APSL 2.0; facts only, no code or declarations | Modern flags, the attribute key and records, private names, the link-stub tests and dates, the compression header and types |
 | NetBSD `sys/fs/hfs/libhfs.c` | BSD-2-Clause | A second, independent derivation of the folding table, compared, not imported |
 | Unicode 3.2.0 character data | Unicode license, notice already in `third-party/Unicode-LICENSE.txt` | Input of the table generator |
-| Apple `lzfse` at a pinned commit | BSD-3-Clause | The imported LZFSE and LZVN decoders, under the [codec design](../specs/design-codecs.md#imported-decoders) |
+| Apple `lzfse` at a pinned commit | BSD-3-Clause | The imported LZFSE and LZVN decoders, under the [codec design](../specs/design-codecs.md#imported-lzfse-and-lzvn-decoders) |
 | macOS `hdiutil`, `newfs_hfs`, `fsck_hfs`, `diskutil`, `ditto`, `xattr` | Native tools on the development host and the CI runner | Captures and native qualification |
 | `afsctool` (Homebrew) | External tool | Compressed files of each chosen type |
 | hfsprogs `mkfs.hfsplus` and `fsck.hfsplus` | APSL-derived binaries, external | Linux formatter and checker oracle |
@@ -97,7 +97,7 @@ the stage that first needs it:
 | `FSIMG_META_EXTRA_DATA`: the bit, its extraction loss, its JSON field and worker encoding | [Metadata](../specs/design-metadata.md#metadata-fields) | 3 |
 | A 765-byte label in `fsimg_volume_info_t`, the writer state and the worker job record | [C API](../specs/design-api.md) | 3 |
 | Decoded content spans in common delivery | [Content](../specs/design-content.md#decoded-spans) | 4 |
-| The imported LZFSE and LZVN decoders and their wrapper | [Codecs](../specs/design-codecs.md#imported-decoders) | 5 |
+| The imported LZFSE and LZVN decoders and their wrapper | [Codecs](../specs/design-codecs.md#imported-lzfse-and-lzvn-decoders) | 5 |
 | An origin for the unsigned-seconds helper | [Loss policy](../specs/design-metadata-loss.md#unsigned-whole-second-selection) | 8 |
 
 The stack's filesystem slot gains `hfsplus` and `hfsx` with the reader in
@@ -317,7 +317,7 @@ Each experiment varies one property on disposable volumes:
 
 * Import the decoders of Apple's `lzfse` at a pinned commit into
   `lib/codec/lzfse/` with their notice, under the codec design's
-  [import rules](../specs/design-codecs.md#imported-decoders), and add the
+  [import rules](../specs/design-codecs.md#imported-lzfse-and-lzvn-decoders), and add the
   project-owned wrapper and `third-party/lzfse-LICENSE.txt`. Record the
   commit, file digests and adaptations in `docs/references.md`.
 * Types 7, 8, 11 and 12 in `compress.c`.
