@@ -28,6 +28,10 @@ fsimg cf data.img -F exfat -C files .      # Create an image from ./files/
   writing; produce reproducible images with `-R`; shrink an image to the
   smallest geometry its files fit in with `-M`; verify staged images before
   publishing them with `cW`.
+- **Huge images, small memory.** Memory use follows a budget you set
+  (256 MiB by default, 16 MiB at least), not the image's size or file
+  count. Large metadata spills to scratch files, and empty space is never
+  scanned, so a terabyte volume costs about what its files do.
 - **Security and sandboxing.** Process untrusted images in an OS sandbox
   where supported, with explicit warnings when confinement is unavailable.
   Use `-S required` to refuse unconfined operation, and set memory, scratch,
@@ -221,6 +225,25 @@ them in place. QNX support targets the layouts above, rather than every
 Power-Safe or firmware variant. ImageFS boot-image creation has additional
 restrictions, and `hbcifs` verification reports incomplete coverage.
 See the [command manual](docs/fsimg.1) for exact profiles and limits.
+
+## Scale
+
+The cost of an operation grows with the files it touches, not with the
+volume's capacity, and memory stays within the library budget however
+large the image or the tree. Some measurements, on an Intel Mac with APFS
+unless noted:
+
+| Workload | Time | Memory |
+| --- | ---: | --- |
+| Create a 128 TiB exFAT image holding an 8 TiB file, under a 64 MiB budget | 0.37 s | 21 MB RSS (12 MB on FreeBSD/ZFS) |
+| The same three files in a 33.5 GB volume rather than 33.5 MB | 0.31 s vs 0.015 s | 10.8 MB RSS for both |
+| Read, verify and extract a 512 MiB file split into a million fragments | 47 s | 12 MB RSS under a 16 MiB budget |
+| Run every CLI command on a tree of 100,000 files | - | under 30 MB for all fsimg processes together, 16 MiB budget |
+| Plan an exFAT image of 10,000,000 files | 18 min | 9 MB RSS; 6.2 GB of scratch on disk |
+
+The 128 TiB file is sparse, so the time measures planning and metadata,
+not writing terabytes. See [validation and qualification](docs/qualification.md)
+for how each figure is measured and what it does not claim.
 
 ## Build
 
