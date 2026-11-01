@@ -21,7 +21,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Container plans](design-container-plans.md) | Private immutable container state, common planning facts, encoder borrowing, and complete destruction |
 | [Driver contract tests](design-driver-contract-tests.md) | Declarative test profiles, registry coverage, shared scenarios, fault injection, and independent expectations |
 | [Verification helpers](design-verification-helpers.md) | Initialized-content read-through and bounded exclusive ownership runs with driver-owned reconciliation |
-| [Binary primitives](design-binary-primitives.md) | Explicit scalar endian codecs and context-backed zlib allocation with precise failure attribution |
+| [Binary primitives](design-binary-primitives.md) | Explicit scalar endian codecs and context-backed allocation for the codec libraries (zlib, optional libzstd and liblzma) with precise failure attribution |
 | [Scheme planning](design-scheme-planning.md) | Scheme-owned option and identity resolution, partition metadata, and the common placement boundary |
 | [Relic result generation](design-relic-generation.md) | Ordinary query results, closed per-family schemas, small AWK templates, C artifacts, and reproducible regeneration |
 | [Verification policy generation](design-generated-verification.md) | Static policy derivation and generated local predicates consumed by native bounded verification algorithms |
@@ -43,6 +43,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [POSIX metadata](design-metadata.md) | Entry kinds beyond files and directories; owner, mode and change time across API, catalog, scanner, extractor and CLI |
 | [Manifests](design-mtree.md) | Creating from an mtree(5) manifest as a source root: grammar subset, generated content, host bytes beneath a content directory, keyword mapping, bounds; the manifest extraction writes |
 | [Layers](design-layers.md) | Partition schemes, disk-image containers, compression, spooling and composition |
+| [Optional compression libraries](design-compression-libs.md) | zstd and xz over the system libzstd and liblzma as optional integrations: build and packaging, profiles, memory and input bounds, sandbox, reproducibility, licensing, oracles |
 | [Command line](design-cli.md) | Modes, bundled letters, options, stacks and settings, operands, destinations, output, and failure behavior |
 | [Specification-driven testing](design-spec-testing.md) | Rule-derived valid and invalid images, per-stage expectations, the CLI runner contract, fixtures and coverage reports |
 | [Style](style.md) | C conventions and readability review |

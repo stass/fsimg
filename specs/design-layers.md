@@ -235,10 +235,12 @@ covered by all three without a second list: stripping an image name to its
 extraction stem; choosing the compression under `-a`, which selects
 compression from the suffix and never a container; and the `-a` conflict
 check between an output name's container suffix and the stack's container.
-A reserved compression name (`zstd`, `xz`) is registered with its suffix
-but no profile: its suffix is stripped like gzip's, and `-a` selects it so
-that creation fails as unsupported rather than writing an uncompressed
-image under a compressed name.
+A compression whose library the build lacks (`zstd` without libzstd, `xz`
+without liblzma, under the
+[optional compression libraries design](design-compression-libs.md)) is
+registered with its suffix but no operations: its suffix is stripped like
+gzip's, and `-a` selects it so that creation fails as unsupported rather
+than writing an uncompressed image under a compressed name.
 
 The read-side result of every peel is an ordinary `fsimg_io_t`: a container
 yields a positional object over the disk; a scheme yields slices of it. A
@@ -867,6 +869,9 @@ container's bytes around the same disk as far as the profile states.
 | `ifsboot:startup_vaddr`, `ifsboot:paddr_bias`, `ifsboot:image_paddr`, `ifsboot:ram_paddr`, `ifsboot:imagefs_paddr` | `0x` 32-bit | None; each required | Any value, stored verbatim: target addresses fsimg never uses |
 | `ifsboot:compress` | `lzo`, `none` | `lzo` | `none` stores the body raw; see the [profile](#qnx-boot-image-ifsboot) |
 | `gzip:level` | integer | 6 | 1 to 9; only when gzip is selected (`-z`, a `.gz` name under `-a`, or the library's write options naming `gzip`) |
+| `zstd:level` | integer | 3 | 1 to 19; only when zstd is selected; the [zstd profile](design-compression-libs.md#zstd) |
+| `xz:level` | integer | 6 | 0 to 9, the `xz(1)` presets; only when xz is selected; the [xz profile](design-compression-libs.md#xz) |
+| `xz:check` | `crc32`, `crc64`, `sha256` | `crc64` | The block check type; `none` is read, never written |
 
 Values use the CLI's existing byte-quantity, integer, UUID and boolean
 syntax, and a file setting's value is a host path. A key whose layer is
@@ -1103,7 +1108,9 @@ Compressed bytes are reproducible only for a given zlib implementation and
 version: zlib-ng in compatibility mode, which some distributions ship as
 their zlib, produces different, equally valid, streams. Capability output
 and the plan report the zlib version string so a reproducibility claim can
-name it. `dmg:compress=none`, `simg` and `vhd` output is reproducible without
+name it. The same qualification holds for the
+[optional libzstd and liblzma](design-compression-libs.md#reproducibility),
+whose versions are reported the same way. `dmg:compress=none`, `simg` and `vhd` output is reproducible without
 that qualification, and so is an `ifsboot` image: its codec is
 project-owned and deterministic, and every other output byte comes from
 the settings, the file settings or the input.
@@ -1115,6 +1122,7 @@ Layer verification runs before the filesystem's and reports its own scope:
 | Layer | Checks |
 | --- | --- |
 | gzip | Each member's CRC32 and modular length, at spool time; trailing bytes |
+| zstd, xz | The frame and stream checks the [compression libraries design](design-compression-libs.md#verification-scope) lists, at spool time; a frame or stream without an integrity check is decoded and reported unverified, making the scope incomplete |
 | DMG | koly fields and ranges, the data-fork CRC32 by one sequential pass over the data fork where the koly declares it, the master CRC32 over the tables' checksum values where the koly declares it, each block table's CRC32 over its decoded bytes under payload read-through, chunk tiling and bounds, every chunk decoded once under read-through |
 | VHD | Footer checksum and the constant fields (format version, data offset, saved state); the cookie, type 2 and the size tie are identity and already hold at open |
 | simg | Header and chunk-header consistency, block totals, CRC32 chunk where present under read-through |
@@ -1161,8 +1169,11 @@ zlib is a required dependency, linked from the system as the
 permits: gzip and DMG zlib chunks (UDZO) are always available, and configure
 fails clearly without it. Other DMG chunk codecs (ADC, bzip2, lzfse, lzma)
 are unsupported chunk compression and fail with an explicit error naming the
-type; they are never silently treated as zeros. zstd and xz are reserved
-compression names for later profiles.
+type; they are never silently treated as zeros. zstd and xz are
+[optional integrations](design-compression-libs.md) over the system
+libzstd and liblzma: a build that has the library implements the
+compression, and one that lacks it keeps the registered name and suffix
+with no operations.
 
 The LZO1X decoder and encoder and the UCL NRV2B decoder are project-owned
 code with no knowledge of IFS or of any container, specified in the
@@ -1240,7 +1251,10 @@ Each profile states the on-disk facts fsimg relies on, what it writes, what it
 checks on read, and the independent oracle that gates the claim. Field layouts
 below are recorded from the formats' public documentation and are verified
 against oracle output before the codec is accepted; a mismatch changes the
-profile, never the oracle.
+profile, never the oracle. The zstd and xz profiles, which depend on
+optional system libraries, are in the
+[compression libraries design](design-compression-libs.md#profiles) with
+their build and packaging rules.
 
 ### GPT
 
@@ -2057,8 +2071,10 @@ brings new mechanism, before implementation; none is implied by this design:
   refused.
 * **VMDK streamOptimized**: compressed grains with embedded markers; a
   sequential writer fits the transcode, a reader needs the grain directory.
-* **zstd** and **xz**: whole-file compression with the gzip profile's shape;
-  seekable zstd frames could later avoid the spool.
+* **Seekable zstd**: indexing the seek table of the `zstd` seekable
+  format to read in place without a spool; such files already decode
+  through the spool under the [zstd profile](design-compression-libs.md#zstd),
+  whose seek table is a skippable frame.
 * **Extended MBR partitions**: a bounded EBR chain walk with cycle detection.
 * **Multi-segment DMG**: refused until a design covers segment discovery.
 

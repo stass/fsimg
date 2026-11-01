@@ -208,7 +208,9 @@ every safety check.
 Compression is not a slot: it wraps the whole image on its way to or from
 the file. On create, `-z` selects gzip and `-a` chooses the compression from
 the output suffix as tar does, using the suffixes the layer registry
-declares: `.gz` selects gzip, a reserved name such as `.zst` or `.xz` fails,
+declares: `.gz` selects gzip, `.zst` and `.xz` select the
+[optional zstd and xz](design-compression-libs.md), which fail as
+unsupported in a build without their libraries,
 and a container suffix (`.dmg`, `.vhd`, `.simg`) selects nothing but must
 match the stack's container, so `-a -f disk.dmg -F fat32/gpt` is a syntax
 error. A double suffix is matched outermost first: `disk.dmg.gz` selects

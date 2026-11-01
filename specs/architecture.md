@@ -821,6 +821,28 @@ become necessary for raw-image operations. Imported code and generated
 tables receive file-level provenance and license review; test tools do not
 imply permission to copy them.
 
+An **optional integration** is a system library the build may link, never
+one it needs. Its mechanics are fixed so that every optional library is
+handled the same way: a `--with-NAME[=auto|yes|no]` configure option
+detected like zlib (pkg-config, then header and library, overridable
+flags), one conditionally compiled source file that alone includes the
+library's header, a registry row whose operations are present exactly when
+that file is compiled, the library's flags in `Libs.private`, the sources
+distributed in every build, and a public header identical in every build.
+Behaviour without the library is the core's: the row keeps its name and
+suffix with no operations, so a request for it fails as unsupported,
+naming it, and nothing else changes. Capability output names the library
+and its runtime version, as it does for zlib, because compressed bytes are
+reproducible only per library version. Every optional library's code runs
+inside the confined worker under the same allocation adapter and the same
+syscall profile as the core, verified under required confinement on each
+platform; a library that needs more is not integrated. The
+[compression libraries design](design-compression-libs.md) is the first
+instance: zstd over libzstd and xz over liblzma, both permissively
+licensed system libraries on FreeBSD and standard packages elsewhere, but
+absent from the macOS base system, which is what makes them optional
+rather than required like zlib.
+
 Relic, POSIX AWK and the fsimg generation scripts are development tools under the
 [generation contract](design-relic-generation.md). Regeneration records the
 generator identity and input digests without absolute host paths or timestamps.

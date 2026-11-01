@@ -3,8 +3,9 @@
 ## Purpose and ownership
 
 Two small facilities remove repeated mechanisms without sharing format policy:
-explicit unsigned scalar byte access, and an adapter from zlib allocation
-callbacks to the resource context. They are independent modules, not a general
+explicit unsigned scalar byte access, and an adapter from the allocation
+callbacks of the codec libraries (zlib always; libzstd and liblzma when the
+build has them) to the resource context. They are independent modules, not a general
 utility framework. The [architecture contracts](architecture.md#contracts)
 own byte boundaries and resource accounting; this document specifies the
 private interfaces that implement those contracts.
@@ -15,9 +16,9 @@ nothing in installed `fsimg.h`. The library and CLI use the same private
 header. Its project-prefixed filename avoids shadowing system `<endian.h>`
 when the private core directory appears on the compiler's include path. Its
 include guard is `FSIMG_ENDIAN_H`; it defines no host-endianness macros and
-does not reuse system header guards. `lib/core/zlib-memory.h` and
-`lib/core/zlib-memory.c` own the allocation
-adapter; only zlib users include its header. Neither zlib types nor callbacks
+does not reuse system header guards. `lib/core/codec-memory.h` and
+`lib/core/codec-memory.c` own the allocation
+adapter; only codec-library users include its header. Neither library types nor callbacks
 belong in the broad `internal.h` or `layer.h` interface.
 
 The [layer design](design-layers.md) owns framing, decompression limits,
@@ -172,21 +173,38 @@ cleanup. The `opaque` pointer addresses the adapter, not a larger gzip, DMG or
 chunk object with an unrelated layout.
 
 ```c
-typedef struct fsimg_zlib_memory {
+typedef struct fsimg_codec_memory {
     fsimg_ctx_t *ctx;
     fsimg_error_t error;
-} fsimg_zlib_memory_t;
+} fsimg_codec_memory_t;
 
-void fsimg_zlib_memory_bind(fsimg_zlib_memory_t *, fsimg_ctx_t *, z_stream *);
-fsimg_status_t fsimg_zlib_memory_error(const fsimg_zlib_memory_t *,
+void fsimg_zlib_memory_bind(fsimg_codec_memory_t *, fsimg_ctx_t *, z_stream *);
+fsimg_status_t fsimg_codec_memory_error(const fsimg_codec_memory_t *,
     fsimg_error_t *);
+void *fsimg_codec_memory_alloc(fsimg_codec_memory_t *, size_t, size_t);
+void fsimg_codec_memory_free(void *);
 ```
 
 The header includes the private context declarations and system `zlib.h`.
-The two callback functions are private to `zlib-memory.c`, with zlib's exact
+The two callback functions are private to `codec-memory.c`, with zlib's exact
 `voidpf (voidpf, uInt, uInt)` and `void (voidpf, voidpf)` signatures. Binding
 sets `zalloc`, `zfree` and `opaque`; callers cannot accidentally install only
 one callback and fall back to an uncharged system allocation.
+
+The state and its rules are library neutral. `fsimg_codec_memory_alloc`
+performs the overflow check, the first-error capture and the context
+allocation for `items` times `size` bytes, and `fsimg_codec_memory_free`
+the release; the zlib callbacks are shims over them that convert `uInt`
+to `size_t`. The [optional compression libraries](design-compression-libs.md)
+bind the same state to `liblzma` (an `lzma_allocator` whose `alloc` is
+`(opaque, nmemb, size)`) and to `libzstd` (a `ZSTD_customMem` whose
+`customAlloc` is `(opaque, size)`, bound with `items` 1) through shims that
+live in the layer file including that library's header, so this core file
+includes only `zlib.h` and a build without an optional library compiles no
+shim for it. Each binding installs both callbacks or none, exactly as the
+zlib binding does, and every rule below, first error, zero-byte requests,
+accounting and stream lifetime, applies to each binding without a case of
+its own.
 
 `bind` requires a valid borrowed context and a fresh, zero-initialized stream
 with no live zlib state. It initializes both adapter fields explicitly and
@@ -244,7 +262,7 @@ on free. Host allocator bookkeeping remains excluded as specified by the
 architecture. There is no zlib-specific budget, reserve, hidden fallback or
 allocation counter. Multiple live streams compete for the same context budget.
 
-`fsimg_zlib_memory_error()` requires a non-NULL output error and returns the
+`fsimg_codec_memory_error()` requires a non-NULL output error and returns the
 stored first status and a complete copy of its diagnostic. If no allocation
 failure was recorded, it reports `FSIMG_ENOMEM`, `FSIMG_OP_ALLOCATE`, with a
 fixed zlib allocation-failure message. It is used only to interpret
@@ -297,7 +315,7 @@ fsimg-owned text, not arbitrary unescaped `stream.msg` bytes.
 
 ### zlib call-site map and contract evidence
 
-`chunk_disk_t` in `lib/layers/chunks.c` embeds `fsimg_zlib_memory_t` instead of
+`chunk_disk_t` in `lib/layers/chunks.c` embeds `fsimg_codec_memory_t` instead of
 a separate `zlib_error`; its zlib-specific allocation callbacks disappear.
 The existing `stream_ready` flag and inflate/reset/end control remain there.
 `dmg_encoder_t` in `lib/layers/dmg.c` makes the same replacement; raw chunks,
