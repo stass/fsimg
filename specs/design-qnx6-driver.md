@@ -400,7 +400,10 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    positions and link counts; assign the next long-name index when the name
    exceeds 27 bytes; validate kind and metadata representability under the
    [metadata policy](design-metadata.md#writer-policy); accumulate the totals
-   of content and indirect blocks and `initialized_bytes`. A name outside the
+   of content and indirect blocks, for each candidate block size when
+   minimization searches an open one, and `initialized_bytes`. The layout
+   pass sets a directory's length from its slot count once the block size
+   is chosen. A name outside the
    profile fails with `FSIMG_EINVAL`. A catalog `/.boot` that is not a
    directory fails with `FSIMG_EUNSUPPORTED`; a catalog `/.boot` directory
    keeps its children and takes the profile mode `0700`, and another
@@ -436,10 +439,12 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    as the format design's post-order recipe; the root directory and `.boot`
    from `2R`; every entry in catalog ID order; then the long-name stream. Each
    object's range is its indirect blocks followed by its content, so a file's
-   payload is one emission region. The sum must equal `A`, and `A` plus the
+   payload is one emission region, and a directory's length is its whole
+   blocks. The sum must equal `A`, and `A` plus the
    reserve must not exceed `N`.
 4. **Summary.** Fill `fsimg_plan_info_t`: volume, metadata, allocated, free and
-   initialized bytes and the sector and block sizes. The common
+   initialized bytes, the sector and block sizes, the block count, and the
+   inode capacity with its free inodes. The common
    [writer loss policy](design-metadata-loss.md) installs the loss count after
    every planning step succeeds.
 

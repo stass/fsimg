@@ -28,7 +28,9 @@ An explicit setting fixes its dimension in both policies. Minimization then
 searches only the remaining ones; when none remain it is the default policy,
 not an error. `volume_bytes` fixes everything the search would choose, so
 `FSIMG_WRITE_MINIMIZE` with an exact size is `FSIMG_EINVAL`, reported by the
-CLI as conflicting requested settings, like `-e` without `-R`. `min_free_bytes`
+CLI as conflicting requested settings, like `-e` without `-R`. A fixed disk
+(`gpt:disk`, `mbr:disk`) gives the volume its partition's length as an exact
+size, so minimization with one is `FSIMG_EINVAL` as well. `min_free_bytes`
 and `reserve_percent` are requirements, not dimensions: a minimized volume
 still contains them.
 
@@ -53,18 +55,34 @@ since a native user of that volume cannot create files beyond it.
 
 The entries pass accumulates, in one traversal of the layout rows, the
 allocation total for every candidate allocation unit at once: one counter
-per legal unit, at most seventeen, instead of one pass per candidate. Each
-candidate's geometry is then computed as the default policy already does,
-and minimization keeps the candidate with the smallest `volume_bytes`. Ties
-go to the candidate the default policy would have chosen, so the two
-policies agree whenever the default is already minimal.
+per legal unit, at most seventeen, instead of one pass per candidate. Both
+policies use that one pass. Each candidate's geometry is then computed as
+the default policy already does, and minimization keeps the candidate with
+the smallest `volume_bytes`.
+
+Ties go to the candidate the default policy would have chosen, so the two
+policies agree whenever the default is already minimal. Each format ranks
+its candidates in a fixed preference order whose first legal member is the
+default policy's choice, and a tie between other candidates follows the
+same order:
+
+* FAT: increasing allocation unit.
+* exFAT: increasing allocation unit among the units whose cluster count is
+  within the recommended count, the largest permitted unit included, then
+  the remaining units in increasing order.
+* QNX6: the default block size 1024, then the other open block sizes in
+  increasing order.
 
 For QNX6 the block-count search first finds the smallest 64-block multiple
 that fits, as the [driver design](design-qnx6-driver.md#planning) states,
 then tests each smaller block count at the volume's alignment step within
-that 64-block window and keeps the smallest that fits. The window holds at
-most 64 candidates, each a constant-time check against the accumulated
-totals, so the exact minimum costs no further pass.
+that 64-block window and keeps the smallest that fits. The alignment step is
+`4096 / B` blocks, so the volume stays a whole number of 4096-byte units and
+an exact size of the minimized volume describes it again. The window never
+goes below the 64 blocks that an exact size must hold. It holds at most 64
+candidates, each a constant-time check against the accumulated totals, so
+the exact minimum costs no further pass. A block size whose object or
+system trees exceed the profile's depth limits is not a candidate.
 
 For QNX4 the default block count is the smallest one that holds the fixed
 layout, the objects and the bitmap, found by the short iteration the
@@ -80,13 +98,19 @@ refused with `FSIMG_EINVAL`, which the CLI reports for `-s` and
 `--free-space` as settings the format cannot honor.
 
 Planning work grows by the number of candidates evaluated, never by a
-second traversal of the catalog. The plan's reported scratch and work
-figures include the search.
+second traversal of the catalog: each candidate geometry evaluated charges
+one work unit, under either policy. The plan's reported scratch and work
+figures include the search. The search keeps a fixed number of counters and
+no per-candidate rows, tables or catalogs.
 
 ## Reporting and tests
 
 `-n` and the plan information show the selected unit, block count and inode
-capacity under either policy. Tests pin one catalog per format where the
+capacity under either policy. `fsimg_plan_info_t` carries the unit count as
+`allocation_units`, the clusters or blocks of the volume as an opened volume
+reports them, and, for a format whose inode table bounds the files a native
+user can create (QNX6), `inode_capacity` and `free_inodes`; both are zero for
+the other formats. Tests pin one catalog per format where the
 default and minimized choices differ: a few large files, where a larger
 allocation unit's smaller table outweighs its slack, must produce a smaller
 volume under `-M` and an identical one under the default; a wide tree of
