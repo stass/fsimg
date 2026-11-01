@@ -24,7 +24,8 @@ fsimg cf data.img -F exfat -C files .      # Create an image from ./files/
   label, partition scheme, and container. Use mtree manifests to set image
   ownership and permissions without changing host files.
 - **Plan and reproduce builds.** Inspect sizing and metadata losses before
-  writing; produce reproducible images with `-R`; verify staged images before
+  writing; produce reproducible images with `-R`; shrink an image to the
+  smallest geometry its files fit in with `-M`; verify staged images before
   publishing them with `cW`.
 - **Security and sandboxing.** Process untrusted images in an OS sandbox
   where supported, with explicit warnings when confinement is unavailable.
@@ -123,6 +124,9 @@ fsimg cf data.img -F fat32 -s 64M -L DATA -C files .
 # A reproducible exFAT image, verified before publication.
 fsimg cWRf data-exfat.img -F exfat -C files .
 
+# The smallest FAT16 volume the files fit in.
+fsimg cMf data-small.img -F fat16 -C files .
+
 # A FAT32 volume inside a GPT disk, then inside a compressed DMG.
 fsimg cf data.dmg -F fat32/gpt/dmg -C files .
 
@@ -137,6 +141,22 @@ fsimg cn -F exfat --free-space=32M -C files .
 filesystem in a GPT partition inside a DMG. Creation writes one partition;
 the C API can compose several volumes into a disk. Images are sized
 automatically unless you request an exact size with `-s`.
+
+By default, fsimg picks the first legal geometry for the size it needs,
+leaving the room a native formatter would. `-M` instead tries every open
+geometry setting and keeps the one giving the smallest volume: every
+cluster size for FAT and exFAT, and every block size for QNX6, with an inode
+table that just holds the entries. Settings you give with `-o`, such as
+`cluster=` or `inodes=`, and `--free-space` still apply, and the output is as
+reproducible as any other build. `-M` conflicts with `-s`. Check the result
+first with `fsimg cnM ...`, which prints the chosen cluster or block size.
+
+A minimized image has little spare room for metadata. On FAT12 and FAT16
+the root directory holds only the entries it was created with, so a system
+that later adds files to the root finds it full; QNX6 has almost no free
+inodes unless you pass `inodes=`. A small tree may already be at the
+format's minimum, such as FAT32's 65,525 clusters or exFAT's 1 MiB, and
+then `-M` gives the same image.
 
 Creation publishes a new file and refuses to replace an existing name.
 Keep source files stable during the operation. `-R` fixes ordering,
