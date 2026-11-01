@@ -1965,6 +1965,56 @@ test_minimize_recommended_cluster_count(void)
 	}
 }
 
+/* Plan only: scan-derived tie for a zero file of 16777212 * 8 MiB.
+ * At 8 MiB, file/root/upcase/bitmap need 16777212 + 1 + 1 + 1 clusters;
+ * the FAT and boot region align to nine more units before the heap.
+ * At 16 MiB, those counts are 8388606 + 1 + 1 + 1, with three units before
+ * the heap. Both volumes are 140737555464192 bytes, the global minimum
+ * over the legal units. Only the smaller unit exceeds 0x00fffffe clusters,
+ * so the recommendation breaks the tie in favor of 16 MiB.
+ */
+static void
+test_minimize_tie_prefers_recommended_cluster_count(void)
+{
+	typedef struct recommendation_tie_case {
+		uint32_t requested_unit;
+		uint32_t expected_unit;
+		uint64_t expected_clusters;
+	} recommendation_tie_case_t;
+	static const recommendation_tie_case_t cases[] = {
+		{ .requested_unit = 8388608, .expected_unit = 8388608,
+		    .expected_clusters = 16777215 },
+		{ .requested_unit = 16777216, .expected_unit = 16777216,
+		    .expected_clusters = 8388609 },
+		{ .expected_unit = 16777216, .expected_clusters = 8388609 }
+	};
+	exfat_fixture_t f;
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_entry_t entry = { .path = "/ZERO", .kind = FSIMG_ENTRY_FILE,
+	    .size = UINT64_C(140737454800896) };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fsimg_plan_info_t info;
+	const fsimg_plan_t *plan;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_new(&f);
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_MINIMIZE;
+		options.allocation_unit_bytes = cases[i].requested_unit;
+		CHECK(fsimg_writer_new(f.ctx, "exfat", &options, &writer, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_add(writer, &entry, &zero, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.volume_bytes == UINT64_C(140737555464192));
+		CHECK(info.allocation_unit_bytes == cases[i].expected_unit);
+		CHECK(info.allocation_units == cases[i].expected_clusters);
+		CHECK((info.allocation_units > UINT64_C(0x00fffffe)) == (i == 0));
+		fsimg_writer_free(writer);
+		fixture_free(&f);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1973,6 +2023,7 @@ main(int argc, char **argv)
 		return (0);
 	}
 	if (argc == 2 && strcmp(argv[1], "--minimize") == 0) {
+		test_minimize_tie_prefers_recommended_cluster_count();
 		test_minimize_large_and_tiny_files();
 		test_minimize_constraints_and_limits();
 		test_minimize_recommended_cluster_count();
@@ -2030,6 +2081,7 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_minimize_tie_prefers_recommended_cluster_count();
 	test_minimize_large_and_tiny_files();
 	test_minimize_constraints_and_limits();
 	test_minimize_recommended_cluster_count();

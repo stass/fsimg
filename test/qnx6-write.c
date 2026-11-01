@@ -16,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "digest.h"
 #include "fsimg.h"
 #include "host.h"
 #include "internal.h"
@@ -1220,6 +1221,95 @@ test_matrix(void)
 			for (unsigned pass = 0; pass < 3; pass++)
 				free(sinks[pass].bytes);
 		}
+	}
+}
+
+/* The digests pin the default policy's bytes, which minimization must not
+ * change. Each catalog includes the nested tree, long names, a link and a FIFO.
+ * Its 384 additional children make /dir/sub span several directory blocks
+ * even at B=4096. The last case supplies /.boot and explicit inode/reserve
+ * settings; the others let the writer synthesize /.boot.
+ */
+static void
+test_default_image_sha256(void)
+{
+	typedef struct default_image_case {
+		const char *name;
+		const char *sha256;
+		uint32_t block;
+		uint32_t inodes;
+		unsigned reserve;
+		bool catalog_boot;
+	} default_image_case_t;
+	static const default_image_case_t cases[] = {
+		{ .name = "default",
+		    .sha256 =
+		    "4c2f4f7fabf5332ea474793a5ba66354e68c149c5db10e09535b75ed12972a50",
+		    .reserve = 3 },
+		{ .name = "4096-byte blocks",
+		    .sha256 =
+		    "4bbca3ed0fef5825c795597c8c6ca586ed99133c4e6d58064255fbd65c506808",
+		    .block = 4096, .reserve = 3 },
+		{ .name = "inode capacity and reserve",
+		    .sha256 =
+		    "62b60cfd338951f02f674c969d9e5047d8860d1761864c608d070e27111945b3",
+		    .inodes = 2048, .reserve = 17, .catalog_boot = true }
+	};
+	const spec_t boot = { "/.boot", FSIMG_ENTRY_DIRECTORY, 0, 0 };
+	const spec_t startup = { "/.boot/startup.bin", FSIMG_ENTRY_FILE, 2049, 6 };
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	chk_expect_t expect;
+	fsimg_sha256_t digest;
+	const chk_entry_t *directory;
+	chk_t c;
+	char hex[FSIMG_SHA256_DIGEST_STRING_LENGTH], path[64];
+	spec_t child = { .kind = FSIMG_ENTRY_FILE, .source = 1 };
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+		options.epoch = 1700000000;
+		options.allocation_unit_bytes = cases[i].block;
+		options.inode_capacity = cases[i].inodes;
+		options.reserve_percent = cases[i].reserve;
+		bcopy(test_uuid, options.volume_uuid, sizeof(test_uuid));
+		expect_defaults(&expect, &options);
+		fixture_open(&fixture, &options);
+		add_tree(&fixture, false);
+		for (unsigned n = 0; n < 384; n++) {
+			snprintf(path, sizeof(path), "/dir/sub/entry-%03u", n);
+			child.path = path;
+			child.size = n % 17;
+			CHECK(add_one(&fixture, &child, NULL) == FSIMG_OK);
+		}
+		if (cases[i].catalog_boot) {
+			CHECK(add_one(&fixture, &boot, NULL) == FSIMG_OK);
+			CHECK(add_one(&fixture, &startup, NULL) == FSIMG_OK);
+		}
+		CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+		CHECK(fixture.losses == 0);
+		chk_image(&c, sink.bytes, sink.length, &expect);
+		CHECK(c.errors == 0);
+		CHECK(c.block == (cases[i].block == 0 ? 1024 : cases[i].block));
+		directory = chk_find(&c, "/dir/sub");
+		CHECK(directory != NULL);
+		CHECK(directory->size >= 4 * c.block);
+		CHECK(c.names_leaves > 0);
+		chk_free(&c);
+		check_reader(&fixture, &sink,
+		    TREE_COUNT + 385 + (cases[i].catalog_boot ? 1 : 0));
+
+		fsimg_sha256_init(&digest);
+		fsimg_sha256_update(&digest, sink.bytes, (size_t)sink.length);
+		sha256_final_hex(&digest, hex);
+		if (strcmp(hex, cases[i].sha256) != 0)
+			fprintf(stderr, "%s: QNX6 SHA-256 %s, expected %s\n",
+			    cases[i].name, hex, cases[i].sha256);
+		CHECK(strcmp(hex, cases[i].sha256) == 0);
+		free(sink.bytes);
+		fixture_close(&fixture);
 	}
 }
 
@@ -2542,10 +2632,67 @@ test_minimize_search_limits(void)
 	}
 }
 
+/* With 1048577 requested inodes, 512-byte blocks need 262145 table leaves
+ * after block rounding, exceeding the depth-2 capacity 16 * 128^2 = 262144.
+ * At 1024, 2048 and 4096 bytes the respective leaf counts are 131073,
+ * 65537 and 32769, all within depth 2. Reject only the unusable candidate;
+ * a caller that fixes it must receive FSIMG_ERANGE under either policy.
+ */
+static void
+test_minimize_rejects_unusable_block_candidate(void)
+{
+	typedef struct block_candidate_case {
+		uint32_t block;
+		bool minimize;
+	} block_candidate_case_t;
+	static const block_candidate_case_t cases[] = {
+		{ .block = 0, .minimize = true },
+		{ .block = 1024, .minimize = true },
+		{ .block = 2048, .minimize = true },
+		{ .block = 4096, .minimize = true },
+		{ .block = 512, .minimize = true },
+		{ .block = 512, .minimize = false }
+	};
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	fsimg_plan_info_t info;
+	const fsimg_plan_t *plan;
+	fsimg_error_t error;
+	uint64_t leaves, pointers;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_write_options_init(&options);
+		if (cases[i].minimize)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+		options.allocation_unit_bytes = cases[i].block;
+		options.inode_capacity = 1048577;
+		fixture_open(&fixture, &options);
+		if (cases[i].block == 512) {
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, &error) ==
+			    FSIMG_ERANGE);
+			CHECK(plan == NULL && error.status == FSIMG_ERANGE);
+		} else {
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+			CHECK(info.allocation_unit_bytes != 512);
+			if (cases[i].block != 0)
+				CHECK(info.allocation_unit_bytes == cases[i].block);
+			CHECK(info.inode_capacity >= options.inode_capacity);
+			CHECK(info.inode_capacity - info.free_inodes == 2);
+			leaves = info.inode_capacity / (info.allocation_unit_bytes / 128);
+			pointers = info.allocation_unit_bytes / 4;
+			CHECK(leaves <= 16 * pointers * pointers);
+		}
+		fixture_close(&fixture);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
 	if (argc == 2 && strcmp(argv[1], "--minimize") == 0) {
+		test_default_image_sha256();
+		test_minimize_rejects_unusable_block_candidate();
 		test_minimize_large_files();
 		test_minimize_tiny_files();
 		test_minimize_tie_prefers_default_block();
@@ -2566,6 +2713,8 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_default_image_sha256();
+	test_minimize_rejects_unusable_block_candidate();
 	test_minimize_large_files();
 	test_minimize_tiny_files();
 	test_minimize_tie_prefers_default_block();

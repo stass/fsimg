@@ -228,7 +228,8 @@ test_exfat_SOURCES = test/exfat.c test/test.h \
 test_exfat_LDADD = libfsimg.la
 test_qnx6_SOURCES = test/qnx6.c test/test.h
 test_qnx6_LDADD = libfsimg.la
-test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h
+test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h \
+	test/digest.c test/digest.h
 test_qnx6_write_LDADD = libfsimg.la
 test_qnx4_SOURCES = test/qnx4.c test/test.h
 test_qnx4_LDADD = libfsimg.la
