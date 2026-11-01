@@ -346,33 +346,33 @@ which E8 checks. A candidate's **descriptor run is whole** when:
 2. every mapping block in the run is valid, has the candidate's XID, and has
    a count that fits the block; exactly the run's last mapping block carries
    the last-map flag `0x1`, and no flag outside it is set;
-3. every mapping names an object kind and subtype, a byte size that is a
-   positive multiple of `B`, and a block run that lies inside the
-   candidate's data run without straddling the data ring's wrap;
+3. every mapping names an object kind and subtype and a byte size that is a
+   positive multiple of `B`;
 4. the candidate's next-index fields lie within their rings and its next XID
    exceeds its XID.
 
-These are local facts of each descriptor block and its slot, so one pass
+Each of these depends only on one descriptor block and its slot, so one pass
 over the ring records them per slot, and runs are judged from those records
 without reading a block again. A slot that matches a candidate's XID matches
 no other candidate's, because XIDs are distinct, so judging every run costs
-at most `D` record reads in total. The selected checkpoint is the candidate
-with the largest XID whose descriptor run is whole; none is
-`FSIMG_ECORRUPT`. A candidate with a larger XID whose run is not whole is a
+at most `D` record reads plus one per candidate. The selected checkpoint is
+the candidate with the largest XID whose descriptor run is whole; if no
+candidate's run is whole, the image is `FSIMG_ECORRUPT`. A candidate with a larger XID whose run is not whole is a
 checkpoint a crash interrupted: the reader passes over it, as macOS mounts
 the newest superblock that is not malformed, and reports the volume's
 `clean` state as false.
 
-The selected checkpoint's mappings are then checked together: every
-ephemeral OID is distinct, no two mapped runs overlap, and the space
-manager and reaper OIDs are mapped with their kinds. Each mapped object is
+The selected checkpoint's mappings are then checked together: every mapped
+block run lies inside the checkpoint's data run without straddling the data
+ring's wrap, every ephemeral OID is distinct, no two mapped runs overlap,
+and the space manager and reaper OIDs are mapped with their kinds. Each mapped object is
 read once and must have a valid header whose OID, kind and subtype equal the
 mapping's and whose XID is not above the checkpoint's, and the container
 object map must be a valid physical object. A failure in this phase is
 `FSIMG_ECORRUPT`: the reader does not fall back to an older checkpoint after
 judging a newer one complete, and E8 checks whether macOS does. Selection
-therefore reads the `D` descriptor blocks once and one checkpoint's data
-run.
+therefore reads the `D` descriptor blocks once, the selected run's mapping
+blocks a second time, and one checkpoint's data run.
 
 Block 0 does not select the checkpoint; it constrains the candidates and is
 a copy of a committed superblock. A block-0 XID larger than every whole
@@ -1056,7 +1056,11 @@ never in the main one, and the pool's bitmap must be set exactly for them.
 Space-manager blocks outside the pool are main claims.
 
 Data blocks are claimed through the physical-extent records of every
-extent-reference tree of a volume, the live tree and each snapshot's.
+extent-reference tree of a volume, the live tree and each snapshot's. In a
+sealed volume, whose file extents live in the sealed file-extent tree,
+those extents are checked against the reference records in the same way,
+and whether a sealed volume has an extent-reference tree at all is checked
+by E11; without one, its sealed file extents are its data claims.
 Records of one tree never overlap; records of different trees of one
 volume may, since a snapshot and the live volume share unchanged extents,
 so a block a snapshot alone still uses is claimed by that snapshot's

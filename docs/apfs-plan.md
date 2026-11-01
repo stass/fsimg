@@ -160,7 +160,8 @@ The designs record these with their rationale.
    superblock that is not malformed. A newer one with a broken run is passed
    over and reported as not clean; a selected checkpoint whose mappings or
    mapped objects fail is corrupt, with no further fallback, so selection
-   reads the descriptor ring once and one data run. There is no recovery scan and no
+   reads the descriptor ring once, the selected run again, and one data
+   run. There is no recovery scan and no
    checkpoint option.
 3. **One object reader and one B-tree cursor.** Every reference goes through
    `apfs_object_read()` and every node through `btree.c`, so storage-class,
@@ -225,7 +226,7 @@ stage that consumes it.
 | Compression header, inline marker bytes, resource-fork framing per codec, inline size limit, codecs `ditto` and installers choose | E7 | Stage 7 |
 | Snapshot records, flags, extended metadata, dataless snapshots | E9 | Stage 10 |
 | Volume roles and volume groups in multi-volume containers | E10 | Volume selection |
-| Encrypted and sealed detection; sealed tree types, node flags, hash types | E11 | Refusal, stage 11 |
+| Encrypted and sealed detection; sealed tree types, node flags, hash types; whether a sealed volume has an extent-reference tree | E11 | Refusal, stage 11, sealed verification |
 | DMG and GPT layouts `hdiutil` produces around APFS | E13 | Layer interplay |
 | Native time and owner limits; whether times are signed | E14 | Metadata mapping |
 | Kinds, compression and snapshots on a used Data volume | E16 | Owner decision 5, stage 7 priorities |

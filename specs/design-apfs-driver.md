@@ -103,8 +103,9 @@ the next starts:
    rereading a block; the first whose run is whole is selected, and a larger
    one whose run is not sets `clean` to false. The selected run's mapping
    blocks are then read again, their mappings copied into a paged array
-   sorted by OID, which rejects duplicate OIDs, and their runs checked for
-   overlap; each mapped object is read once and checked. A failure after
+   sorted by OID, which rejects duplicate OIDs, and their block runs checked
+   against the data run, its wrap and each other; each mapped object is
+   read once and checked. A failure after
    selection is `FSIMG_ECORRUPT`, with no fallback to an older checkpoint.
    Selection costs the `D` descriptor blocks, one reread of the selected
    run, and one data run.
@@ -290,9 +291,11 @@ queue's entries go to a second, smaller claim stream for the pool's own
 domain, merged against the pool's bitmap, so no block is claimed in both.
 For each volume it scans the object map, the snapshot tree, every
 extent-reference tree (the live one and each snapshot's), and the
-filesystem tree with dedicated cursors. Each physical-extent record appends
-a data claim, owner `(volume, tree)`; the filesystem scan appends a
-file-extent record `(block, count, volume, private ID)` to a third stream.
+filesystem tree with dedicated cursors, and in the sealed profile the
+sealed file-extent tree. Each physical-extent record appends a data claim,
+owner `(volume, tree)`; the filesystem scan, or the sealed file-extent
+scan, appends a file-extent record `(block, count, volume, private ID)` to
+a third stream.
 
 **Record reconciliation.** The filesystem scan visits each object's records
 together because they share the owner prefix, so most checks are local and
@@ -445,7 +448,7 @@ comes from a row, the geometry, the sorted records or a profile constant.
 
 | Operation | Work and residency |
 | --- | --- |
-| Probe and open | Block 0, one pass over the descriptor ring and each candidate's descriptor run, the selected checkpoint's mapped objects, the container and volume map paths, the volume superblocks, the root inodes; the candidate stream and the paged mapping array |
+| Probe and open | Block 0, one pass over the descriptor ring, one reread of the selected run, the selected checkpoint's mapped objects (one data run), the container and volume map paths, the volume superblocks, the root inodes; the slot-record array and the paged mapping array |
 | Listing | Per directory: one scan of its records and the common key sort; per entry: one inode lookup and, for a link or compressed file, one attribute lookup. No file payload is read |
 | Content | Per sequential read: one cursor advance per extent; per random offset: one tree descent; per compressed chunk: one decode of at most 64 KiB |
 | Verification | One scan of every tree of every volume; the main and pool claim, file-extent, name-reference, sibling-map, stream-use and collision streams, each sorted once, and the `(record, stream)` pairs; one pass over the chunk structures, bitmaps and pool bitmap; one walk of the selected volume |
