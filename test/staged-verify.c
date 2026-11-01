@@ -241,8 +241,12 @@ run_case(int directory, int source, char *executable,
 		execv(executable, arguments);
 		_exit(127);
 	}
-	/* Either side can establish the group before the child execs. */
-	CHECK(setpgid(child, child) == 0 || errno == EACCES);
+	/*
+	 * Either side can establish the group before the child execs. EACCES
+	 * means the child has exec'd after setting its group; ESRCH means it
+	 * has exited, so waitpid below collects its status.
+	 */
+	CHECK(setpgid(child, child) == 0 || errno == EACCES || errno == ESRCH);
 	for (;;) {
 		waited = waitpid(child, &status, WNOHANG);
 		CHECK(waited != -1 || errno == EINTR);
