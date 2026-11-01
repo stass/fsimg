@@ -622,10 +622,12 @@ with payload, each at a 16 MiB context budget:
 ```
 
 It checks the driver design's resource bounds as they apply to these
-volumes: every live inode listed and verified, charged memory at most 4 MiB
-at every size, scratch within a context budget linear in `N`, the inode
-count, the live inodes and the blocks objects own, no owned block read twice
-by one operation, and the system run read in bounded passes, so that only
+volumes: every live inode listed and verified, charged memory at most
+5,535,848 bytes (the metadata cache's maximum, one sort run and 256 KiB of
+other state) at every size, scratch within a context budget linear in `N`,
+the inode count, the live inodes and the blocks objects own, no owned block
+read twice by one operation, and the system run read in bounded passes, so
+that only
 verification reads the bitmap and the inode table in full, once each. The
 per-inode reads and bitmap-window loads allowed beside those passes are
 regression ceilings for the reader's access pattern, not design bounds. It
@@ -653,10 +655,11 @@ child process of its own, which reads the volume's file with `pread`:
 
 It checks the driver design's resource bounds as they apply to these
 volumes: every name listed and every file, directory and allocated block
-verified; charged memory at most 4 MiB and scratch within a budget the
-context enforces (the claimed bitset of `N` bits, 128 bytes per name and 32
-per extent), which together keep the 256 MiB claimed bitset out of memory;
-the operation's growth of the child's peak RSS at most 32 MiB; every
+verified; charged memory at most 5,535,848 bytes (the metadata cache's
+maximum, one sort run and 256 KiB of other state) and scratch within a
+budget the context enforces (the claimed bitset of `N` bits, 128 bytes per
+name and 32 per extent), which together keep the 256 MiB claimed bitset
+out of memory; the operation's growth of the child's peak RSS at most 32 MiB; every
 extent block read exactly once by each operation; directory reads at most
 each directory's slots once, the root's twice, and each name's record once
 more; the bitmap read in full only by verification, once, beside one
@@ -665,14 +668,14 @@ and the `.inodes` table read in full only by verification. On APFS:
 
 | Case | Operation | Image calls | Image bytes | Bitmap bytes | Directory bytes | Extent-block bytes | Peak scratch | RSS | Seconds |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `N` = 2^31 | list | 15 | 38,594 | 12,800 | 16,512 | 0 | 268,435,472 | 5,120,000 | 0.002 |
-| `N` = 2^31 | verify | 65,553 | 268,482,242 | 268,448,256 | 16,512 | 0 | 268,443,724 | 5,144,576 | 1.627 |
-| 200,000 names | list | 206,261 | 25,633,973 | 4,608 | 25,616,960 | 0 | 21,008,436 | 7,364,608 | 5.721 |
-| 200,000 names | verify | 206,264 | 25,646,193 | 8,636 | 25,616,960 | 0 | 21,008,436 | 7,368,704 | 5.673 |
-| 65,535 extents | list | 79,838 | 39,753,244 | 5,614,080 | 16,448 | 559,616 | 1,594,174 | 5,926,912 | 0.122 |
-| 65,535 extents | verify | 68,835 | 39,778,469 | 5,631,113 | 16,448 | 559,616 | 1,594,174 | 7,041,024 | 0.112 |
-| 16,383 levels | list | 32,777 | 9,465,412 | 3,072 | 9,453,056 | 0 | 0 | 15,069,184 | 1.317 |
-| 16,383 levels | verify | 32,780 | 9,476,164 | 5,632 | 9,453,056 | 0 | 0 | 11,816,960 | 1.314 |
+| `N` = 2^31 | list | 15 | 38,594 | 12,800 | 16,512 | 0 | 268,435,472 | 4,329,472 | 0.003 |
+| `N` = 2^31 | verify | 65,553 | 268,482,242 | 268,448,256 | 16,512 | 0 | 268,443,724 | 4,395,008 | 2.218 |
+| 200,000 names | list | 206,261 | 25,633,973 | 4,608 | 25,616,960 | 0 | 21,208,439 | 6,746,112 | 1.951 |
+| 200,000 names | verify | 206,264 | 25,646,193 | 8,636 | 25,616,960 | 0 | 21,208,439 | 6,881,280 | 2.257 |
+| 65,535 extents | list | 79,838 | 39,753,244 | 5,614,080 | 16,448 | 559,616 | 0 | 3,993,600 | 0.212 |
+| 65,535 extents | verify | 68,835 | 39,778,469 | 5,631,113 | 16,448 | 559,616 | 0 | 4,091,904 | 0.214 |
+| 16,383 levels | list | 32,777 | 9,465,412 | 3,072 | 9,453,056 | 0 | 0 | 3,678,208 | 0.183 |
+| 16,383 levels | verify | 32,780 | 9,476,164 | 5,632 | 9,453,056 | 0 | 0 | 3,727,360 | 0.188 |
 
 The per-kind byte counts exclude the format registry's probe of the image's
 first 8,704 bytes, which the image bytes include, and give the metadata
@@ -688,12 +691,19 @@ case loads about 1,370 bitmap windows, one and a quarter per extent block,
 since a block's own bit and the extents it describes lie in different windows.
 Verification reads the 8,192-byte `.inodes` table once beside open's
 signature read, and the listing never. Charged memory peaks between
-3,236,264 and 3,818,032 bytes, the deep tree's walk stack of 32 bytes per
+1,810,441 and 5,425,545 bytes, the deep tree's walk stack of 32 bytes per
 level of `max_depth` included; the 200,000-name directory's scratch peak is
-its sorted key records, about 105 bytes per name. The RSS column is the
-child's peak, almost all of it the operation's growth. Ordinary
-`test-qnx4` runs the same cases in memory at 100,000 blocks, 2,000 names,
-2,000 extents and 255 levels, the file at the default 256-component depth
+its sorted key records, about 106 bytes per name. The RSS column is the
+child's peak, which includes the pages it inherits from the test process.
+The bound applies to the operation's growth over the resident set the
+child starts with; on FreeBSD that baseline is read from the current
+resident set, since `ru_maxrss` stays zero until the first statistics-clock
+tick while fork already counts the parent's resident pages in the child's.
+Memory the child allocates in pages it inherited resident does not raise
+its resident set, so on FreeBSD and Linux the growth is a lower bound,
+which can fall below charged memory; it still catches a resident claimed
+bitset. Ordinary `test-qnx4` runs the same cases in memory at 100,000
+blocks, 2,000 names, 2,000 extents and 255 levels, the file at the default 256-component depth
 limit; it exits 77 when the host cannot hold the 64 GiB sparse volume of
 the bitmap-window case.
 
@@ -723,7 +733,8 @@ files back with their checksums, verifies the structure, and requires
 verification to find no free block. It also emits one directory of
 200,000 files, one in sixteen with a 49-byte name, whose catalog and rows
 spill past the budget into scratch. Both check charged memory at most
-8 MiB, the child's RSS growth beyond the sink's pages at most 64 MiB, and
+6,060,136 bytes (the metadata cache's maximum, one sort run and 768 KiB of
+other state), the child's RSS growth beyond the sink's pages at most 64 MiB, and
 the bytes written at most the plan's metadata and the tree's content. On
 APFS:
 
@@ -778,10 +789,10 @@ MallocSpaceEfficient=1 ./test-ifs --scale
 
 It checks the driver design's resource bounds for these images: every
 member and implicit directory listed and verified; charged memory at most
-8 MiB, the reader's fixed state and a metadata cache of at most a quarter
-of the budget; scratch within a budget the context enforces, four times
-the table and 64 bytes per entry; the operation's growth of the child's
-peak RSS at most 32 MiB, below the million-record table; the million-record
+5,535,848 bytes (the metadata cache's maximum, one sort run and 256 KiB
+for the reader's other state); scratch within a budget the context
+enforces, four times the table and 64 bytes per entry; the operation's
+growth of the child's peak RSS at most 32 MiB, below the million-record table; the million-record
 and million-file cases spilling past the 16 MiB budget; open reading the
 table once, where a table read cut a record re-reading it, less than one
 record per 4 KiB of table; a listing reading each file's record once more

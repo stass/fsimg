@@ -500,17 +500,17 @@
   setup (ports, fatcat, spec gems) is followed by hand on a host. Run the
   CI Linux job in the same image, and give the FreeBSD setup one script.
 
-* [High] **FreeBSD: QNX4 scale RSS exceeds its bound in the wide case**
-  (`test/qnx4.c` scale, FreeBSD 16 on a 128-CPU host): listing or verifying
-  one directory of 200,000 entries raises the child's `ru_maxrss` by about
-  70 MB against the 32 MiB bound while charged memory peaks at 5.4 MB;
-  macOS shows 6-9 MB. It predates the input-sized sort. Ruled out: the
-  image mapping (the fixture reads with `pread`), inherited pages (the
-  child starts at zero), jemalloc decay (no change; `retain:false` gives
-  46 MB; one arena, no change) and the test's region table (about 5 MB).
-  Find what holds the rest: uncharged library memory would be a contract
-  bug, a FreeBSD accounting effect a test fix. `check-scale` fails on
-  FreeBSD until then.
+* [Medium] **Scale RSS growth is blind to reused inherited pages on FreeBSD
+  and Linux** (`test/scale.h`, `test/qnx4.c`, `test/ifs.c`,
+  `test/qnx4-write.c`): each operation runs in a child forked after the
+  fixture is built, and the child starts with the parent's resident pages,
+  heap its allocator kept included. Allocations that land in those pages
+  raise no resident count, so the 200,000-name QNX4 listing shows about
+  50 KB of growth on FreeBSD against 5.4 MB charged (6 MB on macOS). An
+  uncharged allocation up to the inherited heap's size would pass the
+  32 MiB bound there. Run each measured operation in a freshly executed
+  child (the test binary with a case argument), so nothing is inherited
+  and the peak needs no baseline on any host.
 
 * [Medium] **FreeBSD: `check-cli-rss` creation fails under its address-space
   limit** (`test/qualify-rss.c`, `test/qualify-cli.rb`): FreeBSD bounds each

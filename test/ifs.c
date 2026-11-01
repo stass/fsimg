@@ -4,7 +4,6 @@
 #include "config.h"
 
 #include <sys/types.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -4604,20 +4603,6 @@ scale_scratch(const scale_image_t *s)
 	    64 * (s->members + s->implicit) + (UINT64_C(1) << 20));
 }
 
-/* The process's peak resident set so far, in bytes. */
-static uint64_t
-peak_rss(void)
-{
-	struct rusage usage;
-
-	CHECK(getrusage(RUSAGE_SELF, &usage) == 0 && usage.ru_maxrss >= 0);
-#if defined(__APPLE__)
-	return ((uint64_t)usage.ru_maxrss);
-#else
-	return ((uint64_t)usage.ru_maxrss * 1024);
-#endif
-}
-
 /* One operation over the image, in the calling process. */
 static void
 scale_operate(const scale_image_t *s, operation_t operation,
@@ -4642,7 +4627,8 @@ scale_operate(const scale_image_t *s, operation_t operation,
 	fixture_t f;
 
 	bzero(run, sizeof(*run));
-	baseline = peak_rss();
+	baseline = scale_peak_rss();
+	run->rss = baseline;
 	fixture_new(&f, NULL, s->layout.image_size, &spec);
 	CHECK(f.ctx->options.memory_bytes == SCALE_BUDGET);
 	f.account = &account;
@@ -4668,6 +4654,7 @@ scale_operate(const scale_image_t *s, operation_t operation,
 		fprintf(stderr, "scale: %d %s\n", status, error.message);
 	CHECK(status == FSIMG_OK);
 
+	scale_rss_sample(&run->rss);
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 	run->reads = account;
 	run->io_calls = stats.io_calls;
@@ -4676,7 +4663,7 @@ scale_operate(const scale_image_t *s, operation_t operation,
 	run->seconds = (double)(end.tv_sec - start.tv_sec) +
 	    (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 	fixture_close(&f);
-	run->rss = peak_rss();
+	scale_rss_sample(&run->rss);
 	run->rss_growth = run->rss - baseline;
 }
 

@@ -5,7 +5,6 @@
 
 #include <sys/types.h>
 #include <sys/mman.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -4803,20 +4802,6 @@ scale_directory_reads(const gen_t *g, const scale_volume_t *v)
 	return (v->directory_bytes + g->objects[OBJ_ROOT].size + 64 * v->names);
 }
 
-/* The process's peak resident set so far, in bytes. */
-static uint64_t
-peak_rss(void)
-{
-	struct rusage usage;
-
-	CHECK(getrusage(RUSAGE_SELF, &usage) == 0 && usage.ru_maxrss >= 0);
-#if defined(__APPLE__)
-	return ((uint64_t)usage.ru_maxrss);
-#else
-	return ((uint64_t)usage.ru_maxrss * 1024);
-#endif
-}
-
 /* One operation over the volume, in the calling process. */
 static void
 scale_operate(const gen_t *g, const scale_volume_t *v, operation_t operation,
@@ -4840,7 +4825,8 @@ scale_operate(const gen_t *g, const scale_volume_t *v, operation_t operation,
 	uint64_t baseline;
 
 	bzero(run, sizeof(*run));
-	baseline = peak_rss();
+	baseline = scale_peak_rss();
+	run->rss = baseline;
 	fixture_open(&f, g->image, g->length, &spec);
 	CHECK(f.ctx->options.memory_bytes == SCALE_BUDGET);
 	f.account = &account;
@@ -4865,6 +4851,7 @@ scale_operate(const gen_t *g, const scale_volume_t *v, operation_t operation,
 		fprintf(stderr, "scale: %d %s\n", status, error.message);
 	CHECK(status == FSIMG_OK);
 
+	scale_rss_sample(&run->rss);
 	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 	run->reads = account.counts;
 	run->io_calls = stats.io_calls;
@@ -4873,7 +4860,7 @@ scale_operate(const gen_t *g, const scale_volume_t *v, operation_t operation,
 	run->seconds = (double)(end.tv_sec - start.tv_sec) +
 	    (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 	fixture_free(&f);
-	run->rss = peak_rss();
+	scale_rss_sample(&run->rss);
 	run->rss_growth = run->rss - baseline;
 }
 

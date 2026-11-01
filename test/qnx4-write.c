@@ -5,7 +5,6 @@
 
 #include <sys/types.h>
 #include <sys/mman.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
@@ -3197,20 +3196,6 @@ seconds_since(const struct timespec *start)
 	    (double)(now.tv_nsec - start->tv_nsec) / 1e9);
 }
 
-/* The process's peak resident set so far, in bytes. */
-static uint64_t
-peak_rss(void)
-{
-	struct rusage usage;
-
-	CHECK(getrusage(RUSAGE_SELF, &usage) == 0 && usage.ru_maxrss >= 0);
-#if defined(__APPLE__)
-	return ((uint64_t)usage.ru_maxrss);
-#else
-	return ((uint64_t)usage.ru_maxrss * 1024);
-#endif
-}
-
 /* A writer for a scale case: a 16 MiB budget, the default metadata cache,
  * and scratch under the case's budget in directory, which the parent
  * process made and removes.
@@ -3464,11 +3449,12 @@ scale_run(const scale_case_t *sc, const char *directory,
 	page_sink_t sink;
 	fixture_t fixture;
 	struct timespec start;
-	uint64_t baseline, sink_bytes;
+	uint64_t baseline, rss, sink_bytes;
 
 	bzero(result, sizeof(*result));
 	page_sink_open(&sink);
-	baseline = peak_rss();
+	baseline = scale_peak_rss();
+	rss = baseline;
 	scale_fixture_open(&fixture, sc, directory);
 	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
 	sc->add(&fixture, sc);
@@ -3492,13 +3478,15 @@ scale_run(const scale_case_t *sc, const char *directory,
 		if (sc->kind == SCALE_EMIT)
 			scale_emit(&fixture, sc, &info, &sink, result);
 	}
+	scale_rss_sample(&rss);
 	CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
 	result->memory_peak = stats.memory_peak;
 	result->scratch_peak = stats.scratch_peak;
 	fixture_release(&fixture);
 	sink_bytes = page_sink_bytes(&sink);
 	page_sink_close(&sink);
-	result->rss_growth = peak_rss() - baseline;
+	scale_rss_sample(&rss);
+	result->rss_growth = rss - baseline;
 	result->rss_growth = result->rss_growth > sink_bytes ?
 	    result->rss_growth - sink_bytes : 0;
 }
