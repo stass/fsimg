@@ -22,6 +22,15 @@ candidate evaluated charges one work unit. The plan reports the volume's
 clusters or blocks as `allocation_units` and, for QNX6, `inode_capacity` and
 `free_inodes`, in `fsimg_plan_info_t`, `c -n` and its JSON record.
 
+`-o root=N` sets the FAT12/FAT16 root directory capacity, the library's
+`fat_root_entries`, under the new `FSIMG_SETTING_ROOT_ENTRIES` bit, so a
+minimized image can leave room in its root. The capacity rounds up to a
+whole sector of 32-byte entries, must hold the root's entries and is at
+most 65535; it holds under `-M`, and without it overrides the default of at
+least 512. Other formats refuse it through the common settings check. The
+plan reports the capacity as `root_entries` in `fsimg_plan_info_t`, `c -n`
+and its JSON record.
+
 `x` and `t` accept several members and select the union of their
 subtrees in one walk of the image; an entry that nested, repeated or
 aliased members select, such as a FAT name given in another case or by its

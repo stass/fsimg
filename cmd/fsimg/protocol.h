@@ -145,9 +145,10 @@ _Static_assert(FSIMG_WIRE_PARTITION_NAME + FSIMG_WIRE_PARTITION_NAME_BYTES ==
  * the compression library the output depends on, empty for none. UNITS is
  * the volume's clusters or blocks; INODES and FREE_INODES the inode
  * capacity and the inodes left free, both zero for a format whose inode
- * table does not bound its files.
+ * table does not bound its files; ROOT the entries of a fixed FAT12/16
+ * root directory, at most 65535, zero for every other format.
  */
-#define FSIMG_WIRE_PLAN_BYTES 184u
+#define FSIMG_WIRE_PLAN_BYTES 192u
 #define FSIMG_WIRE_PLAN_CODEC_BYTES 32u
 typedef enum fsimg_wire_plan_field {
 	FSIMG_WIRE_PLAN_VOLUME = 0,
@@ -168,7 +169,8 @@ typedef enum fsimg_wire_plan_field {
 	FSIMG_WIRE_PLAN_UNITS = 128,
 	FSIMG_WIRE_PLAN_INODES = 136,
 	FSIMG_WIRE_PLAN_FREE_INODES = 144,
-	FSIMG_WIRE_PLAN_CODEC = 152
+	FSIMG_WIRE_PLAN_ROOT = 152,
+	FSIMG_WIRE_PLAN_CODEC = 160
 } fsimg_wire_plan_field_t;
 _Static_assert(FSIMG_WIRE_PLAN_CODEC + FSIMG_WIRE_PLAN_CODEC_BYTES ==
     FSIMG_WIRE_PLAN_BYTES, "the plan record ends with the codec");

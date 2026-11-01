@@ -1979,6 +1979,7 @@ test_minimize_plan_display(bool json)
 		CHECK(strstr(display.buffer, "\"allocation_units\":\"4238\"") != NULL);
 		CHECK(strstr(display.buffer, "\"inode_capacity\":\"16\"") != NULL);
 		CHECK(strstr(display.buffer, "\"free_inodes\":\"12\"") != NULL);
+		CHECK(strstr(display.buffer, "\"root_entries\":\"0\"") != NULL);
 	} else {
 		CHECK(strstr(display.buffer, "\nClusters:     4238\n") != NULL);
 		CHECK(strstr(display.buffer, "\nInodes:       16 (12 free)\n") != NULL);
@@ -1993,6 +1994,18 @@ test_minimize_plan_display(bool json)
 		CHECK(strstr(display.buffer, "\"free_inodes\":\"0\"") != NULL);
 	} else {
 		CHECK(strstr(display.buffer, "Inodes:") == NULL);
+		CHECK(strstr(display.buffer, "Root entries:") == NULL);
+	}
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_ROOT, 112);
+	strcpy((char *)raw + FSIMG_WIRE_PLAN_FORMAT, "fat12");
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	if (json) {
+		CHECK(strstr(display.buffer,
+		    "\"free_inodes\":\"0\",\"root_entries\":\"112\"") != NULL);
+	} else {
+		CHECK(strstr(display.buffer,
+		    "\nClusters:     4238\nRoot entries: 112\n") != NULL);
 	}
 }
 

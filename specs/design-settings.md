@@ -101,7 +101,7 @@ Public option initialization and catalogue default tests agree on these values:
 | Layer booleans without flags | False |
 | DMG and ifsboot compression | `FSIMG_DMG_ZLIB` and `FSIMG_IFSBOOT_LZO` respectively |
 | Filesystem byte order | `FSIMG_BYTE_ORDER_LITTLE` |
-| Filesystem UUID and inode capacity | Zero bytes and zero respectively |
+| Filesystem UUID, inode capacity and FAT root capacity | Zero bytes, zero and zero respectively |
 | Filesystem reserve percentage | 3 |
 | Filesystem mountpoint | `NULL`; a pointer to `""` is an explicit empty mountpoint |
 | File input | `NULL` |
@@ -145,7 +145,7 @@ The finite syntax classes cover the existing grammar:
 | Class | Examples and conversion |
 | --- | --- |
 | Byte quantity | `sector`, `cluster`, `gpt:disk`, chunk and alignment sizes; checked CLI unit syntax, then destination range |
-| Decimal count | `inodes`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
+| Decimal count | `inodes`, `root`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
 | Hexadecimal 32-bit value | `mbr:id` and boot addresses; `0x` or `0X` and one through eight hexadecimal digits |
 | Boolean | Exactly `yes` or `no` |
 | Named choice | `endian=little|big`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437` |

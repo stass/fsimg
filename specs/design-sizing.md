@@ -32,13 +32,15 @@ CLI as conflicting requested settings, like `-e` without `-R`. A fixed disk
 (`gpt:disk`, `mbr:disk`) gives the volume its partition's length as an exact
 size, so minimization with one is `FSIMG_EINVAL` as well. `min_free_bytes`
 and `reserve_percent` are requirements, not dimensions: a minimized volume
-still contains them.
+still contains them. `root=` (`fat_root_entries`) fixes the FAT12/16 root
+capacity, so a minimized root keeps the free entries it asks for; rounded up
+to a whole sector, it is the same capacity under either policy.
 
 ## Dimensions per format
 
 | Format | Searched under minimization | Kept from the default policy |
 | --- | --- | --- |
-| FAT12/16/32 | Allocation-unit size over the variant's legal units; root capacity on FAT12/16, the smallest sector multiple holding the root's slots | The variant, its cluster-count minimum and the 16-cluster type margin, the reserved-sector count, two FAT copies |
+| FAT12/16/32 | Allocation-unit size over the variant's legal units; root capacity on FAT12/16, the smallest sector multiple holding the root's slots unless `root=` fixes it | The variant, its cluster-count minimum and the 16-cluster type margin, the reserved-sector count, two FAT copies |
 | exFAT | Allocation-unit size over the legal units | The 1 MiB minimum, one FAT, the recommended cluster-count rule as a tie-break only |
 | QNX6 | Block size over the classic sizes; inode capacity, the catalog's inodes rounded to a whole table block; the block count at the alignment step instead of the 64-block search step | Byte order, the reserve percentage, the system-run recipe |
 | QNX4 | Nothing: the block is 512 bytes and the block count is already the smallest that fits | The native default layout, the 128-slot `.inodes` minimum, the 4096-byte directory rounding |
@@ -112,7 +114,10 @@ capacity under either policy. `fsimg_plan_info_t` carries the unit count as
 `allocation_units`, the clusters or blocks of the volume as an opened volume
 reports them, and, for a format whose inode table bounds the files a native
 user can create (QNX6), `inode_capacity` and `free_inodes`; both are zero for
-the other formats. Tests pin one catalog per format where the
+the other formats. `root_entries` is the fixed root directory's capacity of
+FAT12/16, which minimization shrinks to the root's slots unless `root=` fixes
+it, and zero for the
+formats whose root grows as a cluster chain or has no fixed size. Tests pin one catalog per format where the
 default and minimized choices differ: a few large files, where a larger
 allocation unit's smaller table outweighs its slack, must produce a smaller
 volume under `-M` and an identical one under the default; a wide tree of

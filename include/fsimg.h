@@ -762,7 +762,12 @@ typedef struct fsimg_write_options {
 	 */
 	uint32_t	 sector_bytes;
 	uint32_t	 allocation_unit_bytes; /* Zero selects automatically. */
-	uint32_t	 fat_root_entries; /* FAT12/16 only; zero selects an adequate root. */
+	/* FSIMG_SETTING_ROOT_ENTRIES: the 32-byte entries of the FAT12/16 fixed
+	 * root directory, rounded up to whole sectors, at most 65535; zero
+	 * selects one holding the root's entries, at least 512 of them without
+	 * FSIMG_WRITE_MINIMIZE.
+	 */
+	uint32_t	 fat_root_entries;
 	uint32_t	 volume_serial; /* Default zero; used verbatim in all modes. */
 	/* Format-specific settings: a format whose record lacks the matching
 	 * FSIMG_SETTING_* bit requires the default.
@@ -813,6 +818,10 @@ typedef struct fsimg_plan_info {
 	 */
 	uint64_t	 inode_capacity;
 	uint64_t	 free_inodes;
+	/* The 32-byte entries of a fixed root directory (FAT12/16); zero for
+	 * every other format, whose root grows as a cluster chain.
+	 */
+	uint64_t	 root_entries;
 	unsigned	 required_io_flags;
 	/* The image around the volume, reported as an opened image reports
 	 * it, with every identifier the plan derived. image.disk_bytes is the
@@ -1024,6 +1033,7 @@ typedef struct fsimg_volume_info {
 #define FSIMG_SETTING_INODE_CAPACITY 0x04u
 #define FSIMG_SETTING_RESERVE 0x08u
 #define FSIMG_SETTING_MOUNTPOINT 0x10u
+#define FSIMG_SETTING_ROOT_ENTRIES 0x20u
 
 typedef struct fsimg_format_info {
 	char		 name[16];

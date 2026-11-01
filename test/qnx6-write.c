@@ -1056,6 +1056,7 @@ emit_memory(fixture_t *fixture, memory_sink_t *sink, fsimg_error_t *error)
 	status = fsimg_writer_plan(fixture->writer, &plan, &detail);
 	if (status == FSIMG_OK) {
 		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.root_entries == 0);
 		sink->length = info.volume_bytes;
 		sink->bytes = malloc((size_t)info.volume_bytes);
 		CHECK(sink->bytes != NULL);
@@ -1474,6 +1475,7 @@ test_validation(void)
 	fsimg_writer_t *writer;
 	fsimg_options_t ctx_options;
 	static const char *const others[] = { "fat12", "fat16", "fat32", "exfat" };
+	fsimg_error_t error;
 	fsimg_status_t status;
 
 	fsimg_options_init(&ctx_options);
@@ -1514,7 +1516,9 @@ test_validation(void)
 			continue;
 		}
 		/* The common capability check refuses a label first. */
-		status = fsimg_writer_new(ctx, "qnx6", &options, &writer, NULL);
+		status = fsimg_writer_new(ctx, "qnx6", &options, &writer, &error);
+		if (k == 4)
+			CHECK(strcmp(error.path, "root") == 0);
 		if (status != (k == 3 ? FSIMG_EUNSUPPORTED : FSIMG_EINVAL))
 			fprintf(stderr, "validation case %u: %d\n", k, status);
 		CHECK(status == (k == 3 ? FSIMG_EUNSUPPORTED : FSIMG_EINVAL));

@@ -187,7 +187,6 @@ check_mode(const fsimg_stack_t *stack, const fsimg_write_options_t *options,
 	volume_defaults = options->volume_bytes == defaults.volume_bytes &&
 	    options->min_free_bytes == defaults.min_free_bytes &&
 	    options->label == defaults.label &&
-	    options->fat_root_entries == defaults.fat_root_entries &&
 	    options->volume_serial == defaults.volume_serial;
 	for (unsigned i = 0; i < 4; i++)
 		volume_defaults = volume_defaults && options->reserved[i] == 0;

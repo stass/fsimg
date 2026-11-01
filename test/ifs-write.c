@@ -843,6 +843,7 @@ emit_memory(fixture_t *fixture, memory_sink_t *sink, fsimg_error_t *error)
 	status = fsimg_writer_plan(fixture->writer, &plan, &detail);
 	if (status == FSIMG_OK) {
 		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.root_entries == 0);
 		sink->length = info.volume_bytes;
 		sink->bytes = malloc((size_t)info.volume_bytes);
 		CHECK(sink->bytes != NULL);
@@ -1467,8 +1468,11 @@ check_refused(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
     fsimg_status_t status)
 {
 	fsimg_writer_t *writer;
+	fsimg_error_t error;
 
-	CHECK(ifs_writer(ctx, options, &writer, NULL) == status);
+	CHECK(ifs_writer(ctx, options, &writer, &error) == status);
+	if (options->fat_root_entries != 0)
+		CHECK(strcmp(error.path, "root") == 0);
 }
 
 /* Settings: byte addressing only, no FAT root, no size or free space, no

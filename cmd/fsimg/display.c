@@ -400,7 +400,7 @@ help(fsimg_cli_display_t *display)
 		append(display, "%s%s", help_budgets, help_memory);
 		append(display, "    -n              Without W, report a plan without creating an image\n"
 		    "    -o key=value    Setting: sector, cluster, endian, uuid, inodes,\n"
-		    "                    reserve or mountpoint, or layer:key for a layer the\n"
+		    "                    reserve, mountpoint or root, or layer:key for a layer the\n"
 		    "                    stack or the compression selects, such as\n"
 		    "                    gpt:type=esp, dmg:compress=none or gzip:level=9\n"
 		    "    -p              Import owner, group and permission bits\n"
@@ -1024,7 +1024,8 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
  * or compression the most its encoding can take; padding_bytes the zeros
  * the container's granularity added to the disk; codec the compression
  * library the image depends on, so a reproducible build can name it. The
- * inode line appears only for a format whose inode table bounds its files.
+ * inode line appears only for a format whose inode table bounds its files,
+ * and the root line only for one with a fixed root directory (FAT12/16).
  */
 static void
 plan(fsimg_cli_display_t *display, const unsigned char *raw)
@@ -1033,14 +1034,19 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 	    FSIMG_WIRE_PLAN_INITIALIZED, FSIMG_WIRE_PLAN_ALLOCATED, FSIMG_WIRE_PLAN_METADATA,
 	    FSIMG_WIRE_PLAN_FREE, FSIMG_WIRE_PLAN_ENTRIES, FSIMG_WIRE_PLAN_LOSSES,
 	    FSIMG_WIRE_PLAN_SCRATCH, FSIMG_WIRE_PLAN_OUTPUT, FSIMG_WIRE_PLAN_PADDING,
-	    FSIMG_WIRE_PLAN_UNITS, FSIMG_WIRE_PLAN_INODES, FSIMG_WIRE_PLAN_FREE_INODES };
+	    FSIMG_WIRE_PLAN_UNITS, FSIMG_WIRE_PLAN_INODES, FSIMG_WIRE_PLAN_FREE_INODES,
+	    FSIMG_WIRE_PLAN_ROOT };
 	static const char *const keys[] = { "volume_bytes", "payload_bytes", "initialized_bytes",
 	    "allocated_bytes", "metadata_bytes", "free_bytes", "entries", "metadata_losses",
 	    "scratch_observed_bytes", "output_bytes", "padding_bytes", "allocation_units",
-	    "inode_capacity", "free_inodes" };
+	    "inode_capacity", "free_inodes", "root_entries" };
 	const char *codec = (const char *)raw + FSIMG_WIRE_PLAN_CODEC;
 	uint64_t padding = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_PADDING);
 	uint64_t inodes = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_INODES);
+	uint64_t root = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ROOT);
+
+	_Static_assert(sizeof(offsets) / sizeof(offsets[0]) ==
+	    sizeof(keys) / sizeof(keys[0]), "each plan field has one JSON key");
 
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"plan\",\"format\":");
@@ -1079,6 +1085,8 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, "\nInodes:       %llu (%llu free)",
 			    (unsigned long long)inodes, (unsigned long long)
 			    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_FREE_INODES));
+		if (root != 0)
+			append(display, "\nRoot entries: %llu", (unsigned long long)root);
 		append(display, "\nEntries:      %llu\nScratch used: ",
 		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ENTRIES));
 		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_SCRATCH));

@@ -715,7 +715,8 @@ fsimg_wire_plan_frame_valid(const fsimg_frame_t *frame)
 	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_OUTPUT) <
 	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_VOLUME) ||
 	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_FREE_INODES) >
-	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_INODES))
+	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_INODES) ||
+	    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ROOT) > UINT16_MAX)
 		return (false);
 	return (memchr(raw + FSIMG_WIRE_PLAN_FORMAT, '\0', 16) != NULL &&
 	    memchr(raw + FSIMG_WIRE_PLAN_CODEC, '\0',

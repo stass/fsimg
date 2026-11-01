@@ -67,12 +67,13 @@ const fsimg_writer_ops_t fsimg_qnx4_writer_ops = {
 };
 
 /* The common options with the profile's rules: 512-byte sectors and
- * blocks, no FAT root, a 31-bit reproducible epoch (the range the profile
- * stores), an exact size of 43 to 2^31 whole blocks, an .inodes capacity
- * whose table size fits 32 bits, and a label of at most 48 bytes under the
- * name profile's byte rules. NULL selects the empty label, which leaves
- * the root block's label field zero as the formatter does without -l. The
- * volume serial is a common identity the profile does not store.
+ * blocks, a 31-bit reproducible epoch (the range the profile stores), an
+ * exact size of 43 to 2^31 whole blocks, an .inodes capacity whose table
+ * size fits 32 bits, and a label of at most 48 bytes under the name
+ * profile's byte rules. NULL selects the empty label, which leaves the
+ * root block's label field zero as the formatter does without -l. The
+ * volume serial is a common identity the profile does not store, and the
+ * common capability check has refused a FAT root capacity.
  */
 static fsimg_status_t
 validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
@@ -86,7 +87,6 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	if ((options->sector_bytes != 0 && options->sector_bytes != 512) ||
 	    (options->allocation_unit_bytes != 0 &&
 	    options->allocation_unit_bytes != QNX4_BLOCK_BYTES) ||
-	    options->fat_root_entries != 0 ||
 	    (options->volume_bytes != 0 &&
 	    (options->volume_bytes % QNX4_BLOCK_BYTES != 0 ||
 	    blocks < QNX4_BLOCKS_MIN || blocks > QNX4_BLOCKS_MAX)) ||

@@ -27,7 +27,14 @@ directory slot limit bounds the number of reservations and assigned aliases.
 Directory sizes include long-name slots, short entries, a zero terminator,
 the root volume label, and non-root `.` / `..` entries. Directories cannot
 exceed 2 MiB. FAT12/16 roots use a sector-aligned fixed region, selected to fit
-the entries (at least 512 slots) unless explicitly constrained. FAT32 roots and
+the entries (at least 512 slots, exactly the rounded slots under
+[minimization](design-sizing.md)) unless `root=` (`fat_root_entries`, the
+`FSIMG_SETTING_ROOT_ENTRIES` setting only FAT12/16 records carry) fixes it.
+Validation rounds a requested capacity up to a whole sector of 32-byte
+entries and refuses one above the 16-bit count of 65535 with
+`FSIMG_EINVAL`; planning refuses a capacity below the root's slots, the
+terminator included, with `FSIMG_ERANGE`. The plan reports the capacity as
+`root_entries`. FAT32 roots and
 all other directories occupy ordinary contiguous cluster chains. The parent
 cluster for `..` is zero when the parent is the volume root.
 

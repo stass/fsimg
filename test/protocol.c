@@ -71,6 +71,7 @@ write_seed(const char *path)
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_INFO, raw, FSIMG_WIRE_INFO_BYTES, NULL) == FSIMG_OK);
 	bzero(raw, sizeof(raw));
 	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_VOLUME, 4096);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_ROOT, 112);
 	CHECK(fsimg_frame_write(fd, FSIMG_FRAME_PLAN, raw, FSIMG_WIRE_PLAN_BYTES, NULL) == FSIMG_OK);
 	bzero(raw, sizeof(raw));
 	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
@@ -1570,16 +1571,20 @@ static void
 test_plan_geometry_record(void)
 {
 	fsimg_frame_t frame;
+	fsimg_frame_decoder_t decoder;
+	unsigned char encoded[FSIMG_FRAME_HEADER + FSIMG_WIRE_PLAN_BYTES];
 	unsigned char *raw = frame.payload;
+	size_t consumed;
 
 	bzero(&frame, sizeof(frame));
 	frame.type = FSIMG_FRAME_PLAN;
-	frame.length = 184;
-	CHECK(FSIMG_WIRE_PLAN_BYTES == 184);
+	frame.length = 192;
+	CHECK(FSIMG_WIRE_PLAN_BYTES == 192);
 	CHECK(FSIMG_WIRE_PLAN_UNITS == 128);
 	CHECK(FSIMG_WIRE_PLAN_INODES == 136);
 	CHECK(FSIMG_WIRE_PLAN_FREE_INODES == 144);
-	CHECK(FSIMG_WIRE_PLAN_CODEC == 152);
+	CHECK(FSIMG_WIRE_PLAN_ROOT == 152);
+	CHECK(FSIMG_WIRE_PLAN_CODEC == 160);
 	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_VOLUME, 8695808);
 	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_OUTPUT, 8695808);
 	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_CLUSTER, 2048);
@@ -1588,15 +1593,43 @@ test_plan_geometry_record(void)
 	fsimg_store_le64(raw + 136, 16);
 	fsimg_store_le64(raw + 144, 12);
 	strcpy((char *)raw + FSIMG_WIRE_PLAN_FORMAT, "qnx6");
-	strcpy((char *)raw + 152, "zlib fixture");
+	fsimg_store_le64(raw + 152, 65535);
+	strcpy((char *)raw + 160, "zlib fixture");
+	CHECK(fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ROOT) == 65535);
+	CHECK(fsimg_wire_plan_frame_valid(&frame));
+	CHECK(fsimg_frame_header(encoded, FSIMG_FRAME_PLAN,
+	    FSIMG_WIRE_PLAN_BYTES, NULL) == FSIMG_OK);
+	bcopy(raw, encoded + FSIMG_FRAME_HEADER, FSIMG_WIRE_PLAN_BYTES);
+	for (size_t split = 0; split <= sizeof(encoded); split++) {
+		bzero(&decoder, sizeof(decoder));
+		CHECK(fsimg_frame_feed(&decoder, encoded, split,
+		    &consumed, NULL) == FSIMG_OK);
+		CHECK(consumed == split);
+		if (split < sizeof(encoded)) {
+			CHECK(fsimg_frame_feed(&decoder, encoded + split,
+			    sizeof(encoded) - split, &consumed, NULL) == FSIMG_OK);
+			CHECK(consumed == sizeof(encoded) - split);
+		}
+		CHECK(decoder.complete);
+		CHECK(fsimg_wire_plan_frame_valid(&decoder.frame));
+		CHECK(fsimg_load_le64(decoder.frame.payload +
+		    FSIMG_WIRE_PLAN_ROOT) == 65535);
+		CHECK(strcmp((char *)decoder.frame.payload +
+		    FSIMG_WIRE_PLAN_CODEC, "zlib fixture") == 0);
+	}
+	fsimg_store_le64(raw + 152, 65536);
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	fsimg_store_le64(raw + 152, 0);
 	CHECK(fsimg_wire_plan_frame_valid(&frame));
 	frame.length = 160;
 	CHECK(!fsimg_wire_plan_frame_valid(&frame));
-	frame.length = 183;
-	CHECK(!fsimg_wire_plan_frame_valid(&frame));
-	frame.length = 185;
-	CHECK(!fsimg_wire_plan_frame_valid(&frame));
 	frame.length = 184;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 191;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 193;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 192;
 	fsimg_store_le64(raw + 144, 16);
 	CHECK(fsimg_wire_plan_frame_valid(&frame));
 	fsimg_store_le64(raw + 144, 17);

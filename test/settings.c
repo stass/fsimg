@@ -73,7 +73,8 @@ static const member_t write_members[] = {
 	WRITE_MEMBER(volume_uuid, unsigned char),
 	WRITE_MEMBER(inode_capacity, uint32_t),
 	WRITE_MEMBER(reserve_percent, uint32_t),
-	WRITE_MEMBER(mountpoint, const char *)
+	WRITE_MEMBER(mountpoint, const char *),
+	WRITE_MEMBER(fat_root_entries, uint32_t)
 };
 
 static const member_t input_members[] = {
@@ -275,9 +276,9 @@ test_masks_and_files(void)
 {
 	static const uint32_t bits[] = { FSIMG_SETTING_BYTE_ORDER,
 	    FSIMG_SETTING_VOLUME_UUID, FSIMG_SETTING_INODE_CAPACITY,
-	    FSIMG_SETTING_RESERVE, FSIMG_SETTING_MOUNTPOINT };
+	    FSIMG_SETTING_RESERVE, FSIMG_SETTING_MOUNTPOINT, FSIMG_SETTING_ROOT_ENTRIES };
 	static const char *const bit_keys[] = { "endian", "uuid", "inodes",
-	    "reserve", "mountpoint" };
+	    "reserve", "mountpoint", "root" };
 	static const char *const file_keys[FSIMG_FILE_SETTINGS] = {
 		[FSIMG_FILE_IFSBOOT_STARTUP] = "ifsboot:startup",
 		[FSIMG_FILE_IFSBOOT_PREFIX] = "ifsboot:prefix"
@@ -475,11 +476,13 @@ static void
 test_default_distinctions(void)
 {
 	const fsimg_setting_slice_t *fs = &fsimg_filesystem_settings;
-	const fsimg_setting_t *reserve, *mountpoint, *uuid, *type;
+	const fsimg_setting_t *reserve, *mountpoint, *uuid, *type, *root;
 	fsimg_setting_records_t records;
 	fsimg_write_options_t write;
 	fsimg_layer_options_t layers;
 
+	root = fsimg_setting_find(fs, "root", 4);
+	CHECK(root != NULL && root->support == FSIMG_SETTING_ROOT_ENTRIES);
 	reserve = fsimg_setting_find(fs, "reserve", 7);
 	mountpoint = fsimg_setting_find(fs, "mountpoint", 10);
 	uuid = fsimg_setting_find(fs, "uuid", 4);
@@ -490,6 +493,11 @@ test_default_distinctions(void)
 	fsimg_layer_options_init(&layers);
 	records = (fsimg_setting_records_t){ .write = &write,
 	    .layers = &layers };
+	CHECK(write.fat_root_entries == 0);
+	CHECK(fsimg_setting_is_default(root, &records));
+	write.fat_root_entries = 16;
+	CHECK(!fsimg_setting_is_default(root, &records));
+	write.fat_root_entries = 0;
 	write.reserve_percent = 0;
 	CHECK(!fsimg_setting_is_default(reserve, &records));
 	write.reserve_percent = 3;
@@ -692,6 +700,37 @@ test_write_applicability(void)
 	CHECK(strcmp(error.path, "endian") == 0);
 }
 
+static void
+test_root_setting_applicability(void)
+{
+	static const char *const formats[] = {
+		"fat12", "fat16", "fat32", "exfat", "qnx4", "qnx6", "ifs"
+	};
+	fsimg_format_info_t info;
+	fsimg_write_options_t write;
+	fsimg_error_t error;
+
+	CHECK(FSIMG_SETTING_ROOT_ENTRIES == 0x20u);
+	for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+		format_info(formats[f], &info);
+		fsimg_write_options_init(&write);
+		CHECK(fsimg_write_settings_check(&write, &info, NULL) == FSIMG_OK);
+		write.fat_root_entries = 16;
+		if (f < 2) {
+			CHECK((info.write_settings & FSIMG_SETTING_ROOT_ENTRIES) != 0);
+			CHECK(fsimg_write_settings_check(&write, &info, NULL) == FSIMG_OK);
+		} else {
+			CHECK((info.write_settings & FSIMG_SETTING_ROOT_ENTRIES) == 0);
+			CHECK(fsimg_write_settings_check(&write, &info, &error) == FSIMG_EINVAL);
+			CHECK(strcmp(error.path, "root") == 0);
+			CHECK(strcmp(error.message, "write setting does not apply to the image format") == 0);
+		}
+	}
+	CHECK(fsimg_write_settings_check(&write, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "root") == 0);
+	CHECK(strcmp(error.message, "filesystem settings must hold their defaults without a filesystem writer") == 0);
+}
+
 static fsimg_status_t
 check_layers(const char *text, const char *compression,
     const fsimg_layer_options_t *layers, const fsimg_layer_inputs_t *inputs,
@@ -825,7 +864,6 @@ test_write_member_coverage(void)
 		WRITE_MEMBER(volume_bytes, uint64_t),
 		WRITE_MEMBER(min_free_bytes, uint64_t),
 		WRITE_MEMBER(label, const char *),
-		WRITE_MEMBER(fat_root_entries, uint32_t),
 		WRITE_MEMBER(volume_serial, uint32_t),
 		WRITE_MEMBER(reserved, uint64_t)
 	};
@@ -910,6 +948,7 @@ main(void)
 	test_presence();
 	test_store();
 	test_write_applicability();
+	test_root_setting_applicability();
 	test_layer_applicability();
 	test_file_settings();
 	test_bool_bytes();

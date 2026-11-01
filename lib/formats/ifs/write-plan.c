@@ -61,10 +61,10 @@ invalid(fsimg_error_t *error, const char *message)
 }
 
 /* The common options with the profile's rules (Writer settings): byte
- * addressing, so a sector and allocation unit of 1 byte; no FAT root; no
- * volume size or free space, since the image has neither; a 32-bit
- * reproducible epoch; either byte order; a mountpoint of at most 1024
- * bytes under the name profile's byte rules, slashes allowed. The common
+ * addressing, so a sector and allocation unit of 1 byte; no volume size
+ * or free space, since the image has neither; a 32-bit reproducible
+ * epoch; either byte order; a mountpoint of at most 1024 bytes under the
+ * name profile's byte rules, slashes allowed. The common
  * capability check has refused a label and the settings ImageFS lacks, and
  * the volume serial is a common identity the profile does not store.
  */
@@ -76,10 +76,9 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 
 	if ((options->sector_bytes != 0 && options->sector_bytes != 1) ||
 	    (options->allocation_unit_bytes != 0 &&
-	    options->allocation_unit_bytes != 1) ||
-	    options->fat_root_entries != 0)
+	    options->allocation_unit_bytes != 1))
 		return (invalid(error, "ImageFS is byte-addressed, with no "
-		    "sectors, clusters or FAT root"));
+		    "sectors or clusters"));
 	if (options->volume_bytes != 0 || options->min_free_bytes != 0)
 		return (invalid(error, "an ImageFS image has no free space: its "
 		    "size is derived from its contents"));

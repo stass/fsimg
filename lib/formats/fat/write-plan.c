@@ -42,6 +42,7 @@ typedef struct fat_candidate {
 } fat_candidate_t;
 
 static uint64_t divide_up(uint64_t, uint64_t);
+static uint64_t root_sectors_entries(uint64_t, uint32_t);
 static fsimg_status_t count_clusters(fat_plan_t *, uint32_t, unsigned,
     uint64_t *, fsimg_error_t *);
 static fsimg_status_t choose_root(fat_plan_t *, fsimg_error_t *);
@@ -57,6 +58,17 @@ static uint64_t
 divide_up(uint64_t value, uint64_t unit)
 {
 	return (value / unit + (value % unit != 0 ? 1 : 0));
+}
+
+/* entries rounded up to whole sectors of 32-byte directory entries: the
+ * only capacities a FAT12/16 fixed root region can have.
+ */
+static uint64_t
+root_sectors_entries(uint64_t entries, uint32_t sector_bytes)
+{
+	uint64_t per_sector = sector_bytes / 32;
+
+	return (divide_up(entries, per_sector) * per_sector);
 }
 
 fsimg_status_t
@@ -219,6 +231,7 @@ apply_geometry(fat_plan_t *plan, const fat_candidate_t *g)
 	info->volume_bytes = g->volume_bytes;
 	info->allocation_unit_bytes = g->cluster_bytes;
 	info->allocation_units = g->clusters;
+	info->root_entries = plan->root_entries;
 	info->free_bytes = (uint64_t)(g->clusters - g->allocated) * g->cluster_bytes;
 	info->allocated_bytes = (uint64_t)g->allocated * g->cluster_bytes;
 }
@@ -272,34 +285,45 @@ geometry_error(const fat_plan_t *plan, fat_geometry_result_t reason,
 	return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER, message));
 }
 
-/* The FAT12/16 fixed root: the requested capacity, or the smallest whole
- * number of sectors holding the root's slots, at least 512 entries under
- * the default policy and exactly that under minimization. FAT32 has none.
+/* The FAT12/16 fixed root: the requested capacity, which validation has
+ * rounded up to whole sectors, or the smallest whole number of sectors
+ * holding the root's slots, at least 512 entries under the default policy
+ * and exactly that under minimization. Either must hold the root's slots
+ * and fit the 16-bit entry count. FAT32 has none.
  */
 static fsimg_status_t
 choose_root(fat_plan_t *plan, fsimg_error_t *error)
 {
 	const fsimg_write_options_t *options = &plan->common.writer->options;
 	fat_layout_t root;
-	uint64_t root_entries, per_sector;
+	uint64_t root_entries;
 	fsimg_status_t status;
+	char message[128];
 
 	if (plan->variant == 32)
 		return (FSIMG_OK);
 	status = fsimg_fat_layout_get(plan, 0, &root, error);
 	if (status != FSIMG_OK)
 		return (status);
-	per_sector = options->sector_bytes / 32;
 	root_entries = options->fat_root_entries;
 	if (root_entries == 0) {
-		root_entries = divide_up(root.slots, per_sector) * per_sector;
+		root_entries = root_sectors_entries(root.slots, options->sector_bytes);
 		if ((options->flags & FSIMG_WRITE_MINIMIZE) == 0 && root_entries < 512)
 			root_entries = 512;
 	}
-	if (root_entries < root.slots || root_entries > UINT16_MAX ||
-	    root_entries % per_sector != 0)
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-		    FSIMG_OP_WRITER, "FAT fixed root capacity is insufficient or invalid"));
+	if (root_entries < root.slots || root_entries > UINT16_MAX) {
+		if (root_entries < root.slots)
+			snprintf(message, sizeof(message), "FAT root directory "
+			    "capacity %llu is below the %llu entries the root needs",
+			    (unsigned long long)root_entries,
+			    (unsigned long long)root.slots);
+		else
+			snprintf(message, sizeof(message), "FAT root directory "
+			    "needs %llu entries, above the 65535 a fixed root holds",
+			    (unsigned long long)root_entries);
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
+		    message));
+	}
 	plan->root_entries = (uint32_t)root_entries;
 	return (FSIMG_OK);
 }
@@ -456,9 +480,10 @@ fsimg_fat_write_free(fsimg_plan_t *base)
 }
 
 fsimg_status_t
-fsimg_fat_write_validate(fsimg_write_options_t *selected, unsigned variant,
-    fsimg_error_t *error)
+fsimg_fat_write_validate(fsimg_write_options_t *selected,
+    unsigned variant FSIMG_UNUSED, fsimg_error_t *error)
 {
+	uint64_t root_entries;
 	uint32_t sector, cluster;
 	size_t length;
 
@@ -469,13 +494,25 @@ fsimg_fat_write_validate(fsimg_write_options_t *selected, unsigned variant,
 	    (cluster & (cluster - 1)) != 0)) ||
 	    selected->volume_bytes % sector != 0 ||
 	    selected->volume_bytes / sector > UINT32_MAX ||
-	    selected->fat_root_entries > UINT16_MAX ||
-	    (variant == 32 && selected->fat_root_entries != 0) ||
 	    ((selected->flags & FSIMG_WRITE_REPRODUCIBLE) != 0 &&
 	    (selected->epoch < 315532800 || selected->epoch > 4354819199LL)))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "invalid FAT geometry or reproducible epoch"));
 	selected->sector_bytes = sector;
+	/* A requested root capacity rounds up to whole sectors of 32-byte
+	 * entries; the common settings check has already refused one on FAT32,
+	 * which has no fixed root. Rounding is idempotent, so a second
+	 * validation of the selected options keeps the same capacity.
+	 */
+	if (selected->fat_root_entries != 0) {
+		root_entries = root_sectors_entries(selected->fat_root_entries,
+		    sector);
+		if (root_entries > UINT16_MAX)
+			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+			    FSIMG_OP_WRITER, "FAT root directory capacity exceeds "
+			    "65535 entries once rounded up to whole sectors"));
+		selected->fat_root_entries = (uint32_t)root_entries;
+	}
 	if (selected->label == NULL)
 		selected->label = "NO NAME";
 	length = strnlen(selected->label, 12);

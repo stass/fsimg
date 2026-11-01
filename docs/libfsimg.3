@@ -263,7 +263,8 @@ geometry.
 Plans report logical, initialized, allocated, metadata and free byte quantities
 separately, plus metadata-loss counts and observed scratch use, and the
 geometry: sector and allocation-unit sizes, allocation_units, the volume's
-clusters or blocks, and for QNX6 inode_capacity and free_inodes, zero for
+clusters or blocks, for QNX6 inode_capacity and free_inodes, and for
+FAT12 and FAT16 root_entries, the fixed root's capacity; each is zero for
 every other format.
 Automatic sizing, a zero volume_bytes, takes the first legal candidate in a
 fixed order: increasing cluster size for FAT and exFAT, with exFAT keeping
@@ -302,7 +303,13 @@ slot count, where zero selects 128 slots raised to the slots the names
 need.
 QNX6 and QNX4 store no volume_serial and ignore it.
 The setting mountpoint, a copied string under FSIMG_SETTING_MOUNTPOINT,
-follows the same rule.
+follows the same rule, as does fat_root_entries under
+FSIMG_SETTING_ROOT_ENTRIES, which FAT12 and FAT16 name: the fixed root
+directory's 32-byte entries, rounded up to a whole sector's worth, at most
+65535 after rounding (else FSIMG_EINVAL), and enough for the root's names,
+volume label and terminating entry (else FSIMG_ERANGE at planning).
+Zero selects the smallest such root, at least 512 entries without
+FSIMG_WRITE_MINIMIZE; a nonzero value holds under both policies.
 ImageFS names FSIMG_SETTING_BYTE_ORDER and FSIMG_SETTING_MOUNTPOINT:
 a NULL mountpoint stores
 .Pa / ,

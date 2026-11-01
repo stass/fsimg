@@ -112,7 +112,9 @@ static const fsimg_setting_choice_t ifsboot_choices[] = {
  * format-specific fields, each tied to its FSIMG_SETTING_* bit. The
  * mountpoint is a borrowed pointer, NULL for the format's default and ""
  * for an explicit empty path; the command bounds it by the 1025 bytes and
- * terminator of the worker record's mountpoint field.
+ * terminator of the worker record's mountpoint field. root, the FAT12/16
+ * fixed root's entry count, is bounded by its 16-bit on-disk field; the
+ * writer rounds it up to whole sectors.
  */
 static const fsimg_setting_t filesystem_rows[] = {
 	{ .key = "sector", U32(RECORD_WRITE, sector_bytes),
@@ -138,7 +140,10 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_RESERVE },
 	{ .key = "mountpoint", TEXT_POINTER(RECORD_WRITE, mountpoint),
 	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = 1025 + 1,
-	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_MOUNTPOINT }
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_MOUNTPOINT },
+	{ .key = "root", U32(RECORD_WRITE, fat_root_entries),
+	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT16_MAX, .nonzero = true,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ROOT_ENTRIES }
 };
 
 /*

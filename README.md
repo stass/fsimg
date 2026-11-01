@@ -152,11 +152,13 @@ reproducible as any other build. `-M` conflicts with `-s`. Check the result
 first with `fsimg cnM ...`, which prints the chosen cluster or block size.
 
 A minimized image has little spare room for metadata. On FAT12 and FAT16
-the root directory holds only the entries it was created with, so a system
-that later adds files to the root finds it full; QNX6 has almost no free
-inodes unless you pass `inodes=`. A small tree may already be at the
-format's minimum, such as FAT32's 65,525 clusters or exFAT's 1 MiB, and
-then `-M` gives the same image.
+the root directory holds only the entries it was created with, up to a
+whole sector, so a system that later adds files to the root soon finds it
+full; `-o root=N` gives the root N entries, rounded up to a whole sector,
+so it keeps room for more. QNX6 has almost no free inodes unless you pass
+`inodes=`. A small tree may already be at the format's minimum, such as
+FAT32's 65,525 clusters or exFAT's 1 MiB, and then `-M` gives the same
+image.
 
 Creation publishes a new file and refuses to replace an existing name.
 Keep source files stable during the operation. `-R` fixes ordering,

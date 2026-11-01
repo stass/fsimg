@@ -252,6 +252,7 @@ create `sector` and `cluster` in bytes, and the QNX6 settings
 `endian=little|big`, `uuid=` RFC 4122 text, `inodes=` a positive inode count
 and `reserve=` a percentage up to 100, which every other format rejects
 unless at their defaults; QNX4 shares `inodes=` as its `.inodes` slot count,
+FAT12 and FAT16 take `root=` a positive root directory entry count,
 and ImageFS shares `endian=` and adds `mountpoint=`, its stored mount path
 of at most 1024 bytes, default `/`, with `mountpoint=` alone storing an
 empty one; its writer takes no boot setting, since it writes

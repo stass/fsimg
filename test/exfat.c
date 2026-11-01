@@ -939,6 +939,7 @@ test_writer(void)
 	CHECK(fsimg_writer_add(writer, &source, &zero, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
 	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	CHECK(info.root_entries == 0);
 	CHECK(info.payload_bytes == 100003 && info.initialized_bytes == 0 && info.entries == 3);
 	status = fsimg_writer_emit(writer, f.io, &error);
 	if (status != FSIMG_OK)

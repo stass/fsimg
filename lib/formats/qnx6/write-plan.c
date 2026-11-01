@@ -118,12 +118,11 @@ const fsimg_writer_ops_t fsimg_qnx6_writer_ops = {
 
 /* The common options with the profile's rules (Writer settings): one
  * 512-byte sector size, a classic block size (1024 when zero, which
- * minimization leaves zero for its search), no FAT root
- * (the common capability check refuses a label), a 32-bit reproducible
- * epoch, an exact size that holds the two
- * header areas and at least 64 blocks, and the typed QNX6 settings. The
- * volume serial is a common identity the profile does not store; the UUID
- * is its identity.
+ * minimization leaves zero for its search), a 32-bit reproducible epoch,
+ * an exact size that holds the two header areas and at least 64 blocks,
+ * and the typed QNX6 settings. The common capability check has refused a
+ * label and a FAT root capacity. The volume serial is a common identity
+ * the profile does not store; the UUID is its identity.
  */
 static fsimg_status_t
 validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
@@ -135,7 +134,6 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	    options->allocation_unit_bytes;
 	if ((options->sector_bytes != 0 && options->sector_bytes != 512) ||
 	    (block != 512 && block != 1024 && block != 2048 && block != 4096) ||
-	    options->fat_root_entries != 0 ||
 	    options->volume_bytes > INT64_MAX ||
 	    (options->volume_bytes != 0 && (options->volume_bytes % 512 != 0 ||
 	    options->volume_bytes < 16384 + (uint64_t)64 * block)) ||

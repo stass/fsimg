@@ -352,15 +352,16 @@ subtrees, and the report is complete.
 ## Writer settings
 
 `validate` accepts the common options with these rules: `sector_bytes` zero
-or 512; `allocation_unit_bytes` zero, selecting 1024, or a classic block size,
-which is the filesystem block size; `fat_root_entries` zero; `label` NULL,
-which the common capability check already enforces with
-`FSIMG_EUNSUPPORTED`, since the profile has no label; `epoch` within
-`[0, 4294967295]` in reproducible mode; `volume_bytes` zero or a multiple of
-512 of at least `16384 + 64 * B`. `volume_serial` is the identity of the
-formats that have a serial; the profile stores none and ignores it, since the
-CLI generates one for every format. The QNX6-specific fields of
-`fsimg_write_options_t` are typed, and the capability record's
+or 512; `allocation_unit_bytes` zero, selecting 1024, or a classic block
+size, which is the filesystem block size; `fat_root_entries` zero, which the
+common settings check enforces since the record lacks
+`FSIMG_SETTING_ROOT_ENTRIES`; `label` NULL, which the common capability
+check already enforces with `FSIMG_EUNSUPPORTED`, since the profile has no
+label; `epoch` within `[0, 4294967295]` in reproducible mode; `volume_bytes`
+zero or a multiple of 512 of at least `16384 + 64 * B`. `volume_serial` is
+the identity of the formats that have a serial; the profile stores none and
+ignores it, since the CLI generates one for every format. The QNX6-specific
+fields of `fsimg_write_options_t` are typed, and the capability record's
 `write_settings` names all four, so every other format requires their
 defaults:
 

@@ -60,7 +60,7 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	if ((sector != 512 && sector != 1024 && sector != 2048 && sector != 4096) ||
 	    (cluster != 0 && (cluster < sector || cluster > EXFAT_CLUSTER_BYTES_MAX ||
 	    (cluster & (cluster - 1)) != 0)) || options->volume_bytes % sector != 0 ||
-	    options->volume_bytes > INT64_MAX || options->fat_root_entries != 0 ||
+	    options->volume_bytes > INT64_MAX ||
 	    ((options->flags & FSIMG_WRITE_REPRODUCIBLE) != 0 &&
 	    (options->epoch < 315532800 || options->epoch > 4354819199LL)))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,

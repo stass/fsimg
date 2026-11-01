@@ -335,13 +335,14 @@ complete.
 ## Writer settings
 
 `validate` accepts the common options with these rules: `sector_bytes` and
-`allocation_unit_bytes` zero or 512; `fat_root_entries` zero; `label` NULL
-or at most 48 bytes under the profile's byte rules, where NULL and the empty
-string both select the zero field; `epoch` within `[0, 2147483647]` in
-reproducible mode; `volume_bytes` zero or a multiple of 512 in
-`[43 * 512, 2^31 * 512]`; `inode_capacity` at most 33554424, the slots of
-the largest whole-block `.inodes` within the `2^31 - 1` byte object
-maximum that readers enforce on every record.
+`allocation_unit_bytes` zero or 512; `fat_root_entries` zero, which the
+common settings check enforces since the record lacks
+`FSIMG_SETTING_ROOT_ENTRIES`; `label` NULL or at most 48 bytes under the
+profile's byte rules, where NULL and the empty string both select the zero
+field; `epoch` within `[0, 2147483647]` in reproducible mode; `volume_bytes`
+zero or a multiple of 512 in `[43 * 512, 2^31 * 512]`; `inode_capacity` at
+most 33554424, the slots of the largest whole-block `.inodes` within the
+`2^31 - 1` byte object maximum that readers enforce on every record.
 `volume_serial` is ignored, as the profile stores none. The capability
 record's `write_settings` names `inode_capacity` alone:
 

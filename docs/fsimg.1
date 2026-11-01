@@ -614,7 +614,9 @@ Minimize: choose the geometry settings left open that give the smallest
 volume, instead of the first legal one.
 FAT and exFAT try every cluster size, and FAT12 and FAT16 take the
 smallest root directory holding the root's entries rather than at least
-512; QNX6 tries every block size, sizes the inode table to the entries
+512, so the root has at most the rest of its last sector free unless
+.Ar root=
+is given; QNX6 tries every block size, sizes the inode table to the entries
 rounded up to a whole inode-table block, so the volume has almost no spare
 inodes unless
 .Ar inodes=
@@ -642,8 +644,9 @@ Collect, validate and report a plan without creating an output image or reading
 file payloads;
 .Fl f
 is then optional.
-The plan names the cluster or block size and count and, for QNX6, the
-inode capacity and the inodes left free.
+The plan names the cluster or block size and count, for FAT12 and FAT16 the
+root directory's entries, and for QNX6 the inode capacity and the inodes left
+free.
 Planning refuses an image larger than the output limit, as creation does;
 the raw copy an unencoded image on standard output is written from is
 charged only when it is written.
@@ -680,6 +683,19 @@ alone stores an empty one.
 ImageFS stores one of at most 1024 bytes of UTF-8 text without control
 bytes; default
 .Pa / .
+.It Fl o Ar root=entries
+FAT12 and FAT16 root directory capacity in 32-byte entries, rounded up to a
+whole number of sectors' worth (16 per 512-byte sector), at most 65535 after
+rounding; it holds with
+.Fl M
+too.
+It must hold the volume label, one free entry that ends the directory, and
+each name in the root: one entry, plus one per 13 UTF-16 units of a name
+that needs a long name.
+Default the smallest such whole-sector root, at least 512 entries unless
+.Fl M
+is given.
+Other formats refuse it.
 .It Fl p
 Import each source object's owner, group and permission bits as optional
 metadata.

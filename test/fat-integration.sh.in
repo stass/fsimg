@@ -6,12 +6,13 @@ MKFS_FAT='@MKFS_FAT@'
 FSCK_FAT='@FSCK_FAT@'
 NEWFS_MSDOS='@NEWFS_MSDOS@'
 FSCK_MSDOSFS='@FSCK_MSDOSFS@'
+MDIR='@MDIR@'
 MCOPY='@MCOPY@'
 MMD='@MMD@'
 MDEL='@MDEL@'
 FATCAT='@FATCAT@'
 host=$(uname -s)
-for tool in "$MCOPY" "$MMD" "$MDEL"; do
+for tool in "$MCOPY" "$MMD" "$MDEL" "$MDIR"; do
     if test -z "$tool"; then
         echo 'SKIP: independent FAT tests require mtools'
         exit 77
@@ -211,4 +212,39 @@ for profile in fat12 fat16 fat32; do
     "$checker" -n "$image"
     check_fatcat "$image" 512 /
     echo 'result: independently checked empty writer volume'
+done
+
+# The fixed root has 32 slots: the label and SEED.TXT consume two. Empty
+# 8.3 files consume one slot each and no data clusters, so failure on the
+# 31st copy measures the directory capacity independently of fsimg's reader.
+: > "$fixture_dir/root-empty"
+for profile in fat12 fat16; do
+    mkdir "$fixture_dir/root-$profile"
+    ./test-fat-write --create-fixed-root "$fixture_dir/root-$profile" "$profile"
+    image="$fixture_dir/root-$profile/writer.img"
+    "$checker" -n "$image"
+    LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MDIR" -i "$image" ::
+    if test "$host" != Linux; then
+        "$FATCAT" -l / "$image"
+    fi
+    slot=1
+    while test "$slot" -le 30; do
+        name=$(printf 'F%07d' "$slot")
+        LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MCOPY" -i "$image" \
+            "$fixture_dir/root-empty" "::$name"
+        slot=$((slot + 1))
+    done
+    if LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MCOPY" -i "$image" \
+        "$fixture_dir/root-empty" ::OVERFLOW > "$fixture_dir/root-full.log" 2>&1; then
+        echo "ERROR: $profile accepted a 33rd fixed-root entry" >&2
+        exit 1
+    fi
+    cat "$fixture_dir/root-full.log"
+    if ! grep -F 'No directory slots' "$fixture_dir/root-full.log"; then
+        echo "ERROR: $profile overflow did not report exhausted directory slots" >&2
+        exit 1
+    fi
+    LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MDIR" -i "$image" ::F0000030
+    "$checker" -n "$image"
+    echo "result: minimized $profile has exactly 32 independently filled root slots"
 done

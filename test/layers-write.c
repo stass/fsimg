@@ -1384,7 +1384,7 @@ static void
 test_wrap_settings(void)
 {
 	static const char *const keys[] = { "sector", "cluster", "endian",
-	    "uuid", "inodes", "reserve", "mountpoint" };
+	    "uuid", "inodes", "reserve", "mountpoint", "root" };
 	fsimg_write_options_t defaults, options;
 	fsimg_sink_t sink;
 	fsimg_error_t error;
@@ -1438,7 +1438,8 @@ test_wrap_settings(void)
 		case 3: options.volume_uuid[15] = 1; break;
 		case 4: options.inode_capacity = 64; break;
 		case 5: options.reserve_percent = 0; break;
-		default: options.mountpoint = ""; break;
+		case 6: options.mountpoint = ""; break;
+		default: options.fat_root_entries = 16; break;
 		}
 		bzero(&error, sizeof(error));
 		CHECK(fsimg_image_wrap(f.ctx, input, "fat12", &options, &sink,

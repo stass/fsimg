@@ -364,6 +364,7 @@ test_roundtrip(const char *format)
 		CHECK(fsimg_writer_plan(fixture.writer, &again, NULL) == FSIMG_OK);
 		CHECK(plan == again);
 		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.root_entries == (strcmp(format, "fat32") == 0 ? 0 : 512));
 		sinks[pass].length = info.volume_bytes;
 		sinks[pass].bytes = malloc((size_t)info.volume_bytes);
 		CHECK(sinks[pass].bytes != NULL);
@@ -1251,6 +1252,406 @@ emit_minimize_image(writer_fixture_t *fixture, memory_sink_t *sink,
 	fsimg_io_free(output);
 }
 
+/* An explicit root is a capacity under either planning policy. Compare the
+ * public plan with the BPB and the first data byte independently of planning.
+ */
+static void
+test_root_entry_geometry(void)
+{
+	static const char *const formats[] = { "fat12", "fat16" };
+	static const struct {
+		uint32_t request;
+		uint32_t sector;
+		uint32_t default_expected;
+		uint32_t minimized_expected;
+	} cases[] = {
+		{ 1, 512, 16, 16 }, { 17, 512, 32, 32 },
+		{ 100, 512, 112, 112 }, { 1, 1024, 32, 32 },
+		{ 1, 2048, 64, 64 }, { 1, 4096, 128, 128 },
+		{ 0, 512, 512, 16 }
+	};
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_plan_info_t info;
+	fat_geometry_t geometry;
+	memory_sink_t sink;
+	uint64_t root_offset;
+	uint32_t expected;
+
+	for (size_t f = 0; f < 2; f++) {
+		for (unsigned minimize = 0; minimize < 2; minimize++) {
+			for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+				fsimg_write_options_init(&options);
+				options.fat_root_entries = cases[c].request;
+				options.sector_bytes = cases[c].sector;
+				if (minimize)
+					options.flags |= FSIMG_WRITE_MINIMIZE;
+				fixture_open(&fixture, formats[f], &options, 1);
+				add_fixture(&fixture, false);
+				bzero(&sink, sizeof(sink));
+				emit_minimize_image(&fixture, &sink, &info);
+				expected = minimize ? cases[c].minimized_expected :
+				    cases[c].default_expected;
+				CHECK(info.root_entries == expected);
+				CHECK(fsimg_load_le16(sink.bytes + 17) == expected);
+				CHECK(fsimg_fat_geometry_decode(sink.bytes,
+				    sink.length, &geometry, NULL) == FSIMG_OK);
+				/* BPB reserved sectors + FAT count * FAT sectors. */
+				root_offset = (fsimg_load_le16(sink.bytes + 14) +
+				    (uint64_t)sink.bytes[16] *
+				    fsimg_load_le16(sink.bytes + 22)) * cases[c].sector;
+				CHECK(geometry.root_offset == root_offset);
+				CHECK(geometry.data_offset == root_offset + expected * 32);
+				check_contents(&fixture, &sink);
+				free(sink.bytes);
+				fixture_close(&fixture);
+			}
+		}
+	}
+}
+
+static void
+test_fixed_disk_preserves_rounded_root_entries(void)
+{
+	static const char *const stacks[] = { "fat16/gpt", "fat16/mbr" };
+	static const struct {
+		uint32_t sector;
+		uint32_t expected;
+	} cases[] = {
+		{ .sector = 512, .expected = 112 },
+		{ .sector = 4096, .expected = 128 }
+	};
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_layer_options_t layers;
+	fsimg_plan_info_t info;
+	const fsimg_plan_t *plan;
+	fsimg_io_t *output;
+	memory_sink_t sink;
+
+	for (size_t s = 0; s < sizeof(stacks) / sizeof(stacks[0]); s++) {
+		for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+			fsimg_layer_options_init(&layers);
+			if (s == 0)
+				layers.gpt_disk_bytes = 64 * 1024 * 1024;
+			else
+				layers.mbr_disk_bytes = 64 * 1024 * 1024;
+			fsimg_write_options_init(&options);
+			options.layers = &layers;
+			options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+			options.fat_root_entries = 100;
+			options.sector_bytes = cases[c].sector;
+			/* A zero volume size makes fixed-disk fitting validate
+			 * the already sector-rounded root capacity again.
+			 */
+			fixture_open(&fixture, stacks[s], &options, 1);
+			add_fixture(&fixture, false);
+
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+			CHECK(info.root_entries == cases[c].expected);
+			bzero(&sink, sizeof(sink));
+			sink.length = info.output_bytes;
+			sink.bytes = malloc((size_t)sink.length);
+			CHECK(sink.bytes != NULL);
+			memset(sink.bytes, 0xa5, (size_t)sink.length);
+			memory_io(&fixture, &sink, true, &output);
+			CHECK(fsimg_writer_emit(fixture.writer, output, NULL) == FSIMG_OK);
+
+			/* The BPB stores a little-endian root count at byte 17
+			 * of the volume, beyond the partition table.
+			 */
+			CHECK(info.partition.offset > 0);
+			CHECK(info.partition.offset < sink.length - 19);
+			CHECK(fsimg_load_le16(sink.bytes + info.partition.offset + 17) ==
+			    cases[c].expected);
+
+			fsimg_io_free(output);
+			free(sink.bytes);
+			fixture_close(&fixture);
+		}
+	}
+}
+
+static void
+test_root_entry_construction_limits(void)
+{
+	static const uint32_t invalid[] = { 65521, 65535, UINT32_MAX };
+	static const char *const formats[] = { "fat12", "fat16" };
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_ctx_t *ctx;
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+			fsimg_write_options_init(&options);
+			options.fat_root_entries = invalid[i];
+			writer = NULL;
+			CHECK(fsimg_writer_new(ctx, formats[f], &options,
+			    &writer, NULL) == FSIMG_EINVAL);
+			CHECK(writer == NULL);
+		}
+	}
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_root_entry_inapplicable_formats(void)
+{
+	static const char *const formats[] = {
+		"fat32", "exfat", "qnx4", "qnx6", "ifs"
+	};
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_ctx_t *ctx;
+	fsimg_error_t error;
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+		fsimg_write_options_init(&options);
+		options.fat_root_entries = 16;
+		writer = NULL;
+		CHECK(fsimg_writer_new(ctx, formats[f], &options,
+		    &writer, &error) == FSIMG_EINVAL);
+		CHECK(writer == NULL);
+		CHECK(strcmp(error.path, "root") == 0);
+	}
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_root_entry_4096_byte_rounding_limit(void)
+{
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_ctx_t *ctx;
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	/* 4096-byte sectors round to multiples of 128 entries. */
+	fsimg_write_options_init(&options);
+	options.sector_bytes = 4096;
+	options.fat_root_entries = 65409;
+	CHECK(fsimg_writer_new(ctx, "fat16", &options, &writer, NULL) == FSIMG_EINVAL);
+	CHECK(writer == NULL);
+
+	fsimg_write_options_init(&options);
+	options.sector_bytes = 4096;
+	options.fat_root_entries = 65408;
+	CHECK(fsimg_writer_new(ctx, "fat16", &options, &writer, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	CHECK(info.root_entries == 65408);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_root_entry_65520_maximum(void)
+{
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+
+	for (unsigned minimize = 0; minimize < 2; minimize++) {
+		fsimg_write_options_init(&options);
+		options.fat_root_entries = 65520;
+		if (minimize)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+		fixture_open(&fixture, "fat16", &options, 1);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.root_entries == 65520);
+		fixture_close(&fixture);
+	}
+}
+
+static void
+add_root_short_names(writer_fixture_t *fixture, unsigned count)
+{
+	fsimg_entry_t entry = { .kind = FSIMG_ENTRY_FILE };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	char name[16];
+
+	for (unsigned n = 0; n < count; n++) {
+		snprintf(name, sizeof(name), "/F%07u", n);
+		entry.path = name;
+		CHECK(fsimg_writer_add(fixture->writer, &entry, &zero, NULL) == FSIMG_OK);
+	}
+}
+
+/* Each fixture needs exactly 16 slots, then one extra short name needs 17.
+ * A non-NULL long_name contributes its LFN slots and its short entry.
+ */
+static void
+check_root_capacity_boundary(const char *long_name, unsigned short_names)
+{
+	static const char *const formats[] = { "fat12", "fat16" };
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_error_t error;
+	fsimg_status_t status, expected_status;
+	fsimg_entry_t entry = { .path = long_name, .kind = FSIMG_ENTRY_FILE };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+
+	for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+		for (unsigned minimize = 0; minimize < 2; minimize++) {
+			for (unsigned extra = 0; extra < 2; extra++) {
+				fsimg_write_options_init(&options);
+				options.fat_root_entries = 16;
+				options.sector_bytes = 512;
+				options.label = "ROOTTEST";
+				if (minimize)
+					options.flags |= FSIMG_WRITE_MINIMIZE;
+				fixture_open(&fixture, formats[f], &options, 1);
+				add_root_short_names(&fixture, short_names + extra);
+				if (long_name != NULL)
+					CHECK(fsimg_writer_add(fixture.writer, &entry,
+					    &zero, NULL) == FSIMG_OK);
+
+				expected_status = extra == 0 ? FSIMG_OK : FSIMG_ERANGE;
+				status = fsimg_writer_plan(fixture.writer, &plan, &error);
+				if (status != expected_status)
+					fprintf(stderr, "%s capacity boundary: %s, minimize=%u, slots=%u: expected status %d, got %d\n",
+					    long_name == NULL ? "short-name" : "long-name",
+					    formats[f], minimize, 16 + extra,
+					    expected_status, status);
+				CHECK(status == expected_status);
+				if (extra == 0) {
+					CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+					CHECK(info.root_entries == 16);
+				} else {
+					CHECK(plan == NULL);
+					CHECK(strcmp(error.message, "FAT root directory capacity 16 is below the 17 entries the root needs") == 0);
+				}
+				fixture_close(&fixture);
+			}
+		}
+	}
+}
+
+static void
+test_root_entry_short_name_capacity_boundary(void)
+{
+	/* Label + 14 short entries + terminator = 16 slots. */
+	check_root_capacity_boundary(NULL, 14);
+}
+
+static void
+test_root_entry_long_name_capacity_boundary(void)
+{
+	const char *long_name = "/Long filename filling root number 00.txt";
+
+	/* 40 UTF-16 units need ceil(40/13) = 4 LFN slots, plus a short
+	 * entry. Label + 9 short entries + 5 long-name slots + terminator = 16.
+	 */
+	CHECK(strlen(long_name + 1) == 40);
+	check_root_capacity_boundary(long_name, 9);
+}
+
+static void
+test_root_entry_minimized_exact_sector_multiple(void)
+{
+	static const char *const formats[] = { "fat12", "fat16" };
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+
+	for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_MINIMIZE;
+		options.sector_bytes = 512;
+		options.label = "ROOTTEST";
+		fixture_open(&fixture, formats[f], &options, 1);
+		/* Label + 30 short entries + terminator = exactly two sectors. */
+		add_root_short_names(&fixture, 30);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.root_entries == 32);
+		fixture_close(&fixture);
+	}
+}
+
+static void
+check_root_entry_images_equal(uint32_t flags, uint32_t first_root,
+    uint32_t second_root, bool reverse_second)
+{
+	static const char *const formats[] = { "fat12", "fat16" };
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_plan_info_t info;
+	memory_sink_t sinks[2];
+
+	for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+		bzero(sinks, sizeof(sinks));
+		for (unsigned pass = 0; pass < 2; pass++) {
+			fsimg_write_options_init(&options);
+			options.flags |= FSIMG_WRITE_REPRODUCIBLE | flags;
+			options.fat_root_entries = pass == 0 ? first_root : second_root;
+			fixture_open(&fixture, formats[f], &options, 1);
+			add_fixture(&fixture, pass != 0 && reverse_second);
+			emit_minimize_image(&fixture, &sinks[pass], &info);
+			fixture_close(&fixture);
+		}
+		CHECK(sinks[0].length == sinks[1].length);
+		CHECK(bcmp(sinks[0].bytes, sinks[1].bytes,
+		    (size_t)sinks[0].length) == 0);
+		free(sinks[0].bytes);
+		free(sinks[1].bytes);
+	}
+}
+
+static void
+test_root_entry_reproducible_explicit_capacity(void)
+{
+	check_root_entry_images_equal(0, 100, 100, false);
+	check_root_entry_images_equal(FSIMG_WRITE_MINIMIZE, 100, 100, false);
+}
+
+static void
+test_root_entry_default_equals_explicit_512(void)
+{
+	check_root_entry_images_equal(0, 0, 512, false);
+}
+
+static void
+test_root_entry_source_order_independence(void)
+{
+	check_root_entry_images_equal(0, 100, 100, true);
+	check_root_entry_images_equal(FSIMG_WRITE_MINIMIZE, 100, 100, true);
+}
+
+/* One short empty file and a label occupy exactly two of the 32 slots.
+ * Independent tools fill the remaining slots without allocating clusters.
+ */
+static void
+create_fixed_root_external(const char *directory, const char *format)
+{
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_entry_t entry = { .path = "/SEED.TXT", .kind = FSIMG_ENTRY_FILE };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	int parent;
+
+	fsimg_write_options_init(&options);
+	options.flags |= FSIMG_WRITE_MINIMIZE | FSIMG_WRITE_REPRODUCIBLE;
+	options.fat_root_entries = 32;
+	options.label = "ROOTTEST";
+	fixture_open(&fixture, format, &options, 1);
+	CHECK(fsimg_writer_add(fixture.writer, &entry, &zero, NULL) == FSIMG_OK);
+	parent = open(directory, O_RDONLY | O_DIRECTORY);
+	CHECK(parent != -1);
+	CHECK(fsimg_writer_write_at(fixture.writer, parent, "writer.img", NULL) == FSIMG_OK);
+	CHECK(close(parent) == 0);
+	fixture_close(&fixture);
+}
+
 /* For C-byte clusters and n clusters, size is n*C + reserved + root +
  * 2*ceil((n+2)*bits/4096)*512. FAT12 ties at 8/16/32 KiB: 8 KiB wins.
  * FAT16/32 cannot trade below the type minimum plus its 16-cluster margin.
@@ -1509,6 +1910,10 @@ create_minimized_external(const char *directory, const char *format)
 int
 main(int argc, char **argv)
 {
+	if (argc == 4 && strcmp(argv[1], "--create-fixed-root") == 0) {
+		create_fixed_root_external(argv[2], argv[3]);
+		return (0);
+	}
 	if (argc == 4 && strcmp(argv[1], "--create-minimized") == 0) {
 		create_minimized_external(argv[2], argv[3]);
 		return (0);
@@ -1568,6 +1973,18 @@ main(int argc, char **argv)
 	test_roundtrip("fat12");
 	test_roundtrip("fat16");
 	test_roundtrip("fat32");
+	test_root_entry_geometry();
+	test_fixed_disk_preserves_rounded_root_entries();
+	test_root_entry_construction_limits();
+	test_root_entry_inapplicable_formats();
+	test_root_entry_4096_byte_rounding_limit();
+	test_root_entry_65520_maximum();
+	test_root_entry_short_name_capacity_boundary();
+	test_root_entry_long_name_capacity_boundary();
+	test_root_entry_minimized_exact_sector_multiple();
+	test_root_entry_reproducible_explicit_capacity();
+	test_root_entry_default_equals_explicit_512();
+	test_root_entry_source_order_independence();
 	test_geometry();
 	test_type_margins();
 	test_invalid_names();

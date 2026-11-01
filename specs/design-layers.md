@@ -139,7 +139,8 @@ split below.
 
 A setting without a layer qualifier targets the filesystem: `oem`,
 `sector`, `cluster`, the QNX6 `endian`, `uuid`, `inodes`, `reserve`, the
-QNX4 `inodes`, and the IFS `endian` (shared with QNX6) and `mountpoint`.
+QNX4 `inodes`, the FAT12/16 `root`, and the IFS `endian` (shared with QNX6)
+and `mountpoint`.
 A layer setting is qualified by its layer name: `gpt:type=esp`,
 `dmg:compress=none`, `gzip:level=9`. A qualified key for a layer absent from
 the stack fails; fsimg never guesses the target of a bare key. On read the

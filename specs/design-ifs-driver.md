@@ -363,17 +363,18 @@ any other, so the report is complete whenever verification returns
 ## Writer settings
 
 `validate` accepts the common options with these rules: `sector_bytes` zero
-or 1; `allocation_unit_bytes` zero or 1; `fat_root_entries` zero; `label`
-NULL, which the common capability check already enforces with
-`FSIMG_EUNSUPPORTED`, since `max_label_bytes` is 0; `epoch` within
-`[0, 4294967295]` in reproducible mode; `volume_bytes` and `min_free_bytes`
-zero, any other value `FSIMG_EINVAL`, because the image has no free space
-and its size is derived; `volume_serial` ignored, as the profile stores
-none. The capability record's `write_settings` names the byte order, which
-QNX6 also stores, and the mountpoint, typed fields of
-`fsimg_write_options_t` that every other format requires at their
-defaults. The writer has no boot setting: it writes
-[nonbootable bodies](design-ifs.md#bootable-bodies) only.
+or 1; `allocation_unit_bytes` zero or 1; `fat_root_entries` zero, which the
+common settings check enforces since the record lacks
+`FSIMG_SETTING_ROOT_ENTRIES`; `label` NULL, which the common capability
+check already enforces with `FSIMG_EUNSUPPORTED`, since `max_label_bytes` is
+0; `epoch` within `[0, 4294967295]` in reproducible mode; `volume_bytes` and
+`min_free_bytes` zero, any other value `FSIMG_EINVAL`, because the image has
+no free space and its size is derived; `volume_serial` ignored, as the
+profile stores none. The capability record's `write_settings` names the byte
+order, which QNX6 also stores, and the mountpoint, typed fields of
+`fsimg_write_options_t` that every other format requires at their defaults.
+The writer has no boot setting: it writes [nonbootable
+bodies](design-ifs.md#bootable-bodies) only.
 
 | Field | CLI setting | Meaning |
 | --- | --- | --- |
