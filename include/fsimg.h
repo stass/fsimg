@@ -720,6 +720,11 @@ typedef struct fsimg_layer_report {
 #define FSIMG_WRITE_DURABLE 0x04u
 /* Host trees also record uid, gid and permission bits as optional fields. */
 #define FSIMG_WRITE_IMPORT_POSIX 0x08u
+/* Automatic sizing chooses the geometry settings left open that give the
+ * smallest volume, instead of the first legal candidate; FSIMG_EINVAL with
+ * an exact volume_bytes or a fixed disk.
+ */
+#define FSIMG_WRITE_MINIMIZE 0x10u
 
 /* The on-disk byte order of a format that offers both, such as QNX6. */
 typedef enum fsimg_byte_order {
@@ -786,6 +791,14 @@ typedef struct fsimg_plan_info {
 	uint64_t	 scratch_bytes; /* Observed context use at plan completion. */
 	uint32_t	 sector_bytes;
 	uint32_t	 allocation_unit_bytes;
+	/* The volume's clusters or blocks, as an opened volume reports them. */
+	uint64_t	 allocation_units;
+	/* The inode capacity and the inodes left free of a format whose inode
+	 * table bounds the files a native user can create (QNX6); zero for
+	 * every other format.
+	 */
+	uint64_t	 inode_capacity;
+	uint64_t	 free_inodes;
 	unsigned	 required_io_flags;
 	/* The image around the volume, reported as an opened image reports
 	 * it, with every identifier the plan derived. image.disk_bytes is the

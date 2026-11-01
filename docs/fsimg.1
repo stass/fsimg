@@ -586,11 +586,35 @@ Volume label.
 The default FSIMG applies only to a format with a volume label; a format
 without one is created without a label and rejects
 .Fl L .
+.It Fl M
+Minimize: choose the geometry settings left open that give the smallest
+volume, instead of the first legal one.
+FAT and exFAT try every cluster size, and FAT12 and FAT16 take the
+smallest root directory holding the root's entries rather than at least
+512; QNX6 tries every block size, sizes the inode table to the entries
+rounded up to a whole inode-table block, so the volume has almost no spare
+inodes unless
+.Ar inodes=
+is given, and takes the smallest block count at a 4096-byte step instead of
+a multiple of 64.
+An exFAT volume may then exceed the recommended cluster count.
+Settings given with
+.Fl o
+and the free space still hold; QNX4 and ImageFS images are already the
+smallest.
+Conflicts with
+.Fl s
+and with a fixed
+.Ar gpt:disk
+or
+.Ar mbr:disk .
 .It Fl n
 Collect, validate and report a plan without creating an output image or reading
 file payloads;
 .Fl f
 is then optional.
+The plan names the cluster or block size and count and, for QNX6, the
+inode capacity and the inodes left free.
 Planning refuses an image larger than the output limit, as creation does;
 the raw copy an unencoded image on standard output is written from is
 charged only when it is written.
@@ -1425,8 +1449,6 @@ recognizes the following and reports each as not supported, with status 1,
 after the rest of the command line is checked:
 writing zstd or xz
 .Pq Fl a No with Cm c ,
-minimization
-.Pq Fl M No with Cm c ,
 and the reserved filesystem names apfs and hfs.
 .Sh EXAMPLES
 .Bd -literal -offset indent

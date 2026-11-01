@@ -17,17 +17,25 @@ typedef struct exfat_geometry_candidate {
 	uint32_t	 allocated;
 } exfat_geometry_candidate_t;
 
+/* The cluster sizes a search can try: the powers of two from the sector to
+ * 32 MiB, at most seventeen with 512-byte sectors.
+ */
+#define EXFAT_UNITS_MAX 17u
+#define EXFAT_CLUSTER_BYTES_MAX 33554432u
+
 static fsimg_status_t validate_options(fsimg_write_options_t *, unsigned,
     fsimg_error_t *);
 static fsimg_status_t make_plan(fsimg_writer_t *, fsimg_error_t *);
 static void free_plan(fsimg_plan_t *);
 static fsimg_status_t prepare_upcase(exfat_plan_t *, fsimg_error_t *);
 static fsimg_status_t prepare_names(exfat_plan_t *, fsimg_error_t *);
-static fsimg_status_t count_allocation(exfat_plan_t *, uint32_t, uint64_t *,
-    fsimg_error_t *);
+static fsimg_status_t count_allocation(exfat_plan_t *, uint32_t, unsigned,
+    uint64_t *, fsimg_error_t *);
 static bool volume_geometry(uint64_t, uint32_t, uint32_t, exfat_geometry_t *);
 static bool build_geometry_candidate(const fsimg_write_options_t *, uint64_t,
     uint32_t, uint64_t, exfat_geometry_candidate_t *);
+static bool size_candidate(const fsimg_write_options_t *, uint32_t, uint64_t,
+    exfat_geometry_candidate_t *);
 static fsimg_status_t choose_geometry(exfat_plan_t *, fsimg_error_t *);
 static fsimg_status_t allocate_layout(exfat_plan_t *, fsimg_error_t *);
 
@@ -50,7 +58,7 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	sector = options->sector_bytes == 0 ? 512 : options->sector_bytes;
 	cluster = options->allocation_unit_bytes;
 	if ((sector != 512 && sector != 1024 && sector != 2048 && sector != 4096) ||
-	    (cluster != 0 && (cluster < sector || cluster > 33554432 ||
+	    (cluster != 0 && (cluster < sector || cluster > EXFAT_CLUSTER_BYTES_MAX ||
 	    (cluster & (cluster - 1)) != 0)) || options->volume_bytes % sector != 0 ||
 	    options->volume_bytes > INT64_MAX || options->fat_root_entries != 0 ||
 	    ((options->flags & FSIMG_WRITE_REPRODUCIBLE) != 0 &&
@@ -234,26 +242,34 @@ prepare_upcase(exfat_plan_t *plan, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/* The clusters every candidate size needs, in one pass over the layout
+ * rows: totals[i] is the allocation, the up-case table included, with
+ * clusters of first << i bytes.
+ */
 static fsimg_status_t
-count_allocation(exfat_plan_t *plan, uint32_t cluster_bytes, uint64_t *out,
-    fsimg_error_t *error)
+count_allocation(exfat_plan_t *plan, uint32_t first, unsigned count,
+    uint64_t *totals, fsimg_error_t *error)
 {
 	exfat_layout_t row;
-	uint64_t total, count;
+	uint64_t cluster;
 	fsimg_status_t status;
 
-	*out = 0;
-	total = (plan->upcase_length + (uint64_t)cluster_bytes - 1) / cluster_bytes;
+	for (unsigned i = 0; i < count; i++) {
+		cluster = (uint64_t)first << i;
+		totals[i] = (plan->upcase_length + cluster - 1) / cluster;
+	}
 	for (uint64_t id = 0; id <= plan->common.writer->count; id++) {
 		status = exfat_layout_get(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
-		count = row.length / cluster_bytes + (row.length % cluster_bytes != 0);
-		if (!fsimg_add_u64(total, count, &total))
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_WRITER, "exFAT allocation total overflow"));
+		for (unsigned i = 0; i < count; i++) {
+			cluster = (uint64_t)first << i;
+			if (!fsimg_add_u64(totals[i], row.length / cluster +
+			    (row.length % cluster != 0), &totals[i]))
+				return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+				    FSIMG_OP_WRITER, "exFAT allocation total overflow"));
+		}
 	}
-	*out = total;
 	return (FSIMG_OK);
 }
 
@@ -322,67 +338,114 @@ build_geometry_candidate(const fsimg_write_options_t *options, uint64_t bytes,
 	return (true);
 }
 
+/* The geometry of one cluster size holding base clusters and the free
+ * reserve: at the exact size, or the smallest volume that fits.
+ */
+static bool
+size_candidate(const fsimg_write_options_t *options, uint32_t cluster,
+    uint64_t base, exfat_geometry_candidate_t *candidate)
+{
+	uint64_t low, high, middle, max_fat, spc, sector;
+
+	if (options->volume_bytes != 0)
+		return (build_geometry_candidate(options, options->volume_bytes,
+		    cluster, base, candidate));
+	sector = options->sector_bytes;
+	spc = cluster / sector;
+	max_fat = (((uint64_t)EXFAT_CLUSTER_MAX + 2) * 4 + sector - 1) / sector;
+	high = (24 + max_fat + spc - 1) / spc * spc +
+	    (uint64_t)EXFAT_CLUSTER_MAX * spc;
+	if (high > INT64_MAX / sector)
+		high = INT64_MAX / sector;
+	if (!build_geometry_candidate(options, high * sector, cluster, base,
+	    candidate))
+		return (false);
+	low = 1048576 / sector;
+	/* Bitmap allocation is included in each candidate's fit test. Free
+	 * capacity is monotone, so no allocation/bitmap fixed point or
+	 * per-cluster capacity search is needed.
+	 */
+	while (low < high) {
+		middle = low + (high - low) / 2;
+		if (build_geometry_candidate(options, middle * sector, cluster, base,
+		    candidate))
+			high = middle;
+		else
+			low = middle + 1;
+	}
+	return (build_geometry_candidate(options, low * sector, cluster, base,
+	    candidate));
+}
+
+/* The cluster size: the requested one, or every legal size in increasing
+ * order (specs/design-sizing.md). A candidate past the recommended cluster
+ * count ranks after the others unless it is the largest permitted size.
+ * The default policy takes the first fitting candidate of the first rank;
+ * minimization the one with the smallest volume, ties going to the better
+ * rank and then the smaller size, so it agrees with the default whenever
+ * that is already minimal. Each candidate evaluated charges one work unit.
+ */
 static fsimg_status_t
 choose_geometry(exfat_plan_t *plan, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
-	exfat_geometry_candidate_t candidate;
-	uint64_t base, low, high, middle, max_fat, spc, sector;
-	uint32_t cluster, last;
+	const fsimg_write_options_t *options = &writer->options;
+	uint64_t totals[EXFAT_UNITS_MAX];
+	exfat_geometry_candidate_t candidate, best;
+	uint32_t first, last, cluster;
+	unsigned count, rank, best_rank;
 	fsimg_status_t status;
+	bool minimize, found;
 
-	sector = writer->options.sector_bytes;
-	cluster = writer->options.allocation_unit_bytes;
-	last = cluster == 0 ? 33554432 : cluster;
-	if (cluster == 0)
-		cluster = (uint32_t)sector;
-	for (; cluster <= last; cluster *= 2) {
-		status = count_allocation(plan, cluster, &base, error);
+	minimize = (options->flags & FSIMG_WRITE_MINIMIZE) != 0;
+	first = options->allocation_unit_bytes;
+	last = first == 0 ? EXFAT_CLUSTER_BYTES_MAX : first;
+	if (first == 0)
+		first = options->sector_bytes;
+	count = 0;
+	while (count < EXFAT_UNITS_MAX && (first << count) <= last)
+		count++;
+	status = count_allocation(plan, first, count, totals, error);
+	if (status != FSIMG_OK)
+		return (status);
+	bzero(&best, sizeof(best));
+	best_rank = 0;
+	found = false;
+	for (unsigned i = 0; i < count; i++) {
+		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (writer->options.volume_bytes != 0) {
-			if (!build_geometry_candidate(&writer->options, writer->options.volume_bytes,
-			    cluster, base, &candidate))
-				continue;
-		} else {
-			spc = cluster / sector;
-			max_fat = (((uint64_t)EXFAT_CLUSTER_MAX + 2) * 4 + sector - 1) / sector;
-			high = (24 + max_fat + spc - 1) / spc * spc +
-			    (uint64_t)EXFAT_CLUSTER_MAX * spc;
-			if (high > INT64_MAX / sector)
-				high = INT64_MAX / sector;
-			if (!build_geometry_candidate(&writer->options, high * sector,
-			    cluster, base, &candidate))
-				continue;
-			low = 1048576 / sector;
-			/* Bitmap allocation is included in each candidate's fit test.
-			 * Free capacity is monotone, so no allocation/bitmap fixed point
-			 * or per-cluster capacity search is needed.
-			 */
-			while (low < high) {
-				middle = low + (high - low) / 2;
-				if (build_geometry_candidate(&writer->options, middle * sector,
-				    cluster, base, &candidate))
-					high = middle;
-				else
-					low = middle + 1;
-			}
-			if (!build_geometry_candidate(&writer->options, low * sector,
-			    cluster, base, &candidate))
-				continue;
-		}
-		if (writer->options.allocation_unit_bytes == 0 && cluster != last &&
-		    candidate.geometry.clusters > EXFAT_CLUSTER_RECOMMENDED)
+		cluster = first << i;
+		if (!size_candidate(options, cluster, totals[i], &candidate))
 			continue;
-		plan->geometry = candidate.geometry;
-		plan->bitmap_length = candidate.bitmap_length;
-		plan->bitmap_clusters = candidate.bitmap_clusters;
-		plan->upcase_clusters = (plan->upcase_length + cluster - 1) / cluster;
-		plan->allocated = candidate.allocated;
-		return (FSIMG_OK);
+		rank = cluster != last &&
+		    candidate.geometry.clusters > EXFAT_CLUSTER_RECOMMENDED ? 1 : 0;
+		if (!minimize) {
+			if (rank != 0)
+				continue;
+			best = candidate;
+			found = true;
+			break;
+		}
+		if (!found ||
+		    candidate.geometry.volume_bytes < best.geometry.volume_bytes ||
+		    (candidate.geometry.volume_bytes == best.geometry.volume_bytes &&
+		    rank < best_rank)) {
+			best = candidate;
+			best_rank = rank;
+		}
+		found = true;
 	}
-	return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-	    FSIMG_OP_WRITER, "no exFAT geometry fits content and free-space reserve"));
+	if (!found)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_WRITER, "no exFAT geometry fits content and free-space reserve"));
+	plan->geometry = best.geometry;
+	plan->bitmap_length = best.bitmap_length;
+	plan->bitmap_clusters = best.bitmap_clusters;
+	plan->upcase_clusters = (plan->upcase_length +
+	    best.geometry.cluster_bytes - 1) / best.geometry.cluster_bytes;
+	plan->allocated = best.allocated;
+	return (FSIMG_OK);
 }
 
 static fsimg_status_t
@@ -426,6 +489,7 @@ allocate_layout(exfat_plan_t *plan, fsimg_error_t *error)
 	info->volume_bytes = g->volume_bytes;
 	info->sector_bytes = g->sector_bytes;
 	info->allocation_unit_bytes = g->cluster_bytes;
+	info->allocation_units = g->clusters;
 	info->allocated_bytes = (uint64_t)plan->allocated * g->cluster_bytes;
 	info->free_bytes = (uint64_t)(g->clusters - plan->allocated) * g->cluster_bytes;
 	info->metadata_bytes = g->heap_offset + directory_bytes +

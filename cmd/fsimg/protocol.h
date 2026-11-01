@@ -142,9 +142,12 @@ _Static_assert(FSIMG_WIRE_PARTITION_NAME + FSIMG_WIRE_PARTITION_NAME_BYTES ==
 /* OUTPUT is the most bytes the image can take: the volume or disk, or the
  * largest encoding of the disk by its container and compression. PADDING
  * is the zero padding the container's disk granularity added, and CODEC
- * the compression library the output depends on, empty for none.
+ * the compression library the output depends on, empty for none. UNITS is
+ * the volume's clusters or blocks; INODES and FREE_INODES the inode
+ * capacity and the inodes left free, both zero for a format whose inode
+ * table does not bound its files.
  */
-#define FSIMG_WIRE_PLAN_BYTES 160u
+#define FSIMG_WIRE_PLAN_BYTES 184u
 #define FSIMG_WIRE_PLAN_CODEC_BYTES 32u
 typedef enum fsimg_wire_plan_field {
 	FSIMG_WIRE_PLAN_VOLUME = 0,
@@ -162,7 +165,10 @@ typedef enum fsimg_wire_plan_field {
 	FSIMG_WIRE_PLAN_FORMAT = 96,
 	FSIMG_WIRE_PLAN_OUTPUT = 112,
 	FSIMG_WIRE_PLAN_PADDING = 120,
-	FSIMG_WIRE_PLAN_CODEC = 128
+	FSIMG_WIRE_PLAN_UNITS = 128,
+	FSIMG_WIRE_PLAN_INODES = 136,
+	FSIMG_WIRE_PLAN_FREE_INODES = 144,
+	FSIMG_WIRE_PLAN_CODEC = 152
 } fsimg_wire_plan_field_t;
 _Static_assert(FSIMG_WIRE_PLAN_CODEC + FSIMG_WIRE_PLAN_CODEC_BYTES ==
     FSIMG_WIRE_PLAN_BYTES, "the plan record ends with the codec");

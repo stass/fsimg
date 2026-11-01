@@ -1409,6 +1409,7 @@ check_reader(fixture_t *fixture, memory_sink_t *sink, const chk_t *c)
 	const fsimg_entry_t *entry;
 	const chk_entry_t *e;
 	fsimg_verify_report_t report;
+	fsimg_volume_info_t volume;
 	fsimg_error_t error;
 	unsigned char buffer[4096];
 	uint64_t offset, count;
@@ -1419,6 +1420,8 @@ check_reader(fixture_t *fixture, memory_sink_t *sink, const chk_t *c)
 	CHECK(memory_io(fixture, sink, false, &input) == FSIMG_OK);
 	CHECK(fsimg_reader_open(fixture->ctx, input, NULL, &reader, NULL) ==
 	    FSIMG_OK);
+	CHECK(fsimg_reader_get_info(reader, &volume, NULL) == FSIMG_OK);
+	CHECK(volume.allocation_units == c->blocks);
 	count = 0;
 	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
 		count++;
@@ -1474,26 +1477,32 @@ reproducible_options(fsimg_write_options_t *options)
  * and scratch, reverse order with a 1024-page cache in another time zone,
  * and forward order without scratch, all metadata in a 1024-page cache --
  * passes the checker and the reader each time and gives identical bytes.
+ * Two more passes minimize in reverse order with scratch and forward order
+ * without scratch: QNX4's fixed geometry is already minimal.
  */
 static void
 test_matrix(void)
 {
 	fsimg_write_options_t options;
+	fsimg_plan_info_t info;
+	const fsimg_plan_t *plan;
 	fixture_t fixture;
-	memory_sink_t sinks[3];
+	memory_sink_t sinks[5];
 	chk_expect_t expect;
 	chk_t c;
 
 	reproducible_options(&options);
 	options.label = "fsimg QNX4";
-	for (unsigned pass = 0; pass < 3; pass++) {
+	for (unsigned pass = 0; pass < 5; pass++) {
+		if (pass >= 3)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
 		if (pass == 1) {
 			CHECK(setenv("TZ", "America/New_York", 1) == 0);
 			tzset();
 		}
-		fixture_open_with(&fixture, &options, pass == 0 ? 1 : 1024,
-		    pass != 2);
-		add_specs(&fixture, tree, TREE_COUNT, pass == 1);
+		fixture_open_with(&fixture, &options, (pass == 0 || pass == 3) ? 1 : 1024,
+		    pass != 2 && pass != 4);
+		add_specs(&fixture, tree, TREE_COUNT, pass == 1 || pass == 3);
 		CHECK(emit_memory(&fixture, &sinks[pass], NULL) == FSIMG_OK);
 		/* Three of owned_metadata's four times differ from the epoch,
 		 * in two entries.
@@ -1505,6 +1514,10 @@ test_matrix(void)
 		expect.inode_slots = 128;
 		chk_image(&c, sinks[pass].bytes, sinks[pass].length, &expect);
 		CHECK(c.errors == 0);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.allocation_units == c.blocks);
+		CHECK(info.inode_capacity == 0 && info.free_inodes == 0);
 		check_tree_entries(&c, 1700000000, true);
 		CHECK(c.names_blocks == 16 && c.used_inodes == 10);
 		chk_minimal(&c, 0);
@@ -1516,12 +1529,12 @@ test_matrix(void)
 			tzset();
 		}
 	}
-	for (unsigned pass = 1; pass < 3; pass++) {
+	for (unsigned pass = 1; pass < 5; pass++) {
 		CHECK(sinks[pass].length == sinks[0].length);
 		CHECK(bcmp(sinks[pass].bytes, sinks[0].bytes,
 		    (size_t)sinks[0].length) == 0);
 	}
-	for (unsigned pass = 0; pass < 3; pass++)
+	for (unsigned pass = 0; pass < 5; pass++)
 		free(sinks[pass].bytes);
 }
 

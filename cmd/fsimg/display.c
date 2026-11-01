@@ -1022,7 +1022,8 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
  * The plan record. output_bytes is the image's length, or with a container
  * or compression the most its encoding can take; padding_bytes the zeros
  * the container's granularity added to the disk; codec the compression
- * library the image depends on, so a reproducible build can name it.
+ * library the image depends on, so a reproducible build can name it. The
+ * inode line appears only for a format whose inode table bounds its files.
  */
 static void
 plan(fsimg_cli_display_t *display, const unsigned char *raw)
@@ -1030,12 +1031,15 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 	static const unsigned offsets[] = { FSIMG_WIRE_PLAN_VOLUME, FSIMG_WIRE_PLAN_PAYLOAD,
 	    FSIMG_WIRE_PLAN_INITIALIZED, FSIMG_WIRE_PLAN_ALLOCATED, FSIMG_WIRE_PLAN_METADATA,
 	    FSIMG_WIRE_PLAN_FREE, FSIMG_WIRE_PLAN_ENTRIES, FSIMG_WIRE_PLAN_LOSSES,
-	    FSIMG_WIRE_PLAN_SCRATCH, FSIMG_WIRE_PLAN_OUTPUT, FSIMG_WIRE_PLAN_PADDING };
+	    FSIMG_WIRE_PLAN_SCRATCH, FSIMG_WIRE_PLAN_OUTPUT, FSIMG_WIRE_PLAN_PADDING,
+	    FSIMG_WIRE_PLAN_UNITS, FSIMG_WIRE_PLAN_INODES, FSIMG_WIRE_PLAN_FREE_INODES };
 	static const char *const keys[] = { "volume_bytes", "payload_bytes", "initialized_bytes",
 	    "allocated_bytes", "metadata_bytes", "free_bytes", "entries", "metadata_losses",
-	    "scratch_observed_bytes", "output_bytes", "padding_bytes" };
+	    "scratch_observed_bytes", "output_bytes", "padding_bytes", "allocation_units",
+	    "inode_capacity", "free_inodes" };
 	const char *codec = (const char *)raw + FSIMG_WIRE_PLAN_CODEC;
 	uint64_t padding = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_PADDING);
+	uint64_t inodes = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_INODES);
 
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"plan\",\"format\":");
@@ -1068,6 +1072,12 @@ plan(fsimg_cli_display_t *display, const unsigned char *raw)
 		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_SECTOR));
 		append(display, "\nCluster size: ");
 		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_CLUSTER));
+		append(display, "\nClusters:     %llu",
+		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_PLAN_UNITS));
+		if (inodes != 0)
+			append(display, "\nInodes:       %llu (%llu free)",
+			    (unsigned long long)inodes, (unsigned long long)
+			    fsimg_load_le64(raw + FSIMG_WIRE_PLAN_FREE_INODES));
 		append(display, "\nEntries:      %llu\nScratch used: ",
 		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ENTRIES));
 		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PLAN_SCRATCH));

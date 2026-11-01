@@ -1224,6 +1224,8 @@ interpret_create(cli_parse_t *parse)
 		request->write.flags |= FSIMG_WRITE_REPRODUCIBLE;
 	if (option_count(parse, 'p') != 0)
 		request->write.flags |= FSIMG_WRITE_IMPORT_POSIX;
+	if (option_count(parse, 'M') != 0)
+		request->write.flags |= FSIMG_WRITE_MINIMIZE;
 	if (option_count(parse, 'L') != 0)
 		request->write.label = option_value(parse, 'L');
 	if (option_count(parse, 'e') != 0) {
@@ -1261,8 +1263,6 @@ interpret_create(cli_parse_t *parse)
 	status = apply_compression(parse);
 	if (status != FSIMG_OK)
 		return (status);
-	if (option_count(parse, 'M') != 0)
-		note_unsupported(parse, "-M minimization is not supported");
 	status = read_create_operands(parse);
 	if (status != FSIMG_OK)
 		return (status);

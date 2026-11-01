@@ -637,7 +637,6 @@ test_stacks(void)
 	};
 	char *unsupported[][12] = {
 		{ "fsimg", "-cn", "-F", "hfs", ".", NULL },
-		{ "fsimg", "-cM", "-F", "fat32", "-f", "out.img", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.zst", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-f", "out.img.XZ", ".", NULL },
 		{ "fsimg", "-c", "-a", "-F", "fat32", "-o", "zstd:level=1", "-f",
@@ -1918,6 +1917,84 @@ test_manifest_staging_cleanup(void)
 	CHECK(close(parent) == 0 && rmdir(root) == 0);
 }
 
+static void
+test_minimize_options(void)
+{
+	static const char *const formats[] = {
+		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs"
+	};
+	char *arguments[] = { "fsimg", "-cM", "-F", NULL, "-f", "out.img", ".", NULL };
+	char *conflicts[][10] = {
+		{ "fsimg", "-cnM", "-s", "1M", "-F", "fat12", ".", NULL },
+		{ "fsimg", "-cn", "-s", "1M", "-M", "-F", "fat12", ".", NULL }
+	};
+	fsimg_cli_options_t options;
+	fsimg_error_t error;
+	unsigned count;
+
+	for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+		arguments[3] = (char *)formats[i];
+		CHECK(parse(arguments, &options) == FSIMG_OK);
+		CHECK(options.request.kind == FSIMG_JOB_CREATE && !options.syntax_error);
+		CHECK((options.request.write.flags & FSIMG_WRITE_MINIMIZE) != 0);
+		fsimg_cli_release(&options);
+	}
+	for (unsigned i = 0; i < 2; i++) {
+		for (count = 0; conflicts[i][count] != NULL; count++)
+			;
+		CHECK(fsimg_cli_parse((int)count, conflicts[i], &options, &error) == FSIMG_EINVAL);
+		CHECK(options.syntax_error);
+		CHECK(strcmp(error.message, "-M conflicts with -s") == 0);
+		fsimg_cli_release(&options);
+	}
+}
+
+static void
+test_minimize_plan_display(bool json)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_worker_text_t text;
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_PLAN, .length = FSIMG_WIRE_PLAN_BYTES };
+	unsigned char *raw = frame.payload;
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_PLAN;
+	options.json = json;
+	options.mode = "c";
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_VOLUME, 8695808);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_OUTPUT, 8695808);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_CLUSTER, 2048);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_UNITS, 4238);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_INODES, 16);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_FREE_INODES, 12);
+	strcpy((char *)raw + FSIMG_WIRE_PLAN_FORMAT, "qnx6");
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	if (json) {
+		CHECK(strstr(display.buffer, "\"cluster_bytes\":2048") != NULL);
+		CHECK(strstr(display.buffer, "\"allocation_units\":\"4238\"") != NULL);
+		CHECK(strstr(display.buffer, "\"inode_capacity\":\"16\"") != NULL);
+		CHECK(strstr(display.buffer, "\"free_inodes\":\"12\"") != NULL);
+	} else {
+		CHECK(strstr(display.buffer, "\nClusters:     4238\n") != NULL);
+		CHECK(strstr(display.buffer, "\nInodes:       16 (12 free)\n") != NULL);
+	}
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_INODES, 0);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_FREE_INODES, 0);
+	strcpy((char *)raw + FSIMG_WIRE_PLAN_FORMAT, "fat32");
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+	if (json) {
+		CHECK(strstr(display.buffer, "\"inode_capacity\":\"0\"") != NULL);
+		CHECK(strstr(display.buffer, "\"free_inodes\":\"0\"") != NULL);
+	} else {
+		CHECK(strstr(display.buffer, "Inodes:") == NULL);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1931,6 +2008,9 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_minimize_options();
+	test_minimize_plan_display(false);
+	test_minimize_plan_display(true);
 	test_numbers();
 	test_options();
 	test_modes();

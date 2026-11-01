@@ -24,13 +24,15 @@ if test "$host" != Linux && test -z "$FATCAT"; then
 fi
 
 # fatcat checks are scoped to macOS/FreeBSD. The other independent tools still
-# validate Linux fixtures. Every pair below names an image path and expected
-# host content; an empty list requests volume information only.
+# validate Linux fixtures. The third argument names the directory fatcat
+# lists before the comparisons. Every pair after it names an image path and
+# expected host content; an empty list requests volume information only.
 check_fatcat()
 {
     checked_image=$1
     checked_sector=$2
-    shift 2
+    checked_listing=$3
+    shift 3
     if test "$host" = Linux; then
         echo 'SKIP: fatcat checks are scoped to macOS and FreeBSD'
         return
@@ -41,7 +43,7 @@ check_fatcat()
     fi
     "$FATCAT" -i "$checked_image"
     if test "$#" != 0; then
-        "$FATCAT" -l /Nested "$checked_image"
+        "$FATCAT" -l "$checked_listing" "$checked_image"
     fi
     while test "$#" != 0; do
         "$FATCAT" -r "$1" "$checked_image" > "$fixture_dir/fatcat-payload"
@@ -153,14 +155,31 @@ for profile in fat12 fat16 fat32 fat16-wide; do
     fi
     "$checker" -n "$image"
     if test "$profile" = fat12; then
-        check_fatcat "$image" "$sector" /Hello.txt "$fixture_dir/payload" \
+        check_fatcat "$image" "$sector" /Nested /Hello.txt "$fixture_dir/payload" \
             /Nested/Deep.txt "$fixture_dir/payload" /FRAG.BIN "$fixture_dir/fragment"
     else
-        check_fatcat "$image" "$sector" /Hello.txt "$fixture_dir/payload" \
+        check_fatcat "$image" "$sector" /Nested /Hello.txt "$fixture_dir/payload" \
             /Nested/Deep.txt "$fixture_dir/payload"
     fi
     ./test-fat "$external_mode" "$image" "fat$variant"
     echo 'result: independent checker and fsimg enumeration/content/full verification passed'
+done
+
+# The pinned large-file catalogs choose different clusters under -M. Check
+# their FAT/root layout and extract both files without fsimg's decoder.
+for profile in fat12 fat16 fat32; do
+    mkdir "$fixture_dir/minimize-$profile"
+    ./test-fat-write --create-minimized "$fixture_dir/minimize-$profile" "$profile"
+    image="$fixture_dir/minimize-$profile/writer.img"
+    expected="$fixture_dir/minimize-$profile/payload"
+    "$checker" -n "$image"
+    check_fatcat "$image" 512 / /F0000000 "$expected" /F0000001 "$expected"
+    for name in F0000000 F0000001; do
+        LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" "::$name" "$fixture_dir/minimized-payload"
+        cmp "$expected" "$fixture_dir/minimized-payload"
+        rm "$fixture_dir/minimized-payload"
+    done
+    echo "result: minimized $profile passed checker and independent content comparisons"
 done
 
 # fsimg-created volumes are checked and extracted by independent tools. These
@@ -172,7 +191,7 @@ for profile in fat12 fat16 fat32; do
     image="$fixture_dir/write-$profile/writer.img"
     echo "writer fixture: $profile; automatic geometry; serial zero; NO NAME label"
     "$checker" -n "$image"
-    check_fatcat "$image" 512 /HELLO.TXT "$fixture_dir/writer-payload" \
+    check_fatcat "$image" 512 /Nested /HELLO.TXT "$fixture_dir/writer-payload" \
         '/Nested/long name.txt' "$fixture_dir/writer-payload"
     LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" ::HELLO.TXT "$fixture_dir/extracted"
     cmp "$fixture_dir/writer-payload" "$fixture_dir/extracted"
@@ -190,6 +209,6 @@ for profile in fat12 fat16 fat32; do
     rm "$image"
     ./test-fat-write --create-empty "$fixture_dir/write-$profile" "$profile"
     "$checker" -n "$image"
-    check_fatcat "$image" 512
+    check_fatcat "$image" 512 /
     echo 'result: independently checked empty writer volume'
 done

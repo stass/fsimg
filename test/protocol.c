@@ -1514,6 +1514,74 @@ test_job_device_input(void)
 	    &capabilities, NULL) == FSIMG_EINVAL);
 }
 
+/* Pin the plan's wire size and geometry offsets separately from the codec:
+ * a 160-byte record and inconsistent inode counts are invalid.
+ */
+static void
+test_plan_geometry_record(void)
+{
+	fsimg_frame_t frame;
+	unsigned char *raw = frame.payload;
+
+	bzero(&frame, sizeof(frame));
+	frame.type = FSIMG_FRAME_PLAN;
+	frame.length = 184;
+	CHECK(FSIMG_WIRE_PLAN_BYTES == 184);
+	CHECK(FSIMG_WIRE_PLAN_UNITS == 128);
+	CHECK(FSIMG_WIRE_PLAN_INODES == 136);
+	CHECK(FSIMG_WIRE_PLAN_FREE_INODES == 144);
+	CHECK(FSIMG_WIRE_PLAN_CODEC == 152);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_VOLUME, 8695808);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_OUTPUT, 8695808);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_CLUSTER, 2048);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_SECTOR, 512);
+	fsimg_store_le64(raw + 128, 4238);
+	fsimg_store_le64(raw + 136, 16);
+	fsimg_store_le64(raw + 144, 12);
+	strcpy((char *)raw + FSIMG_WIRE_PLAN_FORMAT, "qnx6");
+	strcpy((char *)raw + 152, "zlib fixture");
+	CHECK(fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 160;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 183;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 185;
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	frame.length = 184;
+	fsimg_store_le64(raw + 144, 16);
+	CHECK(fsimg_wire_plan_frame_valid(&frame));
+	fsimg_store_le64(raw + 144, 17);
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	fsimg_store_le64(raw + 136, 0);
+	fsimg_store_le64(raw + 144, 1);
+	CHECK(!fsimg_wire_plan_frame_valid(&frame));
+	fsimg_store_le64(raw + 144, 0);
+	CHECK(fsimg_wire_plan_frame_valid(&frame));
+	fsimg_store_le64(raw + 136, UINT64_MAX);
+	fsimg_store_le64(raw + 144, UINT64_MAX);
+	CHECK(fsimg_wire_plan_frame_valid(&frame));
+}
+
+static void
+test_job_minimize_flag(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	CHECK(fsimg_stack_parse("qnx6", &request.stack, NULL) == FSIMG_OK);
+	request.write.flags |= FSIMG_WRITE_MINIMIZE;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK((decoded.write.flags & FSIMG_WRITE_MINIMIZE) != 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1522,6 +1590,8 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_plan_geometry_record();
+	test_job_minimize_flag();
 	test_job_qnx6_settings();
 	test_job_mountpoint();
 	test_job_ifsboot_settings();

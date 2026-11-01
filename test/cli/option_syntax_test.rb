@@ -110,6 +110,10 @@ class CliTest < Minitest::Test
       [["cf", "syntax.img", "-F", "fat12"], "c requires at least one operand".b],
       [["cf", "syntax.img", "-C", "source", "."], "c requires -F with a filesystem".b],
       [["c", "-F", "fat12", "-C", "source", "."], "c requires -f image unless -n is given".b],
+      [["c", "-M", "-s", "1M", "-F", "fat12", "-f", "syntax.img", "-C", "source", "."],
+       "-M conflicts with -s".b],
+      [["c", "-s", "1M", "-M", "-F", "fat12", "-f", "syntax.img", "-C", "source", "."],
+       "-M conflicts with -s".b],
       [
         [
           "c",
@@ -162,19 +166,6 @@ class CliTest < Minitest::Test
           "."
         ],
         "writing this compression is not supported".b
-      ],
-      [
-        [
-          "cf",
-          "syntax.img",
-          "-M",
-          "-F",
-          "fat32",
-          "-C",
-          "source",
-          "."
-        ],
-        "-M minimization is not supported".b
       ],
       [
         [

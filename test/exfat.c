@@ -1680,9 +1680,304 @@ test_case_overlap_selects_subtree_once(void)
 	fixture_free(&f);
 }
 
+static fsimg_status_t
+minimize_source_validate(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+minimize_source_read(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
+    uint64_t offset, void *buffer, size_t length, size_t *transferred,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	unsigned char *bytes = buffer;
+
+	for (size_t i = 0; i < length; i++)
+		bytes[i] = (unsigned char)((offset + i) % 251);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static void
+add_minimize_files(fsimg_writer_t *writer, unsigned count, uint64_t size,
+    bool reverse)
+{
+	fsimg_source_ops_t ops;
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 1 };
+	fsimg_entry_t entry = { .kind = FSIMG_ENTRY_FILE, .size = size };
+	char path[32];
+
+	fsimg_source_ops_init(&ops);
+	ops.validate = minimize_source_validate;
+	ops.read_at = minimize_source_read;
+	CHECK(fsimg_writer_set_sources(writer, &ops, NULL, NULL) == FSIMG_OK);
+	for (unsigned i = 0; i < count; i++) {
+		snprintf(path, sizeof(path), "/F%07u", reverse ? count - i - 1 : i);
+		entry.path = path;
+		CHECK(fsimg_writer_add(writer, &entry, &source, NULL) == FSIMG_OK);
+	}
+}
+
+static void
+check_minimize_image(exfat_fixture_t *f, const fsimg_plan_info_t *plan,
+    unsigned count, uint64_t size)
+{
+	fsimg_volume_info_t volume;
+	fsimg_verify_report_t report;
+	const fsimg_entry_t *entry;
+	unsigned char buffer[8192];
+	uint64_t offset;
+	size_t length;
+
+	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f->reader, &volume, NULL) == FSIMG_OK);
+	CHECK(plan->allocation_units == volume.allocation_units);
+	CHECK(plan->inode_capacity == 0 && plan->free_inodes == 0);
+	CHECK(fsimg_verify(f->reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete && report.files == count);
+	fsimg_reader_free(f->reader);
+	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) == FSIMG_OK);
+	for (unsigned file = 0; file < count; file++) {
+		CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_OK);
+		CHECK(entry->kind == FSIMG_ENTRY_FILE && entry->size == size);
+		for (offset = 0; offset < size; offset += length) {
+			CHECK(fsimg_reader_read_at(f->reader, offset, buffer,
+			    sizeof(buffer), &length, NULL) == FSIMG_OK);
+			CHECK(length > 0);
+			for (size_t i = 0; i < length; i++)
+				CHECK(buffer[i] == (unsigned char)((offset + i) % 251));
+		}
+	}
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_DONE);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+}
+
+static void
+emit_minimize_image(exfat_fixture_t *f, fsimg_writer_t *writer,
+    fsimg_plan_info_t *info)
+{
+	const fsimg_plan_t *plan;
+	fsimg_io_ops_t ops;
+	unsigned char *image;
+
+	CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, info, NULL) == FSIMG_OK);
+	image = realloc(f->image, (size_t)info->volume_bytes);
+	CHECK(image != NULL);
+	f->image = image;
+	f->length = info->volume_bytes;
+	memset(f->image, 0xa5, (size_t)f->length);
+	fsimg_io_free(f->io);
+	fsimg_io_ops_init(&ops);
+	ops.get_size = image_size;
+	ops.read_at = image_read;
+	ops.write_at = image_write;
+	ops.zero_range = image_zero;
+	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, f, &f->io, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_emit(writer, f->io, NULL) == FSIMG_OK);
+}
+
+/* Two 4 MiB files, a one-cluster root and a 3850-byte upcase table:
+ * at 512 bytes, 16384+1+8+5 bitmap clusters, 129 FAT sectors and 24 boot
+ * sectors give 8474112 bytes. At 4096 bytes, 2048+1+1+1 clusters and a
+ * 17-sector FAT aligned after the boot give 8425472 bytes. Larger units
+ * add more slack than they save in the table.
+ */
+static void
+test_minimize_large_and_tiny_files(void)
+{
+	exfat_fixture_t f;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	fsimg_plan_info_t info[3];
+	unsigned char *reference = NULL;
+	uint64_t size;
+	unsigned count;
+
+	for (unsigned tiny = 0; tiny < 2; tiny++) {
+		size = tiny ? 1 : 4194304;
+		count = tiny ? 256 : 2;
+		for (unsigned pass = 0; pass < 3; pass++) {
+			fixture_new(&f);
+			CHECK(fsimg_test_meta_cache(f.ctx, pass == 2 ? 32 : 1, NULL) == FSIMG_OK);
+			fsimg_write_options_init(&options);
+			options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+			if (pass != 0)
+				options.flags |= FSIMG_WRITE_MINIMIZE;
+			CHECK(fsimg_writer_new(f.ctx, "exfat", &options, &writer, NULL) == FSIMG_OK);
+			add_minimize_files(writer, count, size, pass == 2);
+			emit_minimize_image(&f, writer, &info[pass]);
+			CHECK(info[pass].allocation_unit_bytes == (tiny || pass == 0 ? 512 : 4096));
+			CHECK(info[pass].volume_bytes == (tiny ? 1048576 :
+			    pass == 0 ? 8474112 : 8425472));
+			if (!tiny && pass != 0)
+				CHECK(info[pass].allocation_units == 2051);
+			check_minimize_image(&f, &info[pass], count, size);
+			if (pass == (tiny ? 0 : 1)) {
+				reference = malloc((size_t)f.length);
+				CHECK(reference != NULL);
+				bcopy(f.image, reference, (size_t)f.length);
+			} else if (pass != 0) {
+				CHECK(bcmp(f.image, reference, (size_t)f.length) == 0);
+			}
+			fsimg_writer_free(writer);
+			fixture_free(&f);
+		}
+		CHECK(info[1].scratch_bytes == info[0].scratch_bytes);
+		if (!tiny)
+			CHECK(info[1].volume_bytes < info[0].volume_bytes);
+		free(reference);
+	}
+}
+
+static void
+test_minimize_constraints_and_limits(void)
+{
+	/* Measure and repeat default planning at its work limit; minimization
+	 * exceeds that limit but fits the same memory and scratch peaks. The
+	 * last pass fixes the cluster and adds a free-space requirement.
+	 */
+	exfat_fixture_t f;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	fsimg_plan_info_t info;
+	fsimg_stats_t stats;
+	const fsimg_plan_t *plan;
+	fsimg_error_t error;
+	uint64_t before, work = 0, scratch = 0, memory = 0, planned_scratch = 0;
+
+	for (unsigned pass = 0; pass < 5; pass++) {
+		fixture_new(&f);
+		CHECK(fsimg_test_meta_cache(f.ctx, 1, NULL) == FSIMG_OK);
+		fsimg_write_options_init(&options);
+		if (pass >= 2)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+		if (pass == 4) {
+			options.allocation_unit_bytes = 8192;
+			options.min_free_bytes = 12345;
+		}
+		CHECK(fsimg_writer_new(f.ctx, "exfat", &options, &writer, NULL) == FSIMG_OK);
+		add_minimize_files(writer, 2, 1, false);
+		before = writer->session.progress.work;
+		if (pass == 1 || pass == 2)
+			f.ctx->options.max_work = before + work;
+		if (pass == 3) {
+			f.ctx->options.memory_bytes = memory;
+			f.ctx->options.scratch_bytes = scratch;
+		}
+		if (pass == 2) {
+			CHECK(fsimg_writer_plan(writer, &plan, &error) == FSIMG_ELIMIT);
+			CHECK(error.resource == FSIMG_RESOURCE_WORK && plan == NULL);
+		} else {
+			CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+			if (pass == 0) {
+				work = writer->session.progress.work - before;
+				CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+				memory = stats.memory_peak;
+				scratch = stats.scratch_peak;
+				planned_scratch = info.scratch_bytes;
+			}
+			if (pass == 3) {
+				CHECK(info.scratch_bytes == planned_scratch);
+				CHECK(writer->session.progress.work - before == work + 16);
+			}
+			if (pass == 4) {
+				CHECK(info.allocation_unit_bytes == 8192 && info.free_bytes >= 12345);
+				emit_minimize_image(&f, writer, &info);
+				check_minimize_image(&f, &info, 2, 1);
+			}
+		}
+		fsimg_writer_free(writer);
+		fixture_free(&f);
+	}
+}
+
+static void
+emit_minimized_external(const char *path)
+{
+	exfat_fixture_t f;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	fsimg_plan_info_t info;
+	int fd;
+
+	fixture_new(&f);
+	fsimg_write_options_init(&options);
+	options.flags |= FSIMG_WRITE_MINIMIZE | FSIMG_WRITE_REPRODUCIBLE;
+	CHECK(fsimg_writer_new(f.ctx, "exfat", &options, &writer, NULL) == FSIMG_OK);
+	add_minimize_files(writer, 2, 4194304, false);
+	emit_minimize_image(&f, writer, &info);
+	CHECK(info.volume_bytes == 8425472 && info.allocation_unit_bytes == 4096);
+	check_minimize_image(&f, &info, 2, 4194304);
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	CHECK(fd != -1);
+	CHECK(write(fd, f.image, (size_t)f.length) == (ssize_t)f.length);
+	CHECK(close(fd) == 0);
+	fsimg_writer_free(writer);
+	fixture_free(&f);
+}
+
+/* Plan only: an 8 GiB zero file needs 16781323 clusters at 512 bytes,
+ * above 0x00fffffe. The default advances to 1024 bytes. Minimization ties
+ * at 64/128 KiB: at 64 KiB the 131075 heap clusters plus nine units
+ * before the heap give 8590721024 bytes. A fixed 512-byte unit
+ * is the largest permitted candidate and may exceed the recommendation.
+ */
+static void
+test_minimize_recommended_cluster_count(void)
+{
+	exfat_fixture_t f;
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_entry_t entry = { .path = "/ZERO", .kind = FSIMG_ENTRY_FILE,
+	    .size = UINT64_C(8589934592) };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fsimg_plan_info_t info;
+	const fsimg_plan_t *plan;
+
+	for (unsigned scenario = 0; scenario < 3; scenario++) {
+		fixture_new(&f);
+		fsimg_write_options_init(&options);
+		if (scenario != 0)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+		if (scenario == 2)
+			options.allocation_unit_bytes = 512;
+		CHECK(fsimg_writer_new(f.ctx, "exfat", &options, &writer, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_add(writer, &entry, &zero, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		if (scenario == 0) {
+			CHECK(info.allocation_unit_bytes == 1024);
+			CHECK(info.allocation_units == 8389638 && info.volume_bytes == 8624561152);
+		} else if (scenario == 1) {
+			CHECK(info.allocation_unit_bytes == 65536);
+			CHECK(info.allocation_units == 131075 && info.volume_bytes == 8590721024);
+		} else {
+			CHECK(info.allocation_unit_bytes == 512);
+			CHECK(info.allocation_units == 16781323 && info.volume_bytes == 8659175424);
+		}
+		fsimg_writer_free(writer);
+		fixture_free(&f);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
+	if (argc == 3 && strcmp(argv[1], "--emit-minimized") == 0) {
+		emit_minimized_external(argv[2]);
+		return (0);
+	}
+	if (argc == 2 && strcmp(argv[1], "--minimize") == 0) {
+		test_minimize_large_and_tiny_files();
+		test_minimize_constraints_and_limits();
+		test_minimize_recommended_cluster_count();
+		return (0);
+	}
 	/* Measurement records only on stdout; test/baseline.sh parses them. */
 	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
 		baseline_tree("exfat-tree", "exfat");
@@ -1735,6 +2030,9 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_minimize_large_and_tiny_files();
+	test_minimize_constraints_and_limits();
+	test_minimize_recommended_cluster_count();
 	test_empty_directory();
 	test_independent();
 	test_corruptions();

@@ -234,9 +234,15 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	}
 	if (selected.version != FSIMG_OPTIONS_VERSION ||
 	    (selected.flags & ~(FSIMG_WRITE_ALLOW_LOSS | FSIMG_WRITE_REPRODUCIBLE |
-	    FSIMG_WRITE_DURABLE | FSIMG_WRITE_IMPORT_POSIX)) != 0)
+	    FSIMG_WRITE_DURABLE | FSIMG_WRITE_IMPORT_POSIX |
+	    FSIMG_WRITE_MINIMIZE)) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_WRITER, "unsupported write options version or flags"));
+	/* An exact size leaves minimization nothing to choose. */
+	if ((selected.flags & FSIMG_WRITE_MINIMIZE) != 0 &&
+	    selected.volume_bytes != 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_WRITER, "minimization conflicts with an exact volume size"));
 	for (size_t i = 0; i < 4; i++) {
 		if (selected.reserved[i] != 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
@@ -264,6 +270,11 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 		return (status);
 	status = plan_layers(&writer->session, stack, &selected,
 	    &writer->layers, &writer->disk, error);
+	/* A fixed disk gives the volume its partition's length exactly. */
+	if (status == FSIMG_OK && (selected.flags & FSIMG_WRITE_MINIMIZE) != 0 &&
+	    writer->disk.scheme != NULL && writer->disk.fixed)
+		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "minimization conflicts with a fixed disk size");
 	if (status == FSIMG_OK)
 		status = driver->writer->validate(&selected, variant->id, error);
 	if (status == FSIMG_OK && writer->disk.scheme != NULL &&

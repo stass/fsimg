@@ -55,7 +55,7 @@
   [plan](docs/implementation-plan.md#extension-sequence). Containers and
   gzip are read and written, and `-f -` reads and writes streams; the
   command line recognizes and refuses with exit 1 the reserved zstd and xz
-  compressions and `-M` minimization, which no stage schedules yet. The
+  compressions, which no stage schedules yet. The
   `hdiutil attach` gate of the container writer settles the layer design's
   DMG-table-split question.
   Stage 1 leaves these open:
@@ -312,6 +312,14 @@
 
 ## Bugs by subsystem
 
+* [Low] **Minimized geometry under `c -v` and the FAT root report**
+  (`specs/design-sizing.md`, `specs/design-cli.md`, `cmd/fsimg/display.c`):
+  the sizing design says `-v` names the unit minimization chose, but the CLI
+  design gives `c -v` only the entry names, so creation prints no geometry
+  (`c -n` reports it). Decide which design holds. The plan also does not
+  report the FAT12/16 root capacity, which `-M` shrinks to the root's slots,
+  leaving a native user no free root entries.
+
 * [Medium] **Post-read source-change payload evidence** (`test/exfat.c`):
   the helper's truncation case changes its source before the next read.
   Add a backing-identity resolver that confirms bytes and then changes the
@@ -526,14 +534,6 @@
   window, FAT32's four-bit active-table field, a writer setting, sizing and
   the capability record; then implement both sides and check mtools and
   `fsck.fat` behaviour with more than two tables.
-
-* [Medium] **Image minimization** (`lib/formats/fat/write-plan.c`,
-  `lib/formats/exfat/write-plan.c`, `cmd/fsimg/options.c`): implement the
-  [sizing design](specs/design-sizing.md): `FSIMG_WRITE_MINIMIZE` and `-M`,
-  one layout pass accumulating every candidate unit's total, selection of the
-  smallest volume, and the pinned test catalogs where it differs from the
-  default, including the QNX6 search over the open block sizes and the exact
-  inode capacity that its driver design specifies.
 
 * [Medium] **Manifest import and export** (`lib/source/`, `lib/extract/`,
   `lib/core/`, `cmd/fsimg/`, `fuzz/`): implement the

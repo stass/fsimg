@@ -239,7 +239,24 @@ Opaque callback sources and sinks must use disjoint storage.
 seals collection, validates names and metadata, and fixes deterministic
 geometry.
 Plans report logical, initialized, allocated, metadata and free byte quantities
-separately, plus metadata-loss counts and observed scratch use.
+separately, plus metadata-loss counts and observed scratch use, and the
+geometry: sector and allocation-unit sizes, allocation_units, the volume's
+clusters or blocks, and for QNX6 inode_capacity and free_inodes, zero for
+every other format.
+Automatic sizing, a zero volume_bytes, takes the first legal candidate in a
+fixed order: increasing cluster size for FAT and exFAT, with exFAT keeping
+to the recommended cluster count when a larger cluster allows, and the
+1024-byte block and native inode ratio for QNX6.
+FSIMG_WRITE_MINIMIZE instead chooses, among the settings left open, the
+geometry giving the smallest volume: every legal cluster size and, on
+FAT12/16, the smallest root holding its entries; for QNX6 every classic
+block size, an inode capacity of exactly the entries rounded to a whole
+inode-table block, and the smallest block count rather than a multiple of
+64.
+Explicit settings and the free reserve still hold, ties go to the default
+candidate, and QNX4 and ImageFS volumes are already their smallest.
+Minimization with a nonzero volume_bytes or a fixed disk fails with
+FSIMG_EINVAL.
 Reproducible mode fixes timestamps, identifiers, ordering and padding.
 Optional losses follow the explicit allow-loss policy; required losses fail.
 A field the selected format does not store, as its capability record states,

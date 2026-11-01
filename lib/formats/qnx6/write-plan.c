@@ -13,19 +13,42 @@
 
 /* Planning runs a fixed sequence of passes over the frozen catalog
  * (specs/design-qnx6-driver.md, Planning): the entries pass fills one row
- * per entry and the totals, the geometry search chooses N, the layout pass
- * assigns each object its block range, and the summary fills the plan
+ * per entry and the totals of every candidate block size, the geometry
+ * search chooses the block size and N (specs/design-sizing.md), the layout
+ * pass assigns each object its block range, and the summary fills the plan
  * information. Rows are the only per-entry state.
  */
 
+/* The block sizes planning can try, in the preference order of
+ * specs/design-sizing.md: the default 1024, then the others increasing. A
+ * requested block size is the only candidate, and so is the default one
+ * unless minimization searches an open block size.
+ */
+static const uint32_t candidate_blocks[] = { 1024, 512, 2048, 4096 };
+#define QNX6_CANDIDATES_MAX \
+	(sizeof(candidate_blocks) / sizeof(candidate_blocks[0]))
+
+/* One candidate block size and what the entries pass accumulates for it:
+ * the blocks of every object, indirect blocks included, and of file and
+ * link content alone. usable is false once an object exceeds the block
+ * reference space at this size.
+ */
+typedef struct qnx6_candidate {
+	uint64_t	 objects;
+	uint64_t	 payload_blocks;
+	uint32_t	 block_size;
+	bool		 usable;
+} qnx6_candidate_t;
+
 /* What the entries pass accumulates: the inodes used so far, the long
- * names, the content blocks of files and links, and whether .boot has a
+ * names, the blocks of each candidate block size, and whether .boot has a
  * slot in the root yet (boot_slot, for a synthesized one).
  */
 typedef struct qnx6_totals {
+	qnx6_candidate_t candidates[QNX6_CANDIDATES_MAX];
+	unsigned	 candidate_count;
 	uint64_t	 inodes;
 	uint64_t	 long_names;
-	uint64_t	 payload_blocks;
 	uint32_t	 boot_slot;
 	bool		 boot_placed;
 } qnx6_totals_t;
@@ -40,6 +63,18 @@ typedef struct qnx6_system {
 	uint64_t	 reservation;
 } qnx6_system_t;
 
+/* One candidate's volume: N, its system run, the long-name tree and the
+ * object blocks it holds, base.
+ */
+typedef struct qnx6_sizing {
+	qnx6_system_t	 system;
+	qnx6_shape_t	 names;
+	uint64_t	 volume_bytes;
+	uint64_t	 base;
+	uint64_t	 blocks;
+	const qnx6_candidate_t *candidate;
+} qnx6_sizing_t;
+
 static fsimg_status_t validate_options(fsimg_write_options_t *, unsigned,
     fsimg_error_t *);
 static fsimg_status_t make_plan(fsimg_writer_t *, fsimg_error_t *);
@@ -50,8 +85,8 @@ static fsimg_status_t encode_time(qnx6_plan_t *, const fsimg_entry_t *,
 static fsimg_status_t encode_metadata(qnx6_plan_t *, const fsimg_entry_t *,
     uint16_t, qnx6_row_t *, fsimg_error_t *);
 static void profile_directory(qnx6_plan_t *, uint32_t, uint16_t, qnx6_row_t *);
-static uint64_t directory_bytes(const qnx6_plan_t *, uint64_t);
-static fsimg_status_t add_object(qnx6_plan_t *, uint64_t, qnx6_shape_t *,
+static void open_candidates(const fsimg_write_options_t *, qnx6_totals_t *);
+static fsimg_status_t add_object(qnx6_totals_t *, uint64_t, bool,
     fsimg_error_t *);
 static fsimg_status_t add_slot(qnx6_row_t *, bool, uint32_t *,
     fsimg_error_t *);
@@ -62,9 +97,12 @@ static fsimg_status_t plan_entries(qnx6_plan_t *, qnx6_totals_t *,
 static unsigned size_class(uint64_t);
 static uint64_t ladder_capacity(uint64_t);
 static uint32_t native_groups(const qnx6_system_t *, uint64_t);
-static bool system_for(const qnx6_plan_t *, uint64_t, uint64_t, qnx6_system_t *);
-static bool fits(const qnx6_plan_t *, uint64_t, uint64_t, uint64_t,
+static bool system_for(const qnx6_plan_t *, uint32_t, uint64_t, uint64_t,
     qnx6_system_t *);
+static bool fits(const qnx6_plan_t *, uint32_t, uint64_t, uint64_t, uint64_t,
+    qnx6_system_t *);
+static fsimg_status_t size_candidate(qnx6_plan_t *, const qnx6_totals_t *,
+    const qnx6_candidate_t *, qnx6_sizing_t *, fsimg_error_t *);
 static fsimg_status_t choose_geometry(qnx6_plan_t *, const qnx6_totals_t *,
     fsimg_error_t *);
 static fsimg_status_t place_object(qnx6_plan_t *, uint64_t, uint64_t *,
@@ -79,7 +117,8 @@ const fsimg_writer_ops_t fsimg_qnx6_writer_ops = {
 };
 
 /* The common options with the profile's rules (Writer settings): one
- * 512-byte sector size, a classic block size (1024 when zero), no FAT root
+ * 512-byte sector size, a classic block size (1024 when zero, which
+ * minimization leaves zero for its search), no FAT root
  * (the common capability check refuses a label), a 32-bit reproducible
  * epoch, an exact size that holds the two
  * header areas and at least 64 blocks, and the typed QNX6 settings. The
@@ -108,7 +147,10 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "invalid QNX6 geometry, settings or reproducible epoch"));
 	options->sector_bytes = 512;
-	options->allocation_unit_bytes = block;
+	/* Minimization searches an open block size, so it stays zero. */
+	if (options->allocation_unit_bytes != 0 ||
+	    (options->flags & FSIMG_WRITE_MINIMIZE) == 0)
+		options->allocation_unit_bytes = block;
 	return (FSIMG_OK);
 }
 
@@ -165,11 +207,15 @@ qnx6_row_set(qnx6_plan_t *plan, uint64_t id, const qnx6_row_t *row,
 	return (fsimg_array_set(plan->rows, id, raw, error));
 }
 
-/* The shape of an object of length bytes; false past depth 5. */
+/* The shape of an object of length bytes at the chosen block size; false
+ * past depth 5, or before the geometry pass has chosen the block size.
+ */
 bool
 qnx6_object_shape(const qnx6_plan_t *plan, uint64_t length,
     qnx6_shape_t *shape)
 {
+	if (plan->geometry.block_size == 0)
+		return (false);
 	return (qnx6_shape(qnx6_tree_leaves(length, plan->geometry.block_size),
 	    plan->geometry.pointers, shape));
 }
@@ -294,24 +340,57 @@ profile_directory(qnx6_plan_t *plan, uint32_t inode, uint16_t mode,
 	};
 }
 
-/* The whole-block length of a directory of the given slot count. */
-static uint64_t
-directory_bytes(const qnx6_plan_t *plan, uint64_t slots)
+/* The candidate block sizes: the one the options fix, or under
+ * minimization of an open block size every classic one.
+ */
+static void
+open_candidates(const fsimg_write_options_t *options, qnx6_totals_t *totals)
 {
-	uint64_t bytes = slots * QNX6_SLOT_BYTES;
-	uint32_t block = plan->geometry.block_size;
+	unsigned count;
 
-	return ((bytes / block + (bytes % block != 0)) * block);
+	count = 0;
+	if (options->allocation_unit_bytes != 0) {
+		totals->candidates[count++].block_size = options->allocation_unit_bytes;
+	} else {
+		while (count < QNX6_CANDIDATES_MAX) {
+			totals->candidates[count].block_size = candidate_blocks[count];
+			count++;
+		}
+	}
+	for (unsigned i = 0; i < count; i++)
+		totals->candidates[i].usable = true;
+	totals->candidate_count = count;
 }
 
-/* Add an object of length bytes to the block total and return its shape. */
+/* Add an object of length bytes, file or link content when payload, to
+ * every candidate's block totals. A candidate the object does not fit is
+ * no longer usable; the object fails only when none remains.
+ */
 static fsimg_status_t
-add_object(qnx6_plan_t *plan, uint64_t length, qnx6_shape_t *shape,
+add_object(qnx6_totals_t *totals, uint64_t length, bool payload,
     fsimg_error_t *error)
 {
-	if (!qnx6_object_shape(plan, length, shape) ||
-	    !fsimg_add_u64(plan->objects, shape->leaves + shape->indirect,
-	    &plan->objects))
+	qnx6_candidate_t *candidate;
+	qnx6_shape_t shape;
+	bool usable;
+
+	usable = false;
+	for (unsigned i = 0; i < totals->candidate_count; i++) {
+		candidate = &totals->candidates[i];
+		if (!candidate->usable)
+			continue;
+		if (!qnx6_shape(qnx6_tree_leaves(length, candidate->block_size),
+		    candidate->block_size / 4, &shape) ||
+		    !fsimg_add_u64(candidate->objects, shape.leaves + shape.indirect,
+		    &candidate->objects)) {
+			candidate->usable = false;
+			continue;
+		}
+		if (payload)
+			candidate->payload_blocks += shape.leaves;
+		usable = true;
+	}
+	if (!usable)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
 		    "QNX6 object exceeds the block reference space"));
 	return (FSIMG_OK);
@@ -347,7 +426,6 @@ plan_entry(qnx6_plan_t *plan, const fsimg_catalog_entry_t *catalog,
 {
 	const fsimg_entry_t *entry = &catalog->entry;
 	qnx6_row_t row, parent;
-	qnx6_shape_t shape;
 	const char *name;
 	size_t length;
 	fsimg_status_t status;
@@ -417,19 +495,18 @@ plan_entry(qnx6_plan_t *plan, const fsimg_catalog_entry_t *catalog,
 	row.long_name = QNX6_SENTINEL;
 	if (length > QNX6_INLINE_NAME_MAX)
 		row.long_name = (uint32_t)totals->long_names++;
-	if (directory) {
-		row.length = directory_bytes(plan, catalog->children + 2);
-	} else if (entry->kind != FSIMG_ENTRY_FIFO) {
+	if (!directory && entry->kind != FSIMG_ENTRY_FIFO) {
 		row.length = entry->size;
 		plan->common.info.initialized_bytes += entry->size;
 	}
-	status = add_object(plan, row.length, &shape, error);
+	/* A directory's length waits for the block size (place_object). */
+	status = add_object(totals, directory ?
+	    (catalog->children + 2) * QNX6_SLOT_BYTES : row.length, !directory,
+	    error);
 	if (status != FSIMG_OK) {
 		fsimg_error_path(error, entry->path);
 		return (status);
 	}
-	if (!directory)
-		totals->payload_blocks += shape.leaves;
 	return (qnx6_row_set(plan, catalog->id, &row, error));
 }
 
@@ -443,9 +520,9 @@ plan_entries(qnx6_plan_t *plan, qnx6_totals_t *totals, fsimg_error_t *error)
 	fsimg_writer_t *writer = plan->common.writer;
 	const fsimg_catalog_entry_t *catalog;
 	qnx6_row_t root, boot;
-	qnx6_shape_t shape;
 	fsimg_status_t status;
 
+	open_candidates(&writer->options, totals);
 	profile_directory(plan, QNX6_ROOT_INODE, QNX6_ROOT_MODE, &root);
 	status = qnx6_row_set(plan, 0, &root, error);
 	if (status != FSIMG_OK)
@@ -471,15 +548,14 @@ plan_entries(qnx6_plan_t *plan, qnx6_totals_t *totals, fsimg_error_t *error)
 	if (qnx6_boot_synthesized(plan)) {
 		profile_directory(plan, QNX6_BOOT_INODE, QNX6_BOOT_MODE, &boot);
 		boot.slot = totals->boot_slot;
-		boot.length = directory_bytes(plan, 2);
-		status = add_object(plan, boot.length, &shape, error);
+		status = add_object(totals, 2 * QNX6_SLOT_BYTES, false, error);
 		if (status == FSIMG_OK)
 			status = qnx6_row_set(plan, plan->boot_row, &boot, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	root.length = directory_bytes(plan, root.next_slot);
-	status = add_object(plan, root.length, &shape, error);
+	status = add_object(totals, (uint64_t)root.next_slot * QNX6_SLOT_BYTES,
+	    false, error);
 	if (status != FSIMG_OK)
 		return (status);
 	return (qnx6_row_set(plan, 0, &root, error));
@@ -544,22 +620,23 @@ native_groups(const qnx6_system_t *system, uint64_t blocks)
 	return (ladder < cap ? ladder : cap);
 }
 
-/* The system run for N blocks: the inode capacity (the requested one, or
- * the ladder raised to the inodes the catalog needs, rounded up to a whole
+/* The system run for N blocks of block bytes: the inode capacity (the
+ * requested one; otherwise the ladder raised to the inodes the catalog
+ * needs, or exactly those under minimization; rounded up to a whole
  * inode-table block), the bitmap and inode-table shapes, and R.
  */
 static bool
-system_for(const qnx6_plan_t *plan, uint64_t blocks, uint64_t needed,
-    qnx6_system_t *system)
+system_for(const qnx6_plan_t *plan, uint32_t block, uint64_t blocks,
+    uint64_t needed, qnx6_system_t *system)
 {
-	const fsimg_writer_t *writer = plan->common.writer;
-	uint32_t block = plan->geometry.block_size;
+	const fsimg_write_options_t *options = &plan->common.writer->options;
 	uint64_t per_block, capacity, bitmap_bytes;
 
 	per_block = block / QNX6_INODE_BYTES;
-	capacity = writer->options.inode_capacity;
+	capacity = options->inode_capacity;
 	if (capacity == 0) {
-		capacity = ladder_capacity(blocks);
+		capacity = (options->flags & FSIMG_WRITE_MINIMIZE) != 0 ? needed :
+		    ladder_capacity(blocks);
 		if (capacity < needed)
 			capacity = needed;
 	}
@@ -567,10 +644,9 @@ system_for(const qnx6_plan_t *plan, uint64_t blocks, uint64_t needed,
 	if (capacity > UINT32_MAX)
 		return (false);
 	bitmap_bytes = blocks / 8 + (blocks % 8 != 0);
-	if (!qnx6_shape(qnx6_tree_leaves(bitmap_bytes, block), plan->geometry.pointers,
+	if (!qnx6_shape(qnx6_tree_leaves(bitmap_bytes, block), block / 4,
 	    &system->bitmap) ||
-	    !qnx6_shape(capacity / per_block, plan->geometry.pointers,
-	    &system->inodes))
+	    !qnx6_shape(capacity / per_block, block / 4, &system->inodes))
 		return (false);
 	system->capacity = capacity;
 	system->reservation = system->bitmap.leaves + system->bitmap.indirect +
@@ -578,38 +654,131 @@ system_for(const qnx6_plan_t *plan, uint64_t blocks, uint64_t needed,
 	return (true);
 }
 
-/* Whether N blocks hold the system run and its twin, base blocks of
- * objects and long names, the reserve percentage and the requested free
- * space. Raising N by 64 adds 64 blocks against at most fourteen system
- * blocks (twice one bitmap leaf, two inode-table leaves and one indirect
- * block per level of each depth-2 tree) and ceil(64 * reserve / 100)
- * reserve blocks, so the predicate is monotone over that step for reserves
- * up to 76 percent. Above that the binary search still returns an N that
- * fits, which may not be the smallest, and when that N is past the depth-2
- * limit of the system trees the request fails although a smaller N would
- * have fitted.
+/* Whether N blocks of block bytes hold the system run and its twin, base
+ * blocks of objects and long names, the reserve percentage and the
+ * requested free space. Raising N by 64 adds 64 blocks against at most
+ * fourteen system blocks (twice one bitmap leaf, two inode-table leaves and
+ * one indirect block per level of each depth-2 tree) and
+ * ceil(64 * reserve / 100) reserve blocks, so the predicate is monotone
+ * over that step for reserves up to 76 percent. Above that the binary
+ * search still returns an N that fits, which may not be the smallest, and
+ * when that N is past the depth-2 limit of the system trees the request
+ * fails although a smaller N would have fitted.
  */
 static bool
-fits(const qnx6_plan_t *plan, uint64_t blocks, uint64_t base, uint64_t needed,
-    qnx6_system_t *system)
+fits(const qnx6_plan_t *plan, uint32_t block, uint64_t blocks, uint64_t base,
+    uint64_t needed, qnx6_system_t *system)
 {
 	const fsimg_write_options_t *options = &plan->common.writer->options;
 	uint64_t total, reserve, free_blocks;
 
-	if (!system_for(plan, blocks, needed, system))
+	if (!system_for(plan, block, blocks, needed, system))
 		return (false);
 	reserve = blocks * options->reserve_percent / 100 +
 	    (blocks * options->reserve_percent % 100 != 0);
-	free_blocks = options->min_free_bytes / plan->geometry.block_size +
-	    (options->min_free_bytes % plan->geometry.block_size != 0);
+	free_blocks = options->min_free_bytes / block +
+	    (options->min_free_bytes % block != 0);
 	total = system->reservation * 2;
 	return (fsimg_add_u64(total, base, &total) &&
 	    fsimg_add_u64(total, reserve, &total) &&
 	    fsimg_add_u64(total, free_blocks, &total) && total <= blocks);
 }
 
-/* Pass 2: N from the exact slice, or the smallest multiple of 64 blocks
- * that fits; then the system trees must have the native depth of at most 2.
+/* One candidate block size's volume: N from the exact slice, or the
+ * smallest multiple of 64 blocks that fits, which minimization refines to
+ * the smallest fitting N at the alignment step, 4096 / B blocks, within
+ * the last 64-block window and never below 64 blocks. The system trees
+ * must have the native depth of at most 2. Each refinement step evaluated
+ * charges one work unit.
+ */
+static fsimg_status_t
+size_candidate(qnx6_plan_t *plan, const qnx6_totals_t *totals,
+    const qnx6_candidate_t *candidate, qnx6_sizing_t *out, fsimg_error_t *error)
+{
+	const fsimg_write_options_t *options = &plan->common.writer->options;
+	uint32_t block = candidate->block_size;
+	uint64_t needed = totals->inodes;
+	uint64_t blocks, low, high, middle, end, step;
+	fsimg_status_t status;
+
+	bzero(out, sizeof(*out));
+	out->candidate = candidate;
+	if (!qnx6_shape(totals->long_names, block / 4, &out->names) ||
+	    !fsimg_add_u64(candidate->objects,
+	    out->names.leaves + out->names.indirect, &out->base))
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
+		    "QNX6 content exceeds the block reference space"));
+	if (options->volume_bytes != 0) {
+		/* E = floor(V / 4096) * 4096 and N = (E - 16384) / B. */
+		end = options->volume_bytes / QNX6_HEADER_AREA * QNX6_HEADER_AREA;
+		blocks = (end - QNX6_DATA_ORIGIN - QNX6_HEADER_AREA) / block;
+		if (blocks > UINT32_MAX)
+			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_WRITER,
+			    "QNX6 volume size exceeds the 32-bit block count"));
+		if (!fits(plan, block, blocks, out->base, needed, &out->system))
+			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_WRITER,
+			    "QNX6 content and reserve do not fit the volume size"));
+		out->volume_bytes = options->volume_bytes;
+	} else {
+		/* Search k for N = 64k over the 32-bit reference space. */
+		low = 1;
+		high = UINT32_MAX / 64;
+		if (!fits(plan, block, high * 64, out->base, needed, &out->system))
+			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
+			    FSIMG_OP_WRITER,
+			    "QNX6 content and reserve exceed the largest volume"));
+		while (low < high) {
+			middle = low + (high - low) / 2;
+			if (fits(plan, block, middle * 64, out->base, needed,
+			    &out->system))
+				high = middle;
+			else
+				low = middle + 1;
+		}
+		blocks = low * 64;
+		/* The search rejected blocks - 64, and an exact size must hold
+		 * 64 blocks, so the window is (blocks - 64, blocks) when
+		 * blocks exceeds 64 and empty otherwise.
+		 */
+		if ((options->flags & FSIMG_WRITE_MINIMIZE) != 0 && blocks > 64) {
+			step = QNX6_HEADER_AREA / block;
+			for (uint64_t n = blocks - 64 + step; n < blocks; n += step) {
+				status = fsimg_session_charge(
+				    &plan->common.writer->session, 0, 0, 1, error);
+				if (status != FSIMG_OK)
+					return (status);
+				if (fits(plan, block, n, out->base, needed,
+				    &out->system)) {
+					blocks = n;
+					break;
+				}
+			}
+		}
+		/* Recompute the system run of the chosen N: the last probe
+		 * may have been a rejected one.
+		 */
+		if (!fits(plan, block, blocks, out->base, needed, &out->system))
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_WRITER, "QNX6 size search lost its fit"));
+		out->volume_bytes = QNX6_DATA_ORIGIN + blocks * block +
+		    QNX6_HEADER_AREA;
+	}
+	if (out->system.bitmap.depth > QNX6_SYSTEM_DEPTH_MAX ||
+	    out->system.inodes.depth > QNX6_SYSTEM_DEPTH_MAX)
+		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
+		    "QNX6 volume is too large for the classic system trees"));
+	out->blocks = blocks;
+	return (FSIMG_OK);
+}
+
+/* Pass 2: the geometry. The default policy sizes its one candidate block
+ * size; minimization sizes every usable candidate and keeps the smallest
+ * volume, the earliest in candidate order on a tie, so it agrees with the
+ * default whenever that is already minimal. A candidate that cannot hold
+ * the catalog is dropped; when none remains, the first one's reason is the
+ * error. Each candidate evaluated charges one work unit.
  */
 static fsimg_status_t
 choose_geometry(qnx6_plan_t *plan, const qnx6_totals_t *totals,
@@ -617,67 +786,67 @@ choose_geometry(qnx6_plan_t *plan, const qnx6_totals_t *totals,
 {
 	fsimg_writer_t *writer = plan->common.writer;
 	qnx6_geometry_t *g = &plan->geometry;
-	qnx6_system_t system;
-	uint64_t base, needed, blocks, low, high, middle, end;
+	qnx6_sizing_t sizing, best;
+	fsimg_error_t detail, first_failure;
+	uint64_t needed;
+	fsimg_status_t status;
+	bool found, failed;
 
-	if (!qnx6_shape(totals->long_names, g->pointers, &plan->names) ||
-	    !fsimg_add_u64(plan->objects, plan->names.leaves + plan->names.indirect,
-	    &base))
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
-		    "QNX6 content exceeds the block reference space"));
 	needed = totals->inodes;
 	if (writer->options.inode_capacity != 0 &&
 	    writer->options.inode_capacity < needed)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
 		    "QNX6 inode capacity is smaller than the number of entries"));
-	if (writer->options.volume_bytes != 0) {
-		/* E = floor(V / 4096) * 4096 and N = (E - 16384) / B. */
-		end = writer->options.volume_bytes / QNX6_HEADER_AREA *
-		    QNX6_HEADER_AREA;
-		blocks = (end - QNX6_DATA_ORIGIN - QNX6_HEADER_AREA) /
-		    g->block_size;
-		if (blocks > UINT32_MAX)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_WRITER,
-			    "QNX6 volume size exceeds the 32-bit block count"));
-		if (!fits(plan, blocks, base, needed, &system))
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_WRITER,
-			    "QNX6 content and reserve do not fit the volume size"));
-		g->volume_bytes = writer->options.volume_bytes;
-	} else {
-		/* Search k for N = 64k over the 32-bit reference space. */
-		low = 1;
-		high = UINT32_MAX / 64;
-		if (!fits(plan, high * 64, base, needed, &system))
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_WRITER,
-			    "QNX6 content and reserve exceed the largest volume"));
-		while (low < high) {
-			middle = low + (high - low) / 2;
-			if (fits(plan, middle * 64, base, needed, &system))
-				high = middle;
-			else
-				low = middle + 1;
+	bzero(&best, sizeof(best));
+	bzero(&first_failure, sizeof(first_failure));
+	found = false;
+	failed = false;
+	for (unsigned i = 0; i < totals->candidate_count; i++) {
+		if (!totals->candidates[i].usable)
+			continue;
+		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
+		if (status != FSIMG_OK)
+			return (status);
+		bzero(&detail, sizeof(detail));
+		status = size_candidate(plan, totals, &totals->candidates[i],
+		    &sizing, &detail);
+		if (status == FSIMG_ERANGE) {
+			if (!failed)
+				first_failure = detail;
+			failed = true;
+			continue;
 		}
-		blocks = low * 64;
-		if (!fits(plan, blocks, base, needed, &system))
-			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-			    FSIMG_OP_WRITER, "QNX6 size search lost its fit"));
-		end = QNX6_DATA_ORIGIN + blocks * g->block_size + QNX6_HEADER_AREA;
-		g->volume_bytes = end;
+		if (status != FSIMG_OK) {
+			if (error != NULL)
+				*error = detail;
+			return (status);
+		}
+		if (!found || sizing.volume_bytes < best.volume_bytes)
+			best = sizing;
+		found = true;
 	}
-	if (system.bitmap.depth > QNX6_SYSTEM_DEPTH_MAX ||
-	    system.inodes.depth > QNX6_SYSTEM_DEPTH_MAX)
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
-		    "QNX6 volume is too large for the classic system trees"));
-	g->second_header = end - QNX6_HEADER_AREA;
-	g->blocks = (uint32_t)blocks;
-	g->inode_count = (uint32_t)system.capacity;
-	g->reservation = (uint32_t)system.reservation;
-	g->groups = native_groups(&system, blocks);
-	plan->bitmap = system.bitmap;
-	plan->inodes = system.inodes;
+	if (!found && !failed)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "QNX6 planning has no candidate block size"));
+	if (!found) {
+		if (error != NULL)
+			*error = first_failure;
+		return (first_failure.status);
+	}
+	g->block_size = best.candidate->block_size;
+	g->pointers = g->block_size / 4;
+	g->volume_bytes = best.volume_bytes;
+	g->second_header = best.volume_bytes / QNX6_HEADER_AREA *
+	    QNX6_HEADER_AREA - QNX6_HEADER_AREA;
+	g->blocks = (uint32_t)best.blocks;
+	g->inode_count = (uint32_t)best.system.capacity;
+	g->reservation = (uint32_t)best.system.reservation;
+	g->groups = native_groups(&best.system, best.blocks);
+	plan->bitmap = best.system.bitmap;
+	plan->inodes = best.system.inodes;
+	plan->names = best.names;
+	plan->objects = best.candidate->objects;
+	plan->payload_blocks = best.candidate->payload_blocks;
 	plan->used_inodes = (uint32_t)needed;
 	return (FSIMG_OK);
 }
@@ -699,9 +868,14 @@ place_object(qnx6_plan_t *plan, uint64_t id, uint64_t *next,
 		status = qnx6_row_get(plan, id, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (!qnx6_object_shape(plan, row.length, &shape) ||
-	    ((row.mode & QNX6_MODE_TYPE) == QNX6_MODE_DIRECTORY &&
-	    (uint64_t)row.next_slot * QNX6_SLOT_BYTES > row.length))
+	/* A directory takes the whole blocks of its slots, all assigned by
+	 * the entries pass, at the chosen block size.
+	 */
+	if ((row.mode & QNX6_MODE_TYPE) == QNX6_MODE_DIRECTORY)
+		row.length = qnx6_tree_leaves((uint64_t)row.next_slot *
+		    QNX6_SLOT_BYTES, plan->geometry.block_size) *
+		    plan->geometry.block_size;
+	if (!qnx6_object_shape(plan, row.length, &shape))
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
 		    "QNX6 row disagrees with its planned storage"));
 	row.first = (uint32_t)*next;
@@ -770,8 +944,6 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 	info->required_io_flags = FSIMG_IO_WRITE;
 	if ((writer->options.flags & FSIMG_WRITE_DURABLE) != 0)
 		info->required_io_flags |= FSIMG_IO_DURABLE;
-	plan->geometry.block_size = writer->options.allocation_unit_bytes;
-	plan->geometry.pointers = plan->geometry.block_size / 4;
 	plan->geometry.big_endian = writer->options.byte_order == FSIMG_BYTE_ORDER_BIG;
 
 	/* Header and absent inode times: the epoch when reproducible,
@@ -808,10 +980,13 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 	info->volume_bytes = g->volume_bytes;
 	info->sector_bytes = 512;
 	info->allocation_unit_bytes = g->block_size;
+	info->allocation_units = g->blocks;
+	info->inode_capacity = g->inode_count;
+	info->free_inodes = g->inode_count - plan->used_inodes;
 	info->allocated_bytes = (uint64_t)plan->allocated * g->block_size;
 	info->free_bytes = (uint64_t)(g->blocks - plan->allocated) * g->block_size;
 	info->metadata_bytes = QNX6_DATA_ORIGIN + QNX6_HEADER_AREA +
-	    ((uint64_t)plan->allocated - totals.payload_blocks) * g->block_size;
+	    ((uint64_t)plan->allocated - plan->payload_blocks) * g->block_size;
 	info->scratch_bytes = writer->ctx->stats.scratch_bytes;
 	writer->plan = &plan->common;
 	return (FSIMG_OK);

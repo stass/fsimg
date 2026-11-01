@@ -1,5 +1,18 @@
 fsimg 0.1.0 (unreleased)
 
+`c -M`, and the library's `FSIMG_WRITE_MINIMIZE`, choose the geometry
+settings left open that give the smallest volume instead of the first legal
+one: every cluster size and, on FAT12/16, the smallest root that holds the
+root's entries; for QNX6 every classic block size, an inode table of exactly
+the entries and the smallest block count at the 4096-byte step. Explicit
+settings and the free reserve still hold, ties keep the default choice, and
+`-M` conflicts with `-s` and with a fixed `gpt:disk` or `mbr:disk`. One pass
+over the layout counts every candidate cluster size, so automatic FAT and
+exFAT sizing no longer traverses the catalog once per candidate, and each
+candidate evaluated charges one work unit. The plan reports the volume's
+clusters or blocks as `allocation_units` and, for QNX6, `inode_capacity` and
+`free_inodes`, in `fsimg_plan_info_t`, `c -n` and its JSON record.
+
 `x` and `t` accept several members and select the union of their
 subtrees in one walk of the image; an entry that nested, repeated or
 aliased members select, such as a FAT name given in another case or by its

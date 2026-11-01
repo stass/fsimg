@@ -1176,9 +1176,350 @@ test_scale(void)
 	fixture_close(&fixture);
 }
 
+/* Short names keep the root at one slot per file. Provider 1 supplies the
+ * same nonzero pattern at every size, so readback checks more than holes.
+ */
+static void
+add_minimize_files(writer_fixture_t *fixture, unsigned count, uint64_t size,
+    bool reverse)
+{
+	fsimg_entry_t entry = { .kind = FSIMG_ENTRY_FILE, .size = size };
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 1 };
+	char path[32];
+
+	for (unsigned i = 0; i < count; i++) {
+		snprintf(path, sizeof(path), "/F%07u", reverse ? count - i - 1 : i);
+		entry.path = path;
+		CHECK(fsimg_writer_add(fixture->writer, &entry, &source, NULL) == FSIMG_OK);
+	}
+}
+
+static void
+check_minimize_image(writer_fixture_t *fixture, memory_sink_t *sink,
+    const fsimg_plan_info_t *plan, unsigned count, uint64_t size)
+{
+	fsimg_io_t *input;
+	fsimg_reader_t *reader;
+	fsimg_volume_info_t volume;
+	fsimg_verify_report_t report;
+	const fsimg_entry_t *entry;
+	unsigned char buffer[8192];
+	uint64_t offset;
+	size_t length;
+
+	memory_io(fixture, sink, false, &input);
+	CHECK(fsimg_reader_open(fixture->ctx, input, NULL, &reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(reader, &volume, NULL) == FSIMG_OK);
+	CHECK(plan->allocation_units == volume.allocation_units);
+	CHECK(plan->inode_capacity == 0 && plan->free_inodes == 0);
+	CHECK(fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete && report.files == count);
+	fsimg_reader_free(reader);
+	CHECK(fsimg_reader_open(fixture->ctx, input, NULL, &reader, NULL) == FSIMG_OK);
+	for (unsigned file = 0; file < count; file++) {
+		CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_OK);
+		CHECK(entry->kind == FSIMG_ENTRY_FILE && entry->size == size);
+		for (offset = 0; offset < size; offset += length) {
+			CHECK(fsimg_reader_read_at(reader, offset, buffer,
+			    sizeof(buffer), &length, NULL) == FSIMG_OK);
+			CHECK(length > 0);
+			for (size_t i = 0; i < length; i++)
+				CHECK(buffer[i] == (unsigned char)payload[
+				    (offset + i) % (sizeof(payload) - 1)]);
+		}
+	}
+	CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_DONE);
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+}
+
+static void
+emit_minimize_image(writer_fixture_t *fixture, memory_sink_t *sink,
+    fsimg_plan_info_t *info)
+{
+	const fsimg_plan_t *plan;
+	fsimg_io_t *output;
+
+	CHECK(fsimg_writer_plan(fixture->writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, info, NULL) == FSIMG_OK);
+	sink->length = info->volume_bytes;
+	sink->bytes = malloc((size_t)sink->length);
+	CHECK(sink->bytes != NULL);
+	memset(sink->bytes, 0xa5, (size_t)sink->length);
+	memory_io(fixture, sink, true, &output);
+	CHECK(fsimg_writer_emit(fixture->writer, output, NULL) == FSIMG_OK);
+	fsimg_io_free(output);
+}
+
+/* For C-byte clusters and n clusters, size is n*C + reserved + root +
+ * 2*ceil((n+2)*bits/4096)*512. FAT12 ties at 8/16/32 KiB: 8 KiB wins.
+ * FAT16/32 cannot trade below the type minimum plus its 16-cluster margin.
+ */
+static void
+test_minimize_large_files(void)
+{
+	static const struct {
+		const char *format;
+		uint64_t file_bytes, default_bytes, minimized_bytes, clusters;
+		uint32_t unit;
+	} cases[] = {
+		{ .format = "fat12", .file_bytes = 1048576,
+		  .default_bytes = 2121216, .minimized_bytes = 2099200,
+		  .clusters = 256, .unit = 8192 },
+		{ .format = "fat16", .file_bytes = 16777216,
+		  .default_bytes = 33703424, .minimized_bytes = 33589248,
+		  .clusters = 8192, .unit = 4096 },
+		{ .format = "fat32", .file_bytes = 33554432,
+		  .default_bytes = 68175360, .minimized_bytes = 67655680,
+		  .clusters = 65541, .unit = 1024 }
+	};
+	fsimg_write_options_t options;
+	writer_fixture_t fixture;
+	memory_sink_t sinks[3];
+	fsimg_plan_info_t info[3];
+
+	for (unsigned c = 0; c < 3; c++) {
+		for (unsigned pass = 0; pass < 3; pass++) {
+			fsimg_write_options_init(&options);
+			options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+			if (pass != 0)
+				options.flags |= FSIMG_WRITE_MINIMIZE;
+			bzero(&sinks[pass], sizeof(sinks[pass]));
+			fixture_open(&fixture, cases[c].format, &options, pass == 2 ? 16 : 1);
+			add_minimize_files(&fixture, 2, cases[c].file_bytes, pass == 2);
+			emit_minimize_image(&fixture, &sinks[pass], &info[pass]);
+			check_minimize_image(&fixture, &sinks[pass], &info[pass],
+			    2, cases[c].file_bytes);
+			fixture_close(&fixture);
+		}
+		CHECK(info[0].volume_bytes == cases[c].default_bytes);
+		CHECK(info[1].volume_bytes == cases[c].minimized_bytes);
+		CHECK(info[1].allocation_unit_bytes == cases[c].unit);
+		CHECK(info[1].allocation_units == cases[c].clusters);
+		CHECK(info[1].volume_bytes < info[0].volume_bytes);
+		CHECK(info[1].allocation_unit_bytes != info[0].allocation_unit_bytes);
+		CHECK(info[1].scratch_bytes == info[0].scratch_bytes);
+		CHECK(sinks[1].length == sinks[2].length);
+		CHECK(bcmp(sinks[1].bytes, sinks[2].bytes, (size_t)sinks[1].length) == 0);
+		for (unsigned pass = 0; pass < 3; pass++)
+			free(sinks[pass].bytes);
+		if (c != 2) {
+			/* Fixing the root still leaves cluster selection open. */
+			const fsimg_plan_t *plan;
+
+			options.fat_root_entries = 512;
+			fixture_open(&fixture, cases[c].format, &options, 1);
+			add_minimize_files(&fixture, 2, cases[c].file_bytes, false);
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+			CHECK(fsimg_plan_get_info(plan, &info[0], NULL) == FSIMG_OK);
+			CHECK(info[0].allocation_unit_bytes == cases[c].unit);
+			CHECK(info[0].volume_bytes == cases[c].minimized_bytes + 31 * 512);
+			fixture_close(&fixture);
+		}
+	}
+}
+
+/* A wide root of one-byte files favors 512-byte clusters. Fixing the root
+ * makes the default already minimal, including FAT12/16's root dimension.
+ */
+static void
+test_minimize_tiny_files_and_constraints(void)
+{
+	static const char *const formats[] = { "fat12", "fat16", "fat32" };
+	fsimg_write_options_t options;
+	writer_fixture_t fixture;
+	memory_sink_t sinks[2];
+	fsimg_plan_info_t info[2];
+	fat_geometry_t geometry;
+
+	for (unsigned c = 0; c < 3; c++) {
+		for (unsigned pass = 0; pass < 2; pass++) {
+			fsimg_write_options_init(&options);
+			options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+			if (pass != 0)
+				options.flags |= FSIMG_WRITE_MINIMIZE;
+			options.fat_root_entries = c == 2 ? 0 : 512;
+			bzero(&sinks[pass], sizeof(sinks[pass]));
+			fixture_open(&fixture, formats[c], &options, 1);
+			add_minimize_files(&fixture, 256, 1, pass != 0);
+			emit_minimize_image(&fixture, &sinks[pass], &info[pass]);
+			CHECK(info[pass].allocation_unit_bytes == 512);
+			check_minimize_image(&fixture, &sinks[pass], &info[pass], 256, 1);
+			fixture_close(&fixture);
+		}
+		CHECK(sinks[0].length == sinks[1].length);
+		CHECK(bcmp(sinks[0].bytes, sinks[1].bytes, (size_t)sinks[0].length) == 0);
+		free(sinks[0].bytes);
+		free(sinks[1].bytes);
+
+		/* A fixed cluster still permits root minimization. */
+		options.flags |= FSIMG_WRITE_MINIMIZE;
+		options.allocation_unit_bytes = 2048;
+		options.fat_root_entries = 0;
+		options.min_free_bytes = 12345;
+		bzero(&sinks[0], sizeof(sinks[0]));
+		fixture_open(&fixture, formats[c], &options, 1);
+		add_minimize_files(&fixture, 2, 1, false);
+		emit_minimize_image(&fixture, &sinks[0], &info[0]);
+		CHECK(info[0].allocation_unit_bytes == 2048);
+		CHECK(info[0].free_bytes >= 12345);
+		CHECK(fsimg_fat_geometry_decode(sinks[0].bytes, sinks[0].length,
+		    &geometry, NULL) == FSIMG_OK);
+		if (c != 2)
+			CHECK(geometry.root_entries == 16);
+		check_minimize_image(&fixture, &sinks[0], &info[0], 2, 1);
+		fixture_close(&fixture);
+		free(sinks[0].bytes);
+	}
+}
+
+static void
+test_minimize_search_limits(void)
+{
+	/* Measure default planning, repeat at that work limit, require the
+	 * larger search to exhaust it, then give minimization the default's
+	 * measured memory and scratch peaks without a work cap.
+	 */
+	static const char *const formats[] = { "fat12", "fat16", "fat32" };
+	fsimg_write_options_t options;
+	writer_fixture_t fixture;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_stats_t stats;
+	fsimg_error_t error;
+	uint64_t before, work = 0, scratch = 0, memory = 0, planned_scratch = 0;
+
+	for (unsigned c = 0; c < 3; c++) {
+		for (unsigned pass = 0; pass < 4; pass++) {
+			fsimg_write_options_init(&options);
+			if (pass >= 2)
+				options.flags |= FSIMG_WRITE_MINIMIZE;
+			fixture_open(&fixture, formats[c], &options, 1);
+			add_minimize_files(&fixture, 2, 1, false);
+			before = fixture.writer->session.progress.work;
+			if (pass == 1 || pass == 2)
+				fixture.ctx->options.max_work = before + work;
+			if (pass == 3) {
+				fixture.ctx->options.memory_bytes = memory;
+				fixture.ctx->options.scratch_bytes = scratch;
+			}
+			if (pass == 2) {
+				CHECK(fsimg_writer_plan(fixture.writer, &plan, &error) == FSIMG_ELIMIT);
+				CHECK(error.resource == FSIMG_RESOURCE_WORK && plan == NULL);
+			} else {
+				CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+				CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+				if (pass == 0) {
+					work = fixture.writer->session.progress.work - before;
+					CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+					memory = stats.memory_peak;
+					scratch = stats.scratch_peak;
+					planned_scratch = info.scratch_bytes;
+				}
+				if (pass == 3) {
+					CHECK(info.scratch_bytes == planned_scratch);
+					CHECK(fixture.writer->session.progress.work - before == work + 6);
+				}
+			}
+			fixture_close(&fixture);
+		}
+	}
+}
+
+static void
+test_minimize_rejects_exact_sizes(void)
+{
+	static const char *const formats[] = {
+		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs"
+	};
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_writer_t *writer;
+	fsimg_error_t error;
+	fsimg_layer_options_t layers;
+	const char *const stacks[] = { "fat16/mbr", "fat16/gpt" };
+
+	fixture_open(&fixture, "fat12", NULL, 1);
+	for (unsigned c = 0; c < sizeof(formats) / sizeof(formats[0]); c++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_MINIMIZE;
+		options.volume_bytes = 64 * 1024 * 1024;
+		CHECK(fsimg_writer_new(fixture.ctx, formats[c], &options,
+		    &writer, &error) == FSIMG_EINVAL);
+		CHECK(writer == NULL);
+		CHECK(strstr(error.message, "minimization conflicts") != NULL);
+	}
+	options.volume_bytes = 0;
+	options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+	for (unsigned i = 0; i < 2; i++) {
+		fsimg_layer_options_init(&layers);
+		if (i == 0)
+			layers.mbr_disk_bytes = 64 * 1024 * 1024;
+		else
+			layers.gpt_disk_bytes = 64 * 1024 * 1024;
+		options.layers = &layers;
+		CHECK(fsimg_writer_new(fixture.ctx, stacks[i], &options,
+		    &writer, &error) == FSIMG_EINVAL);
+		CHECK(writer == NULL);
+		if (strstr(error.message, "minimization conflicts") == NULL)
+			fprintf(stderr, "%s: %s\n", stacks[i], error.message);
+		CHECK(strstr(error.message, "minimization conflicts") != NULL);
+		options.flags &= ~(uint32_t)FSIMG_WRITE_MINIMIZE;
+		CHECK(fsimg_writer_new(fixture.ctx, stacks[i], &options,
+		    &writer, NULL) == FSIMG_OK);
+		fsimg_writer_free(writer);
+		options.flags |= FSIMG_WRITE_MINIMIZE;
+	}
+	fixture_close(&fixture);
+}
+
+static void
+create_minimized_external(const char *directory, const char *format)
+{
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	uint64_t size, remaining;
+	size_t length;
+	unsigned char buffer[32768];
+	int parent, fd;
+
+	size = strcmp(format, "fat12") == 0 ? 1048576 :
+	    strcmp(format, "fat16") == 0 ? 16777216 : 33554432;
+	fsimg_write_options_init(&options);
+	options.flags |= FSIMG_WRITE_MINIMIZE | FSIMG_WRITE_REPRODUCIBLE;
+	fixture_open(&fixture, format, &options, 1);
+	add_minimize_files(&fixture, 2, size, false);
+	parent = open(directory, O_RDONLY | O_DIRECTORY);
+	CHECK(parent != -1);
+	CHECK(fsimg_writer_write_at(fixture.writer, parent, "writer.img", NULL) == FSIMG_OK);
+	fd = openat(parent, "payload", O_WRONLY | O_CREAT | O_EXCL, 0600);
+	CHECK(fd != -1);
+	for (remaining = size; remaining != 0; remaining -= length) {
+		length = remaining < sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
+		for (size_t i = 0; i < length; i++)
+			buffer[i] = (unsigned char)payload[(size - remaining + i) %
+			    (sizeof(payload) - 1)];
+		CHECK(write(fd, buffer, length) == (ssize_t)length);
+	}
+	CHECK(close(fd) == 0);
+	CHECK(close(parent) == 0);
+	fixture_close(&fixture);
+}
+
 int
 main(int argc, char **argv)
 {
+	if (argc == 4 && strcmp(argv[1], "--create-minimized") == 0) {
+		create_minimized_external(argv[2], argv[3]);
+		return (0);
+	}
+	if (argc == 2 && strcmp(argv[1], "--minimize") == 0) {
+		test_minimize_large_files();
+		test_minimize_tiny_files_and_constraints();
+		test_minimize_search_limits();
+		test_minimize_rejects_exact_sizes();
+		return (0);
+	}
 	/* Measurement records only on stdout; test/baseline.sh parses them. */
 	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
 		baseline_tree("fat12-tree", "fat12");
@@ -1220,6 +1561,10 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_minimize_large_files();
+	test_minimize_tiny_files_and_constraints();
+	test_minimize_search_limits();
+	test_minimize_rejects_exact_sizes();
 	test_roundtrip("fat12");
 	test_roundtrip("fat16");
 	test_roundtrip("fat32");

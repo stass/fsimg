@@ -627,6 +627,9 @@ send_plan(const fsimg_plan_info_t *info, fsimg_error_t *error)
 	bcopy(info->format, raw + FSIMG_WIRE_PLAN_FORMAT, strlen(info->format));
 	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_OUTPUT, info->output_bytes);
 	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_PADDING, info->padding_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_UNITS, info->allocation_units);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_INODES, info->inode_capacity);
+	fsimg_store_le64(raw + FSIMG_WIRE_PLAN_FREE_INODES, info->free_inodes);
 	bcopy(info->codec_version, raw + FSIMG_WIRE_PLAN_CODEC,
 	    strnlen(info->codec_version, FSIMG_WIRE_PLAN_CODEC_BYTES - 1));
 	return (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PLAN, raw,

@@ -21,6 +21,7 @@
 #include "internal.h"
 #include "meta.h"
 #include "test.h"
+#include "write.h"
 
 /*
  * QNX6 writer tests. Images are created through the public API and checked
@@ -2179,9 +2180,379 @@ compare_native(const char *path)
 	return (differences == 0 ? 0 : 1);
 }
 
+static const spec_t minimize_large[] = {
+	{ "/big.bin", FSIMG_ENTRY_FILE, 4194304, 8 },
+	{ "/zero.bin", FSIMG_ENTRY_FILE, 4194304, 0 }
+};
+
+static void
+add_minimize_large(fixture_t *fixture, bool reverse)
+{
+	for (unsigned i = 0; i < 2; i++)
+		CHECK(add_one(fixture, &minimize_large[reverse ? 1 - i : i],
+		    NULL) == FSIMG_OK);
+}
+
+/* At fixed inode capacity the immediately preceding aligned N cannot fit.
+ * The checker derives content from the blocks it actually walked; only the
+ * bitmap tree changes when testing the shorter volume.
+ */
+static void
+check_minimize_block_count(const chk_t *c, const fsimg_write_options_t *options)
+{
+	uint64_t previous, bitmap, table, run, content, reserve, free_blocks;
+
+	CHECK(c->blocks >= 64 && c->blocks % (4096 / c->block) == 0);
+	if (c->blocks == 64)
+		return;
+	previous = c->blocks - 4096 / c->block;
+	bitmap = ((previous + 7) / 8 + c->block - 1) / c->block;
+	table = c->capacity / (c->block / 128);
+	run = bitmap + chk_indirect(bitmap, c->pointers, chk_depth(bitmap, c->pointers)) +
+	    table + chk_indirect(table, c->pointers, chk_depth(table, c->pointers));
+	content = c->allocated - 2 * (uint64_t)c->reservation;
+	reserve = (previous * options->reserve_percent + 99) / 100;
+	free_blocks = (options->min_free_bytes + c->block - 1) / c->block;
+	CHECK(2 * run + content + reserve + free_blocks > previous);
+}
+
+static void
+check_minimize_plan(fixture_t *fixture, memory_sink_t *sink, const chk_t *c,
+    fsimg_plan_info_t *info)
+{
+	const fsimg_plan_t *plan;
+	fsimg_volume_info_t volume;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+
+	CHECK(fsimg_writer_plan(fixture->writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, info, NULL) == FSIMG_OK);
+	CHECK(info->allocation_units == c->blocks);
+	CHECK(info->inode_capacity == c->capacity);
+	CHECK(info->inode_capacity - info->free_inodes == c->used_inodes);
+	CHECK(memory_io(fixture, sink, false, &input) == FSIMG_OK);
+	CHECK(fsimg_reader_open(fixture->ctx, input, NULL, &reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(reader, &volume, NULL) == FSIMG_OK);
+	CHECK(info->allocation_units == volume.allocation_units);
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+}
+
+/* Two 4 MiB files: 1024-byte blocks need 4112 blocks per file including
+ * indirects. Default N=8832, capacity=1104, R=141. At 2048 bytes each file
+ * takes 2052 blocks; root and .boot add two, R=2, and ceil(.03*N) reserve
+ * makes 4238 the first fitting even N. Size is 16384+N*B = 8695808.
+ */
+static void
+test_minimize_large_files(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sinks[4];
+	fsimg_plan_info_t info[4];
+	chk_expect_t expect;
+	const chk_entry_t *entry;
+	chk_t c;
+
+	for (unsigned pass = 0; pass < 4; pass++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+		if (pass != 0)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+		expect_defaults(&expect, &options);
+		fixture_open_with(&fixture, "qnx6", &options,
+		    pass < 2 ? 1 : 1024, pass != 3);
+		add_minimize_large(&fixture, pass == 2);
+		CHECK(emit_memory(&fixture, &sinks[pass], NULL) == FSIMG_OK);
+		chk_image(&c, sinks[pass].bytes, sinks[pass].length, &expect);
+		CHECK(c.errors == 0 && c.count == 4 && c.used_inodes == 4);
+		for (unsigned i = 0; i < 2; i++) {
+			entry = chk_find(&c, minimize_large[i].path);
+			CHECK(entry != NULL && entry->size == minimize_large[i].size);
+			CHECK(entry->digest == expected_digest(minimize_large[i].source,
+			    minimize_large[i].size));
+		}
+		check_minimize_plan(&fixture, &sinks[pass], &c, &info[pass]);
+		if (pass != 0) {
+			CHECK(c.block == 2048 && c.blocks == 4238 && c.capacity == 16);
+			CHECK(info[pass].free_inodes == 12);
+			check_minimize_block_count(&c, &options);
+		}
+		chk_free(&c);
+		check_reader(&fixture, &sinks[pass], 3);
+		fixture_close(&fixture);
+	}
+	CHECK(info[0].allocation_unit_bytes == 1024 && info[0].allocation_units == 8832);
+	CHECK(info[0].volume_bytes == 9060352 && info[1].volume_bytes == 8695808);
+	CHECK(info[1].volume_bytes < info[0].volume_bytes);
+	CHECK(info[1].scratch_bytes == info[0].scratch_bytes);
+	for (unsigned pass = 2; pass < 4; pass++) {
+		CHECK(sinks[pass].length == sinks[1].length);
+		CHECK(bcmp(sinks[pass].bytes, sinks[1].bytes, (size_t)sinks[1].length) == 0);
+	}
+	for (unsigned pass = 0; pass < 4; pass++)
+		free(sinks[pass].bytes);
+}
+
+static void
+test_minimize_constraints(void)
+{
+	static const spec_t small = { "/big.bin", FSIMG_ENTRY_FILE, 49152, 8 };
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink, identical[2];
+	fsimg_plan_info_t info;
+	chk_expect_t expect;
+	chk_t c;
+	uint64_t reserve;
+
+	for (unsigned scenario = 0; scenario < 3; scenario++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_REPRODUCIBLE | FSIMG_WRITE_MINIMIZE;
+		options.min_free_bytes = 12345;
+		options.reserve_percent = 25;
+		if (scenario != 1)
+			options.allocation_unit_bytes = 1024;
+		if (scenario != 0)
+			options.inode_capacity = 101;
+		expect_defaults(&expect, &options);
+		fixture_open(&fixture, &options);
+		add_minimize_large(&fixture, false);
+		CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+		chk_image(&c, sink.bytes, sink.length, &expect);
+		CHECK(c.errors == 0);
+		if (scenario != 1)
+			CHECK(c.block == 1024);
+		else
+			CHECK(c.block == 2048 && c.blocks == 5506 && sink.length == 11292672);
+		if (scenario == 0)
+			CHECK(c.capacity == 8);
+		else
+			CHECK(c.capacity == (101 + c.block / 128 - 1) /
+			    (c.block / 128) * (c.block / 128));
+		reserve = ((uint64_t)c.blocks * 25 + 99) / 100;
+		CHECK((uint64_t)(c.blocks - c.allocated) >= reserve +
+		    (12345 + c.block - 1) / c.block);
+		check_minimize_block_count(&c, &options);
+		check_minimize_plan(&fixture, &sink, &c, &info);
+		chk_free(&c);
+		check_reader(&fixture, &sink, 3);
+		fixture_close(&fixture);
+		free(sink.bytes);
+	}
+	/* Fixed block and inode capacity, with content fitting the 64-block
+	 * floor: both policies produce the same 81920-byte image.
+	 */
+	for (unsigned pass = 0; pass < 2; pass++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+		if (pass != 0)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+		options.allocation_unit_bytes = 1024;
+		options.inode_capacity = 8;
+		expect_defaults(&expect, &options);
+		fixture_open(&fixture, &options);
+		CHECK(add_one(&fixture, &small, NULL) == FSIMG_OK);
+		CHECK(emit_memory(&fixture, &identical[pass], NULL) == FSIMG_OK);
+		chk_image(&c, identical[pass].bytes, identical[pass].length, &expect);
+		CHECK(c.errors == 0 && c.blocks == 64 && c.block == 1024 && c.capacity == 8);
+		CHECK(identical[pass].length == 81920);
+		check_minimize_plan(&fixture, &identical[pass], &c, &info);
+		chk_free(&c);
+		check_reader(&fixture, &identical[pass], 2);
+		fixture_close(&fixture);
+	}
+	CHECK(bcmp(identical[0].bytes, identical[1].bytes, 81920) == 0);
+	free(identical[0].bytes);
+	free(identical[1].bytes);
+}
+
+/* The default fixes B=1024. With 256 one-byte files minimization selects
+ * the smallest classic block, B=512: 274 object blocks, a 67-block system
+ * run and its twin, and 13 reserve blocks fit at N=424 (8-block steps).
+ * 258 used inodes round to 260. At B=1024 the default needs N=384.
+ */
+static void
+test_minimize_tiny_files(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sinks[3];
+	fsimg_plan_info_t info;
+	chk_expect_t expect;
+	chk_t c;
+	const chk_entry_t *stored;
+	fsimg_io_t *input;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	spec_t spec = { .kind = FSIMG_ENTRY_FILE, .size = 1 };
+	unsigned char byte;
+	size_t length;
+	char path[32];
+
+	for (unsigned pass = 0; pass < 3; pass++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+		if (pass != 0)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+		expect_defaults(&expect, &options);
+		fixture_open_with(&fixture, "qnx6", &options, pass == 2 ? 1024 : 1, true);
+		for (unsigned i = 0; i < 256; i++) {
+			snprintf(path, sizeof(path), "/tiny%03u", pass == 2 ? 255 - i : i);
+			spec.path = path;
+			CHECK(add_one(&fixture, &spec, NULL) == FSIMG_OK);
+		}
+		CHECK(emit_memory(&fixture, &sinks[pass], NULL) == FSIMG_OK);
+		chk_image(&c, sinks[pass].bytes, sinks[pass].length, &expect);
+		CHECK(c.errors == 0 && c.count == 258 && c.used_inodes == 258);
+		CHECK(c.block == (pass == 0 ? 1024 : 512));
+		CHECK(c.blocks == (pass == 0 ? 384 : 424));
+		CHECK(sinks[pass].length == (pass == 0 ? 409600 : 233472));
+		if (pass != 0) {
+			CHECK(c.capacity == 260);
+			check_minimize_block_count(&c, &options);
+		}
+		for (unsigned i = 0; i < 256; i++) {
+			snprintf(path, sizeof(path), "/tiny%03u", i);
+			stored = chk_find(&c, path);
+			CHECK(stored != NULL && stored->size == 1);
+			CHECK(stored->digest == expected_digest(0, 1));
+		}
+		check_minimize_plan(&fixture, &sinks[pass], &c, &info);
+		CHECK(memory_io(&fixture, &sinks[pass], false, &input) == FSIMG_OK);
+		CHECK(fsimg_reader_open(fixture.ctx, input, NULL, &reader, NULL) == FSIMG_OK);
+		/* .boot sorts first, followed by every one-byte zero file. */
+		CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, "/.boot") == 0);
+		for (unsigned i = 0; i < 256; i++) {
+			CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_OK);
+			CHECK(entry->kind == FSIMG_ENTRY_FILE && entry->size == 1);
+			CHECK(fsimg_reader_read_at(reader, 0, &byte, 1, &length, NULL) == FSIMG_OK);
+			CHECK(length == 1 && byte == 0);
+		}
+		CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_DONE);
+		fsimg_reader_free(reader);
+		fsimg_io_free(input);
+		check_reader(&fixture, &sinks[pass], 257);
+		chk_free(&c);
+		fixture_close(&fixture);
+	}
+	CHECK(sinks[1].length == sinks[2].length);
+	CHECK(bcmp(sinks[1].bytes, sinks[2].bytes, (size_t)sinks[1].length) == 0);
+	for (unsigned pass = 0; pass < 3; pass++)
+		free(sinks[pass].bytes);
+}
+
+/* Two 1 MiB files tie at B=1024,N=2128 and B=2048,N=1064:
+ * 16384+N*B is 2195456 bytes. The open search prefers its default 1024.
+ */
+static void
+test_minimize_tie_prefers_default_block(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_plan_info_t info;
+	chk_expect_t expect;
+	chk_t c;
+	spec_t file;
+	const chk_entry_t *entry;
+
+	for (unsigned fixed = 0; fixed < 2; fixed++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_REPRODUCIBLE | FSIMG_WRITE_MINIMIZE;
+		if (fixed != 0)
+			options.allocation_unit_bytes = 2048;
+		expect_defaults(&expect, &options);
+		fixture_open(&fixture, &options);
+		for (unsigned i = 0; i < 2; i++) {
+			file = minimize_large[i];
+			file.size = 1048576;
+			CHECK(add_one(&fixture, &file, NULL) == FSIMG_OK);
+		}
+		CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+		chk_image(&c, sink.bytes, sink.length, &expect);
+		CHECK(c.errors == 0 && sink.length == 2195456);
+		CHECK(c.block == (fixed == 0 ? 1024 : 2048));
+		CHECK(c.blocks == (fixed == 0 ? 2128 : 1064));
+		for (unsigned i = 0; i < 2; i++) {
+			entry = chk_find(&c, minimize_large[i].path);
+			CHECK(entry != NULL && entry->size == 1048576);
+			CHECK(entry->digest == expected_digest(minimize_large[i].source, 1048576));
+		}
+		check_minimize_plan(&fixture, &sink, &c, &info);
+		check_minimize_block_count(&c, &options);
+		check_reader(&fixture, &sink, 3);
+		chk_free(&c);
+		fixture_close(&fixture);
+		free(sink.bytes);
+	}
+}
+
+static void
+test_minimize_search_limits(void)
+{
+	/* Measure default planning, repeat at that work limit, require the
+	 * larger search to exhaust it, then give minimization the default's
+	 * measured memory and scratch peaks without a work cap.
+	 */
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_stats_t stats;
+	fsimg_error_t error;
+	uint64_t before, work = 0, scratch = 0, memory = 0, planned_scratch = 0;
+
+	for (unsigned pass = 0; pass < 4; pass++) {
+		fsimg_write_options_init(&options);
+		if (pass >= 2)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+		fixture_open(&fixture, &options);
+		add_minimize_large(&fixture, false);
+		before = fixture.writer->session.progress.work;
+		if (pass == 1 || pass == 2)
+			fixture.ctx->options.max_work = before + work;
+		if (pass == 3) {
+			fixture.ctx->options.memory_bytes = memory;
+			fixture.ctx->options.scratch_bytes = scratch;
+		}
+		if (pass == 2) {
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, &error) == FSIMG_ELIMIT);
+			CHECK(error.resource == FSIMG_RESOURCE_WORK && plan == NULL);
+		} else {
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+			if (pass == 0) {
+				work = fixture.writer->session.progress.work - before;
+				CHECK(fsimg_ctx_get_stats(fixture.ctx, &stats, NULL) == FSIMG_OK);
+				memory = stats.memory_peak;
+				scratch = stats.scratch_peak;
+				planned_scratch = info.scratch_bytes;
+			}
+			if (pass == 3) {
+				CHECK(info.scratch_bytes == planned_scratch);
+				/* Four block sizes plus 10+2+7+8 refinements,
+				 * against the default's single geometry evaluation.
+				 */
+				CHECK(fixture.writer->session.progress.work - before == work + 30);
+			}
+		}
+		fixture_close(&fixture);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--minimize") == 0) {
+		test_minimize_large_files();
+		test_minimize_tiny_files();
+		test_minimize_tie_prefers_default_block();
+		test_minimize_constraints();
+		test_minimize_search_limits();
+		return (0);
+	}
 	if (argc == 3 && strcmp(argv[1], "--native") == 0)
 		return (compare_native(argv[2]));
 	if (argc == 2 && strcmp(argv[1], "--scale") == 0) {
@@ -2195,6 +2566,11 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_minimize_large_files();
+	test_minimize_tiny_files();
+	test_minimize_tie_prefers_default_block();
+	test_minimize_constraints();
+	test_minimize_search_limits();
 	test_checker();
 	test_link_nul();
 	test_link_range();

@@ -772,6 +772,7 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 	info->volume_bytes = plan->geometry.volume_bytes;
 	info->sector_bytes = 512;
 	info->allocation_unit_bytes = QNX4_BLOCK_BYTES;
+	info->allocation_units = plan->geometry.blocks;
 	info->allocated_bytes = (uint64_t)plan->allocated * QNX4_BLOCK_BYTES;
 	info->free_bytes = (uint64_t)(plan->geometry.blocks - plan->allocated) *
 	    QNX4_BLOCK_BYTES;

@@ -19,8 +19,9 @@
  * synthesized .boot when the catalog has none. A row is everything the
  * inode, the entry's slot and its storage need, apart from the name, which
  * stays in the catalog:
- *   length	file or symbolic-link size, or a directory's whole-block
- *		slot bytes; zero for a FIFO
+ *   length	file or symbolic-link size, or a directory's whole
+ *		blocks of next_slot slots, which the layout pass sets once
+ *		the block size is chosen; zero for a FIFO
  *   first	first block of the object's range: its indirect blocks in
  *		post-order, then its leaves
  *   slot	the entry's slot index in its parent directory
@@ -54,9 +55,11 @@ typedef struct qnx6_row {
 #define QNX6_ROW_BYTES		64u
 
 /* The plan: the geometry, the three system-tree shapes, the row array and
- * the totals the passes derive. boot_row is the catalog ID of /.boot or
- * count + 1. allocated is A: every block below it is in use, and none
- * above it.
+ * the totals the passes derive for the chosen block size: objects, every
+ * object's blocks, and payload_blocks, those of file and link content.
+ * boot_row is the catalog ID of /.boot or count + 1. allocated is A: every
+ * block below it is in use, and none above it. The geometry's block size
+ * is zero until the geometry pass chooses it.
  */
 typedef struct qnx6_plan {
 	fsimg_plan_t	 common;
@@ -67,6 +70,7 @@ typedef struct qnx6_plan {
 	qnx6_shape_t	 names;
 	uint64_t	 boot_row;
 	uint64_t	 objects;
+	uint64_t	 payload_blocks;
 	uint32_t	 names_first;
 	uint32_t	 allocated;
 	uint32_t	 used_inodes;

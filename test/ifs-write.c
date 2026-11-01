@@ -1011,6 +1011,7 @@ check_reader(fsimg_ctx_t *ctx, memory_sink_t *sink, const chk_t *c)
 	CHECK((info.valid & FSIMG_VOLUME_MOUNTPOINT) != 0);
 	CHECK(strcmp(info.mountpoint, c->mountpoint) == 0);
 	CHECK(info.volume_bytes == sink->length);
+	CHECK(info.allocation_units == sink->length);
 	count = 0;
 	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
 		count++;
@@ -1056,26 +1057,36 @@ check_reader(fsimg_ctx_t *ctx, memory_sink_t *sink, const chk_t *c)
  * and scratch, reverse order with a 1024-page cache in another time zone,
  * and forward order without scratch, all metadata in a 1024-page cache --
  * passes the checker and the reader each time and gives identical bytes.
- * Each fixture has its own scratch directory.
+ * Each fixture has its own scratch directory. Two more passes minimize in
+ * reverse order with scratch and forward order without scratch.
  */
 static void
 test_matrix(void)
 {
 	fsimg_write_options_t options;
+	fsimg_plan_info_t info;
+	const fsimg_plan_t *plan;
 	fixture_t fixture;
-	memory_sink_t sinks[3];
+	memory_sink_t sinks[5];
 	chk_t c;
 
 	reproducible_options(&options);
-	for (unsigned pass = 0; pass < 3; pass++) {
+	for (unsigned pass = 0; pass < 5; pass++) {
+		/* ImageFS has no open geometry: minimizing preserves every byte. */
+		if (pass >= 3)
+			options.flags |= FSIMG_WRITE_MINIMIZE;
 		if (pass == 1) {
 			CHECK(setenv("TZ", "America/New_York", 1) == 0);
 			tzset();
 		}
-		fixture_open_with(&fixture, &options, pass == 0 ? 1 : 1024,
-		    pass != 2);
-		add_specs(&fixture, tree, TREE_COUNT, pass == 1);
+		fixture_open_with(&fixture, &options, (pass == 0 || pass == 3) ? 1 : 1024,
+		    pass != 2 && pass != 4);
+		add_specs(&fixture, tree, TREE_COUNT, pass == 1 || pass == 3);
 		CHECK(emit_memory(&fixture, &sinks[pass], NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.allocation_units == sinks[pass].length);
+		CHECK(info.inode_capacity == 0 && info.free_inodes == 0);
 		/* owned_metadata's time differs from the epoch. */
 		CHECK(fixture.losses == TREE_TIMED);
 		chk_image(&c, sinks[pass].bytes, sinks[pass].length, true, false);
@@ -1090,12 +1101,12 @@ test_matrix(void)
 			tzset();
 		}
 	}
-	for (unsigned pass = 1; pass < 3; pass++) {
+	for (unsigned pass = 1; pass < 5; pass++) {
 		CHECK(sinks[pass].length == sinks[0].length);
 		CHECK(bcmp(sinks[pass].bytes, sinks[0].bytes,
 		    (size_t)sinks[0].length) == 0);
 	}
-	for (unsigned pass = 0; pass < 3; pass++)
+	for (unsigned pass = 0; pass < 5; pass++)
 		free(sinks[pass].bytes);
 }
 

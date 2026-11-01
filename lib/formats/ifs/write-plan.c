@@ -448,6 +448,7 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 	info->volume_bytes = plan->image_size;
 	info->sector_bytes = 1;
 	info->allocation_unit_bytes = 1;
+	info->allocation_units = plan->image_size;
 	info->allocated_bytes = plan->image_size;
 	info->free_bytes = 0;
 	info->metadata_bytes = (uint64_t)plan->hdr_dir_size + 4;
