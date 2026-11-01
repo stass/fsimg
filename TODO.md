@@ -309,6 +309,15 @@
 
 ## Bugs by subsystem
 
+* [Low] **Device seam renames a libc function** (`test/device-seam.c`,
+  `lib/io/io.c`, `compat/`): the seam redirects the adapter's `pread` with a
+  macro, which glibc headers can defeat. Fortification does, and the seam
+  compiles unfortified for it; a `-D_FILE_OFFSET_BITS=64` build still would,
+  since `unistd.h` then binds the renamed declaration to `pread64`, and
+  `test-device` would fail with no fixture reads. Route the device read
+  through a project-owned compat function, as `fsimg_host_disk_sector` and
+  `fsimg_host_fstat` already are, so no seam renames a libc identifier.
+
 * [Medium] **Post-read source-change payload evidence** (`test/exfat.c`):
   the helper's truncation case changes its source before the next read.
   Add a backing-identity resolver that confirms bytes and then changes the
