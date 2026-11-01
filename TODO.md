@@ -454,13 +454,33 @@
   [spec-testing stage policy](specs/design-spec-testing.md#stage-policy).
   Write the failing open/verify tests first.
 
-* [Medium] **Local Linux and FreeBSD checks copy the CI job by hand**
-  (`build-aux/linux-check/Dockerfile`, `build-aux/linux-check.sh`, `CLAUDE.md`,
-  `.github/workflows/check.yml`): the image repeats the job's package list and
-  the runner tools it relies on, the script repeats its spec-pass check, and
-  the FreeBSD procedure is the job's `run:` block followed by hand. Make one
-  copy authoritative: a build-and-check script that CI, `linux-check.sh` and
-  the FreeBSD host all call, and a CI Linux job that runs in the same image.
+* [Medium] **The Linux check image repeats the CI job's environment**
+  (`build-aux/linux-check/Dockerfile`, `.github/workflows/check.yml`): the
+  checks themselves are one list in `build-aux/ci-check.sh`, but the image
+  repeats the job's package list and runner tools, and the FreeBSD job's
+  setup (ports, fatcat, spec gems) is followed by hand on a host. Run the
+  CI Linux job in the same image, and give the FreeBSD setup one script.
+
+* [High] **FreeBSD: QNX4 scale RSS exceeds its bound in the wide case**
+  (`test/qnx4.c` scale, FreeBSD 16 on a 128-CPU host): listing or verifying
+  one directory of 200,000 entries raises the child's `ru_maxrss` by about
+  70 MB against the 32 MiB bound while charged memory peaks at 5.4 MB;
+  macOS shows 6-9 MB. It predates the input-sized sort. Ruled out: the
+  image mapping (the fixture reads with `pread`), inherited pages (the
+  child starts at zero), jemalloc decay (no change; `retain:false` gives
+  46 MB; one arena, no change) and the test's region table (about 5 MB).
+  Find what holds the rest: uncharged library memory would be a contract
+  bug, a FreeBSD accounting effect a test fix. `check-scale` fails on
+  FreeBSD until then.
+
+* [Medium] **FreeBSD: `check-cli-rss` creation fails under its address-space
+  limit** (`test/qualify-rss.c`, `test/qualify-cli.rb`): FreeBSD bounds each
+  process with `RLIMIT_AS` of (budget + 64 MiB) / 3, about 27 MB under the
+  16 MiB budget, and `fsimg c` exits unsuccessfully without a diagnostic.
+  It predates the zstd and xz libraries and fails without them. A likely
+  cause is address space reserved up front (jemalloc's per-CPU arenas on a
+  128-CPU host, thread stacks, library mappings) rather than memory used;
+  trace the failing call before changing the bound or the method.
 
 * [Medium] **No check runs confinement on glibc 2.33 to 2.38**
   (`build-aux/linux-check.sh`, `.github/workflows/check.yml`): those
