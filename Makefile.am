@@ -359,6 +359,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/compressed_create_test.rb \
 	test/cli/container_create_test.rb \
 	test/cli/containers_test.rb \
+	test/cli/coordinator_worker_test.rb \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \
 	test/cli/extract_here_test.rb \
