@@ -68,6 +68,24 @@ if test -z "$formatter" || test -z "$checker"; then
     exit 77
 fi
 
+check_volume()
+{
+    volume_size=$(wc -c < "$1")
+    if test "$volume_size" -lt 4096; then
+        # fsck_msdosfs reads a 4096-byte boot block even for smaller volumes.
+        # Zero padding lies beyond the volume's recorded sector count.
+        padded_image="$fixture_dir/check-volume.img"
+        cp "$1" "$padded_image"
+        dd if=/dev/zero bs=1 count=$((4096 - volume_size)) \
+            >> "$padded_image" 2>/dev/null
+        checker_status=0
+        "$checker" -n "$padded_image" || checker_status=$?
+        rm -f "$padded_image"
+        return "$checker_status"
+    fi
+    "$checker" -n "$1"
+}
+
 format_image()
 {
     if test "$(uname -s)" = FreeBSD; then
@@ -154,7 +172,7 @@ for profile in fat12 fat16 fat32 fat16-wide; do
         LC_ALL=${utf8_locale:-C} "$MDEL" -i "$image" ::A.BIN ::C.BIN
         echo 'fragment: three 400 KiB fillers, delete middle, copy 600 KiB, delete remaining fillers'
     fi
-    "$checker" -n "$image"
+    check_volume "$image"
     if test "$profile" = fat12; then
         check_fatcat "$image" "$sector" /Nested /Hello.txt "$fixture_dir/payload" \
             /Nested/Deep.txt "$fixture_dir/payload" /FRAG.BIN "$fixture_dir/fragment"
@@ -173,7 +191,7 @@ for profile in fat12 fat16 fat32; do
     ./test-fat-write --create-minimized "$fixture_dir/minimize-$profile" "$profile"
     image="$fixture_dir/minimize-$profile/writer.img"
     expected="$fixture_dir/minimize-$profile/payload"
-    "$checker" -n "$image"
+    check_volume "$image"
     check_fatcat "$image" 512 / /F0000000 "$expected" /F0000001 "$expected"
     for name in F0000000 F0000001; do
         LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" "::$name" "$fixture_dir/minimized-payload"
@@ -191,7 +209,7 @@ for profile in fat12 fat16 fat32; do
     ./test-fat-write --create "$fixture_dir/write-$profile" "$profile"
     image="$fixture_dir/write-$profile/writer.img"
     echo "writer fixture: $profile; automatic geometry; serial zero; NO NAME label"
-    "$checker" -n "$image"
+    check_volume "$image"
     check_fatcat "$image" 512 /Nested /HELLO.TXT "$fixture_dir/writer-payload" \
         '/Nested/long name.txt' "$fixture_dir/writer-payload"
     LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" ::HELLO.TXT "$fixture_dir/extracted"
@@ -209,7 +227,7 @@ for profile in fat12 fat16 fat32; do
     echo 'result: checker and mtools long-name extraction passed'
     rm "$image"
     ./test-fat-write --create-empty "$fixture_dir/write-$profile" "$profile"
-    "$checker" -n "$image"
+    check_volume "$image"
     check_fatcat "$image" 512 /
     echo 'result: independently checked empty writer volume'
 done
@@ -222,7 +240,7 @@ for profile in fat12 fat16; do
     mkdir "$fixture_dir/root-$profile"
     ./test-fat-write --create-fixed-root "$fixture_dir/root-$profile" "$profile"
     image="$fixture_dir/root-$profile/writer.img"
-    "$checker" -n "$image"
+    check_volume "$image"
     LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MDIR" -i "$image" ::
     if test "$host" != Linux; then
         "$FATCAT" -l / "$image"
@@ -245,6 +263,6 @@ for profile in fat12 fat16; do
         exit 1
     fi
     LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MDIR" -i "$image" ::F0000030
-    "$checker" -n "$image"
+    check_volume "$image"
     echo "result: minimized $profile has exactly 32 independently filled root slots"
 done
