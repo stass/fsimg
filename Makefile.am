@@ -310,6 +310,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/spec-testing-plan.md docs/qnx4-plan.md docs/qnx4-research.md \
 	docs/todo-qnx4.md docs/architecture-analysis.md docs/ifs-plan.md \
 	docs/ifs-research.md docs/todo-ifs.md \
+	docs/hfsplus-plan.md docs/todo-hfsplus.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-device-input.md \
@@ -326,6 +327,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-layers.md specs/design-content.md \
 	specs/design-directories.md specs/design-emission.md \
 	specs/design-holes.md specs/design-ifs.md specs/design-ifs-driver.md \
+	specs/design-hfsplus.md specs/design-hfsplus-driver.md \
 	specs/design-codecs.md specs/design-compression-libs.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \

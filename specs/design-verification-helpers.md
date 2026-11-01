@@ -349,6 +349,7 @@ omitted-entry semantics.
 | QNX6 | Common helper for first name of each inode | Private owner-tagged runs and selected-snapshot bitmap merge; tree roles, system reservation and inode-reference reconciliation stay private |
 | QNX4 | Common helper for first name of each object | Existing paged claimed-block bitset, direct bitmap comparison, inode references and long-name occupancy; no interval stream |
 | ImageFS | Common helper for each derived file/link node | No allocation ownership stream; length, whole-image checksum, boot/script references and derived-tree validation remain private |
+| HFS Plus | Common helper for each walked entry, an indirect node once per stub | Common exclusive runs over allocation blocks `[0, N)`; the fork resolver emits every fork's claims during the catalog and attributes leaf passes, which reach each record once, and the reserved ranges and bad blocks are claimed directly; one bitmap scan; tree structure, thread pairing and link counts stay private |
 
 ### FAT and exFAT claim production
 

@@ -67,8 +67,9 @@ A volume is `N` blocks of 512 bytes. Block `b` starts at byte `512 * (b - 1)`
 of the volume slice. No record stores `N`: the native checker derives it from
 the device size, and so does fsimg. `N` is the slice length divided by 512,
 and the slice length must be a multiple of 512. A volume embedded in a longer
-image is read as a slice given with `-b` and `-z`; without `-z` the slice runs
-to the end of the image and `N` follows from that. [X1]
+image is read as a slice given with `--offset` and `--length`; without
+`--length` the slice runs to the end of the image and `N` follows from that.
+[X1]
 
 The smallest volume the native formatter accepts is 43 blocks, at which no
 block is free; the largest `N` is `2^31`. The reader accepts any `N` from 43

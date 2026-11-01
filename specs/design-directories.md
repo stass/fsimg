@@ -11,8 +11,8 @@ The [architecture](architecture.md#writer-and-reader-independence) assigns the
 owners. [Storage](design-storage.md#reading-and-traversal) states the bounds.
 Driver designs ([FAT](design-fat-reader.md), [exFAT](design-exfat.md),
 [QNX6](design-qnx6.md), [QNX4](design-qnx4.md),
-[ImageFS](design-ifs-driver.md)) define only their decoding, keys, and
-locators.
+[ImageFS](design-ifs-driver.md), [HFS Plus](design-hfsplus-driver.md))
+define only their decoding, keys, and locators.
 Host source scanning and safe extraction have separate authority and lifetime
 rules and do not use this walker.
 
@@ -67,7 +67,8 @@ The shared invariant is:
 While decoding, the driver emits one or more comparison keys for each admitted
 entry. FAT emits its long-name key and alias key; exFAT emits the name mapped
 through the volume's validated upcase table; QNX6 emits the case-sensitive UTF-8
-bytes. Keys are opaque, bounded byte strings to common code. Preparation stores
+bytes; HFS Plus emits the stored name decomposed and, on a case-insensitive
+volume, folded through its pinned table. Keys are opaque, bounded byte strings to common code. Preparation stores
 key records `(entry position, key)` in a second stream, sorts them externally,
 and rejects equal keys with different entry positions. Duplicate keys for the
 same entry are permitted. The key stream is released when validation completes.
@@ -160,7 +161,7 @@ strict UTF-8, no NUL, slash, control byte or `0x7f`, neither `.` nor `..`.
 A component under the profile makes the child *delivered*; a natively legal
 component outside it makes the child *omitted*, under the
 [architecture's rule](architecture.md#names-and-metadata). A format
-that declares no profile, FAT and exFAT, admits every child as delivered,
+that declares no profile, FAT, exFAT and HFS Plus, admits every child as delivered,
 since its driver derives validated names by its own rules. Common code
 branches on the declared property, never on a format name, and no driver
 chooses a class. The same function validates a query component in every

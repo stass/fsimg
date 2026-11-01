@@ -129,6 +129,7 @@ umask. Timestamp defaults follow the format's explicit policy:
 | exFAT | 1980-01-01 00:00:00 UTC | Epoch as UTC |
 | QNX4 | UTC host clock sampled once during planning, within 0 through 2147483647 | Epoch within that same interval |
 | QNX6 and ImageFS | UTC host clock sampled once during planning, within 0 through 4294967295 | Epoch within that same interval |
+| HFS Plus | UTC host clock sampled once during planning, within 1904-01-01 00:00:00 through 2040-02-06 06:28:15 UTC | Epoch within that same interval |
 
 The seconds helpers do not sample a clock. Drivers resolve and validate the
 fallback once and use it for absent times, out-of-range optional times and
@@ -147,18 +148,23 @@ second loss unit.
 
 ## Unsigned whole-second selection
 
-QNX4, QNX6 and ImageFS share a narrow pure helper for selecting an unsigned
-32-bit whole-second value. Its inputs are presence, the timestamp when present,
-an inclusive maximum, a validated fallback and the reproducible selection
-flag. It returns the selected scalar and whether a present value is exact.
-The maximum is 2147483647 for QNX4 and 4294967295 for QNX6 and ImageFS; no
-format enum or driver callback is needed. The fallback is already the epoch
-when reproducibility is enabled.
+QNX4, QNX6, ImageFS and HFS Plus share a narrow pure helper for selecting an
+unsigned 32-bit whole-second value. Its inputs are presence, the timestamp
+when present, an origin, an inclusive maximum, a validated fallback and the
+reproducible selection flag. It returns the selected scalar and whether a
+present value is exact. The stored scalar is the timestamp's Unix seconds
+plus the origin, and it is in range when `0 <= seconds + origin <= maximum`,
+computed in signed 64-bit arithmetic. The origin is 0 for QNX4, QNX6 and
+ImageFS, which count from 1970, and 2082844800 for HFS Plus, which counts
+from 1904, so a valid HFS Plus time before 1970 has negative Unix seconds.
+The maximum is 2147483647 for QNX4 and 4294967295 for the others; no format
+enum or driver callback is needed. The fallback is a stored scalar, already
+the epoch's when reproducibility is enabled.
 
 | Input | Stored seconds | Fidelity |
 | --- | --- | --- |
 | Absent | Fallback | No requested value; no loss |
-| Present, in range, non-reproducible | Original seconds | Exact only for UTC with zero nanoseconds |
+| Present, in range, non-reproducible | Original seconds plus the origin | Exact only for UTC with zero nanoseconds |
 | Present, out of range, non-reproducible | Fallback | Inexact |
 | Present, reproducible | Fallback/epoch | Exact only for in-range UTC whole seconds equal to the epoch |
 

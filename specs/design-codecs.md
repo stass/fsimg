@@ -1,9 +1,11 @@
-# Compression codecs: LZO1X and NRV2B
+# Compression codecs: LZO1X, NRV2B, LZFSE and LZVN
 
 ## Scope
 
 fsimg owns three stream codecs: an LZO1X decoder, an NRV2B decoder for the
-8-bit control-buffer variant, and an LZO1X encoder. They live in
+8-bit control-buffer variant, and an LZO1X encoder. It also compiles two
+[imported decoders](#imported-decoders), Apple's LZFSE and LZVN, which HFS
+Plus's transparent compression needs. They live in
 `lib/codec/`, are private to libfsimg, and know nothing about the images
 they serve. A codec sees one compressed stream and one output; it never sees
 a chunk length, a header or a checksum. The framing of QNX boot images, a
@@ -628,10 +630,12 @@ and a call is bounded by the window sizes the container chose.
 | `lib/codec/codec.h` | `fsimg_codec_step_t`, the decoder and encoder types and prototypes; private to libfsimg, never included by `include/fsimg.h` |
 | `lib/codec/lzo1x.c` | The LZO1X instruction tables, the decoder state machine and the encoder; one file, because decoder and encoder share the class and distance constants |
 | `lib/codec/nrv2b.c` | The NRV2B bit reader, number decoder and one-call decoder |
+| `lib/codec/lzfse.c` | The project-owned wrapper over the imported decoders: `fsimg_lzfse_decode` and `fsimg_lzvn_decode`, their charged scratch and their bounds |
+| `lib/codec/lzfse/` | The imported LZFSE and LZVN decoder files under Apple's notice; nothing else includes them |
 
 `lib/codec/` depends on `lib/core/` for statuses, errors and allocation and
 on nothing else; nothing in it names a chunk, a header, an image or an I/O
-object. `lib/layers/` is its only caller. The directory is always built:
+object. `lib/layers/` and the HFS Plus driver are its only callers. The directory is always built:
 reading the PCM images needs it in the default build. The name means
 stream codecs; the `codec.c` files under `lib/formats/` are the formats'
 record and integer codecs and stay where they are. Names follow the
@@ -639,11 +643,50 @@ style guide: `fsimg_lzo1x_` and `fsimg_nrv2b_` prefixes, `_t` typedefs,
 constants in upper case named for their meaning (`LZO1X_MAX_DISTANCE`,
 `NRV2B_OFFSET_BONUS_THRESHOLD`), no magic numbers in the machines.
 
+## Imported decoders
+
+HFS Plus files that macOS compresses use LZVN and LZFSE as well as zlib.
+Neither is a system library on Linux or FreeBSD, and Apple's reference
+implementation, the `lzfse` project, is BSD-3-Clause, so fsimg imports its
+decoders instead of writing them again; the
+[architecture](architecture.md#dependencies-and-implementation-organization)
+records why. The rules of the import:
+
+* **Scope.** Only the decoder files are imported, from one pinned commit:
+  the LZFSE decoder and its finite-state-entropy tables, the LZVN decoder,
+  and the headers they need. No encoder, command-line tool or build file
+  enters the tree.
+* **Notice.** Every imported file keeps its copyright and license text;
+  `third-party/lzfse-LICENSE.txt` repeats the notice for binary
+  distributions and is installed with the documentation, as the FreeBSD
+  SHA-256 notice is.
+* **Adaptations.** The files are changed only as `docs/references.md`
+  lists: external symbols take an `fsimg_apple_` prefix, so that a program
+  that also links the upstream library cannot collide with them and the
+  wrapper's own `fsimg_lzfse_` and `fsimg_lzvn_` names stay distinct, the
+  unused encoder entry points are removed, and compiler extensions the supported compilers lack
+  are replaced by their portable forms. Upstream style is kept, so a diff
+  against the pinned commit shows exactly the adaptations.
+* **Wrapper.** Callers never reach the imported code directly. The
+  project-owned `lib/codec/lzfse.c` takes the encoded span, the expected
+  decoded length and a caller's output buffer; it allocates the LZFSE
+  scratch through the context, requires the decoder to consume exactly the
+  span and produce exactly the expected length, and maps every other
+  outcome to `FSIMG_ECORRUPT`. Output never grows past the caller's buffer.
+* **Assurance.** `fuzz/lzfse.c` feeds the wrapper under ASan and UBSan with
+  finite budgets; unit tests decode small vectors encoded once with the
+  upstream tool and kept as byte arrays; the native HFS Plus captures are
+  the end-to-end oracle. fsimg owns any fix to the imported files and
+  compares the pinned commit with upstream changes at each release.
+
+The [clean-room procedure](#clean-room-procedure) below governs the
+LZO1X and NRV2B files, not the imported decoders.
+
 ## Clean-room procedure
 
-The codecs are written without reading any codec implementation, so that
-nothing in `lib/codec/` is a derivative of GPL or other third-party code.
-The procedure and its inputs:
+The LZO1X and NRV2B codecs are written without reading any codec
+implementation, so that none of their files is a derivative of GPL or
+other third-party code. The procedure and its inputs:
 
 * **LZO1X.** The factual source is the Linux kernel's
   `Documentation/staging/lzo.rst`, documentation prose by Willy Tarreau
@@ -680,8 +723,9 @@ The procedure and its inputs:
 * **This design.** Its author read the two documents above and the oracle
   wrapper, ran the oracle on hand-built streams and on the corpus, and
   read no codec source.
-* **Implementers.** Whoever writes `lib/codec/` works from this design and
-  the tests alone and reads no codec source: not `liblzo2`, `minilzo`,
+* **Implementers.** Whoever writes `lib/codec/lzo1x.c` and
+  `lib/codec/nrv2b.c` works from this design and the tests alone and reads
+  no codec source: not `liblzo2`, `minilzo`,
   `libucl`, UPX, the kernel's `lzo1x_decompress_safe.c`, nor the owner's
   `~/pcm31/tools/ifs.py`. When agents do the work, describer and
   implementer are separate sessions sharing nothing beyond the accepted
@@ -691,8 +735,8 @@ The procedure and its inputs:
   and fsimg copyright; that the structure is this design's LZO1X state
   machine and one-call NRV2B decoder and not a transcription of any
   decoder's control flow; that the only
-  literal constants are those the format tables require; that no file in
-  the directory's history ever held imported text; and that the commit
+  literal constants are those the format tables require; that neither
+  file's history ever held imported text; and that the commit
   message lists the sources above. The review is recorded with the stage's
   code review.
 

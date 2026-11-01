@@ -44,7 +44,7 @@ content interface. Extent lookup alone never authorizes exposing them.
 | Owner | Owns |
 | --- | --- |
 | Common delivery (`lib/read/`) | Bounds against the logical length, the initialized/zero split, transfer batching, source-stability checks, cancellation, work charging, confirmed byte counts, content-domain enforcement, terminal failure |
-| Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated physical extent containing that offset |
+| Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated physical extent containing that offset, or for encoded content to one [decoded span](#decoded-spans) |
 | Extent index (optional, `lib/meta/`) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
 
 Delivery calls one driver operation: resolve offset `o < initialized` to an
@@ -85,6 +85,30 @@ allocation once.
 
 Metadata reads of complete records keep their own contract: they succeed only
 with the complete record. Partial progress is a content-read concept.
+
+## Decoded spans
+
+Some content is not an image range: an HFS Plus file that macOS compressed
+keeps its bytes as encoded chunks in an attribute or its resource fork. For
+such an entry the driver's resolution returns a decoded span instead of an
+extent: `(logical_offset, bytes, length)`, with `bytes` borrowed from one
+decode window the driver owns and `logical_offset <= o < logical_offset +
+length`. The window is one charged buffer per reader, sized by the format's
+fixed chunk, 65536 bytes for HFS Plus, and holds one decoded chunk at a
+time. A span stays valid until the next resolution or the walker's advance.
+
+Delivery treats a span as it treats an extent: it checks containment,
+clips the span to the request and the initialized length, copies from the
+window instead of reading the image, and keeps every other duty in the
+owners table, so cancellation, work charging, confirmed counts, the
+source-stability check and terminal failure stay common. Because delivery
+reads nothing for a span, keeping the encoded bytes' reads in bounds is the
+driver's obligation, as it is for its other metadata reads: it reads them
+through a fork's extent index over the content domain, or from a validated
+metadata record such as an inline attribute. It decodes exactly the chunk's
+expected length or fails, and charges the bytes it consumed and produced as
+work. A sequential read therefore decodes each chunk once, and memory does
+not grow with the file. Range queries still answer from the lengths alone.
 
 ## Extent index
 

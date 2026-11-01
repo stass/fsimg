@@ -10,7 +10,7 @@ and the geometry settings the caller left open. It has two policies:
   default favors small units, which minimize per-file slack and match what
   native formatters choose for a volume of that size. For QNX6 the block size
   is a setting with a default of 1024 and the inode capacity follows the
-  native ladder. The volume is the smallest legal one for the chosen
+  native ladder; for HFS Plus it is a setting with a default of 4096. The volume is the smallest legal one for the chosen
   candidate.
 * **Minimize.** `FSIMG_WRITE_MINIMIZE`, CLI `-M`, chooses the candidate whose
   volume is the smallest in bytes, over every setting the caller left open.
@@ -45,6 +45,7 @@ to a whole sector, it is the same capacity under either policy.
 | QNX6 | Block size over the classic sizes; inode capacity, the catalog's inodes rounded to a whole table block; the block count at the alignment step instead of the 64-block search step | Byte order, the reserve percentage, the system-run recipe |
 | QNX4 | Nothing: the block is 512 bytes and the block count is already the smallest that fits | The native default layout, the 128-slot `.inodes` minimum, the 4096-byte directory rounding |
 | ImageFS | Nothing: the image is exactly its header, mountpoint, records, data and trailer | The 4-byte record and data alignment |
+| HFS Plus and HFSX | Block size over the writer's sizes, 512 to 65536 bytes | The native B-tree node sizes, one extent per fork, the reserved head and tail blocks |
 
 The FAT type minimum is what makes the image the requested variant and is
 not a dimension. The exFAT recommended cluster count is a guidance value, so
@@ -76,6 +77,8 @@ same order:
   the remaining units in increasing order.
 * QNX6: the default block size 1024, then the other open block sizes in
   increasing order.
+* HFS Plus: the default block size 4096, then the other open block sizes in
+  increasing order.
 
 For QNX6 the block-count search first finds the smallest 64-block multiple
 that fits, as the [driver design](design-qnx6-driver.md#planning) states,
@@ -92,6 +95,15 @@ For QNX4 the default block count is the smallest one that holds the fixed
 layout, the objects and the bitmap, found by the short iteration the
 [driver design](design-qnx4-driver.md#planning) states, so minimization
 returns the default volume.
+
+For HFS Plus the block count for one block size is the smallest that holds
+the reserved blocks, the bitmap, the trees, the forks and the free reserve,
+found by the raise-until-fit iteration the
+[driver design](design-hfsplus-driver.md#planning) states. The writer's
+B-tree node sizes are fixed, so the trees' node counts depend on the
+catalog alone and are packed once; a candidate block size only rounds the
+tree forks and the accumulated fork totals to whole blocks, so each costs a
+few constant-time steps.
 
 An ImageFS has no free space and no geometry: its size is derived exactly
 from the catalog and the settings by the

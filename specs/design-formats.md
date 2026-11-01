@@ -30,10 +30,11 @@ Shared helpers handle bounded I/O, endian conversion, UTF validation,
 resources, and [emission](design-emission.md); a driver does not acquire host
 descriptors or allocate outside its context.
 
-The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4` and
-`ifs`. FAT12,
+The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`,
+`ifs`, `hfsplus` and `hfsx`. FAT12,
 FAT16, and FAT32 share one descriptor and driver; opening selects the variant
-from the validated cluster count. Detection follows one bounded probe contract:
+from the validated cluster count. HFS Plus and HFSX share one descriptor
+likewise, and the volume signature selects the variant. Detection follows one bounded probe contract:
 
 * A probe inspects at most a descriptor-declared prefix, which common code
   reads once through the reader's session and cuts to the volume length. The
@@ -218,6 +219,30 @@ check and extract testing gates the writer capability, as native mounting
 does for QNX6 and QNX4; wrapping a bootable body, built by `mkifs` or
 unwrapped from an existing boot image, is the `ifsboot` container's, gated
 by a native boot.
+
+## HFS Plus and HFSX
+
+The [HFS Plus design](design-hfsplus.md) defines Apple's HFS Plus volume
+format and its HFSX variant from Apple's technical note TN1150 and native
+macOS observation: the volume header at byte 1024 and its alternate, forks
+of eight extents continued in the extents overflow tree, the allocation
+bitmap, and the catalog and attributes B-trees. HFSX's case sensitivity is
+the catalog header's comparison type, never inferred from the signature.
+Names are decomposed UTF-16 compared under pinned tables that native
+observation accepts row for row. The reader resolves file hard links,
+decodes transparent compression of the zlib, LZVN and LZFSE types, reads
+volumes inside a classic HFS wrapper, reads through an empty journal and
+refuses one that holds transactions; it marks resource forks and stored
+extended attributes with `FSIMG_META_EXTRA_DATA` rather than dropping them
+silently. Acceptance tables are closed. The
+[driver design](design-hfsplus-driver.md) defines the code.
+
+The writer builds clean, unjournaled, unwrapped `hfsplus` and
+case-sensitive `hfsx` volumes with bulk-built B-trees and one extent per
+fork, following the native formatter's choices. Native `fsck_hfs`, mount,
+modify and remount testing on macOS gates the writer capability, as native
+mounting does for QNX6 and QNX4; `fsck.hfsplus`, `hfsdump` and the Sleuth
+Kit are independent read oracles.
 
 ## Verification and compatibility claims
 

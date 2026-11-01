@@ -19,8 +19,8 @@ stream. Ordinary file use requires no privileges, kernel filesystem driver,
 or external formatter. Device use requires permission to read that endpoint.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
-Power-Safe profiles, QNX4 and the QNX image filesystem (ImageFS) with
-independent read and write support. The CLI is
+Power-Safe profiles, QNX4, the QNX image filesystem (ImageFS), and HFS Plus
+and HFSX with independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
 `--formats` for capabilities, with `-f` naming the image. Each format
@@ -367,8 +367,9 @@ traversal, delivery, or copy lifecycle:
   validates the namespace before any child is exposed, and one walker owns
   traversal, paths, limits, and selection.
 * The [logical content design](design-content.md) has drivers resolve offsets
-  to validated extents. One common operation delivers bytes and zeros and
-  preserves confirmed progress. A shared extent index is optional.
+  to validated extents, or for encoded content to spans the driver decoded
+  into one bounded window. One common operation delivers bytes and zeros
+  and preserves confirmed progress. A shared extent index is optional.
 * The [emission design](design-emission.md) has the common writer perform
   pre-mutation checks, sink initialization, and complete source copies. Drivers
   write encoded metadata and request copies into planned regions.
@@ -380,9 +381,9 @@ The [verification helpers](design-verification-helpers.md) own initialized
 payload read-through and the mechanics of exclusive ownership runs. Drivers
 retain traversal scope, repeated-object handling, allocation discovery, and
 reconciliation against format metadata. FAT keeps its fused chain verification
-and payload read. The strict FAT/exFAT run utility rejects every overlapping
-claim in its declared domain; it neither infers complete ownership nor defines
-sharing policy for other formats. QNX6's owner-bearing records, QNX4's claimed
+and payload read. The strict run utility, which FAT, exFAT and HFS Plus share,
+rejects every overlapping claim in its declared domain; it neither infers
+complete ownership nor defines sharing policy for other formats. QNX6's owner-bearing records, QNX4's claimed
 bitset, and ImageFS's reference and checksum checks keep their own representations.
 
 The [settings catalogue](design-settings.md) is the shared description of
@@ -517,6 +518,22 @@ at its image address and a compiled boot script, and fsimg neither
 produces nor modifies member files, so such a body comes from `mkifs` or
 is unwrapped from an existing boot image, and the `ifsboot` writer
 packages its ImageFS bytes unmodified.
+The [HFS Plus design](design-hfsplus.md) defines Apple's HFS Plus and its
+HFSX variant: a volume header, forks of eight extents continued in an
+extents overflow B-tree, an allocation bitmap, and a catalog B-tree of
+primary and thread records with decomposed UTF-16 names under a folded or
+binary comparator. Its comparators and Unicode tables are pinned and
+accepted only when an exhaustive native macOS observation agrees, because
+a writer whose order differs from macOS's emits a catalog macOS cannot
+search. The [HFS Plus driver design](design-hfsplus-driver.md) validates
+each folder's thread as it enters the folder, so the namespace is a tree by
+construction, and verifies over the catalog's leaf sequence, in which every
+file record appears exactly once, so one fork resolver claims all storage
+for the strict run utility. Transparently compressed files are delivered
+as decoded spans. A journal is never replayed: one holding transactions is
+refused. The writer bulk-builds every B-tree from sorted records and gives
+every fork one extent, so it never splits a node or writes an overflow
+record, and native `fsck_hfs`, mount, modify and remount testing gates it.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
@@ -636,9 +653,10 @@ has been shown to store.
 The QNX4, QNX6 and ImageFS readers omit an entry whose name is natively
 legal but outside the QNX-family fsimg name profile, instead of failing the
 image, through the
-[prepared-directory contract](design-directories.md#omitted-names); FAT and
-exFAT keep their strict UTF-16 name rules, under which a name is either
-valid or corrupt. The profile is fsimg's, not the format's: one foreign
+[prepared-directory contract](design-directories.md#omitted-names); FAT,
+exFAT and HFS Plus keep their strict UTF-16 name rules, under which a name
+is valid, corrupt, or for HFS Plus a natively legal spelling that no image
+path can express, which is unsupported. The profile is fsimg's, not the format's: one foreign
 name, such as a Latin-1 byte in an otherwise ordinary QNX volume, must not
 make the rest of an image unreadable. Omission is a filter on delivery
 only. The entry is validated like any other, enters no listing or
@@ -657,6 +675,21 @@ format itself forbids remains `FSIMG_ECORRUPT`; a path shape a format's
 design refuses as unsupported, such as an ImageFS odd path, remains
 refused. The writer is unchanged: a name the profile cannot store fails
 planning.
+
+Some formats store data beside an entry that the entry model has no field
+for: HFS Plus keeps a second fork and named extended attributes, whose
+presence and size vary per entry. A reader marks such an entry with the
+`FSIMG_META_EXTRA_DATA` validity bit, which carries no value, so a listing
+shows which entries hold data fsimg did not deliver and the extraction loss
+report names it among the entry's lost fields, as for any field the
+extractor does not restore. No writer stores the bit, so a catalog entry
+carrying it is an ordinary omission under the writer loss policy. One bit
+and the existing loss policy make that omission visible per entry without
+a second loss mechanism; carrying the data itself needs a common design of
+its own. Fixed fields a format stores for every entry but the model lacks,
+such as HFS Plus Finder information and BSD flags, are not marked: the
+format design and the manual list them, as every format's fields outside
+the model are listed.
 
 ### Extraction and sandboxing
 
@@ -877,6 +910,21 @@ from factual stream descriptions under a clean-room split, and the GPL
 libraries serve only as out-of-tree black-box oracles that never enter the
 repository or the link.
 
+The LZFSE and LZVN decoders that HFS Plus's transparent compression needs
+are Apple's BSD-3-Clause reference decoders, imported into `lib/codec/lzfse/`
+under their notice, as FreeBSD's SHA-256 was, rather than linked. Neither
+codec is a system library on Linux or FreeBSD, and macOS's own compression
+library is not portable, so an optional link would leave most hosts unable
+to read files macOS compresses. The license is permissive and compatible
+with BSD-2-Clause, and the reference decoders define the streams macOS
+writes; a clean-room pair would have to reproduce them exactly and would
+remove no obligation, since fsimg fuzzes and bounds whichever decoder it
+compiles.
+Imported source is not a runtime dependency: fsimg compiles it, owns its
+fixes, fuzzes it under the sanitizers and bounds every call through a
+project-owned wrapper charged to the context. The
+[codec design](design-codecs.md#imported-decoders) owns the import rules.
+
 The build uses Autoconf, Automake, and Libtool as development tools. Release
 archives contain generated build machinery; users need a C compiler, make,
 and standard host utilities. Public headers are C11 and C++ includable, do not
@@ -893,11 +941,13 @@ lib/read/            reader lifecycle and verification
 lib/extract/         safe host extraction
 lib/output/          shared staging, finalization, publication
 lib/layers/          partition schemes, containers, compression, spooling
+lib/codec/           stream codecs: LZO1X, NRV2B; imported LZFSE and LZVN
 lib/formats/fat/     FAT codecs, reader, writer
 lib/formats/exfat/   exFAT codecs, reader, writer
 lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
 lib/formats/qnx4/    QNX4 codecs, reader, writer, verification
 lib/formats/ifs/     ImageFS codecs, reader, writer, verification
+lib/formats/hfsplus/ HFS Plus codecs, Unicode tables, reader, writer, verification
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests
