@@ -261,7 +261,7 @@ extension. With flag `0x100` the stored
 checksum must equal the recurrence over the name bytes; without it the field
 must be zero. QNX itself forbids NUL, slash and the dot names, so they are
 corruption. The decoded name is handed to preparation, which applies the
-QNX-family profile the descriptor declares (strict UTF-8, no NUL, slash,
+portable name profile the descriptor declares (strict UTF-8, no NUL, slash,
 control byte or `0x7f`, neither `.` nor `..`) and assigns the child's class
 under the [omitted-names contract](design-directories.md#omitted-names);
 the driver chooses no class, and one foreign name never fails the directory

@@ -121,3 +121,15 @@ ReFirmLabs, and Porsche PCM-Explorer references, vendor documentation, license
 boundaries, and independently checked fixture observations. These sources
 inform the [QNX6 design](../specs/design-qnx6.md); no third-party code or
 binary fixture is imported. Read-only parsers are not formatter oracles.
+
+## UDF references
+
+ECMA-167 3rd edition and the ECMA TR/112 republication of UDF 1.02 to 2.60
+are the normative references for the [UDF design](../specs/design-udf.md);
+they are public standards, paraphrased, never copied. NetBSD's BSD-licensed
+`ecma167-udf.h` cross-checks field offsets; no NetBSD code is adapted.
+udftools, genisoimage, pycdlib, 7-Zip and the Linux driver are GPL or LGPL
+black-box oracles, and the NetBSD tools, Windows and macOS are run as
+external programs. The [UDF evidence record](udf-research.md) pins their
+versions and records what each image showed. No third-party code, captured
+image or disc survey enters the repository.

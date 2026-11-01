@@ -129,6 +129,7 @@ umask. Timestamp defaults follow the format's explicit policy:
 | exFAT | 1980-01-01 00:00:00 UTC | Epoch as UTC |
 | QNX4 | UTC host clock sampled once during planning, within 0 through 2147483647 | Epoch within that same interval |
 | QNX6 and ImageFS | UTC host clock sampled once during planning, within 0 through 4294967295 | Epoch within that same interval |
+| UDF | UTC host clock sampled once during planning, within years 1 through 9999 | Epoch within that same interval |
 
 The seconds helpers do not sample a clock. Drivers resolve and validate the
 fallback once and use it for absent times, out-of-range optional times and

@@ -640,6 +640,13 @@ registered after native qualification, which writes nonbootable bodies,
 and boot-gated wraps of a bootable body, built by `mkifs` or unwrapped
 from an existing boot image, behind its startup section.
 
+UDF follows its own [plan](udf-plan.md): confirmation of the designs
+against ECMA-167 and TR/112 and an oracle corpus, the format-neutral content
+and emission additions, a reader and verifier for physical partitions and
+ISO 9660 bridges, then metadata partitions, then a UDF 2.01 writer
+registered after NetBSD `fsck_udf` and native read-write qualification, then
+sparable and virtual partitions.
+
 Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order

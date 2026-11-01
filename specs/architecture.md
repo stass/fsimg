@@ -19,7 +19,7 @@ stream. Ordinary file use requires no privileges, kernel filesystem driver,
 or external formatter. Device use requires permission to read that endpoint.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
-Power-Safe profiles, QNX4 and the QNX image filesystem (ImageFS) with
+Power-Safe profiles, QNX4, the QNX image filesystem (ImageFS) and UDF with
 independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
@@ -517,6 +517,21 @@ at its image address and a compiled boot script, and fsimg neither
 produces nor modifies member files, so such a body comes from `mkifs` or
 is unwrapped from an existing boot image, and the `ifsboot` writer
 packages its ImageFS bytes unmodified.
+The [UDF design](design-udf.md) defines the Universal Disk Format, revisions
+1.02 to 2.60: recognition at 32 KiB, anchors, redundant volume descriptor
+sequences, partition maps translating three address spaces, file entries
+with allocation descriptors and directories of compressed-Unicode names; the
+[UDF driver design](design-udf-driver.md) gives address translation,
+descriptor walking and ownership one owner each, builds every Type-2 map
+through the physical map so the bootstrap is acyclic by construction, and
+plans a closed 2.01 volume whose metadata precedes its file bodies. UDF is
+the first format whose files carry unrecorded extents in their interior and
+whose links store an encoded target, so the
+[content design](design-content.md) owns zero extents, decoded link targets
+and the stored-byte count, and the [emission design](design-emission.md) the
+link-target read, each format-neutral and ready for NTFS. An ISO 9660 bridge
+is read through its UDF view only. NetBSD `fsck_udf` and native read-write
+mount cycles gate its writer.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
@@ -536,7 +551,8 @@ compatibility evidence separate from a successful filesystem parse.
 
 Plan initialized payload counts describe format-initialized file extents,
 excluding metadata. They are distinct from logical length, allocated capacity,
-and actual transferred bytes. Uninitialized logical tails read as zero through
+and actual transferred bytes. Zero extents a driver resolves inside a file,
+like uninitialized logical tails, read as zero through
 every content interface, even when their backing storage contains other bytes.
 
 Collection records source references, validation orders and checks entries,
@@ -620,7 +636,7 @@ needed by format codecs and extraction policy.
 
 A symbolic link's target length has two bounds. The entry model's ceiling,
 `FSIMG_SYMLINK_TARGET_MAX`, is 1024 bytes: the longest target any
-registered format stores, which is ImageFS's. It sizes every target buffer,
+registered format stores, which is ImageFS's and UDF's. It sizes every target buffer,
 and the source scan refuses a host target outside 1 to 1024 bytes as
 `FSIMG_EUNSUPPORTED`. Each format's capability record states its own limit
 in `max_link_target_bytes`, zero for a format that stores no symbolic links;
@@ -633,8 +649,8 @@ and QNX6 hold evidence to 1023. One ceiling with per-format limits keeps the
 buffers and the scan format-neutral while no format advertises more than it
 has been shown to store.
 
-The QNX4, QNX6 and ImageFS readers omit an entry whose name is natively
-legal but outside the QNX-family fsimg name profile, instead of failing the
+The QNX4, QNX6, ImageFS and UDF readers omit an entry whose name is natively
+legal but outside the portable fsimg name profile, instead of failing the
 image, through the
 [prepared-directory contract](design-directories.md#omitted-names); FAT and
 exFAT keep their strict UTF-16 name rules, under which a name is either
@@ -898,6 +914,7 @@ lib/formats/exfat/   exFAT codecs, reader, writer
 lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
 lib/formats/qnx4/    QNX4 codecs, reader, writer, verification
 lib/formats/ifs/     ImageFS codecs, reader, writer, verification
+lib/formats/udf/     UDF codecs, translators, reader, writer, verification
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests

@@ -143,7 +143,8 @@ lists the additional kinds and fields a format advertises.
 `fsimg_format_info_t.entry_kinds` and `metadata_fields` use the masks above.
 The record also gains `max_label_bytes`, the format's encoded on-disk label
 capacity in bytes (11 for FAT, 22 for exFAT's eleven UTF-16 units, 48 for
-QNX4), zero for a format without a volume label. Writer construction rejects a non-NULL label
+QNX4, 126 for UDF's logical volume identifier), zero for a format without a
+volume label. Writer construction rejects a non-NULL label
 for such a format; the CLI applies its default label only when the value is
 nonzero and passes a NULL label otherwise, so a format that refuses labels,
 such as QNX6, is created without `-L` and fails explicitly when `-L` is given.
@@ -164,8 +165,8 @@ their fields and defaults; capability checks and CLI conversion share that
 description while format validation retains the value relationships.
 
 `max_link_target_bytes` is the longest symbolic-link target the format
-stores: 1024 for ImageFS, 1023 for QNX4 and QNX6, and zero for FAT and
-exFAT, whose `entry_kinds` lack links. The entry model's ceiling,
+stores: 1024 for ImageFS and UDF, 1023 for QNX4 and QNX6, and zero for FAT
+and exFAT, whose `entry_kinds` lack links. The entry model's ceiling,
 `FSIMG_SYMLINK_TARGET_MAX`, is the largest of these, 1024, and bounds the
 buffers and the host scan; the
 [architecture](architecture.md#names-and-metadata) records the split.

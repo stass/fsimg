@@ -88,6 +88,19 @@
   qnxprobe comparisons and head-unit acceptance.
   [Research evidence](docs/qnx4-research.md) owns the native observations.
 
+* [Medium] **UDF reader, verifier and writer** (`lib/formats/udf/`,
+  `lib/read/`, `lib/meta/extent.c`, `lib/write/`): the
+  [format design](specs/design-udf.md) and
+  [driver design](specs/design-udf-driver.md) describe reading physical,
+  metadata, sparable and virtual partitions and ISO 9660 bridges, full
+  verification, and a closed UDF 2.01 writer, with format-neutral zero
+  extents, decoded link targets, stored-byte payload counts, link-target
+  reads and a 255-byte label in the common contracts. The
+  [plan](docs/udf-plan.md) orders the stages, starting with confirmation
+  against the published standards; the
+  [research record](docs/udf-research.md) holds the evidence; the
+  [qualification work](docs/todo-udf.md) lists the open items.
+
 * [Medium] **Specification-driven testing** (`test/spec/`, `test/spec.sh.in`,
   `Makefile.am`, `.github/workflows/check.yml`): build the Ruby rule, case and
   runner harness. It derives valid and targetedly invalid FAT images from

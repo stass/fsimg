@@ -510,16 +510,24 @@ timestamp interpretation, and header-level validation scope, with validity bits
 for unknown totals. Querying it does not traverse directories or certify the
 whole volume; full verification has its own report.
 
-Two fields of the record serve formats whose header carries more than a
-label, and both change the public record's layout, so adding them is an
-ABI change of `fsimg_volume_info_t`. The record has no size or version
+Three fields of the record serve formats whose header carries more than a
+short label, and each changes the public record's layout, so adding or
+resizing them is an ABI change of `fsimg_volume_info_t`. The record has no size or version
 field, so its layout is pre-stable like the rest of the interface and
 freezes at the first declared stable release:
 
 * `mountpoint[1025]`, valid under `FSIMG_VOLUME_MOUNTPOINT`: the stored
   mount path of a format that has one, ImageFS, as validated UTF-8 of at
-  most 1024 bytes and a terminator. It is distinct from the label, which
-  stays 49 bytes; a format reports either, both or neither.
+  most 1024 bytes and a terminator. It is distinct from the label; a format
+  reports either, both or neither.
+* `label[256]`: a label of at most 255 bytes of UTF-8 and a terminator,
+  sized for UDF, whose logical volume identifier of 126 eight-bit
+  characters decodes to at most 252 bytes. A label is reported exactly or
+  not at all, never truncated. The same capacity applies on writing: the
+  writer's copied label, the common check that bounds it once the driver's
+  `validate` has resolved a NULL label to its default, and the worker's job
+  and information records all hold 255 bytes and a terminator, so a label a
+  format accepts is never refused by common storage.
 * `details[16]` with `detail_count`: a bounded, format-neutral table of
   named values, `fsimg_volume_detail_t`, each an ASCII `name[24]` of at
   most 23 bytes and a `uint64_t value`. A driver fills at most 16 in a

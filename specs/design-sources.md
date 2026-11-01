@@ -31,7 +31,9 @@ configuration are terminal collection failures. Failure immediately closes the
 current source and retained host roots, and releases collection-only storage.
 The source cursor itself only reports: an operational failure of an open,
 read, range query or finish closes the current source and returns its status
-to the emission that asked, and the writer fails when that emission returns,
+to the emission or planning step that asked, such as a
+[link-target read](design-emission.md#encoded-link-targets), and the writer
+fails when that step returns,
 as it does for a sink's failure, so a driver still on the stack never sees
 writer state change beneath it.
 A successfully published catalog remains

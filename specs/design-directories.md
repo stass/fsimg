@@ -11,7 +11,8 @@ The [architecture](architecture.md#writer-and-reader-independence) assigns the
 owners. [Storage](design-storage.md#reading-and-traversal) states the bounds.
 Driver designs ([FAT](design-fat-reader.md), [exFAT](design-exfat.md),
 [QNX6](design-qnx6.md), [QNX4](design-qnx4.md),
-[ImageFS](design-ifs-driver.md)) define only their decoding, keys, and
+[ImageFS](design-ifs-driver.md), [UDF](design-udf-driver.md)) define only
+their decoding, keys, and
 locators.
 Host source scanning and safe extraction have separate authority and lifetime
 rules and do not use this walker.
@@ -153,10 +154,20 @@ whole-volume tree is materialized.
 A driver admits a child once its name has passed the driver's native checks,
 the ones whose failure is corruption, such as an embedded NUL or an empty
 name. Preparation then assigns the child one of two classes. A format whose
-reader operations, which its descriptor names, declare the QNX-family name
-profile (QNX4, QNX6 and ImageFS) has every child's component checked by the
-one common profile function:
+reader operations, which its descriptor names, declare the portable name
+profile, `FSIMG_NAME_PROFILE_PORTABLE` (QNX4, QNX6, ImageFS and UDF), has
+every child's component checked by the one common profile function,
+`fsimg_name_in_portable_profile()`:
 strict UTF-8, no NUL, slash, control byte or `0x7f`, neither `.` nor `..`.
+UDF declares it because a UDF name is
+Unicode a POSIX host cannot always store: the UDF driver hands preparation
+the WTF-8 of a name with a control character or an unpaired surrogate,
+which the function's byte rules reject, as the
+[UDF design](design-udf.md#name-profile) states. UDF names can also hold
+NUL, slash or a dot name natively; `fsimg_directory_admit()` takes no such
+component, so the UDF driver fails that directory with
+`FSIMG_EUNSUPPORTED` instead of omitting the child, the one case where a
+natively legal name outside the profile is refused rather than omitted.
 A component under the profile makes the child *delivered*; a natively legal
 component outside it makes the child *omitted*, under the
 [architecture's rule](architecture.md#names-and-metadata). A format
@@ -164,7 +175,7 @@ that declares no profile, FAT and exFAT, admits every child as delivered,
 since its driver derives validated names by its own rules. Common code
 branches on the declared property, never on a format name, and no driver
 chooses a class. The same function validates a query component in every
-QNX driver's `key`, and the ImageFS child pass calls it to count omitted
+QNX and UDF driver's `key`, and the ImageFS child pass calls it to count omitted
 nodes at open, so there is one rule for what the profile accepts.
 
 The class is the only difference between the two kinds of child. An

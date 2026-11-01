@@ -114,6 +114,24 @@ a different entry's source or leave a source open.
 * The current source is released on every outcome, including errors in the
   middle of a batch.
 
+## Encoded link targets
+
+A symbolic link's target is the entry's content, and most formats store it
+verbatim through the copy operation. A format that stores an encoding of it,
+such as UDF's path components, needs the target's bytes to size the encoding
+while planning and to encode it while emitting, and a driver never opens a
+source. One common operation serves both: given a symbolic link's catalog ID
+and a buffer of `FSIMG_SYMLINK_TARGET_MAX` bytes, it opens the entry's
+source through the writer's current-source lifecycle, reads and checks the
+complete target, closes the source and returns the length. It validates the
+source exactly as a copy does, so a link whose target changed between
+planning and emission fails with `FSIMG_ESOURCE_CHANGED`. Planning may call
+it; it is the only source access planning makes, and it reads at most one
+link at a time into the driver's one charged buffer. A failure closes the
+source and fails the planning or emission step that asked, and the writer
+with it, under the [source failure rule](design-sources.md); a failed plan
+publishes no losses and no summary.
+
 ## Failure
 
 Every failure from step 4 on marks the output incomplete. A caller-supplied

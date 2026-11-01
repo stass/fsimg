@@ -199,7 +199,8 @@ owns the grammar: three slots in fixed order, filesystem, scheme, container;
 a name fills the slot of its kind and `-` marks the next slot empty, so
 `fat32/-/dmg` spells `fat32/dmg` out and `fat32/-/-` is a bare volume. A
 repeated kind or misordered name is a syntax error, not a guess. Filesystem
-names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4` and `ifs`.
+names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs` and
+`udf`.
 
 `-F` is required for `c`, and its stack must begin with a filesystem name:
 `-F gpt` creates nothing and is a syntax error. On reading, a named slot is

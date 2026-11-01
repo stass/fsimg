@@ -59,7 +59,7 @@ An image is a stack with three slots in fixed order, each at most once:
 
 | Slot | Kind | Names |
 | --- | --- | --- |
-| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`; reserved: `apfs`, `hfs` |
+| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`, `udf`; reserved: `apfs`, `hfs` |
 | 2 | Scheme | `gpt`, `mbr` |
 | 3 | Container | `dmg`, `vhd`, `simg`, `ifsboot`, `hbcifs` |
 
@@ -846,12 +846,12 @@ container's bytes around the same disk as far as the profile states.
 
 | Key | Type | Default | Validation |
 | --- | --- | --- | --- |
-| `gpt:type` | type name, or GUID text | Derived from the filesystem: `basic` for FAT and exFAT, `qnx6` for QNX6; none for QNX4, which must name its type | Name from the [type table](#partition-types) or RFC 4122 text; not nil, which marks an unused entry |
+| `gpt:type` | type name, or GUID text | Derived from the filesystem: `basic` for FAT and exFAT, `qnx6` for QNX6; none for QNX4 and UDF, which must name their type | Name from the [type table](#partition-types) or RFC 4122 text; not nil, which marks an unused entry |
 | `gpt:name` | UTF-8 text | The type's conventional name from the [type table](#partition-types); an empty value is the default | At most 36 UTF-16LE units after conversion; validated UTF-8 |
 | `gpt:disk-guid`, `gpt:guid` | GUID text | See [identifiers](#identifiers) | RFC 4122 text; not nil, which the library reads as unset |
 | `gpt:disk` | bytes | Derived from the volume | Multiple of the sector size and the container granularity; large enough for the volume and tables |
 | `gpt:sector` | bytes | 512 | 512 or 4096; the LBA size of the tables. On read it resolves a disk carrying a header at both offsets and requires `gpt` in the forced stack |
-| `mbr:type` | type name, or `0x` byte | Derived: `fat12` 0x01, `fat16` 0x06, `fat32` 0x0C, `exfat` 0x07, `qnx6` 0xB2, `qnx4` 0x4D | Nonzero byte; not 0x05, 0x0F or 0x85 (extended containers) and not 0xEE (GPT protective) |
+| `mbr:type` | type name, or `0x` byte | Derived: `fat12` 0x01, `fat16` 0x06, `fat32` 0x0C, `exfat` 0x07, `qnx6` 0xB2, `qnx4` 0x4D; none for `udf`, which must name its type | Nonzero byte; not 0x05, 0x0F or 0x85 (extended containers) and not 0xEE (GPT protective) |
 | `mbr:active` | `yes`, `no` | `no` | Sets the 0x80 status |
 | `mbr:id` | `0x` 32-bit | See [identifiers](#identifiers) | Any value |
 | `mbr:disk` | bytes | Derived | As `gpt:disk`; at most 2 TiB, the 2^32 sectors an entry can address |

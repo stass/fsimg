@@ -45,6 +45,7 @@ to a whole sector, it is the same capacity under either policy.
 | QNX6 | Block size over the classic sizes; inode capacity, the catalog's inodes rounded to a whole table block; the block count at the alignment step instead of the 64-block search step | Byte order, the reserve percentage, the system-run recipe |
 | QNX4 | Nothing: the block is 512 bytes and the block count is already the smallest that fits | The native default layout, the 128-slot `.inodes` minimum, the 4096-byte directory rounding |
 | ImageFS | Nothing: the image is exactly its header, mountpoint, records, data and trailer | The 4-byte record and data alignment |
+| UDF | Nothing: the block is the sector, and the block count is already the smallest that fits | The 2048-byte default block, the fixed volume layout around the partition, the space bitmap's size |
 
 The FAT type minimum is what makes the image the requested variant and is
 not a dimension. The exFAT recommended cluster count is a guidance value, so
@@ -92,6 +93,15 @@ For QNX4 the default block count is the smallest one that holds the fixed
 layout, the objects and the bitmap, found by the short iteration the
 [driver design](design-qnx4-driver.md#planning) states, so minimization
 returns the default volume.
+
+For UDF the default block count is the smallest whose partition holds the
+space bitmap, the file set descriptor, the objects and the free reserve,
+found by the short iteration the
+[driver design](design-udf-driver.md#planning) states, so minimization
+returns the default volume. UDF's logical block is its sector, and the
+sector size is a property of the medium the volume is for, which no format's
+minimization searches; FAT and exFAT search only the allocation unit above
+it. The block size therefore stays the default or the caller's choice.
 
 An ImageFS has no free space and no geometry: its size is derived exactly
 from the catalog and the settings by the
