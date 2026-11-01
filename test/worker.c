@@ -26,6 +26,17 @@
 #include "test.h"
 #include "worker.h"
 
+/* Memory reports use three little-endian words: marker, peak, reserved. */
+#define WORKER_MEMORY_REPORT UINT64_MAX
+#define WORKER_MEMORY_MARKER_OFFSET 0
+#define WORKER_MEMORY_PEAK_OFFSET 8
+#define WORKER_MEMORY_REPORT_BYTES 24
+
+/* The test target redirects the child's final stats query through this hook. */
+#undef fsimg_ctx_get_stats
+fsimg_status_t fsimg_ctx_get_stats(fsimg_ctx_t *, fsimg_stats_t *,
+    fsimg_error_t *);
+
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
 #define FSIMG_TEST_ASAN 1
@@ -629,6 +640,7 @@ static const coordinator_case_t coordinator_cases[] = {
 static unsigned coordinator_clock_calls;
 static unsigned coordinator_clock_fail_from;
 static uint64_t coordinator_clock_fault_started;
+static bool report_worker_memory;
 
 /* Create jobs in these tests copy one source directory to the image root. */
 static const char *const image_root[] = { "/" };
@@ -647,6 +659,7 @@ typedef struct worker_fixture {
 	fsimg_worker_result_t result;
 	char		 path[64];
 	char		 executable[4096];
+	uint64_t	 memory_peak;
 	uint64_t	 name_bytes;
 	uint64_t	 plan_losses;
 	unsigned	 info;
@@ -715,6 +728,8 @@ static void fixture_open(worker_fixture_t *);
 static void fixture_open_format(worker_fixture_t *, const char *);
 static void fixture_open_with_entries(worker_fixture_t *, const char *,
     const fsimg_entry_t *, size_t);
+static void fixture_open_with_sources(worker_fixture_t *, const char *,
+    const fsimg_entry_t *, size_t, const fsimg_source_ops_t *);
 static void fixture_open_directories(worker_fixture_t *);
 static void fixture_close(worker_fixture_t *);
 static fsimg_status_t check_listed_path(void *, const fsimg_frame_t *,
@@ -725,6 +740,11 @@ static fsimg_status_t event(void *, const fsimg_frame_t *, fsimg_worker_text_t *
     fsimg_error_t *);
 static fsimg_status_t run(worker_fixture_t *, fsimg_error_t *);
 static void test_operations(const char *);
+static void test_cat_sizes_buffer_to_file_and_streams_partial_chunk(void);
+static unsigned char cat_pattern(uint64_t);
+static fsimg_status_t cat_source_validate(void *, uint64_t, fsimg_error_t *);
+static fsimg_status_t cat_source_read(void *, uint64_t, uint64_t, void *,
+    size_t, size_t *, fsimg_error_t *);
 static void test_prompt_completion(void);
 static void test_startup(void);
 static void test_inheritance(void);
@@ -792,6 +812,30 @@ static unsigned test_forged_creation_compression(void);
 static unsigned test_forged_creation_staged_length(void);
 static unsigned test_forged_creation_stream_length(void);
 static void test_coordinator_regressions(void);
+
+/* A marked progress frame carries charged memory without changing the wire
+ * protocol. Only a worker child started on a marked image sets the flag,
+ * so the parent's own contexts never emit the frame.
+ */
+fsimg_status_t
+fsimg_test_worker_get_stats(fsimg_ctx_t *ctx, fsimg_stats_t *stats,
+    fsimg_error_t *error)
+{
+	unsigned char raw[WORKER_MEMORY_REPORT_BYTES] = { 0 };
+	fsimg_status_t status;
+
+	status = fsimg_ctx_get_stats(ctx, stats, error);
+	if (status == FSIMG_OK && report_worker_memory) {
+		fsimg_store_le64(raw + WORKER_MEMORY_MARKER_OFFSET,
+		    WORKER_MEMORY_REPORT);
+		fsimg_store_le64(raw + WORKER_MEMORY_PEAK_OFFSET,
+		    stats->memory_peak);
+		/* A failed control channel must not abort the child's error path. */
+		(void)fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PROGRESS,
+		    raw, sizeof(raw), NULL);
+	}
+	return (status);
+}
 
 /* Run the real worker with a preloaded job pipe, bypassing the coordinator's
  * path framing. The cancellation writer stays open until the child is reaped.
@@ -1265,7 +1309,17 @@ static void
 fixture_open_with_entries(worker_fixture_t *fixture, const char *format,
     const fsimg_entry_t *entries, size_t count)
 {
-	const fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fixture_open_with_sources(fixture, format, entries, count, NULL);
+}
+
+static void
+fixture_open_with_sources(worker_fixture_t *fixture, const char *format,
+    const fsimg_entry_t *entries, size_t count,
+    const fsimg_source_ops_t *sources)
+{
+	const fsimg_source_t source = {
+		.kind = sources == NULL ? FSIMG_SOURCE_ZERO : FSIMG_SOURCE_PROVIDER
+	};
 	fsimg_options_t options;
 	fsimg_writer_t *writer;
 	fsimg_io_t *output;
@@ -1296,10 +1350,12 @@ fixture_open_with_entries(worker_fixture_t *fixture, const char *format,
 	options.scratch_directory_fd = fixture->scratch;
 	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_new(fixture->ctx, format, NULL, &writer, NULL) == FSIMG_OK);
+	if (sources != NULL)
+		CHECK(fsimg_writer_set_sources(writer, sources, NULL, NULL) == FSIMG_OK);
 	CHECK(fsimg_writer_add_tree(writer, fixture->source, "/", NULL) == FSIMG_OK);
 	for (size_t i = 0; i < count; i++)
 		CHECK(fsimg_writer_add(writer, &entries[i],
-		    entries[i].kind == FSIMG_ENTRY_FILE ? &zero : NULL, NULL) == FSIMG_OK);
+		    entries[i].kind == FSIMG_ENTRY_FILE ? &source : NULL, NULL) == FSIMG_OK);
 	fd = openat(fixture->parent, "image", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
 	CHECK(fd != -1);
 	CHECK(fsimg_io_from_fd(fixture->ctx, fd, FSIMG_IO_WRITE, &output, NULL) == FSIMG_OK);
@@ -1366,6 +1422,11 @@ event(void *argument, const fsimg_frame_t *frame,
 		}
 		if (frame->type == FSIMG_FRAME_NAME)
 			fixture->name_bytes += frame->length;
+		if (frame->type == FSIMG_FRAME_PROGRESS &&
+		    fsimg_load_le64(frame->payload + WORKER_MEMORY_MARKER_OFFSET) ==
+		    WORKER_MEMORY_REPORT)
+			fixture->memory_peak = fsimg_load_le64(frame->payload +
+			    WORKER_MEMORY_PEAK_OFFSET);
 	}
 	return (FSIMG_OK);
 }
@@ -1719,6 +1780,100 @@ test_list_and_extract_directory_counts_and_manifest_match(void)
 	CHECK(unlinkat(fixture.output, "DIR/SUB", AT_REMOVEDIR) == 0);
 	CHECK(unlinkat(fixture.output, "DIR", AT_REMOVEDIR) == 0);
 	fixture_close(&fixture);
+}
+
+static unsigned char
+cat_pattern(uint64_t offset)
+{
+	/* High offset bits distinguish successive 64 KiB pieces. */
+	return ((unsigned char)(offset ^ (offset >> 16)));
+}
+
+static fsimg_status_t
+cat_source_validate(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+cat_source_read(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
+    uint64_t offset, void *buffer, size_t length, size_t *transferred,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	unsigned char *bytes = buffer;
+
+	for (size_t i = 0; i < length; i++)
+		bytes[i] = cat_pattern(offset + i);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static void
+test_cat_sizes_buffer_to_file_and_streams_partial_chunk(void)
+{
+	const fsimg_entry_t entries[] = {
+		{ .path = "/small", .kind = FSIMG_ENTRY_FILE, .size = 1 },
+		{ .path = "/large", .kind = FSIMG_ENTRY_FILE,
+		    .size = 3 * 65536 + 123 },
+		{ .path = "/empty", .kind = FSIMG_ENTRY_FILE, .size = 0 }
+	};
+	worker_fixture_t fixture;
+	fsimg_source_ops_t sources;
+	fsimg_error_t error;
+	uint64_t peaks[sizeof(entries) / sizeof(entries[0])], offset;
+	unsigned char bytes[4096];
+	size_t batch;
+	ssize_t count;
+	int fd;
+
+	fsimg_source_ops_init(&sources);
+	sources.validate = cat_source_validate;
+	sources.read_at = cat_source_read;
+	/* ImageFS keeps this generated image close to its payload size. */
+	fixture_open_with_sources(&fixture, "ifs", entries,
+	    sizeof(entries) / sizeof(entries[0]), &sources);
+	/* Group execute marks this image for the child's stats-reporting hook. */
+	CHECK(fchmod(fixture.input, 0610) == 0);
+	fixture.request.kind = FSIMG_JOB_CAT;
+	fixture.request.member_count = 1;
+	fd = openat(fixture.parent, "raw", O_CREAT | O_EXCL | O_RDWR, 0600);
+	CHECK(fd != -1);
+
+	for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+		fixture.request.members = &entries[i].path;
+		fixture.ready = false;
+		fixture.memory_peak = 0;
+		CHECK(ftruncate(fd, 0) == 0);
+		CHECK(lseek(fd, 0, SEEK_SET) == 0);
+		CHECK(fsimg_worker_run(fixture.executable, &fixture.request,
+		    event, &fixture, fd, NULL, &fixture.result, &error) == FSIMG_OK);
+		CHECK(fixture.result.raw_bytes == entries[i].size);
+		CHECK(fixture.memory_peak != 0);
+		peaks[i] = fixture.memory_peak;
+		offset = 0;
+		while (offset < entries[i].size) {
+			batch = entries[i].size - offset > sizeof(bytes) ?
+			    sizeof(bytes) : (size_t)(entries[i].size - offset);
+			count = pread(fd, bytes, batch, (off_t)offset);
+			CHECK(count == (ssize_t)batch);
+			for (size_t j = 0; j < batch; j++)
+				CHECK(bytes[j] == cat_pattern(offset + j));
+			offset += batch;
+		}
+		CHECK(pread(fd, bytes, 1, (off_t)offset) == 0);
+	}
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture.parent, "raw", 0) == 0);
+	fixture_close(&fixture);
+
+	/* Both jobs read the same directory. A 1-byte buffer saves nearly
+	 * 64 KiB; requiring more than 32 KiB allows other peak allocations.
+	 */
+	if (peaks[1] <= peaks[0] || peaks[1] - peaks[0] <= 32768)
+		fprintf(stderr, "cat memory_peak: small=%llu large=%llu bytes\n",
+		    (unsigned long long)peaks[0], (unsigned long long)peaks[1]);
+	CHECK(peaks[1] > peaks[0] && peaks[1] - peaks[0] > 32768);
 }
 
 static void
@@ -2962,12 +3117,17 @@ main(int argc, char **argv)
 	if (argc == 2 && strcmp(argv[1], "--internal-worker") == 0) {
 		CHECK(setrlimit(RLIMIT_CORE, &no_core) == 0);
 		CHECK(fcntl(200, F_GETFD) == -1 && errno == EBADF);
+		/* Marker modes: 0700 fake_worker, 0710 coordinator_worker_selected,
+		 * 0720 names_worker_selected, 0610 the stats hook.
+		 */
 		if (names_worker_selected(&st))
 			return (fake_names_worker((size_t)st.st_size));
 		if (coordinator_worker_selected(&st))
 			return (fake_coordinator_worker((size_t)st.st_size));
 		if (fstat(FSIMG_CHILD_INPUT, &st) == 0 && (st.st_mode & 0100) != 0)
 			return (fake_worker((worker_scenario_t)st.st_size));
+		report_worker_memory = fstat(FSIMG_CHILD_INPUT, &st) == 0 &&
+		    (st.st_mode & S_IXGRP) != 0;
 		return (fsimg_worker_main());
 	}
 	if (argc == 2 && strcmp(argv[1], "--internal-input") == 0)
@@ -2999,6 +3159,7 @@ main(int argc, char **argv)
 		test_transport((worker_scenario_t)atoi(getenv("FSIMG_TEST_TRANSPORT")));
 		return (0);
 	}
+	test_cat_sizes_buffer_to_file_and_streams_partial_chunk();
 	test_operations("fat16");
 	test_operations("exfat");
 	test_list_case_alias_members_once();

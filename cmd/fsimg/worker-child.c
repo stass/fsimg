@@ -26,6 +26,9 @@
 _Static_assert(FSIMG_SANDBOX_SETTINGS == FSIMG_FILE_SETTINGS,
     "the sandbox admits every file setting");
 
+/* The largest piece a cat job reads and writes at once. */
+#define CAT_BUFFER_BYTES ((size_t)65536)
+
 typedef struct worker_child {
 	fsimg_worker_request_t request;
 	fsimg_worker_result_t result;
@@ -730,7 +733,7 @@ cat_job(worker_child_t *child, fsimg_error_t *error)
 	const fsimg_entry_t *entry;
 	unsigned char *buffer;
 	uint64_t offset;
-	size_t batch, transferred, done;
+	size_t batch, capacity, transferred, done;
 	ssize_t written;
 	unsigned interruptions;
 	fsimg_status_t status;
@@ -751,12 +754,18 @@ cat_job(worker_child_t *child, fsimg_error_t *error)
 		return (status);
 	child->result.entries = 1;
 	child->result.logical_bytes = entry->size;
-	buffer = fsimg_alloc(child->ctx, 65536, error);
+	/* Read in pieces of at most CAT_BUFFER_BYTES; a smaller file needs a
+	 * buffer only as large as itself (fsimg_alloc accepts zero bytes).
+	 */
+	capacity = entry->size < CAT_BUFFER_BYTES ? (size_t)entry->size :
+	    CAT_BUFFER_BYTES;
+	buffer = fsimg_alloc(child->ctx, capacity, error);
 	if (buffer == NULL)
 		return (error->status);
 	offset = 0;
 	while (offset < entry->size) {
-		batch = entry->size - offset > 65536 ? 65536 : (size_t)(entry->size - offset);
+		batch = entry->size - offset > capacity ? capacity :
+		    (size_t)(entry->size - offset);
 		status = fsimg_reader_read_at(child->reader, offset, buffer, batch,
 		    &transferred, error);
 		if (status != FSIMG_OK)
