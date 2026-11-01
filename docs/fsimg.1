@@ -269,8 +269,8 @@ the names are entry records on stderr and stdout is unchanged; a creation's
 record carries the source's metadata, before the format reduces it.
 A terminal slower than the job slows the job; no name is dropped.
 .Fl vv
-adds bounded progress, capability details and sampled metadata-loss
-examples on stderr.
+adds the creation plan with its chosen geometry, bounded progress,
+capability details and sampled metadata-loss examples on stderr.
 In mode
 .Cm t ,
 .Fl v
@@ -625,6 +625,12 @@ Settings given with
 .Fl o
 and the free space still hold; QNX4 and ImageFS images are already the
 smallest.
+The plan, which
+.Fl n
+prints on stdout and
+.Fl vv
+on stderr, reports the chosen cluster or block size and count and, for
+QNX6, the inode capacity.
 Conflicts with
 .Fl s
 and with a fixed

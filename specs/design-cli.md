@@ -157,7 +157,7 @@ rule.
 
 | Mode | `-v` | `-vv` |
 | --- | --- | --- |
-| `c`, `x` | One escaped entry name per line on stderr as each entry is processed | Adds bounded progress, capability details and sampled metadata-loss examples on stderr |
+| `c`, `x` | One escaped entry name per line on stderr as each entry is processed | Adds, on stderr, the creation's plan with its chosen geometry (the cluster or block size and count and, for QNX6, the inode capacity), bounded progress, capability details and sampled metadata-loss examples |
 | `t` | The long listing on stdout, defined under [listing](#listing) | The same stderr details |
 | `W`, `i`, `--formats` | Capability, geometry and sandbox details on stderr | Nothing further |
 

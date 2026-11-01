@@ -309,13 +309,10 @@
 
 ## Bugs by subsystem
 
-* [Low] **Minimized geometry under `c -v` and the FAT root report**
-  (`specs/design-sizing.md`, `specs/design-cli.md`, `cmd/fsimg/display.c`):
-  the sizing design says `-v` names the unit minimization chose, but the CLI
-  design gives `c -v` only the entry names, so creation prints no geometry
-  (`c -n` reports it). Decide which design holds. The plan also does not
-  report the FAT12/16 root capacity, which `-M` shrinks to the root's slots,
-  leaving a native user no free root entries.
+* [Low] **FAT root report** (`specs/design-sizing.md`,
+  `cmd/fsimg/display.c`): the plan does not report the FAT12/16 root
+  capacity, which `-M` shrinks to the root's slots, leaving a native user no
+  free root entries.
 
 * [Medium] **Post-read source-change payload evidence** (`test/exfat.c`):
   the helper's truncation case changes its source before the next read.

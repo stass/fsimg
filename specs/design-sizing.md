@@ -46,8 +46,10 @@ still contains them.
 
 The FAT type minimum is what makes the image the requested variant and is
 not a dimension. The exFAT recommended cluster count is a guidance value, so
-minimization may exceed it when a smaller volume results; `-v` names the
-chosen unit and the plan reports it. A minimized QNX6 volume has no spare
+minimization may exceed it when a smaller volume results. The plan reports
+the chosen unit's size and count and, for QNX6, the inode capacity, which
+`c -n` prints on stdout and `c -vv` on stderr with its other details; `c -v`
+names entries only. A minimized QNX6 volume has no spare
 inodes unless `inodes=` is given, and the plan reports its free inode count,
 since a native user of that volume cannot create files beyond it.
 
