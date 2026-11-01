@@ -12,6 +12,35 @@ class CliTest < Minitest::Test
     assert_includes(result.stderr, "read setting does not apply to the image format".b)
   end
 
+  def test_forced_fat_rejects_joliet_before_consuming_stdin
+    payload = "unread image bytes".b
+    IO.pipe do |reader, writer|
+      writer.write(payload)
+      writer.close
+      reader.nonblock = false
+
+      result = invoke(arguments: ["-t", "-F", "fat12", "-o", "view=joliet", "-f", "-"],
+        stdin: reader, expected: 1)
+
+      assert_empty(result.stdout)
+      assert_includes(result.stderr, '"view"'.b)
+      assert_includes(result.stderr, "read setting does not apply to the image format".b)
+      assert_equal(payload, reader.read, "settings rejection must leave stdin unread")
+    end
+  end
+
+  def test_forced_fat_rejects_joliet_before_opening_file_image
+    # A missing image makes input preparation observable: the settings error
+    # must take precedence over a host open failure.
+    result = invoke(arguments: ["-t", "-F", "fat12", "-o", "view=joliet",
+      "-f", "missing.img"], expected: 1)
+
+    assert_empty(result.stdout)
+    assert_includes(result.stderr, '"view"'.b)
+    assert_includes(result.stderr, "read setting does not apply to the image format".b)
+    refute_includes(result.stderr, "No such file".b)
+  end
+
   def test_view_syntax_lists_choices_and_rejects_repeated_keys
     result = invoke(arguments: ["t", "-o", "view=bogus", "-f", "unused.img"], expected: 2)
     %w[view auto rockridge joliet primary].each { assert_includes(result.stderr, _1.b) }

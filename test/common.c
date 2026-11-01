@@ -43,6 +43,10 @@ typedef struct reader_fixture {
 	memory_image_t		image;
 	link_corruption_t	corruption;
 	bool			trees;
+	bool			cancel_delivery;
+	bool			cancelled;
+	bool			fail_link_allocation;
+	int			changed_host;
 	bool			duplicate_second;
 	bool			deep_second;
 	unsigned		tree;
@@ -206,6 +210,8 @@ reader_replay(fsimg_reader_t *reader, const char *name FSIMG_UNUSED,
 	if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
 		return (FSIMG_OK);
 	if (reader->entry.kind == FSIMG_ENTRY_SYMLINK) {
+		if (f->fail_link_allocation)
+			fsimg_test_fail_alloc_after(f->ctx, 1);
 		status = fsimg_reader_set_link_target(reader, DECODED_TARGET,
 		    sizeof(DECODED_TARGET) - 1, error);
 		if (status != FSIMG_OK)
@@ -246,6 +252,28 @@ reader_verify(fsimg_reader_t *reader, unsigned flags,
 	fsimg_status_t status;
 	unsigned char bytes[64];
 
+	/* Inject only after replay has established the decoded snapshot. This
+	 * bypasses the outer read_at guards and exercises delivery's own checks.
+	 */
+	if (f->changed_host != -1 || f->cancel_delivery) {
+		CHECK((flags & FSIMG_VERIFY_PAYLOAD) != 0);
+		status = fsimg_walk_next(reader, error);
+		if (status != FSIMG_OK)
+			return (status);
+		CHECK(reader->link_target != NULL && reader->link_length == 10);
+		CHECK(reader->entry.path != NULL);
+		CHECK(fsimg_reader_stable(reader, NULL) == FSIMG_OK);
+		if (f->changed_host != -1)
+			CHECK(ftruncate(f->changed_host, VOLUME_BYTES + 1) == 0);
+		f->cancelled = f->cancel_delivery;
+		memset(bytes, 0xa5, sizeof(bytes));
+		status = fsimg_verify_payload(reader, bytes, sizeof(bytes), report,
+		    error);
+		for (size_t i = 0; i < sizeof(bytes); i++)
+			CHECK(bytes[i] == 0xa5);
+		return (status);
+	}
+
 	/* The walker yields children; account for the root separately. */
 	report->directories = 1;
 	CHECK(fsimg_walk_restart(reader, NULL) == FSIMG_ESTATE);
@@ -284,6 +312,12 @@ static const fsimg_reader_ops_t reader_ops = {
 	.resolve = reader_resolve, .verify = reader_verify
 };
 
+static bool
+reader_cancelled(void *argument)
+{
+	return (((reader_fixture_t *)argument)->cancelled);
+}
+
 static void
 reader_fixture_open(reader_fixture_t *f)
 {
@@ -292,7 +326,10 @@ reader_fixture_open(reader_fixture_t *f)
 	fsimg_options_t limits;
 
 	bzero(f, sizeof(*f));
+	f->changed_host = -1;
 	fsimg_options_init(&limits);
+	limits.cancelled = reader_cancelled;
+	limits.cancel_argument = f;
 	limits.memory_bytes = 32u * 1024u * 1024u;
 	CHECK(fsimg_ctx_new(&limits, &f->ctx, NULL) == FSIMG_OK);
 	open_memory(f->ctx, &f->image, &f->io);
@@ -315,7 +352,112 @@ reader_fixture_close(reader_fixture_t *f)
 	fsimg_reader_free(f->reader);
 	fsimg_io_free(f->io);
 	free(f->image.bytes);
+	CHECK(f->ctx->stats.memory_bytes == sizeof(*f->ctx));
 	fsimg_ctx_free(f->ctx);
+}
+
+/* Replace the callback input with a real file before opening the reader,
+ * so the public open captures the identity used by source-stability checks.
+ */
+static int
+reader_fixture_use_host(reader_fixture_t *f, const char *directory)
+{
+	char path[128];
+	int fd;
+
+	CHECK(snprintf(path, sizeof(path), "%s/image", directory) <
+	    (int)sizeof(path));
+	fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+	CHECK(fd != -1);
+	CHECK(write(fd, f->image.bytes, VOLUME_BYTES) == VOLUME_BYTES);
+	CHECK(unlink(path) == 0);
+	fsimg_reader_free(f->reader);
+	fsimg_io_free(f->io);
+	CHECK(fsimg_io_from_fd(f->ctx, fd, FSIMG_IO_READ | FSIMG_IO_WRITE,
+	    &f->io, NULL) ==
+	    FSIMG_OK);
+	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) == FSIMG_OK);
+	CHECK(f->reader->host_identity);
+	f->reader->ops->close(f->reader);
+	f->reader->driver = f;
+	f->reader->ops = &reader_ops;
+	return (fd);
+}
+
+static void
+check_reader_failed_without_snapshot(reader_fixture_t *f)
+{
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+	unsigned char byte;
+	size_t count;
+
+	CHECK(f->reader->state == FSIMG_READER_FAILED);
+	CHECK(f->reader->entry.path == NULL && f->reader->entry.kind == 0);
+	CHECK(f->reader->entry.size == 0);
+	CHECK(f->reader->link_target == NULL && f->reader->link_length == 0);
+	CHECK(fsimg_reader_next(f->reader, &entry, &error) == FSIMG_ESTATE);
+	CHECK(strcmp(error.message, "reader has failed") == 0);
+	CHECK(fsimg_reader_read_at(f->reader, 0, &byte, 1, &count, &error) ==
+	    FSIMG_ESTATE);
+	CHECK(count == 0 && strcmp(error.message, "reader has failed") == 0);
+}
+
+static void
+test_decoded_link_host_change_during_verification_is_terminal(void)
+{
+	reader_fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	char directory[] = "common-reader-XXXXXX";
+	int fd;
+
+	CHECK(mkdtemp(directory) != NULL);
+	reader_fixture_open(&f);
+	fd = reader_fixture_use_host(&f, directory);
+	f.changed_host = fd;
+	CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report, &error) ==
+	    FSIMG_ESOURCE_CHANGED);
+	CHECK(error.operation == FSIMG_OP_READER);
+	CHECK(!report.complete && report.payload_bytes_read == 0);
+	check_reader_failed_without_snapshot(&f);
+	reader_fixture_close(&f);
+	CHECK(close(fd) == 0);
+	CHECK(rmdir(directory) == 0);
+}
+
+static void
+test_decoded_link_cancellation_during_verification_is_terminal(void)
+{
+	reader_fixture_t f;
+	fsimg_verify_report_t report;
+
+	reader_fixture_open(&f);
+	f.cancel_delivery = true;
+	CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) ==
+	    FSIMG_ECANCELLED);
+	CHECK(!report.complete && report.payload_bytes_read == 0);
+	f.cancelled = false;
+	check_reader_failed_without_snapshot(&f);
+	reader_fixture_close(&f);
+}
+
+static void
+test_decoded_link_allocation_failure_during_advance_is_terminal(void)
+{
+	reader_fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+
+	reader_fixture_open(&f);
+	f.fail_link_allocation = true;
+	CHECK(fsimg_reader_next(f.reader, &entry, &error) == FSIMG_ENOMEM);
+	CHECK(entry == NULL);
+	CHECK(f.ctx->allocation_attempts == 1);
+	CHECK(error.status == FSIMG_ENOMEM);
+	fsimg_test_fail_alloc_after(f.ctx, 0);
+	check_reader_failed_without_snapshot(&f);
+	reader_fixture_close(&f);
 }
 
 static void
@@ -772,6 +914,7 @@ typedef struct link_run {
 	unsigned	planned;
 	unsigned	emitted;
 	unsigned	validations;
+	unsigned	reads;
 	unsigned	fail_validation_at;
 	unsigned char	emitted_target[1024];
 	size_t		emitted_length;
@@ -805,6 +948,7 @@ link_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
 	link_run_t *run = argument;
 
 	CHECK(id == 7 && offset <= 6 && length <= 6 - offset);
+	run->reads++;
 	*count = run->short_read ? 0 : length;
 	bcopy(run->target + offset, buffer, *count);
 	return (FSIMG_OK);
@@ -1007,6 +1151,71 @@ test_link_read_failures_close_source(void)
 }
 
 static void
+count_link_losses(void *argument, const char *path FSIMG_UNUSED,
+    uint32_t fields FSIMG_UNUSED)
+{
+	unsigned *count = argument;
+
+	(*count)++;
+}
+
+static void
+test_link_read_failures_during_planning_publish_nothing(void)
+{
+	enum { FAIL_OPEN, SHORT_READ, FAIL_FINISH };
+	static const char *const names[] = {
+		"planning open validation", "planning short read",
+		"planning finish validation"
+	};
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	fsimg_options_t options;
+	link_run_t run;
+	const fsimg_plan_t *plan;
+	fsimg_error_t error;
+	fsimg_status_t status, expected;
+	unsigned losses = 0;
+	fsimg_plan_t unpublished = { 0 };
+
+	fsimg_options_init(&options);
+	options.loss = count_link_losses;
+	options.loss_argument = &losses;
+	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
+	for (unsigned fault = 0; fault < 3; fault++) {
+		writer = new_link_writer(ctx, &run);
+		run.fail_validation = fault == FAIL_OPEN;
+		run.short_read = fault == SHORT_READ;
+		if (fault == FAIL_FINISH)
+			run.fail_validation_at = 2;
+		/* Seed with a valid non-NULL pointer: failure must clear the
+		 * output rather than expose the driver's incomplete summary.
+		 */
+		plan = &unpublished;
+		expected = fault == SHORT_READ ? FSIMG_EIO : FSIMG_ESOURCE_CHANGED;
+		status = fsimg_writer_plan(writer, &plan, &error);
+		if (status != expected)
+			fprintf(stderr, "%s: expected %d, got %d\n",
+			    names[fault], expected, status);
+		CHECK(status == expected);
+		if (fault != SHORT_READ)
+			CHECK(strcmp(error.path, "/provider") == 0);
+		CHECK(run.validations == (fault == SHORT_READ ? 0u :
+		    (fault == FAIL_FINISH ? 2u : 1u)));
+		CHECK(run.reads == 1);
+		CHECK(!writer->source.active);
+		CHECK(writer->source.io == NULL && writer->source.fd == -1);
+		CHECK(writer->state == FSIMG_WRITER_FAILED);
+		CHECK(plan == NULL && writer->plan == NULL);
+		CHECK(run.planned == 0 && run.emitted == 0);
+		CHECK(losses == 0 && ctx->stats.metadata_losses == 0);
+		CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_ESTATE);
+		CHECK(plan == NULL && losses == 0);
+		fsimg_writer_free(writer);
+	}
+	fsimg_ctx_free(ctx);
+}
+
+static void
 test_host_link_reads_and_retargeted_link_names_image_path(void)
 {
 	fsimg_ctx_t *ctx;
@@ -1106,8 +1315,12 @@ main(void)
 {
 	test_provider_link_reads_at_plan_and_emit_and_observes_changed_bytes();
 	test_link_read_failures_close_source();
+	test_link_read_failures_during_planning_publish_nothing();
 	test_host_link_reads_and_retargeted_link_names_image_path();
 	test_writer_owns_validated_boot_paths();
+	test_decoded_link_host_change_during_verification_is_terminal();
+	test_decoded_link_cancellation_during_verification_is_terminal();
+	test_decoded_link_allocation_failure_during_advance_is_terminal();
 	test_content_reports_stored_bytes_separately();
 	test_decoded_link_declared_inconsistently_during_replay_fails_at_advance();
 	test_decoded_link_reads_ranges_and_verification();

@@ -1442,7 +1442,14 @@ interpret_read(cli_parse_t *parse)
 	}
 	if (fsimg_job_format(request)[0] == '\0' || parse->reserved)
 		return (FSIMG_OK);
-	return (find_format(parse, fsimg_job_format(request), &info));
+	status = find_format(parse, fsimg_job_format(request), &info);
+	if (status != FSIMG_OK)
+		return (status);
+	/*
+	 * A forced format is known now, so a read setting it does not accept
+	 * is refused here, before any input is prepared or a worker starts.
+	 */
+	return (fsimg_read_settings_check(&request->read, &info, parse->error));
 }
 
 /*
