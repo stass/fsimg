@@ -48,6 +48,7 @@ to a whole sector, it is the same capacity under either policy.
 | HFS Plus and HFSX | Block size over the writer's sizes, 512 to 65536 bytes | The native B-tree node sizes, one extent per fork, the reserved head and tail blocks |
 | APFS | Nothing: the block is 4096 bytes and the block count is already the smallest that fits | The native formatter's fixed regions for the block count, its minimum container and its sizing granularity |
 | UDF | Nothing: the block is the sector, and the block count is already the smallest that fits | The 2048-byte default block, the fixed volume layout around the partition, the space bitmap's size |
+| ISO 9660 | Nothing: the image is exactly its descriptors, path tables, directories, continuation region and data | The 2048-byte block and the writer's one layout |
 
 The FAT type minimum is what makes the image the requested variant and is
 not a dimension. The exFAT recommended cluster count is a guidance value, so
@@ -129,6 +130,13 @@ plan reports it. Neither policy searches anything, so minimization returns
 the same image, and a requested `volume_bytes` or `min_free_bytes` is
 refused with `FSIMG_EINVAL`, which the CLI reports for `-s` and
 `--free-space` as settings the format cannot honor.
+
+An ISO 9660 volume has no free space either: its exact size follows from
+the [driver design's](design-iso9660-driver.md#planning) layout pass, and
+minimization returns the same image. Unlike ImageFS it accepts a
+`volume_bytes` at least that size and a multiple of 2048, padding with
+zero blocks the volume counts, since a padded volume is legal and some
+media want it; `min_free_bytes` is refused with `FSIMG_EINVAL`.
 
 Planning work grows by the number of candidates evaluated, never by a
 second traversal of the catalog: each candidate geometry evaluated charges

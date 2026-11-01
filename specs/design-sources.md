@@ -116,9 +116,11 @@ read: a change in between surfaces at finish, and a read that fails, such as
 one cut short by truncation, reports a file that changed as changed. Reads
 are bounded by the declared length and must be exact. Failure, completion, and destruction
 release it. No descriptor or heap object is retained per file. During emission
-the alias preflight and the [source copy operation](design-emission.md#source-copy)
-are the only callers of source access; format drivers never open, read, or
-finish a source.
+source access belongs to common operations: alias preflight, the
+[source copy](design-emission.md#source-copy), and the
+[link-target read](design-emission.md#encoded-link-targets). Format drivers
+never open, read, or finish a source. Planning can request the common
+link-target read under the same lifecycle and validation rules.
 Ordinary replacements, size changes, and observed change-metadata differences
 return `FSIMG_ESOURCE_CHANGED`. These checks are not an atomic snapshot against
 a hostile concurrent writer; callers requiring one provide immutable sources

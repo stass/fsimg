@@ -20,7 +20,7 @@ or external formatter. Device use requires permission to read that endpoint.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
 Power-Safe profiles, QNX4, the QNX image filesystem (ImageFS), HFS Plus,
-HFSX, APFS and UDF with independent read and write support. The CLI is
+HFSX, APFS, UDF and ISO 9660 with independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
 `--formats` for capabilities, with `-f` naming the image. Each format
@@ -573,13 +573,34 @@ with allocation descriptors and directories of compressed-Unicode names; the
 [UDF driver design](design-udf-driver.md) gives address translation,
 descriptor walking and ownership one owner each, builds every Type-2 map
 through the physical map so the bootstrap is acyclic by construction, and
-plans a closed 2.01 volume whose metadata precedes its file bodies. UDF files carry unrecorded extents in their interior and its links store
+plans a closed 2.01 volume whose metadata precedes its file bodies. UDF
+files carry unrecorded extents in their interior and its links store
 an encoded target, so the
 [content design](design-content.md) owns zero extents, decoded link targets
 and the stored-byte count, and the [emission design](design-emission.md) the
 link-target read, each format-neutral and ready for NTFS. An ISO 9660 bridge
 is read through its UDF view only. NetBSD `fsck_udf` and native read-write
 mount cycles gate its writer.
+
+The [ISO 9660 design](design-iso9660.md) defines a volume that carries up
+to three name trees over shared file data: the primary hierarchy, its Rock
+Ridge interpretation and a Joliet hierarchy. A reader session exposes
+exactly one of them, the view chosen at open, and never resolves a name or
+borrows metadata across trees, so a tree's corruption cannot be masked by
+another; the [driver design](design-iso9660-driver.md) maps them onto one
+directory decoder for all three views. Three common additions serve it,
+each owned by the design that owns the mechanism and available to any
+format: full verification walks each tree with the one walker
+([several walks](design-directories.md#several-walks)), so every tree is
+checked without a second traversal engine; a reader may deliver a
+symbolic link's target from bytes it decoded rather than an image range
+([decoded link targets](design-content.md#decoded-link-targets)), because
+Rock Ridge assembles targets from components; and a writer may read a
+link's target while planning ([link targets](design-emission.md#encoded-link-targets)),
+because Rock Ridge record sizes depend on its bytes. Each keeps its
+owner's bounds and source lifecycle, so no driver gains a private path to
+sources or content. Its El Torito boot entries name files of the tree,
+whose bytes the writer copies unmodified.
 Static format operations own their private reader state and writer plan extension.
 The common plan holds only its writer and public summary; the selected driver
 destroys the complete plan once. This keeps lifecycle and source/publication
@@ -697,11 +718,12 @@ and QNX6 hold evidence to 1023. One ceiling with per-format limits keeps the
 buffers and the scan format-neutral while no format advertises more than it
 has been shown to store.
 
-The QNX4, QNX6, ImageFS and UDF readers omit an entry whose name is natively
+The QNX4, QNX6, ImageFS, UDF and ISO 9660 readers omit an entry whose name is natively
 legal but outside the portable fsimg name profile, instead of failing the
 image, through the
 [prepared-directory contract](design-directories.md#omitted-names); FAT,
-exFAT and HFS Plus keep their strict UTF-16 name rules, and APFS its strict UTF-8 rules. A name
+exFAT and HFS Plus keep their strict UTF-16 name rules, and APFS its strict
+UTF-8 rules. A name
 is valid, corrupt, or for HFS Plus a natively legal spelling that no image
 path can express, which is unsupported. The profile is fsimg's, not the format's: one foreign
 name, such as a Latin-1 byte in an otherwise ordinary QNX volume, must not
@@ -997,6 +1019,7 @@ lib/formats/ifs/     ImageFS codecs, reader, writer, verification
 lib/formats/hfsplus/ HFS Plus codecs, Unicode tables, reader, writer, verification
 lib/formats/apfs/    APFS codecs, checkpoints, B-trees, reader, writer, verification
 lib/formats/udf/     UDF codecs, translators, reader, writer, verification
+lib/formats/iso9660/ ISO 9660 codecs, views, reader, writer, verification
 compat/             host portability
 cmd/fsimg/          CLI, worker protocol, sandbox, coordinator
 test/               unit, integration, adversarial, resource tests

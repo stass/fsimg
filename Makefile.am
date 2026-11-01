@@ -326,6 +326,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/hfsplus-plan.md docs/todo-hfsplus.md \
 	docs/apfs-plan.md \
 	docs/udf-plan.md docs/udf-research.md docs/todo-udf.md \
+	docs/iso9660-plan.md docs/todo-iso9660.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
 	specs/design-device-input.md \
@@ -346,6 +347,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-apfs.md specs/design-apfs-driver.md \
 	specs/design-codecs.md specs/design-compression-libs.md \
 	specs/design-udf.md specs/design-udf-driver.md \
+	specs/design-iso9660.md specs/design-iso9660-driver.md \
 	tools/qnx/decode/q6dump.py tools/qnx/decode/q6ls.py \
 	tools/qnx/decode/q6walk.py tools/qnx/guest/pop.sh \
 	tools/qnx/guest/pop2.sh tools/qnx/guest/pop4.sh tools/qnx/guest/manifest4.sh \

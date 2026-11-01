@@ -133,3 +133,22 @@ black-box oracles, and the NetBSD tools, Windows and macOS are run as
 external programs. The [UDF evidence record](udf-research.md) pins their
 versions and records what each image showed. No third-party code, captured
 image or disc survey enters the repository.
+
+## ISO 9660 references
+
+[ECMA-119](https://ecma-international.org/publications-and-standards/standards/ecma-119/),
+sixth edition, with its Annex C for Joliet, is the normative volume and
+file structure reference. The IEEE P1281 (SUSP) and P1282 (RRIP) drafts at
+version 1.12 and the El Torito 1.0 specification define the system-use
+protocol, Rock Ridge and boot catalogs. These documents are copyrighted:
+the [format design](../specs/design-iso9660.md) restates their layouts in
+project prose and copies no text, and the research draft
+[fsimg_iso9660_spec.md](../fsspecs/fsimg_iso9660_spec.md) records the links.
+
+libarchive's ISO reader and writer (BSD-2-Clause) and FreeBSD's `cd9660`
+and `makefs` (BSD) are behavioural references and oracles; no code from
+them is imported. `xorriso` and libisofs, `genisoimage`, `isoinfo` and
+`isovfy`, and `pycdlib` (GPL and LGPL families) are external programs used
+only as producers and consumers of test images, at the versions
+[build.md](build.md) records, and never enter the repository or the link.
+Test images are generated from manifests; none is committed.

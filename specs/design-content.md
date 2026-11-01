@@ -94,7 +94,8 @@ of types 1 (allocated, not recorded) and 2 (not allocated) read as zeros
 wherever they appear, and NTFS's sparse runs behave the same way. An initialized
 length cannot describe them, since it covers only a tail. A resolved extent
 therefore has a kind: `FSIMG_EXTENT_DATA`, value zero, or
-`FSIMG_EXTENT_ZERO`, whose image offset is zero and meaningless, or the held kind described above. Delivery
+`FSIMG_EXTENT_ZERO`, whose image offset is zero and meaningless, or
+`FSIMG_EXTENT_HELD`, whose bytes are borrowed as described above. Delivery
 clears the extent before calling `resolve`, so a driver that never sets the
 kind resolves data extents, and any other kind value is `FSIMG_ESTATE`.
 
@@ -128,10 +129,17 @@ resolve an offset fails.
 A symbolic link's target is ordinary content, which most formats store
 verbatim, so delivery reads it from resolved extents like a file's bytes. A
 format can instead store an encoding: UDF records a sequence of path
-components, NTFS a reparse buffer in UTF-16. For such a format the driver
-decodes the target at replay into the reader's target buffer, one buffer of
-`FSIMG_SYMLINK_TARGET_MAX` bytes the reader charges once, and sets its
-length as the entry's size. The walker clears that length before every
+components, Rock Ridge an SL component sequence, and NTFS a reparse buffer
+in UTF-16. For such a format the driver
+decodes the target at replay and declares it with
+`fsimg_reader_set_link_target(reader, bytes, length, error)`. The operation
+requires a symbolic-link entry and a length from 1 through
+`FSIMG_SYMLINK_TARGET_MAX`, otherwise `FSIMG_ESTATE`. It copies the target
+into the reader's target buffer, one buffer of
+`FSIMG_SYMLINK_TARGET_MAX` bytes allocated on first declaration and charged
+once, and sets its
+length as the entry's size and initialized length. The walker clears that
+length before every
 replay, as it clears `initialized`, so a stale target can never reach the
 next entry. A nonzero decoded length marks decoded content: delivery then
 serves `[0, size)` of the current entry from the buffer instead of calling
@@ -148,8 +156,9 @@ link content cannot both apply to one entry.
 
 Every content read reports two counts: the bytes it transferred, which the
 public operations return and which measure progress, and the bytes among
-them that it read from storage. Synthesized bytes, from the zero tail, a
-zero extent, a held extent or a decoded target, are transferred but not stored. Payload
+them that delivery read directly from mapped storage. The zero tail, zero
+extents, held extents and decoded targets are transferred but not stored
+for this counter; encoded backing reads during resolution are outside it. Payload
 verification advances and checks completion by the transferred count and
 adds only the stored count to its report, so a file of zero extents reports
 no payload read.

@@ -53,9 +53,8 @@ Non-goals:
 * Writing 1.02, read-only (DVD-ROM-style), metadata-partition, sparable or
   VAT volumes. Each is unscheduled work behind its own evidence.
 * Choosing between the UDF and ISO 9660 views of a bridge automatically.
-  fsimg has no ISO 9660 reader; when one exists, both claim a bridge and the
-  existing ambiguity rule requires a forced format until a view-selection
-  design says otherwise.
+  Both readers claim a bridge, so the existing ambiguity rule requires
+  `-F udf` or `-F iso9660` until a view-selection design says otherwise.
 
 ## Inputs and their standing
 
@@ -320,7 +319,7 @@ Every stage leaves `make -j32 check` passing and follows the gates below.
 Unscheduled, each behind its own evidence: a `revision=` setting for 1.02
 output, a read-only writer profile for optical masters, a 2.50
 metadata-partition writer, hard links after the common hardlink design, an
-ISO 9660 reader with bridge view selection, degraded reading, and layer
+automatic bridge view selection, degraded reading, and layer
 partition types for UDF volumes.
 
 ## Dependency order
@@ -434,8 +433,8 @@ and close at the stage 1 design review.
 * **Native mounts.** Linux mounts need privileges the ordinary suite never
   has; the integration script runs them only where the host allows and
   reports skips.
-* **Bridges.** A future ISO 9660 reader turns every DVD image into an
-  ambiguous claim until a view-selection design exists.
+* **Bridges.** UDF and ISO 9660 both claim a bridge; the caller forces
+  the desired format until an automatic view-selection design exists.
 * **Provenance.** The designs are written in project prose from facts.
   Nothing from GPL or LGPL sources enters the tree; captured images and
   disc surveys never enter the repository.

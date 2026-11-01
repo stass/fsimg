@@ -510,6 +510,13 @@ settings select an APFS volume and snapshot, as the
   `open()`, NULL for the live view. A non-NULL name is valid UTF-8 of 1 to
   255 bytes, and anything else is `FSIMG_EINVAL`.
 
+The `iso_view` read option selects the ISO 9660
+[view](design-iso9660.md#view-selection): `FSIMG_ISO_VIEW_AUTO`, zero, or
+`FSIMG_ISO_VIEW_ROCKRIDGE`, `FSIMG_ISO_VIEW_JOLIET` or
+`FSIMG_ISO_VIEW_PRIMARY`. The reader copies typed decoding options for its
+driver's `open`; common code validates applicability without interpreting
+the format-specific selection.
+
 A read setting at a non-default value is accepted only by a format whose
 capability record names it in `read_settings`; once detection or the forced
 format has chosen the driver, any other is `FSIMG_EINVAL` naming the
@@ -556,9 +563,21 @@ behind `FSIMG_SETTING_*` bits, as the
 under `FSIMG_SETTING_CASE_SENSITIVE`. The `FSIMG_SETTING_*` bits form one
 namespace shared by the write and read options, so a bit names one field
 wherever it appears: `FSIMG_SETTING_VOLUME_INDEX` and
-`FSIMG_SETTING_SNAPSHOT` name the read fields above. No write setting names a boot program or a
+`FSIMG_SETTING_SNAPSHOT` and `FSIMG_SETTING_ISO_VIEW` name the read fields
+above. No ImageFS write setting names a boot program or a
 startup script: the ImageFS writer writes
 [nonbootable bodies](design-ifs.md#bootable-bodies) only.
+
+ISO 9660 has four typed fields in `fsimg_write_options_t`, whose layout,
+like the rest of the interface, freezes at the first declared stable
+release: `iso_level`, zero selecting 3, under
+`FSIMG_SETTING_ISO_LEVEL`; and under `FSIMG_SETTING_ELTORITO`
+`boot_bios` and `boot_efi`, copied absolute image paths of files in the
+writer's own catalog with NULL for none, and `boot_load_sectors`, zero
+selecting 4. A boot path names an entry of the image being written, never
+a host file, so the fields carry no descriptor and grant no authority; the
+[ISO driver design](design-iso9660-driver.md#writer-settings) states their
+rules.
 
 `next()` validates a directory's effective lookup namespace through the bounded
 preparation specified in [prepared directories](design-directories.md) before
@@ -768,10 +787,12 @@ report. The calls equal the result's `entries` plus `skipped_entries`.
 Verification returns bounded counters and a named scope: structural or
 structural-plus-payload-read. It reports corruption and unsupported features,
 performs no repair, and never claims success for an incomplete traversal.
-The report's `payload_bytes_read` counts confirmed initialized payload bytes,
-including those transferred before a later failure and those read while
-checking omitted entries. Metadata and whole-image checksum reads do not enter
-that count. It uses the cumulative-I/O convention: exact while representable,
+The report's `payload_bytes_read` counts confirmed bytes read directly
+from mapped initialized content, including those transferred before a
+later failure and those read while checking omitted entries. Zero ranges,
+held extents and decoded link targets contribute no bytes. Encoded backing
+reads during resolution, metadata and whole-image checksum reads do not
+enter that count. It uses the cumulative-I/O convention: exact while representable,
 then saturated at `UINT64_MAX`. Saturation neither makes an incomplete report
 complete nor causes a new failure. Traversal, logical-byte totals, allocation
 bounds, and live-resource reservations retain their checked exact arithmetic;

@@ -199,8 +199,8 @@ owns the grammar: three slots in fixed order, filesystem, scheme, container;
 a name fills the slot of its kind and `-` marks the next slot empty, so
 `fat32/-/dmg` spells `fat32/dmg` out and `fat32/-/-` is a bare volume. A
 repeated kind or misordered name is a syntax error, not a guess. Filesystem
-names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs` and
-`udf`.
+names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`,
+`hfsplus`, `hfsx`, `apfs`, `udf` and `iso9660`.
 
 `-F` is required for `c`, and its stack must begin with a filesystem name:
 `-F gpt` creates nothing and is a syntax error. On reading, a named slot is
@@ -266,6 +266,17 @@ refuses these settings; a read setting is refused once detection has chosen
 the format. ImageFS has no free
 space, so `-s` and `--free-space` fail with it as settings the format
 cannot honor, and `-e` is its only time setting.
+ISO 9660 takes `level=1|2|3`, the primary hierarchy's interchange level,
+default 3; `boot=PATH` and `efiboot=PATH`, image paths of files in the
+tree being created that become El Torito BIOS and EFI boot images, never
+host paths; and `bootload=N`, the BIOS entry's 512-byte load sectors,
+default 4, only with `boot=`. Its `-s` pads the volume with zero blocks,
+and `--free-space` fails, since the format has no free space. On read,
+`view=auto|rockridge|joliet|primary` chooses the
+[view](design-iso9660.md#view-selection); it applies to whatever ISO 9660
+volume detection finds, and an image of another format refuses a
+non-default `view`, as the [settings catalogue](design-settings.md)
+states.
 A qualified key targets one layer: `-o gpt:type=esp`,
 `-o gpt:name=EFI`, `-o dmg:compress=none`, `-o gzip:level=9`. A qualifier
 naming a layer absent from the stack, or a compression not selected, fails;

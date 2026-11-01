@@ -375,12 +375,16 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    object identifier is one past the largest inode assigned.
 2. **Collisions.** Sort the collision stream; two equal `(parent, form)`
    records fail with `FSIMG_EINVAL` naming both entries.
-3. **Records.** Append every filesystem record each entry needs, and the
-   native records of the empty volume, to a record stream, encoded in full
-   except the physical block of each file extent, which is a fixed-width
-   field emission fills from the row. Sort it with the filesystem
-   comparator. Encoded lengths depend only on the catalog, so the sorted
-   stream is final.
+3. **Records.** For a symbolic link, first read its target through the
+   common [link-target operation](design-emission.md#encoded-link-targets)
+   and encode the bytes in its inline attribute. The catalog bounds the
+   target length; the read supplies its bytes and validates the source.
+   Append every filesystem record each entry needs, and the native records
+   of the empty volume, to a record stream, encoded in full except the
+   physical block of each file extent, which is a fixed-width field
+   emission fills from the row. Sort it with the filesystem comparator.
+   The sorted stream holds the final encoded lengths and planned target
+   bytes.
 4. **Packing.** Run the packing arithmetic over the sorted stream to count
    the filesystem tree's nodes per level, in the completion order emission
    reproduces: one open node per level, each node closed when the next
@@ -421,11 +425,16 @@ scratch placement, locale or time zone.
 
 The common emission object has already zeroed the sink. The driver emits:
 
-1. For each row in ID order: the payload copy for a nonempty file over its
-   run.
+1. For each regular-file row in ID order: the common payload copy over
+   its run. An empty file uses a zero-length copy with no regions, so its
+   source is still opened and validated.
 2. The filesystem tree: the sorted record stream is replayed through the
    packing arithmetic a second time, with each file extent's physical block
-   filled from its row. Leaves are written as they fill; one open node per
+   filled from its row. Before packing each symbolic-link attribute, read
+   its target again by catalog ID through the common link-target operation
+   and compare it byte for byte with the planned attribute. A difference
+   fails with `FSIMG_ESOURCE_CHANGED`; no unchecked planned target reaches
+   the output. Leaves are written as they fill; one open node per
    level collects separators, so index nodes are written as their children
    complete and the root last, with its footer. Node `k` in completion order
    takes OID `first + k` and block `base + k`, which is what planning

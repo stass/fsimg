@@ -59,9 +59,13 @@ support; there is no second per-format list of setting names. `sector` and
 checks, rather than acquiring new support bits. `oem` is FAT's read-side
 filesystem setting, outside the read mask because its accepted values mean
 the one supported codepage for every format; `volume` and `snapshot` are
-read-side filesystem settings under the read mask, held by APFS. The
+read-side filesystem settings under the read mask, held by APFS, and `view` is the ISO 9660 `iso_view` setting under
+`FSIMG_SETTING_ISO_VIEW`. The
 `FSIMG_SETTING_*` bits form one namespace across write and read fields. A layer row's owner
 is a registry identity, not a repeated test against a string in each consumer.
+A read command validates non-default fields against the selected format's
+mask after detection and before driver open. A forced format lets the CLI
+refuse an unsupported key before starting the worker.
 
 The catalogue includes all fields subject to shared setting applicability,
 even if a particular field has no CLI spelling. Ordinary mode flags, resource
@@ -111,6 +115,9 @@ Public option initialization and catalogue default tests agree on these values:
 | Filesystem case sensitivity | `false`, case-insensitive |
 | Filesystem volume index (read) | Absent: `volume_index_set` false and `volume_index` zero |
 | Filesystem snapshot (read) | `NULL`, the live view |
+| ISO level, boot load sectors | Zero, requesting levels 3 and 4 sectors |
+| ISO boot images | `NULL` |
+| ISO view (read) | `FSIMG_ISO_VIEW_AUTO`, zero |
 | File input | `NULL` |
 
 Default tests compare typed values. They never compare entire native structures
@@ -152,12 +159,12 @@ The finite syntax classes cover the existing grammar:
 | Class | Examples and conversion |
 | --- | --- |
 | Byte quantity | `sector`, `cluster`, `gpt:disk`, chunk and alignment sizes; checked CLI unit syntax, then destination range |
-| Decimal count | `inodes`, `root`, `volume`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
+| Decimal count | `inodes`, `root`, `volume`, `level`, `bootload`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
 | Hexadecimal 32-bit value | `mbr:id` and boot addresses; `0x` or `0X` and one through eight hexadecimal digits |
 | Boolean | Exactly `yes` or `no` |
-| Named choice | `endian=little|big`, `case=insensitive|sensitive`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437` |
+| Named choice | `endian=little|big`, `case=insensitive|sensitive`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437`, `view=auto|rockridge|joliet|primary` |
 | UUID | RFC 4122 text converted to textual byte order; nil permitted for the filesystem UUID, refused for layer identifiers; the filesystem's own validation may still refuse nil, as APFS does outside reproducible mode |
-| Text | GPT type/name, MBR type, mountpoint, snapshot name; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes |
+| Text | GPT type/name, MBR type, mountpoint, snapshot name, ISO `boot` and `efiboot` image paths; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes |
 | File path | A host operand retained by the CLI for descriptor preparation |
 
 Choice entries pair spellings with values of the row's declared type. Lexical

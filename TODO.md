@@ -343,6 +343,17 @@
   [research record](docs/ifs-research.md) holds the evidence; the
   [qualification work](docs/todo-ifs.md) lists the open items.
 
+* [High] **ISO 9660 read and write support** (`lib/formats/iso9660/`,
+  `lib/read/`, `lib/write/`, `include/fsimg.h`): read ISO 9660 volumes in
+  their Rock Ridge, Joliet and primary views with multi-extent files,
+  relocation and El Torito catalogs, verify every tree, and write Rock
+  Ridge and Joliet volumes at a selectable interchange level with
+  relocation and El Torito boot entries. The [plan](docs/iso9660-plan.md)
+  orders the work; the [format](specs/design-iso9660.md) and
+  [driver](specs/design-iso9660-driver.md) designs are the contract; the
+  [ISO work list](docs/todo-iso9660.md) holds the open items, starting with
+  the owner's acceptance of the designs.
+
 ## Bugs by subsystem
 
 * [Medium] **Post-read source-change payload evidence** (`test/exfat.c`):

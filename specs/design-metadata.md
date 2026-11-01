@@ -132,7 +132,9 @@ no new option.
 Readers set the fields their format stores. The QNX6 reader sets owner, mode,
 and all four timestamps; the HFS Plus reader sets the same fields and, on an
 entry with a resource fork or stored attributes, `FSIMG_META_EXTRA_DATA`;
-FAT and exFAT readers set nothing new. The safe
+the ISO 9660 reader sets owner, mode and the timestamps Rock Ridge records
+in its `rockridge` view and only the recording date in the others; FAT and
+exFAT readers set nothing new. The safe
 extractor keeps its profile: it creates regular files and directories with
 private modes, never restores owners, permission bits or change times, and
 creates no symbolic links or FIFOs. By default an unsupported kind fails the
@@ -166,7 +168,8 @@ lists the additional kinds and fields a format advertises.
 The record also gains `max_label_bytes`, the format's encoded on-disk label
 capacity in bytes (11 for FAT, 22 for exFAT's eleven UTF-16 units, 48 for
 QNX4, 510 for HFS Plus's 255 UTF-16 units, 255 for an APFS volume name,
-126 for UDF's logical volume identifier), zero for a format without a
+126 for UDF's logical volume identifier,
+32 for ISO 9660's sixteen UCS-2 Joliet characters), zero for a format without a
 volume label. Writer construction rejects a non-NULL label
 for such a format; the CLI applies its default label only when the value is
 nonzero and passes a NULL label otherwise, so a format that refuses labels,
@@ -179,7 +182,10 @@ the mountpoint under `FSIMG_SETTING_MOUNTPOINT`, a copied string field, as
 the [ImageFS driver design](design-ifs-driver.md#writer-settings) states;
 FAT12 and FAT16 store the fixed root capacity under
 `FSIMG_SETTING_ROOT_ENTRIES`; APFS stores the volume UUID and the case
-sensitivity under `FSIMG_SETTING_CASE_SENSITIVE`),
+sensitivity under `FSIMG_SETTING_CASE_SENSITIVE`; ISO 9660 stores its
+interchange level under `FSIMG_SETTING_ISO_LEVEL` and its El Torito boot
+images under `FSIMG_SETTING_ELTORITO`, as the
+[ISO driver design](design-iso9660-driver.md#writer-settings) states),
 and writer construction rejects a non-default value of any other one with
 `FSIMG_EINVAL` before the driver's `validate` runs, so no driver has to
 remember another format's settings. The CLI generates a random UUID, like
@@ -188,8 +194,13 @@ The [settings catalogue](design-settings.md) associates these mask bits with
 their fields and defaults; capability checks and CLI conversion share that
 description while format validation retains the value relationships.
 
+`read_settings` names accepted read options in the same `FSIMG_SETTING_*`
+namespace: APFS's volume and snapshot and ISO 9660's view. Common reader
+validation refuses non-default fields absent from this mask before driver
+open, as the [settings catalogue](design-settings.md) specifies.
+
 `max_link_target_bytes` is the longest symbolic-link target the format
-stores: 1024 for ImageFS and UDF, 1023 for QNX4, QNX6 and APFS, and zero for FAT
+stores: 1024 for ImageFS, UDF and ISO 9660, 1023 for QNX4, QNX6 and APFS, and zero for FAT
 and exFAT, whose `entry_kinds` lack links. The entry model's ceiling,
 `FSIMG_SYMLINK_TARGET_MAX`, is the largest of these, 1024, and bounds the
 buffers and the host scan; the

@@ -666,6 +666,15 @@ ISO 9660 bridges, then metadata partitions, then a UDF 2.01 writer
 registered after NetBSD `fsck_udf` and native read-write qualification, then
 sparable and virtual partitions.
 
+ISO 9660 follows its own [plan](iso9660-plan.md): an oracle corpus from
+independent producers and consumers and the PCM 3.1 update disc, a format
+and a driver design with three common additions (several verification
+walks, decoded link targets and link-target reads), readers for the
+primary, Rock Ridge and Joliet views with El Torito inspection, a verifier
+of every tree, and a writer registered once independent consumers agree
+in every view, followed by Rock Ridge relocation and boot-gated El Torito
+writing.
+
 Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order

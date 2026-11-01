@@ -322,9 +322,11 @@ non-directory, marked in the exposure bitset, it walks the list under the
 exclusive policy into the content index. A later name of a regular file
 builds its index on its first `resolve` under the shared policy. A symbolic
 link's body is walked at replay under the policy its name calls for, and
-its target is decoded from it into the reader's
-[decoded-target buffer](design-content.md#decoded-link-targets); its size is
-the target's length. A FIFO has size 0 and is never delivered from.
+its target is decoded into one bounded driver buffer. Replay sets the
+entry's symbolic-link kind, then calls `fsimg_reader_set_link_target()`,
+the [decoded-target declaration](design-content.md#decoded-link-targets),
+which copies the target into the common reader buffer and sets its size
+and initialized length. A FIFO has size 0 and is never delivered from.
 
 ## Content
 

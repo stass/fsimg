@@ -31,7 +31,7 @@ resources, and [emission](design-emission.md); a driver does not acquire host
 descriptors or allocate outside its context.
 
 The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`,
-`ifs`, `hfsplus`, `hfsx` `apfs` and `udf`. FAT12,
+`ifs`, `hfsplus`, `hfsx`, `apfs`, `udf` and `iso9660`. FAT12,
 FAT16, and FAT32 share one descriptor and driver; opening selects the variant
 from the validated cluster count. HFS Plus and HFSX share one descriptor
 likewise, and the volume signature selects the variant. Detection follows one bounded probe contract:
@@ -290,6 +290,34 @@ rather than the common 512-byte default; 512, 1024 and 4096 are legal
 alternatives. NetBSD `fsck_udf`, independent readers and native read-write
 mount cycles gate the writer capability, as native qualification does for
 the QNX formats.
+
+## ISO 9660
+
+The [ISO 9660 design](design-iso9660.md) defines the cooked
+2048-byte-sector volume of ECMA-119: the volume descriptor set from block
+16, the primary hierarchy with its directory records and path tables,
+SUSP and Rock Ridge over that hierarchy, the Joliet supplementary
+hierarchy, multi-extent files and El Torito boot catalogs. A reader
+session exposes one view, `rockridge`, `joliet` or `primary`, chosen at
+open from header evidence in that order or forced by the `view` read
+setting, and never mixes trees. Structure is checked strictly and spelling
+leniently, since the interchange level is not recorded; acceptance tables
+for descriptor types, geometry, continuation, `ER` identifiers and catalog
+platforms are closed. Full verification walks every view the image offers.
+The [driver design](design-iso9660-driver.md) defines the code.
+
+The probe's identity signature is `CD001` at block 16 with a known
+descriptor type, so its own prefix is 34816 bytes. Common detection sizes
+its buffer from the maximum descriptor prefix, including UDF's 131072 bytes. An isohybrid image, whose system area also holds a partition
+table, draws a scheme claim as well and is ambiguous until forced.
+
+The writer has one profile: a Rock Ridge primary hierarchy at interchange
+level 1, 2 or 3, default 3, a Joliet hierarchy, relocation of deep
+directories, and El Torito entries for boot images that are files of the
+tree. Independent consumers, the Linux and FreeBSD kernels, libarchive,
+`isoinfo`, `isovfy` and `xorriso`, reading writer output in every view gate
+the writer capability, and QEMU boots under SeaBIOS and OVMF gate each
+boot platform.
 
 ## Verification and compatibility claims
 

@@ -112,7 +112,10 @@ include metadata, prior operations and other handles, and may be saturated.
 
 ### Report counters and saturation
 
-`payload_bytes_read` is an observed-I/O counter. Both the common helper and FAT's
+`payload_bytes_read` observes direct mapped-content I/O, as the
+[content design](design-content.md#stored-bytes) defines. Decoded held
+extents and link targets contribute zero; encoded backing reads during
+resolution are outside this counter. Both the common helper and FAT's
 fused loop add each confirmed count with the existing `fsimg_stat_add()`
 saturating primitive: the result is exact while representable and remains
 `UINT64_MAX` after saturation. Saturation does not cause a new refusal, replace

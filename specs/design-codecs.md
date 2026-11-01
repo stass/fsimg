@@ -651,8 +651,8 @@ constants in upper case named for their meaning (`LZO1X_MAX_DISTANCE`,
 
 ## Imported LZFSE and LZVN decoders
 
-HFS Plus and APFS store transparently compressed files as LZVN or LZFSE chunks of at
-most 64 KiB, as the [APFS design](design-apfs.md#transparent-compression)
+HFS Plus and APFS store transparently compressed files as LZVN or LZFSE
+chunks of at most 64 KiB, as the [APFS design](design-apfs.md#transparent-compression)
 states. Apple's reference implementation is the formats' authoritative
 definition, and its license, BSD-3-Clause, permits carrying it in a
 BSD-2-Clause library with its notice and its non-endorsement clause. A
@@ -697,7 +697,9 @@ The import follows these rules:
   in [references](../docs/references.md); encoder files and the command-line
   tool are not. Each file's license header is checked individually before
   import, and the license text is kept in `third-party/`.
-* **Changes.** Imported files keep their notices and their style. External symbols take an `fsimg_apple_` prefix so an embedding application can also link upstream without symbol collisions. They are
+* **Changes.** Imported files keep their notices and their style. External
+  symbols take an `fsimg_apple_` prefix so an embedding application can also
+  link upstream without symbol collisions. They are
   changed only to build under the project's compilers and warnings, to
   remove allocation and I/O paths the adapter does not use, and to fix
   defects found by review, sanitizers or fuzzing; each change is listed in
