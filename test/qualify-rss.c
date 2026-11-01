@@ -25,7 +25,11 @@
 #include "test.h"
 #include "worker.h"
 
-#if !defined(__FreeBSD__)
+#if defined(__FreeBSD__)
+#define QUALIFICATION_PROCESS_COUNT 3u
+_Static_assert(QUALIFICATION_PROCESS_COUNT == FSIMG_CLI_PROCESS_BOUND - 1u,
+    "file-backed qualification excludes only the input relay");
+#else
 static uint64_t child_peaks;
 static uint64_t children_reaped;
 static bool accounting_failed;
@@ -64,8 +68,10 @@ check_vm_bound(void)
 
 /* FreeBSD samples ru_maxrss on statistics-clock ticks. A short relay can
  * therefore have no recorded peak. Re-exec the qualification program with an
- * inherited, irrevocable virtual-memory ceiling instead. Every CLI process
- * inherits the same ceiling, so their sum bounds RSS even between samples.
+ * inherited, irrevocable virtual-memory ceiling instead. The file-backed
+ * profile has at most three processes: coordinator, parser and output relay,
+ * with no input relay. Each inherits the same ceiling, so their sum bounds
+ * RSS even between samples.
  * The bootstrap is an observer, not part of the measured CLI execution.
  */
 static void
@@ -167,6 +173,11 @@ fsimg_rss_qualification_main(int argc, char **argv)
 	internal_child = argc == 2 && (strcmp(argv[1], "--internal-worker") == 0 ||
 	    strcmp(argv[1], "--internal-output") == 0);
 #if defined(__FreeBSD__)
+	/* The relay's stderr is the null device, so the operator sees only the
+	 * coordinator's failure to relay standard input. The command still fails.
+	 */
+	if (argc == 2 && strcmp(argv[1], "--internal-input") == 0)
+		CHECK(!"file-backed qualification profile has no input relay");
 	vm_bounded = argc > 1 && strcmp(argv[1], "--rss-vm-bound") == 0;
 	if (internal_child || vm_bounded)
 		check_vm_bound();
@@ -189,7 +200,7 @@ fsimg_rss_qualification_main(int argc, char **argv)
 	CHECK(budget <= UINT64_MAX - (UINT64_C(64) << 20));
 	allowance = budget + (UINT64_C(64) << 20);
 #if defined(__FreeBSD__)
-	vm_ceiling = allowance / FSIMG_CLI_PROCESS_BOUND;
+	vm_ceiling = allowance / QUALIFICATION_PROCESS_COUNT;
 	if (!vm_bounded)
 		enter_vm_bound(argc, argv, vm_ceiling);
 	CHECK(getrlimit(RLIMIT_AS, &address) == 0 && getrlimit(RLIMIT_STACK, &stack) == 0);
@@ -209,11 +220,11 @@ fsimg_rss_qualification_main(int argc, char **argv)
 	free(command);
 #if defined(__FreeBSD__)
 	CHECK(status == 0);
-	combined = vm_ceiling * FSIMG_CLI_PROCESS_BOUND;
+	combined = vm_ceiling * QUALIFICATION_PROCESS_COUNT;
 	CHECK(fprintf(stderr, "CLI RSS command=%s method=vm-ceiling"
 	    " per_process_vm_ceiling=%" PRIu64 " process_bound=%u"
 	    " combined_upper_bound=%" PRIu64 " budget_plus_allowance=%" PRIu64 "\n",
-	    argv[2], vm_ceiling, FSIMG_CLI_PROCESS_BOUND, combined, allowance) >= 0);
+	    argv[2], vm_ceiling, QUALIFICATION_PROCESS_COUNT, combined, allowance) >= 0);
 #else
 	if (status != 0 || accounting_failed || children_reaped == 0)
 		fprintf(stderr, "RSS qualification status=%d accounting_failed=%s reaped=%" PRIu64

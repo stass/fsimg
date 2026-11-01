@@ -67,24 +67,46 @@ module CliQualification
     puts("CLI disk-backed source files=#{files + 1}; all six operations satisfy RSS allowance")
   end
 
-  def run(program:, command:, log:)
-    result = File.open(log, "wb") do |diagnostics|
-      pid = Process.spawn(program.to_s, "16777216", *command, out: File::NULL, err: diagnostics)
-      begin
-        status = Timeout.timeout(900) { Process.wait2(pid).last }
-      ensure
-        unless status
-          Process.kill("KILL", pid)
-          Process.wait(pid)
+  def stop_group(pid)
+    begin
+      Process.kill("KILL", -pid)
+    rescue Errno::ESRCH
+      # The group may have exited as the timeout fired.
+    end
+    begin
+      Process.wait(pid)
+    rescue Errno::ECHILD
+      # The interrupted wait may already have reaped the coordinator.
+    end
+  end
+
+  def capture(program:, command:, log:)
+    File.open(log, "wb") do |diagnostics|
+      IO.pipe do |output, writer|
+        output.binmode
+        pid = Process.spawn(program.to_s, "16777216", *command, out: writer, err: diagnostics, pgroup: true)
+        writer.close
+        status = nil
+        begin
+          Timeout.timeout(900) do
+            # Read to EOF before waiting so every process holding stdout exits
+            # within the measured command.
+            last_line = output.each_line.inject(nil) { _2 }
+            status = Process.wait2(pid).last
+            [status, last_line]
+          end
+        ensure
+          stop_group(pid) unless status
         end
       end
-
-      status
     end
+  end
 
+  def run(program:, command:, log:)
+    result, last_line = capture(program: program, command: command, log: log)
     measurements = File.readlines(log).select { _1.start_with?("CLI RSS ") }
     measurements.each { puts(_1.strip) }
-    raise CliQualification::Error, "operation #{command.first} failed" unless result.success?
+    raise CliQualification::Error, "operation #{command.first} failed: #{last_line&.chomp.inspect}" unless result.success?
     raise CliQualification::Error, "expected one RSS measurement" unless measurements.size == 1
   end
 

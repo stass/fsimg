@@ -134,8 +134,10 @@ are redirected. It uses the production library, supervisor, workers, output
 relay and confinement. Its Ruby driver creates 100,000 empty host files in
 100 directories plus a 257-byte marker, then runs modes `c`, `i`, recursive
 NDJSON `t`, raw `x -O`, payload `W -d` and `x`. The library budget is
-16,777,216 bytes; the combined allowance is 83,886,080 bytes. Output goes to
-`/dev/null`; bounded measurement lines are streamed from disk logs. Every
+16,777,216 bytes; the combined allowance is 83,886,080 bytes. The driver
+keeps only the last line of each command's standard output and reports it
+when the command fails, which for a `--json` command is its error record;
+bounded measurement lines are streamed from disk logs. Every
 extracted file and marker is checked, and scratch must be empty afterward.
 
 On macOS/Linux the wrapper adds the coordinator's self peak to each terminal
@@ -166,9 +168,13 @@ bound. Its qualification bootstrap re-execs the same program under a uniform
 bootstrap is an observer outside the measured execution. Every coordinator and
 internal-role entry asserts that its initial `kinfo_proc.ki_size` is within the
 finite inherited cap before production code runs. Ordinary later mappings,
-heap and stack growth obey the cap. The supervisor's closed role enum has a
-compile-time assertion tying it to at most three simultaneous processes.
-Resident memory cannot exceed their combined virtual-memory ceiling.
+heap and stack growth obey the cap. The six commands read and write files,
+so they run at most three processes: the coordinator, the parser and the
+output relay. The input relay runs only for an image read from standard
+input, which this file-backed profile excludes: a compile-time assertion
+ties the profile's three processes to the supervisor's closed role enum
+less that relay, and the wrapper fails if an input relay starts. Resident
+memory cannot exceed the three processes' combined virtual-memory ceiling.
 
 The initial-map assertion matters: exec's initial mappings are not all subject
 to the ordinary mapping checks. A negative fixture maps and touches 128 MiB

@@ -512,15 +512,6 @@
   child (the test binary with a case argument), so nothing is inherited
   and the peak needs no baseline on any host.
 
-* [Medium] **FreeBSD: `check-cli-rss` creation fails under its address-space
-  limit** (`test/qualify-rss.c`, `test/qualify-cli.rb`): FreeBSD bounds each
-  process with `RLIMIT_AS` of (budget + 64 MiB) / 3, about 27 MB under the
-  16 MiB budget, and `fsimg c` exits unsuccessfully without a diagnostic.
-  It predates the zstd and xz libraries and fails without them. A likely
-  cause is address space reserved up front (jemalloc's per-CPU arenas on a
-  128-CPU host, thread stacks, library mappings) rather than memory used;
-  trace the failing call before changing the bound or the method.
-
 * [Medium] **No check runs confinement on glibc 2.33 to 2.38**
   (`build-aux/linux-check.sh`, `.github/workflows/check.yml`): those
   releases implement `fstat()` as `newfstatat`, which the worker's seccomp
