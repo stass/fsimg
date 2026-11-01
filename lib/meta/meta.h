@@ -184,6 +184,9 @@ typedef struct fsimg_sort_options {
 fsimg_status_t fsimg_stream_sort(fsimg_stream_t *, fsimg_compare_fn_t,
     void *, const fsimg_sort_options_t *, fsimg_stream_t **, fsimg_error_t *);
 
+/* The default run buffer under a memory budget: an eighth, at most 4 MiB. */
+size_t fsimg_sort_run_bytes(uint64_t);
+
 /* Shared frame codec also bounds records inside a sort run. */
 fsimg_status_t fsimg_record_length(fsimg_store_t *, uint64_t, uint64_t,
     uint32_t, uint32_t *, fsimg_error_t *);

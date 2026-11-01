@@ -28,6 +28,11 @@ typedef struct oracle_record {
 	unsigned char	 bytes[64];
 } oracle_record_t;
 
+typedef struct sort_record {
+	const void	*bytes;
+	size_t		 length;
+} sort_record_t;
+
 typedef struct sort_fixture {
 	fsimg_ctx_t	*ctx;
 	fsimg_session_t	 session;
@@ -51,6 +56,11 @@ static void add_records(sort_fixture_t *, uint64_t);
 static void check_original(sort_fixture_t *, uint64_t);
 static void check_resources(sort_fixture_t *, const fsimg_stats_t *);
 static void test_oracle(uint64_t, uint32_t, size_t, uint32_t, bool);
+static void check_sorted(fsimg_stream_t *, const sort_record_t *, size_t);
+static uint64_t sort_and_measure(uint32_t, const sort_record_t *,
+	    const sort_record_t *, size_t);
+static void test_sort_memory_tracks_input(void);
+static void test_run_buffer_limits(void);
 static void test_failures(void);
 static void test_cancellation(void);
 static void test_corruption_and_limits(void);
@@ -255,6 +265,187 @@ test_oracle(uint64_t count, uint32_t pages, size_t run_bytes,
 }
 
 static void
+check_sorted(fsimg_stream_t *output, const sort_record_t *expected,
+    size_t count)
+{
+	unsigned char data[4096];
+	uint64_t cursor;
+	size_t length;
+
+	CHECK(output->count == count && output->sealed);
+	cursor = 0;
+	for (size_t i = 0; i < count; i++) {
+		CHECK(fsimg_stream_next(output, &cursor, data, sizeof(data),
+		    &length, NULL) == FSIMG_OK);
+		CHECK(length == expected[i].length);
+		CHECK(bcmp(data, expected[i].bytes, length) == 0);
+	}
+	CHECK(fsimg_stream_next(output, &cursor, data, sizeof(data),
+	    &length, NULL) == FSIMG_DONE);
+}
+
+static uint64_t
+sort_and_measure(uint32_t maximum, const sort_record_t *records,
+    const sort_record_t *expected, size_t count)
+{
+	sort_fixture_t fixture;
+	fsimg_stats_t after, before;
+	fsimg_stream_t *output;
+	uint64_t rise;
+
+	fixture_open(&fixture, 2, true, maximum);
+	for (size_t i = 0; i < count; i++)
+		CHECK(fsimg_stream_append(fixture.input, records[i].bytes,
+		    records[i].length, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_seal(fixture.input, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &before, NULL) == FSIMG_OK);
+
+	CHECK(fsimg_stream_sort(fixture.input, record_compare, &fixture,
+	    NULL, &output, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture.ctx, &after, NULL) == FSIMG_OK);
+	rise = after.memory_peak - before.memory_bytes;
+
+	check_sorted(output, expected, count);
+	fsimg_stream_free(output);
+	fixture_close(&fixture);
+	return (rise);
+}
+
+static void
+test_sort_memory_tracks_input(void)
+{
+	unsigned char maximum_bytes[4096];
+	const sort_record_t records[] = {
+		{ .bytes = "cat", .length = 3 },
+		{ .bytes = "ant", .length = 3 },
+		{ .bytes = "bee", .length = 3 }
+	};
+	const sort_record_t expected[] = {
+		{ .bytes = "ant", .length = 3 },
+		{ .bytes = "bee", .length = 3 },
+		{ .bytes = "cat", .length = 3 }
+	};
+	const sort_record_t maximum = {
+		.bytes = maximum_bytes, .length = sizeof(maximum_bytes)
+	};
+	const uint64_t memory_bound = 64 * 1024;
+	uint64_t small_rise, empty_rise, maximum_rise;
+
+	/*
+	 * fixture_open creates the cache before the measurement, so cache
+	 * pages do not contribute to the rise. The sort charges a reference
+	 * per record (one for an empty stream), an input-sized arena, run
+	 * store and output stream objects, and a merge/publish record buffer
+	 * if needed. These fit below 64 KiB; a budget-sized run uses 2 MiB.
+	 */
+
+	/* Three small records. */
+	small_rise = sort_and_measure(4096, records, expected, 3);
+	CHECK(small_rise < memory_bound);
+
+	/* Empty stream. */
+	empty_rise = sort_and_measure(4096, NULL, NULL, 0);
+	CHECK(empty_rise < memory_bound);
+
+	/* One maximum-length record. */
+	for (size_t i = 0; i < sizeof(maximum_bytes); i++)
+		maximum_bytes[i] = (unsigned char)i;
+	maximum_rise = sort_and_measure(4096, &maximum, &maximum, 1);
+	CHECK(maximum_rise < memory_bound);
+}
+
+static void
+test_run_buffer_limits(void)
+{
+	/* This type mirrors the engine's reference record. */
+	typedef struct sort_reference {
+		uint64_t	 ordinal;
+		size_t		 offset;
+		uint32_t	 length;
+	} sort_reference_t;
+
+	unsigned char data[20][12], large[200];
+	const sort_record_t records[] = {
+		{ .bytes = "cat", .length = 3 },
+		{ .bytes = "ant", .length = 3 },
+		{ .bytes = "bee", .length = 3 }
+	};
+	const sort_record_t expected[] = {
+		{ .bytes = "ant", .length = 3 },
+		{ .bytes = "bee", .length = 3 },
+		{ .bytes = "cat", .length = 3 }
+	};
+	sort_record_t merged[20];
+	sort_fixture_t fixture;
+	fsimg_sort_options_t options = { .run_bytes = 256, .fan_in = 2 };
+	fsimg_stream_t *output;
+	fsimg_error_t error;
+
+	/*
+	 * On LP64, 256 / 2 / 24 gives five references, leaving an arena of
+	 * 256 - 5 * 24 = 136 bytes. With 32-bit size_t, 16-byte references
+	 * give eight slots and a 128-byte arena. Small inputs clamp these
+	 * allocations to their record count and framed byte extent.
+	 * The 4096-byte stream maximum does not set the required arena size.
+	 */
+	fixture_open(&fixture, 2, true, 4096);
+	for (size_t i = 0; i < 3; i++)
+		CHECK(fsimg_stream_append(fixture.input, records[i].bytes,
+		    records[i].length, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_seal(fixture.input, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_sort(fixture.input, record_compare, &fixture,
+	    &options, &output, NULL) == FSIMG_OK);
+	check_sorted(output, expected, 3);
+	fsimg_stream_free(output);
+	fixture_close(&fixture);
+
+	/* Twenty records and 240 payload bytes require several runs and
+	 * merging, but each 12-byte record fits an empty arena.
+	 */
+	fixture_open(&fixture, 2, true, 4096);
+	for (size_t i = 0; i < 20; i++) {
+		memset(data[i], 't' - (int)i, sizeof(data[i]));
+		/* Descending first bytes make the expected output the reverse. */
+		merged[19 - i].bytes = data[i];
+		merged[19 - i].length = sizeof(data[i]);
+		CHECK(fsimg_stream_append(fixture.input, data[i],
+		    sizeof(data[i]), NULL, NULL) == FSIMG_OK);
+	}
+	CHECK(fsimg_stream_seal(fixture.input, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_sort(fixture.input, record_compare, &fixture,
+	    &options, &output, NULL) == FSIMG_OK);
+	check_sorted(output, merged, 20);
+	fsimg_stream_free(output);
+	fixture_close(&fixture);
+
+	/* A 200-byte record cannot fit even an empty arena. */
+	fixture_open(&fixture, 2, true, 4096);
+	memset(large, 'x', sizeof(large));
+	CHECK(fsimg_stream_append(fixture.input, "ant", 3,
+	    NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_append(fixture.input, large, sizeof(large),
+	    NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_append(fixture.input, "bee", 3,
+	    NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_seal(fixture.input, NULL) == FSIMG_OK);
+	CHECK(fsimg_stream_sort(fixture.input, record_compare, &fixture,
+	    &options, &output, &error) == FSIMG_ELIMIT);
+	CHECK(output == NULL && error.resource == FSIMG_RESOURCE_MEMORY);
+	CHECK(error.limit == 256);
+	CHECK(error.observed == 2 * sizeof(large) + 2 * sizeof(sort_reference_t));
+	fixture_close(&fixture);
+
+	/* One byte cannot hold a reference, even with no input frames. */
+	fixture_open(&fixture, 2, true, 4096);
+	CHECK(fsimg_stream_seal(fixture.input, NULL) == FSIMG_OK);
+	options.run_bytes = 1;
+	CHECK(fsimg_stream_sort(fixture.input, record_compare, &fixture,
+	    &options, &output, &error) == FSIMG_ELIMIT);
+	CHECK(output == NULL && error.resource == FSIMG_RESOURCE_MEMORY);
+	fixture_close(&fixture);
+}
+
+static void
 test_failures(void)
 {
 	sort_fixture_t fixture;
@@ -387,6 +578,18 @@ test_corruption_and_limits(void)
 	    &options, &output, NULL) == FSIMG_ECORRUPT);
 	CHECK(output == NULL);
 	fixture.input->count--;
+	/* The one-reference floor advances through every frame. */
+	fixture.input->count = 0;
+	CHECK(fsimg_stream_sort(fixture.input, record_compare, &fixture,
+	    &options, &output, NULL) == FSIMG_ECORRUPT);
+	CHECK(output == NULL);
+	fixture.input->count = 20;
+	/* Nineteen references force a second run before the mismatch. */
+	fixture.input->count -= 1;
+	CHECK(fsimg_stream_sort(fixture.input, record_compare, &fixture,
+	    &options, &output, NULL) == FSIMG_ECORRUPT);
+	CHECK(output == NULL);
+	fixture.input->count++;
 	check_original(&fixture, 20);
 	fixture_close(&fixture);
 }
@@ -491,5 +694,7 @@ main(int argc, char **argv)
 	test_failures();
 	test_cancellation();
 	test_corruption_and_limits();
+	test_sort_memory_tracks_input();
+	test_run_buffer_limits();
 	return (0);
 }

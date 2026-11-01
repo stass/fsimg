@@ -8,6 +8,9 @@
 #include "fsimg-endian.h"
 #include "meta.h"
 
+/* The largest default run buffer, whatever the budget. */
+#define SORT_RUN_MAX ((size_t)4 * 1024 * 1024)
+
 typedef struct sort_reference {
 	uint64_t	 ordinal;
 	size_t		 offset;
@@ -216,10 +219,20 @@ generate_runs(sort_state_t *sort, fsimg_stream_t *input, size_t run_bytes,
 	*run_count = 0;
 	capacity = run_bytes / 2 / sizeof(*references);
 	arena_size = run_bytes - capacity * sizeof(*references);
-	if (capacity == 0 || arena_size < sort->maximum)
+	if (capacity == 0)
 		return (fsimg_limit_error(error, FSIMG_RESOURCE_MEMORY,
-		    run_bytes, (uint64_t)sort->maximum * 2 +
-		    2 * sizeof(*references)));
+		    run_bytes, 2 * sizeof(*references)));
+	/* The budget share bounds a run, and so does the input: a sort of a
+	 * few records allocates for those records only. Every frame lies
+	 * inside end, so an arena of end bytes still holds any record of the
+	 * input; one reference keeps each run advancing even if count
+	 * disagrees with the frames (the mismatch is reported below). Both
+	 * clamps only shrink a size_t, so the casts cannot truncate.
+	 */
+	if (capacity > input->count)
+		capacity = input->count == 0 ? 1 : (size_t)input->count;
+	if (arena_size > input->end)
+		arena_size = (size_t)input->end;
 	references = fsimg_alloc(sort->ctx, capacity * sizeof(*references),
 	    &detail);
 	if (references == NULL) {
@@ -248,8 +261,17 @@ generate_runs(sort_state_t *sort, fsimg_stream_t *input, size_t run_bytes,
 			    sort->maximum, &length, error);
 			if (status != FSIMG_OK)
 				goto done;
-			if (length > arena_size - used)
-				break;
+			/* A record that does not fit ends the run; one that
+			 * does not fit an empty arena exceeds the run share.
+			 */
+			if (length > arena_size - used) {
+				if (count != 0)
+					break;
+				status = fsimg_limit_error(error,
+				    FSIMG_RESOURCE_MEMORY, run_bytes,
+				    (uint64_t)length * 2 + 2 * sizeof(*references));
+				goto done;
+			}
 			references[count].offset = used;
 			references[count].ordinal = seen;
 			references[count].length = length;
@@ -449,14 +471,18 @@ merge_passes(sort_state_t *sort, fsimg_store_t **runs, uint64_t run_count,
 	fsimg_store_t *replacement;
 	unsigned char *storage;
 	uint64_t next, start, records, new_count, remaining, header_offset;
-	size_t stride, available, bytes;
+	uint64_t stride, available, bytes;
 	fsimg_status_t status;
 	uint32_t count;
 
 	if (run_count < 2)
 		return (FSIMG_OK);
 	group.stride = sort->maximum == 0 ? 1 : sort->maximum;
-	stride = sizeof(*group.cursors) + sizeof(*group.heap) + group.stride;
+	/* In 64 bits: a declared maximum near UINT32_MAX would wrap a 32-bit
+	 * size_t. The allocation below is checked against SIZE_MAX.
+	 */
+	stride = sizeof(*group.cursors) + sizeof(*group.heap) +
+	    (uint64_t)group.stride;
 	available = sort->ctx->options.memory_bytes - sort->ctx->stats.memory_bytes;
 	/* Leave room for allocation headers and the replacement store handle. */
 	available = available > 1024 ? available - 1024 : 0;
@@ -466,7 +492,10 @@ merge_passes(sort_state_t *sort, fsimg_store_t **runs, uint64_t run_count,
 		return (fsimg_limit_error(error, FSIMG_RESOURCE_MEMORY,
 		    available, stride * 2));
 	bytes = fan_in * stride;
-	storage = fsimg_alloc(sort->ctx, bytes, &detail);
+	if (bytes > SIZE_MAX)
+		return (fsimg_limit_error(error, FSIMG_RESOURCE_MEMORY,
+		    SIZE_MAX, bytes));
+	storage = fsimg_alloc(sort->ctx, (size_t)bytes, &detail);
 	if (storage == NULL) {
 		if (error != NULL)
 			*error = detail;
@@ -583,6 +612,13 @@ done:
 	return (status);
 }
 
+size_t
+fsimg_sort_run_bytes(uint64_t memory_bytes)
+{
+	return (memory_bytes / 8 < SORT_RUN_MAX ? (size_t)(memory_bytes / 8) :
+	    SORT_RUN_MAX);
+}
+
 fsimg_status_t
 fsimg_stream_sort(fsimg_stream_t *input, fsimg_compare_fn_t compare,
     void *argument, const fsimg_sort_options_t *options, fsimg_stream_t **out,
@@ -611,11 +647,8 @@ fsimg_stream_sort(fsimg_stream_t *input, fsimg_compare_fn_t compare,
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_METADATA, "sort input must be sealed"));
 	run_bytes = options == NULL ? 0 : options->run_bytes;
-	if (run_bytes == 0) {
-		run_bytes = sort.ctx->options.memory_bytes / 8;
-		if (run_bytes > 4 * 1024 * 1024)
-			run_bytes = 4 * 1024 * 1024;
-	}
+	if (run_bytes == 0)
+		run_bytes = fsimg_sort_run_bytes(sort.ctx->options.memory_bytes);
 	fan_in = options == NULL ? 0 : options->fan_in;
 	if (fan_in == 0)
 		fan_in = 16;

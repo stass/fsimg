@@ -148,9 +148,14 @@ Only three primitives are needed:
    Their logical length is derived from validated geometry and charged to the
    scratch budget even if the host stores few physical blocks.
 3. **External sort and merge.** A bounded run buffer produces sorted runs;
-   bounded fan-in merge passes produce one ordered stream. Run descriptors are
-   themselves stored in streams. Fan-in obeys memory and descriptor budgets,
-   and inputs are released only after replacement output is complete.
+   bounded fan-in merge passes produce one ordered stream. By default the
+   run buffer is an eighth of the memory budget, at most 4 MiB. It holds at
+   most one reference per input record and an arena no larger than the
+   input's byte extent, so a sort of a few records charges for those
+   records. The run buffer must hold the input's largest record. Run
+   descriptors are themselves stored in streams. Fan-in obeys memory and
+   descriptor budgets, and inputs are released only after replacement output
+   is complete.
 
 These primitives have in-memory representations for small inputs under the
 same semantics and budget. Spill is automatic when scratch is enabled.
