@@ -373,8 +373,11 @@ Reader fixtures are written by the common writer, so they are round-trip
 integration evidence. Independent format evidence remains with the
 format-local tests, the specification harness and the integration scripts.
 
-`test-zlib-memory` covers the shared zlib allocator in
-`lib/core/zlib-memory.c`. It checks charged deltas and zero-byte requests,
+`test-codec-memory` covers the shared codec allocator in
+`lib/core/codec-memory.c`: its library-neutral entry points directly (a
+`size_t` product that overflows, initialization, zero-byte requests, the
+version text), and zlib's binding through real streams. It checks charged
+deltas and zero-byte requests,
 a budget refusal keeping its exact limit diagnostic, a sticky first error
 across later attempts and frees, the `FSIMG_ENOMEM` fallback, every
 allocation ordinal of deflate and inflate initialization returning to the

@@ -11,10 +11,10 @@
 
 #include <zlib.h>
 
+#include "codec-memory.h"
 #include "fsimg-endian.h"
 #include "host.h"
 #include "layer.h"
-#include "zlib-memory.h"
 
 /*
  * gzip, read side (RFC 1952; specs/design-layers.md#gzip). A file is one
@@ -69,7 +69,7 @@
  */
 typedef struct gzip_decoder {
 	z_stream	 stream;
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_spool_input_t	*source;
 	fsimg_spool_t	*spool;
 	unsigned char	*input;
@@ -85,7 +85,7 @@ typedef struct gzip_decoder {
  */
 typedef struct gzip_encoder {
 	z_stream	 stream;
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_seq_sink_t *sink;
 	unsigned char	*output;
 	unsigned char	*zeros;
@@ -110,7 +110,7 @@ static fsimg_status_t encoder_finish(void *, fsimg_error_t *);
 static void encoder_close(void *);
 static fsimg_status_t deflate_out(gzip_encoder_t *, int, fsimg_error_t *);
 static unsigned char header_xfl(uint32_t);
-static fsimg_status_t zlib_failed(const fsimg_zlib_memory_t *, int,
+static fsimg_status_t zlib_failed(const fsimg_codec_memory_t *, int,
     const char *, fsimg_error_t *);
 static fsimg_status_t gzip_corrupt(fsimg_error_t *, const char *);
 static fsimg_status_t refill(gzip_decoder_t *, fsimg_error_t *);
@@ -141,7 +141,7 @@ const fsimg_compression_ops_t fsimg_gzip_compression = {
 	.plan = gzip_plan,
 	.bound = gzip_bound,
 	.encoder = &gzip_encoder,
-	.zlib = true
+	.version = fsimg_zlib_version
 };
 
 static fsimg_status_t
@@ -160,13 +160,13 @@ gzip_probe(const unsigned char *prefix, size_t length, fsimg_error_t *error)
  * library in the named call.
  */
 static fsimg_status_t
-zlib_failed(const fsimg_zlib_memory_t *memory, int code, const char *call,
+zlib_failed(const fsimg_codec_memory_t *memory, int code, const char *call,
     fsimg_error_t *error)
 {
 	char message[64];
 
 	if (code == Z_MEM_ERROR)
-		return (fsimg_zlib_memory_error(memory, error));
+		return (fsimg_codec_memory_error(memory, error));
 	if (code == Z_VERSION_ERROR)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
 		    "the zlib library does not match its header"));

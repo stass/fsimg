@@ -162,8 +162,7 @@ const fsimg_container_ops_t fsimg_simg_container = {
 	.verify = simg_verify,
 	.writer = &simg_writer,
 	.codecs = "raw,zero,fill",
-	.payload_checks = true,
-	.zlib = false
+	.payload_checks = true
 };
 
 static fsimg_status_t

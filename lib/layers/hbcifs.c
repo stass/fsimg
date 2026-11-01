@@ -95,7 +95,6 @@ const fsimg_container_ops_t fsimg_hbcifs_container = {
 	.carries = "ifs",
 	.unverified = "0x14,0x1c",
 	.payload_checks = false,
-	.zlib = false,
 	.spooled = true
 };
 

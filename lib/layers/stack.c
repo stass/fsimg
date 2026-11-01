@@ -8,8 +8,6 @@
 #include <string.h>
 #include <strings.h>
 
-#include <zlib.h>
-
 #include "format.h"
 #include "layer.h"
 
@@ -20,6 +18,7 @@
  * machine table lists as writable; zstd and xz are compression names reserved
  * for later profiles, recognized by name and suffix with no operations.
  */
+
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme,
 	    .settings = &fsimg_gpt_settings },
@@ -448,18 +447,16 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 	if (layer->container != NULL) {
 		snprintf(out->codecs, sizeof(out->codecs), "%s",
 		    layer->container->codecs);
-		if (layer->container->zlib)
-			snprintf(out->codec_version, sizeof(out->codec_version),
-			    "zlib %s", zlibVersion());
+		if (layer->container->version != NULL)
+			layer->container->version(out->codec_version,
+			    sizeof(out->codec_version));
 		if (layer->container->carries != NULL)
 			snprintf(out->carries, sizeof(out->carries), "%s",
 			    layer->container->carries);
 	}
-	if (layer->compression != NULL) {
-		if (layer->compression->zlib)
-			snprintf(out->codec_version, sizeof(out->codec_version),
-			    "zlib %s", zlibVersion());
-	}
+	if (layer->compression != NULL && layer->compression->version != NULL)
+		layer->compression->version(out->codec_version,
+		    sizeof(out->codec_version));
 	/* The layer's keys in its slice's order, file settings first; the
 	 * longest list fits.
 	 */

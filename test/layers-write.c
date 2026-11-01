@@ -957,7 +957,7 @@ test_container_plan_facts(void)
 	facts = fsimg_disk_plan_container(&plan);
 	CHECK(facts->granularity == 1 &&
 	    facts->chunk_bytes == FSIMG_TRANSCODE_CHUNK_BYTES &&
-	    facts->passes == 1 && !facts->zlib &&
+	    facts->passes == 1 && !facts->uses_library &&
 	    all_zero(facts->identifier, sizeof(facts->identifier)));
 	fsimg_disk_plan_free(&plan);
 	fsimg_disk_plan_free(&plan);

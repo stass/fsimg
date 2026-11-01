@@ -429,14 +429,16 @@ typedef struct fsimg_planned_file {
  * disk, one, or two for an encoder whose leading bytes depend on what the
  * first pass learns; identifier the VHD unique identifier or DMG segment
  * ID in textual byte order, which the image report states, all zero for a
- * container without one; and zlib whether the resolved encoding depends
- * on zlib, for the plan's codec report. Once constructed the plan never
- * changes: what an encoder learns stays in the encoder's own state.
+ * container without one; and uses_library whether the resolved encoding
+ * depends on the library the container's version operation names, as
+ * DMG's zlib chunks do and its raw chunks do not, for the plan's codec
+ * report; a container with a version operation sets it. Once
+ * constructed the plan never changes: what an encoder learns stays in the encoder's own state.
  *
  * Without a container there is no plan, and fsimg_disk_plan_container
  * supplies the defaults fsimg_container_plan_alloc gives a new base: a
  * granularity of one byte, FSIMG_TRANSCODE_CHUNK_BYTES chunks, one pass,
- * no identifier and no zlib.
+ * no identifier and no library.
  */
 #define FSIMG_TRANSCODE_CHUNK_BYTES	(UINT32_C(1) << 20)
 
@@ -445,7 +447,7 @@ typedef struct fsimg_container_plan {
 	uint32_t	 chunk_bytes;
 	uint32_t	 passes;
 	unsigned char	 identifier[16];
-	bool		 zlib;
+	bool		 uses_library;
 } fsimg_container_plan_t;
 
 /*
@@ -590,8 +592,9 @@ typedef struct fsimg_container_writer {
  * the tables, and with payload those that decode every chunk;
  * payload_checks is true when those check decoded bytes against a
  * checksum, so read-through verification has payload scope. codecs names
- * the chunk encodings it reads, for the capability record; zlib is true
- * when it depends on zlib.
+ * the chunk encodings it reads, for the capability record; version writes
+ * the name and runtime version of the library they depend on, as
+ * "zlib 1.3.1", NULL for a container whose codecs depend on none.
  *
  * Three profile facts (specs/design-layers.md#layer-contract). spooled
  * says the payload is one unframed stream that open decodes into the
@@ -633,8 +636,8 @@ typedef struct fsimg_container_ops {
 	const char	*carries;
 	const char	*unverified;
 	size_t		 trailer_bytes;
+	void		(*version)(char *, size_t);
 	bool		 payload_checks;
-	bool		 zlib;
 	bool		 spooled;
 } fsimg_container_ops_t;
 
@@ -733,9 +736,10 @@ typedef struct fsimg_compressor_ops {
  * resolves them, given the FSIMG_WRITE_* mode and the epoch; a failure is
  * FSIMG_EINVAL naming the key. bound states the most bytes the encoding of
  * an input of the given length can take, FSIMG_EUNSUPPORTED when that
- * exceeds the 64-bit range. encoder writes the compression. zlib says the
- * codec is zlib's, whose version the capability record and the plan
- * report.
+ * exceeds the 64-bit range. encoder writes the compression. version
+ * writes the name and runtime version of the library the codec is, as
+ * "zlib 1.3.1", which the capability record and the plan report; NULL
+ * for a compression this build does not implement.
  */
 typedef struct fsimg_compression_ops {
 	size_t		 probe_bytes;
@@ -746,7 +750,7 @@ typedef struct fsimg_compression_ops {
 			    fsimg_compression_settings_t *, fsimg_error_t *);
 	fsimg_status_t	(*bound)(uint64_t, uint64_t *, fsimg_error_t *);
 	const fsimg_compressor_ops_t *encoder;
-	bool		 zlib;
+	void		(*version)(char *, size_t);
 } fsimg_compression_ops_t;
 
 /* A registered layer. Every layer name the stack grammar accepts outside
@@ -1060,8 +1064,10 @@ fsimg_status_t fsimg_disk_output(fsimg_session_t *, fsimg_io_t *,
  */
 fsimg_status_t fsimg_disk_output_check(fsimg_ctx_t *, const fsimg_disk_plan_t *,
     const fsimg_sink_t *, bool, fsimg_error_t *);
-/* The compression library a plan's output depends on, as "zlib 1.3.1",
- * or empty when its bytes depend on none: DMG's zlib chunks or gzip.
+/* The compression libraries a plan's output depends on, as "zlib 1.3.1":
+ * the container's when its resolved encoding uses it, as DMG's zlib
+ * chunks do, then the compression's, each named once and separated by
+ * ", ", or empty when the bytes depend on none.
  */
 void fsimg_disk_plan_codec(const fsimg_disk_plan_t *, char *, size_t);
 

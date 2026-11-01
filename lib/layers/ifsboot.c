@@ -362,8 +362,7 @@ const fsimg_container_ops_t fsimg_ifsboot_container = {
 	.section = ifsboot_section,
 	.codecs = "raw,lzo1x,nrv2b",
 	.carries = "ifs",
-	.payload_checks = false,
-	.zlib = false
+	.payload_checks = false
 };
 
 static fsimg_status_t

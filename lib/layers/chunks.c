@@ -9,12 +9,12 @@
 
 #include <zlib.h>
 
+#include "codec-memory.h"
 #include "codec.h"
 #include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 #include "meta.h"
-#include "zlib-memory.h"
 
 /*
  * A container's disk as a chunk index, and the read-only adapter that
@@ -113,7 +113,7 @@ typedef struct chunk_disk {
 	cache_slot_t	 slots[CHUNK_CACHE_SLOTS];
 	uint64_t	 slot_bytes;	/* Each slot's size, fixed at open */
 	z_stream	 stream;
-	fsimg_zlib_memory_t zlib_memory;	/* Charges stream's allocations */
+	fsimg_codec_memory_t zlib_memory;	/* Charges stream's allocations */
 	uint64_t	 decoded_bytes;
 	uint64_t	 decode_bound;
 	uint64_t	 use_clock;
@@ -133,7 +133,7 @@ static fsimg_status_t record_search(fsimg_chunk_index_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
 static fsimg_status_t tile_records(fsimg_chunk_index_t *, fsimg_stream_t *,
     fsimg_error_t *);
-static fsimg_status_t zlib_failed(const fsimg_zlib_memory_t *, int,
+static fsimg_status_t zlib_failed(const fsimg_codec_memory_t *, int,
     const char *, fsimg_error_t *);
 static void disk_release(void *);
 static fsimg_status_t charge_decode(chunk_disk_t *, const fsimg_chunk_t *,
@@ -562,13 +562,13 @@ fsimg_chunk_kinds_text(unsigned kinds, unsigned codecs, char *text,
  * library in the named call.
  */
 static fsimg_status_t
-zlib_failed(const fsimg_zlib_memory_t *memory, int result, const char *call,
+zlib_failed(const fsimg_codec_memory_t *memory, int result, const char *call,
     fsimg_error_t *error)
 {
 	char message[64];
 
 	if (result == Z_MEM_ERROR)
-		return (fsimg_zlib_memory_error(memory, error));
+		return (fsimg_codec_memory_error(memory, error));
 	if (result == Z_VERSION_ERROR)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
 		    "the zlib library does not match its header"));

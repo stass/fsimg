@@ -13,24 +13,23 @@
 
 #include <zlib.h>
 
+#include "codec-memory.h"
 #include "host.h"
 #include "internal.h"
 #include "test.h"
-#include "zlib-memory.h"
 
 /*
- * The zlib allocation adapter against the installed zlib and the context's
- * own budget, statistics and allocation-failure injection. Direct cases
- * call the callbacks the adapter installs in a bound stream; lifetime
+ * The codec allocation adapter against the context's own budget, statistics
+ * and allocation-failure injection, with a binding to the installed zlib.
+ * Direct cases call the neutral entry points and bound callbacks; lifetime
  * cases run real inflate and deflate streams. No expectation depends on
  * how many allocations a zlib release makes or how large they are: init
  * failures are enumerated until an attempt succeeds, and budgets are set
  * from what one stream was measured to need.
  *
- * A product of two uInt factors that overflows size_t cannot be formed
- * here: with a 64-bit size_t and a 32-bit uInt both factors and their
- * product fit, so that case is inapplicable on the supported hosts. The
- * context tests cover the allocator's own header-overflow check.
+ * The neutral entry point accepts size_t factors, so direct requests also
+ * check multiplication overflow and preservation of that first failure.
+ * The context tests cover the allocator's own header-overflow check.
  */
 
 #define MIB		(1024u * 1024)
@@ -46,6 +45,12 @@ static size_t compress_payload(fsimg_ctx_t *, const unsigned char *, size_t,
     unsigned char *, size_t);
 static int deflate_start(z_stream *);
 static int inflate_start(z_stream *);
+static void test_init_clears_stale_failure(void);
+static void test_zero_byte_requests_are_distinct_and_charged(void);
+static void test_free_null_is_a_noop(void);
+static void test_overflow_failure_is_sticky(void);
+static void test_zlib_version_matches_runtime(void);
+static void test_zlib_version_truncates_safely(void);
 static void test_direct_allocations(bool);
 static void test_budget_failure(void);
 static void test_injected_failure_is_sticky(void);
@@ -131,7 +136,7 @@ static size_t
 compress_payload(fsimg_ctx_t *ctx, const unsigned char *payload,
     size_t length, unsigned char *out, size_t capacity)
 {
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	z_stream stream;
 	size_t produced;
 
@@ -163,6 +168,139 @@ inflate_start(z_stream *stream)
 	return (inflateInit(stream));
 }
 
+static void
+test_init_clears_stale_failure(void)
+{
+	fsimg_codec_memory_t memory;
+	fsimg_error_t clear;
+	fsimg_ctx_t *ctx;
+	uint64_t baseline;
+	void *allocation;
+
+	ctx = context_new(BUDGET_BYTES);
+	baseline = memory_charged(ctx);
+	bzero(&memory, sizeof(memory));
+	fsimg_error_set(&memory.error, FSIMG_ERANGE, 0, FSIMG_OP_ALLOCATE,
+	    "stale allocation failure");
+	fsimg_error_clear(&clear);
+
+	fsimg_codec_memory_init(&memory, ctx);
+	CHECK(memory.ctx == ctx);
+	CHECK(bcmp(&memory.error, &clear, sizeof(clear)) == 0);
+	CHECK(memory_charged(ctx) == baseline);
+	allocation = fsimg_codec_memory_alloc(&memory, 1, 1);
+	CHECK(allocation != NULL);
+	fsimg_codec_memory_free(allocation);
+	CHECK(memory_charged(ctx) == baseline);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_zero_byte_requests_are_distinct_and_charged(void)
+{
+	fsimg_codec_memory_t memory;
+	fsimg_ctx_t *ctx;
+	uint64_t baseline;
+	size_t header;
+	void *first, *second;
+
+	ctx = context_new(BUDGET_BYTES);
+	header = header_bytes(ctx);
+	baseline = memory_charged(ctx);
+	fsimg_codec_memory_init(&memory, ctx);
+
+	first = fsimg_codec_memory_alloc(&memory, 0, 0);
+	CHECK(first != NULL);
+	CHECK(memory_charged(ctx) == baseline + header);
+	second = fsimg_codec_memory_alloc(&memory, 0, 5);
+	CHECK(second != NULL && second != first);
+	CHECK(memory_charged(ctx) == baseline + 2 * header);
+	fsimg_codec_memory_free(first);
+	CHECK(memory_charged(ctx) == baseline + header);
+	fsimg_codec_memory_free(second);
+	CHECK(memory_charged(ctx) == baseline);
+	CHECK(memory.error.status == FSIMG_OK);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_free_null_is_a_noop(void)
+{
+	fsimg_ctx_t *ctx;
+	uint64_t baseline;
+
+	ctx = context_new(BUDGET_BYTES);
+	baseline = memory_charged(ctx);
+	fsimg_codec_memory_free(NULL);
+	CHECK(memory_charged(ctx) == baseline);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_overflow_failure_is_sticky(void)
+{
+	static const struct {
+		size_t	items;
+		size_t	size;
+	} later_requests[] = {
+		{ 1, 1 }, { 0, 0 }, { 0, 5 }, { SIZE_MAX, 2 }
+	};
+	fsimg_codec_memory_t memory;
+	fsimg_error_t first, again;
+	fsimg_ctx_t *ctx;
+	uint64_t baseline;
+
+	ctx = context_new(BUDGET_BYTES);
+	baseline = memory_charged(ctx);
+	fsimg_codec_memory_init(&memory, ctx);
+	CHECK(fsimg_codec_memory_alloc(&memory, SIZE_MAX / 2 + 1, 2) == NULL);
+	CHECK(memory_charged(ctx) == baseline);
+	CHECK(fsimg_codec_memory_error(&memory, &first) == FSIMG_ERANGE);
+	CHECK(first.status == FSIMG_ERANGE);
+	CHECK(first.operation == FSIMG_OP_ALLOCATE);
+	CHECK(first.resource == FSIMG_RESOURCE_NONE);
+
+	/* Injection counts attempts, proving no later request reaches malloc. */
+	fsimg_test_fail_alloc_after(ctx, 1);
+	for (size_t i = 0; i < sizeof(later_requests) /
+	    sizeof(later_requests[0]); i++) {
+		CHECK(fsimg_codec_memory_alloc(&memory, later_requests[i].items,
+		    later_requests[i].size) == NULL);
+		CHECK(ctx->allocation_attempts == 0);
+		CHECK(memory_charged(ctx) == baseline);
+		CHECK(fsimg_codec_memory_error(&memory, &again) == FSIMG_ERANGE);
+		CHECK(bcmp(&first, &again, sizeof(first)) == 0);
+		CHECK(bcmp(&first, &memory.error, sizeof(first)) == 0);
+	}
+	fsimg_test_fail_alloc_after(ctx, 0);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_zlib_version_matches_runtime(void)
+{
+	char version[128];
+
+	fsimg_zlib_version(version, sizeof(version));
+	CHECK(strncmp(version, "zlib ", 5) == 0);
+	CHECK(strcmp(version + 5, zlibVersion()) == 0);
+}
+
+static void
+test_zlib_version_truncates_safely(void)
+{
+	struct {
+		char before;
+		char version[6];
+		char after;
+	} output;
+
+	memset(&output, 0x5a, sizeof(output));
+	fsimg_zlib_version(output.version, sizeof(output.version));
+	CHECK(bcmp(output.version, "zlib \0", sizeof(output.version)) == 0);
+	CHECK(output.before == 0x5a && output.after == 0x5a);
+}
+
 /*
  * The callbacks charge exactly the payload and the context's header, and
  * hand back the allocator's storage as it is: zero normally, 0xa5 under
@@ -178,7 +316,7 @@ test_direct_allocations(bool poison)
 	} requests[] = {
 		{ 1, 1 }, { 3, 1000 }, { 1000, 3 }, { 0, 16 }, { 16, 0 }, { 0, 0 }
 	};
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_ctx_t *ctx;
 	z_stream stream;
 	uint64_t baseline;
@@ -217,7 +355,7 @@ test_direct_allocations(bool poison)
 static void
 test_budget_failure(void)
 {
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_error_t error;
 	fsimg_ctx_t *ctx;
 	z_stream stream;
@@ -233,7 +371,7 @@ test_budget_failure(void)
 	fsimg_zlib_memory_bind(&memory, ctx, &stream);
 	CHECK(stream.zalloc(stream.opaque, 64, 1024) == Z_NULL);
 	CHECK(memory_charged(ctx) == baseline);
-	CHECK(fsimg_zlib_memory_error(&memory, &error) == FSIMG_ELIMIT);
+	CHECK(fsimg_codec_memory_error(&memory, &error) == FSIMG_ELIMIT);
 	CHECK(error.status == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
 	CHECK(error.limit == BUDGET_BYTES);
@@ -250,7 +388,7 @@ test_budget_failure(void)
 static void
 test_injected_failure_is_sticky(void)
 {
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_error_t first, again;
 	fsimg_ctx_t *ctx;
 	z_stream stream;
@@ -268,13 +406,13 @@ test_injected_failure_is_sticky(void)
 	CHECK(stream.zalloc(stream.opaque, 1, 100) == Z_NULL);
 	fsimg_test_fail_alloc_after(ctx, 0);
 	CHECK(memory_charged(ctx) == baseline);
-	CHECK(fsimg_zlib_memory_error(&memory, &first) == FSIMG_ENOMEM);
+	CHECK(fsimg_codec_memory_error(&memory, &first) == FSIMG_ENOMEM);
 	CHECK(first.operation == FSIMG_OP_ALLOCATE);
 
 	CHECK(stream.zalloc(stream.opaque, 1, 100) == Z_NULL);
 	CHECK(memory_charged(ctx) == baseline);
 	stream.zfree(stream.opaque, kept);
-	CHECK(fsimg_zlib_memory_error(&memory, &again) == FSIMG_ENOMEM);
+	CHECK(fsimg_codec_memory_error(&memory, &again) == FSIMG_ENOMEM);
 	CHECK(memcmp(&first, &again, sizeof(first)) == 0);
 	fsimg_ctx_free(ctx);
 }
@@ -283,15 +421,13 @@ test_injected_failure_is_sticky(void)
 static void
 test_unexplained_memory_error(void)
 {
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_error_t error;
 	fsimg_ctx_t *ctx;
-	z_stream stream;
 
 	ctx = context_new(BUDGET_BYTES);
-	bzero(&stream, sizeof(stream));
-	fsimg_zlib_memory_bind(&memory, ctx, &stream);
-	CHECK(fsimg_zlib_memory_error(&memory, &error) == FSIMG_ENOMEM);
+	fsimg_codec_memory_init(&memory, ctx);
+	CHECK(fsimg_codec_memory_error(&memory, &error) == FSIMG_ENOMEM);
 	CHECK(error.status == FSIMG_ENOMEM);
 	CHECK(error.operation == FSIMG_OP_ALLOCATE);
 	CHECK(error.message[0] != '\0');
@@ -308,7 +444,7 @@ test_unexplained_memory_error(void)
 static void
 test_init_ordinals(bool deflating)
 {
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_error_t error;
 	fsimg_ctx_t *ctx;
 	z_stream stream;
@@ -327,7 +463,7 @@ test_init_ordinals(bool deflating)
 		if (result == Z_OK)
 			break;
 		CHECK(result == Z_MEM_ERROR);
-		CHECK(fsimg_zlib_memory_error(&memory, &error) == FSIMG_ENOMEM);
+		CHECK(fsimg_codec_memory_error(&memory, &error) == FSIMG_ENOMEM);
 		CHECK(error.operation == FSIMG_OP_ALLOCATE);
 		CHECK(strcmp(error.message, "allocation failed") == 0);
 		CHECK(memory_charged(ctx) == baseline);
@@ -350,7 +486,7 @@ test_delayed_window(void)
 {
 	static unsigned char payload[PAYLOAD_BYTES], packed[PAYLOAD_BYTES];
 	static unsigned char out[PAYLOAD_BYTES];
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_error_t error;
 	fsimg_ctx_t *ctx;
 	z_stream stream;
@@ -373,7 +509,7 @@ test_delayed_window(void)
 	fsimg_test_fail_alloc_after(ctx, 1);
 	CHECK(inflate(&stream, Z_NO_FLUSH) == Z_MEM_ERROR);
 	fsimg_test_fail_alloc_after(ctx, 0);
-	CHECK(fsimg_zlib_memory_error(&memory, &error) == FSIMG_ENOMEM);
+	CHECK(fsimg_codec_memory_error(&memory, &error) == FSIMG_ENOMEM);
 	CHECK(error.operation == FSIMG_OP_ALLOCATE);
 
 	/* Terminal: with injection off, even a reset stream, which allocates
@@ -385,7 +521,7 @@ test_delayed_window(void)
 	stream.next_out = out;
 	stream.avail_out = 4096;
 	CHECK(inflate(&stream, Z_NO_FLUSH) == Z_MEM_ERROR);
-	CHECK(fsimg_zlib_memory_error(&memory, &error) == FSIMG_ENOMEM);
+	CHECK(fsimg_codec_memory_error(&memory, &error) == FSIMG_ENOMEM);
 	CHECK(error.operation == FSIMG_OP_ALLOCATE);
 	CHECK(inflateEnd(&stream) == Z_OK);
 	CHECK(memory_charged(ctx) == baseline);
@@ -403,7 +539,7 @@ test_reset_reuse(void)
 {
 	static unsigned char payload[PAYLOAD_BYTES], packed[PAYLOAD_BYTES];
 	static unsigned char out[PAYLOAD_BYTES];
-	fsimg_zlib_memory_t deflate_memory, inflate_memory;
+	fsimg_codec_memory_t deflate_memory, inflate_memory;
 	z_stream deflater, inflater;
 	fsimg_ctx_t *ctx;
 	uint64_t baseline, live, before_window;
@@ -473,7 +609,7 @@ test_reset_reuse(void)
 static void
 test_fresh_bind_after_failure(void)
 {
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_ctx_t *ctx;
 	z_stream stream;
 	uint64_t baseline;
@@ -506,7 +642,7 @@ test_fresh_bind_after_failure(void)
 static void
 test_shared_context(void)
 {
-	fsimg_zlib_memory_t first_memory, second_memory;
+	fsimg_codec_memory_t first_memory, second_memory;
 	z_stream first, second;
 	fsimg_error_t error;
 	fsimg_ctx_t *ctx;
@@ -536,7 +672,7 @@ test_shared_context(void)
 	bzero(&second, sizeof(second));
 	fsimg_zlib_memory_bind(&second_memory, ctx, &second);
 	CHECK(deflate_start(&second) == Z_MEM_ERROR);
-	CHECK(fsimg_zlib_memory_error(&second_memory, &error) == FSIMG_ELIMIT);
+	CHECK(fsimg_codec_memory_error(&second_memory, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
 	CHECK(error.limit == BUDGET_BYTES);
 	CHECK(error.observed > BUDGET_BYTES);
@@ -555,7 +691,7 @@ test_poisoned_output(void)
 	static unsigned char payload[PAYLOAD_BYTES];
 	static unsigned char plain[PAYLOAD_BYTES], poisoned[PAYLOAD_BYTES];
 	static unsigned char out[PAYLOAD_BYTES];
-	fsimg_zlib_memory_t memory;
+	fsimg_codec_memory_t memory;
 	fsimg_ctx_t *ctx;
 	z_stream stream;
 	size_t plain_length, poisoned_length;
@@ -757,6 +893,12 @@ test_encoder_budgets(void)
 int
 main(void)
 {
+	test_init_clears_stale_failure();
+	test_zero_byte_requests_are_distinct_and_charged();
+	test_free_null_is_a_noop();
+	test_overflow_failure_is_sticky();
+	test_zlib_version_matches_runtime();
+	test_zlib_version_truncates_safely();
 	test_direct_allocations(false);
 	test_direct_allocations(true);
 	test_budget_failure();

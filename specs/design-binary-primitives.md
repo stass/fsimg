@@ -178,11 +178,13 @@ typedef struct fsimg_codec_memory {
     fsimg_error_t error;
 } fsimg_codec_memory_t;
 
-void fsimg_zlib_memory_bind(fsimg_codec_memory_t *, fsimg_ctx_t *, z_stream *);
-fsimg_status_t fsimg_codec_memory_error(const fsimg_codec_memory_t *,
-    fsimg_error_t *);
+void fsimg_codec_memory_init(fsimg_codec_memory_t *, fsimg_ctx_t *);
 void *fsimg_codec_memory_alloc(fsimg_codec_memory_t *, size_t, size_t);
 void fsimg_codec_memory_free(void *);
+fsimg_status_t fsimg_codec_memory_error(const fsimg_codec_memory_t *,
+    fsimg_error_t *);
+void fsimg_zlib_memory_bind(fsimg_codec_memory_t *, fsimg_ctx_t *, z_stream *);
+void fsimg_zlib_version(char *, size_t);
 ```
 
 The header includes the private context declarations and system `zlib.h`.
@@ -195,7 +197,11 @@ The state and its rules are library neutral. `fsimg_codec_memory_alloc`
 performs the overflow check, the first-error capture and the context
 allocation for `items` times `size` bytes, and `fsimg_codec_memory_free`
 the release; the zlib callbacks are shims over them that convert `uInt`
-to `size_t`. The [optional compression libraries](design-compression-libs.md)
+to `size_t`. `fsimg_codec_memory_init` sets the borrowed context and clears
+the first error; every binding starts with it, so an adapter's two fields
+are initialized in one place. `fsimg_zlib_version` writes `"zlib "` and
+`zlibVersion()`, the runtime value, for the version operation of the layers
+whose codec is zlib. The [optional compression libraries](design-compression-libs.md)
 bind the same state to `liblzma` (an `lzma_allocator` whose `alloc` is
 `(opaque, nmemb, size)`) and to `libzstd` (a `ZSTD_customMem` whose
 `customAlloc` is `(opaque, size)`, bound with `items` 1) through shims that
@@ -220,7 +226,8 @@ Separate streams use separate adapters even when they borrow the same context.
 For `items` and `size`, the callback checks multiplication in `size_t` before
 performing it: if `size != 0 && items > SIZE_MAX / size`, it records
 `FSIMG_ERANGE`, `FSIMG_OP_ALLOCATE`, and an allocation-size-overflow diagnostic,
-then returns `Z_NULL`. On the supported 64-bit hosts the two `uInt` factors
+then returns NULL, which zlib's binding passes on as `Z_NULL`. On the
+supported 64-bit hosts the two `uInt` factors
 fit `size_t`; that platform prerequisite is explicit and checked at build
 time. The context allocator separately checks its allocation-header addition.
 An overflow is not a memory-budget exhaustion and does not fabricate an
@@ -229,8 +236,8 @@ An overflow is not a memory-budget exhaustion and does not fabricate an
 For a representable product, the callback calls `fsimg_alloc(ctx, bytes,
 &detail)` using a local error record. A successful allocation is returned
 unchanged. On failure it copies `detail` to the adapter only if the adapter
-has no earlier error, then returns `Z_NULL`. Later allocation attempts after
-the first failure return `Z_NULL` immediately and do not change that error.
+has no earlier error, then returns NULL. Later allocation attempts after
+the first failure return NULL immediately and do not change that error.
 Freeing an allocation never modifies it. In particular, a successful context
 allocation's error clearing cannot erase a preceding failure within the same
 zlib call.
@@ -265,8 +272,10 @@ allocation counter. Multiple live streams compete for the same context budget.
 `fsimg_codec_memory_error()` requires a non-NULL output error and returns the
 stored first status and a complete copy of its diagnostic. If no allocation
 failure was recorded, it reports `FSIMG_ENOMEM`, `FSIMG_OP_ALLOCATE`, with a
-fixed zlib allocation-failure message. It is used only to interpret
-`Z_MEM_ERROR`; it does not consume or clear the stored error. Captured
+fixed allocation-failure message. It is used only to interpret a library's
+out-of-memory result (`Z_MEM_ERROR`, `LZMA_MEM_ERROR`,
+`ZSTD_error_memory_allocation`); it does not consume or clear the stored
+error. Captured
 `FSIMG_ELIMIT` retains its resource, limit and observed values; captured
 `FSIMG_ENOMEM` remains allocation failure; other allocator statuses such as
 `FSIMG_ERANGE` are preserved. Layer attribution may add the layer identity

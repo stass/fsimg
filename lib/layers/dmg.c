@@ -9,11 +9,11 @@
 
 #include <zlib.h>
 
+#include "codec-memory.h"
 #include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
 #include "meta.h"
-#include "zlib-memory.h"
 
 /*
  * Apple UDIF disk images (DMG). The file is a data fork of chunks, an XML
@@ -253,7 +253,7 @@ typedef struct dmg_encoder {
 	uLong		 table_crc;
 	uLong		 fork_crc;
 	z_stream	 stream;
-	fsimg_zlib_memory_t zlib_memory;
+	fsimg_codec_memory_t zlib_memory;
 	bool		 stream_ready;
 	unsigned char	*packed;
 	unsigned char	 carry[3];
@@ -341,7 +341,7 @@ static fsimg_status_t dmg_plan(const fsimg_container_plan_args_t *,
 static uint64_t plist_bytes(uint64_t);
 static fsimg_status_t dmg_bound(const fsimg_container_plan_t *, uint64_t,
     uint64_t *, fsimg_error_t *);
-static fsimg_status_t dmg_zlib_failed(const fsimg_zlib_memory_t *, int,
+static fsimg_status_t dmg_zlib_failed(const fsimg_codec_memory_t *, int,
     const char *, fsimg_error_t *);
 static fsimg_status_t dmg_encode_open(const fsimg_encode_t *, void **,
     fsimg_error_t *);
@@ -384,8 +384,8 @@ const fsimg_container_ops_t fsimg_dmg_container = {
 	.verify = dmg_verify,
 	.writer = &dmg_writer,
 	.codecs = "raw,zero,zlib",
-	.payload_checks = true,
-	.zlib = true
+	.version = fsimg_zlib_version,
+	.payload_checks = true
 };
 
 static void
@@ -1091,7 +1091,7 @@ dmg_plan(const fsimg_container_plan_args_t *args, fsimg_container_plan_t **out,
 		return (error->status);
 	plan->base.granularity = DMG_SECTOR_BYTES;
 	plan->base.chunk_bytes = chunk;
-	plan->base.zlib = level != 0;
+	plan->base.uses_library = level != 0;
 	plan->level = level;
 	return (fsimg_container_identifier(layers->dmg_uuid, "dmg:uuid",
 	    FSIMG_ROLE_DMG, args->flags, args->epoch, plan->base.identifier,
@@ -1146,13 +1146,13 @@ dmg_bound(const fsimg_container_plan_t *plan, uint64_t disk_bytes,
  * the named call.
  */
 static fsimg_status_t
-dmg_zlib_failed(const fsimg_zlib_memory_t *memory, int result,
+dmg_zlib_failed(const fsimg_codec_memory_t *memory, int result,
     const char *call, fsimg_error_t *error)
 {
 	char message[64];
 
 	if (result == Z_MEM_ERROR)
-		return (fsimg_zlib_memory_error(memory, error));
+		return (fsimg_codec_memory_error(memory, error));
 	if (result == Z_VERSION_ERROR)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_IMAGE,
 		    "the zlib library does not match its header"));

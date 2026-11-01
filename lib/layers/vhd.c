@@ -105,8 +105,7 @@ const fsimg_container_ops_t fsimg_vhd_container = {
 	.writer = &vhd_writer,
 	.codecs = "raw",
 	.trailer_bytes = VHD_FOOTER_BYTES,
-	.payload_checks = false,
-	.zlib = false
+	.payload_checks = false
 };
 
 static fsimg_status_t

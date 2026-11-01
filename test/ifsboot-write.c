@@ -1469,7 +1469,7 @@ test_prefix_buffer(void)
 	CHECK(bcmp(bytes, loader, sizeof(loader)) == 0);
 	CHECK(all_zero(bytes + LOADER_BYTES, 3));
 	CHECK(plan->passes == 2 && plan->chunk_bytes == UNIT &&
-	    plan->granularity == 1 && !plan->zlib &&
+	    plan->granularity == 1 && !plan->uses_library &&
 	    all_zero(plan->identifier, sizeof(plan->identifier)));
 	free_plan(plan);
 	CHECK(memory_now(&f) == baseline);

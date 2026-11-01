@@ -642,19 +642,31 @@ copy_close(void *state FSIMG_UNUSED)
 {
 }
 
-/* The codec a plan's output depends on: zlib when the container's
- * resolved encoding declares it, as DMG's zlib chunks do, and for a zlib
- * compression.
- */
 void
 fsimg_disk_plan_codec(const fsimg_disk_plan_t *plan, char *out,
     size_t capacity)
 {
-	if (fsimg_disk_plan_container(plan)->zlib ||
-	    (plan->compression != NULL && plan->compression->compression->zlib))
-		snprintf(out, capacity, "zlib %s", zlibVersion());
-	else if (capacity != 0)
-		out[0] = '\0';
+	const fsimg_layer_t *container = plan->container;
+	const fsimg_layer_t *compression = plan->compression;
+	char container_library[64], compression_library[64];
+
+	container_library[0] = compression_library[0] = '\0';
+	if (container != NULL && container->container->version != NULL &&
+	    fsimg_disk_plan_container(plan)->uses_library)
+		container->container->version(container_library,
+		    sizeof(container_library));
+	if (compression != NULL && compression->compression->version != NULL)
+		compression->compression->version(compression_library,
+		    sizeof(compression_library));
+	/* Name each library once: DMG's zlib chunks inside gzip are one. */
+	if (compression_library[0] == '\0' ||
+	    strcmp(container_library, compression_library) == 0)
+		snprintf(out, capacity, "%s", container_library);
+	else if (container_library[0] == '\0')
+		snprintf(out, capacity, "%s", compression_library);
+	else
+		snprintf(out, capacity, "%s, %s", container_library,
+		    compression_library);
 }
 
 /*

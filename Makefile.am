@@ -43,7 +43,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/core/unicode.c lib/core/unicode.h lib/core/case-tables.h \
 	lib/core/calendar.c lib/core/sha256.c lib/core/sha256.h \
 	lib/core/settings.c lib/core/settings.h \
-	lib/core/zlib-memory.c lib/core/zlib-memory.h \
+	lib/core/codec-memory.c lib/core/codec-memory.h \
 	lib/formats/format.c lib/formats/format.h \
 	lib/io/io.c lib/output/publish.c lib/output/publish.h \
 	lib/output/write.c \
@@ -133,7 +133,7 @@ example_extract_LDADD = libfsimg.la
 test_programs = test-core test-endian test-endian-unsigned-char \
 	test-private test-io test-device test-meta test-meta-sort test-meta-runs test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
-	test-driver-contracts test-layer-contracts test-zlib-memory \
+	test-driver-contracts test-layer-contracts test-codec-memory \
 	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
@@ -163,8 +163,8 @@ test_endian_SOURCES = test/endian.c test/test.h lib/core/fsimg-endian.h
 test_endian_CFLAGS = $(AM_CFLAGS) -fsigned-char
 test_endian_unsigned_char_SOURCES = $(test_endian_SOURCES)
 test_endian_unsigned_char_CFLAGS = $(AM_CFLAGS) -funsigned-char
-test_zlib_memory_SOURCES = test/zlib-memory.c test/test.h
-test_zlib_memory_LDADD = libfsimg-core.la $(ZLIB_LIBS)
+test_codec_memory_SOURCES = test/codec-memory.c test/test.h
+test_codec_memory_LDADD = libfsimg-core.la $(ZLIB_LIBS)
 test_core_SOURCES = test/core.c test/test.h test/digest.c test/digest.h
 test_core_LDADD = libfsimg.la
 test_cli_SOURCES = test/cli.c test/test.h cmd/fsimg/cli.h cmd/fsimg/options.c \

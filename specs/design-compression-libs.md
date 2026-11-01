@@ -85,33 +85,24 @@ keys.
   both in user space; `lzma_physmem` and `lzma_cputhreads`, the two
   routines that do ask the kernel, are never called.
 
-## What the code does today
+## Foundations
 
-* `lib/layers/stack.c` registers `zstd` with suffix `.zst` and `xz` with
-  `.xz` as compressions with no operations and no settings. The registry
-  being the single source of suffixes, both already reach the three CLI
-  uses: suffix stripping for an extraction stem, `-a` selection, and the
-  container-suffix conflict check. `fsimg_compression_named()` turns a
-  registered compression without the needed operation into
-  `FSIMG_EUNSUPPORTED` naming it, for a write (`compression` in the write
-  options) and a read (the image options' forced compression) alike.
-* `cmd/fsimg/options.c` refuses a creation whose `-a` selects a compression
-  without `FSIMG_CAP_WRITE` with "writing this compression is not supported"
-  and exit status 1, after the rest of the command line is checked
-  (`test/cli.c` covers `out.img.zst` and `out.img.XZ`); `-o zstd:level=1` is
-  an unknown key, since the layer has no settings slice.
-* `fsimg --formats` lists both with no read, write or verify support and no
-  codec version; `fsimg_layer_info_t.codec_version` is filled only from a
-  `bool zlib` on the container and compression operation records, and
-  `fsimg_disk_plan_codec()` reads the same two flags for the plan report.
+The design reuses mechanisms the core already has:
+
+* `lib/layers/stack.c` is the single source of layer names and suffixes,
+  so a registered compression's suffix reaches the three CLI uses (suffix
+  stripping for an extraction stem, `-a` selection and the
+  container-suffix conflict check) whatever operations its row carries.
+  `fsimg_compression_named()` turns a registered compression without the
+  needed operation into `FSIMG_EUNSUPPORTED` naming it, for a write
+  (`compression` in the write options) and a read (the image options'
+  forced compression) alike.
+* `cmd/fsimg/options.c` refuses a creation whose selected compression lacks
+  `FSIMG_CAP_WRITE` with "writing this compression is not supported" and
+  exit status 1, after the rest of the command line is checked.
 * `configure.ac` finds zlib through pkg-config or `zlib.h` and `-lz`,
   accepts `ZLIB_CFLAGS` and `ZLIB_LIBS`, fails without it, and puts
-  `ZLIB_LIBS` into `libfsimg.pc`'s `Libs.private`; `Makefile.am` links it
-  into the core convenience library and repeats `$(ZLIB_LIBS)` in the
-  installed-library link checks.
-* `lib/core/zlib-memory.c` is the one context-backed allocation adapter:
-  a `(ctx, first error)` state, an overflow-checked multiply, `fsimg_alloc`
-  and `fsimg_dealloc`, and zlib's two callback signatures.
+  `ZLIB_LIBS` into `libfsimg.pc`'s `Libs.private`.
 * `lib/layers/gzip.c` is the profile this design mirrors: a probe on the
   prefix, a decoder that reads the source through `fsimg_spool_input_t`
   in 64 KiB pieces and appends decoded bytes to the spool in 256 KiB steps,
@@ -119,9 +110,6 @@ keys.
   checked as they end; and an encoder that is a sequential sink over the
   transcode's next sink, deflating in 64 KiB pieces with a bound the plan
   charges to the output limit.
-* `build-aux/linux-check/Dockerfile` already installs `zstd` for the large
-  QNX6 fixtures, so the Linux check image has the oracle; it does not
-  install `libzstd-dev` or `liblzma-dev`.
 
 ## Design
 
@@ -138,8 +126,8 @@ operations. Every other behaviour is already a function of the registry:
 | Reading into the spool, limits, work, cancellation | The compression step calls the row's `decode` with the spool and its input |
 | Writing, bounds, streams, create-then-verify | The disk plan calls `plan` and `bound`; the transcode wraps its sink in `encoder` |
 | Settings keys, validation, `--formats` listing | The row's settings slice |
-| Codec version in `--formats`, `i` and the plan report | The row's `version` operation |
-| Verification scope | The spool-time checks `decode` performs and the `unverified` list it records |
+| Codec version in `--formats` and the plan report | The row's `version` operation |
+| Verification scope | The spool-time checks `decode` performs, and the row's one `unverified` entry, which verification reports when `decode` says a member lacked that check |
 
 So the design has one conditional, evaluated once at configure time: the
 library is present, so `lib/layers/zstd.c` (or `xz.c`) is compiled and the
@@ -228,7 +216,18 @@ are recognized and nothing can be done with them. The JSON `format` record
 is unchanged in shape; `capabilities` is 0 and `codec_version` null for an
 unimplemented row. `i` reports the detected compression beside the stack
 (`Compression:  zstd`), and the plan report's `codec_version` names the
-library an output depends on. Runtime sandbox reporting is unchanged.
+libraries an output depends on: the container's when its resolved
+encoding uses one, as DMG's zlib chunks do, then the compression's, each
+once and separated by `, ` (`zlib 1.3.1, liblzma 5.8.4` for a `.dmg.xz`).
+Runtime sandbox reporting is unchanged.
+
+The layer report names what a decode left unchecked. A compression's
+operation record states the one entry it can leave, `zstd:checksum` or
+`xz:check`, qualified by the compression's name; `decode` reports whether
+it decoded any frame or stream without that check, and verification then
+adds the entry to the `unverified` list. A container's entries are its
+own unqualified field names (`0x14,0x1c`), so `W`'s human line attributes
+each entry to the compression or the container by that qualification.
 
 ### Profiles
 
@@ -267,10 +266,16 @@ explicitly rather than left to the library's defaults, so the frame's
 shape is fsimg's: `ZSTD_c_compressionLevel` from `zstd:level`;
 `ZSTD_c_checksumFlag` 1, so every frame fsimg writes carries a content
 checksum, as `zstd(1)` writes by default; `ZSTD_c_contentSizeFlag` 1 with
-`ZSTD_CCtx_setPledgedSrcSize` set to the disk length the plan knows, so
-the frame header declares the content size, `zstd -l` shows it and a
-reader can tie the decoded length to it; `ZSTD_c_nbWorkers` 0. The window
-is the level's own, at most 8 MiB at level 19. The library checks the
+`ZSTD_CCtx_setPledgedSrcSize` set to the length the plan knows the
+compression's input to have, so the frame header declares the content
+size, `zstd -l` shows it and a reader can tie the decoded length to it;
+`ZSTD_c_nbWorkers` 0. The input length is known exactly when the
+compression wraps the bare disk, whose length the layout fixes; a
+container's encoding is bounded but not known in advance, so a zstd frame
+around a container declares no content size, as `zstd(1)` writing from a
+pipe does, and still carries its checksum. The plan records the length in
+the compression settings, unknown for a container. The window
+is the level's own, at most 8 MiB at level 19. The library checks a
 pledged size at `ZSTD_e_end`, so a transcode that delivers a different
 length than it planned fails there as `FSIMG_ESTATE`, the same class as a
 sink receiving a byte past its bound. The output's bound is
@@ -318,13 +323,20 @@ Writing: one stream of one block from `lzma_easy_encoder` with the preset
 `xz:level` names and the check `xz:check` names, fed with `LZMA_RUN` per
 piece and one `LZMA_FINISH`; no `LZMA_PRESET_EXTREME`, no filter chain
 beyond LZMA2, no multithreaded encoder. The output's bound is
-`n + n/16384 + 2048`: LZMA2 stores incompressible data in uncompressed
-chunks of at most 64 KiB with a 3-byte header each, and the stream header
-and footer (24), the block header (at most 1024), the block padding (at
-most 3), the check (at most 32), and the one-record index with its
-padding and CRC32 (fewer than 64) fit the constant. `lzma_stream_buffer_bound()`
-is the oracle the tests compare it against, never the value the plan uses,
-so the bound does not depend on the library version. The encoder's memory
+`n + n/4096 + 2048`. The streaming LZMA2 encoder ends a chunk when its
+compressed data nears 64 KiB or its input reaches 2 MiB, and stores a
+chunk that did not shrink as uncompressed data, so no chunk is more than
+its six header bytes longer than the input it holds, and each holds about
+64 KiB or more: `n/4096` allows sixteen bytes per 64 KiB. (The bound of
+uncompressed chunks alone, 3 bytes per 64 KiB, is not enough: a chunk that
+shrank by one byte keeps its compressed form and its longer header.) The
+stream header and footer (24), the block header (at most 1024), the block
+padding (at most 3), the check (at most 64), and the one-record index with
+its padding and CRC32 (fewer than 64) fit the constant.
+`lzma_stream_buffer_bound()` and the encoder's real output on
+incompressible and barely compressible input are the oracles the tests
+compare it against, never the value the plan uses, so the bound does not
+depend on the library version. The encoder's memory
 is the preset's, up to 674 MiB at preset 9; an encoder the memory budget
 cannot hold fails at `encoder_open` with the adapter's `FSIMG_RESOURCE_MEMORY`
 before any byte is written, and the man page states the per-preset need
@@ -360,13 +372,18 @@ them beside `gzip:level`:
 | `xz:level` | integer | 6 | 0 to 9, the `xz(1)` presets; only when xz is selected |
 | `xz:check` | `crc32`, `crc64`, `sha256` | `crc64` | `crc32` for readers that decode no other check (boot loaders, kernels); `none` is never written: an unchecked stream is read and reported, not produced |
 
-`fsimg_layer_options_t` gains `zstd_level` and `xz_level` (`uint32_t`,
-zero for the default, the rule every layer quantity follows) and `xz_check`
-of the public enum `fsimg_xz_check_t` (`FSIMG_XZ_CRC64 = 0`,
+`fsimg_layer_options_t` gains `zstd_level` and `xz_level` (`uint32_t`)
+and `xz_check` of the public enum `fsimg_xz_check_t` (`FSIMG_XZ_CRC64 = 0`,
 `FSIMG_XZ_CRC32`, `FSIMG_XZ_SHA256`), whose zero value is the default as
-`FSIMG_DMG_ZLIB` is. The worker's job record carries the three fields as
-it carries `gzip_level`, moving its reserved area as its layout check
-documents. A key of a compression that is not selected fails as every
+`FSIMG_DMG_ZLIB` is. `zstd_level` follows the rule of `gzip_level`: zero
+selects the default, and the key refuses zero. Preset 0 is a real xz
+preset, so zero cannot select the default for `xz_level`; the catalogue
+row's initial value is 6, which `fsimg_layer_options_init()` stores, as
+`fsimg_write_options_init()` stores the `reserve` row's 3. The members take the start of the structure's
+reserved area, which shrinks so the structure's size does not change. The
+worker's job record carries the three fields as
+it carries `gzip_level`, in a compression block after the `ifsboot`
+settings that its layout check documents. A key of a compression that is not selected fails as every
 unselected layer's key does; a key of a compression this build does not
 implement is accepted by the catalogue and the creation then fails as
 unsupported, naming the compression, before any byte is written. No
@@ -467,10 +484,12 @@ enabled; the design does not widen the allowlist for it.
 Under reproducible mode the compressed bytes are a function of the input,
 the settings and the library version: both encoders run single-threaded
 with every parameter fsimg sets fixed, neither format carries a timestamp
-or host identity, and the zstd frame header's content size is the disk
-length. Compressed bytes are reproducible only for one library version,
-as for zlib; the capability output, `i` and the plan report name the
-version (`zstd 1.5.7`, `liblzma 5.8.4`) so a claim can state it. The
+or host identity, and the zstd frame header's content size, when it has
+one, is the disk length. Compressed bytes are reproducible only for one
+library version, as for zlib; the capability output and the plan report
+name the version (`zstd 1.5.7`, `liblzma 5.8.4`) so a claim can state it.
+`i` names the compression it detected but no version: the running
+library did not necessarily produce the bytes it reads. The
 [reproducibility section](design-layers.md#reproducibility) extends its
 zlib sentence to the two libraries. The tests compare output across hosts
 only within one version and record the version beside the bytes.
@@ -529,14 +548,14 @@ library skips the profile's rows explicitly and runs the refusal rows.
 | --- | --- | --- |
 | Build | `--with-zstd=yes` and `--with-xz=yes` configure where the libraries exist; `--without-*` builds and `--formats` shows no support and no version; `auto` without the library reports the choice; `make distcheck` from a build without the libraries includes `zstd.c` and `xz.c`; `pkg-config --static --libs libfsimg` names the linked libraries | `--with-zstd=yes` with `ZSTD_LIBS=-lnonexistent` fails configure naming zstd; `check-dist.sh` on a tree with `zstd.c` removed from `EXTRA_DIST` fails |
 | Registry and CLI | `.zst` and `.xz` strip to the stem; `-a -f x.img.zst` and `x.img.xz` create; `-a -f x.dmg.xz` requires `dmg` in the stack; `--formats` lists both with versions in a full build | `-a -f x.img.zst` in a build without libzstd exits 1 with the unsupported message and writes nothing; `-z -a -f x.img.zst` is a syntax error |
-| zstd write | `zstd -t` accepts output at levels 1, 3 and 19; `zstd -d` yields the raw image; `zstd -l` shows the disk length as content size and a checksum; the bound is at least `ZSTD_compressBound(n)` for sampled `n` up to 2^40; byte-identical output across hosts and budgets under one libzstd version; `cW` verifies a `.zst` through the spool | `zstd:level=0` and `20` refused naming the key; a flipped frame byte fails `zstd -t` and fsimg's own verification; a transcode fault that delivers one byte less than pledged fails at `ZSTD_e_end` as `FSIMG_ESTATE`; allocation failure injected at each adapter call fails the open or the write and leaves accounting at its baseline |
-| zstd read | `zstd` output at levels 1, 3, 19 and `--ultra -22` spools and lists as the raw image, from a file and from a pipe; concatenated frames; a leading and a middle skippable frame; a `--no-check` file verifies with `zstd:checksum` unverified, `"complete":false` and a passing status; a file piped to `zstd` (no content size) verifies complete; `i` prints `Compression: zstd` and the version | Trailing garbage (`FSIMG_ECORRUPT` at its offset); a flipped checksum; a content size one more and one less than the data; a frame truncated at each of its byte offsets up to the first block; a `--long=28` window (`FSIMG_EUNSUPPORTED`); a frame with a dictionary ID (`FSIMG_EUNSUPPORTED`); a bomb failing at the spool step that crosses the limit before the file grows past it; a 32 MiB budget failing a 64 MiB-window frame (`zstd --long=26`) as a memory limit naming zstd, with nothing decoded; forced `zstd` on a gzip file (`FSIMG_EFORMAT`); a zstd file whose content is itself zstd is unrecognized |
+| zstd write | `zstd -t` accepts output at levels 1, 3 and 19; `zstd -d` yields the raw image; `zstd -l` shows the disk length as content size and a checksum for a bare disk, and a checksum with no content size around a container; the bound is at least `ZSTD_compressBound(n)` for sampled `n` up to 2^40; byte-identical output across hosts and budgets under one libzstd version; `cW` verifies a `.zst` through the spool | `zstd:level=0` and `20` refused naming the key; a flipped frame byte fails `zstd -t` and fsimg's own verification; a transcode fault on a bare disk that delivers one byte less than pledged fails at `ZSTD_e_end` as `FSIMG_ESTATE`; allocation failure injected at each adapter call fails the open or the write and leaves accounting at its baseline |
+| zstd read | `zstd` output at levels 1, 3, 19 and `--ultra -22` spools and lists as the raw image, from a file and from a pipe; concatenated frames; a leading and a middle skippable frame; a `--no-check` file verifies with `zstd:checksum` unverified, `"complete":false` and a passing status; a file piped to `zstd` (no content size) verifies complete; `i` prints `Compression: zstd` | Trailing garbage (`FSIMG_ECORRUPT` at its offset); a flipped checksum; a content size one more and one less than the data; a frame truncated at each of its byte offsets up to the first block; a `--long=28` window (`FSIMG_EUNSUPPORTED`); a frame with a dictionary ID (`FSIMG_EUNSUPPORTED`); a bomb failing at the spool step that crosses the limit before the file grows past it; a 32 MiB budget failing a 64 MiB-window frame (`zstd --long=26`) as a memory limit naming zstd, with nothing decoded; forced `zstd` on a gzip file (`FSIMG_EFORMAT`); a zstd file whose content is itself zstd is unrecognized |
 | xz write | `xz -t` accepts output at presets 0, 6 and 9 with each check; `xz -d` yields the raw image; `xz -l` shows one stream, one block and the chosen check; the bound is at least `lzma_stream_buffer_bound(n)` for sampled `n` up to 2^40; byte-identical output across hosts under one liblzma version; `cW` verifies a `.xz` | `xz:level=10` and `xz:check=none` refused naming the key; preset 9 under a 256 MiB budget fails at encoder open as `FSIMG_RESOURCE_MEMORY` naming xz before any byte is written; a flipped block byte fails `xz -t` and fsimg's verification; allocation failure injected at each adapter call |
 | xz read | `xz` output at presets 0, 6 and 9 and with each check spools and lists; `-T0` multi-block streams; concatenated streams with and without stream padding; `--check=none` verifies with `xz:check` unverified and a passing status; `i` prints `Compression: xz` | Trailing garbage, a padding run of 5 zero bytes (`FSIMG_ECORRUPT` at its offset); a flipped check; a flipped index CRC32; a header flags byte changed; a stream truncated at each offset through its first block header; a 4 GiB dictionary size (`FSIMG_RESOURCE_MEMORY` at the allocation, nothing decoded); a bomb at the spool step; a `.lzma` (legacy) file is unrecognized, not an xz claim |
 | Spool and streams | Stdin of a `.zst` and a `.xz` image through the coordinator's pipe; `cf -` writing a zstd and an xz stream the oracles decode | Short write, flush failure and cancellation at each piece: staged files removed, nothing published, stream reports incomplete output after the first byte |
 | Sandbox | Decode and create under `-S required` on Linux x86-64 and FreeBSD, and on Linux arm64 where available | A test build that sets `ZSTD_c_nbWorkers` to 1 fails under `-S required`, proving the gate sees a thread attempt |
 | Adapter | Charged deltas and release for each binding; zero-byte requests; the first error kept across several allocations in one library call; poison mode | A binding that installs only one callback fails the contract test |
-| Fuzzing | `fuzz/zstd.c` and `fuzz/xz.c`, each the shape of `fuzz/gzip.c`: the input is a whole file opened forced, as a file and as a stream, into a fresh spool under a 4 MiB limit and a 32 MiB memory budget, under sanitizers | Corpus seeded from every fixture above and from each oracle's output at each level and check |
+| Fuzzing | `fuzz/compression.c`, the gzip harness generalized and built once per compression the build implements (`fuzz-gzip`, `fuzz-xz`, `fuzz-zstd`): the input is a whole file opened forced, as a file and as a stream, into a fresh spool under a 4 MiB limit and a 32 MiB memory budget, under sanitizers | Corpus seeded from every fixture above and from each oracle's output at each level and check |
 
 CI builds with the libraries on macOS (Homebrew), Ubuntu (`libzstd-dev`,
 `liblzma-dev`) and FreeBSD (base), and without them in one job per platform
