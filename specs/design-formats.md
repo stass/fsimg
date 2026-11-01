@@ -31,7 +31,7 @@ resources, and [emission](design-emission.md); a driver does not acquire host
 descriptors or allocate outside its context.
 
 The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`,
-`ifs`, `hfsplus`, `hfsx` and `apfs`. FAT12,
+`ifs`, `hfsplus`, `hfsx` `apfs` and `udf`. FAT12,
 FAT16, and FAT32 share one descriptor and driver; opening selects the variant
 from the validated cluster count. HFS Plus and HFSX share one descriptor
 likewise, and the volume signature selects the variant. Detection follows one bounded probe contract:
@@ -265,6 +265,31 @@ the native formatter's empty layout and adding the catalog in one
 transaction. Native `fsck_apfs`, mount and write-after-create testing on
 macOS gates the writer capability, as native testing does for the QNX
 writers; the Linux checkers are a second opinion, never a substitute.
+
+## UDF
+
+The [UDF design](design-udf.md) defines the Universal Disk Format, OSTA's
+profile of the ECMA-167 volume and file structures, revisions 1.02 to 2.60:
+a volume recognition sequence at 32 KiB, anchors at block 256 and the end,
+redundant volume descriptor sequences, partition maps, an integrity
+descriptor, a file set, file entries with allocation descriptors and
+directories of file identifier descriptors with OSTA compressed Unicode
+names. Its probe's identity signature is the recognition sequence's
+`BEA01`, `NSR02` or `NSR03` and `TEA01`, and `open` completes recognition
+from the anchor. The reader covers physical, metadata, sparable and virtual
+partitions, each behind its own acceptance gate, and reads an ISO 9660
+bridge through its UDF view only. Its acceptance tables follow the
+standards and are corroborated by the mkudffs, genisoimage and pycdlib
+images in the [research record](../docs/udf-research.md); a value the
+standard permits outside the profile is unsupported, a contradiction is
+corrupt. The [driver design](design-udf-driver.md) defines the code.
+
+The writer constructs a closed UDF 2.01 volume of one overwritable physical
+partition. Its default block size is 2048 bytes, the optical convention,
+rather than the common 512-byte default; 512, 1024 and 4096 are legal
+alternatives. NetBSD `fsck_udf`, independent readers and native read-write
+mount cycles gate the writer capability, as native qualification does for
+the QNX formats.
 
 ## Verification and compatibility claims
 

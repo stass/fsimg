@@ -659,6 +659,13 @@ and LZVN decoders for compressed files, and a writer registered only after
 macOS checks, mounts and modifies its output, followed by snapshot and
 sealed-volume reading.
 
+UDF follows its own [plan](udf-plan.md): confirmation of the designs
+against ECMA-167 and TR/112 and an oracle corpus, the format-neutral content
+and emission additions, a reader and verifier for physical partitions and
+ISO 9660 bridges, then metadata partitions, then a UDF 2.01 writer
+registered after NetBSD `fsck_udf` and native read-write qualification, then
+sparable and virtual partitions.
+
 Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order

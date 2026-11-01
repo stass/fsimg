@@ -75,11 +75,14 @@ The helper visits exactly `[0, reader->initialized)` in logical byte offsets:
    buffer capacity, converting to `size_t` only after bounding it by capacity.
 3. Call `fsimg_reader_content()` for that batch. It resolves and checks physical
    extents, clips reads to the content domain, and uses bounded session I/O.
-4. Account the returned confirmed byte count before testing the return status.
-   On failure, return that status and error immediately. No retry starts again
+4. The content operation returns two counts, transferred and
+   [stored](design-content.md#stored-bytes). Add the stored count to the
+   report before testing the return status. On failure, return that status
+   and error immediately. No retry starts again
    at the beginning of the object or the failed batch.
-5. On success, the count equals the batch length. Advance by the confirmed
-   count; stop exactly at the initialized end.
+5. On success, the transferred count equals the batch length. Advance by
+   the transferred count; stop exactly at the initialized end. The stored
+   count never decides progress or completion.
 
 The content operation already promises exact completion for a bounded batch.
 An impossible successful short result is an internal contract failure, not a
@@ -91,7 +94,11 @@ The zero tail `[initialized, logical)` and allocation slack are never requested,
 synthesized, or counted. Thus an exFAT file with 6 KiB initialized, 10 KiB logical,
 and 16 KiB allocated contributes 6 KiB of payload reads, while all 16 KiB remain
 subject to structural ownership checks. A zero-initialized preallocated file
-performs structural work but no payload read.
+performs structural work but no payload read. A
+[zero extent](design-content.md#zero-extents) inside `[0, initialized)` is
+requested and delivered as zeros but adds nothing to the count, since no
+storage is read for it: a UDF file whose middle is unrecorded reports only
+its recorded bytes.
 
 Bytes confirmed by a failing read are still bytes read. This includes a read
 whose post-read source-stability check reports `FSIMG_ESOURCE_CHANGED`. The

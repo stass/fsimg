@@ -47,6 +47,7 @@ to a whole sector, it is the same capacity under either policy.
 | ImageFS | Nothing: the image is exactly its header, mountpoint, records, data and trailer | The 4-byte record and data alignment |
 | HFS Plus and HFSX | Block size over the writer's sizes, 512 to 65536 bytes | The native B-tree node sizes, one extent per fork, the reserved head and tail blocks |
 | APFS | Nothing: the block is 4096 bytes and the block count is already the smallest that fits | The native formatter's fixed regions for the block count, its minimum container and its sizing granularity |
+| UDF | Nothing: the block is the sector, and the block count is already the smallest that fits | The 2048-byte default block, the fixed volume layout around the partition, the space bitmap's size |
 
 The FAT type minimum is what makes the image the requested variant and is
 not a dimension. The exFAT recommended cluster count is a guidance value, so
@@ -111,6 +112,15 @@ internal pool and chunk structures, all functions of the block count),
 metadata trees, file data and requested free space fit, found by the
 binary search the [driver design](design-apfs-driver.md#planning) states,
 so minimization returns the default container.
+
+For UDF the default block count is the smallest whose partition holds the
+space bitmap, the file set descriptor, the objects and the free reserve,
+found by the short iteration the
+[driver design](design-udf-driver.md#planning) states, so minimization
+returns the default volume. UDF's logical block is its sector, and the
+sector size is a property of the medium the volume is for, which no format's
+minimization searches; FAT and exFAT search only the allocation unit above
+it. The block size therefore stays the default or the caller's choice.
 
 An ImageFS has no free space and no geometry: its size is derived exactly
 from the catalog and the settings by the

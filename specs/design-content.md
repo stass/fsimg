@@ -20,7 +20,7 @@ A regular file's content has three explicit quantities, all in bytes:
 | Quantity | Meaning |
 | --- | --- |
 | Logical length | The file size. No content exists at or beyond it. |
-| Initialized length | `0 <= initialized <= logical`. Bytes below it come from storage. |
+| Initialized length | `0 <= initialized <= logical`. Bytes below it come from mapped storage, zero extents or decoded spans. |
 | Physical mapping | Validated image ranges, holes and driver-decoded ranges that together cover the initialized bytes. |
 
 Bytes in `[initialized, logical)` are zero and are synthesized without reading
@@ -29,6 +29,8 @@ uses its valid-data length. Below the initialized length a driver may also
 report holes, ranges with no backing storage that read as zero, and decoded
 ranges whose bytes the driver produces from validated storage, such as an
 APFS sparse file's holes and a compressed file's chunks.
+A UDF file has `initialized == logical` and expresses unrecorded extents
+anywhere in its body as zero extents.
 
 For an exFAT file with 16 KiB allocated, a 10 KiB logical length, and 6 KiB
 initialized:
@@ -46,7 +48,7 @@ content interface. Extent lookup alone never authorizes exposing them.
 
 | Owner | Owns |
 | --- | --- |
-| Common delivery (`lib/read/`) | Bounds against the logical length, the initialized/zero split, transfer batching, source-stability checks, cancellation, work charging, confirmed byte counts, content-domain enforcement, terminal failure |
+| Common delivery (`lib/read/`) | Bounds against the logical length, the initialized/zero split, decoded link targets, transfer batching, source-stability checks, cancellation, work charging, confirmed and stored byte counts, content-domain enforcement, terminal failure |
 | Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated extent containing that offset: mapped, zero or held |
 | Extent index (optional, `lib/meta/`) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
 
@@ -84,6 +86,73 @@ Payload verification reads through the same delivery. A driver whose
 ownership walk already yields each physical run, such as FAT, can instead read
 those runs clipped to the logical length, so verification walks the
 allocation once.
+
+## Zero extents
+
+A format can leave a file's interior unrecorded: UDF's allocation descriptors
+of types 1 (allocated, not recorded) and 2 (not allocated) read as zeros
+wherever they appear, and NTFS's sparse runs behave the same way. An initialized
+length cannot describe them, since it covers only a tail. A resolved extent
+therefore has a kind: `FSIMG_EXTENT_DATA`, value zero, or
+`FSIMG_EXTENT_ZERO`, whose image offset is zero and meaningless, or the held kind described above. Delivery
+clears the extent before calling `resolve`, so a driver that never sets the
+kind resolves data extents, and any other kind value is `FSIMG_ESTATE`.
+
+* Delivery checks a zero extent's containment exactly as a data extent's,
+  then fills the piece with zeros. It never reads storage for it and applies
+  no content-domain check, since nothing is read; the source-stability check,
+  cancellation and work charging still run, as for the zero tail.
+* The extent index keeps its three-field records and marks a zero record by
+  an image offset of `UINT64_MAX`, which no data record can carry because
+  every data record lies inside a domain whose end fits in `uint64_t`; the
+  mark is private to the index, so record size and scratch use do not change
+  for any format. A zero record is not checked against the domain; zero
+  records coalesce with adjacent zero records and never with data records.
+  Records of both kinds are whole units, so a driver appends a body's final
+  extent, data or zero, rounded up to the unit; delivery clips to the
+  logical length. Lookup
+  and the ordered walk return both kinds; a whole-object walk for ownership
+  sees the zero records and decides from its own allocation data whether
+  storage stands behind them, since allocated-but-unrecorded storage is
+  still owned.
+* A range query keeps answering from lengths alone, so it reports a body
+  with interior zero extents as one data range. Callers already cannot infer
+  fragmentation from range shapes; they cannot infer holes either, and a
+  reader that wants them reads the zeros.
+
+A zero extent is never a way to hide a failed lookup: a driver that cannot
+resolve an offset fails.
+
+## Decoded link targets
+
+A symbolic link's target is ordinary content, which most formats store
+verbatim, so delivery reads it from resolved extents like a file's bytes. A
+format can instead store an encoding: UDF records a sequence of path
+components, NTFS a reparse buffer in UTF-16. For such a format the driver
+decodes the target at replay into the reader's target buffer, one buffer of
+`FSIMG_SYMLINK_TARGET_MAX` bytes the reader charges once, and sets its
+length as the entry's size. The walker clears that length before every
+replay, as it clears `initialized`, so a stale target can never reach the
+next entry. A nonzero decoded length marks decoded content: delivery then
+serves `[0, size)` of the current entry from the buffer instead of calling
+`resolve`, and requires the entry to be a symbolic link whose size equals
+that length, else `FSIMG_ESTATE`. A zero length, which every driver that
+stores targets verbatim leaves, means delivery resolves extents. Decoded
+content takes the same bounds, batching, stability check and work charging,
+and a range query reports the target as one data range. The buffer's content is
+valid until the walker advances, like the rest of the current entry. A
+driver that stores targets verbatim never sets it, so the two sources of
+link content cannot both apply to one entry.
+
+## Stored bytes
+
+Every content read reports two counts: the bytes it transferred, which the
+public operations return and which measure progress, and the bytes among
+them that it read from storage. Synthesized bytes, from the zero tail, a
+zero extent, a held extent or a decoded target, are transferred but not stored. Payload
+verification advances and checks completion by the transferred count and
+adds only the stored count to its report, so a file of zero extents reports
+no payload read.
 
 ## Operations
 
@@ -138,8 +207,9 @@ The extent index is a tool, not a requirement. A driver can keep a sequential
 cursor and build an index only on a seek, prepare one when its metadata
 validation already needs it, or resolve directly and never build one.
 
-The index holds mapped extents only. Records are three little-endian
-`uint64_t` values: logical offset, image offset, and length. They sit in a paged scratch store charged to the reader's
+Records are three little-endian `uint64_t` values: logical offset, image
+offset, and length, a [zero extent](#zero-extents) marked by an image offset
+of `UINT64_MAX`. They sit in a paged scratch store charged to the reader's
 session. The driver creates an index with its permitted physical domain: the
 image range and allocation-unit alignment that file storage can occupy, such as
 the FAT data region or the exFAT cluster heap. The index owns:
