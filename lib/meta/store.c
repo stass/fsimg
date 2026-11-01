@@ -34,10 +34,12 @@ typedef struct fsimg_meta_page {
 
 /* Slots live in chunks allocated as the cache grows, so a context charges
  * only for the slots it has needed. Slot i is entry i % chunk_pages of
- * chunk i / chunk_pages. Indices link slots from newest to oldest; NO_PAGE
- * terminates each end and each hash bucket chain. Free slots sit at the
- * oldest end, so the replacement victim is always the oldest slot. No
- * pointer escapes a transfer operation.
+ * chunk i / chunk_pages. The chunk table is rebuilt with the bucket array,
+ * whose count is at least the slots, so neither depends on the budget.
+ * Indices link slots from newest to oldest; NO_PAGE terminates each end and
+ * each hash bucket chain. Free slots sit at the oldest end, so the
+ * replacement victim is always the oldest slot. No pointer escapes a
+ * transfer operation.
  */
 struct fsimg_meta_cache {
 	uint64_t	 objects;
@@ -49,7 +51,7 @@ struct fsimg_meta_cache {
 	uint32_t	 oldest;
 	uint32_t	 mask;		/* bucket count less one; the count is at least the slots */
 	uint32_t	*buckets;	/* a separate allocation, rebuilt on growth */
-	fsimg_meta_page_t *chunks[];
+	fsimg_meta_page_t **chunks;	/* cache_table_entries(mask + 1) */
 };
 
 /* A walk over one store's cached slots. Its mode is fixed when it starts:
@@ -164,6 +166,38 @@ store_ready(fsimg_store_t *store, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/* The bucket count for a number of slots: the least power of two holding
+ * them. Slots are at most 2^22, so the count stays below 2^23.
+ */
+static uint32_t
+cache_bucket_count(uint32_t slots)
+{
+	uint32_t buckets;
+
+	for (buckets = 1; buckets < slots; buckets *= 2)
+		continue;
+	return (buckets);
+}
+
+/* The chunk table's entries for a bucket count. The buckets are at least
+ * the slots, so the table indexes every chunk; a validation control's chunk
+ * need not divide the count, hence the rounding up.
+ */
+static uint32_t
+cache_table_entries(uint32_t buckets, uint32_t chunk_pages)
+{
+	return ((buckets + chunk_pages - 1) / chunk_pages);
+}
+
+/* The bucket array and chunk table for a bucket count, in bytes. */
+static uint64_t
+cache_index_bytes(uint32_t buckets, uint32_t chunk_pages)
+{
+	return ((uint64_t)buckets * sizeof(uint32_t) +
+	    (uint64_t)cache_table_entries(buckets, chunk_pages) *
+	    sizeof(fsimg_meta_page_t *));
+}
+
 /* The most slots a cache may allocate under a memory budget: whole chunks
  * whose slots and buckets fit a quarter of it, and at least the first one.
  */
@@ -185,18 +219,18 @@ cache_slot_limit(uint64_t memory_bytes)
 uint64_t
 fsimg_meta_cache_max_bytes(uint64_t memory_bytes)
 {
-	uint64_t buckets, slots;
+	uint32_t buckets, slots;
 
 	slots = cache_slot_limit(memory_bytes);
-	for (buckets = 1; buckets < slots; buckets *= 2)
-		continue;
-	/* The header, its chunk table, the slots, and the buckets at their
-	 * last rebuild, when the old array is still held beside the new one.
+	buckets = cache_bucket_count(slots);
+	/* The header, the slots, and the index at its last rebuild, when the
+	 * old index of half the buckets is still held beside the new one.
 	 */
 	return (sizeof(fsimg_meta_cache_t) +
-	    slots / CACHE_CHUNK_PAGES * sizeof(fsimg_meta_page_t *) +
-	    slots * sizeof(fsimg_meta_page_t) +
-	    (buckets + buckets / 2) * sizeof(uint32_t));
+	    (uint64_t)slots * sizeof(fsimg_meta_page_t) +
+	    cache_index_bytes(buckets, CACHE_CHUNK_PAGES) +
+	    (buckets > 1 ? cache_index_bytes(buckets / 2, CACHE_CHUNK_PAGES) :
+	    0));
 }
 
 /* Create the context's cache with one chunk of slots. A validation
@@ -218,9 +252,7 @@ cache_new(fsimg_ctx_t *ctx, fsimg_error_t *error)
 		chunk = CACHE_CHUNK_PAGES;
 		limit = cache_slot_limit(ctx->options.memory_bytes);
 	}
-	/* At most CACHE_SLOT_LIMIT / CACHE_CHUNK_PAGES or 1024 chunk pointers. */
-	cache = fsimg_alloc(ctx, sizeof(*cache) +
-	    (size_t)(limit / chunk) * sizeof(cache->chunks[0]), &detail);
+	cache = fsimg_alloc(ctx, sizeof(*cache), &detail);
 	if (cache == NULL) {
 		if (error != NULL)
 			*error = detail;
@@ -239,15 +271,16 @@ cache_new(fsimg_ctx_t *ctx, fsimg_error_t *error)
 }
 
 /* Add a chunk of free slots at the oldest end, rebuilding the bucket array
- * when the slots outgrow it. The caller checks the limit.
+ * and the chunk table when the slots outgrow them. The caller checks the
+ * limit.
  */
 static fsimg_status_t
 cache_grow(fsimg_ctx_t *ctx, fsimg_error_t *error)
 {
 	fsimg_meta_cache_t *cache;
-	fsimg_meta_page_t *chunk;
+	fsimg_meta_page_t *chunk, **chunks;
 	fsimg_error_t detail;
-	uint32_t buckets, first, *table;
+	uint32_t buckets, entries, first, *table;
 
 	cache = ctx->meta_cache;
 	/* The allocator zeroes the chunk, so every new slot is free. */
@@ -257,16 +290,22 @@ cache_grow(fsimg_ctx_t *ctx, fsimg_error_t *error)
 		goto fail;
 	first = cache->count;
 	if (cache->buckets == NULL || first + cache->chunk_pages > cache->mask + 1) {
-		/* Limit is at most 2^22, so the bucket count stays below 2^23. */
-		for (buckets = 1; buckets < first + cache->chunk_pages;
-		    buckets *= 2)
-			continue;
+		buckets = cache_bucket_count(first + cache->chunk_pages);
+		entries = cache_table_entries(buckets, cache->chunk_pages);
 		table = fsimg_alloc(ctx, (size_t)buckets * sizeof(*table),
 		    &detail);
-		if (table == NULL) {
+		chunks = table == NULL ? NULL : fsimg_alloc(ctx,
+		    (size_t)entries * sizeof(*chunks), &detail);
+		if (chunks == NULL) {
+			fsimg_dealloc(table);
 			fsimg_dealloc(chunk);
 			goto fail;
 		}
+		if (first != 0)
+			bcopy(cache->chunks, chunks,
+			    (size_t)(first / cache->chunk_pages) * sizeof(*chunks));
+		fsimg_dealloc(cache->chunks);
+		cache->chunks = chunks;
 		fsimg_dealloc(cache->buckets);
 		cache->buckets = table;
 		cache->mask = buckets - 1;
@@ -276,6 +315,7 @@ cache_grow(fsimg_ctx_t *ctx, fsimg_error_t *error)
 			if (page_at(cache, slot)->owner != NULL)
 				page_hash(cache, slot);
 	}
+	/* The table covers the bucket count, which holds count slots. */
 	cache->chunks[first / cache->chunk_pages] = chunk;
 	cache->count += cache->chunk_pages;
 	for (uint32_t slot = first; slot < cache->count; slot++)
@@ -300,11 +340,12 @@ cache_try_grow(fsimg_ctx_t *ctx)
 	cache = ctx->meta_cache;
 	if (cache->count == cache->limit)
 		return (false);
-	/* A chunk and, if the buckets are rebuilt, a doubled array while the
-	 * old one is still held.
+	/* A chunk and, if the index is rebuilt, one of twice the buckets while
+	 * the old one is still held.
 	 */
 	need = (uint64_t)cache->chunk_pages * sizeof(fsimg_meta_page_t) +
-	    3 * ((uint64_t)cache->mask + 1) * sizeof(uint32_t);
+	    cache_index_bytes(2 * (cache->mask + 1), cache->chunk_pages) +
+	    cache_index_bytes(cache->mask + 1, cache->chunk_pages);
 	if (ctx->stats.memory_bytes + need >
 	    ctx->options.memory_bytes - ctx->options.memory_bytes / 4)
 		return (false);
@@ -316,6 +357,7 @@ cache_free(fsimg_meta_cache_t *cache)
 {
 	for (uint32_t i = 0; i < cache->count / cache->chunk_pages; i++)
 		fsimg_dealloc(cache->chunks[i]);
+	fsimg_dealloc(cache->chunks);
 	fsimg_dealloc(cache->buckets);
 	fsimg_dealloc(cache);
 }

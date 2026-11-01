@@ -474,6 +474,89 @@ test_budget_sized_cache(void)
 	fixture_close(&fixture);
 }
 
+static void
+test_cache_growth_stays_within_its_maximum(void)
+{
+	static const uint64_t budgets[] = {
+		UINT64_C(16) << 20, UINT64_C(64) << 20, UINT64_C(256) << 20
+	};
+	fsimg_options_t options;
+	fsimg_ctx_t *ctx;
+	fsimg_session_t session;
+	fsimg_store_t *store, *empty;
+	fsimg_stats_t baseline, before, after;
+	fsimg_error_t error;
+	uint64_t header_bytes, store_bytes, capacity, chunks, attempts;
+	uint64_t cache_peak, maximum, allowance;
+	void *allocation;
+
+	for (size_t i = 0; i < sizeof(budgets) / sizeof(budgets[0]); i++) {
+		fsimg_options_init(&options);
+		options.memory_bytes = budgets[i];
+		CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
+		fsimg_session_init(&session, ctx, "cache maximum test", 0);
+		CHECK(fsimg_ctx_get_stats(ctx, &baseline, NULL) == FSIMG_OK);
+
+		/* Measure the allocator header and a store independently of the
+		 * cache. A second empty store reuses the first store's cache.
+		 */
+		allocation = fsimg_alloc(ctx, 0, NULL);
+		CHECK(allocation != NULL);
+		CHECK(fsimg_ctx_get_stats(ctx, &after, NULL) == FSIMG_OK);
+		header_bytes = after.memory_bytes - baseline.memory_bytes;
+		fsimg_dealloc(allocation);
+		CHECK(fsimg_store_new(&session, &store, NULL) == FSIMG_OK);
+		CHECK(fsimg_ctx_get_stats(ctx, &before, NULL) == FSIMG_OK);
+		CHECK(fsimg_store_new(&session, &empty, NULL) == FSIMG_OK);
+		CHECK(fsimg_ctx_get_stats(ctx, &after, NULL) == FSIMG_OK);
+		store_bytes = after.memory_bytes - before.memory_bytes;
+		fsimg_store_free(empty);
+
+		/* With no scratch directory, an oversized resident reservation
+		 * allocates every possible chunk before reporting its capacity.
+		 * No page writes or scratch I/O are needed, even at 256 MiB.
+		 */
+		CHECK(fsimg_store_grow(store, budgets[i], &error) == FSIMG_ELIMIT);
+		CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
+		CHECK(error.observed == budgets[i]);
+		capacity = error.limit;
+		CHECK(capacity >= budgets[i] / 8);
+		CHECK(capacity % (256 * FSIMG_META_PAGE_SIZE) == 0);
+		CHECK(fsimg_store_size(store) == 0);
+		CHECK(fsimg_ctx_get_stats(ctx, &before, NULL) == FSIMG_OK);
+		/* Far below the three-quarter growth gate, with room for another
+		 * 256-page chunk and its index: refusal is the slot limit.
+		 */
+		CHECK(before.memory_bytes < budgets[i] / 2);
+		attempts = ctx->allocation_attempts;
+		CHECK(fsimg_store_grow(store, budgets[i], &error) == FSIMG_ELIMIT);
+		CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
+		CHECK(error.limit == capacity);
+		CHECK(ctx->allocation_attempts == attempts);
+		CHECK(fsimg_ctx_get_stats(ctx, &after, NULL) == FSIMG_OK);
+		CHECK(after.memory_bytes == before.memory_bytes);
+		CHECK(after.memory_peak == before.memory_peak);
+		CHECK(after.scratch_peak == 0 && after.io_calls == 0);
+
+		/* At a rebuild: one allocation header per 256-page chunk, four
+		 * for the old/new bucket arrays and chunk tables, and one for
+		 * the cache header. The store's entire charge is subtracted.
+		 */
+		chunks = capacity / FSIMG_META_PAGE_SIZE / 256;
+		allowance = (chunks + 5) * header_bytes;
+		maximum = fsimg_meta_cache_max_bytes(budgets[i]);
+		cache_peak = after.memory_peak - baseline.memory_bytes - store_bytes;
+		printf("cache budget=%" PRIu64 " peak=%" PRIu64
+		    " maximum=%" PRIu64 " headers=%" PRIu64 "\n",
+		    budgets[i], cache_peak, maximum, allowance);
+		CHECK(cache_peak <= maximum + allowance);
+		fsimg_store_free(store);
+		CHECK(fsimg_ctx_get_stats(ctx, &after, NULL) == FSIMG_OK);
+		CHECK(after.memory_bytes == baseline.memory_bytes);
+		fsimg_ctx_free(ctx);
+	}
+}
+
 /* Fill a store's pages with a pattern derived from a seed and its page
  * number, or check that pattern.
  */
@@ -1069,6 +1152,7 @@ main(int argc, char **argv)
 	test_sparse_and_quotas();
 	test_spilled_growth_host_calls();
 	test_budget_sized_cache();
+	test_cache_growth_stays_within_its_maximum();
 	test_cache_growth();
 	test_failures();
 	test_retained_dirty_page();
