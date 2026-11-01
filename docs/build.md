@@ -95,6 +95,11 @@ make check-fuzz-extended
 
 The tree builds warning-free under `-Werror` with Clang and with GCC. CI builds
 and checks with Clang on Linux and macOS, and with GCC 13 and GCC 16 on Linux.
+The macOS, Linux and FreeBSD jobs run `sh ../build-aux/ci-check.sh` in the
+build directory after `make`. Run the same script before a change lands: it
+holds the one list of checks, from `make check` through the sanitizers,
+`check-scale`, `check-cli-rss` and `distcheck`, and leaves out only the long
+`check-extended` and fuzzing targets. The GCC jobs run `make check` and require the CLI suite to pass.
 On macOS the Homebrew `gcc` formula installs versioned drivers; configure a
 separate build directory with `../configure CC=gcc-<major> CXX=g++-<major>`.
 

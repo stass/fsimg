@@ -8,6 +8,7 @@
 /build-aux/*
 !/build-aux/check-ascii.sh
 !/build-aux/check-dist.sh
+!/build-aux/ci-check.sh
 !/build-aux/device-check.sh
 !/build-aux/build-msan-zlib.sh
 !/build-aux/check-seek-holes.sh

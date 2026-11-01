@@ -16,6 +16,9 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/codec
 AM_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 AM_CXXFLAGS = -std=c++11 -Wall -Wextra -Wpedantic -Werror
+# The distcheck build keeps the configured Ruby, which a host may install
+# only under a versioned name, such as ruby33 on FreeBSD.
+AM_DISTCHECK_CONFIGURE_FLAGS = RUBY="$(RUBY)"
 # The sanitizer and fuzz scripts run `make distdir` and `make check` as
 # sub-makes. MAKE names this make program (gmake rather than BSD make, say),
 # and their rules start with + to pass the jobserver. A + line runs even
@@ -298,7 +301,7 @@ header_cxx_LDADD = libfsimg.la
 EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/device-check.sh \
 	libfsimg.pc.in docs/examples.md \
-	build-aux/check-ascii.sh build-aux/check-dist.sh \
+	build-aux/check-ascii.sh build-aux/check-dist.sh build-aux/ci-check.sh \
 	build-aux/check-seek-holes.sh build-aux/sanitize.sh \
 	build-aux/check-install.sh build-aux/check-installed.rb \
 	build-aux/fuzz.sh \

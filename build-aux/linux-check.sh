@@ -8,8 +8,9 @@
 #   build-aux/linux-check.sh [-r REV] [COMMAND]
 #
 # REV defaults to HEAD. COMMAND is one shell string, run in the configured
-# out-of-tree build directory; it defaults to "make -j8 check" plus CI's check
-# that the specification suite passed rather than skipped. When the build or
+# out-of-tree build directory; it defaults to "make -j8 check" plus a check
+# that the specification suite passed rather than skipped. Pass
+# "sh ../build-aux/ci-check.sh" to run the full CI list. When the build or
 # COMMAND fails, the relevant logs' tails are printed, since the container and
 # its logs are discarded on exit.
 #

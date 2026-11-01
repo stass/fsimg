@@ -52,19 +52,7 @@ jobs:
           cd build
           ../configure CC=clang CXX=clang++
           make -j2
-          make check
-          grep -q '^:test-result: PASS' test/cli.sh.trs
-          # The specification tests must run here, not skip.
-          grep -q '^:test-result: PASS' test/spec.sh.trs
-          make check-install
-          if [ "$(uname -s)" = Linux ]; then ./test-sandbox; fi
-          make check-asan
-          make check-ubsan
-          make check-lsan
-          make check-msan
-          make check-scale
-          make check-cli-rss
-          make distcheck
+          sh ../build-aux/ci-check.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -169,12 +157,5 @@ jobs:
               cd build
               ../configure CC=clang CXX=clang++ RUBY="$ruby"
               make -j2
-              make check
-              grep -q "^:test-result: PASS" test/cli.sh.trs
-              grep -q "^:test-result: PASS" test/spec.sh.trs
-              make check-install
-              ./test-sandbox
-              make check-asan
-              make check-scale
-              make check-cli-rss
+              sh ../build-aux/ci-check.sh
             '

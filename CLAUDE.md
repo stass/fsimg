@@ -266,6 +266,11 @@ Test names describe behaviour, such as
 * Implementation subagents do not run sanitizer or fuzz suites. The
   coordinating session runs them once, on the integrated tree, before the
   work lands; subagents run the plain suite with `make -j32 check`.
+* The coordinating session lands work only after `build-aux/ci-check.sh`
+  passes in the macOS build directory. It is the list every native CI job
+  runs, so a check CI runs is never skipped locally. Run it in the Linux
+  container (`build-aux/linux-check.sh -r REV 'sh ../build-aux/ci-check.sh'`)
+  and on FreeBSD whenever the platform rule below applies.
 
 ### Linux and FreeBSD
 
@@ -280,8 +285,9 @@ worker. Every report names the platforms that ran and those that did not.
   MemorySanitizer run there, not on macOS.
 * **FreeBSD** runs on a FreeBSD host. The procedure is the commands inside
   the `su -c` string of the FreeBSD job in `.github/workflows/check.yml`, run
-  as yourself with `gmake` for `make`: they install the spec gems and build
-  the fatcat oracle first, and a run counts only when `test/spec.sh` passed
+  as yourself with `gmake` for `make` and `MAKE=gmake sh
+  ../build-aux/ci-check.sh` as the last step: they install the spec gems and
+  build the fatcat oracle first, and a run counts only when `test/spec.sh` passed
   rather than skipped.
 
 ## Committing
