@@ -26,6 +26,7 @@
 #include "fsimg.h"
 #include "qnx4.h"
 #include "reader.h"
+#include "scale.h"
 #include "selection.h"
 #include "test.h"
 
@@ -4591,9 +4592,9 @@ test_extract(void)
  *
  * - the listing exposes every name, and verification completes and counts
  *   every file, directory and allocated block;
- * - charged memory stays below SCALE_MEMORY at every size, and scratch
- *   within a budget the context enforces (see scale_scratch). Everything
- *   the reader keeps is charged, so these two bounds are what keep the
+ * - charged memory stays below the component ceiling at every size,
+ *   and scratch within a budget the context enforces (see scale_scratch).
+ *   Everything the reader keeps is charged, so these bounds keep the
  *   2^31-block volume's 256 MiB claimed bitset out of memory; the growth
  *   of the child's peak RSS during the operation corroborates them;
  * - each operation reads every extent block exactly once, and each
@@ -4604,11 +4605,13 @@ test_extract(void)
  * - only verification reads the .inodes table in full, once.
  */
 
-/* The charged-memory ceiling, below the context's 16 MiB budget. It grows
- * only with the depth limit: the common walk keeps 32 bytes per level of
- * max_depth, half a MiB for the deep case.
+/*
+ * Non-cache, non-run state measures about 150 KB on macOS LP64 at the
+ * scale budget; 256 KiB allows about 110 KiB of headroom.
+ * The depth case's walk state exceeds this allowance but coincides with
+ * neither a full cache nor a full run: metadata and sort inputs are small.
  */
-#define SCALE_MEMORY	(UINT64_C(4) << 20)
+#define SCALE_STATE		(UINT64_C(256) << 10)
 
 /* The most an operation may raise its process's peak resident set: far
  * below the 256 MiB a resident claimed bitset of a 2^31-block volume would
@@ -4839,6 +4842,7 @@ scale_operate(const gen_t *g, const scale_volume_t *v, operation_t operation,
 	bzero(run, sizeof(*run));
 	baseline = peak_rss();
 	fixture_open(&f, g->image, g->length, &spec);
+	CHECK(f.ctx->options.memory_bytes == SCALE_BUDGET);
 	f.account = &account;
 	bzero(&error, sizeof(error));
 	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
@@ -5048,7 +5052,7 @@ scale_check(const gen_t *g, const scale_volume_t *v, const scale_run_t *run,
 	uint64_t table = g->objects[OBJ_INODES].size;
 
 	CHECK(run->entries == (verify ? v->files + v->directories : v->names));
-	CHECK(run->memory_peak <= SCALE_MEMORY);
+	CHECK(run->memory_peak <= scale_memory(SCALE_STATE));
 	/* An in-memory volume's pages belong to the test, and reading them
 	 * makes them resident in the child; a sparse one is read with pread.
 	 */

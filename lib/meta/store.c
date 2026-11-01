@@ -164,9 +164,44 @@ store_ready(fsimg_store_t *store, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/* The most slots a cache may allocate under a memory budget: whole chunks
+ * whose slots and buckets fit a quarter of it, and at least the first one.
+ */
+static uint32_t
+cache_slot_limit(uint64_t memory_bytes)
+{
+	uint64_t limit, slot_bytes;
+
+	/* The bucket array holds at most two entries per slot. */
+	slot_bytes = sizeof(fsimg_meta_page_t) + 2 * sizeof(uint32_t);
+	limit = memory_bytes / 4 / slot_bytes;
+	if (limit > CACHE_SLOT_LIMIT)
+		limit = CACHE_SLOT_LIMIT;
+	if (limit < CACHE_CHUNK_PAGES)
+		return (CACHE_CHUNK_PAGES);
+	return ((uint32_t)(limit / CACHE_CHUNK_PAGES * CACHE_CHUNK_PAGES));
+}
+
+uint64_t
+fsimg_meta_cache_max_bytes(uint64_t memory_bytes)
+{
+	uint64_t buckets, slots;
+
+	slots = cache_slot_limit(memory_bytes);
+	for (buckets = 1; buckets < slots; buckets *= 2)
+		continue;
+	/* The header, its chunk table, the slots, and the buckets at their
+	 * last rebuild, when the old array is still held beside the new one.
+	 */
+	return (sizeof(fsimg_meta_cache_t) +
+	    slots / CACHE_CHUNK_PAGES * sizeof(fsimg_meta_page_t *) +
+	    slots * sizeof(fsimg_meta_page_t) +
+	    (buckets + buckets / 2) * sizeof(uint32_t));
+}
+
 /* Create the context's cache with one chunk of slots. A validation
  * control fixes the capacity in a single chunk; otherwise the cache may
- * grow until its slots and buckets would take a quarter of the budget.
+ * grow to cache_slot_limit.
  */
 static fsimg_status_t
 cache_new(fsimg_ctx_t *ctx, fsimg_error_t *error)
@@ -174,20 +209,14 @@ cache_new(fsimg_ctx_t *ctx, fsimg_error_t *error)
 	fsimg_error_t detail;
 	fsimg_meta_cache_t *cache;
 	fsimg_status_t status;
-	uint64_t limit, slot_bytes;
+	uint64_t limit;
 	uint32_t chunk;
 
 	if (ctx->meta_cache_pages != 0) {
 		limit = chunk = ctx->meta_cache_pages;
 	} else {
-		/* The bucket array holds at most two entries per slot. */
-		slot_bytes = sizeof(fsimg_meta_page_t) + 2 * sizeof(uint32_t);
 		chunk = CACHE_CHUNK_PAGES;
-		limit = ctx->options.memory_bytes / 4 / slot_bytes;
-		if (limit > CACHE_SLOT_LIMIT)
-			limit = CACHE_SLOT_LIMIT;
-		/* Whole chunks, and at least the first one. */
-		limit = limit < chunk ? chunk : limit / chunk * chunk;
+		limit = cache_slot_limit(ctx->options.memory_bytes);
 	}
 	/* At most CACHE_SLOT_LIMIT / CACHE_CHUNK_PAGES or 1024 chunk pointers. */
 	cache = fsimg_alloc(ctx, sizeof(*cache) +

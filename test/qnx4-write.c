@@ -24,6 +24,7 @@
 #include "host.h"
 #include "internal.h"
 #include "meta.h"
+#include "scale.h"
 #include "test.h"
 
 /*
@@ -2735,15 +2736,18 @@ create_external(const char *directory, const char *name, const char *blocks,
  * QNX4_SCALE_SCRATCH names the scratch parent, such as a RAM disk.
  *
  * The checks restate the driver design's bounds: charged memory stays
- * below SCALE_MEMORY, scratch within the case's budget, the growth of the
- * child's peak resident set, less the sink's pages, below
+ * below the component ceiling, scratch within the case's budget, the growth
+ * of the child's peak resident set, less the sink's pages, below
  * SCALE_RSS_GROWTH, and the bytes written at most the plan's metadata and
  * the tree's content.
  */
 
-/* The charged-memory ceiling, below the context's 16 MiB budget. */
-#define SCALE_MEMORY		(UINT64_C(8) << 20)
-#define SCALE_BUDGET		(UINT64_C(16) << 20)
+/*
+ * Non-cache, non-run state measures about 490 KB on macOS LP64 at the
+ * scale budget; 768 KiB allows about 290 KiB of headroom for catalog,
+ * planning, emission and read-back state.
+ */
+#define SCALE_STATE		(UINT64_C(768) << 10)
 
 /* The limit cases' budget: they show where planning refuses, not what it
  * keeps resident, and a large budget spills less of their tens of
@@ -3637,7 +3641,7 @@ test_scale(scale_kind_t kind)
 		 */
 		CHECK(r.scratch_peak <= cases[i].scratch_bytes);
 		if (kind == SCALE_EMIT) {
-			CHECK(r.memory_peak <= SCALE_MEMORY);
+			CHECK(r.memory_peak <= scale_memory(SCALE_STATE));
 			CHECK(r.rss_growth <= SCALE_RSS_GROWTH);
 		}
 	}

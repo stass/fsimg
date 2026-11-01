@@ -22,6 +22,7 @@
 #include "extract.h"
 #include "format.h"
 #include "fsimg.h"
+#include "scale.h"
 #include "test.h"
 
 /*
@@ -4197,7 +4198,7 @@ test_faults(void)
  *
  * - the listing delivers every member, with its name and bytes, and every
  *   synthesized directory, and verification counts them all;
- * - charged memory stays below SCALE_MEMORY, and at the large sizes the
+ * - charged memory stays below the component ceiling, and at large sizes the
  *   child's resident set grows by at most SCALE_RSS_GROWTH, below a
  *   resident table, where that is measurable (see rss_measurable);
  * - scratch stays within a budget the context enforces, a small multiple
@@ -4210,17 +4211,16 @@ test_faults(void)
  *   image once more, for the checksum.
  */
 
-/* The charged-memory ceiling, half the context's 16 MiB budget: the
- * reader's fixed state, about 3.1 MiB, and the metadata cache, which grows
- * to at most a quarter of the budget before stores spill to scratch.
+/*
+ * Non-cache, non-run state measures about 150 KB on macOS LP64 at the
+ * scale budget; 256 KiB allows about 110 KiB of headroom.
  */
-#define SCALE_MEMORY		(UINT64_C(8) << 20)
+#define SCALE_STATE		(UINT64_C(256) << 10)
+
 /* The most an operation may raise its process's peak resident set: below
  * the 44 MB table of a million records and the scratch its tree takes.
  */
 #define SCALE_RSS_GROWTH	(UINT64_C(32) << 20)
-/* The context's memory budget, which a spilled case's scratch exceeds. */
-#define SCALE_BUDGET		(UINT64_C(16) << 20)
 /* dir_offset for the mountpoint "/", and the root record. */
 #define SCALE_DIR_OFFSET	0x5cu
 #define SCALE_ROOT_RECORD	0x1cu
@@ -4644,6 +4644,7 @@ scale_operate(const scale_image_t *s, operation_t operation,
 	bzero(run, sizeof(*run));
 	baseline = peak_rss();
 	fixture_new(&f, NULL, s->layout.image_size, &spec);
+	CHECK(f.ctx->options.memory_bytes == SCALE_BUDGET);
 	f.account = &account;
 	bzero(&error, sizeof(error));
 	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
@@ -4759,7 +4760,7 @@ scale_check(const scale_image_t *s, const scale_run_t *run,
 	reread = (table / (4096 - s->record_length) + 2) * s->record_length;
 
 	CHECK(run->entries == s->members + s->implicit + (verify ? 1 : 0));
-	CHECK(run->memory_peak <= SCALE_MEMORY);
+	CHECK(run->memory_peak <= scale_memory(SCALE_STATE));
 	CHECK(!rss || run->rss_growth <= SCALE_RSS_GROWTH);
 	CHECK(opened >= table && opened <= table + reread);
 	CHECK(run->opening.region_bytes[REGION_DATA] == 0);

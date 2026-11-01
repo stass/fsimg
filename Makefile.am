@@ -226,16 +226,16 @@ test_codec_LDADD = libfsimg-core.la
 test_exfat_SOURCES = test/exfat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_exfat_LDADD = libfsimg.la
-test_qnx6_SOURCES = test/qnx6.c test/test.h
+test_qnx6_SOURCES = test/qnx6.c test/test.h test/scale.h
 test_qnx6_LDADD = libfsimg.la
 test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h \
 	test/digest.c test/digest.h
 test_qnx6_write_LDADD = libfsimg.la
-test_qnx4_SOURCES = test/qnx4.c test/test.h
+test_qnx4_SOURCES = test/qnx4.c test/test.h test/scale.h
 test_qnx4_LDADD = libfsimg.la
-test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h
+test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h test/scale.h
 test_qnx4_write_LDADD = libfsimg.la
-test_ifs_SOURCES = test/ifs.c test/test.h
+test_ifs_SOURCES = test/ifs.c test/test.h test/scale.h
 test_ifs_LDADD = libfsimg.la
 test_ifs_write_SOURCES = test/ifs-write.c test/test.h
 test_ifs_write_LDADD = libfsimg.la

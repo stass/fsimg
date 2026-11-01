@@ -30,6 +30,10 @@ fsimg_status_t fsimg_store_read(fsimg_store_t *, uint64_t, void *, size_t,
 fsimg_status_t fsimg_store_write(fsimg_store_t *, uint64_t, const void *,
     size_t, fsimg_error_t *);
 fsimg_status_t fsimg_store_flush(fsimg_store_t *, fsimg_error_t *);
+/* The most the metadata cache charges under a memory budget, excluding the
+ * allocator's small per-block header on each of its allocations.
+ */
+uint64_t fsimg_meta_cache_max_bytes(uint64_t);
 
 /* Streams borrow their context. Iteration advances only after a complete
  * record, including when the payload is empty. Offsets name frame starts.

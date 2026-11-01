@@ -22,6 +22,7 @@
 #include "fsimg.h"
 #include "qnx6.h"
 #include "reader.h"
+#include "scale.h"
 #include "test.h"
 
 /*
@@ -3445,8 +3446,8 @@ test_extract(void)
  *
  * - the listing and verification see every live inode, and verification
  *   completes;
- * - charged memory stays below SCALE_MEMORY at every size, and scratch
- *   within a budget the context enforces (see test_scale);
+ * - charged memory stays below the component ceiling at every size,
+ *   and scratch within a budget the context enforces (see test_scale);
  * - no owned block is read twice by one operation;
  * - the system run is read in bounded passes: only verification reads
  *   the bitmap and the inode table in full, once each (see scale_system).
@@ -3473,10 +3474,11 @@ typedef struct scale_case {
 	bool		 marked;	/* /f carries scale_mark bytes */
 } scale_case_t;
 
-/* The charged-memory ceiling: a regression bound below the context's
- * 16 MiB budget that no case approaches by growing.
+/*
+ * Non-cache, non-run state measures about 150 KB on macOS LP64 at the
+ * scale budget; 256 KiB allows about 110 KiB of headroom.
  */
-#define SCALE_MEMORY	(UINT64_C(4) << 20)
+#define SCALE_STATE		(UINT64_C(256) << 10)
 
 /* Facts about a committed volume the bounds are stated in. */
 typedef struct scale_volume {
@@ -3579,6 +3581,7 @@ scale_measure(qnx6_gen_t *g, bool verify, uint64_t scratch_bytes,
 	fsimg_status_t status;
 
 	fixture_limited(&f, g->image, g->image_fd, g->length, 0, scratch_bytes);
+	CHECK(f.ctx->options.memory_bytes == SCALE_BUDGET);
 	fixture_account(&f, g);
 	bzero(&error, sizeof(error));
 	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
@@ -3783,8 +3786,8 @@ test_scale(bool large)
 			scale_print(cases[c].name, size, "verify", &verify);
 		}
 		CHECK(list.entries == v.live - 1 && verify.entries == v.live);
-		CHECK(list.memory_peak <= SCALE_MEMORY &&
-		    verify.memory_peak <= SCALE_MEMORY);
+		CHECK(list.memory_peak <= scale_memory(SCALE_STATE) &&
+		    verify.memory_peak <= scale_memory(SCALE_STATE));
 		CHECK(list.repeats == 0 && verify.repeats == 0);
 		CHECK(list.system_bytes <= scale_system(&g, &v, false));
 		CHECK(verify.system_bytes <= scale_system(&g, &v, true));
