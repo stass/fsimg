@@ -161,6 +161,11 @@ so it keeps room for more. QNX6 has almost no free inodes unless you pass
 FAT32's 65,525 clusters or exFAT's 1 MiB, and then `-M` gives the same
 image.
 
+On Linux, a confined creation refuses a source tree that holds a symbolic
+link, because the sandbox cannot confine reading one. Describe each link
+in an mtree manifest with `type=link`, or pass `-S off` for a trusted
+source; see the [command manual](docs/fsimg.1).
+
 Creation publishes a new file and refuses to replace an existing name.
 Keep source files stable during the operation. `-R` fixes ordering,
 timestamps, identifiers, and padding; compressed bytes also depend on the
