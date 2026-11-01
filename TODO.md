@@ -88,6 +88,15 @@
   qnxprobe comparisons and head-unit acceptance.
   [Research evidence](docs/qnx4-research.md) owns the native observations.
 
+* [High] **HFS Plus and HFSX** (`lib/formats/hfsplus/`, `lib/codec/`,
+  `lib/read/`): the [format design](specs/design-hfsplus.md) and
+  [driver design](specs/design-hfsplus-driver.md) describe a reader and
+  verifier for native volumes, transparent compression included, and an
+  unjournaled writer registered after native macOS qualification; none of it
+  is implemented. The [plan](docs/hfsplus-plan.md) orders the stages, from
+  the native evidence corpus to wrapped volumes, and the
+  [work breakdown](docs/todo-hfsplus.md) holds the open items and decisions.
+
 * [Medium] **Specification-driven testing** (`test/spec/`, `test/spec.sh.in`,
   `Makefile.am`, `.github/workflows/check.yml`): build the Ruby rule, case and
   runner harness. It derives valid and targetedly invalid FAT images from

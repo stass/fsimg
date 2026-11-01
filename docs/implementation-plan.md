@@ -640,6 +640,15 @@ registered after native qualification, which writes nonbootable bodies,
 and boot-gated wraps of a bootable body, built by `mkifs` or unwrapped
 from an existing boot image, behind its startup section.
 
+HFS Plus and HFSX follow their own [plan](hfsplus-plan.md): native evidence
+from macOS and Linux formatters, including an exhaustive Unicode
+observation that the pinned comparison tables must match; the format and
+driver designs revised against it; a reader with file hard links and the
+common extra-data mark; transparent compression through decoded spans,
+zlib and the imported LZVN and LZFSE decoders; a full verifier; a writer
+registered after the native macOS `fsck_hfs`, mount, modify and remount
+cycle; and reading of volumes in a classic HFS wrapper.
+
 Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order

@@ -59,7 +59,7 @@ An image is a stack with three slots in fixed order, each at most once:
 
 | Slot | Kind | Names |
 | --- | --- | --- |
-| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`; reserved: `apfs`, `hfs` |
+| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`, `hfsplus`, `hfsx`; reserved: `apfs`, `hfs` (classic HFS) |
 | 2 | Scheme | `gpt`, `mbr` |
 | 3 | Container | `dmg`, `vhd`, `simg`, `ifsboot`, `hbcifs` |
 
@@ -901,6 +901,7 @@ One table serves `type=` on write, the Type selector on read, compose and
 | `linux` | `0FC63DAF-8483-4772-8E79-3D69D8477DE4` | 0x83 | `Linux filesystem` | Linux filesystem data |
 | `apfs` | `7C3457EF-0000-11AA-AA11-00306543ECAC` | none | `Apple APFS` | APFS container |
 | `hfs` | `48465300-0000-11AA-AA11-00306543ECAC` | 0xAF | `Apple HFS/HFS+` | Apple HFS+ |
+| `hfsplus`, `hfsx` | as `hfs` | 0xAF | as `hfs` | HFS Plus and HFSX by convention |
 | `qnx6` | `CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1` | 0xB2 | `QNX6 Power-Safe` | QNX6 Power-Safe; 0xB1 and 0xB3 accepted on read |
 | `qnx4` | none | 0x4D | none | QNX4 POSIX volume; 0x4E and 0x4F, the secondary and tertiary volumes, accepted on read |
 

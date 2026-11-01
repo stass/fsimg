@@ -500,11 +500,13 @@ Exclusivity has a narrow, driver-defined scope:
 The driver defines the domain, identifies owners, accounts for repeated
 references, and supplies every required claim; a list of extents alone does not
 establish complete ownership. FAT and exFAT use one domain, the cluster heap,
-with one owner per directory or file allocation. The QNX6 design distinguishes
+with one owner per directory or file allocation; HFS Plus uses one, its
+allocation blocks, with one owner per fork, B-tree file and reserved range.
+The QNX6 design distinguishes
 snapshots, objects, logical ranges, and roles, and permits cross-snapshot
 sharing. The [exclusive run utility](design-verification-helpers.md) owns the
-FAT/exFAT record encoding, bounds checks, external sort, and sequential overlap
-cursor. It rejects all overlap, including repeated identical claims; its
+record encoding those three formats share, bounds checks, external sort, and
+sequential overlap cursor. It rejects all overlap, including repeated identical claims; its
 callers supply one claim per owned run. QNX6 retains its compact owner-bearing
 records, QNX4 its bitset, and ImageFS its separate reference checks. Reconciliation
 against allocation tables or bitmaps, reserved structures, and legal sharing

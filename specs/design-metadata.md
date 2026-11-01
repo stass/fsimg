@@ -45,6 +45,22 @@ writer never receives one because the catalog rejects unknown kind values.
 | `FSIMG_META_OWNER` | `uid`, `gid` | Numeric owner and group identifiers, `uint32_t` |
 | `FSIMG_META_MODE` | `mode` | Permission bits `07777`: the twelve POSIX permission, setuid, setgid and sticky bits; no file-type bits |
 
+One further bit governs no value:
+
+| Bit | Field | Meaning |
+| --- | --- | --- |
+| `FSIMG_META_EXTRA_DATA` | None | The entry has stored data the entry model does not carry, such as an HFS Plus resource fork or extended attributes |
+
+A reader sets it where its format design says, and only there; its absence
+says nothing for a format that never sets it. It exists so that an
+omission is visible per entry: `t --json` shows it, and since the extractor
+never restores it, the extraction loss report names it among the entry's
+lost fields, beside owner and mode, which safe extraction never restores
+either. No format stores it, so no capability record lists it in
+`metadata_fields`, and a catalog entry that carries it is an omission under
+the common writer policy, like any field a format lacks. Carrying the data
+itself needs a common design of its own.
+
 The existing rules apply unchanged: `required` is a subset of `valid`, unknown
 bits are invalid, an absent field has no value, and the catalog preserves every
 valid field. A kind is not metadata: it has no validity bit and is always
@@ -111,7 +127,9 @@ no new option.
 ## Reading, extraction and display
 
 Readers set the fields their format stores. The QNX6 reader sets owner, mode,
-and all four timestamps; FAT and exFAT readers set nothing new. The safe
+and all four timestamps; the HFS Plus reader sets the same fields and, on an
+entry with a resource fork or stored attributes, `FSIMG_META_EXTRA_DATA`;
+FAT and exFAT readers set nothing new. The safe
 extractor keeps its profile: it creates regular files and directories with
 private modes, never restores owners, permission bits or change times, and
 creates no symbolic links or FIFOs. By default an unsupported kind fails the
@@ -133,7 +151,8 @@ symbolic link directly with `x -O` writes its target bytes, which is the
 content the entry declares.
 
 `t --json` records carry `kind` as a name (`file`, `directory`, `symlink`,
-`fifo`) and the new fields when valid and null otherwise; human listings mark
+`fifo`) and the new fields when valid and null otherwise, with
+`extra_data` true when that bit is set and null otherwise; human listings mark
 a symbolic link with `@` and a FIFO with `|` after the quoted name, in the
 style of `ls -F`. Info (`i`) prints the volume UUID when valid, and `--formats`
 lists the additional kinds and fields a format advertises.
@@ -143,7 +162,8 @@ lists the additional kinds and fields a format advertises.
 `fsimg_format_info_t.entry_kinds` and `metadata_fields` use the masks above.
 The record also gains `max_label_bytes`, the format's encoded on-disk label
 capacity in bytes (11 for FAT, 22 for exFAT's eleven UTF-16 units, 48 for
-QNX4), zero for a format without a volume label. Writer construction rejects a non-NULL label
+QNX4, 510 for HFS Plus's 255 UTF-16 units), zero for a format without a
+volume label. Writer construction rejects a non-NULL label
 for such a format; the CLI applies its default label only when the value is
 nonzero and passes a NULL label otherwise, so a format that refuses labels,
 such as QNX6, is created without `-L` and fails explicitly when `-L` is given.
