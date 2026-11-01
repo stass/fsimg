@@ -147,15 +147,17 @@ bounded. Scratch storage can grow with metadata and is limited separately.
 The detailed algorithms and complexity bounds are in
 [storage and algorithms](design-storage.md).
 
-The budget caps working buffers; it does not size them. A buffer takes what
-its operation needs, up to its share of the budget, and one whose need is not
-known in advance starts small and grows in steps, as the metadata page cache
-does. Only a format's or codec's fixed unit, such as a block, a zlib window or
-a streaming copy buffer of fixed modest size, is allocated at full size
-whatever the input. Booking the full share for every operation, however
-small, would inflate the charged peak, fail small operations under a tight
-budget, and churn the host allocator once per directory or file, which some
-allocators turn into resident memory the budget never sees.
+The budget caps working buffers; it does not size them. A buffer allocated
+per object, such as per directory or per file, takes what that object needs,
+and a buffer sized from the budget takes no more than its input needs; one
+whose need is not known in advance starts small and grows in steps, as the
+metadata page cache does. A fixed buffer allocated once per operation and
+bounded by a configured limit or a format's or codec's fixed unit, such as a
+path buffer, a block, a zlib window or a streaming copy buffer, keeps its
+fixed size. Booking a full share for every small object would inflate the
+charged peak, fail small operations under a tight budget, and churn the host
+allocator once per object, which some allocators turn into resident memory
+the budget never sees.
 
 Defaults are product policy, not a measurement claim:
 
