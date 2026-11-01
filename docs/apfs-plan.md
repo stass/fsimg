@@ -152,14 +152,15 @@ The designs record these with their rationale.
 1. **One volume per reader.** A volume shares its container's blocks, so it
    cannot be a layer slice. A read setting selects it by its stored slot
    index; a single-volume container needs none, and a multi-volume container
-   without one fails naming the occupied indexes. No synthesized root and no
+   without one fails giving the volume count and the lowest and highest
+   occupied indexes. No synthesized root and no
    new enumeration API: `i -o volume=N` shows each volume.
 2. **One bounded checkpoint rule.** The checkpoint with the largest XID
    whose descriptor run is whole is read, as macOS mounts the newest
    superblock that is not malformed. A newer one with a broken run is passed
-   over and reported as not clean; a selected checkpoint whose mapped
-   objects fail is corrupt, with no further fallback, so selection reads the
-   descriptor ring and one data run. There is no recovery scan and no
+   over and reported as not clean; a selected checkpoint whose mappings or
+   mapped objects fail is corrupt, with no further fallback, so selection
+   reads the descriptor ring once and one data run. There is no recovery scan and no
    checkpoint option.
 3. **One object reader and one B-tree cursor.** Every reference goes through
    `apfs_object_read()` and every node through `btree.c`, so storage-class,
@@ -167,11 +168,12 @@ The designs record these with their rationale.
 4. **No caches beyond cursor paths.** Each cursor keeps its root-to-leaf
    windows, bounded by the 16-level height limit; nearby lookups reuse them.
    The driver owns no other cache, as the architecture requires.
-5. **Directory cycles by the parent rule.** A directory's inode names its
-   parent, and the reader requires it to be the directory that holds the
-   record naming it. A
-   cycle would give some directory two parents, so none can be followed and
-   no claimed-object set is needed for sparse 60-bit inode numbers.
+5. **Directory cycles and sharing by the parent and name rules.** A
+   directory's inode names its parent and its own name, and the reader
+   requires them to be the directory holding the record that names it and
+   that record's name, so a second record naming the directory is corrupt.
+   A cycle would give some directory two parents, so none can be followed,
+   and no claimed-object set is needed for sparse 60-bit inode numbers.
 6. **Names are delivered as stored; keys follow the volume.** Every valid
    UTF-8 name is delivered, with no omitted-names profile, and the
    namespace key is the volume's comparison form, so equivalent names are

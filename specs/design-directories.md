@@ -141,8 +141,9 @@ its storage there. For FAT and exFAT that claim uses a paged exact bitset, so
 re-entering claimed storage is corruption whether it comes from a cycle or a
 shared chain. A driver with different object identity supplies an equally
 bounded exact scheme: APFS requires each directory inode's recorded parent
-to be the directory that holds the record naming it, which rules out every
-cycle without a claimed set.
+and name to be the directory holding the record that names it and that
+record's name, which rules out every cycle and every second record for one
+directory without a claimed set.
 
 ## Charging and limits
 

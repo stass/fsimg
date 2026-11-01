@@ -95,15 +95,19 @@ the next starts:
 1. **Block 0.** One read of 4096 bytes, then `B` bytes once the block size is
    known. Geometry, features and areas as the format design states.
 2. **Checkpoint.** `checkpoint.c` reads the descriptor ring once with one
-   block window, recording each valid superblock as an `(XID, slot)`
-   candidate in a charged stream. Candidates are examined from the largest
-   XID down by rereading only their descriptor runs; the first whose run is
-   whole is selected, and a larger one whose run is not sets `clean` to
-   false. Its mappings are copied into a paged array in metadata scratch and
-   sorted by OID, and each mapped object is then read once and checked; a
-   failure is `FSIMG_ECORRUPT`, with no fallback to an older checkpoint.
-   Selection costs the `D` descriptor blocks, each candidate's run, and one
-   data run.
+   block window. For each slot it records, in a paged array of fixed-size
+   slot records in metadata scratch, the block's kind (superblock, valid
+   mapping block or other), XID, last-map flag and its superblock run
+   fields. Candidates are sorted by XID, which rejects duplicates, and
+   judged from the largest down against the slot records alone, never
+   rereading a block; the first whose run is whole is selected, and a larger
+   one whose run is not sets `clean` to false. The selected run's mapping
+   blocks are then read again, their mappings copied into a paged array
+   sorted by OID, which rejects duplicate OIDs, and their runs checked for
+   overlap; each mapped object is read once and checked. A failure after
+   selection is `FSIMG_ECORRUPT`, with no fallback to an older checkpoint.
+   Selection costs the `D` descriptor blocks, one reread of the selected
+   run, and one data run.
 3. **Space manager.** The ephemeral object is read through the mapping
    table; its main-device free count gives `free_bytes`.
 4. **Container object map.** The physical object and its tree root.
@@ -279,15 +283,16 @@ claims `(first block, count, class, owner)` to a claim stream: block 0 and
 the two areas as fixed claims; the internal pool as one range; every node of
 every object map; every live object version each object map maps, at its
 size, tombstones excluded; every physical tree node; the reaper's list
-objects; every free-queue entry; and the space manager's chunk-information,
-address and bitmap blocks that lie outside the internal pool. Those inside
-the pool are checked against the pool's own bitmap as sub-allocations,
-never claimed twice. For each volume it scans the object map, the
-extent-reference tree, the snapshot tree with each snapshot's
-extent-reference tree, and the filesystem tree with dedicated cursors; the
-filesystem scan appends a data claim for every mapped file extent, owner
-`(volume, private ID)`, and the extent-reference scans append a reference
-record for every physical extent.
+objects; every main free-queue entry; and the space manager's
+chunk-information, address and bitmap blocks that lie outside the internal
+pool. The space-manager blocks inside the pool and the internal-pool free
+queue's entries go to a second, smaller claim stream for the pool's own
+domain, merged against the pool's bitmap, so no block is claimed in both.
+For each volume it scans the object map, the snapshot tree, every
+extent-reference tree (the live one and each snapshot's), and the
+filesystem tree with dedicated cursors. Each physical-extent record appends
+a data claim, owner `(volume, tree)`; the filesystem scan appends a
+file-extent record `(block, count, volume, private ID)` to a third stream.
 
 **Record reconciliation.** The filesystem scan visits each object's records
 together because they share the owner prefix, so most checks are local and
@@ -313,11 +318,14 @@ once:
 walks it with `spaceman.c`'s pager, which visits chunk-information blocks in
 address order and each chunk's bitmap block in 4 KiB windows. For each block
 it checks the format design's rules: metadata claims never overlap any other
-claim; data claims overlap only data claims of the same volume, inside one
-reference record whose count, checked by a second sort of
-`(reference, stream)` pairs, equals the distinct streams sharing it; a block
-is allocated exactly when claimed; each chunk's free count and the device's
-free count equal the clear bits.
+claim; data claims overlap only data claims of other trees of the same
+volume; a block is allocated exactly when claimed; each chunk's free count
+and the device's free count equal the clear bits. The file-extent stream,
+sorted by block, is merged with the live tree's physical-extent records:
+every file extent lies inside one, and a second sort of
+`(record, stream)` pairs checks that each record's count equals the
+distinct live streams sharing it. The pool's claim stream is merged the
+same way against the pool's bitmap.
 
 **Walk.** The common walker visits the selected volume once, with payload
 read-through when requested, and the report counts its files, directories and
@@ -440,7 +448,7 @@ comes from a row, the geometry, the sorted records or a profile constant.
 | Probe and open | Block 0, one pass over the descriptor ring and each candidate's descriptor run, the selected checkpoint's mapped objects, the container and volume map paths, the volume superblocks, the root inodes; the candidate stream and the paged mapping array |
 | Listing | Per directory: one scan of its records and the common key sort; per entry: one inode lookup and, for a link or compressed file, one attribute lookup. No file payload is read |
 | Content | Per sequential read: one cursor advance per extent; per random offset: one tree descent; per compressed chunk: one decode of at most 64 KiB |
-| Verification | One scan of every tree of every volume; the claim, name-reference, sibling-map, stream-use and collision streams, each sorted once; one pass over the chunk structures and bitmaps; one walk of the selected volume |
+| Verification | One scan of every tree of every volume; the main and pool claim, file-extent, name-reference, sibling-map, stream-use and collision streams, each sorted once, and the `(record, stream)` pairs; one pass over the chunk structures, bitmaps and pool bitmap; one walk of the selected volume |
 | Planning | One catalog pass, two external sorts (collisions and records), one packing pass, a bounded binary search, one layout pass |
 | Emission | Payload bytes, one replay of the sorted records, and metadata proportional to entries and container size |
 

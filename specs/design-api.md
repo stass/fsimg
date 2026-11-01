@@ -525,15 +525,14 @@ timestamp interpretation, and header-level validation scope, with validity bits
 for unknown totals. Querying it does not traverse directories or certify the
 whole volume; full verification has its own report.
 
-The label holds validated UTF-8 of at most 255 bytes and a terminator: the
-longest label a registered format stores is an APFS volume name. The record
-has no size or version field, so changing a field's size or adding one is
-an ABI change of `fsimg_volume_info_t`; its layout is pre-stable like the
-rest of the interface and freezes at the first declared stable release.
-Three fields exist for formats whose headers carry more than the common
-fields:
+The record has no size or version field, so changing a field's size or
+adding one is an ABI change of `fsimg_volume_info_t`; its layout is
+pre-stable like the rest of the interface and freezes at the first declared
+stable release. The label, `label[256]`, holds validated UTF-8 of at most
+255 bytes and a terminator, sized for the longest label a registered format
+stores, an APFS volume name. Two further fields serve formats whose headers
+carry more than a label:
 
-* `label[256]`, sized for APFS volume names.
 * `mountpoint[1025]`, valid under `FSIMG_VOLUME_MOUNTPOINT`: the stored
   mount path of a format that has one, ImageFS, as validated UTF-8 of at
   most 1024 bytes and a terminator. It is distinct from the label; a format

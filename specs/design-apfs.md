@@ -337,38 +337,42 @@ modulo the data area's size.
 
 A candidate superblock is a descriptor block whose checksum, magic, kind and
 geometry are valid, whose block size, block count, UUID and areas equal
-block 0's, and whose XID is nonzero. A candidate's **descriptor run is
-whole** when:
+block 0's, and whose XID is nonzero. Two candidates with the same XID are an
+ambiguous tie, `FSIMG_ECORRUPT`: each checkpoint writes its superblock once,
+which E8 checks. A candidate's **descriptor run is whole** when:
 
 1. the run has at least two blocks, lies in the ring, and ends at the
    candidate's own slot;
 2. every mapping block in the run is valid, has the candidate's XID, and has
    a count that fits the block; exactly the run's last mapping block carries
    the last-map flag `0x1`, and no flag outside it is set;
-3. every mapping names a distinct ephemeral OID, an object kind and subtype,
-   a byte size that is a positive multiple of `B`, and a block run that lies
-   inside the candidate's data run without straddling the data ring's wrap;
-   no two mapped runs overlap;
-4. the space manager and reaper OIDs are among the mappings with their
-   kinds;
-5. the candidate's next-index fields lie within their rings and its next XID
+3. every mapping names an object kind and subtype, a byte size that is a
+   positive multiple of `B`, and a block run that lies inside the
+   candidate's data run without straddling the data ring's wrap;
+4. the candidate's next-index fields lie within their rings and its next XID
    exceeds its XID.
 
-These checks read only descriptor blocks. The selected checkpoint is the
-candidate with the largest XID whose descriptor run is whole. Two such
-candidates with equal XIDs must be byte-identical, and are otherwise an
-ambiguous tie, `FSIMG_ECORRUPT`; no such candidate is `FSIMG_ECORRUPT`. A
-candidate with a larger XID whose run is not whole is a checkpoint a crash
-interrupted: the reader passes over it, as macOS mounts the newest
-superblock that is not malformed, and reports the volume's `clean` state as
-false. The selected checkpoint's mapped objects are then read once each:
-every one must have a valid header whose OID, kind and subtype equal the
+These are local facts of each descriptor block and its slot, so one pass
+over the ring records them per slot, and runs are judged from those records
+without reading a block again. A slot that matches a candidate's XID matches
+no other candidate's, because XIDs are distinct, so judging every run costs
+at most `D` record reads in total. The selected checkpoint is the candidate
+with the largest XID whose descriptor run is whole; none is
+`FSIMG_ECORRUPT`. A candidate with a larger XID whose run is not whole is a
+checkpoint a crash interrupted: the reader passes over it, as macOS mounts
+the newest superblock that is not malformed, and reports the volume's
+`clean` state as false.
+
+The selected checkpoint's mappings are then checked together: every
+ephemeral OID is distinct, no two mapped runs overlap, and the space
+manager and reaper OIDs are mapped with their kinds. Each mapped object is
+read once and must have a valid header whose OID, kind and subtype equal the
 mapping's and whose XID is not above the checkpoint's, and the container
-object map must be a valid physical object. A failure there is
-`FSIMG_ECORRUPT`; the reader does not fall back to an older checkpoint after
-reading a newer one's objects, and E8 checks whether macOS does. Selection
-therefore reads at most the `D` descriptor blocks once and one checkpoint's
-data run.
+object map must be a valid physical object. A failure in this phase is
+`FSIMG_ECORRUPT`: the reader does not fall back to an older checkpoint after
+judging a newer one complete, and E8 checks whether macOS does. Selection
+therefore reads the `D` descriptor blocks once and one checkpoint's data
+run.
 
 Block 0 does not select the checkpoint; it constrains the candidates and is
 a copy of a committed superblock. A block-0 XID larger than every whole
@@ -416,7 +420,9 @@ structures are read only by verification. Its layout:
 | 340 | 4 | Structure size |
 
 Its counts are tied to the geometry, so no loop over them is bounded only by
-the work budget: the main device's block count is `N` and its chunk count
+the work budget. These relations come from [A1] and are checked against
+every E1 and E12 capture before the driver enforces them: the main device's
+block count is `N` and its chunk count
 `ceil(N / (8 * B))`; chunks per chunk-information block are
 `floor((B - 40) / 32)` and chunk-information blocks per address block
 `floor((B - 40) / 8)`; the chunk-information block count is
@@ -859,11 +865,13 @@ whose high 8 bits are flags, the extent's first physical block (u64), and a
 crypto ID (u64). A data-stream ID record under the private ID holds its
 reference count.
 
-The extents of a stream tile a prefix of its allocation in logical order,
-without gaps or overlap: each starts where the previous one ends, each
-length is a positive multiple of `B`, and none extends past the data-stream
-field's allocated bytes, which may exceed the size rounded to blocks when
-space is preallocated (E3 and E6 check native preallocation). Logical bytes
+The extents of a stream tile a prefix of its logical range in logical order,
+without gaps or overlap: each starts where the previous one ends, and each
+length is a positive multiple of `B`. No extent extends past the larger of
+the size rounded up to whole blocks and the data-stream field's allocated
+bytes, which exceed the rounded size when space is preallocated; mapped
+extents, not holes, are what the allocated bytes count (E3 and E6 check
+native preallocation and sparse accounting). Logical bytes
 past the last extent and below the size read as zero, as do extents whose
 physical block is zero, which mark holes (E6 checks both representations).
 A mapped extent's blocks lie inside `[1, N)`. Extent flags must be zero, and
@@ -882,7 +890,9 @@ key is the 64-bit word whose low 60 bits are the extent's first block and
 whose kind is 2; its value is a u64 whose low 60 bits are the extent's
 length in blocks and whose high 4 bits are its kind (`1` new or `2` update
 on disk; any other is corrupt), the owning object's ID (u64), and a signed
-32-bit reference count, which must be positive.
+32-bit reference count. In the live tree the count is positive and kinds
+are new; how a snapshot's tree records update kinds and counts is checked
+by E9.
 
 ### Symbolic links
 
@@ -1024,8 +1034,8 @@ and its records reconciled:
 * each non-directory's link count equals its names, which its sibling links
   and sibling maps match;
 * every inode other than the root and private directories is named by a
-  directory record, or lies in the private directory where E3 shows native
-  volumes place inodes;
+  directory record, or lies in the private directory, which E3 checks is
+  where native volumes place unnamed inodes;
 * each data-stream ID's reference count equals the inodes and attributes
   using it, and every file extent belongs to a live stream;
 * every attribute is well formed, and names equivalent under the volume's
@@ -1033,23 +1043,33 @@ and its records reconciled:
 * the volume superblock's object counts equal the counted inodes by kind.
 
 **Allocation.** Every block is claimed exactly as the space manager says.
-Claims come from block 0 and the checkpoint areas; the internal pool, as one
-range; every object-map node and every live object version an object map
-maps, tombstones excluded; every physical tree node; the reaper's lists;
-every free-queue entry; and every mapped file extent. Snapshot trees and
-the object versions snapshots retain are claimed the same way, so a volume
-with snapshots verifies completely. Space-manager blocks inside the
-internal pool are sub-allocations checked against the pool's own bitmap,
-not claims in the main domain; those outside it are main claims.
+Claims in the main domain come from block 0 and the checkpoint areas; the
+internal pool, as one range; every object-map node and every live object
+version an object map maps, tombstones excluded, including the versions
+snapshots retain; every physical tree node, including snapshot trees; the
+reaper's lists; every entry of the main free queue; and the data extents
+described below.
 
-Metadata claims are exclusive. File extents may overlap other file extents
-of the same volume only inside one physical-extent record whose reference
-count equals the streams sharing it, and every mapped block lies in a
-physical-extent record of its volume. A block is allocated in the main
-bitmap exactly when it is claimed; each chunk's free count and the device's
-free count equal the clear bits; bits past `N` follow the observed rule
-(E1). Each volume's allocated block count follows the observed accounting
-(E3).
+The internal pool is a domain of its own. Space-manager blocks inside it
+and the entries of the internal-pool free queue are claims in that domain,
+never in the main one, and the pool's bitmap must be set exactly for them.
+Space-manager blocks outside the pool are main claims.
+
+Data blocks are claimed through the physical-extent records of every
+extent-reference tree of a volume, the live tree and each snapshot's.
+Records of one tree never overlap; records of different trees of one
+volume may, since a snapshot and the live volume share unchanged extents,
+so a block a snapshot alone still uses is claimed by that snapshot's
+record. Every mapped file extent of the live filesystem tree lies inside a
+live physical-extent record, and file extents overlap one another only
+inside one such record, whose reference count equals the live streams
+sharing it. How a snapshot's references enter the counts is checked by E9.
+
+Metadata claims are exclusive, and data claims never overlap metadata. A
+block is allocated in the main bitmap exactly when it is claimed; each
+chunk's free count and the device's free count equal the clear bits; bits
+past `N` follow the observed rule (E1). Each volume's allocated block count
+follows the observed accounting (E3).
 
 **Namespace.** The selected volume's walk performs namespace validation,
 path limits and, with payload read-through, reads every file's content
@@ -1191,7 +1211,7 @@ free space, attribute data or buffer contents.
 | B-trees | Root leaves, three or more levels, fixed and variable tables, aligned and unaligned trees, ghost records in free queues | Table overflow, key or value crossing free space or the footer, ghosts without the flag, wrong levels, repeated node on a path, unsorted keys, child key below its separator, height 17 |
 | Volumes | One and several volumes, each role E10 provides, case-insensitive and case-sensitive personalities | Missing selection with several volumes, empty slot, index mismatch, duplicate UUIDs, every refused feature bit |
 | Records | Every kind in each tree, extended fields at their boundaries, names of 1 to 255 bytes and every Unicode class of E4 | Truncated values, overlapping fields, misaligned field data, wrong hash or length, invalid UTF-8, embedded NUL or slash, dot names, wrong record variant, type disagreeing with mode |
-| Content | Files of 0, 1, 4095, 4096, 4097 bytes and above 4 GiB, many extents, holes in both forms, clones and their overwritten branches, every supported compression type with one and many chunks | Gaps, overlaps, unaligned lengths, extent past the size or past `N`, nonzero crypto ID, short or long decoded chunks, chunk table overruns |
+| Content | Files of 0, 1, 4095, 4096, 4097 bytes and above 4 GiB, many extents, holes in both forms, preallocated extents past the size, clones and their overwritten branches, every supported compression type with one and many chunks | Gaps, overlaps, unaligned lengths, extent past both the rounded size and the allocated bytes, extent past `N`, crypto ID outside the table, short or long decoded chunks, chunk table overruns |
 | Links | Hard links across directories, symbolic links of 1 and 1023 bytes, FIFOs | Mismatched link counts, missing sibling records, directory with two parents, directory cycle, link target of 1024 bytes |
 | Verification | Every native fixture verifies; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found | Each mutation reports its class; a report is never complete after an unsupported object |
 | Writer | Empty, small, deep, wide (forcing multi-level trees), large-file and nearly full containers in both personalities; byte identity across source order, budget, scratch and time zone; poison scan of unused bytes | Colliding names under each personality, oversized names and labels, times outside the range, sizes that do not fit |
