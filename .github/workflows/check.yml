@@ -6,7 +6,10 @@ permissions:
   contents: read
 jobs:
   native:
+    # Each platform reports its own result; one failing must not cancel the
+    # other mid-run.
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
@@ -71,6 +74,7 @@ jobs:
     # newest compiles the optional compression libraries, the older builds
     # without them, so GCC sees both configurations.
     strategy:
+      fail-fast: false
       matrix:
         include:
           - gcc: '13'

@@ -235,25 +235,38 @@ done
 # The fixed root has 32 slots: the label and SEED.TXT consume two. Empty
 # 8.3 files consume one slot each and no data clusters, so failure on the
 # 31st copy measures the directory capacity independently of fsimg's reader.
+# mtools runs in the script's UTF-8 locale because some macOS builds
+# mis-convert names under C. MTOOLS_NO_VFAT=1 also stops it adding a
+# long name for a case-only difference. Names it judges illegal still get
+# one, so a misjudged name fails its fill copy rather than passing silently.
 : > "$fixture_dir/root-empty"
+root_mtools() (
+    export LC_ALL="${utf8_locale:-C}" MTOOLS_SKIP_CHECK=1 MTOOLS_NO_VFAT=1
+    "$@"
+)
 for profile in fat12 fat16; do
     mkdir "$fixture_dir/root-$profile"
     ./test-fat-write --create-fixed-root "$fixture_dir/root-$profile" "$profile"
     image="$fixture_dir/root-$profile/writer.img"
     check_volume "$image"
-    LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MDIR" -i "$image" ::
+    echo "fixed-root $profile image: $(cksum < "$image")"
+    root_mtools "$MDIR" -i "$image" ::
     if test "$host" != Linux; then
         "$FATCAT" -l / "$image"
     fi
     slot=1
     while test "$slot" -le 30; do
         name=$(printf 'F%07d' "$slot")
-        LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MCOPY" -i "$image" \
-            "$fixture_dir/root-empty" "::$name"
+        if ! root_mtools "$MCOPY" -i "$image" "$fixture_dir/root-empty" \
+            "::$name"; then
+            od -A x -t x1 "$image" >&2
+            echo "ERROR: $profile fill copy $slot failed" >&2
+            exit 1
+        fi
         slot=$((slot + 1))
     done
-    if LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MCOPY" -i "$image" \
-        "$fixture_dir/root-empty" ::OVERFLOW > "$fixture_dir/root-full.log" 2>&1; then
+    if root_mtools "$MCOPY" -i "$image" "$fixture_dir/root-empty" ::OVERFLOW \
+        > "$fixture_dir/root-full.log" 2>&1; then
         echo "ERROR: $profile accepted a 33rd fixed-root entry" >&2
         exit 1
     fi
@@ -262,7 +275,7 @@ for profile in fat12 fat16; do
         echo "ERROR: $profile overflow did not report exhausted directory slots" >&2
         exit 1
     fi
-    LC_ALL=C MTOOLS_SKIP_CHECK=1 "$MDIR" -i "$image" ::F0000030
+    root_mtools "$MDIR" -i "$image" ::F0000030
     check_volume "$image"
     echo "result: minimized $profile has exactly 32 independently filled root slots"
 done
