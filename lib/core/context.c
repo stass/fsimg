@@ -124,6 +124,16 @@ fsimg_report_loss(fsimg_ctx_t *ctx, const char *path, uint32_t fields)
 	return (count);
 }
 
+void
+fsimg_report_entry(fsimg_ctx_t *ctx, const fsimg_entry_t *entry)
+{
+	if (ctx->options.entry == NULL)
+		return;
+	ctx->in_callback = true;
+	ctx->options.entry(ctx->options.entry_argument, entry);
+	ctx->in_callback = false;
+}
+
 static bool
 render_in_omitted(const render_cursor_t *cursor)
 {

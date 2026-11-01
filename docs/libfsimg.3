@@ -57,6 +57,28 @@ Payload copying, metadata, allocation indexes and sorting obey separate memory,
 scratch, spool, work and traversal limits.
 A handle is used serially; independent contexts may be used concurrently.
 Callbacks cannot re-enter an active context.
+.Pp
+The options' entry callback, with its entry_argument, observes each entry
+one at a time: it receives a borrowed
+.Vt fsimg_entry_t ,
+valid until it returns, whose path is the entry's own unrendered image path.
+It has no result and cannot fail or cancel the operation.
+Planning calls it as it admits each entry to the sorted catalog, in image
+order and before any capability check of that plan, so the calls equal the
+plan's entries; a repeated path is reported once, and a later planning
+failure, even one naming a reported entry, does not retract the calls.
+A record the catalog refuses is not reported.
+Extraction calls it once an entry is created or copied, or skipped under
+FSIMG_EXTRACT_SKIP_UNSUPPORTED, after its manifest line is recorded (a
+buffered line that later fails to reach the manifest fails the extraction),
+in traversal order,
+so the calls equal the result's entries plus skipped_entries; an entry
+whose extraction fails is not reported.
+Neither reports the implicit root or an omitted entry, and a reader's own
+iteration does not use it.
+Entries a format adds itself, such as the QNX6
+.Pa /.boot
+directory, are not catalog entries and are not reported by planning.
 .Sh OWNERSHIP
 FD adapters duplicate borrowed regular-file descriptors or finite disk-device
 descriptors requested with FSIMG_IO_READ, preserving position and shared flags.

@@ -241,7 +241,7 @@ test_ifs_write_SOURCES = test/ifs-write.c test/test.h
 test_ifs_write_LDADD = libfsimg.la
 test_exfat_scale_SOURCES = test/exfat-scale.c test/test.h
 test_exfat_scale_LDADD = libfsimg.la
-test_catalog_SOURCES = test/catalog.c test/test.h
+test_catalog_SOURCES = test/catalog.c test/test.h test/entry-log.h
 test_catalog_LDADD = libfsimg.la
 test_source_SOURCES = test/source.c test/test.h test/socket.c test/socket.h
 test_source_LDADD = libfsimg.la
@@ -266,7 +266,7 @@ test_emit_SOURCES = test/emit.c test/test.h
 test_emit_LDADD = libfsimg.la
 test_metadata_loss_SOURCES = test/metadata-loss.c test/test.h
 test_metadata_loss_LDADD = libfsimg.la
-test_extract_SOURCES = test/extract.c test/test.h
+test_extract_SOURCES = test/extract.c test/test.h test/entry-log.h
 test_extract_LDADD = libfsimg.la
 test_protocol_SOURCES = test/protocol.c test/test.h \
 	cmd/fsimg/protocol.c cmd/fsimg/protocol.h cmd/fsimg/job.c cmd/fsimg/worker.h
@@ -399,6 +399,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/qnx6_test.rb \
 	test/cli/run.rb \
 	test/cli/tree_at_depth_limit_test.rb \
+	test/cli/verbose_names_test.rb \
 	test/baseline.sh.in test/baseline.txt \
 	specs/design-security.md specs/design-formats.md specs/design-cli.md \
 	specs/design-spec-testing.md test/spec.sh.in \

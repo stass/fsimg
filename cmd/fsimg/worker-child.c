@@ -69,6 +69,7 @@ typedef struct worker_child {
 static bool child_cancelled(void *);
 static void child_progress(void *, const fsimg_progress_t *);
 static void child_loss(void *, const char *, uint32_t);
+static void child_entry(void *, const fsimg_entry_t *);
 static bool holds(unsigned, fsimg_capability_t);
 static fsimg_status_t prepare_capabilities(worker_child_t *, unsigned,
     fsimg_sandbox_caps_t *, fsimg_error_t *);
@@ -129,7 +130,8 @@ child_progress(void *argument, const fsimg_progress_t *progress)
 	unsigned char raw[24];
 	uint64_t milliseconds;
 
-	if (!child->processing || (child->request.flags & FSIMG_JOB_VERBOSE) == 0)
+	if (!child->processing || child->channel_failed ||
+	    (child->request.flags & FSIMG_JOB_VERBOSE) == 0)
 		return;
 	if (clock_gettime(CLOCK_MONOTONIC, &time) == -1)
 		return;
@@ -153,7 +155,8 @@ child_loss(void *argument, const char *path, uint32_t fields)
 	size_t length, start;
 
 	/* Frames provide bounded examples; DONE retains the exact aggregate. */
-	if (!child->processing || child->losses_sent >= FSIMG_WIRE_LOSS_EVENTS)
+	if (!child->processing || child->channel_failed ||
+	    child->losses_sent >= FSIMG_WIRE_LOSS_EVENTS)
 		return;
 	child->losses_sent++;
 	/* The excerpt is the rendered path's tail, which names the entry. */
@@ -167,6 +170,21 @@ child_loss(void *argument, const char *path, uint32_t fields)
 	bcopy(path + start, raw + FSIMG_WIRE_LOSS_PATH, length);
 	if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_LOSS, raw,
 	    (uint32_t)(FSIMG_WIRE_LOSS_BYTES + length), NULL) != FSIMG_OK)
+		child->channel_failed = true;
+}
+
+/* A verbose creation's or extraction's name, relayed as the entry record a
+ * listing sends. Every name is sent: a terminal slower than the job slows
+ * it. A failed send cancels the job at its next poll.
+ */
+static void
+child_entry(void *argument, const fsimg_entry_t *entry)
+{
+	worker_child_t *child = argument;
+
+	if (!child->processing || child->channel_failed)
+		return;
+	if (send_entry(entry, NULL) != FSIMG_OK)
 		child->channel_failed = true;
 }
 
@@ -285,6 +303,10 @@ prepare_context(worker_child_t *child, const fsimg_sandbox_caps_t *caps,
 	child->request.limits.progress_argument = child;
 	child->request.limits.loss = child_loss;
 	child->request.limits.loss_argument = child;
+	if ((child->request.flags & FSIMG_JOB_NAMES) != 0) {
+		child->request.limits.entry = child_entry;
+		child->request.limits.entry_argument = child;
+	}
 	status = fsimg_ctx_new(&child->request.limits, &child->ctx, error);
 	if (status != FSIMG_OK)
 		return (status);

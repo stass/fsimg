@@ -449,6 +449,12 @@ fsimg_job_has_roots(fsimg_job_kind_t kind)
 	return (kind == FSIMG_JOB_CREATE || kind == FSIMG_JOB_PLAN);
 }
 
+bool
+fsimg_job_names_entries(fsimg_job_kind_t kind)
+{
+	return (fsimg_job_has_roots(kind) || kind == FSIMG_JOB_EXTRACT);
+}
+
 const char *
 fsimg_job_compression(const fsimg_worker_request_t *request)
 {
@@ -707,9 +713,12 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_KIND) > FSIMG_JOB_PLAN ||
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
-	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STDOUT)) != 0 ||
+	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STDOUT |
+	    FSIMG_JOB_NAMES)) != 0 ||
 	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDOUT) != 0 &&
 	    get_field(raw, JOB_KIND) != FSIMG_JOB_CREATE) ||
+	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_NAMES) != 0 &&
+	    !fsimg_job_names_entries((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
 	    (get_field(raw, JOB_CAPABILITIES) & ~(uint64_t)FSIMG_JOB_CAP_ALL) != 0 ||
 	    ((get_field(raw, JOB_CAPABILITIES) & FSIMG_JOB_CAP_SETTINGS) != 0 &&
 	    !fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||

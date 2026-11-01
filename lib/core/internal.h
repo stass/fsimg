@@ -153,6 +153,12 @@ void fsimg_stat_add(uint64_t *, uint64_t);
  * field; the result is that count.
  */
 uint64_t fsimg_report_loss(fsimg_ctx_t *, const char *, uint32_t);
+/* Hand entry to the entry callback, when there is one. The writer's catalog
+ * indexing and the extractor's entry loop are its only callers, each once
+ * per entry, so a host counting the calls can check them against the plan
+ * or the extraction result (specs/design-api.md).
+ */
+void fsimg_report_entry(fsimg_ctx_t *, const fsimg_entry_t *);
 /* Render a library path for emission into out, which holds size bytes and
  * its NUL, and return whether the rendering was truncated. It is the one
  * rendering of every path the library emits other than fsimg_entry_t.path.

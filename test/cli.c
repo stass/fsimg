@@ -40,6 +40,7 @@ static void test_long_listing(void);
 static void test_staged_verification_failure(void);
 static void test_compressed_verification_spool_limit(void);
 static void test_names(bool);
+static void test_interrupted_verbose_entry_closes_on_stderr(bool);
 static void test_private_cleanup(void);
 static void test_staging_cleanup(void);
 static void test_progress(void);
@@ -1998,6 +1999,11 @@ test_minimize_plan_display(bool json)
 int
 main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--interrupted-verbose-entry") == 0) {
+		test_interrupted_verbose_entry_closes_on_stderr(false);
+		test_interrupted_verbose_entry_closes_on_stderr(true);
+		return (0);
+	}
 	if (argc == 2 && strcmp(argv[1], "--private-cleanup") == 0) {
 		test_private_cleanup();
 		return (0);
@@ -2038,6 +2044,8 @@ main(int argc, char **argv)
 	test_format_masks(true);
 	test_final_diagnostics();
 	test_verification_completion();
+	test_interrupted_verbose_entry_closes_on_stderr(false);
+	test_interrupted_verbose_entry_closes_on_stderr(true);
 	test_names(false);
 	test_names(true);
 	test_private_cleanup();
@@ -2141,5 +2149,63 @@ test_compressed_verification_spool_limit(void)
 			    cases[i].status, error.resource, (unsigned long long)error.limit,
 			    (unsigned long long)error.observed);
 		CHECK(valid);
+	}
+}
+
+/* Failure closes the borrowed NAME stream on the same descriptor as ENTRY.
+ * A partial UTF-8 sequence is escaped before the incomplete record closes.
+ */
+static void
+test_interrupted_verbose_entry_closes_on_stderr(bool json)
+{
+	const fsimg_job_kind_t kinds[] = { FSIMG_JOB_CREATE, FSIMG_JOB_PLAN,
+	    FSIMG_JOB_EXTRACT };
+	fsimg_cli_options_t options;
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_worker_text_t text;
+	fsimg_frame_t frame;
+	fsimg_error_t failure;
+	const char *expected;
+
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		bzero(&options, sizeof(options));
+		fsimg_worker_request_init(&options.request);
+		options.request.kind = kinds[i];
+		options.request.flags |= FSIMG_JOB_NAMES;
+		options.verbosity = 1;
+		options.json = json;
+		options.scratch = "-";
+		options.mode = kinds[i] == FSIMG_JOB_EXTRACT ? "x" : "c";
+		fsimg_cli_display_init(&display, &options, &result, &paths);
+		bzero(&frame, sizeof(frame));
+		frame.type = FSIMG_FRAME_ENTRY;
+		frame.length = FSIMG_WIRE_ENTRY_BYTES;
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_ENTRY_NAME_LENGTH,
+		    sizeof("/partial\342\202\254") - 1);
+		CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+		CHECK(text.diagnostic && text.length != 0);
+		CHECK(display.entry_open);
+
+		frame.type = FSIMG_FRAME_NAME;
+		frame.length = sizeof("/partial\342") - 1;
+		bcopy("/partial\342", frame.payload, frame.length);
+		CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+		CHECK(text.diagnostic && text.length == strlen("/partial"));
+		CHECK(display.utf8_used == 1);
+		CHECK(fsimg_error_set(&failure, FSIMG_EIO, 0, FSIMG_OP_CONTEXT,
+		    "test worker interrupted a name") == FSIMG_EIO);
+		display.failure = &failure;
+		CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
+		CHECK(text.diagnostic && text.length != 0);
+		expected = json ? "\\\\xe2\",\"complete\":false}\n" :
+		    "\\xe2\" [incomplete]\n";
+		if (strcmp(display.buffer, expected) != 0)
+			fprintf(stderr, "interrupted %s entry for job %d: expected %sactual %s",
+			    json ? "JSON" : "human", kinds[i], expected, display.buffer);
+		CHECK(strcmp(display.buffer, expected) == 0);
+		CHECK(!display.entry_open && display.utf8_used == 0);
 	}
 }

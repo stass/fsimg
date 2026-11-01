@@ -1,5 +1,14 @@
 fsimg 0.1.0 (unreleased)
 
+`c -v` and `x -v` name each entry on stderr in the default `t` form, the
+quoted, escaped image path with `@` for a symbolic link and `|` for a FIFO:
+creation as planning admits each entry, in image order and under `-n` too,
+and extraction once each entry is created, copied or skipped under `-k`.
+Under `--json` the names are `entry` records on stderr. The library's new
+`entry` callback in `fsimg_options_t` reports the same entries, and the
+coordinator checks the names against the plan's and the extraction's
+counts.
+
 `c -M`, and the library's `FSIMG_WRITE_MINIMIZE`, choose the geometry
 settings left open that give the smallest volume instead of the first legal
 one: every cluster size and, on FAT12/16, the smallest root that holds the

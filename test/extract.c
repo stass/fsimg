@@ -24,6 +24,7 @@
 #include "fat.h"
 #include "selection.h"
 #include "test.h"
+#include "entry-log.h"
 
 #define FILE_BYTES 70001u
 
@@ -42,6 +43,13 @@ typedef struct extract_fixture {
 static void fixture_open(extract_fixture_t *);
 static void fixture_open_with_entries(extract_fixture_t *,
     const fsimg_entry_t *, size_t);
+static void fixture_open_format(extract_fixture_t *, const fsimg_entry_t *,
+    size_t, const char *, entry_log_t *);
+static void test_extraction_reports_completed_and_skipped_entries(void);
+static void test_failed_extraction_reports_only_completed_entries(void);
+static fsimg_status_t link_validate(void *, uint64_t, fsimg_error_t *);
+static fsimg_status_t link_read(void *, uint64_t, uint64_t, void *, size_t,
+    size_t *, fsimg_error_t *);
 static void fixture_open_union(extract_fixture_t *);
 static void fixture_close(extract_fixture_t *);
 static void remove_tree(int, const char *);
@@ -334,10 +342,12 @@ add_entry(fsimg_writer_t *writer, const char *path, fsimg_entry_kind_t kind,
     uint64_t length)
 {
 	fsimg_entry_t entry = { .path = path, .kind = kind, .size = length };
-	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	fsimg_source_t source = { .kind = kind == FSIMG_ENTRY_SYMLINK ?
+	    FSIMG_SOURCE_PROVIDER : FSIMG_SOURCE_ZERO };
 
 	CHECK(fsimg_writer_add(writer, &entry,
-	    kind == FSIMG_ENTRY_DIRECTORY ? NULL : &zero, NULL) == FSIMG_OK);
+	    kind == FSIMG_ENTRY_DIRECTORY || kind == FSIMG_ENTRY_FIFO ?
+	    NULL : &source, NULL) == FSIMG_OK);
 }
 
 static void
@@ -350,7 +360,15 @@ static void
 fixture_open_with_entries(extract_fixture_t *fixture,
     const fsimg_entry_t *extra, size_t count)
 {
+	fixture_open_format(fixture, extra, count, "fat16", NULL);
+}
+
+static void
+fixture_open_format(extract_fixture_t *fixture, const fsimg_entry_t *extra,
+    size_t count, const char *format, entry_log_t *log)
+{
 	fsimg_options_t options;
+	fsimg_source_ops_t sources;
 	fsimg_writer_t *writer;
 	fsimg_io_t *output;
 	int fd;
@@ -363,11 +381,17 @@ fixture_open_with_entries(extract_fixture_t *fixture,
 	fsimg_options_init(&options);
 	options.scratch_directory_fd = fixture->parent;
 	options.memory_bytes = UINT64_C(16) * 1024 * 1024;
+	options.entry = log == NULL ? NULL : record_entry;
+	options.entry_argument = log;
 	options.cancelled = cancelled;
 	options.cancel_argument = fixture;
 	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline, NULL) == FSIMG_OK);
-	CHECK(fsimg_writer_new(fixture->ctx, "fat16", NULL, &writer, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_new(fixture->ctx, format, NULL, &writer, NULL) == FSIMG_OK);
+	fsimg_source_ops_init(&sources);
+	sources.validate = link_validate;
+	sources.read_at = link_read;
+	CHECK(fsimg_writer_set_sources(writer, &sources, NULL, NULL) == FSIMG_OK);
 	add_entry(writer, "/Long root name.txt", FSIMG_ENTRY_FILE, 0);
 	add_entry(writer, "/A", FSIMG_ENTRY_DIRECTORY, 0);
 	add_entry(writer, "/A/nested", FSIMG_ENTRY_DIRECTORY, 0);
@@ -385,6 +409,9 @@ fixture_open_with_entries(extract_fixture_t *fixture,
 	CHECK(fsimg_io_close_output(output, NULL) == FSIMG_OK);
 	CHECK(close(fd) == 0);
 	fsimg_writer_free(writer);
+	/* The observations below belong to extraction, after fixture creation. */
+	if (log != NULL)
+		log->count = 0;
 	fd = openat(fixture->parent, "image", O_RDONLY | O_NOFOLLOW);
 	CHECK(fd != -1);
 	CHECK(fsimg_io_from_fd(fixture->ctx, fd, FSIMG_IO_READ, &fixture->input,
@@ -1301,8 +1328,115 @@ main(int argc, char **argv)
 	test_allocations();
 	test_selection_allocation_failures_leave_no_output();
 	test_pivot();
+	test_extraction_reports_completed_and_skipped_entries();
+	test_failed_extraction_reports_only_completed_entries();
 	test_unsupported_kinds();
 	test_link_content();
 	test_inherited_acl();
 	return (0);
+}
+
+static fsimg_status_t
+link_validate(void *argument, uint64_t id, fsimg_error_t *error)
+{
+	(void)argument;
+	(void)id;
+	(void)error;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+link_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
+    size_t length, size_t *count, fsimg_error_t *error)
+{
+	static const char target[] = "target";
+
+	(void)argument;
+	(void)id;
+	(void)error;
+	CHECK(offset <= sizeof(target) - 1);
+	*count = length < sizeof(target) - 1 - offset ?
+	    length : (size_t)(sizeof(target) - 1 - offset);
+	bcopy(target + offset, buffer, *count);
+	return (FSIMG_OK);
+}
+
+/* QNX6 stores both unsupported host kinds, so callbacks exercise the actual
+ * reader as well as nested traversal. Its format-owned /.boot is extracted.
+ */
+static void
+test_extraction_reports_completed_and_skipped_entries(void)
+{
+	const fsimg_entry_t extra[] = {
+		{ .path = "/A/zz-link", .kind = FSIMG_ENTRY_SYMLINK, .size = 6 },
+		{ .path = "/zz-fifo", .kind = FSIMG_ENTRY_FIFO }
+	};
+	extract_fixture_t fixture;
+	entry_log_t log = { 0 };
+	fsimg_extract_options_t options;
+	fsimg_extract_result_t result;
+	struct stat st;
+	int root;
+
+	fixture_open_format(&fixture, extra, 2, "qnx6", &log);
+	CHECK(log.count == 0);
+	CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
+	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
+	CHECK(root != -1);
+	fsimg_extract_options_init(&options);
+	options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	CHECK(fsimg_extract_into(fixture.reader, root, &options, &result,
+	    NULL) == FSIMG_OK);
+
+	CHECK(result.entries == 8 && result.skipped_entries == 2);
+	CHECK(log.count == result.entries + result.skipped_entries);
+	expect_entry(&log, 0, "/.boot", FSIMG_ENTRY_DIRECTORY);
+	expect_entry(&log, 1, "/A", FSIMG_ENTRY_DIRECTORY);
+	expect_entry(&log, 2, "/A/nested", FSIMG_ENTRY_DIRECTORY);
+	expect_entry(&log, 3, "/A/nested/file", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 4, "/A/short", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 5, "/A/zz-link", FSIMG_ENTRY_SYMLINK);
+	expect_entry(&log, 6, "/A-", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 7, "/Long root name.txt", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 8, "/ZERO", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 9, "/zz-fifo", FSIMG_ENTRY_FIFO);
+	CHECK(fstatat(root, "A/nested/file", &st, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(S_ISREG(st.st_mode) && st.st_size == FILE_BYTES);
+	CHECK(fstatat(root, "A/zz-link", &st, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+	CHECK(fstatat(root, "zz-fifo", &st, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+	CHECK(close(root) == 0);
+	remove_tree(fixture.parent, "output");
+	fixture_close(&fixture);
+}
+
+static void
+test_failed_extraction_reports_only_completed_entries(void)
+{
+	const fsimg_entry_t extra = {
+		.path = "/A/zz-link", .kind = FSIMG_ENTRY_SYMLINK, .size = 6
+	};
+	extract_fixture_t fixture;
+	entry_log_t log = { 0 };
+	fsimg_extract_result_t result;
+	fsimg_error_t error;
+	int root;
+
+	fixture_open_format(&fixture, &extra, 1, "qnx6", &log);
+	CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
+	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
+	CHECK(root != -1);
+	CHECK(fsimg_extract_into(fixture.reader, root, NULL, &result,
+	    &error) == FSIMG_EUNSUPPORTED);
+
+	CHECK(strcmp(error.path, "/A/zz-link") == 0);
+	CHECK(result.entries == 5 && result.skipped_entries == 0);
+	CHECK(log.count == result.entries);
+	expect_entry(&log, 0, "/.boot", FSIMG_ENTRY_DIRECTORY);
+	expect_entry(&log, 1, "/A", FSIMG_ENTRY_DIRECTORY);
+	expect_entry(&log, 2, "/A/nested", FSIMG_ENTRY_DIRECTORY);
+	expect_entry(&log, 3, "/A/nested/file", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 4, "/A/short", FSIMG_ENTRY_FILE);
+	CHECK(close(root) == 0);
+	remove_tree(fixture.parent, "output");
+	fixture_close(&fixture);
 }

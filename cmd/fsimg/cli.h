@@ -159,6 +159,8 @@ typedef struct fsimg_cli_display {
 	fsimg_validation_scope_t scope;
 	bool		 syntax;
 	bool		 entry_open;
+	/* The open entry's record goes to stderr: a c -v or x -v name. */
+	bool		 entry_diagnostic;
 	bool		 overflow;
 	bool		 progress_started;
 	/* cW: events come from the verification worker of the staged image. */

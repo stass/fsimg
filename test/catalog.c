@@ -16,6 +16,7 @@
 #include "fsimg-endian.h"
 #include "source.h"
 #include "test.h"
+#include "entry-log.h"
 
 typedef struct catalog_fixture {
 	fsimg_ctx_t	*ctx;
@@ -27,6 +28,12 @@ typedef struct catalog_fixture {
 static void fixture_open(catalog_fixture_t *, uint32_t);
 static void fixture_open_budget(catalog_fixture_t *, uint32_t, uint64_t,
     uint64_t);
+static void fixture_open_observed(catalog_fixture_t *, entry_log_t *);
+static void fixture_open_options(catalog_fixture_t *, uint32_t, uint64_t,
+    uint64_t, entry_log_t *);
+static void test_planning_reports_merged_catalog_once(void);
+static void test_failed_planning_preserves_entry_callbacks(void);
+static void test_planning_without_entry_callback(void);
 static void fixture_close(catalog_fixture_t *);
 static void add_entry(fsimg_writer_t *, const char *, fsimg_entry_kind_t);
 static void add_dated_directory(fsimg_writer_t *, const char *, int64_t);
@@ -64,6 +71,13 @@ static void
 fixture_open_budget(catalog_fixture_t *fixture, uint32_t pages, uint64_t budget,
     uint64_t entries)
 {
+	fixture_open_options(fixture, pages, budget, entries, NULL);
+}
+
+static void
+fixture_open_options(catalog_fixture_t *fixture, uint32_t pages, uint64_t budget,
+    uint64_t entries, entry_log_t *log)
+{
 	fsimg_options_t options;
 	int fd;
 
@@ -74,6 +88,8 @@ fixture_open_budget(catalog_fixture_t *fixture, uint32_t pages, uint64_t budget,
 	CHECK(fd != -1);
 	fsimg_options_init(&options);
 	options.memory_bytes = budget;
+	options.entry = log == NULL ? NULL : record_entry;
+	options.entry_argument = log;
 	options.max_path_bytes = 512;
 	options.max_open_files = 16;
 	if (entries != 0)
@@ -982,6 +998,9 @@ main(int argc, char **argv)
 		test_order(pages, 2);
 		test_order(pages, 8);
 	}
+	test_planning_reports_merged_catalog_once();
+	test_failed_planning_preserves_entry_callbacks();
+	test_planning_without_entry_callback();
 	test_long_directory();
 	test_deep_catalog();
 	test_invalid_catalogs();
@@ -1000,4 +1019,107 @@ main(int argc, char **argv)
 	test_merged_metadata();
 	test_corrupt_rank();
 	return (0);
+}
+
+static void
+fixture_open_observed(catalog_fixture_t *fixture, entry_log_t *log)
+{
+	fixture_open_options(fixture, 2, UINT64_C(16) * 1024 * 1024, 0, log);
+	fsimg_writer_free(fixture->writer);
+	CHECK(fsimg_writer_new(fixture->ctx, "fat16", NULL, &fixture->writer,
+	    NULL) == FSIMG_OK);
+}
+
+/* Component tuples put /a/child before /a-. Two adds contribute the same
+ * parent; the implicit root and the merged-away directory contribute no event.
+ */
+static void
+test_planning_reports_merged_catalog_once(void)
+{
+	catalog_fixture_t fixture;
+	entry_log_t log = { 0 };
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+
+	fixture_open_observed(&fixture, &log);
+	add_entry(fixture.writer, "/a-", FSIMG_ENTRY_FILE);
+	add_entry(fixture.writer, "/a", FSIMG_ENTRY_DIRECTORY);
+	add_entry(fixture.writer, "/a/z", FSIMG_ENTRY_FILE);
+	add_entry(fixture.writer, "/a", FSIMG_ENTRY_DIRECTORY);
+	add_entry(fixture.writer, "/a/b", FSIMG_ENTRY_FILE);
+	CHECK(log.count == 0);
+
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	CHECK(info.entries == 4 && log.count == info.entries);
+	expect_entry(&log, 0, "/a", FSIMG_ENTRY_DIRECTORY);
+	expect_entry(&log, 1, "/a/b", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 2, "/a/z", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 3, "/a-", FSIMG_ENTRY_FILE);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	CHECK(log.count == 4);
+	fixture_close(&fixture);
+	/* The callback owns these copies even after the context is gone. */
+	expect_entry(&log, 2, "/a/z", FSIMG_ENTRY_FILE);
+}
+
+static void
+test_failed_planning_preserves_entry_callbacks(void)
+{
+	catalog_fixture_t fixture;
+	entry_log_t log = { 0 };
+	fsimg_entry_t collision = { .path = "/collision", .kind = FSIMG_ENTRY_FILE,
+	    .size = 1 };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	const fsimg_plan_t *plan;
+	fsimg_error_t error;
+	size_t collisions;
+
+	fixture_open_observed(&fixture, &log);
+	use_provider(&fixture);
+	add_entry(fixture.writer, "/a", FSIMG_ENTRY_FILE);
+	add_entry(fixture.writer, "/link", FSIMG_ENTRY_SYMLINK);
+	CHECK(log.count == 0);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, &error) == FSIMG_EUNSUPPORTED);
+	CHECK(plan == NULL);
+	CHECK(strcmp(error.path, "/link") == 0);
+	CHECK(log.count == 2);
+	expect_entry(&log, 0, "/a", FSIMG_ENTRY_FILE);
+	expect_entry(&log, 1, "/link", FSIMG_ENTRY_SYMLINK);
+	fixture_close(&fixture);
+
+	bzero(&log, sizeof(log));
+	fixture_open_observed(&fixture, &log);
+	add_entry(fixture.writer, "/a", FSIMG_ENTRY_FILE);
+	add_entry(fixture.writer, "/collision", FSIMG_ENTRY_FILE);
+	CHECK(fsimg_writer_add(fixture.writer, &collision, &zero, NULL) == FSIMG_OK);
+	CHECK(log.count == 0);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, &error) == FSIMG_EINVAL);
+	CHECK(plan == NULL && strcmp(error.path, "/collision") == 0);
+	CHECK(log.count > 0);
+	expect_entry(&log, 0, "/a", FSIMG_ENTRY_FILE);
+	collisions = 0;
+	for (size_t i = 0; i < log.count; i++) {
+		CHECK(strcmp(log.entries[i].path, "/") != 0);
+		if (strcmp(log.entries[i].path, "/collision") == 0)
+			collisions++;
+	}
+	CHECK(collisions == 1);
+	fixture_close(&fixture);
+}
+
+static void
+test_planning_without_entry_callback(void)
+{
+	catalog_fixture_t fixture;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+
+	fixture_open_observed(&fixture, NULL);
+	add_entry(fixture.writer, "/dir", FSIMG_ENTRY_DIRECTORY);
+	add_entry(fixture.writer, "/dir/file", FSIMG_ENTRY_FILE);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	CHECK(info.entries == 2);
+	fixture_close(&fixture);
 }

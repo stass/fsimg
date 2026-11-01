@@ -72,6 +72,108 @@ typedef enum worker_scenario {
 	SCENARIO_LIMIT_LOSS,
 } worker_scenario_t;
 
+/* The point at which a forged worker interrupts its ordinary result stream. */
+typedef enum names_position {
+	NAMES_BEFORE_HEADER,
+	NAMES_AFTER_IMAGE,
+	NAMES_AFTER_INFO,
+	NAMES_AFTER_PLAN,
+	NAMES_CHUNK_WITHOUT_ENTRY
+} names_position_t;
+
+typedef struct names_case {
+	const char	*name;
+	fsimg_job_kind_t kind;
+	unsigned	 flags;
+	names_position_t position;
+	size_t		 names;
+	uint64_t	 plan_entries;
+	uint64_t	 done_entries;
+	uint64_t	 done_skipped;
+	bool		 encoded;
+	const char	*message; /* NULL means success. */
+} names_case_t;
+
+static const names_case_t names_cases[] = {
+	{ .name = "create refuses unsolicited entry", .kind = FSIMG_JOB_CREATE,
+	  .names = 1, .message = "invalid worker entry start" },
+	{ .name = "extract refuses unsolicited entry", .kind = FSIMG_JOB_EXTRACT,
+	  .position = NAMES_AFTER_INFO, .names = 1,
+	  .message = "invalid worker entry start" },
+	{ .name = "create refuses entry after plan", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .position = NAMES_AFTER_PLAN, .names = 1,
+	  .message = "invalid worker entry start" },
+	{ .name = "encoded create refuses entry after image", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .position = NAMES_AFTER_IMAGE, .names = 1,
+	  .encoded = true, .message = "invalid worker entry start" },
+	{ .name = "create refuses more planned entries than names", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .names = 1, .plan_entries = 2, .done_entries = 2,
+	  .message = "worker plan entry count differs from its names" },
+	{ .name = "create refuses fewer planned entries than names", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .names = 2, .plan_entries = 1, .done_entries = 1,
+	  .message = "worker plan entry count differs from its names" },
+	{ .name = "create refuses more completed entries than planned", .kind = FSIMG_JOB_CREATE,
+	  .plan_entries = 2, .done_entries = 3,
+	  .message = "worker creation count differs from its plan" },
+	{ .name = "create refuses fewer completed entries than planned", .kind = FSIMG_JOB_CREATE,
+	  .plan_entries = 2, .done_entries = 1,
+	  .message = "worker creation count differs from its plan" },
+	{ .name = "verbose create refuses more completed entries than planned", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .names = 2, .plan_entries = 2, .done_entries = 3,
+	  .message = "worker creation count differs from its plan" },
+	{ .name = "verbose create refuses fewer completed entries than planned", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .names = 2, .plan_entries = 2, .done_entries = 1,
+	  .message = "worker creation count differs from its plan" },
+	{ .name = "plan refuses more completed entries than planned", .kind = FSIMG_JOB_PLAN,
+	  .plan_entries = 2, .done_entries = 3,
+	  .message = "worker creation count differs from its plan" },
+	{ .name = "plan refuses fewer completed entries than planned", .kind = FSIMG_JOB_PLAN,
+	  .plan_entries = 2, .done_entries = 1,
+	  .message = "worker creation count differs from its plan" },
+	{ .name = "verbose plan refuses more completed entries than planned", .kind = FSIMG_JOB_PLAN,
+	  .flags = FSIMG_JOB_NAMES, .names = 2, .plan_entries = 2, .done_entries = 3,
+	  .message = "worker creation count differs from its plan" },
+	{ .name = "verbose plan refuses fewer completed entries than planned", .kind = FSIMG_JOB_PLAN,
+	  .flags = FSIMG_JOB_NAMES, .names = 2, .plan_entries = 2, .done_entries = 1,
+	  .message = "worker creation count differs from its plan" },
+	{ .name = "extract refuses fewer completed entries", .kind = FSIMG_JOB_EXTRACT,
+	  .flags = FSIMG_JOB_NAMES | FSIMG_JOB_SKIP_UNSUPPORTED,
+	  .position = NAMES_AFTER_INFO, .names = 4, .done_entries = 1, .done_skipped = 2,
+	  .message = "worker extraction counts differ from its names" },
+	{ .name = "extract refuses more completed entries", .kind = FSIMG_JOB_EXTRACT,
+	  .flags = FSIMG_JOB_NAMES | FSIMG_JOB_SKIP_UNSUPPORTED,
+	  .position = NAMES_AFTER_INFO, .names = 4, .done_entries = 3, .done_skipped = 2,
+	  .message = "worker extraction counts differ from its names" },
+	{ .name = "extract refuses fewer skipped entries", .kind = FSIMG_JOB_EXTRACT,
+	  .flags = FSIMG_JOB_NAMES | FSIMG_JOB_SKIP_UNSUPPORTED,
+	  .position = NAMES_AFTER_INFO, .names = 4, .done_entries = 2, .done_skipped = 1,
+	  .message = "worker extraction counts differ from its names" },
+	{ .name = "extract refuses more skipped entries", .kind = FSIMG_JOB_EXTRACT,
+	  .flags = FSIMG_JOB_NAMES | FSIMG_JOB_SKIP_UNSUPPORTED,
+	  .position = NAMES_AFTER_INFO, .names = 4, .done_entries = 2, .done_skipped = 3,
+	  .message = "worker extraction counts differ from its names" },
+	/* The total is correct, but the split by kind is forged. */
+	{ .name = "extract refuses swapped completed and skipped counts", .kind = FSIMG_JOB_EXTRACT,
+	  .flags = FSIMG_JOB_NAMES | FSIMG_JOB_SKIP_UNSUPPORTED,
+	  .position = NAMES_AFTER_INFO, .names = 4, .done_entries = 3, .done_skipped = 1,
+	  .message = "worker extraction counts differ from its names" },
+	{ .name = "create refuses name chunk without entry", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .position = NAMES_CHUNK_WITHOUT_ENTRY,
+	  .message = "invalid worker name chunk" },
+	{ .name = "extract refuses entry before info", .kind = FSIMG_JOB_EXTRACT,
+	  .flags = FSIMG_JOB_NAMES, .names = 1, .message = "invalid worker entry start" },
+	{ .name = "create accepts names before plan", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .names = 2, .plan_entries = 2, .done_entries = 2 },
+	{ .name = "encoded create accepts names before image", .kind = FSIMG_JOB_CREATE,
+	  .flags = FSIMG_JOB_NAMES, .names = 2, .plan_entries = 2, .done_entries = 2,
+	  .encoded = true },
+	{ .name = "plan accepts names before plan", .kind = FSIMG_JOB_PLAN,
+	  .flags = FSIMG_JOB_NAMES, .names = 2, .plan_entries = 2, .done_entries = 2 },
+	{ .name = "extract accepts completed and skipped names", .kind = FSIMG_JOB_EXTRACT,
+	  .flags = FSIMG_JOB_NAMES | FSIMG_JOB_SKIP_UNSUPPORTED,
+	  .position = NAMES_AFTER_INFO, .names = 4, .done_entries = 2, .done_skipped = 2 }
+};
+
 typedef enum coordinator_scenario {
 	COORDINATOR_EXIT_BLOCKED_INPUT = 1000,
 	COORDINATOR_CLOCK_FIRST_FAILURE,
@@ -627,6 +729,10 @@ static void test_prompt_completion(void);
 static void test_startup(void);
 static void test_inheritance(void);
 static void test_forged(void);
+static void test_verbose_names_protocol(void);
+static bool names_worker_selected(struct stat *);
+static int fake_names_worker(size_t);
+static bool send_forged_names(const names_case_t *);
 static void test_path_sequences(void);
 static void run_path_sequence(const worker_fixture_t *, const unsigned char *,
     size_t, path_sequence_result_t *);
@@ -2856,6 +2962,8 @@ main(int argc, char **argv)
 	if (argc == 2 && strcmp(argv[1], "--internal-worker") == 0) {
 		CHECK(setrlimit(RLIMIT_CORE, &no_core) == 0);
 		CHECK(fcntl(200, F_GETFD) == -1 && errno == EBADF);
+		if (names_worker_selected(&st))
+			return (fake_names_worker((size_t)st.st_size));
 		if (coordinator_worker_selected(&st))
 			return (fake_coordinator_worker((size_t)st.st_size));
 		if (fstat(FSIMG_CHILD_INPUT, &st) == 0 && (st.st_mode & 0100) != 0)
@@ -2872,6 +2980,11 @@ main(int argc, char **argv)
 	if (argc == 3 && strcmp(argv[1], "--mount-source") == 0) {
 		signal(SIGPIPE, SIG_IGN);
 		test_mount_source(argv[2]);
+		return (0);
+	}
+	if (argc == 2 && strcmp(argv[1], "--verbose-names") == 0) {
+		signal(SIGPIPE, SIG_IGN);
+		test_verbose_names_protocol();
 		return (0);
 	}
 	CHECK(argc == 1);
@@ -2906,6 +3019,7 @@ main(int argc, char **argv)
 	test_text_output();
 	test_startup();
 	test_inheritance();
+	test_verbose_names_protocol();
 	test_forged();
 	test_path_sequences();
 	test_forged_publication();
@@ -3495,4 +3609,194 @@ fsimg_test_clock_gettime(clockid_t clock, struct timespec *time)
 		return (-1);
 	}
 	return (clock_gettime(clock, time));
+}
+
+/* A mode distinct from the other forged-worker markers selects this table. */
+static bool
+names_worker_selected(struct stat *st)
+{
+	const int descriptors[] = { FSIMG_CHILD_SPOOL,
+	    FSIMG_CHILD_SLOT(FSIMG_CAPABILITY_SETTING) };
+
+	for (size_t i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); i++) {
+		if (fstat(descriptors[i], st) == 0 && S_ISREG(st->st_mode) &&
+		    (st->st_mode & 0777) == 0720 && st->st_size >= 0 &&
+		    (uint64_t)st->st_size < sizeof(names_cases) / sizeof(names_cases[0]))
+			return (true);
+	}
+	return (false);
+}
+
+/* All envelopes and names are valid; only their position/count is forged.
+ * A rejected frame may close the channel before the rest of the script sends.
+ */
+static bool
+send_forged_names(const names_case_t *test)
+{
+	static const fsimg_entry_kind_t kinds[] = { FSIMG_ENTRY_FILE,
+	    FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_SYMLINK, FSIMG_ENTRY_FIFO };
+	unsigned char raw[FSIMG_WIRE_ENTRY_BYTES];
+	char name[] = "/a";
+
+	CHECK(test->names <= sizeof(kinds) / sizeof(kinds[0]));
+	for (size_t i = 0; i < test->names; i++) {
+		bzero(raw, sizeof(raw));
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, kinds[i]);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, 2);
+		if (kinds[i] == FSIMG_ENTRY_SYMLINK)
+			fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_LENGTH, 1);
+		if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY,
+		    raw, sizeof(raw), NULL) != FSIMG_OK)
+			return (false);
+		name[1] = (char)('a' + i);
+		if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_NAME,
+		    name, 2, NULL) != FSIMG_OK)
+			return (false);
+		if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY_END,
+		    NULL, 0, NULL) != FSIMG_OK)
+			return (false);
+	}
+	return (true);
+}
+
+static int
+fake_names_worker(size_t index)
+{
+	const names_case_t *test = &names_cases[index];
+	fsimg_frame_t frame;
+	unsigned char raw[FSIMG_FRAME_BYTES];
+	int fd;
+
+	CHECK(fsimg_frame_read(FSIMG_CHILD_JOB, &frame, NULL) == FSIMG_OK);
+	CHECK(frame.type == FSIMG_FRAME_JOB);
+	CHECK(fsimg_frame_read(FSIMG_CHILD_JOB, &frame, NULL) == FSIMG_OK);
+	CHECK(frame.type == FSIMG_FRAME_SELECTION);
+	bzero(raw, sizeof(raw));
+	fsimg_store_le64(raw, FSIMG_CONFINEMENT_DISABLED);
+	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_READY, raw, 8,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_frame_read(FSIMG_CHILD_JOB, &frame, NULL) == FSIMG_OK);
+	CHECK(frame.type == FSIMG_FRAME_ACK);
+
+	if (test->position == NAMES_CHUNK_WITHOUT_ENTRY) {
+		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_NAME, "/a", 2, NULL);
+		return (0);
+	}
+	if (test->position == NAMES_BEFORE_HEADER && !send_forged_names(test))
+		return (0);
+	if (test->kind == FSIMG_JOB_EXTRACT || test->encoded) {
+		bzero(raw, FSIMG_WIRE_IMAGE_BYTES);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, 512);
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 512);
+		if (test->encoded)
+			strcpy((char *)raw + FSIMG_WIRE_IMAGE_COMPRESSION, "gzip");
+		if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_IMAGE, raw,
+		    FSIMG_WIRE_IMAGE_BYTES, NULL) != FSIMG_OK)
+			return (0);
+	}
+	if (test->position == NAMES_AFTER_IMAGE && !send_forged_names(test))
+		return (0);
+	if (test->kind == FSIMG_JOB_EXTRACT) {
+		bzero(raw, FSIMG_WIRE_INFO_BYTES);
+		fsimg_store_le64(raw + 56, FSIMG_TIME_WALL);
+		fsimg_store_le64(raw + 64, FSIMG_VALIDATION_HEADER);
+		if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO, raw,
+		    FSIMG_WIRE_INFO_BYTES, NULL) != FSIMG_OK)
+			return (0);
+		if (test->position == NAMES_AFTER_INFO && !send_forged_names(test))
+			return (0);
+	} else {
+		bzero(raw, FSIMG_WIRE_PLAN_BYTES);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_VOLUME, 512);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_OUTPUT, test->encoded ? 1024 : 512);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_SECTOR, 512);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_CLUSTER, 512);
+		fsimg_store_le64(raw + FSIMG_WIRE_PLAN_ENTRIES, test->plan_entries);
+		strcpy((char *)raw + FSIMG_WIRE_PLAN_FORMAT, "fat12");
+		if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PLAN, raw,
+		    FSIMG_WIRE_PLAN_BYTES, NULL) != FSIMG_OK)
+			return (0);
+		if (test->position == NAMES_AFTER_PLAN && !send_forged_names(test))
+			return (0);
+	}
+	/* Only the successful creation writes staging. The coordinator owns
+	 * publication; no rejected script creates even a staged image.
+	 */
+	if (test->message == NULL && test->kind == FSIMG_JOB_CREATE) {
+		fd = openat(FSIMG_CHILD_OUTPUT, "image", O_CREAT | O_EXCL | O_WRONLY, 0600);
+		CHECK(fd != -1);
+		CHECK(ftruncate(fd, 512) == 0);
+		CHECK(close(fd) == 0);
+	}
+	bzero(raw, FSIMG_WIRE_DONE_BYTES);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_ENTRIES, test->done_entries);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_SKIPPED, test->done_skipped);
+	if (test->kind == FSIMG_JOB_CREATE)
+		fsimg_store_le64(raw + FSIMG_WIRE_DONE_IMAGE, 512);
+	fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw,
+	    FSIMG_WIRE_DONE_BYTES, NULL);
+	return (0);
+}
+
+static void
+test_verbose_names_protocol(void)
+{
+	worker_fixture_t fixture;
+	const names_case_t *test;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	int marker, fd;
+
+	for (size_t i = 0; i < sizeof(names_cases) / sizeof(names_cases[0]); i++) {
+		test = &names_cases[i];
+		fixture_open(&fixture);
+		marker = coordinator_marker(&fixture, i, O_RDWR);
+		CHECK(fchmod(marker, 0720) == 0);
+		if (test->kind == FSIMG_JOB_EXTRACT) {
+			fd = openat(fixture.parent, "image", O_WRONLY);
+			CHECK(fd != -1);
+			CHECK(ftruncate(fd, 512) == 0);
+			CHECK(close(fd) == 0);
+			CHECK(fsimg_input_prepare(fixture.input, NULL, NULL,
+			    &fixture.request.input, NULL) == FSIMG_OK);
+			fixture.request.spool_fd = marker;
+			fixture.request.output_fd = fixture.output;
+		} else {
+			create_request(&fixture, "fat12");
+			fixture.request.setting_fds[0] = marker;
+		}
+		fixture.request.kind = test->kind;
+		fixture.request.flags = test->flags;
+		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
+		fixture.request.seconds = 5;
+		if (test->encoded) {
+			strcpy(fixture.request.compression, "gzip");
+			fixture.request.raw_fd = raw_intermediate(&fixture);
+		}
+		if (test->kind == FSIMG_JOB_PLAN)
+			fixture.request.output_fd = -1;
+
+		status = run(&fixture, &error);
+		if (status != (test->message == NULL ? FSIMG_OK : FSIMG_EIO) ||
+		    (test->message != NULL && strcmp(error.message, test->message) != 0))
+			fprintf(stderr, "%s: status %d, message %s\n",
+			    test->name, status, error.message);
+		CHECK(status == (test->message == NULL ? FSIMG_OK : FSIMG_EIO));
+		if (test->message != NULL) {
+			CHECK(strcmp(error.message, test->message) == 0);
+			CHECK(error.output_state != FSIMG_OUTPUT_PUBLISHED);
+			CHECK(error.output_state != FSIMG_OUTPUT_UNCERTAIN);
+			CHECK(faccessat(fixture.output, "image", F_OK, 0) == -1 && errno == ENOENT);
+		} else {
+			CHECK(fixture.name_bytes == 2 * test->names);
+			CHECK(fixture.result.entries == test->done_entries);
+			CHECK(fixture.result.skipped_entries == test->done_skipped);
+			if (test->kind == FSIMG_JOB_CREATE)
+				CHECK(unlinkat(fixture.output, "image", 0) == 0);
+		}
+		if (fixture.request.raw_fd != -1)
+			CHECK(close(fixture.request.raw_fd) == 0);
+		CHECK(close(marker) == 0);
+		fixture_close(&fixture);
+	}
 }

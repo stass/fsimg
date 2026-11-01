@@ -1752,6 +1752,10 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 	if (options->verbosity >= ((parse.mode & (MODES_CREATE | MODE_EXTRACT |
 	    MODE_LIST)) != 0 ? 2u : 1u))
 		options->request.flags |= FSIMG_JOB_VERBOSE;
+	/* -v names each entry c and x process; x -O names none. */
+	if (options->verbosity != 0 &&
+	    fsimg_job_names_entries(options->request.kind))
+		options->request.flags |= FSIMG_JOB_NAMES;
 	if (status == FSIMG_OK && parse.unsupported != NULL)
 		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_CONTEXT, parse.unsupported);

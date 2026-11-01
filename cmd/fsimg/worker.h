@@ -42,6 +42,10 @@ typedef enum fsimg_confinement {
  * channel, not to staging.
  */
 #define FSIMG_JOB_STDOUT 0x10u
+/* Creation, planning and extraction only: report each entry's name
+ * through the library's entry callback (c -v, x -v).
+ */
+#define FSIMG_JOB_NAMES 0x20u
 
 /*
  * The worker's single-descriptor capabilities, the prepared descriptors it
@@ -260,6 +264,10 @@ _Static_assert(sizeof(FSIMG_JOB_MANIFEST) <= FSIMG_JOB_TAG_BYTES,
  * These are the job's paths in wire order.
  */
 bool fsimg_job_has_roots(fsimg_job_kind_t);
+/* Whether a job of this kind may name its entries (FSIMG_JOB_NAMES):
+ * creation, planning and extraction.
+ */
+bool fsimg_job_names_entries(fsimg_job_kind_t);
 /* The filesystem the stack names, or "" when its slot is not named. */
 const char *fsimg_job_format(const fsimg_worker_request_t *);
 /*

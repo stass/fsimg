@@ -407,8 +407,8 @@ help(fsimg_cli_display_t *display)
 		    "    -R              Create reproducible image bytes\n");
 		append(display, "%s", help_policies);
 		append(display, "    -s bytes        Exact image size (default automatic)\n"
-		    "    -v              Repeat as -vv for progress, details and sampled\n"
-		    "                    metadata losses on stderr\n"
+		    "    -v              Name each entry on stderr; -vv adds the plan,\n"
+		    "                    progress, details and sampled metadata losses\n"
 		    "    -W              Verify the staged image before publication\n"
 		    "    -z              Compress the image with gzip; with -a its name must\n"
 		    "                    end in .gz\n");
@@ -440,7 +440,8 @@ help(fsimg_cli_display_t *display)
 		    "                    entries, digests and metadata to the new file\n");
 		append(display, "    -O              Write one member's bytes to stdout\n");
 		append(display, "%s%s", help_settings_read, help_policies);
-		append(display, "    -v              Repeat as -vv for progress and details on stderr\n");
+		append(display, "    -v              Name each entry on stderr; -vv adds progress and\n"
+		    "                    details\n");
 		append(display, "%s%s", help_gzip_read, help_units);
 		append(display, "Extracts into a new directory named after the image, such as ./boot for\n"
 		    "boot.img, with private modes and without host timestamps. Symbolic links\n"
@@ -1202,7 +1203,11 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 		owner_fields(display, raw, valid);
 		append(display, ",\"path\":\"");
 	} else {
-		if (display->options->verbosity != 0)
+		/* Only t -v adds the long columns; c -v and x -v name
+		 * entries in the default listing form.
+		 */
+		if (display->options->request.kind == FSIMG_JOB_LIST &&
+		    display->options->verbosity != 0)
 			long_listing_columns(display, raw);
 		append(display, "\"");
 	}
@@ -1746,14 +1751,17 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 	fsimg_cli_display_t *display = argument;
 	const fsimg_cli_options_t *options = display->options;
 	const unsigned char *raw = frame->payload;
-	bool diagnostic, listing, planning;
+	bool diagnostic, listing, named, planning;
 	fsimg_status_t status;
 
 	display->used = 0;
 	diagnostic = false;
 	listing = options->request.kind == FSIMG_JOB_LIST;
+	/* c -v and x -v: each entry record is a listing line on stderr. */
+	named = !display->verifying_staged &&
+	    (options->request.flags & FSIMG_JOB_NAMES) != 0;
 	/* A creation reports its plan, and the planned disk's IMAGE and
-	 * PARTITION records before it, under --json, -n or -v; c -v reports
+	 * PARTITION records before it, under --json, -n or -vv; c -vv reports
 	 * them as diagnostics. cW's verification worker reports none of them.
 	 */
 	planning = !display->verifying_staged &&
@@ -1824,17 +1832,22 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		}
 		break;
 	case FSIMG_FRAME_ENTRY:
-		if (listing) entry_start(display, raw);
+		/* All of an entry's frames share its stream. */
+		display->entry_diagnostic = named;
+		if (listing || named) entry_start(display, raw);
+		diagnostic = display->entry_diagnostic;
 		break;
 	case FSIMG_FRAME_NAME:
-		if (listing) {
+		if (listing || named) {
 			status = escape_span(display, raw, frame->length, options->json ?
 			    ESCAPE_JSON : ESCAPE_HUMAN, true, false, error);
 			if (status != FSIMG_OK) return (status);
 		}
+		diagnostic = display->entry_diagnostic;
 		break;
 	case FSIMG_FRAME_ENTRY_END:
-		if (listing) {
+		diagnostic = display->entry_diagnostic;
+		if (listing || named) {
 			status = escape_span(display, NULL, 0, options->json ?
 			    ESCAPE_JSON : ESCAPE_HUMAN, true, true, error);
 			if (status != FSIMG_OK) return (status);
@@ -1935,9 +1948,10 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 	diagnostic = false;
 	if (display->failure != NULL) {
 		if (display->entry_open) {
-			escape_invalid(display, options->json);
+			escape_invalid(display, options->json ? ESCAPE_JSON : ESCAPE_HUMAN);
 			append(display, options->json ? "\",\"complete\":false}\n" : "\" [incomplete]\n");
 			display->entry_open = false;
+			diagnostic = display->entry_diagnostic;
 		} else if (display->phase != FSIMG_CLI_OUTPUT_DONE) {
 			failure(display);
 			diagnostic = !options->json;

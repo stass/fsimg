@@ -66,9 +66,6 @@
     intermediate and spool roles with their Capsicum rights and a stream
     creation's data channel, with its `CAP_FSTAT` right, have likewise run
     only unconfined (`cmd/fsimg/sandbox.c`).
-  * `c -v` and `x -v` do not yet print one line per entry: the writer and
-    extractor have no per-entry callback for the worker to relay
-    (`lib/write/`, `lib/extract/`, `cmd/fsimg/worker-child.c`).
   The layer read side leaves these open:
   The layer write side leaves these open:
   * [Medium] Hole knowledge tests lack the design's Sandbox and capability

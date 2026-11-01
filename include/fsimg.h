@@ -25,6 +25,7 @@ typedef struct fsimg_plan fsimg_plan_t;
 typedef struct fsimg_reader fsimg_reader_t;
 typedef struct fsimg_image fsimg_image_t;
 typedef struct fsimg_layer_options fsimg_layer_options_t;
+typedef struct fsimg_entry fsimg_entry_t;
 
 typedef enum fsimg_status {
 	FSIMG_OK = 0,
@@ -114,6 +115,17 @@ typedef bool (*fsimg_cancel_fn_t)(void *);
  * 0x7e is written "\xNN" in lowercase hex.
  */
 typedef void (*fsimg_loss_fn_t)(void *, const char *, uint32_t);
+/* entry is borrowed for this callback, its path the entry's own unrendered
+ * image path. The writer calls it as planning admits each entry to the
+ * catalog, in image order, so the calls equal the plan's entries; the
+ * extractor calls it once each entry is created, copied or skipped, so the
+ * calls equal the result's entries plus skipped_entries. Neither reports
+ * the implicit root or an omitted entry, and the extractor not an entry
+ * whose extraction fails; a planning failure after an entry's admission,
+ * one naming it included, does not retract its call. It observes only: it
+ * cannot fail or cancel the operation.
+ */
+typedef void (*fsimg_entry_fn_t)(void *, const fsimg_entry_t *);
 
 typedef struct fsimg_options {
 	size_t		 size;
@@ -138,6 +150,8 @@ typedef struct fsimg_options {
 	void		*cancel_argument;
 	fsimg_loss_fn_t	 loss;
 	void		*loss_argument;
+	fsimg_entry_fn_t entry;
+	void		*entry_argument;
 	uint64_t	 reserved[4];
 } fsimg_options_t;
 
@@ -334,12 +348,12 @@ typedef struct fsimg_metadata {
 	fsimg_timestamp_t changed;
 } fsimg_metadata_t;
 
-typedef struct fsimg_entry {
+struct fsimg_entry {
 	const char	*path;
 	fsimg_entry_kind_t kind;
 	uint64_t	 size;
 	fsimg_metadata_t metadata;
-} fsimg_entry_t;
+};
 
 typedef enum fsimg_source_kind {
 	FSIMG_SOURCE_ZERO = 1,

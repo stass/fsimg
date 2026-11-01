@@ -67,6 +67,8 @@ static fsimg_status_t record_entry(extract_state_t *, const fsimg_entry_t *,
     const unsigned char *, const unsigned char *, size_t, fsimg_error_t *);
 static fsimg_status_t record_skipped(extract_state_t *, const fsimg_entry_t *,
     fsimg_error_t *);
+static fsimg_status_t extract_entry(extract_state_t *, const fsimg_entry_t *,
+    size_t, fsimg_error_t *);
 static fsimg_status_t extract_entries(extract_state_t *, fsimg_error_t *);
 static void report_destination(fsimg_error_t *, const char *);
 
@@ -484,20 +486,26 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 
 /* The safe profile creates only regular files and directories. Any other
  * kind, such as a symbolic link or FIFO, fails the extraction naming the
- * entry, unless the caller asked to skip such entries; a skip is counted in
- * the context statistics, so the omission is never silent. Such kinds have
- * no children, so skipping one never skips a subtree.
+ * entry, unless the caller asked to skip such entries; a skip is recorded
+ * in the manifest and counted in the context statistics, so the omission is
+ * never silent. Such kinds have no children, so skipping one never skips a
+ * subtree.
  */
 static fsimg_status_t
 skip_unsupported(extract_state_t *state, const fsimg_entry_t *entry,
     fsimg_error_t *error)
 {
+	fsimg_status_t status;
+
 	if ((state->options.flags & FSIMG_EXTRACT_SKIP_UNSUPPORTED) == 0) {
 		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_EXTRACT,
 		    "safe extraction creates only regular files and directories");
 		fsimg_error_path(error, entry->path);
 		return (FSIMG_EUNSUPPORTED);
 	}
+	status = record_skipped(state, entry, error);
+	if (status != FSIMG_OK)
+		return (status);
 	state->skipped_entries++;
 	fsimg_stat_add(&state->reader->ctx->stats.skipped_entries, 1);
 	return (FSIMG_OK);
@@ -562,13 +570,42 @@ record_skipped(extract_state_t *state, const fsimg_entry_t *entry,
 	return (record_entry(state, entry, NULL, state->buffer, length, error));
 }
 
+/* Create a regular file or directory beneath its parent and record its
+ * manifest line, counting it complete.
+ */
+static fsimg_status_t
+extract_entry(extract_state_t *state, const fsimg_entry_t *entry,
+    size_t path_length, fsimg_error_t *error)
+{
+	unsigned char digest[FSIMG_SHA256_DIGEST_LENGTH];
+	unsigned char *file_digest;
+	const char *name;
+	fsimg_status_t status;
+
+	status = select_parent(state, entry, path_length, &name, error);
+	if (status != FSIMG_OK)
+		return (status);
+	/* A file is hashed exactly when there is a manifest to record its
+	 * digest; record_entry writes nothing without one.
+	 */
+	file_digest = NULL;
+	if (entry->kind == FSIMG_ENTRY_DIRECTORY) {
+		status = extract_directory(state, entry, name, error);
+	} else {
+		file_digest = state->manifest != NULL ? digest : NULL;
+		status = extract_file(state, entry, name, file_digest, error);
+	}
+	if (status == FSIMG_OK)
+		status = record_entry(state, entry, file_digest, NULL, 0, error);
+	if (status == FSIMG_OK)
+		state->completed_entries++;
+	return (status);
+}
+
 static fsimg_status_t
 extract_entries(extract_state_t *state, fsimg_error_t *error)
 {
-	unsigned char digest[FSIMG_SHA256_DIGEST_LENGTH];
 	const fsimg_entry_t *entry;
-	unsigned char *file_digest;
-	const char *name;
 	size_t path_length;
 	uint32_t depth;
 	fsimg_status_t status;
@@ -588,32 +625,15 @@ extract_entries(extract_state_t *state, fsimg_error_t *error)
 			return (status);
 		if (entry->kind != FSIMG_ENTRY_FILE && entry->kind != FSIMG_ENTRY_DIRECTORY) {
 			status = skip_unsupported(state, entry, error);
-			if (status == FSIMG_OK)
-				status = record_skipped(state, entry, error);
-			if (status != FSIMG_OK)
-				return (status);
-			continue;
-		}
-		status = select_parent(state, entry, path_length, &name, error);
-		if (status != FSIMG_OK)
-			return (status);
-		/* A file is hashed exactly when there is a manifest to record
-		 * its digest; record_entry writes nothing without one.
-		 */
-		file_digest = NULL;
-		if (entry->kind == FSIMG_ENTRY_DIRECTORY) {
-			status = extract_directory(state, entry, name, error);
 		} else {
-			file_digest = state->manifest != NULL ? digest : NULL;
-			status = extract_file(state, entry, name, file_digest,
-			    error);
+			status = extract_entry(state, entry, path_length, error);
 		}
-		if (status == FSIMG_OK)
-			status = record_entry(state, entry, file_digest, NULL, 0,
-			    error);
 		if (status != FSIMG_OK)
 			return (status);
-		state->completed_entries++;
+		/* The entry is complete, its manifest line recorded: report
+		 * it, the extractor's one entry callback.
+		 */
+		fsimg_report_entry(state->reader->ctx, entry);
 	}
 	while (state->depth != 0) {
 		status = close_directory(state, error);

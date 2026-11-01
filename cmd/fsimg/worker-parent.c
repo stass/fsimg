@@ -43,6 +43,8 @@ typedef enum worker_phase {
  * planned disk, a partitioned disk's one PARTITION record the volume's
  * place on it, and then its PLAN follows. A create job of a bare volume
  * written as it is starts in WAIT_HEADER, for its PLAN.
+ * IN_ENTRY lasts from an ENTRY record to its ENTRY_END, which returns to
+ * the state the record interrupted (entry_admitted says which those are).
  */
 typedef enum worker_output_state {
 	WORKER_WAIT_HEADER,
@@ -140,11 +142,20 @@ typedef struct worker_supervisor {
 	int		 channels[CHANNEL_COUNT][2];
 	worker_phase_t	 phase;
 	worker_output_state_t output_state;
+	/* The state an entry record interrupted, restored at its ENTRY_END. */
+	worker_output_state_t entry_return;
 	uint64_t	 deadline;
 	uint64_t	 name_length;
 	uint64_t	 name_bytes;
 	uint64_t	 entry_size;
+	uint64_t	 entry_kind;
 	uint64_t	 entry_count;
+	/* Of entry_count, the entries neither files nor directories, which
+	 * an extraction can only skip (names_match_extraction).
+	 */
+	uint64_t	 named_other_kinds;
+	/* A create job's PLAN entries, which its DONE repeats. */
+	uint64_t	 planned_entries;
 	/* Metadata loss examples received; a worker sends at most
 	 * FSIMG_WIRE_LOSS_EVENTS, and DONE carries the exact count.
 	 */
@@ -183,6 +194,11 @@ static bool read_disk_expected(const worker_supervisor_t *,
 static bool output_length_expected(const worker_supervisor_t *, uint64_t);
 static bool image_frame_expected(const worker_supervisor_t *,
     const fsimg_frame_t *);
+static worker_output_state_t first_output_state(const fsimg_worker_request_t *);
+static bool entry_admitted(const worker_supervisor_t *);
+static bool names_match_plan(const worker_supervisor_t *, uint64_t);
+static bool names_match_extraction(const worker_supervisor_t *, uint64_t,
+    uint64_t);
 static bool plan_frame_expected(const worker_supervisor_t *,
     const fsimg_frame_t *);
 static bool image_length_expected(const worker_supervisor_t *, uint64_t);
@@ -429,6 +445,66 @@ image_frame_expected(const worker_supervisor_t *state,
 	    (raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0' ? 1 : 0));
 }
 
+/* A read job, and a create job of a partitioned disk or an encoded output,
+ * reports its image first; a bare volume's creation starts at its PLAN.
+ */
+static worker_output_state_t
+first_output_state(const fsimg_worker_request_t *request)
+{
+	return (request->kind < FSIMG_JOB_CREATE ||
+	    slot_name(request, FSIMG_LAYER_SCHEME)[0] != '\0' ||
+	    fsimg_job_encoded(request) ? WORKER_WAIT_IMAGE : WORKER_WAIT_HEADER);
+}
+
+/*
+ * Entry records arrive by job and state: a listing's and a member output's
+ * once the volume is reported; under -v a creation's while it plans, before
+ * its planned disk's IMAGE and PARTITION records and its PLAN, so in the
+ * state the job starts in, and an extraction's after its INFO. No other
+ * job sends them, a creation or extraction not asked for names included.
+ */
+static bool
+entry_admitted(const worker_supervisor_t *state)
+{
+	const fsimg_worker_request_t *request = state->request;
+	bool names = (request->flags & FSIMG_JOB_NAMES) != 0;
+
+	switch (request->kind) {
+	case FSIMG_JOB_LIST:
+	case FSIMG_JOB_CAT:
+		return (state->output_state == WORKER_OUTPUT_READY);
+	case FSIMG_JOB_EXTRACT:
+		return (names && state->output_state == WORKER_OUTPUT_READY);
+	case FSIMG_JOB_CREATE:
+	case FSIMG_JOB_PLAN:
+		return (names && state->output_state == first_output_state(request));
+	default:
+		return (false);
+	}
+}
+
+/* Names and counts agree. A creation named every planned entry before its
+ * PLAN, so the plan's entries are the names.
+ */
+static bool
+names_match_plan(const worker_supervisor_t *state, uint64_t entries)
+{
+	return ((state->request->flags & FSIMG_JOB_NAMES) == 0 ||
+	    entries == state->entry_count);
+}
+
+/* An extraction named each file and directory it completed and each entry
+ * of another kind it skipped.
+ */
+static bool
+names_match_extraction(const worker_supervisor_t *state, uint64_t entries,
+    uint64_t skipped)
+{
+	return ((state->request->flags & FSIMG_JOB_NAMES) == 0 ||
+	    (entries == state->entry_count - state->named_other_kinds &&
+	    skipped == state->named_other_kinds));
+}
+
 /*
  * A create job's PLAN: a planned disk holds its volume, which the one
  * PARTITION record placed when a scheme is named, and without a container
@@ -612,6 +688,9 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 	case FSIMG_FRAME_PLAN:
 		if (!plan_frame_expected(state, frame))
 			return (worker_error(error, "invalid worker image plan"));
+		state->planned_entries = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_ENTRIES);
+		if (!names_match_plan(state, state->planned_entries))
+			return (worker_error(error, "worker plan entry count differs from its names"));
 		state->output_state = WORKER_OUTPUT_READY;
 		state->planned_output = fsimg_load_le64(raw + FSIMG_WIRE_PLAN_OUTPUT);
 		if (streaming(state->request)) {
@@ -627,8 +706,7 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 	case FSIMG_FRAME_ENTRY:
 		path_limit = state->request->limits.max_path_bytes == 0 ? 65536 :
 		    state->request->limits.max_path_bytes;
-		if ((kind != FSIMG_JOB_LIST && kind != FSIMG_JOB_CAT) ||
-		    state->output_state != WORKER_OUTPUT_READY ||
+		if (!entry_admitted(state) ||
 		    !fsimg_wire_entry_frame_valid(frame, kind == FSIMG_JOB_CAT, path_limit))
 			return (worker_error(error, "invalid worker entry start"));
 		if (kind == FSIMG_JOB_CAT && state->entry_count != 0)
@@ -643,7 +721,9 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		}
 		state->name_length = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH);
 		state->entry_size = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_LENGTH);
+		state->entry_kind = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_KIND);
 		state->name_bytes = 0;
+		state->entry_return = state->output_state;
 		state->output_state = WORKER_IN_ENTRY;
 		break;
 	case FSIMG_FRAME_NAME:
@@ -657,8 +737,11 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		if (state->output_state != WORKER_IN_ENTRY || frame->length != 0 ||
 		    state->name_bytes != state->name_length)
 			return (worker_error(error, "incomplete worker entry name"));
-		state->output_state = WORKER_OUTPUT_READY;
+		state->output_state = state->entry_return;
 		state->entry_count++;
+		if (state->entry_kind != FSIMG_ENTRY_FILE &&
+		    state->entry_kind != FSIMG_ENTRY_DIRECTORY)
+			state->named_other_kinds++;
 		if (kind == FSIMG_JOB_CAT) {
 			state->raw_open = true;
 			state->raw_bound = state->entry_size;
@@ -702,6 +785,12 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		state->result->logical_bytes = fsimg_load_le64(raw + FSIMG_WIRE_DONE_LOGICAL);
 		state->result->metadata_losses = fsimg_load_le64(raw + FSIMG_WIRE_DONE_LOSSES);
 		state->result->skipped_entries = fsimg_load_le64(raw + FSIMG_WIRE_DONE_SKIPPED);
+		if (kind == FSIMG_JOB_EXTRACT && !names_match_extraction(state,
+		    count, state->result->skipped_entries))
+			return (worker_error(error, "worker extraction counts differ from its names"));
+		/* A creation's completion repeats its plan's count. */
+		if (kind >= FSIMG_JOB_CREATE && count != state->planned_entries)
+			return (worker_error(error, "worker creation count differs from its plan"));
 		if ((kind != FSIMG_JOB_EXTRACT ||
 		    (state->request->flags & FSIMG_JOB_SKIP_UNSUPPORTED) == 0) &&
 		    state->result->skipped_entries != 0)
@@ -1423,9 +1512,7 @@ supervisor_init(worker_supervisor_t *state, const fsimg_worker_request_t *reques
 	state->interrupted = interrupted;
 	state->stdout_available = standard_output != -1;
 	state->producer_done = true;
-	state->output_state = request->kind < FSIMG_JOB_CREATE ||
-	    slot_name(request, FSIMG_LAYER_SCHEME)[0] != '\0' ||
-	    fsimg_job_encoded(request) ? WORKER_WAIT_IMAGE : WORKER_WAIT_HEADER;
+	state->output_state = first_output_state(request);
 	if (request->output_budget == NULL)
 		state->budget = &state->local_budget;
 	else

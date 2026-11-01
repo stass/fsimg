@@ -493,7 +493,8 @@ find_parent(const catalog_ancestor_t *ancestors, size_t *top,
  * directory) and its ancestors, so their paths are prefixes of kept_path.
  *
  * Planning's capability summaries, the unions and the longest link target,
- * are taken here, over kept records only.
+ * are taken here, over kept records only, and each kept record is reported
+ * to the entry callback here, so the calls equal writer->count.
  */
 static fsimg_status_t
 index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
@@ -599,6 +600,11 @@ index_entries(fsimg_writer_t *writer, fsimg_stream_t *children,
 		writer->catalog_kinds |= (uint32_t)entry.entry.kind;
 		writer->catalog_fields |= entry.entry.metadata.valid;
 		writer->catalog_required |= entry.entry.metadata.required;
+		/* The record is the catalog's entry for its path: report it,
+		 * while the record buffer still holds its path. A repeated
+		 * record after it adds nothing to report.
+		 */
+		fsimg_report_entry(writer->ctx, &entry.entry);
 
 		/* Preserve the merge and traversal state before reusing the record
 		 * buffer. A long component's collision key can overlap the

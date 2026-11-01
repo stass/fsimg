@@ -243,11 +243,34 @@ In modes
 .Cm c
 and
 .Cm x ,
-.Fl vv
-reports bounded progress, capability details and sampled metadata-loss
-examples on stderr; a single
 .Fl v
-alone adds no output in these modes.
+names each entry on stderr in the default listing form: one quoted, escaped
+image path per line, a symbolic link marked
+.Ql @
+and a FIFO
+.Ql | .
+Creation names each entry as planning admits it, in image order, also under
+.Fl n ;
+the lines are the listing of the image to come, less the entries a format
+adds itself, such as the QNX6
+.Pa /.boot
+directory.
+Extraction names each entry once it is created or copied, and under
+.Fl k
+each skipped entry too, so a marked line there is a skipped entry.
+An entry the reader omits, or one whose extraction fails, is not named;
+since creation names entries before checking the plan, a creation can fail
+naming an entry already listed.
+.Cm x Fl O
+names nothing.
+With
+.Fl Fl json
+the names are entry records on stderr and stdout is unchanged; a creation's
+record carries the source's metadata, before the format reduces it.
+A terminal slower than the job slows the job; no name is dropped.
+.Fl vv
+adds bounded progress, capability details and sampled metadata-loss
+examples on stderr.
 In mode
 .Cm t ,
 .Fl v

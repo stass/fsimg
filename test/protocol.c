@@ -626,6 +626,55 @@ test_info_mountpoint(void)
 	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
 }
 
+/* NAMES is meaningful only for planning, creation and extraction. All other
+ * fields stay valid so a refusal identifies the kind/flag combination.
+ */
+static void
+test_job_names_roundtrip_only_for_create_plan_and_extract(void)
+{
+	static const struct {
+		fsimg_job_kind_t kind;
+		bool valid;
+	} cases[] = {
+		{ FSIMG_JOB_CREATE, true },
+		{ FSIMG_JOB_PLAN, true },
+		{ FSIMG_JOB_EXTRACT, true },
+		{ FSIMG_JOB_LIST, false },
+		{ FSIMG_JOB_CAT, false },
+		{ FSIMG_JOB_INFO, false },
+		{ FSIMG_JOB_VERIFY, false }
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+	fsimg_status_t status;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_worker_request_init(&request);
+		request.kind = cases[i].kind;
+		if (fsimg_job_has_roots(request.kind)) {
+			request.root_paths = image_root;
+			request.root_count = 1;
+		}
+		/* The same job without NAMES is the control for every kind. */
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		request.flags |= FSIMG_JOB_NAMES;
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		status = fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL);
+		if (status != (cases[i].valid ? FSIMG_OK : FSIMG_EINVAL))
+			fprintf(stderr, "NAMES job kind %d: status %d\n", cases[i].kind, status);
+		CHECK(status == (cases[i].valid ? FSIMG_OK : FSIMG_EINVAL));
+		if (cases[i].valid) {
+			CHECK(decoded.kind == cases[i].kind);
+			CHECK(decoded.flags == request.flags);
+		}
+	}
+}
+
 static void
 test_job_posix_flags(void)
 {
@@ -1617,6 +1666,7 @@ main(int argc, char **argv)
 	test_info_uuid();
 	test_info_label();
 	test_info_mountpoint();
+	test_job_names_roundtrip_only_for_create_plan_and_extract();
 	test_job_posix_flags();
 	test_job_roots();
 	test_signed_wire_values();

@@ -168,15 +168,20 @@ path. The names are the library's
 through the listing's entry records, so one escaping, one path limit and one
 entries limit serve every mode. Creation names each entry as planning admits
 it to the catalog, in image order: the lines are the `t` listing of the
-image to come, and `c -n -v` names them too, before the plan. Extraction
+image to come, less the entries a format adds itself rather than takes from
+the catalog, such as QNX6's synthesized `/.boot` or QNX4's `/.boot` and
+`/.altboot`, and `c -n -v` names them too, before the plan. Extraction
 names each entry once it is created or copied, and recorded in the manifest
 when there is one, in traversal order; under `-k` a skipped entry is named
 as well, and since the safe profile creates only regular files and
 directories, a marked line under `x` is a skipped entry. An entry the
-reader omits has no name to print and appears only in its count. A failed
-entry is not named; the error names it. Under `--json` stdout's records are
+reader omits has no name to print and appears only in its count. An entry
+whose extraction fails is not named; the error names it. Creation names an
+entry when the catalog admits it, before the plan's checks, so a creation
+can fail naming an entry already listed. Under `--json` stdout's records are
 unchanged and the names take the `entry` record form on stderr, as progress
-and loss examples do.
+and loss examples do; a creation's record carries the catalog's metadata,
+before the format reduces it.
 
 Verbose names are streamed, never accumulated: the worker holds the
 library's borrowed entry, the coordinator one formatted span and the relay

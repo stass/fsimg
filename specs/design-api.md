@@ -141,7 +141,10 @@ delivered, so the two stay separate callbacks. The writer and the extractor
 each call it from one place, defined in their sections, so a host counting
 the calls checks the count against the operation's result. Omitted entries,
 which have no deliverable name, and the implicit root are never reported,
-and neither is an entry whose processing fails: the error names it. The
+and neither is a record the catalog refuses or an entry whose extraction
+fails: the error names it. Planning reports an entry when the catalog
+admits it, before the plan's checks, so a later planning failure can name
+an entry already reported. The
 reader's own iteration does not use the callback, since `next()` already
 hands the caller every entry. The library prints nothing; the CLI relays
 each call as a listing's entry records.
@@ -730,8 +733,10 @@ against a memory-corruption exploit in its host application.
 
 Extraction reports an entry through the entry callback once it is complete:
 a directory created, a file copied, or an entry of another kind skipped
-under the skip option, each after its manifest line is written when there
-is a manifest. The order is the traversal's, so a directory precedes its
+under the skip option, each after its manifest line is recorded when there
+is a manifest. The manifest writer buffers its lines, so a reported entry's
+line can still fail to reach the file; that failure fails the extraction,
+whose manifest is then incomplete. The order is the traversal's, so a directory precedes its
 children; an entry's loss reports precede its own report; a directory's
 timestamps, set when it closes after its children, are not part of its
 report. The calls equal the result's `entries` plus `skipped_entries`.
