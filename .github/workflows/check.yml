@@ -130,31 +130,12 @@ jobs:
           usesh: true
           prepare: |
             set -eu
-            if [ ! -f /usr/ports/Mk/bsd.port.mk ]; then
-              fetch -o /tmp/fsimg-ports.tar.xz https://download.freebsd.org/ports/ports/ports.tar.xz
-              tar -xf /tmp/fsimg-ports.tar.xz -C /usr
-            fi
-            install_port() {
-              if ! command -v "$2" >/dev/null; then
-                make -C "/usr/ports/$1" BATCH=yes install clean
-              fi
-            }
-            install_port devel/autoconf autoreconf
-            install_port devel/automake automake
-            install_port devel/libtool libtool
-            install_port devel/cmake cmake
-            install_port devel/git git
-            install_port filesystems/mtools mcopy
-            install_port devel/pkgconf pkg-config
-            install_port devel/rubygem-bundler bundle
-            # Minitest has no executable; probe the library.
-            ruby -rminitest -e 1 2>/dev/null ||
-                make -C /usr/ports/devel/rubygem-minitest BATCH=yes install clean
-            install_port lang/python3 python3
-            # The base system's zstd library is private; the port installs
-            # the public one with its pkg-config file. liblzma is in base.
-            pkg-config --exists libzstd ||
-                make -C /usr/ports/archivers/zstd BATCH=yes install clean
+            # The base system's zstd library is private; the package
+            # installs the public one with its pkg-config file. liblzma is
+            # in base.
+            ASSUME_ALWAYS_YES=yes pkg install -y autoconf automake libtool \
+                cmake-core git-lite mtools pkgconf rubygem-bundler \
+                rubygem-minitest python3 zstd
             pw useradd fsimgtest -m -s /bin/sh
           run: |
             chown -R fsimgtest .

@@ -497,7 +497,7 @@
   (`build-aux/linux-check/Dockerfile`, `.github/workflows/check.yml`): the
   checks themselves are one list in `build-aux/ci-check.sh`, but the image
   repeats the job's package list and runner tools, and the FreeBSD job's
-  setup (ports, fatcat, spec gems) is followed by hand on a host. Run the
+  setup (packages, fatcat, spec gems) is followed by hand on a host. Run the
   CI Linux job in the same image, and give the FreeBSD setup one script.
 
 * [Medium] **Scale RSS growth is blind to reused inherited pages on FreeBSD
