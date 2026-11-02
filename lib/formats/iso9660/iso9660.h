@@ -31,6 +31,7 @@
 #define ISO_VOLUME_BLOCKS_MAX	UINT64_C(0xffffffff)
 #define ISO_RECORD_MIN		34u	/* LEN_DR with a one-byte identifier */
 #define ISO_IDENTIFIER_MAX	222u	/* 255 - 33, the longest LEN_FI */
+#define ISO_RECORD_IDENTIFIER	33u	/* a record's identifier's offset */
 #define ISO_SECTIONS_MAX	65535u
 #define ISO_NAME_MAX		1024u
 #define ISO_LABEL_BYTES		32u
@@ -81,6 +82,20 @@ typedef struct iso_record {
 	uint8_t		 system_use_length;
 	bool		 date_present;
 } iso_record_t;
+
+/* One path-table record (specs/design-iso9660.md#path-tables): an
+ * ISO_PATH_HEADER_BYTES header, then length identifier bytes and a zero pad
+ * byte when length is odd. parent is the parent's record number.
+ */
+#define ISO_PATH_HEADER_BYTES	8u
+
+typedef struct iso_path_record {
+	uint32_t	 extent;
+	uint16_t	 parent;
+	uint8_t		 ea_length;
+	uint8_t		 length;		/* LEN_DI */
+	unsigned char	 identifier[255];
+} iso_path_record_t;
 
 /* A decoded volume descriptor. block, type, version and joliet_level are
  * set for every descriptor; the other fields only for the primary
@@ -275,7 +290,11 @@ typedef struct iso_payload {
  * directory records being read, continuation the last SUSP continuation
  * block, so a record's system use area and its continuation areas are
  * readable together. rockridge is the handshake's ISO_ROCKRIDGE_ value.
+ * verify is full verification's state (verify.c) while fsimg_verify runs,
+ * otherwise NULL.
  */
+typedef struct iso_verify iso_verify_t;
+
 typedef struct fsimg_iso9660_reader {
 	iso_descriptor_t primary;
 	iso_descriptor_t joliet;
@@ -292,6 +311,7 @@ typedef struct fsimg_iso9660_reader {
 	bool		 system_area_used;
 	iso_window_t	 window;
 	iso_window_t	 continuation;
+	iso_verify_t	*verify;
 } fsimg_iso9660_reader_t;
 
 extern const fsimg_reader_ops_t fsimg_iso9660_reader_ops;
@@ -320,6 +340,7 @@ fsimg_status_t iso_descriptor_decode(const unsigned char *, uint32_t,
     iso_descriptor_t *, fsimg_error_t *);
 fsimg_status_t iso_record_decode(const unsigned char *, size_t,
     iso_record_t *, fsimg_error_t *);
+void iso_path_header_decode(const unsigned char *, bool, iso_path_record_t *);
 
 /* volume.c */
 fsimg_status_t iso_volume_open(fsimg_reader_t *, fsimg_error_t *);
@@ -365,6 +386,8 @@ fsimg_status_t iso_keys(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
 fsimg_status_t iso_key(fsimg_reader_t *, const char *, unsigned char *,
     size_t *, fsimg_error_t *);
+int iso_primary_order(const unsigned char *, size_t, bool,
+    const unsigned char *, size_t, bool);
 
 /* directory.c */
 fsimg_status_t iso_payload_decode(const fsimg_iso9660_reader_t *,
@@ -373,5 +396,16 @@ fsimg_status_t iso_prepare(fsimg_reader_t *, fsimg_directory_build_t *,
     fsimg_error_t *);
 fsimg_status_t iso_replay(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_error_t *);
+
+/* verify.c: full verification, and the two hooks through which
+ * iso_prepare reports, while verify is set, each directory it prepares and
+ * each later record of it; outside verification they do nothing.
+ */
+fsimg_status_t iso_verify(fsimg_reader_t *, unsigned, fsimg_verify_report_t *,
+    fsimg_error_t *);
+fsimg_status_t iso_verify_directory(fsimg_reader_t *, const iso_cursor_t *,
+    bool, fsimg_error_t *);
+fsimg_status_t iso_verify_record(fsimg_reader_t *, const iso_cursor_t *,
+    const iso_record_t *, const unsigned char *, fsimg_error_t *);
 
 #endif

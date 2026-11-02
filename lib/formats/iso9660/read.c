@@ -14,11 +14,6 @@ static void iso_close(fsimg_reader_t *);
 static fsimg_status_t iso_resolve(fsimg_reader_t *, uint64_t,
     fsimg_extent_t *, fsimg_error_t *);
 
-/* The reader has no full verifier: a report could not claim the ownership
- * sweep, path tables, order and every offered view of
- * specs/design-iso9660-driver.md#verification, so the format advertises no
- * verify capability and fsimg_verify refuses before any work.
- */
 const fsimg_reader_ops_t fsimg_iso9660_reader_ops = {
 	.open = iso_open,
 	.close = iso_close,
@@ -28,7 +23,8 @@ const fsimg_reader_ops_t fsimg_iso9660_reader_ops = {
 	.key = iso_key,
 	.ambiguous = "duplicate ISO 9660 name or directory in one directory",
 	.name_profile = FSIMG_NAME_PROFILE_PORTABLE,
-	.resolve = iso_resolve
+	.resolve = iso_resolve,
+	.verify = iso_verify
 };
 
 fsimg_iso9660_reader_t *

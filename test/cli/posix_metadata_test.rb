@@ -32,7 +32,7 @@ class CliTest < Minitest::Test
     assert_equal(0x11, ifs.fetch("write_settings"), "ifs write settings")
     assert_equal(1024, ifs.fetch("max_link_target_bytes"))
     iso = formats.delete("iso9660")
-    assert_equal(1, iso.fetch("capabilities"))
+    assert_equal(5, iso.fetch("capabilities"))
     assert_equal(15, iso.fetch("entry_kinds"))
     assert_equal(0x7f, iso.fetch("metadata_fields"))
     assert_equal(1024, iso.fetch("max_link_target_bytes"))

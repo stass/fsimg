@@ -310,8 +310,17 @@ It runs:
    of omission scope: `rockridge`, `primary` and `joliet` in that order,
    skipping the selected one. Payload read-through, when requested, reads
    the files and links of every walk, since shared extents are read per
-   reference. The first walk of each hierarchy emits its claims and
-   path-table records; the `rockridge` walk emits the relocation records.
+   reference. Each hierarchy's physical walk, `primary` or `joliet`,
+   reads every record of the hierarchy and emits its claims and
+   path-table records; the `primary` walk also claims each record's
+   continuation areas when the image offers Rock Ridge, and checks the
+   [order](design-iso9660.md#ordering) of each directory's records as it
+   prepares it. The `rockridge` walk is not physical: it skips every
+   record carrying `RE`, and with it the relocation directory that
+   mkisofs and xorriso mark with `RE`; it emits the `CL` half of the
+   relocation records.
+   Each record is reported once, when its directory is prepared, never
+   when replay or a placeholder's check reads it again.
    Each walk admits and charges its entries, so verifying an image with
    three views charges the entry limit three times.
 4. **Claims.** Each claim is `(start byte, end byte, class, hierarchy)`:
@@ -320,13 +329,13 @@ It runs:
    externally by start, end and class, and one sweep applies the
    [sharing rules](design-iso9660.md#ownership) with constant state: the
    furthest end of any data claim seen, and the last metadata claim. A
-   metadata claim conflicts with an earlier data claim still open, and
-   with an open metadata claim unless both are the identical interval of
-   one directory or path table of the same hierarchy; continuation areas
-   never share bytes. A data claim conflicts with an open metadata claim
-   unless both are the identical boot-catalog interval. Identical
-   intervals sort adjacently, so each exception is a comparison with the
-   previous claim.
+   metadata claim conflicts with an earlier data claim still open and with
+   any open metadata claim: each physical walk prepares a directory once
+   and the header claims each path table once, so no structure is claimed
+   twice. A data claim conflicts with an open metadata claim unless both
+   are the identical boot-catalog interval, which sorts just before the
+   data claims identical to it, so the exception is a comparison with the
+   previous metadata claim. Each sweep step charges the session.
 5. **Path tables.** For each hierarchy, both tables are decoded in
    lockstep, record by record, requiring equal records, the
    [ordering rules](design-iso9660.md#path-tables) and the exact size;
@@ -336,10 +345,14 @@ It runs:
    every physical directory record, `(opened extent, the containing
    directory's extent, identifier)`, admitted or not, are sorted by extent
    and must be equal.
-6. **Relocation.** The `rockridge` walk emits `(target, physical parent)`
-   for each `CL`, the physical parent from the target's second dot record,
-   and `(directory, containing directory)` for each `RE` record; sorted,
-   the two lists must be equal, each extent once.
+6. **Relocation.** The `rockridge` walk emits the extent of each
+   directory it enters through `CL`. The `primary` walk, which frames
+   every record's SUSP stream when the image offers Rock Ridge, emits the
+   extent of each directory whose second dot record carries `PL`, having
+   checked that record names the directory's physical parent. Sorted, the
+   two lists must be equal; neither repeats an extent, since each walk
+   prepares a directory once. `RE` takes no part: mkisofs and xorriso mark
+   their relocation directory itself with `RE` and no `CL` names it.
 7. **El Torito.** Open validated the boot catalog; its extents are in the
    claim stream.
 
@@ -348,7 +361,10 @@ the root included, its logical bytes, and the bytes read in every walk;
 allocated units are the blocks some claim covers; free and bad counts are
 zero; the omitted subtree roots are the counted walk's. An unsupported
 value anywhere fails verification, so a complete report means every view
-and every structure was checked.
+and every structure was checked. Rock Ridge entries are interpreted where
+the `rockridge` view reads them; in a subtree `RE` hides from it, the
+records are checked in the primary hierarchy and their SUSP streams
+framed.
 
 ## Writer settings
 

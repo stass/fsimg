@@ -288,3 +288,106 @@ iso_key(fsimg_reader_t *reader, const char *component, unsigned char *key,
 	*length = bytes;
 	return (FSIMG_OK);
 }
+
+/* The parts of a primary identifier the order compares: the file name,
+ * before the first '.', or a directory's whole identifier; the extension,
+ * up to the last ';', which iso_primary_name also takes as the version's
+ * separator; and the version after it. A missing part is empty.
+ */
+typedef struct order_parts {
+	const unsigned char *name;
+	const unsigned char *extension;
+	const unsigned char *version;
+	size_t		 name_length;
+	size_t		 extension_length;
+	size_t		 version_length;
+} order_parts_t;
+
+static void
+order_split(const unsigned char *identifier, size_t length, bool directory,
+    order_parts_t *parts)
+{
+	const unsigned char *dot;
+	size_t end;
+
+	bzero(parts, sizeof(*parts));
+	parts->name = identifier;
+	parts->name_length = length;
+	if (directory)
+		return;
+	for (end = length; end > 0 && identifier[end - 1] != ';'; end--)
+		continue;
+	if (end > 0) {
+		parts->version = identifier + end;
+		parts->version_length = length - end;
+		end--;
+	} else {
+		end = length;
+	}
+	parts->name_length = end;
+	dot = memchr(identifier, '.', end);
+	if (dot != NULL) {
+		parts->name_length = (size_t)(dot - identifier);
+		parts->extension = dot + 1;
+		parts->extension_length = end - parts->name_length - 1;
+	}
+}
+
+/* Compare by byte, the shorter padded with spaces. */
+static int
+padded_compare(const unsigned char *a, size_t a_length, const unsigned char *b,
+    size_t b_length)
+{
+	size_t length = a_length > b_length ? a_length : b_length;
+	unsigned char ca, cb;
+
+	for (size_t i = 0; i < length; i++) {
+		ca = i < a_length ? a[i] : 0x20;
+		cb = i < b_length ? b[i] : 0x20;
+		if (ca != cb)
+			return (ca < cb ? -1 : 1);
+	}
+	return (0);
+}
+
+/* Versions are decimal without leading zeros, so a longer one is larger
+ * and equal lengths compare by byte. Without both versions, as for a
+ * directory, the step finds the identifiers equal.
+ */
+static int
+version_compare(const order_parts_t *a, const order_parts_t *b)
+{
+	int order;
+
+	if (a->version_length == 0 || b->version_length == 0)
+		return (0);
+	if (a->version_length != b->version_length)
+		return (a->version_length < b->version_length ? -1 : 1);
+	order = memcmp(a->version, b->version, a->version_length);
+	return ((order > 0) - (order < 0));
+}
+
+/* The order of two primary identifiers
+ * (specs/design-iso9660.md#ordering): name, extension, then version
+ * descending, each directory's identifier being its whole name.
+ * Identifiers it finds equal, such as a directory FOO and a file FOO.;1,
+ * may stand in either order.
+ */
+int
+iso_primary_order(const unsigned char *a, size_t a_length, bool a_directory,
+    const unsigned char *b, size_t b_length, bool b_directory)
+{
+	order_parts_t pa, pb;
+	int order;
+
+	order_split(a, a_length, a_directory, &pa);
+	order_split(b, b_length, b_directory, &pb);
+	order = padded_compare(pa.name, pa.name_length, pb.name,
+	    pb.name_length);
+	if (order == 0)
+		order = padded_compare(pa.extension, pa.extension_length,
+		    pb.extension, pb.extension_length);
+	if (order == 0)
+		order = -version_compare(&pa, &pb);
+	return (order);
+}

@@ -11,7 +11,8 @@
 
 /*
  * Pure decoders for ISO 9660 structures: both-byte-order fields, the two
- * date forms, volume descriptors and directory records. They perform no
+ * date forms, volume descriptors, directory records and path-table
+ * records. They perform no
  * I/O and fill their outputs with validated values only; every failure
  * names its class (specs/design-iso9660.md).
  */
@@ -47,7 +48,7 @@
 #define DR_GAP_SIZE		27u
 #define DR_SEQUENCE		28u
 #define DR_IDENTIFIER_LENGTH	32u
-#define DR_IDENTIFIER		33u
+#define DR_IDENTIFIER		ISO_RECORD_IDENTIFIER
 
 #define DATE7_BYTES		7u
 #define DATE17_BYTES		17u
@@ -463,4 +464,19 @@ iso_record_decode(const unsigned char *block, size_t offset,
 			    "with an extended attribute record"));
 	}
 	return (FSIMG_OK);
+}
+
+/* Decode the header of a path-table record, type M when big_endian, else
+ * type L. Its identifier follows; the caller checks the fields.
+ */
+void
+iso_path_header_decode(const unsigned char *raw, bool big_endian,
+    iso_path_record_t *out)
+{
+	out->length = raw[0];
+	out->ea_length = raw[1];
+	out->extent = big_endian ? fsimg_load_be32(raw + 2) :
+	    fsimg_load_le32(raw + 2);
+	out->parent = big_endian ? fsimg_load_be16(raw + 6) :
+	    fsimg_load_le16(raw + 6);
 }

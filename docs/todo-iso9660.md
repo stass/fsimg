@@ -21,14 +21,7 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   (`-eltorito-selcrit`), which the El Torito comparison does not yet
   cover.
 * [High] **Reader** (`lib/formats/iso9660/`, `test/iso9660.c`,
-  `fuzz/iso9660.c`): stages 7 and 8, the verifier, and interoperability,
-  scale and fault evidence. The registered reader presents the Rock
-  Ridge, Joliet and primary views:
-  * a Rock Ridge directory carrying `RE` that no `CL` names is left out of
-    the view without an error, with its subtree, until stage 7's
-    relocation match refuses it under `W`;
-  * the format has no verifier, so `W` refuses it as unsupported, until
-    stage 7.
+  `fuzz/iso9660.c`): stage 8, interoperability, scale and fault evidence.
 * [Low] **Root metadata** (`lib/read/`, `lib/formats/iso9660/`): the
   format design gives the Rock Ridge root the owner, mode and times of its
   own first dot record, but the walker delivers no metadata for the root

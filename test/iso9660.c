@@ -9,10 +9,12 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "format.h"
@@ -30,6 +32,15 @@
 #define DATA 104u
 #define RR_AREA 110u
 #define RR_DIRECTORY 85u
+#define VERIFY_SCALE_CLAIMS 1000000u
+#define VERIFY_SCALE_SECTIONS 62500u
+#define VERIFY_SCALE_FILES (VERIFY_SCALE_CLAIMS / VERIFY_SCALE_SECTIONS)
+#define VERIFY_SCALE_BLOCKS (1 + (VERIFY_SCALE_CLAIMS - 40 + 41) / 42)
+#define VERIFY_SCALE_DATA 24000u
+#define VERIFY_DIRECTORY_CHILDREN 65535u
+#define VERIFY_DIRECTORY_FIRST_CHILD 2048u
+#define VERIFY_DIRECTORY_ROOT_BLOCKS \
+	(1 + (VERIFY_DIRECTORY_CHILDREN - 40 + 41) / 42)
 
 enum {
 	DOT_BYTES = 34, DOT_PAIR_BYTES = 2 * DOT_BYTES,
@@ -64,6 +75,10 @@ typedef struct image {
 	uint64_t	 continuation_reads;
 	uint64_t	 ce_read_index;
 	uint64_t	 fail_read;
+	/* Borrowed only by the second-walk read-fault fixture. */
+	fsimg_verify_report_t *verify_report;
+	bool		 scale;
+	bool		 directory_scale;
 	bool		 eof;
 	bool		 cancel_read;
 } image_t;
@@ -83,6 +98,8 @@ static void directory(unsigned char *p, uint32_t block, uint32_t parent,
     uint32_t length);
 static void descriptor(unsigned char *p, unsigned type, unsigned version);
 static image_t image_new(void);
+static void verify_scale_block(unsigned char *, unsigned);
+static void verify_directory_limit_block(unsigned char *, unsigned);
 static fsimg_status_t image_size(void *arg, uint64_t *size,
     fsimg_error_t *error FSIMG_UNUSED);
 static fsimg_status_t image_read(void *arg, uint64_t offset, void *buffer,
@@ -270,6 +287,11 @@ image_read(void *arg, uint64_t offset, void *buffer, size_t length,
 
 	CHECK(offset <= image->length && length <= image->length - offset);
 	image->reads++;
+	if (image->verify_report != NULL &&
+	    image->verify_report->files == 2 && offset == RR_AREA * BLOCK) {
+		*count = 0;
+		return (FSIMG_EIO);
+	}
 	if (offset <= RR_AREA * BLOCK && offset + length > RR_AREA * BLOCK) {
 		image->continuation_reads++;
 		image->ce_read_index = image->reads;
@@ -289,6 +311,29 @@ image_read(void *arg, uint64_t offset, void *buffer, size_t length,
 		if (stored > length)
 			stored = length;
 		bcopy(image->bytes + offset, buffer, stored);
+	}
+	if (image->scale || image->directory_scale) {
+		unsigned char block[BLOCK];
+		uint64_t begin = ROOT * BLOCK;
+		uint64_t end = image->directory_scale ? image->length :
+		    begin + (uint64_t)VERIFY_SCALE_BLOCKS * BLOCK;
+		uint64_t cursor = offset > begin ? offset : begin;
+
+		while (cursor < end && cursor < offset + length) {
+			uint64_t index = (cursor - begin) / BLOCK;
+			size_t within = (cursor - begin) % BLOCK;
+			size_t bytes = BLOCK - within;
+
+			if (bytes > offset + length - cursor)
+				bytes = offset + length - cursor;
+			if (image->directory_scale)
+				verify_directory_limit_block(block, ROOT + index);
+			else
+				verify_scale_block(block, index);
+			bcopy(block + within, (unsigned char *)buffer + cursor - offset,
+			    bytes);
+			cursor += bytes;
+		}
 	}
 	*count = length;
 	return (FSIMG_OK);
@@ -977,14 +1022,17 @@ test_info_metadata_views(void)
 	CHECK(info.allocation_unit_bytes == BLOCK);
 	CHECK(info.time_basis == FSIMG_TIME_OFFSET);
 	CHECK(info.scope == FSIMG_VALIDATION_HEADER);
-	CHECK(info.capabilities == FSIMG_CAP_READ);
+	CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 	CHECK(info.detail_count == 13);
 	for (unsigned i = 0; i < 13; i++) {
 		CHECK(strcmp(info.details[i].name, details[i]) == 0);
 		CHECK(info.details[i].value == values[i]);
 	}
-	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_EUNSUPPORTED);
-	CHECK(!report.complete);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_free(&f);
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK((entry->metadata.valid & FSIMG_META_MODIFIED) == 0);
 	fixture_free(&f);
@@ -4515,6 +4563,1091 @@ test_joliet_selection(void)
 	free(image.bytes);
 }
 
+enum { PT_ROOT = 0, PT_A = 10, PT_B = 20, PT_C = 30, PT_D = 40, PT_END = 50,
+    PT_EXTENT = 2, PT_PARENT = 6, PT_NAME = 8, PT_PAD = 9, PT_XATTR = 1 };
+
+/* Verifier fixtures encode the redundant index independently of traversal.
+ * Both byte orders are written explicitly; no library codec is an oracle.
+ */
+static size_t
+verify_path(unsigned char *p, const void *name, size_t length,
+    uint32_t extent, uint16_t parent, bool big)
+{
+	size_t bytes = 8 + length + (length % 2);
+
+	bzero(p, bytes);
+	p[0] = length;
+	for (unsigned i = 0; i < 4; i++)
+		p[2 + i] = extent >> (8 * (big ? 3 - i : i));
+	p[6] = big ? parent >> 8 : parent;
+	p[7] = big ? parent : parent >> 8;
+	bcopy(name, p + 8, length);
+	return (bytes);
+}
+
+static void
+verify_table_root(image_t *image, unsigned vd, unsigned root,
+    unsigned l, unsigned m)
+{
+	unsigned char zero = 0, *p = image->bytes + vd * BLOCK;
+
+	put32(p + VD_PATH_SIZE, 10);
+	bzero(p + VD_PATH_L, 16);
+	boot_le32(p + VD_PATH_L, l);
+	p[VD_PATH_M] = m >> 24;
+	p[VD_PATH_M + 1] = m >> 16;
+	p[VD_PATH_M + 2] = m >> 8;
+	p[VD_PATH_M + 3] = m;
+	verify_path(image->bytes + l * BLOCK, &zero, 1, root, 1, false);
+	verify_path(image->bytes + m * BLOCK, &zero, 1, root, 1, true);
+}
+
+/* Every negative verifier assertion also checks the public incomplete
+ * contract. Return the report so positive rows can check exact accounting.
+ */
+static fsimg_verify_report_t
+verify_expect(image_t *image, fsimg_iso_view_t view, unsigned flags,
+    fsimg_status_t expected, const char *message, const char *name)
+{
+	fsimg_verify_report_t report = {0};
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+	fixture_t f;
+
+	fixture_new(&f, image, NULL);
+	status = open_image(&f, view);
+	rr_status_equal(status, FSIMG_OK, name);
+	if (status == FSIMG_OK)
+		status = fsimg_verify(f.reader, flags, &report, &error);
+	cases++;
+	if (status != expected || report.complete != (expected == FSIMG_OK) ||
+	    (message != NULL && strstr(error.message, message) == NULL)) {
+		fprintf(stderr, "%s: expected status=%d complete=%d message=%s; "
+		    "observed status=%d complete=%d message=%s\n", name,
+		    expected, expected == FSIMG_OK, message == NULL ? "*" : message,
+		    status, report.complete, error.message);
+		failures++;
+	}
+	fixture_free(&f);
+	return (report);
+}
+
+/* Sorted physical tree: root/{A/C,B/D}. Joliet uses two-byte names. */
+static image_t
+verify_tree(bool joliet)
+{
+	static const unsigned extents[] = { 85, 86, 87, 92 };
+	static const unsigned parents[] = { ROOT, ROOT, 85, 86 };
+	static const unsigned numbers[] = { 1, 1, 2, 3 };
+	image_t image = image_new();
+	unsigned root = joliet ? JOLIET_ROOT : ROOT;
+	unsigned vd = joliet ? 17 : 16;
+	unsigned l = joliet ? 90 : 82, m = l + 1;
+	unsigned char *p;
+	size_t offset = 10;
+
+	if (joliet)
+		joliet_add(&image);
+	verify_table_root(&image, vd, root, l, m);
+	bzero(image.bytes + root * BLOCK, BLOCK);
+	directory(image.bytes + root * BLOCK, root, root, BLOCK);
+	for (unsigned i = 0; i < 4; i++) {
+		unsigned parent = parents[i] == ROOT ? root : parents[i];
+		unsigned char name[] = { 0, 'A' + i };
+		const unsigned char *identifier = joliet ? name : name + 1;
+		size_t length = joliet ? 2 : 1;
+		size_t position = DOT_PAIR_BYTES;
+
+		directory(image.bytes + extents[i] * BLOCK, extents[i],
+		    parent, BLOCK);
+		if (i == 1)
+			position += joliet ? 36 : 34;
+		record(image.bytes + parent * BLOCK + position, identifier,
+		    length, extents[i], BLOCK, 2);
+		p = image.bytes + l * BLOCK + offset;
+		verify_path(p, identifier, length, extents[i], numbers[i], false);
+		p = image.bytes + m * BLOCK + offset;
+		offset += verify_path(p, identifier, length, extents[i],
+		    numbers[i], true);
+	}
+	put32(image.bytes + vd * BLOCK + VD_PATH_SIZE, offset);
+	return (image);
+}
+
+static void
+test_verify_counts_distinct_claimed_blocks(void)
+{
+	image_t image = image_new();
+	fsimg_verify_report_t report;
+
+	report = verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK,
+	    NULL, "baseline distinct blocks");
+	/* system 0..15, descriptors 16..17, tables 82,83, root 84, data 104 */
+	rr_equal(report.allocated_clusters, 22, "distinct claimed blocks");
+	rr_equal(report.free_clusters, 0, "no free-block inference");
+	rr_equal(report.bad_clusters, 0, "no bad-block inference");
+	rr_equal(report.files, 1, "baseline files");
+	rr_equal(report.directories, 1, "baseline root included");
+	rr_equal(report.logical_bytes, 5, "baseline logical bytes");
+	/* A directory length may end before the zero block tail. */
+	put32(image.bytes + 16 * BLOCK + VD_ROOT + DR_SIZE, 108);
+	put32(image.bytes + ROOT * BLOCK + DR_SIZE, 108);
+	put32(image.bytes + ROOT * BLOCK + DOT_BYTES + DR_SIZE, 108);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "directory length need not be block aligned");
+	free(image.bytes);
+}
+
+static void
+test_verify_file_metadata_overlap_is_corrupt(void)
+{
+	static const struct {
+		const char *name;
+		unsigned extent;
+		const char *message;
+	} rows[] = {
+		{ "file over directory", ROOT, "file data overlaps a structure" },
+		{ "file over volume descriptor", 16,
+		    "file data overlaps a structure" },
+		{ "file over path table", 82, "file data overlaps a structure" },
+		{ "file over system area", 0,
+		    "file data overlaps a structure" }
+	};
+
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		image_t image = image_new();
+
+		put32(image.bytes + ROOT * BLOCK + DOT_PAIR_BYTES + DR_EXTENT,
+		    rows[i].extent);
+		/* Extended attributes occupy the reserved blocks; delivered data
+		 * starts just after the terminator, inside the content domain.
+		 * W claims the attributes too, so only the sweep rejects these.
+		 */
+		if (rows[i].extent < 18)
+			image.bytes[ROOT * BLOCK + DOT_PAIR_BYTES + DR_XATTR] =
+			    18 - rows[i].extent;
+
+		verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+		    rows[i].message, rows[i].name);
+		free(image.bytes);
+	}
+}
+
+static void
+test_verify_data_sharing_and_empty_sections(void)
+{
+	image_t image = image_new();
+	unsigned char *p = image.bytes + ROOT * BLOCK + DOT_PAIR_BYTES;
+	fsimg_verify_report_t report;
+
+	record(p + p[0], "B.TXT;1", 7, DATA, 5, 0);
+	report = verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK,
+	    NULL, "two files share one extent");
+	rr_equal(report.allocated_clusters, 22, "shared data counted once");
+	record(p + p[0], "B.TXT;1", 7, 0, 0, 0);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "empty file at extent zero claims nothing");
+	joliet_add(&image);
+	verify_table_root(&image, 17, JOLIET_ROOT, 90, 91);
+	record(image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES,
+	    "\0A\0.\0T\0X\0T\0;\0" "1", 14, DATA, 5, 0);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "primary and Joliet share file data");
+	free(image.bytes);
+}
+
+static void
+test_verify_continuations_share_blocks_but_not_bytes(void)
+{
+	for (unsigned overlap = 0; overlap < 2; overlap++) {
+		susp_area_t area = {0}, ce = {0};
+		image_t image;
+		unsigned char *p;
+		size_t length;
+
+		susp_entry(&area, "ST", 4);
+		image = rr_image(&area, 0);
+		p = image.bytes + ROOT * BLOCK + RR_CHILD;
+		p += p[0];
+		length = record(p, "B.TXT;1", 7, DATA, 5, 0);
+		susp_ce(&ce, RR_AREA, overlap ? 0 : 4, 4);
+		bcopy(ce.bytes, p + length, ce.length);
+		p[0] += ce.length;
+		bcopy(area.bytes, image.bytes + RR_AREA * BLOCK + 4, 4);
+		verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0,
+		    overlap ? FSIMG_ECORRUPT : FSIMG_OK,
+		    overlap ? "overlap" : NULL,
+		    overlap ? "CE byte overlap" : "disjoint CE bytes in one block");
+		if (!overlap) {
+			put32(image.bytes + ROOT * BLOCK + RR_CHILD + DR_EXTENT,
+			    RR_AREA);
+			verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0,
+			    FSIMG_ECORRUPT, "overlap", "file over continuation");
+		}
+		free(image.bytes);
+	}
+}
+
+static void
+test_verify_continuation_inside_directory_is_corrupt(void)
+{
+	susp_area_t area = {0}, ce = {0};
+	image_t image;
+	unsigned char *p;
+
+	susp_entry(&area, "ST", 4);
+	image = rr_image(&area, 0);
+	/* The second block contains a valid file record whose name is ST.
+	 * This keeps the primary walk valid while RR reads those same bytes.
+	 */
+	put32(image.bytes + 16 * BLOCK + VD_ROOT + DR_SIZE, 2 * BLOCK);
+	put32(image.bytes + ROOT * BLOCK + DR_SIZE, 2 * BLOCK);
+	put32(image.bytes + ROOT * BLOCK + ROOT_DOT_BYTES + DR_SIZE, 2 * BLOCK);
+	p = image.bytes + (ROOT + 1) * BLOCK;
+	record(p, area.bytes, area.length, DATA, 0, 0);
+	susp_ce(&ce, ROOT + 1, DR_NAME, 4);
+	p = image.bytes + ROOT * BLOCK + RR_CHILD + CHILD_SUSP;
+	bcopy(ce.bytes, p, ce.length);
+	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_ECORRUPT,
+	    "continuation area overlaps another structure", "CE inside directory block");
+	free(image.bytes);
+}
+
+static void
+test_verify_directory_and_path_table_overlap_is_corrupt(void)
+{
+	image_t image = image_new();
+
+	/* CE-in-directory above exercises a nonidentical metadata overlap
+	 * after both walks; nested directory dots fail the walk earlier.
+	 */
+	boot_le32(image.bytes + 16 * BLOCK + VD_PATH_L, ROOT);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+	    "overlap", "path table over directory");
+	free(image.bytes);
+	image = verify_tree(true);
+	boot_le32(image.bytes + 17 * BLOCK + VD_PATH_L, 82);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+	    "path table overlaps another structure", "hierarchies share path table");
+	free(image.bytes);
+}
+
+static void
+test_verify_boot_catalog_and_image_sharing(void)
+{
+	image_t image = boot_image(0);
+	unsigned char *p = image.bytes + ROOT * BLOCK + DOT_PAIR_BYTES;
+	fsimg_verify_report_t report;
+
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "boot image is also a tree file");
+	bzero(p, BLOCK - DOT_PAIR_BYTES);
+	record(p, "BOOT.CAT;1", 10, BOOT_CATALOG, BLOCK, 0);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "catalog published as exact one-section file");
+	put32(p + DR_SIZE, 2 * BLOCK);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+	    "overlap", "file larger than catalog overlaps catalog");
+	put32(p + DR_SIZE, BLOCK);
+	/* Eight sectors cover the catalog and its following block. */
+	boot_entry(image.bytes + BOOT_CATALOG * BLOCK + 32, 0, 8, BOOT_CATALOG);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+	    "file data overlaps a structure", "boot image partially overlaps catalog");
+	boot_entry(image.bytes + BOOT_CATALOG * BLOCK + 32, 0, 12, BLOCKS - 1);
+
+	report = verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK,
+	    NULL, "boot image crosses volume end");
+	/* baseline minus data, plus boot descriptor, catalog and final block */
+	rr_equal(report.allocated_clusters, 24, "boot claims only in-volume part");
+	free(image.bytes);
+}
+
+static void
+test_verify_path_tables_reject_malformed_records(void)
+{
+	enum mutation { DIFFER, COPY_DIFFER, M_COPY_DIFFER, COPY_EQUAL,
+	    COPY_ALIAS, PARENT_SELF,
+	    MISSING, EXTRA, WRONG_PARENT, WRONG_NAME, TRUNCATED, PAD,
+	    NOT_ROOT, OUTSIDE, XATTR };
+	static const struct {
+		const char *name;
+		enum mutation mutation;
+		fsimg_status_t expected;
+		const char *message;
+	} rows[] = {
+		{ "L and M differ", DIFFER, FSIMG_ECORRUPT, "type L and M" },
+		{ "optional copy differs", COPY_DIFFER, FSIMG_ECORRUPT, "copy differs" },
+		{ "optional M copy differs", M_COPY_DIFFER, FSIMG_ECORRUPT, "copy differs" },
+		{ "optional copy equal", COPY_EQUAL, FSIMG_OK, NULL },
+		{ "optional copy aliases table", COPY_ALIAS, FSIMG_ECORRUPT, "path table overlaps another structure" },
+		{ "parent does not precede record", PARENT_SELF, FSIMG_ECORRUPT, "parent does not precede" },
+		{ "directory missing", MISSING, FSIMG_ECORRUPT, "path table does not match the directories" },
+		{ "extra directory", EXTRA, FSIMG_ECORRUPT, "path table does not match the directories" },
+		{ "wrong parent", WRONG_PARENT, FSIMG_ECORRUPT, "path table does not match the directories" },
+		{ "wrong identifier", WRONG_NAME, FSIMG_ECORRUPT, "path table does not match the directories" },
+		{ "record truncated", TRUNCATED, FSIMG_ECORRUPT, "ends inside a record" },
+		{ "nonzero pad", PAD, FSIMG_ECORRUPT, "pad byte is not zero" },
+		{ "first record not root", NOT_ROOT, FSIMG_ECORRUPT, "does not begin with the root" },
+		{ "table outside volume", OUTSIDE, FSIMG_ECORRUPT, "path table lies outside the volume" },
+		{ "extended attributes", XATTR, FSIMG_EUNSUPPORTED, "extended attribute" }
+	};
+
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		image_t image = verify_tree(false);
+		unsigned char *vd = image.bytes + 16 * BLOCK;
+		unsigned char *l = image.bytes + 82 * BLOCK;
+		unsigned char *m = image.bytes + 83 * BLOCK;
+
+		switch (rows[i].mutation) {
+		case DIFFER: m[PT_A + PT_EXTENT + 3]++; break;
+		case COPY_DIFFER:
+		case COPY_EQUAL:
+			boot_le32(vd + VD_PATH_L + 4, 80);
+			bcopy(l, image.bytes + 80 * BLOCK, PT_END);
+			if (rows[i].mutation == COPY_DIFFER)
+				image.bytes[80 * BLOCK + PT_A + PT_NAME] = 'Z';
+			break;
+		case M_COPY_DIFFER:
+			/* Optional type-M copy changes A's identifier. */
+			vd[VD_PATH_M + 7] = 80;
+			bcopy(m, image.bytes + 80 * BLOCK, PT_END);
+			image.bytes[80 * BLOCK + PT_A + PT_NAME] = 'Z';
+			break;
+		case COPY_ALIAS: boot_le32(vd + VD_PATH_L + 4, 82); break;
+		case PARENT_SELF: l[PT_A + PT_PARENT] = m[PT_A + PT_PARENT + 1] = 2; break;
+		case MISSING: put32(vd + VD_PATH_SIZE, 40); break;
+		case EXTRA:
+			verify_path(l + PT_END, "E", 1, 93, 3, false);
+			verify_path(m + PT_END, "E", 1, 93, 3, true);
+			put32(vd + VD_PATH_SIZE, 60);
+			break;
+		case WRONG_PARENT: l[PT_D + PT_PARENT] = m[PT_D + PT_PARENT + 1] = 2; break;
+		case WRONG_NAME: l[PT_D + PT_NAME] = m[PT_D + PT_NAME] = 'Z'; break;
+		case TRUNCATED: put32(vd + VD_PATH_SIZE, 49); break;
+		case PAD: l[PT_ROOT + PT_PAD] = m[PT_ROOT + PT_PAD] = 1; break;
+		case NOT_ROOT: l[PT_ROOT + PT_NAME] = m[PT_ROOT + PT_NAME] = 'R'; break;
+		case OUTSIDE: boot_le32(vd + VD_PATH_L, BLOCKS); break;
+		case XATTR: l[PT_ROOT + PT_XATTR] = m[PT_ROOT + PT_XATTR] = 1; break;
+		}
+		if (rows[i].mutation == OUTSIDE) {
+			fsimg_read_options_t options;
+			fsimg_error_t error = {0};
+			fixture_t f;
+
+			/* Placement is checked at open, before W is available. */
+			fixture_new(&f, &image, NULL);
+			fsimg_read_options_init(&options);
+			options.iso_view = FSIMG_ISO_VIEW_PRIMARY;
+			rr_status_equal(fsimg_reader_open(f.ctx, f.io, &options,
+			    &f.reader, &error), FSIMG_ECORRUPT, rows[i].name);
+			CHECK(strstr(error.message, rows[i].message) != NULL);
+			CHECK(f.reader == NULL);
+			fixture_free(&f);
+		} else
+			verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0,
+			    rows[i].expected, rows[i].message, rows[i].name);
+		free(image.bytes);
+	}
+}
+
+static void
+test_verify_primary_path_order_and_joliet_structural_order(void)
+{
+	for (unsigned joliet = 0; joliet < 2; joliet++) {
+		for (unsigned decrease = 0; decrease < 2; decrease++) {
+			image_t image = verify_tree(joliet != 0);
+			unsigned l = joliet ? 90 : 82;
+			unsigned char saved[12];
+			size_t size = 10;
+
+			verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK,
+			    NULL, "sorted directory tree baseline");
+			for (unsigned table = l; table <= l + 1; table++) {
+				unsigned char *p = image.bytes + table * BLOCK;
+				size_t a = decrease ? PT_C : PT_A;
+				size_t b = decrease ? PT_D : PT_B;
+
+				bcopy(p + a, saved, size);
+				bcopy(p + b, p + a, size);
+				bcopy(saved, p + b, size);
+				/* Swapping A/B also swaps their record numbers. */
+				if (!decrease) {
+					p[PT_C + PT_PARENT + (table != l)] = 3;
+					p[PT_D + PT_PARENT + (table != l)] = 2;
+				}
+			}
+			verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0,
+			    joliet ? FSIMG_OK : FSIMG_ECORRUPT,
+			    joliet ? NULL : "primary path table is not sorted",
+			    decrease ? "parent numbers decrease" : "identifiers descend");
+			if (joliet) {
+				image.bytes[l * BLOCK + PT_A + PT_PARENT] = 2;
+				image.bytes[(l + 1) * BLOCK + PT_A + PT_PARENT + 1] = 2;
+				verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0,
+				    FSIMG_ECORRUPT, "parent does not precede",
+				    "Joliet parent must precede its own record");
+			}
+			free(image.bytes);
+		}
+	}
+}
+
+static void
+test_verify_path_record_can_cross_block_boundary(void)
+{
+	image_t image = image_new();
+	unsigned char name[220];
+	size_t offset = 10, position = DOT_PAIR_BYTES;
+
+	verify_table_root(&image, 16, ROOT, 70, 72);
+	bzero(image.bytes + ROOT * BLOCK, 2 * BLOCK);
+	directory(image.bytes + ROOT * BLOCK, ROOT, ROOT, 2 * BLOCK);
+	put32(image.bytes + 16 * BLOCK + VD_ROOT + DR_SIZE, 2 * BLOCK);
+	for (unsigned i = 0; i < 9; i++) {
+		memset(name, 'A' + i, sizeof(name));
+		if (position % BLOCK + 254 > BLOCK)
+			position += BLOCK - position % BLOCK;
+		position += record(image.bytes + ROOT * BLOCK + position,
+		    name, sizeof(name), 30 + i, BLOCK, 2);
+		directory(image.bytes + (30 + i) * BLOCK, 30 + i, ROOT, BLOCK);
+		put32(image.bytes + (30 + i) * BLOCK + DOT_BYTES + DR_SIZE,
+		    2 * BLOCK);
+		verify_path(image.bytes + 70 * BLOCK + offset, name,
+		    sizeof(name), 30 + i, 1, false);
+		offset += verify_path(image.bytes + 72 * BLOCK + offset, name,
+		    sizeof(name), 30 + i, 1, true);
+	}
+	CHECK(offset == 2062);
+	put32(image.bytes + 16 * BLOCK + VD_PATH_SIZE, offset);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "path record crosses block boundary");
+	free(image.bytes);
+}
+
+static void
+test_verify_excess_path_table_records_are_corrupt(void)
+{
+	image_t image = image_new();
+	unsigned char zero = 0;
+	const size_t bytes = 65536 * 10;
+	const unsigned l = 128, m = 449, blocks = 770;
+
+	image.bytes = realloc(image.bytes, blocks * BLOCK);
+	CHECK(image.bytes != NULL);
+	bzero(image.bytes + image.stored, blocks * BLOCK - image.stored);
+	image.stored = image.length = blocks * BLOCK;
+	put32(image.bytes + 16 * BLOCK + VD_SPACE, blocks);
+	verify_table_root(&image, 16, ROOT, l, m);
+	for (unsigned i = 1; i < 65536; i++) {
+		verify_path(image.bytes + l * BLOCK + i * 10, &zero, 1,
+		    ROOT, 1, false);
+		verify_path(image.bytes + m * BLOCK + i * 10, &zero, 1,
+		    ROOT, 1, true);
+	}
+	put32(image.bytes + 16 * BLOCK + VD_PATH_SIZE, bytes);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+	    "path table does not match the directories", "excess path table records");
+	free(image.bytes);
+}
+
+/* The wide root and its empty children are synthesized on demand. Each
+ * root block holds 42 records (40 after the dots); names sort numerically.
+ */
+static void
+verify_directory_limit_block(unsigned char *p, unsigned block)
+{
+	unsigned index = block - ROOT;
+	unsigned first = index == 0 ? 0 : 40 + (index - 1) * 42;
+	unsigned slots = index == 0 ? 40 : 42;
+	size_t offset = index == 0 ? DOT_PAIR_BYTES : 0;
+	char name[15];
+
+	bzero(p, BLOCK);
+	if (block >= VERIFY_DIRECTORY_FIRST_CHILD) {
+		directory(p, block, ROOT, BLOCK);
+		put32(p + DOT_BYTES + DR_SIZE, VERIFY_DIRECTORY_ROOT_BLOCKS * BLOCK);
+		return;
+	}
+	if (index >= VERIFY_DIRECTORY_ROOT_BLOCKS)
+		return;
+	if (index == 0)
+		directory(p, ROOT, ROOT, VERIFY_DIRECTORY_ROOT_BLOCKS * BLOCK);
+	for (unsigned i = 0; i < slots && first + i < VERIFY_DIRECTORY_CHILDREN; i++) {
+		CHECK(snprintf(name, sizeof(name), "D%013u", first + i) == 14);
+		offset += record(p + offset, name, 14,
+		    VERIFY_DIRECTORY_FIRST_CHILD + first + i, BLOCK, 2);
+	}
+}
+
+static void
+test_verify_directory_count_limit(void)
+{
+	const unsigned blocks = VERIFY_DIRECTORY_FIRST_CHILD + VERIFY_DIRECTORY_CHILDREN;
+	image_t image = image_new();
+
+	image.directory_scale = true;
+	image.length = (uint64_t)blocks * BLOCK;
+	put32(image.bytes + 16 * BLOCK + VD_SPACE, blocks);
+	put32(image.bytes + 16 * BLOCK + VD_ROOT + DR_SIZE,
+	    VERIFY_DIRECTORY_ROOT_BLOCKS * BLOCK);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_EUNSUPPORTED,
+	    "more than 65535 directories", "walk directory count exceeds path numbering");
+	free(image.bytes);
+}
+
+static void
+test_verify_primary_directory_order_and_versions(void)
+{
+	static const struct {
+		const char *first;
+		const char *second;
+		fsimg_status_t expected;
+		const char *name;
+	} rows[] = {
+		{ "B.TXT;1", "A.TXT;1", FSIMG_ECORRUPT, "primary records descend" },
+		{ "FOO.TXT;2", "FOO.TXT;1", FSIMG_OK, "versions descend" },
+		{ "FOO.TXT;1", "FOO.TXT;2", FSIMG_ECORRUPT, "versions ascend" },
+		{ "A;B;2", "A;B;1", FSIMG_OK, "last semicolon versions descend" },
+		{ "A;B;1", "A;B;2", FSIMG_ECORRUPT, "last semicolon versions ascend" }
+	};
+
+	for (unsigned rr = 0; rr < 2; rr++) {
+		for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+			susp_area_t area = {0};
+			image_t image = rr ? rr_image(&area, 0) : image_new();
+			unsigned start = rr ? RR_CHILD : DOT_PAIR_BYTES;
+			unsigned char *p = image.bytes + ROOT * BLOCK + start;
+			size_t length;
+
+			bzero(p, BLOCK - start);
+			length = record(p, rows[i].first, strlen(rows[i].first),
+			    DATA, 5, 0);
+			record(p + length, rows[i].second, strlen(rows[i].second),
+			    DATA + 1, 5, 0);
+			verify_expect(&image, rr ? FSIMG_ISO_VIEW_ROCKRIDGE :
+			    FSIMG_ISO_VIEW_PRIMARY, 0, rows[i].expected,
+			    rows[i].expected == FSIMG_OK ? NULL :
+			    "primary directory records are not sorted", rows[i].name);
+			free(image.bytes);
+		}
+	}
+}
+
+static void
+test_verify_directory_and_file_equal_order_keys(void)
+{
+	for (unsigned reverse = 0; reverse < 2; reverse++) {
+		image_t image = image_new();
+		unsigned char *p = image.bytes + ROOT * BLOCK + DOT_PAIR_BYTES;
+
+		bzero(p, BLOCK - DOT_PAIR_BYTES);
+		if (reverse)
+			p += record(p, "FOO.;1", 6, DATA, 5, 0);
+		p += record(p, "FOO", 3, 85, BLOCK, 2);
+		if (!reverse)
+			record(p, "FOO.;1", 6, DATA, 5, 0);
+		directory(image.bytes + 85 * BLOCK, 85, ROOT, BLOCK);
+		verify_path(image.bytes + 82 * BLOCK + 10, "FOO", 3, 85, 1, false);
+		verify_path(image.bytes + 83 * BLOCK + 10, "FOO", 3, 85, 1, true);
+		put32(image.bytes + 16 * BLOCK + VD_PATH_SIZE, 22);
+		verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+		    reverse ? "file before equal-key directory" :
+		    "directory before equal-key file");
+		free(image.bytes);
+	}
+}
+
+static void
+test_verify_unsorted_joliet_directory_is_accepted(void)
+{
+	image_t image = verify_tree(true);
+	unsigned char *p = image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES;
+	unsigned char saved[36];
+
+	bcopy(p, saved, 36);
+	bcopy(p + 36, p, 36);
+	bcopy(saved, p + 36, 36);
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "unsorted Joliet beside sorted primary");
+	/* Root record is ten bytes; the first UCS-2 child name starts at +8. */
+	image.bytes[90 * BLOCK + PT_A + PT_NAME + 1] = 'Z';
+	image.bytes[91 * BLOCK + PT_A + PT_NAME + 1] = 'Z';
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+	    "path table does not match the directories", "Joliet table identifier mismatch");
+
+	free(image.bytes);
+}
+
+/* Relocate Z into the logical root: root/{A(CL),RR_MOVED(RE)/{Z(RE)}}.
+ * Primary sees an empty A file and the physical RR_MOVED/Z tree.
+ * RE hides RR_MOVED in the Rock Ridge view.
+ */
+static image_t
+verify_relocation_image(void)
+{
+	susp_area_t cl = {0}, pl = {0};
+	image_t image;
+	unsigned char *p;
+	size_t length;
+
+	put32(susp_entry(&cl, "CL", 12) + 4, 86);
+	image = rr_image(&cl, 0);
+	p = image.bytes + ROOT * BLOCK + RR_CHILD;
+	put32(p + DR_SIZE, 0);
+	put32(p + DR_EXTENT, MKISOFS_PLACEHOLDER);
+	p += p[0];
+	length = record(p, "RR_MOVED", 8, 85, BLOCK, 2);
+	bcopy("RE\004\001", p + length, 4);
+	p[0] += 4;
+	directory(image.bytes + 85 * BLOCK, 85, ROOT, BLOCK);
+	p = image.bytes + 85 * BLOCK + DOT_PAIR_BYTES;
+	length = record(p, "Z", 1, 86, BLOCK, 2);
+	bcopy("RE\004\001", p + length, 4);
+	p[0] += 4;
+	p = image.bytes + 86 * BLOCK;
+	directory(p, 86, 85, BLOCK);
+	put32(susp_entry(&pl, "PL", 12) + 4, ROOT);
+	bcopy(pl.bytes, p + DOT_PAIR_BYTES, pl.length);
+	p[DOT_BYTES] += pl.length;
+	verify_path(image.bytes + 82 * BLOCK + 10, "RR_MOVED", 8, 85, 1, false);
+	verify_path(image.bytes + 83 * BLOCK + 10, "RR_MOVED", 8, 85, 1, true);
+	verify_path(image.bytes + 82 * BLOCK + 26, "Z", 1, 86, 2, false);
+	verify_path(image.bytes + 83 * BLOCK + 26, "Z", 1, 86, 2, true);
+	put32(image.bytes + 16 * BLOCK + VD_PATH_SIZE, 36);
+	joliet_add(&image);
+	verify_table_root(&image, 17, JOLIET_ROOT, 90, 91);
+	return (image);
+}
+
+static void
+test_verify_relocation_matches_cl_and_pl_and_hides_re(void)
+{
+	static const fsimg_iso_view_t views[] = {
+		FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ISO_VIEW_PRIMARY,
+		FSIMG_ISO_VIEW_JOLIET
+	};
+	image_t image = verify_relocation_image();
+	fsimg_verify_report_t report;
+
+	for (unsigned i = 0; i < sizeof(views) / sizeof(views[0]); i++) {
+		report = verify_expect(&image, views[i], 0, FSIMG_OK, NULL,
+		    "valid relocation in every selected view");
+		rr_equal(report.files, views[i] == FSIMG_ISO_VIEW_PRIMARY ? 1 : 0,
+		    "selected view files");
+		rr_equal(report.directories, views[i] == FSIMG_ISO_VIEW_JOLIET ? 1 :
+		    views[i] == FSIMG_ISO_VIEW_PRIMARY ? 3 : 2,
+		    "selected view directories");
+		rr_equal(report.logical_bytes, 0, "selected view logical bytes");
+	}
+	{
+		static const char *const names[] = { "/A.TXT" };
+
+		joliet_names(&image, FSIMG_ISO_VIEW_ROCKRIDGE, names, 1, 0,
+		    "producer relocation directory is hidden");
+	}
+	/* Remove CL while retaining a structurally valid empty placeholder. */
+	bzero(image.bytes + RR_AREA * BLOCK, 12);
+	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_OK,
+	    "orphaned PL directory still lists");
+	{
+		static const char *const names[] = { "/A.TXT" };
+
+		joliet_names(&image, FSIMG_ISO_VIEW_ROCKRIDGE, names, 1, 0,
+		    "orphaned PL directory is hidden from listing");
+	}
+	for (unsigned i = 0; i < sizeof(views) / sizeof(views[0]); i++)
+		verify_expect(&image, views[i], 0, FSIMG_ECORRUPT,
+		    "Rock Ridge relocated directories and CL entries do not match",
+		    "orphaned PL directory");
+	/* Without PL these RE markers merely hide ordinary directories. */
+	bzero(image.bytes + 86 * BLOCK + DOT_PAIR_BYTES, LINK_BYTES);
+	image.bytes[86 * BLOCK + DOT_BYTES] = DOT_BYTES;
+	for (unsigned i = 0; i < sizeof(views) / sizeof(views[0]); i++)
+		verify_expect(&image, views[i], 0, FSIMG_OK, NULL,
+		    "unreferenced RE without PL verifies");
+	free(image.bytes);
+	image = verify_relocation_image();
+	bzero(image.bytes + 85 * BLOCK + DOT_PAIR_BYTES, BLOCK - DOT_PAIR_BYTES);
+	put32(image.bytes + 16 * BLOCK + VD_PATH_SIZE, 26);
+	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_OK,
+	    "CL target outside primary tree still lists");
+	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_ECORRUPT,
+	    "Rock Ridge relocated directories and CL entries do not match",
+	    "CL target with PL outside primary tree");
+	free(image.bytes);
+	image = verify_relocation_image();
+	/* RR validates PL logically, W must also validate the physical parent. */
+	put32(image.bytes + 86 * BLOCK + DOT_BYTES + DR_EXTENT, ROOT);
+	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_ECORRUPT,
+	    "directory's parent record does not name its parent",
+	    "CL target physical parent differs from its physical container");
+	free(image.bytes);
+}
+
+/* RE hides an ordinary directory and its child from the Rock Ridge walk.
+ * The primary walk must frame the child's SUSP without interpreting TF.
+ */
+static void
+test_verify_hidden_subtree_susp_framing(void)
+{
+	susp_area_t area = {0};
+	image_t image = rr_image(&area, 0);
+	unsigned char *p = image.bytes + ROOT * BLOCK + RR_CHILD;
+	size_t length;
+
+	bzero(p, BLOCK - RR_CHILD);
+	length = record(p, "HIDDEN", 6, 85, BLOCK, 2);
+	bcopy("RE\004\001", p + length, 4);
+	p[0] += 4;
+	directory(image.bytes + 85 * BLOCK, 85, ROOT, BLOCK);
+	p = image.bytes + 85 * BLOCK + DOT_PAIR_BYTES;
+	length = record(p, "CHILD;1", 7, DATA, 5, 0);
+	/* TF selects a timestamp without supplying it; framing is valid. */
+	bcopy("TF\005\001\100", p + length, 5);
+	p[0] += 6;
+	verify_path(image.bytes + 82 * BLOCK + 10, "HIDDEN", 6, 85, 1, false);
+	verify_path(image.bytes + 83 * BLOCK + 10, "HIDDEN", 6, 85, 1, true);
+	put32(image.bytes + 16 * BLOCK + VD_PATH_SIZE, 24);
+	joliet_names(&image, FSIMG_ISO_VIEW_ROCKRIDGE, NULL, 0, 0,
+	    "RE hides ordinary directory and child");
+	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_OK, NULL,
+	    "hidden subtree well-framed TF with missing timestamp");
+	/* The entry claims seven bytes in a six-byte area. */
+	p[length + 2] = 7;
+	joliet_names(&image, FSIMG_ISO_VIEW_ROCKRIDGE, NULL, 0, 0,
+	    "RE hides child with malformed SUSP");
+	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_ECORRUPT,
+	    "SUSP entry extends past its area", "primary walk frames hidden child SUSP");
+	free(image.bytes);
+}
+
+/* Open without faults so every injected allocation belongs to verification.
+ * The first untouched attempt proves the entire allocation sequence ran.
+ * fixture_free checks all memory, scratch and descriptors after each prefix.
+ */
+static void
+test_verify_allocation_failures_are_incomplete(void)
+{
+	image_t image = verify_relocation_image();
+	fsimg_verify_report_t report;
+	fsimg_status_t status;
+	fixture_t f;
+	bool allocation_hit;
+
+	/* A regular child exercises actual payload delivery in both trees. */
+	record(image.bytes + 86 * BLOCK + RELOCATED_CHILD, "PAYLOAD;1", 9,
+	    DATA, 5, 0);
+
+	for (unsigned payload = 0; payload < 2; payload++) {
+		for (unsigned n = 1;; n++) {
+			fixture_new(&f, &image, NULL);
+			CHECK(open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE) == FSIMG_OK);
+			fsimg_test_fail_alloc_after(f.ctx, n);
+			status = fsimg_verify(f.reader,
+			    payload ? FSIMG_VERIFY_PAYLOAD : 0, &report, NULL);
+			allocation_hit = f.ctx->allocation_attempts >= n;
+			if (allocation_hit) {
+				CHECK(status != FSIMG_OK);
+				CHECK(!report.complete);
+			} else {
+				CHECK(status == FSIMG_OK);
+				CHECK(report.complete);
+			}
+			fsimg_test_fail_alloc_after(f.ctx, 0);
+			fixture_free(&f);
+			if (!allocation_hit) {
+				printf("ISO verifier allocation faults: payload=%u attempts=%u\n",
+				    payload, n - 1);
+				break;
+			}
+			CHECK(n < 10000);
+		}
+	}
+	free(image.bytes);
+}
+
+/* Sweep every cancellation checkpoint through all offered walks, claim
+ * sorting/sweeping, path comparison and relocation matching. Opening uses
+ * an unexhausted budget so each injected cancellation belongs to W.
+ * fixture_free checks memory, scratch and descriptor accounting each time.
+ */
+static void
+test_verify_cancellation_at_every_checkpoint_is_incomplete(void)
+{
+	image_t image = verify_relocation_image();
+	fsimg_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_status_t status;
+	fixture_t f;
+	unsigned budget, checkpoints;
+	bool cancelled_after_walks = false;
+
+	fsimg_options_init(&options);
+	options.cancelled = cancelled;
+	options.cancel_argument = &budget;
+	for (checkpoints = 0;; checkpoints++) {
+		budget = UINT_MAX;
+		fixture_new(&f, &image, &options);
+		CHECK(open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE) == FSIMG_OK);
+		budget = checkpoints;
+		bzero(&report, sizeof(report));
+		status = fsimg_verify(f.reader, 0, &report, NULL);
+		CHECK(status == FSIMG_OK || status == FSIMG_ECANCELLED);
+		if (status == FSIMG_ECANCELLED) {
+			CHECK(!report.complete);
+			/* Allocated blocks are counted only in the claim sweep,
+			 * after every offered walk has finished.
+			 */
+			if (report.allocated_clusters > 0)
+				cancelled_after_walks = true;
+		} else
+			CHECK(report.complete);
+		fixture_free(&f);
+		if (status == FSIMG_OK)
+			break;
+		CHECK(checkpoints < 10000);
+	}
+	CHECK(cancelled_after_walks);
+	printf("ISO verifier cancellation: checkpoints=%u\n", checkpoints);
+	free(image.bytes);
+}
+
+static void
+test_verify_checks_unselected_joliet_parent_records(void)
+{
+	susp_area_t area = {0};
+	image_t image;
+
+	susp_entry(&area, "ST", 4);
+	image = rr_image(&area, 0);
+	joliet_add(&image);
+	record(image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES,
+	    "\0D", 2, JOLIET_CHILD, BLOCK, 2);
+	directory(image.bytes + JOLIET_CHILD * BLOCK,
+	    JOLIET_CHILD, JOLIET_CHILD, BLOCK);
+	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_OK,
+	    "RR listing ignores corrupt unselected Joliet");
+	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_ECORRUPT,
+	    "directory's parent record does not name its parent",
+	    "RR verification checks Joliet parent");
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+	    "directory's parent record does not name its parent",
+	    "forced primary verification checks Joliet parent");
+	free(image.bytes);
+}
+
+static void
+test_verify_forced_primary_rejects_unsupported_rr_skip(void)
+{
+	susp_area_t area = {0};
+	image_t image = rr_image(&area, 0);
+
+	image.bytes[ROOT * BLOCK + ROOT_SP + 6] = 1;
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_EUNSUPPORTED,
+	    "unsupported SP skip count", "forced primary still checks RR handshake");
+	free(image.bytes);
+}
+
+static void
+test_verify_omissions_belong_to_counted_walk(void)
+{
+	susp_area_t area = {0};
+	image_t image;
+	fsimg_verify_report_t report;
+
+	susp_nm(&area, "\001", 1, 0);
+	image = rr_image(&area, 0);
+	report = verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_OK,
+	    NULL, "RR counted omitted name");
+	rr_equal(report.omitted_entries, 1, "RR omissions");
+	rr_equal(report.files, 0, "omitted RR file is not counted");
+	rr_equal(report.logical_bytes, 0, "omitted RR bytes are not counted");
+	report = verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK,
+	    NULL, "primary counted before omitted RR walk");
+	rr_equal(report.omitted_entries, 0, "uncounted RR omissions excluded");
+	rr_equal(report.files, 1, "primary file counted");
+	rr_equal(report.logical_bytes, 5, "primary bytes counted");
+	free(image.bytes);
+}
+
+static void
+test_verify_payload_reads_sections_once_per_offered_view(void)
+{
+	susp_area_t area = {0};
+	image_t image = rr_image(&area, 0);
+	unsigned char *p = image.bytes + ROOT * BLOCK + RR_CHILD;
+	fsimg_verify_report_t report;
+
+	bzero(p, BLOCK - RR_CHILD);
+	p += record(p, "A.TXT;1", 7, DATA, BLOCK, 0x80);
+	record(p, "A.TXT;1", 7, DATA + 1, 5, 0);
+	joliet_add(&image);
+	verify_table_root(&image, 17, JOLIET_ROOT, 90, 91);
+	p = image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES;
+	p += record(p, "\0A\0.\0T\0X\0T\0;\0" "1", 14, DATA, BLOCK, 0x80);
+	record(p, "\0A\0.\0T\0X\0T\0;\0" "1", 14, DATA + 1, 5, 0);
+	report = verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+	    FSIMG_VERIFY_PAYLOAD, FSIMG_OK, NULL, "multi-section payload in three views");
+	rr_equal(report.files, 1, "sections count as one file");
+	rr_equal(report.logical_bytes, BLOCK + 5, "sections logical size");
+	rr_equal(report.payload_bytes_read, 3 * (BLOCK + 5),
+	    "payload read once in each offered view");
+	/* Headers and all trees remain readable; the final section is absent. */
+	image.length = (DATA + 1) * BLOCK;
+	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_VERIFY_PAYLOAD,
+	    FSIMG_ECORRUPT, "extent is empty, misaligned or outside its allocation domain",
+	    "section past readable image fails payload W");
+	/* Content-index construction rejects the absent section even without
+	 * payload verification, before fsimg_verify_payload runs.
+	 */
+	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_ECORRUPT,
+	    "extent is empty, misaligned or outside its allocation domain",
+	    "content index rejects absent section without payload");
+
+	free(image.bytes);
+}
+
+static void
+test_verify_second_walk_read_failure_is_incomplete(void)
+{
+	susp_area_t area = {0}, ce = {0};
+	image_t image;
+	fixture_t f;
+	fsimg_verify_report_t report = {0};
+	fsimg_status_t status;
+	unsigned char *p;
+	size_t length;
+
+	susp_entry(&area, "ST", 4);
+	image = rr_image(&area, 0);
+	p = image.bytes + ROOT * BLOCK + RR_CHILD;
+	p += p[0];
+	length = record(p, "B.TXT;1", 7, DATA, 5, 0);
+	susp_ce(&ce, RR_AREA + 1, 0, 4);
+	bcopy(ce.bytes, p + length, ce.length);
+	p[0] += ce.length;
+	bcopy(area.bytes, image.bytes + (RR_AREA + 1) * BLOCK, 4);
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	/* Two CE blocks evict one another from the continuation window.
+	 * Refuse the first CE only after both selected files are counted,
+	 * so the injected read belongs to the second, uncounted RR walk.
+	 */
+	image.verify_report = &report;
+	status = fsimg_verify(f.reader, 0, &report, NULL);
+	rr_status_equal(status, FSIMG_EIO, "read failure in second walk");
+	CHECK(!report.complete);
+	rr_equal(report.files, 2, "selected walk finished before injected read");
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+/* The primary-only image has 16 files of 62500 one-block sections each:
+ * exactly a million data claims, but only 16 prepared entries. Each run's
+ * sections ascend without overlap; files share the same payload range.
+ * Complete 48-byte records are synthesized on demand, never stored on disk.
+ */
+static void
+verify_scale_block(unsigned char *p, unsigned block)
+{
+	unsigned first = block == 0 ? 0 : 40 + (block - 1) * 42;
+	unsigned slots = block == 0 ? 40 : 42;
+	size_t offset = block == 0 ? DOT_PAIR_BYTES : 0;
+	char name[15];
+
+	bzero(p, BLOCK);
+	if (block == 0)
+		directory(p, ROOT, ROOT, VERIFY_SCALE_BLOCKS * BLOCK);
+	for (unsigned i = 0; i < slots && first + i < VERIFY_SCALE_CLAIMS; i++) {
+		unsigned section = (first + i) % VERIFY_SCALE_SECTIONS;
+		unsigned file = (first + i) / VERIFY_SCALE_SECTIONS;
+
+		CHECK(snprintf(name, sizeof(name), "%08u.TXT;1", file) == 14);
+		offset += record(p + offset, name, 14, VERIFY_SCALE_DATA + section,
+		    BLOCK, section + 1 < VERIFY_SCALE_SECTIONS ? 0x80 : 0);
+	}
+}
+
+static void
+test_verify_million_data_claims_spill_to_scratch(void)
+{
+	image_t image = image_new();
+	fixture_t f;
+	fsimg_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_error_t error = {0};
+	fsimg_stats_t stats;
+	fsimg_status_t status;
+	struct timespec start, end;
+	double seconds;
+
+	image.scale = true;
+	image.length = (uint64_t)(VERIFY_SCALE_DATA + VERIFY_SCALE_SECTIONS) * BLOCK;
+	put32(image.bytes + 16 * BLOCK + VD_SPACE,
+	    VERIFY_SCALE_DATA + VERIFY_SCALE_SECTIONS);
+	put32(image.bytes + 16 * BLOCK + VD_ROOT + DR_SIZE,
+	    VERIFY_SCALE_BLOCKS * BLOCK);
+	fsimg_options_init(&options);
+	options.memory_bytes = 16 * 1024 * 1024;
+	options.max_entries = VERIFY_SCALE_FILES + 1;
+	options.max_work = UINT64_C(10000000000);
+	fixture_new(&f, &image, &options);
+	CHECK(fsimg_test_meta_cache(f.ctx, 2, NULL) == FSIMG_OK);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	status = fsimg_verify(f.reader, 0, &report, &error);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	seconds = end.tv_sec - start.tv_sec +
+	    (end.tv_nsec - start.tv_nsec) / 1000000000.0;
+	printf("ISO verifier million claims: seconds=%.3f scratch_peak=%" PRIu64
+	    " memory_peak=%" PRIu64 " status=%d message=%s\n", seconds,
+	    stats.scratch_peak, stats.memory_peak, status,
+	    error.message);
+	rr_status_equal(status, FSIMG_OK, "million data claims");
+	CHECK(report.complete);
+	rr_equal(report.files, VERIFY_SCALE_FILES, "multi-section counted files");
+	rr_equal(report.allocated_clusters, 20 + VERIFY_SCALE_BLOCKS +
+	    VERIFY_SCALE_SECTIONS, "million claims share one ascending section range");
+	rr_equal(report.logical_bytes, (uint64_t)VERIFY_SCALE_CLAIMS * BLOCK,
+	    "all million sections counted");
+	CHECK(stats.scratch_peak >= UINT64_C(1000000) * 18);
+	CHECK(stats.memory_peak < UINT64_C(1000000) * 18);
+	CHECK(stats.scratch_peak < UINT64_C(80) * 1024 * 1024);
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+static void
+test_verifier(void)
+{
+	test_verify_counts_distinct_claimed_blocks();
+	test_verify_file_metadata_overlap_is_corrupt();
+	test_verify_data_sharing_and_empty_sections();
+	test_verify_continuations_share_blocks_but_not_bytes();
+	test_verify_continuation_inside_directory_is_corrupt();
+	test_verify_directory_and_path_table_overlap_is_corrupt();
+	test_verify_boot_catalog_and_image_sharing();
+	test_verify_path_tables_reject_malformed_records();
+	test_verify_primary_path_order_and_joliet_structural_order();
+	test_verify_path_record_can_cross_block_boundary();
+	test_verify_excess_path_table_records_are_corrupt();
+	test_verify_directory_count_limit();
+	test_verify_primary_directory_order_and_versions();
+	test_verify_directory_and_file_equal_order_keys();
+	test_verify_unsorted_joliet_directory_is_accepted();
+	test_verify_relocation_matches_cl_and_pl_and_hides_re();
+	test_verify_hidden_subtree_susp_framing();
+	test_verify_allocation_failures_are_incomplete();
+	test_verify_cancellation_at_every_checkpoint_is_incomplete();
+	test_verify_checks_unselected_joliet_parent_records();
+	test_verify_forced_primary_rejects_unsupported_rr_skip();
+	test_verify_omissions_belong_to_counted_walk();
+	test_verify_payload_reads_sections_once_per_offered_view();
+	test_verify_second_walk_read_failure_is_incomplete();
+	test_verify_million_data_claims_spill_to_scratch();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4555,7 +5688,12 @@ main(int argc, char **argv)
 		susp_seed(argv[2]);
 		return (0);
 	}
+	if (argc == 2 && strcmp(argv[1], "--verify-scale") == 0) {
+		test_verify_million_data_claims_spill_to_scratch();
+		return (failures == 0 ? 0 : 1);
+	}
 	CHECK(argc == 1);
+	test_verifier();
 	test_joliet_views();
 	test_joliet_identifiers();
 	test_joliet_namespace();

@@ -485,6 +485,9 @@ one written without Rock Ridge fails under
 .Ar view=auto
 too and reads with
 .Ar view=primary .
+.Cm W ,
+which walks every tree an image offers, fails on such an image under every
+view.
 In the primary and Joliet views a final
 .Ql ;1
 is removed from displayed names and other versions are kept, so
@@ -493,7 +496,26 @@ lists and selects as
 .Pa README.TXT .
 Names are case sensitive.
 .Cm W
-reports an ISO 9660 image as unsupported.
+checks the Rock Ridge, primary and Joliet trees the image offers, the
+selected view first, and reports the selected view's files, directories
+and bytes.
+It checks that no block has two kinds of owner, where files may share data
+and the boot catalog may also be a file; that the primary hierarchy's
+directory records and path tables are sorted; that each hierarchy's path
+tables list exactly its directories; and that every relocated Rock Ridge
+directory has one placeholder.
+The Joliet hierarchy's order is not checked, since producers write it
+unsorted.
+A directory whose record carries the Rock Ridge
+.Ql RE
+entry, such as the
+.Pa rr_moved
+directory mkisofs and xorriso write, is hidden from the Rock Ridge view
+with its subtree; the primary view shows it, and
+.Cm W
+checks its records there without interpreting their Rock Ridge entries.
+The allocated units it reports are the blocks some structure or file
+claims; unused blocks are legal and none is reported free.
 An image whose system area holds a partition table matches both the scheme
 and the filesystem;
 .Fl F Ar iso9660/-

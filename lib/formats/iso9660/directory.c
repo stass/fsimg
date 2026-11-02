@@ -211,7 +211,7 @@ run_add(const fsimg_iso9660_reader_t *iso, iso_run_t *run,
     const iso_cursor_t *cursor, const iso_record_t *record,
     const unsigned char *raw, fsimg_error_t *error)
 {
-	const unsigned char *identifier = raw + 33;
+	const unsigned char *identifier = raw + ISO_RECORD_IDENTIFIER;
 	fsimg_status_t status;
 
 	if (record->identifier_length == 1 && identifier[0] <= 0x01)
@@ -245,10 +245,11 @@ run_add(const fsimg_iso9660_reader_t *iso, iso_run_t *run,
  * parent, the walker's parent, which is the root itself for the root. In
  * the rockridge view both streams pass every Rock Ridge check, neither
  * carries CL or RE, and the second carries PL exactly when the directory
- * is relocated: its PL then names parent, and its extent the relocation
- * directory, which only full verification checks against the RE record
- * there. The two records are checked as a pair: a refusal in either is
- * reported only once both have passed their checks.
+ * is relocated: its PL then names parent, and its extent the directory's
+ * physical parent, which the primary view checks. Full verification
+ * matches the directories carrying PL with those reached through CL. The
+ * two records are checked as a pair: a refusal in either is reported only
+ * once both have passed their checks.
  */
 static fsimg_status_t
 dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
@@ -270,7 +271,8 @@ dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
 			return (status);
 		if (cursor->record_block != cursor->extent ||
 		    (dot == 0 && cursor->record_offset != 0) ||
-		    record.identifier_length != 1 || raw[33] != dot ||
+		    record.identifier_length != 1 ||
+		    raw[ISO_RECORD_IDENTIFIER] != dot ||
 		    (record.flags & ISO_FLAG_DIRECTORY) == 0)
 			return (iso_corrupt(error,
 			    "ISO 9660 directory does not begin with its dot records"));
@@ -518,7 +520,8 @@ run_admit(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 /* Prepare the view's root at level 0, otherwise the directory replay made
  * current: check its dot records, then group every later record into runs
  * and admit each complete one. Preparation reads the directory's blocks
- * once and never its subtree.
+ * once and never its subtree. Under full verification it reports the
+ * directory and every record it found valid.
  */
 fsimg_status_t
 iso_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
@@ -551,6 +554,9 @@ iso_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	if (status == FSIMG_OK)
 		status = dots_check(reader, &cursor, length, parent, relocated,
 		    error);
+	if (status == FSIMG_OK)
+		status = iso_verify_directory(reader, &cursor, relocated,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
 
@@ -562,6 +568,9 @@ iso_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 		if (status == FSIMG_OK)
 			status = run_record(reader, &run, &cursor, &record, raw,
 			    error);
+		if (status == FSIMG_OK)
+			status = iso_verify_record(reader, &cursor, &record,
+			    raw, error);
 		if (status == FSIMG_OK && !run.open)
 			status = run_admit(reader, build, &cursor, &run, error);
 		if (status != FSIMG_OK)

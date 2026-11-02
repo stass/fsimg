@@ -497,6 +497,25 @@ module IsoIntegration
          "(#{actual.size} paths, #{files.size} SHA-256); #{paired}/Joliet content agrees"
   end
 
+  def verify_corpus_image(binary:, image:, forcing:)
+    parent_rule_images = %w[xorriso-joliet.iso xorriso-joliet-long.iso xorriso-joliet-utf16.iso]
+    parent_rule = parent_rule_images.include?(File.basename(image))
+    failures = %w[auto primary].filter_map do |view|
+      selection = view == "auto" ? [] : ["-o", "view=primary"]
+      _output, diagnostic, status = Open3.capture3(binary, "W", *forcing, *selection, "-f", image)
+      if parent_rule
+        unless status.exitstatus == 1 && diagnostic.include?("directory's parent record does not name its parent")
+          "W #{view}: expected Joliet parent-rule failure; exit=#{status.exitstatus}: #{diagnostic.strip}"
+        end
+      elsif !status.success?
+        "W #{view}: expected success; exit=#{status.exitstatus}: #{diagnostic.strip}"
+      end
+    end
+    raise Error, failures.join("; ") unless failures.empty?
+
+    puts "#{File.basename(image)}: W auto/primary #{parent_rule ? 'expected Joliet parent-rule rejection' : 'ok'}"
+  end
+
   def corpus(binary:, directory:, scratch:)
     images = Dir.glob(File.join(directory, "*.iso")).sort
     raise Error, "no producer images" if images.empty?
@@ -505,6 +524,13 @@ module IsoIntegration
     images.each_with_index do |image, index|
       label = File.basename(image)
       forcing = label.include?("isohybrid") ? ["-F", "iso9660/-"] : []
+      begin
+        verify_corpus_image(binary: binary, image: image, forcing: forcing)
+      rescue Error => error
+        warn "#{label}: verification failed: #{error.message}"
+        failed = true
+      end
+
       if command("isoinfo", "-d", "-i", image).match?(/^Rock Ridge signatures version 1 found/)
         begin
           agreement = rockridge(binary: binary, image: image, options: [*forcing, "-f", image])
@@ -583,6 +609,16 @@ module IsoIntegration
   end
 
   def private_disc(binary:, image:)
+    # Discard both streams at the process boundary: private member names
+    # must never enter an integration diagnostic or a stored transcript.
+    %w[auto primary].each do |view|
+      selection = view == "auto" ? [] : ["-o", "view=primary"]
+      verified = system(binary, "W", *selection, "-f", image, out: File::NULL, err: File::NULL)
+      raise Error, "H3 W #{view}: verification failed" unless verified
+
+      puts "H3 W #{view}: successful verifications=1"
+    end
+
     profile = counts([binary, "i", "-f", image],
                      ["awk", '/^Profile:[[:space:]]+joliet$/ { n++ } END { print n+0 }'])
     raise Error, "H3 auto profile must be Joliet" unless profile == [1]

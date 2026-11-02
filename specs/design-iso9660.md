@@ -737,20 +737,35 @@ In the `rockridge` view:
 * a directory reached through an ordinary record must not carry `PL`, so
   every directory has exactly one way in: through `CL` when it carries
   `PL`, through its physical parent otherwise;
-* a record with `RE` is not an entry: its directory is reached only
-  through its placeholder; `RE` on a record without the directory flag is
+* a record with `RE` is not an entry: the view skips it and the
+  directory it opens, which a relocated directory's placeholder reaches
+  instead; `RE` on a record without the directory flag is
   `FSIMG_ECORRUPT`;
 * a placeholder's target is checked, its dot records included, when the
   directory holding the placeholder is prepared, so a corrupt or refused
   target fails the listing of that directory;
-* full verification requires every `RE` directory to be named by exactly
-  one `CL`, whose target's physical parent is the directory holding the
-  `RE` record, and every `CL` target to be such an `RE` directory.
+* a directory is relocated when its second dot record carries `PL`; full
+  verification requires the relocated directories to be exactly the `CL`
+  targets, each entered by one `CL`.
+
+`RE` hides whatever directory record carries it and is never matched
+against a `CL`. A producer may put it on each relocated directory's
+record, on the relocation directory's own record, or both: mkisofs and
+xorriso mark their relocation directory `RR_MOVED` itself with `RE`, which
+no `CL` names, so the view hides it, while the relocated directories inside
+it carry `PL` and are reached through their placeholders. A relocated
+directory that no `CL` enters would vanish from the view with its subtree;
+verification fails it. A directory under `RE` that is not relocated is
+hidden from the view with its subtree, as Linux hides it; verification
+checks its records in the primary hierarchy and frames their SUSP
+streams, but interprets their Rock Ridge entries only where the view
+reads them.
 
 With the [dot-record rules](#dot-records), these keep the view a tree: a
 relocation loop or a directory reached both ways fails a check, and the
-walker's depth limit bounds a long chain. The relocation directory itself
-is an ordinary directory in the view; no name is special. In the
+walker's depth limit bounds a long chain. The relocation directory is an
+ordinary directory in the view unless its own record carries `RE`; no
+name is special. In the
 `primary` view `CL`, `PL` and `RE` do not exist: the placeholder is the
 file its record describes, empty as producers write it, and the relocated
 directory sits under its physical parent.
@@ -813,10 +828,8 @@ images, each for its part within the volume. The sharing rules:
 * data may overlap data: Joliet and primary records name one file's
   extents, deduplicating producers share identical content, and a boot
   image is usually a file;
-* a file whose one section is exactly the boot catalog's extent is the
-  boot catalog published as a file, as `boot.cat` is;
-* a directory or path table claimed again by the same hierarchy, from
-  another walk or another reference, is the same object;
+* data whose extent is exactly the boot catalog's block, such as a file
+  `boot.cat`, is the boot catalog published as a file;
 * continuation areas may share a block, but their byte ranges are
   disjoint, even between records;
 * any other overlap, such as file data over a directory, a continuation
@@ -1006,8 +1019,8 @@ levels and 255-byte paths. A directory is relocated when its physical
 level would be 9 or more, or when its physical path, identifiers and
 separators, would leave no room for its longest possible child: more than
 255 bytes less the separator and the level's longest file identifier.
-A relocated directory is written under `RR_MOVED` in the root with `RE`,
-at level 3, its subtree continuing below it and relocated again by the
+A relocated directory is written under `RR_MOVED` in the root, its
+record there carrying `RE`, at level 3, its subtree continuing below it and relocated again by the
 same rule; its logical parent holds a placeholder file record with `CL`,
 under the identifier the directory would have had there; and its second
 dot record carries `PL`. In `RR_MOVED` every relocated directory takes an
@@ -1017,7 +1030,8 @@ number is assigned. The Joliet hierarchy holds the logical tree and no
 relocation directory.
 
 The relocation directory's Rock Ridge name is `.rr_moved` and its
-existence flag is set. A root child naturally named `RR_MOVED` takes an
+existence flag is set; its own record carries no `RE`, so the `rockridge`
+view lists it, empty, as the round trip below needs. A root child naturally named `RR_MOVED` takes an
 alias. When the source root already holds an empty directory whose name
 is `.rr_moved`, as extracting a relocated image yields, it is the
 relocation directory and keeps its metadata, so such a tree round-trips;
@@ -1141,7 +1155,7 @@ shown, when reading unless the row says at verification.
 | Order | Sorted primary directories and path tables, versions descending, `FOO` and `FOO.;1` in either order; an unsorted Joliet hierarchy | Swapped unequal primary neighbours (ECORRUPT at verification) |
 | SUSP | `SP` alone; `ER` in a continuation; 16 continuation areas; unknown entries | Bad check bytes at root (opaque, view absent); length below 4 or past the area (ECORRUPT); 17 areas, an area crossing a block (EUNSUPPORTED); self-referencing or overlapping continuation (ECORRUPT); nonzero skip (EUNSUPPORTED for the view) |
 | Rock Ridge | Every kind; 36- and 44-byte `PX`; 1024-byte name and target; `NM` and `SL` across continuations; short and long `TF` | Type disagreeing with the flag, duplicate `PX`, `TF` length mismatch, dangling `SL` continuation, `NM` with a slash (ECORRUPT); device (EUNSUPPORTED); `ZF`, `SF` (EUNSUPPORTED) |
-| Relocation | Depths 9 to 20 through one and several relocations; placeholders with a directory `PX` | `CL` to a non-directory, missing `PL`, `PL` on an ordinary directory, `RE` without `CL`, a loop (ECORRUPT) |
+| Relocation | Depths 9 to 20 through one and several relocations; placeholders with a directory `PX`; a relocation directory carrying `RE` that no `CL` names, as mkisofs and xorriso write it | `CL` to a non-directory, missing `PL`, `PL` on an ordinary directory, a `PL` directory no `CL` enters, a loop (ECORRUPT) |
 | Joliet | Levels 1 to 3; shared data with the primary hierarchy | Bad escape (not Joliet); geometry differing from the PVD (ECORRUPT); a forced `joliet` view over a damaged primary handshake (reads) |
 | El Torito | BIOS only, EFI only, BIOS and EFI, boot image as a file and not, an EFI image past the volume, selection criteria in the initial entry | Checksum, signature, media type, a section count past its entries, a catalog or image before the data area, a catalog past the volume or slice (ECORRUPT); unknown platform, extension entry, a second block of entries, two boot records (EUNSUPPORTED) |
 | Ownership | Primary and Joliet sharing data; `boot.cat` as a file; deduplicated files | File data over a directory, continuation or descriptor; two records sharing continuation bytes (ECORRUPT) |

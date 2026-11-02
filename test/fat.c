@@ -391,7 +391,7 @@ test_variants(void)
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK(strcmp(format.name, names[i]) == 0);
 		CHECK(format.capabilities == (strcmp(format.name, "iso9660") == 0 ?
-		    FSIMG_CAP_READ : FSIMG_CAP_READ | FSIMG_CAP_WRITE |
+		    FSIMG_CAP_READ | FSIMG_CAP_VERIFY : FSIMG_CAP_READ | FSIMG_CAP_WRITE |
 		    FSIMG_CAP_VERIFY));
 	}
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);

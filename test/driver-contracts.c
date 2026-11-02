@@ -329,7 +329,7 @@ static fsimg_status_t materialize_iso(contract_volume_t *, fsimg_error_t *);
 
 static const contract_fs_profile_t fs_profiles[] = {
 	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ,
+	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
 	    .materialize = materialize_iso, .max_fixture_bytes = MIB },
 	{ .id = "fat12", .format = "fat12", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
@@ -496,6 +496,11 @@ iso_contract_record(unsigned char *p, const void *name, size_t name_bytes,
 static fsimg_status_t
 materialize_iso(contract_volume_t *volume, fsimg_error_t *error FSIMG_UNUSED)
 {
+	/* These extensionless names sort by bytes within each directory. */
+	static const unsigned record_order[] = {
+		ID_DIR, ID_EMPTY, ID_SPARSE, ID_ZEROS,
+		ID_EDIR, ID_MIXED, ID_SUB, ID_LARGE
+	};
 	uint32_t blocks[SOURCE_COUNT], parents[SOURCE_COUNT];
 	uint32_t next = 24, next_directory = 21;
 	unsigned char *bytes, *p;
@@ -548,7 +553,8 @@ materialize_iso(contract_volume_t *volume, fsimg_error_t *error FSIMG_UNUSED)
 	p = bytes + 20 * 2048;
 	iso_contract_record(p, &dot, 1, 20, 2048, 2);
 	iso_contract_record(p + 34, &up, 1, 20, 2048, 2);
-	for (size_t i = 0; i < SOURCE_COUNT; i++) {
+	for (size_t record = 0; record < COUNT(record_order); record++) {
+		size_t i = record_order[record] - 1;
 		const contract_entry_t *entry = &source_tree[i];
 		const char *name = strrchr(entry->path, '/') + 1;
 		unsigned dir = parents[i] - 20;

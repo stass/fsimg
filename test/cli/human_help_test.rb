@@ -90,7 +90,7 @@ class CliTest < Minitest::Test
       qnx6     yes   yes    yes
       qnx4     yes   yes    yes
       ifs      yes   yes    yes
-      iso9660  yes   no     no
+      iso9660  yes   no     yes
 
       Layer    Kind         Read  Write  Verify  Codecs           Settings
       gpt      scheme       yes   yes    yes     -                sector,disk,type,name,disk-guid,guid
