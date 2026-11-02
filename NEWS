@@ -1,5 +1,13 @@
 fsimg 0.1.0 (unreleased)
 
+ISO 9660 volumes can be inspected, listed, extracted and verified in their
+Rock Ridge, Joliet and primary views. Automatic view selection prefers
+Rock Ridge, then Joliet; `-o view=primary|rockridge|joliet` forces a view.
+The reader supports multi-extent files, Rock Ridge symbolic links and
+relocated directories, and reports El Torito boot catalogs through info.
+Full verification checks every offered hierarchy, path tables, record
+order and allocation ownership under the documented reader profile.
+
 zstd-compressed images are read and written over the system libzstd, an
 optional integration that `configure --with-zstd` controls (default auto)
 behind a link test of its custom-allocator interface. Reading decodes

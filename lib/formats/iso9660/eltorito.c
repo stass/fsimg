@@ -222,7 +222,7 @@ catalog_decode(const unsigned char *block, uint32_t data_start,
 {
 	iso_boot_entry_t entry;
 	const unsigned char *raw;
-	uint8_t platform;
+	uint8_t platform = block[VALIDATION_PLATFORM];
 	unsigned remaining;
 	bool last;
 	fsimg_status_t status;

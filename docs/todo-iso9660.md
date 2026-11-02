@@ -20,8 +20,6 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   images are built) and with initial-entry selection criteria
   (`-eltorito-selcrit`), which the El Torito comparison does not yet
   cover.
-* [High] **Reader** (`lib/formats/iso9660/`, `test/iso9660.c`,
-  `fuzz/iso9660.c`): stage 8, interoperability, scale and fault evidence.
 * [Low] **Root metadata** (`lib/read/`, `lib/formats/iso9660/`): the
   format design gives the Rock Ridge root the owner, mode and times of its
   own first dot record, but the walker delivers no metadata for the root
