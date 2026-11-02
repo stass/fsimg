@@ -198,17 +198,22 @@ iso_susp_next(fsimg_reader_t *reader, iso_susp_t *susp, iso_entry_t *entry,
 	return (FSIMG_DONE);
 }
 
-/* Walk a stream for its framing only, as for a file's later sections,
- * whose entries are not interpreted.
+/* Walk the stream of record, decoded from raw, which lies at offset of
+ * volume block number block, for its framing only, as for a file's later
+ * sections, whose entries are not interpreted.
  */
 fsimg_status_t
-iso_susp_frame(fsimg_reader_t *reader, iso_susp_t *susp, fsimg_error_t *error)
+iso_susp_frame(fsimg_reader_t *reader, const unsigned char *raw,
+    uint32_t block, uint32_t offset, const iso_record_t *record,
+    fsimg_error_t *error)
 {
 	iso_entry_t entry;
+	iso_susp_t susp;
 	fsimg_status_t status;
 
+	iso_susp_start(&susp, raw, block, offset, record);
 	do
-		status = iso_susp_next(reader, susp, &entry, error);
+		status = iso_susp_next(reader, &susp, &entry, error);
 	while (status == FSIMG_OK);
 	return (status == FSIMG_DONE ? FSIMG_OK : status);
 }

@@ -10,15 +10,15 @@
 
 /*
  * Rock Ridge entries (specs/design-iso9660.md#rock-ridge). iso_rr_decode()
- * consumes one record's SUSP stream into an iso_rr_t, which owns what it
- * decodes: PX owner, mode and file type; TF times; the name its NM entries
- * assemble; the link target its SL entries assemble; and the CL, PL and RE
- * relocation pointers. Every length, version and repetition is checked as
- * the entry table states; what the profile refuses (SF, ZF, a volume-root
- * or host link component, a name or target over 1024 bytes) is noted and
- * reported only after every corruption check, so corruption anywhere in
- * the stream takes precedence. iso_rr_kind() runs those checks against PX
- * and the record's directory flag, then refuses or names the kind.
+ * is the one decoder of a record's SUSP stream; it fills an iso_rr_t,
+ * which owns what it decodes: PX owner, mode and file type; TF times; the
+ * name its NM entries assemble; the link target its SL entries assemble;
+ * and the CL, PL and RE relocation pointers. Every length, version and
+ * repetition is checked as the entry table states; what the profile
+ * refuses (SF, ZF, a volume-root or host link component, a name or target
+ * over 1024 bytes) is noted and reported only after every corruption
+ * check, so corruption anywhere in the stream takes precedence. rr_kind() then runs the kind checks against
+ * PX and the record's directory flag, and refuses or names the kind.
  *
  * A name or target is assembled across entries: NM and SL entries carry a
  * continue flag, every one but the last of a record must carry it, and no
@@ -241,22 +241,37 @@ target_append(iso_rr_t *rr, rr_assembly_t *assembly, const void *bytes,
 	rr->target_length += length;
 }
 
-/* Append one SL component of length bytes with flags to the target:
- * components join with '/', except after a root component or when the
- * previous component continues into this one.
+/* Add one SL component of length bytes with flags. Every component is
+ * checked first, whatever it means: at most one of the meaning flags and
+ * no NUL byte. A volume-root or host component is then refused and adds
+ * nothing; any other is appended to the target, joined with '/' except
+ * after a root component or when the previous component continues into
+ * this one. Every component's continue flag counts, so a refused final
+ * component still cannot leave the target continuing.
  */
 static fsimg_status_t
 component_append(iso_rr_t *rr, rr_assembly_t *assembly, unsigned flags,
     const unsigned char *bytes, size_t length, fsimg_error_t *error)
 {
-	unsigned special = flags & (SL_CURRENT | SL_PARENT | SL_ROOT);
+	unsigned special = flags & (SL_CURRENT | SL_PARENT | SL_ROOT |
+	    SL_VOLUME_ROOT | SL_HOST);
 
 	if ((special & (special - 1)) != 0)
 		return (iso_corrupt(error,
 		    "Rock Ridge link component has two meanings"));
-	if (special == 0 && memchr(bytes, '\0', length) != NULL)
+	if (memchr(bytes, '\0', length) != NULL)
 		return (iso_corrupt(error,
-		    "Rock Ridge link target holds a NUL"));
+		    "Rock Ridge link component holds a NUL"));
+	/* A refused component adds nothing, and the entry is never delivered,
+	 * so only its continue flag still matters: a target cannot end on it.
+	 */
+	if (special == SL_VOLUME_ROOT || special == SL_HOST) {
+		assembly->component_refused = true;
+		rr->refusal = "Rock Ridge volume-root or host link components "
+		    "are unsupported";
+		assembly->joining = (flags & RR_FLAG_CONTINUE) != 0;
+		return (FSIMG_OK);
+	}
 	if (assembly->has_component && !assembly->joining &&
 	    !assembly->after_root)
 		target_append(rr, assembly, "/", 1);
@@ -282,7 +297,7 @@ component_append(iso_rr_t *rr, rr_assembly_t *assembly, unsigned flags,
 
 /* SL: a flag byte, then components of a flag byte, a length and that many
  * bytes, each within the entry. On a dot record it is framed and not
- * assembled. A volume-root or host component is refused.
+ * assembled.
  */
 static fsimg_status_t
 sl_decode(const iso_entry_t *entry, bool dot, iso_rr_t *rr,
@@ -310,16 +325,10 @@ sl_decode(const iso_entry_t *entry, bool dot, iso_rr_t *rr,
 			    "Rock Ridge link component overruns its entry"));
 		flags = at[0];
 		length = at[1];
-		if ((flags & (SL_VOLUME_ROOT | SL_HOST)) != 0) {
-			assembly->component_refused = true;
-			rr->refusal = "Rock Ridge volume-root or host link "
-			    "components are unsupported";
-		} else {
-			status = component_append(rr, assembly, flags, at + 2,
-			    length, error);
-			if (status != FSIMG_OK)
-				return (status);
-		}
+		status = component_append(rr, assembly, flags, at + 2, length,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
 		at += 2 + length;
 	}
 	return (FSIMG_OK);
@@ -423,45 +432,8 @@ entry_decode(const iso_entry_t *entry, bool dot, iso_rr_t *rr,
 	return (FSIMG_OK);
 }
 
-/* Decode the stream susp was started on into rr. A dot record's NM and SL
- * entries are framed and not assembled. Otherwise a name is not empty,
- * "." or "..", a target is not empty unless a refused component was
- * dropped from it, and neither ends on a continue flag; the name is
- * NUL-terminated.
- */
-fsimg_status_t
-iso_rr_decode(fsimg_reader_t *reader, iso_susp_t *susp, bool dot,
-    iso_rr_t *rr, fsimg_error_t *error)
-{
-	rr_assembly_t assembly;
-	iso_entry_t entry;
-	fsimg_status_t status;
-
-	bzero(rr, sizeof(*rr));
-	bzero(&assembly, sizeof(assembly));
-	while ((status = iso_susp_next(reader, susp, &entry, error)) ==
-	    FSIMG_OK) {
-		status = entry_decode(&entry, dot, rr, &assembly, error);
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	if (status != FSIMG_DONE)
-		return (status);
-	if (assembly.name_open || assembly.target_open || assembly.joining)
-		return (iso_corrupt(error, "Rock Ridge name or link target "
-		    "continues past its record"));
-	if ((rr->entries & RR_NM) != 0 && !assembly.name_long &&
-	    (rr->name_length == 0 || strcmp(rr->name, ".") == 0 ||
-	    strcmp(rr->name, "..") == 0))
-		return (iso_corrupt(error, "Rock Ridge name names no entry"));
-	if ((rr->entries & RR_SL) != 0 && rr->target_length == 0 &&
-	    !assembly.component_refused)
-		return (iso_corrupt(error, "Rock Ridge link target is empty"));
-	return (FSIMG_OK);
-}
-
-/* The kind of the entry whose first record is record and whose stream
- * decoded into rr (specs/design-iso9660.md#kinds-and-metadata). First the
+/* The kind of the entry whose record is record and whose stream decoded
+ * into rr (specs/design-iso9660.md#kinds-and-metadata). First the
  * corruption checks, on the PX type or, without PX, the type the
  * directory flag implies: a placeholder carrying CL is a directory and
  * carries no RE; otherwise the type is a directory exactly when the flag
@@ -469,8 +441,8 @@ iso_rr_decode(fsimg_reader_t *reader, iso_susp_t *susp, bool dot,
  * to a device. Then the refusals: an entry the stream refused, a device or
  * socket, and a type outside the seven POSIX types.
  */
-fsimg_status_t
-iso_rr_kind(const iso_rr_t *rr, const iso_record_t *record,
+static fsimg_status_t
+rr_kind(const iso_rr_t *rr, const iso_record_t *record,
     fsimg_entry_kind_t *kind, fsimg_error_t *error)
 {
 	bool flagged = (record->flags & ISO_FLAG_DIRECTORY) != 0;
@@ -525,4 +497,56 @@ iso_rr_kind(const iso_rr_t *rr, const iso_record_t *record,
 		return (iso_unsupported(error,
 		    "Rock Ridge file type is unsupported"));
 	}
+}
+
+/* Decode the SUSP stream of record, in role, into rr and derive rr->kind.
+ * raw holds the decoded record, which lies at offset of volume block
+ * number block. This is the only interpreting decoder of a stream, so no
+ * caller can skip the kind checks or the refusals. A dot record's stream
+ * takes every check but the interpretation of its NM and SL entries,
+ * which are framed and not assembled, and carries no CL or RE, nor PL on
+ * the first dot record. An entry's name is not empty, "." or "..", its
+ * target is not empty unless a refused component was dropped from it, and
+ * neither ends on a continue flag; the name is NUL-terminated.
+ */
+fsimg_status_t
+iso_rr_decode(fsimg_reader_t *reader, const unsigned char *raw,
+    uint32_t block, uint32_t offset, const iso_record_t *record,
+    iso_rr_role_t role, iso_rr_t *rr, fsimg_error_t *error)
+{
+	bool dot = role != ISO_RR_ENTRY;
+	rr_assembly_t assembly;
+	iso_susp_t susp;
+	iso_entry_t entry;
+	fsimg_status_t status;
+
+	bzero(rr, sizeof(*rr));
+	bzero(&assembly, sizeof(assembly));
+	iso_susp_start(&susp, raw, block, offset, record);
+	while ((status = iso_susp_next(reader, &susp, &entry, error)) ==
+	    FSIMG_OK) {
+		status = entry_decode(&entry, dot, rr, &assembly, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (status != FSIMG_DONE)
+		return (status);
+	if (assembly.name_open || assembly.target_open || assembly.joining)
+		return (iso_corrupt(error, "Rock Ridge name or link target "
+		    "continues past its record"));
+	if ((rr->entries & RR_NM) != 0 && !assembly.name_long &&
+	    (rr->name_length == 0 || strcmp(rr->name, ".") == 0 ||
+	    strcmp(rr->name, "..") == 0))
+		return (iso_corrupt(error, "Rock Ridge name names no entry"));
+	if ((rr->entries & RR_SL) != 0 && rr->target_length == 0 &&
+	    !assembly.component_refused)
+		return (iso_corrupt(error, "Rock Ridge link target is empty"));
+	/* Relocation lives in the records that name directories and in a
+	 * relocated directory's parent record, nowhere else.
+	 */
+	if (dot && ((rr->entries & (RR_CL | RR_RE)) != 0 ||
+	    (role == ISO_RR_SELF && (rr->entries & RR_PL) != 0)))
+		return (iso_corrupt(error,
+		    "Rock Ridge relocation entry on a dot record"));
+	return (rr_kind(rr, record, &rr->kind, error));
 }

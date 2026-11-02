@@ -207,7 +207,8 @@ typedef struct iso_susp {
  * valid bit. name holds name_length bytes and a NUL, and target holds
  * target_length bytes, both assembled only for a record that is not a dot
  * record. child and parent are the CL and PL blocks. refusal names what
- * the profile refuses, reported after every corruption check.
+ * the profile refuses, reported after every corruption check. kind is the
+ * entry's kind, valid only when decoding succeeded.
  */
 #define RR_PX	0x001u
 #define RR_PN	0x002u
@@ -218,6 +219,15 @@ typedef struct iso_susp {
 #define RR_RE	0x040u
 #define RR_TF	0x080u
 
+/* Which record a stream belongs to: an entry's, or a directory's first
+ * ("." itself) or second ("..", its parent) dot record.
+ */
+typedef enum iso_rr_role {
+	ISO_RR_ENTRY,
+	ISO_RR_SELF,
+	ISO_RR_PARENT
+} iso_rr_role_t;
+
 typedef struct iso_rr {
 	fsimg_metadata_t metadata;
 	uint32_t	 entries;
@@ -227,6 +237,7 @@ typedef struct iso_rr {
 	size_t		 name_length;
 	size_t		 target_length;
 	const char	*refusal;
+	fsimg_entry_kind_t kind;
 	char		 name[ISO_NAME_MAX + 1];
 	unsigned char	 target[ISO_NAME_MAX];
 } iso_rr_t;
@@ -326,15 +337,14 @@ void iso_susp_start(iso_susp_t *, const unsigned char *, uint32_t, uint32_t,
     const iso_record_t *);
 fsimg_status_t iso_susp_next(fsimg_reader_t *, iso_susp_t *, iso_entry_t *,
     fsimg_error_t *);
-fsimg_status_t iso_susp_frame(fsimg_reader_t *, iso_susp_t *,
-    fsimg_error_t *);
+fsimg_status_t iso_susp_frame(fsimg_reader_t *, const unsigned char *,
+    uint32_t, uint32_t, const iso_record_t *, fsimg_error_t *);
 fsimg_status_t iso_handshake(fsimg_reader_t *, fsimg_error_t *);
 
 /* rockridge.c */
-fsimg_status_t iso_rr_decode(fsimg_reader_t *, iso_susp_t *, bool,
-    iso_rr_t *, fsimg_error_t *);
-fsimg_status_t iso_rr_kind(const iso_rr_t *, const iso_record_t *,
-    fsimg_entry_kind_t *, fsimg_error_t *);
+fsimg_status_t iso_rr_decode(fsimg_reader_t *, const unsigned char *,
+    uint32_t, uint32_t, const iso_record_t *, iso_rr_role_t, iso_rr_t *,
+    fsimg_error_t *);
 
 /* names.c: identifier checks, displayed names and namespace keys. A
  * displayed-name buffer holds ISO_IDENTIFIER_MAX bytes and a NUL.

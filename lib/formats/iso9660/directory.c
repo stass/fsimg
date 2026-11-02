@@ -199,7 +199,10 @@ run_section_add(const fsimg_iso9660_reader_t *iso, iso_run_t *run,
  * a new entry, or the next section of an open run, which repeats the
  * identifier and is a file section. A run that is not open is reset by
  * its next record, so one iso_run_t serves every entry of a directory. On
- * return run->open tells whether another section must follow.
+ * return run->open tells whether another section must follow. The
+ * one-byte identifiers 0x00 and 0x01 belong to the dot records, so a
+ * later record carrying one is corrupt in every view, whatever name the
+ * view would display for it.
  */
 static fsimg_status_t
 run_add(const fsimg_iso9660_reader_t *iso, iso_run_t *run,
@@ -209,6 +212,8 @@ run_add(const fsimg_iso9660_reader_t *iso, iso_run_t *run,
 	const unsigned char *identifier = raw + 33;
 	fsimg_status_t status;
 
+	if (record->identifier_length == 1 && identifier[0] <= 0x01)
+		return (iso_corrupt(error, "misplaced ISO 9660 dot record"));
 	if (!run->open) {
 		bzero(run, sizeof(*run));
 		run->first = *record;
@@ -236,10 +241,11 @@ run_add(const fsimg_iso9660_reader_t *iso, iso_run_t *run,
 /* The dot records: the first, at the directory's first byte, names the
  * directory itself with its length; the second, in the same block, names
  * parent, the walker's parent, which is the root itself for the root. In
- * the rockridge view both streams are decoded, and the second carries PL
- * exactly when the directory is relocated: its PL then names parent, and
- * its extent the relocation directory, which only full verification
- * checks against the RE record there.
+ * the rockridge view both streams pass every Rock Ridge check, neither
+ * carries CL or RE, and the second carries PL exactly when the directory
+ * is relocated: its PL then names parent, and its extent the relocation
+ * directory, which only full verification checks against the RE record
+ * there.
  */
 static fsimg_status_t
 dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
@@ -248,7 +254,6 @@ dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
 	fsimg_iso9660_reader_t *iso = iso_state(reader);
 	const unsigned char *raw;
 	iso_record_t record;
-	iso_susp_t susp;
 	iso_rr_t rr;
 	fsimg_status_t status;
 
@@ -271,9 +276,10 @@ dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
 			    "record does not name it"));
 		bzero(&rr, sizeof(rr));
 		if (iso->view == FSIMG_ISO_VIEW_ROCKRIDGE) {
-			iso_susp_start(&susp, raw, cursor->record_block,
-			    cursor->record_offset, &record);
-			status = iso_rr_decode(reader, &susp, true, &rr, error);
+			status = iso_rr_decode(reader, raw,
+			    cursor->record_block, cursor->record_offset,
+			    &record, dot == 0 ? ISO_RR_SELF : ISO_RR_PARENT,
+			    &rr, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}
@@ -304,7 +310,6 @@ run_record(fsimg_reader_t *reader, iso_run_t *run, const iso_cursor_t *cursor,
     fsimg_error_t *error)
 {
 	fsimg_iso9660_reader_t *iso = iso_state(reader);
-	iso_susp_t susp;
 	fsimg_status_t status;
 
 	status = run_add(iso, run, cursor, record, raw, error);
@@ -315,13 +320,13 @@ run_record(fsimg_reader_t *reader, iso_run_t *run, const iso_cursor_t *cursor,
 		    FSIMG_ENTRY_DIRECTORY : FSIMG_ENTRY_FILE;
 	if (iso->view != FSIMG_ISO_VIEW_ROCKRIDGE)
 		return (FSIMG_OK);
-	iso_susp_start(&susp, raw, cursor->record_block, cursor->record_offset,
-	    record);
 	if (run->sections > 1)
-		return (iso_susp_frame(reader, &susp, error));
-	status = iso_rr_decode(reader, &susp, false, &run->rr, error);
+		return (iso_susp_frame(reader, raw, cursor->record_block,
+		    cursor->record_offset, record, error));
+	status = iso_rr_decode(reader, raw, cursor->record_block,
+	    cursor->record_offset, record, ISO_RR_ENTRY, &run->rr, error);
 	if (status == FSIMG_OK)
-		status = iso_rr_kind(&run->rr, record, &run->kind, error);
+		run->kind = run->rr.kind;
 	return (status);
 }
 

@@ -59,8 +59,10 @@ typedef struct image {
 	uint64_t	 high_read;
 	uint64_t	 reads;
 	uint64_t	 continuation_reads;
+	uint64_t	 ce_read_index;
 	uint64_t	 fail_read;
 	bool		 eof;
+	bool		 cancel_read;
 } image_t;
 
 typedef struct fixture {
@@ -265,11 +267,16 @@ image_read(void *arg, uint64_t offset, void *buffer, size_t length,
 
 	CHECK(offset <= image->length && length <= image->length - offset);
 	image->reads++;
-	if (offset <= RR_AREA * BLOCK && offset + length > RR_AREA * BLOCK)
+	if (offset <= RR_AREA * BLOCK && offset + length > RR_AREA * BLOCK) {
 		image->continuation_reads++;
+		image->ce_read_index = image->reads;
+	}
 	*count = 0;
-	if (image->reads == image->fail_read)
+	if (image->reads == image->fail_read) {
+		if (image->cancel_read)
+			return (FSIMG_ECANCELLED);
 		return (image->eof ? FSIMG_OK : FSIMG_EIO);
+	}
 	if (offset + length > image->high_read)
 		image->high_read = offset + length;
 	bzero(buffer, length);
@@ -2101,6 +2108,7 @@ static void susp_sl(susp_area_t *, unsigned, unsigned, const void *, size_t);
 static void susp_er(susp_area_t *, const char *, unsigned);
 static image_t rr_image(const susp_area_t *, unsigned);
 static unsigned char *rr_child_directory(image_t *);
+static image_t rr_dot_image(const susp_area_t *, bool, bool);
 static void rr_status(image_t *, fsimg_iso_view_t, fsimg_status_t,
     const char *);
 static void rr_equal(uint64_t, uint64_t, const char *);
@@ -2119,6 +2127,8 @@ static void test_rr_omitted_names(void);
 static void rr_relocated_chain(unsigned, bool);
 static void test_rr_relocation(void);
 static void test_rr_dot_entries(void);
+static void test_rr_misplaced_dot_names(void);
+static void test_rr_faults(void);
 static void test_rr_later_sections(void);
 static void test_rr_exact_queries(void);
 static void test_rr_known_versions(void);
@@ -2231,6 +2241,49 @@ rr_child_directory(image_t *image)
 	put32(child + DR_SIZE, BLOCK);
 	directory(contents, RR_DIRECTORY, ROOT, BLOCK);
 	return (contents);
+}
+
+/* Build a root with one valid child directory, placing the supplied SUSP
+ * area on exactly one of the four dot records. The root handshake precedes
+ * any supplied entries on its first dot record.
+ */
+static image_t
+rr_dot_image(const susp_area_t *dot, bool root, bool parent)
+{
+	image_t image = image_new();
+	susp_area_t area;
+	unsigned char *p;
+	size_t length;
+
+	for (unsigned level = 0; level < 2; level++) {
+		unsigned extent = level == 0 ? ROOT : RR_DIRECTORY;
+
+		p = image.bytes + extent * BLOCK;
+		bzero(p, BLOCK);
+		for (unsigned char identifier = 0; identifier < 2; identifier++) {
+			bzero(&area, sizeof(area));
+			if (level == 0 && identifier == 0) {
+				unsigned char *sp = susp_entry(&area, "SP", SP_BYTES);
+
+				sp[4] = 0xbe;
+				sp[5] = 0xef;
+				susp_er(&area, "RRIP_1991A", 1);
+			}
+			if (root == (level == 0) && parent == (identifier == 1)) {
+				bcopy(dot->bytes, area.bytes + area.length, dot->length);
+				area.length += dot->length;
+			}
+			length = record(p, &identifier, 1,
+			    identifier == 0 ? extent : ROOT, BLOCK, 2);
+			bcopy(area.bytes, p + length, area.length);
+			length += area.length;
+			p[0] = length + (length % 2);
+			p += p[0];
+		}
+		if (level == 0)
+			record(p, "CHILD", 5, RR_DIRECTORY, BLOCK, 2);
+	}
+	return (image);
 }
 
 static void
@@ -2645,7 +2698,7 @@ test_rr_kinds_and_singletons(void)
 		bzero(&area, sizeof(area));
 		susp_px(&area, kinds[i].mode, kinds[i].px_length);
 		if (kinds[i].kind == FSIMG_ENTRY_SYMLINK)
-			susp_sl(&area, 0, 0, "a", 1);
+			susp_sl(&area, 0x00, 0x00, "a", 1);
 		if (kinds[i].device)
 			susp_entry(&area, "PN", 20);
 		image = rr_image(&area,
@@ -2714,7 +2767,7 @@ test_rr_kinds_and_singletons(void)
 		area.bytes[SUSP_VERSION] = invalid[i].version;
 		if (invalid[i].extra != NULL) {
 			if (strcmp(invalid[i].extra, "SL") == 0)
-				susp_sl(&area, 0, 0, "a", 1);
+				susp_sl(&area, 0x00, 0x00, "a", 1);
 			else
 				susp_entry(&area, invalid[i].extra,
 				    strcmp(invalid[i].extra, "PN") ==
@@ -2817,30 +2870,75 @@ test_rr_link_components(void)
 		unsigned flags, length;
 		fsimg_status_t expected;
 	} components[] = {
-		{ "SL ordinary", "a/b", "b", 0, 1, FSIMG_OK },
-		{ "SL continued component", "ab", "b", 1, 1, FSIMG_OK },
-		{ "SL current", "./b", "b", 2, 0, FSIMG_OK },
-		{ "SL parent", "../b", "b", 4, 0, FSIMG_OK },
-		{ "SL root", "/a", "a", 8, 0, FSIMG_OK },
-		{ "SL volume root refused", NULL, "b", 16, 0,
+		{ "SL ordinary", "a/b", "b", 0x00, 1, FSIMG_OK },
+		{ "SL continued component", "ab", "b", 0x01, 1, FSIMG_OK },
+		{ "SL current", "./b", "b", 0x02, 0, FSIMG_OK },
+		{ "SL parent", "../b", "b", 0x04, 0, FSIMG_OK },
+		{ "SL root", "/a", "a", 0x08, 0, FSIMG_OK },
+		{ "SL volume root refused", NULL, "b", 0x10, 0,
 		    FSIMG_EUNSUPPORTED },
-		{ "SL host refused", NULL, "b", 32, 0, FSIMG_EUNSUPPORTED },
-		{ "SL current plus parent", NULL, "b", 6, 0, FSIMG_ECORRUPT },
-		{ "SL current plus root", NULL, "b", 10, 0, FSIMG_ECORRUPT },
-		{ "SL parent plus root", NULL, "b", 12, 0, FSIMG_ECORRUPT }
+		{ "SL host refused", NULL, "b", 0x20, 0, FSIMG_EUNSUPPORTED },
+		{ "SL volume root continued refused", NULL, "b", 0x11, 0,
+		    FSIMG_EUNSUPPORTED },
+		{ "SL host continued refused", NULL, "b", 0x21, 0,
+		    FSIMG_EUNSUPPORTED },
+		{ "SL current plus parent", NULL, "b", 0x06, 0, FSIMG_ECORRUPT },
+		{ "SL current plus root", NULL, "b", 0x0a, 0, FSIMG_ECORRUPT },
+		{ "SL parent plus root", NULL, "b", 0x0c, 0, FSIMG_ECORRUPT },
+		{ "SL volume root parent current", NULL, "b", 0x16, 0,
+		    FSIMG_ECORRUPT },
+		{ "SL volume root plus root", NULL, "b", 0x18, 0,
+		    FSIMG_ECORRUPT },
+		{ "SL volume root plus host", NULL, "b", 0x30, 0,
+		    FSIMG_ECORRUPT }
 	};
 	static const struct {
 		const char *label;
 		unsigned length, flags, component, text_length, text;
 		bool second;
 	} invalid[] = {
-		{ "dangling SL entry", 8, 1, 0, 1, 'a', false },
-		{ "dangling SL component", 8, 0, 1, 1, 'a', false },
-		{ "SL component overrun", 8, 0, 0, 2, 'a', false },
-		{ "empty SL target", 5, 0, 0, 0, 0, false },
-		{ "SL component NUL", 8, 0, 0, 1, 0, false },
-		{ "SL after ended target", 8, 0, 0, 1, 'a', true },
-		{ "SL multiple meanings", 8, 0, 2 | 8, 1, 'a', false }
+		{ .label = "dangling SL entry", .length = 8,
+		    .flags = 0x01, .component = 0x00, .text_length = 1,
+		    .text = 'a', .second = false },
+		{ .label = "dangling SL component", .length = 8,
+		    .flags = 0x00, .component = 0x01, .text_length = 1,
+		    .text = 'a', .second = false },
+		{ .label = "SL component overrun", .length = 8,
+		    .flags = 0x00, .component = 0x00, .text_length = 2,
+		    .text = 'a', .second = false },
+		{ .label = "empty SL target", .length = 5,
+		    .flags = 0x00, .component = 0x00, .text_length = 0,
+		    .text = 0, .second = false },
+		{ .label = "SL component NUL", .length = 8,
+		    .flags = 0x00, .component = 0x00, .text_length = 1,
+		    .text = 0, .second = false },
+		{ .label = "SL after ended target", .length = 8,
+		    .flags = 0x00, .component = 0x00, .text_length = 1,
+		    .text = 'a', .second = true },
+		{ .label = "SL multiple meanings", .length = 8,
+		    .flags = 0x00, .component = 0x0a, .text_length = 1,
+		    .text = 'a', .second = false },
+		{ .label = "SL current NUL", .length = 8,
+		    .flags = 0x00, .component = 0x02, .text_length = 1,
+		    .text = 0, .second = false },
+		{ .label = "SL parent NUL", .length = 8,
+		    .flags = 0x00, .component = 0x04, .text_length = 1,
+		    .text = 0, .second = false },
+		{ .label = "SL root NUL", .length = 8,
+		    .flags = 0x00, .component = 0x08, .text_length = 1,
+		    .text = 0, .second = false },
+		{ .label = "SL volume root NUL", .length = 8,
+		    .flags = 0x00, .component = 0x10, .text_length = 1,
+		    .text = 0, .second = false },
+		{ .label = "SL host NUL", .length = 8,
+		    .flags = 0x00, .component = 0x20, .text_length = 1,
+		    .text = 0, .second = false },
+		{ .label = "SL volume root dangling component", .length = 7,
+		    .flags = 0x00, .component = 0x11, .text_length = 0,
+		    .text = 0, .second = false },
+		{ .label = "SL host dangling component", .length = 7,
+		    .flags = 0x00, .component = 0x21, .text_length = 0,
+		    .text = 0, .second = false }
 	};
 	susp_area_t area, next;
 	image_t image;
@@ -2850,9 +2948,9 @@ test_rr_link_components(void)
 	    i++) {
 		bzero(&area, sizeof(area));
 		susp_px(&area, 0120777, 44);
-		susp_sl(&area, 1, components[i].flags, "a",
+		susp_sl(&area, 0x01, components[i].flags, "a",
 		    components[i].length);
-		susp_sl(&area, 0, 0, components[i].second, 1);
+		susp_sl(&area, 0x00, 0x00, components[i].second, 1);
 		image = rr_image(&area, 0);
 		if (components[i].expected == FSIMG_OK)
 			rr_witness(&image, "/A.TXT", FSIMG_ENTRY_SYMLINK,
@@ -2878,15 +2976,23 @@ test_rr_link_components(void)
 		if (invalid[i].length > 5) {
 			p[5] = invalid[i].component;
 			p[6] = invalid[i].text_length;
-			p[7] = invalid[i].text;
+			if (invalid[i].length > 7)
+				p[7] = invalid[i].text;
 		}
 		if (invalid[i].second)
-			susp_sl(&area, 0, 0, "b", 1);
+			susp_sl(&area, 0x00, 0x00, "b", 1);
 		image = rr_image(&area, 0);
 		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
 		    invalid[i].label);
 		free(image.bytes);
 	}
+	bzero(&area, sizeof(area));
+	susp_px(&area, 0120777, PX_BYTES);
+	susp_sl(&area, 0x00, 0x20, "", 0);
+	image = rr_image(&area, 0);
+	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_EUNSUPPORTED,
+	    "SL lone host refused");
+	free(image.bytes);
 	memset(text, 'a', sizeof(text));
 	for (unsigned size = 1024; size <= 1025; size++) {
 		bzero(&area, sizeof(area));
@@ -2918,8 +3024,8 @@ test_rr_link_components(void)
 	bzero(&area, sizeof(area));
 	bzero(&next, sizeof(next));
 	susp_px(&area, 0120777, 36);
-	susp_sl(&area, 1, 1, "tar", 3);
-	susp_sl(&next, 0, 0, "get", 3);
+	susp_sl(&area, 0x01, 0x01, "tar", 3);
+	susp_sl(&next, 0x00, 0x00, "get", 3);
 	susp_ce(&area, 111, 0, next.length);
 	image = rr_image(&area, 0);
 	bcopy(next.bytes, image.bytes + 111 * BLOCK, next.length);
@@ -3369,7 +3475,43 @@ test_rr_dot_entries(void)
 		{ "dot NM current and SL ignored", 1, FSIMG_OK },
 		{ "dot NM bad entry version", 2, FSIMG_ECORRUPT }
 	};
+	static const struct {
+		const char *label, *signature;
+		unsigned mode, length;
+		fsimg_status_t expected;
+		const char *refusal;
+	} checks[] = {
+		{ "directory PX control", NULL, 0040755, 0, FSIMG_OK, NULL },
+		{ "CL on dot", "CL", 0040755, 12, FSIMG_ECORRUPT, NULL },
+		{ "RE on dot", "RE", 0040755, 4, FSIMG_ECORRUPT, NULL },
+		{ "PL on first dot", "PL", 0040755, 12, FSIMG_ECORRUPT,
+		    NULL },
+		{ "regular PX", NULL, 0100644, 0, FSIMG_ECORRUPT, NULL },
+		{ "PN on directory", "PN", 0040755, 20, FSIMG_ECORRUPT,
+		    NULL },
+		{ "SF refused", "SF", 0040755, 4, FSIMG_EUNSUPPORTED,
+		    NULL },
+		{ "ZF refused", "ZF", 0040755, 4, FSIMG_EUNSUPPORTED,
+		    NULL },
+		{ "SF then regular PX", "SF", 0100644, 4,
+		    FSIMG_ECORRUPT, NULL },
+		{ "ZF then regular PX", "ZF", 0100644, 4,
+		    FSIMG_ECORRUPT, NULL },
+		{ "ZF then CL", "CL", 0040755, 12, FSIMG_ECORRUPT, "ZF" },
+		{ "SF then RE", "RE", 0040755, 4, FSIMG_ECORRUPT, "SF" },
+		{ "ZF then PL", "PL", 0040755, 12, FSIMG_ECORRUPT, "ZF" }
+	};
+	static const struct {
+		const char *label;
+		bool root, parent;
+	} positions[] = {
+		{ "root dot", true, false },
+		{ "root parent", true, true },
+		{ "subdirectory dot", false, false },
+		{ "subdirectory parent", false, true }
+	};
 	susp_area_t area = {0}, dot;
+	char label[96];
 	image_t image;
 	unsigned char *p, self = 0, up = 1;
 	size_t offset, length;
@@ -3382,7 +3524,7 @@ test_rr_dot_entries(void)
 		susp_nm(&dot, "", 0, 2);
 		dot.bytes[SUSP_VERSION] = rows[i].version;
 		/* CURRENT and PARENT together are corrupt if interpreted. */
-		susp_sl(&dot, 0, 2 | 4, "", 0);
+		susp_sl(&dot, 0x00, 0x06, "", 0);
 		length = record(p, &self, 1, RR_DIRECTORY, BLOCK, 2);
 		bcopy(dot.bytes, p + length, dot.length);
 		p[0] += dot.length + (dot.length % 2);
@@ -3395,6 +3537,173 @@ test_rr_dot_entries(void)
 		    rows[i].expected, rows[i].label);
 		free(image.bytes);
 	}
+	for (unsigned i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
+		bzero(&dot, sizeof(dot));
+		if (checks[i].refusal != NULL)
+			susp_entry(&dot, checks[i].refusal, 4);
+		if (checks[i].signature != NULL)
+			susp_entry(&dot, checks[i].signature, checks[i].length);
+		susp_px(&dot, checks[i].mode, PX_BYTES);
+		for (unsigned j = 0;
+		    j < sizeof(positions) / sizeof(positions[0]); j++) {
+			if (checks[i].signature != NULL &&
+			    strcmp(checks[i].signature, "PL") == 0 &&
+			    positions[j].parent)
+				continue;
+			image = rr_dot_image(&dot, positions[j].root,
+			    positions[j].parent);
+			snprintf(label, sizeof(label), "%s: %s",
+			    positions[j].label, checks[i].label);
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    checks[i].expected, label);
+			free(image.bytes);
+		}
+	}
+}
+
+static void
+test_rr_misplaced_dot_names(void)
+{
+	static const struct {
+		const char *label;
+		unsigned char identifier;
+	} rows[] = {
+		{ "misplaced dot with visible NM", 0 },
+		{ "misplaced parent with visible NM", 1 }
+	};
+	susp_area_t area = {0}, continuation = {0};
+	image_t image;
+	unsigned char *p;
+	size_t length;
+
+	susp_nm(&area, "visible", 7, 0);
+	susp_ce(&continuation, RR_AREA, 0, area.length);
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		image = rr_image(&area, 0);
+		p = image.bytes + ROOT * BLOCK + RR_CHILD;
+		bzero(p, BLOCK - RR_CHILD);
+		length = record(p, &rows[i].identifier, 1, DATA, 5, 0);
+		bcopy(continuation.bytes, p + length, continuation.length);
+		p[0] += continuation.length;
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
+		    rows[i].label);
+		rr_status(&image, FSIMG_ISO_VIEW_PRIMARY, FSIMG_ECORRUPT,
+		    rows[i].label);
+		free(image.bytes);
+	}
+}
+
+static void
+test_rr_faults(void)
+{
+	static const struct {
+		const char *label;
+		bool eof, cancel;
+		fsimg_status_t expected;
+	} faults[] = {
+		{ "Rock Ridge CE read I/O failure", false, false, FSIMG_EIO },
+		{ "Rock Ridge CE read EOF", true, false, FSIMG_EIO },
+		{ "Rock Ridge CE read cancelled", false, true,
+		    FSIMG_ECANCELLED }
+	};
+	static const struct {
+		const char *label;
+		bool read_target;
+	} operations[] = {
+		{ .label = "Rock Ridge symlink listing allocation",
+		    .read_target = false },
+		{ .label = "Rock Ridge symlink target read allocation",
+		    .read_target = true }
+	};
+	susp_area_t area = {0};
+	image_t image;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	unsigned char buffer[8];
+	uint64_t ce_read_index;
+	size_t count;
+	bool allocation_hit;
+	char label[96];
+
+	susp_px(&area, 0120777, PX_BYTES);
+	susp_sl(&area, 0x00, 0x00, "target", 6);
+	image = rr_image(&area, 0);
+	/* Locate the continuation callback independently of other read counts. */
+	fixture_new(&f, &image, NULL);
+	rr_status_equal(open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE), FSIMG_OK,
+	    "Rock Ridge fault fixture open");
+	rr_status_equal(fsimg_reader_next(f.reader, &entry, NULL), FSIMG_OK,
+	    "Rock Ridge fault fixture next");
+	rr_equal(image.continuation_reads, 1, "one CE read in fault fixture");
+	ce_read_index = image.ce_read_index;
+	fixture_free(&f);
+	for (unsigned i = 0; i < sizeof(faults) / sizeof(faults[0]); i++) {
+		image.reads = 0;
+		image.continuation_reads = 0;
+		image.fail_read = ce_read_index;
+		image.eof = faults[i].eof;
+		image.cancel_read = faults[i].cancel;
+		fixture_new(&f, &image, NULL);
+		status = open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE);
+		rr_status_equal(status, FSIMG_OK, faults[i].label);
+		if (status == FSIMG_OK)
+			status = walk(&f);
+		rr_status_equal(status, faults[i].expected, faults[i].label);
+		rr_equal(image.continuation_reads, 1, faults[i].label);
+		rr_equal(image.reads, ce_read_index, faults[i].label);
+		fixture_free(&f);
+	}
+	image.fail_read = 0;
+	image.eof = false;
+	image.cancel_read = false;
+	/* Arm after open so the sweep reaches the common reader's decoded
+	 * link target allocation, as well as the listing's scratch state.
+	 * fixture_free checks that every failed prefix releases its resources.
+	 */
+	for (unsigned operation = 0;
+	    operation < sizeof(operations) / sizeof(operations[0]); operation++) {
+		for (unsigned n = 1;; n++) {
+			fixture_new(&f, &image, NULL);
+			status = open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE);
+			rr_status_equal(status, FSIMG_OK,
+			    operations[operation].label);
+			fsimg_test_fail_alloc_after(f.ctx, n);
+			if (status == FSIMG_OK)
+				status = fsimg_reader_next(f.reader, &entry, NULL);
+			if (status == FSIMG_OK) {
+				rr_equal(entry->kind, FSIMG_ENTRY_SYMLINK,
+				    operations[operation].label);
+				if (operations[operation].read_target) {
+					status = fsimg_reader_read_at(f.reader, 0,
+					    buffer, sizeof(buffer), &count, NULL);
+					if (status == FSIMG_OK) {
+						rr_equal(count, 6,
+						    operations[operation].label);
+						rr_equal(count == 6 &&
+						    bcmp(buffer, "target", 6) == 0, 1,
+						    operations[operation].label);
+					}
+				}
+			}
+			if (status == FSIMG_OK)
+				status = walk(&f);
+			allocation_hit = f.ctx->allocation_attempts >= n;
+			fsimg_test_fail_alloc_after(f.ctx, 0);
+			snprintf(label, sizeof(label), "%s %u",
+			    operations[operation].label, n);
+			if (allocation_hit) {
+				rr_equal(status == FSIMG_ENOMEM ||
+				    status == FSIMG_ELIMIT, 1, label);
+			} else
+				rr_status_equal(status, FSIMG_OK, label);
+			fixture_free(&f);
+			if (!allocation_hit)
+				break;
+			CHECK(n < 10000);
+		}
+	}
+	free(image.bytes);
 }
 
 static void
@@ -3504,7 +3813,7 @@ susp_seed(const char *path)
 	bcopy(area.bytes, seed + 128, area.length);
 	bzero(&area, sizeof(area));
 	susp_px(&area, 0120777, 44);
-	susp_sl(&area, 1, 1, "fi", 2);
+	susp_sl(&area, 0x01, 0x01, "fi", 2);
 	susp_ce(&area, 111, 0, 9);
 	bcopy(area.bytes, seed + 256, area.length);
 	bzero(&area, sizeof(area));
@@ -3514,7 +3823,7 @@ susp_seed(const char *path)
 	susp_nm(&area, "le", 2, 0);
 	bcopy(area.bytes, seed + 512, area.length);
 	bzero(&area, sizeof(area));
-	susp_sl(&area, 0, 0, "le", 2);
+	susp_sl(&area, 0x00, 0x00, "le", 2);
 	bcopy(area.bytes, seed + 512 + BLOCK, area.length);
 	file = fopen(path, "wb");
 	CHECK(file != NULL);
@@ -3574,6 +3883,8 @@ main(int argc, char **argv)
 	test_rr_omitted_names();
 	test_rr_relocation();
 	test_rr_dot_entries();
+	test_rr_misplaced_dot_names();
+	test_rr_faults();
 	test_rr_later_sections();
 	test_rr_exact_queries();
 	test_rr_known_versions();

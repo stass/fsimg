@@ -349,7 +349,9 @@ bytes `0x00` (the directory itself) and `0x01` (its parent), in every
 hierarchy, Joliet included. Both have the directory flag. The first
 record's extent and data length must equal the directory's own. A
 one-byte identifier `0x00` or `0x01` in any later record is a misplaced
-dot record. The two records are structure, never entries.
+dot record, `FSIMG_ECORRUPT` in every view whatever name the view would
+display, a Rock Ridge `NM` included. The two records are structure, never
+entries.
 
 The second record names the directory's **physical parent**, the directory
 whose record names it in the hierarchy: the walker's parent, except for a
@@ -481,7 +483,12 @@ current or parent flag appears only on the dot records. A violation is
 `FSIMG_ECORRUPT`; a name over 1024 bytes is `FSIMG_EUNSUPPORTED`. A record
 without `NM` takes its [primary displayed name](#displayed-names-and-keys).
 A dot record's `NM` and `SL` entries are framed and held to their
-length and version, and are not interpreted.
+length and version, and are not interpreted. Every other entry of a dot
+record is held to the [entry table](#entries) and the
+[kind checks](#kinds-and-metadata) as on any record, so its `PX` type is
+directory, it carries no `PN`, and `SF` or `ZF` on it is refused. A dot
+record carries no `CL` or `RE`, and only the second one may carry `PL`
+([relocation](#relocation)); otherwise it is `FSIMG_ECORRUPT`.
 
 ### Displayed names and keys
 
@@ -669,12 +676,15 @@ Components join with `/` between them, except that nothing is added after
 a root component, so the components root and `a` give `/a`. The entry
 flag's bit 0 says the next `SL` entry continues the target. The target is
 1 through 1024 bytes, `max_link_target_bytes`, else `FSIMG_EUNSUPPORTED`;
-an empty target, a component that overruns its entry, a flag byte with two
-of `0x02`, `0x04` and `0x08`, a `0x00` byte, an `SL` entry after one
-without the continue flag, or a final entry or final component still
-flagged to continue is `FSIMG_ECORRUPT`. A symbolic link has a target and
-no other entry has `SL`, else `FSIMG_ECORRUPT`. A symbolic link's size
-is its target's length and its content the target, through the
+an empty target, a component that overruns its entry, a flag byte with
+two of `0x02`, `0x04`, `0x08`, `0x10` and `0x20`, a `0x00` byte in any
+component, an `SL` entry after one without the continue flag, or a final
+entry or final component still flagged to continue is `FSIMG_ECORRUPT`.
+Every component is held to these rules before its meaning is applied or
+refused, so a volume-root or host component cannot hide a corrupt one.
+A symbolic link has a target and no other entry has `SL`, else
+`FSIMG_ECORRUPT`. A symbolic link's size is its target's length and its
+content the target, through the
 [decoded link target](design-content.md#decoded-link-targets) of logical
 content; the data length of its ISO record is not its size. fsimg never
 resolves a target.
@@ -704,6 +714,9 @@ In the `rockridge` view:
 * a record with `RE` is not an entry: its directory is reached only
   through its placeholder; `RE` on a record without the directory flag is
   `FSIMG_ECORRUPT`;
+* a placeholder's target is checked, its dot records included, when the
+  directory holding the placeholder is prepared, so a corrupt or refused
+  target fails the listing of that directory;
 * full verification requires every `RE` directory to be named by exactly
   one `CL`, whose target's physical parent is the directory holding the
   `RE` record, and every `CL` target to be such an `RE` directory.
