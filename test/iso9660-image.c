@@ -642,4 +642,3 @@ verify_scale_block(unsigned char *p, unsigned block)
 		    BLOCK, section + 1 < VERIFY_SCALE_SECTIONS ? 0x80 : 0);
 	}
 }
-

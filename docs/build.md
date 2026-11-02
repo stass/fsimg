@@ -2203,10 +2203,6 @@ The external ISO corpus and H3 are absent from the Linux and FreeBSD
 runs, where `iso9660-integration.sh` skips. The MSan build disables the
 optional xz and zstd profiles as described in the sanitizer instructions.
 
-The full FreeBSD CI list fails at the QNX4 wide-directory RSS bound.
-Running the remaining targets separately also reproduces the CLI RSS
-creation failure; QNX4 writer scale, ImageFS scale and `distcheck` pass.
-Both RSS issues are recorded in [TODO.md](../TODO.md#bugs-by-subsystem).
 Standalone LSan and MSan report unsupported-platform skips on macOS and
 FreeBSD.
 
