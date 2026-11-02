@@ -289,7 +289,10 @@ typedef struct iso_payload {
  * window caches the block of descriptors, system area, boot catalog or
  * directory records being read, continuation the last SUSP continuation
  * block, so a record's system use area and its continuation areas are
- * readable together. rockridge is the handshake's ISO_ROCKRIDGE_ value.
+ * readable together. rockridge is the handshake's ISO_ROCKRIDGE_ value;
+ * susp tells that the handshake found SP at the primary root, so the
+ * volume's system use areas are SUSP streams, and susp_skip its skip
+ * count.
  * verify is full verification's state (verify.c) while fsimg_verify runs,
  * otherwise NULL.
  */
@@ -307,6 +310,8 @@ typedef struct fsimg_iso9660_reader {
 	uint32_t	 terminator_block;
 	unsigned	 joliet_level;
 	unsigned	 rockridge;
+	uint8_t		 susp_skip;
+	bool		 susp;
 	bool		 enhanced;
 	bool		 system_area_used;
 	iso_window_t	 window;
@@ -388,6 +393,7 @@ fsimg_status_t iso_key(fsimg_reader_t *, const char *, unsigned char *,
     size_t *, fsimg_error_t *);
 int iso_primary_order(const unsigned char *, size_t, bool,
     const unsigned char *, size_t, bool);
+bool iso_primary_versioned(const unsigned char *, size_t, bool);
 
 /* directory.c */
 fsimg_status_t iso_payload_decode(const fsimg_iso9660_reader_t *,

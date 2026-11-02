@@ -4757,6 +4757,111 @@ test_verify_data_sharing_and_empty_sections(void)
 }
 
 static void
+test_verify_susp_without_rockridge_claims_root_continuation(void)
+{
+	static const fsimg_iso_view_t views[] = {
+		FSIMG_ISO_VIEW_AUTO, FSIMG_ISO_VIEW_PRIMARY, FSIMG_ISO_VIEW_JOLIET
+	};
+
+	for (unsigned joliet = 0; joliet < 2; joliet++) {
+		for (unsigned unknown_er = 0; unknown_er < 2; unknown_er++) {
+			for (unsigned overlap = 0; overlap < 2; overlap++) {
+				image_t image = image_new();
+				susp_area_t handshake = {0}, area = {0};
+				fsimg_verify_report_t report;
+				unsigned block = overlap ? DATA : RR_AREA;
+				unsigned char *root = image.bytes + ROOT * BLOCK;
+				unsigned char *sp, self = 0, up = 1;
+				size_t length;
+
+				if (joliet) {
+					joliet_add(&image);
+					verify_table_root(&image, 17, JOLIET_ROOT, 90, 91);
+				}
+				if (unknown_er)
+					susp_er(&area, "FSIMG_TEST_EXTENSION", 1);
+				susp_entry(&area, "ST", 4);
+				sp = susp_entry(&handshake, "SP", SP_BYTES);
+				sp[4] = 0xbe;
+				sp[5] = 0xef;
+				susp_ce(&handshake, block, 0, area.length);
+				bzero(root, BLOCK);
+				length = record(root, &self, 1, ROOT, BLOCK, 2);
+				bcopy(handshake.bytes, root + length, handshake.length);
+				root[0] += handshake.length + (handshake.length % 2);
+				length = root[0];
+				length += record(root + length, &up, 1, ROOT, BLOCK, 2);
+				record(root + length, "A.TXT;1", 7, DATA, 5, 0);
+				bcopy(area.bytes, image.bytes + block * BLOCK, area.length);
+
+				for (unsigned v = 0; v < (joliet ? 3u : 2u); v++) {
+					char label[128];
+
+					snprintf(label, sizeof(label),
+					    "SUSP without RR: Joliet=%u ER=%u overlap=%u view=%u",
+					    joliet, unknown_er, overlap, (unsigned)views[v]);
+					report = verify_expect(&image, views[v], 0,
+					    overlap ? FSIMG_ECORRUPT : FSIMG_OK,
+					    overlap ? "overlap" : NULL, label);
+					if (!overlap) {
+						/* Baseline 22, CE 110; Joliet adds descriptor
+						 * 18, path tables 90/91 and root 88. */
+						rr_equal(report.allocated_clusters,
+						    joliet ? 27 : 23,
+						    label);
+					}
+				}
+				free(image.bytes);
+			}
+		}
+	}
+}
+
+static void
+test_verify_susp_skip_without_rockridge_is_unsupported_but_lists(void)
+{
+	static const fsimg_iso_view_t views[] = {
+		FSIMG_ISO_VIEW_AUTO, FSIMG_ISO_VIEW_PRIMARY, FSIMG_ISO_VIEW_JOLIET
+	};
+	image_t image = image_new();
+	susp_area_t handshake = {0};
+	unsigned char *root = image.bytes + ROOT * BLOCK, *sp;
+	unsigned char self = 0, up = 1;
+	size_t length;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+
+	joliet_add(&image);
+	verify_table_root(&image, 17, JOLIET_ROOT, 90, 91);
+	joliet_record(image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES,
+	    (const uint16_t[]){ 'A', '.', 'T', 'X', 'T', ';', '1' },
+	    7, DATA, 5, 0);
+	sp = susp_entry(&handshake, "SP", SP_BYTES);
+	sp[4] = 0xbe;
+	sp[5] = 0xef;
+	sp[6] = 1;
+	bzero(root, BLOCK);
+	length = record(root, &self, 1, ROOT, BLOCK, 2);
+	bcopy(handshake.bytes, root + length, handshake.length);
+	root[0] += handshake.length + (handshake.length % 2);
+	length = root[0];
+	length += record(root + length, &up, 1, ROOT, BLOCK, 2);
+	record(root + length, "A.TXT;1", 7, DATA, 5, 0);
+
+	for (unsigned v = 0; v < sizeof(views) / sizeof(views[0]); v++) {
+		fixture_new(&f, &image, NULL);
+		CHECK(open_image(&f, views[v]) == FSIMG_OK);
+		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, "/A.TXT") == 0);
+		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_DONE);
+		fixture_free(&f);
+		verify_expect(&image, views[v], 0, FSIMG_EUNSUPPORTED,
+		    "unsupported SP skip count", "SUSP skip without RR is incomplete");
+	}
+	free(image.bytes);
+}
+
+static void
 test_verify_continuations_share_blocks_but_not_bytes(void)
 {
 	for (unsigned overlap = 0; overlap < 2; overlap++) {
@@ -5153,6 +5258,51 @@ test_verify_directory_and_file_equal_order_keys(void)
 		verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
 		    reverse ? "file before equal-key directory" :
 		    "directory before equal-key file");
+		free(image.bytes);
+	}
+}
+
+static void
+test_verify_versions_descend_across_directory_file_ties(void)
+{
+	static const struct {
+		const char *names[3];
+		fsimg_status_t expected;
+		const char *label;
+	} rows[] = {
+		{ { "FOO.;1", "FOO", "FOO.;2" }, FSIMG_ECORRUPT,
+		    "ascending versions across directory tie" },
+		{ { "FOO.;2", "FOO", "FOO.;1" }, FSIMG_OK,
+		    "descending versions across directory tie" },
+		{ { "FOO", "FOO.;2", "FOO.;1" }, FSIMG_OK,
+		    "directory precedes descending versions" },
+		{ { "FOO.;1", "FOO.;2", "FOO" }, FSIMG_ECORRUPT,
+		    "directory follows ascending versions" },
+		{ { "FOO", "FOO.;1", "FOO.;2" }, FSIMG_ECORRUPT,
+		    "directory precedes ascending versions" },
+		{ { "FOO.;2", "FOO.;1", "FOO" }, FSIMG_OK,
+		    "directory follows descending versions" }
+	};
+
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		image_t image = image_new();
+		unsigned char *p = image.bytes + ROOT * BLOCK + DOT_PAIR_BYTES;
+
+		bzero(p, BLOCK - DOT_PAIR_BYTES);
+		for (unsigned n = 0; n < 3; n++) {
+			bool is_directory = strcmp(rows[i].names[n], "FOO") == 0;
+
+			p += record(p, rows[i].names[n], strlen(rows[i].names[n]),
+			    is_directory ? 85 : DATA + n,
+			    is_directory ? BLOCK : 5, is_directory ? 2 : 0);
+		}
+		directory(image.bytes + 85 * BLOCK, 85, ROOT, BLOCK);
+		verify_path(image.bytes + 82 * BLOCK + 10, "FOO", 3, 85, 1, false);
+		verify_path(image.bytes + 83 * BLOCK + 10, "FOO", 3, 85, 1, true);
+		put32(image.bytes + 16 * BLOCK + VD_PATH_SIZE, 22);
+		verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, rows[i].expected,
+		    rows[i].expected == FSIMG_OK ? NULL :
+		    "primary directory records are not sorted", rows[i].label);
 		free(image.bytes);
 	}
 }
@@ -5624,6 +5774,8 @@ test_verifier(void)
 	test_verify_counts_distinct_claimed_blocks();
 	test_verify_file_metadata_overlap_is_corrupt();
 	test_verify_data_sharing_and_empty_sections();
+	test_verify_susp_without_rockridge_claims_root_continuation();
+	test_verify_susp_skip_without_rockridge_is_unsupported_but_lists();
 	test_verify_continuations_share_blocks_but_not_bytes();
 	test_verify_continuation_inside_directory_is_corrupt();
 	test_verify_directory_and_path_table_overlap_is_corrupt();
@@ -5635,6 +5787,7 @@ test_verifier(void)
 	test_verify_directory_count_limit();
 	test_verify_primary_directory_order_and_versions();
 	test_verify_directory_and_file_equal_order_keys();
+	test_verify_versions_descend_across_directory_file_ties();
 	test_verify_unsorted_joliet_directory_is_accepted();
 	test_verify_relocation_matches_cl_and_pl_and_hides_re();
 	test_verify_hidden_subtree_susp_framing();

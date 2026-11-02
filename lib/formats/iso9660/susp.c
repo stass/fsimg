@@ -268,6 +268,8 @@ iso_handshake(fsimg_reader_t *reader, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	iso->rockridge = ISO_ROCKRIDGE_ABSENT;
+	iso->susp = false;
+	iso->susp_skip = 0;
 	status = iso_block_read(reader, iso->primary.root.extent, error);
 	if (status == FSIMG_OK)
 		status = iso_record_decode(iso->window.bytes, 0, &record,
@@ -280,6 +282,8 @@ iso_handshake(fsimg_reader_t *reader, fsimg_error_t *error)
 	    area[5] != 0xef)
 		return (FSIMG_OK);
 	skip = area[6];
+	iso->susp = true;
+	iso->susp_skip = skip;
 
 	found = false;
 	iso_susp_start(&susp, iso->window.bytes, iso->primary.root.extent, 0,

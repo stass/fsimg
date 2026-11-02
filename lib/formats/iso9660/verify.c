@@ -97,13 +97,21 @@ typedef struct path_table {
 	bool		 big_endian;
 } path_table_t;
 
+/* An identifier the order check remembers: length bytes, zero for none,
+ * and whether it names a directory.
+ */
+typedef struct order_entry {
+	bool		 directory;
+	uint8_t		 length;
+	unsigned char	 bytes[ISO_IDENTIFIER_MAX];
+} order_entry_t;
+
 /* Verification state behind the reader's verify pointer for the length of
  * fsimg_verify: the four streams; directories, the count of paths records
- * of each hierarchy; and the identifier of the last entry of the primary
- * directory being prepared, previous_length bytes, zero before its first
- * entry, with whether it named a directory. tables are the two windows
- * through which the path-table pass reads one table and its partner: L and
- * M in lockstep, then each table and its copy.
+ * of each hierarchy; and, in the primary directory being prepared, the
+ * last entry's identifier and the last one carrying a version. tables are
+ * the two windows through which the path-table pass reads one table and
+ * its partner: L and M in lockstep, then each table and its copy.
  */
 struct iso_verify {
 	path_table_t	 tables[2];
@@ -112,9 +120,8 @@ struct iso_verify {
 	fsimg_stream_t	*placeholders;
 	fsimg_stream_t	*relocated;
 	uint64_t	 directories[HIERARCHIES];
-	bool		 previous_directory;
-	uint8_t		 previous_length;
-	unsigned char	 previous[ISO_IDENTIFIER_MAX];
+	order_entry_t	 previous;
+	order_entry_t	 versioned;
 };
 
 /* Every stream holds explicitly encoded big-endian records, so plain byte
@@ -334,23 +341,47 @@ claims_sweep(fsimg_session_t *session, fsimg_stream_t *claims,
 
 /* Order. */
 
+/* Whether identifier sorts strictly before entry, so may not follow it. */
+static bool
+order_descends(const order_entry_t *entry, const unsigned char *identifier,
+    size_t length, bool directory)
+{
+	return (entry->length != 0 && iso_primary_order(entry->bytes,
+	    entry->length, entry->directory, identifier, length, directory) > 0);
+}
+
+static void
+order_remember(order_entry_t *entry, const unsigned char *identifier,
+    uint8_t length, bool directory)
+{
+	bcopy(identifier, entry->bytes, length);
+	entry->length = length;
+	entry->directory = directory;
+}
+
 /* A primary directory's records after the dot records never descend. The
- * sections of one file repeat its identifier and compare equal.
+ * sections of one file repeat its identifier and compare equal. A
+ * directory ties with the files of its name, so FOO.;1, FOO and FOO.;2
+ * never descend pairwise; each record is therefore also compared with
+ * the last one carrying a version, which keeps versions descending across
+ * the tie. Versions descend only within one name and extension, and a
+ * versioned record of an earlier name or extension always sorts before.
  */
 static fsimg_status_t
 order_check(iso_verify_t *verify, const iso_record_t *record,
     const unsigned char *identifier, fsimg_error_t *error)
 {
 	bool directory = (record->flags & ISO_FLAG_DIRECTORY) != 0;
+	uint8_t length = record->identifier_length;
 
-	if (verify->previous_length != 0 && iso_primary_order(verify->previous,
-	    verify->previous_length, verify->previous_directory, identifier,
-	    record->identifier_length, directory) > 0)
+	if (order_descends(&verify->previous, identifier, length, directory) ||
+	    order_descends(&verify->versioned, identifier, length, directory))
 		return (iso_corrupt(error,
 		    "ISO 9660 primary directory records are not sorted"));
-	bcopy(identifier, verify->previous, record->identifier_length);
-	verify->previous_length = record->identifier_length;
-	verify->previous_directory = directory;
+	order_remember(&verify->previous, identifier, length, directory);
+	if (iso_primary_versioned(identifier, length, directory))
+		order_remember(&verify->versioned, identifier, length,
+		    directory);
 	return (FSIMG_OK);
 }
 
@@ -409,14 +440,17 @@ walk_physical(const fsimg_iso9660_reader_t *iso)
 	return (iso->view != FSIMG_ISO_VIEW_ROCKRIDGE);
 }
 
-/* Whether the walk in progress is the primary walk of an image offering
- * Rock Ridge, which frames every record's SUSP stream.
+/* Whether the walk in progress is the primary walk of a volume using
+ * SUSP, which frames every record's SUSP stream. That covers every
+ * continuation area the reader follows: the handshake's, from the root's
+ * first dot record, whether or not Rock Ridge is present, and the
+ * rockridge view's, from the records of the primary hierarchy; and those
+ * of the subtrees RE hides from that view.
  */
 static bool
 walk_frames_susp(const fsimg_iso9660_reader_t *iso)
 {
-	return (iso->view == FSIMG_ISO_VIEW_PRIMARY &&
-	    iso->rockridge == ISO_ROCKRIDGE_PRESENT);
+	return (iso->view == FSIMG_ISO_VIEW_PRIMARY && iso->susp);
 }
 
 /* Frame the SUSP stream of record, decoded from raw at offset of volume
@@ -490,7 +524,7 @@ dots_scan(fsimg_reader_t *reader, uint32_t extent, fsimg_error_t *error)
  * was entered through CL. The rockridge walk notes a relocated directory.
  * A physical walk claims the directory's blocks, starts its order, records
  * the root's path-table record, whose identifier is a zero byte, and in
- * the primary walk of an image offering Rock Ridge frames its dot records.
+ * the primary walk of a volume using SUSP frames its dot records.
  */
 fsimg_status_t
 iso_verify_directory(fsimg_reader_t *reader, const iso_cursor_t *directory,
@@ -506,7 +540,8 @@ iso_verify_directory(fsimg_reader_t *reader, const iso_cursor_t *directory,
 	if (!walk_physical(iso))
 		return (relocated ? relocation_note(verify->placeholders,
 		    directory->extent, error) : FSIMG_OK);
-	verify->previous_length = 0;
+	verify->previous.length = 0;
+	verify->versioned.length = 0;
 	status = claim_blocks(verify, CLAIM_DIRECTORY, walk_hierarchy(iso),
 	    directory->extent, directory->blocks, error);
 	if (status == FSIMG_OK &&
@@ -539,7 +574,7 @@ record_claims(iso_verify_t *verify, unsigned hierarchy,
 
 /* iso_prepare read record, an entry's, at the cursor's last position in
  * directory, and found it valid. A physical walk frames its SUSP stream
- * in the primary walk of an image offering Rock Ridge, checks a primary
+ * in the primary walk of a volume using SUSP, checks a primary
  * record's order, and records what the record owns.
  */
 fsimg_status_t
@@ -1039,9 +1074,12 @@ iso_verify(fsimg_reader_t *reader, unsigned flags,
 	status = FSIMG_OK;
 	if (iso->rockridge == ISO_ROCKRIDGE_UNKNOWN)
 		status = iso_handshake(reader, error);
-	if (status == FSIMG_OK && iso->rockridge == ISO_ROCKRIDGE_SKIP)
+	/* The SUSP cursor reads no stream behind skipped bytes, so neither
+	 * Rock Ridge nor any continuation area could be verified.
+	 */
+	if (status == FSIMG_OK && iso->susp_skip != 0)
 		status = iso_unsupported(error,
-		    "Rock Ridge view has an unsupported SP skip count");
+		    "ISO 9660 SUSP has an unsupported SP skip count");
 	if (status == FSIMG_OK)
 		status = verify_new(reader, error);
 	if (status == FSIMG_OK)

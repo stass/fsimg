@@ -297,8 +297,10 @@ It runs:
 
 1. **Handshake.** When open did not run it, because a `joliet` or
    `primary` view was forced, verification runs it first, so the offered
-   views are known; a Rock Ridge view with an unsupported skip count makes
-   verification `FSIMG_EUNSUPPORTED`.
+   views are known and whether the volume uses SUSP; an `SP` with a
+   nonzero skip count makes verification `FSIMG_EUNSUPPORTED`, with or
+   without Rock Ridge, since the cursor reads no stream behind skipped
+   bytes.
 2. **Header claims.** The system area, each descriptor block, each path
    table and its copies, the boot catalog and the part of each boot
    image's extent within the volume go into the claim stream.
@@ -313,7 +315,9 @@ It runs:
    reference. Each hierarchy's physical walk, `primary` or `joliet`,
    reads every record of the hierarchy and emits its claims and
    path-table records; the `primary` walk also claims each record's
-   continuation areas when the image offers Rock Ridge, and checks the
+   continuation areas when the volume uses SUSP, which covers every area
+   the reader follows, the handshake's included whether or not Rock Ridge
+   is present, and checks the
    [order](design-iso9660.md#ordering) of each directory's records as it
    prepares it. The `rockridge` walk is not physical: it skips every
    record carrying `RE`, and with it the relocation directory that
@@ -347,7 +351,7 @@ It runs:
    and must be equal.
 6. **Relocation.** The `rockridge` walk emits the extent of each
    directory it enters through `CL`. The `primary` walk, which frames
-   every record's SUSP stream when the image offers Rock Ridge, emits the
+   every record's SUSP stream when the volume uses SUSP, emits the
    extent of each directory whose second dot record carries `PL`, having
    checked that record names the directory's physical parent. Sorted, the
    two lists must be equal; neither repeats an extent, since each walk
@@ -359,12 +363,14 @@ It runs:
 The report counts the selected view's delivered files and directories,
 the root included, its logical bytes, and the bytes read in every walk;
 allocated units are the blocks some claim covers; free and bad counts are
-zero; the omitted subtree roots are the counted walk's. An unsupported
-value anywhere fails verification, so a complete report means every view
-and every structure was checked. Rock Ridge entries are interpreted where
-the `rockridge` view reads them; in a subtree `RE` hides from it, the
-records are checked in the primary hierarchy and their SUSP streams
-framed.
+zero; the omitted subtree roots are the counted walk's. A complete report
+means every offered view was walked and passed its checks, and every
+check above held. An unsupported value in what a walk reads fails
+verification. Rock Ridge entries are interpreted only where the
+`rockridge` view reads them: in a subtree `RE` hides from it, the records
+are checked in the primary hierarchy and their SUSP streams framed, but
+their Rock Ridge entries are not decoded, so a malformed or refused entry
+there does not fail verification.
 
 ## Writer settings
 

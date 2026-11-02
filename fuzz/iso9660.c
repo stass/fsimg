@@ -51,6 +51,8 @@ exercise(const uint8_t *data, size_t size, const char *format,
 	fsimg_io_t *io;
 	fsimg_reader_t *reader;
 	fsimg_stats_t baseline, stats;
+	fsimg_verify_report_t report;
+	fsimg_status_t status;
 	const fsimg_entry_t *entry;
 	fsimg_range_t range;
 	unsigned char bytes[4096];
@@ -98,6 +100,18 @@ exercise(const uint8_t *data, size_t size, const char *format,
 					break;
 			}
 		}
+		fsimg_reader_free(reader);
+	}
+	/* Each verification starts before traversal on a fresh reader. */
+	for (unsigned payload = 0; payload < 2; payload++) {
+		if (fsimg_reader_open(ctx, io, &read_options, &reader, NULL) !=
+		    FSIMG_OK)
+			continue;
+		bzero(&report, sizeof(report));
+		status = fsimg_verify(reader, payload ? FSIMG_VERIFY_PAYLOAD : 0,
+		    &report, NULL);
+		if (report.complete != (status == FSIMG_OK))
+			abort();
 		fsimg_reader_free(reader);
 	}
 	fsimg_io_free(io);

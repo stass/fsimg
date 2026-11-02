@@ -367,11 +367,25 @@ version_compare(const order_parts_t *a, const order_parts_t *b)
 	return ((order > 0) - (order < 0));
 }
 
+/* Whether a primary identifier carries a version, which a directory's
+ * never does.
+ */
+bool
+iso_primary_versioned(const unsigned char *identifier, size_t length,
+    bool directory)
+{
+	order_parts_t parts;
+
+	order_split(identifier, length, directory, &parts);
+	return (parts.version_length != 0);
+}
+
 /* The order of two primary identifiers
  * (specs/design-iso9660.md#ordering): name, extension, then version
  * descending, each directory's identifier being its whole name.
  * Identifiers it finds equal, such as a directory FOO and a file FOO.;1,
- * may stand in either order.
+ * may stand in either order, so the relation is not transitive across
+ * such a tie.
  */
 int
 iso_primary_order(const unsigned char *a, size_t a_length, bool a_directory,

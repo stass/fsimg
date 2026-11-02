@@ -545,6 +545,11 @@ parent, are sorted. For the primary hierarchy, identifiers compare:
 3. then by the version, descending;
 4. sections of one file stay in section order.
 
+A directory has no version and ties with the files of its name, so the
+versions of one name and extension descend across their whole run, with
+any directory tying with them standing anywhere in it: `FOO.;2`, `FOO`,
+`FOO.;1` is sorted and `FOO.;1`, `FOO`, `FOO.;2` is not.
+
 Joliet compares the same way over 16-bit code units, padding with
 `U+0020`. Full verification checks that the primary hierarchy's records
 never descend under these rules; listing does not depend on them. Joliet's
@@ -571,9 +576,12 @@ stream, continuations included, holds an `ER` entry whose identifier is in
 the closed table `RRIP_1991A`, `IEEE_P1282`, `IEEE_1282`, with extension
 version 1. Without one, the image does not offer the `rockridge` view. The
 profile accepts a skip count of 0 only; a present Rock Ridge with another
-skip count is a view fsimg cannot read: forcing it or verifying the image
-is `FSIMG_EUNSUPPORTED`, and automatic selection passes it over for the
-next view, which info reports. Once `SP` is well formed, a malformed entry
+skip count is a view fsimg cannot read: forcing it is
+`FSIMG_EUNSUPPORTED`, and automatic selection passes it over for the next
+view, which info reports. Verification refuses any nonzero skip count,
+with or without Rock Ridge, as `FSIMG_EUNSUPPORTED`: it frames every
+system use area of a hierarchy using SUSP, and the cursor reads no
+stream behind skipped bytes. Once `SP` is well formed, a malformed entry
 stream at the root, or an `ER` whose identifier, description and source
 do not fit within it, is `FSIMG_ECORRUPT` whenever the handshake runs.
 Such a failure, and a root stream outside the profile's continuation
